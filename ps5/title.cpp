@@ -37,6 +37,8 @@
 //               (chat.h); the TV shows the chat and the reply
 //   keytest     a minute of a keyboard's raw reports in the log, while
 //               someone types (keyboard_probe.h)
+//   whispertest whispertest.wav (or audiotest.wav) transcribed on the CPU
+//               with the first ggml-*.bin in models/, timed (stt.h)
 //   quit        closes the title; restart starts it again
 //
 // A title must never return from main or call exit(): the console reports
@@ -74,6 +76,7 @@
 #include "pad.h"
 #include "runner.h"
 #include "server.h"
+#include "stt.h"
 #include "vk_context.h"
 
 #ifndef TS5_VERSION
@@ -128,6 +131,8 @@ constexpr const char *kAudioTest = TS5_HOME "/audiotest";
 constexpr const char *kAudioWav = TS5_HOME "/audiotest.wav";
 constexpr const char *kChat = TS5_HOME "/chat";
 constexpr const char *kKeyTest = TS5_HOME "/keytest";
+constexpr const char *kWhisperTest = TS5_HOME "/whispertest";
+constexpr const char *kWhisperWav = TS5_HOME "/whispertest.wav";
 constexpr const char *kQuit = TS5_HOME "/quit";
 constexpr const char *kRestart = TS5_HOME "/restart";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
@@ -409,7 +414,7 @@ int main(int, char **) {
         printf("ts5-title: %s\n", w.c_str());
     }
 
-    for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kKeyTest}) unlink(f);
+    for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kKeyTest, kWhisperTest}) unlink(f);
     std::thread(watch_control_files).detach();
     const char *awake = getenv("TS5_KEEP_AWAKE");
     if (!awake || atoi(awake) != 0) std::thread(keep_awake).detach();
@@ -476,7 +481,7 @@ int main(int, char **) {
     double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan;
     const double dim = dim_after();
     bool lib_changed = true;
-    std::atomic<bool> audio_testing{false}, key_testing{false};
+    std::atomic<bool> audio_testing{false}, key_testing{false}, whisper_testing{false};
     for (;;) {
         const double t = app::now_s();
         uint32_t buttons = pad.poll();
@@ -528,6 +533,14 @@ int main(int, char **) {
                 sceUserServiceGetInitialUser(&user);
                 app::keyboard_probe(user, 60);
                 key_testing = false;
+            }).detach();
+        }
+        if (exists(kWhisperTest) && !whisper_testing) {
+            unlink(kWhisperTest);
+            whisper_testing = true;
+            std::thread([&whisper_testing] {
+                app::whisper_test(kModels, {kWhisperWav, kAudioWav}, notify);
+                whisper_testing = false;
             }).detach();
         }
         if (t - last_scan > 2) {

@@ -41,7 +41,8 @@ const char *file_type_name(int64_t t) {
 }
 
 bool is_model_file(const std::string &n) {
-    // Vision projectors and split files are not models ts5 loads.
+    // Vision projectors and split files are not models ts5 loads. Nor are
+    // whisper's speech models (ggml-*.bin, stt.h), which share the folder.
     return n.size() > 5 && n.compare(n.size() - 5, 5, ".gguf") == 0 && n.find("mmproj") == std::string::npos &&
            n.find("-of-0") == std::string::npos && n[0] != '.';
 }

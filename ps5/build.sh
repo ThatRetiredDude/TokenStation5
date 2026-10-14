@@ -43,16 +43,42 @@ done
 
 # The engine and the title, with exceptions and RTTI (the PS5 target turns
 # them off by default; the engine's C++ library code uses both).
+w="$root/third_party/whisper.cpp"
 cxxflags=(-std=c++17 -O2 -Wall -ffunction-sections -fdata-sections -fexceptions -fcxx-exceptions -frtti
     -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_VERSION=\"$version\"" "-DTS5_TITLE_ID=\"$title_id\""
-    -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$out/shaders" -I "$radv/include")
+    -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$out/shaders" -I "$radv/include"
+    -I "$w/include" -I "$w/ggml/include")
 objects=()
 pids=()
 for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
-        "$root"/ps5/{title,library,runner,audio_probe,keyboard_probe,chat}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page}.cpp; do
+        "$root"/ps5/{title,library,runner,audio_probe,keyboard_probe,chat,stt}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page}.cpp; do
     o="$out/obj/$(basename "$src" .cpp).o"
     objects+=("$o")
     cc "${cxxflags[@]}" -c "$src" -o "$o" &
+    pids+=($!)
+done
+# whisper.cpp (third_party/whisper.cpp), CPU only, for speech to text
+# (ps5/stt.cpp): its x86 code at the target's own znver2 (AVX2, FMA, F16C),
+# no OpenMP (ggml's own threads), and CMake's defaults for the rest
+# (third_party/whisper.cpp/VENDOR.md).
+wflags=(-O2 -ffunction-sections -fdata-sections -DNDEBUG -DGGML_USE_CPU -DGGML_USE_CPU_REPACK -DGGML_USE_LLAMAFILE
+    -DGGML_SCHED_MAX_COPIES=4 "-DWHISPER_VERSION=\"$(sed -n 's/^version=//p' "$root/scripts/vendor-whisper.sh")\""
+    -I "$w/include" -I "$w/ggml/include" -I "$w/ggml/src" -I "$w/ggml/src/ggml-cpu")
+mkdir -p "$out/obj/whisper"
+wobjects=()
+for src in "$w"/src/whisper.cpp "$w"/src/aneforge/whisper-aneforge.cpp \
+        "$w"/ggml/src/{ggml.c,ggml.cpp,ggml-alloc.c,ggml-quants.c,ggml-threading.cpp,gguf.cpp} \
+        "$w"/ggml/src/{ggml-backend,ggml-backend-dl,ggml-backend-meta,ggml-backend-reg}.cpp \
+        "$w"/ggml/src/ggml-cpu/{ggml-cpu.c,ggml-cpu.cpp,quants.c,ops.cpp,binary-ops.cpp,unary-ops.cpp,vec.cpp,repack.cpp,traits.cpp} \
+        "$w"/ggml/src/ggml-cpu/{tiled/tiled.cpp,tiled/tiled-kernel.cpp,llamafile/sgemm.cpp,arch/x86/quants.c,arch/x86/repack.cpp}; do
+    rel=${src#"$w"/}
+    o="$out/obj/whisper/${rel//\//_}.o"
+    wobjects+=("$o")
+    # Clang 18 warns about the SDK's own isinf and isnan, each time ggml uses them.
+    case $src in
+        *.c) cc -std=c11 -Wno-unreachable-code-generic-assoc "${wflags[@]}" -c "$src" -o "$o" & ;;
+        *) cc -std=c++17 -fexceptions -fcxx-exceptions -frtti "${wflags[@]}" -c "$src" -o "$o" & ;;
+    esac
     pids+=($!)
 done
 cc -std=c11 -O2 -Wall -ffunction-sections -fdata-sections -c "$root/ps5/compat.c" -o "$out/obj/compat.o" &
@@ -68,8 +94,10 @@ pids+=($!)
 for p in "${pids[@]}"; do wait "$p"; done
 # In an archive, so --exclude-libs keeps its names local: the SDK's stub
 # modules define some of them too, and the title converter refuses exports.
-rm -f "$out/obj/libts5compat.a"
+# whisper.cpp likewise: its names stay inside the title.
+rm -f "$out/obj/libts5compat.a" "$out/obj/libts5whisper.a"
 "$sdk/bin/llvm-ar" rcs "$out/obj/libts5compat.a" "$out/obj/compat.o"
+"$sdk/bin/llvm-ar" rcs "$out/obj/libts5whisper.a" "${wobjects[@]}"
 
 # The AGC modules RADV's winsys submits through, named for the import tables.
 stub() {
@@ -97,7 +125,7 @@ weak=(--no-dynamic-linker)
 "$sdk/bin/prospero-lld" "${radv_linker_script[@]}" --eh-frame-hdr "${weak[@]}" "${radv_link_flags[@]}" \
     --version-script "$vk/tooling/native/app-symbols.map" --exclude-libs=ALL \
     -e _start -o "$out/llvm-pie.elf" \
-    "$out/obj/app_crt.o" "${objects[@]}" "$out/obj/libts5compat.a" \
+    "$out/obj/app_crt.o" "${objects[@]}" "$out/obj/libts5whisper.a" "$out/obj/libts5compat.a" \
     "$out/stubs/libSceAgc.so" "$out/stubs/libSceAgcDriver.so" "$out/stubs/libSceAudioIn.so" \
     "${radv_link_inputs[@]}" \
     --as-needed "$sdk"/target/lib/*.so

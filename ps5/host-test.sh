@@ -3,10 +3,16 @@
 # functions stood in for by ps5/host_shim.cpp and folders for its own folder
 # (/app0) and /data, and walks it through what the controller and the PC do
 # to it: serve a model from the dashboard, a GPU check and a speed test,
-# screenshots, restart, a one-off check, another port, quit and close.
-# The screenshots stay in build/ps5-host/shots.
+# screenshots, the audio, keyboard and whisper tests, the chat page, restart,
+# a one-off check, another port, quit and close. The screenshots stay in
+# build/ps5-host/shots.
 #
 #   ps5/host-test.sh MODEL.gguf
+#   TS5_TEST_WHISPER_MODEL=ggml-tiny.en.bin ps5/host-test.sh MODEL.gguf
+#
+# With a whisper model, the whisper test also transcribes whisper.cpp's
+# jfk.wav with it and checks the words; without one it checks only that the
+# test says it has no model.
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,11 +29,51 @@ for src in "$root"/engine/shaders/*.comp; do
     glslangValidator -V --target-env vulkan1.2 -I"$root/engine/shaders" --vn "spv_$stem" \
         -o "$work/shaders/$stem.spv.h" "$src" > /dev/null
 done
+
+# whisper.cpp (third_party/whisper.cpp, CPU only) as libts5whisper.a, as
+# ps5/build.sh builds it for the console. Its objects stay in
+# build/ps5-host/whisper and are compiled again only when a file there or
+# these flags change.
+w="$root/third_party/whisper.cpp"
+wobj="$work/whisper"
+wflags=(-O2 -march=x86-64-v3 -pthread -D_GNU_SOURCE -DNDEBUG -DGGML_USE_CPU -DGGML_USE_CPU_REPACK -DGGML_USE_LLAMAFILE
+    -DGGML_SCHED_MAX_COPIES=4 "-DWHISPER_VERSION=\"$(sed -n 's/^version=//p' "$root/scripts/vendor-whisper.sh")\""
+    -I "$w/include" -I "$w/ggml/include" -I "$w/ggml/src" -I "$w/ggml/src/ggml-cpu")
+mkdir -p "$wobj"
+if [ "$(cat "$wobj/flags" 2> /dev/null)" != "${wflags[*]}" ]; then
+    rm -f "$wobj"/*.o "$wobj/libts5whisper.a"
+    printf '%s' "${wflags[*]}" > "$wobj/flags"
+fi
+wobjects=()
+pids=()
+t0=$(date +%s)
+for src in "$w"/src/whisper.cpp "$w"/src/aneforge/whisper-aneforge.cpp \
+        "$w"/ggml/src/{ggml.c,ggml.cpp,ggml-alloc.c,ggml-quants.c,ggml-threading.cpp,gguf.cpp} \
+        "$w"/ggml/src/{ggml-backend,ggml-backend-dl,ggml-backend-meta,ggml-backend-reg}.cpp \
+        "$w"/ggml/src/ggml-cpu/{ggml-cpu.c,ggml-cpu.cpp,quants.c,ops.cpp,binary-ops.cpp,unary-ops.cpp,vec.cpp,repack.cpp,traits.cpp} \
+        "$w"/ggml/src/ggml-cpu/{tiled/tiled.cpp,tiled/tiled-kernel.cpp,llamafile/sgemm.cpp,arch/x86/quants.c,arch/x86/repack.cpp}; do
+    rel=${src#"$w"/}
+    o="$wobj/${rel//\//_}.o"
+    wobjects+=("$o")
+    [ -f "$o" ] && [ -z "$(find "$w" -newer "$o" -print -quit)" ] && continue
+    case $src in
+        *.c) cc -std=c11 "${wflags[@]}" -c "$src" -o "$o" & ;;
+        *) c++ -std=c++17 "${wflags[@]}" -c "$src" -o "$o" & ;;
+    esac
+    pids+=($!)
+done
+for p in "${pids[@]}"; do wait "$p"; done
+if [ ${#pids[@]} -gt 0 ] || [ ! -f "$wobj/libts5whisper.a" ]; then
+    rm -f "$wobj/libts5whisper.a"
+    ar rcs "$wobj/libts5whisper.a" "${wobjects[@]}"
+    echo "== libts5whisper.a: ${#pids[@]} files compiled in $(($(date +%s) - t0)) s"
+fi
+
 c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" \
-    -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" \
+    -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" -I "$w/include" -I "$w/ggml/include" \
     "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
-    "$root"/ps5/{title,library,runner,audio_probe,keyboard_probe,chat,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page}.cpp \
-    -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -x none -ldl -o "$work/eboot.bin"
+    "$root"/ps5/{title,library,runner,audio_probe,keyboard_probe,chat,stt,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page}.cpp \
+    -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -x none "$wobj/libts5whisper.a" -ldl -o "$work/eboot.bin"
 
 title_pid=
 cleanup() { [ -n "$title_pid" ] && kill "$title_pid" 2> /dev/null || true; }
@@ -145,6 +191,41 @@ echo "== keytest: no keyboard on the PC, so the test says so and the title carri
 wait_log "^ts5-title: key test: done$"
 grep -q "key test: open, user 0x00000001: 0x80960002" "$home/ts5.log" || fail "the keyboard test didn't try to open it"
 wait_health
+
+# Waits up to $3 seconds for the log to have $2 lines matching a regex.
+wait_lines() {
+    for _ in $(seq 1 $(($3 * 10))); do
+        [ "$(grep -cE "$1" "$home/ts5.log" 2> /dev/null || true)" -ge "$2" ] && return 0
+        kill -0 "$title_pid" 2> /dev/null || fail "the title ended while waiting for: $1"
+        sleep 0.1
+    done
+    fail "fewer than $2 '$1' in the log after $3 s"
+}
+
+echo "== whispertest: no whisper model yet, so the test says so and the title carries on"
+: > "$home/whispertest"
+wait_lines "^ts5-title: whisper test: done$" 1 30
+grep -q "^ts5-title: whisper test: no model: " "$home/ts5.log" || fail "the whisper test didn't say it has no model"
+notified "whisper test: no model"
+wait_health
+
+if [ -n "${TS5_TEST_WHISPER_MODEL:-}" ]; then
+    echo "== whispertest: a whisper model in models/ transcribes jfk.wav; the dashboard doesn't list the model"
+    wname=$(basename "$TS5_TEST_WHISPER_MODEL")
+    case $wname in ggml-*.bin) ;; *) wname=ggml-test.bin ;; esac
+    cp "$TS5_TEST_WHISPER_MODEL" "$home/models/$wname.part"
+    mv "$home/models/$wname.part" "$home/models/$wname"
+    cp "$root/third_party/whisper.cpp/samples/jfk.wav" "$home/whispertest.wav"
+    : > "$home/whispertest"
+    wait_lines "^ts5-title: whisper test: done$" 2 180
+    grep "^ts5-title: whisper test: " "$home/ts5.log" | awk '/whisper test: start/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; i++) print "   " line[i] }'
+    text=$(grep "^ts5-title: whisper test: text: " "$home/ts5.log" | tail -1)
+    grep -qi "ask not what your country can do for you" <<< "$text" || fail "the transcript: ${text:-none}"
+    sleep 2.5  # a scan of the models folder
+    ! grep -q "^ts5-title: models: .*ggml-" "$home/ts5.log" || fail "the dashboard lists the whisper model"
+    wait_health
+    rm "$home/models/$wname" "$home/whispertest.wav"
+fi
 
 echo "== chat: a message from the PC; the TV shows the chat page and the reply streams in"
 replies() { grep -cE "^ts5-title: chat: reply (done|stopped|failed)" "$home/ts5.log" || true; }
