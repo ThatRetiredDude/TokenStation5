@@ -24,6 +24,8 @@ struct VkContext {
     VkPhysicalDeviceMemoryProperties memory{};
     // VK_KHR_display and VK_KHR_swapchain are on (asked for, and offered).
     bool display = false;
+    // Arithmetic on f16 in shaders (shaderFloat16), on where the device has it.
+    bool float16 = false;
     // The queue is shared: hold this around vkQueueSubmit and vkQueuePresentKHR.
     std::mutex queue_mutex;
 

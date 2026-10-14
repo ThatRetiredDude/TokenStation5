@@ -64,6 +64,8 @@
 #include "mmb_q4_k.spv.h"
 #include "mmb_q6_k.spv.h"
 #include "mmb_reduce.spv.h"
+#include "mmb16_q4_k.spv.h"
+#include "mmb16_q6_k.spv.h"
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
@@ -263,6 +265,8 @@ private:
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
         if (const char *e = getenv("TS5_MMB_SPLIT")) mmb_split_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SLICES")) mmb_slices_ = std::max(0, atoi(e));
+        mmb_f16_ = ctx_->float16;
+        if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
         kv_ = kv_type_setting();
         if (kv_ == KvType::Q8 && !(attn_ok() && hp_.head_dim % 32 == 0)) {
             fprintf(stderr, "ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16\n");
@@ -409,6 +413,7 @@ private:
         P(matmul_q4_k, 3) P(matmul_q5_k, 3) P(matmul_q6_k, 3)
         P(mm_f32, 3) P(mm_f16, 3) P(mm_q4_0, 3) P(mm_q8_0, 3) P(mm_q4_1, 3) P(mm_q5_0, 3) P(mm_q5_1, 3)
         P(mm_q4_k, 3) P(mm_q5_k, 3) P(mm_q6_k, 3) P(mmb_q4_k, 4) P(mmb_q6_k, 4) P(mmb_reduce, 2)
+        P(mmb16_q4_k, 4) P(mmb16_q6_k, 4)
         // The one-token mat-vecs twice: mv_rows_ rows per workgroup, and one
         // (".1") for matrices with few rows.
 #define MV(n, nb)                                                                       \
@@ -663,7 +668,7 @@ private:
             p_off};
         const bool skip = no_barrier_;
         if (S > 1) no_barrier_ = false;  // mmb_reduce reads what it wrote
-        dispatch(std::string("mmb_") + qname(w.type()), {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128,
+        dispatch(std::string(mmb_f16_ ? "mmb16_" : "mmb_") + qname(w.type()), {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128,
                  (ntok + 127) / 128, what, S);
         if (S == 1) return;
         split_used_ = p_off + S * slice;
@@ -884,6 +889,9 @@ private:
     // TS5_MMB_SLICES=N: every matrix in N.
     uint32_t mmb_split_ = 256;
     int mmb_slices_ = 0;
+    // mmb sums each step's 32 products in packed f16 (mmb16_*), where the
+    // device has f16 arithmetic (TS5_MMB_F16=0: f32 throughout).
+    bool mmb_f16_ = false;
     size_t split_used_ = 0;  // floats of split_ that kernels may still read
     // The KV cache's type (TS5_KV=q8 or f16).
     KvType kv_ = KvType::F16;
