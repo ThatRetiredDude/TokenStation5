@@ -163,6 +163,24 @@ wait_down
 port=18081
 wait_health
 
+echo "== keep-awake, and a dark screen after TS5_DIM_AFTER seconds without a button; a press brings back the dashboard"
+echo "TS5_DIM_AFTER=2" > "$home/ts5.env"
+: > "$home/restart"
+wait_down
+wait_health
+wait_log "^ts5-title: keeping the console awake \(0\)$"
+sleep 3
+brightness() {  # mean of the screenshot's RGB, 0 to 255
+    python3 -c 'import sys; d = open(sys.argv[1], "rb").read()[54:]
+print(int((sum(d[0::4]) + sum(d[1::4]) + sum(d[2::4])) / (3 * len(d) / 4)))' "$work/shots/$1.bmp"
+}
+shot dark
+[ "$(brightness dark)" -lt 2 ] || fail "the screen is not dark after 2 s without a button: $(brightness dark)"
+press up
+shot woken
+[ "$(brightness woken)" -ge 5 ] || fail "a press did not bring the dashboard back: $(brightness woken)"
+rm "$home/ts5.env"
+
 echo "== quit: the title leaves"
 : > "$home/quit"
 wait "$title_pid" || fail "exit status $?"
