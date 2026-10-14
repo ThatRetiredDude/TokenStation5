@@ -1,19 +1,24 @@
 // TokenStation5's PS5 title: ts5 as a native app, on the console's GPU.
 //
+// Everything lives in the title's own folder, /app0 to the title and
+// /data/homebrew/<title ID> to the PC over FTP. A title can't count on seeing
+// the console's /data: ShadowMountPlus only puts it in a title's sandbox when
+// its fakelib layer is on.
+//
 // The console starts a title with no arguments, so this one reads its command
-// line from /data/ts5/ts5.args: one ts5 command line, as on Linux, such as
+// line from ts5.args: one ts5 command line, as on Linux, such as
 //
-//   serve -m /data/ts5/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf -c 8192
+//   serve -m /app0/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf -c 8192
 //
-// Without that file it serves the first model it finds in /data/ts5/models,
-// then in /data/PS5LM/models. Everything ts5 prints goes to /data/ts5/ts5.log
-// (the previous run's is ts5.prev.log), and a notification on the TV says
-// when the API is up and where.
+// Without that file it serves the first model it finds in models/ (then in
+// /data/ts5/models and /data/PS5LM/models, where the title can see them).
+// Everything ts5 prints goes to ts5.log (the previous run's is ts5.prev.log),
+// and a notification on the TV says when the API is up and where.
 //
-// The PC drives it over FTP (scripts/ts5-ps5.sh): a file named quit in
-// /data/ts5 closes the title, and restart starts it again with the args file
-// as it is then. /data/ts5/ts5.once holds a one-off command (check, bench):
-// the next start runs it instead, then restarts into the args file's.
+// The PC drives it over FTP (scripts/ts5-ps5.sh): a file named quit closes
+// the title, and restart starts it again with the args file as it is then.
+// ts5.once holds a one-off command (check, bench): the next start runs it
+// instead, then restarts into the args file's.
 //
 // A title must never return from main or call exit(): the console reports
 // "Something went wrong" and can lose the app. It leaves with
@@ -30,6 +35,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -58,19 +64,27 @@ PFN_vkGetInstanceProcAddr ts5_vk_entry() { return vk_icdGetInstanceProcAddr; }
 
 namespace {
 
-// The console's /data; ps5/host-test.sh points it at a folder on the PC.
+// The title's folder and the console's /data; ps5/host-test.sh points both
+// at folders on the PC.
+#ifndef TS5_HOME
+#define TS5_HOME "/app0"
+#endif
 #ifndef TS5_DATA
 #define TS5_DATA "/data"
 #endif
-constexpr const char *kDir = TS5_DATA "/ts5";
-constexpr const char *kModels = TS5_DATA "/ts5/models";
-constexpr const char *kArgs = TS5_DATA "/ts5/ts5.args";
-constexpr const char *kOnce = TS5_DATA "/ts5/ts5.once";
-constexpr const char *kLog = TS5_DATA "/ts5/ts5.log";
-constexpr const char *kPrevLog = TS5_DATA "/ts5/ts5.prev.log";
-constexpr const char *kQuit = TS5_DATA "/ts5/quit";
-constexpr const char *kRestart = TS5_DATA "/ts5/restart";
-const char *const kModelDirs[] = {kModels, TS5_DATA "/PS5LM/models"};
+#ifndef TS5_TITLE_ID
+#define TS5_TITLE_ID "PPSA99555"
+#endif
+// The title's folder as the PC sees it, for messages.
+#define TS5_FTP_DIR "/data/homebrew/" TS5_TITLE_ID
+constexpr const char *kModels = TS5_HOME "/models";
+constexpr const char *kArgs = TS5_HOME "/ts5.args";
+constexpr const char *kOnce = TS5_HOME "/ts5.once";
+constexpr const char *kLog = TS5_HOME "/ts5.log";
+constexpr const char *kPrevLog = TS5_HOME "/ts5.prev.log";
+constexpr const char *kQuit = TS5_HOME "/quit";
+constexpr const char *kRestart = TS5_HOME "/restart";
+const char *const kModelDirs[] = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
 
 // A notification on the TV. The request is the system's layout: 45 bytes of
 // header fields this title leaves at zero, then the text.
@@ -183,18 +197,21 @@ std::string lan_address() {
 }  // namespace
 
 int main(int, char **) {
-    mkdir(kDir, 0777);
     mkdir(kModels, 0777);
     rename(kLog, kPrevLog);
     // Both in append mode, so neither writes over the other's lines.
-    if (freopen(kLog, "a", stdout)) setvbuf(stdout, nullptr, _IOLBF, 0);
+    if (freopen(kLog, "a", stdout)) {
+        setvbuf(stdout, nullptr, _IOLBF, 0);
+    } else {
+        notify(std::string("TokenStation5: can't write its log in " TS5_FTP_DIR ": ") + strerror(errno));
+    }
     if (freopen(kLog, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
     printf("ts5-title: TokenStation5 %s\n", TS5_VERSION);
 
     // RADV's one heap over the console's unified memory: 11.44 GiB for the
     // GPU instead of a split. Read when the Vulkan instance is created.
     setenv("radv_enable_unified_heap_on_apu", "true", 1);
-    setenv("HOME", kDir, 0);
+    setenv("HOME", TS5_HOME, 0);
 
     unlink(kQuit);
     unlink(kRestart);
@@ -210,7 +227,7 @@ int main(int, char **) {
     if (args.empty()) {
         const std::string model = find_model();
         if (model.empty()) {
-            notify("TokenStation5: no model. Copy a .gguf to /data/ts5/models");
+            notify("TokenStation5: no model. Copy a .gguf to " TS5_FTP_DIR "/models");
             sceKernelUsleep(3000000);
             leave("exit");
         }
@@ -242,7 +259,7 @@ int main(int, char **) {
     }
     printf("ts5-title: %s ended with status %d\n", cmd.c_str(), rc);
     // A one-off run's log is the previous one once the title has restarted.
-    const std::string log = once ? "/data/ts5/ts5.prev.log" : "/data/ts5/ts5.log";
+    const std::string log = once ? TS5_FTP_DIR "/ts5.prev.log" : TS5_FTP_DIR "/ts5.log";
     if (cmd == "check")
         notify(rc == 0 ? "TokenStation5: GPU check passed" : "TokenStation5: GPU check FAILED, see " + log);
     else if (rc != 0)
