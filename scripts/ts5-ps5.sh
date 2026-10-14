@@ -18,6 +18,8 @@
 #   scripts/ts5-ps5.sh audiotest [FILE]    tones on the TV and the controller, then 8 s from its
 #                                          mic played back; prints the results, saves the
 #                                          recording (default audiotest.wav)
+#   scripts/ts5-ps5.sh chat MESSAGE...     a message on the TV's chat page; waits for the
+#                                          reply there and prints how it went
 #   scripts/ts5-ps5.sh log [prev]          the title's log (prev: the run before)
 #   scripts/ts5-ps5.sh restart | quit      restart or close the running title
 #   scripts/ts5-ps5.sh wait                wait for the API to answer
@@ -169,6 +171,18 @@ case $cmd in
         log_lines "^ts5-title: audio test: " | awk '/audio test: start/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; i++) print line[i] }'
         curl -sSf "$ftp$dir/audiotest.wav" -o "$out" 2> /dev/null && echo "ts5-ps5: $out" || true
         ;;
+    chat)
+        [ $# -gt 0 ] || { echo "ts5-ps5: chat needs a message" >&2; exit 2; }
+        replies() { log_lines "^ts5-title: chat: (reply |not sent)" | grep -c . || true; }
+        before=$(replies)
+        put_text chat "$*"
+        echo "ts5-ps5: sent; the TV shows the chat page and the reply as it comes"
+        for _ in $(seq 1 300); do
+            sleep 2
+            [ "$(replies)" -gt "$before" ] && break
+        done
+        log_lines "^ts5-title: chat: (reply |not sent)" | tail -1
+        ;;
     log)
         curl -sS "$ftp$dir/ts5${1:+.$1}.log"
         ;;
@@ -180,7 +194,7 @@ case $cmd in
         wait_api
         ;;
     *)
-        sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac

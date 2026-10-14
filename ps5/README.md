@@ -50,6 +50,10 @@ python3 scripts/bench.py                            # speed through the API
 
 ## On the TV
 
+Two pages; **L1** switches between them.
+
+**Models**
+
 | Button | |
 | --- | --- |
 | up / down | choose a model |
@@ -58,6 +62,20 @@ python3 scripts/bench.py                            # speed through the API
 | triangle | speed test: prompt (512 tokens) and generation (128) tok/s |
 | circle | stop serving |
 | OPTIONS | close the title |
+
+**Chat**: a conversation with the serving model, the reply streaming in as
+it's written (code in blocks, a thinking model's thinking dimmed). For now a
+message comes from the PC (`scripts/ts5-ps5.sh chat`); a keyboard and holding
+R1 to talk come next. The chat sends its messages to the title's own API, as
+any client would. When a conversation outgrows the model's context, its
+oldest exchanges are left out of the requests (they stay on screen).
+
+| Button | |
+| --- | --- |
+| up / down | scroll; at the bottom, the page follows the reply |
+| triangle | stop the reply |
+| square | new chat |
+| circle | back to Models |
 
 A check or speed test of the serving model runs on its loaded weights while
 the API waits; of another model, the serving one is unloaded first and
@@ -77,6 +95,7 @@ the command that fetches them.
 | `scripts/ts5-ps5.sh env TS5_TILED_MIN=16` | engine settings (writes `ts5.env`) and restart; with none, clears them |
 | `scripts/ts5-ps5.sh press down cross` | controller buttons, as if pressed |
 | `scripts/ts5-ps5.sh screenshot` | the TV picture, as `screen.bmp` |
+| `scripts/ts5-ps5.sh chat "Hello!"` | a message on the chat page; waits for the reply and prints its length and speed |
 | `scripts/ts5-ps5.sh audiotest` | the audio test: a tone on the TV, the controller speaker and its headset jack, then 8 s from the controller's mic (after a beep) played back; prints every return code and saves `audiotest.wav` |
 | `scripts/ts5-ps5.sh log` / `log prev` | the title's log, or the run before |
 | `scripts/ts5-ps5.sh restart` / `quit` | restart or close the title |
@@ -90,8 +109,9 @@ On the console, everything lives in the title's own folder,
 | `ts5.args` | what to serve at start: `serve -m MODEL [-c N] [--port N]` |
 | `ts5.cmd` | a command to run now: `serve`, `check`, `bench` (`-m MODEL`), or `stop`. `check` and `bench` take `--env NAME=VALUE` (engine settings for that job only, on a load of its own) and `check` takes `--fresh 1` (run the CPU again) |
 | `ts5.once` | a command to run at the next start, before `ts5.args` |
-| `ts5.env` | engine settings read at start, `NAME=VALUE` (the `getenv` calls in `engine/src/vk_backend.cpp`) |
+| `ts5.env` | engine settings read at start, `NAME=VALUE` (the `getenv` calls in `engine/src/vk_backend.cpp`), and the chat's: `TS5_CHAT_MAX_TOKENS` (longest reply, 2048) and `TS5_CHAT_FPS` (frames a second while a reply comes in, 10) |
 | `press`, `screenshot` | controller buttons; the next frame to `screen.bmp` |
+| `chat` | a message for the chat page: the file's text |
 | `audiotest` | run the audio test (someone has to talk into the controller after the beep); the recording goes to `audiotest.wav` |
 | `quit`, `restart` | close or restart the title |
 | `ts5.log`, `ts5.prev.log`, `results.tsv` | its log, the run before's, and the check and speed results |
@@ -112,7 +132,8 @@ reference and says PASS or FAIL.
 | --- | --- |
 | `title.cpp` | the title's `main`: command files, logging, notifications, the dashboard loop, never `exit()` |
 | `runner.cpp`, `library.cpp` | its jobs (serve, check, speed test) on the shared GPU device; its models and results |
-| `ui/` | the dashboard: drawing (`canvas`), the TV (`display`, VK_KHR_display), the controller (`pad`), fonts and logo baked by `make_font.py` and `make_logo.py` |
+| `chat.cpp` | the chat's conversation, sent to the title's own API with replies streamed back |
+| `ui/` | the screen: the Models page (`dashboard`), the Chat page (`chat_page`), drawing (`canvas`, `style.h`), the TV (`display`, VK_KHR_display), the controller (`pad`), fonts and logo baked by `make_font.py` and `make_logo.py` |
 | `compat.c` | libc functions RADV needs that titles don't get |
 | `build.sh`, `setup.sh` | the build |
 | `check-imports.py` | fails the build on imports that would be NULL on the console |

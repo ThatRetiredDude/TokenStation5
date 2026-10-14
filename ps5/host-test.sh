@@ -26,7 +26,7 @@ done
 c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" \
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" \
     "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
-    "$root"/ps5/{title,library,runner,audio_probe,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard}.cpp \
+    "$root"/ps5/{title,library,runner,audio_probe,chat,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -x none -ldl -o "$work/eboot.bin"
 
 title_pid=
@@ -39,7 +39,8 @@ fail() {
     done
     exit 1
 }
-launch() { (cd "$work" && exec ./eboot.bin) & title_pid=$!; }
+# Short chat replies: the test model never ends one by itself.
+launch() { (cd "$work" && TS5_CHAT_MAX_TOKENS=8 exec ./eboot.bin) & title_pid=$!; }
 wait_health() {
     for _ in $(seq 1 100); do
         curl -sf "http://127.0.0.1:$port/health" > /dev/null && return 0
@@ -137,6 +138,38 @@ wait_log "^ts5-title: audio test: done$"
 grep -q "audio test: open TV 0x80260005" "$home/ts5.log" || fail "the audio test didn't try the TV"
 grep -q "audio test: mic open, type 0: 0x80260109" "$home/ts5.log" || fail "the audio test didn't try the mic"
 notified "the controller's mic didn't open"
+wait_health
+
+echo "== chat: a message from the PC; the TV shows the chat page and the reply streams in"
+replies() { grep -cE "^ts5-title: chat: reply (done|stopped|failed)" "$home/ts5.log" || true; }
+printf 'Say hello in five words.\n' > "$home/chat"
+wait_log "^ts5-title: chat: message \(24 bytes\)$"
+wait_log "^ts5-title: chat: reply done, [0-9]+ bytes, [0-9]+ tokens"
+shot chat
+first=$(grep -oE "^ts5: chatcmpl-[0-9]+ prompt [0-9]+" "$home/ts5.log" | tail -1 | awk '{print $4}')
+
+echo "== chat: the next message goes with the conversation so far"
+printf 'Now in French.\n' > "$home/chat"
+for _ in $(seq 1 300); do [ "$(replies)" -ge 2 ] && break; sleep 0.1; done
+grep -q "^ts5-title: chat: reply done" <(grep -E "^ts5-title: chat: reply" "$home/ts5.log" | tail -1) ||
+    fail "the second reply: $(grep -E '^ts5-title: chat: reply' "$home/ts5.log" | tail -1)"
+second=$(grep -oE "^ts5: chatcmpl-[0-9]+ prompt [0-9]+" "$home/ts5.log" | tail -1 | awk '{print $4}')
+[ "$second" -gt "$first" ] || fail "the second request didn't carry the first exchange ($first, then $second tokens)"
+shot chat2
+
+echo "== chat: triangle stops a reply; square starts a new chat; L1 goes back to Models"
+printf 'Count from one to two hundred, one number per line.\n' > "$home/chat"
+wait_log "^ts5-title: chat: message \(51 bytes\)$"
+sleep 0.5
+press triangle
+for _ in $(seq 1 100); do [ "$(replies)" -ge 3 ] && break; sleep 0.1; done
+grep -q "^ts5-title: chat: reply stopped" <(grep -E "^ts5-title: chat: reply" "$home/ts5.log" | tail -1) ||
+    fail "triangle didn't stop the reply: $(grep -E '^ts5-title: chat: reply' "$home/ts5.log" | tail -1)"
+shot chat-stopped
+press square
+shot chat-new
+press l1
+shot models-again
 wait_health
 
 echo "== circle: stop serving"
