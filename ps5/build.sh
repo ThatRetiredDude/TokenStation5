@@ -6,7 +6,8 @@
 #   build/ps5/PPSA99555/sce_module/libc.prx     the runtime module titles carry
 #
 # Needs ps5/setup.sh run once. The engine sources are the same ones the Linux
-# build compiles; ps5/title.cpp is the title's main.
+# build compiles; ps5/title.cpp is the title's main, with its jobs (runner,
+# library) and its dashboard on the TV (ps5/ui).
 #
 #   ps5/build.sh
 set -euo pipefail
@@ -42,17 +43,21 @@ done
 # them off by default; the engine's C++ library code uses both).
 cxxflags=(-std=c++17 -O2 -Wall -ffunction-sections -fdata-sections -fexceptions -fcxx-exceptions -frtti
     -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_VERSION=\"$version\"" "-DTS5_TITLE_ID=\"$title_id\""
-    -I "$root/engine/src" -I "$out/shaders" -I "$radv/include")
+    -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$out/shaders" -I "$radv/include")
 objects=()
 pids=()
-for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_backend,tokenizer,engine,server,cli}.cpp \
-        "$root/ps5/title.cpp"; do
+for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
+        "$root"/ps5/{title,library,runner}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard}.cpp; do
     o="$out/obj/$(basename "$src" .cpp).o"
     objects+=("$o")
     cc "${cxxflags[@]}" -c "$src" -o "$o" &
     pids+=($!)
 done
 cc -std=c11 -O2 -Wall -ffunction-sections -fdata-sections -c "$root/ps5/compat.c" -o "$out/obj/compat.o" &
+pids+=($!)
+# The dashboard's fonts and logo, as they are (ps5/ui/make_font.py, make_logo.py).
+objects+=("$out/obj/font_data.o")
+cc -x assembler-with-cpp -Wa,-I"$root/ps5/ui" -c "$root/ps5/ui/font_data.S" -o "$out/obj/font_data.o" &
 pids+=($!)
 # PS5_Vulkan's title start code: IEEE floating point, the platform runtime,
 # static constructors, then main.
