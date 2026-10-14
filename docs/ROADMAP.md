@@ -49,7 +49,7 @@ ts5's CPU reference) on all four.
 
 ## Next
 
-- [ ] Generation at 70% of the GPU's 448 GB/s. Coder 7B at 66 tok/s streams about 310 GB/s (69%).
+- [ ] Generation at 80% of the GPU's 448 GB/s. The big one-token kernels already stream 380-410 GB/s; what's left is attention (10% of a token's GPU time at 512 tokens of context, latency-bound) and the CPU between tokens (about 1.4 ms of Coder 7B's 15). Speculative decoding (#17, #21, #24) goes past the limit for text that repeats.
 - [ ] Voice: a TV chat box with a keyboard and hold-R1 speech to text (whisper.cpp, on the CPU), then Kokoro speaking the replies, then the Settings page (`ts5.env`: audio output, `TAVILY_API_KEY`, a remote provider). Notes: `ps5-ai/voice/VOICE_FEASIBILITY.md` in the project files.
 - [ ] Measure PS5LM Plus on the console, same models, for a head-to-head. Its own figure is 124 tok/s generation on Llama 3.2 3B (ts5: 108).
 - [ ] Speculative decoding with a small draft model in the spare memory.
@@ -57,7 +57,7 @@ ts5's CPU reference) on all four.
 - [ ] An 8-bit KV cache within the 2% bar, so 8B models get long contexts.
 - [ ] Qwen 3's thinking: honor `enable_thinking` and `/no_think`.
 - [ ] More models: Gemma 3 12B, Qwen 3.5 4B and 9B, Gemma 4 E4B, Mistral Nemo 12B ([models.tsv](../models.tsv)).
-- [ ] Memory over many model reloads: after a fresh launch Coder 7B leaves 4524 MiB of direct memory free, but about 900 MiB less after some 16 bench reloads in one run of the title. Leak or fragmentation; [#11](https://github.com/ThatRetiredDude/TokenStation5/pull/11)'s fuller memory line (now merged) will tell which.
+- [ ] Memory over many model reloads: after a fresh launch Coder 7B leaves 4528 MiB of direct memory free, and about 900 MiB less after some 10 bench reloads in one run of the title. With #11's fuller line, the largest free run equals the total free, so it isn't fragmentation: something isn't given back when a model unloads, about 90 MiB a reload. Next: log the driver's live allocations by kind around each load.
 - [ ] Endpoint: a static IP or DHCP reservation, client configs (Open WebUI, Continue, opencode, Claude Code) in `docs/CLIENTS.md`, an optional API-key proxy in front of `:8081`, one command after each reboot.
 
 ## Done
@@ -81,6 +81,7 @@ ts5's CPU reference) on all four.
 - [x] Console audio from the title: the DualSense mic in, TV and controller speaker out ([#19](https://github.com/ThatRetiredDude/TokenStation5/pull/19)). libSceAudioOut and libSceAudioIn have to be imported directly; loaded at run time, their symbols aren't found.
 - [x] [#11](https://github.com/ThatRetiredDude/TokenStation5/pull/11) Memory probe payload and a fuller free-memory line. Finding: the game's memory pool is 11.44 GiB and ts5 already gets all of it; closing other apps frees nothing.
 - [x] [#16](https://github.com/ThatRetiredDude/TokenStation5/pull/16) Keep-awake: `sceSystemServicePowerTick` once a minute, and a dark TV after 10 idle minutes (the 90-minute check is under Critical).
+- [x] Generation at 70% of the GPU's 448 GB/s: Coder 7B at 69 tok/s streams about 323 GB/s (72%), with #15 and #23.
 
 ## Risks
 
