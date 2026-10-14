@@ -72,7 +72,7 @@ fi
 c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" \
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" -I "$w/include" -I "$w/ggml/include" \
     "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
-    "$root"/ps5/{title,library,runner,audio_probe,keyboard_probe,chat,stt,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page}.cpp \
+    "$root"/ps5/{title,library,runner,audio_probe,keyboard_probe,chat,stt,voice,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -x none "$wobj/libts5whisper.a" -ldl -o "$work/eboot.bin"
 
 title_pid=
@@ -86,7 +86,8 @@ fail() {
     exit 1
 }
 # Short chat replies: the test model never ends one by itself.
-launch() { (cd "$work" && TS5_CHAT_MAX_TOKENS=8 exec ./eboot.bin) & title_pid=$!; }
+# What was said by voice goes in the log, so the test can check it.
+launch() { (cd "$work" && TS5_CHAT_MAX_TOKENS=8 TS5_VOICE_LOG_TEXT=1 exec ./eboot.bin) & title_pid=$!; }
 wait_health() {
     for _ in $(seq 1 100); do
         curl -sf "http://127.0.0.1:$port/health" > /dev/null && return 0
@@ -255,6 +256,33 @@ grep -q "^ts5-title: chat: reply stopped" <(grep -E "^ts5-title: chat: reply" "$
 shot chat-stopped
 press square
 shot chat-new
+
+echo "== talk: R1 held on the chat page, with no speech model, says so"
+press hold-r1
+press release-r1
+wait_log "^ts5-title: voice: No speech model"
+shot talk-no-model
+
+if [ -n "${TS5_TEST_WHISPER_MODEL:-}" ]; then
+    echo "== talk: R1 held while jfk.wav plays into the mic; let go, and what was said goes to the chat"
+    cp "$TS5_TEST_WHISPER_MODEL" "$home/models/ggml-test.bin"
+    cp "$root/third_party/whisper.cpp/samples/jfk.wav" "$home/mic.wav"
+    sleep 2.5  # a scan of the models folder
+    press hold-r1
+    wait_log "^ts5-title: voice: mic open 0x0"
+    sleep 5
+    shot talk-listening
+    sleep 6  # jfk.wav is 11 s
+    press release-r1
+    wait_log "^ts5-title: voice: [0-9]+ bytes of text$"
+    text=$(grep "^ts5-title: voice: text: " "$home/ts5.log" | tail -1)
+    grep -qi "ask not what your country can do for you" <<< "$text" || fail "what was said: ${text:-none}"
+    wait_log "^ts5-title: chat: message by voice"
+    for _ in $(seq 1 300); do [ "$(replies)" -ge 4 ] && break; sleep 0.1; done
+    shot talk
+    rm "$home/models/ggml-test.bin" "$home/mic.wav"
+    press square
+fi
 press l1
 shot models-again
 wait_health

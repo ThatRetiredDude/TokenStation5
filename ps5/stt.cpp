@@ -83,21 +83,25 @@ std::vector<int16_t> to_16k(const std::vector<int16_t> &in, uint32_t rate) {
 
 // The first ggml-*.bin in a folder, by name; empty if none.
 std::string first_whisper_model(const std::string &dir) {
-    DIR *d = opendir(dir.c_str());
-    if (!d) return {};
+    const std::vector<std::string> names = whisper_models(dir);
+    return names.empty() ? std::string() : dir + "/" + names[0];
+}
+
+}  // namespace
+
+std::vector<std::string> whisper_models(const std::string &dir) {
     std::vector<std::string> names;
+    DIR *d = opendir(dir.c_str());
+    if (!d) return names;
     while (dirent *e = readdir(d)) {
         const std::string n = e->d_name;
         if (n.size() > 9 && n.compare(0, 5, "ggml-") == 0 && n.compare(n.size() - 4, 4, ".bin") == 0)
             names.push_back(n);
     }
     closedir(d);
-    if (names.empty()) return {};
     std::sort(names.begin(), names.end());
-    return dir + "/" + names[0];
+    return names;
 }
-
-}  // namespace
 
 int Stt::default_threads() {
     const char *e = getenv("TS5_WHISPER_THREADS");

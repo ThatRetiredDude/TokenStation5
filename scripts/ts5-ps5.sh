@@ -5,6 +5,8 @@
 #   scripts/ts5-ps5.sh model FILE          upload a model (.gguf, or whisper's ggml-*.bin) to the
 #                                          title's models folder
 #   scripts/ts5-ps5.sh fetch KEY...        download models.tsv models and upload them there
+#   scripts/ts5-ps5.sh speech [NAME]       download whisper's ggml-NAME.bin (base.en, the default;
+#                                          tiny.en, small.en ...) and upload it there, for R1 talk
 #   scripts/ts5-ps5.sh models              list the models on the console
 #   scripts/ts5-ps5.sh serve NAME.gguf [ts5 options]
 #                                          serve that model from now on, and restart
@@ -120,6 +122,16 @@ case $cmd in
     fetch)
         PS5_MODEL_DIR="$dir/models" "$root/scripts/fetch-models.sh" "$@"
         ;;
+    speech)
+        # whisper.cpp's own conversions, as its models/download-ggml-model.sh fetches them.
+        f="ggml-${1:-base.en}.bin"
+        mkdir -p "$TS5_MODEL_CACHE"
+        curl -fL -C - --progress-bar -o "$TS5_MODEL_CACHE/$f" \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$f"
+        curl --ftp-create-dirs --progress-bar -T "$TS5_MODEL_CACHE/$f" "$ftp$dir/models/$f.part" -o /dev/null \
+            -Q "-RNFR $f.part" -Q "-RNTO $f"
+        echo "ts5-ps5: uploaded $f to $dir/models; hold R1 on the chat page to talk"
+        ;;
     model)
         f=${1:?a model file}
         curl --ftp-create-dirs --progress-bar -T "$f" "$ftp$dir/models/$(basename "$f")" -o /dev/null
@@ -225,7 +237,7 @@ case $cmd in
         wait_api
         ;;
     *)
-        sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac

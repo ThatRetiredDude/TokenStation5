@@ -1,6 +1,7 @@
 #include "chat_page.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 #include "pad.h"
@@ -272,11 +273,12 @@ ChatPage::Laid ChatPage::lay_out(const app::ChatTurn &t, int w, const std::strin
 }
 
 void ChatPage::draw(Canvas &c, const app::ChatState &s, int x, int y, int w, int h, double now,
-                    const std::function<std::string(const std::string &)> &name, const std::string &serving) {
+                    const std::function<std::string(const std::string &)> &name, const std::string &serving,
+                    bool can_talk) {
     if (s.turns.empty()) {
         follow_ = true;
         laid_.clear();
-        draw_empty(c, x, y, w, h, serving.empty() ? "" : name(serving));
+        draw_empty(c, x, y, w, h, serving.empty() ? "" : name(serving), can_talk);
         return;
     }
     const int pad = 32, cx = x + pad, cw = w - 2 * pad, cy = y + 20, ch = h - 40;
@@ -334,7 +336,7 @@ void ChatPage::draw(Canvas &c, const app::ChatState &s, int x, int y, int w, int
     if (!follow_) pill(c, smallb_, x + w - 24, y + h - 50, "\xE2\x86\x93  Newer below", kAccent);
 }
 
-void ChatPage::draw_empty(Canvas &c, int x, int y, int w, int h, const std::string &serving_name) {
+void ChatPage::draw_empty(Canvas &c, int x, int y, int w, int h, const std::string &serving_name, bool can_talk) {
     auto centered = [&](const Font &f, int by, const std::string &s, Color col) {
         c.text(f, x + (w - Canvas::measure(f, s)) / 2, by, s, col, w - 64);
     };
@@ -347,15 +349,30 @@ void ChatPage::draw_empty(Canvas &c, int x, int y, int w, int h, const std::stri
         return;
     }
     centered(h2_, mid - 100, "Chat with " + serving_name, kText);
-    centered(body_, mid - 40, "Send it a message from your computer:", kText2);
+    if (can_talk) {
+        const std::string before = "Hold", after = "and talk to it, then let go.";
+        const int kw = Canvas::measure(bodyb_, "R1") + 24;
+        const int tw = Canvas::measure(body_, before) + 12 + kw + 12 + Canvas::measure(body_, after);
+        int tx = x + (w - tw) / 2;
+        tx += c.text(body_, tx, mid - 40, before, kText2) + 12;
+        tx += key_cap(c, bodyb_, tx, mid - 36, "R1") + 12;
+        c.text(body_, tx, mid - 40, after, kText2);
+    } else {
+        centered(body_, mid - 40, "Send it a message from your computer:", kText2);
+    }
     const std::string cmd = "scripts/ts5-ps5.sh chat \"Hello!\"";
+    if (can_talk) centered(small_, mid + 4, "Or send one from your computer:", kMuted);
+    const int top = can_talk ? mid + 24 : mid - 12;
     const int bw = Canvas::measure(mono_, cmd) + 48;
-    c.round_rect((float)(x + (w - bw) / 2), (float)mid - 12, (float)bw, 50, 10, kCodeBg);
-    centered(mono_, mid + 20, cmd, kAccent);
-    centered(small_, mid + 100, "Typing on a keyboard, and holding R1 to talk, come in the next builds.", kMuted);
+    c.round_rect((float)(x + (w - bw) / 2), (float)top, (float)bw, 50, 10, kCodeBg);
+    centered(mono_, top + 32, cmd, kAccent);
+    if (!can_talk)
+        centered(small_, mid + 100, "To talk to it with R1, get a speech model first: scripts/ts5-ps5.sh speech",
+                 kMuted);
 }
 
-void ChatPage::draw_input(Canvas &c, const app::ChatState &s, int x, int y, int w, int h) {
+void ChatPage::draw_input(Canvas &c, const app::ChatState &s, const app::VoiceState &voice, double now, int x, int y,
+                          int w, int h) {
     const int fx = x + 24, fy = y + 18, fh = h - 36, right = x + w - 24;
     int fw = w - 48;
     if (s.busy) {
@@ -367,9 +384,41 @@ void ChatPage::draw_input(Canvas &c, const app::ChatState &s, int x, int y, int 
         glyph(c, (float)bx + 32, (float)fy + fh * 0.5f, kGlyphTriangle);
         c.text(bodyb_, bx + 60, baseline(bodyb_, fy, fh), "Stop", kText);
     }
+    const bool listening = voice.phase == app::VoiceState::Listening;
     c.round_rect((float)fx, (float)fy, (float)fw, (float)fh, 14, kCodeBg);
-    c.round_rect_line((float)fx, (float)fy, (float)fw, (float)fh, 14, 1.5f, kPanelLine);
-    const int tx = fx + 24 + c.text(small_, fx + 24, baseline(small_, fy, fh), "From your computer:", kMuted) + 14;
+    c.round_rect_line((float)fx, (float)fy, (float)fw, (float)fh, 14, listening ? 2.5f : 1.5f,
+                      listening ? kRed : kPanelLine);
+    const int ty = baseline(bodyb_, fy, fh), cy = fy + fh / 2;
+    if (listening) {
+        // A pulsing dot, the words, and the mic's level as a bar.
+        const float pulse = 0.5f + 0.5f * std::sin((float)now * 6);
+        c.circle((float)fx + 34, (float)cy, 9, alpha(kRed, 140 + (unsigned)(pulse * 115)));
+        char secs[32];
+        snprintf(secs, sizeof secs, "  %.0f s", voice.seconds);
+        const int tw = c.text(bodyb_, fx + 58, ty, std::string("Listening\xE2\x80\xA6 let go of R1 to send") + secs, kText);
+        const int bx = fx + 58 + tw + 32, bw = std::max(0, fx + fw - 32 - bx);
+        c.round_rect((float)bx, (float)cy - 6, (float)bw, 12, 6, rgb(0x1B2650));
+        c.round_rect((float)bx, (float)cy - 6, std::max(12.0f, bw * voice.level), 12, 6, kRed);
+        return;
+    }
+    if (voice.phase == app::VoiceState::Transcribing) {
+        spinner(c, (float)fx + 34, (float)cy, now, kAccent);
+        c.text(bodyb_, fx + 58, ty, "Turning what you said into text\xE2\x80\xA6", kText);
+        return;
+    }
+    int tx = fx + 24;
+    if (!voice.error.empty()) {
+        c.text(small_, tx, baseline(small_, fy, fh), voice.error, kRed, fx + fw - 24 - tx);
+        return;
+    }
+    if (!voice.model.empty()) {
+        tx += c.text(body_, tx, ty, "Hold", kText2) + 12;
+        tx += key_cap(c, bodyb_, tx, ty + 4, "R1") + 12;
+        tx += c.text(body_, tx, ty, "and talk", kText2) + 32;
+        tx += c.text(small_, tx, baseline(small_, fy, fh), "or from your computer:", kMuted) + 14;
+    } else {
+        tx += c.text(small_, tx, baseline(small_, fy, fh), "From your computer:", kMuted) + 14;
+    }
     c.text(mono_, tx, baseline(mono_, fy, fh), "scripts/ts5-ps5.sh chat \"your message\"", kText2, fx + fw - 24 - tx);
 }
 

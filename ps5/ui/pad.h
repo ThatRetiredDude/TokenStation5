@@ -22,6 +22,8 @@ public:
     bool open();
     // Buttons pressed since the last poll, plus held arrows repeating.
     uint32_t poll();
+    // Buttons down at the last poll (R1 is held to talk).
+    uint32_t held() const { return held_; }
 
 private:
     int handle_ = -1;

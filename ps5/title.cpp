@@ -29,7 +29,8 @@
 //   ts5.once    one command at the next start, before the args file's
 //   ts5.env     NAME=VALUE settings for the engine, read at start, such as
 //               TS5_TILED_MIN=16 (engine/src/vk_backend.cpp lists them)
-//   press       controller buttons, as words: up down cross square ...
+//   press       controller buttons, as words: up down cross square ...;
+//               hold-r1 and release-r1 hold a button down and let it go
 //   screenshot  the next frame goes to screen.bmp
 //   audiotest   tones on the TV and the controller, five seconds from its
 //               mic played back (audio_probe.h), the recording in audiotest.wav
@@ -78,6 +79,7 @@
 #include "server.h"
 #include "stt.h"
 #include "vk_context.h"
+#include "voice.h"
 
 #ifndef TS5_VERSION
 #define TS5_VERSION "dev"
@@ -456,6 +458,15 @@ int main(int, char **) {
     if (!server.start(opts.host, opts.port, err)) notify("TokenStation5: the API can't listen: " + err);
     app::Runner runner(ctx, server, lib, lib_mutex, notify, api_url);
     app::Chat chat(opts.host, opts.port);
+    int user = -1;
+    sceUserServiceGetInitialUser(&user);
+    // What R1 recorded, as a message. A reply still ending (R1 stops it) gets
+    // a moment to.
+    app::Voice voice(user, kModels, [&chat](const std::string &text) {
+        bool sent = false;
+        for (int i = 0; i < 100 && !(sent = chat.send(text)); i++) sceKernelUsleep(20000);
+        printf("ts5-title: chat: %s by voice (%zu bytes)\n", sent ? "message" : "not sent", text.size());
+    });
 
     if (!once.empty()) {
         app::Job j;
@@ -472,10 +483,14 @@ int main(int, char **) {
 
     ui::Dashboard dash(fonts, ts5_logo_data, (size_t)(ts5_logo_data_end - ts5_logo_data));
     ui::Canvas canvas(kWidth, kHeight);
-    std::deque<uint32_t> presses;
+    // Presses from the PC, and holds ('h') and releases ('r') of a button.
+    std::deque<std::pair<char, uint32_t>> presses;
+    uint32_t pc_held = 0;
+    bool talking = false;
     std::string listed;
     uint64_t drawn_version = ~0ull, drawn_chat = ~0ull, chat_version = ~0ull;
     app::ChatState chat_state;
+    app::VoiceState voice_state;
     const double chat_period = 1.0 / chat_fps();
     bool drawn_dark = false;
     double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan;
@@ -488,10 +503,19 @@ int main(int, char **) {
         // Presses from the PC, one per frame.
         std::vector<std::string> words;
         if (presses.empty() && take_written(kPress, words))
-            for (const auto &w : words)
-                if (uint32_t b = ui::button_named(w)) presses.push_back(b);
+            for (const auto &w : words) {
+                const char kind = w.rfind("hold-", 0) == 0 ? 'h' : w.rfind("release-", 0) == 0 ? 'r' : 'p';
+                if (uint32_t b = ui::button_named(kind == 'p' ? w : w.substr(w.find('-') + 1)))
+                    presses.push_back({kind, b});
+            }
         if (!presses.empty()) {
-            buttons |= presses.front();
+            const auto [kind, b] = presses.front();
+            if (kind == 'p') buttons |= b;
+            if (kind == 'h') {
+                buttons |= b & ~pc_held;
+                pc_held |= b;
+            }
+            if (kind == 'r') pc_held &= ~b;
             presses.pop_front();
         }
         // A press on a dark screen only brings the dashboard back.
@@ -543,7 +567,17 @@ int main(int, char **) {
                 whisper_testing = false;
             }).detach();
         }
+        // R1 held on the chat page: talk (a reply that's coming stops).
+        const bool talk = ((pad.held() | pc_held) & ui::kR1) && dash.page() == ui::Dashboard::Chat && !woke;
+        if (talk && !talking) {
+            if (chat_state.busy) chat.stop();
+            voice.hold();
+        } else if (!talk && talking) {
+            voice.release();
+        }
+        talking = talk;
         if (t - last_scan > 2) {
+            voice.rescan();
             std::lock_guard<std::mutex> lk(lib_mutex);
             lib_changed |= lib.scan();
             last_scan = t;
@@ -577,13 +611,17 @@ int main(int, char **) {
         v.status = runner.status();
         v.events = runner.events();
         v.api = server.activity();
-        if (chat.version() != chat_version) {
-            chat_version = chat.version();
+        // Both only grow, so their sum changes whenever either does.
+        if (chat.version() + voice.version() != chat_version) {
+            chat_version = chat.version() + voice.version();
             chat_state = chat.state();
+            voice_state = voice.state();
         }
         v.chat = chat_state;
+        v.voice = voice_state;
+        const bool chat_active = v.chat.busy || v.voice.phase != app::VoiceState::Idle;
         // Nor does the screen go dark while a reply comes in on the chat page.
-        if (v.chat.busy && dash.page() == ui::Dashboard::Chat) last_input = t;
+        if (chat_active && dash.page() == ui::Dashboard::Chat) last_input = t;
         v.now = t;
         v.wall = (int64_t)time(nullptr);
 
@@ -637,9 +675,9 @@ int main(int, char **) {
         double period = dark ? 60.0 : dash.animating(v) && !computing ? 1.0 / 15 : 1.0;
         // The chat page shows a reply as it comes, a few frames a second.
         const bool on_chat = !dark && dash.page() == ui::Dashboard::Chat;
-        if (on_chat && v.chat.busy) period = chat_period;
+        if (on_chat && chat_active) period = chat_period;
         const bool tick = t - last_draw > period;
-        const bool chat_dirty = on_chat && chat_version != drawn_chat && (!v.chat.busy || tick);
+        const bool chat_dirty = on_chat && chat_version != drawn_chat && (!chat_active || tick);
         if (dirty || tick || chat_dirty) {
             if (dark)
                 draw_resting(canvas, fonts.get("small"),
