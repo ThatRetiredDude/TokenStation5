@@ -28,15 +28,17 @@
 #endif
 
 #ifdef TS5_PS5
-// The console's resolver and random numbers (libSceNet, libSceRandom): a title
-// has no /etc/resolv.conf, and its libc exports no getaddrinfo.
+// The console's resolver (libSceNet): a title has no /etc/resolv.conf, and its
+// libc exports no getaddrinfo. Random numbers come from the kernel's
+// kern.arandom, through libkernel's sysctl, which needs no other module (the
+// title died on its first HTTPS request while it used libSceRandom).
 extern "C" {
 int sceNetInit(void);
 int sceNetPoolCreate(const char *name, int size, int flags);
 int sceNetResolverCreate(const char *name, int pool, int flags);
 int sceNetResolverStartNtoa(int resolver, const char *host, uint32_t *addr, int timeout_us, int retries, int flags);
 int sceNetResolverDestroy(int resolver);
-int sceRandomGetRandomNumber(void *buf, size_t size);
+int sysctl(const int *name, unsigned namelen, void *old, size_t *oldlen, const void *new_, size_t newlen);
 }
 #else
 #include <fcntl.h>
@@ -60,12 +62,20 @@ void trace(const char *fmt, ...) {
 
 bool fill_random(unsigned char *out, size_t n) {
 #ifdef TS5_PS5
+    static const int name[2] = {1, 37};  // CTL_KERN, KERN_ARND
+    static bool first = true;
+    if (first) trace("random numbers from kern.arandom");
     while (n > 0) {
-        size_t k = n < 64 ? n : 64;  // the most one call gives
-        if (sceRandomGetRandomNumber(out, k) != 0) return false;
+        size_t k = n < 256 ? n : 256;  // the most one call gives
+        if (sysctl(name, 2, out, &k, nullptr, 0) != 0 || k == 0) {
+            trace("kern.arandom failed (errno %d)", errno);
+            return false;
+        }
         out += k;
         n -= k;
     }
+    if (first) trace("random numbers ok");
+    first = false;
     return true;
 #else
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
@@ -270,11 +280,12 @@ Tls &tls() {
         mbedtls_ssl_config_init(&t.conf);
         trace("first HTTPS request: starting crypto");
         if (psa_crypto_init() != PSA_SUCCESS) { t.why = "psa_crypto_init failed"; return; }
+        trace("crypto started; seeding the TLS random generator");
         static const char pers[] = "ts5";
         int rc = mbedtls_ctr_drbg_seed(&t.drbg, mbedtls_entropy_func, &t.entropy, (const unsigned char *)pers,
                                        sizeof pers);
         if (rc != 0) { t.why = "no random numbers for TLS (-0x" + Conn::hex(-rc) + ")"; return; }
-        trace("random numbers ok; reading the CA bundle");
+        trace("TLS random generator seeded; reading the CA bundle");
         // TS5_CA_FILE, else the system's bundle, else the one built in.
         std::vector<std::string> files;
         if (const char *f = getenv("TS5_CA_FILE")) files.push_back(f);

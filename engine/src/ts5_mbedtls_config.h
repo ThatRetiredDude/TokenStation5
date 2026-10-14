@@ -2,7 +2,7 @@
 // a TLS client on sockets ts5 opens itself, on Linux and in the PS5 title.
 
 // Randomness comes from mbedtls_hardware_poll in net.cpp (the kernel's
-// generator on Linux, sceRandomGetRandomNumber on the PS5), not from Mbed
+// generator on Linux, kern.arandom on the PS5), not from Mbed
 // TLS's own platform probing.
 #define MBEDTLS_NO_PLATFORM_ENTROPY
 #define MBEDTLS_ENTROPY_HARDWARE_ALT
