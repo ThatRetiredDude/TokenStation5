@@ -80,6 +80,7 @@ struct Runner::Loaded {
     std::string path, file, name;  // name: general.name, else the file name
     int asked_ctx = 0;  // as the job asked: 0 for what fits
     int n_ctx = 0;      // as loaded
+    bool kv8 = false;   // its KV cache is 8-bit
     ts5::Model model;
     ts5::Tokenizer tok;
     std::unique_ptr<ts5::Engine> engine;
@@ -189,8 +190,9 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
     ts5::Backend *b = ts5::make_vk_backend(ctx_, l->model, path, n_ctx, err);
     if (!b) return nullptr;
     l->n_ctx = b->n_ctx();
-    printf("ts5: %s backend ready in %.1f s, context %d%s\n", b->name(), now_s() - t0, l->n_ctx,
-           n_ctx <= 0 ? " (what fits)" : "");
+    l->kv8 = b->kv_type() == ts5::KvType::Q8;
+    printf("ts5: %s backend ready in %.1f s, context %d%s, %s KV cache\n", b->name(), now_s() - t0, l->n_ctx,
+           n_ctx <= 0 ? " (what fits)" : "", l->kv8 ? "8-bit" : "f16");
     l->engine = std::make_unique<ts5::Engine>(l->model, b, l->tok);
     log_memory("after loading " + l->file);
     return l;
@@ -205,6 +207,7 @@ void Runner::unload() {
     status_.serving.clear();
     status_.serving_path.clear();
     status_.serving_ctx = 0;
+    status_.serving_kv8 = false;
 }
 
 bool Runner::serve(const std::string &path, int n_ctx) {
@@ -234,6 +237,7 @@ bool Runner::serve(const std::string &path, int n_ctx) {
         status_.serving = file;
         status_.serving_path = path;
         status_.serving_ctx = serving_->n_ctx;
+        status_.serving_kv8 = serving_->kv8;
         status_.phase = Status::Serving;
     }
     event("Serving " + serving_->name);
