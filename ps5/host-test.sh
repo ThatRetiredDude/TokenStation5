@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Runs the PS5 title's own main (ps5/title.cpp) on Linux, with the console's
 # functions stood in for by ps5/host_shim.cpp and folders for its own folder
-# (/app0) and /data, and
-# walks it through what the PC does to it over FTP: pick a model by itself,
-# serve, restart, a one-off check, quit.
+# (/app0) and /data, and walks it through what the controller and the PC do
+# to it: serve a model from the dashboard, a GPU check and a speed test,
+# screenshots, restart, a one-off check, another port, quit and close.
+# The screenshots stay in build/ps5-host/shots.
 #
 #   ps5/host-test.sh MODEL.gguf
 set -euo pipefail
@@ -14,8 +15,8 @@ work="$root/build/ps5-host"
 data="$work/data"
 home="$work/app0"
 port=8081
-rm -rf "$data" "$home"
-mkdir -p "$work/shaders" "$data" "$home"
+rm -rf "$data" "$home" "$work/shots"
+mkdir -p "$work/shaders" "$data" "$home" "$work/shots"
 
 for src in "$root"/engine/shaders/*.comp; do
     stem=$(basename "$src" .comp)
@@ -23,9 +24,10 @@ for src in "$root"/engine/shaders/*.comp; do
         -o "$work/shaders/$stem.spv.h" "$src" > /dev/null
 done
 c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" \
-    -I "$root/engine/src" -I "$work/shaders" \
-    "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_backend,tokenizer,engine,server,cli}.cpp \
-    "$root/ps5/title.cpp" "$root/ps5/host_shim.cpp" -ldl -o "$work/eboot.bin"
+    -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" \
+    "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
+    "$root"/ps5/{title,library,runner,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard}.cpp \
+    -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -x none -ldl -o "$work/eboot.bin"
 
 title_pid=
 cleanup() { [ -n "$title_pid" ] && kill "$title_pid" 2> /dev/null || true; }
@@ -55,38 +57,89 @@ wait_down() {
 }
 notified() { grep -qF "$1" "$data/notifications.txt" || fail "no notification: $1"; }
 
-echo "== no model: a notification, then the title leaves"
-launch
-wait "$title_pid" || fail "exit status $?"
-title_pid=
-notified "no model"
+# Waits for a line matching a regex in the title's log.
+wait_log() {
+    for _ in $(seq 1 300); do
+        grep -qE "$1" "$home/ts5.log" 2> /dev/null && return 0
+        kill -0 "$title_pid" 2> /dev/null || fail "the title ended while waiting for: $1"
+        sleep 0.1
+    done
+    fail "no '$1' in the log after 30 s"
+}
+health_says() { curl -s "http://127.0.0.1:$port/health" | grep -qF "$1"; }
+# The next frame, saved as shots/NAME.bmp.
+shot() {
+    rm -f "$home/screen.bmp"
+    : > "$home/screenshot"
+    for _ in $(seq 1 50); do
+        [ -e "$home/screenshot" ] || [ ! -s "$home/screen.bmp" ] || break
+        sleep 0.1
+    done
+    [ -s "$home/screen.bmp" ] || fail "no screenshot"
+    [ "$(stat -c %s "$home/screen.bmp")" = $((54 + 1920 * 1080 * 4)) ] || fail "the screenshot is not 1920x1080"
+    cp "$home/screen.bmp" "$work/shots/$1.bmp"
+}
+press() { echo "$*" > "$home/press"; sleep 0.5; }
 
-echo "== a model in its models folder: serves it with no args file"
-cp "$model" "$home/models/"
+name=$(basename "$model")
+
+echo "== no model: the dashboard, a notification, and the API says so"
 launch
+wait_log "no model"
+for _ in $(seq 1 50); do health_says "no model" && break; sleep 0.1; done
+health_says "no model" || fail "/health: $(curl -s "http://127.0.0.1:$port/health")"
+notified "no model"
+shot empty
+
+echo "== a model arrives over FTP: the dashboard lists it, cross serves it"
+# Whole, as an FTP upload that finished: a file still arriving can't run yet.
+cp "$model" "$home/$name.part"
+mv "$home/$name.part" "$home/models/$name"
+wait_log "^ts5-title: models: $name"
+press cross
 wait_health
-notified "$(basename "$model") ready at http://"
+notified "$name ready at http://"
+grep -q "serve -m \"$home/models/$name\"" "$home/ts5.args" || fail "serving did not write ts5.args"
 reply=$(curl -sf "http://127.0.0.1:$port/v1/chat/completions" -H 'Content-Type: application/json' \
     -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}')
 grep -q '"completion_tokens":4' <<< "$reply" || fail "chat completion: $reply"
+shot serving
 
-echo "== restart: the title starts again, its log becomes ts5.prev.log"
+echo "== square: the GPU check on the serving model, then serving again"
+press square
+wait_log "^ts5 check: .* PASS$"
+notified "GPU check passed"
+grep -q "^check	$name	.*	PASS	" "$home/results.tsv" || fail "no check in results.tsv"
+wait_health
+
+echo "== ts5.cmd: a speed test from the PC"
+echo "bench -m $name --pp 32 --tg 8" > "$home/ts5.cmd"
+wait_log "^\| $name \| vk:"
+grep -q "^bench	$name	" "$home/results.tsv" || fail "no speed test in results.tsv"
+wait_health
+shot results
+
+echo "== circle: stop serving"
+press circle
+for _ in $(seq 1 50); do health_says "no model" && break; sleep 0.1; done
+health_says "no model" || fail "still serving after circle"
+
+echo "== restart: serves what ts5.args says, its log becomes ts5.prev.log"
 : > "$home/restart"
 wait_down
 wait_health
 grep -q "TokenStation5" "$home/ts5.prev.log" || fail "no previous log"
 
-echo "== a one-off check, then back to serving"
-echo "check -m $home/models/$(basename "$model") -n 6" > "$home/ts5.once"
+echo "== ts5.once: a one-off check at the next start, then the args file's model"
+echo "check -m $name -n 6" > "$home/ts5.once"
 : > "$home/restart"
 wait_down
+wait_log "^ts5 check: .*, 6 tokens: .* PASS$"
 wait_health
 [ ! -e "$home/ts5.once" ] || fail "ts5.once was not consumed"
-grep -q "^ts5 check: .* PASS$" "$home/ts5.prev.log" || fail "check did not pass"
-notified "GPU check passed"
 
 echo "== the args file: another port"
-echo "serve -m \"$home/models/$(basename "$model")\" --port 18081" > "$home/ts5.args"
+echo "serve -m \"$home/models/$name\" --port 18081" > "$home/ts5.args"
 : > "$home/restart"
 wait_down
 port=18081
@@ -94,6 +147,17 @@ wait_health
 
 echo "== quit: the title leaves"
 : > "$home/quit"
+wait "$title_pid" || fail "exit status $?"
+title_pid=
+notified "closing"
+
+echo "== OPTIONS, then cross: the title closes from the dashboard"
+rm -f "$data/notifications.txt"
+launch
+wait_health
+press options
+shot close
+press cross
 wait "$title_pid" || fail "exit status $?"
 title_pid=
 notified "closing"

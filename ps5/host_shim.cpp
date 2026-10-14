@@ -6,6 +6,8 @@
 //   notifications               go to stdout (the title's log) and to
 //                               TS5_DATA/notifications.txt
 //   vk_icdGetInstanceProcAddr   the system Vulkan loader's entry point
+//   the controller              never there: the host test presses buttons
+//                               through the press file
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
@@ -38,6 +40,15 @@ int sceKernelSendNotificationRequest(int, void *request, size_t, int) {
 }
 
 int sceKernelUsleep(unsigned int microseconds) { return usleep(microseconds); }
+
+int sceUserServiceInitialize(const void *) { return 0; }
+int sceUserServiceGetInitialUser(int *user) {
+    *user = 1;
+    return 0;
+}
+int scePadInit(void) { return 0; }
+int scePadOpen(int, int, int, const void *) { return -1; }
+int scePadRead(int, void *, int) { return 0; }
 
 PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char *name) {
     static PFN_vkGetInstanceProcAddr gipa = [] {

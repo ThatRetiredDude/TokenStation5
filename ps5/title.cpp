@@ -1,24 +1,35 @@
-// TokenStation5's PS5 title: ts5 as a native app, on the console's GPU.
+// TokenStation5's PS5 title: ts5 as a native app, on the console's GPU, with
+// a dashboard on the TV.
 //
 // Everything lives in the title's own folder, /app0 to the title and
 // /data/homebrew/<title ID> to the PC over FTP. A title can't count on seeing
 // the console's /data: ShadowMountPlus only puts it in a title's sandbox when
 // its fakelib layer is on.
 //
-// The console starts a title with no arguments, so this one reads its command
-// line from ts5.args: one ts5 command line, as on Linux, such as
+// The title keeps one Vulkan device for its whole run: the dashboard presents
+// on it through RADV's VK_KHR_display, and models load onto it and are freed
+// from it as the controller (or the PC) asks. The API listens from the start
+// and answers with whichever model is serving (ui/dashboard.h has the
+// screen, runner.h the jobs).
+//
+// At start it serves what ts5.args says, one ts5 command line such as
 //
 //   serve -m /app0/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf -c 8192
 //
-// Without that file it serves the first model it finds in models/ (then in
+// and without that file the first model it can run in models/ (then in
 // /data/ts5/models and /data/PS5LM/models, where the title can see them).
-// Everything ts5 prints goes to ts5.log (the previous run's is ts5.prev.log),
-// and a notification on the TV says when the API is up and where.
+// Serving a model from the dashboard writes ts5.args, so the next start
+// serves the same one. Everything the title prints goes to ts5.log (the
+// previous run's is ts5.prev.log), and notifications say when the API is up
+// and where.
 //
-// The PC drives it over FTP (scripts/ts5-ps5.sh): a file named quit closes
-// the title, and restart starts it again with the args file as it is then.
-// ts5.once holds a one-off command (check, bench): the next start runs it
-// instead, then restarts into the args file's.
+// The PC drives it over FTP (scripts/ts5-ps5.sh) with files in the folder,
+// each taken as soon as the title sees it:
+//   ts5.cmd     one command now: serve|check|bench -m MODEL [options], or stop
+//   ts5.once    one command at the next start, before the args file's
+//   press       controller buttons, as words: up down cross square ...
+//   screenshot  the next frame goes to screen.bmp
+//   quit        closes the title; restart starts it again
 //
 // A title must never return from main or call exit(): the console reports
 // "Something went wrong" and can lose the app. It leaves with
@@ -27,23 +38,30 @@
 #include <vulkan/vulkan.h>
 
 #include <arpa/inet.h>
-#include <dirent.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include <algorithm>
-#include <cstdio>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <exception>
+#include <ctime>
+#include <deque>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
-#include "cli.h"
+#include "canvas.h"
+#include "dashboard.h"
+#include "display.h"
+#include "library.h"
+#include "pad.h"
+#include "runner.h"
+#include "server.h"
+#include "vk_context.h"
 
 #ifndef TS5_VERSION
 #define TS5_VERSION "dev"
@@ -56,10 +74,13 @@ int sceKernelSendNotificationRequest(int device, void *request, size_t size, int
 int sceKernelUsleep(unsigned int microseconds);
 
 // RADV is linked in whole and there is no Vulkan loader: its ICD entry point
-// answers vkGetInstanceProcAddr for every command, and vk_backend.cpp starts
+// answers vkGetInstanceProcAddr for every command, and vk_context.cpp starts
 // from whatever ts5_vk_entry() returns.
 PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
 PFN_vkGetInstanceProcAddr ts5_vk_entry() { return vk_icdGetInstanceProcAddr; }
+
+// ui/font_data.S
+extern const uint8_t ts5_font_data[], ts5_font_data_end[], ts5_logo_data[], ts5_logo_data_end[];
 }
 
 namespace {
@@ -80,11 +101,18 @@ namespace {
 constexpr const char *kModels = TS5_HOME "/models";
 constexpr const char *kArgs = TS5_HOME "/ts5.args";
 constexpr const char *kOnce = TS5_HOME "/ts5.once";
+constexpr const char *kCmd = TS5_HOME "/ts5.cmd";
 constexpr const char *kLog = TS5_HOME "/ts5.log";
 constexpr const char *kPrevLog = TS5_HOME "/ts5.prev.log";
+constexpr const char *kResults = TS5_HOME "/results.tsv";
+constexpr const char *kPress = TS5_HOME "/press";
+constexpr const char *kShot = TS5_HOME "/screenshot";
+constexpr const char *kScreen = TS5_HOME "/screen.bmp";
 constexpr const char *kQuit = TS5_HOME "/quit";
 constexpr const char *kRestart = TS5_HOME "/restart";
-const char *const kModelDirs[] = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
+const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
+
+constexpr int kWidth = 1920, kHeight = 1080;
 
 // A notification on the TV. The request is the system's layout: 45 bytes of
 // header fields this title leaves at zero, then the text.
@@ -107,7 +135,8 @@ void notify(const std::string &text) {
 
 bool exists(const char *path) { return access(path, F_OK) == 0; }
 
-// The PC's quit and restart requests, checked twice a second.
+// The PC's quit and restart requests, checked twice a second on a thread of
+// their own, so they work whatever the rest of the title is doing.
 void watch_control_files() {
     for (;;) {
         if (exists(kQuit)) {
@@ -124,9 +153,9 @@ void watch_control_files() {
     }
 }
 
-// The args file split into words: whitespace separates them, double quotes
+// A command file split into words: whitespace separates them, double quotes
 // group them, and lines starting with # are comments.
-std::vector<std::string> read_args_file(const char *path) {
+std::vector<std::string> read_words(const char *path) {
     std::vector<std::string> out;
     FILE *f = fopen(path, "r");
     if (!f) return out;
@@ -156,23 +185,76 @@ std::vector<std::string> read_args_file(const char *path) {
     return out;
 }
 
-// The first GGUF by name in the model folders, skipping vision projectors and
-// split files, which ts5 does not load.
-std::string find_model() {
-    for (const char *dir : kModelDirs) {
-        DIR *d = opendir(dir);
-        if (!d) continue;
-        std::vector<std::string> names;
-        while (dirent *e = readdir(d)) {
-            std::string n = e->d_name;
-            if (n.size() > 5 && n.compare(n.size() - 5, 5, ".gguf") == 0 && n.find("mmproj") == std::string::npos &&
-                n.find("-of-0") == std::string::npos)
-                names.push_back(n);
-        }
-        closedir(d);
-        if (!names.empty()) return std::string(dir) + "/" + *std::min_element(names.begin(), names.end());
+// A file's words, taking the file: a command must not run twice.
+std::vector<std::string> take_words(const char *path) {
+    std::vector<std::string> w = read_words(path);
+    unlink(path);
+    return w;
+}
+
+// The API's options, from the args file.
+struct Options {
+    std::string host = "0.0.0.0";
+    int port = 8081, n_ctx = 8192;
+};
+
+// A ts5 command line as a job:
+//   serve -m MODEL [-c N] [--port N] [--host ADDR]
+//   check -m MODEL [-n TOKENS]
+//   bench -m MODEL [--pp N] [--tg N]
+//   stop
+// A MODEL without a folder is one in models/.
+bool parse_job(const std::vector<std::string> &a, app::Job &j, Options *o, std::string &err) {
+    if (a.empty()) {
+        err = "an empty command";
+        return false;
     }
-    return {};
+    const std::string &cmd = a[0];
+    if (cmd == "serve") j.kind = app::Job::Serve;
+    else if (cmd == "check") j.kind = app::Job::Check;
+    else if (cmd == "bench") j.kind = app::Job::Bench;
+    else if (cmd == "stop") j.kind = app::Job::Stop;
+    else {
+        err = "the title doesn't run '" + cmd + "' (serve, check, bench or stop)";
+        return false;
+    }
+    if (o) j.n_ctx = o->n_ctx;
+    for (size_t i = 1; i < a.size(); i++) {
+        const std::string &s = a[i];
+        if (i + 1 >= a.size()) {
+            err = "'" + s + "' without a value";
+            return false;
+        }
+        const std::string &v = a[++i];
+        if (s == "-m") j.path = v.find('/') == std::string::npos ? std::string(kModels) + "/" + v : v;
+        else if (s == "-c") j.n_ctx = atoi(v.c_str());
+        else if (s == "-n") j.n = atoi(v.c_str());
+        else if (s == "--pp") j.pp = atoi(v.c_str());
+        else if (s == "--tg") j.tg = atoi(v.c_str());
+        else if (s == "--port") { if (o) o->port = atoi(v.c_str()); }
+        else if (s == "--host") { if (o) o->host = v; }
+        else if (s == "--backend" || s == "--device") {}  // the title always uses the console's GPU
+        else {
+            err = "unknown option " + s;
+            return false;
+        }
+    }
+    if (j.kind != app::Job::Stop && j.path.empty()) {
+        err = cmd + " needs -m MODEL";
+        return false;
+    }
+    if (o && j.kind == app::Job::Serve) o->n_ctx = j.n_ctx;
+    return true;
+}
+
+// What the dashboard served, for the next start.
+void save_args(const std::string &path, const Options &o) {
+    FILE *f = fopen(kArgs, "w");
+    if (!f) return;
+    fprintf(f, "serve -m \"%s\" -c %d --port %d", path.c_str(), o.n_ctx, o.port);
+    if (o.host != "0.0.0.0") fprintf(f, " --host %s", o.host.c_str());
+    fprintf(f, "\n");
+    fclose(f);
 }
 
 // The console's address on the LAN: the source address a UDP socket would
@@ -194,6 +276,15 @@ std::string lan_address() {
     return buf;
 }
 
+std::mutex ip_mutex;
+std::string ip;
+int api_port = 8081;
+
+std::string api_url() {
+    std::lock_guard<std::mutex> lk(ip_mutex);
+    return "http://" + (ip.empty() ? std::string("<console ip>") : ip) + ":" + std::to_string(api_port) + "/v1";
+}
+
 }  // namespace
 
 int main(int, char **) {
@@ -213,59 +304,172 @@ int main(int, char **) {
     setenv("radv_enable_unified_heap_on_apu", "true", 1);
     setenv("HOME", TS5_HOME, 0);
 
-    unlink(kQuit);
-    unlink(kRestart);
+    for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd}) unlink(f);
     std::thread(watch_control_files).detach();
     sceSystemServiceHideSplashScreen();
 
-    // A one-off command is taken before it runs: one that brings the title
-    // down must not run again at every launch.
-    std::vector<std::string> args = read_args_file(kOnce);
-    const bool once = !args.empty();
-    unlink(kOnce);
-    if (!once) args = read_args_file(kArgs);
-    if (args.empty()) {
-        const std::string model = find_model();
-        if (model.empty()) {
-            notify("TokenStation5: no model. Copy a .gguf to " TS5_FTP_DIR "/models");
-            sceKernelUsleep(3000000);
-            leave("exit");
+    std::string err;
+    ts5::VkContext *ctx = ts5::create_vk_context(0, true, err);
+    if (!ctx) {
+        notify("TokenStation5: no GPU: " + err);
+        sceKernelUsleep(5000000);
+        leave("exit");
+    }
+    ui::Fonts fonts;
+    fonts.load(ts5_font_data, (size_t)(ts5_font_data_end - ts5_font_data));
+    ui::Display display;
+    bool screen = ctx->display && display.open(ctx, kWidth, kHeight, err);
+    if (!screen) printf("ts5-title: no picture on the TV: %s\n", ctx->display ? err.c_str() : "no display on this device");
+    ui::Pad pad;
+    pad.open();
+
+    // The startup command: the args file's, after a one-off one.
+    Options opts;
+    const std::vector<std::string> once = take_words(kOnce);
+    const std::vector<std::string> args = read_words(kArgs);
+    app::Job startup;
+    bool have_startup = false;
+    if (!args.empty()) {
+        have_startup = parse_job(args, startup, &opts, err);
+        if (!have_startup) printf("ts5-title: ts5.args: %s\n", err.c_str());
+    }
+
+    std::mutex lib_mutex;
+    app::Library lib(kModelDirs, kResults);
+    lib.scan();
+    ts5::Server server;
+    api_port = opts.port;
+    ip = lan_address();
+    if (!server.start(opts.host, opts.port, err)) notify("TokenStation5: the API can't listen: " + err);
+    app::Runner runner(ctx, server, lib, lib_mutex, notify, api_url);
+
+    if (!once.empty()) {
+        app::Job j;
+        if (parse_job(once, j, nullptr, err)) runner.push(j);
+        else printf("ts5-title: ts5.once: %s\n", err.c_str());
+    }
+    if (!have_startup) {
+        startup.path = lib.first_runnable();
+        startup.n_ctx = opts.n_ctx;
+        have_startup = !startup.path.empty();
+    }
+    if (have_startup) runner.push(startup);
+    else notify("TokenStation5: no model. Copy a .gguf to " TS5_FTP_DIR "/models");
+
+    ui::Dashboard dash(fonts, ts5_logo_data, (size_t)(ts5_logo_data_end - ts5_logo_data));
+    ui::Canvas canvas(kWidth, kHeight);
+    std::deque<uint32_t> presses;
+    std::string listed;
+    uint64_t drawn_version = ~0ull;
+    double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan;
+    bool lib_changed = true;
+    for (;;) {
+        const double t = app::now_s();
+        uint32_t buttons = pad.poll();
+        // Presses from the PC, one per frame.
+        if (presses.empty() && exists(kPress))
+            for (const auto &w : take_words(kPress))
+                if (uint32_t b = ui::button_named(w)) presses.push_back(b);
+        if (!presses.empty()) {
+            buttons |= presses.front();
+            presses.pop_front();
         }
-        args = {"serve", "-m", model};
-    }
-    std::string line;
-    for (const auto &a : args) line += " " + a;
-    printf("ts5-title: ts5%s\n", line.c_str());
+        if (exists(kCmd)) {
+            app::Job j;
+            if (parse_job(take_words(kCmd), j, nullptr, err)) runner.push(j);
+            else printf("ts5-title: ts5.cmd: %s\n", err.c_str());
+        }
+        if (t - last_scan > 2) {
+            std::lock_guard<std::mutex> lk(lib_mutex);
+            lib_changed |= lib.scan();
+            last_scan = t;
+        }
+        if (t - last_ip > 10) {
+            const std::string now_ip = lan_address();
+            std::lock_guard<std::mutex> lk(ip_mutex);
+            lib_changed |= now_ip != ip;
+            ip = now_ip;
+            last_ip = t;
+        }
 
-    std::vector<char *> argv{const_cast<char *>("ts5")};
-    for (auto &a : args) argv.push_back(a.data());
-    argv.push_back(nullptr);
-    const std::string &cmd = args[0];
-    std::string model;
-    for (size_t i = 0; i + 1 < args.size(); i++)
-        if (args[i] == "-m") model = args[i + 1].substr(args[i + 1].find_last_of('/') + 1);
-    notify("TokenStation5: loading " + model);
+        ui::View v;
+        v.version = TS5_VERSION;
+        v.url = api_url();
+        v.folder = TS5_FTP_DIR "/models";
+        v.gpu_memory = ctx->device_memory();
+        v.n_ctx = opts.n_ctx;
+        {
+            std::lock_guard<std::mutex> lk(lib_mutex);
+            v.models = lib.models();
+            for (const auto &m : v.models) v.results[m.file] = lib.results(m.file);
+        }
+        if (lib_changed) {
+            std::string names;
+            for (const auto &m : v.models) names += (names.empty() ? "" : ", ") + m.file;
+            if (names != listed) printf("ts5-title: models: %s\n", names.empty() ? "none" : names.c_str());
+            listed = names;
+        }
+        const uint64_t version = runner.version();
+        v.status = runner.status();
+        v.events = runner.events();
+        v.api = server.activity();
+        v.now = t;
+        v.wall = (int64_t)time(nullptr);
 
-    int rc = 1;
-    try {
-        rc = ts5::cli_main((int)argv.size() - 1, argv.data(), [](const std::string &name, int port) {
-            const std::string ip = lan_address();
-            notify("TokenStation5: " + name + " ready at http://" + (ip.empty() ? "<console ip>" : ip) + ":" +
-                   std::to_string(port) + "/v1");
-        });
-    } catch (const std::exception &e) {
-        // An uncaught exception would end the process the way a title must not.
-        printf("ts5-title: %s\n", e.what());
+        const ui::Action a = dash.press(buttons, v);
+        switch (a.kind) {
+            case ui::Action::Serve: {
+                app::Job j;
+                j.kind = app::Job::Serve;
+                j.path = a.path;
+                j.n_ctx = opts.n_ctx;
+                runner.push(j);
+                save_args(a.path, opts);
+                break;
+            }
+            case ui::Action::Check: {
+                app::Job j;
+                j.kind = app::Job::Check;
+                j.path = a.path;
+                runner.push(j);
+                break;
+            }
+            case ui::Action::Bench: {
+                app::Job j;
+                j.kind = app::Job::Bench;
+                j.path = a.path;
+                runner.push(j);
+                break;
+            }
+            case ui::Action::Stop: {
+                app::Job j;
+                j.kind = app::Job::Stop;
+                runner.push(j);
+                break;
+            }
+            case ui::Action::Close:
+                notify("TokenStation5: closing");
+                leave("exit");
+            case ui::Action::None: break;
+        }
+
+        const bool shot = exists(kShot);
+        const bool dirty = buttons || lib_changed || version != drawn_version || shot;
+        const bool tick = t - last_draw > (dash.animating(v) ? 1.0 / 15 : 1.0);
+        if (dirty || tick) {
+            dash.draw(canvas, v);
+            if (screen && !display.present(canvas.pixels(), err)) {
+                printf("ts5-title: the picture stopped: %s\n", err.c_str());
+                screen = false;
+            }
+            if (shot) {
+                unlink(kShot);
+                if (!canvas.save_bmp(kScreen)) printf("ts5-title: can't write %s\n", kScreen);
+            }
+            drawn_version = version;
+            last_draw = t;
+            lib_changed = false;
+        }
+        sceKernelUsleep(16000);
     }
-    printf("ts5-title: %s ended with status %d\n", cmd.c_str(), rc);
-    // A one-off run's log is the previous one once the title has restarted.
-    const std::string log = once ? TS5_FTP_DIR "/ts5.prev.log" : TS5_FTP_DIR "/ts5.log";
-    if (cmd == "check")
-        notify(rc == 0 ? "TokenStation5: GPU check passed" : "TokenStation5: GPU check FAILED, see " + log);
-    else if (rc != 0)
-        notify("TokenStation5 stopped with an error, see " + log);
-    else
-        notify("TokenStation5: " + cmd + " done, see " + log);
-    sceKernelUsleep(3000000);
-    leave(once ? "/app0/eboot.bin" : "exit");
 }
