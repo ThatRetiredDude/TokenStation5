@@ -12,6 +12,7 @@ extern "C" {
 int sceKernelLoadStartModule(const char *path, size_t args, const void *argp, uint32_t flags, const void *opt,
                              int *result);
 int sceKernelDlsym(int handle, const char *symbol, void **address);
+const char *sceKernelGetFsSandboxRandomWord(void);
 int sceKernelUsleep(unsigned int microseconds);
 }
 
@@ -49,24 +50,42 @@ const char *port_name(int port) {
     return port == kMain ? "TV" : port == kPadSpeaker ? "controller speaker" : "headset jack";
 }
 
+// A system library by name. A title sees the system's libraries in its
+// sandbox, at /<sandbox word>/common/lib, not at /system/common/lib (the first
+// console run got 0x80020002, not found, there); the other places are for a
+// console that differs. Its handle, or < 0.
+int open_system_module(const char *name) {
+    static const std::string word = [] {
+        const char *w = sceKernelGetFsSandboxRandomWord();
+        printf("ts5-title: audio test: sandbox word %s\n", w ? w : "(none)");
+        return std::string(w ? w : "");
+    }();
+    std::vector<std::string> paths;
+    if (!word.empty()) paths.push_back("/" + word + "/common/lib/" + name);
+    paths.push_back(std::string("/system/common/lib/") + name);
+    paths.push_back(name);
+    int h = -1;
+    for (const std::string &path : paths) {
+        h = sceKernelLoadStartModule(path.c_str(), 0, nullptr, 0, nullptr, nullptr);
+        printf("ts5-title: audio test: load %s 0x%08x\n", path.c_str(), (unsigned)h);
+        if (h >= 0) break;
+    }
+    return h;
+}
+
 // A system library, loaded through the system's module loader first when it
 // can (some modules want that), then by path. Its handle, or < 0.
 int load_module(const char *name, uint32_t sysmodule_id) {
     static SysmoduleLoad sysmodule_load = [] {
-        const int h = sceKernelLoadStartModule("/system/common/lib/libSceSysmodule.sprx", 0, nullptr, 0, nullptr,
-                                               nullptr);
+        const int h = open_system_module("libSceSysmodule.sprx");
         void *f = nullptr;
         if (h >= 0) sceKernelDlsym(h, "sceSysmoduleLoadModuleInternal", &f);
-        printf("ts5-title: audio test: libSceSysmodule 0x%08x, LoadModuleInternal %s\n", (unsigned)h,
-               f ? "found" : "missing");
+        printf("ts5-title: audio test: LoadModuleInternal %s\n", f ? "found" : "missing");
         return (SysmoduleLoad)f;
     }();
     if (sysmodule_load)
         printf("ts5-title: audio test: LoadModuleInternal(%s) 0x%08x\n", name, (unsigned)sysmodule_load(sysmodule_id));
-    const std::string path = std::string("/system/common/lib/") + name;
-    const int h = sceKernelLoadStartModule(path.c_str(), 0, nullptr, 0, nullptr, nullptr);
-    printf("ts5-title: audio test: load %s 0x%08x\n", name, (unsigned)h);
-    return h;
+    return open_system_module(name);
 }
 
 template <typename F>

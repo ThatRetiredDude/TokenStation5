@@ -51,6 +51,7 @@ int sceKernelLoadStartModule(const char *, size_t, const void *, uint32_t, const
     return (int)0x80020002;  // not found
 }
 int sceKernelDlsym(int, const char *, void **) { return -1; }
+const char *sceKernelGetFsSandboxRandomWord(void) { return "host"; }
 
 int sceUserServiceInitialize(const void *) { return 0; }
 int sceUserServiceGetInitialUser(int *user) {
