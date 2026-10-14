@@ -192,6 +192,17 @@ std::vector<std::string> take_words(const char *path) {
     return w;
 }
 
+// A command file's words, taken once the PC has written it: an FTP upload
+// creates the file before its data arrives, so an empty one gets two seconds
+// before it counts as empty. False while it waits.
+bool take_written(const char *path, std::vector<std::string> &words) {
+    struct stat st;
+    if (stat(path, &st) != 0) return false;
+    if (st.st_size == 0 && time(nullptr) - st.st_mtime < 2) return false;
+    words = take_words(path);
+    return true;
+}
+
 // The API's options, from the args file.
 struct Options {
     std::string host = "0.0.0.0";
@@ -299,9 +310,11 @@ int main(int, char **) {
     if (freopen(kLog, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
     printf("ts5-title: TokenStation5 %s\n", TS5_VERSION);
 
-    // RADV's one heap over the console's unified memory: 11.44 GiB for the
-    // GPU instead of a split. Read when the Vulkan instance is created.
-    setenv("radv_enable_unified_heap_on_apu", "true", 1);
+    // Not radv_enable_unified_heap_on_apu, which shows the console's memory as
+    // one 11.44 GiB heap: it also takes away the GTT memory types, and RADV's
+    // VideoOut swapchain imports its framebuffers through one, so the TV got
+    // no picture. Without it the same memory shows as two heaps, and models
+    // still get all of it (vk_backend.cpp falls back from one to the other).
     setenv("HOME", TS5_HOME, 0);
 
     for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd}) unlink(f);
@@ -367,16 +380,17 @@ int main(int, char **) {
         const double t = app::now_s();
         uint32_t buttons = pad.poll();
         // Presses from the PC, one per frame.
-        if (presses.empty() && exists(kPress))
-            for (const auto &w : take_words(kPress))
+        std::vector<std::string> words;
+        if (presses.empty() && take_written(kPress, words))
+            for (const auto &w : words)
                 if (uint32_t b = ui::button_named(w)) presses.push_back(b);
         if (!presses.empty()) {
             buttons |= presses.front();
             presses.pop_front();
         }
-        if (exists(kCmd)) {
+        if (take_written(kCmd, words)) {
             app::Job j;
-            if (parse_job(take_words(kCmd), j, nullptr, err)) runner.push(j);
+            if (parse_job(words, j, nullptr, err)) runner.push(j);
             else printf("ts5-title: ts5.cmd: %s\n", err.c_str());
         }
         if (t - last_scan > 2) {
@@ -455,7 +469,12 @@ int main(int, char **) {
 
         const bool shot = exists(kShot);
         const bool dirty = buttons || lib_changed || version != drawn_version || shot;
-        const bool tick = t - last_draw > (dash.animating(v) ? 1.0 / 15 : 1.0);
+        // The spinner turns at 15 frames a second while a model loads. While the
+        // GPU computes (a check, a speed test, a reply), a frame a second at
+        // most, so the copy each frame costs the GPU never weighs on the work.
+        const bool computing = v.status.phase == app::Status::Checking ||
+                               v.status.phase == app::Status::Benchmarking || v.api.generating;
+        const bool tick = t - last_draw > (dash.animating(v) && !computing ? 1.0 / 15 : 1.0);
         if (dirty || tick) {
             dash.draw(canvas, v);
             if (screen && !display.present(canvas.pixels(), err)) {
