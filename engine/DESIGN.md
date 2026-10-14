@@ -154,6 +154,13 @@ accept most drafts; free-form prose accepts few, and costs only the extra
 ALU of the wasted batch columns (the weight stream is shared either way).
 `timings` reports `draft_n`/`draft_n_accepted`.
 
+The verify batch has its own kernels (`mvt_q4_k`, `mvt_q6_k`; `TS5_MVT=0`
+reverts to the generic ones): the mv16 layout with one row per workgroup,
+where each thread dequantizes its 32 weight values into registers once and
+dots them with every token's x. The batch's x (at most 8 tokens) sits well
+under the 4 MB L2, so re-reading it per token is cheap; the weight stream,
+which decode is bound by, is paid once for the whole batch.
+
 ## Memory
 
 Every buffer is sub-allocated from 1 GiB blocks. Host-visible device-local
