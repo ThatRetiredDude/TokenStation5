@@ -351,4 +351,14 @@ std::string Tokenizer::apply_chat(const std::vector<ChatMessage> &msgs) const {
     return s;
 }
 
+bool Tokenizer::same_vocab(const Gguf &g) const {
+    const GgufArray *toks = g.get_arr("tokenizer.ggml.tokens");
+    if (!toks || toks->size() != tokens_.size()) return false;
+    for (size_t i = 0; i < tokens_.size(); i++) {
+        const std::string *s = std::get_if<std::string>(&(*toks)[i]);
+        if (!s || *s != tokens_[i]) return false;
+    }
+    return true;
+}
+
 }  // namespace ts5

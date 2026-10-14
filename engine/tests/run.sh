@@ -137,6 +137,18 @@ TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-Q8_0.gguf" "$ts5" run --backend cpu -m 
 cmp "$work/dm-off.txt" "$work/dm-on.txt"
 grep -q "draft model .* ready" "$work/dm-on.err"
 grep -q "draft [0-9]*/[1-9]" "$work/dm-on.err"  # the drafter actually proposed
+echo "== a drafter whose weight rows are padded past the token list (and the reverse), as released models pad"
+mk_k qwen2-pad qwen2 qwen2 --pad-vocab 128
+TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-pad.gguf" -p "$nr" -n 100 --temp 0 > "$work/pad-off.txt" 2> /dev/null
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-kmix.gguf" "$ts5" run --backend cpu -m "$work/qwen2-pad.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/pad-on.txt" 2> "$work/pad-on.err"
+cmp "$work/pad-off.txt" "$work/pad-on.txt"
+grep -q "draft model .* ready" "$work/pad-on.err"  # narrower drafter accepted (the console case)
+TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" -p "$nr" -n 100 --temp 0 > "$work/padr-off.txt" 2> /dev/null
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-pad.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/padr-on.txt" 2> "$work/padr-on.err"
+cmp "$work/padr-off.txt" "$work/padr-on.txt"
+grep -q "draft model .* ready" "$work/padr-on.err"  # wider drafter accepted too
 echo "== ts5 check (GPU vs CPU in one command, as run on the console), then again on the saved answers"
 rm -f "$work"/qwen3-Q4_0.gguf*.ts5ref
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null
