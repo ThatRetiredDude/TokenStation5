@@ -106,6 +106,7 @@ dashboard back.
 | `scripts/ts5-ps5.sh chat "Hello!"` | a message on the chat page; waits for the reply and prints its length and speed |
 | `scripts/ts5-ps5.sh keytest` | the keyboard test: a minute of a connected keyboard's raw reports in the log while someone types, printed |
 | `scripts/ts5-ps5.sh audiotest` | the audio test: a tone on the TV, the controller speaker and its headset jack, then 8 s from the controller's mic (after a beep) played back; prints every return code and saves `audiotest.wav` |
+| `scripts/ts5-ps5.sh whispertest [FILE.wav]` | the whisper test: speech to text on the console's CPU, with the first `ggml-*.bin` in `models` (`scripts/ts5-ps5.sh model ggml-tiny.en.bin`); transcribes the WAV (16 kHz mono 16-bit), or without one the last one sent or `audiotest.wav`, and prints the model, threads, load and transcription times and the text |
 | `scripts/ts5-ps5.sh log` / `log prev` | the title's log, or the run before |
 | `scripts/ts5-ps5.sh restart` / `quit` | restart or close the title |
 
@@ -123,6 +124,7 @@ On the console, everything lives in the title's own folder,
 | `chat` | a message for the chat page: the file's text |
 | `keytest` | run the keyboard test (someone types on the keyboard for a minute) |
 | `audiotest` | run the audio test (someone has to talk into the controller after the beep); the recording goes to `audiotest.wav` |
+| `whispertest` | run the whisper test on `whispertest.wav`, or `audiotest.wav` without it: 16-bit PCM, best 16 kHz mono (other rates are resampled, more channels mixed down). It uses the first `ggml-*.bin` in `models/` (the Models page lists only GGUFs) on `TS5_WHISPER_THREADS` CPU threads (in `ts5.env`, 6 by default); `TS5_WHISPER_SWEEP=1` runs it again at 4, 6, 8 and 12 |
 | `quit`, `restart` | close or restart the title |
 | `ts5.log`, `ts5.prev.log`, `results.tsv` | its log, the run before's, and the check and speed results |
 | `LICENSE`, `NOTICE.md`, `SOURCE.txt` | from the build: the title's license (GPL-3.0), the third-party notices, and the commits of its source |
@@ -143,8 +145,9 @@ reference and says PASS or FAIL.
 | `title.cpp` | the title's `main`: command files, logging, notifications, the dashboard loop, never `exit()` |
 | `runner.cpp`, `library.cpp` | its jobs (serve, check, speed test) on the shared GPU device; its models and results |
 | `chat.cpp` | the chat's conversation, sent to the title's own API with replies streamed back |
+| `stt.cpp` | speech to text on the CPU with whisper.cpp (`third_party/whisper.cpp`, built into `libts5whisper.a`), and the whisper test |
 | `ui/` | the screen: the Models page (`dashboard`), the Chat page (`chat_page`), drawing (`canvas`, `style.h`), the TV (`display`, VK_KHR_display), the controller (`pad`), fonts and logo baked by `make_font.py` and `make_logo.py` |
-| `compat.c` | libc functions RADV needs that titles don't get |
+| `compat.c` | libc functions RADV and whisper.cpp need that titles don't get |
 | `build.sh`, `setup.sh` | the build |
 | `check-imports.py` | fails the build on imports that would be NULL on the console |
 | `host_shim.cpp`, `host-test.sh` | run `title.cpp` on Linux, for CI |
@@ -161,6 +164,7 @@ build used `PPSA05005`, and came up as "A Monster's Expedition"). The
 ## License note
 
 The `eboot.bin` links PS5_Vulkan's platform code and start files, which are
-GPL-3.0-or-later, so a distributed title is GPL-3.0. RADV and Mesa are MIT.
+GPL-3.0-or-later, so a distributed title is GPL-3.0. RADV and Mesa are MIT,
+and so are whisper.cpp and ggml (`third_party/whisper.cpp`).
 The dashboard's text comes from Inter (SIL Open Font License 1.1) and DejaVu
 Sans Mono (Bitstream Vera license), rendered into `ui/font.bin`.

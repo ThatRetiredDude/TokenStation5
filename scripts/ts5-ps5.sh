@@ -2,7 +2,8 @@
 # Drives the TokenStation5 title on the console over FTP (ftpsrv, 2121).
 #
 #   scripts/ts5-ps5.sh install             upload the title from build/ps5 to /data/homebrew
-#   scripts/ts5-ps5.sh model FILE.gguf     upload a model to the title's models folder
+#   scripts/ts5-ps5.sh model FILE          upload a model (.gguf, or whisper's ggml-*.bin) to the
+#                                          title's models folder
 #   scripts/ts5-ps5.sh fetch KEY...        download models.tsv models and upload them there
 #   scripts/ts5-ps5.sh models              list the models on the console
 #   scripts/ts5-ps5.sh serve NAME.gguf [ts5 options]
@@ -22,6 +23,9 @@
 #                                          reply there and prints how it went
 #   scripts/ts5-ps5.sh keytest             a minute of a keyboard's raw reports while someone
 #                                          types on it; prints them
+#   scripts/ts5-ps5.sh whispertest [WAV]   speech to text on the console's CPU with the first
+#                                          ggml-*.bin in models: WAV (16 kHz mono 16-bit; else the
+#                                          last one sent, or audiotest.wav); prints times and text
 #   scripts/ts5-ps5.sh log [prev]          the title's log (prev: the run before)
 #   scripts/ts5-ps5.sh restart | quit      restart or close the running title
 #   scripts/ts5-ps5.sh wait                wait for the API to answer
@@ -117,7 +121,7 @@ case $cmd in
         PS5_MODEL_DIR="$dir/models" "$root/scripts/fetch-models.sh" "$@"
         ;;
     model)
-        f=${1:?a .gguf file}
+        f=${1:?a model file}
         curl --ftp-create-dirs --progress-bar -T "$f" "$ftp$dir/models/$(basename "$f")" -o /dev/null
         echo "ts5-ps5: uploaded $(basename "$f") to $dir/models"
         ;;
@@ -195,6 +199,21 @@ case $cmd in
         done
         log_lines "^ts5-title: key test: " | awk '/key test: start/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; i++) print line[i] }'
         ;;
+    whispertest)
+        if [ $# -gt 0 ]; then
+            curl -sS --ftp-create-dirs -T "$1" "$ftp$dir/whispertest.wav.part" \
+                -Q "-RNFR whispertest.wav.part" -Q "-RNTO whispertest.wav"
+            echo "ts5-ps5: uploaded $(basename "$1") as whispertest.wav"
+        fi
+        before=$(log_lines "^ts5-title: whisper test: done$" | grep -c . || true)
+        put_text whispertest ""
+        echo "ts5-ps5: whisper test started: loading the model, then transcribing"
+        for _ in $(seq 1 300); do
+            sleep 2
+            [ "$(log_lines "^ts5-title: whisper test: done$" | grep -c . || true)" -gt "$before" ] && break
+        done
+        log_lines "^ts5-title: whisper test: " | awk '/whisper test: start/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; i++) print line[i] }'
+        ;;
     log)
         curl -sS "$ftp$dir/ts5${1:+.$1}.log"
         ;;
@@ -206,7 +225,7 @@ case $cmd in
         wait_api
         ;;
     *)
-        sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac

@@ -17,8 +17,24 @@ jobs:
           pip install gguf numpy
       - name: Vulkan device
         run: vulkaninfo --summary | grep -E "deviceName|apiVersion"
+      - name: Cache the whisper model
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/whisper
+          key: whisper-ggml-tiny.en-c78c86eb1a8faa21b369bcd33207cc90d64ae9df
+      - name: Whisper model for the title's speech test (ggml-tiny.en.bin)
+        run: |
+          mkdir -p "$RUNNER_TEMP/whisper"
+          cd "$RUNNER_TEMP/whisper"
+          [ -s ggml-tiny.en.bin ] || curl -fsSL --retry 3 -o ggml-tiny.en.bin \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+          # whisper.cpp's models/README.md lists each model's SHA-1.
+          echo "c78c86eb1a8faa21b369bcd33207cc90d64ae9df  ggml-tiny.en.bin" | sha1sum -c
       - name: Engine tests (Vulkan vs CPU reference)
         run: engine/tests/run.sh
+        env:
+          # ps5/host-test.sh: the whisper test transcribes jfk.wav with it.
+          TS5_TEST_WHISPER_MODEL: ${{ runner.temp }}/whisper/ggml-tiny.en.bin
 
   ps5-title:
     runs-on: ubuntu-24.04
