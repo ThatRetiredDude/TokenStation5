@@ -57,9 +57,10 @@ void Engine::index_grams(size_t from) {
 
 bool Engine::set_drafter(Model &dm, Backend *db, std::string &err) {
     std::unique_ptr<Backend> b(db);
-    if (dm.hp.n_vocab != m_.hp.n_vocab) { err = "the draft model's vocabulary differs"; return false; }
+    if (!t_.same_vocab(dm.gguf)) { err = "the draft model's vocabulary differs"; return false; }
     dm_ = &dm;
     db_ = std::move(b);
+    dl_.clear();
     dcached_ = 0;
     drafter_ok_ = true;
     return true;
@@ -71,16 +72,28 @@ bool Engine::set_drafter(Model &dm, Backend *db, std::string &err) {
 // output distribution. A failure turns the drafter off rather than the
 // request: lookup-only drafting still works.
 void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
-    const int nv = m_.hp.n_vocab;
+    const int nv = dm_->hp.n_vocab;  // the drafter's own rows: padding may differ
     const int pos = (int)cached_.size();
     if (pos + k + 2 > db_->n_ctx()) return;
     std::string err;
+    // When the target pads wider than the drafter, a sampled id could sit
+    // past the drafter's embedding rows; it could never catch up past it.
+    auto fits = [&](const int32_t *p, size_t n) {
+        for (size_t i = 0; i < n; i++)
+            if (p[i] >= (int32_t)nv) {
+                drafter_ok_ = false;
+                fprintf(stderr, "ts5: draft model stopped: token %d is past its %d embedding rows\n", p[i], nv);
+                return false;
+            }
+        return true;
+    };
     // A long backlog (the prompt of a fresh request, or everything lookup
     // served since the drafter last ran) is caught up one bounded chunk per
     // step, no logits wanted, so no single step stalls on it; drafting
     // resumes once the drafter is nearly caught up.
     const size_t CHUNK = 256;
     if (cached_.size() - dcached_ >= CHUNK) {
+        if (!fits(cached_.data() + dcached_, CHUNK)) return;
         if (!db_->forward(cached_.data() + dcached_, (int)CHUNK, (int)dcached_, nullptr, false, err)) {
             drafter_ok_ = false;
             fprintf(stderr, "ts5: draft model failed (%s); drafting by lookup only\n", err.c_str());
@@ -93,6 +106,7 @@ void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
     if (!ip && dl_.empty()) dl_.resize(nv);
     cu_.assign(cached_.begin() + dcached_, cached_.end());
     cu_.push_back(tok);
+    if (!fits(cu_.data(), cu_.size())) return;
     int32_t t = -1;
     for (int i = 0; i < k; i++) {
         const int32_t *in = i == 0 ? cu_.data() : &t;
@@ -107,6 +121,7 @@ void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
         }
         const float *lg = ip ? db_->logits_view() : dl_.data();
         t = (int32_t)(std::max_element(lg, lg + nv) - lg);
+        if (t >= (int32_t)m_.hp.n_vocab) break;  // a padded drafter row: not a target token
         out.push_back(t);
         if (t_.is_eog(t)) break;  // drafts past the end would be wasted
     }
