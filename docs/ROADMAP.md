@@ -25,10 +25,10 @@ Qwen 2.5 Coder 7B Q4_K_M on the console, build by build (`ts5 bench`: a
 | Tiled matmul, word-load mat-vecs ([#7](https://github.com/ThatRetiredDude/TokenStation5/pull/7)) | 170 | 35 |
 | Attention per KV head ([#12](https://github.com/ThatRetiredDude/TokenStation5/pull/12)) | 234 | 45 |
 | Attention tiles, 128 x 128 matmul blocks ([#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15), draft) | 450 | 54 |
-| One-token kernels over several rows, split prompt matmuls (#15, second round) | 459 | 64 |
+| One-token kernels over several rows, split prompt matmuls (#15, second round) | 465 | 66 |
 
-With #15's second round: Qwen 3 8B 393 / 47, Llama 3.1 8B 406 / 51, Llama
-3.2 3B 880 / 98. Every build passes the GPU check (the GPU's logits against
+With #15's second round: Qwen 3 8B 396 / 59, Llama 3.1 8B 412 / 60, Llama
+3.2 3B 894 / 108. Every build passes the GPU check (the GPU's logits against
 ts5's CPU reference) on all four.
 
 ## Critical
@@ -37,21 +37,21 @@ ts5's CPU reference) on all four.
 
 ## Open
 
-- [ ] [#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15) Faster prompts and generation (draft). Measured on the console as above, two rounds. Round two: one-token kernels that read x once for several rows (Q4_K and Q6_K), and the prompt matmuls with few rows (attn_q, attn_output, ffn_down) split across all compute units. It cost the 8B models 3-5% of prompt speed, because k and v then waited for q; a fix (k and v first, 4 rows per workgroup, which measured faster than 8) waits for the console. Also brings `scripts/ts5-ps5.sh update`, which swaps a new build into the running title.
+- [ ] [#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15) Faster prompts and generation (draft). Measured on the console as above, two rounds. Round two: one-token kernels that read x once for several rows (Q4_K and Q6_K), and the prompt matmuls with few rows (attn_q, attn_output, ffn_down) split across all compute units. Its first build cost the 8B models 3-5% of prompt speed, because k and v waited for q; the fix (k and v first, and 4 rows per workgroup instead of 8) is measured: prompts back up, and generation on the 8B models up by a fifth to a quarter. Two comparisons are left (2 rows on Coder 7B, Qwen 3 8B without the split), then it's ready. Also brings `scripts/ts5-ps5.sh update`, which swaps a new build into the running title.
 - [ ] [#13](https://github.com/ThatRetiredDude/TokenStation5/pull/13) An 8-bit KV cache, and serving with as much context as fits (draft). The 8-bit cache drifts 2.3% on Coder 7B against a 2% bar, so it stays opt-in (`TS5_KV=q8`), and f16 is used wherever the model's whole context fits. To verify on the console.
 - [ ] [#16](https://github.com/ThatRetiredDude/TokenStation5/pull/16) Keep-awake (see Critical).
 - [ ] [#17](https://github.com/ThatRetiredDude/TokenStation5/pull/17) Speculative decoding by prompt lookup (draft): drafts up to 7 tokens from earlier text and checks them in one pass, with the same output. To measure on the console (`TS5_DRAFT=0` turns it off).
 - [ ] [#11](https://github.com/ThatRetiredDude/TokenStation5/pull/11) Memory probe payload and a fuller free-memory line (ready). Finding: the game's memory pool is 11.44 GiB and ts5 already gets all of it; closing other apps frees nothing.
 - [ ] [#14](https://github.com/ThatRetiredDude/TokenStation5/pull/14) Our own PS5 runtime, so the title can ship without the GPL (draft). The clean-room spec is written and the assessment is "same speed"; the code waits for a go. The default flips only after a clean launch, a passing GPU check and matching speeds on the console, then LICENSING.md changes.
 - [ ] Homebrew catalog listing (ps5-homebrew-catalog, ProsperoStore): waiting on a fork of the catalog repo.
-- [ ] [#20](https://github.com/ThatRetiredDude/TokenStation5/pull/20) Web search (approved 2026-10-14): waits on one console run with a Tavily key (resolving api.tavily.com and the TLS handshake from the PS5). OpenAI tool calling in ts5 and which models support it, then a `web_search` tool that calls Tavily over HTTPS from the console (mbedTLS), with the key in `tavily.key` in the title's folder (and a field in the Settings page). Notes: `ps5-ai/websearch/WEB_SEARCH_FEASIBILITY.md` in the project files.
-- [ ] [#19](https://github.com/ThatRetiredDude/TokenStation5/pull/19) Console audio test: passed on the console; ready to merge once CI passes.
+- [ ] [#20](https://github.com/ThatRetiredDude/TokenStation5/pull/20) Web search (approved 2026-10-14): waits on one console run with a Tavily key (resolving api.tavily.com and the TLS handshake from the PS5). OpenAI tool calling in ts5 and which models support it, then a `web_search` tool that calls Tavily over HTTPS from the console (mbedTLS), with the key as `TAVILY_API_KEY` in `ts5.env` in the title's folder (and a field in the Settings page). Notes: `ps5-ai/websearch/WEB_SEARCH_FEASIBILITY.md` in the project files.
 
 ## Next
 
-- [ ] Generation at 70% of the GPU's 448 GB/s. Coder 7B at 64 tok/s streams about 300 GB/s (67%).
+- [ ] Prompts in packed f16: the GPU does f16 math at twice its f32 rate. A Coder 7B prompt is 79% FFN matmuls, which run at about 65% of the f32 peak.
+- [ ] Generation at 70% of the GPU's 448 GB/s. Coder 7B at 66 tok/s streams about 310 GB/s (69%).
 - [ ] Voice: a TV chat box with a keyboard and hold-R1 speech to text (whisper.cpp, on the CPU), then Kokoro speaking the replies, then the Settings page (`ts5.env`: audio output, `TAVILY_API_KEY`, a remote provider). Notes: `ps5-ai/voice/VOICE_FEASIBILITY.md` in the project files.
-- [ ] Measure PS5LM Plus on the console, same models, for a head-to-head. Its own figure is 124 tok/s generation on Llama 3.2 3B (ts5: 94).
+- [ ] Measure PS5LM Plus on the console, same models, for a head-to-head. Its own figure is 124 tok/s generation on Llama 3.2 3B (ts5: 108).
 - [ ] Speculative decoding, next steps after [#17](https://github.com/ThatRetiredDude/TokenStation5/pull/17) (being built by the hardware-experiments thread): a fast kernel for the verify batch of up to 8 tokens (packed f16, near one token's weight read) with the argmax on the GPU; a leaner serving loop (coalesced socket sends, top-k sampling without sorting 152k entries, logits read in place); then a suffix index for drafts and a draft length that adapts to how often drafts are accepted. Notes: `ps5-ai/experiments/IDEAS.md` in the project files.
 - [ ] Speculative decoding with a small draft model in the spare memory.
 - [ ] An 8-bit KV cache within the 2% bar, so 8B models get long contexts.
