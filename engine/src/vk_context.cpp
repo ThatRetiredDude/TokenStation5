@@ -140,6 +140,8 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
     VkPhysicalDeviceVulkan12Features e12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     e11.storageBuffer16BitAccess = VK_TRUE;
     e12.storageBuffer8BitAccess = VK_TRUE;
+    e12.shaderFloat16 = f12.shaderFloat16;
+    c->float16 = f12.shaderFloat16 == VK_TRUE;
     e11.pNext = &e12;
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};

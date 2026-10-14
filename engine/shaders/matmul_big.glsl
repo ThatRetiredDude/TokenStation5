@@ -9,7 +9,18 @@
 // With n_split > 1, workgroup z takes `units` of the row's 32-value units
 // and writes its sums to P (from p_off: [slice][token][row]) for mmb_reduce
 // to add up: a matrix with few blocks then still keeps the GPU busy.
+// With MMB_F16, shared memory holds f16 and each step's 32 products are
+// summed in packed f16 (two per instruction, twice the f32 rate), then added
+// to the f32 sums: an f16 sum is never more than 32 products long.
 #extension GL_EXT_shader_16bit_storage : require
+#ifdef MMB_F16
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define SV f16vec4
+#define SF float16_t
+#else
+#define SV vec4
+#define SF float
+#endif
 #define T_Q4_K 12
 #define T_Q6_K 14
 
@@ -35,8 +46,8 @@ layout(push_constant) uniform PC {
 } pc;
 
 // [k][row / 4] and [k][token / 4].
-shared vec4 Ws[BK][BM / 4];
-shared vec4 Xs[BK][BN / 4];
+shared SV Ws[BK][BM / 4];
+shared SV Xs[BK][BN / 4];
 
 #if QTYPE == T_Q4_K
 // A 144-byte block is 9 words of 16 bytes: d, dmin and the 12 bytes of
@@ -125,25 +136,37 @@ void main() {
         } else {
             for (uint l = 0; l < 16; l++) v[l] = 0.0;
         }
-        for (uint l = 0; l < 16; l++) Ws[16 * lh + l][lr / 4][lr % 4] = v[l];
+        for (uint l = 0; l < 16; l++) Ws[16 * lh + l][lr / 4][lr % 4] = SF(v[l]);
         for (uint i = 0; i < 4; i++) {
-            Xs[16 * lh + 4 * i][lr / 4][lr % 4] = x[i].x;
-            Xs[16 * lh + 4 * i + 1][lr / 4][lr % 4] = x[i].y;
-            Xs[16 * lh + 4 * i + 2][lr / 4][lr % 4] = x[i].z;
-            Xs[16 * lh + 4 * i + 3][lr / 4][lr % 4] = x[i].w;
+            Xs[16 * lh + 4 * i][lr / 4][lr % 4] = SF(x[i].x);
+            Xs[16 * lh + 4 * i + 1][lr / 4][lr % 4] = SF(x[i].y);
+            Xs[16 * lh + 4 * i + 2][lr / 4][lr % 4] = SF(x[i].z);
+            Xs[16 * lh + 4 * i + 3][lr / 4][lr % 4] = SF(x[i].w);
         }
         barrier();
         if (u + 1 < u1) {
             if (w_ok) w = load_w(r0 + lr, u + 1, lh);
             for (uint i = 0; i < 4; i++) x[i] = x_ok ? X4[xb + 8 * (u + 1) + i] : vec4(0.0);
         }
+#ifdef MMB_F16
+        SV s[2][8];
+        for (uint a = 0; a < 2; a++)
+            for (uint j = 0; j < 8; j++) s[a][j] = SV(0.0);
+#define S s
+#else
+#define S acc
+#endif
         for (uint k = 0; k < BK; k++) {
-            const vec4 w0 = Ws[k][tr], w1 = Ws[k][16 + tr], x0 = Xs[k][tt], x1 = Xs[k][16 + tt];
-            acc[0][0] += w0 * x0.x; acc[0][1] += w0 * x0.y; acc[0][2] += w0 * x0.z; acc[0][3] += w0 * x0.w;
-            acc[0][4] += w0 * x1.x; acc[0][5] += w0 * x1.y; acc[0][6] += w0 * x1.z; acc[0][7] += w0 * x1.w;
-            acc[1][0] += w1 * x0.x; acc[1][1] += w1 * x0.y; acc[1][2] += w1 * x0.z; acc[1][3] += w1 * x0.w;
-            acc[1][4] += w1 * x1.x; acc[1][5] += w1 * x1.y; acc[1][6] += w1 * x1.z; acc[1][7] += w1 * x1.w;
+            const SV w0 = Ws[k][tr], w1 = Ws[k][16 + tr], x0 = Xs[k][tt], x1 = Xs[k][16 + tt];
+            S[0][0] += w0 * x0.x; S[0][1] += w0 * x0.y; S[0][2] += w0 * x0.z; S[0][3] += w0 * x0.w;
+            S[0][4] += w0 * x1.x; S[0][5] += w0 * x1.y; S[0][6] += w0 * x1.z; S[0][7] += w0 * x1.w;
+            S[1][0] += w1 * x0.x; S[1][1] += w1 * x0.y; S[1][2] += w1 * x0.z; S[1][3] += w1 * x0.w;
+            S[1][4] += w1 * x1.x; S[1][5] += w1 * x1.y; S[1][6] += w1 * x1.z; S[1][7] += w1 * x1.w;
         }
+#ifdef MMB_F16
+        for (uint a = 0; a < 2; a++)
+            for (uint j = 0; j < 8; j++) acc[a][j] += vec4(s[a][j]);
+#endif
     }
 
     for (uint j = 0; j < 8; j++) {
