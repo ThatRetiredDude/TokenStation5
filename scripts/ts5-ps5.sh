@@ -15,7 +15,7 @@
 #                                          none: clear them
 #   scripts/ts5-ps5.sh press BUTTON...     press controller buttons (up down cross square ...)
 #   scripts/ts5-ps5.sh screenshot [FILE]   the TV picture, as a BMP (default screen.bmp)
-#   scripts/ts5-ps5.sh audiotest [FILE]    tones on the TV and the controller, then 5 s from its
+#   scripts/ts5-ps5.sh audiotest [FILE]    tones on the TV and the controller, then 8 s from its
 #                                          mic played back; prints the results, saves the
 #                                          recording (default audiotest.wav)
 #   scripts/ts5-ps5.sh log [prev]          the title's log (prev: the run before)
@@ -161,8 +161,8 @@ case $cmd in
         out=${1:-audiotest.wav}
         before=$(log_lines "^ts5-title: audio test: done$" | grep -c . || true)
         put_text audiotest ""
-        echo "ts5-ps5: audio test started: listen for tones, then talk into the controller when the TV says so"
-        for _ in $(seq 1 30); do
+        echo "ts5-ps5: audio test started: three tones (TV, controller, headset jack), then talk into the controller after the beep, for 8 s"
+        for _ in $(seq 1 45); do
             sleep 2
             [ "$(log_lines "^ts5-title: audio test: done$" | grep -c . || true)" -gt "$before" ] && break
         done

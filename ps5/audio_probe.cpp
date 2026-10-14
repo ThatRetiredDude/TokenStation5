@@ -37,7 +37,7 @@ constexpr int kVolume0dB = 32768;
 // Mic kinds to try, in order: voice chat, general, voice recognition.
 constexpr uint32_t kInTypes[] = {0, 1, 5};
 constexpr uint32_t kInRate = 16000, kInGrain = 256;
-constexpr int kRecordSeconds = 5;
+constexpr int kRecordSeconds = 8;
 constexpr double kPi = 3.14159265358979323846;
 
 const char *port_name(int port) {
@@ -107,8 +107,13 @@ bool save_wav(const std::string &path, const std::vector<int16_t> &s, uint32_t r
     return fclose(f) == 0;
 }
 
-// Five seconds from the controller's mic at 16 kHz; empty if it won't open.
+// Eight seconds from the controller's mic at 16 kHz, after a beep on the TV
+// and the controller that says to talk (the TV's notice alone didn't show on
+// the console); empty if the mic won't open.
 std::vector<int16_t> record(int user, const std::function<void(const std::string &)> &notify) {
+    notify("TokenStation5 audio test: talk into the controller after the beep (8 s)");
+    play(kMain, user, tone(1000, 0.25));
+    play(kPadSpeaker, user, tone(1000, 0.25));
     int h = -1;
     for (uint32_t type : kInTypes) {
         h = sceAudioInOpen(user, type, 0, kInGrain, kInRate, kMono16);
@@ -116,7 +121,6 @@ std::vector<int16_t> record(int user, const std::function<void(const std::string
         if (h >= 0) break;
     }
     if (h < 0) return {};
-    notify("TokenStation5 audio test: talk into the controller now (5 s)");
     std::vector<int16_t> s;
     std::vector<int16_t> grain(kInGrain);
     int first = 0, failures = 0;
@@ -146,6 +150,7 @@ std::vector<int16_t> record(int user, const std::function<void(const std::string
 
 void audio_probe(int user, const std::string &wav_path, const std::function<void(const std::string &)> &notify) {
     printf("ts5-title: audio test: start, user 0x%08x\n", (unsigned)user);
+    // 0x8026000e on a second test in the same run: already initialized.
     printf("ts5-title: audio test: sceAudioOutInit 0x%08x\n", (unsigned)sceAudioOutInit());
 
     // The TV first: the one sound everything else builds on. Three seconds
