@@ -275,6 +275,7 @@ private:
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV16")) mv16_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT")) mvt_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_MVT_ROWS")) mvt_rows_ = std::min(4, std::max(1, atoi(e)));
         if (const char *e = getenv("TS5_BARRIER")) barrier_mode_ = std::min(2, std::max(0, atoi(e)));
         if (const char *e = getenv("TS5_FUSE")) fuse_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
@@ -375,9 +376,10 @@ private:
         return true;
     }
 
-    // spec: the value of the shader's specialization constant 0, when not 0.
+    // spec, spec1: the values of the shader's specialization constants 0 and
+    // 1, where not 0.
     bool make_pipe(const std::string &name, const uint32_t *code, size_t bytes, uint32_t nbind, std::string &err,
-                   uint32_t spec = 0) {
+                   uint32_t spec = 0, uint32_t spec1 = 0) {
         Pipe p;
         p.nbind = nbind;
         std::vector<VkDescriptorSetLayoutBinding> b(nbind);
@@ -409,8 +411,9 @@ private:
         cp.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         cp.stage.module = mod;
         cp.stage.pName = "main";
-        VkSpecializationMapEntry se{0, 0, 4};
-        VkSpecializationInfo si{1, &se, 4, &spec};
+        const VkSpecializationMapEntry se[2] = {{0, 0, 4}, {1, 4, 4}};
+        const uint32_t sv[2] = {spec, spec1};
+        VkSpecializationInfo si{spec1 ? 2u : 1u, se, spec1 ? 8u : 4u, sv};
         if (spec) cp.stage.pSpecializationInfo = &si;
         cp.layout = p.layout;
         CHECK(vk.vkCreateComputePipelines(dev_, VK_NULL_HANDLE, 1, &cp, nullptr, &p.pipe));
@@ -434,7 +437,17 @@ private:
         return false;
         MV(matvec_q4_k, 3) MV(matvec_q6_k, 3) MV(mv16_q4_k, 3) MV(mv16_q6_k, 3) MV(mv16_glu_q4_k, 4)
 #undef MV
-        P(mvt_q4_k, 3) P(mvt_q6_k, 3)
+        // The verify-batch mat-vecs once per batch size (their token loop is
+        // compile-time), each twice like the one-token ones: mvt_rows_ rows
+        // per workgroup and one.
+        for (uint32_t nt = 2; nt <= 8; nt++) {
+            const std::string s = "." + std::to_string(nt);
+            if (!make_pipe("mvt_q4_k" + s, spv_mvt_q4_k, sizeof(spv_mvt_q4_k), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvt_q4_k" + s + ".1", spv_mvt_q4_k, sizeof(spv_mvt_q4_k), 3, err, nt, 1) ||
+                !make_pipe("mvt_q6_k" + s, spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvt_q6_k" + s + ".1", spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, 1))
+                return false;
+        }
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
@@ -660,10 +673,16 @@ private:
             return;
         }
         // A few tokens (speculation's verify batch): the word-load kernels
-        // with the dequantized values kept in registers for every token, so
-        // the weight stream is paid once for the whole batch.
+        // that read each row's words once and dot them with every token, so
+        // the weight stream is paid once for the whole batch. As mat_vec:
+        // mvt_rows_ rows per workgroup, sharing each token's x loads, or one
+        // for a matrix with few rows.
         if (ntok >= 2 && ntok <= 8 && fast_matvec_ && mvt_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
-            dispatch(std::string("mvt_") + qname(w.type()), {&W(w), &x, &y}, pc, gx, gy, what);
+            const bool one = rows < (uint32_t)mv_rows_min_ || mvt_rows_ == 1;
+            const uint32_t nr = one ? 1 : mvt_rows_, groups = (rows + nr - 1) / nr;
+            const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
+            dispatch(std::string("mvt_") + qname(w.type()) + "." + std::to_string(ntok) + (one ? ".1" : ""),
+                     {&W(w), &x, &y}, pc, mx, my, what);
             return;
         }
         dispatch(std::string("matmul_") + qname(w.type()), {&W(w), &x, &y}, pc, gx, gy, what);
@@ -904,6 +923,9 @@ private:
     // 8 threads per block (TS5_MV16=0: matvec_q4_k and matvec_q6_k).
     bool mv16_ = true;
     bool mvt_ = true;
+    // Rows per workgroup of the verify-batch kernels (TS5_MVT_ROWS, 1 to 4),
+    // which share each token's x loads; one for matrices under mv_rows_min_.
+    uint32_t mvt_rows_ = 4;
     // The barrier between kernels (see barrier(); TS5_BARRIER=0, 1, 2).
     int barrier_mode_ = 1;
     // Fewer kernels and barriers: none between kernels that only share
