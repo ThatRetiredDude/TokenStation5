@@ -270,8 +270,9 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         }
         cached_.insert(cached_.end(), batch.begin(), batch.begin() + accepted + 1);
         if (dmax > 0) index_grams(cached_.size() - (accepted + 1));
-        // The drafter entered batch[0..nb-2] while drafting; its last draft
-        // was never forwarded, so on full acceptance it is one token short.
+        // The drafter entered batch[0..nb-2] while drafting; on full
+        // acceptance its last draft may not have been forwarded, so count it
+        // one short (a re-fed token is idempotent: positions are absolute).
         if (by_model && batch.size() > 1) dcached_ = cached_.size() - (accepted == nb - 1 ? 1 : 0);
         for (int i = 1; i <= accepted; i++) emit(batch[i]);
         if (st.gen_tokens >= p.max_tokens) { st.finish = "length"; break; }

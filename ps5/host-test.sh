@@ -83,6 +83,10 @@ press() { echo "$*" > "$home/press"; sleep 0.5; }
 
 name=$(basename "$model")
 
+# Serves also load a draft model (the model as its own drafter), proving the
+# title keeps the file's token list until the vocabulary check has read it.
+export TS5_DRAFT_MODEL="$home/models/$name"
+
 echo "== no model: the dashboard, a notification, and the API says so"
 launch
 wait_log "no model"
@@ -101,6 +105,7 @@ wait_health
 notified "$name ready at http://"
 grep -q "serve -m \"$home/models/$name\" -c auto " "$home/ts5.args" || fail "serving did not write ts5.args"
 wait_log "context [0-9]+ \(what fits\), f16 KV cache$"
+wait_log "draft model $name ready"
 reply=$(curl -sf "http://127.0.0.1:$port/v1/chat/completions" -H 'Content-Type: application/json' \
     -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}')
 grep -q '"completion_tokens":4' <<< "$reply" || fail "chat completion: $reply"
