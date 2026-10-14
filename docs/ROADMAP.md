@@ -38,6 +38,7 @@ ts5's CPU reference) on all four.
 ## Open
 
 - [ ] [#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15) Faster prompts and generation (draft). Measured on the console as above, two rounds. Round two: one-token kernels that read x once for several rows (Q4_K and Q6_K), and the prompt matmuls with few rows (attn_q, attn_output, ffn_down) split across all compute units. Its first build cost the 8B models 3-5% of prompt speed, because k and v waited for q; the fix (k and v first, and 4 rows per workgroup instead of 8) is measured: prompts back up, and generation on the 8B models up by a fifth to a quarter. Two comparisons are left (2 rows on Coder 7B, Qwen 3 8B without the split), then it's ready. Also brings `scripts/ts5-ps5.sh update`, which swaps a new build into the running title.
+- [ ] [#23](https://github.com/ThatRetiredDude/TokenStation5/pull/23) Prompts in packed f16 (draft, on top of #15): the GPU does f16 math at twice its f32 rate, and a Coder 7B prompt is 79% FFN matmuls running at about 65% of the f32 peak. Each step's 32 products are summed in f16, then added to f32 sums; on the test models the logits move by 0.1% of their range. To measure on the console, with the GPU check on all four models (`TS5_MMB_F16=0` turns it off).
 - [ ] [#13](https://github.com/ThatRetiredDude/TokenStation5/pull/13) An 8-bit KV cache, and serving with as much context as fits (draft). The 8-bit cache drifts 2.3% on Coder 7B against a 2% bar, so it stays opt-in (`TS5_KV=q8`), and f16 is used wherever the model's whole context fits. To verify on the console.
 - [ ] [#16](https://github.com/ThatRetiredDude/TokenStation5/pull/16) Keep-awake (see Critical).
 - [ ] [#17](https://github.com/ThatRetiredDude/TokenStation5/pull/17) Speculative decoding by prompt lookup (draft): drafts up to 7 tokens from earlier text and checks them in one pass, with the same output. To measure on the console (`TS5_DRAFT=0` turns it off).
@@ -48,7 +49,6 @@ ts5's CPU reference) on all four.
 
 ## Next
 
-- [ ] Prompts in packed f16: the GPU does f16 math at twice its f32 rate. A Coder 7B prompt is 79% FFN matmuls, which run at about 65% of the f32 peak.
 - [ ] Generation at 70% of the GPU's 448 GB/s. Coder 7B at 66 tok/s streams about 310 GB/s (69%).
 - [ ] Voice: a TV chat box with a keyboard and hold-R1 speech to text (whisper.cpp, on the CPU), then Kokoro speaking the replies, then the Settings page (`ts5.env`: audio output, `TAVILY_API_KEY`, a remote provider). Notes: `ps5-ai/voice/VOICE_FEASIBILITY.md` in the project files.
 - [ ] Measure PS5LM Plus on the console, same models, for a head-to-head. Its own figure is 124 tok/s generation on Llama 3.2 3B (ts5: 108).
