@@ -198,6 +198,10 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
             dopen = l->dmodel.open(dp, derr);
         } catch (const std::exception &e) { derr = e.what(); }
         if (dopen) {
+            // Everything but the token list, which the vocabulary check in
+            // set_drafter still needs, is dropped before the main load.
+            for (const char *k : {"tokenizer.ggml.scores", "tokenizer.ggml.token_type", "tokenizer.ggml.merges"})
+                l->dmodel.gguf.kv.erase(k);
             uint64_t dw = 0;
             for (const auto &t : l->dmodel.gguf.tensors) dw += t.nbytes;
             dreserve = ts5::vk_fixed_bytes(l->dmodel.hp, dw) +
@@ -219,11 +223,7 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
             printf("ts5: draft model not used: %s\n", derr.c_str());
         else
             printf("ts5: draft model %s ready\n", base(dp).c_str());
-        // The vocabulary check reads the drafter's token list, so its arrays
-        // (about 20 MB for 150k tokens) are dropped only now.
-        for (const char *k : {"tokenizer.ggml.tokens", "tokenizer.ggml.scores", "tokenizer.ggml.token_type",
-                              "tokenizer.ggml.merges"})
-            l->dmodel.gguf.kv.erase(k);
+        l->dmodel.gguf.kv.erase("tokenizer.ggml.tokens");
     }
     log_memory("after loading " + l->file);
     return l;
