@@ -44,7 +44,7 @@ the GPU check (the GPU's logits against ts5's CPU reference) on all four.
 - [ ] [#14](https://github.com/ThatRetiredDude/TokenStation5/pull/14) Our own PS5 runtime, so the title can ship without the GPL (draft). The clean-room spec is written and the assessment is "same speed"; the code waits for a go. The default flips only after a clean launch, a passing GPU check and matching speeds on the console, then LICENSING.md changes.
 - [ ] Homebrew catalog listing (ps5-homebrew-catalog, ProsperoStore): waiting on a fork of the catalog repo.
 - [ ] Web search (approved 2026-10-14, being built on branch `claude/project-thread-mp3yju`): OpenAI tool calling in ts5 and which models support it, then a `web_search` tool that calls Tavily over HTTPS from the console (mbedTLS), with the key in `tavily.key` in the title's folder (and a field in the Settings page). Notes: `ps5-ai/websearch/WEB_SEARCH_FEASIBILITY.md` in the project files.
-- [ ] Voice chat. First a console audio test (approved 2026-10-14, being built): the pad's mic in, TV or pad speaker out. Then a chat box on the TV (typed on a keyboard or spoken), speech to text (whisper.cpp), text to speech (Kokoro) and a Settings page. Notes: `ps5-ai/voice/VOICE_FEASIBILITY.md` in the project files.
+- [ ] Voice chat. First an audio test ([#19](https://github.com/ThatRetiredDude/TokenStation5/pull/19), draft): the pad's mic in, TV or pad speaker out. Then a chat box on the TV (keyboard or voice), speech to text (whisper.cpp), Kokoro reading ts5's replies aloud, and a Settings page in `ts5.env`: output on the TV or the controller, an optional remote provider and the Tavily key. Notes: `ps5-ai/voice/VOICE_FEASIBILITY.md` in the project files.
 
 ## Next
 
