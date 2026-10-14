@@ -1,70 +1,85 @@
 # Roadmap
 
-Goal: a PS5 on the home network serving the candidate models over an
+Goal: a PS5 on the home network serving local models over an
 OpenAI-compatible API, fast enough to use from chat clients and coding tools.
 
-The engine is llama.cpp (C++), running on the PS5 GPU through ggml-vulkan and
-Mihawk-99's RADV port. [PS5LM Plus](https://github.com/abhi245y/PS5LM) already
-packages that as a native title, so this project starts by running it and only
-forks it where measurements show a gap. See [FEASIBILITY.md](FEASIBILITY.md).
+The engine is ts5, our own C++/Vulkan engine ([engine/](../engine/)), running
+on the console's GPU as the PS5 title TokenStation5 (PPSA99555,
+[ps5/](../ps5/)). [PS5LM Plus](https://github.com/abhi245y/PS5LM), a llama.cpp
+port, is the baseline to beat. [FEASIBILITY.md](FEASIBILITY.md) is where this
+started.
 
-## M0: bring-up (on the console)
+This is the project's punch list: what's done, what's open and what's next.
+Every PR updates it.
 
-- [x] Console jailbroken on fw 13.60 (OnionHEN + kstuff), RADV compute proven by aamd-at-home's PPSA99021
-- [ ] ShadowMountPlus, ftpsrv (2121) and elfldr (9021) loaded after the exploit
-- [ ] `scripts/install-ps5lm.sh`: PPSA99581 on the console, launched once from the home screen
-- [ ] Smoke test: `scripts/fetch-models.sh llama32-3b`, load it, chat at `http://<ps5>:8081`
-- [ ] `scripts/bench.py` reproduces PS5LM's ~124 tok/s on Llama 3.2 3B
+Last updated: 2026-10-14.
 
-**Done when** the console answers an OpenAI request from the PC.
+## Where we are
 
-## M1: the candidate models
+Qwen 2.5 Coder 7B Q4_K_M on the console, build by build (`ts5 bench`: a
+512-token prompt, then 128 generated tokens):
 
-For each model in `models.tsv`: fetch, `scripts/load-model.sh`, `scripts/bench.py`.
+| Build | Prompt tok/s | Generation tok/s |
+| --- | ---: | ---: |
+| First console run (347f168) | 31 | 21 |
+| Tiled matmul, word-load mat-vecs ([#7](https://github.com/ThatRetiredDude/TokenStation5/pull/7)) | 170 | 35 |
+| Attention per KV head ([#12](https://github.com/ThatRetiredDude/TokenStation5/pull/12)) | 234 | 45 |
+| Attention tiles, 128 x 128 matmul blocks ([#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15), draft) | 450 | 54 |
 
-- [ ] Qwen 3.5 4B Q4_K_M
-- [ ] Gemma 4 E4B Q4_0
-- [ ] Qwen 2.5 Coder 7B Q4_K_M
-- [ ] Qwen 3 8B Q4_K_M
-- [ ] Qwen 3.5 9B Q4_K_M
-- [ ] Gemma 3 12B Q4_K_M
-- [ ] Mistral Nemo 12B Q4_K_M
-- [ ] Pick defaults: one coding model, one general model; record why in `bench/results.md`
+With [#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15): Qwen 3
+8B 415 / 47, Llama 3.1 8B 420 / 48, Llama 3.2 3B 874 / 94. Every build passes
+the GPU check (the GPU's logits against ts5's CPU reference) on all four.
 
-**Done when** every candidate has generation and prompt tok/s at 128, 1k and 4k prompts.
+## Critical
 
-## M2: make it an endpoint
+- [ ] Keep the PS5 out of rest mode while TokenStation5 runs ([#16](https://github.com/ThatRetiredDude/TokenStation5/pull/16)). Its idle timer counts only controller input, not API requests or jobs: on 2026-10-14 it went into rest mode at 18:36 UTC in the middle of unattended speed tests (the jailbreak, ftpsrv and the title survived and resumed). The title now calls `sceSystemServicePowerTick` once a minute and darkens the TV itself after 10 idle minutes; to verify on the console with the rest timer at its shortest.
 
-- [ ] Static IP / DHCP reservation for the console
-- [ ] Client configs (Open WebUI, Continue, opencode, Claude Code) in `docs/CLIENTS.md`
-- [ ] Optional auth: a reverse proxy with an API key on a PC or Pi in front of `:8081` (llama-server and the console's FTP/elfldr ports have no auth)
-- [ ] One command after each reboot: exploit, payloads, launch PPSA99581, load the default model
+## Open
 
-**Done when** a laptop on the LAN uses the PS5 as its model with no manual steps on the console besides the exploit.
+- [ ] [#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15) Faster prompts and generation (draft). Measured on the console as above. The next round is built and waiting for the console: one-token kernels that read x once per 8 rows (Q4_K and Q6_K), and the prompt matmuls with few rows (attn_q, attn_output, ffn_down) split across all compute units. Also brings `scripts/ts5-ps5.sh update`, which swaps a new build into the running title.
+- [ ] [#13](https://github.com/ThatRetiredDude/TokenStation5/pull/13) An 8-bit KV cache, and serving with as much context as fits (draft). The 8-bit cache drifts 2.3% on Coder 7B against a 2% bar, so it stays opt-in (`TS5_KV=q8`), and f16 is used wherever the model's whole context fits. To verify on the console.
+- [ ] [#16](https://github.com/ThatRetiredDude/TokenStation5/pull/16) Keep-awake (see Critical).
+- [ ] [#17](https://github.com/ThatRetiredDude/TokenStation5/pull/17) Speculative decoding by prompt lookup (draft): drafts up to 7 tokens from earlier text and checks them in one pass, with the same output. To measure on the console (`TS5_DRAFT=0` turns it off).
+- [ ] [#11](https://github.com/ThatRetiredDude/TokenStation5/pull/11) Memory probe payload and a fuller free-memory line (ready). Finding: the game's memory pool is 11.44 GiB and ts5 already gets all of it; closing other apps frees nothing.
+- [ ] [#14](https://github.com/ThatRetiredDude/TokenStation5/pull/14) Our own PS5 runtime, so the title can ship without the GPL (draft). The clean-room spec is written and the assessment is "same speed"; the code waits for a go. The default flips only after a clean launch, a passing GPU check and matching speeds on the console, then LICENSING.md changes.
+- [ ] Homebrew catalog listing (ps5-homebrew-catalog, ProsperoStore): waiting on a fork of the catalog repo.
 
-## M3: our own engine (`engine/`)
+## Next
 
-Decision (2026-10-14): build a scratch C++/Vulkan engine rather than fork
-PS5LM, so we own the kernels where the PS5 is slowest. PS5LM stays installed
-as the baseline to beat. Design: [engine/DESIGN.md](../engine/DESIGN.md).
+- [ ] Generation at 70% of the GPU's 448 GB/s. Coder 7B at 54 tok/s streams about 250 GB/s (56%).
+- [ ] Measure PS5LM Plus on the console, same models, for a head-to-head. Its own figure is 124 tok/s generation on Llama 3.2 3B (ts5: 94).
+- [ ] Speculative decoding with a small draft model in the spare memory, after [#17](https://github.com/ThatRetiredDude/TokenStation5/pull/17), and a fast kernel for its batch of 8 tokens.
+- [ ] An 8-bit KV cache within the 2% bar, so 8B models get long contexts.
+- [ ] Qwen 3's thinking: honor `enable_thinking` and `/no_think`.
+- [ ] More models: Gemma 3 12B, Qwen 3.5 4B and 9B, Gemma 4 E4B, Mistral Nemo 12B ([models.tsv](../models.tsv)).
+- [ ] Check memory after a fresh launch: direct free memory was about 1 GiB lower after some 20 bench reloads (a leak?).
+- [ ] Endpoint: a static IP or DHCP reservation, client configs (Open WebUI, Continue, opencode, Claude Code) in `docs/CLIENTS.md`, an optional API-key proxy in front of `:8081`, one command after each reboot.
 
-- [x] v0: GGUF loader, llama/qwen2/qwen3, F32 to Q6_K, BPE + SentencePiece tokenizers, OpenAI server
-- [x] Correctness: logits match llama.cpp and the CPU reference on every type; tokenizer matches llama-tokenize; CI on lavapipe
-- [x] PS5 title builds: TokenStation5 (PPSA99555) linked against PS5_Vulkan's RADV, libc shims, an import check, its `main` tested on Linux in CI ([ps5/](../ps5/))
-- [ ] First console run: `scripts/ts5-ps5.sh check` on a small model, then serve Qwen 2.5 Coder 7B on :8081
-- [ ] Remote test loop: a session on the PC deploys over FTP, launches over elfldr, reads logs, runs `ts5 bench`
-- [ ] Prefill: tiled fp16 matmul (beat PS5LM's prompt tok/s on the same model)
-- [ ] Decode: wide loads, multi-row workgroups, subgroup reductions (target 70%+ of 448 GB/s)
-- [ ] Gemma 3 (12B), then Qwen 3.5 and Gemma 4 E4B
-- [ ] Speculative decoding with a small draft model
+## Done
 
-**Done when** ts5 beats PS5LM Plus on prompt tok/s for Qwen 2.5 Coder 7B on the console.
+- [x] Console jailbroken on fw 13.60 (OnionHEN + kstuff); ShadowMountPlus, ftpsrv (2121) and elfldr (9021) loaded after the exploit.
+- [x] Feasibility report, model lineup ([models.tsv](../models.tsv)) and PS5LM install and bench scripts.
+- [x] Decision: our own engine rather than a PS5LM fork, so we own the kernels where the PS5 is slowest.
+- [x] [#1](https://github.com/ThatRetiredDude/TokenStation5/pull/1) ts5 v0: GGUF loader, llama / qwen2 / qwen3, F32 to Q6_K, BPE and SentencePiece tokenizers, OpenAI server; logits match llama.cpp and the CPU reference; CI on lavapipe.
+- [x] [#3](https://github.com/ThatRetiredDude/TokenStation5/pull/3) The PS5 title: ts5 on the console's GPU through PS5_Vulkan's RADV, its `main` tested on Linux in CI.
+- [x] [#4](https://github.com/ThatRetiredDude/TokenStation5/pull/4) Its own title ID (PPSA99555) and folder.
+- [x] [#5](https://github.com/ThatRetiredDude/TokenStation5/pull/5) Licenses: PolyForm Small Business for ts5, scripts and docs; GPL-3.0 for the PS5 title. [#8](https://github.com/ThatRetiredDude/TokenStation5/pull/8): the title ships its license, notices and source commits.
+- [x] First console run: Qwen 2.5 0.5B passes the GPU check and serves on `:8081` (693 tok/s prompt, 185 generation from the Mac).
+- [x] [#6](https://github.com/ThatRetiredDude/TokenStation5/pull/6), [#10](https://github.com/ThatRetiredDude/TokenStation5/pull/10) The dashboard on the TV: models, GPU check, speed test, serving.
+- [x] [#7](https://github.com/ThatRetiredDude/TokenStation5/pull/7) Tiled matmul for prompts, word-load mat-vecs for Q4_K and Q6_K generation.
+- [x] [#9](https://github.com/ThatRetiredDude/TokenStation5/pull/9) README with the console numbers.
+- [x] [#12](https://github.com/ThatRetiredDude/TokenStation5/pull/12) Attention per KV head with split keys, GPU time per kernel (`TS5_PROFILE=1`), saved GPU-check answers.
+- [x] Remote test loop: a session on the Mac deploys over FTP, reads the title's log, and runs checks and benches.
+- [x] Driver check: RADV isn't the bottleneck; ts5's barriers and its ALU-bound mat-vecs were (fixed in [#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15)).
+- [x] Clean-room spec of the PS5 runtime, for [#14](https://github.com/ThatRetiredDude/TokenStation5/pull/14).
+- [x] The 2026-10-14 "crash" diagnosed from the logs: rest mode, not a crash.
 
 ## Risks
 
 | Risk | Plan |
 | --- | --- |
-| Firmware update closes the exploit (14.00 does) | Auto updates off; keep the console off PSN updates |
-| Exploit race shuts the console down at boot | Retry; it is the exploit, not the app (PS5LM CONSOLE.md) |
-| A model's ops misbehave on RADV | ggml-vulkan's `GGML_VK_DISABLE_*` switches; report to PS5LM |
-| GPL: PS5LM and PS5_Vulkan are GPL-3.0 | Patches carried here are GPL-3.0 too; scripts and docs can stay under any license |
+| A firmware update closes the exploit (14.00 does) | Auto updates off; keep the console off PSN updates |
+| The exploit race shuts the console down at boot | Retry; it is the exploit, not the app |
+| Rest mode in the middle of a job | Keep-awake ([#16](https://github.com/ThatRetiredDude/TokenStation5/pull/16)) |
+| A model's ops misbehave on RADV | The GPU check against the CPU reference, before serving |
+| GPL: the title links PS5_Vulkan's and the payload SDK's runtime (GPL-3.0) | Our own runtime ([#14](https://github.com/ThatRetiredDude/TokenStation5/pull/14)); until then the title ships GPL-3.0 |
