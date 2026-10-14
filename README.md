@@ -49,7 +49,7 @@ The full plan is in [engine/DESIGN.md](engine/DESIGN.md).
 | Quants | ✅ F32, F16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K_M, Q5_K_M |
 | OpenAI API | ✅ `/v1/chat/completions` (streaming), `/v1/completions`, `/v1/models` |
 | PS5 title | ✅ Runs on a real PS5 as **TokenStation5** (`PPSA99555`). The GPU check passes on the console, and the API serves the home network |
-| TV dashboard | 🧪 Pick, check, benchmark and serve models with the controller. Works in tests; first run on the TV is next |
+| TV dashboard | ✅ Pick, check, benchmark and serve models with the controller, on the TV |
 | PS5 kernel tuning | 🔨 In progress: prompts read 3 to 5 times faster and generation 1.6 times faster than the first console build. Attention is next |
 | Gemma 3, Qwen 3.5, Gemma 4 | 📋 Planned |
 

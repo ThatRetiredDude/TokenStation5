@@ -23,9 +23,12 @@ static PFN_vkGetInstanceProcAddr ts5_vk_entry() {
 #endif
 
 uint64_t VkContext::device_memory() const {
+    // A GPU that shares the system's memory (the PS5, an APU, a CPU driver)
+    // can use every heap: they are all that memory.
+    const bool shared = props.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
     uint64_t n = 0;
     for (uint32_t i = 0; i < memory.memoryHeapCount; i++)
-        if (memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) n += memory.memoryHeaps[i].size;
+        if (shared || (memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) n += memory.memoryHeaps[i].size;
     return n;
 }
 
