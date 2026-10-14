@@ -5,8 +5,8 @@
 
 The tokenizer is copied from a vocab-only GGUF (llama.cpp ships them under
 models/), so llama.cpp can load the file and act as the reference. Weights are
-F32, F16, Q8_0, Q4_0, Q4_1, Q5_0 or Q5_1 (--quant); llama-quantize makes the
-K-quant variants. Dimensions are multiples of 256 so K-quants apply to every
+F32, F16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1 or a Q4_K/Q6_K mix like llama.cpp's
+Q4_K_M (--quant); llama-quantize makes the other K-quant variants. Dimensions are multiples of 256 so K-quants apply to every
 matrix.
 """
 import argparse
@@ -34,6 +34,49 @@ def copy_tokenizer(reader, writer):
             writer.add_key_value(field.name, val, vtype)
 
 
+def quantize_q4_k(x):
+    """Q4_K: per 256 values d, dmin (f16), 6-bit scales and mins for eight
+    32-value sub-blocks, then 4-bit values; x ~ d * sc * q - dmin * m."""
+    b = x.reshape(-1, 8, 32).astype(np.float64)
+    lo = np.minimum(b.min(axis=2), 0.0)
+    scale = (b.max(axis=2) - lo) / 15.0
+    d = np.maximum(scale.max(axis=1), 1e-12) / 63.0
+    dmin = np.maximum((-lo).max(axis=1), 1e-12) / 63.0
+    d16, dmin16 = d.astype(np.float16), dmin.astype(np.float16)
+    d, dmin = d16.astype(np.float64), dmin16.astype(np.float64)
+    sc = np.clip(np.round(scale / d[:, None]), 0, 63).astype(np.uint8)
+    mn = np.clip(np.round(-lo / dmin[:, None]), 0, 63).astype(np.uint8)
+    step = np.maximum(d[:, None] * sc, 1e-30)[:, :, None]
+    q = np.clip(np.round((b + (dmin[:, None] * mn)[:, :, None]) / step), 0, 15).astype(np.uint8)
+    s = np.zeros((b.shape[0], 12), np.uint8)
+    s[:, 0:4] = (sc[:, :4] & 63) | ((sc[:, 4:] >> 4) << 6)
+    s[:, 4:8] = (mn[:, :4] & 63) | ((mn[:, 4:] >> 4) << 6)
+    s[:, 8:12] = (sc[:, 4:] & 15) | ((mn[:, 4:] & 15) << 4)
+    qs = (q[:, 0::2, :] | (q[:, 1::2, :] << 4)).reshape(-1, 128)
+    out = np.concatenate([d16.view(np.uint8).reshape(-1, 2), dmin16.view(np.uint8).reshape(-1, 2), s, qs], axis=1)
+    return out.reshape(x.shape[0], -1)
+
+
+def quantize_q6_k(x):
+    """Q6_K: per 256 values 6-bit values (low nibbles, then high 2 bits),
+    an int8 scale per 16 and d (f16); x ~ d * sc * (q - 32)."""
+    b = x.reshape(-1, 16, 16).astype(np.float64)
+    scale = np.abs(b).max(axis=2) / 31.0
+    d = np.maximum(scale.max(axis=1), 1e-12) / 127.0
+    d16 = d.astype(np.float16)
+    d = d16.astype(np.float64)
+    sc = np.clip(np.round(scale / d[:, None]), -128, 127).astype(np.int8)
+    step = np.where(sc == 0, 1.0, d[:, None] * sc)[:, :, None]
+    q = (np.clip(np.round(b / step), -32, 31) + 32).astype(np.uint8).reshape(-1, 2, 4, 32)  # [blk][half][i][l]
+    ql = np.zeros((q.shape[0], 2, 64), np.uint8)
+    ql[:, :, 0:32] = (q[:, :, 0] & 15) | ((q[:, :, 2] & 15) << 4)
+    ql[:, :, 32:64] = (q[:, :, 1] & 15) | ((q[:, :, 3] & 15) << 4)
+    qh = (q[:, :, 0] >> 4) | ((q[:, :, 1] >> 4) << 2) | ((q[:, :, 2] >> 4) << 4) | ((q[:, :, 3] >> 4) << 6)
+    out = np.concatenate([ql.reshape(-1, 128), qh.reshape(-1, 64), sc.view(np.uint8), d16.view(np.uint8).reshape(-1, 2)],
+                         axis=1)
+    return out.reshape(x.shape[0], -1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--arch", default="qwen2", choices=["llama", "qwen2", "qwen3"])
@@ -44,8 +87,9 @@ def main():
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--kv-heads", type=int, default=2)
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--quant", default="F32", choices=["F32", "F16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1"],
-                    help="type for the 2-D weights (K-quants need llama-quantize)")
+    ap.add_argument("--quant", default="F32", choices=["F32", "F16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q4_K_M"],
+                    help="type for the 2-D weights; Q4_K_M: Q4_K, with Q6_K for attn_v, ffn_down and output, "
+                         "as llama-quantize's mix")
     ap.add_argument("out")
     a = ap.parse_args()
 
@@ -70,13 +114,22 @@ def main():
     w.add_file_type(0)
     copy_tokenizer(reader, w)
 
-    qtype = getattr(GGMLQuantizationType, a.quant)
+    kmix = a.quant == "Q4_K_M"
+    qtype = GGMLQuantizationType.Q4_K if kmix else getattr(GGMLQuantizationType, a.quant)
 
     def t(name, *shape, scale=None):
         # numpy shape is (ne1, ne0): rows are outputs, columns are inputs.
         s = scale if scale is not None else 1.0 / np.sqrt(shape[-1])
         data = (rng.standard_normal(shape) * s).astype(np.float32)
-        if qtype == GGMLQuantizationType.F32:
+        if kmix:
+            if shape[-1] % 256:
+                w.add_tensor(name, quants.quantize(data, GGMLQuantizationType.Q8_0),
+                             raw_dtype=GGMLQuantizationType.Q8_0)
+            elif any(k in name for k in ("attn_v", "ffn_down", "output")) and "attn_output" not in name:
+                w.add_tensor(name, quantize_q6_k(data), raw_dtype=GGMLQuantizationType.Q6_K)
+            else:
+                w.add_tensor(name, quantize_q4_k(data), raw_dtype=GGMLQuantizationType.Q4_K)
+        elif qtype == GGMLQuantizationType.F32:
             w.add_tensor(name, data)
         elif qtype == GGMLQuantizationType.F16:
             w.add_tensor(name, data.astype(np.float16))
