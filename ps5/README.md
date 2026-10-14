@@ -54,7 +54,7 @@ python3 scripts/bench.py                            # speed through the API
 | --- | --- |
 | up / down | choose a model |
 | cross | serve it (and serve it again at the next start) |
-| square | GPU check: its logits on the GPU against ts5's CPU reference, PASS or FAIL |
+| square | GPU check: its logits on the GPU against ts5's CPU reference, PASS or FAIL. The first check of a model runs the CPU and saves its answers next to the model (`NAME.gguf.ts5ref`); later ones run only the GPU, in about a second |
 | triangle | speed test: prompt (512 tokens) and generation (128) tok/s |
 | circle | stop serving |
 | OPTIONS | close the title |
@@ -87,7 +87,7 @@ On the console, everything lives in the title's own folder,
 | --- | --- |
 | `models/` | the models |
 | `ts5.args` | what to serve at start: `serve -m MODEL [-c N] [--port N]` |
-| `ts5.cmd` | a command to run now: `serve`, `check`, `bench` (`-m MODEL`), or `stop` |
+| `ts5.cmd` | a command to run now: `serve`, `check`, `bench` (`-m MODEL`), or `stop`. `check` and `bench` take `--env NAME=VALUE` (engine settings for that job only, on a load of its own) and `check` takes `--fresh 1` (run the CPU again) |
 | `ts5.once` | a command to run at the next start, before `ts5.args` |
 | `ts5.env` | engine settings read at start, `NAME=VALUE` (the `getenv` calls in `engine/src/vk_backend.cpp`) |
 | `press`, `screenshot` | controller buttons; the next frame to `screen.bmp` |

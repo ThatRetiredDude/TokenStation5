@@ -25,6 +25,10 @@ struct Job {
     std::string path;
     int n_ctx = 8192;      // Serve
     int n = 16;            // Check: tokens
+    bool fresh = false;    // Check: run the CPU even if its answers are saved
+    // Check, Bench: engine settings (NAME=VALUE, as in ts5.env) for this job's
+    // own load of the model, so a test can try settings without a restart.
+    std::vector<std::string> env;
     int pp = 512, tg = 128;  // Bench
 };
 

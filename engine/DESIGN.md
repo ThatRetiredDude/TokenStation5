@@ -54,7 +54,7 @@ Per layer, 12 dispatches, each followed by a compute-to-compute barrier:
 1. `rmsnorm` (attention norm)
 2. `matmul` Q, K, V (one per projection)
 3. `qkv_post`: bias (Qwen2), per-head RMSNorm (Qwen3), RoPE (normal or NeoX), write K and V to the f16 cache
-4. `attention`: one workgroup per (head, token); online softmax over 128-key blocks; GQA by head mapping
+4. `attn`: attention over the f16 cache (below), plus `attn_merge` when it splits the keys
 5. `matmul` output projection, accumulating into the residual
 6. `rmsnorm` (FFN norm), `matmul` gate and up, `swiglu`, `matmul` down accumulating into the residual
 
@@ -75,10 +75,28 @@ Each matmul picks one of three kernels by how many tokens it multiplies:
   accumulates 4 x 4 outputs. Each weight is read once per 64 tokens instead
   of once per 8. `TS5_TILED_MIN` sets the threshold.
 - One token of Q4_K or Q6_K, as in generation with a Q4_K_M model
-  (`matvec_*`, `shaders/matvec_k.glsl`): one workgroup per row, 16 threads
-  per super-block reading its quants as 32-bit words, subgroup reductions.
+  (`matvec_*`, `shaders/matvec_k.glsl`): one workgroup per row (or per
+  `TS5_MV_ROWS`, up to 4, sharing their reads of x), 16 threads per
+  super-block reading its quants as 32-bit words, subgroup reductions.
   `TS5_FAST_MATVEC=0` turns it off.
 - Anything else (`matmul_*`): one workgroup per row, 8 tokens per pass.
+
+Attention (`shaders/attn.comp`) gives each workgroup the query heads that
+share one KV head (grouped-query attention), for as many tokens as fit 1024
+floats of queries: 7 heads x 1 token on Qwen 2.5 7B, 4 heads x 2 tokens on
+Llama 3.1 8B. Keys and values come from the cache in tiles of 2048 values
+staged in shared memory, so the block reads each once rather than once per
+head and token; online softmax per row. Generation has one token, so that
+makes only one workgroup per KV head (4 on Qwen 2.5 7B) for every key in the
+cache. There the keys are split into slices of 64 or more, about 128
+workgroups in all, each writing a partial result (unnormalized output, max
+score, sum of weights) that `attn_merge` combines. `TS5_ATTN=0` runs the old
+kernel (`attention.comp`, one workgroup per head and token); `TS5_ATTN_SPLITS`
+sets the number of slices.
+
+`TS5_PROFILE=1` writes a GPU timestamp after every dispatch; `ts5 bench`
+then prints the GPU's time per kernel (matmuls by weight) for the prompt and
+for generation.
 
 ## Memory
 
@@ -104,8 +122,16 @@ llama.cpp. The Vulkan backend is checked against both:
   reference (relative max difference about 1e-4 on every type) and vs
   llama.cpp (2e-4 on F32; about 1e-2 on Q4_K_M, because llama.cpp's CPU
   backend quantizes activations to 8 bits).
-- `--step` runs one token per call to exercise the KV cache across calls;
-  `--ntok 300` exercises batch chunking and multi-block attention.
+- `--step` runs one token per call to exercise the KV cache across calls
+  (and attention's split keys); `--ntok 300` exercises batch chunking and
+  multi-tile attention. Extra test models cover other head layouts: 7 query
+  heads per KV head at head sizes 64 and 128, 4 per KV head, and head size 256.
+- `ts5 check` (the dashboard's square) compares the GPU with the CPU
+  reference on the machine itself. The reference's logits are saved next to
+  the model (`MODEL.gguf.ts5ref`, 4 bytes x vocabulary x tokens) the first
+  time, so later checks of the same file run only the GPU; `--fresh` runs the
+  CPU again. The file records the model's size and a hash of its first MiB,
+  and a version that changes when the reference's math does.
 - `tests/tokenizer_test.py` matches `llama-tokenize` on 15 strings (code,
   contractions, digits, CJK, emoji, special tokens) for Qwen2, Llama 3 and
   SentencePiece vocabularies.
@@ -124,8 +150,8 @@ needs the console or an RDNA 2 card. In order of expected payoff:
 2. **Decode matvec.** Word loads and subgroup reductions are done for Q4_K
    and Q6_K. Next: several rows per workgroup, the other types, and the
    gate/up pair fused. Target: 70%+ of the 448 GB/s bandwidth.
-3. **Attention.** Flash-attention style tiles for prefill; split-K over the
-   cache for long-context decode.
+3. **Attention.** Done: shared K/V tiles per KV head, and split keys for
+   generation (above). Next: measure it on the console against the old kernel.
 4. **Fewer dispatches.** Fuse rmsnorm into the following matmul's input
    load, swiglu into gate/up, and record the command buffer once per batch size.
 5. **Integer dot products.** If the PS5 GPU has the RDNA 2 `v_dot4` instructions,

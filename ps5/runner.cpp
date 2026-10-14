@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <exception>
 #include <thread>
@@ -29,6 +30,30 @@ double now_s() {
 }
 
 namespace {
+
+// A job's engine settings (NAME=VALUE), set while it lives: the engine reads
+// them as a backend starts. Puts back the earlier values when it goes.
+class EnvScope {
+public:
+    explicit EnvScope(const std::vector<std::string> &env) {
+        for (const std::string &kv : env) {
+            const std::string name = kv.substr(0, kv.find('='));
+            const char *was = getenv(name.c_str());
+            saved_.push_back({name, was ? std::string("=") + was : std::string()});
+            setenv(name.c_str(), kv.substr(kv.find('=') + 1).c_str(), 1);
+            printf("ts5-title: for this job: %s\n", kv.c_str());
+        }
+    }
+    ~EnvScope() {
+        for (auto it = saved_.rbegin(); it != saved_.rend(); ++it) {
+            if (it->second.empty()) unsetenv(it->first.c_str());
+            else setenv(it->first.c_str(), it->second.c_str() + 1, 1);
+        }
+    }
+
+private:
+    std::vector<std::pair<std::string, std::string>> saved_;  // name, "=" + value or "" (unset)
+};
 
 std::string base(const std::string &p) {
     const size_t s = p.find_last_of('/');
@@ -242,7 +267,7 @@ void Runner::run(const Job &job) {
     // An exception (out of memory, say) fails the job but not what follows it:
     // the serving model goes back on the API either way.
     try {
-        if (serving_ && serving_->path == job.path && serving_->n_ctx >= need_ctx) {
+        if (job.env.empty() && serving_ && serving_->path == job.path && serving_->n_ctx >= need_ctx) {
             server_.set_engine(nullptr, "", check ? "running the GPU check" : "running the speed test");
             target = serving_.get();
         } else {
@@ -252,6 +277,7 @@ void Runner::run(const Job &job) {
             }
             unload();
             set_step("loading the model");
+            EnvScope settings(job.env);
             own = load(job.path, need_ctx, err);
             target = own.get();
         }
@@ -259,7 +285,7 @@ void Runner::run(const Job &job) {
         auto progress = [this](const std::string &s) { set_step(s); };
         if (ok && check) {
             ts5::CheckResult r;
-            ok = ts5::run_check(target->model, target->engine->backend(), job.n, r, err, progress);
+            ok = ts5::run_check(target->model, target->engine->backend(), job.n, r, err, progress, job.fresh);
             if (ok) {
                 const std::string line = ts5::check_line(file, r);
                 printf("%s\n", line.c_str());
@@ -279,6 +305,7 @@ void Runner::run(const Job &job) {
             ok = ts5::run_bench(target->model, target->engine->backend(), job.pp, job.tg, r, err, progress);
             if (ok) {
                 printf("%s\n", ts5::bench_table(file, r).c_str());
+                fputs(ts5::bench_profile(r).c_str(), stdout);
                 BenchRecord rec{r.pp, r.tg, r.pp_tps, r.tg_tps, (int64_t)time(nullptr)};
                 {
                     std::lock_guard<std::mutex> lk(lib_mutex_);

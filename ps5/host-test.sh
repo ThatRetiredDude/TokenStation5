@@ -119,6 +119,18 @@ grep -q "^bench	$name	" "$home/results.tsv" || fail "no speed test in results.ts
 wait_health
 shot results
 
+echo "== a second check: GPU only, against the CPU's answers saved by the first"
+[ -s "$home/models/$name.ts5ref" ] || fail "the first check saved no answers"
+echo "check -m $name" > "$home/ts5.cmd"
+wait_log "^ts5 check: .*, cpu answers saved earlier: PASS$"
+wait_health
+
+echo "== --env: settings for one job (here the GPU's time per kernel)"
+echo "bench -m $name --pp 32 --tg 8 --env TS5_PROFILE=1" > "$home/ts5.cmd"
+wait_log "^ts5-title: for this job: TS5_PROFILE=1$"
+wait_log "^generation \(8 tokens\), GPU time"
+wait_health
+
 echo "== circle: stop serving"
 press circle
 for _ in $(seq 1 50); do health_says "no model" && break; sleep 0.1; done
