@@ -29,7 +29,9 @@ an OSI open source one.
 
 The PS5 title is one program made of ts5, the files in `ps5/`, RADV, and
 PS5_Vulkan's and the payload SDK's GPL-3.0 code. The GPL requires a
-distributed program like that to be licensed under the GPL as a whole. So:
+distributed program like that to be licensed under the GPL as a whole. The
+copyright holder therefore also grants GPL-3.0-or-later on the `engine/`
+source, but only as part of the PS5 title and its corresponding source. So:
 
 - Whoever distributes the built title must offer its complete source under
   GPL-3.0, including the `engine/` source it was built from.
@@ -52,5 +54,22 @@ To keep the line clean:
 - Accepting outside contributions to `engine/` needs a contributor agreement
   that lets the copyright holder relicense them, or commercial licenses can't
   cover their code.
+
+## When distributing a built PS5 title
+
+Every published build of the title (a CI artifact, a catalog release, a zip)
+must carry, in the title folder or next to it:
+
+- a copy of [ps5/LICENSE](ps5/LICENSE) and [NOTICE.md](NOTICE.md), and
+- the source: the commit of this repo it was built from and the pinned
+  revisions `ps5/setup.sh` names, or a written offer of them (GPL section 6).
+
+A catalog entry for the title should name its license as GPL-3.0.
+
+## Trademarks
+
+This project is independent and is not affiliated with or endorsed by Sony
+Interactive Entertainment. "PlayStation" and "PS5" are trademarks of Sony
+Interactive Entertainment.
 
 This file describes the project's intent. It is not legal advice.
