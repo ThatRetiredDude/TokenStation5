@@ -79,6 +79,15 @@ TS5_MMB_MIN=1 TS5_MMB_SPLIT=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu 
 # The f32 sums throughout (where the device has f16, mmb sums each step in f16).
 TS5_MMB_MIN=1 TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
     "${kmix[@]}"
+# A wider model with the minimum at 12 blocks: attn_k, attn_v, ffn_gate and
+# ffn_up (4 or 8 blocks) take mmb only by splitting their columns in 4
+# slices, attn_q and ffn_down have the blocks; the last 44 tokens take the
+# 64 x 64 kernel for the small ones.
+wide="$work/qwen3-kmix-wide.gguf"
+[ -s "$wide" ] || python3 "$here/make_test_model.py" --arch qwen3 --quant Q4_K_M --vocab "$work/ggml-vocab-qwen2.gguf" \
+    --embd 1024 --heads 8 --kv-heads 2 "$wide" > /dev/null
+TS5_MMB_MIN=12 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "$wide"
+TS5_MMB_MIN=12 TS5_MMB_SMALL=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "$wide"
 TS5_MMB=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${kmix[@]}"
 # One token per call: a row per workgroup (these matrices are small), 8 rows
 # (TS5_MV_ROWS_MIN=1), 3 (a partial last group), and the older mat-vecs.

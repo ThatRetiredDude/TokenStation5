@@ -162,7 +162,7 @@ class VkBackend : public Backend {
 public:
     static constexpr int TMAX = 256;  // tokens per forward call
     static constexpr size_t PART = 1u << 20;  // floats of attn's partial results, when it splits the keys
-    static constexpr size_t SPLIT = 6u << 20;  // floats of mmb's partial results, when it splits the rows
+    static constexpr size_t SPLIT = 12u << 20;  // floats of mmb's partial results, when it splits the rows
 
     VkBackend(VkContext *ctx, bool owns_ctx, Model &m, int n_ctx)
         : ctx_(ctx), owns_ctx_(owns_ctx), m_(m), hp_(m.hp), n_ctx_(n_ctx) {}
@@ -265,6 +265,7 @@ private:
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
         if (const char *e = getenv("TS5_MMB_SPLIT")) mmb_split_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SLICES")) mmb_slices_ = std::max(0, atoi(e));
+        if (const char *e = getenv("TS5_MMB_SMALL")) mmb_small_ = atoi(e) != 0;
         mmb_f16_ = ctx_->float16;
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
         kv_ = kv_type_setting();
@@ -622,8 +623,13 @@ private:
         // Many tokens: the tiled kernels, which read each weight once per 128
         // or 64 tokens. Few: one workgroup per row. The 128 x 128 blocks
         // (K-quants) only where there are enough of them for the GPU.
+        // A matrix with few rows (attn_k, attn_v) too, for a full block of
+        // tokens, where splitting its columns (mmb) makes enough workgroups.
         const uint32_t big = ((rows + 127) / 128) * (((uint32_t)ntok + 127) / 128);
-        if (ntok >= tiled_min_ && mmb_ && big >= (uint32_t)mmb_min_ && x_off % 4 == 0 && w.ne0() % 4 == 0 &&
+        const uint32_t split_big = mmb_small_ && mmb_split_ && ntok >= 128 && big < (uint32_t)mmb_min_
+                                       ? big * std::min({(mmb_split_ + big - 1) / big, (uint32_t)w.ne0() / 256, 16u})
+                                       : big;
+        if (ntok >= tiled_min_ && mmb_ && split_big >= (uint32_t)mmb_min_ && x_off % 4 == 0 && w.ne0() % 4 == 0 &&
             (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
             mmb(w, x, y, pc, big, what);
             return;
@@ -889,6 +895,9 @@ private:
     // TS5_MMB_SLICES=N: every matrix in N.
     uint32_t mmb_split_ = 256;
     int mmb_slices_ = 0;
+    // Matrices of fewer blocks than mmb_min_ use mmb too where their split
+    // makes that many workgroups (TS5_MMB_SMALL=0: the 64 x 64 kernel).
+    bool mmb_small_ = true;
     // mmb sums each step's 32 products in packed f16 (mmb16_*), where the
     // device has f16 arithmetic (TS5_MMB_F16=0: f32 throughout).
     bool mmb_f16_ = false;
