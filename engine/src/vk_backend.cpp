@@ -780,12 +780,14 @@ private:
             const Layer &L = m_.layers[l];
             rmsnorm(x_, L.attn_norm, h_, n);
             // q, k and v only read h_: no barrier between them (nor between
-            // gate and up below).
-            no_barrier_ = fuse_;
-            matmul(L.wq, h_, q_, n, false);
+            // gate and up below). k and v first: a prompt's q may be split
+            // (mmb), with a barrier before its sums are added up, and the
+            // small k and v run alongside it rather than after it.
             no_barrier_ = fuse_;
             matmul(L.wk, h_, k_, n, false);
+            no_barrier_ = fuse_;
             matmul(L.wv, h_, v_, n, false);
+            matmul(L.wq, h_, q_, n, false);
             const uint32_t cache_off = (uint32_t)((size_t)l * n_ctx_ * KVD);
             {
                 struct {
@@ -855,7 +857,7 @@ private:
     // Rows per workgroup of those kernels (TS5_MV_ROWS, 1 to 8), which share
     // their x loads, for matrices of at least mv_rows_min_ rows
     // (TS5_MV_ROWS_MIN); one for smaller ones.
-    uint32_t mv_rows_ = 8;
+    uint32_t mv_rows_ = 4;
     int mv_rows_min_ = 2048;
     // Attention with attn (TS5_ATTN=0: the old kernel); TS5_ATTN_SPLITS=N
     // sets how many slices generation splits the keys into.
