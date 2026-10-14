@@ -43,22 +43,33 @@ int32_t Engine::sample(const float *lg, int n, const SampleParams &p) {
     return idx_[d(rng_)];
 }
 
+static uint64_t gram_key(int32_t a, int32_t b) { return ((uint64_t)(uint32_t)a << 21) | (uint32_t)b; }
+
+// Index the grams ending at positions from.. of cached_, overwriting earlier
+// occurrences, so a lookup always finds the most recent one.
+void Engine::index_grams(size_t from) {
+    for (size_t j = std::max(from, (size_t)1); j < cached_.size(); j++) {
+        gram2_[gram_key(cached_[j - 1], cached_[j])] = (int32_t)j + 1;
+        if (j >= 2) gram3_[(gram_key(cached_[j - 2], cached_[j - 1]) << 21) | (uint32_t)cached_[j]] = (int32_t)j + 1;
+    }
+}
+
 // Propose up to k tokens by prompt lookup: the most recent earlier occurrence
 // of the text's final n-gram (n = 3, then 2) says what came next last time.
 // Free to be wrong: every draft is verified against the model's own logits.
-static void draft_lookup(const std::vector<int32_t> &h, int32_t tok, int k, std::vector<int32_t> &out) {
-    const size_t n = h.size() + 1;  // the history plus the token being extended
-    auto at = [&](size_t i) -> int32_t { return i < h.size() ? h[i] : tok; };
-    for (size_t g = 3; g >= 2; g--) {
-        if (n < g + 1) continue;
-        for (size_t j = n - g; j-- > 0;) {
-            size_t m = 0;
-            while (m < g && at(j + m) == at(n - g + m)) m++;
-            if (m < g) continue;
-            for (size_t i = j + g; i < n && (int)out.size() < k + 1; i++) out.push_back(at(i));
-            return;
-        }
+void Engine::draft_lookup(int32_t tok, int k, std::vector<int32_t> &out) {
+    const size_t sz = cached_.size();
+    int32_t p = -1;
+    if (sz >= 2) {
+        auto it = gram3_.find((gram_key(cached_[sz - 2], cached_[sz - 1]) << 21) | (uint32_t)tok);
+        if (it != gram3_.end()) p = it->second;
     }
+    if (p < 0 && sz >= 1) {
+        auto it = gram2_.find(gram_key(cached_[sz - 1], tok));
+        if (it != gram2_.end()) p = it->second;
+    }
+    if (p < 0) return;
+    for (size_t i = p; i <= sz && (int)out.size() < k + 1; i++) out.push_back(i < sz ? cached_[i] : tok);
 }
 
 bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
@@ -67,6 +78,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     const int nv = m_.hp.n_vocab;
     st = GenStats{};
     st.prompt_tokens = (int)prompt.size();
+    if (prompt.empty()) { err = "empty prompt"; return false; }
     if ((int)prompt.size() + 1 > b_->n_ctx()) { err = "prompt longer than the context"; return false; }
     // Reuse the cached prefix; always evaluate at least the last prompt token.
     size_t keep = 0;
@@ -91,6 +103,23 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         cached_.insert(cached_.end(), prompt.begin() + i, prompt.begin() + i + n);
     }
     st.prompt_evaluated = (int)(prompt.size() - keep);
+    // Each step forwards the next token plus up to `dmax` lookup-drafted
+    // tokens in one batch, then keeps the drafts the model itself would have
+    // produced: the output is exactly what one-token-at-a-time sampling gives
+    // (a draft is accepted only when the target sample equals it), but every
+    // accepted draft rides the same weight stream as the token before it.
+    int dmax = p.draft;
+    if (const char *e = getenv("TS5_DRAFT")) dmax = atoi(e);
+    if (dmax < 0) dmax = 7;    // batch of 8: one pass of the 8-token matmul kernels
+    if (dmax > 255) dmax = 255;  // the batch must fit one forward chunk: the vk
+                                 // in-place logits buffer holds 256 rows
+    gram3_.clear();
+    gram2_.clear();
+    if (dmax > 0) {
+        gram3_.reserve(cached_.size());
+        gram2_.reserve(cached_.size());
+        index_grams(0);
+    }
     st.prompt_ms = now_ms() - t0;
     t0 = now_ms();
     std::string pending;  // decoded but unsent bytes (one send per step)
@@ -114,14 +143,13 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         }
         return true;
     };
-    // Each step forwards the next token plus up to `dmax` lookup-drafted
-    // tokens in one batch, then keeps the drafts the model itself would have
-    // produced: the output is exactly what one-token-at-a-time sampling gives
-    // (a draft is accepted only when the target sample equals it), but every
-    // accepted draft rides the same weight stream as the token before it.
-    int dmax = p.draft;
-    if (const char *e = getenv("TS5_DRAFT")) dmax = atoi(e);
-    if (dmax < 0) dmax = 7;  // batch of 8: one pass of the 8-token matmul kernels
+    // Rolling per-column acceptance steers the draft length: echo-heavy spans
+    // draft the full dmax, prose stops paying for wasted columns, and a probe
+    // every 16 steps lets a dried-up stream pick drafting back up.
+    bool adapt = true;
+    if (const char *e = getenv("TS5_ADAPT")) adapt = atoi(e) != 0;
+    float acc = -1;  // accepted/proposed, EWMA; <0: nothing judged yet
+    int step = 0;
     std::vector<int32_t> batch;
     std::vector<float> lgb;  // one row of logits per batch position
     int32_t tok = sample(in_place ? b_->logits_view() : logits.data(), nv, p);
@@ -131,9 +159,15 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         if (st.gen_tokens >= p.max_tokens) { st.finish = "length"; break; }
         if ((int)cached_.size() + 1 >= b_->n_ctx()) { st.finish = "length"; break; }
         batch.assign(1, tok);
-        int room = std::min(dmax, p.max_tokens - st.gen_tokens);
+        int want = dmax;
+        if (adapt && acc >= 0) {
+            want = acc < 0.15f ? 0 : acc < 0.5f ? std::min(dmax, 3) : dmax;
+            if (want == 0 && step % 16 == 0) want = std::min(dmax, 3);
+        }
+        step++;
+        int room = std::min(want, p.max_tokens - st.gen_tokens);
         room = std::min(room, b_->n_ctx() - (int)cached_.size() - 2);
-        if (room > 0) draft_lookup(cached_, tok, room, batch);
+        if (room > 0) draft_lookup(tok, room, batch);
         const int nb = (int)batch.size();
         if (!in_place && (size_t)nb * nv > lgb.size()) lgb.resize((size_t)nb * nv);
         bool ok = in_place ? b_->forward_in_place(batch.data(), nb, (int)cached_.size(), nb > 1, err)
@@ -149,7 +183,12 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
             break;
         }
         st.draft_accepted += accepted;
+        if (nb > 1) {
+            float r = (float)accepted / (nb - 1);
+            acc = acc < 0 ? r : 0.8f * acc + 0.2f * r;
+        }
         cached_.insert(cached_.end(), batch.begin(), batch.begin() + accepted + 1);
+        if (dmax > 0) index_grams(cached_.size() - (accepted + 1));
         for (int i = 1; i <= accepted; i++) emit(batch[i]);
         if (st.gen_tokens >= p.max_tokens) { st.finish = "length"; break; }
         if (!flush()) { st.finish = "stop"; break; }

@@ -154,6 +154,17 @@ accept most drafts; free-form prose accepts few, and costs only the extra
 ALU of the wasted batch columns (the weight stream is shared either way).
 `timings` reports `draft_n`/`draft_n_accepted`.
 
+The lookup reads a gram index instead of scanning the context backward per
+step: a hash map from each 3- and 2-gram (packed 21 bits per token) to the
+position after its most recent occurrence, rebuilt per request from the cached
+prompt and extended as tokens are accepted, so a step with no match costs two
+probes rather than a walk over up to 32k tokens. The draft length adapts to a
+rolling acceptance estimate (full `TS5_DRAFT` above 0.5 accepted per proposed
+column, 3 below it, none under 0.15, with a 3-token probe every 16 steps so an
+echo span can turn drafting back on); `TS5_ADAPT=0` pins the length to
+`TS5_DRAFT` for an A/B. Adaptation changes which drafts are proposed, never
+how they are accepted, so the output-equivalence guarantee is untouched.
+
 The verify batch has its own kernels (`mvt_q4_k`, `mvt_q6_k`; `TS5_MVT=0`
 reverts to the generic ones): the mv16 layout with one row per workgroup,
 where each thread dequantizes its 32 weight values into registers once and
