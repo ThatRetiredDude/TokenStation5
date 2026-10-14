@@ -45,11 +45,12 @@ ts5's CPU reference) on all four.
 - [ ] [#14](https://github.com/ThatRetiredDude/TokenStation5/pull/14) Our own PS5 runtime, so the title can ship without the GPL (draft). The clean-room spec is written and the assessment is "same speed"; the code waits for a go. The default flips only after a clean launch, a passing GPU check and matching speeds on the console, then LICENSING.md changes.
 - [ ] Homebrew catalog listing (ps5-homebrew-catalog, ProsperoStore): waiting on a fork of the catalog repo.
 - [ ] [#20](https://github.com/ThatRetiredDude/TokenStation5/pull/20) Web search (approved 2026-10-14): waits on one console run with a Tavily key (resolving api.tavily.com and the TLS handshake from the PS5). OpenAI tool calling in ts5 and which models support it, then a `web_search` tool that calls Tavily over HTTPS from the console (mbedTLS), with the key in `tavily.key` in the title's folder (and a field in the Settings page). Notes: `ps5-ai/websearch/WEB_SEARCH_FEASIBILITY.md` in the project files.
-- [ ] Voice chat. The audio test passed on the console ([#19](https://github.com/ThatRetiredDude/TokenStation5/pull/19)): the pad's mic in, TV and pad speaker out. The title has to import libSceAudioOut and libSceAudioIn directly (loaded at run time, their symbols aren't found). Next, a chat box on the TV (keyboard or voice), speech to text (whisper.cpp), Kokoro reading ts5's replies aloud, and a Settings page in `ts5.env`: output on the TV or the controller, an optional remote provider and the Tavily key. Notes: `ps5-ai/voice/VOICE_FEASIBILITY.md` in the project files.
+- [ ] [#19](https://github.com/ThatRetiredDude/TokenStation5/pull/19) Console audio test: passed on the console; ready to merge once CI passes.
 
 ## Next
 
-- [ ] Generation at 70% of the GPU's 448 GB/s. Coder 7B at 54 tok/s streams about 250 GB/s (56%).
+- [ ] Generation at 70% of the GPU's 448 GB/s. Coder 7B at 64 tok/s streams about 300 GB/s (67%).
+- [ ] Voice: a TV chat box with a keyboard and hold-R1 speech to text (whisper.cpp, on the CPU), then Kokoro speaking the replies, then the Settings page (`ts5.env`: audio output, `TAVILY_API_KEY`, a remote provider). Notes: `ps5-ai/voice/VOICE_FEASIBILITY.md` in the project files.
 - [ ] Measure PS5LM Plus on the console, same models, for a head-to-head. Its own figure is 124 tok/s generation on Llama 3.2 3B (ts5: 94).
 - [ ] Speculative decoding with a small draft model in the spare memory, after [#17](https://github.com/ThatRetiredDude/TokenStation5/pull/17), and a fast kernel for its batch of 8 tokens.
 - [ ] An 8-bit KV cache within the 2% bar, so 8B models get long contexts.
@@ -76,6 +77,7 @@ ts5's CPU reference) on all four.
 - [x] Driver check: RADV isn't the bottleneck; ts5's barriers and its ALU-bound mat-vecs were (fixed in [#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15)).
 - [x] Clean-room spec of the PS5 runtime, for [#14](https://github.com/ThatRetiredDude/TokenStation5/pull/14).
 - [x] The 2026-10-14 "crash" diagnosed from the logs: rest mode, not a crash.
+- [x] Console audio from the title: the DualSense mic in, TV and controller speaker out ([#19](https://github.com/ThatRetiredDude/TokenStation5/pull/19)). libSceAudioOut and libSceAudioIn have to be imported directly; loaded at run time, their symbols aren't found.
 
 ## Risks
 
