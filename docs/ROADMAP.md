@@ -10,7 +10,7 @@ forks it where measurements show a gap. See [FEASIBILITY.md](FEASIBILITY.md).
 
 ## Critical
 
-- [ ] Keep the PS5 out of rest mode while TokenStation5 runs. Its idle timer counts only controller input, not API requests or jobs: on 2026-10-14 it went into rest mode at 18:36 UTC in the middle of unattended speed tests (the jailbreak, ftpsrv and the title survived and resumed). The title now calls `sceSystemServicePowerTick` every 10 s and darkens the TV itself after 10 idle minutes; to verify on the console with the rest timer at its shortest.
+- [ ] Keep the PS5 out of rest mode while TokenStation5 runs. Its idle timer counts only controller input, not API requests or jobs: on 2026-10-14 it went into rest mode at 18:36 UTC in the middle of unattended speed tests (the jailbreak, ftpsrv and the title survived and resumed). The title now calls `sceSystemServicePowerTick` once a minute and darkens the TV itself after 10 idle minutes; to verify on the console with the rest timer at its shortest.
 
 ## M0: bring-up (on the console)
 
