@@ -1,6 +1,6 @@
 # ts5 on the PS5
 
-This folder turns ts5 into a native PS5 title, **TokenStation5** (`PPSA99555`):
+This folder turns ts5 into a native PS5 title, **TokenStation5** (`PPSA05005`):
 the same engine as the Linux build, linked against Mihawk-99's RADV port so
 it runs on the console's GPU, with an OpenAI-compatible API on port 8081.
 
@@ -8,7 +8,7 @@ it runs on the console's GPU, with an OpenAI-compatible API on port 8081.
 
 - A PS5 on firmware 13.60 or lower, jailbroken, with ShadowMountPlus, ftpsrv
   (2121) and elfldr loaded (the same setup PS5LM Plus uses).
-- The title: either download `TokenStation5-PPSA99555` from the latest CI run
+- The title: either download `TokenStation5-PPSA05005` from the latest CI run
   (Actions, `engine` workflow), or build it on Linux (below).
 
 ## Build it
@@ -21,7 +21,7 @@ sudo apt install clang-18 lld-18 libclang-rt-18-dev llvm-18-dev libclang-18-dev 
     glslang-tools python3-mako python3-yaml bison flex
 pip install --user meson        # 1.4 or newer
 ps5/setup.sh                    # once: SDK, RADV (a Mesa cross build), title tools
-ps5/build.sh                    # build/ps5/PPSA99555/
+ps5/build.sh                    # build/ps5/PPSA05005/
 ```
 
 `ps5/setup.sh` fetches PS5_Vulkan at a pinned revision, and the SDK fork and
@@ -33,7 +33,7 @@ produce a title with an import that would be NULL on the console
 
 ```sh
 export PS5_HOST=192.168.1.50
-scripts/ts5-ps5.sh install                          # title -> /data/homebrew/PPSA99555
+scripts/ts5-ps5.sh install                          # title -> /data/homebrew/PPSA05005
 scripts/ts5-ps5.sh model ~/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf
 ```
 
