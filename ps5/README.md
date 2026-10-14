@@ -50,7 +50,7 @@ python3 scripts/bench.py                            # speed through the API
 
 ## On the TV
 
-Two pages; **L1** switches between them.
+Three pages; **L1** goes to the next: Models, Chat, Settings.
 
 **Models**
 
@@ -78,6 +78,21 @@ oldest exchanges are left out of the requests (they stay on screen).
 | up / down | scroll; at the bottom, the page follows the reply |
 | triangle | stop the reply |
 | square | new chat |
+| circle | back to Models |
+
+**Settings**: the title's settings, saved in `ts5.env` (one change at a
+time, keeping the rest of the file). The longest chat reply, the chat's
+frames a second while a reply comes in, the speech model and its CPU threads
+for R1 talk, whether a Tavily key is set for web search (it's set from the
+PC; square twice removes it), keeping the console awake, and how long until
+the dark screen. Changes count at once, or where they can't, at the next use
+(the page says which).
+
+| Button | |
+| --- | --- |
+| up / down | choose a setting |
+| left / right | change it (cross steps through its choices) |
+| square | back to its default |
 | circle | back to Models |
 
 A check or speed test of the serving model runs on its loaded weights while
@@ -123,7 +138,7 @@ On the console, everything lives in the title's own folder,
 | `ts5.args` | what to serve at start: `serve -m MODEL [-c N] [--port N]` |
 | `ts5.cmd` | a command to run now: `serve`, `check`, `bench` (`-m MODEL`), or `stop`. `check` and `bench` take `--env NAME=VALUE` (engine settings for that job only, on a load of its own) and `check` takes `--fresh 1` (run the CPU again) |
 | `ts5.once` | a command to run at the next start, before `ts5.args` |
-| `ts5.env` | engine settings read at start, `NAME=VALUE` (the `getenv` calls in `engine/src/vk_backend.cpp`), and the chat's: `TS5_CHAT_MAX_TOKENS` (longest reply, 2048) and `TS5_CHAT_FPS` (frames a second while a reply comes in, 10) |
+| `ts5.env` | settings, `NAME=VALUE`, read at start and written by the Settings page: engine settings (the `getenv` calls in `engine/src/vk_backend.cpp`), and the Settings page's: `TS5_CHAT_MAX_TOKENS` (longest reply, 2048), `TS5_CHAT_FPS` (frames a second while a reply comes in, 10), `TS5_WHISPER_MODEL` (the speech model; the first `ggml-*.bin` without it), `TS5_WHISPER_THREADS` (6), `TS5_KEEP_AWAKE` (1; 0 lets the console rest), `TS5_DIM_AFTER` (seconds to the dark screen, 600; 0: never) and `TAVILY_API_KEY`. `scripts/ts5-ps5.sh env` replaces the engine settings and keeps these |
 | `press`, `screenshot` | controller buttons; the next frame to `screen.bmp` |
 | `chat` | a message for the chat page: the file's text |
 | `keytest` | run the keyboard test (someone types on the keyboard for a minute) |

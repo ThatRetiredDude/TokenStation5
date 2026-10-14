@@ -46,10 +46,11 @@ Voice::~Voice() {
 
 void Voice::rescan() {
     const std::vector<std::string> found = whisper_models(dir_);
-    const std::string m = found.empty() ? "" : found.front();
+    const std::string m = chosen_whisper_model(dir_);
     std::lock_guard<std::mutex> lk(mu_);
-    if (m != state_.model) {
+    if (m != state_.model || found != state_.models) {
         state_.model = m;
+        state_.models = found;
         version_++;
     }
 }

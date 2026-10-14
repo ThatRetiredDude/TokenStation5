@@ -72,7 +72,7 @@ fi
 c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" \
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" -I "$w/include" -I "$w/ggml/include" \
     "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
-    "$root"/ps5/{title,library,runner,audio_probe,keyboard_probe,chat,stt,voice,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page}.cpp \
+    "$root"/ps5/{title,library,runner,audio_probe,keyboard_probe,chat,stt,voice,settings,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -x none "$wobj/libts5whisper.a" -ldl -o "$work/eboot.bin"
 
 title_pid=
@@ -245,7 +245,7 @@ second=$(grep -oE "^ts5: chatcmpl-[0-9]+ prompt [0-9]+" "$home/ts5.log" | tail -
 [ "$second" -gt "$first" ] || fail "the second request didn't carry the first exchange ($first, then $second tokens)"
 shot chat2
 
-echo "== chat: triangle stops a reply; square starts a new chat; L1 goes back to Models"
+echo "== chat: triangle stops a reply; square starts a new chat"
 printf 'Count from one to two hundred, one number per line.\n' > "$home/chat"
 wait_log "^ts5-title: chat: message \(51 bytes\)$"
 sleep 0.5
@@ -283,7 +283,19 @@ if [ -n "${TS5_TEST_WHISPER_MODEL:-}" ]; then
     rm "$home/models/ggml-test.bin" "$home/mic.wav"
     press square
 fi
+
+echo "== settings: L1 again goes to Settings; right changes a setting in ts5.env, square puts back its default"
 press l1
+shot settings
+press down
+press right
+wait_log "^ts5-title: settings: TS5_CHAT_FPS=15$"
+grep -qx "TS5_CHAT_FPS=15" "$home/ts5.env" || fail "ts5.env: $(cat "$home/ts5.env" 2> /dev/null)"
+shot settings-changed
+press square
+wait_log "^ts5-title: settings: TS5_CHAT_FPS cleared$"
+! grep -q "TS5_CHAT_FPS" "$home/ts5.env" || fail "square left it in ts5.env: $(cat "$home/ts5.env")"
+press circle
 shot models-again
 wait_health
 

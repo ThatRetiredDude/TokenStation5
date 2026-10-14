@@ -343,7 +343,7 @@ void ChatPage::draw_empty(Canvas &c, int x, int y, int w, int h, const std::stri
     const int mid = y + h / 2;
     if (serving_name.empty()) {
         centered(h2_, mid - 30, "No model is serving", kText);
-        const std::string before = "Press L1 for Models, choose one and press", after = "to serve it.";
+        const std::string before = "Press circle for Models, choose one and press", after = "to serve it.";
         const int tw = Canvas::measure(body_, before) + 44 + Canvas::measure(body_, after);
         text_glyph(c, body_, x + (w - tw) / 2, mid + 24, before, kGlyphCross, after, kText2);
         return;

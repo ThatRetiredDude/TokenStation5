@@ -1,11 +1,12 @@
-// The TV screen, two pages under the header; L1 switches between them.
+// The TV screen, three pages under the header; L1 goes to the next.
 // Models: the models on the console and a few suggested ones, the selected
 // model's details and results, what the title is doing, and the API's
 // activity; up/down choose a model, cross serves it, square runs the GPU
 // check, triangle the speed test, circle stops serving. Chat (chat_page.h):
 // a conversation with the serving model; hold R1 to talk, up/down scroll,
 // triangle stops the reply, square starts a new chat, circle goes back to
-// Models. OPTIONS closes the title.
+// Models. Settings (settings_page.h): the title's settings, kept in ts5.env;
+// circle goes back to Models. OPTIONS closes the title.
 #pragma once
 #include <cstdint>
 #include <map>
@@ -15,6 +16,7 @@
 #include "canvas.h"
 #include "chat.h"
 #include "chat_page.h"
+#include "settings_page.h"
 #include "voice.h"
 #include "library.h"
 #include "runner.h"
@@ -34,18 +36,20 @@ struct View {
     ts5::Server::Activity api;
     app::ChatState chat;
     app::VoiceState voice;
+    SettingsInfo settings;  // its speech models and now come from the fields above
     double now = 0;    // seconds, steady clock (app::now_s)
     int64_t wall = 0;  // time(nullptr)
 };
 
 struct Action {
-    enum Kind { None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear } kind = None;
+    enum Kind { None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear, Set } kind = None;
     std::string path;
+    std::string name, value;  // Set: NAME=VALUE in ts5.env ("": the default)
 };
 
 class Dashboard {
 public:
-    enum Page { Models, Chat };
+    enum Page { Models, Chat, Settings };
     Dashboard(const Fonts &fonts, const uint8_t *logo, size_t logo_size);
     Page page() const { return page_; }
     void show(Page p);
@@ -66,6 +70,8 @@ private:
     void draw_activity(Canvas &c, const View &v);
     void draw_footer(Canvas &c);
     void draw_chat_footer(Canvas &c, const View &v);
+    void draw_settings_footer(Canvas &c);
+    SettingsInfo settings_info(const View &v) const;
     void draw_tabs(Canvas &c);
     void draw_confirm(Canvas &c);
 
@@ -73,9 +79,10 @@ private:
     int logo_w_ = 0, logo_h_ = 0;
     const uint32_t *logo_ = nullptr;
     std::vector<uint32_t> logo_px_;
-    std::vector<uint32_t> background_, chat_background_;
+    std::vector<uint32_t> background_, chat_background_, settings_background_;
     Page page_ = Models;
     ChatPage chat_;
+    SettingsPage settings_;
     std::string selected_key_;  // the selected item's path or suggestion key
     int scroll_ = 0;
     bool confirm_close_ = false;

@@ -77,6 +77,7 @@
 #include "pad.h"
 #include "runner.h"
 #include "server.h"
+#include "settings.h"
 #include "stt.h"
 #include "vk_context.h"
 #include "voice.h"
@@ -184,15 +185,23 @@ void watch_control_files() {
 // rest mode after a while with no controller input (20 minutes at the
 // least), in the middle of a job or a reply: API requests aren't input.
 // While the title runs it tells the system it is in use once a minute, as a
-// video player does (TS5_KEEP_AWAKE=0 in ts5.env: it doesn't). That also
-// keeps the system from dimming the TV, so the title dims its own picture
-// (main's loop).
+// video player does (TS5_KEEP_AWAKE=0 in ts5.env, or Off on the Settings
+// page: it doesn't, from the next minute). That also keeps the system from
+// dimming the TV, so the title dims its own picture (main's loop).
 void keep_awake() {
     int last = 1;  // logs the first answer and any change
+    bool was_on = true;
     for (;;) {
-        const int r = sceSystemServicePowerTick();
-        if (r != last) printf("ts5-title: keeping the console awake%s (%#x)\n", r == 0 ? "" : ": refused", r);
-        last = r;
+        const bool on = app::setting("TS5_KEEP_AWAKE", "1") != "0";
+        if (on) {
+            const int r = sceSystemServicePowerTick();
+            if (r != last || !was_on)
+                printf("ts5-title: keeping the console awake%s (%#x)\n", r == 0 ? "" : ": refused", r);
+            last = r;
+        } else if (was_on) {
+            printf("ts5-title: TS5_KEEP_AWAKE=0: the console may go into rest mode\n");
+        }
+        was_on = on;
         sceKernelUsleep(60000000);
     }
 }
@@ -418,9 +427,7 @@ int main(int, char **) {
 
     for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kKeyTest, kWhisperTest}) unlink(f);
     std::thread(watch_control_files).detach();
-    const char *awake = getenv("TS5_KEEP_AWAKE");
-    if (!awake || atoi(awake) != 0) std::thread(keep_awake).detach();
-    else printf("ts5-title: TS5_KEEP_AWAKE=0: the console may go into rest mode\n");
+    std::thread(keep_awake).detach();
     sceSystemServiceHideSplashScreen();
 
     std::string err;
@@ -491,14 +498,15 @@ int main(int, char **) {
     uint64_t drawn_version = ~0ull, drawn_chat = ~0ull, chat_version = ~0ull;
     app::ChatState chat_state;
     app::VoiceState voice_state;
-    const double chat_period = 1.0 / chat_fps();
     bool drawn_dark = false;
     double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan;
-    const double dim = dim_after();
+    ui::SettingsInfo settings_note;  // the Settings page's last change
     bool lib_changed = true;
     std::atomic<bool> audio_testing{false}, key_testing{false}, whisper_testing{false};
     for (;;) {
         const double t = app::now_s();
+        // Read each time: the Settings page changes them.
+        const double dim = dim_after(), chat_period = 1.0 / chat_fps();
         uint32_t buttons = pad.poll();
         // Presses from the PC, one per frame.
         std::vector<std::string> words;
@@ -622,6 +630,7 @@ int main(int, char **) {
         const bool chat_active = v.chat.busy || v.voice.phase != app::VoiceState::Idle;
         // Nor does the screen go dark while a reply comes in on the chat page.
         if (chat_active && dash.page() == ui::Dashboard::Chat) last_input = t;
+        v.settings = settings_note;
         v.now = t;
         v.wall = (int64_t)time(nullptr);
 
@@ -658,6 +667,16 @@ int main(int, char **) {
             }
             case ui::Action::ChatStop: chat.stop(); break;
             case ui::Action::ChatClear: chat.clear(); break;
+            case ui::Action::Set: {
+                std::string e;
+                const bool ok = app::set_setting(kEnv, a.name, a.value, e);
+                settings_note.note = ok ? "Saved" : "Not saved: " + e;
+                settings_note.note_failed = !ok;
+                settings_note.note_at = t;
+                v.settings = settings_note;
+                if (ok && a.name == "TS5_WHISPER_MODEL") voice.rescan();
+                break;
+            }
             case ui::Action::Close:
                 notify("TokenStation5: closing");
                 leave("exit");

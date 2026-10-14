@@ -234,7 +234,7 @@ Chat::Result Chat::post(const std::string &body, std::string &err) {
         if (status == 503)
             err = why.rfind("loading", 0) == 0 ? "The model is still loading. Try again in a moment."
                   : why.empty() || why == "no model is loaded"
-                      ? "No model is serving. Press L1 for Models and choose one."
+                      ? "No model is serving. Press circle for Models and choose one."
                       : "The model is busy: " + why + ".";
         else
             err = why.empty() ? "the API answered " + std::to_string(status) : why;
