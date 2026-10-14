@@ -41,14 +41,33 @@ for src in "$root"/engine/shaders/*.comp; do
     fi
 done
 
+# Mbed TLS and the CA bundle for the web search tool's HTTPS (engine/deps.sh).
+deps=${TS5_DEPS:-$root/.deps}
+bash "$root/engine/deps.sh" "$deps"
+mbedtls="$deps/mbedtls-3.6.7"
+ca_pem="$deps/cacert-2026.07.22.pem"
+mbedflags=(-I "$mbedtls/include" -I "$root/engine/src" "-DMBEDTLS_USER_CONFIG_FILE=\"ts5_mbedtls_config.h\"")
+
 # The engine and the title, with exceptions and RTTI (the PS5 target turns
 # them off by default; the engine's C++ library code uses both).
 cxxflags=(-std=c++17 -O2 -Wall -ffunction-sections -fdata-sections -fexceptions -fcxx-exceptions -frtti
-    -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_VERSION=\"$version\"" "-DTS5_TITLE_ID=\"$title_id\""
+    -DTS5_PS5=1 -DTS5_VULKAN=1 -DTS5_HTTPS=1 "-DTS5_VERSION=\"$version\"" "-DTS5_TITLE_ID=\"$title_id\""
+    "-DTS5_CA_PEM=\"$ca_pem\"" "${mbedflags[@]}"
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$out/shaders" -I "$radv/include")
 objects=()
 pids=()
+mkdir -p "$out/obj/mbedtls"
+mbed_objects=()
+for src in "$mbedtls"/library/*.c; do
+    o="$out/obj/mbedtls/$(basename "$src" .c).o"
+    mbed_objects+=("$o")
+    if [ ! -f "$o" ] || [ "$src" -nt "$o" ] || [ "$root/engine/src/ts5_mbedtls_config.h" -nt "$o" ]; then
+        cc -std=c11 -O2 -ffunction-sections -fdata-sections "${mbedflags[@]}" -I "$mbedtls/library" -c "$src" -o "$o" &
+        pids+=($!)
+    fi
+done
 for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
+        "$root"/engine/src/{tools,net,websearch,ca_bundle}.cpp \
         "$root"/ps5/{title,library,runner}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard}.cpp; do
     o="$out/obj/$(basename "$src" .cpp).o"
     objects+=("$o")
@@ -70,6 +89,8 @@ for p in "${pids[@]}"; do wait "$p"; done
 # modules define some of them too, and the title converter refuses exports.
 rm -f "$out/obj/libts5compat.a"
 "$sdk/bin/llvm-ar" rcs "$out/obj/libts5compat.a" "$out/obj/compat.o"
+rm -f "$out/obj/libts5mbedtls.a"
+"$sdk/bin/llvm-ar" rcs "$out/obj/libts5mbedtls.a" "${mbed_objects[@]}"
 
 # The AGC modules RADV's winsys submits through, named for the import tables.
 stub() {
@@ -94,7 +115,7 @@ weak=(--no-dynamic-linker)
 "$sdk/bin/prospero-lld" "${radv_linker_script[@]}" --eh-frame-hdr "${weak[@]}" "${radv_link_flags[@]}" \
     --version-script "$vk/tooling/native/app-symbols.map" --exclude-libs=ALL \
     -e _start -o "$out/llvm-pie.elf" \
-    "$out/obj/app_crt.o" "${objects[@]}" "$out/obj/libts5compat.a" \
+    "$out/obj/app_crt.o" "${objects[@]}" "$out/obj/libts5compat.a" "$out/obj/libts5mbedtls.a" \
     "$out/stubs/libSceAgc.so" "$out/stubs/libSceAgcDriver.so" \
     "${radv_link_inputs[@]}" \
     --as-needed "$sdk"/target/lib/*.so
