@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Builds ts5 as a PS5 title, ready for ShadowMountPlus:
 #
-#   build/ps5/PPSA05005/eboot.bin               ts5 with RADV linked in
-#   build/ps5/PPSA05005/sce_sys/param.json      title metadata, icon0.png
-#   build/ps5/PPSA05005/sce_module/libc.prx     the runtime module titles carry
+#   build/ps5/PPSA99555/eboot.bin               ts5 with RADV linked in
+#   build/ps5/PPSA99555/sce_sys/param.json      title metadata, icon0.png
+#   build/ps5/PPSA99555/sce_module/libc.prx     the runtime module titles carry
 #
 # Needs ps5/setup.sh run once. The engine sources are the same ones the Linux
 # build compiles; ps5/title.cpp is the title's main.
