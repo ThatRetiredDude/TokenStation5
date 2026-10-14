@@ -106,7 +106,11 @@ std::vector<std::string> whisper_models(const std::string &dir) {
 int Stt::default_threads() {
     const char *e = getenv("TS5_WHISPER_THREADS");
     const int n = e ? atoi(e) : 0;
-    return n > 0 ? std::min(n, 64) : 6;
+    if (n > 0) return std::min(n, 64);
+    // More threads than CPUs makes ggml's threads wait on each other: a
+    // 4-CPU PC took 16 s for 11 s of speech with 6.
+    const int cpus = (int)std::thread::hardware_concurrency();
+    return cpus > 0 ? std::min(6, cpus) : 6;
 }
 
 bool Stt::load(const std::string &path, int n_threads, std::string &err) {

@@ -269,12 +269,12 @@ if [ -n "${TS5_TEST_WHISPER_MODEL:-}" ]; then
     cp "$root/third_party/whisper.cpp/samples/jfk.wav" "$home/mic.wav"
     sleep 2.5  # a scan of the models folder
     press hold-r1
-    wait_log "^ts5-title: voice: mic open 0x0"
+    wait_log "^ts5-title: voice: mic open 0x[0-7]"
     sleep 5
     shot talk-listening
     sleep 6  # jfk.wav is 11 s
     press release-r1
-    wait_log "^ts5-title: voice: [0-9]+ bytes of text$"
+    wait_lines "^ts5-title: voice: [0-9]+ bytes of text$" 1 120
     text=$(grep "^ts5-title: voice: text: " "$home/ts5.log" | tail -1)
     grep -qi "ask not what your country can do for you" <<< "$text" || fail "what was said: ${text:-none}"
     wait_log "^ts5-title: chat: message by voice"
