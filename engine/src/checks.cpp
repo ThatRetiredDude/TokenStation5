@@ -33,8 +33,13 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     const std::vector<int32_t> toks = test_tokens(n, nv);
     std::vector<float> got((size_t)n * nv), ref(got.size());
     if (progress) progress("running on the GPU");
+    // The prompt's way for most positions, then generation's for the last few:
+    // one token per call, through the KV cache and the one-token kernels.
+    const int single = std::min(4, n / 2), batch = n - single;
     double t = now_ms();
-    if (!gpu.forward(toks.data(), n, 0, got.data(), true, err)) return false;
+    if (!gpu.forward(toks.data(), batch, 0, got.data(), true, err)) return false;
+    for (int i = batch; i < n; i++)
+        if (!gpu.forward(&toks[i], 1, i, got.data() + (size_t)i * nv, false, err)) return false;
     r.gpu_ms = now_ms() - t;
     if (progress) progress("loading the CPU reference");
     bool ok;

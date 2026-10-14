@@ -128,7 +128,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     if (a.cmd == "logits" && a.n_ctx < (int)a.tokens.size()) a.n_ctx = (int)a.tokens.size();
     if (a.cmd == "bench" && a.n_ctx < a.pp + a.tg + 1) a.n_ctx = a.pp + a.tg + 1;
     if (a.cmd == "check") {
-        if (!a.n_set) a.n_predict = 8;
+        if (!a.n_set) a.n_predict = 16;
         a.n_ctx = std::max(1, a.n_predict);
     }
 
