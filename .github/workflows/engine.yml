@@ -40,6 +40,8 @@ jobs:
         run: ps5/setup.sh
       - name: Build the title
         run: ps5/build.sh
+        env:
+          TS5_SOURCE_COMMITS: ${{ github.event_name == 'pull_request' && format('{0} merged into {1}', github.event.pull_request.head.sha, github.event.pull_request.base.sha) || '' }}
       - name: Keep only what the build links in the cache
         run: rm -rf .deps/ps5/PS5_Mesa .deps/ps5/PS5_Vulkan/.deps/work
       - uses: actions/upload-artifact@v4
