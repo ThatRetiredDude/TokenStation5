@@ -4,8 +4,9 @@
 // them back, logging every return code, so the console answers whether voice
 // chat can work before any of it is built. The recording is kept as a WAV.
 //
-// The audio libraries are loaded while it runs, never imported by the title:
-// a console that refuses them fails the test, not the title's launch.
+// libSceAudioOut is imported, as libScePad is. libSceAudioIn is loaded while
+// the test runs, so a console that refuses it fails the test, not the title's
+// launch.
 #pragma once
 #include <functional>
 #include <string>

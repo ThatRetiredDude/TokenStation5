@@ -14,18 +14,21 @@ int sceKernelLoadStartModule(const char *path, size_t args, const void *argp, ui
 int sceKernelDlsym(int handle, const char *symbol, void **address);
 const char *sceKernelGetFsSandboxRandomWord(void);
 int sceKernelUsleep(unsigned int microseconds);
+// libSceAudioOut, imported as the title imports libScePad: the second console
+// run loaded the library by path, but sceKernelDlsym found none of its calls
+// (0x80020003) by name.
+int sceAudioOutInit(void);
+int sceAudioOutOpen(int user, int type, int index, uint32_t len, uint32_t freq, uint32_t param);
+int sceAudioOutOutput(int handle, const void *samples);
+int sceAudioOutSetVolume(int handle, int flags, int *volumes);
+int sceAudioOutClose(int handle);
 }
 
 namespace app {
 
 namespace {
 
-// The libraries' calls, as the PS4 SDK documents them (the PS5 keeps them).
-using AudioOutInit = int (*)();
-using AudioOutOpen = int (*)(int user, int type, int index, uint32_t len, uint32_t freq, uint32_t param);
-using AudioOutOutput = int (*)(int handle, const void *samples);
-using AudioOutSetVolume = int (*)(int handle, int flags, int *volumes);
-using AudioOutClose = int (*)(int handle);
+// libSceAudioIn's calls, as the PS4 SDK documents them (the PS5 keeps them).
 using AudioInOpen = int (*)(int user, uint32_t type, uint32_t index, uint32_t len, uint32_t freq, uint32_t param);
 using AudioInInput = int (*)(int handle, void *samples);
 using AudioInGetSilentState = int (*)(int handle);
@@ -43,8 +46,8 @@ constexpr uint32_t kInRate = 16000, kInGrain = 256;
 constexpr int kRecordSeconds = 5;
 constexpr double kPi = 3.14159265358979323846;
 
-// libSceAudioOut and libSceAudioIn ids for the system's module loader.
-constexpr uint32_t kSysmoduleAudioOut = 0x80000001, kSysmoduleAudioIn = 0x80000002;
+// libSceAudioIn's id for the system's module loader.
+constexpr uint32_t kSysmoduleAudioIn = 0x80000002;
 
 const char *port_name(int port) {
     return port == kMain ? "TV" : port == kPadSpeaker ? "controller speaker" : "headset jack";
@@ -73,66 +76,61 @@ int open_system_module(const char *name) {
     return h;
 }
 
+// A call in a loaded library. By name the second console run found none, so
+// it also tries the name's NID (how the libraries list their calls, computed
+// with the payload SDK's nid_encode) and the NID as their symbol tables spell it.
+template <typename F>
+F symbol(int module, const char *name, const char *nid) {
+    const std::string forms[] = {name, nid, std::string(nid) + "#A#A"};
+    for (const std::string &form : forms) {
+        void *f = nullptr;
+        const int r = module >= 0 ? sceKernelDlsym(module, form.c_str(), &f) : -1;
+        printf("ts5-title: audio test: %s as %s: %s (0x%08x)\n", name, form.c_str(), f ? "found" : "missing",
+               (unsigned)r);
+        if (f) return (F)f;
+    }
+    return nullptr;
+}
+
 // A system library, loaded through the system's module loader first when it
 // can (some modules want that), then by path. Its handle, or < 0.
 int load_module(const char *name, uint32_t sysmodule_id) {
     static SysmoduleLoad sysmodule_load = [] {
         const int h = open_system_module("libSceSysmodule.sprx");
-        void *f = nullptr;
-        if (h >= 0) sceKernelDlsym(h, "sceSysmoduleLoadModuleInternal", &f);
-        printf("ts5-title: audio test: LoadModuleInternal %s\n", f ? "found" : "missing");
-        return (SysmoduleLoad)f;
+        return symbol<SysmoduleLoad>(h, "sceSysmoduleLoadModuleInternal", "39iV5E1HoCk");
     }();
     if (sysmodule_load)
         printf("ts5-title: audio test: LoadModuleInternal(%s) 0x%08x\n", name, (unsigned)sysmodule_load(sysmodule_id));
     return open_system_module(name);
 }
 
-template <typename F>
-F symbol(int module, const char *name) {
-    void *f = nullptr;
-    const int r = module >= 0 ? sceKernelDlsym(module, name, &f) : -1;
-    if (!f) printf("ts5-title: audio test: %s missing (0x%08x)\n", name, (unsigned)r);
-    return (F)f;
-}
-
-struct Out {
-    AudioOutOpen open = nullptr;
-    AudioOutOutput output = nullptr;
-    AudioOutSetVolume set_volume = nullptr;
-    AudioOutClose close = nullptr;
-    bool ok() const { return open && output && close; }
-};
-
 // Plays mono 48 kHz samples on a port; false if it doesn't open.
-bool play(const Out &out, int port, int user, const std::vector<int16_t> &samples) {
-    int h = out.open(port == kMain ? kSystemUser : user, port, 0, kOutGrain, kOutRate, kMono16);
+bool play(int port, int user, const std::vector<int16_t> &samples) {
+    int h = sceAudioOutOpen(port == kMain ? kSystemUser : user, port, 0, kOutGrain, kOutRate, kMono16);
     if (h < 0 && port == kMain) {
         printf("ts5-title: audio test: open %s as the system 0x%08x, trying as the user\n", port_name(port),
                (unsigned)h);
-        h = out.open(user, port, 0, kOutGrain, kOutRate, kMono16);
+        h = sceAudioOutOpen(user, port, 0, kOutGrain, kOutRate, kMono16);
     }
     printf("ts5-title: audio test: open %s 0x%08x\n", port_name(port), (unsigned)h);
     if (h < 0) return false;
-    if (out.set_volume) {
-        int volumes[8];
-        for (int &v : volumes) v = kVolume0dB;
-        printf("ts5-title: audio test: volume %s 0x%08x\n", port_name(port), (unsigned)out.set_volume(h, 0xFF, volumes));
-    }
+    int volumes[8];
+    for (int &v : volumes) v = kVolume0dB;
+    printf("ts5-title: audio test: volume %s 0x%08x\n", port_name(port), (unsigned)sceAudioOutSetVolume(h, 0xFF, volumes));
     std::vector<int16_t> grain(kOutGrain);
     int first = 0, failures = 0;
     for (size_t i = 0; i < samples.size(); i += kOutGrain) {
         const size_t n = std::min<size_t>(kOutGrain, samples.size() - i);
         std::fill(grain.begin(), grain.end(), 0);
         memcpy(grain.data(), samples.data() + i, n * sizeof(int16_t));
-        const int r = out.output(h, grain.data());
+        const int r = sceAudioOutOutput(h, grain.data());
         if (i == 0) first = r;
         if (r < 0) failures++;
     }
-    out.output(h, nullptr);  // waits for the last grain
+    sceAudioOutOutput(h, nullptr);  // waits for the last grain
     printf("ts5-title: audio test: played %.1f s on %s, first output 0x%08x, %d failed\n",
            samples.size() / (double)kOutRate, port_name(port), (unsigned)first, failures);
-    out.close(h);
+    sceAudioOutClose(h);
     return true;
 }
 
@@ -172,10 +170,10 @@ bool save_wav(const std::string &path, const std::vector<int16_t> &s, uint32_t r
 // Five seconds from the controller's mic at 16 kHz; empty if it won't open.
 std::vector<int16_t> record(int user, const std::function<void(const std::string &)> &notify) {
     const int module = load_module("libSceAudioIn.sprx", kSysmoduleAudioIn);
-    const auto open = symbol<AudioInOpen>(module, "sceAudioInOpen");
-    const auto input = symbol<AudioInInput>(module, "sceAudioInInput");
-    const auto close = symbol<AudioInClose>(module, "sceAudioInClose");
-    const auto silent = symbol<AudioInGetSilentState>(module, "sceAudioInGetSilentState");
+    const auto open = symbol<AudioInOpen>(module, "sceAudioInOpen", "5NE8Sjc7VC8");
+    const auto input = symbol<AudioInInput>(module, "sceAudioInInput", "LozEOU8+anM");
+    const auto close = symbol<AudioInClose>(module, "sceAudioInClose", "Jh6WbHhnI68");
+    const auto silent = symbol<AudioInGetSilentState>(module, "sceAudioInGetSilentState", "BohEAQ7DlUE");
     if (!open || !input || !close) return {};
     int h = -1;
     for (uint32_t type : kInTypes) {
@@ -215,23 +213,15 @@ std::vector<int16_t> record(int user, const std::function<void(const std::string
 
 void audio_probe(int user, const std::string &wav_path, const std::function<void(const std::string &)> &notify) {
     printf("ts5-title: audio test: start, user 0x%08x\n", (unsigned)user);
-    const int module = load_module("libSceAudioOut.sprx", kSysmoduleAudioOut);
-    Out out;
-    out.open = symbol<AudioOutOpen>(module, "sceAudioOutOpen");
-    out.output = symbol<AudioOutOutput>(module, "sceAudioOutOutput");
-    out.close = symbol<AudioOutClose>(module, "sceAudioOutClose");
-    out.set_volume = symbol<AudioOutSetVolume>(module, "sceAudioOutSetVolume");
-    if (const auto init = symbol<AudioOutInit>(module, "sceAudioOutInit"))
-        printf("ts5-title: audio test: sceAudioOutInit 0x%08x\n", (unsigned)init());
+    printf("ts5-title: audio test: sceAudioOutInit 0x%08x\n", (unsigned)sceAudioOutInit());
 
+    // The TV first, two seconds: the one sound everything else builds on.
     std::vector<int> ports;
-    if (out.ok()) {
-        for (int port : {kMain, kPadSpeaker, kPersonal}) {
-            notify(std::string("TokenStation5 audio test: a tone on the ") + port_name(port));
-            if (play(out, port, user, tone(port == kMain ? 440 : port == kPadSpeaker ? 660 : 880, 1.0)))
-                ports.push_back(port);
-            sceKernelUsleep(500000);
-        }
+    for (int port : {kMain, kPadSpeaker, kPersonal}) {
+        notify(std::string("TokenStation5 audio test: a tone on the ") + port_name(port));
+        if (play(port, user, tone(port == kMain ? 440 : port == kPadSpeaker ? 660 : 880, port == kMain ? 2.0 : 1.0)))
+            ports.push_back(port);
+        sceKernelUsleep(500000);
     }
 
     const std::vector<int16_t> voice = record(user, notify);
@@ -244,7 +234,7 @@ void audio_probe(int user, const std::string &wav_path, const std::function<void
         for (int port : ports) {
             if (port == kPersonal) continue;
             notify(std::string("TokenStation5 audio test: playing it back on the ") + port_name(port));
-            play(out, port, user, back);
+            play(port, user, back);
             sceKernelUsleep(500000);
         }
     }
