@@ -1,15 +1,18 @@
 #include "server.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <mutex>
 #include <thread>
 
@@ -230,27 +233,70 @@ void handle(int fd, Engine &e, const std::string &model) {
 
 }  // namespace
 
-int serve(Engine &e, const std::string &model_name, const std::string &host, int port) {
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    int one = 1;
-    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+namespace {
+
+// A listening socket on host:port, or -1.
+int listen_on(const std::string &host, int port) {
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_port = htons((uint16_t)port);
-    if (inet_pton(AF_INET, host.c_str(), &a.sin_addr) != 1) {
+    if (inet_pton(AF_INET, host.c_str(), &a.sin_addr) != 1) return -1;
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return -1;
+    // Not inherited by a process started in this one's place (the PS5 title
+    // restarts itself that way), which would hold the port.
+    fcntl(s, F_SETFD, FD_CLOEXEC);
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (bind(s, (sockaddr *)&a, sizeof a) != 0 || listen(s, 16) != 0) {
+        close(s);
+        return -1;
+    }
+    return s;
+}
+
+}  // namespace
+
+int serve(Engine &e, const std::string &model_name, const std::string &host, int port,
+          const std::function<void(int)> &on_listening) {
+    in_addr probe{};
+    if (inet_pton(AF_INET, host.c_str(), &probe) != 1) {
         fprintf(stderr, "ts5: bad host %s (use a numeric address)\n", host.c_str());
         return 1;
     }
-    if (bind(s, (sockaddr *)&a, sizeof a) != 0 || listen(s, 16) != 0) {
+    int s = listen_on(host, port);
+    if (s < 0) {
         perror("ts5: bind/listen");
         return 1;
     }
     fprintf(stderr, "ts5: serving %s on http://%s:%d/v1\n", model_name.c_str(), host.c_str(), port);
+    if (on_listening) on_listening(port);
+    const int one = 1;
     while (true) {
         int c = accept(s, nullptr, nullptr);
-        if (c < 0) continue;
+        if (c < 0) {
+            if (errno == EINTR || errno == ECONNABORTED) continue;
+            // The console's network can drop (link down, a new DHCP lease) and
+            // take the listening socket with it: listen again, once a second,
+            // until it works, so a loaded model never ends up unreachable.
+            fprintf(stderr, "ts5: accept failed (errno %d); listening again\n", errno);
+            close(s);
+            while ((s = listen_on(host, port)) < 0) std::this_thread::sleep_for(std::chrono::seconds(1));
+            fprintf(stderr, "ts5: listening again on port %d\n", port);
+            continue;
+        }
+        fcntl(c, F_SETFD, FD_CLOEXEC);
         setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-        std::thread([c, &e, model_name] { handle(c, e, model_name); }).detach();
+        std::thread([c, &e, model_name] {
+            // A request that fails (out of memory, say) ends its connection,
+            // not the server.
+            try {
+                handle(c, e, model_name);
+            } catch (const std::exception &ex) {
+                fprintf(stderr, "ts5: request failed: %s\n", ex.what());
+                close(c);
+            }
+        }).detach();
     }
 }
 

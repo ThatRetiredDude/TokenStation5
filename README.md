@@ -48,13 +48,12 @@ The full plan is in [engine/DESIGN.md](engine/DESIGN.md).
 | Models | ✅ Qwen 2.5, Qwen 2.5 Coder, Qwen 3, Llama, Mistral, Mistral Nemo |
 | Quants | ✅ F32, F16, Q8_0, Q4_0, Q4_K_M, Q5_K_M |
 | OpenAI API | ✅ `/v1/chat/completions` (streaming), `/v1/completions`, `/v1/models` |
-| PS5 build | 🔨 Next up |
+| PS5 title | 🧪 Builds and links against the console's RADV driver ([ps5/](ps5/)); first run on hardware is next |
 | PS5 kernel tuning | 🔨 After that: beat the llama.cpp port's prompt speed |
 | Gemma 3, Qwen 3.5, Gemma 4 | 📋 Planned |
 
-Until the PS5 build lands, the console side runs
-[PS5LM Plus](https://github.com/abhi245y/PS5LM), a llama.cpp port, through the
-scripts in [scripts/](scripts/). It's the baseline ts5 has to beat.
+[PS5LM Plus](https://github.com/abhi245y/PS5LM), a llama.cpp port, stays on
+the console as the baseline ts5 has to beat.
 
 ## Quick start
 
@@ -75,6 +74,22 @@ engine/build/ts5 bench -m model.gguf
 
 Then point any OpenAI-compatible client at `http://<host>:8081/v1`: Open
 WebUI, Continue, opencode, aider, or your own scripts.
+
+## On the PS5
+
+ts5 ships as its own PS5 title, **TokenStation5**: the same engine, linked
+against Mihawk-99's RADV port so it runs on the console's GPU.
+
+```sh
+ps5/setup.sh && ps5/build.sh        # or download the title from the latest CI run
+export PS5_HOST=192.168.1.50
+scripts/ts5-ps5.sh install
+scripts/ts5-ps5.sh model qwen2.5-coder-7b-instruct-q4_k_m.gguf
+# launch TokenStation5 from the home screen; the TV says when it's serving
+```
+
+Switching models, one-off GPU checks and benchmarks are one command each from
+the PC. All of it is in [ps5/README.md](ps5/README.md).
 
 ## Proven correct, not vibes
 
@@ -112,12 +127,13 @@ Memory is an 11.44 GiB GPU heap on the console. Measured numbers go in
 ## Repo map
 
 - [engine/](engine/): ts5 source, shaders, tests, [design](engine/DESIGN.md)
+- [ps5/](ps5/): the PS5 title: build, packaging, console control
 - [docs/ROADMAP.md](docs/ROADMAP.md): milestones
 - [docs/FEASIBILITY.md](docs/FEASIBILITY.md): hardware, memory budget, risks
 - [scripts/](scripts/): console deploy, model fetch and benchmark tools
 - [models.tsv](models.tsv): the model lineup and the context each one gets
 
-## Running the console side today
+## The baseline: PS5LM Plus
 
 On the console: jailbreak (firmware 13.60 or lower), then load ShadowMountPlus,
 ftpsrv (2121) and elfldr (9021). On a PC on the same network:
@@ -130,8 +146,8 @@ scripts/load-model.sh Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
 python3 scripts/bench.py                # results land in bench/results.md
 ```
 
-`bench.py` speaks plain OpenAI API, so the same command will benchmark ts5 on
-the console once it ships.
+`bench.py` speaks plain OpenAI API, so the same command benchmarks ts5 on the
+console.
 
 ## Safety
 
