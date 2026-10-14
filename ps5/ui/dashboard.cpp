@@ -22,6 +22,8 @@ constexpr int LIST_X = LX + 16, LIST_W = LW - 32, LIST_Y0 = 268, LIST_Y1 = PB - 
 constexpr int DX = RX + 32, DW = RW - 64;
 // The chat page: the conversation, and the line for a message under it.
 constexpr int CX = LX, CW = 1848 - LX, CB = 884, IY = 900, IH = AY + AH - 900;
+// The settings page: two panels down to where the activity panel ends.
+constexpr int SB = AY + AH;
 
 // Models worth starting with that ts5 runs, for a console that has none of
 // them yet. `id` finds one already there by its file name; `key` is its line
@@ -116,7 +118,7 @@ struct Dashboard::Item {
 Dashboard::Dashboard(const Fonts &fonts, const uint8_t *logo, size_t logo_size)
     : title_(fonts.get("title")), h2_(fonts.get("h2")), body_(fonts.get("body")),
       bodyb_(fonts.get("bodyb")), small_(fonts.get("small")), smallb_(fonts.get("smallb")), mono_(fonts.get("mono")),
-      chat_(fonts) {
+      chat_(fonts), settings_(fonts) {
     if (logo && logo_size >= 8 && memcmp(logo, "TS5L", 4) == 0) {
         uint16_t w, h;
         memcpy(&w, logo + 4, 2);
@@ -164,7 +166,16 @@ void Dashboard::show(Page p) {
     page_ = p;
 }
 
+SettingsInfo Dashboard::settings_info(const View &v) const {
+    SettingsInfo s = v.settings;
+    s.speech_models = v.voice.models;
+    s.speech_model = v.voice.model;
+    s.now = v.now;
+    return s;
+}
+
 bool Dashboard::animating(const View &v) const {
+    if (page_ == Settings) return false;
     if (page_ == Chat)
         return v.chat.busy || v.voice.phase != app::VoiceState::Idle || v.status.phase == app::Status::Loading;
     return v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
@@ -184,7 +195,17 @@ Action Dashboard::press(uint32_t b, const View &v) {
         return a;
     }
     if (b & kL1) {
-        show(page_ == Models ? Chat : Models);
+        show(page_ == Models ? Chat : page_ == Chat ? Settings : Models);
+        return a;
+    }
+    if (page_ == Settings) {
+        const SettingChange ch = settings_.press(b, settings_info(v));
+        if (ch.any) {
+            a.kind = Action::Set;
+            a.name = ch.name;
+            a.value = ch.value;
+        }
+        if (b & kCircle) page_ = Models;
         return a;
     }
     if (page_ == Chat) {
@@ -227,6 +248,20 @@ Action Dashboard::press(uint32_t b, const View &v) {
 }
 
 void Dashboard::draw_background(Canvas &c) {
+    if (page_ == Settings) {
+        if (settings_background_.empty()) {
+            Canvas bg(W, H);
+            bg.gradient(0, 0, W, H, kBgTop, kBgBottom);
+            bg.fill(LX, 168, 1848 - LX, 1, kPanelLine);
+            for (auto [x, y, w, h] : {std::array<int, 4>{LX, PT, LW, SB - PT}, std::array<int, 4>{RX, PT, RW, SB - PT}}) {
+                bg.round_rect((float)x, (float)y, (float)w, (float)h, 20, kPanel);
+                bg.round_rect_line((float)x, (float)y, (float)w, (float)h, 20, 1.5f, kPanelLine);
+            }
+            settings_background_.assign(bg.pixels(), bg.pixels() + (size_t)W * H);
+        }
+        memcpy(c.pixels(), settings_background_.data(), settings_background_.size() * 4);
+        return;
+    }
     if (page_ == Chat) {
         if (chat_background_.empty()) {
             Canvas bg(W, H);
@@ -287,8 +322,8 @@ void Dashboard::draw_tabs(Canvas &c) {
     int x = 820;
     const int y = 140;
     x += key_cap(c, smallb_, x, y - 2, "L1") + 24;
-    for (Page p : {Models, Chat}) {
-        const char *name = p == Models ? "Models" : "Chat";
+    for (Page p : {Models, Chat, Settings}) {
+        const char *name = p == Models ? "Models" : p == Chat ? "Chat" : "Settings";
         const int w = Canvas::measure(bodyb_, name);
         c.text(bodyb_, x, y, name, p == page_ ? kText : kText2);
         if (p == page_) c.round_rect((float)x, 163, (float)w, 5, 2.5f, kAccent);
@@ -570,7 +605,7 @@ void Dashboard::draw_chat_footer(Canvas &c, const View &v) {
     int x = LX;
     const int y = 1046;
     x += key_cap(c, smallb_, x, y, "L1") + 12;
-    x += c.text(small_, x, y, "Models", kText2) + 40;
+    x += c.text(small_, x, y, "Settings", kText2) + 40;
     const bool talk = !v.voice.model.empty();
     x += key_cap(c, smallb_, x, y, "R1", talk) + 12;
     x += c.text(small_, x, y, "Hold to talk", talk ? kText2 : kMuted) + 40;
@@ -585,6 +620,27 @@ void Dashboard::draw_chat_footer(Canvas &c, const View &v) {
     for (auto &h : hints) {
         glyph(c, (float)x + 16, (float)y - 8, h.g, h.on);
         x += 40 + c.text(small_, x + 40, y, h.text, h.on ? kText2 : kMuted) + 36;
+    }
+    const int ow = Canvas::measure(smallb_, "OPTIONS") + 28;
+    c.round_rect((float)x, (float)y - 25, (float)ow, 34, 17, rgb(0x1E2850));
+    c.text(smallb_, x + 14, y - 1, "OPTIONS", kText2);
+    c.text(small_, x + ow + 12, y, "Close", kText2);
+}
+
+void Dashboard::draw_settings_footer(Canvas &c) {
+    int x = LX;
+    const int y = 1046;
+    x += key_cap(c, smallb_, x, y, "L1") + 12;
+    x += c.text(small_, x, y, "Models", kText2) + 40;
+    x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
+    x += c.text(small_, x, y, "\xE2\x86\x90\xE2\x86\x92  Change", kText2) + 40;
+    struct {
+        PadGlyph g;
+        const char *text;
+    } hints[] = {{kGlyphSquare, "Default"}, {kGlyphCircle, "Back"}};
+    for (auto &h : hints) {
+        glyph(c, (float)x + 16, (float)y - 8, h.g);
+        x += 40 + c.text(small_, x + 40, y, h.text, kText2) + 36;
     }
     const int ow = Canvas::measure(smallb_, "OPTIONS") + 28;
     c.round_rect((float)x, (float)y - 25, (float)ow, 34, 17, rgb(0x1E2850));
@@ -611,6 +667,14 @@ void Dashboard::draw_confirm(Canvas &c) {
 void Dashboard::draw(Canvas &c, const View &v) {
     draw_background(c);
     draw_header(c, v);
+    if (page_ == Settings) {
+        const SettingsInfo info = settings_info(v);
+        settings_.draw(c, info, LX, PT, LW, SB - PT);
+        settings_.draw_details(c, info, RX, PT, RW, SB - PT);
+        draw_settings_footer(c);
+        if (confirm_close_) draw_confirm(c);
+        return;
+    }
     if (page_ == Chat) {
         chat_.draw(c, v.chat, CX, PT, CW, CB - PT, v.now, [&](const std::string &f) { return name_of(v, f); },
                    v.status.phase == app::Status::Serving ? v.status.serving : std::string(), !v.voice.model.empty());

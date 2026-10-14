@@ -53,13 +53,16 @@ private:
 
 // The ggml-*.bin files in dir (whisper models), by name.
 std::vector<std::string> whisper_models(const std::string &dir);
+// The one to use: TS5_WHISPER_MODEL if it's there (the Settings page sets
+// it), else the first; "" if none.
+std::string chosen_whisper_model(const std::string &dir);
 
 // A WAV file's 16-bit PCM as 16 kHz mono: other rates are resampled and more
 // channels mixed down. format says what the file was ("44100 Hz stereo").
 bool read_wav_16k(const std::string &path, std::vector<int16_t> &pcm, std::string &format, std::string &err);
 
-// The whisper test: the first of wavs that exists, transcribed with the first
-// ggml-*.bin in models_dir, logging the model, the threads, the load and
+// The whisper test: the first of wavs that exists, transcribed with the
+// chosen ggml-*.bin in models_dir (chosen_whisper_model), logging the model, the threads, the load and
 // transcription times and the text. With TS5_WHISPER_SWEEP=1 it transcribes
 // again at 4, 6, 8 and 12 threads. Blocks.
 void whisper_test(const std::string &models_dir, const std::vector<std::string> &wavs,

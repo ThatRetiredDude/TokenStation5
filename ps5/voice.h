@@ -1,8 +1,8 @@
 // Talking to the chat: hold R1 and speak into the controller; let go, and
 // what you said is turned into text on the console's CPU (stt.h, whisper.cpp)
 // and sent as a chat message. The mic is open only while R1 is held. The
-// speech model (the first ggml-*.bin in models/) loads at the first use and
-// stays loaded.
+// speech model (a ggml-*.bin in models/: the one the Settings page chose, or
+// the first) loads at the first use and stays loaded.
 #pragma once
 #include <atomic>
 #include <cstdint>
@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace app {
 
@@ -22,6 +23,7 @@ struct VoiceState {
     double seconds = 0;   // Listening: how long so far
     std::string error;    // why the last try sent nothing, until the next
     std::string model;    // the speech model's file name; "" if there's none
+    std::vector<std::string> models;  // every one in models/, by name
 };
 
 class Voice {

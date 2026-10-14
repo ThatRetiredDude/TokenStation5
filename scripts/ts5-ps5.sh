@@ -14,8 +14,8 @@
 #   scripts/ts5-ps5.sh bench NAME.gguf [--pp N --tg N]
 #                                          prompt/generation speed run, as its triangle
 #   scripts/ts5-ps5.sh stop                stop serving
-#   scripts/ts5-ps5.sh env [NAME=VALUE...] engine settings (ts5.env), then restart;
-#                                          none: clear them
+#   scripts/ts5-ps5.sh env [NAME=VALUE...] engine settings (ts5.env), then restart; none: clear
+#                                          them (the Settings page's and any keys stay)
 #   scripts/ts5-ps5.sh press BUTTON...     press controller buttons (up down cross square ...)
 #   scripts/ts5-ps5.sh screenshot [FILE]   the TV picture, as a BMP (default screen.bmp)
 #   scripts/ts5-ps5.sh audiotest [FILE]    tones on the TV and the controller, then 8 s from its
@@ -162,7 +162,12 @@ case $cmd in
         echo "ts5-ps5: asked the title to stop serving"
         ;;
     env)
-        put_text ts5.env "$*"
+        # ts5.env is NAME=VALUE words: what the Settings page sets and any
+        # keys stay, the engine's are replaced.
+        current=$(curl -sS "$ftp$dir/ts5.env" 2> /dev/null || true)
+        page='TS5_CHAT_MAX_TOKENS|TS5_CHAT_FPS|TS5_WHISPER_MODEL|TS5_WHISPER_THREADS|TS5_KEEP_AWAKE|TS5_DIM_AFTER'
+        kept=$(printf '%s\n' $current | grep -E "^($page|[A-Z0-9_]*_(KEY|TOKEN))=" | tr '\n' ' ' | sed 's/ *$//' || true)
+        put_text ts5.env "${kept:+$kept }$*"
         put_text restart ""
         wait_down
         wait_api

@@ -81,12 +81,6 @@ std::vector<int16_t> to_16k(const std::vector<int16_t> &in, uint32_t rate) {
     return out;
 }
 
-// The first ggml-*.bin in a folder, by name; empty if none.
-std::string first_whisper_model(const std::string &dir) {
-    const std::vector<std::string> names = whisper_models(dir);
-    return names.empty() ? std::string() : dir + "/" + names[0];
-}
-
 }  // namespace
 
 std::vector<std::string> whisper_models(const std::string &dir) {
@@ -101,6 +95,14 @@ std::vector<std::string> whisper_models(const std::string &dir) {
     closedir(d);
     std::sort(names.begin(), names.end());
     return names;
+}
+
+std::string chosen_whisper_model(const std::string &dir) {
+    const std::vector<std::string> names = whisper_models(dir);
+    const char *e = getenv("TS5_WHISPER_MODEL");
+    for (const std::string &n : names)
+        if (e && n == e) return n;
+    return names.empty() ? std::string() : names[0];
 }
 
 int Stt::default_threads() {
@@ -272,7 +274,8 @@ void whisper_test(const std::string &models_dir, const std::vector<std::string> 
     struct Done {
         ~Done() { printf("ts5-title: whisper test: done\n"); }
     } done;
-    const std::string model = first_whisper_model(models_dir);
+    const std::string chosen = chosen_whisper_model(models_dir);
+    const std::string model = chosen.empty() ? chosen : models_dir + "/" + chosen;
     if (model.empty()) {
         printf("ts5-title: whisper test: no model: no ggml-*.bin in %s (such as ggml-tiny.en.bin)\n",
                models_dir.c_str());
