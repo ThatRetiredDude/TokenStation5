@@ -34,6 +34,9 @@ public:
                   const std::function<bool(const std::string &)> &on_text, GenStats &st, std::string &err);
     Tokenizer &tok() { return t_; }
     Backend &backend() { return *b_; }
+    // After something else ran on the backend: its KV cache no longer holds
+    // the last prompt.
+    void forget_cache() { cached_.clear(); }
 
 private:
     int32_t sample(std::vector<float> &logits, const SampleParams &p);

@@ -1,14 +1,55 @@
 #pragma once
+#include <atomic>
 #include <functional>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include "engine.h"
 
 namespace ts5 {
 
-// Serves the OpenAI-compatible API (chat completions, completions, models,
-// health) until the process ends. One generation runs at a time. Returns only
-// when it cannot listen; on_listening runs once the socket is up.
+// The OpenAI-compatible API (chat completions, completions, models, health).
+// One generation runs at a time. The engine it answers with can change while
+// it runs; without one, requests get 503 and /health says "no model".
+class Server {
+public:
+    // Listens on host:port and accepts on a thread of its own. If the
+    // network drops the socket, it listens again once a second.
+    bool start(const std::string &host, int port, std::string &err);
+    // Waits for the request in progress, then answers with e from the next
+    // request on. Without one (nullptr), requests get 503 with `unavailable`
+    // as the reason, such as "loading" or "no model".
+    void set_engine(Engine *e, const std::string &model_name, const std::string &unavailable = "no model");
+    int port() const { return port_; }
+
+    // For a status display.
+    struct Activity {
+        bool generating = false;
+        int requests = 0;
+        GenStats last;  // the last finished request
+    };
+    Activity activity();
+
+    // Shared with the request threads.
+    struct State {
+        std::mutex gen;  // held for a whole generation, and to change the engine
+        Engine *engine = nullptr;
+        std::string model, unavailable = "no model";
+        std::mutex stats;
+        Activity activity;
+    };
+
+private:
+    void accept_loop();
+    std::string host_;
+    int port_ = 0, sock_ = -1;
+    State state_;
+};
+
+// The command line's server: start, answer with e, and block until the
+// process ends. Returns only when it cannot listen; on_listening runs once
+// the socket is up.
 int serve(Engine &e, const std::string &model_name, const std::string &host, int port,
           const std::function<void(int port)> &on_listening = nullptr);
 

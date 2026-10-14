@@ -1,8 +1,7 @@
 // Vulkan compute backend. Written against plain Vulkan 1.2 plus
 // VK_KHR_push_descriptor so it runs the same on a desktop driver, on lavapipe
-// (tests) and on the PS5's RADV port. Function pointers are loaded through one
-// vkGetInstanceProcAddr, which the platform supplies (dlopen on Linux, the
-// ICD entry point inside a PS5 title).
+// (tests) and on the PS5's RADV port. It runs on a VkContext's device (its
+// own, or one the process shares) and frees all it made when deleted.
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
@@ -12,17 +11,22 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "backend.h"
 #include "quants.h"
+#include "vk_context.h"
 
 // Generated SPIR-V (one header per shader).
 #include "attention.spv.h"
 #include "get_rows_f16.spv.h"
 #include "get_rows_f32.spv.h"
 #include "get_rows_q4_0.spv.h"
+#include "get_rows_q4_1.spv.h"
+#include "get_rows_q5_0.spv.h"
+#include "get_rows_q5_1.spv.h"
 #include "get_rows_q4_k.spv.h"
 #include "get_rows_q5_k.spv.h"
 #include "get_rows_q6_k.spv.h"
@@ -30,6 +34,9 @@
 #include "matmul_f16.spv.h"
 #include "matmul_f32.spv.h"
 #include "matmul_q4_0.spv.h"
+#include "matmul_q4_1.spv.h"
+#include "matmul_q5_0.spv.h"
+#include "matmul_q5_1.spv.h"
 #include "matmul_q4_k.spv.h"
 #include "matmul_q5_k.spv.h"
 #include "matmul_q6_k.spv.h"
@@ -38,38 +45,9 @@
 #include "rmsnorm.spv.h"
 #include "swiglu.spv.h"
 
-#ifndef TS5_PS5
-#include <dlfcn.h>
-#endif
-
 namespace ts5 {
 
-// The platform's entry point. On Linux it comes from libvulkan; a PS5 title
-// defines ts5_vk_entry() returning RADV's vk_icdGetInstanceProcAddr.
-#ifdef TS5_PS5
-extern "C" PFN_vkGetInstanceProcAddr ts5_vk_entry();
-#else
-static PFN_vkGetInstanceProcAddr ts5_vk_entry() {
-    void *lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
-    if (!lib) lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-    return lib ? (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr") : nullptr;
-}
-#endif
-
-#define VK_INSTANCE_FNS(X)                     \
-    X(vkDestroyInstance)                        \
-    X(vkEnumeratePhysicalDevices)               \
-    X(vkGetPhysicalDeviceProperties)            \
-    X(vkGetPhysicalDeviceQueueFamilyProperties) \
-    X(vkGetPhysicalDeviceMemoryProperties)      \
-    X(vkGetPhysicalDeviceFeatures2)             \
-    X(vkEnumerateDeviceExtensionProperties)     \
-    X(vkCreateDevice)                           \
-    X(vkGetDeviceProcAddr)
-
 #define VK_DEVICE_FNS(X)              \
-    X(vkDestroyDevice)                \
-    X(vkGetDeviceQueue)               \
     X(vkCreateBuffer)                 \
     X(vkDestroyBuffer)                \
     X(vkGetBufferMemoryRequirements)  \
@@ -101,16 +79,12 @@ static PFN_vkGetInstanceProcAddr ts5_vk_entry() {
     X(vkCreateFence)                  \
     X(vkDestroyFence)                 \
     X(vkWaitForFences)                \
-    X(vkResetFences)                  \
-    X(vkDeviceWaitIdle)
+    X(vkResetFences)
 
 namespace {
 
 struct Fns {
-    PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr = nullptr;
-    PFN_vkCreateInstance vkCreateInstance = nullptr;
 #define DECL(f) PFN_##f f = nullptr;
-    VK_INSTANCE_FNS(DECL)
     VK_DEVICE_FNS(DECL)
 #undef DECL
 };
@@ -133,6 +107,9 @@ const char *qname(uint32_t t) {
         case GGML_F32: return "f32";
         case GGML_F16: return "f16";
         case GGML_Q4_0: return "q4_0";
+        case GGML_Q4_1: return "q4_1";
+        case GGML_Q5_0: return "q5_0";
+        case GGML_Q5_1: return "q5_1";
         case GGML_Q8_0: return "q8_0";
         case GGML_Q4_K: return "q4_k";
         case GGML_Q5_K: return "q5_k";
@@ -154,17 +131,30 @@ class VkBackend : public Backend {
 public:
     static constexpr int TMAX = 256;  // tokens per forward call
 
-    VkBackend(Model &m, int n_ctx) : m_(m), hp_(m.hp), n_ctx_(n_ctx) {}
+    VkBackend(VkContext *ctx, bool owns_ctx, Model &m, int n_ctx)
+        : ctx_(ctx), owns_ctx_(owns_ctx), m_(m), hp_(m.hp), n_ctx_(n_ctx) {}
+    // Every submit has been waited for, so nothing of this backend's is in
+    // flight on the shared queue.
     ~VkBackend() override {
-        if (dev_) vk.vkDeviceWaitIdle(dev_);
-        // Process exit reclaims the rest; the PS5 title never tears down.
+        if (dev_) {
+            for (VkBuffer b : all_bufs_) vk.vkDestroyBuffer(dev_, b, nullptr);
+            for (auto &a : arenas_) vk.vkFreeMemory(dev_, a.mem, nullptr);
+            for (auto &p : pipes_) {
+                vk.vkDestroyPipeline(dev_, p.second.pipe, nullptr);
+                vk.vkDestroyPipelineLayout(dev_, p.second.layout, nullptr);
+                vk.vkDestroyDescriptorSetLayout(dev_, p.second.dsl, nullptr);
+            }
+            if (fence_) vk.vkDestroyFence(dev_, fence_, nullptr);
+            if (pool_) vk.vkDestroyCommandPool(dev_, pool_, nullptr);
+        }
+        if (owns_ctx_) destroy_vk_context(ctx_);
     }
 
     const char *name() const override { return name_.c_str(); }
     int n_ctx() const override { return n_ctx_; }
 
-    bool init(const std::string &path, int device, std::string &err) {
-        if (!init_device(device, err)) return false;
+    bool init(const std::string &path, std::string &err) {
+        if (!init_device(err)) return false;
         if (!init_pipelines(err)) return false;
         if (!upload_weights(path, err)) return false;
         return init_buffers(err);
@@ -185,78 +175,17 @@ public:
 private:
     // --- setup -------------------------------------------------------------
 
-    bool init_device(int device, std::string &err) {
-        vk.vkGetInstanceProcAddr = ts5_vk_entry();
-        if (!vk.vkGetInstanceProcAddr) { err = "no Vulkan loader/driver"; return false; }
-        vk.vkCreateInstance = (PFN_vkCreateInstance)vk.vkGetInstanceProcAddr(nullptr, "vkCreateInstance");
-        VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-        app.pApplicationName = "tokenstation5";
-        app.apiVersion = VK_API_VERSION_1_2;
-        VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-        ici.pApplicationInfo = &app;
-        CHECK(vk.vkCreateInstance(&ici, nullptr, &inst_));
-#define LOADI(f) vk.f = (PFN_##f)vk.vkGetInstanceProcAddr(inst_, #f);
-        VK_INSTANCE_FNS(LOADI)
-#undef LOADI
-        uint32_t n = 0;
-        vk.vkEnumeratePhysicalDevices(inst_, &n, nullptr);
-        if (n == 0) { err = "no Vulkan devices"; return false; }
-        std::vector<VkPhysicalDevice> pds(n);
-        vk.vkEnumeratePhysicalDevices(inst_, &n, pds.data());
-        if (device < 0 || device >= (int)n) { err = "device index out of range"; return false; }
-        pd_ = pds[device];
-        vk.vkGetPhysicalDeviceProperties(pd_, &props_);
-        vk.vkGetPhysicalDeviceMemoryProperties(pd_, &memprops_);
+    bool init_device(std::string &err) {
+        dev_ = ctx_->device;
+        queue_ = ctx_->queue;
+        qfam_ = ctx_->queue_family;
+        props_ = ctx_->props;
+        memprops_ = ctx_->memory;
         name_ = std::string("vk:") + props_.deviceName;
-        fprintf(stderr, "ts5: %s, Vulkan %u.%u, memory heaps:", props_.deviceName, VK_API_VERSION_MAJOR(props_.apiVersion),
-                VK_API_VERSION_MINOR(props_.apiVersion));
-        for (uint32_t i = 0; i < memprops_.memoryHeapCount; i++)
-            fprintf(stderr, " %.2f GiB%s", memprops_.memoryHeaps[i].size / 1073741824.0,
-                    memprops_.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? " (device)" : "");
-        fprintf(stderr, "\n");
-
-        uint32_t nq = 0;
-        vk.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &nq, nullptr);
-        std::vector<VkQueueFamilyProperties> qf(nq);
-        vk.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &nq, qf.data());
-        qfam_ = UINT32_MAX;
-        for (uint32_t i = 0; i < nq; i++)
-            if (qf[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { qfam_ = i; break; }
-        if (qfam_ == UINT32_MAX) { err = "no compute queue"; return false; }
-
-        VkPhysicalDeviceVulkan11Features f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
-        VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-        f11.pNext = &f12;
-        VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-        f2.pNext = &f11;
-        vk.vkGetPhysicalDeviceFeatures2(pd_, &f2);
-        if (!f11.storageBuffer16BitAccess || !f12.storageBuffer8BitAccess) {
-            err = "device lacks 8/16-bit storage buffer access";
-            return false;
-        }
-        VkPhysicalDeviceVulkan11Features e11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
-        VkPhysicalDeviceVulkan12Features e12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-        e11.storageBuffer16BitAccess = VK_TRUE;
-        e12.storageBuffer8BitAccess = VK_TRUE;
-        e11.pNext = &e12;
-        float prio = 1.0f;
-        VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
-        qci.queueFamilyIndex = qfam_;
-        qci.queueCount = 1;
-        qci.pQueuePriorities = &prio;
-        const char *exts[] = {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
-        VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-        dci.pNext = &e11;
-        dci.queueCreateInfoCount = 1;
-        dci.pQueueCreateInfos = &qci;
-        dci.enabledExtensionCount = 1;
-        dci.ppEnabledExtensionNames = exts;
-        CHECK(vk.vkCreateDevice(pd_, &dci, nullptr, &dev_));
-#define LOADD(f) vk.f = (PFN_##f)vk.vkGetDeviceProcAddr(dev_, #f);
+#define LOADD(f) vk.f = (PFN_##f)ctx_->get_device_proc(dev_, #f);
         VK_DEVICE_FNS(LOADD)
 #undef LOADD
         if (!vk.vkCmdPushDescriptorSetKHR) { err = "VK_KHR_push_descriptor missing"; return false; }
-        vk.vkGetDeviceQueue(dev_, qfam_, 0, &queue_);
         VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         pci.queueFamilyIndex = qfam_;
@@ -292,6 +221,7 @@ private:
         bci.size = size;
         bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         CHECK(vk.vkCreateBuffer(dev_, &bci, nullptr, &b.buf));
+        all_bufs_.push_back(b.buf);
         VkMemoryRequirements req;
         vk.vkGetBufferMemoryRequirements(dev_, b.buf, &req);
         // Host-visible requests prefer device-local too (unified memory: PS5,
@@ -380,8 +310,10 @@ private:
     bool init_pipelines(std::string &err) {
 #define P(n, nb) if (!make_pipe(#n, spv_##n, sizeof(spv_##n), nb, err)) return false;
         P(matmul_f32, 3) P(matmul_f16, 3) P(matmul_q4_0, 3) P(matmul_q8_0, 3)
+        P(matmul_q4_1, 3) P(matmul_q5_0, 3) P(matmul_q5_1, 3)
         P(matmul_q4_k, 3) P(matmul_q5_k, 3) P(matmul_q6_k, 3)
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
+        P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
         P(rmsnorm, 3) P(qkv_post, 10) P(attention, 4) P(swiglu, 2)
 #undef P
@@ -461,7 +393,10 @@ private:
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
         si.pCommandBuffers = &cmd_;
-        CHECK(vk.vkQueueSubmit(queue_, 1, &si, fence_));
+        {
+            std::lock_guard<std::mutex> lk(ctx_->queue_mutex);
+            CHECK(vk.vkQueueSubmit(queue_, 1, &si, fence_));
+        }
         CHECK(vk.vkWaitForFences(dev_, 1, &fence_, VK_TRUE, UINT64_MAX));
         CHECK(vk.vkResetFences(dev_, 1, &fence_));
         return true;
@@ -575,12 +510,12 @@ private:
     }
 
     Fns vk;
+    VkContext *ctx_;
+    bool owns_ctx_;
     Model &m_;
     const HParams &hp_;
     int n_ctx_;
     std::string name_;
-    VkInstance inst_ = VK_NULL_HANDLE;
-    VkPhysicalDevice pd_ = VK_NULL_HANDLE;
     VkPhysicalDeviceProperties props_{};
     VkPhysicalDeviceMemoryProperties memprops_{};
     VkDevice dev_ = VK_NULL_HANDLE;
@@ -590,6 +525,7 @@ private:
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
     VkFence fence_ = VK_NULL_HANDLE;
     std::vector<Arena> arenas_;
+    std::vector<VkBuffer> all_bufs_;
     VkDeviceSize allocated_ = 0;
     uint64_t weight_bytes_ = 0;
     int layers_per_submit_ = 0;
@@ -600,13 +536,26 @@ private:
 
 }  // namespace
 
-Backend *make_vk_backend(Model &m, const std::string &path, int n_ctx, int device, std::string &err) {
-    auto *b = new VkBackend(m, n_ctx);
-    if (!b->init(path, device, err)) {
+Backend *make_vk_backend(VkContext *ctx, Model &m, const std::string &path, int n_ctx, std::string &err) {
+    auto *b = new VkBackend(ctx, false, m, n_ctx);
+    if (!b->init(path, err)) {
         delete b;
         return nullptr;
     }
     return b;
 }
+
+Backend *make_vk_backend(Model &m, const std::string &path, int n_ctx, int device, std::string &err) {
+    VkContext *ctx = create_vk_context(device, false, err);
+    if (!ctx) return nullptr;
+    auto *b = new VkBackend(ctx, true, m, n_ctx);
+    if (!b->init(path, err)) {
+        delete b;
+        return nullptr;
+    }
+    return b;
+}
+
+bool vk_supports_type(uint32_t type) { return qname(type) != nullptr; }
 
 }  // namespace ts5

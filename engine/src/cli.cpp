@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "backend.h"
+#include "checks.h"
 #include "cli.h"
 #include "engine.h"
 #include "server.h"
@@ -167,60 +168,16 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         return 0;
     }
     if (a.cmd == "check") {
-        // The GPU's logits at every position against the fp32 CPU reference,
-        // on the model at hand: the first thing to run on new hardware.
         if (a.backend == "cpu") return usage();
-        const int n = a.n_ctx;
-        std::vector<int32_t> toks(n);
-        for (int i = 0; i < n; i++) toks[i] = 1000 + (i * 7919) % (hp.n_vocab - 1000);
-        std::vector<float> got((size_t)n * hp.n_vocab), ref(got.size());
-        double t = now_ms();
-        if (!be->forward(toks.data(), n, 0, got.data(), true, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
-        double gpu_ms = now_ms() - t;
-        if (!model.load(nullptr, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
-        std::unique_ptr<Backend> cpu(make_cpu_backend(model, n));
-        t = now_ms();
-        if (!cpu->forward(toks.data(), n, 0, ref.data(), true, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
-        double cpu_ms = now_ms() - t;
-        double max_diff = 0, max_ref = 0;
-        int argmax_same = 0;
-        for (int i = 0; i < n; i++) {
-            const float *g = got.data() + (size_t)i * hp.n_vocab, *r = ref.data() + (size_t)i * hp.n_vocab;
-            for (int j = 0; j < hp.n_vocab; j++) {
-                max_diff = std::max(max_diff, (double)std::fabs(g[j] - r[j]));
-                max_ref = std::max(max_ref, (double)std::fabs(r[j]));
-            }
-            argmax_same += std::max_element(g, g + hp.n_vocab) - g == std::max_element(r, r + hp.n_vocab) - r;
-        }
-        const double rel = max_ref > 0 ? max_diff / max_ref : max_diff;
-        const bool pass = std::isfinite(rel) && rel < 5e-3;
-        printf("ts5 check: %s, %d tokens: max |diff| %.3g (%.2g of the largest logit), same top token at %d/%d, "
-               "%s %.0f ms, cpu %.0f ms: %s\n",
-               basename_of(a.model).c_str(), n, max_diff, rel, argmax_same, n, be->name(), gpu_ms, cpu_ms,
-               pass ? "PASS" : "FAIL");
-        return pass ? 0 : 1;
+        CheckResult r;
+        if (!run_check(model, *be, a.n_ctx, r, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
+        printf("%s\n", check_line(basename_of(a.model), r).c_str());
+        return r.pass ? 0 : 1;
     }
     if (a.cmd == "bench") {
-        std::vector<int32_t> toks(a.pp);
-        for (int i = 0; i < a.pp; i++) toks[i] = 1000 + (i * 7919) % (hp.n_vocab - 1000);
-        std::vector<float> lg(hp.n_vocab);
-        // warm-up: compiles pipelines and touches the weights once
-        if (!be->forward(toks.data(), std::min(a.pp, 8), 0, lg.data(), false, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
-        double t = now_ms();
-        const int chunk = 256;
-        for (int i = 0; i < a.pp; i += chunk) {
-            int n = std::min(chunk, a.pp - i);
-            if (!be->forward(toks.data() + i, n, i, lg.data(), false, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
-        }
-        double pp_ms = now_ms() - t;
-        t = now_ms();
-        int32_t tk = toks[0];
-        for (int i = 0; i < a.tg; i++)
-            if (!be->forward(&tk, 1, a.pp + i, lg.data(), false, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
-        double tg_ms = now_ms() - t;
-        printf("| model | backend | pp%d tok/s | tg%d tok/s |\n| --- | --- | ---: | ---: |\n", a.pp, a.tg);
-        printf("| %s | %s | %.1f | %.1f |\n", basename_of(a.model).c_str(), be->name(), a.pp * 1000.0 / pp_ms,
-               a.tg * 1000.0 / tg_ms);
+        BenchResult r;
+        if (!run_bench(model, *be, a.pp, a.tg, r, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
+        printf("%s\n", bench_table(basename_of(a.model), r).c_str());
         return 0;
     }
     if (a.cmd == "run") {
