@@ -100,7 +100,7 @@ press cross
 wait_health
 notified "$name ready at http://"
 grep -q "serve -m \"$home/models/$name\" -c auto " "$home/ts5.args" || fail "serving did not write ts5.args"
-wait_log "context [0-9]+ \(what fits\)$"
+wait_log "context [0-9]+ \(what fits\), f16 KV cache$"
 reply=$(curl -sf "http://127.0.0.1:$port/v1/chat/completions" -H 'Content-Type: application/json' \
     -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}')
 grep -q '"completion_tokens":4' <<< "$reply" || fail "chat completion: $reply"

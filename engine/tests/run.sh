@@ -102,6 +102,8 @@ rm -f "$work"/qwen3-Q4_0.gguf*.ts5ref
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
 TS5_KV=q8 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
 TS5_KV=q8 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
+echo "== -c auto with TS5_KV=q8: an f16 cache, as the test model's whole context fits in f16"
+TS5_KV=q8 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "KV cache [0-9.]* GiB (f16, "
 echo "== the PS5 title's main on this machine (ps5/host-test.sh)"
 "$engine/../ps5/host-test.sh" "$work/qwen2-Q4_0.gguf"
 
