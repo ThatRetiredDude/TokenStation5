@@ -1,4 +1,4 @@
-# Third-party notices
+# Notices
 
 What third-party code is in TokenStation5's source and binaries, under which
 license. [LICENSING.md](LICENSING.md) explains how these fit with the
@@ -59,6 +59,13 @@ The full GPL-3.0 text is in [ps5/LICENSE](ps5/LICENSE). Whoever distributes a
 built title must also offer its corresponding source: this repo at the commit
 it was built from, plus the pinned revisions of the projects above.
 
+## Linux build
+
+The Linux `ts5` binary links only the system's Vulkan loader (Apache-2.0) and
+the C++ runtime (libstdc++, GPL-3.0 WITH GCC-exception-3.1, which places no
+terms on the program), both dynamically. Its shaders run on whatever Vulkan
+driver the system has, such as Mesa (MIT) in CI.
+
 ## Build tools only
 
 These are used to build or test but are not part of any binary: glslang
@@ -69,5 +76,6 @@ packages in the tests.
 ## Downloaded by scripts
 
 `scripts/install-ps5lm.sh` downloads [PS5LM Plus](https://github.com/abhi245y/PS5LM)
-(GPL-3.0) and `scripts/fetch-models.sh` downloads model weights, each under its
+(GPL-3.0), the PS5 setup uses the console tools ShadowMountPlus, ftpsrv and
+elfldr, which users install themselves, and `scripts/fetch-models.sh` downloads model weights, each under its
 own license. Neither is redistributed by this repo.
