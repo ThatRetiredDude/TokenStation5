@@ -166,11 +166,17 @@ echo span can turn drafting back on); `TS5_ADAPT=0` pins the length to
 how they are accepted, so the output-equivalence guarantee is untouched.
 
 The verify batch has its own kernels (`mvt_q4_k`, `mvt_q6_k`; `TS5_MVT=0`
-reverts to the generic ones): the mv16 layout with one row per workgroup,
-where each thread dequantizes its 32 weight values into registers once and
-dots them with every token's x. The batch's x (at most 8 tokens) sits well
-under the 4 MB L2, so re-reading it per token is cheap; the weight stream,
-which decode is bound by, is paid once for the whole batch.
+reverts to the generic ones): the mv16 layout, with the batch size a
+specialization constant (one pipeline per size, 2 to 8, so the token loop
+unrolls and every token's loads are in flight at once) and `TS5_MVT_ROWS`
+rows per workgroup (default 4, matrices under `TS5_MV_ROWS_MIN` rows take
+one). Each row's words are loaded once per block and dotted with every
+token's x, so the weight stream, which decode is bound by, is paid once for
+the whole batch; each token's x values are loaded once per NR rows. The
+batch's x sits in the 4 MB L2, but at one row per workgroup a 19k-row
+matrix re-read it from L2 per (row, token) — several GB a layer at 7
+tokens, measured on the console as a verify pass costing 5.7x a single
+step — which the row tiling divides by NR.
 
 ## Memory
 
