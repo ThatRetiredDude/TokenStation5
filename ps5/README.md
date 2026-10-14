@@ -83,6 +83,14 @@ served again afterwards. Results are kept in `results.tsv` and show in the
 list. Models that aren't on the console yet are listed as suggestions, with
 the command that fetches them.
 
+While the title runs, the console stays out of rest mode: its idle timer
+counts only the controller, so it would otherwise go to sleep in the middle
+of a job or a reply (`TS5_KEEP_AWAKE=0` in `ts5.env` turns this off). The
+system then doesn't dim the TV either, so after 10 minutes without a button
+press the title shows a dark screen with one line on it instead of the
+dashboard (`TS5_DIM_AFTER=SECONDS`, 0 for never); any button brings the
+dashboard back.
+
 ## From the PC
 
 | Command | What it does |

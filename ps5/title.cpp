@@ -49,6 +49,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
@@ -79,6 +80,7 @@
 extern "C" {
 int sceSystemServiceLoadExec(const char *path, const char *const *args);
 int sceSystemServiceHideSplashScreen(void);
+int sceSystemServicePowerTick(void);
 int sceKernelSendNotificationRequest(int device, void *request, size_t size, int blocking);
 int sceKernelUsleep(unsigned int microseconds);
 int sceUserServiceGetInitialUser(int *user);
@@ -165,6 +167,41 @@ void watch_control_files() {
         }
         sceKernelUsleep(500000);
     }
+}
+
+// The console's idle timer (Settings > System > Power Saving) puts it into
+// rest mode after a while with no controller input (20 minutes at the
+// least), in the middle of a job or a reply: API requests aren't input.
+// While the title runs it tells the system it is in use once a minute, as a
+// video player does (TS5_KEEP_AWAKE=0 in ts5.env: it doesn't). That also
+// keeps the system from dimming the TV, so the title dims its own picture
+// (main's loop).
+void keep_awake() {
+    int last = 1;  // logs the first answer and any change
+    for (;;) {
+        const int r = sceSystemServicePowerTick();
+        if (r != last) printf("ts5-title: keeping the console awake%s (%#x)\n", r == 0 ? "" : ": refused", r);
+        last = r;
+        sceKernelUsleep(60000000);
+    }
+}
+
+// After this many seconds with no button pressed (TS5_DIM_AFTER, 0: never),
+// a dark screen instead of the dashboard, so a picture that hardly changes
+// doesn't stay on the TV for hours. Any button brings the dashboard back (and
+// does nothing else).
+double dim_after() {
+    const char *e = getenv("TS5_DIM_AFTER");
+    return e ? atof(e) : 10 * 60;
+}
+
+// The dark screen: one line, moved once a minute.
+void draw_resting(ui::Canvas &c, const ui::Font &f, const std::string &line, double t) {
+    c.clear(ui::rgb(0x000000));
+    const int m = (int)(t / 60), w = ui::Canvas::measure(f, line);
+    const int x = 80 + (int)((m * 7919u) % (unsigned)std::max(1, c.width() - 160 - w));
+    const int y = 120 + (int)((m * 104729u) % (unsigned)(c.height() - 240));
+    c.text(f, x, y, line, ui::rgb(0x3A4466));
 }
 
 // A command file split into words: whitespace separates them, double quotes
@@ -370,6 +407,9 @@ int main(int, char **) {
 
     for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat}) unlink(f);
     std::thread(watch_control_files).detach();
+    const char *awake = getenv("TS5_KEEP_AWAKE");
+    if (!awake || atoi(awake) != 0) std::thread(keep_awake).detach();
+    else printf("ts5-title: TS5_KEEP_AWAKE=0: the console may go into rest mode\n");
     sceSystemServiceHideSplashScreen();
 
     std::string err;
@@ -428,7 +468,9 @@ int main(int, char **) {
     uint64_t drawn_version = ~0ull, drawn_chat = ~0ull, chat_version = ~0ull;
     app::ChatState chat_state;
     const double chat_period = 1.0 / chat_fps();
-    double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan;
+    bool drawn_dark = false;
+    double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan;
+    const double dim = dim_after();
     bool lib_changed = true;
     std::atomic<bool> audio_testing{false};
     for (;;) {
@@ -443,6 +485,11 @@ int main(int, char **) {
             buttons |= presses.front();
             presses.pop_front();
         }
+        // A press on a dark screen only brings the dashboard back.
+        const bool resting = dim > 0 && t - last_input > dim;
+        if (buttons) last_input = t;
+        const bool woke = resting && buttons;
+        if (woke) buttons = 0;
         if (take_written(kCmd, words)) {
             app::Job j;
             if (parse_job(words, j, nullptr, err)) runner.push(j);
@@ -453,7 +500,10 @@ int main(int, char **) {
             const bool sent = chat.send(message);
             printf("ts5-title: chat: %s (%zu bytes)\n", sent ? "message" : "not sent: a reply is coming or it's blank",
                    message.size());
-            if (sent) dash.show(ui::Dashboard::Chat);
+            if (sent) {
+                dash.show(ui::Dashboard::Chat);
+                last_input = t;  // input too: it brings the chat back from a dark screen
+            }
         }
         if (exists(kAudioTest) && !audio_testing) {
             unlink(kAudioTest);
@@ -504,6 +554,8 @@ int main(int, char **) {
             chat_state = chat.state();
         }
         v.chat = chat_state;
+        // Nor does the screen go dark while a reply comes in on the chat page.
+        if (v.chat.busy && dash.page() == ui::Dashboard::Chat) last_input = t;
         v.now = t;
         v.wall = (int64_t)time(nullptr);
 
@@ -547,20 +599,27 @@ int main(int, char **) {
         }
 
         const bool shot = exists(kShot);
-        const bool dirty = buttons || lib_changed || version != drawn_version || shot;
+        const bool dark = dim > 0 && t - last_input > dim;
+        const bool dirty = buttons || lib_changed || version != drawn_version || shot || dark != drawn_dark;
         // The spinner turns at 15 frames a second while a model loads. While the
         // GPU computes (a check, a speed test, a reply), a frame a second at
         // most, so the copy each frame costs the GPU never weighs on the work.
         const bool computing = v.status.phase == app::Status::Checking ||
                                v.status.phase == app::Status::Benchmarking || v.api.generating;
-        double period = dash.animating(v) && !computing ? 1.0 / 15 : 1.0;
+        double period = dark ? 60.0 : dash.animating(v) && !computing ? 1.0 / 15 : 1.0;
         // The chat page shows a reply as it comes, a few frames a second.
-        const bool on_chat = dash.page() == ui::Dashboard::Chat;
+        const bool on_chat = !dark && dash.page() == ui::Dashboard::Chat;
         if (on_chat && v.chat.busy) period = chat_period;
         const bool tick = t - last_draw > period;
         const bool chat_dirty = on_chat && chat_version != drawn_chat && (!v.chat.busy || tick);
         if (dirty || tick || chat_dirty) {
-            dash.draw(canvas, v);
+            if (dark)
+                draw_resting(canvas, fonts.get("small"),
+                             "TokenStation5" + (v.status.serving.empty() ? std::string() : " \xC2\xB7 " + v.url) +
+                                 "  \xC2\xB7  press any button",
+                             t);
+            else
+                dash.draw(canvas, v);
             if (screen && !display.present(canvas.pixels(), err)) {
                 printf("ts5-title: the picture stopped: %s\n", err.c_str());
                 screen = false;
@@ -571,6 +630,7 @@ int main(int, char **) {
             }
             drawn_version = version;
             drawn_chat = chat_version;
+            drawn_dark = dark;
             last_draw = t;
             lib_changed = false;
         }
