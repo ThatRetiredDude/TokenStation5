@@ -8,6 +8,7 @@ GPL-3.0 code and the engine does not.
 | `engine/` (ts5: source, shaders, tests, design doc) | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code. Contains no GPL code. |
 | `scripts/`, `docs/`, `models.tsv`, `README.md`, `.github/` | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code and docs. The scripts download and talk to GPL programs (PS5LM) but contain none of their code. |
 | `ps5/` (title main, libc shims, build scripts, import checker) | [GPL-3.0-or-later](ps5/LICENSE) | Exists to link ts5 with PS5_Vulkan and the PS5 payload SDK, which are GPL-3.0-or-later. |
+| `payloads/` (small diagnostic payloads for the jailbreak's ELF loader) | GPL-3.0-or-later | Built with the PS5 payload SDK, which is GPL-3.0-or-later. |
 | The built PS5 title (`eboot.bin`, `sce_module/libc.prx`) | GPL-3.0-or-later, as a whole | See below. |
 | The Linux `ts5` binary | PolyForm Small Business 1.0.0 | Built from `engine/` alone. Links only the system Vulkan loader. |
 | The TokenStation5 name and logo, `ps5/sce_sys/icon0.png` | Not licensed | Brand assets. Neither license grants trademark rights. |
