@@ -7,6 +7,9 @@
 #   scripts/ts5-ps5.sh fetch KEY...        download models.tsv models and upload them there
 #   scripts/ts5-ps5.sh speech [NAME]       download whisper's ggml-NAME.bin (base.en, the default;
 #                                          tiny.en, small.en ...) and upload it there, for R1 talk
+#   scripts/ts5-ps5.sh voice [NAME]        download Kokoro's model and voice NAME (af_heart, the
+#                                          default; am_michael, bf_emma ...) and upload them there,
+#                                          for spoken replies
 #   scripts/ts5-ps5.sh models              list the models on the console
 #   scripts/ts5-ps5.sh serve NAME.gguf [ts5 options]
 #                                          serve that model from now on, and restart
@@ -28,6 +31,9 @@
 #   scripts/ts5-ps5.sh whispertest [WAV]   speech to text on the console's CPU with the first
 #                                          ggml-*.bin in models: WAV (16 kHz mono 16-bit; else the
 #                                          last one sent, or audiotest.wav); prints times and text
+#   scripts/ts5-ps5.sh speaktest [TEXT...] text to speech on the console's CPU with Kokoro,
+#                                          played on the TV; prints the phonemes and times, saves
+#                                          the speech (speaktest.wav)
 #   scripts/ts5-ps5.sh log [prev]          the title's log (prev: the run before)
 #   scripts/ts5-ps5.sh restart | quit      restart or close the running title
 #   scripts/ts5-ps5.sh wait                wait for the API to answer
@@ -132,6 +138,23 @@ case $cmd in
             -Q "-RNFR $f.part" -Q "-RNTO $f"
         echo "ts5-ps5: uploaded $f to $dir/models; hold R1 on the chat page to talk"
         ;;
+    voice)
+        # kokoro.cpp's conversions of Kokoro-82M and its voices (Apache-2.0), as
+        # its models/download-model.sh fetches them.
+        v=${1:-af_heart}
+        v=${v#kokoro-voice-}
+        v=${v%.gguf}
+        mkdir -p "$TS5_MODEL_CACHE"
+        hf=https://huggingface.co/simonfxr/kokoro.cpp-GGUF/resolve/main
+        for f in kokoro-82m-f16.gguf "voices/kokoro-voice-$v.gguf"; do
+            curl -fL -C - --progress-bar -o "$TS5_MODEL_CACHE/${f#voices/}" "$hf/$f"
+        done
+        for f in kokoro-82m-f16.gguf "kokoro-voice-$v.gguf"; do
+            curl --ftp-create-dirs --progress-bar -T "$TS5_MODEL_CACHE/$f" "$ftp$dir/models/$f.part" -o /dev/null \
+                -Q "-RNFR $f.part" -Q "-RNTO $f"
+        done
+        echo "ts5-ps5: uploaded kokoro-82m-f16.gguf and the voice $v to $dir/models; try: scripts/ts5-ps5.sh speaktest"
+        ;;
     model)
         f=${1:?a model file}
         curl --ftp-create-dirs --progress-bar -T "$f" "$ftp$dir/models/$(basename "$f")" -o /dev/null
@@ -165,7 +188,7 @@ case $cmd in
         # ts5.env is NAME=VALUE words: what the Settings page sets and any
         # keys stay, the engine's are replaced.
         current=$(curl -sS "$ftp$dir/ts5.env" 2> /dev/null || true)
-        page='TS5_CHAT_MAX_TOKENS|TS5_CHAT_FPS|TS5_WHISPER_MODEL|TS5_WHISPER_THREADS|TS5_KEEP_AWAKE|TS5_DIM_AFTER'
+        page='TS5_CHAT_MAX_TOKENS|TS5_CHAT_FPS|TS5_WHISPER_MODEL|TS5_WHISPER_THREADS|TS5_SPEAK|TS5_SPEAK_OUT|TS5_TTS_VOICE|TS5_TTS_SPEED|TS5_TTS_THREADS|TS5_KEEP_AWAKE|TS5_DIM_AFTER'
         kept=$(printf '%s\n' $current | grep -E "^($page|[A-Z0-9_]*_(KEY|TOKEN))=" | tr '\n' ' ' | sed 's/ *$//' || true)
         put_text ts5.env "${kept:+$kept }$*"
         put_text restart ""
@@ -231,6 +254,19 @@ case $cmd in
         done
         log_lines "^ts5-title: whisper test: " | awk '/whisper test: start/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; i++) print line[i] }'
         ;;
+    speaktest)
+        before=$(log_lines "^ts5-title: speak test: done$" | grep -c . || true)
+        put_text speaktest "$*"
+        echo "ts5-ps5: speak test started: loading the model, then speaking on the TV"
+        for _ in $(seq 1 300); do
+            sleep 2
+            [ "$(log_lines "^ts5-title: speak test: done$" | grep -c . || true)" -gt "$before" ] && break
+        done
+        log_lines "^ts5-title: (speak test|kokoro): " | awk '/speak test: start/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; i++) print line[i] }'
+        if curl -fsS -o speaktest.wav "$ftp$dir/speaktest.wav" 2> /dev/null; then
+            echo "ts5-ps5: saved the speech as speaktest.wav"
+        fi
+        ;;
     log)
         curl -sS "$ftp$dir/ts5${1:+.$1}.log"
         ;;
@@ -242,7 +278,7 @@ case $cmd in
         wait_api
         ;;
     *)
-        sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac

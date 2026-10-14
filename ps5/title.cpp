@@ -40,6 +40,9 @@
 //               someone types (keyboard_probe.h)
 //   whispertest whispertest.wav (or audiotest.wav) transcribed on the CPU
 //               with the first ggml-*.bin in models/, timed (stt.h)
+//   speaktest   the file's text (or a sentence of the title's own) spoken
+//               with Kokoro on the CPU, timed, kept in speaktest.wav and
+//               played on the TV (speak.h)
 //   quit        closes the title; restart starts it again
 //
 // A title must never return from main or call exit(): the console reports
@@ -78,7 +81,9 @@
 #include "runner.h"
 #include "server.h"
 #include "settings.h"
+#include "speak.h"
 #include "stt.h"
+#include "tts/synth.h"
 #include "vk_context.h"
 #include "voice.h"
 
@@ -136,6 +141,8 @@ constexpr const char *kChat = TS5_HOME "/chat";
 constexpr const char *kKeyTest = TS5_HOME "/keytest";
 constexpr const char *kWhisperTest = TS5_HOME "/whispertest";
 constexpr const char *kWhisperWav = TS5_HOME "/whispertest.wav";
+constexpr const char *kSpeakTest = TS5_HOME "/speaktest";
+constexpr const char *kSpeakWav = TS5_HOME "/speaktest.wav";
 constexpr const char *kQuit = TS5_HOME "/quit";
 constexpr const char *kRestart = TS5_HOME "/restart";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
@@ -425,7 +432,9 @@ int main(int, char **) {
         printf("ts5-title: %s\n", w.c_str());
     }
 
-    for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kKeyTest, kWhisperTest}) unlink(f);
+    for (const char *f :
+         {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kKeyTest, kWhisperTest, kSpeakTest})
+        unlink(f);
     std::thread(watch_control_files).detach();
     std::thread(keep_awake).detach();
     sceSystemServiceHideSplashScreen();
@@ -474,6 +483,7 @@ int main(int, char **) {
         for (int i = 0; i < 100 && !(sent = chat.send(text)); i++) sceKernelUsleep(20000);
         printf("ts5-title: chat: %s by voice (%zu bytes)\n", sent ? "message" : "not sent", text.size());
     });
+    app::Speaker speaker(user, kModels);
 
     if (!once.empty()) {
         app::Job j;
@@ -498,11 +508,11 @@ int main(int, char **) {
     uint64_t drawn_version = ~0ull, drawn_chat = ~0ull, chat_version = ~0ull;
     app::ChatState chat_state;
     app::VoiceState voice_state;
-    bool drawn_dark = false;
+    bool drawn_dark = false, drawn_speaking = false;
     double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan;
     ui::SettingsInfo settings_note;  // the Settings page's last change
     bool lib_changed = true;
-    std::atomic<bool> audio_testing{false}, key_testing{false}, whisper_testing{false};
+    std::atomic<bool> audio_testing{false}, key_testing{false}, whisper_testing{false}, speak_testing{false};
     for (;;) {
         const double t = app::now_s();
         // Read each time: the Settings page changes them.
@@ -575,10 +585,21 @@ int main(int, char **) {
                 whisper_testing = false;
             }).detach();
         }
+        std::string speak_text;
+        if (!speak_testing && take_text(kSpeakTest, speak_text)) {
+            speak_testing = true;
+            std::thread([&speak_testing, speak_text] {
+                int user = -1;
+                sceUserServiceGetInitialUser(&user);
+                app::speak_test(user, kModels, speak_text, kSpeakWav, notify);
+                speak_testing = false;
+            }).detach();
+        }
         // R1 held on the chat page: talk (a reply that's coming stops).
         const bool talk = ((pad.held() | pc_held) & ui::kR1) && dash.page() == ui::Dashboard::Chat && !woke;
         if (talk && !talking) {
             if (chat_state.busy) chat.stop();
+            speaker.stop();
             voice.hold();
         } else if (!talk && talking) {
             voice.release();
@@ -586,6 +607,12 @@ int main(int, char **) {
         talking = talk;
         if (t - last_scan > 2) {
             voice.rescan();
+            // Kokoro's voices, for the Settings page.
+            std::vector<std::string> voices = tts::kokoro_voices(kModels);
+            if (voices != settings_note.voices) {
+                settings_note.voices = std::move(voices);
+                lib_changed = true;
+            }
             std::lock_guard<std::mutex> lk(lib_mutex);
             lib_changed |= lib.scan();
             last_scan = t;
@@ -624,12 +651,19 @@ int main(int, char **) {
             chat_version = chat.version() + voice.version();
             chat_state = chat.state();
             voice_state = voice.state();
+            // The reply as it comes, read aloud a sentence at a time.
+            if (!chat_state.turns.empty() && !chat_state.turns.back().user) {
+                const app::ChatTurn &r = chat_state.turns.back();
+                speaker.feed(chat_state.turns.size() - 1, r.text, r.end != app::ChatTurn::Coming);
+            }
         }
         v.chat = chat_state;
         v.voice = voice_state;
+        v.speaking = speaker.speaking();
         const bool chat_active = v.chat.busy || v.voice.phase != app::VoiceState::Idle;
-        // Nor does the screen go dark while a reply comes in on the chat page.
-        if (chat_active && dash.page() == ui::Dashboard::Chat) last_input = t;
+        // Nor does the screen go dark while a reply comes in on the chat page,
+        // or is read aloud.
+        if ((chat_active || v.speaking) && dash.page() == ui::Dashboard::Chat) last_input = t;
         v.settings = settings_note;
         v.now = t;
         v.wall = (int64_t)time(nullptr);
@@ -665,8 +699,14 @@ int main(int, char **) {
                 runner.push(j);
                 break;
             }
-            case ui::Action::ChatStop: chat.stop(); break;
-            case ui::Action::ChatClear: chat.clear(); break;
+            case ui::Action::ChatStop:
+                chat.stop();
+                speaker.stop();
+                break;
+            case ui::Action::ChatClear:
+                chat.clear();
+                speaker.reset();
+                break;
             case ui::Action::Set: {
                 std::string e;
                 const bool ok = app::set_setting(kEnv, a.name, a.value, e);
@@ -685,7 +725,8 @@ int main(int, char **) {
 
         const bool shot = exists(kShot);
         const bool dark = dim > 0 && t - last_input > dim;
-        const bool dirty = buttons || lib_changed || version != drawn_version || shot || dark != drawn_dark;
+        const bool dirty = buttons || lib_changed || version != drawn_version || shot || dark != drawn_dark ||
+                           v.speaking != drawn_speaking;
         // The spinner turns at 15 frames a second while a model loads. While the
         // GPU computes (a check, a speed test, a reply), a frame a second at
         // most, so the copy each frame costs the GPU never weighs on the work.
@@ -718,6 +759,7 @@ int main(int, char **) {
             drawn_version = version;
             drawn_chat = chat_version;
             drawn_dark = dark;
+            drawn_speaking = v.speaking;
             last_draw = t;
             lib_changed = false;
         }

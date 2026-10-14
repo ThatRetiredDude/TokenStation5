@@ -210,7 +210,7 @@ Action Dashboard::press(uint32_t b, const View &v) {
     }
     if (page_ == Chat) {
         chat_.press(b);
-        if ((b & kTriangle) && v.chat.busy) a.kind = Action::ChatStop;
+        if ((b & kTriangle) && (v.chat.busy || v.speaking)) a.kind = Action::ChatStop;
         else if ((b & kSquare) && !v.chat.turns.empty()) a.kind = Action::ChatClear;
         if (a.kind == Action::ChatClear) chat_.to_bottom();
         if (b & kCircle) page_ = Models;
@@ -614,7 +614,8 @@ void Dashboard::draw_chat_footer(Canvas &c, const View &v) {
         PadGlyph g;
         const char *text;
         bool on;
-    } hints[] = {{kGlyphTriangle, "Stop the reply", v.chat.busy},
+    } hints[] = {{kGlyphTriangle, v.speaking && !v.chat.busy ? "Stop speaking" : "Stop the reply",
+                  v.chat.busy || v.speaking},
                  {kGlyphSquare, "New chat", !v.chat.turns.empty()},
                  {kGlyphCircle, "Back", true}};
     for (auto &h : hints) {

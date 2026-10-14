@@ -83,6 +83,45 @@ Foundation", and its YaRN rotary embedding (in `ggml/src/ggml-cpu/ops.cpp`),
 `samples/jfk.wav` is from John F. Kennedy's inaugural address (1961), a US
 government work in the public domain.
 
+### kokoro.cpp (MIT)
+
+`third_party/kokoro.cpp` is [kokoro.cpp](https://github.com/simonfxr/kokoro.cpp)
+at commit `a9e3143`: the Kokoro-82M text-to-speech model code, which its
+authors extracted from [CrispASR](https://github.com/CrispStrobe/CrispASR)
+(MIT). Three changes are ours (`scripts/vendor-kokoro.patch`,
+`third_party/kokoro.cpp/VENDOR.md`): espeak-ng (GPL-3.0) and Google Highway
+are taken out, and it reads models without mmap. The PS5 title links it for
+spoken replies, on whisper.cpp's ggml, and so does the Linux build of the
+title that `ps5/host-test.sh` runs; the Linux `ts5` binary doesn't. Its
+upstream `NOTICE` is kept beside it; the espeak-ng and Highway sections there
+describe upstream's build, not this one. Its license, in
+`third_party/kokoro.cpp/LICENSE`:
+
+```
+MIT License
+
+Copyright (c) 2023-2026 The ggml authors
+Copyright (c) 2026 The kokoro.cpp contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### Pronunciation data for the voice (`ps5/tts`)
 
 `ps5/tts/lexicon.bin` is made by `scripts/pack-g2p-lexicon.py` from two word
@@ -177,4 +216,8 @@ packages in the tests.
 elfldr, which users install themselves, and `scripts/fetch-models.sh` downloads model weights, each under its
 own license. Neither is redistributed by this repo. CI downloads whisper.cpp's
 `ggml-tiny.en.bin` (OpenAI's Whisper tiny.en weights, MIT) for the title's
-speech test; it isn't stored here either.
+speech test; it isn't stored here either. `scripts/ts5-ps5.sh voice` and CI
+download kokoro.cpp's GGUF conversions of [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)
+and its voices (Apache-2.0) from
+[simonfxr/kokoro.cpp-GGUF](https://huggingface.co/simonfxr/kokoro.cpp-GGUF);
+they aren't stored here either.

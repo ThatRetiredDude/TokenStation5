@@ -36,6 +36,7 @@ struct View {
     ts5::Server::Activity api;
     app::ChatState chat;
     app::VoiceState voice;
+    bool speaking = false;  // a reply is being read aloud (speak.h)
     SettingsInfo settings;  // its speech models and now come from the fields above
     double now = 0;    // seconds, steady clock (app::now_s)
     int64_t wall = 0;  // time(nullptr)

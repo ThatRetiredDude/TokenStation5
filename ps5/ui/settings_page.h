@@ -16,6 +16,7 @@ namespace ui {
 struct SettingsInfo {
     std::vector<std::string> speech_models;  // ggml-*.bin in the models folder
     std::string speech_model;                // the one talking uses
+    std::vector<std::string> voices;         // Kokoro's voices there (kokoro-voice-NAME.gguf), by NAME
     std::string note;                        // the last change: saved, or why not
     bool note_failed = false;
     double note_at = -1e9;  // when (now's clock)

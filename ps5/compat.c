@@ -86,3 +86,15 @@ int symlink(const char *target, const char *path) {
     errno = EPERM;
     return -1;
 }
+
+/* kokoro.cpp's model loader advises the kernel on how it will read a mapping
+ * (third_party/kokoro.cpp's gguf_loader.cpp). The title reads its models
+ * with stdio (KOKORO_NO_MMAP), and advice may always be ignored. */
+#include <sys/mman.h>
+
+int posix_madvise(void *addr, size_t len, int advice) {
+    (void)addr;
+    (void)len;
+    (void)advice;
+    return 0;
+}
