@@ -41,5 +41,5 @@ if(TS5_VULKAN)
   target_compile_definitions(ts5core PUBLIC TS5_VULKAN=1)
 endif()
 
-add_executable(ts5 src/main.cpp src/tokenizer.cpp src/server.cpp src/engine.cpp)
+add_executable(ts5 src/main.cpp src/cli.cpp src/tokenizer.cpp src/server.cpp src/engine.cpp)
 target_link_libraries(ts5 PRIVATE ts5core)

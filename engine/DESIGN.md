@@ -123,19 +123,32 @@ through the API.
 
 ## PS5 port
 
-The engine was written so the console build only adds platform glue:
+The engine compiles unchanged for the console; [ps5/](../ps5/) adds the
+title around it:
 
 - **Vulkan entry.** Built with `TS5_PS5`, `vk_backend.cpp` calls
-  `ts5_vk_entry()`, which returns RADV's `vk_icdGetInstanceProcAddr` (no
-  loader on the console). Everything else is loaded through it.
-- **Title shell.** aamd-at-home's PPSA99021 already proves the recipe:
-  FSELF `eboot.bin`, `libc.prx`, `param.json` with `attribute3` 524352 and
-  `amm`/`kernel` page tables, never returning from `main`.
-- **libc gaps.** PS5LM found these by crashing: no `exit()`, null imports
-  (`isatty`, `getnameinfo` and others), a broken `getaddrinfo` (the server
-  binds a numeric address, so it never calls it), `accept4`, and `HOME`. The
-  engine calls none of `isatty`, `getaddrinfo` or `mmap`; C++ exceptions are
-  only used for errors, so they still have to be enabled for the PS5 target.
+  `ts5_vk_entry()`, which `ps5/title.cpp` defines as RADV's
+  `vk_icdGetInstanceProcAddr` (RADV is linked in whole; there is no loader).
+  Everything else is loaded through it.
+- **Link.** PS5_Vulkan's RADV title recipe (`tools/radv-link.sh`): RADV whole,
+  libc++, the SDK platform layer's heap and threads in direct memory, and its
+  stand-ins for libc functions titles lack. `--no-dynamic-linker` keeps Mesa's
+  weak entry-point references out of the import table.
+- **Null imports.** Two SDK stub modules give a title nothing, so a function
+  bound to one is a call through NULL. `ps5/check-imports.py` fails the build
+  on any; `ps5/compat.c` defines the two RADV needs (`readlink`, `mkstemp`).
+  The engine itself calls none of `isatty`, `getaddrinfo` or `mmap`.
+- **Never exit.** `cli_main()` returns a status instead of calling `exit()`;
+  the title leaves with `sceSystemServiceLoadExec("exit")`, and restarts itself
+  with `LoadExec("/app0/eboot.bin")`. Sockets are close-on-exec so a restart
+  can bind the port again.
+- **Shell.** `param.json` in PS5LM's working shape (`amm` and `kernel` page
+  table sizes; `attribute3` 0x80040 only declares 120 Hz output, which a
+  server does not need). C++ exceptions and RTTI are on.
 - **Memory.** `radv_enable_unified_heap_on_apu` for the 11.44 GiB heap.
-- **Network.** `ts5 serve --host 0.0.0.0 --port 8081`, same port as PS5LM so
-  clients and `scripts/bench.py` work unchanged.
+- **Network.** `ts5 serve` on 0.0.0.0:8081, the same port as PS5LM, so
+  clients and `scripts/bench.py` work unchanged. The accept loop listens again
+  when the console's network drops.
+- **Testing off the console.** `ps5/host-test.sh` builds `title.cpp` for
+  Linux against `ps5/host_shim.cpp` (the console calls) and walks it through
+  model pick, serve, restart, a one-off check and quit; CI runs it.
