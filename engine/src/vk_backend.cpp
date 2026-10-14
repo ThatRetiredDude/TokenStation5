@@ -603,11 +603,26 @@ private:
         vk.vkCmdPushDescriptorSetKHR(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout, 0, (uint32_t)w.size(), w.data());
         vk.vkCmdPushConstants(cmd_, p.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PC), &pc);
         vk.vkCmdDispatch(cmd_, gx, gy, gz);
-        if (!no_barrier_) barrier();
+        const bool bar = !no_barrier_;
+        if (bar) barrier();
         no_barrier_ = false;
         if (qpool_ && qlabels_.size() + 1 < QMAX) {
             vk.vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool_, (uint32_t)qlabels_.size() + 1);
             qlabels_.push_back(what.empty() ? name : name + " " + what);
+        }
+        if (bar) add_up();
+    }
+
+    // The mmb_reduce dispatches that wait for a barrier (see mmb), one after
+    // another without barriers between them, and a barrier after the last.
+    void add_up() {
+        std::vector<Reduce> r;
+        r.swap(reduces_);
+        for (size_t i = 0; i < r.size(); i++) {
+            no_barrier_ = i + 1 < r.size();
+            const uint32_t groups = (uint32_t)(((size_t)r[i].pc.nrows * r[i].pc.ntok + 255) / 256);
+            const uint32_t gx = std::min<uint32_t>(groups, 65535);
+            dispatch("mmb_reduce", {&split_, r[i].y}, r[i].pc, gx, (groups + gx - 1) / gx, r[i].what);
         }
     }
 
@@ -666,24 +681,31 @@ private:
         S = std::max(1u, S);
         const uint32_t units = (nunits + S - 1) / S;
         S = (nunits + units - 1) / units;
-        // Kernels that may still read split_ (no barrier since) keep their part.
-        if (S > 1 && split_used_ + S * slice > SPLIT) barrier();
+        // Parts that sums still to be added up read (no barrier since) stay.
+        if (S > 1 && split_used_ + S * slice > SPLIT) {
+            barrier();
+            add_up();
+        }
         const uint32_t p_off = S > 1 ? (uint32_t)split_used_ : 0;
         struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off, n_split, units, p_off; } bp{
             pc.ncols, pc.nrows, pc.ntok, pc.row_bytes, pc.x_stride, pc.y_stride, pc.accumulate, pc.x_off, S, units,
             p_off};
-        const bool skip = no_barrier_;
-        if (S > 1) no_barrier_ = false;  // mmb_reduce reads what it wrote
+        // mmb_reduce adds the slices up after the next barrier: this one's, or
+        // for k and v (no barrier after them), the one after q, so the three
+        // matmuls run side by side and then the three reduces.
+        if (S > 1) {
+            reduces_.push_back({{rows, ntok, pc.y_stride, pc.accumulate, S, p_off}, &y, what});
+            split_used_ = p_off + S * slice;
+        }
         dispatch(std::string(mmb_f16_ ? "mmb16_" : "mmb_") + qname(w.type()), {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128,
                  (ntok + 127) / 128, what, S);
-        if (S == 1) return;
-        split_used_ = p_off + S * slice;
-        no_barrier_ = skip;
-        struct { uint32_t nrows, ntok, y_stride, accumulate, n_split, p_off; } rp{
-            rows, ntok, pc.y_stride, pc.accumulate, S, p_off};
-        const uint32_t groups = (uint32_t)((slice + 255) / 256), gx = std::min<uint32_t>(groups, 65535);
-        dispatch("mmb_reduce", {&split_, &y}, rp, gx, (groups + gx - 1) / gx, what);
     }
+    struct Reduce {
+        struct { uint32_t nrows, ntok, y_stride, accumulate, n_split, p_off; } pc;
+        const Buf *y;
+        std::string what;
+    };
+    std::vector<Reduce> reduces_;  // waiting for a barrier
 
     // A weight's name without its layer: "blk.3.attn_q.weight" -> "attn_q".
     static std::string role(const Weight &w) {
