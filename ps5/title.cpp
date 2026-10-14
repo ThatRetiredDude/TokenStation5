@@ -159,18 +159,19 @@ void watch_control_files() {
 }
 
 // The console's idle timer (Settings > System > Power Saving) puts it into
-// rest mode after a while with no controller input, in the middle of a job
-// or a reply: API requests aren't input. While the title runs it tells the
-// system it is in use every 10 seconds, as a video player does
-// (TS5_KEEP_AWAKE=0 in ts5.env: it doesn't). That also keeps the system from
-// dimming the TV, so the title dims its own picture (main's loop).
+// rest mode after a while with no controller input (20 minutes at the
+// least), in the middle of a job or a reply: API requests aren't input.
+// While the title runs it tells the system it is in use once a minute, as a
+// video player does (TS5_KEEP_AWAKE=0 in ts5.env: it doesn't). That also
+// keeps the system from dimming the TV, so the title dims its own picture
+// (main's loop).
 void keep_awake() {
     int last = 1;  // logs the first answer and any change
     for (;;) {
         const int r = sceSystemServicePowerTick();
         if (r != last) printf("ts5-title: keeping the console awake%s (%#x)\n", r == 0 ? "" : ": refused", r);
         last = r;
-        sceKernelUsleep(10000000);
+        sceKernelUsleep(60000000);
     }
 }
 
