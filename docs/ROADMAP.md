@@ -41,7 +41,6 @@ ts5's CPU reference) on all four.
 - [ ] [#23](https://github.com/ThatRetiredDude/TokenStation5/pull/23) Prompts in packed f16 (draft, on top of #15): the GPU does f16 math at twice its f32 rate, and a Coder 7B prompt is 79% FFN matmuls running at about 65% of the f32 peak. Each step's 32 products are summed in f16, then added to f32 sums; on the test models the logits move by 0.1% of their range. To measure on the console, with the GPU check on all four models (`TS5_MMB_F16=0` turns it off).
 - [ ] [#13](https://github.com/ThatRetiredDude/TokenStation5/pull/13) An 8-bit KV cache, and serving with as much context as fits (draft). The 8-bit cache drifts 2.3% on Coder 7B against a 2% bar, so it stays opt-in (`TS5_KV=q8`), and f16 is used wherever the model's whole context fits. To verify on the console.
 - [ ] [#17](https://github.com/ThatRetiredDude/TokenStation5/pull/17) Speculative decoding by prompt lookup (draft): drafts up to 7 tokens from earlier text and checks them in one pass, with the same output. To measure on the console (`TS5_DRAFT=0` turns it off).
-- [ ] [#11](https://github.com/ThatRetiredDude/TokenStation5/pull/11) Memory probe payload and a fuller free-memory line (ready). Finding: the game's memory pool is 11.44 GiB and ts5 already gets all of it; closing other apps frees nothing.
 - [ ] [#14](https://github.com/ThatRetiredDude/TokenStation5/pull/14) Our own PS5 runtime, so the title can ship without the GPL (draft). The clean-room spec is written and the assessment is "same speed"; the code waits for a go. The default flips only after a clean launch, a passing GPU check and matching speeds on the console, then LICENSING.md changes.
 - [ ] Homebrew catalog listing (ps5-homebrew-catalog, ProsperoStore): waiting on a fork of the catalog repo.
 - [ ] [#20](https://github.com/ThatRetiredDude/TokenStation5/pull/20) Web search (approved 2026-10-14): waits on one console run with a Tavily key (resolving api.tavily.com and the TLS handshake from the PS5). OpenAI tool calling in ts5 and which models support it, then a `web_search` tool that calls Tavily over HTTPS from the console (mbedTLS), with the key as `TAVILY_API_KEY` in `ts5.env` in the title's folder (and a field in the Settings page). Notes: `ps5-ai/websearch/WEB_SEARCH_FEASIBILITY.md` in the project files.
@@ -57,7 +56,7 @@ ts5's CPU reference) on all four.
 - [ ] An 8-bit KV cache within the 2% bar, so 8B models get long contexts.
 - [ ] Qwen 3's thinking: honor `enable_thinking` and `/no_think`.
 - [ ] More models: Gemma 3 12B, Qwen 3.5 4B and 9B, Gemma 4 E4B, Mistral Nemo 12B ([models.tsv](../models.tsv)).
-- [ ] Memory over many model reloads: after a fresh launch Coder 7B leaves 4524 MiB of direct memory free, but about 900 MiB less after some 16 bench reloads in one run of the title. Leak or fragmentation; [#11](https://github.com/ThatRetiredDude/TokenStation5/pull/11)'s fuller memory line will tell which.
+- [ ] Memory over many model reloads: after a fresh launch Coder 7B leaves 4524 MiB of direct memory free, but about 900 MiB less after some 16 bench reloads in one run of the title. Leak or fragmentation; [#11](https://github.com/ThatRetiredDude/TokenStation5/pull/11)'s fuller memory line (now merged) will tell which.
 - [ ] Endpoint: a static IP or DHCP reservation, client configs (Open WebUI, Continue, opencode, Claude Code) in `docs/CLIENTS.md`, an optional API-key proxy in front of `:8081`, one command after each reboot.
 
 ## Done
@@ -79,6 +78,8 @@ ts5's CPU reference) on all four.
 - [x] Clean-room spec of the PS5 runtime, for [#14](https://github.com/ThatRetiredDude/TokenStation5/pull/14).
 - [x] The 2026-10-14 "crash" diagnosed from the logs: rest mode, not a crash.
 - [x] Console audio from the title: the DualSense mic in, TV and controller speaker out ([#19](https://github.com/ThatRetiredDude/TokenStation5/pull/19)). libSceAudioOut and libSceAudioIn have to be imported directly; loaded at run time, their symbols aren't found.
+- [x] [#11](https://github.com/ThatRetiredDude/TokenStation5/pull/11) Memory probe payload and a fuller free-memory line. Finding: the game's memory pool is 11.44 GiB and ts5 already gets all of it; closing other apps frees nothing.
+- [x] [#16](https://github.com/ThatRetiredDude/TokenStation5/pull/16) Keep-awake: `sceSystemServicePowerTick` once a minute, and a dark TV after 10 idle minutes (the 90-minute check is under Critical).
 
 ## Risks
 
