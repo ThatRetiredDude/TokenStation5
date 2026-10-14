@@ -55,8 +55,8 @@ python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --nto
 # K-quants as Q4_K_M files have them (Q4_K, with Q6_K for attn_v, ffn_down
 # and output), quantized by make_test_model.py: the 128 x 128 matmul blocks
 # for prompts (TS5_MMB_MIN=1 uses them even for these small matrices; one
-# model's attn_k has only 64 rows), the 64 x 64 ones and the one-token
-# mat-vec kernels.
+# model's attn_k has only 64 rows; they split their columns where there
+# are few blocks), the 64 x 64 ones and the one-token mat-vec kernels.
 kmix=()
 mk_k() {  # name arch vocab [make_test_model.py options]
     local out="$work/$1.gguf" arch=$2 vocab=$3
@@ -71,9 +71,21 @@ mk_k llama-kmix llama llama-spm
 mk_k llama-kmix-kv1 llama llama-spm --kv-heads 1 --ff 768
 echo "== K-quants: 300 tokens in 128 x 128 blocks, 72 in 64 x 64 blocks, one token per call"
 TS5_MMB_MIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${kmix[@]}"
+# The columns split in 5 slices, which don't start on a block, and not at all.
+TS5_MMB_MIN=1 TS5_MMB_SLICES=5 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
+    "${kmix[@]}"
+TS5_MMB_MIN=1 TS5_MMB_SPLIT=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
+    "${kmix[@]}"
 TS5_MMB=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${kmix[@]}"
+# One token per call: a row per workgroup (these matrices are small), 8 rows
+# (TS5_MV_ROWS_MIN=1), 3 (a partial last group), and the older mat-vecs.
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${kmix[@]}"
-TS5_MV_ROWS=3 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 12 --step "${kmix[@]}"
+TS5_MV_ROWS_MIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 12 --step \
+    "${kmix[@]}"
+TS5_MV_ROWS_MIN=1 TS5_MV_ROWS=3 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 12 \
+    --step "${kmix[@]}"
+TS5_MV_ROWS_MIN=1 TS5_MV16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 12 \
+    --step "${kmix[@]}"
 # Attention's head layouts: query heads per KV head and head size.
 shapes=()
 mk_shape() {  # name embd heads kv_heads
