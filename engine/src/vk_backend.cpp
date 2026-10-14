@@ -51,6 +51,8 @@
 #include "mv16_glu_q4_k.spv.h"
 #include "mv16_q4_k.spv.h"
 #include "mv16_q6_k.spv.h"
+#include "mvt_q4_k.spv.h"
+#include "mvt_q6_k.spv.h"
 #include "mm_f16.spv.h"
 #include "mm_f32.spv.h"
 #include "mm_q4_0.spv.h"
@@ -258,6 +260,7 @@ private:
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV16")) mv16_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_MVT")) mvt_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_BARRIER")) barrier_mode_ = std::min(2, std::max(0, atoi(e)));
         if (const char *e = getenv("TS5_FUSE")) fuse_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
@@ -417,6 +420,7 @@ private:
         return false;
         MV(matvec_q4_k, 3) MV(matvec_q6_k, 3) MV(mv16_q4_k, 3) MV(mv16_q6_k, 3) MV(mv16_glu_q4_k, 4)
 #undef MV
+        P(mvt_q4_k, 3) P(mvt_q6_k, 3)
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
@@ -633,6 +637,13 @@ private:
         // kernels that read the weights as words.
         if (ntok == 1 && fast_matvec_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
             mat_vec(std::string(mv16_ ? "mv16_" : "matvec_") + qname(w.type()), {&W(w), &x, &y}, pc, rows, what);
+            return;
+        }
+        // A few tokens (speculation's verify batch): the word-load kernels
+        // with the dequantized values kept in registers for every token, so
+        // the weight stream is paid once for the whole batch.
+        if (ntok >= 2 && ntok <= 8 && fast_matvec_ && mvt_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
+            dispatch(std::string("mvt_") + qname(w.type()), {&W(w), &x, &y}, pc, gx, gy, what);
             return;
         }
         dispatch(std::string("matmul_") + qname(w.type()), {&W(w), &x, &y}, pc, gx, gy, what);
@@ -871,6 +882,7 @@ private:
     // One token of Q4_K and Q6_K: mv16_q4_k's 16-byte loads and mv16_q6_k's
     // 8 threads per block (TS5_MV16=0: matvec_q4_k and matvec_q6_k).
     bool mv16_ = true;
+    bool mvt_ = true;
     // The barrier between kernels (see barrier(); TS5_BARRIER=0, 1, 2).
     int barrier_mode_ = 1;
     // Fewer kernels and barriers: none between kernels that only share

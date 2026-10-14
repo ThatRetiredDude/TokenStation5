@@ -1,0 +1,78 @@
+#version 450
+// Y[t][r] (+)= sum_c W[r][c] * X[t][c] for 2..8 tokens of a Q4_K matrix: the
+// verify batch of speculative decoding. Laid out as mv16_q4_k (8 threads
+// share a 144-byte block from 16-byte loads, the workgroup's 64 threads take
+// 8 blocks of a row at a time), but one row per workgroup and the thread's
+// 32 weight values are fully dequantized into registers once, then dotted
+// with every token's x: the weight stream, which decode is bound by, is paid
+// once for the whole batch, while x (at most 8 tokens, well under the L2)
+// is re-read per token.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+
+#define WG 64
+#define NTMAX 8
+layout(local_size_x = WG) in;
+
+layout(std430, binding = 0) readonly buffer W128 { uvec4 w128[]; };
+layout(std430, binding = 1) readonly buffer Xbuf { vec4 X4[]; };
+layout(std430, binding = 2) buffer Ybuf { float Y[]; };
+
+layout(push_constant) uniform PC {
+    uint ncols, nrows, ntok, row_bytes;
+    uint x_stride, y_stride, accumulate, x_off;
+} pc;
+
+shared float partial[NTMAX * WG];  // [token][subgroup]
+
+// As mv16_q4_k: sub-blocks 2p and 2p + 1's 6-bit scales (bytes 0 and 1) and
+// mins (bytes 2 and 3), from the block's header h.
+uint scales_mins(uvec4 h, uint p) {
+    const uint sh = 16u * (p & 1u);
+    const uint a = (h.y >> sh) & 0xFFFFu, b = (h.z >> sh) & 0xFFFFu, c = (h.w >> sh) & 0xFFFFu;
+    if (p < 2) return (a & 0x3F3Fu) | ((b & 0x3F3Fu) << 16);
+    return ((c & 0x0F0Fu) | ((a >> 2) & 0x3030u)) | ((((c >> 4) & 0x0F0Fu) | ((b >> 2) & 0x3030u)) << 16);
+}
+vec4 bytes4(uint w) { return vec4(float(w & 255u), float((w >> 8) & 255u), float((w >> 16) & 255u), float(w >> 24)); }
+
+void main() {
+    const uint r = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (r >= pc.nrows) return;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint nb = pc.ncols / 256, row_words = pc.row_bytes / 16;
+    const uint th = tid % 8, p = th >> 1;
+    const uint nt = min(pc.ntok, NTMAX);
+    float acc[NTMAX];
+    for (uint t = 0; t < NTMAX; t++) acc[t] = 0.0;
+    for (uint b = tid / 8; b < nb; b += WG / 8) {
+        const uint o = r * row_words + b * 9;
+        const uvec4 h = w128[o], q = w128[o + 1 + th];
+        // The thread's 16 low-nibble values (sub-block 2p) and 16 high ones
+        // (2p + 1), dequantized once: v = d * scale * nibble - dmin * min.
+        const vec4 sm = bytes4(scales_mins(h, p));
+        const vec2 dm = unpackHalf2x16(h.x);
+        vec4 va[4], ve[4];
+        [[unroll]] for (uint c = 0; c < 4; c++) {
+            va[c] = dm.x * sm.x * bytes4(q[c] & 0x0F0F0F0Fu) - dm.y * sm.z;
+            ve[c] = dm.x * sm.y * bytes4((q[c] >> 4) & 0x0F0F0F0Fu) - dm.y * sm.w;
+        }
+        const uint x0 = (b * 256) / 4 + 16 * p + 4 * (th & 1u);
+        for (uint t = 0; t < nt; t++) {
+            const uint xt = (pc.x_off + t * pc.x_stride) / 4 + x0;
+            float s = 0.0;
+            [[unroll]] for (uint c = 0; c < 4; c++) s += dot(va[c], X4[xt + c]) + dot(ve[c], X4[xt + 8 + c]);
+            acc[t] += s;
+        }
+    }
+    for (uint t = 0; t < nt; t++) {
+        const float s = subgroupAdd(acc[t]);
+        if (gl_SubgroupInvocationID == 0) partial[t * WG + gl_SubgroupID] = s;
+    }
+    barrier();
+    if (tid < nt) {
+        float s = 0.0;
+        for (uint i = 0; i < gl_NumSubgroups; i++) s += partial[tid * WG + i];
+        const uint yi = tid * pc.y_stride + r;
+        Y[yi] = pc.accumulate != 0 ? Y[yi] + s : s;
+    }
+}
