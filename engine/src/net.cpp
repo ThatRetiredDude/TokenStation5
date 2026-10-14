@@ -4,11 +4,13 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -43,6 +45,18 @@ int sceRandomGetRandomNumber(void *buf, size_t size);
 namespace ts5 {
 
 namespace {
+
+// One line per step of a request in the log, so a request that never comes
+// back shows how far it got.
+void trace(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "ts5: net: ");
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    fflush(stderr);
+    va_end(ap);
+}
 
 bool fill_random(unsigned char *out, size_t n) {
 #ifdef TS5_PS5
@@ -123,7 +137,11 @@ bool resolve(const std::string &host, std::vector<uint32_t> &addrs, std::string 
 
 int connect_to(const std::string &host, int port, int timeout_s, std::string &err) {
     std::vector<uint32_t> addrs;
+    trace("resolving %s", host.c_str());
     if (!resolve(host, addrs, err)) return -1;
+    char ip[INET_ADDRSTRLEN] = "?";
+    inet_ntop(AF_INET, &addrs[0], ip, sizeof ip);
+    trace("%s is %s; connecting to port %d", host.c_str(), ip, port);
     for (uint32_t addr : addrs) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {
@@ -250,11 +268,13 @@ Tls &tls() {
         mbedtls_ctr_drbg_init(&t.drbg);
         mbedtls_x509_crt_init(&t.ca);
         mbedtls_ssl_config_init(&t.conf);
+        trace("first HTTPS request: starting crypto");
         if (psa_crypto_init() != PSA_SUCCESS) { t.why = "psa_crypto_init failed"; return; }
         static const char pers[] = "ts5";
         int rc = mbedtls_ctr_drbg_seed(&t.drbg, mbedtls_entropy_func, &t.entropy, (const unsigned char *)pers,
                                        sizeof pers);
         if (rc != 0) { t.why = "no random numbers for TLS (-0x" + Conn::hex(-rc) + ")"; return; }
+        trace("random numbers ok; reading the CA bundle");
         // TS5_CA_FILE, else the system's bundle, else the one built in.
         std::vector<std::string> files;
         if (const char *f = getenv("TS5_CA_FILE")) files.push_back(f);
@@ -278,6 +298,7 @@ Tls &tls() {
             if (rc < 0 || t.ca.version == 0) { t.why = "cannot read the built-in CA bundle"; return; }
             t.ca_from = "built in";
         }
+        trace("CA bundle read (%s)", t.ca_from.c_str());
         rc = mbedtls_ssl_config_defaults(&t.conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
                                          MBEDTLS_SSL_PRESET_DEFAULT);
         if (rc != 0) { t.why = "TLS setup failed (-0x" + Conn::hex(-rc) + ")"; return; }
@@ -307,6 +328,7 @@ int bio_recv(void *ctx, unsigned char *buf, size_t len) {
 }
 
 bool start_tls(Conn &c, const std::string &host, std::string &err) {
+    trace("connected; setting up TLS");
     Tls &t = tls();
     if (!t.ready) {
         err = t.why;
@@ -336,6 +358,7 @@ bool start_tls(Conn &c, const std::string &host, std::string &err) {
         }
         return false;
     }
+    trace("TLS handshake done (%s, %s)", mbedtls_ssl_get_version(&c.ssl), mbedtls_ssl_get_ciphersuite(&c.ssl));
     return true;
 }
 
@@ -358,8 +381,8 @@ bool dechunk(const std::string &in, std::string &out) {
 
 }  // namespace
 
-bool http_post(const std::string &url, const std::vector<std::string> &headers, const std::string &body,
-               HttpResponse &resp, std::string &err, int timeout_s) {
+bool post(const std::string &url, const std::vector<std::string> &headers, const std::string &body,
+          HttpResponse &resp, std::string &err, int timeout_s) {
     // scheme://host[:port]/path
     size_t s = url.find("://");
     if (s == std::string::npos) {
@@ -400,7 +423,10 @@ bool http_post(const std::string &url, const std::vector<std::string> &headers, 
     for (auto &h : headers) req += h + "\r\n";
     req += "\r\n" + body;
     std::string raw;
-    if (!c.write_all(req, err) || !c.read_all(raw, err)) return false;
+    if (!c.write_all(req, err)) return false;
+    trace("request sent (%zu bytes); reading the answer", req.size());
+    if (!c.read_all(raw, err)) return false;
+    trace("answer read (%zu bytes)", raw.size());
 
     size_t he = raw.find("\r\n\r\n");
     if (he == std::string::npos || raw.compare(0, 5, "HTTP/") != 0) {
@@ -422,6 +448,36 @@ bool http_post(const std::string &url, const std::vector<std::string> &headers, 
         resp.body = raw.substr(he + 4);
     }
     return true;
+}
+
+// TLS (certificate checks, key exchange) wants more stack than a server
+// thread may have (a PS5 thread's default is small), so a request runs on a
+// thread of its own with 1 MiB.
+bool http_post(const std::string &url, const std::vector<std::string> &headers, const std::string &body,
+               HttpResponse &resp, std::string &err, int timeout_s) {
+    struct Job {
+        const std::string &url;
+        const std::vector<std::string> &headers;
+        const std::string &body;
+        HttpResponse &resp;
+        std::string &err;
+        int timeout_s;
+        bool ok;
+    } job{url, headers, body, resp, err, timeout_s, false};
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 1 << 20);
+    pthread_t th;
+    auto run = [](void *p) -> void * {
+        Job &j = *(Job *)p;
+        j.ok = post(j.url, j.headers, j.body, j.resp, j.err, j.timeout_s);
+        return nullptr;
+    };
+    int rc = pthread_create(&th, &attr, run, &job);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) return post(url, headers, body, resp, err, timeout_s);  // no thread: try on this one
+    pthread_join(th, nullptr);
+    return job.ok;
 }
 
 }  // namespace ts5
