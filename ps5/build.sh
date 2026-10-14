@@ -49,7 +49,7 @@ cxxflags=(-std=c++17 -O2 -Wall -ffunction-sections -fdata-sections -fexceptions 
 objects=()
 pids=()
 for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
-        "$root"/ps5/{title,library,runner}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard}.cpp; do
+        "$root"/ps5/{title,library,runner,audio_probe}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard}.cpp; do
     o="$out/obj/$(basename "$src" .cpp).o"
     objects+=("$o")
     cc "${cxxflags[@]}" -c "$src" -o "$o" &
@@ -78,6 +78,9 @@ stub() {
 }
 stub libSceAgc agc_canary_link_stub.c
 stub libSceAgcDriver agc_driver_canary_link_stub.c
+# libSceAudioIn, which the SDK has no stub for, named as the SDK names its own.
+cc -std=c11 -O2 -fPIC -c "$root/ps5/stubs/libSceAudioIn.c" -o "$out/obj/libSceAudioIn_stub.o"
+"$sdk/bin/prospero-lld" --shared -soname libSceAudioIn.sprx -o "$out/stubs/libSceAudioIn.so" "$out/obj/libSceAudioIn_stub.o"
 
 # The link PS5_Vulkan's RADV titles use: RADV whole, libc++, the platform
 # layer's heap and threads, and its stand-ins for libc functions titles lack.
@@ -95,7 +98,7 @@ weak=(--no-dynamic-linker)
     --version-script "$vk/tooling/native/app-symbols.map" --exclude-libs=ALL \
     -e _start -o "$out/llvm-pie.elf" \
     "$out/obj/app_crt.o" "${objects[@]}" "$out/obj/libts5compat.a" \
-    "$out/stubs/libSceAgc.so" "$out/stubs/libSceAgcDriver.so" \
+    "$out/stubs/libSceAgc.so" "$out/stubs/libSceAgcDriver.so" "$out/stubs/libSceAudioIn.so" \
     "${radv_link_inputs[@]}" \
     --as-needed "$sdk"/target/lib/*.so
 # An import that only a module titles get nothing from provides is a call
@@ -103,7 +106,7 @@ weak=(--no-dynamic-linker)
 python3 "$root/ps5/check-imports.py" "$sdk" "$out/llvm-pie.elf" "$out/stubs"
 "$tool" link --in "$out/llvm-pie.elf" --out "$out/eboot.elf" \
     --stub-dir "$sdk/target/lib" --stub "$out/stubs/libSceAgc.so" \
-    --stub "$out/stubs/libSceAgcDriver.so" --module-sdk 0x02000009 \
+    --stub "$out/stubs/libSceAgcDriver.so" --stub "$out/stubs/libSceAudioIn.so" --module-sdk 0x02000009 \
     --companion-sdk 0x08050001 --file-name eboot.elf > /dev/null
 
 app="$out/$title_id"
