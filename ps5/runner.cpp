@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -20,6 +21,9 @@ extern "C" {
 size_t sceKernelGetDirectMemorySize(void);
 int sceKernelAvailableDirectMemorySize(off_t start, off_t end, size_t align, off_t *found, size_t *size);
 int sceKernelAvailableFlexibleMemorySize(size_t *size);
+// RADV's PS5 winsys: the direct memory its buffers hold now. Weak, as the host
+// test's build has no such driver.
+extern uint64_t radv_ps5_allocated_bytes __attribute__((weak));
 }
 
 namespace app {
@@ -63,7 +67,9 @@ std::string base(const std::string &p) {
 // What's free once a model is loaded or a job is done, so the log shows whether
 // anything stayed behind: the CPU's flexible memory, and the direct memory the
 // GPU allocates from, all its free runs added up (the largest alone hides what
-// a freed model left as smaller holes), with the largest run beside it.
+// a freed model left as smaller holes), with the largest run beside it, and
+// what the driver's buffers hold: if that comes back to the same after each
+// model but the free memory doesn't, something else keeps it.
 void log_memory(const std::string &when) {
     size_t flex = 0, free_total = 0, largest = 0;
     const size_t pool = sceKernelGetDirectMemorySize();
@@ -79,9 +85,13 @@ void log_memory(const std::string &when) {
         start = at + (off_t)run;
     }
     const double mib = 1024.0 * 1024.0;
-    printf("ts5-title: memory %s: flexible free %.0f MiB%s, direct free %.0f of %.0f MiB (largest run %.0f)%s\n",
+    char driver[64] = "";
+    if (&radv_ps5_allocated_bytes)
+        snprintf(driver, sizeof(driver), ", driver buffers %.0f MiB",
+                 __atomic_load_n(&radv_ps5_allocated_bytes, __ATOMIC_RELAXED) / mib);
+    printf("ts5-title: memory %s: flexible free %.0f MiB%s, direct free %.0f of %.0f MiB (largest run %.0f)%s%s\n",
            when.c_str(), flex / mib, fok ? "" : " (unknown)", free_total / mib, pool / mib, largest / mib,
-           dok ? "" : " (unknown)");
+           dok ? "" : " (unknown)", driver);
 }
 
 }  // namespace
@@ -206,8 +216,10 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
 void Runner::unload() {
     if (!serving_) return;
     server_.set_engine(nullptr, "", "no model");
-    printf("ts5-title: unloading %s\n", serving_->file.c_str());
+    const std::string file = serving_->file;
+    printf("ts5-title: unloading %s\n", file.c_str());
     serving_.reset();
+    log_memory("after unloading " + file);
     std::lock_guard<std::mutex> lk(mu_);
     status_.serving.clear();
     status_.serving_path.clear();
