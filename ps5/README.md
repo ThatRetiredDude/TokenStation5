@@ -104,6 +104,7 @@ dashboard back.
 | `scripts/ts5-ps5.sh press down cross` | controller buttons, as if pressed |
 | `scripts/ts5-ps5.sh screenshot` | the TV picture, as `screen.bmp` |
 | `scripts/ts5-ps5.sh chat "Hello!"` | a message on the chat page; waits for the reply and prints its length and speed |
+| `scripts/ts5-ps5.sh keytest` | the keyboard test: a minute of a connected keyboard's raw reports in the log while someone types, printed |
 | `scripts/ts5-ps5.sh audiotest` | the audio test: a tone on the TV, the controller speaker and its headset jack, then 8 s from the controller's mic (after a beep) played back; prints every return code and saves `audiotest.wav` |
 | `scripts/ts5-ps5.sh log` / `log prev` | the title's log, or the run before |
 | `scripts/ts5-ps5.sh restart` / `quit` | restart or close the title |
@@ -120,6 +121,7 @@ On the console, everything lives in the title's own folder,
 | `ts5.env` | engine settings read at start, `NAME=VALUE` (the `getenv` calls in `engine/src/vk_backend.cpp`), and the chat's: `TS5_CHAT_MAX_TOKENS` (longest reply, 2048) and `TS5_CHAT_FPS` (frames a second while a reply comes in, 10) |
 | `press`, `screenshot` | controller buttons; the next frame to `screen.bmp` |
 | `chat` | a message for the chat page: the file's text |
+| `keytest` | run the keyboard test (someone types on the keyboard for a minute) |
 | `audiotest` | run the audio test (someone has to talk into the controller after the beep); the recording goes to `audiotest.wav` |
 | `quit`, `restart` | close or restart the title |
 | `ts5.log`, `ts5.prev.log`, `results.tsv` | its log, the run before's, and the check and speed results |
