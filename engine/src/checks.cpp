@@ -46,7 +46,7 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     {
         Model cpu_model;
         if (!cpu_model.open(m.gguf.path, err) || !cpu_model.load(nullptr, err)) return false;
-        std::unique_ptr<Backend> cpu(make_cpu_backend(cpu_model, n));
+        std::unique_ptr<Backend> cpu(make_cpu_backend(cpu_model, n, true));
         if (progress) progress("running on the CPU");
         t = now_ms();
         ok = cpu->forward(toks.data(), n, 0, ref.data(), true, err);
@@ -57,7 +57,8 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     for (int i = 0; i < n; i++) {
         const float *g = got.data() + (size_t)i * nv, *f = ref.data() + (size_t)i * nv;
         for (int j = 0; j < nv; j++) {
-            r.max_diff = std::max(r.max_diff, (double)std::fabs(g[j] - f[j]));
+            const double d = std::fabs(g[j] - f[j]);
+            if (d > r.max_diff) r.max_diff = d, r.worst = i;
             max_ref = std::max(max_ref, (double)std::fabs(f[j]));
         }
         r.same_top += std::max_element(g, g + nv) - g == std::max_element(f, f + nv) - f;
@@ -70,9 +71,9 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
 std::string check_line(const std::string &model, const CheckResult &r) {
     char b[512];
     snprintf(b, sizeof b,
-             "ts5 check: %s, %d tokens: max |diff| %.3g (%.2g of the largest logit), same top token at %d/%d, "
-             "%s %.0f ms, cpu %.0f ms: %s",
-             model.c_str(), r.n, r.max_diff, r.rel, r.same_top, r.n, r.backend.c_str(), r.gpu_ms, r.cpu_ms,
+             "ts5 check: %s, %d tokens: max |diff| %.3g (%.2g of the largest logit) at token %d, same top token at "
+             "%d/%d, %s %.0f ms, cpu %.0f ms: %s",
+             model.c_str(), r.n, r.max_diff, r.rel, r.worst, r.same_top, r.n, r.backend.c_str(), r.gpu_ms, r.cpu_ms,
              r.pass ? "PASS" : "FAIL");
     return b;
 }

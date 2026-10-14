@@ -58,7 +58,7 @@ void rope(float *v, int head_dim, int n_rot, int pos, float base, bool neox) {
 
 class CpuBackend : public Backend {
 public:
-    CpuBackend(const Model &m, int n_ctx) : m_(m), hp_(m.hp), n_ctx_(n_ctx) {
+    CpuBackend(const Model &m, int n_ctx, bool kv_f16) : m_(m), hp_(m.hp), n_ctx_(n_ctx), kv_f16_(kv_f16) {
         const int kv = hp_.n_head_kv * hp_.head_dim;
         kc_.assign((size_t)hp_.n_layer * n_ctx * kv, 0.f);
         vc_.assign(kc_.size(), 0.f);
@@ -114,6 +114,8 @@ private:
                 if (!N.k.empty()) rmsnorm(&k[hh * HD], N.k.data(), HD, hp_.rms_eps);
                 rope(&k[hh * HD], HD, hp_.rope_dims, pos, hp_.rope_base, hp_.rope_neox);
             }
+            if (kv_f16_)
+                for (int i = 0; i < KV; i++) k[i] = fp16_to_fp32(fp32_to_fp16(k[i])), v[i] = fp16_to_fp32(fp32_to_fp16(v[i]));
             float *kl = &kc_[((size_t)l * n_ctx_) * KV];
             float *vl = &vc_[((size_t)l * n_ctx_) * KV];
             memcpy(kl + (size_t)pos * KV, k.data(), KV * 4);
@@ -156,12 +158,13 @@ private:
     const Model &m_;
     const HParams &hp_;
     int n_ctx_;
+    bool kv_f16_;
     std::vector<float> kc_, vc_, out_norm_;
     std::vector<Norms> norms_;
 };
 
 }  // namespace
 
-Backend *make_cpu_backend(const Model &m, int n_ctx) { return new CpuBackend(m, n_ctx); }
+Backend *make_cpu_backend(const Model &m, int n_ctx, bool kv_f16) { return new CpuBackend(m, n_ctx, kv_f16); }
 
 }  // namespace ts5
