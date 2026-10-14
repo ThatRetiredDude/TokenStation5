@@ -22,7 +22,9 @@ public:
 
 struct VkContext;
 
-Backend *make_cpu_backend(const Model &m, int n_ctx);
+// kv_f16: round K and V to f16 as they go into the cache, as the GPU stores
+// them, so a comparison with the GPU measures its kernels rather than that.
+Backend *make_cpu_backend(const Model &m, int n_ctx, bool kv_f16 = false);
 // On Vulkan device `device`, with a device of its own.
 Backend *make_vk_backend(Model &m, const std::string &path, int n_ctx, int device, std::string &err);
 // On a device the process shares (vk_context.h); ctx must outlive it.

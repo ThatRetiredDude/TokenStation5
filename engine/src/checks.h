@@ -14,14 +14,15 @@ namespace ts5 {
 using Progress = std::function<void(const std::string &step)>;
 
 struct CheckResult {
-    int n = 0, same_top = 0;
+    int n = 0, same_top = 0, worst = 0;  // worst: the position of max_diff
     double max_diff = 0, rel = 0, gpu_ms = 0, cpu_ms = 0;
     bool pass = false;
     std::string backend;
 };
 
 // The GPU's logits at every one of n positions against the fp32 CPU
-// reference. The GPU runs the first positions in one call, as for a prompt
+// reference, with its KV cache rounded to f16 as the GPU's is (so a real
+// model's large K values test the kernels, not the cache's precision). The GPU runs the first positions in one call, as for a prompt
 // (the tiled matmul from 9 tokens), and the last few (up to 4) one token per
 // call, as in generation. The reference loads the model file into host memory
 // of its own and frees it again; m and gpu are left as they were, apart from
