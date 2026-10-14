@@ -41,7 +41,7 @@ done
 # The engine and the title, with exceptions and RTTI (the PS5 target turns
 # them off by default; the engine's C++ library code uses both).
 cxxflags=(-std=c++17 -O2 -Wall -ffunction-sections -fdata-sections -fexceptions -fcxx-exceptions -frtti
-    -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_VERSION=\"$version\""
+    -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_VERSION=\"$version\"" "-DTS5_TITLE_ID=\"$title_id\""
     -I "$root/engine/src" -I "$out/shaders" -I "$radv/include")
 objects=()
 pids=()

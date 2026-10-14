@@ -2,7 +2,7 @@
 # Drives the TokenStation5 title on the console over FTP (ftpsrv, 2121).
 #
 #   scripts/ts5-ps5.sh install             upload the title from build/ps5 to /data/homebrew
-#   scripts/ts5-ps5.sh model FILE.gguf     upload a model to /data/ts5/models
+#   scripts/ts5-ps5.sh model FILE.gguf     upload a model to the title's models folder
 #   scripts/ts5-ps5.sh models              list the models on the console
 #   scripts/ts5-ps5.sh serve NAME.gguf [ts5 options]
 #                                          serve that model from now on, and restart
@@ -12,18 +12,21 @@
 #   scripts/ts5-ps5.sh restart | quit      restart or close the running title
 #   scripts/ts5-ps5.sh wait                wait for the API to answer
 #
-# NAME is a file in /data/ts5/models (or a full path on the console). Launch
-# the title from the home screen once after install; ShadowMountPlus lists it
-# as TokenStation5.
+# Everything lives in the title's folder, /data/homebrew/<title ID> over FTP
+# and /app0 to the title. NAME is a file in its models folder (or a full path
+# as the title sees it). Launch the title from the home screen once after
+# install; ShadowMountPlus lists it as TokenStation5.
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$root/scripts/env.sh"
 ftp="ftp://$PS5_HOST:$PS5_FTP_PORT"
-dir=$TS5_DIR
+id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["titleId"])' "$root/ps5/sce_sys/param.json")
+dir=${TS5_DIR:-/data/homebrew/$id}
 
 put_text() { printf '%s\n' "$2" | curl -sS --ftp-create-dirs -T - "$ftp$dir/$1"; }
-console_path() { case $1 in /*) echo "$1" ;; *) echo "$dir/models/$1" ;; esac; }
+# A model as the title sees it.
+console_path() { case $1 in /*) echo "$1" ;; *) echo "/app0/models/$1" ;; esac; }
 
 wait_api() {
     echo "ts5-ps5: waiting for http://$PS5_HOST:$PS5_API_PORT"
@@ -53,13 +56,13 @@ cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
     install)
-        id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["titleId"])' "$root/ps5/sce_sys/param.json")
         app="$root/build/ps5/$id"
         [ -f "$app/eboot.bin" ] || { echo "ts5-ps5: build it first: ps5/build.sh" >&2; exit 2; }
         # Files of a running title cannot be replaced.
         put_text quit "" 2> /dev/null && sleep 3 || true
+        # File by file: the models, args and logs in the folder stay.
         (cd "$app" && find . -type f | sort | while read -r f; do
-            curl -sS --ftp-create-dirs -T "$f" "$ftp/data/homebrew/$id/${f#./}"
+            curl -sS --ftp-create-dirs -T "$f" "$ftp$dir/${f#./}"
         done)
         curl -sS --ftp-create-dirs -T /dev/null "$ftp$dir/models/.keep"
         echo "ts5-ps5: installed. Launch TokenStation5 from the home screen."
