@@ -36,17 +36,27 @@ std::string base(const std::string &p) {
 }
 
 // What's free once a model is loaded or a job is done, so the log shows whether
-// anything stayed behind: the CPU's flexible memory, and the largest free run
-// of the direct memory the GPU allocates from.
+// anything stayed behind: the CPU's flexible memory, and the direct memory the
+// GPU allocates from, all its free runs added up (the largest alone hides what
+// a freed model left as smaller holes), with the largest run beside it.
 void log_memory(const std::string &when) {
-    size_t flex = 0, run = 0;
-    off_t at = 0;
+    size_t flex = 0, free_total = 0, largest = 0;
     const size_t pool = sceKernelGetDirectMemorySize();
     const bool fok = sceKernelAvailableFlexibleMemorySize(&flex) == 0;
-    const bool dok = sceKernelAvailableDirectMemorySize(0, (off_t)pool, 0x4000, &at, &run) == 0;
+    bool dok = false;
+    for (off_t start = 0; pool > 0 && start < (off_t)pool;) {
+        off_t at = 0;
+        size_t run = 0;
+        if (sceKernelAvailableDirectMemorySize(start, (off_t)pool, 0x4000, &at, &run) != 0 || run == 0) break;
+        dok = true;
+        free_total += run;
+        largest = std::max(largest, run);
+        start = at + (off_t)run;
+    }
     const double mib = 1024.0 * 1024.0;
-    printf("ts5-title: memory %s: flexible free %.0f MiB%s, direct free %.0f of %.0f MiB%s\n", when.c_str(),
-           flex / mib, fok ? "" : " (unknown)", run / mib, pool / mib, dok ? "" : " (unknown)");
+    printf("ts5-title: memory %s: flexible free %.0f MiB%s, direct free %.0f of %.0f MiB (largest run %.0f)%s\n",
+           when.c_str(), flex / mib, fok ? "" : " (unknown)", free_total / mib, pool / mib, largest / mib,
+           dok ? "" : " (unknown)");
 }
 
 }  // namespace
