@@ -43,6 +43,8 @@ the GPU check (the GPU's logits against ts5's CPU reference) on all four.
 - [ ] [#11](https://github.com/ThatRetiredDude/TokenStation5/pull/11) Memory probe payload and a fuller free-memory line (ready). Finding: the game's memory pool is 11.44 GiB and ts5 already gets all of it; closing other apps frees nothing.
 - [ ] [#14](https://github.com/ThatRetiredDude/TokenStation5/pull/14) Our own PS5 runtime, so the title can ship without the GPL (draft). The clean-room spec is written and the assessment is "same speed"; the code waits for a go. The default flips only after a clean launch, a passing GPU check and matching speeds on the console, then LICENSING.md changes.
 - [ ] Homebrew catalog listing (ps5-homebrew-catalog, ProsperoStore): waiting on a fork of the catalog repo.
+- [ ] Web search (approved 2026-10-14, being built on branch `claude/project-thread-mp3yju`): OpenAI tool calling in ts5 and which models support it, then a `web_search` tool that calls Tavily over HTTPS from the console (mbedTLS), with the key in `tavily.key` in the title's folder (and a field in the Settings page). Notes: `ps5-ai/websearch/WEB_SEARCH_FEASIBILITY.md` in the project files.
+- [ ] Voice chat. First a console audio test (approved 2026-10-14, being built): the pad's mic in, TV or pad speaker out. Then a chat box on the TV (typed on a keyboard or spoken), speech to text (whisper.cpp), text to speech (Kokoro) and a Settings page. Notes: `ps5-ai/voice/VOICE_FEASIBILITY.md` in the project files.
 
 ## Next
 
@@ -52,7 +54,6 @@ the GPU check (the GPU's logits against ts5's CPU reference) on all four.
 - [ ] An 8-bit KV cache within the 2% bar, so 8B models get long contexts.
 - [ ] Qwen 3's thinking: honor `enable_thinking` and `/no_think`.
 - [ ] More models: Gemma 3 12B, Qwen 3.5 4B and 9B, Gemma 4 E4B, Mistral Nemo 12B ([models.tsv](../models.tsv)).
-- [ ] Voice chat (proposed, not approved yet): a console audio probe (the pad's mic in, TV or pad speaker out), then speech to text (whisper.cpp), text to speech (Kokoro) and a Settings page. Feasibility notes: `ps5-ai/voice/VOICE_FEASIBILITY.md` in the project files.
 - [ ] Endpoint: a static IP or DHCP reservation, client configs (Open WebUI, Continue, opencode, Claude Code) in `docs/CLIENTS.md`, an optional API-key proxy in front of `:8081`, one command after each reboot.
 
 ## Done
