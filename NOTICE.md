@@ -83,6 +83,62 @@ Foundation", and its YaRN rotary embedding (in `ggml/src/ggml-cpu/ops.cpp`),
 `samples/jfk.wav` is from John F. Kennedy's inaugural address (1961), a US
 government work in the public domain.
 
+### Pronunciation data for the voice (`ps5/tts`)
+
+`ps5/tts/lexicon.bin` is made by `scripts/pack-g2p-lexicon.py` from two word
+lists, fetched at pinned commits and converted to our own format; the PS5
+title links it in with the voice. The text-to-phonemes code in `ps5/tts` is
+our own.
+
+| Data | What we use | License |
+| --- | --- | --- |
+| [misaki](https://github.com/hexgrad/misaki) `us_gold.json` (commit fba1236) | US English pronunciations in Kokoro's symbols, taken first. The reader's design (stress, endings, special words) follows misaki's `en.py`. | [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) |
+| [CMUdict](https://github.com/cmusphinx/cmudict) (commit 7479086) | words misaki's list lacks, converted from ARPAbet to misaki's symbols | BSD-style, below |
+| Kokoro-82M's phoneme vocabulary (its `config.json`, as in [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx)) | the 114 symbols every output is checked against | Apache-2.0 / MIT |
+
+The letter-to-sound rules for unknown words (`ps5/tts/spelling.cpp`) are our
+own, in the style of the public-domain NRL Report 7948 (1976). No eSpeak or
+other GPL/LGPL phonemizer code, rules or data are used. misaki's
+`us_silver.json` is left out (the packing script adds it with
+`--with-silver`). `scripts/g2p-agreement.py` runs misaki itself, with spaCy
+and num2words, on a PC to compare; none of those is in any binary.
+
+```
+Copyright (C) 1993-2015 Carnegie Mellon University. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+   The contents of this file are deemed to be source code.
+
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in
+   the documentation and/or other materials provided with the
+   distribution.
+
+This work was supported in part by funding from the Defense Advanced
+Research Projects Agency, the Office of Naval Research and the National
+Science Foundation of the United States of America, and by member
+companies of the Carnegie Mellon Sphinx Speech Consortium. We acknowledge
+the contributions of many volunteers to the expansion and improvement of
+this dictionary.
+
+THIS SOFTWARE IS PROVIDED BY CARNEGIE MELLON UNIVERSITY ``AS IS'' AND
+ANY EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL CARNEGIE MELLON UNIVERSITY
+NOR ITS EMPLOYEES BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
 ## In the PS5 title only
 
 The PS5 title (`eboot.bin` and `sce_module/libc.prx`) is built by
