@@ -29,7 +29,11 @@ ftp="ftp://$PS5_HOST:$PS5_FTP_PORT"
 id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["titleId"])' "$root/ps5/sce_sys/param.json")
 dir=${TS5_DIR:-/data/homebrew/$id}
 
-put_text() { printf '%s\n' "$2" | curl -sS --ftp-create-dirs -T - "$ftp$dir/$1"; }
+# A file for the title, whole: uploaded under another name, then renamed, since
+# the title can see a file the FTP server has made but not yet filled.
+put_text() {
+    printf '%s\n' "$2" | curl -sS --ftp-create-dirs -T - "$ftp$dir/$1.part" -Q "-RNFR $1.part" -Q "-RNTO $1"
+}
 # A model as the title sees it.
 console_path() { case $1 in /*) echo "$1" ;; *) echo "/app0/models/$1" ;; esac; }
 
