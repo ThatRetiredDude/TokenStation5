@@ -20,7 +20,14 @@ public:
     virtual int n_ctx() const = 0;
 };
 
+struct VkContext;
+
 Backend *make_cpu_backend(const Model &m, int n_ctx);
+// On Vulkan device `device`, with a device of its own.
 Backend *make_vk_backend(Model &m, const std::string &path, int n_ctx, int device, std::string &err);
+// On a device the process shares (vk_context.h); ctx must outlive it.
+Backend *make_vk_backend(VkContext *ctx, Model &m, const std::string &path, int n_ctx, std::string &err);
+// Whether the Vulkan backend has shaders for weights of this GGML type.
+bool vk_supports_type(uint32_t type);
 
 }  // namespace ts5

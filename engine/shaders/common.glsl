@@ -1,6 +1,7 @@
 // Shared helpers: extensions, byte access and the per-type "unit" dequantizer.
-// A unit is 32 consecutive values of a row: one block for F32/F16/Q4_0/Q8_0,
-// one eighth of a 256-value block for the K-quants.
+// A unit is 32 consecutive values of a row: one block for F32/F16 and the
+// 32-value quants (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0), one eighth of a 256-value
+// block for the K-quants.
 #extension GL_EXT_shader_8bit_storage : require
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
@@ -8,6 +9,9 @@
 #define T_F32 0
 #define T_F16 1
 #define T_Q4_0 2
+#define T_Q4_1 3
+#define T_Q5_0 6
+#define T_Q5_1 7
 #define T_Q8_0 8
 #define T_Q4_K 12
 #define T_Q5_K 13
@@ -35,6 +39,30 @@ void load_unit(uint rb, uint u, out float v[32]) {
         uint q = b8(o + 2 + l);
         v[l] = (float(q & 15u) - 8.0) * d;
         v[l + 16] = (float(q >> 4) - 8.0) * d;
+    }
+#elif QTYPE == T_Q4_1
+    uint o = rb + u * 20;
+    float d = h16(o), m = h16(o + 2);
+    for (uint l = 0; l < 16; l++) {
+        uint q = b8(o + 4 + l);
+        v[l] = float(q & 15u) * d + m;
+        v[l + 16] = float(q >> 4) * d + m;
+    }
+#elif QTYPE == T_Q5_0 || QTYPE == T_Q5_1
+#if QTYPE == T_Q5_0
+    uint o = rb + u * 22;
+    float d = h16(o), m = -16.0 * d;
+    uint h = o + 2;
+#else
+    uint o = rb + u * 24;
+    float d = h16(o), m = h16(o + 2);
+    uint h = o + 4;
+#endif
+    uint qh = b8(h) | (b8(h + 1) << 8) | (b8(h + 2) << 16) | (b8(h + 3) << 24);
+    for (uint l = 0; l < 16; l++) {
+        uint q = b8(h + 4 + l);
+        v[l] = float((q & 15u) | (((qh >> l) & 1u) << 4)) * d + m;
+        v[l + 16] = float((q >> 4) | (((qh >> (l + 16)) & 1u) << 4)) * d + m;
     }
 #elif QTYPE == T_Q8_0
     uint o = rb + u * 34;

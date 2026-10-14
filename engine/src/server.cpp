@@ -69,7 +69,11 @@ bool read_request(int fd, Request &r) {
 }
 
 std::string response(int code, const std::string &body, const char *type = "application/json") {
-    const char *msg = code == 200 ? "OK" : code == 404 ? "Not Found" : code == 400 ? "Bad Request" : "Error";
+    const char *msg = code == 200   ? "OK"
+                      : code == 404 ? "Not Found"
+                      : code == 400 ? "Bad Request"
+                      : code == 503 ? "Service Unavailable"
+                                    : "Error";
     char h[256];
     snprintf(h, sizeof h,
              "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
@@ -108,10 +112,11 @@ std::string usage_json(const GenStats &st) {
            ",\"total_tokens\":" + std::to_string(st.prompt_tokens + st.gen_tokens) + "}";
 }
 
-std::mutex gen_mu;
 int request_counter = 0;
 
-void handle(int fd, Engine &e, const std::string &model) {
+std::string health_body(const std::string &status) { return "{\"status\":" + json_escape(status) + "}"; }
+
+void handle(int fd, Server::State &state) {
     Request r;
     if (!read_request(fd, r)) { close(fd); return; }
     if (r.method == "OPTIONS") {
@@ -121,11 +126,34 @@ void handle(int fd, Engine &e, const std::string &model) {
         close(fd);
         return;
     }
+    // The engine of the moment; generations hold `gen` throughout, so it
+    // stays for the whole request.
+    std::unique_lock<std::mutex> lk(state.gen, std::defer_lock);
+    auto engine = [&]() -> Engine * {
+        if (!lk.owns_lock()) lk.lock();
+        return state.engine;
+    };
     if (r.path == "/health") {
-        send_all(fd, response(200, "{\"status\":\"ok\"}"));
+        // Answers at once: never waits for a generation.
+        bool loaded;
+        std::string why;
+        {
+            std::lock_guard<std::mutex> g(state.stats);
+            loaded = !state.model.empty();
+            why = state.unavailable;
+        }
+        send_all(fd, loaded ? response(200, health_body("ok")) : response(503, health_body(why)));
     } else if (r.path == "/v1/models" || r.path == "/models") {
-        send_all(fd, response(200, "{\"object\":\"list\",\"data\":[{\"id\":" + json_escape(model) +
-                                       ",\"object\":\"model\",\"owned_by\":\"tokenstation5\"}]}"));
+        std::string model;
+        {
+            std::lock_guard<std::mutex> g(state.stats);
+            model = state.model;
+        }
+        send_all(fd, response(200, "{\"object\":\"list\",\"data\":[" +
+                                       (model.empty() ? std::string()
+                                                      : "{\"id\":" + json_escape(model) +
+                                                            ",\"object\":\"model\",\"owned_by\":\"tokenstation5\"}") +
+                                       "]}"));
     } else if (r.method == "POST" && (r.path == "/v1/chat/completions" || r.path == "/v1/completions" ||
                                       r.path == "/chat/completions" || r.path == "/completions")) {
         Json req;
@@ -135,6 +163,19 @@ void handle(int fd, Engine &e, const std::string &model) {
             return;
         }
         const bool chat = r.path.find("chat") != std::string::npos;
+        Engine *ep = engine();
+        if (!ep) {
+            std::string why;
+            {
+                std::lock_guard<std::mutex> g(state.stats);
+                why = state.unavailable;
+            }
+            send_all(fd, response(503, error_body(why == "no model" ? "no model is loaded" : why)));
+            close(fd);
+            return;
+        }
+        Engine &e = *ep;
+        const std::string model = state.model;
         std::string prompt;
         if (chat) {
             std::vector<ChatMessage> msgs;
@@ -154,7 +195,10 @@ void handle(int fd, Engine &e, const std::string &model) {
         if (req["stop"].type == Json::STR) stops.push_back(req["stop"].s);
         for (auto &s : req["stop"].a) stops.push_back(s.str());
 
-        std::lock_guard<std::mutex> lk(gen_mu);
+        {
+            std::lock_guard<std::mutex> g(state.stats);
+            state.activity.generating = true;
+        }
         const std::string id = std::string(chat ? "chatcmpl-" : "cmpl-") + std::to_string(++request_counter);
         const long created = (long)time(nullptr);
         const std::vector<int32_t> toks = e.tok().encode(prompt, !chat || prompt.rfind("<|begin_of_text|>", 0) != 0);
@@ -201,6 +245,12 @@ void handle(int fd, Engine &e, const std::string &model) {
         };
         bool ok = e.generate(toks, sp, on_text, st, err);
         if (stopped) st.finish = "stop";
+        {
+            std::lock_guard<std::mutex> g(state.stats);
+            state.activity.generating = false;
+            state.activity.requests++;
+            state.activity.last = st;
+        }
         if (!ok) {
             if (stream) send_all(fd, "data: " + error_body(err) + "\n\ndata: [DONE]\n\n");
             else send_all(fd, response(500, error_body(err)));
@@ -257,47 +307,78 @@ int listen_on(const std::string &host, int port) {
 
 }  // namespace
 
-int serve(Engine &e, const std::string &model_name, const std::string &host, int port,
-          const std::function<void(int)> &on_listening) {
+bool Server::start(const std::string &host, int port, std::string &err) {
     in_addr probe{};
     if (inet_pton(AF_INET, host.c_str(), &probe) != 1) {
-        fprintf(stderr, "ts5: bad host %s (use a numeric address)\n", host.c_str());
-        return 1;
+        err = "bad host " + host + " (use a numeric address)";
+        return false;
     }
-    int s = listen_on(host, port);
-    if (s < 0) {
-        perror("ts5: bind/listen");
-        return 1;
+    sock_ = listen_on(host, port);
+    if (sock_ < 0) {
+        err = "cannot listen on port " + std::to_string(port) + ": " + strerror(errno);
+        return false;
     }
-    fprintf(stderr, "ts5: serving %s on http://%s:%d/v1\n", model_name.c_str(), host.c_str(), port);
-    if (on_listening) on_listening(port);
+    host_ = host;
+    port_ = port;
+    std::thread([this] { accept_loop(); }).detach();
+    return true;
+}
+
+void Server::set_engine(Engine *e, const std::string &model_name, const std::string &unavailable) {
+    std::lock_guard<std::mutex> lk(state_.gen);
+    std::lock_guard<std::mutex> g(state_.stats);
+    state_.engine = e;
+    state_.model = e ? model_name : std::string();
+    state_.unavailable = unavailable;
+}
+
+Server::Activity Server::activity() {
+    std::lock_guard<std::mutex> g(state_.stats);
+    return state_.activity;
+}
+
+void Server::accept_loop() {
     const int one = 1;
     while (true) {
-        int c = accept(s, nullptr, nullptr);
+        int c = accept(sock_, nullptr, nullptr);
         if (c < 0) {
             if (errno == EINTR || errno == ECONNABORTED) continue;
             // The console's network can drop (link down, a new DHCP lease) and
             // take the listening socket with it: listen again, once a second,
             // until it works, so a loaded model never ends up unreachable.
             fprintf(stderr, "ts5: accept failed (errno %d); listening again\n", errno);
-            close(s);
-            while ((s = listen_on(host, port)) < 0) std::this_thread::sleep_for(std::chrono::seconds(1));
-            fprintf(stderr, "ts5: listening again on port %d\n", port);
+            close(sock_);
+            while ((sock_ = listen_on(host_, port_)) < 0) std::this_thread::sleep_for(std::chrono::seconds(1));
+            fprintf(stderr, "ts5: listening again on port %d\n", port_);
             continue;
         }
         fcntl(c, F_SETFD, FD_CLOEXEC);
         setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-        std::thread([c, &e, model_name] {
+        std::thread([this, c] {
             // A request that fails (out of memory, say) ends its connection,
             // not the server.
             try {
-                handle(c, e, model_name);
+                handle(c, state_);
             } catch (const std::exception &ex) {
                 fprintf(stderr, "ts5: request failed: %s\n", ex.what());
                 close(c);
             }
         }).detach();
     }
+}
+
+int serve(Engine &e, const std::string &model_name, const std::string &host, int port,
+          const std::function<void(int)> &on_listening) {
+    static Server server;
+    std::string err;
+    if (!server.start(host, port, err)) {
+        fprintf(stderr, "ts5: %s\n", err.c_str());
+        return 1;
+    }
+    server.set_engine(&e, model_name);
+    fprintf(stderr, "ts5: serving %s on http://%s:%d/v1\n", model_name.c_str(), host.c_str(), port);
+    if (on_listening) on_listening(port);
+    for (;;) std::this_thread::sleep_for(std::chrono::hours(1));
 }
 
 }  // namespace ts5
