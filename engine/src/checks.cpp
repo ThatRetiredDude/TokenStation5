@@ -45,7 +45,9 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     bool ok;
     {
         Model cpu_model;
-        if (!cpu_model.open(m.gguf.path, err) || !cpu_model.load(nullptr, err)) return false;
+        // Opened, not loaded: the reference reads one layer's weights from the
+        // file at a time, so the check needs little memory beside the GPU's.
+        if (!cpu_model.open(m.gguf.path, err)) return false;
         std::unique_ptr<Backend> cpu(make_cpu_backend(cpu_model, n, true));
         if (progress) progress("running on the CPU");
         t = now_ms();
