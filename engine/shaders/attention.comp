@@ -1,0 +1,75 @@
+// Causal attention for one (head, token): online softmax over the f16 KV
+// cache in blocks of 128 keys. head_dim up to 256.
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) readonly buffer Qbuf { float Q[]; };
+layout(std430, binding = 1) readonly buffer KC { float16_t kc[]; };
+layout(std430, binding = 2) readonly buffer VC { float16_t vc[]; };
+layout(std430, binding = 3) writeonly buffer Obuf { float O[]; };
+
+layout(push_constant) uniform PC {
+    uint head_dim, n_head, n_head_kv, pos0, cache_off;
+    float scale;
+} pc;
+
+shared float qs[256];
+shared float p[128];
+shared float red[128];
+
+void main() {
+    const uint h = gl_WorkGroupID.x, t = gl_WorkGroupID.y, tid = gl_LocalInvocationID.x;
+    const uint HD = pc.head_dim;
+    const uint kh = h / (pc.n_head / pc.n_head_kv);
+    const uint q_stride = pc.n_head * HD, kv_stride = pc.n_head_kv * HD;
+    const uint n_keys = pc.pos0 + t + 1;
+    const uint kbase = pc.cache_off + kh * HD;
+
+    for (uint d = tid; d < HD; d += 128) qs[d] = Q[t * q_stride + h * HD + d] * pc.scale;
+    barrier();
+
+    float m = -1.0 / 0.0, l = 0.0, acc0 = 0.0, acc1 = 0.0;
+    for (uint kb = 0; kb < n_keys; kb += 128) {
+        const uint j = kb + tid;
+        float sc = -1.0 / 0.0;
+        if (j < n_keys) {
+            sc = 0.0;
+            const uint kr = kbase + j * kv_stride;
+            for (uint d = 0; d < HD; d++) sc += qs[d] * float(kc[kr + d]);
+        }
+        red[tid] = sc;
+        barrier();
+        for (uint k = 64; k > 0; k >>= 1) {
+            if (tid < k) red[tid] = max(red[tid], red[tid + k]);
+            barrier();
+        }
+        const float m_new = max(m, red[0]);
+        barrier();
+        const float pj = j < n_keys ? exp(sc - m_new) : 0.0;
+        p[tid] = pj;
+        red[tid] = pj;
+        barrier();
+        for (uint k = 64; k > 0; k >>= 1) {
+            if (tid < k) red[tid] += red[tid + k];
+            barrier();
+        }
+        const float corr = exp(m - m_new);
+        l = l * corr + red[0];
+        acc0 *= corr;
+        acc1 *= corr;
+        const uint nb = min(128u, n_keys - kb);
+        const uint vbase = kbase + kb * kv_stride;
+        for (uint jj = 0; jj < nb; jj++) {
+            const uint vr = vbase + jj * kv_stride;
+            if (tid < HD) acc0 += p[jj] * float(vc[vr + tid]);
+            if (tid + 128 < HD) acc1 += p[jj] * float(vc[vr + tid + 128]);
+        }
+        m = m_new;
+        barrier();
+    }
+    const uint ob = t * q_stride + h * HD;
+    if (tid < HD) O[ob + tid] = acc0 / l;
+    if (tid + 128 < HD) O[ob + tid + 128] = acc1 / l;
+}

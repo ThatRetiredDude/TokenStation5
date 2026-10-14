@@ -1,0 +1,23 @@
+// Y[t][:] = X[x_off + t][:] * rsqrt(mean(X^2) + eps) * W[:]
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Xbuf { float X[]; };
+layout(std430, binding = 1) readonly buffer Wbuf { float W[]; };
+layout(std430, binding = 2) writeonly buffer Ybuf { float Y[]; };
+layout(push_constant) uniform PC { uint n, x_row0; float eps; } pc;
+shared float red[256];
+
+void main() {
+    const uint t = gl_WorkGroupID.x, tid = gl_LocalInvocationID.x;
+    const uint xb = (pc.x_row0 + t) * pc.n, yb = t * pc.n;
+    float s = 0.0;
+    for (uint i = tid; i < pc.n; i += 256) s += X[xb + i] * X[xb + i];
+    red[tid] = s;
+    barrier();
+    for (uint k = 128; k > 0; k >>= 1) {
+        if (tid < k) red[tid] += red[tid + k];
+        barrier();
+    }
+    const float scale = inversesqrt(red[0] / float(pc.n) + pc.eps);
+    for (uint i = tid; i < pc.n; i += 256) Y[yb + i] = X[xb + i] * scale * W[i];
+}

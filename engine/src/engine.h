@@ -1,0 +1,47 @@
+// Generation on top of a backend: prompt reuse, sampling, stop handling.
+#pragma once
+#include <functional>
+#include <memory>
+#include <random>
+#include <string>
+#include <vector>
+
+#include "backend.h"
+#include "model.h"
+#include "tokenizer.h"
+
+namespace ts5 {
+
+struct SampleParams {
+    float temperature = 0.7f;
+    float top_p = 0.95f;
+    int top_k = 40;
+    int max_tokens = 512;
+    uint64_t seed = 0;  // 0: random
+};
+
+struct GenStats {
+    int prompt_tokens = 0, prompt_evaluated = 0, gen_tokens = 0;
+    double prompt_ms = 0, gen_ms = 0;
+    std::string finish = "length";
+};
+
+class Engine {
+public:
+    Engine(Model &m, Backend *b, Tokenizer &t) : m_(m), b_(b), t_(t) {}
+    // Calls on_text with each decoded piece; returning false stops early.
+    bool generate(const std::vector<int32_t> &prompt, const SampleParams &p,
+                  const std::function<bool(const std::string &)> &on_text, GenStats &st, std::string &err);
+    Tokenizer &tok() { return t_; }
+    Backend &backend() { return *b_; }
+
+private:
+    int32_t sample(std::vector<float> &logits, const SampleParams &p);
+    Model &m_;
+    std::unique_ptr<Backend> b_;
+    Tokenizer &t_;
+    std::vector<int32_t> cached_;  // tokens whose K/V are in the cache
+    std::mt19937_64 rng_{std::random_device{}()};
+};
+
+}  // namespace ts5

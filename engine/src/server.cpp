@@ -1,0 +1,257 @@
+#include "server.h"
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <mutex>
+#include <thread>
+
+#include "json.h"
+
+namespace ts5 {
+
+namespace {
+
+struct Request {
+    std::string method, path, body;
+};
+
+bool send_all(int fd, const std::string &s) {
+    size_t off = 0;
+    while (off < s.size()) {
+        ssize_t n = ::send(fd, s.data() + off, s.size() - off, MSG_NOSIGNAL);
+        if (n <= 0) return false;
+        off += (size_t)n;
+    }
+    return true;
+}
+
+bool read_request(int fd, Request &r) {
+    std::string buf;
+    char tmp[16384];
+    size_t hdr_end;
+    while ((hdr_end = buf.find("\r\n\r\n")) == std::string::npos) {
+        ssize_t n = recv(fd, tmp, sizeof tmp, 0);
+        if (n <= 0 || buf.size() > (1u << 20)) return false;
+        buf.append(tmp, (size_t)n);
+    }
+    std::string head = buf.substr(0, hdr_end);
+    size_t sp1 = head.find(' '), sp2 = head.find(' ', sp1 + 1);
+    if (sp1 == std::string::npos || sp2 == std::string::npos) return false;
+    r.method = head.substr(0, sp1);
+    r.path = head.substr(sp1 + 1, sp2 - sp1 - 1);
+    size_t q = r.path.find('?');
+    if (q != std::string::npos) r.path.resize(q);
+    size_t clen = 0;
+    for (size_t p = head.find("\r\n"); p != std::string::npos; p = head.find("\r\n", p + 2)) {
+        size_t e = head.find("\r\n", p + 2);
+        std::string line = head.substr(p + 2, e == std::string::npos ? std::string::npos : e - p - 2);
+        if (strncasecmp(line.c_str(), "content-length:", 15) == 0) clen = strtoul(line.c_str() + 15, nullptr, 10);
+    }
+    if (clen > (64u << 20)) return false;
+    r.body = buf.substr(hdr_end + 4);
+    while (r.body.size() < clen) {
+        ssize_t n = recv(fd, tmp, sizeof tmp, 0);
+        if (n <= 0) return false;
+        r.body.append(tmp, (size_t)n);
+    }
+    return true;
+}
+
+std::string response(int code, const std::string &body, const char *type = "application/json") {
+    const char *msg = code == 200 ? "OK" : code == 404 ? "Not Found" : code == 400 ? "Bad Request" : "Error";
+    char h[256];
+    snprintf(h, sizeof h,
+             "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
+             "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+             code, msg, type, body.size());
+    return h + body;
+}
+
+std::string error_body(const std::string &msg) {
+    return "{\"error\":{\"message\":" + json_escape(msg) + ",\"type\":\"invalid_request_error\"}}";
+}
+
+std::string content_text(const Json &c) {
+    if (c.type == Json::STR) return c.s;
+    std::string s;
+    if (c.type == Json::ARR)
+        for (auto &part : c.a)
+            if (part["type"].str() == "text") s += part["text"].str();
+    return s;
+}
+
+std::string timings_json(const GenStats &st) {
+    char b[512];
+    snprintf(b, sizeof b,
+             "{\"prompt_n\":%d,\"prompt_ms\":%.1f,\"prompt_per_second\":%.2f,"
+             "\"predicted_n\":%d,\"predicted_ms\":%.1f,\"predicted_per_second\":%.2f,\"cache_n\":%d}",
+             st.prompt_evaluated, st.prompt_ms, st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0,
+             st.gen_tokens, st.gen_ms, st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0,
+             st.prompt_tokens - st.prompt_evaluated);
+    return b;
+}
+
+std::string usage_json(const GenStats &st) {
+    return "{\"prompt_tokens\":" + std::to_string(st.prompt_tokens) +
+           ",\"completion_tokens\":" + std::to_string(st.gen_tokens) +
+           ",\"total_tokens\":" + std::to_string(st.prompt_tokens + st.gen_tokens) + "}";
+}
+
+std::mutex gen_mu;
+int request_counter = 0;
+
+void handle(int fd, Engine &e, const std::string &model) {
+    Request r;
+    if (!read_request(fd, r)) { close(fd); return; }
+    if (r.method == "OPTIONS") {
+        send_all(fd, "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n"
+                     "Access-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                     "Connection: close\r\n\r\n");
+        close(fd);
+        return;
+    }
+    if (r.path == "/health") {
+        send_all(fd, response(200, "{\"status\":\"ok\"}"));
+    } else if (r.path == "/v1/models" || r.path == "/models") {
+        send_all(fd, response(200, "{\"object\":\"list\",\"data\":[{\"id\":" + json_escape(model) +
+                                       ",\"object\":\"model\",\"owned_by\":\"tokenstation5\"}]}"));
+    } else if (r.method == "POST" && (r.path == "/v1/chat/completions" || r.path == "/v1/completions" ||
+                                      r.path == "/chat/completions" || r.path == "/completions")) {
+        Json req;
+        if (!Json::parse(r.body, req)) {
+            send_all(fd, response(400, error_body("invalid JSON")));
+            close(fd);
+            return;
+        }
+        const bool chat = r.path.find("chat") != std::string::npos;
+        std::string prompt;
+        if (chat) {
+            std::vector<ChatMessage> msgs;
+            for (auto &m : req["messages"].a) msgs.push_back({m["role"].str("user"), content_text(m["content"])});
+            prompt = e.tok().apply_chat(msgs);
+        } else {
+            prompt = req["prompt"].str();
+        }
+        SampleParams sp;
+        sp.temperature = (float)req["temperature"].num(0.7);
+        sp.top_p = (float)req["top_p"].num(0.95);
+        sp.top_k = (int)req["top_k"].num(40);
+        sp.max_tokens = (int)req["max_tokens"].num(req["max_completion_tokens"].num(512));
+        sp.seed = (uint64_t)req["seed"].num(0);
+        const bool stream = req["stream"].boolean(false);
+        std::vector<std::string> stops;
+        if (req["stop"].type == Json::STR) stops.push_back(req["stop"].s);
+        for (auto &s : req["stop"].a) stops.push_back(s.str());
+
+        std::lock_guard<std::mutex> lk(gen_mu);
+        const std::string id = std::string(chat ? "chatcmpl-" : "cmpl-") + std::to_string(++request_counter);
+        const long created = (long)time(nullptr);
+        const std::vector<int32_t> toks = e.tok().encode(prompt, !chat || prompt.rfind("<|begin_of_text|>", 0) != 0);
+        auto chunk_json = [&](const std::string &delta, const char *finish) {
+            std::string fin = finish ? std::string("\"") + finish + "\"" : "null";
+            if (chat)
+                return "{\"id\":\"" + id + "\",\"object\":\"chat.completion.chunk\",\"created\":" +
+                       std::to_string(created) + ",\"model\":" + json_escape(model) +
+                       ",\"choices\":[{\"index\":0,\"delta\":" +
+                       (finish ? std::string("{}") : "{\"content\":" + json_escape(delta) + "}") +
+                       ",\"finish_reason\":" + fin + "}]}";
+            return "{\"id\":\"" + id + "\",\"object\":\"text_completion\",\"created\":" + std::to_string(created) +
+                   ",\"model\":" + json_escape(model) + ",\"choices\":[{\"index\":0,\"text\":" + json_escape(delta) +
+                   ",\"finish_reason\":" + fin + "}]}";
+        };
+        if (stream)
+            send_all(fd, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
+                         "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n");
+        std::string text, err;
+        bool client_ok = true;
+        size_t sent = 0;  // bytes of `text` already streamed
+        bool stopped = false;
+        GenStats st;
+        auto on_text = [&](const std::string &piece) {
+            text += piece;
+            for (auto &s : stops) {
+                size_t at = s.empty() ? std::string::npos : text.find(s);
+                if (at != std::string::npos) { text.resize(at); stopped = true; }
+            }
+            if (stream) {
+                // Hold back text that could be the start of a stop string.
+                size_t hold = 0;
+                for (auto &s : stops)
+                    if (!s.empty())
+                    for (size_t k = std::min(s.size() - 1, text.size()); k > 0; k--)
+                        if (text.compare(text.size() - k, k, s, 0, k) == 0) { hold = std::max(hold, k); break; }
+                size_t upto = stopped ? text.size() : text.size() - hold;
+                if (upto > sent) {
+                    client_ok = send_all(fd, "data: " + chunk_json(text.substr(sent, upto - sent), nullptr) + "\n\n");
+                    sent = upto;
+                }
+            }
+            return client_ok && !stopped;
+        };
+        bool ok = e.generate(toks, sp, on_text, st, err);
+        if (stopped) st.finish = "stop";
+        if (!ok) {
+            if (stream) send_all(fd, "data: " + error_body(err) + "\n\ndata: [DONE]\n\n");
+            else send_all(fd, response(500, error_body(err)));
+        } else if (stream) {
+            std::string last = chunk_json("", st.finish.c_str());
+            last.insert(last.size() - 1, ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st));
+            send_all(fd, "data: " + last + "\n\ndata: [DONE]\n\n");
+        } else {
+            std::string body;
+            if (chat)
+                body = "{\"id\":\"" + id + "\",\"object\":\"chat.completion\",\"created\":" + std::to_string(created) +
+                       ",\"model\":" + json_escape(model) +
+                       ",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":" +
+                       json_escape(text) + "},\"finish_reason\":\"" + st.finish + "\"}]";
+            else
+                body = "{\"id\":\"" + id + "\",\"object\":\"text_completion\",\"created\":" + std::to_string(created) +
+                       ",\"model\":" + json_escape(model) + ",\"choices\":[{\"index\":0,\"text\":" + json_escape(text) +
+                       ",\"finish_reason\":\"" + st.finish + "\"}]";
+            body += ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st) + "}";
+            send_all(fd, response(200, body));
+        }
+        fprintf(stderr, "ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s\n", id.c_str(), st.prompt_tokens,
+                st.prompt_evaluated, st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0,
+                st.gen_tokens, st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0);
+    } else {
+        send_all(fd, response(404, error_body("not found: " + r.path)));
+    }
+    close(fd);
+}
+
+}  // namespace
+
+int serve(Engine &e, const std::string &model_name, const std::string &host, int port) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons((uint16_t)port);
+    if (inet_pton(AF_INET, host.c_str(), &a.sin_addr) != 1) {
+        fprintf(stderr, "ts5: bad host %s (use a numeric address)\n", host.c_str());
+        return 1;
+    }
+    if (bind(s, (sockaddr *)&a, sizeof a) != 0 || listen(s, 16) != 0) {
+        perror("ts5: bind/listen");
+        return 1;
+    }
+    fprintf(stderr, "ts5: serving %s on http://%s:%d/v1\n", model_name.c_str(), host.c_str(), port);
+    while (true) {
+        int c = accept(s, nullptr, nullptr);
+        if (c < 0) continue;
+        setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        std::thread([c, &e, model_name] { handle(c, e, model_name); }).detach();
+    }
+}
+
+}  // namespace ts5
