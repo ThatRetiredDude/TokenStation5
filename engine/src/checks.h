@@ -22,12 +22,13 @@ struct CheckResult {
 
 // The GPU's logits at every one of n positions against the fp32 CPU
 // reference, with its KV cache rounded to f16 as the GPU's is (so a real
-// model's large K values test the kernels, not the cache's precision). The GPU runs the first positions in one call, as for a prompt
-// (the tiled matmul from 9 tokens), and the last few (up to 4) one token per
-// call, as in generation. The reference loads the model file into host memory
-// of its own and frees it again; m and gpu are left as they were, apart from
-// gpu's KV cache. Passes when the largest difference is under 0.5% of the
-// largest logit.
+// model's large K values test the kernels, not the cache's precision). The
+// GPU runs the first positions in one call, as for a prompt (the tiled matmul
+// from 9 tokens), and the last few (up to 4) one token per call, as in
+// generation. The reference reads the weights from the model file one layer
+// at a time, so it needs a layer's worth of memory rather than a second copy
+// of the model; m and gpu are left as they were, apart from gpu's KV cache.
+// Passes when the largest difference is under 0.5% of the largest logit.
 bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string &err,
                const Progress &progress = nullptr);
 // "ts5 check: <model>, N tokens: max |diff| ..., ...: PASS|FAIL"
