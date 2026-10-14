@@ -24,7 +24,7 @@ struct Job {
     enum Kind { Serve, Check, Bench, Stop } kind = Serve;
     std::string path;
     int n_ctx = 8192;      // Serve
-    int n = 8;             // Check: tokens
+    int n = 16;            // Check: tokens
     int pp = 512, tg = 128;  // Bench
 };
 
