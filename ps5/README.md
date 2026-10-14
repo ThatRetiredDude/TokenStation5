@@ -69,7 +69,7 @@ the command that fetches them.
 
 | Command | What it does |
 | --- | --- |
-| `scripts/ts5-ps5.sh update` | a new build into the running title, which then restarts on it (no home-screen launch; untested on the console until it's been tried once) |
+| `scripts/ts5-ps5.sh update` | a new build into the running title, which then restarts on it (no home-screen launch) |
 | `scripts/ts5-ps5.sh fetch qwen3-8b` | download a `models.tsv` model and upload it to the title |
 | `scripts/ts5-ps5.sh serve NAME.gguf -c 16384` | serve that model from now on (writes `ts5.args`) and restart |
 | `scripts/ts5-ps5.sh check NAME.gguf` | the GPU check, printing its result line |
