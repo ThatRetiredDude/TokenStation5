@@ -1,17 +1,26 @@
 /* ts5-memprobe: a read-only snapshot of where the PS5's memory is.
  *
- * Sent to the jailbreak's ELF loader (port 9021). It changes nothing: it
- * reads the process table, the VM counters, the direct and flexible memory
- * calls as a payload sees them, and every sysctl whose name mentions memory
- * or budgets, then writes the lot to stdout and to /data/ts5-memprobe.txt
- * (FTP: scripts/ts5-ps5.sh memprobe fetches it).
+ * Sent to the jailbreak's ELF loader (port 9021). It reads the process
+ * table, the VM counters, the direct and flexible memory calls as a payload
+ * sees them, and every sysctl whose name mentions memory or budgets. Then it
+ * asks again with system privileges, which the console's own services have:
+ * the counters and sysctls, the physical free lists, and the size of each
+ * direct-memory device (/dev/dmem*), read through its size ioctl. The only
+ * thing it changes is its own process's credentials, put back before it
+ * exits; it reads no kernel memory itself. Everything goes to stdout and to
+ * /data/ts5-memprobe.txt (payloads/memprobe/run.sh fetches it).
  *
  * Copyright (C) 2026 ThatRetiredDude. GPL-3.0-or-later (links the PS5
  * payload SDK). */
 
 #include <sys/types.h>
+#include <sys/ioctl.h>
 #include <sys/sysctl.h>
 #include <sys/user.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -166,6 +175,64 @@ static void sysctls(void) {
     }
 }
 
+/* The direct-memory devices and what their size ioctl answers (the one
+ * libkernel's sceKernelGetDirectMemorySize uses on the PS4). */
+static void dmem_devices(void) {
+    say("\n## /dev entries\n");
+    DIR *d = opendir("/dev");
+    if (d) {
+        struct dirent *e;
+        int n = 0;
+        while ((e = readdir(d))) {
+            if (e->d_name[0] == '.') continue;
+            say("%s%s", n++ % 8 ? " " : "\n  ", e->d_name);
+        }
+        say("\n");
+        closedir(d);
+    } else {
+        say("can't list /dev: %s\n", strerror(errno));
+    }
+    say("\n## direct-memory devices\n");
+    for (int i = 0; i < 4; i++) {
+        char path[32];
+        snprintf(path, sizeof path, "/dev/dmem%d", i);
+        int fd = open(path, O_RDONLY);
+        if (fd < 0) fd = open(path, O_RDWR);
+        if (fd < 0) {
+            say("%s: open: %s\n", path, strerror(errno));
+            continue;
+        }
+        uint64_t size = 0;
+        if (ioctl(fd, 0x4008800a, &size) == 0)
+            say("%s: size %llu (%.1f MiB)\n", path, (unsigned long long)size, MiB(size));
+        else
+            say("%s: size ioctl: %s\n", path, strerror(errno));
+        close(fd);
+    }
+}
+
+/* FreeBSD's physical-memory reports, as strings, when the kernel has them. */
+static void phys(void) {
+    say("\n## physical memory reports\n");
+    const char *names[] = {"vm.phys_free", "vm.phys_segs", "vm.vmtotal"};
+    static char buf[65536];
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        size_t len = sizeof(buf) - 1;
+        if (sysctlbyname(names[i], buf, &len, NULL, 0)) {
+            say("%s: %s\n", names[i], strerror(errno));
+            continue;
+        }
+        if (i == 2) {  // struct vmtotal: print its words
+            say("%s:", names[i]);
+            for (size_t w = 0; w + 8 <= len && w < 128; w += 8) say(" %llu", *(unsigned long long *)(buf + w));
+            say("\n");
+            continue;
+        }
+        buf[len] = 0;
+        say("%s:\n%s\n", names[i], buf);
+    }
+}
+
 int main(void) {
     out = fopen("/data/ts5-memprobe.txt", "w");
     time_t now = time(NULL);
@@ -174,6 +241,26 @@ int main(void) {
     vm();
     processes();
     sysctls();
+
+    /* System privileges, as the SDK's own samples take them: the console's
+     * services' authid and every capability, on this process only. */
+    pid_t me = getpid();
+    uint64_t authid = kernel_get_ucred_authid(me);
+    uint8_t caps[16], all[16];
+    memset(all, 0xff, sizeof all);
+    if (authid && kernel_get_ucred_caps(me, caps) == 0 && kernel_set_ucred_authid(me, 0x4800000000010003l) == 0 &&
+        kernel_set_ucred_caps(me, all) == 0) {
+        say("\n# with system privileges\n");
+        pools();
+        vm();
+        phys();
+        dmem_devices();
+        sysctls();
+        kernel_set_ucred_caps(me, caps);
+        kernel_set_ucred_authid(me, authid);
+    } else {
+        say("\n# couldn't take system privileges\n");
+    }
     say("\n# done\n");
     if (out) fclose(out);
     return 0;
