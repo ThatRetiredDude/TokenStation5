@@ -44,6 +44,10 @@ echo "== one token per call (KV cache across calls)"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --step "$work/qwen3-Q4_0.gguf" "$work/llama-Q8_0.gguf"
 echo "== 300 tokens (prefill chunking, >128 keys per attention block)"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "$work/qwen2-Q8_0.gguf"
+echo "== ts5 check (GPU vs CPU in one command, as run on the console)"
+"$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null
+echo "== the PS5 title's main on this machine (ps5/host-test.sh)"
+"$engine/../ps5/host-test.sh" "$work/qwen2-Q4_0.gguf"
 
 if [ -n "${LLAMA_CPP:-}" ]; then
     bin="$LLAMA_CPP/build/bin"
