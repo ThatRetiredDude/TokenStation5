@@ -78,6 +78,7 @@ the command that fetches them.
 | `scripts/ts5-ps5.sh websearch tvly-...` | turn web search on with a [Tavily](https://tavily.com) key (adds `TAVILY_API_KEY` to `ts5.env`, keeping the rest) and restart; `off` removes it; with nothing, says whether it's on. See [docs/WEB_SEARCH.md](../docs/WEB_SEARCH.md) |
 | `scripts/ts5-ps5.sh press down cross` | controller buttons, as if pressed |
 | `scripts/ts5-ps5.sh screenshot` | the TV picture, as `screen.bmp` |
+| `scripts/ts5-ps5.sh audiotest` | the audio test: a tone on the TV, the controller speaker and its headset jack, then 8 s from the controller's mic (after a beep) played back; prints every return code and saves `audiotest.wav` |
 | `scripts/ts5-ps5.sh log` / `log prev` | the title's log, or the run before |
 | `scripts/ts5-ps5.sh restart` / `quit` | restart or close the title |
 
@@ -92,6 +93,7 @@ On the console, everything lives in the title's own folder,
 | `ts5.once` | a command to run at the next start, before `ts5.args` |
 | `ts5.env` | engine settings read at start, `NAME=VALUE` (the `getenv` calls in `engine/src/vk_backend.cpp`, and `TAVILY_API_KEY` for web search). The log shows a setting whose name has `KEY` or `TOKEN` in it as `(set)` |
 | `press`, `screenshot` | controller buttons; the next frame to `screen.bmp` |
+| `audiotest` | run the audio test (someone has to talk into the controller after the beep); the recording goes to `audiotest.wav` |
 | `quit`, `restart` | close or restart the title |
 | `ts5.log`, `ts5.prev.log`, `results.tsv` | its log, the run before's, and the check and speed results |
 | `LICENSE`, `NOTICE.md`, `SOURCE.txt` | from the build: the title's license (GPL-3.0), the third-party notices, and the commits of its source |
