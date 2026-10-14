@@ -26,7 +26,7 @@ public:
 
     // Threads for transcription: TS5_WHISPER_THREADS, or 6 (a title doesn't
     // get all 16 of the CPU's threads, and its own threads need some; the
-    // whisper test logs how many it sees).
+    // whisper test logs how many it sees), or fewer on a PC with fewer CPUs.
     static int default_threads();
 
     // Loads a model, replacing any loaded one; transcriptions then use
