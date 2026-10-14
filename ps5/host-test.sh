@@ -99,7 +99,8 @@ wait_log "^ts5-title: models: $name"
 press cross
 wait_health
 notified "$name ready at http://"
-grep -q "serve -m \"$home/models/$name\"" "$home/ts5.args" || fail "serving did not write ts5.args"
+grep -q "serve -m \"$home/models/$name\" -c auto " "$home/ts5.args" || fail "serving did not write ts5.args"
+wait_log "context [0-9]+ \(what fits\)$"
 reply=$(curl -sf "http://127.0.0.1:$port/v1/chat/completions" -H 'Content-Type: application/json' \
     -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}')
 grep -q '"completion_tokens":4' <<< "$reply" || fail "chat completion: $reply"
@@ -143,13 +144,14 @@ wait_health
 grep -q "TokenStation5" "$home/ts5.prev.log" || fail "no previous log"
 
 echo "== ts5.once: a one-off check at the next start, then the args file's model"
-echo "== ts5.env: engine settings (here every matmul tiled, even one token's)"
+echo "== ts5.env: engine settings (here every matmul tiled, even one token's, and an 8-bit KV cache)"
 echo "check -m $name -n 6" > "$home/ts5.once"
-echo "TS5_TILED_MIN=1 TS5_FAST_MATVEC=0" > "$home/ts5.env"
+echo "TS5_TILED_MIN=1 TS5_FAST_MATVEC=0 TS5_KV=q8" > "$home/ts5.env"
 : > "$home/restart"
 wait_down
 wait_log "^ts5-title: TS5_TILED_MIN=1$"
-wait_log "^ts5 check: .*, 6 tokens: .* PASS$"
+wait_log "KV cache .*\(q8, "
+wait_log "^ts5 check: .*, 6 tokens: .*, cpu [0-9]+ ms: PASS$"
 wait_health
 [ ! -e "$home/ts5.once" ] || fail "ts5.once was not consumed"
 rm "$home/ts5.env"

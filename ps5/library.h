@@ -20,10 +20,14 @@ struct ModelInfo {
     double params = 0;  // parameter count
     int layers = 0, ctx_train = 0;
     uint64_t weight_bytes = 0;
-    uint64_t kv_bytes_per_token = 0;  // f16 K and V over all layers
+    uint64_t kv_bytes_per_token = 0;  // K and V over all layers, in the cache type TS5_KV sets
+    uint64_t fixed_bytes = 0;         // GPU memory for weights and activations, as allocated
 
     // Weights plus a KV cache of n_ctx tokens.
     uint64_t memory_for(int n_ctx) const { return weight_bytes + kv_bytes_per_token * (uint64_t)n_ctx; }
+    // The context serving it with no -c (or -c auto) gets on a GPU with this
+    // much memory: what fits, at most the training context (0: not 1024).
+    int auto_ctx(uint64_t gpu_memory) const;
 };
 
 struct CheckRecord {

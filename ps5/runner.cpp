@@ -78,7 +78,8 @@ void log_memory(const std::string &when) {
 
 struct Runner::Loaded {
     std::string path, file, name;  // name: general.name, else the file name
-    int n_ctx = 0;
+    int asked_ctx = 0;  // as the job asked: 0 for what fits
+    int n_ctx = 0;      // as loaded
     ts5::Model model;
     ts5::Tokenizer tok;
     std::unique_ptr<ts5::Engine> engine;
@@ -173,7 +174,7 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
     auto l = std::make_unique<Loaded>();
     l->path = path;
     l->file = base(path);
-    l->n_ctx = n_ctx;
+    l->asked_ctx = n_ctx;
     if (!l->model.open(path, err) || !l->tok.load(l->model.gguf, err)) return nullptr;
     // The tokenizer keeps its own copy of the vocabulary; the file's arrays of
     // it (about 20 MB for 150k tokens) aren't read again.
@@ -187,7 +188,9 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
     const double t0 = now_s();
     ts5::Backend *b = ts5::make_vk_backend(ctx_, l->model, path, n_ctx, err);
     if (!b) return nullptr;
-    printf("ts5: %s backend ready in %.1f s, context %d\n", b->name(), now_s() - t0, n_ctx);
+    l->n_ctx = b->n_ctx();
+    printf("ts5: %s backend ready in %.1f s, context %d%s\n", b->name(), now_s() - t0, l->n_ctx,
+           n_ctx <= 0 ? " (what fits)" : "");
     l->engine = std::make_unique<ts5::Engine>(l->model, b, l->tok);
     log_memory("after loading " + l->file);
     return l;
@@ -205,7 +208,7 @@ void Runner::unload() {
 }
 
 bool Runner::serve(const std::string &path, int n_ctx) {
-    if (serving_ && serving_->path == path && serving_->n_ctx == n_ctx) return true;
+    if (serving_ && serving_->path == path && serving_->asked_ctx == n_ctx) return true;
     unload();
     const std::string file = base(path);
     {
@@ -230,7 +233,7 @@ bool Runner::serve(const std::string &path, int n_ctx) {
         std::lock_guard<std::mutex> lk(mu_);
         status_.serving = file;
         status_.serving_path = path;
-        status_.serving_ctx = n_ctx;
+        status_.serving_ctx = serving_->n_ctx;
         status_.phase = Status::Serving;
     }
     event("Serving " + serving_->name);
@@ -273,7 +276,7 @@ void Runner::run(const Job &job) {
         } else {
             if (serving_) {
                 resume_path = serving_->path;
-                resume_ctx = serving_->n_ctx;
+                resume_ctx = serving_->asked_ctx;
             }
             unload();
             set_step("loading the model");

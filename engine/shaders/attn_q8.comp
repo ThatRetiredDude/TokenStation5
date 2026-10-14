@@ -1,0 +1,5 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Attention over the 8-bit KV cache (see attn.glsl).
+#define KV_Q8
+#include "attn.glsl"

@@ -53,8 +53,8 @@ Per layer, 12 dispatches, each followed by a compute-to-compute barrier:
 
 1. `rmsnorm` (attention norm)
 2. `matmul` Q, K, V (one per projection)
-3. `qkv_post`: bias (Qwen2), per-head RMSNorm (Qwen3), RoPE (normal or NeoX), write K and V to the f16 cache
-4. `attn`: attention over the f16 cache (below), plus `attn_merge` when it splits the keys
+3. `qkv_post`: bias (Qwen2), per-head RMSNorm (Qwen3), RoPE (normal or NeoX), write K and V to the cache (f16 or 8-bit, below)
+4. `attn`: attention over the cache (below), plus `attn_merge` when it splits the keys
 5. `matmul` output projection, accumulating into the residual
 6. `rmsnorm` (FFN norm), `matmul` gate and up, `swiglu`, `matmul` down accumulating into the residual
 
@@ -106,9 +106,29 @@ weights are read from the file straight into GPU memory with no staging copy;
 discrete GPUs go through a 64 MiB staging buffer.
 
 Budget on the PS5 (RADV reports one 11.44 GiB heap when the title has 12 GiB of
-direct memory, per PS5LM): weights + f16 KV cache (`2 x layers x ctx x kv_heads x
-head_dim x 2 bytes`) + about 0.3 GiB of activations at 256 tokens per batch.
-Qwen 2.5 Coder 7B Q4_K_M at 32k context: 4.4 + 1.75 + 0.3 GiB.
+direct memory, per PS5LM): weights + KV cache + about 0.3 GiB of activations at
+256 tokens per batch. The KV cache is `2 x layers x ctx x kv_heads x head_dim`
+values, 2 bytes each in f16, or 1 byte plus an f16 scale per 32 values
+(1.06 bytes) with `TS5_KV=q8`. Qwen 2.5 Coder 7B Q4_K_M at 32k context: 4.4 +
+1.75 (f16) or 0.93 (q8) + 0.3 GiB.
+
+The 8-bit cache is q8_0's layout split in two: the values (4 to a word, as
+`attn` loads them) and the scales, which are the largest magnitude of the 32
+values over 127, rounded to f16; values round to nearest even. `qkv_post_q8`
+writes it, `attn_q8` reads it (both are the f16 shaders compiled with
+`KV_Q8`). It needs `attn` (the old attention kernel only reads f16) and heads
+a multiple of 32 wide, else the backend falls back to f16. On the test
+models it moves logits by about 0.3% of the largest one against an fp32
+cache, where the f16 cache moves them by 0.01%.
+
+Context 0 (`ts5 serve -c auto`, and the PS5 title's default) means as much as
+fits: after the weights and activations are allocated, the backend takes
+what is left of the GPU's memory less 1 GiB for everything else (the
+display, a GPU check's CPU reference), in multiples of 1024 tokens, up to the
+model's training context and what one buffer can address. On the PS5 that
+leaves about 5.4 GiB of cache beside a 7B or 8B Q4_K_M model: Qwen 2.5 Coder
+7B's full 32k, about 38k of Qwen3 8B's 40k (all of it with q8) and about 44k
+of Llama 3.1 8B (84k with q8).
 
 ## Correctness
 
@@ -128,7 +148,8 @@ llama.cpp. The Vulkan backend is checked against both:
   heads per KV head at head sizes 64 and 128, 4 per KV head, and head size 256.
 - `ts5 check` (the dashboard's square) compares the GPU with the CPU
   reference on the machine itself. The reference's logits are saved next to
-  the model (`MODEL.gguf.ts5ref`, 4 bytes x vocabulary x tokens) the first
+  the model (`MODEL.gguf.ts5ref`, or `MODEL.gguf.q8.ts5ref` for an 8-bit
+  cache; 4 bytes x vocabulary x tokens) the first
   time, so later checks of the same file run only the GPU; `--fresh` runs the
   CPU again. The file records the model's size and a hash of its first MiB,
   and a version that changes when the reference's math does.
