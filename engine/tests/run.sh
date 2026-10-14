@@ -108,6 +108,14 @@ TS5_ATTN_SPLITS=7 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 
 echo "== 8-bit KV cache (TS5_KV=q8), against the CPU's fp32 cache: about 0.3% of the largest logit"
 TS5_KV=q8 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 300 "${shapes[@]}"
 TS5_KV=q8 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 60 --step "${shapes[@]}"
+
+echo "== speculative decoding: the small verify batch, then draft-on output == draft-off output"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 5 "$work/qwen2-Q8_0.gguf" "$work/llama-Q8_0.gguf"
+rep="one two three one two three one two three one two three one two"
+TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-off.txt" 2> /dev/null
+TS5_DRAFT=7 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-on.txt" 2> "$work/sd-on.err"
+cmp "$work/sd-off.txt" "$work/sd-on.txt"
+grep -q "draft [0-9]*/[1-9]" "$work/sd-on.err"  # drafts were actually proposed
 echo "== ts5 check (GPU vs CPU in one command, as run on the console), then again on the saved answers"
 rm -f "$work"/qwen3-Q4_0.gguf*.ts5ref
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null
