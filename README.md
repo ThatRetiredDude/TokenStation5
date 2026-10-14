@@ -164,4 +164,4 @@ Keep it on a network you trust.
 
 [LICENSING.md](LICENSING.md) has the full map, including what the GPL means
 for the engine code inside the PS5 title, and
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists the third-party code.
+[NOTICE.md](NOTICE.md) lists the third-party code.

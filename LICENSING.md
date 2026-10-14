@@ -14,7 +14,7 @@ GPL-3.0 code and the engine does not.
 | Model weights (GGUF files) | Each model's own license | Not part of this repo. Qwen, Llama, Mistral and Gemma each have their own terms. |
 
 Third-party code that ends up in the source or the binaries, and the notices
-it needs, is listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+it needs, is listed in [NOTICE.md](NOTICE.md).
 
 ## What PolyForm Small Business allows
 
@@ -48,7 +48,7 @@ To keep the line clean:
 - Don't copy code from PS5_Vulkan, the payload SDK, PS5LM or any other GPL
   project into `engine/`, `scripts/` or `docs/`. GPL code goes in `ps5/` only.
 - MIT, BSD, Apache-2.0 and zlib code may go in `engine/` if its notice is
-  added to THIRD_PARTY_NOTICES.md.
+  added to NOTICE.md.
 - Accepting outside contributions to `engine/` needs a contributor agreement
   that lets the copyright holder relicense them, or commercial licenses can't
   cover their code.
