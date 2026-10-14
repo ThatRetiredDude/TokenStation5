@@ -63,7 +63,7 @@ Nothing critical open.
 - [ ] An 8-bit KV cache within the 2% bar, so 8B models get long contexts.
 - [ ] Qwen 3's thinking: honor `enable_thinking` and `/no_think`.
 - [ ] More models: Gemma 3 12B, Qwen 3.5 4B and 9B, Gemma 4 E4B, Mistral Nemo 12B ([models.tsv](../models.tsv)).
-- [ ] Faster cold loads: a model loads at the speed its file is read, about 92 MB/s on the console (Coder 7B's 4.68 GB in 50.7 s, the whole 51 s to ready). Find the read path's limit (the title's folder on exFAT through nullfs?) and read in bigger or parallel chunks.
+- [ ] Faster cold loads: a model loads at the speed its file is read, about 92 MB/s on the console (Coder 7B's 4.68 GB in 50.7 s, the whole 51 s to ready). [#29](https://github.com/ThatRetiredDude/TokenStation5/pull/29) (draft) reads through ordinary memory instead of straight into the GPU's, to A/B on the console; if that isn't it, the storage path is the limit and bigger or parallel reads are next.
 - [ ] Endpoint: a static IP or DHCP reservation, client configs (Open WebUI, Continue, opencode, Claude Code) in `docs/CLIENTS.md`, an optional API-key proxy in front of `:8081`, one command after each reboot.
 
 ## Done
