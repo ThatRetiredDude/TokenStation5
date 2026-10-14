@@ -15,6 +15,9 @@
 #                                          none: clear them
 #   scripts/ts5-ps5.sh press BUTTON...     press controller buttons (up down cross square ...)
 #   scripts/ts5-ps5.sh screenshot [FILE]   the TV picture, as a BMP (default screen.bmp)
+#   scripts/ts5-ps5.sh audiotest [FILE]    tones on the TV and the controller, then 5 s from its
+#                                          mic played back; prints the results, saves the
+#                                          recording (default audiotest.wav)
 #   scripts/ts5-ps5.sh log [prev]          the title's log (prev: the run before)
 #   scripts/ts5-ps5.sh restart | quit      restart or close the running title
 #   scripts/ts5-ps5.sh wait                wait for the API to answer
@@ -154,6 +157,18 @@ case $cmd in
         curl -sS "$ftp$dir/screen.bmp" -o "$out"
         echo "ts5-ps5: $out"
         ;;
+    audiotest)
+        out=${1:-audiotest.wav}
+        before=$(log_lines "^ts5-title: audio test: done$" | grep -c . || true)
+        put_text audiotest ""
+        echo "ts5-ps5: audio test started: listen for tones, then talk into the controller when the TV says so"
+        for _ in $(seq 1 30); do
+            sleep 2
+            [ "$(log_lines "^ts5-title: audio test: done$" | grep -c . || true)" -gt "$before" ] && break
+        done
+        log_lines "^ts5-title: audio test: " | awk '/audio test: start/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; i++) print line[i] }'
+        curl -sSf "$ftp$dir/audiotest.wav" -o "$out" 2> /dev/null && echo "ts5-ps5: $out" || true
+        ;;
     log)
         curl -sS "$ftp$dir/ts5${1:+.$1}.log"
         ;;
@@ -165,7 +180,7 @@ case $cmd in
         wait_api
         ;;
     *)
-        sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac
