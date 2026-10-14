@@ -253,6 +253,47 @@ std::string render_results(ToolFormat f, const std::vector<std::string> &results
     return s;
 }
 
+// The tags a Hermes model wraps a call in. <tool_call> is what the templates
+// teach; Qwen 2.5 Coder often writes <tools> (seen on the console) and the
+// others turn up too, as in llama.cpp's Hermes parser.
+const char *const kHermesTags[][2] = {
+    {"<tool_call>", "</tool_call>"}, {"<tools>", "</tools>"}, {"<tool>", "</tool>"},
+    {"<function_call>", "</function_call>"}};
+
+// The first call tag at or after pos: its index in kHermesTags, or -1.
+int find_hermes_tag(const std::string &text, size_t pos, size_t &at) {
+    int best = -1;
+    at = std::string::npos;
+    for (int i = 0; i < 4; i++) {
+        size_t p = text.find(kHermesTags[i][0], pos);
+        if (p < at) at = p, best = i;
+    }
+    return best;
+}
+
+// Calls written as nothing but JSON objects, maybe inside a ```json fence.
+bool calls_from_objects(const std::string &text, std::vector<ToolCall> &calls) {
+    std::string s = strip(text);
+    if (starts(s, "```")) {
+        size_t nl = s.find('\n');
+        if (nl == std::string::npos || !ends(s, "```")) return false;
+        s = strip(s.substr(nl + 1, s.size() - 3 - nl - 1));
+    }
+    std::vector<ToolCall> out;
+    size_t i = 0;
+    while (i < s.size() && s[i] == '{') {
+        size_t e = object_end(s, i);
+        ToolCall call;
+        if (e == std::string::npos || !call_from_json(s.substr(i, e - i), call)) return false;
+        out.push_back(call);
+        i = s.find_first_not_of(" \t\r\n;,", e);
+        if (i == std::string::npos) i = s.size();
+    }
+    if (i != s.size() || out.empty()) return false;
+    calls.insert(calls.end(), out.begin(), out.end());
+    return true;
+}
+
 ParsedTurn parse_turn(ToolFormat f, const std::string &text) {
     ParsedTurn r;
     r.content = text;
@@ -266,18 +307,21 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text) {
         std::string content = text.substr(0, from);
         size_t pos = from;
         while (true) {
-            size_t p = text.find("<tool_call>", pos);
-            if (p == std::string::npos) break;
-            size_t q = text.find("</tool_call>", p);
+            size_t p;
+            int tag = find_hermes_tag(text, pos, p);
+            if (tag < 0) break;
+            const std::string open = kHermesTags[tag][0], close = kHermesTags[tag][1];
+            size_t q = text.find(close, p);
             size_t body_end = q == std::string::npos ? text.size() : q;
-            size_t next = q == std::string::npos ? text.size() : q + 12;
-            ToolCall call;
+            size_t next = q == std::string::npos ? text.size() : q + close.size();
             content += text.substr(pos, p - pos);
-            if (call_from_json(text.substr(p + 11, body_end - p - 11), call)) r.calls.push_back(call);
-            else content += text.substr(p, next - p);
+            if (!calls_from_objects(text.substr(p + open.size(), body_end - p - open.size()), r.calls))
+                content += text.substr(p, next - p);
             pos = next;
         }
         content += text.substr(pos);
+        // No tags: a reply that is only a call object.
+        if (r.calls.empty() && calls_from_objects(text.substr(from), r.calls)) content = text.substr(0, from);
         if (!r.calls.empty()) r.content = rstrip(content);
     } else if (f == ToolFormat::LLAMA3) {
         std::string s = strip(text);
@@ -308,13 +352,22 @@ size_t content_prefix(ToolFormat f, const std::string &text) {
             if (from == std::string::npos) return text.size();
             from += 8;
         }
-        size_t p = text.find("<tool_call>", from);
-        if (p != std::string::npos) return p;
-        // Hold back what could be the start of "<tool_call>".
-        const std::string tag = "<tool_call>";
-        for (size_t k = std::min(tag.size() - 1, text.size() - from); k > 0; k--)
-            if (text.compare(text.size() - k, k, tag, 0, k) == 0) return text.size() - k;
-        return text.size();
+        size_t p;
+        if (find_hermes_tag(text, from, p) >= 0) return p;
+        // A reply that opens with { or ``` may be a bare call: hold it all.
+        size_t i = text.find_first_not_of(kSpace, from);
+        if (i != std::string::npos && (text[i] == '{' || text[i] == '`')) return from;
+        // Hold back what could be the start of a call tag.
+        size_t hold = text.size();
+        for (auto &t : kHermesTags) {
+            const std::string tag = t[0];
+            for (size_t k = std::min(tag.size() - 1, text.size() - from); k > 0; k--)
+                if (text.compare(text.size() - k, k, tag, 0, k) == 0) {
+                    hold = std::min(hold, text.size() - k);
+                    break;
+                }
+        }
+        return hold;
     }
     if (f == ToolFormat::LLAMA3) {
         size_t i = text.find_first_not_of(kSpace);
