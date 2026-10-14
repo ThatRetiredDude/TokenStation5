@@ -17,6 +17,7 @@ struct CheckResult {
     int n = 0, same_top = 0, worst = 0;  // worst: the position of max_diff
     double max_diff = 0, rel = 0, gpu_ms = 0, cpu_ms = 0;
     bool pass = false;
+    bool saved = false;  // the CPU's logits came from the model's saved answers
     std::string backend;
 };
 
@@ -29,8 +30,11 @@ struct CheckResult {
 // at a time, so it needs a layer's worth of memory rather than a second copy
 // of the model; m and gpu are left as they were, apart from gpu's KV cache.
 // Passes when the largest difference is under 0.5% of the largest logit.
+// The reference's logits are saved next to the model (MODEL.ts5ref) the first
+// time, and later checks of as many tokens or fewer compare against those
+// instead of running the CPU again; fresh: run the CPU anyway.
 bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string &err,
-               const Progress &progress = nullptr);
+               const Progress &progress = nullptr, bool fresh = false);
 // "ts5 check: <model>, N tokens: max |diff| ..., ...: PASS|FAIL"
 std::string check_line(const std::string &model, const CheckResult &r);
 
@@ -38,6 +42,8 @@ struct BenchResult {
     int pp = 0, tg = 0;
     double pp_tps = 0, tg_tps = 0;
     std::string backend;
+    // With TS5_PROFILE=1: the GPU's time per kernel in each part (else empty).
+    std::string pp_profile, tg_profile;
 };
 
 // Prompt processing over pp tokens in chunks of 256, then tg tokens
@@ -47,5 +53,7 @@ bool run_bench(const Model &m, Backend &b, int pp, int tg, BenchResult &r, std::
                const Progress &progress = nullptr);
 // A markdown table: header, rule and one row.
 std::string bench_table(const std::string &model, const BenchResult &r);
+// The profiles, if any: "prompt, GPU time ...", "generation, ...".
+std::string bench_profile(const BenchResult &r);
 
 }  // namespace ts5

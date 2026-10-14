@@ -35,7 +35,7 @@ struct Args {
     std::string cmd, model, prompt, out, host = "0.0.0.0", backend;
     int port = 8081, n_ctx = 8192, n_predict = 256, pp = 512, tg = 128, device = 0;
     float temp = 0.7f;
-    bool chat = false, step = false, n_set = false;
+    bool chat = false, step = false, n_set = false, fresh = false;
     std::vector<int32_t> tokens;
 };
 
@@ -50,7 +50,7 @@ int usage() {
             "  serve: --host ADDR --port N\n"
             "  run:   -p PROMPT [--chat] [-n N] [--temp T]\n"
             "  bench: --pp N --tg N\n"
-            "  check: [-n TOKENS]\n"
+            "  check: [-n TOKENS] [--fresh]  (--fresh: run the CPU even if its answers are saved)\n"
             "  logits: -o FILE TOKENS...\n");
     return 2;
 }
@@ -84,6 +84,7 @@ bool parse(int argc, char **argv, Args &a) {
         else if (s == "--device") a.device = atoi(next().c_str());
         else if (s == "--chat") a.chat = true;
         else if (s == "--step") a.step = true;
+        else if (s == "--fresh") a.fresh = true;
         else if (!s.empty() && (isdigit((unsigned char)s[0]))) a.tokens.push_back(atoi(s.c_str()));
         else ok = false;
     }
@@ -170,7 +171,10 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     if (a.cmd == "check") {
         if (a.backend == "cpu") return usage();
         CheckResult r;
-        if (!run_check(model, *be, a.n_ctx, r, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
+        if (!run_check(model, *be, a.n_ctx, r, err, nullptr, a.fresh)) {
+            fprintf(stderr, "ts5: %s\n", err.c_str());
+            return 1;
+        }
         printf("%s\n", check_line(basename_of(a.model), r).c_str());
         return r.pass ? 0 : 1;
     }
@@ -178,6 +182,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         BenchResult r;
         if (!run_bench(model, *be, a.pp, a.tg, r, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
         printf("%s\n", bench_table(basename_of(a.model), r).c_str());
+        fputs(bench_profile(r).c_str(), stdout);
         return 0;
     }
     if (a.cmd == "run") {

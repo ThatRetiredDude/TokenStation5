@@ -110,6 +110,7 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
     for (uint32_t i = 0; i < nq; i++)
         if (qf[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { c->queue_family = i; break; }
     if (c->queue_family == UINT32_MAX) { fail(c, err, "no compute queue"); return nullptr; }
+    c->timestamp_bits = qf[c->queue_family].timestampValidBits;
 
     VkPhysicalDeviceVulkan11Features f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
     VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};

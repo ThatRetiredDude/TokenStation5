@@ -50,7 +50,7 @@ The full plan is in [engine/DESIGN.md](engine/DESIGN.md).
 | OpenAI API | ✅ `/v1/chat/completions` (streaming), `/v1/completions`, `/v1/models` |
 | PS5 title | ✅ Runs on a real PS5 as **TokenStation5** (`PPSA99555`). The GPU check passes on the console, and the API serves the home network |
 | TV dashboard | ✅ Pick, check, benchmark and serve models with the controller, on the TV |
-| PS5 kernel tuning | 🔨 In progress: prompts read 3 to 5 times faster and generation 1.6 times faster than the first console build. Attention is next |
+| PS5 kernel tuning | 🔨 In progress: prompts read 6 to 7.5 times faster and generation about 2.2 times faster than the first console build. The feed-forward matmuls are next |
 | Gemma 3, Qwen 3.5, Gemma 4 | 📋 Planned |
 
 ## On the console today
@@ -61,23 +61,28 @@ ran there, before any kernel tuning:
 | Model | GPU check | Prompt tok/s | Generation tok/s | Load | GPU memory |
 | --- | :---: | ---: | ---: | ---: | ---: |
 | Qwen 2.5 0.5B Q8_0 | ✅ | **2641** | **98** | 8 s | |
-| Llama 3.2 3B Q4_K_M | ✅ | **261** (78) | **53** (36) | 22 s | 1.9 + 0.9 GiB |
-| Qwen 2.5 Coder 7B Q4_K_M | ✅ | **168** (31) | **35** (21) | 51 s | 4.4 + 0.4 GiB |
-| Qwen 3 8B Q4_K_M | ✅ | **132** (29) | **30** (19) | 55 s | 4.7 + 1.1 GiB |
-| Llama 3.1 8B Q4_K_M | ✅ | **139** (28.5) | **31.5** (19.7) | 54 s | 4.6 + 1.0 GiB |
+| Llama 3.2 3B Q4_K_M | ✅ | **473** (78) | **82** (36) | 22 s | 1.9 + 0.9 GiB |
+| Qwen 2.5 Coder 7B Q4_K_M | ✅ | **234** (31) | **45** (21) | 51 s | 4.4 + 0.4 GiB |
+| Qwen 3 8B Q4_K_M | ✅ | **211** (29) | **41** (19) | 55 s | 4.7 + 1.1 GiB |
+| Llama 3.1 8B Q4_K_M | ✅ | **213** (28.5) | **42** (19.7) | 54 s | 4.6 + 1.0 GiB |
 
 The GPU check runs the same prompt through the console's GPU and through
-ts5's CPU reference, and compares the logits at every position. Prompt and
-generation speeds are `ts5 bench` (512-token prompt, 128 generated tokens).
-Load is how long a model takes to get ready. GPU memory is weights plus
-the f16 KV cache.
+ts5's CPU reference, and compares the logits at every position. The first
+check of a model saves the CPU's answers next to it, so later checks run only
+the GPU and take about a second. Prompt and generation speeds are `ts5 bench`
+(512-token prompt, 128 generated tokens); the 0.5B row is from the build
+before attention was rewritten. Load is how long a model takes to get ready.
+GPU memory is weights plus the f16 KV cache.
 
-The tuned kernels read prompts 3 to 5 times faster than the first console
-build and generate about 1.6 times faster, with the same answers. Generation
-has the most room left: 7B streams its weights at about 155 GiB/s, a third of
-the GPU's bandwidth, and on Llama 3.2 3B the llama.cpp port still generates
-faster (124 tok/s to ts5's 53). Attention is next: it runs one workgroup per
-head, which slows generation as the context grows.
+The tuned kernels read prompts 6 to 7.5 times faster than the first console
+build and generate 2.1 to 2.3 times faster, with the same answers. Long
+prompts gained the most from the new attention: after a 4,096-token prompt,
+Qwen 2.5 Coder 7B reads at 147 tok/s and generates at 36, where the build
+before managed 41 and 12. Generation still has room: 7B streams its weights
+at about 200 GiB/s, under half the GPU's bandwidth, and on Llama 3.2 3B the
+llama.cpp port still generates faster (124 tok/s to ts5's 82). The
+feed-forward matmuls are next: they take two thirds of the GPU's time while
+generating (`TS5_PROFILE=1` prints the split).
 
 [PS5LM Plus](https://github.com/abhi245y/PS5LM), a llama.cpp port, stays on
 the console as the baseline ts5 has to beat.
