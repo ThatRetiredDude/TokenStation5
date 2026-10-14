@@ -34,7 +34,7 @@ ts5's CPU reference) on all four.
 
 ## Critical
 
-- [ ] Keep the PS5 out of rest mode while TokenStation5 runs ([#16](https://github.com/ThatRetiredDude/TokenStation5/pull/16), merged). Its idle timer counts only controller input, not API requests or jobs: on 2026-10-14 it went into rest mode at 18:36 UTC in the middle of unattended speed tests (the jailbreak, ftpsrv and the title survived and resumed). The title now calls `sceSystemServicePowerTick` once a minute and darkens the TV itself after 10 idle minutes. Its log line is confirmed on the console; what's left is a 90-minute run with nobody touching the controller.
+Nothing critical open.
 
 ## Open
 
@@ -63,6 +63,7 @@ ts5's CPU reference) on all four.
 - [ ] Qwen 3's thinking: honor `enable_thinking` and `/no_think`.
 - [ ] More models: Gemma 3 12B, Qwen 3.5 4B and 9B, Gemma 4 E4B, Mistral Nemo 12B ([models.tsv](../models.tsv)).
 - [ ] Memory over many model reloads: after a fresh launch Coder 7B leaves 4528 MiB of direct memory free, and about 900 MiB less after some 10 bench reloads in one run of the title. With #11's fuller line, the largest free run equals the total free, so it isn't fragmentation: something isn't given back when a model unloads, about 90 MiB a reload. Next: #26 logs the driver's buffers around each load. Not a leak: the kernels builds leave 1792 MiB less free after loading Coder 7B (4528 vs 6320) because they serve 32k tokens of context, and that's exactly its f16 KV cache.
+- [ ] Faster cold loads: a model loads at the speed its file is read, about 92 MB/s on the console (Coder 7B's 4.68 GB in 50.7 s, the whole 51 s to ready). Find the read path's limit (the title's folder on exFAT through nullfs?) and read in bigger or parallel chunks.
 - [ ] Endpoint: a static IP or DHCP reservation, client configs (Open WebUI, Continue, opencode, Claude Code) in `docs/CLIENTS.md`, an optional API-key proxy in front of `:8081`, one command after each reboot.
 
 ## Done
@@ -85,7 +86,7 @@ ts5's CPU reference) on all four.
 - [x] The 2026-10-14 "crash" diagnosed from the logs: rest mode, not a crash.
 - [x] Console audio from the title: the DualSense mic in, TV and controller speaker out ([#19](https://github.com/ThatRetiredDude/TokenStation5/pull/19)). libSceAudioOut and libSceAudioIn have to be imported directly; loaded at run time, their symbols aren't found.
 - [x] [#11](https://github.com/ThatRetiredDude/TokenStation5/pull/11) Memory probe payload and a fuller free-memory line. Finding: the game's memory pool is 11.44 GiB and ts5 already gets all of it; closing other apps frees nothing.
-- [x] [#16](https://github.com/ThatRetiredDude/TokenStation5/pull/16) Keep-awake: `sceSystemServicePowerTick` once a minute, and a dark TV after 10 idle minutes (the 90-minute check is under Critical).
+- [x] [#16](https://github.com/ThatRetiredDude/TokenStation5/pull/16) Keep-awake: `sceSystemServicePowerTick` once a minute, and a dark TV after 10 idle minutes. Passed the 90-minute check on 2026-10-14: 94 minutes with nobody touching the controller (21:17 to 22:51 UTC), through restarts and new builds, and no rest mode (it had gone to sleep at 18:36 UTC mid-job before).
 - [x] Generation at 70% of the GPU's 448 GB/s: Coder 7B at 69 tok/s streams about 323 GB/s (72%), with #15 and #23.
 
 ## Risks
