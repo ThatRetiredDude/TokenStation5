@@ -6,6 +6,7 @@
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -205,6 +206,10 @@ public:
         }
         return s;
     }
+
+    // Bytes an auto-fit context (n_ctx 0) keeps free beyond its usual 1 GiB:
+    // the budget of a second backend loaded after this one (a draft model).
+    void set_fit_reserve(uint64_t bytes) { fit_reserve_ = bytes; }
 
     bool init(const std::string &path, std::string &err) {
         if (!init_device(err)) return false;
@@ -443,6 +448,9 @@ private:
     // One buffer per tensor, filled straight from the file when the memory is
     // host-visible (unified memory), else through a staging buffer.
     bool upload_weights(const std::string &path, std::string &err) {
+        // The read rate decides whether a slow model load is the storage or
+        // the code; it is printed once per load.
+        const auto lt0 = std::chrono::steady_clock::now();
         FILE *f = fopen(path.c_str(), "rb");
         if (!f) { err = "cannot open " + path; return false; }
         Buf staging;
@@ -467,6 +475,9 @@ private:
             weight_bytes_ += t.nbytes;
         }
         fclose(f);
+        const double ls = std::chrono::duration<double>(std::chrono::steady_clock::now() - lt0).count();
+        fprintf(stderr, "ts5: weights %.2f GB read in %.1f s (%.0f MB/s)\n", weight_bytes_ / 1e9, ls,
+                ls > 0 ? weight_bytes_ / 1e6 / ls : 0.0);
         return true;
     }
 
@@ -496,7 +507,7 @@ private:
             auto fit = [&](KvType t) {
                 const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * hp_.n_layer * KVD;
                 const int cap = (int)std::min<uint64_t>(train, props_.limits.maxStorageBufferRange / per_buf);
-                return fit_context(ctx_->device_memory(), allocated_, kv_bytes_per_token(hp_, t), cap);
+                return fit_context(ctx_->device_memory(), allocated_ + fit_reserve_, kv_bytes_per_token(hp_, t), cap);
             };
             const int f16 = fit(KvType::F16);
             if (kv_ == KvType::Q8 && f16_reaches(f16, train)) {
@@ -868,6 +879,7 @@ private:
     std::vector<Arena> arenas_;
     std::vector<VkBuffer> all_bufs_;
     VkDeviceSize allocated_ = 0;
+    uint64_t fit_reserve_ = 0;  // set_fit_reserve
     uint64_t weight_bytes_ = 0;
     int layers_per_submit_ = 0;
     // Matmuls of at least this many tokens use the tiled kernel (TS5_TILED_MIN).
@@ -924,8 +936,10 @@ private:
 
 }  // namespace
 
-Backend *make_vk_backend(VkContext *ctx, Model &m, const std::string &path, int n_ctx, std::string &err) {
+Backend *make_vk_backend(VkContext *ctx, Model &m, const std::string &path, int n_ctx, std::string &err,
+                         uint64_t fit_reserve) {
     auto *b = new VkBackend(ctx, false, m, n_ctx);
+    b->set_fit_reserve(fit_reserve);
     if (!b->init(path, err)) {
         delete b;
         return nullptr;

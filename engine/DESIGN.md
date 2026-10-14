@@ -172,6 +172,17 @@ dots them with every token's x. The batch's x (at most 8 tokens) sits well
 under the 4 MB L2, so re-reading it per token is cheap; the weight stream,
 which decode is bound by, is paid once for the whole batch.
 
+When `TS5_DRAFT_MODEL` names a smaller GGUF with the same vocabulary (for
+Qwen 2.5 Coder 7B, a Qwen 2.5 0.5B), steps where the lookup finds nothing
+draft that model's greedy continuation instead: its own cache is caught up to
+the confirmed history in one batch, then it extends one token at a time, and
+the big model verifies the batch as usual. The acceptance walk keeps the
+output distribution for any draft source, so a drafter changes speed, never
+output. Unlike the free lookup it costs real forwards (a 0.5B is roughly a
+tenth of a 7B token), so the lookup still serves echo spans first and the
+adaptive draft length throttles both. A drafter that fails logs once and
+turns itself off; generation continues on lookup alone.
+
 ## Memory
 
 Every buffer is sub-allocated from 1 GiB blocks. Host-visible device-local
