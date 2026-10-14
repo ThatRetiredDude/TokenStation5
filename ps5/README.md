@@ -77,6 +77,7 @@ the command that fetches them.
 | `scripts/ts5-ps5.sh env TS5_TILED_MIN=16` | engine settings (writes `ts5.env`) and restart; with none, clears them |
 | `scripts/ts5-ps5.sh press down cross` | controller buttons, as if pressed |
 | `scripts/ts5-ps5.sh screenshot` | the TV picture, as `screen.bmp` |
+| `scripts/ts5-ps5.sh audiotest` | the audio test: a tone on the TV, the controller speaker and its headset jack, then 5 s from the controller's mic played back; prints every return code and saves `audiotest.wav` |
 | `scripts/ts5-ps5.sh log` / `log prev` | the title's log, or the run before |
 | `scripts/ts5-ps5.sh restart` / `quit` | restart or close the title |
 
@@ -91,6 +92,7 @@ On the console, everything lives in the title's own folder,
 | `ts5.once` | a command to run at the next start, before `ts5.args` |
 | `ts5.env` | engine settings read at start, `NAME=VALUE` (the `getenv` calls in `engine/src/vk_backend.cpp`) |
 | `press`, `screenshot` | controller buttons; the next frame to `screen.bmp` |
+| `audiotest` | run the audio test (someone has to talk into the controller when the TV says so); the recording goes to `audiotest.wav` |
 | `quit`, `restart` | close or restart the title |
 | `ts5.log`, `ts5.prev.log`, `results.tsv` | its log, the run before's, and the check and speed results |
 | `LICENSE`, `NOTICE.md`, `SOURCE.txt` | from the build: the title's license (GPL-3.0), the third-party notices, and the commits of its source |
