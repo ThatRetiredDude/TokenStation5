@@ -30,6 +30,8 @@ int sceSystemServiceLoadExec(const char *path, const char *const *) {
 
 int sceSystemServiceHideSplashScreen(void) { return 0; }
 
+int sceSystemServicePowerTick(void) { return 0; }
+
 int sceKernelSendNotificationRequest(int, void *request, size_t, int) {
     const char *text = static_cast<const char *>(request) + 45;
     if (FILE *f = fopen(TS5_DATA "/notifications.txt", "a")) {
