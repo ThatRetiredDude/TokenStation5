@@ -153,3 +153,15 @@ console.
 
 A jailbroken console's API, FTP and payload ports have no authentication.
 Keep it on a network you trust.
+
+## Licensing
+
+- **ts5 and everything outside `ps5/`:** [PolyForm Small Business 1.0.0](LICENSE.md).
+  Free for individuals and for companies under 100 people and about $1M in
+  revenue; larger companies need a commercial license.
+- **`ps5/` and the built PS5 title:** [GPL-3.0-or-later](ps5/LICENSE), because
+  the title links PS5_Vulkan's GPL-3.0 code.
+
+[LICENSING.md](LICENSING.md) has the full map, including what the GPL means
+for the engine code inside the PS5 title, and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists the third-party code.
