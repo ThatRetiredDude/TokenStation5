@@ -42,16 +42,22 @@ For each model in `models.tsv`: fetch, `scripts/load-model.sh`, `scripts/bench.p
 
 **Done when** a laptop on the LAN uses the PS5 as its model with no manual steps on the console besides the exploit.
 
-## M3: C++ work, only where M1 shows a gap
+## M3: our own engine (`engine/`)
 
-Fork PS5LM as a submodule and carry patches here, sending fixes upstream.
+Decision (2026-10-14): build a scratch C++/Vulkan engine rather than fork
+PS5LM, so we own the kernels where the PS5 is slowest. PS5LM stays installed
+as the baseline to beat. Design: [engine/DESIGN.md](../engine/DESIGN.md).
 
-- [ ] **Prompt processing.** The biggest weakness (35 to 50 tok/s on the 27B). RADV here exposes no cooperative matrix and no accelerated integer dot product, so ggml-vulkan uses fp16 matmul shaders. Investigate whether the PS5 GPU's ISA has the RDNA2 dot instructions and whether exposing `VK_KHR_shader_integer_dot_product` in PS5_Mesa unlocks ggml-vulkan's integer (MMQ) path; tune `-ub` against the 10 s submit watchdog.
-- [ ] **Speculative decoding.** A small draft model (for example Qwen3 0.6B for Qwen3 8B) through llama-server's `--model-draft`; memory is plentiful at 7 to 8B.
-- [ ] **Model switch without restart.** Find where ~5 GiB stays held after unload (PS5LM CONSOLE.md, "Switching models").
-- [ ] **Concurrent requests.** `-np 2` with a shared KV budget, so two clients don't queue.
+- [x] v0: GGUF loader, llama/qwen2/qwen3, F32 to Q6_K, BPE + SentencePiece tokenizers, OpenAI server
+- [x] Correctness: logits match llama.cpp and the CPU reference on every type; tokenizer matches llama-tokenize; CI on lavapipe
+- [ ] PS5 title: link against PS5_Vulkan's RADV, PPSA99021-style shell, libc shims, launch and serve on :8081
+- [ ] Remote test loop: a session on the PC deploys over FTP, launches over elfldr, reads logs, runs `ts5 bench`
+- [ ] Prefill: tiled fp16 matmul (beat PS5LM's prompt tok/s on the same model)
+- [ ] Decode: wide loads, multi-row workgroups, subgroup reductions (target 70%+ of 448 GB/s)
+- [ ] Gemma 3 (12B), then Qwen 3.5 and Gemma 4 E4B
+- [ ] Speculative decoding with a small draft model
 
-**Done when** prompt processing on the default coding model is good enough for a 10k-token agent prompt in under a minute.
+**Done when** ts5 beats PS5LM Plus on prompt tok/s for Qwen 2.5 Coder 7B on the console.
 
 ## Risks
 
