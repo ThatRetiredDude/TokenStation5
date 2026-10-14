@@ -26,9 +26,9 @@ Qwen 2.5 Coder 7B Q4_K_M on the console, build by build (`ts5 bench`: a
 | Attention per KV head ([#12](https://github.com/ThatRetiredDude/TokenStation5/pull/12)) | 234 | 45 |
 | Attention tiles, 128 x 128 matmul blocks ([#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15), draft) | 450 | 54 |
 | One-token kernels over several rows, split prompt matmuls (#15, second round) | 465 | 66 |
+| Prompt matmuls in packed f16 ([#23](https://github.com/ThatRetiredDude/TokenStation5/pull/23)) | 524 | 69 |
 
-With #15's second round: Qwen 3 8B 396 / 59, Llama 3.1 8B 412 / 60, Llama
-3.2 3B 894 / 108. Every build passes the GPU check (the GPU's logits against
+With #23: Qwen 3 8B 434 / 60, Llama 3.1 8B 467 / 63, Llama 3.2 3B 988 / 108. Every build passes the GPU check (the GPU's logits against
 ts5's CPU reference) on all four.
 
 ## Critical
@@ -38,7 +38,7 @@ ts5's CPU reference) on all four.
 ## Open
 
 - [ ] [#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15) Faster prompts and generation (ready). Measured on the console as above, two rounds. Round two: one-token kernels that read x once for several rows (Q4_K and Q6_K), and the prompt matmuls with few rows (attn_q, attn_output, ffn_down) split across all compute units. Its first build cost the 8B models 3-5% of prompt speed, because k and v waited for q; the fix (k and v first, and 4 rows per workgroup instead of 8) is measured: prompts back up, and generation on the 8B models up by a fifth to a quarter. Qwen 3 8B's prompts are still 5% under round one, and not because of the split (399 with it off). Also brings `scripts/ts5-ps5.sh update`, which swaps a new build into the running title.
-- [ ] [#23](https://github.com/ThatRetiredDude/TokenStation5/pull/23) Prompts in packed f16 (draft, on top of #15): the GPU does f16 math at twice its f32 rate, and a Coder 7B prompt is 79% FFN matmuls running at about 65% of the f32 peak. Each step's 32 products are summed in f16, then added to f32 sums; on the test models the logits move by 0.1% of their range. To measure on the console, with the GPU check on all four models (`TS5_MMB_F16=0` turns it off).
+- [ ] [#23](https://github.com/ThatRetiredDude/TokenStation5/pull/23) Prompts in packed f16 (ready, on top of #15): each step's 32 products are summed in f16 at twice the f32 rate, then added to f32 sums. Measured on the console: prompts 10-13% faster on all four models, and the GPU checks pass (largest error 0.27% against the 0.5% bar). `TS5_MMB_F16=0` turns it off.
 - [ ] [#13](https://github.com/ThatRetiredDude/TokenStation5/pull/13) An 8-bit KV cache, and serving with as much context as fits (draft). The 8-bit cache drifts 2.3% on Coder 7B against a 2% bar, so it stays opt-in (`TS5_KV=q8`), and f16 is used wherever the model's whole context fits. To verify on the console.
 - [ ] [#17](https://github.com/ThatRetiredDude/TokenStation5/pull/17) Speculative decoding by prompt lookup (draft): drafts up to 7 tokens from earlier text and checks them in one pass, with the same output. To measure on the console (`TS5_DRAFT=0` turns it off).
 - [ ] [#21](https://github.com/ThatRetiredDude/TokenStation5/pull/21) Fast kernels for speculative decoding's verify batch of 2 to 8 tokens, one weight read for the whole batch, plus a leaner serving loop: sampling in place, top-k without sorting, one send per step (draft, on top of #15 and #17). `TS5_MVT=0` turns the kernels off. To measure on the console.
