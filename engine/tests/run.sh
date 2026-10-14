@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Correctness tests for the engine. Runs anywhere with a Vulkan driver
 # (lavapipe is enough: apt install mesa-vulkan-drivers glslang-tools
-# libvulkan-dev; pip install gguf numpy).
+# libvulkan-dev; pip install gguf numpy jinja2).
 #
 #   engine/tests/run.sh                       # Vulkan vs ts5's CPU reference
 #   LLAMA_CPP=~/llama.cpp engine/tests/run.sh # also vs llama.cpp, K-quants, tokenizer
@@ -73,6 +73,12 @@ echo "== ts5 check (GPU vs CPU in one command, as run on the console), then agai
 rm -f "$work/qwen3-Q4_0.gguf.ts5ref"
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
+echo "== tool calls: prompts against the models' own templates, the parser, web_search over HTTP(S)"
+for t in Qwen-Qwen2.5-7B-Instruct Qwen-Qwen3-0.6B meta-llama-Llama-3.1-8B-Instruct meta-llama-Llama-3.2-3B-Instruct; do
+    f="$work/$t.jinja"
+    [ -s "$f" ] || curl -fsSL -o "$f" "https://raw.githubusercontent.com/ggml-org/llama.cpp/$rev/models/templates/$t.jinja"
+done
+python3 "$here/tools_test.py" "$ts5" "$work/qwen2-Q8_0.gguf" "$work"
 echo "== the PS5 title's main on this machine (ps5/host-test.sh)"
 "$engine/../ps5/host-test.sh" "$work/qwen2-Q4_0.gguf"
 

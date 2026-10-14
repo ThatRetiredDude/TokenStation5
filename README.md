@@ -180,6 +180,7 @@ Memory is an 11.44 GiB GPU heap on the console. Measured numbers are in
 - [ps5/](ps5/): the PS5 title: build, packaging, console control
 - [docs/ROADMAP.md](docs/ROADMAP.md): milestones
 - [docs/FEASIBILITY.md](docs/FEASIBILITY.md): hardware, memory budget, risks
+- [docs/WEB_SEARCH.md](docs/WEB_SEARCH.md): web search with a Tavily key, and tool calling
 - [scripts/](scripts/): console deploy, model fetch and benchmark tools
 - [models.tsv](models.tsv): the model lineup and the context each one gets
 

@@ -1,6 +1,7 @@
-// Minimal JSON value, parser and string escaping: enough for OpenAI request
-// bodies. Not a general-purpose library.
+// Minimal JSON value, parser, writer and string escaping: enough for OpenAI
+// request bodies and tool schemas. Not a general-purpose library.
 #pragma once
+#include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -13,9 +14,10 @@ struct Json {
     enum Type { NUL, BOOL, NUM, STR, ARR, OBJ } type = NUL;
     bool b = false;
     double n = 0;
-    std::string s;
+    std::string s;  // a string, or a number as written
     std::vector<Json> a;
     std::map<std::string, Json> o;
+    std::vector<std::string> keys;  // o's keys in the order they came
 
     const Json &operator[](const std::string &k) const {
         static const Json none;
@@ -32,7 +34,95 @@ struct Json {
         return parse_value(text, i, out, 0) && (skip(text, i), i == text.size());
     }
 
+    // Written as Python's json.dumps(v, ensure_ascii=False, indent=indent)
+    // writes it, which is what chat templates' tojson gives: models saw tool
+    // schemas in that layout. indent < 0: on one line.
+    std::string dump(int indent = -1) const {
+        std::string r;
+        dump_to(r, indent, 0);
+        return r;
+    }
+
+    static Json string(const std::string &v) {
+        Json j;
+        j.type = STR;
+        j.s = v;
+        return j;
+    }
+    static Json object() {
+        Json j;
+        j.type = OBJ;
+        return j;
+    }
+    Json &set(const std::string &k, const Json &v) {
+        type = OBJ;
+        if (!o.count(k)) keys.push_back(k);
+        o[k] = v;
+        return *this;
+    }
+
 private:
+    static void dump_str(std::string &r, const std::string &v) {
+        r += '"';
+        for (unsigned char c : v) {
+            switch (c) {
+                case '"': r += "\\\""; break;
+                case '\\': r += "\\\\"; break;
+                case '\n': r += "\\n"; break;
+                case '\r': r += "\\r"; break;
+                case '\t': r += "\\t"; break;
+                case '\b': r += "\\b"; break;
+                case '\f': r += "\\f"; break;
+                default:
+                    if (c < 0x20) {
+                        char b[8];
+                        snprintf(b, sizeof b, "\\u%04x", c);
+                        r += b;
+                    } else {
+                        r += (char)c;
+                    }
+            }
+        }
+        r += '"';
+    }
+    void dump_to(std::string &r, int indent, int depth) const {
+        auto newline = [&](int d) {
+            if (indent < 0) return;
+            r += '\n';
+            r.append((size_t)(indent * d), ' ');
+        };
+        const char *sep = indent < 0 ? ", " : ",";
+        switch (type) {
+            case NUL: r += "null"; break;
+            case BOOL: r += b ? "true" : "false"; break;
+            case NUM: r += s; break;
+            case STR: dump_str(r, s); break;
+            case ARR:
+                if (a.empty()) { r += "[]"; break; }
+                r += '[';
+                for (size_t i = 0; i < a.size(); i++) {
+                    if (i) r += sep;
+                    newline(depth + 1);
+                    a[i].dump_to(r, indent, depth + 1);
+                }
+                newline(depth);
+                r += ']';
+                break;
+            case OBJ:
+                if (keys.empty()) { r += "{}"; break; }
+                r += '{';
+                for (size_t i = 0; i < keys.size(); i++) {
+                    if (i) r += sep;
+                    newline(depth + 1);
+                    dump_str(r, keys[i]);
+                    r += ": ";
+                    o.at(keys[i]).dump_to(r, indent, depth + 1);
+                }
+                newline(depth);
+                r += '}';
+                break;
+        }
+    }
     static void skip(const std::string &t, size_t &i) {
         while (i < t.size() && (t[i] == ' ' || t[i] == '\n' || t[i] == '\r' || t[i] == '\t')) i++;
     }
@@ -94,7 +184,8 @@ private:
                 if (i >= t.size() || !parse_string(t, i, k)) return false;
                 skip(t, i);
                 if (i >= t.size() || t[i++] != ':') return false;
-                if (!parse_value(t, i, v.o[k], depth + 1)) return false;
+                if (!v.o.count(k)) v.keys.push_back(k);
+                if (!parse_value(t, i, v.o[k] = Json(), depth + 1)) return false;
                 skip(t, i);
                 if (i < t.size() && t[i] == ',') { i++; continue; }
                 if (i < t.size() && t[i] == '}') { i++; return true; }
@@ -123,6 +214,7 @@ private:
         v.n = strtod(t.c_str() + i, &end);
         if (end == t.c_str() + i) return false;
         v.type = NUM;
+        v.s.assign(t, i, (size_t)(end - t.c_str()) - i);
         i = (size_t)(end - t.c_str());
         return true;
     }
