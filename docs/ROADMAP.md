@@ -25,10 +25,11 @@ Qwen 2.5 Coder 7B Q4_K_M on the console, build by build (`ts5 bench`: a
 | Tiled matmul, word-load mat-vecs ([#7](https://github.com/ThatRetiredDude/TokenStation5/pull/7)) | 170 | 35 |
 | Attention per KV head ([#12](https://github.com/ThatRetiredDude/TokenStation5/pull/12)) | 234 | 45 |
 | Attention tiles, 128 x 128 matmul blocks ([#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15), draft) | 450 | 54 |
+| One-token kernels over several rows, split prompt matmuls (#15, second round) | 459 | 64 |
 
-With [#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15): Qwen 3
-8B 415 / 47, Llama 3.1 8B 420 / 48, Llama 3.2 3B 874 / 94. Every build passes
-the GPU check (the GPU's logits against ts5's CPU reference) on all four.
+With #15's second round: Qwen 3 8B 393 / 47, Llama 3.1 8B 406 / 51, Llama
+3.2 3B 880 / 98. Every build passes the GPU check (the GPU's logits against
+ts5's CPU reference) on all four.
 
 ## Critical
 
@@ -36,7 +37,7 @@ the GPU check (the GPU's logits against ts5's CPU reference) on all four.
 
 ## Open
 
-- [ ] [#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15) Faster prompts and generation (draft). Measured on the console as above. The next round is built and waiting for the console: one-token kernels that read x once per 8 rows (Q4_K and Q6_K), and the prompt matmuls with few rows (attn_q, attn_output, ffn_down) split across all compute units. Also brings `scripts/ts5-ps5.sh update`, which swaps a new build into the running title.
+- [ ] [#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15) Faster prompts and generation (draft). Measured on the console as above, two rounds. Round two: one-token kernels that read x once for several rows (Q4_K and Q6_K), and the prompt matmuls with few rows (attn_q, attn_output, ffn_down) split across all compute units. It cost the 8B models 3-5% of prompt speed, because k and v then waited for q; a fix (k and v first, 4 rows per workgroup, which measured faster than 8) waits for the console. Also brings `scripts/ts5-ps5.sh update`, which swaps a new build into the running title.
 - [ ] [#13](https://github.com/ThatRetiredDude/TokenStation5/pull/13) An 8-bit KV cache, and serving with as much context as fits (draft). The 8-bit cache drifts 2.3% on Coder 7B against a 2% bar, so it stays opt-in (`TS5_KV=q8`), and f16 is used wherever the model's whole context fits. To verify on the console.
 - [ ] [#16](https://github.com/ThatRetiredDude/TokenStation5/pull/16) Keep-awake (see Critical).
 - [ ] [#17](https://github.com/ThatRetiredDude/TokenStation5/pull/17) Speculative decoding by prompt lookup (draft): drafts up to 7 tokens from earlier text and checks them in one pass, with the same output. To measure on the console (`TS5_DRAFT=0` turns it off).
@@ -54,6 +55,7 @@ the GPU check (the GPU's logits against ts5's CPU reference) on all four.
 - [ ] An 8-bit KV cache within the 2% bar, so 8B models get long contexts.
 - [ ] Qwen 3's thinking: honor `enable_thinking` and `/no_think`.
 - [ ] More models: Gemma 3 12B, Qwen 3.5 4B and 9B, Gemma 4 E4B, Mistral Nemo 12B ([models.tsv](../models.tsv)).
+- [ ] Memory over many model reloads: after a fresh launch Coder 7B leaves 4524 MiB of direct memory free, but about 900 MiB less after some 16 bench reloads in one run of the title. Leak or fragmentation; [#11](https://github.com/ThatRetiredDude/TokenStation5/pull/11)'s fuller memory line will tell which.
 - [ ] Endpoint: a static IP or DHCP reservation, client configs (Open WebUI, Continue, opencode, Claude Code) in `docs/CLIENTS.md`, an optional API-key proxy in front of `:8081`, one command after each reboot.
 
 ## Done
@@ -74,7 +76,6 @@ the GPU check (the GPU's logits against ts5's CPU reference) on all four.
 - [x] Driver check: RADV isn't the bottleneck; ts5's barriers and its ALU-bound mat-vecs were (fixed in [#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15)).
 - [x] Clean-room spec of the PS5 runtime, for [#14](https://github.com/ThatRetiredDude/TokenStation5/pull/14).
 - [x] The 2026-10-14 "crash" diagnosed from the logs: rest mode, not a crash.
-- [x] No memory leak: after a fresh launch Coder 7B leaves 4524 MiB of direct memory free. The 3234 MiB seen after some 20 bench reloads and a rest-mode resume was most likely fragmentation, not a lasting loss.
 
 ## Risks
 
