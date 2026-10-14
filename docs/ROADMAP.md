@@ -53,6 +53,7 @@ the GPU check (the GPU's logits against ts5's CPU reference) on all four.
 - [ ] Qwen 3's thinking: honor `enable_thinking` and `/no_think`.
 - [ ] More models: Gemma 3 12B, Qwen 3.5 4B and 9B, Gemma 4 E4B, Mistral Nemo 12B ([models.tsv](../models.tsv)).
 - [ ] Check memory after a fresh launch: direct free memory was about 1 GiB lower after some 20 bench reloads (a leak?).
+- [ ] Voice chat (proposed, not approved yet): a console audio probe (the pad's mic in, TV or pad speaker out), then speech to text (whisper.cpp), text to speech (Kokoro) and a Settings page. Feasibility notes: `ps5-ai/voice/VOICE_FEASIBILITY.md` in the project files.
 - [ ] Endpoint: a static IP or DHCP reservation, client configs (Open WebUI, Continue, opencode, Claude Code) in `docs/CLIENTS.md`, an optional API-key proxy in front of `:8081`, one command after each reboot.
 
 ## Done
