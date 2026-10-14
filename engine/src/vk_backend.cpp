@@ -21,6 +21,8 @@
 
 // Generated SPIR-V (one header per shader).
 #include "attention.spv.h"
+#include "attn.spv.h"
+#include "attn_merge.spv.h"
 #include "get_rows_f16.spv.h"
 #include "get_rows_f32.spv.h"
 #include "get_rows_q4_0.spv.h"
@@ -91,7 +93,12 @@ namespace ts5 {
     X(vkCreateFence)                  \
     X(vkDestroyFence)                 \
     X(vkWaitForFences)                \
-    X(vkResetFences)
+    X(vkResetFences)                  \
+    X(vkCreateQueryPool)              \
+    X(vkDestroyQueryPool)             \
+    X(vkCmdResetQueryPool)            \
+    X(vkCmdWriteTimestamp)            \
+    X(vkGetQueryPoolResults)
 
 namespace {
 
@@ -156,6 +163,7 @@ public:
                 vk.vkDestroyPipelineLayout(dev_, p.second.layout, nullptr);
                 vk.vkDestroyDescriptorSetLayout(dev_, p.second.dsl, nullptr);
             }
+            if (qpool_) vk.vkDestroyQueryPool(dev_, qpool_, nullptr);
             if (fence_) vk.vkDestroyFence(dev_, fence_, nullptr);
             if (pool_) vk.vkDestroyCommandPool(dev_, pool_, nullptr);
         }
@@ -164,6 +172,24 @@ public:
 
     const char *name() const override { return name_.c_str(); }
     int n_ctx() const override { return n_ctx_; }
+
+    std::string take_profile() override {
+        if (prof_.empty()) return {};
+        std::vector<std::pair<std::string, Prof>> v(prof_.begin(), prof_.end());
+        prof_.clear();
+        std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) { return a.second.ms > b.second.ms; });
+        double total = 0;
+        for (auto &e : v) total += e.second.ms;
+        char b[256];
+        snprintf(b, sizeof b, "GPU time %.1f ms:\n", total);
+        std::string s = b;
+        for (auto &e : v) {
+            snprintf(b, sizeof b, "  %-24s %9.2f ms %5.1f%% %7d calls\n", e.first.c_str(), e.second.ms,
+                     100.0 * e.second.ms / total, e.second.calls);
+            s += b;
+        }
+        return s;
+    }
 
     bool init(const std::string &path, std::string &err) {
         if (!init_device(err)) return false;
@@ -212,6 +238,20 @@ private:
         if (const char *e = getenv("TS5_LAYERS_PER_SUBMIT")) layers_per_submit_ = std::max(1, atoi(e));
         if (const char *e = getenv("TS5_TILED_MIN")) tiled_min_ = atoi(e);
         if (const char *e = getenv("TS5_FAST_MATVEC")) fast_matvec_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_MV_ROWS")) mv_rows_ = std::min(4, std::max(1, atoi(e)));
+        if (const char *e = getenv("TS5_ATTN")) attn_fast_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_ATTN_SPLITS")) attn_splits_ = std::max(0, atoi(e));
+        const char *prof = getenv("TS5_PROFILE");
+        if (prof && atoi(prof) != 0) {
+            if (!ctx_->timestamp_bits) {
+                fprintf(stderr, "ts5: TS5_PROFILE: the queue has no timestamps\n");
+            } else {
+                VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+                qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+                qi.queryCount = QMAX;
+                CHECK(vk.vkCreateQueryPool(dev_, &qi, nullptr, &qpool_));
+            }
+        }
         return true;
     }
 
@@ -289,7 +329,9 @@ private:
         return true;
     }
 
-    bool make_pipe(const std::string &name, const uint32_t *code, size_t bytes, uint32_t nbind, std::string &err) {
+    // spec: the value of the shader's specialization constant 0, when not 0.
+    bool make_pipe(const std::string &name, const uint32_t *code, size_t bytes, uint32_t nbind, std::string &err,
+                   uint32_t spec = 0) {
         Pipe p;
         p.nbind = nbind;
         std::vector<VkDescriptorSetLayoutBinding> b(nbind);
@@ -321,6 +363,9 @@ private:
         cp.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         cp.stage.module = mod;
         cp.stage.pName = "main";
+        VkSpecializationMapEntry se{0, 0, 4};
+        VkSpecializationInfo si{1, &se, 4, &spec};
+        if (spec) cp.stage.pSpecializationInfo = &si;
         cp.layout = p.layout;
         CHECK(vk.vkCreateComputePipelines(dev_, VK_NULL_HANDLE, 1, &cp, nullptr, &p.pipe));
         vk.vkDestroyShaderModule(dev_, mod, nullptr);
@@ -335,11 +380,13 @@ private:
         P(matmul_q4_k, 3) P(matmul_q5_k, 3) P(matmul_q6_k, 3)
         P(mm_f32, 3) P(mm_f16, 3) P(mm_q4_0, 3) P(mm_q8_0, 3) P(mm_q4_1, 3) P(mm_q5_0, 3) P(mm_q5_1, 3)
         P(mm_q4_k, 3) P(mm_q5_k, 3) P(mm_q6_k, 3)
-        P(matvec_q4_k, 3) P(matvec_q6_k, 3)
+        if (!make_pipe("matvec_q4_k", spv_matvec_q4_k, sizeof(spv_matvec_q4_k), 3, err, mv_rows_) ||
+            !make_pipe("matvec_q6_k", spv_matvec_q6_k, sizeof(spv_matvec_q6_k), 3, err, mv_rows_))
+            return false;
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
-        P(rmsnorm, 3) P(qkv_post, 10) P(attention, 4) P(swiglu, 2)
+        P(rmsnorm, 3) P(qkv_post, 10) P(attention, 4) P(attn, 5) P(attn_merge, 2) P(swiglu, 2)
 #undef P
         return true;
     }
@@ -387,7 +434,7 @@ private:
         auto mk = [&](Buf &b, size_t bytes, bool host = false) { return create_buf(bytes, host, b, err); };
         if (!mk(x_, 4ull * TMAX * E) || !mk(h_, 4ull * TMAX * E) || !mk(q_, 4ull * TMAX * QD) ||
             !mk(k_, 4ull * TMAX * KVD) || !mk(v_, 4ull * TMAX * KVD) || !mk(att_, 4ull * TMAX * QD) ||
-            !mk(g_, 4ull * TMAX * F) || !mk(u_, 4ull * TMAX * F) || !mk(dummy_, 256) ||
+            !mk(g_, 4ull * TMAX * F) || !mk(u_, 4ull * TMAX * F) || !mk(dummy_, 256) || !mk(part_, 4ull * PART) ||
             !mk(ids_, 4ull * TMAX, true) || !mk(logits_, 4ull * TMAX * hp_.n_vocab, true))
             return false;
         const size_t cache = 2ull * hp_.n_layer * n_ctx_ * KVD;  // f16
@@ -409,6 +456,11 @@ private:
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         CHECK(vk.vkBeginCommandBuffer(cmd_, &bi));
+        if (qpool_) {
+            vk.vkCmdResetQueryPool(cmd_, qpool_, 0, QMAX);
+            vk.vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool_, 0);
+            qlabels_.clear();
+        }
         return true;
     }
 
@@ -423,6 +475,19 @@ private:
         }
         CHECK(vk.vkWaitForFences(dev_, 1, &fence_, VK_TRUE, UINT64_MAX));
         CHECK(vk.vkResetFences(dev_, 1, &fence_));
+        if (qpool_ && !qlabels_.empty()) {
+            const uint32_t nq = (uint32_t)qlabels_.size() + 1;
+            std::vector<uint64_t> ts(nq);
+            CHECK(vk.vkGetQueryPoolResults(dev_, qpool_, 0, nq, 8ull * nq, ts.data(), 8,
+                                           VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT));
+            const uint64_t mask = ctx_->timestamp_bits >= 64 ? ~0ull : (1ull << ctx_->timestamp_bits) - 1;
+            for (uint32_t i = 0; i + 1 < nq; i++) {
+                Prof &p = prof_[qlabels_[i]];
+                p.ms += ((ts[i + 1] - ts[i]) & mask) * (double)props_.limits.timestampPeriod * 1e-6;
+                p.calls++;
+            }
+            qlabels_.clear();
+        }
         return true;
     }
 
@@ -434,9 +499,10 @@ private:
                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
     }
 
+    // `what` adds to the kernel's name in the profile (the weight a matmul is on).
     template <class PC>
     void dispatch(const std::string &name, std::initializer_list<const Buf *> bufs, const PC &pc, uint32_t gx,
-                  uint32_t gy = 1) {
+                  uint32_t gy = 1, const std::string &what = {}) {
         const Pipe &p = pipes_.at(name);
         vk.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipe);
         std::vector<VkDescriptorBufferInfo> bi;
@@ -453,6 +519,10 @@ private:
         vk.vkCmdPushConstants(cmd_, p.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PC), &pc);
         vk.vkCmdDispatch(cmd_, gx, gy, 1);
         barrier();
+        if (qpool_ && qlabels_.size() + 1 < QMAX) {
+            vk.vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool_, (uint32_t)qlabels_.size() + 1);
+            qlabels_.push_back(what.empty() ? name : name + " " + what);
+        }
     }
 
     const Buf &W(const Weight &w) { return weights_.at(w.info->name); }
@@ -463,21 +533,75 @@ private:
             (uint32_t)w.ne0(), (uint32_t)w.ne1(), (uint32_t)ntok, (uint32_t)w.info->row_bytes(),
             (uint32_t)w.ne0(), (uint32_t)w.ne1(), accumulate ? 1u : 0u, x_off};
         uint32_t rows = (uint32_t)w.ne1();
+        const std::string what = qpool_ ? role(w) : std::string();
         // Many tokens: the tiled kernel, which reads each weight once per 64
         // tokens. Few: one workgroup per row.
         if (ntok >= tiled_min_) {
             dispatch(std::string("mm_") + qname(w.type()), {&W(w), &x, &y}, pc, (rows + 63) / 64,
-                     ((uint32_t)ntok + 63) / 64);
+                     ((uint32_t)ntok + 63) / 64, what);
             return;
         }
         uint32_t gx = std::min<uint32_t>(rows, 65535), gy = (rows + gx - 1) / gx;
         // One token of Q4_K or Q6_K (generation with a Q4_K_M model): the
-        // kernels that read the weights as words.
+        // kernels that read the weights as words, mv_rows_ rows per workgroup.
         if (ntok == 1 && fast_matvec_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
-            dispatch(std::string("matvec_") + qname(w.type()), {&W(w), &x, &y}, pc, gx, gy);
+            const uint32_t groups = (rows + mv_rows_ - 1) / mv_rows_;
+            const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
+            dispatch(std::string("matvec_") + qname(w.type()), {&W(w), &x, &y}, pc, mx, my, what);
             return;
         }
-        dispatch(std::string("matmul_") + qname(w.type()), {&W(w), &x, &y}, pc, gx, gy);
+        dispatch(std::string("matmul_") + qname(w.type()), {&W(w), &x, &y}, pc, gx, gy, what);
+    }
+
+    // A weight's name without its layer: "blk.3.attn_q.weight" -> "attn_q".
+    static std::string role(const Weight &w) {
+        std::string n = w.info->name;
+        if (n.compare(0, 4, "blk.") == 0) n = n.substr(n.find('.', 4) + 1);
+        if (n.size() > 7 && n.compare(n.size() - 7, 7, ".weight") == 0) n.resize(n.size() - 7);
+        return n;
+    }
+
+    // Attention of n tokens at pos0 for the layer at cache_off, into att_.
+    void attention(int n, int pos0, uint32_t cache_off) {
+        const uint32_t HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
+        const float scale = 1.0f / std::sqrt((float)HD);
+        if (!attn_ok()) {
+            struct { uint32_t head_dim, n_head, n_head_kv, pos0, cache_off; float scale; } pc{
+                HD, H, HKV, (uint32_t)pos0, cache_off, scale};
+            dispatch("attention", {&q_, &kc_, &vc_, &att_}, pc, H, (uint32_t)n);
+            return;
+        }
+        // Rows per workgroup: the query heads of one KV head, for as many
+        // tokens as fit attn's 1024 floats of queries.
+        const uint32_t G = H / HKV, tq = std::max<uint32_t>(1, 1024 / HD / G);
+        const uint32_t groups = HKV * (((uint32_t)n + tq - 1) / tq), keys = (uint32_t)(pos0 + n);
+        // Few workgroups for many keys (generation): split the keys so every
+        // compute unit gets some, about 128 workgroups and 64 keys or more each.
+        uint32_t n_split = 1;
+        if (groups < 64) {
+            const uint32_t fit = (uint32_t)(PART / ((size_t)n * H * (HD + 2)));
+            n_split = std::min({(128 + groups - 1) / groups, (keys + 63) / 64, 64u, fit});
+            if (attn_splits_) n_split = std::min({(uint32_t)attn_splits_, keys, 64u, fit});
+            n_split = std::max(1u, n_split);
+        }
+        const uint32_t bk = std::min(32u, 2048 / HD);
+        uint32_t chunk = (keys + n_split - 1) / n_split;
+        chunk = (chunk + bk - 1) / bk * bk;
+        n_split = (keys + chunk - 1) / chunk;
+        struct { uint32_t head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split; float scale; } pc{
+            HD, H, HKV, (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale};
+        dispatch("attn", {&q_, &kc_, &vc_, &att_, &part_}, pc, groups, n_split);
+        if (n_split > 1) {
+            struct { uint32_t head_dim, n_head, n_tok, n_split; } mpc{HD, H, (uint32_t)n, n_split};
+            dispatch("attn_merge", {&part_, &att_}, mpc, H, (uint32_t)n);
+        }
+    }
+
+    // Whether attn fits the model's heads (else the one-workgroup-per-head kernel).
+    bool attn_ok() const {
+        const int HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
+        return attn_fast_ && HKV > 0 && H % HKV == 0 && HD % 4 == 0 && HD >= 32 && HD <= 256 &&
+               (H / HKV) * HD <= 1024;
     }
 
     void rmsnorm(const Buf &x, const Weight &w, const Buf &y, int ntok, uint32_t x_row0 = 0) {
@@ -518,11 +642,7 @@ private:
                 dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_}, pc, (uint32_t)(H + HKV),
                          (uint32_t)n);
             }
-            {
-                struct { uint32_t head_dim, n_head, n_head_kv, pos0, cache_off; float scale; } pc{
-                    (uint32_t)HD, (uint32_t)H, (uint32_t)HKV, (uint32_t)pos0, cache_off, 1.0f / std::sqrt((float)HD)};
-                dispatch("attention", {&q_, &kc_, &vc_, &att_}, pc, (uint32_t)H, (uint32_t)n);
-            }
+            attention(n, pos0, cache_off);
             matmul(L.wo, att_, x_, n, true);
             rmsnorm(x_, L.ffn_norm, h_, n);
             matmul(L.w_gate, h_, g_, n, false);
@@ -570,9 +690,26 @@ private:
     int tiled_min_ = 9;
     // One-token Q4_K/Q6_K matmuls use the word-load kernels (TS5_FAST_MATVEC=0: off).
     bool fast_matvec_ = true;
+    // Rows per workgroup of those kernels (TS5_MV_ROWS, 1 to 4).
+    uint32_t mv_rows_ = 1;
+    // Attention with attn (TS5_ATTN=0: the old kernel); TS5_ATTN_SPLITS=N
+    // sets how many slices generation splits the keys into.
+    bool attn_fast_ = true;
+    int attn_splits_ = 0;
+    // attn's partial results when it splits the keys, in floats.
+    static constexpr size_t PART = 1u << 20;
+    // TS5_PROFILE=1: a timestamp after each dispatch, summed per kernel.
+    static constexpr uint32_t QMAX = 4096;
+    VkQueryPool qpool_ = VK_NULL_HANDLE;
+    std::vector<std::string> qlabels_;
+    struct Prof {
+        double ms = 0;
+        int calls = 0;
+    };
+    std::map<std::string, Prof> prof_;
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
-    Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, ids_, logits_, kc_, vc_;
+    Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, ids_, logits_, kc_, vc_;
 };
 
 }  // namespace
