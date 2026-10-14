@@ -41,6 +41,11 @@ int sceKernelSendNotificationRequest(int, void *request, size_t, int) {
 
 int sceKernelUsleep(unsigned int microseconds) { return usleep(microseconds); }
 
+// The console's memory pools have no Linux counterpart: the log says unknown.
+size_t sceKernelGetDirectMemorySize(void) { return 0; }
+int sceKernelAvailableDirectMemorySize(off_t, off_t, size_t, off_t *, size_t *) { return -1; }
+int sceKernelAvailableFlexibleMemorySize(size_t *) { return -1; }
+
 int sceUserServiceInitialize(const void *) { return 0; }
 int sceUserServiceGetInitialUser(int *user) {
     *user = 1;

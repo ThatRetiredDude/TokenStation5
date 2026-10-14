@@ -1,0 +1,27 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Q6_K: 128 bytes of low nibbles, 64 of high 2 bits, 16 int8 scales, d
+// (f16). Each 128-value half h has ql[64], qh[32] and scales[8]; value
+// l + 32 i (l < 32, i < 4) takes its low bits from ql[l + 32 (i & 1)]
+// (nibble i >> 1), its high bits from qh[l] (bits 2i, 2i + 1) and its scale
+// from scales[l / 16 + 2 i]. Blocks are 210 bytes, so only 2-byte aligned.
+#define BLOCK_BYTES 210
+#include "matvec_k.glsl"
+
+float sc8(uint off) { return float(int(uint(w8[off]) << 24) >> 24); }
+
+// Thread th takes half th / 8 and l = 4 (th % 8) .. + 3, for all four i.
+float block_dot(uint o, uint xb, uint th) {
+    const uint h = th / 8, l = 4 * (th % 8);
+    const float d = h16(o + 208);
+    const uint ql0 = u32_at2(o + 64 * h + l), ql1 = u32_at2(o + 64 * h + 32 + l);
+    const uint qh = u32_at2(o + 128 + 32 * h + l);
+    const uint scb = o + 192 + 8 * h + l / 16;
+    const uint xh = xb + (128 * h + l) / 4;
+    const vec4 q0 = nibbles(ql0, 0) + 16.0 * crumbs(qh, 0) - 32.0;
+    const vec4 q1 = nibbles(ql1, 0) + 16.0 * crumbs(qh, 2) - 32.0;
+    const vec4 q2 = nibbles(ql0, 4) + 16.0 * crumbs(qh, 4) - 32.0;
+    const vec4 q3 = nibbles(ql1, 4) + 16.0 * crumbs(qh, 6) - 32.0;
+    return d * (sc8(scb) * dot(q0, X4[xh]) + sc8(scb + 2) * dot(q1, X4[xh + 8]) + sc8(scb + 4) * dot(q2, X4[xh + 16]) +
+                sc8(scb + 6) * dot(q3, X4[xh + 24]));
+}
