@@ -82,19 +82,27 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   Each thread dequantizes 16 values of one row and loads 16 of one token from
   16-byte words, for the next step of 32 while the block computes the
   current one. `TS5_MMB=0` turns it off; `TS5_MMB_MIN` sets the number of
-  blocks.
+  blocks. A matrix with few rows (attn_q, attn_output and ffn_down: 56
+  blocks for 256 tokens of Qwen 2.5 7B) would leave compute units idle, so
+  under 256 blocks the columns are split in slices of one super-block or
+  more, for about 256 workgroups, each writing its partial sums for
+  `mmb_reduce` to add up (`TS5_MMB_SPLIT` sets the 256, 0 for never;
+  `TS5_MMB_SLICES=N` splits every matrix in N).
 - 9 or more (`mm_*`, `shaders/matmul_tiled.glsl`): 64 rows x 64 tokens per
   workgroup. Half the threads dequantize a 64 x 64 slice of W into shared
   memory while the other half load the matching slice of X, then each thread
   accumulates 4 x 4 outputs. Each weight is read once per 64 tokens instead
   of once per 8. `TS5_TILED_MIN` sets the threshold.
 - One token of Q4_K or Q6_K, as in generation with a Q4_K_M model
-  (`matvec_*`, `shaders/matvec_k.glsl`): one workgroup per row (or per
-  `TS5_MV_ROWS`, up to 4, sharing their reads of x), 16 threads per
-  super-block reading its quants as 32-bit words, subgroup reductions.
-  Q4_K uses `mv16_q4_k` instead: 8 threads per super-block, each loading the
-  16-byte header (scales and mins) and one 16-byte word of nibbles
-  (`TS5_MV16=0` for the other). `TS5_FAST_MATVEC=0` turns both off.
+  (`matvec_*`, `shaders/matvec_k.glsl`): 8 rows per workgroup
+  (`TS5_MV_ROWS`, 1 to 8), which load their part of x once for all 8, since
+  a long x doesn't stay in the nearest cache; one row per workgroup for
+  matrices of fewer than 2048 rows (`TS5_MV_ROWS_MIN`), so they still make
+  enough workgroups. 16 threads per super-block reading its quants as
+  32-bit words, subgroup reductions. `mv16_q4_k` and `mv16_q6_k` are used
+  instead (`TS5_MV16=0` for the others): 8 threads per super-block, Q4_K's
+  each loading the 16-byte header (scales and mins) and one 16-byte word of
+  nibbles, Q6_K's 32 values each. `TS5_FAST_MATVEC=0` turns them all off.
 - Anything else (`matmul_*`): one workgroup per row, 8 tokens per pass.
 
 Attention (`shaders/attn.comp`) gives each workgroup the query heads that

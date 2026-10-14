@@ -50,6 +50,7 @@
 #include "matvec_q6_k.spv.h"
 #include "mv16_glu_q4_k.spv.h"
 #include "mv16_q4_k.spv.h"
+#include "mv16_q6_k.spv.h"
 #include "mm_f16.spv.h"
 #include "mm_f32.spv.h"
 #include "mm_q4_0.spv.h"
@@ -62,6 +63,7 @@
 #include "mm_q8_0.spv.h"
 #include "mmb_q4_k.spv.h"
 #include "mmb_q6_k.spv.h"
+#include "mmb_reduce.spv.h"
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
@@ -158,6 +160,7 @@ class VkBackend : public Backend {
 public:
     static constexpr int TMAX = 256;  // tokens per forward call
     static constexpr size_t PART = 1u << 20;  // floats of attn's partial results, when it splits the keys
+    static constexpr size_t SPLIT = 6u << 20;  // floats of mmb's partial results, when it splits the rows
 
     VkBackend(VkContext *ctx, bool owns_ctx, Model &m, int n_ctx)
         : ctx_(ctx), owns_ctx_(owns_ctx), m_(m), hp_(m.hp), n_ctx_(n_ctx) {}
@@ -248,7 +251,8 @@ private:
         if (const char *e = getenv("TS5_LAYERS_PER_SUBMIT")) layers_per_submit_ = std::max(1, atoi(e));
         if (const char *e = getenv("TS5_TILED_MIN")) tiled_min_ = atoi(e);
         if (const char *e = getenv("TS5_FAST_MATVEC")) fast_matvec_ = atoi(e) != 0;
-        if (const char *e = getenv("TS5_MV_ROWS")) mv_rows_ = std::min(4, std::max(1, atoi(e)));
+        if (const char *e = getenv("TS5_MV_ROWS")) mv_rows_ = std::min(8, std::max(1, atoi(e)));
+        if (const char *e = getenv("TS5_MV_ROWS_MIN")) mv_rows_min_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_ATTN")) attn_fast_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_SPLITS")) attn_splits_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
@@ -257,6 +261,8 @@ private:
         if (const char *e = getenv("TS5_BARRIER")) barrier_mode_ = std::min(2, std::max(0, atoi(e)));
         if (const char *e = getenv("TS5_FUSE")) fuse_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
+        if (const char *e = getenv("TS5_MMB_SPLIT")) mmb_split_ = std::max(0, atoi(e));
+        if (const char *e = getenv("TS5_MMB_SLICES")) mmb_slices_ = std::max(0, atoi(e));
         kv_ = kv_type_setting();
         if (kv_ == KvType::Q8 && !(attn_ok() && hp_.head_dim % 32 == 0)) {
             fprintf(stderr, "ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16\n");
@@ -402,12 +408,15 @@ private:
         P(matmul_q4_1, 3) P(matmul_q5_0, 3) P(matmul_q5_1, 3)
         P(matmul_q4_k, 3) P(matmul_q5_k, 3) P(matmul_q6_k, 3)
         P(mm_f32, 3) P(mm_f16, 3) P(mm_q4_0, 3) P(mm_q8_0, 3) P(mm_q4_1, 3) P(mm_q5_0, 3) P(mm_q5_1, 3)
-        P(mm_q4_k, 3) P(mm_q5_k, 3) P(mm_q6_k, 3) P(mmb_q4_k, 3) P(mmb_q6_k, 3)
-        if (!make_pipe("matvec_q4_k", spv_matvec_q4_k, sizeof(spv_matvec_q4_k), 3, err, mv_rows_) ||
-            !make_pipe("matvec_q6_k", spv_matvec_q6_k, sizeof(spv_matvec_q6_k), 3, err, mv_rows_) ||
-            !make_pipe("mv16_q4_k", spv_mv16_q4_k, sizeof(spv_mv16_q4_k), 3, err, mv_rows_) ||
-            !make_pipe("mv16_glu_q4_k", spv_mv16_glu_q4_k, sizeof(spv_mv16_glu_q4_k), 4, err, mv_rows_))
-            return false;
+        P(mm_q4_k, 3) P(mm_q5_k, 3) P(mm_q6_k, 3) P(mmb_q4_k, 4) P(mmb_q6_k, 4) P(mmb_reduce, 2)
+        // The one-token mat-vecs twice: mv_rows_ rows per workgroup, and one
+        // (".1") for matrices with few rows.
+#define MV(n, nb)                                                                       \
+    if (!make_pipe(#n, spv_##n, sizeof(spv_##n), nb, err, mv_rows_) ||                  \
+        !make_pipe(#n ".1", spv_##n, sizeof(spv_##n), nb, err, 1))                      \
+        return false;
+        MV(matvec_q4_k, 3) MV(matvec_q6_k, 3) MV(mv16_q4_k, 3) MV(mv16_q6_k, 3) MV(mv16_glu_q4_k, 4)
+#undef MV
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
@@ -464,6 +473,7 @@ private:
         if (!mk(x_, 4ull * TMAX * E) || !mk(h_, 4ull * TMAX * E) || !mk(q_, 4ull * TMAX * QD) ||
             !mk(k_, 4ull * TMAX * KVD) || !mk(v_, 4ull * TMAX * KVD) || !mk(att_, 4ull * TMAX * QD) ||
             !mk(g_, 4ull * TMAX * F) || !mk(u_, 4ull * TMAX * F) || !mk(dummy_, 256) || !mk(part_, 4ull * PART) ||
+            !mk(split_, 4ull * SPLIT) ||
             !mk(ids_, 4ull * TMAX, true) || !mk(logits_, 4ull * TMAX * hp_.n_vocab, true))
             return false;
         if (n_ctx_ <= 0) {
@@ -565,12 +575,13 @@ private:
             mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         }
         vk.vkCmdPipelineBarrier(cmd_, src, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+        split_used_ = 0;  // every earlier kernel is done with split_
     }
 
     // `what` adds to the kernel's name in the profile (the weight a matmul is on).
     template <class PC>
     void dispatch(const std::string &name, std::initializer_list<const Buf *> bufs, const PC &pc, uint32_t gx,
-                  uint32_t gy = 1, const std::string &what = {}) {
+                  uint32_t gy = 1, const std::string &what = {}, uint32_t gz = 1) {
         const Pipe &p = pipes_.at(name);
         vk.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipe);
         std::vector<VkDescriptorBufferInfo> bi;
@@ -585,7 +596,7 @@ private:
         }
         vk.vkCmdPushDescriptorSetKHR(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout, 0, (uint32_t)w.size(), w.data());
         vk.vkCmdPushConstants(cmd_, p.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PC), &pc);
-        vk.vkCmdDispatch(cmd_, gx, gy, 1);
+        vk.vkCmdDispatch(cmd_, gx, gy, gz);
         if (!no_barrier_) barrier();
         no_barrier_ = false;
         if (qpool_ && qlabels_.size() + 1 < QMAX) {
@@ -609,8 +620,7 @@ private:
         const uint32_t big = ((rows + 127) / 128) * (((uint32_t)ntok + 127) / 128);
         if (ntok >= tiled_min_ && mmb_ && big >= (uint32_t)mmb_min_ && x_off % 4 == 0 && w.ne0() % 4 == 0 &&
             (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
-            dispatch(std::string("mmb_") + qname(w.type()), {&W(w), &x, &y}, pc, (rows + 127) / 128,
-                     ((uint32_t)ntok + 127) / 128, what);
+            mmb(w, x, y, pc, big, what);
             return;
         }
         if (ntok >= tiled_min_) {
@@ -620,15 +630,48 @@ private:
         }
         uint32_t gx = std::min<uint32_t>(rows, 65535), gy = (rows + gx - 1) / gx;
         // One token of Q4_K or Q6_K (generation with a Q4_K_M model): the
-        // kernels that read the weights as words, mv_rows_ rows per workgroup.
+        // kernels that read the weights as words.
         if (ntok == 1 && fast_matvec_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
-            const uint32_t groups = (rows + mv_rows_ - 1) / mv_rows_;
-            const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
-            const bool wide = mv16_ && w.type() == GGML_Q4_K;
-            dispatch(std::string(wide ? "mv16_" : "matvec_") + qname(w.type()), {&W(w), &x, &y}, pc, mx, my, what);
+            mat_vec(std::string(mv16_ ? "mv16_" : "matvec_") + qname(w.type()), {&W(w), &x, &y}, pc, rows, what);
             return;
         }
         dispatch(std::string("matmul_") + qname(w.type()), {&W(w), &x, &y}, pc, gx, gy, what);
+    }
+
+    // matmul with mmb. Fewer blocks than mmb_split_ (a matrix with few rows,
+    // as attn_q, attn_output and ffn_down): the columns are split in S
+    // slices, a workgroup per block and slice, which write their sums to
+    // split_ for mmb_reduce to add up, so all of the GPU's compute units get
+    // some.
+    template <class PC>
+    void mmb(const Weight &w, const Buf &x, const Buf &y, const PC &pc, uint32_t big, const std::string &what) {
+        const uint32_t rows = pc.nrows, ntok = pc.ntok, nunits = pc.ncols / 32;
+        const size_t slice = (size_t)rows * ntok;
+        uint32_t S = 1;
+        if (mmb_slices_)
+            S = std::min({(uint32_t)mmb_slices_, nunits, (uint32_t)(SPLIT / slice)});
+        else if (mmb_split_ && big < mmb_split_)
+            S = std::min({(mmb_split_ + big - 1) / big, nunits / 8, 16u, (uint32_t)(SPLIT / slice)});
+        S = std::max(1u, S);
+        const uint32_t units = (nunits + S - 1) / S;
+        S = (nunits + units - 1) / units;
+        // Kernels that may still read split_ (no barrier since) keep their part.
+        if (S > 1 && split_used_ + S * slice > SPLIT) barrier();
+        const uint32_t p_off = S > 1 ? (uint32_t)split_used_ : 0;
+        struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off, n_split, units, p_off; } bp{
+            pc.ncols, pc.nrows, pc.ntok, pc.row_bytes, pc.x_stride, pc.y_stride, pc.accumulate, pc.x_off, S, units,
+            p_off};
+        const bool skip = no_barrier_;
+        if (S > 1) no_barrier_ = false;  // mmb_reduce reads what it wrote
+        dispatch(std::string("mmb_") + qname(w.type()), {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128,
+                 (ntok + 127) / 128, what, S);
+        if (S == 1) return;
+        split_used_ = p_off + S * slice;
+        no_barrier_ = skip;
+        struct { uint32_t nrows, ntok, y_stride, accumulate, n_split, p_off; } rp{
+            rows, ntok, pc.y_stride, pc.accumulate, S, p_off};
+        const uint32_t groups = (uint32_t)((slice + 255) / 256), gx = std::min<uint32_t>(groups, 65535);
+        dispatch("mmb_reduce", {&split_, &y}, rp, gx, (groups + gx - 1) / gx, what);
     }
 
     // A weight's name without its layer: "blk.3.attn_q.weight" -> "attn_q".
@@ -698,10 +741,20 @@ private:
         struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; } pc{
             (uint32_t)L.w_gate.ne0(), rows, 1, (uint32_t)L.w_gate.info->row_bytes(), (uint32_t)L.w_gate.ne0(),
             rows, 0, 0};
-        const uint32_t groups = (rows + mv_rows_ - 1) / mv_rows_;
-        const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
-        dispatch("mv16_glu_q4_k", {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, mx, my, "ffn_gate+up");
+        mat_vec("mv16_glu_q4_k", {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, rows, "ffn_gate+up");
         return true;
+    }
+
+    // A one-token mat-vec kernel over `rows` rows: mv_rows_ rows per
+    // workgroup, or one where there are fewer than mv_rows_min_ rows (a
+    // workgroup per row keeps more of the GPU busy).
+    template <class PC>
+    void mat_vec(const std::string &name, std::initializer_list<const Buf *> bufs, const PC &pc, uint32_t rows,
+                 const std::string &what) {
+        const bool one = rows < (uint32_t)mv_rows_min_ || mv_rows_ == 1;
+        const uint32_t nr = one ? 1 : mv_rows_, groups = (rows + nr - 1) / nr;
+        const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
+        dispatch(one ? name + ".1" : name, bufs, pc, mx, my, what);
     }
 
     void rmsnorm(const Buf &x, const Weight &w, const Buf &y, int ntok, uint32_t x_row0 = 0) {
@@ -799,8 +852,11 @@ private:
     int tiled_min_ = 9;
     // One-token Q4_K/Q6_K matmuls use the word-load kernels (TS5_FAST_MATVEC=0: off).
     bool fast_matvec_ = true;
-    // Rows per workgroup of those kernels (TS5_MV_ROWS, 1 to 4).
-    uint32_t mv_rows_ = 1;
+    // Rows per workgroup of those kernels (TS5_MV_ROWS, 1 to 8), which share
+    // their x loads, for matrices of at least mv_rows_min_ rows
+    // (TS5_MV_ROWS_MIN); one for smaller ones.
+    uint32_t mv_rows_ = 8;
+    int mv_rows_min_ = 2048;
     // Attention with attn (TS5_ATTN=0: the old kernel); TS5_ATTN_SPLITS=N
     // sets how many slices generation splits the keys into.
     bool attn_fast_ = true;
@@ -810,7 +866,8 @@ private:
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).
     bool mmb_ = true;
-    // One token of Q4_K: mv16_q4_k's 16-byte loads (TS5_MV16=0: matvec_q4_k).
+    // One token of Q4_K and Q6_K: mv16_q4_k's 16-byte loads and mv16_q6_k's
+    // 8 threads per block (TS5_MV16=0: matvec_q4_k and matvec_q6_k).
     bool mv16_ = true;
     // The barrier between kernels (see barrier(); TS5_BARRIER=0, 1, 2).
     int barrier_mode_ = 1;
@@ -820,6 +877,12 @@ private:
     bool fuse_ = true;
     bool no_barrier_ = false;  // skip the barrier after the next dispatch
     int mmb_min_ = 48;
+    // mmb splits matrices of fewer blocks than this (TS5_MMB_SPLIT; 0: never),
+    // in about as many workgroups, each one Q4_K or Q6_K block or more wide;
+    // TS5_MMB_SLICES=N: every matrix in N.
+    uint32_t mmb_split_ = 256;
+    int mmb_slices_ = 0;
+    size_t split_used_ = 0;  // floats of split_ that kernels may still read
     // The KV cache's type (TS5_KV=q8 or f16).
     KvType kv_ = KvType::F16;
     // TS5_PROFILE=1: a timestamp after each dispatch, summed per kernel.
@@ -833,7 +896,7 @@ private:
     std::map<std::string, Prof> prof_;
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
-    Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, ids_, logits_, kc_, vc_, ks_, vs_;
+    Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_, kc_, vc_, ks_, vs_;
 };
 
 }  // namespace
@@ -877,7 +940,8 @@ uint64_t kv_bytes_per_token(const HParams &hp, KvType kv) {
 uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
     const uint64_t T = VkBackend::TMAX, E = hp.n_embd, F = hp.n_ff;
     const uint64_t QD = (uint64_t)hp.n_head * hp.head_dim, KVD = (uint64_t)hp.n_head_kv * hp.head_dim;
-    const uint64_t act = 4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab) + 4 * VkBackend::PART;
+    const uint64_t act =
+        4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab) + 4 * (VkBackend::PART + VkBackend::SPLIT);
     const uint64_t gib = 1ull << 30;
     return (weight_bytes + act + gib - 1) / gib * gib;
 }

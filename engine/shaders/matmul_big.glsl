@@ -6,6 +6,9 @@
 // dequantizes 16 values of one row and loads 16 of one token, from 16-byte
 // words, for the next step while the block computes the current one.
 // K-quants only (Q4_K, Q6_K); X rows 16-byte aligned.
+// With n_split > 1, workgroup z takes `units` of the row's 32-value units
+// and writes its sums to P (from p_off: [slice][token][row]) for mmb_reduce
+// to add up: a matrix with few blocks then still keeps the GPU busy.
 #extension GL_EXT_shader_16bit_storage : require
 #define T_Q4_K 12
 #define T_Q6_K 14
@@ -23,10 +26,12 @@ layout(std430, binding = 0) readonly buffer Wbuf { uint16_t w16[]; };
 #endif
 layout(std430, binding = 1) readonly buffer Xbuf { vec4 X4[]; };
 layout(std430, binding = 2) buffer Ybuf { float Y[]; };
+layout(std430, binding = 3) writeonly buffer Pbuf { float P[]; };
 
 layout(push_constant) uniform PC {
     uint ncols, nrows, ntok, row_bytes;
     uint x_stride, y_stride, accumulate, x_off;
+    uint n_split, units, p_off;
 } pc;
 
 // [k][row / 4] and [k][token / 4].
@@ -96,7 +101,8 @@ void main() {
     const uint tid = gl_LocalInvocationID.x;
     const uint r0 = gl_WorkGroupID.x * BM, t0 = gl_WorkGroupID.y * BN;
     const uint tr = tid % 16, tt = tid / 16;  // rows 4 tr + {0..3, 64..67}, tokens 4 tt + {0..3, 64..67}
-    const uint nunits = pc.ncols / 32;
+    const uint split = gl_WorkGroupID.z;
+    const uint u0 = split * pc.units, u1 = min(pc.ncols / 32, u0 + pc.units);
     // Loads: row (and token) tid % 128, values 16 (tid / 128) .. + 15 of the unit.
     const uint lr = tid % 128, lh = tid / 128;
     const bool w_ok = r0 + lr < pc.nrows, x_ok = t0 + lr < pc.ntok;
@@ -108,10 +114,10 @@ void main() {
 
     Raw w;
     vec4 x[4];
-    if (w_ok) w = load_w(r0 + lr, 0, lh);
-    for (uint i = 0; i < 4; i++) x[i] = x_ok ? X4[xb + i] : vec4(0.0);
+    if (w_ok) w = load_w(r0 + lr, u0, lh);
+    for (uint i = 0; i < 4; i++) x[i] = x_ok ? X4[xb + 8 * u0 + i] : vec4(0.0);
 
-    for (uint u = 0; u < nunits; u++) {
+    for (uint u = u0; u < u1; u++) {
         barrier();  // everyone is done with the previous step
         float v[16];
         if (w_ok) {
@@ -127,7 +133,7 @@ void main() {
             Xs[16 * lh + 4 * i + 3][lr / 4][lr % 4] = x[i].w;
         }
         barrier();
-        if (u + 1 < nunits) {
+        if (u + 1 < u1) {
             if (w_ok) w = load_w(r0 + lr, u + 1, lh);
             for (uint i = 0; i < 4; i++) x[i] = x_ok ? X4[xb + 8 * (u + 1) + i] : vec4(0.0);
         }
@@ -147,8 +153,12 @@ void main() {
             for (uint i = 0; i < 4; i++) {
                 const uint r = r0 + 64 * a + 4 * tr + i;
                 if (r < pc.nrows) {
-                    const uint yi = t * pc.y_stride + r;
-                    Y[yi] = pc.accumulate != 0 ? Y[yi] + acc[a][j][i] : acc[a][j][i];
+                    if (pc.n_split > 1) {
+                        P[pc.p_off + (split * pc.ntok + t) * pc.nrows + r] = acc[a][j][i];
+                    } else {
+                        const uint yi = t * pc.y_stride + r;
+                        Y[yi] = pc.accumulate != 0 ? Y[yi] + acc[a][j][i] : acc[a][j][i];
+                    }
                 }
             }
     }
