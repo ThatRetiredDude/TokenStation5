@@ -28,9 +28,12 @@ Qwen 2.5 Coder 7B Q4_K_M on the console, build by build (`ts5 bench`: a
 | One-token kernels over several rows, split prompt matmuls (#15, second round) | 465 | 66 |
 | Prompt matmuls in packed f16 ([#23](https://github.com/ThatRetiredDude/TokenStation5/pull/23)) | 524 | 69 |
 | k and v prompt matmuls on the f16 kernel ([#25](https://github.com/ThatRetiredDude/TokenStation5/pull/25)) | 529 | 69 |
+| q, k and v side by side (#25), long-context attention ([#28](https://github.com/ThatRetiredDude/TokenStation5/pull/28)) | 532 | 69 |
 
-With #25: Qwen 3 8B 449 / 60, Llama 3.1 8B 467 / 61, Llama 3.2 3B 1007 / 108. Every build passes the GPU check (the GPU's logits against
+With #28's build: Qwen 3 8B 458 / 59, Llama 3.1 8B 470 / 60, Llama 3.2 3B 1035 / 107. Every build passes the GPU check (the GPU's logits against
 ts5's CPU reference) on all four.
+
+Long contexts (a 16,384-token prompt, then 32 tokens): Coder 7B 228 / 50 (24 before #28), Llama 3.2 3B 344 / 48 (21).
 
 ## Critical
 
@@ -40,8 +43,8 @@ Nothing critical open.
 
 - [ ] [#15](https://github.com/ThatRetiredDude/TokenStation5/pull/15) Faster prompts and generation (ready). Measured on the console as above, two rounds. Round two: one-token kernels that read x once for several rows (Q4_K and Q6_K), and the prompt matmuls with few rows (attn_q, attn_output, ffn_down) split across all compute units. Its first build cost the 8B models 3-5% of prompt speed, because k and v waited for q; the fix (k and v first, and 4 rows per workgroup instead of 8) is measured: prompts back up, and generation on the 8B models up by a fifth to a quarter. Qwen 3 8B's prompts are still 5% under round one, and not because of the split (399 with it off). Also brings `scripts/ts5-ps5.sh update`, which swaps a new build into the running title.
 - [ ] [#23](https://github.com/ThatRetiredDude/TokenStation5/pull/23) Prompts in packed f16 (ready, on top of #15): each step's 32 products are summed in f16 at twice the f32 rate, then added to f32 sums. Measured on the console: prompts 10-13% faster on all four models, and the GPU checks pass (largest error 0.27% against the 0.5% bar). `TS5_MMB_F16=0` turns it off.
-- [ ] [#25](https://github.com/ThatRetiredDude/TokenStation5/pull/25) Prompt k and v matmuls on the fast kernel (draft, on top of #23): attn_k and attn_v took the old 64 x 64 f32 kernel, 9.3% of a Qwen 3 8B prompt; now the 128 x 128 f16 one, split across the compute units. `TS5_MMB_SMALL=0` turns it off. Console: checks pass on all four; Qwen 3 8B prompts +2.5% (449 vs 439), Coder unchanged. k and v went from 107 to 55 ms, but q got 19 ms slower because their sums were added up before q ran; now q, k and v run side by side and their three sums are added up after (to measure).
-- [ ] [#28](https://github.com/ThatRetiredDude/TokenStation5/pull/28) Long-context generation (draft, on top of #25): a new attention kernel for one token over 1024 keys or more that streams the cache 128 keys at a time (`TS5_ATTN_DEC=0` turns it off). To measure on the console at 0.5k and 16k tokens of context.
+- [ ] [#25](https://github.com/ThatRetiredDude/TokenStation5/pull/25) Prompt k and v matmuls on the fast kernel (ready, on top of #23): attn_k and attn_v took the old 64 x 64 f32 kernel, 9.3% of a Qwen 3 8B prompt; now the 128 x 128 f16 one, split across the compute units. `TS5_MMB_SMALL=0` turns it off. Console: checks pass on all four; Qwen 3 8B prompts +2.5% (449 vs 439), Coder unchanged. k and v went from 107 to 55 ms, but q got 19 ms slower because their sums were added up before q ran; now q, k and v run side by side and their three sums are added up after. Measured (in #28's build): checks pass, prompts +0.6% to +2.8% more on all four (Qwen 3 8B 458, Llama 3.2 3B 1035), q back to 83 ms.
+- [ ] [#28](https://github.com/ThatRetiredDude/TokenStation5/pull/28) Long-context generation (draft, on top of #25): a new attention kernel for one token over 1024 keys or more that streams the cache 128 keys at a time (`TS5_ATTN_DEC=0` turns it off). Console: checks pass; at 16k tokens of context generation doubles (Coder 7B 50.0 vs 24.4 tok/s, Llama 3.2 3B 48.2 vs 21.2), attention 4.1x faster; the 18k request writes 47 tok/s instead of 23 with identical output. From the first key it's +3% at 512 tokens too (71.1 vs 69.0); a short-context A/B sets the default, then it's ready.
 - [ ] [#26](https://github.com/ThatRetiredDude/TokenStation5/pull/26) The driver's buffer memory in each memory line, and a line after each unload (draft): it showed there's no leak (below, under Done). Worth keeping for the next memory question.
 - [ ] [#13](https://github.com/ThatRetiredDude/TokenStation5/pull/13) An 8-bit KV cache, and serving with as much context as fits (draft). The 8-bit cache drifts 2.3% on Coder 7B against a 2% bar, so it stays opt-in (`TS5_KV=q8`), and f16 is used wherever the model's whole context fits. To verify on the console.
 - [ ] [#17](https://github.com/ThatRetiredDude/TokenStation5/pull/17) Speculative decoding by prompt lookup (draft): drafts up to 7 tokens from earlier text and checks them in one pass, with the same output. `TS5_DRAFT=0` turns it off. Measured with #21 and #24 on the console (2026-10-14): output identical to no drafts, but slower, see #24.
@@ -54,7 +57,7 @@ Nothing critical open.
 
 ## Next
 
-- [ ] Long contexts: at 18k tokens Coder 7B writes 23 tok/s (65 at 0.5k) and reads 202 (463 at 0.5k), so attention dominates there: at 16k it's 68% of a token's GPU time (0.96 ms per layer), for a cache the memory moves in under 3 ms per token. #28 is the generation side; the prompt side (attn_pf at 18k) is next.
+- [ ] Long contexts: generation at 16k is twice as fast with #28 (attention from 68% to 34% of a token's GPU time; it still streams the cache at about a third of the memory's speed). The prompt side is next: an 18k prompt reads at 215 tok/s against 532 at 0.5k, so attention is most of a long prompt's time.
 - [ ] Generation at 80% of the GPU's 448 GB/s. The big one-token kernels already stream 380-410 GB/s; what's left is attention (10% of a token's GPU time at 512 tokens of context, latency-bound) and the CPU between tokens (about 1.4 ms of Coder 7B's 15). Speculative decoding (#17, #21, #24) can go past the limit for text that repeats, once its verify step is cheap (a net loss today).
 - [ ] Voice: a TV chat box with a keyboard and hold-R1 speech to text (whisper.cpp, on the CPU), then Kokoro speaking the replies, then the Settings page (`ts5.env`: audio output, `TAVILY_API_KEY`, a remote provider). Notes: `ps5-ai/voice/VOICE_FEASIBILITY.md` in the project files.
 - [ ] Measure PS5LM Plus on the console, same models, for a head-to-head. Its own figure is 124 tok/s generation on Llama 3.2 3B (ts5: 108).
