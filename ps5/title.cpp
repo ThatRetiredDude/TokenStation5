@@ -35,6 +35,8 @@
 //               mic played back (audio_probe.h), the recording in audiotest.wav
 //   chat        a message for the chat page, the file's text as it is
 //               (chat.h); the TV shows the chat and the reply
+//   keytest     a minute of a keyboard's raw reports in the log, while
+//               someone types (keyboard_probe.h)
 //   quit        closes the title; restart starts it again
 //
 // A title must never return from main or call exit(): the console reports
@@ -67,6 +69,7 @@
 #include "chat.h"
 #include "dashboard.h"
 #include "display.h"
+#include "keyboard_probe.h"
 #include "library.h"
 #include "pad.h"
 #include "runner.h"
@@ -124,6 +127,7 @@ constexpr const char *kScreen = TS5_HOME "/screen.bmp";
 constexpr const char *kAudioTest = TS5_HOME "/audiotest";
 constexpr const char *kAudioWav = TS5_HOME "/audiotest.wav";
 constexpr const char *kChat = TS5_HOME "/chat";
+constexpr const char *kKeyTest = TS5_HOME "/keytest";
 constexpr const char *kQuit = TS5_HOME "/quit";
 constexpr const char *kRestart = TS5_HOME "/restart";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
@@ -405,7 +409,7 @@ int main(int, char **) {
         printf("ts5-title: %s\n", w.c_str());
     }
 
-    for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat}) unlink(f);
+    for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kKeyTest}) unlink(f);
     std::thread(watch_control_files).detach();
     const char *awake = getenv("TS5_KEEP_AWAKE");
     if (!awake || atoi(awake) != 0) std::thread(keep_awake).detach();
@@ -472,7 +476,7 @@ int main(int, char **) {
     double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan;
     const double dim = dim_after();
     bool lib_changed = true;
-    std::atomic<bool> audio_testing{false};
+    std::atomic<bool> audio_testing{false}, key_testing{false};
     for (;;) {
         const double t = app::now_s();
         uint32_t buttons = pad.poll();
@@ -513,6 +517,17 @@ int main(int, char **) {
                 sceUserServiceGetInitialUser(&user);
                 app::audio_probe(user, kAudioWav, notify);
                 audio_testing = false;
+            }).detach();
+        }
+        if (exists(kKeyTest) && !key_testing) {
+            unlink(kKeyTest);
+            key_testing = true;
+            notify("TokenStation5 keyboard test: type on the keyboard for a minute");
+            std::thread([&key_testing] {
+                int user = -1;
+                sceUserServiceGetInitialUser(&user);
+                app::keyboard_probe(user, 60);
+                key_testing = false;
             }).detach();
         }
         if (t - last_scan > 2) {

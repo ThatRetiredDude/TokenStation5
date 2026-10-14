@@ -26,7 +26,7 @@ done
 c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" \
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" \
     "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
-    "$root"/ps5/{title,library,runner,audio_probe,chat,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page}.cpp \
+    "$root"/ps5/{title,library,runner,audio_probe,keyboard_probe,chat,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -x none -ldl -o "$work/eboot.bin"
 
 title_pid=
@@ -138,6 +138,12 @@ wait_log "^ts5-title: audio test: done$"
 grep -q "audio test: open TV 0x80260005" "$home/ts5.log" || fail "the audio test didn't try the TV"
 grep -q "audio test: mic open, type 0: 0x80260109" "$home/ts5.log" || fail "the audio test didn't try the mic"
 notified "the controller's mic didn't open"
+wait_health
+
+echo "== keytest: no keyboard on the PC, so the test says so and the title carries on"
+: > "$home/keytest"
+wait_log "^ts5-title: key test: done$"
+grep -q "key test: open, user 0x00000001: 0x80960002" "$home/ts5.log" || fail "the keyboard test didn't try to open it"
 wait_health
 
 echo "== chat: a message from the PC; the TV shows the chat page and the reply streams in"

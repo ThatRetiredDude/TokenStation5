@@ -10,6 +10,7 @@
 //                               through the press file
 //   audio out and in            no port opens, so the audio test reports no
 //                               audio
+//   the keyboard                never opens
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
@@ -58,6 +59,12 @@ int sceAudioOutClose(int) { return -1; }
 int sceAudioInOpen(int, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) { return (int)0x80260109; }  // no mic
 int sceAudioInInput(int, void *) { return -1; }
 int sceAudioInClose(int) { return -1; }
+
+int sceKeyboardInit(void) { return 0; }
+int sceKeyboardOpen(int, int, int, const void *) { return (int)0x80960002; }  // no keyboard
+int sceKeyboardReadState(int, void *) { return -1; }
+int sceKeyboardRead(int, void *, int) { return -1; }
+int sceKeyboardClose(int) { return -1; }
 
 int sceUserServiceInitialize(const void *) { return 0; }
 int sceUserServiceGetInitialUser(int *user) {
