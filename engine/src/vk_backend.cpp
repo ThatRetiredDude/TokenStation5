@@ -23,6 +23,7 @@
 #include "attention.spv.h"
 #include "attn.spv.h"
 #include "attn_merge.spv.h"
+#include "attn_q8.spv.h"
 #include "get_rows_f16.spv.h"
 #include "get_rows_f32.spv.h"
 #include "get_rows_q4_0.spv.h"
@@ -56,6 +57,7 @@
 #include "mm_q6_k.spv.h"
 #include "mm_q8_0.spv.h"
 #include "qkv_post.spv.h"
+#include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
 #include "swiglu.spv.h"
 
@@ -149,6 +151,7 @@ const char *qname(uint32_t t) {
 class VkBackend : public Backend {
 public:
     static constexpr int TMAX = 256;  // tokens per forward call
+    static constexpr size_t PART = 1u << 20;  // floats of attn's partial results, when it splits the keys
 
     VkBackend(VkContext *ctx, bool owns_ctx, Model &m, int n_ctx)
         : ctx_(ctx), owns_ctx_(owns_ctx), m_(m), hp_(m.hp), n_ctx_(n_ctx) {}
@@ -172,6 +175,7 @@ public:
 
     const char *name() const override { return name_.c_str(); }
     int n_ctx() const override { return n_ctx_; }
+    KvType kv_type() const override { return kv_; }
 
     std::string take_profile() override {
         if (prof_.empty()) return {};
@@ -241,6 +245,11 @@ private:
         if (const char *e = getenv("TS5_MV_ROWS")) mv_rows_ = std::min(4, std::max(1, atoi(e)));
         if (const char *e = getenv("TS5_ATTN")) attn_fast_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_SPLITS")) attn_splits_ = std::max(0, atoi(e));
+        kv_ = kv_type_setting();
+        if (kv_ == KvType::Q8 && !(attn_ok() && hp_.head_dim % 32 == 0)) {
+            fprintf(stderr, "ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16\n");
+            kv_ = KvType::F16;
+        }
         const char *prof = getenv("TS5_PROFILE");
         if (prof && atoi(prof) != 0) {
             if (!ctx_->timestamp_bits) {
@@ -386,7 +395,8 @@ private:
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
-        P(rmsnorm, 3) P(qkv_post, 10) P(attention, 4) P(attn, 5) P(attn_merge, 2) P(swiglu, 2)
+        P(rmsnorm, 3) P(qkv_post, 10) P(qkv_post_q8, 12) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2)
+        P(swiglu, 2)
 #undef P
         return true;
     }
@@ -437,14 +447,29 @@ private:
             !mk(g_, 4ull * TMAX * F) || !mk(u_, 4ull * TMAX * F) || !mk(dummy_, 256) || !mk(part_, 4ull * PART) ||
             !mk(ids_, 4ull * TMAX, true) || !mk(logits_, 4ull * TMAX * hp_.n_vocab, true))
             return false;
-        const size_t cache = 2ull * hp_.n_layer * n_ctx_ * KVD;  // f16
+        if (n_ctx_ <= 0) {
+            // As much as fits, in what the weights and activations left, and
+            // no more than one buffer can address.
+            const uint64_t per_buf = (kv_ == KvType::Q8 ? 1ull : 2ull) * hp_.n_layer * KVD;
+            const int cap = (int)std::min<uint64_t>(hp_.n_ctx_train > 0 ? hp_.n_ctx_train : 32768,
+                                                    props_.limits.maxStorageBufferRange / per_buf);
+            n_ctx_ = fit_context(ctx_->device_memory(), allocated_, kv_bytes_per_token(hp_, kv_), cap);
+            if (n_ctx_ <= 0) {
+                err = "not enough GPU memory left for a context of 1024 tokens";
+                return false;
+            }
+        }
+        // Bytes of K (and as many of V): f16, or 8 bits plus a 2-byte scale per 32.
+        const size_t values = (size_t)hp_.n_layer * n_ctx_ * KVD;
+        const size_t cache = kv_ == KvType::Q8 ? values : 2 * values, scales = kv_ == KvType::Q8 ? values / 16 : 0;
         if (cache > props_.limits.maxStorageBufferRange) {
             err = "KV cache larger than maxStorageBufferRange; use a smaller context";
             return false;
         }
         if (!mk(kc_, cache) || !mk(vc_, cache)) return false;
-        fprintf(stderr, "ts5: %s: weights %.2f GiB, KV cache %.2f GiB (f16, %d tokens), %s memory\n", name_.c_str(),
-                weight_bytes_ / 1073741824.0, 2.0 * cache / 1073741824.0, n_ctx_,
+        if (scales && (!mk(ks_, scales) || !mk(vs_, scales))) return false;
+        fprintf(stderr, "ts5: %s: weights %.2f GiB, KV cache %.2f GiB (%s, %d tokens), %s memory\n", name_.c_str(),
+                weight_bytes_ / 1073741824.0, 2.0 * (cache + scales) / 1073741824.0, kv_type_name(kv_), n_ctx_,
                 x_.map ? "unified" : "device");
         return true;
     }
@@ -590,7 +615,10 @@ private:
         n_split = (keys + chunk - 1) / chunk;
         struct { uint32_t head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split; float scale; } pc{
             HD, H, HKV, (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale};
-        dispatch("attn", {&q_, &kc_, &vc_, &att_, &part_}, pc, groups, n_split);
+        if (kv_ == KvType::Q8)
+            dispatch("attn_q8", {&q_, &kc_, &vc_, &att_, &part_, &ks_, &vs_}, pc, groups, n_split);
+        else
+            dispatch("attn", {&q_, &kc_, &vc_, &att_, &part_}, pc, groups, n_split);
         if (n_split > 1) {
             struct { uint32_t head_dim, n_head, n_tok, n_split; } mpc{HD, H, (uint32_t)n, n_split};
             dispatch("attn_merge", {&part_, &att_}, mpc, H, (uint32_t)n);
@@ -639,8 +667,12 @@ private:
                      hp_.rms_eps};
                 const Buf &bq = L.bq ? W(L.bq) : dummy_, &bk = L.bk ? W(L.bk) : dummy_, &bv = L.bv ? W(L.bv) : dummy_;
                 const Buf &nq = L.q_norm ? W(L.q_norm) : dummy_, &nk = L.k_norm ? W(L.k_norm) : dummy_;
-                dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_}, pc, (uint32_t)(H + HKV),
-                         (uint32_t)n);
+                if (kv_ == KvType::Q8)
+                    dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_, &ks_, &vs_}, pc,
+                             (uint32_t)(H + HKV), (uint32_t)n);
+                else
+                    dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_}, pc, (uint32_t)(H + HKV),
+                             (uint32_t)n);
             }
             attention(n, pos0, cache_off);
             matmul(L.wo, att_, x_, n, true);
@@ -696,8 +728,8 @@ private:
     // sets how many slices generation splits the keys into.
     bool attn_fast_ = true;
     int attn_splits_ = 0;
-    // attn's partial results when it splits the keys, in floats.
-    static constexpr size_t PART = 1u << 20;
+    // The KV cache's type (TS5_KV=q8 or f16).
+    KvType kv_ = KvType::F16;
     // TS5_PROFILE=1: a timestamp after each dispatch, summed per kernel.
     static constexpr uint32_t QMAX = 4096;
     VkQueryPool qpool_ = VK_NULL_HANDLE;
@@ -709,7 +741,7 @@ private:
     std::map<std::string, Prof> prof_;
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
-    Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, ids_, logits_, kc_, vc_;
+    Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, ids_, logits_, kc_, vc_, ks_, vs_;
 };
 
 }  // namespace
@@ -735,5 +767,34 @@ Backend *make_vk_backend(Model &m, const std::string &path, int n_ctx, int devic
 }
 
 bool vk_supports_type(uint32_t type) { return qname(type) != nullptr; }
+
+KvType kv_type_setting() {
+    const char *e = getenv("TS5_KV");
+    if (!e || !*e) return KvType::F16;
+    const std::string v = e;
+    if (v == "q8" || v == "8") return KvType::Q8;
+    if (v != "f16" && v != "16") fprintf(stderr, "ts5: TS5_KV=%s: not q8 or f16, using f16\n", e);
+    return KvType::F16;
+}
+
+uint64_t kv_bytes_per_token(const HParams &hp, KvType kv) {
+    const uint64_t values = 2ull * hp.n_layer * hp.n_head_kv * hp.head_dim;  // K and V
+    return kv == KvType::Q8 ? values + values / 16 : kv == KvType::F16 ? 2 * values : 4 * values;
+}
+
+uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
+    const uint64_t T = VkBackend::TMAX, E = hp.n_embd, F = hp.n_ff;
+    const uint64_t QD = (uint64_t)hp.n_head * hp.head_dim, KVD = (uint64_t)hp.n_head_kv * hp.head_dim;
+    const uint64_t act = 4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab) + 4 * VkBackend::PART;
+    const uint64_t gib = 1ull << 30;
+    return (weight_bytes + act + gib - 1) / gib * gib;
+}
+
+int fit_context(uint64_t memory, uint64_t used, uint64_t per_token, int cap) {
+    const uint64_t reserve = 1ull << 30;
+    if (per_token == 0 || memory < used + reserve) return 0;
+    const uint64_t n = std::min<uint64_t>((memory - used - reserve) / per_token, cap > 0 ? cap : 0) / 1024 * 1024;
+    return (int)n;
+}
 
 }  // namespace ts5

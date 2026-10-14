@@ -44,7 +44,7 @@ struct Args {
 int usage() {
     fprintf(stderr,
             "usage: ts5 serve|run|bench|check|tokenize|logits -m model.gguf [options]\n"
-            "  -c N           context length (default 8192)\n"
+            "  -c N|auto      context length (default 8192; auto: what fits in GPU memory)\n"
             "  --backend B    vk or cpu\n"
             "  --device N     Vulkan device index\n"
             "  serve: --host ADDR --port N\n"
@@ -73,7 +73,7 @@ bool parse(int argc, char **argv, Args &a) {
         if (s == "-m") a.model = next();
         else if (s == "-p") a.prompt = next();
         else if (s == "-o") a.out = next();
-        else if (s == "-c") a.n_ctx = atoi(next().c_str());
+        else if (s == "-c") a.n_ctx = atoi(next().c_str());  // "auto": 0
         else if (s == "-n") a.n_predict = atoi(next().c_str()), a.n_set = true;
         else if (s == "--host") a.host = next();
         else if (s == "--port") a.port = atoi(next().c_str());
@@ -136,6 +136,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     double t0 = now_ms();
     Backend *be = nullptr;
     if (a.backend == "cpu") {
+        if (a.n_ctx <= 0) a.n_ctx = 8192;
         if (!model.load(nullptr, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
         be = make_cpu_backend(model, a.n_ctx);
     } else {
@@ -146,7 +147,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
 #endif
         if (!be) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
     }
-    fprintf(stderr, "ts5: %s backend ready in %.1f s, context %d\n", be->name(), (now_ms() - t0) / 1000, a.n_ctx);
+    fprintf(stderr, "ts5: %s backend ready in %.1f s, context %d\n", be->name(), (now_ms() - t0) / 1000, be->n_ctx());
     Engine eng(model, be, tok);
 
     if (a.cmd == "logits") {

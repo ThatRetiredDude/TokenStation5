@@ -86,10 +86,10 @@ On the console, everything lives in the title's own folder,
 | File | |
 | --- | --- |
 | `models/` | the models |
-| `ts5.args` | what to serve at start: `serve -m MODEL [-c N] [--port N]` |
+| `ts5.args` | what to serve at start: `serve -m MODEL [-c N\|auto] [--port N]`. With no `-c`, or `-c auto`, the context is as long as fits in the GPU's memory (up to the model's own limit); the log's "context N (what fits)" line says how long |
 | `ts5.cmd` | a command to run now: `serve`, `check`, `bench` (`-m MODEL`), or `stop`. `check` and `bench` take `--env NAME=VALUE` (engine settings for that job only, on a load of its own) and `check` takes `--fresh 1` (run the CPU again) |
 | `ts5.once` | a command to run at the next start, before `ts5.args` |
-| `ts5.env` | engine settings read at start, `NAME=VALUE` (the `getenv` calls in `engine/src/vk_backend.cpp`) |
+| `ts5.env` | engine settings read at start, `NAME=VALUE` (the `getenv` calls in `engine/src/vk_backend.cpp`), such as `TS5_KV=q8` for an 8-bit KV cache (half the memory, so about twice the context) |
 | `press`, `screenshot` | controller buttons; the next frame to `screen.bmp` |
 | `quit`, `restart` | close or restart the title |
 | `ts5.log`, `ts5.prev.log`, `results.tsv` | its log, the run before's, and the check and speed results |

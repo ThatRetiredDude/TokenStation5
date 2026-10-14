@@ -82,7 +82,8 @@ ModelInfo inspect(const std::string &path, const std::string &file, uint64_t siz
     m.layers = hp.n_layer;
     m.ctx_train = hp.n_ctx_train;
     m.weight_bytes = model.data_bytes();
-    m.kv_bytes_per_token = 2ull * 2 * hp.n_layer * hp.n_head_kv * hp.head_dim;
+    m.kv_bytes_per_token = ts5::kv_bytes_per_token(hp, ts5::kv_type_setting());
+    m.fixed_bytes = ts5::vk_fixed_bytes(hp, m.weight_bytes);
     if (g.data_offset + m.weight_bytes > size) {
         m.error = "the file is incomplete (" + format_bytes(size) + " of " + format_bytes(g.data_offset + m.weight_bytes) +
                   ")";
@@ -109,6 +110,10 @@ std::vector<std::string> split_tabs(const std::string &line) {
 }
 
 }  // namespace
+
+int ModelInfo::auto_ctx(uint64_t gpu_memory) const {
+    return ts5::fit_context(gpu_memory, fixed_bytes, kv_bytes_per_token, ctx_train > 0 ? ctx_train : 32768);
+}
 
 Library::Library(std::vector<std::string> dirs, std::string results_path)
     : dirs_(std::move(dirs)), results_path_(std::move(results_path)) {

@@ -23,7 +23,7 @@ namespace app {
 struct Job {
     enum Kind { Serve, Check, Bench, Stop } kind = Serve;
     std::string path;
-    int n_ctx = 8192;      // Serve
+    int n_ctx = 0;         // Serve: 0 for what fits in the GPU's memory
     int n = 16;            // Check: tokens
     bool fresh = false;    // Check: run the CPU even if its answers are saved
     // Check, Bench: engine settings (NAME=VALUE, as in ts5.env) for this job's
