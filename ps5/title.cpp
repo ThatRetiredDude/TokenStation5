@@ -31,6 +31,8 @@
 //               TS5_TILED_MIN=16 (engine/src/vk_backend.cpp lists them)
 //   press       controller buttons, as words: up down cross square ...
 //   screenshot  the next frame goes to screen.bmp
+//   audiotest   tones on the TV and the controller, five seconds from its
+//               mic played back (audio_probe.h), the recording in audiotest.wav
 //   quit        closes the title; restart starts it again
 //
 // A title must never return from main or call exit(): the console reports
@@ -46,6 +48,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -57,6 +60,7 @@
 #include <thread>
 #include <vector>
 
+#include "audio_probe.h"
 #include "canvas.h"
 #include "dashboard.h"
 #include "display.h"
@@ -76,6 +80,7 @@ int sceSystemServiceHideSplashScreen(void);
 int sceSystemServicePowerTick(void);
 int sceKernelSendNotificationRequest(int device, void *request, size_t size, int blocking);
 int sceKernelUsleep(unsigned int microseconds);
+int sceUserServiceGetInitialUser(int *user);
 
 // RADV is linked in whole and there is no Vulkan loader: its ICD entry point
 // answers vkGetInstanceProcAddr for every command, and vk_context.cpp starts
@@ -113,6 +118,8 @@ constexpr const char *kResults = TS5_HOME "/results.tsv";
 constexpr const char *kPress = TS5_HOME "/press";
 constexpr const char *kShot = TS5_HOME "/screenshot";
 constexpr const char *kScreen = TS5_HOME "/screen.bmp";
+constexpr const char *kAudioTest = TS5_HOME "/audiotest";
+constexpr const char *kAudioWav = TS5_HOME "/audiotest.wav";
 constexpr const char *kQuit = TS5_HOME "/quit";
 constexpr const char *kRestart = TS5_HOME "/restart";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
@@ -368,7 +375,7 @@ int main(int, char **) {
         printf("ts5-title: %s\n", w.c_str());
     }
 
-    for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd}) unlink(f);
+    for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest}) unlink(f);
     std::thread(watch_control_files).detach();
     const char *awake = getenv("TS5_KEEP_AWAKE");
     if (!awake || atoi(awake) != 0) std::thread(keep_awake).detach();
@@ -432,6 +439,7 @@ int main(int, char **) {
     double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan;
     const double dim = dim_after();
     bool lib_changed = true;
+    std::atomic<bool> audio_testing{false};
     for (;;) {
         const double t = app::now_s();
         uint32_t buttons = pad.poll();
@@ -453,6 +461,16 @@ int main(int, char **) {
             app::Job j;
             if (parse_job(words, j, nullptr, err)) runner.push(j);
             else printf("ts5-title: ts5.cmd: %s\n", err.c_str());
+        }
+        if (exists(kAudioTest) && !audio_testing) {
+            unlink(kAudioTest);
+            audio_testing = true;
+            std::thread([&audio_testing] {
+                int user = -1;
+                sceUserServiceGetInitialUser(&user);
+                app::audio_probe(user, kAudioWav, notify);
+                audio_testing = false;
+            }).detach();
         }
         if (t - last_scan > 2) {
             std::lock_guard<std::mutex> lk(lib_mutex);
