@@ -8,7 +8,8 @@
 //   vk_icdGetInstanceProcAddr   the system Vulkan loader's entry point
 //   the controller              never there: the host test presses buttons
 //                               through the press file
-//   system modules              none load, so the audio test reports no audio
+//   system modules, audio out   none load or open, so the audio test reports
+//                               no audio
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
@@ -52,6 +53,11 @@ int sceKernelLoadStartModule(const char *, size_t, const void *, uint32_t, const
 }
 int sceKernelDlsym(int, const char *, void **) { return -1; }
 const char *sceKernelGetFsSandboxRandomWord(void) { return "host"; }
+int sceAudioOutInit(void) { return 0; }
+int sceAudioOutOpen(int, int, int, uint32_t, uint32_t, uint32_t) { return (int)0x80260005; }  // no port
+int sceAudioOutOutput(int, const void *) { return -1; }
+int sceAudioOutSetVolume(int, int, int *) { return -1; }
+int sceAudioOutClose(int) { return -1; }
 
 int sceUserServiceInitialize(const void *) { return 0; }
 int sceUserServiceGetInitialUser(int *user) {
