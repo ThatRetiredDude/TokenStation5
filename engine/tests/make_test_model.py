@@ -5,8 +5,9 @@
 
 The tokenizer is copied from a vocab-only GGUF (llama.cpp ships them under
 models/), so llama.cpp can load the file and act as the reference. Weights are
-F32, F16, Q8_0 or Q4_0 (--quant); llama-quantize makes the K-quant variants. Dimensions
-are multiples of 256 so K-quants apply to every matrix.
+F32, F16, Q8_0, Q4_0, Q4_1, Q5_0 or Q5_1 (--quant); llama-quantize makes the
+K-quant variants. Dimensions are multiples of 256 so K-quants apply to every
+matrix.
 """
 import argparse
 
@@ -43,7 +44,7 @@ def main():
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--kv-heads", type=int, default=2)
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--quant", default="F32", choices=["F32", "F16", "Q8_0", "Q4_0"],
+    ap.add_argument("--quant", default="F32", choices=["F32", "F16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1"],
                     help="type for the 2-D weights (K-quants need llama-quantize)")
     ap.add_argument("out")
     a = ap.parse_args()

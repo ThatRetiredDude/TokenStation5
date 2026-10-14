@@ -96,6 +96,40 @@ void dequantize_row(uint32_t type, const void *src, float *y, int64_t n) {
                 }
             }
             return;
+        case GGML_Q4_1:
+            for (int64_t b = 0; b < n / 32; b++, p += 20, y += 32) {
+                float d = rd16(p), m = rd16(p + 2);
+                const uint8_t *qs = p + 4;
+                for (int j = 0; j < 16; j++) {
+                    y[j] = (qs[j] & 0xF) * d + m;
+                    y[j + 16] = (qs[j] >> 4) * d + m;
+                }
+            }
+            return;
+        case GGML_Q5_0:
+        case GGML_Q5_1: {
+            // Q5_0: d, the 32 fifth bits, 16 bytes of nibbles; value (q - 16) * d.
+            // Q5_1: d, m, then the same; value q * d + m.
+            const bool q51 = type == GGML_Q5_1;
+            const int bytes = q51 ? 24 : 22;
+            for (int64_t b = 0; b < n / 32; b++, p += bytes, y += 32) {
+                float d = rd16(p), m = q51 ? rd16(p + 2) : 0.0f;
+                const uint8_t *h = p + (q51 ? 4 : 2), *qs = h + 4;
+                uint32_t qh = (uint32_t)h[0] | ((uint32_t)h[1] << 8) | ((uint32_t)h[2] << 16) | ((uint32_t)h[3] << 24);
+                for (int j = 0; j < 16; j++) {
+                    int x0 = (qs[j] & 0xF) | (((qh >> j) & 1) << 4);
+                    int x1 = (qs[j] >> 4) | (((qh >> (j + 16)) & 1) << 4);
+                    if (q51) {
+                        y[j] = x0 * d + m;
+                        y[j + 16] = x1 * d + m;
+                    } else {
+                        y[j] = (x0 - 16) * d;
+                        y[j + 16] = (x1 - 16) * d;
+                    }
+                }
+            }
+            return;
+        }
         case GGML_Q8_0:
             for (int64_t b = 0; b < n / 32; b++, p += 34, y += 32) {
                 float d = rd16(p);

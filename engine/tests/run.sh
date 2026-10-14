@@ -37,6 +37,12 @@ for q in F32 F16 Q8_0 Q4_0; do
     mk qwen3 qwen2 $q
     mk llama llama-spm $q
 done
+# The 32-value formats llama.cpp falls back to where K-quant blocks don't
+# fit a row (Qwen2.5 0.5B's 896-wide embeddings in a Q4_K_M file are Q5_0).
+for q in Q4_1 Q5_0 Q5_1; do
+    mk qwen2 qwen2 $q
+done
+mk llama llama-spm Q5_0
 
 echo "== Vulkan vs CPU reference"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${models[@]}"

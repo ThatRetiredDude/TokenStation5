@@ -10,6 +10,9 @@ const char *type_name(uint32_t t) {
         case GGML_F32: return "F32";
         case GGML_F16: return "F16";
         case GGML_Q4_0: return "Q4_0";
+        case GGML_Q4_1: return "Q4_1";
+        case GGML_Q5_0: return "Q5_0";
+        case GGML_Q5_1: return "Q5_1";
         case GGML_Q8_0: return "Q8_0";
         case GGML_Q4_K: return "Q4_K";
         case GGML_Q5_K: return "Q5_K";
@@ -22,7 +25,7 @@ const char *type_name(uint32_t t) {
 int block_values(uint32_t t) {
     switch (t) {
         case GGML_F32: case GGML_F16: case GGML_BF16: return 1;
-        case GGML_Q4_0: case GGML_Q8_0: return 32;
+        case GGML_Q4_0: case GGML_Q4_1: case GGML_Q5_0: case GGML_Q5_1: case GGML_Q8_0: return 32;
         case GGML_Q4_K: case GGML_Q5_K: case GGML_Q6_K: return 256;
         default: return 0;
     }
@@ -33,6 +36,9 @@ int block_bytes(uint32_t t) {
         case GGML_F32: return 4;
         case GGML_F16: case GGML_BF16: return 2;
         case GGML_Q4_0: return 18;
+        case GGML_Q4_1: return 20;
+        case GGML_Q5_0: return 22;
+        case GGML_Q5_1: return 24;
         case GGML_Q8_0: return 34;
         case GGML_Q4_K: return 144;
         case GGML_Q5_K: return 176;
