@@ -8,8 +8,11 @@
 //   vk_icdGetInstanceProcAddr   the system Vulkan loader's entry point
 //   the controller              never there: the host test presses buttons
 //                               through the press file
-//   audio out and in            no port opens, so the audio test reports no
+//   audio out                   no port opens, so the audio test reports no
 //                               audio
+//   the mic                     none, unless the host test puts a 16 kHz mono
+//                               WAV at TS5_HOME/mic.wav: then the mic plays
+//                               it, in real time, then silence
 //   the keyboard                never opens
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -56,9 +59,29 @@ int sceAudioOutOpen(int, int, int, uint32_t, uint32_t, uint32_t) { return (int)0
 int sceAudioOutOutput(int, const void *) { return -1; }
 int sceAudioOutSetVolume(int, int, int *) { return -1; }
 int sceAudioOutClose(int) { return -1; }
-int sceAudioInOpen(int, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) { return (int)0x80260109; }  // no mic
-int sceAudioInInput(int, void *) { return -1; }
-int sceAudioInClose(int) { return -1; }
+static FILE *mic;
+int sceAudioInOpen(int, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {
+    FILE *f = fopen(TS5_HOME "/mic.wav", "rb");
+    if (!f) return (int)0x80260109;  // no mic
+    // To the samples: past the RIFF header and every chunk before "data".
+    char id[4];
+    uint32_t size;
+    fseek(f, 12, SEEK_SET);
+    while (fread(id, 1, 4, f) == 4 && fread(&size, 4, 1, f) == 1 && memcmp(id, "data", 4) != 0) fseek(f, size, SEEK_CUR);
+    mic = f;
+    return 0x30000007;
+}
+int sceAudioInInput(int, void *samples) {
+    usleep(256 * 1000000 / 16000);  // a grain's time
+    const size_t n = mic ? fread(samples, 2, 256, mic) : 0;
+    memset(static_cast<int16_t *>(samples) + n, 0, (256 - n) * 2);
+    return 0;
+}
+int sceAudioInClose(int) {
+    if (mic) fclose(mic);
+    mic = nullptr;
+    return 0;
+}
 
 int sceKeyboardInit(void) { return 0; }
 int sceKeyboardOpen(int, int, int, const void *) { return (int)0x80960002; }  // no keyboard

@@ -11,6 +11,7 @@
 
 #include "canvas.h"
 #include "chat.h"
+#include "voice.h"
 
 namespace ui {
 
@@ -23,17 +24,21 @@ public:
     // Back to the newest message, as for a new conversation.
     void to_bottom();
     // The conversation in the rectangle x, y, w, h. name: a model's display
-    // name for its file name; serving: the serving model's file name, or "".
+    // name for its file name; serving: the serving model's file name, or "";
+    // can_talk: there's a speech model for R1.
     void draw(Canvas &c, const app::ChatState &s, int x, int y, int w, int h, double now,
-              const std::function<std::string(const std::string &)> &name, const std::string &serving);
-    // The line under the conversation, where a message is typed.
-    void draw_input(Canvas &c, const app::ChatState &s, int x, int y, int w, int h);
+              const std::function<std::string(const std::string &)> &name, const std::string &serving,
+              bool can_talk);
+    // The line under the conversation: how to send a message, or what the
+    // mic is doing while R1 is held.
+    void draw_input(Canvas &c, const app::ChatState &s, const app::VoiceState &voice, double now, int x, int y,
+                    int w, int h);
 
 private:
     struct Piece;
     struct Laid;
     Laid lay_out(const app::ChatTurn &t, int w, const std::string &model) const;
-    void draw_empty(Canvas &c, int x, int y, int w, int h, const std::string &serving_name);
+    void draw_empty(Canvas &c, int x, int y, int w, int h, const std::string &serving_name, bool can_talk);
 
     const Font &h2_, &body_, &bodyb_, &small_, &smallb_, &mono_, &code_;
     std::vector<Laid> laid_;  // by turn

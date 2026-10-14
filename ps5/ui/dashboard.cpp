@@ -165,7 +165,8 @@ void Dashboard::show(Page p) {
 }
 
 bool Dashboard::animating(const View &v) const {
-    if (page_ == Chat) return v.chat.busy || v.status.phase == app::Status::Loading;
+    if (page_ == Chat)
+        return v.chat.busy || v.voice.phase != app::VoiceState::Idle || v.status.phase == app::Status::Loading;
     return v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
            v.status.phase == app::Status::Benchmarking || v.api.generating;
 }
@@ -570,6 +571,9 @@ void Dashboard::draw_chat_footer(Canvas &c, const View &v) {
     const int y = 1046;
     x += key_cap(c, smallb_, x, y, "L1") + 12;
     x += c.text(small_, x, y, "Models", kText2) + 40;
+    const bool talk = !v.voice.model.empty();
+    x += key_cap(c, smallb_, x, y, "R1", talk) + 12;
+    x += c.text(small_, x, y, "Hold to talk", talk ? kText2 : kMuted) + 40;
     x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Scroll", kText2) + 40;
     struct {
         PadGlyph g;
@@ -609,8 +613,8 @@ void Dashboard::draw(Canvas &c, const View &v) {
     draw_header(c, v);
     if (page_ == Chat) {
         chat_.draw(c, v.chat, CX, PT, CW, CB - PT, v.now, [&](const std::string &f) { return name_of(v, f); },
-                   v.status.phase == app::Status::Serving ? v.status.serving : std::string());
-        chat_.draw_input(c, v.chat, CX, IY, CW, IH);
+                   v.status.phase == app::Status::Serving ? v.status.serving : std::string(), !v.voice.model.empty());
+        chat_.draw_input(c, v.chat, v.voice, v.now, CX, IY, CW, IH);
         draw_chat_footer(c, v);
         if (confirm_close_) draw_confirm(c);
         return;

@@ -64,14 +64,17 @@ Two pages; **L1** switches between them.
 | OPTIONS | close the title |
 
 **Chat**: a conversation with the serving model, the reply streaming in as
-it's written (code in blocks, a thinking model's thinking dimmed). For now a
-message comes from the PC (`scripts/ts5-ps5.sh chat`); a keyboard and holding
-R1 to talk come next. The chat sends its messages to the title's own API, as
-any client would. When a conversation outgrows the model's context, its
+it's written (code in blocks, a thinking model's thinking dimmed). Hold R1
+and talk into the controller; let go, and what you said is turned into text
+on the console's CPU (whisper.cpp, with a speech model from
+`scripts/ts5-ps5.sh speech`) and sent. A message can also come from the PC
+(`scripts/ts5-ps5.sh chat`); a keyboard comes next. The chat sends its
+messages to the title's own API, as any client would. When a conversation outgrows the model's context, its
 oldest exchanges are left out of the requests (they stay on screen).
 
 | Button | |
 | --- | --- |
+| R1 (hold) | talk: the mic is open while it's held, and the message goes when you let go (a reply still coming stops) |
 | up / down | scroll; at the bottom, the page follows the reply |
 | triangle | stop the reply |
 | square | new chat |
@@ -103,6 +106,7 @@ dashboard back.
 | `scripts/ts5-ps5.sh env TS5_TILED_MIN=16` | engine settings (writes `ts5.env`) and restart; with none, clears them |
 | `scripts/ts5-ps5.sh press down cross` | controller buttons, as if pressed |
 | `scripts/ts5-ps5.sh screenshot` | the TV picture, as `screen.bmp` |
+| `scripts/ts5-ps5.sh speech [base.en]` | download whisper's speech model (`ggml-base.en.bin`; or `tiny.en`, `small.en` ...) and upload it to `models`, for R1 talk |
 | `scripts/ts5-ps5.sh chat "Hello!"` | a message on the chat page; waits for the reply and prints its length and speed |
 | `scripts/ts5-ps5.sh keytest` | the keyboard test: a minute of a connected keyboard's raw reports in the log while someone types, printed |
 | `scripts/ts5-ps5.sh audiotest` | the audio test: a tone on the TV, the controller speaker and its headset jack, then 8 s from the controller's mic (after a beep) played back; prints every return code and saves `audiotest.wav` |
@@ -145,6 +149,7 @@ reference and says PASS or FAIL.
 | `title.cpp` | the title's `main`: command files, logging, notifications, the dashboard loop, never `exit()` |
 | `runner.cpp`, `library.cpp` | its jobs (serve, check, speed test) on the shared GPU device; its models and results |
 | `chat.cpp` | the chat's conversation, sent to the title's own API with replies streamed back |
+| `voice.cpp` | R1 talk: the controller's mic while R1 is held, then speech to text (`stt.cpp`) and the message |
 | `stt.cpp` | speech to text on the CPU with whisper.cpp (`third_party/whisper.cpp`, built into `libts5whisper.a`), and the whisper test |
 | `ui/` | the screen: the Models page (`dashboard`), the Chat page (`chat_page`), drawing (`canvas`, `style.h`), the TV (`display`, VK_KHR_display), the controller (`pad`), fonts and logo baked by `make_font.py` and `make_logo.py` |
 | `compat.c` | libc functions RADV and whisper.cpp need that titles don't get |

@@ -51,6 +51,9 @@ private:
     double load_ms_ = 0, transcribe_ms_ = 0;
 };
 
+// The ggml-*.bin files in dir (whisper models), by name.
+std::vector<std::string> whisper_models(const std::string &dir);
+
 // A WAV file's 16-bit PCM as 16 kHz mono: other rates are resampled and more
 // channels mixed down. format says what the file was ("44100 Hz stereo").
 bool read_wav_16k(const std::string &path, std::vector<int16_t> &pcm, std::string &format, std::string &err);

@@ -3,9 +3,9 @@
 // model's details and results, what the title is doing, and the API's
 // activity; up/down choose a model, cross serves it, square runs the GPU
 // check, triangle the speed test, circle stops serving. Chat (chat_page.h):
-// a conversation with the serving model; up/down scroll, triangle stops the
-// reply, square starts a new chat, circle goes back to Models. OPTIONS
-// closes the title.
+// a conversation with the serving model; hold R1 to talk, up/down scroll,
+// triangle stops the reply, square starts a new chat, circle goes back to
+// Models. OPTIONS closes the title.
 #pragma once
 #include <cstdint>
 #include <map>
@@ -15,6 +15,7 @@
 #include "canvas.h"
 #include "chat.h"
 #include "chat_page.h"
+#include "voice.h"
 #include "library.h"
 #include "runner.h"
 #include "server.h"
@@ -32,6 +33,7 @@ struct View {
     std::vector<app::Event> events;
     ts5::Server::Activity api;
     app::ChatState chat;
+    app::VoiceState voice;
     double now = 0;    // seconds, steady clock (app::now_s)
     int64_t wall = 0;  // time(nullptr)
 };
