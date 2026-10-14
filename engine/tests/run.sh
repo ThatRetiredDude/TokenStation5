@@ -123,6 +123,14 @@ cmp "$work/sd-off.txt" "$work/sd-on.txt"
 grep -q "draft [0-9]*/[1-9]" "$work/sd-on.err"  # drafts were actually proposed
 TS5_ADAPT=0 TS5_DRAFT=7 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-fix.txt" 2> /dev/null
 cmp "$work/sd-off.txt" "$work/sd-fix.txt"  # the fixed-length policy too
+echo "== the draft model cascade: a non-repeating prompt, the model as its own drafter"
+nr="The sky turned a deep shade of violet over the quiet harbor town that evening"
+TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$nr" -n 200 --temp 0 > "$work/dm-off.txt" 2> /dev/null
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-Q8_0.gguf" "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" \
+    -p "$nr" -n 200 --temp 0 > "$work/dm-on.txt" 2> "$work/dm-on.err"
+cmp "$work/dm-off.txt" "$work/dm-on.txt"
+grep -q "draft model .* ready" "$work/dm-on.err"
+grep -q "draft [0-9]*/[1-9]" "$work/dm-on.err"  # the drafter actually proposed
 echo "== ts5 check (GPU vs CPU in one command, as run on the console), then again on the saved answers"
 rm -f "$work"/qwen3-Q4_0.gguf*.ts5ref
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null

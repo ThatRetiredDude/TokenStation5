@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 
 namespace ts5 {
 
@@ -54,6 +55,63 @@ void Engine::index_grams(size_t from) {
     }
 }
 
+bool Engine::set_drafter(Model &dm, Backend *db, std::string &err) {
+    std::unique_ptr<Backend> b(db);
+    if (dm.hp.n_vocab != m_.hp.n_vocab) { err = "the draft model's vocabulary differs"; return false; }
+    dm_ = &dm;
+    db_ = std::move(b);
+    dcached_ = 0;
+    drafter_ok_ = true;
+    return true;
+}
+
+// Propose up to k tokens as the draft model's greedy continuation: catch its
+// cache up to the confirmed history plus `tok` in one batch, then extend one
+// token at a time. Any draft source is safe; the verify walk keeps the
+// output distribution. A failure turns the drafter off rather than the
+// request: lookup-only drafting still works.
+void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
+    const int nv = m_.hp.n_vocab;
+    const int pos = (int)cached_.size();
+    if (pos + k + 2 > db_->n_ctx()) return;
+    std::string err;
+    // A long backlog (the prompt of a fresh request, or everything lookup
+    // served since the drafter last ran) is caught up one bounded chunk per
+    // step, no logits wanted, so no single step stalls on it; drafting
+    // resumes once the drafter is nearly caught up.
+    const size_t CHUNK = 256;
+    if (cached_.size() - dcached_ >= CHUNK) {
+        if (!db_->forward(cached_.data() + dcached_, (int)CHUNK, (int)dcached_, nullptr, false, err)) {
+            drafter_ok_ = false;
+            fprintf(stderr, "ts5: draft model failed (%s); drafting by lookup only\n", err.c_str());
+            return;
+        }
+        dcached_ += CHUNK;
+        return;
+    }
+    const bool ip = db_->logits_view() != nullptr;
+    if (!ip && dl_.empty()) dl_.resize(nv);
+    cu_.assign(cached_.begin() + dcached_, cached_.end());
+    cu_.push_back(tok);
+    int32_t t = -1;
+    for (int i = 0; i < k; i++) {
+        const int32_t *in = i == 0 ? cu_.data() : &t;
+        const int n = i == 0 ? (int)cu_.size() : 1;
+        const int p0 = i == 0 ? (int)dcached_ : pos + i;
+        bool ok = ip ? db_->forward_in_place(in, n, p0, false, err)
+                     : db_->forward(in, n, p0, dl_.data(), false, err);
+        if (!ok) {
+            drafter_ok_ = false;
+            fprintf(stderr, "ts5: draft model failed (%s); drafting by lookup only\n", err.c_str());
+            return;
+        }
+        const float *lg = ip ? db_->logits_view() : dl_.data();
+        t = (int32_t)(std::max_element(lg, lg + nv) - lg);
+        out.push_back(t);
+        if (t_.is_eog(t)) break;  // drafts past the end would be wasted
+    }
+}
+
 // Propose up to k tokens by prompt lookup: the most recent earlier occurrence
 // of the text's final n-gram (n = 3, then 2) says what came next last time.
 // Free to be wrong: every draft is verified against the model's own logits.
@@ -85,6 +143,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     while (keep < cached_.size() && keep < prompt.size() && cached_[keep] == prompt[keep]) keep++;
     if (keep == prompt.size()) keep--;
     cached_.resize(keep);
+    if (dcached_ > keep) dcached_ = keep;
     // On unified memory the logits are sampled in place; the scratch vectors
     // are for backends without a view.
     const bool in_place = b_->logits_view() != nullptr;
@@ -99,7 +158,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         bool ok = in_place ? (last ? b_->forward_in_place(prompt.data() + i, n, (int)i, false, err)
                                    : b_->forward(prompt.data() + i, n, (int)i, nullptr, false, err))
                            : b_->forward(prompt.data() + i, n, (int)i, logits.data(), false, err);
-        if (!ok) { cached_.clear(); return false; }
+        if (!ok) { cached_.clear(); dcached_ = 0; return false; }
         cached_.insert(cached_.end(), prompt.begin() + i, prompt.begin() + i + n);
     }
     st.prompt_evaluated = (int)(prompt.size() - keep);
@@ -152,7 +211,9 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     int step = 0;
     std::vector<int32_t> batch;
     std::vector<float> lgb;  // one row of logits per batch position
+    double ts = now_ms();
     int32_t tok = sample(in_place ? b_->logits_view() : logits.data(), nv, p);
+    st.sample_ms += now_ms() - ts;
     while (true) {
         if (t_.is_eog(tok)) { st.finish = "stop"; break; }
         emit(tok);
@@ -168,20 +229,25 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         int room = std::min(want, p.max_tokens - st.gen_tokens);
         room = std::min(room, b_->n_ctx() - (int)cached_.size() - 2);
         if (room > 0) draft_lookup(tok, room, batch);
+        // The cascade: where the free lookup finds nothing, the draft model.
+        const bool by_model = batch.size() == 1 && room > 0 && db_ && drafter_ok_;
+        if (by_model) draft_model(tok, room, batch);
         const int nb = (int)batch.size();
         if (!in_place && (size_t)nb * nv > lgb.size()) lgb.resize((size_t)nb * nv);
         bool ok = in_place ? b_->forward_in_place(batch.data(), nb, (int)cached_.size(), nb > 1, err)
                            : b_->forward(batch.data(), nb, (int)cached_.size(), lgb.data(), nb > 1, err);
-        if (!ok) { cached_.clear(); return false; }
+        if (!ok) { cached_.clear(); dcached_ = 0; return false; }
         const float *lg = in_place ? b_->logits_view() : lgb.data();
         st.drafted += nb - 1;
         int accepted = 0;
         int32_t next = -1;
+        ts = now_ms();
         for (int i = 0; i < nb; i++) {
             next = sample(lg + (size_t)i * nv, nv, p);
             if (i + 1 < nb && next == batch[i + 1] && !t_.is_eog(next)) { accepted++; continue; }
             break;
         }
+        st.sample_ms += now_ms() - ts;
         st.draft_accepted += accepted;
         if (nb > 1) {
             float r = (float)accepted / (nb - 1);
@@ -189,6 +255,9 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         }
         cached_.insert(cached_.end(), batch.begin(), batch.begin() + accepted + 1);
         if (dmax > 0) index_grams(cached_.size() - (accepted + 1));
+        // The drafter entered batch[0..nb-2] while drafting; its last draft
+        // was never forwarded, so on full acceptance it is one token short.
+        if (by_model && batch.size() > 1) dcached_ = cached_.size() - (accepted == nb - 1 ? 1 : 0);
         for (int i = 1; i <= accepted; i++) emit(batch[i]);
         if (st.gen_tokens >= p.max_tokens) { st.finish = "length"; break; }
         if (!flush()) { st.finish = "stop"; break; }

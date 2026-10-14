@@ -82,6 +82,7 @@ struct Runner::Loaded {
     int n_ctx = 0;      // as loaded
     bool kv8 = false;   // its KV cache is 8-bit
     ts5::Model model;
+    ts5::Model dmodel;  // the draft model, when TS5_DRAFT_MODEL names one
     ts5::Tokenizer tok;
     std::unique_ptr<ts5::Engine> engine;
 };
@@ -171,7 +172,7 @@ void Runner::loop() {
     }
 }
 
-std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx, std::string &err) {
+std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx, std::string &err, bool drafter) {
     auto l = std::make_unique<Loaded>();
     l->path = path;
     l->file = base(path);
@@ -186,14 +187,42 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
     const ts5::HParams &hp = l->model.hp;
     printf("ts5: %s: %s, %d layers, embd %d, ff %d, heads %d/%d, head_dim %d, vocab %d\n", l->file.c_str(),
            hp.arch.c_str(), hp.n_layer, hp.n_embd, hp.n_ff, hp.n_head, hp.n_head_kv, hp.head_dim, hp.n_vocab);
+    // A draft model must fit beside the main one, so an auto-fit context
+    // leaves its budget free: weights and activations plus a 32k f16 cache.
+    const char *dp = drafter ? getenv("TS5_DRAFT_MODEL") : nullptr;
+    uint64_t dreserve = 0;
+    std::string derr;
+    bool dopen = false;
+    if (dp && *dp) {
+        try {
+            dopen = l->dmodel.open(dp, derr);
+        } catch (const std::exception &e) { derr = e.what(); }
+        if (dopen) {
+            for (const char *k : {"tokenizer.ggml.tokens", "tokenizer.ggml.scores", "tokenizer.ggml.token_type",
+                                  "tokenizer.ggml.merges"})
+                l->dmodel.gguf.kv.erase(k);
+            uint64_t dw = 0;
+            for (const auto &t : l->dmodel.gguf.tensors) dw += t.nbytes;
+            dreserve = ts5::vk_fixed_bytes(l->dmodel.hp, dw) +
+                       32768ull * ts5::kv_bytes_per_token(l->dmodel.hp, ts5::KvType::F16);
+        }
+    }
     const double t0 = now_s();
-    ts5::Backend *b = ts5::make_vk_backend(ctx_, l->model, path, n_ctx, err);
+    ts5::Backend *b = ts5::make_vk_backend(ctx_, l->model, path, n_ctx, err, dreserve);
     if (!b) return nullptr;
     l->n_ctx = b->n_ctx();
     l->kv8 = b->kv_type() == ts5::KvType::Q8;
     printf("ts5: %s backend ready in %.1f s, context %d%s, %s KV cache\n", b->name(), now_s() - t0, l->n_ctx,
            n_ctx <= 0 ? " (what fits)" : "", l->kv8 ? "8-bit" : "f16");
     l->engine = std::make_unique<ts5::Engine>(l->model, b, l->tok);
+    if (dp && *dp) {
+        ts5::Backend *db = nullptr;
+        if (dopen) db = ts5::make_vk_backend(ctx_, l->dmodel, dp, std::min(l->n_ctx, 32768), derr);
+        if (!db || !l->engine->set_drafter(l->dmodel, db, derr))
+            printf("ts5: draft model not used: %s\n", derr.c_str());
+        else
+            printf("ts5: draft model %s ready\n", base(dp).c_str());
+    }
     log_memory("after loading " + l->file);
     return l;
 }
@@ -223,7 +252,7 @@ bool Runner::serve(const std::string &path, int n_ctx) {
     notify_("TokenStation5: loading " + file);
     server_.set_engine(nullptr, "", "loading " + file);
     std::string err;
-    serving_ = load(path, n_ctx, err);
+    serving_ = load(path, n_ctx, err, true);
     if (!serving_) {
         server_.set_engine(nullptr, "", "no model");
         std::lock_guard<std::mutex> lk(mu_);
