@@ -11,6 +11,8 @@
 #   scripts/ts5-ps5.sh bench NAME.gguf [--pp N --tg N]
 #                                          prompt/generation speed run, as its triangle
 #   scripts/ts5-ps5.sh stop                stop serving
+#   scripts/ts5-ps5.sh env [NAME=VALUE...] engine settings (ts5.env), then restart;
+#                                          none: clear them
 #   scripts/ts5-ps5.sh press BUTTON...     press controller buttons (up down cross square ...)
 #   scripts/ts5-ps5.sh screenshot [FILE]   the TV picture, as a BMP (default screen.bmp)
 #   scripts/ts5-ps5.sh log [prev]          the title's log (prev: the run before)
@@ -132,6 +134,12 @@ case $cmd in
         put_text ts5.cmd stop
         echo "ts5-ps5: asked the title to stop serving"
         ;;
+    env)
+        put_text ts5.env "$*"
+        put_text restart ""
+        wait_down
+        wait_api
+        ;;
     press)
         put_text press "$*"
         ;;
@@ -153,7 +161,7 @@ case $cmd in
         wait_api
         ;;
     *)
-        sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac

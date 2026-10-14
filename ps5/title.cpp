@@ -27,6 +27,8 @@
 // each taken as soon as the title sees it:
 //   ts5.cmd     one command now: serve|check|bench -m MODEL [options], or stop
 //   ts5.once    one command at the next start, before the args file's
+//   ts5.env     NAME=VALUE settings for the engine, read at start, such as
+//               TS5_TILED_MIN=16 (engine/src/vk_backend.cpp lists them)
 //   press       controller buttons, as words: up down cross square ...
 //   screenshot  the next frame goes to screen.bmp
 //   quit        closes the title; restart starts it again
@@ -101,6 +103,7 @@ namespace {
 constexpr const char *kModels = TS5_HOME "/models";
 constexpr const char *kArgs = TS5_HOME "/ts5.args";
 constexpr const char *kOnce = TS5_HOME "/ts5.once";
+constexpr const char *kEnv = TS5_HOME "/ts5.env";
 constexpr const char *kCmd = TS5_HOME "/ts5.cmd";
 constexpr const char *kLog = TS5_HOME "/ts5.log";
 constexpr const char *kPrevLog = TS5_HOME "/ts5.prev.log";
@@ -303,6 +306,15 @@ int main(int, char **) {
     // GPU instead of a split. Read when the Vulkan instance is created.
     setenv("radv_enable_unified_heap_on_apu", "true", 1);
     setenv("HOME", TS5_HOME, 0);
+    for (const std::string &w : read_words(kEnv)) {
+        size_t eq = w.find('=');
+        if (eq == 0 || eq == std::string::npos) {
+            printf("ts5-title: ts5.env: not NAME=VALUE: %s\n", w.c_str());
+            continue;
+        }
+        setenv(w.substr(0, eq).c_str(), w.substr(eq + 1).c_str(), 1);
+        printf("ts5-title: %s\n", w.c_str());
+    }
 
     for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd}) unlink(f);
     std::thread(watch_control_files).detach();

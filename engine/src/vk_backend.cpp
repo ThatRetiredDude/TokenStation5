@@ -41,6 +41,18 @@
 #include "matmul_q5_k.spv.h"
 #include "matmul_q6_k.spv.h"
 #include "matmul_q8_0.spv.h"
+#include "matvec_q4_k.spv.h"
+#include "matvec_q6_k.spv.h"
+#include "mm_f16.spv.h"
+#include "mm_f32.spv.h"
+#include "mm_q4_0.spv.h"
+#include "mm_q4_1.spv.h"
+#include "mm_q4_k.spv.h"
+#include "mm_q5_0.spv.h"
+#include "mm_q5_1.spv.h"
+#include "mm_q5_k.spv.h"
+#include "mm_q6_k.spv.h"
+#include "mm_q8_0.spv.h"
 #include "qkv_post.spv.h"
 #include "rmsnorm.spv.h"
 #include "swiglu.spv.h"
@@ -198,6 +210,8 @@ private:
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         CHECK(vk.vkCreateFence(dev_, &fci, nullptr, &fence_));
         if (const char *e = getenv("TS5_LAYERS_PER_SUBMIT")) layers_per_submit_ = std::max(1, atoi(e));
+        if (const char *e = getenv("TS5_TILED_MIN")) tiled_min_ = atoi(e);
+        if (const char *e = getenv("TS5_FAST_MATVEC")) fast_matvec_ = atoi(e) != 0;
         return true;
     }
 
@@ -312,6 +326,9 @@ private:
         P(matmul_f32, 3) P(matmul_f16, 3) P(matmul_q4_0, 3) P(matmul_q8_0, 3)
         P(matmul_q4_1, 3) P(matmul_q5_0, 3) P(matmul_q5_1, 3)
         P(matmul_q4_k, 3) P(matmul_q5_k, 3) P(matmul_q6_k, 3)
+        P(mm_f32, 3) P(mm_f16, 3) P(mm_q4_0, 3) P(mm_q8_0, 3) P(mm_q4_1, 3) P(mm_q5_0, 3) P(mm_q5_1, 3)
+        P(mm_q4_k, 3) P(mm_q5_k, 3) P(mm_q6_k, 3)
+        P(matvec_q4_k, 3) P(matvec_q6_k, 3)
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
@@ -439,7 +456,20 @@ private:
             (uint32_t)w.ne0(), (uint32_t)w.ne1(), (uint32_t)ntok, (uint32_t)w.info->row_bytes(),
             (uint32_t)w.ne0(), (uint32_t)w.ne1(), accumulate ? 1u : 0u, x_off};
         uint32_t rows = (uint32_t)w.ne1();
+        // Many tokens: the tiled kernel, which reads each weight once per 64
+        // tokens. Few: one workgroup per row.
+        if (ntok >= tiled_min_) {
+            dispatch(std::string("mm_") + qname(w.type()), {&W(w), &x, &y}, pc, (rows + 63) / 64,
+                     ((uint32_t)ntok + 63) / 64);
+            return;
+        }
         uint32_t gx = std::min<uint32_t>(rows, 65535), gy = (rows + gx - 1) / gx;
+        // One token of Q4_K or Q6_K (generation with a Q4_K_M model): the
+        // kernels that read the weights as words.
+        if (ntok == 1 && fast_matvec_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
+            dispatch(std::string("matvec_") + qname(w.type()), {&W(w), &x, &y}, pc, gx, gy);
+            return;
+        }
         dispatch(std::string("matmul_") + qname(w.type()), {&W(w), &x, &y}, pc, gx, gy);
     }
 
@@ -529,6 +559,10 @@ private:
     VkDeviceSize allocated_ = 0;
     uint64_t weight_bytes_ = 0;
     int layers_per_submit_ = 0;
+    // Matmuls of at least this many tokens use the tiled kernel (TS5_TILED_MIN).
+    int tiled_min_ = 9;
+    // One-token Q4_K/Q6_K matmuls use the word-load kernels (TS5_FAST_MATVEC=0: off).
+    bool fast_matvec_ = true;
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
     Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, ids_, logits_, kc_, vc_;

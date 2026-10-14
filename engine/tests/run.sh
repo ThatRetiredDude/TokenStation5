@@ -50,6 +50,8 @@ echo "== one token per call (KV cache across calls)"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --step "$work/qwen3-Q4_0.gguf" "$work/llama-Q8_0.gguf"
 echo "== 300 tokens (prefill chunking, >128 keys per attention block)"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "$work/qwen2-Q8_0.gguf"
+echo "== 72 tokens per call (the tiled matmul: a full and a partial 64-token tile)"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${models[@]}"
 echo "== ts5 check (GPU vs CPU in one command, as run on the console)"
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null
 echo "== the PS5 title's main on this machine (ps5/host-test.sh)"
@@ -70,6 +72,9 @@ if [ -n "${LLAMA_CPP:-}" ]; then
     done
     echo "== K-quants: Vulkan vs CPU reference"
     python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${kq[@]}"
+    python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${kq[@]}"
+    python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --step \
+        "$work/qwen3-Q4_K_M.gguf" "$work/llama-Q4_K_M.gguf"
     echo "== vs llama.cpp (llama.cpp quantizes activations, so quantized models differ a little)"
     python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk "$work/qwen2-F32.gguf" "$work/qwen3-F32.gguf" \
         "$work/llama-F32.gguf" "$work/qwen3-Q4_K_M.gguf"
