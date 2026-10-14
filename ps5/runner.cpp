@@ -7,11 +7,19 @@
 #include <exception>
 #include <thread>
 
+#include <sys/types.h>
+
 #include "backend.h"
 #include "checks.h"
 #include "engine.h"
 #include "model.h"
 #include "tokenizer.h"
+
+extern "C" {
+size_t sceKernelGetDirectMemorySize(void);
+int sceKernelAvailableDirectMemorySize(off_t start, off_t end, size_t align, off_t *found, size_t *size);
+int sceKernelAvailableFlexibleMemorySize(size_t *size);
+}
 
 namespace app {
 
@@ -25,6 +33,20 @@ namespace {
 std::string base(const std::string &p) {
     const size_t s = p.find_last_of('/');
     return s == std::string::npos ? p : p.substr(s + 1);
+}
+
+// What's free once a model is loaded or a job is done, so the log shows whether
+// anything stayed behind: the CPU's flexible memory, and the largest free run
+// of the direct memory the GPU allocates from.
+void log_memory(const std::string &when) {
+    size_t flex = 0, run = 0;
+    off_t at = 0;
+    const size_t pool = sceKernelGetDirectMemorySize();
+    const bool fok = sceKernelAvailableFlexibleMemorySize(&flex) == 0;
+    const bool dok = sceKernelAvailableDirectMemorySize(0, (off_t)pool, 0x4000, &at, &run) == 0;
+    const double mib = 1024.0 * 1024.0;
+    printf("ts5-title: memory %s: flexible free %.0f MiB%s, direct free %.0f of %.0f MiB%s\n", when.c_str(),
+           flex / mib, fok ? "" : " (unknown)", run / mib, pool / mib, dok ? "" : " (unknown)");
 }
 
 }  // namespace
@@ -128,6 +150,11 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
     l->file = base(path);
     l->n_ctx = n_ctx;
     if (!l->model.open(path, err) || !l->tok.load(l->model.gguf, err)) return nullptr;
+    // The tokenizer keeps its own copy of the vocabulary; the file's arrays of
+    // it (about 20 MB for 150k tokens) aren't read again.
+    for (const char *k : {"tokenizer.ggml.tokens", "tokenizer.ggml.scores", "tokenizer.ggml.token_type",
+                          "tokenizer.ggml.merges"})
+        l->model.gguf.kv.erase(k);
     l->name = l->model.gguf.get_str("general.name", l->file);
     const ts5::HParams &hp = l->model.hp;
     printf("ts5: %s: %s, %d layers, embd %d, ff %d, heads %d/%d, head_dim %d, vocab %d\n", l->file.c_str(),
@@ -137,6 +164,7 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
     if (!b) return nullptr;
     printf("ts5: %s backend ready in %.1f s, context %d\n", b->name(), now_s() - t0, n_ctx);
     l->engine = std::make_unique<ts5::Engine>(l->model, b, l->tok);
+    log_memory("after loading " + l->file);
     return l;
 }
 
@@ -210,54 +238,62 @@ void Runner::run(const Job &job) {
     std::string resume_path;
     int resume_ctx = 0;
     std::string err;
-    if (serving_ && serving_->path == job.path && serving_->n_ctx >= need_ctx) {
-        server_.set_engine(nullptr, "", check ? "running the GPU check" : "running the speed test");
-        target = serving_.get();
-    } else {
-        if (serving_) {
-            resume_path = serving_->path;
-            resume_ctx = serving_->n_ctx;
-        }
-        unload();
-        set_step("loading the model");
-        own = load(job.path, need_ctx, err);
-        target = own.get();
-    }
-    bool ok = target != nullptr;
-    auto progress = [this](const std::string &s) { set_step(s); };
-    if (ok && check) {
-        ts5::CheckResult r;
-        ok = ts5::run_check(target->model, target->engine->backend(), job.n, r, err, progress);
-        if (ok) {
-            const std::string line = ts5::check_line(file, r);
-            printf("%s\n", line.c_str());
-            CheckRecord rec{r.pass, r.same_top, r.n, r.rel, r.gpu_ms, r.cpu_ms, (int64_t)time(nullptr)};
-            {
-                std::lock_guard<std::mutex> lk(lib_mutex_);
-                lib_.record(file, rec);
+    bool ok = false;
+    // An exception (out of memory, say) fails the job but not what follows it:
+    // the serving model goes back on the API either way.
+    try {
+        if (serving_ && serving_->path == job.path && serving_->n_ctx >= need_ctx) {
+            server_.set_engine(nullptr, "", check ? "running the GPU check" : "running the speed test");
+            target = serving_.get();
+        } else {
+            if (serving_) {
+                resume_path = serving_->path;
+                resume_ctx = serving_->n_ctx;
             }
-            char b[160];
-            snprintf(b, sizeof b, "GPU check %s on %s: same top token %d/%d", r.pass ? "passed" : "FAILED",
-                     target->name.c_str(), r.same_top, r.n);
-            event(b, !r.pass);
-            notify_(r.pass ? "TokenStation5: GPU check passed" : "TokenStation5: GPU check FAILED");
+            unload();
+            set_step("loading the model");
+            own = load(job.path, need_ctx, err);
+            target = own.get();
         }
-    } else if (ok) {
-        ts5::BenchResult r;
-        ok = ts5::run_bench(target->model, target->engine->backend(), job.pp, job.tg, r, err, progress);
-        if (ok) {
-            printf("%s\n", ts5::bench_table(file, r).c_str());
-            BenchRecord rec{r.pp, r.tg, r.pp_tps, r.tg_tps, (int64_t)time(nullptr)};
-            {
-                std::lock_guard<std::mutex> lk(lib_mutex_);
-                lib_.record(file, rec);
+        ok = target != nullptr;
+        auto progress = [this](const std::string &s) { set_step(s); };
+        if (ok && check) {
+            ts5::CheckResult r;
+            ok = ts5::run_check(target->model, target->engine->backend(), job.n, r, err, progress);
+            if (ok) {
+                const std::string line = ts5::check_line(file, r);
+                printf("%s\n", line.c_str());
+                CheckRecord rec{r.pass, r.same_top, r.n, r.rel, r.gpu_ms, r.cpu_ms, (int64_t)time(nullptr)};
+                {
+                    std::lock_guard<std::mutex> lk(lib_mutex_);
+                    lib_.record(file, rec);
+                }
+                char b[160];
+                snprintf(b, sizeof b, "GPU check %s on %s: same top token %d/%d", r.pass ? "passed" : "FAILED",
+                         target->name.c_str(), r.same_top, r.n);
+                event(b, !r.pass);
+                notify_(r.pass ? "TokenStation5: GPU check passed" : "TokenStation5: GPU check FAILED");
             }
-            char b[160];
-            snprintf(b, sizeof b, "Speed test on %s: prompt %.0f tok/s, generation %.1f tok/s", target->name.c_str(),
-                     r.pp_tps, r.tg_tps);
-            event(b);
-            notify_(std::string("TokenStation5: ") + b);
+        } else if (ok) {
+            ts5::BenchResult r;
+            ok = ts5::run_bench(target->model, target->engine->backend(), job.pp, job.tg, r, err, progress);
+            if (ok) {
+                printf("%s\n", ts5::bench_table(file, r).c_str());
+                BenchRecord rec{r.pp, r.tg, r.pp_tps, r.tg_tps, (int64_t)time(nullptr)};
+                {
+                    std::lock_guard<std::mutex> lk(lib_mutex_);
+                    lib_.record(file, rec);
+                }
+                char b[160];
+                snprintf(b, sizeof b, "Speed test on %s: prompt %.0f tok/s, generation %.1f tok/s",
+                         target->name.c_str(), r.pp_tps, r.tg_tps);
+                event(b);
+                notify_(std::string("TokenStation5: ") + b);
+            }
         }
+    } catch (const std::exception &e) {
+        ok = false;
+        err = e.what();
     }
     if (!ok) {
         std::lock_guard<std::mutex> lk(mu_);
@@ -281,6 +317,7 @@ void Runner::run(const Job &job) {
             status_.error = error;
         }
     }
+    log_memory(check ? "after the GPU check" : "after the speed test");
 }
 
 }  // namespace app

@@ -131,12 +131,16 @@ wait_health
 grep -q "TokenStation5" "$home/ts5.prev.log" || fail "no previous log"
 
 echo "== ts5.once: a one-off check at the next start, then the args file's model"
+echo "== ts5.env: engine settings (here every matmul tiled, even one token's)"
 echo "check -m $name -n 6" > "$home/ts5.once"
+echo "TS5_TILED_MIN=1 TS5_FAST_MATVEC=0" > "$home/ts5.env"
 : > "$home/restart"
 wait_down
+wait_log "^ts5-title: TS5_TILED_MIN=1$"
 wait_log "^ts5 check: .*, 6 tokens: .* PASS$"
 wait_health
 [ ! -e "$home/ts5.once" ] || fail "ts5.once was not consumed"
+rm "$home/ts5.env"
 
 echo "== the args file: another port"
 echo "serve -m \"$home/models/$name\" --port 18081" > "$home/ts5.args"

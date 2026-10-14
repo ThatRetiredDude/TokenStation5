@@ -74,6 +74,7 @@ the command that fetches them.
 | `scripts/ts5-ps5.sh check NAME.gguf` | the GPU check, printing its result line |
 | `scripts/ts5-ps5.sh bench NAME.gguf` | the speed test, printing its table row |
 | `scripts/ts5-ps5.sh stop` | stop serving |
+| `scripts/ts5-ps5.sh env TS5_TILED_MIN=16` | engine settings (writes `ts5.env`) and restart; with none, clears them |
 | `scripts/ts5-ps5.sh press down cross` | controller buttons, as if pressed |
 | `scripts/ts5-ps5.sh screenshot` | the TV picture, as `screen.bmp` |
 | `scripts/ts5-ps5.sh log` / `log prev` | the title's log, or the run before |
@@ -88,6 +89,7 @@ On the console, everything lives in the title's own folder,
 | `ts5.args` | what to serve at start: `serve -m MODEL [-c N] [--port N]` |
 | `ts5.cmd` | a command to run now: `serve`, `check`, `bench` (`-m MODEL`), or `stop` |
 | `ts5.once` | a command to run at the next start, before `ts5.args` |
+| `ts5.env` | engine settings read at start, `NAME=VALUE` (the `getenv` calls in `engine/src/vk_backend.cpp`) |
 | `press`, `screenshot` | controller buttons; the next frame to `screen.bmp` |
 | `quit`, `restart` | close or restart the title |
 | `ts5.log`, `ts5.prev.log`, `results.tsv` | its log, the run before's, and the check and speed results |

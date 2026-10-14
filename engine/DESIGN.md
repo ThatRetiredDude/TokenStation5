@@ -67,6 +67,19 @@ Weights stay in their GGUF block layout on the GPU, one buffer per tensor.
 Kernels read them through 8-bit storage access and dequantize 32-value "units"
 (one block, or one eighth of a K-quant super-block) in registers.
 
+Each matmul picks one of three kernels by how many tokens it multiplies:
+
+- 9 or more (`mm_*`, `shaders/matmul_tiled.glsl`): 64 rows x 64 tokens per
+  workgroup. Half the threads dequantize a 64 x 64 slice of W into shared
+  memory while the other half load the matching slice of X, then each thread
+  accumulates 4 x 4 outputs. Each weight is read once per 64 tokens instead
+  of once per 8. `TS5_TILED_MIN` sets the threshold.
+- One token of Q4_K or Q6_K, as in generation with a Q4_K_M model
+  (`matvec_*`, `shaders/matvec_k.glsl`): one workgroup per row, 16 threads
+  per super-block reading its quants as 32-bit words, subgroup reductions.
+  `TS5_FAST_MATVEC=0` turns it off.
+- Anything else (`matmul_*`): one workgroup per row, 8 tokens per pass.
+
 ## Memory
 
 Every buffer is sub-allocated from 1 GiB blocks. Host-visible device-local
@@ -100,17 +113,17 @@ llama.cpp. The Vulkan backend is checked against both:
 
 ## Performance plan
 
-v0 kernels are correctness-first: one workgroup per output row, byte loads,
-shared-memory reductions. Lavapipe numbers mean nothing; real tuning needs the
-console or an RDNA 2 card. In order of expected payoff:
+The v0 kernels were correctness-first: one workgroup per output row, byte
+loads, shared-memory reductions. Lavapipe numbers mean nothing; real tuning
+needs the console or an RDNA 2 card. In order of expected payoff:
 
-1. **Prefill matmul.** Tiled kernel: dequantize a weight tile to fp16 in LDS,
-   multiply against a token tile with packed fp16 FMA (`v_pk_fma_f16`, twice
-   the fp32 rate), fp32 accumulation. This is where llama.cpp leaves ~85% of
-   the GPU idle on the PS5.
-2. **Decode matvec.** 32-bit or 128-bit weight loads, several rows per
-   workgroup, subgroup reductions instead of shared memory, and the gate/up
-   pair fused. Target: 70%+ of the 448 GB/s bandwidth.
+1. **Prefill matmul.** Done in fp32 (the tiled kernel above). Next: fp16
+   tiles in LDS with packed fp16 FMA (`v_pk_fma_f16`, twice the fp32 rate) and
+   fp32 accumulation. This is where llama.cpp leaves ~85% of the GPU idle on
+   the PS5.
+2. **Decode matvec.** Word loads and subgroup reductions are done for Q4_K
+   and Q6_K. Next: several rows per workgroup, the other types, and the
+   gate/up pair fused. Target: 70%+ of the 448 GB/s bandwidth.
 3. **Attention.** Flash-attention style tiles for prefill; split-K over the
    cache for long-context decode.
 4. **Fewer dispatches.** Fuse rmsnorm into the following matmul's input
@@ -145,7 +158,11 @@ title around it:
 - **Shell.** `param.json` in PS5LM's working shape (`amm` and `kernel` page
   table sizes; `attribute3` 0x80040 only declares 120 Hz output, which a
   server does not need). C++ exceptions and RTTI are on.
-- **Memory.** `radv_enable_unified_heap_on_apu` for the 11.44 GiB heap.
+- **Memory.** RADV shows the console's 11.44 GiB as a 7.63 GiB device-local
+  heap and a 3.81 GiB GTT heap, the same memory underneath. Buffers fall back
+  from one heap to the other, so models get all of it. Not
+  `radv_enable_unified_heap_on_apu`: its one heap has no GTT memory types, and
+  the VideoOut swapchain needs one, so the TV gets no picture.
 - **Network.** `ts5 serve` on 0.0.0.0:8081, the same port as PS5LM, so
   clients and `scripts/bench.py` work unchanged. The accept loop listens again
   when the console's network drops.
