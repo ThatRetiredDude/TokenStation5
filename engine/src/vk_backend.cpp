@@ -6,6 +6,7 @@
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -394,17 +395,33 @@ private:
     // One buffer per tensor, filled straight from the file when the memory is
     // host-visible (unified memory), else through a staging buffer.
     bool upload_weights(const std::string &path, std::string &err) {
+        // The read rate decides whether a slow model load is the storage or
+        // the code; it is printed once per load.
+        const auto lt0 = std::chrono::steady_clock::now();
         FILE *f = fopen(path.c_str(), "rb");
         if (!f) { err = "cannot open " + path; return false; }
         Buf staging;
         const VkDeviceSize SCHUNK = 64ull << 20;
+        // Host-visible memory is filled through a buffer in ordinary memory,
+        // 8 MiB per read (TS5_LOAD_BOUNCE=0: read straight into it).
+        const size_t BCHUNK = 8u << 20;
+        bool bounce = true;
+        if (const char *e = getenv("TS5_LOAD_BOUNCE")) bounce = atoi(e) != 0;
+        std::vector<char> tmp;
         for (auto &t : m_.gguf.tensors) {
             if (t.nbytes == 0) continue;
             if (!qname(t.type)) { fclose(f); err = t.name + ": type " + type_name(t.type) + " not supported on Vulkan yet"; return false; }
             Buf b;
             if (!create_buf(t.nbytes, false, b, err)) { fclose(f); return false; }
             fseeko(f, (off_t)(m_.gguf.data_offset + t.offset), SEEK_SET);
-            if (b.map) {
+            if (b.map && bounce) {
+                if (tmp.empty()) tmp.resize(BCHUNK);
+                for (uint64_t off = 0; off < t.nbytes; off += BCHUNK) {
+                    const size_t len = (size_t)std::min<uint64_t>(BCHUNK, t.nbytes - off);
+                    if (fread(tmp.data(), 1, len, f) != len) { fclose(f); err = "short read"; return false; }
+                    memcpy(b.map + off, tmp.data(), len);
+                }
+            } else if (b.map) {
                 if (fread(b.map, 1, t.nbytes, f) != t.nbytes) { fclose(f); err = "short read"; return false; }
             } else {
                 if (!staging.buf && !create_buf(SCHUNK, true, staging, err)) { fclose(f); return false; }
@@ -418,6 +435,9 @@ private:
             weight_bytes_ += t.nbytes;
         }
         fclose(f);
+        const double ls = std::chrono::duration<double>(std::chrono::steady_clock::now() - lt0).count();
+        fprintf(stderr, "ts5: weights %.2f GB read in %.1f s (%.0f MB/s)\n", weight_bytes_ / 1e9, ls,
+                ls > 0 ? weight_bytes_ / 1e6 / ls : 0.0);
         return true;
     }
 
