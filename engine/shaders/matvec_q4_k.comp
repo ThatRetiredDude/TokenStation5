@@ -1,0 +1,36 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Q4_K: d, dmin (f16), 12 bytes of 6-bit scales and mins, then 128 bytes of
+// nibbles: 32-byte group p holds sub-block 2p in its low nibbles and 2p + 1
+// in its high ones.
+#define BLOCK_BYTES 144
+#include "matvec_k.glsl"
+
+// Sub-block j's 6-bit scale and min.
+void scale_min(uint o, uint j, out float sc, out float m) {
+    if (j < 4) {
+        sc = float(uint(w8[o + 4 + j]) & 63u);
+        m = float(uint(w8[o + 8 + j]) & 63u);
+    } else {
+        sc = float((uint(w8[o + 8 + j]) & 15u) | ((uint(w8[o + j]) >> 6) << 4));
+        m = float((uint(w8[o + 8 + j]) >> 4) | ((uint(w8[o + 4 + j]) >> 6) << 4));
+    }
+}
+
+// Thread th takes words th and th + 16 of the nibbles: 4 values each of two
+// sub-blocks per word.
+float block_dot(uint o, uint xb, uint th) {
+    const vec2 dm = unpackHalf2x16(w32[o >> 2]);
+    float s = 0.0;
+    for (uint k = 0; k < 2; k++) {
+        const uint w = th + 16 * k, p = w / 8, l = 4 * (w % 8);
+        const uint q = w32[(o + 16) / 4 + w];
+        float sc0, m0, sc1, m1;
+        scale_min(o, 2 * p, sc0, m0);
+        scale_min(o, 2 * p + 1, sc1, m1);
+        const vec4 x0 = X4[xb + (64 * p + l) / 4], x1 = X4[xb + (64 * p + 32 + l) / 4];
+        s += dm.x * (sc0 * dot(nibbles(q, 0), x0) + sc1 * dot(nibbles(q, 4), x1)) -
+             dm.y * (m0 * dot(x0, vec4(1.0)) + m1 * dot(x1, vec4(1.0)));
+    }
+    return s;
+}
