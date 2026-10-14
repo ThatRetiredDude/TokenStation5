@@ -8,6 +8,10 @@ Mihawk-99's RADV port. [PS5LM Plus](https://github.com/abhi245y/PS5LM) already
 packages that as a native title, so this project starts by running it and only
 forks it where measurements show a gap. See [FEASIBILITY.md](FEASIBILITY.md).
 
+## Critical
+
+- [ ] Keep the PS5 out of rest mode while TokenStation5 runs. Its idle timer counts only controller input, not API requests or jobs: on 2026-10-14 it went into rest mode at 18:36 UTC in the middle of unattended speed tests (the jailbreak, ftpsrv and the title survived and resumed). The title now calls `sceSystemServicePowerTick` every 10 s and darkens the TV itself after 10 idle minutes; to verify on the console with the rest timer at its shortest.
+
 ## M0: bring-up (on the console)
 
 - [x] Console jailbroken on fw 13.60 (OnionHEN + kstuff), RADV compute proven by aamd-at-home's PPSA99021
