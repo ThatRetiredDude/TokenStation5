@@ -134,7 +134,7 @@ wait_health
 echo "== audiotest: no audio on the PC, so the test says so and the title carries on"
 : > "$home/audiotest"
 wait_log "^ts5-title: audio test: done$"
-grep -q "audio test: load libSceAudioOut.sprx 0x80020002" "$home/ts5.log" || fail "the audio test logged no module load"
+grep -q "audio test: load /host/common/lib/libSceAudioOut.sprx 0x80020002" "$home/ts5.log" || fail "the audio test logged no module load"
 notified "the controller's mic didn't open"
 wait_health
 
