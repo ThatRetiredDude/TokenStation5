@@ -18,10 +18,12 @@ struct SampleParams {
     int top_k = 40;
     int max_tokens = 512;
     uint64_t seed = 0;  // 0: random
+    int draft = -1;     // tokens drafted per step by prompt lookup; -1: TS5_DRAFT or 7; 0: off
 };
 
 struct GenStats {
     int prompt_tokens = 0, prompt_evaluated = 0, gen_tokens = 0;
+    int drafted = 0, draft_accepted = 0;  // prompt-lookup speculation
     double prompt_ms = 0, gen_ms = 0;
     std::string finish = "length";
 };
@@ -39,7 +41,7 @@ public:
     void forget_cache() { cached_.clear(); }
 
 private:
-    int32_t sample(std::vector<float> &logits, const SampleParams &p);
+    int32_t sample(const float *logits, int n, const SampleParams &p);
     Model &m_;
     std::unique_ptr<Backend> b_;
     Tokenizer &t_;

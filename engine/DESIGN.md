@@ -133,6 +133,27 @@ A short prompt late in a chat splits its keys too.
 then prints the GPU's time per kernel (matmuls by weight) for the prompt and
 for generation.
 
+## Speculative decoding (prompt lookup)
+
+Single-stream decode streams every weight byte per token, so it is capped by
+memory bandwidth (~96 tok/s for a 7B Q4_K_M at 448 GB/s). Verifying several
+tokens in one forward pass rides one weight stream, which is the only way past
+that wall. `Engine::generate` drafts up to `TS5_DRAFT` tokens per step (default
+7, so the batch of 8 fits one pass of the 8-token matmul kernels; 0 disables)
+by prompt lookup: the most recent earlier occurrence of the text's final
+3-gram (then 2-gram) proposes what followed it last time. The drafted tokens
+ride the next token's forward pass as one batch, and a draft is kept only when
+sampling the model's own logits at its position yields exactly that token, so
+the output is token-for-token what one-at-a-time sampling would produce (for a
+delta-distribution draft, "sample the target and compare" is the speculative
+acceptance rule). Rejected positions leave stale K/V entries past the accepted
+point; they are overwritten before any later token attends to them, since
+positions are absolute and monotonic. Acceptance is workload-dependent: code
+editing and retrieval-heavy chats repeat long spans of their own context and
+accept most drafts; free-form prose accepts few, and costs only the extra
+ALU of the wasted batch columns (the weight stream is shared either way).
+`timings` reports `draft_n`/`draft_n_accepted`.
+
 ## Memory
 
 Every buffer is sub-allocated from 1 GiB blocks. Host-visible device-local
