@@ -44,5 +44,5 @@ jobs:
         run: rm -rf .deps/ps5/PS5_Mesa .deps/ps5/PS5_Vulkan/.deps/work
       - uses: actions/upload-artifact@v4
         with:
-          name: TokenStation5-PPSA99555
-          path: build/ps5/PPSA99555
+          name: TokenStation5-PPSA05005
+          path: build/ps5/PPSA05005

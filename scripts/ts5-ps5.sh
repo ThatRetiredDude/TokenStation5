@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Drives the TokenStation5 title on the console over FTP (ftpsrv, 2121).
 #
-#   scripts/ts5-ps5.sh install             upload build/ps5/PPSA99555 to /data/homebrew
+#   scripts/ts5-ps5.sh install             upload the title from build/ps5 to /data/homebrew
 #   scripts/ts5-ps5.sh model FILE.gguf     upload a model to /data/ts5/models
 #   scripts/ts5-ps5.sh models              list the models on the console
 #   scripts/ts5-ps5.sh serve NAME.gguf [ts5 options]
@@ -53,12 +53,13 @@ cmd=${1:-}
 [ $# -gt 0 ] && shift
 case $cmd in
     install)
-        app="$root/build/ps5/PPSA99555"
+        id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["titleId"])' "$root/ps5/sce_sys/param.json")
+        app="$root/build/ps5/$id"
         [ -f "$app/eboot.bin" ] || { echo "ts5-ps5: build it first: ps5/build.sh" >&2; exit 2; }
         # Files of a running title cannot be replaced.
         put_text quit "" 2> /dev/null && sleep 3 || true
         (cd "$app" && find . -type f | sort | while read -r f; do
-            curl -sS --ftp-create-dirs -T "$f" "$ftp/data/homebrew/PPSA99555/${f#./}"
+            curl -sS --ftp-create-dirs -T "$f" "$ftp/data/homebrew/$id/${f#./}"
         done)
         curl -sS --ftp-create-dirs -T /dev/null "$ftp$dir/models/.keep"
         echo "ts5-ps5: installed. Launch TokenStation5 from the home screen."

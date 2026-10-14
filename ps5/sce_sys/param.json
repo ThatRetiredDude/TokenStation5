@@ -12,9 +12,9 @@
   "attribute": 0,
   "attribute2": 0,
   "attribute3": 0,
-  "conceptId": "99555",
+  "conceptId": "05005",
   "contentBadgeType": 1,
-  "contentId": "UP9000-PPSA99555_00-TOKENSTATION5000",
+  "contentId": "UP9000-PPSA05005_00-TOKENSTATION5000",
   "contentVersion": "01.000.000",
   "downloadDataSize": 256,
   "gameIntent": {
@@ -42,6 +42,6 @@
   },
   "requiredSystemSoftwareVersion": "0x0000000000000000",
   "sdkVersion": "0x0000000000000000",
-  "titleId": "PPSA99555",
+  "titleId": "PPSA05005",
   "versionFileUri": ""
 }

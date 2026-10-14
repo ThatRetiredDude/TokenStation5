@@ -50,7 +50,7 @@ as the baseline to beat. Design: [engine/DESIGN.md](../engine/DESIGN.md).
 
 - [x] v0: GGUF loader, llama/qwen2/qwen3, F32 to Q6_K, BPE + SentencePiece tokenizers, OpenAI server
 - [x] Correctness: logits match llama.cpp and the CPU reference on every type; tokenizer matches llama-tokenize; CI on lavapipe
-- [x] PS5 title builds: TokenStation5 (PPSA99555) linked against PS5_Vulkan's RADV, libc shims, an import check, its `main` tested on Linux in CI ([ps5/](../ps5/))
+- [x] PS5 title builds: TokenStation5 (PPSA05005) linked against PS5_Vulkan's RADV, libc shims, an import check, its `main` tested on Linux in CI ([ps5/](../ps5/))
 - [ ] First console run: `scripts/ts5-ps5.sh check` on a small model, then serve Qwen 2.5 Coder 7B on :8081
 - [ ] Remote test loop: a session on the PC deploys over FTP, launches over elfldr, reads logs, runs `ts5 bench`
 - [ ] Prefill: tiled fp16 matmul (beat PS5LM's prompt tok/s on the same model)
