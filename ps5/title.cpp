@@ -1,5 +1,5 @@
 // TokenStation5's PS5 title: ts5 as a native app, on the console's GPU, with
-// a dashboard on the TV.
+// a dashboard on the TV and a chat box for the model it serves.
 //
 // Everything lives in the title's own folder, /app0 to the title and
 // /data/homebrew/<title ID> to the PC over FTP. A title can't count on seeing
@@ -33,6 +33,8 @@
 //   screenshot  the next frame goes to screen.bmp
 //   audiotest   tones on the TV and the controller, five seconds from its
 //               mic played back (audio_probe.h), the recording in audiotest.wav
+//   chat        a message for the chat page, the file's text as it is
+//               (chat.h); the TV shows the chat and the reply
 //   quit        closes the title; restart starts it again
 //
 // A title must never return from main or call exit(): the console reports
@@ -61,6 +63,7 @@
 
 #include "audio_probe.h"
 #include "canvas.h"
+#include "chat.h"
 #include "dashboard.h"
 #include "display.h"
 #include "library.h"
@@ -118,6 +121,7 @@ constexpr const char *kShot = TS5_HOME "/screenshot";
 constexpr const char *kScreen = TS5_HOME "/screen.bmp";
 constexpr const char *kAudioTest = TS5_HOME "/audiotest";
 constexpr const char *kAudioWav = TS5_HOME "/audiotest.wav";
+constexpr const char *kChat = TS5_HOME "/chat";
 constexpr const char *kQuit = TS5_HOME "/quit";
 constexpr const char *kRestart = TS5_HOME "/restart";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
@@ -211,6 +215,32 @@ bool take_written(const char *path, std::vector<std::string> &words) {
     if (st.st_size == 0 && time(nullptr) - st.st_mtime < 2) return false;
     words = take_words(path);
     return true;
+}
+
+// A file's text, taken once written as take_written's are, with trailing
+// whitespace off. False while it waits.
+bool take_text(const char *path, std::string &text) {
+    struct stat st;
+    if (stat(path, &st) != 0) return false;
+    if (st.st_size == 0 && time(nullptr) - st.st_mtime < 2) return false;
+    text.clear();
+    if (FILE *f = fopen(path, "rb")) {
+        char buf[4096];
+        for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+        fclose(f);
+    }
+    unlink(path);
+    while (!text.empty() && strchr(" \t\r\n", text.back())) text.pop_back();
+    return true;
+}
+
+// Frames a second on the chat page while a reply comes in (TS5_CHAT_FPS).
+// Each frame is a copy on the GPU the model computes on, so fewer frames
+// leave it more time.
+double chat_fps() {
+    const char *e = getenv("TS5_CHAT_FPS");
+    const double f = e ? atof(e) : 10;
+    return f > 0 ? f : 10;
 }
 
 // The API's options, from the args file.
@@ -338,7 +368,7 @@ int main(int, char **) {
         printf("ts5-title: %s\n", w.c_str());
     }
 
-    for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest}) unlink(f);
+    for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat}) unlink(f);
     std::thread(watch_control_files).detach();
     sceSystemServiceHideSplashScreen();
 
@@ -376,6 +406,7 @@ int main(int, char **) {
     ip = lan_address();
     if (!server.start(opts.host, opts.port, err)) notify("TokenStation5: the API can't listen: " + err);
     app::Runner runner(ctx, server, lib, lib_mutex, notify, api_url);
+    app::Chat chat(opts.host, opts.port);
 
     if (!once.empty()) {
         app::Job j;
@@ -394,7 +425,9 @@ int main(int, char **) {
     ui::Canvas canvas(kWidth, kHeight);
     std::deque<uint32_t> presses;
     std::string listed;
-    uint64_t drawn_version = ~0ull;
+    uint64_t drawn_version = ~0ull, drawn_chat = ~0ull, chat_version = ~0ull;
+    app::ChatState chat_state;
+    const double chat_period = 1.0 / chat_fps();
     double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan;
     bool lib_changed = true;
     std::atomic<bool> audio_testing{false};
@@ -414,6 +447,13 @@ int main(int, char **) {
             app::Job j;
             if (parse_job(words, j, nullptr, err)) runner.push(j);
             else printf("ts5-title: ts5.cmd: %s\n", err.c_str());
+        }
+        std::string message;
+        if (take_text(kChat, message)) {
+            const bool sent = chat.send(message);
+            printf("ts5-title: chat: %s (%zu bytes)\n", sent ? "message" : "not sent: a reply is coming or it's blank",
+                   message.size());
+            if (sent) dash.show(ui::Dashboard::Chat);
         }
         if (exists(kAudioTest) && !audio_testing) {
             unlink(kAudioTest);
@@ -459,6 +499,11 @@ int main(int, char **) {
         v.status = runner.status();
         v.events = runner.events();
         v.api = server.activity();
+        if (chat.version() != chat_version) {
+            chat_version = chat.version();
+            chat_state = chat.state();
+        }
+        v.chat = chat_state;
         v.now = t;
         v.wall = (int64_t)time(nullptr);
 
@@ -493,6 +538,8 @@ int main(int, char **) {
                 runner.push(j);
                 break;
             }
+            case ui::Action::ChatStop: chat.stop(); break;
+            case ui::Action::ChatClear: chat.clear(); break;
             case ui::Action::Close:
                 notify("TokenStation5: closing");
                 leave("exit");
@@ -506,8 +553,13 @@ int main(int, char **) {
         // most, so the copy each frame costs the GPU never weighs on the work.
         const bool computing = v.status.phase == app::Status::Checking ||
                                v.status.phase == app::Status::Benchmarking || v.api.generating;
-        const bool tick = t - last_draw > (dash.animating(v) && !computing ? 1.0 / 15 : 1.0);
-        if (dirty || tick) {
+        double period = dash.animating(v) && !computing ? 1.0 / 15 : 1.0;
+        // The chat page shows a reply as it comes, a few frames a second.
+        const bool on_chat = dash.page() == ui::Dashboard::Chat;
+        if (on_chat && v.chat.busy) period = chat_period;
+        const bool tick = t - last_draw > period;
+        const bool chat_dirty = on_chat && chat_version != drawn_chat && (!v.chat.busy || tick);
+        if (dirty || tick || chat_dirty) {
             dash.draw(canvas, v);
             if (screen && !display.present(canvas.pixels(), err)) {
                 printf("ts5-title: the picture stopped: %s\n", err.c_str());
@@ -518,6 +570,7 @@ int main(int, char **) {
                 if (!canvas.save_bmp(kScreen)) printf("ts5-title: can't write %s\n", kScreen);
             }
             drawn_version = version;
+            drawn_chat = chat_version;
             last_draw = t;
             lib_changed = false;
         }

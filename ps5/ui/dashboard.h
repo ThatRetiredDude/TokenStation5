@@ -1,8 +1,11 @@
-// The TV screen: the models on the console and a few suggested ones, the
-// selected model's details and results, what the title is doing, and the API's
-// activity. Driven with the controller: up/down choose a model, cross serves
-// it, square runs the GPU check, triangle the speed test, circle stops
-// serving, OPTIONS closes the title.
+// The TV screen, two pages under the header; L1 switches between them.
+// Models: the models on the console and a few suggested ones, the selected
+// model's details and results, what the title is doing, and the API's
+// activity; up/down choose a model, cross serves it, square runs the GPU
+// check, triangle the speed test, circle stops serving. Chat (chat_page.h):
+// a conversation with the serving model; up/down scroll, triangle stops the
+// reply, square starts a new chat, circle goes back to Models. OPTIONS
+// closes the title.
 #pragma once
 #include <cstdint>
 #include <map>
@@ -10,6 +13,8 @@
 #include <vector>
 
 #include "canvas.h"
+#include "chat.h"
+#include "chat_page.h"
 #include "library.h"
 #include "runner.h"
 #include "server.h"
@@ -26,18 +31,22 @@ struct View {
     app::Status status;
     std::vector<app::Event> events;
     ts5::Server::Activity api;
+    app::ChatState chat;
     double now = 0;    // seconds, steady clock (app::now_s)
     int64_t wall = 0;  // time(nullptr)
 };
 
 struct Action {
-    enum Kind { None, Serve, Check, Bench, Stop, Close } kind = None;
+    enum Kind { None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear } kind = None;
     std::string path;
 };
 
 class Dashboard {
 public:
+    enum Page { Models, Chat };
     Dashboard(const Fonts &fonts, const uint8_t *logo, size_t logo_size);
+    Page page() const { return page_; }
+    void show(Page p);
     // Applies a frame's button presses; at most one action comes of them.
     Action press(uint32_t buttons, const View &v);
     void draw(Canvas &c, const View &v);
@@ -54,13 +63,17 @@ private:
     void draw_details(Canvas &c, const View &v, const Item &item);
     void draw_activity(Canvas &c, const View &v);
     void draw_footer(Canvas &c);
+    void draw_chat_footer(Canvas &c, const View &v);
+    void draw_tabs(Canvas &c);
     void draw_confirm(Canvas &c);
 
     const Font &title_, &h2_, &body_, &bodyb_, &small_, &smallb_, &mono_;
     int logo_w_ = 0, logo_h_ = 0;
     const uint32_t *logo_ = nullptr;
     std::vector<uint32_t> logo_px_;
-    std::vector<uint32_t> background_;
+    std::vector<uint32_t> background_, chat_background_;
+    Page page_ = Models;
+    ChatPage chat_;
     std::string selected_key_;  // the selected item's path or suggestion key
     int scroll_ = 0;
     bool confirm_close_ = false;

@@ -49,7 +49,7 @@ cxxflags=(-std=c++17 -O2 -Wall -ffunction-sections -fdata-sections -fexceptions 
 objects=()
 pids=()
 for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
-        "$root"/ps5/{title,library,runner,audio_probe}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard}.cpp; do
+        "$root"/ps5/{title,library,runner,audio_probe,chat}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page}.cpp; do
     o="$out/obj/$(basename "$src" .cpp).o"
     objects+=("$o")
     cc "${cxxflags[@]}" -c "$src" -o "$o" &
