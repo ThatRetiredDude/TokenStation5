@@ -213,14 +213,23 @@ public:
         return init_buffers(err);
     }
 
+    const float *logits_view() const override { return (const float *)logits_.map; }
+
     bool forward(const int32_t *tokens, int n, int pos0, float *logits, bool all, std::string &err) override {
+        return fwd(tokens, n, pos0, logits, all, logits != nullptr, err);
+    }
+
+    bool forward_in_place(const int32_t *tokens, int n, int pos0, bool all, std::string &err) override {
+        return fwd(tokens, n, pos0, nullptr, all, true, err);
+    }
+
+    bool fwd(const int32_t *tokens, int n, int pos0, float *logits, bool all, bool want, std::string &err) {
         if (pos0 + n > n_ctx_) { err = "context full"; return false; }
         for (int i = 0; i < n; i += TMAX) {
             int c = std::min(TMAX, n - i);
-            bool want_all = all;
             bool last = i + c == n;
-            float *out = all ? logits + (size_t)i * hp_.n_vocab : (last ? logits : nullptr);
-            if (!run(tokens + i, c, pos0 + i, out, want_all, err)) return false;
+            float *out = all ? (logits ? logits + (size_t)i * hp_.n_vocab : nullptr) : (last ? logits : nullptr);
+            if (!run(tokens + i, c, pos0 + i, out, all, want && (all || last), err)) return false;
         }
         return true;
     }
@@ -773,7 +782,7 @@ private:
         dispatch("rmsnorm", {&x, &W(w), &y}, pc, (uint32_t)ntok);
     }
 
-    bool run(const int32_t *tokens, int n, int pos0, float *logits, bool all, std::string &err) {
+    bool run(const int32_t *tokens, int n, int pos0, float *logits, bool all, bool want, std::string &err) {
         const int E = hp_.n_embd, HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
         const size_t KVD = (size_t)HKV * HD;
         memcpy(ids_.map, tokens, 4 * (size_t)n);
@@ -831,7 +840,7 @@ private:
                 if (!submit(err) || !begin(err)) return false;
             }
         }
-        if (logits) {
+        if (want) {
             const int nout = all ? n : 1;
             rmsnorm(x_, m_.out_norm, h_, nout, all ? 0 : (uint32_t)(n - 1));
             matmul(m_.output, h_, logits_, nout, false);

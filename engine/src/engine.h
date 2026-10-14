@@ -46,6 +46,7 @@ private:
     std::unique_ptr<Backend> b_;
     Tokenizer &t_;
     std::vector<int32_t> cached_;  // tokens whose K/V are in the cache
+    std::vector<int32_t> idx_;     // sample()'s top-k scratch, reused
     std::mt19937_64 rng_{std::random_device{}()};
 };
 
