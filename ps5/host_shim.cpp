@@ -8,7 +8,7 @@
 //   vk_icdGetInstanceProcAddr   the system Vulkan loader's entry point
 //   the controller              never there: the host test presses buttons
 //                               through the press file
-//   the resolver, random bytes  getaddrinfo and /dev/urandom (engine/src/net.cpp)
+//   the resolver, kern.arandom  getaddrinfo and /dev/urandom (engine/src/net.cpp)
 //   audio out and in            no port opens, so the audio test reports no
 //                               audio
 #define VK_NO_PROTOTYPES
@@ -59,11 +59,15 @@ int sceNetResolverStartNtoa(int, const char *host, uint32_t *addr, int, int, int
     freeaddrinfo(res);
     return 0;
 }
-int sceRandomGetRandomNumber(void *buf, size_t size) {
+// kern.arandom only (glibc has no sysctl).
+int sysctl(const int *name, unsigned namelen, void *old, size_t *oldlen, const void *, size_t) {
+    if (namelen != 2 || name[0] != 1 || name[1] != 37) return -1;
     int fd = open("/dev/urandom", O_RDONLY);
-    ssize_t n = fd < 0 ? -1 : read(fd, buf, size);
+    ssize_t n = fd < 0 ? -1 : read(fd, old, *oldlen);
     if (fd >= 0) close(fd);
-    return n == (ssize_t)size ? 0 : -1;
+    if (n <= 0) return -1;
+    *oldlen = (size_t)n;
+    return 0;
 }
 
 // The console's memory pools have no Linux counterpart: the log says unknown.
