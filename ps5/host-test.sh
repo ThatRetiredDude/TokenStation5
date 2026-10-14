@@ -26,7 +26,7 @@ done
 c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" \
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" \
     "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks,tools,net,websearch}.cpp \
-    "$root"/ps5/{title,library,runner,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard}.cpp \
+    "$root"/ps5/{title,library,runner,audio_probe,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -x none -ldl -o "$work/eboot.bin"
 
 title_pid=
@@ -129,6 +129,14 @@ echo "== --env: settings for one job (here the GPU's time per kernel)"
 echo "bench -m $name --pp 32 --tg 8 --env TS5_PROFILE=1" > "$home/ts5.cmd"
 wait_log "^ts5-title: for this job: TS5_PROFILE=1$"
 wait_log "^generation \(8 tokens\), GPU time"
+wait_health
+
+echo "== audiotest: no audio on the PC, so the test says so and the title carries on"
+: > "$home/audiotest"
+wait_log "^ts5-title: audio test: done$"
+grep -q "audio test: open TV 0x80260005" "$home/ts5.log" || fail "the audio test didn't try the TV"
+grep -q "audio test: mic open, type 0: 0x80260109" "$home/ts5.log" || fail "the audio test didn't try the mic"
+notified "the controller's mic didn't open"
 wait_health
 
 echo "== circle: stop serving"
