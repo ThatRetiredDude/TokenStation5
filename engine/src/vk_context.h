@@ -18,6 +18,7 @@ struct VkContext {
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
     uint32_t queue_family = 0;
+    uint32_t timestamp_bits = 0;  // the queue's valid timestamp bits (0: none)
     VkQueue queue = VK_NULL_HANDLE;
     VkPhysicalDeviceProperties props{};
     VkPhysicalDeviceMemoryProperties memory{};

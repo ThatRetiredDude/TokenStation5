@@ -214,8 +214,8 @@ struct Options {
 
 // A ts5 command line as a job:
 //   serve -m MODEL [-c N] [--port N] [--host ADDR]
-//   check -m MODEL [-n TOKENS]
-//   bench -m MODEL [--pp N] [--tg N]
+//   check -m MODEL [-n TOKENS] [--fresh 1] [--env NAME=VALUE]...
+//   bench -m MODEL [--pp N] [--tg N] [--env NAME=VALUE]...
 //   stop
 // A MODEL without a folder is one in models/.
 bool parse_job(const std::vector<std::string> &a, app::Job &j, Options *o, std::string &err) {
@@ -243,6 +243,8 @@ bool parse_job(const std::vector<std::string> &a, app::Job &j, Options *o, std::
         if (s == "-m") j.path = v.find('/') == std::string::npos ? std::string(kModels) + "/" + v : v;
         else if (s == "-c") j.n_ctx = atoi(v.c_str());
         else if (s == "-n") j.n = atoi(v.c_str());
+        else if (s == "--fresh") j.fresh = atoi(v.c_str()) != 0;
+        else if (s == "--env" && v.find('=') != std::string::npos && v.find('=') > 0) j.env.push_back(v);
         else if (s == "--pp") j.pp = atoi(v.c_str());
         else if (s == "--tg") j.tg = atoi(v.c_str());
         else if (s == "--port") { if (o) o->port = atoi(v.c_str()); }

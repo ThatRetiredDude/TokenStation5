@@ -18,6 +18,9 @@ public:
     virtual bool forward(const int32_t *tokens, int n, int pos0, float *logits, bool all_logits,
                          std::string &err) = 0;
     virtual int n_ctx() const = 0;
+    // With TS5_PROFILE=1: GPU time per kernel since the last call, a few
+    // lines of text; else empty.
+    virtual std::string take_profile() { return {}; }
 };
 
 struct VkContext;

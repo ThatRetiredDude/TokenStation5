@@ -52,8 +52,27 @@ echo "== 300 tokens (prefill chunking, >128 keys per attention block)"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "$work/qwen2-Q8_0.gguf"
 echo "== 72 tokens per call (the tiled matmul: a full and a partial 64-token tile)"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${models[@]}"
-echo "== ts5 check (GPU vs CPU in one command, as run on the console)"
+# Attention's head layouts: query heads per KV head and head size.
+shapes=()
+mk_shape() {  # name embd heads kv_heads
+    local out="$work/$1.gguf"
+    [ -s "$out" ] || python3 "$here/make_test_model.py" --arch llama --quant Q8_0 --embd "$2" --heads "$3" \
+        --kv-heads "$4" --vocab "$work/ggml-vocab-llama-spm.gguf" "$out" > /dev/null
+    shapes+=("$out")
+}
+mk_shape heads14-kv2 896 14 2  # 7 per KV head, size 64 (Qwen 2.5 0.5B)
+mk_shape heads7-kv1 896 7 1    # 7 per KV head, size 128 (Qwen 2.5 7B)
+mk_shape heads8-kv2 512 8 2    # 4 per KV head, size 64
+mk_shape heads2-kv2 512 2 2    # size 256
+echo "== attention: head layouts, 300 tokens at once, then one per call (keys split in slices)"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${shapes[@]}"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 100 --step "${shapes[@]}"
+TS5_ATTN_SPLITS=7 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 40 --step \
+    "${shapes[@]}"
+echo "== ts5 check (GPU vs CPU in one command, as run on the console), then again on the saved answers"
+rm -f "$work/qwen3-Q4_0.gguf.ts5ref"
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null
+"$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
 echo "== the PS5 title's main on this machine (ps5/host-test.sh)"
 "$engine/../ps5/host-test.sh" "$work/qwen2-Q4_0.gguf"
 
@@ -74,6 +93,8 @@ if [ -n "${LLAMA_CPP:-}" ]; then
     python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${kq[@]}"
     python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${kq[@]}"
     python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --step \
+        "$work/qwen3-Q4_K_M.gguf" "$work/llama-Q4_K_M.gguf"
+    TS5_MV_ROWS=3 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --step --ntok 12 \
         "$work/qwen3-Q4_K_M.gguf" "$work/llama-Q4_K_M.gguf"
     echo "== vs llama.cpp (llama.cpp quantizes activations, so quantized models differ a little)"
     python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk "$work/qwen2-F32.gguf" "$work/qwen3-F32.gguf" \

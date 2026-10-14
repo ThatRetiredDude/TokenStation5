@@ -1,14 +1,17 @@
 // y[r] (+)= sum_c W[r][c] * x[c] for one token (generation), for the
-// K-quants that Q4_K_M files hold. One workgroup per row; 16 threads share a
-// 256-value block, each taking 16 of its values, so the workgroup's 64
-// threads work through 4 blocks at a time. Weights are read as 16- and
-// 32-bit words rather than byte by byte, and x as vec4.
+// K-quants that Q4_K_M files hold. One workgroup per NR rows (a
+// specialization constant); 16 threads share a 256-value block, each taking
+// 16 of its values, so the workgroup's 64 threads work through 4 blocks of
+// each row at a time, and use the x values they read for all NR rows.
+// Weights are read as 16- and 32-bit words rather than byte by byte, and x as
+// vec4.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_8bit_storage : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 
 #define WG 64
 layout(local_size_x = WG) in;
+layout(constant_id = 0) const uint NR = 1;  // rows per workgroup, at most 4
 
 layout(std430, binding = 0) readonly buffer W16 { uint16_t w16[]; };
 layout(std430, binding = 0) readonly buffer W32 { uint w32[]; };
@@ -21,7 +24,7 @@ layout(push_constant) uniform PC {
     uint x_stride, y_stride, accumulate, x_off;
 } pc;
 
-shared float partial[WG];
+shared float partial[4 * WG];
 
 float h16(uint byte_off) { return unpackHalf2x16(uint(w16[byte_off >> 1])).x; }
 // Four bytes at a 2-byte-aligned offset.
@@ -38,19 +41,25 @@ vec4 crumbs(uint w, uint shift) {
 float block_dot(uint o, uint xb, uint th);
 
 void main() {
-    const uint r = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
-    if (r >= pc.nrows) return;
+    const uint r0 = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * NR;
+    if (r0 >= pc.nrows) return;
     const uint tid = gl_LocalInvocationID.x;
-    const uint nb = pc.ncols / 256, rb = r * pc.row_bytes;
-    float acc = 0.0;
-    for (uint b = tid / 16; b < nb; b += WG / 16)
-        acc += block_dot(rb + b * BLOCK_BYTES, (pc.x_off + b * 256) / 4, tid % 16);
-    acc = subgroupAdd(acc);
-    if (gl_SubgroupInvocationID == 0) partial[gl_SubgroupID] = acc;
+    const uint nb = pc.ncols / 256, nr = min(NR, pc.nrows - r0);
+    float acc[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    for (uint b = tid / 16; b < nb; b += WG / 16) {
+        const uint xb = (pc.x_off + b * 256) / 4;
+        for (uint i = 0; i < NR; i++)
+            if (i < nr) acc[i] += block_dot((r0 + i) * pc.row_bytes + b * BLOCK_BYTES, xb, tid % 16);
+    }
+    for (uint i = 0; i < NR; i++) {
+        const float a = subgroupAdd(acc[i]);
+        if (gl_SubgroupInvocationID == 0) partial[i * WG + gl_SubgroupID] = a;
+    }
     barrier();
-    if (tid == 0) {
+    if (tid < nr) {
         float s = 0.0;
-        for (uint i = 0; i < gl_NumSubgroups; i++) s += partial[i];
+        for (uint i = 0; i < gl_NumSubgroups; i++) s += partial[tid * WG + i];
+        const uint r = r0 + tid;
         Y[r] = pc.accumulate != 0 ? Y[r] + s : s;
     }
 }

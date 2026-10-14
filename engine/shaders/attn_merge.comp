@@ -1,0 +1,38 @@
+// Combines attn's partial results over the slices of the keys: one
+// workgroup per (head, token).
+#version 450
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) readonly buffer Pbuf { float P[]; };
+layout(std430, binding = 1) writeonly buffer Obuf { float O[]; };
+
+layout(push_constant) uniform PC {
+    uint head_dim, n_head, n_tok, n_split;
+} pc;
+
+shared float w[64];
+shared float total;
+
+void main() {
+    const uint h = gl_WorkGroupID.x, t = gl_WorkGroupID.y, tid = gl_LocalInvocationID.x;
+    const uint HD = pc.head_dim, row = t * pc.n_head + h, sstride = pc.n_tok * pc.n_head * (HD + 2);
+    const uint base = row * (HD + 2);
+    if (tid == 0) {
+        float mx = -1.0 / 0.0;
+        for (uint s = 0; s < pc.n_split; s++) mx = max(mx, P[base + s * sstride + HD]);
+        float l = 0.0;
+        for (uint s = 0; s < pc.n_split; s++) {
+            const float m = P[base + s * sstride + HD];
+            const float ws = m == -1.0 / 0.0 ? 0.0 : exp(m - mx);
+            w[s] = ws;
+            l += ws * P[base + s * sstride + HD + 1];
+        }
+        total = l;
+    }
+    barrier();
+    for (uint d = tid; d < HD; d += 128) {
+        float o = 0.0;
+        for (uint s = 0; s < pc.n_split; s++) o += w[s] * P[base + s * sstride + d];
+        O[row * HD + d] = o / total;
+    }
+}
