@@ -135,7 +135,7 @@ echo "== audiotest: no audio on the PC, so the test says so and the title carrie
 : > "$home/audiotest"
 wait_log "^ts5-title: audio test: done$"
 grep -q "audio test: open TV 0x80260005" "$home/ts5.log" || fail "the audio test didn't try the TV"
-grep -q "audio test: load /host/common/lib/libSceAudioIn.sprx 0x80020002" "$home/ts5.log" || fail "the audio test logged no mic module load"
+grep -q "audio test: mic open, type 0: 0x80260109" "$home/ts5.log" || fail "the audio test didn't try the mic"
 notified "the controller's mic didn't open"
 wait_health
 
