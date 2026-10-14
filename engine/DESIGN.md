@@ -49,14 +49,21 @@ whole build. That keeps the PS5 port to the platform glue below.
 
 ## Forward pass
 
-Per layer, 12 dispatches, each followed by a compute-to-compute barrier:
+Per layer, 11 to 13 dispatches. Dependent kernels are separated by a
+compute-to-compute barrier with the narrowest masks (compute stage, shader
+writes): with transfer in the source scope, RADV on the PS5 also flushed the
+color and depth caches and waited for the end of the pipe after every
+kernel. `TS5_BARRIER=0` restores that mask and `TS5_BARRIER=2` drops the L2
+write-back too (outside the Vulkan spec). Kernels that only share inputs (Q,
+K and V; gate and up) get no barrier between them (`TS5_FUSE=0` puts them
+back):
 
 1. `rmsnorm` (attention norm)
 2. `matmul` Q, K, V (one per projection)
 3. `qkv_post`: bias (Qwen2), per-head RMSNorm (Qwen3), RoPE (normal or NeoX), write K and V to the cache (f16 or 8-bit, below)
 4. `attn`: attention over the cache (below), plus `attn_merge` when it splits the keys
 5. `matmul` output projection, accumulating into the residual
-6. `rmsnorm` (FFN norm), `matmul` gate and up, `swiglu`, `matmul` down accumulating into the residual
+6. `rmsnorm` (FFN norm), `matmul` gate and up, `swiglu`, `matmul` down accumulating into the residual. For one token of Q4_K, gate, up and swiglu are one kernel (`mv16_glu_q4_k`)
 
 Then the output norm and the vocabulary matmul for the last token (or every
 token for tests). Prompts are processed 256 tokens per call; big batches are
@@ -67,8 +74,15 @@ Weights stay in their GGUF block layout on the GPU, one buffer per tensor.
 Kernels read them through 8-bit storage access and dequantize 32-value "units"
 (one block, or one eighth of a K-quant super-block) in registers.
 
-Each matmul picks one of three kernels by how many tokens it multiplies:
+Each matmul picks one of four kernels by how many tokens it multiplies:
 
+- 9 or more of Q4_K or Q6_K, where that makes at least 48 blocks (`mmb_*`,
+  `shaders/matmul_big.glsl`): 128 rows x 128 tokens per workgroup, 8 x 8
+  outputs per thread, so each value read from shared memory is used 8 times.
+  Each thread dequantizes 16 values of one row and loads 16 of one token from
+  16-byte words, for the next step of 32 while the block computes the
+  current one. `TS5_MMB=0` turns it off; `TS5_MMB_MIN` sets the number of
+  blocks.
 - 9 or more (`mm_*`, `shaders/matmul_tiled.glsl`): 64 rows x 64 tokens per
   workgroup. Half the threads dequantize a 64 x 64 slice of W into shared
   memory while the other half load the matching slice of X, then each thread
@@ -78,7 +92,9 @@ Each matmul picks one of three kernels by how many tokens it multiplies:
   (`matvec_*`, `shaders/matvec_k.glsl`): one workgroup per row (or per
   `TS5_MV_ROWS`, up to 4, sharing their reads of x), 16 threads per
   super-block reading its quants as 32-bit words, subgroup reductions.
-  `TS5_FAST_MATVEC=0` turns it off.
+  Q4_K uses `mv16_q4_k` instead: 8 threads per super-block, each loading the
+  16-byte header (scales and mins) and one 16-byte word of nibbles
+  (`TS5_MV16=0` for the other). `TS5_FAST_MATVEC=0` turns both off.
 - Anything else (`matmul_*`): one workgroup per row, 8 tokens per pass.
 
 Attention (`shaders/attn.comp`) gives each workgroup the query heads that
@@ -88,11 +104,21 @@ Llama 3.1 8B. Keys and values come from the cache in tiles of 2048 values
 staged in shared memory, so the block reads each once rather than once per
 head and token; online softmax per row. Generation has one token, so that
 makes only one workgroup per KV head (4 on Qwen 2.5 7B) for every key in the
-cache. There the keys are split into slices of 64 or more, about 128
+cache. There the keys are split into slices of 32 or more, about 256
 workgroups in all, each writing a partial result (unnormalized output, max
 score, sum of weights) that `attn_merge` combines. `TS5_ATTN=0` runs the old
 kernel (`attention.comp`, one workgroup per head and token); `TS5_ATTN_SPLITS`
 sets the number of slices.
+
+Prompts of 8 tokens or more (`TS5_ATTN_PF` sets how many; 0: never) use
+`shaders/attn_pf.glsl` where heads are a multiple of 16 wide and at most 128:
+64 rows per workgroup (7 heads x 9 tokens on Qwen 2.5 7B, 4 x 16 on Llama 3.1
+8B), four threads per row, each holding a quarter of the row's query and
+output in registers. Keys and values pass through shared memory 32 at a time,
+the next tile loading into registers while the current one is used. attn
+holds one token's 7 rows on Qwen 2.5 7B and re-reads the cache for every
+token; attn_pf reads it once per 9 tokens and does 64 rows of work per tile.
+A short prompt late in a chat splits its keys too.
 
 `TS5_PROFILE=1` writes a GPU timestamp after every dispatch; `ts5 bench`
 then prints the GPU's time per kernel (matmuls by weight) for the prompt and
@@ -164,19 +190,23 @@ The v0 kernels were correctness-first: one workgroup per output row, byte
 loads, shared-memory reductions. Lavapipe numbers mean nothing; real tuning
 needs the console or an RDNA 2 card. In order of expected payoff:
 
-1. **Prefill matmul.** Done in fp32 (the tiled kernel above). Next: fp16
-   tiles in LDS with packed fp16 FMA (`v_pk_fma_f16`, twice the fp32 rate) and
-   fp32 accumulation. This is where llama.cpp leaves ~85% of the GPU idle on
-   the PS5.
-2. **Decode matvec.** Word loads and subgroup reductions are done for Q4_K
-   and Q6_K. Next: several rows per workgroup, the other types, and the
-   gate/up pair fused. Target: 70%+ of the 448 GB/s bandwidth.
-3. **Attention.** Done: shared K/V tiles per KV head, and split keys for
-   generation (above). Next: measure it on the console against the old kernel.
-4. **Fewer dispatches.** Fuse rmsnorm into the following matmul's input
-   load, swiglu into gate/up, and record the command buffer once per batch size.
-5. **Integer dot products.** If the PS5 GPU has the RDNA 2 `v_dot4` instructions,
-   expose them through RADV and run Q8 activations x Q4 weights.
+1. **Prefill matmul.** fp32, 128 x 128 blocks (above). Next: fp16 tiles in
+   LDS with packed fp16 FMA (`v_pk_fma_f16`, twice the fp32 rate) and fp32
+   accumulation. This is where llama.cpp leaves ~85% of the GPU idle on the
+   PS5.
+2. **Decode matvec.** 16-byte loads for Q4_K, gate and up fused. Next: fewer
+   instructions per weight byte (packed f16 or float-bias dequantization,
+   per-sub-block sums of x shared across rows), the same for Q6_K. Target:
+   70%+ of the 448 GB/s bandwidth.
+3. **Attention.** Done: shared K/V tiles per KV head, split keys for
+   generation, 64-row tiles for prompts. Next: a decode kernel with one key
+   per thread for long chats.
+4. **Fewer dispatches.** Done: narrow barriers, none between independent
+   kernels, gate/up/swiglu fused. Next: rmsnorm into the following mat-vec,
+   attn_merge into the output projection, and recording the decode command
+   buffer once.
+5. **Integer dot products.** Not on the PS5: its GPU has no working `v_dot4`
+   and RADV's port turns them off.
 
 `ts5 bench` reports prompt and generation tok/s; `scripts/bench.py` measures
 through the API.
