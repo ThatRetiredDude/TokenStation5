@@ -272,7 +272,9 @@ private:
         int type = -1;
     };
 
-    bool create_buf(VkDeviceSize size, bool host, Buf &b, std::string &err) {
+    // exact: a new block of memory for it is its own size, not 1 GiB (the KV
+    // cache, sized to what is left).
+    bool create_buf(VkDeviceSize size, bool host, Buf &b, std::string &err, bool exact = false) {
         size = std::max<VkDeviceSize>(size, 16);
         VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bci.size = size;
@@ -312,7 +314,7 @@ private:
         for (size_t t = 0; !ar && t < types.size(); t++) {
             Arena a;
             a.type = types[t];
-            a.size = std::max<VkDeviceSize>(req.size, 1ull << 30);
+            a.size = exact ? req.size : std::max<VkDeviceSize>(req.size, 1ull << 30);
             VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
             mai.allocationSize = a.size;
             mai.memoryTypeIndex = (uint32_t)a.type;
@@ -441,7 +443,9 @@ private:
     bool init_buffers(std::string &err) {
         const int E = hp_.n_embd, F = hp_.n_ff, HD = hp_.head_dim;
         const size_t QD = (size_t)hp_.n_head * HD, KVD = (size_t)hp_.n_head_kv * HD;
-        auto mk = [&](Buf &b, size_t bytes, bool host = false) { return create_buf(bytes, host, b, err); };
+        auto mk = [&](Buf &b, size_t bytes, bool host = false, bool exact = false) {
+            return create_buf(bytes, host, b, err, exact);
+        };
         if (!mk(x_, 4ull * TMAX * E) || !mk(h_, 4ull * TMAX * E) || !mk(q_, 4ull * TMAX * QD) ||
             !mk(k_, 4ull * TMAX * KVD) || !mk(v_, 4ull * TMAX * KVD) || !mk(att_, 4ull * TMAX * QD) ||
             !mk(g_, 4ull * TMAX * F) || !mk(u_, 4ull * TMAX * F) || !mk(dummy_, 256) || !mk(part_, 4ull * PART) ||
@@ -450,10 +454,19 @@ private:
         if (n_ctx_ <= 0) {
             // As much as fits, in what the weights and activations left, and
             // no more than one buffer can address.
-            const uint64_t per_buf = (kv_ == KvType::Q8 ? 1ull : 2ull) * hp_.n_layer * KVD;
-            const int cap = (int)std::min<uint64_t>(hp_.n_ctx_train > 0 ? hp_.n_ctx_train : 32768,
-                                                    props_.limits.maxStorageBufferRange / per_buf);
-            n_ctx_ = fit_context(ctx_->device_memory(), allocated_, kv_bytes_per_token(hp_, kv_), cap);
+            const int train = hp_.n_ctx_train > 0 ? hp_.n_ctx_train : 32768;
+            auto fit = [&](KvType t) {
+                const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * hp_.n_layer * KVD;
+                const int cap = (int)std::min<uint64_t>(train, props_.limits.maxStorageBufferRange / per_buf);
+                return fit_context(ctx_->device_memory(), allocated_, kv_bytes_per_token(hp_, t), cap);
+            };
+            const int f16 = fit(KvType::F16);
+            if (kv_ == KvType::Q8 && f16_reaches(f16, train)) {
+                fprintf(stderr, "ts5: f16 KV cache: the model's whole %d-token context fits in f16, the more exact\n",
+                        train);
+                kv_ = KvType::F16;
+            }
+            n_ctx_ = kv_ == KvType::F16 ? f16 : fit(kv_);
             if (n_ctx_ <= 0) {
                 err = "not enough GPU memory left for a context of 1024 tokens";
                 return false;
@@ -466,8 +479,10 @@ private:
             err = "KV cache larger than maxStorageBufferRange; use a smaller context";
             return false;
         }
-        if (!mk(kc_, cache) || !mk(vc_, cache)) return false;
-        if (scales && (!mk(ks_, scales) || !mk(vs_, scales))) return false;
+        // Exact sizes: a 1 GiB block for the scales would take what
+        // fit_context keeps free for everything else.
+        if (!mk(kc_, cache, false, true) || !mk(vc_, cache, false, true)) return false;
+        if (scales && (!mk(ks_, scales, false, true) || !mk(vs_, scales, false, true))) return false;
         fprintf(stderr, "ts5: %s: weights %.2f GiB, KV cache %.2f GiB (%s, %d tokens), %s memory\n", name_.c_str(),
                 weight_bytes_ / 1073741824.0, 2.0 * (cache + scales) / 1073741824.0, kv_type_name(kv_), n_ctx_,
                 x_.map ? "unified" : "device");
@@ -789,6 +804,8 @@ uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
     const uint64_t gib = 1ull << 30;
     return (weight_bytes + act + gib - 1) / gib * gib;
 }
+
+bool f16_reaches(int f16_ctx, int train) { return train >= 1024 && f16_ctx >= train / 1024 * 1024; }
 
 int fit_context(uint64_t memory, uint64_t used, uint64_t per_token, int cap) {
     const uint64_t reserve = 1ull << 30;

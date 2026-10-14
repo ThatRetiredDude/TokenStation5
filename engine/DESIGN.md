@@ -119,16 +119,24 @@ writes it, `attn_q8` reads it (both are the f16 shaders compiled with
 `KV_Q8`). It needs `attn` (the old attention kernel only reads f16) and heads
 a multiple of 32 wide, else the backend falls back to f16. On the test
 models it moves logits by about 0.3% of the largest one against an fp32
-cache, where the f16 cache moves them by 0.01%.
+cache, where the f16 cache moves them by 0.01%. On the console it runs at
+f16's speed, and the GPU check (against a CPU that rounds its cache the same
+way) finds it 0.4% to 1% off on Llama 3.1 8B, Llama 3.2 3B and Qwen3 8B but
+2.3% on Qwen 2.5 Coder 7B, over the 2% the check allows. So with a context
+of what fits, `TS5_KV=q8` gets an f16 cache wherever f16 already reaches the
+model's training context: 8 bits are only worth their precision where they
+buy context.
 
 Context 0 (`ts5 serve -c auto`, and the PS5 title's default) means as much as
 fits: after the weights and activations are allocated, the backend takes
 what is left of the GPU's memory less 1 GiB for everything else (the
 display, a GPU check's CPU reference), in multiples of 1024 tokens, up to the
-model's training context and what one buffer can address. On the PS5 that
-leaves about 5.4 GiB of cache beside a 7B or 8B Q4_K_M model: Qwen 2.5 Coder
-7B's full 32k, about 38k of Qwen3 8B's 40k (all of it with q8) and about 44k
-of Llama 3.1 8B (84k with q8).
+model's training context and what one buffer can address. The cache's
+buffers get blocks of memory of their own size (everything else comes in
+1 GiB blocks), so the 8-bit scales don't take a block out of that 1 GiB. On
+the PS5 that leaves about 5.4 GiB of cache beside a 7B or 8B Q4_K_M model:
+the full 32k of Qwen 2.5 Coder 7B and of Qwen3 8B (as its file gives it), 43k
+of Llama 3.1 8B's 128k (81k with q8) and 68k of Llama 3.2 3B's.
 
 ## Correctness
 
