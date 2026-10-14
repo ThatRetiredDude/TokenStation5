@@ -16,14 +16,18 @@ struct Choice {
 };
 
 // One setting: NAME in ts5.env, and what reads it does with it. No choices:
-// a key, set from the PC.
+// a key, set from the PC, or files in the models folder (get: the command
+// that fetches them).
 struct Row {
     const char *section, *name, *label, *help, *applies;
     std::vector<Choice> choices;
     std::string def;  // the value with nothing in ts5.env, as each reader's default
+    const char *get = nullptr;
 };
 
-constexpr const char *kSpeechModel = "TS5_WHISPER_MODEL";
+constexpr const char *kSpeechModel = "TS5_WHISPER_MODEL", *kVoice = "TS5_TTS_VOICE";
+// The voice with no TS5_TTS_VOICE, if it's there (tts/synth.h).
+constexpr const char *kDefaultVoice = "af_heart";
 constexpr int kRowH = 64, kHeadH = 44, kGap = 8;
 constexpr double kNoteFor = 6, kConfirmFor = 4;
 
@@ -46,10 +50,29 @@ const std::vector<Row> &rows() {
         {"TALK", kSpeechModel, "Speech model",
          "The speech-to-text model that holding R1 on the Chat page uses: a ggml-*.bin file in the models "
          "folder. base.en is a good start; small.en understands more, and takes longer.",
-         "The next time you hold R1", {}, ""},
+         "The next time you hold R1", {}, "", "scripts/ts5-ps5.sh speech base.en"},
         {"TALK", "TS5_WHISPER_THREADS", "Speech threads",
          "CPU cores that turn what you said into text. More is faster while nothing else runs on the CPU.",
          "The next time you hold R1", {{"4", "4"}, {"6", "6"}, {"8", "8"}, {"10", "10"}, {"12", "12"}}, "6"},
+        {"SPOKEN REPLIES", "TS5_SPEAK", "Read replies aloud",
+         "Reads each reply on the Chat page out loud as it comes in, a sentence at a time, in a Kokoro voice "
+         "made on the console's CPU. Triangle stops it. Kokoro's files go in the models folder from your "
+         "computer: scripts/ts5-ps5.sh voice.",
+         "From the next reply", {{"1", "On"}, {"0", "Off"}}, "1"},
+        {"SPOKEN REPLIES", "TS5_SPEAK_OUT", "Speak on",
+         "Where the voice comes out: the TV, or the speaker in the controller.", "From the next sentence",
+         {{"tv", "TV"}, {"controller", "Controller speaker"}}, "tv"},
+        {"SPOKEN REPLIES", kVoice, "Voice",
+         "Kokoro's voice: a kokoro-voice-*.gguf file in the models folder. af_heart is the clearest; "
+         "scripts/ts5-ps5.sh voice NAME adds others, such as am_michael or bf_emma.",
+         "From the next sentence", {}, "", "scripts/ts5-ps5.sh voice af_heart"},
+        {"SPOKEN REPLIES", "TS5_TTS_SPEED", "Speaking speed", "How fast the voice talks.", "From the next sentence",
+         {{"0.8", "Slower (0.8x)"}, {"0.9", "0.9x"}, {"1", "Normal"}, {"1.1", "1.1x"}, {"1.25", "1.25x"},
+          {"1.5", "1.5x"}},
+         "1"},
+        {"SPOKEN REPLIES", "TS5_TTS_THREADS", "Voice threads",
+         "CPU cores that make the voice. More is faster while nothing else runs on the CPU.",
+         "From the next sentence", {{"4", "4"}, {"6", "6"}, {"8", "8"}, {"10", "10"}, {"12", "12"}}, "6"},
         {"WEB SEARCH", "TAVILY_API_KEY", "Tavily key",
          "With a key, a model that calls tools can search the web through Tavily. Each search uses one of the "
          "account's credits.",
@@ -71,13 +94,24 @@ const std::vector<Row> &rows() {
 
 bool is_key(const Row &r) { return app::secret_setting(r.name); }
 
-// The row's choices; the speech model's are the files there are.
+// For a row of files, what its default picks; "" if there are none.
+std::string default_file(const Row &r, const SettingsInfo &info) {
+    const auto &files = std::string(r.name) == kVoice ? info.voices : info.speech_models;
+    if (files.empty()) return "";
+    if (std::string(r.name) == kVoice && std::find(files.begin(), files.end(), kDefaultVoice) != files.end())
+        return kDefaultVoice;
+    return files.front();
+}
+
+// The row's choices; a row of files has the files there are.
 std::vector<Choice> choices(const Row &r, const SettingsInfo &info) {
-    if (std::string(r.name) != kSpeechModel) return r.choices;
+    if (!r.get) return r.choices;
+    const auto &files = std::string(r.name) == kVoice ? info.voices : info.speech_models;
     std::vector<Choice> c;
-    if (info.speech_models.empty()) return c;
-    c.push_back({"", "The first one (" + info.speech_models.front() + ")"});
-    for (const std::string &m : info.speech_models) c.push_back({m, m});
+    if (files.empty()) return c;
+    const std::string def = default_file(r, info);
+    c.push_back({"", (std::string(r.name) == kVoice ? "The default (" : "The first one (") + def + ")"});
+    for (const std::string &m : files) c.push_back({m, m});
     return c;
 }
 
@@ -93,10 +127,10 @@ int index_of(const std::vector<Choice> &cs, const std::string &v) {
 std::string shown(const Row &r, const SettingsInfo &info) {
     if (is_key(r)) return current(r).empty() ? "Not set" : "Set";
     const auto cs = choices(r, info);
-    if (std::string(r.name) == kSpeechModel && cs.empty()) return "None yet";
+    if (r.get && cs.empty()) return "None yet";
     const int i = index_of(cs, current(r));
     if (i < 0) return current(r);
-    if (std::string(r.name) == kSpeechModel && i == 0) return info.speech_models.front();
+    if (r.get && i == 0) return default_file(r, info);
     return cs[i].shown;
 }
 
@@ -260,7 +294,7 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
         if (cs.empty()) {
             c.text(body_, dx, ty + 30, "None in the models folder yet. On your computer, run", kText2, dw);
             c.round_rect((float)dx, (float)ty + 48, (float)dw, 50, 10, rgb(0x0A1024));
-            c.text(mono_, dx + 18, ty + 80, "scripts/ts5-ps5.sh speech base.en", kAccent, dw - 36);
+            c.text(mono_, dx + 18, ty + 80, r.get ? r.get : "", kAccent, dw - 36);
             ty += 120;
         }
         const int at = index_of(cs, cur);
@@ -270,7 +304,7 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
             c.ring((float)dx + 12, (float)cy - 8, 11, 2.5f, on ? kAccent : kMuted);
             if (on) c.circle((float)dx + 12, (float)cy - 8, 5.5f, kAccent);
             const int tw = c.text(body_, dx + 40, cy, cs[i].shown, on ? kText : kText2, dw - 40);
-            if (cs[i].value == r.def && std::string(r.name) != kSpeechModel)
+            if (cs[i].value == r.def && !r.get)
                 c.text(small_, dx + 40 + tw + 14, cy, "default", kMuted);
             ty += 42;
         }

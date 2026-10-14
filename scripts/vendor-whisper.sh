@@ -142,7 +142,7 @@ tests, models, and the CMake files.
 ## The build
 
 There is no CMake: \`ps5/host-test.sh\` (Linux) and \`ps5/build.sh\` (PS5)
-compile these files into \`libts5whisper.a\` with CMake's defaults for a
+compile these files into \`libts5speech.a\` (with kokoro.cpp) with CMake's defaults for a
 CPU-only build:
 
 - \`GGML_USE_CPU\`: the registry knows the CPU backend.

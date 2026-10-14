@@ -3,16 +3,19 @@
 # functions stood in for by ps5/host_shim.cpp and folders for its own folder
 # (/app0) and /data, and walks it through what the controller and the PC do
 # to it: serve a model from the dashboard, a GPU check and a speed test,
-# screenshots, the audio, keyboard and whisper tests, the chat page, restart,
-# a one-off check, another port, quit and close. The screenshots stay in
-# build/ps5-host/shots.
+# screenshots, the audio, keyboard, whisper and speak tests, the chat page,
+# restart, a one-off check, another port, quit and close. The screenshots
+# stay in build/ps5-host/shots.
 #
 #   ps5/host-test.sh MODEL.gguf
-#   TS5_TEST_WHISPER_MODEL=ggml-tiny.en.bin ps5/host-test.sh MODEL.gguf
+#   TS5_TEST_WHISPER_MODEL=ggml-tiny.en.bin \
+#   TS5_TEST_KOKORO_MODEL=kokoro-82m-f16.gguf TS5_TEST_KOKORO_VOICE=kokoro-voice-af_heart.gguf \
+#       ps5/host-test.sh MODEL.gguf
 #
 # With a whisper model, the whisper test also transcribes whisper.cpp's
-# jfk.wav with it and checks the words; without one it checks only that the
-# test says it has no model.
+# jfk.wav with it and checks the words; with Kokoro's model and a voice, the
+# speak test speaks a sentence, and whisper (when there's a model) must hear
+# its words. Without them each test checks only that it says it has no model.
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,18 +33,20 @@ for src in "$root"/engine/shaders/*.comp; do
         -o "$work/shaders/$stem.spv.h" "$src" > /dev/null
 done
 
-# whisper.cpp (third_party/whisper.cpp, CPU only) as libts5whisper.a, as
-# ps5/build.sh builds it for the console. Its objects stay in
-# build/ps5-host/whisper and are compiled again only when a file there or
+# whisper.cpp and kokoro.cpp (third_party/, CPU only, on whisper's ggml) as
+# libts5speech.a, as ps5/build.sh builds it for the console. Its objects stay
+# in build/ps5-host/speech and are compiled again only when a file there or
 # these flags change.
 w="$root/third_party/whisper.cpp"
-wobj="$work/whisper"
+k="$root/third_party/kokoro.cpp"
+wobj="$work/speech"
 wflags=(-O2 -march=x86-64-v3 -pthread -D_GNU_SOURCE -DNDEBUG -DGGML_USE_CPU -DGGML_USE_CPU_REPACK -DGGML_USE_LLAMAFILE
     -DGGML_SCHED_MAX_COPIES=4 "-DWHISPER_VERSION=\"$(sed -n 's/^version=//p' "$root/scripts/vendor-whisper.sh")\""
-    -I "$w/include" -I "$w/ggml/include" -I "$w/ggml/src" -I "$w/ggml/src/ggml-cpu")
+    -DKOKORO_NO_MMAP -I "$w/include" -I "$w/ggml/include" -I "$w/ggml/src" -I "$w/ggml/src/ggml-cpu"
+    -I "$k/include" -I "$k/src")
 mkdir -p "$wobj"
 if [ "$(cat "$wobj/flags" 2> /dev/null)" != "${wflags[*]}" ]; then
-    rm -f "$wobj"/*.o "$wobj/libts5whisper.a"
+    rm -f "$wobj"/*.o "$wobj/libts5speech.a"
     printf '%s' "${wflags[*]}" > "$wobj/flags"
 fi
 wobjects=()
@@ -51,29 +56,35 @@ for src in "$w"/src/whisper.cpp "$w"/src/aneforge/whisper-aneforge.cpp \
         "$w"/ggml/src/{ggml.c,ggml.cpp,ggml-alloc.c,ggml-quants.c,ggml-threading.cpp,gguf.cpp} \
         "$w"/ggml/src/{ggml-backend,ggml-backend-dl,ggml-backend-meta,ggml-backend-reg}.cpp \
         "$w"/ggml/src/ggml-cpu/{ggml-cpu.c,ggml-cpu.cpp,quants.c,ops.cpp,binary-ops.cpp,unary-ops.cpp,vec.cpp,repack.cpp,traits.cpp} \
-        "$w"/ggml/src/ggml-cpu/{tiled/tiled.cpp,tiled/tiled-kernel.cpp,llamafile/sgemm.cpp,arch/x86/quants.c,arch/x86/repack.cpp}; do
-    rel=${src#"$w"/}
+        "$w"/ggml/src/ggml-cpu/{tiled/tiled.cpp,tiled/tiled-kernel.cpp,llamafile/sgemm.cpp,arch/x86/quants.c,arch/x86/repack.cpp} \
+        "$k"/src/{kokoro.cpp,core/gguf_loader.cpp,core/simd_math.cpp}; do
+    rel=${src#"$root"/third_party/}
     o="$wobj/${rel//\//_}.o"
     wobjects+=("$o")
-    [ -f "$o" ] && [ -z "$(find "$w" -newer "$o" -print -quit)" ] && continue
+    [ -f "$o" ] && [ -z "$(find "$w" "$k" -newer "$o" -print -quit)" ] && continue
     case $src in
         *.c) cc -std=c11 "${wflags[@]}" -c "$src" -o "$o" & ;;
+        # kokoro.cpp asks for F32 matrix products with a call ggml 0.26 deprecates.
+        "$k"/*) c++ -std=c++17 -Wno-deprecated-declarations "${wflags[@]}" -c "$src" -o "$o" & ;;
         *) c++ -std=c++17 "${wflags[@]}" -c "$src" -o "$o" & ;;
     esac
     pids+=($!)
 done
 for p in "${pids[@]}"; do wait "$p"; done
-if [ ${#pids[@]} -gt 0 ] || [ ! -f "$wobj/libts5whisper.a" ]; then
-    rm -f "$wobj/libts5whisper.a"
-    ar rcs "$wobj/libts5whisper.a" "${wobjects[@]}"
-    echo "== libts5whisper.a: ${#pids[@]} files compiled in $(($(date +%s) - t0)) s"
+if [ ${#pids[@]} -gt 0 ] || [ ! -f "$wobj/libts5speech.a" ]; then
+    rm -f "$wobj/libts5speech.a"
+    ar rcs "$wobj/libts5speech.a" "${wobjects[@]}"
+    echo "== libts5speech.a: ${#pids[@]} files compiled in $(($(date +%s) - t0)) s"
 fi
 
 c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" \
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" -I "$w/include" -I "$w/ggml/include" \
+    -I "$k/include" \
     "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
-    "$root"/ps5/{title,library,runner,audio_probe,keyboard_probe,chat,stt,voice,settings,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page}.cpp \
-    -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -x none "$wobj/libts5whisper.a" -ldl -o "$work/eboot.bin"
+    "$root"/ps5/{title,library,runner,audio_probe,keyboard_probe,chat,stt,voice,settings,speak,host_shim}.cpp \
+    "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
+    -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -Wa,-I"$root/ps5/tts" "$root/ps5/tts/lexicon_data.S" \
+    -x none "$wobj/libts5speech.a" -ldl -o "$work/eboot.bin"
 
 title_pid=
 cleanup() { [ -n "$title_pid" ] && kill "$title_pid" 2> /dev/null || true; }
@@ -228,6 +239,44 @@ if [ -n "${TS5_TEST_WHISPER_MODEL:-}" ]; then
     rm "$home/models/$wname" "$home/whispertest.wav"
 fi
 
+echo "== speaktest: no Kokoro model yet, so the test says so and the title carries on"
+: > "$home/speaktest"
+wait_lines "^ts5-title: speak test: done$" 1 30
+grep -q "^ts5-title: speak test: no model: " "$home/ts5.log" || fail "the speak test didn't say it has no model"
+notified "speak test: no Kokoro model"
+wait_health
+
+if [ -n "${TS5_TEST_KOKORO_MODEL:-}" ] && [ -n "${TS5_TEST_KOKORO_VOICE:-}" ]; then
+    echo "== speaktest: Kokoro in models/ speaks a sentence; the dashboard doesn't list its files"
+    cp "$TS5_TEST_KOKORO_MODEL" "$home/models/kokoro-test.gguf.part"
+    mv "$home/models/kokoro-test.gguf.part" "$home/models/kokoro-test.gguf"
+    cp "$TS5_TEST_KOKORO_VOICE" "$home/models/kokoro-voice-test.gguf"
+    echo "Hello from TokenStation. The quick brown fox jumps over the lazy dog." > "$home/speaktest.part"
+    mv "$home/speaktest.part" "$home/speaktest"
+    wait_lines "^ts5-title: speak test: done$" 2 300
+    grep -E "^ts5-title: (speak test|kokoro): " "$home/ts5.log" |
+        awk '/speak test: start/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; i++) print "   " line[i] }'
+    grep -qE "^ts5-title: speak test: [0-9.]+ s of speech in [0-9]+ ms, " "$home/ts5.log" || fail "the speak test spoke nothing"
+    grep -q "^ts5-title: speak test: saved speaktest.wav$" "$home/ts5.log" || fail "the speak test saved no speaktest.wav"
+    notified "speak test: "
+    sleep 2.5  # a scan of the models folder
+    ! grep -q "^ts5-title: models: .*kokoro-" "$home/ts5.log" || fail "the dashboard lists Kokoro's files"
+    wait_health
+    if [ -n "${TS5_TEST_WHISPER_MODEL:-}" ]; then
+        echo "== whispertest: whisper hears what Kokoro said"
+        cp "$TS5_TEST_WHISPER_MODEL" "$home/models/ggml-test.bin"
+        cp "$home/speaktest.wav" "$home/whispertest.wav"
+        : > "$home/whispertest"
+        wait_lines "^ts5-title: whisper test: done$" 3 180
+        text=$(grep "^ts5-title: whisper test: text: " "$home/ts5.log" | tail -1)
+        echo "   $text"
+        grep -qi "quick brown fox" <<< "$text" && grep -qi "lazy dog" <<< "$text" ||
+            fail "whisper didn't hear the sentence Kokoro spoke: ${text:-none}"
+        rm "$home/models/ggml-test.bin" "$home/whispertest.wav"
+    fi
+    rm "$home/models/kokoro-test.gguf" "$home/models/kokoro-voice-test.gguf" "$home/speaktest.wav"
+fi
+
 echo "== chat: a message from the PC; the TV shows the chat page and the reply streams in"
 replies() { grep -cE "^ts5-title: chat: reply (done|stopped|failed)" "$home/ts5.log" || true; }
 printf 'Say hello in five words.\n' > "$home/chat"
@@ -235,6 +284,8 @@ wait_log "^ts5-title: chat: message \(24 bytes\)$"
 wait_log "^ts5-title: chat: reply done, [0-9]+ bytes, [0-9]+ tokens"
 shot chat
 first=$(grep -oE "^ts5: chatcmpl-[0-9]+ prompt [0-9]+" "$home/ts5.log" | tail -1 | awk '{print $4}')
+
+wait_log "^ts5-title: speak: no Kokoro model in models"
 
 echo "== chat: the next message goes with the conversation so far"
 printf 'Now in French.\n' > "$home/chat"
@@ -281,6 +332,23 @@ if [ -n "${TS5_TEST_WHISPER_MODEL:-}" ]; then
     for _ in $(seq 1 300); do [ "$(replies)" -ge 4 ] && break; sleep 0.1; done
     shot talk
     rm "$home/models/ggml-test.bin" "$home/mic.wav"
+    press square
+fi
+
+if [ -n "${TS5_TEST_KOKORO_MODEL:-}" ] && [ -n "${TS5_TEST_KOKORO_VOICE:-}" ]; then
+    echo "== spoken replies: with Kokoro's files, the reply is read aloud as it comes; triangle stops it"
+    cp "$TS5_TEST_KOKORO_MODEL" "$home/models/kokoro-test.gguf"
+    cp "$TS5_TEST_KOKORO_VOICE" "$home/models/kokoro-voice-test.gguf"
+    n=$(replies)
+    printf 'Say hello in five words.\n' > "$home/chat"
+    wait_log "^ts5-title: speak: kokoro-test.gguf with the voice test, loaded in [0-9]+ ms$"
+    wait_lines "^ts5-title: speak: [0-9]+ bytes, [0-9.]+ s of speech in [0-9]+ ms$" 1 180
+    grep -E "^ts5-title: speak: " "$home/ts5.log" | sed 's/^/   /'
+    # A PC has no TV to play it on.
+    wait_log "^ts5-title: speak: the TV's audio didn't open"
+    for _ in $(seq 1 300); do [ "$(replies)" -gt "$n" ] && break; sleep 0.1; done
+    press triangle
+    rm "$home/models/kokoro-test.gguf" "$home/models/kokoro-voice-test.gguf"
     press square
 fi
 
