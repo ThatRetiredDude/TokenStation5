@@ -93,6 +93,7 @@ On the console, everything lives in the title's own folder,
 | `press`, `screenshot` | controller buttons; the next frame to `screen.bmp` |
 | `quit`, `restart` | close or restart the title |
 | `ts5.log`, `ts5.prev.log`, `results.tsv` | its log, the run before's, and the check and speed results |
+| `LICENSE`, `NOTICE.md`, `SOURCE.txt` | from the build: the title's license (GPL-3.0), the third-party notices, and the commits of its source |
 
 The title takes each command file as soon as it sees it. A title can't count
 on seeing the console's `/data`: ShadowMountPlus only puts it in a title's

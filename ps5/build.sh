@@ -4,6 +4,8 @@
 #   build/ps5/PPSA99555/eboot.bin               ts5 with RADV linked in
 #   build/ps5/PPSA99555/sce_sys/param.json      title metadata, icon0.png
 #   build/ps5/PPSA99555/sce_module/libc.prx     the runtime module titles carry
+#   build/ps5/PPSA99555/LICENSE, NOTICE.md      the GPL and the third-party notices
+#   build/ps5/PPSA99555/SOURCE.txt              the commits it was built from
 #
 # Needs ps5/setup.sh run once. The engine sources are the same ones the Linux
 # build compiles; ps5/title.cpp is the title's main, with its jobs (runner,
@@ -110,5 +112,22 @@ mkdir -p "$app/sce_sys" "$app/sce_module"
 "$tool" self --sign --in "$out/eboot.elf" --out "$app/eboot.bin" --magic 0x1D3D154F > /dev/null
 cp "$param" "$root/ps5/sce_sys/icon0.png" "$app/sce_sys/"
 cp "$vk/runtime/libc.prx" "$app/sce_module/libc.prx"
+# What every copy of the title must carry (LICENSING.md): its license, the
+# notices, and where its source is.
+cp "$root/ps5/LICENSE" "$root/NOTICE.md" "$app/"
+commit() { git -C "$1" rev-parse HEAD 2> /dev/null || echo "$2"; }
+# CI names a pull request's two commits: it builds their merge, which only the
+# pull request's ref keeps.
+ts5_source=${TS5_SOURCE_COMMITS:-$(commit "$root" "$version")}
+cat > "$app/SOURCE.txt" << EOF
+TokenStation5 $version is GPL-3.0-or-later as a whole (LICENSE). NOTICE.md
+lists the third-party code in it. Its source is these repositories at these
+commits:
+
+https://github.com/ThatRetiredDude/TokenStation5  $ts5_source
+https://github.com/mihawk-99/PS5_Vulkan  $(commit "$vk" "$(sed -n 's/^vulkan_rev=//p' "$root/ps5/setup.sh")")
+https://github.com/mihawk-99/PS5_PayloadSDK  $(sed -n 's/^sdk_revision=//p' "$vk/tools/setup-native-dependencies.sh")
+https://github.com/mihawk-99/PS5_Mesa  $(sed -n 's/^mesa_revision=//p' "$vk/tools/build-radv.sh")
+EOF
 "$tool" self --inspect --file "$app/eboot.bin" > /dev/null
 echo "build: $app (ts5 $version, eboot.bin $(stat -c %s "$app/eboot.bin") bytes)"

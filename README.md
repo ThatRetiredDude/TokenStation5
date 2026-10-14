@@ -36,7 +36,7 @@ instructions llama.cpp's Vulkan path is tuned for.
 ts5 is built around this one GPU's constraints instead of around every GPU's:
 - batches split to stay under the console driver's 10-second watchdog (done)
 - weights loaded straight into the GPU's 11.4 GiB heap with no staging copy (done)
-- kernels tuned to RDNA 2 wavefronts and packed fp16 math (the next big push)
+- kernels tuned to RDNA 2 wavefronts and packed fp16 math (in progress)
 
 The full plan is in [engine/DESIGN.md](engine/DESIGN.md).
 
@@ -44,13 +44,37 @@ The full plan is in [engine/DESIGN.md](engine/DESIGN.md).
 
 | | |
 | --- | --- |
-| Engine core | ✅ Working on Linux. Logits match the reference at every position, on every quant type |
+| Engine core | ✅ Working on Linux and on the PS5. Logits match the reference at every position, on every quant type |
 | Models | ✅ Qwen 2.5, Qwen 2.5 Coder, Qwen 3, Llama, Mistral, Mistral Nemo |
-| Quants | ✅ F32, F16, Q8_0, Q4_0, Q4_K_M, Q5_K_M |
+| Quants | ✅ F32, F16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K_M, Q5_K_M |
 | OpenAI API | ✅ `/v1/chat/completions` (streaming), `/v1/completions`, `/v1/models` |
-| PS5 title | 🧪 Builds and links against the console's RADV driver ([ps5/](ps5/)); first run on hardware is next |
-| PS5 kernel tuning | 🔨 After that: beat the llama.cpp port's prompt speed |
+| PS5 title | ✅ Runs on a real PS5 as **TokenStation5** (`PPSA99555`). The GPU check passes on the console, and the API serves the home network |
+| TV dashboard | 🧪 Pick, check, benchmark and serve models with the controller. Works in tests; first run on the TV is next |
+| PS5 kernel tuning | 🔨 In progress: a tiled prompt kernel and faster Q4_K_M generation are being measured on the console |
 | Gemma 3, Qwen 3.5, Gemma 4 | 📋 Planned |
+
+## On the console today
+
+Measured on a PS5 with the build that first ran there, before any kernel
+tuning, at 8k context:
+
+| Model | GPU check | Prompt tok/s | Generation tok/s | Load | GPU memory |
+| --- | :---: | ---: | ---: | ---: | ---: |
+| Qwen 2.5 0.5B Q8_0 | ✅ | 693\* | 185\* | 8 s | |
+| Qwen 2.5 Coder 7B Q4_K_M | ✅ | 31 | 21 | 51 s | 4.4 + 0.4 GiB |
+| Qwen 3 8B Q4_K_M | ✅ | 29 | 19 | 55 s | 4.7 + 1.1 GiB |
+| Llama 3.1 8B Q4_K_M | testing | | | | |
+| Llama 3.2 3B Q4_K_M | testing | | | | |
+
+The GPU check runs the same prompt through the console's GPU and through
+ts5's CPU reference, and compares the logits at every position. Prompt and
+generation speeds are `ts5 bench` (512-token prompt, 128 generated tokens);
+\* marks a chat request instead. GPU memory is weights plus the f16 KV cache.
+
+The answers are right. The speed isn't there yet: 7B generation streams its
+weights at about 93 GiB/s, a fifth of the GPU's bandwidth, and prompt reading
+is slower still. The llama.cpp port reaches about 236 GiB/s generating with
+Llama 3.2 3B. Closing that gap is what the kernel work is for.
 
 [PS5LM Plus](https://github.com/abhi245y/PS5LM), a llama.cpp port, stays on
 the console as the baseline ts5 has to beat.
@@ -77,19 +101,29 @@ WebUI, Continue, opencode, aider, or your own scripts.
 
 ## On the PS5
 
-ts5 ships as its own PS5 title, **TokenStation5**: the same engine, linked
-against Mihawk-99's RADV port so it runs on the console's GPU.
+ts5 ships as its own PS5 title, **TokenStation5** (title ID `PPSA99555`, a
+homebrew ID that no store game uses). It's the same engine, linked against
+Mihawk-99's RADV port so it runs on the console's GPU.
 
 ```sh
 ps5/setup.sh && ps5/build.sh        # or download the title from the latest CI run
 export PS5_HOST=192.168.1.50
-scripts/ts5-ps5.sh install
-scripts/ts5-ps5.sh model qwen2.5-coder-7b-instruct-q4_k_m.gguf
-# launch TokenStation5 from the home screen; the TV says when it's serving
+scripts/ts5-ps5.sh install          # to /data/homebrew/PPSA99555
+scripts/ts5-ps5.sh fetch qwen25-coder-7b
+# launch TokenStation5 from the home screen
 ```
 
-Switching models, one-off GPU checks and benchmarks are one command each from
-the PC. All of it is in [ps5/README.md](ps5/README.md).
+The TV shows a dashboard. It lists the models on the console with their size,
+quant, GPU memory and results, and suggests starter models that aren't there
+yet. Use the controller to pick one, then:
+
+- ✕ serves it on the API;
+- □ runs the GPU check;
+- △ runs the speed test;
+- ○ stops serving.
+
+Everything the controller does is also one command from the PC. All of it is in
+[ps5/README.md](ps5/README.md).
 
 ## Proven correct, not vibes
 
@@ -97,13 +131,18 @@ Every kernel is checked against an independent fp32 CPU implementation and
 against llama.cpp itself:
 
 - Logits at every position match the CPU reference to about 1e-4 across F32,
-  F16, Q8_0, Q4_0, Q4_K_M and Q5_K_M, for all three architectures, and match
-  llama.cpp to 2e-4 on unquantized models.
+  F16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K_M and Q5_K_M, for all three
+  architectures, and match llama.cpp to 2e-4 on unquantized models.
 - KV-cache reuse across calls and 300-token prompts are covered.
 - The tokenizer matches `llama-tokenize` on 15 tricky strings (code,
   contractions, CJK, emoji, chat special tokens) for Qwen, Llama 3 and
   SentencePiece vocabularies.
-- CI runs the suite on every push.
+- The same check runs on the console itself (`ts5 check`, the dashboard's □).
+  Qwen 2.5 Coder 7B on the PS5's GPU gives the CPU's top token at all 8
+  positions, with logits within 0.15% of the largest.
+- CI runs the suite on every pull request and every push to main. It also
+  builds the PS5 title, and runs the title's own code on Linux, driving the
+  dashboard the way a user would.
 
 ```sh
 engine/tests/run.sh                          # Vulkan vs the CPU reference
@@ -112,13 +151,16 @@ LLAMA_CPP=~/llama.cpp engine/tests/run.sh    # plus llama.cpp and tokenizer chec
 
 ## Models that fit
 
-Memory is an 11.44 GiB GPU heap on the console. Measured numbers go in
-[bench/](bench/) as they land.
+Memory is an 11.44 GiB GPU heap on the console. Measured numbers are in
+[On the console today](#on-the-console-today).
 
 | Model | Quant | Size | Role |
 | --- | --- | ---: | --- |
+| Qwen 2.5 0.5B | Q8_0 | ~0.6 GiB | quick GPU test |
+| Llama 3.2 3B | Q4_K_M | ~1.9 GiB | small and fast; the llama.cpp port's benchmark |
 | Qwen 2.5 Coder 7B | Q4_K_M | ~4.4 GiB | coding endpoint |
 | Qwen 3 8B | Q4_K_M | ~4.7 GiB | general chat, thinking mode |
+| Llama 3.1 8B | Q4_K_M | ~4.6 GiB | general chat |
 | Mistral Nemo 12B | Q4_K_M | ~7.0 GiB | long-form writing |
 | Gemma 3 12B | Q4_K_M | ~6.8 GiB | planned |
 | Qwen 3.5 4B / 9B | Q4_K_M | ~2.7 / 5.3 GiB | planned |
@@ -153,3 +195,15 @@ console.
 
 A jailbroken console's API, FTP and payload ports have no authentication.
 Keep it on a network you trust.
+
+## Licensing
+
+- **ts5 and everything outside `ps5/`:** [PolyForm Small Business 1.0.0](LICENSE.md).
+  Free for individuals and for companies under 100 people and about $1M in
+  revenue; larger companies need a commercial license.
+- **`ps5/` and the built PS5 title:** [GPL-3.0-or-later](ps5/LICENSE), because
+  the title links PS5_Vulkan's GPL-3.0 code.
+
+[LICENSING.md](LICENSING.md) has the full map, including what the GPL means
+for the engine code inside the PS5 title, and
+[NOTICE.md](NOTICE.md) lists the third-party code.
