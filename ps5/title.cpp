@@ -691,8 +691,10 @@ int main(int, char **) {
                 screen = false;
             }
             if (shot) {
-                unlink(kShot);
+                // The file goes once the picture is written: whoever asked
+                // reads it after that.
                 if (!canvas.save_bmp(kScreen)) printf("ts5-title: can't write %s\n", kScreen);
+                unlink(kShot);
             }
             drawn_version = version;
             drawn_chat = chat_version;
