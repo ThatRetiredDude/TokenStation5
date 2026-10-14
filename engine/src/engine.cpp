@@ -11,9 +11,8 @@ static double now_ms() {
     return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
 }
 
-int32_t Engine::sample(std::vector<float> &lg, const SampleParams &p) {
-    const int n = (int)lg.size();
-    if (p.temperature <= 0) return (int32_t)(std::max_element(lg.begin(), lg.end()) - lg.begin());
+int32_t Engine::sample(const float *lg, int n, const SampleParams &p) {
+    if (p.temperature <= 0) return (int32_t)(std::max_element(lg, lg + n) - lg);
     std::vector<int32_t> idx(n);
     for (int i = 0; i < n; i++) idx[i] = i;
     int k = p.top_k > 0 ? std::min(p.top_k, n) : n;
@@ -30,6 +29,24 @@ int32_t Engine::sample(std::vector<float> &lg, const SampleParams &p) {
     }
     std::discrete_distribution<int> d(pr.begin(), pr.begin() + keep);
     return idx[d(rng_)];
+}
+
+// Propose up to k tokens by prompt lookup: the most recent earlier occurrence
+// of the text's final n-gram (n = 3, then 2) says what came next last time.
+// Free to be wrong: every draft is verified against the model's own logits.
+static void draft_lookup(const std::vector<int32_t> &h, int32_t tok, int k, std::vector<int32_t> &out) {
+    const size_t n = h.size() + 1;  // the history plus the token being extended
+    auto at = [&](size_t i) -> int32_t { return i < h.size() ? h[i] : tok; };
+    for (size_t g = 3; g >= 2; g--) {
+        if (n < g + 1) continue;
+        for (size_t j = n - g; j-- > 0;) {
+            size_t m = 0;
+            while (m < g && at(j + m) == at(n - g + m)) m++;
+            if (m < g) continue;
+            for (size_t i = j + g; i < n && (int)out.size() < k + 1; i++) out.push_back(at(i));
+            return;
+        }
+    }
 }
 
 bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
@@ -56,11 +73,9 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     st.prompt_ms = now_ms() - t0;
     t0 = now_ms();
     std::string pending;  // bytes of an incomplete UTF-8 sequence
-    for (int g = 0; g < p.max_tokens; g++) {
-        int32_t tok = sample(logits, p);
-        if (t_.is_eog(tok)) { st.finish = "stop"; break; }
+    auto emit = [&](int32_t t) -> bool {  // false: the caller asked to stop
         st.gen_tokens++;
-        pending += t_.decode(tok);
+        pending += t_.decode(t);
         // Emit only complete UTF-8 sequences.
         size_t cut = pending.size();
         for (size_t back = 1; back <= 3 && back <= pending.size(); back++) {
@@ -71,13 +86,54 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
             break;
         }
         if (cut > 0) {
-            if (!on_text(pending.substr(0, cut))) { st.finish = "stop"; break; }
+            if (!on_text(pending.substr(0, cut))) return false;
             pending.erase(0, cut);
         }
+        return true;
+    };
+    // Each step forwards the next token plus up to `dmax` lookup-drafted
+    // tokens in one batch, then keeps the drafts the model itself would have
+    // produced: the output is exactly what one-token-at-a-time sampling gives
+    // (a draft is accepted only when the target sample equals it), but every
+    // accepted draft rides the same weight stream as the token before it.
+    int dmax = p.draft;
+    if (const char *e = getenv("TS5_DRAFT")) dmax = atoi(e);
+    if (dmax < 0) dmax = 7;  // batch of 8: one pass of the 8-token matmul kernels
+    std::vector<int32_t> batch;
+    std::vector<float> lgb;  // one row of logits per batch position
+    int32_t tok = sample(logits.data(), nv, p);
+    while (true) {
+        if (t_.is_eog(tok)) { st.finish = "stop"; break; }
+        if (!emit(tok)) { st.finish = "stop"; break; }
+        if (st.gen_tokens >= p.max_tokens) { st.finish = "length"; break; }
         if ((int)cached_.size() + 1 >= b_->n_ctx()) { st.finish = "length"; break; }
-        if (g + 1 == p.max_tokens) break;
-        if (!b_->forward(&tok, 1, (int)cached_.size(), logits.data(), false, err)) { cached_.clear(); return false; }
-        cached_.push_back(tok);
+        batch.assign(1, tok);
+        int room = std::min(dmax, p.max_tokens - st.gen_tokens);
+        room = std::min(room, b_->n_ctx() - (int)cached_.size() - 2);
+        if (room > 0) draft_lookup(cached_, tok, room, batch);
+        const int nb = (int)batch.size();
+        if ((size_t)nb * nv > lgb.size()) lgb.resize((size_t)nb * nv);
+        if (!b_->forward(batch.data(), nb, (int)cached_.size(), lgb.data(), nb > 1, err)) {
+            cached_.clear();
+            return false;
+        }
+        st.drafted += nb - 1;
+        int accepted = 0;
+        int32_t next = -1;
+        for (int i = 0; i < nb; i++) {
+            next = sample(lgb.data() + (size_t)i * nv, nv, p);
+            if (i + 1 < nb && next == batch[i + 1] && !t_.is_eog(next)) { accepted++; continue; }
+            break;
+        }
+        st.draft_accepted += accepted;
+        cached_.insert(cached_.end(), batch.begin(), batch.begin() + accepted + 1);
+        bool stop = false;
+        for (int i = 1; i <= accepted && !stop; i++) {
+            if (!emit(batch[i])) { st.finish = "stop"; stop = true; }
+            else if (st.gen_tokens >= p.max_tokens) { st.finish = "length"; stop = true; }
+        }
+        if (stop) break;
+        tok = next;
     }
     if (!pending.empty()) on_text(pending);
     st.gen_ms = now_ms() - t0;
