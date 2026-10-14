@@ -5,7 +5,11 @@
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -14,6 +18,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "backend.h"
@@ -398,32 +403,32 @@ private:
         // The read rate decides whether a slow model load is the storage or
         // the code; it is printed once per load.
         const auto lt0 = std::chrono::steady_clock::now();
+        // Host-visible buffers are read with pread in 16 MiB pieces, four
+        // threads at once (TS5_LOAD_THREADS sets how many; 0: one fread per
+        // tensor, as before).
+        int threads = 4;
+        if (const char *e = getenv("TS5_LOAD_THREADS")) threads = std::max(0, atoi(e));
         FILE *f = fopen(path.c_str(), "rb");
         if (!f) { err = "cannot open " + path; return false; }
         Buf staging;
         const VkDeviceSize SCHUNK = 64ull << 20;
-        // Host-visible memory is filled through a buffer in ordinary memory,
-        // 8 MiB per read (TS5_LOAD_BOUNCE=0: read straight into it).
-        const size_t BCHUNK = 8u << 20;
-        bool bounce = true;
-        if (const char *e = getenv("TS5_LOAD_BOUNCE")) bounce = atoi(e) != 0;
-        std::vector<char> tmp;
+        const uint64_t PIECE = 16ull << 20;
+        struct Piece { char *dst; uint64_t off, len; };
+        std::vector<Piece> pieces;
         for (auto &t : m_.gguf.tensors) {
             if (t.nbytes == 0) continue;
             if (!qname(t.type)) { fclose(f); err = t.name + ": type " + type_name(t.type) + " not supported on Vulkan yet"; return false; }
             Buf b;
             if (!create_buf(t.nbytes, false, b, err)) { fclose(f); return false; }
-            fseeko(f, (off_t)(m_.gguf.data_offset + t.offset), SEEK_SET);
-            if (b.map && bounce) {
-                if (tmp.empty()) tmp.resize(BCHUNK);
-                for (uint64_t off = 0; off < t.nbytes; off += BCHUNK) {
-                    const size_t len = (size_t)std::min<uint64_t>(BCHUNK, t.nbytes - off);
-                    if (fread(tmp.data(), 1, len, f) != len) { fclose(f); err = "short read"; return false; }
-                    memcpy(b.map + off, tmp.data(), len);
-                }
+            const uint64_t at = m_.gguf.data_offset + t.offset;
+            if (b.map && threads > 0) {
+                for (uint64_t off = 0; off < t.nbytes; off += PIECE)
+                    pieces.push_back({(char *)b.map + off, at + off, std::min(PIECE, t.nbytes - off)});
             } else if (b.map) {
+                fseeko(f, (off_t)at, SEEK_SET);
                 if (fread(b.map, 1, t.nbytes, f) != t.nbytes) { fclose(f); err = "short read"; return false; }
             } else {
+                fseeko(f, (off_t)at, SEEK_SET);
                 if (!staging.buf && !create_buf(SCHUNK, true, staging, err)) { fclose(f); return false; }
                 for (uint64_t off = 0; off < t.nbytes; off += SCHUNK) {
                     uint64_t len = std::min<uint64_t>(SCHUNK, t.nbytes - off);
@@ -435,9 +440,31 @@ private:
             weight_bytes_ += t.nbytes;
         }
         fclose(f);
+        if (!pieces.empty()) {
+            const int fd = open(path.c_str(), O_RDONLY);
+            if (fd < 0) { err = "cannot open " + path; return false; }
+            std::atomic<size_t> next{0};
+            std::atomic<bool> bad{false};
+            auto work = [&] {
+                for (size_t i; !bad && (i = next++) < pieces.size();) {
+                    const Piece &p = pieces[i];
+                    for (uint64_t done = 0; done < p.len;) {
+                        const ssize_t r = pread(fd, p.dst + done, p.len - done, (off_t)(p.off + done));
+                        if (r <= 0) { bad = true; break; }
+                        done += (uint64_t)r;
+                    }
+                }
+            };
+            std::vector<std::thread> th;
+            for (int i = 1; i < threads; i++) th.emplace_back(work);
+            work();
+            for (auto &t : th) t.join();
+            close(fd);
+            if (bad) { err = "short read"; return false; }
+        }
         const double ls = std::chrono::duration<double>(std::chrono::steady_clock::now() - lt0).count();
-        fprintf(stderr, "ts5: weights %.2f GB read in %.1f s (%.0f MB/s)\n", weight_bytes_ / 1e9, ls,
-                ls > 0 ? weight_bytes_ / 1e6 / ls : 0.0);
+        fprintf(stderr, "ts5: weights %.2f GB read in %.1f s (%.0f MB/s, %d threads)\n", weight_bytes_ / 1e9, ls,
+                ls > 0 ? weight_bytes_ / 1e6 / ls : 0.0, threads);
         return true;
     }
 
