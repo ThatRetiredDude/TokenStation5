@@ -52,7 +52,8 @@ ts5's CPU reference) on all four.
 - [ ] Generation at 70% of the GPU's 448 GB/s. Coder 7B at 64 tok/s streams about 300 GB/s (67%).
 - [ ] Voice: a TV chat box with a keyboard and hold-R1 speech to text (whisper.cpp, on the CPU), then Kokoro speaking the replies, then the Settings page (`ts5.env`: audio output, `TAVILY_API_KEY`, a remote provider). Notes: `ps5-ai/voice/VOICE_FEASIBILITY.md` in the project files.
 - [ ] Measure PS5LM Plus on the console, same models, for a head-to-head. Its own figure is 124 tok/s generation on Llama 3.2 3B (ts5: 94).
-- [ ] Speculative decoding with a small draft model in the spare memory, after [#17](https://github.com/ThatRetiredDude/TokenStation5/pull/17), and a fast kernel for its batch of 8 tokens.
+- [ ] Speculative decoding, next steps after [#17](https://github.com/ThatRetiredDude/TokenStation5/pull/17) (being built by the hardware-experiments thread): a fast kernel for the verify batch of up to 8 tokens (packed f16, near one token's weight read) with the argmax on the GPU; a leaner serving loop (coalesced socket sends, top-k sampling without sorting 152k entries, logits read in place); then a suffix index for drafts and a draft length that adapts to how often drafts are accepted. Notes: `ps5-ai/experiments/IDEAS.md` in the project files.
+- [ ] Speculative decoding with a small draft model in the spare memory.
 - [ ] An 8-bit KV cache within the 2% bar, so 8B models get long contexts.
 - [ ] Qwen 3's thinking: honor `enable_thinking` and `/no_think`.
 - [ ] More models: Gemma 3 12B, Qwen 3.5 4B and 9B, Gemma 4 E4B, Mistral Nemo 12B ([models.tsv](../models.tsv)).
