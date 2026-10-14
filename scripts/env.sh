@@ -7,3 +7,5 @@ export PS5_API_PORT=${PS5_API_PORT:-8081}
 export PS5_MODEL_DIR=${PS5_MODEL_DIR:-/data/PS5LM/models}
 # Local download cache for GGUFs.
 export TS5_MODEL_CACHE=${TS5_MODEL_CACHE:-$HOME/.cache/tokenstation5/models}
+# The TokenStation5 title's folder on the console: models, args, log.
+export TS5_DIR=${TS5_DIR:-/data/ts5}

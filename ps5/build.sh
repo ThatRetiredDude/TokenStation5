@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Builds ts5 as a PS5 title, ready for ShadowMountPlus:
+#
+#   build/ps5/PPSA05005/eboot.bin               ts5 with RADV linked in
+#   build/ps5/PPSA05005/sce_sys/param.json      title metadata, icon0.png
+#   build/ps5/PPSA05005/sce_module/libc.prx     the runtime module titles carry
+#
+# Needs ps5/setup.sh run once. The engine sources are the same ones the Linux
+# build compiles; ps5/title.cpp is the title's main.
+#
+#   ps5/build.sh
+set -euo pipefail
+
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+vk="${PS5_VULKAN_ROOT:-${TS5_PS5_DEPS:-$root/.deps/ps5}/PS5_Vulkan}"
+sdk="$vk/.deps/native/ps5-payload-sdk"
+radv="$vk/.deps/native/radv-release"
+archive="$radv/lib/libvulkan_radeon.ps5.a"
+tool="$vk/build/host/ps5-native-tool"
+param="$root/ps5/sce_sys/param.json"
+out="$root/build/ps5"
+for f in "$archive" "$tool" "$vk/runtime/libc.prx" "$sdk/bin/prospero-lld"; do
+    [ -e "$f" ] || { echo "build: missing $f (run ps5/setup.sh)" >&2; exit 2; }
+done
+command -v glslangValidator > /dev/null || { echo "build: glslangValidator was not found" >&2; exit 2; }
+version=$(git -C "$root" describe --always --dirty 2>/dev/null || echo dev)
+title_id=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["titleId"])' "$param")
+mkdir -p "$out/obj" "$out/shaders" "$out/stubs"
+
+cc() { PS5_PAYLOAD_SDK="$sdk" sh "$vk/tooling/prospero-clang18" "$@"; }
+
+# The compute shaders, as SPIR-V in C headers, as the CMake build makes them.
+for src in "$root"/engine/shaders/*.comp; do
+    stem=$(basename "$src" .comp)
+    hdr="$out/shaders/$stem.spv.h"
+    if [ ! -f "$hdr" ] || [ -n "$(find "$root/engine/shaders" -newer "$hdr" -print -quit)" ]; then
+        glslangValidator -V --target-env vulkan1.2 -I"$root/engine/shaders" --vn "spv_$stem" -o "$hdr" "$src" > /dev/null
+    fi
+done
+
+# The engine and the title, with exceptions and RTTI (the PS5 target turns
+# them off by default; the engine's C++ library code uses both).
+cxxflags=(-std=c++17 -O2 -Wall -ffunction-sections -fdata-sections -fexceptions -fcxx-exceptions -frtti
+    -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_VERSION=\"$version\""
+    -I "$root/engine/src" -I "$out/shaders" -I "$radv/include")
+objects=()
+pids=()
+for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_backend,tokenizer,engine,server,cli}.cpp \
+        "$root/ps5/title.cpp"; do
+    o="$out/obj/$(basename "$src" .cpp).o"
+    objects+=("$o")
+    cc "${cxxflags[@]}" -c "$src" -o "$o" &
+    pids+=($!)
+done
+cc -std=c11 -O2 -Wall -ffunction-sections -fdata-sections -c "$root/ps5/compat.c" -o "$out/obj/compat.o" &
+pids+=($!)
+# PS5_Vulkan's title start code: IEEE floating point, the platform runtime,
+# static constructors, then main.
+cc -std=c++20 -O2 -fno-exceptions -fno-rtti -c "$vk/tooling/native/app_crt.cpp" -o "$out/obj/app_crt.o" &
+pids+=($!)
+for p in "${pids[@]}"; do wait "$p"; done
+# In an archive, so --exclude-libs keeps its names local: the SDK's stub
+# modules define some of them too, and the title converter refuses exports.
+rm -f "$out/obj/libts5compat.a"
+"$sdk/bin/llvm-ar" rcs "$out/obj/libts5compat.a" "$out/obj/compat.o"
+
+# The AGC modules RADV's winsys submits through, named for the import tables.
+stub() {
+    cc -std=c11 -O2 -fPIC -c "$vk/vendor/ps5/sdk/stubs/$2" -o "$out/obj/$1_stub.o"
+    "$sdk/bin/prospero-lld" --shared -soname "$1.prx" -o "$out/stubs/$1.so" "$out/obj/$1_stub.o"
+}
+stub libSceAgc agc_canary_link_stub.c
+stub libSceAgcDriver agc_driver_canary_link_stub.c
+
+# The link PS5_Vulkan's RADV titles use: RADV whole, libc++, the platform
+# layer's heap and threads, and its stand-ins for libc functions titles lack.
+# shellcheck source=/dev/null
+source "$vk/tools/radv-link.sh"
+radv_link_recipe "$vk" "$sdk" "$archive" || exit 2
+# Mesa names every Vulkan entry point through a weak reference that must read
+# as NULL, and the title converter takes every undefined dynamic symbol for an
+# SDK import: --no-dynamic-linker keeps the weak ones out of the dynamic table
+# on LLD 18, -z nodynamic-undefined-weak on newer LLD.
+weak=(--no-dynamic-linker)
+"$sdk/bin/ld.lld" -z nodynamic-undefined-weak --version 2>&1 | grep -q "unknown -z" ||
+    weak+=(-z nodynamic-undefined-weak)
+"$sdk/bin/prospero-lld" "${radv_linker_script[@]}" --eh-frame-hdr "${weak[@]}" "${radv_link_flags[@]}" \
+    --version-script "$vk/tooling/native/app-symbols.map" --exclude-libs=ALL \
+    -e _start -o "$out/llvm-pie.elf" \
+    "$out/obj/app_crt.o" "${objects[@]}" "$out/obj/libts5compat.a" \
+    "$out/stubs/libSceAgc.so" "$out/stubs/libSceAgcDriver.so" \
+    "${radv_link_inputs[@]}" \
+    --as-needed "$sdk"/target/lib/*.so
+# An import that only a module titles get nothing from provides is a call
+# through NULL at run time: refuse to ship one.
+python3 "$root/ps5/check-imports.py" "$sdk" "$out/llvm-pie.elf" "$out/stubs"
+"$tool" link --in "$out/llvm-pie.elf" --out "$out/eboot.elf" \
+    --stub-dir "$sdk/target/lib" --stub "$out/stubs/libSceAgc.so" \
+    --stub "$out/stubs/libSceAgcDriver.so" --module-sdk 0x02000009 \
+    --companion-sdk 0x08050001 --file-name eboot.elf > /dev/null
+
+app="$out/$title_id"
+rm -rf -- "$app"
+mkdir -p "$app/sce_sys" "$app/sce_module"
+"$tool" self --sign --in "$out/eboot.elf" --out "$app/eboot.bin" --magic 0x1D3D154F > /dev/null
+cp "$param" "$root/ps5/sce_sys/icon0.png" "$app/sce_sys/"
+cp "$vk/runtime/libc.prx" "$app/sce_module/libc.prx"
+"$tool" self --inspect --file "$app/eboot.bin" > /dev/null
+echo "build: $app (ts5 $version, eboot.bin $(stat -c %s "$app/eboot.bin") bytes)"

@@ -19,3 +19,30 @@ jobs:
         run: vulkaninfo --summary | grep -E "deviceName|apiVersion"
       - name: Engine tests (Vulkan vs CPU reference)
         run: engine/tests/run.sh
+
+  ps5-title:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the cross toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-18 lld-18 libclang-rt-18-dev llvm-18-dev libclang-18-dev \
+            libclc-18-dev libllvmspirvlib-18-dev ninja-build rsync wget unzip glslang-tools \
+            python3-mako python3-yaml bison flex
+          pip install --user meson
+      - name: Cache the SDK and RADV
+        uses: actions/cache@v4
+        with:
+          path: .deps/ps5
+          key: ps5-deps-${{ hashFiles('ps5/setup.sh') }}
+      - name: Set up the SDK and build RADV
+        run: ps5/setup.sh
+      - name: Build the title
+        run: ps5/build.sh
+      - name: Keep only what the build links in the cache
+        run: rm -rf .deps/ps5/PS5_Mesa .deps/ps5/PS5_Vulkan/.deps/work
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TokenStation5-PPSA05005
+          path: build/ps5/PPSA05005

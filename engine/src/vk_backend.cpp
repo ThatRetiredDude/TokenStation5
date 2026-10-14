@@ -208,6 +208,12 @@ private:
         vk.vkGetPhysicalDeviceProperties(pd_, &props_);
         vk.vkGetPhysicalDeviceMemoryProperties(pd_, &memprops_);
         name_ = std::string("vk:") + props_.deviceName;
+        fprintf(stderr, "ts5: %s, Vulkan %u.%u, memory heaps:", props_.deviceName, VK_API_VERSION_MAJOR(props_.apiVersion),
+                VK_API_VERSION_MINOR(props_.apiVersion));
+        for (uint32_t i = 0; i < memprops_.memoryHeapCount; i++)
+            fprintf(stderr, " %.2f GiB%s", memprops_.memoryHeaps[i].size / 1073741824.0,
+                    memprops_.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? " (device)" : "");
+        fprintf(stderr, "\n");
 
         uint32_t nq = 0;
         vk.vkGetPhysicalDeviceQueueFamilyProperties(pd_, &nq, nullptr);
