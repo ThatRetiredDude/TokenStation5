@@ -39,6 +39,7 @@ struct Status {
     double job_started = 0;  // seconds, steady clock
     std::string serving, serving_path;  // file name and path of the model the API answers with
     int serving_ctx = 0;
+    bool serving_kv8 = false;  // its KV cache is 8-bit
     std::string error;  // the last job's failure, until the next job starts
     int queued = 0;
 };

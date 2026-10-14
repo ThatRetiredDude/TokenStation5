@@ -82,7 +82,9 @@ ModelInfo inspect(const std::string &path, const std::string &file, uint64_t siz
     m.layers = hp.n_layer;
     m.ctx_train = hp.n_ctx_train;
     m.weight_bytes = model.data_bytes();
-    m.kv_bytes_per_token = ts5::kv_bytes_per_token(hp, ts5::kv_type_setting());
+    m.kv_bytes[0] = ts5::kv_bytes_per_token(hp, ts5::KvType::F16);
+    m.kv_bytes[1] = ts5::kv_bytes_per_token(hp, ts5::KvType::Q8);
+    m.kv8 = ts5::kv_type_setting() == ts5::KvType::Q8 && hp.head_dim % 32 == 0;
     m.fixed_bytes = ts5::vk_fixed_bytes(hp, m.weight_bytes);
     if (g.data_offset + m.weight_bytes > size) {
         m.error = "the file is incomplete (" + format_bytes(size) + " of " + format_bytes(g.data_offset + m.weight_bytes) +
@@ -111,8 +113,12 @@ std::vector<std::string> split_tabs(const std::string &line) {
 
 }  // namespace
 
-int ModelInfo::auto_ctx(uint64_t gpu_memory) const {
-    return ts5::fit_context(gpu_memory, fixed_bytes, kv_bytes_per_token, ctx_train > 0 ? ctx_train : 32768);
+ModelInfo::Ctx ModelInfo::serve_ctx(int asked, uint64_t gpu_memory) const {
+    if (asked > 0) return {asked, kv8};
+    const int train = ctx_train > 0 ? ctx_train : 32768;
+    const int f16 = ts5::fit_context(gpu_memory, fixed_bytes, kv_bytes[0], train);
+    if (!kv8 || ts5::f16_reaches(f16, train)) return {f16, false};
+    return {ts5::fit_context(gpu_memory, fixed_bytes, kv_bytes[1], train), true};
 }
 
 Library::Library(std::vector<std::string> dirs, std::string results_path)
