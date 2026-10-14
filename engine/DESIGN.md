@@ -158,7 +158,11 @@ title around it:
 - **Shell.** `param.json` in PS5LM's working shape (`amm` and `kernel` page
   table sizes; `attribute3` 0x80040 only declares 120 Hz output, which a
   server does not need). C++ exceptions and RTTI are on.
-- **Memory.** `radv_enable_unified_heap_on_apu` for the 11.44 GiB heap.
+- **Memory.** RADV shows the console's 11.44 GiB as a 7.63 GiB device-local
+  heap and a 3.81 GiB GTT heap, the same memory underneath. Buffers fall back
+  from one heap to the other, so models get all of it. Not
+  `radv_enable_unified_heap_on_apu`: its one heap has no GTT memory types, and
+  the VideoOut swapchain needs one, so the TV gets no picture.
 - **Network.** `ts5 serve` on 0.0.0.0:8081, the same port as PS5LM, so
   clients and `scripts/bench.py` work unchanged. The accept loop listens again
   when the console's network drops.

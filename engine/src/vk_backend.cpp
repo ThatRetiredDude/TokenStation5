@@ -215,12 +215,6 @@ private:
         return true;
     }
 
-    int mem_type(uint32_t bits, VkMemoryPropertyFlags want) const {
-        for (uint32_t i = 0; i < memprops_.memoryTypeCount; i++)
-            if ((bits & (1u << i)) && (memprops_.memoryTypes[i].propertyFlags & want) == want) return (int)i;
-        return -1;
-    }
-
     // Sub-allocates buffers from large memory blocks of one memory type.
     struct Arena {
         VkDeviceMemory mem = VK_NULL_HANDLE;
@@ -238,42 +232,55 @@ private:
         all_bufs_.push_back(b.buf);
         VkMemoryRequirements req;
         vk.vkGetBufferMemoryRequirements(dev_, b.buf, &req);
-        // Host-visible requests prefer device-local too (unified memory: PS5,
-        // APUs, ReBAR); weights prefer device-local and fall back to anything.
-        int type = -1;
+        // The memory types to use, best first. Host-visible requests prefer
+        // device-local too (unified memory: PS5, APUs, ReBAR); weights prefer
+        // device-local and fall back to anything. A type whose memory runs out
+        // falls through to the next: on the PS5, RADV's device-local heap is
+        // two thirds of the memory and its host-visible GTT types hold the rest.
         const VkMemoryPropertyFlags HV = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        std::vector<int> types;
+        auto add = [&](VkMemoryPropertyFlags want) {
+            for (uint32_t i = 0; i < memprops_.memoryTypeCount; i++)
+                if ((req.memoryTypeBits & (1u << i)) && (memprops_.memoryTypes[i].propertyFlags & want) == want &&
+                    std::find(types.begin(), types.end(), (int)i) == types.end())
+                    types.push_back((int)i);
+        };
+        add(HV | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         if (host) {
-            type = mem_type(req.memoryTypeBits, HV | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            if (type < 0) type = mem_type(req.memoryTypeBits, HV);
+            add(HV);
         } else {
-            type = mem_type(req.memoryTypeBits, HV | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            if (type < 0) type = mem_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            if (type < 0) type = mem_type(req.memoryTypeBits, 0);
+            add(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            add(0);
         }
-        if (type < 0) { err = "no suitable memory type"; return false; }
+        if (types.empty()) { err = "no suitable memory type"; return false; }
         Arena *ar = nullptr;
-        for (auto &a : arenas_)
-            if (a.type == type && (a.used + req.alignment - 1) / req.alignment * req.alignment + req.size <= a.size) { ar = &a; break; }
-        if (!ar) {
+        for (int type : types) {
+            for (auto &a : arenas_)
+                if (a.type == type && (a.used + req.alignment - 1) / req.alignment * req.alignment + req.size <= a.size) { ar = &a; break; }
+            if (ar) break;
+        }
+        VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        for (size_t t = 0; !ar && t < types.size(); t++) {
             Arena a;
-            a.type = type;
+            a.type = types[t];
             a.size = std::max<VkDeviceSize>(req.size, 1ull << 30);
             VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
             mai.allocationSize = a.size;
-            mai.memoryTypeIndex = (uint32_t)type;
-            VkResult r = vk.vkAllocateMemory(dev_, &mai, nullptr, &a.mem);
+            mai.memoryTypeIndex = (uint32_t)a.type;
+            r = vk.vkAllocateMemory(dev_, &mai, nullptr, &a.mem);
             if (r != VK_SUCCESS && a.size > req.size) {  // retry with just what is needed
                 a.size = req.size;
                 mai.allocationSize = a.size;
                 r = vk.vkAllocateMemory(dev_, &mai, nullptr, &a.mem);
             }
-            if (r != VK_SUCCESS) { err = "vkAllocateMemory failed (" + std::to_string((int)r) + "), out of GPU memory?"; return false; }
-            if (memprops_.memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+            if (r != VK_SUCCESS) continue;
+            if (memprops_.memoryTypes[a.type].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
                 CHECK(vk.vkMapMemory(dev_, a.mem, 0, VK_WHOLE_SIZE, 0, (void **)&a.map));
             arenas_.push_back(a);
             ar = &arenas_.back();
             allocated_ += a.size;
         }
+        if (!ar) { err = "vkAllocateMemory failed (" + std::to_string((int)r) + "), out of GPU memory?"; return false; }
         VkDeviceSize off = (ar->used + req.alignment - 1) / req.alignment * req.alignment;
         CHECK(vk.vkBindBufferMemory(dev_, b.buf, ar->mem, off));
         ar->used = off + req.size;

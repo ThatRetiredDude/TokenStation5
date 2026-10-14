@@ -26,7 +26,8 @@ struct VkContext {
     // The queue is shared: hold this around vkQueueSubmit and vkQueuePresentKHR.
     std::mutex queue_mutex;
 
-    // Bytes in the device-local heaps.
+    // Bytes models can use: the device-local heaps, or every heap on a GPU
+    // that shares the system's memory.
     uint64_t device_memory() const;
 };
 
