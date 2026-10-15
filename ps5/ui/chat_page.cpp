@@ -276,7 +276,7 @@ void ChatPage::draw(Canvas &c, const app::ChatState &s, int x, int y, int w, int
     if (s.turns.empty()) {
         follow_ = true;
         laid_.clear();
-        draw_empty(c, x, y, w, h, serving.empty() ? "" : name(serving), can_talk);
+        draw_empty(c, x, y, w, h, serving.empty() ? "" : name_of(name, serving), can_talk);
         return;
     }
     const int pad = 32, cx = x + pad, cw = w - 2 * pad, cy = y + 20, ch = h - 40;
@@ -285,7 +285,10 @@ void ChatPage::draw(Canvas &c, const app::ChatState &s, int x, int y, int w, int
     int total = 0;
     for (size_t i = 0; i < s.turns.size(); i++) {
         const app::ChatTurn &t = s.turns[i];
-        const std::string model = t.user ? "" : t.model.empty() ? (serving.empty() ? "" : name(serving)) : name(t.model);
+        const std::string model = t.user              ? ""
+                                  : !t.model.empty() ? name_of(name, t.model)
+                                  : serving.empty()  ? ""
+                                                     : name_of(name, serving);
         const size_t hash = std::hash<std::string>()(t.text) ^ (t.user ? 0x9E3779B9u : 0);
         Laid &l = laid_[i];
         if (l.hash != hash || l.end != (int)t.end || l.width != cw || l.model != model || l.pieces.empty()) {
@@ -369,12 +372,19 @@ void ChatPage::draw_empty(Canvas &c, int x, int y, int w, int h, const std::stri
         tx += key_cap(c, bodyb_, tx, mid + 40, "R1") + 12;
         c.text(body_, tx, mid + 36, after, kText2);
     } else {
-        centered(small_, mid + 34, "To talk to it with R1, add a speech model first.", kMuted);
+        centered(small_, mid + 34, "To talk to it with R1, add a speech model in Settings.", kMuted);
     }
 }
 
+std::string ChatPage::name_of(const std::function<std::string(const std::string &)> &name, const std::string &file) {
+    std::string n = name(file);
+    if (!n.empty()) return names_[file] = n;
+    const auto it = names_.find(file);
+    return it != names_.end() ? it->second : "A model no longer on your PS5";
+}
+
 void ChatPage::draw_input(Canvas &c, const app::ChatState &s, const app::VoiceState &voice, double now, int x, int y,
-                          int w, int h) {
+                          int w, int h, bool no_voice) {
     const int fx = x + 24, fy = y + 18, fh = h - 36, right = x + w - 24;
     int fw = w - 48;
     if (s.busy) {
@@ -420,7 +430,18 @@ void ChatPage::draw_input(Canvas &c, const app::ChatState &s, const app::VoiceSt
     if (!voice.model.empty()) {
         tx += c.text(body_, tx, ty, "or hold", kText2) + 12;
         tx += key_cap(c, bodyb_, tx, ty + 4, "R1") + 12;
-        c.text(body_, tx, ty, "and talk", kText2);
+        tx += c.text(body_, tx, ty, "and talk", kText2);
+    }
+    if (no_voice) {
+        // At the right of the line, in as many words as there's room for.
+        const int room = fx + fw - 24 - (tx + 40);
+        for (const char *say : {"Spoken replies are on, but there's no voice on your PS5 yet. Add one in Settings, "
+                                "under Voice.",
+                                "Spoken replies need a voice: add one in Settings."})
+            if (Canvas::measure(small_, say) <= room) {
+                c.text_right(small_, fx + fw - 24, baseline(small_, fy, fh), say, kAmber);
+                break;
+            }
     }
 }
 

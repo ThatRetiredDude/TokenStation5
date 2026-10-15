@@ -2,10 +2,12 @@
 // back to Home. Home (home_page.h): how apps have used the API, by model and
 // app, over 24 hours, 7 days or 30 days (left and right), and live; cross
 // goes to Chat, or to Models with nothing running. Models: the models on the
-// console and a few suggested ones, the selected model's details and
-// results, and what the title is doing; up/down choose a model, cross starts
-// it (or, on the one in use, stops it after asking), square runs the GPU
-// check, triangle the speed test. Chat (chat_page.h): a conversation with
+// console and the ones it can download (catalog.h), the selected model's
+// details and results, and what the title is doing; up/down choose a model,
+// cross starts it (or, on the one in use, stops it after asking), square runs
+// the GPU check, triangle the speed test, right removes it from the PS5
+// after asking; on a model to download, cross downloads it, stops the
+// download or goes on with it, and square removes the part downloaded. Chat (chat_page.h): a conversation with
 // the running model; cross types a message on the console's keyboard (with
 // nothing running, it goes to Models), hold R1 to talk, up/down scroll,
 // triangle stops the reply, square starts a new chat. Settings
@@ -23,7 +25,9 @@
 
 #include "canvas.h"
 #include "chat.h"
+#include "catalog.h"
 #include "chat_page.h"
+#include "downloads.h"
 #include "home_page.h"
 #include "logs_page.h"
 #include "settings_page.h"
@@ -48,18 +52,27 @@ struct View {
     app::ChatState chat;
     app::VoiceState voice;
     bool speaking = false;  // a reply is being read aloud (speak.h)
+    bool no_voice = false;  // spoken replies are on, but Kokoro's model or a voice isn't on the PS5
     SettingsInfo settings;  // its speech models and now come from the fields above
     std::shared_ptr<const app::UsageView> usage;  // Home's numbers, over Dashboard::range()
     std::vector<float> live;           // tokens written a second, oldest first (HomeInfo)
     std::vector<uint8_t> live_reading;
     std::string own_ip;  // the console's LAN address ("" without one)
+    std::map<std::string, app::Download> downloads;  // by catalog key
+    bool have_free = false;   // free_bytes is known
+    uint64_t free_bytes = 0;  // free space where models go
+    std::string models_dir;   // the title's own models folder: only models there can be removed
     double now = 0;    // seconds, steady clock (app::now_s)
     int64_t wall = 0;  // time(nullptr)
 };
 
 struct Action {
-    enum Kind { None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear, ChatType, Set, TypeSetting } kind = None;
-    std::string path;
+    enum Kind {
+        None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear, ChatType, Set, TypeSetting,
+        Download, StopDownload, RemovePart, Remove
+    } kind = None;
+    std::string path;         // Remove: the model's file
+    std::vector<std::string> keys;  // Download, StopDownload, RemovePart: catalog entries
     std::string name, value;  // Set: NAME=VALUE in ts5.env ("": the default); TypeSetting: NAME
     std::string label;        // TypeSetting: the setting's name on the page
 };
@@ -98,7 +111,7 @@ private:
     void draw_home_footer(Canvas &c, const View &v);
     HomeInfo home_info(const View &v) const;
     void draw_chat_footer(Canvas &c, const View &v);
-    void draw_settings_footer(Canvas &c);
+    void draw_settings_footer(Canvas &c, const View &v);
     void draw_logs_footer(Canvas &c);
     // OPTIONS Close, after a page's hints.
     void draw_close_hint(Canvas &c, int x, int y);
@@ -117,11 +130,13 @@ private:
     LogsPage logs_;
     ChatPage chat_;
     SettingsPage settings_;
-    std::string selected_key_;  // the selected item's path or suggestion key
+    std::string selected_key_;  // the selected item's path, or "catalog:" and its key
     int scroll_ = 0;
-    // Asking before closing the title, or stopping the model in use (its name).
-    enum Confirm { NoConfirm, ConfirmClose, ConfirmStop } confirm_ = NoConfirm;
-    std::string confirm_name_;
+    // Asking before closing the title, stopping the model in use, or removing
+    // a model from the PS5 (its name, file and size).
+    enum Confirm { NoConfirm, ConfirmClose, ConfirmStop, ConfirmRemove } confirm_ = NoConfirm;
+    std::string confirm_name_, confirm_path_;
+    uint64_t confirm_bytes_ = 0;
 };
 
 }  // namespace ui

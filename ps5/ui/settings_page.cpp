@@ -1,8 +1,10 @@
 #include "settings_page.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
+#include "library.h"
 #include "pad.h"
 #include "plain.h"
 #include "settings.h"
@@ -119,6 +121,32 @@ std::vector<Choice> choices(const Row &r, const SettingsInfo &info) {
 
 std::string current(const Row &r) { return app::setting(r.name, r.def); }
 
+// On Speech model or Voice: the catalog files (catalog.h) the row needs on
+// the PS5 before it has something to use. Voice needs Kokoro's model and a
+// voice; Heart is the one it downloads.
+std::vector<std::string> missing(const Row &r, const SettingsInfo &info) {
+    std::vector<std::string> keys;
+    if (!r.files) return keys;
+    if (std::string(r.name) == kSpeechModel) {
+        if (info.speech_models.empty()) keys.push_back("speech-base-en");
+        return keys;
+    }
+    if (!info.kokoro_model) keys.push_back("kokoro");
+    if (info.voices.empty()) keys.push_back("voice-af-heart");
+    return keys;
+}
+
+// What cross downloads there: "Base (English), 148 MB", "the Heart voice,
+// 171 MB" (with Kokoro's model), "Kokoro's model, 170 MB".
+std::string download_what(const std::vector<std::string> &keys, const SettingsInfo &info) {
+    const app::Download d = app::joined(keys, info.downloads);
+    std::string what;
+    if (keys.size() == 1 && keys[0] == "speech-base-en") what = "Base (English)";
+    else if (std::find(keys.begin(), keys.end(), "voice-af-heart") != keys.end()) what = "the Heart voice";
+    else what = "Kokoro's model";
+    return what + ", " + app::format_bytes(d.total);
+}
+
 // What the row is set to in effect: for a row of files left unset, the file
 // used by default.
 std::string in_effect(const Row &r, const SettingsInfo &info) {
@@ -148,7 +176,19 @@ std::string other(const Row &r) {
 std::string shown(const Row &r, const SettingsInfo &info) {
     if (is_key(r)) return current(r).empty() ? "Not set" : "Set";
     const auto cs = choices(r, info);
-    if (r.files && cs.empty()) return "None yet";
+    if (r.files && cs.empty()) {
+        const app::Download d = app::joined(missing(r, info), info.downloads);
+        switch (d.phase) {
+            case app::Download::Running:
+                return d.held ? "Waiting" : "Downloading " + std::to_string(app::percent(d)) + "%";
+            case app::Download::Queued:
+            case app::Download::Retrying: return "Waiting";
+            case app::Download::Stopped: return "Stopped at " + std::to_string(app::percent(d)) + "%";
+            case app::Download::Failed: return "Didn't download";
+            case app::Download::None: break;
+        }
+        return "None yet";
+    }
     const int i = index_of(cs, in_effect(r, info));
     if (i < 0) return other(r);
     return cs[i].shown;
@@ -210,6 +250,13 @@ SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
                 confirm_at_ = info.now;
             }
         }
+        return ch;
+    }
+    // Nothing there to choose yet: cross downloads it, or stops that.
+    const auto keys = missing(r, info);
+    if (!keys.empty() && (b & kCross)) {
+        ch.download = keys;
+        ch.stop = app::joined(keys, info.downloads).active();
         return ch;
     }
     const auto cs = choices(r, info);
@@ -313,12 +360,54 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
         }
     } else {
         const auto cs = choices(r, info);
-        c.text(smallb_, dx, ty, "CHOICES", kMuted);
+        const auto keys = missing(r, info);
+        const bool fetching = !keys.empty() && app::joined(keys, info.downloads).phase != app::Download::None;
+        c.text(smallb_, dx, ty, cs.empty() && fetching ? "DOWNLOAD" : "CHOICES", kMuted);
         ty += 20;
-        if (cs.empty()) {
-            c.text(body_, dx, ty + 30, "None on your PS5 yet.", kText2, dw);
-            c.text(body_, dx, ty + 68, "The TokenStation5 guide shows how to add one.", kText2, dw);
-            ty += 100;
+        if (!keys.empty()) {
+            const app::Download d = app::joined(keys, info.downloads);
+            using D = app::Download;
+            const std::string head = cs.empty() ? "None on your PS5 yet." : "Kokoro's model isn't on your PS5 yet.";
+            if (d.phase == D::None) {
+                c.text(body_, dx, ty + 30, head, kText2, dw);
+                text_glyph(c, body_, dx, ty + 68, "Press", kGlyphCross, "to download " + download_what(keys, info) + ".",
+                           kText2);
+                ty += 100;
+            } else {
+                c.round_rect((float)dx, (float)ty + 14, (float)dw, 12, 6, kTrack);
+                const float f = d.total ? std::min(1.0f, (float)d.done / (float)d.total) : 0;
+                const Color mc = d.phase == D::Failed ? kRed : d.phase == D::Running && !d.held ? kAccent : kText2;
+                if (f > 0) c.round_rect((float)dx, (float)ty + 14, std::max(12.0f, dw * f), 12, 6, mc);
+                c.text(small_, dx, ty + 58, std::to_string(app::percent(d)) + "%  \xC2\xB7  " + app::progress_text(d, true),
+                       kText2, dw);
+                ty += 94;
+                auto para = [&](const std::string &text, Color col) {
+                    for (const std::string &l : wrap(small_, text, dw)) {
+                        c.text(small_, dx, ty, l, col);
+                        ty += 32;
+                    }
+                };
+                switch (d.phase) {
+                    case D::Running:
+                        para(d.held ? "It waits while a model loads, then goes on by itself."
+                                    : "It's ready to use when the download finishes.",
+                             kText2);
+                        break;
+                    case D::Queued: para("It starts after the download before it.", kText2); break;
+                    case D::Retrying:
+                        para(d.problem + " Trying again in " +
+                                 std::to_string(std::max(1, (int)std::ceil(d.retry_at - info.now))) + " s.",
+                             kAmber);
+                        break;
+                    case D::Stopped:
+                        text_glyph(c, small_, dx, ty, "Stopped. Press", kGlyphCross, "to go on.", kText2);
+                        ty += 32;
+                        break;
+                    case D::Failed: para(d.problem, kRed); break;
+                    case D::None: break;
+                }
+                ty += 8;
+            }
         }
         const int at = index_of(cs, in_effect(r, info));
         for (size_t i = 0; i < cs.size(); i++) {
@@ -344,6 +433,14 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
     if (info.now - info.note_at < kNoteFor && !info.note.empty())
         c.text_right(smallb_, dx + dw, by, info.note, info.note_failed ? kRed : kGreen);
     (void)ty;
+}
+
+std::string SettingsPage::cross_does(const SettingsInfo &info) const {
+    const Row &r = rows()[sel_];
+    if (is_key(r)) return "Type";
+    const auto keys = missing(r, info);
+    if (!keys.empty()) return app::joined(keys, info.downloads).active() ? "Stop the download" : "Download";
+    return choices(r, info).empty() ? "" : "Next choice";
 }
 
 }  // namespace ui
