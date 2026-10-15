@@ -304,6 +304,9 @@ void handle(int fd, Server::State &state) {
             st.prompt_ms += turn.prompt_ms;
             st.gen_tokens += turn.gen_tokens;
             st.gen_ms += turn.gen_ms;
+            st.drafted += turn.drafted;
+            st.draft_accepted += turn.draft_accepted;
+            st.sample_ms += turn.sample_ms;
             st.finish = stopped ? "stop" : turn.finish;
             if (!ok || !use_tools) {
                 content += text;
