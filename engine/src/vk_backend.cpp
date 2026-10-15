@@ -328,7 +328,8 @@ private:
         if (const char *e = getenv("TS5_MMB_SPLIT")) mmb_split_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SLICES")) mmb_slices_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SMALL")) mmb_small_ = atoi(e) != 0;
-        mmb_f16_ = ctx_->float16;
+        // f32 by default: on the PS5 the f16 sums put Llama 3.2 3B over the
+        // GPU check's bar (0.78% at 512 tokens, 0.02-0.04% in f32).
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
         kv_ = kv_type_setting();
         if (kv_ == KvType::Q8 && !(attn_ok() && hp_.head_dim % 32 == 0)) {
@@ -1218,8 +1219,9 @@ private:
     // Matrices of fewer blocks than mmb_min_ use mmb too where their split
     // makes that many workgroups (TS5_MMB_SMALL=0: the 64 x 64 kernel).
     bool mmb_small_ = true;
-    // mmb sums each step's 32 products in packed f16 (mmb16_*), where the
-    // device has f16 arithmetic (TS5_MMB_F16=0: f32 throughout).
+    // mmb sums each step's 32 products in packed f16 (mmb16_*) with
+    // TS5_MMB_F16=1, where the device has f16 arithmetic; f32 throughout by
+    // default.
     bool mmb_f16_ = false;
     size_t split_used_ = 0;  // floats of split_ that kernels may still read
     // The KV cache's type (TS5_KV=q8 or f16).
