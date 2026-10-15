@@ -145,15 +145,17 @@ dims and waits for each shared-memory read before the next
 (`TS5_ATTN_PF128=0` runs that build).
 
 Generation over 1024 keys or more (`TS5_ATTN_DEC` sets how many; 0: never),
-with an f16 cache and heads of 128, uses `shaders/attn_dec.comp`: up to 8
-rows per workgroup, its slice of the keys 128 at a time. Thread t scores key
-t against every row, reading the key's 256 bytes straight from the cache,
-and thread d then adds value column d of the 128 keys into every row's sum;
-the queries and the weights sit in shared memory, where all threads read the
-same word at once. That's three barriers per 128 keys where attn has four
-per 16, and no 128-long sums from shared memory one value at a time. On the
-console, Coder 7B wrote 65 tok/s at 0.5k tokens of context and 23 at 18k
-with attn.
+with an f16 cache and heads of 128, uses `shaders/attn_dec.glsl`: up to 8
+rows per workgroup (`attn_dec`; `attn_dec4` for 4, where a KV head has 3 or
+4 query heads), its slice of the keys 128 at a time. Thread t scores key t
+against every row, reading the key's 256 bytes straight from the cache; the
+queries are the same for every thread, so they come through scalar loads.
+Then each group of 32 threads takes a quarter of the tile's keys and each
+thread 4 value columns of them, and the four groups' sums are added up once,
+at the end. That's three barriers per 128 keys where attn has four per 16.
+On the console, Coder 7B wrote 65 tok/s at 0.5k tokens of context and 23 at
+18k with attn, 47 at 18k with the first version of attn_dec (the queries and
+weights in shared memory, one value column per thread).
 
 `TS5_PROFILE=1` writes a GPU timestamp after every dispatch; `ts5 bench`
 then prints the GPU's time per kernel (matmuls by weight) for the prompt and
