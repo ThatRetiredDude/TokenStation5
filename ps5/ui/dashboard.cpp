@@ -106,6 +106,9 @@ std::string name_of(const View &v, const std::string &file) {
     return file;
 }
 
+// Cross types a message: a model serves, and no reply is coming.
+bool can_type(const View &v) { return v.status.phase == app::Status::Serving && !v.chat.busy; }
+
 }  // namespace
 
 struct Dashboard::Item {
@@ -200,10 +203,11 @@ Action Dashboard::press(uint32_t b, const View &v) {
     }
     if (page_ == Settings) {
         const SettingChange ch = settings_.press(b, settings_info(v));
-        if (ch.any) {
-            a.kind = Action::Set;
+        if (ch.any || ch.type) {
+            a.kind = ch.type ? Action::TypeSetting : Action::Set;
             a.name = ch.name;
             a.value = ch.value;
+            a.label = ch.label;
         }
         if (b & kCircle) page_ = Models;
         return a;
@@ -212,6 +216,7 @@ Action Dashboard::press(uint32_t b, const View &v) {
         chat_.press(b);
         if ((b & kTriangle) && (v.chat.busy || v.speaking)) a.kind = Action::ChatStop;
         else if ((b & kSquare) && !v.chat.turns.empty()) a.kind = Action::ChatClear;
+        else if ((b & kCross) && can_type(v)) a.kind = Action::ChatType;
         if (a.kind == Action::ChatClear) chat_.to_bottom();
         if (b & kCircle) page_ = Models;
         return a;
@@ -618,7 +623,8 @@ void Dashboard::draw_chat_footer(Canvas &c, const View &v) {
         PadGlyph g;
         const char *text;
         bool on;
-    } hints[] = {{kGlyphTriangle, v.speaking && !v.chat.busy ? "Stop speaking" : "Stop the reply",
+    } hints[] = {{kGlyphCross, "Type", can_type(v)},
+                 {kGlyphTriangle, v.speaking && !v.chat.busy ? "Stop speaking" : "Stop the reply",
                   v.chat.busy || v.speaking},
                  {kGlyphSquare, "New chat", !v.chat.turns.empty()},
                  {kGlyphCircle, "Back", true}};

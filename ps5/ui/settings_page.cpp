@@ -16,8 +16,8 @@ struct Choice {
 };
 
 // One setting: NAME in ts5.env, and what reads it does with it. No choices:
-// a key, set from the PC, or files in the models folder (get: the command
-// that fetches them).
+// a key, typed on the console's keyboard, or files in the models folder (get:
+// the command that fetches them).
 struct Row {
     const char *section, *name, *label, *help, *applies;
     std::vector<Choice> choices;
@@ -176,6 +176,12 @@ SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
         ch.value = v == r.def ? "" : v;
     };
     if (is_key(r)) {
+        if (b & kCross) {
+            ch.type = true;
+            ch.name = r.name;
+            ch.label = r.label;
+            return ch;
+        }
         if ((b & kSquare) && !current(r).empty()) {
             if (info.now - confirm_at_ < kConfirmFor) {
                 set("");
@@ -276,11 +282,10 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
         c.text(bodyb_, dx, ty + 38, cur.empty() ? "Not set" : "Set", cur.empty() ? kText2 : kGreen);
         ty += 84;
         c.text(smallb_, dx, ty, "TO SET IT", kMuted);
-        c.text(body_, dx, ty + 38, "On your computer, in the TokenStation5 folder, run", kText2, dw);
-        c.round_rect((float)dx, (float)ty + 56, (float)dw, 50, 10, rgb(0x0A1024));
-        c.text(mono_, dx + 18, ty + 88, "scripts/ts5-ps5.sh websearch tvly-...", kAccent, dw - 36);
-        c.text(small_, dx, ty + 140, "Get a key at app.tavily.com. It stays on your PS5, out of the log.", kMuted, dw);
-        ty += 176;
+        text_glyph(c, body_, dx, ty + 38, "Press", kGlyphCross,
+                   "and type it, with the controller or a keyboard.", kText2);
+        c.text(small_, dx, ty + 84, "Get a key at app.tavily.com. It stays on your PS5, out of the log.", kMuted, dw);
+        ty += 120;
         if (!cur.empty()) {
             const bool confirming = info.now - confirm_at_ < kConfirmFor;
             text_glyph(c, small_, dx, ty + 8, confirming ? "Press" : "", kGlyphSquare,
