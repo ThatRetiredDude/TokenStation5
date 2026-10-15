@@ -9,6 +9,8 @@
 
 namespace app {
 
+struct CatalogEntry;
+
 struct ModelInfo {
     std::string path, file;  // full path as the title sees it; file name
     uint64_t size = 0;
@@ -84,6 +86,10 @@ private:
     std::vector<ModelInfo> models_;
     std::map<std::string, Results> results_;
 };
+
+// What a catalog model (catalog.h) will be once it's on the PS5, for its
+// memory estimate: the same fields inspect() fills from its header.
+ModelInfo estimate(const CatalogEntry &e);
 
 // "0.5B", "7.6B"
 std::string format_params(double n);
