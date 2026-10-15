@@ -1,5 +1,6 @@
 // Reference forward pass on the CPU, in fp32. It is the oracle the Vulkan
 // backend is tested against, so it favours being obviously right over speed.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -63,9 +64,26 @@ void rope(float *v, int head_dim, int n_rot, int pos, float base, bool neox) {
     (void)head_dim;
 }
 
+// One token's K or V (n values, whole heads) as a cache of type t keeps it.
+// Q8 rounds as the GPU's qkv_post does: per 32 values, the scale is the
+// largest magnitude over 127 in f16, and values round to nearest even.
+void round_kv(KvType t, float *v, int n) {
+    if (t == KvType::F16) {
+        for (int i = 0; i < n; i++) v[i] = fp16_to_fp32(fp32_to_fp16(v[i]));
+    } else if (t == KvType::Q8) {
+        for (int b = 0; b + 32 <= n; b += 32) {
+            float amax = 0;
+            for (int i = 0; i < 32; i++) amax = std::max(amax, std::fabs(v[b + i]));
+            const float sc = fp16_to_fp32(fp32_to_fp16(amax / 127.0f));
+            for (int i = 0; i < 32; i++)
+                v[b + i] = sc > 0 ? std::min(127.0f, std::max(-127.0f, std::nearbyint(v[b + i] / sc))) * sc : 0.0f;
+        }
+    }
+}
+
 class CpuBackend : public Backend {
 public:
-    CpuBackend(const Model &m, int n_ctx, bool kv_f16) : m_(m), hp_(m.hp), n_ctx_(n_ctx), kv_f16_(kv_f16) {
+    CpuBackend(const Model &m, int n_ctx, KvType kv_type) : m_(m), hp_(m.hp), n_ctx_(n_ctx), kv_(kv_type) {
         const int kv = hp_.n_head_kv * hp_.head_dim;
         kc_.assign((size_t)hp_.n_layer * n_ctx * kv, 0.f);
         vc_.assign(kc_.size(), 0.f);
@@ -107,6 +125,7 @@ public:
             if (file_ && !load_layer(L, err)) return false;
             layer(l, L, x.data(), n, pos0);
         }
+        if (!logits) return true;  // the caller only wanted the KV entries
         // The last token only, unless all.
         const int nout = all ? n : 1;
         float *xo = x.data() + (size_t)(n - nout) * E;
@@ -180,8 +199,8 @@ private:
                 if (!N.k.empty()) rmsnorm(&kt[hh * HD], N.k.data(), HD, hp_.rms_eps);
                 rope(&kt[hh * HD], HD, hp_.rope_dims, pos, hp_.rope_base, hp_.rope_neox);
             }
-            if (kv_f16_)
-                for (int i = 0; i < KV; i++) kt[i] = fp16_to_fp32(fp32_to_fp16(kt[i])), vt[i] = fp16_to_fp32(fp32_to_fp16(vt[i]));
+            round_kv(kv_, kt, KV);
+            round_kv(kv_, vt, KV);
             memcpy(kl + (size_t)pos * KV, kt, KV * 4);
             memcpy(vl + (size_t)pos * KV, vt, KV * 4);
         }
@@ -244,7 +263,7 @@ private:
     const Model &m_;
     const HParams &hp_;
     int n_ctx_;
-    bool kv_f16_;
+    KvType kv_;
     FILE *file_ = nullptr;      // the model file, when its weights were not loaded
     bool read_ok_ = true;
     std::vector<uint8_t> buf_;  // the weights being used, read from file_
@@ -254,6 +273,8 @@ private:
 
 }  // namespace
 
-Backend *make_cpu_backend(const Model &m, int n_ctx, bool kv_f16) { return new CpuBackend(m, n_ctx, kv_f16); }
+Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv) { return new CpuBackend(m, n_ctx, kv); }
+
+const char *kv_type_name(KvType t) { return t == KvType::Q8 ? "q8" : t == KvType::F16 ? "f16" : "f32"; }
 
 }  // namespace ts5

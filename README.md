@@ -22,6 +22,9 @@ ts5 is not a fork, a wrapper or a rebrand of llama.cpp. Every layer is ours:
   to the reference implementation.
 - **OpenAI-compatible server:** chat completions with streaming, prompt-prefix
   caching, and llama-server-style timing stats.
+- **Speculative decoding:** drafts looked up in the prompt, verified in one
+  batched pass by kernels built for it, with byte-identical output and an
+  adaptive policy that stops drafting where nothing is accepted.
 - **Zero third-party code:** the build needs a C++17 compiler, the Vulkan
   headers and glslang, and nothing else.
 
@@ -36,7 +39,7 @@ instructions llama.cpp's Vulkan path is tuned for.
 ts5 is built around this one GPU's constraints instead of around every GPU's:
 - batches split to stay under the console driver's 10-second watchdog (done)
 - weights loaded straight into the GPU's 11.4 GiB heap with no staging copy (done)
-- kernels tuned to RDNA 2 wavefronts and packed fp16 math (in progress)
+- kernels tuned to RDNA 2 wavefronts and packed fp16 math (done, still being tuned)
 
 The full plan is in [engine/DESIGN.md](engine/DESIGN.md).
 
@@ -50,7 +53,8 @@ The full plan is in [engine/DESIGN.md](engine/DESIGN.md).
 | OpenAI API | ✅ `/v1/chat/completions` (streaming), `/v1/completions`, `/v1/models` |
 | PS5 title | ✅ Runs on a real PS5 as **TokenStation5** (`PPSA99555`). The GPU check passes on the console, and the API serves the home network |
 | TV dashboard | ✅ Pick, check, benchmark and serve models with the controller, on the TV |
-| PS5 kernel tuning | 🔨 In progress: prompts read 6 to 7.5 times faster and generation about 2.2 times faster than the first console build. The feed-forward matmuls are next |
+| PS5 kernel tuning | 🔨 Ongoing: prompts read 14 to 18 times faster and generation about 3.4 times faster than the first console build; the new attention doubled generation again at 16k+ context |
+| Speculative decoding | ✅ Code editing with Coder 7B runs at 102 tok/s against 64 with drafting off, byte-identical output; free chat stays within 4% |
 | Gemma 3, Qwen 3.5, Gemma 4 | 📋 Planned |
 
 ## On the console today
@@ -60,29 +64,31 @@ ran there, before any kernel tuning:
 
 | Model | GPU check | Prompt tok/s | Generation tok/s | Load | GPU memory |
 | --- | :---: | ---: | ---: | ---: | ---: |
-| Qwen 2.5 0.5B Q8_0 | ✅ | **2641** | **98** | 8 s | |
-| Llama 3.2 3B Q4_K_M | ✅ | **473** (78) | **82** (36) | 22 s | 1.9 + 0.9 GiB |
-| Qwen 2.5 Coder 7B Q4_K_M | ✅ | **234** (31) | **45** (21) | 51 s | 4.4 + 0.4 GiB |
-| Qwen 3 8B Q4_K_M | ✅ | **211** (29) | **41** (19) | 55 s | 4.7 + 1.1 GiB |
-| Llama 3.1 8B Q4_K_M | ✅ | **213** (28.5) | **42** (19.7) | 54 s | 4.6 + 1.0 GiB |
+| Qwen 2.5 0.5B Q8_0 | ✅ | **2641** | **98** | ~0.5 s | |
+| Llama 3.2 3B Q4_K_M | ✅ | **1095** (78) | **122** (36) | ~1 s | 1.9 + 0.9 GiB |
+| Qwen 2.5 Coder 7B Q4_K_M | ✅ | **558** (31) | **71** (21) | 2.3 s | 4.4 + 0.4 GiB |
+| Qwen 3 8B Q4_K_M | ✅ | **480** (29) | **65** (19) | ~2.4 s | 4.7 + 1.1 GiB |
+| Llama 3.1 8B Q4_K_M | ✅ | **487** (28.5) | **67** (19.7) | ~2.3 s | 4.6 + 1.0 GiB |
 
 The GPU check runs the same prompt through the console's GPU and through
 ts5's CPU reference, and compares the logits at every position. The first
 check of a model saves the CPU's answers next to it, so later checks run only
 the GPU and take about a second. Prompt and generation speeds are `ts5 bench`
-(512-token prompt, 128 generated tokens); the 0.5B row is from the build
-before attention was rewritten. Load is how long a model takes to get ready.
-GPU memory is weights plus the f16 KV cache.
+(512-token prompt, 128 generated tokens). Load is how long a model takes to
+get ready: the loader reads at 2 GB/s, measured on Coder 7B (2.3 s, down
+from 51); the other models' times scale with their size. GPU memory is
+weights plus the f16 KV cache.
 
-The tuned kernels read prompts 6 to 7.5 times faster than the first console
-build and generate 2.1 to 2.3 times faster, with the same answers. Long
-prompts gained the most from the new attention: after a 4,096-token prompt,
-Qwen 2.5 Coder 7B reads at 147 tok/s and generates at 36, where the build
-before managed 41 and 12. Generation still has room: 7B streams its weights
-at about 200 GiB/s, under half the GPU's bandwidth, and on Llama 3.2 3B the
-llama.cpp port still generates faster (124 tok/s to ts5's 82). The
-feed-forward matmuls are next: they take two thirds of the GPU's time while
-generating (`TS5_PROFILE=1` prints the split).
+The tuned kernels read prompts 14 to 18 times faster than the first console
+build and generate about 3.4 times faster, with the same answers. Long
+contexts gained the most from the new attention: after a 16,384-token prompt,
+Qwen 2.5 Coder 7B reads at 387 tok/s and generates at 50, where generating
+at that depth used to run at 23. On Llama 3.2 3B, where the llama.cpp port
+used to generate half again as fast as ts5, the two are now even (124 tok/s
+to ts5's 122). Speculative decoding adds its gain on top of all of that:
+editing code with Coder 7B runs at 102 tok/s against 64 with drafting off,
+with byte-identical output, and free chat stays within 4% either way
+because drafting backs off where nothing is accepted.
 
 [PS5LM Plus](https://github.com/abhi245y/PS5LM), a llama.cpp port, stays on
 the console as the baseline ts5 has to beat.
@@ -180,6 +186,7 @@ Memory is an 11.44 GiB GPU heap on the console. Measured numbers are in
 - [ps5/](ps5/): the PS5 title: build, packaging, console control
 - [docs/ROADMAP.md](docs/ROADMAP.md): milestones
 - [docs/FEASIBILITY.md](docs/FEASIBILITY.md): hardware, memory budget, risks
+- [docs/WEB_SEARCH.md](docs/WEB_SEARCH.md): web search with a Tavily key, and tool calling
 - [scripts/](scripts/): console deploy, model fetch and benchmark tools
 - [models.tsv](models.tsv): the model lineup and the context each one gets
 
@@ -206,11 +213,13 @@ Keep it on a network you trust.
 
 ## Licensing
 
-- **ts5 and everything outside `ps5/`:** [PolyForm Small Business 1.0.0](LICENSE.md).
-  Free for individuals and for companies under 100 people and about $1M in
-  revenue; larger companies need a commercial license.
-- **`ps5/` and the built PS5 title:** [GPL-3.0-or-later](ps5/LICENSE), because
-  the title links PS5_Vulkan's GPL-3.0 code.
+- **Everything in this repository, unless [LICENSING.md](LICENSING.md) says
+  otherwise:** [PolyForm Small Business 1.0.0](LICENSE.md). Free for
+  individuals and for companies under 100 people and about $1M in revenue;
+  larger companies need a commercial license.
+- **`ps5/`, `payloads/` and the built PS5 title:**
+  [GPL-3.0-or-later](ps5/LICENSE), because the title links PS5_Vulkan's
+  GPL-3.0 code.
 
 [LICENSING.md](LICENSING.md) has the full map, including what the GPL means
 for the engine code inside the PS5 title, and

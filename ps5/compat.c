@@ -39,3 +39,62 @@ int mkstemp(char *path) {
     errno = EEXIST;
     return -1;
 }
+
+/* whisper.cpp's ggml, on an error it can't go on from, forks a debugger to
+ * print where (ggml_print_backtrace). A title can't start a process: fork is
+ * only in libkernel_sys and no module has execlp. Both fail here, and ggml
+ * skips the backtrace. */
+#include <unistd.h>
+
+pid_t fork(void) {
+    errno = ENOSYS;
+    return -1;
+}
+
+int execlp(const char *file, const char *arg, ...) {
+    (void)file;
+    (void)arg;
+    errno = ENOSYS;
+    return -1;
+}
+
+/* ggml finds its backends with std::filesystem, and libc++'s file system
+ * operations come as one piece, links and all; only libkernel_sys has these
+ * three. ggml looks in folders only when asked to load backends from files,
+ * which the title never does: its CPU backend is linked in. A path is as long
+ * as the system's own limit; links can't be made. */
+#include <limits.h>
+
+long pathconf(const char *path, int name) {
+    (void)path;
+    if (name == _PC_PATH_MAX) return PATH_MAX;
+    if (name == _PC_NAME_MAX) return NAME_MAX;
+    errno = EINVAL;
+    return -1;
+}
+
+int link(const char *from, const char *to) {
+    (void)from;
+    (void)to;
+    errno = EPERM;
+    return -1;
+}
+
+int symlink(const char *target, const char *path) {
+    (void)target;
+    (void)path;
+    errno = EPERM;
+    return -1;
+}
+
+/* kokoro.cpp's model loader advises the kernel on how it will read a mapping
+ * (third_party/kokoro.cpp's gguf_loader.cpp). The title reads its models
+ * with stdio (KOKORO_NO_MMAP), and advice may always be ignored. */
+#include <sys/mman.h>
+
+int posix_madvise(void *addr, size_t len, int advice) {
+    (void)addr;
+    (void)len;
+    (void)advice;
+    return 0;
+}

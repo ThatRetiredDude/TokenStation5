@@ -30,7 +30,8 @@ std::vector<int32_t> test_tokens(int n, int n_vocab) {
 constexpr uint32_t kRefVersion = 1;
 struct RefHeader {
     char magic[8];
-    uint32_t version, n, n_vocab, reserved;
+    uint32_t version, n, n_vocab;
+    uint32_t kv;  // the cache type the reference rounded to: kv_code()
     uint64_t file_size, file_hash;  // of the model: its size and its first MiB
 };
 
@@ -47,40 +48,50 @@ bool model_id(const std::string &path, uint64_t &size, uint64_t &hash) {
     return true;
 }
 
-RefHeader ref_header(const std::string &model, int n, int n_vocab) {
+// 0 is f16, which the files saved before this field all are.
+uint32_t kv_code(KvType t) { return t == KvType::F16 ? 0 : t == KvType::Q8 ? 1 : 2; }
+
+// One file per cache type, so trying one doesn't throw away the other's.
+std::string ref_path(const std::string &model, KvType kv) {
+    return model + (kv == KvType::F16 ? "" : std::string(".") + kv_type_name(kv)) + ".ts5ref";
+}
+
+RefHeader ref_header(const std::string &model, int n, int n_vocab, KvType kv) {
     RefHeader h{};
     memcpy(h.magic, "TS5REF\0\0", 8);
     h.version = kRefVersion;
     h.n = (uint32_t)n;
     h.n_vocab = (uint32_t)n_vocab;
+    h.kv = kv_code(kv);
     model_id(model, h.file_size, h.file_hash);
     return h;
 }
 
 // The first n positions' logits from a saved file of the same model and at
 // least n positions.
-bool load_ref(const std::string &model, int n, int n_vocab, std::vector<float> &out) {
-    FILE *f = fopen((model + ".ts5ref").c_str(), "rb");
+bool load_ref(const std::string &model, int n, int n_vocab, KvType kv, std::vector<float> &out) {
+    FILE *f = fopen(ref_path(model, kv).c_str(), "rb");
     if (!f) return false;
-    RefHeader h{}, want = ref_header(model, n, n_vocab);
+    RefHeader h{}, want = ref_header(model, n, n_vocab, kv);
     bool ok = fread(&h, sizeof h, 1, f) == 1 && memcmp(h.magic, want.magic, 8) == 0 && h.version == want.version &&
-              h.n >= want.n && h.n_vocab == want.n_vocab && h.file_size == want.file_size &&
+              h.n >= want.n && h.n_vocab == want.n_vocab && h.kv == want.kv && h.file_size == want.file_size &&
               h.file_hash == want.file_hash;
     ok = ok && fread(out.data(), 4, (size_t)n * n_vocab, f) == (size_t)n * n_vocab;
     fclose(f);
     return ok;
 }
 
-// Keeps the saved file if it already has as many positions.
-void save_ref(const std::string &model, int n, int n_vocab, const std::vector<float> &ref) {
-    const std::string path = model + ".ts5ref", part = path + ".part";
+// Keeps the saved file if it already has more positions for the same cache type.
+void save_ref(const std::string &model, int n, int n_vocab, KvType kv, const std::vector<float> &ref) {
+    const std::string path = ref_path(model, kv), part = path + ".part";
     if (FILE *f = fopen(path.c_str(), "rb")) {
         RefHeader h{};
-        const bool more = fread(&h, sizeof h, 1, f) == 1 && h.version == kRefVersion && (int)h.n > n;
+        const bool more =
+            fread(&h, sizeof h, 1, f) == 1 && h.version == kRefVersion && h.kv == kv_code(kv) && (int)h.n > n;
         fclose(f);
         if (more) return;
     }
-    const RefHeader h = ref_header(model, n, n_vocab);
+    const RefHeader h = ref_header(model, n, n_vocab, kv);
     FILE *f = fopen(part.c_str(), "wb");
     bool ok = f && fwrite(&h, sizeof h, 1, f) == 1 && fwrite(ref.data(), 4, ref.size(), f) == ref.size();
     if (f) ok = fclose(f) == 0 && ok;
@@ -110,7 +121,7 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     for (int i = batch; i < n; i++)
         if (!gpu.forward(&toks[i], 1, i, got.data() + (size_t)i * nv, false, err)) return false;
     r.gpu_ms = now_ms() - t;
-    r.saved = !fresh && load_ref(m.gguf.path, n, nv, ref);
+    r.saved = !fresh && load_ref(m.gguf.path, n, nv, gpu.kv_type(), ref);
     bool ok = true;
     if (!r.saved) {
         if (progress) progress("loading the CPU reference");
@@ -118,12 +129,12 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
         // Opened, not loaded: the reference reads one layer's weights from the
         // file at a time, so the check needs little memory beside the GPU's.
         if (!cpu_model.open(m.gguf.path, err)) return false;
-        std::unique_ptr<Backend> cpu(make_cpu_backend(cpu_model, n, true));
+        std::unique_ptr<Backend> cpu(make_cpu_backend(cpu_model, n, gpu.kv_type()));
         if (progress) progress("running on the CPU");
         t = now_ms();
         ok = cpu->forward(toks.data(), n, 0, ref.data(), true, err);
         r.cpu_ms = now_ms() - t;
-        if (ok) save_ref(m.gguf.path, n, nv, ref);
+        if (ok) save_ref(m.gguf.path, n, nv, gpu.kv_type(), ref);
     }
     if (!ok) return false;
     double max_ref = 0;
@@ -137,7 +148,11 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
         r.same_top += std::max_element(g, g + nv) - g == std::max_element(f, f + nv) - f;
     }
     r.rel = max_ref > 0 ? r.max_diff / max_ref : r.max_diff;
-    r.pass = std::isfinite(r.rel) && r.rel < 5e-3;
+    // An 8-bit cache rounds a value differently on the two sides whenever their
+    // inputs differ in the last bits near a rounding boundary, a step of 1/127
+    // of the block's largest value, so it gets a wider margin. A wrong kernel
+    // is off by far more than either.
+    r.pass = std::isfinite(r.rel) && r.rel < (gpu.kv_type() == KvType::Q8 ? 2e-2 : 5e-3);
     return true;
 }
 

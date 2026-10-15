@@ -1,17 +1,19 @@
 // y[r] (+)= sum_c W[r][c] * x[c] for one token (generation), for the
 // K-quants that Q4_K_M files hold. One workgroup per NR rows (a
-// specialization constant); 16 threads share a 256-value block, each taking
-// 16 of its values, so the workgroup's 64 threads work through 4 blocks of
-// each row at a time, and use the x values they read for all NR rows.
-// Weights are read as 16- and 32-bit words rather than byte by byte, and x as
-// vec4.
+// specialization constant, at most 8); 16 threads share a 256-value block,
+// each taking 16 of its values, so the workgroup's 64 threads work through 4
+// blocks of each row at a time. Each thread loads its 16 values of x once
+// and uses them for all NR rows. Weights are read as 16- and 32-bit words
+// rather than byte by byte, and x as vec4.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_8bit_storage : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
 
 #define WG 64
+#define NRMAX 8
 layout(local_size_x = WG) in;
-layout(constant_id = 0) const uint NR = 1;  // rows per workgroup, at most 4
+layout(constant_id = 0) const uint NR = 1;  // rows per workgroup, at most NRMAX
 
 layout(std430, binding = 0) readonly buffer W16 { uint16_t w16[]; };
 layout(std430, binding = 0) readonly buffer W32 { uint w32[]; };
@@ -24,7 +26,7 @@ layout(push_constant) uniform PC {
     uint x_stride, y_stride, accumulate, x_off;
 } pc;
 
-shared float partial[4 * WG];
+shared float partial[NRMAX * WG];
 
 float h16(uint byte_off) { return unpackHalf2x16(uint(w16[byte_off >> 1])).x; }
 // Four bytes at a 2-byte-aligned offset.
@@ -38,18 +40,24 @@ vec4 crumbs(uint w, uint shift) {
                 float((w >> (shift + 24)) & 3u));
 }
 
-float block_dot(uint o, uint xb, uint th);
+// Thread th's 16 values of x for the block whose x starts at vec4 xb, and
+// its share of the block at byte o with them.
+void load_x(uint xb, uint th, out vec4 x[4]);
+float block_dot(uint o, vec4 x[4], uint th);
 
 void main() {
     const uint r0 = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * NR;
     if (r0 >= pc.nrows) return;
-    const uint tid = gl_LocalInvocationID.x;
+    const uint tid = gl_LocalInvocationID.x, th = tid % 16;
     const uint nb = pc.ncols / 256, nr = min(NR, pc.nrows - r0);
-    float acc[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    float acc[NRMAX];
+    for (uint i = 0; i < NRMAX; i++) acc[i] = 0.0;
     for (uint b = tid / 16; b < nb; b += WG / 16) {
-        const uint xb = (pc.x_off + b * 256) / 4;
-        for (uint i = 0; i < NR; i++)
-            if (i < nr) acc[i] += block_dot((r0 + i) * pc.row_bytes + b * BLOCK_BYTES, xb, tid % 16);
+        vec4 x[4];
+        load_x((pc.x_off + b * 256) / 4, th, x);
+        // Rows past the matrix read its last row; their sums aren't written.
+        [[unroll]] for (uint i = 0; i < NR; i++)
+            acc[i] += block_dot(min(r0 + i, pc.nrows - 1) * pc.row_bytes + b * BLOCK_BYTES, x, th);
     }
     for (uint i = 0; i < NR; i++) {
         const float a = subgroupAdd(acc[i]);
