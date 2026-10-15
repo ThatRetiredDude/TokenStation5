@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Copies whisper.cpp into third_party/whisper.cpp: only what transcription on
 # the CPU needs (whisper itself, ggml's core and its CPU backend with the x86
-# code), at a pinned commit, plus its license and a test recording. Writes
-# third_party/whisper.cpp/VENDOR.md, which says what was kept and why.
+# code), at a pinned commit, plus its license and a test recording. Then
+# applies scripts/vendor-whisper.patch (one change to ggml's backend
+# scheduler) and writes third_party/whisper.cpp/VENDOR.md, which says what
+# was kept and why.
 #
 #   scripts/vendor-whisper.sh
 #
@@ -106,6 +108,7 @@ cat > "$dest/ggml/src/ggml-version.h" << EOF
 #define GGML_VERSION "$ggml_version"
 #define GGML_COMMIT  "${commit:0:7}"
 EOF
+patch -s -p1 -d "$dest" < "$root/scripts/vendor-whisper.patch"
 
 cat > "$dest/VENDOR.md" << EOF
 # whisper.cpp, vendored
@@ -114,9 +117,18 @@ cat > "$dest/VENDOR.md" << EOF
 (ggml $ggml_version). MIT license: [LICENSE](LICENSE), "Copyright (c)
 2023-2026 The ggml authors". NOTICE.md at the top of this repo lists it.
 
-The title transcribes speech on the console's CPU with it (\`ps5/stt.cpp\`).
-Nothing here is changed from upstream. \`scripts/vendor-whisper.sh\` copies
-it, and only what CPU inference on x86 needs:
+The title transcribes speech on the console's CPU with it (\`ps5/stt.cpp\`),
+and kokoro.cpp runs on its ggml. \`scripts/vendor-whisper.sh\` copies it, and
+only what CPU inference on x86 needs, then applies one change of ours
+(\`scripts/vendor-whisper.patch\`, marked "ts5" in the code):
+\`ggml/src/ggml-backend.cpp\`'s scheduler allows 64 splits of a graph, not
+one per node. Upstream sets aside room for every split's input copies when a
+scheduler is made, graph_size × 60 tensors: 5 GB for kokoro.cpp's 262144-node
+graphs, which the PS5's malloc takes from the console's memory. On the CPU
+backend alone a graph is one split, and the scheduler checks that a graph
+still fits.
+
+What is kept:
 
 | Kept | Why |
 | --- | --- |
@@ -166,7 +178,9 @@ gives a title:
 ## Updating
 
 1. Set \`version\`, \`commit\` and \`ggml_version\` (from \`ggml/CMakeLists.txt\`
-   at that commit) in \`scripts/vendor-whisper.sh\`, and run it.
+   at that commit) in \`scripts/vendor-whisper.sh\`, and run it. If the patch
+   no longer applies, make the same change by hand and write the patch again
+   from a clean copy.
 2. If the build stops on a missing file, add it to the script's list; if
    upstream's \`ggml/src/CMakeLists.txt\` or \`ggml/src/ggml-cpu/CMakeLists.txt\`
    added sources, add them to the lists in \`ps5/host-test.sh\` and

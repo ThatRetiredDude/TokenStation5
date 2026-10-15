@@ -969,6 +969,9 @@ struct ggml_backend_sched {
     char * context_buffer;
     size_t context_buffer_size;
 
+    // ts5: the length of node_backend_ids and the other three
+    size_t nodes_size;
+
     bool op_offload;
 
     int debug;
@@ -1629,6 +1632,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         total_inputs += sched->splits[i].n_inputs;
     }
     int graph_size = std::max(graph->n_nodes, graph->n_leafs) + total_inputs * 2 * sched->n_copies + n_dep_nodes;
+    GGML_ASSERT((size_t) graph_size <= sched->nodes_size); // ts5: see ggml_sched_max_splits
 
     // remember the actual graph_size for performing reallocation checks later [GGML_SCHED_DEBUG_REALLOC]
     sched->debug_prev_graph_size = sched->debug_graph_size;
@@ -2033,8 +2037,15 @@ ggml_backend_sched_t ggml_backend_sched_new(
     sched->hv_tensor_backend_ids = (int *) malloc(sched->hash_set.size * sizeof(sched->hv_tensor_backend_ids[0]));
     sched->hv_tensor_copies      = (ggml_tensor **) malloc(sched->hash_set.size * sched->n_backends * sched->n_copies * sizeof(struct ggml_tensor *));
 
-    const size_t ggml_sched_max_splits = graph_size; // at most there is one split for each node in the graph
+    // ts5 (scripts/vendor-whisper.patch): upstream allows a split for each
+    // node and sets aside room for every split's input copies up front:
+    // graph_size*60 tensors, 5 GB for kokoro.cpp's 262144-node graphs, and on
+    // the PS5 malloc takes that from the console's memory. On the CPU backend
+    // alone a graph is a single split with no copies, so 64 is plenty;
+    // ggml_backend_sched_split_graph checks the graph copy still fits.
+    const size_t ggml_sched_max_splits = graph_size < 64 ? graph_size : 64;
     const size_t nodes_size = graph_size + ggml_sched_max_splits*GGML_SCHED_MAX_SPLIT_INPUTS*2;
+    sched->nodes_size = nodes_size;
     sched->node_backend_ids = (int *) calloc(nodes_size, sizeof(sched->node_backend_ids[0]));
     sched->leaf_backend_ids = (int *) calloc(nodes_size, sizeof(sched->leaf_backend_ids[0]));
     sched->prev_node_backend_ids = (int *) calloc(nodes_size, sizeof(sched->prev_node_backend_ids[0]));

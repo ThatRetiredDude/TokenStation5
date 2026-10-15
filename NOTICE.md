@@ -46,7 +46,9 @@ SOFTWARE.
 
 `third_party/whisper.cpp` is [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
 1.9.5 with the ggml it carries: the parts that transcribe speech on the CPU,
-unchanged (`third_party/whisper.cpp/VENDOR.md` lists them). The PS5 title
+with one change of ours to ggml's backend scheduler, so it sets aside less
+memory (`scripts/vendor-whisper.patch`; `third_party/whisper.cpp/VENDOR.md`
+lists the parts). The PS5 title
 links it for speech to text, and so does the Linux build of the title that
 `ps5/host-test.sh` runs; the Linux `ts5` binary doesn't. Its license, in
 `third_party/whisper.cpp/LICENSE`, covers whisper.cpp and its ggml:
