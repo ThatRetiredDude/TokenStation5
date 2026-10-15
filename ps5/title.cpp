@@ -87,6 +87,7 @@
 #include "text_input.h"
 #include "tts/synth.h"
 #include "usage.h"
+#include "usage_store.h"
 #include "vk_context.h"
 #include "voice.h"
 
@@ -147,6 +148,7 @@ constexpr const char *kSpeakWav = TS5_HOME "/speaktest.wav";
 constexpr const char *kQuit = TS5_HOME "/quit";
 constexpr const char *kRestart = TS5_HOME "/restart";
 constexpr const char *kUsage = TS5_HOME "/usage.tsv";
+constexpr const char *kUsageHours = TS5_HOME "/usage-hours.tsv";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
 
 constexpr int kWidth = 1920, kHeight = 1080;
@@ -514,7 +516,10 @@ int main(int, char **) {
     lib.scan();
     ts5::Server server;
     // Each request's usage, named from the library (the file name without
-    // .gguf if it isn't there), queued for the main loop.
+    // .gguf if it isn't there), queued for the main loop: for usage.tsv, and
+    // for Home's totals (made before the API takes a request, so it reads
+    // the files as they are now).
+    app::UsageStore usage_store(kUsageHours, usage_log.path(), usage_log.prev_path());
     std::mutex names_mutex;
     std::map<std::string, std::string> model_names;  // file: general.name
     server.set_on_usage([&](const ts5::UsageRecord &r) {
@@ -525,6 +530,7 @@ int main(int, char **) {
             u.name = it != model_names.end() ? it->second : r.model.substr(0, r.model.rfind(".gguf"));
         }
         usage_log.push(u);
+        usage_store.push(u);
     });
     usage_log.start(TS5_VERSION);
     double last_usage = 0;
@@ -570,7 +576,17 @@ int main(int, char **) {
     else notify("TokenStation5: no models yet. Open it to see which to add.");
 
     ui::Dashboard dash(fonts, ts5_logo_data, (size_t)(ts5_logo_data_end - ts5_logo_data));
+    {
+        // Home first, or Models while there's no model to use.
+        std::lock_guard<std::mutex> lk(lib_mutex);
+        if (lib.models().empty()) dash.show(ui::Dashboard::Models);
+    }
     ui::Canvas canvas(kWidth, kHeight);
+    // Home's live line: tokens written each second, the last two minutes.
+    std::vector<float> live;
+    std::vector<uint8_t> live_reading;
+    double last_live = app::now_s();
+    uint64_t last_gen = server.activity().gen_total;
     // Presses from the PC, and holds ('h') and releases ('r') of a button.
     std::deque<std::pair<char, uint32_t>> presses;
     uint32_t pc_held = 0;
@@ -729,6 +745,7 @@ int main(int, char **) {
         {
             std::lock_guard<std::mutex> lk(ip_mutex);
             v.on_network = !ip.empty();
+            v.own_ip = ip;
         }
         v.gpu_memory = ctx->device_memory();
         v.n_ctx = opts.n_ctx;
@@ -749,6 +766,20 @@ int main(int, char **) {
         v.status = runner.status();
         v.events = runner.events();
         v.api = server.activity();
+        const int64_t now_ms = (int64_t)time(nullptr) * 1000;
+        if (t - last_live >= 1) {
+            live.push_back((float)((double)(v.api.gen_total - last_gen) / (t - last_live)));
+            live_reading.push_back(v.api.phase == 1);
+            if (live.size() > 120) {
+                live.erase(live.begin());
+                live_reading.erase(live_reading.begin());
+            }
+            last_gen = v.api.gen_total;
+            last_live = t;
+            usage_store.tick(now_ms);
+        }
+        v.live = live;
+        v.live_reading = live_reading;
         // Both only grow, so their sum changes whenever either does.
         if (chat.version() + voice.version() != chat_version) {
             chat_version = chat.version() + voice.version();
@@ -772,6 +803,8 @@ int main(int, char **) {
         v.wall = (int64_t)time(nullptr);
 
         const ui::Action a = dash.press(buttons, v);
+        // After the press, which can change Home's range.
+        v.usage = usage_store.view(dash.range(), now_ms, v.own_ip);
         switch (a.kind) {
             case ui::Action::Serve: {
                 app::Job j;

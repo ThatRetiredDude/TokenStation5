@@ -65,20 +65,41 @@ seconds. A model still arriving shows as COPYING until it's whole.
 
 ## On the TV
 
-Three pages; **L1** goes to the next: Models, Chat, Settings. They say what
-happened and what to do in plain words; the details (file names, the
-engine's own errors) are in `ts5.log`.
+Four pages; **L1** goes to the next: Home, Models, Chat, Settings, and
+**circle** back to Home. They say what happened and what to do in plain
+words; the details (file names, the engine's own errors) are in `ts5.log`.
+The title opens on Home, or on Models while there's no model to use.
+
+**Home**: how apps have used the API, like an AI provider's usage page. Four
+tiles: the model running now and what it's doing, and over the range the
+tokens (written and read), the requests (and how many weren't answered, and
+mostly why), and the writing speed. Under them, tokens by model as stacked
+bars (an hour, six hours or a day each), requests by app (the TV's own chat
+is "Chat on this PS5"; other apps by their address), writing speed by model,
+and a live line of the last two minutes, a point a second. The numbers come
+from `usage.tsv`, summed by hour into `usage-hours.tsv` so the 7- and 30-day
+ranges outlast its rotation.
+
+| Button | |
+| --- | --- |
+| left / right | 24 hours, 7 days or 30 days |
+| cross | Chat, or Models with nothing running |
+| OPTIONS | close the title |
 
 **Models**
 
 | Button | |
 | --- | --- |
 | up / down | choose a model |
-| cross | start it, so apps can use it (and start it again at the next start) |
+| cross | start it, so apps can use it (and start it again at the next start); on the model in use, stop it (it asks first) |
 | square | GPU check: its logits on the GPU against ts5's CPU reference, PASS or FAIL. The first check of a model runs the CPU and saves its answers next to the model (`NAME.gguf.ts5ref`); later ones run only the GPU, in about a second |
 | triangle | speed test: how fast it reads a 512-token prompt and writes 128 tokens, in tokens a second |
-| circle | stop it |
+| circle | Home |
 | OPTIONS | close the title |
+
+The list shows each model's speed as used over the last 7 days (else the
+speed test's), and the strip under it the chosen model's requests, tokens
+and average writing speed over those days.
 
 **Chat**: a conversation with the serving model, the reply streaming in as
 it's written (code in blocks, a thinking model's thinking dimmed). Cross
@@ -97,12 +118,12 @@ oldest exchanges are left out of the requests (they stay on screen).
 
 | Button | |
 | --- | --- |
-| cross, or Enter on a USB or Bluetooth keyboard | type a message on the console's keyboard (Enter sends it) |
+| cross, or Enter on a USB or Bluetooth keyboard | type a message on the console's keyboard (Enter sends it); with nothing running, go to Models |
 | R1 (hold) | talk: the mic is open while it's held, and the message goes when you let go (a reply still coming stops, and so does its voice) |
 | up / down | scroll; at the bottom, the page follows the reply |
 | triangle | stop the reply, and its voice |
 | square | new chat |
-| circle | back to Models |
+| circle | Home |
 
 **Settings**: the title's settings, saved in `ts5.env` (one change at a
 time, keeping the rest of the file). The longest chat reply, the chat's
@@ -119,7 +140,7 @@ the dark screen. Changes count at once, or where they can't, at the next use
 | left / right | change it (cross steps through its choices) |
 | cross, on the Tavily key | type it on the console's keyboard |
 | square | back to its default |
-| circle | back to Models |
+| circle | Home |
 
 A check or speed test of the serving model runs on its loaded weights while
 the API waits; of another model, the serving one is unloaded first and
@@ -176,6 +197,7 @@ On the console, everything lives in the title's own folder,
 | `quit`, `restart` | close or restart the title |
 | `ts5.log`, `ts5.prev.log`, `results.tsv` | its log, the run before's, and the check and speed results |
 | `usage.tsv`, `usage.prev.tsv` | a line per API request (chat and completions, the TV's own chat too): when, the model, the app's address, tokens and times, and why it wasn't answered if it wasn't; never the prompt, the reply or a key. Tab-separated, its columns named on its second line (`engine/src/usage.h`). Written every 2 s and as the title closes; past 2 MiB it becomes `usage.prev.tsv` |
+| `usage-hours.tsv` | the same requests summed by hour, model, app address and key, a row each, written a few seconds after each hour ends (a request that ends up in an hour already written gets a row of its own; readers add rows with the same hour, model, address and key). Home's 7- and 30-day charts read it; it keeps 400 days, trimmed once it passes 4 MiB |
 | `LICENSE`, `NOTICE.md`, `SOURCE.txt` | from the build: the title's license (GPL-3.0), the third-party notices, and the commits of its source |
 
 The title takes each command file as soon as it sees it. A title can't count
@@ -199,7 +221,8 @@ reference and says PASS or FAIL.
 | `tts/` | text to speech: the G2P (`g2p.cpp`, `text.cpp`, `numbers.cpp`, `spelling.cpp`, with its lexicon `lexicon.bin`), text to the phonemes Kokoro reads; and `synth.cpp`, phonemes to audio with kokoro.cpp (`third_party/kokoro.cpp`, built into `libts5speech.a`) |
 | `speak.cpp` | speech out: on the TV or the controller's speaker, and the speak test |
 | `plain.h` | plain words for the screens: what an error means and what to do, and names for models, speech models and voices |
-| `ui/` | the screen: the Models page (`dashboard`), the Chat page (`chat_page`), drawing (`canvas`, `style.h`), the TV (`display`, VK_KHR_display), the controller (`pad`), fonts and logo baked by `make_font.py` and `make_logo.py` |
+| `usage_store.cpp` | Home's numbers: `usage.tsv` and `usage-hours.tsv` read at start on a thread of their own, each request added as it comes, an hour's rows written once it ends |
+| `ui/` | the screen: the pages and the Models page (`dashboard`), Home (`home_page`), the Chat page (`chat_page`), drawing (`canvas`, `style.h`), the TV (`display`, VK_KHR_display), the controller (`pad`), fonts and logo baked by `make_font.py` and `make_logo.py` |
 | `compat.c` | libc functions RADV and whisper.cpp need that titles don't get |
 | `build.sh`, `setup.sh` | the build |
 | `check-imports.py` | fails the build on imports that would be NULL on the console |
