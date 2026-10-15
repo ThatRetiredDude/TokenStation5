@@ -11,12 +11,15 @@ jinja2 (pip install jinja2) and openssl.
 """
 import http.server
 import json
+import socket
 import os
 import ssl
 import subprocess
 import sys
 import tempfile
 import threading
+import time
+import urllib.request
 
 import jinja2.ext
 import jinja2.sandbox
@@ -254,9 +257,82 @@ def test_search(ts5):
     return failed
 
 
+CALL = '<tool_call>\n{"name": "web_search", "arguments": {"query": "PS5 firmware"}}\n</tool_call>'
+
+
+def test_search_loop(ts5, model, tdir):
+    """The server's search loop, with the model's turns scripted (TS5_TEST_TURNS)."""
+    failed = 0
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Tavily)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_port}"
+    cases = [
+        # name, key, turns, stream, Tavily requests, answer, in the last prompt
+        ("answers from a search", "tvly-test", [CALL, "Done.", "Final answer."], False, 1, "Done.", None),
+        # A refused key: one request to Tavily, then an answer without tools.
+        ("refused key", "tvly-bad", [CALL, "Final answer."], False, 1, "Final answer.",
+         "Web search is not working right now: the Tavily API key was refused"),
+        ("refused key, streaming", "tvly-bad", [CALL, "Final answer."], True, 1, "Final answer.",
+         "Web search is not working right now"),
+        # A model that never stops searching: three rounds, then an answer from them.
+        ("search limit", "tvly-test", [CALL, "Final answer."], False, 3, "Final answer.",
+         "Web searches found the following"),
+    ]
+    template = os.path.join(tdir, "Qwen-Qwen2.5-7B-Instruct.jinja")
+    for name, key, turns, stream, hits, answer, note in cases:
+        with tempfile.TemporaryDirectory() as d:
+            script = os.path.join(d, "turns.txt")
+            open(script, "w").write("\n----\n".join(turns))
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+            env = dict(os.environ, TS5_TEST_TURNS=script, TS5_TAVILY_URL=url, TAVILY_API_KEY=key)
+            log = open(os.path.join(d, "log"), "w+")
+            p = subprocess.Popen([ts5, "serve", "-m", model, "--chat-template", template, "--host", "127.0.0.1",
+                                  "--port", str(port), "--backend", "cpu"], env=env, stdout=log, stderr=log)
+            try:
+                for _ in range(300):
+                    try:
+                        urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
+                        break
+                    except OSError:
+                        time.sleep(0.1)
+                before = len(Tavily.seen)
+                req = {"messages": [{"role": "user", "content": "What is the latest PS5 firmware?"}],
+                       "stream": stream, "max_tokens": 100}
+                r = urllib.request.urlopen(urllib.request.Request(
+                    f"http://127.0.0.1:{port}/v1/chat/completions", json.dumps(req).encode(),
+                    {"Content-Type": "application/json"}), timeout=60).read().decode()
+                if stream:
+                    got = "".join(json.loads(line[6:])["choices"][0]["delta"].get("content", "")
+                                  for line in r.splitlines() if line.startswith("data: {"))
+                else:
+                    got = json.loads(r)["choices"][0]["message"]["content"]
+                prompts = open(script + ".prompts").read().split("\n====\n")[:-1]
+                last = prompts[-1]
+                problems = []
+                if got != answer:
+                    problems.append(f"answer {got!r}")
+                if len(Tavily.seen) - before != hits:
+                    problems.append(f"{len(Tavily.seen) - before} requests to Tavily")
+                if note and (note not in last or "<tools>" in last):
+                    problems.append("last prompt:\n" + last)
+            finally:
+                p.terminate()
+                p.wait()
+            if problems:
+                failed += 1
+                log.seek(0)
+                print(f"FAIL search loop {name}: " + "; ".join(problems) + "\n" + log.read()[-2000:])
+            else:
+                print(f"ok   search loop {name}")
+    srv.shutdown()
+    return failed
+
+
 def main():
     ts5, model, tdir = sys.argv[1:4]
-    failed = test_prompts(ts5, model, tdir) + test_parser(ts5) + test_search(ts5)
+    failed = test_prompts(ts5, model, tdir) + test_parser(ts5) + test_search(ts5) + test_search_loop(ts5, model, tdir)
     if failed:
         sys.exit(f"tools_test: {failed} failed")
     print("tools_test: all passed")
