@@ -44,7 +44,8 @@ struct BenchResult {
     int pp = 0, tg = 0;
     double pp_tps = 0, tg_tps = 0;
     std::string backend;
-    // With TS5_PROFILE=1: the GPU's time per kernel in each part (else empty).
+    // With TS5_PROFILE set: the CPU's time per call in each part, and with
+    // TS5_PROFILE=1 the GPU's time per kernel (else empty).
     std::string pp_profile, tg_profile;
 };
 

@@ -296,6 +296,7 @@ private:
         if (const char *e = getenv("TS5_LAYERS_PER_SUBMIT")) layers_per_submit_ = std::max(1, atoi(e));
         if (const char *e = getenv("TS5_DEC_SUBMIT")) dec_submit_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_AHEAD")) ahead_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_AHEAD_FAIL")) ahead_fail_ = atoi(e);
         if (const char *e = getenv("TS5_TILED_MIN")) tiled_min_ = atoi(e);
         if (const char *e = getenv("TS5_FAST_MATVEC")) fast_matvec_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV_ROWS")) mv_rows_ = std::min(8, std::max(1, atoi(e)));
@@ -960,9 +961,25 @@ private:
         if (ahead_ && !qpool_ && want && !all && !layers_per_submit_ && !dec_submit_ && pos0 + n < n_ctx_) {
             const double t = now_ms();
             ahead_cur_ ^= 1;
-            if (!record(1, pos0 + n, true, false, aheads_[ahead_cur_], err)) return false;
-            CHECK(vk.vkEndCommandBuffer(cmd_));
-            ahead_pos_ = pos0 + n;
+            // Only a head start: if it fails (out of memory, say), this call
+            // still waits for its own work and succeeds, and the calls after
+            // it record as they come.
+            std::string aerr;
+            bool ok = false;
+            try {
+                ok = record_ahead(pos0 + n, aerr);
+            } catch (const std::exception &e) {
+                aerr = e.what();
+            }
+            if (ok) {
+                ahead_pos_ = pos0 + n;
+            } else {
+                ahead_ = false;
+                split_used_ = 0;
+                reduces_.clear();
+                no_barrier_ = false;
+                fprintf(stderr, "ts5: recording ahead stopped: %s\n", aerr.c_str());
+            }
             cpu_.ahead += now_ms() - t;
         }
         if (!finish(err)) return false;
@@ -972,6 +989,17 @@ private:
         cpu_.copy += t2 - t1;
         cpu_.call += t2 - t0;
         cpu_.calls++;
+        return true;
+    }
+
+    // The next token's command buffer, at pos, into the spare of aheads_.
+    bool record_ahead(int pos, std::string &err) {
+        if (ahead_fail_ && --ahead_fail_ == 0) {
+            err = "TS5_AHEAD_FAIL";
+            return false;
+        }
+        if (!record(1, pos, true, false, aheads_[ahead_cur_], err)) return false;
+        CHECK(vk.vkEndCommandBuffer(cmd_));
         return true;
     }
 
@@ -1072,6 +1100,7 @@ private:
     bool ahead_ = true;
     std::array<VkCommandBuffer, 2> aheads_{};
     int ahead_cur_ = 0, ahead_pos_ = -1;
+    int ahead_fail_ = 0;  // TS5_AHEAD_FAIL=n (tests): the nth recording ahead fails
     VkFence fence_ = VK_NULL_HANDLE;
     std::vector<Arena> arenas_;
     std::vector<VkBuffer> all_bufs_;
