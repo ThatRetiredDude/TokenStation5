@@ -48,19 +48,36 @@ scripts/ts5-ps5.sh wait                             # until the API answers
 python3 scripts/bench.py                            # speed through the API
 ```
 
+## Adding models from a computer
+
+The screens on the TV don't show paths or commands; this is the guide they
+point to ("the TokenStation5 guide shows how"). Everything goes in the
+title's `models` folder, `/data/homebrew/PPSA99555/models` over FTP (port
+2121), and shows up on the Models page or in Settings by itself within a few
+seconds. A model still arriving shows as COPYING until it's whole.
+
+| To add | From the TokenStation5 folder on your computer |
+| --- | --- |
+| a suggested model | `scripts/ts5-ps5.sh fetch KEY`, with its key in `models.tsv`: `qwen25-0.5b`, `llama32-3b`, `qwen25-coder-7b`, `qwen3-8b`, `llama31-8b` |
+| any other GGUF model | `scripts/ts5-ps5.sh model FILE.gguf`, or copy it into `models` with any FTP client |
+| a speech model, for R1 talk | `scripts/ts5-ps5.sh speech` (Base, English), or `speech small.en` |
+| a voice, for spoken replies | `scripts/ts5-ps5.sh voice` (Heart, US English), or `voice am_michael`, `voice bf_emma` ... |
+
 ## On the TV
 
-Three pages; **L1** goes to the next: Models, Chat, Settings.
+Three pages; **L1** goes to the next: Models, Chat, Settings. They say what
+happened and what to do in plain words; the details (file names, the
+engine's own errors) are in `ts5.log`.
 
 **Models**
 
 | Button | |
 | --- | --- |
 | up / down | choose a model |
-| cross | serve it (and serve it again at the next start) |
+| cross | start it, so apps can use it (and start it again at the next start) |
 | square | GPU check: its logits on the GPU against ts5's CPU reference, PASS or FAIL. The first check of a model runs the CPU and saves its answers next to the model (`NAME.gguf.ts5ref`); later ones run only the GPU, in about a second |
-| triangle | speed test: prompt (512 tokens) and generation (128) tok/s |
-| circle | stop serving |
+| triangle | speed test: how fast it reads a 512-token prompt and writes 128 tokens, in tokens a second |
+| circle | stop it |
 | OPTIONS | close the title |
 
 **Chat**: a conversation with the serving model, the reply streaming in as
@@ -107,8 +124,8 @@ the dark screen. Changes count at once, or where they can't, at the next use
 A check or speed test of the serving model runs on its loaded weights while
 the API waits; of another model, the serving one is unloaded first and
 served again afterwards. Results are kept in `results.tsv` and show in the
-list. Models that aren't on the console yet are listed as suggestions, with
-the command that fetches them.
+list. Models that aren't on the console yet are listed as suggestions; the
+table above says how to add one.
 
 While the title runs, the console stays out of rest mode: its idle timer
 counts only the controller, so it would otherwise go to sleep in the middle
@@ -131,7 +148,7 @@ dashboard back.
 | `scripts/ts5-ps5.sh env TS5_TILED_MIN=16` | engine settings (writes `ts5.env`) and restart; with none, clears them |
 | `scripts/ts5-ps5.sh websearch tvly-...` | turn web search on with a [Tavily](https://tavily.com) key (adds `TAVILY_API_KEY` to `ts5.env`, keeping the rest) and restart; `off` removes it; with nothing, says whether it's on. See [docs/WEB_SEARCH.md](../docs/WEB_SEARCH.md) |
 | `scripts/ts5-ps5.sh press down cross` | controller buttons, as if pressed |
-| `scripts/ts5-ps5.sh screenshot` | the TV picture, as `screen.bmp` |
+| `scripts/ts5-ps5.sh screenshot` | the TV picture, as `screen.bmp`, and the words on it, one string a line, as `screen.txt` |
 | `scripts/ts5-ps5.sh speech [base.en]` | download whisper's speech model (`ggml-base.en.bin`; or `tiny.en`, `small.en` ...) and upload it to `models`, for R1 talk |
 | `scripts/ts5-ps5.sh voice [af_heart]` | download Kokoro's model (`kokoro-82m-f16.gguf`) and a voice (`kokoro-voice-af_heart.gguf`; or `am_michael`, `bf_emma` ...) and upload them to `models`, for speech out |
 | `scripts/ts5-ps5.sh chat "Hello!"` | a message on the chat page; waits for the reply and prints its length and speed |
@@ -151,7 +168,7 @@ On the console, everything lives in the title's own folder,
 | `ts5.cmd` | a command to run now: `serve`, `check`, `bench` (`-m MODEL`), or `stop`. `check` and `bench` take `--env NAME=VALUE` (engine settings for that job only, on a load of its own) and `check` takes `--fresh 1` (run the CPU again) |
 | `ts5.once` | a command to run at the next start, before `ts5.args` |
 | `ts5.env` | settings, `NAME=VALUE`, read at start and written by the Settings page: engine settings (the `getenv` calls in `engine/src/vk_backend.cpp`), such as `TS5_KV=q8` for an 8-bit KV cache (half the memory, so about twice the context; with no `-c`, only for models whose whole context doesn't fit in f16), and the Settings page's: `TS5_CHAT_MAX_TOKENS` (longest reply, 2048), `TS5_CHAT_FPS` (frames a second while a reply comes in, 10), `TS5_WHISPER_MODEL` (the speech model; the first `ggml-*.bin` without it), `TS5_WHISPER_THREADS` (6), `TS5_SPEAK` (1: replies read aloud; 0: not), `TS5_SPEAK_OUT` (`tv`, or `controller`), `TS5_TTS_VOICE` (Kokoro's voice, `af_heart` without it), `TS5_TTS_SPEED` (1), `TS5_TTS_THREADS` (6), `TS5_KEEP_AWAKE` (1; 0 lets the console rest), `TS5_DIM_AFTER` (seconds to the dark screen, 600; 0: never) and `TAVILY_API_KEY`. `TS5_KEYBOARD=0` leaves a USB keyboard alone (Enter then doesn't open the console's keyboard). `scripts/ts5-ps5.sh env` replaces the engine settings and keeps these. The log shows a setting whose name ends in `_KEY` or `_TOKEN` as `(set)` |
-| `press`, `screenshot` | controller buttons; the next frame to `screen.bmp` |
+| `press`, `screenshot` | controller buttons; the next frame to `screen.bmp` and its words to `screen.txt` |
 | `chat` | a message for the chat page: the file's text |
 | `audiotest` | run the audio test (someone has to talk into the controller after the beep); the recording goes to `audiotest.wav` |
 | `whispertest` | run the whisper test on `whispertest.wav`, or `audiotest.wav` without it: 16-bit PCM, best 16 kHz mono (other rates are resampled, more channels mixed down). It uses the first `ggml-*.bin` in `models/` (the Models page lists only GGUFs) on `TS5_WHISPER_THREADS` CPU threads (in `ts5.env`, 6 by default); `TS5_WHISPER_SWEEP=1` runs it again at 4, 6, 8 and 12 |
@@ -174,6 +191,7 @@ reference and says PASS or FAIL.
 | File | |
 | --- | --- |
 | `title.cpp` | the title's `main`: command files, logging, notifications, the dashboard loop, never `exit()` |
+| `plain.h` | plain words for the screens: what an error means and what to do, and names for models, speech models and voices |
 | `runner.cpp`, `library.cpp` | its jobs (serve, check, speed test) on the shared GPU device; its models and results |
 | `chat.cpp` | the chat's conversation, sent to the title's own API with replies streamed back |
 | `voice.cpp` | R1 talk: the controller's mic while R1 is held, then speech to text (`stt.cpp`) and the message |

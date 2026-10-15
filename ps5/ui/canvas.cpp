@@ -204,8 +204,11 @@ std::string Canvas::fit(const Font &f, const std::string &s, int max_w) {
     return cut + "\xE2\x80\xA6";
 }
 
+std::vector<std::string> *Canvas::record = nullptr;
+
 int Canvas::text(const Font &f, int x, int y, const std::string &s, Color c, int max_w) {
     const std::string t = max_w > 0 ? fit(f, s, max_w) : s;
+    if (record && !t.empty()) record->push_back(t);
     int pen = x * 64;
     for (size_t i = 0; i < t.size();) {
         const Glyph *g = f.find(next_cp(t, i));

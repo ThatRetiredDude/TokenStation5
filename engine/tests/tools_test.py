@@ -271,7 +271,7 @@ def test_search_loop(ts5, model, tdir):
         ("answers from a search", "tvly-test", [CALL, "Done.", "Final answer."], False, 1, "Done.", None),
         # A refused key: one request to Tavily, then an answer without tools.
         ("refused key", "tvly-bad", [CALL, "Final answer."], False, 1, "Final answer.",
-         "Web search is not working right now: the Tavily API key was refused"),
+         "Web search is not working right now: the Tavily key was refused"),
         ("refused key, streaming", "tvly-bad", [CALL, "Final answer."], True, 1, "Final answer.",
          "Web search is not working right now"),
         # A model that never stops searching: three rounds, then an answer from them.

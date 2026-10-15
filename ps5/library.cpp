@@ -78,6 +78,8 @@ ModelInfo inspect(const std::string &path, const std::string &file, uint64_t siz
     }
     if (!opened) {
         m.error = err;
+        // A file that has only started to arrive: no header yet, or part of it.
+        m.incomplete = err == "not a GGUF file" || err == "truncated GGUF header";
         return m;
     }
     const ts5::HParams &hp = model.hp;
@@ -88,9 +90,10 @@ ModelInfo inspect(const std::string &path, const std::string &file, uint64_t siz
     m.kv_bytes[1] = ts5::kv_bytes_per_token(hp, ts5::KvType::Q8);
     m.kv8 = ts5::kv_type_setting() == ts5::KvType::Q8 && hp.head_dim % 32 == 0;
     m.fixed_bytes = ts5::vk_fixed_bytes(hp, m.weight_bytes);
-    if (g.data_offset + m.weight_bytes > size) {
-        m.error = "the file is incomplete (" + format_bytes(size) + " of " + format_bytes(g.data_offset + m.weight_bytes) +
-                  ")";
+    m.full_size = g.data_offset + m.weight_bytes;
+    if (m.full_size > size) {
+        m.incomplete = true;
+        m.error = "the file is incomplete (" + format_bytes(size) + " of " + format_bytes(m.full_size) + ")";
         return m;
     }
     for (auto &t : g.tensors)
@@ -143,16 +146,21 @@ bool Library::scan() {
             struct stat st;
             if (stat(path.c_str(), &st) != 0) continue;
             const ModelInfo *old = find(path);
-            if (old && old->size == (uint64_t)st.st_size && old->mtime == (int64_t)st.st_mtime)
+            if (old && old->size == (uint64_t)st.st_size && old->mtime == (int64_t)st.st_mtime) {
+                // It didn't grow since the last scan: a copy that was arriving
+                // has stopped.
                 next.push_back(*old);
-            else
+                next.back().copying = false;
+            } else {
                 next.push_back(inspect(path, n, (uint64_t)st.st_size, (int64_t)st.st_mtime));
+                next.back().copying = next.back().incomplete;
+            }
         }
     }
     bool changed = next.size() != models_.size();
     for (size_t i = 0; !changed && i < next.size(); i++)
         changed = next[i].path != models_[i].path || next[i].size != models_[i].size ||
-                  next[i].mtime != models_[i].mtime;
+                  next[i].mtime != models_[i].mtime || next[i].copying != models_[i].copying;
     models_ = std::move(next);
     return changed;
 }

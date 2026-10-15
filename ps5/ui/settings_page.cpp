@@ -4,6 +4,7 @@
 #include <cstdlib>
 
 #include "pad.h"
+#include "plain.h"
 #include "settings.h"
 #include "style.h"
 
@@ -16,13 +17,12 @@ struct Choice {
 };
 
 // One setting: NAME in ts5.env, and what reads it does with it. No choices:
-// a key, typed on the console's keyboard, or files in the models folder (get:
-// the command that fetches them).
+// a key, typed on the console's keyboard, or files in the models folder.
 struct Row {
     const char *section, *name, *label, *help, *applies;
     std::vector<Choice> choices;
     std::string def;  // the value with nothing in ts5.env, as each reader's default
-    const char *get = nullptr;
+    bool files = false;
 };
 
 constexpr const char *kSpeechModel = "TS5_WHISPER_MODEL", *kVoice = "TS5_TTS_VOICE";
@@ -48,24 +48,23 @@ const std::vector<Row> &rows() {
           {"15", "15 a second"}, {"30", "30 a second"}},
          "10"},
         {"TALK", kSpeechModel, "Speech model",
-         "The speech-to-text model that holding R1 on the Chat page uses: a ggml-*.bin file in the models "
-         "folder. base.en is a good start; small.en understands more, and takes longer.",
-         "The next time you hold R1", {}, "", "scripts/ts5-ps5.sh speech base.en"},
+         "The model that turns what you say into text when you hold R1 on the Chat page. Base (English) is a "
+         "good start; Small (English) understands more and takes longer.",
+         "The next time you hold R1", {}, "", true},
         {"TALK", "TS5_WHISPER_THREADS", "Speech threads",
          "CPU cores that turn what you said into text. More is faster while nothing else runs on the CPU.",
          "The next time you hold R1", {{"4", "4"}, {"6", "6"}, {"8", "8"}, {"10", "10"}, {"12", "12"}}, "6"},
         {"SPOKEN REPLIES", "TS5_SPEAK", "Read replies aloud",
-         "Reads each reply on the Chat page out loud as it comes in, a sentence at a time, in a Kokoro voice "
-         "made on the console's CPU. Triangle stops it. Kokoro's files go in the models folder from your "
-         "computer: scripts/ts5-ps5.sh voice.",
+         "Reads each reply on the Chat page out loud as it comes in, a sentence at a time, in a voice made on "
+         "the PS5. Triangle stops it. It needs a voice: see Voice below.",
          "From the next reply", {{"1", "On"}, {"0", "Off"}}, "1"},
         {"SPOKEN REPLIES", "TS5_SPEAK_OUT", "Speak on",
          "Where the voice comes out: the TV, or the speaker in the controller.", "From the next sentence",
          {{"tv", "TV"}, {"controller", "Controller speaker"}}, "tv"},
         {"SPOKEN REPLIES", kVoice, "Voice",
-         "Kokoro's voice: a kokoro-voice-*.gguf file in the models folder. af_heart is the clearest; "
-         "scripts/ts5-ps5.sh voice NAME adds others, such as am_michael or bf_emma.",
-         "From the next sentence", {}, "", "scripts/ts5-ps5.sh voice af_heart"},
+         "The voice that reads replies. Heart (US English) is the clearest; others include Michael (US "
+         "English) and Emma (British English).",
+         "From the next sentence", {}, "", true},
         {"SPOKEN REPLIES", "TS5_TTS_SPEED", "Speaking speed", "How fast the voice talks.", "From the next sentence",
          {{"0.8", "Slower (0.8x)"}, {"0.9", "0.9x"}, {"1", "Normal"}, {"1.1", "1.1x"}, {"1.25", "1.25x"},
           {"1.5", "1.5x"}},
@@ -103,15 +102,20 @@ std::string default_file(const Row &r, const SettingsInfo &info) {
     return files.front();
 }
 
+// A file's name on the page: a speech model's or a voice's.
+std::string file_name(const Row &r, const std::string &file) {
+    return std::string(r.name) == kVoice ? plain::voice_name(file) : plain::speech_name(file);
+}
+
 // The row's choices; a row of files has the files there are.
 std::vector<Choice> choices(const Row &r, const SettingsInfo &info) {
-    if (!r.get) return r.choices;
+    if (!r.files) return r.choices;
     const auto &files = std::string(r.name) == kVoice ? info.voices : info.speech_models;
     std::vector<Choice> c;
     if (files.empty()) return c;
-    const std::string def = default_file(r, info);
+    const std::string def = file_name(r, default_file(r, info));
     c.push_back({"", (std::string(r.name) == kVoice ? "The default (" : "The first one (") + def + ")"});
-    for (const std::string &m : files) c.push_back({m, m});
+    for (const std::string &m : files) c.push_back({m, file_name(r, m)});
     return c;
 }
 
@@ -124,13 +128,19 @@ int index_of(const std::vector<Choice> &cs, const std::string &v) {
     return -1;
 }
 
+// A value that isn't one of the row's choices (set from a computer), by name.
+std::string other(const Row &r) {
+    if (!r.files) return current(r);
+    return std::string(r.name) == kVoice ? "A voice not on your PS5" : "A speech model not on your PS5";
+}
+
 std::string shown(const Row &r, const SettingsInfo &info) {
     if (is_key(r)) return current(r).empty() ? "Not set" : "Set";
     const auto cs = choices(r, info);
-    if (r.get && cs.empty()) return "None yet";
+    if (r.files && cs.empty()) return "None yet";
     const int i = index_of(cs, current(r));
-    if (i < 0) return current(r);
-    if (r.get && i == 0) return default_file(r, info);
+    if (i < 0) return other(r);
+    if (r.files && i == 0) return file_name(r, default_file(r, info));
     return cs[i].shown;
 }
 
@@ -159,7 +169,7 @@ std::vector<std::string> wrap(const Font &f, const std::string &text, int max_w)
 
 SettingsPage::SettingsPage(const Fonts &fonts)
     : h2_(fonts.get("h2")), body_(fonts.get("body")), bodyb_(fonts.get("bodyb")), small_(fonts.get("small")),
-      smallb_(fonts.get("smallb")), mono_(fonts.get("mono")) {}
+      smallb_(fonts.get("smallb")) {}
 
 SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
     SettingChange ch;
@@ -205,7 +215,6 @@ SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
 
 void SettingsPage::draw(Canvas &c, const SettingsInfo &info, int x, int y, int w, int h) {
     c.text(h2_, x + 32, y + 50, "Settings", kText);
-    c.text_right(small_, x + w - 32, y + 50, "kept in ts5.env", kText2);
     const auto &rs = rows();
 
     // Rows under their sections, scrolled so the chosen one shows.
@@ -284,7 +293,7 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
         c.text(smallb_, dx, ty, "TO SET IT", kMuted);
         text_glyph(c, body_, dx, ty + 38, "Press", kGlyphCross,
                    "and type it, with the controller or a keyboard.", kText2);
-        c.text(small_, dx, ty + 84, "Get a key at app.tavily.com. It stays on your PS5, out of the log.", kMuted, dw);
+        c.text(small_, dx, ty + 84, "Get a key at app.tavily.com. It stays on your PS5.", kMuted, dw);
         ty += 120;
         if (!cur.empty()) {
             const bool confirming = info.now - confirm_at_ < kConfirmFor;
@@ -297,10 +306,9 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
         c.text(smallb_, dx, ty, "CHOICES", kMuted);
         ty += 20;
         if (cs.empty()) {
-            c.text(body_, dx, ty + 30, "None in the models folder yet. On your computer, run", kText2, dw);
-            c.round_rect((float)dx, (float)ty + 48, (float)dw, 50, 10, rgb(0x0A1024));
-            c.text(mono_, dx + 18, ty + 80, r.get ? r.get : "", kAccent, dw - 36);
-            ty += 120;
+            c.text(body_, dx, ty + 30, "None on your PS5 yet.", kText2, dw);
+            c.text(body_, dx, ty + 68, "The TokenStation5 guide shows how to add one.", kText2, dw);
+            ty += 100;
         }
         const int at = index_of(cs, cur);
         for (size_t i = 0; i < cs.size(); i++) {
@@ -309,26 +317,21 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
             c.ring((float)dx + 12, (float)cy - 8, 11, 2.5f, on ? kAccent : kMuted);
             if (on) c.circle((float)dx + 12, (float)cy - 8, 5.5f, kAccent);
             const int tw = c.text(body_, dx + 40, cy, cs[i].shown, on ? kText : kText2, dw - 40);
-            if (cs[i].value == r.def && !r.get)
+            if (cs[i].value == r.def && !r.files)
                 c.text(small_, dx + 40 + tw + 14, cy, "default", kMuted);
             ty += 42;
         }
         if (at < 0 && !cs.empty()) {
-            c.text(small_, dx + 40, ty + 26, cur + " (set in ts5.env)", kAmber, dw - 40);
+            c.text(small_, dx + 40, ty + 26, other(r) + " (set from a computer)", kAmber, dw - 40);
             ty += 42;
         }
         ty += 20;
     }
 
-    // Bottom: when a change counts, and the line in ts5.env.
-    const int by = y + h - 150;
+    // Bottom: when a change counts.
+    const int by = y + h - 90;
     c.text(smallb_, dx, by, "TAKES EFFECT", kMuted);
     c.text(body_, dx, by + 36, r.applies, kText2, dw);
-    std::string line = cur.empty() || getenv(r.name) == nullptr ? std::string("nothing (the default)")
-                       : is_key(r)                               ? std::string(r.name) + "=(set)"
-                                                                 : std::string(r.name) + "=" + cur;
-    c.text(smallb_, dx, by + 84, "IN TS5.ENV", kMuted);
-    c.text(mono_, dx, by + 116, line, kAccent, dw);
     if (info.now - info.note_at < kNoteFor && !info.note.empty())
         c.text_right(smallb_, dx + dw, by, info.note, info.note_failed ? kRed : kGreen);
     (void)ty;

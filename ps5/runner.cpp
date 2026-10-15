@@ -14,6 +14,7 @@
 #include "checks.h"
 #include "engine.h"
 #include "model.h"
+#include "plain.h"
 #include "tokenizer.h"
 
 extern "C" {
@@ -135,6 +136,18 @@ void Runner::set_step(const std::string &step) {
     version_++;
 }
 
+void Runner::fail(const std::string &raw, const std::string &said) {
+    std::lock_guard<std::mutex> lk(mu_);
+    status_.error = raw;
+    status_.said = said;
+}
+
+std::string Runner::name_for(const std::string &path) {
+    std::lock_guard<std::mutex> lk(lib_mutex_);
+    const ModelInfo *m = lib_.find(path);
+    return m ? m->name : plain::model_name(base(path));
+}
+
 void Runner::event(const std::string &text, bool bad) {
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -154,6 +167,7 @@ void Runner::loop() {
             jobs_.pop_front();
             status_.queued = (int)jobs_.size();
             status_.error.clear();
+            status_.said.clear();
             status_.job_model = base(job.path);
             status_.job_started = now_s();
             status_.step.clear();
@@ -163,20 +177,23 @@ void Runner::loop() {
             run(job);
         } catch (const std::exception &e) {
             // A title must not end on an exception; the job fails instead.
-            std::lock_guard<std::mutex> lk(mu_);
-            status_.error = e.what();
+            fail(e.what(), plain::sentence(plain::reason(e.what())));
         }
-        std::string error;
+        std::string error, said;
         {
             std::lock_guard<std::mutex> lk(mu_);
             status_.phase = serving_ ? Status::Serving : Status::Idle;
             status_.step.clear();
             error = status_.error;
+            said = status_.said;
         }
         if (!error.empty()) {
+            // The engine's words in the log (scripts/ts5-ps5.sh looks for
+            // them there); plain ones on the screen.
             printf("ts5-title: %s\n", error.c_str());
-            event(error, true);
-            notify_("TokenStation5: " + error);
+            if (said.empty()) said = "Something went wrong.";
+            event(said, true);
+            notify_("TokenStation5: " + said);
         }
         version_++;
     }
@@ -254,21 +271,21 @@ void Runner::unload() {
 bool Runner::serve(const std::string &path, int n_ctx) {
     if (serving_ && serving_->path == path && serving_->asked_ctx == n_ctx) return true;
     unload();
-    const std::string file = base(path);
+    const std::string file = base(path), name = name_for(path);
     {
         std::lock_guard<std::mutex> lk(mu_);
         status_.phase = Status::Loading;
         status_.job_model = file;
     }
     set_step("loading " + file);
-    notify_("TokenStation5: loading " + file);
+    notify_("TokenStation5: loading " + name);
+    // An app's request meanwhile gets a 503 that starts with "loading" (chat.cpp).
     server_.set_engine(nullptr, "", "loading " + file);
     std::string err;
     serving_ = load(path, n_ctx, err, true);
     if (!serving_) {
         server_.set_engine(nullptr, "", "no model");
-        std::lock_guard<std::mutex> lk(mu_);
-        status_.error = "couldn't load " + file + ": " + err;
+        fail("couldn't load " + file + ": " + err, "Couldn't start " + name + ": " + plain::reason(err) + ".");
         return false;
     }
     server_.set_engine(serving_->engine.get(), file);
@@ -281,15 +298,17 @@ bool Runner::serve(const std::string &path, int n_ctx) {
         status_.serving_kv8 = serving_->kv8;
         status_.phase = Status::Serving;
     }
-    event("Serving " + serving_->name);
-    notify_("TokenStation5: " + file + " ready at " + url_());
+    // No address while the console isn't on a network: then just "is ready".
+    const std::string url = url_();
+    event(name + " is ready");
+    notify_("TokenStation5: " + name + " is ready." + (url.empty() ? std::string() : " Apps can use it at " + url));
     return true;
 }
 
 void Runner::run(const Job &job) {
     const std::string file = base(job.path);
     if (job.kind == Job::Stop) {
-        if (serving_) event("Stopped serving " + serving_->name);
+        if (serving_) event("Stopped " + name_for(serving_->path));
         unload();
         return;
     }
@@ -302,6 +321,7 @@ void Runner::run(const Job &job) {
     // room, else on a load of its own with the serving model put back after.
     const bool check = job.kind == Job::Check;
     const int need_ctx = check ? std::max(1, job.n) : job.pp + job.tg + 1;
+    const std::string name = name_for(job.path);
     {
         std::lock_guard<std::mutex> lk(mu_);
         status_.phase = check ? Status::Checking : Status::Benchmarking;
@@ -316,7 +336,10 @@ void Runner::run(const Job &job) {
     // the serving model goes back on the API either way.
     try {
         if (job.env.empty() && serving_ && serving_->path == job.path && serving_->n_ctx >= need_ctx) {
-            server_.set_engine(nullptr, "", check ? "running the GPU check" : "running the speed test");
+            // What an app's request gets meanwhile, and the Chat page shows.
+            server_.set_engine(nullptr, "",
+                               check ? "The model is busy with a GPU check. Try again in a moment."
+                                     : "The model is busy with a speed test. Try again in a moment.");
             target = serving_.get();
         } else {
             if (serving_) {
@@ -330,7 +353,16 @@ void Runner::run(const Job &job) {
             target = own.get();
         }
         ok = target != nullptr;
-        auto progress = [this](const std::string &s) { set_step(s); };
+        // The steps (checks.cpp), as the screen says them.
+        auto progress = [this](const std::string &s) {
+            std::string step = s;
+            if (s == "running on the GPU") step = "answering on the GPU";
+            else if (s == "loading the CPU reference") step = "getting the CPU ready to compare";
+            else if (s == "running on the CPU") step = "answering on the CPU to compare (slow)";
+            else if (s.compare(0, 8, "prompt: ") == 0) step = "reading a " + s.substr(8, s.find(' ', 8) - 8) + "-token prompt";
+            else if (s.compare(0, 11, "generating ") == 0) step = "writing " + s.substr(11);
+            set_step(step);
+        };
         if (ok && check) {
             ts5::CheckResult r;
             ok = ts5::run_check(target->model, target->engine->backend(), job.n, r, err, progress, job.fresh);
@@ -342,11 +374,10 @@ void Runner::run(const Job &job) {
                     std::lock_guard<std::mutex> lk(lib_mutex_);
                     lib_.record(file, rec);
                 }
-                char b[160];
-                snprintf(b, sizeof b, "GPU check %s on %s: same top token %d/%d", r.pass ? "passed" : "FAILED",
-                         target->name.c_str(), r.same_top, r.n);
-                event(b, !r.pass);
-                notify_(r.pass ? "TokenStation5: GPU check passed" : "TokenStation5: GPU check FAILED");
+                event(name + (r.pass ? " passed the GPU check: same answers as the CPU"
+                                     : " failed the GPU check: its answers may be wrong on this PS5"),
+                      !r.pass);
+                notify_("TokenStation5: " + name + (r.pass ? " passed the GPU check" : " failed the GPU check"));
             }
         } else if (ok) {
             ts5::BenchResult r;
@@ -359,38 +390,36 @@ void Runner::run(const Job &job) {
                     std::lock_guard<std::mutex> lk(lib_mutex_);
                     lib_.record(file, rec);
                 }
-                char b[160];
-                snprintf(b, sizeof b, "Speed test on %s: prompt %.0f tok/s, generation %.1f tok/s",
-                         target->name.c_str(), r.pp_tps, r.tg_tps);
-                event(b);
-                notify_(std::string("TokenStation5: ") + b);
+                char reads[48];
+                snprintf(reads, sizeof reads, ", reads %.0f", r.pp_tps);
+                const std::string said = "Speed test on " + name + ": writes " + plain::tokens_a_second(r.tg_tps) + reads;
+                event(said);
+                notify_("TokenStation5: " + said);
             }
         }
     } catch (const std::exception &e) {
         ok = false;
         err = e.what();
     }
-    if (!ok) {
-        std::lock_guard<std::mutex> lk(mu_);
-        status_.error = std::string(check ? "GPU check" : "speed test") + " on " + file + " failed: " + err;
-    }
+    if (!ok)
+        fail(std::string(check ? "GPU check" : "speed test") + " on " + file + " failed: " + err,
+             std::string(check ? "The GPU check on " : "The speed test on ") + name + " stopped: " + plain::reason(err) +
+                 ".");
     if (target == serving_.get() && serving_) {
         serving_->engine->forget_cache();
         server_.set_engine(serving_->engine.get(), serving_->file);
     }
     own.reset();
     if (!resume_path.empty()) {
-        std::string error;
+        std::string error, said;
         {
             std::lock_guard<std::mutex> lk(mu_);
             error = status_.error;
+            said = status_.said;
         }
         serve(resume_path, resume_ctx);
         // The job's own failure is the one to show.
-        if (!error.empty()) {
-            std::lock_guard<std::mutex> lk(mu_);
-            status_.error = error;
-        }
+        if (!error.empty()) fail(error, said);
     }
     log_memory(check ? "after the GPU check" : "after the speed test");
 }

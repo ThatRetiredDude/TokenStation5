@@ -95,7 +95,7 @@ void Voice::run() {
     if (model.empty()) {
         // Nothing to transcribe with: say so at once rather than record.
         while (!released_) sceKernelUsleep(20000);
-        set_error("No speech model yet. On your computer, run: scripts/ts5-ps5.sh speech");
+        set_error("No speech model on your PS5 yet. The TokenStation5 guide shows how to add one.");
         return;
     }
     const int h = sceAudioInOpen(user_, kVoiceChat, 0, kGrain, kRate, kMono16);
@@ -143,7 +143,8 @@ void Voice::run() {
         if (!stt_->load(dir_ + "/" + model, Stt::default_threads(), err)) {
             stt_.reset();
             loaded_.clear();
-            set_error("The speech model didn't load: " + err);
+            printf("ts5-title: voice: the speech model didn't load: %s\n", err.c_str());
+            set_error("The speech model couldn't be read. Choose another in Settings, or download it again.");
             return;
         }
         loaded_ = model;
@@ -151,7 +152,8 @@ void Voice::run() {
     stt_->set_threads(Stt::default_threads());
     std::string text;
     if (!stt_->transcribe(pcm, text, err, nullptr)) {
-        set_error("Speech to text failed: " + err);
+        printf("ts5-title: voice: speech to text failed: %s\n", err.c_str());
+        set_error("Couldn't turn that into text. Hold R1 and try again.");
         return;
     }
     // whisper's markers for no speech, and the spaces around the words.
