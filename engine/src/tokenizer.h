@@ -23,9 +23,22 @@ public:
     bool is_eog(int32_t tok) const;
     int32_t bos() const { return bos_; }
     int n_vocab() const { return (int)tokens_.size(); }
+    // Whether g holds this tokenizer's token list. A draft model with the
+    // same vocabulary may pad its weight rows differently, and Qwen 2.5 7B
+    // GGUFs pad the token list itself with placeholders (to 152064, where
+    // the 0.5B stops at 151936), so the test is the lists' shared prefix;
+    // ids past either list are guarded where drafts are made and fed.
+    bool same_vocab(const Gguf &g) const;
     // Formats a conversation with the model's chat format, ending with the
     // assistant turn opened.
     std::string apply_chat(const std::vector<ChatMessage> &msgs) const;
+
+    enum Chat { CHATML, LLAMA3, MISTRAL, PLAIN };
+    Chat chat_format() const { return chat_; }
+    // The model's own chat template (GGUF tokenizer.chat_template), or "".
+    const std::string &chat_template() const { return template_; }
+    // Another template in its place (tests).
+    void set_chat_template(const std::string &tmpl);
 
 private:
     void encode_bpe(const std::string &piece, std::vector<int32_t> &out) const;
@@ -33,7 +46,8 @@ private:
     void encode_plain(const std::string &text, std::vector<int32_t> &out) const;
 
     enum Kind { BPE, SPM } kind_ = BPE;
-    enum Chat { CHATML, LLAMA3, MISTRAL, PLAIN } chat_ = CHATML;
+    Chat chat_ = CHATML;
+    std::string template_;
     std::vector<std::string> tokens_;
     std::vector<float> scores_;
     std::vector<int> types_;
