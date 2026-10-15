@@ -1,5 +1,6 @@
 // Combines attn's partial results over the slices of the keys: one
-// workgroup per (head, token).
+// workgroup per (head, token). Thread s reads slice s's max score and weight
+// sum, so the slices are read in parallel rather than one after another.
 #version 450
 layout(local_size_x = 128) in;
 
@@ -10,29 +11,38 @@ layout(push_constant) uniform PC {
     uint head_dim, n_head, n_tok, n_split;
 } pc;
 
-shared float w[64];
-shared float total;
+shared float ms[64], w[64], lw[64];
+
+const float NEG_INF = -1.0 / 0.0;
 
 void main() {
     const uint h = gl_WorkGroupID.x, t = gl_WorkGroupID.y, tid = gl_LocalInvocationID.x;
     const uint HD = pc.head_dim, row = t * pc.n_head + h, sstride = pc.n_tok * pc.n_head * (HD + 2);
-    const uint base = row * (HD + 2);
-    if (tid == 0) {
-        float mx = -1.0 / 0.0;
-        for (uint s = 0; s < pc.n_split; s++) mx = max(mx, P[base + s * sstride + HD]);
-        float l = 0.0;
-        for (uint s = 0; s < pc.n_split; s++) {
-            const float m = P[base + s * sstride + HD];
-            const float ws = m == -1.0 / 0.0 ? 0.0 : exp(m - mx);
-            w[s] = ws;
-            l += ws * P[base + s * sstride + HD + 1];
-        }
-        total = l;
+    const uint base = row * (HD + 2), ns = pc.n_split;
+    if (tid < ns) ms[tid] = P[base + tid * sstride + HD];
+    barrier();
+    float mx = NEG_INF;
+    for (uint s = 0; s < ns; s++) mx = max(mx, ms[s]);
+    if (tid < ns) {
+        const float m = ms[tid];
+        const float ws = m == NEG_INF ? 0.0 : exp(m - mx);
+        w[tid] = ws;
+        lw[tid] = ws * P[base + tid * sstride + HD + 1];
     }
     barrier();
+    float total = 0.0;
+    for (uint s = 0; s < ns; s++) total += lw[s];
     for (uint d = tid; d < HD; d += 128) {
-        float o = 0.0;
-        for (uint s = 0; s < pc.n_split; s++) o += w[s] * P[base + s * sstride + d];
-        O[row * HD + d] = o / total;
+        float o0 = 0.0, o1 = 0.0, o2 = 0.0, o3 = 0.0;
+        uint s = 0;
+        for (; s + 4 <= ns; s += 4) {
+            const uint p = base + s * sstride + d;
+            o0 += w[s] * P[p];
+            o1 += w[s + 1] * P[p + sstride];
+            o2 += w[s + 2] * P[p + 2 * sstride];
+            o3 += w[s + 3] * P[p + 3 * sstride];
+        }
+        for (; s < ns; s++) o0 += w[s] * P[base + s * sstride + d];
+        O[row * HD + d] = (o0 + o1 + o2 + o3) / total;
     }
 }

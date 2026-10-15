@@ -20,10 +20,20 @@ struct ModelInfo {
     double params = 0;  // parameter count
     int layers = 0, ctx_train = 0;
     uint64_t weight_bytes = 0;
-    uint64_t kv_bytes_per_token = 0;  // f16 K and V over all layers
+    uint64_t kv_bytes[2] = {};  // K and V over all layers per token: f16, 8-bit
+    bool kv8 = false;           // TS5_KV=q8 asks for an 8-bit cache and the heads allow it
+    uint64_t fixed_bytes = 0;   // GPU memory for weights and activations, as allocated
 
-    // Weights plus a KV cache of n_ctx tokens.
-    uint64_t memory_for(int n_ctx) const { return weight_bytes + kv_bytes_per_token * (uint64_t)n_ctx; }
+    struct Ctx {
+        int n = 0;          // tokens
+        bool kv8 = false;   // in an 8-bit cache
+    };
+    // The context serving it with -c `asked` gets on a GPU with this much
+    // memory. asked 0 (no -c, or -c auto): what fits, at most the training
+    // context (n 0: not 1024), in f16 where that reaches it.
+    Ctx serve_ctx(int asked, uint64_t gpu_memory) const;
+    // Weights plus a KV cache of that context.
+    uint64_t memory_for(Ctx c) const { return weight_bytes + kv_bytes[c.kv8] * (uint64_t)c.n; }
 };
 
 struct CheckRecord {
