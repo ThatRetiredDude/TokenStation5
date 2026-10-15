@@ -434,8 +434,8 @@ private:
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
         P(rmsnorm, 3) P(qkv_post, 10) P(qkv_post_q8, 12) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
         P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf_q8, 7)
-        if (!make_pipe("attn_dec", spv_attn_dec, sizeof(spv_attn_dec), 5, err, attn_dec_plain_) ||
-            !make_pipe("attn_dec4", spv_attn_dec4, sizeof(spv_attn_dec4), 5, err, attn_dec_plain_))
+        if (!make_pipe("attn_dec", spv_attn_dec, sizeof(spv_attn_dec), 5, err, attn_dec_plain_ != 0) ||
+            !make_pipe("attn_dec4", spv_attn_dec4, sizeof(spv_attn_dec4), 5, err, attn_dec_plain_ == 1))
             return false;
         P(swiglu, 2)
 #undef P
@@ -920,9 +920,11 @@ private:
     // Generation over at least this many keys uses attn_dec (TS5_ATTN_DEC;
     // 0: never).
     int attn_dec_min_ = 256;
-    // attn_dec loading each tile's keys at the tile's start instead of during
-    // the tile before (TS5_ATTN_DEC_PLAIN=1, for an A/B).
-    uint32_t attn_dec_plain_ = 0;
+    // Whether attn_dec loads each tile's keys at the tile's start (1) or
+    // during the tile before (0), TS5_ATTN_DEC_PLAIN; by default (-1) the
+    // 8-row kernel at the start and attn_dec4 the tile before, the faster of
+    // the two for each on the console.
+    int attn_dec_plain_ = -1;
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).
     bool mmb_ = true;
