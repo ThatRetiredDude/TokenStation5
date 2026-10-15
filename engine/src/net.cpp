@@ -56,9 +56,13 @@ namespace {
 // One line per step of a request in the log, so a request that never comes
 // back shows how far it got.
 void trace(const char *fmt, ...) {
+    // Seconds since the first line, so the gaps between lines show (a
+    // redirect hop on the LAN took 9-17 s with every timed step in ms).
+    static const auto t0 = std::chrono::steady_clock::now();
+    const double at = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     va_list ap;
     va_start(ap, fmt);
-    fprintf(stderr, "ts5: net: ");
+    fprintf(stderr, "ts5: net: [%.3f s] ", at);
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
     fflush(stderr);
@@ -848,6 +852,14 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
             Url next;
             if (!parse_url(resolve(u, location), next, err)) return false;
             trace("redirected to %s", next.shown.c_str());
+            const auto closing = clock::now();
+#ifdef TS5_HTTPS
+            if (c.tls) mbedtls_ssl_free(&c.ssl);
+            c.tls = false;
+#endif
+            close(c.fd);
+            c.fd = -1;
+            trace("closed (%ld ms)", ms_since(closing));
             u = next;
             continue;
         }
