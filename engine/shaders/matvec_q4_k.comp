@@ -19,16 +19,23 @@ void scale_min(uint o, uint j, out float sc, out float m) {
 
 // Thread th takes words th and th + 16 of the nibbles: 4 values each of two
 // sub-blocks per word.
-float block_dot(uint o, uint xb, uint th) {
+void load_x(uint xb, uint th, out vec4 x[4]) {
+    for (uint k = 0; k < 2; k++) {
+        const uint w = th + 16 * k, p = w / 8, l = 4 * (w % 8);
+        x[2 * k] = X4[xb + (64 * p + l) / 4];
+        x[2 * k + 1] = X4[xb + (64 * p + 32 + l) / 4];
+    }
+}
+float block_dot(uint o, vec4 x[4], uint th) {
     const vec2 dm = unpackHalf2x16(w32[o >> 2]);
     float s = 0.0;
     for (uint k = 0; k < 2; k++) {
-        const uint w = th + 16 * k, p = w / 8, l = 4 * (w % 8);
+        const uint w = th + 16 * k, p = w / 8;
         const uint q = w32[(o + 16) / 4 + w];
         float sc0, m0, sc1, m1;
         scale_min(o, 2 * p, sc0, m0);
         scale_min(o, 2 * p + 1, sc1, m1);
-        const vec4 x0 = X4[xb + (64 * p + l) / 4], x1 = X4[xb + (64 * p + 32 + l) / 4];
+        const vec4 x0 = x[2 * k], x1 = x[2 * k + 1];
         s += dm.x * (sc0 * dot(nibbles(q, 0), x0) + sc1 * dot(nibbles(q, 4), x1)) -
              dm.y * (m0 * dot(x0, vec4(1.0)) + m1 * dot(x1, vec4(1.0)));
     }

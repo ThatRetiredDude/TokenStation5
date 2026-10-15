@@ -52,6 +52,40 @@ echo "== 300 tokens (prefill chunking, >128 keys per attention block)"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "$work/qwen2-Q8_0.gguf"
 echo "== 72 tokens per call (the tiled matmul: a full and a partial 64-token tile)"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${models[@]}"
+# K-quants as Q4_K_M files have them (Q4_K, with Q6_K for attn_v, ffn_down
+# and output), quantized by make_test_model.py: the 128 x 128 matmul blocks
+# for prompts (TS5_MMB_MIN=1 uses them even for these small matrices; one
+# model's attn_k has only 64 rows; they split their columns where there
+# are few blocks), the 64 x 64 ones and the one-token mat-vec kernels.
+kmix=()
+mk_k() {  # name arch vocab [make_test_model.py options]
+    local out="$work/$1.gguf" arch=$2 vocab=$3
+    shift 3
+    [ -s "$out" ] || python3 "$here/make_test_model.py" --arch "$arch" --quant Q4_K_M \
+        --vocab "$work/ggml-vocab-$vocab.gguf" "$@" "$out" > /dev/null
+    kmix+=("$out")
+}
+mk_k qwen2-kmix qwen2 qwen2
+mk_k qwen3-kmix qwen3 qwen2
+mk_k llama-kmix llama llama-spm
+mk_k llama-kmix-kv1 llama llama-spm --kv-heads 1 --ff 768
+echo "== K-quants: 300 tokens in 128 x 128 blocks, 72 in 64 x 64 blocks, one token per call"
+TS5_MMB_MIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${kmix[@]}"
+# The columns split in 5 slices, which don't start on a block, and not at all.
+TS5_MMB_MIN=1 TS5_MMB_SLICES=5 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
+    "${kmix[@]}"
+TS5_MMB_MIN=1 TS5_MMB_SPLIT=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
+    "${kmix[@]}"
+TS5_MMB=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${kmix[@]}"
+# One token per call: a row per workgroup (these matrices are small), 8 rows
+# (TS5_MV_ROWS_MIN=1), 3 (a partial last group), and the older mat-vecs.
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${kmix[@]}"
+TS5_MV_ROWS_MIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 12 --step \
+    "${kmix[@]}"
+TS5_MV_ROWS_MIN=1 TS5_MV_ROWS=3 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 12 \
+    --step "${kmix[@]}"
+TS5_MV_ROWS_MIN=1 TS5_MV16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 12 \
+    --step "${kmix[@]}"
 # Attention's head layouts: query heads per KV head and head size.
 shapes=()
 mk_shape() {  # name embd heads kv_heads
@@ -64,8 +98,10 @@ mk_shape heads14-kv2 896 14 2  # 7 per KV head, size 64 (Qwen 2.5 0.5B)
 mk_shape heads7-kv1 896 7 1    # 7 per KV head, size 128 (Qwen 2.5 7B)
 mk_shape heads8-kv2 512 8 2    # 4 per KV head, size 64
 mk_shape heads2-kv2 512 2 2    # size 256
-echo "== attention: head layouts, 300 tokens at once, then one per call (keys split in slices)"
+echo "== attention: head layouts, 300 tokens at once (attn_pf, then attn), then one per call (keys split in slices)"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${shapes[@]}"
+TS5_ATTN_PF=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${shapes[@]}"
+TS5_ATTN_SPLITS=3 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${shapes[@]}"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 100 --step "${shapes[@]}"
 TS5_ATTN_SPLITS=7 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 40 --step \
     "${shapes[@]}"

@@ -2,6 +2,9 @@
 # Drives the TokenStation5 title on the console over FTP (ftpsrv, 2121).
 #
 #   scripts/ts5-ps5.sh install             upload the title from build/ps5 to /data/homebrew
+#   scripts/ts5-ps5.sh update              the same into the running title, then restart it
+#                                          (no trip to the home screen; falls back to install's
+#                                          advice if the console won't swap a file)
 #   scripts/ts5-ps5.sh model FILE.gguf     upload a model to the title's models folder
 #   scripts/ts5-ps5.sh fetch KEY...        download models.tsv models and upload them there
 #   scripts/ts5-ps5.sh models              list the models on the console
@@ -108,6 +111,31 @@ case $cmd in
         done)
         curl -sS --ftp-create-dirs -T /dev/null "$ftp$dir/models/.keep"
         echo "ts5-ps5: installed. Launch TokenStation5 from the home screen."
+        ;;
+    update)
+        # A running title's files can't be written, but a new file can be
+        # renamed over one: the title keeps the old one open, and its restart
+        # (sceSystemServiceLoadExec of /app0/eboot.bin) loads the new one.
+        app="$root/build/ps5/$id"
+        [ -f "$app/eboot.bin" ] || { echo "ts5-ps5: build it first: ps5/build.sh" >&2; exit 2; }
+        # eboot.bin first, so the binary is new even if a later file is refused.
+        files=$(cd "$app" && { echo eboot.bin; find . -type f ! -name eboot.bin | sort | sed 's|^\./||'; })
+        for f in $files; do
+            curl -sS --ftp-create-dirs -T "$app/$f" "$ftp$dir/$f.new"
+        done
+        failed=
+        for f in $files; do
+            # ftpsrv renames absolute paths only.
+            curl -sS "$ftp$dir/" -Q "RNFR $dir/$f.new" -Q "RNTO $dir/$f" -o /dev/null || { failed=$f; break; }
+        done
+        if [ -n "$failed" ]; then
+            for f in $files; do curl -s "$ftp$dir/" -Q "-DELE $dir/$f.new" -o /dev/null || true; done
+            echo "ts5-ps5: the console wouldn't replace $failed; use install, then launch from the home screen" >&2
+            exit 1
+        fi
+        put_text restart ""
+        wait_down
+        wait_api
         ;;
     fetch)
         PS5_MODEL_DIR="$dir/models" "$root/scripts/fetch-models.sh" "$@"
