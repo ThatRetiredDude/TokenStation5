@@ -1,5 +1,6 @@
 // The title's work, one job at a time on a thread of its own: serve a model
-// through the API, run the GPU check or the speed test on one, stop serving.
+// through the API, run the GPU check or the speed test on one, stop serving,
+// or download a file into the models folder (the API keeps answering).
 // Every model loads onto the one Vulkan device the title shares with its
 // display. A check or speed test of another model than the one serving
 // unloads that one first and serves it again afterwards; of the serving
@@ -21,8 +22,10 @@
 namespace app {
 
 struct Job {
-    enum Kind { Serve, Check, Bench, Stop } kind = Serve;
-    std::string path;
+    enum Kind { Serve, Check, Bench, Stop, Fetch } kind = Serve;
+    std::string path;      // the model; Fetch: the file to write
+    std::string url;       // Fetch: where from
+    std::string sha256;    // Fetch: the hash the file must have (hex); "": not checked
     int n_ctx = 0;         // Serve: 0 for what fits in the GPU's memory
     int n = 16;            // Check: tokens
     bool fresh = false;    // Check: run the CPU even if its answers are saved
@@ -69,6 +72,7 @@ private:
     void loop();
     void run(const Job &job);
     bool serve(const std::string &path, int n_ctx);
+    void fetch(const Job &job);
     void unload();
     // drafter: also load TS5_DRAFT_MODEL (serve jobs; check and bench never
     // call generate, so they skip it).
