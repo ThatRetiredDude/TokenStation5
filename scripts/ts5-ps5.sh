@@ -16,6 +16,8 @@
 #   scripts/ts5-ps5.sh stop                stop serving
 #   scripts/ts5-ps5.sh env [NAME=VALUE...] engine settings (ts5.env), then restart;
 #                                          none: clear them
+#   scripts/ts5-ps5.sh websearch [KEY|off] the Tavily key for web search (in ts5.env, keeping the
+#                                          other settings), then restart; none: say if one is set
 #   scripts/ts5-ps5.sh press BUTTON...     press controller buttons (up down cross square ...)
 #   scripts/ts5-ps5.sh screenshot [FILE]   the TV picture, as a BMP (default screen.bmp)
 #   scripts/ts5-ps5.sh audiotest [FILE]    tones on the TV and the controller, then 8 s from its
@@ -174,6 +176,30 @@ case $cmd in
         put_text restart ""
         wait_down
         wait_api
+        ;;
+    websearch)
+        # ts5.env is NAME=VALUE words; this one is TAVILY_API_KEY.
+        current=$(curl -sS "$ftp$dir/ts5.env" 2> /dev/null || true)
+        others=$(printf '%s\n' $current | grep -v '^TAVILY_API_KEY=' | tr '\n' ' ' | sed 's/ *$//' || true)
+        if [ $# -eq 0 ]; then
+            printf '%s\n' $current | grep -q '^TAVILY_API_KEY=.' && echo "ts5-ps5: web search is on (a Tavily key is set)" ||
+                echo "ts5-ps5: web search is off (no Tavily key); scripts/ts5-ps5.sh websearch tvly-..."
+            exit 0
+        fi
+        case $1 in
+            off) put_text ts5.env "$others" ;;
+            tvly-*) put_text ts5.env "${others:+$others }TAVILY_API_KEY=$1" ;;
+            *) echo "ts5-ps5: a Tavily key starts with tvly- (https://app.tavily.com)" >&2; exit 2 ;;
+        esac
+        put_text restart ""
+        wait_down
+        wait_api
+        curl -sS "http://$PS5_HOST:$PS5_API_PORT/v1/models" | python3 -c '
+import json, sys
+for m in json.load(sys.stdin)["data"]:
+    c = m.get("capabilities", {})
+    print("ts5-ps5: %s: tool calls %s, web search %s" % (m["id"], c.get("tool_format", "?"),
+          "on" if c.get("web_search") else "off"))'
         ;;
     press)
         put_text press "$*"
