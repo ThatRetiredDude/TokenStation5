@@ -148,7 +148,24 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         if (!be) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
     }
     fprintf(stderr, "ts5: %s backend ready in %.1f s, context %d\n", be->name(), (now_ms() - t0) / 1000, be->n_ctx());
+    Model dmodel;  // the draft model, when TS5_DRAFT_MODEL names one; outlives eng
     Engine eng(model, be, tok);
+    if (const char *dp = getenv("TS5_DRAFT_MODEL"); dp && *dp && (a.cmd == "run" || a.cmd == "serve")) {
+        std::string derr;
+        Backend *db = nullptr;
+        if (!dmodel.open(dp, derr)) {
+        } else if (a.backend == "cpu") {
+            if (dmodel.load(nullptr, derr)) db = make_cpu_backend(dmodel, be->n_ctx());
+        } else {
+#ifdef TS5_VULKAN
+            db = make_vk_backend(dmodel, dp, be->n_ctx(), a.device, derr);
+#endif
+        }
+        if (!db || !eng.set_drafter(dmodel, db, derr))
+            fprintf(stderr, "ts5: draft model not used: %s\n", derr.c_str());
+        else
+            fprintf(stderr, "ts5: draft model %s ready\n", basename_of(dp).c_str());
+    }
 
     if (a.cmd == "logits") {
         if (a.tokens.empty() || a.out.empty()) return usage();
@@ -164,6 +181,10 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             fprintf(stderr, "ts5: %s\n", err.c_str());
             return 1;
         }
+        // With TS5_PROFILE=1, the forward's per-kernel GPU time (otherwise
+        // take_profile returns nothing): one batch under the profiler.
+        const std::string prof = be->take_profile();
+        if (!prof.empty()) fprintf(stderr, "logits (%zu tokens), %s", a.tokens.size(), prof.c_str());
         FILE *f = fopen(a.out.c_str(), "wb");
         fwrite(lg.data(), 4, lg.size(), f);
         fclose(f);
@@ -197,9 +218,9 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
                                st, err);
         printf("\n");
         if (!ok) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
-        fprintf(stderr, "ts5: prompt %d tok %.1f tok/s, gen %d tok %.1f tok/s, draft %d/%d accepted\n",
+        fprintf(stderr, "ts5: prompt %d tok %.1f tok/s, gen %d tok %.1f tok/s, draft %d/%d accepted, sample %.0f ms\n",
                 st.prompt_evaluated, st.prompt_evaluated * 1000.0 / st.prompt_ms, st.gen_tokens,
-                st.gen_tokens * 1000.0 / st.gen_ms, st.draft_accepted, st.drafted);
+                st.gen_tokens * 1000.0 / st.gen_ms, st.draft_accepted, st.drafted, st.sample_ms);
         return 0;
     }
     if (a.cmd == "serve")

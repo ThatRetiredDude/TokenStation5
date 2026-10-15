@@ -66,7 +66,10 @@ bool f16_reaches(int f16_ctx, int train);
 // cache where that reaches it (f16_reaches).
 Backend *make_vk_backend(Model &m, const std::string &path, int n_ctx, int device, std::string &err);
 // On a device the process shares (vk_context.h); ctx must outlive it.
-Backend *make_vk_backend(VkContext *ctx, Model &m, const std::string &path, int n_ctx, std::string &err);
+// fit_reserve: bytes an auto-fit context (n_ctx 0) keeps free beyond its
+// usual 1 GiB, the budget of a second backend loaded after this one.
+Backend *make_vk_backend(VkContext *ctx, Model &m, const std::string &path, int n_ctx, std::string &err,
+                         uint64_t fit_reserve = 0);
 // Whether the Vulkan backend has shaders for weights of this GGML type.
 bool vk_supports_type(uint32_t type);
 

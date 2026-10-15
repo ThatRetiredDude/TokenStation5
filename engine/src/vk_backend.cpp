@@ -6,6 +6,7 @@
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -51,6 +52,7 @@
 #include "mv16_glu_q4_k.spv.h"
 #include "mv16_q4_k.spv.h"
 #include "mv16_q6_k.spv.h"
+#include "mvt_glu_q4_k.spv.h"
 #include "mvt_q4_k.spv.h"
 #include "mvt_q6_k.spv.h"
 #include "mm_f16.spv.h"
@@ -206,6 +208,10 @@ public:
         return s;
     }
 
+    // Bytes an auto-fit context (n_ctx 0) keeps free beyond its usual 1 GiB:
+    // the budget of a second backend loaded after this one (a draft model).
+    void set_fit_reserve(uint64_t bytes) { fit_reserve_ = bytes; }
+
     bool init(const std::string &path, std::string &err) {
         if (!init_device(err)) return false;
         if (!init_pipelines(err)) return false;
@@ -270,7 +276,12 @@ private:
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV16")) mv16_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT")) mvt_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_MVT_GLU")) mvt_glu_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT_ROWS")) mvt_rows_ = std::min(4, std::max(1, atoi(e)));
+        // The fused kernel holds two matrices' words: past 2 rows it spills
+        // registers on the PS5 (1376 VGPRs into scratch at 4 rows, a 7x
+        // regression), so its row tiling is capped where the plain one's isn't.
+        mvt_glu_rows_ = std::min(mvt_rows_, 2u);
         if (const char *e = getenv("TS5_BARRIER")) barrier_mode_ = std::min(2, std::max(0, atoi(e)));
         if (const char *e = getenv("TS5_FUSE")) fuse_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
@@ -440,7 +451,9 @@ private:
             if (!make_pipe("mvt_q4_k" + s, spv_mvt_q4_k, sizeof(spv_mvt_q4_k), 3, err, nt, mvt_rows_) ||
                 !make_pipe("mvt_q4_k" + s + ".1", spv_mvt_q4_k, sizeof(spv_mvt_q4_k), 3, err, nt, 1) ||
                 !make_pipe("mvt_q6_k" + s, spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, mvt_rows_) ||
-                !make_pipe("mvt_q6_k" + s + ".1", spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, 1))
+                !make_pipe("mvt_q6_k" + s + ".1", spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, 1) ||
+                !make_pipe("mvt_glu_q4_k" + s, spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, mvt_glu_rows_) ||
+                !make_pipe("mvt_glu_q4_k" + s + ".1", spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, 1))
                 return false;
         }
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
@@ -456,6 +469,9 @@ private:
     // One buffer per tensor, filled straight from the file when the memory is
     // host-visible (unified memory), else through a staging buffer.
     bool upload_weights(const std::string &path, std::string &err) {
+        // The read rate decides whether a slow model load is the storage or
+        // the code; it is printed once per load.
+        const auto lt0 = std::chrono::steady_clock::now();
         FILE *f = fopen(path.c_str(), "rb");
         if (!f) { err = "cannot open " + path; return false; }
         Buf staging;
@@ -480,6 +496,9 @@ private:
             weight_bytes_ += t.nbytes;
         }
         fclose(f);
+        const double ls = std::chrono::duration<double>(std::chrono::steady_clock::now() - lt0).count();
+        fprintf(stderr, "ts5: weights %.2f GB read in %.1f s (%.0f MB/s)\n", weight_bytes_ / 1e9, ls,
+                ls > 0 ? weight_bytes_ / 1e6 / ls : 0.0);
         return true;
     }
 
@@ -509,7 +528,7 @@ private:
             auto fit = [&](KvType t) {
                 const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * hp_.n_layer * KVD;
                 const int cap = (int)std::min<uint64_t>(train, props_.limits.maxStorageBufferRange / per_buf);
-                return fit_context(ctx_->device_memory(), allocated_, kv_bytes_per_token(hp_, t), cap);
+                return fit_context(ctx_->device_memory(), allocated_ + fit_reserve_, kv_bytes_per_token(hp_, t), cap);
             };
             const int f16 = fit(KvType::F16);
             if (kv_ == KvType::Q8 && f16_reaches(f16, train)) {
@@ -770,17 +789,28 @@ private:
                (H / HKV) * HD <= 1024;
     }
 
-    // One token through gate and up of Q4_K with swiglu, in one kernel
-    // (mv16_glu_q4_k), into g_. False where that doesn't apply.
+    // Gate and up of Q4_K with swiglu in one kernel, into g_: one token
+    // through mv16_glu_q4_k, a verify batch through mvt_glu_q4_k, which
+    // loads each token's x once for both matrices. False where that
+    // doesn't apply.
     bool ffn_glu(const Layer &L, int n) {
-        if (n != 1 || !fuse_ || !mv16_ || !fast_matvec_ || L.w_gate.type() != GGML_Q4_K ||
+        const bool batch = n >= 2 && n <= 8 && mvt_ && mvt_glu_;
+        if ((n == 1 ? !mv16_ : !batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != GGML_Q4_K ||
             L.w_up.type() != GGML_Q4_K || L.w_gate.ne0() != L.w_up.ne0() || L.w_gate.ne1() != L.w_up.ne1())
             return false;
         const uint32_t rows = (uint32_t)L.w_gate.ne1();
         struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; } pc{
-            (uint32_t)L.w_gate.ne0(), rows, 1, (uint32_t)L.w_gate.info->row_bytes(), (uint32_t)L.w_gate.ne0(),
-            rows, 0, 0};
-        mat_vec("mv16_glu_q4_k", {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, rows, "ffn_gate+up");
+            (uint32_t)L.w_gate.ne0(), rows, (uint32_t)n, (uint32_t)L.w_gate.info->row_bytes(),
+            (uint32_t)L.w_gate.ne0(), rows, 0, 0};
+        if (n == 1) {
+            mat_vec("mv16_glu_q4_k", {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, rows, "ffn_gate+up");
+            return true;
+        }
+        const bool one = rows < (uint32_t)mv_rows_min_ || mvt_glu_rows_ == 1;
+        const uint32_t nr = one ? 1 : mvt_glu_rows_, groups = (rows + nr - 1) / nr;
+        const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
+        dispatch("mvt_glu_q4_k." + std::to_string(n) + (one ? ".1" : ""),
+                 {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, mx, my, "ffn_gate+up");
         return true;
     }
 
@@ -887,6 +917,7 @@ private:
     std::vector<Arena> arenas_;
     std::vector<VkBuffer> all_bufs_;
     VkDeviceSize allocated_ = 0;
+    uint64_t fit_reserve_ = 0;  // set_fit_reserve
     uint64_t weight_bytes_ = 0;
     int layers_per_submit_ = 0;
     // Matmuls of at least this many tokens use the tiled kernel (TS5_TILED_MIN).
@@ -911,6 +942,10 @@ private:
     // 8 threads per block (TS5_MV16=0: matvec_q4_k and matvec_q6_k).
     bool mv16_ = true;
     bool mvt_ = true;
+    // The fused gate+up verify kernel: off until a console A/B shows a win
+    // (phase L measured it 7x slower at 4 rows from register spills).
+    bool mvt_glu_ = false;
+    uint32_t mvt_glu_rows_ = 2;
     // Rows per workgroup of the verify-batch kernels (TS5_MVT_ROWS, 1 to 4),
     // which share each token's x loads; one for matrices under mv_rows_min_.
     uint32_t mvt_rows_ = 4;
@@ -946,8 +981,10 @@ private:
 
 }  // namespace
 
-Backend *make_vk_backend(VkContext *ctx, Model &m, const std::string &path, int n_ctx, std::string &err) {
+Backend *make_vk_backend(VkContext *ctx, Model &m, const std::string &path, int n_ctx, std::string &err,
+                         uint64_t fit_reserve) {
     auto *b = new VkBackend(ctx, false, m, n_ctx);
+    b->set_fit_reserve(fit_reserve);
     if (!b->init(path, err)) {
         delete b;
         return nullptr;
