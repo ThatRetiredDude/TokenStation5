@@ -45,12 +45,25 @@ std::string lower(std::string s) {
     return s;
 }
 
-// What a model is good for: its suggestion's role, else its family.
+// What a model is good for: its suggestion's role, found by its file name or
+// its own name (a copy under another file name is the same model), else a
+// guess from its name.
 std::string good_for(const app::ModelInfo &m) {
+    std::string name = lower(m.name);
+    for (auto &ch : name)
+        if (ch == ' ') ch = '-';
     for (const Suggestion &s : kSuggestions)
-        if (lower(m.file).find(s.id) != std::string::npos) return s.role;
-    const std::string f = plain::family(m.arch);
-    return f.empty() ? "Other family" : f;
+        if (lower(m.file).find(s.id) != std::string::npos || name.find(s.id) != std::string::npos) return s.role;
+    return name.find("coder") != std::string::npos ? "Coding" : "General chat";
+}
+
+// A model's name in the list: with its precision when another model there
+// has the same name (two downloads of one model, 4-bit and 8-bit).
+std::string shown_name(const std::vector<app::ModelInfo> &models, const app::ModelInfo &m) {
+    int same = 0;
+    for (const app::ModelInfo &o : models) same += o.name == m.name;
+    if (same < 2 || m.quant.empty()) return m.name;
+    return m.name + " (" + plain::quant_detail(m.quant) + ")";
 }
 
 // "Still copying: 2.1 GB of 4.7 GB so far"
@@ -65,8 +78,18 @@ std::string ago(int64_t then, int64_t now) {
     if (s < 60) return "just now";
     if (s < 3600) snprintf(b, sizeof b, "%lld min ago", (long long)(s / 60));
     else if (s < 86400) snprintf(b, sizeof b, "%lld h ago", (long long)(s / 3600));
+    else if (s < 2 * 86400) return "a day ago";
     else snprintf(b, sizeof b, "%lld days ago", (long long)(s / 86400));
     return b;
+}
+
+// A line with its time after it ("... · 5 min ago"): a line too long for
+// max_w is cut, never the time.
+int text_with_time(Canvas &c, const Font &f, int x, int y, const std::string &s, const std::string &when, Color col,
+                   int max_w) {
+    const std::string tail = "  \xC2\xB7  " + when;
+    const int w = c.text(f, x, y, s, col, std::max(1, max_w - Canvas::measure(f, tail)));
+    return w + c.text(f, x + w, y, tail, col, std::max(1, max_w - w));
 }
 
 std::string elapsed(double s) {
@@ -413,7 +436,8 @@ void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &lis
         else if (m.path == v.status.serving_path) pl = pill(c, smallb_, right, ry + 14, "IN USE", kGreen);
         else if (m.copying) pl = pill(c, smallb_, right, ry + 14, "COPYING", kAmber);
         else if (!m.runnable) pl = pill(c, smallb_, right, ry + 14, "CAN'T RUN", kRed);
-        c.text(bodyb_, LIST_X + 24, ry + 40, m.name, m.runnable ? kText : kText2, pl - 16 - (LIST_X + 24));
+        c.text(bodyb_, LIST_X + 24, ry + 40, shown_name(v.models, m), m.runnable ? kText : kText2,
+               pl - 16 - (LIST_X + 24));
 
         // Results, right-aligned under the label: a failed check, else the
         // speed (with a tick once the check passed): as used over the last 7
@@ -491,7 +515,7 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
     if (it.kind != Item::Model) return;
     const app::ModelInfo &m = v.models[it.index];
     const app::Results r = v.results.count(m.file) ? v.results.at(m.file) : app::Results{};
-    c.text(h2_, DX, 244, m.name, kText, DW);
+    c.text(h2_, DX, 244, shown_name(v.models, m), kText, DW);
     c.text(small_, DX, 278, plain::capital("added " + ago(m.mtime, v.wall)), kText2, DW);
     cell(DX, 306, "GOOD FOR", good_for(m));
     cell(col2, 306, "SIZE", m.params > 0 ? plain::parameters(m.params) : "\xE2\x80\x94");
@@ -536,20 +560,17 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
         if (r.has_check) {
             const int w = c.text(bodyb_, DX, 648, r.check.pass ? "\xE2\x9C\x93 Passed: " : "\xE2\x9C\x97 Failed: ",
                                  r.check.pass ? kGreen : kRed);
-            c.text(body_, DX + w, 648,
-                   std::string(r.check.pass ? "same answers on the GPU as on the CPU" : "its answers don't match the CPU's") +
-                       "  \xC2\xB7  " + ago(r.check.when, v.wall),
-                   kText2, DW - w);
+            text_with_time(c, body_, DX + w, 648,
+                           r.check.pass ? "same answers as the CPU" : "its answers don't match the CPU's",
+                           ago(r.check.when, v.wall), kText2, DW - w);
         } else {
             text_glyph(c, body_, DX, 648, "Not run yet. Press", kGlyphSquare, "to check its answers on the PS5.", kMuted);
         }
         label(c, smallb_, DX, 696, "SPEED");
         if (r.has_bench) {
-            char reads[48];
-            snprintf(reads, sizeof reads, "reads %.0f a second", r.bench.pp_tps);
-            c.text(body_, DX, 732,
-                   "Writes " + tps(r.bench.tg_tps) + "  \xC2\xB7  " + reads + "  \xC2\xB7  " + ago(r.bench.when, v.wall),
-                   kText, DW);
+            char speeds[96];
+            snprintf(speeds, sizeof speeds, "Writes %.0f, reads %.0f tokens a second", r.bench.tg_tps, r.bench.pp_tps);
+            text_with_time(c, body_, DX, 732, speeds, ago(r.bench.when, v.wall), kText, DW);
         } else {
             text_glyph(c, body_, DX, 732, "Not measured yet. Press", kGlyphTriangle, "to time it.", kMuted);
         }
@@ -602,7 +623,7 @@ void Dashboard::draw_activity(Canvas &c, const View &v, const Item *sel) {
     for (int i = (int)v.events.size() - 1, shown = 0; i >= 0 && shown < 2; i--, shown++) {
         const app::Event &e = v.events[i];
         const int64_t secs = (int64_t)(v.now - e.when);
-        c.text(small_, tx, y, e.text + "  \xC2\xB7  " + ago(0, secs), e.bad ? kRed : kText2, 1080 - tx);
+        text_with_time(c, small_, tx, y, e.text, ago(0, secs), e.bad ? kRed : kText2, 1080 - tx);
         y += 30;
     }
 
