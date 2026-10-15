@@ -182,6 +182,15 @@ cmp "$work/sd-off.txt" "$work/sd-on.txt"
 grep -q "draft [0-9]*/[1-9]" "$work/sd-on.err"  # drafts were actually proposed
 TS5_ADAPT=0 TS5_DRAFT=7 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-fix.txt" 2> /dev/null
 cmp "$work/sd-off.txt" "$work/sd-fix.txt"  # the fixed-length policy too
+# Drafting on the GPU, where each generated token's command buffer is
+# recorded ahead (the default): verify batches and rejected drafts record
+# anew, and the output is the same as without recording ahead.
+TS5_DRAFT=7 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-vk.txt" \
+    2> "$work/sd-vk.err"
+grep -q "draft [0-9]*/[1-9]" "$work/sd-vk.err"
+TS5_AHEAD=0 TS5_DRAFT=7 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 \
+    > "$work/sd-vk0.txt" 2> /dev/null
+cmp "$work/sd-vk.txt" "$work/sd-vk0.txt"
 echo "== the draft model cascade: a non-repeating prompt, the model as its own drafter"
 nr="The sky turned a deep shade of violet over the quiet harbor town that evening"
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$nr" -n 200 --temp 0 > "$work/dm-off.txt" 2> /dev/null
