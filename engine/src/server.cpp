@@ -248,6 +248,10 @@ void handle(int fd, Server::State &state, Usage &u) {
         Json req;
         if (!Json::parse(r.body, req)) {
             send_all(fd, response(400, error_body("invalid JSON")));
+            {
+                std::lock_guard<std::mutex> g(state.stats);
+                u.rec.model = state.model;
+            }
             u.rec.status = 400;
             u.rec.finish = "refused";
             u.rec.why = "bad_json";
@@ -294,6 +298,16 @@ void handle(int fd, Server::State &state, Usage &u) {
             prompt = render_chat(e.tok(), msgs, tools, date);
         } else {
             prompt = req["prompt"].str();
+        }
+        // No prompt tokens at all (an empty prompt, or one that isn't a
+        // string, on a model without BOS) is the app's mistake, not the GPU's.
+        if (prompt.empty() && e.tok().encode(prompt, true).empty()) {
+            send_all(fd, response(400, error_body("empty prompt")));
+            u.rec.status = 400;
+            u.rec.finish = "refused";
+            u.rec.why = "bad_json";
+            done();
+            return;
         }
         bool use_tools = !tools.empty();  // off for a last turn that must answer
         SampleParams sp;
