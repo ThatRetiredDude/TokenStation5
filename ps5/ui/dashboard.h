@@ -1,8 +1,12 @@
-// The TV screen: the models on the console and a few suggested ones, the
-// selected model's details and results, what the title is doing, and the API's
-// activity. Driven with the controller: up/down choose a model, cross serves
-// it, square runs the GPU check, triangle the speed test, circle stops
-// serving, OPTIONS closes the title.
+// The TV screen, three pages under the header; L1 goes to the next.
+// Models: the models on the console and a few suggested ones, the selected
+// model's details and results, what the title is doing, and the API's
+// activity; up/down choose a model, cross serves it, square runs the GPU
+// check, triangle the speed test, circle stops serving. Chat (chat_page.h):
+// a conversation with the serving model; hold R1 to talk, up/down scroll,
+// triangle stops the reply, square starts a new chat, circle goes back to
+// Models. Settings (settings_page.h): the title's settings, kept in ts5.env;
+// circle goes back to Models. OPTIONS closes the title.
 #pragma once
 #include <cstdint>
 #include <map>
@@ -10,6 +14,10 @@
 #include <vector>
 
 #include "canvas.h"
+#include "chat.h"
+#include "chat_page.h"
+#include "settings_page.h"
+#include "voice.h"
 #include "library.h"
 #include "runner.h"
 #include "server.h"
@@ -20,24 +28,32 @@ namespace ui {
 struct View {
     std::string version, url, folder;  // folder: the models folder as the PC sees it over FTP
     uint64_t gpu_memory = 0;
-    int n_ctx = 8192;  // the context a Serve loads with
+    int n_ctx = 0;  // the context a Serve loads with (0: what fits)
     std::vector<app::ModelInfo> models;
     std::map<std::string, app::Results> results;  // by file name
     app::Status status;
     std::vector<app::Event> events;
     ts5::Server::Activity api;
+    app::ChatState chat;
+    app::VoiceState voice;
+    bool speaking = false;  // a reply is being read aloud (speak.h)
+    SettingsInfo settings;  // its speech models and now come from the fields above
     double now = 0;    // seconds, steady clock (app::now_s)
     int64_t wall = 0;  // time(nullptr)
 };
 
 struct Action {
-    enum Kind { None, Serve, Check, Bench, Stop, Close } kind = None;
+    enum Kind { None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear, Set } kind = None;
     std::string path;
+    std::string name, value;  // Set: NAME=VALUE in ts5.env ("": the default)
 };
 
 class Dashboard {
 public:
+    enum Page { Models, Chat, Settings };
     Dashboard(const Fonts &fonts, const uint8_t *logo, size_t logo_size);
+    Page page() const { return page_; }
+    void show(Page p);
     // Applies a frame's button presses; at most one action comes of them.
     Action press(uint32_t buttons, const View &v);
     void draw(Canvas &c, const View &v);
@@ -54,13 +70,20 @@ private:
     void draw_details(Canvas &c, const View &v, const Item &item);
     void draw_activity(Canvas &c, const View &v);
     void draw_footer(Canvas &c);
+    void draw_chat_footer(Canvas &c, const View &v);
+    void draw_settings_footer(Canvas &c);
+    SettingsInfo settings_info(const View &v) const;
+    void draw_tabs(Canvas &c);
     void draw_confirm(Canvas &c);
 
     const Font &title_, &h2_, &body_, &bodyb_, &small_, &smallb_, &mono_;
     int logo_w_ = 0, logo_h_ = 0;
     const uint32_t *logo_ = nullptr;
     std::vector<uint32_t> logo_px_;
-    std::vector<uint32_t> background_;
+    std::vector<uint32_t> background_, chat_background_, settings_background_;
+    Page page_ = Models;
+    ChatPage chat_;
+    SettingsPage settings_;
     std::string selected_key_;  // the selected item's path or suggestion key
     int scroll_ = 0;
     bool confirm_close_ = false;

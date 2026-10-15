@@ -1,0 +1,61 @@
+// Tool calling (OpenAI "tools" / "tool_calls") in the formats the models were
+// trained on: the Hermes style of Qwen 2.5 and Qwen3, and the JSON style of
+// Llama 3.1 and 3.2. Each is written the way the model's own chat template
+// writes it, so the model sees what it saw in training.
+#pragma once
+#include <string>
+#include <vector>
+
+#include "json.h"
+#include "tokenizer.h"
+
+namespace ts5 {
+
+enum class ToolFormat {
+    NONE,    // the model's template has no tool calls
+    HERMES,  // Qwen: <tool_call>{"name": ..., "arguments": {...}}</tool_call>
+    LLAMA3,  // Llama 3.1/3.2: {"name": ..., "parameters": {...}}, results in the ipython role
+};
+// Read from the model's chat template.
+ToolFormat tool_format(const Tokenizer &t);
+const char *tool_format_name(ToolFormat f);
+
+struct ToolCall {
+    std::string id, name, arguments;  // arguments: a JSON object, as text
+};
+
+struct Message {
+    std::string role, content;
+    std::vector<ToolCall> calls;  // an assistant message's tool calls
+};
+
+// An OpenAI request's "messages".
+std::vector<Message> parse_messages(const Json &messages);
+
+// The prompt for a conversation, with `tools` (OpenAI tool objects) offered to
+// the model, ending with the assistant turn opened. today: "14 Oct 2026", for
+// the Llama system prompt. Without tools or tool messages, this is
+// Tokenizer::apply_chat.
+std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, const std::vector<Json> &tools,
+                        const std::string &today);
+
+// After a turn of the model's that ended in tool calls: the text that closes
+// the turn, gives each result back in order, and opens the model's next turn.
+std::string render_results(ToolFormat f, const std::vector<std::string> &results);
+
+// A finished turn: its text without the calls, and the calls. A call whose JSON
+// does not parse stays in the text.
+struct ParsedTurn {
+    std::string content;
+    std::vector<ToolCall> calls;
+};
+ParsedTurn parse_turn(ToolFormat f, const std::string &text);
+
+// While a turn streams: how many bytes of `text` are surely text for the user,
+// never part of a call (the rest is held until the turn ends).
+size_t content_prefix(ToolFormat f, const std::string &text);
+
+// "call_" and 24 random letters and digits, as OpenAI's ids look.
+std::string new_call_id();
+
+}  // namespace ts5

@@ -7,6 +7,10 @@
 //   ts5 tokenize -m model.gguf -p "text"
 //   ts5 check    -m model.gguf [-n 16]   GPU logits against the CPU reference
 //   ts5 logits   -m model.gguf -o out.bin [--step] tok0 tok1 ...   (all positions, for tests)
+//   ts5 prompt   -m model.gguf [--chat-template FILE] < request.json
+//                                        the prompt a chat request becomes (for tests)
+//   ts5 tool-parse hermes|llama3 < text  a model's turn as content and tool calls (for tests)
+//   ts5 search "query"                   one web_search, as the model would get it
 //
 // Common: --backend vk|cpu (default vk when built with Vulkan), --device N.
 #include <algorithm>
@@ -26,13 +30,15 @@
 #include "engine.h"
 #include "server.h"
 #include "tokenizer.h"
+#include "tools.h"
+#include "websearch.h"
 
 using namespace ts5;
 
 namespace {
 
 struct Args {
-    std::string cmd, model, prompt, out, host = "0.0.0.0", backend;
+    std::string cmd, model, prompt, out, host = "0.0.0.0", backend, chat_template;
     int port = 8081, n_ctx = 8192, n_predict = 256, pp = 512, tg = 128, device = 0;
     float temp = 0.7f;
     bool chat = false, step = false, n_set = false, fresh = false;
@@ -43,8 +49,9 @@ struct Args {
 // exit(): a PS5 title must never end that way.
 int usage() {
     fprintf(stderr,
-            "usage: ts5 serve|run|bench|check|tokenize|logits -m model.gguf [options]\n"
-            "  -c N           context length (default 8192)\n"
+            "usage: ts5 serve|run|bench|check|tokenize|logits|prompt -m model.gguf [options]\n"
+            "       ts5 search QUERY | ts5 tool-parse hermes|llama3 < TEXT\n"
+            "  -c N|auto      context length (default 8192; auto: what fits in GPU memory)\n"
             "  --backend B    vk or cpu\n"
             "  --device N     Vulkan device index\n"
             "  serve: --host ADDR --port N\n"
@@ -58,7 +65,7 @@ int usage() {
 bool parse(int argc, char **argv, Args &a) {
     if (argc < 2) return false;
     a.cmd = argv[1];
-    const char *cmds[] = {"serve", "run", "bench", "check", "tokenize", "logits"};
+    const char *cmds[] = {"serve", "run", "bench", "check", "tokenize", "logits", "prompt"};
     if (std::none_of(std::begin(cmds), std::end(cmds), [&](const char *c) { return a.cmd == c; })) return false;
     bool ok = true;
     for (int i = 2; i < argc && ok; i++) {
@@ -73,7 +80,7 @@ bool parse(int argc, char **argv, Args &a) {
         if (s == "-m") a.model = next();
         else if (s == "-p") a.prompt = next();
         else if (s == "-o") a.out = next();
-        else if (s == "-c") a.n_ctx = atoi(next().c_str());
+        else if (s == "-c") a.n_ctx = atoi(next().c_str());  // "auto": 0
         else if (s == "-n") a.n_predict = atoi(next().c_str()), a.n_set = true;
         else if (s == "--host") a.host = next();
         else if (s == "--port") a.port = atoi(next().c_str());
@@ -85,6 +92,7 @@ bool parse(int argc, char **argv, Args &a) {
         else if (s == "--chat") a.chat = true;
         else if (s == "--step") a.step = true;
         else if (s == "--fresh") a.fresh = true;
+        else if (s == "--chat-template") a.chat_template = next();
         else if (!s.empty() && (isdigit((unsigned char)s[0]))) a.tokens.push_back(atoi(s.c_str()));
         else ok = false;
     }
@@ -102,6 +110,46 @@ double now_ms() {
     return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
 }
 
+std::string read_all(FILE *f) {
+    std::string s;
+    char buf[65536];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) s.append(buf, n);
+    return s;
+}
+
+// The commands that need no model: a web search, and the tool-call parser.
+int no_model_command(int argc, char **argv) {
+    std::string cmd = argv[1];
+    if (cmd == "search") {
+        if (argc != 3) return usage();
+        if (tavily_key().empty()) fprintf(stderr, "ts5: TAVILY_API_KEY is not set\n");
+        std::string log;
+        printf("%s\n", web_search(Json::object().set("query", Json::string(argv[2])).dump(), log).c_str());
+        fprintf(stderr, "ts5: %s\n", log.c_str());
+        return log.find(" results (") != std::string::npos ? 0 : 1;
+    }
+    if (argc != 3) return usage();
+    std::string f = argv[2];
+    ToolFormat tf = f == "hermes" ? ToolFormat::HERMES : f == "llama3" ? ToolFormat::LLAMA3 : ToolFormat::NONE;
+    std::string text = read_all(stdin);
+    ParsedTurn pt = parse_turn(tf, text);
+    Json out = Json::object();
+    out.set("content", Json::string(pt.content));
+    Json calls;
+    calls.type = Json::ARR;
+    for (auto &c : pt.calls)
+        calls.a.push_back(Json::object().set("name", Json::string(c.name)).set("arguments", Json::string(c.arguments)));
+    out.set("calls", calls);
+    // How much of the text streams before the turn ends.
+    Json prefix;
+    prefix.type = Json::NUM;
+    prefix.s = std::to_string(content_prefix(tf, text));
+    out.set("content_prefix", prefix);
+    printf("%s\n", out.dump().c_str());
+    return 0;
+}
+
 std::string basename_of(const std::string &p) {
     size_t s = p.find_last_of('/');
     return s == std::string::npos ? p : p.substr(s + 1);
@@ -110,6 +158,8 @@ std::string basename_of(const std::string &p) {
 }  // namespace
 
 int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
+    if (argc >= 2 && (std::string(argv[1]) == "search" || std::string(argv[1]) == "tool-parse"))
+        return no_model_command(argc, argv);
     Args a;
     if (!parse(argc, argv, a)) return usage();
     std::string err;
@@ -121,6 +171,21 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             hp.head_dim, hp.n_vocab);
     Tokenizer tok;
     if (!tok.load(model.gguf, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
+    if (!a.chat_template.empty()) {
+        FILE *f = fopen(a.chat_template.c_str(), "rb");
+        if (!f) { fprintf(stderr, "ts5: cannot open %s\n", a.chat_template.c_str()); return 1; }
+        tok.set_chat_template(read_all(f));
+        fclose(f);
+    }
+    if (a.cmd == "prompt") {
+        Json req;
+        if (!Json::parse(read_all(stdin), req)) { fprintf(stderr, "ts5: invalid JSON\n"); return 1; }
+        std::vector<Json> tools(req["tools"].a.begin(), req["tools"].a.end());
+        const char *date = getenv("TS5_TODAY");
+        printf("%s", render_chat(tok, parse_messages(req["messages"]), tools, date ? date : "26 Jul 2024").c_str());
+        fprintf(stderr, "ts5: tool calls: %s\n", tool_format_name(tool_format(tok)));
+        return 0;
+    }
     if (a.cmd == "tokenize") {
         for (int32_t t : tok.encode(a.prompt, true)) printf("%d ", t);
         printf("\n");
@@ -136,6 +201,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     double t0 = now_ms();
     Backend *be = nullptr;
     if (a.backend == "cpu") {
+        if (a.n_ctx <= 0) a.n_ctx = 8192;
         if (!model.load(nullptr, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
         be = make_cpu_backend(model, a.n_ctx);
     } else {
@@ -146,8 +212,25 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
 #endif
         if (!be) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
     }
-    fprintf(stderr, "ts5: %s backend ready in %.1f s, context %d\n", be->name(), (now_ms() - t0) / 1000, a.n_ctx);
+    fprintf(stderr, "ts5: %s backend ready in %.1f s, context %d\n", be->name(), (now_ms() - t0) / 1000, be->n_ctx());
+    Model dmodel;  // the draft model, when TS5_DRAFT_MODEL names one; outlives eng
     Engine eng(model, be, tok);
+    if (const char *dp = getenv("TS5_DRAFT_MODEL"); dp && *dp && (a.cmd == "run" || a.cmd == "serve")) {
+        std::string derr;
+        Backend *db = nullptr;
+        if (!dmodel.open(dp, derr)) {
+        } else if (a.backend == "cpu") {
+            if (dmodel.load(nullptr, derr)) db = make_cpu_backend(dmodel, be->n_ctx());
+        } else {
+#ifdef TS5_VULKAN
+            db = make_vk_backend(dmodel, dp, be->n_ctx(), a.device, derr);
+#endif
+        }
+        if (!db || !eng.set_drafter(dmodel, db, derr))
+            fprintf(stderr, "ts5: draft model not used: %s\n", derr.c_str());
+        else
+            fprintf(stderr, "ts5: draft model %s ready\n", basename_of(dp).c_str());
+    }
 
     if (a.cmd == "logits") {
         if (a.tokens.empty() || a.out.empty()) return usage();
@@ -163,6 +246,10 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             fprintf(stderr, "ts5: %s\n", err.c_str());
             return 1;
         }
+        // With TS5_PROFILE set, the forward's CPU time, and with
+        // TS5_PROFILE=1 its per-kernel GPU time: one batch under the profiler.
+        const std::string prof = be->take_profile();
+        if (!prof.empty()) fprintf(stderr, "logits (%zu tokens), %s", a.tokens.size(), prof.c_str());
         FILE *f = fopen(a.out.c_str(), "wb");
         fwrite(lg.data(), 4, lg.size(), f);
         fclose(f);
@@ -196,8 +283,9 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
                                st, err);
         printf("\n");
         if (!ok) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
-        fprintf(stderr, "ts5: prompt %d tok %.1f tok/s, gen %d tok %.1f tok/s\n", st.prompt_evaluated,
-                st.prompt_evaluated * 1000.0 / st.prompt_ms, st.gen_tokens, st.gen_tokens * 1000.0 / st.gen_ms);
+        fprintf(stderr, "ts5: prompt %d tok %.1f tok/s, gen %d tok %.1f tok/s, draft %d/%d accepted, sample %.0f ms\n",
+                st.prompt_evaluated, st.prompt_evaluated * 1000.0 / st.prompt_ms, st.gen_tokens,
+                st.gen_tokens * 1000.0 / st.gen_ms, st.draft_accepted, st.drafted, st.sample_ms);
         return 0;
     }
     if (a.cmd == "serve")
