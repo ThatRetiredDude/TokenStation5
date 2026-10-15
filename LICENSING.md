@@ -14,6 +14,8 @@ takes the default until a row here says otherwise.
 | `engine/` (ts5: source, shaders, tests, design doc) | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code. Contains no GPL code. |
 | `scripts/`, `docs/`, `models.tsv`, `README.md`, `.github/` | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code and docs. The scripts download and talk to GPL programs (PS5LM) but contain none of their code. |
 | `ps5/` (title main, libc shims, build scripts, import checker) | [GPL-3.0-or-later](ps5/LICENSE) | Exists to link ts5 with PS5_Vulkan and the PS5 payload SDK, which are GPL-3.0-or-later. |
+| `third_party/whisper.cpp/` (whisper.cpp and ggml, for speech to text) | [MIT](third_party/whisper.cpp/LICENSE), as vendored | Third-party code, copied unchanged by `scripts/vendor-whisper.sh`. Linked into the PS5 title (GPL-3.0 as a whole, below), not into the Linux `ts5` binary. |
+| `third_party/kokoro.cpp/` (Kokoro-82M's model code, for spoken replies) | [MIT](third_party/kokoro.cpp/LICENSE), as vendored | Third-party code, copied by `scripts/vendor-kokoro.sh` with our patch (espeak-ng and Highway out). Linked into the PS5 title, not into the Linux `ts5` binary. |
 | `payloads/` (small diagnostic payloads for the jailbreak's ELF loader) | GPL-3.0-or-later | Built with the PS5 payload SDK, which is GPL-3.0-or-later. |
 | The built PS5 title (`eboot.bin`, `sce_module/libc.prx`) | GPL-3.0-or-later, as a whole | See below. |
 | The Linux `ts5` binary | PolyForm Small Business 1.0.0 | Built from `engine/` plus Mbed TLS (Apache-2.0) and the Mozilla CA bundle (MPL-2.0, unmodified data), see [NOTICE.md](NOTICE.md). Links only the system Vulkan loader. |
@@ -35,8 +37,8 @@ an OSI open source one.
 
 ## The PS5 title is GPL-3.0 as a whole
 
-The PS5 title is one program made of ts5, the files in `ps5/`, RADV, and
-PS5_Vulkan's and the payload SDK's GPL-3.0 code. The GPL requires a
+The PS5 title is one program made of ts5, the files in `ps5/`, whisper.cpp,
+kokoro.cpp, RADV, and PS5_Vulkan's and the payload SDK's GPL-3.0 code. The GPL requires a
 distributed program like that to be licensed under the GPL as a whole. The
 copyright holder therefore also grants GPL-3.0-or-later on the `engine/`
 source, but only as part of the PS5 title and its corresponding source. So:

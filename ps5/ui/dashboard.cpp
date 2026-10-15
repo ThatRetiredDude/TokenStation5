@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "pad.h"
+#include "style.h"
 
 namespace ui {
 
@@ -19,14 +20,10 @@ constexpr int LX = 72, LW = 900, RX = 1000, RW = 848;
 constexpr int AY = 868, AH = 136;
 constexpr int LIST_X = LX + 16, LIST_W = LW - 32, LIST_Y0 = 268, LIST_Y1 = PB - 16;
 constexpr int DX = RX + 32, DW = RW - 64;
-
-constexpr Color kBgTop = rgb(0x0B1226), kBgBottom = rgb(0x05070F);
-constexpr Color kPanel = rgb(0x0E1530), kPanelLine = rgb(0x1B2650);
-constexpr Color kRow = rgb(0x121B3A), kRowSel = rgb(0x17244E);
-constexpr Color kText = rgb(0xEAF0FF), kText2 = rgb(0x9AA6C8), kMuted = rgb(0x627095);
-constexpr Color kAccent = rgb(0x3CC8FF), kGreen = rgb(0x3DDC97), kRed = rgb(0xFF5C70), kAmber = rgb(0xFFB547);
-constexpr Color kCrossColor = rgb(0x8FB0FF), kCircleColor = rgb(0xFF6F7F), kSquareColor = rgb(0xFF8BD0),
-                kTriangleColor = rgb(0x4BE0A8);
+// The chat page: the conversation, and the line for a message under it.
+constexpr int CX = LX, CW = 1848 - LX, CB = 884, IY = 900, IH = AY + AH - 900;
+// The settings page: two panels down to where the activity panel ends.
+constexpr int SB = AY + AH;
 
 // Models worth starting with that ts5 runs, for a console that has none of
 // them yet. `id` finds one already there by its file name; `key` is its line
@@ -100,47 +97,6 @@ std::vector<std::string> wrap(const Font &f, const std::string &text, int max_w)
     return lines;
 }
 
-enum PadGlyph { kGlyphCross, kGlyphCircle, kGlyphSquare, kGlyphTriangle };
-
-void glyph(Canvas &c, float cx, float cy, PadGlyph g, bool enabled = true) {
-    c.circle(cx, cy, 16, rgb(0x1E2850));
-    Color col = g == kGlyphCross    ? kCrossColor
-                : g == kGlyphCircle ? kCircleColor
-                : g == kGlyphSquare ? kSquareColor
-                                    : kTriangleColor;
-    if (!enabled) col = kMuted;
-    switch (g) {
-        case kGlyphCross:
-            c.segment(cx - 6, cy - 6, cx + 6, cy + 6, 3, col);
-            c.segment(cx - 6, cy + 6, cx + 6, cy - 6, 3, col);
-            break;
-        case kGlyphCircle: c.ring(cx, cy, 7, 3, col); break;
-        case kGlyphSquare: c.round_rect_line(cx - 7, cy - 7, 14, 14, 2, 3, col); break;
-        case kGlyphTriangle:
-            c.segment(cx, cy - 7.5f, cx - 8, cy + 6, 3, col);
-            c.segment(cx - 8, cy + 6, cx + 8, cy + 6, 3, col);
-            c.segment(cx + 8, cy + 6, cx, cy - 7.5f, 3, col);
-            break;
-    }
-}
-
-// A rounded label right-aligned at `right`; returns its left edge.
-int pill(Canvas &c, const Font &f, int right, int top, const std::string &text, Color col) {
-    const int w = Canvas::measure(f, text) + 32, h = 34;
-    c.round_rect((float)(right - w), (float)top, (float)w, (float)h, h * 0.5f, alpha(col, 46));
-    c.text(f, right - w + 16, top + 24, text, col);
-    return right - w;
-}
-
-void spinner(Canvas &c, float cx, float cy, double t, Color col) {
-    const int phase = (int)(t * 12) % 8;
-    for (int i = 0; i < 8; i++) {
-        const float a = (float)(i * M_PI / 4);
-        const int age = (phase - i + 8) % 8;
-        c.circle(cx + 11 * std::cos(a), cy + 11 * std::sin(a), 3.2f, alpha(col, 255 - age * 28));
-    }
-}
-
 void label(Canvas &c, const Font &f, int x, int y, const std::string &s) { c.text(f, x, y, s, kMuted); }
 
 // A model's name (general.name) for its file name.
@@ -148,14 +104,6 @@ std::string name_of(const View &v, const std::string &file) {
     for (const auto &m : v.models)
         if (m.file == file) return m.name;
     return file;
-}
-
-// Text with a controller button drawn in it: before, the button, after.
-void text_glyph(Canvas &c, const Font &f, int x, int y, const std::string &before, PadGlyph g, const std::string &after,
-                Color col) {
-    x += c.text(f, x, y, before, col) + 6;
-    glyph(c, (float)x + 16, (float)y - f.px * 0.33f, g);
-    c.text(f, x + 38, y, after, col);
 }
 
 }  // namespace
@@ -169,7 +117,8 @@ struct Dashboard::Item {
 
 Dashboard::Dashboard(const Fonts &fonts, const uint8_t *logo, size_t logo_size)
     : title_(fonts.get("title")), h2_(fonts.get("h2")), body_(fonts.get("body")),
-      bodyb_(fonts.get("bodyb")), small_(fonts.get("small")), smallb_(fonts.get("smallb")), mono_(fonts.get("mono")) {
+      bodyb_(fonts.get("bodyb")), small_(fonts.get("small")), smallb_(fonts.get("smallb")), mono_(fonts.get("mono")),
+      chat_(fonts), settings_(fonts) {
     if (logo && logo_size >= 8 && memcmp(logo, "TS5L", 4) == 0) {
         uint16_t w, h;
         memcpy(&w, logo + 4, 2);
@@ -212,7 +161,23 @@ int Dashboard::selected(const std::vector<Item> &items) const {
     return first;
 }
 
+void Dashboard::show(Page p) {
+    if (p == Chat && page_ != Chat) chat_.to_bottom();
+    page_ = p;
+}
+
+SettingsInfo Dashboard::settings_info(const View &v) const {
+    SettingsInfo s = v.settings;
+    s.speech_models = v.voice.models;
+    s.speech_model = v.voice.model;
+    s.now = v.now;
+    return s;
+}
+
 bool Dashboard::animating(const View &v) const {
+    if (page_ == Settings) return false;
+    if (page_ == Chat)
+        return v.chat.busy || v.voice.phase != app::VoiceState::Idle || v.status.phase == app::Status::Loading;
     return v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
            v.status.phase == app::Status::Benchmarking || v.api.generating;
 }
@@ -227,6 +192,28 @@ Action Dashboard::press(uint32_t b, const View &v) {
     }
     if (b & kOptions) {
         confirm_close_ = true;
+        return a;
+    }
+    if (b & kL1) {
+        show(page_ == Models ? Chat : page_ == Chat ? Settings : Models);
+        return a;
+    }
+    if (page_ == Settings) {
+        const SettingChange ch = settings_.press(b, settings_info(v));
+        if (ch.any) {
+            a.kind = Action::Set;
+            a.name = ch.name;
+            a.value = ch.value;
+        }
+        if (b & kCircle) page_ = Models;
+        return a;
+    }
+    if (page_ == Chat) {
+        chat_.press(b);
+        if ((b & kTriangle) && (v.chat.busy || v.speaking)) a.kind = Action::ChatStop;
+        else if ((b & kSquare) && !v.chat.turns.empty()) a.kind = Action::ChatClear;
+        if (a.kind == Action::ChatClear) chat_.to_bottom();
+        if (b & kCircle) page_ = Models;
         return a;
     }
     const auto list = items(v);
@@ -261,6 +248,34 @@ Action Dashboard::press(uint32_t b, const View &v) {
 }
 
 void Dashboard::draw_background(Canvas &c) {
+    if (page_ == Settings) {
+        if (settings_background_.empty()) {
+            Canvas bg(W, H);
+            bg.gradient(0, 0, W, H, kBgTop, kBgBottom);
+            bg.fill(LX, 168, 1848 - LX, 1, kPanelLine);
+            for (auto [x, y, w, h] : {std::array<int, 4>{LX, PT, LW, SB - PT}, std::array<int, 4>{RX, PT, RW, SB - PT}}) {
+                bg.round_rect((float)x, (float)y, (float)w, (float)h, 20, kPanel);
+                bg.round_rect_line((float)x, (float)y, (float)w, (float)h, 20, 1.5f, kPanelLine);
+            }
+            settings_background_.assign(bg.pixels(), bg.pixels() + (size_t)W * H);
+        }
+        memcpy(c.pixels(), settings_background_.data(), settings_background_.size() * 4);
+        return;
+    }
+    if (page_ == Chat) {
+        if (chat_background_.empty()) {
+            Canvas bg(W, H);
+            bg.gradient(0, 0, W, H, kBgTop, kBgBottom);
+            bg.fill(LX, 168, 1848 - LX, 1, kPanelLine);
+            for (auto [x, y, w, h] : {std::array<int, 4>{CX, PT, CW, CB - PT}, std::array<int, 4>{CX, IY, CW, IH}}) {
+                bg.round_rect((float)x, (float)y, (float)w, (float)h, 20, kPanel);
+                bg.round_rect_line((float)x, (float)y, (float)w, (float)h, 20, 1.5f, kPanelLine);
+            }
+            chat_background_.assign(bg.pixels(), bg.pixels() + (size_t)W * H);
+        }
+        memcpy(c.pixels(), chat_background_.data(), chat_background_.size() * 4);
+        return;
+    }
     if (background_.empty()) {
         Canvas bg(W, H);
         bg.gradient(0, 0, W, H, kBgTop, kBgBottom);
@@ -296,9 +311,24 @@ void Dashboard::draw_header(Canvas &c, const View &v) {
     }
     const int left = pill(c, smallb_, 1848, 48, state, col);
     c.circle((float)left - 18, 65, 7, col);
+    draw_tabs(c);
     const bool up = !st.serving.empty() && st.phase == app::Status::Serving;
     c.text_right(smallb_, 1848, 132, v.url, up ? kAccent : kText2);
     c.text_right(small_, 1848 - Canvas::measure(smallb_, v.url) - 12, 132, "API", kMuted);
+}
+
+// The pages, as tabs right of the title, with the button that switches them.
+void Dashboard::draw_tabs(Canvas &c) {
+    int x = 820;
+    const int y = 140;
+    x += key_cap(c, smallb_, x, y - 2, "L1") + 24;
+    for (Page p : {Models, Chat, Settings}) {
+        const char *name = p == Models ? "Models" : p == Chat ? "Chat" : "Settings";
+        const int w = Canvas::measure(bodyb_, name);
+        c.text(bodyb_, x, y, name, p == page_ ? kText : kText2);
+        if (p == page_) c.round_rect((float)x, 163, (float)w, 5, 2.5f, kAccent);
+        x += w + 40;
+    }
 }
 
 void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &list, int sel) {
@@ -554,11 +584,61 @@ void Dashboard::draw_activity(Canvas &c, const View &v) {
 void Dashboard::draw_footer(Canvas &c) {
     int x = LX;
     const int y = 1046;
+    x += key_cap(c, smallb_, x, y, "L1") + 12;
+    x += c.text(small_, x, y, "Chat", kText2) + 40;
     x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
     struct {
         PadGlyph g;
         const char *text;
     } hints[] = {{kGlyphCross, "Serve"}, {kGlyphSquare, "GPU check"}, {kGlyphTriangle, "Speed test"}, {kGlyphCircle, "Stop serving"}};
+    for (auto &h : hints) {
+        glyph(c, (float)x + 16, (float)y - 8, h.g);
+        x += 40 + c.text(small_, x + 40, y, h.text, kText2) + 36;
+    }
+    const int ow = Canvas::measure(smallb_, "OPTIONS") + 28;
+    c.round_rect((float)x, (float)y - 25, (float)ow, 34, 17, rgb(0x1E2850));
+    c.text(smallb_, x + 14, y - 1, "OPTIONS", kText2);
+    c.text(small_, x + ow + 12, y, "Close", kText2);
+}
+
+void Dashboard::draw_chat_footer(Canvas &c, const View &v) {
+    int x = LX;
+    const int y = 1046;
+    x += key_cap(c, smallb_, x, y, "L1") + 12;
+    x += c.text(small_, x, y, "Settings", kText2) + 40;
+    const bool talk = !v.voice.model.empty();
+    x += key_cap(c, smallb_, x, y, "R1", talk) + 12;
+    x += c.text(small_, x, y, "Hold to talk", talk ? kText2 : kMuted) + 40;
+    x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Scroll", kText2) + 40;
+    struct {
+        PadGlyph g;
+        const char *text;
+        bool on;
+    } hints[] = {{kGlyphTriangle, v.speaking && !v.chat.busy ? "Stop speaking" : "Stop the reply",
+                  v.chat.busy || v.speaking},
+                 {kGlyphSquare, "New chat", !v.chat.turns.empty()},
+                 {kGlyphCircle, "Back", true}};
+    for (auto &h : hints) {
+        glyph(c, (float)x + 16, (float)y - 8, h.g, h.on);
+        x += 40 + c.text(small_, x + 40, y, h.text, h.on ? kText2 : kMuted) + 36;
+    }
+    const int ow = Canvas::measure(smallb_, "OPTIONS") + 28;
+    c.round_rect((float)x, (float)y - 25, (float)ow, 34, 17, rgb(0x1E2850));
+    c.text(smallb_, x + 14, y - 1, "OPTIONS", kText2);
+    c.text(small_, x + ow + 12, y, "Close", kText2);
+}
+
+void Dashboard::draw_settings_footer(Canvas &c) {
+    int x = LX;
+    const int y = 1046;
+    x += key_cap(c, smallb_, x, y, "L1") + 12;
+    x += c.text(small_, x, y, "Models", kText2) + 40;
+    x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
+    x += c.text(small_, x, y, "\xE2\x86\x90\xE2\x86\x92  Change", kText2) + 40;
+    struct {
+        PadGlyph g;
+        const char *text;
+    } hints[] = {{kGlyphSquare, "Default"}, {kGlyphCircle, "Back"}};
     for (auto &h : hints) {
         glyph(c, (float)x + 16, (float)y - 8, h.g);
         x += 40 + c.text(small_, x + 40, y, h.text, kText2) + 36;
@@ -588,6 +668,22 @@ void Dashboard::draw_confirm(Canvas &c) {
 void Dashboard::draw(Canvas &c, const View &v) {
     draw_background(c);
     draw_header(c, v);
+    if (page_ == Settings) {
+        const SettingsInfo info = settings_info(v);
+        settings_.draw(c, info, LX, PT, LW, SB - PT);
+        settings_.draw_details(c, info, RX, PT, RW, SB - PT);
+        draw_settings_footer(c);
+        if (confirm_close_) draw_confirm(c);
+        return;
+    }
+    if (page_ == Chat) {
+        chat_.draw(c, v.chat, CX, PT, CW, CB - PT, v.now, [&](const std::string &f) { return name_of(v, f); },
+                   v.status.phase == app::Status::Serving ? v.status.serving : std::string(), !v.voice.model.empty());
+        chat_.draw_input(c, v.chat, v.voice, v.now, CX, IY, CW, IH);
+        draw_chat_footer(c, v);
+        if (confirm_close_) draw_confirm(c);
+        return;
+    }
     const auto list = items(v);
     int sel = selected(list);
     if (sel >= 0 && selected_key_.empty()) {
