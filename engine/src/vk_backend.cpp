@@ -52,6 +52,7 @@
 #include "mv16_glu_q4_k.spv.h"
 #include "mv16_q4_k.spv.h"
 #include "mv16_q6_k.spv.h"
+#include "mvt_glu_q4_k.spv.h"
 #include "mvt_q4_k.spv.h"
 #include "mvt_q6_k.spv.h"
 #include "mm_f16.spv.h"
@@ -275,6 +276,7 @@ private:
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV16")) mv16_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT")) mvt_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_MVT_GLU")) mvt_glu_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT_ROWS")) mvt_rows_ = std::min(4, std::max(1, atoi(e)));
         if (const char *e = getenv("TS5_BARRIER")) barrier_mode_ = std::min(2, std::max(0, atoi(e)));
         if (const char *e = getenv("TS5_FUSE")) fuse_ = atoi(e) != 0;
@@ -445,7 +447,9 @@ private:
             if (!make_pipe("mvt_q4_k" + s, spv_mvt_q4_k, sizeof(spv_mvt_q4_k), 3, err, nt, mvt_rows_) ||
                 !make_pipe("mvt_q4_k" + s + ".1", spv_mvt_q4_k, sizeof(spv_mvt_q4_k), 3, err, nt, 1) ||
                 !make_pipe("mvt_q6_k" + s, spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, mvt_rows_) ||
-                !make_pipe("mvt_q6_k" + s + ".1", spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, 1))
+                !make_pipe("mvt_q6_k" + s + ".1", spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, 1) ||
+                !make_pipe("mvt_glu_q4_k" + s, spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, mvt_rows_) ||
+                !make_pipe("mvt_glu_q4_k" + s + ".1", spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, 1))
                 return false;
         }
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
@@ -781,17 +785,28 @@ private:
                (H / HKV) * HD <= 1024;
     }
 
-    // One token through gate and up of Q4_K with swiglu, in one kernel
-    // (mv16_glu_q4_k), into g_. False where that doesn't apply.
+    // Gate and up of Q4_K with swiglu in one kernel, into g_: one token
+    // through mv16_glu_q4_k, a verify batch through mvt_glu_q4_k, which
+    // loads each token's x once for both matrices. False where that
+    // doesn't apply.
     bool ffn_glu(const Layer &L, int n) {
-        if (n != 1 || !fuse_ || !mv16_ || !fast_matvec_ || L.w_gate.type() != GGML_Q4_K ||
+        const bool batch = n >= 2 && n <= 8 && mvt_ && mvt_glu_;
+        if ((n == 1 ? !mv16_ : !batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != GGML_Q4_K ||
             L.w_up.type() != GGML_Q4_K || L.w_gate.ne0() != L.w_up.ne0() || L.w_gate.ne1() != L.w_up.ne1())
             return false;
         const uint32_t rows = (uint32_t)L.w_gate.ne1();
         struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; } pc{
-            (uint32_t)L.w_gate.ne0(), rows, 1, (uint32_t)L.w_gate.info->row_bytes(), (uint32_t)L.w_gate.ne0(),
-            rows, 0, 0};
-        mat_vec("mv16_glu_q4_k", {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, rows, "ffn_gate+up");
+            (uint32_t)L.w_gate.ne0(), rows, (uint32_t)n, (uint32_t)L.w_gate.info->row_bytes(),
+            (uint32_t)L.w_gate.ne0(), rows, 0, 0};
+        if (n == 1) {
+            mat_vec("mv16_glu_q4_k", {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, rows, "ffn_gate+up");
+            return true;
+        }
+        const bool one = rows < (uint32_t)mv_rows_min_ || mvt_rows_ == 1;
+        const uint32_t nr = one ? 1 : mvt_rows_, groups = (rows + nr - 1) / nr;
+        const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
+        dispatch("mvt_glu_q4_k." + std::to_string(n) + (one ? ".1" : ""),
+                 {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, mx, my, "ffn_gate+up");
         return true;
     }
 
@@ -923,6 +938,7 @@ private:
     // 8 threads per block (TS5_MV16=0: matvec_q4_k and matvec_q6_k).
     bool mv16_ = true;
     bool mvt_ = true;
+    bool mvt_glu_ = true;
     // Rows per workgroup of the verify-batch kernels (TS5_MVT_ROWS, 1 to 4),
     // which share each token's x loads; one for matrices under mv_rows_min_.
     uint32_t mvt_rows_ = 4;
