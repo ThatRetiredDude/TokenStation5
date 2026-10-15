@@ -134,22 +134,31 @@ Prompts of 8 tokens or more (`TS5_ATTN_PF` sets how many; 0: never) use
 `shaders/attn_pf.glsl` where heads are a multiple of 16 wide and at most 128:
 64 rows per workgroup (7 heads x 9 tokens on Qwen 2.5 7B, 4 x 16 on Llama 3.1
 8B), four threads per row, each holding a quarter of the row's query and
-output in registers. Keys and values pass through shared memory 32 at a time,
-the next tile loading into registers while the current one is used. attn
+output in registers. Keys and values pass through shared memory 32 at a time
+(f16 for the f16 cache: the GPU multiplies f16 by f32 into an f32 sum at the
+f32 rate), the next tile loading into registers while the current one is
+used. attn
 holds one token's 7 rows on Qwen 2.5 7B and re-reads the cache for every
 token; attn_pf reads it once per 9 tokens and does 64 rows of work per tile.
-A short prompt late in a chat splits its keys too.
+A short prompt late in a chat splits its keys too. With heads of 128 (all four
+console models) it runs as `attn_pf128`, the same code built with the head
+size fixed, so its loops unroll: built for any size it branches on every 16
+dims and waits for each shared-memory read before the next
+(`TS5_ATTN_PF128=0` runs that build).
 
 Generation over 256 keys or more (`TS5_ATTN_DEC` sets how many; 0: never),
-with an f16 cache and heads of 128, uses `shaders/attn_dec.comp`: up to 8
-rows per workgroup, its slice of the keys 128 at a time. Thread t scores key
-t against every row, reading the key's 256 bytes straight from the cache,
-and thread d then adds value column d of the 128 keys into every row's sum;
-the queries and the weights sit in shared memory, where all threads read the
-same word at once. That's three barriers per 128 keys where attn has four
-per 16, and no 128-long sums from shared memory one value at a time. On the
-console, Coder 7B wrote 65 tok/s at 0.5k tokens of context and 23 at 18k
-with attn, 47 at 18k with attn_dec. Under 256 keys attn is as fast.
+with an f16 cache and heads of 128, uses `shaders/attn_dec.glsl`: up to 8
+rows per workgroup (`attn_dec`; `attn_dec4` for 4, where a KV head has 3 or
+4 query heads), its slice of the keys 128 at a time. Thread t scores key t
+against every row, reading the key's 256 bytes straight from the cache; the
+queries are the same for every thread, so they come through scalar loads.
+Then each group of 32 threads takes a quarter of the tile's keys and each
+thread 4 value columns of them, and the four groups' sums are added up once,
+at the end. That's three barriers per 128 keys where attn has four per 16.
+On the console, Coder 7B wrote 65 tok/s at 0.5k tokens of context and 23 at
+18k with attn, 47 at 18k with the first version of attn_dec (the queries and
+weights in shared memory, one value column per thread). Under 256 keys attn
+is as fast.
 
 `TS5_PROFILE=1` writes a GPU timestamp after every dispatch; `ts5 bench`
 then prints the GPU's time per kernel (matmuls by weight) for the prompt and
