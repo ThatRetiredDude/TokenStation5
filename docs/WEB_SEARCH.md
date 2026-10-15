@@ -1,10 +1,13 @@
 # Web search
 
 ts5 can search the web for the model. Give it a [Tavily](https://tavily.com)
-API key and every chat request gets a `web_search` tool: the model decides
-when to search, ts5 calls Tavily over HTTPS from the console, gives the
-results back to the model, and the model answers from them with the URLs it
-used. No PC, Pi or proxy is involved, and it works from any chat client,
+API key and every chat request gets a `web_search` tool. The tool tells the
+model to search only for things after its training data (news, prices,
+weather, a specific site) or when the user asks it to look something up, and
+to answer general questions itself; each search costs a Tavily credit and a
+few seconds. When the model does search, ts5 calls Tavily over HTTPS from the
+console, gives the results back to the model, and the model answers from them
+with the URLs it used. No PC, Pi or proxy is involved, and it works from any chat client,
 including ones that know nothing about tools.
 
 ## Turn it on

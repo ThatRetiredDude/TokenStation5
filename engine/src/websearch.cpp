@@ -32,9 +32,11 @@ std::string tavily_key() { return env_or("TAVILY_API_KEY", ""); }
 Json web_search_tool(const std::string &today) {
     std::string tool =
         "{\"type\": \"function\", \"function\": {\"name\": \"web_search\", \"description\": \"Search the web. "
-        "Returns the top results, each with a title, URL and text from the page. Use it for anything recent, "
-        "anything you are unsure of, and anything the user asks you to look up; then answer from the results "
-        "and cite the URLs you used. Today is " +
+        "Returns the top results, each with a title, URL and text from the page. Use it only when the answer "
+        "depends on something after your training data (news, prices, weather, schedules, new releases, "
+        "a specific website), or when the user asks you to look something up. Do not search for general "
+        "knowledge, explanations, definitions, writing or code: answer those yourself. When you do search, "
+        "answer from the results and cite the URLs you used. Today is " +
         today +
         ".\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", "
         "\"description\": \"What to search for, as you would type it into a search engine.\"}}, "
