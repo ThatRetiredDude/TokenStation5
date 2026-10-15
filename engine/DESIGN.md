@@ -72,6 +72,10 @@ driver's 10-second no-progress limit (`TS5_LAYERS_PER_SUBMIT` overrides).
 A generated token is one submit, recorded while the GPU waits;
 `TS5_DEC_SUBMIT=n` instead submits it n layers at a time without waiting in
 between, so the GPU starts on the first layers while the CPU records the rest.
+On the PS5 a submit made while the GPU is busy waits for it, so that overlaps
+little. `TS5_AHEAD=1` instead records the next token's command buffer while
+the GPU runs this one: it fits whatever token comes, since the kernels read
+the token's id from a buffer, and a call at any other position records anew.
 
 Weights stay in their GGUF block layout on the GPU, one buffer per tensor.
 Kernels read them through 8-bit storage access and dequantize 32-value "units"
@@ -172,7 +176,9 @@ is as fast.
 `TS5_PROFILE=1` writes a GPU timestamp after every dispatch; `ts5 bench`
 then prints the GPU's time per kernel (matmuls by weight) for the prompt and
 for generation, and the CPU's time per forward call: recording, in
-vkQueueSubmit, copying the logits out, and waiting for the GPU.
+vkQueueSubmit (and how much of that waiting for the queue's lock, which the
+title's screen shares), copying the logits out, and waiting for the GPU.
+`TS5_PROFILE=2` prints the CPU's times alone, without the timestamps.
 
 ## Memory
 

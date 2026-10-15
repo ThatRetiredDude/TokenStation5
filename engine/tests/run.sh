@@ -125,6 +125,13 @@ TS5_DEC_SUBMIT=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 -
     "${shapes[@]}"
 TS5_DEC_SUBMIT=1 TS5_PROFILE=1 "$ts5" bench -m "${shapes[1]}" --backend vk > "$work/bench-dec-submit.txt"
 grep -q "CPU per call" "$work/bench-dec-submit.txt"
+# Each generated token's command buffer recorded while the GPU runs the one
+# before (the token's id is read when it runs), with the 8-bit cache too.
+TS5_AHEAD=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 40 --step "${shapes[@]}"
+TS5_AHEAD=1 TS5_KV=q8 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 40 --step \
+    "${shapes[@]}"
+TS5_AHEAD=1 TS5_PROFILE=2 "$ts5" bench -m "${shapes[1]}" --backend vk > "$work/bench-ahead.txt"
+grep -q "(128 calls, 128 recorded ahead)" "$work/bench-ahead.txt"
 # attn_dec (generation over a long cache; TS5_ATTN_DEC=1 from the first key),
 # heads of 128: one token per call, its keys in slices of 128, then 300 at
 # once without attn_pf (8 rows of 1 or 2 tokens a workgroup).
