@@ -102,13 +102,17 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   for 256 tokens of Qwen 3 8B, 4 of Qwen 2.5 7B) take mmb this way too, in
   up to 16 slices (`TS5_MMB_SMALL=0`: the 64 x 64 kernel); k, v and q's
   partial sums fit in `split_` together (12M floats), so their splits add
-  no barriers. Where the device has f16
-  arithmetic (`mmb16_*`, the same shader with `MMB_F16`), shared memory holds
-  f16 and each step's 32 products are summed in packed f16, two per
+  no barriers. mmb sums in f32. With `TS5_MMB_F16=1`, where the device has
+  f16 arithmetic (`mmb16_*`, the same shader with `MMB_F16`), shared memory
+  holds f16 and each step's 32 products are summed in packed f16, two per
   `v_pk_fma_f16`, before they're added to f32 sums (`v_fma_mix_f32`): half
-  the instructions of f32 FMAs, and no f16 sum longer than 32 products. On
-  the test models the logits move by 0.1% of their range (0.01% in f32).
-  `TS5_MMB_F16=0` keeps f32.
+  the instructions of f32 FMAs, and no f16 sum longer than 32 products. It
+  reads prompts 8% faster on Llama 3.2 3B and 13% on Qwen 2.5 Coder 7B
+  (pp512 on the PS5), but Llama 3.x's large activations make the 3B's logits
+  move by 0.78% of their range over 512 tokens (over the GPU check's 0.5%
+  bar) against 0.04% in f32, so f16 is off by default. Moving the f16 sums
+  into f32 every 8 products instead of 32 didn't help and cost as much as
+  f32.
 - 9 or more (`mm_*`, `shaders/matmul_tiled.glsl`): 64 rows x 64 tokens per
   workgroup. Half the threads dequantize a 64 x 64 slice of W into shared
   memory while the other half load the matching slice of X, then each thread
