@@ -108,6 +108,9 @@ engine/build/ts5 run -m model.gguf --chat -p "Write a haiku about a PS5"
 
 # measure prompt and generation speed
 engine/build/ts5 bench -m model.gguf
+
+# download a model over HTTPS, checking its hash; a stopped download goes on where it left off
+engine/build/ts5 fetch https://huggingface.co/REPO/resolve/main/model.gguf model.gguf --sha256 HEX
 ```
 
 Then point any OpenAI-compatible client at `http://<host>:8081/v1`: Open
