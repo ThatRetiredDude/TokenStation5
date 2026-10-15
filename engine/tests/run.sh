@@ -119,6 +119,29 @@ TS5_ATTN_SPLITS=3 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 100 --step "${shapes[@]}"
 TS5_ATTN_SPLITS=7 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 40 --step \
     "${shapes[@]}"
+# A generated token's layers submitted one at a time, without waiting in
+# between, and the same with the profile's timestamps across the submits.
+TS5_DEC_SUBMIT=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 40 --step \
+    "${shapes[@]}"
+TS5_DEC_SUBMIT=1 TS5_PROFILE=1 "$ts5" bench -m "${shapes[1]}" --backend vk > "$work/bench-dec-submit.txt"
+grep -q "CPU per call" "$work/bench-dec-submit.txt"
+# Each generated token's command buffer is recorded while the GPU runs the
+# one before (the token's id is read when it runs; the step tests above go
+# through it): every generated token reuses one, and with TS5_AHEAD=0 none
+# is recorded and the logits stay the same.
+TS5_PROFILE=2 "$ts5" bench -m "${shapes[1]}" --backend vk > "$work/bench-ahead.txt"
+grep -q "(128 calls, 128 recorded ahead)" "$work/bench-ahead.txt"
+TS5_AHEAD=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 40 --step "${shapes[@]}"
+TS5_AHEAD=0 TS5_PROFILE=2 "$ts5" bench -m "${shapes[1]}" --backend vk > "$work/bench-plain.txt"
+grep -q "(128 calls, 0 recorded ahead)" "$work/bench-plain.txt"
+# A recording ahead that fails only stops recording ahead: the call it was
+# made in, and the generation, go on with the same output.
+TS5_DRAFT=0 TS5_AHEAD=0 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "one two three four" -n 40 --temp 0 \
+    > "$work/af-off.txt" 2> /dev/null
+TS5_DRAFT=0 TS5_AHEAD_FAIL=5 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "one two three four" -n 40 \
+    --temp 0 > "$work/af-on.txt" 2> "$work/af-on.err"
+cmp "$work/af-off.txt" "$work/af-on.txt"
+grep -q "recording ahead stopped: TS5_AHEAD_FAIL" "$work/af-on.err"
 # attn_dec (generation over a long cache; TS5_ATTN_DEC=1 from the first key),
 # heads of 128: one token per call, its keys in slices of 128, then 300 at
 # once without attn_pf (8 rows of 1 or 2 tokens a workgroup).
@@ -176,6 +199,15 @@ curl -sf http://127.0.0.1:18190/v1/completions -H 'Content-Type: application/jso
 kill $spid; wait $spid || true
 grep -q '"draft_n":[1-9]' "$work/sd-serve.json"
 grep -q "draft [0-9]*/[1-9][0-9]*, sample [0-9]* ms" "$work/sd-serve.err"
+# Drafting on the GPU, where each generated token's command buffer is
+# recorded ahead (the default): verify batches and rejected drafts record
+# anew, and the output is the same as without recording ahead.
+TS5_DRAFT=7 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-vk.txt" \
+    2> "$work/sd-vk.err"
+grep -q "draft [0-9]*/[1-9]" "$work/sd-vk.err"
+TS5_AHEAD=0 TS5_DRAFT=7 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 \
+    > "$work/sd-vk0.txt" 2> /dev/null
+cmp "$work/sd-vk.txt" "$work/sd-vk0.txt"
 echo "== the draft model cascade: a non-repeating prompt, the model as its own drafter"
 nr="The sky turned a deep shade of violet over the quiet harbor town that evening"
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$nr" -n 200 --temp 0 > "$work/dm-off.txt" 2> /dev/null
