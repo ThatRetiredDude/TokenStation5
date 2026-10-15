@@ -723,17 +723,18 @@ void Dashboard::draw_logs_footer(Canvas &c) {
     draw_close_hint(c, x, y);
 }
 
-void Dashboard::draw_footer(Canvas &c) {
+void Dashboard::draw_footer(Canvas &c, const View &v, const Item *sel) {
     int x = LX;
     const int y = 1046;
     x += key_cap(c, smallb_, x, y, "L1") + 12;
     x += c.text(small_, x, y, page_name(next(Models)), kText2) + 40;
     x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
+    const app::ModelInfo *m = sel && sel->kind == Item::Model ? &v.models[sel->index] : nullptr;
     struct {
         PadGlyph g;
         const char *text;
     } hints[] = {{kGlyphCross, "Start or stop"},
-                 {kGlyphSquare, "GPU check"},
+                 {kGlyphSquare, m && cant_run(*m) ? "Details" : "GPU check"},
                  {kGlyphTriangle, "Speed test"},
                  {kGlyphCircle, "Home"}};
     for (auto &h : hints) {
@@ -867,7 +868,7 @@ void Dashboard::draw(Canvas &c, const View &v) {
     draw_list(c, v, list, sel);
     if (sel >= 0) draw_details(c, v, list[sel]);
     draw_activity(c, v, sel >= 0 ? &list[sel] : nullptr);
-    draw_footer(c);
+    draw_footer(c, v, sel >= 0 ? &list[sel] : nullptr);
     if (confirm_ != NoConfirm) draw_confirm(c);
 }
 

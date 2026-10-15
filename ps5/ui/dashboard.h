@@ -94,7 +94,7 @@ private:
     void draw_list(Canvas &c, const View &v, const std::vector<Item> &items, int sel);
     void draw_details(Canvas &c, const View &v, const Item &item);
     void draw_activity(Canvas &c, const View &v, const Item *sel);
-    void draw_footer(Canvas &c);
+    void draw_footer(Canvas &c, const View &v, const Item *sel);
     void draw_home_footer(Canvas &c, const View &v);
     HomeInfo home_info(const View &v) const;
     void draw_chat_footer(Canvas &c, const View &v);
