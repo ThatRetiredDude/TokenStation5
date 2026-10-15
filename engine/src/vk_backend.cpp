@@ -23,6 +23,7 @@
 // Generated SPIR-V (one header per shader).
 #include "attention.spv.h"
 #include "attn.spv.h"
+#include "attn_dec.spv.h"
 #include "attn_merge.spv.h"
 #include "attn_pf.spv.h"
 #include "attn_pf_q8.spv.h"
@@ -275,6 +276,7 @@ private:
         if (const char *e = getenv("TS5_ATTN")) attn_fast_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_SPLITS")) attn_splits_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
+        if (const char *e = getenv("TS5_ATTN_DEC")) attn_dec_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV16")) mv16_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT")) mvt_ = atoi(e) != 0;
@@ -465,7 +467,7 @@ private:
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
-        P(rmsnorm, 3) P(qkv_post, 10) P(qkv_post_q8, 12) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2)
+        P(rmsnorm, 3) P(qkv_post, 10) P(qkv_post_q8, 12) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) P(attn_dec, 5)
         P(attn_pf, 5) P(attn_pf_q8, 7)
         P(swiglu, 2)
 #undef P
@@ -784,27 +786,30 @@ private:
             return;
         }
         // Rows per workgroup: the query heads of one KV head, for as many
-        // tokens as fit attn's 1024 floats of queries, or attn_pf's 64 rows
-        // (prompts: attn_pf_min_ tokens or more).
-        const uint32_t G = H / HKV;
+        // tokens as fit attn's 1024 floats of queries, attn_pf's 64 rows
+        // (prompts: attn_pf_min_ tokens or more) or attn_dec's 8 (generation
+        // over attn_dec_min_ keys or more, f16 cache, heads of 128).
+        const uint32_t G = H / HKV, keys = (uint32_t)(pos0 + n);
         const bool pf = attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && HD <= 128 && G <= 64;
-        const uint32_t tq = pf ? 64 / G : std::max<uint32_t>(1, 1024 / HD / G);
-        const uint32_t groups = HKV * (((uint32_t)n + tq - 1) / tq), keys = (uint32_t)(pos0 + n);
+        const bool dec = !pf && attn_dec_min_ && keys >= (uint32_t)attn_dec_min_ && kv_ == KvType::F16 &&
+                         HD == 128 && G <= 8;
+        const uint32_t tq = pf ? 64 / G : dec ? 8 / G : std::max<uint32_t>(1, 1024 / HD / G);
+        const uint32_t groups = HKV * (((uint32_t)n + tq - 1) / tq);
         // Few workgroups for many keys (generation, or a short prompt late in
         // a chat): split the keys so every compute unit gets some, about 256
-        // workgroups and 32 keys or more each.
+        // workgroups and 32 keys or more each (attn_dec: 128).
+        const uint32_t bk = dec ? 128u : pf ? 32u : std::min(32u, 2048 / HD), min_keys = dec ? 128u : 32u;
         uint32_t n_split = 1;
         const uint32_t fit = (uint32_t)(PART / ((size_t)n * H * (HD + 2)));
-        if (groups < 64) n_split = std::min({(256 + groups - 1) / groups, (keys + 31) / 32, 64u, fit});
+        if (groups < 64) n_split = std::min({(256 + groups - 1) / groups, (keys + min_keys - 1) / min_keys, 64u, fit});
         if (attn_splits_) n_split = std::min({(uint32_t)attn_splits_, keys, 64u, fit});
         n_split = std::max(1u, n_split);
-        const uint32_t bk = pf ? 32u : std::min(32u, 2048 / HD);
         uint32_t chunk = (keys + n_split - 1) / n_split;
         chunk = (chunk + bk - 1) / bk * bk;
         n_split = (keys + chunk - 1) / chunk;
         struct { uint32_t head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split; float scale; } pc{
             HD, H, HKV, (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale};
-        const std::string kern = std::string(pf ? "attn_pf" : "attn") + (kv_ == KvType::Q8 ? "_q8" : "");
+        const std::string kern = dec ? "attn_dec" : std::string(pf ? "attn_pf" : "attn") + (kv_ == KvType::Q8 ? "_q8" : "");
         if (kv_ == KvType::Q8)
             dispatch(kern, {&q_, &kc_, &vc_, &att_, &part_, &ks_, &vs_}, pc, groups, n_split);
         else
@@ -968,6 +973,9 @@ private:
     int attn_splits_ = 0;
     // Prompts of at least this many tokens use attn_pf (TS5_ATTN_PF; 0: never).
     int attn_pf_min_ = 8;
+    // Generation over at least this many keys uses attn_dec (TS5_ATTN_DEC;
+    // 0: never).
+    int attn_dec_min_ = 256;
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).
     bool mmb_ = true;
