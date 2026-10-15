@@ -126,6 +126,19 @@ wait_log() {
     fail "no '$1' in the log after 30 s"
 }
 health_says() { curl -s "http://127.0.0.1:$port/health" | grep -qF "$1"; }
+# Waits up to $3 seconds for $2 lines in usage.tsv for which a Python
+# expression holds, with each line's columns by name in r.
+usage_has() {
+    for _ in $(seq 0 $(($3 * 10))); do
+        python3 -c 'import sys
+lines = open(sys.argv[1]).read().splitlines()
+names = next(l[1:].split("\t") for l in lines if l.startswith("#") and "\t" in l)
+rs = [dict(zip(names, l.split("\t"))) for l in lines if l and l[0] != "#"]
+sys.exit(sum(1 for r in rs if eval(sys.argv[2])) < int(sys.argv[3]))' "$home/usage.tsv" "$1" "$2" 2> /dev/null && return 0
+        sleep 0.1
+    done
+    fail "fewer than $2 lines in usage.tsv where $1: $(cat "$home/usage.tsv" 2> /dev/null)"
+}
 # The next frame, saved as shots/NAME.bmp.
 shot() {
     rm -f "$home/screen.bmp"
@@ -141,6 +154,10 @@ shot() {
 press() { echo "$*" > "$home/press"; sleep 0.5; }
 
 name=$(basename "$model")
+# The model's general.name, which usage.tsv names it by.
+gname=$(python3 -c 'import sys, gguf
+f = gguf.GGUFReader(sys.argv[1]).fields.get("general.name")
+print(bytes(f.parts[f.data[0]]).decode() if f else sys.argv[2])' "$model" "${name%.gguf}")
 
 # Serves also load a draft model (the model as its own drafter), proving the
 # title keeps the file's token list until the vocabulary check has read it.
@@ -168,6 +185,8 @@ wait_log "draft model $name ready"
 reply=$(curl -sf "http://127.0.0.1:$port/v1/chat/completions" -H 'Content-Type: application/json' \
     -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}')
 grep -q '"completion_tokens":4' <<< "$reply" || fail "chat completion: $reply"
+# Its usage line, written within 2 s by the main loop.
+usage_has "r['status'] == '200' and r['gen'] == '4' and r['name'] == '$gname' and r['client'] == '127.0.0.1'" 1 3
 shot serving
 
 echo "== square: the GPU check on the serving model, then serving again"
@@ -295,6 +314,8 @@ grep -q "^ts5-title: chat: reply done" <(grep -E "^ts5-title: chat: reply" "$hom
 second=$(grep -oE "^ts5: chatcmpl-[0-9]+ prompt [0-9]+" "$home/ts5.log" | tail -1 | awk '{print $4}')
 [ "$second" -gt "$first" ] || fail "the second request didn't carry the first exchange ($first, then $second tokens)"
 shot chat2
+# The TV's chat goes through the API too, from 127.0.0.1.
+usage_has "r['client'] == '127.0.0.1' and r['kind'] == 'chat' and r['stream'] == '1' and r['status'] == '200'" 2 3
 
 echo "== chat: triangle stops a reply; square starts a new chat"
 printf 'Count from one to two hundred, one number per line.\n' > "$home/chat"
@@ -395,10 +416,17 @@ rm "$home/ts5.env"
 
 echo "== the args file: another port"
 echo "serve -m \"$home/models/$name\" --port 18081" > "$home/ts5.args"
+# A request just before a restart: its usage line is written as the title
+# leaves. The Tavily key is still set, and never reaches usage.tsv.
+curl -sf "http://127.0.0.1:$port/v1/chat/completions" -H 'Content-Type: application/json' \
+    -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":3,"temperature":0,"web_search":false}' > /dev/null ||
+    fail "the chat completion before the restart"
 : > "$home/restart"
 wait_down
 port=18081
 wait_health
+usage_has "r['stream'] == '0' and r['gen'] == '3'" 1 0
+! grep -q "tvly-host-test-secret" "$home/usage.tsv" || fail "the Tavily key is in usage.tsv"
 
 echo "== keep-awake, and a dark screen after TS5_DIM_AFTER seconds without a button; a press brings back the dashboard"
 echo "TS5_DIM_AFTER=2" > "$home/ts5.env"
