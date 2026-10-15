@@ -69,6 +69,9 @@ Then the output norm and the vocabulary matmul for the last token (or every
 token for tests). Prompts are processed 256 tokens per call; big batches are
 split into submits of 4 layers so no submit runs anywhere near the PS5
 driver's 10-second no-progress limit (`TS5_LAYERS_PER_SUBMIT` overrides).
+A generated token is one submit, recorded while the GPU waits;
+`TS5_DEC_SUBMIT=n` instead submits it n layers at a time without waiting in
+between, so the GPU starts on the first layers while the CPU records the rest.
 
 Weights stay in their GGUF block layout on the GPU, one buffer per tensor.
 Kernels read them through 8-bit storage access and dequantize 32-value "units"
@@ -168,7 +171,8 @@ is as fast.
 
 `TS5_PROFILE=1` writes a GPU timestamp after every dispatch; `ts5 bench`
 then prints the GPU's time per kernel (matmuls by weight) for the prompt and
-for generation.
+for generation, and the CPU's time per forward call: recording, in
+vkQueueSubmit, copying the logits out, and waiting for the GPU.
 
 ## Memory
 
