@@ -99,10 +99,11 @@ std::string timings_json(const GenStats &st) {
     char b[512];
     snprintf(b, sizeof b,
              "{\"prompt_n\":%d,\"prompt_ms\":%.1f,\"prompt_per_second\":%.2f,"
-             "\"predicted_n\":%d,\"predicted_ms\":%.1f,\"predicted_per_second\":%.2f,\"cache_n\":%d}",
+             "\"predicted_n\":%d,\"predicted_ms\":%.1f,\"predicted_per_second\":%.2f,\"cache_n\":%d,"
+             "\"draft_n\":%d,\"draft_n_accepted\":%d}",
              st.prompt_evaluated, st.prompt_ms, st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0,
              st.gen_tokens, st.gen_ms, st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0,
-             st.prompt_tokens - st.prompt_evaluated);
+             st.prompt_tokens - st.prompt_evaluated, st.drafted, st.draft_accepted);
     return b;
 }
 
@@ -272,9 +273,15 @@ void handle(int fd, Server::State &state) {
             body += ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st) + "}";
             send_all(fd, response(200, body));
         }
-        fprintf(stderr, "ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s\n", id.c_str(), st.prompt_tokens,
-                st.prompt_evaluated, st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0,
-                st.gen_tokens, st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0);
+        fprintf(stderr, "ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, draft %d/%d, sample %.0f ms\n",
+                id.c_str(), st.prompt_tokens, st.prompt_evaluated,
+                st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0, st.gen_tokens,
+                st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0, st.draft_accepted, st.drafted,
+                st.sample_ms);
+        // TS5_PROFILE=1 (take_profile is empty otherwise): the per-kernel GPU
+        // table for this request, in serve mode as everywhere else.
+        std::string prof = e.backend().take_profile();
+        if (!prof.empty()) fputs(prof.c_str(), stderr);
     } else {
         send_all(fd, response(404, error_body("not found: " + r.path)));
     }
