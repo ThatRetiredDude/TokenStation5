@@ -153,6 +153,20 @@ cmp "$work/padr-off.txt" "$work/padr-on.txt"
 grep -q "draft model .* ready" "$work/padr-on.err"  # wider drafter accepted too
 grep -q "draft [0-9]*/[1-9][0-9]* accepted" "$work/padr-on.err"
 ! grep -q "draft model \(stopped\|failed\)" "$work/padr-on.err"
+echo "== a target whose token list itself is padded (and the reverse), as Qwen 7B pads against the 0.5B"
+mk_k qwen2-padlist qwen2 qwen2 --pad-tokens 128
+TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-padlist.gguf" -p "$nr" -n 100 --temp 0 > "$work/padl-off.txt" 2> /dev/null
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-kmix.gguf" "$ts5" run --backend cpu -m "$work/qwen2-padlist.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/padl-on.txt" 2> "$work/padl-on.err"
+cmp "$work/padl-off.txt" "$work/padl-on.txt"
+grep -q "draft model .* ready" "$work/padl-on.err"  # the drafter's shorter token list is accepted
+grep -q "draft [0-9]*/[1-9][0-9]* accepted" "$work/padl-on.err"
+! grep -q "draft model \(stopped\|failed\)" "$work/padl-on.err"
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-padlist.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/padlr-on.txt" 2> "$work/padlr-on.err"
+cmp "$work/padr-off.txt" "$work/padlr-on.txt"
+grep -q "draft model .* ready" "$work/padlr-on.err"  # a longer one too
+! grep -q "draft model \(stopped\|failed\)" "$work/padlr-on.err"
 echo "== ts5 check (GPU vs CPU in one command, as run on the console), then again on the saved answers"
 rm -f "$work"/qwen3-Q4_0.gguf*.ts5ref
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null
