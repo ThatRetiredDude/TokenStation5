@@ -71,6 +71,30 @@ inline std::string reason(const std::string &raw) {
     return r;
 }
 
+// A model's name as people write it: a general.name all in lower case, like
+// "qwen2.5-0.5b-instruct", becomes "Qwen2.5 0.5B Instruct"; a name with
+// capitals in it stays as it is.
+inline std::string pretty_model_name(const std::string &n) {
+    for (char c : n)
+        if (isupper((unsigned char)c)) return n;
+    std::string out;
+    bool start = true;
+    for (size_t i = 0; i < n.size(); i++) {
+        char c = n[i];
+        if (c == '-' || c == '_') {
+            out += ' ';
+            start = true;
+            continue;
+        }
+        const bool size_letter = (c == 'b' || c == 'm') && i > 0 && isdigit((unsigned char)n[i - 1]) &&
+                                 (i + 1 == n.size() || n[i + 1] == '-' || n[i + 1] == '_');
+        if ((start && isalpha((unsigned char)c)) || size_letter) c = (char)toupper((unsigned char)c);
+        out += c;
+        start = false;
+    }
+    return out;
+}
+
 // A model's name from its file name, for a model the library doesn't list.
 inline std::string model_name(const std::string &file) {
     std::string n = file.substr(file.find_last_of('/') == std::string::npos ? 0 : file.find_last_of('/') + 1);
