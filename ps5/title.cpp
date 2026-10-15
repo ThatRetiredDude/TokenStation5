@@ -64,6 +64,7 @@
 #include <cstring>
 #include <ctime>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -82,6 +83,7 @@
 #include "speak.h"
 #include "stt.h"
 #include "tts/synth.h"
+#include "usage.h"
 #include "vk_context.h"
 #include "voice.h"
 
@@ -142,6 +144,7 @@ constexpr const char *kSpeakTest = TS5_HOME "/speaktest";
 constexpr const char *kSpeakWav = TS5_HOME "/speaktest.wav";
 constexpr const char *kQuit = TS5_HOME "/quit";
 constexpr const char *kRestart = TS5_HOME "/restart";
+constexpr const char *kUsage = TS5_HOME "/usage.tsv";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
 
 constexpr int kWidth = 1920, kHeight = 1080;
@@ -158,7 +161,12 @@ void notify(const std::string &text) {
     printf("ts5-title: notify: %s\n", text.c_str());
 }
 
+// A line per API request (engine/src/usage.h): request threads queue them,
+// the main loop writes them every 2 s, and leave() writes what's left.
+ts5::UsageLog usage_log(kUsage);
+
 [[noreturn]] void leave(const char *path) {
+    usage_log.flush();
     printf("ts5-title: leaving (%s)\n", path);
     fflush(nullptr);
     sceSystemServiceLoadExec(path, nullptr);
@@ -470,6 +478,22 @@ int main(int, char **) {
     app::Library lib(kModelDirs, kResults);
     lib.scan();
     ts5::Server server;
+    // Each request's usage, named from the library (the file name without
+    // .gguf if it isn't there), queued for the main loop.
+    std::mutex names_mutex;
+    std::map<std::string, std::string> model_names;  // file: general.name
+    server.set_on_usage([&](const ts5::UsageRecord &r) {
+        ts5::UsageRecord u = r;
+        {
+            std::lock_guard<std::mutex> lk(names_mutex);
+            const auto it = model_names.find(r.model);
+            u.name = it != model_names.end() ? it->second : r.model.substr(0, r.model.rfind(".gguf"));
+        }
+        usage_log.push(u);
+    });
+    usage_log.start(TS5_VERSION);
+    double last_usage = 0;
+    bool usage_ok = true;
     api_port = opts.port;
     ip = lan_address();
     if (!server.start(opts.host, opts.port, err)) notify("TokenStation5: the API can't listen: " + err);
@@ -631,6 +655,8 @@ int main(int, char **) {
             for (const auto &m : v.models) names += (names.empty() ? "" : ", ") + m.file;
             if (names != listed) printf("ts5-title: models: %s\n", names.empty() ? "none" : names.c_str());
             listed = names;
+            std::lock_guard<std::mutex> lk(names_mutex);
+            for (const auto &m : v.models) model_names[m.file] = m.name;
         }
         const uint64_t version = runner.version();
         v.status = runner.status();
@@ -752,6 +778,13 @@ int main(int, char **) {
             drawn_speaking = v.speaking;
             last_draw = t;
             lib_changed = false;
+        }
+        // The usage lines the requests queued, at most every 2 s.
+        if (t - last_usage > 2) {
+            const bool ok = usage_log.flush();
+            if (!ok && usage_ok) printf("ts5-title: can't write %s: %s\n", kUsage, strerror(errno));
+            usage_ok = ok;
+            last_usage = t;
         }
         sceKernelUsleep(16000);
     }
