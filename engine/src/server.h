@@ -35,6 +35,13 @@ public:
         bool generating = false;
         int requests = 0;
         GenStats last;  // the last finished request
+        std::string client;  // the generating request's
+        int prompt = 0;      // its turn's prompt tokens
+        // Live, from State's counters: tokens written and prompt tokens read
+        // (not from the cache) since start, the phase (0 idle, 1 reading the
+        // prompt, 2 writing), and requests waiting behind the generation.
+        uint64_t gen_total = 0, prompt_total = 0;
+        int phase = 0, waiting = 0;
     };
     Activity activity();
 
@@ -46,6 +53,10 @@ public:
         std::string tool_format = "none";  // the model's (tools.h), for /v1/models
         std::mutex stats;
         Activity activity;
+        // Activity's live counters, kept without a lock: the generating
+        // thread adds to them as it goes.
+        std::atomic<uint64_t> gen_total{0}, prompt_total{0};
+        std::atomic<int> phase{0}, waiting{0};
         std::function<void(const UsageRecord &)> on_usage;
     };
 

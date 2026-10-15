@@ -198,7 +198,9 @@ void handle(int fd, Server::State &state, Usage &u) {
     auto engine = [&]() -> Engine * {
         if (!lk.owns_lock() && !lk.try_lock()) {
             const double w0 = now_ms();  // behind another generation
+            state.waiting.fetch_add(1, std::memory_order_relaxed);
             lk.lock();
+            state.waiting.fetch_sub(1, std::memory_order_relaxed);
             u.rec.wait_ms = std::lround(now_ms() - w0);
         }
         return state.engine;
@@ -308,6 +310,7 @@ void handle(int fd, Server::State &state, Usage &u) {
         {
             std::lock_guard<std::mutex> g(state.stats);
             state.activity.generating = true;
+            state.activity.client = u.rec.client;
         }
         const std::string id = std::string(chat ? "chatcmpl-" : "cmpl-") + std::to_string(++request_counter);
         u.rec.id = id;
@@ -342,8 +345,30 @@ void handle(int fd, Server::State &state, Usage &u) {
                 e.tok().encode(prompt, !chat || prompt.rfind("<|begin_of_text|>", 0) != 0);
             std::string text;
             size_t sent = 0;  // bytes of this turn's `text` already streamed
+            {
+                std::lock_guard<std::mutex> g(state.stats);
+                state.activity.prompt = (int)toks.size();
+            }
+            state.phase.store(1, std::memory_order_relaxed);
+            GenStats turn;
+            int counted = 0;       // turn.gen_tokens already in gen_total
+            bool writing = false;  // past the prompt
+            // The live counters: the turn's tokens so far (an engine step can
+            // add several accepted drafts), with one relaxed add a step.
+            auto count = [&] {
+                if (turn.gen_tokens > counted) {
+                    state.gen_total.fetch_add(turn.gen_tokens - counted, std::memory_order_relaxed);
+                    counted = turn.gen_tokens;
+                }
+                if (!writing) {
+                    writing = true;
+                    state.prompt_total.fetch_add(turn.prompt_evaluated, std::memory_order_relaxed);
+                    state.phase.store(2, std::memory_order_relaxed);
+                }
+            };
             auto on_text = [&](const std::string &piece) {
                 if (first < 0) first = now_ms();
+                count();
                 text += piece;
                 for (auto &s : stops) {
                     size_t at = s.empty() ? std::string::npos : text.find(s);
@@ -366,7 +391,6 @@ void handle(int fd, Server::State &state, Usage &u) {
                 }
                 return client_ok && !stopped;
             };
-            GenStats turn;
             sp.max_tokens = max_tokens - st.gen_tokens;
             if (const char *f = getenv("TS5_TEST_TURNS")) {
                 // Tests: the model's turns from a file ("\n----\n" between
@@ -399,6 +423,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                 ok = e.generate(toks, sp, on_text, turn, err);
                 if (!ok) u.rec.why = (int)toks.size() + 1 > e.backend().n_ctx() ? "too_long" : "gpu_error";
             }
+            count();  // what on_text didn't see: the test turns, a turn with no text
             st.prompt_tokens += turn.prompt_tokens;
             st.prompt_evaluated += turn.prompt_evaluated;
             st.prompt_ms += turn.prompt_ms;
@@ -474,6 +499,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             state.activity.requests++;
             state.activity.last = st;
         }
+        state.phase.store(0, std::memory_order_relaxed);
         if (!ok) {
             if (stream) send_all(fd, "data: " + error_body(err) + "\n\ndata: [DONE]\n\n");
             else send_all(fd, response(500, error_body(err)));
@@ -594,7 +620,12 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
 
 Server::Activity Server::activity() {
     std::lock_guard<std::mutex> g(state_.stats);
-    return state_.activity;
+    Activity a = state_.activity;
+    a.gen_total = state_.gen_total.load(std::memory_order_relaxed);
+    a.prompt_total = state_.prompt_total.load(std::memory_order_relaxed);
+    a.phase = state_.phase.load(std::memory_order_relaxed);
+    a.waiting = state_.waiting.load(std::memory_order_relaxed);
+    return a;
 }
 
 void Server::accept_loop() {
