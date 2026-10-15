@@ -312,6 +312,7 @@ private:
         if (const char *e = getenv("TS5_ATTN_DEC")) attn_dec_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_PF128")) attn_pf128_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_PLAIN")) attn_dec_plain_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_ATTN_DEC_KEYS")) attn_dec_keys_ = atoi(e);
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV16")) mv16_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT")) mvt_ = atoi(e) != 0;
@@ -463,7 +464,7 @@ private:
         const VkSpecializationMapEntry se[2] = {{0, 0, 4}, {1, 4, 4}};
         const uint32_t sv[2] = {spec, spec1};
         VkSpecializationInfo si{spec1 ? 2u : 1u, se, spec1 ? 8u : 4u, sv};
-        if (spec) cp.stage.pSpecializationInfo = &si;
+        if (spec || spec1) cp.stage.pSpecializationInfo = &si;
         cp.layout = p.layout;
         CHECK(vk.vkCreateComputePipelines(dev_, VK_NULL_HANDLE, 1, &cp, nullptr, &p.pipe));
         vk.vkDestroyShaderModule(dev_, mod, nullptr);
@@ -505,8 +506,11 @@ private:
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
         P(rmsnorm, 3) P(qkv_post, 10) P(qkv_post_q8, 12) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
         P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf_q8, 7)
-        if (!make_pipe("attn_dec", spv_attn_dec, sizeof(spv_attn_dec), 5, err, attn_dec_plain_ != 0) ||
-            !make_pipe("attn_dec4", spv_attn_dec4, sizeof(spv_attn_dec4), 5, err, attn_dec_plain_ == 1))
+        // Lanes per key in attn_dec: 8, 16 or 32, and no more than a subgroup.
+        uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
+        while (lpk > ctx_->subgroup_size) lpk = lpk > 8 ? lpk / 2 : 0;
+        if (!make_pipe("attn_dec", spv_attn_dec, sizeof(spv_attn_dec), 5, err, attn_dec_plain_ != 0, lpk) ||
+            !make_pipe("attn_dec4", spv_attn_dec4, sizeof(spv_attn_dec4), 5, err, attn_dec_plain_ == 1, lpk))
             return false;
         P(swiglu, 2)
 #undef P
@@ -1178,6 +1182,12 @@ private:
     // 8-row kernel at the start and attn_dec4 the tile before, the faster of
     // the two for each on the console.
     int attn_dec_plain_ = -1;
+    // attn_dec scoring each key with this many lanes side by side (8, 16 or 32,
+    // TS5_ATTN_DEC_KEYS; 0: one thread a key, its words one after another).
+    // 16 is the fastest on the console at 16k tokens of context: generation
+    // +6% on Coder 7B, +31% on Qwen 3 8B and +37% on Llama 3.2 3B against 0;
+    // 32 is slower than 0 on Coder 7B.
+    int attn_dec_keys_ = 16;
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).
     bool mmb_ = true;

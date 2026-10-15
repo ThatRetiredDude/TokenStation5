@@ -81,6 +81,7 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
     LOAD(c->get_instance_proc, c->instance, vkGetPhysicalDeviceMemoryProperties);
     LOAD(c->get_instance_proc, c->instance, vkGetPhysicalDeviceQueueFamilyProperties);
     LOAD(c->get_instance_proc, c->instance, vkGetPhysicalDeviceFeatures2);
+    LOAD(c->get_instance_proc, c->instance, vkGetPhysicalDeviceProperties2);
     LOAD(c->get_instance_proc, c->instance, vkEnumerateDeviceExtensionProperties);
     LOAD(c->get_instance_proc, c->instance, vkCreateDevice);
     LOAD(c->get_instance_proc, c->instance, vkGetDeviceProcAddr);
@@ -95,6 +96,11 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
     c->physical = pds[index];
     vkGetPhysicalDeviceProperties(c->physical, &c->props);
     vkGetPhysicalDeviceMemoryProperties(c->physical, &c->memory);
+    VkPhysicalDeviceSubgroupProperties sg{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    p2.pNext = &sg;
+    vkGetPhysicalDeviceProperties2(c->physical, &p2);
+    c->subgroup_size = sg.subgroupSize;
     fprintf(stderr, "ts5: %s, Vulkan %u.%u, memory heaps:", c->props.deviceName,
             VK_API_VERSION_MAJOR(c->props.apiVersion), VK_API_VERSION_MINOR(c->props.apiVersion));
     for (uint32_t i = 0; i < c->memory.memoryHeapCount; i++)
