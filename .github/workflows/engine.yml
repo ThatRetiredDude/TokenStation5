@@ -14,7 +14,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq mesa-vulkan-drivers glslang-tools libvulkan-dev vulkan-tools
-          pip install gguf numpy
+          pip install gguf numpy jinja2
       - name: Vulkan device
         run: vulkaninfo --summary | grep -E "deviceName|apiVersion"
       - name: Engine tests (Vulkan vs CPU reference)

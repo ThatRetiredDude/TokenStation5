@@ -6,6 +6,7 @@
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -52,6 +53,9 @@
 #include "mv16_glu_q4_k.spv.h"
 #include "mv16_q4_k.spv.h"
 #include "mv16_q6_k.spv.h"
+#include "mvt_glu_q4_k.spv.h"
+#include "mvt_q4_k.spv.h"
+#include "mvt_q6_k.spv.h"
 #include "mm_f16.spv.h"
 #include "mm_f32.spv.h"
 #include "mm_q4_0.spv.h"
@@ -207,6 +211,10 @@ public:
         return s;
     }
 
+    // Bytes an auto-fit context (n_ctx 0) keeps free beyond its usual 1 GiB:
+    // the budget of a second backend loaded after this one (a draft model).
+    void set_fit_reserve(uint64_t bytes) { fit_reserve_ = bytes; }
+
     bool init(const std::string &path, std::string &err) {
         if (!init_device(err)) return false;
         if (!init_pipelines(err)) return false;
@@ -214,14 +222,23 @@ public:
         return init_buffers(err);
     }
 
+    const float *logits_view() const override { return (const float *)logits_.map; }
+
     bool forward(const int32_t *tokens, int n, int pos0, float *logits, bool all, std::string &err) override {
+        return fwd(tokens, n, pos0, logits, all, logits != nullptr, err);
+    }
+
+    bool forward_in_place(const int32_t *tokens, int n, int pos0, bool all, std::string &err) override {
+        return fwd(tokens, n, pos0, nullptr, all, true, err);
+    }
+
+    bool fwd(const int32_t *tokens, int n, int pos0, float *logits, bool all, bool want, std::string &err) {
         if (pos0 + n > n_ctx_) { err = "context full"; return false; }
         for (int i = 0; i < n; i += TMAX) {
             int c = std::min(TMAX, n - i);
-            bool want_all = all;
             bool last = i + c == n;
-            float *out = all ? logits + (size_t)i * hp_.n_vocab : (last ? logits : nullptr);
-            if (!run(tokens + i, c, pos0 + i, out, want_all, err)) return false;
+            float *out = all ? (logits ? logits + (size_t)i * hp_.n_vocab : nullptr) : (last ? logits : nullptr);
+            if (!run(tokens + i, c, pos0 + i, out, all, want && (all || last), err)) return false;
         }
         return true;
     }
@@ -262,6 +279,13 @@ private:
         if (const char *e = getenv("TS5_ATTN_DEC")) attn_dec_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV16")) mv16_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_MVT")) mvt_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_MVT_GLU")) mvt_glu_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_MVT_ROWS")) mvt_rows_ = std::min(4, std::max(1, atoi(e)));
+        // The fused kernel holds two matrices' words: past 2 rows it spills
+        // registers on the PS5 (1376 VGPRs into scratch at 4 rows, a 7x
+        // regression), so its row tiling is capped where the plain one's isn't.
+        mvt_glu_rows_ = std::min(mvt_rows_, 2u);
         if (const char *e = getenv("TS5_BARRIER")) barrier_mode_ = std::min(2, std::max(0, atoi(e)));
         if (const char *e = getenv("TS5_FUSE")) fuse_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
@@ -365,9 +389,10 @@ private:
         return true;
     }
 
-    // spec: the value of the shader's specialization constant 0, when not 0.
+    // spec, spec1: the values of the shader's specialization constants 0 and
+    // 1, where not 0.
     bool make_pipe(const std::string &name, const uint32_t *code, size_t bytes, uint32_t nbind, std::string &err,
-                   uint32_t spec = 0) {
+                   uint32_t spec = 0, uint32_t spec1 = 0) {
         Pipe p;
         p.nbind = nbind;
         std::vector<VkDescriptorSetLayoutBinding> b(nbind);
@@ -399,8 +424,9 @@ private:
         cp.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         cp.stage.module = mod;
         cp.stage.pName = "main";
-        VkSpecializationMapEntry se{0, 0, 4};
-        VkSpecializationInfo si{1, &se, 4, &spec};
+        const VkSpecializationMapEntry se[2] = {{0, 0, 4}, {1, 4, 4}};
+        const uint32_t sv[2] = {spec, spec1};
+        VkSpecializationInfo si{spec1 ? 2u : 1u, se, spec1 ? 8u : 4u, sv};
         if (spec) cp.stage.pSpecializationInfo = &si;
         cp.layout = p.layout;
         CHECK(vk.vkCreateComputePipelines(dev_, VK_NULL_HANDLE, 1, &cp, nullptr, &p.pipe));
@@ -425,6 +451,19 @@ private:
         return false;
         MV(matvec_q4_k, 3) MV(matvec_q6_k, 3) MV(mv16_q4_k, 3) MV(mv16_q6_k, 3) MV(mv16_glu_q4_k, 4)
 #undef MV
+        // The verify-batch mat-vecs once per batch size (their token loop is
+        // compile-time), each twice like the one-token ones: mvt_rows_ rows
+        // per workgroup and one.
+        for (uint32_t nt = 2; nt <= 8; nt++) {
+            const std::string s = "." + std::to_string(nt);
+            if (!make_pipe("mvt_q4_k" + s, spv_mvt_q4_k, sizeof(spv_mvt_q4_k), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvt_q4_k" + s + ".1", spv_mvt_q4_k, sizeof(spv_mvt_q4_k), 3, err, nt, 1) ||
+                !make_pipe("mvt_q6_k" + s, spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvt_q6_k" + s + ".1", spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, 1) ||
+                !make_pipe("mvt_glu_q4_k" + s, spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, mvt_glu_rows_) ||
+                !make_pipe("mvt_glu_q4_k" + s + ".1", spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, 1))
+                return false;
+        }
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
@@ -438,6 +477,9 @@ private:
     // One buffer per tensor, filled straight from the file when the memory is
     // host-visible (unified memory), else through a staging buffer.
     bool upload_weights(const std::string &path, std::string &err) {
+        // The read rate decides whether a slow model load is the storage or
+        // the code; it is printed once per load.
+        const auto lt0 = std::chrono::steady_clock::now();
         FILE *f = fopen(path.c_str(), "rb");
         if (!f) { err = "cannot open " + path; return false; }
         Buf staging;
@@ -462,6 +504,9 @@ private:
             weight_bytes_ += t.nbytes;
         }
         fclose(f);
+        const double ls = std::chrono::duration<double>(std::chrono::steady_clock::now() - lt0).count();
+        fprintf(stderr, "ts5: weights %.2f GB read in %.1f s (%.0f MB/s)\n", weight_bytes_ / 1e9, ls,
+                ls > 0 ? weight_bytes_ / 1e6 / ls : 0.0);
         return true;
     }
 
@@ -491,7 +536,7 @@ private:
             auto fit = [&](KvType t) {
                 const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * hp_.n_layer * KVD;
                 const int cap = (int)std::min<uint64_t>(train, props_.limits.maxStorageBufferRange / per_buf);
-                return fit_context(ctx_->device_memory(), allocated_, kv_bytes_per_token(hp_, t), cap);
+                return fit_context(ctx_->device_memory(), allocated_ + fit_reserve_, kv_bytes_per_token(hp_, t), cap);
             };
             const int f16 = fit(KvType::F16);
             if (kv_ == KvType::Q8 && f16_reaches(f16, train)) {
@@ -663,6 +708,19 @@ private:
             mat_vec(std::string(mv16_ ? "mv16_" : "matvec_") + qname(w.type()), {&W(w), &x, &y}, pc, rows, what);
             return;
         }
+        // A few tokens (speculation's verify batch): the word-load kernels
+        // that read each row's words once and dot them with every token, so
+        // the weight stream is paid once for the whole batch. As mat_vec:
+        // mvt_rows_ rows per workgroup, sharing each token's x loads, or one
+        // for a matrix with few rows.
+        if (ntok >= 2 && ntok <= 8 && fast_matvec_ && mvt_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
+            const bool one = rows < (uint32_t)mv_rows_min_ || mvt_rows_ == 1;
+            const uint32_t nr = one ? 1 : mvt_rows_, groups = (rows + nr - 1) / nr;
+            const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
+            dispatch(std::string("mvt_") + qname(w.type()) + "." + std::to_string(ntok) + (one ? ".1" : ""),
+                     {&W(w), &x, &y}, pc, mx, my, what);
+            return;
+        }
         dispatch(std::string("matmul_") + qname(w.type()), {&W(w), &x, &y}, pc, gx, gy, what);
     }
 
@@ -769,17 +827,28 @@ private:
                (H / HKV) * HD <= 1024;
     }
 
-    // One token through gate and up of Q4_K with swiglu, in one kernel
-    // (mv16_glu_q4_k), into g_. False where that doesn't apply.
+    // Gate and up of Q4_K with swiglu in one kernel, into g_: one token
+    // through mv16_glu_q4_k, a verify batch through mvt_glu_q4_k, which
+    // loads each token's x once for both matrices. False where that
+    // doesn't apply.
     bool ffn_glu(const Layer &L, int n) {
-        if (n != 1 || !fuse_ || !mv16_ || !fast_matvec_ || L.w_gate.type() != GGML_Q4_K ||
+        const bool batch = n >= 2 && n <= 8 && mvt_ && mvt_glu_;
+        if ((n == 1 ? !mv16_ : !batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != GGML_Q4_K ||
             L.w_up.type() != GGML_Q4_K || L.w_gate.ne0() != L.w_up.ne0() || L.w_gate.ne1() != L.w_up.ne1())
             return false;
         const uint32_t rows = (uint32_t)L.w_gate.ne1();
         struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; } pc{
-            (uint32_t)L.w_gate.ne0(), rows, 1, (uint32_t)L.w_gate.info->row_bytes(), (uint32_t)L.w_gate.ne0(),
-            rows, 0, 0};
-        mat_vec("mv16_glu_q4_k", {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, rows, "ffn_gate+up");
+            (uint32_t)L.w_gate.ne0(), rows, (uint32_t)n, (uint32_t)L.w_gate.info->row_bytes(),
+            (uint32_t)L.w_gate.ne0(), rows, 0, 0};
+        if (n == 1) {
+            mat_vec("mv16_glu_q4_k", {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, rows, "ffn_gate+up");
+            return true;
+        }
+        const bool one = rows < (uint32_t)mv_rows_min_ || mvt_glu_rows_ == 1;
+        const uint32_t nr = one ? 1 : mvt_glu_rows_, groups = (rows + nr - 1) / nr;
+        const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
+        dispatch("mvt_glu_q4_k." + std::to_string(n) + (one ? ".1" : ""),
+                 {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, mx, my, "ffn_gate+up");
         return true;
     }
 
@@ -800,7 +869,7 @@ private:
         dispatch("rmsnorm", {&x, &W(w), &y}, pc, (uint32_t)ntok);
     }
 
-    bool run(const int32_t *tokens, int n, int pos0, float *logits, bool all, std::string &err) {
+    bool run(const int32_t *tokens, int n, int pos0, float *logits, bool all, bool want, std::string &err) {
         const int E = hp_.n_embd, HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
         const size_t KVD = (size_t)HKV * HD;
         memcpy(ids_.map, tokens, 4 * (size_t)n);
@@ -858,7 +927,7 @@ private:
                 if (!submit(err) || !begin(err)) return false;
             }
         }
-        if (logits) {
+        if (want) {
             const int nout = all ? n : 1;
             rmsnorm(x_, m_.out_norm, h_, nout, all ? 0 : (uint32_t)(n - 1));
             matmul(m_.output, h_, logits_, nout, false);
@@ -886,6 +955,7 @@ private:
     std::vector<Arena> arenas_;
     std::vector<VkBuffer> all_bufs_;
     VkDeviceSize allocated_ = 0;
+    uint64_t fit_reserve_ = 0;  // set_fit_reserve
     uint64_t weight_bytes_ = 0;
     int layers_per_submit_ = 0;
     // Matmuls of at least this many tokens use the tiled kernel (TS5_TILED_MIN).
@@ -912,6 +982,14 @@ private:
     // One token of Q4_K and Q6_K: mv16_q4_k's 16-byte loads and mv16_q6_k's
     // 8 threads per block (TS5_MV16=0: matvec_q4_k and matvec_q6_k).
     bool mv16_ = true;
+    bool mvt_ = true;
+    // The fused gate+up verify kernel: off until a console A/B shows a win
+    // (phase L measured it 7x slower at 4 rows from register spills).
+    bool mvt_glu_ = false;
+    uint32_t mvt_glu_rows_ = 2;
+    // Rows per workgroup of the verify-batch kernels (TS5_MVT_ROWS, 1 to 4),
+    // which share each token's x loads; one for matrices under mv_rows_min_.
+    uint32_t mvt_rows_ = 4;
     // The barrier between kernels (see barrier(); TS5_BARRIER=0, 1, 2).
     int barrier_mode_ = 1;
     // Fewer kernels and barriers: none between kernels that only share
@@ -950,8 +1028,10 @@ private:
 
 }  // namespace
 
-Backend *make_vk_backend(VkContext *ctx, Model &m, const std::string &path, int n_ctx, std::string &err) {
+Backend *make_vk_backend(VkContext *ctx, Model &m, const std::string &path, int n_ctx, std::string &err,
+                         uint64_t fit_reserve) {
     auto *b = new VkBackend(ctx, false, m, n_ctx);
+    b->set_fit_reserve(fit_reserve);
     if (!b->init(path, err)) {
         delete b;
         return nullptr;
