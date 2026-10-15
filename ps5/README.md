@@ -124,6 +124,7 @@ dashboard back.
 | `scripts/ts5-ps5.sh bench NAME.gguf` | the speed test, printing its table row |
 | `scripts/ts5-ps5.sh stop` | stop serving |
 | `scripts/ts5-ps5.sh env TS5_TILED_MIN=16` | engine settings (writes `ts5.env`) and restart; with none, clears them |
+| `scripts/ts5-ps5.sh websearch tvly-...` | turn web search on with a [Tavily](https://tavily.com) key (adds `TAVILY_API_KEY` to `ts5.env`, keeping the rest) and restart; `off` removes it; with nothing, says whether it's on. See [docs/WEB_SEARCH.md](../docs/WEB_SEARCH.md) |
 | `scripts/ts5-ps5.sh press down cross` | controller buttons, as if pressed |
 | `scripts/ts5-ps5.sh screenshot` | the TV picture, as `screen.bmp` |
 | `scripts/ts5-ps5.sh speech [base.en]` | download whisper's speech model (`ggml-base.en.bin`; or `tiny.en`, `small.en` ...) and upload it to `models`, for R1 talk |
@@ -145,7 +146,7 @@ On the console, everything lives in the title's own folder,
 | `ts5.args` | what to serve at start: `serve -m MODEL [-c N] [--port N]` |
 | `ts5.cmd` | a command to run now: `serve`, `check`, `bench` (`-m MODEL`), or `stop`. `check` and `bench` take `--env NAME=VALUE` (engine settings for that job only, on a load of its own) and `check` takes `--fresh 1` (run the CPU again) |
 | `ts5.once` | a command to run at the next start, before `ts5.args` |
-| `ts5.env` | settings, `NAME=VALUE`, read at start and written by the Settings page: engine settings (the `getenv` calls in `engine/src/vk_backend.cpp`), and the Settings page's: `TS5_CHAT_MAX_TOKENS` (longest reply, 2048), `TS5_CHAT_FPS` (frames a second while a reply comes in, 10), `TS5_WHISPER_MODEL` (the speech model; the first `ggml-*.bin` without it), `TS5_WHISPER_THREADS` (6), `TS5_SPEAK` (1: replies read aloud; 0: not), `TS5_SPEAK_OUT` (`tv`, or `controller`), `TS5_TTS_VOICE` (Kokoro's voice, `af_heart` without it), `TS5_TTS_SPEED` (1), `TS5_TTS_THREADS` (6), `TS5_KEEP_AWAKE` (1; 0 lets the console rest), `TS5_DIM_AFTER` (seconds to the dark screen, 600; 0: never) and `TAVILY_API_KEY`. `scripts/ts5-ps5.sh env` replaces the engine settings and keeps these |
+| `ts5.env` | settings, `NAME=VALUE`, read at start and written by the Settings page: engine settings (the `getenv` calls in `engine/src/vk_backend.cpp`), and the Settings page's: `TS5_CHAT_MAX_TOKENS` (longest reply, 2048), `TS5_CHAT_FPS` (frames a second while a reply comes in, 10), `TS5_WHISPER_MODEL` (the speech model; the first `ggml-*.bin` without it), `TS5_WHISPER_THREADS` (6), `TS5_SPEAK` (1: replies read aloud; 0: not), `TS5_SPEAK_OUT` (`tv`, or `controller`), `TS5_TTS_VOICE` (Kokoro's voice, `af_heart` without it), `TS5_TTS_SPEED` (1), `TS5_TTS_THREADS` (6), `TS5_KEEP_AWAKE` (1; 0 lets the console rest), `TS5_DIM_AFTER` (seconds to the dark screen, 600; 0: never) and `TAVILY_API_KEY`. `scripts/ts5-ps5.sh env` replaces the engine settings and keeps these. The log shows a setting whose name has `KEY` or `TOKEN` in it as `(set)` |
 | `press`, `screenshot` | controller buttons; the next frame to `screen.bmp` |
 | `chat` | a message for the chat page: the file's text |
 | `keytest` | run the keyboard test (someone types on the keyboard for a minute) |

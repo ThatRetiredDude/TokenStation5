@@ -17,6 +17,8 @@
 #include <thread>
 
 #include "json.h"
+#include "tools.h"
+#include "websearch.h"
 
 namespace ts5 {
 
@@ -86,23 +88,43 @@ std::string error_body(const std::string &msg) {
     return "{\"error\":{\"message\":" + json_escape(msg) + ",\"type\":\"invalid_request_error\"}}";
 }
 
-std::string content_text(const Json &c) {
-    if (c.type == Json::STR) return c.s;
-    std::string s;
-    if (c.type == Json::ARR)
-        for (auto &part : c.a)
-            if (part["type"].str() == "text") s += part["text"].str();
-    return s;
+// "14 Oct 2026" (UTC), for the Llama system prompt and the search tool.
+std::string today() {
+    static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    time_t t = time(nullptr);
+    const tm *g = gmtime(&t);
+    if (!g) return "1 Jan 1970";
+    char b[32];
+    snprintf(b, sizeof b, "%02d %s %d", g->tm_mday, months[g->tm_mon % 12], g->tm_year + 1900);
+    return b;
+}
+
+// At most this many rounds of web searches per answer; after that the model
+// is told to answer with what it has.
+constexpr int kSearchRounds = 3;
+
+std::string tool_calls_json(const std::vector<ToolCall> &calls, bool with_index) {
+    std::string s = "[";
+    for (size_t i = 0; i < calls.size(); i++) {
+        if (i) s += ",";
+        s += "{";
+        if (with_index) s += "\"index\":" + std::to_string(i) + ",";
+        s += "\"id\":" + json_escape(calls[i].id) + ",\"type\":\"function\",\"function\":{\"name\":" +
+             json_escape(calls[i].name) + ",\"arguments\":" + json_escape(calls[i].arguments) + "}}";
+    }
+    return s + "]";
 }
 
 std::string timings_json(const GenStats &st) {
     char b[512];
     snprintf(b, sizeof b,
              "{\"prompt_n\":%d,\"prompt_ms\":%.1f,\"prompt_per_second\":%.2f,"
-             "\"predicted_n\":%d,\"predicted_ms\":%.1f,\"predicted_per_second\":%.2f,\"cache_n\":%d}",
+             "\"predicted_n\":%d,\"predicted_ms\":%.1f,\"predicted_per_second\":%.2f,\"cache_n\":%d,"
+             "\"draft_n\":%d,\"draft_n_accepted\":%d}",
              st.prompt_evaluated, st.prompt_ms, st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0,
              st.gen_tokens, st.gen_ms, st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0,
-             st.prompt_tokens - st.prompt_evaluated);
+             st.prompt_tokens - st.prompt_evaluated, st.drafted, st.draft_accepted);
     return b;
 }
 
@@ -144,15 +166,23 @@ void handle(int fd, Server::State &state) {
         }
         send_all(fd, loaded ? response(200, health_body("ok")) : response(503, health_body(why)));
     } else if (r.path == "/v1/models" || r.path == "/models") {
-        std::string model;
+        std::string model, tools;
         {
             std::lock_guard<std::mutex> g(state.stats);
             model = state.model;
+            tools = state.tool_format;
         }
+        // capabilities: whether the model takes OpenAI tools, and whether ts5
+        // runs web searches for it (a Tavily key is set).
+        const bool can = tools != "none";
         send_all(fd, response(200, "{\"object\":\"list\",\"data\":[" +
                                        (model.empty() ? std::string()
                                                       : "{\"id\":" + json_escape(model) +
-                                                            ",\"object\":\"model\",\"owned_by\":\"tokenstation5\"}") +
+                                                            ",\"object\":\"model\",\"owned_by\":\"tokenstation5\"" +
+                                                            ",\"capabilities\":{\"tools\":" + (can ? "true" : "false") +
+                                                            ",\"tool_format\":" + json_escape(tools) +
+                                                            ",\"web_search\":" +
+                                                            (can && !tavily_key().empty() ? "true" : "false") + "}}") +
                                        "]}"));
     } else if (r.method == "POST" && (r.path == "/v1/chat/completions" || r.path == "/v1/completions" ||
                                       r.path == "/chat/completions" || r.path == "/completions")) {
@@ -176,14 +206,29 @@ void handle(int fd, Server::State &state) {
         }
         Engine &e = *ep;
         const std::string model = state.model;
+        const std::string date = today();
+        // Tools: the client's, plus web_search when a Tavily key is set and
+        // the request does not turn it off ("web_search": false).
+        const ToolFormat tf = chat ? tool_format(e.tok()) : ToolFormat::NONE;
+        std::vector<Json> tools;
+        bool web = false;
         std::string prompt;
         if (chat) {
-            std::vector<ChatMessage> msgs;
-            for (auto &m : req["messages"].a) msgs.push_back({m["role"].str("user"), content_text(m["content"])});
-            prompt = e.tok().apply_chat(msgs);
+            const std::vector<Message> msgs = parse_messages(req["messages"]);
+            if (tf != ToolFormat::NONE && req["tool_choice"].str() != "none") {
+                bool named = false;
+                for (auto &t : req["tools"].a) {
+                    tools.push_back(t);
+                    named |= t["function"]["name"].str() == "web_search";
+                }
+                web = !named && req["web_search"].boolean(true) && !tavily_key().empty();
+                if (web) tools.push_back(web_search_tool(date));
+            }
+            prompt = render_chat(e.tok(), msgs, tools, date);
         } else {
             prompt = req["prompt"].str();
         }
+        const bool use_tools = !tools.empty();
         SampleParams sp;
         sp.temperature = (float)req["temperature"].num(0.7);
         sp.top_p = (float)req["top_p"].num(0.95);
@@ -201,7 +246,6 @@ void handle(int fd, Server::State &state) {
         }
         const std::string id = std::string(chat ? "chatcmpl-" : "cmpl-") + std::to_string(++request_counter);
         const long created = (long)time(nullptr);
-        const std::vector<int32_t> toks = e.tok().encode(prompt, !chat || prompt.rfind("<|begin_of_text|>", 0) != 0);
         auto chunk_json = [&](const std::string &delta, const char *finish) {
             std::string fin = finish ? std::string("\"") + finish + "\"" : "null";
             if (chat)
@@ -217,34 +261,80 @@ void handle(int fd, Server::State &state) {
         if (stream)
             send_all(fd, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
                          "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n");
-        std::string text, err;
-        bool client_ok = true;
-        size_t sent = 0;  // bytes of `text` already streamed
-        bool stopped = false;
-        GenStats st;
-        auto on_text = [&](const std::string &piece) {
-            text += piece;
-            for (auto &s : stops) {
-                size_t at = s.empty() ? std::string::npos : text.find(s);
-                if (at != std::string::npos) { text.resize(at); stopped = true; }
-            }
-            if (stream) {
-                // Hold back text that could be the start of a stop string.
-                size_t hold = 0;
-                for (auto &s : stops)
-                    if (!s.empty())
-                    for (size_t k = std::min(s.size() - 1, text.size()); k > 0; k--)
-                        if (text.compare(text.size() - k, k, s, 0, k) == 0) { hold = std::max(hold, k); break; }
-                size_t upto = stopped ? text.size() : text.size() - hold;
-                if (upto > sent) {
-                    client_ok = send_all(fd, "data: " + chunk_json(text.substr(sent, upto - sent), nullptr) + "\n\n");
-                    sent = upto;
+        std::string content, err;  // content: for the user, over every turn
+        std::vector<ToolCall> calls;  // the client's to run
+        bool client_ok = true, ok = true, stopped = false;
+        GenStats st;  // over every turn
+        int max_tokens = sp.max_tokens;
+        // A turn of the model's; with web_search, ts5 answers the model's
+        // searches and lets it go on, so one request can be several turns.
+        for (int round = 0;; round++) {
+            const std::vector<int32_t> toks =
+                e.tok().encode(prompt, !chat || prompt.rfind("<|begin_of_text|>", 0) != 0);
+            std::string text;
+            size_t sent = 0;  // bytes of this turn's `text` already streamed
+            auto on_text = [&](const std::string &piece) {
+                text += piece;
+                for (auto &s : stops) {
+                    size_t at = s.empty() ? std::string::npos : text.find(s);
+                    if (at != std::string::npos) { text.resize(at); stopped = true; }
                 }
+                if (stream) {
+                    // Hold back text that could be the start of a stop string,
+                    // or of a tool call.
+                    size_t hold = 0;
+                    for (auto &s : stops)
+                        if (!s.empty())
+                        for (size_t k = std::min(s.size() - 1, text.size()); k > 0; k--)
+                            if (text.compare(text.size() - k, k, s, 0, k) == 0) { hold = std::max(hold, k); break; }
+                    size_t upto = stopped ? text.size() : text.size() - hold;
+                    if (use_tools) upto = std::min(upto, content_prefix(tf, text));
+                    if (upto > sent) {
+                        client_ok = send_all(fd, "data: " + chunk_json(text.substr(sent, upto - sent), nullptr) + "\n\n");
+                        sent = upto;
+                    }
+                }
+                return client_ok && !stopped;
+            };
+            GenStats turn;
+            sp.max_tokens = max_tokens - st.gen_tokens;
+            ok = e.generate(toks, sp, on_text, turn, err);
+            st.prompt_tokens += turn.prompt_tokens;
+            st.prompt_evaluated += turn.prompt_evaluated;
+            st.prompt_ms += turn.prompt_ms;
+            st.gen_tokens += turn.gen_tokens;
+            st.gen_ms += turn.gen_ms;
+            st.finish = stopped ? "stop" : turn.finish;
+            if (!ok || !use_tools) {
+                content += text;
+                break;
             }
-            return client_ok && !stopped;
-        };
-        bool ok = e.generate(toks, sp, on_text, st, err);
-        if (stopped) st.finish = "stop";
+            ParsedTurn pt = parse_turn(tf, text);
+            if (stream && pt.content.size() > sent && client_ok)
+                client_ok = send_all(fd, "data: " + chunk_json(pt.content.substr(sent), nullptr) + "\n\n");
+            content += pt.content;
+            if (pt.calls.empty() || stopped || !client_ok) break;
+            // The client's own calls go back to it; web_search is ts5's.
+            std::vector<ToolCall> searches;
+            for (auto &c : pt.calls) (web && c.name == "web_search" ? searches : calls).push_back(c);
+            if (!calls.empty()) {
+                st.finish = "tool_calls";
+                break;
+            }
+            if (st.gen_tokens >= max_tokens || round > kSearchRounds) break;
+            std::vector<std::string> results;
+            for (auto &c : searches) {
+                std::string log;
+                if (round >= kSearchRounds) {
+                    results.push_back("No more searches for this answer: answer now from the results you have.");
+                    log = "web_search: limit of " + std::to_string(kSearchRounds) + " rounds reached";
+                } else {
+                    results.push_back(web_search(c.arguments, log));
+                }
+                fprintf(stderr, "ts5: %s %s\n", id.c_str(), log.c_str());
+            }
+            prompt += text + render_results(tf, results);
+        }
         {
             std::lock_guard<std::mutex> g(state.stats);
             state.activity.generating = false;
@@ -255,6 +345,11 @@ void handle(int fd, Server::State &state) {
             if (stream) send_all(fd, "data: " + error_body(err) + "\n\ndata: [DONE]\n\n");
             else send_all(fd, response(500, error_body(err)));
         } else if (stream) {
+            if (!calls.empty())
+                send_all(fd, "data: {\"id\":\"" + id + "\",\"object\":\"chat.completion.chunk\",\"created\":" +
+                                 std::to_string(created) + ",\"model\":" + json_escape(model) +
+                                 ",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":" + tool_calls_json(calls, true) +
+                                 "},\"finish_reason\":null}]}\n\n");
             std::string last = chunk_json("", st.finish.c_str());
             last.insert(last.size() - 1, ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st));
             send_all(fd, "data: " + last + "\n\ndata: [DONE]\n\n");
@@ -264,17 +359,20 @@ void handle(int fd, Server::State &state) {
                 body = "{\"id\":\"" + id + "\",\"object\":\"chat.completion\",\"created\":" + std::to_string(created) +
                        ",\"model\":" + json_escape(model) +
                        ",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":" +
-                       json_escape(text) + "},\"finish_reason\":\"" + st.finish + "\"}]";
+                       (content.empty() && !calls.empty() ? std::string("null") : json_escape(content)) +
+                       (calls.empty() ? std::string() : ",\"tool_calls\":" + tool_calls_json(calls, false)) +
+                       "},\"finish_reason\":\"" + st.finish + "\"}]";
             else
                 body = "{\"id\":\"" + id + "\",\"object\":\"text_completion\",\"created\":" + std::to_string(created) +
-                       ",\"model\":" + json_escape(model) + ",\"choices\":[{\"index\":0,\"text\":" + json_escape(text) +
+                       ",\"model\":" + json_escape(model) + ",\"choices\":[{\"index\":0,\"text\":" + json_escape(content) +
                        ",\"finish_reason\":\"" + st.finish + "\"}]";
             body += ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st) + "}";
             send_all(fd, response(200, body));
         }
-        fprintf(stderr, "ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s\n", id.c_str(), st.prompt_tokens,
-                st.prompt_evaluated, st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0,
-                st.gen_tokens, st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0);
+        fprintf(stderr, "ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, draft %d/%d\n", id.c_str(),
+                st.prompt_tokens, st.prompt_evaluated, st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0,
+                st.gen_tokens, st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0,
+                st.draft_accepted, st.drafted);
     } else {
         send_all(fd, response(404, error_body("not found: " + r.path)));
     }
@@ -330,6 +428,12 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
     state_.engine = e;
     state_.model = e ? model_name : std::string();
     state_.unavailable = unavailable;
+    state_.tool_format = e ? tool_format_name(tool_format(e->tok())) : "none";
+    if (e)
+        fprintf(stderr, "ts5: tool calls: %s; web search: %s\n", state_.tool_format.c_str(),
+                state_.tool_format == "none" ? "off (no tool calls)"
+                : tavily_key().empty()       ? "off (no TAVILY_API_KEY)"
+                                             : "on (Tavily)");
 }
 
 Server::Activity Server::activity() {

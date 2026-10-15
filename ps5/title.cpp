@@ -28,7 +28,8 @@
 //   ts5.cmd     one command now: serve|check|bench -m MODEL [options], or stop
 //   ts5.once    one command at the next start, before the args file's
 //   ts5.env     NAME=VALUE settings for the engine, read at start, such as
-//               TS5_TILED_MIN=16 (engine/src/vk_backend.cpp lists them)
+//               TS5_TILED_MIN=16 (engine/src/vk_backend.cpp lists them) and
+//               TAVILY_API_KEY=tvly-... for web search (engine/src/websearch.h)
 //   press       controller buttons, as words: up down cross square ...;
 //               hold-r1 and release-r1 hold a button down and let it go
 //   screenshot  the next frame goes to screen.bmp
@@ -430,9 +431,9 @@ int main(int, char **) {
         }
         const std::string name = w.substr(0, eq);
         setenv(name.c_str(), w.substr(eq + 1).c_str(), 1);
-        // A key's value stays out of the log, which anyone on the network can
-        // read over FTP.
-        printf("ts5-title: %s\n", app::secret_setting(name) ? (name + "=(set)").c_str() : w.c_str());
+        // Keys stay out of the log, which anyone on the network can read over FTP.
+        const bool secret = name.find("KEY") != std::string::npos || name.find("TOKEN") != std::string::npos;
+        printf("ts5-title: %s\n", secret ? (name + "=(set)").c_str() : w.c_str());
     }
 
     for (const char *f :

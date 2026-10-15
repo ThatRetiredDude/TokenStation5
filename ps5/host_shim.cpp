@@ -8,7 +8,8 @@
 //   vk_icdGetInstanceProcAddr   the system Vulkan loader's entry point
 //   the controller              never there: the host test presses buttons
 //                               through the press file
-//   audio out                   no port opens, so the audio test reports no
+//   the resolver, kern.arandom  getaddrinfo and /dev/urandom (engine/src/net.cpp)
+//   audio out and in            no port opens, so the audio test reports no
 //                               audio
 //   the mic                     none, unless the host test puts a 16 kHz mono
 //                               WAV at TS5_HOME/mic.wav: then the mic plays
@@ -17,7 +18,10 @@
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
+#include <arpa/inet.h>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <netdb.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -48,6 +52,29 @@ int sceKernelSendNotificationRequest(int, void *request, size_t, int) {
 }
 
 int sceKernelUsleep(unsigned int microseconds) { return usleep(microseconds); }
+
+int sceNetInit(void) { return 0; }
+int sceNetPoolCreate(const char *, int, int) { return 1; }
+int sceNetResolverCreate(const char *, int, int) { return 1; }
+int sceNetResolverDestroy(int) { return 0; }
+int sceNetResolverStartNtoa(int, const char *host, uint32_t *addr, int, int, int) {
+    addrinfo hints{}, *res = nullptr;
+    hints.ai_family = AF_INET;
+    if (getaddrinfo(host, nullptr, &hints, &res) != 0) return -1;
+    *addr = ((sockaddr_in *)res->ai_addr)->sin_addr.s_addr;
+    freeaddrinfo(res);
+    return 0;
+}
+// kern.arandom only (glibc has no sysctl).
+int sysctl(const int *name, unsigned namelen, void *old, size_t *oldlen, const void *, size_t) {
+    if (namelen != 2 || name[0] != 1 || name[1] != 37) return -1;
+    int fd = open("/dev/urandom", O_RDONLY);
+    ssize_t n = fd < 0 ? -1 : read(fd, old, *oldlen);
+    if (fd >= 0) close(fd);
+    if (n <= 0) return -1;
+    *oldlen = (size_t)n;
+    return 0;
+}
 
 // The console's memory pools have no Linux counterpart: the log says unknown.
 size_t sceKernelGetDirectMemorySize(void) { return 0; }

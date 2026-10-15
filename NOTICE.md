@@ -178,6 +178,22 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+## In the binaries
+
+`engine/deps.sh` fetches these at pinned, hash-checked versions for both the
+Linux `ts5` and the PS5 title, which build them in for the web search tool's
+HTTPS. Neither is stored in this repo.
+
+| Project | What ts5 uses | License |
+| --- | --- | --- |
+| [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) 3.6.7 | TLS, X.509 and crypto (`engine/src/net.cpp`), linked in | Apache-2.0 |
+| [certifi](https://github.com/certifi/python-certifi) 2026.07.22 (Mozilla's CA certificates) | `cacert.pem`, unmodified, built in as data (`engine/src/ca_bundle.cpp`) | MPL-2.0 |
+
+Mbed TLS: Copyright The Mbed TLS Contributors, licensed under the Apache
+License 2.0 (https://www.apache.org/licenses/LICENSE-2.0). The CA bundle is
+distributed unmodified under the Mozilla Public License 2.0
+(https://mozilla.org/MPL/2.0/); its source is the certifi release above.
+
 ## In the PS5 title only
 
 The PS5 title (`eboot.bin` and `sce_module/libc.prx`) is built by
