@@ -807,9 +807,12 @@ int main(int, char **) {
         v.now = t;
         v.wall = (int64_t)time(nullptr);
 
+        // Home's square needs the numbers at the press; the press can change
+        // Home's range, so they're fetched again then.
+        const app::UsageView::Range range = dash.range();
+        v.usage = usage_store.view(range, now_ms, v.own_ip);
         const ui::Action a = dash.press(buttons, v);
-        // After the press, which can change Home's range.
-        v.usage = usage_store.view(dash.range(), now_ms, v.own_ip);
+        if (dash.range() != range) v.usage = usage_store.view(dash.range(), now_ms, v.own_ip);
         switch (a.kind) {
             case ui::Action::Serve: {
                 app::Job j;
