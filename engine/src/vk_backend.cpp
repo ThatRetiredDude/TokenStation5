@@ -201,21 +201,25 @@ public:
     std::string take_profile() override {
         const Cpu c = cpu_;
         cpu_ = Cpu{};
-        if (prof_.empty()) return {};
+        if (prof_.empty() && !(cpu_prof_ && c.calls)) return {};
         std::vector<std::pair<std::string, Prof>> v(prof_.begin(), prof_.end());
         prof_.clear();
         std::sort(v.begin(), v.end(), [](const auto &a, const auto &b) { return a.second.ms > b.second.ms; });
         double total = 0;
         for (auto &e : v) total += e.second.ms;
-        char b[256];
-        snprintf(b, sizeof b, "GPU time %.1f ms:\n", total);
+        char b[320];
+        snprintf(b, sizeof b, v.empty() ? "CPU time:\n" : "GPU time %.1f ms:\n", total);
         std::string s = b;
         if (c.calls) {
-            // What the CPU did per forward call besides waiting for the GPU.
-            const double n = c.calls, rec = c.call - c.submit - c.wait - c.copy;
+            // What the CPU did per forward call besides waiting for the GPU;
+            // what it recorded ahead it did while the GPU worked.
+            const double n = c.calls, rec = c.call - c.submit - c.wait - c.copy - c.ahead;
             snprintf(b, sizeof b,
-                     "  CPU per call: %.3f ms recording, %.3f submitting, %.3f copying logits; %.3f waiting (%d calls)\n",
-                     rec / n, c.submit / n, c.copy / n, c.wait / n, c.calls);
+                     "  CPU per call: %.3f ms recording, %.3f submitting (%.3f of it for the queue's lock, longest "
+                     "%.2f), %.3f copying logits; %.3f waiting, %.3f recording ahead meanwhile (%d calls, %d recorded "
+                     "ahead)\n",
+                     rec / n, c.submit / n, c.lock / n, c.submit_max, c.copy / n, c.wait / n, c.ahead / n, c.calls,
+                     c.reused);
             s += b;
         }
         for (auto &e : v) {
@@ -269,10 +273,13 @@ private:
         cai.commandBufferCount = (uint32_t)cmds_.size();
         CHECK(vk.vkAllocateCommandBuffers(dev_, &cai, cmds_.data()));
         cmd_ = cmds_[0];
+        cai.commandBufferCount = (uint32_t)aheads_.size();
+        CHECK(vk.vkAllocateCommandBuffers(dev_, &cai, aheads_.data()));
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         CHECK(vk.vkCreateFence(dev_, &fci, nullptr, &fence_));
         if (const char *e = getenv("TS5_LAYERS_PER_SUBMIT")) layers_per_submit_ = std::max(1, atoi(e));
         if (const char *e = getenv("TS5_DEC_SUBMIT")) dec_submit_ = std::max(0, atoi(e));
+        if (const char *e = getenv("TS5_AHEAD")) ahead_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_TILED_MIN")) tiled_min_ = atoi(e);
         if (const char *e = getenv("TS5_FAST_MATVEC")) fast_matvec_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV_ROWS")) mv_rows_ = std::min(8, std::max(1, atoi(e)));
@@ -299,7 +306,8 @@ private:
             kv_ = KvType::F16;
         }
         const char *prof = getenv("TS5_PROFILE");
-        if (prof && atoi(prof) != 0) {
+        cpu_prof_ = prof && atoi(prof) != 0;
+        if (prof && atoi(prof) == 1) {
             if (!ctx_->timestamp_bits) {
                 fprintf(stderr, "ts5: TS5_PROFILE: the queue has no timestamps\n");
             } else {
@@ -550,9 +558,9 @@ private:
 
     // --- recording -----------------------------------------------------------
 
-    bool begin(std::string &err) {
+    bool begin(std::string &err, VkCommandBuffer target = VK_NULL_HANDLE) {
         cur_ = 0;
-        cmd_ = cmds_[0];
+        cmd_ = target ? target : cmds_[0];
         CHECK(vk.vkResetCommandBuffer(cmd_, 0));
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -565,18 +573,29 @@ private:
         return true;
     }
 
-    bool submit(std::string &err) {
-        CHECK(vk.vkEndCommandBuffer(cmd_));
+    bool submit(std::string &err) { return send(err) && finish(err); }
+
+    // Submits cmd_ (ended already when `ended`) with fence_ (or none).
+    bool send(std::string &err, bool ended = false, bool fenced = true) {
+        if (!ended) CHECK(vk.vkEndCommandBuffer(cmd_));
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
         si.pCommandBuffers = &cmd_;
-        double t = now_ms();
+        const double t = now_ms();
         {
             std::lock_guard<std::mutex> lk(ctx_->queue_mutex);
-            CHECK(vk.vkQueueSubmit(queue_, 1, &si, fence_));
+            cpu_.lock += now_ms() - t;
+            CHECK(vk.vkQueueSubmit(queue_, 1, &si, fenced ? fence_ : VK_NULL_HANDLE));
         }
-        cpu_.submit += now_ms() - t;
-        t = now_ms();
+        const double dt = now_ms() - t;
+        cpu_.submit += dt;
+        cpu_.submit_max = std::max(cpu_.submit_max, dt);
+        return true;
+    }
+
+    // Waits for what send() submitted, and for the profile's timestamps.
+    bool finish(std::string &err) {
+        const double t = now_ms();
         // The fence also covers what flush() submitted before it.
         CHECK(vk.vkWaitForFences(dev_, 1, &fence_, VK_TRUE, UINT64_MAX));
         cpu_.wait += now_ms() - t;
@@ -602,16 +621,7 @@ private:
     // while the CPU records the rest. Timestamps carry on where they were;
     // the last submit() waits for all of it.
     bool flush(std::string &err) {
-        CHECK(vk.vkEndCommandBuffer(cmd_));
-        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        si.commandBufferCount = 1;
-        si.pCommandBuffers = &cmd_;
-        const double t = now_ms();
-        {
-            std::lock_guard<std::mutex> lk(ctx_->queue_mutex);
-            CHECK(vk.vkQueueSubmit(queue_, 1, &si, VK_NULL_HANDLE));
-        }
-        cpu_.submit += now_ms() - t;
+        if (!send(err, false, false)) return false;
         if (++cur_ == cmds_.size()) { err = "too many submits in one forward call"; return false; }
         cmd_ = cmds_[cur_];
         CHECK(vk.vkResetCommandBuffer(cmd_, 0));
@@ -863,9 +873,45 @@ private:
     }
 
     bool run(const int32_t *tokens, int n, int pos0, float *logits, bool all, std::string &err) {
+        const double t0 = now_ms();
+        // The command buffer recorded ahead fits a token at that position
+        // whatever the token is: it reads its id from ids_ when it runs.
+        const bool reuse = ahead_pos_ >= 0 && n == 1 && pos0 == ahead_pos_ && logits && !all;
+        ahead_pos_ = -1;
+        memcpy(ids_.map, tokens, 4 * (size_t)n);
+        if (reuse) {
+            cmd_ = aheads_[ahead_cur_];
+            cpu_.reused++;
+        } else if (!record(n, pos0, logits != nullptr, all, VK_NULL_HANDLE, err)) {
+            return false;
+        }
+        if (!send(err, reuse)) return false;
+        // While the GPU works: the next token's command buffer, for when the
+        // caller goes on one token at a time (generation does).
+        if (ahead_ && !qpool_ && logits && !all && !layers_per_submit_ && !dec_submit_ && pos0 + n < n_ctx_) {
+            const double t = now_ms();
+            ahead_cur_ ^= 1;
+            if (!record(1, pos0 + n, true, false, aheads_[ahead_cur_], err)) return false;
+            CHECK(vk.vkEndCommandBuffer(cmd_));
+            ahead_pos_ = pos0 + n;
+            cpu_.ahead += now_ms() - t;
+        }
+        if (!finish(err)) return false;
+        const double t1 = now_ms();
+        if (logits) memcpy(logits, logits_.map, 4ull * (all ? n : 1) * hp_.n_vocab);
+        const double t2 = now_ms();
+        cpu_.copy += t2 - t1;
+        cpu_.call += t2 - t0;
+        cpu_.calls++;
+        return true;
+    }
+
+    // Records a forward call of n tokens from pos0 into target (or cmds_),
+    // submitting and waiting for parts of a big batch on the way; the last
+    // command buffer is left open in cmd_.
+    bool record(int n, int pos0, bool logits, bool all, VkCommandBuffer target, std::string &err) {
         const int E = hp_.n_embd, HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
         const size_t KVD = (size_t)HKV * HD;
-        memcpy(ids_.map, tokens, 4 * (size_t)n);
         // Big batches are split into several submits so no single submit
         // runs long (the PS5 driver drops the device after 10 s without
         // progress).
@@ -873,8 +919,7 @@ private:
         // Small batches (a generated token, a verify batch) instead go out
         // dec_submit_ layers at a time without waiting in between.
         const int per_flush = n < 64 && !layers_per_submit_ ? dec_submit_ : 0;
-        const double t0 = now_ms();
-        if (!begin(err)) return false;
+        if (!begin(err, target)) return false;
         {
             struct { uint32_t ncols, row_bytes; } pc{(uint32_t)E, (uint32_t)m_.tok_embd.info->row_bytes()};
             dispatch(std::string("get_rows_") + qname(m_.tok_embd.type()), {&W(m_.tok_embd), &ids_, &x_}, pc,
@@ -931,13 +976,6 @@ private:
             rmsnorm(x_, m_.out_norm, h_, nout, all ? 0 : (uint32_t)(n - 1));
             matmul(m_.output, h_, logits_, nout, false);
         }
-        if (!submit(err)) return false;
-        const double t1 = now_ms();
-        if (logits) memcpy(logits, logits_.map, 4ull * (all ? n : 1) * hp_.n_vocab);
-        const double t2 = now_ms();
-        cpu_.copy += t2 - t1;
-        cpu_.call += t2 - t0;
-        cpu_.calls++;
         return true;
     }
 
@@ -959,6 +997,12 @@ private:
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
     std::array<VkCommandBuffer, 64> cmds_{};
     size_t cur_ = 0;
+    // A one-token forward call recorded while the GPU ran the call before
+    // (TS5_AHEAD=1), for position ahead_pos_ (-1: none), in
+    // aheads_[ahead_cur_]; the other one may be running.
+    bool ahead_ = false;
+    std::array<VkCommandBuffer, 2> aheads_{};
+    int ahead_cur_ = 0, ahead_pos_ = -1;
     VkFence fence_ = VK_NULL_HANDLE;
     std::vector<Arena> arenas_;
     std::vector<VkBuffer> all_bufs_;
@@ -1033,10 +1077,11 @@ private:
     // CPU milliseconds since the last take_profile: whole forward calls, and
     // the parts of them in vkQueueSubmit, the fence wait and the logits copy.
     struct Cpu {
-        double call = 0, submit = 0, wait = 0, copy = 0;
-        int calls = 0;
+        double call = 0, submit = 0, lock = 0, submit_max = 0, wait = 0, copy = 0, ahead = 0;
+        int calls = 0, reused = 0;
     };
     Cpu cpu_;
+    bool cpu_prof_ = false;  // TS5_PROFILE=1 or 2 (CPU times only)
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
     Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_, kc_, vc_, ks_, vs_;
