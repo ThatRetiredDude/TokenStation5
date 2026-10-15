@@ -81,7 +81,8 @@ ModelInfo inspect(const std::string &path, const std::string &file, uint64_t siz
     if (!opened) {
         m.error = err;
         // A file that has only started to arrive: no header yet, or part of it.
-        m.incomplete = err == "not a GGUF file" || err == "truncated GGUF header";
+        // Four bytes in, a file that doesn't start "GGUF" isn't a model.
+        m.incomplete = err == "truncated GGUF header" || (err == "not a GGUF file" && size < 4);
         return m;
     }
     const ts5::HParams &hp = model.hp;
@@ -157,6 +158,13 @@ Library::Library(std::vector<std::string> dirs, std::string results_path)
     load_results();
 }
 
+namespace {
+
+// Into the log, where the Models page's "Details" leads (Logs' problems).
+void log_cant_run(const ModelInfo &m) { printf("ts5-title: models: can't run %s: %s\n", m.file.c_str(), m.error.c_str()); }
+
+}  // namespace
+
 bool Library::scan() {
     std::vector<ModelInfo> next;
     for (const auto &dir : dirs_) {
@@ -177,9 +185,11 @@ bool Library::scan() {
                 // has stopped.
                 next.push_back(*old);
                 next.back().copying = false;
+                if (old->copying && !old->runnable) log_cant_run(next.back());
             } else {
                 next.push_back(inspect(path, n, (uint64_t)st.st_size, (int64_t)st.st_mtime));
                 next.back().copying = next.back().incomplete;
+                if (!next.back().runnable && !next.back().copying) log_cant_run(next.back());
             }
         }
     }
