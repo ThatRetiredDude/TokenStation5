@@ -54,6 +54,8 @@ std::string good_for(const app::ModelInfo &m) {
         if (ch == ' ') ch = '-';
     for (const Suggestion &s : kSuggestions)
         if (lower(m.file).find(s.id) != std::string::npos || name.find(s.id) != std::string::npos) return s.role;
+    // A file with no model in it: nothing to guess from.
+    if (m.arch.empty()) return "\xE2\x80\x94";
     return name.find("coder") != std::string::npos ? "Coding" : "General chat";
 }
 
