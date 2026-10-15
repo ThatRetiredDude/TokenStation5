@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include "pad.h"
+#include "plain.h"
 #include "style.h"
 
 namespace ui {
@@ -105,10 +106,7 @@ std::string prose_line(std::string l, bool &bold) {
 }
 
 std::string speed(double tps, int tokens) {
-    char b[64];
-    snprintf(b, sizeof b, tps >= 100 ? "%.0f tok/s  \xC2\xB7  %d tokens" : "%.1f tok/s  \xC2\xB7  %d tokens", tps,
-             tokens);
-    return b;
+    return plain::tokens_a_second(tps) + "  \xC2\xB7  " + plain::count(tokens) + " tokens";
 }
 
 int baseline(const Font &f, int y, int h) { return y + (h - f.line_height) / 2 + f.ascent; }

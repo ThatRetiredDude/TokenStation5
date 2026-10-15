@@ -364,8 +364,7 @@ void speak_test(int user, const std::string &models_dir, std::string text, const
     if (model.empty() || voice.empty()) {
         printf("ts5-title: speak test: no %s: no kokoro-%s in %s\n", model.empty() ? "model" : "voice",
                model.empty() ? "82m-f16.gguf" : "voice-af_heart.gguf", models_dir.c_str());
-        notify(std::string("TokenStation5 speak test: no ") + (model.empty() ? "Kokoro model" : "Kokoro voice") +
-               " in models");
+        notify("TokenStation5 voice test: no voice on the PS5 yet");
         return;
     }
     while (!text.empty() && strchr(" \r\n\t", text.back())) text.pop_back();
@@ -375,7 +374,7 @@ void speak_test(int user, const std::string &models_dir, std::string text, const
     std::string err;
     if (!g2p.load(ts5_lexicon_data, (size_t)(ts5_lexicon_data_end - ts5_lexicon_data), err)) {
         printf("ts5-title: speak test: the G2P's lexicon didn't load: %s\n", err.c_str());
-        notify("TokenStation5 speak test: the G2P's lexicon didn't load");
+        notify("TokenStation5 voice test: the pronunciation list didn't load");
         return;
     }
     // The text cut into sentences as a reply is, each with its phonemes.
@@ -393,7 +392,7 @@ void speak_test(int user, const std::string &models_dir, std::string text, const
            phonemes.size() == 1 ? "" : "s", g2p.entries());
     if (phonemes.empty()) {
         printf("ts5-title: speak test: nothing to say in that text\n");
-        notify("TokenStation5 speak test: nothing to say");
+        notify("TokenStation5 voice test: nothing to say in that text");
         return;
     }
 
@@ -407,7 +406,7 @@ void speak_test(int user, const std::string &models_dir, std::string text, const
     tts::Synth synth;
     if (!synth.load(model_path, models_dir + "/" + tts::kokoro_voice_file(voice), threads, err)) {
         printf("ts5-title: speak test: load failed: %s\n", err.c_str());
-        notify("TokenStation5 speak test: the model didn't load");
+        notify("TokenStation5 voice test: the voice didn't load");
         return;
     }
     printf("ts5-title: speak test: load %.0f ms\n", synth.load_ms());
@@ -436,7 +435,7 @@ void speak_test(int user, const std::string &models_dir, std::string text, const
         return true;
     };
     if (!run(threads)) {
-        notify("TokenStation5 speak test: " + err);
+        notify("TokenStation5 voice test: couldn't make the speech");
         return;
     }
     const double seconds = pcm.size() / (double)tts::Synth::kRate;
@@ -445,7 +444,7 @@ void speak_test(int user, const std::string &models_dir, std::string text, const
     else
         printf("ts5-title: speak test: couldn't save %s\n", base_name(wav_path).c_str());
     char line[160];
-    snprintf(line, sizeof line, "TokenStation5 speak test: %.1f s of speech made in %.1f s", seconds, made_ms / 1000);
+    snprintf(line, sizeof line, "TokenStation5 voice test: %.1f s of speech made in %.1f s", seconds, made_ms / 1000);
     notify(line);
     if (play_speech(SpeechOut::TV, user, speech_to_48k(pcm), err))
         printf("ts5-title: speak test: played on the TV\n");

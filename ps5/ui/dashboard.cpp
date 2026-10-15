@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "pad.h"
+#include "plain.h"
 #include "style.h"
 
 namespace ui {
@@ -26,8 +27,8 @@ constexpr int CX = LX, CW = 1848 - LX, CB = 884, IY = 900, IH = AY + AH - 900;
 constexpr int SB = AY + AH;
 
 // Models worth starting with that ts5 runs, for a console that has none of
-// them yet. `id` finds one already there by its file name; `key` is its line
-// in models.tsv for scripts/ts5-ps5.sh fetch.
+// them yet. `id` finds one already there by its file name, which then gets
+// its `role` as what it's good for; `key` is its line in models.tsv.
 struct Suggestion {
     const char *key, *id, *name, *quant, *size, *role;
 };
@@ -44,12 +45,31 @@ std::string lower(std::string s) {
     return s;
 }
 
-std::string arch_name(const std::string &a) {
-    if (a == "qwen2") return "Qwen2";
-    if (a == "qwen3") return "Qwen3";
-    if (a == "llama") return "Llama";
-    if (a == "mistral") return "Mistral";
-    return a.empty() ? "Unknown" : a;
+// What a model is good for: its suggestion's role, found by its file name or
+// its own name (a copy under another file name is the same model), else a
+// guess from its name.
+std::string good_for(const app::ModelInfo &m) {
+    std::string name = lower(m.name);
+    for (auto &ch : name)
+        if (ch == ' ') ch = '-';
+    for (const Suggestion &s : kSuggestions)
+        if (lower(m.file).find(s.id) != std::string::npos || name.find(s.id) != std::string::npos) return s.role;
+    return name.find("coder") != std::string::npos ? "Coding" : "General chat";
+}
+
+// A model's name in the list: with its precision when another model there
+// has the same name (two downloads of one model, 4-bit and 8-bit).
+std::string shown_name(const std::vector<app::ModelInfo> &models, const app::ModelInfo &m) {
+    int same = 0;
+    for (const app::ModelInfo &o : models) same += o.name == m.name;
+    if (same < 2 || m.quant.empty()) return m.name;
+    return m.name + " (" + plain::quant_detail(m.quant) + ")";
+}
+
+// "Still copying: 2.1 GB of 4.7 GB so far"
+std::string copied(const app::ModelInfo &m) {
+    return "Still copying: " + app::format_bytes(m.size) +
+           (m.full_size > m.size ? " of " + app::format_bytes(m.full_size) : std::string()) + " so far";
 }
 
 std::string ago(int64_t then, int64_t now) {
@@ -58,8 +78,18 @@ std::string ago(int64_t then, int64_t now) {
     if (s < 60) return "just now";
     if (s < 3600) snprintf(b, sizeof b, "%lld min ago", (long long)(s / 60));
     else if (s < 86400) snprintf(b, sizeof b, "%lld h ago", (long long)(s / 3600));
+    else if (s < 2 * 86400) return "a day ago";
     else snprintf(b, sizeof b, "%lld days ago", (long long)(s / 86400));
     return b;
+}
+
+// A line with its time after it ("... · 5 min ago"): a line too long for
+// max_w is cut, never the time.
+int text_with_time(Canvas &c, const Font &f, int x, int y, const std::string &s, const std::string &when, Color col,
+                   int max_w) {
+    const std::string tail = "  \xC2\xB7  " + when;
+    const int w = c.text(f, x, y, s, col, std::max(1, max_w - Canvas::measure(f, tail)));
+    return w + c.text(f, x + w, y, tail, col, std::max(1, max_w - w));
 }
 
 std::string elapsed(double s) {
@@ -69,11 +99,7 @@ std::string elapsed(double s) {
     return b;
 }
 
-std::string tps(double v) {
-    char b[32];
-    snprintf(b, sizeof b, v >= 100 ? "%.0f tok/s" : "%.1f tok/s", v);
-    return b;
-}
+std::string tps(double v) { return plain::tokens_a_second(v); }
 
 // Words onto lines no wider than max_w.
 std::vector<std::string> wrap(const Font &f, const std::string &text, int max_w) {
@@ -103,7 +129,7 @@ void label(Canvas &c, const Font &f, int x, int y, const std::string &s) { c.tex
 std::string name_of(const View &v, const std::string &file) {
     for (const auto &m : v.models)
         if (m.file == file) return m.name;
-    return file;
+    return plain::model_name(file);
 }
 
 // Cross types a message: a model serves, and no reply is coming.
@@ -120,7 +146,7 @@ struct Dashboard::Item {
 
 Dashboard::Dashboard(const Fonts &fonts, const uint8_t *logo, size_t logo_size)
     : title_(fonts.get("title")), h2_(fonts.get("h2")), body_(fonts.get("body")),
-      bodyb_(fonts.get("bodyb")), small_(fonts.get("small")), smallb_(fonts.get("smallb")), mono_(fonts.get("mono")),
+      bodyb_(fonts.get("bodyb")), small_(fonts.get("small")), smallb_(fonts.get("smallb")),
       chat_(fonts), settings_(fonts) {
     if (logo && logo_size >= 8 && memcmp(logo, "TS5L", 4) == 0) {
         uint16_t w, h;
@@ -302,24 +328,28 @@ void Dashboard::draw_header(Canvas &c, const View &v) {
     }
     const int tx = LX + (logo_ ? logo_w_ + 28 : 0);
     c.text(title_, tx, 100, "TokenStation5", kText);
-    c.text(small_, tx, 136, "Local AI on your PS5  \xC2\xB7  build " + v.version, kText2);
+    c.text(small_, tx, 136, "Local AI on your PS5", kText2);
 
     const auto &st = v.status;
-    std::string state = "NOT SERVING";
+    std::string state = "NOT RUNNING";
     Color col = kText2;
     switch (st.phase) {
         case app::Status::Loading: state = "LOADING", col = kAmber; break;
         case app::Status::Checking: state = "GPU CHECK", col = kAccent; break;
         case app::Status::Benchmarking: state = "SPEED TEST", col = kAccent; break;
-        case app::Status::Serving: state = "SERVING", col = kGreen; break;
+        case app::Status::Serving: state = "READY", col = kGreen; break;
         case app::Status::Idle: break;
     }
     const int left = pill(c, smallb_, 1848, 48, state, col);
     c.circle((float)left - 18, 65, 7, col);
     draw_tabs(c);
     const bool up = !st.serving.empty() && st.phase == app::Status::Serving;
-    c.text_right(smallb_, 1848, 132, v.url, up ? kAccent : kText2);
-    c.text_right(small_, 1848 - Canvas::measure(smallb_, v.url) - 12, 132, "API", kMuted);
+    if (v.on_network) {
+        c.text_right(smallb_, 1848, 132, v.url, up ? kAccent : kText2);
+        c.text_right(small_, 1848 - Canvas::measure(smallb_, v.url) - 12, 132, "For apps", kMuted);
+    } else {
+        c.text_right(small_, 1848, 132, "Not on a network yet", kText2);
+    }
 }
 
 // The pages, as tabs right of the title, with the button that switches them.
@@ -371,18 +401,17 @@ void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &lis
         if (it.kind == Item::Empty) {
             c.round_rect_line((float)LIST_X, (float)ry, (float)LIST_W, (float)it.h, 14, 1.5f, kPanelLine);
             c.text(bodyb_, LIST_X + 24, ry + 44, "No models yet", kText);
-            c.text(small_, LIST_X + 24, ry + 80, "Copy a .gguf over FTP to", kText2);
-            c.text(small_, LIST_X + 24, ry + 110, v.folder, kAccent);
+            c.text(small_, LIST_X + 24, ry + 80, "Add one from your computer.", kText2);
+            c.text(small_, LIST_X + 24, ry + 110, "The TokenStation5 guide shows how.", kText2);
             continue;
         }
         c.round_rect((float)LIST_X, (float)ry, (float)LIST_W, (float)it.h, 14, is_sel ? kRowSel : kRow);
         if (is_sel) c.round_rect_line((float)LIST_X, (float)ry, (float)LIST_W, (float)it.h, 14, 2.5f, kAccent);
         if (it.kind == Item::Suggestion) {
             const Suggestion &s = kSuggestions[it.index];
-            const int pl = pill(c, smallb_, right, ry + 14, "SUGGESTED", kMuted);
-            c.text(bodyb_, LIST_X + 24, ry + 40, s.name, kText2, pl - 16 - (LIST_X + 24));
-            c.text(small_, LIST_X + 24, ry + 72, std::string(s.quant) + "  \xC2\xB7  " + s.size + "  \xC2\xB7  " + s.role,
-                   kMuted, LIST_W - 48);
+            c.text(bodyb_, LIST_X + 24, ry + 40, s.name, kText2, right - (LIST_X + 24));
+            c.text(small_, LIST_X + 24, ry + 72, std::string(s.role) + "  \xC2\xB7  " + s.size + " download", kMuted,
+                   LIST_W - 48);
             continue;
         }
         const app::ModelInfo &m = v.models[it.index];
@@ -394,21 +423,33 @@ void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &lis
             pl = pill(c, smallb_, right, ry + 14, "GPU CHECK", kAccent);
         else if (job_here && v.status.phase == app::Status::Benchmarking)
             pl = pill(c, smallb_, right, ry + 14, "SPEED TEST", kAccent);
-        else if (m.path == v.status.serving_path) pl = pill(c, smallb_, right, ry + 14, "SERVING", kGreen);
+        else if (m.path == v.status.serving_path) pl = pill(c, smallb_, right, ry + 14, "IN USE", kGreen);
+        else if (m.copying) pl = pill(c, smallb_, right, ry + 14, "COPYING", kAmber);
         else if (!m.runnable) pl = pill(c, smallb_, right, ry + 14, "CAN'T RUN", kRed);
-        c.text(bodyb_, LIST_X + 24, ry + 40, m.name, m.runnable ? kText : kText2, pl - 16 - (LIST_X + 24));
+        c.text(bodyb_, LIST_X + 24, ry + 40, shown_name(v.models, m), m.runnable ? kText : kText2,
+               pl - 16 - (LIST_X + 24));
 
-        // Results, right-aligned under the label.
+        // Results, right-aligned under the label: a failed check, else the
+        // speed (with a tick once the check passed).
         int rx = right;
-        if (r.has_bench) rx = c.text_right(small_, rx, ry + 72, tps(r.bench.tg_tps), kText2) - 20;
-        if (r.has_check)
-            rx = c.text_right(smallb_, rx, ry + 72, r.check.pass ? "\xE2\x9C\x93 GPU check" : "\xE2\x9C\x97 GPU check",
-                              r.check.pass ? kGreen : kRed) - 20;
-        std::string line = arch_name(m.arch);
-        if (m.params > 0) line += "  \xC2\xB7  " + app::format_params(m.params);
-        if (!m.quant.empty()) line += "  \xC2\xB7  " + m.quant;
-        line += "  \xC2\xB7  " + app::format_bytes(m.size);
-        c.text(small_, LIST_X + 24, ry + 72, line, kText2, rx - (LIST_X + 24));
+        if (r.has_check && !r.check.pass) {
+            rx = c.text_right(smallb_, rx, ry + 72, "\xE2\x9C\x97 Failed GPU check", kRed) - 20;
+        } else if (r.has_bench) {
+            rx = c.text_right(small_, rx, ry + 72, tps(r.bench.tg_tps), kText2) - 8;
+            if (r.has_check) rx = c.text_right(smallb_, rx, ry + 72, "\xE2\x9C\x93", kGreen) - 20;
+            else rx -= 12;
+        } else if (r.has_check) {
+            rx = c.text_right(smallb_, rx, ry + 72, "\xE2\x9C\x93 Passed GPU check", kGreen) - 20;
+        }
+        std::string line;
+        if (m.copying) {
+            line = copied(m);
+        } else {
+            line = good_for(m);
+            if (m.params > 0) line += "  \xC2\xB7  " + app::format_params(m.params);
+            line += "  \xC2\xB7  " + app::format_bytes(m.size);
+        }
+        c.text(small_, LIST_X + 24, ry + 72, line, m.copying ? kAmber : kText2, rx - (LIST_X + 24));
     }
     c.unclip();
 }
@@ -444,16 +485,16 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
         c.text(h2_, DX, 244, s.name, kText, DW);
         c.text(small_, DX, 280, "Suggested  \xC2\xB7  not on your PS5 yet", kText2);
         cell(DX, 306, "DOWNLOAD SIZE", s.size);
-        cell(col2, 306, "QUANTIZATION", s.quant);
         cell(DX, 390, "GOOD FOR", s.role, DW);
         label(c, smallb_, DX, 500, "TO ADD IT");
-        c.text(body_, DX, 540, "On your computer, in the TokenStation5 folder, run", kText2, DW);
-        c.round_rect((float)DX, 558, (float)DW, 50, 10, rgb(0x0A1024));
-        c.text(mono_, DX + 18, 590, std::string("scripts/ts5-ps5.sh fetch ") + s.key, kAccent, DW - 36);
-        c.text(body_, DX, 650, "or copy its .gguf over FTP to", kText2, DW);
-        c.text(mono_, DX, 684, v.folder, kAccent, DW);
-        c.text(small_, DX, 730, "It shows up here by itself once it's copied.", kMuted, DW);
-        buttons({{kGlyphCross, "Serve", false},
+        int y = 540;
+        for (auto &line : wrap(body_, "Not on your PS5 yet. It can be added from a computer; the TokenStation5 guide "
+                                      "shows how.", DW)) {
+            c.text(body_, DX, y, line, kText2);
+            y += 36;
+        }
+        c.text(small_, DX, y + 10, "It shows up here by itself.", kMuted, DW);
+        buttons({{kGlyphCross, "Start", false},
                  {kGlyphSquare, "GPU check", false},
                  {kGlyphTriangle, "Speed test", false},
                  {kGlyphCircle, "Stop", serving_any && !busy}});
@@ -462,19 +503,24 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
     if (it.kind != Item::Model) return;
     const app::ModelInfo &m = v.models[it.index];
     const app::Results r = v.results.count(m.file) ? v.results.at(m.file) : app::Results{};
-    c.text(h2_, DX, 244, m.name, kText, DW);
-    c.text(mono_, DX, 278, m.file, kText2, DW);
-    cell(DX, 306, "ARCHITECTURE", arch_name(m.arch) + (m.layers ? "  \xC2\xB7  " + std::to_string(m.layers) + " layers" : ""));
-    cell(col2, 306, "PARAMETERS", m.params > 0 ? app::format_params(m.params) : "\xE2\x80\x94");
-    cell(DX, 390, "QUANTIZATION", m.quant.empty() ? "\xE2\x80\x94" : m.quant);
+    c.text(h2_, DX, 244, shown_name(v.models, m), kText, DW);
+    c.text(small_, DX, 278, plain::capital("added " + ago(m.mtime, v.wall)), kText2, DW);
+    cell(DX, 306, "GOOD FOR", good_for(m));
+    cell(col2, 306, "SIZE", m.params > 0 ? plain::parameters(m.params) : "\xE2\x80\x94");
+    cell(DX, 390, "PRECISION", m.quant.empty() ? "\xE2\x80\x94" : plain::quant_detail(m.quant));
     cell(col2, 390, "FILE SIZE", app::format_bytes(m.size));
 
-    if (!m.runnable) {
-        label(c, smallb_, DX, 500, "CAN'T RUN IT");
+    if (m.copying || !m.runnable) {
+        // Why it can't run, in plain words; the engine's own words are in the
+        // log (the title logs each model it can't open).
+        label(c, smallb_, DX, 500, m.copying ? "COPYING" : "CAN'T RUN IT");
+        const std::string why = m.copying      ? copied(m) + ". It's ready when the copy finishes."
+                                : m.incomplete ? "This file is incomplete. Copy or download it again."
+                                               : plain::sentence(plain::reason(m.error));
         int y = 540;
-        for (auto &line : wrap(body_, "TokenStation5 can't run this model: " + m.error + ".", DW)) {
+        for (auto &line : wrap(body_, why, DW)) {
             if (y > 740) break;
-            c.text(body_, DX, y, line, kRed);
+            c.text(body_, DX, y, line, m.copying ? kAmber : kRed);
             y += 36;
         }
     } else {
@@ -486,43 +532,40 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
                                             : m.serve_ctx(v.n_ctx, v.gpu_memory);
         const uint64_t need = m.memory_for(ctx);
         const bool fits = !v.gpu_memory || (ctx.n > 0 && need <= v.gpu_memory);
-        char cap[64];
-        snprintf(cap, sizeof cap, "GPU MEMORY AT %dK CONTEXT%s", ctx.n / 1024, ctx.kv8 ? ", 8-BIT CACHE" : "");
-        label(c, smallb_, DX, 500, cap);
+        label(c, smallb_, DX, 500, "MEMORY NEEDED");
         c.round_rect((float)DX, 516, (float)DW, 14, 7, rgb(0x1B2650));
         if (v.gpu_memory) {
             const float f = std::min(1.0f, (float)need / (float)v.gpu_memory);
             c.round_rect((float)DX, 516, std::max(14.0f, DW * f), 14, 7, fits ? kAccent : kRed);
         }
-        std::string mem = "Needs " + app::format_bytes(need);
+        std::string mem = app::format_bytes(need);
         if (v.gpu_memory) mem += " of the GPU's " + app::format_bytes(v.gpu_memory);
-        if (!fits) mem += ": too big to load";
+        mem = fits ? mem + "  \xC2\xB7  room for " + plain::count(ctx.n) + " tokens of conversation"
+                   : "Too big for this PS5's GPU: it needs " + mem;
         c.text(small_, DX, 562, mem, fits ? kText2 : kRed, DW);
 
         label(c, smallb_, DX, 612, "GPU CHECK");
         if (r.has_check) {
-            char b[160];
-            snprintf(b, sizeof b, "  \xC2\xB7  top token %d/%d  \xC2\xB7  max diff %.2f%%  \xC2\xB7  ", r.check.same_top,
-                     r.check.n, r.check.rel * 100);
-            const int w = c.text(bodyb_, DX, 648, r.check.pass ? "\xE2\x9C\x93 Passed" : "\xE2\x9C\x97 Failed",
+            const int w = c.text(bodyb_, DX, 648, r.check.pass ? "\xE2\x9C\x93 Passed: " : "\xE2\x9C\x97 Failed: ",
                                  r.check.pass ? kGreen : kRed);
-            c.text(body_, DX + w, 648, b + ago(r.check.when, v.wall), kText2, DW - w);
+            text_with_time(c, body_, DX + w, 648,
+                           r.check.pass ? "same answers as the CPU" : "its answers don't match the CPU's",
+                           ago(r.check.when, v.wall), kText2, DW - w);
         } else {
-            text_glyph(c, body_, DX, 648, "Not run yet. Press", kGlyphSquare, "to compare the GPU with the CPU.", kMuted);
+            text_glyph(c, body_, DX, 648, "Not run yet. Press", kGlyphSquare, "to check its answers on the PS5.", kMuted);
         }
         label(c, smallb_, DX, 696, "SPEED");
         if (r.has_bench) {
-            c.text(body_, DX, 732,
-                   "Prompt " + tps(r.bench.pp_tps) + "  \xC2\xB7  generation " + tps(r.bench.tg_tps) + "  \xC2\xB7  " +
-                       ago(r.bench.when, v.wall),
-                   kText, DW);
+            char speeds[96];
+            snprintf(speeds, sizeof speeds, "Writes %.0f, reads %.0f tokens a second", r.bench.tg_tps, r.bench.pp_tps);
+            text_with_time(c, body_, DX, 732, speeds, ago(r.bench.when, v.wall), kText, DW);
         } else {
-            c.text(body_, DX, 732, "Not measured yet.", kMuted, DW);
+            text_glyph(c, body_, DX, 732, "Not measured yet. Press", kGlyphTriangle, "to time it.", kMuted);
         }
     }
     const bool can = m.runnable && !busy;
     const bool is_serving = m.path == v.status.serving_path;
-    buttons({{kGlyphCross, is_serving ? "Serving" : "Serve", can && !is_serving},
+    buttons({{kGlyphCross, is_serving ? "In use" : "Start", can && !is_serving},
              {kGlyphSquare, "GPU check", can},
              {kGlyphTriangle, "Speed test", can},
              {kGlyphCircle, "Stop", serving_any && !busy}});
@@ -547,7 +590,7 @@ void Dashboard::draw_activity(Canvas &c, const View &v) {
             break;
         case app::Status::Serving:
             spin = false;
-            line = "Serving " + name_of(v, st.serving) + " to your network";
+            line = name_of(v, st.serving) + (v.on_network ? " is ready for apps on your network" : " is ready");
             col = kGreen;
             break;
         case app::Status::Idle:
@@ -559,7 +602,7 @@ void Dashboard::draw_activity(Canvas &c, const View &v) {
     if (spin) spinner(c, (float)x + 12, AY + 42, v.now, kAccent);
     else c.circle((float)x + 12, AY + 42, 7, col);
     if (st.phase == app::Status::Idle)
-        text_glyph(c, bodyb_, tx, AY + 52, "Not serving. Choose a model and press", kGlyphCross, "to serve it.", col);
+        text_glyph(c, bodyb_, tx, AY + 52, "Nothing running. Choose a model and press", kGlyphCross, "to start it.", col);
     else
         c.text(bodyb_, tx, AY + 52, line, col, 1080 - tx);
 
@@ -568,22 +611,21 @@ void Dashboard::draw_activity(Canvas &c, const View &v) {
     for (int i = (int)v.events.size() - 1, shown = 0; i >= 0 && shown < 2; i--, shown++) {
         const app::Event &e = v.events[i];
         const int64_t secs = (int64_t)(v.now - e.when);
-        c.text(small_, tx, y, e.text + "  \xC2\xB7  " + ago(0, secs), e.bad ? kRed : kText2, 1080 - tx);
+        text_with_time(c, small_, tx, y, e.text, ago(0, secs), e.bad ? kRed : kText2, 1080 - tx);
         y += 30;
     }
 
     const int ax = 1180;
-    label(c, smallb_, ax, AY + 40, "API REQUESTS");
-    c.text(bodyb_, ax, AY + 78, std::to_string(v.api.requests) + (v.api.requests == 1 ? " request" : " requests"), kText);
+    label(c, smallb_, ax, AY + 40, "REQUESTS FROM APPS");
+    c.text(bodyb_, ax, AY + 78, plain::count(v.api.requests) + " since TokenStation5 opened", kText, 1848 - 32 - ax);
     if (v.api.generating) {
         const float pulse = 0.5f + 0.5f * std::sin((float)v.now * 6);
         c.circle(ax + 8, AY + 104, 6, alpha(kAccent, 120 + (unsigned)(pulse * 135)));
-        c.text(small_, ax + 24, AY + 112, "Answering a request\xE2\x80\xA6", kAccent);
+        c.text(small_, ax + 24, AY + 112, "Writing a reply\xE2\x80\xA6", kAccent);
     } else if (v.api.requests > 0) {
         const auto &g = v.api.last;
-        std::string s = "Last reply: ";
-        if (g.prompt_evaluated > 0 && g.prompt_ms > 0) s += "prompt " + tps(g.prompt_evaluated * 1000.0 / g.prompt_ms) + "  \xC2\xB7  ";
-        if (g.gen_tokens > 0 && g.gen_ms > 0) s += "generation " + tps(g.gen_tokens * 1000.0 / g.gen_ms);
+        const std::string s = g.gen_tokens > 0 && g.gen_ms > 0 ? "Last reply: " + tps(g.gen_tokens * 1000.0 / g.gen_ms)
+                                                                : std::string("Last reply: no words");
         c.text(small_, ax, AY + 112, s, kText2, 1848 - 32 - ax);
     } else {
         c.text(small_, ax, AY + 112, "None yet", kMuted);
@@ -599,7 +641,7 @@ void Dashboard::draw_footer(Canvas &c) {
     struct {
         PadGlyph g;
         const char *text;
-    } hints[] = {{kGlyphCross, "Serve"}, {kGlyphSquare, "GPU check"}, {kGlyphTriangle, "Speed test"}, {kGlyphCircle, "Stop serving"}};
+    } hints[] = {{kGlyphCross, "Start"}, {kGlyphSquare, "GPU check"}, {kGlyphTriangle, "Speed test"}, {kGlyphCircle, "Stop"}};
     for (auto &h : hints) {
         glyph(c, (float)x + 16, (float)y - 8, h.g);
         x += 40 + c.text(small_, x + 40, y, h.text, kText2) + 36;
@@ -665,7 +707,11 @@ void Dashboard::draw_confirm(Canvas &c) {
     c.round_rect((float)x, (float)y, (float)w, (float)h, 24, rgb(0x111A38));
     c.round_rect_line((float)x, (float)y, (float)w, (float)h, 24, 2, rgb(0x2A3A70));
     c.text(h2_, x + 48, y + 80, "Close TokenStation5?", kText);
-    c.text(body_, x + 48, y + 130, "The API stops until you open the app again.", kText2, w - 96);
+    int ty = y + 124;
+    for (auto &line : wrap(body_, "Apps on your network can't use TokenStation5 until you open it again.", w - 96)) {
+        c.text(body_, x + 48, ty, line, kText2);
+        ty += 34;
+    }
     const int bw = 220, by = y + 196;
     for (int i = 0; i < 2; i++) {
         const int bx = x + 48 + i * (bw + 16);

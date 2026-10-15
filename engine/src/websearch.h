@@ -41,4 +41,8 @@ Json web_search_tool(const std::string &today);
 // not work (network, a refused key, a used-up plan), not that it found nothing.
 std::string web_search(const std::string &arguments, std::string &log, bool *failed = nullptr);
 
+// Why a search failed, in the plain words web_search gave the model ("the
+// Tavily key was refused"); the log line has the raw reason.
+std::string search_failure(const std::string &result);
+
 }  // namespace ts5

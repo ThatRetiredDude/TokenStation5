@@ -43,7 +43,8 @@ struct Status {
     std::string serving, serving_path;  // file name and path of the model the API answers with
     int serving_ctx = 0;
     bool serving_kv8 = false;  // its KV cache is 8-bit
-    std::string error;  // the last job's failure, until the next job starts
+    std::string error;  // the last job's failure, until the next job starts, as the log has it
+    std::string said;   // the same failure in plain words, for the screen and the notification
     int queued = 0;
 };
 
@@ -79,6 +80,10 @@ private:
     std::unique_ptr<Loaded> load(const std::string &path, int n_ctx, std::string &err, bool drafter = false);
     void set_step(const std::string &step);
     void event(const std::string &text, bool bad = false);
+    // The job's failure: raw for the log, said for the screen.
+    void fail(const std::string &raw, const std::string &said);
+    // The model's name as the Models page shows it (the library's).
+    std::string name_for(const std::string &path);
 
     ts5::VkContext *ctx_;
     ts5::Server &server_;

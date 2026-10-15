@@ -26,6 +26,23 @@ int max_tokens() {
     return n > 0 ? n : 2048;
 }
 
+// A failed reply in plain words. The error comes from the title's own API:
+// a 503's sentence (already plain), or the engine's words, which go to the log.
+std::string said(const std::string &raw) {
+    auto has = [&](const char *w) { return raw.find(w) != std::string::npos; };
+    if (raw.rfind("The model is", 0) == 0 || raw.rfind("No model is", 0) == 0) return raw;
+    if (has("empty prompt")) return "Nothing to answer: the message was empty.";
+    if (has("context full") || has("longer than the context"))
+        return "This chat is too long for this model. Press square for a new chat.";
+    if (has("vkAllocateMemory") || has("out of GPU memory") || has("not enough GPU memory") || has("bad_alloc"))
+        return "There wasn't enough memory to finish this reply. Try a shorter chat.";
+    if (has("vk") || has("VK_") || has("too many submits") || has("failed: -"))
+        return "The GPU hit a problem while writing this reply. Press square for a new chat.";
+    if (has("can't reach the API"))
+        return "The chat couldn't reach TokenStation5's server. Close TokenStation5 and open it again.";
+    return "The reply failed. Press square for a new chat and try again.";
+}
+
 // A reply as the next request sends it back: without its thinking, which
 // the thinking models' own templates leave out of the history too.
 std::string without_thinking(const std::string &s) {
@@ -135,11 +152,15 @@ void Chat::reply() {
         t.end = ChatTurn::Stopped;
     } else {
         t.end = ChatTurn::Failed;
-        t.error = r == TooLong ? "This message is longer than the model's context." : err;
+        t.error = r == TooLong ? "This message is too long for this model. Try a shorter one, or press square for a "
+                                 "new chat."
+                               : said(err);
     }
+    // The API's own words in the log.
     printf("ts5-title: chat: reply %s, %zu bytes, %d tokens, %.1f tok/s%s%s\n",
            t.end == ChatTurn::Done ? "done" : t.end == ChatTurn::Stopped ? "stopped" : "failed", t.text.size(),
-           t.tokens, t.tps, t.error.empty() ? "" : ": ", t.error.c_str());
+           t.tokens, t.tps, t.end == ChatTurn::Failed ? ": " : "",
+           t.end == ChatTurn::Failed ? (err.empty() ? "longer than the context" : err.c_str()) : "");
     state_.busy = state_.waiting = false;
     bump();
 }
@@ -235,7 +256,8 @@ Chat::Result Chat::post(const std::string &body, std::string &err) {
             err = why.rfind("loading", 0) == 0 ? "The model is still loading. Try again in a moment."
                   : why.empty() || why == "no model is loaded"
                       ? "No model is serving. Press circle for Models and choose one."
-                      : "The model is busy: " + why + ".";
+                  : why.rfind("The model is busy", 0) == 0 ? why  // a GPU check or speed test (runner.cpp)
+                                                             : "The model is busy. Try again in a moment.";
         else
             err = why.empty() ? "the API answered " + std::to_string(status) : why;
         return Failed;
