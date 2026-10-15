@@ -23,7 +23,7 @@ namespace app {
 struct Job {
     enum Kind { Serve, Check, Bench, Stop } kind = Serve;
     std::string path;
-    int n_ctx = 8192;      // Serve
+    int n_ctx = 0;         // Serve: 0 for what fits in the GPU's memory
     int n = 16;            // Check: tokens
     bool fresh = false;    // Check: run the CPU even if its answers are saved
     // Check, Bench: engine settings (NAME=VALUE, as in ts5.env) for this job's
@@ -39,6 +39,7 @@ struct Status {
     double job_started = 0;  // seconds, steady clock
     std::string serving, serving_path;  // file name and path of the model the API answers with
     int serving_ctx = 0;
+    bool serving_kv8 = false;  // its KV cache is 8-bit
     std::string error;  // the last job's failure, until the next job starts
     int queued = 0;
 };
@@ -69,7 +70,9 @@ private:
     void run(const Job &job);
     bool serve(const std::string &path, int n_ctx);
     void unload();
-    std::unique_ptr<Loaded> load(const std::string &path, int n_ctx, std::string &err);
+    // drafter: also load TS5_DRAFT_MODEL (serve jobs; check and bench never
+    // call generate, so they skip it).
+    std::unique_ptr<Loaded> load(const std::string &path, int n_ctx, std::string &err, bool drafter = false);
     void set_step(const std::string &step);
     void event(const std::string &text, bool bad = false);
 

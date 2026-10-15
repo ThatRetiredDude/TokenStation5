@@ -1,0 +1,98 @@
+#version 450
+// y[r] (+)= sum_c W[r][c] * x[c] for one token of a Q6_K matrix, laid out
+// as mv16_q4_k: 8 threads share a 256-value block, the workgroup's 64
+// threads take 8 blocks of a row at a time for NR rows (a specialization
+// constant, at most 8), and each thread loads its 32 values of x once for
+// all NR rows.
+// A 210-byte block: ql[128], qh[64], 16 int8 scales, d (f16). Half h holds
+// ql[64 h ..], qh[32 h ..] and scales[8 h ..]; its value 32 i + l (i < 4,
+// l < 32) has its low 4 bits in ql[64 h + 32 (i & 1) + l] (nibble i / 2),
+// its top 2 in bits 2i, 2i + 1 of qh[32 h + l], and scale scales[8 h + 2 i
+// + l / 16]: d * scale * (q - 32). Thread t takes half t / 4 and l = 8 (t %
+// 4) .. + 7 for all four i: three 8-byte runs of ql and qh. Blocks are only
+// 2-byte aligned, so each run is read as three 4-byte words and shifted.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+
+#define WG 64
+#define NRMAX 8
+layout(local_size_x = WG) in;
+layout(constant_id = 0) const uint NR = 1;  // rows per workgroup, at most NRMAX
+
+layout(std430, binding = 0) readonly buffer W32 { uint w32[]; };
+layout(std430, binding = 0) readonly buffer W16 { uint16_t w16[]; };
+layout(std430, binding = 1) readonly buffer Xbuf { vec4 X4[]; };
+layout(std430, binding = 2) buffer Ybuf { float Y[]; };
+
+layout(push_constant) uniform PC {
+    uint ncols, nrows, ntok, row_bytes;
+    uint x_stride, y_stride, accumulate, x_off;
+} pc;
+
+shared float partial[NRMAX * WG];  // [row][subgroup]
+
+// The 8 bytes at a 2-byte-aligned offset. The third word is read only to be
+// shifted in; at most 2 bytes past the run, clamped to the buffer.
+uvec2 read8(uint off) {
+    const uint i = off >> 2, sh = (off & 2u) * 8u;
+    const uint a = w32[i], b = w32[i + 1], c = w32[min(i + 2, w32.length() - 1)];
+    return sh == 0 ? uvec2(a, b) : uvec2((a >> 16) | (b << 16), (b >> 16) | (c << 16));
+}
+vec4 bytes4(uint w) { return vec4(float(w & 255u), float((w >> 8) & 255u), float((w >> 16) & 255u), float(w >> 24)); }
+
+// Thread t's share of the block at byte o, with its x (x[2 i + j]: values
+// 32 i + l .. + 7 of its half, 4 at a time) and their sums per i.
+float block_dot(uint o, vec4 x[8], vec4 xs, uint t) {
+    const uint h = t >> 2, l = 8 * (t & 3u);
+    const uvec2 q0 = read8(o + 64 * h + l), q1 = read8(o + 64 * h + 32 + l), qh = read8(o + 128 + 32 * h + l);
+    const uvec2 sc = read8(o + 192 + 8 * h);
+    const float d = unpackHalf2x16(uint(w16[(o + 208) >> 1])).x;
+    const int ss = int(8 * (l / 16));  // scales[8 h + 2 i + l / 16]: byte l / 16 of each pair
+    const vec4 s = vec4(bitfieldExtract(int(sc.x), ss, 8), bitfieldExtract(int(sc.x), 16 + ss, 8),
+                        bitfieldExtract(int(sc.y), ss, 8), bitfieldExtract(int(sc.y), 16 + ss, 8));
+    vec4 dots = vec4(0.0);
+    [[unroll]] for (uint i = 0; i < 4; i++) {
+        const uvec2 lo = (i & 1u) != 0 ? q1 : q0;
+        const uint ns = 4 * (i >> 1);
+        [[unroll]] for (uint j = 0; j < 2; j++) {
+            const uint q = ((lo[j] >> ns) & 0x0F0F0F0Fu) | (((qh[j] >> (2 * i)) & 0x03030303u) << 4);
+            dots[i] += dot(bytes4(q), x[2 * i + j]);
+        }
+    }
+    return d * dot(s, dots - 32.0 * xs);
+}
+
+void main() {
+    const uint r0 = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * NR;
+    if (r0 >= pc.nrows) return;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint nb = pc.ncols / 256, nr = min(NR, pc.nrows - r0);
+    const uint t = tid % 8, h = t >> 2, l = 8 * (t & 3u);
+    float acc[NRMAX];
+    for (uint i = 0; i < NRMAX; i++) acc[i] = 0.0;
+    for (uint b = tid / 8; b < nb; b += WG / 8) {
+        const uint xb = (pc.x_off + b * 256 + 128 * h + l) / 4;
+        vec4 x[8];
+        vec4 xs;
+        for (uint i = 0; i < 4; i++) {
+            x[2 * i] = X4[xb + 8 * i];
+            x[2 * i + 1] = X4[xb + 8 * i + 1];
+            xs[i] = dot(x[2 * i] + x[2 * i + 1], vec4(1.0));
+        }
+        // Rows past the matrix read its last row; their sums aren't written.
+        [[unroll]] for (uint i = 0; i < NR; i++)
+            acc[i] += block_dot(min(r0 + i, pc.nrows - 1) * pc.row_bytes + b * 210, x, xs, t);
+    }
+    for (uint i = 0; i < NR; i++) {
+        const float s = subgroupAdd(acc[i]);
+        if (gl_SubgroupInvocationID == 0) partial[i * WG + gl_SubgroupID] = s;
+    }
+    barrier();
+    if (tid < nr) {
+        float s = 0.0;
+        for (uint i = 0; i < gl_NumSubgroups; i++) s += partial[tid * WG + i];
+        const uint r = r0 + tid;
+        Y[r] = pc.accumulate != 0 ? Y[r] + s : s;
+    }
+}
