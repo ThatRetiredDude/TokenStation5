@@ -6,10 +6,11 @@
 // through scalar loads and cost no vector instructions. Then each group of
 // 32 threads takes a quarter of the tile's keys, and each thread 4 value
 // columns of them, for RM x 4 sums per key from one 8-byte load; the four
-// groups' sums are added up once, at the end. Three barriers per 128 keys;
-// the next tile's keys load while this tile's values are summed, so every
-// thread has reads in flight across the barriers (constant PLAIN = 1: load
-// them at the top of the tile instead, for an A/B). Head size 128. Partial
+// groups' sums are added up once, at the end. Three barriers per 128 keys.
+// Constant PLAIN = 0: the next tile's keys load while this tile's values are
+// summed, so every thread has reads in flight across the barriers; 1: each
+// tile's keys load at its top, all 16 words at once. On the console the
+// first is faster for 4 rows and the second for 8. Head size 128. Partial
 // results as attn's, for attn_merge.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
