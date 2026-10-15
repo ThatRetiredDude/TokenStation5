@@ -92,7 +92,7 @@ time, keeping the rest of the file). The longest chat reply, the chat's
 frames a second while a reply comes in, the speech model and its CPU threads
 for R1 talk, spoken replies (on or off, TV or controller speaker, the voice,
 its speed and CPU threads), whether a Tavily key is set for web search (cross types it on the
-console's keyboard, hidden as it's typed; square twice removes it), keeping the console awake, and how long until
+console's keyboard, starting from the saved one so a typo can be fixed; square twice removes it), keeping the console awake, and how long until
 the dark screen. Changes count at once, or where they can't, at the next use
 (the page says which).
 

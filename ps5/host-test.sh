@@ -317,7 +317,8 @@ printf '(cancel)' > "$home/typed"
 wait_log "^ts5-title: keyboard: canceled$"
 sleep 0.5
 [ "$(grep -c "^ts5-title: chat: message by keyboard" "$home/ts5.log")" = 1 ] || fail "a canceled keyboard sent a message"
-echo "== keyboard: Enter on a USB keyboard opens it too"
+echo "== keyboard: Enter on a USB keyboard opens it too (not one pressed just as it closed)"
+sleep 1
 : > "$home/keys"
 wait_log "^ts5-title: keys: enter$"
 wait_lines "^ts5-title: keyboard: open 0x00000000, user 0x00000001$" 3 30
@@ -381,7 +382,7 @@ shot settings-changed
 press square
 wait_log "^ts5-title: settings: TS5_CHAT_FPS cleared$"
 ! grep -q "TS5_CHAT_FPS" "$home/ts5.env" || fail "square left it in ts5.env: $(cat "$home/ts5.env")"
-echo "== settings: cross on the Tavily key opens the keyboard, hidden as typed; the key goes in ts5.env, never the log"
+echo "== settings: cross on the Tavily key opens the keyboard; the key goes in ts5.env, never the log"
 press down down down down down down down down
 press cross
 wait_log "^ts5-title: keyboard: open 0x00000000, user 0x00000001, a key$"
