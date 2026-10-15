@@ -403,10 +403,12 @@ private:
         // The read rate decides whether a slow model load is the storage or
         // the code; it is printed once per load.
         const auto lt0 = std::chrono::steady_clock::now();
-        // Host-visible buffers are read with pread in 16 MiB pieces, four
-        // threads at once (TS5_LOAD_THREADS sets how many; 0: one fread per
-        // tensor, as before).
-        int threads = 4;
+        // Host-visible buffers are read with pread in 16 MiB pieces
+        // (TS5_LOAD_THREADS: how many threads read at once; 0: one fread per
+        // tensor, as before). On the console this reads Coder 7B's 4.68 GB at
+        // 2 GB/s against fread's 92 MB/s; more threads are slower there (4:
+        // 0.55 GB/s, 8: 0.25).
+        int threads = 1;
         if (const char *e = getenv("TS5_LOAD_THREADS")) threads = std::max(0, atoi(e));
         FILE *f = fopen(path.c_str(), "rb");
         if (!f) { err = "cannot open " + path; return false; }
