@@ -46,11 +46,18 @@ struct Sha256Resume {
 // bytes (0: none), asking the server for the rest with Range. Follows up to
 // 5 redirects. Writes 256 KiB at a time through a 1 MiB buffer, with the
 // SHA-256 updated as it goes; with expected_sha256 given (hex), fails when
-// the finished file's hash is another. The file is kept on every failure,
-// so the next call can go on from its size. sha: a checkpoint to go on
-// from, and where to report new ones; without one, a resume hashes the
-// file's first `offset` bytes first. Each socket operation has 30 s. A
-// full disk reports "storage full".
+// the finished file's hash is another. A body with neither a size nor
+// chunks is taken only with a hash to check it by. Beside the file, path +
+// ".from" notes the URL (without its query string) and the server's ETag or
+// Last-Modified, so only a part of the same URL is gone on from, asking
+// with If-Range, and a file that changed on the server starts over; it goes
+// once the file is whole. The file is kept on a failure the next call can
+// go on from (a dropped connection, a timeout, a full disk, a cancel) and
+// removed when it turned out wrong (another size or hash than it should
+// have, or longer than the file), so that call starts over. sha: a
+// checkpoint to go on from, and where to report new ones; without one, a
+// resume hashes the file's first `offset` bytes first. Each socket
+// operation has 30 s. A full disk reports "storage full".
 bool http_get_file(const std::string &url, const std::string &path, uint64_t offset,
                    const std::string &expected_sha256, FetchProgress &progress, std::string &err,
                    Sha256Resume *sha = nullptr);

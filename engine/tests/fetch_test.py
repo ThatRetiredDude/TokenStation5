@@ -18,7 +18,10 @@ requests with a chain of 302 and 307 redirects, relative and absolute in
 turn (6 or more: a loop the client has to give up on). --chunked sends the
 body as Transfer-Encoding: chunked, without a Content-Length. --cert and
 --key serve HTTPS; the console's title takes the certificate's CA through
-TS5_CA_FILE in ts5.env.
+TS5_CA_FILE in ts5.env. Every file comes with an ETag made of its size and
+time, and a Range request whose If-Range names another one gets 200 with
+the whole file, as a changed file would: touch the file between a drop and
+the resume to see the download start over.
 
 Every request is logged with its path, range, status and bytes sent. On the
 console:
@@ -68,10 +71,11 @@ class Files(http.server.BaseHTTPRequestHandler):
             self.log("404")
             return
         size = os.path.getsize(full)
+        etag = f'"{size:x}-{int(os.path.getmtime(full)):x}"'
         start, end = 0, size - 1
         rng = self.headers.get("Range")
         status = 200
-        if rng and rng.startswith("bytes=") and not self.no_range:
+        if rng and rng.startswith("bytes=") and not self.no_range and self.headers.get("If-Range", etag) == etag:
             a, _, b = rng[6:].partition("-")
             start = int(a) if a else 0
             if b:
@@ -87,6 +91,7 @@ class Files(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Accept-Ranges", "none" if self.no_range else "bytes")
+        self.send_header("ETag", etag)
         if status == 206:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         if self.chunked:
