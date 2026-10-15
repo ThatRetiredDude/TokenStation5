@@ -25,7 +25,8 @@
 //
 // The PC drives it over FTP (scripts/ts5-ps5.sh) with files in the folder,
 // each taken as soon as the title sees it:
-//   ts5.cmd     one command now: serve|check|bench -m MODEL [options], or stop
+//   ts5.cmd     one command now: serve|check|bench -m MODEL [options],
+//               fetch URL FILE [--sha256 HEX] (a download into models/), or stop
 //   ts5.once    one command at the next start, before the args file's
 //   ts5.env     NAME=VALUE settings for the engine, read at start, such as
 //               TS5_TILED_MIN=16 (engine/src/vk_backend.cpp lists them) and
@@ -332,8 +333,9 @@ struct Options {
 //   serve -m MODEL [-c N|auto] [--port N] [--host ADDR]   (no -c, or auto: what fits)
 //   check -m MODEL [-n TOKENS] [--fresh 1] [--env NAME=VALUE]...
 //   bench -m MODEL [--pp N] [--tg N] [--env NAME=VALUE]...
+//   fetch URL FILE [--sha256 HEX]   (a download, going on from a part already there)
 //   stop
-// A MODEL without a folder is one in models/.
+// A MODEL or FILE without a folder is one in models/.
 bool parse_job(const std::vector<std::string> &a, app::Job &j, Options *o, std::string &err) {
     if (a.empty()) {
         err = "an empty command";
@@ -343,20 +345,35 @@ bool parse_job(const std::vector<std::string> &a, app::Job &j, Options *o, std::
     if (cmd == "serve") j.kind = app::Job::Serve;
     else if (cmd == "check") j.kind = app::Job::Check;
     else if (cmd == "bench") j.kind = app::Job::Bench;
+    else if (cmd == "fetch") j.kind = app::Job::Fetch;
     else if (cmd == "stop") j.kind = app::Job::Stop;
     else {
-        err = "the title doesn't run '" + cmd + "' (serve, check, bench or stop)";
+        err = "the title doesn't run '" + cmd + "' (serve, check, bench, fetch or stop)";
         return false;
     }
+    auto in_models = [](const std::string &v) {
+        return v.find('/') == std::string::npos ? std::string(kModels) + "/" + v : v;
+    };
     if (o) j.n_ctx = o->n_ctx;
-    for (size_t i = 1; i < a.size(); i++) {
+    size_t i = 1;
+    if (j.kind == app::Job::Fetch) {
+        if (a.size() < 3) {
+            err = "fetch needs URL FILE";
+            return false;
+        }
+        j.url = a[1];
+        j.path = in_models(a[2]);
+        i = 3;
+    }
+    for (; i < a.size(); i++) {
         const std::string &s = a[i];
         if (i + 1 >= a.size()) {
             err = "'" + s + "' without a value";
             return false;
         }
         const std::string &v = a[++i];
-        if (s == "-m") j.path = v.find('/') == std::string::npos ? std::string(kModels) + "/" + v : v;
+        if (s == "-m") j.path = in_models(v);
+        else if (s == "--sha256") j.sha256 = v;
         else if (s == "-c") j.n_ctx = v == "auto" ? 0 : atoi(v.c_str());
         else if (s == "-n") j.n = atoi(v.c_str());
         else if (s == "--fresh") j.fresh = atoi(v.c_str()) != 0;
