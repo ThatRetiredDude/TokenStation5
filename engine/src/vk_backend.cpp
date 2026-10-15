@@ -998,9 +998,9 @@ private:
     std::array<VkCommandBuffer, 64> cmds_{};
     size_t cur_ = 0;
     // A one-token forward call recorded while the GPU ran the call before
-    // (TS5_AHEAD=1), for position ahead_pos_ (-1: none), in
+    // (TS5_AHEAD=0 turns it off), for position ahead_pos_ (-1: none), in
     // aheads_[ahead_cur_]; the other one may be running.
-    bool ahead_ = false;
+    bool ahead_ = true;
     std::array<VkCommandBuffer, 2> aheads_{};
     int ahead_cur_ = 0, ahead_pos_ = -1;
     VkFence fence_ = VK_NULL_HANDLE;

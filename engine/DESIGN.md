@@ -69,13 +69,16 @@ Then the output norm and the vocabulary matmul for the last token (or every
 token for tests). Prompts are processed 256 tokens per call; big batches are
 split into submits of 4 layers so no submit runs anywhere near the PS5
 driver's 10-second no-progress limit (`TS5_LAYERS_PER_SUBMIT` overrides).
-A generated token is one submit, recorded while the GPU waits;
-`TS5_DEC_SUBMIT=n` instead submits it n layers at a time without waiting in
-between, so the GPU starts on the first layers while the CPU records the rest.
-On the PS5 a submit made while the GPU is busy waits for it, so that overlaps
-little. `TS5_AHEAD=1` instead records the next token's command buffer while
-the GPU runs this one: it fits whatever token comes, since the kernels read
-the token's id from a buffer, and a call at any other position records anew.
+A generated token is one submit, and its command buffer is recorded while
+the GPU runs the token before: it fits whatever token comes, since the kernels
+read the token's id from a buffer, and a call at any other position records
+anew. That hides the 0.4 ms of recording a token takes on the console: 3 to
+8% more tokens a second on the four models, and steadier (`TS5_AHEAD=0`
+records each token when it comes, while the GPU waits).
+`TS5_DEC_SUBMIT=n` instead submits a token n layers at a time without waiting
+in between, so the GPU starts on the first layers while the CPU records the
+rest. On the PS5 a submit made while the GPU is busy waits for it, so that
+overlaps little.
 
 Weights stay in their GGUF block layout on the GPU, one buffer per tensor.
 Kernels read them through 8-bit storage access and dequantize 32-value "units"
