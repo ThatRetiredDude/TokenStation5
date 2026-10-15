@@ -348,27 +348,23 @@ void ChatPage::draw_empty(Canvas &c, int x, int y, int w, int h, const std::stri
         text_glyph(c, body_, x + (w - tw) / 2, mid + 24, before, kGlyphCross, after, kText2);
         return;
     }
-    centered(h2_, mid - 100, "Chat with " + serving_name, kText);
+    centered(h2_, mid - 70, "Chat with " + serving_name, kText);
+    {
+        const std::string before = "Press", after = "to type a message, with the controller or a keyboard.";
+        const int tw = Canvas::measure(body_, before) + 44 + Canvas::measure(body_, after);
+        text_glyph(c, body_, x + (w - tw) / 2, mid - 10, before, kGlyphCross, after, kText2);
+    }
     if (can_talk) {
-        const std::string before = "Hold", after = "and talk to it, then let go.";
+        const std::string before = "Or hold", after = "and talk to it, then let go.";
         const int kw = Canvas::measure(bodyb_, "R1") + 24;
         const int tw = Canvas::measure(body_, before) + 12 + kw + 12 + Canvas::measure(body_, after);
         int tx = x + (w - tw) / 2;
-        tx += c.text(body_, tx, mid - 40, before, kText2) + 12;
-        tx += key_cap(c, bodyb_, tx, mid - 36, "R1") + 12;
-        c.text(body_, tx, mid - 40, after, kText2);
+        tx += c.text(body_, tx, mid + 36, before, kText2) + 12;
+        tx += key_cap(c, bodyb_, tx, mid + 40, "R1") + 12;
+        c.text(body_, tx, mid + 36, after, kText2);
     } else {
-        centered(body_, mid - 40, "Send it a message from your computer:", kText2);
+        centered(small_, mid + 34, "To talk to it with R1, add a speech model first.", kMuted);
     }
-    const std::string cmd = "scripts/ts5-ps5.sh chat \"Hello!\"";
-    if (can_talk) centered(small_, mid + 4, "Or send one from your computer:", kMuted);
-    const int top = can_talk ? mid + 24 : mid - 12;
-    const int bw = Canvas::measure(mono_, cmd) + 48;
-    c.round_rect((float)(x + (w - bw) / 2), (float)top, (float)bw, 50, 10, kCodeBg);
-    centered(mono_, top + 32, cmd, kAccent);
-    if (!can_talk)
-        centered(small_, mid + 100, "To talk to it with R1, get a speech model first: scripts/ts5-ps5.sh speech",
-                 kMuted);
 }
 
 void ChatPage::draw_input(Canvas &c, const app::ChatState &s, const app::VoiceState &voice, double now, int x, int y,
@@ -411,15 +407,15 @@ void ChatPage::draw_input(Canvas &c, const app::ChatState &s, const app::VoiceSt
         c.text(small_, tx, baseline(small_, fy, fh), voice.error, kRed, fx + fw - 24 - tx);
         return;
     }
+    if (s.busy) return;
+    tx += c.text(body_, tx, ty, "Press", kText2) + 6;
+    glyph(c, (float)tx + 16, (float)ty - body_.px * 0.33f, kGlyphCross);
+    tx += 38 + c.text(body_, tx + 38, ty, "to type a message", kText2) + 32;
     if (!voice.model.empty()) {
-        tx += c.text(body_, tx, ty, "Hold", kText2) + 12;
+        tx += c.text(body_, tx, ty, "or hold", kText2) + 12;
         tx += key_cap(c, bodyb_, tx, ty + 4, "R1") + 12;
-        tx += c.text(body_, tx, ty, "and talk", kText2) + 32;
-        tx += c.text(small_, tx, baseline(small_, fy, fh), "or from your computer:", kMuted) + 14;
-    } else {
-        tx += c.text(small_, tx, baseline(small_, fy, fh), "From your computer:", kMuted) + 14;
+        c.text(body_, tx, ty, "and talk", kText2);
     }
-    c.text(mono_, tx, baseline(mono_, fy, fh), "scripts/ts5-ps5.sh chat \"your message\"", kText2, fx + fw - 24 - tx);
 }
 
 }  // namespace ui

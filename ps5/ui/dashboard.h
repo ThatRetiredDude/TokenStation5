@@ -3,10 +3,11 @@
 // model's details and results, what the title is doing, and the API's
 // activity; up/down choose a model, cross serves it, square runs the GPU
 // check, triangle the speed test, circle stops serving. Chat (chat_page.h):
-// a conversation with the serving model; hold R1 to talk, up/down scroll,
-// triangle stops the reply, square starts a new chat, circle goes back to
-// Models. Settings (settings_page.h): the title's settings, kept in ts5.env;
-// circle goes back to Models. OPTIONS closes the title.
+// a conversation with the serving model; cross types a message on the
+// console's keyboard, hold R1 to talk, up/down scroll, triangle stops the
+// reply, square starts a new chat, circle goes back to Models. Settings
+// (settings_page.h): the title's settings, kept in ts5.env; circle goes back
+// to Models. OPTIONS closes the title.
 #pragma once
 #include <cstdint>
 #include <map>
@@ -43,9 +44,10 @@ struct View {
 };
 
 struct Action {
-    enum Kind { None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear, Set } kind = None;
+    enum Kind { None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear, ChatType, Set, TypeSetting } kind = None;
     std::string path;
-    std::string name, value;  // Set: NAME=VALUE in ts5.env ("": the default)
+    std::string name, value;  // Set: NAME=VALUE in ts5.env ("": the default); TypeSetting: NAME
+    std::string label;        // TypeSetting: the setting's name on the page
 };
 
 class Dashboard {
