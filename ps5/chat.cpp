@@ -255,7 +255,7 @@ Chat::Result Chat::post(const std::string &body, std::string &err) {
         if (status == 503)
             err = why.rfind("loading", 0) == 0 ? "The model is still loading. Try again in a moment."
                   : why.empty() || why == "no model is loaded"
-                      ? "No model is serving. Press circle for Models and choose one."
+                      ? "No model is running. Press cross to choose one."
                   : why.rfind("The model is busy", 0) == 0 ? why  // a GPU check or speed test (runner.cpp)
                                                              : "The model is busy. Try again in a moment.";
         else

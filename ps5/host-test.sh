@@ -81,8 +81,8 @@ c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" -I "$w/include" -I "$w/ggml/include" \
     -I "$k/include" \
     "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks,tools,net,websearch}.cpp \
-    "$root"/ps5/{title,library,runner,audio_probe,chat,stt,voice,settings,speak,text_input,host_shim}.cpp \
-    "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
+    "$root"/ps5/{title,library,runner,audio_probe,chat,stt,voice,settings,speak,text_input,usage_store,host_shim}.cpp \
+    "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -Wa,-I"$root/ps5/tts" "$root/ps5/tts/lexicon_data.S" \
     -x none "$wobj/libts5speech.a" -ldl -o "$work/eboot.bin"
 
@@ -402,13 +402,16 @@ press square
 wait_log "^ts5-title: settings: TAVILY_API_KEY cleared$"
 ! grep -q "TAVILY_API_KEY" "$home/ts5.env" || fail "square twice left the key in ts5.env"
 press circle
-shot models-again
+shot home-again
 wait_health
 
-echo "== circle: stop serving"
-press circle
+echo "== stop serving: L1 to Models, cross on the model in use, cross again to confirm"
+press l1
+press cross
+shot stop-confirm
+press cross
 for _ in $(seq 1 50); do health_says "no model" && break; sleep 0.1; done
-health_says "no model" || fail "still serving after circle"
+health_says "no model" || fail "still serving after the confirmed stop"
 
 echo "== restart: serves what ts5.args says, its log becomes ts5.prev.log"
 : > "$home/restart"
