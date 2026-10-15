@@ -192,7 +192,7 @@ void Runner::loop() {
             // The engine's words in the log (scripts/ts5-ps5.sh looks for
             // them there); plain ones on the screen.
             printf("ts5-title: %s\n", error.c_str());
-            if (said.empty()) said = "Something went wrong.";
+            if (said.empty()) said = error;  // a job that set only error, in plain words already
             event(said, true);
             notify_("TokenStation5: " + said);
         }
