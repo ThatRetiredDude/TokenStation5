@@ -71,7 +71,7 @@ for src in "$mbedtls"/library/*.c; do
 done
 for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
         "$root"/engine/src/{tools,net,websearch,ca_bundle}.cpp \
-        "$root"/ps5/{title,library,runner,audio_probe,chat,stt,voice,settings,speak}.cpp \
+        "$root"/ps5/{title,library,runner,audio_probe,chat,stt,voice,settings,speak,text_input}.cpp \
         "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp; do
     o="$out/obj/$(basename "$src" .cpp).o"
     objects+=("$o")
@@ -139,9 +139,12 @@ stub() {
 }
 stub libSceAgc agc_canary_link_stub.c
 stub libSceAgcDriver agc_driver_canary_link_stub.c
-# libSceAudioIn, which the SDK has no stub for, named as the SDK names its own.
-cc -std=c11 -O2 -fPIC -c "$root/ps5/stubs/libSceAudioIn.c" -o "$out/obj/libSceAudioIn_stub.o"
-"$sdk/bin/prospero-lld" --shared -soname libSceAudioIn.sprx -o "$out/stubs/libSceAudioIn.so" "$out/obj/libSceAudioIn_stub.o"
+# libSceAudioIn and libSceCommonDialog, which the SDK has no stubs for, named
+# as the SDK names its own.
+for m in libSceAudioIn libSceCommonDialog; do
+    cc -std=c11 -O2 -fPIC -c "$root/ps5/stubs/$m.c" -o "$out/obj/${m}_stub.o"
+    "$sdk/bin/prospero-lld" --shared -soname "$m.sprx" -o "$out/stubs/$m.so" "$out/obj/${m}_stub.o"
+done
 
 # The link PS5_Vulkan's RADV titles use: RADV whole, libc++, the platform
 # layer's heap and threads, and its stand-ins for libc functions titles lack.
@@ -160,14 +163,15 @@ weak=(--no-dynamic-linker)
     -e _start -o "$out/llvm-pie.elf" \
     "$out/obj/app_crt.o" "${objects[@]}" "$out/obj/libts5speech.a" "$out/obj/libts5compat.a" "$out/obj/libts5mbedtls.a" \
     "$out/stubs/libSceAgc.so" "$out/stubs/libSceAgcDriver.so" "$out/stubs/libSceAudioIn.so" \
-    "${radv_link_inputs[@]}" \
+    "$out/stubs/libSceCommonDialog.so" "${radv_link_inputs[@]}" \
     --as-needed "$sdk"/target/lib/*.so
 # An import that only a module titles get nothing from provides is a call
 # through NULL at run time: refuse to ship one.
 python3 "$root/ps5/check-imports.py" "$sdk" "$out/llvm-pie.elf" "$out/stubs"
 "$tool" link --in "$out/llvm-pie.elf" --out "$out/eboot.elf" \
     --stub-dir "$sdk/target/lib" --stub "$out/stubs/libSceAgc.so" \
-    --stub "$out/stubs/libSceAgcDriver.so" --stub "$out/stubs/libSceAudioIn.so" --module-sdk 0x02000009 \
+    --stub "$out/stubs/libSceAgcDriver.so" --stub "$out/stubs/libSceAudioIn.so" \
+    --stub "$out/stubs/libSceCommonDialog.so" --module-sdk 0x02000009 \
     --companion-sdk 0x08050001 --file-name eboot.elf > /dev/null
 
 app="$out/$title_id"
