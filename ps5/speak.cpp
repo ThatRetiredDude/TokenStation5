@@ -271,12 +271,21 @@ void Speaker::make_loop() {
         Sentence s;
         {
             std::unique_lock<std::mutex> lk(mu_);
-            cv_.wait(lk, [&] { return quit_ || warm_ || !sentences_.empty(); });
+            // Every second too: Kokoro is loaded while replies are read aloud
+            // (as soon as its files are there) and unloaded while they aren't.
+            cv_.wait_for(lk, std::chrono::seconds(1), [&] { return quit_ || warm_ || !sentences_.empty(); });
             if (quit_) return;
             warm_ = false;
             if (sentences_.empty()) {
                 lk.unlock();
-                ready();
+                if (setting("TS5_SPEAK", "1") != "0") {
+                    ready();
+                } else if (synth.loaded()) {
+                    synth.unload();
+                    loaded_model.clear();
+                    loaded_voice.clear();
+                    printf("ts5-title: speak: replies aren't read aloud, so Kokoro is unloaded\n");
+                }
                 continue;
             }
             s = std::move(sentences_.front());

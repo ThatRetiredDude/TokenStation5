@@ -56,9 +56,9 @@ const std::vector<Row> &rows() {
          "The next time you hold R1", {{"4", "4"}, {"6", "6"}, {"8", "8"}, {"10", "10"}, {"12", "12"}}, "6"},
         {"SPOKEN REPLIES", "TS5_SPEAK", "Read replies aloud",
          "Reads each reply on the Chat page out loud as it comes in, a sentence at a time, in a Kokoro voice "
-         "made on the console's CPU. Triangle stops it. Kokoro's files go in the models folder from your "
-         "computer: scripts/ts5-ps5.sh voice.",
-         "From the next reply", {{"1", "On"}, {"0", "Off"}}, "1"},
+         "made on the console's CPU. Triangle stops it. The voice is loaded only while this is on: off gives "
+         "its memory back.",
+         "Now", {{"1", "On"}, {"0", "Off"}}, "1"},
         {"SPOKEN REPLIES", "TS5_SPEAK_OUT", "Speak on",
          "Where the voice comes out: the TV, or the speaker in the controller.", "From the next sentence",
          {{"tv", "TV"}, {"controller", "Controller speaker"}}, "tv"},
