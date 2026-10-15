@@ -43,10 +43,11 @@ jobs:
           [ -s kokoro-82m-f16.gguf ] || curl -fsSL --retry 3 -o kokoro-82m-f16.gguf "$hf/kokoro-82m-f16.gguf"
           [ -s kokoro-voice-af_heart.gguf ] || curl -fsSL --retry 3 -o kokoro-voice-af_heart.gguf \
             "$hf/voices/kokoro-voice-af_heart.gguf"
-          ls -l
-          sha256sum kokoro-82m-f16.gguf kokoro-voice-af_heart.gguf
-          # The size Hugging Face lists for the model.
-          [ "$(stat -c %s kokoro-82m-f16.gguf)" = 163728096 ]
+          # The files as first downloaded (2026-10-15), the same on CI and the Mac.
+          sha256sum -c << 'EOF'
+          597926de84f5550e1526ce0abde4e496209d464afc9274d8603d14f3c04d1f67  kokoro-82m-f16.gguf
+          c2f44076dfb8f9c098a85d634f6d6b46b038f80e3afdf695ff3b90f6d9ef473f  kokoro-voice-af_heart.gguf
+          EOF
       - name: Engine tests (Vulkan vs CPU reference)
         run: engine/tests/run.sh
         env:

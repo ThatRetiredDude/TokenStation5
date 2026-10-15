@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 
 #include "settings.h"
 #include "tts/g2p.h"
@@ -16,6 +17,7 @@
 extern "C" {
 // The audio library, imported (audio_probe.cpp says why not loaded at run
 // time).
+int sceAudioOutInit(void);
 int sceAudioOutOpen(int user, int type, int index, uint32_t len, uint32_t freq, uint32_t param);
 int sceAudioOutOutput(int handle, const void *samples);
 int sceAudioOutSetVolume(int handle, int flags, int *volumes);
@@ -73,6 +75,10 @@ const char *out_name(SpeechOut out) { return out == SpeechOut::TV ? "TV" : "cont
 
 // An output port at 0 dB, or -1 (and err).
 int open_out(SpeechOut out, int user, std::string &err) {
+    // Once in the title's run; the audio test may have done it already
+    // (0x8026000e). Without it every port fails to open, 0x8026000f.
+    static std::once_flag init;
+    std::call_once(init, [] { sceAudioOutInit(); });
     const int port = out == SpeechOut::TV ? kMain : kPadSpeaker;
     int h = sceAudioOutOpen(port == kMain ? kSystemUser : user, port, 0, kOutGrain, kOutRate, kMono16);
     if (h < 0 && port == kMain) h = sceAudioOutOpen(user, port, 0, kOutGrain, kOutRate, kMono16);
