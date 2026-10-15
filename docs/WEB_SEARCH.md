@@ -10,7 +10,11 @@ including ones that know nothing about tools.
 ## Turn it on
 
 1. Get a key at [app.tavily.com](https://app.tavily.com) (it starts with `tvly-`).
-2. From the PC:
+2. On the console: on the title's Settings page, choose **Tavily key**, press
+   cross and type it on the console's keyboard (with the controller, or a USB
+   or Bluetooth keyboard). It counts from the next request.
+
+   Or from the PC:
 
    ```sh
    scripts/ts5-ps5.sh websearch tvly-YOUR-KEY   # on, then the title restarts

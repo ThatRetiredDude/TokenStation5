@@ -81,6 +81,7 @@
 #include "settings.h"
 #include "speak.h"
 #include "stt.h"
+#include "text_input.h"
 #include "tts/synth.h"
 #include "vk_context.h"
 #include "voice.h"
@@ -166,6 +167,12 @@ void notify(const std::string &text) {
 }
 
 bool exists(const char *path) { return access(path, F_OK) == 0; }
+
+// Without spaces and line breaks at either end.
+std::string trimmed(const std::string &s) {
+    const size_t a = s.find_first_not_of(" \t\r\n");
+    return a == std::string::npos ? std::string() : s.substr(a, s.find_last_not_of(" \t\r\n") - a + 1);
+}
 
 // The PC's quit and restart requests, checked twice a second on a thread of
 // their own, so they work whatever the rest of the title is doing.
@@ -513,6 +520,12 @@ int main(int, char **) {
     ui::SettingsInfo settings_note;  // the Settings page's last change
     bool lib_changed = true;
     std::atomic<bool> audio_testing{false}, whisper_testing{false}, speak_testing{false};
+    // The console's keyboard (text_input.h), for a chat message or a key.
+    app::TextInput keyboard;
+    app::TextRequest typing;
+    std::string typing_for;  // the setting it's for; "": a chat message
+    bool typing_pending = false;  // until cross is let go, or the dialog takes it as a press
+    bool swallow = false;         // after it closes, until every button is up
     for (;;) {
         const double t = app::now_s();
         // Read each time: the Settings page changes them.
@@ -541,6 +554,31 @@ int main(int, char **) {
         if (buttons) last_input = t;
         const bool woke = resting && buttons;
         if (woke) buttons = 0;
+        // While the console's keyboard is up, the controller is its; nor does
+        // the press that closes it reach the page.
+        if (keyboard.is_open()) {
+            buttons = 0;
+            last_input = t;
+            std::string typed;
+            const app::TextInput::State st = keyboard.poll(typed);
+            if (st != app::TextInput::Typing) swallow = true;
+            const std::string text = trimmed(typed);
+            if (st == app::TextInput::Done && typing_for.empty()) {
+                const bool sent = !text.empty() && chat.send(text);
+                printf("ts5-title: chat: %s by keyboard (%zu bytes)\n", sent ? "message" : "not sent", text.size());
+            } else if (st == app::TextInput::Done && !text.empty()) {
+                std::string e;
+                const bool ok = app::set_setting(kEnv, typing_for, text, e);
+                if (!ok) printf("ts5-title: settings: %s not saved: %s\n", typing_for.c_str(), e.c_str());
+                settings_note.note = ok ? "Saved" : "Couldn't save it. The log says why.";
+                settings_note.note_failed = !ok;
+                settings_note.note_at = t;
+            }
+        }
+        if (swallow) {
+            buttons = 0;
+            swallow = pad.held() != 0;
+        }
         if (take_written(kCmd, words)) {
             app::Job j;
             if (parse_job(words, j, nullptr, err)) runner.push(j);
@@ -584,8 +622,10 @@ int main(int, char **) {
                 speak_testing = false;
             }).detach();
         }
-        // R1 held on the chat page: talk (a reply that's coming stops).
-        const bool talk = ((pad.held() | pc_held) & ui::kR1) && dash.page() == ui::Dashboard::Chat && !woke;
+        // R1 held on the chat page: talk (a reply that's coming stops). Not
+        // while the console's keyboard is up, which has R1 for itself.
+        const bool talk = ((pad.held() | pc_held) & ui::kR1) && dash.page() == ui::Dashboard::Chat && !woke &&
+                          !keyboard.is_open() && !swallow;
         if (talk && !talking) {
             if (chat_state.busy) chat.stop();
             speaker.stop();
@@ -699,17 +739,46 @@ int main(int, char **) {
             case ui::Action::Set: {
                 std::string e;
                 const bool ok = app::set_setting(kEnv, a.name, a.value, e);
-                settings_note.note = ok ? "Saved" : "Not saved: " + e;
+                if (!ok) printf("ts5-title: settings: %s not saved: %s\n", a.name.c_str(), e.c_str());
+                settings_note.note = ok ? "Saved" : "Couldn't save it. The log says why.";
                 settings_note.note_failed = !ok;
                 settings_note.note_at = t;
                 v.settings = settings_note;
                 if (ok && a.name == "TS5_WHISPER_MODEL") voice.rescan();
                 break;
             }
+            case ui::Action::ChatType:
+            case ui::Action::TypeSetting:
+                typing = app::TextRequest();
+                typing_for = a.kind == ui::Action::TypeSetting ? a.name : std::string();
+                if (typing_for.empty()) {
+                    typing.title = "Message";
+                    typing.placeholder = "Ask anything";
+                    typing.send = true;
+                } else {
+                    typing.title = a.label;
+                    typing.placeholder = typing_for == "TAVILY_API_KEY" ? "tvly-..." : "";
+                    typing.secret = app::secret_setting(typing_for);
+                    typing.max_chars = 256;
+                }
+                typing_pending = true;
+                break;
             case ui::Action::Close:
                 notify("TokenStation5: closing");
                 leave("exit");
             case ui::Action::None: break;
+        }
+        if (typing_pending && !(pad.held() & ui::kCross)) {
+            typing_pending = false;
+            if (!keyboard.open(typing)) {
+                if (typing_for.empty()) {
+                    notify("TokenStation5: the console's keyboard didn't open");
+                } else {
+                    settings_note.note = "The keyboard didn't open";
+                    settings_note.note_failed = true;
+                    settings_note.note_at = t;
+                }
+            }
         }
 
         const bool shot = exists(kShot);

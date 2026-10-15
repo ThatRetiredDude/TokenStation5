@@ -64,11 +64,13 @@ Three pages; **L1** goes to the next: Models, Chat, Settings.
 | OPTIONS | close the title |
 
 **Chat**: a conversation with the serving model, the reply streaming in as
-it's written (code in blocks, a thinking model's thinking dimmed). Hold R1
+it's written (code in blocks, a thinking model's thinking dimmed). Cross
+opens the console's own on-screen keyboard (the system's, which the
+controller and a USB or Bluetooth keyboard type on) for a message. Or hold R1
 and talk into the controller; let go, and what you said is turned into text
 on the console's CPU (whisper.cpp, with a speech model from
 `scripts/ts5-ps5.sh speech`) and sent. A message can also come from the PC
-(`scripts/ts5-ps5.sh chat`); a keyboard comes next. Each reply is read
+(`scripts/ts5-ps5.sh chat`). Each reply is read
 aloud as it comes in, a sentence at a time, in a Kokoro voice made on the
 console's CPU (with Kokoro's files from `scripts/ts5-ps5.sh voice`; Settings
 turns it off, picks the voice and speed, and puts it on the TV or the
@@ -78,6 +80,7 @@ oldest exchanges are left out of the requests (they stay on screen).
 
 | Button | |
 | --- | --- |
+| cross | type a message on the console's keyboard |
 | R1 (hold) | talk: the mic is open while it's held, and the message goes when you let go (a reply still coming stops, and so does its voice) |
 | up / down | scroll; at the bottom, the page follows the reply |
 | triangle | stop the reply, and its voice |
@@ -88,8 +91,8 @@ oldest exchanges are left out of the requests (they stay on screen).
 time, keeping the rest of the file). The longest chat reply, the chat's
 frames a second while a reply comes in, the speech model and its CPU threads
 for R1 talk, spoken replies (on or off, TV or controller speaker, the voice,
-its speed and CPU threads), whether a Tavily key is set for web search (it's set from the
-PC; square twice removes it), keeping the console awake, and how long until
+its speed and CPU threads), whether a Tavily key is set for web search (cross types it on the
+console's keyboard, hidden as it's typed; square twice removes it), keeping the console awake, and how long until
 the dark screen. Changes count at once, or where they can't, at the next use
 (the page says which).
 
@@ -97,6 +100,7 @@ the dark screen. Changes count at once, or where they can't, at the next use
 | --- | --- |
 | up / down | choose a setting |
 | left / right | change it (cross steps through its choices) |
+| cross, on the Tavily key | type it on the console's keyboard |
 | square | back to its default |
 | circle | back to Models |
 
