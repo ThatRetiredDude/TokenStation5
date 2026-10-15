@@ -15,7 +15,7 @@ import numpy as np
 from gguf import GGMLQuantizationType, GGUFReader, GGUFValueType, GGUFWriter, quants
 
 
-def copy_tokenizer(reader, writer):
+def copy_tokenizer(reader, writer, pad_tokens=0):
     for field in reader.fields.values():
         if not field.name.startswith("tokenizer."):
             continue
@@ -26,6 +26,14 @@ def copy_tokenizer(reader, writer):
                 vals = [bytes(field.parts[i]).decode("utf-8", errors="surrogateescape") for i in field.data]
             else:
                 vals = [field.parts[i].tolist()[0] for i in field.data]
+            # Qwen 2.5 7B GGUFs pad the token list itself with placeholders;
+            # the parallel scores and types arrays grow with it.
+            if field.name == "tokenizer.ggml.tokens":
+                vals += [f"[PAD{len(vals) + i}]" for i in range(pad_tokens)]
+            elif field.name == "tokenizer.ggml.scores":
+                vals += [0.0] * pad_tokens
+            elif field.name == "tokenizer.ggml.token_type":
+                vals += [5] * pad_tokens  # UNUSED
             writer.add_array(field.name, vals)
         elif vtype == GGUFValueType.STRING:
             writer.add_string(field.name, bytes(field.parts[field.data[0]]).decode("utf-8"))
@@ -87,6 +95,12 @@ def main():
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--kv-heads", type=int, default=2)
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--pad-vocab", type=int, default=0,
+                    help="extra embedding and output rows past the token list, as released models pad")
+    ap.add_argument("--pad-tokens", type=int, default=0,
+                    help="placeholder entries added to the token list itself (with rows to match), as Qwen 7B pads")
+    ap.add_argument("--boost-token", type=int, default=-1,
+                    help="make this output row huge, so greedy sampling soon picks it: for guard tests")
     ap.add_argument("--quant", default="F32", choices=["F32", "F16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q4_K_M"],
                     help="type for the 2-D weights; Q4_K_M: Q4_K, with Q6_K for attn_v, ffn_down and output, "
                          "as llama-quantize's mix")
@@ -112,15 +126,17 @@ def main():
         w.add_key_length(hd)
         w.add_value_length(hd)
     w.add_file_type(0)
-    copy_tokenizer(reader, w)
+    copy_tokenizer(reader, w, a.pad_tokens)
 
     kmix = a.quant == "Q4_K_M"
     qtype = GGMLQuantizationType.Q4_K if kmix else getattr(GGMLQuantizationType, a.quant)
 
-    def t(name, *shape, scale=None):
+    def t(name, *shape, scale=None, boost_row=-1):
         # numpy shape is (ne1, ne0): rows are outputs, columns are inputs.
         s = scale if scale is not None else 1.0 / np.sqrt(shape[-1])
         data = (rng.standard_normal(shape) * s).astype(np.float32)
+        if boost_row >= 0:
+            data[boost_row, :] = 100.0  # its logit dwarfs the rest whenever sum(h) > 0
         if kmix:
             if shape[-1] % 256:
                 w.add_tensor(name, quants.quantize(data, GGMLQuantizationType.Q8_0),
@@ -139,7 +155,7 @@ def main():
     def norm(name, n):
         w.add_tensor(name, (1.0 + 0.1 * rng.standard_normal(n)).astype(np.float32))
 
-    t("token_embd.weight", n_vocab, a.embd, scale=1.0)
+    t("token_embd.weight", n_vocab + a.pad_tokens + a.pad_vocab, a.embd, scale=1.0)
     for i in range(a.layers):
         p = f"blk.{i}."
         norm(p + "attn_norm.weight", a.embd)
@@ -158,7 +174,7 @@ def main():
         t(p + "ffn_up.weight", a.ff, a.embd)
         t(p + "ffn_down.weight", a.embd, a.ff)
     norm("output_norm.weight", a.embd)
-    t("output.weight", n_vocab, a.embd)
+    t("output.weight", n_vocab + a.pad_tokens + a.pad_vocab, a.embd, boost_row=a.boost_token)
 
     w.write_header_to_file()
     w.write_kv_data_to_file()
