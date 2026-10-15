@@ -1,4 +1,4 @@
-// The TV screen, four pages under the header; L1 goes to the next, circle
+// The TV screen, five pages under the header; L1 goes to the next, circle
 // back to Home. Home (home_page.h): how apps have used the API, by model and
 // app, over 24 hours, 7 days or 30 days (left and right), and live; cross
 // goes to Chat, or to Models with nothing running. Models: the models on the
@@ -9,9 +9,11 @@
 // the running model; cross types a message on the console's keyboard (with
 // nothing running, it goes to Models), hold R1 to talk, up/down scroll,
 // triangle stops the reply, square starts a new chat. Settings
-// (settings_page.h): the title's settings. Every page says things in plain
-// words (plain.h): no paths, commands, settings names or engine errors,
-// which stay in the log. OPTIONS closes the title.
+// (settings_page.h): the title's settings. Logs (logs_page.h): what the
+// title wrote in its log, the one page with raw text; square on Home (when
+// requests failed) or on a model that can't run opens it at the problems.
+// Every other page says things in plain words (plain.h): no paths, commands,
+// settings names or engine errors. OPTIONS closes the title.
 #pragma once
 #include <cstdint>
 #include <map>
@@ -23,6 +25,7 @@
 #include "chat.h"
 #include "chat_page.h"
 #include "home_page.h"
+#include "logs_page.h"
 #include "settings_page.h"
 #include "voice.h"
 #include "library.h"
@@ -63,11 +66,17 @@ struct Action {
 
 class Dashboard {
 public:
-    enum Page { Home, Models, Chat, Settings };
-    static Page next(Page p) { return p == Home ? Models : p == Models ? Chat : p == Chat ? Settings : Home; }
+    enum Page { Home, Models, Chat, Settings, Logs };
+    static Page next(Page p) {
+        return p == Home ? Models : p == Models ? Chat : p == Chat ? Settings : p == Settings ? Logs : Home;
+    }
     Dashboard(const Fonts &fonts, const uint8_t *logo, size_t logo_size);
     Page page() const { return page_; }
     void show(Page p);
+    // Logs, at its problems.
+    void show_problems();
+    // The title's log and the run before's, for the Logs page.
+    void set_log_files(const std::string &log, const std::string &prev_log) { logs_.set_files(log, prev_log); }
     // Applies a frame's button presses; at most one action comes of them.
     Action press(uint32_t buttons, const View &v);
     void draw(Canvas &c, const View &v);
@@ -85,11 +94,12 @@ private:
     void draw_list(Canvas &c, const View &v, const std::vector<Item> &items, int sel);
     void draw_details(Canvas &c, const View &v, const Item &item);
     void draw_activity(Canvas &c, const View &v, const Item *sel);
-    void draw_footer(Canvas &c);
+    void draw_footer(Canvas &c, const View &v, const Item *sel);
     void draw_home_footer(Canvas &c, const View &v);
     HomeInfo home_info(const View &v) const;
     void draw_chat_footer(Canvas &c, const View &v);
     void draw_settings_footer(Canvas &c);
+    void draw_logs_footer(Canvas &c);
     // OPTIONS Close, after a page's hints.
     void draw_close_hint(Canvas &c, int x, int y);
     SettingsInfo settings_info(const View &v) const;
@@ -104,6 +114,7 @@ private:
     int background_page_ = -1;
     Page page_ = Home;
     HomePage home_;
+    LogsPage logs_;
     ChatPage chat_;
     SettingsPage settings_;
     std::string selected_key_;  // the selected item's path or suggestion key

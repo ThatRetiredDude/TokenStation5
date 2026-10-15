@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include "json.h"
+#include "plain.h"
 
 namespace app {
 
@@ -35,12 +36,13 @@ std::string said(const std::string &raw) {
     if (has("context full") || has("longer than the context"))
         return "This chat is too long for this model. Press square for a new chat.";
     if (has("vkAllocateMemory") || has("out of GPU memory") || has("not enough GPU memory") || has("bad_alloc"))
-        return "There wasn't enough memory to finish this reply. Try a shorter chat.";
+        return std::string("There wasn't enough memory to finish this reply. Try a shorter chat.") + plain::kDetails;
     if (has("vk") || has("VK_") || has("too many submits") || has("failed: -"))
-        return "The GPU hit a problem while writing this reply. Press square for a new chat.";
+        return std::string("The GPU hit a problem while writing this reply. Press square for a new chat.") + plain::kDetails;
     if (has("can't reach the API"))
-        return "The chat couldn't reach TokenStation5's server. Close TokenStation5 and open it again.";
-    return "The reply failed. Press square for a new chat and try again.";
+        return std::string("The chat couldn't reach TokenStation5's server. Close TokenStation5 and open it again.") +
+               plain::kDetails;
+    return std::string("The reply failed. Press square for a new chat and try again.") + plain::kDetails;
 }
 
 // A reply as the next request sends it back: without its thinking, which

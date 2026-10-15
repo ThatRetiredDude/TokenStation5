@@ -79,6 +79,7 @@
 #include "display.h"
 #include "library.h"
 #include "pad.h"
+#include "plain.h"
 #include "runner.h"
 #include "server.h"
 #include "settings.h"
@@ -464,10 +465,13 @@ int main(int, char **) {
     // no picture. Without it the same memory shows as two heaps, and models
     // still get all of it (vk_backend.cpp falls back from one to the other).
     setenv("HOME", TS5_HOME, 0);
+    int word = 0;
     for (const std::string &w : read_words(kEnv)) {
         size_t eq = w.find('=');
+        word++;
         if (eq == 0 || eq == std::string::npos) {
-            printf("ts5-title: ts5.env: not NAME=VALUE: %s\n", w.c_str());
+            // Not the word itself: it could be half of a key split by a space.
+            printf("ts5-title: ts5.env: word %d (%zu characters) isn't NAME=VALUE\n", word, w.size());
             continue;
         }
         const std::string name = w.substr(0, eq);
@@ -576,6 +580,7 @@ int main(int, char **) {
     else notify("TokenStation5: no models yet. Open it to see which to add.");
 
     ui::Dashboard dash(fonts, ts5_logo_data, (size_t)(ts5_logo_data_end - ts5_logo_data));
+    dash.set_log_files(kLog, kPrevLog);
     {
         // Home first, or Models while there's no model to use.
         std::lock_guard<std::mutex> lk(lib_mutex);
@@ -655,7 +660,7 @@ int main(int, char **) {
                 std::string e;
                 const bool ok = app::set_setting(kEnv, typing_for, text, e);
                 if (!ok) printf("ts5-title: settings: %s not saved: %s\n", typing_for.c_str(), e.c_str());
-                settings_note.note = ok ? "Saved" : "Couldn't save it. The log says why.";
+                settings_note.note = ok ? "Saved" : std::string("Couldn't save it.") + plain::kDetails;
                 settings_note.note_failed = !ok;
                 settings_note.note_at = t;
             }
@@ -802,9 +807,12 @@ int main(int, char **) {
         v.now = t;
         v.wall = (int64_t)time(nullptr);
 
+        // Home's square needs the numbers at the press; the press can change
+        // Home's range, so they're fetched again then.
+        const app::UsageView::Range range = dash.range();
+        v.usage = usage_store.view(range, now_ms, v.own_ip);
         const ui::Action a = dash.press(buttons, v);
-        // After the press, which can change Home's range.
-        v.usage = usage_store.view(dash.range(), now_ms, v.own_ip);
+        if (dash.range() != range) v.usage = usage_store.view(dash.range(), now_ms, v.own_ip);
         switch (a.kind) {
             case ui::Action::Serve: {
                 app::Job j;
@@ -847,7 +855,7 @@ int main(int, char **) {
                 std::string e;
                 const bool ok = app::set_setting(kEnv, a.name, a.value, e);
                 if (!ok) printf("ts5-title: settings: %s not saved: %s\n", a.name.c_str(), e.c_str());
-                settings_note.note = ok ? "Saved" : "Couldn't save it. The log says why.";
+                settings_note.note = ok ? "Saved" : std::string("Couldn't save it.") + plain::kDetails;
                 settings_note.note_failed = !ok;
                 settings_note.note_at = t;
                 v.settings = settings_note;
@@ -884,7 +892,7 @@ int main(int, char **) {
                 if (typing_for.empty()) {
                     notify("TokenStation5: the console's keyboard didn't open");
                 } else {
-                    settings_note.note = "The keyboard didn't open";
+                    settings_note.note = std::string("The keyboard didn't open.") + plain::kDetails;
                     settings_note.note_failed = true;
                     settings_note.note_at = t;
                 }

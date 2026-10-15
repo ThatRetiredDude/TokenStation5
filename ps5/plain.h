@@ -48,7 +48,9 @@ inline std::string reason(const std::string &raw) {
         r = "the file couldn't be read; it may still be copying, or be damaged";
     } else if (has(raw, "GGUF v1")) {
         r = "the file is in an old format; download a newer copy";
-    } else if (has(raw, "not a GGUF") || has(raw, "truncated") || has(raw, "missing hyperparameters") ||
+    } else if (has(raw, "not a GGUF")) {
+        r = "this file isn't a model";
+    } else if (has(raw, "truncated") || has(raw, "missing hyperparameters") ||
                has(raw, "missing tensor") || has(raw, "no tokenizer.ggml.tokens")) {
         r = "this file isn't a complete model; copy or download it again";
     } else if (has(raw, "architecture '")) {
@@ -70,6 +72,9 @@ inline std::string reason(const std::string &raw) {
     }
     return r;
 }
+
+// After a failure on screen: where its raw words are.
+inline const char *const kDetails = " Details are in Logs.";
 
 // A model's name as people write it: a general.name all in lower case, like
 // "qwen2.5-0.5b-instruct", becomes "Qwen2.5 0.5B Instruct"; a name with
