@@ -373,6 +373,17 @@ if [ -n "${TS5_TEST_KOKORO_MODEL:-}" ] && [ -n "${TS5_TEST_KOKORO_VOICE:-}" ]; t
     wait_log "^ts5-title: speak: the TV's audio didn't open"
     for _ in $(seq 1 300); do [ "$(replies)" -gt "$n" ] && break; sleep 0.1; done
     press triangle
+    echo "== spoken replies off in Settings: Kokoro is unloaded at once, and loaded again when they're back on"
+    loads=$(grep -cE "^ts5-title: speak: kokoro-test.gguf with the voice test, loaded in [0-9]+ ms$" "$home/ts5.log")
+    press l1
+    press down down down down
+    press right
+    wait_log "^ts5-title: speak: replies aren't read aloud, so Kokoro is unloaded$"
+    press square
+    wait_lines "^ts5-title: speak: kokoro-test.gguf with the voice test, loaded in [0-9]+ ms$" $((loads + 1)) 60
+    press up up up up
+    press circle
+    press l1
     rm "$home/models/kokoro-test.gguf" "$home/models/kokoro-voice-test.gguf"
     press square
 fi
