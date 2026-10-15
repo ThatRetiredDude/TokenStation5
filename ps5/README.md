@@ -93,8 +93,8 @@ seconds. A model still arriving shows as COPYING until it's whole.
 | --- | --- |
 | a model from `models.tsv` | `scripts/ts5-ps5.sh fetch KEY`, with its key there: `llama32-3b`, `qwen25-coder-7b`, `qwen3-8b`, `llama31-8b`, `qwen25-0.5b`, ... |
 | any other GGUF model | `scripts/ts5-ps5.sh model FILE.gguf`, or copy it into `models` with any FTP client |
-| a speech model, for R1 talk | `scripts/ts5-ps5.sh speech` (Base, English), or `speech small.en` |
-| a voice, for spoken replies | `scripts/ts5-ps5.sh voice` (Heart, US English), or `voice am_michael`, `voice bf_emma` ... |
+| a speech model, for R1 talk | Settings downloads Base (English); or `scripts/ts5-ps5.sh speech` (Base, English), or `speech small.en` |
+| a voice, for spoken replies | Settings downloads Kokoro and Heart (US English); or `scripts/ts5-ps5.sh voice` (Heart), or `voice am_michael`, `voice bf_emma` ... |
 
 ## On the TV
 
@@ -143,13 +143,14 @@ it's written (code in blocks, a thinking model's thinking dimmed). Cross
 opens the console's own on-screen keyboard (the system's, which the
 controller and a USB or Bluetooth keyboard type on) for a message. Or hold R1
 and talk into the controller; let go, and what you said is turned into text
-on the console's CPU (whisper.cpp, with a speech model from
-`scripts/ts5-ps5.sh speech`) and sent. A message can also come from the PC
+on the console's CPU (whisper.cpp, with a speech model downloaded in
+Settings or from `scripts/ts5-ps5.sh speech`) and sent. A message can also come from the PC
 (`scripts/ts5-ps5.sh chat`). Each reply is read
 aloud as it comes in, a sentence at a time, in a Kokoro voice made on the
-console's CPU (with Kokoro's files from `scripts/ts5-ps5.sh voice`; Settings
-turns it off, picks the voice and speed, and puts it on the TV or the
-controller's speaker). The chat sends its
+console's CPU (with Kokoro's files, downloaded in Settings or from
+`scripts/ts5-ps5.sh voice`; Settings turns it off, picks the voice and speed,
+and puts it on the TV or the controller's speaker). With spoken replies on
+and no voice on the PS5, the line under the chat says so. The chat sends its
 messages to the title's own API, as any client would. When a conversation outgrows the model's context, its
 oldest exchanges are left out of the requests (they stay on screen).
 
@@ -169,13 +170,16 @@ for R1 talk, spoken replies (on or off, TV or controller speaker, the voice,
 its speed and CPU threads), whether a Tavily key is set for web search (cross types it on the
 console's keyboard, starting from the saved one so a typo can be fixed; square twice removes it), keeping the console awake, and how long until
 the dark screen. Changes count at once, or where they can't, at the next use
-(the page says which).
+(the page says which). With no speech model on the PS5, cross on Speech model
+downloads Base (English); with no voice, cross on Voice downloads Kokoro's
+model and the Heart voice. The details show the download's progress, and
+cross again stops it (the next cross goes on).
 
 | Button | |
 | --- | --- |
 | up / down | choose a setting |
-| left / right | change it (cross steps through its choices) |
-| cross, on the Tavily key | type it on the console's keyboard |
+| left / right | change it |
+| cross | steps through its choices; on the Tavily key, type it on the console's keyboard; on Speech model or Voice with nothing on the PS5 yet, download one (or stop the download) |
 | square | back to its default |
 | circle | Home |
 

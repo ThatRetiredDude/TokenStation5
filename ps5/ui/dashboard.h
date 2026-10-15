@@ -52,6 +52,7 @@ struct View {
     app::ChatState chat;
     app::VoiceState voice;
     bool speaking = false;  // a reply is being read aloud (speak.h)
+    bool no_voice = false;  // spoken replies are on, but Kokoro's model or a voice isn't on the PS5
     SettingsInfo settings;  // its speech models and now come from the fields above
     std::shared_ptr<const app::UsageView> usage;  // Home's numbers, over Dashboard::range()
     std::vector<float> live;           // tokens written a second, oldest first (HomeInfo)
@@ -71,7 +72,7 @@ struct Action {
         Download, StopDownload, RemovePart, Remove
     } kind = None;
     std::string path;         // Remove: the model's file
-    std::string key;          // Download, StopDownload, RemovePart: the catalog entry
+    std::vector<std::string> keys;  // Download, StopDownload, RemovePart: catalog entries
     std::string name, value;  // Set: NAME=VALUE in ts5.env ("": the default); TypeSetting: NAME
     std::string label;        // TypeSetting: the setting's name on the page
 };
@@ -110,7 +111,7 @@ private:
     void draw_home_footer(Canvas &c, const View &v);
     HomeInfo home_info(const View &v) const;
     void draw_chat_footer(Canvas &c, const View &v);
-    void draw_settings_footer(Canvas &c);
+    void draw_settings_footer(Canvas &c, const View &v);
     void draw_logs_footer(Canvas &c);
     // OPTIONS Close, after a page's hints.
     void draw_close_hint(Canvas &c, int x, int y);
