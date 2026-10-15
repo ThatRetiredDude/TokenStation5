@@ -13,6 +13,12 @@ constexpr Color kPanel = rgb(0x0E1530), kPanelLine = rgb(0x1B2650);
 constexpr Color kRow = rgb(0x121B3A), kRowSel = rgb(0x17244E);
 constexpr Color kText = rgb(0xEAF0FF), kText2 = rgb(0x9AA6C8), kMuted = rgb(0x627095);
 constexpr Color kAccent = rgb(0x3CC8FF), kGreen = rgb(0x3DDC97), kRed = rgb(0xFF5C70), kAmber = rgb(0xFFB547);
+// A model's colour on the Home page's charts, by UsageStore::slot_of: Qwen
+// 2.5 Coder 7B, Qwen 3 8B, Llama 3.1 8B, Llama 3.2 3B, Gemma 4, then every
+// other model. Checked as a set for colour-blind viewers on kPanel; status
+// green, amber and red are never a model's.
+constexpr Color kSeries[6] = {rgb(0x3987E5), rgb(0x199E70), rgb(0xD95926), rgb(0x7E4AC2), rgb(0xB42F73), kMuted};
+constexpr Color kTrack = rgb(0x1B2650);
 constexpr Color kCrossColor = rgb(0x8FB0FF), kCircleColor = rgb(0xFF6F7F), kSquareColor = rgb(0xFF8BD0),
                 kTriangleColor = rgb(0x4BE0A8);
 

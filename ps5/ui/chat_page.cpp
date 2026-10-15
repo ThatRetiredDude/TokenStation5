@@ -316,10 +316,18 @@ void ChatPage::draw(Canvas &c, const app::ChatState &s, int x, int y, int w, int
                     c.round_rect((float)px, (float)py, (float)p.w, (float)p.h, 10, kCodeBg);
                     c.round_rect_line((float)px, (float)py, (float)p.w, (float)p.h, 10, 1.5f, kPanelLine);
                     break;
-                case Piece::Text: c.text(body_, px, baseline(body_, py, p.h), p.text, kText); break;
-                case Piece::Bold: c.text(bodyb_, px, baseline(bodyb_, py, p.h), p.text, kText); break;
-                case Piece::Think: c.text(body_, px, baseline(body_, py, p.h), p.text, kMuted); break;
-                case Piece::Code: c.text(code_, px, baseline(code_, py, p.h), p.text, kCodeText); break;
+                // The conversation's own words (screen.txt marks them).
+                case Piece::Text:
+                case Piece::Bold:
+                case Piece::Think:
+                case Piece::Code: {
+                    const Font &f = p.kind == Piece::Bold ? bodyb_ : p.kind == Piece::Code ? code_ : body_;
+                    Canvas::conversation = true;
+                    c.text(f, px, baseline(f, py, p.h), p.text,
+                           p.kind == Piece::Think ? kMuted : p.kind == Piece::Code ? kCodeText : kText);
+                    Canvas::conversation = false;
+                    break;
+                }
                 case Piece::Label: c.text(smallb_, px, baseline(smallb_, py, p.h), p.text, kMuted, p.w); break;
                 case Piece::Note: c.text(small_, px, baseline(small_, py, p.h), p.text, kMuted); break;
                 case Piece::Error: c.text(small_, px, baseline(small_, py, p.h), p.text, kRed); break;
@@ -340,8 +348,8 @@ void ChatPage::draw_empty(Canvas &c, int x, int y, int w, int h, const std::stri
     };
     const int mid = y + h / 2;
     if (serving_name.empty()) {
-        centered(h2_, mid - 30, "No model is serving", kText);
-        const std::string before = "Press circle for Models, choose one and press", after = "to serve it.";
+        centered(h2_, mid - 30, "No model is running", kText);
+        const std::string before = "Press", after = "to choose one.";
         const int tw = Canvas::measure(body_, before) + 44 + Canvas::measure(body_, after);
         text_glyph(c, body_, x + (w - tw) / 2, mid + 24, before, kGlyphCross, after, kText2);
         return;
