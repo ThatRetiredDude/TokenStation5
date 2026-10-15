@@ -28,7 +28,7 @@ if(TS5_VULKAN)
       COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/shaders
       COMMAND ${GLSLANG} -V --target-env vulkan1.2 -I${CMAKE_CURRENT_SOURCE_DIR}/shaders
               --vn spv_${stem} -o ${hdr} ${src}
-      DEPENDS ${src} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matmul.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matmul_tiled.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matmul_big.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matvec_k.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mv16_q4_k.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/get_rows.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/attn.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/attn_pf.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/qkv_post.glsl
+      DEPENDS ${src} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matmul.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matmul_tiled.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matmul_big.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matvec_k.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mv16_q4_k.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/get_rows.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/attn.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/attn_pf.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/attn_dec.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/qkv_post.glsl
       COMMENT "glslang ${stem}.comp")
     list(APPEND SPV_HEADERS ${hdr})
   endforeach()

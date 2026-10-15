@@ -138,7 +138,11 @@ output in registers. Keys and values pass through shared memory 32 at a time,
 the next tile loading into registers while the current one is used. attn
 holds one token's 7 rows on Qwen 2.5 7B and re-reads the cache for every
 token; attn_pf reads it once per 9 tokens and does 64 rows of work per tile.
-A short prompt late in a chat splits its keys too.
+A short prompt late in a chat splits its keys too. With heads of 128 (all four
+console models) it runs as `attn_pf128`, the same code built with the head
+size fixed, so its loops unroll: built for any size it branches on every 16
+dims and waits for each shared-memory read before the next
+(`TS5_ATTN_PF128=0` runs that build).
 
 Generation over 1024 keys or more (`TS5_ATTN_DEC` sets how many; 0: never),
 with an f16 cache and heads of 128, uses `shaders/attn_dec.comp`: up to 8
