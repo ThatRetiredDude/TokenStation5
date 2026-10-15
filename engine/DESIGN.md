@@ -87,7 +87,13 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   under 256 blocks the columns are split in slices of one super-block or
   more, for about 256 workgroups, each writing its partial sums for
   `mmb_reduce` to add up (`TS5_MMB_SPLIT` sets the 256, 0 for never;
-  `TS5_MMB_SLICES=N` splits every matrix in N).
+  `TS5_MMB_SLICES=N` splits every matrix in N). Where the device has f16
+  arithmetic (`mmb16_*`, the same shader with `MMB_F16`), shared memory holds
+  f16 and each step's 32 products are summed in packed f16, two per
+  `v_pk_fma_f16`, before they're added to f32 sums (`v_fma_mix_f32`): half
+  the instructions of f32 FMAs, and no f16 sum longer than 32 products. On
+  the test models the logits move by 0.1% of their range (0.01% in f32).
+  `TS5_MMB_F16=0` keeps f32.
 - 9 or more (`mm_*`, `shaders/matmul_tiled.glsl`): 64 rows x 64 tokens per
   workgroup. Half the threads dequantize a 64 x 64 slice of W into shared
   memory while the other half load the matching slice of X, then each thread
@@ -270,10 +276,9 @@ The v0 kernels were correctness-first: one workgroup per output row, byte
 loads, shared-memory reductions. Lavapipe numbers mean nothing; real tuning
 needs the console or an RDNA 2 card. In order of expected payoff:
 
-1. **Prefill matmul.** fp32, 128 x 128 blocks (above). Next: fp16 tiles in
-   LDS with packed fp16 FMA (`v_pk_fma_f16`, twice the fp32 rate) and fp32
-   accumulation. This is where llama.cpp leaves ~85% of the GPU idle on the
-   PS5.
+1. **Prefill matmul.** 128 x 128 blocks, f16 tiles in LDS with packed f16
+   FMA (`v_pk_fma_f16`, twice the fp32 rate) and f32 sums every 32 products
+   (above). This is where llama.cpp leaves ~85% of the GPU idle on the PS5.
 2. **Decode matvec.** 16-byte loads for Q4_K, gate and up fused. Next: fewer
    instructions per weight byte (packed f16 or float-bias dequantization,
    per-sub-block sums of x shared across rows), the same for Q6_K. Target:
