@@ -17,8 +17,46 @@ jobs:
           pip install gguf numpy jinja2
       - name: Vulkan device
         run: vulkaninfo --summary | grep -E "deviceName|apiVersion"
+      - name: Cache the whisper model
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/whisper
+          key: whisper-ggml-tiny.en-c78c86eb1a8faa21b369bcd33207cc90d64ae9df
+      - name: Whisper model for the title's speech test (ggml-tiny.en.bin)
+        run: |
+          mkdir -p "$RUNNER_TEMP/whisper"
+          cd "$RUNNER_TEMP/whisper"
+          [ -s ggml-tiny.en.bin ] || curl -fsSL --retry 3 -o ggml-tiny.en.bin \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+          # whisper.cpp's models/README.md lists each model's SHA-1.
+          echo "c78c86eb1a8faa21b369bcd33207cc90d64ae9df  ggml-tiny.en.bin" | sha1sum -c
+      - name: Cache the Kokoro model and voice
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/kokoro
+          key: kokoro-82m-f16-af_heart-a9e3143
+      - name: Kokoro model and voice for the title's speak test (kokoro.cpp's GGUFs)
+        run: |
+          mkdir -p "$RUNNER_TEMP/kokoro"
+          cd "$RUNNER_TEMP/kokoro"
+          hf=https://huggingface.co/simonfxr/kokoro.cpp-GGUF/resolve/main
+          [ -s kokoro-82m-f16.gguf ] || curl -fsSL --retry 3 -o kokoro-82m-f16.gguf "$hf/kokoro-82m-f16.gguf"
+          [ -s kokoro-voice-af_heart.gguf ] || curl -fsSL --retry 3 -o kokoro-voice-af_heart.gguf \
+            "$hf/voices/kokoro-voice-af_heart.gguf"
+          # The files as first downloaded (2026-10-15), the same on CI and the Mac.
+          sha256sum -c << 'EOF'
+          597926de84f5550e1526ce0abde4e496209d464afc9274d8603d14f3c04d1f67  kokoro-82m-f16.gguf
+          c2f44076dfb8f9c098a85d634f6d6b46b038f80e3afdf695ff3b90f6d9ef473f  kokoro-voice-af_heart.gguf
+          EOF
       - name: Engine tests (Vulkan vs CPU reference)
         run: engine/tests/run.sh
+        env:
+          # ps5/host-test.sh: the whisper test transcribes jfk.wav with it.
+          TS5_TEST_WHISPER_MODEL: ${{ runner.temp }}/whisper/ggml-tiny.en.bin
+          # ps5/host-test.sh: the speak test speaks with them, and whisper
+          # hears what it said.
+          TS5_TEST_KOKORO_MODEL: ${{ runner.temp }}/kokoro/kokoro-82m-f16.gguf
+          TS5_TEST_KOKORO_VOICE: ${{ runner.temp }}/kokoro/kokoro-voice-af_heart.gguf
 
   ps5-title:
     runs-on: ubuntu-24.04
