@@ -1,19 +1,25 @@
 #include "runner.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <exception>
 #include <thread>
 
+#include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/types.h>
 
 #include "backend.h"
 #include "checks.h"
 #include "engine.h"
 #include "model.h"
+#include "net.h"
 #include "tokenizer.h"
 
 #include "plain.h"
@@ -317,6 +323,10 @@ void Runner::run(const Job &job) {
         serve(job.path, job.n_ctx);
         return;
     }
+    if (job.kind == Job::Fetch) {
+        fetch(job);
+        return;
+    }
 
     // A check or speed test: on the serving model's own backend when it has
     // room, else on a load of its own with the serving model put back after.
@@ -423,6 +433,95 @@ void Runner::run(const Job &job) {
         if (!error.empty()) fail(error, said);
     }
     log_memory(check ? "after the GPU check" : "after the speed test");
+}
+
+namespace {
+
+// Bytes free on the volume dir is on, for the log and the room check before
+// a download. The one call to statvfs, here by itself, so it goes easily if
+// the console turns out not to have it (check-imports.py would refuse the
+// import; or the call could fail at run time, which the log then says).
+bool free_space(const std::string &dir, uint64_t &bytes) {
+    struct statvfs vs;
+    if (statvfs(dir.c_str(), &vs) != 0) return false;
+    bytes = (uint64_t)vs.f_bavail * (vs.f_frsize ? vs.f_frsize : vs.f_bsize);
+    return true;
+}
+
+}  // namespace
+
+// A download to the job's path, as .<file>.part beside it until its size
+// and SHA-256 (when given) agree, then renamed: the Library never sees a
+// half file. It goes on from a part that is already there. A line in the
+// log every 5 s, then "fetch: done" or "fetch failed: <why>"
+// (scripts/ts5-ps5.sh waits for them). Nothing is unloaded: a model that
+// is serving keeps answering, only other jobs wait.
+void Runner::fetch(const Job &job) {
+    const std::string file = base(job.path);
+    const std::string dir = job.path.substr(0, job.path.size() - file.size());  // with its '/', or ""
+    const std::string part = dir + "." + file + ".part";
+    constexpr double mb = 1e6;
+    constexpr uint64_t keep_free = 1000000000ull;  // a download may not take the last 1 GB
+    uint64_t free = 0;
+    const bool have_free = free_space(dir.empty() ? "." : dir, free);
+    if (have_free) printf("ts5-title: fetch: %s free\n", format_bytes(free).c_str());
+    else printf("ts5-title: fetch: free space unknown (%s)\n", strerror(errno));
+    struct stat st;
+    const uint64_t offset = stat(part.c_str(), &st) == 0 ? (uint64_t)st.st_size : 0;
+    if (offset > 0) printf("ts5-title: fetch: going on from the %.0f MB already there\n", offset / mb);
+
+    ts5::FetchProgress progress;
+    std::string err;
+    bool ok = false;
+    std::atomic<bool> finished{false};
+    std::thread worker([&] {
+        ok = ts5::http_get_file(job.url, part, offset, job.sha256, progress, err);
+        finished = true;
+    });
+    // Once the server has said how big the file is: is there room for the
+    // rest of it? If not, the download is stopped with that as the reason.
+    std::string refused;
+    bool checked_room = false;
+    double last_line = now_s();
+    while (!finished) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const uint64_t done = progress.done, total = progress.total;
+        if (!checked_room && total > 0) {
+            checked_room = true;
+            if (have_free && total > done && total - done + keep_free > free) {
+                refused = "not enough space: it needs " + format_bytes(total - done) + " and the console has " +
+                          format_bytes(free) + " free";
+                progress.cancel = true;
+            }
+        }
+        if (now_s() - last_line >= 5) {
+            char b[160];
+            if (total > 0)
+                snprintf(b, sizeof b, "fetch: %.0f MB of %.0f MB, %.1f MB a second", done / mb, total / mb,
+                         progress.speed / mb);
+            else
+                snprintf(b, sizeof b, "fetch: %.0f MB, %.1f MB a second", done / mb, progress.speed / mb);
+            set_step(b);
+            last_line = now_s();
+        }
+    }
+    worker.join();
+    if (ok && rename(part.c_str(), job.path.c_str()) != 0) {
+        ok = false;
+        err = std::string("cannot rename the part: ") + strerror(errno);
+    }
+    if (!ok) {
+        printf("ts5-title: fetch failed: %s\n", refused.empty() ? err.c_str() : refused.c_str());
+        std::lock_guard<std::mutex> lk(mu_);
+        status_.error = "The download failed. The log says why.";
+        return;
+    }
+    printf("ts5-title: fetch: done\n");
+    // The Library picks the file up on its next scan; until then the name is
+    // the file's own, without its ending, as the Library's fallback is.
+    const std::string name = file.substr(0, file.rfind('.'));
+    event("Downloaded " + name);
+    notify_("TokenStation5: " + name + " is downloaded");
 }
 
 }  // namespace app
