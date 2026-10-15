@@ -23,8 +23,10 @@
 #include "attention.spv.h"
 #include "attn.spv.h"
 #include "attn_dec.spv.h"
+#include "attn_dec4.spv.h"
 #include "attn_merge.spv.h"
 #include "attn_pf.spv.h"
+#include "attn_pf128.spv.h"
 #include "attn_pf_q8.spv.h"
 #include "attn_q8.spv.h"
 #include "get_rows_f16.spv.h"
@@ -260,6 +262,7 @@ private:
         if (const char *e = getenv("TS5_ATTN_SPLITS")) attn_splits_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_DEC")) attn_dec_min_ = atoi(e) > 0 ? atoi(e) : 0;
+        if (const char *e = getenv("TS5_ATTN_PF128")) attn_pf128_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV16")) mv16_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_BARRIER")) barrier_mode_ = std::min(2, std::max(0, atoi(e)));
@@ -428,8 +431,8 @@ private:
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
-        P(rmsnorm, 3) P(qkv_post, 10) P(qkv_post_q8, 12) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) P(attn_dec, 5)
-        P(attn_pf, 5) P(attn_pf_q8, 7)
+        P(rmsnorm, 3) P(qkv_post, 10) P(qkv_post_q8, 12) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) P(attn_dec, 5) P(attn_dec4, 5)
+        P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf_q8, 7)
         P(swiglu, 2)
 #undef P
         return true;
@@ -729,13 +732,14 @@ private:
         }
         // Rows per workgroup: the query heads of one KV head, for as many
         // tokens as fit attn's 1024 floats of queries, attn_pf's 64 rows
-        // (prompts: attn_pf_min_ tokens or more) or attn_dec's 8 (generation
+        // (prompts: attn_pf_min_ tokens or more) or attn_dec's 8 or 4 (generation
         // over attn_dec_min_ keys or more, f16 cache, heads of 128).
         const uint32_t G = H / HKV, keys = (uint32_t)(pos0 + n);
         const bool pf = attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && HD <= 128 && G <= 64;
         const bool dec = !pf && attn_dec_min_ && keys >= (uint32_t)attn_dec_min_ && kv_ == KvType::F16 &&
                          HD == 128 && G <= 8;
-        const uint32_t tq = pf ? 64 / G : dec ? 8 / G : std::max<uint32_t>(1, 1024 / HD / G);
+        const uint32_t dec_rows = G <= 4 ? 4 : 8;
+        const uint32_t tq = pf ? 64 / G : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / G);
         const uint32_t groups = HKV * (((uint32_t)n + tq - 1) / tq);
         // Few workgroups for many keys (generation, or a short prompt late in
         // a chat): split the keys so every compute unit gets some, about 256
@@ -751,7 +755,11 @@ private:
         n_split = (keys + chunk - 1) / chunk;
         struct { uint32_t head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split; float scale; } pc{
             HD, H, HKV, (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale};
-        const std::string kern = dec ? "attn_dec" : std::string(pf ? "attn_pf" : "attn") + (kv_ == KvType::Q8 ? "_q8" : "");
+        std::string kern = std::string(pf ? "attn_pf" : "attn") + (kv_ == KvType::Q8 ? "_q8" : "");
+        if (dec)
+            kern = dec_rows == 4 ? "attn_dec4" : "attn_dec";
+        else if (pf && HD == 128 && attn_pf128_ && kv_ == KvType::F16)
+            kern = "attn_pf128";
         if (kv_ == KvType::Q8)
             dispatch(kern, {&q_, &kc_, &vc_, &att_, &part_, &ks_, &vs_}, pc, groups, n_split);
         else
@@ -901,8 +909,10 @@ private:
     // sets how many slices generation splits the keys into.
     bool attn_fast_ = true;
     int attn_splits_ = 0;
-    // Prompts of at least this many tokens use attn_pf (TS5_ATTN_PF; 0: never).
+    // Prompts of at least this many tokens use attn_pf (TS5_ATTN_PF; 0: never),
+    // its build for heads of 128 where they are (TS5_ATTN_PF128=0: never).
     int attn_pf_min_ = 8;
+    bool attn_pf128_ = true;
     // Generation over at least this many keys uses attn_dec (TS5_ATTN_DEC;
     // 0: never).
     int attn_dec_min_ = 1024;

@@ -1,0 +1,5 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Generation attention over a long f16 cache, up to 4 rows (see attn_dec.glsl).
+#define RM 4
+#include "attn_dec.glsl"
