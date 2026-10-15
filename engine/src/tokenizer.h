@@ -33,13 +33,21 @@ public:
     // assistant turn opened.
     std::string apply_chat(const std::vector<ChatMessage> &msgs) const;
 
+    enum Chat { CHATML, LLAMA3, MISTRAL, PLAIN };
+    Chat chat_format() const { return chat_; }
+    // The model's own chat template (GGUF tokenizer.chat_template), or "".
+    const std::string &chat_template() const { return template_; }
+    // Another template in its place (tests).
+    void set_chat_template(const std::string &tmpl);
+
 private:
     void encode_bpe(const std::string &piece, std::vector<int32_t> &out) const;
     void encode_spm(const std::string &text, std::vector<int32_t> &out) const;
     void encode_plain(const std::string &text, std::vector<int32_t> &out) const;
 
     enum Kind { BPE, SPM } kind_ = BPE;
-    enum Chat { CHATML, LLAMA3, MISTRAL, PLAIN } chat_ = CHATML;
+    Chat chat_ = CHATML;
+    std::string template_;
     std::vector<std::string> tokens_;
     std::vector<float> scores_;
     std::vector<int> types_;

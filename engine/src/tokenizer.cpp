@@ -168,7 +168,7 @@ bool Tokenizer::load(const Gguf &g, std::string &err) {
     std::sort(specials_.begin(), specials_.end(),
               [](auto &a, auto &b) { return a.first.size() > b.first.size(); });
     if (eos_ >= 0) eog_.push_back(eos_);
-    for (const char *s : {"<|im_end|>", "<|eot_id|>", "<|endoftext|>", "<|end|>", "</s>", "<end_of_turn>"}) {
+    for (const char *s : {"<|im_end|>", "<|eot_id|>", "<|eom_id|>", "<|endoftext|>", "<|end|>", "</s>", "<end_of_turn>"}) {
         auto it = id_.find(s);
         if (it != id_.end() && std::find(eog_.begin(), eog_.end(), it->second) == eog_.end()) eog_.push_back(it->second);
     }
@@ -179,13 +179,17 @@ bool Tokenizer::load(const Gguf &g, std::string &err) {
         byte_enc_[b] = utf8(keep ? (uint32_t)b : (uint32_t)(256 + n++));
         byte_dec_[byte_enc_[b]] = (uint8_t)b;
     }
-    std::string tmpl = g.get_str("tokenizer.chat_template");
+    set_chat_template(g.get_str("tokenizer.chat_template"));
+    return true;
+}
+
+void Tokenizer::set_chat_template(const std::string &tmpl) {
+    template_ = tmpl;
     if (tmpl.find("<|im_start|>") != std::string::npos) chat_ = CHATML;
     else if (tmpl.find("<|start_header_id|>") != std::string::npos) chat_ = LLAMA3;
     else if (tmpl.find("[INST]") != std::string::npos) chat_ = MISTRAL;
     else if (id_.count("<|im_start|>")) chat_ = CHATML;
     else chat_ = PLAIN;
-    return true;
 }
 
 void Tokenizer::encode_bpe(const std::string &piece, std::vector<int32_t> &out) const {
