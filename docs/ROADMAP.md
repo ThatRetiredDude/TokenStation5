@@ -60,9 +60,16 @@ Nothing critical open.
 
 ## Next
 
+- [ ] No technical details on the app's screens (Jared, 2026-10-15): no file paths, script commands or `ts5.env` names. Where they show today:
+  - Models: the empty list and a suggested model's "To add it" panel (`scripts/ts5-ps5.sh fetch KEY`, "copy its .gguf over FTP to" the title's folder), and a model's file name.
+  - Settings: "kept in ts5.env", the "IN TS5.ENV" line, "(set in ts5.env)", and `scripts/ts5-ps5.sh speech`, `voice` and `websearch` for adding a speech model, a voice or the Tavily key.
+  - Chat: the hints to send a message with `scripts/ts5-ps5.sh chat` and to get a speech model.
+  - Console notifications: no model ("Copy a .gguf to /data/homebrew/..."), no speech model, and a log it can't write.
+  - Each needs plain words, and the ones that say how to add something need a way to do it on the console: downloading a suggested model from the Models page (the title has HTTPS since #20), and typing the Tavily key (with the on-screen keyboard above). Goes with the new pages below.
+- [ ] App pages: today's main screen becomes the Models page, beside Chat and Settings, and a new home page shows usage like the AI providers' usage pages: tokens per hour by model, speed over time, requests by key, and a live line. It reads a per-request log in the title's folder. Named API keys (turned on in Settings, one per client) wait on a go.
 - [ ] Long contexts: #28 and #30 doubled generation at 16k and made long prompts 70% faster. #32 adds 4-6% to generation at 16k. What's left: generation attention still streams the cache at about a third of the memory's speed (half of Qwen 3 8B's GPU time at 16k, 35.6 tok/s), and prompt attention is still 30% of a 16k prompt.
 - [ ] Generation at 80% of the GPU's 448 GB/s. The big one-token kernels already stream 380-410 GB/s; what's left is attention (10% of a token's GPU time at 512 tokens of context, latency-bound). The CPU between tokens is down to about 0.07 ms with #33 (was 0.45 ms). Speculative decoding (#17 to #27) goes past the limit for text that repeats: +60% on a code edit with #27's verify kernels.
-- [ ] Voice: a TV chat box with a keyboard and hold-R1 speech to text (whisper.cpp, on the CPU), then Kokoro speaking the replies, then the Settings page (`ts5.env`: audio output, `TAVILY_API_KEY`, a remote provider). Notes: `ps5-ai/voice/VOICE_FEASIBILITY.md` in the project files.
+- [ ] Voice, what's left after #22: typing in the chat. The keyboard library crashed the title with a USB keyboard plugged in, so the system's on-screen keyboard dialog is next. Generation slows to 25-28 tok/s while Kokoro speaks; fewer voice threads may help. Notes: `ps5-ai/voice/VOICE_FEASIBILITY.md` in the project files.
 - [ ] Measure PS5LM Plus on the console, same models, for a head-to-head. Its own figure is 124 tok/s generation on Llama 3.2 3B (ts5: 108).
 - [ ] Q8_0 on the fast one-token kernels. Qwen 2.5 0.5B Q8_0, the test model, now writes at 191 tok/s (185 in a short chat, as on the first run) and reads 4,618; its Q8_0 matmuls still run on the old one-row code, 64% of its writing time. Matters if a 0.5B becomes the draft model.
 - [ ] An 8-bit KV cache within the 2% bar, so 8B models get long contexts.
@@ -72,6 +79,7 @@ Nothing critical open.
 
 ## Done
 
+- [x] [#22](https://github.com/ThatRetiredDude/TokenStation5/pull/22) Chat on the TV, hold R1 to talk, a Settings page and spoken replies (merged 2026-10-15). On the console: whisper's base.en turns 2-8 s of speech into text in 0.5-0.8 s, and Kokoro speaks at 0.69x real time on 6 CPU threads, its first sentence after 0.9 s, on the TV or the controller.
 - [x] [#17](https://github.com/ThatRetiredDude/TokenStation5/pull/17) Speculative decoding by prompt lookup, and [#20](https://github.com/ThatRetiredDude/TokenStation5/pull/20) web search with a Tavily key and OpenAI tool calling (merged 2026-10-15). Web search works on the console: TLS 1.3 to api.tavily.com from the PS5, 5 results in 1.9 s, and Coder 7B answered from them correctly. The key goes in `ts5.env` in the title's folder as `TAVILY_API_KEY`, and the title's log shows it only as `(set)`.
 - [x] [#35](https://github.com/ThatRetiredDude/TokenStation5/pull/35) A PolyForm catch-all default in the licenses, and a current README (merged 2026-10-15).
 - [x] Memory over many model reloads (2026-10-14, with #26's log): no leak. In one run of the title, speed tests on all four models and back: every unload returns to the same 9392 MiB free with the driver's buffers at 8 MiB, and each model's load lands on the same number every time. The first load in a run is 1 GiB lighter on the direct-memory count than every later one (6320 vs 5296 MiB free for Coder 7B, same 5128 MiB of driver buffers); that's the whole "drop" seen earlier. The kernels builds leave 1792 MiB less free because they serve 32k tokens of context.
