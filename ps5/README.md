@@ -80,7 +80,7 @@ oldest exchanges are left out of the requests (they stay on screen).
 
 | Button | |
 | --- | --- |
-| cross | type a message on the console's keyboard |
+| cross, or Enter on a USB or Bluetooth keyboard | type a message on the console's keyboard (Enter sends it) |
 | R1 (hold) | talk: the mic is open while it's held, and the message goes when you let go (a reply still coming stops, and so does its voice) |
 | up / down | scroll; at the bottom, the page follows the reply |
 | triangle | stop the reply, and its voice |

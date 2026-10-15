@@ -526,6 +526,7 @@ int main(int, char **) {
     std::string typing_for;  // the setting it's for; "": a chat message
     bool typing_pending = false;  // until cross is let go, or the dialog takes it as a press
     bool swallow = false;         // after it closes, until every button is up
+    app::EnterKey enter_key;      // a USB or Bluetooth keyboard's Enter
     for (;;) {
         const double t = app::now_s();
         // Read each time: the Settings page changes them.
@@ -549,6 +550,10 @@ int main(int, char **) {
             if (kind == 'r') pc_held &= ~b;
             presses.pop_front();
         }
+        // Enter on a keyboard does on the chat page what cross does: it opens
+        // the console's keyboard.
+        if (enter_key.poll(dash.page() == ui::Dashboard::Chat && !keyboard.is_open() && !swallow && !typing_pending, t))
+            buttons |= ui::kCross;
         // A press on a dark screen only brings the dashboard back.
         const bool resting = dim > 0 && t - last_input > dim;
         if (buttons) last_input = t;

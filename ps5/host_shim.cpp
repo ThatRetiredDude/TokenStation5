@@ -17,6 +17,8 @@
 //   the on-screen keyboard      open until the host test writes
 //                               TS5_HOME/typed: its text is what was typed,
 //                               and "(cancel)" cancels
+//   a USB keyboard              one, whose Enter is pressed and let go
+//                               when the host test writes TS5_HOME/keys
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
@@ -163,6 +165,31 @@ int sceImeDialogGetResult(void *result) {
 int sceImeDialogTerm(void) {
     typed_into = nullptr;
     return 0;
+}
+int sceKeyboardInit(void) { return 0; }
+int sceKeyboardOpen(int, int, int index, const void *) { return index == 0 ? 7 : (int)0x80960002; }
+// libSceKeyboard's 96-byte report: connected at 16, the number of keys at
+// 20, their HID usages from 32.
+static int keyboard_report(void *data, bool enter) {
+    char *d = static_cast<char *>(data);
+    memset(d, 0, 96);
+    d[16] = 1;
+    const int32_t n = enter ? 1 : 0;
+    const uint16_t usage = 0x28;
+    memcpy(d + 20, &n, 4);
+    if (enter) memcpy(d + 32, &usage, 2);
+    return 1;
+}
+int sceKeyboardReadState(int, void *data) {
+    keyboard_report(data, false);
+    return 0;
+}
+int sceKeyboardRead(int, void *data, int count) {
+    if (count < 2 || access(TS5_HOME "/keys", F_OK) != 0) return 0;
+    unlink(TS5_HOME "/keys");
+    keyboard_report(data, true);
+    keyboard_report(static_cast<char *>(data) + 96, false);
+    return 2;
 }
 int scePadInit(void) { return 0; }
 int scePadOpen(int, int, int, const void *) { return -1; }
