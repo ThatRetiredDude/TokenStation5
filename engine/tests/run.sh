@@ -121,10 +121,17 @@ for r in 3 4; do
     TS5_MV_ROWS_MIN=1 TS5_MVT_ROWS=$r python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
         --ntok 7 "$work/qwen2-Q4_K_M.gguf"
 done
-# The fused gate+up verify kernel against the split one, byte for byte.
-"$ts5" logits -m "$work/qwen2-Q4_K_M.gguf" -o "$work/glu-on.bin" 12 34 56 78 90 11 22 2> /dev/null
+# The fused gate+up verify kernel against the split one, byte for byte; its
+# profile line proves the fused kernel is what ran, one row per workgroup
+# here and row-tiled as the console runs it.
+TS5_PROFILE=1 "$ts5" logits -m "$work/qwen2-Q4_K_M.gguf" -o "$work/glu-on.bin" 12 34 56 78 90 11 22 2> "$work/glu-on.err"
+grep -q "mvt_glu_q4_k\.7\.1 ffn_gate+up" "$work/glu-on.err"
 TS5_MVT_GLU=0 "$ts5" logits -m "$work/qwen2-Q4_K_M.gguf" -o "$work/glu-off.bin" 12 34 56 78 90 11 22 2> /dev/null
 cmp "$work/glu-on.bin" "$work/glu-off.bin"
+TS5_MV_ROWS_MIN=1 TS5_MVT_ROWS=4 TS5_PROFILE=1 "$ts5" logits -m "$work/qwen2-Q4_K_M.gguf" \
+    -o "$work/glu-r4.bin" 12 34 56 78 90 11 22 2> "$work/glu-r4.err"
+grep -q "mvt_glu_q4_k\.7 ffn_gate+up" "$work/glu-r4.err"
+cmp "$work/glu-on.bin" "$work/glu-r4.bin"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 5 "$work/qwen2-Q8_0.gguf" "$work/llama-Q8_0.gguf"
 rep="one two three one two three one two three one two three one two"
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-off.txt" 2> /dev/null
@@ -171,6 +178,21 @@ TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-padlist.gguf" "$ts5" run --backend cpu 
 cmp "$work/padr-off.txt" "$work/padlr-on.txt"
 grep -q "draft model .* ready" "$work/padlr-on.err"  # a longer one too
 ! grep -q "draft model \(stopped\|failed\)" "$work/padlr-on.err"
+echo "== the guards at the vocabulary seams, forced to fire (a boosted row the greedy target soon picks)"
+mk_k qwen2-padhot qwen2 qwen2 --pad-tokens 128 --boost-token 151940
+# A target that samples into its pad range stops the draft model with a
+# message, and the output stays its own...
+TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-padhot.gguf" -p "$nr" -n 100 --temp 0 > "$work/padf-off.txt" 2> /dev/null
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-kmix.gguf" "$ts5" run --backend cpu -m "$work/qwen2-padhot.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/padf-on.txt" 2> "$work/padf-on.err"
+cmp "$work/padf-off.txt" "$work/padf-on.txt"
+grep -q "draft model stopped: token 151940 is past its 151936 embedding rows" "$work/padf-on.err"
+# ...and a drafter that argmaxes past the target's rows only loses that draft.
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-padhot.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/padb-on.txt" 2> "$work/padb-on.err"
+cmp "$work/padr-off.txt" "$work/padb-on.txt"
+grep -q "draft model .* ready" "$work/padb-on.err"
+! grep -q "draft model \(stopped\|failed\)" "$work/padb-on.err"
 echo "== ts5 check (GPU vs CPU in one command, as run on the console), then again on the saved answers"
 rm -f "$work"/qwen3-Q4_0.gguf*.ts5ref
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null
