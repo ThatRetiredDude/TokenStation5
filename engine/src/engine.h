@@ -4,6 +4,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "backend.h"
@@ -23,8 +24,9 @@ struct SampleParams {
 
 struct GenStats {
     int prompt_tokens = 0, prompt_evaluated = 0, gen_tokens = 0;
-    int drafted = 0, draft_accepted = 0;  // prompt-lookup speculation
+    int drafted = 0, draft_accepted = 0;  // speculation (lookup or draft model)
     double prompt_ms = 0, gen_ms = 0;
+    double sample_ms = 0;  // CPU time in sample(), its logits reads included
     std::string finish = "length";
 };
 
@@ -34,18 +36,36 @@ public:
     // Calls on_text with each decoded piece; returning false stops early.
     bool generate(const std::vector<int32_t> &prompt, const SampleParams &p,
                   const std::function<bool(const std::string &)> &on_text, GenStats &st, std::string &err);
+    // A smaller model with the same vocabulary whose greedy continuations
+    // become the drafts when prompt lookup finds nothing. Takes ownership of
+    // the backend; the model must outlive the engine.
+    bool set_drafter(Model &dm, Backend *db, std::string &err);
     Tokenizer &tok() { return t_; }
     Backend &backend() { return *b_; }
     // After something else ran on the backend: its KV cache no longer holds
     // the last prompt.
-    void forget_cache() { cached_.clear(); }
+    void forget_cache() { cached_.clear(); dcached_ = 0; }
 
 private:
     int32_t sample(const float *logits, int n, const SampleParams &p);
+    void index_grams(size_t from);
+    void draft_lookup(int32_t tok, int k, std::vector<int32_t> &out);
+    void draft_model(int32_t tok, int k, std::vector<int32_t> &out);
     Model &m_;
     std::unique_ptr<Backend> b_;
     Tokenizer &t_;
     std::vector<int32_t> cached_;  // tokens whose K/V are in the cache
+    std::vector<int32_t> idx_;     // sample()'s top-k scratch, reused
+    // Prompt-lookup index over cached_: a 3- or 2-gram, packed 21 bits per
+    // token, maps to the position after its most recent occurrence.
+    std::unordered_map<uint64_t, int32_t> gram3_, gram2_;
+    // The draft model, when one is set (TS5_DRAFT_MODEL).
+    Model *dm_ = nullptr;
+    std::unique_ptr<Backend> db_;
+    size_t dcached_ = 0;        // the cached_ prefix the drafter has entered
+    bool drafter_ok_ = true;    // false after a drafter forward fails
+    std::vector<float> dl_;     // drafter logits, for backends without a view
+    std::vector<int32_t> cu_;   // the drafter's catch-up batch, reused
     std::mt19937_64 rng_{std::random_device{}()};
 };
 

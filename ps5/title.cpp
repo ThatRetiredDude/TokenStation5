@@ -14,7 +14,7 @@
 //
 // At start it serves what ts5.args says, one ts5 command line such as
 //
-//   serve -m /app0/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf -c 8192
+//   serve -m /app0/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf -c auto
 //
 // and without that file the first model it can run in models/ (then in
 // /data/ts5/models and /data/PS5LM/models, where the title can see them).
@@ -307,11 +307,11 @@ double chat_fps() {
 // The API's options, from the args file.
 struct Options {
     std::string host = "0.0.0.0";
-    int port = 8081, n_ctx = 8192;
+    int port = 8081, n_ctx = 0;  // n_ctx 0 ("-c auto"): what fits in the GPU's memory
 };
 
 // A ts5 command line as a job:
-//   serve -m MODEL [-c N] [--port N] [--host ADDR]
+//   serve -m MODEL [-c N|auto] [--port N] [--host ADDR]   (no -c, or auto: what fits)
 //   check -m MODEL [-n TOKENS] [--fresh 1] [--env NAME=VALUE]...
 //   bench -m MODEL [--pp N] [--tg N] [--env NAME=VALUE]...
 //   stop
@@ -339,7 +339,7 @@ bool parse_job(const std::vector<std::string> &a, app::Job &j, Options *o, std::
         }
         const std::string &v = a[++i];
         if (s == "-m") j.path = v.find('/') == std::string::npos ? std::string(kModels) + "/" + v : v;
-        else if (s == "-c") j.n_ctx = atoi(v.c_str());
+        else if (s == "-c") j.n_ctx = v == "auto" ? 0 : atoi(v.c_str());
         else if (s == "-n") j.n = atoi(v.c_str());
         else if (s == "--fresh") j.fresh = atoi(v.c_str()) != 0;
         else if (s == "--env" && v.find('=') != std::string::npos && v.find('=') > 0) j.env.push_back(v);
@@ -365,7 +365,8 @@ bool parse_job(const std::vector<std::string> &a, app::Job &j, Options *o, std::
 void save_args(const std::string &path, const Options &o) {
     FILE *f = fopen(kArgs, "w");
     if (!f) return;
-    fprintf(f, "serve -m \"%s\" -c %d --port %d", path.c_str(), o.n_ctx, o.port);
+    const std::string ctx = o.n_ctx > 0 ? std::to_string(o.n_ctx) : "auto";
+    fprintf(f, "serve -m \"%s\" -c %s --port %d", path.c_str(), ctx.c_str(), o.port);
     if (o.host != "0.0.0.0") fprintf(f, " --host %s", o.host.c_str());
     fprintf(f, "\n");
     fclose(f);

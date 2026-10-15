@@ -28,7 +28,7 @@ namespace ui {
 struct View {
     std::string version, url, folder;  // folder: the models folder as the PC sees it over FTP
     uint64_t gpu_memory = 0;
-    int n_ctx = 8192;  // the context a Serve loads with
+    int n_ctx = 0;  // the context a Serve loads with (0: what fits)
     std::vector<app::ModelInfo> models;
     std::map<std::string, app::Results> results;  // by file name
     app::Status status;
