@@ -144,7 +144,7 @@ size fixed, so its loops unroll: built for any size it branches on every 16
 dims and waits for each shared-memory read before the next
 (`TS5_ATTN_PF128=0` runs that build).
 
-Generation over 1024 keys or more (`TS5_ATTN_DEC` sets how many; 0: never),
+Generation over 256 keys or more (`TS5_ATTN_DEC` sets how many; 0: never),
 with an f16 cache and heads of 128, uses `shaders/attn_dec.glsl`: up to 8
 rows per workgroup (`attn_dec`; `attn_dec4` for 4, where a KV head has 3 or
 4 query heads), its slice of the keys 128 at a time. Thread t scores key t
@@ -155,7 +155,8 @@ thread 4 value columns of them, and the four groups' sums are added up once,
 at the end. That's three barriers per 128 keys where attn has four per 16.
 On the console, Coder 7B wrote 65 tok/s at 0.5k tokens of context and 23 at
 18k with attn, 47 at 18k with the first version of attn_dec (the queries and
-weights in shared memory, one value column per thread).
+weights in shared memory, one value column per thread). Under 256 keys attn
+is as fast.
 
 `TS5_PROFILE=1` writes a GPU timestamp after every dispatch; `ts5 bench`
 then prints the GPU's time per kernel (matmuls by weight) for the prompt and
