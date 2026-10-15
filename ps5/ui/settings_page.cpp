@@ -113,14 +113,24 @@ std::vector<Choice> choices(const Row &r, const SettingsInfo &info) {
     if (!r.files) return r.choices;
     const auto &files = std::string(r.name) == kVoice ? info.voices : info.speech_models;
     std::vector<Choice> c;
-    if (files.empty()) return c;
-    const std::string def = file_name(r, default_file(r, info));
-    c.push_back({"", (std::string(r.name) == kVoice ? "The default (" : "The first one (") + def + ")"});
     for (const std::string &m : files) c.push_back({m, file_name(r, m)});
     return c;
 }
 
 std::string current(const Row &r) { return app::setting(r.name, r.def); }
+
+// What the row is set to in effect: for a row of files left unset, the file
+// used by default.
+std::string in_effect(const Row &r, const SettingsInfo &info) {
+    const std::string v = current(r);
+    return r.files && v.empty() ? default_file(r, info) : v;
+}
+
+// The choice marked "default": the row's default, or for a row of files the
+// file used when nothing is chosen.
+bool is_default(const Row &r, const SettingsInfo &info, const Choice &ch) {
+    return r.files ? ch.value == default_file(r, info) : ch.value == r.def;
+}
 
 // The current value's choice, or -1 (a value set some other way).
 int index_of(const std::vector<Choice> &cs, const std::string &v) {
@@ -139,9 +149,8 @@ std::string shown(const Row &r, const SettingsInfo &info) {
     if (is_key(r)) return current(r).empty() ? "Not set" : "Set";
     const auto cs = choices(r, info);
     if (r.files && cs.empty()) return "None yet";
-    const int i = index_of(cs, current(r));
+    const int i = index_of(cs, in_effect(r, info));
     if (i < 0) return other(r);
-    if (r.files && i == 0) return file_name(r, default_file(r, info));
     return cs[i].shown;
 }
 
@@ -180,7 +189,7 @@ SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
     if (b & (kUp | kDown)) confirm_at_ = -1e9;
     const Row &r = rs[sel_];
     auto set = [&](const std::string &v) {
-        if (v == current(r)) return;
+        if (v == current(r) || (v == in_effect(r, info) && v != r.def)) return;
         ch.any = true;
         ch.name = r.name;
         // The default goes back to nothing in ts5.env.
@@ -205,7 +214,7 @@ SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
     }
     const auto cs = choices(r, info);
     if (cs.empty()) return ch;
-    int i = index_of(cs, current(r));
+    int i = index_of(cs, in_effect(r, info));
     if (i < 0) i = std::max(0, index_of(cs, r.def));
     if (b & kLeft) set(cs[std::max(0, i - 1)].value);
     else if (b & kRight) set(cs[std::min((int)cs.size() - 1, i + 1)].value);
@@ -311,15 +320,14 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
             c.text(body_, dx, ty + 68, "The TokenStation5 guide shows how to add one.", kText2, dw);
             ty += 100;
         }
-        const int at = index_of(cs, cur);
+        const int at = index_of(cs, in_effect(r, info));
         for (size_t i = 0; i < cs.size(); i++) {
             const int cy = ty + 26;
             const bool on = (int)i == at;
             c.ring((float)dx + 12, (float)cy - 8, 11, 2.5f, on ? kAccent : kMuted);
             if (on) c.circle((float)dx + 12, (float)cy - 8, 5.5f, kAccent);
             const int tw = c.text(body_, dx + 40, cy, cs[i].shown, on ? kText : kText2, dw - 40);
-            if (cs[i].value == r.def && !r.files)
-                c.text(small_, dx + 40 + tw + 14, cy, "default", kMuted);
+            if (is_default(r, info, cs[i])) c.text(small_, dx + 40 + tw + 14, cy, "default", kMuted);
             ty += 42;
         }
         if (at < 0 && !cs.empty()) {
