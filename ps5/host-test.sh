@@ -82,7 +82,7 @@ c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data
     -I "$k/include" \
     "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks,tools,net,websearch}.cpp \
     "$root"/ps5/{title,library,runner,audio_probe,chat,stt,voice,settings,speak,text_input,usage_store,host_shim}.cpp \
-    "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
+    "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page,logs_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -Wa,-I"$root/ps5/tts" "$root/ps5/tts/lexicon_data.S" \
     -x none "$wobj/libts5speech.a" -ldl -o "$work/eboot.bin"
 

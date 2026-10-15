@@ -65,9 +65,10 @@ seconds. A model still arriving shows as COPYING until it's whole.
 
 ## On the TV
 
-Four pages; **L1** goes to the next: Home, Models, Chat, Settings, and
+Five pages; **L1** goes to the next: Home, Models, Chat, Settings, Logs, and
 **circle** back to Home. They say what happened and what to do in plain
-words; the details (file names, the engine's own errors) are in `ts5.log`.
+words; the details (file names, the engine's own errors) are in `ts5.log`,
+which the Logs page shows.
 The title opens on Home, or on Models while there's no model to use.
 
 **Home**: how apps have used the API, like an AI provider's usage page. Four
@@ -84,6 +85,7 @@ ranges outlast its rotation.
 | --- | --- |
 | left / right | 24 hours, 7 days or 30 days |
 | cross | Chat, or Models with nothing running |
+| square | when some requests weren't answered: Logs, at the problems |
 | OPTIONS | close the title |
 
 **Models**
@@ -92,7 +94,7 @@ ranges outlast its rotation.
 | --- | --- |
 | up / down | choose a model |
 | cross | start it, so apps can use it (and start it again at the next start); on the model in use, stop it (it asks first) |
-| square | GPU check: its logits on the GPU against ts5's CPU reference, PASS or FAIL. The first check of a model runs the CPU and saves its answers next to the model (`NAME.gguf.ts5ref`); later ones run only the GPU, in about a second |
+| square | GPU check (on a model that can't run: Logs, at the problems): its logits on the GPU against ts5's CPU reference, PASS or FAIL. The first check of a model runs the CPU and saves its answers next to the model (`NAME.gguf.ts5ref`); later ones run only the GPU, in about a second |
 | triangle | speed test: how fast it reads a 512-token prompt and writes 128 tokens, in tokens a second |
 | circle | Home |
 | OPTIONS | close the title |
@@ -140,6 +142,23 @@ the dark screen. Changes count at once, or where they can't, at the next use
 | left / right | change it (cross steps through its choices) |
 | cross, on the Tavily key | type it on the console's keyboard |
 | square | back to its default |
+| circle | Home |
+
+**Logs**: `ts5.log`, or `ts5.prev.log` for the run before, the one page
+with raw text: file names, settings names, the engine's, the GPU's and the
+network's own words. Keys never show: the value of a `NAME_KEY=` or
+`NAME_TOKEN=` and a `tvly-` key are hidden before a line is drawn. The page
+reads the last 256 KiB of the file while it's shown, follows the newest
+line unless scrolled up, draws problems (failed, errors, can't, couldn't,
+refused) in red, and gives the build at the bottom. A failure on the other
+pages ends with "Details are in Logs."
+
+| Button | |
+| --- | --- |
+| up / down | scroll a line |
+| left / right | scroll a page |
+| square | only the problems, or everything |
+| triangle | the run before, or this run |
 | circle | Home |
 
 A check or speed test of the serving model runs on its loaded weights while
@@ -222,7 +241,7 @@ reference and says PASS or FAIL.
 | `speak.cpp` | speech out: on the TV or the controller's speaker, and the speak test |
 | `plain.h` | plain words for the screens: what an error means and what to do, and names for models, speech models and voices |
 | `usage_store.cpp` | Home's numbers: `usage.tsv` and `usage-hours.tsv` read at start on a thread of their own, each request added as it comes, an hour's rows written once it ends |
-| `ui/` | the screen: the pages and the Models page (`dashboard`), Home (`home_page`), the Chat page (`chat_page`), drawing (`canvas`, `style.h`), the TV (`display`, VK_KHR_display), the controller (`pad`), fonts and logo baked by `make_font.py` and `make_logo.py` |
+| `ui/` | the screen: the pages and the Models page (`dashboard`), Home (`home_page`), Logs (`logs_page`), the Chat page (`chat_page`), drawing (`canvas`, `style.h`), the TV (`display`, VK_KHR_display), the controller (`pad`), fonts and logo baked by `make_font.py` and `make_logo.py` |
 | `compat.c` | libc functions RADV and whisper.cpp need that titles don't get |
 | `build.sh`, `setup.sh` | the build |
 | `check-imports.py` | fails the build on imports that would be NULL on the console |
