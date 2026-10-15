@@ -479,11 +479,15 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
         }
     } else {
         const bool is_serving = m.path == v.status.serving_path;
-        const int ctx = is_serving && v.status.serving_ctx ? v.status.serving_ctx : v.n_ctx;
+        // Serving: its context. Else what serving it would get: the args'
+        // -c, or what fits (no -c).
+        const app::ModelInfo::Ctx ctx = is_serving && v.status.serving_ctx
+                                            ? app::ModelInfo::Ctx{v.status.serving_ctx, v.status.serving_kv8}
+                                            : m.serve_ctx(v.n_ctx, v.gpu_memory);
         const uint64_t need = m.memory_for(ctx);
-        const bool fits = !v.gpu_memory || need <= v.gpu_memory;
+        const bool fits = !v.gpu_memory || (ctx.n > 0 && need <= v.gpu_memory);
         char cap[64];
-        snprintf(cap, sizeof cap, "GPU MEMORY AT %dK CONTEXT", ctx / 1024);
+        snprintf(cap, sizeof cap, "GPU MEMORY AT %dK CONTEXT%s", ctx.n / 1024, ctx.kv8 ? ", 8-BIT CACHE" : "");
         label(c, smallb_, DX, 500, cap);
         c.round_rect((float)DX, 516, (float)DW, 14, 7, rgb(0x1B2650));
         if (v.gpu_memory) {

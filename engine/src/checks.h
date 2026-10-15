@@ -22,17 +22,19 @@ struct CheckResult {
 };
 
 // The GPU's logits at every one of n positions against the fp32 CPU
-// reference, with its KV cache rounded to f16 as the GPU's is (so a real
-// model's large K values test the kernels, not the cache's precision). The
+// reference, with its KV cache rounded as the GPU's is, f16 or 8-bit (so a
+// real model's large K values test the kernels, not the cache's precision). The
 // GPU runs the first positions in one call, as for a prompt (the tiled matmul
 // from 9 tokens), and the last few (up to 4) one token per call, as in
 // generation. The reference reads the weights from the model file one layer
 // at a time, so it needs a layer's worth of memory rather than a second copy
 // of the model; m and gpu are left as they were, apart from gpu's KV cache.
-// Passes when the largest difference is under 0.5% of the largest logit.
-// The reference's logits are saved next to the model (MODEL.ts5ref) the first
-// time, and later checks of as many tokens or fewer compare against those
-// instead of running the CPU again; fresh: run the CPU anyway.
+// Passes when the largest difference is under 0.5% of the largest logit (2%
+// with an 8-bit cache).
+// The reference's logits are saved next to the model (MODEL.gguf.ts5ref, or
+// MODEL.gguf.q8.ts5ref for an 8-bit cache) the first time, and later checks
+// of as many tokens or fewer compare against those instead of running the
+// CPU again; fresh: run the CPU anyway.
 bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string &err,
                const Progress &progress = nullptr, bool fresh = false);
 // "ts5 check: <model>, N tokens: max |diff| ..., ...: PASS|FAIL"
@@ -42,7 +44,8 @@ struct BenchResult {
     int pp = 0, tg = 0;
     double pp_tps = 0, tg_tps = 0;
     std::string backend;
-    // With TS5_PROFILE=1: the GPU's time per kernel in each part (else empty).
+    // With TS5_PROFILE set: the CPU's time per call in each part, and with
+    // TS5_PROFILE=1 the GPU's time per kernel (else empty).
     std::string pp_profile, tg_profile;
 };
 
