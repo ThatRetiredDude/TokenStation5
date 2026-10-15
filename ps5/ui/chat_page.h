@@ -6,6 +6,7 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -24,27 +25,33 @@ public:
     // Back to the newest message, as for a new conversation.
     void to_bottom();
     // The conversation in the rectangle x, y, w, h. name: a model's display
-    // name for its file name; serving: the serving model's file name, or "";
-    // can_talk: there's a speech model for R1.
+    // name for its file name, "" when it isn't on the PS5 (a reply keeps the
+    // name it was seen with; else it's "A model no longer on your PS5");
+    // serving: the serving model's file name, or ""; can_talk: there's a
+    // speech model for R1.
     void draw(Canvas &c, const app::ChatState &s, int x, int y, int w, int h, double now,
               const std::function<std::string(const std::string &)> &name, const std::string &serving,
               bool can_talk);
     // The line under the conversation: how to send a message, or what the
-    // mic is doing while R1 is held.
+    // mic is doing while R1 is held. no_voice: spoken replies are on but
+    // there's no voice on the PS5, which the line says too.
     void draw_input(Canvas &c, const app::ChatState &s, const app::VoiceState &voice, double now, int x, int y,
-                    int w, int h);
+                    int w, int h, bool no_voice = false);
 
 private:
     struct Piece;
     struct Laid;
     Laid lay_out(const app::ChatTurn &t, int w, const std::string &model) const;
     void draw_empty(Canvas &c, int x, int y, int w, int h, const std::string &serving_name, bool can_talk);
+    // A model's name, remembered from when it was last on the PS5.
+    std::string name_of(const std::function<std::string(const std::string &)> &name, const std::string &file);
 
     const Font &h2_, &body_, &bodyb_, &small_, &smallb_, &mono_, &code_;
     std::vector<Laid> laid_;  // by turn
     bool follow_ = true;      // showing the newest, following the reply
     int top_ = 0;             // else: the conversation's first pixel row shown
     int shown_top_ = 0, max_top_ = 0;
+    std::map<std::string, std::string> names_;  // by file name
 };
 
 }  // namespace ui

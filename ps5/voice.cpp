@@ -95,7 +95,7 @@ void Voice::run() {
     if (model.empty()) {
         // Nothing to transcribe with: say so at once rather than record.
         while (!released_) sceKernelUsleep(20000);
-        set_error("No speech model on your PS5 yet. The TokenStation5 guide shows how to add one.");
+        set_error("No speech model yet. Add one in Settings, under Talk.");
         return;
     }
     const int h = sceAudioInOpen(user_, kVoiceChat, 0, kGrain, kRate, kMono16);
