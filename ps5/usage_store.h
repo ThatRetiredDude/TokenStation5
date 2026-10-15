@@ -31,8 +31,9 @@ struct UsageSums {
     int64_t requests = 0;
     // Not answered (status other than 200, or finish error), and why: no
     // model running (no_model, loading), busy with a check (busy_check,
-    // busy_bench), a bad request (bad_json, too_long), the GPU or the engine
-    // (gpu_error, exception). left: the app went before the reply ended.
+    // busy_bench), a bad request (bad_json, empty_prompt, too_long), the GPU
+    // or the engine (gpu_error, exception). left: the app went before the
+    // reply ended.
     int64_t failed = 0, no_model = 0, busy = 0, bad_request = 0, error = 0, left = 0;
     int64_t prompt = 0, prompt_new = 0, prompt_ms = 0, gen = 0, gen_ms = 0, searches = 0;
     int64_t wait_ms = 0, first_ms = 0, total_ms = 0;
