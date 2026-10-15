@@ -278,6 +278,10 @@ private:
         if (const char *e = getenv("TS5_MVT")) mvt_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT_GLU")) mvt_glu_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT_ROWS")) mvt_rows_ = std::min(4, std::max(1, atoi(e)));
+        // The fused kernel holds two matrices' words: past 2 rows it spills
+        // registers on the PS5 (1376 VGPRs into scratch at 4 rows, a 7x
+        // regression), so its row tiling is capped where the plain one's isn't.
+        mvt_glu_rows_ = std::min(mvt_rows_, 2u);
         if (const char *e = getenv("TS5_BARRIER")) barrier_mode_ = std::min(2, std::max(0, atoi(e)));
         if (const char *e = getenv("TS5_FUSE")) fuse_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
@@ -448,7 +452,7 @@ private:
                 !make_pipe("mvt_q4_k" + s + ".1", spv_mvt_q4_k, sizeof(spv_mvt_q4_k), 3, err, nt, 1) ||
                 !make_pipe("mvt_q6_k" + s, spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, mvt_rows_) ||
                 !make_pipe("mvt_q6_k" + s + ".1", spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, 1) ||
-                !make_pipe("mvt_glu_q4_k" + s, spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, mvt_rows_) ||
+                !make_pipe("mvt_glu_q4_k" + s, spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, mvt_glu_rows_) ||
                 !make_pipe("mvt_glu_q4_k" + s + ".1", spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, 1))
                 return false;
         }
@@ -802,8 +806,8 @@ private:
             mat_vec("mv16_glu_q4_k", {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, rows, "ffn_gate+up");
             return true;
         }
-        const bool one = rows < (uint32_t)mv_rows_min_ || mvt_rows_ == 1;
-        const uint32_t nr = one ? 1 : mvt_rows_, groups = (rows + nr - 1) / nr;
+        const bool one = rows < (uint32_t)mv_rows_min_ || mvt_glu_rows_ == 1;
+        const uint32_t nr = one ? 1 : mvt_glu_rows_, groups = (rows + nr - 1) / nr;
         const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
         dispatch("mvt_glu_q4_k." + std::to_string(n) + (one ? ".1" : ""),
                  {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, mx, my, "ffn_gate+up");
@@ -938,7 +942,10 @@ private:
     // 8 threads per block (TS5_MV16=0: matvec_q4_k and matvec_q6_k).
     bool mv16_ = true;
     bool mvt_ = true;
-    bool mvt_glu_ = true;
+    // The fused gate+up verify kernel: off until a console A/B shows a win
+    // (phase L measured it 7x slower at 4 rows from register spills).
+    bool mvt_glu_ = false;
+    uint32_t mvt_glu_rows_ = 2;
     // Rows per workgroup of the verify-batch kernels (TS5_MVT_ROWS, 1 to 4),
     // which share each token's x loads; one for matrices under mv_rows_min_.
     uint32_t mvt_rows_ = 4;

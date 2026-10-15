@@ -177,10 +177,13 @@ batch's x sits in the 4 MB L2, but at one row per workgroup a 19k-row
 matrix re-read it from L2 per (row, token) — several GB a layer at 7
 tokens, measured on the console as a verify pass costing 5.7x a single
 step — which the row tiling divides by NR. The feed-forward's gate and up,
-the two biggest lines of a verify pass, run as one kernel (`mvt_glu_q4_k`,
-`TS5_MVT_GLU=0` splits them again): both matrices' blocks are dotted with
-the same x loads and swiglu is applied in place, as `mv16_glu_q4_k` does
-for one token.
+the two biggest lines of a verify pass, can run as one kernel
+(`TS5_MVT_GLU=1` picks `mvt_glu_q4_k`): both matrices' blocks are dotted
+with the same x loads and swiglu is applied in place, as `mv16_glu_q4_k`
+does for one token. Holding two matrices' words doubles the register
+load, so its rows per workgroup are capped at 2 (at 4 the PS5 spills
+1376 VGPRs into scratch, measured as a 7x slower verify), and it stays
+off by default until a console A/B shows the capped version winning.
 
 When `TS5_DRAFT_MODEL` names a smaller GGUF with the same vocabulary (for
 Qwen 2.5 Coder 7B, a Qwen 2.5 0.5B), steps where the lookup finds nothing
