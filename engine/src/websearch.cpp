@@ -44,7 +44,7 @@ Json web_search_tool(const std::string &today) {
     return j;
 }
 
-std::string web_search(const std::string &arguments, std::string &log) {
+std::string web_search(const std::string &arguments, std::string &log, bool *failed) {
     Json args;
     std::string query;
     if (Json::parse(arguments, args)) query = args["query"].str();
@@ -74,6 +74,7 @@ std::string web_search(const std::string &arguments, std::string &log) {
     char took[32];
     snprintf(took, sizeof took, "%.1f s", secs);
     if (!ok) {
+        if (failed) *failed = true;
         log = "web_search \"" + query + "\": " + err + " (" + took + ")";
         return "The search failed: " + err + ". Tell the user, and answer from what you know if you can.";
     }
@@ -85,6 +86,7 @@ std::string web_search(const std::string &arguments, std::string &log) {
                           : resp.status == 429 ? "too many searches at once"
                                                : "Tavily answered HTTP " + std::to_string(resp.status);
         if (!detail.empty()) why += " (" + detail + ")";
+        if (failed) *failed = true;
         log = "web_search \"" + query + "\": " + why + " (" + took + ")";
         return "The search failed: " + why + ". Tell the user, and answer from what you know if you can.";
     }
