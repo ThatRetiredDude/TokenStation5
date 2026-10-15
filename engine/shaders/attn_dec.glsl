@@ -6,8 +6,11 @@
 // through scalar loads and cost no vector instructions. Then each group of
 // 32 threads takes a quarter of the tile's keys, and each thread 4 value
 // columns of them, for RM x 4 sums per key from one 8-byte load; the four
-// groups' sums are added up once, at the end. Three barriers per 128 keys.
-// Head size 128. Partial results as attn's, for attn_merge.
+// groups' sums are added up once, at the end. Three barriers per 128 keys;
+// the next tile's keys load while this tile's values are summed, so every
+// thread has reads in flight across the barriers (constant PLAIN = 1: load
+// them at the top of the tile instead, for an A/B). Head size 128. Partial
+// results as attn's, for attn_merge.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_shader_subgroup_basic : require
@@ -27,6 +30,7 @@ layout(push_constant) uniform PC {
 } pc;
 
 const uint HD = 128, BK = 128, NG = 4, GK = BK / NG, SGMAX = 32, RV = RM / 4;
+layout(constant_id = 0) const uint PLAIN = 0;
 // The tile's weights, [key][row / 4]; at the end, the row sums [row][col / 4].
 shared vec4 pw[BK * RV];
 shared float red[RM][SGMAX];   // each subgroup's highest score per row
@@ -60,15 +64,26 @@ void main() {
     }
     const uint head = pc.cache_off + kh * HD;  // halves
 
+    // Thread t's key of a tile, all 16 words loaded at once.
+    uvec4 kw[HD / 8];
+#define LOAD_KEYS(KB)                                                         \
+    {                                                                         \
+        const uint k_ = (KB) + tid;                                           \
+        if (k_ < k_end) {                                                     \
+            const uint w0 = (head + k_ * kv_stride) / 8;                      \
+            [[unroll]] for (uint i = 0; i < HD / 8; i++) kw[i] = kc[w0 + i];  \
+        }                                                                     \
+    }
+    if (PLAIN == 0) LOAD_KEYS(k_begin)
     for (uint kb = k_begin; kb < k_end; kb += BK) {
+        if (PLAIN != 0) LOAD_KEYS(kb)
         // Scores: thread t, key kb + t.
         const uint key = kb + tid;
         float s[RM];
         [[unroll]] for (uint r = 0; r < RM; r++) s[r] = 0.0;
         if (key < k_end) {
-            const uint w0 = (head + key * kv_stride) / 8;
             [[unroll]] for (uint i = 0; i < HD / 8; i++) {
-                const uvec4 w = kc[w0 + i];
+                const uvec4 w = kw[i];
                 const vec4 k0 = vec4(unpackHalf2x16(w.x), unpackHalf2x16(w.y));
                 const vec4 k1 = vec4(unpackHalf2x16(w.z), unpackHalf2x16(w.w));
                 [[unroll]] for (uint r = 0; r < RM; r++)
@@ -102,6 +117,8 @@ void main() {
             l[r] = l[r] * c[r] + ps;
             acc[r] *= c[r];
         }
+        // The next tile's keys, in flight while this one's values are summed.
+        if (PLAIN == 0 && kb + BK < k_end) LOAD_KEYS(kb + BK)
         // Values: group g, keys kb + 32 g ..; thread c4, columns 4 c4 ...
         const uint j0 = g * GK, nj = min(GK, max(k_end - kb, j0) - j0);
         const uint vo = (head + (kb + j0) * kv_stride) / 4 + c4, vs = kv_stride / 4;
