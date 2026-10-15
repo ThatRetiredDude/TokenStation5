@@ -640,6 +640,35 @@ int Body::next(char *buf, size_t cap, std::string &err) {
     }
 }
 
+// Beside a part, "<part>.from" says which URL it is of (without the query
+// string: a signed one changes with every link) and what the server called
+// that version of the file (its ETag, else its Last-Modified; maybe
+// nothing), one a line. A resume only goes on from a part of the same URL,
+// and asks for the rest with If-Range when there is a validator, so a file
+// that changed on the server comes whole (200) instead of its new tail
+// landing after the old head.
+bool read_from(const std::string &path, std::string &url, std::string &tag) {
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    std::string text;
+    char buf[4096];
+    for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+    fclose(f);
+    const size_t a = text.find('\n');
+    if (a == std::string::npos) return false;
+    const size_t b = text.find('\n', a + 1);
+    url = text.substr(0, a);
+    tag = text.substr(a + 1, b == std::string::npos ? std::string::npos : b - a - 1);
+    return !url.empty();
+}
+
+bool write_from(const std::string &path, const std::string &url, const std::string &tag) {
+    FILE *f = fopen(path.c_str(), "wb");
+    if (!f) return false;
+    fprintf(f, "%s\n%s\n", url.c_str(), tag.c_str());
+    return fclose(f) == 0;
+}
+
 // The download itself, on the thread http_get_file gives it. The file is
 // written from `start` (the checkpoint's offset, else `offset`), 256 KiB at
 // a time, and the hash follows the writes; a checkpoint is reported only
@@ -668,11 +697,22 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
 #endif
 
     // Where to go on from: the checkpoint's offset with its hash state, else
-    // the file's first `offset` bytes, hashed here first.
+    // the file's first `offset` bytes, hashed here first. Only a part of this
+    // same URL is gone on from (its .from file says which); another one, or
+    // one without a .from, starts over.
     struct stat st;
     if (offset > 0 && (stat(path.c_str(), &st) != 0 || (uint64_t)st.st_size < offset)) {
         offset = stat(path.c_str(), &st) == 0 ? (uint64_t)st.st_size : 0;
         trace("the file is shorter than said; going on from its %llu bytes", (unsigned long long)offset);
+    }
+    const std::string from_path = path + ".from", source = url.substr(0, url.find('?'));
+    std::string from_url, validator;
+    if (offset > 0 && !read_from(from_path, from_url, validator)) {
+        trace("the part doesn't say where it's from; starting over");
+        offset = 0;
+    } else if (offset > 0 && from_url != source) {
+        trace("the part is of another URL; starting over");
+        offset = 0;
     }
     uint64_t start = offset;
     Hasher hash;
@@ -686,6 +726,9 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
             trace("the checkpoint doesn't fit the file; hashing the file instead");
         }
     }
+    // The buffers before the file, so they are still there when the Closer's
+    // fclose flushes what is left in fbuf on a failure return.
+    std::vector<char> fbuf(1 << 20), wbuf(block);
     FILE *f = fopen(path.c_str(), start > 0 ? "r+b" : "wb");
     if (!f) {
         err = std::string("cannot open the file: ") + strerror(errno);
@@ -693,9 +736,10 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
     }
     struct Closer {
         FILE *f;
-        ~Closer() { fclose(f); }
+        ~Closer() {
+            if (f) fclose(f);
+        }
     } closer{f};
-    std::vector<char> fbuf(1 << 20), wbuf(block);
     setvbuf(f, fbuf.data(), _IOFBF, fbuf.size());
     progress.done = start;
     // Waits while paused. False once cancelled.
@@ -709,6 +753,18 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
     // gets its own words.
     auto write_failed = [&] {
         err = errno == ENOSPC ? std::string("storage full") : std::string("cannot write the file: ") + strerror(errno);
+        return false;
+    };
+    // A part that turned out wrong (another size or hash than it should
+    // have, or longer than the file) goes, with its .from, so the next call
+    // starts over instead of failing the same way again. A part a dropped
+    // connection, a timeout, a full disk or a cancel cut short is kept.
+    auto damaged = [&] {
+        trace("removing the part: it can't be gone on from");
+        fclose(f);
+        closer.f = nullptr;
+        unlink(path.c_str());
+        unlink(from_path.c_str());
         return false;
     };
     if (rehash) {
@@ -742,6 +798,7 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
         std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + u.hostport + "\r\nConnection: close\r\n" +
                           "User-Agent: TokenStation5\r\nAccept-Encoding: identity\r\n";
         if (start > 0) req += "Range: bytes=" + std::to_string(start) + "-\r\n";
+        if (start > 0 && !validator.empty()) req += "If-Range: " + validator + "\r\n";
         req += "\r\n";
         if (!c.write_all(req, err)) return false;
 
@@ -785,14 +842,18 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
         }
         // 206 goes on from where the file stops, if the range agrees; 200 is
         // the whole file, so the part starts over; 416 past the end means
-        // the part already is the whole file.
+        // the part already is the whole file, or is longer than it.
         const std::string range = header(head, "Content-Range");
         unsigned long long rs = 0, re = 0;
         char rt[32] = "";
         if (status == 416 && start > 0 && sscanf(range.c_str(), "bytes */%31s", rt) == 1 &&
-            strtoull(rt, nullptr, 10) == start) {
-            total = start;
-            break;
+            isdigit((unsigned char)rt[0])) {
+            if (strtoull(rt, nullptr, 10) == start) {
+                total = start;
+                break;
+            }
+            err = "the part is " + std::to_string(start) + " bytes, longer than the file's " + rt;
+            return damaged();
         }
         if (status == 206) {
             if (sscanf(range.c_str(), "bytes %llu-%llu/%31s", &rs, &re, rt) < 2) {
@@ -815,19 +876,35 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
                 start = done = 0;
                 progress.done = 0;
             }
+            // What this version of the file is called, for a resume's
+            // If-Range: its ETag, unless weak (W/..., which may not go
+            // there); without one, its Last-Modified.
+            validator = header(head, "ETag");
+            if (validator.empty()) validator = header(head, "Last-Modified");
+            else if (validator.compare(0, 2, "W/") == 0) validator.clear();
+            if (!write_from(from_path, source, validator))
+                trace("cannot note where the part is from (%s)", strerror(errno));
         } else {
             err = "the server at " + u.host + " answered " + std::to_string(status);
             return false;
         }
+        // Chunked wins over a Content-Length sent along with it (RFC 9112,
+        // 6.3): counted, the chunk lines would pass for bytes of the file.
         const std::string length = header(head, "Content-Length");
         std::string te = header(head, "Transfer-Encoding");
         for (auto &ch : te) ch = (char)tolower((unsigned char)ch);
-        const Body::Kind kind = !length.empty()                       ? Body::Counted
-                                : te.find("chunked") != std::string::npos ? Body::Chunked
+        const Body::Kind kind = te.find("chunked") != std::string::npos   ? Body::Chunked
+                                : !length.empty()                         ? Body::Counted
                                                                           : Body::ToClose;
-        const uint64_t length_n = strtoull(length.c_str(), nullptr, 10);
+        const uint64_t length_n = kind == Body::Counted ? strtoull(length.c_str(), nullptr, 10) : 0;
         if (kind == Body::Counted && total == 0) total = start + length_n;
         progress.total = total;
+        // A body only the server's close ends can't be told from one cut
+        // short, so without a size it is taken only with a hash to check.
+        if (kind == Body::ToClose && total == 0 && want.empty()) {
+            err = "the server didn't say how big the file is, and there's no hash to check it by";
+            return false;
+        }
         trace("reading the body (%s)", kind == Body::Counted   ? (std::to_string(length_n) + " bytes").c_str()
                                        : kind == Body::Chunked ? "chunked"
                                                                : "until the server closes");
@@ -872,15 +949,16 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
     if (fflush(f) != 0) return write_failed();
     if (total > 0 && done != total) {
         err = "the server sent " + std::to_string(done) + " of " + std::to_string(total) + " bytes";
-        return false;
+        return done < total ? false : damaged();  // short: the next call asks for the rest
     }
     if (!want.empty()) {
         const std::string got = hash.finish();
         if (got != want) {
             err = "the file's SHA-256 is " + got + ", not " + want;
-            return false;
+            return damaged();
         }
     }
+    unlink(from_path.c_str());  // the file is whole: nothing to go on from
     trace("done (%llu bytes)", (unsigned long long)done);
     return true;
 }
