@@ -14,7 +14,6 @@
 //   the mic                     none, unless the host test puts a 16 kHz mono
 //                               WAV at TS5_HOME/mic.wav: then the mic plays
 //                               it, in real time, then silence
-//   the keyboard                never opens
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
@@ -109,12 +108,6 @@ int sceAudioInClose(int) {
     mic = nullptr;
     return 0;
 }
-
-int sceKeyboardInit(void) { return 0; }
-int sceKeyboardOpen(int, int, int, const void *) { return (int)0x80960002; }  // no keyboard
-int sceKeyboardReadState(int, void *) { return -1; }
-int sceKeyboardRead(int, void *, int) { return -1; }
-int sceKeyboardClose(int) { return -1; }
 
 int sceUserServiceInitialize(const void *) { return 0; }
 int sceUserServiceGetInitialUser(int *user) {

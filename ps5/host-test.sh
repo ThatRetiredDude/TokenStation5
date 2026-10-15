@@ -3,7 +3,7 @@
 # functions stood in for by ps5/host_shim.cpp and folders for its own folder
 # (/app0) and /data, and walks it through what the controller and the PC do
 # to it: serve a model from the dashboard, a GPU check and a speed test,
-# screenshots, the audio, keyboard, whisper and speak tests, the chat page,
+# screenshots, the audio, whisper and speak tests, the chat page,
 # restart, a one-off check, another port, quit and close. The screenshots
 # stay in build/ps5-host/shots.
 #
@@ -81,7 +81,7 @@ c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" -I "$w/include" -I "$w/ggml/include" \
     -I "$k/include" \
     "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks,tools,net,websearch}.cpp \
-    "$root"/ps5/{title,library,runner,audio_probe,keyboard_probe,chat,stt,voice,settings,speak,host_shim}.cpp \
+    "$root"/ps5/{title,library,runner,audio_probe,chat,stt,voice,settings,speak,host_shim}.cpp \
     "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -Wa,-I"$root/ps5/tts" "$root/ps5/tts/lexicon_data.S" \
     -x none "$wobj/libts5speech.a" -ldl -o "$work/eboot.bin"
@@ -196,12 +196,6 @@ wait_log "^ts5-title: audio test: done$"
 grep -q "audio test: open TV 0x80260005" "$home/ts5.log" || fail "the audio test didn't try the TV"
 grep -q "audio test: mic open, type 0: 0x80260109" "$home/ts5.log" || fail "the audio test didn't try the mic"
 notified "the controller's mic didn't open"
-wait_health
-
-echo "== keytest: no keyboard on the PC, so the test says so and the title carries on"
-: > "$home/keytest"
-wait_log "^ts5-title: key test: done$"
-grep -q "key test: open, user 0x00000001: 0x80960002" "$home/ts5.log" || fail "the keyboard test didn't try to open it"
 wait_health
 
 # Waits up to $3 seconds for the log to have $2 lines matching a regex.
