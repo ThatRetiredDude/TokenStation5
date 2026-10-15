@@ -468,27 +468,13 @@ private:
         if (!f) { err = "cannot open " + path; return false; }
         Buf staging;
         const VkDeviceSize SCHUNK = 64ull << 20;
-        // Unified GPU memory is write-combined: a read() that lands straight
-        // in it makes the kernel copy out word by word (92 MB/s measured on
-        // the PS5), where a read into cached memory and one big memcpy
-        // streams. TS5_LOAD=direct reads into the mapping as before.
-        const char *lm = getenv("TS5_LOAD");
-        const bool bounce = !(lm && strcmp(lm, "direct") == 0);
-        std::vector<char> bb;
         for (auto &t : m_.gguf.tensors) {
             if (t.nbytes == 0) continue;
             if (!qname(t.type)) { fclose(f); err = t.name + ": type " + type_name(t.type) + " not supported on Vulkan yet"; return false; }
             Buf b;
             if (!create_buf(t.nbytes, false, b, err)) { fclose(f); return false; }
             fseeko(f, (off_t)(m_.gguf.data_offset + t.offset), SEEK_SET);
-            if (b.map && bounce) {
-                if (bb.empty()) bb.resize(SCHUNK);
-                for (uint64_t off = 0; off < t.nbytes; off += SCHUNK) {
-                    const uint64_t len = std::min<uint64_t>(SCHUNK, t.nbytes - off);
-                    if (fread(bb.data(), 1, len, f) != len) { fclose(f); err = "short read"; return false; }
-                    memcpy((char *)b.map + off, bb.data(), len);
-                }
-            } else if (b.map) {
+            if (b.map) {
                 if (fread(b.map, 1, t.nbytes, f) != t.nbytes) { fclose(f); err = "short read"; return false; }
             } else {
                 if (!staging.buf && !create_buf(SCHUNK, true, staging, err)) { fclose(f); return false; }
