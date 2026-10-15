@@ -33,8 +33,9 @@ public:
     }
     virtual int n_ctx() const = 0;
     virtual KvType kv_type() const { return KvType::F32; }
-    // With TS5_PROFILE=1: GPU time per kernel since the last call, a few
-    // lines of text; else empty.
+    // Since the last call, a few lines of text: with TS5_PROFILE set (vk),
+    // the CPU's time per forward call, and with TS5_PROFILE=1 also the GPU's
+    // time per kernel; else empty.
     virtual std::string take_profile() { return {}; }
 };
 
