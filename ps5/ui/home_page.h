@@ -31,6 +31,7 @@ struct HomeInfo {
     std::string url;      // the address apps use
     bool on_network = false;
     double now = 0;
+    std::string download;  // "Downloading Qwen3 8B · 38%" while one runs
 };
 
 class HomePage {

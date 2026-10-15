@@ -12,7 +12,6 @@
 #include <thread>
 
 #include <sys/stat.h>
-#include <sys/statvfs.h>
 #include <sys/types.h>
 
 #include "backend.h"
@@ -22,6 +21,7 @@
 #include "net.h"
 #include "tokenizer.h"
 
+#include "downloads.h"
 #include "plain.h"
 #include "settings.h"
 
@@ -435,21 +435,6 @@ void Runner::run(const Job &job) {
     }
     log_memory(check ? "after the GPU check" : "after the speed test");
 }
-
-namespace {
-
-// Bytes free on the volume dir is on, for the log and the room check before
-// a download. The one call to statvfs, here by itself, so it goes easily if
-// the console turns out not to have it (check-imports.py would refuse the
-// import; or the call could fail at run time, which the log then says).
-bool free_space(const std::string &dir, uint64_t &bytes) {
-    struct statvfs vs;
-    if (statvfs(dir.c_str(), &vs) != 0) return false;
-    bytes = (uint64_t)vs.f_bavail * (vs.f_frsize ? vs.f_frsize : vs.f_bsize);
-    return true;
-}
-
-}  // namespace
 
 // A download to the job's path, as .<file>.part beside it until its size
 // and SHA-256 (when given) agree, then renamed: the Library never sees a

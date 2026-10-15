@@ -77,6 +77,7 @@
 #include "chat.h"
 #include "dashboard.h"
 #include "display.h"
+#include "downloads.h"
 #include "library.h"
 #include "pad.h"
 #include "plain.h"
@@ -554,6 +555,9 @@ int main(int, char **) {
         }
     }
     app::Runner runner(ctx, server, lib, lib_mutex, notify, network_url);
+    // Models (and, from Settings, the speech model and voice) downloaded on
+    // the console, beside whatever the Runner does.
+    app::Downloads downloads(kModels, TS5_VERSION, notify);
     app::Chat chat(opts.host, opts.port);
     int user = -1;
     sceUserServiceGetInitialUser(&user);
@@ -577,7 +581,7 @@ int main(int, char **) {
         have_startup = !startup.path.empty();
     }
     if (have_startup) runner.push(startup);
-    else notify("TokenStation5: no models yet. Open it to see which to add.");
+    else notify("TokenStation5: no models yet. Open it and download one on the Models page.");
 
     ui::Dashboard dash(fonts, ts5_logo_data, (size_t)(ts5_logo_data_end - ts5_logo_data));
     dash.set_log_files(kLog, kPrevLog);
@@ -744,6 +748,32 @@ int main(int, char **) {
             last_ip = t;
         }
 
+        // Downloads that arrived: the Library lists them now, not at its next
+        // scan, so their rows turn into models at once.
+        for (const std::string &key : downloads.finished()) {
+            const app::CatalogEntry *e = app::Downloads::find(key);
+            if (!e) continue;
+            const std::string path = std::string(kModels) + "/" + e->file;
+            {
+                std::lock_guard<std::mutex> lk(lib_mutex);
+                lib.scan();
+            }
+            lib_changed = true;
+            runner.note(std::string("Downloaded ") + e->name);
+            // With nothing running, the new model starts.
+            const app::Status st = runner.status();
+            if (e->kind == app::CatalogEntry::Model && st.serving.empty() && st.phase == app::Status::Idle &&
+                st.queued == 0) {
+                app::Job j;
+                j.kind = app::Job::Serve;
+                j.path = path;
+                j.n_ctx = opts.n_ctx;
+                runner.push(j);
+                save_args(path, opts);
+                printf("ts5-title: download: starting %s, nothing else was running\n", e->file);
+            }
+            if (e->kind != app::CatalogEntry::Model) voice.rescan();
+        }
         ui::View v;
         v.version = TS5_VERSION;
         v.url = api_url();
@@ -767,9 +797,16 @@ int main(int, char **) {
             std::lock_guard<std::mutex> lk(names_mutex);
             for (const auto &m : v.models) model_names[m.file] = m.name;
         }
-        const uint64_t version = runner.version();
+        // Both only grow, so their sum changes whenever either does.
+        const uint64_t version = runner.version() + downloads.version();
         v.status = runner.status();
         v.events = runner.events();
+        // A download waits while a model loads, which wants the console's
+        // CPU and storage to itself.
+        downloads.hold(v.status.phase == app::Status::Loading);
+        v.downloads = downloads.state();
+        v.have_free = downloads.free_space(v.free_bytes);
+        v.models_dir = kModels;
         v.api = server.activity();
         const int64_t now_ms = (int64_t)time(nullptr) * 1000;
         if (t - last_live >= 1) {
@@ -881,6 +918,36 @@ int main(int, char **) {
                 }
                 typing_pending = true;
                 break;
+            case ui::Action::Download: downloads.start(a.key); break;
+            case ui::Action::StopDownload: downloads.stop(a.key); break;
+            case ui::Action::RemovePart: downloads.remove_part(a.key); break;
+            case ui::Action::Remove: {
+                // A model in the title's own folder that isn't in use (the
+                // dashboard asked first). Its results and usage stay.
+                const app::Status st = runner.status();
+                const std::string prefix = std::string(kModels) + "/";
+                std::string note;
+                bool bad = false;
+                {
+                    std::lock_guard<std::mutex> lk(lib_mutex);
+                    const app::ModelInfo *m = lib.find(a.path);
+                    if (!m || a.path == st.serving_path || a.path.compare(0, prefix.size(), prefix) != 0) {
+                        printf("ts5-title: remove: %s isn't one to remove\n", a.path.c_str());
+                    } else if (unlink(a.path.c_str()) != 0) {
+                        printf("ts5-title: remove failed: %s: %s\n", a.path.c_str(), strerror(errno));
+                        note = "Couldn't remove " + m->name + "." + plain::kDetails;
+                        bad = true;
+                    } else {
+                        printf("ts5-title: removed %s (%llu bytes)\n", a.path.c_str(), (unsigned long long)m->size);
+                        note = "Removed " + m->name;
+                    }
+                    lib.scan();
+                }
+                if (!note.empty()) runner.note(note, bad);
+                lib_changed = true;
+                downloads.refresh();
+                break;
+            }
             case ui::Action::Close:
                 notify("TokenStation5: closing");
                 leave("exit");
