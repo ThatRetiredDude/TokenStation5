@@ -142,6 +142,12 @@ TS5_ATTN_DEC=1 TS5_ATTN_DEC_PLAIN=0 python3 "$here/compare.py" --ts5 "$ts5" --re
     --step "${shapes[@]}"
 TS5_ATTN_DEC=1 TS5_ATTN_PF=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
     "${shapes[@]}"
+# attn_dec scoring each key with 8, 16 or 32 lanes side by side, in
+# lavapipe's subgroups made 64 wide as RADV's (heads of 128 only).
+for k in 8 16 32; do
+    LP_NATIVE_VECTOR_WIDTH=2048 TS5_ATTN_DEC=1 TS5_ATTN_DEC_KEYS=$k python3 "$here/compare.py" --ts5 "$ts5" --ref cpu \
+        --tol 0.002 --backend vk --ntok 160 --step "${shapes[1]}" "${shapes[4]}"
+done
 echo "== 8-bit KV cache (TS5_KV=q8), against the CPU's fp32 cache: about 0.3% of the largest logit"
 TS5_KV=q8 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 300 "${shapes[@]}"
 TS5_KV=q8 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 60 --step "${shapes[@]}"
