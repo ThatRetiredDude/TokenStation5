@@ -70,7 +70,9 @@ private:
     void run(const Job &job);
     bool serve(const std::string &path, int n_ctx);
     void unload();
-    std::unique_ptr<Loaded> load(const std::string &path, int n_ctx, std::string &err);
+    // drafter: also load TS5_DRAFT_MODEL (serve jobs; check and bench never
+    // call generate, so they skip it).
+    std::unique_ptr<Loaded> load(const std::string &path, int n_ctx, std::string &err, bool drafter = false);
     void set_step(const std::string &step);
     void event(const std::string &text, bool bad = false);
 

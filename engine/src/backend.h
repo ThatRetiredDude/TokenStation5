@@ -22,6 +22,15 @@ public:
     // every token when all_logits, into `logits` (n_vocab floats each).
     virtual bool forward(const int32_t *tokens, int n, int pos0, float *logits, bool all_logits,
                          std::string &err) = 0;
+    // Where the last forward_in_place's logits can be read (unified memory),
+    // or null when the backend has no readable buffer.
+    virtual const float *logits_view() const { return nullptr; }
+    // forward, with the logits left at logits_view() instead of copied out.
+    // Only meaningful when logits_view() is non-null. forward with a null
+    // `logits` instead skips computing them (a prompt chunk before the last).
+    virtual bool forward_in_place(const int32_t *tokens, int n, int pos0, bool all_logits, std::string &err) {
+        return forward(tokens, n, pos0, nullptr, all_logits, err);
+    }
     virtual int n_ctx() const = 0;
     virtual KvType kv_type() const { return KvType::F32; }
     // With TS5_PROFILE=1: GPU time per kernel since the last call, a few
@@ -57,7 +66,10 @@ bool f16_reaches(int f16_ctx, int train);
 // cache where that reaches it (f16_reaches).
 Backend *make_vk_backend(Model &m, const std::string &path, int n_ctx, int device, std::string &err);
 // On a device the process shares (vk_context.h); ctx must outlive it.
-Backend *make_vk_backend(VkContext *ctx, Model &m, const std::string &path, int n_ctx, std::string &err);
+// fit_reserve: bytes an auto-fit context (n_ctx 0) keeps free beyond its
+// usual 1 GiB, the budget of a second backend loaded after this one.
+Backend *make_vk_backend(VkContext *ctx, Model &m, const std::string &path, int n_ctx, std::string &err,
+                         uint64_t fit_reserve = 0);
 // Whether the Vulkan backend has shaders for weights of this GGML type.
 bool vk_supports_type(uint32_t type);
 
