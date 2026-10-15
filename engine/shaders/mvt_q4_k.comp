@@ -1,0 +1,104 @@
+#version 450
+// Y[t][r] (+)= sum_c W[r][c] * X[t][c] for NT tokens (a specialization
+// constant, 2..8) of a Q4_K matrix: the verify batch of speculative
+// decoding. Laid out as mv16_q4_k: 8 threads share a 144-byte block from
+// 16-byte loads, and the workgroup's 64 threads take 8 blocks at a time of
+// NR rows (a specialization constant, at most 4). Each row's words are
+// loaded once per block and dotted, raw, with every token's x, so the
+// weight stream, which decode is bound by, is paid once for the whole
+// batch; each token's 32 x values and their sums are loaded once per NR
+// rows, where one row per workgroup re-read them per row from the L2 — at
+// 7 tokens and 19k rows several GB a layer, the measured cost of a verify
+// pass. Both loops are compile-time, so every token's loads are in flight
+// at once.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+
+#define WG 64
+#define NTMAX 8
+#define NRMAX 4
+layout(local_size_x = WG) in;
+layout(constant_id = 0) const uint NT = 2;  // tokens, at most NTMAX
+layout(constant_id = 1) const uint NR = 1;  // rows per workgroup, at most NRMAX
+
+layout(std430, binding = 0) readonly buffer W128 { uvec4 w128[]; };
+layout(std430, binding = 1) readonly buffer Xbuf { vec4 X4[]; };
+layout(std430, binding = 2) buffer Ybuf { float Y[]; };
+
+layout(push_constant) uniform PC {
+    uint ncols, nrows, ntok, row_bytes;
+    uint x_stride, y_stride, accumulate, x_off;
+} pc;
+
+shared float partial[NRMAX * NTMAX * WG];  // [row][token][subgroup]
+
+// As mv16_q4_k: sub-blocks 2p and 2p + 1's 6-bit scales (bytes 0 and 1) and
+// mins (bytes 2 and 3), from the block's header h.
+uint scales_mins(uvec4 h, uint p) {
+    const uint sh = 16u * (p & 1u);
+    const uint a = (h.y >> sh) & 0xFFFFu, b = (h.z >> sh) & 0xFFFFu, c = (h.w >> sh) & 0xFFFFu;
+    if (p < 2) return (a & 0x3F3Fu) | ((b & 0x3F3Fu) << 16);
+    return ((c & 0x0F0Fu) | ((a >> 2) & 0x3030u)) | ((((c >> 4) & 0x0F0Fu) | ((b >> 2) & 0x3030u)) << 16);
+}
+vec4 bytes4(uint w) { return vec4(float(w & 255u), float((w >> 8) & 255u), float((w >> 16) & 255u), float(w >> 24)); }
+
+// A block's header h and nibble word q (thread th of 8), with one token's x:
+// a holds the low nibbles' 16 values, e the high ones', ta and te their sums.
+float block_dot(uvec4 h, uvec4 q, vec4 a[4], vec4 e[4], float ta, float te, uint th) {
+    float s0 = 0.0, s1 = 0.0;
+    for (uint c = 0; c < 4; c++) {
+        s0 += dot(bytes4(q[c] & 0x0F0F0F0Fu), a[c]);
+        s1 += dot(bytes4((q[c] >> 4) & 0x0F0F0F0Fu), e[c]);
+    }
+    const vec4 sm = bytes4(scales_mins(h, th >> 1));  // scale 2p, 2p + 1, min 2p, 2p + 1
+    const vec2 dm = unpackHalf2x16(h.x);
+    return dm.x * (sm.x * s0 + sm.y * s1) - dm.y * (sm.z * ta + sm.w * te);
+}
+
+void main() {
+    const uint r0 = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * NR;
+    if (r0 >= pc.nrows) return;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint nb = pc.ncols / 256, row_words = pc.row_bytes / 16;
+    const uint th = tid % 8;
+    float acc[NRMAX * NTMAX];
+    for (uint i = 0; i < NRMAX * NTMAX; i++) acc[i] = 0.0;
+    for (uint b = tid / 8; b < nb; b += WG / 8) {
+        // The NR rows' header and nibble words, all in flight at once. Rows
+        // past the matrix read its last row; their sums aren't written.
+        uvec4 h[NRMAX], q[NRMAX];
+        [[unroll]] for (uint i = 0; i < NR; i++) {
+            const uint o = min(r0 + i, pc.nrows - 1) * row_words + b * 9;
+            h[i] = w128[o];
+            q[i] = w128[o + 1 + th];
+        }
+        const uint x0 = (b * 256) / 4 + 16 * (th >> 1) + 4 * (th & 1u);
+        [[unroll]] for (uint t = 0; t < NT; t++) {
+            const uint xt = (pc.x_off + t * pc.x_stride) / 4 + x0;
+            vec4 a[4], e[4];
+            float ta = 0.0, te = 0.0;
+            [[unroll]] for (uint c = 0; c < 4; c++) {
+                a[c] = X4[xt + c];
+                e[c] = X4[xt + 8 + c];
+                ta += a[c].x + a[c].y + a[c].z + a[c].w;
+                te += e[c].x + e[c].y + e[c].z + e[c].w;
+            }
+            [[unroll]] for (uint i = 0; i < NR; i++)
+                acc[i * NTMAX + t] += block_dot(h[i], q[i], a, e, ta, te, th);
+        }
+    }
+    [[unroll]] for (uint t = 0; t < NT; t++)
+        [[unroll]] for (uint i = 0; i < NR; i++) {
+            const float s = subgroupAdd(acc[i * NTMAX + t]);
+            if (gl_SubgroupInvocationID == 0) partial[(i * NTMAX + t) * WG + gl_SubgroupID] = s;
+        }
+    barrier();
+    const uint nr = min(NR, pc.nrows - r0);
+    if (tid < nr * NT) {
+        const uint i = tid / NT, t = tid % NT;
+        float s = 0.0;
+        for (uint sg = 0; sg < gl_NumSubgroups; sg++) s += partial[(i * NTMAX + t) * WG + sg];
+        const uint yi = t * pc.y_stride + r0 + i;
+        Y[yi] = pc.accumulate != 0 ? Y[yi] + s : s;
+    }
+}

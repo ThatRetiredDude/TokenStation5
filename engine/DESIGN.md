@@ -170,6 +170,69 @@ is as fast.
 then prints the GPU's time per kernel (matmuls by weight) for the prompt and
 for generation.
 
+## Speculative decoding (prompt lookup)
+
+Single-stream decode streams every weight byte per token, so it is capped by
+memory bandwidth (~96 tok/s for a 7B Q4_K_M at 448 GB/s). Verifying several
+tokens in one forward pass rides one weight stream, which is the only way past
+that wall. `Engine::generate` drafts up to `TS5_DRAFT` tokens per step (default
+7, so the batch of 8 fits one pass of the 8-token matmul kernels; 0 disables)
+by prompt lookup: the most recent earlier occurrence of the text's final
+3-gram (then 2-gram) proposes what followed it last time. The drafted tokens
+ride the next token's forward pass as one batch, and a draft is kept only when
+sampling the model's own logits at its position yields exactly that token, so
+the output is token-for-token what one-at-a-time sampling would produce (for a
+delta-distribution draft, "sample the target and compare" is the speculative
+acceptance rule). Rejected positions leave stale K/V entries past the accepted
+point; they are overwritten before any later token attends to them, since
+positions are absolute and monotonic. Acceptance is workload-dependent: code
+editing and retrieval-heavy chats repeat long spans of their own context and
+accept most drafts; free-form prose accepts few, and costs only the extra
+ALU of the wasted batch columns (the weight stream is shared either way).
+`timings` reports `draft_n`/`draft_n_accepted`.
+
+The lookup reads a gram index instead of scanning the context backward per
+step: a hash map from each 3- and 2-gram (packed 21 bits per token) to the
+position after its most recent occurrence, rebuilt per request from the cached
+prompt and extended as tokens are accepted, so a step with no match costs two
+probes rather than a walk over up to 32k tokens. The draft length adapts to a
+rolling acceptance estimate (full `TS5_DRAFT` above 0.5 accepted per proposed
+column, 3 below it, none under 0.15, with a 3-token probe every 16 steps so an
+echo span can turn drafting back on); `TS5_ADAPT=0` pins the length to
+`TS5_DRAFT` for an A/B. Adaptation changes which drafts are proposed, never
+how they are accepted, so the output-equivalence guarantee is untouched.
+
+The verify batch has its own kernels (`mvt_q4_k`, `mvt_q6_k`; `TS5_MVT=0`
+reverts to the generic ones): the mv16 layout, with the batch size a
+specialization constant (one pipeline per size, 2 to 8, so the token loop
+unrolls and every token's loads are in flight at once) and `TS5_MVT_ROWS`
+rows per workgroup (default 4, matrices under `TS5_MV_ROWS_MIN` rows take
+one). Each row's words are loaded once per block and dotted with every
+token's x, so the weight stream, which decode is bound by, is paid once for
+the whole batch; each token's x values are loaded once per NR rows. The
+batch's x sits in the 4 MB L2, but at one row per workgroup a 19k-row
+matrix re-read it from L2 per (row, token) — several GB a layer at 7
+tokens, measured on the console as a verify pass costing 5.7x a single
+step — which the row tiling divides by NR. The feed-forward's gate and up,
+the two biggest lines of a verify pass, can run as one kernel
+(`TS5_MVT_GLU=1` picks `mvt_glu_q4_k`): both matrices' blocks are dotted
+with the same x loads and swiglu is applied in place, as `mv16_glu_q4_k`
+does for one token. Holding two matrices' words doubles the register
+load, so its rows per workgroup are capped at 2 (at 4 the PS5 spills
+1376 VGPRs into scratch, measured as a 7x slower verify), and it stays
+off by default until a console A/B shows the capped version winning.
+
+When `TS5_DRAFT_MODEL` names a smaller GGUF with the same vocabulary (for
+Qwen 2.5 Coder 7B, a Qwen 2.5 0.5B), steps where the lookup finds nothing
+draft that model's greedy continuation instead: its own cache is caught up to
+the confirmed history in one batch, then it extends one token at a time, and
+the big model verifies the batch as usual. The acceptance walk keeps the
+output distribution for any draft source, so a drafter changes speed, never
+output. Unlike the free lookup it costs real forwards (a 0.5B is roughly a
+tenth of a 7B token), so the lookup still serves echo spans first and the
+adaptive draft length throttles both. A drafter that fails logs once and
+turns itself off; generation continues on lookup alone.
+
 ## Memory
 
 Every buffer is sub-allocated from 1 GiB blocks. Host-visible device-local

@@ -25,7 +25,7 @@ for src in "$root"/engine/shaders/*.comp; do
 done
 c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" \
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" \
-    "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
+    "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks,tools,net,websearch}.cpp \
     "$root"/ps5/{title,library,runner,audio_probe,host_shim}.cpp "$root"/ps5/ui/{canvas,display,pad,dashboard}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -x none -ldl -o "$work/eboot.bin"
 
@@ -83,6 +83,10 @@ press() { echo "$*" > "$home/press"; sleep 0.5; }
 
 name=$(basename "$model")
 
+# Serves also load a draft model (the model as its own drafter), proving the
+# title keeps the file's token list until the vocabulary check has read it.
+export TS5_DRAFT_MODEL="$home/models/$name"
+
 echo "== no model: the dashboard, a notification, and the API says so"
 launch
 wait_log "no model"
@@ -101,6 +105,7 @@ wait_health
 notified "$name ready at http://"
 grep -q "serve -m \"$home/models/$name\" -c auto " "$home/ts5.args" || fail "serving did not write ts5.args"
 wait_log "context [0-9]+ \(what fits\), f16 KV cache$"
+wait_log "draft model $name ready"
 reply=$(curl -sf "http://127.0.0.1:$port/v1/chat/completions" -H 'Content-Type: application/json' \
     -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}')
 grep -q '"completion_tokens":4' <<< "$reply" || fail "chat completion: $reply"
@@ -152,12 +157,14 @@ wait_health
 grep -q "TokenStation5" "$home/ts5.prev.log" || fail "no previous log"
 
 echo "== ts5.once: a one-off check at the next start, then the args file's model"
-echo "== ts5.env: engine settings (here every matmul tiled, even one token's, and an 8-bit KV cache)"
+echo "== ts5.env: engine settings (here every matmul tiled, even one token's, an 8-bit KV cache and a Tavily key)"
 echo "check -m $name -n 6" > "$home/ts5.once"
-echo "TS5_TILED_MIN=1 TS5_FAST_MATVEC=0 TS5_KV=q8" > "$home/ts5.env"
+echo "TS5_TILED_MIN=1 TS5_FAST_MATVEC=0 TS5_KV=q8 TAVILY_API_KEY=tvly-host-test-secret" > "$home/ts5.env"
 : > "$home/restart"
 wait_down
 wait_log "^ts5-title: TS5_TILED_MIN=1$"
+wait_log "^ts5-title: TAVILY_API_KEY=\\(set\\)$"
+! grep -q "tvly-host-test-secret" "$home/ts5.log" || fail "the Tavily key is in the log"
 wait_log "KV cache .*\(q8, "
 wait_log "^ts5 check: .*, 6 tokens: .*, cpu [0-9]+ ms: PASS$"
 wait_health
