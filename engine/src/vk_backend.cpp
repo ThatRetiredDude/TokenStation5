@@ -79,6 +79,8 @@
 #include "mmb_reduce.spv.h"
 #include "mmb16_q4_k.spv.h"
 #include "mmb16_q6_k.spv.h"
+#include "mmb16s_q4_k.spv.h"
+#include "mmb16s_q6_k.spv.h"
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
@@ -328,8 +330,8 @@ private:
         if (const char *e = getenv("TS5_MMB_SPLIT")) mmb_split_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SLICES")) mmb_slices_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SMALL")) mmb_small_ = atoi(e) != 0;
-        mmb_f16_ = ctx_->float16;
-        if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
+        mmb_f16_ = ctx_->float16 ? 1 : 0;
+        if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 ? std::min(2, std::max(0, atoi(e))) : 0;
         kv_ = kv_type_setting();
         if (kv_ == KvType::Q8 && !(attn_ok() && hp_.head_dim % 32 == 0)) {
             fprintf(stderr, "ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16\n");
@@ -479,7 +481,7 @@ private:
         P(matmul_q4_k, 3) P(matmul_q5_k, 3) P(matmul_q6_k, 3)
         P(mm_f32, 3) P(mm_f16, 3) P(mm_q4_0, 3) P(mm_q8_0, 3) P(mm_q4_1, 3) P(mm_q5_0, 3) P(mm_q5_1, 3)
         P(mm_q4_k, 3) P(mm_q5_k, 3) P(mm_q6_k, 3) P(mmb_q4_k, 4) P(mmb_q6_k, 4) P(mmb_reduce, 2)
-        P(mmb16_q4_k, 4) P(mmb16_q6_k, 4)
+        P(mmb16_q4_k, 4) P(mmb16_q6_k, 4) P(mmb16s_q4_k, 4) P(mmb16s_q6_k, 4)
         // The one-token mat-vecs twice: mv_rows_ rows per workgroup, and one
         // (".1") for matrices with few rows.
 #define MV(n, nb)                                                                       \
@@ -870,7 +872,8 @@ private:
             reduces_.push_back({{rows, ntok, pc.y_stride, pc.accumulate, S, p_off}, &y, what});
             split_used_ = p_off + S * slice;
         }
-        dispatch(std::string(mmb_f16_ ? "mmb16_" : "mmb_") + qname(w.type()), {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128,
+        dispatch(std::string(mmb_f16_ == 2 ? "mmb16s_" : mmb_f16_ ? "mmb16_" : "mmb_") + qname(w.type()),
+                 {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128,
                  (ntok + 127) / 128, what, S);
     }
     struct Reduce {
@@ -1219,8 +1222,10 @@ private:
     // makes that many workgroups (TS5_MMB_SMALL=0: the 64 x 64 kernel).
     bool mmb_small_ = true;
     // mmb sums each step's 32 products in packed f16 (mmb16_*), where the
-    // device has f16 arithmetic (TS5_MMB_F16=0: f32 throughout).
-    bool mmb_f16_ = false;
+    // device has f16 arithmetic (TS5_MMB_F16=0: f32 throughout; 2: the f16
+    // sums go into the f32 ones every 8 products, mmb16s_*, for models whose
+    // activations are large).
+    int mmb_f16_ = 0;
     size_t split_used_ = 0;  // floats of split_ that kernels may still read
     // The KV cache's type (TS5_KV=q8 or f16).
     KvType kv_ = KvType::F16;
