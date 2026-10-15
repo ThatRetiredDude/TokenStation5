@@ -175,6 +175,7 @@ On the console, everything lives in the title's own folder,
 | `speaktest` | run the speak test on the file's text (none: a sentence of its own): phonemes from the title's G2P, then Kokoro with `TS5_TTS_MODEL` (else the first `kokoro-*.gguf` that isn't a voice) and the voice `TS5_TTS_VOICE` (else `af_heart`, else the first) on `TS5_TTS_THREADS` CPU threads (6 by default); the speech goes to `speaktest.wav` (24 kHz) and the TV. `TS5_TTS_SWEEP=1` runs it again at 4, 6, 8 and 12 |
 | `quit`, `restart` | close or restart the title |
 | `ts5.log`, `ts5.prev.log`, `results.tsv` | its log, the run before's, and the check and speed results |
+| `usage.tsv`, `usage.prev.tsv` | a line per API request (chat and completions, the TV's own chat too): when, the model, the app's address, tokens and times, and why it wasn't answered if it wasn't; never the prompt, the reply or a key. Tab-separated, its columns named on its second line (`engine/src/usage.h`). Written every 2 s and as the title closes; past 2 MiB it becomes `usage.prev.tsv` |
 | `LICENSE`, `NOTICE.md`, `SOURCE.txt` | from the build: the title's license (GPL-3.0), the third-party notices, and the commits of its source |
 
 The title takes each command file as soon as it sees it. A title can't count
