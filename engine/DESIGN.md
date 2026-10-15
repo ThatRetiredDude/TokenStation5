@@ -76,7 +76,8 @@ Kernels read them through 8-bit storage access and dequantize 32-value "units"
 
 Each matmul picks one of four kernels by how many tokens it multiplies:
 
-- 9 or more of Q4_K or Q6_K, where that makes at least 48 blocks (`mmb_*`,
+- 9 or more of Q4_K or Q6_K, where that makes at least 48 blocks, or
+  splitting the columns does for 128 or more tokens (`mmb_*`,
   `shaders/matmul_big.glsl`): 128 rows x 128 tokens per workgroup, 8 x 8
   outputs per thread, so each value read from shared memory is used 8 times.
   Each thread dequantizes 16 values of one row and loads 16 of one token from
@@ -87,7 +88,11 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   under 256 blocks the columns are split in slices of one super-block or
   more, for about 256 workgroups, each writing its partial sums for
   `mmb_reduce` to add up (`TS5_MMB_SPLIT` sets the 256, 0 for never;
-  `TS5_MMB_SLICES=N` splits every matrix in N). Where the device has f16
+  `TS5_MMB_SLICES=N` splits every matrix in N). attn_k and attn_v (8 blocks
+  for 256 tokens of Qwen 3 8B, 4 of Qwen 2.5 7B) take mmb this way too, in
+  up to 16 slices (`TS5_MMB_SMALL=0`: the 64 x 64 kernel); k, v and q's
+  partial sums fit in `split_` together (12M floats), so their splits add
+  no barriers. Where the device has f16
   arithmetic (`mmb16_*`, the same shader with `MMB_F16`), shared memory holds
   f16 and each step's 32 products are summed in packed f16, two per
   `v_pk_fma_f16`, before they're added to f32 sums (`v_fma_mix_f32`): half
