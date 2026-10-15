@@ -305,7 +305,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             send_all(fd, response(400, error_body("empty prompt")));
             u.rec.status = 400;
             u.rec.finish = "refused";
-            u.rec.why = "bad_json";
+            u.rec.why = "empty_prompt";
             done();
             return;
         }
