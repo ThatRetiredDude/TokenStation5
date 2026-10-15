@@ -389,9 +389,8 @@ void handle(int fd, Server::State &state) {
                     log = "web_search: skipped after a failed search";
                 } else {
                     bool failed = false;
-                    std::string why;  // in plain words, for the note the model reads
-                    results.push_back(web_search(c.arguments, log, &failed, &why));
-                    if (failed) search_failed = why;
+                    results.push_back(web_search(c.arguments, log, &failed));
+                    if (failed) search_failed = search_failure(results.back());  // in plain words
                     else found.push_back(results.back());
                 }
                 fprintf(stderr, "ts5: %s %s\n", id.c_str(), log.c_str());

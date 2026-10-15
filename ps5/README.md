@@ -191,13 +191,13 @@ reference and says PASS or FAIL.
 | File | |
 | --- | --- |
 | `title.cpp` | the title's `main`: command files, logging, notifications, the dashboard loop, never `exit()` |
-| `plain.h` | plain words for the screens: what an error means and what to do, and names for models, speech models and voices |
 | `runner.cpp`, `library.cpp` | its jobs (serve, check, speed test) on the shared GPU device; its models and results |
 | `chat.cpp` | the chat's conversation, sent to the title's own API with replies streamed back |
 | `voice.cpp` | R1 talk: the controller's mic while R1 is held, then speech to text (`stt.cpp`) and the message |
 | `stt.cpp` | speech to text on the CPU with whisper.cpp (`third_party/whisper.cpp`, built into `libts5speech.a`), and the whisper test |
 | `tts/` | text to speech: the G2P (`g2p.cpp`, `text.cpp`, `numbers.cpp`, `spelling.cpp`, with its lexicon `lexicon.bin`), text to the phonemes Kokoro reads; and `synth.cpp`, phonemes to audio with kokoro.cpp (`third_party/kokoro.cpp`, built into `libts5speech.a`) |
 | `speak.cpp` | speech out: on the TV or the controller's speaker, and the speak test |
+| `plain.h` | plain words for the screens: what an error means and what to do, and names for models, speech models and voices |
 | `ui/` | the screen: the Models page (`dashboard`), the Chat page (`chat_page`), drawing (`canvas`, `style.h`), the TV (`display`, VK_KHR_display), the controller (`pad`), fonts and logo baked by `make_font.py` and `make_logo.py` |
 | `compat.c` | libc functions RADV and whisper.cpp need that titles don't get |
 | `build.sh`, `setup.sh` | the build |

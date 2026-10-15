@@ -14,8 +14,9 @@
 #include "checks.h"
 #include "engine.h"
 #include "model.h"
-#include "plain.h"
 #include "tokenizer.h"
+
+#include "plain.h"
 
 extern "C" {
 size_t sceKernelGetDirectMemorySize(void);

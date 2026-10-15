@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "net.h"
 
@@ -25,6 +26,10 @@ std::string clip(const std::string &s, size_t n) {
     return s.substr(0, cut) + " ...";
 }
 
+// A failed search, as the model reads it: kFailed, why in plain words, kTell.
+const char *const kFailed = "The search failed: ";
+const char *const kTell = ". Tell the user, and answer from what you know if you can.";
+
 }  // namespace
 
 std::string tavily_key() { return env_or("TAVILY_API_KEY", ""); }
@@ -44,7 +49,12 @@ Json web_search_tool(const std::string &today) {
     return j;
 }
 
-std::string web_search(const std::string &arguments, std::string &log, bool *failed, std::string *why_failed) {
+std::string search_failure(const std::string &result) {
+    if (result.compare(0, strlen(kFailed), kFailed) != 0) return result;
+    return result.substr(strlen(kFailed), result.rfind(kTell) - strlen(kFailed));
+}
+
+std::string web_search(const std::string &arguments, std::string &log, bool *failed) {
     Json args;
     std::string query;
     if (Json::parse(arguments, args)) query = args["query"].str();
@@ -80,9 +90,8 @@ std::string web_search(const std::string &arguments, std::string &log, bool *fai
                                     ? "Tavily's identity couldn't be checked"
                                     : "the PS5 couldn't reach Tavily";
         if (failed) *failed = true;
-        if (why_failed) *why_failed = why;
         log = "web_search \"" + query + "\": " + err + " (" + took + ")";
-        return "The search failed: " + why + ". Tell the user, and answer from what you know if you can.";
+        return kFailed + why + kTell;
     }
     Json r;
     if (resp.status != 200 || !Json::parse(resp.body, r)) {
@@ -92,10 +101,9 @@ std::string web_search(const std::string &arguments, std::string &log, bool *fai
                                 : resp.status == 429 ? "Tavily got too many searches at once"
                                                      : "Tavily had a problem";
         if (failed) *failed = true;
-        if (why_failed) *why_failed = why;
         log = "web_search \"" + query + "\": Tavily answered HTTP " + std::to_string(resp.status) +
               (detail.empty() ? std::string() : " (" + detail + ")") + " (" + took + ")";
-        return "The search failed: " + why + ". Tell the user, and answer from what you know if you can.";
+        return kFailed + why + kTell;
     }
     std::string out = "Results for \"" + query + "\":";
     int i = 0;
