@@ -167,6 +167,15 @@ cmp "$work/sd-off.txt" "$work/sd-on.txt"
 grep -q "draft [0-9]*/[1-9]" "$work/sd-on.err"  # drafts were actually proposed
 TS5_ADAPT=0 TS5_DRAFT=7 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-fix.txt" 2> /dev/null
 cmp "$work/sd-off.txt" "$work/sd-fix.txt"  # the fixed-length policy too
+# Served, the request's timings and log line count the drafts.
+TS5_DRAFT=7 "$ts5" serve --backend cpu -m "$work/qwen2-Q8_0.gguf" --host 127.0.0.1 --port 18190 2> "$work/sd-serve.err" &
+spid=$!
+for _ in $(seq 60); do curl -sf http://127.0.0.1:18190/health | grep -q '"ok"' && break; sleep 1; done
+curl -sf http://127.0.0.1:18190/v1/completions -H 'Content-Type: application/json' \
+    -d "{\"prompt\": \"$rep\", \"max_tokens\": 300, \"temperature\": 0}" > "$work/sd-serve.json"
+kill $spid; wait $spid || true
+grep -q '"draft_n":[1-9]' "$work/sd-serve.json"
+grep -q "draft [0-9]*/[1-9][0-9]*, sample [0-9]* ms" "$work/sd-serve.err"
 echo "== the draft model cascade: a non-repeating prompt, the model as its own drafter"
 nr="The sky turned a deep shade of violet over the quiet harbor town that evening"
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$nr" -n 200 --temp 0 > "$work/dm-off.txt" 2> /dev/null
