@@ -11,7 +11,9 @@
 // to add up: a matrix with few blocks then still keeps the GPU busy.
 // With MMB_F16, shared memory holds f16 and each step's 32 products are
 // summed in packed f16 (two per instruction, twice the f32 rate), then added
-// to the f32 sums: an f16 sum is never more than 32 products long.
+// to the f32 sums: an f16 sum is never more than 32 products long. With
+// MMB_F16_STEP as well, the f16 sums go into the f32 ones every that many
+// products instead (mmb16s_*: 8), for models whose activations are large.
 #extension GL_EXT_shader_16bit_storage : require
 #ifdef MMB_F16
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -162,6 +164,15 @@ void main() {
             S[0][4] += w0 * x1.x; S[0][5] += w0 * x1.y; S[0][6] += w0 * x1.z; S[0][7] += w0 * x1.w;
             S[1][0] += w1 * x0.x; S[1][1] += w1 * x0.y; S[1][2] += w1 * x0.z; S[1][3] += w1 * x0.w;
             S[1][4] += w1 * x1.x; S[1][5] += w1 * x1.y; S[1][6] += w1 * x1.z; S[1][7] += w1 * x1.w;
+#if defined(MMB_F16) && defined(MMB_F16_STEP)
+            if ((k + 1) % MMB_F16_STEP == 0 && k + 1 < BK) {
+                for (uint a = 0; a < 2; a++)
+                    for (uint j = 0; j < 8; j++) {
+                        acc[a][j] += vec4(s[a][j]);
+                        s[a][j] = SV(0.0);
+                    }
+            }
+#endif
         }
 #ifdef MMB_F16
         for (uint a = 0; a < 2; a++)
