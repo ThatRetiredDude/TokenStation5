@@ -134,6 +134,14 @@ grep -q "(128 calls, 128 recorded ahead)" "$work/bench-ahead.txt"
 TS5_AHEAD=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 40 --step "${shapes[@]}"
 TS5_AHEAD=0 TS5_PROFILE=2 "$ts5" bench -m "${shapes[1]}" --backend vk > "$work/bench-plain.txt"
 grep -q "(128 calls, 0 recorded ahead)" "$work/bench-plain.txt"
+# A recording ahead that fails only stops recording ahead: the call it was
+# made in, and the generation, go on with the same output.
+TS5_DRAFT=0 TS5_AHEAD=0 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "one two three four" -n 40 --temp 0 \
+    > "$work/af-off.txt" 2> /dev/null
+TS5_DRAFT=0 TS5_AHEAD_FAIL=5 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "one two three four" -n 40 \
+    --temp 0 > "$work/af-on.txt" 2> "$work/af-on.err"
+cmp "$work/af-off.txt" "$work/af-on.txt"
+grep -q "recording ahead stopped: TS5_AHEAD_FAIL" "$work/af-on.err"
 # attn_dec (generation over a long cache; TS5_ATTN_DEC=1 from the first key),
 # heads of 128: one token per call, its keys in slices of 128, then 300 at
 # once without attn_pf (8 rows of 1 or 2 tokens a workgroup).
