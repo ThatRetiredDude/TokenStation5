@@ -76,6 +76,9 @@ TS5_MMB_MIN=1 TS5_MMB_SLICES=5 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu
     "${kmix[@]}"
 TS5_MMB_MIN=1 TS5_MMB_SPLIT=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
     "${kmix[@]}"
+# The f32 sums throughout (where the device has f16, mmb sums each step in f16).
+TS5_MMB_MIN=1 TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
+    "${kmix[@]}"
 TS5_MMB=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${kmix[@]}"
 # One token per call: a row per workgroup (these matrices are small), 8 rows
 # (TS5_MV_ROWS_MIN=1), 3 (a partial last group), and the older mat-vecs.
