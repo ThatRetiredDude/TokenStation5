@@ -377,8 +377,9 @@ void handle(int fd, Server::State &state) {
                 st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0, st.gen_tokens,
                 st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0, st.draft_accepted, st.drafted,
                 st.sample_ms);
-        // TS5_PROFILE=1 (take_profile is empty otherwise): the per-kernel GPU
-        // table for this request, in serve mode as everywhere else.
+        // With TS5_PROFILE set (take_profile is empty otherwise): the CPU's
+        // time per call and, with TS5_PROFILE=1, the per-kernel GPU table for
+        // this request, in serve mode as everywhere else.
         std::string prof = e.backend().take_profile();
         if (!prof.empty()) fputs(prof.c_str(), stderr);
     } else {

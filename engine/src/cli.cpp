@@ -246,8 +246,8 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             fprintf(stderr, "ts5: %s\n", err.c_str());
             return 1;
         }
-        // With TS5_PROFILE=1, the forward's per-kernel GPU time (otherwise
-        // take_profile returns nothing): one batch under the profiler.
+        // With TS5_PROFILE set, the forward's CPU time, and with
+        // TS5_PROFILE=1 its per-kernel GPU time: one batch under the profiler.
         const std::string prof = be->take_profile();
         if (!prof.empty()) fprintf(stderr, "logits (%zu tokens), %s", a.tokens.size(), prof.c_str());
         FILE *f = fopen(a.out.c_str(), "wb");
