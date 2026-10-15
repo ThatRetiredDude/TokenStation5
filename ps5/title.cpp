@@ -37,8 +37,6 @@
 //               mic played back (audio_probe.h), the recording in audiotest.wav
 //   chat        a message for the chat page, the file's text as it is
 //               (chat.h); the TV shows the chat and the reply
-//   keytest     a minute of a keyboard's raw reports in the log, while
-//               someone types (keyboard_probe.h)
 //   whispertest whispertest.wav (or audiotest.wav) transcribed on the CPU
 //               with the first ggml-*.bin in models/, timed (stt.h)
 //   speaktest   the file's text (or a sentence of the title's own) spoken
@@ -76,7 +74,6 @@
 #include "chat.h"
 #include "dashboard.h"
 #include "display.h"
-#include "keyboard_probe.h"
 #include "library.h"
 #include "pad.h"
 #include "runner.h"
@@ -139,7 +136,6 @@ constexpr const char *kScreen = TS5_HOME "/screen.bmp";
 constexpr const char *kAudioTest = TS5_HOME "/audiotest";
 constexpr const char *kAudioWav = TS5_HOME "/audiotest.wav";
 constexpr const char *kChat = TS5_HOME "/chat";
-constexpr const char *kKeyTest = TS5_HOME "/keytest";
 constexpr const char *kWhisperTest = TS5_HOME "/whispertest";
 constexpr const char *kWhisperWav = TS5_HOME "/whispertest.wav";
 constexpr const char *kSpeakTest = TS5_HOME "/speaktest";
@@ -437,7 +433,7 @@ int main(int, char **) {
     }
 
     for (const char *f :
-         {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kKeyTest, kWhisperTest, kSpeakTest})
+         {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kWhisperTest, kSpeakTest})
         unlink(f);
     std::thread(watch_control_files).detach();
     std::thread(keep_awake).detach();
@@ -516,7 +512,7 @@ int main(int, char **) {
     double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan;
     ui::SettingsInfo settings_note;  // the Settings page's last change
     bool lib_changed = true;
-    std::atomic<bool> audio_testing{false}, key_testing{false}, whisper_testing{false}, speak_testing{false};
+    std::atomic<bool> audio_testing{false}, whisper_testing{false}, speak_testing{false};
     for (;;) {
         const double t = app::now_s();
         // Read each time: the Settings page changes them.
@@ -568,17 +564,6 @@ int main(int, char **) {
                 sceUserServiceGetInitialUser(&user);
                 app::audio_probe(user, kAudioWav, notify);
                 audio_testing = false;
-            }).detach();
-        }
-        if (exists(kKeyTest) && !key_testing) {
-            unlink(kKeyTest);
-            key_testing = true;
-            notify("TokenStation5 keyboard test: type on the keyboard for a minute");
-            std::thread([&key_testing] {
-                int user = -1;
-                sceUserServiceGetInitialUser(&user);
-                app::keyboard_probe(user, 60);
-                key_testing = false;
             }).detach();
         }
         if (exists(kWhisperTest) && !whisper_testing) {

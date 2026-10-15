@@ -28,8 +28,6 @@
 #                                          recording (default audiotest.wav)
 #   scripts/ts5-ps5.sh chat MESSAGE...     a message on the TV's chat page; waits for the
 #                                          reply there and prints how it went
-#   scripts/ts5-ps5.sh keytest             a minute of a keyboard's raw reports while someone
-#                                          types on it; prints them
 #   scripts/ts5-ps5.sh whispertest [WAV]   speech to text on the console's CPU with the first
 #                                          ggml-*.bin in models: WAV (16 kHz mono 16-bit; else the
 #                                          last one sent, or audiotest.wav); prints times and text
@@ -255,16 +253,6 @@ for m in json.load(sys.stdin)["data"]:
         done
         log_lines "^ts5-title: chat: (reply |not sent)" | tail -1
         ;;
-    keytest)
-        before=$(log_lines "^ts5-title: key test: done$" | grep -c . || true)
-        put_text keytest ""
-        echo "ts5-ps5: keyboard test started: type on the keyboard connected to the console for a minute"
-        for _ in $(seq 1 40); do
-            sleep 2
-            [ "$(log_lines "^ts5-title: key test: done$" | grep -c . || true)" -gt "$before" ] && break
-        done
-        log_lines "^ts5-title: key test: " | awk '/key test: start/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; i++) print line[i] }'
-        ;;
     whispertest)
         if [ $# -gt 0 ]; then
             curl -sS --ftp-create-dirs -T "$1" "$ftp$dir/whispertest.wav.part" \
@@ -304,7 +292,7 @@ for m in json.load(sys.stdin)["data"]:
         wait_api
         ;;
     *)
-        sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac
