@@ -50,12 +50,15 @@ everything else works as before.
   console speeds that adds a few seconds per search before the answer.
 - With a key set, every chat's prompt carries the tool's description, about
   250 tokens. The prompt cache keeps that to once per conversation.
-- At most three rounds of searches per answer; after that the model is told
-  to answer with what it has.
+- At most three rounds of searches per answer. A model that still wants to
+  search after that answers from what the searches found, without tools, so
+  there is always an answer.
 - A failed search (no network, a refused key, Tavily's limit) goes back to the
-  model as text saying why, so it can tell you instead of stalling. The log
-  (`scripts/ts5-ps5.sh log`) has a line per search with the query, the number
-  of results and the time.
+  model as text saying why, so it can tell you instead of stalling. ts5 does
+  not call Tavily again in that answer; if the model tries to search again, it
+  answers without tools from what it knows and says the search failed. The
+  log (`scripts/ts5-ps5.sh log`) has a line per search with the query, the
+  number of results and the time.
 - A request can turn it off with `"web_search": false`, or with
   `"tool_choice": "none"`.
 

@@ -23,6 +23,8 @@ Json web_search_tool(const std::string &today);
 
 // Runs a web_search call (its arguments, as JSON text). Returns what the
 // model gets back: the results, or why there are none. log: one line for the log.
-std::string web_search(const std::string &arguments, std::string &log);
+// The text for the model; *failed (when given) says the search itself did
+// not work (network, a refused key, a used-up plan), not that it found nothing.
+std::string web_search(const std::string &arguments, std::string &log, bool *failed = nullptr);
 
 }  // namespace ts5

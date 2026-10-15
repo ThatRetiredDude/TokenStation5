@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <exception>
@@ -213,8 +214,9 @@ void handle(int fd, Server::State &state) {
         std::vector<Json> tools;
         bool web = false;
         std::string prompt;
+        std::vector<Message> msgs;
         if (chat) {
-            const std::vector<Message> msgs = parse_messages(req["messages"]);
+            msgs = parse_messages(req["messages"]);
             if (tf != ToolFormat::NONE && req["tool_choice"].str() != "none") {
                 bool named = false;
                 for (auto &t : req["tools"].a) {
@@ -228,7 +230,7 @@ void handle(int fd, Server::State &state) {
         } else {
             prompt = req["prompt"].str();
         }
-        const bool use_tools = !tools.empty();
+        bool use_tools = !tools.empty();  // off for a last turn that must answer
         SampleParams sp;
         sp.temperature = (float)req["temperature"].num(0.7);
         sp.top_p = (float)req["top_p"].num(0.95);
@@ -266,6 +268,8 @@ void handle(int fd, Server::State &state) {
         bool client_ok = true, ok = true, stopped = false;
         GenStats st;  // over every turn
         int max_tokens = sp.max_tokens;
+        std::string search_failed;      // why the first failed search failed
+        std::vector<std::string> found;  // what the searches found, for a forced answer
         // A turn of the model's; with web_search, ts5 answers the model's
         // searches and lets it go on, so one request can be several turns.
         for (int round = 0;; round++) {
@@ -298,12 +302,44 @@ void handle(int fd, Server::State &state) {
             };
             GenStats turn;
             sp.max_tokens = max_tokens - st.gen_tokens;
-            ok = e.generate(toks, sp, on_text, turn, err);
+            if (const char *f = getenv("TS5_TEST_TURNS")) {
+                // Tests: the model's turns from a file ("\n----\n" between
+                // them): turn N for turn N with tools (the one before last
+                // repeats), the last for a turn without. Each turn's prompt is
+                // appended to FILE.prompts.
+                std::string all;
+                if (FILE *in = fopen(f, "rb")) {
+                    char b[4096];
+                    size_t n;
+                    while ((n = fread(b, 1, sizeof b, in)) > 0) all.append(b, n);
+                    fclose(in);
+                }
+                std::vector<std::string> turns;
+                for (size_t at = 0;;) {
+                    size_t sep = all.find("\n----\n", at);
+                    turns.push_back(all.substr(at, sep == std::string::npos ? std::string::npos : sep - at));
+                    if (sep == std::string::npos) break;
+                    at = sep + 6;
+                }
+                if (FILE *out = fopen((std::string(f) + ".prompts").c_str(), "ab")) {
+                    fprintf(out, "%s\n====\n", prompt.c_str());
+                    fclose(out);
+                }
+                const size_t with_tools = turns.size() > 1 ? turns.size() - 2 : 0;
+                on_text(use_tools ? turns[std::min((size_t)round, with_tools)] : turns.back());
+                turn.gen_tokens = 1;
+                turn.finish = "stop";
+            } else {
+                ok = e.generate(toks, sp, on_text, turn, err);
+            }
             st.prompt_tokens += turn.prompt_tokens;
             st.prompt_evaluated += turn.prompt_evaluated;
             st.prompt_ms += turn.prompt_ms;
             st.gen_tokens += turn.gen_tokens;
             st.gen_ms += turn.gen_ms;
+            st.drafted += turn.drafted;
+            st.draft_accepted += turn.draft_accepted;
+            st.sample_ms += turn.sample_ms;
             st.finish = stopped ? "stop" : turn.finish;
             if (!ok || !use_tools) {
                 content += text;
@@ -321,15 +357,44 @@ void handle(int fd, Server::State &state) {
                 st.finish = "tool_calls";
                 break;
             }
-            if (st.gen_tokens >= max_tokens || round > kSearchRounds) break;
+            if (st.gen_tokens >= max_tokens) break;
+            if (round >= kSearchRounds || !search_failed.empty()) {
+                // Out of rounds, or searching again after a search failed
+                // (models retry a refused key until the limit): one last
+                // turn without tools, from the original messages and a note,
+                // so the answer is never empty.
+                std::string note;
+                if (!search_failed.empty()) {
+                    note = "(Web search is not working right now: " + search_failed +
+                           ". Answer from what you know, and say that the search failed.)";
+                } else {
+                    note = "(Web searches found the following. Answer from it now.)";
+                    for (auto &f : found) note += "\n\n" + f;
+                }
+                fprintf(stderr, "ts5: %s web_search: answering without tools (%s)\n", id.c_str(),
+                        search_failed.empty() ? "search limit reached" : "search failed");
+                std::vector<Message> last = msgs;
+                if (last.empty() || last.back().role != "user") last.push_back({"user", "", {}});
+                last.back().content += (last.back().content.empty() ? "" : "\n\n") + note;
+                prompt = render_chat(e.tok(), last, {}, date);
+                use_tools = false;
+                continue;
+            }
             std::vector<std::string> results;
             for (auto &c : searches) {
                 std::string log;
-                if (round >= kSearchRounds) {
-                    results.push_back("No more searches for this answer: answer now from the results you have.");
-                    log = "web_search: limit of " + std::to_string(kSearchRounds) + " rounds reached";
+                if (!search_failed.empty()) {
+                    results.push_back("Searching is not working right now (" + search_failed +
+                                      "). Do not search again: answer from what you know.");
+                    log = "web_search: skipped after a failed search";
                 } else {
-                    results.push_back(web_search(c.arguments, log));
+                    bool failed = false;
+                    results.push_back(web_search(c.arguments, log, &failed));
+                    if (failed) {  // the log line's reason, without the query and the time
+                        search_failed = log.substr(log.find("\": ") + 3);
+                        search_failed = search_failed.substr(0, search_failed.rfind(" ("));
+                    }
+                    else found.push_back(results.back());
                 }
                 fprintf(stderr, "ts5: %s %s\n", id.c_str(), log.c_str());
             }
@@ -369,10 +434,16 @@ void handle(int fd, Server::State &state) {
             body += ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st) + "}";
             send_all(fd, response(200, body));
         }
-        fprintf(stderr, "ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, draft %d/%d\n", id.c_str(),
-                st.prompt_tokens, st.prompt_evaluated, st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0,
-                st.gen_tokens, st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0,
-                st.draft_accepted, st.drafted);
+        fprintf(stderr, "ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, draft %d/%d, sample %.0f ms\n",
+                id.c_str(), st.prompt_tokens, st.prompt_evaluated,
+                st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0, st.gen_tokens,
+                st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0, st.draft_accepted, st.drafted,
+                st.sample_ms);
+        // With TS5_PROFILE set (take_profile is empty otherwise): the CPU's
+        // time per call and, with TS5_PROFILE=1, the per-kernel GPU table for
+        // this request, in serve mode as everywhere else.
+        std::string prof = e.backend().take_profile();
+        if (!prof.empty()) fputs(prof.c_str(), stderr);
     } else {
         send_all(fd, response(404, error_body("not found: " + r.path)));
     }

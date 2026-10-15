@@ -88,8 +88,11 @@ void log_memory(const std::string &when) {
 
 struct Runner::Loaded {
     std::string path, file, name;  // name: general.name, else the file name
-    int n_ctx = 0;
+    int asked_ctx = 0;  // as the job asked: 0 for what fits
+    int n_ctx = 0;      // as loaded
+    bool kv8 = false;   // its KV cache is 8-bit
     ts5::Model model;
+    ts5::Model dmodel;  // the draft model, when TS5_DRAFT_MODEL names one
     ts5::Tokenizer tok;
     std::unique_ptr<ts5::Engine> engine;
 };
@@ -179,11 +182,11 @@ void Runner::loop() {
     }
 }
 
-std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx, std::string &err) {
+std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx, std::string &err, bool drafter) {
     auto l = std::make_unique<Loaded>();
     l->path = path;
     l->file = base(path);
-    l->n_ctx = n_ctx;
+    l->asked_ctx = n_ctx;
     if (!l->model.open(path, err) || !l->tok.load(l->model.gguf, err)) return nullptr;
     // The tokenizer keeps its own copy of the vocabulary; the file's arrays of
     // it (about 20 MB for 150k tokens) aren't read again.
@@ -194,11 +197,44 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
     const ts5::HParams &hp = l->model.hp;
     printf("ts5: %s: %s, %d layers, embd %d, ff %d, heads %d/%d, head_dim %d, vocab %d\n", l->file.c_str(),
            hp.arch.c_str(), hp.n_layer, hp.n_embd, hp.n_ff, hp.n_head, hp.n_head_kv, hp.head_dim, hp.n_vocab);
+    // A draft model must fit beside the main one, so an auto-fit context
+    // leaves its budget free: weights and activations plus a 32k f16 cache.
+    const char *dp = drafter ? getenv("TS5_DRAFT_MODEL") : nullptr;
+    uint64_t dreserve = 0;
+    std::string derr;
+    bool dopen = false;
+    if (dp && *dp) {
+        try {
+            dopen = l->dmodel.open(dp, derr);
+        } catch (const std::exception &e) { derr = e.what(); }
+        if (dopen) {
+            // Everything but the token list, which the vocabulary check in
+            // set_drafter still needs, is dropped before the main load.
+            for (const char *k : {"tokenizer.ggml.scores", "tokenizer.ggml.token_type", "tokenizer.ggml.merges"})
+                l->dmodel.gguf.kv.erase(k);
+            uint64_t dw = 0;
+            for (const auto &t : l->dmodel.gguf.tensors) dw += t.nbytes;
+            dreserve = ts5::vk_fixed_bytes(l->dmodel.hp, dw) +
+                       32768ull * ts5::kv_bytes_per_token(l->dmodel.hp, ts5::KvType::F16);
+        }
+    }
     const double t0 = now_s();
-    ts5::Backend *b = ts5::make_vk_backend(ctx_, l->model, path, n_ctx, err);
+    ts5::Backend *b = ts5::make_vk_backend(ctx_, l->model, path, n_ctx, err, dreserve);
     if (!b) return nullptr;
-    printf("ts5: %s backend ready in %.1f s, context %d\n", b->name(), now_s() - t0, n_ctx);
+    l->n_ctx = b->n_ctx();
+    l->kv8 = b->kv_type() == ts5::KvType::Q8;
+    printf("ts5: %s backend ready in %.1f s, context %d%s, %s KV cache\n", b->name(), now_s() - t0, l->n_ctx,
+           n_ctx <= 0 ? " (what fits)" : "", l->kv8 ? "8-bit" : "f16");
     l->engine = std::make_unique<ts5::Engine>(l->model, b, l->tok);
+    if (dp && *dp) {
+        ts5::Backend *db = nullptr;
+        if (dopen) db = ts5::make_vk_backend(ctx_, l->dmodel, dp, std::min(l->n_ctx, 32768), derr);
+        if (!db || !l->engine->set_drafter(l->dmodel, db, derr))
+            printf("ts5: draft model not used: %s\n", derr.c_str());
+        else
+            printf("ts5: draft model %s ready\n", base(dp).c_str());
+        l->dmodel.gguf.kv.erase("tokenizer.ggml.tokens");
+    }
     log_memory("after loading " + l->file);
     return l;
 }
@@ -212,10 +248,11 @@ void Runner::unload() {
     status_.serving.clear();
     status_.serving_path.clear();
     status_.serving_ctx = 0;
+    status_.serving_kv8 = false;
 }
 
 bool Runner::serve(const std::string &path, int n_ctx) {
-    if (serving_ && serving_->path == path && serving_->n_ctx == n_ctx) return true;
+    if (serving_ && serving_->path == path && serving_->asked_ctx == n_ctx) return true;
     unload();
     const std::string file = base(path);
     {
@@ -227,7 +264,7 @@ bool Runner::serve(const std::string &path, int n_ctx) {
     notify_("TokenStation5: loading " + file);
     server_.set_engine(nullptr, "", "loading " + file);
     std::string err;
-    serving_ = load(path, n_ctx, err);
+    serving_ = load(path, n_ctx, err, true);
     if (!serving_) {
         server_.set_engine(nullptr, "", "no model");
         std::lock_guard<std::mutex> lk(mu_);
@@ -240,7 +277,8 @@ bool Runner::serve(const std::string &path, int n_ctx) {
         std::lock_guard<std::mutex> lk(mu_);
         status_.serving = file;
         status_.serving_path = path;
-        status_.serving_ctx = n_ctx;
+        status_.serving_ctx = serving_->n_ctx;
+        status_.serving_kv8 = serving_->kv8;
         status_.phase = Status::Serving;
     }
     event("Serving " + serving_->name);
@@ -283,7 +321,7 @@ void Runner::run(const Job &job) {
         } else {
             if (serving_) {
                 resume_path = serving_->path;
-                resume_ctx = serving_->n_ctx;
+                resume_ctx = serving_->asked_ctx;
             }
             unload();
             set_step("loading the model");
