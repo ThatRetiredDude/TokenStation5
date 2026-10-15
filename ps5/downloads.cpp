@@ -99,8 +99,8 @@ std::string mb(uint64_t n) {
 }
 
 // Why a download stopped, in plain words; retry: a network failure, worth
-// trying again.
-std::string said(const std::string &err, bool damaged, bool &retry) {
+// trying again. cut: some of it came before the network failed.
+std::string said(const std::string &err, bool damaged, bool cut, bool &retry) {
     retry = false;
     std::string s;
     int status = 0;
@@ -128,7 +128,9 @@ std::string said(const std::string &err, bool damaged, bool &retry) {
     } else {
         retry = true;  // can't resolve or connect, timed out, the connection dropped
     }
-    if (retry) s = "The download stopped: your PS5 couldn't reach the download site. Press cross to go on.";
+    if (retry)
+        s = cut ? "The download stopped: the connection was cut. Press cross to go on."
+                : "The download stopped: your PS5 couldn't reach the download site. Press cross to go on.";
     return s + plain::kDetails;
 }
 
@@ -371,8 +373,10 @@ void Downloads::run(const std::string &key) {
                 printf("ts5-title: download: can't write the checkpoint (%s)\n", strerror(errno));
         };
         const uint64_t offset = size_of(part);
+        // From a checkpoint the part is cut back to it (they're 64 MiB apart).
+        const uint64_t from_byte = have_checkpoint && resume.offset <= offset ? resume.offset : offset;
         if (offset > 0)
-            printf("ts5-title: download: going on from %s%s\n", mb(offset).c_str(),
+            printf("ts5-title: download: going on from %s%s\n", mb(from_byte).c_str(),
                    have_checkpoint ? ", from its checkpoint" : "; hashing the part first");
 
         ts5::FetchProgress progress;
@@ -383,7 +387,7 @@ void Downloads::run(const std::string &key) {
             progress_ = &progress;
             d.phase = Download::Running;
             d.held = held_;
-            d.done = offset;
+            d.done = from_byte;
             d.problem.clear();
             state_[key] = d;
         }
@@ -476,14 +480,15 @@ void Downloads::run(const std::string &key) {
                              (has(err, "the server sent") && !exists(part));
         if (damaged) unlink(sha_path.c_str());
         bool retry = false;
-        const std::string why = said(err, damaged, retry);
+        const bool cut = progress.done > from_byte;
+        const std::string why = said(err, damaged, cut, retry);
         printf("ts5-title: download failed: %s: %s\n", e.file, err.c_str());
         if (retry && attempt < 3) {
             const double wait = kRetry[attempt];
             printf("ts5-title: download: %s: trying again in %.0f s\n", e.file, wait);
             d.phase = Download::Retrying;
             d.retry_at = now_s() + wait;
-            d.problem = "Your PS5 couldn't reach the download site.";
+            d.problem = cut ? "The connection was cut." : "Your PS5 couldn't reach the download site.";
             set(key, d);
             std::unique_lock<std::mutex> lk(mu_);
             while (!stop_current_ && !quit_ && now_s() < d.retry_at)
