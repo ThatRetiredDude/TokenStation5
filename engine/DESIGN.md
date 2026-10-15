@@ -140,6 +140,17 @@ holds one token's 7 rows on Qwen 2.5 7B and re-reads the cache for every
 token; attn_pf reads it once per 9 tokens and does 64 rows of work per tile.
 A short prompt late in a chat splits its keys too.
 
+Generation over 256 keys or more (`TS5_ATTN_DEC` sets how many; 0: never),
+with an f16 cache and heads of 128, uses `shaders/attn_dec.comp`: up to 8
+rows per workgroup, its slice of the keys 128 at a time. Thread t scores key
+t against every row, reading the key's 256 bytes straight from the cache,
+and thread d then adds value column d of the 128 keys into every row's sum;
+the queries and the weights sit in shared memory, where all threads read the
+same word at once. That's three barriers per 128 keys where attn has four
+per 16, and no 128-long sums from shared memory one value at a time. On the
+console, Coder 7B wrote 65 tok/s at 0.5k tokens of context and 23 at 18k
+with attn, 47 at 18k with attn_dec. Under 256 keys attn is as fast.
+
 `TS5_PROFILE=1` writes a GPU timestamp after every dispatch; `ts5 bench`
 then prints the GPU's time per kernel (matmuls by weight) for the prompt and
 for generation.

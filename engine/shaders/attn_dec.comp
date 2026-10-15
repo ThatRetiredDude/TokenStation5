@@ -1,0 +1,149 @@
+#version 450
+// Attention for one token (generation) over a long f16 KV cache: the query
+// heads that share one KV head, at most 8 rows (heads times tokens), against
+// one slice of the keys. The slice goes 128 keys at a time: thread t scores
+// key t of the tile against every row, reading the key's 128 values (256
+// bytes) straight from the cache, then thread d adds value column d of the
+// tile's 128 keys into every row's sum. The queries and the weights sit in
+// shared memory, where all threads read the same word at once. Three
+// barriers per 128 keys (attn has four per 16, and its scores are 128-long
+// sums from shared memory one value at a time), so a long cache streams at
+// close to memory speed. Head size 128. Partial results as attn's, for
+// attn_merge.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) readonly buffer Qbuf { float Q[]; };
+layout(std430, binding = 1) readonly buffer KC { uvec4 kc[]; };  // 8 values a word
+layout(std430, binding = 2) readonly buffer VC { float16_t vc[]; };
+layout(std430, binding = 3) writeonly buffer Obuf { float O[]; };
+layout(std430, binding = 4) writeonly buffer Pbuf { float P[]; };
+
+layout(push_constant) uniform PC {
+    uint head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split;
+    float scale;
+} pc;
+
+const uint HD = 128, BK = 128, RM = 8, SGMAX = 32;
+shared vec4 qs[RM][HD / 4];
+shared vec4 pw[BK][RM / 4];       // the tile's weights: [key][row]
+shared float red[RM][SGMAX];      // each subgroup's highest score per row
+
+const float NEG_INF = -1.0 / 0.0;
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x, G = pc.n_head / pc.n_head_kv;
+    const uint n_tblk = (pc.n_tok + pc.tq - 1) / pc.tq;
+    const uint kh = gl_WorkGroupID.x / n_tblk, t0 = (gl_WorkGroupID.x % n_tblk) * pc.tq;
+    const uint R = G * min(pc.tq, pc.n_tok - t0);
+    const uint q_stride = pc.n_head * HD, kv_stride = pc.n_head_kv * HD;
+    const uint split = gl_WorkGroupID.y;
+    // Row r is head kh * G + r % G of token t0 + r / G.
+    const uint k_begin = split * pc.chunk;
+    const uint k_end = min(k_begin + pc.chunk, pc.pos0 + t0 + R / G);
+
+    for (uint e = tid; e < RM * HD / 4; e += 128) {
+        const uint r = e / (HD / 4), c = e % (HD / 4);
+        vec4 q = vec4(0.0);
+        if (r < R) {
+            const uint o = (t0 + r / G) * q_stride + (kh * G + r % G) * HD + 4 * c;
+            q = vec4(Q[o], Q[o + 1], Q[o + 2], Q[o + 3]) * pc.scale;
+        }
+        qs[r][c] = q;
+    }
+    float m[RM], l[RM], acc[RM];
+    [[unroll]] for (uint r = 0; r < RM; r++) {
+        m[r] = NEG_INF;
+        l[r] = 0.0;
+        acc[r] = 0.0;
+    }
+    const uint head = pc.cache_off + kh * HD;  // halves
+    barrier();
+
+    for (uint kb = k_begin; kb < k_end; kb += BK) {
+        // Scores: thread t, key kb + t.
+        const uint key = kb + tid;
+        float s[RM];
+        [[unroll]] for (uint r = 0; r < RM; r++) s[r] = 0.0;
+        if (key < k_end) {
+            const uint w0 = (head + key * kv_stride) / 8;
+            for (uint i = 0; i < HD / 8; i++) {
+                const uvec4 w = kc[w0 + i];
+                const vec4 k0 = vec4(unpackHalf2x16(w.x), unpackHalf2x16(w.y));
+                const vec4 k1 = vec4(unpackHalf2x16(w.z), unpackHalf2x16(w.w));
+                [[unroll]] for (uint r = 0; r < RM; r++) s[r] += dot(qs[r][2 * i], k0) + dot(qs[r][2 * i + 1], k1);
+            }
+        }
+        [[unroll]] for (uint r = 0; r < RM; r++) {
+            if (key >= k_end || r >= R || key > pc.pos0 + t0 + r / G) s[r] = NEG_INF;  // causal
+            const float mx = subgroupMax(s[r]);
+            if (subgroupElect()) red[r][gl_SubgroupID] = mx;
+        }
+        barrier();
+        // Every thread keeps every row's max and sum (the same everywhere).
+        float p[RM];
+        [[unroll]] for (uint r = 0; r < RM; r++) {
+            float mx = red[r][0];
+            for (uint g = 1; g < gl_NumSubgroups; g++) mx = max(mx, red[r][g]);
+            const float m_new = max(m[r], mx);
+            const float c = m[r] == NEG_INF ? 0.0 : exp(m[r] - m_new);
+            acc[r] *= c;
+            l[r] *= c;
+            m[r] = m_new;
+            p[r] = s[r] == NEG_INF ? 0.0 : exp(s[r] - m_new);
+        }
+        pw[tid][0] = vec4(p[0], p[1], p[2], p[3]);
+        pw[tid][1] = vec4(p[4], p[5], p[6], p[7]);
+        barrier();
+        // Values: thread d, column d of every key in the tile.
+        const uint nb = min(BK, k_end - kb);
+        vec4 a0 = vec4(0.0), a1 = vec4(0.0), l0 = vec4(0.0), l1 = vec4(0.0);
+        const uint vo = head + kb * kv_stride + tid;
+        uint j = 0;
+        for (; j + 4 <= nb; j += 4) {  // four loads in flight
+            float v[4];
+            [[unroll]] for (uint u = 0; u < 4; u++) v[u] = float(vc[vo + (j + u) * kv_stride]);
+            [[unroll]] for (uint u = 0; u < 4; u++) {
+                const vec4 p0 = pw[j + u][0], p1 = pw[j + u][1];
+                a0 += p0 * v[u];
+                a1 += p1 * v[u];
+                l0 += p0;
+                l1 += p1;
+            }
+        }
+        for (; j < nb; j++) {
+            const float v = float(vc[vo + j * kv_stride]);
+            const vec4 p0 = pw[j][0], p1 = pw[j][1];
+            a0 += p0 * v;
+            a1 += p1 * v;
+            l0 += p0;
+            l1 += p1;
+        }
+        [[unroll]] for (uint r = 0; r < 4; r++) {
+            acc[r] += a0[r];
+            acc[4 + r] += a1[r];
+            l[r] += l0[r];
+            l[4 + r] += l1[r];
+        }
+        barrier();  // before the next tile's weights
+    }
+
+    [[unroll]] for (uint r = 0; r < RM; r++) {
+        if (r >= R) break;
+        const uint row = (t0 + r / G) * pc.n_head + kh * G + r % G;  // token * n_head + head
+        if (pc.n_split == 1) {
+            O[row * HD + tid] = acc[r] / l[r];
+        } else {
+            const uint o = (split * pc.n_tok * pc.n_head + row) * (HD + 2);
+            P[o + tid] = acc[r];
+            if (tid == 0) {
+                P[o + HD] = m[r];
+                P[o + HD + 1] = l[r];
+            }
+        }
+    }
+}
