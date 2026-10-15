@@ -3,6 +3,12 @@
 TokenStation5 has two licenses, split by folder, because the PS5 title links
 GPL-3.0 code and the engine does not.
 
+**The default is PolyForm.** Anything in this repository that neither the
+table below nor a file's own header places under another license is licensed
+under [PolyForm Small Business 1.0.0](LICENSE.md). A new file takes the
+license of the folder it lands in; a new path this file doesn't name yet
+takes the default until a row here says otherwise.
+
 | Part | License | Why |
 | --- | --- | --- |
 | `engine/` (ts5: source, shaders, tests, design doc) | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code. Contains no GPL code. |
@@ -10,9 +16,10 @@ GPL-3.0 code and the engine does not.
 | `ps5/` (title main, libc shims, build scripts, import checker) | [GPL-3.0-or-later](ps5/LICENSE) | Exists to link ts5 with PS5_Vulkan and the PS5 payload SDK, which are GPL-3.0-or-later. |
 | `payloads/` (small diagnostic payloads for the jailbreak's ELF loader) | GPL-3.0-or-later | Built with the PS5 payload SDK, which is GPL-3.0-or-later. |
 | The built PS5 title (`eboot.bin`, `sce_module/libc.prx`) | GPL-3.0-or-later, as a whole | See below. |
-| The Linux `ts5` binary | PolyForm Small Business 1.0.0 | Built from `engine/` alone. Links only the system Vulkan loader. |
+| The Linux `ts5` binary | PolyForm Small Business 1.0.0 | Built from `engine/` plus Mbed TLS (Apache-2.0) and the Mozilla CA bundle (MPL-2.0, unmodified data), see [NOTICE.md](NOTICE.md). Links only the system Vulkan loader. |
 | The TokenStation5 name and logo, `ps5/sce_sys/icon0.png` | Not licensed | Brand assets. Neither license grants trademark rights. |
 | Model weights (GGUF files) | Each model's own license | Not part of this repo. Qwen, Llama, Mistral and Gemma each have their own terms. |
+| Everything else in this repository | [PolyForm Small Business 1.0.0](LICENSE.md) | The default, for anything no row or file header covers. |
 
 Third-party code that ends up in the source or the binaries, and the notices
 it needs, is listed in [NOTICE.md](NOTICE.md).

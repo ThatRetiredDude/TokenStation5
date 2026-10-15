@@ -1,7 +1,10 @@
 Required Notice: Copyright (c) 2026 ThatRetiredDude (https://github.com/ThatRetiredDude)
 
-This license covers everything in this repository except the ps5/ folder and the
-other parts listed in LICENSING.md, which says what applies where.
+This license covers everything in this repository that LICENSING.md or a file's
+own header does not place under another license; today that is the ps5/ and
+payloads/ folders and the built PS5 title, which are GPL-3.0-or-later.
+LICENSING.md says what applies where, and anything it doesn't name is under
+this license.
 
 # PolyForm Small Business License 1.0.0
 

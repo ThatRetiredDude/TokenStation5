@@ -125,6 +125,7 @@ public:
             if (file_ && !load_layer(L, err)) return false;
             layer(l, L, x.data(), n, pos0);
         }
+        if (!logits) return true;  // the caller only wanted the KV entries
         // The last token only, unless all.
         const int nout = all ? n : 1;
         float *xo = x.data() + (size_t)(n - nout) * E;
