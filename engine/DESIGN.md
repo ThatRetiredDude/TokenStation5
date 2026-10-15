@@ -155,6 +155,12 @@ queries are the same for every thread, so they come through scalar loads.
 Then each group of 32 threads takes a quarter of the tile's keys and each
 thread 4 value columns of them, and the four groups' sums are added up once,
 at the end. That's three barriers per 128 keys where attn has four per 16.
+attn_dec4 loads the next tile's keys while this tile's values are summed, so
+reads stay in flight across the barriers; attn_dec loads each tile's keys at
+its start, all 16 words at once. That split is what the console measured at
+16k tokens of context: the prefetch made Qwen3 8B's attn_dec4 2.5% faster
+and Coder 7B's attn_dec 9% slower (`TS5_ATTN_DEC_PLAIN=0` prefetches in both,
+`=1` in neither).
 On the console, Coder 7B wrote 65 tok/s at 0.5k tokens of context and 23 at
 18k with attn, 47 at 18k with the first version of attn_dec (the queries and
 weights in shared memory, one value column per thread). Under 256 keys attn
