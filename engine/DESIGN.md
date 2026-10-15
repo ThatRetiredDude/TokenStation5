@@ -154,7 +154,10 @@ against every row, reading the key's 256 bytes straight from the cache; the
 queries are the same for every thread, so they come through scalar loads.
 Then each group of 32 threads takes a quarter of the tile's keys and each
 thread 4 value columns of them, and the four groups' sums are added up once,
-at the end. That's three barriers per 128 keys where attn has four per 16.
+at the end. That's three barriers per 128 keys where attn has four per 16,
+and the next tile's keys load while this tile's values are summed, so reads
+stay in flight across them (`TS5_ATTN_DEC_PLAIN=1` loads each tile's keys at
+its start instead).
 On the console, Coder 7B wrote 65 tok/s at 0.5k tokens of context and 23 at
 18k with attn, 47 at 18k with the first version of attn_dec (the queries and
 weights in shared memory, one value column per thread). Under 256 keys attn
