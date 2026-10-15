@@ -456,6 +456,8 @@ void HomePage::draw_live(Canvas &c, const HomeInfo &info) {
     } else if (api.generating) {
         line = "Writing a reply for " + who(api.client, info.own_ip);
         col = kAccent;
+    } else if (!info.download.empty()) {
+        line = info.download;
     } else if (info.status.phase == app::Status::Serving) {
         line = "Waiting for requests";
     } else {

@@ -48,6 +48,39 @@ scripts/ts5-ps5.sh wait                             # until the API answers
 python3 scripts/bench.py                            # speed through the API
 ```
 
+## Downloading models on the console
+
+The Models page lists, under DOWNLOAD, the models TokenStation5 runs that
+aren't on the PS5 yet: Llama 3.2 3B, Qwen 2.5 Coder 7B, Qwen 3 8B and Llama
+3.1 8B (the rows of `models.tsv` with a `console` column). Cross on one
+downloads it from Hugging Face over HTTPS, straight to the title's `models`
+folder; the row shows how far it got, how fast and how long is left, and
+the details how much memory it will need. When it's whole and its SHA-256
+matches, it is listed like any other model, and starts if nothing else runs.
+
+- **One at a time**, on a thread of its own: serving, the GPU check and the
+  speed test go on meanwhile. It waits while a model loads.
+- **Stop and go on**: cross stops it and keeps the part; cross again goes on
+  from there, fetching at most 64 MB again (a checkpoint of its SHA-256 is
+  kept every 64 MiB beside the part, `.<file>.sha`). Closing the title
+  stops it the same way; it doesn't go on by itself. Square deletes a
+  stopped download's part.
+- **Room**: a download may not leave less than 1 GB free; the strip under
+  the list says how much there is.
+- **Trouble**: a dropped connection is tried again 3 times (after 5, 15 and
+  45 s); anything else stops it with the reason in plain words, and the
+  details in Logs.
+- **Remove a model**: right on a model in the title's `models` folder that
+  isn't in use, then cross to confirm, deletes its file. Its results and
+  usage history stay.
+
+The files are pinned in `ps5/catalog.h` (repo, commit, size, SHA-256 and the
+header fields for the memory estimate), which `scripts/catalog.py` writes
+from `models.tsv` on a computer that can reach huggingface.co. With
+`TS5_CATALOG_URL=http://HOST:PORT` in `ts5.env`, every file comes from
+`HOST:PORT/<file name>` instead, for trying downloads with a server on the
+LAN (`engine/tests/fetch_test.py`, which can drop, throttle and redirect).
+
 ## Adding models from a computer
 
 The screens on the TV don't show paths or commands; this is the guide they
@@ -58,7 +91,7 @@ seconds. A model still arriving shows as COPYING until it's whole.
 
 | To add | From the TokenStation5 folder on your computer |
 | --- | --- |
-| a suggested model | `scripts/ts5-ps5.sh fetch KEY`, with its key in `models.tsv`: `qwen25-0.5b`, `llama32-3b`, `qwen25-coder-7b`, `qwen3-8b`, `llama31-8b` |
+| a model from `models.tsv` | `scripts/ts5-ps5.sh fetch KEY`, with its key there: `llama32-3b`, `qwen25-coder-7b`, `qwen3-8b`, `llama31-8b`, `qwen25-0.5b`, ... |
 | any other GGUF model | `scripts/ts5-ps5.sh model FILE.gguf`, or copy it into `models` with any FTP client |
 | a speech model, for R1 talk | `scripts/ts5-ps5.sh speech` (Base, English), or `speech small.en` |
 | a voice, for spoken replies | `scripts/ts5-ps5.sh voice` (Heart, US English), or `voice am_michael`, `voice bf_emma` ... |
@@ -93,12 +126,14 @@ ranges outlast its rotation.
 | Button | |
 | --- | --- |
 | up / down | choose a model |
-| cross | start it, so apps can use it (and start it again at the next start); on the model in use, stop it (it asks first) |
+| cross | start it, so apps can use it (and start it again at the next start); on the model in use, stop it (it asks first); on a model to download, download it, stop the download, or go on with it |
 | square | GPU check (on a model that can't run: Logs, at the problems): its logits on the GPU against ts5's CPU reference, PASS or FAIL. The first check of a model runs the CPU and saves its answers next to the model (`NAME.gguf.ts5ref`); later ones run only the GPU, in about a second |
 | triangle | speed test: how fast it reads a 512-token prompt and writes 128 tokens, in tokens a second |
+| right | remove it from the PS5 (it asks first): a model in the title's own `models` folder that isn't in use |
 | circle | Home |
 | OPTIONS | close the title |
 
+On a model to download, square deletes the part of a stopped download.
 The list shows each model's speed as used over the last 7 days (else the
 speed test's), and the strip under it the chosen model's requests, tokens
 and average writing speed over those days.
