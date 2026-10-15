@@ -110,8 +110,18 @@ std::string name_of(const View &v, const std::string &file) {
 }
 
 const char *page_name(Dashboard::Page p) {
-    return p == Dashboard::Home ? "Home" : p == Dashboard::Models ? "Models" : p == Dashboard::Chat ? "Chat" : "Settings";
+    return p == Dashboard::Home     ? "Home"
+           : p == Dashboard::Models ? "Models"
+           : p == Dashboard::Chat   ? "Chat"
+           : p == Dashboard::Settings ? "Settings"
+                                      : "Logs";
 }
+
+// Some request over Home's range wasn't answered: square shows why.
+bool home_problems(const View &v) { return v.usage && v.usage->ready && v.usage->total.failed > 0; }
+
+// A model that can't run, and isn't just still copying: square shows why.
+bool cant_run(const app::ModelInfo &m) { return !m.runnable && !m.copying; }
 
 // Cross types a message: a model serves, and no reply is coming.
 bool can_type(const View &v) { return v.status.phase == app::Status::Serving && !v.chat.busy; }
@@ -138,7 +148,7 @@ struct Dashboard::Item {
 Dashboard::Dashboard(const Fonts &fonts, const uint8_t *logo, size_t logo_size)
     : title_(fonts.get("title")), h2_(fonts.get("h2")), body_(fonts.get("body")),
       bodyb_(fonts.get("bodyb")), small_(fonts.get("small")), smallb_(fonts.get("smallb")),
-      home_(fonts), chat_(fonts), settings_(fonts) {
+      home_(fonts), logs_(fonts), chat_(fonts), settings_(fonts) {
     if (logo && logo_size >= 8 && memcmp(logo, "TS5L", 4) == 0) {
         uint16_t w, h;
         memcpy(&w, logo + 4, 2);
@@ -183,7 +193,14 @@ int Dashboard::selected(const std::vector<Item> &items) const {
 
 void Dashboard::show(Page p) {
     if (p == Chat && page_ != Chat) chat_.to_bottom();
+    if (p == Logs && page_ != Logs) logs_.open(false);
+    if (p != Logs && page_ == Logs) logs_.close();
     page_ = p;
+}
+
+void Dashboard::show_problems() {
+    show(Logs);
+    logs_.open(true);
 }
 
 SettingsInfo Dashboard::settings_info(const View &v) const {
@@ -195,7 +212,7 @@ SettingsInfo Dashboard::settings_info(const View &v) const {
 }
 
 bool Dashboard::animating(const View &v) const {
-    if (page_ == Settings || page_ == Home) return false;
+    if (page_ == Settings || page_ == Home || page_ == Logs) return false;
     if (page_ == Chat)
         return v.chat.busy || v.voice.phase != app::VoiceState::Idle || v.status.phase == app::Status::Loading;
     return v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
@@ -221,6 +238,12 @@ Action Dashboard::press(uint32_t b, const View &v) {
     if (page_ == Home) {
         home_.press(b);
         if (b & kCross) show(v.status.phase == app::Status::Serving ? Chat : Models);
+        else if ((b & kSquare) && home_problems(v)) show_problems();
+        return a;
+    }
+    if (page_ == Logs) {
+        logs_.press(b);
+        if (b & kCircle) show(Home);
         return a;
     }
     if (page_ == Settings) {
@@ -266,6 +289,10 @@ Action Dashboard::press(uint32_t b, const View &v) {
     if (b & kDown) sel = step(+1);
     selected_key_ = list[sel].key;
     const Item &it = list[sel];
+    if ((b & kSquare) && it.kind == Item::Model && cant_run(v.models[it.index])) {
+        show_problems();
+        return a;
+    }
     const bool busy = v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
                       v.status.phase == app::Status::Benchmarking || v.status.queued > 0;
     if (busy) return a;
@@ -294,6 +321,7 @@ void Dashboard::draw_background(Canvas &c) {
             case Models: panels = {{LX, PT, LW, PB - PT}, {RX, PT, RW, PB - PT}, {LX, AY, 1848 - LX, AH}}; break;
             case Chat: panels = {{CX, PT, CW, CB - PT}, {CX, IY, CW, IH}}; break;
             case Settings: panels = {{LX, PT, LW, SB - PT}, {RX, PT, RW, SB - PT}}; break;
+            case Logs: panels = {{LX, PT, 1848 - LX, SB - PT}}; break;
         }
         Canvas bg(W, H);
         bg.gradient(0, 0, W, H, kBgTop, kBgBottom);
@@ -344,7 +372,7 @@ void Dashboard::draw_tabs(Canvas &c) {
     int x = 700;
     const int y = 140;
     x += key_cap(c, smallb_, x, y - 2, "L1") + 24;
-    for (Page p : {Home, Models, Chat, Settings}) {
+    for (Page p : {Home, Models, Chat, Settings, Logs}) {
         const char *name = page_name(p);
         const int w = Canvas::measure(bodyb_, name);
         c.text(bodyb_, x, y, name, p == page_ ? kText : kText2);
@@ -507,10 +535,11 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
                                                : plain::sentence(plain::reason(m.error));
         int y = 540;
         for (auto &line : wrap(body_, why, DW)) {
-            if (y > 740) break;
+            if (y > 700) break;
             c.text(body_, DX, y, line, m.copying ? kAmber : kRed);
             y += 36;
         }
+        if (!m.copying) text_glyph(c, small_, DX, y + 12, "Press", kGlyphSquare, "for the details, in Logs.", kText2);
     } else {
         const bool is_serving = m.path == v.status.serving_path;
         // Serving: its context. Else what serving it would get: the args'
@@ -557,7 +586,7 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
     const bool can = m.runnable && !busy;
     const bool is_serving = m.path == v.status.serving_path;
     buttons({{kGlyphCross, is_serving ? "Stop" : "Start", can},
-             {kGlyphSquare, "GPU check", can},
+             cant_run(m) ? Btn{kGlyphSquare, "Details", true} : Btn{kGlyphSquare, "GPU check", can},
              {kGlyphTriangle, "Speed test", can},
              {kGlyphCircle, "Home", true}});
 }
@@ -644,6 +673,30 @@ void Dashboard::draw_home_footer(Canvas &c, const View &v) {
     x += c.text(small_, x, y, "\xE2\x86\x90\xE2\x86\x92  24 hours, 7 days or 30 days", kText2) + 40;
     glyph(c, (float)x + 16, (float)y - 8, kGlyphCross);
     x += 40 + c.text(small_, x + 40, y, v.status.phase == app::Status::Serving ? "Chat" : "Models", kText2) + 36;
+    if (home_problems(v)) {
+        glyph(c, (float)x + 16, (float)y - 8, kGlyphSquare);
+        x += 40 + c.text(small_, x + 40, y, "Why some failed", kText2) + 36;
+    }
+    draw_close_hint(c, x, y);
+}
+
+void Dashboard::draw_logs_footer(Canvas &c) {
+    int x = LX;
+    const int y = 1046;
+    x += key_cap(c, smallb_, x, y, "L1") + 12;
+    x += c.text(small_, x, y, page_name(next(Logs)), kText2) + 40;
+    x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Scroll", kText2) + 40;
+    x += c.text(small_, x, y, "\xE2\x86\x90\xE2\x86\x92  A page", kText2) + 40;
+    struct {
+        PadGlyph g;
+        const char *text;
+    } hints[] = {{kGlyphSquare, logs_.problems() ? "Everything" : "Problems only"},
+                 {kGlyphTriangle, logs_.last_run() ? "This run" : "The run before"},
+                 {kGlyphCircle, "Home"}};
+    for (auto &h : hints) {
+        glyph(c, (float)x + 16, (float)y - 8, h.g);
+        x += 40 + c.text(small_, x + 40, y, h.text, kText2) + 36;
+    }
     draw_close_hint(c, x, y);
 }
 
@@ -757,6 +810,12 @@ void Dashboard::draw(Canvas &c, const View &v) {
     if (page_ == Home) {
         home_.draw(c, home_info(v));
         draw_home_footer(c, v);
+        if (confirm_ != NoConfirm) draw_confirm(c);
+        return;
+    }
+    if (page_ == Logs) {
+        logs_.draw(c, LX, PT, 1848 - LX, SB - PT, v.version, v.now);
+        draw_logs_footer(c);
         if (confirm_ != NoConfirm) draw_confirm(c);
         return;
     }
