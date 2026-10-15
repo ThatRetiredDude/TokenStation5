@@ -166,7 +166,7 @@ class VkBackend : public Backend {
 public:
     static constexpr int TMAX = 256;  // tokens per forward call
     static constexpr size_t PART = 1u << 20;  // floats of attn's partial results, when it splits the keys
-    static constexpr size_t SPLIT = 6u << 20;  // floats of mmb's partial results, when it splits the rows
+    static constexpr size_t SPLIT = 12u << 20;  // floats of mmb's partial results, when it splits the rows
 
     VkBackend(VkContext *ctx, bool owns_ctx, Model &m, int n_ctx)
         : ctx_(ctx), owns_ctx_(owns_ctx), m_(m), hp_(m.hp), n_ctx_(n_ctx) {}
@@ -289,6 +289,7 @@ private:
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
         if (const char *e = getenv("TS5_MMB_SPLIT")) mmb_split_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SLICES")) mmb_slices_ = std::max(0, atoi(e));
+        if (const char *e = getenv("TS5_MMB_SMALL")) mmb_small_ = atoi(e) != 0;
         mmb_f16_ = ctx_->float16;
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
         kv_ = kv_type_setting();
@@ -647,11 +648,26 @@ private:
         vk.vkCmdPushDescriptorSetKHR(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, p.layout, 0, (uint32_t)w.size(), w.data());
         vk.vkCmdPushConstants(cmd_, p.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PC), &pc);
         vk.vkCmdDispatch(cmd_, gx, gy, gz);
-        if (!no_barrier_) barrier();
+        const bool bar = !no_barrier_;
+        if (bar) barrier();
         no_barrier_ = false;
         if (qpool_ && qlabels_.size() + 1 < QMAX) {
             vk.vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool_, (uint32_t)qlabels_.size() + 1);
             qlabels_.push_back(what.empty() ? name : name + " " + what);
+        }
+        if (bar) add_up();
+    }
+
+    // The mmb_reduce dispatches that wait for a barrier (see mmb), one after
+    // another without barriers between them, and a barrier after the last.
+    void add_up() {
+        std::vector<Reduce> r;
+        r.swap(reduces_);
+        for (size_t i = 0; i < r.size(); i++) {
+            no_barrier_ = i + 1 < r.size();
+            const uint32_t groups = (uint32_t)(((size_t)r[i].pc.nrows * r[i].pc.ntok + 255) / 256);
+            const uint32_t gx = std::min<uint32_t>(groups, 65535);
+            dispatch("mmb_reduce", {&split_, r[i].y}, r[i].pc, gx, (groups + gx - 1) / gx, r[i].what);
         }
     }
 
@@ -667,8 +683,13 @@ private:
         // Many tokens: the tiled kernels, which read each weight once per 128
         // or 64 tokens. Few: one workgroup per row. The 128 x 128 blocks
         // (K-quants) only where there are enough of them for the GPU.
+        // A matrix with few rows (attn_k, attn_v) too, for a full block of
+        // tokens, where splitting its columns (mmb) makes enough workgroups.
         const uint32_t big = ((rows + 127) / 128) * (((uint32_t)ntok + 127) / 128);
-        if (ntok >= tiled_min_ && mmb_ && big >= (uint32_t)mmb_min_ && x_off % 4 == 0 && w.ne0() % 4 == 0 &&
+        const uint32_t split_big = mmb_small_ && mmb_split_ && ntok >= 128 && big < (uint32_t)mmb_min_
+                                       ? big * std::min({(mmb_split_ + big - 1) / big, (uint32_t)w.ne0() / 256, 16u})
+                                       : big;
+        if (ntok >= tiled_min_ && mmb_ && split_big >= (uint32_t)mmb_min_ && x_off % 4 == 0 && w.ne0() % 4 == 0 &&
             (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
             mmb(w, x, y, pc, big, what);
             return;
@@ -718,24 +739,31 @@ private:
         S = std::max(1u, S);
         const uint32_t units = (nunits + S - 1) / S;
         S = (nunits + units - 1) / units;
-        // Kernels that may still read split_ (no barrier since) keep their part.
-        if (S > 1 && split_used_ + S * slice > SPLIT) barrier();
+        // Parts that sums still to be added up read (no barrier since) stay.
+        if (S > 1 && split_used_ + S * slice > SPLIT) {
+            barrier();
+            add_up();
+        }
         const uint32_t p_off = S > 1 ? (uint32_t)split_used_ : 0;
         struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off, n_split, units, p_off; } bp{
             pc.ncols, pc.nrows, pc.ntok, pc.row_bytes, pc.x_stride, pc.y_stride, pc.accumulate, pc.x_off, S, units,
             p_off};
-        const bool skip = no_barrier_;
-        if (S > 1) no_barrier_ = false;  // mmb_reduce reads what it wrote
+        // mmb_reduce adds the slices up after the next barrier: this one's, or
+        // for k and v (no barrier after them), the one after q, so the three
+        // matmuls run side by side and then the three reduces.
+        if (S > 1) {
+            reduces_.push_back({{rows, ntok, pc.y_stride, pc.accumulate, S, p_off}, &y, what});
+            split_used_ = p_off + S * slice;
+        }
         dispatch(std::string(mmb_f16_ ? "mmb16_" : "mmb_") + qname(w.type()), {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128,
                  (ntok + 127) / 128, what, S);
-        if (S == 1) return;
-        split_used_ = p_off + S * slice;
-        no_barrier_ = skip;
-        struct { uint32_t nrows, ntok, y_stride, accumulate, n_split, p_off; } rp{
-            rows, ntok, pc.y_stride, pc.accumulate, S, p_off};
-        const uint32_t groups = (uint32_t)((slice + 255) / 256), gx = std::min<uint32_t>(groups, 65535);
-        dispatch("mmb_reduce", {&split_, &y}, rp, gx, (groups + gx - 1) / gx, what);
     }
+    struct Reduce {
+        struct { uint32_t nrows, ntok, y_stride, accumulate, n_split, p_off; } pc;
+        const Buf *y;
+        std::string what;
+    };
+    std::vector<Reduce> reduces_;  // waiting for a barrier
 
     // A weight's name without its layer: "blk.3.attn_q.weight" -> "attn_q".
     static std::string role(const Weight &w) {
@@ -967,6 +995,9 @@ private:
     // TS5_MMB_SLICES=N: every matrix in N.
     uint32_t mmb_split_ = 256;
     int mmb_slices_ = 0;
+    // Matrices of fewer blocks than mmb_min_ use mmb too where their split
+    // makes that many workgroups (TS5_MMB_SMALL=0: the 64 x 64 kernel).
+    bool mmb_small_ = true;
     // mmb sums each step's 32 products in packed f16 (mmb16_*), where the
     // device has f16 arithmetic (TS5_MMB_F16=0: f32 throughout).
     bool mmb_f16_ = false;
