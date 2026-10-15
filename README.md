@@ -53,7 +53,7 @@ The full plan is in [engine/DESIGN.md](engine/DESIGN.md).
 | OpenAI API | ✅ `/v1/chat/completions` (streaming), `/v1/completions`, `/v1/models` |
 | PS5 title | ✅ Runs on a real PS5 as **TokenStation5** (`PPSA99555`). The GPU check passes on the console, and the API serves the home network |
 | TV dashboard | ✅ Pick, check, benchmark and serve models with the controller, on the TV |
-| PS5 kernel tuning | 🔨 Ongoing: prompts read 14 to 18 times faster and generation about 3.4 times faster than the first console build; the new attention doubled generation again at 16k+ context |
+| PS5 kernel tuning | 🔨 Ongoing: prompts read 13 to 16 times faster and generation about 3.5 times faster than the first console build; the new attention doubled generation again at 16k+ context |
 | Speculative decoding | ✅ Code editing with Coder 7B runs at 102 tok/s against 64 with drafting off, byte-identical output; free chat stays within 4% |
 | Gemma 3, Qwen 3.5, Gemma 4 | 📋 Planned |
 
@@ -64,28 +64,31 @@ ran there, before any kernel tuning:
 
 | Model | GPU check | Prompt tok/s | Generation tok/s | Load | GPU memory |
 | --- | :---: | ---: | ---: | ---: | ---: |
-| Qwen 2.5 0.5B Q8_0 | ✅ | **2641** | **98** | ~0.5 s | |
-| Llama 3.2 3B Q4_K_M | ✅ | **1095** (78) | **122** (36) | ~1 s | 1.9 + 0.9 GiB |
-| Qwen 2.5 Coder 7B Q4_K_M | ✅ | **558** (31) | **71** (21) | 2.3 s | 4.4 + 0.4 GiB |
-| Qwen 3 8B Q4_K_M | ✅ | **480** (29) | **65** (19) | ~2.4 s | 4.7 + 1.1 GiB |
-| Llama 3.1 8B Q4_K_M | ✅ | **487** (28.5) | **67** (19.7) | ~2.3 s | 4.6 + 1.0 GiB |
+| Qwen 2.5 0.5B Q8_0 | ✅ | **4636** | **233** | ~0.5 s | |
+| Llama 3.2 3B Q4_K_M | ✅ | **1016** (78) | **131** (36) | ~1 s | 1.9 + 0.9 GiB |
+| Qwen 2.5 Coder 7B Q4_K_M | ✅ | **483** (31) | **70** (21) | 2.3 s | 4.4 + 0.4 GiB |
+| Qwen 3 8B Q4_K_M | ✅ | **429** (29) | **68** (19) | ~2.4 s | 4.7 + 1.1 GiB |
+| Llama 3.1 8B Q4_K_M | ✅ | **428** (28.5) | **70** (19.7) | ~2.3 s | 4.6 + 1.0 GiB |
 
 The GPU check runs the same prompt through the console's GPU and through
-ts5's CPU reference, and compares the logits at every position. The first
-check of a model saves the CPU's answers next to it, so later checks run only
-the GPU and take about a second. Prompt and generation speeds are `ts5 bench`
+ts5's CPU reference, and compares the logits at every position. With a
+512-token prompt, all four models pick the same top word as the CPU at every
+one of the 512 positions, because prompts are summed in 32-bit (16-bit sums,
+`TS5_MMB_F16=1`, read prompts 9 to 14% faster but put Llama 3.2 3B over the
+check's bar). The first check of a model saves the CPU's answers next to it,
+so later checks run only the GPU and take about a second. Prompt and generation speeds are `ts5 bench`
 (512-token prompt, 128 generated tokens). Load is how long a model takes to
 get ready: the loader reads at 2 GB/s, measured on Coder 7B (2.3 s, down
 from 51); the other models' times scale with their size. GPU memory is
 weights plus the f16 KV cache.
 
-The tuned kernels read prompts 14 to 18 times faster than the first console
-build and generate about 3.4 times faster, with the same answers. Long
+The tuned kernels read prompts 13 to 16 times faster than the first console
+build and generate about 3.5 times faster, with the same answers. Long
 contexts gained the most from the new attention: after a 16,384-token prompt,
 Qwen 2.5 Coder 7B reads at 387 tok/s and generates at 50, where generating
 at that depth used to run at 23. On Llama 3.2 3B, where the llama.cpp port
-used to generate half again as fast as ts5, the two are now even (124 tok/s
-to ts5's 122). Speculative decoding adds its gain on top of all of that:
+used to generate half again as fast as ts5, ts5 is now ahead (131 tok/s to
+the port's 124). Speculative decoding adds its gain on top of all of that:
 editing code with Coder 7B runs at 102 tok/s against 64 with drafting off,
 with byte-identical output, and free chat stays within 4% either way
 because drafting backs off where nothing is accepted.
