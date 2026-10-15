@@ -64,11 +64,13 @@ Three pages; **L1** goes to the next: Models, Chat, Settings.
 | OPTIONS | close the title |
 
 **Chat**: a conversation with the serving model, the reply streaming in as
-it's written (code in blocks, a thinking model's thinking dimmed). Hold R1
+it's written (code in blocks, a thinking model's thinking dimmed). Cross
+opens the console's own on-screen keyboard (the system's, which the
+controller and a USB or Bluetooth keyboard type on) for a message. Or hold R1
 and talk into the controller; let go, and what you said is turned into text
 on the console's CPU (whisper.cpp, with a speech model from
 `scripts/ts5-ps5.sh speech`) and sent. A message can also come from the PC
-(`scripts/ts5-ps5.sh chat`); a keyboard comes next. Each reply is read
+(`scripts/ts5-ps5.sh chat`). Each reply is read
 aloud as it comes in, a sentence at a time, in a Kokoro voice made on the
 console's CPU (with Kokoro's files from `scripts/ts5-ps5.sh voice`; Settings
 turns it off, picks the voice and speed, and puts it on the TV or the
@@ -78,6 +80,7 @@ oldest exchanges are left out of the requests (they stay on screen).
 
 | Button | |
 | --- | --- |
+| cross, or Enter on a USB or Bluetooth keyboard | type a message on the console's keyboard (Enter sends it) |
 | R1 (hold) | talk: the mic is open while it's held, and the message goes when you let go (a reply still coming stops, and so does its voice) |
 | up / down | scroll; at the bottom, the page follows the reply |
 | triangle | stop the reply, and its voice |
@@ -88,8 +91,8 @@ oldest exchanges are left out of the requests (they stay on screen).
 time, keeping the rest of the file). The longest chat reply, the chat's
 frames a second while a reply comes in, the speech model and its CPU threads
 for R1 talk, spoken replies (on or off, TV or controller speaker, the voice,
-its speed and CPU threads), whether a Tavily key is set for web search (it's set from the
-PC; square twice removes it), keeping the console awake, and how long until
+its speed and CPU threads), whether a Tavily key is set for web search (cross types it on the
+console's keyboard, starting from the saved one so a typo can be fixed; square twice removes it), keeping the console awake, and how long until
 the dark screen. Changes count at once, or where they can't, at the next use
 (the page says which).
 
@@ -97,6 +100,7 @@ the dark screen. Changes count at once, or where they can't, at the next use
 | --- | --- |
 | up / down | choose a setting |
 | left / right | change it (cross steps through its choices) |
+| cross, on the Tavily key | type it on the console's keyboard |
 | square | back to its default |
 | circle | back to Models |
 
@@ -146,7 +150,7 @@ On the console, everything lives in the title's own folder,
 | `ts5.args` | what to serve at start: `serve -m MODEL [-c N\|auto] [--port N]`. With no `-c`, or `-c auto`, the context is as long as fits in the GPU's memory (up to the model's own limit); the log's "context N (what fits)" line says how long |
 | `ts5.cmd` | a command to run now: `serve`, `check`, `bench` (`-m MODEL`), or `stop`. `check` and `bench` take `--env NAME=VALUE` (engine settings for that job only, on a load of its own) and `check` takes `--fresh 1` (run the CPU again) |
 | `ts5.once` | a command to run at the next start, before `ts5.args` |
-| `ts5.env` | settings, `NAME=VALUE`, read at start and written by the Settings page: engine settings (the `getenv` calls in `engine/src/vk_backend.cpp`), such as `TS5_KV=q8` for an 8-bit KV cache (half the memory, so about twice the context; with no `-c`, only for models whose whole context doesn't fit in f16), and the Settings page's: `TS5_CHAT_MAX_TOKENS` (longest reply, 2048), `TS5_CHAT_FPS` (frames a second while a reply comes in, 10), `TS5_WHISPER_MODEL` (the speech model; the first `ggml-*.bin` without it), `TS5_WHISPER_THREADS` (6), `TS5_SPEAK` (1: replies read aloud; 0: not), `TS5_SPEAK_OUT` (`tv`, or `controller`), `TS5_TTS_VOICE` (Kokoro's voice, `af_heart` without it), `TS5_TTS_SPEED` (1), `TS5_TTS_THREADS` (6), `TS5_KEEP_AWAKE` (1; 0 lets the console rest), `TS5_DIM_AFTER` (seconds to the dark screen, 600; 0: never) and `TAVILY_API_KEY`. `scripts/ts5-ps5.sh env` replaces the engine settings and keeps these. The log shows a setting whose name has `KEY` or `TOKEN` in it as `(set)` |
+| `ts5.env` | settings, `NAME=VALUE`, read at start and written by the Settings page: engine settings (the `getenv` calls in `engine/src/vk_backend.cpp`), such as `TS5_KV=q8` for an 8-bit KV cache (half the memory, so about twice the context; with no `-c`, only for models whose whole context doesn't fit in f16), and the Settings page's: `TS5_CHAT_MAX_TOKENS` (longest reply, 2048), `TS5_CHAT_FPS` (frames a second while a reply comes in, 10), `TS5_WHISPER_MODEL` (the speech model; the first `ggml-*.bin` without it), `TS5_WHISPER_THREADS` (6), `TS5_SPEAK` (1: replies read aloud; 0: not), `TS5_SPEAK_OUT` (`tv`, or `controller`), `TS5_TTS_VOICE` (Kokoro's voice, `af_heart` without it), `TS5_TTS_SPEED` (1), `TS5_TTS_THREADS` (6), `TS5_KEEP_AWAKE` (1; 0 lets the console rest), `TS5_DIM_AFTER` (seconds to the dark screen, 600; 0: never) and `TAVILY_API_KEY`. `TS5_KEYBOARD=0` leaves a USB keyboard alone (Enter then doesn't open the console's keyboard). `scripts/ts5-ps5.sh env` replaces the engine settings and keeps these. The log shows a setting whose name ends in `_KEY` or `_TOKEN` as `(set)` |
 | `press`, `screenshot` | controller buttons; the next frame to `screen.bmp` |
 | `chat` | a message for the chat page: the file's text |
 | `audiotest` | run the audio test (someone has to talk into the controller after the beep); the recording goes to `audiotest.wav` |
