@@ -33,7 +33,8 @@
 //               TAVILY_API_KEY=tvly-... for web search (engine/src/websearch.h)
 //   press       controller buttons, as words: up down cross square ...;
 //               hold-r1 and release-r1 hold a button down and let it go
-//   screenshot  the next frame goes to screen.bmp
+//   screenshot  the next frame goes to screen.bmp, and the words drawn on
+//               it, one string a line, to screen.txt
 //   audiotest   tones on the TV and the controller, five seconds from its
 //               mic played back (audio_probe.h), the recording in audiotest.wav
 //   chat        a message for the chat page, the file's text as it is
@@ -124,8 +125,6 @@ namespace {
 #ifndef TS5_TITLE_ID
 #define TS5_TITLE_ID "PPSA99555"
 #endif
-// The title's folder as the PC sees it, for messages.
-#define TS5_FTP_DIR "/data/homebrew/" TS5_TITLE_ID
 constexpr const char *kModels = TS5_HOME "/models";
 constexpr const char *kArgs = TS5_HOME "/ts5.args";
 constexpr const char *kOnce = TS5_HOME "/ts5.once";
@@ -137,6 +136,7 @@ constexpr const char *kResults = TS5_HOME "/results.tsv";
 constexpr const char *kPress = TS5_HOME "/press";
 constexpr const char *kShot = TS5_HOME "/screenshot";
 constexpr const char *kScreen = TS5_HOME "/screen.bmp";
+constexpr const char *kScreenText = TS5_HOME "/screen.txt";
 constexpr const char *kAudioTest = TS5_HOME "/audiotest";
 constexpr const char *kAudioWav = TS5_HOME "/audiotest.wav";
 constexpr const char *kChat = TS5_HOME "/chat";
@@ -432,6 +432,15 @@ std::string api_url() {
     return "http://" + (ip.empty() ? std::string("<console ip>") : ip) + ":" + std::to_string(api_port) + "/v1";
 }
 
+// The address apps use, or "" while the console isn't on a network.
+std::string network_url() {
+    {
+        std::lock_guard<std::mutex> lk(ip_mutex);
+        if (ip.empty()) return {};
+    }
+    return api_url();
+}
+
 }  // namespace
 
 int main(int, char **) {
@@ -441,7 +450,8 @@ int main(int, char **) {
     if (freopen(kLog, "a", stdout)) {
         setvbuf(stdout, nullptr, _IOLBF, 0);
     } else {
-        notify(std::string("TokenStation5: can't write its log in " TS5_FTP_DIR ": ") + strerror(errno));
+        notify("TokenStation5 can't save to its folder, so settings and usage won't be kept. Check that the PS5 has "
+               "free storage.");
     }
     if (freopen(kLog, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
     printf("ts5-title: TokenStation5 %s\n", TS5_VERSION);
@@ -474,7 +484,9 @@ int main(int, char **) {
     std::string err;
     ts5::VkContext *ctx = ts5::create_vk_context(0, true, err);
     if (!ctx) {
-        notify("TokenStation5: no GPU: " + err);
+        printf("ts5-title: no GPU: %s\n", err.c_str());
+        notify("TokenStation5 couldn't start the PS5's graphics chip and is closing. Open it again, or restart the PS5 "
+               "if it keeps happening.");
         sceKernelUsleep(5000000);
         leave("exit");
     }
@@ -519,8 +531,19 @@ int main(int, char **) {
     bool usage_ok = true;
     api_port = opts.port;
     ip = lan_address();
-    if (!server.start(opts.host, opts.port, err)) notify("TokenStation5: the API can't listen: " + err);
-    app::Runner runner(ctx, server, lib, lib_mutex, notify, api_url);
+    if (!server.start(opts.host, opts.port, err)) {
+        printf("ts5-title: the API can't listen: %s\n", err.c_str());
+        // A --host that isn't an address: all networks instead.
+        if (err.compare(0, 9, "bad host ") == 0 && server.start("0.0.0.0", opts.port, err)) {
+            opts.host = "0.0.0.0";
+            notify("TokenStation5's saved network setting didn't work, so it listens on all networks now.");
+        } else {
+            if (err.compare(0, 9, "bad host ") == 0) printf("ts5-title: the API can't listen: %s\n", err.c_str());
+            notify("Apps can't reach TokenStation5: its network port " + std::to_string(opts.port) +
+                   " is in use. Restart the PS5 and open TokenStation5 again.");
+        }
+    }
+    app::Runner runner(ctx, server, lib, lib_mutex, notify, network_url);
     app::Chat chat(opts.host, opts.port);
     int user = -1;
     sceUserServiceGetInitialUser(&user);
@@ -544,7 +567,7 @@ int main(int, char **) {
         have_startup = !startup.path.empty();
     }
     if (have_startup) runner.push(startup);
-    else notify("TokenStation5: no model. Copy a .gguf to " TS5_FTP_DIR "/models");
+    else notify("TokenStation5: no models yet. Open it to see which to add.");
 
     ui::Dashboard dash(fonts, ts5_logo_data, (size_t)(ts5_logo_data_end - ts5_logo_data));
     ui::Canvas canvas(kWidth, kHeight);
@@ -703,7 +726,10 @@ int main(int, char **) {
         ui::View v;
         v.version = TS5_VERSION;
         v.url = api_url();
-        v.folder = TS5_FTP_DIR "/models";
+        {
+            std::lock_guard<std::mutex> lk(ip_mutex);
+            v.on_network = !ip.empty();
+        }
         v.gpu_memory = ctx->device_memory();
         v.n_ctx = opts.n_ctx;
         {
@@ -848,13 +874,18 @@ int main(int, char **) {
         const bool tick = t - last_draw > period;
         const bool chat_dirty = on_chat && chat_version != drawn_chat && (!chat_active || tick);
         if (dirty || tick || chat_dirty) {
+            // With a screenshot, the words drawn too (screen.txt).
+            std::vector<std::string> words;
+            if (shot) ui::Canvas::record = &words;
             if (dark)
                 draw_resting(canvas, fonts.get("small"),
-                             "TokenStation5" + (v.status.serving.empty() ? std::string() : " \xC2\xB7 " + v.url) +
+                             "TokenStation5" +
+                                 (v.status.serving.empty() || !v.on_network ? std::string() : " \xC2\xB7 " + v.url) +
                                  "  \xC2\xB7  press any button",
                              t);
             else
                 dash.draw(canvas, v);
+            ui::Canvas::record = nullptr;
             if (screen && !display.present(canvas.pixels(), err)) {
                 printf("ts5-title: the picture stopped: %s\n", err.c_str());
                 screen = false;
@@ -863,6 +894,10 @@ int main(int, char **) {
                 // The file goes once the picture is written: whoever asked
                 // reads it after that.
                 if (!canvas.save_bmp(kScreen)) printf("ts5-title: can't write %s\n", kScreen);
+                if (FILE *f = fopen(kScreenText, "w")) {
+                    for (const std::string &w : words) fprintf(f, "%s\n", w.c_str());
+                    fclose(f);
+                }
                 unlink(kShot);
             }
             drawn_version = version;

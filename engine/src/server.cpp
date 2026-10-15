@@ -503,10 +503,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                     bool failed = false;
                     u.rec.searches++;
                     results.push_back(web_search(c.arguments, log, &failed));
-                    if (failed) {  // the log line's reason, without the query and the time
-                        search_failed = log.substr(log.find("\": ") + 3);
-                        search_failed = search_failed.substr(0, search_failed.rfind(" ("));
-                    }
+                    if (failed) search_failed = search_failure(results.back());  // in plain words
                     else found.push_back(results.back());
                 }
                 fprintf(stderr, "ts5: %s %s\n", id.c_str(), log.c_str());

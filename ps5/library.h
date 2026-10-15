@@ -14,7 +14,12 @@ struct ModelInfo {
     uint64_t size = 0;
     int64_t mtime = 0;
     bool runnable = false;
-    std::string error;  // why not, when not
+    std::string error;  // why not, when not, as the engine says it (for the log)
+    // Shorter than its header says (error says so too), or its header isn't
+    // there yet. copying: and it grew since the last scan (or is new), so it
+    // is still arriving; once it stops growing it is incomplete.
+    bool incomplete = false, copying = false;
+    uint64_t full_size = 0;  // the size its header says it has; 0 if unknown
     std::string name;   // general.name, or the file name without .gguf
     std::string arch, quant;
     double params = 0;  // parameter count

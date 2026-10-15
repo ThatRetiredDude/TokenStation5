@@ -41,7 +41,7 @@ public:
     void draw_details(Canvas &c, const SettingsInfo &info, int x, int y, int w, int h);
 
 private:
-    const Font &h2_, &body_, &bodyb_, &small_, &smallb_, &mono_;
+    const Font &h2_, &body_, &bodyb_, &small_, &smallb_;
     int sel_ = 0;
     int scroll_ = 0;
     double confirm_at_ = -1e9;  // square once on a key: press again to remove it

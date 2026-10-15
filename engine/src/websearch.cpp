@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #include "net.h"
@@ -27,6 +28,10 @@ std::string clip(const std::string &s, size_t n) {
     if (space != std::string::npos && space > n / 2) cut = space;
     return s.substr(0, cut) + " ...";
 }
+
+// A failed search, as the model reads it: kFailed, why in plain words, kTell.
+const char *const kFailed = "The search failed: ";
+const char *const kTell = ". Tell the user, and answer from what you know if you can.";
 
 }  // namespace
 
@@ -106,6 +111,11 @@ Json web_search_tool(const std::string &today) {
     return j;
 }
 
+std::string search_failure(const std::string &result) {
+    if (result.compare(0, strlen(kFailed), kFailed) != 0) return result;
+    return result.substr(strlen(kFailed), result.rfind(kTell) - strlen(kFailed));
+}
+
 std::string web_search(const std::string &arguments, std::string &log, bool *failed) {
     Json args;
     std::string query;
@@ -135,22 +145,27 @@ std::string web_search(const std::string &arguments, std::string &log, bool *fai
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     char took[32];
     snprintf(took, sizeof took, "%.1f s", secs);
+    // Why a search failed: the network's or Tavily's own words in the log,
+    // plain ones for the model, which tells the user.
     if (!ok) {
+        const std::string why = err.find("certificate") != std::string::npos || err.find("TLS") != std::string::npos
+                                    ? "Tavily's identity couldn't be checked"
+                                    : "the PS5 couldn't reach Tavily";
         if (failed) *failed = true;
         log = "web_search \"" + query + "\": " + err + " (" + took + ")";
-        return "The search failed: " + err + ". Tell the user, and answer from what you know if you can.";
+        return kFailed + why + kTell;
     }
     Json r;
     if (resp.status != 200 || !Json::parse(resp.body, r)) {
-        std::string detail = r["detail"]["error"].str(r["detail"].str(r["error"].str()));
-        std::string why = resp.status == 401   ? "the Tavily API key was refused"
-                          : resp.status == 432 ? "the Tavily plan's search limit is used up"
-                          : resp.status == 429 ? "too many searches at once"
-                                               : "Tavily answered HTTP " + std::to_string(resp.status);
-        if (!detail.empty()) why += " (" + detail + ")";
+        const std::string detail = r["detail"]["error"].str(r["detail"].str(r["error"].str()));
+        const std::string why = resp.status == 401   ? "the Tavily key was refused"
+                                : resp.status == 432 ? "the Tavily plan's searches are used up"
+                                : resp.status == 429 ? "Tavily got too many searches at once"
+                                                     : "Tavily had a problem";
         if (failed) *failed = true;
-        log = "web_search \"" + query + "\": " + why + " (" + took + ")";
-        return "The search failed: " + why + ". Tell the user, and answer from what you know if you can.";
+        log = "web_search \"" + query + "\": Tavily answered HTTP " + std::to_string(resp.status) +
+              (detail.empty() ? std::string() : " (" + detail + ")") + " (" + took + ")";
+        return kFailed + why + kTell;
     }
     std::string out = "Results for \"" + query + "\":";
     int i = 0;
