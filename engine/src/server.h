@@ -6,6 +6,7 @@
 #include <thread>
 
 #include "engine.h"
+#include "usage.h"
 
 namespace ts5 {
 
@@ -24,6 +25,10 @@ public:
     // as the reason, such as "loading" or "no model".
     void set_engine(Engine *e, const std::string &model_name, const std::string &unavailable = "no model");
     int port() const { return port_; }
+    // Called with each completions request's usage (usage.h) on its thread,
+    // once its reply is sent and the generation lock is let go, so the next
+    // generation never waits on it. Set before start().
+    void set_on_usage(std::function<void(const UsageRecord &)> f) { state_.on_usage = std::move(f); }
 
     // For a status display.
     struct Activity {
@@ -41,6 +46,7 @@ public:
         std::string tool_format = "none";  // the model's (tools.h), for /v1/models
         std::mutex stats;
         Activity activity;
+        std::function<void(const UsageRecord &)> on_usage;
     };
 
 private:
@@ -54,6 +60,7 @@ private:
 // process ends. Returns only when it cannot listen; on_listening runs once
 // the socket is up.
 int serve(Engine &e, const std::string &model_name, const std::string &host, int port,
-          const std::function<void(int port)> &on_listening = nullptr);
+          const std::function<void(int port)> &on_listening = nullptr,
+          const std::function<void(const UsageRecord &)> &on_usage = nullptr);
 
 }  // namespace ts5

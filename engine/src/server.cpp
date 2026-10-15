@@ -9,6 +9,7 @@
 
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -139,9 +140,51 @@ int request_counter = 0;
 
 std::string health_body(const std::string &status) { return "{\"status\":" + json_escape(status) + "}"; }
 
-void handle(int fd, Server::State &state) {
+double now_ms() {
+    using namespace std::chrono;
+    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
+
+// A request's usage record as handle() fills it in. accept_loop's catch
+// writes it when handle() throws first, with an empty kind if that was
+// before the request was read.
+struct Usage {
+    UsageRecord rec;
+    double t0 = 0;        // when the request was read
+    bool pending = true;  // a completions request (or one not read yet) whose record isn't written
+    bool closed = false;  // its connection is closed
+};
+
+// Hands the record to the hook, once.
+void report(Server::State &state, Usage &u) {
+    using namespace std::chrono;
+    u.pending = false;
+    u.rec.total_ms = std::lround(now_ms() - u.t0);
+    u.rec.time_ms = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+    if (state.on_usage) state.on_usage(u.rec);
+}
+
+// usage.tsv's why for a 503, from State::unavailable: "no model",
+// "loading X", "running the GPU check" or "running the speed test".
+const char *unavailable_why(const std::string &s) {
+    if (s.rfind("loading", 0) == 0) return "loading";
+    if (s.find("check") != std::string::npos) return "busy_check";
+    if (s.find("speed") != std::string::npos) return "busy_bench";
+    return "no_model";
+}
+
+void handle(int fd, Server::State &state, Usage &u) {
     Request r;
-    if (!read_request(fd, r)) { close(fd); return; }
+    if (!read_request(fd, r)) {
+        u.pending = false;
+        u.closed = true;
+        close(fd);
+        return;
+    }
+    u.t0 = now_ms();
+    const bool completions = r.method == "POST" && (r.path == "/v1/chat/completions" || r.path == "/v1/completions" ||
+                                                    r.path == "/chat/completions" || r.path == "/completions");
+    u.pending = completions;  // the only requests recorded
     if (r.method == "OPTIONS") {
         send_all(fd, "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n"
                      "Access-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
@@ -153,8 +196,20 @@ void handle(int fd, Server::State &state) {
     // stays for the whole request.
     std::unique_lock<std::mutex> lk(state.gen, std::defer_lock);
     auto engine = [&]() -> Engine * {
-        if (!lk.owns_lock()) lk.lock();
+        if (!lk.owns_lock() && !lk.try_lock()) {
+            const double w0 = now_ms();  // behind another generation
+            lk.lock();
+            u.rec.wait_ms = std::lround(now_ms() - w0);
+        }
         return state.engine;
+    };
+    // A completions request ends here: the generation lock let go, the
+    // connection closed, then its usage record.
+    auto done = [&] {
+        if (lk.owns_lock()) lk.unlock();
+        close(fd);
+        u.closed = true;
+        report(state, u);
     };
     if (r.path == "/health") {
         // Answers at once: never waits for a generation.
@@ -185,15 +240,19 @@ void handle(int fd, Server::State &state) {
                                                             ",\"web_search\":" +
                                                             (can && !tavily_key().empty() ? "true" : "false") + "}}") +
                                        "]}"));
-    } else if (r.method == "POST" && (r.path == "/v1/chat/completions" || r.path == "/v1/completions" ||
-                                      r.path == "/chat/completions" || r.path == "/completions")) {
+    } else if (completions) {
+        const bool chat = r.path.find("chat") != std::string::npos;
+        u.rec.kind = chat ? "chat" : "completion";
         Json req;
         if (!Json::parse(r.body, req)) {
             send_all(fd, response(400, error_body("invalid JSON")));
-            close(fd);
+            u.rec.status = 400;
+            u.rec.finish = "refused";
+            u.rec.why = "bad_json";
+            done();
             return;
         }
-        const bool chat = r.path.find("chat") != std::string::npos;
+        u.rec.stream = req["stream"].boolean(false);
         Engine *ep = engine();
         if (!ep) {
             std::string why;
@@ -202,11 +261,15 @@ void handle(int fd, Server::State &state) {
                 why = state.unavailable;
             }
             send_all(fd, response(503, error_body(why == "no model" ? "no model is loaded" : why)));
-            close(fd);
+            u.rec.status = 503;
+            u.rec.finish = "refused";
+            u.rec.why = unavailable_why(why);
+            done();
             return;
         }
         Engine &e = *ep;
         const std::string model = state.model;
+        u.rec.model = model;
         const std::string date = today();
         // Tools: the client's, plus web_search when a Tavily key is set and
         // the request does not turn it off ("web_search": false).
@@ -247,6 +310,7 @@ void handle(int fd, Server::State &state) {
             state.activity.generating = true;
         }
         const std::string id = std::string(chat ? "chatcmpl-" : "cmpl-") + std::to_string(++request_counter);
+        u.rec.id = id;
         const long created = (long)time(nullptr);
         auto chunk_json = [&](const std::string &delta, const char *finish) {
             std::string fin = finish ? std::string("\"") + finish + "\"" : "null";
@@ -270,6 +334,7 @@ void handle(int fd, Server::State &state) {
         int max_tokens = sp.max_tokens;
         std::string search_failed;      // why the first failed search failed
         std::vector<std::string> found;  // what the searches found, for a forced answer
+        double first = -1;               // when the first text came
         // A turn of the model's; with web_search, ts5 answers the model's
         // searches and lets it go on, so one request can be several turns.
         for (int round = 0;; round++) {
@@ -278,6 +343,7 @@ void handle(int fd, Server::State &state) {
             std::string text;
             size_t sent = 0;  // bytes of this turn's `text` already streamed
             auto on_text = [&](const std::string &piece) {
+                if (first < 0) first = now_ms();
                 text += piece;
                 for (auto &s : stops) {
                     size_t at = s.empty() ? std::string::npos : text.find(s);
@@ -331,6 +397,7 @@ void handle(int fd, Server::State &state) {
                 turn.finish = "stop";
             } else {
                 ok = e.generate(toks, sp, on_text, turn, err);
+                if (!ok) u.rec.why = (int)toks.size() + 1 > e.backend().n_ctx() ? "too_long" : "gpu_error";
             }
             st.prompt_tokens += turn.prompt_tokens;
             st.prompt_evaluated += turn.prompt_evaluated;
@@ -389,6 +456,7 @@ void handle(int fd, Server::State &state) {
                     log = "web_search: skipped after a failed search";
                 } else {
                     bool failed = false;
+                    u.rec.searches++;
                     results.push_back(web_search(c.arguments, log, &failed));
                     if (failed) {  // the log line's reason, without the query and the time
                         search_failed = log.substr(log.find("\": ") + 3);
@@ -417,7 +485,7 @@ void handle(int fd, Server::State &state) {
                                  "},\"finish_reason\":null}]}\n\n");
             std::string last = chunk_json("", st.finish.c_str());
             last.insert(last.size() - 1, ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st));
-            send_all(fd, "data: " + last + "\n\ndata: [DONE]\n\n");
+            client_ok &= send_all(fd, "data: " + last + "\n\ndata: [DONE]\n\n");
         } else {
             std::string body;
             if (chat)
@@ -432,7 +500,7 @@ void handle(int fd, Server::State &state) {
                        ",\"model\":" + json_escape(model) + ",\"choices\":[{\"index\":0,\"text\":" + json_escape(content) +
                        ",\"finish_reason\":\"" + st.finish + "\"}]";
             body += ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st) + "}";
-            send_all(fd, response(200, body));
+            client_ok &= send_all(fd, response(200, body));
         }
         fprintf(stderr, "ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, draft %d/%d, sample %.0f ms\n",
                 id.c_str(), st.prompt_tokens, st.prompt_evaluated,
@@ -444,10 +512,27 @@ void handle(int fd, Server::State &state) {
         // this request, in serve mode as everywhere else.
         std::string prof = e.backend().take_profile();
         if (!prof.empty()) fputs(prof.c_str(), stderr);
+        UsageRecord &ur = u.rec;
+        ur.status = !ok && !stream ? 500 : 200;
+        ur.finish = !ok ? "error" : !client_ok ? "left" : st.finish;
+        ur.prompt = st.prompt_tokens;
+        ur.prompt_new = st.prompt_evaluated;
+        ur.prompt_ms = std::lround(st.prompt_ms);
+        ur.gen = st.gen_tokens;
+        ur.gen_ms = std::lround(st.gen_ms);
+        ur.draft = st.drafted;
+        ur.draft_ok = st.draft_accepted;
+        ur.sample_ms = std::lround(st.sample_ms);
+        ur.search_failed = !search_failed.empty();
+        ur.tool_calls = (int64_t)calls.size();
+        ur.first_ms = first < 0 ? 0 : std::lround(first - u.t0);
+        done();
+        return;
     } else {
         send_all(fd, response(404, error_body("not found: " + r.path)));
     }
     close(fd);
+    u.closed = true;
 }
 
 }  // namespace
@@ -515,7 +600,9 @@ Server::Activity Server::activity() {
 void Server::accept_loop() {
     const int one = 1;
     while (true) {
-        int c = accept(sock_, nullptr, nullptr);
+        sockaddr_in peer{};
+        socklen_t len = sizeof peer;
+        int c = accept(sock_, (sockaddr *)&peer, &len);
         if (c < 0) {
             if (errno == EINTR || errno == ECONNABORTED) continue;
             // The console's network can drop (link down, a new DHCP lease) and
@@ -529,22 +616,34 @@ void Server::accept_loop() {
         }
         fcntl(c, F_SETFD, FD_CLOEXEC);
         setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-        std::thread([this, c] {
+        char ip[INET_ADDRSTRLEN] = {};
+        if (peer.sin_family != AF_INET || !inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof ip)) ip[0] = 0;
+        std::thread([this, c, client = std::string(ip)] {
+            Usage u;
+            u.rec.client = client;
+            u.t0 = now_ms();
             // A request that fails (out of memory, say) ends its connection,
-            // not the server.
+            // not the server; a completions request still gets its record.
             try {
-                handle(c, state_);
+                handle(c, state_, u);
             } catch (const std::exception &ex) {
                 fprintf(stderr, "ts5: request failed: %s\n", ex.what());
-                close(c);
+                if (!u.closed) close(c);
+                if (u.pending) {
+                    u.rec.status = 500;
+                    u.rec.finish = "error";
+                    u.rec.why = "exception";
+                    report(state_, u);
+                }
             }
         }).detach();
     }
 }
 
 int serve(Engine &e, const std::string &model_name, const std::string &host, int port,
-          const std::function<void(int)> &on_listening) {
+          const std::function<void(int)> &on_listening, const std::function<void(const UsageRecord &)> &on_usage) {
     static Server server;
+    server.set_on_usage(on_usage);
     std::string err;
     if (!server.start(host, port, err)) {
         fprintf(stderr, "ts5: %s\n", err.c_str());
