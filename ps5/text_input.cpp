@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "runner.h"
@@ -50,9 +51,43 @@ constexpr size_t kMaxChars = 2048;
 // Right after it opens, the dialog can still read as None for a moment.
 constexpr double kStartGrace = 1.5;
 
+// libSceKeyboard's report: the keys held at one moment, as USB HID usages.
+struct KeyboardData {
+    uint64_t timestamp_us;
+    uint8_t intercepted;  // the system has the keyboard (its own keyboard is up)
+    uint8_t reserved0[7];
+    uint8_t connected;
+    uint8_t reserved1[3];
+    int32_t length;  // keys in keycodes
+    uint32_t leds;
+    uint32_t modifiers;
+    uint16_t keycodes[16];
+    uint8_t reserved2[32];
+};
+static_assert(sizeof(KeyboardData) == 96, "libSceKeyboard's report is 96 bytes");
+static_assert(offsetof(KeyboardData, connected) == 0x10 && offsetof(KeyboardData, keycodes) == 0x20,
+              "libSceKeyboard's report");
+
+constexpr uint16_t kSysmoduleKeyboard = 0x0106;
+constexpr uint16_t kUsageEnter = 0x28, kUsageKeypadEnter = 0x58;
+constexpr int kKeyboardSlots = 12;
+// How often to look for a keyboard while none is open.
+constexpr double kOpenEvery = 2;
+
+bool holds_enter(const KeyboardData &d) {
+    const int n = std::min(std::max(d.length, 0), 16);
+    for (int i = 0; i < n; i++)
+        if (d.keycodes[i] == kUsageEnter || d.keycodes[i] == kUsageKeypadEnter) return true;
+    return false;
+}
+
 }  // namespace
 
 extern "C" {
+int sceKeyboardInit(void);
+int sceKeyboardOpen(int32_t user, int32_t type, int32_t index, const void *param);
+int sceKeyboardReadState(int32_t handle, KeyboardData *data);
+int sceKeyboardRead(int32_t handle, KeyboardData *data, int32_t count);
 int sceCommonDialogInitialize(void);
 int sceSysmoduleLoadModule(uint16_t id);
 int sceUserServiceGetForegroundUser(int32_t *user);
@@ -141,6 +176,64 @@ TextInput::State TextInput::poll(std::string &text) {
     std::fill(buffer_.begin(), buffer_.end(), u'\0');
     open_ = false;
     return s;
+}
+
+bool EnterKey::open_keyboard(double now) {
+    if (!tried_) {
+        tried_ = true;
+        const char *e = getenv("TS5_KEYBOARD");
+        if (e && strcmp(e, "0") == 0) return false;
+        // The module first: without it, the first call crashes the title.
+        const int mod = sceSysmoduleLoadModule(kSysmoduleKeyboard);
+        const int init = mod >= 0 ? sceKeyboardInit() : -1;
+        printf("ts5-title: keys: module 0x%08x, init 0x%08x\n", (unsigned)mod, (unsigned)init);
+        ready_ = mod >= 0 && init >= 0;
+    }
+    if (!ready_ || handle_ >= 0 || now < next_open_) return handle_ >= 0;
+    next_open_ = now + kOpenEvery;
+    int32_t user = -1;
+    if (sceUserServiceGetForegroundUser(&user) != 0 || user < 0) sceUserServiceGetInitialUser(&user);
+    int ret = -1;
+    for (int i = 0; i < kKeyboardSlots && handle_ < 0; i++) {
+        ret = sceKeyboardOpen(user, 0, i, nullptr);
+        if (ret >= 0) {
+            handle_ = ret;
+            printf("ts5-title: keys: keyboard %d open\n", i);
+        }
+    }
+    static int last_ret = 0;
+    if (handle_ < 0 && ret != last_ret) printf("ts5-title: keys: no keyboard (0x%08x)\n", (unsigned)ret);
+    last_ret = ret;
+    return handle_ >= 0;
+}
+
+bool EnterKey::poll(bool active, double now) {
+    if (!active && !ready_) return false;
+    if (!open_keyboard(now)) return false;
+    KeyboardData d[16];
+    if (active && !was_active_) {
+        // A press from before (the Enter that closed the console's keyboard)
+        // waits to be let go.
+        memset(d, 0, sizeof d[0]);
+        wait_release_ = sceKeyboardReadState(handle_, d) >= 0 && holds_enter(d[0]);
+        down_ = false;
+    }
+    was_active_ = active;
+    memset(d, 0, sizeof d);
+    const int n = sceKeyboardRead(handle_, d, 16);
+    if (!active || n <= 0) return false;
+    bool released = false;
+    for (int i = 0; i < n; i++) {
+        if (!d[i].connected || d[i].intercepted) continue;
+        if (holds_enter(d[i])) {
+            down_ = !wait_release_;
+        } else {
+            released = released || down_;
+            down_ = wait_release_ = false;
+        }
+    }
+    if (released) printf("ts5-title: keys: enter\n");
+    return released;
 }
 
 std::u16string utf16(const std::string &s) {

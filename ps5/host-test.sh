@@ -317,6 +317,13 @@ printf '(cancel)' > "$home/typed"
 wait_log "^ts5-title: keyboard: canceled$"
 sleep 0.5
 [ "$(grep -c "^ts5-title: chat: message by keyboard" "$home/ts5.log")" = 1 ] || fail "a canceled keyboard sent a message"
+echo "== keyboard: Enter on a USB keyboard opens it too"
+: > "$home/keys"
+wait_log "^ts5-title: keys: enter$"
+wait_lines "^ts5-title: keyboard: open 0x00000000, user 0x00000001$" 3 30
+grep -q "^ts5-title: keys: module 0x00000000, init 0x00000000$" "$home/ts5.log" || fail "libSceKeyboard didn't start"
+printf '(cancel)' > "$home/typed"
+wait_lines "^ts5-title: keyboard: canceled$" 2 30
 press square
 
 echo "== talk: R1 held on the chat page, with no speech model, says so"
