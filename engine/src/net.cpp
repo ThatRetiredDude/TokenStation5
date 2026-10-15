@@ -6,22 +6,27 @@
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <mutex>
+#include <thread>
 
 #ifdef TS5_HTTPS
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/error.h>
 #include <mbedtls/platform_util.h>
+#include <mbedtls/sha256.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 #include <psa/crypto.h>
@@ -245,6 +250,31 @@ struct Conn {
             return false;
         }
     }
+    // What has arrived, up to cap bytes: how many, 0 once the server has
+    // closed, -1 on an error (err says). For a body too big to hold.
+    int read_some(char *buf, size_t cap, std::string &err) {
+        while (true) {
+#ifdef TS5_HTTPS
+            if (tls) {
+                int n = mbedtls_ssl_read(&ssl, (unsigned char *)buf, cap);
+                if (n > 0) return n;
+                if (n == 0 || n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == MBEDTLS_ERR_NET_CONN_RESET_) return 0;
+                if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE ||
+                    n == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET)
+                    continue;
+                err = n == -0x004C ? std::string("timed out waiting for the server")  // MBEDTLS_ERR_NET_RECV_FAILED
+                                   : "TLS read failed (-0x" + hex(-n) + ")";
+                return -1;
+            }
+#endif
+            ssize_t n = recv(fd, buf, cap, 0);
+            if (n >= 0) return (int)n;
+            if (errno == EINTR) continue;
+            err = errno == EAGAIN || errno == EWOULDBLOCK ? std::string("timed out waiting for the server")
+                                                         : std::string("recv: ") + strerror(errno);
+            return -1;
+        }
+    }
     static std::string hex(int v) {
         char b[16];
         snprintf(b, sizeof b, "%04x", v);
@@ -390,6 +420,471 @@ bool dechunk(const std::string &in, std::string &out) {
     return true;
 }
 
+// ---- Downloads (http_get_file) ----
+
+// The SHA-256 of what has been written so far. Its state goes out and comes
+// back as bytes, so a download can go on from a checkpoint (Sha256Resume).
+#ifdef TS5_HTTPS
+struct Hasher {
+    mbedtls_sha256_context ctx;
+    Hasher() { mbedtls_sha256_init(&ctx); }
+    ~Hasher() { mbedtls_sha256_free(&ctx); }
+    static bool available() { return true; }
+    void start() { mbedtls_sha256_starts(&ctx, 0); }
+    void update(const char *p, size_t n) { mbedtls_sha256_update(&ctx, (const unsigned char *)p, n); }
+    // The digest in lowercase hex. Ends the hash.
+    std::string finish() {
+        unsigned char d[32];
+        mbedtls_sha256_finish(&ctx, d);
+        char hex[65];
+        for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", d[i]);
+        return hex;
+    }
+    std::vector<unsigned char> state() const {
+        const unsigned char *p = (const unsigned char *)&ctx;
+        return std::vector<unsigned char>(p, p + sizeof ctx);
+    }
+    bool restore(const std::vector<unsigned char> &s) {
+        if (s.size() != sizeof ctx) return false;
+        memcpy(&ctx, s.data(), sizeof ctx);
+        return true;
+    }
+};
+#else
+// Without Mbed TLS there is no SHA-256, so a download can't be checked.
+struct Hasher {
+    static bool available() { return false; }
+    void start() {}
+    void update(const char *, size_t) {}
+    std::string finish() { return ""; }
+    std::vector<unsigned char> state() const { return {}; }
+    bool restore(const std::vector<unsigned char> &) { return false; }
+};
+#endif
+
+// The parts of http[s]://host[:port]/path?query. `path` keeps the query for
+// the request line; `shown` is the host and the path without it, for the
+// log, because a signed CDN URL's query acts as a credential.
+struct Url {
+    bool https = false;
+    std::string host, hostport, path, shown;
+    int port = 80;
+};
+
+bool parse_url(const std::string &url, Url &u, std::string &err) {
+    size_t s = url.find("://");
+    if (s == std::string::npos) {
+        err = "not a URL";
+        return false;
+    }
+    const std::string scheme = url.substr(0, s);
+    u.https = scheme == "https";
+    if (!u.https && scheme != "http") {
+        err = "unsupported URL scheme " + scheme;
+        return false;
+    }
+    size_t p = url.find('/', s + 3);
+    u.hostport = url.substr(s + 3, p == std::string::npos ? std::string::npos : p - s - 3);
+    u.path = p == std::string::npos ? "/" : url.substr(p);
+    u.port = u.https ? 443 : 80;
+    u.host = u.hostport;
+    size_t colon = u.hostport.rfind(':');
+    if (colon != std::string::npos) {
+        u.host = u.hostport.substr(0, colon);
+        u.port = atoi(u.hostport.c_str() + colon + 1);
+    }
+    if (u.host.empty()) {
+        err = "a URL without a host";
+        return false;
+    }
+    u.shown = u.host + " " + u.path.substr(0, u.path.find('?'));
+    return true;
+}
+
+// Where a Location header points: a whole URL, or a path on the same server.
+std::string resolve(const Url &from, const std::string &location) {
+    if (location.compare(0, 7, "http://") == 0 || location.compare(0, 8, "https://") == 0) return location;
+    const std::string scheme = from.https ? "https:" : "http:";
+    if (location.compare(0, 2, "//") == 0) return scheme + location;
+    if (!location.empty() && location[0] == '/') return scheme + "//" + from.hostport + location;
+    const std::string dir = from.path.substr(0, from.path.find('?'));
+    return scheme + "//" + from.hostport + dir.substr(0, dir.rfind('/') + 1) + location;
+}
+
+// A header's value from a response head, whatever the case of its name; ""
+// without it.
+std::string header(const std::string &head, const char *name) {
+    std::string lower = head, key = std::string("\r\n") + name + ":";
+    for (auto &ch : lower) ch = (char)tolower((unsigned char)ch);
+    for (auto &ch : key) ch = (char)tolower((unsigned char)ch);
+    size_t p = lower.find(key);
+    if (p == std::string::npos) return "";
+    p += key.size();
+    size_t e = head.find("\r\n", p);
+    std::string v = head.substr(p, e == std::string::npos ? std::string::npos : e - p);
+    size_t a = v.find_first_not_of(" \t"), b = v.find_last_not_of(" \t");
+    return a == std::string::npos ? "" : v.substr(a, b - a + 1);
+}
+
+// A response body as it comes: counted by Content-Length, chunked, or
+// everything until the server closes. (dechunk() above is the whole-string
+// form a POST's answer uses.)
+class Body {
+public:
+    enum Kind { Counted, Chunked, ToClose };
+    // ahead: what came after the headers in the same read.
+    Body(Conn &c, std::string ahead, Kind kind, uint64_t length)
+        : c_(c), stash_(std::move(ahead)), kind_(kind), left_(length) {}
+    // The next piece into buf: how many bytes, 0 at the end, -1 on an error (err says).
+    int next(char *buf, size_t cap, std::string &err);
+    // False when a counted body ended short.
+    bool complete() const { return kind_ != Counted || left_ == 0; }
+
+private:
+    // More into the stash. False at the end, or on an error (err says).
+    bool more(std::string &err) {
+        stash_.erase(0, pos_);
+        pos_ = 0;
+        char buf[65536];
+        int n = c_.read_some(buf, sizeof buf, err);
+        if (n <= 0) return false;
+        stash_.append(buf, (size_t)n);
+        return true;
+    }
+    Conn &c_;
+    std::string stash_;  // read, not yet taken
+    size_t pos_ = 0;     // taken up to here
+    Kind kind_;
+    uint64_t left_;      // Counted: bytes still to come; Chunked: left in this chunk
+    enum { Size, Data, AfterData, Trailers, End } chunk_ = Size;
+};
+
+int Body::next(char *buf, size_t cap, std::string &err) {
+    if (kind_ != Chunked) {
+        if (kind_ == Counted && left_ == 0) return 0;
+        if (kind_ == Counted && cap > left_) cap = (size_t)left_;
+        int n;
+        if (pos_ < stash_.size()) {
+            n = (int)std::min(cap, stash_.size() - pos_);
+            memcpy(buf, stash_.data() + pos_, (size_t)n);
+            pos_ += (size_t)n;
+        } else {
+            n = c_.read_some(buf, cap, err);
+            if (n <= 0) return n;  // 0: closed, maybe short (complete() says)
+        }
+        if (kind_ == Counted) left_ -= (uint64_t)n;
+        return n;
+    }
+    for (;;) {
+        const size_t have = stash_.size() - pos_;
+        switch (chunk_) {
+            case Size: {
+                size_t e = stash_.find("\r\n", pos_);
+                if (e == std::string::npos) {
+                    if (have > 65536) {
+                        err = "bad chunked response";
+                        return -1;
+                    }
+                    if (!more(err)) {
+                        if (err.empty()) err = "incomplete chunked response";
+                        return -1;
+                    }
+                    continue;
+                }
+                left_ = strtoull(stash_.c_str() + pos_, nullptr, 16);
+                pos_ = e + 2;
+                chunk_ = left_ == 0 ? Trailers : Data;
+                continue;
+            }
+            case Data: {
+                if (have == 0) {
+                    if (!more(err)) {
+                        if (err.empty()) err = "incomplete chunked response";
+                        return -1;
+                    }
+                    continue;
+                }
+                size_t n = (size_t)std::min<uint64_t>(std::min(have, cap), left_);
+                memcpy(buf, stash_.data() + pos_, n);
+                pos_ += n;
+                left_ -= n;
+                if (left_ == 0) chunk_ = AfterData;
+                return (int)n;
+            }
+            case AfterData:  // the CRLF after a chunk's data
+                if (have < 2) {
+                    if (!more(err)) {
+                        if (err.empty()) err = "incomplete chunked response";
+                        return -1;
+                    }
+                    continue;
+                }
+                pos_ += 2;
+                chunk_ = Size;
+                continue;
+            case Trailers: {  // after the last chunk: trailer lines, then a blank one
+                size_t e = stash_.find("\r\n", pos_);
+                if (e == std::string::npos) {
+                    if (!more(err)) {  // closed here: nothing was missing
+                        chunk_ = End;
+                        return err.empty() ? 0 : -1;
+                    }
+                    continue;
+                }
+                if (e == pos_) chunk_ = End;
+                pos_ = e + 2;
+                continue;
+            }
+            case End: return 0;
+        }
+    }
+}
+
+// The download itself, on the thread http_get_file gives it. The file is
+// written from `start` (the checkpoint's offset, else `offset`), 256 KiB at
+// a time, and the hash follows the writes; a checkpoint is reported only
+// after a flush, so it never describes bytes that aren't on disk yet.
+bool get_file(const std::string &url, const std::string &path, uint64_t offset, const std::string &expected_sha256,
+              FetchProgress &progress, std::string &err, Sha256Resume *sha) {
+    constexpr int timeout_s = 30;
+    constexpr size_t block = 256 << 10;
+    constexpr uint64_t checkpoint_every = 64ull << 20;
+    using clock = std::chrono::steady_clock;
+    auto seconds = [](clock::duration d) { return std::chrono::duration<double>(d).count(); };
+
+    if (!expected_sha256.empty() && !Hasher::available()) {
+        err = "this ts5 was built without HTTPS, so it can't check a SHA-256";
+        return false;
+    }
+    std::string want = expected_sha256;
+    for (auto &ch : want) ch = (char)tolower((unsigned char)ch);
+    Url u;
+    if (!parse_url(url, u, err)) return false;
+#ifndef TS5_HTTPS
+    if (u.https) {
+        err = "this ts5 was built without HTTPS";
+        return false;
+    }
+#endif
+
+    // Where to go on from: the checkpoint's offset with its hash state, else
+    // the file's first `offset` bytes, hashed here first.
+    struct stat st;
+    if (offset > 0 && (stat(path.c_str(), &st) != 0 || (uint64_t)st.st_size < offset)) {
+        offset = stat(path.c_str(), &st) == 0 ? (uint64_t)st.st_size : 0;
+        trace("the file is shorter than said; going on from its %llu bytes", (unsigned long long)offset);
+    }
+    uint64_t start = offset;
+    Hasher hash;
+    hash.start();
+    bool rehash = start > 0;
+    if (sha && !sha->state.empty()) {
+        if (sha->offset <= offset && hash.restore(sha->state)) {
+            start = sha->offset;
+            rehash = false;
+        } else {
+            trace("the checkpoint doesn't fit the file; hashing the file instead");
+        }
+    }
+    FILE *f = fopen(path.c_str(), start > 0 ? "r+b" : "wb");
+    if (!f) {
+        err = std::string("cannot open the file: ") + strerror(errno);
+        return false;
+    }
+    struct Closer {
+        FILE *f;
+        ~Closer() { fclose(f); }
+    } closer{f};
+    std::vector<char> fbuf(1 << 20), wbuf(block);
+    setvbuf(f, fbuf.data(), _IOFBF, fbuf.size());
+    progress.done = start;
+    // Waits while paused. False once cancelled.
+    auto go_on = [&] {
+        while (progress.pause && !progress.cancel) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (!progress.cancel) return true;
+        err = "cancelled";
+        return false;
+    };
+    // A full disk is the one failure the user can do something about, so it
+    // gets its own words.
+    auto write_failed = [&] {
+        err = errno == ENOSPC ? std::string("storage full") : std::string("cannot write the file: ") + strerror(errno);
+        return false;
+    };
+    if (rehash) {
+        trace("hashing the %llu bytes already there", (unsigned long long)start);
+        for (uint64_t left = start; left > 0;) {
+            size_t n = fread(wbuf.data(), 1, (size_t)std::min<uint64_t>(block, left), f);
+            if (n == 0) {
+                err = "cannot read the file";
+                return false;
+            }
+            hash.update(wbuf.data(), n);
+            left -= n;
+            if (!go_on()) return false;
+        }
+    }
+    if (start > 0 && (fseeko(f, (off_t)start, SEEK_SET) != 0 || ftruncate(fileno(f), (off_t)start) != 0)) {
+        err = std::string("cannot truncate the file: ") + strerror(errno);
+        return false;
+    }
+
+    uint64_t done = start, total = 0;
+    for (int hop = 0;; hop++) {
+        if (start > 0) trace("GET %s from byte %llu", u.shown.c_str(), (unsigned long long)start);
+        else trace("GET %s", u.shown.c_str());
+        Conn c;
+        c.fd = connect_to(u.host, u.port, timeout_s, err);
+        if (c.fd < 0) return false;
+#ifdef TS5_HTTPS
+        if (u.https && !start_tls(c, u.host, err)) return false;
+#endif
+        std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + u.hostport + "\r\nConnection: close\r\n" +
+                          "User-Agent: TokenStation5\r\nAccept-Encoding: identity\r\n";
+        if (start > 0) req += "Range: bytes=" + std::to_string(start) + "-\r\n";
+        req += "\r\n";
+        if (!c.write_all(req, err)) return false;
+
+        // The status line and headers; whatever follows them is body.
+        std::string head;
+        size_t he;
+        while ((he = head.find("\r\n\r\n")) == std::string::npos) {
+            if (head.size() > (64u << 10)) {
+                err = "the response's headers are too long";
+                return false;
+            }
+            char buf[16384];
+            int n = c.read_some(buf, sizeof buf, err);
+            if (n < 0) return false;
+            if (n == 0) {
+                err = "the server closed the connection before answering";
+                return false;
+            }
+            head.append(buf, (size_t)n);
+        }
+        std::string ahead = head.substr(he + 4);
+        head.resize(he);
+        if (head.compare(0, 5, "HTTP/") != 0) {
+            err = "not an HTTP response from " + u.host;
+            return false;
+        }
+        size_t sp = head.find(' ');
+        const int status = sp == std::string::npos ? 0 : atoi(head.c_str() + sp + 1);
+        trace("the server answered %d", status);
+        const std::string location = header(head, "Location");
+        if ((status == 301 || status == 302 || status == 303 || status == 307 || status == 308) && !location.empty()) {
+            if (hop >= 5) {
+                err = "more than 5 redirects";
+                return false;
+            }
+            Url next;
+            if (!parse_url(resolve(u, location), next, err)) return false;
+            trace("redirected to %s", next.shown.c_str());
+            u = next;
+            continue;
+        }
+        // 206 goes on from where the file stops, if the range agrees; 200 is
+        // the whole file, so the part starts over; 416 past the end means
+        // the part already is the whole file.
+        const std::string range = header(head, "Content-Range");
+        unsigned long long rs = 0, re = 0;
+        char rt[32] = "";
+        if (status == 416 && start > 0 && sscanf(range.c_str(), "bytes */%31s", rt) == 1 &&
+            strtoull(rt, nullptr, 10) == start) {
+            total = start;
+            break;
+        }
+        if (status == 206) {
+            if (sscanf(range.c_str(), "bytes %llu-%llu/%31s", &rs, &re, rt) < 2) {
+                err = "the server answered 206 without a usable Content-Range";
+                return false;
+            }
+            if (rs != start) {
+                err = "the server's range starts at " + std::to_string(rs) + ", not " + std::to_string(start);
+                return false;
+            }
+            total = isdigit((unsigned char)rt[0]) ? strtoull(rt, nullptr, 10) : re + 1;
+        } else if (status == 200) {
+            if (start > 0) {
+                trace("the server sent the whole file: starting over");
+                if (fseeko(f, 0, SEEK_SET) != 0 || ftruncate(fileno(f), 0) != 0) {
+                    err = std::string("cannot truncate the file: ") + strerror(errno);
+                    return false;
+                }
+                hash.start();
+                start = done = 0;
+                progress.done = 0;
+            }
+        } else {
+            err = "the server at " + u.host + " answered " + std::to_string(status);
+            return false;
+        }
+        const std::string length = header(head, "Content-Length");
+        std::string te = header(head, "Transfer-Encoding");
+        for (auto &ch : te) ch = (char)tolower((unsigned char)ch);
+        const Body::Kind kind = !length.empty()                       ? Body::Counted
+                                : te.find("chunked") != std::string::npos ? Body::Chunked
+                                                                          : Body::ToClose;
+        const uint64_t length_n = strtoull(length.c_str(), nullptr, 10);
+        if (kind == Body::Counted && total == 0) total = start + length_n;
+        progress.total = total;
+        trace("reading the body (%s)", kind == Body::Counted   ? (std::to_string(length_n) + " bytes").c_str()
+                                       : kind == Body::Chunked ? "chunked"
+                                                               : "until the server closes");
+        Body body(c, std::move(ahead), kind, length_n);
+        size_t filled = 0;
+        auto t_win = clock::now();
+        uint64_t b_win = done, last_checkpoint = done;
+        for (;;) {
+            int n = body.next(wbuf.data() + filled, block - filled, err);
+            if (n < 0) return false;
+            filled += (size_t)n;
+            if (filled < block && n > 0) continue;
+            // A full block, or the last one.
+            if (filled > 0) {
+                hash.update(wbuf.data(), filled);
+                if (fwrite(wbuf.data(), 1, filled, f) != filled || ferror(f)) return write_failed();
+                done += filled;
+                filled = 0;
+                progress.done = done;
+            }
+            const auto now = clock::now();
+            if (seconds(now - t_win) >= 2) {
+                progress.speed = (double)(done - b_win) / seconds(now - t_win);
+                t_win = now;
+                b_win = done;
+            }
+            if (sha && sha->on_checkpoint && Hasher::available() && done - last_checkpoint >= checkpoint_every) {
+                if (fflush(f) != 0) return write_failed();
+                last_checkpoint = done;
+                sha->on_checkpoint(done, hash.state());
+            }
+            if (n == 0) break;
+            if (!go_on()) return false;
+        }
+        if (!body.complete()) {
+            err = "the connection closed after " + std::to_string(done) + " of " + std::to_string(total) + " bytes";
+            return false;
+        }
+        break;
+    }
+    progress.total = total;
+    if (fflush(f) != 0) return write_failed();
+    if (total > 0 && done != total) {
+        err = "the server sent " + std::to_string(done) + " of " + std::to_string(total) + " bytes";
+        return false;
+    }
+    if (!want.empty()) {
+        const std::string got = hash.finish();
+        if (got != want) {
+            err = "the file's SHA-256 is " + got + ", not " + want;
+            return false;
+        }
+    }
+    trace("done (%llu bytes)", (unsigned long long)done);
+    return true;
+}
+
 }  // namespace
 
 bool post(const std::string &url, const std::vector<std::string> &headers, const std::string &body,
@@ -487,6 +982,33 @@ bool http_post(const std::string &url, const std::vector<std::string> &headers, 
     int rc = pthread_create(&th, &attr, run, &job);
     pthread_attr_destroy(&attr);
     if (rc != 0) return post(url, headers, body, resp, err, timeout_s);  // no thread: try on this one
+    pthread_join(th, nullptr);
+    return job.ok;
+}
+
+// A download too, on a thread of its own with 1 MiB, for the same reason.
+bool http_get_file(const std::string &url, const std::string &path, uint64_t offset,
+                   const std::string &expected_sha256, FetchProgress &progress, std::string &err, Sha256Resume *sha) {
+    struct Job {
+        const std::string &url, &path, &expected_sha256;
+        uint64_t offset;
+        FetchProgress &progress;
+        std::string &err;
+        Sha256Resume *sha;
+        bool ok;
+    } job{url, path, expected_sha256, offset, progress, err, sha, false};
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 1 << 20);
+    pthread_t th;
+    auto run = [](void *p) -> void * {
+        Job &j = *(Job *)p;
+        j.ok = get_file(j.url, j.path, j.offset, j.expected_sha256, j.progress, j.err, j.sha);
+        return nullptr;
+    };
+    int rc = pthread_create(&th, &attr, run, &job);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) return get_file(url, path, offset, expected_sha256, progress, err, sha);
     pthread_join(th, nullptr);
     return job.ok;
 }
