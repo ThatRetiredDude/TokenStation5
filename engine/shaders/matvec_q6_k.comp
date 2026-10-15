@@ -11,17 +11,20 @@
 float sc8(uint off) { return float(int(uint(w8[off]) << 24) >> 24); }
 
 // Thread th takes half th / 8 and l = 4 (th % 8) .. + 3, for all four i.
-float block_dot(uint o, uint xb, uint th) {
+void load_x(uint xb, uint th, out vec4 x[4]) {
+    const uint xh = xb + (128 * (th / 8) + 4 * (th % 8)) / 4;
+    for (uint i = 0; i < 4; i++) x[i] = X4[xh + 8 * i];
+}
+float block_dot(uint o, vec4 x[4], uint th) {
     const uint h = th / 8, l = 4 * (th % 8);
     const float d = h16(o + 208);
     const uint ql0 = u32_at2(o + 64 * h + l), ql1 = u32_at2(o + 64 * h + 32 + l);
     const uint qh = u32_at2(o + 128 + 32 * h + l);
     const uint scb = o + 192 + 8 * h + l / 16;
-    const uint xh = xb + (128 * h + l) / 4;
     const vec4 q0 = nibbles(ql0, 0) + 16.0 * crumbs(qh, 0) - 32.0;
     const vec4 q1 = nibbles(ql1, 0) + 16.0 * crumbs(qh, 2) - 32.0;
     const vec4 q2 = nibbles(ql0, 4) + 16.0 * crumbs(qh, 4) - 32.0;
     const vec4 q3 = nibbles(ql1, 4) + 16.0 * crumbs(qh, 6) - 32.0;
-    return d * (sc8(scb) * dot(q0, X4[xh]) + sc8(scb + 2) * dot(q1, X4[xh + 8]) + sc8(scb + 4) * dot(q2, X4[xh + 16]) +
-                sc8(scb + 6) * dot(q3, X4[xh + 24]));
+    return d * (sc8(scb) * dot(q0, x[0]) + sc8(scb + 2) * dot(q1, x[1]) + sc8(scb + 4) * dot(q2, x[2]) +
+                sc8(scb + 6) * dot(q3, x[3]));
 }
