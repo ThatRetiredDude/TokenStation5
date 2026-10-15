@@ -209,7 +209,8 @@ void handle(int fd, Server::State &state) {
         const std::string model = state.model;
         const std::string date = today();
         // Tools: the client's, plus web_search when a Tavily key is set and
-        // the request does not turn it off ("web_search": false).
+        // the chat looks like it needs the web (needs_web), or the request
+        // asks for it ("web_search": true); "web_search": false turns it off.
         const ToolFormat tf = chat ? tool_format(e.tok()) : ToolFormat::NONE;
         std::vector<Json> tools;
         bool web = false;
@@ -223,7 +224,12 @@ void handle(int fd, Server::State &state) {
                     tools.push_back(t);
                     named |= t["function"]["name"].str() == "web_search";
                 }
-                web = !named && req["web_search"].boolean(true) && !tavily_key().empty();
+                std::string last_user;
+                for (auto &m : msgs)
+                    if (m.role == "user") last_user = m.content;
+                const Json &ws = req["web_search"];
+                web = !named && !tavily_key().empty() &&
+                      (ws.type == Json::BOOL ? ws.boolean(false) : web_search_always() || needs_web(last_user));
                 if (web) tools.push_back(web_search_tool(date));
             }
             prompt = render_chat(e.tok(), msgs, tools, date);
@@ -501,7 +507,8 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
         fprintf(stderr, "ts5: tool calls: %s; web search: %s\n", state_.tool_format.c_str(),
                 state_.tool_format == "none" ? "off (no tool calls)"
                 : tavily_key().empty()       ? "off (no TAVILY_API_KEY)"
-                                             : "on (Tavily)");
+                : web_search_always()        ? "on (Tavily), offered on every chat"
+                                             : "on (Tavily), offered when a chat looks like it needs the web");
 }
 
 Server::Activity Server::activity() {
