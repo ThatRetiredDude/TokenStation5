@@ -568,8 +568,8 @@ int main(int, char **) {
                 screen = false;
             }
             if (shot) {
-                unlink(kShot);
                 if (!canvas.save_bmp(kScreen)) printf("ts5-title: can't write %s\n", kScreen);
+                unlink(kShot);  // after the file is whole: that's what a waiting reader goes by
             }
             drawn_version = version;
             drawn_dark = dark;
