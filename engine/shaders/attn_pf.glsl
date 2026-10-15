@@ -6,8 +6,11 @@
 // the next tile is loaded into registers while the current one is used.
 // Online softmax per row, 16 keys at a time. Head size a multiple of 16, at
 // most 128. With n_split > 1, workgroup y takes one slice of the keys and
-// writes a partial result for attn_merge, as attn does.
+// writes a partial result for attn_merge, as attn does. With HEAD_DIM
+// defined the head size is fixed, so every loop over it unrolls with no
+// branch per step (attn_pf128).
 #extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_shader_subgroup_clustered : require
 layout(local_size_x = 256) in;
@@ -36,14 +39,27 @@ layout(push_constant) uniform PC {
 
 const uint BC = 32, STEP = 16, HDMAX = 128, NV = HDMAX / 16, WG = 256;
 const uint NL = BC * HDMAX / 4 / WG;  // vec4s of K (and of V) each thread loads per tile
-shared vec4 ks[BC * HDMAX / 4];      // [key][dim / 4]
-shared vec4 vs[BC * HDMAX / 4];
+// The f16 cache's tiles stay f16 in shared memory: half the bytes to read,
+// and the GPU multiplies f16 by f32 into an f32 sum at the f32 rate.
+#ifdef KV_Q8
+#define TILE vec4
+#else
+#define TILE f16vec4
+#endif
+shared TILE ks[BC * HDMAX / 4];      // [key][dim / 4]
+shared TILE vs[BC * HDMAX / 4];
 
 const float NEG_INF = -1.0 / 0.0;
+#ifdef HEAD_DIM
+const uint HD = HEAD_DIM, HD4 = HD / 4, NI = HD / 16;
+#endif
 
 void main() {
     const uint tid = gl_LocalInvocationID.x, c = tid & 3u, r = tid >> 2;
-    const uint HD = pc.head_dim, HD4 = HD / 4, NI = HD / 16, G = pc.n_head / pc.n_head_kv;
+#ifndef HEAD_DIM
+    const uint HD = pc.head_dim, HD4 = HD / 4, NI = HD / 16;
+#endif
+    const uint G = pc.n_head / pc.n_head_kv;
     const uint n_tblk = (pc.n_tok + pc.tq - 1) / pc.tq;
     const uint kh = gl_WorkGroupID.x / n_tblk, t0 = (gl_WorkGroupID.x % n_tblk) * pc.tq;
     const uint ntq = min(pc.tq, pc.n_tok - t0);
@@ -59,7 +75,7 @@ void main() {
 
     vec4 q[NV], acc[NV];
     const uint qo = (t * pc.n_head + h) * HD4 + c;
-    for (uint i = 0; i < NV; i++) {
+    [[unroll]] for (uint i = 0; i < NV; i++) {
         q[i] = i < NI ? Q4[qo + 4 * i] * pc.scale : vec4(0.0);
         acc[i] = vec4(0.0);
     }
@@ -90,7 +106,7 @@ void main() {
 #else
 #define LOAD_ONE(n, src) kr[n] = kc[src]; vr[n] = vc[src];
 #define ZERO_ONE(n) kr[n] = f16vec4(0.0); vr[n] = f16vec4(0.0);
-#define STORE_ONE(n, e) ks[e] = vec4(kr[n]); vs[e] = vec4(vr[n]);
+#define STORE_ONE(n, e) ks[e] = kr[n]; vs[e] = vr[n];
 #endif
 
     LOAD_TILE(k_begin)
@@ -106,11 +122,11 @@ void main() {
         for (uint j0 = 0; j0 < nb; j0 += STEP) {
             float s[STEP];
             float mx = m;
-            for (uint jj = 0; jj < STEP; jj++) {
+            [[unroll]] for (uint jj = 0; jj < STEP; jj++) {
                 const uint ko = (j0 + jj) * HD4 + c;
                 float d = 0.0;
-                for (uint i = 0; i < NV; i++)
-                    if (i < NI) d += dot(q[i], ks[ko + 4 * i]);
+                [[unroll]] for (uint i = 0; i < NV; i++)
+                    if (i < NI) d += dot(q[i], vec4(ks[ko + 4 * i]));
                 d = subgroupClusteredAdd(d, 4);
                 const uint key = kb + j0 + jj;
                 s[jj] = (j0 + jj < nb && key <= kmax) ? d : NEG_INF;
@@ -119,13 +135,13 @@ void main() {
             if (mx != NEG_INF) {  // else none of these keys is this row's yet
                 const float cf = exp(m - mx);  // 0 while m is -inf
                 l *= cf;
-                for (uint i = 0; i < NV; i++) acc[i] *= cf;
-                for (uint jj = 0; jj < STEP; jj++) {
+                [[unroll]] for (uint i = 0; i < NV; i++) acc[i] *= cf;
+                [[unroll]] for (uint jj = 0; jj < STEP; jj++) {
                     const float p = exp(s[jj] - mx);
                     l += p;
                     const uint vo = (j0 + jj) * HD4 + c;
-                    for (uint i = 0; i < NV; i++)
-                        if (i < NI) acc[i] += p * vs[vo + 4 * i];
+                    [[unroll]] for (uint i = 0; i < NV; i++)
+                        if (i < NI) acc[i] += p * vec4(vs[vo + 4 * i]);
                 }
                 m = mx;
             }
