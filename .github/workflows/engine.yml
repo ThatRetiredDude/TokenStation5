@@ -4,9 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
+  # The engine's tests on lavapipe, a software GPU on the CPU (about 50
+  # minutes). Testing is done on the PS5's GPU, so this runs only when
+  # started by hand from the Actions tab.
   test:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
