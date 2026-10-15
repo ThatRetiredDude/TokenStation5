@@ -134,8 +134,10 @@ Prompts of 8 tokens or more (`TS5_ATTN_PF` sets how many; 0: never) use
 `shaders/attn_pf.glsl` where heads are a multiple of 16 wide and at most 128:
 64 rows per workgroup (7 heads x 9 tokens on Qwen 2.5 7B, 4 x 16 on Llama 3.1
 8B), four threads per row, each holding a quarter of the row's query and
-output in registers. Keys and values pass through shared memory 32 at a time,
-the next tile loading into registers while the current one is used. attn
+output in registers. Keys and values pass through shared memory 32 at a time
+(f16 for the f16 cache: the GPU multiplies f16 by f32 into an f32 sum at the
+f32 rate), the next tile loading into registers while the current one is
+used. attn
 holds one token's 7 rows on Qwen 2.5 7B and re-reads the cache for every
 token; attn_pf reads it once per 9 tokens and does 64 rows of work per tile.
 A short prompt late in a chat splits its keys too. With heads of 128 (all four

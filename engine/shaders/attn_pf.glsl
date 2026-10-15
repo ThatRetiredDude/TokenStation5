@@ -39,8 +39,15 @@ layout(push_constant) uniform PC {
 
 const uint BC = 32, STEP = 16, HDMAX = 128, NV = HDMAX / 16, WG = 256;
 const uint NL = BC * HDMAX / 4 / WG;  // vec4s of K (and of V) each thread loads per tile
-shared vec4 ks[BC * HDMAX / 4];      // [key][dim / 4]
-shared vec4 vs[BC * HDMAX / 4];
+// The f16 cache's tiles stay f16 in shared memory: half the bytes to read,
+// and the GPU multiplies f16 by f32 into an f32 sum at the f32 rate.
+#ifdef KV_Q8
+#define TILE vec4
+#else
+#define TILE f16vec4
+#endif
+shared TILE ks[BC * HDMAX / 4];      // [key][dim / 4]
+shared TILE vs[BC * HDMAX / 4];
 
 const float NEG_INF = -1.0 / 0.0;
 #ifdef HEAD_DIM
@@ -99,7 +106,7 @@ void main() {
 #else
 #define LOAD_ONE(n, src) kr[n] = kc[src]; vr[n] = vc[src];
 #define ZERO_ONE(n) kr[n] = f16vec4(0.0); vr[n] = f16vec4(0.0);
-#define STORE_ONE(n, e) ks[e] = vec4(kr[n]); vs[e] = vec4(vr[n]);
+#define STORE_ONE(n, e) ks[e] = kr[n]; vs[e] = vr[n];
 #endif
 
     LOAD_TILE(k_begin)
@@ -119,7 +126,7 @@ void main() {
                 const uint ko = (j0 + jj) * HD4 + c;
                 float d = 0.0;
                 [[unroll]] for (uint i = 0; i < NV; i++)
-                    if (i < NI) d += dot(q[i], ks[ko + 4 * i]);
+                    if (i < NI) d += dot(q[i], vec4(ks[ko + 4 * i]));
                 d = subgroupClusteredAdd(d, 4);
                 const uint key = kb + j0 + jj;
                 s[jj] = (j0 + jj < nb && key <= kmax) ? d : NEG_INF;
@@ -134,7 +141,7 @@ void main() {
                     l += p;
                     const uint vo = (j0 + jj) * HD4 + c;
                     [[unroll]] for (uint i = 0; i < NV; i++)
-                        if (i < NI) acc[i] += p * vs[vo + 4 * i];
+                        if (i < NI) acc[i] += p * vec4(vs[vo + 4 * i]);
                 }
                 m = mx;
             }
