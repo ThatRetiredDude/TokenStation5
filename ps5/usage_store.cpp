@@ -125,7 +125,7 @@ void UsageSums::add(const ts5::UsageRecord &r) {
         failed++;
         if (r.why == "no_model" || r.why == "loading") no_model++;
         else if (r.why == "busy_check" || r.why == "busy_bench") busy++;
-        else if (r.why == "bad_json" || r.why == "too_long") bad_request++;
+        else if (r.why == "bad_json" || r.why == "empty_prompt" || r.why == "too_long") bad_request++;
         else error++;
     }
     if (r.finish == "left") left++;
