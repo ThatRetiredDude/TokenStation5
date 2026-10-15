@@ -428,8 +428,11 @@ int main(int, char **) {
             printf("ts5-title: ts5.env: not NAME=VALUE: %s\n", w.c_str());
             continue;
         }
-        setenv(w.substr(0, eq).c_str(), w.substr(eq + 1).c_str(), 1);
-        printf("ts5-title: %s\n", w.c_str());
+        const std::string name = w.substr(0, eq);
+        setenv(name.c_str(), w.substr(eq + 1).c_str(), 1);
+        // A key's value stays out of the log, which anyone on the network can
+        // read over FTP.
+        printf("ts5-title: %s\n", app::secret_setting(name) ? (name + "=(set)").c_str() : w.c_str());
     }
 
     for (const char *f :
