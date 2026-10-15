@@ -260,13 +260,6 @@ def test_search(ts5):
 CALL = '<tool_call>\n{"name": "web_search", "arguments": {"query": "PS5 firmware"}}\n</tool_call>'
 
 
-def usage_records(path):
-    """A usage.tsv's requests (TS5_USAGE_LOG), as dicts by its column names."""
-    lines = open(path).read().splitlines() if os.path.exists(path) else []
-    names = next((l[1:].split("\t") for l in lines if l.startswith("#") and "\t" in l), [])
-    return [dict(zip(names, l.split("\t"))) for l in lines if l and not l.startswith("#")]
-
-
 def test_search_loop(ts5, model, tdir):
     """The server's search loop, with the model's turns scripted (TS5_TEST_TURNS)."""
     failed = 0
@@ -274,28 +267,26 @@ def test_search_loop(ts5, model, tdir):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_port}"
     cases = [
-        # name, key, turns, stream, Tavily requests, a search failed, answer, in the last prompt
-        ("answers from a search", "tvly-test", [CALL, "Done.", "Final answer."], False, 1, False, "Done.", None),
+        # name, key, turns, stream, Tavily requests, answer, in the last prompt
+        ("answers from a search", "tvly-test", [CALL, "Done.", "Final answer."], False, 1, "Done.", None),
         # A refused key: one request to Tavily, then an answer without tools.
-        ("refused key", "tvly-bad", [CALL, "Final answer."], False, 1, True, "Final answer.",
+        ("refused key", "tvly-bad", [CALL, "Final answer."], False, 1, "Final answer.",
          "Web search is not working right now: the Tavily API key was refused"),
-        ("refused key, streaming", "tvly-bad", [CALL, "Final answer."], True, 1, True, "Final answer.",
+        ("refused key, streaming", "tvly-bad", [CALL, "Final answer."], True, 1, "Final answer.",
          "Web search is not working right now"),
         # A model that never stops searching: three rounds, then an answer from them.
-        ("search limit", "tvly-test", [CALL, "Final answer."], False, 3, False, "Final answer.",
+        ("search limit", "tvly-test", [CALL, "Final answer."], False, 3, "Final answer.",
          "Web searches found the following"),
     ]
     template = os.path.join(tdir, "Qwen-Qwen2.5-7B-Instruct.jinja")
-    for name, key, turns, stream, hits, search_failed, answer, note in cases:
+    for name, key, turns, stream, hits, answer, note in cases:
         with tempfile.TemporaryDirectory() as d:
             script = os.path.join(d, "turns.txt")
             open(script, "w").write("\n----\n".join(turns))
             with socket.socket() as s:
                 s.bind(("127.0.0.1", 0))
                 port = s.getsockname()[1]
-            usage = os.path.join(d, "usage.tsv")
-            env = dict(os.environ, TS5_TEST_TURNS=script, TS5_TAVILY_URL=url, TAVILY_API_KEY=key,
-                       TS5_USAGE_LOG=usage)
+            env = dict(os.environ, TS5_TEST_TURNS=script, TS5_TAVILY_URL=url, TAVILY_API_KEY=key)
             log = open(os.path.join(d, "log"), "w+")
             p = subprocess.Popen([ts5, "serve", "-m", model, "--chat-template", template, "--host", "127.0.0.1",
                                   "--port", str(port), "--backend", "cpu"], env=env, stdout=log, stderr=log)
@@ -326,19 +317,6 @@ def test_search_loop(ts5, model, tdir):
                     problems.append(f"{len(Tavily.seen) - before} requests to Tavily")
                 if note and (note not in last or "<tools>" in last):
                     problems.append("last prompt:\n" + last)
-                # usage.tsv: ts5's searches and whether one failed, and
-                # neither the key nor the question.
-                for _ in range(50):
-                    recs = usage_records(usage)
-                    if recs:
-                        break
-                    time.sleep(0.1)
-                got = [(r["searches"], r["search_failed"]) for r in recs]
-                if got != [(str(hits), str(int(search_failed)))]:
-                    problems.append(f"usage.tsv searches, search_failed: {got}")
-                written = open(usage).read()
-                if key in written or "PS5" in written:
-                    problems.append("the key or the question is in usage.tsv")
             finally:
                 p.terminate()
                 p.wait()

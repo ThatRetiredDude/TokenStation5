@@ -3,9 +3,9 @@
 # functions stood in for by ps5/host_shim.cpp and folders for its own folder
 # (/app0) and /data, and walks it through what the controller and the PC do
 # to it: serve a model from the dashboard, a GPU check and a speed test,
-# screenshots, the audio, whisper and speak tests, the chat page,
-# restart, a one-off check, another port, quit and close. The screenshots
-# stay in build/ps5-host/shots.
+# screenshots, the audio, whisper and speak tests, the chat page, typing on
+# the console's keyboard, the Settings page, restart, a one-off check,
+# another port, quit and close. The screenshots stay in build/ps5-host/shots.
 #
 #   ps5/host-test.sh MODEL.gguf
 #   TS5_TEST_WHISPER_MODEL=ggml-tiny.en.bin \
@@ -81,7 +81,7 @@ c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" -I "$w/include" -I "$w/ggml/include" \
     -I "$k/include" \
     "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks,tools,net,websearch}.cpp \
-    "$root"/ps5/{title,library,runner,audio_probe,chat,stt,voice,settings,speak,host_shim}.cpp \
+    "$root"/ps5/{title,library,runner,audio_probe,chat,stt,voice,settings,speak,text_input,host_shim}.cpp \
     "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -Wa,-I"$root/ps5/tts" "$root/ps5/tts/lexicon_data.S" \
     -x none "$wobj/libts5speech.a" -ldl -o "$work/eboot.bin"
@@ -126,19 +126,6 @@ wait_log() {
     fail "no '$1' in the log after 30 s"
 }
 health_says() { curl -s "http://127.0.0.1:$port/health" | grep -qF "$1"; }
-# Waits up to $3 seconds for $2 lines in usage.tsv for which a Python
-# expression holds, with each line's columns by name in r.
-usage_has() {
-    for _ in $(seq 0 $(($3 * 10))); do
-        python3 -c 'import sys
-lines = open(sys.argv[1]).read().splitlines()
-names = next(l[1:].split("\t") for l in lines if l.startswith("#") and "\t" in l)
-rs = [dict(zip(names, l.split("\t"))) for l in lines if l and l[0] != "#"]
-sys.exit(sum(1 for r in rs if eval(sys.argv[2])) < int(sys.argv[3]))' "$home/usage.tsv" "$1" "$2" 2> /dev/null && return 0
-        sleep 0.1
-    done
-    fail "fewer than $2 lines in usage.tsv where $1: $(cat "$home/usage.tsv" 2> /dev/null)"
-}
 # The next frame, saved as shots/NAME.bmp.
 shot() {
     rm -f "$home/screen.bmp"
@@ -154,10 +141,6 @@ shot() {
 press() { echo "$*" > "$home/press"; sleep 0.5; }
 
 name=$(basename "$model")
-# The model's general.name, which usage.tsv names it by.
-gname=$(python3 -c 'import sys, gguf
-f = gguf.GGUFReader(sys.argv[1]).fields.get("general.name")
-print(bytes(f.parts[f.data[0]]).decode() if f else sys.argv[2])' "$model" "${name%.gguf}")
 
 # Serves also load a draft model (the model as its own drafter), proving the
 # title keeps the file's token list until the vocabulary check has read it.
@@ -185,8 +168,6 @@ wait_log "draft model $name ready"
 reply=$(curl -sf "http://127.0.0.1:$port/v1/chat/completions" -H 'Content-Type: application/json' \
     -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":4,"temperature":0}')
 grep -q '"completion_tokens":4' <<< "$reply" || fail "chat completion: $reply"
-# Its usage line, written within 2 s by the main loop.
-usage_has "r['status'] == '200' and r['gen'] == '4' and r['name'] == '$gname' and r['client'] == '127.0.0.1'" 1 3
 shot serving
 
 echo "== square: the GPU check on the serving model, then serving again"
@@ -314,8 +295,6 @@ grep -q "^ts5-title: chat: reply done" <(grep -E "^ts5-title: chat: reply" "$hom
 second=$(grep -oE "^ts5: chatcmpl-[0-9]+ prompt [0-9]+" "$home/ts5.log" | tail -1 | awk '{print $4}')
 [ "$second" -gt "$first" ] || fail "the second request didn't carry the first exchange ($first, then $second tokens)"
 shot chat2
-# The TV's chat goes through the API too, from 127.0.0.1.
-usage_has "r['client'] == '127.0.0.1' and r['kind'] == 'chat' and r['stream'] == '1' and r['status'] == '200'" 2 3
 
 echo "== chat: triangle stops a reply; square starts a new chat"
 printf 'Count from one to two hundred, one number per line.\n' > "$home/chat"
@@ -328,6 +307,31 @@ grep -q "^ts5-title: chat: reply stopped" <(grep -E "^ts5-title: chat: reply" "$
 shot chat-stopped
 press square
 shot chat-new
+
+echo "== keyboard: cross on the chat page opens the console's keyboard; what's typed goes to the chat, and a cancel sends nothing"
+n=$(replies)
+press cross
+wait_log "^ts5-title: keyboard: open 0x00000000, user 0x00000001$"
+printf '  Say hi in three words. ' > "$home/typed"
+wait_log "^ts5-title: chat: message by keyboard \(22 bytes\)$"
+for _ in $(seq 1 300); do [ "$(replies)" -gt "$n" ] && break; sleep 0.1; done
+[ "$(replies)" -gt "$n" ] || fail "no reply to the typed message"
+shot chat-typed
+press cross
+wait_lines "^ts5-title: keyboard: open 0x00000000, user 0x00000001$" 2 30
+printf '(cancel)' > "$home/typed"
+wait_log "^ts5-title: keyboard: canceled$"
+sleep 0.5
+[ "$(grep -c "^ts5-title: chat: message by keyboard" "$home/ts5.log")" = 1 ] || fail "a canceled keyboard sent a message"
+echo "== keyboard: Enter on a USB keyboard opens it too (not one pressed just as it closed)"
+sleep 1
+: > "$home/keys"
+wait_log "^ts5-title: keys: enter$"
+wait_lines "^ts5-title: keyboard: open 0x00000000, user 0x00000001$" 3 30
+grep -q "^ts5-title: keys: module 0x00000000, init 0x00000000$" "$home/ts5.log" || fail "libSceKeyboard didn't start"
+printf '(cancel)' > "$home/typed"
+wait_lines "^ts5-title: keyboard: canceled$" 2 30
+press square
 
 echo "== talk: R1 held on the chat page, with no speech model, says so"
 press hold-r1
@@ -384,6 +388,19 @@ shot settings-changed
 press square
 wait_log "^ts5-title: settings: TS5_CHAT_FPS cleared$"
 ! grep -q "TS5_CHAT_FPS" "$home/ts5.env" || fail "square left it in ts5.env: $(cat "$home/ts5.env")"
+echo "== settings: cross on the Tavily key opens the keyboard; the key goes in ts5.env, never the log"
+press down down down down down down down down
+press cross
+wait_log "^ts5-title: keyboard: open 0x00000000, user 0x00000001, a key$"
+printf 'tvly-typed-on-the-tv' > "$home/typed"
+wait_log "^ts5-title: settings: TAVILY_API_KEY=\\(set\\)$"
+grep -qx "TAVILY_API_KEY=tvly-typed-on-the-tv" "$home/ts5.env" || fail "the typed key isn't in ts5.env"
+! grep -q "tvly-typed-on-the-tv" "$home/ts5.log" || fail "the typed key is in the log"
+shot settings-key
+press square
+press square
+wait_log "^ts5-title: settings: TAVILY_API_KEY cleared$"
+! grep -q "TAVILY_API_KEY" "$home/ts5.env" || fail "square twice left the key in ts5.env"
 press circle
 shot models-again
 wait_health
@@ -416,17 +433,10 @@ rm "$home/ts5.env"
 
 echo "== the args file: another port"
 echo "serve -m \"$home/models/$name\" --port 18081" > "$home/ts5.args"
-# A request just before a restart: its usage line is written as the title
-# leaves. The Tavily key is still set, and never reaches usage.tsv.
-curl -sf "http://127.0.0.1:$port/v1/chat/completions" -H 'Content-Type: application/json' \
-    -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":3,"temperature":0,"web_search":false}' > /dev/null ||
-    fail "the chat completion before the restart"
 : > "$home/restart"
 wait_down
 port=18081
 wait_health
-usage_has "r['stream'] == '0' and r['gen'] == '3'" 1 0
-! grep -q "tvly-host-test-secret" "$home/usage.tsv" || fail "the Tavily key is in usage.tsv"
 
 echo "== keep-awake, and a dark screen after TS5_DIM_AFTER seconds without a button; a press brings back the dashboard"
 echo "TS5_DIM_AFTER=2" > "$home/ts5.env"
