@@ -176,7 +176,11 @@ the whole batch; each token's x values are loaded once per NR rows. The
 batch's x sits in the 4 MB L2, but at one row per workgroup a 19k-row
 matrix re-read it from L2 per (row, token) — several GB a layer at 7
 tokens, measured on the console as a verify pass costing 5.7x a single
-step — which the row tiling divides by NR.
+step — which the row tiling divides by NR. The feed-forward's gate and up,
+the two biggest lines of a verify pass, run as one kernel (`mvt_glu_q4_k`,
+`TS5_MVT_GLU=0` splits them again): both matrices' blocks are dotted with
+the same x loads and swiglu is applied in place, as `mv16_glu_q4_k` does
+for one token.
 
 When `TS5_DRAFT_MODEL` names a smaller GGUF with the same vocabulary (for
 Qwen 2.5 Coder 7B, a Qwen 2.5 0.5B), steps where the lookup finds nothing
