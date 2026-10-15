@@ -370,10 +370,12 @@ std::shared_ptr<const UsageView> UsageStore::view(UsageView::Range range, int64_
         if (hour < v->first_hour) continue;
         const int b = (int)((hour - v->first_hour) / v->bucket_hours);
         v->total.add(s);
-        const int slot = slot_of(name);
-        by_slot[slot].total.add(s);
-        by_slot[slot].by_bucket[b].add(s);
-        slot_names[slot][name] += s.prompt + s.gen;
+        if (!name.empty()) {  // "": no model was loaded, so it isn't any model's
+            const int slot = slot_of(name);
+            by_slot[slot].total.add(s);
+            by_slot[slot].by_bucket[b].add(s);
+            slot_names[slot][name] += s.prompt + s.gen;
+        }
         const std::string app = !key.empty()                              ? key
                                 : client == "127.0.0.1" || client == own_ip ? std::string("Chat on this PS5")
                                 : client.empty()                          ? std::string("Unknown")
