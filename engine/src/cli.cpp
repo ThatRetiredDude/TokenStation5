@@ -197,8 +197,9 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
                                st, err);
         printf("\n");
         if (!ok) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
-        fprintf(stderr, "ts5: prompt %d tok %.1f tok/s, gen %d tok %.1f tok/s\n", st.prompt_evaluated,
-                st.prompt_evaluated * 1000.0 / st.prompt_ms, st.gen_tokens, st.gen_tokens * 1000.0 / st.gen_ms);
+        fprintf(stderr, "ts5: prompt %d tok %.1f tok/s, gen %d tok %.1f tok/s, draft %d/%d accepted\n",
+                st.prompt_evaluated, st.prompt_evaluated * 1000.0 / st.prompt_ms, st.gen_tokens,
+                st.gen_tokens * 1000.0 / st.gen_ms, st.draft_accepted, st.drafted);
         return 0;
     }
     if (a.cmd == "serve")
