@@ -915,7 +915,7 @@ private:
     bool attn_pf128_ = true;
     // Generation over at least this many keys uses attn_dec (TS5_ATTN_DEC;
     // 0: never).
-    int attn_dec_min_ = 1024;
+    int attn_dec_min_ = 256;
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).
     bool mmb_ = true;
