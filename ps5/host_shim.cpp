@@ -14,6 +14,9 @@
 //   the mic                     none, unless the host test puts a 16 kHz mono
 //                               WAV at TS5_HOME/mic.wav: then the mic plays
 //                               it, in real time, then silence
+//   the on-screen keyboard      open until the host test writes
+//                               TS5_HOME/typed: its text is what was typed,
+//                               and "(cancel)" cancels
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
@@ -112,6 +115,53 @@ int sceAudioInClose(int) {
 int sceUserServiceInitialize(const void *) { return 0; }
 int sceUserServiceGetInitialUser(int *user) {
     *user = 1;
+    return 0;
+}
+int sceUserServiceGetForegroundUser(int *user) {
+    *user = 1;
+    return 0;
+}
+
+int sceCommonDialogInitialize(void) { return 0; }
+int sceSysmoduleLoadModule(uint16_t) { return 0; }
+// The dialog's text buffer and its length, while it's open.
+static char16_t *typed_into;
+static uint32_t typed_max;
+static int typed_end = -1;  // -1 until TS5_HOME/typed appears
+int sceImeDialogInit(const void *param, const void *) {
+    if (typed_into) return (int)0x80bc0001;  // busy
+    const char *p = static_cast<const char *>(param);
+    memcpy(&typed_max, p + 36, 4);
+    memcpy(&typed_into, p + 40, sizeof typed_into);
+    typed_end = -1;
+    return 0;
+}
+int sceImeDialogGetStatus(void) {
+    if (!typed_into) return 0;
+    if (typed_end < 0) {
+        FILE *f = fopen(TS5_HOME "/typed", "rb");
+        if (!f) return 1;  // running
+        char buf[8192];
+        const size_t n = fread(buf, 1, sizeof buf - 1, f);
+        fclose(f);
+        unlink(TS5_HOME "/typed");
+        buf[n] = 0;
+        typed_end = strcmp(buf, "(cancel)") == 0 ? 1 : 0;
+        // ASCII is all the host test types.
+        uint32_t i = 0;
+        for (; typed_end == 0 && i < typed_max && buf[i]; i++) typed_into[i] = (char16_t)(unsigned char)buf[i];
+        typed_into[i] = 0;
+    }
+    return 2;  // finished
+}
+int sceImeDialogGetResult(void *result) {
+    if (!typed_into || typed_end < 0) return (int)0x80bc0002;
+    memset(result, 0, 16);
+    memcpy(result, &typed_end, 4);
+    return 0;
+}
+int sceImeDialogTerm(void) {
+    typed_into = nullptr;
     return 0;
 }
 int scePadInit(void) { return 0; }

@@ -1,8 +1,9 @@
 // The Settings page: the title's settings, kept in ts5.env (settings.h), on
 // the left; the chosen one's choices and what it does on the right. Up and
 // down choose a setting, left and right change it, cross steps through its
-// choices, square puts back its default. A key is set from the PC (or a
-// keyboard) and only shows whether it's set; square removes it.
+// choices, square puts back its default. A key is typed on the console's
+// keyboard (cross opens it, text_input.h) and only shows whether it's set;
+// square removes it.
 #pragma once
 #include <cstdint>
 #include <string>
@@ -23,10 +24,12 @@ struct SettingsInfo {
     double now = 0;
 };
 
-// A change to save: NAME=VALUE; an empty value puts back the default.
+// A change to save: NAME=VALUE; an empty value puts back the default. Or,
+// with type, the key NAME to type on the console's keyboard.
 struct SettingChange {
-    bool any = false;
+    bool any = false, type = false;
     std::string name, value;
+    std::string label;  // type: the setting's name on the page
 };
 
 class SettingsPage {
