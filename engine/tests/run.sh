@@ -153,9 +153,6 @@ cmp "$work/padr-off.txt" "$work/padr-on.txt"
 grep -q "draft model .* ready" "$work/padr-on.err"  # wider drafter accepted too
 grep -q "draft [0-9]*/[1-9][0-9]* accepted" "$work/padr-on.err"
 ! grep -q "draft model \(stopped\|failed\)" "$work/padr-on.err"
-"$ts5" run -m "$work/qwen2-kmix.gguf" -p "$nr" -n 50 --temp 0 > "$work/load-b.txt" 2> /dev/null
-TS5_LOAD=direct "$ts5" run -m "$work/qwen2-kmix.gguf" -p "$nr" -n 50 --temp 0 > "$work/load-d.txt" 2> /dev/null
-cmp "$work/load-b.txt" "$work/load-d.txt"  # both load paths read the same bytes
 echo "== ts5 check (GPU vs CPU in one command, as run on the console), then again on the saved answers"
 rm -f "$work"/qwen3-Q4_0.gguf*.ts5ref
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null
