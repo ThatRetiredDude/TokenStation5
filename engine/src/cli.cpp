@@ -11,9 +11,12 @@
 //                                        the prompt a chat request becomes (for tests)
 //   ts5 tool-parse hermes|llama3 < text  a model's turn as content and tool calls (for tests)
 //   ts5 search "query"                   one web_search, as the model would get it
+//   ts5 usage-parse FILE                 a usage.tsv's requests, written again as v1 (for tests)
 //   ts5 fetch URL FILE [--sha256 HEX]    download URL to FILE, going on from a stopped one
 //
 // Common: --backend vk|cpu (default vk when built with Vulkan), --device N.
+// serve with TS5_USAGE_LOG=FILE writes a line per API request to FILE
+// (usage.h), as the PS5 title does to usage.tsv.
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -38,7 +41,12 @@
 #include "server.h"
 #include "tokenizer.h"
 #include "tools.h"
+#include "usage.h"
 #include "websearch.h"
+
+#ifndef TS5_VERSION
+#define TS5_VERSION "dev"
+#endif
 
 using namespace ts5;
 
@@ -57,7 +65,7 @@ struct Args {
 int usage() {
     fprintf(stderr,
             "usage: ts5 serve|run|bench|check|tokenize|logits|prompt -m model.gguf [options]\n"
-            "       ts5 search QUERY | ts5 tool-parse hermes|llama3 < TEXT\n"
+            "       ts5 search QUERY | ts5 tool-parse hermes|llama3 < TEXT | ts5 usage-parse FILE\n"
             "       ts5 fetch URL FILE [--sha256 HEX]\n"
             "  -c N|auto      context length (default 8192; auto: what fits in GPU memory)\n"
             "  --backend B    vk or cpu\n"
@@ -126,9 +134,15 @@ std::string read_all(FILE *f) {
     return s;
 }
 
-// The commands that need no model: a web search, and the tool-call parser.
+// The commands that need no model: a web search, and the tool-call and
+// usage log parsers.
 int no_model_command(int argc, char **argv) {
     std::string cmd = argv[1];
+    if (cmd == "usage-parse") {
+        if (argc != 3) return usage();
+        printf("%s", usage_header().c_str());
+        return UsageLog::read(argv[2], [](const UsageRecord &r) { printf("%s", usage_line(r).c_str()); }) ? 0 : 1;
+    }
     if (cmd == "search") {
         if (argc != 3) return usage();
         if (tavily_key().empty()) fprintf(stderr, "ts5: TAVILY_API_KEY is not set\n");
@@ -215,7 +229,8 @@ int fetch_command(int argc, char **argv) {
 
 int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     if (argc >= 2 && std::string(argv[1]) == "fetch") return fetch_command(argc, argv);
-    if (argc >= 2 && (std::string(argv[1]) == "search" || std::string(argv[1]) == "tool-parse"))
+    if (argc >= 2 && (std::string(argv[1]) == "search" || std::string(argv[1]) == "tool-parse" ||
+                      std::string(argv[1]) == "usage-parse"))
         return no_model_command(argc, argv);
     Args a;
     if (!parse(argc, argv, a)) return usage();
@@ -345,8 +360,27 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
                 st.gen_tokens * 1000.0 / st.gen_ms, st.draft_accepted, st.drafted, st.sample_ms);
         return 0;
     }
-    if (a.cmd == "serve")
+    if (a.cmd == "serve") {
+        // With TS5_USAGE_LOG, each request's line is written as it ends, on
+        // its thread once the generation lock is let go. The name is the
+        // file's, without .gguf.
+        const char *log_path = getenv("TS5_USAGE_LOG");
+        UsageLog log(log_path ? log_path : "");
+        std::function<void(const UsageRecord &)> on_usage;
+        if (log_path && *log_path) {
+            std::string name = basename_of(a.model);
+            if (name.size() > 5 && name.compare(name.size() - 5, 5, ".gguf") == 0) name.resize(name.size() - 5);
+            log.start(TS5_VERSION);
+            if (!log.flush()) fprintf(stderr, "ts5: can't write %s\n", log_path);
+            on_usage = [&log, name](const UsageRecord &r) {
+                UsageRecord n = r;
+                if (!n.model.empty()) n.name = name;
+                log.push(n);
+                log.flush();
+            };
+        }
         return serve(eng, basename_of(a.model), a.host, a.port,
-                     [&](int port) { if (on_serving) on_serving(basename_of(a.model), port); });
+                     [&](int port) { if (on_serving) on_serving(basename_of(a.model), port); }, on_usage);
+    }
     return usage();
 }
