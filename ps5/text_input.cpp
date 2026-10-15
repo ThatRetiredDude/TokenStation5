@@ -20,7 +20,7 @@ struct ImeDialogParam {
     uint32_t enter_label;  // kLabelDefault, kLabelSend
     uint32_t input_method;
     void *filter;
-    uint32_t option;  // kOptionPassword
+    uint32_t option;
     uint32_t max_text_length;
     char16_t *text;
     float x, y;
@@ -41,7 +41,6 @@ static_assert(sizeof(ImeDialogResult) == 16, "libSceImeDialog's result is 16 byt
 
 constexpr uint32_t kTypeDefault = 0, kTypeBasicLatin = 1;
 constexpr uint32_t kLabelDefault = 0, kLabelSend = 1;
-constexpr uint32_t kOptionPassword = 0x4;
 constexpr uint32_t kAlignCenter = 1;
 constexpr int kStatusNone = 0, kStatusRunning = 1, kStatusFinished = 2;
 constexpr uint32_t kEndOk = 0;
@@ -73,6 +72,9 @@ constexpr uint16_t kUsageEnter = 0x28, kUsageKeypadEnter = 0x58;
 constexpr int kKeyboardSlots = 12;
 // How often to look for a keyboard while none is open.
 constexpr double kOpenEvery = 2;
+// A press this soon after the page gets the keyboard back is the Enter that
+// closed the console's keyboard, reported late.
+constexpr double kSettle = 0.5;
 
 bool holds_enter(const KeyboardData &d) {
     const int n = std::min(std::max(d.length, 0), 16);
@@ -127,9 +129,8 @@ bool TextInput::open(const TextRequest &r) {
     ImeDialogParam p;
     memset(&p, 0, sizeof p);
     p.user = user;
-    p.type = r.secret ? kTypeBasicLatin : kTypeDefault;
+    p.type = r.latin ? kTypeBasicLatin : kTypeDefault;
     p.enter_label = r.send ? kLabelSend : kLabelDefault;
-    p.option = r.secret ? kOptionPassword : 0;
     p.max_text_length = (uint32_t)max;
     p.text = &buffer_[0];
     // The middle of the 1920x1080 screen.
@@ -140,7 +141,7 @@ bool TextInput::open(const TextRequest &r) {
     p.title = title_.c_str();
     const int ret = sceImeDialogInit(&p, nullptr);
     printf("ts5-title: keyboard: open 0x%08x, user 0x%08x%s\n", (unsigned)ret, (unsigned)user,
-           r.secret ? ", a key" : "");
+           r.latin ? ", a key" : "");
     if (ret != 0) return false;
     open_ = true;
     opened_at_ = now_s();
@@ -217,6 +218,7 @@ bool EnterKey::poll(bool active, double now) {
         memset(d, 0, sizeof d[0]);
         wait_release_ = sceKeyboardReadState(handle_, d) >= 0 && holds_enter(d[0]);
         down_ = false;
+        active_since_ = now;
     }
     was_active_ = active;
     memset(d, 0, sizeof d);
@@ -226,7 +228,8 @@ bool EnterKey::poll(bool active, double now) {
     for (int i = 0; i < n; i++) {
         if (!d[i].connected || d[i].intercepted) continue;
         if (holds_enter(d[i])) {
-            down_ = !wait_release_;
+            if (!down_) down_ = !wait_release_ && now - active_since_ > kSettle;
+            if (!down_) wait_release_ = true;
         } else {
             released = released || down_;
             down_ = wait_release_ = false;

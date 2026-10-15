@@ -435,8 +435,7 @@ int main(int, char **) {
         const std::string name = w.substr(0, eq);
         setenv(name.c_str(), w.substr(eq + 1).c_str(), 1);
         // Keys stay out of the log, which anyone on the network can read over FTP.
-        const bool secret = name.find("KEY") != std::string::npos || name.find("TOKEN") != std::string::npos;
-        printf("ts5-title: %s\n", secret ? (name + "=(set)").c_str() : w.c_str());
+        printf("ts5-title: %s\n", app::secret_setting(name) ? (name + "=(set)").c_str() : w.c_str());
     }
 
     for (const char *f :
@@ -763,7 +762,10 @@ int main(int, char **) {
                 } else {
                     typing.title = a.label;
                     typing.placeholder = typing_for == "TAVILY_API_KEY" ? "tvly-..." : "";
-                    typing.secret = app::secret_setting(typing_for);
+                    // Shown as it's typed, and starting from the saved one, so a typo
+                    // in a long key can be seen and fixed.
+                    typing.latin = app::secret_setting(typing_for);
+                    typing.text = app::setting(typing_for.c_str(), "");
                     typing.max_chars = 256;
                 }
                 typing_pending = true;

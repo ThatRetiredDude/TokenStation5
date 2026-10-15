@@ -20,7 +20,7 @@ struct TextRequest {
     std::string placeholder;  // in the box while it's empty
     std::string text;         // what the box starts with
     size_t max_chars = 2000;  // the dialog takes at most 2048
-    bool secret = false;      // a key: Latin letters, numbers and symbols, hidden as typed
+    bool latin = false;       // a key: Latin letters, numbers and symbols only
     bool send = false;        // the confirm button reads Send
 };
 
@@ -55,7 +55,7 @@ public:
 private:
     bool tried_ = false, ready_ = false, was_active_ = false, down_ = false, wait_release_ = false;
     int handle_ = -1;
-    double next_open_ = 0;
+    double next_open_ = 0, active_since_ = 0;
     bool open_keyboard(double now);
 };
 
