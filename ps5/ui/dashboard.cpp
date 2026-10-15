@@ -48,6 +48,8 @@ std::string good_for(const app::ModelInfo &m) {
         if (ch == ' ') ch = '-';
     if (const app::CatalogEntry *e = catalog_of(m.file)) return e->good_for;
     if (const app::CatalogEntry *e = catalog_of(name)) return e->good_for;
+    // A file with no model in it: nothing to guess from.
+    if (m.arch.empty()) return "\xE2\x80\x94";
     return name.find("coder") != std::string::npos ? "Coding" : "General chat";
 }
 

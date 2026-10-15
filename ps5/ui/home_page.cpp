@@ -359,14 +359,24 @@ void HomePage::draw_apps(Canvas &c, const HomeInfo &info) {
 void HomePage::draw_speed(Canvas &c, const HomeInfo &info) {
     const UsageView *u = info.usage && info.usage->ready ? info.usage.get() : nullptr;
     const int tw = c.text(h2_, SX + 32, SY + 52, "Writing speed", kText);
-    c.text(small_, SX + 32 + tw + 16, SY + 52, "tokens a second, by model", kText2);
+    const int sw = c.text(small_, SX + 32 + tw + 16, SY + 52, "tokens a second, by model", kText2);
     if (!u) return;
-    // The three models that wrote most over the range.
+    // The models that wrote most over the range, as many as the key at the
+    // top right has room for (the four models of the set fit).
     std::vector<const UsageView::Series *> top;
     for (const auto &m : u->models)
         if (m.total.gen >= kSpeedMin && m.total.gen_ms > 0) top.push_back(&m);
     std::stable_sort(top.begin(), top.end(), [](auto *a, auto *b) { return a->total.gen > b->total.gen; });
-    if (top.size() > 3) top.resize(3);
+    const int room = (SX + SW - 32) - (SX + 32 + tw + 16 + sw + 40);
+    int used = 0;
+    size_t fit = 0;
+    while (fit < top.size() && fit < 5) {
+        const int w = Canvas::measure(small_, short_name(top[fit]->name)) + 44;
+        if (used + w > room) break;
+        used += w;
+        fit++;
+    }
+    top.resize(std::max<size_t>(fit, std::min<size_t>(top.size(), 1)));
     if (top.empty()) {
         const std::string s = u->ever ? "No replies in the last " + std::string(range_words(range_)) : "No replies yet";
         c.text(body_, SX + (SW - Canvas::measure(body_, s)) / 2, (STOP + SBASE) / 2 + 10, s, kMuted);
