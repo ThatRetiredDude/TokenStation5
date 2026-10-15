@@ -358,19 +358,31 @@ void HomePage::draw_apps(Canvas &c, const HomeInfo &info) {
 
 void HomePage::draw_speed(Canvas &c, const HomeInfo &info) {
     const UsageView *u = info.usage && info.usage->ready ? info.usage.get() : nullptr;
+    const char *const sub = "tokens a second, by model";
     const int tw = c.text(h2_, SX + 32, SY + 52, "Writing speed", kText);
-    const int sw = c.text(small_, SX + 32 + tw + 16, SY + 52, "tokens a second, by model", kText2);
-    if (!u) return;
+    if (!u) {
+        c.text(small_, SX + 32 + tw + 16, SY + 52, sub, kText2);
+        return;
+    }
     // The models that wrote most over the range, as many as the key at the
-    // top right has room for (the four models of the set fit).
+    // top right has room for. The words after the heading give way to the
+    // key when it needs the room (all four models of the set do).
     std::vector<const UsageView::Series *> top;
     for (const auto &m : u->models)
         if (m.total.gen >= kSpeedMin && m.total.gen_ms > 0) top.push_back(&m);
     std::stable_sort(top.begin(), top.end(), [](auto *a, auto *b) { return a->total.gen > b->total.gen; });
-    const int room = (SX + SW - 32) - (SX + 32 + tw + 16 + sw + 40);
+    if (top.size() > 5) top.resize(5);
+    int key_w = 0;
+    for (auto *m : top) key_w += Canvas::measure(small_, short_name(m->name)) + 44;
+    const int key_right = SX + SW - 32, after_heading = SX + 32 + tw + 40;
+    int room = key_right - after_heading;
+    if (key_w <= room - 16 - Canvas::measure(small_, sub)) {
+        c.text(small_, SX + 32 + tw + 16, SY + 52, sub, kText2);
+        room -= 16 + Canvas::measure(small_, sub);
+    }
     int used = 0;
     size_t fit = 0;
-    while (fit < top.size() && fit < 5) {
+    while (fit < top.size()) {
         const int w = Canvas::measure(small_, short_name(top[fit]->name)) + 44;
         if (used + w > room) break;
         used += w;
