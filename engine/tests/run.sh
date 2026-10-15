@@ -121,6 +121,20 @@ for r in 3 4; do
     TS5_MV_ROWS_MIN=1 TS5_MVT_ROWS=$r python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
         --ntok 7 "$work/qwen2-Q4_K_M.gguf"
 done
+# The fused gate+up verify kernel (off by default) against the split one,
+# byte for byte; its profile line proves the fused kernel is what ran, one
+# row per workgroup and capped-tiled (TS5_MVT_ROWS=4 still runs it at its
+# 2-row spill cap, so the non-".1" pipeline).
+TS5_MVT_GLU=1 TS5_PROFILE=1 "$ts5" logits -m "$work/qwen2-Q4_K_M.gguf" -o "$work/glu-on.bin" 12 34 56 78 90 11 22 2> "$work/glu-on.err"
+grep -q "mvt_glu_q4_k\.7\.1 ffn_gate+up" "$work/glu-on.err"
+"$ts5" logits -m "$work/qwen2-Q4_K_M.gguf" -o "$work/glu-off.bin" 12 34 56 78 90 11 22 2> /dev/null
+cmp "$work/glu-on.bin" "$work/glu-off.bin"
+TS5_MVT_GLU=1 TS5_MV_ROWS_MIN=1 TS5_MVT_ROWS=4 TS5_PROFILE=1 "$ts5" logits -m "$work/qwen2-Q4_K_M.gguf" \
+    -o "$work/glu-r2.bin" 12 34 56 78 90 11 22 2> "$work/glu-r2.err"
+grep -q "mvt_glu_q4_k\.7 ffn_gate+up" "$work/glu-r2.err"
+cmp "$work/glu-on.bin" "$work/glu-r2.bin"
+TS5_MVT_GLU=1 TS5_MV_ROWS_MIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
+    --ntok 7 "$work/qwen2-Q4_K_M.gguf"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 5 "$work/qwen2-Q8_0.gguf" "$work/llama-Q8_0.gguf"
 rep="one two three one two three one two three one two three one two"
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-off.txt" 2> /dev/null
@@ -129,6 +143,59 @@ cmp "$work/sd-off.txt" "$work/sd-on.txt"
 grep -q "draft [0-9]*/[1-9]" "$work/sd-on.err"  # drafts were actually proposed
 TS5_ADAPT=0 TS5_DRAFT=7 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-fix.txt" 2> /dev/null
 cmp "$work/sd-off.txt" "$work/sd-fix.txt"  # the fixed-length policy too
+echo "== the draft model cascade: a non-repeating prompt, the model as its own drafter"
+nr="The sky turned a deep shade of violet over the quiet harbor town that evening"
+TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$nr" -n 200 --temp 0 > "$work/dm-off.txt" 2> /dev/null
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-Q8_0.gguf" "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" \
+    -p "$nr" -n 200 --temp 0 > "$work/dm-on.txt" 2> "$work/dm-on.err"
+cmp "$work/dm-off.txt" "$work/dm-on.txt"
+grep -q "draft model .* ready" "$work/dm-on.err"
+grep -q "draft [0-9]*/[1-9]" "$work/dm-on.err"  # the drafter actually proposed
+echo "== a drafter whose weight rows are padded past the token list (and the reverse), as released models pad"
+mk_k qwen2-pad qwen2 qwen2 --pad-vocab 128
+TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-pad.gguf" -p "$nr" -n 100 --temp 0 > "$work/pad-off.txt" 2> /dev/null
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-kmix.gguf" "$ts5" run --backend cpu -m "$work/qwen2-pad.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/pad-on.txt" 2> "$work/pad-on.err"
+cmp "$work/pad-off.txt" "$work/pad-on.txt"
+grep -q "draft model .* ready" "$work/pad-on.err"  # narrower drafter accepted (the console case)
+grep -q "draft [0-9]*/[1-9][0-9]* accepted" "$work/pad-on.err"  # and it kept proposing
+! grep -q "draft model \(stopped\|failed\)" "$work/pad-on.err"
+TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" -p "$nr" -n 100 --temp 0 > "$work/padr-off.txt" 2> /dev/null
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-pad.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/padr-on.txt" 2> "$work/padr-on.err"
+cmp "$work/padr-off.txt" "$work/padr-on.txt"
+grep -q "draft model .* ready" "$work/padr-on.err"  # wider drafter accepted too
+grep -q "draft [0-9]*/[1-9][0-9]* accepted" "$work/padr-on.err"
+! grep -q "draft model \(stopped\|failed\)" "$work/padr-on.err"
+echo "== a target whose token list itself is padded (and the reverse), as Qwen 7B pads against the 0.5B"
+mk_k qwen2-padlist qwen2 qwen2 --pad-tokens 128
+TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-padlist.gguf" -p "$nr" -n 100 --temp 0 > "$work/padl-off.txt" 2> /dev/null
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-kmix.gguf" "$ts5" run --backend cpu -m "$work/qwen2-padlist.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/padl-on.txt" 2> "$work/padl-on.err"
+cmp "$work/padl-off.txt" "$work/padl-on.txt"
+grep -q "draft model .* ready" "$work/padl-on.err"  # the drafter's shorter token list is accepted
+grep -q "draft [0-9]*/[1-9][0-9]* accepted" "$work/padl-on.err"
+! grep -q "draft model \(stopped\|failed\)" "$work/padl-on.err"
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-padlist.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/padlr-on.txt" 2> "$work/padlr-on.err"
+cmp "$work/padr-off.txt" "$work/padlr-on.txt"
+grep -q "draft model .* ready" "$work/padlr-on.err"  # a longer one too
+! grep -q "draft model \(stopped\|failed\)" "$work/padlr-on.err"
+echo "== the guards at the vocabulary seams, forced to fire (a boosted row the greedy target soon picks)"
+mk_k qwen2-padhot qwen2 qwen2 --pad-tokens 128 --boost-token 151940
+# A target that samples into its pad range stops the draft model with a
+# message, and the output stays its own...
+TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-padhot.gguf" -p "$nr" -n 100 --temp 0 > "$work/padf-off.txt" 2> /dev/null
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-kmix.gguf" "$ts5" run --backend cpu -m "$work/qwen2-padhot.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/padf-on.txt" 2> "$work/padf-on.err"
+cmp "$work/padf-off.txt" "$work/padf-on.txt"
+grep -q "draft model stopped: token 151940 is past its 151936 embedding rows" "$work/padf-on.err"
+# ...and a drafter that argmaxes past the target's rows only loses that draft.
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-padhot.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/padb-on.txt" 2> "$work/padb-on.err"
+cmp "$work/padr-off.txt" "$work/padb-on.txt"
+grep -q "draft model .* ready" "$work/padb-on.err"
+! grep -q "draft model \(stopped\|failed\)" "$work/padb-on.err"
 echo "== ts5 check (GPU vs CPU in one command, as run on the console), then again on the saved answers"
 rm -f "$work"/qwen3-Q4_0.gguf*.ts5ref
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null

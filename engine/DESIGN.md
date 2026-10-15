@@ -176,7 +176,25 @@ the whole batch; each token's x values are loaded once per NR rows. The
 batch's x sits in the 4 MB L2, but at one row per workgroup a 19k-row
 matrix re-read it from L2 per (row, token) — several GB a layer at 7
 tokens, measured on the console as a verify pass costing 5.7x a single
-step — which the row tiling divides by NR.
+step — which the row tiling divides by NR. The feed-forward's gate and up,
+the two biggest lines of a verify pass, can run as one kernel
+(`TS5_MVT_GLU=1` picks `mvt_glu_q4_k`): both matrices' blocks are dotted
+with the same x loads and swiglu is applied in place, as `mv16_glu_q4_k`
+does for one token. Holding two matrices' words doubles the register
+load, so its rows per workgroup are capped at 2 (at 4 the PS5 spills
+1376 VGPRs into scratch, measured as a 7x slower verify), and it stays
+off by default until a console A/B shows the capped version winning.
+
+When `TS5_DRAFT_MODEL` names a smaller GGUF with the same vocabulary (for
+Qwen 2.5 Coder 7B, a Qwen 2.5 0.5B), steps where the lookup finds nothing
+draft that model's greedy continuation instead: its own cache is caught up to
+the confirmed history in one batch, then it extends one token at a time, and
+the big model verifies the batch as usual. The acceptance walk keeps the
+output distribution for any draft source, so a drafter changes speed, never
+output. Unlike the free lookup it costs real forwards (a 0.5B is roughly a
+tenth of a 7B token), so the lookup still serves echo spans first and the
+adaptive draft length throttles both. A drafter that fails logs once and
+turns itself off; generation continues on lookup alone.
 
 ## Memory
 
