@@ -6,6 +6,8 @@
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -117,6 +119,11 @@ namespace ts5 {
 
 namespace {
 
+double now_ms() {
+    using namespace std::chrono;
+    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
+
 struct Fns {
 #define DECL(f) PFN_##f f = nullptr;
     VK_DEVICE_FNS(DECL)
@@ -192,6 +199,8 @@ public:
     KvType kv_type() const override { return kv_; }
 
     std::string take_profile() override {
+        const Cpu c = cpu_;
+        cpu_ = Cpu{};
         if (prof_.empty()) return {};
         std::vector<std::pair<std::string, Prof>> v(prof_.begin(), prof_.end());
         prof_.clear();
@@ -201,6 +210,14 @@ public:
         char b[256];
         snprintf(b, sizeof b, "GPU time %.1f ms:\n", total);
         std::string s = b;
+        if (c.calls) {
+            // What the CPU did per forward call besides waiting for the GPU.
+            const double n = c.calls, rec = c.call - c.submit - c.wait - c.copy;
+            snprintf(b, sizeof b,
+                     "  CPU per call: %.3f ms recording, %.3f submitting, %.3f copying logits; %.3f waiting (%d calls)\n",
+                     rec / n, c.submit / n, c.copy / n, c.wait / n, c.calls);
+            s += b;
+        }
         for (auto &e : v) {
             snprintf(b, sizeof b, "  %-24s %9.2f ms %5.1f%% %7d calls\n", e.first.c_str(), e.second.ms,
                      100.0 * e.second.ms / total, e.second.calls);
@@ -249,11 +266,13 @@ private:
         VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         cai.commandPool = pool_;
         cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        cai.commandBufferCount = 1;
-        CHECK(vk.vkAllocateCommandBuffers(dev_, &cai, &cmd_));
+        cai.commandBufferCount = (uint32_t)cmds_.size();
+        CHECK(vk.vkAllocateCommandBuffers(dev_, &cai, cmds_.data()));
+        cmd_ = cmds_[0];
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         CHECK(vk.vkCreateFence(dev_, &fci, nullptr, &fence_));
         if (const char *e = getenv("TS5_LAYERS_PER_SUBMIT")) layers_per_submit_ = std::max(1, atoi(e));
+        if (const char *e = getenv("TS5_DEC_SUBMIT")) dec_submit_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_TILED_MIN")) tiled_min_ = atoi(e);
         if (const char *e = getenv("TS5_FAST_MATVEC")) fast_matvec_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV_ROWS")) mv_rows_ = std::min(8, std::max(1, atoi(e)));
@@ -532,6 +551,8 @@ private:
     // --- recording -----------------------------------------------------------
 
     bool begin(std::string &err) {
+        cur_ = 0;
+        cmd_ = cmds_[0];
         CHECK(vk.vkResetCommandBuffer(cmd_, 0));
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -549,11 +570,16 @@ private:
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
         si.pCommandBuffers = &cmd_;
+        double t = now_ms();
         {
             std::lock_guard<std::mutex> lk(ctx_->queue_mutex);
             CHECK(vk.vkQueueSubmit(queue_, 1, &si, fence_));
         }
+        cpu_.submit += now_ms() - t;
+        t = now_ms();
+        // The fence also covers what flush() submitted before it.
         CHECK(vk.vkWaitForFences(dev_, 1, &fence_, VK_TRUE, UINT64_MAX));
+        cpu_.wait += now_ms() - t;
         CHECK(vk.vkResetFences(dev_, 1, &fence_));
         if (qpool_ && !qlabels_.empty()) {
             const uint32_t nq = (uint32_t)qlabels_.size() + 1;
@@ -568,6 +594,30 @@ private:
             }
             qlabels_.clear();
         }
+        return true;
+    }
+
+    // Submits what's recorded without waiting for it, and goes on recording
+    // into the next command buffer: the GPU runs the first layers of a token
+    // while the CPU records the rest. Timestamps carry on where they were;
+    // the last submit() waits for all of it.
+    bool flush(std::string &err) {
+        CHECK(vk.vkEndCommandBuffer(cmd_));
+        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cmd_;
+        const double t = now_ms();
+        {
+            std::lock_guard<std::mutex> lk(ctx_->queue_mutex);
+            CHECK(vk.vkQueueSubmit(queue_, 1, &si, VK_NULL_HANDLE));
+        }
+        cpu_.submit += now_ms() - t;
+        if (++cur_ == cmds_.size()) { err = "too many submits in one forward call"; return false; }
+        cmd_ = cmds_[cur_];
+        CHECK(vk.vkResetCommandBuffer(cmd_, 0));
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        CHECK(vk.vkBeginCommandBuffer(cmd_, &bi));
         return true;
     }
 
@@ -820,6 +870,10 @@ private:
         // runs long (the PS5 driver drops the device after 10 s without
         // progress).
         int per_submit = layers_per_submit_ ? layers_per_submit_ : (n >= 64 ? 4 : hp_.n_layer);
+        // Small batches (a generated token, a verify batch) instead go out
+        // dec_submit_ layers at a time without waiting in between.
+        const int per_flush = n < 64 && !layers_per_submit_ ? dec_submit_ : 0;
+        const double t0 = now_ms();
         if (!begin(err)) return false;
         {
             struct { uint32_t ncols, row_bytes; } pc{(uint32_t)E, (uint32_t)m_.tok_embd.info->row_bytes()};
@@ -866,7 +920,9 @@ private:
                 dispatch("swiglu", {&g_, &u_}, pc, std::min<uint32_t>(65535, (pc.n + 255) / 256));
             }
             matmul(L.w_down, g_, x_, n, true);
-            if ((l + 1) % per_submit == 0 && l + 1 < hp_.n_layer) {
+            if (per_flush && (l + 1) % per_flush == 0 && l + 1 < hp_.n_layer) {
+                if (!flush(err)) return false;
+            } else if ((l + 1) % per_submit == 0 && l + 1 < hp_.n_layer) {
                 if (!submit(err) || !begin(err)) return false;
             }
         }
@@ -876,7 +932,12 @@ private:
             matmul(m_.output, h_, logits_, nout, false);
         }
         if (!submit(err)) return false;
+        const double t1 = now_ms();
         if (logits) memcpy(logits, logits_.map, 4ull * (all ? n : 1) * hp_.n_vocab);
+        const double t2 = now_ms();
+        cpu_.copy += t2 - t1;
+        cpu_.call += t2 - t0;
+        cpu_.calls++;
         return true;
     }
 
@@ -893,13 +954,20 @@ private:
     VkQueue queue_ = VK_NULL_HANDLE;
     uint32_t qfam_ = 0;
     VkCommandPool pool_ = VK_NULL_HANDLE;
+    // The command buffer being recorded: cmds_[cur_]. Several per forward
+    // call only when it flushes layers as it goes (TS5_DEC_SUBMIT).
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
+    std::array<VkCommandBuffer, 64> cmds_{};
+    size_t cur_ = 0;
     VkFence fence_ = VK_NULL_HANDLE;
     std::vector<Arena> arenas_;
     std::vector<VkBuffer> all_bufs_;
     VkDeviceSize allocated_ = 0;
     uint64_t weight_bytes_ = 0;
     int layers_per_submit_ = 0;
+    // Layers per submit for forward calls under 64 tokens, without waiting
+    // between them (TS5_DEC_SUBMIT; 0: one submit).
+    int dec_submit_ = 0;
     // Matmuls of at least this many tokens use the tiled kernel (TS5_TILED_MIN).
     int tiled_min_ = 9;
     // One-token Q4_K/Q6_K matmuls use the word-load kernels (TS5_FAST_MATVEC=0: off).
@@ -962,6 +1030,13 @@ private:
         int calls = 0;
     };
     std::map<std::string, Prof> prof_;
+    // CPU milliseconds since the last take_profile: whole forward calls, and
+    // the parts of them in vkQueueSubmit, the fence wait and the logits copy.
+    struct Cpu {
+        double call = 0, submit = 0, wait = 0, copy = 0;
+        int calls = 0;
+    };
+    Cpu cpu_;
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
     Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_, kc_, vc_, ks_, vs_;

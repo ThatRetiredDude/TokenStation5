@@ -119,6 +119,12 @@ TS5_ATTN_SPLITS=3 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 100 --step "${shapes[@]}"
 TS5_ATTN_SPLITS=7 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 40 --step \
     "${shapes[@]}"
+# A generated token's layers submitted one at a time, without waiting in
+# between, and the same with the profile's timestamps across the submits.
+TS5_DEC_SUBMIT=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 40 --step \
+    "${shapes[@]}"
+TS5_DEC_SUBMIT=1 TS5_PROFILE=1 "$ts5" bench -m "${shapes[1]}" --backend vk > "$work/bench-dec-submit.txt"
+grep -q "CPU per call" "$work/bench-dec-submit.txt"
 # attn_dec (generation over a long cache; TS5_ATTN_DEC=1 from the first key),
 # heads of 128: one token per call, its keys in slices of 128, then 300 at
 # once without attn_pf (8 rows of 1 or 2 tokens a workgroup).
