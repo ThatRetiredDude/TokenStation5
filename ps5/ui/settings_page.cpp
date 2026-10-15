@@ -58,8 +58,9 @@ const std::vector<Row> &rows() {
          "The next time you hold R1", {{"4", "4"}, {"6", "6"}, {"8", "8"}, {"10", "10"}, {"12", "12"}}, "6"},
         {"SPOKEN REPLIES", "TS5_SPEAK", "Read replies aloud",
          "Reads each reply on the Chat page out loud as it comes in, a sentence at a time, in a voice made on "
-         "the PS5. Triangle stops it. It needs a voice: see Voice below.",
-         "From the next reply", {{"1", "On"}, {"0", "Off"}}, "1"},
+         "the PS5. Triangle stops it. The voice is loaded only while this is on, so off gives its memory back. "
+         "It needs a voice: see Voice below.",
+         "Now", {{"1", "On"}, {"0", "Off"}}, "1"},
         {"SPOKEN REPLIES", "TS5_SPEAK_OUT", "Speak on",
          "Where the voice comes out: the TV, or the speaker in the controller.", "From the next sentence",
          {{"tv", "TV"}, {"controller", "Controller speaker"}}, "tv"},
