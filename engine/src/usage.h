@@ -41,7 +41,7 @@ struct UsageRecord {
     int64_t wait_ms = 0;                      // behind another generation
     int64_t first_ms = 0, total_ms = 0;       // from the request read to the first text, and to the end
     // Why it wasn't answered: no_model, loading, busy_check, busy_bench,
-    // bad_json, too_long, gpu_error or exception; "" when it was.
+    // bad_json, empty_prompt, too_long, gpu_error or exception; "" when it was.
     std::string why;
 };
 
