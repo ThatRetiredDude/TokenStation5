@@ -11,6 +11,7 @@
 
 #include "backend.h"
 #include "model.h"
+#include "plain.h"
 
 namespace app {
 
@@ -61,7 +62,7 @@ ModelInfo inspect(const std::string &path, const std::string &file, uint64_t siz
     const ts5::Gguf &g = model.gguf;
     if (!g.tensors.empty() || g.has("general.architecture")) {
         const std::string name = g.get_str("general.name");
-        if (!name.empty()) m.name = name;
+        if (!name.empty()) m.name = plain::pretty_model_name(name);
         m.arch = g.get_str("general.architecture");
         if (const char *q = file_type_name(g.get_int("general.file_type", -1))) m.quant = q;
         std::map<uint32_t, uint64_t> by_type;
