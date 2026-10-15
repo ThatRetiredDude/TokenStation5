@@ -5,7 +5,10 @@
 // mvt_q4_k, but each block's words are loaded from both matrices and dotted
 // with the same x values, so the x traffic — the dominant stream once the
 // batch shares the weights — is paid once for the two biggest lines of a
-// verify pass, and the swiglu kernel and its barrier are spared.
+// verify pass, and the swiglu kernel and its barrier are spared. Holding
+// two matrices' words doubles the register load: past NR = 2 the PS5
+// spills (1376 VGPRs into 36 KB of scratch at NR 4, NT 8 — a 7x
+// regression, measured), so the backend caps this kernel's rows at 2.
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_control_flow_attributes : require
 
