@@ -50,6 +50,8 @@ std::string good_for(const app::ModelInfo &m) {
     if (const app::CatalogEntry *e = catalog_of(name)) return e->good_for;
     // A file with no model in it: nothing to guess from.
     if (m.arch.empty()) return "\xE2\x80\x94";
+    // The tiny test model isn't in the catalog.
+    if (name.find("0.5b") != std::string::npos) return "A quick test";
     return name.find("coder") != std::string::npos ? "Coding" : "General chat";
 }
 
