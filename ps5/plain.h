@@ -71,6 +71,9 @@ inline std::string reason(const std::string &raw) {
     return r;
 }
 
+// After a failure on screen: where its raw words are.
+inline const char *const kDetails = " Details are in Logs.";
+
 // A model's name from its file name, for a model the library doesn't list.
 inline std::string model_name(const std::string &file) {
     std::string n = file.substr(file.find_last_of('/') == std::string::npos ? 0 : file.find_last_of('/') + 1);

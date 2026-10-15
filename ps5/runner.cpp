@@ -17,6 +17,7 @@
 #include "tokenizer.h"
 
 #include "plain.h"
+#include "settings.h"
 
 extern "C" {
 size_t sceKernelGetDirectMemorySize(void);
@@ -43,7 +44,7 @@ public:
             const char *was = getenv(name.c_str());
             saved_.push_back({name, was ? std::string("=") + was : std::string()});
             setenv(name.c_str(), kv.substr(kv.find('=') + 1).c_str(), 1);
-            printf("ts5-title: for this job: %s\n", kv.c_str());
+            printf("ts5-title: for this job: %s\n", secret_setting(name) ? (name + "=(set)").c_str() : kv.c_str());
         }
     }
     ~EnvScope() {
@@ -193,8 +194,8 @@ void Runner::loop() {
             // them there); plain ones on the screen.
             printf("ts5-title: %s\n", error.c_str());
             if (said.empty()) said = error;  // a job that set only error, in plain words already
-            event(said, true);
-            notify_("TokenStation5: " + said);
+            event(said + plain::kDetails, true);
+            notify_("TokenStation5: " + said + plain::kDetails);
         }
         version_++;
     }
