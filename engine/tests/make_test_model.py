@@ -99,6 +99,8 @@ def main():
                     help="extra embedding and output rows past the token list, as released models pad")
     ap.add_argument("--pad-tokens", type=int, default=0,
                     help="placeholder entries added to the token list itself (with rows to match), as Qwen 7B pads")
+    ap.add_argument("--boost-token", type=int, default=-1,
+                    help="make this output row huge, so greedy sampling soon picks it: for guard tests")
     ap.add_argument("--quant", default="F32", choices=["F32", "F16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q4_K_M"],
                     help="type for the 2-D weights; Q4_K_M: Q4_K, with Q6_K for attn_v, ffn_down and output, "
                          "as llama-quantize's mix")
@@ -129,10 +131,12 @@ def main():
     kmix = a.quant == "Q4_K_M"
     qtype = GGMLQuantizationType.Q4_K if kmix else getattr(GGMLQuantizationType, a.quant)
 
-    def t(name, *shape, scale=None):
+    def t(name, *shape, scale=None, boost_row=-1):
         # numpy shape is (ne1, ne0): rows are outputs, columns are inputs.
         s = scale if scale is not None else 1.0 / np.sqrt(shape[-1])
         data = (rng.standard_normal(shape) * s).astype(np.float32)
+        if boost_row >= 0:
+            data[boost_row, :] = 100.0  # its logit dwarfs the rest whenever sum(h) > 0
         if kmix:
             if shape[-1] % 256:
                 w.add_tensor(name, quants.quantize(data, GGMLQuantizationType.Q8_0),
@@ -170,7 +174,7 @@ def main():
         t(p + "ffn_up.weight", a.ff, a.embd)
         t(p + "ffn_down.weight", a.embd, a.ff)
     norm("output_norm.weight", a.embd)
-    t("output.weight", n_vocab + a.pad_tokens + a.pad_vocab, a.embd)
+    t("output.weight", n_vocab + a.pad_tokens + a.pad_vocab, a.embd, boost_row=a.boost_token)
 
     w.write_header_to_file()
     w.write_kv_data_to_file()
