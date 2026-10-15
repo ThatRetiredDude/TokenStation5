@@ -144,12 +144,15 @@ cmp "$work/af-off.txt" "$work/af-on.txt"
 grep -q "recording ahead stopped: TS5_AHEAD_FAIL" "$work/af-on.err"
 # attn_dec (generation over a long cache; TS5_ATTN_DEC=1 from the first key),
 # heads of 128: one token per call, its keys in slices of 128, then 300 at
-# once without attn_pf (8 rows of 1 or 2 tokens a workgroup).
+# once without attn_pf (8 rows of 1 or 2 tokens a workgroup). By default each
+# key is scored by 16 lanes side by side, 8 in lavapipe's 8-wide subgroups;
+# TS5_ATTN_DEC_KEYS=0 gives each key one thread, with plain and prefetching
+# key loads.
 TS5_ATTN_DEC=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 --step "${shapes[@]}"
-TS5_ATTN_DEC=1 TS5_ATTN_DEC_PLAIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
-    --step "${shapes[@]}"
-TS5_ATTN_DEC=1 TS5_ATTN_DEC_PLAIN=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
-    --step "${shapes[@]}"
+TS5_ATTN_DEC=1 TS5_ATTN_DEC_KEYS=0 TS5_ATTN_DEC_PLAIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 \
+    --backend vk --ntok 300 --step "${shapes[@]}"
+TS5_ATTN_DEC=1 TS5_ATTN_DEC_KEYS=0 TS5_ATTN_DEC_PLAIN=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 \
+    --backend vk --ntok 300 --step "${shapes[@]}"
 TS5_ATTN_DEC=1 TS5_ATTN_PF=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
     "${shapes[@]}"
 # attn_dec scoring each key with 8 or 16 lanes side by side, in lavapipe's

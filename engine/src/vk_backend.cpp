@@ -1142,7 +1142,10 @@ private:
     int attn_dec_plain_ = -1;
     // attn_dec scoring each key with this many lanes side by side (8, 16 or 32,
     // TS5_ATTN_DEC_KEYS; 0: one thread a key, its words one after another).
-    int attn_dec_keys_ = 0;
+    // 16 is the fastest on the console at 16k tokens of context: generation
+    // +6% on Coder 7B, +31% on Qwen 3 8B and +37% on Llama 3.2 3B against 0;
+    // 32 is slower than 0 on Coder 7B.
+    int attn_dec_keys_ = 16;
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).
     bool mmb_ = true;
