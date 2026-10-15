@@ -1,0 +1,4 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Prompt attention over the f16 KV cache (see attn_pf.glsl).
+#include "attn_pf.glsl"

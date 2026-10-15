@@ -1,0 +1,284 @@
+diff -ruN a/src/core/gguf_loader.cpp b/src/core/gguf_loader.cpp
+--- a/src/core/gguf_loader.cpp
++++ b/src/core/gguf_loader.cpp
+@@ -211,6 +211,11 @@
+         if (!base)
+             return;
+         ok = true;
++#elif defined(KOKORO_NO_MMAP)
++        // ts5: never mapped, so every load takes its fread path (the PS5
++        // title reads its models with stdio, as whisper.cpp there does).
++        (void)path;
++        (void)writable;
+ #else
+         fd = ::open(path, O_RDONLY);
+         if (fd < 0)
+@@ -390,6 +395,9 @@
+ // on volumes that may disappear mid-run (network mounts, removable
+ // disks); mmap-backed weights SIGBUS if the underlying file vanishes.
+ static bool mmap_loader_enabled() {
++#if defined(KOKORO_NO_MMAP)
++    return false;
++#endif
+     const char* v = std::getenv("KOKORO_GGUF_MMAP");
+     if (!v || !*v)
+         return true;
+diff -ruN a/src/core/simd_math.cpp b/src/core/simd_math.cpp
+--- a/src/core/simd_math.cpp
++++ b/src/core/simd_math.cpp
+@@ -1,78 +1,33 @@
+-#undef HWY_TARGET_INCLUDE
+-#define HWY_TARGET_INCLUDE "core/simd_math.cpp"
+-#include "hwy/foreach_target.h"
+-
+-#include "hwy/contrib/math/math-inl.h"
+-#include "hwy/contrib/random/random-inl.h"
+-#include "hwy/highway.h"
++// ts5: plain C++ in place of upstream's Google Highway version, so the
++// vendored code needs nothing beyond ggml. The same three functions with the
++// same results up to rounding, except the noise: a different random stream
++// (std::mt19937_64 and std::normal_distribution, as upstream's own fallback
++// without float64 vectors), which only changes the noise the model adds.
++// With -march=znver2 the compiler vectorizes the loops it can.
+ 
+ #include "core/simd_math.h"
+ 
+-#include <algorithm>
+ #include <cmath>
+ #include <random>
+-#include <vector>
+ 
+-HWY_BEFORE_NAMESPACE();
+ namespace core_simd {
+-namespace HWY_NAMESPACE {
+ 
+-namespace hn = hwy::HWY_NAMESPACE;
+-
+-void SinScaledInplace(float * values, std::size_t count, float scale) {
+-    const hn::ScalableTag<float> d;
+-    const std::size_t lanes = hn::Lanes(d);
+-    const auto scale_vec = hn::Set(d, scale);
+-    std::size_t i = 0;
+-    for (; i + lanes <= count; i += lanes) {
+-        const auto value = hn::LoadU(d, values + i);
+-        hn::StoreU(hn::Mul(hn::Sin(d, value), scale_vec), d, values + i);
+-    }
+-    for (; i < count; ++i) {
++void sin_scaled_inplace(float * values, std::size_t count, float scale) {
++    for (std::size_t i = 0; i < count; ++i) {
+         values[i] = std::sin(values[i]) * scale;
+     }
+ }
+ 
+-void FillStandardNormal(
++void fill_standard_normal(
+     float * values, std::size_t count, std::uint64_t seed) {
+-#if HWY_HAVE_FLOAT64
+-    hn::VectorXoshiro rng(seed);
+-    const hn::ScalableTag<double> d;
+-    const std::size_t lanes = hn::Lanes(d);
+-    const auto minus_two = hn::Set(d, -2.0);
+-    const auto two_pi = hn::Set(d, 6.28318530717958647692);
+-    const auto minimum = hn::Set(d, 0x1.0p-53);
+-    std::vector<double> first(lanes);
+-    std::vector<double> second(lanes);
+-    std::size_t output = 0;
+-    while (output < count) {
+-        const auto uniform_radius = hn::Max(rng.Uniform(), minimum);
+-        const auto uniform_angle = rng.Uniform();
+-        const auto radius =
+-            hn::Sqrt(hn::Mul(minus_two, hn::Log(d, uniform_radius)));
+-        const auto angle = hn::Mul(two_pi, uniform_angle);
+-        auto sine = hn::Zero(d);
+-        auto cosine = hn::Zero(d);
+-        hn::SinCos(d, angle, sine, cosine);
+-        hn::StoreU(hn::Mul(radius, cosine), d, first.data());
+-        hn::StoreU(hn::Mul(radius, sine), d, second.data());
+-        for (std::size_t lane = 0; lane < lanes && output < count; ++lane) {
+-            values[output++] = static_cast<float>(first[lane]);
+-            if (output < count) {
+-                values[output++] = static_cast<float>(second[lane]);
+-            }
+-        }
+-    }
+-#else
+     std::mt19937_64 rng(seed);
+     std::normal_distribution<float> normal(0.0f, 1.0f);
+     for (std::size_t i = 0; i < count; ++i) {
+         values[i] = normal(rng);
+     }
+-#endif
+ }
+ 
+-void Stft20(
++void stft20(
+     const float * padded,
+     std::size_t frame_count,
+     std::size_t hop,
+@@ -83,71 +38,28 @@
+     constexpr std::size_t n_fft = 20;
+     constexpr std::size_t n_bins = 11;
+     constexpr std::size_t output_channels = 22;
+-    const hn::ScalableTag<float> d;
+-    const std::size_t lanes = hn::Lanes(d);
+     for (std::size_t frame = 0; frame < frame_count; ++frame) {
+         float windowed[n_fft];
+         const float * input = padded + frame * hop;
+         for (std::size_t n = 0; n < n_fft; ++n) {
+             windowed[n] = input[n] * hann[n];
+         }
+-        for (std::size_t bin = 0; bin < n_bins; bin += lanes) {
+-            const std::size_t active = std::min(lanes, n_bins - bin);
+-            auto real = hn::Zero(d);
+-            auto imag = hn::Zero(d);
+-            for (std::size_t n = 0; n < n_fft; ++n) {
+-                const auto value = hn::Set(d, windowed[n]);
+-                const auto cosine = hn::LoadN(
+-                    d, twiddle_cos_transposed + n * n_bins + bin, active);
+-                const auto sine = hn::LoadN(
+-                    d, twiddle_sin_transposed + n * n_bins + bin, active);
+-                real = hn::Add(real, hn::Mul(value, cosine));
+-                imag = hn::Add(imag, hn::Mul(value, sine));
++        float real[n_bins] = {};
++        float imag[n_bins] = {};
++        for (std::size_t n = 0; n < n_fft; ++n) {
++            const float * cosine = twiddle_cos_transposed + n * n_bins;
++            const float * sine = twiddle_sin_transposed + n * n_bins;
++            for (std::size_t bin = 0; bin < n_bins; ++bin) {
++                real[bin] += windowed[n] * cosine[bin];
++                imag[bin] += windowed[n] * sine[bin];
+             }
+-            const auto magnitude = hn::Sqrt(
+-                hn::Add(hn::Mul(real, real), hn::Mul(imag, imag)));
+-            const auto phase = hn::Atan2(d, imag, real);
+-            hn::StoreN(
+-                magnitude, d, output + frame * output_channels + bin, active);
+-            hn::StoreN(
+-                phase, d,
+-                output + frame * output_channels + n_bins + bin, active);
++        }
++        float * out = output + frame * output_channels;
++        for (std::size_t bin = 0; bin < n_bins; ++bin) {
++            out[bin] = std::sqrt(real[bin] * real[bin] + imag[bin] * imag[bin]);
++            out[n_bins + bin] = std::atan2(imag[bin], real[bin]);
+         }
+     }
+ }
+ 
+-} // namespace HWY_NAMESPACE
+-} // namespace core_simd
+-HWY_AFTER_NAMESPACE();
+-
+-#if HWY_ONCE
+-namespace core_simd {
+-
+-HWY_EXPORT(SinScaledInplace);
+-HWY_EXPORT(FillStandardNormal);
+-HWY_EXPORT(Stft20);
+-
+-void sin_scaled_inplace(float * values, std::size_t count, float scale) {
+-    HWY_DYNAMIC_DISPATCH(SinScaledInplace)(values, count, scale);
+-}
+-
+-void fill_standard_normal(
+-    float * values, std::size_t count, std::uint64_t seed) {
+-    HWY_DYNAMIC_DISPATCH(FillStandardNormal)(values, count, seed);
+-}
+-
+-void stft20(
+-    const float * padded,
+-    std::size_t frame_count,
+-    std::size_t hop,
+-    const float * hann,
+-    const float * twiddle_cos_transposed,
+-    const float * twiddle_sin_transposed,
+-    float * output) {
+-    HWY_DYNAMIC_DISPATCH(Stft20)(
+-        padded, frame_count, hop, hann,
+-        twiddle_cos_transposed, twiddle_sin_transposed, output);
+-}
+-
+ } // namespace core_simd
+-#endif
+diff -ruN a/src/kokoro.cpp b/src/kokoro.cpp
+--- a/src/kokoro.cpp
++++ b/src/kokoro.cpp
+@@ -79,7 +79,7 @@
+ #include <unordered_map>
+ #include <vector>
+ 
+-#include <espeak-ng/speak_lib.h>
++// ts5: no espeak-ng (GPL); the title passes phonemes from its own G2P.
+ 
+ // ===========================================================================
+ // Logging infrastructure
+@@ -3153,64 +3153,13 @@
+ 
+ namespace {
+ 
+-// Strip ASCII whitespace from both ends.
+-void rstrip_inplace(std::string& s) {
+-    size_t b = 0, e = s.size();
+-    while (b < e && std::isspace((unsigned char)s[b]))
+-        b++;
+-    while (e > b && std::isspace((unsigned char)s[e - 1]))
+-        e--;
+-    s = s.substr(b, e - b);
+-}
+-
+-// libespeak-ng's state is process-global, so all access goes through one
+-// mutex. Init is one-shot; voice switches are sticky.
+-std::mutex g_espeak_mu;
+-bool g_espeak_inited = false;
+-bool g_espeak_init_failed = false; // sticky — don't keep retrying
+-std::string g_espeak_voice;
+-
+-
+-// Returns true on success and fills `out`.
+-bool phonemize_espeak_lib(const std::string& lang, const std::string& text, std::string& out) {
+-    std::lock_guard<std::mutex> g(g_espeak_mu);
+-    if (g_espeak_init_failed)
+-        return false;
+-    if (!g_espeak_inited) {
+-        const char* path = std::getenv("KOKORO_ESPEAK_DATA_PATH");
+-        int sr = espeak_Initialize(AUDIO_OUTPUT_SYNCHRONOUS, 0, path,
+-                                   espeakINITIALIZE_PHONEME_IPA | espeakINITIALIZE_DONT_EXIT);
+-        if (sr < 0) {
+-            kokoro_log(KOKORO_LOG_ERROR, "kokoro: espeak_Initialize failed (data path=%s)",
+-                       path ? path : "<default>");
+-            g_espeak_init_failed = true;
+-            return false;
+-        }
+-        g_espeak_inited = true;
+-    }
+-    if (g_espeak_voice != lang) {
+-        if (espeak_SetVoiceByName(lang.c_str()) != EE_OK) {
+-            kokoro_log(KOKORO_LOG_ERROR, "kokoro: espeak_SetVoiceByName('%s') failed", lang.c_str());
+-            return false;
+-        }
+-        g_espeak_voice = lang;
+-    }
+-    out.clear();
+-    const void* tp = text.c_str();
+-    while (tp) {
+-        const char* chunk = espeak_TextToPhonemes(&tp, espeakCHARS_UTF8, espeakPHONEMES_IPA);
+-        if (chunk && *chunk) {
+-            if (!out.empty())
+-                out += ' ';
+-            out += chunk;
+-        }
+-    }
+-    rstrip_inplace(out);
+-    return !out.empty();
++// ts5: espeak-ng is left out, so text needs phonemes from the caller
++// (kokoro_synthesize_phonemes_audio); text alone fails here.
++bool phonemize_espeak_lib(const std::string&, const std::string&, std::string&) {
++    kokoro_log(KOKORO_LOG_ERROR, "kokoro: this build has no espeak-ng; pass phonemes");
++    return false;
+ }
+ 
+-
+-
+ // Post-process Mandarin/Chinese phonemes from espeak-ng.  espeak emits
+ // tone numbers (1-5) after each syllable (e.g. "ni2xˈɑu3") which
+ // Kokoro's 178-symbol IPA tokenizer can't represent.  Strip them so

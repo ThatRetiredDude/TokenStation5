@@ -1,0 +1,4 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// One-token Q4_K mat-vec (see mv16_q4_k.glsl).
+#include "mv16_q4_k.glsl"

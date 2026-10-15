@@ -41,9 +41,11 @@ const char *file_type_name(int64_t t) {
 }
 
 bool is_model_file(const std::string &n) {
-    // Vision projectors and split files are not models ts5 loads.
+    // Vision projectors and split files are not models ts5 loads. Nor are
+    // whisper's speech models (ggml-*.bin, stt.h) or Kokoro's model and
+    // voices (kokoro-*.gguf, tts/synth.h), which share the folder.
     return n.size() > 5 && n.compare(n.size() - 5, 5, ".gguf") == 0 && n.find("mmproj") == std::string::npos &&
-           n.find("-of-0") == std::string::npos && n[0] != '.';
+           n.find("-of-0") == std::string::npos && n[0] != '.' && n.compare(0, 7, "kokoro-") != 0;
 }
 
 ModelInfo inspect(const std::string &path, const std::string &file, uint64_t size, int64_t mtime) {
@@ -82,7 +84,10 @@ ModelInfo inspect(const std::string &path, const std::string &file, uint64_t siz
     m.layers = hp.n_layer;
     m.ctx_train = hp.n_ctx_train;
     m.weight_bytes = model.data_bytes();
-    m.kv_bytes_per_token = 2ull * 2 * hp.n_layer * hp.n_head_kv * hp.head_dim;
+    m.kv_bytes[0] = ts5::kv_bytes_per_token(hp, ts5::KvType::F16);
+    m.kv_bytes[1] = ts5::kv_bytes_per_token(hp, ts5::KvType::Q8);
+    m.kv8 = ts5::kv_type_setting() == ts5::KvType::Q8 && hp.head_dim % 32 == 0;
+    m.fixed_bytes = ts5::vk_fixed_bytes(hp, m.weight_bytes);
     if (g.data_offset + m.weight_bytes > size) {
         m.error = "the file is incomplete (" + format_bytes(size) + " of " + format_bytes(g.data_offset + m.weight_bytes) +
                   ")";
@@ -109,6 +114,14 @@ std::vector<std::string> split_tabs(const std::string &line) {
 }
 
 }  // namespace
+
+ModelInfo::Ctx ModelInfo::serve_ctx(int asked, uint64_t gpu_memory) const {
+    if (asked > 0) return {asked, kv8};
+    const int train = ctx_train > 0 ? ctx_train : 32768;
+    const int f16 = ts5::fit_context(gpu_memory, fixed_bytes, kv_bytes[0], train);
+    if (!kv8 || ts5::f16_reaches(f16, train)) return {f16, false};
+    return {ts5::fit_context(gpu_memory, fixed_bytes, kv_bytes[1], train), true};
+}
 
 Library::Library(std::vector<std::string> dirs, std::string results_path)
     : dirs_(std::move(dirs)), results_path_(std::move(results_path)) {

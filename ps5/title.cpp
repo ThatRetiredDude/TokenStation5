@@ -1,5 +1,5 @@
 // TokenStation5's PS5 title: ts5 as a native app, on the console's GPU, with
-// a dashboard on the TV.
+// a dashboard on the TV and a chat box for the model it serves.
 //
 // Everything lives in the title's own folder, /app0 to the title and
 // /data/homebrew/<title ID> to the PC over FTP. A title can't count on seeing
@@ -14,7 +14,7 @@
 //
 // At start it serves what ts5.args says, one ts5 command line such as
 //
-//   serve -m /app0/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf -c 8192
+//   serve -m /app0/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf -c auto
 //
 // and without that file the first model it can run in models/ (then in
 // /data/ts5/models and /data/PS5LM/models, where the title can see them).
@@ -28,11 +28,20 @@
 //   ts5.cmd     one command now: serve|check|bench -m MODEL [options], or stop
 //   ts5.once    one command at the next start, before the args file's
 //   ts5.env     NAME=VALUE settings for the engine, read at start, such as
-//               TS5_TILED_MIN=16 (engine/src/vk_backend.cpp lists them)
-//   press       controller buttons, as words: up down cross square ...
+//               TS5_TILED_MIN=16 (engine/src/vk_backend.cpp lists them) and
+//               TAVILY_API_KEY=tvly-... for web search (engine/src/websearch.h)
+//   press       controller buttons, as words: up down cross square ...;
+//               hold-r1 and release-r1 hold a button down and let it go
 //   screenshot  the next frame goes to screen.bmp
 //   audiotest   tones on the TV and the controller, five seconds from its
 //               mic played back (audio_probe.h), the recording in audiotest.wav
+//   chat        a message for the chat page, the file's text as it is
+//               (chat.h); the TV shows the chat and the reply
+//   whispertest whispertest.wav (or audiotest.wav) transcribed on the CPU
+//               with the first ggml-*.bin in models/, timed (stt.h)
+//   speaktest   the file's text (or a sentence of the title's own) spoken
+//               with Kokoro on the CPU, timed, kept in speaktest.wav and
+//               played on the TV (speak.h)
 //   quit        closes the title; restart starts it again
 //
 // A title must never return from main or call exit(): the console reports
@@ -62,13 +71,20 @@
 
 #include "audio_probe.h"
 #include "canvas.h"
+#include "chat.h"
 #include "dashboard.h"
 #include "display.h"
 #include "library.h"
 #include "pad.h"
 #include "runner.h"
 #include "server.h"
+#include "settings.h"
+#include "speak.h"
+#include "stt.h"
+#include "text_input.h"
+#include "tts/synth.h"
 #include "vk_context.h"
+#include "voice.h"
 
 #ifndef TS5_VERSION
 #define TS5_VERSION "dev"
@@ -120,6 +136,11 @@ constexpr const char *kShot = TS5_HOME "/screenshot";
 constexpr const char *kScreen = TS5_HOME "/screen.bmp";
 constexpr const char *kAudioTest = TS5_HOME "/audiotest";
 constexpr const char *kAudioWav = TS5_HOME "/audiotest.wav";
+constexpr const char *kChat = TS5_HOME "/chat";
+constexpr const char *kWhisperTest = TS5_HOME "/whispertest";
+constexpr const char *kWhisperWav = TS5_HOME "/whispertest.wav";
+constexpr const char *kSpeakTest = TS5_HOME "/speaktest";
+constexpr const char *kSpeakWav = TS5_HOME "/speaktest.wav";
 constexpr const char *kQuit = TS5_HOME "/quit";
 constexpr const char *kRestart = TS5_HOME "/restart";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
@@ -147,6 +168,12 @@ void notify(const std::string &text) {
 
 bool exists(const char *path) { return access(path, F_OK) == 0; }
 
+// Without spaces and line breaks at either end.
+std::string trimmed(const std::string &s) {
+    const size_t a = s.find_first_not_of(" \t\r\n");
+    return a == std::string::npos ? std::string() : s.substr(a, s.find_last_not_of(" \t\r\n") - a + 1);
+}
+
 // The PC's quit and restart requests, checked twice a second on a thread of
 // their own, so they work whatever the rest of the title is doing.
 void watch_control_files() {
@@ -169,15 +196,23 @@ void watch_control_files() {
 // rest mode after a while with no controller input (20 minutes at the
 // least), in the middle of a job or a reply: API requests aren't input.
 // While the title runs it tells the system it is in use once a minute, as a
-// video player does (TS5_KEEP_AWAKE=0 in ts5.env: it doesn't). That also
-// keeps the system from dimming the TV, so the title dims its own picture
-// (main's loop).
+// video player does (TS5_KEEP_AWAKE=0 in ts5.env, or Off on the Settings
+// page: it doesn't, from the next minute). That also keeps the system from
+// dimming the TV, so the title dims its own picture (main's loop).
 void keep_awake() {
     int last = 1;  // logs the first answer and any change
+    bool was_on = true;
     for (;;) {
-        const int r = sceSystemServicePowerTick();
-        if (r != last) printf("ts5-title: keeping the console awake%s (%#x)\n", r == 0 ? "" : ": refused", r);
-        last = r;
+        const bool on = app::setting("TS5_KEEP_AWAKE", "1") != "0";
+        if (on) {
+            const int r = sceSystemServicePowerTick();
+            if (r != last || !was_on)
+                printf("ts5-title: keeping the console awake%s (%#x)\n", r == 0 ? "" : ": refused", r);
+            last = r;
+        } else if (was_on) {
+            printf("ts5-title: TS5_KEEP_AWAKE=0: the console may go into rest mode\n");
+        }
+        was_on = on;
         sceKernelUsleep(60000000);
     }
 }
@@ -250,14 +285,40 @@ bool take_written(const char *path, std::vector<std::string> &words) {
     return true;
 }
 
+// A file's text, taken once written as take_written's are, with trailing
+// whitespace off. False while it waits.
+bool take_text(const char *path, std::string &text) {
+    struct stat st;
+    if (stat(path, &st) != 0) return false;
+    if (st.st_size == 0 && time(nullptr) - st.st_mtime < 2) return false;
+    text.clear();
+    if (FILE *f = fopen(path, "rb")) {
+        char buf[4096];
+        for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+        fclose(f);
+    }
+    unlink(path);
+    while (!text.empty() && strchr(" \t\r\n", text.back())) text.pop_back();
+    return true;
+}
+
+// Frames a second on the chat page while a reply comes in (TS5_CHAT_FPS).
+// Each frame is a copy on the GPU the model computes on, so fewer frames
+// leave it more time.
+double chat_fps() {
+    const char *e = getenv("TS5_CHAT_FPS");
+    const double f = e ? atof(e) : 10;
+    return f > 0 ? f : 10;
+}
+
 // The API's options, from the args file.
 struct Options {
     std::string host = "0.0.0.0";
-    int port = 8081, n_ctx = 8192;
+    int port = 8081, n_ctx = 0;  // n_ctx 0 ("-c auto"): what fits in the GPU's memory
 };
 
 // A ts5 command line as a job:
-//   serve -m MODEL [-c N] [--port N] [--host ADDR]
+//   serve -m MODEL [-c N|auto] [--port N] [--host ADDR]   (no -c, or auto: what fits)
 //   check -m MODEL [-n TOKENS] [--fresh 1] [--env NAME=VALUE]...
 //   bench -m MODEL [--pp N] [--tg N] [--env NAME=VALUE]...
 //   stop
@@ -285,7 +346,7 @@ bool parse_job(const std::vector<std::string> &a, app::Job &j, Options *o, std::
         }
         const std::string &v = a[++i];
         if (s == "-m") j.path = v.find('/') == std::string::npos ? std::string(kModels) + "/" + v : v;
-        else if (s == "-c") j.n_ctx = atoi(v.c_str());
+        else if (s == "-c") j.n_ctx = v == "auto" ? 0 : atoi(v.c_str());
         else if (s == "-n") j.n = atoi(v.c_str());
         else if (s == "--fresh") j.fresh = atoi(v.c_str()) != 0;
         else if (s == "--env" && v.find('=') != std::string::npos && v.find('=') > 0) j.env.push_back(v);
@@ -311,7 +372,8 @@ bool parse_job(const std::vector<std::string> &a, app::Job &j, Options *o, std::
 void save_args(const std::string &path, const Options &o) {
     FILE *f = fopen(kArgs, "w");
     if (!f) return;
-    fprintf(f, "serve -m \"%s\" -c %d --port %d", path.c_str(), o.n_ctx, o.port);
+    const std::string ctx = o.n_ctx > 0 ? std::to_string(o.n_ctx) : "auto";
+    fprintf(f, "serve -m \"%s\" -c %s --port %d", path.c_str(), ctx.c_str(), o.port);
     if (o.host != "0.0.0.0") fprintf(f, " --host %s", o.host.c_str());
     fprintf(f, "\n");
     fclose(f);
@@ -371,15 +433,17 @@ int main(int, char **) {
             printf("ts5-title: ts5.env: not NAME=VALUE: %s\n", w.c_str());
             continue;
         }
-        setenv(w.substr(0, eq).c_str(), w.substr(eq + 1).c_str(), 1);
-        printf("ts5-title: %s\n", w.c_str());
+        const std::string name = w.substr(0, eq);
+        setenv(name.c_str(), w.substr(eq + 1).c_str(), 1);
+        // Keys stay out of the log, which anyone on the network can read over FTP.
+        printf("ts5-title: %s\n", app::secret_setting(name) ? (name + "=(set)").c_str() : w.c_str());
     }
 
-    for (const char *f : {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest}) unlink(f);
+    for (const char *f :
+         {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kWhisperTest, kSpeakTest})
+        unlink(f);
     std::thread(watch_control_files).detach();
-    const char *awake = getenv("TS5_KEEP_AWAKE");
-    if (!awake || atoi(awake) != 0) std::thread(keep_awake).detach();
-    else printf("ts5-title: TS5_KEEP_AWAKE=0: the console may go into rest mode\n");
+    std::thread(keep_awake).detach();
     sceSystemServiceHideSplashScreen();
 
     std::string err;
@@ -416,6 +480,17 @@ int main(int, char **) {
     ip = lan_address();
     if (!server.start(opts.host, opts.port, err)) notify("TokenStation5: the API can't listen: " + err);
     app::Runner runner(ctx, server, lib, lib_mutex, notify, api_url);
+    app::Chat chat(opts.host, opts.port);
+    int user = -1;
+    sceUserServiceGetInitialUser(&user);
+    // What R1 recorded, as a message. A reply still ending (R1 stops it) gets
+    // a moment to.
+    app::Voice voice(user, kModels, [&chat](const std::string &text) {
+        bool sent = false;
+        for (int i = 0; i < 100 && !(sent = chat.send(text)); i++) sceKernelUsleep(20000);
+        printf("ts5-title: chat: %s by voice (%zu bytes)\n", sent ? "message" : "not sent", text.size());
+    });
+    app::Speaker speaker(user, kModels);
 
     if (!once.empty()) {
         app::Job j;
@@ -432,35 +507,97 @@ int main(int, char **) {
 
     ui::Dashboard dash(fonts, ts5_logo_data, (size_t)(ts5_logo_data_end - ts5_logo_data));
     ui::Canvas canvas(kWidth, kHeight);
-    std::deque<uint32_t> presses;
+    // Presses from the PC, and holds ('h') and releases ('r') of a button.
+    std::deque<std::pair<char, uint32_t>> presses;
+    uint32_t pc_held = 0;
+    bool talking = false;
     std::string listed;
-    uint64_t drawn_version = ~0ull;
-    bool drawn_dark = false;
+    uint64_t drawn_version = ~0ull, drawn_chat = ~0ull, chat_version = ~0ull;
+    app::ChatState chat_state;
+    app::VoiceState voice_state;
+    bool drawn_dark = false, drawn_speaking = false;
     double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan;
-    const double dim = dim_after();
+    ui::SettingsInfo settings_note;  // the Settings page's last change
     bool lib_changed = true;
-    std::atomic<bool> audio_testing{false};
+    std::atomic<bool> audio_testing{false}, whisper_testing{false}, speak_testing{false};
+    // The console's keyboard (text_input.h), for a chat message or a key.
+    app::TextInput keyboard;
+    app::TextRequest typing;
+    std::string typing_for;  // the setting it's for; "": a chat message
+    bool typing_pending = false;  // until cross is let go, or the dialog takes it as a press
+    bool swallow = false;         // after it closes, until every button is up
+    app::EnterKey enter_key;      // a USB or Bluetooth keyboard's Enter
     for (;;) {
         const double t = app::now_s();
+        // Read each time: the Settings page changes them.
+        const double dim = dim_after(), chat_period = 1.0 / chat_fps();
         uint32_t buttons = pad.poll();
         // Presses from the PC, one per frame.
         std::vector<std::string> words;
         if (presses.empty() && take_written(kPress, words))
-            for (const auto &w : words)
-                if (uint32_t b = ui::button_named(w)) presses.push_back(b);
+            for (const auto &w : words) {
+                const char kind = w.rfind("hold-", 0) == 0 ? 'h' : w.rfind("release-", 0) == 0 ? 'r' : 'p';
+                if (uint32_t b = ui::button_named(kind == 'p' ? w : w.substr(w.find('-') + 1)))
+                    presses.push_back({kind, b});
+            }
         if (!presses.empty()) {
-            buttons |= presses.front();
+            const auto [kind, b] = presses.front();
+            if (kind == 'p') buttons |= b;
+            if (kind == 'h') {
+                buttons |= b & ~pc_held;
+                pc_held |= b;
+            }
+            if (kind == 'r') pc_held &= ~b;
             presses.pop_front();
         }
+        // Enter on a keyboard does on the chat page what cross does: it opens
+        // the console's keyboard.
+        if (enter_key.poll(dash.page() == ui::Dashboard::Chat && !keyboard.is_open() && !swallow && !typing_pending, t))
+            buttons |= ui::kCross;
         // A press on a dark screen only brings the dashboard back.
         const bool resting = dim > 0 && t - last_input > dim;
         if (buttons) last_input = t;
         const bool woke = resting && buttons;
         if (woke) buttons = 0;
+        // While the console's keyboard is up, the controller is its; nor does
+        // the press that closes it reach the page.
+        if (keyboard.is_open()) {
+            buttons = 0;
+            last_input = t;
+            std::string typed;
+            const app::TextInput::State st = keyboard.poll(typed);
+            if (st != app::TextInput::Typing) swallow = true;
+            const std::string text = trimmed(typed);
+            if (st == app::TextInput::Done && typing_for.empty()) {
+                const bool sent = !text.empty() && chat.send(text);
+                printf("ts5-title: chat: %s by keyboard (%zu bytes)\n", sent ? "message" : "not sent", text.size());
+            } else if (st == app::TextInput::Done && !text.empty()) {
+                std::string e;
+                const bool ok = app::set_setting(kEnv, typing_for, text, e);
+                if (!ok) printf("ts5-title: settings: %s not saved: %s\n", typing_for.c_str(), e.c_str());
+                settings_note.note = ok ? "Saved" : "Couldn't save it. The log says why.";
+                settings_note.note_failed = !ok;
+                settings_note.note_at = t;
+            }
+        }
+        if (swallow) {
+            buttons = 0;
+            swallow = pad.held() != 0;
+        }
         if (take_written(kCmd, words)) {
             app::Job j;
             if (parse_job(words, j, nullptr, err)) runner.push(j);
             else printf("ts5-title: ts5.cmd: %s\n", err.c_str());
+        }
+        std::string message;
+        if (take_text(kChat, message)) {
+            const bool sent = chat.send(message);
+            printf("ts5-title: chat: %s (%zu bytes)\n", sent ? "message" : "not sent: a reply is coming or it's blank",
+                   message.size());
+            if (sent) {
+                dash.show(ui::Dashboard::Chat);
+                last_input = t;  // input too: it brings the chat back from a dark screen
+            }
         }
         if (exists(kAudioTest) && !audio_testing) {
             unlink(kAudioTest);
@@ -472,7 +609,44 @@ int main(int, char **) {
                 audio_testing = false;
             }).detach();
         }
+        if (exists(kWhisperTest) && !whisper_testing) {
+            unlink(kWhisperTest);
+            whisper_testing = true;
+            std::thread([&whisper_testing] {
+                app::whisper_test(kModels, {kWhisperWav, kAudioWav}, notify);
+                whisper_testing = false;
+            }).detach();
+        }
+        std::string speak_text;
+        if (!speak_testing && take_text(kSpeakTest, speak_text)) {
+            speak_testing = true;
+            std::thread([&speak_testing, speak_text] {
+                int user = -1;
+                sceUserServiceGetInitialUser(&user);
+                app::speak_test(user, kModels, speak_text, kSpeakWav, notify);
+                speak_testing = false;
+            }).detach();
+        }
+        // R1 held on the chat page: talk (a reply that's coming stops). Not
+        // while the console's keyboard is up, which has R1 for itself.
+        const bool talk = ((pad.held() | pc_held) & ui::kR1) && dash.page() == ui::Dashboard::Chat && !woke &&
+                          !keyboard.is_open() && !swallow;
+        if (talk && !talking) {
+            if (chat_state.busy) chat.stop();
+            speaker.stop();
+            voice.hold();
+        } else if (!talk && talking) {
+            voice.release();
+        }
+        talking = talk;
         if (t - last_scan > 2) {
+            voice.rescan();
+            // Kokoro's voices, for the Settings page.
+            std::vector<std::string> voices = tts::kokoro_voices(kModels);
+            if (voices != settings_note.voices) {
+                settings_note.voices = std::move(voices);
+                lib_changed = true;
+            }
             std::lock_guard<std::mutex> lk(lib_mutex);
             lib_changed |= lib.scan();
             last_scan = t;
@@ -506,6 +680,25 @@ int main(int, char **) {
         v.status = runner.status();
         v.events = runner.events();
         v.api = server.activity();
+        // Both only grow, so their sum changes whenever either does.
+        if (chat.version() + voice.version() != chat_version) {
+            chat_version = chat.version() + voice.version();
+            chat_state = chat.state();
+            voice_state = voice.state();
+            // The reply as it comes, read aloud a sentence at a time.
+            if (!chat_state.turns.empty() && !chat_state.turns.back().user) {
+                const app::ChatTurn &r = chat_state.turns.back();
+                speaker.feed(chat_state.turns.size() - 1, r.text, r.end != app::ChatTurn::Coming);
+            }
+        }
+        v.chat = chat_state;
+        v.voice = voice_state;
+        v.speaking = speaker.speaking();
+        const bool chat_active = v.chat.busy || v.voice.phase != app::VoiceState::Idle;
+        // Nor does the screen go dark while a reply comes in on the chat page,
+        // or is read aloud.
+        if ((chat_active || v.speaking) && dash.page() == ui::Dashboard::Chat) last_input = t;
+        v.settings = settings_note;
         v.now = t;
         v.wall = (int64_t)time(nullptr);
 
@@ -540,22 +733,78 @@ int main(int, char **) {
                 runner.push(j);
                 break;
             }
+            case ui::Action::ChatStop:
+                chat.stop();
+                speaker.stop();
+                break;
+            case ui::Action::ChatClear:
+                chat.clear();
+                speaker.reset();
+                break;
+            case ui::Action::Set: {
+                std::string e;
+                const bool ok = app::set_setting(kEnv, a.name, a.value, e);
+                if (!ok) printf("ts5-title: settings: %s not saved: %s\n", a.name.c_str(), e.c_str());
+                settings_note.note = ok ? "Saved" : "Couldn't save it. The log says why.";
+                settings_note.note_failed = !ok;
+                settings_note.note_at = t;
+                v.settings = settings_note;
+                if (ok && a.name == "TS5_WHISPER_MODEL") voice.rescan();
+                break;
+            }
+            case ui::Action::ChatType:
+            case ui::Action::TypeSetting:
+                typing = app::TextRequest();
+                typing_for = a.kind == ui::Action::TypeSetting ? a.name : std::string();
+                if (typing_for.empty()) {
+                    typing.title = "Message";
+                    typing.placeholder = "Ask anything";
+                    typing.send = true;
+                } else {
+                    typing.title = a.label;
+                    typing.placeholder = typing_for == "TAVILY_API_KEY" ? "tvly-..." : "";
+                    // Shown as it's typed, and starting from the saved one, so a typo
+                    // in a long key can be seen and fixed.
+                    typing.latin = app::secret_setting(typing_for);
+                    typing.text = app::setting(typing_for.c_str(), "");
+                    typing.max_chars = 256;
+                }
+                typing_pending = true;
+                break;
             case ui::Action::Close:
                 notify("TokenStation5: closing");
                 leave("exit");
             case ui::Action::None: break;
         }
+        if (typing_pending && !(pad.held() & ui::kCross)) {
+            typing_pending = false;
+            if (!keyboard.open(typing)) {
+                if (typing_for.empty()) {
+                    notify("TokenStation5: the console's keyboard didn't open");
+                } else {
+                    settings_note.note = "The keyboard didn't open";
+                    settings_note.note_failed = true;
+                    settings_note.note_at = t;
+                }
+            }
+        }
 
         const bool shot = exists(kShot);
         const bool dark = dim > 0 && t - last_input > dim;
-        const bool dirty = buttons || lib_changed || version != drawn_version || shot || dark != drawn_dark;
+        const bool dirty = buttons || lib_changed || version != drawn_version || shot || dark != drawn_dark ||
+                           v.speaking != drawn_speaking;
         // The spinner turns at 15 frames a second while a model loads. While the
         // GPU computes (a check, a speed test, a reply), a frame a second at
         // most, so the copy each frame costs the GPU never weighs on the work.
         const bool computing = v.status.phase == app::Status::Checking ||
                                v.status.phase == app::Status::Benchmarking || v.api.generating;
-        const bool tick = t - last_draw > (dark ? 60.0 : dash.animating(v) && !computing ? 1.0 / 15 : 1.0);
-        if (dirty || tick) {
+        double period = dark ? 60.0 : dash.animating(v) && !computing ? 1.0 / 15 : 1.0;
+        // The chat page shows a reply as it comes, a few frames a second.
+        const bool on_chat = !dark && dash.page() == ui::Dashboard::Chat;
+        if (on_chat && chat_active) period = chat_period;
+        const bool tick = t - last_draw > period;
+        const bool chat_dirty = on_chat && chat_version != drawn_chat && (!chat_active || tick);
+        if (dirty || tick || chat_dirty) {
             if (dark)
                 draw_resting(canvas, fonts.get("small"),
                              "TokenStation5" + (v.status.serving.empty() ? std::string() : " \xC2\xB7 " + v.url) +
@@ -568,11 +817,15 @@ int main(int, char **) {
                 screen = false;
             }
             if (shot) {
-                unlink(kShot);
+                // The file goes once the picture is written: whoever asked
+                // reads it after that.
                 if (!canvas.save_bmp(kScreen)) printf("ts5-title: can't write %s\n", kScreen);
+                unlink(kShot);
             }
             drawn_version = version;
+            drawn_chat = chat_version;
             drawn_dark = dark;
+            drawn_speaking = v.speaking;
             last_draw = t;
             lib_changed = false;
         }

@@ -9,7 +9,9 @@
 
 namespace ts5 {
 
-// The OpenAI-compatible API (chat completions, completions, models, health).
+// The OpenAI-compatible API (chat completions with tool calls, completions,
+// models, health). With TAVILY_API_KEY set, chat requests also get a
+// web_search tool that the server runs itself (websearch.h).
 // One generation runs at a time. The engine it answers with can change while
 // it runs; without one, requests get 503 and /health says "no model".
 class Server {
@@ -36,6 +38,7 @@ public:
         std::mutex gen;  // held for a whole generation, and to change the engine
         Engine *engine = nullptr;
         std::string model, unavailable = "no model";
+        std::string tool_format = "none";  // the model's (tools.h), for /v1/models
         std::mutex stats;
         Activity activity;
     };
