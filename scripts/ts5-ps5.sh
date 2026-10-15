@@ -25,7 +25,7 @@
 #   scripts/ts5-ps5.sh websearch [KEY|off] the Tavily key for web search (in ts5.env, keeping the
 #                                          other settings), then restart; none: say if one is set
 #   scripts/ts5-ps5.sh press BUTTON...     press controller buttons (up down cross square ...)
-#   scripts/ts5-ps5.sh screenshot [FILE]   the TV picture, as a BMP (default screen.bmp)
+#   scripts/ts5-ps5.sh screenshot [FILE]   the TV picture, as a BMP (default screen.bmp), and its words as .txt
 #   scripts/ts5-ps5.sh audiotest [FILE]    tones on the TV and the controller, then 8 s from its
 #                                          mic played back; prints the results, saves the
 #                                          recording (default audiotest.wav)
@@ -255,6 +255,8 @@ for m in json.load(sys.stdin)["data"]:
         put_text screenshot ""
         sleep 2
         curl -sS "$ftp$dir/screen.bmp" -o "$out"
+        # The words on it too, one string a line (a title before plain words has none).
+        curl -sS "$ftp$dir/screen.txt" -o "${out%.bmp}.txt" 2> /dev/null && echo "ts5-ps5: ${out%.bmp}.txt"
         echo "ts5-ps5: $out"
         ;;
     audiotest)

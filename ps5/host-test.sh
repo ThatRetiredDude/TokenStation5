@@ -161,7 +161,7 @@ mv "$home/$name.part" "$home/models/$name"
 wait_log "^ts5-title: models: $name"
 press cross
 wait_health
-notified "$name ready at http://"
+notified "is ready. Apps can use it at http://"
 grep -q "serve -m \"$home/models/$name\" -c auto " "$home/ts5.args" || fail "serving did not write ts5.args"
 wait_log "context [0-9]+ \(what fits\), f16 KV cache$"
 wait_log "draft model $name ready"
@@ -173,7 +173,7 @@ shot serving
 echo "== square: the GPU check on the serving model, then serving again"
 press square
 wait_log "^ts5 check: .* PASS$"
-notified "GPU check passed"
+notified "passed the GPU check"
 grep -q "^check	$name	.*	PASS	" "$home/results.tsv" || fail "no check in results.tsv"
 wait_health
 
@@ -218,7 +218,7 @@ echo "== whispertest: no whisper model yet, so the test says so and the title ca
 : > "$home/whispertest"
 wait_lines "^ts5-title: whisper test: done$" 1 30
 grep -q "^ts5-title: whisper test: no model: " "$home/ts5.log" || fail "the whisper test didn't say it has no model"
-notified "whisper test: no model"
+notified "speech test: no speech model"
 wait_health
 
 if [ -n "${TS5_TEST_WHISPER_MODEL:-}" ]; then
@@ -243,7 +243,7 @@ echo "== speaktest: no Kokoro model yet, so the test says so and the title carri
 : > "$home/speaktest"
 wait_lines "^ts5-title: speak test: done$" 1 30
 grep -q "^ts5-title: speak test: no model: " "$home/ts5.log" || fail "the speak test didn't say it has no model"
-notified "speak test: no Kokoro model"
+notified "voice test: no voice"
 wait_health
 
 if [ -n "${TS5_TEST_KOKORO_MODEL:-}" ] && [ -n "${TS5_TEST_KOKORO_VOICE:-}" ]; then
@@ -258,7 +258,7 @@ if [ -n "${TS5_TEST_KOKORO_MODEL:-}" ] && [ -n "${TS5_TEST_KOKORO_VOICE:-}" ]; t
         awk '/speak test: start/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; i++) print "   " line[i] }'
     grep -qE "^ts5-title: speak test: [0-9.]+ s of speech in [0-9]+ ms, " "$home/ts5.log" || fail "the speak test spoke nothing"
     grep -q "^ts5-title: speak test: saved speaktest.wav$" "$home/ts5.log" || fail "the speak test saved no speaktest.wav"
-    notified "speak test: "
+    notified "voice test: "
     sleep 2.5  # a scan of the models folder
     ! grep -q "^ts5-title: models: .*kokoro-" "$home/ts5.log" || fail "the dashboard lists Kokoro's files"
     wait_health

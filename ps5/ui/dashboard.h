@@ -1,8 +1,10 @@
 // The TV screen, three pages under the header; L1 goes to the next.
 // Models: the models on the console and a few suggested ones, the selected
 // model's details and results, what the title is doing, and the API's
-// activity; up/down choose a model, cross serves it, square runs the GPU
-// check, triangle the speed test, circle stops serving. Chat (chat_page.h):
+// activity; up/down choose a model, cross starts it, square runs the GPU
+// check, triangle the speed test, circle stops it. Every page says things in
+// plain words (plain.h): no paths, commands, settings names or engine errors,
+// which stay in the log. Chat (chat_page.h):
 // a conversation with the serving model; cross types a message on the
 // console's keyboard, hold R1 to talk, up/down scroll, triangle stops the
 // reply, square starts a new chat, circle goes back to Models. Settings
@@ -27,7 +29,8 @@ namespace ui {
 
 // Everything one frame shows, gathered under the title's locks.
 struct View {
-    std::string version, url, folder;  // folder: the models folder as the PC sees it over FTP
+    std::string version, url;
+    bool on_network = false;  // the console has a LAN address, so url is one apps can use
     uint64_t gpu_memory = 0;
     int n_ctx = 0;  // the context a Serve loads with (0: what fits)
     std::vector<app::ModelInfo> models;
@@ -78,7 +81,7 @@ private:
     void draw_tabs(Canvas &c);
     void draw_confirm(Canvas &c);
 
-    const Font &title_, &h2_, &body_, &bodyb_, &small_, &smallb_, &mono_;
+    const Font &title_, &h2_, &body_, &bodyb_, &small_, &smallb_;
     int logo_w_ = 0, logo_h_ = 0;
     const uint32_t *logo_ = nullptr;
     std::vector<uint32_t> logo_px_;
