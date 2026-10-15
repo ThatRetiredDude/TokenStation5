@@ -80,7 +80,7 @@ fi
 c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" \
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" -I "$w/include" -I "$w/ggml/include" \
     -I "$k/include" \
-    "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
+    "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks,tools,net,websearch}.cpp \
     "$root"/ps5/{title,library,runner,audio_probe,keyboard_probe,chat,stt,voice,settings,speak,host_shim}.cpp \
     "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -Wa,-I"$root/ps5/tts" "$root/ps5/tts/lexicon_data.S" \
@@ -379,14 +379,14 @@ wait_health
 grep -q "TokenStation5" "$home/ts5.prev.log" || fail "no previous log"
 
 echo "== ts5.once: a one-off check at the next start, then the args file's model"
-echo "== ts5.env: engine settings (here every matmul tiled, even one token's), and a key the log doesn't show"
+echo "== ts5.env: engine settings (here every matmul tiled, even one token's, and a Tavily key)"
 echo "check -m $name -n 6" > "$home/ts5.once"
-echo "TS5_TILED_MIN=1 TS5_FAST_MATVEC=0 TS5_TEST_KEY=not-for-the-log" > "$home/ts5.env"
+echo "TS5_TILED_MIN=1 TS5_FAST_MATVEC=0 TAVILY_API_KEY=tvly-host-test-secret" > "$home/ts5.env"
 : > "$home/restart"
 wait_down
 wait_log "^ts5-title: TS5_TILED_MIN=1$"
-wait_log "^ts5-title: TS5_TEST_KEY=\(set\)$"
-! grep -q "not-for-the-log" "$home/ts5.log" || fail "the key's value is in the log"
+wait_log "^ts5-title: TAVILY_API_KEY=\\(set\\)$"
+! grep -q "tvly-host-test-secret" "$home/ts5.log" || fail "the Tavily key is in the log"
 wait_log "^ts5 check: .*, 6 tokens: .* PASS$"
 wait_health
 [ ! -e "$home/ts5.once" ] || fail "ts5.once was not consumed"
