@@ -133,6 +133,40 @@ A short prompt late in a chat splits its keys too.
 then prints the GPU's time per kernel (matmuls by weight) for the prompt and
 for generation.
 
+## Speculative decoding (prompt lookup)
+
+Single-stream decode streams every weight byte per token, so it is capped by
+memory bandwidth (~96 tok/s for a 7B Q4_K_M at 448 GB/s). Verifying several
+tokens in one forward pass rides one weight stream, which is the only way past
+that wall. `Engine::generate` drafts up to `TS5_DRAFT` tokens per step (default
+7, so the batch of 8 fits one pass of the 8-token matmul kernels; 0 disables)
+by prompt lookup: the most recent earlier occurrence of the text's final
+3-gram (then 2-gram) proposes what followed it last time. The drafted tokens
+ride the next token's forward pass as one batch, and a draft is kept only when
+sampling the model's own logits at its position yields exactly that token, so
+the output is token-for-token what one-at-a-time sampling would produce (for a
+delta-distribution draft, "sample the target and compare" is the speculative
+acceptance rule). Rejected positions leave stale K/V entries past the accepted
+point; they are overwritten before any later token attends to them, since
+positions are absolute and monotonic. Acceptance is workload-dependent: code
+editing and retrieval-heavy chats repeat long spans of their own context and
+accept most drafts; free-form prose accepts few, and costs only the extra
+ALU of the wasted batch columns (the weight stream is shared either way).
+`timings` reports `draft_n`/`draft_n_accepted`.
+
+The verify batch has its own kernels (`mvt_q4_k`, `mvt_q6_k`; `TS5_MVT=0`
+reverts to the generic ones): the mv16 layout, with the batch size a
+specialization constant (one pipeline per size, 2 to 8, so the token loop
+unrolls and every token's loads are in flight at once) and `TS5_MVT_ROWS`
+rows per workgroup (default 4, matrices under `TS5_MV_ROWS_MIN` rows take
+one). Each row's words are loaded once per block and dotted with every
+token's x, so the weight stream, which decode is bound by, is paid once for
+the whole batch; each token's x values are loaded once per NR rows. The
+batch's x sits in the 4 MB L2, but at one row per workgroup a 19k-row
+matrix re-read it from L2 per (row, token) — several GB a layer at 7
+tokens, measured on the console as a verify pass costing 5.7x a single
+step — which the row tiling divides by NR.
+
 ## Memory
 
 Every buffer is sub-allocated from 1 GiB blocks. Host-visible device-local
