@@ -1,14 +1,15 @@
 # Web search
 
 ts5 can search the web for the model. Give it a [Tavily](https://tavily.com)
-API key and every chat request gets a `web_search` tool. The tool tells the
-model to search only for things after its training data (news, prices,
-weather, a specific site) or when the user asks it to look something up, and
-to answer general questions itself; each search costs a Tavily credit and a
-few seconds. When the model does search, ts5 calls Tavily over HTTPS from the
-console, gives the results back to the model, and the model answers from them
-with the URLs it used. No PC, Pi or proxy is involved, and it works from any chat client,
-including ones that know nothing about tools.
+API key and a chat that looks like it needs the web gets a `web_search` tool:
+one that asks to look something up or names a website, or asks about what
+changes (news, weather, prices, scores, elections, "today", "latest", a year
+after 2023). Other chats get no tool, so the model answers them itself, with
+no credit spent and a shorter prompt. When the model searches, ts5 calls
+Tavily over HTTPS from the console, gives the results back to the model, and
+the model answers from them with the URLs it used. No PC, Pi or proxy is
+involved, and it works from any chat client, including ones that know nothing
+about tools.
 
 ## Turn it on
 
@@ -51,8 +52,15 @@ everything else works as before.
 - Searches cost prompt tokens: each result is cut to about 1,200 characters,
   five results per search (`TS5_SEARCH_RESULTS` changes that). At today's
   console speeds that adds a few seconds per search before the answer.
-- With a key set, every chat's prompt carries the tool's description, about
-  250 tokens. The prompt cache keeps that to once per conversation.
+- Only a chat whose last message looks like it needs the web is offered the
+  tool. With it in the prompt (about 250 tokens), Llama 3's template tells
+  the model to answer with a call, and on the PS5 Llama 3.1 8B searched for
+  "how does a refrigerator keep food cold" and a Fibonacci function; without
+  it, those cost nothing. The check is a list of words and phrases in
+  `needs_web` (`engine/src/websearch.cpp`); a question it misses gets an
+  answer from what the model knows. `"web_search": true` in a request offers
+  the tool anyway, and `TS5_WEB_SEARCH=always` in `ts5.env` offers it on every
+  chat as before.
 - At most three rounds of searches per answer. A model that still wants to
   search after that answers from what the searches found, without tools, so
   there is always an answer.
@@ -63,7 +71,7 @@ everything else works as before.
   log (`scripts/ts5-ps5.sh log`) has a line per search with the query, the
   number of results and the time.
 - A request can turn it off with `"web_search": false`, or with
-  `"tool_choice": "none"`.
+  `"tool_choice": "none"`, and turn it on with `"web_search": true`.
 
 ## Clients with their own tools
 
