@@ -389,9 +389,47 @@ std::string unfenced(const std::string &text) {
     return strip(s.substr(nl + 1, s.size() - 3 - nl - 1));
 }
 
+// The text of the <tag>...</tag> element in s, which is cut out of s.
+bool take_element(std::string &s, const std::string &tag, std::string &text) {
+    const size_t a = s.find("<" + tag + ">");
+    if (a == std::string::npos) return false;
+    const size_t from = a + tag.size() + 2, e = s.find("</" + tag + ">", from);
+    if (e == std::string::npos) return false;
+    text = strip(s.substr(from, e - from));
+    s.erase(a, e + tag.size() + 3 - a);
+    return true;
+}
+
+// A call written as child elements, nothing else in the text:
+// <name>get_weather</name> <arguments>{"city": "Paris"}</arguments>
+bool element_call(const std::string &text, std::vector<ToolCall> &calls) {
+    std::string s = text, name, args;
+    if (!take_element(s, "name", name) || name.empty()) return false;
+    if (!take_element(s, "arguments", args) && !take_element(s, "parameters", args)) args = "{}";
+    Json j;
+    if (!strip(s).empty() || !Json::parse(args, j) || j.type != Json::OBJ) return false;
+    ToolCall call;
+    call.name = name;
+    call.arguments = j.dump();
+    call.id = new_call_id();
+    calls.push_back(call);
+    return true;
+}
+
+bool calls_in_any_wrapper(const std::string &text, std::vector<ToolCall> &calls);
+
+// What a call tag can hold: call objects, a call as child elements, or a
+// call in one more wrapper.
+bool calls_in_body(const std::string &body, std::vector<ToolCall> &calls) {
+    return calls_from_objects(body, calls) || element_call(body, calls) || calls_in_any_wrapper(body, calls);
+}
+
 bool calls_in_any_wrapper(const std::string &text, std::vector<ToolCall> &calls) {
     const std::string s = unfenced(text);
     if (s.size() < 5 || s[0] != '<') return false;
+    // The object itself in angle brackets: <{"name": ..., "arguments": {...}}>
+    if (s[1] == '{' && s[s.size() - 1] == '>' && s[s.size() - 2] == '}')
+        return calls_from_objects(s.substr(1, s.size() - 2), calls);
     const size_t gt = s.find('>');
     if (gt == std::string::npos || gt < 2) return false;
     const std::string name = s.substr(1, gt - 1);
@@ -399,12 +437,22 @@ bool calls_in_any_wrapper(const std::string &text, std::vector<ToolCall> &calls)
         if (!isalnum((unsigned char)c) && c != '_' && c != '-') return false;
     const std::string close = "</" + name + ">";
     if (!ends(s, close)) return false;
-    return calls_from_objects(s.substr(gt + 1, s.size() - gt - 1 - close.size()), calls);
+    return calls_in_body(s.substr(gt + 1, s.size() - gt - 1 - close.size()), calls);
 }
 
-// Text whose call came out of a fence leaves the fence behind ("```xml\n\n```"):
-// that goes too.
-std::string without_empty_fence(const std::string &c) {
+// Text whose call came out of a fence or a wrapper leaves it behind
+// ("```xml\n\n```", "<response>\n</response>"): that goes too.
+std::string without_empty_fence(const std::string &text) {
+    std::string c = rstrip(text);
+    while (c.size() >= 5 && c.back() == '>') {  // an emptied <x></x> at the end
+        const size_t lt = c.rfind("</");
+        if (lt == std::string::npos) break;
+        const std::string name = c.substr(lt + 2, c.size() - lt - 3);
+        const size_t open = c.rfind("<" + name + ">", lt);
+        if (name.empty() || open == std::string::npos || !strip(c.substr(open + name.size() + 2, lt - open - name.size() - 2)).empty())
+            break;
+        c = rstrip(c.substr(0, open));
+    }
     if (c.size() < 6 || !ends(c, "```")) return c;
     const size_t open = c.rfind("```", c.size() - 4);
     if (open == std::string::npos) return c;
@@ -450,7 +498,7 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text) {
             size_t body_end = q == std::string::npos ? text.size() : q;
             size_t next = q == std::string::npos ? text.size() : q + close.size();
             content += text.substr(pos, p - pos);
-            if (!calls_from_objects(text.substr(p + open.size(), body_end - p - open.size()), r.calls))
+            if (!calls_in_body(text.substr(p + open.size(), body_end - p - open.size()), r.calls))
                 content += text.substr(p, next - p);
             pos = next;
         }
