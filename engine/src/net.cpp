@@ -60,13 +60,17 @@ void trace(const char *fmt, ...) {
     // redirect hop on the LAN took 9-17 s with every timed step in ms).
     static const auto t0 = std::chrono::steady_clock::now();
     const double at = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    // One write for the line, so lines from several threads don't mix.
+    char line[1024];
+    int n = snprintf(line, sizeof line, "ts5: net: [%.3f s] ", at);
     va_list ap;
     va_start(ap, fmt);
-    fprintf(stderr, "ts5: net: [%.3f s] ", at);
-    vfprintf(stderr, fmt, ap);
-    fputc('\n', stderr);
-    fflush(stderr);
+    if (n > 0 && n < (int)sizeof line) vsnprintf(line + n, sizeof line - (size_t)n, fmt, ap);
     va_end(ap);
+    std::string out = line;
+    out += '\n';
+    fwrite(out.data(), 1, out.size(), stderr);
+    fflush(stderr);
 }
 
 bool fill_random(unsigned char *out, size_t n) {
@@ -313,6 +317,15 @@ struct Tls {
     std::string ca_from;
 };
 
+// The shared generator, one caller at a time: mbedtls is built without its
+// threading layer, and downloads, web searches and the Hugging Face search
+// make connections from several threads at once.
+int locked_random(void *drbg, unsigned char *out, size_t len) {
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lk(mu);
+    return mbedtls_ctr_drbg_random(drbg, out, len);
+}
+
 // The first HTTPS request sets up what every one shares.
 Tls &tls() {
     static Tls t;
@@ -359,7 +372,7 @@ Tls &tls() {
         if (rc != 0) { t.why = "TLS setup failed (-0x" + Conn::hex(-rc) + ")"; return; }
         mbedtls_ssl_conf_authmode(&t.conf, MBEDTLS_SSL_VERIFY_REQUIRED);
         mbedtls_ssl_conf_ca_chain(&t.conf, &t.ca, nullptr);
-        mbedtls_ssl_conf_rng(&t.conf, mbedtls_ctr_drbg_random, &t.drbg);
+        mbedtls_ssl_conf_rng(&t.conf, locked_random, &t.drbg);
         t.ready = true;
     });
     return t;
@@ -986,7 +999,99 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
     return true;
 }
 
+// A GET read into memory, up to max_bytes of the body (a Range header asks
+// the server for no more), following up to 5 redirects with the same headers.
+bool get(const std::string &url0, const std::vector<std::string> &headers, HttpResponse &resp, std::string &err,
+         size_t max_bytes, int timeout_s) {
+    std::string url = url0;
+    for (int hop = 0; hop <= 5; hop++) {
+        Url u;
+        if (!parse_url(url, u, err)) return false;
+#ifndef TS5_HTTPS
+        if (u.https) {
+            err = "this ts5 was built without HTTPS";
+            return false;
+        }
+#endif
+        Conn c;
+        c.fd = connect_to(u.host, u.port, timeout_s, err);
+        if (c.fd < 0) return false;
+#ifdef TS5_HTTPS
+        if (u.https && !start_tls(c, u.host, err)) return false;
+#endif
+        std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + u.hostport +
+                          "\r\nConnection: close\r\nUser-Agent: TokenStation5\r\nAccept-Encoding: identity\r\n";
+        for (auto &h : headers) req += h + "\r\n";
+        req += "\r\n";
+        if (!c.write_all(req, err)) return false;
+        trace("GET %s", u.shown.c_str());
+        std::string raw;
+        char buf[16384];
+        size_t he;
+        while ((he = raw.find("\r\n\r\n")) == std::string::npos) {
+            if (raw.size() > (64u << 10)) {
+                err = "the answer's headers are too long";
+                return false;
+            }
+            int n = c.read_some(buf, sizeof buf, err);
+            if (n <= 0) {
+                if (err.empty()) err = "the server closed the connection before answering";
+                return false;
+            }
+            raw.append(buf, (size_t)n);
+        }
+        if (raw.compare(0, 5, "HTTP/") != 0) {
+            err = "not an HTTP answer from " + u.host;
+            return false;
+        }
+        const std::string head = raw.substr(0, he);
+        const size_t sp = head.find(' ');
+        const int status = sp == std::string::npos ? 0 : atoi(head.c_str() + sp + 1);
+        if (status >= 300 && status < 400 && status != 304) {
+            const std::string loc = header(head, "location");
+            if (loc.empty()) {
+                err = "a redirect without a Location";
+                return false;
+            }
+            url = resolve(u, loc);
+            continue;
+        }
+        resp.status = status;
+        std::string te = header(head, "transfer-encoding");
+        for (auto &ch : te) ch = (char)tolower((unsigned char)ch);
+        const std::string cl = header(head, "content-length");
+        const Body::Kind kind = te.find("chunked") != std::string::npos ? Body::Chunked
+                                : !cl.empty()                           ? Body::Counted
+                                                                        : Body::ToClose;
+        Body body(c, raw.substr(he + 4), kind, cl.empty() ? 0 : strtoull(cl.c_str(), nullptr, 10));
+        resp.body.clear();
+        while (resp.body.size() < max_bytes) {
+            const int n = body.next(buf, std::min(sizeof buf, max_bytes - resp.body.size()), err);
+            if (n < 0) return false;
+            if (n == 0) break;
+            resp.body.append(buf, (size_t)n);
+        }
+        return true;
+    }
+    err = "too many redirects";
+    return false;
+}
+
 }  // namespace
+
+bool random_bytes(unsigned char *out, size_t n) { return fill_random(out, n); }
+
+std::string sha256_hex(const std::string &data) {
+#ifdef TS5_HTTPS
+    Hasher h;
+    h.start();
+    h.update(data.data(), data.size());
+    return h.finish();
+#else
+    (void)data;
+    return "";
+#endif
+}
 
 bool post(const std::string &url, const std::vector<std::string> &headers, const std::string &body,
           HttpResponse &resp, std::string &err, int timeout_s) {
@@ -1083,6 +1188,34 @@ bool http_post(const std::string &url, const std::vector<std::string> &headers, 
     int rc = pthread_create(&th, &attr, run, &job);
     pthread_attr_destroy(&attr);
     if (rc != 0) return post(url, headers, body, resp, err, timeout_s);  // no thread: try on this one
+    pthread_join(th, nullptr);
+    return job.ok;
+}
+
+// A GET too, on a thread of its own with 1 MiB, for the same reason.
+bool http_get(const std::string &url, const std::vector<std::string> &headers, HttpResponse &resp, std::string &err,
+              size_t max_bytes, int timeout_s) {
+    struct Job {
+        const std::string &url;
+        const std::vector<std::string> &headers;
+        HttpResponse &resp;
+        std::string &err;
+        size_t max_bytes;
+        int timeout_s;
+        bool ok;
+    } job{url, headers, resp, err, max_bytes, timeout_s, false};
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 1 << 20);
+    pthread_t th;
+    auto run = [](void *p) -> void * {
+        Job &j = *(Job *)p;
+        j.ok = get(j.url, j.headers, j.resp, j.err, j.max_bytes, j.timeout_s);
+        return nullptr;
+    };
+    int rc = pthread_create(&th, &attr, run, &job);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) return get(url, headers, resp, err, max_bytes, timeout_s);  // no thread: try on this one
     pthread_join(th, nullptr);
     return job.ok;
 }

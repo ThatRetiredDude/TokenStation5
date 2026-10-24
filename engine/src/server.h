@@ -29,6 +29,13 @@ public:
     // once its reply is sent and the generation lock is let go, so the next
     // generation never waits on it. Set before start().
     void set_on_usage(std::function<void(const UsageRecord &)> f) { state_.on_usage = std::move(f); }
+    // Decides who may use /v1: called on the request's thread with the key
+    // the request sent ("Authorization: Bearer KEY", or "x-api-key: KEY";
+    // "" with none) and the peer's address. True lets it in, with name set
+    // to the key's name for usage.tsv ("" for none); false answers 401.
+    // Without one, everyone gets in. /health never asks. Set before start().
+    using Authorize = std::function<bool(const std::string &key, const std::string &client, std::string &name)>;
+    void set_authorize(Authorize f) { state_.authorize = std::move(f); }
 
     // For a status display.
     struct Activity {
@@ -59,6 +66,7 @@ public:
         std::atomic<uint64_t> gen_total{0}, prompt_total{0};
         std::atomic<int> phase{0}, waiting{0};
         std::function<void(const UsageRecord &)> on_usage;
+        Authorize authorize;
     };
 
 private:

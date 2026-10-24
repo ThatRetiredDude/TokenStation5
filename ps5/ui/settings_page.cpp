@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 
 #include "library.h"
 #include "pad.h"
@@ -20,20 +21,25 @@ struct Choice {
 
 // One setting: NAME in ts5.env, and what reads it does with it. No choices:
 // a key, typed on the console's keyboard, or files in the models folder.
+// The APPS section also has rows that aren't settings: how to set up an app,
+// making a key, and a row per API key (name: its id).
 struct Row {
-    const char *section, *name, *label, *help, *applies;
+    std::string section, name, label, help, applies;
     std::vector<Choice> choices;
     std::string def;  // the value with nothing in ts5.env, as each reader's default
     bool files = false;
+    enum Kind { Setting, Guide, NewKey, ApiKey } kind = Setting;
 };
 
 constexpr const char *kSpeechModel = "TS5_WHISPER_MODEL", *kVoice = "TS5_TTS_VOICE";
+// Not ..._KEY: a name ending in _KEY is a secret, typed in (settings.h).
+constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
 // The voice with no TS5_TTS_VOICE, if it's there (tts/synth.h).
 constexpr const char *kDefaultVoice = "af_heart";
 constexpr int kRowH = 64, kHeadH = 44, kGap = 8;
 constexpr double kNoteFor = 6, kConfirmFor = 4;
 
-const std::vector<Row> &rows() {
+const std::vector<Row> &setting_rows() {
     static const std::vector<Row> r = {
         {"CHAT", "TS5_CHAT_MAX_TOKENS", "Longest reply",
          "How long a reply on the Chat page may run before it stops, in tokens (a token is about three "
@@ -94,7 +100,52 @@ const std::vector<Row> &rows() {
     return r;
 }
 
-bool is_key(const Row &r) { return app::secret_setting(r.name); }
+const ApiKeyInfo *key_of(const Row &r, const SettingsInfo &info) {
+    if (r.kind != Row::ApiKey) return nullptr;
+    for (const ApiKeyInfo &k : info.keys)
+        if (k.id == r.name) return &k;
+    return nullptr;
+}
+
+// The page's rows: APPS (how to connect, the key setting, making a key and
+// the keys), then the settings.
+std::vector<Row> rows(const SettingsInfo &info) {
+    std::vector<Row> r;
+    r.push_back({"APPS", "", "Set up an app",
+                 "Any app that takes an OpenAI-compatible provider can use the models on this PS5: Kilo Code, "
+                 "Continue, Cline, Open WebUI and more. Give it these:",
+                 "", {}, "", false, Row::Guide});
+    r.push_back({"APPS", kRequireKey, "Require a key",
+                 "With this on, apps on your network need one of your keys below to use the models. The Chat page "
+                 "on this PS5 never needs one. Off: anyone on your network can, and an app that sends a key still "
+                 "shows by its name on Home.",
+                 "From the next request", {{"1", "On"}, {"0", "Off"}}, "0"});
+    r.push_back({"APPS", "", "New key",
+                 "Make a key for each app, named after it, such as \"Kilo Code on the laptop\". The key shows once, "
+                 "right after you make it: type it into the app then.",
+                 "", {}, "", false, Row::NewKey});
+    for (const ApiKeyInfo &k : info.keys)
+        r.push_back({"APPS", k.id, k.name.empty() ? "Key " + k.id : k.name,
+                     "An app sends this key to use the models. Turn it off to shut that app out without removing "
+                     "the key.",
+                     "From the next request", {{"1", "On"}, {"0", "Off"}}, "", false, Row::ApiKey});
+    const auto &s = setting_rows();
+    r.insert(r.end(), s.begin(), s.end());
+    return r;
+}
+
+// "24 Oct 2026" (local to the PS5's clock, UTC); "never" for 0.
+std::string date_of(int64_t t) {
+    if (t <= 0) return "Never";
+    static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    const time_t tt = (time_t)t;
+    struct tm g;
+    if (!gmtime_r(&tt, &g)) return "";
+    return std::to_string(g.tm_mday) + " " + months[g.tm_mon % 12] + " " + std::to_string(g.tm_year + 1900);
+}
+
+bool is_key(const Row &r) { return r.kind == Row::Setting && app::secret_setting(r.name); }
 
 // For a row of files, what its default picks; "" if there are none.
 std::string default_file(const Row &r, const SettingsInfo &info) {
@@ -119,7 +170,7 @@ std::vector<Choice> choices(const Row &r, const SettingsInfo &info) {
     return c;
 }
 
-std::string current(const Row &r) { return app::setting(r.name, r.def); }
+std::string current(const Row &r) { return app::setting(r.name.c_str(), r.def); }
 
 // On Speech model or Voice: the catalog files (catalog.h) the row needs on
 // the PS5 before it has something to use. Voice needs Kokoro's model and a
@@ -174,6 +225,9 @@ std::string other(const Row &r) {
 }
 
 std::string shown(const Row &r, const SettingsInfo &info) {
+    if (r.kind == Row::Guide) return "How to";
+    if (r.kind == Row::NewKey) return "Make one";
+    if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "On" : "Off";
     if (is_key(r)) return current(r).empty() ? "Not set" : "Set";
     const auto cs = choices(r, info);
     if (r.files && cs.empty()) {
@@ -192,6 +246,17 @@ std::string shown(const Row &r, const SettingsInfo &info) {
     const int i = index_of(cs, in_effect(r, info));
     if (i < 0) return other(r);
     return cs[i].shown;
+}
+
+// Keeps sel in range, and moves it to a key just made (once), so its row
+// shows the key.
+void follow(const std::vector<Row> &rs, const SettingsInfo &info, int &sel, std::string &seen) {
+    if (info.fresh_key_id != seen) {
+        seen = info.fresh_key_id;
+        for (size_t i = 0; i < rs.size(); i++)
+            if (rs[i].kind == Row::ApiKey && rs[i].name == seen) sel = (int)i;
+    }
+    sel = std::max(0, std::min(sel, (int)rs.size() - 1));
 }
 
 std::vector<std::string> wrap(const Font &f, const std::string &text, int max_w) {
@@ -223,11 +288,34 @@ SettingsPage::SettingsPage(const Fonts &fonts)
 
 SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
     SettingChange ch;
-    const auto &rs = rows();
+    const auto rs = rows(info);
+    follow(rs, info, sel_, fresh_seen_);
     if (b & kUp) sel_ = std::max(0, sel_ - 1);
     if (b & kDown) sel_ = std::min((int)rs.size() - 1, sel_ + 1);
     if (b & (kUp | kDown)) confirm_at_ = -1e9;
     const Row &r = rs[sel_];
+    if (r.kind == Row::Guide) return ch;
+    if (r.kind == Row::NewKey) {
+        ch.new_key = (b & kCross) != 0;
+        return ch;
+    }
+    if (const ApiKeyInfo *k = key_of(r, info)) {
+        // On is the first choice, Off the second.
+        const bool want = (b & kCross) ? !k->on : (b & kLeft) ? true : (b & kRight) ? false : k->on;
+        if (want != k->on) {
+            ch.key_id = k->id;
+            ch.key_on = want;
+        } else if (b & kSquare) {
+            if (info.now - confirm_at_ < kConfirmFor) {
+                ch.key_id = k->id;
+                ch.key_remove = true;
+                confirm_at_ = -1e9;
+            } else {
+                confirm_at_ = info.now;
+            }
+        }
+        return ch;
+    }
     auto set = [&](const std::string &v) {
         if (v == current(r) || (v == in_effect(r, info) && v != r.def)) return;
         ch.any = true;
@@ -272,7 +360,8 @@ SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
 
 void SettingsPage::draw(Canvas &c, const SettingsInfo &info, int x, int y, int w, int h) {
     c.text(h2_, x + 32, y + 50, "Settings", kText);
-    const auto &rs = rows();
+    const auto rs = rows(info);
+    follow(rs, info, sel_, fresh_seen_);
 
     // Rows under their sections, scrolled so the chosen one shows.
     struct Place {
@@ -332,7 +421,8 @@ void SettingsPage::draw(Canvas &c, const SettingsInfo &info, int x, int y, int w
 }
 
 void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int y, int w, int h) {
-    const Row &r = rows()[sel_];
+    const auto rs = rows(info);
+    const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
     const int dx = x + 32, dw = w - 64;
     c.text(h2_, dx, y + 52, r.label, kText, dw);
     int ty = y + 100;
@@ -342,8 +432,59 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
     }
     ty += 24;
     const std::string cur = current(r);
+    // A label and its value, one under the other.
+    auto field = [&](const char *label, const std::string &value, Color col, const Font &f) {
+        c.text(smallb_, dx, ty, label, kMuted);
+        c.text(f, dx, ty + 38, value, col, dw);
+        ty += 84;
+    };
+    auto para = [&](const std::string &text, Color col) {
+        for (const std::string &l : wrap(small_, text, dw)) {
+            c.text(small_, dx, ty, l, col);
+            ty += 32;
+        }
+    };
 
-    if (is_key(r)) {
+    if (r.kind == Row::Guide) {
+        ty -= 12;
+        if (info.on_network) field("BASE URL", info.url, kAccent, bodyb_);
+        else field("BASE URL", "Connect the PS5 to your network first", kAmber, body_);
+        if (!info.model_id.empty()) field("MODEL", info.model_id, kText, bodyb_);
+        else field("MODEL", "Load a model on the Models page first", kAmber, body_);
+        field("API KEY",
+              app::setting(kRequireKey, "0") == "1" ? "One of your keys, below" : "Any text, or one of your keys below",
+              kText, body_);
+        if (info.n_ctx > 0)
+            field("CONTEXT WINDOW", plain::count(info.n_ctx) + " tokens", kText, body_);
+        para("In Kilo Code, add a provider of the type OpenAI Compatible with these. Use the address as it is, "
+             "starting http and ending /v1. Where the app asks for a context window, give it the number above, "
+             "so it shortens long conversations before the PS5 has to refuse them.",
+             kText2);
+    } else if (r.kind == Row::NewKey) {
+        text_glyph(c, body_, dx, ty + 8, "Press", kGlyphCross, "to name a new key.", kText2);
+        ty += 56;
+        if (info.keys.empty()) para("You have no keys yet.", kMuted);
+        else para("You have " + std::to_string(info.keys.size()) + (info.keys.size() == 1 ? " key." : " keys."), kMuted);
+    } else if (const ApiKeyInfo *k = key_of(r, info)) {
+        if (k->id == info.fresh_key_id && !info.fresh_key.empty()) {
+            field("YOUR KEY", info.fresh_key, kAccent, h2_);
+            para("Type it into the app now: it won't show again. Lost it? Make a new one and remove this one.",
+                 kAmber);
+            ty += 16;
+        }
+        field("NOW", k->on ? "On" : "Off", k->on ? kGreen : kText2, bodyb_);
+        c.text(smallb_, dx, ty, "MADE", kMuted);
+        c.text(smallb_, dx + dw / 2, ty, "LAST USED", kMuted);
+        c.text(body_, dx, ty + 38, date_of(k->created), kText2, dw / 2 - 16);
+        c.text(body_, dx + dw / 2, ty + 38, date_of(k->used), kText2, dw / 2);
+        ty += 92;
+        text_glyph(c, small_, dx, ty, "Press", kGlyphCross, k->on ? "to turn it off." : "to turn it on.", kText2);
+        ty += 40;
+        const bool confirming = info.now - confirm_at_ < kConfirmFor;
+        text_glyph(c, small_, dx, ty, confirming ? "Press" : "", kGlyphSquare,
+                   confirming ? "again to remove the key" : "Remove the key", confirming ? kAmber : kText2);
+        ty += 40;
+    } else if (is_key(r)) {
         c.text(smallb_, dx, ty, "NOW", kMuted);
         c.text(bodyb_, dx, ty + 38, cur.empty() ? "Not set" : "Set", cur.empty() ? kText2 : kGreen);
         ty += 84;
@@ -428,15 +569,21 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
 
     // Bottom: when a change counts.
     const int by = y + h - 90;
-    c.text(smallb_, dx, by, "TAKES EFFECT", kMuted);
-    c.text(body_, dx, by + 36, r.applies, kText2, dw);
+    if (!r.applies.empty()) {
+        c.text(smallb_, dx, by, "TAKES EFFECT", kMuted);
+        c.text(body_, dx, by + 36, r.applies, kText2, dw);
+    }
     if (info.now - info.note_at < kNoteFor && !info.note.empty())
         c.text_right(smallb_, dx + dw, by, info.note, info.note_failed ? kRed : kGreen);
     (void)ty;
 }
 
 std::string SettingsPage::cross_does(const SettingsInfo &info) const {
-    const Row &r = rows()[sel_];
+    const auto rs = rows(info);
+    const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
+    if (r.kind == Row::Guide) return "";
+    if (r.kind == Row::NewKey) return "New key";
+    if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "Turn off" : "Turn on";
     if (is_key(r)) return "Type";
     const auto keys = missing(r, info);
     if (!keys.empty()) {
@@ -444,6 +591,14 @@ std::string SettingsPage::cross_does(const SettingsInfo &info) const {
         return d.active() ? "Stop the download" : d.done > 0 ? "Go on" : "Download";
     }
     return choices(r, info).empty() ? "" : "Next choice";
+}
+
+std::string SettingsPage::square_does(const SettingsInfo &info) const {
+    const auto rs = rows(info);
+    const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
+    if (r.kind == Row::Guide || r.kind == Row::NewKey) return "";
+    if (r.kind == Row::ApiKey || is_key(r)) return "Remove";
+    return "Default";
 }
 
 }  // namespace ui
