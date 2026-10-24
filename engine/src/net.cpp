@@ -56,9 +56,13 @@ namespace {
 // One line per step of a request in the log, so a request that never comes
 // back shows how far it got.
 void trace(const char *fmt, ...) {
+    // Seconds since the first line, so the gaps between lines show (a
+    // redirect hop on the LAN took 9-17 s with every timed step in ms).
+    static const auto t0 = std::chrono::steady_clock::now();
+    const double at = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     va_list ap;
     va_start(ap, fmt);
-    fprintf(stderr, "ts5: net: ");
+    fprintf(stderr, "ts5: net: [%.3f s] ", at);
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
     fflush(stderr);
@@ -150,13 +154,20 @@ bool resolve(const std::string &host, std::vector<uint32_t> &addrs, std::string 
 #endif
 }
 
+// Milliseconds since t, for the log's timings.
+long ms_since(std::chrono::steady_clock::time_point t) {
+    return (long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t).count();
+}
+
 int connect_to(const std::string &host, int port, int timeout_s, std::string &err) {
     std::vector<uint32_t> addrs;
     trace("resolving %s", host.c_str());
+    auto t = std::chrono::steady_clock::now();
     if (!resolve(host, addrs, err)) return -1;
     char ip[INET_ADDRSTRLEN] = "?";
     inet_ntop(AF_INET, &addrs[0], ip, sizeof ip);
-    trace("%s is %s; connecting to port %d", host.c_str(), ip, port);
+    trace("%s is %s (%ld ms); connecting to port %d", host.c_str(), ip, ms_since(t), port);
+    t = std::chrono::steady_clock::now();
     for (uint32_t addr : addrs) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {
@@ -172,7 +183,10 @@ int connect_to(const std::string &host, int port, int timeout_s, std::string &er
         sa.sin_family = AF_INET;
         sa.sin_port = htons((uint16_t)port);
         sa.sin_addr.s_addr = addr;
-        if (connect(fd, (sockaddr *)&sa, sizeof sa) == 0) return fd;
+        if (connect(fd, (sockaddr *)&sa, sizeof sa) == 0) {
+            trace("connected (%ld ms)", ms_since(t));
+            return fd;
+        }
         char ip[INET_ADDRSTRLEN] = "?";
         inet_ntop(AF_INET, &sa.sin_addr, ip, sizeof ip);
         err = "cannot connect to " + host + " (" + ip + ":" + std::to_string(port) + "): " + strerror(errno);
@@ -800,6 +814,7 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
         if (start > 0) req += "Range: bytes=" + std::to_string(start) + "-\r\n";
         if (start > 0 && !validator.empty()) req += "If-Range: " + validator + "\r\n";
         req += "\r\n";
+        const auto asked = clock::now();
         if (!c.write_all(req, err)) return false;
 
         // The status line and headers; whatever follows them is body.
@@ -827,7 +842,7 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
         }
         size_t sp = head.find(' ');
         const int status = sp == std::string::npos ? 0 : atoi(head.c_str() + sp + 1);
-        trace("the server answered %d", status);
+        trace("the server answered %d (%ld ms)", status, ms_since(asked));
         const std::string location = header(head, "Location");
         if ((status == 301 || status == 302 || status == 303 || status == 307 || status == 308) && !location.empty()) {
             if (hop >= 5) {
@@ -837,6 +852,14 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
             Url next;
             if (!parse_url(resolve(u, location), next, err)) return false;
             trace("redirected to %s", next.shown.c_str());
+            const auto closing = clock::now();
+#ifdef TS5_HTTPS
+            if (c.tls) mbedtls_ssl_free(&c.ssl);
+            c.tls = false;
+#endif
+            close(c.fd);
+            c.fd = -1;
+            trace("closed (%ld ms)", ms_since(closing));
             u = next;
             continue;
         }
@@ -1086,8 +1109,14 @@ bool http_get_file(const std::string &url, const std::string &path, uint64_t off
     };
     int rc = pthread_create(&th, &attr, run, &job);
     pthread_attr_destroy(&attr);
-    if (rc != 0) return get_file(url, path, offset, expected_sha256, progress, err, sha);
-    pthread_join(th, nullptr);
+    if (rc != 0) job.ok = get_file(url, path, offset, expected_sha256, progress, err, sha);  // no thread: on this one
+    else pthread_join(th, nullptr);
+    // A download that failed before its first byte leaves nothing behind.
+    struct stat st;
+    if (!job.ok && stat(path.c_str(), &st) == 0 && st.st_size == 0) {
+        unlink(path.c_str());
+        unlink((path + ".from").c_str());
+    }
     return job.ok;
 }
 

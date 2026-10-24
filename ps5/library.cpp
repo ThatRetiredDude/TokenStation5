@@ -10,6 +10,7 @@
 #include <ctime>
 
 #include "backend.h"
+#include "catalog.h"
 #include "model.h"
 #include "plain.h"
 
@@ -119,6 +120,30 @@ std::vector<std::string> split_tabs(const std::string &line) {
 }
 
 }  // namespace
+
+ModelInfo estimate(const CatalogEntry &e) {
+    ModelInfo m;
+    m.file = e.file;
+    m.name = e.name;
+    m.size = e.bytes;
+    ts5::HParams hp;
+    hp.n_vocab = e.n_vocab;
+    hp.n_embd = e.n_embd;
+    hp.n_layer = e.n_layer;
+    hp.n_ff = e.n_ff;
+    hp.n_head = e.n_head;
+    hp.n_head_kv = e.n_head_kv;
+    hp.head_dim = e.head_dim;
+    hp.n_ctx_train = e.ctx_train;
+    m.layers = hp.n_layer;
+    m.ctx_train = hp.n_ctx_train;
+    m.weight_bytes = e.weight_bytes;
+    m.kv_bytes[0] = ts5::kv_bytes_per_token(hp, ts5::KvType::F16);
+    m.kv_bytes[1] = ts5::kv_bytes_per_token(hp, ts5::KvType::Q8);
+    m.kv8 = ts5::kv_type_setting() == ts5::KvType::Q8 && hp.head_dim % 32 == 0;
+    m.fixed_bytes = ts5::vk_fixed_bytes(hp, m.weight_bytes);
+    return m;
+}
 
 ModelInfo::Ctx ModelInfo::serve_ctx(int asked, uint64_t gpu_memory) const {
     if (asked > 0) return {asked, kv8};
