@@ -268,6 +268,7 @@ On the console, everything lives in the title's own folder,
 | `quit`, `restart` | close or restart the title |
 | `ts5.log`, `ts5.prev.log`, `results.tsv` | its log, the run before's, and the check and speed results |
 | `usage.tsv`, `usage.prev.tsv` | a line per API request (chat and completions, the TV's own chat too): when, the model, the app's address, tokens and times, and why it wasn't answered if it wasn't; never the prompt, the reply or a key. Tab-separated, its columns named on its second line (`engine/src/usage.h`). Written every 2 s and as the title closes; past 2 MiB it becomes `usage.prev.tsv` |
+| `chats/` | the Chat page's saved chats, a JSON file each (`ID.json`: its title, when it began and was last written, and every message and reply), written after each message and each reply; square twice on a chat in the sidebar removes its file (`chat_store.h`) |
 | `usage-hours.tsv` | the same requests summed by hour, model, app address and key, a row each, written a few seconds after each hour ends (a request that ends up in an hour already written gets a row of its own; readers add rows with the same hour, model, address and key). Home's 7- and 30-day charts read it; it keeps 400 days, trimmed once it passes 4 MiB |
 | `LICENSE`, `NOTICE.md`, `SOURCE.txt` | from the build: the title's license (GPL-3.0), the third-party notices, and the commits of its source |
 
