@@ -262,7 +262,8 @@ std::string render_results(ToolFormat f, const std::vector<std::string> &results
 
 // The tags a Hermes model wraps a call in. <tool_call> is what the templates
 // teach; Qwen 2.5 Coder often writes <tools> (seen on the console) and the
-// others turn up too, as in llama.cpp's Hermes parser. The last two hold the
+// others turn up too, as in llama.cpp's Hermes parser, and Coder makes up
+// more under a coding app's prompt (<function>, <json>). The last two hold the
 // name outside the JSON, as Qwen 2.5 Coder also writes them under a coding
 // app's long system prompt (seen on the console):
 //   <function=get_weather>{"city": "Paris"}</function>
@@ -270,9 +271,10 @@ std::string render_results(ToolFormat f, const std::vector<std::string> &results
 const char *const kHermesTags[][2] = {
     {"<tool_call>", "</tool_call>"},         {"<tools>", "</tools>"},
     {"<tool>", "</tool>"},                   {"<function_call>", "</function_call>"},
-    {"<function-call>", "</function-call>"}, {"<function=", "</function>"},
+    {"<function-call>", "</function-call>"}, {"<function>", "</function>"},
+    {"<json>", "</json>"},                   {"<function=", "</function>"},
     {"<function ", "</function>"}};
-constexpr int kNamedEquals = 5, kNamedAttrs = 6;
+constexpr int kNamedEquals = 7, kNamedAttrs = 8;
 constexpr int kHermesTagCount = (int)(sizeof kHermesTags / sizeof kHermesTags[0]);
 
 // The first call tag at or after pos: its index in kHermesTags, or -1.
