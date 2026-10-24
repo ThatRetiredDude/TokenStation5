@@ -220,29 +220,56 @@ void write_log(int in, int file) {
     }
 }
 
-// stdout and stderr into the pipe, the writer appending to the log file;
-// false: neither is set up. Done instead of freopen, whose append mode
-// would have stdio seek the pipe.
-bool log_through_pipe() {
+// stdout and stderr into the pipe, the writer appending to the log file.
+// Done instead of freopen, whose append mode would have stdio seek the pipe.
+// "" when set up, or what was refused (then neither is set up).
+std::string log_through_pipe() {
     int fds[2];
+    std::string why;
+    auto refused = [&](const char *what) {
+        why += (why.empty() ? "" : ", ") + std::string(what) + ": " + strerror(errno);
+    };
     // The PS5 refuses a title pipe() (EPERM, seen 2026-10-24); a local
     // socket pair does the same job.
-    if (pipe(fds) != 0 && socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return false;
+    if (pipe(fds) != 0) {
+        refused("pipe");
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            refused("socketpair");
+            return why;
+        }
+    }
     const int file = open(kLog, O_WRONLY | O_CREAT | O_APPEND, 0666);
-    if (file < 0 || dup2(fds[1], STDOUT_FILENO) < 0 || dup2(fds[1], STDERR_FILENO) < 0) {
-        if (file >= 0) close(file);
+    if (file < 0) {
+        refused("open");
         close(fds[0]);
         close(fds[1]);
-        return false;
+        return why;
     }
-    close(fds[1]);
-    clearerr(stdout);
-    clearerr(stderr);
+    if (dup2(fds[1], STDOUT_FILENO) >= 0 && dup2(fds[1], STDERR_FILENO) >= 0) {
+        close(fds[1]);
+        clearerr(stdout);
+        clearerr(stderr);
+    } else {
+        // Without the descriptors, new streams on the pipe in place of the
+        // two: stdio reads stdout and stderr at each call.
+        refused("dup2");
+        FILE *out = fdopen(fds[1], "w"), *err = fdopen(dup(fds[1]), "w");
+        if (!out || !err) {
+            refused("fdopen");
+            close(file);
+            close(fds[0]);
+            if (!out) close(fds[1]);
+            return why;
+        }
+        stdout = out;
+        stderr = err;
+    }
     setvbuf(stdout, nullptr, _IOLBF, 0);
     setvbuf(stderr, nullptr, _IONBF, 0);
     log_pipe = fds[0];
     std::thread(write_log, fds[0], file).detach();
-    return true;
+    if (!why.empty()) printf("ts5-title: the log goes through its writer (refused: %s)\n", why.c_str());
+    return {};
 }
 
 // Waits (2 s at the most) for the writer to have written everything.
@@ -535,8 +562,8 @@ std::string network_url() {
 int main(int, char **) {
     mkdir(kModels, 0777);
     rename(kLog, kPrevLog);
-    const bool piped = log_through_pipe();
-    const int pipe_errno = errno;
+    const std::string no_pipe = log_through_pipe();
+    const bool piped = no_pipe.empty();
     // Without the pipe, both straight to the file in append mode, so neither
     // writes over the other's lines.
     if (!piped && freopen(kLog, "a", stdout)) {
@@ -547,7 +574,7 @@ int main(int, char **) {
     }
     if (!piped && freopen(kLog, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
     printf("ts5-title: TokenStation5 %s\n", TS5_VERSION);
-    if (!piped) printf("ts5-title: the log is written directly (no pipe: %s)\n", strerror(pipe_errno));
+    if (!piped) printf("ts5-title: the log is written directly (refused: %s)\n", no_pipe.c_str());
 
     // Not radv_enable_unified_heap_on_apu, which shows the console's memory as
     // one 11.44 GiB heap: it also takes away the GTT memory types, and RADV's
