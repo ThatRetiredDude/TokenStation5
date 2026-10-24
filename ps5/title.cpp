@@ -158,7 +158,8 @@ constexpr const char *kRestart = TS5_HOME "/restart";
 constexpr const char *kUsage = TS5_HOME "/usage.tsv";
 constexpr const char *kUsageHours = TS5_HOME "/usage-hours.tsv";
 constexpr const char *kKeys = TS5_HOME "/keys.tsv";
-constexpr const char *kRequireKey = "TS5_REQUIRE_KEY";
+// Not ..._KEY: a name ending in _KEY is a secret, typed in (settings.h).
+constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
 // typing_for while the keyboard names a new API key, or takes a search.
 constexpr const char *kNamingKey = "(new key)", *kSearching = "(search)";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};

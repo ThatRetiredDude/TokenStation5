@@ -32,7 +32,8 @@ struct Row {
 };
 
 constexpr const char *kSpeechModel = "TS5_WHISPER_MODEL", *kVoice = "TS5_TTS_VOICE";
-constexpr const char *kRequireKey = "TS5_REQUIRE_KEY";
+// Not ..._KEY: a name ending in _KEY is a secret, typed in (settings.h).
+constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
 // The voice with no TS5_TTS_VOICE, if it's there (tts/synth.h).
 constexpr const char *kDefaultVoice = "af_heart";
 constexpr int kRowH = 64, kHeadH = 44, kGap = 8;
