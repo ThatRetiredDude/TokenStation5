@@ -378,6 +378,8 @@ void ChatPage::draw_empty(Canvas &c, int x, int y, int w, int h, const std::stri
 
 std::string ChatPage::name_of(const std::function<std::string(const std::string &)> &name, const std::string &file) {
     std::string n = name(file);
+    // The API names a model without its .gguf (server.cpp's api_id).
+    if (n.empty()) n = name(file + ".gguf");
     if (!n.empty()) return names_[file] = n;
     const auto it = names_.find(file);
     return it != names_.end() ? it->second : "A model no longer on your PS5";

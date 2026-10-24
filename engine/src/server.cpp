@@ -446,6 +446,29 @@ void handle(int fd, Server::State &state, Usage &u) {
         // stream_options.include_usage: the usage goes in a last chunk of its
         // own with no choices, as OpenAI sends it; otherwise in the final chunk.
         const bool usage_chunk = stream && req["stream_options"]["include_usage"].boolean(false);
+        // A thinking model's <think>...</think> goes in reasoning_content, apart
+        // from the answer, as llama.cpp and vLLM send it, so coding apps don't
+        // show it as the answer; "reasoning_format": "none" keeps it in the
+        // content (the TV's Chat page shows it there itself).
+        const bool split_think = chat && req["reasoning_format"].str() != "none";
+        // Where the answer starts in a turn's text: past its thinking and the
+        // space after it; text.size() while it's still thinking, or while it
+        // could yet turn out to be thinking. open: just past <think>, or npos.
+        auto answer_start = [&](const std::string &text, size_t &open) {
+            open = std::string::npos;
+            if (!split_think) return (size_t)0;
+            const std::string tag = "<think>";
+            const size_t i = text.find_first_not_of(" \t\r\n");
+            if (i == std::string::npos) return text.size();
+            if (text.compare(i, tag.size(), tag) != 0)
+                return text.size() - i < tag.size() && tag.compare(0, text.size() - i, text, i) == 0 ? text.size()
+                                                                                                    : (size_t)0;
+            open = i + tag.size();
+            const size_t close = text.find("</think>", open);
+            if (close == std::string::npos) return text.size();
+            const size_t a = text.find_first_not_of(" \t\r\n", close + 8);
+            return a == std::string::npos ? text.size() : a;
+        };
         std::vector<std::string> stops;
         if (req["stop"].type == Json::STR) stops.push_back(req["stop"].s);
         for (auto &s : req["stop"].a) stops.push_back(s.str());
@@ -458,13 +481,13 @@ void handle(int fd, Server::State &state, Usage &u) {
         const std::string id = std::string(chat ? "chatcmpl-" : "cmpl-") + std::to_string(++request_counter);
         u.rec.id = id;
         const long created = (long)time(nullptr);
-        auto chunk_json = [&](const std::string &delta, const char *finish) {
+        auto chunk_json = [&](const std::string &delta, const char *finish, const char *field = "content") {
             std::string fin = finish ? std::string("\"") + finish + "\"" : "null";
             if (chat)
                 return "{\"id\":\"" + id + "\",\"object\":\"chat.completion.chunk\",\"created\":" +
                        std::to_string(created) + ",\"model\":" + json_escape(model) +
                        ",\"choices\":[{\"index\":0,\"delta\":" +
-                       (finish ? std::string("{}") : "{\"content\":" + json_escape(delta) + "}") +
+                       (finish ? std::string("{}") : std::string("{\"") + field + "\":" + json_escape(delta) + "}") +
                        ",\"finish_reason\":" + fin + "}]}";
             return "{\"id\":\"" + id + "\",\"object\":\"text_completion\",\"created\":" + std::to_string(created) +
                    ",\"model\":" + json_escape(model) + ",\"choices\":[{\"index\":0,\"text\":" + json_escape(delta) +
@@ -481,6 +504,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                                  "\"finish_reason\":null}]}\n\n");
         }
         std::string content, err;  // content: for the user, over every turn
+        std::string reasoning;     // the thinking, with split_think
         std::vector<ToolCall> calls;  // the client's to run
         bool client_ok = true, ok = true, stopped = false;
         GenStats st;  // over every turn
@@ -494,6 +518,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             const std::vector<int32_t> toks = round == 0 ? std::move(first_toks) : encode();
             std::string text;
             size_t sent = 0;  // bytes of this turn's `text` already streamed
+            size_t thought = 0;  // and of its thinking, as reasoning_content
             {
                 std::lock_guard<std::mutex> g(state.stats);
                 state.activity.prompt = (int)toks.size();
@@ -524,6 +549,26 @@ void handle(int fd, Server::State &state, Usage &u) {
                     if (at != std::string::npos) { text.resize(at); stopped = true; }
                 }
                 if (stream) {
+                    size_t open;
+                    const size_t answer = answer_start(text, open);
+                    if (open != std::string::npos && client_ok) {
+                        // The thinking so far, short of what could be the start of </think>.
+                        size_t upto = std::min(text.find("</think>", open), text.size());
+                        if (upto == text.size())
+                            for (size_t k = std::min((size_t)7, text.size() - open); k > 0; k--)
+                                if (text.compare(text.size() - k, k, "</think>", 0, k) == 0) {
+                                    upto -= k;
+                                    break;
+                                }
+                        thought = std::max(thought, open);
+                        if (upto > thought) {
+                            client_ok = send_all(fd, "data: " + chunk_json(text.substr(thought, upto - thought), nullptr,
+                                                                           "reasoning_content") + "\n\n");
+                            thought = upto;
+                        }
+                    }
+                    if (answer >= text.size() && !stopped) return client_ok;
+                    sent = std::max(sent, answer);
                     // Hold back text that could be the start of a stop string,
                     // or of a tool call.
                     size_t hold = 0;
@@ -582,14 +627,24 @@ void handle(int fd, Server::State &state, Usage &u) {
             st.draft_accepted += turn.draft_accepted;
             st.sample_ms += turn.sample_ms;
             st.finish = stopped ? "stop" : turn.finish;
+            // The turn's answer, its thinking aside (split_think).
+            size_t open;
+            const size_t answer = answer_start(text, open);
+            if (open != std::string::npos) {
+                const size_t close = text.find("</think>", open);
+                reasoning += text.substr(open, (close == std::string::npos ? text.size() : close) - open);
+            }
             if (!ok || !use_tools) {
-                content += text;
+                content += text.substr(std::min(answer, text.size()));
                 break;
             }
             ParsedTurn pt = parse_turn(tf, text);
+            // pt.content is the turn's text, calls taken out after the thinking.
+            const size_t from = std::min(answer, pt.content.size());
+            sent = std::max(sent, from);
             if (stream && pt.content.size() > sent && client_ok)
                 client_ok = send_all(fd, "data: " + chunk_json(pt.content.substr(sent), nullptr) + "\n\n");
-            content += pt.content;
+            content += pt.content.substr(from);
             if (pt.calls.empty() || stopped || !client_ok) break;
             // The client's own calls go back to it; web_search is ts5's.
             std::vector<ToolCall> searches;
@@ -671,6 +726,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                        ",\"model\":" + json_escape(model) +
                        ",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":" +
                        (content.empty() && !calls.empty() ? std::string("null") : json_escape(content)) +
+                       (reasoning.empty() ? std::string() : ",\"reasoning_content\":" + json_escape(reasoning)) +
                        (calls.empty() ? std::string() : ",\"tool_calls\":" + tool_calls_json(calls, false)) +
                        "},\"finish_reason\":\"" + st.finish + "\"}]";
             else
