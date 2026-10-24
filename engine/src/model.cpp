@@ -69,6 +69,7 @@ bool Model::bind(std::string &err) {
     out_norm = weight("output_norm.weight", true, err);
     output = weight("output.weight", false, err);
     if (!output) output = tok_embd;  // tied embeddings
+    rope_freqs = weight("rope_freqs.weight", false, err);
     layers.assign(hp.n_layer, {});
     for (int i = 0; i < hp.n_layer; i++) {
         auto n = [&](const char *s) { return "blk." + std::to_string(i) + "." + s; };
