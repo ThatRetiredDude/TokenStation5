@@ -313,6 +313,15 @@ struct Tls {
     std::string ca_from;
 };
 
+// The shared generator, one caller at a time: mbedtls is built without its
+// threading layer, and downloads, web searches and the Hugging Face search
+// make connections from several threads at once.
+int locked_random(void *drbg, unsigned char *out, size_t len) {
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lk(mu);
+    return mbedtls_ctr_drbg_random(drbg, out, len);
+}
+
 // The first HTTPS request sets up what every one shares.
 Tls &tls() {
     static Tls t;
@@ -359,7 +368,7 @@ Tls &tls() {
         if (rc != 0) { t.why = "TLS setup failed (-0x" + Conn::hex(-rc) + ")"; return; }
         mbedtls_ssl_conf_authmode(&t.conf, MBEDTLS_SSL_VERIFY_REQUIRED);
         mbedtls_ssl_conf_ca_chain(&t.conf, &t.ca, nullptr);
-        mbedtls_ssl_conf_rng(&t.conf, mbedtls_ctr_drbg_random, &t.drbg);
+        mbedtls_ssl_conf_rng(&t.conf, locked_random, &t.drbg);
         t.ready = true;
     });
     return t;

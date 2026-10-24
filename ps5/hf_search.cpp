@@ -1,6 +1,7 @@
 #include "hf_search.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -20,6 +21,7 @@ namespace {
 constexpr const char *kHub = "https://huggingface.co";
 constexpr int kRepos = 8;         // repos looked at, most downloaded first
 constexpr int kPerRepo = 2;       // files offered from one repo at most
+constexpr int kAtOnce = 4;        // repos looked at side by side
 constexpr int kMinContext = 8192;  // what a model must still have room for
 constexpr size_t kHeaderBytes = 2u << 20;
 
@@ -202,6 +204,22 @@ bool read_fields(const std::string &bytes, Fields &f) {
     return !f.arch.empty() && f.n_embd > 0 && f.n_layer > 0 && f.n_head > 0;
 }
 
+// A model's name from its repo: "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF" is
+// "Qwen2.5 Coder 7B Instruct". The files' own general.name is often a
+// converter's leftover ("Models", "Gguf_Conversion", an "AWQ" the GGUF
+// isn't), so the repo's name is the one to trust.
+std::string repo_name(const std::string &repo) {
+    std::string n = repo.substr(repo.find('/') + 1);
+    for (const char *end : {"-gguf", "_gguf", ".gguf", " gguf"})
+        if (n.size() > strlen(end) && lower(n.substr(n.size() - strlen(end))) == end) {
+            n.resize(n.size() - strlen(end));
+            break;
+        }
+    for (auto &c : n)
+        if (c == '-' || c == '_') c = ' ';
+    return n;
+}
+
 // The Hub's answer to url as JSON; false with a reason in plain words.
 bool hub_json(const std::string &url, Json &out, std::string &problem) {
     ts5::HttpResponse resp;
@@ -267,8 +285,14 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
             st.to_check = (int)repos.size();
             st.cant_run = cant;
         });
-        for (const Json *m : repos) {
+        // Each repo is a few HTTPS requests; several at once, each one's files
+        // shown as it's done, and in the end in the Hub's order.
+        std::vector<std::vector<size_t>> per(repos.size());
+        std::atomic<size_t> next{0};
+        auto work = [&] {
+          for (size_t i; (i = next++) < repos.size();) {
             if (s->gen.load() != gen) return;
+            const Json *m = repos[i];
             const std::string repo = (*m)["id"].str(), sha = (*m)["sha"].str();
             Json tree;
             int big = 0;
@@ -327,9 +351,8 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
                     }
                     CatalogText t;
                     t.key = "hf:" + repo + "/" + f.path;
-                    const std::string base = repo.substr(repo.find('/') + 1);
-                    t.name = (hp.name.empty() ? base : hp.name) + " (" + kQuants[f.quant] + ")";
-                    t.good_for = "From Hugging Face";
+                    t.name = repo_name(repo) + " (" + kQuants[f.quant] + ")";
+                    t.good_for = "From " + repo.substr(0, repo.find('/')) + " on Hugging Face";
                     t.same = lower(f.path);
                     t.repo = repo;
                     t.path = f.path;
@@ -340,14 +363,24 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
                 }
             }
             printf("ts5-title: search: %s: %zu fit, %d too big\n", repo.c_str(), found.size(), big);
+            per[i] = found;
             update([&](HfState &st) {
                 st.checked++;
                 st.too_big += big;
                 st.results.insert(st.results.end(), found.begin(), found.end());
             });
-        }
-        update([&](HfState &st) { st.phase = HfState::Done; });
-        printf("ts5-title: search: \"%s\" done (%d repos of a kind ts5 can't run left out)\n", query.c_str(), cant);
+          }
+        };
+        std::vector<std::thread> helpers;
+        for (int k = 1; k < kAtOnce && k < (int)repos.size(); k++) helpers.emplace_back(work);
+        work();
+        for (auto &h : helpers) h.join();
+        update([&](HfState &st) {
+            st.results.clear();
+            for (const auto &f : per) st.results.insert(st.results.end(), f.begin(), f.end());
+            st.phase = HfState::Done;
+        });
+        printf("ts5-title: search: \"%s\" done (%d left out: of a kind ts5 can't run)\n", query.c_str(), cant);
     }).detach();
 }
 
