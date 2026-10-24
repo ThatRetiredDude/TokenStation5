@@ -52,9 +52,11 @@ void rmsnorm(float *x, const float *w, int n, float eps) {
     for (int i = 0; i < n; i++) x[i] = x[i] * s * w[i];
 }
 
-void rope(float *v, int head_dim, int n_rot, int pos, float base, bool neox) {
+// freqs: Llama 3.1's divisor for each frequency (Model::rope_freqs), or null.
+void rope(float *v, int head_dim, int n_rot, int pos, float base, bool neox, const float *freqs) {
     for (int i = 0; i < n_rot / 2; i++) {
         float theta = pos * std::pow(base, -2.0f * i / n_rot);
+        if (freqs) theta /= freqs[i];
         float c = std::cos(theta), s = std::sin(theta);
         int a = neox ? i : 2 * i, b = neox ? i + n_rot / 2 : 2 * i + 1;
         float x0 = v[a], x1 = v[b];
@@ -97,6 +99,7 @@ public:
             norms_.push_back(std::move(n));
         }
         out_norm_ = vec(m.out_norm);
+        if (m.rope_freqs) rope_freqs_ = vec(m.rope_freqs);
     }
     ~CpuBackend() override {
         if (file_) fclose(file_);
@@ -191,13 +194,14 @@ private:
                 for (int i = 0; i < H * HD; i++) qt[i] += N.bq[i];
                 for (int i = 0; i < KV; i++) kt[i] += N.bk[i], vt[i] += N.bv[i];
             }
+            const float *ff = rope_freqs_.empty() ? nullptr : rope_freqs_.data();
             for (int hh = 0; hh < H; hh++) {
                 if (!N.q.empty()) rmsnorm(&qt[hh * HD], N.q.data(), HD, hp_.rms_eps);
-                rope(&qt[hh * HD], HD, hp_.rope_dims, pos, hp_.rope_base, hp_.rope_neox);
+                rope(&qt[hh * HD], HD, hp_.rope_dims, pos, hp_.rope_base, hp_.rope_neox, ff);
             }
             for (int hh = 0; hh < HKV; hh++) {
                 if (!N.k.empty()) rmsnorm(&kt[hh * HD], N.k.data(), HD, hp_.rms_eps);
-                rope(&kt[hh * HD], HD, hp_.rope_dims, pos, hp_.rope_base, hp_.rope_neox);
+                rope(&kt[hh * HD], HD, hp_.rope_dims, pos, hp_.rope_base, hp_.rope_neox, ff);
             }
             round_kv(kv_, kt, KV);
             round_kv(kv_, vt, KV);
@@ -267,7 +271,7 @@ private:
     FILE *file_ = nullptr;      // the model file, when its weights were not loaded
     bool read_ok_ = true;
     std::vector<uint8_t> buf_;  // the weights being used, read from file_
-    std::vector<float> kc_, vc_, out_norm_;
+    std::vector<float> kc_, vc_, out_norm_, rope_freqs_;
     std::vector<Norms> norms_;
 };
 
