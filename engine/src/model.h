@@ -41,6 +41,9 @@ struct Model {
     Gguf gguf;
     HParams hp;
     Weight tok_embd, out_norm, output;
+    // Llama 3.1 and 3.2: a divisor for each RoPE frequency (rope_dims / 2),
+    // which is how they reach 128k tokens; none for the others.
+    Weight rope_freqs;
     std::vector<Layer> layers;
     std::vector<uint8_t> host;  // tensor data when loaded to host memory
 

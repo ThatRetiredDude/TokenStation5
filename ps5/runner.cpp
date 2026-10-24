@@ -220,8 +220,9 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
         l->model.gguf.kv.erase(k);
     l->name = l->model.gguf.get_str("general.name", l->file);
     const ts5::HParams &hp = l->model.hp;
-    printf("ts5: %s: %s, %d layers, embd %d, ff %d, heads %d/%d, head_dim %d, vocab %d\n", l->file.c_str(),
-           hp.arch.c_str(), hp.n_layer, hp.n_embd, hp.n_ff, hp.n_head, hp.n_head_kv, hp.head_dim, hp.n_vocab);
+    printf("ts5: %s: %s, %d layers, embd %d, ff %d, heads %d/%d, head_dim %d, vocab %d, trained on %d tokens%s\n",
+           l->file.c_str(), hp.arch.c_str(), hp.n_layer, hp.n_embd, hp.n_ff, hp.n_head, hp.n_head_kv, hp.head_dim,
+           hp.n_vocab, hp.n_ctx_train, l->model.rope_freqs ? ", scaled RoPE (Llama 3.1)" : "");
     // A draft model must fit beside the main one, so an auto-fit context
     // leaves its budget free: weights and activations plus a 32k f16 cache.
     const char *dp = drafter ? getenv("TS5_DRAFT_MODEL") : nullptr;
