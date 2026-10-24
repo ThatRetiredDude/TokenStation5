@@ -109,7 +109,7 @@ tiles: the model running now and what it's doing, and over the range the
 tokens (written and read), the requests (and how many weren't answered, and
 mostly why), and the writing speed. Under them, tokens by model as stacked
 bars (an hour, six hours or a day each), requests by app (the TV's own chat
-is "Chat on this PS5"; other apps by their address), writing speed by model,
+is "Chat on this PS5"; other apps by their key's name, or by their address), writing speed by model,
 and a live line of the last two minutes, a point a second. The numbers come
 from `usage.tsv`, summed by hour into `usage-hours.tsv` so the 7- and 30-day
 ranges outlast its rotation.
@@ -121,12 +121,20 @@ ranges outlast its rotation.
 | square | when some requests weren't answered: Logs, at the problems |
 | OPTIONS | close the title |
 
-**Models**
+**Models**: the models on the PS5, the built-in ones to download, and
+Search Hugging Face: type a name ("qwen coder"), and the most downloaded GGUF
+repos of a kind ts5 runs (Llama, Mistral, Qwen 2 and 3) are looked through
+for files of a type the GPU code takes (Q4_K_M first, through Q8_0 and F16)
+that fit in memory with at least 8,192 tokens of context, two a repo at
+most. Each one downloads like the built-in ones, pinned to the repo's
+commit and checked against Hugging Face's SHA-256. Searched entries last
+until the title closes; a stopped download of one goes on after the same
+search.
 
 | Button | |
 | --- | --- |
 | up / down | choose a model |
-| cross | start it, so apps can use it (and start it again at the next start); on the model in use, stop it (it asks first); on a model to download, download it, stop the download, or go on with it |
+| cross | start it, so apps can use it (and start it again at the next start); on the model in use, stop it (it asks first); on a model to download, download it, stop the download, or go on with it; on Search Hugging Face, type what to look for |
 | square | GPU check (on a model that can't run: Logs, at the problems): its logits on the GPU against ts5's CPU reference, PASS or FAIL. The first check of a model runs the CPU and saves its answers next to the model (`NAME.gguf.ts5ref`); later ones run only the GPU, in about a second |
 | triangle | speed test: how fast it reads a 512-token prompt and writes 128 tokens, in tokens a second |
 | right | remove it from the PS5 (it asks first): a model in the title's own `models` folder that isn't in use |
@@ -163,8 +171,13 @@ oldest exchanges are left out of the requests (they stay on screen).
 | square | new chat |
 | circle | Home |
 
-**Settings**: the title's settings, saved in `ts5.env` (one change at a
-time, keeping the rest of the file). The longest chat reply, the chat's
+**Settings**: first, Apps: "Set up an app" shows what an app needs to use
+the PS5 (the base URL, the model, the key, the context window; the full guide
+is [docs/CLIENTS.md](../docs/CLIENTS.md)), "Require a key" turns API keys on,
+"New key" names and makes one (it shows once, on its row; only its SHA-256 is
+kept, in `keys.tsv`), and each key can be turned off and on (cross) or
+removed (square twice). Then the title's settings, saved in `ts5.env` (one
+change at a time, keeping the rest of the file). The longest chat reply, the chat's
 frames a second while a reply comes in, the speech model and its CPU threads
 for R1 talk, spoken replies (on or off, TV or controller speaker, the voice,
 its speed and CPU threads), whether a Tavily key is set for web search (cross types it on the
@@ -179,8 +192,8 @@ cross again stops it (the next cross goes on).
 | --- | --- |
 | up / down | choose a setting |
 | left / right | change it |
-| cross | steps through its choices; on the Tavily key, type it on the console's keyboard; on Speech model or Voice with nothing on the PS5 yet, download one (or stop the download) |
-| square | back to its default |
+| cross | steps through its choices; on the Tavily key, type it on the console's keyboard; on Speech model or Voice with nothing on the PS5 yet, download one (or stop the download); on New key, name a new key; on a key, turn it off or on |
+| square | back to its default; on a key, press twice to remove it |
 | circle | Home |
 
 **Logs**: `ts5.log`, or `ts5.prev.log` for the run before, the one page
