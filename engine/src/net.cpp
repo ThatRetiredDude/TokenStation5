@@ -56,16 +56,14 @@ namespace ts5 {
 namespace {
 
 // One line per step of a request in the log, so a request that never comes
-// back shows how far it got. Only with TS5_NET_LOG=1: on the console each
+// back shows how far it got. Only with TS5_NET_LOG=1 (Settings > Detailed
+// log, read at each line so the switch works at once): on the console each
 // line written to ts5.log can hold the thread up for about a second, which
 // made a Hugging Face search of ~150 steps take minutes instead of seconds.
 // A failure still reaches the log through the caller's error.
 void trace(const char *fmt, ...) {
-    static const bool on = [] {
-        const char *e = getenv("TS5_NET_LOG");
-        return e && strcmp(e, "1") == 0;
-    }();
-    if (!on) return;
+    const char *on = getenv("TS5_NET_LOG");
+    if (!on || strcmp(on, "1") != 0) return;
     // Seconds since the first line, so the gaps between lines show (a
     // redirect hop on the LAN took 9-17 s with every timed step in ms).
     static const auto t0 = std::chrono::steady_clock::now();
