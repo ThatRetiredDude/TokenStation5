@@ -220,28 +220,24 @@ void write_log(int in, int file) {
     }
 }
 
-// stdout and stderr (already the log file) into the pipe; false: they stay
-// on the file.
+// stdout and stderr into the pipe, the writer appending to the log file;
+// false: neither is set up. Done instead of freopen, whose append mode
+// would have stdio seek the pipe.
 bool log_through_pipe() {
     int fds[2];
     if (pipe(fds) != 0) return false;
     const int file = open(kLog, O_WRONLY | O_CREAT | O_APPEND, 0666);
-    if (file < 0) {
+    if (file < 0 || dup2(fds[1], STDOUT_FILENO) < 0 || dup2(fds[1], STDERR_FILENO) < 0) {
+        if (file >= 0) close(file);
         close(fds[0]);
         close(fds[1]);
-        return false;
-    }
-    fflush(stdout);
-    fflush(stderr);
-    if (dup2(fds[1], fileno(stdout)) < 0 || dup2(fds[1], fileno(stderr)) < 0) {
-        dup2(file, fileno(stdout));
-        dup2(file, fileno(stderr));
-        close(fds[0]);
-        close(fds[1]);
-        close(file);
         return false;
     }
     close(fds[1]);
+    clearerr(stdout);
+    clearerr(stderr);
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+    setvbuf(stderr, nullptr, _IONBF, 0);
     log_pipe = fds[0];
     std::thread(write_log, fds[0], file).detach();
     return true;
@@ -537,17 +533,19 @@ std::string network_url() {
 int main(int, char **) {
     mkdir(kModels, 0777);
     rename(kLog, kPrevLog);
-    // Both in append mode, so neither writes over the other's lines.
-    if (freopen(kLog, "a", stdout)) {
+    const bool piped = log_through_pipe();
+    const int pipe_errno = errno;
+    // Without the pipe, both straight to the file in append mode, so neither
+    // writes over the other's lines.
+    if (!piped && freopen(kLog, "a", stdout)) {
         setvbuf(stdout, nullptr, _IOLBF, 0);
-    } else {
+    } else if (!piped) {
         notify("TokenStation5 can't save to its folder, so settings and usage won't be kept. Check that the PS5 has "
                "free storage.");
     }
-    if (freopen(kLog, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
-    const bool piped = log_through_pipe();
+    if (!piped && freopen(kLog, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
     printf("ts5-title: TokenStation5 %s\n", TS5_VERSION);
-    if (!piped) printf("ts5-title: the log is written directly (no pipe: %s)\n", strerror(errno));
+    if (!piped) printf("ts5-title: the log is written directly (no pipe: %s)\n", strerror(pipe_errno));
 
     // Not radv_enable_unified_heap_on_apu, which shows the console's memory as
     // one 11.44 GiB heap: it also takes away the GTT memory types, and RADV's
