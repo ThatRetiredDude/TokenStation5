@@ -51,6 +51,7 @@ public:
         Engine *engine = nullptr;
         std::string model, unavailable = "no model";
         std::string tool_format = "none";  // the model's (tools.h), for /v1/models
+        int n_ctx = 0;                     // the engine's context, for /v1/models
         std::mutex stats;
         Activity activity;
         // Activity's live counters, kept without a lock: the generating

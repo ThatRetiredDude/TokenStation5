@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -28,6 +29,7 @@ namespace {
 
 struct Request {
     std::string method, path, body;
+    bool tls = false;  // the client spoke TLS (an https:// address) to this plain-HTTP port
 };
 
 bool send_all(int fd, const std::string &s) {
@@ -48,6 +50,11 @@ bool read_request(int fd, Request &r) {
         ssize_t n = recv(fd, tmp, sizeof tmp, 0);
         if (n <= 0 || buf.size() > (1u << 20)) return false;
         buf.append(tmp, (size_t)n);
+        // A TLS handshake starts 0x16 0x03: the app was given https://.
+        if (buf.size() >= 2 && (unsigned char)buf[0] == 0x16 && buf[1] == 0x03) {
+            r.tls = true;
+            return false;
+        }
     }
     std::string head = buf.substr(0, hdr_end);
     size_t sp1 = head.find(' '), sp2 = head.find(' ', sp1 + 1);
@@ -57,19 +64,48 @@ bool read_request(int fd, Request &r) {
     size_t q = r.path.find('?');
     if (q != std::string::npos) r.path.resize(q);
     size_t clen = 0;
+    bool chunked = false;
     for (size_t p = head.find("\r\n"); p != std::string::npos; p = head.find("\r\n", p + 2)) {
         size_t e = head.find("\r\n", p + 2);
         std::string line = head.substr(p + 2, e == std::string::npos ? std::string::npos : e - p - 2);
         if (strncasecmp(line.c_str(), "content-length:", 15) == 0) clen = strtoul(line.c_str() + 15, nullptr, 10);
+        if (strncasecmp(line.c_str(), "transfer-encoding:", 18) == 0) {
+            for (auto &c : line) c = (char)tolower((unsigned char)c);
+            chunked = line.find("chunked") != std::string::npos;
+        }
     }
     if (clen > (64u << 20)) return false;
-    r.body = buf.substr(hdr_end + 4);
-    while (r.body.size() < clen) {
-        ssize_t n = recv(fd, tmp, sizeof tmp, 0);
-        if (n <= 0) return false;
-        r.body.append(tmp, (size_t)n);
+    std::string raw = buf.substr(hdr_end + 4);
+    if (!chunked) {
+        r.body = std::move(raw);
+        while (r.body.size() < clen) {
+            ssize_t n = recv(fd, tmp, sizeof tmp, 0);
+            if (n <= 0) return false;
+            r.body.append(tmp, (size_t)n);
+        }
+        return true;
     }
-    return true;
+    // A body sent in chunks (some HTTP clients stream a request body this
+    // way): each chunk is its size in hex, CRLF, the bytes, CRLF; size 0 ends it.
+    size_t at = 0;
+    for (;;) {
+        size_t eol;
+        while ((eol = raw.find("\r\n", at)) == std::string::npos) {
+            ssize_t n = recv(fd, tmp, sizeof tmp, 0);
+            if (n <= 0 || raw.size() > (64u << 20)) return false;
+            raw.append(tmp, (size_t)n);
+        }
+        const size_t len = strtoul(raw.c_str() + at, nullptr, 16);
+        if (len == 0) return true;  // any trailers are ignored
+        if (r.body.size() + len > (64u << 20)) return false;
+        while (raw.size() < eol + 2 + len + 2) {
+            ssize_t n = recv(fd, tmp, sizeof tmp, 0);
+            if (n <= 0) return false;
+            raw.append(tmp, (size_t)n);
+        }
+        r.body.append(raw, eol + 2, len);
+        at = eol + 2 + len + 2;
+    }
 }
 
 std::string response(int code, const std::string &body, const char *type = "application/json") {
@@ -86,8 +122,9 @@ std::string response(int code, const std::string &body, const char *type = "appl
     return h + body;
 }
 
-std::string error_body(const std::string &msg) {
-    return "{\"error\":{\"message\":" + json_escape(msg) + ",\"type\":\"invalid_request_error\"}}";
+std::string error_body(const std::string &msg, const char *code = nullptr) {
+    return "{\"error\":{\"message\":" + json_escape(msg) + ",\"type\":\"invalid_request_error\"" +
+           (code ? std::string(",\"code\":\"") + code + "\"" : std::string()) + "}}";
 }
 
 // "14 Oct 2026" (UTC), for the Llama system prompt and the search tool.
@@ -100,6 +137,15 @@ std::string today() {
     char b[32];
     snprintf(b, sizeof b, "%02d %s %d", g->tm_mday, months[g->tm_mon % 12], g->tm_year + 1900);
     return b;
+}
+
+// The model's id in the API: its file name without ".gguf", the name
+// people type into their apps (the server answers whatever id they send).
+std::string api_id(const std::string &file) {
+    const std::string ext = ".gguf";
+    if (file.size() > ext.size() && strcasecmp(file.c_str() + file.size() - ext.size(), ext.c_str()) == 0)
+        return file.substr(0, file.size() - ext.size());
+    return file;
 }
 
 // At most this many rounds of web searches per answer; after that the model
@@ -176,6 +222,9 @@ const char *unavailable_why(const std::string &s) {
 void handle(int fd, Server::State &state, Usage &u) {
     Request r;
     if (!read_request(fd, r)) {
+        if (r.tls)
+            fprintf(stderr, "ts5: %s tried https:// on the API port; the address starts http://, not https://\n",
+                    u.rec.client.c_str());
         u.pending = false;
         u.closed = true;
         close(fd);
@@ -225,18 +274,25 @@ void handle(int fd, Server::State &state, Usage &u) {
         send_all(fd, loaded ? response(200, health_body("ok")) : response(503, health_body(why)));
     } else if (r.path == "/v1/models" || r.path == "/models") {
         std::string model, tools;
+        int n_ctx;
         {
             std::lock_guard<std::mutex> g(state.stats);
             model = state.model;
             tools = state.tool_format;
+            n_ctx = state.n_ctx;
         }
         // capabilities: whether the model takes OpenAI tools, and whether ts5
         // runs web searches for it (a Tavily key is set).
         const bool can = tools != "none";
         send_all(fd, response(200, "{\"object\":\"list\",\"data\":[" +
                                        (model.empty() ? std::string()
-                                                      : "{\"id\":" + json_escape(model) +
-                                                            ",\"object\":\"model\",\"owned_by\":\"tokenstation5\"" +
+                                                      : "{\"id\":" + json_escape(api_id(model)) +
+                                                            ",\"object\":\"model\",\"created\":" +
+                                                            std::to_string((long)time(nullptr)) +
+                                                            ",\"owned_by\":\"tokenstation5\"" +
+                                                            // The context, under the names clients look for.
+                                                            ",\"context_length\":" + std::to_string(n_ctx) +
+                                                            ",\"max_model_len\":" + std::to_string(n_ctx) +
                                                             ",\"capabilities\":{\"tools\":" + (can ? "true" : "false") +
                                                             ",\"tool_format\":" + json_escape(tools) +
                                                             ",\"web_search\":" +
@@ -274,8 +330,8 @@ void handle(int fd, Server::State &state, Usage &u) {
             return;
         }
         Engine &e = *ep;
-        const std::string model = state.model;
-        u.rec.model = model;
+        u.rec.model = state.model;
+        const std::string model = api_id(state.model);  // for the replies
         const std::string date = today();
         // Tools: the client's, plus web_search when a Tavily key is set and
         // the chat looks like it needs the web (needs_web), or the request
@@ -305,13 +361,32 @@ void handle(int fd, Server::State &state, Usage &u) {
         } else {
             prompt = req["prompt"].str();
         }
+        auto encode = [&] { return e.tok().encode(prompt, !chat || prompt.rfind("<|begin_of_text|>", 0) != 0); };
+        std::vector<int32_t> first_toks = encode();  // the first turn's
         // No prompt tokens at all (an empty prompt, or one that isn't a
         // string, on a model without BOS) is the app's mistake, not the GPU's.
-        if (prompt.empty() && e.tok().encode(prompt, true).empty()) {
+        if (first_toks.empty()) {
             send_all(fd, response(400, error_body("empty prompt")));
             u.rec.status = 400;
             u.rec.finish = "refused";
             u.rec.why = "empty_prompt";
+            done();
+            return;
+        }
+        // A prompt longer than the context is refused before anything is
+        // streamed, in OpenAI's words and code: coding tools (Kilo Code, Cline,
+        // Roo) read them as "make the conversation shorter" and retry.
+        const int n_ctx = e.backend().n_ctx();
+        if ((int)first_toks.size() + 1 > n_ctx) {
+            send_all(fd, response(400, error_body("This model's maximum context length is " + std::to_string(n_ctx) +
+                                                      " tokens. However, your messages resulted in " +
+                                                      std::to_string(first_toks.size()) +
+                                                      " tokens. Please reduce the length of the messages.",
+                                                  "context_length_exceeded")));
+            u.rec.status = 400;
+            u.rec.finish = "refused";
+            u.rec.why = "too_long";
+            u.rec.prompt = (int64_t)first_toks.size();
             done();
             return;
         }
@@ -320,9 +395,15 @@ void handle(int fd, Server::State &state, Usage &u) {
         sp.temperature = (float)req["temperature"].num(0.7);
         sp.top_p = (float)req["top_p"].num(0.95);
         sp.top_k = (int)req["top_k"].num(40);
-        sp.max_tokens = (int)req["max_tokens"].num(req["max_completion_tokens"].num(512));
+        // No max_tokens (or 0, or -1, as some clients send for "no limit"):
+        // until the model stops or the context is full, as OpenAI does.
+        const double limit = req["max_tokens"].num(req["max_completion_tokens"].num(0));
+        sp.max_tokens = limit >= 1 ? (int)std::min(limit, (double)n_ctx) : n_ctx;
         sp.seed = (uint64_t)req["seed"].num(0);
         const bool stream = req["stream"].boolean(false);
+        // stream_options.include_usage: the usage goes in a last chunk of its
+        // own with no choices, as OpenAI sends it; otherwise in the final chunk.
+        const bool usage_chunk = stream && req["stream_options"]["include_usage"].boolean(false);
         std::vector<std::string> stops;
         if (req["stop"].type == Json::STR) stops.push_back(req["stop"].s);
         for (auto &s : req["stop"].a) stops.push_back(s.str());
@@ -347,9 +428,16 @@ void handle(int fd, Server::State &state, Usage &u) {
                    ",\"model\":" + json_escape(model) + ",\"choices\":[{\"index\":0,\"text\":" + json_escape(delta) +
                    ",\"finish_reason\":" + fin + "}]}";
         };
-        if (stream)
+        if (stream) {
             send_all(fd, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
                          "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n");
+            // The role first, as OpenAI's streams start.
+            if (chat)
+                send_all(fd, "data: {\"id\":\"" + id + "\",\"object\":\"chat.completion.chunk\",\"created\":" +
+                                 std::to_string(created) + ",\"model\":" + json_escape(model) +
+                                 ",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},"
+                                 "\"finish_reason\":null}]}\n\n");
+        }
         std::string content, err;  // content: for the user, over every turn
         std::vector<ToolCall> calls;  // the client's to run
         bool client_ok = true, ok = true, stopped = false;
@@ -361,8 +449,7 @@ void handle(int fd, Server::State &state, Usage &u) {
         // A turn of the model's; with web_search, ts5 answers the model's
         // searches and lets it go on, so one request can be several turns.
         for (int round = 0;; round++) {
-            const std::vector<int32_t> toks =
-                e.tok().encode(prompt, !chat || prompt.rfind("<|begin_of_text|>", 0) != 0);
+            const std::vector<int32_t> toks = round == 0 ? std::move(first_toks) : encode();
             std::string text;
             size_t sent = 0;  // bytes of this turn's `text` already streamed
             {
@@ -527,7 +614,13 @@ void handle(int fd, Server::State &state, Usage &u) {
                                  ",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":" + tool_calls_json(calls, true) +
                                  "},\"finish_reason\":null}]}\n\n");
             std::string last = chunk_json("", st.finish.c_str());
-            last.insert(last.size() - 1, ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st));
+            last.insert(last.size() - 1,
+                        (usage_chunk ? std::string() : ",\"usage\":" + usage_json(st)) + ",\"timings\":" + timings_json(st));
+            if (usage_chunk)
+                last += "\n\ndata: {\"id\":\"" + id + "\",\"object\":\"" +
+                        (chat ? "chat.completion.chunk" : "text_completion") + "\",\"created\":" +
+                        std::to_string(created) + ",\"model\":" + json_escape(model) +
+                        ",\"choices\":[],\"usage\":" + usage_json(st) + "}";
             client_ok &= send_all(fd, "data: " + last + "\n\ndata: [DONE]\n\n");
         } else {
             std::string body;
@@ -628,6 +721,7 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
     state_.model = e ? model_name : std::string();
     state_.unavailable = unavailable;
     state_.tool_format = e ? tool_format_name(tool_format(e->tok())) : "none";
+    state_.n_ctx = e ? e->backend().n_ctx() : 0;
     if (e)
         fprintf(stderr, "ts5: tool calls: %s; web search: %s\n", state_.tool_format.c_str(),
                 state_.tool_format == "none" ? "off (no tool calls)"
