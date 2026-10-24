@@ -985,8 +985,9 @@ void Dashboard::draw_settings_footer(Canvas &c, const View &v) {
                  {kGlyphSquare, square.empty() ? std::string("Default") : square, !square.empty()},
                  {kGlyphCircle, "Home", true}};
     for (auto &h : hints) {
+        if (!h.on) continue;  // nothing to do on this row: not offered at all
         glyph(c, (float)x + 16, (float)y - 8, h.g, h.on);
-        x += 40 + c.text(small_, x + 40, y, h.text, h.on ? kText2 : kMuted) + 36;
+        x += 40 + c.text(small_, x + 40, y, h.text, kText2) + 36;
     }
     draw_close_hint(c, x, y);
 }
