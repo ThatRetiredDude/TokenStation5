@@ -45,7 +45,7 @@ The workflow writes these fields; they already match this repo:
 | `name` | `TokenStation5` |
 | `kind` | `app` |
 | `category` | `ai` |
-| `license` | `GPL-3.0-or-later` (the built title is GPL-3.0-or-later as a whole; see [LICENSING.md](../LICENSING.md)) |
+| `license` | `Unlicensed` (the catalog's sentinel for a repo GitHub can't map to one SPDX id; see the license note below) |
 | `author` | `Jared Maxwell` |
 | `version` | the release tag, without a leading `v` |
 | `source_repo` | `https://github.com/ThatRetiredDude/TokenStation5` |
@@ -53,21 +53,23 @@ The workflow writes these fields; they already match this repo:
 | `sha256` | computed from the ZIP |
 | `icon_url` | `ps5/sce_sys/icon0.png`, pinned to the tag (512×512 PNG) |
 
-## ⚠️ One thing to resolve before submitting: the license check
+## The license field (why it's `Unlicensed`)
 
-The catalog requires the record's `license` to **match the license GitHub
-detects for the repository**. GitHub currently reports this repo's license as
-**`NOASSERTION` ("Other")**, because the repository root is
+The catalog's submission check compares the record's `license` with the
+license GitHub detects for the repository. GitHub reports this repo as
+**`NOASSERTION`** — it can't map it to a single SPDX id — because the root is
 [PolyForm Small Business](../LICENSE.md) and only the `ps5/` title and the
 built artifact are GPL-3.0-or-later (see [LICENSING.md](../LICENSING.md)).
 
-So a record with `license: GPL-3.0-or-later` may fail the catalog's validation
-even though it correctly describes the distributed title. Options:
+For exactly this case the catalog validator
+([`catalog/verify.py`](https://github.com/darkxex/ps5-homebrew-catalog/blob/main/catalog/verify.py))
+accepts the sentinel value **`"Unlicensed"`** with no error and no warning when
+GitHub's detection is `NOASSERTION`. So the generated record uses
+`"license": "Unlicensed"`, the submission passes cleanly with no manual gate,
+and the repository's actual licensing is left exactly as-is (PolyForm at the
+root, GPL-3.0-or-later for the title). `"Unlicensed"` here means only "GitHub
+could not detect an SPDX license," not that the software is unlicensed.
 
-- Ask the catalog maintainer whether a `NOASSERTION` repo can list with the
-  artifact's license (dual-licensed homebrew is common).
-- Add a root `LICENSE`/SPDX file that makes GitHub detect a single license —
-  this changes how the repo is presented, so it's a deliberate decision.
-
-This is intentionally left for you to decide; the workflow and record are
-otherwise ready.
+If you ever give the repo a root license GitHub can map to one SPDX id, switch
+the record's `license` to that id to match — until then, `"Unlicensed"` is the
+correct value.
