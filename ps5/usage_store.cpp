@@ -119,6 +119,7 @@ bool has(const std::string &s, const char *part) { return s.find(part) != std::s
 }  // namespace
 
 void UsageSums::add(const ts5::UsageRecord &r) {
+    if (r.why == "trimmed") return;  // the TV's Chat page asking again, shorter: the next row counts
     requests++;
     const bool not_answered = r.status != 200 || r.finish == "error";
     if (not_answered) {

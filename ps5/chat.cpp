@@ -114,6 +114,9 @@ ChatState Chat::state() {
 
 std::string Chat::request_body() {
     std::lock_guard<std::mutex> lk(mu_);
+    // reply() asks again without the oldest turn while there's more than
+    // this message: the API logs a refusal then as this page's (server.cpp).
+    const bool trims = first_ + 2 <= state_.turns.size() - 2;
     std::string msgs;
     // Every turn but the reply being written; failed replies and the
     // questions they answer stay on screen but out of the history.
@@ -129,7 +132,7 @@ std::string Chat::request_body() {
     }
     // The thinking stays in the content: the page shows it as it comes.
     return "{\"messages\":[" + msgs + "],\"stream\":true,\"reasoning_format\":\"none\",\"max_tokens\":" +
-           std::to_string(max_tokens()) + "}";
+           std::to_string(max_tokens()) + (trims ? ",\"ts5_trims\":true" : "") + "}";
 }
 
 void Chat::reply() {

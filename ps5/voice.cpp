@@ -50,9 +50,13 @@ void Voice::rescan() {
     const std::vector<std::string> found = whisper_models(dir_);
     const std::string m = chosen_whisper_model(dir_);
     std::lock_guard<std::mutex> lk(mu_);
+    // One came (downloaded on the Settings page): "none yet" is out of date,
+    // also when it came before the error did (R1 held while it arrived).
+    if (!m.empty() && state_.error == kNoModel) {
+        state_.error.clear();
+        version_++;
+    }
     if (m != state_.model || found != state_.models) {
-        // One came (downloaded on the Settings page): "none yet" is out of date.
-        if (!m.empty() && state_.error == kNoModel) state_.error.clear();
         state_.model = m;
         state_.models = found;
         version_++;
@@ -99,7 +103,14 @@ void Voice::run() {
     if (model.empty()) {
         // Nothing to transcribe with: say so at once rather than record.
         while (!released_) sceKernelUsleep(20000);
-        set_error(kNoModel);
+        std::lock_guard<std::mutex> lk(mu_);
+        // One may have come while R1 was down.
+        if (state_.model.empty()) {
+            printf("ts5-title: voice: %s\n", kNoModel);
+            state_.error = kNoModel;
+        }
+        state_.phase = VoiceState::Idle;
+        version_++;
         return;
     }
     const int h = sceAudioInOpen(user_, kVoiceChat, 0, kGrain, kRate, kMono16);

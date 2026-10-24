@@ -400,14 +400,45 @@ bool take_element(std::string &s, const std::string &tag, std::string &text) {
     return true;
 }
 
+// Arguments written as elements, nothing else: <city>Paris</city> <days>3</days>
+// is {"city": "Paris", "days": 3}. A value that reads as JSON (a number,
+// true, a list) is that; anything else is a string.
+bool elements_object(const std::string &text, Json &j) {
+    j = Json();
+    j.type = Json::OBJ;
+    std::string s = strip(text);
+    while (!s.empty()) {
+        if (s[0] != '<') return false;
+        const size_t gt = s.find('>');
+        if (gt == std::string::npos || gt < 2) return false;
+        const std::string tag = s.substr(1, gt - 1);
+        for (char c : tag)
+            if (!isalnum((unsigned char)c) && c != '_' && c != '-') return false;
+        std::string value;
+        if (!take_element(s, tag, value)) return false;
+        Json v;
+        if (!Json::parse(value, v)) {
+            v = Json();
+            v.type = Json::STR;
+            v.s = value;
+        }
+        if (!j.o.count(tag)) j.keys.push_back(tag);
+        j.o[tag] = v;
+        s = lstrip(s);
+    }
+    return true;
+}
+
 // A call written as child elements, nothing else in the text:
-// <name>get_weather</name> <arguments>{"city": "Paris"}</arguments>
+// <name>get_weather</name> <arguments>{"city": "Paris"}</arguments>, the
+// arguments maybe elements themselves (<arguments><city>Paris</city></arguments>).
 bool element_call(const std::string &text, std::vector<ToolCall> &calls) {
     std::string s = text, name, args;
     if (!take_element(s, "name", name) || name.empty()) return false;
     if (!take_element(s, "arguments", args) && !take_element(s, "parameters", args)) args = "{}";
     Json j;
-    if (!strip(s).empty() || !Json::parse(args, j) || j.type != Json::OBJ) return false;
+    if (!strip(s).empty()) return false;
+    if (!(Json::parse(args, j) && j.type == Json::OBJ) && !elements_object(args, j)) return false;
     ToolCall call;
     call.name = name;
     call.arguments = j.dump();
@@ -510,6 +541,14 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text) {
         // the console).
         if (r.calls.empty() && calls_in_any_wrapper(text.substr(from), r.calls)) content = text.substr(0, from);
         if (!r.calls.empty()) r.content = without_empty_fence(rstrip(content));
+        // A plain answer in a <response> wrapper (Coder, seen on the
+        // console): the wrapper goes.
+        if (r.calls.empty()) {
+            const std::string a = strip(text.substr(from)), open = "<response>", close = "</response>";
+            if (starts(a, open) && ends(a, close) && a.size() >= open.size() + close.size() &&
+                a.find(open, open.size()) == std::string::npos)
+                r.content = text.substr(0, from) + strip(a.substr(open.size(), a.size() - open.size() - close.size()));
+        }
     } else if (f == ToolFormat::LLAMA3) {
         std::string s = strip(text);
         if (starts(s, "<|python_tag|>")) s = lstrip(s.substr(14));
