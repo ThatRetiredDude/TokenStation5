@@ -1,15 +1,110 @@
-# TokenStation5
+<div align="center">
 
-**The PS5 was built to push pixels. We're teaching it to push tokens.**
+<img src="ps5/sce_sys/icon0.png" alt="TokenStation5" width="150">
 
-TokenStation5 turns a jailbroken PS5 into a local AI endpoint: quantized LLMs
-running on the console's GPU, served to your home network over an
-OpenAI-compatible API. No cloud, no subscription, no data leaving the house.
+# 🎮 TokenStation5
 
-It runs on **ts5**, our own inference engine, written from scratch for this
-one GPU.
+### The PS5 was built to push pixels. We're teaching it to push tokens.
 
-## ts5: not llama.cpp
+Your PS5 becomes a private AI assistant for the whole house. Talk to it with the controller, chat with it on the TV, or plug it into the coding tools and chat apps you already use. No cloud, no subscription, and your conversations stay at home.
+
+[![Prospero Store](https://img.shields.io/badge/Prospero_Store-PPSA99555-003791?style=for-the-badge&logo=playstation&logoColor=white)](https://github.com/darkxex/ProsperoStore)
+[![License](https://img.shields.io/badge/license-PolyForm_SB_%2F_GPL--3.0-yellow?style=for-the-badge)](LICENSING.md)
+[![Stars](https://img.shields.io/github/stars/ThatRetiredDude/TokenStation5?style=for-the-badge&logo=github&color=gold)](https://github.com/ThatRetiredDude/TokenStation5/stargazers)
+
+![PS5](https://img.shields.io/badge/PS5-jailbroken-003791?style=flat-square&logo=playstation&logoColor=white)
+![GPU](https://img.shields.io/badge/GPU-RDNA_2_·_16GB-ED1C24?style=flat-square&logo=amd&logoColor=white)
+![Vulkan](https://img.shields.io/badge/Vulkan-compute-A41E22?style=flat-square&logo=vulkan&logoColor=white)
+![Engine](https://img.shields.io/badge/ts5-from_scratch_·_C%2B%2B17-00599C?style=flat-square&logo=cplusplus&logoColor=white)
+![API](https://img.shields.io/badge/API-OpenAI--compatible-412991?style=flat-square&logo=openai&logoColor=white)
+![Not llama.cpp](https://img.shields.io/badge/not-llama.cpp-black?style=flat-square)
+
+</div>
+
+---
+
+## What you get
+
+### 🎙️ Talk to it
+
+Hold **R1** on the DualSense, ask your question out loud, and let go. The
+console turns your speech into text, the model answers, and the reply is
+read back to you in a natural voice on the TV or the controller's speaker.
+Speech recognition and the voice both run on the PS5 itself, so nothing you
+say goes to a server. Pick from several voices and set how fast they talk.
+
+### 💬 Chat on the TV
+
+A full chat screen on the big screen. Type with the on-screen keyboard, or
+plug in a USB or Bluetooth keyboard. Replies stream in as they're written.
+
+### 🧑‍💻 A coding assistant for your editor
+
+The console serves the same API that OpenAI-compatible apps already speak, so
+it drops straight into Continue, aider, opencode, Open WebUI or your own
+scripts. Point them at the PS5's address and you have a local coding model
+for every machine on your network, with no per-token bill.
+
+### ⚡ Fast enough to actually use
+
+Qwen 2.5 Coder 7B writes about **70 tokens a second** (a token is roughly
+three quarters of a word) and reads your prompt at almost **500 a second**;
+the smaller Llama 3.2 3B writes over **130 a second**. Models are ready about
+2 seconds after you pick them. When you're editing code it gets faster still,
+up to about 100 a second, by guessing ahead from what's already in your file. All the numbers are in
+[On the console today](#on-the-console-today).
+
+### 🌐 Answers from the web
+
+Add a free [Tavily](https://tavily.com) key (typed right on the console) and
+the model can look things up when a question needs fresh information, like
+news, prices or the weather, then answer with links to its sources. It only
+searches when it has to, and only the search words leave the house.
+
+### 📺 Run it all from the couch
+
+Everything works with the controller:
+
+- **Home** shows how your apps have used it, like an AI provider's usage page.
+- **Models** lists what's on the console, what fits, and runs a speed test or
+  a correctness check with one button.
+- **Chat** and **Settings** for voice, keyboard and web search.
+- **Logs** for when you want the details.
+
+New models download straight to the console, checked against their hash, and
+a stopped download picks up where it left off.
+
+### 🧠 Good models, checked on the real hardware
+
+Qwen 2.5 Coder 7B for code, Qwen 3 8B and Llama 3.1 8B for everyday chat, and
+Llama 3.2 3B when you want speed. Every model passes a check that runs the
+same prompt on the PS5's GPU and on a separate reference, and compares the
+results at every word.
+
+### 🔓 Free for personal use
+
+Free for individuals and small businesses. See [Licensing](#licensing).
+
+## What you need
+
+- A PS5 on firmware 13.60 or lower, with the jailbreak loaded
+- A home network
+- Optional: a USB or Bluetooth keyboard, and a Tavily key for web search
+
+Install the TokenStation5 title, pick a model on the TV, and you're running.
+Step-by-step setup is in [On the PS5](#on-the-ps5).
+
+> [!WARNING]
+> A jailbroken console's API has no password. Keep it on a network you trust.
+
+---
+
+## Under the hood
+
+Everything above runs on **ts5**, our own inference engine, written from
+scratch for this one GPU.
+
+### ts5: not llama.cpp
 
 ts5 is not a fork, a wrapper or a rebrand of llama.cpp. Every layer is ours:
 
@@ -133,6 +228,11 @@ scripts/ts5-ps5.sh fetch qwen25-coder-7b
 # launch TokenStation5 from the home screen
 ```
 
+Publishing to the [Prospero Store](https://github.com/darkxex/ProsperoStore)
+is set up: push a version tag and the [`release`](.github/workflows/release.yml)
+workflow builds and attaches `PPSA99555.zip` plus a ready-to-submit catalog
+record. See [docs/STORE.md](docs/STORE.md) for the submission steps.
+
 The TV shows a dashboard. It lists the models on the console with their size,
 quant, GPU memory and results, and suggests starter models that aren't there
 yet. Use the controller to pick one, then:
@@ -216,6 +316,20 @@ console.
 
 A jailbroken console's API, FTP and payload ports have no authentication.
 Keep it on a network you trust.
+
+## Support development
+
+If TokenStation5 is useful to you, tips are welcome and help fund more kernel
+tuning and new models. Crypto only for now:
+
+| Chain | Address | Scan |
+| --- | --- | :---: |
+| ₿ Bitcoin | `bc1qa5kevv33wq5t4sjckqe32h5hcwyymp767tfhz9` | <img src="docs/donate/bitcoin.png" alt="Bitcoin address QR" width="120"> |
+| Ξ Ethereum | `0x5976376b0c2125655e01d0a7758c744c43fb6d93` | <img src="docs/donate/ethereum.png" alt="Ethereum address QR" width="120"> |
+| ◎ Solana | `u5zcwMcmrn7qAN4zUJzLhpLDQv81qtFDfZR1ohCrMs9` | <img src="docs/donate/solana.png" alt="Solana address QR" width="120"> |
+
+Double-check the address against this page before sending — crypto transfers
+can't be reversed.
 
 ## Licensing
 
