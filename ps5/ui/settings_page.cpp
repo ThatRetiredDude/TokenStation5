@@ -96,6 +96,10 @@ const std::vector<Row> &setting_rows() {
          {{"120", "2 minutes"}, {"300", "5 minutes"}, {"600", "10 minutes"}, {"1200", "20 minutes"},
           {"1800", "30 minutes"}, {"3600", "1 hour"}, {"0", "Never"}},
          "600"},
+        {"LOGS", "TS5_NET_LOG", "Detailed log",
+         "Adds every step of each download and web search to the log, for tracking down a problem. Off keeps "
+         "the log short: what happened, problems, and a line for each request.",
+         "Now", {{"0", "Off"}, {"1", "On"}}, "0"},
     };
     return r;
 }
