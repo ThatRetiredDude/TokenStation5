@@ -56,7 +56,9 @@
 #include <vulkan/vulkan.h>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -182,10 +184,84 @@ void notify(const std::string &text) {
 // the main loop writes them every 2 s, and leave() writes what's left.
 ts5::UsageLog usage_log(kUsage);
 
+// The log goes through a pipe to a thread of its own that writes the file.
+// On the PS5 a write to ts5.log could wait about a second at a time while
+// the TV sat idle, and every thread that logged waited with it: a Hugging
+// Face search's 150 net lines made it take 8 minutes instead of 45 s
+// (2026-10-24). A pipe write doesn't wait on the file. What's still in the
+// pipe when the title crashes is lost, at most what the writer was behind.
+int log_pipe = -1;            // the writer's end of the pipe, for log_drain
+std::atomic<bool> log_writing{false};
+
+void write_log(int in, int file) {
+    static char buf[64 * 1024];
+    double last_slow = -1e9;
+    for (;;) {
+        const ssize_t n = read(in, buf, sizeof buf);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return;
+        log_writing = true;
+        const double t = app::now_s();
+        for (ssize_t off = 0; off < n;) {
+            const ssize_t w = write(file, buf + off, (size_t)(n - off));
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) break;
+            off += w;
+        }
+        // How slow the file is, now and then, so the cause can be seen.
+        const double took = app::now_s() - t;
+        if (took > 0.5 && t - last_slow > 60) {
+            char line[96];
+            const int k = snprintf(line, sizeof line, "ts5-title: the log file took %.1f s to write\n", took);
+            if (k > 0 && write(file, line, (size_t)k) < 0) {}
+            last_slow = t;
+        }
+        log_writing = false;
+    }
+}
+
+// stdout and stderr (already the log file) into the pipe; false: they stay
+// on the file.
+bool log_through_pipe() {
+    int fds[2];
+    if (pipe(fds) != 0) return false;
+    const int file = open(kLog, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (file < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return false;
+    }
+    fflush(stdout);
+    fflush(stderr);
+    if (dup2(fds[1], fileno(stdout)) < 0 || dup2(fds[1], fileno(stderr)) < 0) {
+        dup2(file, fileno(stdout));
+        dup2(file, fileno(stderr));
+        close(fds[0]);
+        close(fds[1]);
+        close(file);
+        return false;
+    }
+    close(fds[1]);
+    log_pipe = fds[0];
+    std::thread(write_log, fds[0], file).detach();
+    return true;
+}
+
+// Waits (2 s at the most) for the writer to have written everything.
+void log_drain() {
+    if (log_pipe < 0) return;
+    for (int i = 0; i < 40; i++) {
+        pollfd p{log_pipe, POLLIN, 0};
+        if (poll(&p, 1, 0) == 0 && !log_writing) return;
+        sceKernelUsleep(50000);
+    }
+}
+
 [[noreturn]] void leave(const char *path) {
     usage_log.flush();
     printf("ts5-title: leaving (%s)\n", path);
     fflush(nullptr);
+    log_drain();
     sceSystemServiceLoadExec(path, nullptr);
     for (;;) sceKernelUsleep(1000000);
 }
@@ -469,7 +545,9 @@ int main(int, char **) {
                "free storage.");
     }
     if (freopen(kLog, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
+    const bool piped = log_through_pipe();
     printf("ts5-title: TokenStation5 %s\n", TS5_VERSION);
+    if (!piped) printf("ts5-title: the log is written directly (no pipe: %s)\n", strerror(errno));
 
     // Not radv_enable_unified_heap_on_apu, which shows the console's memory as
     // one 11.44 GiB heap: it also takes away the GTT memory types, and RADV's
