@@ -1,7 +1,7 @@
 // API keys, made on the Settings page (one per app, by name) and kept in
 // keys.tsv in the title's folder. The file holds each key's SHA-256, never
 // the key: a key shows once, when it's made. With "Require a key" on
-// (TS5_REQUIRE_KEY=1 in ts5.env), apps on the network must send a key that is
+// (TS5_KEYS_REQUIRED=1 in ts5.env), apps on the network must send a key that is
 // turned on; the Chat page on the PS5 itself never needs one. With it off,
 // anyone gets in, and a request that sends a key still has its name in
 // usage.tsv, so Home's "by app" uses names.
