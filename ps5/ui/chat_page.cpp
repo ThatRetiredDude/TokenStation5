@@ -212,6 +212,9 @@ ListPress ChatPage::press_list(uint32_t b, const ChatList &l, double now) {
             p.kind = ListPress::Remove;
             p.id = chat->id;
             remove_id_.clear();
+            // The choice goes to the chat below it, or above at the end.
+            const size_t i = (size_t)list_sel_ - 2;
+            sel_id_ = i + 1 < l.chats.size() ? l.chats[i + 1].id : i > 0 ? l.chats[i - 1].id : std::string();
         } else if (chat) {
             remove_id_ = chat->id;
             remove_until_ = now + kRemoveFor;
