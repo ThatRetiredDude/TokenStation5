@@ -4,8 +4,10 @@
 #include <sys/statvfs.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -135,6 +137,60 @@ std::string said(const std::string &err, bool damaged, bool cut, bool &retry) {
 }
 
 }  // namespace
+
+int percent(const Download &d) {
+    if (!d.total) return 0;
+    return std::min(99, (int)(100.0 * (double)d.done / (double)d.total));
+}
+
+std::string progress_text(const Download &d, bool left) {
+    std::string s = format_bytes(d.done) + " of " + format_bytes(d.total);
+    if (d.phase != Download::Running || d.held || d.speed <= 0) return s;
+    char b[64];
+    if (d.speed >= 1e6) snprintf(b, sizeof b, "%.0f MB a second", d.speed / 1e6);
+    else snprintf(b, sizeof b, "%.0f KB a second", d.speed / 1e3);
+    s += std::string("  \xC2\xB7  ") + b;
+    if (!left || d.total <= d.done) return s;
+    const double secs = (double)(d.total - d.done) / d.speed;
+    const int min = (int)std::ceil(secs / 60);
+    if (secs < 60) snprintf(b, sizeof b, "less than a minute left");
+    else if (min < 60) snprintf(b, sizeof b, "about %d minute%s left", min, min == 1 ? "" : "s");
+    else if (min % 60 == 0) snprintf(b, sizeof b, "about %d hour%s left", min / 60, min / 60 == 1 ? "" : "s");
+    else snprintf(b, sizeof b, "about %d h %d min left", min / 60, min % 60);
+    return s + "  \xC2\xB7  " + b;
+}
+
+Download joined(const std::vector<std::string> &keys, const std::map<std::string, Download> &all) {
+    // The phase that says most: one running beats one waiting, which beats
+    // one that failed, then stopped, then nothing yet.
+    auto rank = [](Download::Phase p) {
+        switch (p) {
+            case Download::Running: return 5;
+            case Download::Retrying: return 4;
+            case Download::Queued: return 3;
+            case Download::Failed: return 2;
+            case Download::Stopped: return 1;
+            case Download::None: return 0;
+        }
+        return 0;
+    };
+    Download j;
+    for (const std::string &k : keys) {
+        const auto it = all.find(k);
+        const Download d = it == all.end() ? Download() : it->second;
+        const CatalogEntry *e = Downloads::find(k);
+        j.done += d.done;
+        j.total += d.total ? d.total : e ? e->bytes : 0;
+        j.speed += d.speed;
+        j.held |= d.held;
+        if (rank(d.phase) > rank(j.phase)) {
+            j.phase = d.phase;
+            j.problem = d.problem;
+            j.retry_at = d.retry_at;
+        }
+    }
+    return j;
+}
 
 bool free_space(const std::string &dir, uint64_t &bytes) {
     struct statvfs vs;

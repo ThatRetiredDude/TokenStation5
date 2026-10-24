@@ -49,6 +49,14 @@ struct Download {
 // Bytes free on the volume dir is on. The title's one call to statvfs.
 bool free_space(const std::string &dir, uint64_t &bytes);
 
+// For the screen: whole percent (99 at most until the file is whole), and
+// "1.9 GB of 4.7 GB · 38 MB a second", with "· about 2 minutes left" when
+// asked for.
+int percent(const Download &d);
+std::string progress_text(const Download &d, bool left);
+// Several downloads as one (Kokoro's model and a voice), for one row.
+Download joined(const std::vector<std::string> &keys, const std::map<std::string, Download> &all);
+
 class Downloads {
 public:
     using Notify = std::function<void(const std::string &)>;
