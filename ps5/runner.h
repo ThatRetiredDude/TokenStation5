@@ -65,6 +65,8 @@ public:
     void push(const Job &job);
     Status status();
     std::vector<Event> events();
+    // A line for the activity list from elsewhere (a download).
+    void note(const std::string &text, bool bad = false) { event(text, bad); }
     // Bumped on every change of status or events.
     uint64_t version() const { return version_.load(); }
 
