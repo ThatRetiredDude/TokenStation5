@@ -176,12 +176,24 @@ void ChatPage::focus_list(bool on) {
     remove_id_.clear();
 }
 
+// The chosen row, kept on the chosen chat when the list changes (a chat
+// that was carried on with moves to the top).
+void ChatPage::follow_choice(const ChatList &l) {
+    const int rows = 2 + (int)l.chats.size();
+    if (!sel_id_.empty())
+        for (size_t i = 0; i < l.chats.size(); i++)
+            if (l.chats[i].id == sel_id_) list_sel_ = 2 + (int)i;
+    list_sel_ = std::min(std::max(list_sel_, 0), rows - 1);
+    sel_id_ = list_sel_ >= 2 ? l.chats[list_sel_ - 2].id : std::string();
+}
+
 ListPress ChatPage::press_list(uint32_t b, const ChatList &l, double now) {
     ListPress p;
+    follow_choice(l);
     const int rows = 2 + (int)l.chats.size();
-    list_sel_ = std::min(std::max(list_sel_, 0), rows - 1);
     if (b & (kUp | kDown)) {
         list_sel_ = std::min(std::max(list_sel_ + ((b & kDown) ? 1 : -1), 0), rows - 1);
+        sel_id_ = list_sel_ >= 2 ? l.chats[list_sel_ - 2].id : std::string();
         remove_id_.clear();
     }
     const app::ChatSummary *chat = list_sel_ >= 2 ? &l.chats[list_sel_ - 2] : nullptr;
@@ -200,6 +212,9 @@ ListPress ChatPage::press_list(uint32_t b, const ChatList &l, double now) {
             p.kind = ListPress::Remove;
             p.id = chat->id;
             remove_id_.clear();
+            // The choice goes to the chat below it, or above at the end.
+            const size_t i = (size_t)list_sel_ - 2;
+            sel_id_ = i + 1 < l.chats.size() ? l.chats[i + 1].id : i > 0 ? l.chats[i - 1].id : std::string();
         } else if (chat) {
             remove_id_ = chat->id;
             remove_until_ = now + kRemoveFor;
@@ -216,7 +231,7 @@ void ChatPage::draw_list(Canvas &c, const ChatList &l, int x, int y, int w, int 
 
     const int rx = x + 16, rw = w - 32, y0 = y + kListHead, y1 = y + h - 16, view_h = y1 - y0;
     const int rows = 2 + (int)l.chats.size();
-    list_sel_ = std::min(std::max(list_sel_, 0), rows - 1);
+    follow_choice(l);
     auto row_y = [&](int i) { return i < 2 ? i * (kActionRow + kRowGap) : 2 * (kActionRow + kRowGap) + (i - 2) * (kChatRow + kRowGap); };
     auto row_h = [&](int i) { return i < 2 ? kActionRow : kChatRow; };
     // Scrolled so the chosen row shows.
