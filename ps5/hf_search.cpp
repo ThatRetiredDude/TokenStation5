@@ -221,6 +221,20 @@ std::string repo_name(const std::string &repo) {
     return n;
 }
 
+// Whether a repo's name says the model is tuned for chat. A base model only
+// continues text: it chats badly ("Qwen2.5-Coder-7B" from QuantFactory came
+// up in a "qwen coder" search, 2026-10-24). Names are all there is to go on,
+// so ones that say nothing either way count as maybe not.
+bool chat_tuned(const std::string &repo) {
+    const std::string n = lower(repo.substr(repo.find('/') + 1));
+    for (const char *base : {"-base", "_base", " base", ".base"})
+        if (n.find(base) != std::string::npos) return false;
+    for (const char *chat : {"instruct", "chat", "-it-", "-it.", "_it_", "_it.", "hermes", "dolphin", "qwen3", "zephyr",
+                             "tulu", "vicuna", "assistant", "roleplay", "-rp"})
+        if (n.find(chat) != std::string::npos) return true;
+    return false;
+}
+
 // The Hub's answer to url as JSON; false with a reason in plain words.
 bool hub_json(const std::string &url, Json &out, std::string &problem) {
     ts5::HttpResponse resp;
@@ -355,7 +369,9 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
                     CatalogText t;
                     t.key = "hf:" + repo + "/" + f.path;
                     t.name = repo_name(repo) + " (" + kQuants[f.quant] + ")";
-                    t.good_for = "From " + repo.substr(0, repo.find('/'));  // under HUGGING FACE already
+                    // Under HUGGING FACE already, so only who made the file.
+                    t.good_for = std::string(chat_tuned(repo) ? "" : "May not chat well \xC2\xB7 ") + "From " +
+                                 repo.substr(0, repo.find('/'));
                     t.same = lower(f.path);
                     t.repo = repo;
                     t.path = f.path;
@@ -380,7 +396,11 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
         for (auto &h : helpers) h.join();
         update([&](HfState &st) {
             st.results.clear();
-            for (const auto &f : per) st.results.insert(st.results.end(), f.begin(), f.end());
+            // Chat models first, each kind most downloaded first.
+            for (int chat : {1, 0})
+                for (size_t i = 0; i < per.size(); i++)
+                    if (chat_tuned((*repos[i])["id"].str()) == (chat == 1))
+                        st.results.insert(st.results.end(), per[i].begin(), per[i].end());
             st.phase = HfState::Done;
         });
         ts5::log_line("ts5-title: search: \"%s\" done (%d left out: of a kind ts5 can't run)", query.c_str(), cant);
