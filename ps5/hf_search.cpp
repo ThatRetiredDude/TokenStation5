@@ -21,7 +21,7 @@ namespace {
 constexpr const char *kHub = "https://huggingface.co";
 constexpr int kRepos = 8;         // repos looked at, most downloaded first
 constexpr int kPerRepo = 2;       // files offered from one repo at most
-constexpr int kAtOnce = 4;        // repos looked at side by side
+constexpr int kAtOnce = 1;        // repos looked at side by side: one, see below
 constexpr int kMinContext = 8192;  // what a model must still have room for
 constexpr size_t kHeaderBytes = 2u << 20;
 
@@ -285,8 +285,10 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
             st.to_check = (int)repos.size();
             st.cant_run = cant;
         });
-        // Each repo is a few HTTPS requests; several at once, each one's files
-        // shown as it's done, and in the end in the Hub's order.
+        // Each repo is a few HTTPS requests, each one's files shown as it's
+        // done. Several side by side stalled together on the PS5 for seconds
+        // at every step until Hugging Face dropped the idle connections
+        // (seen 2026-10-24), so kAtOnce is 1 until that's understood.
         std::vector<std::vector<size_t>> per(repos.size());
         std::atomic<size_t> next{0};
         auto work = [&] {
