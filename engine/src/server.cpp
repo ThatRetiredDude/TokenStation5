@@ -336,6 +336,9 @@ void handle(int fd, Server::State &state, Usage &u) {
         // Tools: the client's, plus web_search when a Tavily key is set and
         // the chat looks like it needs the web (needs_web), or the request
         // asks for it ("web_search": true); "web_search": false turns it off.
+        // A request with tools of its own (a coding agent) gets it only when
+        // it asks: its messages carry URLs, dates and file text that would
+        // look like a question for the web, and every search costs a credit.
         const ToolFormat tf = chat ? tool_format(e.tok()) : ToolFormat::NONE;
         std::vector<Json> tools;
         bool web = false;
@@ -354,7 +357,8 @@ void handle(int fd, Server::State &state, Usage &u) {
                     if (m.role == "user") last_user = m.content;
                 const Json &ws = req["web_search"];
                 web = !named && !tavily_key().empty() &&
-                      (ws.type == Json::BOOL ? ws.boolean(false) : web_search_always() || needs_web(last_user));
+                      (ws.type == Json::BOOL ? ws.boolean(false)
+                                             : web_search_always() || (tools.empty() && needs_web(last_user)));
                 if (web) tools.push_back(web_search_tool(date));
             }
             prompt = render_chat(e.tok(), msgs, tools, date);
