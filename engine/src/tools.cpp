@@ -1,5 +1,7 @@
 #include "tools.h"
 
+#include <cctype>
+
 #include <random>
 
 namespace ts5 {
@@ -378,6 +380,42 @@ bool calls_from_objects(const std::string &text, std::vector<ToolCall> &calls) {
     return true;
 }
 
+// The inside of a ```lang fence around all of s, or s.
+std::string unfenced(const std::string &text) {
+    std::string s = strip(text);
+    if (!starts(s, "```") || !ends(s, "```") || s.size() < 6) return s;
+    size_t nl = s.find('\n');
+    if (nl == std::string::npos || nl > s.size() - 3) return s;
+    return strip(s.substr(nl + 1, s.size() - 3 - nl - 1));
+}
+
+bool calls_in_any_wrapper(const std::string &text, std::vector<ToolCall> &calls) {
+    const std::string s = unfenced(text);
+    if (s.size() < 5 || s[0] != '<') return false;
+    const size_t gt = s.find('>');
+    if (gt == std::string::npos || gt < 2) return false;
+    const std::string name = s.substr(1, gt - 1);
+    for (char c : name)
+        if (!isalnum((unsigned char)c) && c != '_' && c != '-') return false;
+    const std::string close = "</" + name + ">";
+    if (!ends(s, close)) return false;
+    return calls_from_objects(s.substr(gt + 1, s.size() - gt - 1 - close.size()), calls);
+}
+
+// Text whose call came out of a fence leaves the fence behind ("```xml\n\n```"):
+// that goes too.
+std::string without_empty_fence(const std::string &c) {
+    if (c.size() < 6 || !ends(c, "```")) return c;
+    const size_t open = c.rfind("```", c.size() - 4);
+    if (open == std::string::npos) return c;
+    const std::string in = c.substr(open + 3, c.size() - 3 - (open + 3));
+    const size_t nl = in.find('\n');
+    const std::string lang = nl == std::string::npos ? in : in.substr(0, nl);
+    const std::string rest = nl == std::string::npos ? "" : in.substr(nl + 1);
+    if (!strip(rest).empty() || lang.find(' ') != std::string::npos) return c;
+    return rstrip(c.substr(0, open));
+}
+
 ParsedTurn parse_turn(ToolFormat f, const std::string &text) {
     ParsedTurn r;
     r.content = text;
@@ -419,7 +457,11 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text) {
         content += text.substr(pos);
         // No tags: a reply that is only a call object.
         if (r.calls.empty() && calls_from_objects(text.substr(from), r.calls)) content = text.substr(0, from);
-        if (!r.calls.empty()) r.content = rstrip(content);
+        // A reply that is only a call in one wrapper of any name, maybe in a
+        // fence: Coder keeps making new ones up (<response>, <xml>, seen on
+        // the console).
+        if (r.calls.empty() && calls_in_any_wrapper(text.substr(from), r.calls)) content = text.substr(0, from);
+        if (!r.calls.empty()) r.content = without_empty_fence(rstrip(content));
     } else if (f == ToolFormat::LLAMA3) {
         std::string s = strip(text);
         if (starts(s, "<|python_tag|>")) s = lstrip(s.substr(14));
@@ -449,11 +491,12 @@ size_t content_prefix(ToolFormat f, const std::string &text) {
             if (from == std::string::npos) return text.size();
             from += 8;
         }
+        // A reply that opens with {, ``` or < may be a bare, fenced or
+        // wrapped call: hold it all.
+        size_t i = text.find_first_not_of(kSpace, from);
+        if (i != std::string::npos && (text[i] == '{' || text[i] == '`' || text[i] == '<')) return from;
         size_t p;
         if (find_hermes_tag(text, from, p) >= 0) return p;
-        // A reply that opens with { or ``` may be a bare call: hold it all.
-        size_t i = text.find_first_not_of(kSpace, from);
-        if (i != std::string::npos && (text[i] == '{' || text[i] == '`')) return from;
         // Hold back what could be the start of a call tag.
         size_t hold = text.size();
         for (auto &t : kHermesTags) {

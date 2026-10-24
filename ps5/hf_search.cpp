@@ -354,7 +354,7 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
                     CatalogText t;
                     t.key = "hf:" + repo + "/" + f.path;
                     t.name = repo_name(repo) + " (" + kQuants[f.quant] + ")";
-                    t.good_for = "From " + repo.substr(0, repo.find('/')) + " on Hugging Face";
+                    t.good_for = "From " + repo.substr(0, repo.find('/'));  // under HUGGING FACE already
                     t.same = lower(f.path);
                     t.repo = repo;
                     t.path = f.path;
