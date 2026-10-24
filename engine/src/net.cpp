@@ -988,6 +988,20 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
 
 }  // namespace
 
+bool random_bytes(unsigned char *out, size_t n) { return fill_random(out, n); }
+
+std::string sha256_hex(const std::string &data) {
+#ifdef TS5_HTTPS
+    Hasher h;
+    h.start();
+    h.update(data.data(), data.size());
+    return h.finish();
+#else
+    (void)data;
+    return "";
+#endif
+}
+
 bool post(const std::string &url, const std::vector<std::string> &headers, const std::string &body,
           HttpResponse &resp, std::string &err, int timeout_s) {
     // scheme://host[:port]/path
