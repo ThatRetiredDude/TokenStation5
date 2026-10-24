@@ -78,6 +78,7 @@
 #include "dashboard.h"
 #include "display.h"
 #include "downloads.h"
+#include "keys.h"
 #include "library.h"
 #include "pad.h"
 #include "plain.h"
@@ -151,6 +152,10 @@ constexpr const char *kQuit = TS5_HOME "/quit";
 constexpr const char *kRestart = TS5_HOME "/restart";
 constexpr const char *kUsage = TS5_HOME "/usage.tsv";
 constexpr const char *kUsageHours = TS5_HOME "/usage-hours.tsv";
+constexpr const char *kKeys = TS5_HOME "/keys.tsv";
+constexpr const char *kRequireKey = "TS5_REQUIRE_KEY";
+// typing_for while the keyboard names a new API key.
+constexpr const char *kNamingKey = "(new key)";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
 
 constexpr int kWidth = 1920, kHeight = 1080;
@@ -537,6 +542,14 @@ int main(int, char **) {
         usage_log.push(u);
         usage_store.push(u);
     });
+    // API keys (keys.h): who may use the API.
+    app::KeyStore keys;
+    keys.load(kKeys);
+    keys.set_required(app::setting(kRequireKey, "0") == "1");
+    server.set_authorize([&keys](const std::string &key, const std::string &client, std::string &name) {
+        return keys.authorize(key, client, name);
+    });
+    std::string fresh_key, fresh_key_id;  // a key just made, shown on Settings until the page is left
     usage_log.start(TS5_VERSION);
     double last_usage = 0;
     bool usage_ok = true;
@@ -607,6 +620,23 @@ int main(int, char **) {
     bool drawn_dark = false, drawn_speaking = false;
     double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan;
     ui::SettingsInfo settings_note;  // the Settings page's last change
+    // The Settings page's info: the last change, plus the keys and what an
+    // app needs to connect.
+    auto settings_view = [&](const ui::View &v) {
+        ui::SettingsInfo s = settings_note;
+        for (const app::ApiKey &k : keys.list()) s.keys.push_back({k.id, k.name, k.on, k.created, k.used});
+        s.fresh_key = fresh_key;
+        s.fresh_key_id = fresh_key_id;
+        s.url = v.url;
+        s.on_network = v.on_network;
+        if (!v.status.serving.empty()) {
+            s.model_id = v.status.serving;
+            const size_t g = s.model_id.size() > 5 ? s.model_id.size() - 5 : std::string::npos;
+            if (g != std::string::npos && s.model_id.compare(g, 5, ".gguf") == 0) s.model_id.resize(g);
+            s.n_ctx = v.status.serving_ctx;
+        }
+        return s;
+    };
     bool lib_changed = true;
     std::atomic<bool> audio_testing{false}, whisper_testing{false}, speak_testing{false};
     // The console's keyboard (text_input.h), for a chat message or a key.
@@ -660,6 +690,15 @@ int main(int, char **) {
             if (st == app::TextInput::Done && typing_for.empty()) {
                 const bool sent = !text.empty() && chat.send(text);
                 printf("ts5-title: chat: %s by keyboard (%zu bytes)\n", sent ? "message" : "not sent", text.size());
+            } else if (st == app::TextInput::Done && !text.empty() && typing_for == kNamingKey) {
+                std::string e, id;
+                const std::string key = keys.create(text, id, e);
+                if (key.empty()) printf("ts5-title: keys: couldn't make one: %s\n", e.c_str());
+                fresh_key = key;
+                fresh_key_id = id;
+                settings_note.note = !key.empty() ? "Made" : std::string("Couldn't make a key.") + plain::kDetails;
+                settings_note.note_failed = key.empty();
+                settings_note.note_at = t;
             } else if (st == app::TextInput::Done && !text.empty()) {
                 std::string e;
                 const bool ok = app::set_setting(kEnv, typing_for, text, e);
@@ -847,9 +886,14 @@ int main(int, char **) {
         // Nor does the screen go dark while a reply comes in on the chat page,
         // or is read aloud.
         if ((chat_active || v.speaking) && dash.page() == ui::Dashboard::Chat) last_input = t;
-        v.settings = settings_note;
+        // A new key shows only until Settings is left.
+        if (dash.page() != ui::Dashboard::Settings) {
+            fresh_key.clear();
+            fresh_key_id.clear();
+        }
+        keys.save_used(v.wall = (int64_t)time(nullptr));
+        v.settings = settings_view(v);
         v.now = t;
-        v.wall = (int64_t)time(nullptr);
 
         // Home's square needs the numbers at the press; the press can change
         // Home's range, so they're fetched again then.
@@ -897,12 +941,24 @@ int main(int, char **) {
                 break;
             case ui::Action::Set: {
                 std::string e;
+                if (a.name == kRequireKey && a.value == "1") {
+                    bool any_on = false;
+                    for (const app::ApiKey &k : keys.list()) any_on |= k.on;
+                    if (!any_on) {
+                        settings_note.note = "Make a key first, so your apps can still get in.";
+                        settings_note.note_failed = true;
+                        settings_note.note_at = t;
+                        v.settings = settings_view(v);
+                        break;
+                    }
+                }
                 const bool ok = app::set_setting(kEnv, a.name, a.value, e);
+                if (ok && a.name == kRequireKey) keys.set_required(a.value == "1");
                 if (!ok) printf("ts5-title: settings: %s not saved: %s\n", a.name.c_str(), e.c_str());
                 settings_note.note = ok ? "Saved" : std::string("Couldn't save it.") + plain::kDetails;
                 settings_note.note_failed = !ok;
                 settings_note.note_at = t;
-                v.settings = settings_note;
+                v.settings = settings_view(v);
                 if (ok && a.name == "TS5_WHISPER_MODEL") voice.rescan();
                 break;
             }
@@ -928,6 +984,30 @@ int main(int, char **) {
             case ui::Action::Download:
                 for (const std::string &k : a.keys) downloads.start(k);
                 break;
+            case ui::Action::NewKey:
+                typing = app::TextRequest();
+                typing_for = kNamingKey;
+                typing.title = "Name the new key";
+                typing.placeholder = "The app it's for, such as Kilo Code on the laptop";
+                typing.max_chars = 60;
+                typing_pending = true;
+                break;
+            case ui::Action::KeyOn:
+            case ui::Action::RemoveKey: {
+                std::string e;
+                const bool remove = a.kind == ui::Action::RemoveKey;
+                const bool ok = remove ? keys.remove(a.name, e) : keys.set_on(a.name, a.value == "1", e);
+                if (!ok) printf("ts5-title: keys: %s\n", e.c_str());
+                if (ok && remove && a.name == fresh_key_id) {
+                    fresh_key.clear();
+                    fresh_key_id.clear();
+                }
+                settings_note.note = ok ? (remove ? "Removed" : "Saved") : std::string("Couldn't save it.") + plain::kDetails;
+                settings_note.note_failed = !ok;
+                settings_note.note_at = t;
+                v.settings = settings_view(v);
+                break;
+            }
             case ui::Action::StopDownload:
                 for (const std::string &k : a.keys) downloads.stop(k);
                 break;

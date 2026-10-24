@@ -30,7 +30,14 @@ namespace {
 struct Request {
     std::string method, path, body;
     bool tls = false;  // the client spoke TLS (an https:// address) to this plain-HTTP port
+    std::string key;   // the API key it sent, if any
 };
+
+// A header's value without the spaces around it.
+std::string header_value(const std::string &line, size_t name_len) {
+    size_t b = line.find_first_not_of(" \t", name_len), e = line.find_last_not_of(" \t");
+    return b == std::string::npos ? std::string() : line.substr(b, e - b + 1);
+}
 
 bool send_all(int fd, const std::string &s) {
     size_t off = 0;
@@ -69,6 +76,11 @@ bool read_request(int fd, Request &r) {
         size_t e = head.find("\r\n", p + 2);
         std::string line = head.substr(p + 2, e == std::string::npos ? std::string::npos : e - p - 2);
         if (strncasecmp(line.c_str(), "content-length:", 15) == 0) clen = strtoul(line.c_str() + 15, nullptr, 10);
+        if (strncasecmp(line.c_str(), "authorization:", 14) == 0) {
+            const std::string v = header_value(line, 14);
+            if (strncasecmp(v.c_str(), "bearer ", 7) == 0) r.key = header_value(v, 7);
+        }
+        if (strncasecmp(line.c_str(), "x-api-key:", 10) == 0 && r.key.empty()) r.key = header_value(line, 10);
         if (strncasecmp(line.c_str(), "transfer-encoding:", 18) == 0) {
             for (auto &c : line) c = (char)tolower((unsigned char)c);
             chunked = line.find("chunked") != std::string::npos;
@@ -112,6 +124,7 @@ std::string response(int code, const std::string &body, const char *type = "appl
     const char *msg = code == 200   ? "OK"
                       : code == 404 ? "Not Found"
                       : code == 400 ? "Bad Request"
+                      : code == 401 ? "Unauthorized"
                       : code == 503 ? "Service Unavailable"
                                     : "Error";
     char h[256];
@@ -262,6 +275,31 @@ void handle(int fd, Server::State &state, Usage &u) {
         u.closed = true;
         report(state, u);
     };
+    // Everything but /health needs a key the title lets in (set_authorize).
+    if (r.path != "/health" && state.authorize && !state.authorize(r.key, u.rec.client, u.rec.key)) {
+        fprintf(stderr, "ts5: %s %s %s: %s\n", u.rec.client.c_str(), r.method.c_str(), r.path.c_str(),
+                r.key.empty() ? "no API key, refused" : "an API key that isn't one of this PS5's, refused");
+        send_all(fd, response(401, error_body(r.key.empty() ? "This TokenStation5 needs an API key. Make one in "
+                                                              "Settings on the PS5, under Apps."
+                                                            : "Incorrect API key provided. Keys are made and "
+                                                              "turned on in Settings on the PS5, under Apps.",
+                                              "invalid_api_key")));
+        if (completions) {
+            {
+                std::lock_guard<std::mutex> g(state.stats);
+                u.rec.model = state.model;
+            }
+            u.rec.kind = r.path.find("chat") != std::string::npos ? "chat" : "completion";
+            u.rec.status = 401;
+            u.rec.finish = "refused";
+            u.rec.why = "bad_key";
+            done();
+            return;
+        }
+        close(fd);
+        u.closed = true;
+        return;
+    }
     if (r.path == "/health") {
         // Answers at once: never waits for a generation.
         bool loaded;
@@ -791,6 +829,12 @@ int serve(Engine &e, const std::string &model_name, const std::string &host, int
           const std::function<void(int)> &on_listening, const std::function<void(const UsageRecord &)> &on_usage) {
     static Server server;
     server.set_on_usage(on_usage);
+    // TS5_API_KEY=KEY: requests must send that key.
+    if (const char *k = getenv("TS5_API_KEY"); k && *k)
+        server.set_authorize([key = std::string(k)](const std::string &got, const std::string &, std::string &name) {
+            name = got == key ? "TS5_API_KEY" : "";
+            return got == key;
+        });
     std::string err;
     if (!server.start(host, port, err)) {
         fprintf(stderr, "ts5: %s\n", err.c_str());

@@ -318,6 +318,12 @@ Action Dashboard::press(uint32_t b, const View &v) {
             a.name = ch.name;
             a.value = ch.value;
             a.label = ch.label;
+        } else if (ch.new_key) {
+            a.kind = Action::NewKey;
+        } else if (!ch.key_id.empty()) {
+            a.kind = ch.key_remove ? Action::RemoveKey : Action::KeyOn;
+            a.name = ch.key_id;
+            a.value = ch.key_on ? "1" : "0";
         }
         if (b & kCircle) show(Home);
         return a;
@@ -969,13 +975,14 @@ void Dashboard::draw_settings_footer(Canvas &c, const View &v) {
     x += c.text(small_, x, y, page_name(next(Settings)), kText2) + 40;
     x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
     x += c.text(small_, x, y, "\xE2\x86\x90\xE2\x86\x92  Change", kText2) + 40;
-    const std::string cross = settings_.cross_does(settings_info(v));
+    const SettingsInfo si = settings_info(v);
+    const std::string cross = settings_.cross_does(si), square = settings_.square_does(si);
     struct {
         PadGlyph g;
         std::string text;
         bool on;
     } hints[] = {{kGlyphCross, cross.empty() ? std::string("Next choice") : cross, !cross.empty()},
-                 {kGlyphSquare, "Default", true},
+                 {kGlyphSquare, square.empty() ? std::string("Default") : square, !square.empty()},
                  {kGlyphCircle, "Home", true}};
     for (auto &h : hints) {
         glyph(c, (float)x + 16, (float)y - 8, h.g, h.on);
