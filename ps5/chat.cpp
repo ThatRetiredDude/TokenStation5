@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "chat_store.h"
 #include "json.h"
 #include "plain.h"
 
@@ -70,7 +71,12 @@ bool send_all(int fd, const std::string &s) {
 
 }  // namespace
 
-Chat::Chat(const std::string &host, int port) : host_(host == "0.0.0.0" ? "127.0.0.1" : host), port_(port) {}
+Chat::Chat(const std::string &host, int port, ChatStore *store)
+    : store_(store), host_(host == "0.0.0.0" ? "127.0.0.1" : host), port_(port) {}
+
+void Chat::save() {
+    if (store_ && !store_->save(state_.id, state_.turns)) printf("ts5-title: chat: not saved\n");
+}
 
 Chat::~Chat() {
     stop_ = true;
@@ -91,6 +97,7 @@ bool Chat::send(const std::string &text) {
     state_.turns.push_back(ChatTurn{});
     state_.busy = state_.waiting = true;
     stop_ = false;
+    save();
     bump();
     worker_ = std::thread([this] { reply(); });
     return true;
@@ -105,6 +112,20 @@ void Chat::clear() {
     state_ = ChatState{};
     first_ = 0;
     bump();
+}
+
+bool Chat::open(const std::string &id) {
+    stop_ = true;
+    if (worker_.joinable()) worker_.join();
+    std::vector<ChatTurn> turns;
+    if (!store_ || !store_->load(id, turns)) return false;
+    std::lock_guard<std::mutex> lk(mu_);
+    state_ = ChatState{};
+    state_.id = id;
+    state_.turns = turns;
+    first_ = 0;
+    bump();
+    return true;
 }
 
 ChatState Chat::state() {
@@ -169,6 +190,7 @@ void Chat::reply() {
            t.tokens, t.tps, t.end == ChatTurn::Failed ? ": " : "",
            t.end == ChatTurn::Failed ? (err.empty() ? "longer than the context" : err.c_str()) : "");
     state_.busy = state_.waiting = false;
+    save();
     bump();
 }
 
