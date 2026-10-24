@@ -41,7 +41,7 @@ plug in a USB or Bluetooth keyboard. Replies stream in as they're written.
 ### 🧑‍💻 A coding assistant for your editor
 
 The console serves the same API that OpenAI-compatible apps already speak, so
-it drops straight into Continue, aider, opencode, Open WebUI or your own
+it drops straight into Kilo Code, Continue, aider, opencode, Open WebUI or your own
 scripts. Point them at the PS5's address and you have a local coding model
 for every machine on your network, with no per-token bill.
 
@@ -211,8 +211,9 @@ engine/build/ts5 bench -m model.gguf
 engine/build/ts5 fetch https://huggingface.co/REPO/resolve/main/model.gguf model.gguf --sha256 HEX
 ```
 
-Then point any OpenAI-compatible client at `http://<host>:8081/v1`: Open
-WebUI, Continue, opencode, aider, or your own scripts.
+Then point any OpenAI-compatible client at `http://<host>:8081/v1`: Kilo
+Code, Open WebUI, Continue, opencode, aider, or your own scripts. Setup for
+each is in [docs/CLIENTS.md](docs/CLIENTS.md).
 
 ## On the PS5
 
