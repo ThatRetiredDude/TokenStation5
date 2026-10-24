@@ -1,13 +1,29 @@
-# TokenStation5
+<div align="center">
 
-**The PS5 was built to push pixels. We're teaching it to push tokens.**
+<img src="ps5/sce_sys/icon0.png" alt="TokenStation5" width="150">
 
-TokenStation5 turns a jailbroken PS5 into a local AI endpoint: quantized LLMs
-running on the console's GPU, served to your home network over an
-OpenAI-compatible API. No cloud, no subscription, no data leaving the house.
+# 🎮 TokenStation5
 
-It runs on **ts5**, our own inference engine, written from scratch for this
-one GPU.
+### The PS5 was built to push pixels. We're teaching it to push tokens.
+
+A jailbroken PS5, turned into a local AI endpoint: quantized LLMs running on the console's GPU, served to your home network over an **OpenAI-compatible API**. No cloud, no subscription, no data leaving the house. It runs on **ts5** — our own inference engine, written from scratch for this one GPU.
+
+[![Build](https://img.shields.io/github/actions/workflow/status/ThatRetiredDude/TokenStation5/engine.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=build)](https://github.com/ThatRetiredDude/TokenStation5/actions/workflows/engine.yml)
+[![Release](https://img.shields.io/github/v/release/ThatRetiredDude/TokenStation5?style=for-the-badge&logo=github&label=release&color=success)](https://github.com/ThatRetiredDude/TokenStation5/releases)
+[![Prospero Store](https://img.shields.io/badge/Prospero_Store-PPSA99555-003791?style=for-the-badge&logo=playstation&logoColor=white)](https://github.com/darkxex/ProsperoStore)
+[![License](https://img.shields.io/badge/license-PolyForm_SB_%2F_GPL--3.0-yellow?style=for-the-badge)](LICENSING.md)
+[![Stars](https://img.shields.io/github/stars/ThatRetiredDude/TokenStation5?style=for-the-badge&logo=github&color=gold)](https://github.com/ThatRetiredDude/TokenStation5/stargazers)
+
+![PS5](https://img.shields.io/badge/PS5-jailbroken-003791?style=flat-square&logo=playstation&logoColor=white)
+![GPU](https://img.shields.io/badge/GPU-RDNA_2_·_16GB-ED1C24?style=flat-square&logo=amd&logoColor=white)
+![Vulkan](https://img.shields.io/badge/Vulkan-compute-A41E22?style=flat-square&logo=vulkan&logoColor=white)
+![Engine](https://img.shields.io/badge/ts5-from_scratch_·_C%2B%2B17-00599C?style=flat-square&logo=cplusplus&logoColor=white)
+![API](https://img.shields.io/badge/API-OpenAI--compatible-412991?style=flat-square&logo=openai&logoColor=white)
+![Not llama.cpp](https://img.shields.io/badge/not-llama.cpp-black?style=flat-square)
+
+</div>
+
+---
 
 ## ts5: not llama.cpp
 
