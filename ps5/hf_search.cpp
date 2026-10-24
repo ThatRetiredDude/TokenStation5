@@ -10,6 +10,7 @@
 #include "downloads.h"
 #include "json.h"
 #include "library.h"
+#include "log.h"
 #include "net.h"
 
 namespace app {
@@ -225,12 +226,12 @@ bool hub_json(const std::string &url, Json &out, std::string &problem) {
     ts5::HttpResponse resp;
     std::string err;
     if (!ts5::http_get(url, {"Accept: application/json"}, resp, err, 8u << 20)) {
-        printf("ts5-title: search: %s: %s\n", url.c_str(), err.c_str());
+        ts5::log_line("ts5-title: search: %s: %s", url.c_str(), err.c_str());
         problem = "Couldn't reach Hugging Face. Is the PS5 on the internet?";
         return false;
     }
     if (resp.status != 200 || !Json::parse(resp.body, out)) {
-        printf("ts5-title: search: %s: HTTP %d\n", url.c_str(), resp.status);
+        ts5::log_line("ts5-title: search: %s: HTTP %d", url.c_str(), resp.status);
         problem = "Hugging Face didn't answer the search (HTTP " + std::to_string(resp.status) + ").";
         return false;
     }
@@ -258,7 +259,7 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
             s->version++;
             return true;
         };
-        printf("ts5-title: search: \"%s\"\n", query.c_str());
+        ts5::log_line("ts5-title: search: \"%s\"", query.c_str());
         Json list;
         std::string problem;
         if (!hub_json(std::string(kHub) + "/api/models?search=" + url_encode(query) +
@@ -331,7 +332,7 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
                         (resp.status == 200 || resp.status == 206))
                         have = read_fields(resp.body, hp) && supported_arch(hp.arch);
                     else
-                        printf("ts5-title: search: %s header: %s (HTTP %d)\n", repo.c_str(), err.c_str(), resp.status);
+                        ts5::log_line("ts5-title: search: %s header: %s (HTTP %d)", repo.c_str(), err.c_str(), resp.status);
                 }
                 for (const File &f : files) {
                     if (!have || (int)found.size() >= kPerRepo) break;
@@ -364,7 +365,7 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
                     found.push_back(add_catalog_entry(t, e));
                 }
             }
-            printf("ts5-title: search: %s: %zu fit, %d too big\n", repo.c_str(), found.size(), big);
+            ts5::log_line("ts5-title: search: %s: %zu fit, %d too big", repo.c_str(), found.size(), big);
             per[i] = found;
             update([&](HfState &st) {
                 st.checked++;
@@ -382,7 +383,7 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
             for (const auto &f : per) st.results.insert(st.results.end(), f.begin(), f.end());
             st.phase = HfState::Done;
         });
-        printf("ts5-title: search: \"%s\" done (%d left out: of a kind ts5 can't run)\n", query.c_str(), cant);
+        ts5::log_line("ts5-title: search: \"%s\" done (%d left out: of a kind ts5 can't run)", query.c_str(), cant);
     }).detach();
 }
 
