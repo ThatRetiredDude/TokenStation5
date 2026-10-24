@@ -95,7 +95,8 @@ int quant_of(const std::string &file) {
 // usually come after the fields wanted here).
 struct Fields {
     std::string arch, name;
-    int64_t n_vocab = 0, n_embd = 0, n_layer = 0, n_ff = 0, n_head = 0, n_head_kv = 0, key_length = 0, ctx = 0;
+    int64_t n_vocab = 0, n_embd = 0, n_layer = 0, n_ff = 0, n_head = 0, n_head_kv = 0, key_length = 0, ctx = 0, ctx_original = 0;
+    std::string scaling;
 };
 
 class Reader {
@@ -199,8 +200,13 @@ bool read_fields(const std::string &bytes, Fields &f) {
             else if (k == "attention.head_count_kv") f.n_head_kv = v;
             else if (k == "attention.key_length") f.key_length = v;
             else if (k == "context_length") f.ctx = v;
+            else if (k == "rope.scaling.type") f.scaling = s;
+            else if (k == "rope.scaling.original_context_length") f.ctx_original = v;
         }
     }
+    // As the engine reads it (model.cpp): a stretched window it can't use.
+    if (!f.scaling.empty() && f.scaling != "none" && f.ctx_original > 0 && f.ctx_original < f.ctx) f.ctx = f.ctx_original;
+    else if (f.arch == "qwen2" && f.scaling.empty() && f.ctx > 32768) f.ctx = 32768;
     if (f.n_head_kv == 0) f.n_head_kv = f.n_head;
     return !f.arch.empty() && f.n_embd > 0 && f.n_layer > 0 && f.n_head > 0;
 }
