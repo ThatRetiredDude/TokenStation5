@@ -69,12 +69,13 @@ struct View {
 struct Action {
     enum Kind {
         None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear, ChatType, Set, TypeSetting,
-        Download, StopDownload, RemovePart, Remove
+        Download, StopDownload, RemovePart, Remove, NewKey, KeyOn, RemoveKey
     } kind = None;
     std::string path;         // Remove: the model's file
     std::vector<std::string> keys;  // Download, StopDownload, RemovePart: catalog entries
     std::string name, value;  // Set: NAME=VALUE in ts5.env ("": the default); TypeSetting: NAME
     std::string label;        // TypeSetting: the setting's name on the page
+                              // KeyOn, RemoveKey: name is the key's id; KeyOn: value "1" or "0"
 };
 
 class Dashboard {

@@ -7,7 +7,7 @@ that takes an "OpenAI compatible" provider works with three settings:
 | --- | --- |
 | Base URL | `http://<your PS5's address>:8081/v1` (http, not https, and ending in `/v1`) |
 | Model | the id that `http://<your PS5's address>:8081/v1/models` shows, such as `Qwen2.5-Coder-7B-Instruct-Q4_K_M` (the server answers with the model it has loaded whatever id is sent) |
-| API key | any text for now (apps often refuse an empty one) |
+| API key | one of your keys (Settings on the PS5, under Apps: New key). With "Require a key" off, any text works, and a real key still shows the app by name on Home |
 
 `/v1/models` also gives the loaded model's `context_length`: tell your app
 that number as the context window, so it shortens the conversation before
@@ -16,8 +16,20 @@ the PS5 has to refuse it. Coding tools send a long first prompt (10,000 to
 `-c auto` (the default: as much context as fits) rather than a small fixed
 context.
 
-The whole base URL is on the TV, at the top right of the Models page ("For
-apps"). A DHCP reservation in the router keeps the address from changing.
+All of it is on the TV too: Settings, under Apps, "Set up an app" shows the
+base URL, the model, the key to use and the context window. A DHCP
+reservation in the router keeps the address from changing.
+
+## API keys
+
+Settings, under Apps, makes a key per app: "New key", name it after the app,
+and the key shows once on its row, such as `ts5-k7qp2-wx9md-3hf8r-tz6na`
+(no i, l, o or u, so it reads off the TV without mix-ups). Type it into the
+app then; the PS5 keeps only its SHA-256 (in `keys.tsv` in the title's
+folder). Cross turns a key off and on, square twice removes it. With
+"Require a key" on, a request without a key that's on gets HTTP 401
+(`invalid_api_key`); the Chat page on the PS5 never needs one. `ts5 serve`
+on a computer takes one key from `TS5_API_KEY`.
 
 ## Kilo Code
 
@@ -30,7 +42,7 @@ TokenStation5 under `provider`:
     "tokenstation5": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "TokenStation5",
-      "options": { "baseURL": "http://192.168.1.50:8081/v1", "apiKey": "ts5" },
+      "options": { "baseURL": "http://192.168.1.50:8081/v1", "apiKey": "ts5-k7qp2-wx9md-3hf8r-tz6na" },
       "models": {
         "Qwen2.5-Coder-7B-Instruct-Q4_K_M": {
           "name": "Qwen 2.5 Coder 7B",
