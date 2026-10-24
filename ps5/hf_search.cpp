@@ -339,6 +339,7 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
                     found.push_back(add_catalog_entry(t, e));
                 }
             }
+            printf("ts5-title: search: %s: %zu fit, %d too big\n", repo.c_str(), found.size(), big);
             update([&](HfState &st) {
                 st.checked++;
                 st.too_big += big;
@@ -346,7 +347,7 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
             });
         }
         update([&](HfState &st) { st.phase = HfState::Done; });
-        printf("ts5-title: search: \"%s\" done\n", query.c_str());
+        printf("ts5-title: search: \"%s\" done (%d repos of a kind ts5 can't run left out)\n", query.c_str(), cant);
     }).detach();
 }
 
