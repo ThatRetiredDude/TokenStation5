@@ -28,6 +28,7 @@
 #include "catalog.h"
 #include "chat_page.h"
 #include "downloads.h"
+#include "hf_search.h"
 #include "home_page.h"
 #include "logs_page.h"
 #include "settings_page.h"
@@ -59,6 +60,7 @@ struct View {
     std::vector<uint8_t> live_reading;
     std::string own_ip;  // the console's LAN address ("" without one)
     std::map<std::string, app::Download> downloads;  // by catalog key
+    app::HfState hf;  // the Models page's Hugging Face search
     bool have_free = false;   // free_bytes is known
     uint64_t free_bytes = 0;  // free space where models go
     std::string models_dir;   // the title's own models folder: only models there can be removed
@@ -69,7 +71,7 @@ struct View {
 struct Action {
     enum Kind {
         None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear, ChatType, Set, TypeSetting,
-        Download, StopDownload, RemovePart, Remove, NewKey, KeyOn, RemoveKey
+        Download, StopDownload, RemovePart, Remove, NewKey, KeyOn, RemoveKey, Search
     } kind = None;
     std::string path;         // Remove: the model's file
     std::vector<std::string> keys;  // Download, StopDownload, RemovePart: catalog entries

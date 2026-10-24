@@ -71,7 +71,7 @@ for src in "$mbedtls"/library/*.c; do
 done
 for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
         "$root"/engine/src/{tools,net,websearch,ca_bundle}.cpp \
-        "$root"/ps5/{title,library,runner,audio_probe,chat,stt,voice,settings,speak,text_input,usage_store,downloads,keys}.cpp \
+        "$root"/ps5/{title,library,runner,audio_probe,chat,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search}.cpp \
         "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page,logs_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp; do
     o="$out/obj/$(basename "$src" .cpp).o"
     objects+=("$o")
