@@ -1,5 +1,7 @@
 #include "net.h"
 
+#include "log.h"
+
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -68,17 +70,13 @@ void trace(const char *fmt, ...) {
     // redirect hop on the LAN took 9-17 s with every timed step in ms).
     static const auto t0 = std::chrono::steady_clock::now();
     const double at = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    // One write for the line, so lines from several threads don't mix.
     char line[1024];
     int n = snprintf(line, sizeof line, "ts5: net: [%.3f s] ", at);
     va_list ap;
     va_start(ap, fmt);
     if (n > 0 && n < (int)sizeof line) vsnprintf(line + n, sizeof line - (size_t)n, fmt, ap);
     va_end(ap);
-    std::string out = line;
-    out += '\n';
-    fwrite(out.data(), 1, out.size(), stderr);
-    fflush(stderr);
+    log_line("%s", line);
 }
 
 bool fill_random(unsigned char *out, size_t n) {

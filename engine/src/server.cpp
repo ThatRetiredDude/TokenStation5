@@ -20,6 +20,7 @@
 #include <thread>
 
 #include "json.h"
+#include "log.h"
 #include "tools.h"
 #include "websearch.h"
 
@@ -236,7 +237,7 @@ void handle(int fd, Server::State &state, Usage &u) {
     Request r;
     if (!read_request(fd, r)) {
         if (r.tls)
-            fprintf(stderr, "ts5: %s tried https:// on the API port; the address starts http://, not https://\n",
+            log_line("ts5: %s tried https:// on the API port; the address starts http://, not https://",
                     u.rec.client.c_str());
         u.pending = false;
         u.closed = true;
@@ -277,7 +278,7 @@ void handle(int fd, Server::State &state, Usage &u) {
     };
     // Everything but /health needs a key the title lets in (set_authorize).
     if (r.path != "/health" && state.authorize && !state.authorize(r.key, u.rec.client, u.rec.key)) {
-        fprintf(stderr, "ts5: %s %s %s: %s\n", u.rec.client.c_str(), r.method.c_str(), r.path.c_str(),
+        log_line("ts5: %s %s %s: %s", u.rec.client.c_str(), r.method.c_str(), r.path.c_str(),
                 r.key.empty() ? "no API key, refused" : "an API key that isn't one of this PS5's, refused");
         send_all(fd, response(401, error_body(r.key.empty() ? "This TokenStation5 needs an API key. Make one in "
                                                               "Settings on the PS5, under Apps."
@@ -679,7 +680,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                     note = "(Web searches found the following. Answer from it now.)";
                     for (auto &f : found) note += "\n\n" + f;
                 }
-                fprintf(stderr, "ts5: %s web_search: answering without tools (%s)\n", id.c_str(),
+                log_line("ts5: %s web_search: answering without tools (%s)", id.c_str(),
                         search_failed.empty() ? "search limit reached" : "search failed");
                 std::vector<Message> last = msgs;
                 if (last.empty() || last.back().role != "user") last.push_back({"user", "", {}});
@@ -702,7 +703,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                     if (failed) search_failed = search_failure(results.back());  // in plain words
                     else found.push_back(results.back());
                 }
-                fprintf(stderr, "ts5: %s %s\n", id.c_str(), log.c_str());
+                log_line("ts5: %s %s", id.c_str(), log.c_str());
             }
             prompt += text + render_results(tf, results);
         }
@@ -748,7 +749,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             body += ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st) + "}";
             client_ok &= send_all(fd, response(200, body));
         }
-        fprintf(stderr, "ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, draft %d/%d, sample %.0f ms\n",
+        log_line("ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, draft %d/%d, sample %.0f ms",
                 id.c_str(), st.prompt_tokens, st.prompt_evaluated,
                 st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0, st.gen_tokens,
                 st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0, st.draft_accepted, st.drafted,
@@ -833,7 +834,7 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
     state_.tool_format = e ? tool_format_name(tool_format(e->tok())) : "none";
     state_.n_ctx = e ? e->backend().n_ctx() : 0;
     if (e)
-        fprintf(stderr, "ts5: tool calls: %s; web search: %s\n", state_.tool_format.c_str(),
+        log_line("ts5: tool calls: %s; web search: %s", state_.tool_format.c_str(),
                 state_.tool_format == "none" ? "off (no tool calls)"
                 : tavily_key().empty()       ? "off (no TAVILY_API_KEY)"
                 : web_search_always()        ? "on (Tavily), offered on every chat"
@@ -861,10 +862,10 @@ void Server::accept_loop() {
             // The console's network can drop (link down, a new DHCP lease) and
             // take the listening socket with it: listen again, once a second,
             // until it works, so a loaded model never ends up unreachable.
-            fprintf(stderr, "ts5: accept failed (errno %d); listening again\n", errno);
+            log_line("ts5: accept failed (errno %d); listening again", errno);
             close(sock_);
             while ((sock_ = listen_on(host_, port_)) < 0) std::this_thread::sleep_for(std::chrono::seconds(1));
-            fprintf(stderr, "ts5: listening again on port %d\n", port_);
+            log_line("ts5: listening again on port %d", port_);
             continue;
         }
         fcntl(c, F_SETFD, FD_CLOEXEC);
@@ -880,7 +881,7 @@ void Server::accept_loop() {
             try {
                 handle(c, state_, u);
             } catch (const std::exception &ex) {
-                fprintf(stderr, "ts5: request failed: %s\n", ex.what());
+                log_line("ts5: request failed: %s", ex.what());
                 if (!u.closed) close(c);
                 if (u.pending) {
                     u.rec.status = 500;
@@ -905,11 +906,11 @@ int serve(Engine &e, const std::string &model_name, const std::string &host, int
         });
     std::string err;
     if (!server.start(host, port, err)) {
-        fprintf(stderr, "ts5: %s\n", err.c_str());
+        log_line("ts5: %s", err.c_str());
         return 1;
     }
     server.set_engine(&e, model_name);
-    fprintf(stderr, "ts5: serving %s on http://%s:%d/v1\n", model_name.c_str(), host.c_str(), port);
+    log_line("ts5: serving %s on http://%s:%d/v1", model_name.c_str(), host.c_str(), port);
     if (on_listening) on_listening(port);
     for (;;) std::this_thread::sleep_for(std::chrono::hours(1));
 }

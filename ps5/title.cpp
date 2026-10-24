@@ -84,6 +84,7 @@
 #include "hf_search.h"
 #include "keys.h"
 #include "library.h"
+#include "log.h"
 #include "pad.h"
 #include "plain.h"
 #include "runner.h"
@@ -186,6 +187,7 @@ ts5::UsageLog usage_log(kUsage);
     usage_log.flush();
     printf("ts5-title: leaving (%s)\n", path);
     fflush(nullptr);
+    ts5::log_drain();
     sceSystemServiceLoadExec(path, nullptr);
     for (;;) sceKernelUsleep(1000000);
 }
