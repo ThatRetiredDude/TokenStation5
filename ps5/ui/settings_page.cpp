@@ -585,7 +585,10 @@ std::string SettingsPage::cross_does(const SettingsInfo &info) const {
     if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "Turn off" : "Turn on";
     if (is_key(r)) return "Type";
     const auto keys = missing(r, info);
-    if (!keys.empty()) return app::joined(keys, info.downloads).active() ? "Stop the download" : "Download";
+    if (!keys.empty()) {
+        const app::Download d = app::joined(keys, info.downloads);
+        return d.active() ? "Stop the download" : d.done > 0 ? "Go on" : "Download";
+    }
     return choices(r, info).empty() ? "" : "Next choice";
 }
 
