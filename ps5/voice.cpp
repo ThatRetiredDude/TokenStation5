@@ -44,11 +44,15 @@ Voice::~Voice() {
     if (worker_.joinable()) worker_.join();
 }
 
+constexpr const char *kNoModel = "No speech model yet. Add one in Settings, under Talk.";
+
 void Voice::rescan() {
     const std::vector<std::string> found = whisper_models(dir_);
     const std::string m = chosen_whisper_model(dir_);
     std::lock_guard<std::mutex> lk(mu_);
     if (m != state_.model || found != state_.models) {
+        // One came (downloaded on the Settings page): "none yet" is out of date.
+        if (!m.empty() && state_.error == kNoModel) state_.error.clear();
         state_.model = m;
         state_.models = found;
         version_++;
@@ -95,7 +99,7 @@ void Voice::run() {
     if (model.empty()) {
         // Nothing to transcribe with: say so at once rather than record.
         while (!released_) sceKernelUsleep(20000);
-        set_error("No speech model yet. Add one in Settings, under Talk.");
+        set_error(kNoModel);
         return;
     }
     const int h = sceAudioInOpen(user_, kVoiceChat, 0, kGrain, kRate, kMono16);
