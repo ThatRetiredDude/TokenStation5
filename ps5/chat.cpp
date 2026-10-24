@@ -254,6 +254,11 @@ Chat::Result Chat::post(const std::string &body, std::string &err) {
         // An error status: the API says why in its JSON.
         ts5::Json j;
         std::string why = ts5::Json::parse(buf, j) ? j["error"]["message"].str() : "";
+        // Longer than the context: refused before anything streams (server.cpp).
+        if (status == 400 && j["error"]["code"].str() == "context_length_exceeded") {
+            err = why;
+            return TooLong;
+        }
         if (status == 503)
             err = why.rfind("loading", 0) == 0 ? "The model is still loading. Try again in a moment."
                   : why.empty() || why == "no model is loaded"
