@@ -30,7 +30,7 @@ struct UsageRecord {
     std::string model;    // the file, the API's model id; "" when none was loaded
     std::string name;     // general.name (the title), or the file without .gguf (ts5 serve)
     std::string client;   // the peer's IPv4
-    std::string key;      // "" in v1; later the key's name, never the key
+    std::string key;      // the API key's name ("" for none), never the key
     int64_t status = 0;   // the HTTP status sent
     std::string finish;   // stop, length, tool_calls, error, left (the client went) or refused
     int64_t stream = 0;
@@ -41,7 +41,8 @@ struct UsageRecord {
     int64_t wait_ms = 0;                      // behind another generation
     int64_t first_ms = 0, total_ms = 0;       // from the request read to the first text, and to the end
     // Why it wasn't answered: no_model, loading, busy_check, busy_bench,
-    // bad_json, empty_prompt, too_long, gpu_error or exception; "" when it was.
+    // bad_json, empty_prompt, too_long, bad_key, gpu_error or exception; ""
+    // when it was.
     std::string why;
 };
 
