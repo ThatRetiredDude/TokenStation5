@@ -59,6 +59,10 @@ Then pick `tokenstation5/Qwen2.5-Coder-7B-Instruct-Q4_K_M` as the model.
 Put the model's `context_length` from `/v1/models` in `limit.context`. Leave
 `reasoning` out for the Llama and Qwen 2.5 models (only Qwen 3 thinks).
 
+For agent work (editing files, then running them), use Qwen 3 8B. On the PS5
+it took every step of a write-then-run task; Qwen 2.5 Coder 7B wrote the file
+and then stopped in 4 of 4 runs, without running it.
+
 ## Continue, Cline, Roo Code and others
 
 Choose the "OpenAI compatible" (or "OpenAI", with a custom base URL)

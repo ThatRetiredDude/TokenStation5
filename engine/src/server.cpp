@@ -428,7 +428,9 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                   "context_length_exceeded")));
             u.rec.status = 400;
             u.rec.finish = "refused";
-            u.rec.why = "too_long";
+            // The TV's Chat page leaves out the oldest turn and asks again
+            // (ps5/chat.cpp): not a request that failed.
+            u.rec.why = req["ts5_trims"].boolean(false) ? "trimmed" : "too_long";
             u.rec.prompt = (int64_t)first_toks.size();
             done();
             return;
