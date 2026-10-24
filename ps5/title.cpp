@@ -39,6 +39,9 @@
 //               mic played back (audio_probe.h), the recording in audiotest.wav
 //   chat        a message for the chat page, the file's text as it is
 //               (chat.h); the TV shows the chat and the reply
+//   type        text for the next time the console's keyboard would open
+//               (a key's name, a search): taken as typed and sent, with no
+//               keyboard on the TV
 //   whispertest whispertest.wav (or audiotest.wav) transcribed on the CPU
 //               with the first ggml-*.bin in models/, timed (stt.h)
 //   speaktest   the file's text (or a sentence of the title's own) spoken
@@ -144,6 +147,7 @@ constexpr const char *kScreenText = TS5_HOME "/screen.txt";
 constexpr const char *kAudioTest = TS5_HOME "/audiotest";
 constexpr const char *kAudioWav = TS5_HOME "/audiotest.wav";
 constexpr const char *kChat = TS5_HOME "/chat";
+constexpr const char *kType = TS5_HOME "/type";
 constexpr const char *kWhisperTest = TS5_HOME "/whispertest";
 constexpr const char *kWhisperWav = TS5_HOME "/whispertest.wav";
 constexpr const char *kSpeakTest = TS5_HOME "/speaktest";
@@ -487,7 +491,7 @@ int main(int, char **) {
     }
 
     for (const char *f :
-         {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kWhisperTest, kSpeakTest})
+         {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kType, kWhisperTest, kSpeakTest})
         unlink(f);
     std::thread(watch_control_files).detach();
     std::thread(keep_awake).detach();
@@ -645,6 +649,8 @@ int main(int, char **) {
     std::string typing_for;  // the setting it's for; "": a chat message
     bool typing_pending = false;  // until cross is let go, or the dialog takes it as a press
     bool swallow = false;         // after it closes, until every button is up
+    std::string pc_typed;         // from the PC's type file, in place of the keyboard
+    bool pc_typing = false;
     app::EnterKey enter_key;      // a USB or Bluetooth keyboard's Enter
     for (;;) {
         const double t = app::now_s();
@@ -680,11 +686,12 @@ int main(int, char **) {
         if (woke) buttons = 0;
         // While the console's keyboard is up, the controller is its; nor does
         // the press that closes it reach the page.
-        if (keyboard.is_open()) {
+        if (keyboard.is_open() || pc_typing) {
             buttons = 0;
             last_input = t;
-            std::string typed;
-            const app::TextInput::State st = keyboard.poll(typed);
+            std::string typed = pc_typing ? pc_typed : std::string();
+            const app::TextInput::State st = pc_typing ? app::TextInput::Done : keyboard.poll(typed);
+            pc_typing = false;
             if (st != app::TextInput::Typing) swallow = true;
             const std::string text = trimmed(typed);
             if (st == app::TextInput::Done && typing_for.empty()) {
@@ -1048,7 +1055,10 @@ int main(int, char **) {
         }
         if (typing_pending && !(pad.held() & ui::kCross)) {
             typing_pending = false;
-            if (!keyboard.open(typing)) {
+            if (take_text(kType, pc_typed)) {
+                pc_typing = true;
+                printf("ts5-title: typed from the PC (%zu bytes)\n", pc_typed.size());
+            } else if (!keyboard.open(typing)) {
                 if (typing_for.empty()) {
                     notify("TokenStation5: the console's keyboard didn't open. Try again.");
                 } else {
