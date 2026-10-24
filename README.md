@@ -241,11 +241,11 @@ Keep it on a network you trust.
 If TokenStation5 is useful to you, tips are welcome and help fund more kernel
 tuning and new models. Crypto only for now:
 
-| Chain | Address |
-| --- | --- |
-| ₿ Bitcoin | `bc1qa5kevv33wq5t4sjckqe32h5hcwyymp767tfhz9` |
-| Ξ Ethereum | `0x5976376b0c2125655e01d0a7758c744c43fb6d93` |
-| ◎ Solana | `u5zcwMcmrn7qAN4zUJzLhpLDQv81qtFDfZR1ohCrMs9` |
+| Chain | Address | Scan |
+| --- | --- | :---: |
+| ₿ Bitcoin | `bc1qa5kevv33wq5t4sjckqe32h5hcwyymp767tfhz9` | <img src="docs/donate/bitcoin.png" alt="Bitcoin address QR" width="120"> |
+| Ξ Ethereum | `0x5976376b0c2125655e01d0a7758c744c43fb6d93` | <img src="docs/donate/ethereum.png" alt="Ethereum address QR" width="120"> |
+| ◎ Solana | `u5zcwMcmrn7qAN4zUJzLhpLDQv81qtFDfZR1ohCrMs9` | <img src="docs/donate/solana.png" alt="Solana address QR" width="120"> |
 
 Double-check the address against this page before sending — crypto transfers
 can't be reversed.
