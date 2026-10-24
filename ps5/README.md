@@ -121,12 +121,20 @@ ranges outlast its rotation.
 | square | when some requests weren't answered: Logs, at the problems |
 | OPTIONS | close the title |
 
-**Models**
+**Models**: the models on the PS5, the built-in ones to download, and
+Search Hugging Face: type a name ("qwen coder"), and the most downloaded GGUF
+repos of a kind ts5 runs (Llama, Mistral, Qwen 2 and 3) are looked through
+for files of a type the GPU code takes (Q4_K_M first, through Q8_0 and F16)
+that fit in memory with at least 8,192 tokens of context, two a repo at
+most. Each one downloads like the built-in ones, pinned to the repo's
+commit and checked against Hugging Face's SHA-256. Searched entries last
+until the title closes; a stopped download of one goes on after the same
+search.
 
 | Button | |
 | --- | --- |
 | up / down | choose a model |
-| cross | start it, so apps can use it (and start it again at the next start); on the model in use, stop it (it asks first); on a model to download, download it, stop the download, or go on with it |
+| cross | start it, so apps can use it (and start it again at the next start); on the model in use, stop it (it asks first); on a model to download, download it, stop the download, or go on with it; on Search Hugging Face, type what to look for |
 | square | GPU check (on a model that can't run: Logs, at the problems): its logits on the GPU against ts5's CPU reference, PASS or FAIL. The first check of a model runs the CPU and saves its answers next to the model (`NAME.gguf.ts5ref`); later ones run only the GPU, in about a second |
 | triangle | speed test: how fast it reads a 512-token prompt and writes 128 tokens, in tokens a second |
 | right | remove it from the PS5 (it asks first): a model in the title's own `models` folder that isn't in use |

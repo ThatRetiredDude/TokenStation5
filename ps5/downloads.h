@@ -46,6 +46,18 @@ struct Download {
     bool active() const { return phase == Queued || phase == Running || phase == Retrying; }
 };
 
+// The catalog: the built-in entries (catalog.h), then the ones a Hugging Face
+// search added (hf_search.h), which last until the title closes.
+size_t catalog_size();
+const CatalogEntry &catalog_at(size_t i);
+// An entry to add, with its own text.
+struct CatalogText {
+    std::string key, name, good_for, same, repo, path, file, commit, sha256;
+};
+// Adds e (its text from t); the index it has. One with the same key is kept
+// as it was and its index returned.
+size_t add_catalog_entry(const CatalogText &t, CatalogEntry e);
+
 // Bytes free on the volume dir is on. The title's one call to statvfs.
 bool free_space(const std::string &dir, uint64_t &bytes);
 

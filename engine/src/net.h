@@ -28,6 +28,11 @@ std::string sha256_hex(const std::string &data);
 bool http_post(const std::string &url, const std::vector<std::string> &headers, const std::string &body,
                HttpResponse &resp, std::string &err, int timeout_s = 30);
 
+// GET url into resp, at most max_bytes of its body (the rest is left
+// unread), following up to 5 redirects; headers go to every hop.
+bool http_get(const std::string &url, const std::vector<std::string> &headers, HttpResponse &resp, std::string &err,
+              size_t max_bytes = 16u << 20, int timeout_s = 30);
+
 // How a download is going, for another thread to read while it runs, and
 // two flags for that thread to set. The download looks at them between
 // writes (every 256 KiB) and while it hashes a part it goes on from.
