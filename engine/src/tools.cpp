@@ -205,6 +205,7 @@ std::vector<Message> parse_messages(const Json &messages) {
     for (auto &m : messages.a) {
         Message msg;
         msg.role = m["role"].str("user");
+        if (msg.role == "developer") msg.role = "system";  // OpenAI's newer name for it
         const Json &c = m["content"];
         if (c.type == Json::STR) {
             msg.content = c.s;

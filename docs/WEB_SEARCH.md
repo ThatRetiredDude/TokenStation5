@@ -78,10 +78,13 @@ everything else works as before.
 ts5 also speaks OpenAI tool calling for the client's own tools (`tools` in the
 request, `tool_calls` in the answer, `role: "tool"` messages back), streaming
 included, so opencode, Continue, Open WebUI's native function calling and
-similar clients can use their tools with the console's models. Their tools and
-`web_search` are offered together; ts5 answers `web_search` calls itself and
-hands every other call back to the client. A client that defines its own
-`web_search` tool keeps it.
+similar clients can use their tools with the console's models. A request
+with tools of its own gets ts5's `web_search` only when it says
+`"web_search": true` (or with `TS5_WEB_SEARCH=always`): a coding agent's
+messages are full of URLs, dates and file text that would pass the "needs the
+web" check on every turn, and each search costs a credit. With it, ts5
+answers `web_search` calls itself and hands every other call back to the
+client. A client that defines its own `web_search` tool keeps it.
 
 ## Security
 
