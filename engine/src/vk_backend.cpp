@@ -505,7 +505,7 @@ private:
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
-        P(rmsnorm, 3) P(qkv_post, 10) P(qkv_post_q8, 12) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
+        P(rmsnorm, 3) P(qkv_post, 11) P(qkv_post_q8, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
         P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf_q8, 7)
         // Lanes per key in attn_dec: 8, 16 or 32, and no more than a subgroup.
         uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
@@ -1086,17 +1086,19 @@ private:
                 struct {
                     uint32_t head_dim, n_head, n_head_kv, pos0, rope_dims, neox, has_bias, has_norm, cache_off;
                     float rope_base, eps;
+                    uint32_t has_freqs;
                 } pc{(uint32_t)HD, (uint32_t)H, (uint32_t)HKV, (uint32_t)pos0, (uint32_t)hp_.rope_dims,
                      hp_.rope_neox ? 1u : 0u, L.bq ? 1u : 0u, L.q_norm ? 1u : 0u, cache_off, hp_.rope_base,
-                     hp_.rms_eps};
+                     hp_.rms_eps, m_.rope_freqs ? 1u : 0u};
                 const Buf &bq = L.bq ? W(L.bq) : dummy_, &bk = L.bk ? W(L.bk) : dummy_, &bv = L.bv ? W(L.bv) : dummy_;
                 const Buf &nq = L.q_norm ? W(L.q_norm) : dummy_, &nk = L.k_norm ? W(L.k_norm) : dummy_;
+                const Buf &ff = m_.rope_freqs ? W(m_.rope_freqs) : dummy_;
                 if (kv_ == KvType::Q8)
-                    dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_, &ks_, &vs_}, pc,
+                    dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_, &ks_, &vs_, &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
                 else
-                    dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_}, pc, (uint32_t)(H + HKV),
-                             (uint32_t)n);
+                    dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_, &ff}, pc,
+                             (uint32_t)(H + HKV), (uint32_t)n);
             }
             attention(n, pos0, cache_off);
             matmul(L.wo, att_, x_, n, true);
