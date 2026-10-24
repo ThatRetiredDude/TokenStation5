@@ -639,6 +639,18 @@ void handle(int fd, Server::State &state, Usage &u) {
                 break;
             }
             ParsedTurn pt = parse_turn(tf, text);
+            // A call to a tool the request doesn't have is the model making
+            // one up (say_hello for "Say hello in one word.", seen on the
+            // console): the turn stays text.
+            for (const ToolCall &c : pt.calls) {
+                bool known = false;
+                for (const Json &t : tools) known |= t["function"]["name"].str() == c.name;
+                if (!known) {
+                    pt.calls.clear();
+                    pt.content = text;
+                    break;
+                }
+            }
             // pt.content is the turn's text, calls taken out after the thinking.
             const size_t from = std::min(answer, pt.content.size());
             sent = std::max(sent, from);
