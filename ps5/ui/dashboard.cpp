@@ -83,41 +83,6 @@ std::string downloading(const View &v) {
     return "";
 }
 
-// Whole percent, 99 at most until the file is whole.
-int percent(const app::Download &d) {
-    if (!d.total) return 0;
-    return std::min(99, (int)(100.0 * (double)d.done / (double)d.total));
-}
-
-// "about 3 minutes left"
-std::string time_left(double s) {
-    char b[64];
-    if (s < 60) return "less than a minute left";
-    const int min = (int)std::ceil(s / 60);
-    if (min < 60) snprintf(b, sizeof b, "about %d minute%s left", min, min == 1 ? "" : "s");
-    else if (min % 60 == 0) snprintf(b, sizeof b, "about %d hour%s left", min / 60, min / 60 == 1 ? "" : "s");
-    else snprintf(b, sizeof b, "about %d h %d min left", min / 60, min % 60);
-    return b;
-}
-
-// "38 MB a second"
-std::string per_second(double bytes) {
-    char b[40];
-    if (bytes >= 1e6) snprintf(b, sizeof b, "%.0f MB a second", bytes / 1e6);
-    else snprintf(b, sizeof b, "%.0f KB a second", bytes / 1e3);
-    return b;
-}
-
-// "1.9 GB of 4.7 GB · 38 MB a second", and the time left when asked.
-std::string progress_text(const app::Download &d, bool left) {
-    std::string s = app::format_bytes(d.done) + " of " + app::format_bytes(d.total);
-    if (d.phase == app::Download::Running && !d.held && d.speed > 0) {
-        s += "  \xC2\xB7  " + per_second(d.speed);
-        if (left && d.total > d.done) s += "  \xC2\xB7  " + time_left((double)(d.total - d.done) / d.speed);
-    }
-    return s;
-}
-
 // Whether right on Models removes this model: not the one in use or a job's,
 // not one still copying, and only from the title's own folder (another
 // app's models stay that app's).
@@ -300,6 +265,7 @@ SettingsInfo Dashboard::settings_info(const View &v) const {
     SettingsInfo s = v.settings;
     s.speech_models = v.voice.models;
     s.speech_model = v.voice.model;
+    s.downloads = v.downloads;
     s.now = v.now;
     return s;
 }
@@ -344,7 +310,10 @@ Action Dashboard::press(uint32_t b, const View &v) {
     }
     if (page_ == Settings) {
         const SettingChange ch = settings_.press(b, settings_info(v));
-        if (ch.any || ch.type) {
+        if (!ch.download.empty()) {
+            a.kind = ch.stop ? Action::StopDownload : Action::Download;
+            a.keys = ch.download;
+        } else if (ch.any || ch.type) {
             a.kind = ch.type ? Action::TypeSetting : Action::Set;
             a.name = ch.name;
             a.value = ch.value;
@@ -389,7 +358,7 @@ Action Dashboard::press(uint32_t b, const View &v) {
     if (it.kind == Item::Catalog) {
         const app::CatalogEntry &e = app::kCatalog[it.index];
         const app::Download d = download_of(v, e.key);
-        a.key = e.key;
+        a.keys = {e.key};
         if (b & kCross) a.kind = d.active() ? Action::StopDownload : Action::Download;
         else if ((b & kSquare) && !d.active() && d.done > 0) a.kind = Action::RemovePart;
         return a;
@@ -542,7 +511,7 @@ void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &lis
             std::string tag = "DOWNLOAD", line;
             Color tc = kAccent, lc = kText2;
             char pc[16];
-            snprintf(pc, sizeof pc, "%d%%", percent(d));
+            snprintf(pc, sizeof pc, "%d%%", app::percent(d));
             switch (d.phase) {
                 case D::None:
                     line = std::string(e.good_for) + "  \xC2\xB7  " + app::format_bytes(e.bytes) + " download";
@@ -555,7 +524,7 @@ void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &lis
                 case D::Running:
                     if (d.held) tag = "WAITING", tc = kText2;
                     else tag = pc;
-                    line = d.held ? std::string("Waiting while a model loads") : progress_text(d, false);
+                    line = d.held ? std::string("Waiting while a model loads") : app::progress_text(d, false);
                     break;
                 case D::Retrying:
                     tag = "WAITING", tc = kAmber;
@@ -703,7 +672,7 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
             const float f = d.total ? std::min(1.0f, (float)d.done / (float)d.total) : 0;
             const Color mc = d.phase == D::Failed ? kRed : d.phase == D::Running && !d.held ? kAccent : kText2;
             if (f > 0) c.round_rect((float)DX, 542, std::max(14.0f, DW * f), 14, 7, mc);
-            c.text(small_, DX, 590, std::to_string(percent(d)) + "%  \xC2\xB7  " + progress_text(d, true), kText2, DW);
+            c.text(small_, DX, 590, std::to_string(app::percent(d)) + "%  \xC2\xB7  " + app::progress_text(d, true), kText2, DW);
             int y = 632;
             auto para = [&](const std::string &text, Color col) {
                 for (auto &line : wrap(small_, text, DW)) {
@@ -993,20 +962,24 @@ void Dashboard::draw_chat_footer(Canvas &c, const View &v) {
     draw_close_hint(c, x, y);
 }
 
-void Dashboard::draw_settings_footer(Canvas &c) {
+void Dashboard::draw_settings_footer(Canvas &c, const View &v) {
     int x = LX;
     const int y = 1046;
     x += key_cap(c, smallb_, x, y, "L1") + 12;
     x += c.text(small_, x, y, page_name(next(Settings)), kText2) + 40;
     x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
     x += c.text(small_, x, y, "\xE2\x86\x90\xE2\x86\x92  Change", kText2) + 40;
+    const std::string cross = settings_.cross_does(settings_info(v));
     struct {
         PadGlyph g;
-        const char *text;
-    } hints[] = {{kGlyphSquare, "Default"}, {kGlyphCircle, "Home"}};
+        std::string text;
+        bool on;
+    } hints[] = {{kGlyphCross, cross.empty() ? std::string("Next choice") : cross, !cross.empty()},
+                 {kGlyphSquare, "Default", true},
+                 {kGlyphCircle, "Home", true}};
     for (auto &h : hints) {
-        glyph(c, (float)x + 16, (float)y - 8, h.g);
-        x += 40 + c.text(small_, x + 40, y, h.text, kText2) + 36;
+        glyph(c, (float)x + 16, (float)y - 8, h.g, h.on);
+        x += 40 + c.text(small_, x + 40, y, h.text, h.on ? kText2 : kMuted) + 36;
     }
     draw_close_hint(c, x, y);
 }
@@ -1061,7 +1034,7 @@ HomeInfo Dashboard::home_info(const View &v) const {
     for (const auto &[key, d] : v.downloads)
         if (d.phase == app::Download::Running)
             if (const app::CatalogEntry *e = app::Downloads::find(key))
-                h.download = std::string("Downloading ") + e->name + " \xC2\xB7 " + std::to_string(percent(d)) + "%";
+                h.download = std::string("Downloading ") + e->name + " \xC2\xB7 " + std::to_string(app::percent(d)) + "%";
     return h;
 }
 
@@ -1084,14 +1057,21 @@ void Dashboard::draw(Canvas &c, const View &v) {
         const SettingsInfo info = settings_info(v);
         settings_.draw(c, info, LX, PT, LW, SB - PT);
         settings_.draw_details(c, info, RX, PT, RW, SB - PT);
-        draw_settings_footer(c);
+        draw_settings_footer(c, v);
         if (confirm_ != NoConfirm) draw_confirm(c);
         return;
     }
     if (page_ == Chat) {
-        chat_.draw(c, v.chat, CX, PT, CW, CB - PT, v.now, [&](const std::string &f) { return name_of(v, f); },
+        // The Library's name, or "" for a model no longer on the PS5 (the
+        // page keeps the name it saw).
+        auto library_name = [&](const std::string &f) {
+            for (const auto &m : v.models)
+                if (m.file == f) return m.name;
+            return std::string();
+        };
+        chat_.draw(c, v.chat, CX, PT, CW, CB - PT, v.now, library_name,
                    v.status.phase == app::Status::Serving ? v.status.serving : std::string(), !v.voice.model.empty());
-        chat_.draw_input(c, v.chat, v.voice, v.now, CX, IY, CW, IH);
+        chat_.draw_input(c, v.chat, v.voice, v.now, CX, IY, CW, IH, v.no_voice);
         draw_chat_footer(c, v);
         if (confirm_ != NoConfirm) draw_confirm(c);
         return;

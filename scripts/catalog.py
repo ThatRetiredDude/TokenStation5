@@ -32,17 +32,17 @@ HF = "https://huggingface.co"
 # conversions of Kokoro-82M and its voices): key, repo, path in the repo,
 # name on the PS5, name on screen.
 SPEECH = [
-    ("speech-base-en", "ggerganov/whisper.cpp", "ggml-base.en.bin", "ggml-base.en.bin", "Base (English)"),
-    ("speech-small-en", "ggerganov/whisper.cpp", "ggml-small.en.bin", "ggml-small.en.bin", "Small (English)"),
+    ("speech-base-en", "ggerganov/whisper.cpp", "ggml-base.en.bin", "ggml-base.en.bin", "Speech model Base (English)"),
+    ("speech-small-en", "ggerganov/whisper.cpp", "ggml-small.en.bin", "ggml-small.en.bin", "Speech model Small (English)"),
 ]
 VOICE = [
-    ("kokoro", "simonfxr/kokoro.cpp-GGUF", "kokoro-82m-f16.gguf", "kokoro-82m-f16.gguf", "Kokoro"),
+    ("kokoro", "simonfxr/kokoro.cpp-GGUF", "kokoro-82m-f16.gguf", "kokoro-82m-f16.gguf", "Kokoro voice model"),
     ("voice-af-heart", "simonfxr/kokoro.cpp-GGUF", "voices/kokoro-voice-af_heart.gguf",
-     "kokoro-voice-af_heart.gguf", "Heart"),
+     "kokoro-voice-af_heart.gguf", "Heart voice"),
     ("voice-am-michael", "simonfxr/kokoro.cpp-GGUF", "voices/kokoro-voice-am_michael.gguf",
-     "kokoro-voice-am_michael.gguf", "Michael"),
+     "kokoro-voice-am_michael.gguf", "Michael voice"),
     ("voice-bf-emma", "simonfxr/kokoro.cpp-GGUF", "voices/kokoro-voice-bf_emma.gguf",
-     "kokoro-voice-bf_emma.gguf", "Emma"),
+     "kokoro-voice-bf_emma.gguf", "Emma voice"),
 ]
 
 # GGML types the engine has blocks for: values per block, bytes per block.

@@ -736,6 +736,11 @@ int main(int, char **) {
                 settings_note.voices = std::move(voices);
                 lib_changed = true;
             }
+            const bool kokoro = !tts::kokoro_models(kModels).empty();
+            if (kokoro != settings_note.kokoro_model) {
+                settings_note.kokoro_model = kokoro;
+                lib_changed = true;
+            }
             std::lock_guard<std::mutex> lk(lib_mutex);
             lib_changed |= lib.scan();
             last_scan = t;
@@ -836,6 +841,8 @@ int main(int, char **) {
         v.chat = chat_state;
         v.voice = voice_state;
         v.speaking = speaker.speaking();
+        v.no_voice = app::setting("TS5_SPEAK", "1") != "0" &&
+                     (settings_note.voices.empty() || !settings_note.kokoro_model);
         const bool chat_active = v.chat.busy || v.voice.phase != app::VoiceState::Idle;
         // Nor does the screen go dark while a reply comes in on the chat page,
         // or is read aloud.
@@ -909,7 +916,7 @@ int main(int, char **) {
                     typing.send = true;
                 } else {
                     typing.title = a.label;
-                    typing.placeholder = typing_for == "TAVILY_API_KEY" ? "tvly-..." : "";
+                    typing.placeholder = typing_for == "TAVILY_API_KEY" ? "Starts with tvly-" : "";
                     // Shown as it's typed, and starting from the saved one, so a typo
                     // in a long key can be seen and fixed.
                     typing.latin = app::secret_setting(typing_for);
@@ -918,9 +925,15 @@ int main(int, char **) {
                 }
                 typing_pending = true;
                 break;
-            case ui::Action::Download: downloads.start(a.key); break;
-            case ui::Action::StopDownload: downloads.stop(a.key); break;
-            case ui::Action::RemovePart: downloads.remove_part(a.key); break;
+            case ui::Action::Download:
+                for (const std::string &k : a.keys) downloads.start(k);
+                break;
+            case ui::Action::StopDownload:
+                for (const std::string &k : a.keys) downloads.stop(k);
+                break;
+            case ui::Action::RemovePart:
+                for (const std::string &k : a.keys) downloads.remove_part(k);
+                break;
             case ui::Action::Remove: {
                 // A model in the title's own folder that isn't in use (the
                 // dashboard asked first). Its results and usage stay.
@@ -957,9 +970,9 @@ int main(int, char **) {
             typing_pending = false;
             if (!keyboard.open(typing)) {
                 if (typing_for.empty()) {
-                    notify("TokenStation5: the console's keyboard didn't open");
+                    notify("TokenStation5: the console's keyboard didn't open. Try again.");
                 } else {
-                    settings_note.note = std::string("The keyboard didn't open.") + plain::kDetails;
+                    settings_note.note = std::string("The keyboard didn't open. Try again.") + plain::kDetails;
                     settings_note.note_failed = true;
                     settings_note.note_at = t;
                 }
