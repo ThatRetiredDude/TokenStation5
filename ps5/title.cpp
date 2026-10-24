@@ -406,6 +406,12 @@ bool parse_job(const std::vector<std::string> &a, app::Job &j, Options *o, std::
         err = cmd + " needs -m MODEL";
         return false;
     }
+    // Settings last a job's life (runner.cpp's EnvScope); a served model's
+    // are the title's own, in ts5.env.
+    if (!j.env.empty() && j.kind != app::Job::Check && j.kind != app::Job::Bench) {
+        err = "--env is for check and bench; " + cmd + " uses the settings in ts5.env";
+        return false;
+    }
     if (o && j.kind == app::Job::Serve) o->n_ctx = j.n_ctx;
     return true;
 }

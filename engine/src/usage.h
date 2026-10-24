@@ -42,7 +42,8 @@ struct UsageRecord {
     int64_t first_ms = 0, total_ms = 0;       // from the request read to the first text, and to the end
     // Why it wasn't answered: no_model, loading, busy_check, busy_bench,
     // bad_json, empty_prompt, too_long, bad_key, gpu_error or exception; ""
-    // when it was.
+    // when it was. trimmed: too long, and the TV's Chat page asks again
+    // without its oldest turn.
     std::string why;
 };
 

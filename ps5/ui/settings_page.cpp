@@ -462,7 +462,9 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
             field("CONTEXT WINDOW", plain::count(info.n_ctx) + " tokens", kText, body_);
         para("In Kilo Code, add a provider of the type OpenAI Compatible with these. Use the address as it is, "
              "starting http and ending /v1. Where the app asks for a context window, give it the number above, "
-             "so it shortens long conversations before the PS5 has to refuse them.",
+             "so it shortens long conversations before the PS5 has to refuse them. For coding agents that edit "
+             "files and run commands, Qwen 3 8B does best: Qwen 2.5 Coder 7B writes the code but often stops "
+             "before the next step.",
              kText2);
     } else if (r.kind == Row::NewKey) {
         text_glyph(c, body_, dx, ty + 8, "Press", kGlyphCross, "to name a new key.", kText2);
