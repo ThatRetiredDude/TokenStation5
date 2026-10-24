@@ -184,7 +184,7 @@ void notify(const std::string &text) {
 // the main loop writes them every 2 s, and leave() writes what's left.
 ts5::UsageLog usage_log(kUsage);
 
-// The log goes through a pipe to a thread of its own that writes the file.
+// The log goes through a pipe (or socket pair) to a thread of its own that writes the file.
 // On the PS5 a write to ts5.log could wait about a second at a time while
 // the TV sat idle, and every thread that logged waited with it: a Hugging
 // Face search's 150 net lines made it take 8 minutes instead of 45 s
@@ -225,7 +225,9 @@ void write_log(int in, int file) {
 // would have stdio seek the pipe.
 bool log_through_pipe() {
     int fds[2];
-    if (pipe(fds) != 0) return false;
+    // The PS5 refuses a title pipe() (EPERM, seen 2026-10-24); a local
+    // socket pair does the same job.
+    if (pipe(fds) != 0 && socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return false;
     const int file = open(kLog, O_WRONLY | O_CREAT | O_APPEND, 0666);
     if (file < 0 || dup2(fds[1], STDOUT_FILENO) < 0 || dup2(fds[1], STDERR_FILENO) < 0) {
         if (file >= 0) close(file);
