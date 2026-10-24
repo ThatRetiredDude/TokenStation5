@@ -1,0 +1,117 @@
+name: release
+
+# Build the PS5 title and publish it as a GitHub Release asset that the
+# Prospero Store / ps5-homebrew-catalog can list: PPSA99555.zip with the
+# PPSA99555/ app folder at the top of the archive, plus a ready-to-submit
+# apps/PPSA99555.json catalog record (with the real artifact_url + sha256).
+#
+# Trigger it by pushing a version tag, e.g.:
+#   git tag 01.000.001 && git push origin 01.000.001
+#   git tag v1.2.0     && git push origin v1.2.0
+# Avoid generic tags (latest/nightly); the catalog rejects them.
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "[0-9][0-9].[0-9][0-9][0-9].[0-9][0-9][0-9]"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release (must already exist)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    env:
+      TITLE_ID: PPSA99555
+      REPO_URL: https://github.com/ThatRetiredDude/TokenStation5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve tag and version
+        id: ver
+        run: |
+          tag="${{ github.event.inputs.tag }}"
+          [ -n "$tag" ] || tag="${GITHUB_REF_NAME}"
+          case "$tag" in
+            latest|nightly|stable|dev) echo "::error::Generic tag '$tag' is not allowed by the catalog"; exit 1 ;;
+          esac
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install the cross toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-18 lld-18 libclang-rt-18-dev llvm-18-dev libclang-18-dev \
+            libclc-18-dev libllvmspirvlib-18-dev ninja-build rsync wget unzip zip glslang-tools \
+            python3-mako python3-yaml bison flex
+          pip install --user meson
+
+      - name: Cache the SDK and RADV
+        uses: actions/cache@v4
+        with:
+          path: .deps/ps5
+          key: ps5-deps-${{ hashFiles('ps5/setup.sh') }}
+
+      - name: Set up the SDK and build RADV
+        run: ps5/setup.sh
+
+      - name: Build the title
+        run: ps5/build.sh
+
+      - name: Package the ZIP (PPSA99555/ folder at the archive root)
+        run: |
+          test -f "build/ps5/${TITLE_ID}/eboot.bin"
+          test -f "build/ps5/${TITLE_ID}/sce_sys/param.json"
+          mkdir -p dist
+          ( cd build/ps5 && zip -r -X "${GITHUB_WORKSPACE}/dist/${TITLE_ID}.zip" "${TITLE_ID}" )
+          sha=$(sha256sum "dist/${TITLE_ID}.zip" | cut -d' ' -f1)
+          echo "SHA256=$sha" >> "$GITHUB_ENV"
+          echo "$sha  ${TITLE_ID}.zip" > "dist/${TITLE_ID}.zip.sha256"
+          echo "Built dist/${TITLE_ID}.zip ($(stat -c %s dist/${TITLE_ID}.zip) bytes), sha256 $sha"
+
+      - name: Generate the catalog record (apps/PPSA99555.json)
+        run: |
+          tag="${{ steps.ver.outputs.tag }}"
+          version="${{ steps.ver.outputs.version }}"
+          python3 - "$tag" "$version" "$SHA256" <<'PY'
+          import json, sys
+          tag, version, sha = sys.argv[1], sys.argv[2], sys.argv[3]
+          repo = "https://github.com/ThatRetiredDude/TokenStation5"
+          record = {
+              "titleid": "PPSA99555",
+              "name": "TokenStation5",
+              "kind": "app",
+              "category": "ai",
+              "description": "Turns a jailbroken PS5 into a local AI endpoint, serving quantized LLMs on the console GPU over an OpenAI-compatible API on your home network.",
+              "license": "GPL-3.0-or-later",
+              "author": "Jared Maxwell",
+              "version": version,
+              "source_repo": repo,
+              "artifact_url": f"{repo}/releases/download/{tag}/PPSA99555.zip",
+              "sha256": sha,
+              "icon_url": f"{repo}/raw/{tag}/ps5/sce_sys/icon0.png",
+          }
+          with open("dist/PPSA99555.json", "w") as f:
+              json.dump(record, f, indent=2)
+              f.write("\n")
+          print(json.dumps(record, indent=2))
+          PY
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: TokenStation5 ${{ steps.ver.outputs.version }}
+          files: |
+            dist/PPSA99555.zip
+            dist/PPSA99555.zip.sha256
+            dist/PPSA99555.json
