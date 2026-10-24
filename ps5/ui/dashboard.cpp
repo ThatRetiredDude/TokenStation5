@@ -34,7 +34,7 @@ std::string lower(std::string s) {
 // The catalog model a file is, in whatever precision; null if none.
 const app::CatalogEntry *catalog_of(const std::string &file) {
     const std::string f = lower(file);
-    for (const app::CatalogEntry &e : app::kCatalog)
+    for (const app::CatalogEntry &e : app::kCatalog)  // the built-in models only: their words fit
         if (e.kind == app::CatalogEntry::Model && f.find(e.same) != std::string::npos) return &e;
     return nullptr;
 }
@@ -189,8 +189,8 @@ const app::UsageSums *week_of(const View &v, const std::string &name) {
 }  // namespace
 
 struct Dashboard::Item {
-    enum Kind { Model, Header, Catalog, Empty } kind;
-    int index;  // into View::models or app::kCatalog
+    enum Kind { Model, Header, Catalog, Empty, Search } kind;
+    int index;  // into View::models or the catalog (app::catalog_at); a Header's: 0 DOWNLOAD, 1 HUGGING FACE
     int h;
     std::string key;
 };
@@ -219,25 +219,40 @@ std::vector<Dashboard::Item> Dashboard::items(const View &v) const {
     if (v.models.empty()) out.push_back({Item::Empty, 0, 128, ""});
     // The catalog's models that aren't on the PS5, to download; a row with
     // a part or a download going on is taller, for its progress bar.
-    std::vector<Item> more;
-    for (size_t i = 0; i < sizeof app::kCatalog / sizeof app::kCatalog[0]; i++) {
-        const app::CatalogEntry &e = app::kCatalog[i];
-        if (e.kind != app::CatalogEntry::Model || installed(v, e)) continue;
+    // Searched ones show under the search, unless they're downloading.
+    std::vector<Item> more, found;
+    auto row = [&](size_t i) -> Item {
+        const app::CatalogEntry &e = app::catalog_at(i);
         const app::Download d = download_of(v, e.key);
         const bool bar = d.done > 0 || d.active();
-        more.push_back({Item::Catalog, (int)i, bar ? 100 : 88, std::string("catalog:") + e.key});
+        return {Item::Catalog, (int)i, bar ? 100 : 88, std::string("catalog:") + e.key};
+    };
+    const size_t builtin = sizeof app::kCatalog / sizeof app::kCatalog[0];
+    for (size_t i = 0, n = app::catalog_size(); i < n; i++) {
+        const app::CatalogEntry &e = app::catalog_at(i);
+        if (e.kind != app::CatalogEntry::Model || installed(v, e)) continue;
+        const app::Download d = download_of(v, e.key);
+        if (i < builtin || d.done > 0 || d.active()) more.push_back(row(i));
+    }
+    for (size_t i : v.hf.results) {
+        const app::CatalogEntry &e = app::catalog_at(i);
+        const app::Download d = download_of(v, e.key);
+        if (!installed(v, e) && d.done == 0 && !d.active()) found.push_back(row(i));
     }
     if (!more.empty()) {
         out.push_back({Item::Header, 0, 56, ""});
         out.insert(out.end(), more.begin(), more.end());
     }
+    out.push_back({Item::Header, 1, 56, ""});
+    out.push_back({Item::Search, 0, 88, "search"});
+    out.insert(out.end(), found.begin(), found.end());
     return out;
 }
 
 int Dashboard::selected(const std::vector<Item> &items) const {
     int first = -1;
     for (size_t i = 0; i < items.size(); i++) {
-        if (items[i].kind != Item::Model && items[i].kind != Item::Catalog) continue;
+        if (items[i].kind != Item::Model && items[i].kind != Item::Catalog && items[i].kind != Item::Search) continue;
         if (first < 0) first = (int)i;
         if (items[i].key == selected_key_) return (int)i;
     }
@@ -353,16 +368,20 @@ Action Dashboard::press(uint32_t b, const View &v) {
     }
     auto step = [&](int d) {
         for (int i = sel + d; i >= 0 && i < (int)list.size(); i += d)
-            if (list[i].kind == Item::Model || list[i].kind == Item::Catalog) return i;
+            if (list[i].kind == Item::Model || list[i].kind == Item::Catalog || list[i].kind == Item::Search) return i;
         return sel;
     };
     if (b & kUp) sel = step(-1);
     if (b & kDown) sel = step(+1);
     selected_key_ = list[sel].key;
     const Item &it = list[sel];
+    if (it.kind == Item::Search) {
+        if (b & kCross) a.kind = Action::Search;
+        return a;
+    }
     // Downloads go on beside jobs, so these come before the busy check.
     if (it.kind == Item::Catalog) {
-        const app::CatalogEntry &e = app::kCatalog[it.index];
+        const app::CatalogEntry &e = app::catalog_at(it.index);
         const app::Download d = download_of(v, e.key);
         a.keys = {e.key};
         if (b & kCross) a.kind = d.active() ? Action::StopDownload : Action::Download;
@@ -498,7 +517,7 @@ void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &lis
         const bool is_sel = (int)i == sel;
         const int right = LIST_X + LIST_W - 24;
         if (it.kind == Item::Header) {
-            c.text(smallb_, LIST_X + 8, ry + 40, "DOWNLOAD", kMuted);
+            c.text(smallb_, LIST_X + 8, ry + 40, it.index == 1 ? "HUGGING FACE" : "DOWNLOAD", kMuted);
             continue;
         }
         if (it.kind == Item::Empty) {
@@ -510,8 +529,38 @@ void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &lis
         }
         c.round_rect((float)LIST_X, (float)ry, (float)LIST_W, (float)it.h, 14, is_sel ? kRowSel : kRow);
         if (is_sel) c.round_rect_line((float)LIST_X, (float)ry, (float)LIST_W, (float)it.h, 14, 2.5f, kAccent);
+        if (it.kind == Item::Search) {
+            const app::HfState &h = v.hf;
+            std::string tag = "SEARCH", line;
+            Color tc = kAccent, lc = kMuted;
+            switch (h.phase) {
+                case app::HfState::Idle: line = "Find more models that fit this PS5"; break;
+                case app::HfState::Searching:
+                    tag = "LOOKING", tc = kText2;
+                    line = "\"" + h.query + "\": " +
+                           (h.to_check ? std::to_string(h.checked) + " of " + std::to_string(h.to_check) + " looked at"
+                                       : std::string("asking Hugging Face"));
+                    lc = kText2;
+                    break;
+                case app::HfState::Done:
+                    line = "\"" + h.query + "\": " +
+                           (h.results.empty() ? std::string("none that fit")
+                                              : std::to_string(h.results.size()) + (h.results.size() == 1 ? " fits" : " fit"));
+                    lc = kText2;
+                    break;
+                case app::HfState::Failed:
+                    tag = "SEARCH", tc = kRed;
+                    line = "The search didn't work: see why on the right";
+                    lc = kRed;
+                    break;
+            }
+            const int pl = pill(c, smallb_, right, ry + 14, tag, tc);
+            c.text(bodyb_, LIST_X + 24, ry + 40, "Search Hugging Face", kText, pl - 16 - (LIST_X + 24));
+            c.text(small_, LIST_X + 24, ry + 72, line, lc, LIST_W - 48);
+            continue;
+        }
         if (it.kind == Item::Catalog) {
-            const app::CatalogEntry &e = app::kCatalog[it.index];
+            const app::CatalogEntry &e = app::catalog_at(it.index);
             const app::Download d = download_of(v, e.key);
             using D = app::Download;
             std::string tag = "DOWNLOAD", line;
@@ -648,9 +697,50 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
         c.text(small_, DX, y + 62, mem, fits ? kText2 : kRed, DW);
     };
 
+    if (it.kind == Item::Search) {
+        const app::HfState &h = v.hf;
+        c.text(h2_, DX, 244, "Search Hugging Face", kText, DW);
+        int y = 300;
+        auto para = [&](const std::string &text, Color col) {
+            for (auto &line : wrap(small_, text, DW)) {
+                c.text(small_, DX, y, line, col);
+                y += 32;
+            }
+            y += 12;
+        };
+        para("Find a model on Hugging Face by its name, such as \"qwen coder\" or \"llama 3.2\". Only models this PS5 "
+             "can run, that fit in its memory with room for a real conversation, show up here, ready to download.",
+             kText2);
+        switch (h.phase) {
+            case app::HfState::Idle: break;
+            case app::HfState::Searching:
+                para("Looking for \"" + h.query + "\"" +
+                         (h.to_check ? ": " + std::to_string(h.checked) + " of " + std::to_string(h.to_check) +
+                                           " models looked at so far."
+                                     : "."),
+                     kText);
+                break;
+            case app::HfState::Done: {
+                std::string t = "Searched for \"" + h.query + "\": " +
+                                (h.results.empty() ? std::string("nothing that fits.")
+                                                   : std::to_string(h.results.size()) +
+                                                         (h.results.size() == 1 ? " file fits, below." : " files fit, below."));
+                if (h.too_big) t += " " + std::to_string(h.too_big) + (h.too_big == 1 ? " was" : " were") + " too big.";
+                if (h.cant_run)
+                    t += " " + std::to_string(h.cant_run) + " of a kind this PS5 can't run yet " +
+                         (h.cant_run == 1 ? "was" : "were") + " left out.";
+                para(t, kText);
+                break;
+            }
+            case app::HfState::Failed: para(h.problem, kRed); break;
+        }
+        text_glyph(c, body_, DX, y + 24, "Press", kGlyphCross,
+                   h.phase == app::HfState::Idle ? "to type what to look for." : "to search again.", kText);
+        return;
+    }
     if (it.kind == Item::Catalog) {
         using D = app::Download;
-        const app::CatalogEntry &e = app::kCatalog[it.index];
+        const app::CatalogEntry &e = app::catalog_at(it.index);
         const app::Download d = download_of(v, e.key);
         c.text(h2_, DX, 244, e.name, kText, DW);
         const char *state = d.phase == D::None      ? "Not on your PS5 yet"
@@ -830,7 +920,7 @@ void Dashboard::draw_activity(Canvas &c, const View &v, const Item *sel) {
     // Downloading: the room there is for it.
     if (sel && sel->kind == Item::Catalog) {
         if (!v.have_free) return;
-        const app::CatalogEntry &e = app::kCatalog[sel->index];
+        const app::CatalogEntry &e = app::catalog_at(sel->index);
         const app::Download d = download_of(v, e.key);
         const uint64_t total = d.total ? d.total : e.bytes, rest = total > d.done ? total - d.done : 0;
         label(c, smallb_, ax, AY + 40, "STORAGE");
@@ -919,8 +1009,10 @@ void Dashboard::draw_footer(Canvas &c, const View &v, const Item *sel) {
         bool right = false;  // right on the pad, not a button
     };
     std::vector<Hint> hints;
-    if (sel && sel->kind == Item::Catalog) {
-        const app::Download d = download_of(v, app::kCatalog[sel->index].key);
+    if (sel && sel->kind == Item::Search) {
+        hints = {{kGlyphCross, "Search", true}};
+    } else if (sel && sel->kind == Item::Catalog) {
+        const app::Download d = download_of(v, app::catalog_at(sel->index).key);
         hints = {{kGlyphCross, d.active() ? "Stop the download" : d.done > 0 ? "Go on" : "Download", true},
                  {kGlyphSquare, "Delete part", !d.active() && d.done > 0}};
     } else {

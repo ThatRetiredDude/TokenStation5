@@ -81,6 +81,7 @@
 #include "dashboard.h"
 #include "display.h"
 #include "downloads.h"
+#include "hf_search.h"
 #include "keys.h"
 #include "library.h"
 #include "pad.h"
@@ -159,8 +160,8 @@ constexpr const char *kUsageHours = TS5_HOME "/usage-hours.tsv";
 constexpr const char *kKeys = TS5_HOME "/keys.tsv";
 // Not ..._KEY: a name ending in _KEY is a secret, typed in (settings.h).
 constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
-// typing_for while the keyboard names a new API key.
-constexpr const char *kNamingKey = "(new key)";
+// typing_for while the keyboard names a new API key, or takes a search.
+constexpr const char *kNamingKey = "(new key)", *kSearching = "(search)";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
 
 constexpr int kWidth = 1920, kHeight = 1080;
@@ -555,6 +556,7 @@ int main(int, char **) {
         return keys.authorize(key, client, name);
     });
     std::string fresh_key, fresh_key_id;  // a key just made, shown on Settings until the page is left
+    app::HfSearch hf;  // the Models page's search
     usage_log.start(TS5_VERSION);
     double last_usage = 0;
     bool usage_ok = true;
@@ -698,6 +700,8 @@ int main(int, char **) {
             if (st == app::TextInput::Done && typing_for.empty()) {
                 const bool sent = !text.empty() && chat.send(text);
                 printf("ts5-title: chat: %s by keyboard (%zu bytes)\n", sent ? "message" : "not sent", text.size());
+            } else if (st == app::TextInput::Done && !text.empty() && typing_for == kSearching) {
+                hf.start(text, ctx->device_memory());
             } else if (st == app::TextInput::Done && !text.empty() && typing_for == kNamingKey) {
                 std::string e, id;
                 const std::string key = keys.create(text, id, e);
@@ -849,14 +853,15 @@ int main(int, char **) {
             std::lock_guard<std::mutex> lk(names_mutex);
             for (const auto &m : v.models) model_names[m.file] = m.name;
         }
-        // Both only grow, so their sum changes whenever either does.
-        const uint64_t version = runner.version() + downloads.version();
+        // All three only grow, so their sum changes whenever any does.
+        const uint64_t version = runner.version() + downloads.version() + hf.version();
         v.status = runner.status();
         v.events = runner.events();
         // A download waits while a model loads, which wants the console's
         // CPU and storage to itself.
         downloads.hold(v.status.phase == app::Status::Loading);
         v.downloads = downloads.state();
+        v.hf = hf.state();
         v.have_free = downloads.free_space(v.free_bytes);
         v.models_dir = kModels;
         v.api = server.activity();
@@ -991,6 +996,15 @@ int main(int, char **) {
                 break;
             case ui::Action::Download:
                 for (const std::string &k : a.keys) downloads.start(k);
+                break;
+            case ui::Action::Search:
+                typing = app::TextRequest();
+                typing_for = kSearching;
+                typing.title = "Search Hugging Face";
+                typing.placeholder = "A model's name, such as qwen coder";
+                typing.text = v.hf.query;
+                typing.max_chars = 80;
+                typing_pending = true;
                 break;
             case ui::Action::NewKey:
                 typing = app::TextRequest();
