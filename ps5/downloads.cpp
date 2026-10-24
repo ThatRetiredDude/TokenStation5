@@ -192,6 +192,52 @@ Download joined(const std::vector<std::string> &keys, const std::map<std::string
     return j;
 }
 
+namespace {
+
+// Entries added at run time: their text and the entry pointing into it. A
+// deque never moves what it holds, so the pointers stay good.
+struct Added {
+    CatalogText text;
+    CatalogEntry entry;
+};
+std::mutex added_mu;
+std::deque<Added> added;
+
+constexpr size_t kBuiltIn = sizeof kCatalog / sizeof kCatalog[0];
+
+}  // namespace
+
+size_t catalog_size() {
+    std::lock_guard<std::mutex> lk(added_mu);
+    return kBuiltIn + added.size();
+}
+
+const CatalogEntry &catalog_at(size_t i) {
+    if (i < kBuiltIn) return kCatalog[i];
+    std::lock_guard<std::mutex> lk(added_mu);
+    return added[i - kBuiltIn].entry;
+}
+
+size_t add_catalog_entry(const CatalogText &t, CatalogEntry e) {
+    for (size_t i = 0; i < kBuiltIn; i++)
+        if (t.key == kCatalog[i].key) return i;
+    std::lock_guard<std::mutex> lk(added_mu);
+    for (size_t i = 0; i < added.size(); i++)
+        if (added[i].text.key == t.key) return kBuiltIn + i;
+    added.push_back({t, e});
+    Added &a = added.back();
+    a.entry.key = a.text.key.c_str();
+    a.entry.name = a.text.name.c_str();
+    a.entry.good_for = a.text.good_for.c_str();
+    a.entry.same = a.text.same.c_str();
+    a.entry.repo = a.text.repo.c_str();
+    a.entry.path = a.text.path.c_str();
+    a.entry.file = a.text.file.c_str();
+    a.entry.commit = a.text.commit.c_str();
+    a.entry.sha256 = a.text.sha256.c_str();
+    return kBuiltIn + added.size() - 1;
+}
+
 bool free_space(const std::string &dir, uint64_t &bytes) {
     struct statvfs vs;
     if (statvfs(dir.c_str(), &vs) != 0) return false;
@@ -228,8 +274,8 @@ Downloads::~Downloads() {
 }
 
 const CatalogEntry *Downloads::find(const std::string &key) {
-    for (const CatalogEntry &e : kCatalog)
-        if (key == e.key) return &e;
+    for (size_t i = 0, n = catalog_size(); i < n; i++)
+        if (key == catalog_at(i).key) return &catalog_at(i);
     return nullptr;
 }
 
