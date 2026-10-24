@@ -78,6 +78,7 @@
 #include "audio_probe.h"
 #include "canvas.h"
 #include "chat.h"
+#include "chat_store.h"
 #include "dashboard.h"
 #include "display.h"
 #include "downloads.h"
@@ -159,10 +160,11 @@ constexpr const char *kRestart = TS5_HOME "/restart";
 constexpr const char *kUsage = TS5_HOME "/usage.tsv";
 constexpr const char *kUsageHours = TS5_HOME "/usage-hours.tsv";
 constexpr const char *kKeys = TS5_HOME "/keys.tsv";
+constexpr const char *kChats = TS5_HOME "/chats";  // the Chat page's saved chats (chat_store.h)
 // Not ..._KEY: a name ending in _KEY is a secret, typed in (settings.h).
 constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
 // typing_for while the keyboard names a new API key, or takes a search.
-constexpr const char *kNamingKey = "(new key)", *kSearching = "(search)";
+constexpr const char *kNamingKey = "(new key)", *kSearching = "(search)", *kChatSearch = "(chat search)";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
 
 constexpr int kWidth = 1920, kHeight = 1080;
@@ -586,7 +588,13 @@ int main(int, char **) {
     // Models (and, from Settings, the speech model and voice) downloaded on
     // the console, beside whatever the Runner does.
     app::Downloads downloads(kModels, TS5_VERSION, notify);
-    app::Chat chat(opts.host, opts.port);
+    app::ChatStore chat_store(kChats);
+    app::Chat chat(opts.host, opts.port, &chat_store);
+    // The Chat page's sidebar: every chat, or what a search found.
+    std::string chat_query;
+    uint64_t chats_version = 0;
+    std::vector<app::ChatSummary> chat_list;
+    size_t live_turn = (size_t)-1;  // the reply that came in this run, which is read aloud
     int user = -1;
     sceUserServiceGetInitialUser(&user);
     // What R1 recorded, as a message. A reply still ending (R1 stops it) gets
@@ -708,6 +716,10 @@ int main(int, char **) {
             if (st == app::TextInput::Done && typing_for.empty()) {
                 const bool sent = !text.empty() && chat.send(text);
                 printf("ts5-title: chat: %s by keyboard (%zu bytes)\n", sent ? "message" : "not sent", text.size());
+            } else if (st == app::TextInput::Done && typing_for == kChatSearch) {
+                chat_query = text;  // "" shows every chat again
+                chats_version = 0;
+                printf("ts5-title: chats: search (%zu bytes)\n", text.size());
             } else if (st == app::TextInput::Done && !text.empty() && typing_for == kSearching) {
                 hf.start(text, ctx->device_memory());
             } else if (st == app::TextInput::Done && !text.empty() && typing_for == kNamingKey) {
@@ -892,13 +904,24 @@ int main(int, char **) {
             chat_version = chat.version() + voice.version();
             chat_state = chat.state();
             voice_state = voice.state();
-            // The reply as it comes, read aloud a sentence at a time.
+            // The reply as it comes, read aloud a sentence at a time; not the
+            // last reply of a saved chat that's opened.
             if (!chat_state.turns.empty() && !chat_state.turns.back().user) {
                 const app::ChatTurn &r = chat_state.turns.back();
-                speaker.feed(chat_state.turns.size() - 1, r.text, r.end != app::ChatTurn::Coming);
+                const size_t at = chat_state.turns.size() - 1;
+                if (r.end == app::ChatTurn::Coming) live_turn = at;
+                if (at == live_turn) speaker.feed(at, r.text, r.end != app::ChatTurn::Coming);
             }
         }
         v.chat = chat_state;
+        if (chat_store.version() != chats_version) {
+            chats_version = chat_store.version();
+            chat_list = chat_query.empty() ? chat_store.list() : chat_store.search(chat_query);
+        }
+        v.chats.chats = chat_list;
+        v.chats.query = chat_query;
+        v.chats.current = chat_state.id;
+        v.chats.wall = (int64_t)time(nullptr);
         v.voice = voice_state;
         v.speaking = speaker.speaking();
         v.no_voice = app::setting("TS5_SPEAK", "1") != "0" &&
@@ -959,6 +982,31 @@ int main(int, char **) {
             case ui::Action::ChatClear:
                 chat.clear();
                 speaker.reset();
+                break;
+            case ui::Action::ChatOpen:
+                speaker.reset();
+                live_turn = (size_t)-1;
+                if (!chat.open(a.name)) notify("TokenStation5: that chat couldn't be opened.");
+                break;
+            case ui::Action::ChatRemove:
+                if (a.name == chat_state.id) {
+                    chat.clear();
+                    speaker.reset();
+                }
+                if (!chat_store.remove(a.name)) notify("TokenStation5: that chat couldn't be removed.");
+                break;
+            case ui::Action::ChatSearchClear:
+                chat_query.clear();
+                chats_version = 0;
+                break;
+            case ui::Action::ChatSearch:
+                typing = app::TextRequest();
+                typing_for = kChatSearch;
+                typing.title = "Search chats";
+                typing.placeholder = "Words from a chat";
+                typing.text = chat_query;
+                typing.max_chars = 80;
+                typing_pending = true;
                 break;
             case ui::Action::Set: {
                 std::string e;

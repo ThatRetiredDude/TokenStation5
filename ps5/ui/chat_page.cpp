@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <ctime>
 
 #include "pad.h"
 #include "plain.h"
@@ -146,6 +147,128 @@ void ChatPage::press(uint32_t b) {
 }
 
 void ChatPage::to_bottom() { follow_ = true; }
+
+namespace {
+
+constexpr int kListHead = 84;               // the sidebar's heading
+constexpr int kActionRow = 64, kChatRow = 84, kRowGap = 8;
+constexpr double kRemoveFor = 4;            // seconds square's second press has
+
+// "Today", "Yesterday", or "22 Oct" (the PS5's clock).
+std::string when(int64_t t, int64_t now) {
+    static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    const time_t a = (time_t)t, b = (time_t)now;
+    struct tm ta, tb;
+    if (t <= 0 || !localtime_r(&a, &ta) || !localtime_r(&b, &tb)) return "";
+    const int days = (tb.tm_year - ta.tm_year) * 366 + (tb.tm_yday - ta.tm_yday);
+    if (days == 0) return "Today";
+    if (days == 1) return "Yesterday";
+    std::string d = std::to_string(ta.tm_mday) + " " + months[ta.tm_mon % 12];
+    if (ta.tm_year != tb.tm_year) d += " " + std::to_string(ta.tm_year + 1900);
+    return d;
+}
+
+}  // namespace
+
+void ChatPage::focus_list(bool on) {
+    list_focus_ = on;
+    remove_id_.clear();
+}
+
+ListPress ChatPage::press_list(uint32_t b, const ChatList &l, double now) {
+    ListPress p;
+    const int rows = 2 + (int)l.chats.size();
+    list_sel_ = std::min(std::max(list_sel_, 0), rows - 1);
+    if (b & (kUp | kDown)) {
+        list_sel_ = std::min(std::max(list_sel_ + ((b & kDown) ? 1 : -1), 0), rows - 1);
+        remove_id_.clear();
+    }
+    const app::ChatSummary *chat = list_sel_ >= 2 ? &l.chats[list_sel_ - 2] : nullptr;
+    if (b & kCross) {
+        remove_id_.clear();
+        if (list_sel_ == 0) p.kind = ListPress::New;
+        else if (list_sel_ == 1) p.kind = ListPress::Search;
+        else {
+            p.kind = ListPress::Open;
+            p.id = chat->id;
+        }
+    } else if (b & kSquare) {
+        if (list_sel_ == 1 && !l.query.empty()) {
+            p.kind = ListPress::ClearSearch;
+        } else if (chat && removing(now) && remove_id_ == chat->id) {
+            p.kind = ListPress::Remove;
+            p.id = chat->id;
+            remove_id_.clear();
+        } else if (chat) {
+            remove_id_ = chat->id;
+            remove_until_ = now + kRemoveFor;
+        }
+    }
+    return p;
+}
+
+void ChatPage::draw_list(Canvas &c, const ChatList &l, int x, int y, int w, int h, double now) {
+    c.text(h2_, x + 28, y + 52, "Chats", kText);
+    const std::string count = l.query.empty() ? (l.chats.empty() ? "" : std::to_string(l.chats.size()) + " saved")
+                                              : std::to_string(l.chats.size()) + " found";
+    c.text_right(small_, x + w - 28, y + 52, count, kText2);
+
+    const int rx = x + 16, rw = w - 32, y0 = y + kListHead, y1 = y + h - 16, view_h = y1 - y0;
+    const int rows = 2 + (int)l.chats.size();
+    list_sel_ = std::min(std::max(list_sel_, 0), rows - 1);
+    auto row_y = [&](int i) { return i < 2 ? i * (kActionRow + kRowGap) : 2 * (kActionRow + kRowGap) + (i - 2) * (kChatRow + kRowGap); };
+    auto row_h = [&](int i) { return i < 2 ? kActionRow : kChatRow; };
+    // Scrolled so the chosen row shows.
+    if (row_y(list_sel_) - list_top_ < 0) list_top_ = row_y(list_sel_);
+    if (row_y(list_sel_) + row_h(list_sel_) - list_top_ > view_h) list_top_ = row_y(list_sel_) + row_h(list_sel_) - view_h;
+    list_top_ = std::max(0, std::min(list_top_, std::max(0, row_y(rows - 1) + row_h(rows - 1) - view_h)));
+
+    c.clip(rx - 4, y0, rw + 8, view_h);
+    for (int i = 0; i < rows; i++) {
+        const int ry = y0 + row_y(i) - list_top_, rh = row_h(i);
+        if (ry > y1 || ry + rh < y0) continue;
+        const bool sel = list_focus_ && i == list_sel_;
+        const app::ChatSummary *chat = i >= 2 ? &l.chats[i - 2] : nullptr;
+        const bool open = chat && chat->id == l.current;
+        c.round_rect((float)rx, (float)ry, (float)rw, (float)rh, 14, sel ? kRowSel : open ? rgb(0x152046) : kRow);
+        if (sel) c.round_rect_line((float)rx, (float)ry, (float)rw, (float)rh, 14, 2.5f, kAccent);
+        if (open) c.round_rect((float)rx + 6, (float)ry + 14, 5, (float)rh - 28, 2.5f, kAccent);
+        if (i == 0) {
+            c.text(bodyb_, rx + 24, baseline(bodyb_, ry, rh), "+  New chat", l.current.empty() ? kAccent : kText);
+        } else if (i == 1) {
+            if (l.query.empty()) {
+                c.text(body_, rx + 24, baseline(body_, ry, rh), "Search chats", kText2);
+            } else {
+                const int tw = c.text(small_, rx + 24, baseline(small_, ry, rh), "SEARCH", kAccent);
+                Canvas::conversation = true;  // your words (screen.txt marks them)
+                c.text(body_, rx + 24 + tw + 14, baseline(body_, ry, rh), "\"" + l.query + "\"", kText,
+                       rw - 48 - tw - 14);
+                Canvas::conversation = false;
+            }
+        } else {
+            const bool asking = removing(now) && remove_id_ == chat->id;
+            Canvas::conversation = true;
+            c.text(bodyb_, rx + 24, ry + 36, chat->title, kText, rw - 48);
+            Canvas::conversation = false;
+            if (asking) {
+                c.text(small_, rx + 24, ry + 68, "Press square again to remove this chat", kAmber, rw - 48);
+            } else {
+                const std::string sub = when(chat->updated, l.wall) + "  \xC2\xB7  " + std::to_string(chat->messages) +
+                                        (chat->messages == 1 ? " message" : " messages");
+                c.text(small_, rx + 24, ry + 68, sub, kMuted, rw - 48);
+            }
+        }
+    }
+    if (l.chats.empty()) {
+        const int ry = y0 + row_y(2) - list_top_ + 24;
+        c.text(small_, rx + 8, ry + 24, l.query.empty() ? "Your chats show here." : "No chat has those words.", kMuted,
+               rw - 16);
+        if (l.query.empty())
+            c.text(small_, rx + 8, ry + 58, "Each one is kept on your PS5.", kMuted, rw - 16);
+    }
+    c.unclip();
+}
 
 ChatPage::Laid ChatPage::lay_out(const app::ChatTurn &t, int w, const std::string &model) const {
     Laid l;

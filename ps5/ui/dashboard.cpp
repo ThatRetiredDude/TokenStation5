@@ -21,8 +21,9 @@ constexpr int LX = 72, LW = 900, RX = 1000, RW = 848;
 constexpr int AY = 868, AH = 136;
 constexpr int LIST_X = LX + 16, LIST_W = LW - 32, LIST_Y0 = 268, LIST_Y1 = PB - 16;
 constexpr int DX = RX + 32, DW = RW - 64;
-// The chat page: the conversation, and the line for a message under it.
-constexpr int CX = LX, CW = 1848 - LX, CB = 884, IY = 900, IH = AY + AH - 900;
+// The chat page: the chats on the left; the conversation, and the line for a
+// message under it.
+constexpr int CLW = 500, CX = LX + CLW + 24, CW = 1848 - CX, CB = 884, IY = 900, IH = AY + AH - 900;
 // The settings page: two panels down to where the activity panel ends.
 constexpr int SB = AY + AH;
 
@@ -344,12 +345,30 @@ Action Dashboard::press(uint32_t b, const View &v) {
         return a;
     }
     if (page_ == Chat) {
-        chat_.press(b);
-        if ((b & kTriangle) && (v.chat.busy || v.speaking)) a.kind = Action::ChatStop;
-        else if ((b & kSquare) && !v.chat.turns.empty()) a.kind = Action::ChatClear;
-        else if ((b & kCross) && can_type(v)) a.kind = Action::ChatType;
-        else if ((b & kCross) && nothing_running(v)) show(Models);
-        if (a.kind == Action::ChatClear) chat_.to_bottom();
+        if ((b & kTriangle) && (v.chat.busy || v.speaking)) {
+            a.kind = Action::ChatStop;
+        } else if (chat_.list_focused()) {
+            const ListPress p = chat_.press_list(b, v.chats, v.now);
+            switch (p.kind) {
+                case ListPress::New: a.kind = Action::ChatClear; break;
+                case ListPress::Search: a.kind = Action::ChatSearch; break;
+                case ListPress::ClearSearch: a.kind = Action::ChatSearchClear; break;
+                case ListPress::Open: a.kind = Action::ChatOpen; break;
+                case ListPress::Remove: a.kind = Action::ChatRemove; break;
+                case ListPress::None: break;
+            }
+            a.name = p.id;
+            // An opened or new chat takes the controller, ready to type.
+            if (a.kind == Action::ChatClear || a.kind == Action::ChatOpen || (b & kRight)) chat_.focus_list(false);
+        } else if (b & kLeft) {
+            chat_.focus_list(true);
+        } else {
+            chat_.press(b);
+            if ((b & kSquare) && !v.chat.turns.empty()) a.kind = Action::ChatClear;
+            else if ((b & kCross) && can_type(v)) a.kind = Action::ChatType;
+            else if ((b & kCross) && nothing_running(v)) show(Models);
+        }
+        if (a.kind == Action::ChatClear || a.kind == Action::ChatOpen) chat_.to_bottom();
         if (b & kCircle) show(Home);
         return a;
     }
@@ -426,7 +445,7 @@ void Dashboard::draw_background(Canvas &c) {
         switch (page_) {
             case Home: HomePage::panels(panels); break;
             case Models: panels = {{LX, PT, LW, PB - PT}, {RX, PT, RW, PB - PT}, {LX, AY, 1848 - LX, AH}}; break;
-            case Chat: panels = {{CX, PT, CW, CB - PT}, {CX, IY, CW, IH}}; break;
+            case Chat: panels = {{LX, PT, CLW, AY + AH - PT}, {CX, PT, CW, CB - PT}, {CX, IY, CW, IH}}; break;
             case Settings: panels = {{LX, PT, LW, SB - PT}, {RX, PT, RW, SB - PT}}; break;
             case Logs: panels = {{LX, PT, 1848 - LX, SB - PT}}; break;
         }
@@ -1039,6 +1058,25 @@ void Dashboard::draw_chat_footer(Canvas &c, const View &v) {
     const int y = 1046;
     x += key_cap(c, smallb_, x, y, "L1") + 12;
     x += c.text(small_, x, y, page_name(next(Chat)), kText2) + 40;
+    if (chat_.list_focused()) {
+        x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
+        x += c.text(small_, x, y, "\xE2\x86\x92  Back to the chat", kText2) + 40;
+        struct {
+            PadGlyph g;
+            const char *text;
+            bool on;
+        } hints[] = {{kGlyphCross, "Open", true},
+                     {kGlyphSquare, v.chats.query.empty() ? "Remove a chat" : "Remove, or clear the search",
+                      !v.chats.chats.empty() || !v.chats.query.empty()},
+                     {kGlyphCircle, "Home", true}};
+        for (auto &h : hints) {
+            glyph(c, (float)x + 16, (float)y - 8, h.g, h.on);
+            x += 40 + c.text(small_, x + 40, y, h.text, h.on ? kText2 : kMuted) + 36;
+        }
+        draw_close_hint(c, x, y);
+        return;
+    }
+    x += c.text(small_, x, y, "\xE2\x86\x90  Chats", kText2) + 40;
     const bool talk = !v.voice.model.empty();
     x += key_cap(c, smallb_, x, y, "R1", talk) + 12;
     x += c.text(small_, x, y, "Hold to talk", talk ? kText2 : kMuted) + 40;
@@ -1169,6 +1207,7 @@ void Dashboard::draw(Canvas &c, const View &v) {
                 if (m.file == f) return m.name;
             return std::string();
         };
+        chat_.draw_list(c, v.chats, LX, PT, CLW, AY + AH - PT, v.now);
         chat_.draw(c, v.chat, CX, PT, CW, CB - PT, v.now, library_name,
                    v.status.phase == app::Status::Serving ? v.status.serving : std::string(), !v.voice.model.empty());
         chat_.draw_input(c, v.chat, v.voice, v.now, CX, IY, CW, IH, v.no_voice);
