@@ -127,7 +127,9 @@ std::string Chat::request_body() {
         msgs += std::string(msgs.empty() ? "" : ",") + "{\"role\":\"" + (t.user ? "user" : "assistant") +
                 "\",\"content\":" + ts5::json_escape(t.user ? t.text : without_thinking(t.text)) + "}";
     }
-    return "{\"messages\":[" + msgs + "],\"stream\":true,\"max_tokens\":" + std::to_string(max_tokens()) + "}";
+    // The thinking stays in the content: the page shows it as it comes.
+    return "{\"messages\":[" + msgs + "],\"stream\":true,\"reasoning_format\":\"none\",\"max_tokens\":" +
+           std::to_string(max_tokens()) + "}";
 }
 
 void Chat::reply() {
