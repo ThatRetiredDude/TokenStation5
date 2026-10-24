@@ -70,6 +70,7 @@ private:
     struct Laid;
     Laid lay_out(const app::ChatTurn &t, int w, const std::string &model) const;
     void draw_empty(Canvas &c, int x, int y, int w, int h, const std::string &serving_name, bool can_talk);
+    void follow_choice(const ChatList &l);
     // A model's name, remembered from when it was last on the PS5.
     std::string name_of(const std::function<std::string(const std::string &)> &name, const std::string &file);
 
@@ -80,7 +81,8 @@ private:
     int shown_top_ = 0, max_top_ = 0;
     std::map<std::string, std::string> names_;  // by file name
     bool list_focus_ = false;
-    int list_sel_ = 0;  // 0 New chat, 1 Search chats, 2.. the chats
+    int list_sel_ = 0;     // 0 New chat, 1 Search chats, 2.. the chats
+    std::string sel_id_;   // the chosen chat's id, so the choice follows it when the list reorders
     int list_top_ = 0;  // the sidebar's first row shown, in pixels
     std::string remove_id_;
     double remove_until_ = 0;
