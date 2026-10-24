@@ -7,8 +7,9 @@
 // cross starts it (or, on the one in use, stops it after asking), square runs
 // the GPU check, triangle the speed test, right removes it from the PS5
 // after asking; on a model to download, cross downloads it, stops the
-// download or goes on with it, and square removes the part downloaded. Chat (chat_page.h): a conversation with
-// the running model; cross types a message on the console's keyboard (with
+// download or goes on with it, and square removes the part downloaded. Chat (chat_page.h): the saved chats
+// in a sidebar (left goes there, right back) and a conversation with the
+// running model; cross types a message on the console's keyboard (with
 // nothing running, it goes to Models), hold R1 to talk, up/down scroll,
 // triangle stops the reply, square starts a new chat. Settings
 // (settings_page.h): the title's settings. Logs (logs_page.h): what the
@@ -51,6 +52,7 @@ struct View {
     std::vector<app::Event> events;
     ts5::Server::Activity api;
     app::ChatState chat;
+    ChatList chats;  // the Chat page's sidebar; its current is chat.id
     app::VoiceState voice;
     bool speaking = false;  // a reply is being read aloud (speak.h)
     bool no_voice = false;  // spoken replies are on, but Kokoro's model or a voice isn't on the PS5
@@ -71,13 +73,15 @@ struct View {
 struct Action {
     enum Kind {
         None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear, ChatType, Set, TypeSetting,
-        Download, StopDownload, RemovePart, Remove, NewKey, KeyOn, RemoveKey, Search
+        Download, StopDownload, RemovePart, Remove, NewKey, KeyOn, RemoveKey, Search,
+        ChatOpen, ChatSearch, ChatSearchClear, ChatRemove
     } kind = None;
     std::string path;         // Remove: the model's file
     std::vector<std::string> keys;  // Download, StopDownload, RemovePart: catalog entries
     std::string name, value;  // Set: NAME=VALUE in ts5.env ("": the default); TypeSetting: NAME
     std::string label;        // TypeSetting: the setting's name on the page
                               // KeyOn, RemoveKey: name is the key's id; KeyOn: value "1" or "0"
+                              // ChatOpen, ChatRemove: name is the chat's id
 };
 
 class Dashboard {
