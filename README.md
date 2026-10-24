@@ -133,6 +133,11 @@ scripts/ts5-ps5.sh fetch qwen25-coder-7b
 # launch TokenStation5 from the home screen
 ```
 
+Publishing to the [Prospero Store](https://github.com/darkxex/ProsperoStore)
+is set up: push a version tag and the [`release`](.github/workflows/release.yml)
+workflow builds and attaches `PPSA99555.zip` plus a ready-to-submit catalog
+record. See [docs/STORE.md](docs/STORE.md) for the submission steps.
+
 The TV shows a dashboard. It lists the models on the console with their size,
 quant, GPU memory and results, and suggests starter models that aren't there
 yet. Use the controller to pick one, then:
