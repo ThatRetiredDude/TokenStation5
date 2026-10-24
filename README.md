@@ -8,8 +8,6 @@
 
 A jailbroken PS5, turned into a local AI endpoint: quantized LLMs running on the console's GPU, served to your home network over an **OpenAI-compatible API**. No cloud, no subscription, no data leaving the house. It runs on **ts5** — our own inference engine, written from scratch for this one GPU.
 
-[![Build](https://img.shields.io/github/actions/workflow/status/ThatRetiredDude/TokenStation5/engine.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=build)](https://github.com/ThatRetiredDude/TokenStation5/actions/workflows/engine.yml)
-[![Release](https://img.shields.io/github/v/release/ThatRetiredDude/TokenStation5?style=for-the-badge&logo=github&label=release&color=success)](https://github.com/ThatRetiredDude/TokenStation5/releases)
 [![Prospero Store](https://img.shields.io/badge/Prospero_Store-PPSA99555-003791?style=for-the-badge&logo=playstation&logoColor=white)](https://github.com/darkxex/ProsperoStore)
 [![License](https://img.shields.io/badge/license-PolyForm_SB_%2F_GPL--3.0-yellow?style=for-the-badge)](LICENSING.md)
 [![Stars](https://img.shields.io/github/stars/ThatRetiredDude/TokenStation5?style=for-the-badge&logo=github&color=gold)](https://github.com/ThatRetiredDude/TokenStation5/stargazers)
