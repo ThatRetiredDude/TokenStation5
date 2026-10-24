@@ -1,0 +1,7 @@
+# Crypto isn't a native GitHub Sponsors field, so these go under `custom` as
+# block-explorer links (the Sponsor button shows them). The raw addresses are
+# in the README's Support section for easy copy-paste.
+custom:
+  - "https://mempool.space/address/bc1qa5kevv33wq5t4sjckqe32h5hcwyymp767tfhz9"
+  - "https://etherscan.io/address/0x5976376b0c2125655e01d0a7758c744c43fb6d93"
+  - "https://solscan.io/account/u5zcwMcmrn7qAN4zUJzLhpLDQv81qtFDfZR1ohCrMs9"
