@@ -56,7 +56,6 @@ Nothing critical open.
 
 ## Next
 
-- [ ] A `serve` job in ts5.cmd takes `--env` without error but doesn't apply it (only `check` and `bench` jobs do; found on the PS5 2026-10-15). Apply it for the served backend's life, or refuse it.
 - [ ] No technical details on the app's screens (Jared, 2026-10-15): no file paths, script commands or `ts5.env` names. Where they show today:
   - Models: the empty list and a suggested model's "To add it" panel (`scripts/ts5-ps5.sh fetch KEY`, "copy its .gguf over FTP to" the title's folder), and a model's file name.
   - Settings: "kept in ts5.env", the "IN TS5.ENV" line, "(set in ts5.env)", and `scripts/ts5-ps5.sh speech`, `voice` and `websearch` for adding a speech model, a voice or the Tavily key.
@@ -74,12 +73,12 @@ Nothing critical open.
 - [ ] Qwen 3's thinking: honor `enable_thinking` and `/no_think`.
 - [ ] More models: Gemma 3 12B, Qwen 3.5 4B and 9B, Gemma 4 E4B, Mistral Nemo 12B ([models.tsv](../models.tsv)).
 - [ ] Endpoint: a static IP or DHCP reservation, more client configs (Open WebUI, Continue, opencode, Claude Code) beside Kilo Code in `docs/CLIENTS.md`, one command after each reboot. API keys are in the title itself (#57).
-- [ ] Usage: the TV Chat page's own retry after a too-long chat leaves a refused row in `usage.tsv` (found 2026-10-24); mark it as the title's so Home doesn't count it as a failed request.
 - [ ] The log: the GPU driver's submission lines could land in the middle of a `ts5-title:` line (seen 2026-10-24). None spliced since #61 and #62; the driver's own writes are outside our code.
-- [ ] Tool calls: Coder 7B sometimes writes the arguments as XML elements (`<arguments><city>Paris</city></arguments>`, 1 in 16) and once left a `<response>` wrapper around a plain answer (1 in 8).
 
 ## Done
 
+- [x] [#66](https://github.com/ThatRetiredDude/TokenStation5/pull/66) Small fixes (merged 2026-10-24, tested on the console): Qwen 2.5's own GGUFs claim 131,072 tokens with no scaling keys, so search and serving cap them at the model's 32,768 (the "qwen coder" result said 82,944). Coder 7B's XML-element arguments are read and a lone `<response>` wrapper goes (4 of 4 calls). The TV Chat page's shorter retry is logged as "trimmed" and Home doesn't count it. `serve` refuses `--env`. The speech line clears once a model is there. The setup guide recommends Qwen 3 8B for coding agents.
+- [x] [#67](https://github.com/ThatRetiredDude/TokenStation5/pull/67) Llama 3.1 and 3.2 get their RoPE frequency divisors (`rope_freqs.weight`), which ts5 ignored (merged 2026-10-24, tested on the console: same speed, 70.6 tok/s writing). A 13,463-token recall with the fact near the start passed before and after, so a harder check is still to do.
 - [x] [#60](https://github.com/ThatRetiredDude/TokenStation5/pull/60) Two more tool-call forms Coder 7B writes (merged 2026-10-24, tested on the console): a call as child elements and the call object in angle brackets (15 and 16 of 16 on the PS5); a call to a tool the request doesn't have stays text (Coder once made up `say_hello`).
 - [x] [#61](https://github.com/ThatRetiredDude/TokenStation5/pull/61), [#62](https://github.com/ThatRetiredDude/TokenStation5/pull/62) and [#64](https://github.com/ThatRetiredDude/TokenStation5/pull/64) The log no longer slows the title (merged 2026-10-24, tested on the console). On the PS5 a write to `ts5.log` could wait about a second while the TV sat idle, so a Hugging Face search took 7-8 minutes. #61 turns the network step lines off by default, #62 has a thread of its own write the busy lines (request, search and network lines) from a queue, and #64 adds Settings > LOGS > "Detailed log" (off by default) for the step lines. [#65](https://github.com/ThatRetiredDude/TokenStation5/pull/65) writes each batch in one call (FreeBSD stdio split them into 1 KiB writes, so with the detailed log on a search's results took 4 minutes to show). A search now takes 10-13 s, with the detailed log on or off. The PS5 refuses a title `pipe()`, so stdio isn't redirected.
 - [x] [#63](https://github.com/ThatRetiredDude/TokenStation5/pull/63) Hugging Face search lists chat models first (merged 2026-10-24, tested on the console); a result whose name doesn't say it's tuned for chat (base models such as QuantFactory's Qwen2.5 Coder 7B) reads "May not chat well".
