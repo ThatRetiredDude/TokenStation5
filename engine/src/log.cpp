@@ -1,5 +1,8 @@
 #include "log.h"
 
+#include <unistd.h>
+
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdarg>
@@ -35,8 +38,16 @@ Queue &queue() {
                 n->lines.clear();
                 n->writing = true;
                 lk.unlock();
-                fwrite(out.data(), 1, out.size(), stderr);
-                fflush(stderr);
+                // One write call for the lot: FreeBSD's stdio writes an
+                // unbuffered stream in BUFSIZ pieces, and on the PS5 each
+                // write can wait a second (with the detailed log on, a
+                // search's results took 4 minutes to show, 2026-10-24).
+                for (size_t off = 0; off < out.size();) {
+                    const ssize_t w = write(fileno(stderr), out.data() + off, out.size() - off);
+                    if (w < 0 && errno == EINTR) continue;
+                    if (w <= 0) break;
+                    off += (size_t)w;
+                }
                 lk.lock();
                 n->writing = false;
                 n->empty.notify_all();
