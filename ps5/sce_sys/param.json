@@ -15,7 +15,7 @@
   "conceptId": "99555",
   "contentBadgeType": 1,
   "contentId": "UP9000-PPSA99555_00-TOKENSTATION5000",
-  "contentVersion": "01.001.000",
+  "contentVersion": "01.002.000",
   "downloadDataSize": 256,
   "gameIntent": {
     "permittedIntents": [
