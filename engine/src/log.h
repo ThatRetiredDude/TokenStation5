@@ -8,14 +8,6 @@ namespace ts5 {
 // take minutes (2026-10-24). Lines keep their order. The newline is added.
 void log_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
-// Points stdout and stderr at a pipe whose lines join the queue above,
-// written to path (appended). Everything else that writes to them (RADV's
-// lines, from inside its submit lock, and printf) then never waits on the
-// file either: on the PS5, while a download writes, a write to the log
-// waited up to 8 s, and every frame waited with it (2026-10-25). False if
-// it couldn't, and they stay as they were.
-bool log_capture(const char *path);
-
 // Waits (2 s at the most) for the queued lines to be written: before the
 // title leaves, and at exit.
 void log_drain();

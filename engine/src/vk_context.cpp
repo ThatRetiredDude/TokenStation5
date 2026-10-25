@@ -1,4 +1,5 @@
 #include "vk_context.h"
+#include "log.h"
 
 #include <cstdio>
 #include <cstring>
@@ -101,12 +102,15 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
     p2.pNext = &sg;
     vkGetPhysicalDeviceProperties2(c->physical, &p2);
     c->subgroup_size = sg.subgroupSize;
-    fprintf(stderr, "ts5: %s, Vulkan %u.%u, memory heaps:", c->props.deviceName,
-            VK_API_VERSION_MAJOR(c->props.apiVersion), VK_API_VERSION_MINOR(c->props.apiVersion));
-    for (uint32_t i = 0; i < c->memory.memoryHeapCount; i++)
-        fprintf(stderr, " %.2f GiB%s", c->memory.memoryHeaps[i].size / 1073741824.0,
-                c->memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? " (device)" : "");
-    fprintf(stderr, "\n");
+    std::string heaps;
+    for (uint32_t i = 0; i < c->memory.memoryHeapCount; i++) {
+        char h[64];
+        snprintf(h, sizeof h, " %.2f GiB%s", c->memory.memoryHeaps[i].size / 1073741824.0,
+                 c->memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? " (device)" : "");
+        heaps += h;
+    }
+    ts5::log_line("ts5: %s, Vulkan %u.%u, memory heaps:%s", c->props.deviceName,
+                  VK_API_VERSION_MAJOR(c->props.apiVersion), VK_API_VERSION_MINOR(c->props.apiVersion), heaps.c_str());
 
     uint32_t nq = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(c->physical, &nq, nullptr);
