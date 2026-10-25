@@ -1103,9 +1103,10 @@ void Dashboard::draw_settings_footer(Canvas &c, const View &v) {
     const int y = 1046;
     x += key_cap(c, smallb_, x, y, "L1") + 12;
     x += c.text(small_, x, y, page_name(next(Settings)), kText2) + 40;
-    x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
-    x += c.text(small_, x, y, "\xE2\x86\x90\xE2\x86\x92  Change", kText2) + 40;
     const SettingsInfo si = settings_info(v);
+    if (!settings_.guide_open()) x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
+    const std::string arrows = settings_.arrows_do(si);
+    if (!arrows.empty()) x += c.text(small_, x, y, arrows, kText2) + 40;
     const std::string cross = settings_.cross_does(si), square = settings_.square_does(si);
     struct {
         PadGlyph g;

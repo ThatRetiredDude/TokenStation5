@@ -79,6 +79,7 @@
 #include <vector>
 
 #include "audio_probe.h"
+#include "backup.h"
 #include "canvas.h"
 #include "chat.h"
 #include "chat_store.h"
@@ -135,6 +136,11 @@ namespace {
 #ifndef TS5_DATA
 #define TS5_DATA "/data"
 #endif
+// The title's own space outside its folder, which a store update keeps
+// (backup.h).
+#ifndef TS5_STORE
+#define TS5_STORE "/download0"
+#endif
 #ifndef TS5_TITLE_ID
 #define TS5_TITLE_ID "PPSA99555"
 #endif
@@ -188,8 +194,16 @@ void notify(const std::string &text) {
 // the main loop writes them every 2 s, and leave() writes what's left.
 ts5::UsageLog usage_log(kUsage);
 
+// Settings, keys, chats and usage, copied to /download0 so a store update
+// (which swaps the whole folder) keeps them: put back at start, followed
+// every 30 s and before leaving.
+app::Backup backup(TS5_HOME, TS5_STORE "/ts5",
+                   {"ts5.env", "ts5.args", "keys.tsv", "usage.tsv", "usage.prev.tsv", "usage-hours.tsv", "results.tsv"},
+                   {"chats"});
+
 [[noreturn]] void leave(const char *path) {
     usage_log.flush();
+    backup.sync();
     printf("ts5-title: leaving (%s)\n", path);
     fflush(nullptr);
     ts5::log_drain();
@@ -557,6 +571,9 @@ int main(int, char **) {
     }
     if (freopen(kLog, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
     printf("ts5-title: TokenStation5 %s\n", TS5_VERSION);
+    // After a store update the folder is new: the last version's files come
+    // back before anything reads them.
+    backup.restore();
 
     // Not radv_enable_unified_heap_on_apu, which shows the console's memory as
     // one 11.44 GiB heap: it also takes away the GTT memory types, and RADV's
@@ -738,7 +755,8 @@ int main(int, char **) {
     app::ChatState chat_state;
     app::VoiceState voice_state;
     bool drawn_dark = false, drawn_speaking = false;
-    double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan;
+    double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan,
+           last_backup = last_scan;
     ui::SettingsInfo settings_note;  // the Settings page's last change
     // The Settings page's info: the last change, plus the keys and what an
     // app needs to connect.
@@ -919,6 +937,10 @@ int main(int, char **) {
             lib_changed |= now_ip != ip;
             ip = now_ip;
             last_ip = t;
+        }
+        if (t - last_backup > 30) {
+            backup.sync();
+            last_backup = t;
         }
 
         // Downloads that arrived: the Library lists them now, not at its next
