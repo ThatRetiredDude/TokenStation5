@@ -183,13 +183,30 @@ oldest exchanges are left out of the requests (they stay on screen).
 right (up and down choose one, cross opens it, cross again goes back): "Set
 up an app" shows what an app needs to use the PS5 (the base URL, the model,
 the key, the context window; the full guide is
-[docs/CLIENTS.md](../docs/CLIENTS.md)), and "Use it away from home" gives the
-Tailscale steps with the PS5's address filled in, and "Add models from a
+[docs/CLIENTS.md](../docs/CLIENTS.md)), "Away from home with WireGuard" gives
+the steps for the tunnel below with the PS5's addresses filled in, "Away from
+home with Tailscale" gives the Tailscale steps, and "Add models from a
 computer" gives the FTP address, the folder and the steps for copying a model
 in (see [Adding models from a computer](#adding-models-from-a-computer)). "Require a key" turns API keys on,
 "New key" names and makes one (it shows once, on its row; only its SHA-256 is
 kept, in `keys.tsv`), and each key can be turned off and on (cross) or
-removed (square twice). Then the title's settings, saved in `ts5.env` (one
+removed (square twice). Then WireGuard: devices away from home reach the API
+through an encrypted tunnel to the PS5 (`wg/`), and nothing else on the home
+network. "WireGuard" turns it on (`TS5_WIREGUARD=1`; the first time, the PS5
+makes its key pair) and "Port" sets its UDP port (`TS5_WG_PORT`, 51820), which
+the router forwards to the PS5. Each device makes its own key pair in its
+WireGuard app: at home, its browser opens `http://PS5:8081/wireguard` (the
+"Add a device" row shows the address), where it gives its name and public key
+and gets its tunnel settings (`AllowedIPs = 10.55.0.1/32`, the PS5 alone). The
+TV then says it asks to join, and cross on its row lets it in (square refuses
+it); nothing joins otherwise, and a request lapses after 10 minutes. The page
+refuses requests from inside the tunnel. Each device's row turns it off and on
+(cross) or removes it (square twice), and "This PS5's key" shows the public key
+and makes a new key pair (square twice). Over the tunnel, apps use
+`http://10.55.0.1:8081/v1`, and always need one of the keys above, whatever
+"Require a key" says: WireGuard can't be turned on until a key is. Devices and
+the PS5's key are kept in `wireguard.tsv`, which FTP reaches from the home
+network like the rest of the folder. Then the title's settings, saved in `ts5.env` (one
 change at a time, keeping the rest of the file). The longest chat reply, the chat's
 frames a second while a reply comes in, the speech model and its CPU threads
 for R1 talk, spoken replies (on or off, TV or controller speaker, the voice,
@@ -308,6 +325,7 @@ reference and says PASS or FAIL.
 | `plain.h` | plain words for the screens: what an error means and what to do, and names for models, speech models and voices |
 | `usage_store.cpp` | Home's numbers: `usage.tsv` and `usage-hours.tsv` read at start on a thread of their own, each request added as it comes, an hour's rows written once it ends |
 | `ui/` | the screen: the pages and the Models page (`dashboard`), Home (`home_page`), Logs (`logs_page`), the Chat page (`chat_page`), drawing (`canvas`, `style.h`), the TV (`display`, VK_KHR_display), the controller (`pad`), fonts and logo baked by `make_font.py` and `make_logo.py` |
+| `wg/`, `wg_devices.cpp`, `wg_page.cpp` | WireGuard: the tunnel, on lwIP and wireguard-lwip (`third_party/`) over the title's own UDP socket, passing connections on to the API; the devices and the PS5's key in `wireguard.tsv`; the page a device asks to join from |
 | `compat.c` | libc functions RADV and whisper.cpp need that titles don't get |
 | `build.sh`, `setup.sh` | the build |
 | `check-imports.py` | fails the build on imports that would be NULL on the console |

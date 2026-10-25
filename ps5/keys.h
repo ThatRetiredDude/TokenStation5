@@ -40,8 +40,10 @@ public:
     void set_required(bool r) { required_ = r; }
     bool required() const { return required_; }
     // Server::Authorize: whether a request with this key from this address
-    // gets in, and the key's name. Any thread.
-    bool authorize(const std::string &key, const std::string &client, std::string &name);
+    // gets in, and the key's name. need_key: only with a key that's on,
+    // whatever Require a key says (a device in the WireGuard tunnel). Any
+    // thread.
+    bool authorize(const std::string &key, const std::string &client, std::string &name, bool need_key = false);
     // Writes the last-used times if they changed, at most once a minute
     // (now: Unix seconds). The main loop calls it.
     void save_used(int64_t now);

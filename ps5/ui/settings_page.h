@@ -9,7 +9,12 @@
 // has the instructions (cross opens their list on the right, up and down
 // choose a guide, cross opens it and cross again goes back), turns "Require a key" on and off, makes API
 // keys (keys.h; cross names a new one, and it shows once on its row) and
-// turns each key on and off (cross) or removes it (square twice).
+// turns each key on and off (cross) or removes it (square twice). The
+// WIREGUARD section turns the tunnel on and off (wg/wg.h), approves (cross)
+// or refuses (square) a device asking to join, shows the address a device
+// asks from, turns each device on and off (cross) or removes it (square
+// twice), shows this PS5's public key and makes it a new key pair (square
+// twice), and sets the port.
 #pragma once
 #include <cstdint>
 #include <map>
@@ -28,6 +33,24 @@ struct ApiKeyInfo {
     int64_t created = 0, used = 0;  // Unix seconds; used 0: never
 };
 
+// A WireGuard device as the page shows it (wg_devices.h, with what the
+// tunnel says of it).
+struct WgDeviceInfo {
+    std::string id, name, address;  // address: its address in the tunnel
+    bool on = true;
+    int64_t added = 0;    // Unix seconds
+    bool up = false;      // connected now
+    double seen_s = -1;   // seconds since it last sent anything, -1: not this run
+};
+
+struct WgInfo {
+    std::string public_key;  // the PS5's; "" until WireGuard is first turned on
+    std::string problem;     // what's wrong with the tunnel, in plain words; "" if nothing
+    std::vector<WgDeviceInfo> devices;
+    bool waiting = false;  // a device asks to join
+    std::string waiting_name, waiting_address, waiting_from;  // from: its address on the home network
+};
+
 // What the page shows besides the settings themselves.
 struct SettingsInfo {
     std::vector<ApiKeyInfo> keys;
@@ -36,11 +59,13 @@ struct SettingsInfo {
     bool on_network = false;
     std::string model_id;  // the served model's id in the API ("" with none)
     int n_ctx = 0;         // its context
+    int api_port = 8081;   // the API's port, which WireGuard passes on
     std::vector<std::string> speech_models;  // ggml-*.bin in the models folder
     std::string speech_model;                // the one talking uses
     std::vector<std::string> voices;         // Kokoro's voices there (kokoro-voice-NAME.gguf), by NAME
     bool kokoro_model = false;               // Kokoro's model is there too
     std::map<std::string, app::Download> downloads;  // by catalog key
+    WgInfo wg;
     std::string note;                        // the last change: saved, or why not
     bool note_failed = false;
     double note_at = -1e9;  // when (now's clock)
@@ -59,6 +84,10 @@ struct SettingChange {
     bool new_key = false;  // name a new API key on the console's keyboard
     std::string key_id;    // an API key to turn on or off (key_on), or to remove
     bool key_on = false, key_remove = false;
+    std::string wg_device;  // a WireGuard device to turn on or off (wg_on), or to remove
+    bool wg_on = false, wg_remove = false;
+    bool wg_new_key = false;  // a new key pair for this PS5
+    int wg_answer = 0;        // the device asking to join: 1 let it in, -1 refuse it
 };
 
 class SettingsPage {
@@ -85,6 +114,7 @@ private:
     int scroll_ = 0;
     double confirm_at_ = -1e9;  // square once on a key: press again to remove it
     std::string fresh_seen_;    // the fresh key the selection last moved to
+    std::string asking_seen_;   // the WireGuard request the selection last moved to
     bool in_guide_ = false;     // inside the Instructions row's panel
     int link_ = 0, open_ = -1;  // the guide chosen there, and the one open (-1: the list)
 };

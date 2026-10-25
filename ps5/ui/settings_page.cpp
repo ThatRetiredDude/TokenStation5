@@ -22,18 +22,21 @@ struct Choice {
 // One setting: NAME in ts5.env, and what reads it does with it. No choices:
 // a key, typed on the console's keyboard, or files in the models folder.
 // The APPS section also has rows that aren't settings: the instructions,
-// making a key, and a row per API key (name: its id).
+// making a key, and a row per API key (name: its id). So has WIREGUARD: a
+// device asking to join, how to add one, a row per device (name: its id)
+// and this PS5's key.
 struct Row {
     std::string section, name, label, help, applies;
     std::vector<Choice> choices;
     std::string def;  // the value with nothing in ts5.env, as each reader's default
     bool files = false;
-    enum Kind { Setting, Guide, NewKey, ApiKey } kind = Setting;
+    enum Kind { Setting, Guide, NewKey, ApiKey, WgRequest, WgAdd, WgDevice, WgKey } kind = Setting;
 };
 
 constexpr const char *kSpeechModel = "TS5_WHISPER_MODEL", *kVoice = "TS5_TTS_VOICE";
 // Not ..._KEY: a name ending in _KEY is a secret, typed in (settings.h).
 constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
+constexpr const char *kWireGuard = "TS5_WIREGUARD", *kWgPort = "TS5_WG_PORT";
 // The voice with no TS5_TTS_VOICE, if it's there (tts/synth.h).
 constexpr const char *kDefaultVoice = "af_heart";
 constexpr int kRowH = 64, kHeadH = 44, kGap = 8;
@@ -45,14 +48,18 @@ struct GuideLink {
 const GuideLink kGuides[] = {
     {"Set up an app", "Use the models from Kilo Code, Continue, Cline, Open WebUI and more.",
      "Any app that takes an OpenAI-compatible provider can use the models on this PS5. Give it these:"},
-    {"Use it away from home", "Reach this PS5 from your phone or laptop anywhere, privately, with Tailscale.",
-     "Don't open the PS5's port on your router: anyone could find it, and keys would cross the internet "
+    {"Away from home with WireGuard", "An encrypted tunnel from your computer, phone or tablet.",
+     "Only devices you approve here can use the tunnel, and it reaches TokenStation5 alone. Each device makes "
+     "its own key pair: this PS5 gets only the public half."},
+    {"Away from home with Tailscale", "Through a computer at home, with no port open on the router.",
+     "Never forward the API's own port on your router: anyone could find it, and keys would cross the internet "
      "unprotected. Tailscale keeps it private, through a computer that stays on at home."},
     {"Add models from a computer", "Copy models over your network with FTP, much faster than downloading here.",
      "Big downloads on the PS5 slow down after the first few hundred MB: the PS5 seems to limit how fast apps "
      "can save. FTP from a computer is much faster."},
 };
 constexpr int kGuideCount = sizeof kGuides / sizeof kGuides[0];
+enum { kGuideApp, kGuideWireGuard, kGuideTailscale, kGuideFtp };
 constexpr int kLinkH = 104;
 constexpr double kNoteFor = 6, kConfirmFor = 4;
 
@@ -128,8 +135,20 @@ const ApiKeyInfo *key_of(const Row &r, const SettingsInfo &info) {
     return nullptr;
 }
 
+const WgDeviceInfo *device_of(const Row &r, const SettingsInfo &info) {
+    if (r.kind != Row::WgDevice) return nullptr;
+    for (const WgDeviceInfo &d : info.wg.devices)
+        if (d.id == r.name) return &d;
+    return nullptr;
+}
+
+// What tells one WireGuard request from the next, "" with none.
+std::string asking(const SettingsInfo &info) {
+    return info.wg.waiting ? info.wg.waiting_name + "\t" + info.wg.waiting_address + "\t" + info.wg.waiting_from : "";
+}
+
 // The page's rows: APPS (the instructions, the key setting, making a key and
-// the keys), then the settings.
+// the keys), WIREGUARD, then the settings.
 std::vector<Row> rows(const SettingsInfo &info) {
     std::vector<Row> r;
     r.push_back({"APPS", "", "Instructions", "How to use the models on this PS5 from your apps, at home and away, and how to add more.",
@@ -148,6 +167,36 @@ std::vector<Row> rows(const SettingsInfo &info) {
                      "An app sends this key to use the models. Turn it off to shut that app out without removing "
                      "the key.",
                      "From the next request", {{"1", "On"}, {"0", "Off"}}, "", false, Row::ApiKey});
+    r.push_back({"WIREGUARD", kWireGuard, "WireGuard",
+                 "Reach this PS5 away from home from your computer, phone or tablet, through an encrypted tunnel "
+                 "that only devices you approve can use. It needs a port forwarded on your router: see "
+                 "Instructions, at the top. Off: nothing listens for it.",
+                 "Now", {{"1", "On"}, {"0", "Off"}}, "0"});
+    if (info.wg.waiting)
+        r.push_back({"WIREGUARD", "", info.wg.waiting_name + " asks to join",
+                     "A device asked to join from the Add a device page on your home network. Let it in only if "
+                     "you asked from it yourself, just now.",
+                     "", {}, "", false, Row::WgRequest});
+    r.push_back({"WIREGUARD", "", "Add a device",
+                 "Each device makes its own key pair in its WireGuard app and gives this PS5 only the public half, "
+                 "from a page in its browser on your home network. Then you let it in here.",
+                 "", {}, "", false, Row::WgAdd});
+    for (const WgDeviceInfo &d : info.wg.devices)
+        r.push_back({"WIREGUARD", d.id, d.name,
+                     "A device that can reach this PS5 through WireGuard. Turn it off to shut it out without "
+                     "removing it.",
+                     "Now", {{"1", "On"}, {"0", "Off"}}, "", false, Row::WgDevice});
+    r.push_back({"WIREGUARD", "", "This PS5's key",
+                 "Devices know this PS5 by its public key. Its private key is kept in the app's folder, which FTP "
+                 "can reach from your home network: if you think it got out, make a new key pair, and give each "
+                 "device the new public key.",
+                 "", {}, "", false, Row::WgKey});
+    r.push_back({"WIREGUARD", kWgPort, "Port",
+                 "The UDP port WireGuard listens on. Forward it on your router to this PS5. Change it only if "
+                 "something else uses it.",
+                 "Now", {{"51820", "51820"}, {"51821", "51821"}, {"51822", "51822"}, {"51823", "51823"},
+                         {"51824", "51824"}},
+                 "51820"});
     const auto &s = setting_rows();
     r.insert(r.end(), s.begin(), s.end());
     return r;
@@ -162,6 +211,23 @@ std::string date_of(int64_t t) {
     struct tm g;
     if (!gmtime_r(&tt, &g)) return "";
     return std::to_string(g.tm_mday) + " " + months[g.tm_mon % 12] + " " + std::to_string(g.tm_year + 1900);
+}
+
+// "Just now", "12 minutes ago"; s < 0: not since the title opened.
+std::string ago(double s) {
+    if (s < 0) return "Not since TokenStation5 opened";
+    if (s < 90) return "Just now";
+    if (s < 90 * 60) return std::to_string((int)(s / 60 + 0.5)) + " minutes ago";
+    const int h = (int)(s / 3600 + 0.5);
+    return std::to_string(h) + (h == 1 ? " hour ago" : " hours ago");
+}
+
+// The page a device asks to join from: the base URL with /wireguard for /v1.
+std::string join_url(const SettingsInfo &info) {
+    std::string u = info.url;
+    const size_t v1 = u.rfind("/v1");
+    if (v1 != std::string::npos && v1 + 3 == u.size()) u.resize(v1);
+    return u + "/wireguard";
 }
 
 bool is_key(const Row &r) { return r.kind == Row::Setting && app::secret_setting(r.name); }
@@ -247,6 +313,10 @@ std::string shown(const Row &r, const SettingsInfo &info) {
     if (r.kind == Row::Guide) return "Open";
     if (r.kind == Row::NewKey) return "Make one";
     if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "On" : "Off";
+    if (r.kind == Row::WgRequest) return "Waiting";
+    if (r.kind == Row::WgAdd) return "How";
+    if (r.kind == Row::WgKey) return info.wg.public_key.empty() ? "None yet" : "Show";
+    if (const WgDeviceInfo *d = device_of(r, info)) return !d->on ? "Off" : d->up ? "Connected" : "On";
     if (is_key(r)) return current(r).empty() ? "Not set" : "Set";
     const auto cs = choices(r, info);
     if (r.files && cs.empty()) {
@@ -268,12 +338,18 @@ std::string shown(const Row &r, const SettingsInfo &info) {
 }
 
 // Keeps sel in range, and moves it to a key just made (once), so its row
-// shows the key.
-void follow(const std::vector<Row> &rs, const SettingsInfo &info, int &sel, std::string &seen) {
+// shows the key, and to a device asking to join WireGuard (once).
+void follow(const std::vector<Row> &rs, const SettingsInfo &info, int &sel, std::string &seen,
+            std::string &asking_seen) {
     if (info.fresh_key_id != seen) {
         seen = info.fresh_key_id;
         for (size_t i = 0; i < rs.size(); i++)
             if (rs[i].kind == Row::ApiKey && rs[i].name == seen) sel = (int)i;
+    }
+    if (asking(info) != asking_seen) {
+        asking_seen = asking(info);
+        for (size_t i = 0; i < rs.size(); i++)
+            if (rs[i].kind == Row::WgRequest) sel = (int)i;
     }
     sel = std::max(0, std::min(sel, (int)rs.size() - 1));
 }
@@ -308,7 +384,7 @@ SettingsPage::SettingsPage(const Fonts &fonts)
 SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
     SettingChange ch;
     const auto rs = rows(info);
-    follow(rs, info, sel_, fresh_seen_);
+    follow(rs, info, sel_, fresh_seen_, asking_seen_);
     if (rs[sel_].kind != Row::Guide) in_guide_ = false;
     if (in_guide_) {
         // In the instructions: up and down choose a guide, cross or right
@@ -339,6 +415,38 @@ SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
     }
     if (r.kind == Row::NewKey) {
         ch.new_key = (b & kCross) != 0;
+        return ch;
+    }
+    if (r.kind == Row::WgAdd) return ch;
+    if (r.kind == Row::WgRequest) {
+        ch.wg_answer = (b & kCross) ? 1 : (b & kSquare) ? -1 : 0;
+        return ch;
+    }
+    if (r.kind == Row::WgKey) {
+        if ((b & kSquare) && !info.wg.public_key.empty()) {
+            if (info.now - confirm_at_ < kConfirmFor) {
+                ch.wg_new_key = true;
+                confirm_at_ = -1e9;
+            } else {
+                confirm_at_ = info.now;
+            }
+        }
+        return ch;
+    }
+    if (const WgDeviceInfo *d = device_of(r, info)) {
+        const bool want = (b & kCross) ? !d->on : (b & kLeft) ? true : (b & kRight) ? false : d->on;
+        if (want != d->on) {
+            ch.wg_device = d->id;
+            ch.wg_on = want;
+        } else if (b & kSquare) {
+            if (info.now - confirm_at_ < kConfirmFor) {
+                ch.wg_device = d->id;
+                ch.wg_remove = true;
+                confirm_at_ = -1e9;
+            } else {
+                confirm_at_ = info.now;
+            }
+        }
         return ch;
     }
     if (const ApiKeyInfo *k = key_of(r, info)) {
@@ -403,7 +511,7 @@ SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
 void SettingsPage::draw(Canvas &c, const SettingsInfo &info, int x, int y, int w, int h) {
     c.text(h2_, x + 32, y + 50, "Settings", kText);
     const auto rs = rows(info);
-    follow(rs, info, sel_, fresh_seen_);
+    follow(rs, info, sel_, fresh_seen_, asking_seen_);
 
     // Rows under their sections, scrolled so the chosen one shows.
     struct Place {
@@ -450,7 +558,10 @@ void SettingsPage::draw(Canvas &c, const SettingsInfo &info, int x, int y, int w
             c.segment((float)right - 4, (float)cy, (float)right - 12, (float)cy + 8, 2.5f, kAccent);
             right -= 28;
         }
-        const Color vc = is_key(r) ? (current(r).empty() ? kText2 : kGreen) : sel ? kAccent : kText2;
+        const Color vc = is_key(r)                  ? (current(r).empty() ? kText2 : kGreen)
+                         : r.kind == Row::WgRequest ? kAmber
+                         : sel                      ? kAccent
+                                                    : kText2;
         const int vx = c.text_right(bodyb_, right, ry + 42, v, vc);
         if (sel && changeable) {
             const int ax = vx - 16, cy = ry + kRowH / 2;
@@ -514,7 +625,7 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
     std::string host = info.url;
     if (host.rfind("http://", 0) == 0) host = host.substr(7);
     host = host.substr(0, host.find(':'));
-    if (open == 0) {
+    if (open == kGuideApp) {
         ty -= 12;
         if (info.on_network) field("BASE URL", info.url, kAccent, bodyb_);
         else field("BASE URL", "Connect the PS5 to your network first", kAmber, body_);
@@ -532,7 +643,28 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
              "files and run commands, Qwen 3 8B does best: Qwen 2.5 Coder 7B writes the code but often stops "
              "before the next step.",
              kText2);
-    } else if (open == 1) {
+    } else if (open == kGuideWireGuard) {
+        ty -= 12;
+        const std::string port = app::setting(kWgPort, "51820");
+        if (info.on_network) field("ADD A DEVICE AT", join_url(info), kAccent, bodyb_);
+        else field("ADD A DEVICE AT", "Connect the PS5 to your network first", kAmber, body_);
+        para("1. Turn on WireGuard, under WireGuard on the left. On your router, forward UDP port " + port +
+                 " to this PS5, and keep the PS5's address fixed with a DHCP reservation.",
+             kText);
+        ty += 8;
+        para("2. Install WireGuard on your computer, phone or tablet. At home, open the address above in its "
+             "browser and follow the steps there.",
+             kText);
+        ty += 8;
+        para("3. Let the device in here when it asks. Away from home, with its tunnel on, apps use "
+             "http://10.55.0.1:" + std::to_string(info.api_port) + "/v1 and one of your keys: over WireGuard a key "
+             "is always needed.",
+             kText);
+        ty += 8;
+        para("If your internet provider shares one address among many homes (CGNAT), a forwarded port can't be "
+             "reached: use Tailscale instead.",
+             kText2);
+    } else if (open == kGuideTailscale) {
         ty -= 12;
         if (info.on_network) field("THIS PS5'S ADDRESS", host, kAccent, bodyb_);
         else field("THIS PS5'S ADDRESS", "Connect the PS5 to your network first", kAmber, body_);
@@ -550,7 +682,7 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
              "under Apps on the left too, and keep the PS5's address fixed with a DHCP reservation in your "
              "router.",
              kText);
-    } else if (open == 2) {
+    } else if (open == kGuideFtp) {
         ty -= 12;
         // ftpsrv, which the jailbreak runs, listens on 2121.
         if (info.on_network) field("FTP ADDRESS", "ftp://" + host + ":2121", kAccent, bodyb_);
@@ -576,6 +708,56 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
         ty += 56;
         if (info.keys.empty()) para("You have no keys yet.", kMuted);
         else para("You have " + std::to_string(info.keys.size()) + (info.keys.size() == 1 ? " key." : " keys."), kMuted);
+    } else if (r.kind == Row::WgRequest) {
+        field("ASKED FROM", info.wg.waiting_from + " on your home network", kText, bodyb_);
+        field("ITS ADDRESS IN THE TUNNEL", info.wg.waiting_address, kText, bodyb_);
+        text_glyph(c, body_, dx, ty + 8, "Press", kGlyphCross, "to let it in.", kText);
+        ty += 48;
+        text_glyph(c, body_, dx, ty + 8, "Press", kGlyphSquare, "to refuse it.", kText2);
+        ty += 56;
+        para("The request lapses after 10 minutes.", kMuted);
+    } else if (r.kind == Row::WgAdd) {
+        const char *open_label = "ON THE DEVICE, OPEN";
+        if (!info.on_network) field(open_label, "Connect the PS5 to your network first", kAmber, body_);
+        else if (app::setting(kWireGuard, "0") != "1") field(open_label, "Turn on WireGuard above first", kAmber, body_);
+        else field(open_label, join_url(info), kAccent, bodyb_);
+        para("1. Install WireGuard on the device, from wireguard.com/install or its app store.", kText);
+        ty += 8;
+        para("2. At home, open the address above in the device's browser and follow the steps there: the "
+             "device's WireGuard app makes its key pair, and you paste in its public key.",
+             kText);
+        ty += 8;
+        para("3. Let it in here when it asks to join.", kText);
+        ty += 8;
+        para("Instructions, at the top, has the rest: the port on your router, and the address apps use.", kText2);
+    } else if (const WgDeviceInfo *d = device_of(r, info)) {
+        field("NOW", !d->on ? "Off" : d->up ? "Connected" : "On, not connected", !d->on ? kText2 : d->up ? kGreen : kText,
+              bodyb_);
+        c.text(smallb_, dx, ty, "ADDRESS IN THE TUNNEL", kMuted);
+        c.text(smallb_, dx + dw / 2, ty, "ADDED", kMuted);
+        c.text(body_, dx, ty + 38, d->address, kText2, dw / 2 - 16);
+        c.text(body_, dx + dw / 2, ty + 38, date_of(d->added), kText2, dw / 2);
+        ty += 92;
+        field("LAST HEARD FROM", ago(d->seen_s), kText2, body_);
+        text_glyph(c, small_, dx, ty, "Press", kGlyphCross, d->on ? "to turn it off." : "to turn it on.", kText2);
+        ty += 40;
+        const bool confirming = info.now - confirm_at_ < kConfirmFor;
+        text_glyph(c, small_, dx, ty, confirming ? "Press" : "", kGlyphSquare,
+                   confirming ? "again to remove the device" : "Remove the device", confirming ? kAmber : kText2);
+        ty += 40;
+    } else if (r.kind == Row::WgKey) {
+        if (info.wg.public_key.empty()) {
+            field("PUBLIC KEY", "Made when you first turn on WireGuard", kText2, body_);
+        } else {
+            field("PUBLIC KEY", info.wg.public_key, kAccent, bodyb_);
+            para("The Add a device page gives it to each device. Its private half never leaves this PS5.", kText2);
+            ty += 16;
+            const bool confirming = info.now - confirm_at_ < kConfirmFor;
+            text_glyph(c, small_, dx, ty, confirming ? "Press" : "", kGlyphSquare,
+                       confirming ? "again to make a new key pair" : "Make a new key pair", confirming ? kAmber : kText2);
+            ty += 40;
+            if (confirming) para("Every device then needs the new public key before it can connect again.", kAmber);
+        }
     } else if (const ApiKeyInfo *k = key_of(r, info)) {
         if (k->id == info.fresh_key_id && !info.fresh_key.empty()) {
             field("YOUR KEY", info.fresh_key, kAccent, h2_);
@@ -676,6 +858,15 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
             ty += 42;
         }
         ty += 20;
+        if (r.name == kWireGuard && !info.wg.problem.empty()) para(info.wg.problem, kRed);
+        else if (r.name == kWireGuard && current(r) == "1") {
+            const long on = std::count_if(info.wg.devices.begin(), info.wg.devices.end(),
+                                          [](const WgDeviceInfo &d) { return d.on; });
+            para(info.wg.devices.empty() ? "No devices yet: see Add a device below."
+                 : on == 0               ? "Every device is turned off."
+                                         : std::to_string(on) + (on == 1 ? " device can use it." : " devices can use it."),
+                 kText2);
+        }
     }
 
     // Bottom: when a change counts.
@@ -695,6 +886,9 @@ std::string SettingsPage::cross_does(const SettingsInfo &info) const {
     if (r.kind == Row::Guide) return in_guide_ && open_ >= 0 ? "Back" : "Open";
     if (r.kind == Row::NewKey) return "New key";
     if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "Turn off" : "Turn on";
+    if (r.kind == Row::WgRequest) return "Let it in";
+    if (r.kind == Row::WgAdd || r.kind == Row::WgKey) return "";
+    if (const WgDeviceInfo *d = device_of(r, info)) return d->on ? "Turn off" : "Turn on";
     if (is_key(r)) return "Type";
     const auto keys = missing(r, info);
     if (!keys.empty()) {
@@ -707,6 +901,7 @@ std::string SettingsPage::cross_does(const SettingsInfo &info) const {
 std::string SettingsPage::arrows_do(const SettingsInfo &info) const {
     const auto rs = rows(info);
     const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
+    if (r.kind == Row::WgRequest || r.kind == Row::WgAdd || r.kind == Row::WgKey) return "";
     if (r.kind != Row::Guide) return "\xE2\x86\x90\xE2\x86\x92  Change";
     if (!in_guide_) return "";
     return open_ >= 0 ? "" : "\xE2\x86\x90  Back to the settings";  // on a guide, cross says Back
@@ -715,8 +910,10 @@ std::string SettingsPage::arrows_do(const SettingsInfo &info) const {
 std::string SettingsPage::square_does(const SettingsInfo &info) const {
     const auto rs = rows(info);
     const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
-    if (r.kind == Row::Guide || r.kind == Row::NewKey) return "";
-    if (r.kind == Row::ApiKey || is_key(r)) return "Remove";
+    if (r.kind == Row::Guide || r.kind == Row::NewKey || r.kind == Row::WgAdd) return "";
+    if (r.kind == Row::WgRequest) return "Refuse";
+    if (r.kind == Row::WgKey) return info.wg.public_key.empty() ? "" : "New key pair";
+    if (r.kind == Row::ApiKey || r.kind == Row::WgDevice || is_key(r)) return "Remove";
     return "Default";
 }
 
