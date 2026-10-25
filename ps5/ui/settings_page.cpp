@@ -50,7 +50,7 @@ const GuideLink kGuides[] = {
      "unprotected. Tailscale keeps it private, through a computer that stays on at home."},
     {"Add models from a computer", "Copy models over your network with FTP, much faster than downloading here.",
      "Big downloads on the PS5 slow down after the first few hundred MB: the PS5 seems to limit how fast apps "
-     "can save. Copying a model from a computer over FTP is much faster."},
+     "can save. FTP from a computer is much faster."},
 };
 constexpr int kGuideCount = sizeof kGuides / sizeof kGuides[0];
 constexpr int kLinkH = 104;
