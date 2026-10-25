@@ -83,7 +83,7 @@ LAN (`engine/tests/fetch_test.py`, which can drop, throttle and redirect).
 
 ## Adding models from a computer
 
-The screens on the TV don't show paths or commands; this is the guide they
+The screens on the TV don't show commands; this is the guide they
 point to ("the TokenStation5 guide shows how"). Everything goes in the
 title's `models` folder, `/data/homebrew/PPSA99555/models` over FTP (port
 2121), and shows up on the Models page or in Settings by itself within a few
