@@ -55,6 +55,12 @@ on at home shares the PS5's address with your devices as a
    routes on their own; another Linux machine needs
    `tailscale up --accept-routes`.
 
+Instead of a subnet route, the home computer can also pass the API on with
+[Tailscale Serve](https://tailscale.com/kb/1312/serve):
+`tailscale serve --bg http://192.168.1.50:8081`. Your devices then use
+`https://<home computer's name>.<your tailnet>.ts.net/v1` as the base URL,
+with no route to approve and https from Tailscale.
+
 Turn on "Require a key" in Settings as well, and keep the PS5's address fixed
 with a DHCP reservation, since the route names one address. Settings on the
 TV has the same steps, with this PS5's address filled in, under Apps: "Use it
