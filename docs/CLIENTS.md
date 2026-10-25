@@ -16,7 +16,7 @@ the PS5 has to refuse it. Coding tools send a long first prompt (10,000 to
 `-c auto` (the default: as much context as fits) rather than a small fixed
 context.
 
-All of it is on the TV too: Settings, under Apps, "Set up an app" shows the
+All of it is on the TV too: Settings, under Apps, Instructions, "Set up an app" shows the
 base URL, the model, the key to use and the context window. A DHCP
 reservation in the router keeps the address from changing.
 
@@ -63,8 +63,8 @@ with no route to approve and https from Tailscale.
 
 Turn on "Require a key" in Settings as well, and keep the PS5's address fixed
 with a DHCP reservation, since the route names one address. Settings on the
-TV has the same steps, with this PS5's address filled in, under Apps: "Use it
-away from home".
+TV has the same steps, with this PS5's address filled in, under Apps,
+Instructions: "Use it away from home".
 
 ## Kilo Code
 
