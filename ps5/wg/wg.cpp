@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -254,6 +255,21 @@ void on_err(void *arg, err_t err) {
     if (c) c->pcb = nullptr;  // lwIP freed it
 }
 
+// Non-blocking, both ways: on the PS5, O_NONBLOCK through fcntl didn't take
+// on a socket (2026-10-25: a recv on the API's socket held the tunnel's
+// thread for good), so FIONBIO too, and every call passes MSG_DONTWAIT.
+void nonblocking(int fd) {
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    int one = 1;
+    ioctl(fd, FIONBIO, &one);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+}
+
+bool detail() {
+    const char *on = getenv("TS5_NET_LOG");
+    return on && strcmp(on, "1") == 0;
+}
+
 err_t on_accept(void *arg, tcp_pcb *pcb, err_t err) {
     Loop &L = *(Loop *)arg;
     if (err != ERR_OK || !pcb) return ERR_VAL;
@@ -271,8 +287,7 @@ err_t on_accept(void *arg, tcp_pcb *pcb, err_t err) {
         tcp_abort(pcb);
         return ERR_ABRT;
     }
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
-    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    nonblocking(fd);
     const int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     Conn *c = new Conn;
@@ -301,6 +316,9 @@ err_t on_accept(void *arg, tcp_pcb *pcb, err_t err) {
     tcp_err(pcb, on_err);
     tcp_nagle_disable(pcb);  // streamed tokens go out as they come
     L.conns.push_back(c);
+    if (detail())
+        ts5::log_line("ts5-title: wireguard: tcp: %s connects, API socket from port %u%s", from.c_str(), c->local_port,
+                      c->connecting ? ", connecting" : ", connected");
     return ERR_OK;
 }
 
@@ -328,8 +346,7 @@ std::string open_udp(Loop &L, int port) {
                : e == EACCES   ? "port " + std::to_string(port) + " is refused by the PS5"
                                : "can't use port " + std::to_string(port) + " (errno " + std::to_string(e) + ")";
     }
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
-    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    nonblocking(fd);
     L.udp = fd;
     L.udp_port = port;
     L.received = L.traced = 0;
@@ -405,21 +422,29 @@ void drop_conns(Loop &L) {
 
 // Moves what it can between the device and the API; false once it's over.
 bool pump(Loop &L, Conn *c, short revents) {
-    if (c->connecting && (revents & (POLLOUT | POLLERR | POLLHUP))) {
+    // Whatever poll said (on the PS5 it didn't say a socket was ready): a
+    // connection with a peer has connected; one with an error has failed.
+    (void)revents;
+    if (c->connecting) {
         int e = 0;
         socklen_t len = sizeof e;
         getsockopt(c->fd, SOL_SOCKET, SO_ERROR, &e, &len);
+        sockaddr_in peer{};
+        socklen_t plen = sizeof peer;
         if (e != 0) {
             ts5::log_line("ts5-title: wireguard: can't reach the API (errno %d)", e);
             c->api_eof = true;
             c->to_api.clear();
+            c->connecting = false;
+        } else if (getpeername(c->fd, (sockaddr *)&peer, &plen) == 0) {
+            c->connecting = false;
+            if (detail()) ts5::log_line("ts5-title: wireguard: tcp: API socket from port %u connected", c->local_port);
         }
-        c->connecting = false;
     }
     if (c->connecting) return true;
     // Device to API.
     if (!c->to_api.empty() && !c->api_eof) {
-        const ssize_t n = ::send(c->fd, c->to_api.data(), c->to_api.size(), MSG_NOSIGNAL);
+        const ssize_t n = ::send(c->fd, c->to_api.data(), c->to_api.size(), MSG_NOSIGNAL | MSG_DONTWAIT);
         if (n > 0) {
             c->to_api.erase(0, (size_t)n);
             // The window opens again by what the API took (tcp_recved takes 16 bits at a time).
@@ -442,7 +467,7 @@ bool pump(Loop &L, Conn *c, short revents) {
         size_t room = tcp_sndbuf(c->pcb);
         while (room > 0) {
             char buf[16384];
-            const ssize_t n = ::recv(c->fd, buf, room < sizeof buf ? room : sizeof buf, 0);
+            const ssize_t n = ::recv(c->fd, buf, room < sizeof buf ? room : sizeof buf, MSG_DONTWAIT);
             if (n > 0) {
                 if (tcp_write(c->pcb, buf, (u16_t)n, TCP_WRITE_FLAG_COPY) != ERR_OK) break;  // lwIP is out of room; retry later
                 room -= (size_t)n;
@@ -512,7 +537,7 @@ void Tunnel::loop() {
     ts5::log_line("ts5-title: wireguard: the PS5 is %s in the tunnel, key %s", cfg.address.c_str(),
                   public_key_of(cfg.private_key).c_str());
 
-    double last_states = 0;
+    double last_states = 0, pass_at = 0;
     std::vector<pollfd> fds;
     while (!quit_) {
         bool changed;
@@ -562,6 +587,9 @@ void Tunnel::loop() {
         }
         u32_t sleep_ms = sys_timeouts_sleeptime();
         if (sleep_ms > 50) sleep_ms = 50;  // apply() and lwIP's send buffer are checked this often
+        // With connections open, more often: on the PS5 poll doesn't wake for
+        // a socket that's ready, so this is how soon their data moves on.
+        if (!L.conns.empty() && sleep_ms > 5) sleep_ms = 5;
         if (fds.empty()) usleep(sleep_ms * 1000);
         else if (poll(fds.data(), (nfds_t)fds.size(), (int)sleep_ms) < 0) {
             // Then every socket is tried: they're all non-blocking.
@@ -591,8 +619,7 @@ void Tunnel::loop() {
                 // Detailed log: each packet (the first 200 since the port
                 // opened), its WireGuard type (1 a handshake, 4 data) and
                 // whether the PS5 answered it.
-                const char *detail = getenv("TS5_NET_LOG");
-                if (detail && strcmp(detail, "1") == 0 && L.traced < 200) {
+                if (detail() && L.traced < 200) {
                     L.traced++;
                     const std::string what = ts5_wg_sent > sent ? "answered, " + std::to_string(ts5_wg_sent_bytes) + " bytes"
                                              : ts5_wg_send_failed > failed
@@ -617,6 +644,10 @@ void Tunnel::loop() {
         sys_check_timeouts();
 
         const double t = now_s();
+        // A pass that took long: something held the thread.
+        if (pass_at > 0 && t - pass_at > 1)
+            ts5::log_line("ts5-title: wireguard: one pass of the tunnel took %.1f s", t - pass_at);
+        pass_at = t;
         if (t - last_states >= 0.5) {
             last_states = t;
             std::vector<PeerState> states;
