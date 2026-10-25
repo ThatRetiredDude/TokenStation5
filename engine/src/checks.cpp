@@ -1,4 +1,5 @@
 #include "checks.h"
+#include "log.h"
 
 #include <algorithm>
 #include <chrono>
@@ -98,7 +99,7 @@ void save_ref(const std::string &model, int n, int n_vocab, KvType kv, const std
     if (ok) ok = rename(part.c_str(), path.c_str()) == 0;
     if (!ok) {
         remove(part.c_str());
-        fprintf(stderr, "ts5: couldn't save the CPU's answers to %s\n", path.c_str());
+        ts5::log_line("ts5: couldn't save the CPU's answers to %s", path.c_str());
     }
 }
 
