@@ -548,6 +548,33 @@ void write_probe() {
     printf("ts5-title: write probe: done\n");
 }
 
+// How long each pass of the main loop takes, and in which step: a pass
+// over 1 s means the TV's picture and the controller waited that long, and
+// the log says where (on the PS5 a file write can wait behind a download's).
+struct LoopTimer {
+    double start = 0, last = 0, worst_s = 0;
+    const char *worst = "";
+    void begin(double t) {
+        start = last = t;
+        worst_s = 0;
+        worst = "";
+    }
+    // The step that just ended.
+    void mark(const char *step) {
+        const double t = app::now_s();
+        if (t - last > worst_s) {
+            worst_s = t - last;
+            worst = step;
+        }
+        last = t;
+    }
+    void end() {
+        const double t = app::now_s();
+        if (t - start > 1.0)
+            ts5::log_line("ts5-title: the screen waited %.1f s (%.1f s of it in %s)", t - start, worst_s, worst);
+    }
+};
+
 // The address apps use, or "" while the console isn't on a network.
 std::string network_url() {
     {
@@ -786,11 +813,14 @@ int main(int, char **) {
     std::string pc_typed;         // from the PC's type file, in place of the keyboard
     bool pc_typing = false;
     app::EnterKey enter_key;      // a USB or Bluetooth keyboard's Enter
+    LoopTimer timer;
     for (;;) {
         const double t = app::now_s();
+        timer.begin(t);
         // Read each time: the Settings page changes them.
         const double dim = dim_after(), chat_period = 1.0 / chat_fps();
         uint32_t buttons = pad.poll();
+        timer.mark("the controller");
         // Presses from the PC, one per frame.
         std::vector<std::string> words;
         if (presses.empty() && take_written(kPress, words))
@@ -809,6 +839,7 @@ int main(int, char **) {
             if (kind == 'r') pc_held &= ~b;
             presses.pop_front();
         }
+        timer.mark("the PC's press file");
         // Enter on a keyboard does on the chat page what cross does: it opens
         // the console's keyboard.
         if (enter_key.poll(dash.page() == ui::Dashboard::Chat && !keyboard.is_open() && !swallow && !typing_pending, t))
@@ -931,6 +962,7 @@ int main(int, char **) {
             lib_changed |= lib.scan();
             last_scan = t;
         }
+        timer.mark("the files from the PC and the models folder");
         if (t - last_ip > 10) {
             const std::string now_ip = lan_address();
             std::lock_guard<std::mutex> lk(ip_mutex);
@@ -942,6 +974,7 @@ int main(int, char **) {
             backup.sync();
             last_backup = t;
         }
+        timer.mark("the backup in /download0");
 
         // Downloads that arrived: the Library lists them now, not at its next
         // scan, so their rows turn into models at once.
@@ -1054,7 +1087,9 @@ int main(int, char **) {
             fresh_key.clear();
             fresh_key_id.clear();
         }
+        timer.mark("the downloads, chats and usage");
         keys.save_used(v.wall = (int64_t)time(nullptr));
+        timer.mark("keys.tsv");
         v.settings = settings_view(v);
         v.now = t;
 
@@ -1274,6 +1309,7 @@ int main(int, char **) {
         if (on_chat && chat_active) period = chat_period;
         const bool tick = t - last_draw > period;
         const bool chat_dirty = on_chat && chat_version != drawn_chat && (!chat_active || tick);
+        timer.mark("the button presses");
         if (dirty || tick || chat_dirty) {
             // With a screenshot, the words drawn too (screen.txt).
             std::vector<std::string> words;
@@ -1287,10 +1323,12 @@ int main(int, char **) {
             else
                 dash.draw(canvas, v);
             ui::Canvas::record = nullptr;
+            timer.mark("drawing");
             if (screen && !display.present(canvas.pixels(), err)) {
                 printf("ts5-title: the picture stopped: %s\n", err.c_str());
                 screen = false;
             }
+            timer.mark("showing the picture");
             if (shot) {
                 // The file goes once the picture is written: whoever asked
                 // reads it after that.
@@ -1300,6 +1338,7 @@ int main(int, char **) {
                     fclose(f);
                 }
                 unlink(kShot);
+                timer.mark("the screenshot");
             }
             drawn_version = version;
             drawn_chat = chat_version;
@@ -1315,6 +1354,8 @@ int main(int, char **) {
             usage_ok = ok;
             last_usage = t;
         }
+        timer.mark("usage.tsv");
+        timer.end();
         sceKernelUsleep(16000);
     }
 }
