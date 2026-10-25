@@ -961,20 +961,40 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
         size_t filled = 0;
         auto t_win = clock::now();
         uint64_t b_win = done, last_checkpoint = done;
+        // For the detailed log: where the time of each 64 MB went, waiting
+        // for the network, hashing or writing, to find what holds a download
+        // back.
+        double t_read = 0, t_hash = 0, t_write = 0;
+        auto t_span = clock::now();
+        uint64_t b_span = done;
         for (;;) {
+            auto t0 = clock::now();
             int n = body.next(wbuf.data() + filled, block - filled, err);
+            t_read += seconds(clock::now() - t0);
             if (n < 0) return false;
             filled += (size_t)n;
             if (filled < block && n > 0) continue;
             // A full block, or the last one.
             if (filled > 0) {
+                t0 = clock::now();
                 hash.update(wbuf.data(), filled);
+                const auto t1 = clock::now();
+                t_hash += seconds(t1 - t0);
                 if (fwrite(wbuf.data(), 1, filled, f) != filled || ferror(f)) return write_failed();
+                t_write += seconds(clock::now() - t1);
                 done += filled;
                 filled = 0;
                 progress.done = done;
             }
             const auto now = clock::now();
+            if (done - b_span >= (64u << 20) || (n == 0 && done > b_span)) {
+                const double span = seconds(now - t_span), mb = (double)(done - b_span) / 1048576.0;
+                trace("%.0f MB in %.1f s (%.1f MB/s): network %.1f s, hash %.1f s, write %.1f s", mb, span,
+                      span > 0 ? mb / span : 0.0, t_read, t_hash, t_write);
+                t_read = t_hash = t_write = 0;
+                t_span = now;
+                b_span = done;
+            }
             if (seconds(now - t_win) >= 2) {
                 progress.speed = (double)(done - b_win) / seconds(now - t_win);
                 t_win = now;
