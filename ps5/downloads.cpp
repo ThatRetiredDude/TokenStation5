@@ -267,7 +267,7 @@ Downloads::Downloads(std::string dir, std::string build, Notify notify)
         printf("ts5-title: download: %s stopped at %s (%.0f%%) before; cross on its row goes on\n", e.file,
                mb(d.done).c_str(), d.total ? 100.0 * d.done / d.total : 0.0);
     }
-    for (int i = 0; i < kAtOnce; i++) threads_.emplace_back([this] { loop(); });
+    for (int i = 0; i < kDownloadsAtOnce; i++) threads_.emplace_back([this] { loop(); });
 }
 
 Downloads::~Downloads() {
