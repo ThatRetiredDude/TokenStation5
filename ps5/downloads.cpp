@@ -249,7 +249,16 @@ bool free_space(const std::string &dir, uint64_t &bytes) {
         printf("ts5-title: free space of %s: %llu blocks free (%llu for apps) of %llu, block %lu, fragment %lu\n",
                dir.c_str(), (unsigned long long)vs.f_bfree, (unsigned long long)vs.f_bavail,
                (unsigned long long)vs.f_blocks, (unsigned long)vs.f_bsize, (unsigned long)vs.f_frsize);
+#ifdef TS5_PS5
+    // A title's sandbox reports one made-up volume for every folder it can
+    // see (64 GiB, 16 GiB free, however full the drive really is), so the
+    // console's free space can't be known from here: unknown, and a full
+    // drive shows up as a download that can't write.
+    errno = ENOTSUP;
+    return false;
+#else
     return true;
+#endif
 }
 
 namespace {
