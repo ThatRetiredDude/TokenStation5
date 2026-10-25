@@ -206,6 +206,7 @@ app::Backup backup(TS5_HOME, TS5_STORE "/ts5",
     backup.sync();
     printf("ts5-title: leaving (%s)\n", path);
     fflush(nullptr);
+    sceKernelUsleep(50000);  // for the log's pipe to hand its last lines over
     ts5::log_drain();
     sceSystemServiceLoadExec(path, nullptr);
     for (;;) sceKernelUsleep(1000000);
@@ -597,6 +598,8 @@ int main(int, char **) {
                "free storage.");
     }
     if (freopen(kLog, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
+    // Then through a pipe (log.h), so no thread waits on the log file.
+    if (!ts5::log_capture(kLog)) printf("ts5-title: the log goes straight to its file\n");
     printf("ts5-title: TokenStation5 %s\n", TS5_VERSION);
     // After a store update the folder is new: the last version's files come
     // back before anything reads them.
