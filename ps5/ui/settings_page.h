@@ -6,7 +6,8 @@
 // square removes it. On Speech model and Voice with no file on the PS5 yet,
 // cross downloads one (downloads.h): Base (English), or Kokoro with the
 // Heart voice; cross again stops the download. The APPS section on top
-// shows how to set up an app, turns "Require a key" on and off, makes API
+// has the instructions (cross opens their list on the right, up and down
+// choose a guide, cross opens it and cross again goes back), turns "Require a key" on and off, makes API
 // keys (keys.h; cross names a new one, and it shows once on its row) and
 // turns each key on and off (cross) or removes it (square twice).
 #pragma once
@@ -70,6 +71,10 @@ public:
     // What cross does on the chosen setting, for the footer: "Next choice",
     // "Type", "Download" or "Stop the download"; "" when nothing.
     std::string cross_does(const SettingsInfo &info) const;
+    // The left and right arrows' hint for the footer ("" when they do nothing).
+    std::string arrows_do(const SettingsInfo &info) const;
+    // A guide open in the instructions: up and down do nothing there.
+    bool guide_open() const { return in_guide_ && open_ >= 0; }
     // What square does: "Default", "Remove" (an API key or a typed key), or
     // "" when nothing.
     std::string square_does(const SettingsInfo &info) const;
@@ -80,6 +85,8 @@ private:
     int scroll_ = 0;
     double confirm_at_ = -1e9;  // square once on a key: press again to remove it
     std::string fresh_seen_;    // the fresh key the selection last moved to
+    bool in_guide_ = false;     // inside the Instructions row's panel
+    int link_ = 0, open_ = -1;  // the guide chosen there, and the one open (-1: the list)
 };
 
 }  // namespace ui
