@@ -206,7 +206,6 @@ app::Backup backup(TS5_HOME, TS5_STORE "/ts5",
     backup.sync();
     printf("ts5-title: leaving (%s)\n", path);
     fflush(nullptr);
-    sceKernelUsleep(50000);  // for the log's pipe to hand its last lines over
     ts5::log_drain();
     sceSystemServiceLoadExec(path, nullptr);
     for (;;) sceKernelUsleep(1000000);
@@ -597,9 +596,15 @@ int main(int, char **) {
         notify("TokenStation5 can't save to its folder, so settings and usage won't be kept. Check that the PS5 has "
                "free storage.");
     }
-    if (freopen(kLog, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
-    // Then through a pipe (log.h), so no thread waits on the log file.
-    if (!ts5::log_capture(kLog)) printf("ts5-title: the log goes straight to its file\n");
+    // stderr is RADV's: its PS5 layer writes a line there every 10 s from
+    // inside its submit lock, and while a download writes, a write to the
+    // log could take 8 s, so every frame waited (2026-10-25). The PS5 gives
+    // the title no pipe to hand the lines to a thread, so they wait in a
+    // buffer instead, written when the title leaves, or every 10 s by a
+    // thread of their own with the Detailed log on. The title's own lines
+    // don't use stderr's buffer (log.h writes to its descriptor).
+    static char stderr_buf[1 << 20];
+    if (freopen(kLog, "a", stderr)) setvbuf(stderr, stderr_buf, _IOFBF, sizeof stderr_buf);
     printf("ts5-title: TokenStation5 %s\n", TS5_VERSION);
     // After a store update the folder is new: the last version's files come
     // back before anything reads them.
@@ -630,6 +635,13 @@ int main(int, char **) {
          {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kType, kWhisperTest, kSpeakTest})
         unlink(f);
     std::thread(watch_control_files).detach();
+    if (app::setting("TS5_NET_LOG") == "1")
+        std::thread([] {
+            for (;;) {
+                sceKernelUsleep(10000000);
+                fflush(stderr);
+            }
+        }).detach();
     std::thread(keep_awake).detach();
     sceSystemServiceHideSplashScreen();
 
