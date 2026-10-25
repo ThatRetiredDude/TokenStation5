@@ -12,7 +12,7 @@ started.
 This is the project's punch list: what's done, what's open and what's next.
 Every PR updates it.
 
-Last updated: 2026-10-24.
+Last updated: 2026-10-25.
 
 ## Where we are
 
@@ -50,12 +50,14 @@ Nothing critical open.
 
 ## Open
 
-- [ ] [#26](https://github.com/ThatRetiredDude/TokenStation5/pull/26) The driver's buffer memory in each memory line, and a line after each unload (draft): it showed there's no leak (below, under Done). Worth keeping for the next memory question.
-- [ ] [#14](https://github.com/ThatRetiredDude/TokenStation5/pull/14) Our own PS5 runtime, so the title can ship without the GPL (draft). The clean-room spec is written and the assessment is "same speed"; the code waits for a go. The default flips only after a clean launch, a passing GPU check and matching speeds on the console, then LICENSING.md changes.
-- [ ] Homebrew catalog listing (ps5-homebrew-catalog, ProsperoStore): waiting on a fork of the catalog repo.
+- [ ] Homebrew catalog listing (ps5-homebrew-catalog, ProsperoStore): 01.001.000 submitted; no new release until models survive store updates (below).
 
 ## Next
 
+- [ ] Models across store updates. A store update swaps the whole app folder, and the models live in it, so every update starts with no models; settings, keys and chats already come back (#75). `/download0` can't hold them: it is about 321 MiB, and asking for more makes the PS5 refuse to start the title (#76, below). Copying models back over FTP ("Add models from a computer", #77) is the way until another place is found.
+- [ ] The PS5's write limit for titles: a download on the console saves its first 100 MB to 2 GB at network speed, then 1-4 MB/s on every path the title can write (stdio, `write`, `O_DIRECT`, `fsync`, `/download0`), while the FTP server outside the title writes about 30 MB/s. Untested levers: `sceKernelSetFsstParam`, or a helper outside the title (needs Jared's go).
+- [ ] WireGuard in the title, then a Tailscale test (tailscale-rs), so phones and laptops reach the PS5 away from home without a computer at home relaying it.
+- [ ] Our own PS5 runtime, so the title can ship without the GPL. The clean-room spec is written and the assessment is "same speed"; the code waits for a go ([#14](https://github.com/ThatRetiredDude/TokenStation5/pull/14), the first try, closed 2026-10-25).
 - [ ] No technical details on the app's screens (Jared, 2026-10-15): no file paths, script commands or `ts5.env` names. Where they show today:
   - Models: the empty list and a suggested model's "To add it" panel (`scripts/ts5-ps5.sh fetch KEY`, "copy its .gguf over FTP to" the title's folder), and a model's file name.
   - Settings: "kept in ts5.env", the "IN TS5.ENV" line, "(set in ts5.env)", and `scripts/ts5-ps5.sh speech`, `voice` and `websearch` for adding a speech model, a voice or the Tavily key.
@@ -77,6 +79,12 @@ Nothing critical open.
 
 ## Done
 
+- [x] [#77](https://github.com/ThatRetiredDude/TokenStation5/pull/77) Settings > Instructions > "Add models from a computer" (merged 2026-10-25, tested on the console): the PS5's FTP address and the models folder, the steps for copying a model in, and why (downloads on the console slow down after the first few hundred MB).
+- [x] [#76](https://github.com/ThatRetiredDude/TokenStation5/pull/76) A bigger `/download0` (closed 2026-10-25, a test): with `downloadDataSize` 65536 the PS5 refuses to start the title from the home screen (CE-107694-7); the PS5's own copy of the app's settings keeps 256 and `/download0` never grows. `downloadDataSize` stays 256.
+- [x] [#74](https://github.com/ThatRetiredDude/TokenStation5/pull/74) Downloads (merged 2026-10-25, tested on the console): three at once, 4 MiB receive buffers, no picture freezes while they save (the GPU driver's 10-second log line waited on the disk inside its submit lock; stderr is now buffered), resume after a restart, and sizes counted 1,024-based. Free space shows as unknown on the PS5 (it reports a made-up volume). 0 picture stalls over a 25-minute Qwen 3 8B download.
+- [x] [#75](https://github.com/ThatRetiredDude/TokenStation5/pull/75) Settings, keys, chats and usage kept in `/download0` and put back after a store update (merged 2026-10-25, tested on the console). Deleting the app wipes `/download0` too.
+- [x] [#73](https://github.com/ThatRetiredDude/TokenStation5/pull/73) Settings > Instructions, with guide links: "Set up an app" and "Use it away from home" (Tailscale) (merged 2026-10-25, tested on the console).
+- [x] [#71](https://github.com/ThatRetiredDude/TokenStation5/pull/71), [#72](https://github.com/ThatRetiredDude/TokenStation5/pull/72) Version 01.001.000 and its store record (merged 2026-10-25), submitted to the catalog.
 - [x] [#69](https://github.com/ThatRetiredDude/TokenStation5/pull/69) Chat history (merged 2026-10-24, tested on the console): the Chat page has the usual AI-chat sidebar, with New chat, Search chats (every word, in the title or any message) and the saved chats, newest first. Each chat is a JSON file in `chats/`, written after every message and reply. Cross opens a chat to carry on with it, square twice removes one, and chats survive a restart. [#70](https://github.com/ThatRetiredDude/TokenStation5/pull/70) makes the highlight follow a chat that moves to the top, and go to the next chat after a removal (merged 2026-10-24, tested on the console).
 - [x] [#66](https://github.com/ThatRetiredDude/TokenStation5/pull/66) Small fixes (merged 2026-10-24, tested on the console): Qwen 2.5's own GGUFs claim 131,072 tokens with no scaling keys, so search and serving cap them at the model's 32,768 (the "qwen coder" result said 82,944). Coder 7B's XML-element arguments are read and a lone `<response>` wrapper goes (4 of 4 calls). The TV Chat page's shorter retry is logged as "trimmed" and Home doesn't count it. `serve` refuses `--env`. The speech line clears once a model is there. The setup guide recommends Qwen 3 8B for coding agents.
 - [x] [#67](https://github.com/ThatRetiredDude/TokenStation5/pull/67) Llama 3.1 and 3.2 get their RoPE frequency divisors (`rope_freqs.weight`), which ts5 ignored (merged 2026-10-24, tested on the console: same speed, 70.6 tok/s writing). At 31,362 tokens, with the fact in the middle and two like it nearby, the build before answered wrong (7281, mixing two of them) and #67 answered right (7314) both times; prompt reading the same, about 244 tok/s.
@@ -106,7 +114,7 @@ Nothing critical open.
 - [x] [#22](https://github.com/ThatRetiredDude/TokenStation5/pull/22) Chat on the TV, hold R1 to talk, a Settings page and spoken replies (merged 2026-10-15). On the console: whisper's base.en turns 2-8 s of speech into text in 0.5-0.8 s, and Kokoro speaks at 0.69x real time on 6 CPU threads, its first sentence after 0.9 s, on the TV or the controller.
 - [x] [#17](https://github.com/ThatRetiredDude/TokenStation5/pull/17) Speculative decoding by prompt lookup, and [#20](https://github.com/ThatRetiredDude/TokenStation5/pull/20) web search with a Tavily key and OpenAI tool calling (merged 2026-10-15). Web search works on the console: TLS 1.3 to api.tavily.com from the PS5, 5 results in 1.9 s, and Coder 7B answered from them correctly. The key goes in `ts5.env` in the title's folder as `TAVILY_API_KEY`, and the title's log shows it only as `(set)`.
 - [x] [#35](https://github.com/ThatRetiredDude/TokenStation5/pull/35) A PolyForm catch-all default in the licenses, and a current README (merged 2026-10-15).
-- [x] Memory over many model reloads (2026-10-14, with #26's log): no leak. In one run of the title, speed tests on all four models and back: every unload returns to the same 9392 MiB free with the driver's buffers at 8 MiB, and each model's load lands on the same number every time. The first load in a run is 1 GiB lighter on the direct-memory count than every later one (6320 vs 5296 MiB free for Coder 7B, same 5128 MiB of driver buffers); that's the whole "drop" seen earlier. The kernels builds leave 1792 MiB less free because they serve 32k tokens of context.
+- [x] Memory over many model reloads (2026-10-14, with [#26](https://github.com/ThatRetiredDude/TokenStation5/pull/26)'s log, closed 2026-10-25): no leak. In one run of the title, speed tests on all four models and back: every unload returns to the same 9392 MiB free with the driver's buffers at 8 MiB, and each model's load lands on the same number every time. The first load in a run is 1 GiB lighter on the direct-memory count than every later one (6320 vs 5296 MiB free for Coder 7B, same 5128 MiB of driver buffers); that's the whole "drop" seen earlier. The kernels builds leave 1792 MiB less free because they serve 32k tokens of context.
 - [x] Console jailbroken on fw 13.60 (OnionHEN + kstuff); ShadowMountPlus, ftpsrv (2121) and elfldr (9021) loaded after the exploit.
 - [x] Feasibility report, model lineup ([models.tsv](../models.tsv)) and PS5LM install and bench scripts.
 - [x] Decision: our own engine rather than a PS5LM fork, so we own the kernels where the PS5 is slowest.
