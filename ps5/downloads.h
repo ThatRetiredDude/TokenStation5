@@ -1,8 +1,8 @@
 // Downloads from the catalog (catalog.h) into the title's models folder, up
 // to kDownloadsAtOnce at a time, each on a thread of its own. Never a Runner
-// job: the Runner does one job at a time, and serving, the GPU check and the speed test go on
-// while a model downloads. A download writes .<file>.part, a dotfile the
-// Library and the speech and voice scans skip, and every 64 MiB a
+// job: the Runner does one job at a time, and serving, the GPU check and the
+// speed test go on while a model downloads. A download writes .<file>.part, a
+// dotfile the Library and the speech and voice scans skip, and every 64 MiB a
 // checkpoint of its SHA-256 beside it (.<file>.sha), so going on after a
 // stop, a failure or a restart of the title fetches at most 64 MiB again
 // and hashes nothing. Once its size and SHA-256 agree with the catalog's,
