@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "log.h"
 
 #include <algorithm>
 #include <chrono>
@@ -82,7 +83,7 @@ void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
         for (size_t i = 0; i < n; i++)
             if (p[i] >= (int32_t)nv) {
                 drafter_ok_ = false;
-                fprintf(stderr, "ts5: draft model stopped: token %d is past its %d embedding rows\n", p[i], nv);
+                ts5::log_line("ts5: draft model stopped: token %d is past its %d embedding rows", p[i], nv);
                 return false;
             }
         return true;
@@ -96,7 +97,7 @@ void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
         if (!fits(cached_.data() + dcached_, CHUNK)) return;
         if (!db_->forward(cached_.data() + dcached_, (int)CHUNK, (int)dcached_, nullptr, false, err)) {
             drafter_ok_ = false;
-            fprintf(stderr, "ts5: draft model failed (%s); drafting by lookup only\n", err.c_str());
+            ts5::log_line("ts5: draft model failed (%s); drafting by lookup only", err.c_str());
             return;
         }
         dcached_ += CHUNK;
@@ -116,7 +117,7 @@ void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
                      : db_->forward(in, n, p0, dl_.data(), false, err);
         if (!ok) {
             drafter_ok_ = false;
-            fprintf(stderr, "ts5: draft model failed (%s); drafting by lookup only\n", err.c_str());
+            ts5::log_line("ts5: draft model failed (%s); drafting by lookup only", err.c_str());
             return;
         }
         const float *lg = ip ? db_->logits_view() : dl_.data();
