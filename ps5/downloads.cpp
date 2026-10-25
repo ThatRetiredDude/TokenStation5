@@ -21,9 +21,9 @@ namespace app {
 
 namespace {
 
-constexpr uint64_t kKeepFree = 1000000000ull;  // a download may not take the last 1 GB
-constexpr double kRetry[] = {5, 15, 45};       // seconds before each try again
-constexpr double kMB = 1e6;
+constexpr uint64_t kKeepFree = 1ull << 30;  // a download may not take the last 1 GB
+constexpr double kRetry[] = {5, 15, 45};    // seconds before each try again
+constexpr double kMB = 1048576;             // as format_bytes counts
 
 bool exists(const std::string &p) {
     struct stat st;
@@ -147,8 +147,8 @@ std::string progress_text(const Download &d, bool left) {
     std::string s = format_bytes(d.done) + " of " + format_bytes(d.total);
     if (d.phase != Download::Running || d.held || d.speed <= 0) return s;
     char b[64];
-    if (d.speed >= 1e6) snprintf(b, sizeof b, "%.0f MB a second", d.speed / 1e6);
-    else snprintf(b, sizeof b, "%.0f KB a second", d.speed / 1e3);
+    if (d.speed >= kMB) snprintf(b, sizeof b, "%.0f MB a second", d.speed / kMB);
+    else snprintf(b, sizeof b, "%.0f KB a second", d.speed / 1024);
     s += std::string("  \xC2\xB7  ") + b;
     if (!left || d.total <= d.done) return s;
     const double secs = (double)(d.total - d.done) / d.speed;
@@ -242,6 +242,13 @@ bool free_space(const std::string &dir, uint64_t &bytes) {
     struct statvfs vs;
     if (statvfs(dir.c_str(), &vs) != 0) return false;
     bytes = (uint64_t)vs.f_bavail * (vs.f_frsize ? vs.f_frsize : vs.f_bsize);
+    // What the system said, once a run, to check the free space shown
+    // against the console's storage screen.
+    static std::atomic<bool> said{false};
+    if (!said.exchange(true))
+        printf("ts5-title: free space of %s: %llu blocks free (%llu for apps) of %llu, block %lu, fragment %lu\n",
+               dir.c_str(), (unsigned long long)vs.f_bfree, (unsigned long long)vs.f_bavail,
+               (unsigned long long)vs.f_blocks, (unsigned long)vs.f_bsize, (unsigned long)vs.f_frsize);
     return true;
 }
 
