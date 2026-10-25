@@ -193,10 +193,10 @@ std::vector<Row> rows(const SettingsInfo &info) {
                  "", {}, "", false, Row::WgKey});
     r.push_back({"WIREGUARD", kWgPort, "Port",
                  "The UDP port WireGuard listens on. Forward it on your router to this PS5. Change it only if "
-                 "something else uses it.",
-                 "Now", {{"51820", "51820"}, {"51821", "51821"}, {"51822", "51822"}, {"51823", "51823"},
-                         {"51824", "51824"}},
-                 "51820"});
+                 "something else uses it. (Not WireGuard's usual 51820: the PS5 doesn't let apps use ports that "
+                 "high.)",
+                 "Now", {{"9030", "9030"}, {"9031", "9031"}, {"9032", "9032"}, {"9033", "9033"}, {"9034", "9034"}},
+                 "9030"});
     const auto &s = setting_rows();
     r.insert(r.end(), s.begin(), s.end());
     return r;
@@ -645,7 +645,7 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
              kText2);
     } else if (open == kGuideWireGuard) {
         ty -= 12;
-        const std::string port = app::setting(kWgPort, "51820");
+        const std::string port = app::setting(kWgPort, "9030");
         if (info.on_network) field("ADD A DEVICE AT", join_url(info), kAccent, bodyb_);
         else field("ADD A DEVICE AT", "Connect the PS5 to your network first", kAmber, body_);
         para("1. Turn on WireGuard, under WireGuard on the left. On your router, forward UDP port " + port +

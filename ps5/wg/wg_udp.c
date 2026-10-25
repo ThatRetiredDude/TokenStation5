@@ -5,6 +5,7 @@
 // device's) and the ones lwIP's core makes, which drop what they're given.
 //
 // Also the platform functions wireguard-lwip asks for, and lwIP's clock.
+#include <errno.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -18,6 +19,9 @@
 
 static struct udp_pcb device_pcb;
 static int os_socket = -1;
+unsigned long ts5_wg_sent, ts5_wg_send_failed;
+int ts5_wg_send_errno;
+size_t ts5_wg_sent_bytes;
 
 void ts5_wg_udp_use(int fd) { os_socket = fd; }
 
@@ -69,7 +73,15 @@ err_t udp_sendto(struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *dst_ip, u
     to.sin_family = AF_INET;
     to.sin_port = htons(dst_port);
     to.sin_addr.s_addr = ip4_addr_get_u32(ip_2_ip4(dst_ip));
-    return sendto(os_socket, buf, n, 0, (const struct sockaddr *)&to, sizeof to) == (ssize_t)n ? ERR_OK : ERR_IF;
+    if (sendto(os_socket, buf, n, 0, (const struct sockaddr *)&to, sizeof to) == (ssize_t)n) {
+        ts5_wg_sent++;
+        ts5_wg_sent_bytes = n;
+        return ERR_OK;
+    }
+    ts5_wg_send_errno = errno;
+    // The first few in the log; then the count, when the title asks.
+    if (++ts5_wg_send_failed <= 5) ts5_wg_diag("can't send %u bytes to port %u (errno %d)", n, dst_port, errno);
+    return ERR_IF;
 }
 
 // lwIP's core: no UDP inside the tunnel.

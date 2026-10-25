@@ -101,6 +101,12 @@ bool wg_page(const std::string &method, const std::string &path, const std::stri
                         "load this page again.</p>");
         return true;
     }
+    if (!info.running) {
+        out.status = 503;
+        out.body = page("<h1>WireGuard isn't running</h1><p>It's on, but it couldn't start: Settings, WireGuard on "
+                        "the PS5 says why. Then load this page again.</p>");
+        return true;
+    }
     if (method != "POST") {
         out.body = form("", "", "");
         return true;

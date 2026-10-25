@@ -193,7 +193,7 @@ kept, in `keys.tsv`), and each key can be turned off and on (cross) or
 removed (square twice). Then WireGuard: devices away from home reach the API
 through an encrypted tunnel to the PS5 (`wg/`), and nothing else on the home
 network. "WireGuard" turns it on (`TS5_WIREGUARD=1`; the first time, the PS5
-makes its key pair) and "Port" sets its UDP port (`TS5_WG_PORT`, 51820), which
+makes its key pair) and "Port" sets its UDP port (`TS5_WG_PORT`, 9030: the PS5 refuses WireGuard's usual 51820), which
 the router forwards to the PS5. Each device makes its own key pair in its
 WireGuard app: at home, its browser opens `http://PS5:8081/wireguard` (the
 "Add a device" row shows the address), where it gives its name and public key

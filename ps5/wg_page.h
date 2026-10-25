@@ -13,8 +13,9 @@ namespace app {
 
 struct WgPageInfo {
     bool on = false;         // WireGuard is on in Settings
+    bool running = true;     // and the tunnel started (it can't when its port is refused)
     std::string public_key;  // the PS5's
-    int port = 51820;        // UDP
+    int port = 9030;         // UDP
     int api_port = 8081;
 };
 

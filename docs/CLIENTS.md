@@ -47,7 +47,7 @@ it opens gives nothing away. Each device makes its own key pair, and the PS5
 only ever gets the public half.
 
 1. On the PS5, make an API key (Settings, Apps, New key) if you have none,
-   and turn on Settings, WireGuard. On your router, forward UDP port 51820
+   and turn on Settings, WireGuard. On your router, forward UDP port 9030
    (Settings, WireGuard, Port) to the PS5, and keep the PS5's address fixed
    with a DHCP reservation.
 2. Install WireGuard on your computer, phone or tablet. At home, open

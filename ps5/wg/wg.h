@@ -43,7 +43,7 @@ struct Peer {
 struct Config {
     bool on = false;
     std::string private_key;          // base64
-    int port = 51820;                 // UDP, on every address of the PS5
+    int port = 9030;                  // UDP, on every address of the PS5 (it refuses 51820 and 40000)
     std::string address = "10.55.0.1";  // the PS5's in the tunnel (a /24)
     int api_port = 8081;              // passed to the API on this PS5
     std::vector<Peer> peers;
