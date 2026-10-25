@@ -22,13 +22,13 @@ struct Choice {
 // One setting: NAME in ts5.env, and what reads it does with it. No choices:
 // a key, typed on the console's keyboard, or files in the models folder.
 // The APPS section also has rows that aren't settings: how to set up an app,
-// making a key, and a row per API key (name: its id).
+// how to use it away from home, making a key, and a row per API key (name: its id).
 struct Row {
     std::string section, name, label, help, applies;
     std::vector<Choice> choices;
     std::string def;  // the value with nothing in ts5.env, as each reader's default
     bool files = false;
-    enum Kind { Setting, Guide, NewKey, ApiKey } kind = Setting;
+    enum Kind { Setting, Guide, Away, NewKey, ApiKey } kind = Setting;
 };
 
 constexpr const char *kSpeechModel = "TS5_WHISPER_MODEL", *kVoice = "TS5_TTS_VOICE";
@@ -111,14 +111,18 @@ const ApiKeyInfo *key_of(const Row &r, const SettingsInfo &info) {
     return nullptr;
 }
 
-// The page's rows: APPS (how to connect, the key setting, making a key and
-// the keys), then the settings.
+// The page's rows: APPS (how to connect, from home and away, the key setting,
+// making a key and the keys), then the settings.
 std::vector<Row> rows(const SettingsInfo &info) {
     std::vector<Row> r;
     r.push_back({"APPS", "", "Set up an app",
                  "Any app that takes an OpenAI-compatible provider can use the models on this PS5: Kilo Code, "
                  "Continue, Cline, Open WebUI and more. Give it these:",
                  "", {}, "", false, Row::Guide});
+    r.push_back({"APPS", "", "Use it away from home",
+                 "Reach the models from your phone or laptop anywhere, privately, with Tailscale. Don't open the "
+                 "PS5's port on your router: anyone could find it, and keys would cross the internet unprotected.",
+                 "", {}, "", false, Row::Away});
     r.push_back({"APPS", kRequireKey, "Require a key",
                  "With this on, apps on your network need one of your keys below to use the models. The Chat page "
                  "on this PS5 never needs one. Off: anyone on your network can, and an app that sends a key still "
@@ -229,7 +233,7 @@ std::string other(const Row &r) {
 }
 
 std::string shown(const Row &r, const SettingsInfo &info) {
-    if (r.kind == Row::Guide) return "How to";
+    if (r.kind == Row::Guide || r.kind == Row::Away) return "How to";
     if (r.kind == Row::NewKey) return "Make one";
     if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "On" : "Off";
     if (is_key(r)) return current(r).empty() ? "Not set" : "Set";
@@ -298,7 +302,7 @@ SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
     if (b & kDown) sel_ = std::min((int)rs.size() - 1, sel_ + 1);
     if (b & (kUp | kDown)) confirm_at_ = -1e9;
     const Row &r = rs[sel_];
-    if (r.kind == Row::Guide) return ch;
+    if (r.kind == Row::Guide || r.kind == Row::Away) return ch;
     if (r.kind == Row::NewKey) {
         ch.new_key = (b & kCross) != 0;
         return ch;
@@ -466,6 +470,27 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
              "files and run commands, Qwen 3 8B does best: Qwen 2.5 Coder 7B writes the code but often stops "
              "before the next step.",
              kText2);
+    } else if (r.kind == Row::Away) {
+        ty -= 12;
+        // The PS5's address alone, from http://ADDRESS:8081/v1.
+        std::string host = info.url;
+        if (host.rfind("http://", 0) == 0) host = host.substr(7);
+        host = host.substr(0, host.find(':'));
+        if (info.on_network) field("THIS PS5'S ADDRESS", host, kAccent, bodyb_);
+        else field("THIS PS5'S ADDRESS", "Connect the PS5 to your network first", kAmber, body_);
+        para("1. Install Tailscale (free, tailscale.com) on a computer that stays on at home, and on your phone "
+             "or laptop, signed in to the same account.",
+             kText);
+        ty += 8;
+        para("2. On the home computer, share this PS5's address as a subnet route: in a terminal, tailscale up "
+             "--advertise-routes=" + (info.on_network ? host : std::string("ADDRESS")) + "/32",
+             kText);
+        ty += 8;
+        para("3. In Tailscale's admin page, under Machines, approve the route for the home computer.", kText);
+        ty += 8;
+        para("4. Away from home, with Tailscale on, apps use the same base URL as at home. Turn on Require a key "
+             "below too, and keep the PS5's address fixed with a DHCP reservation in your router.",
+             kText);
     } else if (r.kind == Row::NewKey) {
         text_glyph(c, body_, dx, ty + 8, "Press", kGlyphCross, "to name a new key.", kText2);
         ty += 56;
@@ -587,7 +612,7 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
 std::string SettingsPage::cross_does(const SettingsInfo &info) const {
     const auto rs = rows(info);
     const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
-    if (r.kind == Row::Guide) return "";
+    if (r.kind == Row::Guide || r.kind == Row::Away) return "";
     if (r.kind == Row::NewKey) return "New key";
     if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "Turn off" : "Turn on";
     if (is_key(r)) return "Type";
@@ -602,7 +627,7 @@ std::string SettingsPage::cross_does(const SettingsInfo &info) const {
 std::string SettingsPage::square_does(const SettingsInfo &info) const {
     const auto rs = rows(info);
     const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
-    if (r.kind == Row::Guide || r.kind == Row::NewKey) return "";
+    if (r.kind == Row::Guide || r.kind == Row::Away || r.kind == Row::NewKey) return "";
     if (r.kind == Row::ApiKey || is_key(r)) return "Remove";
     return "Default";
 }

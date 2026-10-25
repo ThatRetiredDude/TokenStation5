@@ -173,7 +173,8 @@ oldest exchanges are left out of the requests (they stay on screen).
 
 **Settings**: first, Apps: "Set up an app" shows what an app needs to use
 the PS5 (the base URL, the model, the key, the context window; the full guide
-is [docs/CLIENTS.md](../docs/CLIENTS.md)), "Require a key" turns API keys on,
+is [docs/CLIENTS.md](../docs/CLIENTS.md)), "Use it away from home" gives the
+Tailscale steps with the PS5's address filled in, "Require a key" turns API keys on,
 "New key" names and makes one (it shows once, on its row; only its SHA-256 is
 kept, in `keys.tsv`), and each key can be turned off and on (cross) or
 removed (square twice). Then the title's settings, saved in `ts5.env` (one
