@@ -178,7 +178,9 @@ constexpr const char *kChats = TS5_HOME "/chats";  // the Chat page's saved chat
 constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
 // WireGuard on (1) or off, and its UDP port.
 constexpr const char *kWireGuard = "TS5_WIREGUARD", *kWgPort = "TS5_WG_PORT";
-constexpr int kWgDefaultPort = 51820;
+// Not WireGuard's usual 51820: the PS5 refuses a title's bind there (and at
+// 40000) with EACCES, and takes 9030.
+constexpr int kWgDefaultPort = 9030;
 // typing_for while the keyboard names a new API key, or takes a search.
 constexpr const char *kNamingKey = "(new key)", *kSearching = "(search)", *kChatSearch = "(chat search)";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
@@ -730,6 +732,7 @@ int main(int, char **) {
                          const std::string &client, ts5::Server::Page &out) {
         app::WgPageInfo info;
         info.on = wg_on;
+        info.running = tunnel.problem().empty();
         std::string e;
         if (info.on) info.public_key = wg_store.public_key(e);
         info.port = wg_port;
@@ -865,6 +868,8 @@ int main(int, char **) {
         const std::string problem = tunnel.problem();
         if (problem.find("in use") != std::string::npos)
             s.wg.problem = "Port " + std::to_string(wg_port) + " is in use on the PS5: choose another below.";
+        else if (problem.find("refused") != std::string::npos)
+            s.wg.problem = "The PS5 doesn't let apps use port " + std::to_string(wg_port) + ": choose another below.";
         else if (!problem.empty())
             s.wg.problem = std::string("WireGuard couldn't start.") + plain::kDetails;
         const std::vector<wg::PeerState> peers = tunnel.peers();

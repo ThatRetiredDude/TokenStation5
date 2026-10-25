@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdarg>
+#include <cstdlib>
 #include <cstring>
 #include <list>
 
@@ -202,6 +203,9 @@ struct Loop {
     std::string private_key;
     tcp_pcb *listener = nullptr;
     int udp = -1, udp_port = 0;
+    unsigned long received = 0, traced = 0;  // packets in since the port opened; how many the detailed log showed
+    bool poll_failed = false;
+    std::map<std::string, bool> up;  // by public key: had a session at the last look, for the log
     int api_port = 8081;
     std::map<std::string, uint8_t> peers;  // public key: wireguardif's index
     std::map<std::string, Peer> peer_cfg;
@@ -321,12 +325,14 @@ std::string open_udp(Loop &L, int port) {
         const int e = errno;
         close(fd);
         return e == EADDRINUSE ? "port " + std::to_string(port) + " is in use"
+               : e == EACCES   ? "port " + std::to_string(port) + " is refused by the PS5"
                                : "can't use port " + std::to_string(port) + " (errno " + std::to_string(e) + ")";
     }
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
     fcntl(fd, F_SETFD, FD_CLOEXEC);
     L.udp = fd;
     L.udp_port = port;
+    L.received = L.traced = 0;
     ts5_wg_udp_use(fd);
     return "";
 }
@@ -557,18 +563,43 @@ void Tunnel::loop() {
         u32_t sleep_ms = sys_timeouts_sleeptime();
         if (sleep_ms > 50) sleep_ms = 50;  // apply() and lwIP's send buffer are checked this often
         if (fds.empty()) usleep(sleep_ms * 1000);
-        else poll(fds.data(), (nfds_t)fds.size(), (int)sleep_ms);
+        else if (poll(fds.data(), (nfds_t)fds.size(), (int)sleep_ms) < 0) {
+            // Then every socket is tried: they're all non-blocking.
+            if (errno != EINTR && !L.poll_failed) {
+                ts5::log_line("ts5-title: wireguard: poll failed (errno %d); trying every socket each time", errno);
+                L.poll_failed = true;
+            }
+            for (pollfd &f : fds) f.revents = f.events;
+            usleep(sleep_ms * 1000);
+        }
 
         size_t i = 0;
         if (L.udp >= 0) {
-            if (fds[0].revents & POLLIN) {
-                unsigned char buf[2048];
-                for (int k = 0; k < 256; k++) {
-                    sockaddr_in from{};
-                    socklen_t len = sizeof from;
-                    const ssize_t n = recvfrom(L.udp, buf, sizeof buf, 0, (sockaddr *)&from, &len);
-                    if (n <= 0) break;
-                    ts5_wg_udp_input(buf, (size_t)n, from.sin_addr.s_addr, ntohs(from.sin_port));
+            // Read whatever came, whatever poll said.
+            unsigned char buf[2048];
+            for (int k = 0; k < 256; k++) {
+                sockaddr_in from{};
+                socklen_t len = sizeof from;
+                const ssize_t n = recvfrom(L.udp, buf, sizeof buf, MSG_DONTWAIT, (sockaddr *)&from, &len);
+                if (n <= 0) break;
+                const unsigned long sent = ts5_wg_sent, failed = ts5_wg_send_failed;
+                ts5_wg_udp_input(buf, (size_t)n, from.sin_addr.s_addr, ntohs(from.sin_port));
+                char ip[INET_ADDRSTRLEN] = "?";
+                inet_ntop(AF_INET, &from.sin_addr, ip, sizeof ip);
+                if (++L.received == 1)
+                    ts5::log_line("ts5-title: wireguard: the first packet came in, from %s:%u", ip, ntohs(from.sin_port));
+                // Detailed log: each packet (the first 200 since the port
+                // opened), its WireGuard type (1 a handshake, 4 data) and
+                // whether the PS5 answered it.
+                const char *detail = getenv("TS5_NET_LOG");
+                if (detail && strcmp(detail, "1") == 0 && L.traced < 200) {
+                    L.traced++;
+                    const std::string what = ts5_wg_sent > sent ? "answered, " + std::to_string(ts5_wg_sent_bytes) + " bytes"
+                                             : ts5_wg_send_failed > failed
+                                                 ? "the answer couldn't be sent (errno " + std::to_string(ts5_wg_send_errno) + ")"
+                                                 : "no answer";
+                    ts5::log_line("ts5-title: wireguard: udp: %zd bytes from %s:%u, type %u: %s", n, ip,
+                                  ntohs(from.sin_port), (unsigned)buf[0], what.c_str());
                 }
             }
             i = 1;
@@ -602,6 +633,11 @@ void Tunnel::loop() {
                 if (port && !ip_addr_isany(&from)) s.from = ip_text(ip4_addr_get_u32(ip_2_ip4(&from))) + ":" + std::to_string(port);
                 if (dev && index < WIREGUARD_MAX_PEERS && dev->peers[index].last_rx)
                     s.seen_s = (double)(uint32_t)(now_ms - dev->peers[index].last_rx) / 1000.0;
+                bool &was = L.up[key];
+                if (s.up != was)
+                    ts5::log_line(s.up ? "ts5-title: wireguard: %s connected, from %s" : "ts5-title: wireguard: %s's session ended%s",
+                                  p.name.c_str(), s.up ? s.from.c_str() : "");
+                was = s.up;
                 states.push_back(s);
             }
             std::lock_guard<std::mutex> lk(mu_);
