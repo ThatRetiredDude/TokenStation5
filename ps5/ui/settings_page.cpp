@@ -540,7 +540,7 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
                                     : "It's ready to use when the download finishes.",
                              kText2);
                         break;
-                    case D::Queued: para("It starts after the download before it.", kText2); break;
+                    case D::Queued: para("It starts when one of the downloads running now ends.", kText2); break;
                     case D::Retrying:
                         para(d.problem + " Trying again in " +
                                  std::to_string(std::max(1, (int)std::ceil(d.retry_at - info.now))) + " s.",

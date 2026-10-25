@@ -260,17 +260,18 @@ Downloads::Downloads(std::string dir, std::string build, Notify notify)
         printf("ts5-title: download: %s stopped at %s (%.0f%%) before; cross on its row goes on\n", e.file,
                mb(d.done).c_str(), d.total ? 100.0 * d.done / d.total : 0.0);
     }
-    thread_ = std::thread([this] { loop(); });
+    for (int i = 0; i < kAtOnce; i++) threads_.emplace_back([this] { loop(); });
 }
 
 Downloads::~Downloads() {
     {
         std::lock_guard<std::mutex> lk(mu_);
         quit_ = true;
-        if (progress_) progress_->cancel = true;
+        for (auto &p : progress_) p.second->cancel = true;
     }
     cv_.notify_all();
-    if (thread_.joinable()) thread_.join();
+    for (std::thread &t : threads_)
+        if (t.joinable()) t.join();
 }
 
 const CatalogEntry *Downloads::find(const std::string &key) {
@@ -309,9 +310,10 @@ void Downloads::start(const std::string &key) {
 void Downloads::stop(const std::string &key) {
     {
         std::lock_guard<std::mutex> lk(mu_);
-        if (key == current_) {
-            stop_current_ = true;
-            if (progress_) progress_->cancel = true;
+        if (running_.count(key)) {
+            stopping_.insert(key);
+            auto p = progress_.find(key);
+            if (p != progress_.end()) p->second->cancel = true;
         } else {
             for (auto it = queue_.begin(); it != queue_.end(); ++it)
                 if (*it == key) {
@@ -333,7 +335,7 @@ void Downloads::remove_part(const std::string &key) {
     {
         std::lock_guard<std::mutex> lk(mu_);
         auto s = state_.find(key);
-        if (key == current_ || (s != state_.end() && s->second.active())) return;
+        if (running_.count(key) || (s != state_.end() && s->second.active())) return;
         const std::string part = part_of(*e);
         unlink(part.c_str());
         unlink((part + ".from").c_str());
@@ -350,11 +352,9 @@ void Downloads::hold(bool on) {
     std::lock_guard<std::mutex> lk(mu_);
     if (held_ == on) return;
     held_ = on;
-    if (progress_) progress_->pause = on;
-    if (!current_.empty()) {
-        state_[current_].held = on;
-        printf("ts5-title: download: %s while a model loads\n", on ? "waiting" : "going on");
-    }
+    for (auto &p : progress_) p.second->pause = on;
+    for (const std::string &key : running_) state_[key].held = on;
+    if (!running_.empty()) printf("ts5-title: download: %s while a model loads\n", on ? "waiting" : "going on");
     version_++;
 }
 
@@ -366,6 +366,18 @@ std::map<std::string, Download> Downloads::state() {
 bool Downloads::free_space(uint64_t &bytes) {
     std::lock_guard<std::mutex> lk(mu_);
     bytes = free_;
+    return have_free_;
+}
+
+bool Downloads::room_left(const std::string &key, uint64_t &bytes) {
+    std::lock_guard<std::mutex> lk(mu_);
+    uint64_t others = 0;
+    for (const std::string &k : running_) {
+        if (k == key) continue;
+        const Download &d = state_[k];
+        if (d.total > d.done) others += d.total - d.done;
+    }
+    bytes = free_ > others ? free_ - others : 0;
     return have_free_;
 }
 
@@ -415,8 +427,8 @@ void Downloads::loop() {
             if (!queue_.empty()) {
                 key = queue_.front();
                 queue_.pop_front();
-                current_ = key;
-                stop_current_ = false;
+                running_.insert(key);
+                stopping_.erase(key);
             }
         }
         read_free();
@@ -424,8 +436,8 @@ void Downloads::loop() {
         run(key);
         {
             std::lock_guard<std::mutex> lk(mu_);
-            current_.clear();
-            stop_current_ = false;
+            running_.erase(key);
+            stopping_.erase(key);
         }
         read_free();
         version_++;
@@ -447,10 +459,11 @@ void Downloads::run(const std::string &key) {
         return;
     }
     const bool pinned = e.sha256[0] != 0;
-    // Room for the rest, and 1 GB to spare.
+    // Room for the rest, and 1 GB to spare, besides what the other downloads
+    // still need.
     {
         uint64_t free = 0;
-        const bool known = free_space(free);
+        const bool known = room_left(key, free);
         const uint64_t have = size_of(part), rest = e.bytes > have ? e.bytes - have : 0;
         if (known && rest + kKeepFree > free) {
             printf("ts5-title: download failed: %s: not enough space (needs %s, %s free)\n", e.file, mb(rest).c_str(),
@@ -484,9 +497,9 @@ void Downloads::run(const std::string &key) {
         ts5::FetchProgress progress;
         {
             std::lock_guard<std::mutex> lk(mu_);
-            if (stop_current_ || quit_) break;
+            if (stopping_.count(key) || quit_) break;
             progress.pause = held_;
-            progress_ = &progress;
+            progress_[key] = &progress;
             d.phase = Download::Running;
             d.held = held_;
             d.done = from_byte;
@@ -510,7 +523,7 @@ void Downloads::run(const std::string &key) {
                 // The server's size: is there room for the rest after all?
                 checked_room = true;
                 uint64_t free = 0;
-                if (free_space(free) && total > done && total - done + kKeepFree > free) {
+                if (room_left(key, free) && total > done && total - done + kKeepFree > free) {
                     room = "Not enough space: it needs " + format_bytes(total - done) +
                            " plus 1 GB to spare, and your PS5 has " + format_bytes(free) + " free." + plain::kDetails;
                     progress.cancel = true;
@@ -540,8 +553,8 @@ void Downloads::run(const std::string &key) {
         bool stopped = false;
         {
             std::lock_guard<std::mutex> lk(mu_);
-            progress_ = nullptr;
-            stopped = stop_current_ || quit_;
+            progress_.erase(key);
+            stopped = stopping_.count(key) || quit_;
             d = state_[key];
             d.done = size_of(part);
             if (progress.total) d.total = progress.total;
@@ -593,9 +606,9 @@ void Downloads::run(const std::string &key) {
             d.problem = cut ? "The connection was cut." : "Your PS5 couldn't reach the download site.";
             set(key, d);
             std::unique_lock<std::mutex> lk(mu_);
-            while (!stop_current_ && !quit_ && now_s() < d.retry_at)
+            while (!stopping_.count(key) && !quit_ && now_s() < d.retry_at)
                 cv_.wait_for(lk, std::chrono::milliseconds(500));
-            if (stop_current_ || quit_) {
+            if (stopping_.count(key) || quit_) {
                 state_[key].phase = exists(part) ? Download::Stopped : Download::None;
                 state_[key].problem.clear();
                 version_++;
