@@ -59,6 +59,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -588,6 +589,25 @@ int main(int, char **) {
     // Models (and, from Settings, the speech model and voice) downloaded on
     // the console, beside whatever the Runner does.
     app::Downloads downloads(kModels, TS5_VERSION, notify);
+    // Which folders the title can write to, and the free space each one's
+    // volume reports, to find where models and the rest can live so a store
+    // update (which swaps the app's folder) keeps them.
+    for (const char *dir : {TS5_HOME, "/download0", TS5_DATA}) {
+        struct statvfs vs;
+        if (statvfs(dir, &vs) != 0) {
+            printf("ts5-title: folder %s: can't read its volume (%s)\n", dir, strerror(errno));
+            continue;
+        }
+        const std::string probe = std::string(dir) + "/.ts5-write-test";
+        FILE *f = fopen(probe.c_str(), "wb");
+        const bool writable = f && fputs("ts5", f) >= 0;
+        if (f) fclose(f);
+        unlink(probe.c_str());
+        const uint64_t unit = vs.f_frsize ? vs.f_frsize : vs.f_bsize;
+        printf("ts5-title: folder %s: %s, %s free of %s (fs id %lu)\n", dir, writable ? "writable" : "not writable",
+               app::format_bytes((uint64_t)vs.f_bavail * unit).c_str(),
+               app::format_bytes((uint64_t)vs.f_blocks * unit).c_str(), (unsigned long)vs.f_fsid);
+    }
     app::ChatStore chat_store(kChats);
     app::Chat chat(opts.host, opts.port, &chat_store);
     // The Chat page's sidebar: every chat, or what a search found.
