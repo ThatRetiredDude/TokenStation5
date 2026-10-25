@@ -83,6 +83,7 @@
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
 #include "swiglu.spv.h"
+#include "log.h"
 
 namespace ts5 {
 
@@ -333,14 +334,14 @@ private:
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
         kv_ = kv_type_setting();
         if (kv_ == KvType::Q8 && !(attn_ok() && hp_.head_dim % 32 == 0)) {
-            fprintf(stderr, "ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16\n");
+            ts5::log_line("ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16");
             kv_ = KvType::F16;
         }
         const char *prof = getenv("TS5_PROFILE");
         cpu_prof_ = prof && atoi(prof) != 0;
         if (prof && atoi(prof) == 1) {
             if (!ctx_->timestamp_bits) {
-                fprintf(stderr, "ts5: TS5_PROFILE: the queue has no timestamps\n");
+                ts5::log_line("ts5: TS5_PROFILE: the queue has no timestamps");
             } else {
                 VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
                 qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
@@ -586,7 +587,7 @@ private:
             if (bad) { err = "short read"; return false; }
         }
         const double ls = std::chrono::duration<double>(std::chrono::steady_clock::now() - lt0).count();
-        fprintf(stderr, "ts5: weights %.2f GB read in %.1f s (%.0f MB/s, %d threads)\n", weight_bytes_ / 1e9, ls,
+        ts5::log_line("ts5: weights %.2f GB read in %.1f s (%.0f MB/s, %d threads)", weight_bytes_ / 1e9, ls,
                 ls > 0 ? weight_bytes_ / 1e6 / ls : 0.0, threads);
         return true;
     }
@@ -621,8 +622,8 @@ private:
             };
             const int f16 = fit(KvType::F16);
             if (kv_ == KvType::Q8 && f16_reaches(f16, train)) {
-                fprintf(stderr, "ts5: f16 KV cache: the model's whole %d-token context fits in f16, the more exact\n",
-                        train);
+                ts5::log_line("ts5: f16 KV cache: the model's whole %d-token context fits in f16, the more exact",
+                              train);
                 kv_ = KvType::F16;
             }
             n_ctx_ = kv_ == KvType::F16 ? f16 : fit(kv_);
@@ -642,7 +643,7 @@ private:
         // fit_context keeps free for everything else.
         if (!mk(kc_, cache, false, true) || !mk(vc_, cache, false, true)) return false;
         if (scales && (!mk(ks_, scales, false, true) || !mk(vs_, scales, false, true))) return false;
-        fprintf(stderr, "ts5: %s: weights %.2f GiB, KV cache %.2f GiB (%s, %d tokens), %s memory\n", name_.c_str(),
+        ts5::log_line("ts5: %s: weights %.2f GiB, KV cache %.2f GiB (%s, %d tokens), %s memory", name_.c_str(),
                 weight_bytes_ / 1073741824.0, 2.0 * (cache + scales) / 1073741824.0, kv_type_name(kv_), n_ctx_,
                 x_.map ? "unified" : "device");
         return true;
@@ -1025,7 +1026,7 @@ private:
                 split_used_ = 0;
                 reduces_.clear();
                 no_barrier_ = false;
-                fprintf(stderr, "ts5: recording ahead stopped: %s\n", aerr.c_str());
+                ts5::log_line("ts5: recording ahead stopped: %s", aerr.c_str());
             }
             cpu_.ahead += now_ms() - t;
         }
@@ -1281,7 +1282,7 @@ KvType kv_type_setting() {
     if (!e || !*e) return KvType::F16;
     const std::string v = e;
     if (v == "q8" || v == "8") return KvType::Q8;
-    if (v != "f16" && v != "16") fprintf(stderr, "ts5: TS5_KV=%s: not q8 or f16, using f16\n", e);
+    if (v != "f16" && v != "16") ts5::log_line("ts5: TS5_KV=%s: not q8 or f16, using f16", e);
     return KvType::F16;
 }
 

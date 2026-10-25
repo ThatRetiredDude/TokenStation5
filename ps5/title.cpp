@@ -56,13 +56,16 @@
 #include <vulkan/vulkan.h>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -471,6 +474,107 @@ std::string api_url() {
     return "http://" + (ip.empty() ? std::string("<console ip>") : ip) + ":" + std::to_string(api_port) + "/v1";
 }
 
+// TS5_WRITE_PROBE=1 in ts5.env: how fast the title can write, in 32 MB
+// steps, several ways, to find why downloads write at about 1 MB/s into
+// models/ while the same disk takes 30 MB/s over FTP. Each test's file is
+// removed after it. In a thread of its own, so the TV shows whether the
+// main loop stalls meanwhile.
+void write_probe() {
+    using clock = std::chrono::steady_clock;
+    auto secs = [](clock::time_point a) { return std::chrono::duration<double>(clock::now() - a).count(); };
+    struct Test {
+        const char *name, *dir;
+        int mb;
+        bool stdio, direct, sync;
+    };
+    const Test tests[] = {
+        {"stdio 1 MB writes (as downloads)", kModels, 192, true, false, false},
+        {"write() 8 MB", kModels, 192, false, false, false},
+        {"write() 8 MB, fsync every 32 MB", kModels, 192, false, false, true},
+        {"write() 8 MB, O_DIRECT", kModels, 192, false, true, false},
+        {"write() 8 MB into /download0", "/download0", 128, false, false, false},
+    };
+    std::vector<char> buf(8u << 20, 'x');
+    for (const Test &t : tests) {
+        const std::string path = std::string(t.dir) + "/.ts5-write-probe";
+        printf("ts5-title: write probe: %s, %d MB into %s\n", t.name, t.mb, t.dir);
+        const auto start = clock::now();
+        auto step = start;
+        FILE *f = nullptr;
+        int fd = -1;
+        std::vector<char> fbuf(1 << 20);
+        if (t.stdio) {
+            f = fopen(path.c_str(), "wb");
+            if (f) setvbuf(f, fbuf.data(), _IOFBF, fbuf.size());
+        } else {
+            fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | (t.direct ? O_DIRECT : 0), 0666);
+        }
+        if (!f && fd < 0) {
+            printf("ts5-title: write probe: can't open %s: %s\n", path.c_str(), strerror(errno));
+            continue;
+        }
+        bool ok = true;
+        const size_t piece = t.stdio ? (1u << 20) : buf.size();
+        uint64_t done = 0, step_done = 0;
+        while (ok && done < ((uint64_t)t.mb << 20)) {
+            ok = t.stdio ? fwrite(buf.data(), 1, piece, f) == piece : write(fd, buf.data(), piece) == (ssize_t)piece;
+            if (!ok) printf("ts5-title: write probe: write failed: %s\n", strerror(errno));
+            done += piece;
+            if (done - step_done >= (32u << 20)) {
+                if (t.sync && fd >= 0) fsync(fd);
+                const double s = secs(step);
+                printf("ts5-title: write probe:   %llu MB: 32 MB in %.1f s (%.1f MB/s)\n",
+                       (unsigned long long)(done >> 20), s, s > 0 ? 32.0 / s : 0.0);
+                step = clock::now();
+                step_done = done;
+            }
+        }
+        const double written = secs(start);
+        const auto closing = clock::now();
+        if (f) {
+            fflush(f);
+            fsync(fileno(f));
+            fclose(f);
+        } else {
+            fsync(fd);
+            close(fd);
+        }
+        const double total = secs(start);
+        printf("ts5-title: write probe: %s: %.1f s to write, %.1f s more to reach the disk: %.1f MB/s overall\n",
+               t.name, written, secs(closing), total > 0 ? (double)(done >> 20) / total : 0.0);
+        unlink(path.c_str());
+        sceKernelUsleep(3000000);
+    }
+    printf("ts5-title: write probe: done\n");
+}
+
+// How long each pass of the main loop takes, and in which step: a pass
+// over 1 s means the TV's picture and the controller waited that long, and
+// the log says where (on the PS5 a file write can wait behind a download's).
+struct LoopTimer {
+    double start = 0, last = 0, worst_s = 0;
+    const char *worst = "";
+    void begin(double t) {
+        start = last = t;
+        worst_s = 0;
+        worst = "";
+    }
+    // The step that just ended.
+    void mark(const char *step) {
+        const double t = app::now_s();
+        if (t - last > worst_s) {
+            worst_s = t - last;
+            worst = step;
+        }
+        last = t;
+    }
+    void end() {
+        const double t = app::now_s();
+        if (t - start > 1.0)
+            ts5::log_line("ts5-title: the screen waited %.1f s (%.1f s of it in %s)", t - start, worst_s, worst);
+    }
+};
+
 // The address apps use, or "" while the console isn't on a network.
 std::string network_url() {
     {
@@ -492,7 +596,15 @@ int main(int, char **) {
         notify("TokenStation5 can't save to its folder, so settings and usage won't be kept. Check that the PS5 has "
                "free storage.");
     }
-    if (freopen(kLog, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
+    // stderr is RADV's: its PS5 layer writes a line there every 10 s from
+    // inside its submit lock, and while a download writes, a write to the
+    // log could take 8 s, so every frame waited (2026-10-25). The PS5 gives
+    // the title no pipe to hand the lines to a thread, so they wait in a
+    // buffer instead, written when the title leaves, or every 10 s by a
+    // thread of their own with the Detailed log on. The title's own lines
+    // don't use stderr's buffer (log.h writes to its descriptor).
+    static char stderr_buf[1 << 20];
+    if (freopen(kLog, "a", stderr)) setvbuf(stderr, stderr_buf, _IOFBF, sizeof stderr_buf);
     printf("ts5-title: TokenStation5 %s\n", TS5_VERSION);
     // After a store update the folder is new: the last version's files come
     // back before anything reads them.
@@ -523,6 +635,13 @@ int main(int, char **) {
          {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kType, kWhisperTest, kSpeakTest})
         unlink(f);
     std::thread(watch_control_files).detach();
+    if (app::setting("TS5_NET_LOG") == "1")
+        std::thread([] {
+            for (;;) {
+                sceKernelUsleep(10000000);
+                fflush(stderr);
+            }
+        }).detach();
     std::thread(keep_awake).detach();
     sceSystemServiceHideSplashScreen();
 
@@ -605,6 +724,26 @@ int main(int, char **) {
     // Models (and, from Settings, the speech model and voice) downloaded on
     // the console, beside whatever the Runner does.
     app::Downloads downloads(kModels, TS5_VERSION, notify);
+    // Which folders the title can write to, and the free space each one's
+    // volume reports, to find where models and the rest can live so a store
+    // update (which swaps the app's folder) keeps them.
+    for (const char *dir : {TS5_HOME, "/download0", TS5_DATA}) {
+        struct statvfs vs;
+        if (statvfs(dir, &vs) != 0) {
+            printf("ts5-title: folder %s: can't read its volume (%s)\n", dir, strerror(errno));
+            continue;
+        }
+        const std::string probe = std::string(dir) + "/.ts5-write-test";
+        FILE *f = fopen(probe.c_str(), "wb");
+        const bool writable = f && fputs("ts5", f) >= 0;
+        if (f) fclose(f);
+        unlink(probe.c_str());
+        const uint64_t unit = vs.f_frsize ? vs.f_frsize : vs.f_bsize;
+        printf("ts5-title: folder %s: %s, %s free of %s (fs id %lu)\n", dir, writable ? "writable" : "not writable",
+               app::format_bytes((uint64_t)vs.f_bavail * unit).c_str(),
+               app::format_bytes((uint64_t)vs.f_blocks * unit).c_str(), (unsigned long)vs.f_fsid);
+    }
+    if (app::setting("TS5_WRITE_PROBE") == "1") std::thread(write_probe).detach();
     app::ChatStore chat_store(kChats);
     app::Chat chat(opts.host, opts.port, &chat_store);
     // The Chat page's sidebar: every chat, or what a search found.
@@ -689,11 +828,14 @@ int main(int, char **) {
     std::string pc_typed;         // from the PC's type file, in place of the keyboard
     bool pc_typing = false;
     app::EnterKey enter_key;      // a USB or Bluetooth keyboard's Enter
+    LoopTimer timer;
     for (;;) {
         const double t = app::now_s();
+        timer.begin(t);
         // Read each time: the Settings page changes them.
         const double dim = dim_after(), chat_period = 1.0 / chat_fps();
         uint32_t buttons = pad.poll();
+        timer.mark("the controller");
         // Presses from the PC, one per frame.
         std::vector<std::string> words;
         if (presses.empty() && take_written(kPress, words))
@@ -712,6 +854,7 @@ int main(int, char **) {
             if (kind == 'r') pc_held &= ~b;
             presses.pop_front();
         }
+        timer.mark("the PC's press file");
         // Enter on a keyboard does on the chat page what cross does: it opens
         // the console's keyboard.
         if (enter_key.poll(dash.page() == ui::Dashboard::Chat && !keyboard.is_open() && !swallow && !typing_pending, t))
@@ -834,6 +977,7 @@ int main(int, char **) {
             lib_changed |= lib.scan();
             last_scan = t;
         }
+        timer.mark("the files from the PC and the models folder");
         if (t - last_ip > 10) {
             const std::string now_ip = lan_address();
             std::lock_guard<std::mutex> lk(ip_mutex);
@@ -845,6 +989,7 @@ int main(int, char **) {
             backup.sync();
             last_backup = t;
         }
+        timer.mark("the backup in /download0");
 
         // Downloads that arrived: the Library lists them now, not at its next
         // scan, so their rows turn into models at once.
@@ -957,7 +1102,9 @@ int main(int, char **) {
             fresh_key.clear();
             fresh_key_id.clear();
         }
+        timer.mark("the downloads, chats and usage");
         keys.save_used(v.wall = (int64_t)time(nullptr));
+        timer.mark("keys.tsv");
         v.settings = settings_view(v);
         v.now = t;
 
@@ -1177,6 +1324,7 @@ int main(int, char **) {
         if (on_chat && chat_active) period = chat_period;
         const bool tick = t - last_draw > period;
         const bool chat_dirty = on_chat && chat_version != drawn_chat && (!chat_active || tick);
+        timer.mark("the button presses");
         if (dirty || tick || chat_dirty) {
             // With a screenshot, the words drawn too (screen.txt).
             std::vector<std::string> words;
@@ -1190,10 +1338,12 @@ int main(int, char **) {
             else
                 dash.draw(canvas, v);
             ui::Canvas::record = nullptr;
+            timer.mark("drawing");
             if (screen && !display.present(canvas.pixels(), err)) {
                 printf("ts5-title: the picture stopped: %s\n", err.c_str());
                 screen = false;
             }
+            timer.mark("showing the picture");
             if (shot) {
                 // The file goes once the picture is written: whoever asked
                 // reads it after that.
@@ -1203,6 +1353,7 @@ int main(int, char **) {
                     fclose(f);
                 }
                 unlink(kShot);
+                timer.mark("the screenshot");
             }
             drawn_version = version;
             drawn_chat = chat_version;
@@ -1218,6 +1369,8 @@ int main(int, char **) {
             usage_ok = ok;
             last_usage = t;
         }
+        timer.mark("usage.tsv");
+        timer.end();
         sceKernelUsleep(16000);
     }
 }

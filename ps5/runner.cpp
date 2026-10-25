@@ -447,8 +447,8 @@ void Runner::fetch(const Job &job) {
     const std::string file = base(job.path);
     const std::string dir = job.path.substr(0, job.path.size() - file.size());  // with its '/', or ""
     const std::string part = dir + "." + file + ".part";
-    constexpr double mb = 1e6;
-    constexpr uint64_t keep_free = 1000000000ull;  // a download may not take the last 1 GB
+    constexpr double mb = 1048576;              // as format_bytes counts
+    constexpr uint64_t keep_free = 1ull << 30;  // a download may not take the last 1 GB
     uint64_t free = 0;
     const bool have_free = free_space(dir.empty() ? "." : dir, free);
     if (have_free) printf("ts5-title: fetch: %s free\n", format_bytes(free).c_str());

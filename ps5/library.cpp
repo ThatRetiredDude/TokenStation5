@@ -287,8 +287,9 @@ std::string format_params(double n) {
 
 std::string format_bytes(uint64_t n) {
     char b[32];
-    if (n >= 1000000000ull) snprintf(b, sizeof b, "%.1f GB", n / 1e9);
-    else snprintf(b, sizeof b, "%.0f MB", n / 1e6);
+    // Counted as the PS5's own storage screen counts: 1,024 MB to a GB.
+    if (n >= (1ull << 30)) snprintf(b, sizeof b, "%.1f GB", n / 1073741824.0);
+    else snprintf(b, sizeof b, "%.0f MB", n / 1048576.0);
     return b;
 }
 

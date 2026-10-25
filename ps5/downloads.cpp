@@ -21,9 +21,9 @@ namespace app {
 
 namespace {
 
-constexpr uint64_t kKeepFree = 1000000000ull;  // a download may not take the last 1 GB
-constexpr double kRetry[] = {5, 15, 45};       // seconds before each try again
-constexpr double kMB = 1e6;
+constexpr uint64_t kKeepFree = 1ull << 30;  // a download may not take the last 1 GB
+constexpr double kRetry[] = {5, 15, 45};    // seconds before each try again
+constexpr double kMB = 1048576;             // as format_bytes counts
 
 bool exists(const std::string &p) {
     struct stat st;
@@ -147,8 +147,8 @@ std::string progress_text(const Download &d, bool left) {
     std::string s = format_bytes(d.done) + " of " + format_bytes(d.total);
     if (d.phase != Download::Running || d.held || d.speed <= 0) return s;
     char b[64];
-    if (d.speed >= 1e6) snprintf(b, sizeof b, "%.0f MB a second", d.speed / 1e6);
-    else snprintf(b, sizeof b, "%.0f KB a second", d.speed / 1e3);
+    if (d.speed >= kMB) snprintf(b, sizeof b, "%.0f MB a second", d.speed / kMB);
+    else snprintf(b, sizeof b, "%.0f KB a second", d.speed / 1024);
     s += std::string("  \xC2\xB7  ") + b;
     if (!left || d.total <= d.done) return s;
     const double secs = (double)(d.total - d.done) / d.speed;
@@ -242,7 +242,91 @@ bool free_space(const std::string &dir, uint64_t &bytes) {
     struct statvfs vs;
     if (statvfs(dir.c_str(), &vs) != 0) return false;
     bytes = (uint64_t)vs.f_bavail * (vs.f_frsize ? vs.f_frsize : vs.f_bsize);
+    // What the system said, once a run, to check the free space shown
+    // against the console's storage screen.
+    static std::atomic<bool> said{false};
+    if (!said.exchange(true))
+        printf("ts5-title: free space of %s: %llu blocks free (%llu for apps) of %llu, block %lu, fragment %lu\n",
+               dir.c_str(), (unsigned long long)vs.f_bfree, (unsigned long long)vs.f_bavail,
+               (unsigned long long)vs.f_blocks, (unsigned long)vs.f_bsize, (unsigned long)vs.f_frsize);
+#ifdef TS5_PS5
+    // A title's sandbox reports one made-up volume for every folder it can
+    // see (64 GiB, 16 GiB free, however full the drive really is), so the
+    // console's free space can't be known from here: unknown, and a full
+    // drive shows up as a download that can't write.
+    errno = ENOTSUP;
+    return false;
+#else
     return true;
+#endif
+}
+
+namespace {
+
+// The downloads asked for and not ended, a line each, so they go on after
+// the title restarts: the entry's fields, tab-separated (a search's entries
+// last only as long as the title, so the whole entry is kept).
+std::string wanted_line(const CatalogEntry &e) {
+    char nums[256];
+    snprintf(nums, sizeof nums, "%llu\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%llu", (unsigned long long)e.bytes, e.n_vocab,
+             e.n_embd, e.n_layer, e.n_ff, e.n_head, e.n_head_kv, e.head_dim, e.ctx_train,
+             (unsigned long long)e.weight_bytes);
+    std::string l = std::to_string((int)e.kind);
+    for (const char *f : {e.key, e.name, e.good_for, e.same, e.repo, e.path, e.file, e.commit, e.sha256})
+        l += std::string("\t") + (f ? f : "");
+    return l + "\t" + nums + "\n";
+}
+
+// The entry a line names; false for a line this build can't read.
+bool wanted_entry(const std::string &line, CatalogText &t, CatalogEntry &e) {
+    std::vector<std::string> f;
+    for (size_t i = 0;;) {
+        const size_t tab = line.find('\t', i);
+        f.push_back(line.substr(i, tab == std::string::npos ? std::string::npos : tab - i));
+        if (tab == std::string::npos) break;
+        i = tab + 1;
+    }
+    if (f.size() != 20 || f[1].empty() || f[7].empty()) return false;
+    e = CatalogEntry{};
+    const int kind = atoi(f[0].c_str());
+    if (kind < CatalogEntry::Model || kind > CatalogEntry::Voice) return false;
+    e.kind = (CatalogEntry::Kind)kind;
+    t = CatalogText{f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9]};
+    e.bytes = strtoull(f[10].c_str(), nullptr, 10);
+    int *ints[] = {&e.n_vocab, &e.n_embd, &e.n_layer, &e.n_ff, &e.n_head, &e.n_head_kv, &e.head_dim, &e.ctx_train};
+    for (int i = 0; i < 8; i++) *ints[i] = atoi(f[11 + i].c_str());
+    e.weight_bytes = strtoull(f[19].c_str(), nullptr, 10);
+    return true;
+}
+
+}  // namespace
+
+std::string Downloads::wanted_path() const { return dir_ + "/.downloads.tsv"; }
+
+void Downloads::save_wanted() {
+    std::string text;
+    for (const std::string &key : wanted_)
+        if (const CatalogEntry *e = find(key)) text += wanted_line(*e);
+    const std::string path = wanted_path(), tmp = path + ".tmp";
+    if (text.empty()) {
+        unlink(path.c_str());
+        return;
+    }
+    FILE *f = fopen(tmp.c_str(), "wb");
+    bool ok = f && fwrite(text.data(), 1, text.size(), f) == text.size();
+    if (f) ok = fclose(f) == 0 && ok;
+    if (!ok || rename(tmp.c_str(), path.c_str()) != 0) {
+        unlink(tmp.c_str());
+        printf("ts5-title: download: can't save the list of downloads to go on with (%s)\n", strerror(errno));
+    }
+}
+
+void Downloads::want(const std::string &key, bool on) {
+    const auto it = std::find(wanted_.begin(), wanted_.end(), key);
+    if (on == (it != wanted_.end())) return;
+    if (on) wanted_.push_back(key);
+    else wanted_.erase(it);
+    save_wanted();
 }
 
 Downloads::Downloads(std::string dir, std::string build, Notify notify)
@@ -260,17 +344,40 @@ Downloads::Downloads(std::string dir, std::string build, Notify notify)
         printf("ts5-title: download: %s stopped at %s (%.0f%%) before; cross on its row goes on\n", e.file,
                mb(d.done).c_str(), d.total ? 100.0 * d.done / d.total : 0.0);
     }
-    thread_ = std::thread([this] { loop(); });
+    // The downloads that were going when the title closed go on.
+    if (FILE *f = fopen(wanted_path().c_str(), "rb")) {
+        char line[4096];
+        while (fgets(line, sizeof line, f)) {
+            std::string l = line;
+            while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+            CatalogText t;
+            CatalogEntry e;
+            if (!wanted_entry(l, t, e)) continue;
+            const CatalogEntry &c = catalog_at(add_catalog_entry(t, e));
+            if (exists(dir_ + "/" + c.file)) continue;
+            Download &d = state_[c.key];
+            d.phase = Download::Queued;
+            d.done = size_of(part_of(c));
+            if (!d.total) d.total = c.bytes;
+            queue_.push_back(c.key);
+            wanted_.push_back(c.key);
+            printf("ts5-title: download: %s goes on from before the title closed\n", c.file);
+        }
+        fclose(f);
+        save_wanted();
+    }
+    for (int i = 0; i < kDownloadsAtOnce; i++) threads_.emplace_back([this] { loop(); });
 }
 
 Downloads::~Downloads() {
     {
         std::lock_guard<std::mutex> lk(mu_);
         quit_ = true;
-        if (progress_) progress_->cancel = true;
+        for (auto &p : progress_) p.second->cancel = true;
     }
     cv_.notify_all();
-    if (thread_.joinable()) thread_.join();
+    for (std::thread &t : threads_)
+        if (t.joinable()) t.join();
 }
 
 const CatalogEntry *Downloads::find(const std::string &key) {
@@ -300,6 +407,7 @@ void Downloads::start(const std::string &key) {
         d.problem.clear();
         if (!d.total) d.total = e->bytes;
         queue_.push_back(key);
+        want(key, true);
     }
     printf("ts5-title: download: %s asked for\n", e->file);
     version_++;
@@ -309,9 +417,10 @@ void Downloads::start(const std::string &key) {
 void Downloads::stop(const std::string &key) {
     {
         std::lock_guard<std::mutex> lk(mu_);
-        if (key == current_) {
-            stop_current_ = true;
-            if (progress_) progress_->cancel = true;
+        if (running_.count(key)) {
+            stopping_.insert(key);
+            auto p = progress_.find(key);
+            if (p != progress_.end()) p->second->cancel = true;
         } else {
             for (auto it = queue_.begin(); it != queue_.end(); ++it)
                 if (*it == key) {
@@ -321,6 +430,7 @@ void Downloads::stop(const std::string &key) {
             auto s = state_.find(key);
             const CatalogEntry *e = find(key);
             if (s != state_.end() && e) s->second.phase = exists(part_of(*e)) ? Download::Stopped : Download::None;
+            want(key, false);
         }
     }
     version_++;
@@ -333,7 +443,7 @@ void Downloads::remove_part(const std::string &key) {
     {
         std::lock_guard<std::mutex> lk(mu_);
         auto s = state_.find(key);
-        if (key == current_ || (s != state_.end() && s->second.active())) return;
+        if (running_.count(key) || (s != state_.end() && s->second.active())) return;
         const std::string part = part_of(*e);
         unlink(part.c_str());
         unlink((part + ".from").c_str());
@@ -350,11 +460,9 @@ void Downloads::hold(bool on) {
     std::lock_guard<std::mutex> lk(mu_);
     if (held_ == on) return;
     held_ = on;
-    if (progress_) progress_->pause = on;
-    if (!current_.empty()) {
-        state_[current_].held = on;
-        printf("ts5-title: download: %s while a model loads\n", on ? "waiting" : "going on");
-    }
+    for (auto &p : progress_) p.second->pause = on;
+    for (const std::string &key : running_) state_[key].held = on;
+    if (!running_.empty()) printf("ts5-title: download: %s while a model loads\n", on ? "waiting" : "going on");
     version_++;
 }
 
@@ -366,6 +474,18 @@ std::map<std::string, Download> Downloads::state() {
 bool Downloads::free_space(uint64_t &bytes) {
     std::lock_guard<std::mutex> lk(mu_);
     bytes = free_;
+    return have_free_;
+}
+
+bool Downloads::room_left(const std::string &key, uint64_t &bytes) {
+    std::lock_guard<std::mutex> lk(mu_);
+    uint64_t others = 0;
+    for (const std::string &k : running_) {
+        if (k == key) continue;
+        const Download &d = state_[k];
+        if (d.total > d.done) others += d.total - d.done;
+    }
+    bytes = free_ > others ? free_ - others : 0;
     return have_free_;
 }
 
@@ -415,8 +535,8 @@ void Downloads::loop() {
             if (!queue_.empty()) {
                 key = queue_.front();
                 queue_.pop_front();
-                current_ = key;
-                stop_current_ = false;
+                running_.insert(key);
+                stopping_.erase(key);
             }
         }
         read_free();
@@ -424,8 +544,9 @@ void Downloads::loop() {
         run(key);
         {
             std::lock_guard<std::mutex> lk(mu_);
-            current_.clear();
-            stop_current_ = false;
+            running_.erase(key);
+            stopping_.erase(key);
+            if (!quit_) want(key, false);  // ended: done, stopped or failed; closing, it goes on next time
         }
         read_free();
         version_++;
@@ -447,10 +568,11 @@ void Downloads::run(const std::string &key) {
         return;
     }
     const bool pinned = e.sha256[0] != 0;
-    // Room for the rest, and 1 GB to spare.
+    // Room for the rest, and 1 GB to spare, besides what the other downloads
+    // still need.
     {
         uint64_t free = 0;
-        const bool known = free_space(free);
+        const bool known = room_left(key, free);
         const uint64_t have = size_of(part), rest = e.bytes > have ? e.bytes - have : 0;
         if (known && rest + kKeepFree > free) {
             printf("ts5-title: download failed: %s: not enough space (needs %s, %s free)\n", e.file, mb(rest).c_str(),
@@ -484,9 +606,9 @@ void Downloads::run(const std::string &key) {
         ts5::FetchProgress progress;
         {
             std::lock_guard<std::mutex> lk(mu_);
-            if (stop_current_ || quit_) break;
+            if (stopping_.count(key) || quit_) break;
             progress.pause = held_;
-            progress_ = &progress;
+            progress_[key] = &progress;
             d.phase = Download::Running;
             d.held = held_;
             d.done = from_byte;
@@ -510,7 +632,7 @@ void Downloads::run(const std::string &key) {
                 // The server's size: is there room for the rest after all?
                 checked_room = true;
                 uint64_t free = 0;
-                if (free_space(free) && total > done && total - done + kKeepFree > free) {
+                if (room_left(key, free) && total > done && total - done + kKeepFree > free) {
                     room = "Not enough space: it needs " + format_bytes(total - done) +
                            " plus 1 GB to spare, and your PS5 has " + format_bytes(free) + " free." + plain::kDetails;
                     progress.cancel = true;
@@ -540,8 +662,8 @@ void Downloads::run(const std::string &key) {
         bool stopped = false;
         {
             std::lock_guard<std::mutex> lk(mu_);
-            progress_ = nullptr;
-            stopped = stop_current_ || quit_;
+            progress_.erase(key);
+            stopped = stopping_.count(key) || quit_;
             d = state_[key];
             d.done = size_of(part);
             if (progress.total) d.total = progress.total;
@@ -593,9 +715,9 @@ void Downloads::run(const std::string &key) {
             d.problem = cut ? "The connection was cut." : "Your PS5 couldn't reach the download site.";
             set(key, d);
             std::unique_lock<std::mutex> lk(mu_);
-            while (!stop_current_ && !quit_ && now_s() < d.retry_at)
+            while (!stopping_.count(key) && !quit_ && now_s() < d.retry_at)
                 cv_.wait_for(lk, std::chrono::milliseconds(500));
-            if (stop_current_ || quit_) {
+            if (stopping_.count(key) || quit_) {
                 state_[key].phase = exists(part) ? Download::Stopped : Download::None;
                 state_[key].problem.clear();
                 version_++;
