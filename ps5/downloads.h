@@ -1,8 +1,8 @@
-// Downloads from the catalog (catalog.h) into the title's models folder, one
-// at a time on a thread of their own. Never a Runner job: the Runner does
-// one job at a time, and serving, the GPU check and the speed test go on
-// while a model downloads. A download writes .<file>.part, a dotfile the
-// Library and the speech and voice scans skip, and every 64 MiB a
+// Downloads from the catalog (catalog.h) into the title's models folder, up
+// to kDownloadsAtOnce at a time, each on a thread of its own. Never a Runner
+// job: the Runner does one job at a time, and serving, the GPU check and the
+// speed test go on while a model downloads. A download writes .<file>.part, a
+// dotfile the Library and the speech and voice scans skip, and every 64 MiB a
 // checkpoint of its SHA-256 beside it (.<file>.sha), so going on after a
 // stop, a failure or a restart of the title fetches at most 64 MiB again
 // and hashes nothing. Once its size and SHA-256 agree with the catalog's,
@@ -16,6 +16,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -28,10 +29,13 @@ struct FetchProgress;
 
 namespace app {
 
+// Downloads that run at once; more wait in line.
+constexpr int kDownloadsAtOnce = 3;
+
 struct Download {
     enum Phase {
         None,      // nothing on the PS5 yet
-        Queued,    // behind another download
+        Queued,    // behind kDownloadsAtOnce others
         Running,   // held while a model loads (held)
         Retrying,  // after a network failure, until retry_at
         Stopped,   // by its button, or by closing the title; the part is kept
@@ -83,7 +87,8 @@ public:
     // downloads out with the console).
     static std::string url(const CatalogEntry &e);
 
-    // Starts the entry's download, or goes on with it; after the one running.
+    // Starts the entry's download, or goes on with it; with kDownloadsAtOnce
+    // running, after the first of them ends.
     void start(const std::string &key);
     // Stops it, keeping the part.
     void stop(const std::string &key);
@@ -111,6 +116,13 @@ private:
     std::string part_of(const CatalogEntry &e) const;
     std::string sha_of(const CatalogEntry &e) const;
     void read_free();
+    // The list of downloads to go on with after a restart: .downloads.tsv in
+    // the models folder. want() adds or drops a key and saves it (under mu_).
+    std::string wanted_path() const;
+    void save_wanted();
+    void want(const std::string &key, bool on);
+    // free_space, less what the other running downloads still need.
+    bool room_left(const std::string &key, uint64_t &bytes);
 
     const std::string dir_, build_;
     Notify notify_;
@@ -119,13 +131,14 @@ private:
     std::deque<std::string> queue_;
     std::map<std::string, Download> state_;
     std::vector<std::string> finished_;
-    std::string current_;
-    ts5::FetchProgress *progress_ = nullptr;  // the running transfer's, under mu_
-    bool held_ = false, stop_current_ = false, quit_ = false, refresh_ = true;
+    std::vector<std::string> wanted_;  // asked for and not ended, in order
+    std::set<std::string> running_, stopping_;              // stopping_: stop asked while running
+    std::map<std::string, ts5::FetchProgress *> progress_;  // the running transfers', under mu_
+    bool held_ = false, quit_ = false, refresh_ = true;
     bool have_free_ = false, said_unknown_ = false;
     uint64_t free_ = 0;
     std::atomic<uint64_t> version_{0};
-    std::thread thread_;
+    std::vector<std::thread> threads_;
 };
 
 }  // namespace app

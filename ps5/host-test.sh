@@ -24,7 +24,7 @@ work="$root/build/ps5-host"
 data="$work/data"
 home="$work/app0"
 port=8081
-rm -rf "$data" "$home" "$work/shots"
+rm -rf "$data" "$home" "$work/download0" "$work/shots"
 mkdir -p "$work/shaders" "$data" "$home" "$work/shots"
 
 for src in "$root"/engine/shaders/*.comp; do
@@ -77,11 +77,11 @@ if [ ${#pids[@]} -gt 0 ] || [ ! -f "$wobj/libts5speech.a" ]; then
     echo "== libts5speech.a: ${#pids[@]} files compiled in $(($(date +%s) - t0)) s"
 fi
 
-c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" \
+c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" "-DTS5_STORE=\"$work/download0\"" \
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" -I "$w/include" -I "$w/ggml/include" \
     -I "$k/include" \
     "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks,tools,net,websearch,log}.cpp \
-    "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,host_shim}.cpp \
+    "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup,host_shim}.cpp \
     "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page,logs_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -Wa,-I"$root/ps5/tts" "$root/ps5/tts/lexicon_data.S" \
     -x none "$wobj/libts5speech.a" -ldl -o "$work/eboot.bin"
