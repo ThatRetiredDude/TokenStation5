@@ -39,6 +39,12 @@
 #define LWIP_TCP_KEEPALIVE 1
 #define TCP_LISTEN_BACKLOG 1
 #define TCP_DEFAULT_LISTEN_BACKLOG 16
+// TIME_WAIT for 2 s, not 2 min: the PS5 closes first, so it holds each
+// connection's TIME_WAIT, and in it lwIP answers a new SYN on the same ports
+// with a bare ACK; a device that picked those ports again then got no
+// SYN-ACK until it gave up (about 1 connection in 180, 10 at a time, on the
+// PS5 2026-10-25). One hop in a tunnel has no old segments to wait out.
+#define TCP_MSL 1000
 
 #define LWIP_NETIF_LOOPBACK 0
 #define LWIP_HAVE_LOOPIF 0
