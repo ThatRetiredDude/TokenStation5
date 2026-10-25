@@ -1,10 +1,13 @@
 #include "display.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <vector>
+
+#include "log.h"
 
 namespace ui {
 
@@ -231,14 +234,38 @@ bool Display::present(const uint32_t *pixels, std::string &err) {
         return false;
     }
     VkDevice dev = ctx_->device;
+    // Each step's time, logged when the whole takes over 1 s: the TV's
+    // picture waited that long, and this says on what.
+    using clock = std::chrono::steady_clock;
+    const auto t0 = clock::now();
+    double steps[6] = {};
+    auto lap = [&, last = t0](int i) mutable {
+        const auto now = clock::now();
+        steps[i] = std::chrono::duration<double>(now - last).count();
+        last = now;
+    };
+    struct Report {
+        const double *steps;
+        clock::time_point t0;
+        ~Report() {
+            const double all = std::chrono::duration<double>(clock::now() - t0).count();
+            if (all > 1.0)
+                ts5::log_line("ts5-title: picture: %.1f s: last frame %.1f, copy %.1f, image %.1f, queue %.1f, "
+                              "submit %.1f, flip %.1f",
+                              all, steps[0], steps[1], steps[2], steps[3], steps[4], steps[5]);
+        }
+    } report{steps, t0};
     // The last frame's copy has read the staging buffer.
     CHECK(vk.vkWaitForFences(dev, 1, &fence_, VK_TRUE, UINT64_MAX));
+    lap(0);
     memcpy(staging_map_, pixels, (size_t)w_ * h_ * 4);
+    lap(1);
     // A frame that can't get an image soon is dropped: while the title is in
     // the background, VideoOut may stop flipping, and the dashboard's loop
     // must not hang on it.
     uint32_t index = 0;
     const VkResult r = vk.vkAcquireNextImageKHR(dev, swapchain_, 200000000, acquired_, VK_NULL_HANDLE, &index);
+    lap(2);
     if (r == VK_TIMEOUT || r == VK_NOT_READY) return true;
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
         err = "vkAcquireNextImageKHR failed: " + std::to_string((int)r);
@@ -276,8 +303,11 @@ bool Display::present(const uint32_t *pixels, std::string &err) {
     pi.pSwapchains = &swapchain_;
     pi.pImageIndices = &index;
     std::lock_guard<std::mutex> lk(ctx_->queue_mutex);
+    lap(3);
     CHECK(vk.vkQueueSubmit(ctx_->queue, 1, &si, fence_));
+    lap(4);
     const VkResult pr = vk.vkQueuePresentKHR(ctx_->queue, &pi);
+    lap(5);
     if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) {
         err = "vkQueuePresentKHR failed: " + std::to_string((int)pr);
         return false;
