@@ -718,6 +718,12 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
     constexpr int timeout_s = 30;
     constexpr size_t block = 256 << 10;
     constexpr uint64_t checkpoint_every = 64ull << 20;
+    // On the PS5 the title's writes reach the disk at about 2 MB/s, however
+    // they're made, but the system takes ~100 MB of them at once into memory
+    // first; once that's full, every write in the title waits, the TV's
+    // picture too, for a minute or more. Sending each 8 MB to the disk before
+    // the next keeps that from filling, at the same speed.
+    constexpr uint64_t sync_every = 8ull << 20;
     using clock = std::chrono::steady_clock;
     auto seconds = [](clock::duration d) { return std::chrono::duration<double>(d).count(); };
 
@@ -960,7 +966,7 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
         Body body(c, std::move(ahead), kind, length_n);
         size_t filled = 0;
         auto t_win = clock::now();
-        uint64_t b_win = done, last_checkpoint = done;
+        uint64_t b_win = done, last_checkpoint = done, last_sync = done;
         // For the detailed log: where the time of each 64 MB went, waiting
         // for the network, hashing or writing, to find what holds a download
         // back.
@@ -981,8 +987,12 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
                 const auto t1 = clock::now();
                 t_hash += seconds(t1 - t0);
                 if (fwrite(wbuf.data(), 1, filled, f) != filled || ferror(f)) return write_failed();
-                t_write += seconds(clock::now() - t1);
                 done += filled;
+                if (done - last_sync >= sync_every) {
+                    if (fflush(f) != 0 || fsync(fileno(f)) != 0) return write_failed();
+                    last_sync = done;
+                }
+                t_write += seconds(clock::now() - t1);
                 filled = 0;
                 progress.done = done;
             }
