@@ -514,7 +514,8 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
         if (!info.model_id.empty()) field("MODEL", info.model_id, kText, bodyb_);
         else field("MODEL", "Load a model on the Models page first", kAmber, body_);
         field("API KEY",
-              app::setting(kRequireKey, "0") == "1" ? "One of your keys, below" : "Any text, or one of your keys below",
+              app::setting(kRequireKey, "0") == "1" ? "One of your keys, under Apps on the left"
+                                                    : "Any text, or one of your keys under Apps on the left",
               kText, body_);
         if (info.n_ctx > 0)
             field("CONTEXT WINDOW", plain::count(info.n_ctx) + " tokens", kText, body_);
@@ -543,7 +544,8 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
         para("3. In Tailscale's admin page, under Machines, approve the route for the home computer.", kText);
         ty += 8;
         para("4. Away from home, with Tailscale on, apps use the same base URL as at home. Turn on Require a key "
-             "below too, and keep the PS5's address fixed with a DHCP reservation in your router.",
+             "under Apps on the left too, and keep the PS5's address fixed with a DHCP reservation in your "
+             "router.",
              kText);
     } else if (r.kind == Row::Guide) {
         // The list of guides, drawn above.
@@ -685,7 +687,7 @@ std::string SettingsPage::arrows_do(const SettingsInfo &info) const {
     const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
     if (r.kind != Row::Guide) return "\xE2\x86\x90\xE2\x86\x92  Change";
     if (!in_guide_) return "";
-    return open_ >= 0 ? "\xE2\x86\x90  Back" : "\xE2\x86\x90  Back to the settings";
+    return open_ >= 0 ? "" : "\xE2\x86\x90  Back to the settings";  // on a guide, cross says Back
 }
 
 std::string SettingsPage::square_does(const SettingsInfo &info) const {
