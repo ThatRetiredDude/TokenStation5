@@ -1,7 +1,9 @@
 #include "log.h"
 
+#include <fcntl.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -25,6 +27,10 @@ struct Queue {
     bool writing = false;
 };
 
+// Where the writer writes: stderr, or the log file once log_capture() has
+// pointed stderr at its pipe.
+std::atomic<int> out_fd{2};
+
 Queue &queue() {
     static Queue *q = [] {
         Queue *n = new Queue;
@@ -43,7 +49,7 @@ Queue &queue() {
                 // write can wait a second (with the detailed log on, a
                 // search's results took 4 minutes to show, 2026-10-24).
                 for (size_t off = 0; off < out.size();) {
-                    const ssize_t w = write(fileno(stderr), out.data() + off, out.size() - off);
+                    const ssize_t w = write(out_fd.load(), out.data() + off, out.size() - off);
                     if (w < 0 && errno == EINTR) continue;
                     if (w <= 0) break;
                     off += (size_t)w;
@@ -76,6 +82,44 @@ void log_line(const char *fmt, ...) {
         q.lines.emplace_back(line, (size_t)n + 1);
     }
     q.more.notify_one();
+}
+
+bool log_capture(const char *path) {
+    const int file = open(path, O_WRONLY | O_APPEND | O_CREAT, 0666);
+    int fds[2];
+    if (file < 0) return false;
+    if (pipe(fds) != 0) {
+        close(file);
+        return false;
+    }
+    fflush(stdout);
+    fflush(stderr);
+    Queue &q = queue();
+    out_fd = file;
+    if (dup2(fds[1], 1) < 0 || dup2(fds[1], 2) < 0) {
+        out_fd = 2;
+        close(file);
+        close(fds[0]);
+        close(fds[1]);
+        return false;
+    }
+    close(fds[1]);
+    // The pipe's reader only queues what comes, so a write to stdout or
+    // stderr never waits on the file.
+    std::thread([r = fds[0], &q] {
+        char buf[16384];
+        for (;;) {
+            const ssize_t n = read(r, buf, sizeof buf);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) return;
+            {
+                std::lock_guard<std::mutex> lk(q.mu);
+                q.lines.emplace_back(buf, (size_t)n);
+            }
+            q.more.notify_one();
+        }
+    }).detach();
+    return true;
 }
 
 void log_drain() {
