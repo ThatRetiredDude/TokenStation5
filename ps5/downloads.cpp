@@ -252,6 +252,74 @@ bool free_space(const std::string &dir, uint64_t &bytes) {
     return true;
 }
 
+namespace {
+
+// The downloads asked for and not ended, a line each, so they go on after
+// the title restarts: the entry's fields, tab-separated (a search's entries
+// last only as long as the title, so the whole entry is kept).
+std::string wanted_line(const CatalogEntry &e) {
+    char nums[256];
+    snprintf(nums, sizeof nums, "%llu\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%llu", (unsigned long long)e.bytes, e.n_vocab,
+             e.n_embd, e.n_layer, e.n_ff, e.n_head, e.n_head_kv, e.head_dim, e.ctx_train,
+             (unsigned long long)e.weight_bytes);
+    std::string l = std::to_string((int)e.kind);
+    for (const char *f : {e.key, e.name, e.good_for, e.same, e.repo, e.path, e.file, e.commit, e.sha256})
+        l += std::string("\t") + (f ? f : "");
+    return l + "\t" + nums + "\n";
+}
+
+// The entry a line names; false for a line this build can't read.
+bool wanted_entry(const std::string &line, CatalogText &t, CatalogEntry &e) {
+    std::vector<std::string> f;
+    for (size_t i = 0;;) {
+        const size_t tab = line.find('\t', i);
+        f.push_back(line.substr(i, tab == std::string::npos ? std::string::npos : tab - i));
+        if (tab == std::string::npos) break;
+        i = tab + 1;
+    }
+    if (f.size() != 20 || f[1].empty() || f[7].empty()) return false;
+    e = CatalogEntry{};
+    const int kind = atoi(f[0].c_str());
+    if (kind < CatalogEntry::Model || kind > CatalogEntry::Voice) return false;
+    e.kind = (CatalogEntry::Kind)kind;
+    t = CatalogText{f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9]};
+    e.bytes = strtoull(f[10].c_str(), nullptr, 10);
+    int *ints[] = {&e.n_vocab, &e.n_embd, &e.n_layer, &e.n_ff, &e.n_head, &e.n_head_kv, &e.head_dim, &e.ctx_train};
+    for (int i = 0; i < 8; i++) *ints[i] = atoi(f[11 + i].c_str());
+    e.weight_bytes = strtoull(f[19].c_str(), nullptr, 10);
+    return true;
+}
+
+}  // namespace
+
+std::string Downloads::wanted_path() const { return dir_ + "/.downloads.tsv"; }
+
+void Downloads::save_wanted() {
+    std::string text;
+    for (const std::string &key : wanted_)
+        if (const CatalogEntry *e = find(key)) text += wanted_line(*e);
+    const std::string path = wanted_path(), tmp = path + ".tmp";
+    if (text.empty()) {
+        unlink(path.c_str());
+        return;
+    }
+    FILE *f = fopen(tmp.c_str(), "wb");
+    bool ok = f && fwrite(text.data(), 1, text.size(), f) == text.size();
+    if (f) ok = fclose(f) == 0 && ok;
+    if (!ok || rename(tmp.c_str(), path.c_str()) != 0) {
+        unlink(tmp.c_str());
+        printf("ts5-title: download: can't save the list of downloads to go on with (%s)\n", strerror(errno));
+    }
+}
+
+void Downloads::want(const std::string &key, bool on) {
+    const auto it = std::find(wanted_.begin(), wanted_.end(), key);
+    if (on == (it != wanted_.end())) return;
+    if (on) wanted_.push_back(key);
+    else wanted_.erase(it);
+    save_wanted();
+}
+
 Downloads::Downloads(std::string dir, std::string build, Notify notify)
     : dir_(std::move(dir)), build_(std::move(build)), notify_(std::move(notify)) {
     // Parts left from before (the title closed, or a download stopped): each
@@ -266,6 +334,28 @@ Downloads::Downloads(std::string dir, std::string build, Notify notify)
         state_[e.key] = d;
         printf("ts5-title: download: %s stopped at %s (%.0f%%) before; cross on its row goes on\n", e.file,
                mb(d.done).c_str(), d.total ? 100.0 * d.done / d.total : 0.0);
+    }
+    // The downloads that were going when the title closed go on.
+    if (FILE *f = fopen(wanted_path().c_str(), "rb")) {
+        char line[4096];
+        while (fgets(line, sizeof line, f)) {
+            std::string l = line;
+            while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+            CatalogText t;
+            CatalogEntry e;
+            if (!wanted_entry(l, t, e)) continue;
+            const CatalogEntry &c = catalog_at(add_catalog_entry(t, e));
+            if (exists(dir_ + "/" + c.file)) continue;
+            Download &d = state_[c.key];
+            d.phase = Download::Queued;
+            d.done = size_of(part_of(c));
+            if (!d.total) d.total = c.bytes;
+            queue_.push_back(c.key);
+            wanted_.push_back(c.key);
+            printf("ts5-title: download: %s goes on from before the title closed\n", c.file);
+        }
+        fclose(f);
+        save_wanted();
     }
     for (int i = 0; i < kDownloadsAtOnce; i++) threads_.emplace_back([this] { loop(); });
 }
@@ -308,6 +398,7 @@ void Downloads::start(const std::string &key) {
         d.problem.clear();
         if (!d.total) d.total = e->bytes;
         queue_.push_back(key);
+        want(key, true);
     }
     printf("ts5-title: download: %s asked for\n", e->file);
     version_++;
@@ -330,6 +421,7 @@ void Downloads::stop(const std::string &key) {
             auto s = state_.find(key);
             const CatalogEntry *e = find(key);
             if (s != state_.end() && e) s->second.phase = exists(part_of(*e)) ? Download::Stopped : Download::None;
+            want(key, false);
         }
     }
     version_++;
@@ -445,6 +537,7 @@ void Downloads::loop() {
             std::lock_guard<std::mutex> lk(mu_);
             running_.erase(key);
             stopping_.erase(key);
+            if (!quit_) want(key, false);  // ended: done, stopped or failed; closing, it goes on next time
         }
         read_free();
         version_++;

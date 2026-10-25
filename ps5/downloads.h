@@ -116,6 +116,11 @@ private:
     std::string part_of(const CatalogEntry &e) const;
     std::string sha_of(const CatalogEntry &e) const;
     void read_free();
+    // The list of downloads to go on with after a restart: .downloads.tsv in
+    // the models folder. want() adds or drops a key and saves it (under mu_).
+    std::string wanted_path() const;
+    void save_wanted();
+    void want(const std::string &key, bool on);
     // free_space, less what the other running downloads still need.
     bool room_left(const std::string &key, uint64_t &bytes);
 
@@ -126,6 +131,7 @@ private:
     std::deque<std::string> queue_;
     std::map<std::string, Download> state_;
     std::vector<std::string> finished_;
+    std::vector<std::string> wanted_;  // asked for and not ended, in order
     std::set<std::string> running_, stopping_;              // stopping_: stop asked while running
     std::map<std::string, ts5::FetchProgress *> progress_;  // the running transfers', under mu_
     bool held_ = false, quit_ = false, refresh_ = true;
