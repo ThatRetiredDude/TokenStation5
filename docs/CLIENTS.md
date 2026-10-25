@@ -31,6 +31,35 @@ folder). Cross turns a key off and on, square twice removes it. With
 (`invalid_api_key`); the Chat page on the PS5 never needs one. `ts5 serve`
 on a computer takes one key from `TS5_API_KEY`.
 
+## Away from home
+
+Don't forward port 8081 on your router. The API is plain HTTP, so a key
+would cross the internet unprotected, and anyone who finds the port can try
+it. Use [Tailscale](https://tailscale.com) (free for personal use) instead:
+the connection stays private and encrypted, and nothing is opened to the
+internet. Tailscale doesn't run on the PS5 itself, so a computer that stays
+on at home shares the PS5's address with your devices as a
+[subnet route](https://tailscale.com/kb/1019/subnets):
+
+1. Install Tailscale on a computer that stays on at home (a PC, a Mac, a
+   Raspberry Pi, a NAS) and on the phone or laptop you'll use away, signed in
+   to the same account.
+2. On the home computer, advertise the PS5's address, for example
+   `sudo tailscale up --advertise-routes=192.168.1.50/32` on Linux (which
+   also needs IP forwarding turned on, see the link above). The Windows and
+   Mac apps have the same setting.
+3. In the Tailscale admin console, under Machines, approve the route for the
+   home computer.
+4. Away from home, with Tailscale on, apps use the same base URL as at home,
+   `http://192.168.1.50:8081/v1`. Phones, Windows and Macs use approved
+   routes on their own; another Linux machine needs
+   `tailscale up --accept-routes`.
+
+Turn on "Require a key" in Settings as well, and keep the PS5's address fixed
+with a DHCP reservation, since the route names one address. Settings on the
+TV has the same steps, with this PS5's address filled in, under Apps: "Use it
+away from home".
+
 ## Kilo Code
 
 Kilo Code reads custom providers from `~/.config/kilo/kilo.jsonc`. Add
