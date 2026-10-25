@@ -48,6 +48,9 @@ const GuideLink kGuides[] = {
     {"Use it away from home", "Reach this PS5 from your phone or laptop anywhere, privately, with Tailscale.",
      "Don't open the PS5's port on your router: anyone could find it, and keys would cross the internet "
      "unprotected. Tailscale keeps it private, through a computer that stays on at home."},
+    {"Add models from a computer", "Copy models over your network with FTP, much faster than downloading here.",
+     "Big downloads on the PS5 slow down after the first few hundred MB: the PS5 seems to limit how fast apps "
+     "can save. Copying a model from a computer over FTP is much faster."},
 };
 constexpr int kGuideCount = sizeof kGuides / sizeof kGuides[0];
 constexpr int kLinkH = 104;
@@ -129,7 +132,7 @@ const ApiKeyInfo *key_of(const Row &r, const SettingsInfo &info) {
 // the keys), then the settings.
 std::vector<Row> rows(const SettingsInfo &info) {
     std::vector<Row> r;
-    r.push_back({"APPS", "", "Instructions", "How to use the models on this PS5 from your apps, at home and away.",
+    r.push_back({"APPS", "", "Instructions", "How to use the models on this PS5 from your apps, at home and away, and how to add more.",
                  "", {}, "", false, Row::Guide});
     r.push_back({"APPS", kRequireKey, "Require a key",
                  "With this on, apps on your network need one of your keys below to use the models. The Chat page "
@@ -507,6 +510,10 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
         c.round_rect_line((float)dx, (float)by, (float)bw, (float)bh, 14, 2.5f, kAccent);
         text_glyph(c, bodyb_, dx + 24, by + 46, "", kGlyphCross, "Back to instructions", kText);
     }
+    // The PS5's address alone, from http://ADDRESS:8081/v1.
+    std::string host = info.url;
+    if (host.rfind("http://", 0) == 0) host = host.substr(7);
+    host = host.substr(0, host.find(':'));
     if (open == 0) {
         ty -= 12;
         if (info.on_network) field("BASE URL", info.url, kAccent, bodyb_);
@@ -527,10 +534,6 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
              kText2);
     } else if (open == 1) {
         ty -= 12;
-        // The PS5's address alone, from http://ADDRESS:8081/v1.
-        std::string host = info.url;
-        if (host.rfind("http://", 0) == 0) host = host.substr(7);
-        host = host.substr(0, host.find(':'));
         if (info.on_network) field("THIS PS5'S ADDRESS", host, kAccent, bodyb_);
         else field("THIS PS5'S ADDRESS", "Connect the PS5 to your network first", kAmber, body_);
         para("1. Install Tailscale (free, tailscale.com) on a computer that stays on at home, and on your phone "
@@ -547,6 +550,25 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
              "under Apps on the left too, and keep the PS5's address fixed with a DHCP reservation in your "
              "router.",
              kText);
+    } else if (open == 2) {
+        ty -= 12;
+        // ftpsrv, which the jailbreak runs, listens on 2121.
+        if (info.on_network) field("FTP ADDRESS", "ftp://" + host + ":2121", kAccent, bodyb_);
+        else field("FTP ADDRESS", "Connect the PS5 to your network first", kAmber, body_);
+        field("FOLDER", "/data/homebrew/PPSA99555/models", kText, bodyb_);
+        para("1. On your computer, download the model's .gguf file, from Hugging Face for example. For 7B and "
+             "8B models, Q4_K_M is a good choice.",
+             kText);
+        ty += 8;
+        para("2. Connect an FTP app, such as FileZilla or Cyberduck, to the address above, with no user name "
+             "or password.",
+             kText);
+        ty += 8;
+        para("3. Copy the file into the folder above. The Models page lists it within seconds, as COPYING "
+             "until the whole file is there.",
+             kText);
+        ty += 8;
+        para("Keep a copy on your computer: updating or deleting the app removes its models.", kText2);
     } else if (r.kind == Row::Guide) {
         // The list of guides, drawn above.
     } else if (r.kind == Row::NewKey) {
