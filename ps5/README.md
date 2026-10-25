@@ -83,11 +83,19 @@ LAN (`engine/tests/fetch_test.py`, which can drop, throttle and redirect).
 
 ## Adding models from a computer
 
-The screens on the TV don't show paths or commands; this is the guide they
+The screens on the TV don't show commands; this is the guide they
 point to ("the TokenStation5 guide shows how"). Everything goes in the
 title's `models` folder, `/data/homebrew/PPSA99555/models` over FTP (port
 2121), and shows up on the Models page or in Settings by itself within a few
-seconds. A model still arriving shows as COPYING until it's whole.
+seconds. A model still arriving shows as COPYING until it's whole. Settings
+has the same steps on the TV: Instructions, "Add models from a computer",
+with the PS5's FTP address filled in.
+
+This is the fast way in. The PS5 lets a title save only so fast: a download
+on the console writes its first few hundred MB at network speed, then slows
+to about 1 to 4 MB/s, while the FTP server (outside the title) writes about
+30 MB/s, so a 5 GB model takes a few minutes over FTP instead of about half an
+hour on the console.
 
 | To add | From the TokenStation5 folder on your computer |
 | --- | --- |
@@ -176,7 +184,9 @@ right (up and down choose one, cross opens it, cross again goes back): "Set
 up an app" shows what an app needs to use the PS5 (the base URL, the model,
 the key, the context window; the full guide is
 [docs/CLIENTS.md](../docs/CLIENTS.md)), and "Use it away from home" gives the
-Tailscale steps with the PS5's address filled in. "Require a key" turns API keys on,
+Tailscale steps with the PS5's address filled in, and "Add models from a
+computer" gives the FTP address, the folder and the steps for copying a model
+in (see [Adding models from a computer](#adding-models-from-a-computer)). "Require a key" turns API keys on,
 "New key" names and makes one (it shows once, on its row; only its SHA-256 is
 kept, in `keys.tsv`), and each key can be turned off and on (cross) or
 removed (square twice). Then the title's settings, saved in `ts5.env` (one
