@@ -167,6 +167,8 @@ long ms_since(std::chrono::steady_clock::time_point t) {
     return (long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t).count();
 }
 
+constexpr int kRecvBuffer = 4 << 20;
+
 int connect_to(const std::string &host, int port, int timeout_s, std::string &err) {
     std::vector<uint32_t> addrs;
     trace("resolving %s", host.c_str());
@@ -187,12 +189,19 @@ int connect_to(const std::string &host, int port, int timeout_s, std::string &er
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        // A bigger receive buffer than the system's default, before connecting
+        // so the window can grow to it: one connection never goes faster than
+        // its buffer per round trip (64 KiB over 60 ms is about 1 MB a second).
+        int rcvbuf = kRecvBuffer;
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof rcvbuf);
         sockaddr_in sa{};
         sa.sin_family = AF_INET;
         sa.sin_port = htons((uint16_t)port);
         sa.sin_addr.s_addr = addr;
         if (connect(fd, (sockaddr *)&sa, sizeof sa) == 0) {
-            trace("connected (%ld ms)", ms_since(t));
+            socklen_t len = sizeof rcvbuf;
+            if (getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, &len) != 0) rcvbuf = 0;
+            trace("connected (%ld ms, receive buffer %d KiB)", ms_since(t), rcvbuf / 1024);
             return fd;
         }
         char ip[INET_ADDRSTRLEN] = "?";
