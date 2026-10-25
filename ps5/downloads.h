@@ -1,6 +1,6 @@
 // Downloads from the catalog (catalog.h) into the title's models folder, up
-// to kAtOnce at a time, each on a thread of its own. Never a Runner job: the Runner does
-// one job at a time, and serving, the GPU check and the speed test go on
+// to kDownloadsAtOnce at a time, each on a thread of its own. Never a Runner
+// job: the Runner does one job at a time, and serving, the GPU check and the speed test go on
 // while a model downloads. A download writes .<file>.part, a dotfile the
 // Library and the speech and voice scans skip, and every 64 MiB a
 // checkpoint of its SHA-256 beside it (.<file>.sha), so going on after a
@@ -30,12 +30,12 @@ struct FetchProgress;
 namespace app {
 
 // Downloads that run at once; more wait in line.
-constexpr int kAtOnce = 3;
+constexpr int kDownloadsAtOnce = 3;
 
 struct Download {
     enum Phase {
         None,      // nothing on the PS5 yet
-        Queued,    // behind kAtOnce others
+        Queued,    // behind kDownloadsAtOnce others
         Running,   // held while a model loads (held)
         Retrying,  // after a network failure, until retry_at
         Stopped,   // by its button, or by closing the title; the part is kept
@@ -87,8 +87,8 @@ public:
     // downloads out with the console).
     static std::string url(const CatalogEntry &e);
 
-    // Starts the entry's download, or goes on with it; with kAtOnce running,
-    // after the first of them ends.
+    // Starts the entry's download, or goes on with it; with kDownloadsAtOnce
+    // running, after the first of them ends.
     void start(const std::string &key);
     // Stops it, keeping the part.
     void stop(const std::string &key);
