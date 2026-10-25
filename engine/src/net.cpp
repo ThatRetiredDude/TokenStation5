@@ -167,6 +167,8 @@ long ms_since(std::chrono::steady_clock::time_point t) {
     return (long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t).count();
 }
 
+constexpr int kRecvBuffer = 4 << 20;
+
 int connect_to(const std::string &host, int port, int timeout_s, std::string &err) {
     std::vector<uint32_t> addrs;
     trace("resolving %s", host.c_str());
@@ -187,12 +189,19 @@ int connect_to(const std::string &host, int port, int timeout_s, std::string &er
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        // A bigger receive buffer than the system's default, before connecting
+        // so the window can grow to it: one connection never goes faster than
+        // its buffer per round trip (64 KiB over 60 ms is about 1 MB a second).
+        int rcvbuf = kRecvBuffer;
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof rcvbuf);
         sockaddr_in sa{};
         sa.sin_family = AF_INET;
         sa.sin_port = htons((uint16_t)port);
         sa.sin_addr.s_addr = addr;
         if (connect(fd, (sockaddr *)&sa, sizeof sa) == 0) {
-            trace("connected (%ld ms)", ms_since(t));
+            socklen_t len = sizeof rcvbuf;
+            if (getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, &len) != 0) rcvbuf = 0;
+            trace("connected (%ld ms, receive buffer %d KiB)", ms_since(t), rcvbuf / 1024);
             return fd;
         }
         char ip[INET_ADDRSTRLEN] = "?";
@@ -709,6 +718,12 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
     constexpr int timeout_s = 30;
     constexpr size_t block = 256 << 10;
     constexpr uint64_t checkpoint_every = 64ull << 20;
+    // On the PS5 the title's writes reach the disk at about 2 MB/s, however
+    // they're made, but the system takes ~100 MB of them at once into memory
+    // first; once that's full, every write in the title waits, the TV's
+    // picture too, for a minute or more. Sending each 8 MB to the disk before
+    // the next keeps that from filling, at the same speed.
+    constexpr uint64_t sync_every = 8ull << 20;
     using clock = std::chrono::steady_clock;
     auto seconds = [](clock::duration d) { return std::chrono::duration<double>(d).count(); };
 
@@ -951,21 +966,45 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
         Body body(c, std::move(ahead), kind, length_n);
         size_t filled = 0;
         auto t_win = clock::now();
-        uint64_t b_win = done, last_checkpoint = done;
+        uint64_t b_win = done, last_checkpoint = done, last_sync = done;
+        // For the detailed log: where the time of each 64 MB went, waiting
+        // for the network, hashing or writing, to find what holds a download
+        // back.
+        double t_read = 0, t_hash = 0, t_write = 0;
+        auto t_span = clock::now();
+        uint64_t b_span = done;
         for (;;) {
+            auto t0 = clock::now();
             int n = body.next(wbuf.data() + filled, block - filled, err);
+            t_read += seconds(clock::now() - t0);
             if (n < 0) return false;
             filled += (size_t)n;
             if (filled < block && n > 0) continue;
             // A full block, or the last one.
             if (filled > 0) {
+                t0 = clock::now();
                 hash.update(wbuf.data(), filled);
+                const auto t1 = clock::now();
+                t_hash += seconds(t1 - t0);
                 if (fwrite(wbuf.data(), 1, filled, f) != filled || ferror(f)) return write_failed();
                 done += filled;
+                if (done - last_sync >= sync_every) {
+                    if (fflush(f) != 0 || fsync(fileno(f)) != 0) return write_failed();
+                    last_sync = done;
+                }
+                t_write += seconds(clock::now() - t1);
                 filled = 0;
                 progress.done = done;
             }
             const auto now = clock::now();
+            if (done - b_span >= (64u << 20) || (n == 0 && done > b_span)) {
+                const double span = seconds(now - t_span), mb = (double)(done - b_span) / 1048576.0;
+                trace("%.0f MB in %.1f s (%.1f MB/s): network %.1f s, hash %.1f s, write %.1f s", mb, span,
+                      span > 0 ? mb / span : 0.0, t_read, t_hash, t_write);
+                t_read = t_hash = t_write = 0;
+                t_span = now;
+                b_span = done;
+            }
             if (seconds(now - t_win) >= 2) {
                 progress.speed = (double)(done - b_win) / seconds(now - t_win);
                 t_win = now;

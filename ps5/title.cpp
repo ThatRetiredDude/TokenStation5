@@ -56,13 +56,16 @@
 #include <vulkan/vulkan.h>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -76,6 +79,7 @@
 #include <vector>
 
 #include "audio_probe.h"
+#include "backup.h"
 #include "canvas.h"
 #include "chat.h"
 #include "chat_store.h"
@@ -132,6 +136,11 @@ namespace {
 #ifndef TS5_DATA
 #define TS5_DATA "/data"
 #endif
+// The title's own space outside its folder, which a store update keeps
+// (backup.h).
+#ifndef TS5_STORE
+#define TS5_STORE "/download0"
+#endif
 #ifndef TS5_TITLE_ID
 #define TS5_TITLE_ID "PPSA99555"
 #endif
@@ -185,8 +194,16 @@ void notify(const std::string &text) {
 // the main loop writes them every 2 s, and leave() writes what's left.
 ts5::UsageLog usage_log(kUsage);
 
+// Settings, keys, chats and usage, copied to /download0 so a store update
+// (which swaps the whole folder) keeps them: put back at start, followed
+// every 30 s and before leaving.
+app::Backup backup(TS5_HOME, TS5_STORE "/ts5",
+                   {"ts5.env", "ts5.args", "keys.tsv", "usage.tsv", "usage.prev.tsv", "usage-hours.tsv", "results.tsv"},
+                   {"chats"});
+
 [[noreturn]] void leave(const char *path) {
     usage_log.flush();
+    backup.sync();
     printf("ts5-title: leaving (%s)\n", path);
     fflush(nullptr);
     ts5::log_drain();
@@ -457,6 +474,80 @@ std::string api_url() {
     return "http://" + (ip.empty() ? std::string("<console ip>") : ip) + ":" + std::to_string(api_port) + "/v1";
 }
 
+// TS5_WRITE_PROBE=1 in ts5.env: how fast the title can write, in 32 MB
+// steps, several ways, to find why downloads write at about 1 MB/s into
+// models/ while the same disk takes 30 MB/s over FTP. Each test's file is
+// removed after it. In a thread of its own, so the TV shows whether the
+// main loop stalls meanwhile.
+void write_probe() {
+    using clock = std::chrono::steady_clock;
+    auto secs = [](clock::time_point a) { return std::chrono::duration<double>(clock::now() - a).count(); };
+    struct Test {
+        const char *name, *dir;
+        int mb;
+        bool stdio, direct, sync;
+    };
+    const Test tests[] = {
+        {"stdio 1 MB writes (as downloads)", kModels, 192, true, false, false},
+        {"write() 8 MB", kModels, 192, false, false, false},
+        {"write() 8 MB, fsync every 32 MB", kModels, 192, false, false, true},
+        {"write() 8 MB, O_DIRECT", kModels, 192, false, true, false},
+        {"write() 8 MB into /download0", "/download0", 128, false, false, false},
+    };
+    std::vector<char> buf(8u << 20, 'x');
+    for (const Test &t : tests) {
+        const std::string path = std::string(t.dir) + "/.ts5-write-probe";
+        printf("ts5-title: write probe: %s, %d MB into %s\n", t.name, t.mb, t.dir);
+        const auto start = clock::now();
+        auto step = start;
+        FILE *f = nullptr;
+        int fd = -1;
+        std::vector<char> fbuf(1 << 20);
+        if (t.stdio) {
+            f = fopen(path.c_str(), "wb");
+            if (f) setvbuf(f, fbuf.data(), _IOFBF, fbuf.size());
+        } else {
+            fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | (t.direct ? O_DIRECT : 0), 0666);
+        }
+        if (!f && fd < 0) {
+            printf("ts5-title: write probe: can't open %s: %s\n", path.c_str(), strerror(errno));
+            continue;
+        }
+        bool ok = true;
+        const size_t piece = t.stdio ? (1u << 20) : buf.size();
+        uint64_t done = 0, step_done = 0;
+        while (ok && done < ((uint64_t)t.mb << 20)) {
+            ok = t.stdio ? fwrite(buf.data(), 1, piece, f) == piece : write(fd, buf.data(), piece) == (ssize_t)piece;
+            if (!ok) printf("ts5-title: write probe: write failed: %s\n", strerror(errno));
+            done += piece;
+            if (done - step_done >= (32u << 20)) {
+                if (t.sync && fd >= 0) fsync(fd);
+                const double s = secs(step);
+                printf("ts5-title: write probe:   %llu MB: 32 MB in %.1f s (%.1f MB/s)\n",
+                       (unsigned long long)(done >> 20), s, s > 0 ? 32.0 / s : 0.0);
+                step = clock::now();
+                step_done = done;
+            }
+        }
+        const double written = secs(start);
+        const auto closing = clock::now();
+        if (f) {
+            fflush(f);
+            fsync(fileno(f));
+            fclose(f);
+        } else {
+            fsync(fd);
+            close(fd);
+        }
+        const double total = secs(start);
+        printf("ts5-title: write probe: %s: %.1f s to write, %.1f s more to reach the disk: %.1f MB/s overall\n",
+               t.name, written, secs(closing), total > 0 ? (double)(done >> 20) / total : 0.0);
+        unlink(path.c_str());
+        sceKernelUsleep(3000000);
+    }
+    printf("ts5-title: write probe: done\n");
+}
+
 // The address apps use, or "" while the console isn't on a network.
 std::string network_url() {
     {
@@ -480,6 +571,9 @@ int main(int, char **) {
     }
     if (freopen(kLog, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
     printf("ts5-title: TokenStation5 %s\n", TS5_VERSION);
+    // After a store update the folder is new: the last version's files come
+    // back before anything reads them.
+    backup.restore();
 
     // Not radv_enable_unified_heap_on_apu, which shows the console's memory as
     // one 11.44 GiB heap: it also takes away the GTT memory types, and RADV's
@@ -588,6 +682,26 @@ int main(int, char **) {
     // Models (and, from Settings, the speech model and voice) downloaded on
     // the console, beside whatever the Runner does.
     app::Downloads downloads(kModels, TS5_VERSION, notify);
+    // Which folders the title can write to, and the free space each one's
+    // volume reports, to find where models and the rest can live so a store
+    // update (which swaps the app's folder) keeps them.
+    for (const char *dir : {TS5_HOME, "/download0", TS5_DATA}) {
+        struct statvfs vs;
+        if (statvfs(dir, &vs) != 0) {
+            printf("ts5-title: folder %s: can't read its volume (%s)\n", dir, strerror(errno));
+            continue;
+        }
+        const std::string probe = std::string(dir) + "/.ts5-write-test";
+        FILE *f = fopen(probe.c_str(), "wb");
+        const bool writable = f && fputs("ts5", f) >= 0;
+        if (f) fclose(f);
+        unlink(probe.c_str());
+        const uint64_t unit = vs.f_frsize ? vs.f_frsize : vs.f_bsize;
+        printf("ts5-title: folder %s: %s, %s free of %s (fs id %lu)\n", dir, writable ? "writable" : "not writable",
+               app::format_bytes((uint64_t)vs.f_bavail * unit).c_str(),
+               app::format_bytes((uint64_t)vs.f_blocks * unit).c_str(), (unsigned long)vs.f_fsid);
+    }
+    if (app::setting("TS5_WRITE_PROBE") == "1") std::thread(write_probe).detach();
     app::ChatStore chat_store(kChats);
     app::Chat chat(opts.host, opts.port, &chat_store);
     // The Chat page's sidebar: every chat, or what a search found.
@@ -641,7 +755,8 @@ int main(int, char **) {
     app::ChatState chat_state;
     app::VoiceState voice_state;
     bool drawn_dark = false, drawn_speaking = false;
-    double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan;
+    double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan,
+           last_backup = last_scan;
     ui::SettingsInfo settings_note;  // the Settings page's last change
     // The Settings page's info: the last change, plus the keys and what an
     // app needs to connect.
@@ -822,6 +937,10 @@ int main(int, char **) {
             lib_changed |= now_ip != ip;
             ip = now_ip;
             last_ip = t;
+        }
+        if (t - last_backup > 30) {
+            backup.sync();
+            last_backup = t;
         }
 
         // Downloads that arrived: the Library lists them now, not at its next
