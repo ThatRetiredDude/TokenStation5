@@ -93,7 +93,7 @@ ModelInfo estimate(const CatalogEntry &e);
 
 // "0.5B", "7.6B"
 std::string format_params(double n);
-// "612 MB", "4.7 GB"
+// "612 MB", "4.4 GB": 1,024 MB to a GB, as the PS5's storage screen counts
 std::string format_bytes(uint64_t n);
 
 }  // namespace app
