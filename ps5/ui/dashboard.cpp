@@ -340,6 +340,15 @@ Action Dashboard::press(uint32_t b, const View &v) {
             a.kind = ch.key_remove ? Action::RemoveKey : Action::KeyOn;
             a.name = ch.key_id;
             a.value = ch.key_on ? "1" : "0";
+        } else if (!ch.wg_device.empty()) {
+            a.kind = ch.wg_remove ? Action::WgRemoveDevice : Action::WgDeviceOn;
+            a.name = ch.wg_device;
+            a.value = ch.wg_on ? "1" : "0";
+        } else if (ch.wg_new_key) {
+            a.kind = Action::WgNewKey;
+        } else if (ch.wg_answer) {
+            a.kind = Action::WgAnswer;
+            a.value = ch.wg_answer > 0 ? "1" : "0";
         }
         if (b & kCircle) show(Home);
         return a;

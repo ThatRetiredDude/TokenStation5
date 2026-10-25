@@ -36,6 +36,24 @@ public:
     // Without one, everyone gets in. /health never asks. Set before start().
     using Authorize = std::function<bool(const std::string &key, const std::string &client, std::string &name)>;
     void set_authorize(Authorize f) { state_.authorize = std::move(f); }
+    // Names the peer of each connection, from its address and port, for
+    // Authorize and usage.tsv; without one, the address. The title's
+    // WireGuard tunnel reaches the API from 127.0.0.1 and names each of its
+    // connections by the device behind it. Set before start().
+    using ClientName = std::function<std::string(const std::string &ip, int port)>;
+    void set_client_name(ClientName f) { client_name_ = std::move(f); }
+    // Pages of the title's own outside /v1 (a GET or POST to a path it
+    // knows): true with status, content type and body to answer it, false
+    // to let the API go on (a 404 for a path nobody knows). Called before
+    // Authorize, on the request's thread, with the peer's name: the page
+    // decides who may use it. Set before start().
+    struct Page {
+        int status = 200;
+        std::string type = "text/html; charset=utf-8", body;
+    };
+    using Pages = std::function<bool(const std::string &method, const std::string &path, const std::string &body,
+                                     const std::string &client, Page &out)>;
+    void set_pages(Pages f) { state_.pages = std::move(f); }
 
     // For a status display.
     struct Activity {
@@ -67,6 +85,7 @@ public:
         std::atomic<int> phase{0}, waiting{0};
         std::function<void(const UsageRecord &)> on_usage;
         Authorize authorize;
+        Pages pages;
     };
 
 private:
@@ -74,6 +93,7 @@ private:
     std::string host_;
     int port_ = 0, sock_ = -1;
     State state_;
+    ClientName client_name_;
 };
 
 // The command line's server: start, answer with e, and block until the

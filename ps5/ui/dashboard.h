@@ -74,7 +74,7 @@ struct Action {
     enum Kind {
         None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear, ChatType, Set, TypeSetting,
         Download, StopDownload, RemovePart, Remove, NewKey, KeyOn, RemoveKey, Search,
-        ChatOpen, ChatSearch, ChatSearchClear, ChatRemove
+        ChatOpen, ChatSearch, ChatSearchClear, ChatRemove, WgDeviceOn, WgRemoveDevice, WgNewKey, WgAnswer
     } kind = None;
     std::string path;         // Remove: the model's file
     std::vector<std::string> keys;  // Download, StopDownload, RemovePart: catalog entries
@@ -82,6 +82,8 @@ struct Action {
     std::string label;        // TypeSetting: the setting's name on the page
                               // KeyOn, RemoveKey: name is the key's id; KeyOn: value "1" or "0"
                               // ChatOpen, ChatRemove: name is the chat's id
+                              // WgDeviceOn, WgRemoveDevice: name is the device's id; WgDeviceOn: value
+                              // "1" or "0"; WgAnswer: value "1" (let it in) or "0" (refuse it)
 };
 
 class Dashboard {

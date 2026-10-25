@@ -126,6 +126,8 @@ std::string response(int code, const std::string &body, const char *type = "appl
                       : code == 404 ? "Not Found"
                       : code == 400 ? "Bad Request"
                       : code == 401 ? "Unauthorized"
+                      : code == 403 ? "Forbidden"
+                      : code == 429 ? "Too Many Requests"
                       : code == 503 ? "Service Unavailable"
                                     : "Error";
     char h[256];
@@ -276,6 +278,15 @@ void handle(int fd, Server::State &state, Usage &u) {
         u.closed = true;
         report(state, u);
     };
+    if (state.pages && (r.method == "GET" || r.method == "POST") && r.path.rfind("/v1/", 0) != 0) {
+        Server::Page page;
+        if (state.pages(r.method, r.path, r.body, u.rec.client, page)) {
+            send_all(fd, response(page.status, page.body, page.type.c_str()));
+            close(fd);
+            u.closed = true;
+            return;
+        }
+    }
     // Everything but /health needs a key the title lets in (set_authorize).
     if (r.path != "/health" && state.authorize && !state.authorize(r.key, u.rec.client, u.rec.key)) {
         log_line("ts5: %s %s %s: %s", u.rec.client.c_str(), r.method.c_str(), r.path.c_str(),
@@ -874,7 +885,9 @@ void Server::accept_loop() {
         setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
         char ip[INET_ADDRSTRLEN] = {};
         if (peer.sin_family != AF_INET || !inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof ip)) ip[0] = 0;
-        std::thread([this, c, client = std::string(ip)] {
+        std::string client = ip;
+        if (client_name_) client = client_name_(client, ntohs(peer.sin_port));
+        std::thread([this, c, client] {
             Usage u;
             u.rec.client = client;
             u.t0 = now_ms();
