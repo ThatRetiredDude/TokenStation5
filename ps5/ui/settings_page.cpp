@@ -21,14 +21,14 @@ struct Choice {
 
 // One setting: NAME in ts5.env, and what reads it does with it. No choices:
 // a key, typed on the console's keyboard, or files in the models folder.
-// The APPS section also has rows that aren't settings: how to set up an app,
-// how to use it away from home, making a key, and a row per API key (name: its id).
+// The APPS section also has rows that aren't settings: the instructions,
+// making a key, and a row per API key (name: its id).
 struct Row {
     std::string section, name, label, help, applies;
     std::vector<Choice> choices;
     std::string def;  // the value with nothing in ts5.env, as each reader's default
     bool files = false;
-    enum Kind { Setting, Guide, Away, NewKey, ApiKey } kind = Setting;
+    enum Kind { Setting, Guide, NewKey, ApiKey } kind = Setting;
 };
 
 constexpr const char *kSpeechModel = "TS5_WHISPER_MODEL", *kVoice = "TS5_TTS_VOICE";
@@ -37,6 +37,20 @@ constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
 // The voice with no TS5_TTS_VOICE, if it's there (tts/synth.h).
 constexpr const char *kDefaultVoice = "af_heart";
 constexpr int kRowH = 64, kHeadH = 44, kGap = 8;
+
+// The guides the Instructions row links to, in order.
+struct GuideLink {
+    const char *label, *blurb, *help;
+};
+const GuideLink kGuides[] = {
+    {"Set up an app", "Use the models from Kilo Code, Continue, Cline, Open WebUI and more.",
+     "Any app that takes an OpenAI-compatible provider can use the models on this PS5. Give it these:"},
+    {"Use it away from home", "Reach this PS5 from your phone or laptop anywhere, privately, with Tailscale.",
+     "Don't open the PS5's port on your router: anyone could find it, and keys would cross the internet "
+     "unprotected. Tailscale keeps it private, through a computer that stays on at home."},
+};
+constexpr int kGuideCount = sizeof kGuides / sizeof kGuides[0];
+constexpr int kLinkH = 104;
 constexpr double kNoteFor = 6, kConfirmFor = 4;
 
 const std::vector<Row> &setting_rows() {
@@ -111,18 +125,12 @@ const ApiKeyInfo *key_of(const Row &r, const SettingsInfo &info) {
     return nullptr;
 }
 
-// The page's rows: APPS (how to connect, from home and away, the key setting,
-// making a key and the keys), then the settings.
+// The page's rows: APPS (the instructions, the key setting, making a key and
+// the keys), then the settings.
 std::vector<Row> rows(const SettingsInfo &info) {
     std::vector<Row> r;
-    r.push_back({"APPS", "", "Set up an app",
-                 "Any app that takes an OpenAI-compatible provider can use the models on this PS5: Kilo Code, "
-                 "Continue, Cline, Open WebUI and more. Give it these:",
+    r.push_back({"APPS", "", "Instructions", "How to use the models on this PS5 from your apps, at home and away.",
                  "", {}, "", false, Row::Guide});
-    r.push_back({"APPS", "", "Use it away from home",
-                 "Reach the models from your phone or laptop anywhere, privately, with Tailscale. Don't open the "
-                 "PS5's port on your router: anyone could find it, and keys would cross the internet unprotected.",
-                 "", {}, "", false, Row::Away});
     r.push_back({"APPS", kRequireKey, "Require a key",
                  "With this on, apps on your network need one of your keys below to use the models. The Chat page "
                  "on this PS5 never needs one. Off: anyone on your network can, and an app that sends a key still "
@@ -233,7 +241,7 @@ std::string other(const Row &r) {
 }
 
 std::string shown(const Row &r, const SettingsInfo &info) {
-    if (r.kind == Row::Guide || r.kind == Row::Away) return "How to";
+    if (r.kind == Row::Guide) return "Open";
     if (r.kind == Row::NewKey) return "Make one";
     if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "On" : "Off";
     if (is_key(r)) return current(r).empty() ? "Not set" : "Set";
@@ -298,11 +306,34 @@ SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
     SettingChange ch;
     const auto rs = rows(info);
     follow(rs, info, sel_, fresh_seen_);
+    if (rs[sel_].kind != Row::Guide) in_guide_ = false;
+    if (in_guide_) {
+        // In the instructions: up and down choose a guide, cross or right
+        // opens it; on a guide, cross or left goes back to the list, and left
+        // on the list back to the rows.
+        if (open_ >= 0) {
+            if (b & (kCross | kLeft)) open_ = -1;
+        } else if (b & (kCross | kRight)) {
+            open_ = link_;
+        } else if (b & kLeft) {
+            in_guide_ = false;
+        } else {
+            if (b & kUp) link_ = std::max(0, link_ - 1);
+            if (b & kDown) link_ = std::min(kGuideCount - 1, link_ + 1);
+        }
+        return ch;
+    }
     if (b & kUp) sel_ = std::max(0, sel_ - 1);
     if (b & kDown) sel_ = std::min((int)rs.size() - 1, sel_ + 1);
     if (b & (kUp | kDown)) confirm_at_ = -1e9;
     const Row &r = rs[sel_];
-    if (r.kind == Row::Guide || r.kind == Row::Away) return ch;
+    if (r.kind == Row::Guide) {
+        if (b & (kCross | kRight)) {
+            in_guide_ = true;
+            open_ = -1;
+        }
+        return ch;
+    }
     if (r.kind == Row::NewKey) {
         ch.new_key = (b & kCross) != 0;
         return ch;
@@ -432,9 +463,10 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
     const auto rs = rows(info);
     const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
     const int dx = x + 32, dw = w - 64;
-    c.text(h2_, dx, y + 52, r.label, kText, dw);
+    const int open = r.kind == Row::Guide && in_guide_ ? open_ : -1;  // the guide on show, if any
+    c.text(h2_, dx, y + 52, open >= 0 ? kGuides[open].label : r.label, kText, dw);
     int ty = y + 100;
-    for (const std::string &l : wrap(body_, r.help, dw)) {
+    for (const std::string &l : wrap(body_, open >= 0 ? kGuides[open].help : r.help, dw)) {
         c.text(body_, dx, ty, l, kText2);
         ty += 38;
     }
@@ -453,7 +485,29 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
         }
     };
 
-    if (r.kind == Row::Guide) {
+    if (r.kind == Row::Guide && open < 0) {
+        // The guides, as links.
+        for (int i = 0; i < kGuideCount; i++) {
+            const bool on = in_guide_ && i == link_;
+            c.round_rect((float)dx, (float)ty, (float)dw, (float)kLinkH, 14, on ? kRowSel : kRow);
+            if (on) c.round_rect_line((float)dx, (float)ty, (float)dw, (float)kLinkH, 14, 2.5f, kAccent);
+            const int cx = dx + dw - 28, cy = ty + kLinkH / 2;
+            c.segment((float)cx, (float)cy, (float)cx - 9, (float)cy - 9, 2.5f, on ? kAccent : kText2);
+            c.segment((float)cx, (float)cy, (float)cx - 9, (float)cy + 9, 2.5f, on ? kAccent : kText2);
+            c.text(bodyb_, dx + 24, ty + 44, kGuides[i].label, on ? kAccent : kText, dw - 96);
+            c.text(small_, dx + 24, ty + 80, kGuides[i].blurb, kText2, dw - 96);
+            ty += kLinkH + kGap * 2;
+        }
+        ty += 8;
+        if (!in_guide_) text_glyph(c, small_, dx, ty + 8, "Press", kGlyphCross, "to choose one.", kText2);
+    } else if (r.kind == Row::Guide) {
+        // Back to the list, at the foot of the panel.
+        const int bw = std::min(dw, 460), bh = 72, by = y + h - bh - 32;
+        c.round_rect((float)dx, (float)by, (float)bw, (float)bh, 14, kRowSel);
+        c.round_rect_line((float)dx, (float)by, (float)bw, (float)bh, 14, 2.5f, kAccent);
+        text_glyph(c, bodyb_, dx + 24, by + 46, "", kGlyphCross, "Back to instructions", kText);
+    }
+    if (open == 0) {
         ty -= 12;
         if (info.on_network) field("BASE URL", info.url, kAccent, bodyb_);
         else field("BASE URL", "Connect the PS5 to your network first", kAmber, body_);
@@ -470,7 +524,7 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
              "files and run commands, Qwen 3 8B does best: Qwen 2.5 Coder 7B writes the code but often stops "
              "before the next step.",
              kText2);
-    } else if (r.kind == Row::Away) {
+    } else if (open == 1) {
         ty -= 12;
         // The PS5's address alone, from http://ADDRESS:8081/v1.
         std::string host = info.url;
@@ -491,6 +545,8 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
         para("4. Away from home, with Tailscale on, apps use the same base URL as at home. Turn on Require a key "
              "below too, and keep the PS5's address fixed with a DHCP reservation in your router.",
              kText);
+    } else if (r.kind == Row::Guide) {
+        // The list of guides, drawn above.
     } else if (r.kind == Row::NewKey) {
         text_glyph(c, body_, dx, ty + 8, "Press", kGlyphCross, "to name a new key.", kText2);
         ty += 56;
@@ -612,7 +668,7 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
 std::string SettingsPage::cross_does(const SettingsInfo &info) const {
     const auto rs = rows(info);
     const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
-    if (r.kind == Row::Guide || r.kind == Row::Away) return "";
+    if (r.kind == Row::Guide) return in_guide_ && open_ >= 0 ? "Back" : "Open";
     if (r.kind == Row::NewKey) return "New key";
     if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "Turn off" : "Turn on";
     if (is_key(r)) return "Type";
@@ -624,10 +680,18 @@ std::string SettingsPage::cross_does(const SettingsInfo &info) const {
     return choices(r, info).empty() ? "" : "Next choice";
 }
 
+std::string SettingsPage::arrows_do(const SettingsInfo &info) const {
+    const auto rs = rows(info);
+    const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
+    if (r.kind != Row::Guide) return "\xE2\x86\x90\xE2\x86\x92  Change";
+    if (!in_guide_) return "";
+    return open_ >= 0 ? "\xE2\x86\x90  Back" : "\xE2\x86\x90  Back to the settings";
+}
+
 std::string SettingsPage::square_does(const SettingsInfo &info) const {
     const auto rs = rows(info);
     const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
-    if (r.kind == Row::Guide || r.kind == Row::Away || r.kind == Row::NewKey) return "";
+    if (r.kind == Row::Guide || r.kind == Row::NewKey) return "";
     if (r.kind == Row::ApiKey || is_key(r)) return "Remove";
     return "Default";
 }
