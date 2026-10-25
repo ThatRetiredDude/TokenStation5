@@ -46,7 +46,7 @@ The workflow writes these fields; they already match this repo:
 | `kind` | `app` |
 | `category` | `ai` |
 | `license` | `Unlicensed` (the catalog's sentinel for a repo GitHub can't map to one SPDX id; see the license note below) |
-| `author` | `Jared Maxwell` |
+| `author` | `ThatRetiredDude` |
 | `version` | the release tag, without a leading `v` |
 | `source_repo` | `https://github.com/ThatRetiredDude/TokenStation5` |
 | `artifact_url` | the release's `PPSA99555.zip` |

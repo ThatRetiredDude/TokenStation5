@@ -91,14 +91,14 @@ jobs:
               "name": "TokenStation5",
               "kind": "app",
               "category": "ai",
-              "description": "Turns a jailbroken PS5 into a local AI endpoint, serving quantized LLMs on the console GPU over an OpenAI-compatible API on your home network.",
+              "description": "Local AI endpoint for PS5: runs LLMs on the console GPU behind an OpenAI-compatible API, with API keys, Hugging Face model downloads, chat history and search, voice, and web search.",
               # The repo is dual-licensed (PolyForm root, GPL-3.0-or-later for
               # the ps5/ title), so GitHub detects no single SPDX license
               # (NOASSERTION). The catalog's sentinel for that case is
               # "Unlicensed", which its validator accepts with no warning while
               # leaving the repo's actual licensing untouched. See docs/STORE.md.
               "license": "Unlicensed",
-              "author": "Jared Maxwell",
+              "author": "ThatRetiredDude",
               "version": version,
               "source_repo": repo,
               "artifact_url": f"{repo}/releases/download/{tag}/PPSA99555.zip",
