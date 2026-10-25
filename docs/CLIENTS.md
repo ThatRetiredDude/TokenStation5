@@ -50,16 +50,27 @@ only ever gets the public half.
    and turn on Settings, WireGuard. On your router, forward UDP port 9030
    (Settings, WireGuard, Port) to the PS5, and keep the PS5's address fixed
    with a DHCP reservation.
-2. Install WireGuard on your computer, phone or tablet. At home, open
-   `http://192.168.1.50:8081/wireguard` (the PS5's address; Settings,
-   WireGuard, Add a device shows it) in its browser, and follow the steps:
-   make an empty tunnel in the WireGuard app, paste its public key and a name
-   into the page, and copy the settings the page gives you into the tunnel.
-   They let the tunnel reach the PS5 alone (`AllowedIPs = 10.55.0.1/32`).
+2. Install WireGuard on your computer, phone or tablet. At home, scan the
+   code in Settings, WireGuard, Add a device with its camera, or open
+   `http://192.168.1.50:8081/wireguard` (the PS5's address) in its browser.
+   Give the device a name and press Ask to join. The page makes the
+   device's key pair there, in the browser, and sends the PS5 only the public
+   half.
 3. The TV says the device asks to join: in Settings, WireGuard, press cross
    on it to let it in (square refuses it).
-4. Away from home, with the tunnel on, apps use `http://10.55.0.1:8081/v1`.
+4. The page then has the tunnel ready: check your home's address on the
+   internet (it looks it up), press Download the tunnel, and open the file in
+   WireGuard (Import tunnel(s) from file on a computer; +, Create from file or
+   archive on a phone or tablet). The tunnel reaches the PS5 alone
+   (`AllowedIPs = 10.55.0.1/32`). Delete the downloaded file once WireGuard
+   has it: it holds the device's private key.
+5. Away from home, with the tunnel on, apps use `http://10.55.0.1:8081/v1`.
    Over the tunnel a key is always needed, whatever "Require a key" says.
+
+The page's code comes from the PS5, so a PS5 someone had tampered with
+could keep a key it makes. If you'd rather it never could, open "Rather have
+your WireGuard app make the key?" on the page: the app makes the key pair, you
+paste its public key, and copy the tunnel's settings in by hand.
 
 The endpoint is your home's public address, or a dynamic DNS name for it.
 Some internet providers share one public address among many homes (CGNAT),

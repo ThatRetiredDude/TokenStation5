@@ -274,6 +274,15 @@ bool WgStore::waiting(WgRequest &out) {
     return has_request_;
 }
 
+WgStore::State WgStore::state_of(const std::string &public_key) {
+    std::lock_guard<std::mutex> lk(mu_);
+    for (const WgDevice &d : devices_)
+        if (d.public_key == public_key) return d.on ? State::In : State::Off;
+    if (has_request_ && steady_s() - request_.at > kRequestFor) has_request_ = false;
+    if (has_request_ && request_.public_key == public_key) return State::Waiting;
+    return State::None;
+}
+
 bool WgStore::answer(bool yes, std::string &err) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!has_request_) return true;

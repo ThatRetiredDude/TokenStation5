@@ -8,6 +8,7 @@
 #include "library.h"
 #include "pad.h"
 #include "plain.h"
+#include "qrcodegen.hpp"
 #include "settings.h"
 #include "style.h"
 
@@ -178,8 +179,8 @@ std::vector<Row> rows(const SettingsInfo &info) {
                      "you asked from it yourself, just now.",
                      "", {}, "", false, Row::WgRequest});
     r.push_back({"WIREGUARD", "", "Add a device",
-                 "Each device makes its own key pair in its WireGuard app and gives this PS5 only the public half, "
-                 "from a page in its browser on your home network. Then you let it in here.",
+                 "A page on your home network makes the device's key pair on the device itself and gives this PS5 "
+                 "only the public half. Then you let it in here.",
                  "", {}, "", false, Row::WgAdd});
     for (const WgDeviceInfo &d : info.wg.devices)
         r.push_back({"WIREGUARD", d.id, d.name,
@@ -228,6 +229,35 @@ std::string join_url(const SettingsInfo &info) {
     const size_t v1 = u.rfind("/v1");
     if (v1 != std::string::npos && v1 + 3 == u.size()) u.resize(v1);
     return u + "/wireguard";
+}
+
+// TEXT as a QR code, dark on white with its quiet zone, at most SIZE pixels
+// square at (x, y); returns the side it drew (0 if TEXT doesn't fit one).
+int draw_qr(Canvas &c, int x, int y, const std::string &text, int size) {
+    static std::string last;
+    static std::vector<bool> dark;  // the last code's modules, row by row
+    static int n = 0;
+    if (text != last) {
+        last = text;
+        dark.clear();
+        n = 0;
+        try {
+            const auto qr = qrcodegen::QrCode::encodeText(text.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
+            n = qr.getSize();
+            for (int j = 0; j < n; j++)
+                for (int i = 0; i < n; i++) dark.push_back(qr.getModule(i, j));
+        } catch (...) {
+        }
+    }
+    if (n == 0) return 0;
+    const int m = size / (n + 8);  // 4 modules of quiet zone each side
+    if (m < 1) return 0;
+    const int side = m * (n + 8);
+    c.fill(x, y, side, side, rgb(0xFFFFFF));
+    for (int j = 0; j < n; j++)
+        for (int i = 0; i < n; i++)
+            if (dark[(size_t)j * n + i]) c.fill(x + (i + 4) * m, y + (j + 4) * m, m, m, rgb(0x000000));
+    return side;
 }
 
 bool is_key(const Row &r) { return r.kind == Row::Setting && app::secret_setting(r.name); }
@@ -653,10 +683,11 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
              kText);
         ty += 8;
         para("2. Install WireGuard on your computer, phone or tablet. At home, open the address above in its "
-             "browser and follow the steps there.",
+             "browser (Settings, WireGuard, Add a device has it as a code to scan), name the device and ask to join.",
              kText);
         ty += 8;
-        para("3. Let the device in here when it asks. Away from home, with its tunnel on, apps use "
+        para("3. Let the device in here when it asks, and open the tunnel the page then gives it in WireGuard. "
+             "Away from home, with the tunnel on, apps use "
              "http://10.55.0.1:" + std::to_string(info.api_port) + "/v1 and one of your keys: over WireGuard a key "
              "is always needed.",
              kText);
@@ -717,18 +748,29 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
         ty += 56;
         para("The request lapses after 10 minutes.", kMuted);
     } else if (r.kind == Row::WgAdd) {
-        const char *open_label = "ON THE DEVICE, OPEN";
+        const char *open_label = "ON THE DEVICE, SCAN THIS OR OPEN";
+        const bool ready = info.on_network && app::setting(kWireGuard, "0") == "1";
         if (!info.on_network) field(open_label, "Connect the PS5 to your network first", kAmber, body_);
-        else if (app::setting(kWireGuard, "0") != "1") field(open_label, "Turn on WireGuard above first", kAmber, body_);
+        else if (!ready) field(open_label, "Turn on WireGuard above first", kAmber, body_);
         else field(open_label, join_url(info), kAccent, bodyb_);
-        para("1. Install WireGuard on the device, from wireguard.com/install or its app store.", kText);
-        ty += 8;
-        para("2. At home, open the address above in the device's browser and follow the steps there: the "
-             "device's WireGuard app makes its key pair, and you paste in its public key.",
+        // The code, with the steps beside it.
+        int side = 0;
+        if (ready) side = draw_qr(c, dx, ty - 8, join_url(info), 264);
+        const int sx = side > 0 ? dx + side + 32 : dx, sw = dx + dw - sx;
+        int sy = side > 0 ? ty - 4 : ty;
+        auto step = [&](const std::string &text, Color col) {
+            for (const std::string &l : wrap(small_, text, sw)) {
+                c.text(small_, sx, sy, l, col);
+                sy += 32;
+            }
+            sy += 8;
+        };
+        step("1. Install WireGuard on the device, from wireguard.com/install or its app store.", kText);
+        step("2. At home, scan the code with the device's camera, or type the address in its browser. Name the "
+             "device and ask to join.",
              kText);
-        ty += 8;
-        para("3. Let it in here when it asks to join.", kText);
-        ty += 8;
+        step("3. Let it in here. The page then gives the device its tunnel, ready to open in WireGuard.", kText);
+        ty = std::max(sy, side > 0 ? ty - 8 + side + 24 : 0);
         para("Instructions, at the top, has the rest: the port on your router, and the address apps use.", kText2);
     } else if (const WgDeviceInfo *d = device_of(r, info)) {
         field("NOW", !d->on ? "Off" : d->up ? "Connected" : "On, not connected", !d->on ? kText2 : d->up ? kGreen : kText,

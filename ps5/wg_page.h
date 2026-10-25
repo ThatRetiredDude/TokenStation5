@@ -1,8 +1,10 @@
 // The page a device asks to join WireGuard from, served by the API on the
-// home network at /wireguard (Server::set_pages). It takes the device's
-// name and public key (the device's WireGuard app makes its key pair; the
-// private key never leaves it), asks the TV to approve it (wg_devices.h),
-// and shows what to put in the device's tunnel.
+// home network at /wireguard (Server::set_pages). The page makes the
+// device's key pair in its browser, asks the TV to approve the public half
+// (wg_devices.h) and then gives the device a finished tunnel file; the
+// private key stays in the browser. Or the device's WireGuard app makes the
+// key pair, and the page takes its public key and shows what to put in the
+// tunnel.
 #pragma once
 #include <string>
 

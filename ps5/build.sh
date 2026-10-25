@@ -56,7 +56,7 @@ cxxflags=(-std=c++17 -O2 -Wall -ffunction-sections -fdata-sections -fexceptions 
     -DTS5_PS5=1 -DTS5_VULKAN=1 -DTS5_HTTPS=1 "-DTS5_VERSION=\"$version\"" "-DTS5_TITLE_ID=\"$title_id\""
     "-DTS5_CA_PEM=\"$ca_pem\"" "${mbedflags[@]}"
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$out/shaders" -I "$radv/include"
-    -I "$w/include" -I "$w/ggml/include" -I "$k/include")
+    -I "$w/include" -I "$w/ggml/include" -I "$k/include" -I "$root/third_party/qrcodegen")
 objects=()
 pids=()
 mkdir -p "$out/obj/mbedtls"
@@ -72,7 +72,7 @@ done
 for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
         "$root"/engine/src/{tools,net,websearch,ca_bundle,log}.cpp \
         "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup}.cpp \
-        "$root"/ps5/{wg_devices,wg_page}.cpp \
+        "$root"/ps5/{wg_devices,wg_page}.cpp "$root"/third_party/qrcodegen/qrcodegen.cpp \
         "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page,logs_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp; do
     o="$out/obj/$(basename "$src" .cpp).o"
     objects+=("$o")
