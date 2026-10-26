@@ -340,6 +340,8 @@ Action Dashboard::press(uint32_t b, const View &v) {
             a.kind = ch.key_remove ? Action::RemoveKey : Action::KeyOn;
             a.name = ch.key_id;
             a.value = ch.key_on ? "1" : "0";
+        } else if (ch.ts_sign_out) {
+            a.kind = Action::TsSignOut;
         }
         if (b & kCircle) show(Home);
         return a;

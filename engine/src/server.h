@@ -36,6 +36,12 @@ public:
     // Without one, everyone gets in. /health never asks. Set before start().
     using Authorize = std::function<bool(const std::string &key, const std::string &client, std::string &name)>;
     void set_authorize(Authorize f) { state_.authorize = std::move(f); }
+    // Names the peer of each connection, from its address and port, for
+    // Authorize and usage.tsv; without one, the address. The title's
+    // Tailscale tunnel reaches the API from 127.0.0.1 and names each of its
+    // connections by the device behind it. Set before start().
+    using ClientName = std::function<std::string(const std::string &ip, int port)>;
+    void set_client_name(ClientName f) { client_name_ = std::move(f); }
 
     // For a status display.
     struct Activity {
@@ -74,6 +80,7 @@ private:
     std::string host_;
     int port_ = 0, sock_ = -1;
     State state_;
+    ClientName client_name_;
 };
 
 // The command line's server: start, answer with e, and block until the
