@@ -874,7 +874,9 @@ void Server::accept_loop() {
         setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
         char ip[INET_ADDRSTRLEN] = {};
         if (peer.sin_family != AF_INET || !inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof ip)) ip[0] = 0;
-        std::thread([this, c, client = std::string(ip)] {
+        std::string client = ip;
+        if (client_name_) client = client_name_(client, ntohs(peer.sin_port));
+        std::thread([this, c, client] {
             Usage u;
             u.rec.client = client;
             u.t0 = now_ms();
