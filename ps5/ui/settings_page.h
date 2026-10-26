@@ -54,6 +54,7 @@ struct WgInfo {
     // A phone or tablet just added on the TV: its whole tunnel (private key
     // and all) for the code, until the title forgets it.
     std::string tunnel, tunnel_name;
+    std::string added_id;  // the device last added on the TV, until Settings is left (its code may be gone)
 };
 
 // What the page shows besides the settings themselves.

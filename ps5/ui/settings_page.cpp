@@ -355,7 +355,12 @@ std::string shown(const Row &r, const SettingsInfo &info) {
     if (r.kind == Row::NewKey) return "Make one";
     if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "On" : "Off";
     if (r.kind == Row::WgRequest) return "Waiting";
-    if (r.kind == Row::WgPhone) return info.wg.tunnel.empty() ? "Add one" : "Scan the code";
+    if (r.kind == Row::WgPhone) {
+        if (!info.wg.tunnel.empty()) return "Scan the code";
+        for (const WgDeviceInfo &d : info.wg.devices)
+            if (d.id == info.wg.added_id) return d.up ? "Connected" : "Added";
+        return "Add one";
+    }
     if (r.kind == Row::WgAdd) return "How";
     if (r.kind == Row::WgKey) return info.wg.public_key.empty() ? "None yet" : "Show";
     if (const WgDeviceInfo *d = device_of(r, info)) return !d->on ? "Off" : d->up ? "Connected" : "On";
@@ -768,7 +773,27 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
         para("The request lapses after 10 minutes.", kMuted);
     } else if (r.kind == Row::WgPhone) {
         const std::string port = app::setting(kWgPort, "9030");
-        if (!info.wg.tunnel.empty()) {
+        const WgDeviceInfo *added = nullptr;
+        for (const WgDeviceInfo &d : info.wg.devices)
+            if (d.id == info.wg.added_id) added = &d;
+        if (info.wg.tunnel.empty() && added) {
+            // Added just now, its code gone: whether it has connected.
+            field("ADDED", added->name, kAccent, bodyb_);
+            if (added->up) {
+                field("NOW", "Connected", kGreen, bodyb_);
+                para(added->name + " can reach TokenStation5 through WireGuard now. It's in the list below, where you "
+                     "can turn it off or remove it.",
+                     kText);
+            } else {
+                field("NOW", "Not connected yet", kAmber, bodyb_);
+                para("Turn the TokenStation5 tunnel on in WireGuard on the device. At home, some routers don't "
+                     "pass a device's own public address back in: if it doesn't connect, try it on mobile data.",
+                     kText);
+            }
+            ty += 16;
+            text_glyph(c, small_, dx, ty, "Press", kGlyphCross, "to add another.", kText2);
+            ty += 40;
+        } else if (!info.wg.tunnel.empty()) {
             // The tunnel just made: the code, with what to do beside it.
             field("SCAN THIS IN WIREGUARD", info.wg.tunnel_name, kAccent, bodyb_);
             const int side = draw_qr(c, dx, ty - 8, info.wg.tunnel, 414);
@@ -784,11 +809,11 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
             step("In WireGuard on the device: +, then Create from QR code. Scan this, and name the tunnel "
                  "TokenStation5.",
                  kText);
-            step("Away from home, turn it on. Apps use http://10.55.0.1:" + std::to_string(info.api_port) +
-                     "/v1 and one of your keys.",
+            step("Turn it on: this says Connected once it reaches the PS5. Apps use http://10.55.0.1:" +
+                     std::to_string(info.api_port) + "/v1 and one of your keys.",
                  kText);
-            step("The code holds the device's private key: keep it to yourself. It goes when you leave Settings, "
-                 "and this PS5 doesn't keep it.",
+            step("The code holds the device's private key: keep it to yourself. It goes once the device connects "
+                 "or you leave Settings, and this PS5 doesn't keep it.",
                  kText2);
             ty = std::max(sy, ty - 8 + side + 24);
         } else {
@@ -1013,7 +1038,7 @@ std::string SettingsPage::cross_does(const SettingsInfo &info) const {
     if (r.kind == Row::NewKey) return "New key";
     if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "Turn off" : "Turn on";
     if (r.kind == Row::WgRequest) return "Let it in";
-    if (r.kind == Row::WgPhone) return info.wg.tunnel.empty() ? "Name it" : "Add another";
+    if (r.kind == Row::WgPhone) return info.wg.tunnel.empty() && info.wg.added_id.empty() ? "Name it" : "Add another";
     if (r.kind == Row::WgAdd || r.kind == Row::WgKey) return "";
     if (const WgDeviceInfo *d = device_of(r, info)) return d->on ? "Turn off" : "Turn on";
     if (typed(r)) return "Type";

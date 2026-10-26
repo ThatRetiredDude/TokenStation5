@@ -806,6 +806,11 @@ int main(int, char **) {
     // all, shown as a code until Settings is left or kTunnelShownFor passes.
     std::string fresh_tunnel, fresh_tunnel_name, fresh_tunnel_id;
     double fresh_tunnel_at = 0;
+    std::string added_id, added_address;  // the device last added on the TV, until Settings is left
+    // Devices let in since the title started that haven't connected yet, as
+    // address and name: the TV says so when each first does.
+    std::vector<std::pair<std::string, std::string>> awaiting;
+    double last_awaiting = 0;
     auto forget_tunnel = [&] {
         std::fill(fresh_tunnel.begin(), fresh_tunnel.end(), '\0');
         fresh_tunnel.clear();
@@ -960,6 +965,7 @@ int main(int, char **) {
         s.wg.home_looked_up = looked_up && !s.wg.home.empty();
         s.wg.tunnel = fresh_tunnel;
         s.wg.tunnel_name = fresh_tunnel_name;
+        s.wg.added_id = added_id;
         app::WgRequest req;
         if ((s.wg.waiting = wg_store.waiting(req))) {
             s.wg.waiting_name = req.name;
@@ -1075,6 +1081,9 @@ int main(int, char **) {
                     fresh_tunnel_name = d.name;
                     fresh_tunnel_id = d.id;
                     fresh_tunnel_at = t;
+                    added_id = d.id;
+                    added_address = d.address;
+                    awaiting.emplace_back(d.address, d.name);
                     wg_apply();
                     settings_note.note = "Added";
                 }
@@ -1301,6 +1310,23 @@ int main(int, char **) {
         if (dash.page() != ui::Dashboard::Settings) {
             fresh_key.clear();
             fresh_key_id.clear();
+            added_id.clear();
+            added_address.clear();
+        }
+        // A device just let in: say when it first connects, and take a phone's
+        // code off the screen then, as it has what it needs.
+        if (!awaiting.empty() && t - last_awaiting >= 1) {
+            last_awaiting = t;
+            for (const wg::PeerState &p : tunnel.peers()) {
+                if (!p.up) continue;
+                for (size_t i = 0; i < awaiting.size(); i++)
+                    if (awaiting[i].first == p.address) {
+                        notify("TokenStation5: " + awaiting[i].second + " is connected through WireGuard.");
+                        if (p.address == added_address) forget_tunnel();
+                        awaiting.erase(awaiting.begin() + (long)i);
+                        break;
+                    }
+            }
         }
         // And a phone's tunnel only until then, or for kTunnelShownFor.
         if (!fresh_tunnel.empty() && (dash.page() != ui::Dashboard::Settings || t - fresh_tunnel_at > kTunnelShownFor))
@@ -1489,12 +1515,26 @@ int main(int, char **) {
                     ok = wg_store.new_key(e);
                     done = "New key pair made";
                 } else if (a.kind == ui::Action::WgAnswer) {
+                    app::WgRequest req;
+                    const bool asked = wg_store.waiting(req);
                     ok = wg_store.answer(a.value == "1", e);
+                    if (ok && asked && a.value == "1") awaiting.emplace_back(req.address, req.name);
                     done = a.value == "1" ? "Let in" : "Refused";
                 } else if (a.kind == ui::Action::WgRemoveDevice) {
+                    std::string address;
+                    for (const app::WgDevice &d : wg_store.devices())
+                        if (d.id == a.name) address = d.address;
                     ok = wg_store.remove(a.name, e);
                     done = "Removed";
                     if (ok && a.name == fresh_tunnel_id) forget_tunnel();
+                    if (ok && a.name == added_id) {
+                        added_id.clear();
+                        added_address.clear();
+                    }
+                    if (ok)
+                        awaiting.erase(std::remove_if(awaiting.begin(), awaiting.end(),
+                                                      [&](const auto &w) { return w.first == address; }),
+                                       awaiting.end());
                 } else {
                     ok = wg_store.set_on(a.name, a.value == "1", e);
                 }
