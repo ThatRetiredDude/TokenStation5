@@ -68,43 +68,30 @@ const std::vector<Row> &setting_rows() {
          {{"512", "512 tokens"}, {"1024", "1,024 tokens"}, {"2048", "2,048 tokens"}, {"4096", "4,096 tokens"},
           {"8192", "8,192 tokens"}},
          "2048"},
-        {"CHAT", "TS5_CHAT_FPS", "Frames while a reply comes in",
-         "How often the Chat page redraws while a reply streams in. Each frame is a copy on the GPU the model "
-         "runs on, so fewer frames leave the model a little more speed.",
-         "Now",
-         {{"1", "1 a second"}, {"2", "2 a second"}, {"5", "5 a second"}, {"10", "10 a second"},
-          {"15", "15 a second"}, {"30", "30 a second"}},
-         "10"},
-        {"TALK", kSpeechModel, "Speech model",
+        {"CHAT", "TAVILY_API_KEY", "Web search key",
+         "With a key from Tavily, a model that calls tools can search the web, on the Chat page and from your "
+         "apps. Each search uses one of the account's credits.",
+         "From the next request", {}, ""},
+        {"VOICE", kSpeechModel, "Speech model",
          "The model that turns what you say into text when you hold R1 on the Chat page. Base (English) is a "
          "good start; Small (English) understands more and takes longer.",
          "The next time you hold R1", {}, "", true},
-        {"TALK", "TS5_WHISPER_THREADS", "Speech threads",
-         "CPU cores that turn what you said into text. More is faster while nothing else runs on the CPU.",
-         "The next time you hold R1", {{"4", "4"}, {"6", "6"}, {"8", "8"}, {"10", "10"}, {"12", "12"}}, "6"},
-        {"SPOKEN REPLIES", "TS5_SPEAK", "Read replies aloud",
+        {"VOICE", "TS5_SPEAK", "Read replies aloud",
          "Reads each reply on the Chat page out loud as it comes in, a sentence at a time, in a voice made on "
          "the PS5. Triangle stops it. The voice is loaded only while this is on, so off gives its memory back. "
          "It needs a voice: see Voice below.",
          "Now", {{"1", "On"}, {"0", "Off"}}, "1"},
-        {"SPOKEN REPLIES", "TS5_SPEAK_OUT", "Speak on",
+        {"VOICE", "TS5_SPEAK_OUT", "Speak on",
          "Where the voice comes out: the TV, or the speaker in the controller.", "From the next sentence",
          {{"tv", "TV"}, {"controller", "Controller speaker"}}, "tv"},
-        {"SPOKEN REPLIES", kVoice, "Voice",
+        {"VOICE", kVoice, "Voice",
          "The voice that reads replies. Heart (US English) is the clearest; others include Michael (US "
          "English) and Emma (British English).",
          "From the next sentence", {}, "", true},
-        {"SPOKEN REPLIES", "TS5_TTS_SPEED", "Speaking speed", "How fast the voice talks.", "From the next sentence",
+        {"VOICE", "TS5_TTS_SPEED", "Speaking speed", "How fast the voice talks.", "From the next sentence",
          {{"0.8", "Slower (0.8x)"}, {"0.9", "0.9x"}, {"1", "Normal"}, {"1.1", "1.1x"}, {"1.25", "1.25x"},
           {"1.5", "1.5x"}},
          "1"},
-        {"SPOKEN REPLIES", "TS5_TTS_THREADS", "Voice threads",
-         "CPU cores that make the voice. More is faster while nothing else runs on the CPU.",
-         "From the next sentence", {{"4", "4"}, {"6", "6"}, {"8", "8"}, {"10", "10"}, {"12", "12"}}, "6"},
-        {"WEB SEARCH", "TAVILY_API_KEY", "Tavily key",
-         "With a key, a model that calls tools can search the web through Tavily. Each search uses one of the "
-         "account's credits.",
-         "From the next request", {}, ""},
         {"CONSOLE", "TS5_KEEP_AWAKE", "Keep the console awake",
          "Keeps the console out of rest mode while TokenStation5 is open, as a video player does. Off: the "
          "console's own power saving settings decide.",
@@ -116,7 +103,21 @@ const std::vector<Row> &setting_rows() {
          {{"120", "2 minutes"}, {"300", "5 minutes"}, {"600", "10 minutes"}, {"1200", "20 minutes"},
           {"1800", "30 minutes"}, {"3600", "1 hour"}, {"0", "Never"}},
          "600"},
-        {"LOGS", "TS5_NET_LOG", "Detailed log",
+        // Rarely touched: the defaults suit the PS5.
+        {"TUNING", "TS5_CHAT_FPS", "Frames while a reply comes in",
+         "How often the Chat page redraws while a reply streams in. Each frame is a copy on the GPU the model "
+         "runs on, so fewer frames leave the model a little more speed.",
+         "Now",
+         {{"1", "1 a second"}, {"2", "2 a second"}, {"5", "5 a second"}, {"10", "10 a second"},
+          {"15", "15 a second"}, {"30", "30 a second"}},
+         "10"},
+        {"TUNING", "TS5_WHISPER_THREADS", "Speech threads",
+         "CPU cores that turn what you said into text. More is faster while nothing else runs on the CPU.",
+         "The next time you hold R1", {{"4", "4"}, {"6", "6"}, {"8", "8"}, {"10", "10"}, {"12", "12"}}, "6"},
+        {"TUNING", "TS5_TTS_THREADS", "Voice threads",
+         "CPU cores that make the voice. More is faster while nothing else runs on the CPU.",
+         "From the next sentence", {{"4", "4"}, {"6", "6"}, {"8", "8"}, {"10", "10"}, {"12", "12"}}, "6"},
+        {"TUNING", "TS5_NET_LOG", "Detailed log",
          "Adds every step of each download and web search to the log, for tracking down a problem. Off keeps "
          "the log short: what happened, problems, and a line for each request.",
          "Now", {{"0", "Off"}, {"1", "On"}}, "0"},
@@ -132,7 +133,8 @@ const ApiKeyInfo *key_of(const Row &r, const SettingsInfo &info) {
 }
 
 // The page's rows: APPS (the instructions, the key setting, making a key and
-// the keys), AWAY FROM HOME (Tailscale), then the settings.
+// the keys), AWAY FROM HOME (Tailscale), then the settings: CHAT, VOICE,
+// CONSOLE, and TUNING last, for what's rarely changed.
 std::vector<Row> rows(const SettingsInfo &info) {
     std::vector<Row> r;
     r.push_back({"APPS", "", "Instructions", "How to use the models on this PS5 from your apps, at home and away, and how to add more.",
