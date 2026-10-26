@@ -412,23 +412,35 @@ bool named_call(const std::string &text, size_t p, int tag, ToolCall &call, size
 
 // Calls written as nothing but JSON objects, maybe inside a ```json fence.
 bool calls_from_objects(const std::string &text, std::vector<ToolCall> &calls) {
-    std::string s = strip(text);
-    if (starts(s, "```")) {
-        size_t nl = s.find('\n');
-        if (nl == std::string::npos || !ends(s, "```")) return false;
-        s = strip(s.substr(nl + 1, s.size() - 3 - nl - 1));
-    }
+    // Call objects and nothing else, into out.
+    auto objects = [](const std::string &s, std::vector<ToolCall> &out) {
+        size_t i = 0, before = out.size();
+        while (i < s.size() && s[i] == '{') {
+            size_t e = object_end(s, i);
+            ToolCall call;
+            if (e == std::string::npos || !call_from_json(s.substr(i, e - i), call)) return false;
+            out.push_back(call);
+            i = s.find_first_not_of(" \t\r\n;,", e);
+            if (i == std::string::npos) i = s.size();
+        }
+        return i == s.size() && out.size() > before;
+    };
+    const std::string s = strip(text);
     std::vector<ToolCall> out;
-    size_t i = 0;
-    while (i < s.size() && s[i] == '{') {
-        size_t e = object_end(s, i);
-        ToolCall call;
-        if (e == std::string::npos || !call_from_json(s.substr(i, e - i), call)) return false;
-        out.push_back(call);
-        i = s.find_first_not_of(" \t\r\n;,", e);
-        if (i == std::string::npos) i = s.size();
+    if (!starts(s, "```")) {
+        if (!objects(s, out)) return false;
+    } else {
+        // Fences, one for all the calls or one for each (Coder fences each
+        // of two calls, seen on the console).
+        size_t i = 0;
+        while (i < s.size()) {
+            if (!starts(s, "```", i)) return false;
+            const size_t nl = s.find('\n', i), close = nl == std::string::npos ? nl : s.find("```", nl);
+            if (close == std::string::npos || !objects(strip(s.substr(nl + 1, close - nl - 1)), out)) return false;
+            i = s.find_first_not_of(" \t\r\n", close + 3);
+            if (i == std::string::npos) i = s.size();
+        }
     }
-    if (i != s.size() || out.empty()) return false;
     calls.insert(calls.end(), out.begin(), out.end());
     return true;
 }

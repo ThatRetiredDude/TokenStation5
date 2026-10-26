@@ -337,8 +337,11 @@ def check_agent(api, ctx):
     except SyntaxError:
         compiles = False
     ok = compiles and "Fizz" in code and "Buzz" in code and text(r) and not (message(r).get("tool_calls"))
-    return ok, "steps %s, fizzbuzz.py %d bytes, compiles %s, summary %r" % (
-        steps, len(code), compiles, short(text(r), 80))
+    detail = "steps %s, fizzbuzz.py %d bytes, compiles %s, summary %r" % (steps, len(code), compiles,
+                                                                          short(text(r), 80))
+    if code and not compiles:
+        detail += ", file %r" % code[:300]
+    return ok, detail
 
 
 def check_long(api, ctx):
