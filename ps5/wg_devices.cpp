@@ -87,7 +87,7 @@ void WgStore::load(const std::string &path) {
         WgDevice d;
         for (size_t i = 0; i < v.size() && i < names.size(); i++) {
             if (names[i] == "id") d.id = v[i];
-            else if (names[i] == "name") d.name = v[i];
+            else if (names[i] == "name") d.name = clean(v[i]);
             else if (names[i] == "public_key") d.public_key = v[i];
             else if (names[i] == "address") d.address = v[i];
             else if (names[i] == "on") d.on = v[i] != "0";
