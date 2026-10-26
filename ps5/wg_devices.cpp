@@ -29,13 +29,15 @@ std::vector<std::string> split_tabs(const std::string &line) {
     return out;
 }
 
-// A name for one line of the file, and for the TV: printable, at most 40 characters.
+// A name for one line of the file, and for the TV: printable, one space
+// between words, at most 40 characters.
 std::string clean(const std::string &s) {
     std::string out;
     for (unsigned char c : s) {
         if (out.size() >= 40) break;
+        if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+        if (c == ' ' && !out.empty() && out.back() == ' ') continue;  // one space between words
         if (c >= 0x20 && c != 0x7f) out += (char)c;
-        else if (c == '\t' || c == '\n' || c == '\r') out += ' ';
     }
     while (!out.empty() && out.back() == ' ') out.pop_back();
     size_t b = out.find_first_not_of(' ');
