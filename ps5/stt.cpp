@@ -279,7 +279,7 @@ void whisper_test(const std::string &models_dir, const std::vector<std::string> 
     if (model.empty()) {
         printf("ts5-title: whisper test: no model: no ggml-*.bin in %s (such as ggml-tiny.en.bin)\n",
                models_dir.c_str());
-        notify("TokenStation5 whisper test: no model (a ggml-*.bin in models)");
+        notify("TokenStation5 speech test: no speech model on the PS5");
         return;
     }
     std::string wav;
@@ -292,14 +292,14 @@ void whisper_test(const std::string &models_dir, const std::vector<std::string> 
         std::string names;
         for (const auto &w : wavs) names += (names.empty() ? "" : " or ") + base_name(w);
         printf("ts5-title: whisper test: no audio: no %s in the title's folder\n", names.c_str());
-        notify("TokenStation5 whisper test: no audio (" + names + ")");
+        notify("TokenStation5 speech test: no recording to test with");
         return;
     }
     std::vector<int16_t> pcm;
     std::string format, err;
     if (!read_wav_16k(wav, pcm, format, err)) {
         printf("ts5-title: whisper test: %s\n", err.c_str());
-        notify("TokenStation5 whisper test: " + err);
+        notify("TokenStation5 speech test: couldn't read the recording");
         return;
     }
     const double seconds = pcm.size() / (double)kRate;
@@ -314,7 +314,7 @@ void whisper_test(const std::string &models_dir, const std::vector<std::string> 
     Stt stt;
     if (!stt.load(model, threads, err)) {
         printf("ts5-title: whisper test: load failed: %s\n", err.c_str());
-        notify("TokenStation5 whisper test: the model didn't load");
+        notify("TokenStation5 speech test: the speech model didn't load");
         return;
     }
     printf("ts5-title: whisper test: load %.0f ms\n", stt.load_ms());
@@ -330,12 +330,12 @@ void whisper_test(const std::string &models_dir, const std::vector<std::string> 
         return true;
     };
     if (!run(threads)) {
-        notify("TokenStation5 whisper test: " + err);
+        notify("TokenStation5 speech test: couldn't turn the recording into text");
         return;
     }
     printf("ts5-title: whisper test: text: %s\n", text.empty() ? "(none)" : text.c_str());
     char line[160];
-    snprintf(line, sizeof line, "TokenStation5 whisper test: %.1f s of speech in %.1f s", seconds,
+    snprintf(line, sizeof line, "TokenStation5 speech test: %.1f s of speech in %.1f s", seconds,
              stt.transcribe_ms() / 1000);
     notify(line);
     const char *sweep = getenv("TS5_WHISPER_SWEEP");

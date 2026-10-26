@@ -1,5 +1,7 @@
 #include "tools.h"
 
+#include <cctype>
+
 #include <random>
 
 namespace ts5 {
@@ -205,6 +207,7 @@ std::vector<Message> parse_messages(const Json &messages) {
     for (auto &m : messages.a) {
         Message msg;
         msg.role = m["role"].str("user");
+        if (msg.role == "developer") msg.role = "system";  // OpenAI's newer name for it
         const Json &c = m["content"];
         if (c.type == Json::STR) {
             msg.content = c.s;
@@ -212,6 +215,12 @@ std::vector<Message> parse_messages(const Json &messages) {
             for (auto &part : c.a)
                 if (part["type"].str() == "text") msg.content += part["text"].str();
         }
+        // The thinking a client got as reasoning_content and sends back: where
+        // the model wrote it, so Qwen3's template keeps it after the last user
+        // message, as it does in a tool loop.
+        const std::string thought = m["reasoning_content"].str();
+        if (msg.role == "assistant" && !thought.empty() && msg.content.find("<think>") == std::string::npos)
+            msg.content = "<think>\n" + thought + "\n</think>\n\n" + msg.content;
         for (auto &tc : m["tool_calls"].a) {
             const Json &f = tc["function"];
             ToolCall call;
@@ -255,20 +264,97 @@ std::string render_results(ToolFormat f, const std::vector<std::string> &results
 
 // The tags a Hermes model wraps a call in. <tool_call> is what the templates
 // teach; Qwen 2.5 Coder often writes <tools> (seen on the console) and the
-// others turn up too, as in llama.cpp's Hermes parser.
+// others turn up too, as in llama.cpp's Hermes parser, and Coder makes up
+// more under a coding app's prompt (<function>, <json>). The last two hold the
+// name outside the JSON, as Qwen 2.5 Coder also writes them under a coding
+// app's long system prompt (seen on the console):
+//   <function=get_weather>{"city": "Paris"}</function>
+//   <function name="get_weather" arguments='{"city": "Paris"}' />
 const char *const kHermesTags[][2] = {
-    {"<tool_call>", "</tool_call>"}, {"<tools>", "</tools>"}, {"<tool>", "</tool>"},
-    {"<function_call>", "</function_call>"}};
+    {"<tool_call>", "</tool_call>"},         {"<tools>", "</tools>"},
+    {"<tool>", "</tool>"},                   {"<function_call>", "</function_call>"},
+    {"<function-call>", "</function-call>"}, {"<function>", "</function>"},
+    {"<json>", "</json>"},                   {"<function=", "</function>"},
+    {"<function ", "</function>"}};
+constexpr int kNamedEquals = 7, kNamedAttrs = 8;
+constexpr int kHermesTagCount = (int)(sizeof kHermesTags / sizeof kHermesTags[0]);
 
 // The first call tag at or after pos: its index in kHermesTags, or -1.
 int find_hermes_tag(const std::string &text, size_t pos, size_t &at) {
     int best = -1;
     at = std::string::npos;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < kHermesTagCount; i++) {
         size_t p = text.find(kHermesTags[i][0], pos);
         if (p < at) at = p, best = i;
     }
     return best;
+}
+
+// An attribute's value in an opening tag (tag: from "<function " to its
+// end): name="X", or arguments='{...}' up to the last such quote in the tag,
+// since the JSON can hold the other quote and apostrophes.
+bool tag_attr(const std::string &tag, const std::string &name, std::string &value) {
+    const size_t a = tag.find(" " + name + "=");
+    if (a == std::string::npos || a + name.size() + 2 >= tag.size()) return false;
+    const size_t v = a + name.size() + 2;
+    const char q = tag[v];
+    if (q != '"' && q != '\'') return false;
+    const size_t e = name == "arguments" ? tag.rfind(q) : tag.find(q, v + 1);
+    if (e == std::string::npos || e <= v) return false;
+    value = tag.substr(v + 1, e - v - 1);
+    return true;
+}
+
+// A call in one of the named forms at p (tag kNamedEquals or kNamedAttrs).
+// next: just past it. false: not a call after all, or not finished.
+bool named_call(const std::string &text, size_t p, int tag, ToolCall &call, size_t &next) {
+    std::string name, args;
+    if (tag == kNamedEquals) {
+        const size_t gt = text.find('>', p);
+        const size_t close = gt == std::string::npos ? gt : text.find("</function>", gt);
+        if (close == std::string::npos) return false;
+        name = strip(text.substr(p + 10, gt - p - 10));
+        args = strip(text.substr(gt + 1, close - gt - 1));
+        next = close + 11;
+    } else {
+        // The tag ends at the first > past the arguments' closing quote (the
+        // JSON inside can hold a >).
+        size_t from = p;
+        const size_t a = text.find(" arguments=", p);
+        if (a != std::string::npos && a + 11 < text.size() && (text[a + 11] == '\'' || text[a + 11] == '"') &&
+            a < text.find('\n', p)) {
+            const char q = text[a + 11];
+            for (size_t k = a + 12; k < text.size(); k++) {
+                if (text[k] != q) continue;
+                const size_t n = text.find_first_not_of(" \t", k + 1);
+                if (n != std::string::npos && (text[n] == '>' || text.compare(n, 2, "/>") == 0)) {
+                    from = k;
+                    break;
+                }
+            }
+        }
+        const size_t gt = text.find('>', from);
+        if (gt == std::string::npos) return false;
+        const bool self_closing = text[gt - 1] == '/';
+        const std::string open = text.substr(p, gt + 1 - p);
+        if (!tag_attr(open, "name", name)) return false;
+        if (!tag_attr(open, "arguments", args)) args = "{}";
+        next = gt + 1;
+        if (!self_closing) {
+            const size_t close = text.find("</function>", gt);
+            if (close == std::string::npos) return false;
+            // The arguments may be the body instead: <function name="X">{...}</function>
+            const std::string body = strip(text.substr(gt + 1, close - gt - 1));
+            if (!body.empty() && args == "{}") args = body;
+            next = close + 11;
+        }
+    }
+    Json j;
+    if (name.empty() || !Json::parse(args, j) || j.type != Json::OBJ) return false;
+    call.name = name;
+    call.arguments = j.dump();
+    call.id = new_call_id();
+    return true;
 }
 
 // Calls written as nothing but JSON objects, maybe inside a ```json fence.
@@ -294,6 +380,121 @@ bool calls_from_objects(const std::string &text, std::vector<ToolCall> &calls) {
     return true;
 }
 
+// The inside of a ```lang fence around all of s, or s.
+std::string unfenced(const std::string &text) {
+    std::string s = strip(text);
+    if (!starts(s, "```") || !ends(s, "```") || s.size() < 6) return s;
+    size_t nl = s.find('\n');
+    if (nl == std::string::npos || nl > s.size() - 3) return s;
+    return strip(s.substr(nl + 1, s.size() - 3 - nl - 1));
+}
+
+// The text of the <tag>...</tag> element in s, which is cut out of s.
+bool take_element(std::string &s, const std::string &tag, std::string &text) {
+    const size_t a = s.find("<" + tag + ">");
+    if (a == std::string::npos) return false;
+    const size_t from = a + tag.size() + 2, e = s.find("</" + tag + ">", from);
+    if (e == std::string::npos) return false;
+    text = strip(s.substr(from, e - from));
+    s.erase(a, e + tag.size() + 3 - a);
+    return true;
+}
+
+// Arguments written as elements, nothing else: <city>Paris</city> <days>3</days>
+// is {"city": "Paris", "days": 3}. A value that reads as JSON (a number,
+// true, a list) is that; anything else is a string.
+bool elements_object(const std::string &text, Json &j) {
+    j = Json();
+    j.type = Json::OBJ;
+    std::string s = strip(text);
+    while (!s.empty()) {
+        if (s[0] != '<') return false;
+        const size_t gt = s.find('>');
+        if (gt == std::string::npos || gt < 2) return false;
+        const std::string tag = s.substr(1, gt - 1);
+        for (char c : tag)
+            if (!isalnum((unsigned char)c) && c != '_' && c != '-') return false;
+        std::string value;
+        if (!take_element(s, tag, value)) return false;
+        Json v;
+        if (!Json::parse(value, v)) {
+            v = Json();
+            v.type = Json::STR;
+            v.s = value;
+        }
+        if (!j.o.count(tag)) j.keys.push_back(tag);
+        j.o[tag] = v;
+        s = lstrip(s);
+    }
+    return true;
+}
+
+// A call written as child elements, nothing else in the text:
+// <name>get_weather</name> <arguments>{"city": "Paris"}</arguments>, the
+// arguments maybe elements themselves (<arguments><city>Paris</city></arguments>).
+bool element_call(const std::string &text, std::vector<ToolCall> &calls) {
+    std::string s = text, name, args;
+    if (!take_element(s, "name", name) || name.empty()) return false;
+    if (!take_element(s, "arguments", args) && !take_element(s, "parameters", args)) args = "{}";
+    Json j;
+    if (!strip(s).empty()) return false;
+    if (!(Json::parse(args, j) && j.type == Json::OBJ) && !elements_object(args, j)) return false;
+    ToolCall call;
+    call.name = name;
+    call.arguments = j.dump();
+    call.id = new_call_id();
+    calls.push_back(call);
+    return true;
+}
+
+bool calls_in_any_wrapper(const std::string &text, std::vector<ToolCall> &calls);
+
+// What a call tag can hold: call objects, a call as child elements, or a
+// call in one more wrapper.
+bool calls_in_body(const std::string &body, std::vector<ToolCall> &calls) {
+    return calls_from_objects(body, calls) || element_call(body, calls) || calls_in_any_wrapper(body, calls);
+}
+
+bool calls_in_any_wrapper(const std::string &text, std::vector<ToolCall> &calls) {
+    const std::string s = unfenced(text);
+    if (s.size() < 5 || s[0] != '<') return false;
+    // The object itself in angle brackets: <{"name": ..., "arguments": {...}}>
+    if (s[1] == '{' && s[s.size() - 1] == '>' && s[s.size() - 2] == '}')
+        return calls_from_objects(s.substr(1, s.size() - 2), calls);
+    const size_t gt = s.find('>');
+    if (gt == std::string::npos || gt < 2) return false;
+    const std::string name = s.substr(1, gt - 1);
+    for (char c : name)
+        if (!isalnum((unsigned char)c) && c != '_' && c != '-') return false;
+    const std::string close = "</" + name + ">";
+    if (!ends(s, close)) return false;
+    return calls_in_body(s.substr(gt + 1, s.size() - gt - 1 - close.size()), calls);
+}
+
+// Text whose call came out of a fence or a wrapper leaves it behind
+// ("```xml\n\n```", "<response>\n</response>"): that goes too.
+std::string without_empty_fence(const std::string &text) {
+    std::string c = rstrip(text);
+    while (c.size() >= 5 && c.back() == '>') {  // an emptied <x></x> at the end
+        const size_t lt = c.rfind("</");
+        if (lt == std::string::npos) break;
+        const std::string name = c.substr(lt + 2, c.size() - lt - 3);
+        const size_t open = c.rfind("<" + name + ">", lt);
+        if (name.empty() || open == std::string::npos || !strip(c.substr(open + name.size() + 2, lt - open - name.size() - 2)).empty())
+            break;
+        c = rstrip(c.substr(0, open));
+    }
+    if (c.size() < 6 || !ends(c, "```")) return c;
+    const size_t open = c.rfind("```", c.size() - 4);
+    if (open == std::string::npos) return c;
+    const std::string in = c.substr(open + 3, c.size() - 3 - (open + 3));
+    const size_t nl = in.find('\n');
+    const std::string lang = nl == std::string::npos ? in : in.substr(0, nl);
+    const std::string rest = nl == std::string::npos ? "" : in.substr(nl + 1);
+    if (!strip(rest).empty() || lang.find(' ') != std::string::npos) return c;
+    return rstrip(c.substr(0, open));
+}
+
 ParsedTurn parse_turn(ToolFormat f, const std::string &text) {
     ParsedTurn r;
     r.content = text;
@@ -310,19 +511,44 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text) {
             size_t p;
             int tag = find_hermes_tag(text, pos, p);
             if (tag < 0) break;
+            if (tag == kNamedEquals || tag == kNamedAttrs) {
+                ToolCall call;
+                size_t next;
+                content += text.substr(pos, p - pos);
+                if (named_call(text, p, tag, call, next)) {
+                    r.calls.push_back(call);
+                    pos = next;
+                } else {  // not a call: it stays text
+                    content += text.substr(p, 1);
+                    pos = p + 1;
+                }
+                continue;
+            }
             const std::string open = kHermesTags[tag][0], close = kHermesTags[tag][1];
             size_t q = text.find(close, p);
             size_t body_end = q == std::string::npos ? text.size() : q;
             size_t next = q == std::string::npos ? text.size() : q + close.size();
             content += text.substr(pos, p - pos);
-            if (!calls_from_objects(text.substr(p + open.size(), body_end - p - open.size()), r.calls))
+            if (!calls_in_body(text.substr(p + open.size(), body_end - p - open.size()), r.calls))
                 content += text.substr(p, next - p);
             pos = next;
         }
         content += text.substr(pos);
         // No tags: a reply that is only a call object.
         if (r.calls.empty() && calls_from_objects(text.substr(from), r.calls)) content = text.substr(0, from);
-        if (!r.calls.empty()) r.content = rstrip(content);
+        // A reply that is only a call in one wrapper of any name, maybe in a
+        // fence: Coder keeps making new ones up (<response>, <xml>, seen on
+        // the console).
+        if (r.calls.empty() && calls_in_any_wrapper(text.substr(from), r.calls)) content = text.substr(0, from);
+        if (!r.calls.empty()) r.content = without_empty_fence(rstrip(content));
+        // A plain answer in a <response> wrapper (Coder, seen on the
+        // console): the wrapper goes.
+        if (r.calls.empty()) {
+            const std::string a = strip(text.substr(from)), open = "<response>", close = "</response>";
+            if (starts(a, open) && ends(a, close) && a.size() >= open.size() + close.size() &&
+                a.find(open, open.size()) == std::string::npos)
+                r.content = text.substr(0, from) + strip(a.substr(open.size(), a.size() - open.size() - close.size()));
+        }
     } else if (f == ToolFormat::LLAMA3) {
         std::string s = strip(text);
         if (starts(s, "<|python_tag|>")) s = lstrip(s.substr(14));
@@ -352,11 +578,12 @@ size_t content_prefix(ToolFormat f, const std::string &text) {
             if (from == std::string::npos) return text.size();
             from += 8;
         }
+        // A reply that opens with {, ``` or < may be a bare, fenced or
+        // wrapped call: hold it all.
+        size_t i = text.find_first_not_of(kSpace, from);
+        if (i != std::string::npos && (text[i] == '{' || text[i] == '`' || text[i] == '<')) return from;
         size_t p;
         if (find_hermes_tag(text, from, p) >= 0) return p;
-        // A reply that opens with { or ``` may be a bare call: hold it all.
-        size_t i = text.find_first_not_of(kSpace, from);
-        if (i != std::string::npos && (text[i] == '{' || text[i] == '`')) return from;
         // Hold back what could be the start of a call tag.
         size_t hold = text.size();
         for (auto &t : kHermesTags) {

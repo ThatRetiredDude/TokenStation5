@@ -56,7 +56,7 @@ cxxflags=(-std=c++17 -O2 -Wall -ffunction-sections -fdata-sections -fexceptions 
     -DTS5_PS5=1 -DTS5_VULKAN=1 -DTS5_HTTPS=1 "-DTS5_VERSION=\"$version\"" "-DTS5_TITLE_ID=\"$title_id\""
     "-DTS5_CA_PEM=\"$ca_pem\"" "${mbedflags[@]}"
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$out/shaders" -I "$radv/include"
-    -I "$w/include" -I "$w/ggml/include" -I "$k/include")
+    -I "$w/include" -I "$w/ggml/include" -I "$k/include" -I "$root/third_party/qrcodegen")
 objects=()
 pids=()
 mkdir -p "$out/obj/mbedtls"
@@ -70,9 +70,10 @@ for src in "$mbedtls"/library/*.c; do
     fi
 done
 for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
-        "$root"/engine/src/{tools,net,websearch,ca_bundle}.cpp \
-        "$root"/ps5/{title,library,runner,audio_probe,chat,stt,voice,settings,speak,text_input}.cpp \
-        "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp; do
+        "$root"/engine/src/{tools,net,websearch,ca_bundle,log}.cpp \
+        "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup,local_time}.cpp \
+        "$root"/third_party/qrcodegen/qrcodegen.cpp \
+        "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page,logs_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp; do
     o="$out/obj/$(basename "$src" .cpp).o"
     objects+=("$o")
     cc "${cxxflags[@]}" -c "$src" -o "$o" &
@@ -108,6 +109,27 @@ for src in "$w"/src/whisper.cpp "$w"/src/aneforge/whisper-aneforge.cpp \
     esac
     pids+=($!)
 done
+# The tunnel Tailscale runs on (ps5/wg/wg.h): wireguard-lwip and lwIP
+# (third_party/, scripts/vendor-wireguard.sh) with ps5/wg's settings, on the
+# title's own UDP socket (ps5/wg/wg_udp.c stands in for lwIP's udp.c).
+lw="$root/third_party/lwip/src"
+wgl="$root/third_party/wireguard-lwip/src"
+wgflags=(-O2 -ffunction-sections -fdata-sections -I "$root/ps5/wg" -I "$lw/include" -I "$wgl")
+mkdir -p "$out/obj/wg"
+wgobjects=()
+for src in "$lw"/core/*.c "$lw"/core/ipv4/*.c "$wgl"/*.c "$wgl"/crypto/refc/*.c "$root"/ps5/wg/wg_udp.c "$root"/ps5/wg/wg.cpp \
+        "$root"/ps5/ts/*.cpp; do
+    [ "$src" = "$lw/core/udp.c" ] && continue
+    rel=${src#"$root"/}
+    o="$out/obj/wg/${rel//\//_}.o"
+    wgobjects+=("$o")
+    case $src in
+        # gnu11: wg_udp.c reads the clocks, and lwIP wants ssize_t from the system.
+        *.c) cc -std=gnu11 "${wgflags[@]}" -c "$src" -o "$o" & ;;
+        *) cc "${cxxflags[@]}" "${wgflags[@]}" -c "$src" -o "$o" & ;;
+    esac
+    pids+=($!)
+done
 cc -std=c11 -O2 -Wall -ffunction-sections -fdata-sections -c "$root/ps5/compat.c" -o "$out/obj/compat.o" &
 pids+=($!)
 # The dashboard's fonts and logo, as they are (ps5/ui/make_font.py, make_logo.py).
@@ -126,9 +148,10 @@ for p in "${pids[@]}"; do wait "$p"; done
 # In an archive, so --exclude-libs keeps its names local: the SDK's stub
 # modules define some of them too, and the title converter refuses exports.
 # whisper.cpp and kokoro.cpp likewise: their names stay inside the title.
-rm -f "$out/obj/libts5compat.a" "$out/obj/libts5speech.a"
+rm -f "$out/obj/libts5compat.a" "$out/obj/libts5speech.a" "$out/obj/libts5wg.a"
 "$sdk/bin/llvm-ar" rcs "$out/obj/libts5compat.a" "$out/obj/compat.o"
 "$sdk/bin/llvm-ar" rcs "$out/obj/libts5speech.a" "${wobjects[@]}"
+"$sdk/bin/llvm-ar" rcs "$out/obj/libts5wg.a" "${wgobjects[@]}"
 rm -f "$out/obj/libts5mbedtls.a"
 "$sdk/bin/llvm-ar" rcs "$out/obj/libts5mbedtls.a" "${mbed_objects[@]}"
 
@@ -161,7 +184,7 @@ weak=(--no-dynamic-linker)
 "$sdk/bin/prospero-lld" "${radv_linker_script[@]}" --eh-frame-hdr "${weak[@]}" "${radv_link_flags[@]}" \
     --version-script "$vk/tooling/native/app-symbols.map" --exclude-libs=ALL \
     -e _start -o "$out/llvm-pie.elf" \
-    "$out/obj/app_crt.o" "${objects[@]}" "$out/obj/libts5speech.a" "$out/obj/libts5compat.a" "$out/obj/libts5mbedtls.a" \
+    "$out/obj/app_crt.o" "${objects[@]}" "$out/obj/libts5speech.a" "$out/obj/libts5wg.a" "$out/obj/libts5compat.a" "$out/obj/libts5mbedtls.a" \
     "$out/stubs/libSceAgc.so" "$out/stubs/libSceAgcDriver.so" "$out/stubs/libSceAudioIn.so" \
     "$out/stubs/libSceCommonDialog.so" "${radv_link_inputs[@]}" \
     --as-needed "$sdk"/target/lib/*.so

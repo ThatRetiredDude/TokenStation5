@@ -13,6 +13,8 @@
 
 namespace app {
 
+class ChatStore;
+
 struct ChatTurn {
     bool user = false;
     std::string text;
@@ -26,6 +28,7 @@ struct ChatTurn {
 };
 
 struct ChatState {
+    std::string id;  // the saved chat it is (chat_store.h); "" until its first message
     std::vector<ChatTurn> turns;
     bool busy = false;     // a reply is coming
     bool waiting = false;  // ...and none of its text has arrived yet
@@ -34,7 +37,8 @@ struct ChatState {
 class Chat {
 public:
     // The API's address: host is where it listens (0.0.0.0: the loopback).
-    Chat(const std::string &host, int port);
+    // store, if any, keeps each conversation (after every message and reply).
+    Chat(const std::string &host, int port, ChatStore *store = nullptr);
     ~Chat();
     // Adds the message and asks for the reply; false while one is coming or
     // for a blank message.
@@ -43,6 +47,8 @@ public:
     void stop();
     // Stops, and starts a new conversation.
     void clear();
+    // Stops, and goes on with a saved conversation; false if it can't be read.
+    bool open(const std::string &id);
     ChatState state();
     // Bumped on every change.
     uint64_t version() const { return version_.load(); }
@@ -54,7 +60,9 @@ private:
     std::string request_body();
     void line(const std::string &l, Result &r, std::string &err);
     void bump() { version_++; }
+    void save();  // under mu_
 
+    ChatStore *store_;
     std::string host_;
     int port_;
     std::mutex mu_;

@@ -7,6 +7,8 @@
 //   TAVILY_API_KEY       the key; without it there is no web_search tool
 //   TS5_SEARCH_RESULTS   results per search (default 5)
 //   TS5_TAVILY_URL       another endpoint with Tavily's API (default https://api.tavily.com)
+//   TS5_WEB_SEARCH       "always" offers the tool on every chat; by default
+//                        only on chats that look like they need the web
 #pragma once
 #include <string>
 
@@ -17,6 +19,18 @@ namespace ts5 {
 // TAVILY_API_KEY, or "".
 std::string tavily_key();
 
+// Whether a chat's last user message looks like it needs the web: it asks to
+// look something up or names a website, or it asks about what changes (news,
+// weather, prices, scores, elections, "today", "latest", a year after 2023).
+// ts5 offers web_search only then (or with "web_search": true, or
+// TS5_WEB_SEARCH=always): with the tool in the prompt, Llama 3's template
+// tells the model to answer with a call, and it searched on plain questions.
+// Without it, a general question costs no credit and no prompt tokens.
+bool needs_web(const std::string &user_text);
+
+// TS5_WEB_SEARCH=always.
+bool web_search_always();
+
 // The tool as offered to the model. today: "14 Oct 2026", so the model can
 // search for what is recent.
 Json web_search_tool(const std::string &today);
@@ -26,5 +40,9 @@ Json web_search_tool(const std::string &today);
 // The text for the model; *failed (when given) says the search itself did
 // not work (network, a refused key, a used-up plan), not that it found nothing.
 std::string web_search(const std::string &arguments, std::string &log, bool *failed = nullptr);
+
+// Why a search failed, in the plain words web_search gave the model ("the
+// Tavily key was refused"); the log line has the raw reason.
+std::string search_failure(const std::string &result);
 
 }  // namespace ts5

@@ -44,10 +44,18 @@ Voice::~Voice() {
     if (worker_.joinable()) worker_.join();
 }
 
+constexpr const char *kNoModel = "No speech model yet. Add one in Settings, under Voice.";
+
 void Voice::rescan() {
     const std::vector<std::string> found = whisper_models(dir_);
     const std::string m = chosen_whisper_model(dir_);
     std::lock_guard<std::mutex> lk(mu_);
+    // One came (downloaded on the Settings page): "none yet" is out of date,
+    // also when it came before the error did (R1 held while it arrived).
+    if (!m.empty() && state_.error == kNoModel) {
+        state_.error.clear();
+        version_++;
+    }
     if (m != state_.model || found != state_.models) {
         state_.model = m;
         state_.models = found;
@@ -95,7 +103,14 @@ void Voice::run() {
     if (model.empty()) {
         // Nothing to transcribe with: say so at once rather than record.
         while (!released_) sceKernelUsleep(20000);
-        set_error("No speech model yet. On your computer, run: scripts/ts5-ps5.sh speech");
+        std::lock_guard<std::mutex> lk(mu_);
+        // One may have come while R1 was down.
+        if (state_.model.empty()) {
+            printf("ts5-title: voice: %s\n", kNoModel);
+            state_.error = kNoModel;
+        }
+        state_.phase = VoiceState::Idle;
+        version_++;
         return;
     }
     const int h = sceAudioInOpen(user_, kVoiceChat, 0, kGrain, kRate, kMono16);
@@ -143,7 +158,8 @@ void Voice::run() {
         if (!stt_->load(dir_ + "/" + model, Stt::default_threads(), err)) {
             stt_.reset();
             loaded_.clear();
-            set_error("The speech model didn't load: " + err);
+            printf("ts5-title: voice: the speech model didn't load: %s\n", err.c_str());
+            set_error("The speech model couldn't be read. Choose another in Settings, or download it again.");
             return;
         }
         loaded_ = model;
@@ -151,7 +167,8 @@ void Voice::run() {
     stt_->set_threads(Stt::default_threads());
     std::string text;
     if (!stt_->transcribe(pcm, text, err, nullptr)) {
-        set_error("Speech to text failed: " + err);
+        printf("ts5-title: voice: speech to text failed: %s\n", err.c_str());
+        set_error("Couldn't turn that into text. Hold R1 and try again.");
         return;
     }
     // whisper's markers for no speech, and the spaces around the words.

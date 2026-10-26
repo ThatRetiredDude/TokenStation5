@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "pad.h"
+#include "plain.h"
 #include "style.h"
 
 namespace ui {
@@ -20,36 +21,83 @@ constexpr int LX = 72, LW = 900, RX = 1000, RW = 848;
 constexpr int AY = 868, AH = 136;
 constexpr int LIST_X = LX + 16, LIST_W = LW - 32, LIST_Y0 = 268, LIST_Y1 = PB - 16;
 constexpr int DX = RX + 32, DW = RW - 64;
-// The chat page: the conversation, and the line for a message under it.
-constexpr int CX = LX, CW = 1848 - LX, CB = 884, IY = 900, IH = AY + AH - 900;
+// The chat page: the chats on the left; the conversation, and the line for a
+// message under it.
+constexpr int CLW = 500, CX = LX + CLW + 24, CW = 1848 - CX, CB = 884, IY = 900, IH = AY + AH - 900;
 // The settings page: two panels down to where the activity panel ends.
 constexpr int SB = AY + AH;
-
-// Models worth starting with that ts5 runs, for a console that has none of
-// them yet. `id` finds one already there by its file name; `key` is its line
-// in models.tsv for scripts/ts5-ps5.sh fetch.
-struct Suggestion {
-    const char *key, *id, *name, *quant, *size, *role;
-};
-const Suggestion kSuggestions[] = {
-    {"qwen25-0.5b", "qwen2.5-0.5b", "Qwen2.5 0.5B Instruct", "Q8_0", "0.7 GB", "A quick test: tiny and very fast"},
-    {"llama32-3b", "llama-3.2-3b", "Llama 3.2 3B Instruct", "Q4_K_M", "2.0 GB", "Small and fast everyday chat"},
-    {"qwen25-coder-7b", "qwen2.5-coder-7b", "Qwen2.5 Coder 7B Instruct", "Q4_K_M", "4.7 GB", "Coding"},
-    {"qwen3-8b", "qwen3-8b", "Qwen3 8B", "Q4_K_M", "5.0 GB", "General chat, with thinking"},
-    {"llama31-8b", "llama-3.1-8b", "Llama 3.1 8B Instruct", "Q4_K_M", "4.9 GB", "General chat"},
-};
 
 std::string lower(std::string s) {
     for (auto &c : s) c = (char)tolower((unsigned char)c);
     return s;
 }
 
-std::string arch_name(const std::string &a) {
-    if (a == "qwen2") return "Qwen2";
-    if (a == "qwen3") return "Qwen3";
-    if (a == "llama") return "Llama";
-    if (a == "mistral") return "Mistral";
-    return a.empty() ? "Unknown" : a;
+// The catalog model a file is, in whatever precision; null if none.
+const app::CatalogEntry *catalog_of(const std::string &file) {
+    const std::string f = lower(file);
+    for (const app::CatalogEntry &e : app::kCatalog)  // the built-in models only: their words fit
+        if (e.kind == app::CatalogEntry::Model && f.find(e.same) != std::string::npos) return &e;
+    return nullptr;
+}
+
+// What a model is good for: its catalog entry's words, found by its file name
+// or its own name (a copy under another file name is the same model), else a
+// guess from its name.
+std::string good_for(const app::ModelInfo &m) {
+    std::string name = lower(m.name);
+    for (auto &ch : name)
+        if (ch == ' ') ch = '-';
+    if (const app::CatalogEntry *e = catalog_of(m.file)) return e->good_for;
+    if (const app::CatalogEntry *e = catalog_of(name)) return e->good_for;
+    // A file with no model in it: nothing to guess from.
+    if (m.arch.empty()) return "\xE2\x80\x94";
+    // The tiny test model isn't in the catalog.
+    if (name.find("0.5b") != std::string::npos) return "A quick test";
+    return name.find("coder") != std::string::npos ? "Coding" : "General chat";
+}
+
+// A model's name in the list: with its precision when another model there
+// has the same name (two downloads of one model, 4-bit and 8-bit).
+std::string shown_name(const std::vector<app::ModelInfo> &models, const app::ModelInfo &m) {
+    int same = 0;
+    for (const app::ModelInfo &o : models) same += o.name == m.name;
+    if (same < 2 || m.quant.empty()) return m.name;
+    return m.name + " (" + plain::quant_detail(m.quant) + ")";
+}
+
+// A catalog model is on the PS5 already, in some precision.
+bool installed(const View &v, const app::CatalogEntry &e) {
+    return std::any_of(v.models.begin(), v.models.end(),
+                       [&](const app::ModelInfo &m) { return lower(m.file).find(e.same) != std::string::npos; });
+}
+
+app::Download download_of(const View &v, const std::string &key) {
+    const auto it = v.downloads.find(key);
+    return it == v.downloads.end() ? app::Download() : it->second;
+}
+
+// The download that is running or waiting to try again, for "waiting for".
+std::string downloading(const View &v) {
+    for (const auto &[key, d] : v.downloads)
+        if (d.phase == app::Download::Running || d.phase == app::Download::Retrying)
+            if (const app::CatalogEntry *e = app::Downloads::find(key)) return e->name;
+    return "";
+}
+
+// Whether right on Models removes this model: not the one in use or a job's,
+// not one still copying, and only from the title's own folder (another
+// app's models stay that app's).
+bool removable(const View &v, const app::ModelInfo &m) {
+    if (m.path == v.status.serving_path || m.copying) return false;
+    if (m.file == v.status.job_model && v.status.phase != app::Status::Idle && v.status.phase != app::Status::Serving)
+        return false;
+    return !v.models_dir.empty() && m.path.compare(0, v.models_dir.size() + 1, v.models_dir + "/") == 0;
+}
+
+// "Still copying: 2.1 GB of 4.7 GB so far"
+std::string copied(const app::ModelInfo &m) {
+    return "Still copying: " + app::format_bytes(m.size) +
+           (m.full_size > m.size ? " of " + app::format_bytes(m.full_size) : std::string()) + " so far";
 }
 
 std::string ago(int64_t then, int64_t now) {
@@ -58,8 +106,18 @@ std::string ago(int64_t then, int64_t now) {
     if (s < 60) return "just now";
     if (s < 3600) snprintf(b, sizeof b, "%lld min ago", (long long)(s / 60));
     else if (s < 86400) snprintf(b, sizeof b, "%lld h ago", (long long)(s / 3600));
+    else if (s < 2 * 86400) return "a day ago";
     else snprintf(b, sizeof b, "%lld days ago", (long long)(s / 86400));
     return b;
+}
+
+// A line with its time after it ("... · 5 min ago"): a line too long for
+// max_w is cut, never the time.
+int text_with_time(Canvas &c, const Font &f, int x, int y, const std::string &s, const std::string &when, Color col,
+                   int max_w) {
+    const std::string tail = "  \xC2\xB7  " + when;
+    const int w = c.text(f, x, y, s, col, std::max(1, max_w - Canvas::measure(f, tail)));
+    return w + c.text(f, x + w, y, tail, col, std::max(1, max_w - w));
 }
 
 std::string elapsed(double s) {
@@ -69,11 +127,7 @@ std::string elapsed(double s) {
     return b;
 }
 
-std::string tps(double v) {
-    char b[32];
-    snprintf(b, sizeof b, v >= 100 ? "%.0f tok/s" : "%.1f tok/s", v);
-    return b;
-}
+std::string tps(double v) { return plain::tokens_a_second(v); }
 
 // Words onto lines no wider than max_w.
 std::vector<std::string> wrap(const Font &f, const std::string &text, int max_w) {
@@ -103,25 +157,49 @@ void label(Canvas &c, const Font &f, int x, int y, const std::string &s) { c.tex
 std::string name_of(const View &v, const std::string &file) {
     for (const auto &m : v.models)
         if (m.file == file) return m.name;
-    return file;
+    return plain::model_name(file);
 }
+
+const char *page_name(Dashboard::Page p) {
+    return p == Dashboard::Home     ? "Home"
+           : p == Dashboard::Models ? "Models"
+           : p == Dashboard::Chat   ? "Chat"
+           : p == Dashboard::Settings ? "Settings"
+                                      : "Logs";
+}
+
+// Some request over Home's range wasn't answered: square shows why.
+bool home_problems(const View &v) { return v.usage && v.usage->ready && v.usage->total.failed > 0; }
+
+// A model that can't run, and isn't just still copying: square shows why.
+bool cant_run(const app::ModelInfo &m) { return !m.runnable && !m.copying; }
 
 // Cross types a message: a model serves, and no reply is coming.
 bool can_type(const View &v) { return v.status.phase == app::Status::Serving && !v.chat.busy; }
 
+// No model runs or loads: cross on Chat goes to Models.
+bool nothing_running(const View &v) { return v.status.serving.empty() && v.status.phase != app::Status::Loading; }
+
+// How a model has been used over the last 7 days, from the usage log.
+const app::UsageSums *week_of(const View &v, const std::string &name) {
+    if (!v.usage) return nullptr;
+    const auto it = v.usage->week.find(name);
+    return it == v.usage->week.end() ? nullptr : &it->second;
+}
+
 }  // namespace
 
 struct Dashboard::Item {
-    enum Kind { Model, Header, Suggestion, Empty } kind;
-    int index;  // into View::models or kSuggestions
+    enum Kind { Model, Header, Catalog, Empty, Search } kind;
+    int index;  // into View::models or the catalog (app::catalog_at); a Header's: 0 DOWNLOAD, 1 HUGGING FACE
     int h;
     std::string key;
 };
 
 Dashboard::Dashboard(const Fonts &fonts, const uint8_t *logo, size_t logo_size)
     : title_(fonts.get("title")), h2_(fonts.get("h2")), body_(fonts.get("body")),
-      bodyb_(fonts.get("bodyb")), small_(fonts.get("small")), smallb_(fonts.get("smallb")), mono_(fonts.get("mono")),
-      chat_(fonts), settings_(fonts) {
+      bodyb_(fonts.get("bodyb")), small_(fonts.get("small")), smallb_(fonts.get("smallb")),
+      home_(fonts), logs_(fonts), chat_(fonts), settings_(fonts) {
     if (logo && logo_size >= 8 && memcmp(logo, "TS5L", 4) == 0) {
         uint16_t w, h;
         memcpy(&w, logo + 4, 2);
@@ -140,45 +218,76 @@ std::vector<Dashboard::Item> Dashboard::items(const View &v) const {
     std::vector<Item> out;
     for (size_t i = 0; i < v.models.size(); i++) out.push_back({Item::Model, (int)i, 88, v.models[i].path});
     if (v.models.empty()) out.push_back({Item::Empty, 0, 128, ""});
-    std::vector<Item> sugg;
-    for (size_t i = 0; i < sizeof kSuggestions / sizeof kSuggestions[0]; i++) {
-        const bool have = std::any_of(v.models.begin(), v.models.end(), [&](const app::ModelInfo &m) {
-            return lower(m.file).find(kSuggestions[i].id) != std::string::npos;
-        });
-        if (!have) sugg.push_back({Item::Suggestion, (int)i, 88, std::string("suggest:") + kSuggestions[i].key});
+    // The catalog's models that aren't on the PS5, to download; a row with
+    // a part or a download going on is taller, for its progress bar.
+    // Searched ones show under the search, unless they're downloading.
+    std::vector<Item> more, found;
+    auto row = [&](size_t i) -> Item {
+        const app::CatalogEntry &e = app::catalog_at(i);
+        const app::Download d = download_of(v, e.key);
+        const bool bar = d.done > 0 || d.active();
+        return {Item::Catalog, (int)i, bar ? 100 : 88, std::string("catalog:") + e.key};
+    };
+    const size_t builtin = sizeof app::kCatalog / sizeof app::kCatalog[0];
+    for (size_t i = 0, n = app::catalog_size(); i < n; i++) {
+        const app::CatalogEntry &e = app::catalog_at(i);
+        if (e.kind != app::CatalogEntry::Model || installed(v, e)) continue;
+        const app::Download d = download_of(v, e.key);
+        if (i < builtin || d.done > 0 || d.active()) more.push_back(row(i));
     }
-    if (!sugg.empty()) {
+    for (size_t i : v.hf.results) {
+        const app::CatalogEntry &e = app::catalog_at(i);
+        const app::Download d = download_of(v, e.key);
+        if (!installed(v, e) && d.done == 0 && !d.active()) found.push_back(row(i));
+    }
+    if (!more.empty()) {
         out.push_back({Item::Header, 0, 56, ""});
-        out.insert(out.end(), sugg.begin(), sugg.end());
+        out.insert(out.end(), more.begin(), more.end());
     }
+    out.push_back({Item::Header, 1, 56, ""});
+    out.push_back({Item::Search, 0, 88, "search"});
+    out.insert(out.end(), found.begin(), found.end());
     return out;
 }
 
 int Dashboard::selected(const std::vector<Item> &items) const {
     int first = -1;
     for (size_t i = 0; i < items.size(); i++) {
-        if (items[i].kind != Item::Model && items[i].kind != Item::Suggestion) continue;
+        if (items[i].kind != Item::Model && items[i].kind != Item::Catalog && items[i].kind != Item::Search) continue;
         if (first < 0) first = (int)i;
         if (items[i].key == selected_key_) return (int)i;
     }
+    // A download that just finished: its model, now on the PS5.
+    if (selected_key_.compare(0, 8, "catalog:") == 0)
+        if (const app::CatalogEntry *e = app::Downloads::find(selected_key_.substr(8)))
+            for (size_t i = 0; i < items.size(); i++)
+                if (items[i].kind == Item::Model && lower(items[i].key).find(e->same) != std::string::npos) return (int)i;
     return first;
 }
 
 void Dashboard::show(Page p) {
     if (p == Chat && page_ != Chat) chat_.to_bottom();
+    if (p == Logs && page_ != Logs) logs_.open(false);
+    if (p != Logs && page_ == Logs) logs_.close();
     page_ = p;
+}
+
+void Dashboard::show_problems() {
+    show(Logs);
+    logs_.open(true);
 }
 
 SettingsInfo Dashboard::settings_info(const View &v) const {
     SettingsInfo s = v.settings;
     s.speech_models = v.voice.models;
     s.speech_model = v.voice.model;
+    s.downloads = v.downloads;
     s.now = v.now;
     return s;
 }
 
 bool Dashboard::animating(const View &v) const {
-    if (page_ == Settings) return false;
+    if (page_ == Settings || page_ == Home || page_ == Logs) return false;
     if (page_ == Chat)
         return v.chat.busy || v.voice.phase != app::VoiceState::Idle || v.status.phase == app::Status::Loading;
     return v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
@@ -188,37 +297,85 @@ bool Dashboard::animating(const View &v) const {
 Action Dashboard::press(uint32_t b, const View &v) {
     Action a;
     if (!b) return a;
-    if (confirm_close_) {
-        if (b & kCross) a.kind = Action::Close;
-        if (b & (kCross | kCircle | kOptions)) confirm_close_ = false;
+    if (confirm_ != NoConfirm) {
+        if (b & kCross) {
+            a.kind = confirm_ == ConfirmClose ? Action::Close : confirm_ == ConfirmStop ? Action::Stop : Action::Remove;
+            if (confirm_ == ConfirmRemove) a.path = confirm_path_;
+        }
+        if (b & (kCross | kCircle | kOptions)) confirm_ = NoConfirm;
         return a;
     }
     if (b & kOptions) {
-        confirm_close_ = true;
+        confirm_ = ConfirmClose;
         return a;
     }
     if (b & kL1) {
-        show(page_ == Models ? Chat : page_ == Chat ? Settings : Models);
+        show(next(page_));
+        return a;
+    }
+    if (page_ == Home) {
+        home_.press(b);
+        if (b & kCross) show(v.status.phase == app::Status::Serving ? Chat : Models);
+        else if ((b & kSquare) && home_problems(v)) show_problems();
+        return a;
+    }
+    if (page_ == Logs) {
+        logs_.press(b);
+        if (b & kCircle) show(Home);
         return a;
     }
     if (page_ == Settings) {
         const SettingChange ch = settings_.press(b, settings_info(v));
-        if (ch.any || ch.type) {
+        if (!ch.download.empty()) {
+            a.kind = ch.stop ? Action::StopDownload : Action::Download;
+            a.keys = ch.download;
+        } else if (ch.any || ch.type) {
             a.kind = ch.type ? Action::TypeSetting : Action::Set;
             a.name = ch.name;
             a.value = ch.value;
             a.label = ch.label;
+        } else if (ch.new_key) {
+            a.kind = Action::NewKey;
+        } else if (!ch.key_id.empty()) {
+            a.kind = ch.key_remove ? Action::RemoveKey : Action::KeyOn;
+            a.name = ch.key_id;
+            a.value = ch.key_on ? "1" : "0";
+        } else if (ch.ts_sign_out) {
+            a.kind = Action::TsSignOut;
         }
-        if (b & kCircle) page_ = Models;
+        if (b & kCircle) show(Home);
         return a;
     }
     if (page_ == Chat) {
-        chat_.press(b);
-        if ((b & kTriangle) && (v.chat.busy || v.speaking)) a.kind = Action::ChatStop;
-        else if ((b & kSquare) && !v.chat.turns.empty()) a.kind = Action::ChatClear;
-        else if ((b & kCross) && can_type(v)) a.kind = Action::ChatType;
-        if (a.kind == Action::ChatClear) chat_.to_bottom();
-        if (b & kCircle) page_ = Models;
+        if ((b & kTriangle) && (v.chat.busy || v.speaking)) {
+            a.kind = Action::ChatStop;
+        } else if (chat_.list_focused()) {
+            const ListPress p = chat_.press_list(b, v.chats, v.now);
+            switch (p.kind) {
+                case ListPress::New: a.kind = Action::ChatClear; break;
+                case ListPress::Search: a.kind = Action::ChatSearch; break;
+                case ListPress::ClearSearch: a.kind = Action::ChatSearchClear; break;
+                case ListPress::Open: a.kind = Action::ChatOpen; break;
+                case ListPress::Remove: a.kind = Action::ChatRemove; break;
+                case ListPress::None: break;
+            }
+            a.name = p.id;
+            // An opened or new chat takes the controller, ready to type.
+            if (a.kind == Action::ChatClear || a.kind == Action::ChatOpen || (b & kRight)) chat_.focus_list(false);
+        } else if (b & kLeft) {
+            chat_.focus_list(true);
+        } else {
+            chat_.press(b);
+            if ((b & kSquare) && !v.chat.turns.empty()) a.kind = Action::ChatClear;
+            else if ((b & kCross) && can_type(v)) a.kind = Action::ChatType;
+            else if ((b & kCross) && nothing_running(v)) show(Models);
+        }
+        if (a.kind == Action::ChatClear || a.kind == Action::ChatOpen) chat_.to_bottom();
+        if (b & kCircle) show(Home);
+        return a;
+    }
+    if (b & kCircle) {
+        show(Home);
         return a;
     }
     const auto list = items(v);
@@ -232,65 +389,77 @@ Action Dashboard::press(uint32_t b, const View &v) {
     }
     auto step = [&](int d) {
         for (int i = sel + d; i >= 0 && i < (int)list.size(); i += d)
-            if (list[i].kind == Item::Model || list[i].kind == Item::Suggestion) return i;
+            if (list[i].kind == Item::Model || list[i].kind == Item::Catalog || list[i].kind == Item::Search) return i;
         return sel;
     };
     if (b & kUp) sel = step(-1);
     if (b & kDown) sel = step(+1);
     selected_key_ = list[sel].key;
     const Item &it = list[sel];
+    if (it.kind == Item::Search) {
+        if (b & kCross) a.kind = Action::Search;
+        return a;
+    }
+    // Downloads go on beside jobs, so these come before the busy check.
+    if (it.kind == Item::Catalog) {
+        const app::CatalogEntry &e = app::catalog_at(it.index);
+        const app::Download d = download_of(v, e.key);
+        a.keys = {e.key};
+        if (b & kCross) a.kind = d.active() ? Action::StopDownload : Action::Download;
+        else if ((b & kSquare) && !d.active() && d.done > 0) a.kind = Action::RemovePart;
+        return a;
+    }
+    if ((b & kSquare) && it.kind == Item::Model && cant_run(v.models[it.index])) {
+        show_problems();
+        return a;
+    }
+    if ((b & kRight) && it.kind == Item::Model && removable(v, v.models[it.index])) {
+        const app::ModelInfo &m = v.models[it.index];
+        confirm_ = ConfirmRemove;
+        confirm_name_ = m.name;
+        confirm_path_ = m.path;
+        confirm_bytes_ = m.size;
+        return a;
+    }
     const bool busy = v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
                       v.status.phase == app::Status::Benchmarking || v.status.queued > 0;
     if (busy) return a;
     if (it.kind == Item::Model && v.models[it.index].runnable) {
         a.path = v.models[it.index].path;
-        if ((b & kCross) && a.path != v.status.serving_path) a.kind = Action::Serve;
-        else if (b & kSquare) a.kind = Action::Check;
-        else if (b & kTriangle) a.kind = Action::Bench;
+        if ((b & kCross) && a.path == v.status.serving_path) {
+            // The model apps use: stop it, once asked.
+            confirm_ = ConfirmStop;
+            confirm_name_ = v.models[it.index].name;
+        } else if (b & kCross) {
+            a.kind = Action::Serve;
+        } else if (b & kSquare) {
+            a.kind = Action::Check;
+        } else if (b & kTriangle) {
+            a.kind = Action::Bench;
+        }
     }
-    if ((b & kCircle) && !v.status.serving.empty()) a.kind = Action::Stop;
     return a;
 }
 
 void Dashboard::draw_background(Canvas &c) {
-    if (page_ == Settings) {
-        if (settings_background_.empty()) {
-            Canvas bg(W, H);
-            bg.gradient(0, 0, W, H, kBgTop, kBgBottom);
-            bg.fill(LX, 168, 1848 - LX, 1, kPanelLine);
-            for (auto [x, y, w, h] : {std::array<int, 4>{LX, PT, LW, SB - PT}, std::array<int, 4>{RX, PT, RW, SB - PT}}) {
-                bg.round_rect((float)x, (float)y, (float)w, (float)h, 20, kPanel);
-                bg.round_rect_line((float)x, (float)y, (float)w, (float)h, 20, 1.5f, kPanelLine);
-            }
-            settings_background_.assign(bg.pixels(), bg.pixels() + (size_t)W * H);
+    if (background_page_ != page_) {
+        std::vector<std::array<int, 4>> panels;
+        switch (page_) {
+            case Home: HomePage::panels(panels); break;
+            case Models: panels = {{LX, PT, LW, PB - PT}, {RX, PT, RW, PB - PT}, {LX, AY, 1848 - LX, AH}}; break;
+            case Chat: panels = {{LX, PT, CLW, AY + AH - PT}, {CX, PT, CW, CB - PT}, {CX, IY, CW, IH}}; break;
+            case Settings: panels = {{LX, PT, LW, SB - PT}, {RX, PT, RW, SB - PT}}; break;
+            case Logs: panels = {{LX, PT, 1848 - LX, SB - PT}}; break;
         }
-        memcpy(c.pixels(), settings_background_.data(), settings_background_.size() * 4);
-        return;
-    }
-    if (page_ == Chat) {
-        if (chat_background_.empty()) {
-            Canvas bg(W, H);
-            bg.gradient(0, 0, W, H, kBgTop, kBgBottom);
-            bg.fill(LX, 168, 1848 - LX, 1, kPanelLine);
-            for (auto [x, y, w, h] : {std::array<int, 4>{CX, PT, CW, CB - PT}, std::array<int, 4>{CX, IY, CW, IH}}) {
-                bg.round_rect((float)x, (float)y, (float)w, (float)h, 20, kPanel);
-                bg.round_rect_line((float)x, (float)y, (float)w, (float)h, 20, 1.5f, kPanelLine);
-            }
-            chat_background_.assign(bg.pixels(), bg.pixels() + (size_t)W * H);
-        }
-        memcpy(c.pixels(), chat_background_.data(), chat_background_.size() * 4);
-        return;
-    }
-    if (background_.empty()) {
         Canvas bg(W, H);
         bg.gradient(0, 0, W, H, kBgTop, kBgBottom);
         bg.fill(LX, 168, 1848 - LX, 1, kPanelLine);
-        for (auto [x, y, w, h] : {std::array<int, 4>{LX, PT, LW, PB - PT}, std::array<int, 4>{RX, PT, RW, PB - PT},
-                                   std::array<int, 4>{LX, AY, 1848 - LX, AH}}) {
+        for (auto [x, y, w, h] : panels) {
             bg.round_rect((float)x, (float)y, (float)w, (float)h, 20, kPanel);
             bg.round_rect_line((float)x, (float)y, (float)w, (float)h, 20, 1.5f, kPanelLine);
         }
         background_.assign(bg.pixels(), bg.pixels() + (size_t)W * H);
+        background_page_ = page_;
     }
     memcpy(c.pixels(), background_.data(), background_.size() * 4);
 }
@@ -302,33 +471,37 @@ void Dashboard::draw_header(Canvas &c, const View &v) {
     }
     const int tx = LX + (logo_ ? logo_w_ + 28 : 0);
     c.text(title_, tx, 100, "TokenStation5", kText);
-    c.text(small_, tx, 136, "Local AI on your PS5  \xC2\xB7  build " + v.version, kText2);
+    c.text(small_, tx, 136, "Local AI on your PS5", kText2);
 
     const auto &st = v.status;
-    std::string state = "NOT SERVING";
+    std::string state = "NOT RUNNING";
     Color col = kText2;
     switch (st.phase) {
         case app::Status::Loading: state = "LOADING", col = kAmber; break;
         case app::Status::Checking: state = "GPU CHECK", col = kAccent; break;
         case app::Status::Benchmarking: state = "SPEED TEST", col = kAccent; break;
-        case app::Status::Serving: state = "SERVING", col = kGreen; break;
+        case app::Status::Serving: state = "READY", col = kGreen; break;
         case app::Status::Idle: break;
     }
     const int left = pill(c, smallb_, 1848, 48, state, col);
     c.circle((float)left - 18, 65, 7, col);
     draw_tabs(c);
     const bool up = !st.serving.empty() && st.phase == app::Status::Serving;
-    c.text_right(smallb_, 1848, 132, v.url, up ? kAccent : kText2);
-    c.text_right(small_, 1848 - Canvas::measure(smallb_, v.url) - 12, 132, "API", kMuted);
+    if (v.on_network) {
+        c.text_right(smallb_, 1848, 132, v.url, up ? kAccent : kText2);
+        c.text_right(small_, 1848 - Canvas::measure(smallb_, v.url) - 12, 132, "For apps", kMuted);
+    } else {
+        c.text_right(small_, 1848, 132, "Not on a network yet", kText2);
+    }
 }
 
 // The pages, as tabs right of the title, with the button that switches them.
 void Dashboard::draw_tabs(Canvas &c) {
-    int x = 820;
+    int x = 700;
     const int y = 140;
     x += key_cap(c, smallb_, x, y - 2, "L1") + 24;
-    for (Page p : {Models, Chat, Settings}) {
-        const char *name = p == Models ? "Models" : p == Chat ? "Chat" : "Settings";
+    for (Page p : {Home, Models, Chat, Settings, Logs}) {
+        const char *name = page_name(p);
         const int w = Canvas::measure(bodyb_, name);
         c.text(bodyb_, x, y, name, p == page_ ? kText : kText2);
         if (p == page_) c.round_rect((float)x, 163, (float)w, 5, 2.5f, kAccent);
@@ -365,24 +538,98 @@ void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &lis
         const bool is_sel = (int)i == sel;
         const int right = LIST_X + LIST_W - 24;
         if (it.kind == Item::Header) {
-            c.text(smallb_, LIST_X + 8, ry + 40, "SUGGESTED  \xC2\xB7  NOT ON YOUR PS5 YET", kMuted);
+            c.text(smallb_, LIST_X + 8, ry + 40, it.index == 1 ? "HUGGING FACE" : "DOWNLOAD", kMuted);
             continue;
         }
         if (it.kind == Item::Empty) {
             c.round_rect_line((float)LIST_X, (float)ry, (float)LIST_W, (float)it.h, 14, 1.5f, kPanelLine);
-            c.text(bodyb_, LIST_X + 24, ry + 44, "No models yet", kText);
-            c.text(small_, LIST_X + 24, ry + 80, "Copy a .gguf over FTP to", kText2);
-            c.text(small_, LIST_X + 24, ry + 110, v.folder, kAccent);
+            c.text(bodyb_, LIST_X + 24, ry + 44, "No models on your PS5 yet", kText);
+            text_glyph(c, small_, LIST_X + 24, ry + 84, "Choose one below and press", kGlyphCross, "to download it.",
+                       kText2);
             continue;
         }
         c.round_rect((float)LIST_X, (float)ry, (float)LIST_W, (float)it.h, 14, is_sel ? kRowSel : kRow);
         if (is_sel) c.round_rect_line((float)LIST_X, (float)ry, (float)LIST_W, (float)it.h, 14, 2.5f, kAccent);
-        if (it.kind == Item::Suggestion) {
-            const Suggestion &s = kSuggestions[it.index];
-            const int pl = pill(c, smallb_, right, ry + 14, "SUGGESTED", kMuted);
-            c.text(bodyb_, LIST_X + 24, ry + 40, s.name, kText2, pl - 16 - (LIST_X + 24));
-            c.text(small_, LIST_X + 24, ry + 72, std::string(s.quant) + "  \xC2\xB7  " + s.size + "  \xC2\xB7  " + s.role,
-                   kMuted, LIST_W - 48);
+        if (it.kind == Item::Search) {
+            const app::HfState &h = v.hf;
+            std::string tag = "SEARCH", line;
+            Color tc = kAccent, lc = kMuted;
+            switch (h.phase) {
+                case app::HfState::Idle: line = "Find more models that fit this PS5"; break;
+                case app::HfState::Searching:
+                    tag = "LOOKING", tc = kText2;
+                    line = "\"" + h.query + "\": " +
+                           (h.to_check ? std::to_string(h.checked) + " of " + std::to_string(h.to_check) + " looked at"
+                                       : std::string("asking Hugging Face"));
+                    lc = kText2;
+                    break;
+                case app::HfState::Done:
+                    line = "\"" + h.query + "\": " +
+                           (h.results.empty() ? std::string("none that fit")
+                                              : std::to_string(h.results.size()) + (h.results.size() == 1 ? " fits" : " fit"));
+                    lc = kText2;
+                    break;
+                case app::HfState::Failed:
+                    tag = "SEARCH", tc = kRed;
+                    line = "The search didn't work: see why on the right";
+                    lc = kRed;
+                    break;
+            }
+            const int pl = pill(c, smallb_, right, ry + 14, tag, tc);
+            c.text(bodyb_, LIST_X + 24, ry + 40, "Search Hugging Face", kText, pl - 16 - (LIST_X + 24));
+            c.text(small_, LIST_X + 24, ry + 72, line, lc, LIST_W - 48);
+            continue;
+        }
+        if (it.kind == Item::Catalog) {
+            const app::CatalogEntry &e = app::catalog_at(it.index);
+            const app::Download d = download_of(v, e.key);
+            using D = app::Download;
+            std::string tag = "DOWNLOAD", line;
+            Color tc = kAccent, lc = kText2;
+            char pc[16];
+            snprintf(pc, sizeof pc, "%d%%", app::percent(d));
+            switch (d.phase) {
+                case D::None:
+                    line = std::string(e.good_for) + "  \xC2\xB7  " + app::format_bytes(e.bytes) + " download";
+                    lc = kMuted;
+                    break;
+                case D::Queued:
+                    tag = "WAITING", tc = kText2;
+                    line = "Waiting for the download before it";
+                    break;
+                case D::Running:
+                    if (d.held) tag = "WAITING", tc = kText2;
+                    else tag = pc;
+                    line = d.held ? std::string("Waiting while a model loads") : app::progress_text(d, false);
+                    break;
+                case D::Retrying:
+                    tag = "WAITING", tc = kAmber;
+                    line = "Trying again in " + std::to_string(std::max(1, (int)std::ceil(d.retry_at - v.now))) + " s";
+                    lc = kAmber;
+                    break;
+                case D::Stopped:
+                    tag = "STOPPED", tc = kAmber;
+                    line = std::string("Stopped at ") + pc + "  \xC2\xB7  " + app::format_bytes(d.done) + " of " +
+                           app::format_bytes(d.total);
+                    break;
+                case D::Failed:
+                    tag = "STOPPED", tc = kRed;
+                    line = d.done ? std::string("Stopped at ") + pc + ": see why on the right"
+                                  : std::string("Didn't download: see why on the right");
+                    lc = kRed;
+                    break;
+            }
+            const int pl = pill(c, smallb_, right, ry + 14, tag, tc);
+            c.text(bodyb_, LIST_X + 24, ry + 40, e.name, d.phase == D::None ? kText2 : kText, pl - 16 - (LIST_X + 24));
+            c.text(small_, LIST_X + 24, ry + 72, line, lc, LIST_W - 48);
+            if (it.h > 88) {
+                // The progress bar along the foot of the row.
+                const float bx = (float)LIST_X + 24, bw = (float)LIST_W - 48, by = (float)ry + it.h - 18;
+                c.round_rect(bx, by, bw, 6, 3, kTrack);
+                const float f = d.total ? std::min(1.0f, (float)d.done / (float)d.total) : 0;
+                const Color bc = d.phase == D::Failed ? kRed : d.phase == D::Running && !d.held ? kAccent : kText2;
+                if (f > 0) c.round_rect(bx, by, std::max(6.0f, bw * f), 6, 3, bc);
+            }
             continue;
         }
         const app::ModelInfo &m = v.models[it.index];
@@ -394,21 +641,36 @@ void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &lis
             pl = pill(c, smallb_, right, ry + 14, "GPU CHECK", kAccent);
         else if (job_here && v.status.phase == app::Status::Benchmarking)
             pl = pill(c, smallb_, right, ry + 14, "SPEED TEST", kAccent);
-        else if (m.path == v.status.serving_path) pl = pill(c, smallb_, right, ry + 14, "SERVING", kGreen);
+        else if (m.path == v.status.serving_path) pl = pill(c, smallb_, right, ry + 14, "IN USE", kGreen);
+        else if (m.copying) pl = pill(c, smallb_, right, ry + 14, "COPYING", kAmber);
         else if (!m.runnable) pl = pill(c, smallb_, right, ry + 14, "CAN'T RUN", kRed);
-        c.text(bodyb_, LIST_X + 24, ry + 40, m.name, m.runnable ? kText : kText2, pl - 16 - (LIST_X + 24));
+        c.text(bodyb_, LIST_X + 24, ry + 40, shown_name(v.models, m), m.runnable ? kText : kText2,
+               pl - 16 - (LIST_X + 24));
 
-        // Results, right-aligned under the label.
+        // Results, right-aligned under the label: a failed check, else the
+        // speed (with a tick once the check passed): as used over the last 7
+        // days, else the speed test's.
         int rx = right;
-        if (r.has_bench) rx = c.text_right(small_, rx, ry + 72, tps(r.bench.tg_tps), kText2) - 20;
-        if (r.has_check)
-            rx = c.text_right(smallb_, rx, ry + 72, r.check.pass ? "\xE2\x9C\x93 GPU check" : "\xE2\x9C\x97 GPU check",
-                              r.check.pass ? kGreen : kRed) - 20;
-        std::string line = arch_name(m.arch);
-        if (m.params > 0) line += "  \xC2\xB7  " + app::format_params(m.params);
-        if (!m.quant.empty()) line += "  \xC2\xB7  " + m.quant;
-        line += "  \xC2\xB7  " + app::format_bytes(m.size);
-        c.text(small_, LIST_X + 24, ry + 72, line, kText2, rx - (LIST_X + 24));
+        const app::UsageSums *week = week_of(v, m.name);
+        const bool used = week && week->gen >= 32 && week->gen_ms > 0;
+        if (r.has_check && !r.check.pass) {
+            rx = c.text_right(smallb_, rx, ry + 72, "\xE2\x9C\x97 Failed GPU check", kRed) - 20;
+        } else if (used || r.has_bench) {
+            rx = c.text_right(small_, rx, ry + 72, tps(used ? week->gen * 1000.0 / week->gen_ms : r.bench.tg_tps), kText2) - 8;
+            if (r.has_check) rx = c.text_right(smallb_, rx, ry + 72, "\xE2\x9C\x93", kGreen) - 20;
+            else rx -= 12;
+        } else if (r.has_check) {
+            rx = c.text_right(smallb_, rx, ry + 72, "\xE2\x9C\x93 Passed GPU check", kGreen) - 20;
+        }
+        std::string line;
+        if (m.copying) {
+            line = copied(m);
+        } else {
+            line = good_for(m);
+            if (m.params > 0) line += "  \xC2\xB7  " + app::format_params(m.params);
+            line += "  \xC2\xB7  " + app::format_bytes(m.size);
+        }
+        c.text(small_, LIST_X + 24, ry + 72, line, m.copying ? kAmber : kText2, rx - (LIST_X + 24));
     }
     c.unclip();
 }
@@ -437,46 +699,163 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
     };
     const bool busy = v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
                       v.status.phase == app::Status::Benchmarking || v.status.queued > 0;
-    const bool serving_any = !v.status.serving.empty();
 
-    if (it.kind == Item::Suggestion) {
-        const Suggestion &s = kSuggestions[it.index];
-        c.text(h2_, DX, 244, s.name, kText, DW);
-        c.text(small_, DX, 280, "Suggested  \xC2\xB7  not on your PS5 yet", kText2);
-        cell(DX, 306, "DOWNLOAD SIZE", s.size);
-        cell(col2, 306, "QUANTIZATION", s.quant);
-        cell(DX, 390, "GOOD FOR", s.role, DW);
-        label(c, smallb_, DX, 500, "TO ADD IT");
-        c.text(body_, DX, 540, "On your computer, in the TokenStation5 folder, run", kText2, DW);
-        c.round_rect((float)DX, 558, (float)DW, 50, 10, rgb(0x0A1024));
-        c.text(mono_, DX + 18, 590, std::string("scripts/ts5-ps5.sh fetch ") + s.key, kAccent, DW - 36);
-        c.text(body_, DX, 650, "or copy its .gguf over FTP to", kText2, DW);
-        c.text(mono_, DX, 684, v.folder, kAccent, DW);
-        c.text(small_, DX, 730, "It shows up here by itself once it's copied.", kMuted, DW);
-        buttons({{kGlyphCross, "Serve", false},
-                 {kGlyphSquare, "GPU check", false},
-                 {kGlyphTriangle, "Speed test", false},
-                 {kGlyphCircle, "Stop", serving_any && !busy}});
+    // MEMORY NEEDED, its label's baseline at y: a meter and a line.
+    auto memory = [&](int y, uint64_t need, const app::ModelInfo::Ctx &ctx, bool about) {
+        const bool fits = !v.gpu_memory || (ctx.n > 0 && need <= v.gpu_memory);
+        label(c, smallb_, DX, y, "MEMORY NEEDED");
+        c.round_rect((float)DX, (float)y + 16, (float)DW, 14, 7, kTrack);
+        if (v.gpu_memory) {
+            const float f = std::min(1.0f, (float)need / (float)v.gpu_memory);
+            c.round_rect((float)DX, (float)y + 16, std::max(14.0f, DW * f), 14, 7, fits ? kAccent : kRed);
+        }
+        std::string mem = app::format_bytes(need);
+        if (v.gpu_memory) mem += " of the GPU's " + app::format_bytes(v.gpu_memory);
+        // An estimate ("About"), so shorter: it has to fit the same line.
+        mem = fits ? (about ? "About " : "") + mem + "  \xC2\xB7  room for " + plain::count(ctx.n) +
+                         (about ? " tokens" : " tokens of conversation")
+                   : "Too big for this PS5's GPU: it needs " + mem;
+        c.text(small_, DX, y + 62, mem, fits ? kText2 : kRed, DW);
+    };
+
+    if (it.kind == Item::Search) {
+        const app::HfState &h = v.hf;
+        c.text(h2_, DX, 244, "Search Hugging Face", kText, DW);
+        int y = 300;
+        auto para = [&](const std::string &text, Color col) {
+            for (auto &line : wrap(small_, text, DW)) {
+                c.text(small_, DX, y, line, col);
+                y += 32;
+            }
+            y += 12;
+        };
+        para("Find a model on Hugging Face by its name, such as \"qwen coder\" or \"llama 3.2\". Only models this PS5 "
+             "can run, that fit in its memory with room for a real conversation, show up here, ready to download.",
+             kText2);
+        switch (h.phase) {
+            case app::HfState::Idle: break;
+            case app::HfState::Searching:
+                para("Looking for \"" + h.query + "\"" +
+                         (h.to_check ? ": " + std::to_string(h.checked) + " of " + std::to_string(h.to_check) +
+                                           " models looked at so far."
+                                     : "."),
+                     kText);
+                break;
+            case app::HfState::Done: {
+                std::string t = "Searched for \"" + h.query + "\": " +
+                                (h.results.empty() ? std::string("nothing that fits.")
+                                                   : std::to_string(h.results.size()) +
+                                                         (h.results.size() == 1 ? " file fits, below." : " files fit, below."));
+                if (h.too_big) t += " " + std::to_string(h.too_big) + (h.too_big == 1 ? " was" : " were") + " too big.";
+                if (h.cant_run)
+                    t += " " + std::to_string(h.cant_run) + " of a kind this PS5 can't run yet " +
+                         (h.cant_run == 1 ? "was" : "were") + " left out.";
+                para(t, kText);
+                break;
+            }
+            case app::HfState::Failed: para(h.problem, kRed); break;
+        }
+        text_glyph(c, body_, DX, y + 24, "Press", kGlyphCross,
+                   h.phase == app::HfState::Idle ? "to type what to look for." : "to search again.", kText);
+        return;
+    }
+    if (it.kind == Item::Catalog) {
+        using D = app::Download;
+        const app::CatalogEntry &e = app::catalog_at(it.index);
+        const app::Download d = download_of(v, e.key);
+        c.text(h2_, DX, 244, e.name, kText, DW);
+        const char *state = d.phase == D::None      ? "Not on your PS5 yet"
+                            : d.phase == D::Queued  ? "Waiting to download"
+                            : d.phase == D::Running ? (d.held ? "Waiting while a model loads" : "Downloading")
+                            : d.phase == D::Retrying ? "Waiting to try again"
+                                                     : "Stopped";
+        c.text(small_, DX, 278, state, kText2, DW);
+        cell(DX, 306, "GOOD FOR", e.good_for);
+        cell(col2, 306, "DOWNLOAD SIZE", app::format_bytes(d.total ? d.total : e.bytes));
+        // The estimate the model will show once it's here, from the header
+        // fields the catalog keeps.
+        const app::ModelInfo est = app::estimate(e);
+        const app::ModelInfo::Ctx ctx = est.serve_ctx(v.n_ctx, v.gpu_memory);
+        memory(414, est.memory_for(ctx), ctx, true);
+
+        label(c, smallb_, DX, 526, "DOWNLOAD");
+        if (d.phase == D::None) {
+            text_glyph(c, body_, DX, 570, "Press", kGlyphCross, "to download it to your PS5.", kText);
+            c.text(small_, DX, 610, "It's ready to use when the download finishes.", kText2, DW);
+            if (v.have_free)
+                c.text(small_, DX, 644, "Free space on your PS5: " + app::format_bytes(v.free_bytes), kMuted, DW);
+        } else {
+            c.round_rect((float)DX, 542, (float)DW, 14, 7, kTrack);
+            const float f = d.total ? std::min(1.0f, (float)d.done / (float)d.total) : 0;
+            const Color mc = d.phase == D::Failed ? kRed : d.phase == D::Running && !d.held ? kAccent : kText2;
+            if (f > 0) c.round_rect((float)DX, 542, std::max(14.0f, DW * f), 14, 7, mc);
+            c.text(small_, DX, 590, std::to_string(app::percent(d)) + "%  \xC2\xB7  " + app::progress_text(d, true), kText2, DW);
+            int y = 632;
+            auto para = [&](const std::string &text, Color col) {
+                for (auto &line : wrap(small_, text, DW)) {
+                    if (y > 740) break;
+                    c.text(small_, DX, y, line, col);
+                    y += 32;
+                }
+            };
+            const std::string other = downloading(v);
+            switch (d.phase) {
+                case D::Running:
+                    para(d.held ? "It waits while a model loads, then goes on by itself."
+                                : "It's ready to use when the download finishes.",
+                         kText2);
+                    break;
+                case D::Queued:
+                    para(other.empty() ? std::string("It starts in a moment.")
+                                       : "It starts once " + other + " has downloaded.",
+                         kText2);
+                    break;
+                case D::Retrying:
+                    para(d.problem + " Trying again in " +
+                             std::to_string(std::max(1, (int)std::ceil(d.retry_at - v.now))) + " s.",
+                         kAmber);
+                    break;
+                case D::Stopped:
+                    text_glyph(c, small_, DX, y, "Stopped. Press", kGlyphCross, "to go on.", kText2);
+                    text_glyph(c, small_, DX, y + 36, "Press", kGlyphSquare, "to delete the part downloaded.", kMuted);
+                    break;
+                case D::Failed:
+                    para(d.problem, kRed);
+                    if (d.done > 0 && y <= 740)
+                        text_glyph(c, small_, DX, y + 4, "Press", kGlyphSquare, "to delete the part downloaded.", kMuted);
+                    break;
+                case D::None: break;
+            }
+        }
+        buttons({{kGlyphCross, d.active() ? "Stop" : d.done > 0 ? "Go on" : "Download", true},
+                 {kGlyphSquare, "Delete part", !d.active() && d.done > 0},
+                 {kGlyphCircle, "Home", true}});
         return;
     }
     if (it.kind != Item::Model) return;
     const app::ModelInfo &m = v.models[it.index];
     const app::Results r = v.results.count(m.file) ? v.results.at(m.file) : app::Results{};
-    c.text(h2_, DX, 244, m.name, kText, DW);
-    c.text(mono_, DX, 278, m.file, kText2, DW);
-    cell(DX, 306, "ARCHITECTURE", arch_name(m.arch) + (m.layers ? "  \xC2\xB7  " + std::to_string(m.layers) + " layers" : ""));
-    cell(col2, 306, "PARAMETERS", m.params > 0 ? app::format_params(m.params) : "\xE2\x80\x94");
-    cell(DX, 390, "QUANTIZATION", m.quant.empty() ? "\xE2\x80\x94" : m.quant);
+    c.text(h2_, DX, 244, shown_name(v.models, m), kText, DW);
+    c.text(small_, DX, 278, plain::capital("added " + ago(m.mtime, v.wall)), kText2, DW);
+    cell(DX, 306, "GOOD FOR", good_for(m));
+    cell(col2, 306, "SIZE", m.params > 0 ? plain::parameters(m.params) : "\xE2\x80\x94");
+    cell(DX, 390, "PRECISION", m.quant.empty() ? "\xE2\x80\x94" : plain::quant_detail(m.quant));
     cell(col2, 390, "FILE SIZE", app::format_bytes(m.size));
 
-    if (!m.runnable) {
-        label(c, smallb_, DX, 500, "CAN'T RUN IT");
+    if (m.copying || !m.runnable) {
+        // Why it can't run, in plain words; the engine's own words are in the
+        // log (the title logs each model it can't open).
+        label(c, smallb_, DX, 500, m.copying ? "COPYING" : "CAN'T RUN IT");
+        const std::string why = m.copying      ? copied(m) + ". It's ready when the copy finishes."
+                                : m.incomplete ? "This file is incomplete. Copy or download it again."
+                                               : plain::sentence(plain::reason(m.error));
         int y = 540;
-        for (auto &line : wrap(body_, "TokenStation5 can't run this model: " + m.error + ".", DW)) {
-            if (y > 740) break;
-            c.text(body_, DX, y, line, kRed);
+        for (auto &line : wrap(body_, why, DW)) {
+            if (y > 700) break;
+            c.text(body_, DX, y, line, m.copying ? kAmber : kRed);
             y += 36;
         }
+        if (!m.copying) text_glyph(c, small_, DX, y + 12, "Press", kGlyphSquare, "for the details, in Logs.", kText2);
     } else {
         const bool is_serving = m.path == v.status.serving_path;
         // Serving: its context. Else what serving it would get: the args'
@@ -484,51 +863,36 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
         const app::ModelInfo::Ctx ctx = is_serving && v.status.serving_ctx
                                             ? app::ModelInfo::Ctx{v.status.serving_ctx, v.status.serving_kv8}
                                             : m.serve_ctx(v.n_ctx, v.gpu_memory);
-        const uint64_t need = m.memory_for(ctx);
-        const bool fits = !v.gpu_memory || (ctx.n > 0 && need <= v.gpu_memory);
-        char cap[64];
-        snprintf(cap, sizeof cap, "GPU MEMORY AT %dK CONTEXT%s", ctx.n / 1024, ctx.kv8 ? ", 8-BIT CACHE" : "");
-        label(c, smallb_, DX, 500, cap);
-        c.round_rect((float)DX, 516, (float)DW, 14, 7, rgb(0x1B2650));
-        if (v.gpu_memory) {
-            const float f = std::min(1.0f, (float)need / (float)v.gpu_memory);
-            c.round_rect((float)DX, 516, std::max(14.0f, DW * f), 14, 7, fits ? kAccent : kRed);
-        }
-        std::string mem = "Needs " + app::format_bytes(need);
-        if (v.gpu_memory) mem += " of the GPU's " + app::format_bytes(v.gpu_memory);
-        if (!fits) mem += ": too big to load";
-        c.text(small_, DX, 562, mem, fits ? kText2 : kRed, DW);
+        memory(500, m.memory_for(ctx), ctx, false);
 
         label(c, smallb_, DX, 612, "GPU CHECK");
         if (r.has_check) {
-            char b[160];
-            snprintf(b, sizeof b, "  \xC2\xB7  top token %d/%d  \xC2\xB7  max diff %.2f%%  \xC2\xB7  ", r.check.same_top,
-                     r.check.n, r.check.rel * 100);
-            const int w = c.text(bodyb_, DX, 648, r.check.pass ? "\xE2\x9C\x93 Passed" : "\xE2\x9C\x97 Failed",
+            const int w = c.text(bodyb_, DX, 648, r.check.pass ? "\xE2\x9C\x93 Passed: " : "\xE2\x9C\x97 Failed: ",
                                  r.check.pass ? kGreen : kRed);
-            c.text(body_, DX + w, 648, b + ago(r.check.when, v.wall), kText2, DW - w);
+            text_with_time(c, body_, DX + w, 648,
+                           r.check.pass ? "same answers as the CPU" : "its answers don't match the CPU's",
+                           ago(r.check.when, v.wall), kText2, DW - w);
         } else {
-            text_glyph(c, body_, DX, 648, "Not run yet. Press", kGlyphSquare, "to compare the GPU with the CPU.", kMuted);
+            text_glyph(c, body_, DX, 648, "Not run yet. Press", kGlyphSquare, "to check its answers on the PS5.", kMuted);
         }
         label(c, smallb_, DX, 696, "SPEED");
         if (r.has_bench) {
-            c.text(body_, DX, 732,
-                   "Prompt " + tps(r.bench.pp_tps) + "  \xC2\xB7  generation " + tps(r.bench.tg_tps) + "  \xC2\xB7  " +
-                       ago(r.bench.when, v.wall),
-                   kText, DW);
+            char speeds[96];
+            snprintf(speeds, sizeof speeds, "Writes %.0f, reads %.0f tokens a second", r.bench.tg_tps, r.bench.pp_tps);
+            text_with_time(c, body_, DX, 732, speeds, ago(r.bench.when, v.wall), kText, DW);
         } else {
-            c.text(body_, DX, 732, "Not measured yet.", kMuted, DW);
+            text_glyph(c, body_, DX, 732, "Not measured yet. Press", kGlyphTriangle, "to time it.", kMuted);
         }
     }
     const bool can = m.runnable && !busy;
     const bool is_serving = m.path == v.status.serving_path;
-    buttons({{kGlyphCross, is_serving ? "Serving" : "Serve", can && !is_serving},
-             {kGlyphSquare, "GPU check", can},
+    buttons({{kGlyphCross, is_serving ? "Stop" : "Start", can},
+             cant_run(m) ? Btn{kGlyphSquare, "Details", true} : Btn{kGlyphSquare, "GPU check", can},
              {kGlyphTriangle, "Speed test", can},
-             {kGlyphCircle, "Stop", serving_any && !busy}});
+             {kGlyphCircle, "Home", true}});
 }
 
-void Dashboard::draw_activity(Canvas &c, const View &v) {
+void Dashboard::draw_activity(Canvas &c, const View &v, const Item *sel) {
     const auto &st = v.status;
     const int x = LX + 32;
     std::string line;
@@ -547,7 +911,7 @@ void Dashboard::draw_activity(Canvas &c, const View &v) {
             break;
         case app::Status::Serving:
             spin = false;
-            line = "Serving " + name_of(v, st.serving) + " to your network";
+            line = name_of(v, st.serving) + (v.on_network ? " is ready for apps on your network" : " is ready");
             col = kGreen;
             break;
         case app::Status::Idle:
@@ -559,7 +923,8 @@ void Dashboard::draw_activity(Canvas &c, const View &v) {
     if (spin) spinner(c, (float)x + 12, AY + 42, v.now, kAccent);
     else c.circle((float)x + 12, AY + 42, 7, col);
     if (st.phase == app::Status::Idle)
-        text_glyph(c, bodyb_, tx, AY + 52, "Not serving. Choose a model and press", kGlyphCross, "to serve it.", col);
+        text_glyph(c, bodyb_, tx, AY + 52, "Nothing running. Choose a model and press", kGlyphCross,
+                   v.models.empty() ? "to download it." : "to start it.", col);
     else
         c.text(bodyb_, tx, AY + 52, line, col, 1080 - tx);
 
@@ -568,130 +933,289 @@ void Dashboard::draw_activity(Canvas &c, const View &v) {
     for (int i = (int)v.events.size() - 1, shown = 0; i >= 0 && shown < 2; i--, shown++) {
         const app::Event &e = v.events[i];
         const int64_t secs = (int64_t)(v.now - e.when);
-        c.text(small_, tx, y, e.text + "  \xC2\xB7  " + ago(0, secs), e.bad ? kRed : kText2, 1080 - tx);
+        text_with_time(c, small_, tx, y, e.text, ago(0, secs), e.bad ? kRed : kText2, 1080 - tx);
         y += 30;
     }
 
-    const int ax = 1180;
-    label(c, smallb_, ax, AY + 40, "API REQUESTS");
-    c.text(bodyb_, ax, AY + 78, std::to_string(v.api.requests) + (v.api.requests == 1 ? " request" : " requests"), kText);
-    if (v.api.generating) {
-        const float pulse = 0.5f + 0.5f * std::sin((float)v.now * 6);
-        c.circle(ax + 8, AY + 104, 6, alpha(kAccent, 120 + (unsigned)(pulse * 135)));
-        c.text(small_, ax + 24, AY + 112, "Answering a request\xE2\x80\xA6", kAccent);
-    } else if (v.api.requests > 0) {
-        const auto &g = v.api.last;
-        std::string s = "Last reply: ";
-        if (g.prompt_evaluated > 0 && g.prompt_ms > 0) s += "prompt " + tps(g.prompt_evaluated * 1000.0 / g.prompt_ms) + "  \xC2\xB7  ";
-        if (g.gen_tokens > 0 && g.gen_ms > 0) s += "generation " + tps(g.gen_tokens * 1000.0 / g.gen_ms);
-        c.text(small_, ax, AY + 112, s, kText2, 1848 - 32 - ax);
+    const int ax = 1180, aw = 1848 - 32 - ax;
+    // Downloading: the room there is for it.
+    if (sel && sel->kind == Item::Catalog) {
+        if (!v.have_free) return;
+        const app::CatalogEntry &e = app::catalog_at(sel->index);
+        const app::Download d = download_of(v, e.key);
+        const uint64_t total = d.total ? d.total : e.bytes, rest = total > d.done ? total - d.done : 0;
+        label(c, smallb_, ax, AY + 40, "STORAGE");
+        c.text(bodyb_, ax, AY + 78, app::format_bytes(v.free_bytes) + " free", kText, aw);
+        if (rest > 0)
+            c.text(small_, ax, AY + 112,
+                   v.free_bytes > rest ? "About " + app::format_bytes(v.free_bytes - rest) + " once it's downloaded"
+                                       : std::string("Not enough for this download"),
+                   v.free_bytes > rest ? kText2 : kRed, aw);
+        return;
+    }
+    // The chosen model's use over the last 7 days (Home has the rest).
+    if (!sel || sel->kind != Item::Model) return;
+    const app::ModelInfo &m = v.models[sel->index];
+    label(c, smallb_, ax, AY + 40, "IN USE, LAST 7 DAYS");
+    const app::UsageSums *week = week_of(v, m.name);
+    if (!v.usage || !v.usage->ready) {
+        c.text(small_, ax, AY + 78, "Reading the usage history\xE2\x80\xA6", kMuted, aw);
+    } else if (!week || !week->requests) {
+        c.text(bodyb_, ax, AY + 78, "Not used", kText2, aw);
+        c.text(small_, ax, AY + 112, "No requests to it in the last 7 days", kMuted, aw);
     } else {
-        c.text(small_, ax, AY + 112, "None yet", kMuted);
+        c.text(bodyb_, ax, AY + 78,
+               plain::count(week->requests) + (week->requests == 1 ? " request" : " requests") + "  \xC2\xB7  " +
+                   plain::count(week->prompt + week->gen) + " tokens",
+               kText, aw);
+        const std::string s = week->gen >= 32 && week->gen_ms > 0
+                                  ? "Wrote " + tps(week->gen * 1000.0 / week->gen_ms) + " on average"
+                                  : std::string("No replies written");
+        c.text(small_, ax, AY + 112, s, kText2, aw);
     }
 }
 
-void Dashboard::draw_footer(Canvas &c) {
-    int x = LX;
-    const int y = 1046;
-    x += key_cap(c, smallb_, x, y, "L1") + 12;
-    x += c.text(small_, x, y, "Chat", kText2) + 40;
-    x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
-    struct {
-        PadGlyph g;
-        const char *text;
-    } hints[] = {{kGlyphCross, "Serve"}, {kGlyphSquare, "GPU check"}, {kGlyphTriangle, "Speed test"}, {kGlyphCircle, "Stop serving"}};
-    for (auto &h : hints) {
-        glyph(c, (float)x + 16, (float)y - 8, h.g);
-        x += 40 + c.text(small_, x + 40, y, h.text, kText2) + 36;
-    }
+void Dashboard::draw_close_hint(Canvas &c, int x, int y) {
     const int ow = Canvas::measure(smallb_, "OPTIONS") + 28;
     c.round_rect((float)x, (float)y - 25, (float)ow, 34, 17, rgb(0x1E2850));
     c.text(smallb_, x + 14, y - 1, "OPTIONS", kText2);
     c.text(small_, x + ow + 12, y, "Close", kText2);
+}
+
+void Dashboard::draw_home_footer(Canvas &c, const View &v) {
+    int x = LX;
+    const int y = 1046;
+    x += key_cap(c, smallb_, x, y, "L1") + 12;
+    x += c.text(small_, x, y, page_name(next(Home)), kText2) + 40;
+    x += c.text(small_, x, y, "\xE2\x86\x90\xE2\x86\x92  24 hours, 7 days or 30 days", kText2) + 40;
+    glyph(c, (float)x + 16, (float)y - 8, kGlyphCross);
+    x += 40 + c.text(small_, x + 40, y, v.status.phase == app::Status::Serving ? "Chat" : "Models", kText2) + 36;
+    if (home_problems(v)) {
+        glyph(c, (float)x + 16, (float)y - 8, kGlyphSquare);
+        x += 40 + c.text(small_, x + 40, y, "Why some failed", kText2) + 36;
+    }
+    draw_close_hint(c, x, y);
+}
+
+void Dashboard::draw_logs_footer(Canvas &c) {
+    int x = LX;
+    const int y = 1046;
+    x += key_cap(c, smallb_, x, y, "L1") + 12;
+    x += c.text(small_, x, y, page_name(next(Logs)), kText2) + 40;
+    x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Scroll", kText2) + 40;
+    x += c.text(small_, x, y, "\xE2\x86\x90\xE2\x86\x92  A page", kText2) + 40;
+    struct {
+        PadGlyph g;
+        const char *text;
+    } hints[] = {{kGlyphSquare, logs_.problems() ? "Everything" : "Problems only"},
+                 {kGlyphTriangle, logs_.last_run() ? "This run" : "The run before"},
+                 {kGlyphCircle, "Home"}};
+    for (auto &h : hints) {
+        glyph(c, (float)x + 16, (float)y - 8, h.g);
+        x += 40 + c.text(small_, x + 40, y, h.text, kText2) + 36;
+    }
+    draw_close_hint(c, x, y);
+}
+
+void Dashboard::draw_footer(Canvas &c, const View &v, const Item *sel) {
+    int x = LX;
+    const int y = 1046;
+    x += key_cap(c, smallb_, x, y, "L1") + 12;
+    x += c.text(small_, x, y, page_name(next(Models)), kText2) + 40;
+    x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
+    struct Hint {
+        PadGlyph g;
+        std::string text;
+        bool on;
+        bool right = false;  // right on the pad, not a button
+    };
+    std::vector<Hint> hints;
+    if (sel && sel->kind == Item::Search) {
+        hints = {{kGlyphCross, "Search", true}};
+    } else if (sel && sel->kind == Item::Catalog) {
+        const app::Download d = download_of(v, app::catalog_at(sel->index).key);
+        hints = {{kGlyphCross, d.active() ? "Stop the download" : d.done > 0 ? "Go on" : "Download", true},
+                 {kGlyphSquare, "Delete part", !d.active() && d.done > 0}};
+    } else {
+        const app::ModelInfo *m = sel && sel->kind == Item::Model ? &v.models[sel->index] : nullptr;
+        hints = {{kGlyphCross, "Start or stop", true},
+                 {kGlyphSquare, m && cant_run(*m) ? "Details" : "GPU check", true},
+                 {kGlyphTriangle, "Speed test", true},
+                 {kGlyphCross, "\xE2\x86\x92  Remove", m && removable(v, *m), true}};
+    }
+    hints.push_back({kGlyphCircle, "Home", true});
+    for (auto &h : hints) {
+        if (h.right) {
+            x += c.text(small_, x, y, h.text, h.on ? kText2 : kMuted) + 40;
+            continue;
+        }
+        glyph(c, (float)x + 16, (float)y - 8, h.g, h.on);
+        x += 40 + c.text(small_, x + 40, y, h.text, h.on ? kText2 : kMuted) + 36;
+    }
+    draw_close_hint(c, x, y);
 }
 
 void Dashboard::draw_chat_footer(Canvas &c, const View &v) {
     int x = LX;
     const int y = 1046;
     x += key_cap(c, smallb_, x, y, "L1") + 12;
-    x += c.text(small_, x, y, "Settings", kText2) + 40;
+    x += c.text(small_, x, y, page_name(next(Chat)), kText2) + 40;
+    if (chat_.list_focused()) {
+        x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
+        x += c.text(small_, x, y, "\xE2\x86\x92  Back to the chat", kText2) + 40;
+        struct {
+            PadGlyph g;
+            const char *text;
+            bool on;
+        } hints[] = {{kGlyphCross, "Open", true},
+                     {kGlyphSquare, v.chats.query.empty() ? "Remove a chat" : "Remove, or clear the search",
+                      !v.chats.chats.empty() || !v.chats.query.empty()},
+                     {kGlyphCircle, "Home", true}};
+        for (auto &h : hints) {
+            glyph(c, (float)x + 16, (float)y - 8, h.g, h.on);
+            x += 40 + c.text(small_, x + 40, y, h.text, h.on ? kText2 : kMuted) + 36;
+        }
+        draw_close_hint(c, x, y);
+        return;
+    }
+    x += c.text(small_, x, y, "\xE2\x86\x90  Chats", kText2) + 40;
     const bool talk = !v.voice.model.empty();
     x += key_cap(c, smallb_, x, y, "R1", talk) + 12;
     x += c.text(small_, x, y, "Hold to talk", talk ? kText2 : kMuted) + 40;
     x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Scroll", kText2) + 40;
+    const bool choose = nothing_running(v);
     struct {
         PadGlyph g;
         const char *text;
         bool on;
-    } hints[] = {{kGlyphCross, "Type", can_type(v)},
+    } hints[] = {{kGlyphCross, choose ? "Choose a model" : "Type", choose || can_type(v)},
                  {kGlyphTriangle, v.speaking && !v.chat.busy ? "Stop speaking" : "Stop the reply",
                   v.chat.busy || v.speaking},
                  {kGlyphSquare, "New chat", !v.chat.turns.empty()},
-                 {kGlyphCircle, "Back", true}};
+                 {kGlyphCircle, "Home", true}};
     for (auto &h : hints) {
         glyph(c, (float)x + 16, (float)y - 8, h.g, h.on);
         x += 40 + c.text(small_, x + 40, y, h.text, h.on ? kText2 : kMuted) + 36;
     }
-    const int ow = Canvas::measure(smallb_, "OPTIONS") + 28;
-    c.round_rect((float)x, (float)y - 25, (float)ow, 34, 17, rgb(0x1E2850));
-    c.text(smallb_, x + 14, y - 1, "OPTIONS", kText2);
-    c.text(small_, x + ow + 12, y, "Close", kText2);
+    draw_close_hint(c, x, y);
 }
 
-void Dashboard::draw_settings_footer(Canvas &c) {
+void Dashboard::draw_settings_footer(Canvas &c, const View &v) {
     int x = LX;
     const int y = 1046;
     x += key_cap(c, smallb_, x, y, "L1") + 12;
-    x += c.text(small_, x, y, "Models", kText2) + 40;
-    x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
-    x += c.text(small_, x, y, "\xE2\x86\x90\xE2\x86\x92  Change", kText2) + 40;
+    x += c.text(small_, x, y, page_name(next(Settings)), kText2) + 40;
+    const SettingsInfo si = settings_info(v);
+    if (!settings_.guide_open()) x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
+    const std::string arrows = settings_.arrows_do(si);
+    if (!arrows.empty()) x += c.text(small_, x, y, arrows, kText2) + 40;
+    const std::string cross = settings_.cross_does(si), square = settings_.square_does(si);
     struct {
         PadGlyph g;
-        const char *text;
-    } hints[] = {{kGlyphSquare, "Default"}, {kGlyphCircle, "Back"}};
+        std::string text;
+        bool on;
+    } hints[] = {{kGlyphCross, cross.empty() ? std::string("Next choice") : cross, !cross.empty()},
+                 {kGlyphSquare, square.empty() ? std::string("Default") : square, !square.empty()},
+                 {kGlyphCircle, "Home", true}};
     for (auto &h : hints) {
-        glyph(c, (float)x + 16, (float)y - 8, h.g);
+        if (!h.on) continue;  // nothing to do on this row: not offered at all
+        glyph(c, (float)x + 16, (float)y - 8, h.g, h.on);
         x += 40 + c.text(small_, x + 40, y, h.text, kText2) + 36;
     }
-    const int ow = Canvas::measure(smallb_, "OPTIONS") + 28;
-    c.round_rect((float)x, (float)y - 25, (float)ow, 34, 17, rgb(0x1E2850));
-    c.text(smallb_, x + 14, y - 1, "OPTIONS", kText2);
-    c.text(small_, x + ow + 12, y, "Close", kText2);
+    draw_close_hint(c, x, y);
 }
 
 void Dashboard::draw_confirm(Canvas &c) {
+    const bool stop = confirm_ == ConfirmStop, rm = confirm_ == ConfirmRemove;
     c.fill(0, 0, W, H, alpha(rgb(0x000000), 170));
-    const int w = 760, h = 300, x = (W - w) / 2, y = (H - h) / 2;
+    const int w = 760, x = (W - w) / 2;
+    const std::string head = stop ? "Stop " + confirm_name_ + "?"
+                             : rm ? "Remove " + confirm_name_ + " from your PS5?"
+                                  : std::string("Close TokenStation5?");
+    const std::string body = stop ? "Apps can't use TokenStation5 until you start a model again."
+                             : rm ? "It frees " + app::format_bytes(confirm_bytes_) + ". You can download it again."
+                                  : "Apps on your network can't use TokenStation5 until you open it again.";
+    const auto head_lines = wrap(h2_, head, w - 96), body_lines = wrap(body_, body, w - 96);
+    const int h = 300 + 44 * ((int)head_lines.size() - 1) + 34 * std::max(0, (int)body_lines.size() - 2);
+    const int y = (H - h) / 2;
     c.round_rect((float)x, (float)y, (float)w, (float)h, 24, rgb(0x111A38));
     c.round_rect_line((float)x, (float)y, (float)w, (float)h, 24, 2, rgb(0x2A3A70));
-    c.text(h2_, x + 48, y + 80, "Close TokenStation5?", kText);
-    c.text(body_, x + 48, y + 130, "The API stops until you open the app again.", kText2, w - 96);
-    const int bw = 220, by = y + 196;
+    int ty = y + 80;
+    for (auto &line : head_lines) {
+        c.text(h2_, x + 48, ty, line, kText, w - 96);
+        ty += 44;
+    }
+    for (auto &line : body_lines) {
+        c.text(body_, x + 48, ty, line, kText2);
+        ty += 34;
+    }
+    const int bw = 220, by = y + h - 104;
     for (int i = 0; i < 2; i++) {
         const int bx = x + 48 + i * (bw + 16);
         c.round_rect((float)bx, (float)by, (float)bw, 60, 14, rgb(0x18244C));
         glyph(c, (float)bx + 32, (float)by + 30, i == 0 ? kGlyphCross : kGlyphCircle);
-        c.text(bodyb_, bx + 60, by + 40, i == 0 ? "Close" : "Cancel", kText);
+        c.text(bodyb_, bx + 60, by + 40,
+               i == 0 ? (stop ? "Stop" : rm ? "Remove" : "Close") : stop || rm ? "Keep it" : "Cancel", kText);
     }
+}
+
+HomeInfo Dashboard::home_info(const View &v) const {
+    HomeInfo h;
+    h.usage = v.usage;
+    h.live = v.live;
+    h.reading = v.live_reading;
+    h.status = v.status;
+    if (!v.status.serving.empty()) h.running = name_of(v, v.status.serving);
+    if (!v.status.job_model.empty()) h.job = name_of(v, v.status.job_model);
+    h.api = v.api;
+    h.own_ip = v.own_ip;
+    h.url = v.url;
+    h.on_network = v.on_network;
+    h.now = v.now;
+    for (const auto &[key, d] : v.downloads)
+        if (d.phase == app::Download::Running)
+            if (const app::CatalogEntry *e = app::Downloads::find(key))
+                h.download = std::string("Downloading ") + e->name + " \xC2\xB7 " + std::to_string(app::percent(d)) + "%";
+    return h;
 }
 
 void Dashboard::draw(Canvas &c, const View &v) {
     draw_background(c);
     draw_header(c, v);
+    if (page_ == Home) {
+        home_.draw(c, home_info(v));
+        draw_home_footer(c, v);
+        if (confirm_ != NoConfirm) draw_confirm(c);
+        return;
+    }
+    if (page_ == Logs) {
+        logs_.draw(c, LX, PT, 1848 - LX, SB - PT, v.version, v.now);
+        draw_logs_footer(c);
+        if (confirm_ != NoConfirm) draw_confirm(c);
+        return;
+    }
     if (page_ == Settings) {
         const SettingsInfo info = settings_info(v);
         settings_.draw(c, info, LX, PT, LW, SB - PT);
         settings_.draw_details(c, info, RX, PT, RW, SB - PT);
-        draw_settings_footer(c);
-        if (confirm_close_) draw_confirm(c);
+        draw_settings_footer(c, v);
+        if (confirm_ != NoConfirm) draw_confirm(c);
         return;
     }
     if (page_ == Chat) {
-        chat_.draw(c, v.chat, CX, PT, CW, CB - PT, v.now, [&](const std::string &f) { return name_of(v, f); },
+        // The Library's name, or "" for a model no longer on the PS5 (the
+        // page keeps the name it saw).
+        auto library_name = [&](const std::string &f) {
+            for (const auto &m : v.models)
+                if (m.file == f) return m.name;
+            return std::string();
+        };
+        chat_.draw_list(c, v.chats, LX, PT, CLW, AY + AH - PT, v.now);
+        chat_.draw(c, v.chat, CX, PT, CW, CB - PT, v.now, library_name,
                    v.status.phase == app::Status::Serving ? v.status.serving : std::string(), !v.voice.model.empty());
-        chat_.draw_input(c, v.chat, v.voice, v.now, CX, IY, CW, IH);
+        chat_.draw_input(c, v.chat, v.voice, v.now, CX, IY, CW, IH, v.no_voice);
         draw_chat_footer(c, v);
-        if (confirm_close_) draw_confirm(c);
+        if (confirm_ != NoConfirm) draw_confirm(c);
         return;
     }
     const auto list = items(v);
@@ -702,9 +1226,9 @@ void Dashboard::draw(Canvas &c, const View &v) {
     }
     draw_list(c, v, list, sel);
     if (sel >= 0) draw_details(c, v, list[sel]);
-    draw_activity(c, v);
-    draw_footer(c);
-    if (confirm_close_) draw_confirm(c);
+    draw_activity(c, v, sel >= 0 ? &list[sel] : nullptr);
+    draw_footer(c, v, sel >= 0 ? &list[sel] : nullptr);
+    if (confirm_ != NoConfirm) draw_confirm(c);
 }
 
 }  // namespace ui

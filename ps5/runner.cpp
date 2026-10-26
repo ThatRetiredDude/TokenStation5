@@ -1,20 +1,29 @@
 #include "runner.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <exception>
 #include <thread>
 
+#include <sys/stat.h>
 #include <sys/types.h>
 
 #include "backend.h"
 #include "checks.h"
 #include "engine.h"
 #include "model.h"
+#include "net.h"
 #include "tokenizer.h"
+
+#include "downloads.h"
+#include "plain.h"
+#include "settings.h"
 
 extern "C" {
 size_t sceKernelGetDirectMemorySize(void);
@@ -41,7 +50,7 @@ public:
             const char *was = getenv(name.c_str());
             saved_.push_back({name, was ? std::string("=") + was : std::string()});
             setenv(name.c_str(), kv.substr(kv.find('=') + 1).c_str(), 1);
-            printf("ts5-title: for this job: %s\n", kv.c_str());
+            printf("ts5-title: for this job: %s\n", secret_setting(name) ? (name + "=(set)").c_str() : kv.c_str());
         }
     }
     ~EnvScope() {
@@ -135,6 +144,18 @@ void Runner::set_step(const std::string &step) {
     version_++;
 }
 
+void Runner::fail(const std::string &raw, const std::string &said) {
+    std::lock_guard<std::mutex> lk(mu_);
+    status_.error = raw;
+    status_.said = said;
+}
+
+std::string Runner::name_for(const std::string &path) {
+    std::lock_guard<std::mutex> lk(lib_mutex_);
+    const ModelInfo *m = lib_.find(path);
+    return m ? m->name : plain::model_name(base(path));
+}
+
 void Runner::event(const std::string &text, bool bad) {
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -154,6 +175,7 @@ void Runner::loop() {
             jobs_.pop_front();
             status_.queued = (int)jobs_.size();
             status_.error.clear();
+            status_.said.clear();
             status_.job_model = base(job.path);
             status_.job_started = now_s();
             status_.step.clear();
@@ -163,20 +185,23 @@ void Runner::loop() {
             run(job);
         } catch (const std::exception &e) {
             // A title must not end on an exception; the job fails instead.
-            std::lock_guard<std::mutex> lk(mu_);
-            status_.error = e.what();
+            fail(e.what(), plain::sentence(plain::reason(e.what())));
         }
-        std::string error;
+        std::string error, said;
         {
             std::lock_guard<std::mutex> lk(mu_);
             status_.phase = serving_ ? Status::Serving : Status::Idle;
             status_.step.clear();
             error = status_.error;
+            said = status_.said;
         }
         if (!error.empty()) {
+            // The engine's words in the log (scripts/ts5-ps5.sh looks for
+            // them there); plain ones on the screen.
             printf("ts5-title: %s\n", error.c_str());
-            event(error, true);
-            notify_("TokenStation5: " + error);
+            if (said.empty()) said = error;  // a job that set only error, in plain words already
+            event(said + plain::kDetails, true);
+            notify_("TokenStation5: " + said + plain::kDetails);
         }
         version_++;
     }
@@ -195,8 +220,9 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
         l->model.gguf.kv.erase(k);
     l->name = l->model.gguf.get_str("general.name", l->file);
     const ts5::HParams &hp = l->model.hp;
-    printf("ts5: %s: %s, %d layers, embd %d, ff %d, heads %d/%d, head_dim %d, vocab %d\n", l->file.c_str(),
-           hp.arch.c_str(), hp.n_layer, hp.n_embd, hp.n_ff, hp.n_head, hp.n_head_kv, hp.head_dim, hp.n_vocab);
+    printf("ts5: %s: %s, %d layers, embd %d, ff %d, heads %d/%d, head_dim %d, vocab %d, trained on %d tokens%s\n",
+           l->file.c_str(), hp.arch.c_str(), hp.n_layer, hp.n_embd, hp.n_ff, hp.n_head, hp.n_head_kv, hp.head_dim,
+           hp.n_vocab, hp.n_ctx_train, l->model.rope_freqs ? ", scaled RoPE (Llama 3.1)" : "");
     // A draft model must fit beside the main one, so an auto-fit context
     // leaves its budget free: weights and activations plus a 32k f16 cache.
     const char *dp = drafter ? getenv("TS5_DRAFT_MODEL") : nullptr;
@@ -254,21 +280,21 @@ void Runner::unload() {
 bool Runner::serve(const std::string &path, int n_ctx) {
     if (serving_ && serving_->path == path && serving_->asked_ctx == n_ctx) return true;
     unload();
-    const std::string file = base(path);
+    const std::string file = base(path), name = name_for(path);
     {
         std::lock_guard<std::mutex> lk(mu_);
         status_.phase = Status::Loading;
         status_.job_model = file;
     }
     set_step("loading " + file);
-    notify_("TokenStation5: loading " + file);
+    notify_("TokenStation5: loading " + name);
+    // An app's request meanwhile gets a 503 that starts with "loading" (chat.cpp).
     server_.set_engine(nullptr, "", "loading " + file);
     std::string err;
     serving_ = load(path, n_ctx, err, true);
     if (!serving_) {
         server_.set_engine(nullptr, "", "no model");
-        std::lock_guard<std::mutex> lk(mu_);
-        status_.error = "couldn't load " + file + ": " + err;
+        fail("couldn't load " + file + ": " + err, "Couldn't start " + name + ": " + plain::reason(err) + ".");
         return false;
     }
     server_.set_engine(serving_->engine.get(), file);
@@ -281,15 +307,17 @@ bool Runner::serve(const std::string &path, int n_ctx) {
         status_.serving_kv8 = serving_->kv8;
         status_.phase = Status::Serving;
     }
-    event("Serving " + serving_->name);
-    notify_("TokenStation5: " + file + " ready at " + url_());
+    // No address while the console isn't on a network: then just "is ready".
+    const std::string url = url_();
+    event(name + " is ready");
+    notify_("TokenStation5: " + name + " is ready." + (url.empty() ? std::string() : " Apps can use it at " + url));
     return true;
 }
 
 void Runner::run(const Job &job) {
     const std::string file = base(job.path);
     if (job.kind == Job::Stop) {
-        if (serving_) event("Stopped serving " + serving_->name);
+        if (serving_) event("Stopped " + name_for(serving_->path));
         unload();
         return;
     }
@@ -297,11 +325,16 @@ void Runner::run(const Job &job) {
         serve(job.path, job.n_ctx);
         return;
     }
+    if (job.kind == Job::Fetch) {
+        fetch(job);
+        return;
+    }
 
     // A check or speed test: on the serving model's own backend when it has
     // room, else on a load of its own with the serving model put back after.
     const bool check = job.kind == Job::Check;
     const int need_ctx = check ? std::max(1, job.n) : job.pp + job.tg + 1;
+    const std::string name = name_for(job.path);
     {
         std::lock_guard<std::mutex> lk(mu_);
         status_.phase = check ? Status::Checking : Status::Benchmarking;
@@ -316,7 +349,10 @@ void Runner::run(const Job &job) {
     // the serving model goes back on the API either way.
     try {
         if (job.env.empty() && serving_ && serving_->path == job.path && serving_->n_ctx >= need_ctx) {
-            server_.set_engine(nullptr, "", check ? "running the GPU check" : "running the speed test");
+            // What an app's request gets meanwhile, and the Chat page shows.
+            server_.set_engine(nullptr, "",
+                               check ? "The model is busy with a GPU check. Try again in a moment."
+                                     : "The model is busy with a speed test. Try again in a moment.");
             target = serving_.get();
         } else {
             if (serving_) {
@@ -330,7 +366,16 @@ void Runner::run(const Job &job) {
             target = own.get();
         }
         ok = target != nullptr;
-        auto progress = [this](const std::string &s) { set_step(s); };
+        // The steps (checks.cpp), as the screen says them.
+        auto progress = [this](const std::string &s) {
+            std::string step = s;
+            if (s == "running on the GPU") step = "answering on the GPU";
+            else if (s == "loading the CPU reference") step = "getting the CPU ready to compare";
+            else if (s == "running on the CPU") step = "answering on the CPU to compare (slow)";
+            else if (s.compare(0, 8, "prompt: ") == 0) step = "reading a " + s.substr(8, s.find(' ', 8) - 8) + "-token prompt";
+            else if (s.compare(0, 11, "generating ") == 0) step = "writing " + s.substr(11);
+            set_step(step);
+        };
         if (ok && check) {
             ts5::CheckResult r;
             ok = ts5::run_check(target->model, target->engine->backend(), job.n, r, err, progress, job.fresh);
@@ -342,11 +387,10 @@ void Runner::run(const Job &job) {
                     std::lock_guard<std::mutex> lk(lib_mutex_);
                     lib_.record(file, rec);
                 }
-                char b[160];
-                snprintf(b, sizeof b, "GPU check %s on %s: same top token %d/%d", r.pass ? "passed" : "FAILED",
-                         target->name.c_str(), r.same_top, r.n);
-                event(b, !r.pass);
-                notify_(r.pass ? "TokenStation5: GPU check passed" : "TokenStation5: GPU check FAILED");
+                event(name + (r.pass ? " passed the GPU check: same answers as the CPU"
+                                     : " failed the GPU check: its answers may be wrong on this PS5"),
+                      !r.pass);
+                notify_("TokenStation5: " + name + (r.pass ? " passed the GPU check" : " failed the GPU check"));
             }
         } else if (ok) {
             ts5::BenchResult r;
@@ -359,40 +403,112 @@ void Runner::run(const Job &job) {
                     std::lock_guard<std::mutex> lk(lib_mutex_);
                     lib_.record(file, rec);
                 }
-                char b[160];
-                snprintf(b, sizeof b, "Speed test on %s: prompt %.0f tok/s, generation %.1f tok/s",
-                         target->name.c_str(), r.pp_tps, r.tg_tps);
-                event(b);
-                notify_(std::string("TokenStation5: ") + b);
+                char reads[48];
+                snprintf(reads, sizeof reads, ", reads %.0f", r.pp_tps);
+                const std::string said = "Speed test on " + name + ": writes " + plain::tokens_a_second(r.tg_tps) + reads;
+                event(said);
+                notify_("TokenStation5: " + said);
             }
         }
     } catch (const std::exception &e) {
         ok = false;
         err = e.what();
     }
-    if (!ok) {
-        std::lock_guard<std::mutex> lk(mu_);
-        status_.error = std::string(check ? "GPU check" : "speed test") + " on " + file + " failed: " + err;
-    }
+    if (!ok)
+        fail(std::string(check ? "GPU check" : "speed test") + " on " + file + " failed: " + err,
+             std::string(check ? "The GPU check on " : "The speed test on ") + name + " stopped: " + plain::reason(err) +
+                 ".");
     if (target == serving_.get() && serving_) {
         serving_->engine->forget_cache();
         server_.set_engine(serving_->engine.get(), serving_->file);
     }
     own.reset();
     if (!resume_path.empty()) {
-        std::string error;
+        std::string error, said;
         {
             std::lock_guard<std::mutex> lk(mu_);
             error = status_.error;
+            said = status_.said;
         }
         serve(resume_path, resume_ctx);
         // The job's own failure is the one to show.
-        if (!error.empty()) {
-            std::lock_guard<std::mutex> lk(mu_);
-            status_.error = error;
-        }
+        if (!error.empty()) fail(error, said);
     }
     log_memory(check ? "after the GPU check" : "after the speed test");
+}
+
+// A download to the job's path, as .<file>.part beside it until its size
+// and SHA-256 (when given) agree, then renamed: the Library never sees a
+// half file. It goes on from a part that is already there. A line in the
+// log every 5 s, then "fetch: done" or "fetch failed: <why>"
+// (scripts/ts5-ps5.sh waits for them). Nothing is unloaded: a model that
+// is serving keeps answering, only other jobs wait.
+void Runner::fetch(const Job &job) {
+    const std::string file = base(job.path);
+    const std::string dir = job.path.substr(0, job.path.size() - file.size());  // with its '/', or ""
+    const std::string part = dir + "." + file + ".part";
+    constexpr double mb = 1048576;              // as format_bytes counts
+    constexpr uint64_t keep_free = 1ull << 30;  // a download may not take the last 1 GB
+    uint64_t free = 0;
+    const bool have_free = free_space(dir.empty() ? "." : dir, free);
+    if (have_free) printf("ts5-title: fetch: %s free\n", format_bytes(free).c_str());
+    else printf("ts5-title: fetch: free space unknown (%s)\n", strerror(errno));
+    struct stat st;
+    const uint64_t offset = stat(part.c_str(), &st) == 0 ? (uint64_t)st.st_size : 0;
+    if (offset > 0) printf("ts5-title: fetch: going on from the %.0f MB already there\n", offset / mb);
+
+    ts5::FetchProgress progress;
+    std::string err;
+    bool ok = false;
+    std::atomic<bool> finished{false};
+    std::thread worker([&] {
+        ok = ts5::http_get_file(job.url, part, offset, job.sha256, progress, err);
+        finished = true;
+    });
+    // Once the server has said how big the file is: is there room for the
+    // rest of it? If not, the download is stopped with that as the reason.
+    std::string refused;
+    bool checked_room = false;
+    double last_line = now_s();
+    while (!finished) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const uint64_t done = progress.done, total = progress.total;
+        if (!checked_room && total > 0) {
+            checked_room = true;
+            if (have_free && total > done && total - done + keep_free > free) {
+                refused = "not enough space: it needs " + format_bytes(total - done) + " and the console has " +
+                          format_bytes(free) + " free";
+                progress.cancel = true;
+            }
+        }
+        if (now_s() - last_line >= 5) {
+            char b[160];
+            if (total > 0)
+                snprintf(b, sizeof b, "fetch: %.0f MB of %.0f MB, %.1f MB a second", done / mb, total / mb,
+                         progress.speed / mb);
+            else
+                snprintf(b, sizeof b, "fetch: %.0f MB, %.1f MB a second", done / mb, progress.speed / mb);
+            set_step(b);
+            last_line = now_s();
+        }
+    }
+    worker.join();
+    if (ok && rename(part.c_str(), job.path.c_str()) != 0) {
+        ok = false;
+        err = std::string("cannot rename the part: ") + strerror(errno);
+    }
+    if (!ok) {
+        printf("ts5-title: fetch failed: %s\n", refused.empty() ? err.c_str() : refused.c_str());
+        std::lock_guard<std::mutex> lk(mu_);
+        status_.error = "The download failed. The log says why.";
+        return;
+    }
+    printf("ts5-title: fetch: done\n");
+    // The Library picks the file up on its next scan; until then the name is
+    // the file's own, without its ending, as the Library's fallback is.
+    const std::string name = file.substr(0, file.rfind('.'));
+    event("Downloaded " + name);
+    notify_("TokenStation5: " + name + " is downloaded");
 }
 
 }  // namespace app

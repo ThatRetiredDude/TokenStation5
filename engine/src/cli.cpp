@@ -11,9 +11,17 @@
 //                                        the prompt a chat request becomes (for tests)
 //   ts5 tool-parse hermes|llama3 < text  a model's turn as content and tool calls (for tests)
 //   ts5 search "query"                   one web_search, as the model would get it
+//   ts5 usage-parse FILE                 a usage.tsv's requests, written again as v1 (for tests)
+//   ts5 fetch URL FILE [--sha256 HEX]    download URL to FILE, going on from a stopped one
 //
 // Common: --backend vk|cpu (default vk when built with Vulkan), --device N.
+// serve with TS5_USAGE_LOG=FILE writes a line per API request to FILE
+// (usage.h), as the PS5 title does to usage.tsv.
+#include <sys/stat.h>
+
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <iterator>
@@ -22,16 +30,23 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "backend.h"
 #include "checks.h"
 #include "cli.h"
 #include "engine.h"
+#include "net.h"
 #include "server.h"
 #include "tokenizer.h"
 #include "tools.h"
+#include "usage.h"
 #include "websearch.h"
+
+#ifndef TS5_VERSION
+#define TS5_VERSION "dev"
+#endif
 
 using namespace ts5;
 
@@ -50,7 +65,8 @@ struct Args {
 int usage() {
     fprintf(stderr,
             "usage: ts5 serve|run|bench|check|tokenize|logits|prompt -m model.gguf [options]\n"
-            "       ts5 search QUERY | ts5 tool-parse hermes|llama3 < TEXT\n"
+            "       ts5 search QUERY | ts5 tool-parse hermes|llama3 < TEXT | ts5 usage-parse FILE\n"
+            "       ts5 fetch URL FILE [--sha256 HEX]\n"
             "  -c N|auto      context length (default 8192; auto: what fits in GPU memory)\n"
             "  --backend B    vk or cpu\n"
             "  --device N     Vulkan device index\n"
@@ -118,9 +134,15 @@ std::string read_all(FILE *f) {
     return s;
 }
 
-// The commands that need no model: a web search, and the tool-call parser.
+// The commands that need no model: a web search, and the tool-call and
+// usage log parsers.
 int no_model_command(int argc, char **argv) {
     std::string cmd = argv[1];
+    if (cmd == "usage-parse") {
+        if (argc != 3) return usage();
+        printf("%s", usage_header().c_str());
+        return UsageLog::read(argv[2], [](const UsageRecord &r) { printf("%s", usage_line(r).c_str()); }) ? 0 : 1;
+    }
     if (cmd == "search") {
         if (argc != 3) return usage();
         if (tavily_key().empty()) fprintf(stderr, "ts5: TAVILY_API_KEY is not set\n");
@@ -155,10 +177,60 @@ std::string basename_of(const std::string &p) {
     return s == std::string::npos ? p : p.substr(s + 1);
 }
 
+// A download to FILE, the way the title does it: into .FILE.part beside it,
+// going on from what a part already holds, renamed to FILE only once the
+// size and the hash (with --sha256) agree, so nothing sees a half file.
+// Progress goes to stderr once a second.
+int fetch_command(int argc, char **argv) {
+    std::string url, file, sha;
+    for (int i = 2; i < argc; i++) {
+        std::string s = argv[i];
+        if (s == "--sha256" && i + 1 < argc) sha = argv[++i];
+        else if (url.empty()) url = s;
+        else if (file.empty()) file = s;
+        else return usage();
+    }
+    if (url.empty() || file.empty()) return usage();
+    const std::string part = file.substr(0, file.size() - basename_of(file).size()) + "." + basename_of(file) + ".part";
+    struct stat st;
+    const uint64_t offset = stat(part.c_str(), &st) == 0 ? (uint64_t)st.st_size : 0;
+    if (offset > 0) fprintf(stderr, "ts5: fetch: going on from the %.1f MB already there\n", offset / 1e6);
+    FetchProgress progress;
+    std::atomic<bool> finished{false};
+    std::thread ticker([&] {
+        for (int i = 1; !finished; i++) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (i % 10 != 0 || finished) continue;
+            const double done = (double)progress.done, total = (double)progress.total;
+            if (total > 0)
+                fprintf(stderr, "ts5: fetch: %.1f of %.1f MB, %.1f MB/s\n", done / 1e6, total / 1e6,
+                        progress.speed / 1e6);
+            else
+                fprintf(stderr, "ts5: fetch: %.1f MB, %.1f MB/s\n", done / 1e6, progress.speed / 1e6);
+        }
+    });
+    std::string err;
+    const bool ok = http_get_file(url, part, offset, sha, progress, err);
+    finished = true;
+    ticker.join();
+    if (!ok) {
+        fprintf(stderr, "ts5: fetch failed: %s\n", err.c_str());
+        return 1;
+    }
+    if (rename(part.c_str(), file.c_str()) != 0) {
+        fprintf(stderr, "ts5: fetch failed: cannot rename the part: %s\n", strerror(errno));
+        return 1;
+    }
+    fprintf(stderr, "ts5: fetch: done, %.1f MB\n", (double)progress.done / 1e6);
+    return 0;
+}
+
 }  // namespace
 
 int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
-    if (argc >= 2 && (std::string(argv[1]) == "search" || std::string(argv[1]) == "tool-parse"))
+    if (argc >= 2 && std::string(argv[1]) == "fetch") return fetch_command(argc, argv);
+    if (argc >= 2 && (std::string(argv[1]) == "search" || std::string(argv[1]) == "tool-parse" ||
+                      std::string(argv[1]) == "usage-parse"))
         return no_model_command(argc, argv);
     Args a;
     if (!parse(argc, argv, a)) return usage();
@@ -288,8 +360,27 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
                 st.gen_tokens * 1000.0 / st.gen_ms, st.draft_accepted, st.drafted, st.sample_ms);
         return 0;
     }
-    if (a.cmd == "serve")
+    if (a.cmd == "serve") {
+        // With TS5_USAGE_LOG, each request's line is written as it ends, on
+        // its thread once the generation lock is let go. The name is the
+        // file's, without .gguf.
+        const char *log_path = getenv("TS5_USAGE_LOG");
+        UsageLog log(log_path ? log_path : "");
+        std::function<void(const UsageRecord &)> on_usage;
+        if (log_path && *log_path) {
+            std::string name = basename_of(a.model);
+            if (name.size() > 5 && name.compare(name.size() - 5, 5, ".gguf") == 0) name.resize(name.size() - 5);
+            log.start(TS5_VERSION);
+            if (!log.flush()) fprintf(stderr, "ts5: can't write %s\n", log_path);
+            on_usage = [&log, name](const UsageRecord &r) {
+                UsageRecord n = r;
+                if (!n.model.empty()) n.name = name;
+                log.push(n);
+                log.flush();
+            };
+        }
         return serve(eng, basename_of(a.model), a.host, a.port,
-                     [&](int port) { if (on_serving) on_serving(basename_of(a.model), port); });
+                     [&](int port) { if (on_serving) on_serving(basename_of(a.model), port); }, on_usage);
+    }
     return usage();
 }

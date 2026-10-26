@@ -1,27 +1,34 @@
 #include "net.h"
 
+#include "log.h"
+
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <mutex>
+#include <thread>
 
 #ifdef TS5_HTTPS
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/error.h>
 #include <mbedtls/platform_util.h>
+#include <mbedtls/sha256.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 #include <psa/crypto.h>
@@ -49,15 +56,25 @@ namespace ts5 {
 namespace {
 
 // One line per step of a request in the log, so a request that never comes
-// back shows how far it got.
+// back shows how far it got. Only with TS5_NET_LOG=1 (Settings > Detailed
+// log, read at each line so the switch works at once): on the console each
+// line written to ts5.log can hold the thread up for about a second, which
+// made a Hugging Face search of ~150 steps take minutes instead of seconds.
+// A failure still reaches the log through the caller's error.
 void trace(const char *fmt, ...) {
+    const char *on = getenv("TS5_NET_LOG");
+    if (!on || strcmp(on, "1") != 0) return;
+    // Seconds since the first line, so the gaps between lines show (a
+    // redirect hop on the LAN took 9-17 s with every timed step in ms).
+    static const auto t0 = std::chrono::steady_clock::now();
+    const double at = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    char line[1024];
+    int n = snprintf(line, sizeof line, "ts5: net: [%.3f s] ", at);
     va_list ap;
     va_start(ap, fmt);
-    fprintf(stderr, "ts5: net: ");
-    vfprintf(stderr, fmt, ap);
-    fputc('\n', stderr);
-    fflush(stderr);
+    if (n > 0 && n < (int)sizeof line) vsnprintf(line + n, sizeof line - (size_t)n, fmt, ap);
     va_end(ap);
+    log_line("%s", line);
 }
 
 bool fill_random(unsigned char *out, size_t n) {
@@ -145,13 +162,22 @@ bool resolve(const std::string &host, std::vector<uint32_t> &addrs, std::string 
 #endif
 }
 
+// Milliseconds since t, for the log's timings.
+long ms_since(std::chrono::steady_clock::time_point t) {
+    return (long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t).count();
+}
+
+constexpr int kRecvBuffer = 4 << 20;
+
 int connect_to(const std::string &host, int port, int timeout_s, std::string &err) {
     std::vector<uint32_t> addrs;
     trace("resolving %s", host.c_str());
+    auto t = std::chrono::steady_clock::now();
     if (!resolve(host, addrs, err)) return -1;
     char ip[INET_ADDRSTRLEN] = "?";
     inet_ntop(AF_INET, &addrs[0], ip, sizeof ip);
-    trace("%s is %s; connecting to port %d", host.c_str(), ip, port);
+    trace("%s is %s (%ld ms); connecting to port %d", host.c_str(), ip, ms_since(t), port);
+    t = std::chrono::steady_clock::now();
     for (uint32_t addr : addrs) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {
@@ -163,11 +189,21 @@ int connect_to(const std::string &host, int port, int timeout_s, std::string &er
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        // A bigger receive buffer than the system's default, before connecting
+        // so the window can grow to it: one connection never goes faster than
+        // its buffer per round trip (64 KiB over 60 ms is about 1 MB a second).
+        int rcvbuf = kRecvBuffer;
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof rcvbuf);
         sockaddr_in sa{};
         sa.sin_family = AF_INET;
         sa.sin_port = htons((uint16_t)port);
         sa.sin_addr.s_addr = addr;
-        if (connect(fd, (sockaddr *)&sa, sizeof sa) == 0) return fd;
+        if (connect(fd, (sockaddr *)&sa, sizeof sa) == 0) {
+            socklen_t len = sizeof rcvbuf;
+            if (getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, &len) != 0) rcvbuf = 0;
+            trace("connected (%ld ms, receive buffer %d KiB)", ms_since(t), rcvbuf / 1024);
+            return fd;
+        }
         char ip[INET_ADDRSTRLEN] = "?";
         inet_ntop(AF_INET, &sa.sin_addr, ip, sizeof ip);
         err = "cannot connect to " + host + " (" + ip + ":" + std::to_string(port) + "): " + strerror(errno);
@@ -245,6 +281,31 @@ struct Conn {
             return false;
         }
     }
+    // What has arrived, up to cap bytes: how many, 0 once the server has
+    // closed, -1 on an error (err says). For a body too big to hold.
+    int read_some(char *buf, size_t cap, std::string &err) {
+        while (true) {
+#ifdef TS5_HTTPS
+            if (tls) {
+                int n = mbedtls_ssl_read(&ssl, (unsigned char *)buf, cap);
+                if (n > 0) return n;
+                if (n == 0 || n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == MBEDTLS_ERR_NET_CONN_RESET_) return 0;
+                if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE ||
+                    n == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET)
+                    continue;
+                err = n == -0x004C ? std::string("timed out waiting for the server")  // MBEDTLS_ERR_NET_RECV_FAILED
+                                   : "TLS read failed (-0x" + hex(-n) + ")";
+                return -1;
+            }
+#endif
+            ssize_t n = recv(fd, buf, cap, 0);
+            if (n >= 0) return (int)n;
+            if (errno == EINTR) continue;
+            err = errno == EAGAIN || errno == EWOULDBLOCK ? std::string("timed out waiting for the server")
+                                                         : std::string("recv: ") + strerror(errno);
+            return -1;
+        }
+    }
     static std::string hex(int v) {
         char b[16];
         snprintf(b, sizeof b, "%04x", v);
@@ -266,8 +327,21 @@ struct Tls {
     mbedtls_ctr_drbg_context drbg;
     mbedtls_x509_crt ca;
     mbedtls_ssl_config conf;
+    // The same at most TLS 1.2, for Tailscale's relays: they end their
+    // chain with an Ed25519 certificate of their own, which Mbed TLS can't
+    // read; TLS 1.2 skips it, but 3.6's TLS 1.3 fails the handshake on it.
+    mbedtls_ssl_config conf12;
     std::string ca_from;
 };
+
+// The shared generator, one caller at a time: mbedtls is built without its
+// threading layer, and downloads, web searches and the Hugging Face search
+// make connections from several threads at once.
+int locked_random(void *drbg, unsigned char *out, size_t len) {
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lk(mu);
+    return mbedtls_ctr_drbg_random(drbg, out, len);
+}
 
 // The first HTTPS request sets up what every one shares.
 Tls &tls() {
@@ -278,6 +352,7 @@ Tls &tls() {
         mbedtls_ctr_drbg_init(&t.drbg);
         mbedtls_x509_crt_init(&t.ca);
         mbedtls_ssl_config_init(&t.conf);
+        mbedtls_ssl_config_init(&t.conf12);
         trace("first HTTPS request: starting crypto");
         if (psa_crypto_init() != PSA_SUCCESS) { t.why = "psa_crypto_init failed"; return; }
         trace("crypto started; seeding the TLS random generator");
@@ -315,7 +390,14 @@ Tls &tls() {
         if (rc != 0) { t.why = "TLS setup failed (-0x" + Conn::hex(-rc) + ")"; return; }
         mbedtls_ssl_conf_authmode(&t.conf, MBEDTLS_SSL_VERIFY_REQUIRED);
         mbedtls_ssl_conf_ca_chain(&t.conf, &t.ca, nullptr);
-        mbedtls_ssl_conf_rng(&t.conf, mbedtls_ctr_drbg_random, &t.drbg);
+        mbedtls_ssl_conf_rng(&t.conf, locked_random, &t.drbg);
+        rc = mbedtls_ssl_config_defaults(&t.conf12, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
+                                         MBEDTLS_SSL_PRESET_DEFAULT);
+        if (rc != 0) { t.why = "TLS setup failed (-0x" + Conn::hex(-rc) + ")"; return; }
+        mbedtls_ssl_conf_authmode(&t.conf12, MBEDTLS_SSL_VERIFY_REQUIRED);
+        mbedtls_ssl_conf_ca_chain(&t.conf12, &t.ca, nullptr);
+        mbedtls_ssl_conf_rng(&t.conf12, locked_random, &t.drbg);
+        mbedtls_ssl_conf_max_tls_version(&t.conf12, MBEDTLS_SSL_VERSION_TLS1_2);
         t.ready = true;
     });
     return t;
@@ -338,7 +420,7 @@ int bio_recv(void *ctx, unsigned char *buf, size_t len) {
     return -0x004C;                           // MBEDTLS_ERR_NET_RECV_FAILED (and the timeout)
 }
 
-bool start_tls(Conn &c, const std::string &host, std::string &err) {
+bool start_tls(Conn &c, const std::string &host, std::string &err, bool tls12 = false) {
     trace("connected; setting up TLS");
     Tls &t = tls();
     if (!t.ready) {
@@ -347,7 +429,7 @@ bool start_tls(Conn &c, const std::string &host, std::string &err) {
     }
     mbedtls_ssl_init(&c.ssl);
     c.tls = true;
-    int rc = mbedtls_ssl_setup(&c.ssl, &t.conf);
+    int rc = mbedtls_ssl_setup(&c.ssl, tls12 ? &t.conf12 : &t.conf);
     if (rc == 0) rc = mbedtls_ssl_set_hostname(&c.ssl, host.c_str());
     if (rc != 0) {
         err = "TLS setup failed (-0x" + Conn::hex(-rc) + ")";
@@ -390,7 +472,781 @@ bool dechunk(const std::string &in, std::string &out) {
     return true;
 }
 
+// ---- Downloads (http_get_file) ----
+
+// The SHA-256 of what has been written so far. Its state goes out and comes
+// back as bytes, so a download can go on from a checkpoint (Sha256Resume).
+#ifdef TS5_HTTPS
+struct Hasher {
+    mbedtls_sha256_context ctx;
+    Hasher() { mbedtls_sha256_init(&ctx); }
+    ~Hasher() { mbedtls_sha256_free(&ctx); }
+    static bool available() { return true; }
+    void start() { mbedtls_sha256_starts(&ctx, 0); }
+    void update(const char *p, size_t n) { mbedtls_sha256_update(&ctx, (const unsigned char *)p, n); }
+    // The digest in lowercase hex. Ends the hash.
+    std::string finish() {
+        unsigned char d[32];
+        mbedtls_sha256_finish(&ctx, d);
+        char hex[65];
+        for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", d[i]);
+        return hex;
+    }
+    std::vector<unsigned char> state() const {
+        const unsigned char *p = (const unsigned char *)&ctx;
+        return std::vector<unsigned char>(p, p + sizeof ctx);
+    }
+    bool restore(const std::vector<unsigned char> &s) {
+        if (s.size() != sizeof ctx) return false;
+        memcpy(&ctx, s.data(), sizeof ctx);
+        return true;
+    }
+};
+#else
+// Without Mbed TLS there is no SHA-256, so a download can't be checked.
+struct Hasher {
+    static bool available() { return false; }
+    void start() {}
+    void update(const char *, size_t) {}
+    std::string finish() { return ""; }
+    std::vector<unsigned char> state() const { return {}; }
+    bool restore(const std::vector<unsigned char> &) { return false; }
+};
+#endif
+
+// The parts of http[s]://host[:port]/path?query. `path` keeps the query for
+// the request line; `shown` is the host and the path without it, for the
+// log, because a signed CDN URL's query acts as a credential.
+struct Url {
+    bool https = false;
+    std::string host, hostport, path, shown;
+    int port = 80;
+};
+
+bool parse_url(const std::string &url, Url &u, std::string &err) {
+    size_t s = url.find("://");
+    if (s == std::string::npos) {
+        err = "not a URL";
+        return false;
+    }
+    const std::string scheme = url.substr(0, s);
+    u.https = scheme == "https";
+    if (!u.https && scheme != "http") {
+        err = "unsupported URL scheme " + scheme;
+        return false;
+    }
+    size_t p = url.find('/', s + 3);
+    u.hostport = url.substr(s + 3, p == std::string::npos ? std::string::npos : p - s - 3);
+    u.path = p == std::string::npos ? "/" : url.substr(p);
+    u.port = u.https ? 443 : 80;
+    u.host = u.hostport;
+    size_t colon = u.hostport.rfind(':');
+    if (colon != std::string::npos) {
+        u.host = u.hostport.substr(0, colon);
+        u.port = atoi(u.hostport.c_str() + colon + 1);
+    }
+    if (u.host.empty()) {
+        err = "a URL without a host";
+        return false;
+    }
+    u.shown = u.host + " " + u.path.substr(0, u.path.find('?'));
+    return true;
+}
+
+// Where a Location header points: a whole URL, or a path on the same server.
+std::string resolve(const Url &from, const std::string &location) {
+    if (location.compare(0, 7, "http://") == 0 || location.compare(0, 8, "https://") == 0) return location;
+    const std::string scheme = from.https ? "https:" : "http:";
+    if (location.compare(0, 2, "//") == 0) return scheme + location;
+    if (!location.empty() && location[0] == '/') return scheme + "//" + from.hostport + location;
+    const std::string dir = from.path.substr(0, from.path.find('?'));
+    return scheme + "//" + from.hostport + dir.substr(0, dir.rfind('/') + 1) + location;
+}
+
+// A header's value from a response head, whatever the case of its name; ""
+// without it.
+std::string header(const std::string &head, const char *name) {
+    std::string lower = head, key = std::string("\r\n") + name + ":";
+    for (auto &ch : lower) ch = (char)tolower((unsigned char)ch);
+    for (auto &ch : key) ch = (char)tolower((unsigned char)ch);
+    size_t p = lower.find(key);
+    if (p == std::string::npos) return "";
+    p += key.size();
+    size_t e = head.find("\r\n", p);
+    std::string v = head.substr(p, e == std::string::npos ? std::string::npos : e - p);
+    size_t a = v.find_first_not_of(" \t"), b = v.find_last_not_of(" \t");
+    return a == std::string::npos ? "" : v.substr(a, b - a + 1);
+}
+
+// A response body as it comes: counted by Content-Length, chunked, or
+// everything until the server closes. (dechunk() above is the whole-string
+// form a POST's answer uses.)
+class Body {
+public:
+    enum Kind { Counted, Chunked, ToClose };
+    // ahead: what came after the headers in the same read.
+    Body(Conn &c, std::string ahead, Kind kind, uint64_t length)
+        : c_(c), stash_(std::move(ahead)), kind_(kind), left_(length) {}
+    // The next piece into buf: how many bytes, 0 at the end, -1 on an error (err says).
+    int next(char *buf, size_t cap, std::string &err);
+    // False when a counted body ended short.
+    bool complete() const { return kind_ != Counted || left_ == 0; }
+
+private:
+    // More into the stash. False at the end, or on an error (err says).
+    bool more(std::string &err) {
+        stash_.erase(0, pos_);
+        pos_ = 0;
+        char buf[65536];
+        int n = c_.read_some(buf, sizeof buf, err);
+        if (n <= 0) return false;
+        stash_.append(buf, (size_t)n);
+        return true;
+    }
+    Conn &c_;
+    std::string stash_;  // read, not yet taken
+    size_t pos_ = 0;     // taken up to here
+    Kind kind_;
+    uint64_t left_;      // Counted: bytes still to come; Chunked: left in this chunk
+    enum { Size, Data, AfterData, Trailers, End } chunk_ = Size;
+};
+
+int Body::next(char *buf, size_t cap, std::string &err) {
+    if (kind_ != Chunked) {
+        if (kind_ == Counted && left_ == 0) return 0;
+        if (kind_ == Counted && cap > left_) cap = (size_t)left_;
+        int n;
+        if (pos_ < stash_.size()) {
+            n = (int)std::min(cap, stash_.size() - pos_);
+            memcpy(buf, stash_.data() + pos_, (size_t)n);
+            pos_ += (size_t)n;
+        } else {
+            n = c_.read_some(buf, cap, err);
+            if (n <= 0) return n;  // 0: closed, maybe short (complete() says)
+        }
+        if (kind_ == Counted) left_ -= (uint64_t)n;
+        return n;
+    }
+    for (;;) {
+        const size_t have = stash_.size() - pos_;
+        switch (chunk_) {
+            case Size: {
+                size_t e = stash_.find("\r\n", pos_);
+                if (e == std::string::npos) {
+                    if (have > 65536) {
+                        err = "bad chunked response";
+                        return -1;
+                    }
+                    if (!more(err)) {
+                        if (err.empty()) err = "incomplete chunked response";
+                        return -1;
+                    }
+                    continue;
+                }
+                left_ = strtoull(stash_.c_str() + pos_, nullptr, 16);
+                pos_ = e + 2;
+                chunk_ = left_ == 0 ? Trailers : Data;
+                continue;
+            }
+            case Data: {
+                if (have == 0) {
+                    if (!more(err)) {
+                        if (err.empty()) err = "incomplete chunked response";
+                        return -1;
+                    }
+                    continue;
+                }
+                size_t n = (size_t)std::min<uint64_t>(std::min(have, cap), left_);
+                memcpy(buf, stash_.data() + pos_, n);
+                pos_ += n;
+                left_ -= n;
+                if (left_ == 0) chunk_ = AfterData;
+                return (int)n;
+            }
+            case AfterData:  // the CRLF after a chunk's data
+                if (have < 2) {
+                    if (!more(err)) {
+                        if (err.empty()) err = "incomplete chunked response";
+                        return -1;
+                    }
+                    continue;
+                }
+                pos_ += 2;
+                chunk_ = Size;
+                continue;
+            case Trailers: {  // after the last chunk: trailer lines, then a blank one
+                size_t e = stash_.find("\r\n", pos_);
+                if (e == std::string::npos) {
+                    if (!more(err)) {  // closed here: nothing was missing
+                        chunk_ = End;
+                        return err.empty() ? 0 : -1;
+                    }
+                    continue;
+                }
+                if (e == pos_) chunk_ = End;
+                pos_ = e + 2;
+                continue;
+            }
+            case End: return 0;
+        }
+    }
+}
+
+// Beside a part, "<part>.from" says which URL it is of (without the query
+// string: a signed one changes with every link) and what the server called
+// that version of the file (its ETag, else its Last-Modified; maybe
+// nothing), one a line. A resume only goes on from a part of the same URL,
+// and asks for the rest with If-Range when there is a validator, so a file
+// that changed on the server comes whole (200) instead of its new tail
+// landing after the old head.
+bool read_from(const std::string &path, std::string &url, std::string &tag) {
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    std::string text;
+    char buf[4096];
+    for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+    fclose(f);
+    const size_t a = text.find('\n');
+    if (a == std::string::npos) return false;
+    const size_t b = text.find('\n', a + 1);
+    url = text.substr(0, a);
+    tag = text.substr(a + 1, b == std::string::npos ? std::string::npos : b - a - 1);
+    return !url.empty();
+}
+
+bool write_from(const std::string &path, const std::string &url, const std::string &tag) {
+    FILE *f = fopen(path.c_str(), "wb");
+    if (!f) return false;
+    fprintf(f, "%s\n%s\n", url.c_str(), tag.c_str());
+    return fclose(f) == 0;
+}
+
+// The download itself, on the thread http_get_file gives it. The file is
+// written from `start` (the checkpoint's offset, else `offset`), 256 KiB at
+// a time, and the hash follows the writes; a checkpoint is reported only
+// after a flush, so it never describes bytes that aren't on disk yet.
+bool get_file(const std::string &url, const std::string &path, uint64_t offset, const std::string &expected_sha256,
+              FetchProgress &progress, std::string &err, Sha256Resume *sha) {
+    constexpr int timeout_s = 30;
+    constexpr size_t block = 256 << 10;
+    constexpr uint64_t checkpoint_every = 64ull << 20;
+    // On the PS5 the title's writes reach the disk at about 2 MB/s, however
+    // they're made, but the system takes ~100 MB of them at once into memory
+    // first; once that's full, every write in the title waits, the TV's
+    // picture too, for a minute or more. Sending each 8 MB to the disk before
+    // the next keeps that from filling, at the same speed.
+    constexpr uint64_t sync_every = 8ull << 20;
+    using clock = std::chrono::steady_clock;
+    auto seconds = [](clock::duration d) { return std::chrono::duration<double>(d).count(); };
+
+    if (!expected_sha256.empty() && !Hasher::available()) {
+        err = "this ts5 was built without HTTPS, so it can't check a SHA-256";
+        return false;
+    }
+    std::string want = expected_sha256;
+    for (auto &ch : want) ch = (char)tolower((unsigned char)ch);
+    Url u;
+    if (!parse_url(url, u, err)) return false;
+#ifndef TS5_HTTPS
+    if (u.https) {
+        err = "this ts5 was built without HTTPS";
+        return false;
+    }
+#endif
+
+    // Where to go on from: the checkpoint's offset with its hash state, else
+    // the file's first `offset` bytes, hashed here first. Only a part of this
+    // same URL is gone on from (its .from file says which); another one, or
+    // one without a .from, starts over.
+    struct stat st;
+    if (offset > 0 && (stat(path.c_str(), &st) != 0 || (uint64_t)st.st_size < offset)) {
+        offset = stat(path.c_str(), &st) == 0 ? (uint64_t)st.st_size : 0;
+        trace("the file is shorter than said; going on from its %llu bytes", (unsigned long long)offset);
+    }
+    const std::string from_path = path + ".from", source = url.substr(0, url.find('?'));
+    std::string from_url, validator;
+    if (offset > 0 && !read_from(from_path, from_url, validator)) {
+        trace("the part doesn't say where it's from; starting over");
+        offset = 0;
+    } else if (offset > 0 && from_url != source) {
+        trace("the part is of another URL; starting over");
+        offset = 0;
+    }
+    uint64_t start = offset;
+    Hasher hash;
+    hash.start();
+    bool rehash = start > 0;
+    if (sha && !sha->state.empty()) {
+        if (sha->offset <= offset && hash.restore(sha->state)) {
+            start = sha->offset;
+            rehash = false;
+        } else {
+            trace("the checkpoint doesn't fit the file; hashing the file instead");
+        }
+    }
+    // The buffers before the file, so they are still there when the Closer's
+    // fclose flushes what is left in fbuf on a failure return.
+    std::vector<char> fbuf(1 << 20), wbuf(block);
+    FILE *f = fopen(path.c_str(), start > 0 ? "r+b" : "wb");
+    if (!f) {
+        err = std::string("cannot open the file: ") + strerror(errno);
+        return false;
+    }
+    struct Closer {
+        FILE *f;
+        ~Closer() {
+            if (f) fclose(f);
+        }
+    } closer{f};
+    setvbuf(f, fbuf.data(), _IOFBF, fbuf.size());
+    progress.done = start;
+    // Waits while paused. False once cancelled.
+    auto go_on = [&] {
+        while (progress.pause && !progress.cancel) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (!progress.cancel) return true;
+        err = "cancelled";
+        return false;
+    };
+    // A full disk is the one failure the user can do something about, so it
+    // gets its own words.
+    auto write_failed = [&] {
+        err = errno == ENOSPC ? std::string("storage full") : std::string("cannot write the file: ") + strerror(errno);
+        return false;
+    };
+    // A part that turned out wrong (another size or hash than it should
+    // have, or longer than the file) goes, with its .from, so the next call
+    // starts over instead of failing the same way again. A part a dropped
+    // connection, a timeout, a full disk or a cancel cut short is kept.
+    auto damaged = [&] {
+        trace("removing the part: it can't be gone on from");
+        fclose(f);
+        closer.f = nullptr;
+        unlink(path.c_str());
+        unlink(from_path.c_str());
+        return false;
+    };
+    if (rehash) {
+        trace("hashing the %llu bytes already there", (unsigned long long)start);
+        for (uint64_t left = start; left > 0;) {
+            size_t n = fread(wbuf.data(), 1, (size_t)std::min<uint64_t>(block, left), f);
+            if (n == 0) {
+                err = "cannot read the file";
+                return false;
+            }
+            hash.update(wbuf.data(), n);
+            left -= n;
+            if (!go_on()) return false;
+        }
+    }
+    if (start > 0 && (fseeko(f, (off_t)start, SEEK_SET) != 0 || ftruncate(fileno(f), (off_t)start) != 0)) {
+        err = std::string("cannot truncate the file: ") + strerror(errno);
+        return false;
+    }
+
+    uint64_t done = start, total = 0;
+    for (int hop = 0;; hop++) {
+        if (start > 0) trace("GET %s from byte %llu", u.shown.c_str(), (unsigned long long)start);
+        else trace("GET %s", u.shown.c_str());
+        Conn c;
+        c.fd = connect_to(u.host, u.port, timeout_s, err);
+        if (c.fd < 0) return false;
+#ifdef TS5_HTTPS
+        if (u.https && !start_tls(c, u.host, err)) return false;
+#endif
+        std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + u.hostport + "\r\nConnection: close\r\n" +
+                          "User-Agent: TokenStation5\r\nAccept-Encoding: identity\r\n";
+        if (start > 0) req += "Range: bytes=" + std::to_string(start) + "-\r\n";
+        if (start > 0 && !validator.empty()) req += "If-Range: " + validator + "\r\n";
+        req += "\r\n";
+        const auto asked = clock::now();
+        if (!c.write_all(req, err)) return false;
+
+        // The status line and headers; whatever follows them is body.
+        std::string head;
+        size_t he;
+        while ((he = head.find("\r\n\r\n")) == std::string::npos) {
+            if (head.size() > (64u << 10)) {
+                err = "the response's headers are too long";
+                return false;
+            }
+            char buf[16384];
+            int n = c.read_some(buf, sizeof buf, err);
+            if (n < 0) return false;
+            if (n == 0) {
+                err = "the server closed the connection before answering";
+                return false;
+            }
+            head.append(buf, (size_t)n);
+        }
+        std::string ahead = head.substr(he + 4);
+        head.resize(he);
+        if (head.compare(0, 5, "HTTP/") != 0) {
+            err = "not an HTTP response from " + u.host;
+            return false;
+        }
+        size_t sp = head.find(' ');
+        const int status = sp == std::string::npos ? 0 : atoi(head.c_str() + sp + 1);
+        trace("the server answered %d (%ld ms)", status, ms_since(asked));
+        const std::string location = header(head, "Location");
+        if ((status == 301 || status == 302 || status == 303 || status == 307 || status == 308) && !location.empty()) {
+            if (hop >= 5) {
+                err = "more than 5 redirects";
+                return false;
+            }
+            Url next;
+            if (!parse_url(resolve(u, location), next, err)) return false;
+            trace("redirected to %s", next.shown.c_str());
+            const auto closing = clock::now();
+#ifdef TS5_HTTPS
+            if (c.tls) mbedtls_ssl_free(&c.ssl);
+            c.tls = false;
+#endif
+            close(c.fd);
+            c.fd = -1;
+            trace("closed (%ld ms)", ms_since(closing));
+            u = next;
+            continue;
+        }
+        // 206 goes on from where the file stops, if the range agrees; 200 is
+        // the whole file, so the part starts over; 416 past the end means
+        // the part already is the whole file, or is longer than it.
+        const std::string range = header(head, "Content-Range");
+        unsigned long long rs = 0, re = 0;
+        char rt[32] = "";
+        if (status == 416 && start > 0 && sscanf(range.c_str(), "bytes */%31s", rt) == 1 &&
+            isdigit((unsigned char)rt[0])) {
+            if (strtoull(rt, nullptr, 10) == start) {
+                total = start;
+                break;
+            }
+            err = "the part is " + std::to_string(start) + " bytes, longer than the file's " + rt;
+            return damaged();
+        }
+        if (status == 206) {
+            if (sscanf(range.c_str(), "bytes %llu-%llu/%31s", &rs, &re, rt) < 2) {
+                err = "the server answered 206 without a usable Content-Range";
+                return false;
+            }
+            if (rs != start) {
+                err = "the server's range starts at " + std::to_string(rs) + ", not " + std::to_string(start);
+                return false;
+            }
+            total = isdigit((unsigned char)rt[0]) ? strtoull(rt, nullptr, 10) : re + 1;
+        } else if (status == 200) {
+            if (start > 0) {
+                trace("the server sent the whole file: starting over");
+                if (fseeko(f, 0, SEEK_SET) != 0 || ftruncate(fileno(f), 0) != 0) {
+                    err = std::string("cannot truncate the file: ") + strerror(errno);
+                    return false;
+                }
+                hash.start();
+                start = done = 0;
+                progress.done = 0;
+            }
+            // What this version of the file is called, for a resume's
+            // If-Range: its ETag, unless weak (W/..., which may not go
+            // there); without one, its Last-Modified.
+            validator = header(head, "ETag");
+            if (validator.empty()) validator = header(head, "Last-Modified");
+            else if (validator.compare(0, 2, "W/") == 0) validator.clear();
+            if (!write_from(from_path, source, validator))
+                trace("cannot note where the part is from (%s)", strerror(errno));
+        } else {
+            err = "the server at " + u.host + " answered " + std::to_string(status);
+            return false;
+        }
+        // Chunked wins over a Content-Length sent along with it (RFC 9112,
+        // 6.3): counted, the chunk lines would pass for bytes of the file.
+        const std::string length = header(head, "Content-Length");
+        std::string te = header(head, "Transfer-Encoding");
+        for (auto &ch : te) ch = (char)tolower((unsigned char)ch);
+        const Body::Kind kind = te.find("chunked") != std::string::npos   ? Body::Chunked
+                                : !length.empty()                         ? Body::Counted
+                                                                          : Body::ToClose;
+        const uint64_t length_n = kind == Body::Counted ? strtoull(length.c_str(), nullptr, 10) : 0;
+        if (kind == Body::Counted && total == 0) total = start + length_n;
+        progress.total = total;
+        // A body only the server's close ends can't be told from one cut
+        // short, so without a size it is taken only with a hash to check.
+        if (kind == Body::ToClose && total == 0 && want.empty()) {
+            err = "the server didn't say how big the file is, and there's no hash to check it by";
+            return false;
+        }
+        trace("reading the body (%s)", kind == Body::Counted   ? (std::to_string(length_n) + " bytes").c_str()
+                                       : kind == Body::Chunked ? "chunked"
+                                                               : "until the server closes");
+        Body body(c, std::move(ahead), kind, length_n);
+        size_t filled = 0;
+        auto t_win = clock::now();
+        uint64_t b_win = done, last_checkpoint = done, last_sync = done;
+        // For the detailed log: where the time of each 64 MB went, waiting
+        // for the network, hashing or writing, to find what holds a download
+        // back.
+        double t_read = 0, t_hash = 0, t_write = 0;
+        auto t_span = clock::now();
+        uint64_t b_span = done;
+        for (;;) {
+            auto t0 = clock::now();
+            int n = body.next(wbuf.data() + filled, block - filled, err);
+            t_read += seconds(clock::now() - t0);
+            if (n < 0) return false;
+            filled += (size_t)n;
+            if (filled < block && n > 0) continue;
+            // A full block, or the last one.
+            if (filled > 0) {
+                t0 = clock::now();
+                hash.update(wbuf.data(), filled);
+                const auto t1 = clock::now();
+                t_hash += seconds(t1 - t0);
+                if (fwrite(wbuf.data(), 1, filled, f) != filled || ferror(f)) return write_failed();
+                done += filled;
+                if (done - last_sync >= sync_every) {
+                    if (fflush(f) != 0 || fsync(fileno(f)) != 0) return write_failed();
+                    last_sync = done;
+                }
+                t_write += seconds(clock::now() - t1);
+                filled = 0;
+                progress.done = done;
+            }
+            const auto now = clock::now();
+            if (done - b_span >= (64u << 20) || (n == 0 && done > b_span)) {
+                const double span = seconds(now - t_span), mb = (double)(done - b_span) / 1048576.0;
+                trace("%.0f MB in %.1f s (%.1f MB/s): network %.1f s, hash %.1f s, write %.1f s", mb, span,
+                      span > 0 ? mb / span : 0.0, t_read, t_hash, t_write);
+                t_read = t_hash = t_write = 0;
+                t_span = now;
+                b_span = done;
+            }
+            if (seconds(now - t_win) >= 2) {
+                progress.speed = (double)(done - b_win) / seconds(now - t_win);
+                t_win = now;
+                b_win = done;
+            }
+            if (sha && sha->on_checkpoint && Hasher::available() && done - last_checkpoint >= checkpoint_every) {
+                if (fflush(f) != 0) return write_failed();
+                last_checkpoint = done;
+                sha->on_checkpoint(done, hash.state());
+            }
+            if (n == 0) break;
+            if (!go_on()) return false;
+        }
+        if (!body.complete()) {
+            err = "the connection closed after " + std::to_string(done) + " of " + std::to_string(total) + " bytes";
+            return false;
+        }
+        break;
+    }
+    progress.total = total;
+    if (fflush(f) != 0) return write_failed();
+    if (total > 0 && done != total) {
+        err = "the server sent " + std::to_string(done) + " of " + std::to_string(total) + " bytes";
+        return done < total ? false : damaged();  // short: the next call asks for the rest
+    }
+    if (!want.empty()) {
+        const std::string got = hash.finish();
+        if (got != want) {
+            err = "the file's SHA-256 is " + got + ", not " + want;
+            return damaged();
+        }
+    }
+    unlink(from_path.c_str());  // the file is whole: nothing to go on from
+    trace("done (%llu bytes)", (unsigned long long)done);
+    return true;
+}
+
+// A GET read into memory, up to max_bytes of the body (a Range header asks
+// the server for no more), following up to 5 redirects with the same headers.
+bool get(const std::string &url0, const std::vector<std::string> &headers, HttpResponse &resp, std::string &err,
+         size_t max_bytes, int timeout_s) {
+    std::string url = url0;
+    for (int hop = 0; hop <= 5; hop++) {
+        Url u;
+        if (!parse_url(url, u, err)) return false;
+#ifndef TS5_HTTPS
+        if (u.https) {
+            err = "this ts5 was built without HTTPS";
+            return false;
+        }
+#endif
+        Conn c;
+        c.fd = connect_to(u.host, u.port, timeout_s, err);
+        if (c.fd < 0) return false;
+#ifdef TS5_HTTPS
+        if (u.https && !start_tls(c, u.host, err)) return false;
+#endif
+        std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + u.hostport +
+                          "\r\nConnection: close\r\nUser-Agent: TokenStation5\r\nAccept-Encoding: identity\r\n";
+        for (auto &h : headers) req += h + "\r\n";
+        req += "\r\n";
+        if (!c.write_all(req, err)) return false;
+        trace("GET %s", u.shown.c_str());
+        std::string raw;
+        char buf[16384];
+        size_t he;
+        while ((he = raw.find("\r\n\r\n")) == std::string::npos) {
+            if (raw.size() > (64u << 10)) {
+                err = "the answer's headers are too long";
+                return false;
+            }
+            int n = c.read_some(buf, sizeof buf, err);
+            if (n <= 0) {
+                if (err.empty()) err = "the server closed the connection before answering";
+                return false;
+            }
+            raw.append(buf, (size_t)n);
+        }
+        if (raw.compare(0, 5, "HTTP/") != 0) {
+            err = "not an HTTP answer from " + u.host;
+            return false;
+        }
+        const std::string head = raw.substr(0, he);
+        const size_t sp = head.find(' ');
+        const int status = sp == std::string::npos ? 0 : atoi(head.c_str() + sp + 1);
+        if (status >= 300 && status < 400 && status != 304) {
+            const std::string loc = header(head, "location");
+            if (loc.empty()) {
+                err = "a redirect without a Location";
+                return false;
+            }
+            url = resolve(u, loc);
+            continue;
+        }
+        resp.status = status;
+        std::string te = header(head, "transfer-encoding");
+        for (auto &ch : te) ch = (char)tolower((unsigned char)ch);
+        const std::string cl = header(head, "content-length");
+        const Body::Kind kind = te.find("chunked") != std::string::npos ? Body::Chunked
+                                : !cl.empty()                           ? Body::Counted
+                                                                        : Body::ToClose;
+        Body body(c, raw.substr(he + 4), kind, cl.empty() ? 0 : strtoull(cl.c_str(), nullptr, 10));
+        resp.body.clear();
+        while (resp.body.size() < max_bytes) {
+            const int n = body.next(buf, std::min(sizeof buf, max_bytes - resp.body.size()), err);
+            if (n < 0) return false;
+            if (n == 0) break;
+            resp.body.append(buf, (size_t)n);
+        }
+        return true;
+    }
+    err = "too many redirects";
+    return false;
+}
+
+#ifdef TS5_HTTPS
+// The Stream's reads: a timeout is "try again", so a record half read
+// carries on at the next read.
+int bio_recv_wait(void *ctx, unsigned char *buf, size_t len) {
+    int fd = *(int *)ctx;
+    ssize_t n = recv(fd, buf, len, 0);
+    if (n >= 0) return (int)n;
+    if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) return MBEDTLS_ERR_SSL_WANT_READ;
+    if (errno == ECONNRESET) return -0x0050;  // MBEDTLS_ERR_NET_CONN_RESET
+    return -0x004C;                           // MBEDTLS_ERR_NET_RECV_FAILED
+}
+#endif
+
 }  // namespace
+
+struct Stream::Impl {
+    Conn c;
+    int wait_ms = -1;  // the receive timeout set on the socket now
+};
+
+Stream::Stream() : p_(nullptr) {}
+Stream::~Stream() { close(); }
+
+void Stream::close() {
+    delete p_;
+    p_ = nullptr;
+}
+
+bool Stream::is_open() const { return p_ != nullptr; }
+
+bool Stream::open(const std::string &host, int port, bool tls, int timeout_s, std::string &err, bool tls12) {
+    close();
+#ifndef TS5_HTTPS
+    if (tls) {
+        err = "this ts5 was built without HTTPS";
+        return false;
+    }
+#endif
+    p_ = new Impl;
+    p_->c.fd = connect_to(host, port, timeout_s, err);
+    if (p_->c.fd < 0) {
+        close();
+        return false;
+    }
+    p_->wait_ms = timeout_s * 1000;
+#ifdef TS5_HTTPS
+    if (tls) {
+        if (!start_tls(p_->c, host, err, tls12)) {
+            close();
+            return false;
+        }
+        mbedtls_ssl_set_bio(&p_->c.ssl, &p_->c.fd, bio_send, bio_recv_wait, nullptr);
+    }
+#endif
+    return true;
+}
+
+bool Stream::write(const void *data, size_t len, std::string &err) {
+    if (!p_) {
+        err = "not connected";
+        return false;
+    }
+    return p_->c.write_all(std::string((const char *)data, len), err);
+}
+
+int Stream::read(void *buf, size_t cap, int wait_ms, std::string &err) {
+    if (!p_) {
+        err = "not connected";
+        return -1;
+    }
+    if (wait_ms < 1) wait_ms = 1;
+    if (wait_ms != p_->wait_ms) {
+        timeval tv{wait_ms / 1000, (wait_ms % 1000) * 1000};
+        setsockopt(p_->c.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        p_->wait_ms = wait_ms;
+    }
+    while (true) {
+#ifdef TS5_HTTPS
+        if (p_->c.tls) {
+            // What TLS already decrypted comes back without waiting.
+            int n = mbedtls_ssl_read(&p_->c.ssl, (unsigned char *)buf, cap);
+            if (n > 0) return n;
+            if (n == 0 || n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == -0x0050) return 0;
+            if (n == MBEDTLS_ERR_SSL_WANT_READ) return -2;
+            if (n == MBEDTLS_ERR_SSL_WANT_WRITE || n == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) continue;
+            err = "TLS read failed (-0x" + Conn::hex(-n) + ")";
+            return -1;
+        }
+#endif
+        ssize_t n = recv(p_->c.fd, buf, cap, 0);
+        if (n >= 0) return (int)n;
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return -2;
+        err = std::string("recv: ") + strerror(errno);
+        return -1;
+    }
+}
+
+namespace {
+
+}  // namespace
+
+bool random_bytes(unsigned char *out, size_t n) { return fill_random(out, n); }
+
+std::string sha256_hex(const std::string &data) {
+#ifdef TS5_HTTPS
+    Hasher h;
+    h.start();
+    h.update(data.data(), data.size());
+    return h.finish();
+#else
+    (void)data;
+    return "";
+#endif
+}
 
 bool post(const std::string &url, const std::vector<std::string> &headers, const std::string &body,
           HttpResponse &resp, std::string &err, int timeout_s) {
@@ -488,6 +1344,67 @@ bool http_post(const std::string &url, const std::vector<std::string> &headers, 
     pthread_attr_destroy(&attr);
     if (rc != 0) return post(url, headers, body, resp, err, timeout_s);  // no thread: try on this one
     pthread_join(th, nullptr);
+    return job.ok;
+}
+
+// A GET too, on a thread of its own with 1 MiB, for the same reason.
+bool http_get(const std::string &url, const std::vector<std::string> &headers, HttpResponse &resp, std::string &err,
+              size_t max_bytes, int timeout_s) {
+    struct Job {
+        const std::string &url;
+        const std::vector<std::string> &headers;
+        HttpResponse &resp;
+        std::string &err;
+        size_t max_bytes;
+        int timeout_s;
+        bool ok;
+    } job{url, headers, resp, err, max_bytes, timeout_s, false};
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 1 << 20);
+    pthread_t th;
+    auto run = [](void *p) -> void * {
+        Job &j = *(Job *)p;
+        j.ok = get(j.url, j.headers, j.resp, j.err, j.max_bytes, j.timeout_s);
+        return nullptr;
+    };
+    int rc = pthread_create(&th, &attr, run, &job);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) return get(url, headers, resp, err, max_bytes, timeout_s);  // no thread: try on this one
+    pthread_join(th, nullptr);
+    return job.ok;
+}
+
+// A download too, on a thread of its own with 1 MiB, for the same reason.
+bool http_get_file(const std::string &url, const std::string &path, uint64_t offset,
+                   const std::string &expected_sha256, FetchProgress &progress, std::string &err, Sha256Resume *sha) {
+    struct Job {
+        const std::string &url, &path, &expected_sha256;
+        uint64_t offset;
+        FetchProgress &progress;
+        std::string &err;
+        Sha256Resume *sha;
+        bool ok;
+    } job{url, path, expected_sha256, offset, progress, err, sha, false};
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 1 << 20);
+    pthread_t th;
+    auto run = [](void *p) -> void * {
+        Job &j = *(Job *)p;
+        j.ok = get_file(j.url, j.path, j.offset, j.expected_sha256, j.progress, j.err, j.sha);
+        return nullptr;
+    };
+    int rc = pthread_create(&th, &attr, run, &job);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) job.ok = get_file(url, path, offset, expected_sha256, progress, err, sha);  // no thread: on this one
+    else pthread_join(th, nullptr);
+    // A download that failed before its first byte leaves nothing behind.
+    struct stat st;
+    if (!job.ok && stat(path.c_str(), &st) == 0 && st.st_size == 0) {
+        unlink(path.c_str());
+        unlink((path + ".from").c_str());
+    }
     return job.ok;
 }
 

@@ -83,6 +83,7 @@
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
 #include "swiglu.spv.h"
+#include "log.h"
 
 namespace ts5 {
 
@@ -328,18 +329,19 @@ private:
         if (const char *e = getenv("TS5_MMB_SPLIT")) mmb_split_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SLICES")) mmb_slices_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SMALL")) mmb_small_ = atoi(e) != 0;
-        mmb_f16_ = ctx_->float16;
+        // f32 by default: on the PS5 the f16 sums put Llama 3.2 3B over the
+        // GPU check's bar (0.78% at 512 tokens, 0.02-0.04% in f32).
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
         kv_ = kv_type_setting();
         if (kv_ == KvType::Q8 && !(attn_ok() && hp_.head_dim % 32 == 0)) {
-            fprintf(stderr, "ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16\n");
+            ts5::log_line("ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16");
             kv_ = KvType::F16;
         }
         const char *prof = getenv("TS5_PROFILE");
         cpu_prof_ = prof && atoi(prof) != 0;
         if (prof && atoi(prof) == 1) {
             if (!ctx_->timestamp_bits) {
-                fprintf(stderr, "ts5: TS5_PROFILE: the queue has no timestamps\n");
+                ts5::log_line("ts5: TS5_PROFILE: the queue has no timestamps");
             } else {
                 VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
                 qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
@@ -504,7 +506,7 @@ private:
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
-        P(rmsnorm, 3) P(qkv_post, 10) P(qkv_post_q8, 12) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
+        P(rmsnorm, 3) P(qkv_post, 11) P(qkv_post_q8, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
         P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf_q8, 7)
         // Lanes per key in attn_dec: 8, 16 or 32, and no more than a subgroup.
         uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
@@ -585,7 +587,7 @@ private:
             if (bad) { err = "short read"; return false; }
         }
         const double ls = std::chrono::duration<double>(std::chrono::steady_clock::now() - lt0).count();
-        fprintf(stderr, "ts5: weights %.2f GB read in %.1f s (%.0f MB/s, %d threads)\n", weight_bytes_ / 1e9, ls,
+        ts5::log_line("ts5: weights %.2f GB read in %.1f s (%.0f MB/s, %d threads)", weight_bytes_ / 1e9, ls,
                 ls > 0 ? weight_bytes_ / 1e6 / ls : 0.0, threads);
         return true;
     }
@@ -620,8 +622,8 @@ private:
             };
             const int f16 = fit(KvType::F16);
             if (kv_ == KvType::Q8 && f16_reaches(f16, train)) {
-                fprintf(stderr, "ts5: f16 KV cache: the model's whole %d-token context fits in f16, the more exact\n",
-                        train);
+                ts5::log_line("ts5: f16 KV cache: the model's whole %d-token context fits in f16, the more exact",
+                              train);
                 kv_ = KvType::F16;
             }
             n_ctx_ = kv_ == KvType::F16 ? f16 : fit(kv_);
@@ -641,7 +643,7 @@ private:
         // fit_context keeps free for everything else.
         if (!mk(kc_, cache, false, true) || !mk(vc_, cache, false, true)) return false;
         if (scales && (!mk(ks_, scales, false, true) || !mk(vs_, scales, false, true))) return false;
-        fprintf(stderr, "ts5: %s: weights %.2f GiB, KV cache %.2f GiB (%s, %d tokens), %s memory\n", name_.c_str(),
+        ts5::log_line("ts5: %s: weights %.2f GiB, KV cache %.2f GiB (%s, %d tokens), %s memory", name_.c_str(),
                 weight_bytes_ / 1073741824.0, 2.0 * (cache + scales) / 1073741824.0, kv_type_name(kv_), n_ctx_,
                 x_.map ? "unified" : "device");
         return true;
@@ -1024,7 +1026,7 @@ private:
                 split_used_ = 0;
                 reduces_.clear();
                 no_barrier_ = false;
-                fprintf(stderr, "ts5: recording ahead stopped: %s\n", aerr.c_str());
+                ts5::log_line("ts5: recording ahead stopped: %s", aerr.c_str());
             }
             cpu_.ahead += now_ms() - t;
         }
@@ -1085,17 +1087,19 @@ private:
                 struct {
                     uint32_t head_dim, n_head, n_head_kv, pos0, rope_dims, neox, has_bias, has_norm, cache_off;
                     float rope_base, eps;
+                    uint32_t has_freqs;
                 } pc{(uint32_t)HD, (uint32_t)H, (uint32_t)HKV, (uint32_t)pos0, (uint32_t)hp_.rope_dims,
                      hp_.rope_neox ? 1u : 0u, L.bq ? 1u : 0u, L.q_norm ? 1u : 0u, cache_off, hp_.rope_base,
-                     hp_.rms_eps};
+                     hp_.rms_eps, m_.rope_freqs ? 1u : 0u};
                 const Buf &bq = L.bq ? W(L.bq) : dummy_, &bk = L.bk ? W(L.bk) : dummy_, &bv = L.bv ? W(L.bv) : dummy_;
                 const Buf &nq = L.q_norm ? W(L.q_norm) : dummy_, &nk = L.k_norm ? W(L.k_norm) : dummy_;
+                const Buf &ff = m_.rope_freqs ? W(m_.rope_freqs) : dummy_;
                 if (kv_ == KvType::Q8)
-                    dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_, &ks_, &vs_}, pc,
+                    dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_, &ks_, &vs_, &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
                 else
-                    dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_}, pc, (uint32_t)(H + HKV),
-                             (uint32_t)n);
+                    dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_, &ff}, pc,
+                             (uint32_t)(H + HKV), (uint32_t)n);
             }
             attention(n, pos0, cache_off);
             matmul(L.wo, att_, x_, n, true);
@@ -1218,8 +1222,9 @@ private:
     // Matrices of fewer blocks than mmb_min_ use mmb too where their split
     // makes that many workgroups (TS5_MMB_SMALL=0: the 64 x 64 kernel).
     bool mmb_small_ = true;
-    // mmb sums each step's 32 products in packed f16 (mmb16_*), where the
-    // device has f16 arithmetic (TS5_MMB_F16=0: f32 throughout).
+    // mmb sums each step's 32 products in packed f16 (mmb16_*) with
+    // TS5_MMB_F16=1, where the device has f16 arithmetic; f32 throughout by
+    // default.
     bool mmb_f16_ = false;
     size_t split_used_ = 0;  // floats of split_ that kernels may still read
     // The KV cache's type (TS5_KV=q8 or f16).
@@ -1277,7 +1282,7 @@ KvType kv_type_setting() {
     if (!e || !*e) return KvType::F16;
     const std::string v = e;
     if (v == "q8" || v == "8") return KvType::Q8;
-    if (v != "f16" && v != "16") fprintf(stderr, "ts5: TS5_KV=%s: not q8 or f16, using f16\n", e);
+    if (v != "f16" && v != "16") ts5::log_line("ts5: TS5_KV=%s: not q8 or f16, using f16", e);
     return KvType::F16;
 }
 

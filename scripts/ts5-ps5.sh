@@ -25,12 +25,14 @@
 #   scripts/ts5-ps5.sh websearch [KEY|off] the Tavily key for web search (in ts5.env, keeping the
 #                                          other settings), then restart; none: say if one is set
 #   scripts/ts5-ps5.sh press BUTTON...     press controller buttons (up down cross square ...)
-#   scripts/ts5-ps5.sh screenshot [FILE]   the TV picture, as a BMP (default screen.bmp)
+#   scripts/ts5-ps5.sh screenshot [FILE]   the TV picture, as a BMP (default screen.bmp), and its words as .txt
 #   scripts/ts5-ps5.sh audiotest [FILE]    tones on the TV and the controller, then 8 s from its
 #                                          mic played back; prints the results, saves the
 #                                          recording (default audiotest.wav)
 #   scripts/ts5-ps5.sh chat MESSAGE...     a message on the TV's chat page; waits for the
 #                                          reply there and prints how it went
+#   scripts/ts5-ps5.sh type TEXT...        text for the next keyboard on the TV (a key's name,
+#                                          a search), sent as typed: then press cross on the row
 #   scripts/ts5-ps5.sh whispertest [WAV]   speech to text on the console's CPU with the first
 #                                          ggml-*.bin in models: WAV (16 kHz mono 16-bit; else the
 #                                          last one sent, or audiotest.wav); prints times and text
@@ -255,6 +257,8 @@ for m in json.load(sys.stdin)["data"]:
         put_text screenshot ""
         sleep 2
         curl -sS "$ftp$dir/screen.bmp" -o "$out"
+        # The words on it too, one string a line (a title before plain words has none).
+        curl -sS "$ftp$dir/screen.txt" -o "${out%.bmp}.txt" 2> /dev/null && echo "ts5-ps5: ${out%.bmp}.txt"
         echo "ts5-ps5: $out"
         ;;
     audiotest)
@@ -280,6 +284,11 @@ for m in json.load(sys.stdin)["data"]:
             [ "$(replies)" -gt "$before" ] && break
         done
         log_lines "^ts5-title: chat: (reply |not sent)" | tail -1
+        ;;
+    type)
+        [ $# -gt 0 ] || { echo "ts5-ps5: type needs some text" >&2; exit 2; }
+        put_text type "$*"
+        echo "ts5-ps5: the next keyboard takes it; press cross on the row"
         ;;
     whispertest)
         if [ $# -gt 0 ]; then
