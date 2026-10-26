@@ -75,10 +75,24 @@ wait_down() {
 wait_api() {
     echo "ts5-ps5: waiting for http://$PS5_HOST:$PS5_API_PORT"
     for _ in $(seq 1 120); do
-        if curl -sf "http://$PS5_HOST:$PS5_API_PORT/health" > /dev/null; then
+        local health
+        health=$(curl -s -w ' %{http_code}' "http://$PS5_HOST:$PS5_API_PORT/health" 2> /dev/null || true)
+        if [ "${health##* }" = 200 ]; then
             echo "ts5-ps5: ready at http://$PS5_HOST:$PS5_API_PORT/v1"
             return 0
         fi
+        # Up with no model: if the title refused it, there's nothing to wait
+        # for. Its log starts afresh with each start, so the line is this one's.
+        case $health in
+            *'"no model"'*)
+                local refused
+                refused=$(log_lines "^ts5-title: couldn't load " | tail -1)
+                if [ -n "$refused" ]; then
+                    echo "$refused" >&2
+                    return 1
+                fi
+                ;;
+        esac
         sleep 5
     done
     echo "ts5-ps5: no answer after 10 minutes; see: scripts/ts5-ps5.sh log" >&2
