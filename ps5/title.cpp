@@ -1342,6 +1342,10 @@ int main(int, char **) {
         // Nor does the screen go dark while a reply comes in on the chat page,
         // or is read aloud.
         if ((chat_active || v.speaking) && dash.page() == ui::Dashboard::Chat) last_input = t;
+        // Nor while Settings waits for this PS5 to be signed in to Tailscale:
+        // someone may be walking up to scan its code.
+        if (dash.page() == ui::Dashboard::Settings && tailnet.status().state == ts::Status::NeedsSignIn)
+            last_input = t;
         // A new key shows only until Settings is left.
         if (dash.page() != ui::Dashboard::Settings) {
             fresh_key.clear();
