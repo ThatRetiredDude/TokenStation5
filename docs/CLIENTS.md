@@ -112,6 +112,11 @@ For agent work (editing files, then running them), use Qwen 3 8B. On the PS5
 it took every step of a write-then-run task; Qwen 2.5 Coder 7B wrote the file
 and then stopped in 4 of 4 runs, without running it.
 
+Given tools, Llama 3.1 8B and 3.2 3B call one even when the question needs
+none: asked to say hello with only a weather tool, they ask for the weather
+in Paris. Meta says the same of its 8B model. For plain chat with a Llama,
+leave the tools out, or use a Qwen model.
+
 ## Continue, Cline, Roo Code and others
 
 Choose the "OpenAI compatible" (or "OpenAI", with a custom base URL)

@@ -79,6 +79,23 @@ SKIP = {("meta-llama-Llama-3.1-8B-Instruct", "tool messages, no tools"),
         ("meta-llama-Llama-3.2-3B-Instruct", "tool messages, no tools")}
 
 
+# What ts5 writes differently from Llama 3's template, on purpose (tools.cpp,
+# kLlama3Guidance): words on when not to call and what to do with a result,
+# and a result as {"output": ...}.
+LLAMA3_GUIDANCE = (" Only reply with a function call if the function exists in the list below; if none fits, reply "
+                   "directly in natural language. When you receive a function's output, use it to answer the "
+                   "original question.")
+
+
+def as_ts5_writes_it(name, template):
+    if not name.startswith("meta-llama-"):
+        return template
+    a, b = '"Do not use variables.\\n\\n"', '"Do not use variables.%s\\n\\n"' % LLAMA3_GUIDANCE
+    c, d = "message.content | tojson", '{"output": message.content} | tojson'
+    assert a in template and c in template, name
+    return template.replace(a, b).replace(c, d)
+
+
 def render(template, messages, tools):
     env = jinja2.sandbox.ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True,
                                                        extensions=[jinja2.ext.loopcontrols])
@@ -112,7 +129,7 @@ def test_prompts(ts5, model, tdir):
     failed = 0
     for name in TEMPLATES:
         path = os.path.join(tdir, name + ".jinja")
-        template = open(path).read()
+        template = as_ts5_writes_it(name, open(path).read())
         for case, messages, tools in CASES:
             if (name, case) in SKIP:
                 continue
@@ -175,6 +192,9 @@ def test_parser(ts5):
         ("llama3", '<|python_tag|>{"name": "a", "parameters": {}}; {"name": "b", "parameters": {"x": "y"}}',
          "", [("a", {}), ("b", {"x": "y"})], 0),
         ("llama3", '{"answer": 42}', '{"answer": 42}', [], 0),
+        # Code with bare quotes in a call (Llama 3.2 3B, from the console).
+        ("llama3", '{"name": "write_file", "parameters": {"path": "f.py", "content": "if x:\\n    print("Fizz")"}}',
+         "", [("write_file", {"path": "f.py", "content": 'if x:\n    print("Fizz")'})], 0),
         ("llama3", "Hello {there}", "Hello {there}", [], 13),
     ]
     failed = 0
