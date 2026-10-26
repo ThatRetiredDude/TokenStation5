@@ -703,8 +703,10 @@ void SettingsPage::draw(Canvas &c, const SettingsInfo &info, int x, int y, int w
             continue;
         }
         const bool sel = p.row == sel_;
+        // While the panel on the right has the buttons, its row only stays lit.
+        const bool away = sel && (in_guide_ || in_wg_);
         c.round_rect((float)lx, (float)ry, (float)lw, (float)kRowH, 14, sel ? kRowSel : kRow);
-        if (sel) c.round_rect_line((float)lx, (float)ry, (float)lw, (float)kRowH, 14, 2.5f, kAccent);
+        if (sel && !away) c.round_rect_line((float)lx, (float)ry, (float)lw, (float)kRowH, 14, 2.5f, kAccent);
         const std::string v = shown(r, info);
         const bool changeable = !typed(r) && !choices(r, info).empty();
         int right = lx + lw - 24;
@@ -717,7 +719,7 @@ void SettingsPage::draw(Canvas &c, const SettingsInfo &info, int x, int y, int w
         }
         const Color vc = is_key(r)                  ? (current(r).empty() ? kText2 : kGreen)
                          : r.kind == Row::WgRequest || (r.kind == Row::WgMenu && info.wg.waiting) ? kAmber
-                         : sel                      ? kAccent
+                         : sel && !away             ? kAccent
                                                     : kText2;
         const int vx = c.text_right(bodyb_, right, ry + 42, v, vc);
         if (sel && changeable) {
