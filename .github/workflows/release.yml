@@ -91,7 +91,7 @@ jobs:
               "name": "TokenStation5",
               "kind": "app",
               "category": "ai",
-              "description": "Turn your PS5 into a private AI server: run Qwen, Llama and more on its GPU, talk to it with the controller's mic, hear replies on the TV or controller speaker, and plug in any OpenAI-compatible app.",
+              "description": "Private AI server on your PS5: Qwen and Llama on its GPU behind an OpenAI-compatible API, with API keys, Tailscale for away from home, voice in and out, chat on the TV and Hugging Face downloads.",
               # The repo is dual-licensed (PolyForm root, GPL-3.0-or-later for
               # the ps5/ title), so GitHub detects no single SPDX license
               # (NOASSERTION). The catalog's sentinel for that case is

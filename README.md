@@ -6,7 +6,7 @@
 
 ### The PS5 was built to push pixels. We're teaching it to push tokens.
 
-Your PS5 becomes a private AI assistant for the whole house. Talk to it with the controller, chat with it on the TV, or plug it into the coding tools and chat apps you already use. No cloud, no subscription, and your conversations stay at home.
+Your PS5 becomes a private AI assistant for the whole house. Talk to it with the controller, chat with it on the TV, or plug it into the coding tools and chat apps you already use, at home or away with Tailscale. No cloud, no subscription, and your conversations stay at home.
 
 [![Prospero Store](https://img.shields.io/badge/Prospero_Store-PPSA99555-003791?style=for-the-badge&logo=playstation&logoColor=white)](https://github.com/darkxex/ProsperoStore)
 [![License](https://img.shields.io/badge/license-PolyForm_SB_%2F_GPL--3.0-yellow?style=for-the-badge)](LICENSING.md)
@@ -44,6 +44,21 @@ The console serves the same API that OpenAI-compatible apps already speak, so
 it drops straight into Kilo Code, Continue, aider, opencode, Open WebUI or your own
 scripts. Point them at the PS5's address and you have a local coding model
 for every machine on your network, with no per-token bill.
+
+### 🔑 A key for each app
+
+Make a key on the TV for each app, named after it, and turn on Require a
+key: apps on your network then need one, the way they'd use an OpenAI key,
+and Home shows each app's requests under its name. Turn a key off to shut
+that app out without removing it.
+
+### 🌍 Away from home with Tailscale
+
+Turn on Tailscale in Settings and scan the code with your phone: the PS5
+joins your tailnet as a device of its own, with nothing to set up on the
+router. Your phone, tablet or laptop then reaches it from anywhere, through
+Tailscale's private network, with one of your keys. It works even where no
+port can be opened, like a building's shared internet.
 
 ### ⚡ Fast enough to actually use
 
