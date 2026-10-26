@@ -74,7 +74,7 @@ struct Action {
     enum Kind {
         None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear, ChatType, Set, TypeSetting,
         Download, StopDownload, RemovePart, Remove, NewKey, KeyOn, RemoveKey, Search,
-        ChatOpen, ChatSearch, ChatSearchClear, ChatRemove, WgDeviceOn, WgRemoveDevice, WgNewKey, WgAnswer
+        ChatOpen, ChatSearch, ChatSearchClear, ChatRemove, WgDeviceOn, WgRemoveDevice, WgNewKey, WgAnswer, WgPhone
     } kind = None;
     std::string path;         // Remove: the model's file
     std::vector<std::string> keys;  // Download, StopDownload, RemovePart: catalog entries

@@ -283,6 +283,47 @@ WgStore::State WgStore::state_of(const std::string &public_key) {
     return State::None;
 }
 
+bool WgStore::add_made(const std::string &name, WgDevice &out, std::string &private_key, std::string &err) {
+    const std::string nm = clean(name);
+    if (nm.empty()) {
+        err = "Give the device a name, such as Phone.";
+        return false;
+    }
+    std::string priv, pub;
+    unsigned char b[4];
+    if (!wg::make_keys(priv, pub) || !ts5::random_bytes(b, sizeof b)) {
+        err = "no random numbers";
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(mu_);
+    if ((int)devices_.size() >= wg::kMaxPeers) {
+        err = "This PS5 already has " + std::to_string(wg::kMaxPeers) + " devices. Remove one first.";
+        return false;
+    }
+    const std::string address = free_address_locked();
+    if (address.empty()) {
+        err = "No addresses left. Remove a device first.";
+        return false;
+    }
+    char id[9];
+    snprintf(id, sizeof id, "%02x%02x%02x%02x", b[0], b[1], b[2], b[3]);
+    WgDevice d;
+    d.id = id;
+    d.name = nm;
+    d.public_key = pub;
+    d.address = address;
+    d.added = (int64_t)time(nullptr);
+    devices_.push_back(d);
+    if (!save_locked(err)) {
+        devices_.pop_back();
+        return false;
+    }
+    printf("ts5-title: wireguard: added %s as %s, its keys made here\n", d.name.c_str(), d.address.c_str());
+    out = d;
+    private_key = priv;
+    return true;
+}
+
 bool WgStore::answer(bool yes, std::string &err) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!has_request_) return true;

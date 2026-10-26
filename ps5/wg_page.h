@@ -19,6 +19,7 @@ struct WgPageInfo {
     std::string public_key;  // the PS5's
     int port = 9030;         // UDP
     int api_port = 8081;
+    std::string home;  // the tunnels' endpoint host, if the PS5 knows it (Home address, or looked up)
 };
 
 // Server::Pages for /wireguard; false for any other path. client: the

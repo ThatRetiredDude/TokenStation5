@@ -49,6 +49,11 @@ struct WgInfo {
     std::vector<WgDeviceInfo> devices;
     bool waiting = false;  // a device asks to join
     std::string waiting_name, waiting_address, waiting_from;  // from: its address on the home network
+    std::string home;            // the tunnel's endpoint host: Home address, or the PS5's public address
+    bool home_looked_up = false;  // home is the public address the PS5 looked up
+    // A phone or tablet just added on the TV: its whole tunnel (private key
+    // and all) for the code, until the title forgets it.
+    std::string tunnel, tunnel_name;
 };
 
 // What the page shows besides the settings themselves.
@@ -87,6 +92,7 @@ struct SettingChange {
     std::string wg_device;  // a WireGuard device to turn on or off (wg_on), or to remove
     bool wg_on = false, wg_remove = false;
     bool wg_new_key = false;  // a new key pair for this PS5
+    bool wg_phone = false;    // name a phone or tablet on the console's keyboard, to add it with keys made here
     int wg_answer = 0;        // the device asking to join: 1 let it in, -1 refuse it
 };
 

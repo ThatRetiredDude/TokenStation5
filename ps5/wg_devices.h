@@ -1,8 +1,9 @@
 // The WireGuard devices this PS5 lets in, and its own key, kept in
 // wireguard.tsv in the title's folder (wg/wg.h runs the tunnel). Each
-// device makes its own key pair (in the join page, in its browser, or in its
-// WireGuard app) and gives the PS5 only the public half: the PS5 never makes
-// or keeps a device's private key. A device asks to join from a page the API
+// computer makes its own key pair (in the join page, in its browser, or in
+// its WireGuard app) and gives the PS5 only the public half. A phone or
+// tablet can instead be added on the TV: the PS5 makes its key pair and shows
+// the tunnel as a code for its WireGuard app, and keeps only the public half. A device asks to join from a page the API
 // serves on the home network (/wireguard, wg_page.h), and joins only once
 // someone approves it on the TV.
 //
@@ -58,6 +59,12 @@ public:
              std::string &err);
     // The waiting request, if there is one (they lapse after 10 minutes).
     bool waiting(WgRequest &out);
+    // From the TV: a phone or tablet added at once (the press on the TV lets
+    // it in), its key pair made here. Its private key goes only to
+    // private_key, for the code the TV shows: the store keeps the public
+    // half alone. False with err (in plain words) when it can't be added.
+    bool add_made(const std::string &name, WgDevice &out, std::string &private_key, std::string &err);
+
     // For the page: what became of the device that asked with public_key.
     enum class State { None, Waiting, In, Off };  // None: refused, lapsed or never asked
     State state_of(const std::string &public_key);
