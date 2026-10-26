@@ -683,13 +683,11 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
              kText);
         ty += 8;
         para("2. Install WireGuard on your computer, phone or tablet. At home, open the address above in its "
-             "browser (Settings, WireGuard, Add a device has it as a code to scan), name the device and ask to join.",
+             "browser (Add a device has it as a code to scan) and ask to join. A blank page: turn off its VPN.",
              kText);
         ty += 8;
-        para("3. Let the device in here when it asks, and open the tunnel the page then gives it in WireGuard. "
-             "Away from home, with the tunnel on, apps use "
-             "http://10.55.0.1:" + std::to_string(info.api_port) + "/v1 and one of your keys: over WireGuard a key "
-             "is always needed.",
+        para("3. Let it in here, then open the tunnel the page gives it in WireGuard. Away from home, apps use "
+             "http://10.55.0.1:" + std::to_string(info.api_port) + "/v1 and one of your keys, always needed there.",
              kText);
         ty += 8;
         para("If your internet provider shares one address among many homes (CGNAT), a forwarded port can't be "
@@ -771,6 +769,10 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
              kText);
         step("3. Let it in here. The page then gives the device its tunnel, ready to open in WireGuard.", kText);
         ty = std::max(sy, side > 0 ? ty - 8 + side + 24 : 0);
+        para("The page stays blank? Turn off the device's VPN while you add it, or let the VPN reach your home "
+             "network.",
+             kAmber);
+        ty += 8;
         para("Instructions, at the top, has the rest: the port on your router, and the address apps use.", kText2);
     } else if (const WgDeviceInfo *d = device_of(r, info)) {
         field("NOW", !d->on ? "Off" : d->up ? "Connected" : "On, not connected", !d->on ? kText2 : d->up ? kGreen : kText,

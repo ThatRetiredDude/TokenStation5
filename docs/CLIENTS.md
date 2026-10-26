@@ -55,7 +55,9 @@ only ever gets the public half.
    `http://192.168.1.50:8081/wireguard` (the PS5's address) in its browser.
    Give the device a name and press Ask to join. The page makes the
    device's key pair there, in the browser, and sends the PS5 only the public
-   half.
+   half. If the page stays blank, the device's VPN is probably sending the
+   PS5's address away from home: turn it off while you add the device, or let
+   it reach the local network.
 3. The TV says the device asks to join: in Settings, WireGuard, press cross
    on it to let it in (square refuses it).
 4. The page then has the tunnel ready: check your home's address on the
