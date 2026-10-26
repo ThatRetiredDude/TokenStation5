@@ -766,8 +766,8 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
             sy += 8;
         };
         step("1. Install WireGuard on the device, from wireguard.com/install or its app store.", kText);
-        step("2. At home, scan the code with the device's camera, or type the address in its browser. Name the "
-             "device and ask to join.",
+        step("2. At home, scan the code with the device's camera app (not WireGuard's own scanner), or type the "
+             "address in its browser. Name the device and ask to join.",
              kText);
         step("3. Let it in here. The page then gives the device its tunnel, ready to open in WireGuard.", kText);
         ty = std::max(sy, side > 0 ? ty - 8 + side + 24 : 0);
