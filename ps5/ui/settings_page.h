@@ -9,7 +9,9 @@
 // has the instructions (cross opens their list on the right, up and down
 // choose a guide, cross opens it and cross again goes back), turns "Require a key" on and off, makes API
 // keys (keys.h; cross names a new one, and it shows once on its row) and
-// turns each key on and off (cross) or removes it (square twice).
+// turns each key on and off (cross) or removes it (square twice). The
+// settings follow in four sections: CHAT, VOICE, CONSOLE and, last, TUNING
+// for the frame rate, thread counts and the detailed log, which few change.
 //
 // AWAY FROM HOME has Tailscale, turned on and off with cross; its whole setup
 // is on the right: the code to scan to sign the PS5 in, then its tailnet
