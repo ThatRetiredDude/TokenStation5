@@ -187,7 +187,7 @@ bool KeyStore::remove(const std::string &id, std::string &err) {
     return false;
 }
 
-bool KeyStore::authorize(const std::string &key, const std::string &client, std::string &name) {
+bool KeyStore::authorize(const std::string &key, const std::string &client, std::string &name, bool need_key) {
     name.clear();
     if (!key.empty()) {
         const std::string h = ts5::sha256_hex(key);
@@ -204,7 +204,7 @@ bool KeyStore::authorize(const std::string &key, const std::string &client, std:
             }
     }
     // The title's own Chat page comes from the console itself.
-    return !required_ || client == "127.0.0.1";
+    return !need_key && (!required_ || client == "127.0.0.1");
 }
 
 void KeyStore::save_used(int64_t now) {
