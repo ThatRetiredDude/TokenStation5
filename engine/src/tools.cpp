@@ -58,6 +58,38 @@ size_t object_end(const std::string &s, size_t at) {
     return std::string::npos;
 }
 
+// JSON with bare quotes in its strings, as Llama 3.2 3B writes code in a call
+// ("content": "...print("Fizz")...", seen on the console): a quote in a
+// string ends it only when what follows can follow a string (, : } ] or the
+// end), and any other quote is escaped.
+std::string escape_bare_quotes(const std::string &s) {
+    std::string out;
+    bool in_str = false;
+    for (size_t i = 0; i < s.size(); i++) {
+        const char c = s[i];
+        if (in_str && c == '\\' && i + 1 < s.size()) {
+            out += c;
+            out += s[++i];
+            continue;
+        }
+        if (c == '"') {
+            if (!in_str) {
+                in_str = true;
+            } else {
+                const size_t n = s.find_first_not_of(" \t\r\n", i + 1);
+                if (n == std::string::npos || std::string(",:}]").find(s[n]) != std::string::npos) {
+                    in_str = false;
+                } else {
+                    out += "\\\"";
+                    continue;
+                }
+            }
+        }
+        out += c;
+    }
+    return out;
+}
+
 // {"name": ..., "arguments"/"parameters": {...}} as a call, or false.
 bool call_from_json(const std::string &text, ToolCall &call) {
     Json j;
@@ -149,6 +181,19 @@ std::string render_hermes(const Tokenizer &t, const std::vector<Message> &msgs, 
     return s + "<|im_start|>assistant\n";
 }
 
+// Llama 3's template only asks for a call, and given a tool's result as it
+// writes it (the text as a JSON string), Llama 3.1 8B and 3.2 3B called a tool
+// again instead of answering, every time (console, 2026-10-26). With these
+// words after the template's and the result as {"output": "..."}, as vLLM's
+// template writes it, both answered from the result every time.
+const char *const kLlama3Guidance =
+    " Only reply with a function call if the function exists in the list below; if none fits, reply directly in "
+    "natural language. When you receive a function's output, use it to answer the original question.";
+
+std::string llama3_output(const std::string &result) {
+    return Json::object().set("output", Json::string(result)).dump();
+}
+
 std::string render_llama3(const std::vector<Message> &all, const std::vector<Json> &tools, const std::string &today) {
     std::vector<Message> msgs = all;
     std::string system;
@@ -165,14 +210,15 @@ std::string render_llama3(const std::vector<Message> &all, const std::vector<Jso
              "Given the following functions, please respond with a JSON for a function call with its proper "
              "arguments that best answers the given prompt.\n\n"
              "Respond in the format {\"name\": function name, \"parameters\": dictionary of argument name and its "
-             "value}.Do not use variables.\n\n";
+             "value}.Do not use variables." +
+             std::string(kLlama3Guidance) + "\n\n";
         for (auto &tool : tools) s += tool.dump(4) + "\n\n";
         s += strip(msgs[0].content) + "<|eot_id|>";
         msgs.erase(msgs.begin());
     }
     for (auto &m : msgs) {
         if (m.role == "tool" || m.role == "ipython") {
-            s += "<|start_header_id|>ipython<|end_header_id|>\n\n" + Json::string(m.content).dump() + "<|eot_id|>";
+            s += "<|start_header_id|>ipython<|end_header_id|>\n\n" + llama3_output(m.content) + "<|eot_id|>";
         } else if (!m.calls.empty()) {
             // One call per turn: the models were trained on single calls.
             for (auto &c : m.calls)
@@ -260,7 +306,7 @@ std::string render_results(ToolFormat f, const std::vector<std::string> &results
     } else if (f == ToolFormat::LLAMA3) {
         s = "<|eot_id|>";
         for (auto &r : results)
-            s += "<|start_header_id|>ipython<|end_header_id|>\n\n" + Json::string(r).dump() + "<|eot_id|>";
+            s += "<|start_header_id|>ipython<|end_header_id|>\n\n" + llama3_output(r) + "<|eot_id|>";
         s += "<|start_header_id|>assistant<|end_header_id|>\n\n";
     }
     return s;
@@ -656,17 +702,21 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
     } else if (f == ToolFormat::LLAMA3) {
         std::string s = strip(text);
         if (starts(s, "<|python_tag|>")) s = lstrip(s.substr(14));
+        // Nothing but calls, or false.
+        auto only_calls = [&](const std::string &s, std::vector<ToolCall> &calls) {
+            size_t i = 0;
+            while (i < s.size() && s[i] == '{') {
+                size_t e = object_end(s, i);
+                ToolCall call;
+                if (e == std::string::npos || !call_from_json(s.substr(i, e - i), call)) return false;
+                calls.push_back(call);
+                i = s.find_first_not_of(" \t\r\n;", e);
+                if (i == std::string::npos) i = s.size();
+            }
+            return i == s.size() && !calls.empty();
+        };
         std::vector<ToolCall> calls;
-        size_t i = 0;
-        while (i < s.size() && s[i] == '{') {
-            size_t e = object_end(s, i);
-            ToolCall call;
-            if (e == std::string::npos || !call_from_json(s.substr(i, e - i), call)) return r;
-            calls.push_back(call);
-            i = s.find_first_not_of(" \t\r\n;", e);
-            if (i == std::string::npos) i = s.size();
-        }
-        if (i == s.size() && !calls.empty()) {  // nothing but calls
+        if (only_calls(s, calls) || (calls.clear(), only_calls(escape_bare_quotes(s), calls))) {
             r.calls = calls;
             r.content.clear();
         }
