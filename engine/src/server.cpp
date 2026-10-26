@@ -166,6 +166,10 @@ std::string api_id(const std::string &file) {
 // is told to answer with what it has.
 constexpr int kSearchRounds = 3;
 
+// A reply capped under this many tokens leaves no room to think first: a
+// thinking model answers it at once, unless the request asks for thinking.
+constexpr double kThinkRoom = 1024;
+
 std::string tool_calls_json(const std::vector<ToolCall> &calls, bool with_index) {
     std::string s = "[";
     for (size_t i = 0; i < calls.size(); i++) {
@@ -383,6 +387,24 @@ void handle(int fd, Server::State &state, Usage &u) {
         bool web = false;
         std::string prompt;
         std::vector<Message> msgs;
+        // No max_tokens (or 0, or -1, as some clients send for "no limit"):
+        // until the model stops or the context is full, as OpenAI does.
+        const double limit = req["max_tokens"].num(req["max_completion_tokens"].num(0));
+        // Thinking off, for a model whose template can do it: Qwen3's switch
+        // as vLLM and llama.cpp take it ("chat_template_kwargs":
+        // {"enable_thinking": false}, or at the top level), "reasoning_effort":
+        // "none", or a reply capped under kThinkRoom (an app naming a chat or
+        // finishing a line), where the thinking would use up the limit and
+        // leave the answer empty.
+        std::string opening;  // what opens the model's turn
+        if (chat && can_skip_thinking(e.tok())) {
+            const Json &kw = req["chat_template_kwargs"]["enable_thinking"];
+            const Json &asked = kw.type == Json::BOOL ? kw : req["enable_thinking"];
+            const bool think = asked.type == Json::BOOL            ? asked.boolean(true)
+                               : req["reasoning_effort"].str() == "none" ? false
+                                                                         : !(limit >= 1 && limit < kThinkRoom);
+            if (!think) opening = kNoThinking;
+        }
         if (chat) {
             msgs = parse_messages(req["messages"]);
             if (tf != ToolFormat::NONE && req["tool_choice"].str() != "none") {
@@ -400,7 +422,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                                              : web_search_always() || (tools.empty() && needs_web(last_user)));
                 if (web) tools.push_back(web_search_tool(date));
             }
-            prompt = render_chat(e.tok(), msgs, tools, date);
+            prompt = render_chat(e.tok(), msgs, tools, date) + opening;
         } else {
             prompt = req["prompt"].str();
         }
@@ -440,9 +462,6 @@ void handle(int fd, Server::State &state, Usage &u) {
         sp.temperature = (float)req["temperature"].num(0.7);
         sp.top_p = (float)req["top_p"].num(0.95);
         sp.top_k = (int)req["top_k"].num(40);
-        // No max_tokens (or 0, or -1, as some clients send for "no limit"):
-        // until the model stops or the context is full, as OpenAI does.
-        const double limit = req["max_tokens"].num(req["max_completion_tokens"].num(0));
         sp.max_tokens = limit >= 1 ? (int)std::min(limit, (double)n_ctx) : n_ctx;
         sp.seed = (uint64_t)req["seed"].num(0);
         const bool stream = req["stream"].boolean(false);
@@ -457,9 +476,8 @@ void handle(int fd, Server::State &state, Usage &u) {
         // Where the answer starts in a turn's text: past its thinking and the
         // space after it; text.size() while it's still thinking, or while it
         // could yet turn out to be thinking. open: just past <think>, or npos.
-        auto answer_start = [&](const std::string &text, size_t &open) {
+        auto thinking_end = [&](const std::string &text, size_t &open) {
             open = std::string::npos;
-            if (!split_think) return (size_t)0;
             const std::string tag = "<think>";
             const size_t i = text.find_first_not_of(" \t\r\n");
             if (i == std::string::npos) return text.size();
@@ -471,6 +489,12 @@ void handle(int fd, Server::State &state, Usage &u) {
             if (close == std::string::npos) return text.size();
             const size_t a = text.find_first_not_of(" \t\r\n", close + 8);
             return a == std::string::npos ? text.size() : a;
+        };
+        // The same with split_think; 0 without, the thinking staying in the content.
+        auto answer_start = [&](const std::string &text, size_t &open) {
+            if (split_think) return thinking_end(text, open);
+            open = std::string::npos;
+            return (size_t)0;
         };
         std::vector<std::string> stops;
         if (req["stop"].type == Json::STR) stops.push_back(req["stop"].s);
@@ -514,6 +538,7 @@ void handle(int fd, Server::State &state, Usage &u) {
         int max_tokens = sp.max_tokens;
         std::string search_failed;      // why the first failed search failed
         std::vector<std::string> found;  // what the searches found, for a forced answer
+        bool answered_without_tools = false;  // after a made-up call
         double first = -1;               // when the first text came
         // A turn of the model's; with web_search, ts5 answers the model's
         // searches and lets it go on, so one request can be several turns.
@@ -547,8 +572,12 @@ void handle(int fd, Server::State &state, Usage &u) {
                 if (first < 0) first = now_ms();
                 count();
                 text += piece;
+                // A stop string ends the answer, not the thinking before it
+                // (a count to 10 thinks the 7 that stops it).
+                size_t ignored;
+                const size_t from = stops.empty() ? 0 : thinking_end(text, ignored);
                 for (auto &s : stops) {
-                    size_t at = s.empty() ? std::string::npos : text.find(s);
+                    size_t at = s.empty() || from >= text.size() ? std::string::npos : text.find(s, from);
                     if (at != std::string::npos) { text.resize(at); stopped = true; }
                 }
                 if (stream) {
@@ -641,18 +670,35 @@ void handle(int fd, Server::State &state, Usage &u) {
                 content += text.substr(std::min(answer, text.size()));
                 break;
             }
-            ParsedTurn pt = parse_turn(tf, text);
+            std::vector<std::string> names;
+            for (const Json &t : tools) names.push_back(t["function"]["name"].str());
+            ParsedTurn pt = parse_turn(tf, text, names);
             // A call to a tool the request doesn't have is the model making
-            // one up (say_hello for "Say hello in one word.", seen on the
-            // console): the turn stays text.
+            // one up (say_hello for "Say hello in one word.", math.multiply
+            // for "What is 7 times 6?", seen on the console): no tool fits,
+            // so it answers once more without tools, when it didn't think
+            // and nothing of the answer has gone out yet. Past that, the turn
+            // stays text.
+            std::string made_up;
             for (const ToolCall &c : pt.calls) {
                 bool known = false;
                 for (const Json &t : tools) known |= t["function"]["name"].str() == c.name;
                 if (!known) {
-                    pt.calls.clear();
-                    pt.content = text;
+                    made_up = c.name;
                     break;
                 }
+            }
+            if (!made_up.empty()) {
+                if (!answered_without_tools && open == std::string::npos && sent <= answer && !stopped &&
+                    st.gen_tokens < max_tokens) {
+                    answered_without_tools = true;
+                    log_line("ts5: %s made-up tool %s: answering without tools", id.c_str(), made_up.c_str());
+                    prompt = render_chat(e.tok(), msgs, {}, date) + opening;
+                    use_tools = false;
+                    continue;
+                }
+                pt.calls.clear();
+                pt.content = text;
             }
             // pt.content is the turn's text, calls taken out after the thinking.
             const size_t from = std::min(answer, pt.content.size());
@@ -687,7 +733,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                 std::vector<Message> last = msgs;
                 if (last.empty() || last.back().role != "user") last.push_back({"user", "", {}});
                 last.back().content += (last.back().content.empty() ? "" : "\n\n") + note;
-                prompt = render_chat(e.tok(), last, {}, date);
+                prompt = render_chat(e.tok(), last, {}, date) + opening;
                 use_tools = false;
                 continue;
             }
@@ -707,7 +753,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                 }
                 log_line("ts5: %s %s", id.c_str(), log.c_str());
             }
-            prompt += text + render_results(tf, results);
+            prompt += text + render_results(tf, results) + opening;
         }
         {
             std::lock_guard<std::mutex> g(state.stats);

@@ -100,9 +100,22 @@ Then pick `tokenstation5/Qwen2.5-Coder-7B-Instruct-Q4_K_M` as the model.
 Put the model's `context_length` from `/v1/models` in `limit.context`. Leave
 `reasoning` out for the Llama and Qwen 2.5 models (only Qwen 3 thinks).
 
+Qwen 3 thinks before it answers, and the thinking comes back apart from the
+answer, as `reasoning_content`. To skip it for a request, send
+`"chat_template_kwargs": {"enable_thinking": false}` (as vLLM and llama.cpp
+take it) or end the message with `/no_think`. A reply capped under 1,024
+tokens (`max_tokens`) never thinks, so an app asking for a short title or a
+line of code still gets an answer. Stop strings end the answer, never the
+thinking.
+
 For agent work (editing files, then running them), use Qwen 3 8B. On the PS5
 it took every step of a write-then-run task; Qwen 2.5 Coder 7B wrote the file
 and then stopped in 4 of 4 runs, without running it.
+
+Given tools, Llama 3.1 8B and 3.2 3B sometimes call one the question doesn't
+need: asked for a poem about rain with only a weather tool, Llama 3.1 8B asks
+for the weather in London. Meta says the same of its 8B model. For plain chat with a
+Llama, leave the tools out, or use a Qwen model.
 
 ## Continue, Cline, Roo Code and others
 

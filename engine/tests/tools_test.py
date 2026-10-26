@@ -79,6 +79,30 @@ SKIP = {("meta-llama-Llama-3.1-8B-Instruct", "tool messages, no tools"),
         ("meta-llama-Llama-3.2-3B-Instruct", "tool messages, no tools")}
 
 
+# What ts5 writes differently from Llama 3's template, on purpose (tools.cpp,
+# kLlama3Tools): its own words before the tools, which say when not to call
+# and what to do with a result, and a result as {"output": ...}.
+LLAMA3_TOOLS = ("You can call the following functions. To call one, respond with only a JSON object in the format "
+                "{\"name\": function name, \"parameters\": dictionary of argument name and its value}. Do not use "
+                "variables. If the question doesn't need any of these functions, answer it directly in natural "
+                "language instead. When you receive a function's output, use it to answer the original question.")
+
+
+def as_ts5_writes_it(name, template):
+    if not name.startswith("meta-llama-"):
+        return template
+    words = [('"Given the following functions, please respond with a JSON for a function call "', "ts5_tools"),
+             ('"with its proper arguments that best answers the given prompt.\\n\\n"', '""'),
+             ("""'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.'""",
+              '""'),
+             ('"Do not use variables.\\n\\n"', '"\\n\\n"'),
+             ("message.content | tojson", '{"output": message.content} | tojson')]
+    for old, new in words:
+        assert old in template, (name, old)
+        template = template.replace(old, new)
+    return template
+
+
 def render(template, messages, tools):
     env = jinja2.sandbox.ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True,
                                                        extensions=[jinja2.ext.loopcontrols])
@@ -91,7 +115,8 @@ def render(template, messages, tools):
 
     env.filters["tojson"] = tojson
     env.globals["raise_exception"] = raise_exception
-    kw = {"messages": messages, "add_generation_prompt": True, "bos_token": "<|begin_of_text|>"}
+    kw = {"messages": messages, "add_generation_prompt": True, "bos_token": "<|begin_of_text|>",
+          "ts5_tools": LLAMA3_TOOLS}
     if tools:
         kw["tools"] = tools
     return env.from_string(template).render(**kw)
@@ -112,7 +137,7 @@ def test_prompts(ts5, model, tdir):
     failed = 0
     for name in TEMPLATES:
         path = os.path.join(tdir, name + ".jinja")
-        template = open(path).read()
+        template = as_ts5_writes_it(name, open(path).read())
         for case, messages, tools in CASES:
             if (name, case) in SKIP:
                 continue
@@ -135,8 +160,8 @@ def test_prompts(ts5, model, tdir):
     return failed
 
 
-def parse(ts5, fmt, text):
-    r = subprocess.run([ts5, "tool-parse", fmt], input=text, text=True, capture_output=True, check=True)
+def parse(ts5, fmt, text, names=()):
+    r = subprocess.run([ts5, "tool-parse", fmt, *names], input=text, text=True, capture_output=True, check=True)
     return json.loads(r.stdout)
 
 
@@ -149,7 +174,7 @@ def test_parser(ts5):
          "Let me look.", [("a", {}), ("b", {"n": 2})], 13),
         # Thinking that mentions the tag is not a call.
         ("hermes", '<think>\nMaybe <tool_call> it.\n</think>\n\n<tool_call>\n{"name": "a", "arguments": {}}\n</tool_call>',
-         "<think>\nMaybe <tool_call> it.\n</think>", [("a", {})], 40),
+         "<think>\nMaybe <tool_call> it.\n</think>", [("a", {})], 38),
         ("hermes", "<think>\nstill thinking <tool_call>", "<think>\nstill thinking <tool_call>", [], 34),
         # Broken JSON stays text; a call cut off by the token limit still counts.
         ("hermes", "<tool_call>\n{\"name\": oops}\n</tool_call>", "<tool_call>\n{\"name\": oops}\n</tool_call>", [], 0),
@@ -160,18 +185,34 @@ def test_parser(ts5):
          "", [("web_search", {"query": "linux kernel"})], 0),
         ("hermes", '{"name": "web_search", "arguments": {"query": "a"}}', "", [("web_search", {"query": "a"})], 0),
         ("hermes", '```json\n{"name": "a", "arguments": {}}\n```', "", [("a", {})], 0),
+        ("hermes", '```json\n{\n  "name": "a",\n  "arguments": {}\n}\n```\n```json\n{"name": "b", "arguments": {"n": 2}}\n```',
+         "", [("a", {}), ("b", {"n": 2})], 0),
+        ("hermes", '```json\n{"name": "a", "arguments": {}}\n```\nThen more.', '```json\n{"name": "a", "arguments": {}}\n```\nThen more.',
+         [], 0),
         ("hermes", 'Sure.\n<function_call>{"name": "a", "arguments": {}}</function_call>', "Sure.", [("a", {})], 6),
         ("hermes", '{"answer": 42}', '{"answer": 42}', [], 0),
         ("hermes", "Use the <tools> menu.", "Use the <tools> menu.", [], 8),
+        # Calls as elements named after the tools (Coder's two calls, from the console).
+        ("hermes", '<xml> <get_weather city="Paris" /> <get_time zone="Asia/Tokyo" /> </xml>', "",
+         [("get_weather", {"city": "Paris"}), ("get_time", {"zone": "Asia/Tokyo"})], 0, ["get_weather", "get_time"]),
+        ("hermes", '```xml\n<get_weather>\n  <city>Oslo</city>\n</get_weather>\n```', "",
+         [("get_weather", {"city": "Oslo"})], 0, ["get_weather"]),
+        ("hermes", '<get_weather city="Oslo" days="2" zip="0150"/>', "",
+         [("get_weather", {"city": "Oslo", "days": 2, "zip": "0150"})], 0, ["get_weather"]),
+        ("hermes", "<b>Bold</b> answer", "<b>Bold</b> answer", [], 0, ["get_weather"]),
         ("llama3", '{"name": "web_search", "parameters": {"query": "a"}}', "", [("web_search", {"query": "a"})], 0),
         ("llama3", '<|python_tag|>{"name": "a", "parameters": {}}; {"name": "b", "parameters": {"x": "y"}}',
          "", [("a", {}), ("b", {"x": "y"})], 0),
         ("llama3", '{"answer": 42}', '{"answer": 42}', [], 0),
+        # Code with bare quotes in a call (Llama 3.2 3B, from the console).
+        ("llama3", '{"name": "write_file", "parameters": {"path": "f.py", "content": "if x:\\n    print("Fizz")"}}',
+         "", [("write_file", {"path": "f.py", "content": 'if x:\n    print("Fizz")'})], 0),
+        ("llama3", '{"type": "function", "function": {"name": "a", "parameters": {"x": 1}}}', "", [("a", {"x": 1})], 0),
         ("llama3", "Hello {there}", "Hello {there}", [], 13),
     ]
     failed = 0
-    for fmt, text, content, calls, prefix in cases:
-        r = parse(ts5, fmt, text)
+    for fmt, text, content, calls, prefix, *names in cases:
+        r = parse(ts5, fmt, text, *names)
         got_calls = [(c["name"], json.loads(c["arguments"])) for c in r["calls"]]
         if r["content"] != content or got_calls != calls or r["content_prefix"] != prefix:
             failed += 1
@@ -258,6 +299,7 @@ def test_search(ts5):
 
 
 CALL = '<tool_call>\n{"name": "web_search", "arguments": {"query": "PS5 firmware"}}\n</tool_call>'
+MADE_UP = '<tool_call>\n{"name": "say_hello", "arguments": {}}\n</tool_call>'
 
 
 def test_search_loop(ts5, model, tdir):
@@ -277,9 +319,13 @@ def test_search_loop(ts5, model, tdir):
         # A model that never stops searching: three rounds, then an answer from them.
         ("search limit", "tvly-test", [CALL, "Final answer."], False, 3, "Final answer.",
          "Web searches found the following"),
+        # A call to a tool the request doesn't have: one more turn, without tools.
+        ("made-up tool", "tvly-test", [MADE_UP, "Hello."], False, 0, "Hello.", "latest PS5 firmware", [WEATHER]),
+        ("made-up tool, streaming", "tvly-test", [MADE_UP, "Hello."], True, 0, "Hello.", "latest PS5 firmware",
+         [WEATHER]),
     ]
     template = os.path.join(tdir, "Qwen-Qwen2.5-7B-Instruct.jinja")
-    for name, key, turns, stream, hits, answer, note in cases:
+    for name, key, turns, stream, hits, answer, note, *tools in cases:
         with tempfile.TemporaryDirectory() as d:
             script = os.path.join(d, "turns.txt")
             open(script, "w").write("\n----\n".join(turns))
@@ -300,6 +346,8 @@ def test_search_loop(ts5, model, tdir):
                 before = len(Tavily.seen)
                 req = {"messages": [{"role": "user", "content": "What is the latest PS5 firmware?"}],
                        "stream": stream, "max_tokens": 100}
+                if tools:
+                    req["tools"] = tools[0]
                 r = urllib.request.urlopen(urllib.request.Request(
                     f"http://127.0.0.1:{port}/v1/chat/completions", json.dumps(req).encode(),
                     {"Content-Type": "application/json"}), timeout=60).read().decode()
