@@ -538,6 +538,7 @@ void handle(int fd, Server::State &state, Usage &u) {
         int max_tokens = sp.max_tokens;
         std::string search_failed;      // why the first failed search failed
         std::vector<std::string> found;  // what the searches found, for a forced answer
+        bool answered_without_tools = false;  // after a made-up call
         double first = -1;               // when the first text came
         // A turn of the model's; with web_search, ts5 answers the model's
         // searches and lets it go on, so one request can be several turns.
@@ -673,16 +674,31 @@ void handle(int fd, Server::State &state, Usage &u) {
             for (const Json &t : tools) names.push_back(t["function"]["name"].str());
             ParsedTurn pt = parse_turn(tf, text, names);
             // A call to a tool the request doesn't have is the model making
-            // one up (say_hello for "Say hello in one word.", seen on the
-            // console): the turn stays text.
+            // one up (say_hello for "Say hello in one word.", math.multiply
+            // for "What is 7 times 6?", seen on the console): no tool fits,
+            // so it answers once more without tools, when it didn't think
+            // and nothing of the answer has gone out yet. Past that, the turn
+            // stays text.
+            std::string made_up;
             for (const ToolCall &c : pt.calls) {
                 bool known = false;
                 for (const Json &t : tools) known |= t["function"]["name"].str() == c.name;
                 if (!known) {
-                    pt.calls.clear();
-                    pt.content = text;
+                    made_up = c.name;
                     break;
                 }
+            }
+            if (!made_up.empty()) {
+                if (!answered_without_tools && open == std::string::npos && sent <= answer && !stopped &&
+                    st.gen_tokens < max_tokens) {
+                    answered_without_tools = true;
+                    log_line("ts5: %s made-up tool %s: answering without tools", id.c_str(), made_up.c_str());
+                    prompt = render_chat(e.tok(), msgs, {}, date) + opening;
+                    use_tools = false;
+                    continue;
+                }
+                pt.calls.clear();
+                pt.content = text;
             }
             // pt.content is the turn's text, calls taken out after the thinking.
             const size_t from = std::min(answer, pt.content.size());

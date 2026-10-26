@@ -247,6 +247,20 @@ def check_tool_choice(api, ctx):
     return ok, "no-need: %r; tool_choice none: %r" % (short(text(r1), 60), short(text(r2), 60))
 
 
+def check_no_tool(api, ctx):
+    """Questions the one tool doesn't fit: a plain answer, no call."""
+    if not ctx.get("tools"):
+        return None, "the model takes no tools"
+    got = []
+    for q, want in [("What is 7 times 6?", "42"), ("Write a two-line poem about rain.", "")]:
+        r = api.chat({"model": ctx["model"], "tools": [WEATHER], "messages": [{"role": "user", "content": q}]})
+        t = text(r).strip()
+        got.append((not tool_call(r) and want in t and len(t) > 1 and not t.startswith("{"), t, tool_call(r)))
+    ok = all(g[0] for g in got)
+    return ok, "; ".join("%s" % (("call %s" % g[2]["function"]["name"]) if g[2] else repr(short(g[1], 50)))
+                         for g in got)
+
+
 def check_two_calls(api, ctx):
     if not ctx.get("tools"):
         return None, "the model takes no tools"
@@ -352,8 +366,9 @@ CHECKS = [("models", check_models), ("chat", check_chat), ("stream", check_strea
           ("turns", check_turns), ("parts", check_parts), ("limit", check_short_limit),
           ("nothink", check_no_thinking), ("stop", check_stop), ("json", check_json),
           ("completion", check_completion), ("tools", check_tool_call), ("toolresult", check_tool_result),
-          ("toolchoice", check_tool_choice), ("twocalls", check_two_calls), ("toolstream", check_tool_stream),
-          ("agent", check_agent), ("long", check_long), ("toolong", check_too_long)]
+          ("toolchoice", check_tool_choice), ("notool", check_no_tool), ("twocalls", check_two_calls),
+          ("toolstream", check_tool_stream), ("agent", check_agent), ("long", check_long),
+          ("toolong", check_too_long)]
 
 
 def main():
