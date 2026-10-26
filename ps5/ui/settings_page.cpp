@@ -6,6 +6,7 @@
 #include <ctime>
 
 #include "library.h"
+#include "local_time.h"
 #include "pad.h"
 #include "plain.h"
 #include "settings.h"
@@ -153,14 +154,13 @@ std::vector<Row> rows(const SettingsInfo &info) {
     return r;
 }
 
-// "24 Oct 2026" (local to the PS5's clock, UTC); "never" for 0.
+// "24 Oct 2026", in the console's own time zone; "Never" for 0.
 std::string date_of(int64_t t) {
     if (t <= 0) return "Never";
     static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-    const time_t tt = (time_t)t;
     struct tm g;
-    if (!gmtime_r(&tt, &g)) return "";
+    if (!app::local_tm(t, &g)) return "";
     return std::to_string(g.tm_mday) + " " + months[g.tm_mon % 12] + " " + std::to_string(g.tm_year + 1900);
 }
 

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <ctime>
 
+#include "local_time.h"
 #include "pad.h"
 #include "plain.h"
 #include "style.h"
@@ -154,13 +155,12 @@ constexpr int kListHead = 84;               // the sidebar's heading
 constexpr int kActionRow = 64, kChatRow = 84, kRowGap = 8;
 constexpr double kRemoveFor = 4;            // seconds square's second press has
 
-// "Today", "Yesterday", or "22 Oct" (the PS5's clock).
+// "Today", "Yesterday", or "22 Oct", in the console's own time zone.
 std::string when(int64_t t, int64_t now) {
     static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-    const time_t a = (time_t)t, b = (time_t)now;
     struct tm ta, tb;
-    if (t <= 0 || !localtime_r(&a, &ta) || !localtime_r(&b, &tb)) return "";
+    if (t <= 0 || !app::local_tm(t, &ta) || !app::local_tm(now, &tb)) return "";
     const int days = (tb.tm_year - ta.tm_year) * 366 + (tb.tm_yday - ta.tm_yday);
     if (days == 0) return "Today";
     if (days == 1) return "Yesterday";
