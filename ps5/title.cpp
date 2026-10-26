@@ -90,6 +90,7 @@
 #include "keys.h"
 #include "library.h"
 #include "log.h"
+#include "net.h"
 #include "pad.h"
 #include "plain.h"
 #include "runner.h"
@@ -103,6 +104,9 @@
 #include "usage_store.h"
 #include "vk_context.h"
 #include "voice.h"
+#include "wg/wg.h"
+#include "wg_devices.h"
+#include "wg_page.h"
 
 #ifndef TS5_VERSION
 #define TS5_VERSION "dev"
@@ -169,11 +173,25 @@ constexpr const char *kRestart = TS5_HOME "/restart";
 constexpr const char *kUsage = TS5_HOME "/usage.tsv";
 constexpr const char *kUsageHours = TS5_HOME "/usage-hours.tsv";
 constexpr const char *kKeys = TS5_HOME "/keys.tsv";
+constexpr const char *kWgFile = TS5_HOME "/wireguard.tsv";  // WireGuard's devices and key (wg_devices.h)
 constexpr const char *kChats = TS5_HOME "/chats";  // the Chat page's saved chats (chat_store.h)
 // Not ..._KEY: a name ending in _KEY is a secret, typed in (settings.h).
 constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
-// typing_for while the keyboard names a new API key, or takes a search.
-constexpr const char *kNamingKey = "(new key)", *kSearching = "(search)", *kChatSearch = "(chat search)";
+// WireGuard on (1) or off, and its UDP port.
+constexpr const char *kWireGuard = "TS5_WIREGUARD", *kWgPort = "TS5_WG_PORT";
+// Where devices find this home on the internet (Settings, WireGuard, Home
+// address); not set, the PS5 looks up its public address (look_up_home).
+constexpr const char *kWgHost = "TS5_WG_HOST";
+// Not WireGuard's usual 51820: the PS5 refuses a title's bind there (and at
+// 40000) with EACCES, and takes 9030.
+constexpr int kWgDefaultPort = 9030;
+// typing_for while the keyboard names a new API key, a phone or tablet for
+// WireGuard, or takes a search.
+constexpr const char *kNamingKey = "(new key)", *kNamingDevice = "(new device)", *kSearching = "(search)",
+                     *kChatSearch = "(chat search)";
+// A phone's tunnel shows on the TV this long at most (it holds the phone's
+// private key).
+constexpr double kTunnelShownFor = 600;
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
 
 constexpr int kWidth = 1920, kHeight = 1080;
@@ -198,7 +216,8 @@ ts5::UsageLog usage_log(kUsage);
 // (which swaps the whole folder) keeps them: put back at start, followed
 // every 30 s and before leaving.
 app::Backup backup(TS5_HOME, TS5_STORE "/ts5",
-                   {"ts5.env", "ts5.args", "keys.tsv", "usage.tsv", "usage.prev.tsv", "usage-hours.tsv", "results.tsv"},
+                   {"ts5.env", "ts5.args", "keys.tsv", "wireguard.tsv", "usage.tsv", "usage.prev.tsv", "usage-hours.tsv",
+                    "results.tsv"},
                    {"chats"});
 
 [[noreturn]] void leave(const char *path) {
@@ -217,6 +236,58 @@ bool exists(const char *path) { return access(path, F_OK) == 0; }
 std::string trimmed(const std::string &s) {
     const size_t a = s.find_first_not_of(" \t\r\n");
     return a == std::string::npos ? std::string() : s.substr(a, s.find_last_not_of(" \t\r\n") - a + 1);
+}
+
+// This home's public address, as api.ipify.org sees the PS5, for the
+// WireGuard tunnels the TV makes ("" until it's known); looked up on a thread
+// of its own, one lookup at a time.
+std::mutex home_mu;
+std::string looked_up_home;
+std::atomic<bool> looking_up_home{false};
+
+bool is_ipv4(const std::string &s) {
+    int parts = 0, digits = 0, value = 0;
+    for (char c : s) {
+        if (c == '.') {
+            if (digits == 0 || ++parts > 3) return false;
+            digits = value = 0;
+        } else if (c >= '0' && c <= '9' && digits < 3) {
+            value = value * 10 + (c - '0');
+            if (++digits, value > 255) return false;
+        } else {
+            return false;
+        }
+    }
+    return parts == 3 && digits > 0;
+}
+
+void look_up_home() {
+    if (looking_up_home.exchange(true)) return;
+    std::thread([] {
+        ts5::HttpResponse r;
+        std::string e;
+        const bool got = ts5::http_get("https://api.ipify.org", {}, r, e, 64, 15) && r.status == 200;
+        const std::string ip = got ? trimmed(r.body) : std::string();
+        if (is_ipv4(ip)) {
+            std::lock_guard<std::mutex> lk(home_mu);
+            if (ip != looked_up_home) printf("ts5-title: wireguard: this home's public address is %s\n", ip.c_str());
+            looked_up_home = ip;
+        } else {
+            printf("ts5-title: wireguard: couldn't look up this home's public address: %s\n",
+                   got ? "not an address" : e.c_str());
+        }
+        looking_up_home = false;
+    }).detach();
+}
+
+// The tunnels' endpoint host: Home address in Settings, or the looked-up
+// public address; looked_up says which.
+std::string wg_home(bool *looked_up = nullptr) {
+    const std::string set = trimmed(app::setting(kWgHost, ""));
+    if (looked_up) *looked_up = set.empty();
+    if (!set.empty()) return set;
+    std::lock_guard<std::mutex> lk(home_mu);
+    return looked_up_home;
 }
 
 // The PC's quit and restart requests, checked twice a second on a thread of
@@ -698,10 +769,54 @@ int main(int, char **) {
     app::KeyStore keys;
     keys.load(kKeys);
     keys.set_required(app::setting(kRequireKey, "0") == "1");
-    server.set_authorize([&keys](const std::string &key, const std::string &client, std::string &name) {
-        return keys.authorize(key, client, name);
+    // WireGuard (wg/wg.h): devices away from home reach the API through a
+    // tunnel. Its connections come from 127.0.0.1, so each is named by the
+    // device behind it (10.55.0.N), which always needs a key.
+    app::WgStore wg_store;
+    wg_store.load(kWgFile);
+    wg::Tunnel tunnel;
+    std::atomic<bool> wg_on{false};
+    std::atomic<int> wg_port{kWgDefaultPort};
+    auto in_tunnel = [](const std::string &client) { return client.rfind("10.55.0.", 0) == 0; };
+    server.set_client_name([&tunnel](const std::string &ip, int port) {
+        if (ip == "127.0.0.1") {
+            const std::string device = tunnel.client_for((uint16_t)port);
+            if (!device.empty()) return device;
+        }
+        return ip;
+    });
+    server.set_authorize([&keys, in_tunnel](const std::string &key, const std::string &client, std::string &name) {
+        return keys.authorize(key, client, name, in_tunnel(client));
+    });
+    // The page a device asks to join from, on the home network.
+    server.set_pages([&](const std::string &method, const std::string &path, const std::string &body,
+                         const std::string &client, ts5::Server::Page &out) {
+        app::WgPageInfo info;
+        info.on = wg_on;
+        info.running = tunnel.problem().empty();
+        std::string e;
+        if (info.on) info.public_key = wg_store.public_key(e);
+        info.port = wg_port;
+        info.api_port = api_port;
+        info.home = wg_home();
+        return app::wg_page(method, path, body, client, info, wg_store, out);
     });
     std::string fresh_key, fresh_key_id;  // a key just made, shown on Settings until the page is left
+    // A phone or tablet just added on the TV: its whole tunnel, private key and
+    // all, shown as a code until Settings is left or kTunnelShownFor passes.
+    std::string fresh_tunnel, fresh_tunnel_name, fresh_tunnel_id;
+    double fresh_tunnel_at = 0;
+    std::string added_id, added_address;  // the device last added on the TV, until Settings is left
+    // Devices let in since the title started that haven't connected yet, as
+    // address and name: the TV says so when each first does.
+    std::vector<std::pair<std::string, std::string>> awaiting;
+    double last_awaiting = 0;
+    auto forget_tunnel = [&] {
+        std::fill(fresh_tunnel.begin(), fresh_tunnel.end(), '\0');
+        fresh_tunnel.clear();
+        fresh_tunnel_name.clear();
+        fresh_tunnel_id.clear();
+    };
     app::HfSearch hf;  // the Models page's search
     usage_log.start(TS5_VERSION);
     double last_usage = 0;
@@ -720,6 +835,22 @@ int main(int, char **) {
                    " is in use. Restart the PS5 and open TokenStation5 again.");
         }
     }
+    // Brings the tunnel in line with Settings and the devices; turned on for
+    // the first time, the PS5 makes its key pair.
+    auto wg_apply = [&] {
+        const bool on = app::setting(kWireGuard, "0") == "1";
+        int port = atoi(app::setting(kWgPort, std::to_string(kWgDefaultPort)).c_str());
+        if (port <= 0 || port > 65535) port = kWgDefaultPort;
+        std::string e;
+        if (on && !wg_store.has_key() && wg_store.public_key(e).empty())
+            printf("ts5-title: wireguard: no key pair: %s\n", e.c_str());
+        wg_port = port;
+        wg_on = on && wg_store.has_key();
+        if (wg_on) look_up_home();
+        if (!tunnel.apply(wg_store.config(on, port, api_port), e)) printf("ts5-title: wireguard: %s\n", e.c_str());
+    };
+    wg_apply();
+    std::string wg_asked;  // the request the TV last told of
     app::Runner runner(ctx, server, lib, lib_mutex, notify, network_url);
     // Models (and, from Settings, the speech model and voice) downloaded on
     // the console, beside whatever the Runner does.
@@ -809,6 +940,38 @@ int main(int, char **) {
         s.fresh_key_id = fresh_key_id;
         s.url = v.url;
         s.on_network = v.on_network;
+        s.api_port = api_port;
+        std::string e;
+        if (wg_store.has_key()) s.wg.public_key = wg_store.public_key(e);
+        const std::string problem = tunnel.problem();
+        if (problem.find("in use") != std::string::npos)
+            s.wg.problem = "Port " + std::to_string(wg_port) + " is in use on the PS5: choose another below.";
+        else if (problem.find("refused") != std::string::npos)
+            s.wg.problem = "The PS5 doesn't let apps use port " + std::to_string(wg_port) + ": choose another below.";
+        else if (!problem.empty())
+            s.wg.problem = std::string("WireGuard couldn't start.") + plain::kDetails;
+        const std::vector<wg::PeerState> peers = tunnel.peers();
+        for (const app::WgDevice &d : wg_store.devices()) {
+            ui::WgDeviceInfo di{d.id, d.name, d.address, d.on, d.added};
+            for (const wg::PeerState &p : peers)
+                if (p.address == d.address) {
+                    di.up = p.up;
+                    di.seen_s = p.seen_s;
+                }
+            s.wg.devices.push_back(di);
+        }
+        bool looked_up = false;
+        s.wg.home = wg_home(&looked_up);
+        s.wg.home_looked_up = looked_up && !s.wg.home.empty();
+        s.wg.tunnel = fresh_tunnel;
+        s.wg.tunnel_name = fresh_tunnel_name;
+        s.wg.added_id = added_id;
+        app::WgRequest req;
+        if ((s.wg.waiting = wg_store.waiting(req))) {
+            s.wg.waiting_name = req.name;
+            s.wg.waiting_address = req.address;
+            s.wg.waiting_from = req.from;
+        }
         if (!v.status.serving.empty()) {
             s.model_id = v.status.serving;
             const size_t g = s.model_id.size() > 5 ? s.model_id.size() - 5 : std::string::npos;
@@ -891,6 +1054,40 @@ int main(int, char **) {
                 fresh_key_id = id;
                 settings_note.note = !key.empty() ? "Made" : std::string("Couldn't make a key.") + plain::kDetails;
                 settings_note.note_failed = key.empty();
+                settings_note.note_at = t;
+            } else if (st == app::TextInput::Done && !text.empty() && typing_for == kNamingDevice) {
+                // A phone or tablet, added at once with keys made here; its tunnel
+                // shows as a code for its WireGuard app.
+                std::string e, priv;
+                app::WgDevice d;
+                const std::string home = wg_home();
+                bool ok = false;
+                if (home.empty()) {
+                    look_up_home();
+                    settings_note.note = "Type your home's address in Home address first.";
+                } else if (!(ok = wg_store.add_made(text, d, priv, e))) {
+                    printf("ts5-title: wireguard: couldn't add %s: %s\n", text.c_str(), e.c_str());
+                    settings_note.note = e.empty() || e == "no random numbers" ? std::string("Couldn't add it.") +
+                                                                                     plain::kDetails
+                                                                               : e;
+                } else {
+                    forget_tunnel();
+                    std::string pe;
+                    fresh_tunnel = "[Interface]\nPrivateKey = " + priv + "\nAddress = " + d.address +
+                                   "/32\n\n[Peer]\nPublicKey = " + wg_store.public_key(pe) +
+                                   "\nAllowedIPs = 10.55.0.1/32\nEndpoint = " + home + ":" +
+                                   std::to_string(wg_port.load()) + "\nPersistentKeepalive = 25\n";
+                    std::fill(priv.begin(), priv.end(), '\0');
+                    fresh_tunnel_name = d.name;
+                    fresh_tunnel_id = d.id;
+                    fresh_tunnel_at = t;
+                    added_id = d.id;
+                    added_address = d.address;
+                    awaiting.emplace_back(d.address, d.name);
+                    wg_apply();
+                    settings_note.note = "Added";
+                }
+                settings_note.note_failed = !ok;
                 settings_note.note_at = t;
             } else if (st == app::TextInput::Done && !text.empty()) {
                 std::string e;
@@ -990,6 +1187,18 @@ int main(int, char **) {
             last_backup = t;
         }
         timer.mark("the backup in /download0");
+        {
+            // A device asking to join WireGuard: the TV says so, once.
+            app::WgRequest req;
+            const std::string asked = wg_store.waiting(req) ? req.name + "\t" + req.public_key : "";
+            if (asked != wg_asked) {
+                wg_asked = asked;
+                if (!asked.empty())
+                    notify("TokenStation5: " + req.name + " asks to join WireGuard. Let it in, or refuse it, in "
+                           "Settings, under WireGuard.");
+                lib_changed = true;
+            }
+        }
 
         // Downloads that arrived: the Library lists them now, not at its next
         // scan, so their rows turn into models at once.
@@ -1101,7 +1310,27 @@ int main(int, char **) {
         if (dash.page() != ui::Dashboard::Settings) {
             fresh_key.clear();
             fresh_key_id.clear();
+            added_id.clear();
+            added_address.clear();
         }
+        // A device just let in: say when it first connects, and take a phone's
+        // code off the screen then, as it has what it needs.
+        if (!awaiting.empty() && t - last_awaiting >= 1) {
+            last_awaiting = t;
+            for (const wg::PeerState &p : tunnel.peers()) {
+                if (!p.up) continue;
+                for (size_t i = 0; i < awaiting.size(); i++)
+                    if (awaiting[i].first == p.address) {
+                        notify("TokenStation5: " + awaiting[i].second + " is connected through WireGuard.");
+                        if (p.address == added_address) forget_tunnel();
+                        awaiting.erase(awaiting.begin() + (long)i);
+                        break;
+                    }
+            }
+        }
+        // And a phone's tunnel only until then, or for kTunnelShownFor.
+        if (!fresh_tunnel.empty() && (dash.page() != ui::Dashboard::Settings || t - fresh_tunnel_at > kTunnelShownFor))
+            forget_tunnel();
         timer.mark("the downloads, chats and usage");
         keys.save_used(v.wall = (int64_t)time(nullptr));
         timer.mark("keys.tsv");
@@ -1179,11 +1408,13 @@ int main(int, char **) {
                 break;
             case ui::Action::Set: {
                 std::string e;
-                if (a.name == kRequireKey && a.value == "1") {
+                if ((a.name == kRequireKey || a.name == kWireGuard) && a.value == "1") {
                     bool any_on = false;
                     for (const app::ApiKey &k : keys.list()) any_on |= k.on;
                     if (!any_on) {
-                        settings_note.note = "Make a key first, so your apps can still get in.";
+                        // Over WireGuard a key is always needed.
+                        settings_note.note = a.name == kWireGuard ? "Make a key first: devices need one over WireGuard."
+                                                                  : "Make a key first, so your apps can still get in.";
                         settings_note.note_failed = true;
                         settings_note.note_at = t;
                         v.settings = settings_view(v);
@@ -1198,6 +1429,7 @@ int main(int, char **) {
                 settings_note.note_at = t;
                 v.settings = settings_view(v);
                 if (ok && a.name == "TS5_WHISPER_MODEL") voice.rescan();
+                if (ok && (a.name == kWireGuard || a.name == kWgPort)) wg_apply();
                 break;
             }
             case ui::Action::ChatType:
@@ -1210,10 +1442,12 @@ int main(int, char **) {
                     typing.send = true;
                 } else {
                     typing.title = a.label;
-                    typing.placeholder = typing_for == "TAVILY_API_KEY" ? "Starts with tvly-" : "";
+                    typing.placeholder = typing_for == "TAVILY_API_KEY" ? "Starts with tvly-"
+                                         : typing_for == kWgHost      ? "A dynamic DNS name, or your router's public address"
+                                                                      : "";
                     // Shown as it's typed, and starting from the saved one, so a typo
                     // in a long key can be seen and fixed.
-                    typing.latin = app::secret_setting(typing_for);
+                    typing.latin = app::secret_setting(typing_for) || typing_for == kWgHost;
                     typing.text = app::setting(typing_for.c_str(), "");
                     typing.max_chars = 256;
                 }
@@ -1230,6 +1464,21 @@ int main(int, char **) {
                 typing.text = v.hf.query;
                 typing.max_chars = 80;
                 typing_pending = true;
+                break;
+            case ui::Action::WgPhone:
+                if (!wg_on) {
+                    settings_note.note = "Turn on WireGuard first.";
+                    settings_note.note_failed = true;
+                    settings_note.note_at = t;
+                    break;
+                }
+                typing = app::TextRequest();
+                typing_for = kNamingDevice;
+                typing.title = "Name the phone or tablet";
+                typing.placeholder = "Such as Phone";
+                typing.max_chars = 40;
+                typing_pending = true;
+                if (wg_home().empty()) look_up_home();
                 break;
             case ui::Action::NewKey:
                 typing = app::TextRequest();
@@ -1250,6 +1499,48 @@ int main(int, char **) {
                     fresh_key_id.clear();
                 }
                 settings_note.note = ok ? (remove ? "Removed" : "Saved") : std::string("Couldn't save it.") + plain::kDetails;
+                settings_note.note_failed = !ok;
+                settings_note.note_at = t;
+                v.settings = settings_view(v);
+                break;
+            }
+            case ui::Action::WgDeviceOn:
+            case ui::Action::WgRemoveDevice:
+            case ui::Action::WgNewKey:
+            case ui::Action::WgAnswer: {
+                std::string e;
+                bool ok;
+                const char *done = "Saved";
+                if (a.kind == ui::Action::WgNewKey) {
+                    ok = wg_store.new_key(e);
+                    done = "New key pair made";
+                } else if (a.kind == ui::Action::WgAnswer) {
+                    app::WgRequest req;
+                    const bool asked = wg_store.waiting(req);
+                    ok = wg_store.answer(a.value == "1", e);
+                    if (ok && asked && a.value == "1") awaiting.emplace_back(req.address, req.name);
+                    done = a.value == "1" ? "Let in" : "Refused";
+                } else if (a.kind == ui::Action::WgRemoveDevice) {
+                    std::string address;
+                    for (const app::WgDevice &d : wg_store.devices())
+                        if (d.id == a.name) address = d.address;
+                    ok = wg_store.remove(a.name, e);
+                    done = "Removed";
+                    if (ok && a.name == fresh_tunnel_id) forget_tunnel();
+                    if (ok && a.name == added_id) {
+                        added_id.clear();
+                        added_address.clear();
+                    }
+                    if (ok)
+                        awaiting.erase(std::remove_if(awaiting.begin(), awaiting.end(),
+                                                      [&](const auto &w) { return w.first == address; }),
+                                       awaiting.end());
+                } else {
+                    ok = wg_store.set_on(a.name, a.value == "1", e);
+                }
+                if (!ok) printf("ts5-title: wireguard: %s\n", e.c_str());
+                else wg_apply();
+                settings_note.note = ok ? done : std::string("Couldn't save it.") + plain::kDetails;
                 settings_note.note_failed = !ok;
                 settings_note.note_at = t;
                 v.settings = settings_view(v);

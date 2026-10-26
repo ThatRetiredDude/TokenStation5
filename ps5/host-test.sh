@@ -77,14 +77,34 @@ if [ ${#pids[@]} -gt 0 ] || [ ! -f "$wobj/libts5speech.a" ]; then
     echo "== libts5speech.a: ${#pids[@]} files compiled in $(($(date +%s) - t0)) s"
 fi
 
+# WireGuard (ps5/wg, lwIP and wireguard-lwip), as ps5/build.sh builds it.
+lw="$root/third_party/lwip/src"
+wgl="$root/third_party/wireguard-lwip/src"
+wgflags=(-O2 -I "$root/ps5/wg" -I "$lw/include" -I "$wgl")
+mkdir -p "$work/wg"
+wgobjects=()
+pids=()
+for src in "$lw"/core/*.c "$lw"/core/ipv4/*.c "$wgl"/*.c "$wgl"/crypto/refc/*.c "$root"/ps5/wg/wg_udp.c "$root"/ps5/wg/wg.cpp; do
+    [ "$src" = "$lw/core/udp.c" ] && continue
+    rel=${src#"$root"/}
+    o="$work/wg/${rel//\//_}.o"
+    wgobjects+=("$o")
+    case $src in
+        *.c) cc -std=gnu11 "${wgflags[@]}" -c "$src" -o "$o" & ;;
+        *) c++ -std=c++17 -Wall -pthread "${wgflags[@]}" -I "$root/engine/src" -c "$src" -o "$o" & ;;
+    esac
+    pids+=($!)
+done
+for p in "${pids[@]}"; do wait "$p"; done
+
 c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" "-DTS5_STORE=\"$work/download0\"" \
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" -I "$w/include" -I "$w/ggml/include" \
-    -I "$k/include" \
+    -I "$k/include" -I "$root/third_party/qrcodegen" \
     "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks,tools,net,websearch,log}.cpp \
-    "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup,host_shim}.cpp \
+    "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup,host_shim,wg_devices,wg_page}.cpp "$root"/third_party/qrcodegen/qrcodegen.cpp \
     "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page,logs_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -Wa,-I"$root/ps5/tts" "$root/ps5/tts/lexicon_data.S" \
-    -x none "$wobj/libts5speech.a" -ldl -o "$work/eboot.bin"
+    -x none "${wgobjects[@]}" "$wobj/libts5speech.a" -ldl -o "$work/eboot.bin"
 
 title_pid=
 cleanup() { [ -n "$title_pid" ] && kill "$title_pid" 2> /dev/null || true; }
