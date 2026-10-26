@@ -84,8 +84,9 @@ public:
     Stream(const Stream &) = delete;
     Stream &operator=(const Stream &) = delete;
     // Connects to host:port (TLS checks the certificate as the requests above
-    // do); timeout_s is for the connection and for each write.
-    bool open(const std::string &host, int port, bool tls, int timeout_s, std::string &err);
+    // do); timeout_s is for the connection and for each write. tls12: at
+    // most TLS 1.2.
+    bool open(const std::string &host, int port, bool tls, int timeout_s, std::string &err, bool tls12 = false);
     bool write(const void *data, size_t len, std::string &err);
     // Up to cap bytes, waiting at most wait_ms for the first: how many, 0
     // once the other side has closed, -1 on an error (err says), -2 when
