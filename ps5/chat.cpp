@@ -12,7 +12,9 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "chat_store.h"
 #include "json.h"
+#include "plain.h"
 
 namespace app {
 
@@ -24,6 +26,24 @@ int max_tokens() {
     const char *e = getenv("TS5_CHAT_MAX_TOKENS");
     const int n = e ? atoi(e) : 0;
     return n > 0 ? n : 2048;
+}
+
+// A failed reply in plain words. The error comes from the title's own API:
+// a 503's sentence (already plain), or the engine's words, which go to the log.
+std::string said(const std::string &raw) {
+    auto has = [&](const char *w) { return raw.find(w) != std::string::npos; };
+    if (raw.rfind("The model is", 0) == 0 || raw.rfind("No model is", 0) == 0) return raw;
+    if (has("empty prompt")) return "Nothing to answer: the message was empty.";
+    if (has("context full") || has("longer than the context"))
+        return "This chat is too long for this model. Press square for a new chat.";
+    if (has("vkAllocateMemory") || has("out of GPU memory") || has("not enough GPU memory") || has("bad_alloc"))
+        return std::string("There wasn't enough memory to finish this reply. Try a shorter chat.") + plain::kDetails;
+    if (has("vk") || has("VK_") || has("too many submits") || has("failed: -"))
+        return std::string("The GPU hit a problem while writing this reply. Press square for a new chat.") + plain::kDetails;
+    if (has("can't reach the API"))
+        return std::string("The chat couldn't reach TokenStation5's server. Close TokenStation5 and open it again.") +
+               plain::kDetails;
+    return std::string("The reply failed. Press square for a new chat and try again.") + plain::kDetails;
 }
 
 // A reply as the next request sends it back: without its thinking, which
@@ -51,7 +71,12 @@ bool send_all(int fd, const std::string &s) {
 
 }  // namespace
 
-Chat::Chat(const std::string &host, int port) : host_(host == "0.0.0.0" ? "127.0.0.1" : host), port_(port) {}
+Chat::Chat(const std::string &host, int port, ChatStore *store)
+    : store_(store), host_(host == "0.0.0.0" ? "127.0.0.1" : host), port_(port) {}
+
+void Chat::save() {
+    if (store_ && !store_->save(state_.id, state_.turns)) printf("ts5-title: chat: not saved\n");
+}
 
 Chat::~Chat() {
     stop_ = true;
@@ -72,6 +97,7 @@ bool Chat::send(const std::string &text) {
     state_.turns.push_back(ChatTurn{});
     state_.busy = state_.waiting = true;
     stop_ = false;
+    save();
     bump();
     worker_ = std::thread([this] { reply(); });
     return true;
@@ -88,6 +114,20 @@ void Chat::clear() {
     bump();
 }
 
+bool Chat::open(const std::string &id) {
+    stop_ = true;
+    if (worker_.joinable()) worker_.join();
+    std::vector<ChatTurn> turns;
+    if (!store_ || !store_->load(id, turns)) return false;
+    std::lock_guard<std::mutex> lk(mu_);
+    state_ = ChatState{};
+    state_.id = id;
+    state_.turns = turns;
+    first_ = 0;
+    bump();
+    return true;
+}
+
 ChatState Chat::state() {
     std::lock_guard<std::mutex> lk(mu_);
     return state_;
@@ -95,6 +135,9 @@ ChatState Chat::state() {
 
 std::string Chat::request_body() {
     std::lock_guard<std::mutex> lk(mu_);
+    // reply() asks again without the oldest turn while there's more than
+    // this message: the API logs a refusal then as this page's (server.cpp).
+    const bool trims = first_ + 2 <= state_.turns.size() - 2;
     std::string msgs;
     // Every turn but the reply being written; failed replies and the
     // questions they answer stay on screen but out of the history.
@@ -108,7 +151,9 @@ std::string Chat::request_body() {
         msgs += std::string(msgs.empty() ? "" : ",") + "{\"role\":\"" + (t.user ? "user" : "assistant") +
                 "\",\"content\":" + ts5::json_escape(t.user ? t.text : without_thinking(t.text)) + "}";
     }
-    return "{\"messages\":[" + msgs + "],\"stream\":true,\"max_tokens\":" + std::to_string(max_tokens()) + "}";
+    // The thinking stays in the content: the page shows it as it comes.
+    return "{\"messages\":[" + msgs + "],\"stream\":true,\"reasoning_format\":\"none\",\"max_tokens\":" +
+           std::to_string(max_tokens()) + (trims ? ",\"ts5_trims\":true" : "") + "}";
 }
 
 void Chat::reply() {
@@ -135,12 +180,17 @@ void Chat::reply() {
         t.end = ChatTurn::Stopped;
     } else {
         t.end = ChatTurn::Failed;
-        t.error = r == TooLong ? "This message is longer than the model's context." : err;
+        t.error = r == TooLong ? "This message is too long for this model. Try a shorter one, or press square for a "
+                                 "new chat."
+                               : said(err);
     }
+    // The API's own words in the log.
     printf("ts5-title: chat: reply %s, %zu bytes, %d tokens, %.1f tok/s%s%s\n",
            t.end == ChatTurn::Done ? "done" : t.end == ChatTurn::Stopped ? "stopped" : "failed", t.text.size(),
-           t.tokens, t.tps, t.error.empty() ? "" : ": ", t.error.c_str());
+           t.tokens, t.tps, t.end == ChatTurn::Failed ? ": " : "",
+           t.end == ChatTurn::Failed ? (err.empty() ? "longer than the context" : err.c_str()) : "");
     state_.busy = state_.waiting = false;
+    save();
     bump();
 }
 
@@ -231,11 +281,17 @@ Chat::Result Chat::post(const std::string &body, std::string &err) {
         // An error status: the API says why in its JSON.
         ts5::Json j;
         std::string why = ts5::Json::parse(buf, j) ? j["error"]["message"].str() : "";
+        // Longer than the context: refused before anything streams (server.cpp).
+        if (status == 400 && j["error"]["code"].str() == "context_length_exceeded") {
+            err = why;
+            return TooLong;
+        }
         if (status == 503)
             err = why.rfind("loading", 0) == 0 ? "The model is still loading. Try again in a moment."
                   : why.empty() || why == "no model is loaded"
-                      ? "No model is serving. Press circle for Models and choose one."
-                      : "The model is busy: " + why + ".";
+                      ? "No model is running. Press cross to choose one."
+                  : why.rfind("The model is busy", 0) == 0 ? why  // a GPU check or speed test (runner.cpp)
+                                                             : "The model is busy. Try again in a moment.";
         else
             err = why.empty() ? "the API answered " + std::to_string(status) : why;
         return Failed;

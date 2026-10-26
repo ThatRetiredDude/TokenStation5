@@ -25,18 +25,23 @@
 //
 // The PC drives it over FTP (scripts/ts5-ps5.sh) with files in the folder,
 // each taken as soon as the title sees it:
-//   ts5.cmd     one command now: serve|check|bench -m MODEL [options], or stop
+//   ts5.cmd     one command now: serve|check|bench -m MODEL [options],
+//               fetch URL FILE [--sha256 HEX] (a download into models/), or stop
 //   ts5.once    one command at the next start, before the args file's
 //   ts5.env     NAME=VALUE settings for the engine, read at start, such as
 //               TS5_TILED_MIN=16 (engine/src/vk_backend.cpp lists them) and
 //               TAVILY_API_KEY=tvly-... for web search (engine/src/websearch.h)
 //   press       controller buttons, as words: up down cross square ...;
 //               hold-r1 and release-r1 hold a button down and let it go
-//   screenshot  the next frame goes to screen.bmp
+//   screenshot  the next frame goes to screen.bmp, and the words drawn on
+//               it, one string a line, to screen.txt
 //   audiotest   tones on the TV and the controller, five seconds from its
 //               mic played back (audio_probe.h), the recording in audiotest.wav
 //   chat        a message for the chat page, the file's text as it is
 //               (chat.h); the TV shows the chat and the reply
+//   type        text for the next time the console's keyboard would open
+//               (a key's name, a search): taken as typed and sent, with no
+//               keyboard on the TV
 //   whispertest whispertest.wav (or audiotest.wav) transcribed on the CPU
 //               with the first ggml-*.bin in models/, timed (stt.h)
 //   speaktest   the file's text (or a sentence of the title's own) spoken
@@ -51,31 +56,42 @@
 #include <vulkan/vulkan.h>
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "audio_probe.h"
+#include "backup.h"
 #include "canvas.h"
 #include "chat.h"
+#include "chat_store.h"
 #include "dashboard.h"
 #include "display.h"
+#include "downloads.h"
+#include "hf_search.h"
+#include "keys.h"
 #include "library.h"
+#include "log.h"
 #include "pad.h"
+#include "plain.h"
 #include "runner.h"
 #include "server.h"
 #include "settings.h"
@@ -83,8 +99,12 @@
 #include "stt.h"
 #include "text_input.h"
 #include "tts/synth.h"
+#include "usage.h"
+#include "usage_store.h"
 #include "vk_context.h"
 #include "voice.h"
+#include "wg/wg.h"
+#include "ts/tailscale.h"
 
 #ifndef TS5_VERSION
 #define TS5_VERSION "dev"
@@ -118,11 +138,14 @@ namespace {
 #ifndef TS5_DATA
 #define TS5_DATA "/data"
 #endif
+// The title's own space outside its folder, which a store update keeps
+// (backup.h).
+#ifndef TS5_STORE
+#define TS5_STORE "/download0"
+#endif
 #ifndef TS5_TITLE_ID
 #define TS5_TITLE_ID "PPSA99555"
 #endif
-// The title's folder as the PC sees it, for messages.
-#define TS5_FTP_DIR "/data/homebrew/" TS5_TITLE_ID
 constexpr const char *kModels = TS5_HOME "/models";
 constexpr const char *kArgs = TS5_HOME "/ts5.args";
 constexpr const char *kOnce = TS5_HOME "/ts5.once";
@@ -134,15 +157,31 @@ constexpr const char *kResults = TS5_HOME "/results.tsv";
 constexpr const char *kPress = TS5_HOME "/press";
 constexpr const char *kShot = TS5_HOME "/screenshot";
 constexpr const char *kScreen = TS5_HOME "/screen.bmp";
+constexpr const char *kScreenText = TS5_HOME "/screen.txt";
 constexpr const char *kAudioTest = TS5_HOME "/audiotest";
 constexpr const char *kAudioWav = TS5_HOME "/audiotest.wav";
 constexpr const char *kChat = TS5_HOME "/chat";
+constexpr const char *kType = TS5_HOME "/type";
 constexpr const char *kWhisperTest = TS5_HOME "/whispertest";
 constexpr const char *kWhisperWav = TS5_HOME "/whispertest.wav";
 constexpr const char *kSpeakTest = TS5_HOME "/speaktest";
 constexpr const char *kSpeakWav = TS5_HOME "/speaktest.wav";
 constexpr const char *kQuit = TS5_HOME "/quit";
 constexpr const char *kRestart = TS5_HOME "/restart";
+constexpr const char *kUsage = TS5_HOME "/usage.tsv";
+constexpr const char *kUsageHours = TS5_HOME "/usage-hours.tsv";
+constexpr const char *kKeys = TS5_HOME "/keys.tsv";
+constexpr const char *kTsFile = TS5_HOME "/tailscale.tsv";  // the PS5's keys on its tailnet (ts/tailscale.h)
+constexpr const char *kChats = TS5_HOME "/chats";  // the Chat page's saved chats (chat_store.h)
+// Not ..._KEY: a name ending in _KEY is a secret, typed in (settings.h).
+constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
+// Tailscale on (1) or off; and, set from a computer only, another control
+// server than Tailscale's (a Headscale), the PS5's name on the tailnet, and an
+// auth key that signs it in without the code on the TV.
+constexpr const char *kTailscale = "TS5_TAILSCALE", *kTsServer = "TS5_TS_SERVER", *kTsName = "TS5_TS_NAME",
+                     *kTsAuthKey = "TS5_TS_AUTH_KEY";
+// typing_for while the keyboard names a new API key, or takes a search.
+constexpr const char *kNamingKey = "(new key)", *kSearching = "(search)", *kChatSearch = "(chat search)";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
 
 constexpr int kWidth = 1920, kHeight = 1080;
@@ -159,9 +198,24 @@ void notify(const std::string &text) {
     printf("ts5-title: notify: %s\n", text.c_str());
 }
 
+// A line per API request (engine/src/usage.h): request threads queue them,
+// the main loop writes them every 2 s, and leave() writes what's left.
+ts5::UsageLog usage_log(kUsage);
+
+// Settings, keys, chats and usage, copied to /download0 so a store update
+// (which swaps the whole folder) keeps them: put back at start, followed
+// every 30 s and before leaving.
+app::Backup backup(TS5_HOME, TS5_STORE "/ts5",
+                   {"ts5.env", "ts5.args", "keys.tsv", "tailscale.tsv", "usage.tsv", "usage.prev.tsv", "usage-hours.tsv",
+                    "results.tsv"},
+                   {"chats"});
+
 [[noreturn]] void leave(const char *path) {
+    usage_log.flush();
+    backup.sync();
     printf("ts5-title: leaving (%s)\n", path);
     fflush(nullptr);
+    ts5::log_drain();
     sceSystemServiceLoadExec(path, nullptr);
     for (;;) sceKernelUsleep(1000000);
 }
@@ -321,8 +375,9 @@ struct Options {
 //   serve -m MODEL [-c N|auto] [--port N] [--host ADDR]   (no -c, or auto: what fits)
 //   check -m MODEL [-n TOKENS] [--fresh 1] [--env NAME=VALUE]...
 //   bench -m MODEL [--pp N] [--tg N] [--env NAME=VALUE]...
+//   fetch URL FILE [--sha256 HEX]   (a download, going on from a part already there)
 //   stop
-// A MODEL without a folder is one in models/.
+// A MODEL or FILE without a folder is one in models/.
 bool parse_job(const std::vector<std::string> &a, app::Job &j, Options *o, std::string &err) {
     if (a.empty()) {
         err = "an empty command";
@@ -332,20 +387,35 @@ bool parse_job(const std::vector<std::string> &a, app::Job &j, Options *o, std::
     if (cmd == "serve") j.kind = app::Job::Serve;
     else if (cmd == "check") j.kind = app::Job::Check;
     else if (cmd == "bench") j.kind = app::Job::Bench;
+    else if (cmd == "fetch") j.kind = app::Job::Fetch;
     else if (cmd == "stop") j.kind = app::Job::Stop;
     else {
-        err = "the title doesn't run '" + cmd + "' (serve, check, bench or stop)";
+        err = "the title doesn't run '" + cmd + "' (serve, check, bench, fetch or stop)";
         return false;
     }
+    auto in_models = [](const std::string &v) {
+        return v.find('/') == std::string::npos ? std::string(kModels) + "/" + v : v;
+    };
     if (o) j.n_ctx = o->n_ctx;
-    for (size_t i = 1; i < a.size(); i++) {
+    size_t i = 1;
+    if (j.kind == app::Job::Fetch) {
+        if (a.size() < 3) {
+            err = "fetch needs URL FILE";
+            return false;
+        }
+        j.url = a[1];
+        j.path = in_models(a[2]);
+        i = 3;
+    }
+    for (; i < a.size(); i++) {
         const std::string &s = a[i];
         if (i + 1 >= a.size()) {
             err = "'" + s + "' without a value";
             return false;
         }
         const std::string &v = a[++i];
-        if (s == "-m") j.path = v.find('/') == std::string::npos ? std::string(kModels) + "/" + v : v;
+        if (s == "-m") j.path = in_models(v);
+        else if (s == "--sha256") j.sha256 = v;
         else if (s == "-c") j.n_ctx = v == "auto" ? 0 : atoi(v.c_str());
         else if (s == "-n") j.n = atoi(v.c_str());
         else if (s == "--fresh") j.fresh = atoi(v.c_str()) != 0;
@@ -362,6 +432,12 @@ bool parse_job(const std::vector<std::string> &a, app::Job &j, Options *o, std::
     }
     if (j.kind != app::Job::Stop && j.path.empty()) {
         err = cmd + " needs -m MODEL";
+        return false;
+    }
+    // Settings last a job's life (runner.cpp's EnvScope); a served model's
+    // are the title's own, in ts5.env.
+    if (!j.env.empty() && j.kind != app::Job::Check && j.kind != app::Job::Bench) {
+        err = "--env is for check and bench; " + cmd + " uses the settings in ts5.env";
         return false;
     }
     if (o && j.kind == app::Job::Serve) o->n_ctx = j.n_ctx;
@@ -407,6 +483,116 @@ std::string api_url() {
     return "http://" + (ip.empty() ? std::string("<console ip>") : ip) + ":" + std::to_string(api_port) + "/v1";
 }
 
+// TS5_WRITE_PROBE=1 in ts5.env: how fast the title can write, in 32 MB
+// steps, several ways, to find why downloads write at about 1 MB/s into
+// models/ while the same disk takes 30 MB/s over FTP. Each test's file is
+// removed after it. In a thread of its own, so the TV shows whether the
+// main loop stalls meanwhile.
+void write_probe() {
+    using clock = std::chrono::steady_clock;
+    auto secs = [](clock::time_point a) { return std::chrono::duration<double>(clock::now() - a).count(); };
+    struct Test {
+        const char *name, *dir;
+        int mb;
+        bool stdio, direct, sync;
+    };
+    const Test tests[] = {
+        {"stdio 1 MB writes (as downloads)", kModels, 192, true, false, false},
+        {"write() 8 MB", kModels, 192, false, false, false},
+        {"write() 8 MB, fsync every 32 MB", kModels, 192, false, false, true},
+        {"write() 8 MB, O_DIRECT", kModels, 192, false, true, false},
+        {"write() 8 MB into /download0", "/download0", 128, false, false, false},
+    };
+    std::vector<char> buf(8u << 20, 'x');
+    for (const Test &t : tests) {
+        const std::string path = std::string(t.dir) + "/.ts5-write-probe";
+        printf("ts5-title: write probe: %s, %d MB into %s\n", t.name, t.mb, t.dir);
+        const auto start = clock::now();
+        auto step = start;
+        FILE *f = nullptr;
+        int fd = -1;
+        std::vector<char> fbuf(1 << 20);
+        if (t.stdio) {
+            f = fopen(path.c_str(), "wb");
+            if (f) setvbuf(f, fbuf.data(), _IOFBF, fbuf.size());
+        } else {
+            fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | (t.direct ? O_DIRECT : 0), 0666);
+        }
+        if (!f && fd < 0) {
+            printf("ts5-title: write probe: can't open %s: %s\n", path.c_str(), strerror(errno));
+            continue;
+        }
+        bool ok = true;
+        const size_t piece = t.stdio ? (1u << 20) : buf.size();
+        uint64_t done = 0, step_done = 0;
+        while (ok && done < ((uint64_t)t.mb << 20)) {
+            ok = t.stdio ? fwrite(buf.data(), 1, piece, f) == piece : write(fd, buf.data(), piece) == (ssize_t)piece;
+            if (!ok) printf("ts5-title: write probe: write failed: %s\n", strerror(errno));
+            done += piece;
+            if (done - step_done >= (32u << 20)) {
+                if (t.sync && fd >= 0) fsync(fd);
+                const double s = secs(step);
+                printf("ts5-title: write probe:   %llu MB: 32 MB in %.1f s (%.1f MB/s)\n",
+                       (unsigned long long)(done >> 20), s, s > 0 ? 32.0 / s : 0.0);
+                step = clock::now();
+                step_done = done;
+            }
+        }
+        const double written = secs(start);
+        const auto closing = clock::now();
+        if (f) {
+            fflush(f);
+            fsync(fileno(f));
+            fclose(f);
+        } else {
+            fsync(fd);
+            close(fd);
+        }
+        const double total = secs(start);
+        printf("ts5-title: write probe: %s: %.1f s to write, %.1f s more to reach the disk: %.1f MB/s overall\n",
+               t.name, written, secs(closing), total > 0 ? (double)(done >> 20) / total : 0.0);
+        unlink(path.c_str());
+        sceKernelUsleep(3000000);
+    }
+    printf("ts5-title: write probe: done\n");
+}
+
+// How long each pass of the main loop takes, and in which step: a pass
+// over 1 s means the TV's picture and the controller waited that long, and
+// the log says where (on the PS5 a file write can wait behind a download's).
+struct LoopTimer {
+    double start = 0, last = 0, worst_s = 0;
+    const char *worst = "";
+    void begin(double t) {
+        start = last = t;
+        worst_s = 0;
+        worst = "";
+    }
+    // The step that just ended.
+    void mark(const char *step) {
+        const double t = app::now_s();
+        if (t - last > worst_s) {
+            worst_s = t - last;
+            worst = step;
+        }
+        last = t;
+    }
+    void end() {
+        const double t = app::now_s();
+        if (t - start > 1.0)
+            ts5::log_line("ts5-title: the screen waited %.1f s (%.1f s of it in %s)", t - start, worst_s, worst);
+    }
+};
+
+// The address apps use, or "" while the console isn't on a network.
+std::string network_url() {
+    {
+        std::lock_guard<std::mutex> lk(ip_mutex);
+        if (ip.empty()) return {};
+    }
+    return api_url();
+}
+
 }  // namespace
 
 int main(int, char **) {
@@ -416,10 +602,22 @@ int main(int, char **) {
     if (freopen(kLog, "a", stdout)) {
         setvbuf(stdout, nullptr, _IOLBF, 0);
     } else {
-        notify(std::string("TokenStation5: can't write its log in " TS5_FTP_DIR ": ") + strerror(errno));
+        notify("TokenStation5 can't save to its folder, so settings and usage won't be kept. Check that the PS5 has "
+               "free storage.");
     }
-    if (freopen(kLog, "a", stderr)) setvbuf(stderr, nullptr, _IONBF, 0);
+    // stderr is RADV's: its PS5 layer writes a line there every 10 s from
+    // inside its submit lock, and while a download writes, a write to the
+    // log could take 8 s, so every frame waited (2026-10-25). The PS5 gives
+    // the title no pipe to hand the lines to a thread, so they wait in a
+    // buffer instead, written when the title leaves, or every 10 s by a
+    // thread of their own with the Detailed log on. The title's own lines
+    // don't use stderr's buffer (log.h writes to its descriptor).
+    static char stderr_buf[1 << 20];
+    if (freopen(kLog, "a", stderr)) setvbuf(stderr, stderr_buf, _IOFBF, sizeof stderr_buf);
     printf("ts5-title: TokenStation5 %s\n", TS5_VERSION);
+    // After a store update the folder is new: the last version's files come
+    // back before anything reads them.
+    backup.restore();
 
     // Not radv_enable_unified_heap_on_apu, which shows the console's memory as
     // one 11.44 GiB heap: it also takes away the GTT memory types, and RADV's
@@ -427,10 +625,13 @@ int main(int, char **) {
     // no picture. Without it the same memory shows as two heaps, and models
     // still get all of it (vk_backend.cpp falls back from one to the other).
     setenv("HOME", TS5_HOME, 0);
+    int word = 0;
     for (const std::string &w : read_words(kEnv)) {
         size_t eq = w.find('=');
+        word++;
         if (eq == 0 || eq == std::string::npos) {
-            printf("ts5-title: ts5.env: not NAME=VALUE: %s\n", w.c_str());
+            // Not the word itself: it could be half of a key split by a space.
+            printf("ts5-title: ts5.env: word %d (%zu characters) isn't NAME=VALUE\n", word, w.size());
             continue;
         }
         const std::string name = w.substr(0, eq);
@@ -440,16 +641,25 @@ int main(int, char **) {
     }
 
     for (const char *f :
-         {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kWhisperTest, kSpeakTest})
+         {kQuit, kRestart, kPress, kShot, kCmd, kAudioTest, kChat, kType, kWhisperTest, kSpeakTest})
         unlink(f);
     std::thread(watch_control_files).detach();
+    if (app::setting("TS5_NET_LOG") == "1")
+        std::thread([] {
+            for (;;) {
+                sceKernelUsleep(10000000);
+                fflush(stderr);
+            }
+        }).detach();
     std::thread(keep_awake).detach();
     sceSystemServiceHideSplashScreen();
 
     std::string err;
     ts5::VkContext *ctx = ts5::create_vk_context(0, true, err);
     if (!ctx) {
-        notify("TokenStation5: no GPU: " + err);
+        printf("ts5-title: no GPU: %s\n", err.c_str());
+        notify("TokenStation5 couldn't start the PS5's graphics chip and is closing. Open it again, or restart the PS5 "
+               "if it keeps happening.");
         sceKernelUsleep(5000000);
         leave("exit");
     }
@@ -476,11 +686,115 @@ int main(int, char **) {
     app::Library lib(kModelDirs, kResults);
     lib.scan();
     ts5::Server server;
+    // Each request's usage, named from the library (the file name without
+    // .gguf if it isn't there), queued for the main loop: for usage.tsv, and
+    // for Home's totals (made before the API takes a request, so it reads
+    // the files as they are now).
+    app::UsageStore usage_store(kUsageHours, usage_log.path(), usage_log.prev_path());
+    std::mutex names_mutex;
+    std::map<std::string, std::string> model_names;  // file: general.name
+    server.set_on_usage([&](const ts5::UsageRecord &r) {
+        ts5::UsageRecord u = r;
+        {
+            std::lock_guard<std::mutex> lk(names_mutex);
+            const auto it = model_names.find(r.model);
+            u.name = it != model_names.end() ? it->second : r.model.substr(0, r.model.rfind(".gguf"));
+        }
+        usage_log.push(u);
+        usage_store.push(u);
+    });
+    // API keys (keys.h): who may use the API.
+    app::KeyStore keys;
+    keys.load(kKeys);
+    keys.set_required(app::setting(kRequireKey, "0") == "1");
+    // Tailscale (ts/tailscale.h): this PS5 on a tailnet, its packets through
+    // the tunnel's thread (wg/wg.h). Its connections come from 127.0.0.1, so
+    // each is named by the device behind it (100.64.0.0/10), which always
+    // needs a key.
+    ts::Client tailnet;
+    wg::Tunnel tunnel;
+    tunnel.use_tailscale(&tailnet);
+    auto in_tunnel = [](const std::string &client) {
+        int a = 0, b = 0;
+        return sscanf(client.c_str(), "%d.%d.", &a, &b) == 2 && a == 100 && b >= 64 && b < 128;
+    };
+    server.set_client_name([&tunnel](const std::string &ip, int port) {
+        if (ip == "127.0.0.1") {
+            const std::string device = tunnel.client_for((uint16_t)port);
+            if (!device.empty()) return device;
+        }
+        return ip;
+    });
+    server.set_authorize([&keys, in_tunnel](const std::string &key, const std::string &client, std::string &name) {
+        return keys.authorize(key, client, name, in_tunnel(client));
+    });
+    std::string fresh_key, fresh_key_id;  // a key just made, shown on Settings until the page is left
+    app::HfSearch hf;  // the Models page's search
+    usage_log.start(TS5_VERSION);
+    double last_usage = 0;
+    bool usage_ok = true;
     api_port = opts.port;
     ip = lan_address();
-    if (!server.start(opts.host, opts.port, err)) notify("TokenStation5: the API can't listen: " + err);
-    app::Runner runner(ctx, server, lib, lib_mutex, notify, api_url);
-    app::Chat chat(opts.host, opts.port);
+    if (!server.start(opts.host, opts.port, err)) {
+        printf("ts5-title: the API can't listen: %s\n", err.c_str());
+        // A --host that isn't an address: all networks instead.
+        if (err.compare(0, 9, "bad host ") == 0 && server.start("0.0.0.0", opts.port, err)) {
+            opts.host = "0.0.0.0";
+            notify("TokenStation5's saved network setting didn't work, so it listens on all networks now.");
+        } else {
+            if (err.compare(0, 9, "bad host ") == 0) printf("ts5-title: the API can't listen: %s\n", err.c_str());
+            notify("Apps can't reach TokenStation5: its network port " + std::to_string(opts.port) +
+                   " is in use. Restart the PS5 and open TokenStation5 again.");
+        }
+    }
+    // Brings Tailscale and its tunnel in line with Settings.
+    auto ts_apply = [&] {
+        ts::Config tc;
+        tc.on = app::setting(kTailscale, "0") == "1";
+        tc.control_url = app::setting(kTsServer, "https://controlplane.tailscale.com");
+        tc.hostname = app::setting(kTsName, "tokenstation5");
+        tc.auth_key = app::setting(kTsAuthKey);
+        tc.state_file = kTsFile;
+        tc.version = TS5_VERSION;
+        tailnet.apply(tc);
+        wg::Config wc;
+        wc.api_port = api_port;
+        wc.tailscale = tc.on;
+        std::string e;
+        if (!tunnel.apply(wc, e)) printf("ts5-title: tailscale: %s\n", e.c_str());
+    };
+    ts_apply();
+    app::Runner runner(ctx, server, lib, lib_mutex, notify, network_url);
+    // Models (and, from Settings, the speech model and voice) downloaded on
+    // the console, beside whatever the Runner does.
+    app::Downloads downloads(kModels, TS5_VERSION, notify);
+    // Which folders the title can write to, and the free space each one's
+    // volume reports, to find where models and the rest can live so a store
+    // update (which swaps the app's folder) keeps them.
+    for (const char *dir : {TS5_HOME, "/download0", TS5_DATA}) {
+        struct statvfs vs;
+        if (statvfs(dir, &vs) != 0) {
+            printf("ts5-title: folder %s: can't read its volume (%s)\n", dir, strerror(errno));
+            continue;
+        }
+        const std::string probe = std::string(dir) + "/.ts5-write-test";
+        FILE *f = fopen(probe.c_str(), "wb");
+        const bool writable = f && fputs("ts5", f) >= 0;
+        if (f) fclose(f);
+        unlink(probe.c_str());
+        const uint64_t unit = vs.f_frsize ? vs.f_frsize : vs.f_bsize;
+        printf("ts5-title: folder %s: %s, %s free of %s (fs id %lu)\n", dir, writable ? "writable" : "not writable",
+               app::format_bytes((uint64_t)vs.f_bavail * unit).c_str(),
+               app::format_bytes((uint64_t)vs.f_blocks * unit).c_str(), (unsigned long)vs.f_fsid);
+    }
+    if (app::setting("TS5_WRITE_PROBE") == "1") std::thread(write_probe).detach();
+    app::ChatStore chat_store(kChats);
+    app::Chat chat(opts.host, opts.port, &chat_store);
+    // The Chat page's sidebar: every chat, or what a search found.
+    std::string chat_query;
+    uint64_t chats_version = 0;
+    std::vector<app::ChatSummary> chat_list;
+    size_t live_turn = (size_t)-1;  // the reply that came in this run, which is read aloud
     int user = -1;
     sceUserServiceGetInitialUser(&user);
     // What R1 recorded, as a message. A reply still ending (R1 stops it) gets
@@ -503,10 +817,21 @@ int main(int, char **) {
         have_startup = !startup.path.empty();
     }
     if (have_startup) runner.push(startup);
-    else notify("TokenStation5: no model. Copy a .gguf to " TS5_FTP_DIR "/models");
+    else notify("TokenStation5: no models yet. Open it and download one on the Models page.");
 
     ui::Dashboard dash(fonts, ts5_logo_data, (size_t)(ts5_logo_data_end - ts5_logo_data));
+    dash.set_log_files(kLog, kPrevLog);
+    {
+        // Home first, or Models while there's no model to use.
+        std::lock_guard<std::mutex> lk(lib_mutex);
+        if (lib.models().empty()) dash.show(ui::Dashboard::Models);
+    }
     ui::Canvas canvas(kWidth, kHeight);
+    // Home's live line: tokens written each second, the last two minutes.
+    std::vector<float> live;
+    std::vector<uint8_t> live_reading;
+    double last_live = app::now_s();
+    uint64_t last_gen = server.activity().gen_total;
     // Presses from the PC, and holds ('h') and releases ('r') of a button.
     std::deque<std::pair<char, uint32_t>> presses;
     uint32_t pc_held = 0;
@@ -516,8 +841,37 @@ int main(int, char **) {
     app::ChatState chat_state;
     app::VoiceState voice_state;
     bool drawn_dark = false, drawn_speaking = false;
-    double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan;
+    double last_draw = 0, last_scan = app::now_s(), last_ip = last_scan, last_input = last_scan,
+           last_backup = last_scan;
     ui::SettingsInfo settings_note;  // the Settings page's last change
+    // The Settings page's info: the last change, plus the keys and what an
+    // app needs to connect.
+    auto settings_view = [&](const ui::View &v) {
+        ui::SettingsInfo s = settings_note;
+        for (const app::ApiKey &k : keys.list()) s.keys.push_back({k.id, k.name, k.on, k.created, k.used});
+        s.fresh_key = fresh_key;
+        s.fresh_key_id = fresh_key_id;
+        s.url = v.url;
+        s.on_network = v.on_network;
+        s.api_port = api_port;
+        const ts::Status ts_status = tailnet.status();
+        s.ts.state = (int)ts_status.state;
+        s.ts.sign_in_url = ts_status.sign_in_url;
+        s.ts.problem = ts_status.problem;
+        s.ts.name = ts_status.name;
+        s.ts.address = ts_status.address;
+        s.ts.account = ts_status.account;
+        s.ts.relay = ts_status.relay;
+        s.ts.devices = ts_status.devices;
+        for (const wg::PeerState &p : tunnel.tailnet_peers()) s.ts.connected.push_back({p.name, p.address, p.up, p.seen_s, p.from == "direct"});
+        if (!v.status.serving.empty()) {
+            s.model_id = v.status.serving;
+            const size_t g = s.model_id.size() > 5 ? s.model_id.size() - 5 : std::string::npos;
+            if (g != std::string::npos && s.model_id.compare(g, 5, ".gguf") == 0) s.model_id.resize(g);
+            s.n_ctx = v.status.serving_ctx;
+        }
+        return s;
+    };
     bool lib_changed = true;
     std::atomic<bool> audio_testing{false}, whisper_testing{false}, speak_testing{false};
     // The console's keyboard (text_input.h), for a chat message or a key.
@@ -526,12 +880,17 @@ int main(int, char **) {
     std::string typing_for;  // the setting it's for; "": a chat message
     bool typing_pending = false;  // until cross is let go, or the dialog takes it as a press
     bool swallow = false;         // after it closes, until every button is up
+    std::string pc_typed;         // from the PC's type file, in place of the keyboard
+    bool pc_typing = false;
     app::EnterKey enter_key;      // a USB or Bluetooth keyboard's Enter
+    LoopTimer timer;
     for (;;) {
         const double t = app::now_s();
+        timer.begin(t);
         // Read each time: the Settings page changes them.
         const double dim = dim_after(), chat_period = 1.0 / chat_fps();
         uint32_t buttons = pad.poll();
+        timer.mark("the controller");
         // Presses from the PC, one per frame.
         std::vector<std::string> words;
         if (presses.empty() && take_written(kPress, words))
@@ -550,6 +909,7 @@ int main(int, char **) {
             if (kind == 'r') pc_held &= ~b;
             presses.pop_front();
         }
+        timer.mark("the PC's press file");
         // Enter on a keyboard does on the chat page what cross does: it opens
         // the console's keyboard.
         if (enter_key.poll(dash.page() == ui::Dashboard::Chat && !keyboard.is_open() && !swallow && !typing_pending, t))
@@ -561,21 +921,37 @@ int main(int, char **) {
         if (woke) buttons = 0;
         // While the console's keyboard is up, the controller is its; nor does
         // the press that closes it reach the page.
-        if (keyboard.is_open()) {
+        if (keyboard.is_open() || pc_typing) {
             buttons = 0;
             last_input = t;
-            std::string typed;
-            const app::TextInput::State st = keyboard.poll(typed);
+            std::string typed = pc_typing ? pc_typed : std::string();
+            const app::TextInput::State st = pc_typing ? app::TextInput::Done : keyboard.poll(typed);
+            pc_typing = false;
             if (st != app::TextInput::Typing) swallow = true;
             const std::string text = trimmed(typed);
             if (st == app::TextInput::Done && typing_for.empty()) {
                 const bool sent = !text.empty() && chat.send(text);
                 printf("ts5-title: chat: %s by keyboard (%zu bytes)\n", sent ? "message" : "not sent", text.size());
+            } else if (st == app::TextInput::Done && typing_for == kChatSearch) {
+                chat_query = text;  // "" shows every chat again
+                chats_version = 0;
+                printf("ts5-title: chats: search (%zu bytes)\n", text.size());
+            } else if (st == app::TextInput::Done && !text.empty() && typing_for == kSearching) {
+                hf.start(text, ctx->device_memory());
+            } else if (st == app::TextInput::Done && !text.empty() && typing_for == kNamingKey) {
+                std::string e, id;
+                const std::string key = keys.create(text, id, e);
+                if (key.empty()) printf("ts5-title: keys: couldn't make one: %s\n", e.c_str());
+                fresh_key = key;
+                fresh_key_id = id;
+                settings_note.note = !key.empty() ? "Made" : std::string("Couldn't make a key.") + plain::kDetails;
+                settings_note.note_failed = key.empty();
+                settings_note.note_at = t;
             } else if (st == app::TextInput::Done && !text.empty()) {
                 std::string e;
                 const bool ok = app::set_setting(kEnv, typing_for, text, e);
                 if (!ok) printf("ts5-title: settings: %s not saved: %s\n", typing_for.c_str(), e.c_str());
-                settings_note.note = ok ? "Saved" : "Couldn't save it. The log says why.";
+                settings_note.note = ok ? "Saved" : std::string("Couldn't save it.") + plain::kDetails;
                 settings_note.note_failed = !ok;
                 settings_note.note_at = t;
             }
@@ -647,10 +1023,16 @@ int main(int, char **) {
                 settings_note.voices = std::move(voices);
                 lib_changed = true;
             }
+            const bool kokoro = !tts::kokoro_models(kModels).empty();
+            if (kokoro != settings_note.kokoro_model) {
+                settings_note.kokoro_model = kokoro;
+                lib_changed = true;
+            }
             std::lock_guard<std::mutex> lk(lib_mutex);
             lib_changed |= lib.scan();
             last_scan = t;
         }
+        timer.mark("the files from the PC and the models folder");
         if (t - last_ip > 10) {
             const std::string now_ip = lan_address();
             std::lock_guard<std::mutex> lk(ip_mutex);
@@ -658,11 +1040,46 @@ int main(int, char **) {
             ip = now_ip;
             last_ip = t;
         }
+        if (t - last_backup > 30) {
+            backup.sync();
+            last_backup = t;
+        }
+        timer.mark("the backup in /download0");
 
+        // Downloads that arrived: the Library lists them now, not at its next
+        // scan, so their rows turn into models at once.
+        for (const std::string &key : downloads.finished()) {
+            const app::CatalogEntry *e = app::Downloads::find(key);
+            if (!e) continue;
+            const std::string path = std::string(kModels) + "/" + e->file;
+            {
+                std::lock_guard<std::mutex> lk(lib_mutex);
+                lib.scan();
+            }
+            lib_changed = true;
+            runner.note(std::string("Downloaded ") + e->name);
+            // With nothing running, the new model starts.
+            const app::Status st = runner.status();
+            if (e->kind == app::CatalogEntry::Model && st.serving.empty() && st.phase == app::Status::Idle &&
+                st.queued == 0) {
+                app::Job j;
+                j.kind = app::Job::Serve;
+                j.path = path;
+                j.n_ctx = opts.n_ctx;
+                runner.push(j);
+                save_args(path, opts);
+                printf("ts5-title: download: starting %s, nothing else was running\n", e->file);
+            }
+            if (e->kind != app::CatalogEntry::Model) voice.rescan();
+        }
         ui::View v;
         v.version = TS5_VERSION;
         v.url = api_url();
-        v.folder = TS5_FTP_DIR "/models";
+        {
+            std::lock_guard<std::mutex> lk(ip_mutex);
+            v.on_network = !ip.empty();
+            v.own_ip = ip;
+        }
         v.gpu_memory = ctx->device_memory();
         v.n_ctx = opts.n_ctx;
         {
@@ -675,34 +1092,87 @@ int main(int, char **) {
             for (const auto &m : v.models) names += (names.empty() ? "" : ", ") + m.file;
             if (names != listed) printf("ts5-title: models: %s\n", names.empty() ? "none" : names.c_str());
             listed = names;
+            std::lock_guard<std::mutex> lk(names_mutex);
+            for (const auto &m : v.models) model_names[m.file] = m.name;
         }
-        const uint64_t version = runner.version();
+        // All three only grow, so their sum changes whenever any does.
+        const uint64_t version = runner.version() + downloads.version() + hf.version();
         v.status = runner.status();
         v.events = runner.events();
+        // A download waits while a model loads, which wants the console's
+        // CPU and storage to itself.
+        downloads.hold(v.status.phase == app::Status::Loading);
+        v.downloads = downloads.state();
+        v.hf = hf.state();
+        v.have_free = downloads.free_space(v.free_bytes);
+        v.models_dir = kModels;
         v.api = server.activity();
+        const int64_t now_ms = (int64_t)time(nullptr) * 1000;
+        if (t - last_live >= 1) {
+            live.push_back((float)((double)(v.api.gen_total - last_gen) / (t - last_live)));
+            live_reading.push_back(v.api.phase == 1);
+            if (live.size() > 120) {
+                live.erase(live.begin());
+                live_reading.erase(live_reading.begin());
+            }
+            last_gen = v.api.gen_total;
+            last_live = t;
+            usage_store.tick(now_ms);
+        }
+        v.live = live;
+        v.live_reading = live_reading;
         // Both only grow, so their sum changes whenever either does.
         if (chat.version() + voice.version() != chat_version) {
             chat_version = chat.version() + voice.version();
             chat_state = chat.state();
             voice_state = voice.state();
-            // The reply as it comes, read aloud a sentence at a time.
+            // The reply as it comes, read aloud a sentence at a time; not the
+            // last reply of a saved chat that's opened.
             if (!chat_state.turns.empty() && !chat_state.turns.back().user) {
                 const app::ChatTurn &r = chat_state.turns.back();
-                speaker.feed(chat_state.turns.size() - 1, r.text, r.end != app::ChatTurn::Coming);
+                const size_t at = chat_state.turns.size() - 1;
+                if (r.end == app::ChatTurn::Coming) live_turn = at;
+                if (at == live_turn) speaker.feed(at, r.text, r.end != app::ChatTurn::Coming);
             }
         }
         v.chat = chat_state;
+        if (chat_store.version() != chats_version) {
+            chats_version = chat_store.version();
+            chat_list = chat_query.empty() ? chat_store.list() : chat_store.search(chat_query);
+        }
+        v.chats.chats = chat_list;
+        v.chats.query = chat_query;
+        v.chats.current = chat_state.id;
+        v.chats.wall = (int64_t)time(nullptr);
         v.voice = voice_state;
         v.speaking = speaker.speaking();
+        v.no_voice = app::setting("TS5_SPEAK", "1") != "0" &&
+                     (settings_note.voices.empty() || !settings_note.kokoro_model);
         const bool chat_active = v.chat.busy || v.voice.phase != app::VoiceState::Idle;
         // Nor does the screen go dark while a reply comes in on the chat page,
         // or is read aloud.
         if ((chat_active || v.speaking) && dash.page() == ui::Dashboard::Chat) last_input = t;
-        v.settings = settings_note;
+        // Nor while Settings waits for this PS5 to be signed in to Tailscale:
+        // someone may be walking up to scan its code.
+        if (dash.page() == ui::Dashboard::Settings && tailnet.status().state == ts::Status::NeedsSignIn)
+            last_input = t;
+        // A new key shows only until Settings is left.
+        if (dash.page() != ui::Dashboard::Settings) {
+            fresh_key.clear();
+            fresh_key_id.clear();
+        }
+        timer.mark("the downloads, chats and usage");
+        keys.save_used(v.wall = (int64_t)time(nullptr));
+        timer.mark("keys.tsv");
+        v.settings = settings_view(v);
         v.now = t;
-        v.wall = (int64_t)time(nullptr);
 
+        // Home's square needs the numbers at the press; the press can change
+        // Home's range, so they're fetched again then.
+        const app::UsageView::Range range = dash.range();
+        v.usage = usage_store.view(range, now_ms, v.own_ip);
         const ui::Action a = dash.press(buttons, v);
+        if (dash.range() != range) v.usage = usage_store.view(dash.range(), now_ms, v.own_ip);
         switch (a.kind) {
             case ui::Action::Serve: {
                 app::Job j;
@@ -741,15 +1211,55 @@ int main(int, char **) {
                 chat.clear();
                 speaker.reset();
                 break;
+            case ui::Action::ChatOpen:
+                speaker.reset();
+                live_turn = (size_t)-1;
+                if (!chat.open(a.name)) notify("TokenStation5: that chat couldn't be opened.");
+                break;
+            case ui::Action::ChatRemove:
+                if (a.name == chat_state.id) {
+                    chat.clear();
+                    speaker.reset();
+                }
+                if (!chat_store.remove(a.name)) notify("TokenStation5: that chat couldn't be removed.");
+                break;
+            case ui::Action::ChatSearchClear:
+                chat_query.clear();
+                chats_version = 0;
+                break;
+            case ui::Action::ChatSearch:
+                typing = app::TextRequest();
+                typing_for = kChatSearch;
+                typing.title = "Search chats";
+                typing.placeholder = "Words from a chat";
+                typing.text = chat_query;
+                typing.max_chars = 80;
+                typing_pending = true;
+                break;
             case ui::Action::Set: {
                 std::string e;
+                if ((a.name == kRequireKey || a.name == kTailscale) && a.value == "1") {
+                    bool any_on = false;
+                    for (const app::ApiKey &k : keys.list()) any_on |= k.on;
+                    if (!any_on) {
+                        // Over Tailscale a key is always needed.
+                        settings_note.note = a.name == kTailscale ? "Make a key first: devices need one over Tailscale."
+                                                                  : "Make a key first, so your apps can still get in.";
+                        settings_note.note_failed = true;
+                        settings_note.note_at = t;
+                        v.settings = settings_view(v);
+                        break;
+                    }
+                }
                 const bool ok = app::set_setting(kEnv, a.name, a.value, e);
+                if (ok && a.name == kRequireKey) keys.set_required(a.value == "1");
                 if (!ok) printf("ts5-title: settings: %s not saved: %s\n", a.name.c_str(), e.c_str());
-                settings_note.note = ok ? "Saved" : "Couldn't save it. The log says why.";
+                settings_note.note = ok ? "Saved" : std::string("Couldn't save it.") + plain::kDetails;
                 settings_note.note_failed = !ok;
                 settings_note.note_at = t;
-                v.settings = settings_note;
+                v.settings = settings_view(v);
                 if (ok && a.name == "TS5_WHISPER_MODEL") voice.rescan();
+                if (ok && a.name == kTailscale) ts_apply();
                 break;
             }
             case ui::Action::ChatType:
@@ -762,7 +1272,7 @@ int main(int, char **) {
                     typing.send = true;
                 } else {
                     typing.title = a.label;
-                    typing.placeholder = typing_for == "TAVILY_API_KEY" ? "tvly-..." : "";
+                    typing.placeholder = typing_for == "TAVILY_API_KEY" ? "Starts with tvly-" : "";
                     // Shown as it's typed, and starting from the saved one, so a typo
                     // in a long key can be seen and fixed.
                     typing.latin = app::secret_setting(typing_for);
@@ -771,6 +1281,88 @@ int main(int, char **) {
                 }
                 typing_pending = true;
                 break;
+            case ui::Action::Download:
+                for (const std::string &k : a.keys) downloads.start(k);
+                break;
+            case ui::Action::Search:
+                typing = app::TextRequest();
+                typing_for = kSearching;
+                typing.title = "Search Hugging Face";
+                typing.placeholder = "A model's name, such as qwen coder";
+                typing.text = v.hf.query;
+                typing.max_chars = 80;
+                typing_pending = true;
+                break;
+            case ui::Action::NewKey:
+                typing = app::TextRequest();
+                typing_for = kNamingKey;
+                typing.title = "Name the new key";
+                typing.placeholder = "The app it's for, such as Kilo Code on the laptop";
+                typing.max_chars = 60;
+                typing_pending = true;
+                break;
+            case ui::Action::KeyOn:
+            case ui::Action::RemoveKey: {
+                std::string e;
+                const bool remove = a.kind == ui::Action::RemoveKey;
+                const bool ok = remove ? keys.remove(a.name, e) : keys.set_on(a.name, a.value == "1", e);
+                if (!ok) printf("ts5-title: keys: %s\n", e.c_str());
+                if (ok && remove && a.name == fresh_key_id) {
+                    fresh_key.clear();
+                    fresh_key_id.clear();
+                }
+                settings_note.note = ok ? (remove ? "Removed" : "Saved") : std::string("Couldn't save it.") + plain::kDetails;
+                settings_note.note_failed = !ok;
+                settings_note.note_at = t;
+                v.settings = settings_view(v);
+                break;
+            }
+            case ui::Action::TsSignOut: {
+                // Signed out, and off: turning it on again shows a new code.
+                std::string e;
+                tailnet.sign_out();
+                const bool ok = app::set_setting(kEnv, kTailscale, "", e);
+                if (!ok) printf("ts5-title: settings: %s not saved: %s\n", kTailscale, e.c_str());
+                ts_apply();
+                settings_note.note = ok ? "Signed out" : std::string("Couldn't save it.") + plain::kDetails;
+                settings_note.note_failed = !ok;
+                settings_note.note_at = t;
+                v.settings = settings_view(v);
+                break;
+            }
+            case ui::Action::StopDownload:
+                for (const std::string &k : a.keys) downloads.stop(k);
+                break;
+            case ui::Action::RemovePart:
+                for (const std::string &k : a.keys) downloads.remove_part(k);
+                break;
+            case ui::Action::Remove: {
+                // A model in the title's own folder that isn't in use (the
+                // dashboard asked first). Its results and usage stay.
+                const app::Status st = runner.status();
+                const std::string prefix = std::string(kModels) + "/";
+                std::string note;
+                bool bad = false;
+                {
+                    std::lock_guard<std::mutex> lk(lib_mutex);
+                    const app::ModelInfo *m = lib.find(a.path);
+                    if (!m || a.path == st.serving_path || a.path.compare(0, prefix.size(), prefix) != 0) {
+                        printf("ts5-title: remove: %s isn't one to remove\n", a.path.c_str());
+                    } else if (unlink(a.path.c_str()) != 0) {
+                        printf("ts5-title: remove failed: %s: %s\n", a.path.c_str(), strerror(errno));
+                        note = "Couldn't remove " + m->name + "." + plain::kDetails;
+                        bad = true;
+                    } else {
+                        printf("ts5-title: removed %s (%llu bytes)\n", a.path.c_str(), (unsigned long long)m->size);
+                        note = "Removed " + m->name;
+                    }
+                    lib.scan();
+                }
+                if (!note.empty()) runner.note(note, bad);
+                lib_changed = true;
+                downloads.refresh();
+                break;
+            }
             case ui::Action::Close:
                 notify("TokenStation5: closing");
                 leave("exit");
@@ -778,11 +1370,14 @@ int main(int, char **) {
         }
         if (typing_pending && !(pad.held() & ui::kCross)) {
             typing_pending = false;
-            if (!keyboard.open(typing)) {
+            if (take_text(kType, pc_typed)) {
+                pc_typing = true;
+                printf("ts5-title: typed from the PC (%zu bytes)\n", pc_typed.size());
+            } else if (!keyboard.open(typing)) {
                 if (typing_for.empty()) {
-                    notify("TokenStation5: the console's keyboard didn't open");
+                    notify("TokenStation5: the console's keyboard didn't open. Try again.");
                 } else {
-                    settings_note.note = "The keyboard didn't open";
+                    settings_note.note = std::string("The keyboard didn't open. Try again.") + plain::kDetails;
                     settings_note.note_failed = true;
                     settings_note.note_at = t;
                 }
@@ -804,23 +1399,36 @@ int main(int, char **) {
         if (on_chat && chat_active) period = chat_period;
         const bool tick = t - last_draw > period;
         const bool chat_dirty = on_chat && chat_version != drawn_chat && (!chat_active || tick);
+        timer.mark("the button presses");
         if (dirty || tick || chat_dirty) {
+            // With a screenshot, the words drawn too (screen.txt).
+            std::vector<std::string> words;
+            if (shot) ui::Canvas::record = &words;
             if (dark)
                 draw_resting(canvas, fonts.get("small"),
-                             "TokenStation5" + (v.status.serving.empty() ? std::string() : " \xC2\xB7 " + v.url) +
+                             "TokenStation5" +
+                                 (v.status.serving.empty() || !v.on_network ? std::string() : " \xC2\xB7 " + v.url) +
                                  "  \xC2\xB7  press any button",
                              t);
             else
                 dash.draw(canvas, v);
+            ui::Canvas::record = nullptr;
+            timer.mark("drawing");
             if (screen && !display.present(canvas.pixels(), err)) {
                 printf("ts5-title: the picture stopped: %s\n", err.c_str());
                 screen = false;
             }
+            timer.mark("showing the picture");
             if (shot) {
                 // The file goes once the picture is written: whoever asked
                 // reads it after that.
                 if (!canvas.save_bmp(kScreen)) printf("ts5-title: can't write %s\n", kScreen);
+                if (FILE *f = fopen(kScreenText, "w")) {
+                    for (const std::string &w : words) fprintf(f, "%s\n", w.c_str());
+                    fclose(f);
+                }
                 unlink(kShot);
+                timer.mark("the screenshot");
             }
             drawn_version = version;
             drawn_chat = chat_version;
@@ -829,6 +1437,15 @@ int main(int, char **) {
             last_draw = t;
             lib_changed = false;
         }
+        // The usage lines the requests queued, at most every 2 s.
+        if (t - last_usage > 2) {
+            const bool ok = usage_log.flush();
+            if (!ok && usage_ok) printf("ts5-title: can't write %s: %s\n", kUsage, strerror(errno));
+            usage_ok = ok;
+            last_usage = t;
+        }
+        timer.mark("usage.tsv");
+        timer.end();
         sceKernelUsleep(16000);
     }
 }

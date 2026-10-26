@@ -43,7 +43,7 @@ if(TS5_VULKAN)
 endif()
 
 add_executable(ts5 src/main.cpp src/cli.cpp src/checks.cpp src/tokenizer.cpp src/server.cpp src/engine.cpp
-  src/tools.cpp src/net.cpp src/websearch.cpp)
+  src/tools.cpp src/net.cpp src/websearch.cpp src/log.cpp)
 target_link_libraries(ts5 PRIVATE ts5core)
 
 if(TS5_HTTPS)

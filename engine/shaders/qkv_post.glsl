@@ -41,12 +41,19 @@ uint q8_word(uint w, bool is_v, out float sc) {
 layout(std430, binding = 8) writeonly buffer KC { float16_t kc[]; };
 layout(std430, binding = 9) writeonly buffer VC { float16_t vc[]; };
 #endif
+// Llama 3.1's divisor for each RoPE frequency, with has_freqs (after the caches).
+#ifdef KV_Q8
+layout(std430, binding = 12) readonly buffer FF { float freqs[]; };
+#else
+layout(std430, binding = 10) readonly buffer FF { float freqs[]; };
+#endif
 
 layout(push_constant) uniform PC {
     uint head_dim, n_head, n_head_kv, pos0;
     uint rope_dims, neox, has_bias, has_norm;
     uint cache_off;   // element offset of this layer in the caches
     float rope_base, eps;
+    uint has_freqs;
 } pc;
 
 shared float sh[256];
@@ -86,6 +93,7 @@ void main() {
         if (d < rd) {
             uint i = pc.neox != 0 ? (d < half_rd ? d : d - half_rd) : d / 2;
             float theta = float(pos) * pow(pc.rope_base, -2.0 * float(i) / float(rd));
+            if (pc.has_freqs != 0) theta /= freqs[i];
             float c = cos(theta), s = sin(theta);
             if (pc.neox != 0) y = d < half_rd ? sh[d] * c - sh[d + half_rd] * s : sh[d - half_rd] * s + sh[d] * c;
             else y = (d & 1u) == 0 ? sh[d] * c - sh[d + 1] * s : sh[d - 1] * s + sh[d] * c;

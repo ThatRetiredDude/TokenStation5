@@ -24,7 +24,7 @@ work="$root/build/ps5-host"
 data="$work/data"
 home="$work/app0"
 port=8081
-rm -rf "$data" "$home" "$work/shots"
+rm -rf "$data" "$home" "$work/download0" "$work/shots"
 mkdir -p "$work/shaders" "$data" "$home" "$work/shots"
 
 for src in "$root"/engine/shaders/*.comp; do
@@ -77,14 +77,35 @@ if [ ${#pids[@]} -gt 0 ] || [ ! -f "$wobj/libts5speech.a" ]; then
     echo "== libts5speech.a: ${#pids[@]} files compiled in $(($(date +%s) - t0)) s"
 fi
 
-c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" \
+# WireGuard (ps5/wg, lwIP and wireguard-lwip), as ps5/build.sh builds it.
+lw="$root/third_party/lwip/src"
+wgl="$root/third_party/wireguard-lwip/src"
+wgflags=(-O2 -I "$root/ps5/wg" -I "$lw/include" -I "$wgl")
+mkdir -p "$work/wg"
+wgobjects=()
+pids=()
+for src in "$lw"/core/*.c "$lw"/core/ipv4/*.c "$wgl"/*.c "$wgl"/crypto/refc/*.c "$root"/ps5/wg/wg_udp.c "$root"/ps5/wg/wg.cpp \
+        "$root"/ps5/ts/*.cpp; do
+    [ "$src" = "$lw/core/udp.c" ] && continue
+    rel=${src#"$root"/}
+    o="$work/wg/${rel//\//_}.o"
+    wgobjects+=("$o")
+    case $src in
+        *.c) cc -std=gnu11 "${wgflags[@]}" -c "$src" -o "$o" & ;;
+        *) c++ -std=c++17 -Wall -pthread "${wgflags[@]}" -I "$root/engine/src" -c "$src" -o "$o" & ;;
+    esac
+    pids+=($!)
+done
+for p in "${pids[@]}"; do wait "$p"; done
+
+c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" "-DTS5_STORE=\"$work/download0\"" \
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" -I "$w/include" -I "$w/ggml/include" \
-    -I "$k/include" \
-    "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks,tools,net,websearch}.cpp \
-    "$root"/ps5/{title,library,runner,audio_probe,chat,stt,voice,settings,speak,text_input,host_shim}.cpp \
-    "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
+    -I "$k/include" -I "$root/third_party/qrcodegen" \
+    "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks,tools,net,websearch,log}.cpp \
+    "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup,local_time,host_shim}.cpp "$root"/third_party/qrcodegen/qrcodegen.cpp \
+    "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page,logs_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -Wa,-I"$root/ps5/tts" "$root/ps5/tts/lexicon_data.S" \
-    -x none "$wobj/libts5speech.a" -ldl -o "$work/eboot.bin"
+    -x none "${wgobjects[@]}" "$wobj/libts5speech.a" -ldl -o "$work/eboot.bin"
 
 title_pid=
 cleanup() { [ -n "$title_pid" ] && kill "$title_pid" 2> /dev/null || true; }
@@ -161,7 +182,7 @@ mv "$home/$name.part" "$home/models/$name"
 wait_log "^ts5-title: models: $name"
 press cross
 wait_health
-notified "$name ready at http://"
+notified "is ready. Apps can use it at http://"
 grep -q "serve -m \"$home/models/$name\" -c auto " "$home/ts5.args" || fail "serving did not write ts5.args"
 wait_log "context [0-9]+ \(what fits\), f16 KV cache$"
 wait_log "draft model $name ready"
@@ -173,7 +194,7 @@ shot serving
 echo "== square: the GPU check on the serving model, then serving again"
 press square
 wait_log "^ts5 check: .* PASS$"
-notified "GPU check passed"
+notified "passed the GPU check"
 grep -q "^check	$name	.*	PASS	" "$home/results.tsv" || fail "no check in results.tsv"
 wait_health
 
@@ -218,7 +239,7 @@ echo "== whispertest: no whisper model yet, so the test says so and the title ca
 : > "$home/whispertest"
 wait_lines "^ts5-title: whisper test: done$" 1 30
 grep -q "^ts5-title: whisper test: no model: " "$home/ts5.log" || fail "the whisper test didn't say it has no model"
-notified "whisper test: no model"
+notified "speech test: no speech model"
 wait_health
 
 if [ -n "${TS5_TEST_WHISPER_MODEL:-}" ]; then
@@ -243,7 +264,7 @@ echo "== speaktest: no Kokoro model yet, so the test says so and the title carri
 : > "$home/speaktest"
 wait_lines "^ts5-title: speak test: done$" 1 30
 grep -q "^ts5-title: speak test: no model: " "$home/ts5.log" || fail "the speak test didn't say it has no model"
-notified "speak test: no Kokoro model"
+notified "voice test: no voice"
 wait_health
 
 if [ -n "${TS5_TEST_KOKORO_MODEL:-}" ] && [ -n "${TS5_TEST_KOKORO_VOICE:-}" ]; then
@@ -258,7 +279,7 @@ if [ -n "${TS5_TEST_KOKORO_MODEL:-}" ] && [ -n "${TS5_TEST_KOKORO_VOICE:-}" ]; t
         awk '/speak test: start/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; i++) print "   " line[i] }'
     grep -qE "^ts5-title: speak test: [0-9.]+ s of speech in [0-9]+ ms, " "$home/ts5.log" || fail "the speak test spoke nothing"
     grep -q "^ts5-title: speak test: saved speaktest.wav$" "$home/ts5.log" || fail "the speak test saved no speaktest.wav"
-    notified "speak test: "
+    notified "voice test: "
     sleep 2.5  # a scan of the models folder
     ! grep -q "^ts5-title: models: .*kokoro-" "$home/ts5.log" || fail "the dashboard lists Kokoro's files"
     wait_health
@@ -373,6 +394,17 @@ if [ -n "${TS5_TEST_KOKORO_MODEL:-}" ] && [ -n "${TS5_TEST_KOKORO_VOICE:-}" ]; t
     wait_log "^ts5-title: speak: the TV's audio didn't open"
     for _ in $(seq 1 300); do [ "$(replies)" -gt "$n" ] && break; sleep 0.1; done
     press triangle
+    echo "== spoken replies off in Settings: Kokoro is unloaded at once, and loaded again when they're back on"
+    loads=$(grep -cE "^ts5-title: speak: kokoro-test.gguf with the voice test, loaded in [0-9]+ ms$" "$home/ts5.log")
+    press l1
+    press down down down down down down down  # Read replies aloud, under Voice
+    press right
+    wait_log "^ts5-title: speak: replies aren't read aloud, so Kokoro is unloaded$"
+    press square
+    wait_lines "^ts5-title: speak: kokoro-test.gguf with the voice test, loaded in [0-9]+ ms$" $((loads + 1)) 60
+    press up up up up up up up
+    press circle
+    press l1
     rm "$home/models/kokoro-test.gguf" "$home/models/kokoro-voice-test.gguf"
     press square
 fi
@@ -380,7 +412,7 @@ fi
 echo "== settings: L1 again goes to Settings; right changes a setting in ts5.env, square puts back its default"
 press l1
 shot settings
-press down
+press down down down down down down down down down down down down down  # Frames while a reply comes in, under Tuning
 press right
 wait_log "^ts5-title: settings: TS5_CHAT_FPS=15$"
 grep -qx "TS5_CHAT_FPS=15" "$home/ts5.env" || fail "ts5.env: $(cat "$home/ts5.env" 2> /dev/null)"
@@ -389,7 +421,7 @@ press square
 wait_log "^ts5-title: settings: TS5_CHAT_FPS cleared$"
 ! grep -q "TS5_CHAT_FPS" "$home/ts5.env" || fail "square left it in ts5.env: $(cat "$home/ts5.env")"
 echo "== settings: cross on the Tavily key opens the keyboard; the key goes in ts5.env, never the log"
-press down down down down down down down down
+press up up up up up up up up  # Web search key, under Chat
 press cross
 wait_log "^ts5-title: keyboard: open 0x00000000, user 0x00000001, a key$"
 printf 'tvly-typed-on-the-tv' > "$home/typed"
@@ -402,13 +434,16 @@ press square
 wait_log "^ts5-title: settings: TAVILY_API_KEY cleared$"
 ! grep -q "TAVILY_API_KEY" "$home/ts5.env" || fail "square twice left the key in ts5.env"
 press circle
-shot models-again
+shot home-again
 wait_health
 
-echo "== circle: stop serving"
-press circle
+echo "== stop serving: L1 to Models, cross on the model in use, cross again to confirm"
+press l1
+press cross
+shot stop-confirm
+press cross
 for _ in $(seq 1 50); do health_says "no model" && break; sleep 0.1; done
-health_says "no model" || fail "still serving after circle"
+health_says "no model" || fail "still serving after the confirmed stop"
 
 echo "== restart: serves what ts5.args says, its log becomes ts5.prev.log"
 : > "$home/restart"

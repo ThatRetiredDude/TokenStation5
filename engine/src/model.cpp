@@ -23,6 +23,14 @@ bool Model::open(const std::string &path, std::string &err) {
     hp.n_head_kv = (int)gguf.get_int(a + "attention.head_count_kv", hp.n_head);
     hp.head_dim = (int)gguf.get_int(a + "attention.key_length", hp.n_head ? hp.n_embd / hp.n_head : 0);
     hp.n_ctx_train = (int)gguf.get_int(a + "context_length", 4096);
+    // A window stretched by RoPE scaling (YaRN, linear), which the engine
+    // doesn't do: past the original window the model loses the thread.
+    const std::string scaling = gguf.get_str(a + "rope.scaling.type");
+    const int original = (int)gguf.get_int(a + "rope.scaling.original_context_length", 0);
+    if (!scaling.empty() && scaling != "none" && original > 0 && original < hp.n_ctx_train) hp.n_ctx_train = original;
+    // Qwen 2.5's own GGUFs declare 131072 with no scaling keys: its window is
+    // 32768, and more needs YaRN (its model card).
+    else if (hp.arch == "qwen2" && scaling.empty() && hp.n_ctx_train > 32768) hp.n_ctx_train = 32768;
     hp.rms_eps = (float)gguf.get_float(a + "attention.layer_norm_rms_epsilon", 1e-6);
     hp.rope_base = (float)gguf.get_float(a + "rope.freq_base", 10000.0);
     hp.rope_dims = (int)gguf.get_int(a + "rope.dimension_count", hp.head_dim);
@@ -61,6 +69,7 @@ bool Model::bind(std::string &err) {
     out_norm = weight("output_norm.weight", true, err);
     output = weight("output.weight", false, err);
     if (!output) output = tok_embd;  // tied embeddings
+    rope_freqs = weight("rope_freqs.weight", false, err);
     layers.assign(hp.n_layer, {});
     for (int i = 0; i < hp.n_layer; i++) {
         auto n = [&](const char *s) { return "blk." + std::to_string(i) + "." + s; };

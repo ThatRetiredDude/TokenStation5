@@ -75,6 +75,16 @@ public:
 
     bool save_bmp(const std::string &path) const;
 
+    // While set, each string drawn is added to it, as drawn: the words on the
+    // screen, which the title saves with a screenshot (screen.txt) so a test
+    // on the console can read what a page says.
+    static std::vector<std::string> *record;
+    // While set, what's drawn is a conversation's text (a reply, a typed
+    // message), which can say anything: its lines are recorded with
+    // "conversation" and a tab before them, so a check of the page's own
+    // words can leave them out.
+    static bool conversation;
+
 private:
     void blend(int x, int y, Color c, unsigned cov);
     template <class Dist>

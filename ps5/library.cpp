@@ -10,7 +10,9 @@
 #include <ctime>
 
 #include "backend.h"
+#include "catalog.h"
 #include "model.h"
+#include "plain.h"
 
 namespace app {
 
@@ -61,7 +63,7 @@ ModelInfo inspect(const std::string &path, const std::string &file, uint64_t siz
     const ts5::Gguf &g = model.gguf;
     if (!g.tensors.empty() || g.has("general.architecture")) {
         const std::string name = g.get_str("general.name");
-        if (!name.empty()) m.name = name;
+        if (!name.empty()) m.name = plain::pretty_model_name(name);
         m.arch = g.get_str("general.architecture");
         if (const char *q = file_type_name(g.get_int("general.file_type", -1))) m.quant = q;
         std::map<uint32_t, uint64_t> by_type;
@@ -78,6 +80,9 @@ ModelInfo inspect(const std::string &path, const std::string &file, uint64_t siz
     }
     if (!opened) {
         m.error = err;
+        // A file that has only started to arrive: no header yet, or part of it.
+        // Four bytes in, a file that doesn't start "GGUF" isn't a model.
+        m.incomplete = err == "truncated GGUF header" || (err == "not a GGUF file" && size < 4);
         return m;
     }
     const ts5::HParams &hp = model.hp;
@@ -88,9 +93,10 @@ ModelInfo inspect(const std::string &path, const std::string &file, uint64_t siz
     m.kv_bytes[1] = ts5::kv_bytes_per_token(hp, ts5::KvType::Q8);
     m.kv8 = ts5::kv_type_setting() == ts5::KvType::Q8 && hp.head_dim % 32 == 0;
     m.fixed_bytes = ts5::vk_fixed_bytes(hp, m.weight_bytes);
-    if (g.data_offset + m.weight_bytes > size) {
-        m.error = "the file is incomplete (" + format_bytes(size) + " of " + format_bytes(g.data_offset + m.weight_bytes) +
-                  ")";
+    m.full_size = g.data_offset + m.weight_bytes;
+    if (m.full_size > size) {
+        m.incomplete = true;
+        m.error = "the file is incomplete (" + format_bytes(size) + " of " + format_bytes(m.full_size) + ")";
         return m;
     }
     for (auto &t : g.tensors)
@@ -115,6 +121,30 @@ std::vector<std::string> split_tabs(const std::string &line) {
 
 }  // namespace
 
+ModelInfo estimate(const CatalogEntry &e) {
+    ModelInfo m;
+    m.file = e.file;
+    m.name = e.name;
+    m.size = e.bytes;
+    ts5::HParams hp;
+    hp.n_vocab = e.n_vocab;
+    hp.n_embd = e.n_embd;
+    hp.n_layer = e.n_layer;
+    hp.n_ff = e.n_ff;
+    hp.n_head = e.n_head;
+    hp.n_head_kv = e.n_head_kv;
+    hp.head_dim = e.head_dim;
+    hp.n_ctx_train = e.ctx_train;
+    m.layers = hp.n_layer;
+    m.ctx_train = hp.n_ctx_train;
+    m.weight_bytes = e.weight_bytes;
+    m.kv_bytes[0] = ts5::kv_bytes_per_token(hp, ts5::KvType::F16);
+    m.kv_bytes[1] = ts5::kv_bytes_per_token(hp, ts5::KvType::Q8);
+    m.kv8 = ts5::kv_type_setting() == ts5::KvType::Q8 && hp.head_dim % 32 == 0;
+    m.fixed_bytes = ts5::vk_fixed_bytes(hp, m.weight_bytes);
+    return m;
+}
+
 ModelInfo::Ctx ModelInfo::serve_ctx(int asked, uint64_t gpu_memory) const {
     if (asked > 0) return {asked, kv8};
     const int train = ctx_train > 0 ? ctx_train : 32768;
@@ -127,6 +157,13 @@ Library::Library(std::vector<std::string> dirs, std::string results_path)
     : dirs_(std::move(dirs)), results_path_(std::move(results_path)) {
     load_results();
 }
+
+namespace {
+
+// Into the log, where the Models page's "Details" leads (Logs' problems).
+void log_cant_run(const ModelInfo &m) { printf("ts5-title: models: can't run %s: %s\n", m.file.c_str(), m.error.c_str()); }
+
+}  // namespace
 
 bool Library::scan() {
     std::vector<ModelInfo> next;
@@ -143,16 +180,23 @@ bool Library::scan() {
             struct stat st;
             if (stat(path.c_str(), &st) != 0) continue;
             const ModelInfo *old = find(path);
-            if (old && old->size == (uint64_t)st.st_size && old->mtime == (int64_t)st.st_mtime)
+            if (old && old->size == (uint64_t)st.st_size && old->mtime == (int64_t)st.st_mtime) {
+                // It didn't grow since the last scan: a copy that was arriving
+                // has stopped.
                 next.push_back(*old);
-            else
+                next.back().copying = false;
+                if (old->copying && !old->runnable) log_cant_run(next.back());
+            } else {
                 next.push_back(inspect(path, n, (uint64_t)st.st_size, (int64_t)st.st_mtime));
+                next.back().copying = next.back().incomplete;
+                if (!next.back().runnable && !next.back().copying) log_cant_run(next.back());
+            }
         }
     }
     bool changed = next.size() != models_.size();
     for (size_t i = 0; !changed && i < next.size(); i++)
         changed = next[i].path != models_[i].path || next[i].size != models_[i].size ||
-                  next[i].mtime != models_[i].mtime;
+                  next[i].mtime != models_[i].mtime || next[i].copying != models_[i].copying;
     models_ = std::move(next);
     return changed;
 }
@@ -243,8 +287,9 @@ std::string format_params(double n) {
 
 std::string format_bytes(uint64_t n) {
     char b[32];
-    if (n >= 1000000000ull) snprintf(b, sizeof b, "%.1f GB", n / 1e9);
-    else snprintf(b, sizeof b, "%.0f MB", n / 1e6);
+    // Counted as the PS5's own storage screen counts: 1,024 MB to a GB.
+    if (n >= (1ull << 30)) snprintf(b, sizeof b, "%.1f GB", n / 1073741824.0);
+    else snprintf(b, sizeof b, "%.0f MB", n / 1048576.0);
     return b;
 }
 

@@ -1,5 +1,6 @@
 // The title's work, one job at a time on a thread of its own: serve a model
-// through the API, run the GPU check or the speed test on one, stop serving.
+// through the API, run the GPU check or the speed test on one, stop serving,
+// or download a file into the models folder (the API keeps answering).
 // Every model loads onto the one Vulkan device the title shares with its
 // display. A check or speed test of another model than the one serving
 // unloads that one first and serves it again afterwards; of the serving
@@ -21,8 +22,10 @@
 namespace app {
 
 struct Job {
-    enum Kind { Serve, Check, Bench, Stop } kind = Serve;
-    std::string path;
+    enum Kind { Serve, Check, Bench, Stop, Fetch } kind = Serve;
+    std::string path;      // the model; Fetch: the file to write
+    std::string url;       // Fetch: where from
+    std::string sha256;    // Fetch: the hash the file must have (hex); "": not checked
     int n_ctx = 0;         // Serve: 0 for what fits in the GPU's memory
     int n = 16;            // Check: tokens
     bool fresh = false;    // Check: run the CPU even if its answers are saved
@@ -40,7 +43,8 @@ struct Status {
     std::string serving, serving_path;  // file name and path of the model the API answers with
     int serving_ctx = 0;
     bool serving_kv8 = false;  // its KV cache is 8-bit
-    std::string error;  // the last job's failure, until the next job starts
+    std::string error;  // the last job's failure, until the next job starts, as the log has it
+    std::string said;   // the same failure in plain words, for the screen and the notification
     int queued = 0;
 };
 
@@ -61,6 +65,8 @@ public:
     void push(const Job &job);
     Status status();
     std::vector<Event> events();
+    // A line for the activity list from elsewhere (a download).
+    void note(const std::string &text, bool bad = false) { event(text, bad); }
     // Bumped on every change of status or events.
     uint64_t version() const { return version_.load(); }
 
@@ -69,12 +75,17 @@ private:
     void loop();
     void run(const Job &job);
     bool serve(const std::string &path, int n_ctx);
+    void fetch(const Job &job);
     void unload();
     // drafter: also load TS5_DRAFT_MODEL (serve jobs; check and bench never
     // call generate, so they skip it).
     std::unique_ptr<Loaded> load(const std::string &path, int n_ctx, std::string &err, bool drafter = false);
     void set_step(const std::string &step);
     void event(const std::string &text, bool bad = false);
+    // The job's failure: raw for the log, said for the screen.
+    void fail(const std::string &raw, const std::string &said);
+    // The model's name as the Models page shows it (the library's).
+    std::string name_for(const std::string &path);
 
     ts5::VkContext *ctx_;
     ts5::Server &server_;

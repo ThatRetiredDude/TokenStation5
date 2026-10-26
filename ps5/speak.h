@@ -4,7 +4,8 @@
 //
 // Speaker reads the chat's replies aloud as they come in, a sentence at a
 // time: while one sentence plays, the next is being made. Its settings are
-// in ts5.env (the Settings page): TS5_SPEAK (1, or 0 for silent replies),
+// in ts5.env (the Settings page): TS5_SPEAK (1, or 0 for silent replies:
+// Kokoro is loaded only while it's 1, as soon as its files are there),
 // TS5_SPEAK_OUT (tv or controller), TS5_TTS_VOICE, TS5_TTS_SPEED and
 // TS5_TTS_THREADS, each read again for every sentence.
 //

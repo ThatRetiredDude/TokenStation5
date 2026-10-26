@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <ctime>
 
+#include "local_time.h"
 #include "pad.h"
+#include "plain.h"
 #include "style.h"
 
 namespace ui {
@@ -105,10 +108,7 @@ std::string prose_line(std::string l, bool &bold) {
 }
 
 std::string speed(double tps, int tokens) {
-    char b[64];
-    snprintf(b, sizeof b, tps >= 100 ? "%.0f tok/s  \xC2\xB7  %d tokens" : "%.1f tok/s  \xC2\xB7  %d tokens", tps,
-             tokens);
-    return b;
+    return plain::tokens_a_second(tps) + "  \xC2\xB7  " + plain::count(tokens) + " tokens";
 }
 
 int baseline(const Font &f, int y, int h) { return y + (h - f.line_height) / 2 + f.ascent; }
@@ -148,6 +148,142 @@ void ChatPage::press(uint32_t b) {
 }
 
 void ChatPage::to_bottom() { follow_ = true; }
+
+namespace {
+
+constexpr int kListHead = 84;               // the sidebar's heading
+constexpr int kActionRow = 64, kChatRow = 84, kRowGap = 8;
+constexpr double kRemoveFor = 4;            // seconds square's second press has
+
+// "Today", "Yesterday", or "22 Oct", in the console's own time zone.
+std::string when(int64_t t, int64_t now) {
+    static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    struct tm ta, tb;
+    if (t <= 0 || !app::local_tm(t, &ta) || !app::local_tm(now, &tb)) return "";
+    const int days = (tb.tm_year - ta.tm_year) * 366 + (tb.tm_yday - ta.tm_yday);
+    if (days == 0) return "Today";
+    if (days == 1) return "Yesterday";
+    std::string d = std::to_string(ta.tm_mday) + " " + months[ta.tm_mon % 12];
+    if (ta.tm_year != tb.tm_year) d += " " + std::to_string(ta.tm_year + 1900);
+    return d;
+}
+
+}  // namespace
+
+void ChatPage::focus_list(bool on) {
+    list_focus_ = on;
+    remove_id_.clear();
+}
+
+// The chosen row, kept on the chosen chat when the list changes (a chat
+// that was carried on with moves to the top).
+void ChatPage::follow_choice(const ChatList &l) {
+    const int rows = 2 + (int)l.chats.size();
+    if (!sel_id_.empty())
+        for (size_t i = 0; i < l.chats.size(); i++)
+            if (l.chats[i].id == sel_id_) list_sel_ = 2 + (int)i;
+    list_sel_ = std::min(std::max(list_sel_, 0), rows - 1);
+    sel_id_ = list_sel_ >= 2 ? l.chats[list_sel_ - 2].id : std::string();
+}
+
+ListPress ChatPage::press_list(uint32_t b, const ChatList &l, double now) {
+    ListPress p;
+    follow_choice(l);
+    const int rows = 2 + (int)l.chats.size();
+    if (b & (kUp | kDown)) {
+        list_sel_ = std::min(std::max(list_sel_ + ((b & kDown) ? 1 : -1), 0), rows - 1);
+        sel_id_ = list_sel_ >= 2 ? l.chats[list_sel_ - 2].id : std::string();
+        remove_id_.clear();
+    }
+    const app::ChatSummary *chat = list_sel_ >= 2 ? &l.chats[list_sel_ - 2] : nullptr;
+    if (b & kCross) {
+        remove_id_.clear();
+        if (list_sel_ == 0) p.kind = ListPress::New;
+        else if (list_sel_ == 1) p.kind = ListPress::Search;
+        else {
+            p.kind = ListPress::Open;
+            p.id = chat->id;
+        }
+    } else if (b & kSquare) {
+        if (list_sel_ == 1 && !l.query.empty()) {
+            p.kind = ListPress::ClearSearch;
+        } else if (chat && removing(now) && remove_id_ == chat->id) {
+            p.kind = ListPress::Remove;
+            p.id = chat->id;
+            remove_id_.clear();
+            // The choice goes to the chat below it, or above at the end.
+            const size_t i = (size_t)list_sel_ - 2;
+            sel_id_ = i + 1 < l.chats.size() ? l.chats[i + 1].id : i > 0 ? l.chats[i - 1].id : std::string();
+        } else if (chat) {
+            remove_id_ = chat->id;
+            remove_until_ = now + kRemoveFor;
+        }
+    }
+    return p;
+}
+
+void ChatPage::draw_list(Canvas &c, const ChatList &l, int x, int y, int w, int h, double now) {
+    c.text(h2_, x + 28, y + 52, "Chats", kText);
+    const std::string count = l.query.empty() ? (l.chats.empty() ? "" : std::to_string(l.chats.size()) + " saved")
+                                              : std::to_string(l.chats.size()) + " found";
+    c.text_right(small_, x + w - 28, y + 52, count, kText2);
+
+    const int rx = x + 16, rw = w - 32, y0 = y + kListHead, y1 = y + h - 16, view_h = y1 - y0;
+    const int rows = 2 + (int)l.chats.size();
+    follow_choice(l);
+    auto row_y = [&](int i) { return i < 2 ? i * (kActionRow + kRowGap) : 2 * (kActionRow + kRowGap) + (i - 2) * (kChatRow + kRowGap); };
+    auto row_h = [&](int i) { return i < 2 ? kActionRow : kChatRow; };
+    // Scrolled so the chosen row shows.
+    if (row_y(list_sel_) - list_top_ < 0) list_top_ = row_y(list_sel_);
+    if (row_y(list_sel_) + row_h(list_sel_) - list_top_ > view_h) list_top_ = row_y(list_sel_) + row_h(list_sel_) - view_h;
+    list_top_ = std::max(0, std::min(list_top_, std::max(0, row_y(rows - 1) + row_h(rows - 1) - view_h)));
+
+    c.clip(rx - 4, y0, rw + 8, view_h);
+    for (int i = 0; i < rows; i++) {
+        const int ry = y0 + row_y(i) - list_top_, rh = row_h(i);
+        if (ry > y1 || ry + rh < y0) continue;
+        const bool sel = list_focus_ && i == list_sel_;
+        const app::ChatSummary *chat = i >= 2 ? &l.chats[i - 2] : nullptr;
+        const bool open = chat && chat->id == l.current;
+        c.round_rect((float)rx, (float)ry, (float)rw, (float)rh, 14, sel ? kRowSel : open ? rgb(0x152046) : kRow);
+        if (sel) c.round_rect_line((float)rx, (float)ry, (float)rw, (float)rh, 14, 2.5f, kAccent);
+        if (open) c.round_rect((float)rx + 6, (float)ry + 14, 5, (float)rh - 28, 2.5f, kAccent);
+        if (i == 0) {
+            c.text(bodyb_, rx + 24, baseline(bodyb_, ry, rh), "+  New chat", l.current.empty() ? kAccent : kText);
+        } else if (i == 1) {
+            if (l.query.empty()) {
+                c.text(body_, rx + 24, baseline(body_, ry, rh), "Search chats", kText2);
+            } else {
+                const int tw = c.text(small_, rx + 24, baseline(small_, ry, rh), "SEARCH", kAccent);
+                Canvas::conversation = true;  // your words (screen.txt marks them)
+                c.text(body_, rx + 24 + tw + 14, baseline(body_, ry, rh), "\"" + l.query + "\"", kText,
+                       rw - 48 - tw - 14);
+                Canvas::conversation = false;
+            }
+        } else {
+            const bool asking = removing(now) && remove_id_ == chat->id;
+            Canvas::conversation = true;
+            c.text(bodyb_, rx + 24, ry + 36, chat->title, kText, rw - 48);
+            Canvas::conversation = false;
+            if (asking) {
+                c.text(small_, rx + 24, ry + 68, "Press square again to remove this chat", kAmber, rw - 48);
+            } else {
+                const std::string sub = when(chat->updated, l.wall) + "  \xC2\xB7  " + std::to_string(chat->messages) +
+                                        (chat->messages == 1 ? " message" : " messages");
+                c.text(small_, rx + 24, ry + 68, sub, kMuted, rw - 48);
+            }
+        }
+    }
+    if (l.chats.empty()) {
+        const int ry = y0 + row_y(2) - list_top_ + 24;
+        c.text(small_, rx + 8, ry + 24, l.query.empty() ? "Your chats show here." : "No chat has those words.", kMuted,
+               rw - 16);
+        if (l.query.empty())
+            c.text(small_, rx + 8, ry + 58, "Each one is kept on your PS5.", kMuted, rw - 16);
+    }
+    c.unclip();
+}
 
 ChatPage::Laid ChatPage::lay_out(const app::ChatTurn &t, int w, const std::string &model) const {
     Laid l;
@@ -278,7 +414,7 @@ void ChatPage::draw(Canvas &c, const app::ChatState &s, int x, int y, int w, int
     if (s.turns.empty()) {
         follow_ = true;
         laid_.clear();
-        draw_empty(c, x, y, w, h, serving.empty() ? "" : name(serving), can_talk);
+        draw_empty(c, x, y, w, h, serving.empty() ? "" : name_of(name, serving), can_talk);
         return;
     }
     const int pad = 32, cx = x + pad, cw = w - 2 * pad, cy = y + 20, ch = h - 40;
@@ -287,7 +423,10 @@ void ChatPage::draw(Canvas &c, const app::ChatState &s, int x, int y, int w, int
     int total = 0;
     for (size_t i = 0; i < s.turns.size(); i++) {
         const app::ChatTurn &t = s.turns[i];
-        const std::string model = t.user ? "" : t.model.empty() ? (serving.empty() ? "" : name(serving)) : name(t.model);
+        const std::string model = t.user              ? ""
+                                  : !t.model.empty() ? name_of(name, t.model)
+                                  : serving.empty()  ? ""
+                                                     : name_of(name, serving);
         const size_t hash = std::hash<std::string>()(t.text) ^ (t.user ? 0x9E3779B9u : 0);
         Laid &l = laid_[i];
         if (l.hash != hash || l.end != (int)t.end || l.width != cw || l.model != model || l.pieces.empty()) {
@@ -318,10 +457,18 @@ void ChatPage::draw(Canvas &c, const app::ChatState &s, int x, int y, int w, int
                     c.round_rect((float)px, (float)py, (float)p.w, (float)p.h, 10, kCodeBg);
                     c.round_rect_line((float)px, (float)py, (float)p.w, (float)p.h, 10, 1.5f, kPanelLine);
                     break;
-                case Piece::Text: c.text(body_, px, baseline(body_, py, p.h), p.text, kText); break;
-                case Piece::Bold: c.text(bodyb_, px, baseline(bodyb_, py, p.h), p.text, kText); break;
-                case Piece::Think: c.text(body_, px, baseline(body_, py, p.h), p.text, kMuted); break;
-                case Piece::Code: c.text(code_, px, baseline(code_, py, p.h), p.text, kCodeText); break;
+                // The conversation's own words (screen.txt marks them).
+                case Piece::Text:
+                case Piece::Bold:
+                case Piece::Think:
+                case Piece::Code: {
+                    const Font &f = p.kind == Piece::Bold ? bodyb_ : p.kind == Piece::Code ? code_ : body_;
+                    Canvas::conversation = true;
+                    c.text(f, px, baseline(f, py, p.h), p.text,
+                           p.kind == Piece::Think ? kMuted : p.kind == Piece::Code ? kCodeText : kText);
+                    Canvas::conversation = false;
+                    break;
+                }
                 case Piece::Label: c.text(smallb_, px, baseline(smallb_, py, p.h), p.text, kMuted, p.w); break;
                 case Piece::Note: c.text(small_, px, baseline(small_, py, p.h), p.text, kMuted); break;
                 case Piece::Error: c.text(small_, px, baseline(small_, py, p.h), p.text, kRed); break;
@@ -342,8 +489,8 @@ void ChatPage::draw_empty(Canvas &c, int x, int y, int w, int h, const std::stri
     };
     const int mid = y + h / 2;
     if (serving_name.empty()) {
-        centered(h2_, mid - 30, "No model is serving", kText);
-        const std::string before = "Press circle for Models, choose one and press", after = "to serve it.";
+        centered(h2_, mid - 30, "No model is running", kText);
+        const std::string before = "Press", after = "to choose one.";
         const int tw = Canvas::measure(body_, before) + 44 + Canvas::measure(body_, after);
         text_glyph(c, body_, x + (w - tw) / 2, mid + 24, before, kGlyphCross, after, kText2);
         return;
@@ -363,12 +510,21 @@ void ChatPage::draw_empty(Canvas &c, int x, int y, int w, int h, const std::stri
         tx += key_cap(c, bodyb_, tx, mid + 40, "R1") + 12;
         c.text(body_, tx, mid + 36, after, kText2);
     } else {
-        centered(small_, mid + 34, "To talk to it with R1, add a speech model first.", kMuted);
+        centered(small_, mid + 34, "To talk to it with R1, add a speech model in Settings.", kMuted);
     }
 }
 
+std::string ChatPage::name_of(const std::function<std::string(const std::string &)> &name, const std::string &file) {
+    std::string n = name(file);
+    // The API names a model without its .gguf (server.cpp's api_id).
+    if (n.empty()) n = name(file + ".gguf");
+    if (!n.empty()) return names_[file] = n;
+    const auto it = names_.find(file);
+    return it != names_.end() ? it->second : "A model no longer on your PS5";
+}
+
 void ChatPage::draw_input(Canvas &c, const app::ChatState &s, const app::VoiceState &voice, double now, int x, int y,
-                          int w, int h) {
+                          int w, int h, bool no_voice) {
     const int fx = x + 24, fy = y + 18, fh = h - 36, right = x + w - 24;
     int fw = w - 48;
     if (s.busy) {
@@ -414,7 +570,18 @@ void ChatPage::draw_input(Canvas &c, const app::ChatState &s, const app::VoiceSt
     if (!voice.model.empty()) {
         tx += c.text(body_, tx, ty, "or hold", kText2) + 12;
         tx += key_cap(c, bodyb_, tx, ty + 4, "R1") + 12;
-        c.text(body_, tx, ty, "and talk", kText2);
+        tx += c.text(body_, tx, ty, "and talk", kText2);
+    }
+    if (no_voice) {
+        // At the right of the line, in as many words as there's room for.
+        const int room = fx + fw - 24 - (tx + 40);
+        for (const char *say : {"Spoken replies are on, but there's no voice on your PS5 yet. Add one in Settings, "
+                                "under Voice.",
+                                "Spoken replies need a voice: add one in Settings."})
+            if (Canvas::measure(small_, say) <= room) {
+                c.text_right(small_, fx + fw - 24, baseline(small_, fy, fh), say, kAmber);
+                break;
+            }
     }
 }
 
