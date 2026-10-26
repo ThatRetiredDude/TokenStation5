@@ -26,7 +26,8 @@ struct Choice {
 // making a key, and a row per API key (name: its id). AWAY FROM HOME has one
 // row, WireGuard, whose own list is on the right (wg_rows): what it needs, a
 // device asking to join, the two ways to add one, a row per device (name: its
-// id) and this PS5's key, besides its settings.
+// id) and this PS5's key, besides its settings; and Tailscale, one row
+// whose whole setup is its panel on the right.
 }  // namespace
 
 struct Row {
@@ -34,7 +35,7 @@ struct Row {
     std::vector<Choice> choices;
     std::string def;  // the value with nothing in ts5.env, as each reader's default
     bool files = false;
-    enum Kind { Setting, Guide, NewKey, ApiKey, WgMenu, WgGuide, WgRequest, WgPhone, WgAdd, WgDevice, WgKey } kind = Setting;
+    enum Kind { Setting, Guide, NewKey, ApiKey, WgMenu, WgGuide, WgRequest, WgPhone, WgAdd, WgDevice, WgKey, Tailscale } kind = Setting;
 };
 
 namespace {
@@ -43,6 +44,7 @@ constexpr const char *kSpeechModel = "TS5_WHISPER_MODEL", *kVoice = "TS5_TTS_VOI
 // Not ..._KEY: a name ending in _KEY is a secret, typed in (settings.h).
 constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
 constexpr const char *kWireGuard = "TS5_WIREGUARD", *kWgPort = "TS5_WG_PORT", *kWgHost = "TS5_WG_HOST";
+constexpr const char *kTailscale = "TS5_TAILSCALE";
 // The voice with no TS5_TTS_VOICE, if it's there (tts/synth.h).
 constexpr const char *kDefaultVoice = "af_heart";
 constexpr int kRowH = 64, kHeadH = 44, kGap = 8;
@@ -60,9 +62,9 @@ const GuideLink kGuides[] = {
     {"Set up an app", "Use the models from Kilo Code, Continue, Cline, Open WebUI and more.",
      "Any app that takes an OpenAI-compatible provider can use the models on this PS5. Give it these:"},
     {"Away from home with WireGuard", "An encrypted tunnel from your computer, phone or tablet.", kWgNeeds},
-    {"Away from home with Tailscale", "Through a computer at home, with no port open on the router.",
-     "Never forward the API's own port on your router: anyone could find it, and keys would cross the internet "
-     "unprotected. Tailscale keeps it private, through a computer that stays on at home."},
+    {"At home and away with Tailscale", "This PS5 joins your tailnet itself. Nothing to set up on the router.",
+     "Tailscale connects your devices into a private network of their own (a tailnet), wherever each one is. "
+     "This PS5 joins it as a device of its own, so it works at home and away, even where no port can be opened."},
     {"Add models from a computer", "Copy models over your network with FTP, much faster than downloading here.",
      "Big downloads on the PS5 slow down after the first few hundred MB: the PS5 seems to limit how fast apps "
      "can save. FTP from a computer is much faster."},
@@ -157,7 +159,7 @@ std::string asking(const SettingsInfo &info) {
 }
 
 // The page's rows: APPS (the instructions, the key setting, making a key and
-// the keys), AWAY FROM HOME (WireGuard), then the settings.
+// the keys), AWAY FROM HOME (Tailscale, WireGuard), then the settings.
 std::vector<Row> rows(const SettingsInfo &info) {
     std::vector<Row> r;
     r.push_back({"APPS", "", "Instructions", "How to use the models on this PS5 from your apps, at home and away, and how to add more.",
@@ -176,6 +178,11 @@ std::vector<Row> rows(const SettingsInfo &info) {
                      "An app sends this key to use the models. Turn it off to shut that app out without removing "
                      "the key.",
                      "From the next request", {{"1", "On"}, {"0", "Off"}}, "", false, Row::ApiKey});
+    r.push_back({"AWAY FROM HOME", kTailscale, "Tailscale",
+                 "Reach this PS5 from your phone, tablet or computer, at home or away, through Tailscale. This PS5 "
+                 "joins your tailnet as a device of its own: nothing to set up on your router, and only your "
+                 "tailnet's devices can reach it.",
+                 "Now", {{"1", "On"}, {"0", "Off"}}, "0", false, Row::Tailscale});
     r.push_back({"AWAY FROM HOME", "", "WireGuard",
                  "Reach this PS5 away from home from your computer, phone or tablet, through an encrypted tunnel "
                  "that only devices you add can use.",
@@ -384,6 +391,14 @@ std::string shown(const Row &r, const SettingsInfo &info) {
         const long up = std::count_if(info.wg.devices.begin(), info.wg.devices.end(),
                                       [](const WgDeviceInfo &d) { return d.on && d.up; });
         return up > 0 ? std::to_string(up) + " connected" : "On";
+    }
+    if (r.kind == Row::Tailscale && current(r) == "1") {
+        switch (info.ts.state) {
+            case 2: return "Sign in";
+            case 4: return "Connected";
+            case 5: return "Trying again";
+            default: return "Connecting";
+        }
     }
     if (r.kind == Row::NewKey) return "Make one";
     if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "On" : "Off";
@@ -615,6 +630,18 @@ SettingChange SettingsPage::act(const Row &r, uint32_t b, const SettingsInfo &in
             if (info.now - confirm_at_ < kConfirmFor) {
                 ch.key_id = k->id;
                 ch.key_remove = true;
+                confirm_at_ = -1e9;
+            } else {
+                confirm_at_ = info.now;
+            }
+        }
+        return ch;
+    }
+    if (r.kind == Row::Tailscale && (b & kSquare)) {
+        // Square signs it out (twice); it puts back no default.
+        if (!info.ts.account.empty() || !info.ts.address.empty()) {
+            if (info.now - confirm_at_ < kConfirmFor) {
+                ch.ts_sign_out = true;
                 confirm_at_ = -1e9;
             } else {
                 confirm_at_ = info.now;
@@ -906,22 +933,20 @@ void SettingsPage::draw_panel(Canvas &c, const SettingsInfo &info, const Row &r,
              kText2);
     } else if (open == kGuideTailscale) {
         ty -= 12;
-        if (info.on_network) field("THIS PS5'S ADDRESS", host, kAccent, bodyb_);
-        else field("THIS PS5'S ADDRESS", "Connect the PS5 to your network first", kAmber, body_);
-        para("1. Install Tailscale (free, tailscale.com) on a computer that stays on at home, and on your phone "
-             "or laptop, signed in to the same account.",
+        para("1. Install Tailscale (free, tailscale.com) on your phone, tablet or computer, and sign in.", kText);
+        ty += 8;
+        para("2. On the left, under Away from home, turn on Tailscale. A code shows: scan it with your phone, sign "
+             "in to the same Tailscale account, and approve TokenStation5.",
              kText);
         ty += 8;
-        para("2. On the home computer, share this PS5's address as a subnet route: in a terminal, tailscale up "
-             "--advertise-routes=" + (info.on_network ? host : std::string("ADDRESS")) + "/32",
+        para("3. With Tailscale on, apps use http://" + (info.ts.name.empty() ? std::string("tokenstation5")
+                                                                            : info.ts.name.substr(0, info.ts.name.find('.'))) +
+                 ":" + std::to_string(info.api_port) + "/v1 and one of your keys, at home and away.",
              kText);
         ty += 8;
-        para("3. In Tailscale's admin page, under Machines, approve the route for the home computer.", kText);
-        ty += 8;
-        para("4. Away from home, with Tailscale on, apps use the same base URL as at home. Turn on Require a key "
-             "under Apps on the left too, and keep the PS5's address fixed with a DHCP reservation in your "
-             "router.",
-             kText);
+        para("Over Tailscale a key is always needed. Tailscale's relays carry the traffic, which works even where "
+             "no port can be opened; TokenStation5 has to be open on the PS5.",
+             kText2);
     } else if (open == kGuideFtp) {
         ty -= 12;
         // ftpsrv, which the jailbreak runs, listens on 2121.
@@ -1050,6 +1075,8 @@ void SettingsPage::draw_panel(Canvas &c, const SettingsInfo &info, const Row &r,
         ty += 8;
         para("What you need, at the top of WireGuard's list, has the rest: your router, and the address apps use.",
              kText2);
+    } else if (r.kind == Row::Tailscale) {
+        draw_tailscale(c, info, dx, ty, dw);
     } else if (const WgDeviceInfo *d = device_of(r, info)) {
         field("NOW", !d->on ? "Off" : d->up ? "Connected" : "On, not connected", !d->on ? kText2 : d->up ? kGreen : kText,
               bodyb_);
@@ -1219,6 +1246,109 @@ Row SettingsPage::acting(const SettingsInfo &info, bool *listing) const {
     return ws[std::max(0, std::min(wg_pos_, (int)ws.size() - 1))];
 }
 
+void SettingsPage::draw_tailscale(Canvas &c, const SettingsInfo &info, int dx, int &ty, int dw) {
+    auto field = [&](const char *label, const std::string &value, Color col, const Font &f) {
+        c.text(smallb_, dx, ty, label, kMuted);
+        c.text(f, dx, ty + 38, value, col, dw);
+        ty += 84;
+    };
+    auto para = [&](const std::string &text, Color col) {
+        for (const std::string &l : wrap(small_, text, dw)) {
+            c.text(small_, dx, ty, l, col);
+            ty += 32;
+        }
+    };
+    const TsInfo &t = info.ts;
+    const std::string port = std::to_string(info.api_port);
+    const std::string short_name = t.name.empty() ? "tokenstation5" : t.name.substr(0, t.name.find('.'));
+    if (app::setting(kTailscale, "0") != "1") {
+        field("NOW", "Off", kText2, bodyb_);
+        para("1. Install Tailscale (free, tailscale.com) on your phone, tablet or computer, and sign in.", kText);
+        ty += 8;
+        text_glyph(c, small_, dx, ty, "2. Press", kGlyphCross, "here to turn it on. A code shows here:", kText);
+        ty += 32;
+        para("scan it with your phone and sign in to the same Tailscale account, to add this PS5.", kText);
+        ty += 8;
+        para("3. Apps then use http://" + short_name + ":" + port + "/v1 and one of your keys, at home or away.",
+             kText);
+        ty += 16;
+        para("Over Tailscale a key is always needed. Tailscale's relays carry the traffic, so it works even where no "
+             "port can be opened.",
+             kText2);
+        return;
+    }
+    if (t.state == 2 && !t.sign_in_url.empty()) {
+        // The code to scan, with what to do beside it.
+        field("SCAN THIS TO ADD THIS PS5", "", kAccent, bodyb_);
+        ty -= 40;
+        const int side = draw_qr(c, dx, ty, t.sign_in_url, 360);
+        const int sx = dx + side + 32, sw = dx + dw - sx;
+        int sy = ty + 4;
+        auto step = [&](const std::string &text, Color col) {
+            for (const std::string &l : wrap(small_, text, sw)) {
+                c.text(small_, sx, sy, l, col);
+                sy += 32;
+            }
+            sy += 8;
+        };
+        step("1. Scan it with your phone's camera.", kText);
+        step("2. Sign in to Tailscale, with the account your other devices use.", kText);
+        step("3. Approve TokenStation5. This page shows it on your tailnet then.", kText);
+        step("No camera handy? Open this on any device:", kText2);
+        for (const std::string &l : wrap(small_, t.sign_in_url, sw)) {
+            c.text(small_, sx, sy, l, kAccent);
+            sy += 32;
+        }
+        ty = std::max(sy, ty + side + 24);
+        if (!t.problem.empty()) para(t.problem, kAmber);
+        return;
+    }
+    if (t.state == 2) {
+        field("NOW", "Waiting for approval", kAmber, bodyb_);
+        para(t.problem.empty() ? "Your tailnet's admin has to approve this PS5 in Tailscale's admin page, under Machines."
+                               : t.problem,
+             kText);
+        return;
+    }
+    if (t.state != 4) {
+        field("NOW", t.state == 5 ? "Not connected: trying again" : "Connecting to Tailscale", t.state == 5 ? kAmber : kText,
+              bodyb_);
+        if (!t.problem.empty()) para(t.problem, t.state == 5 ? kRed : kText2);
+        ty += 8;
+        para(info.on_network ? "It goes on trying by itself." : "Connect the PS5 to your network first.", kText2);
+        return;
+    }
+    field("ON YOUR TAILNET AS", t.name.empty() ? short_name : t.name, kAccent, bodyb_);
+    c.text(smallb_, dx, ty, "ADDRESS", kMuted);
+    c.text(smallb_, dx + dw / 2, ty, "SIGNED IN AS", kMuted);
+    c.text(body_, dx, ty + 38, t.address, kText2, dw / 2 - 16);
+    c.text(body_, dx + dw / 2, ty + 38, t.account.empty() ? "Your tailnet" : t.account, kText2, dw / 2);
+    ty += 92;
+    field("APPS USE", "http://" + short_name + ":" + port + "/v1", kText, bodyb_);
+    para("Or http://" + t.address + ":" + port + "/v1, with one of your keys, from any device with Tailscale on.",
+         kText2);
+    ty += 16;
+    c.text(smallb_, dx, ty, "DEVICES THAT REACHED IT", kMuted);
+    ty += 40;
+    if (t.connected.empty()) {
+        para("None yet since TokenStation5 opened. " + std::to_string(t.devices) +
+                 (t.devices == 1 ? " other device is" : " other devices are") + " on your tailnet.",
+             kText2);
+    }
+    for (const TsDeviceInfo &d : t.connected) {
+        c.text(body_, dx, ty, d.name, kText, dw / 2 - 16);
+        c.text_right(small_, dx + dw, ty, d.up ? "Connected" : ago(d.seen_s), d.up ? kGreen : kText2);
+        ty += 40;
+    }
+    ty += 8;
+    if (!t.relay.empty()) para("Through Tailscale's relay in " + t.relay + ".", kMuted);
+    ty += 8;
+    const bool confirming = info.now - confirm_at_ < kConfirmFor;
+    text_glyph(c, small_, dx, ty, confirming ? "Press" : "", kGlyphSquare,
+               confirming ? "again to sign this PS5 out" : "Sign this PS5 out of your tailnet", confirming ? kAmber : kText2);
+    ty += 40;
+}
+
 std::string SettingsPage::cross_does(const SettingsInfo &info) const {
     bool listing;
     const Row r = acting(info, &listing);
@@ -1231,6 +1361,7 @@ std::string SettingsPage::cross_does(const SettingsInfo &info) const {
     if (r.kind == Row::WgGuide) return "Back";
     if (r.kind == Row::Guide) return in_guide_ && open_ >= 0 ? "Back" : "Open";
     if (r.kind == Row::NewKey) return "New key";
+    if (r.kind == Row::Tailscale) return current(r) == "1" ? "Turn off" : "Turn on";
     if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "Turn off" : "Turn on";
     if (r.kind == Row::WgRequest) return "Let it in";
     if (r.kind == Row::WgPhone) return info.wg.tunnel.empty() && info.wg.added_id.empty() ? "Name it" : "Add another";
@@ -1269,6 +1400,7 @@ std::string SettingsPage::square_does(const SettingsInfo &info) const {
     if (typed(r) && !is_key(r)) return current(r).empty() ? "" : "Remove";
     if (r.kind == Row::WgRequest) return "Refuse";
     if (r.kind == Row::WgKey) return info.wg.public_key.empty() ? "" : "New key pair";
+    if (r.kind == Row::Tailscale) return info.ts.account.empty() && info.ts.address.empty() ? "" : "Sign out";
     if (r.kind == Row::ApiKey || r.kind == Row::WgDevice || is_key(r)) return "Remove";
     return "Default";
 }

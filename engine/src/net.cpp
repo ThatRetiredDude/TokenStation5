@@ -1120,6 +1120,106 @@ bool get(const std::string &url0, const std::vector<std::string> &headers, HttpR
     return false;
 }
 
+#ifdef TS5_HTTPS
+// The Stream's reads: a timeout is "try again", so a record half read
+// carries on at the next read.
+int bio_recv_wait(void *ctx, unsigned char *buf, size_t len) {
+    int fd = *(int *)ctx;
+    ssize_t n = recv(fd, buf, len, 0);
+    if (n >= 0) return (int)n;
+    if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) return MBEDTLS_ERR_SSL_WANT_READ;
+    if (errno == ECONNRESET) return -0x0050;  // MBEDTLS_ERR_NET_CONN_RESET
+    return -0x004C;                           // MBEDTLS_ERR_NET_RECV_FAILED
+}
+#endif
+
+}  // namespace
+
+struct Stream::Impl {
+    Conn c;
+    int wait_ms = -1;  // the receive timeout set on the socket now
+};
+
+Stream::Stream() : p_(nullptr) {}
+Stream::~Stream() { close(); }
+
+void Stream::close() {
+    delete p_;
+    p_ = nullptr;
+}
+
+bool Stream::is_open() const { return p_ != nullptr; }
+
+bool Stream::open(const std::string &host, int port, bool tls, int timeout_s, std::string &err) {
+    close();
+#ifndef TS5_HTTPS
+    if (tls) {
+        err = "this ts5 was built without HTTPS";
+        return false;
+    }
+#endif
+    p_ = new Impl;
+    p_->c.fd = connect_to(host, port, timeout_s, err);
+    if (p_->c.fd < 0) {
+        close();
+        return false;
+    }
+    p_->wait_ms = timeout_s * 1000;
+#ifdef TS5_HTTPS
+    if (tls) {
+        if (!start_tls(p_->c, host, err)) {
+            close();
+            return false;
+        }
+        mbedtls_ssl_set_bio(&p_->c.ssl, &p_->c.fd, bio_send, bio_recv_wait, nullptr);
+    }
+#endif
+    return true;
+}
+
+bool Stream::write(const void *data, size_t len, std::string &err) {
+    if (!p_) {
+        err = "not connected";
+        return false;
+    }
+    return p_->c.write_all(std::string((const char *)data, len), err);
+}
+
+int Stream::read(void *buf, size_t cap, int wait_ms, std::string &err) {
+    if (!p_) {
+        err = "not connected";
+        return -1;
+    }
+    if (wait_ms < 1) wait_ms = 1;
+    if (wait_ms != p_->wait_ms) {
+        timeval tv{wait_ms / 1000, (wait_ms % 1000) * 1000};
+        setsockopt(p_->c.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        p_->wait_ms = wait_ms;
+    }
+    while (true) {
+#ifdef TS5_HTTPS
+        if (p_->c.tls) {
+            // What TLS already decrypted comes back without waiting.
+            int n = mbedtls_ssl_read(&p_->c.ssl, (unsigned char *)buf, cap);
+            if (n > 0) return n;
+            if (n == 0 || n == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || n == -0x0050) return 0;
+            if (n == MBEDTLS_ERR_SSL_WANT_READ) return -2;
+            if (n == MBEDTLS_ERR_SSL_WANT_WRITE || n == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) continue;
+            err = "TLS read failed (-0x" + Conn::hex(-n) + ")";
+            return -1;
+        }
+#endif
+        ssize_t n = recv(p_->c.fd, buf, cap, 0);
+        if (n >= 0) return (int)n;
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return -2;
+        err = std::string("recv: ") + strerror(errno);
+        return -1;
+    }
+}
+
+namespace {
+
 }  // namespace
 
 bool random_bytes(unsigned char *out, size_t n) { return fill_random(out, n); }

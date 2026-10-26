@@ -117,7 +117,8 @@ wgl="$root/third_party/wireguard-lwip/src"
 wgflags=(-O2 -ffunction-sections -fdata-sections -I "$root/ps5/wg" -I "$lw/include" -I "$wgl")
 mkdir -p "$out/obj/wg"
 wgobjects=()
-for src in "$lw"/core/*.c "$lw"/core/ipv4/*.c "$wgl"/*.c "$wgl"/crypto/refc/*.c "$root"/ps5/wg/wg_udp.c "$root"/ps5/wg/wg.cpp; do
+for src in "$lw"/core/*.c "$lw"/core/ipv4/*.c "$wgl"/*.c "$wgl"/crypto/refc/*.c "$root"/ps5/wg/wg_udp.c "$root"/ps5/wg/wg.cpp \
+        "$root"/ps5/ts/*.cpp; do
     [ "$src" = "$lw/core/udp.c" ] && continue
     rel=${src#"$root"/}
     o="$out/obj/wg/${rel//\//_}.o"

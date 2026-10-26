@@ -105,6 +105,7 @@
 #include "vk_context.h"
 #include "voice.h"
 #include "wg/wg.h"
+#include "ts/tailscale.h"
 #include "wg_devices.h"
 #include "wg_page.h"
 
@@ -174,6 +175,7 @@ constexpr const char *kUsage = TS5_HOME "/usage.tsv";
 constexpr const char *kUsageHours = TS5_HOME "/usage-hours.tsv";
 constexpr const char *kKeys = TS5_HOME "/keys.tsv";
 constexpr const char *kWgFile = TS5_HOME "/wireguard.tsv";  // WireGuard's devices and key (wg_devices.h)
+constexpr const char *kTsFile = TS5_HOME "/tailscale.tsv";  // the PS5's keys on its tailnet (ts/tailscale.h)
 constexpr const char *kChats = TS5_HOME "/chats";  // the Chat page's saved chats (chat_store.h)
 // Not ..._KEY: a name ending in _KEY is a secret, typed in (settings.h).
 constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
@@ -182,6 +184,11 @@ constexpr const char *kWireGuard = "TS5_WIREGUARD", *kWgPort = "TS5_WG_PORT";
 // Where devices find this home on the internet (Settings, WireGuard, Home
 // address); not set, the PS5 looks up its public address (look_up_home).
 constexpr const char *kWgHost = "TS5_WG_HOST";
+// Tailscale on (1) or off; and, set from a computer only, another control
+// server than Tailscale's (a Headscale), the PS5's name on the tailnet, and an
+// auth key that signs it in without the code on the TV.
+constexpr const char *kTailscale = "TS5_TAILSCALE", *kTsServer = "TS5_TS_SERVER", *kTsName = "TS5_TS_NAME",
+                     *kTsAuthKey = "TS5_TS_AUTH_KEY";
 // Not WireGuard's usual 51820: the PS5 refuses a title's bind there (and at
 // 40000) with EACCES, and takes 9030.
 constexpr int kWgDefaultPort = 9030;
@@ -216,7 +223,7 @@ ts5::UsageLog usage_log(kUsage);
 // (which swaps the whole folder) keeps them: put back at start, followed
 // every 30 s and before leaving.
 app::Backup backup(TS5_HOME, TS5_STORE "/ts5",
-                   {"ts5.env", "ts5.args", "keys.tsv", "wireguard.tsv", "usage.tsv", "usage.prev.tsv", "usage-hours.tsv",
+                   {"ts5.env", "ts5.args", "keys.tsv", "wireguard.tsv", "tailscale.tsv", "usage.tsv", "usage.prev.tsv", "usage-hours.tsv",
                     "results.tsv"},
                    {"chats"});
 
@@ -774,10 +781,19 @@ int main(int, char **) {
     // device behind it (10.55.0.N), which always needs a key.
     app::WgStore wg_store;
     wg_store.load(kWgFile);
+    // Tailscale (ts/tailscale.h): this PS5 on a tailnet, its packets through
+    // the tunnel's thread; its devices come from 100.64.0.0/10, and always
+    // need a key too.
+    ts::Client tailnet;
     wg::Tunnel tunnel;
+    tunnel.use_tailscale(&tailnet);
     std::atomic<bool> wg_on{false};
     std::atomic<int> wg_port{kWgDefaultPort};
-    auto in_tunnel = [](const std::string &client) { return client.rfind("10.55.0.", 0) == 0; };
+    auto in_tunnel = [](const std::string &client) {
+        if (client.rfind("10.55.0.", 0) == 0) return true;
+        int a = 0, b = 0;
+        return sscanf(client.c_str(), "%d.%d.", &a, &b) == 2 && a == 100 && b >= 64 && b < 128;
+    };
     server.set_client_name([&tunnel](const std::string &ip, int port) {
         if (ip == "127.0.0.1") {
             const std::string device = tunnel.client_for((uint16_t)port);
@@ -847,7 +863,17 @@ int main(int, char **) {
         wg_port = port;
         wg_on = on && wg_store.has_key();
         if (wg_on) look_up_home();
-        if (!tunnel.apply(wg_store.config(on, port, api_port), e)) printf("ts5-title: wireguard: %s\n", e.c_str());
+        ts::Config tc;
+        tc.on = app::setting(kTailscale, "0") == "1";
+        tc.control_url = app::setting(kTsServer, "https://controlplane.tailscale.com");
+        tc.hostname = app::setting(kTsName, "tokenstation5");
+        tc.auth_key = app::setting(kTsAuthKey);
+        tc.state_file = kTsFile;
+        tc.version = TS5_VERSION;
+        tailnet.apply(tc);
+        wg::Config wc = wg_store.config(on, port, api_port);
+        wc.tailscale = tc.on;
+        if (!tunnel.apply(wc, e)) printf("ts5-title: wireguard: %s\n", e.c_str());
     };
     wg_apply();
     std::string wg_asked;  // the request the TV last told of
@@ -960,6 +986,16 @@ int main(int, char **) {
                 }
             s.wg.devices.push_back(di);
         }
+        const ts::Status ts_status = tailnet.status();
+        s.ts.state = (int)ts_status.state;
+        s.ts.sign_in_url = ts_status.sign_in_url;
+        s.ts.problem = ts_status.problem;
+        s.ts.name = ts_status.name;
+        s.ts.address = ts_status.address;
+        s.ts.account = ts_status.account;
+        s.ts.relay = ts_status.relay;
+        s.ts.devices = ts_status.devices;
+        for (const wg::PeerState &p : tunnel.tailnet_peers()) s.ts.connected.push_back({p.name, p.address, p.up, p.seen_s});
         bool looked_up = false;
         s.wg.home = wg_home(&looked_up);
         s.wg.home_looked_up = looked_up && !s.wg.home.empty();
@@ -1408,13 +1444,14 @@ int main(int, char **) {
                 break;
             case ui::Action::Set: {
                 std::string e;
-                if ((a.name == kRequireKey || a.name == kWireGuard) && a.value == "1") {
+                if ((a.name == kRequireKey || a.name == kWireGuard || a.name == kTailscale) && a.value == "1") {
                     bool any_on = false;
                     for (const app::ApiKey &k : keys.list()) any_on |= k.on;
                     if (!any_on) {
                         // Over WireGuard a key is always needed.
-                        settings_note.note = a.name == kWireGuard ? "Make a key first: devices need one over WireGuard."
-                                                                  : "Make a key first, so your apps can still get in.";
+                        settings_note.note = a.name == kWireGuard   ? "Make a key first: devices need one over WireGuard."
+                                             : a.name == kTailscale ? "Make a key first: devices need one over Tailscale."
+                                                                    : "Make a key first, so your apps can still get in.";
                         settings_note.note_failed = true;
                         settings_note.note_at = t;
                         v.settings = settings_view(v);
@@ -1429,7 +1466,7 @@ int main(int, char **) {
                 settings_note.note_at = t;
                 v.settings = settings_view(v);
                 if (ok && a.name == "TS5_WHISPER_MODEL") voice.rescan();
-                if (ok && (a.name == kWireGuard || a.name == kWgPort)) wg_apply();
+                if (ok && (a.name == kWireGuard || a.name == kWgPort || a.name == kTailscale)) wg_apply();
                 break;
             }
             case ui::Action::ChatType:
@@ -1541,6 +1578,19 @@ int main(int, char **) {
                 if (!ok) printf("ts5-title: wireguard: %s\n", e.c_str());
                 else wg_apply();
                 settings_note.note = ok ? done : std::string("Couldn't save it.") + plain::kDetails;
+                settings_note.note_failed = !ok;
+                settings_note.note_at = t;
+                v.settings = settings_view(v);
+                break;
+            }
+            case ui::Action::TsSignOut: {
+                // Signed out, and off: turning it on again shows a new code.
+                std::string e;
+                tailnet.sign_out();
+                const bool ok = app::set_setting(kEnv, kTailscale, "", e);
+                if (!ok) printf("ts5-title: settings: %s not saved: %s\n", kTailscale, e.c_str());
+                wg_apply();
+                settings_note.note = ok ? "Signed out" : std::string("Couldn't save it.") + plain::kDetails;
                 settings_note.note_failed = !ok;
                 settings_note.note_at = t;
                 v.settings = settings_view(v);

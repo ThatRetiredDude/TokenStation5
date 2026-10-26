@@ -7,6 +7,11 @@
 //
 // One thread runs it all. Settings, keys and peers come from the title
 // (Settings, WireGuard); a peer is one device, with its own key and address.
+//
+// The same thread runs the PS5's device on a tailnet (ps5/ts/tailscale.h):
+// a second WireGuard device and network interface, whose packets come and
+// go through Tailscale's relay rather than the UDP socket, and whose
+// connections to the API's port are passed on the same way.
 #pragma once
 #include <atomic>
 #include <cstdint>
@@ -15,6 +20,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+namespace ts {
+class Client;
+}
 
 namespace wg {
 
@@ -47,6 +56,7 @@ struct Config {
     std::string address = "10.55.0.1";  // the PS5's in the tunnel (a /24)
     int api_port = 8081;              // passed to the API on this PS5
     std::vector<Peer> peers;
+    bool tailscale = false;           // the PS5 on a tailnet (use_tailscale's client)
 };
 
 struct PeerState {
@@ -59,6 +69,9 @@ struct PeerState {
 class Tunnel {
 public:
     ~Tunnel();
+    // The tailnet's client, before the first apply(); its packets go
+    // through this tunnel's thread while Config::tailscale is on.
+    void use_tailscale(ts::Client *c) { ts_ = c; }
     // Starts the tunnel with c, or brings it in line with c: on and off, the
     // port, the key pair and the peers can change any time; the tunnel's
     // address can't once it has started (the title restarts for that).
@@ -67,6 +80,8 @@ public:
     // What the tunnel is doing, for Settings: "" when it's fine (or off).
     std::string problem();
     std::vector<PeerState> peers();
+    // The tailnet's devices that have talked to the PS5 since it started.
+    std::vector<PeerState> tailnet_peers();
     // For the API: the tunnel address of the device behind a connection the
     // tunnel made to the API from local_port on this PS5, "" if it isn't one.
     // The API names requests by it, and asks it for a key when keys are on.
@@ -78,7 +93,8 @@ private:
     Config want_;            // what apply() asked for; the thread follows it
     bool changed_ = false;
     std::string problem_;
-    std::vector<PeerState> states_;
+    std::vector<PeerState> states_, ts_states_;
+    ts::Client *ts_ = nullptr;
     std::map<uint16_t, std::string> clients_;  // local port: tunnel address
     std::atomic<bool> quit_{false};
     std::thread thread_;

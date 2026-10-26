@@ -35,8 +35,7 @@ on a computer takes one key from `TS5_API_KEY`.
 
 Don't forward port 8081 on your router. The API is plain HTTP, so a key
 would cross the internet unprotected, and anyone who finds the port can try
-it. Use WireGuard, which runs on the PS5 itself, or Tailscale, through a
-computer at home.
+it. Use Tailscale or WireGuard, which both run on the PS5 itself.
 
 ### WireGuard
 
@@ -92,36 +91,34 @@ public key.
 
 ### Tailscale
 
-[Tailscale](https://tailscale.com) (free for personal use) needs no port
-opened on your router. Tailscale doesn't run on the PS5 itself, so a computer
-that stays on at home shares the PS5's address with your devices as a
-[subnet route](https://tailscale.com/kb/1019/subnets):
+[Tailscale](https://tailscale.com) (free for personal use) joins your
+devices into a private network of their own, a tailnet, wherever each one
+is. TokenStation5 joins it as a device of its own: nothing to set up on your
+router, and it works on networks where no port can be forwarded at all (a
+building's shared internet, CGNAT).
 
-1. Install Tailscale on a computer that stays on at home (a PC, a Mac, a
-   Raspberry Pi, a NAS) and on the computer, phone or tablet you'll use away, signed in
-   to the same account.
-2. On the home computer, advertise the PS5's address, for example
-   `sudo tailscale up --advertise-routes=192.168.1.50/32` on Linux (which
-   also needs IP forwarding turned on, see the link above). The Windows and
-   Mac apps have the same setting.
-3. In the Tailscale admin console, under Machines, approve the route for the
-   home computer.
-4. Away from home, with Tailscale on, apps use the same base URL as at home,
-   `http://192.168.1.50:8081/v1`. Phones, Windows and Macs use approved
-   routes on their own; another Linux machine needs
-   `tailscale up --accept-routes`.
+1. Install Tailscale on your phone, tablet or computer and sign in.
+2. On the PS5, in Settings, Tailscale, turn it on (make an API key first:
+   over Tailscale a key is always needed). The TV shows a code: scan it with
+   your phone, sign in to the same Tailscale account, and approve
+   TokenStation5.
+3. With Tailscale on, apps use `http://tokenstation5:8081/v1` (or the PS5's
+   100.x address, shown in Settings) and one of your keys, at home and away.
 
-Instead of a subnet route, the home computer can also pass the API on with
-[Tailscale Serve](https://tailscale.com/kb/1312/serve):
-`tailscale serve --bg http://192.168.1.50:8081`. Your devices then use
-`https://<home computer's name>.<your tailnet>.ts.net/v1` as the base URL,
-with no route to approve and https from Tailscale.
+The PS5 can't run Tailscale's own app, so TokenStation5 has a small client of
+its own: it signs in to Tailscale's control server and sends its traffic
+through Tailscale's relay servers (DERP), always, without direct connections
+yet. That's plenty for streamed replies. Only devices on your tailnet can
+reach it, and your tailnet's access rules apply. Signing out (square twice
+on the Tailscale row) removes the PS5 from the tailnet.
 
-Turn on "Require a key" in Settings as well, and keep the PS5's address fixed
-with a DHCP reservation, since the route names one address. Settings on the
-TV has the same steps for both, with this PS5's address filled in, under
-Apps, Instructions: "Away from home with WireGuard" and "Away from home with
-Tailscale".
+From a computer, `ts5.env` can also set `TS5_TS_SERVER` (another control
+server, such as a [Headscale](https://headscale.net)), `TS5_TS_NAME` (the
+PS5's name on the tailnet, `tokenstation5` by default) and `TS5_TS_AUTH_KEY`
+(an auth key from the admin console, which signs it in without the code).
+
+Settings on the TV has the steps too, under Apps, Instructions: "At home and
+away with Tailscale".
 
 ## Kilo Code
 

@@ -1,8 +1,14 @@
 // lwIP's UDP, as wireguardif.c uses it, on the PS5's own socket. lwIP's
 // udp.c isn't built: WireGuard's encrypted packets come and go through a
 // socket the title opens (ps5/wg/wg.cpp), and nothing inside the tunnel
-// speaks UDP. So this file has the calls wireguardif.c makes (one pcb, the
-// device's) and the ones lwIP's core makes, which drop what they're given.
+// speaks UDP. So this file has the calls wireguardif.c makes and the ones
+// lwIP's core makes, which drop what they're given.
+//
+// Two WireGuard devices make calls here, each with its pcb: the PS5's own
+// server (TS5_UDP_WIREGUARD), on the socket, and its device on a tailnet
+// (TS5_UDP_TAILSCALE), whose packets go through Tailscale's relay instead
+// (ps5/ts/tailscale.h): wg.cpp says which is being made before it adds the
+// device, and passes on the second's packets with ts5_ts_send.
 //
 // Also the platform functions wireguard-lwip asks for, and lwIP's clock.
 #include <errno.h>
@@ -17,7 +23,8 @@
 #include "wireguard-platform.h"
 #include "wg_udp.h"
 
-static struct udp_pcb device_pcb;
+static struct udp_pcb device_pcbs[2];
+static int making = TS5_UDP_WIREGUARD;
 static int os_socket = -1;
 unsigned long ts5_wg_sent, ts5_wg_send_failed;
 int ts5_wg_send_errno;
@@ -25,20 +32,27 @@ size_t ts5_wg_sent_bytes;
 
 void ts5_wg_udp_use(int fd) { os_socket = fd; }
 
-void ts5_wg_udp_input(const void *data, size_t len, uint32_t ip_be, uint16_t port) {
-    if (!device_pcb.recv || len == 0 || len > 0xFFFF) return;
+void ts5_udp_making(int which) { making = which; }
+
+void ts5_udp_input(int which, const void *data, size_t len, uint32_t ip_be, uint16_t port) {
+    struct udp_pcb *pcb = &device_pcbs[which];
+    if (!pcb->recv || len == 0 || len > 0xFFFF) return;
     struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_RAM);
     if (!p) return;
     memcpy(p->payload, data, len);
     ip_addr_t from;
     ip_addr_set_ip4_u32_val(from, ip_be);
     // wireguardif_network_rx frees it.
-    device_pcb.recv(device_pcb.recv_arg, &device_pcb, p, &from, port);
+    pcb->recv(pcb->recv_arg, pcb, p, &from, port);
+}
+
+void ts5_wg_udp_input(const void *data, size_t len, uint32_t ip_be, uint16_t port) {
+    ts5_udp_input(TS5_UDP_WIREGUARD, data, len, ip_be, port);
 }
 
 struct udp_pcb *udp_new(void) {
-    memset(&device_pcb, 0, sizeof device_pcb);
-    return &device_pcb;
+    memset(&device_pcbs[making], 0, sizeof device_pcbs[making]);
+    return &device_pcbs[making];
 }
 
 err_t udp_bind(struct udp_pcb *pcb, const ip_addr_t *ipaddr, u16_t port) {
@@ -63,10 +77,13 @@ void udp_remove(struct udp_pcb *pcb) {
 }
 
 err_t udp_sendto(struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *dst_ip, u16_t dst_port) {
-    (void)pcb;
     unsigned char buf[2048];
-    if (os_socket < 0) return ERR_CONN;
     if (p->tot_len > sizeof buf) return ERR_MEM;
+    if (pcb == &device_pcbs[TS5_UDP_TAILSCALE]) {
+        const u16_t n = pbuf_copy_partial(p, buf, p->tot_len, 0);
+        return ts5_ts_send(buf, n, ip4_addr_get_u32(ip_2_ip4(dst_ip)), dst_port) ? ERR_OK : ERR_RTE;
+    }
+    if (os_socket < 0) return ERR_CONN;
     const u16_t n = pbuf_copy_partial(p, buf, p->tot_len, 0);
     struct sockaddr_in to;
     memset(&to, 0, sizeof to);
