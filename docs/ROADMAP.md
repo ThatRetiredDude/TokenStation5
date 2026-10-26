@@ -83,7 +83,7 @@ Nothing critical open.
 - [ ] Q8_0 on the fast one-token kernels. Qwen 2.5 0.5B Q8_0, the test model, now writes at 191 tok/s (185 in a short chat, as on the first run) and reads 4,618; its Q8_0 matmuls still run on the old one-row code, 64% of its writing time. Matters if a 0.5B becomes the draft model.
 - [ ] An 8-bit KV cache within the 2% bar, so 8B models get long contexts.
 - [ ] Qwen 3's thinking: honor `enable_thinking` and `/no_think`.
-- [ ] More models: Gemma 3 12B, Qwen 3.5 4B and 9B, Gemma 4 E4B, Mistral Nemo 12B ([models.tsv](../models.tsv)).
+- [ ] More models: Gemma 3 12B, Qwen 3.5 4B and 9B, Gemma 4 E4B ([models.tsv](../models.tsv)). The engine runs the llama, mistral, qwen2 and qwen3 architectures (Mistral Nemo 12B is llama, so it runs), and the PS5 refused Qwen 3.5 4B on 2026-10-26 ("architecture 'qwen35' is not supported yet"). Each needs its architecture in the engine: Gemma 3 is an ordinary transformer with a few changes (sliding-window attention on most layers, GELU, extra norms, a 262k vocabulary), so it is the smallest step; Qwen 3.5 mixes attention with Gated DeltaNet layers, which need new GPU code (a short convolution and a recurrent state); Gemma 4 E4B is a third design. Until then `fetch` skips them (#90), and the Models page and its Hugging Face search only offer models the engine runs.
 - [ ] Endpoint: a static IP or DHCP reservation, more client configs (Open WebUI, Continue, opencode, Claude Code) beside Kilo Code in `docs/CLIENTS.md`, one command after each reboot. API keys are in the title itself (#57).
 - [ ] The log: the GPU driver's submission lines could land in the middle of a `ts5-title:` line (seen 2026-10-24). None spliced since #61 and #62; the driver's own writes are outside our code.
 
