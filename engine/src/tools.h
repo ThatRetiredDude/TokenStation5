@@ -55,6 +55,12 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text);
 // never part of a call (the rest is held until the turn ends).
 size_t content_prefix(ToolFormat f, const std::string &text);
 
+// Whether the model's template can turn its thinking off (Qwen3's
+// enable_thinking): its turn then opens with kNoThinking, an empty
+// <think></think>, as the template writes it, and the model answers at once.
+bool can_skip_thinking(const Tokenizer &t);
+extern const char *const kNoThinking;
+
 // "call_" and 24 random letters and digits, as OpenAI's ids look.
 std::string new_call_id();
 

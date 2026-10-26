@@ -187,6 +187,10 @@ std::string render_llama3(const std::vector<Message> &all, const std::vector<Jso
 
 }  // namespace
 
+bool can_skip_thinking(const Tokenizer &t) { return has(t.chat_template(), "enable_thinking"); }
+
+const char *const kNoThinking = "<think>\n\n</think>\n\n";
+
 ToolFormat tool_format(const Tokenizer &t) {
     const std::string &tmpl = t.chat_template();
     if (t.chat_format() == Tokenizer::CHATML && has(tmpl, "<tool_call>")) return ToolFormat::HERMES;
