@@ -475,6 +475,104 @@ bool calls_in_any_wrapper(const std::string &text, std::vector<ToolCall> &calls)
     return calls_in_body(s.substr(gt + 1, s.size() - gt - 1 - close.size()), calls);
 }
 
+bool is_name_char(char c) { return isalnum((unsigned char)c) || c == '_' || c == '-' || c == '.'; }
+
+// A number as JSON writes it: no leading zeros, no "nan" or hex.
+bool json_number(const std::string &s) {
+    size_t i = s[0] == '-' ? 1 : 0;
+    auto digits = [&] {
+        const size_t at = i;
+        while (i < s.size() && isdigit((unsigned char)s[i])) i++;
+        return i > at;
+    };
+    if (i < s.size() && s[i] == '0') i++;
+    else if (!digits()) return false;
+    if (i < s.size() && s[i] == '.' && (++i, !digits())) return false;
+    if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+        i++;
+        if (i < s.size() && (s[i] == '+' || s[i] == '-')) i++;
+        if (!digits()) return false;
+    }
+    return i == s.size();
+}
+
+// Calls written as elements named after the request's tools, nothing else,
+// maybe in one wrapper or a fence, the arguments as attributes or as the body
+// (JSON or elements). Qwen 2.5 Coder writes two calls this way (seen on the
+// console):
+//   <xml> <get_weather city="Paris" /> <get_time zone="Asia/Tokyo" /> </xml>
+bool calls_as_tool_elements(const std::string &text, const std::vector<std::string> &names,
+                            std::vector<ToolCall> &calls) {
+    auto known = [&](const std::string &n) {
+        for (auto &x : names)
+            if (x == n) return true;
+        return false;
+    };
+    std::string s = unfenced(text);
+    // One wrapper that isn't a tool: <xml>...</xml>, <tool_calls>...</tool_calls>.
+    if (starts(s, "<") && s.size() > 2) {
+        size_t e = 1;
+        while (e < s.size() && is_name_char(s[e])) e++;
+        const std::string w = s.substr(1, e - 1);
+        if (!w.empty() && e < s.size() && s[e] == '>' && !known(w) && ends(s, "</" + w + ">"))
+            s = strip(s.substr(e + 1, s.size() - (e + 1) - (w.size() + 3)));
+    }
+    std::vector<ToolCall> out;
+    size_t i = 0;
+    while (i < s.size()) {
+        if (s[i] != '<') return false;
+        size_t e = i + 1;
+        while (e < s.size() && is_name_char(s[e])) e++;
+        const std::string name = s.substr(i + 1, e - i - 1);
+        if (!known(name)) return false;
+        Json args = Json::object();
+        // Attributes: key="value" or key='value', a value that reads as JSON
+        // (a number, true, a list) being that, anything else a string ("02134"
+        // stays one).
+        size_t k = e;
+        for (;;) {
+            k = s.find_first_not_of(kSpace, k);
+            if (k == std::string::npos) return false;
+            if (s[k] == '>' || starts(s, "/>", k)) break;
+            size_t eq = k;
+            while (eq < s.size() && is_name_char(s[eq])) eq++;
+            if (eq == k || eq + 1 >= s.size() || s[eq] != '=' || (s[eq + 1] != '"' && s[eq + 1] != '\'')) return false;
+            const size_t close = s.find(s[eq + 1], eq + 2);
+            if (close == std::string::npos) return false;
+            const std::string key = s.substr(k, eq - k), raw = s.substr(eq + 2, close - eq - 2);
+            Json v;
+            if (!Json::parse(raw, v) || v.type == Json::STR || (v.type == Json::NUM && !json_number(raw)))
+                v = Json::string(raw);
+            args.set(key, v);
+            k = close + 1;
+        }
+        if (s[k] == '/') {
+            i = k + 2;
+        } else {
+            const std::string end = "</" + name + ">";
+            const size_t close = s.find(end, k + 1);
+            if (close == std::string::npos) return false;
+            const std::string body = strip(s.substr(k + 1, close - k - 1));
+            if (!body.empty()) {
+                Json b;
+                if (!(Json::parse(body, b) && b.type == Json::OBJ) && !elements_object(body, b)) return false;
+                for (auto &key : b.keys) args.set(key, b.o[key]);
+            }
+            i = close + end.size();
+        }
+        ToolCall call;
+        call.name = name;
+        call.arguments = args.dump();
+        call.id = new_call_id();
+        out.push_back(call);
+        i = s.find_first_not_of(kSpace, i);
+        if (i == std::string::npos) i = s.size();
+    }
+    if (out.empty()) return false;
+    calls.insert(calls.end(), out.begin(), out.end());
+    return true;
+}
+
 // Text whose call came out of a fence or a wrapper leaves it behind
 // ("```xml\n\n```", "<response>\n</response>"): that goes too.
 std::string without_empty_fence(const std::string &text) {
@@ -499,7 +597,7 @@ std::string without_empty_fence(const std::string &text) {
     return rstrip(c.substr(0, open));
 }
 
-ParsedTurn parse_turn(ToolFormat f, const std::string &text) {
+ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names) {
     ParsedTurn r;
     r.content = text;
     if (f == ToolFormat::HERMES) {
@@ -544,6 +642,8 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text) {
         // fence: Coder keeps making new ones up (<response>, <xml>, seen on
         // the console).
         if (r.calls.empty() && calls_in_any_wrapper(text.substr(from), r.calls)) content = text.substr(0, from);
+        if (r.calls.empty() && !names.empty() && calls_as_tool_elements(text.substr(from), names, r.calls))
+            content = text.substr(0, from);
         if (!r.calls.empty()) r.content = without_empty_fence(rstrip(content));
         // A plain answer in a <response> wrapper (Coder, seen on the
         // console): the wrapper goes.

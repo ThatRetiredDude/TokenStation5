@@ -669,7 +669,9 @@ void handle(int fd, Server::State &state, Usage &u) {
                 content += text.substr(std::min(answer, text.size()));
                 break;
             }
-            ParsedTurn pt = parse_turn(tf, text);
+            std::vector<std::string> names;
+            for (const Json &t : tools) names.push_back(t["function"]["name"].str());
+            ParsedTurn pt = parse_turn(tf, text, names);
             // A call to a tool the request doesn't have is the model making
             // one up (say_hello for "Say hello in one word.", seen on the
             // console): the turn stays text.

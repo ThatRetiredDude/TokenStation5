@@ -135,8 +135,8 @@ def test_prompts(ts5, model, tdir):
     return failed
 
 
-def parse(ts5, fmt, text):
-    r = subprocess.run([ts5, "tool-parse", fmt], input=text, text=True, capture_output=True, check=True)
+def parse(ts5, fmt, text, names=()):
+    r = subprocess.run([ts5, "tool-parse", fmt, *names], input=text, text=True, capture_output=True, check=True)
     return json.loads(r.stdout)
 
 
@@ -149,7 +149,7 @@ def test_parser(ts5):
          "Let me look.", [("a", {}), ("b", {"n": 2})], 13),
         # Thinking that mentions the tag is not a call.
         ("hermes", '<think>\nMaybe <tool_call> it.\n</think>\n\n<tool_call>\n{"name": "a", "arguments": {}}\n</tool_call>',
-         "<think>\nMaybe <tool_call> it.\n</think>", [("a", {})], 40),
+         "<think>\nMaybe <tool_call> it.\n</think>", [("a", {})], 38),
         ("hermes", "<think>\nstill thinking <tool_call>", "<think>\nstill thinking <tool_call>", [], 34),
         # Broken JSON stays text; a call cut off by the token limit still counts.
         ("hermes", "<tool_call>\n{\"name\": oops}\n</tool_call>", "<tool_call>\n{\"name\": oops}\n</tool_call>", [], 0),
@@ -163,6 +163,14 @@ def test_parser(ts5):
         ("hermes", 'Sure.\n<function_call>{"name": "a", "arguments": {}}</function_call>', "Sure.", [("a", {})], 6),
         ("hermes", '{"answer": 42}', '{"answer": 42}', [], 0),
         ("hermes", "Use the <tools> menu.", "Use the <tools> menu.", [], 8),
+        # Calls as elements named after the tools (Coder's two calls, from the console).
+        ("hermes", '<xml> <get_weather city="Paris" /> <get_time zone="Asia/Tokyo" /> </xml>', "",
+         [("get_weather", {"city": "Paris"}), ("get_time", {"zone": "Asia/Tokyo"})], 0, ["get_weather", "get_time"]),
+        ("hermes", '```xml\n<get_weather>\n  <city>Oslo</city>\n</get_weather>\n```', "",
+         [("get_weather", {"city": "Oslo"})], 0, ["get_weather"]),
+        ("hermes", '<get_weather city="Oslo" days="2" zip="0150"/>', "",
+         [("get_weather", {"city": "Oslo", "days": 2, "zip": "0150"})], 0, ["get_weather"]),
+        ("hermes", "<b>Bold</b> answer", "<b>Bold</b> answer", [], 0, ["get_weather"]),
         ("llama3", '{"name": "web_search", "parameters": {"query": "a"}}', "", [("web_search", {"query": "a"})], 0),
         ("llama3", '<|python_tag|>{"name": "a", "parameters": {}}; {"name": "b", "parameters": {"x": "y"}}',
          "", [("a", {}), ("b", {"x": "y"})], 0),
@@ -170,8 +178,8 @@ def test_parser(ts5):
         ("llama3", "Hello {there}", "Hello {there}", [], 13),
     ]
     failed = 0
-    for fmt, text, content, calls, prefix in cases:
-        r = parse(ts5, fmt, text)
+    for fmt, text, content, calls, prefix, *names in cases:
+        r = parse(ts5, fmt, text, *names)
         got_calls = [(c["name"], json.loads(c["arguments"])) for c in r["calls"]]
         if r["content"] != content or got_calls != calls or r["content_prefix"] != prefix:
             failed += 1

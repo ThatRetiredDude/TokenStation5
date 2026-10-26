@@ -44,12 +44,13 @@ std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, co
 std::string render_results(ToolFormat f, const std::vector<std::string> &results);
 
 // A finished turn: its text without the calls, and the calls. A call whose JSON
-// does not parse stays in the text.
+// does not parse stays in the text. names: the request's tools, for calls
+// written as elements named after them.
 struct ParsedTurn {
     std::string content;
     std::vector<ToolCall> calls;
 };
-ParsedTurn parse_turn(ToolFormat f, const std::string &text);
+ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names = {});
 
 // While a turn streams: how many bytes of `text` are surely text for the user,
 // never part of a call (the rest is held until the turn ends).
