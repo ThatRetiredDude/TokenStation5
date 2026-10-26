@@ -419,6 +419,10 @@ void Client::set_state(Status::State s, const std::string &problem) {
 
 void Client::control_loop() {
     double backoff = 1;
+    // The sign-in page last shown, and the device key it's for: a new
+    // connection waits on the same page, so the code on the TV doesn't change
+    // under someone signing in.
+    std::string login_url, login_key;
     while (!quit_) {
         Config cfg;
         uint64_t gen;
@@ -551,6 +555,13 @@ void Client::control_loop() {
         }
         bool authorized = false;
         std::string followup;
+        if (!sign_out && !login_url.empty() && login_key == node_key) {
+            followup = login_url;
+            std::lock_guard<std::mutex> lk(mu_);
+            status_.state = Status::NeedsSignIn;
+            status_.sign_in_url = login_url;
+            status_.problem.clear();
+        }
         while (!authorized) {
             if (!followup.empty()) reg.set("Followup", str(followup));
             int id = 0, status = 0;
@@ -563,6 +574,7 @@ void Client::control_loop() {
             }
             if (!rr["Error"].str().empty()) {
                 why = rr["Error"].str();
+                login_url.clear();  // the page may be no good any more
                 break;
             }
             if (sign_out) {
@@ -595,13 +607,17 @@ void Client::control_loop() {
             const std::string url = rr["AuthURL"].str();
             if (rr["MachineAuthorized"].boolean(false) && url.empty()) {
                 authorized = true;
+                login_url.clear();
                 break;
             }
             if (!url.empty()) {
-                log("waiting for the sign-in at %s", url.c_str());
+                if (url != login_url) log("waiting for the sign-in at %s", url.c_str());
+                login_url = url;
+                login_key = node_key;
                 std::lock_guard<std::mutex> lk(mu_);
                 status_.state = Status::NeedsSignIn;
                 status_.sign_in_url = url;
+                status_.problem.clear();
                 followup = url;
             } else if (followup.empty()) {
                 // Signed in, but an admin has to approve the device.
