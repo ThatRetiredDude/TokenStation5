@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 
 extern "C" {
 
@@ -56,6 +57,30 @@ int sceKernelSendNotificationRequest(int, void *request, size_t, int) {
 }
 
 int sceKernelUsleep(unsigned int microseconds) { return usleep(microseconds); }
+
+// libkernel's UTC-to-local conversion (ps5/local_time.cpp looks it up by
+// name): this machine's time zone, through localtime_r.
+struct ShimTimezone {
+    int minutes_west, dst;
+};
+static int convert_utc_to_localtime(const timespec *utc, timespec *local, ShimTimezone *zone, int *dst) {
+    const time_t t = utc->tv_sec;
+    struct tm l;
+    if (!localtime_r(&t, &l)) return -1;
+    local->tv_sec = utc->tv_sec + l.tm_gmtoff;
+    local->tv_nsec = utc->tv_nsec;
+    if (zone) *zone = {(int)(-l.tm_gmtoff / 60), l.tm_isdst > 0};
+    if (dst) *dst = l.tm_isdst > 0;
+    return 0;
+}
+int sceKernelDlsym(int, const char *name, void **addr) {
+    if (strcmp(name, "sceKernelConvertUtcToLocaltime") == 0) {
+        *addr = (void *)&convert_utc_to_localtime;
+        return 0;
+    }
+    *addr = nullptr;
+    return -1;
+}
 
 int sceNetInit(void) { return 0; }
 int sceNetPoolCreate(const char *, int, int) { return 1; }
