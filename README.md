@@ -79,7 +79,8 @@ a stopped download picks up where it left off.
 Qwen 2.5 Coder 7B for code, Qwen 3 8B and Llama 3.1 8B for everyday chat, and
 Llama 3.2 3B when you want speed. Every model passes a check that runs the
 same prompt on the PS5's GPU and on a separate reference, and compares the
-results at every word.
+results at every word. Want another? The Models page searches Hugging Face
+and shows only the files that fit the console.
 
 ### 🔓 Free for personal use
 
@@ -95,7 +96,15 @@ Install the TokenStation5 title, pick a model on the TV, and you're running.
 Step-by-step setup is in [On the PS5](#on-the-ps5).
 
 > [!WARNING]
-> A jailbroken console's API has no password. Keep it on a network you trust.
+> The jailbreak's own FTP and payload ports have no password, so anyone on
+> your network can read the title's files, keys included. Keep the PS5 on a
+> network you trust. The API itself asks for a key once Settings > Require a
+> key is on.
+
+> [!NOTE]
+> A store update keeps your settings, keys and chats, but not the models you
+> downloaded: put them back from a computer (Settings > Instructions > Add
+> models from a computer) or download them again.
 
 ---
 
@@ -150,7 +159,7 @@ The full plan is in [engine/DESIGN.md](engine/DESIGN.md).
 | TV dashboard | ✅ Pick, check, benchmark and serve models with the controller, on the TV |
 | PS5 kernel tuning | 🔨 Ongoing: prompts read 13 to 16 times faster and generation about 3.5 times faster than the first console build; the new attention doubled generation again at 16k+ context |
 | Speculative decoding | ✅ Code editing with Coder 7B runs at 102 tok/s against 64 with drafting off, byte-identical output; free chat stays within 4% |
-| Gemma 3, Qwen 3.5, Gemma 4 | 📋 Planned |
+| Hugging Face search | ✅ From the TV, finds other Llama, Mistral, Qwen 2.5 and Qwen 3 GGUFs that fit the console |
 
 ## On the console today
 
@@ -261,9 +270,12 @@ against llama.cpp itself:
 - The same check runs on the console itself (`ts5 check`, the dashboard's □).
   Qwen 2.5 Coder 7B on the PS5's GPU gives the CPU's top token at all 8
   positions, with logits within 0.15% of the largest.
-- CI runs the suite on every pull request and every push to main. It also
-  builds the PS5 title, and runs the title's own code on Linux, driving the
-  dashboard the way a user would.
+- Every change is checked on the console itself, with the real models,
+  before it is called done. GitHub builds the PS5 title on every pull request
+  and push to main; it runs no tests of its own.
+
+For engine work away from the console, the same comparisons run on a Linux
+box with a Vulkan GPU:
 
 ```sh
 engine/tests/run.sh                          # Vulkan vs the CPU reference
@@ -272,26 +284,28 @@ LLAMA_CPP=~/llama.cpp engine/tests/run.sh    # plus llama.cpp and tokenizer chec
 
 ## Models that fit
 
-Memory is an 11.44 GiB GPU heap on the console. Measured numbers are in
-[On the console today](#on-the-console-today).
+Memory is an 11.44 GiB GPU heap on the console. These four are the ones the
+Models page offers; all are measured in
+[On the console today](#on-the-console-today):
 
 | Model | Quant | Size | Role |
 | --- | --- | ---: | --- |
-| Qwen 2.5 0.5B | Q8_0 | ~0.6 GiB | quick GPU test |
-| Llama 3.2 3B | Q4_K_M | ~1.9 GiB | small and fast; the llama.cpp port's benchmark |
-| Qwen 2.5 Coder 7B | Q4_K_M | ~4.4 GiB | coding endpoint |
-| Qwen 3 8B | Q4_K_M | ~4.7 GiB | general chat, thinking mode |
-| Llama 3.1 8B | Q4_K_M | ~4.6 GiB | general chat |
-| Mistral Nemo 12B | Q4_K_M | ~7.0 GiB | long-form writing |
-| Gemma 3 12B | Q4_K_M | ~6.8 GiB | planned |
-| Qwen 3.5 4B / 9B | Q4_K_M | ~2.7 / 5.3 GiB | planned |
-| Gemma 4 E4B | Q4_0 | ~4.3 GiB | planned |
+| Llama 3.2 3B Instruct | Q4_K_M | ~1.9 GiB | quick answers |
+| Qwen 2.5 Coder 7B Instruct | Q4_K_M | ~4.4 GiB | coding |
+| Qwen 3 8B | Q4_K_M | ~4.7 GiB | general chat and thinking |
+| Llama 3.1 8B Instruct | Q4_K_M | ~4.6 GiB | general chat |
+
+For anything else, the Models page's Hugging Face search lists GGUFs of the
+architectures ts5 runs (Llama, Mistral, Qwen 2.5 and Qwen 3) and shows only
+the files that fit the console's memory with room for a working context,
+chat-tuned ones first. A 12B at Q4_K_M (about 7 GiB) is the practical
+ceiling. Gemma isn't supported yet.
 
 ## Repo map
 
 - [engine/](engine/): ts5 source, shaders, tests, [design](engine/DESIGN.md)
 - [ps5/](ps5/): the PS5 title: build, packaging, console control
-- [docs/ROADMAP.md](docs/ROADMAP.md): milestones
+- [docs/ROADMAP.md](https://github.com/ThatRetiredDude/TokenStation5/blob/roadmap/docs/ROADMAP.md): the punch list (done, open, next), kept on the `roadmap` branch
 - [docs/FEASIBILITY.md](docs/FEASIBILITY.md): hardware, memory budget, risks
 - [docs/WEB_SEARCH.md](docs/WEB_SEARCH.md): web search with a Tavily key, and tool calling
 - [scripts/](scripts/): console deploy, model fetch and benchmark tools
@@ -315,8 +329,11 @@ console.
 
 ## Safety
 
-A jailbroken console's API, FTP and payload ports have no authentication.
-Keep it on a network you trust.
+The API asks for a key once Settings > Require a key is on; apps send it the
+way they send an OpenAI key, and the TV makes and shows the keys. The
+jailbreak's own FTP and payload ports have no password, so anyone on the
+network can read the title's files, keys included. Keep the console on a
+network you trust.
 
 ## Support development
 
