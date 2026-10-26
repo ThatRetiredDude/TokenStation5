@@ -44,6 +44,8 @@ First release (2026-10-24): TokenStation5 01.000.001, packaged for the Prospero 
 
 Coding apps (2026-10-24, on the console): Kilo Code made and ran a FizzBuzz script through ts5 with Qwen 2.5 Coder 7B (58 s) and Qwen 3 8B (70 s); Llama 3.1 8B answered in text instead of calling the tools. Kilo's system prompt and tools come to about 15,700 tokens, so it needs the title's `-c auto` (32,768 tokens on the 7B and 8B models, 44,032 on Llama 3.1 8B); the old 8,192 couldn't fit it. The first request reads at 300-350 tok/s (about 50 s); later turns reuse the cached prompt and read only the new 100-160 tokens.
 
+Model check (2026-10-26, on the console, `scripts/model-check.py`, 20 checks of the API the way apps use it, [#89](https://github.com/ThatRetiredDude/TokenStation5/pull/89)): Qwen 3 8B 20/20, Qwen 2.5 Coder 7B 19/20, Llama 3.1 8B 18/20, Llama 3.2 3B 18/20 (before #89: 16/19, 18/19, 18/19, 15/19). What's left is the models' own (Open, below).
+
 ## Critical
 
 Nothing critical open.
@@ -56,6 +58,8 @@ Nothing critical open.
   - `scripts/ts5-ps5.sh install` sends `quit` even when the title is closed, which leaves a `quit` file the next launch would read.
   - `TS5_WIREGUARD=1` in `ts5.env` still starts the WireGuard server, with no Settings row to turn it off (only on Jared's console, from #80's tests).
   - After an FTP update, quit and install in a row, the PS5 sometimes starts no homebrew app until a restart and the jailbreak (Jared: "happens sometimes I think from force push updates"). Store updates aren't known to do this.
+
+- [ ] What the model check still finds (2026-10-26), each the model's own: Coder 7B answers the agent task with a code block instead of calling write_file in 2 of 3 runs; Llama 3.1 8B calls the weather tool for a poem or a sum, and writes the agent's file with spaces where the newlines go in 2 of 3 runs; Llama 3.2 3B describes two calls instead of making them in about 1 of 4, and reads HELIOTROPE as "Heliotope" in a 14k-token prompt. docs/CLIENTS.md points agent work at Qwen 3 8B.
 
 ## Next
 
@@ -86,6 +90,7 @@ Nothing critical open.
 
 - [x] [#81](https://github.com/ThatRetiredDude/TokenStation5/pull/81) Tailscale: the PS5 joins the user's tailnet itself, with nothing set up on the router and no other device in between (merged 2026-10-26, tested on the console). Sign-in is a code on the TV, against Tailscale's own servers. Traffic goes through Tailscale's relays, reached over TLS 1.2: their certificate chains end in an Ed25519 certificate that Mbed TLS's TLS 1.3 code rejects. On the home network it goes direct on UDP 9031: about 15 ms from the Mac, against 130 through the relay. Jared's phone reached it on mobile data. A key is always needed over Tailscale ([#82](https://github.com/ThatRetiredDude/TokenStation5/pull/82), which let "Require a key" off open it, was closed at Jared's word).
 - [x] [#84](https://github.com/ThatRetiredDude/TokenStation5/pull/84) Settings in four groups, Chat, Voice, Console and Tuning, instead of six (merged 2026-10-26; shipped in 01.003.000).
+- [x] [#89](https://github.com/ThatRetiredDude/TokenStation5/pull/89) Model check script, and fixes for what it found on the PS5: Qwen 3 thinking off and short replies, Coder's two-call formats, Llama answering from tool results and saying hello without a tool, Llama 3.2 3B's file writes with quotes, one more turn without tools after a made-up call (merged 2026-10-26; replaces #88).
 - [x] Release 01.003.000 (2026-10-26): Tailscale, the Settings cleanup, the docs, and dates in the console's time zone ([#87](https://github.com/ThatRetiredDude/TokenStation5/pull/87): #83's libkernel lookup finds nothing from a title, so the title reads the time zone from the system service). Console pass on the PS5: a store-style update from 01.002.000 put back 6 of 6 files and kept the Tailscale sign-in; Settings shows APPS, AWAY FROM HOME, CHAT, VOICE, CONSOLE, TUNING; signing out from the TV turns Tailscale off and a new code signs it back in at the same address; a new key shows its date in the console's zone (UTC-5 on Jared's PS5). Tagged on af273ba; on the Prospero Store through ps5-homebrew-catalog #818 (merged by its bot 2026-10-26 20:09 UTC, live with its next publication). WireGuard (#80) waits for a later release.
 - [x] [#83](https://github.com/ThatRetiredDude/TokenStation5/pull/83) Docs for 01.003.000, and the TV's dates in the console's time zone instead of UTC (merged 2026-10-26; shipped in 01.003.000).
 - [x] [#77](https://github.com/ThatRetiredDude/TokenStation5/pull/77) Settings > Instructions > "Add models from a computer" (merged 2026-10-25, tested on the console): the PS5's FTP address and the models folder, the steps for copying a model in, and why (downloads on the console slow down after the first few hundred MB).
