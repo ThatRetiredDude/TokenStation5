@@ -65,8 +65,7 @@ address fixed with a DHCP reservation. Then add each device one of two ways:
 
 Both make a tunnel that reaches the PS5 alone (`AllowedIPs = 10.55.0.1/32`).
 Away from home, with the tunnel on, apps use `http://10.55.0.1:8081/v1` and
-one of your keys: over the tunnel a key is always needed, whatever "Require a
-key" says. A phone runs one VPN at a time, so the tunnel takes over from
+one of your keys (none needed with "Require a key" off). A phone runs one VPN at a time, so the tunnel takes over from
 another VPN while it's on. Delete a downloaded tunnel file once WireGuard has
 it: it holds the device's private key.
 
@@ -98,12 +97,13 @@ router, and it works on networks where no port can be forwarded at all (a
 building's shared internet, CGNAT).
 
 1. Install Tailscale on your phone, tablet or computer and sign in.
-2. On the PS5, in Settings, Tailscale, turn it on (make an API key first:
-   over Tailscale a key is always needed). The TV shows a code: scan it with
+2. On the PS5, in Settings, Tailscale, turn it on. The TV shows a code: scan it with
    your phone, sign in to the same Tailscale account, and approve
    TokenStation5.
 3. With Tailscale on, apps use `http://tokenstation5:8081/v1` (or the PS5's
-   100.x address, shown in Settings) and one of your keys, at home and away.
+   100.x address, shown in Settings) and one of your keys, at home and away
+   (none needed with "Require a key" off: only your tailnet's devices can
+   reach it).
 
 The PS5 can't run Tailscale's own app, so TokenStation5 has a small client of
 its own: it signs in to Tailscale's control server and sends its traffic

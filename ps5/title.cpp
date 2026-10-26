@@ -778,22 +778,17 @@ int main(int, char **) {
     keys.set_required(app::setting(kRequireKey, "0") == "1");
     // WireGuard (wg/wg.h): devices away from home reach the API through a
     // tunnel. Its connections come from 127.0.0.1, so each is named by the
-    // device behind it (10.55.0.N), which always needs a key.
+    // device behind it (10.55.0.N). "Require a key" decides for it as for
+    // any other device.
     app::WgStore wg_store;
     wg_store.load(kWgFile);
     // Tailscale (ts/tailscale.h): this PS5 on a tailnet, its packets through
-    // the tunnel's thread; its devices come from 100.64.0.0/10, and always
-    // need a key too.
+    // the tunnel's thread; its devices come from 100.64.0.0/10.
     ts::Client tailnet;
     wg::Tunnel tunnel;
     tunnel.use_tailscale(&tailnet);
     std::atomic<bool> wg_on{false};
     std::atomic<int> wg_port{kWgDefaultPort};
-    auto in_tunnel = [](const std::string &client) {
-        if (client.rfind("10.55.0.", 0) == 0) return true;
-        int a = 0, b = 0;
-        return sscanf(client.c_str(), "%d.%d.", &a, &b) == 2 && a == 100 && b >= 64 && b < 128;
-    };
     server.set_client_name([&tunnel](const std::string &ip, int port) {
         if (ip == "127.0.0.1") {
             const std::string device = tunnel.client_for((uint16_t)port);
@@ -801,8 +796,8 @@ int main(int, char **) {
         }
         return ip;
     });
-    server.set_authorize([&keys, in_tunnel](const std::string &key, const std::string &client, std::string &name) {
-        return keys.authorize(key, client, name, in_tunnel(client));
+    server.set_authorize([&keys](const std::string &key, const std::string &client, std::string &name) {
+        return keys.authorize(key, client, name, false);
     });
     // The page a device asks to join from, on the home network.
     server.set_pages([&](const std::string &method, const std::string &path, const std::string &body,
@@ -1448,14 +1443,11 @@ int main(int, char **) {
                 break;
             case ui::Action::Set: {
                 std::string e;
-                if ((a.name == kRequireKey || a.name == kWireGuard || a.name == kTailscale) && a.value == "1") {
+                if (a.name == kRequireKey && a.value == "1") {
                     bool any_on = false;
                     for (const app::ApiKey &k : keys.list()) any_on |= k.on;
                     if (!any_on) {
-                        // Over WireGuard a key is always needed.
-                        settings_note.note = a.name == kWireGuard   ? "Make a key first: devices need one over WireGuard."
-                                             : a.name == kTailscale ? "Make a key first: devices need one over Tailscale."
-                                                                    : "Make a key first, so your apps can still get in.";
+                        settings_note.note = "Make a key first, so your apps can still get in.";
                         settings_note.note_failed = true;
                         settings_note.note_at = t;
                         v.settings = settings_view(v);
