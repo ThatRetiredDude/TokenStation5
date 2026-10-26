@@ -13,27 +13,36 @@ and a ready-to-submit `PPSA99555.json` to the release.
 
 ## Release checklist
 
-1. **Bump the version.** Raise `contentVersion` in
+1. **Check the build on the console.** Install it on the PS5 and run through
+   what the release changes, with the real models; a green CI build alone is
+   not a pass. Then reread the README against what the build does, and bring
+   the roadmap (the `roadmap` branch, PR #18) up to date: where we are, open,
+   done.
+2. **Bump the version.** Raise `contentVersion` in
    [`ps5/sce_sys/param.json`](../ps5/sce_sys/param.json) in PlayStation format
    (e.g. `01.000.001`) and commit it. Consoles use it to detect updates.
    `titleId` (`PPSA99555`), `conceptId` and `contentId` must stay the same
-   across releases so updates keep the app's data.
-2. **Tag and push.** Use the version as the tag, not a generic name:
+   across releases so updates keep the app's data. Leave `downloadDataSize`
+   at 256: a bigger value (65536 was tried) makes the PS5 refuse to start the
+   title with CE-107694-7.
+3. **Tag and push.** Use the version as the tag, not a generic name:
    ```sh
    git tag 01.000.001 && git push origin 01.000.001
    ```
    The `release` workflow runs and publishes a GitHub Release with
    `PPSA99555.zip`, `PPSA99555.zip.sha256`, and `PPSA99555.json`.
-3. **Submit to the catalog.** Fork `ps5-homebrew-catalog`, copy the generated
+4. **Submit to the catalog.** Fork `ps5-homebrew-catalog`, copy the generated
    `PPSA99555.json` into `apps/PPSA99555.json`, and open a pull request **from
    the account that owns this repository**, changing only that one file. The
    catalog's *Validate submission* check reports any problems; push fixes to
    the same branch to re-run it. A maintainer reviews and merges, and
    prosperostore.net updates after the merge.
-4. **Updating later.** Publish a new tagged release, then open a catalog PR
+5. **Updating later.** Publish a new tagged release, then open a catalog PR
    editing `version`, `artifact_url` and `sha256` (and `icon_url` if the icon
    moved). Never replace the asset on a release that's already listed — its
-   SHA-256 would stop matching.
+   SHA-256 would stop matching. An update keeps the user's settings, keys and
+   chats (they live in `/download0` and come back) but not their downloaded
+   models, so the release notes say so.
 
 ## The record
 
