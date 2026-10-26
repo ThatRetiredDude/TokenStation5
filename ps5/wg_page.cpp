@@ -140,8 +140,8 @@ std::string one_tap(const WgPageInfo &info) {
         "<div id=\"s3\" hidden><h2 class=\"ok\"><span class=\"nm\"></span> is in. Now get its tunnel</h2>"
         "<label>Your home's address on the internet<input id=\"home\" autocomplete=\"off\" spellcheck=\"false\" "
         "placeholder=\"Looking it up...\"></label>"
-        "<p class=\"note\">Looked up from this device (api.ipify.org). If your router has a dynamic DNS name, "
-        "put that here instead. On your router, forward UDP port " +
+        "<p class=\"note\">From Home address in Settings on the PS5, or looked up (api.ipify.org). If your router "
+        "has a dynamic DNS name, put that here instead. On your router, forward UDP port " +
         port +
         " to this PS5.</p>"
         "<p><button id=\"dl\" type=\"button\">Download the tunnel</button></p>"
@@ -162,7 +162,7 @@ std::string one_tap(const WgPageInfo &info) {
         "<p class=\"note\">Nothing joins until someone approves it on the TV, in Settings on the PS5.</p>"
         "<script>\n" +
         std::string(kX25519) +
-        "\nvar PS5=" + json_str(info.public_key) + ",PORT=" + port +
+        "\nvar PS5=" + json_str(info.public_key) + ",HOME=" + json_str(info.home) + ",PORT=" + port +
         R"JS(;
 function $(i){return document.getElementById(i)}
 function show(n){['s1','s2','s3'].forEach(function(i){$(i).hidden=i!=n})}
@@ -176,7 +176,8 @@ var dev=null,timer=0;
 function conf(){return '[Interface]\nPrivateKey = '+dev.priv+'\nAddress = '+dev.address+'/32\n\n[Peer]\nPublicKey = '+PS5+
  '\nAllowedIPs = 10.55.0.1/32\nEndpoint = '+($('home').value.trim()||'YOUR-HOME-ADDRESS')+':'+PORT+
  '\nPersistentKeepalive = 25\n'}
-function finish(){clearInterval(timer);names(dev.name);show('s3');$('conf').value=conf();
+function finish(){clearInterval(timer);names(dev.name);show('s3');if(!$('home').value)$('home').value=HOME;
+ $('conf').value=conf();
  if(!$('home').value)fetch('https://api.ipify.org?format=json').then(function(r){return r.json()})
  .then(function(j){if(!$('home').value)$('home').value=j.ip;$('conf').value=conf()})
  .catch(function(){$('home').placeholder='Type it here: your router shows it'})}

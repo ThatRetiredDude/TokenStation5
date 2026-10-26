@@ -90,6 +90,7 @@
 #include "keys.h"
 #include "library.h"
 #include "log.h"
+#include "net.h"
 #include "pad.h"
 #include "plain.h"
 #include "runner.h"
@@ -178,11 +179,19 @@ constexpr const char *kChats = TS5_HOME "/chats";  // the Chat page's saved chat
 constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
 // WireGuard on (1) or off, and its UDP port.
 constexpr const char *kWireGuard = "TS5_WIREGUARD", *kWgPort = "TS5_WG_PORT";
+// Where devices find this home on the internet (Settings, WireGuard, Home
+// address); not set, the PS5 looks up its public address (look_up_home).
+constexpr const char *kWgHost = "TS5_WG_HOST";
 // Not WireGuard's usual 51820: the PS5 refuses a title's bind there (and at
 // 40000) with EACCES, and takes 9030.
 constexpr int kWgDefaultPort = 9030;
-// typing_for while the keyboard names a new API key, or takes a search.
-constexpr const char *kNamingKey = "(new key)", *kSearching = "(search)", *kChatSearch = "(chat search)";
+// typing_for while the keyboard names a new API key, a phone or tablet for
+// WireGuard, or takes a search.
+constexpr const char *kNamingKey = "(new key)", *kNamingDevice = "(new device)", *kSearching = "(search)",
+                     *kChatSearch = "(chat search)";
+// A phone's tunnel shows on the TV this long at most (it holds the phone's
+// private key).
+constexpr double kTunnelShownFor = 600;
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
 
 constexpr int kWidth = 1920, kHeight = 1080;
@@ -227,6 +236,58 @@ bool exists(const char *path) { return access(path, F_OK) == 0; }
 std::string trimmed(const std::string &s) {
     const size_t a = s.find_first_not_of(" \t\r\n");
     return a == std::string::npos ? std::string() : s.substr(a, s.find_last_not_of(" \t\r\n") - a + 1);
+}
+
+// This home's public address, as api.ipify.org sees the PS5, for the
+// WireGuard tunnels the TV makes ("" until it's known); looked up on a thread
+// of its own, one lookup at a time.
+std::mutex home_mu;
+std::string looked_up_home;
+std::atomic<bool> looking_up_home{false};
+
+bool is_ipv4(const std::string &s) {
+    int parts = 0, digits = 0, value = 0;
+    for (char c : s) {
+        if (c == '.') {
+            if (digits == 0 || ++parts > 3) return false;
+            digits = value = 0;
+        } else if (c >= '0' && c <= '9' && digits < 3) {
+            value = value * 10 + (c - '0');
+            if (++digits, value > 255) return false;
+        } else {
+            return false;
+        }
+    }
+    return parts == 3 && digits > 0;
+}
+
+void look_up_home() {
+    if (looking_up_home.exchange(true)) return;
+    std::thread([] {
+        ts5::HttpResponse r;
+        std::string e;
+        const bool got = ts5::http_get("https://api.ipify.org", {}, r, e, 64, 15) && r.status == 200;
+        const std::string ip = got ? trimmed(r.body) : std::string();
+        if (is_ipv4(ip)) {
+            std::lock_guard<std::mutex> lk(home_mu);
+            if (ip != looked_up_home) printf("ts5-title: wireguard: this home's public address is %s\n", ip.c_str());
+            looked_up_home = ip;
+        } else {
+            printf("ts5-title: wireguard: couldn't look up this home's public address: %s\n",
+                   got ? "not an address" : e.c_str());
+        }
+        looking_up_home = false;
+    }).detach();
+}
+
+// The tunnels' endpoint host: Home address in Settings, or the looked-up
+// public address; looked_up says which.
+std::string wg_home(bool *looked_up = nullptr) {
+    const std::string set = trimmed(app::setting(kWgHost, ""));
+    if (looked_up) *looked_up = set.empty();
+    if (!set.empty()) return set;
+    std::lock_guard<std::mutex> lk(home_mu);
+    return looked_up_home;
 }
 
 // The PC's quit and restart requests, checked twice a second on a thread of
@@ -737,9 +798,20 @@ int main(int, char **) {
         if (info.on) info.public_key = wg_store.public_key(e);
         info.port = wg_port;
         info.api_port = api_port;
+        info.home = wg_home();
         return app::wg_page(method, path, body, client, info, wg_store, out);
     });
     std::string fresh_key, fresh_key_id;  // a key just made, shown on Settings until the page is left
+    // A phone or tablet just added on the TV: its whole tunnel, private key and
+    // all, shown as a code until Settings is left or kTunnelShownFor passes.
+    std::string fresh_tunnel, fresh_tunnel_name, fresh_tunnel_id;
+    double fresh_tunnel_at = 0;
+    auto forget_tunnel = [&] {
+        std::fill(fresh_tunnel.begin(), fresh_tunnel.end(), '\0');
+        fresh_tunnel.clear();
+        fresh_tunnel_name.clear();
+        fresh_tunnel_id.clear();
+    };
     app::HfSearch hf;  // the Models page's search
     usage_log.start(TS5_VERSION);
     double last_usage = 0;
@@ -769,6 +841,7 @@ int main(int, char **) {
             printf("ts5-title: wireguard: no key pair: %s\n", e.c_str());
         wg_port = port;
         wg_on = on && wg_store.has_key();
+        if (wg_on) look_up_home();
         if (!tunnel.apply(wg_store.config(on, port, api_port), e)) printf("ts5-title: wireguard: %s\n", e.c_str());
     };
     wg_apply();
@@ -882,6 +955,11 @@ int main(int, char **) {
                 }
             s.wg.devices.push_back(di);
         }
+        bool looked_up = false;
+        s.wg.home = wg_home(&looked_up);
+        s.wg.home_looked_up = looked_up && !s.wg.home.empty();
+        s.wg.tunnel = fresh_tunnel;
+        s.wg.tunnel_name = fresh_tunnel_name;
         app::WgRequest req;
         if ((s.wg.waiting = wg_store.waiting(req))) {
             s.wg.waiting_name = req.name;
@@ -970,6 +1048,37 @@ int main(int, char **) {
                 fresh_key_id = id;
                 settings_note.note = !key.empty() ? "Made" : std::string("Couldn't make a key.") + plain::kDetails;
                 settings_note.note_failed = key.empty();
+                settings_note.note_at = t;
+            } else if (st == app::TextInput::Done && !text.empty() && typing_for == kNamingDevice) {
+                // A phone or tablet, added at once with keys made here; its tunnel
+                // shows as a code for its WireGuard app.
+                std::string e, priv;
+                app::WgDevice d;
+                const std::string home = wg_home();
+                bool ok = false;
+                if (home.empty()) {
+                    look_up_home();
+                    settings_note.note = "Type your home's address in Home address first.";
+                } else if (!(ok = wg_store.add_made(text, d, priv, e))) {
+                    printf("ts5-title: wireguard: couldn't add %s: %s\n", text.c_str(), e.c_str());
+                    settings_note.note = e.empty() || e == "no random numbers" ? std::string("Couldn't add it.") +
+                                                                                     plain::kDetails
+                                                                               : e;
+                } else {
+                    forget_tunnel();
+                    std::string pe;
+                    fresh_tunnel = "[Interface]\nPrivateKey = " + priv + "\nAddress = " + d.address +
+                                   "/32\n\n[Peer]\nPublicKey = " + wg_store.public_key(pe) +
+                                   "\nAllowedIPs = 10.55.0.1/32\nEndpoint = " + home + ":" +
+                                   std::to_string(wg_port.load()) + "\nPersistentKeepalive = 25\n";
+                    std::fill(priv.begin(), priv.end(), '\0');
+                    fresh_tunnel_name = d.name;
+                    fresh_tunnel_id = d.id;
+                    fresh_tunnel_at = t;
+                    wg_apply();
+                    settings_note.note = "Added";
+                }
+                settings_note.note_failed = !ok;
                 settings_note.note_at = t;
             } else if (st == app::TextInput::Done && !text.empty()) {
                 std::string e;
@@ -1193,6 +1302,9 @@ int main(int, char **) {
             fresh_key.clear();
             fresh_key_id.clear();
         }
+        // And a phone's tunnel only until then, or for kTunnelShownFor.
+        if (!fresh_tunnel.empty() && (dash.page() != ui::Dashboard::Settings || t - fresh_tunnel_at > kTunnelShownFor))
+            forget_tunnel();
         timer.mark("the downloads, chats and usage");
         keys.save_used(v.wall = (int64_t)time(nullptr));
         timer.mark("keys.tsv");
@@ -1304,10 +1416,12 @@ int main(int, char **) {
                     typing.send = true;
                 } else {
                     typing.title = a.label;
-                    typing.placeholder = typing_for == "TAVILY_API_KEY" ? "Starts with tvly-" : "";
+                    typing.placeholder = typing_for == "TAVILY_API_KEY" ? "Starts with tvly-"
+                                         : typing_for == kWgHost      ? "A dynamic DNS name, or your router's public address"
+                                                                      : "";
                     // Shown as it's typed, and starting from the saved one, so a typo
                     // in a long key can be seen and fixed.
-                    typing.latin = app::secret_setting(typing_for);
+                    typing.latin = app::secret_setting(typing_for) || typing_for == kWgHost;
                     typing.text = app::setting(typing_for.c_str(), "");
                     typing.max_chars = 256;
                 }
@@ -1324,6 +1438,21 @@ int main(int, char **) {
                 typing.text = v.hf.query;
                 typing.max_chars = 80;
                 typing_pending = true;
+                break;
+            case ui::Action::WgPhone:
+                if (!wg_on) {
+                    settings_note.note = "Turn on WireGuard first.";
+                    settings_note.note_failed = true;
+                    settings_note.note_at = t;
+                    break;
+                }
+                typing = app::TextRequest();
+                typing_for = kNamingDevice;
+                typing.title = "Name the phone or tablet";
+                typing.placeholder = "Such as Phone";
+                typing.max_chars = 40;
+                typing_pending = true;
+                if (wg_home().empty()) look_up_home();
                 break;
             case ui::Action::NewKey:
                 typing = app::TextRequest();
@@ -1365,6 +1494,7 @@ int main(int, char **) {
                 } else if (a.kind == ui::Action::WgRemoveDevice) {
                     ok = wg_store.remove(a.name, e);
                     done = "Removed";
+                    if (ok && a.name == fresh_tunnel_id) forget_tunnel();
                 } else {
                     ok = wg_store.set_on(a.name, a.value == "1", e);
                 }

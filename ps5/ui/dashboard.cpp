@@ -346,6 +346,8 @@ Action Dashboard::press(uint32_t b, const View &v) {
             a.value = ch.wg_on ? "1" : "0";
         } else if (ch.wg_new_key) {
             a.kind = Action::WgNewKey;
+        } else if (ch.wg_phone) {
+            a.kind = Action::WgPhone;
         } else if (ch.wg_answer) {
             a.kind = Action::WgAnswer;
             a.value = ch.wg_answer > 0 ? "1" : "0";

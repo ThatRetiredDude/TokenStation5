@@ -194,9 +194,15 @@ removed (square twice). Then WireGuard: devices away from home reach the API
 through an encrypted tunnel to the PS5 (`wg/`), and nothing else on the home
 network. "WireGuard" turns it on (`TS5_WIREGUARD=1`; the first time, the PS5
 makes its key pair) and "Port" sets its UDP port (`TS5_WG_PORT`, 9030: the PS5 refuses WireGuard's usual 51820), which
-the router forwards to the PS5. Each device makes its own key pair: at home,
-its browser opens `http://PS5:8081/wireguard` (the "Add a device" row shows
-the address and a QR code of it, `third_party/qrcodegen`). There the page
+the router forwards to the PS5. "Add a phone or tablet" names a device on the
+console's keyboard and adds it at once: the PS5 makes its key pair, keeps the
+public half, and shows the whole tunnel as a QR code for the device's
+WireGuard app (+, Create from QR code) until Settings is left or 10 minutes
+pass; the private key is never written down. Its endpoint is "Home address"
+(`TS5_WG_HOST`, a dynamic DNS name), or else the public address the PS5 looks
+up at api.ipify.org. "Add a computer" is the other way, for any device whose
+key should never leave it: at home, its browser opens `http://PS5:8081/wireguard` (the row shows the address and
+a QR code of it, `third_party/qrcodegen`). There the page
 makes the key pair in the browser (X25519 in JavaScript: the page is plain
 HTTP, where browsers give no WebCrypto), asks to join with the public half
 (`/wireguard/ask`), waits for the TV (`/wireguard/status`) and then offers a
