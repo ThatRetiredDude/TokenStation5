@@ -63,11 +63,23 @@ put_text() {
 # A model as the title sees it.
 console_path() { case $1 in /*) echo "$1" ;; *) echo "/app0/models/$1" ;; esac; }
 
+# /health's HTTP code, or 000 when nothing answers.
+health_code() { curl -s -o /dev/null -w '%{http_code}' "http://$PS5_HOST:$PS5_API_PORT/health" 2> /dev/null || true; }
+
+# Whether the title has gone since a restart request: until it has, a "no
+# model" answer may be the old title's.
+went_down=1
+
 # After a restart request: the old title's API until it goes (at most a few
-# seconds; it may not have been running at all).
+# seconds; it may not have been running at all). Any answer, a 503 too, is
+# the old title still up.
 wait_down() {
+    went_down=0
     for _ in $(seq 1 20); do
-        curl -sf "http://$PS5_HOST:$PS5_API_PORT/health" > /dev/null || return 0
+        if [ "$(health_code)" = 000 ]; then
+            went_down=1
+            return 0
+        fi
         sleep 0.5
     done
 }
@@ -75,10 +87,28 @@ wait_down() {
 wait_api() {
     echo "ts5-ps5: waiting for http://$PS5_HOST:$PS5_API_PORT"
     for _ in $(seq 1 120); do
-        if curl -sf "http://$PS5_HOST:$PS5_API_PORT/health" > /dev/null; then
-            echo "ts5-ps5: ready at http://$PS5_HOST:$PS5_API_PORT/v1"
-            return 0
-        fi
+        local health
+        health=$(curl -s -w ' %{http_code}' "http://$PS5_HOST:$PS5_API_PORT/health" 2> /dev/null || true)
+        case ${health##* } in
+            200)
+                echo "ts5-ps5: ready at http://$PS5_HOST:$PS5_API_PORT/v1"
+                return 0
+                ;;
+            000) went_down=1 ;;
+        esac
+        # Up with no model: if the title refused it, there's nothing to wait
+        # for. Its log starts afresh with each start, so once the old title
+        # has gone, the line is this one's.
+        case $went_down$health in
+            1*'"no model"'*)
+                local refused
+                refused=$(log_lines "^ts5-title: couldn't load " | tail -1)
+                if [ -n "$refused" ]; then
+                    echo "$refused" >&2
+                    return 1
+                fi
+                ;;
+        esac
         sleep 5
     done
     echo "ts5-ps5: no answer after 10 minutes; see: scripts/ts5-ps5.sh log" >&2
