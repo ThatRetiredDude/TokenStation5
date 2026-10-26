@@ -44,7 +44,7 @@ Voice::~Voice() {
     if (worker_.joinable()) worker_.join();
 }
 
-constexpr const char *kNoModel = "No speech model yet. Add one in Settings, under Talk.";
+constexpr const char *kNoModel = "No speech model yet. Add one in Settings, under Voice.";
 
 void Voice::rescan() {
     const std::vector<std::string> found = whisper_models(dir_);
