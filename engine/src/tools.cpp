@@ -58,10 +58,46 @@ size_t object_end(const std::string &s, size_t at) {
     return std::string::npos;
 }
 
+// JSON with bare quotes in its strings, as Llama 3.2 3B writes code in a call
+// ("content": "...print("Fizz")...", seen on the console): a quote in a
+// string ends it only when what follows can follow a string (, : } ] or the
+// end), and any other quote is escaped.
+std::string escape_bare_quotes(const std::string &s) {
+    std::string out;
+    bool in_str = false;
+    for (size_t i = 0; i < s.size(); i++) {
+        const char c = s[i];
+        if (in_str && c == '\\' && i + 1 < s.size()) {
+            out += c;
+            out += s[++i];
+            continue;
+        }
+        if (c == '"') {
+            if (!in_str) {
+                in_str = true;
+            } else {
+                const size_t n = s.find_first_not_of(" \t\r\n", i + 1);
+                if (n == std::string::npos || std::string(",:}]").find(s[n]) != std::string::npos) {
+                    in_str = false;
+                } else {
+                    out += "\\\"";
+                    continue;
+                }
+            }
+        }
+        out += c;
+    }
+    return out;
+}
+
 // {"name": ..., "arguments"/"parameters": {...}} as a call, or false.
 bool call_from_json(const std::string &text, ToolCall &call) {
     Json j;
-    if (!Json::parse(strip(text), j) || j.type != Json::OBJ || j["name"].type != Json::STR) return false;
+    if (!Json::parse(strip(text), j) || j.type != Json::OBJ) return false;
+    // {"type": "function", "function": {"name": ...}}, as OpenAI sends calls
+    // (Llama 3.2 3B, seen on the console).
+    if (j["name"].type != Json::STR && j["function"].type == Json::OBJ) j = Json(j["function"]);
+    if (j["name"].type != Json::STR) return false;
     const Json &args = !j["arguments"].is_null() ? j["arguments"] : j["parameters"];
     call.id = new_call_id();
     call.name = j["name"].s;
@@ -149,6 +185,23 @@ std::string render_hermes(const Tokenizer &t, const std::vector<Message> &msgs, 
     return s + "<|im_start|>assistant\n";
 }
 
+// Llama 3's template only asks for a call, and given a tool's result as it
+// writes it (the text as a JSON string), Llama 3.1 8B and 3.2 3B called a tool
+// again instead of answering, every time, and called one for "Say hello in one
+// word." with only a weather tool (console, 2026-10-26). With these words in
+// place of the template's and each result as {"output": "..."}, as vLLM's
+// template writes it, both answered from the result and said hello in 4 of 4
+// runs, and still called a tool that fits in 4 of 4.
+const char *const kLlama3Tools =
+    "You can call the following functions. To call one, respond with only a JSON object in the format "
+    "{\"name\": function name, \"parameters\": dictionary of argument name and its value}. Do not use variables. "
+    "If the question doesn't need any of these functions, answer it directly in natural language instead. When "
+    "you receive a function's output, use it to answer the original question.";
+
+std::string llama3_output(const std::string &result) {
+    return Json::object().set("output", Json::string(result)).dump();
+}
+
 std::string render_llama3(const std::vector<Message> &all, const std::vector<Json> &tools, const std::string &today) {
     std::vector<Message> msgs = all;
     std::string system;
@@ -161,18 +214,14 @@ std::string render_llama3(const std::vector<Message> &all, const std::vector<Jso
     s += "Cutting Knowledge Date: December 2023\nToday Date: " + today + "\n\n" + system + "<|eot_id|>";
     if (!tools.empty() && !msgs.empty()) {
         // The tools go in the first user message, as the template has it.
-        s += "<|start_header_id|>user<|end_header_id|>\n\n"
-             "Given the following functions, please respond with a JSON for a function call with its proper "
-             "arguments that best answers the given prompt.\n\n"
-             "Respond in the format {\"name\": function name, \"parameters\": dictionary of argument name and its "
-             "value}.Do not use variables.\n\n";
+        s += "<|start_header_id|>user<|end_header_id|>\n\n" + std::string(kLlama3Tools) + "\n\n";
         for (auto &tool : tools) s += tool.dump(4) + "\n\n";
         s += strip(msgs[0].content) + "<|eot_id|>";
         msgs.erase(msgs.begin());
     }
     for (auto &m : msgs) {
         if (m.role == "tool" || m.role == "ipython") {
-            s += "<|start_header_id|>ipython<|end_header_id|>\n\n" + Json::string(m.content).dump() + "<|eot_id|>";
+            s += "<|start_header_id|>ipython<|end_header_id|>\n\n" + llama3_output(m.content) + "<|eot_id|>";
         } else if (!m.calls.empty()) {
             // One call per turn: the models were trained on single calls.
             for (auto &c : m.calls)
@@ -186,6 +235,10 @@ std::string render_llama3(const std::vector<Message> &all, const std::vector<Jso
 }
 
 }  // namespace
+
+bool can_skip_thinking(const Tokenizer &t) { return has(t.chat_template(), "enable_thinking"); }
+
+const char *const kNoThinking = "<think>\n\n</think>\n\n";
 
 ToolFormat tool_format(const Tokenizer &t) {
     const std::string &tmpl = t.chat_template();
@@ -256,7 +309,7 @@ std::string render_results(ToolFormat f, const std::vector<std::string> &results
     } else if (f == ToolFormat::LLAMA3) {
         s = "<|eot_id|>";
         for (auto &r : results)
-            s += "<|start_header_id|>ipython<|end_header_id|>\n\n" + Json::string(r).dump() + "<|eot_id|>";
+            s += "<|start_header_id|>ipython<|end_header_id|>\n\n" + llama3_output(r) + "<|eot_id|>";
         s += "<|start_header_id|>assistant<|end_header_id|>\n\n";
     }
     return s;
@@ -359,23 +412,35 @@ bool named_call(const std::string &text, size_t p, int tag, ToolCall &call, size
 
 // Calls written as nothing but JSON objects, maybe inside a ```json fence.
 bool calls_from_objects(const std::string &text, std::vector<ToolCall> &calls) {
-    std::string s = strip(text);
-    if (starts(s, "```")) {
-        size_t nl = s.find('\n');
-        if (nl == std::string::npos || !ends(s, "```")) return false;
-        s = strip(s.substr(nl + 1, s.size() - 3 - nl - 1));
-    }
+    // Call objects and nothing else, into out.
+    auto objects = [](const std::string &s, std::vector<ToolCall> &out) {
+        size_t i = 0, before = out.size();
+        while (i < s.size() && s[i] == '{') {
+            size_t e = object_end(s, i);
+            ToolCall call;
+            if (e == std::string::npos || !call_from_json(s.substr(i, e - i), call)) return false;
+            out.push_back(call);
+            i = s.find_first_not_of(" \t\r\n;,", e);
+            if (i == std::string::npos) i = s.size();
+        }
+        return i == s.size() && out.size() > before;
+    };
+    const std::string s = strip(text);
     std::vector<ToolCall> out;
-    size_t i = 0;
-    while (i < s.size() && s[i] == '{') {
-        size_t e = object_end(s, i);
-        ToolCall call;
-        if (e == std::string::npos || !call_from_json(s.substr(i, e - i), call)) return false;
-        out.push_back(call);
-        i = s.find_first_not_of(" \t\r\n;,", e);
-        if (i == std::string::npos) i = s.size();
+    if (!starts(s, "```")) {
+        if (!objects(s, out)) return false;
+    } else {
+        // Fences, one for all the calls or one for each (Coder fences each
+        // of two calls, seen on the console).
+        size_t i = 0;
+        while (i < s.size()) {
+            if (!starts(s, "```", i)) return false;
+            const size_t nl = s.find('\n', i), close = nl == std::string::npos ? nl : s.find("```", nl);
+            if (close == std::string::npos || !objects(strip(s.substr(nl + 1, close - nl - 1)), out)) return false;
+            i = s.find_first_not_of(" \t\r\n", close + 3);
+            if (i == std::string::npos) i = s.size();
+        }
     }
-    if (i != s.size() || out.empty()) return false;
     calls.insert(calls.end(), out.begin(), out.end());
     return true;
 }
@@ -471,6 +536,104 @@ bool calls_in_any_wrapper(const std::string &text, std::vector<ToolCall> &calls)
     return calls_in_body(s.substr(gt + 1, s.size() - gt - 1 - close.size()), calls);
 }
 
+bool is_name_char(char c) { return isalnum((unsigned char)c) || c == '_' || c == '-' || c == '.'; }
+
+// A number as JSON writes it: no leading zeros, no "nan" or hex.
+bool json_number(const std::string &s) {
+    size_t i = s[0] == '-' ? 1 : 0;
+    auto digits = [&] {
+        const size_t at = i;
+        while (i < s.size() && isdigit((unsigned char)s[i])) i++;
+        return i > at;
+    };
+    if (i < s.size() && s[i] == '0') i++;
+    else if (!digits()) return false;
+    if (i < s.size() && s[i] == '.' && (++i, !digits())) return false;
+    if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+        i++;
+        if (i < s.size() && (s[i] == '+' || s[i] == '-')) i++;
+        if (!digits()) return false;
+    }
+    return i == s.size();
+}
+
+// Calls written as elements named after the request's tools, nothing else,
+// maybe in one wrapper or a fence, the arguments as attributes or as the body
+// (JSON or elements). Qwen 2.5 Coder writes two calls this way (seen on the
+// console):
+//   <xml> <get_weather city="Paris" /> <get_time zone="Asia/Tokyo" /> </xml>
+bool calls_as_tool_elements(const std::string &text, const std::vector<std::string> &names,
+                            std::vector<ToolCall> &calls) {
+    auto known = [&](const std::string &n) {
+        for (auto &x : names)
+            if (x == n) return true;
+        return false;
+    };
+    std::string s = unfenced(text);
+    // One wrapper that isn't a tool: <xml>...</xml>, <tool_calls>...</tool_calls>.
+    if (starts(s, "<") && s.size() > 2) {
+        size_t e = 1;
+        while (e < s.size() && is_name_char(s[e])) e++;
+        const std::string w = s.substr(1, e - 1);
+        if (!w.empty() && e < s.size() && s[e] == '>' && !known(w) && ends(s, "</" + w + ">"))
+            s = strip(s.substr(e + 1, s.size() - (e + 1) - (w.size() + 3)));
+    }
+    std::vector<ToolCall> out;
+    size_t i = 0;
+    while (i < s.size()) {
+        if (s[i] != '<') return false;
+        size_t e = i + 1;
+        while (e < s.size() && is_name_char(s[e])) e++;
+        const std::string name = s.substr(i + 1, e - i - 1);
+        if (!known(name)) return false;
+        Json args = Json::object();
+        // Attributes: key="value" or key='value', a value that reads as JSON
+        // (a number, true, a list) being that, anything else a string ("02134"
+        // stays one).
+        size_t k = e;
+        for (;;) {
+            k = s.find_first_not_of(kSpace, k);
+            if (k == std::string::npos) return false;
+            if (s[k] == '>' || starts(s, "/>", k)) break;
+            size_t eq = k;
+            while (eq < s.size() && is_name_char(s[eq])) eq++;
+            if (eq == k || eq + 1 >= s.size() || s[eq] != '=' || (s[eq + 1] != '"' && s[eq + 1] != '\'')) return false;
+            const size_t close = s.find(s[eq + 1], eq + 2);
+            if (close == std::string::npos) return false;
+            const std::string key = s.substr(k, eq - k), raw = s.substr(eq + 2, close - eq - 2);
+            Json v;
+            if (!Json::parse(raw, v) || v.type == Json::STR || (v.type == Json::NUM && !json_number(raw)))
+                v = Json::string(raw);
+            args.set(key, v);
+            k = close + 1;
+        }
+        if (s[k] == '/') {
+            i = k + 2;
+        } else {
+            const std::string end = "</" + name + ">";
+            const size_t close = s.find(end, k + 1);
+            if (close == std::string::npos) return false;
+            const std::string body = strip(s.substr(k + 1, close - k - 1));
+            if (!body.empty()) {
+                Json b;
+                if (!(Json::parse(body, b) && b.type == Json::OBJ) && !elements_object(body, b)) return false;
+                for (auto &key : b.keys) args.set(key, b.o[key]);
+            }
+            i = close + end.size();
+        }
+        ToolCall call;
+        call.name = name;
+        call.arguments = args.dump();
+        call.id = new_call_id();
+        out.push_back(call);
+        i = s.find_first_not_of(kSpace, i);
+        if (i == std::string::npos) i = s.size();
+    }
+    if (out.empty()) return false;
+    calls.insert(calls.end(), out.begin(), out.end());
+    return true;
+}
+
 // Text whose call came out of a fence or a wrapper leaves it behind
 // ("```xml\n\n```", "<response>\n</response>"): that goes too.
 std::string without_empty_fence(const std::string &text) {
@@ -495,7 +658,7 @@ std::string without_empty_fence(const std::string &text) {
     return rstrip(c.substr(0, open));
 }
 
-ParsedTurn parse_turn(ToolFormat f, const std::string &text) {
+ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names) {
     ParsedTurn r;
     r.content = text;
     if (f == ToolFormat::HERMES) {
@@ -540,6 +703,8 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text) {
         // fence: Coder keeps making new ones up (<response>, <xml>, seen on
         // the console).
         if (r.calls.empty() && calls_in_any_wrapper(text.substr(from), r.calls)) content = text.substr(0, from);
+        if (r.calls.empty() && !names.empty() && calls_as_tool_elements(text.substr(from), names, r.calls))
+            content = text.substr(0, from);
         if (!r.calls.empty()) r.content = without_empty_fence(rstrip(content));
         // A plain answer in a <response> wrapper (Coder, seen on the
         // console): the wrapper goes.
@@ -552,17 +717,21 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text) {
     } else if (f == ToolFormat::LLAMA3) {
         std::string s = strip(text);
         if (starts(s, "<|python_tag|>")) s = lstrip(s.substr(14));
+        // Nothing but calls, or false.
+        auto only_calls = [&](const std::string &s, std::vector<ToolCall> &calls) {
+            size_t i = 0;
+            while (i < s.size() && s[i] == '{') {
+                size_t e = object_end(s, i);
+                ToolCall call;
+                if (e == std::string::npos || !call_from_json(s.substr(i, e - i), call)) return false;
+                calls.push_back(call);
+                i = s.find_first_not_of(" \t\r\n;", e);
+                if (i == std::string::npos) i = s.size();
+            }
+            return i == s.size() && !calls.empty();
+        };
         std::vector<ToolCall> calls;
-        size_t i = 0;
-        while (i < s.size() && s[i] == '{') {
-            size_t e = object_end(s, i);
-            ToolCall call;
-            if (e == std::string::npos || !call_from_json(s.substr(i, e - i), call)) return r;
-            calls.push_back(call);
-            i = s.find_first_not_of(" \t\r\n;", e);
-            if (i == std::string::npos) i = s.size();
-        }
-        if (i == s.size() && !calls.empty()) {  // nothing but calls
+        if (only_calls(s, calls) || (calls.clear(), only_calls(escape_bare_quotes(s), calls))) {
             r.calls = calls;
             r.content.clear();
         }
