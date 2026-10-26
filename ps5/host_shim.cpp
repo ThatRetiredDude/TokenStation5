@@ -58,28 +58,17 @@ int sceKernelSendNotificationRequest(int, void *request, size_t, int) {
 
 int sceKernelUsleep(unsigned int microseconds) { return usleep(microseconds); }
 
-// libkernel's UTC-to-local conversion (ps5/local_time.cpp looks it up by
-// name): this machine's time zone, through localtime_r.
-struct ShimTimezone {
-    int minutes_west, dst;
-};
-static int convert_utc_to_localtime(const timespec *utc, timespec *local, ShimTimezone *zone, int *dst) {
-    const time_t t = utc->tv_sec;
+// The console's time zone settings (ps5/local_time.cpp): this machine's, through
+// localtime_r, the summer hour apart as the console gives it.
+int sceSystemServiceParamGetInt(int id, int *value) {
+    const time_t now = time(nullptr);
     struct tm l;
-    if (!localtime_r(&t, &l)) return -1;
-    local->tv_sec = utc->tv_sec + l.tm_gmtoff;
-    local->tv_nsec = utc->tv_nsec;
-    if (zone) *zone = {(int)(-l.tm_gmtoff / 60), l.tm_isdst > 0};
-    if (dst) *dst = l.tm_isdst > 0;
+    if (!value || !localtime_r(&now, &l)) return -1;
+    const bool summer = l.tm_isdst > 0;
+    if (id == 4) *value = (int)(l.tm_gmtoff / 60) - (summer ? 60 : 0);
+    else if (id == 5) *value = summer;
+    else return -1;
     return 0;
-}
-int sceKernelDlsym(int, const char *name, void **addr) {
-    if (strcmp(name, "sceKernelConvertUtcToLocaltime") == 0) {
-        *addr = (void *)&convert_utc_to_localtime;
-        return 0;
-    }
-    *addr = nullptr;
-    return -1;
 }
 
 int sceNetInit(void) { return 0; }
