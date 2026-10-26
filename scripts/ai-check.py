@@ -9,8 +9,8 @@ task, a long prompt and the error for one that's too long.
     TS5_KEY=ts5-... python3 scripts/ai-check.py      # when a key is needed
 
 Every check prints PASS or FAIL with what came back, and --out FILE saves
-them all as JSON. Each request sends "web_search": false, so no check spends
-a search. The agent check never runs what the model writes: it compiles the
+them all as JSON, with each check's last reply whole. Each request sends
+"web_search": false, so no check spends a search. The agent check never runs what the model writes: it compiles the
 file and looks at it. Standard library only.
 """
 import argparse
@@ -40,6 +40,7 @@ TIME = {"type": "function", "function": {
 class Api:
     def __init__(self, base, key, timeout):
         self.base, self.key, self.timeout = base, key, timeout
+        self.last = None  # the last chat reply, whole, for --out
 
     def _req(self, path, body=None):
         headers = {"Content-Type": "application/json"}
@@ -57,12 +58,13 @@ class Api:
         body = dict(body, web_search=False)
         try:
             with urllib.request.urlopen(self._req("/v1/chat/completions", body), timeout=self.timeout) as r:
-                return json.load(r)
+                self.last = json.load(r)
         except urllib.error.HTTPError as e:
             try:
-                return {"_status": e.code, **json.load(e)}
+                self.last = {"_status": e.code, **json.load(e)}
             except ValueError:
-                return {"_status": e.code}
+                self.last = {"_status": e.code}
+        return self.last
 
     def stream(self, body):
         """The stream's chunks, in order, and whether it ended with [DONE]."""
@@ -239,7 +241,9 @@ def check_tool_choice(api, ctx):
         {"role": "user", "content": "Say hello in one word."}]})
     r2 = api.chat({"model": ctx["model"], "tools": [WEATHER], "tool_choice": "none", "messages": [
         {"role": "user", "content": "What's the weather in Rome?"}]})
-    ok = not tool_call(r1) and text(r1) and not tool_call(r2) and text(r2)
+    # A call written out as text (a made-up tool) is no answer either.
+    t1 = text(r1).strip()
+    ok = not tool_call(r1) and "hello" in t1.lower() and not t1.startswith("{") and not tool_call(r2) and text(r2)
     return ok, "no-need: %r; tool_choice none: %r" % (short(text(r1), 60), short(text(r2), 60))
 
 
@@ -368,6 +372,7 @@ def main():
         if only and name not in only and name != "models":
             continue
         t0 = time.time()
+        api.last = None
         try:
             ok, detail = fn(api, ctx)
         except Exception as e:  # a check that throws is a failed check
@@ -375,7 +380,8 @@ def main():
         s = time.time() - t0
         mark = "SKIP" if ok is None else "PASS" if ok else "FAIL"
         print("%-4s %-10s %6.1f s  %s" % (mark, name, s, detail), flush=True)
-        results.append({"check": name, "result": mark, "seconds": round(s, 1), "detail": detail})
+        results.append({"check": name, "result": mark, "seconds": round(s, 1), "detail": detail,
+                        "last_reply": api.last})
         if name == "models" and not ok:
             break
     if a.out:
