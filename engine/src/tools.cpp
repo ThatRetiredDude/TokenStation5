@@ -93,7 +93,11 @@ std::string escape_bare_quotes(const std::string &s) {
 // {"name": ..., "arguments"/"parameters": {...}} as a call, or false.
 bool call_from_json(const std::string &text, ToolCall &call) {
     Json j;
-    if (!Json::parse(strip(text), j) || j.type != Json::OBJ || j["name"].type != Json::STR) return false;
+    if (!Json::parse(strip(text), j) || j.type != Json::OBJ) return false;
+    // {"type": "function", "function": {"name": ...}}, as OpenAI sends calls
+    // (Llama 3.2 3B, seen on the console).
+    if (j["name"].type != Json::STR && j["function"].type == Json::OBJ) j = Json(j["function"]);
+    if (j["name"].type != Json::STR) return false;
     const Json &args = !j["arguments"].is_null() ? j["arguments"] : j["parameters"];
     call.id = new_call_id();
     call.name = j["name"].s;
@@ -183,12 +187,16 @@ std::string render_hermes(const Tokenizer &t, const std::vector<Message> &msgs, 
 
 // Llama 3's template only asks for a call, and given a tool's result as it
 // writes it (the text as a JSON string), Llama 3.1 8B and 3.2 3B called a tool
-// again instead of answering, every time (console, 2026-10-26). With these
-// words after the template's and the result as {"output": "..."}, as vLLM's
-// template writes it, both answered from the result every time.
-const char *const kLlama3Guidance =
-    " Only reply with a function call if the function exists in the list below; if none fits, reply directly in "
-    "natural language. When you receive a function's output, use it to answer the original question.";
+// again instead of answering, every time, and called one for "Say hello in one
+// word." with only a weather tool (console, 2026-10-26). With these words in
+// place of the template's and each result as {"output": "..."}, as vLLM's
+// template writes it, both answered from the result and said hello in 4 of 4
+// runs, and still called a tool that fits in 4 of 4.
+const char *const kLlama3Tools =
+    "You can call the following functions. To call one, respond with only a JSON object in the format "
+    "{\"name\": function name, \"parameters\": dictionary of argument name and its value}. Do not use variables. "
+    "If the question doesn't need any of these functions, answer it directly in natural language instead. When "
+    "you receive a function's output, use it to answer the original question.";
 
 std::string llama3_output(const std::string &result) {
     return Json::object().set("output", Json::string(result)).dump();
@@ -206,12 +214,7 @@ std::string render_llama3(const std::vector<Message> &all, const std::vector<Jso
     s += "Cutting Knowledge Date: December 2023\nToday Date: " + today + "\n\n" + system + "<|eot_id|>";
     if (!tools.empty() && !msgs.empty()) {
         // The tools go in the first user message, as the template has it.
-        s += "<|start_header_id|>user<|end_header_id|>\n\n"
-             "Given the following functions, please respond with a JSON for a function call with its proper "
-             "arguments that best answers the given prompt.\n\n"
-             "Respond in the format {\"name\": function name, \"parameters\": dictionary of argument name and its "
-             "value}.Do not use variables." +
-             std::string(kLlama3Guidance) + "\n\n";
+        s += "<|start_header_id|>user<|end_header_id|>\n\n" + std::string(kLlama3Tools) + "\n\n";
         for (auto &tool : tools) s += tool.dump(4) + "\n\n";
         s += strip(msgs[0].content) + "<|eot_id|>";
         msgs.erase(msgs.begin());

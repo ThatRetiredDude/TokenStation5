@@ -80,20 +80,27 @@ SKIP = {("meta-llama-Llama-3.1-8B-Instruct", "tool messages, no tools"),
 
 
 # What ts5 writes differently from Llama 3's template, on purpose (tools.cpp,
-# kLlama3Guidance): words on when not to call and what to do with a result,
-# and a result as {"output": ...}.
-LLAMA3_GUIDANCE = (" Only reply with a function call if the function exists in the list below; if none fits, reply "
-                   "directly in natural language. When you receive a function's output, use it to answer the "
-                   "original question.")
+# kLlama3Tools): its own words before the tools, which say when not to call
+# and what to do with a result, and a result as {"output": ...}.
+LLAMA3_TOOLS = ("You can call the following functions. To call one, respond with only a JSON object in the format "
+                "{\"name\": function name, \"parameters\": dictionary of argument name and its value}. Do not use "
+                "variables. If the question doesn't need any of these functions, answer it directly in natural "
+                "language instead. When you receive a function's output, use it to answer the original question.")
 
 
 def as_ts5_writes_it(name, template):
     if not name.startswith("meta-llama-"):
         return template
-    a, b = '"Do not use variables.\\n\\n"', '"Do not use variables.%s\\n\\n"' % LLAMA3_GUIDANCE
-    c, d = "message.content | tojson", '{"output": message.content} | tojson'
-    assert a in template and c in template, name
-    return template.replace(a, b).replace(c, d)
+    words = [('"Given the following functions, please respond with a JSON for a function call "', "ts5_tools"),
+             ('"with its proper arguments that best answers the given prompt.\\n\\n"', '""'),
+             ("""'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.'""",
+              '""'),
+             ('"Do not use variables.\\n\\n"', '"\\n\\n"'),
+             ("message.content | tojson", '{"output": message.content} | tojson')]
+    for old, new in words:
+        assert old in template, (name, old)
+        template = template.replace(old, new)
+    return template
 
 
 def render(template, messages, tools):
@@ -108,7 +115,8 @@ def render(template, messages, tools):
 
     env.filters["tojson"] = tojson
     env.globals["raise_exception"] = raise_exception
-    kw = {"messages": messages, "add_generation_prompt": True, "bos_token": "<|begin_of_text|>"}
+    kw = {"messages": messages, "add_generation_prompt": True, "bos_token": "<|begin_of_text|>",
+          "ts5_tools": LLAMA3_TOOLS}
     if tools:
         kw["tools"] = tools
     return env.from_string(template).render(**kw)
@@ -195,6 +203,7 @@ def test_parser(ts5):
         # Code with bare quotes in a call (Llama 3.2 3B, from the console).
         ("llama3", '{"name": "write_file", "parameters": {"path": "f.py", "content": "if x:\\n    print("Fizz")"}}',
          "", [("write_file", {"path": "f.py", "content": 'if x:\n    print("Fizz")'})], 0),
+        ("llama3", '{"type": "function", "function": {"name": "a", "parameters": {"x": 1}}}', "", [("a", {"x": 1})], 0),
         ("llama3", "Hello {there}", "Hello {there}", [], 13),
     ]
     failed = 0
@@ -286,6 +295,7 @@ def test_search(ts5):
 
 
 CALL = '<tool_call>\n{"name": "web_search", "arguments": {"query": "PS5 firmware"}}\n</tool_call>'
+MADE_UP = '<tool_call>\n{"name": "say_hello", "arguments": {}}\n</tool_call>'
 
 
 def test_search_loop(ts5, model, tdir):
@@ -305,9 +315,13 @@ def test_search_loop(ts5, model, tdir):
         # A model that never stops searching: three rounds, then an answer from them.
         ("search limit", "tvly-test", [CALL, "Final answer."], False, 3, "Final answer.",
          "Web searches found the following"),
+        # A call to a tool the request doesn't have: one more turn, without tools.
+        ("made-up tool", "tvly-test", [MADE_UP, "Hello."], False, 0, "Hello.", "latest PS5 firmware", [WEATHER]),
+        ("made-up tool, streaming", "tvly-test", [MADE_UP, "Hello."], True, 0, "Hello.", "latest PS5 firmware",
+         [WEATHER]),
     ]
     template = os.path.join(tdir, "Qwen-Qwen2.5-7B-Instruct.jinja")
-    for name, key, turns, stream, hits, answer, note in cases:
+    for name, key, turns, stream, hits, answer, note, *tools in cases:
         with tempfile.TemporaryDirectory() as d:
             script = os.path.join(d, "turns.txt")
             open(script, "w").write("\n----\n".join(turns))
@@ -328,6 +342,8 @@ def test_search_loop(ts5, model, tdir):
                 before = len(Tavily.seen)
                 req = {"messages": [{"role": "user", "content": "What is the latest PS5 firmware?"}],
                        "stream": stream, "max_tokens": 100}
+                if tools:
+                    req["tools"] = tools[0]
                 r = urllib.request.urlopen(urllib.request.Request(
                     f"http://127.0.0.1:{port}/v1/chat/completions", json.dumps(req).encode(),
                     {"Content-Type": "application/json"}), timeout=60).read().decode()
