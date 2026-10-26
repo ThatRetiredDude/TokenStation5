@@ -183,22 +183,28 @@ oldest exchanges are left out of the requests (they stay on screen).
 right (up and down choose one, cross opens it, cross again goes back): "Set
 up an app" shows what an app needs to use the PS5 (the base URL, the model,
 the key, the context window; the full guide is
-[docs/CLIENTS.md](../docs/CLIENTS.md)), "Away from home with WireGuard" gives
-the steps for the tunnel below with the PS5's addresses filled in, "Away from
+[docs/CLIENTS.md](../docs/CLIENTS.md)), "Away from home with WireGuard" says
+what the tunnel below needs from the home's internet and the steps, "Away from
 home with Tailscale" gives the Tailscale steps, and "Add models from a
 computer" gives the FTP address, the folder and the steps for copying a model
 in (see [Adding models from a computer](#adding-models-from-a-computer)). "Require a key" turns API keys on,
 "New key" names and makes one (it shows once, on its row; only its SHA-256 is
 kept, in `keys.tsv`), and each key can be turned off and on (cross) or
-removed (square twice). Then WireGuard: devices away from home reach the API
-through an encrypted tunnel to the PS5 (`wg/`), and nothing else on the home
-network. "WireGuard" turns it on (`TS5_WIREGUARD=1`; the first time, the PS5
+removed (square twice). Then AWAY FROM HOME, whose one row, WireGuard, opens
+its own list on the right (left goes back; on the list, cross turns the tunnel
+on and off and steps the port, and opens the rest, where left goes back to the
+list): devices away from home reach the API through an encrypted tunnel to the
+PS5 (`wg/`), and nothing else on the home network. "What you need" says what
+the home's internet must allow: a router that forwards the UDP port to the PS5,
+and a public address of its own (not CGNAT, nor a building's network, from
+where nothing outside reaches in). "WireGuard" turns it on (`TS5_WIREGUARD=1`; the first time, the PS5
 makes its key pair) and "Port" sets its UDP port (`TS5_WG_PORT`, 9030: the PS5 refuses WireGuard's usual 51820), which
 the router forwards to the PS5. "Add a phone or tablet" names a device on the
 console's keyboard and adds it at once: the PS5 makes its key pair, keeps the
 public half, and shows the whole tunnel as a QR code for the device's
 WireGuard app (+, Create from QR code) until Settings is left or 10 minutes
-pass; the private key is never written down. Its endpoint is "Home address"
+pass, or the device first connects (the row then says Connected, and the TV
+says so); the private key is never written down. Its endpoint is "Home address"
 (`TS5_WG_HOST`, a dynamic DNS name), or else the public address the PS5 looks
 up at api.ipify.org. "Add a computer" is the other way, for any device whose
 key should never leave it: at home, its browser opens `http://PS5:8081/wireguard` (the row shows the address and
@@ -209,8 +215,8 @@ HTTP, where browsers give no WebCrypto), asks to join with the public half
 finished tunnel file (`AllowedIPs = 10.55.0.1/32`, the PS5 alone; the private
 key goes only into that file). Or the device's WireGuard app makes the key pair
 and the page takes its public key and gives the settings to copy in. The
-TV says it asks to join, and cross on its row lets it in (square refuses
-it); nothing joins otherwise, and a request lapses after 10 minutes. The page
+TV says it asks to join and opens its item, where cross lets it in (square
+refuses it); nothing joins otherwise, and a request lapses after 10 minutes. The page
 refuses requests from inside the tunnel. Each device's row turns it off and on
 (cross) or removes it (square twice), and "This PS5's key" shows the public key
 and makes a new key pair (square twice). Over the tunnel, apps use

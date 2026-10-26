@@ -45,10 +45,17 @@ devices you add reach the API through it, encrypted, and nothing else on
 your network. WireGuard answers nothing without a key it knows, so the port
 it opens gives nothing away.
 
+What your home needs: a router you can set up, and a public address of its
+own. Where the internet provider shares one address among many homes (CGNAT,
+common with mobile, 5G and satellite internet), or the internet comes through
+a building's network you can't set up, nothing outside can reach the PS5, and
+WireGuard can't work there. Settings, WireGuard, What you need says the same
+on the TV.
+
 First, on the PS5: make an API key (Settings, Apps, New key) if you have
-none, and turn on Settings, WireGuard. On your router, forward UDP port 9030
-(Settings, WireGuard, Port) to the PS5, and keep the PS5's address fixed with
-a DHCP reservation. Then add each device one of two ways:
+none, and turn on WireGuard in Settings, WireGuard. On your router, forward
+UDP port 9030 (Settings, WireGuard, Port) to the PS5, and keep the PS5's
+address fixed with a DHCP reservation. Then add each device one of two ways:
 
 | | Phone or tablet: the TV's code | Computer: the join page |
 |---|---|---|
@@ -74,8 +81,10 @@ This is a sound setup for a home, not a hardened one.
 
 The endpoint is your home's public address, which the PS5 looks up, or a
 dynamic DNS name for it: type that in Settings, WireGuard, Home address.
-Some internet providers share one public address among many homes (CGNAT),
-and then a forwarded port can't be reached from outside: use Tailscale then.
+To check it works, put a phone on mobile data and turn its tunnel on: within
+seconds its row under WireGuard says Connected. If it never does, nothing
+from outside is reaching the PS5's port: the forward is missing, or the home
+has no public address of its own (see above).
 The PS5's own private key is kept in `wireguard.tsv` in the title's folder,
 which FTP reaches from your home network: if you think it got out, make a new
 key pair in Settings, WireGuard, This PS5's key, and give each device the new
