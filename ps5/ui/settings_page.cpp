@@ -944,8 +944,9 @@ void SettingsPage::draw_panel(Canvas &c, const SettingsInfo &info, const Row &r,
                  ":" + std::to_string(info.api_port) + "/v1 and one of your keys, at home and away.",
              kText);
         ty += 8;
-        para("Over Tailscale a key is always needed. Tailscale's relays carry the traffic, which works even where "
-             "no port can be opened; TokenStation5 has to be open on the PS5.",
+        para("Only the devices on your tailnet can reach it. With Require a key off, they need no key. Tailscale's "
+             "relays carry the traffic, which works even where no port can be opened; TokenStation5 has to be "
+             "open on the PS5.",
              kText2);
     } else if (open == kGuideFtp) {
         ty -= 12;
@@ -1272,8 +1273,8 @@ void SettingsPage::draw_tailscale(Canvas &c, const SettingsInfo &info, int dx, i
         para("3. Apps then use http://" + short_name + ":" + port + "/v1 and one of your keys, at home or away.",
              kText);
         ty += 16;
-        para("Over Tailscale a key is always needed. Tailscale's relays carry the traffic, so it works even where no "
-             "port can be opened.",
+        para("Only the devices on your tailnet can reach it. With Require a key off, they need no key. Tailscale's "
+             "relays carry the traffic, so it works even where no port can be opened.",
              kText2);
         return;
     }
