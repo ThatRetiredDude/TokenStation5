@@ -327,6 +327,10 @@ struct Tls {
     mbedtls_ctr_drbg_context drbg;
     mbedtls_x509_crt ca;
     mbedtls_ssl_config conf;
+    // The same at most TLS 1.2, for Tailscale's relays: they end their
+    // chain with an Ed25519 certificate of their own, which Mbed TLS can't
+    // read; TLS 1.2 skips it, but 3.6's TLS 1.3 fails the handshake on it.
+    mbedtls_ssl_config conf12;
     std::string ca_from;
 };
 
@@ -348,6 +352,7 @@ Tls &tls() {
         mbedtls_ctr_drbg_init(&t.drbg);
         mbedtls_x509_crt_init(&t.ca);
         mbedtls_ssl_config_init(&t.conf);
+        mbedtls_ssl_config_init(&t.conf12);
         trace("first HTTPS request: starting crypto");
         if (psa_crypto_init() != PSA_SUCCESS) { t.why = "psa_crypto_init failed"; return; }
         trace("crypto started; seeding the TLS random generator");
@@ -386,6 +391,13 @@ Tls &tls() {
         mbedtls_ssl_conf_authmode(&t.conf, MBEDTLS_SSL_VERIFY_REQUIRED);
         mbedtls_ssl_conf_ca_chain(&t.conf, &t.ca, nullptr);
         mbedtls_ssl_conf_rng(&t.conf, locked_random, &t.drbg);
+        rc = mbedtls_ssl_config_defaults(&t.conf12, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
+                                         MBEDTLS_SSL_PRESET_DEFAULT);
+        if (rc != 0) { t.why = "TLS setup failed (-0x" + Conn::hex(-rc) + ")"; return; }
+        mbedtls_ssl_conf_authmode(&t.conf12, MBEDTLS_SSL_VERIFY_REQUIRED);
+        mbedtls_ssl_conf_ca_chain(&t.conf12, &t.ca, nullptr);
+        mbedtls_ssl_conf_rng(&t.conf12, locked_random, &t.drbg);
+        mbedtls_ssl_conf_max_tls_version(&t.conf12, MBEDTLS_SSL_VERSION_TLS1_2);
         t.ready = true;
     });
     return t;
@@ -408,7 +420,7 @@ int bio_recv(void *ctx, unsigned char *buf, size_t len) {
     return -0x004C;                           // MBEDTLS_ERR_NET_RECV_FAILED (and the timeout)
 }
 
-bool start_tls(Conn &c, const std::string &host, std::string &err) {
+bool start_tls(Conn &c, const std::string &host, std::string &err, bool tls12 = false) {
     trace("connected; setting up TLS");
     Tls &t = tls();
     if (!t.ready) {
@@ -417,7 +429,7 @@ bool start_tls(Conn &c, const std::string &host, std::string &err) {
     }
     mbedtls_ssl_init(&c.ssl);
     c.tls = true;
-    int rc = mbedtls_ssl_setup(&c.ssl, &t.conf);
+    int rc = mbedtls_ssl_setup(&c.ssl, tls12 ? &t.conf12 : &t.conf);
     if (rc == 0) rc = mbedtls_ssl_set_hostname(&c.ssl, host.c_str());
     if (rc != 0) {
         err = "TLS setup failed (-0x" + Conn::hex(-rc) + ")";
@@ -1150,7 +1162,7 @@ void Stream::close() {
 
 bool Stream::is_open() const { return p_ != nullptr; }
 
-bool Stream::open(const std::string &host, int port, bool tls, int timeout_s, std::string &err) {
+bool Stream::open(const std::string &host, int port, bool tls, int timeout_s, std::string &err, bool tls12) {
     close();
 #ifndef TS5_HTTPS
     if (tls) {
@@ -1167,7 +1179,7 @@ bool Stream::open(const std::string &host, int port, bool tls, int timeout_s, st
     p_->wait_ms = timeout_s * 1000;
 #ifdef TS5_HTTPS
     if (tls) {
-        if (!start_tls(p_->c, host, err)) {
+        if (!start_tls(p_->c, host, err, tls12)) {
             close();
             return false;
         }

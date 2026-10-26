@@ -883,7 +883,8 @@ void Client::relay_loop() {
         ts5::Stream s;
         std::string why;
         const std::string host = rg->nodes[0].first;
-        if (!s.open(host, rg->nodes[0].second, !rg->insecure, 10, why)) {
+        // At most TLS 1.2: the relays' Ed25519 certificate (net.cpp).
+        if (!s.open(host, rg->nodes[0].second, !rg->insecure, 10, why, true)) {
             fail(why);
             continue;
         }
