@@ -12,7 +12,7 @@ started.
 This is the project's punch list: what's done, what's open and what's next.
 Every PR updates it.
 
-Last updated: 2026-10-25.
+Last updated: 2026-10-26.
 
 ## Where we are
 
@@ -50,13 +50,13 @@ Nothing critical open.
 
 ## Open
 
-- [ ] Homebrew catalog listing (ps5-homebrew-catalog, ProsperoStore): 01.001.000 submitted; no new release until models survive store updates (below).
+- [ ] Release 01.003.000: Tailscale ([#81](https://github.com/ThatRetiredDude/TokenStation5/pull/81)), the Settings cleanup ([#84](https://github.com/ThatRetiredDude/TokenStation5/pull/84)) and the docs and local-time dates ([#83](https://github.com/ThatRetiredDude/TokenStation5/pull/83)), all merged 2026-10-26. Its console pass comes next: a store-style update from 01.002.000, the new Settings, Tailscale sign-in and sign-out. Then the version bump, the tag and the catalog update (ps5-homebrew-catalog, ProsperoStore). 01.002.000 is on the store since 2026-10-25. It ships before models survive store updates: Jared moved that to the release after (2026-10-26, below).
 
 ## Next
 
-- [ ] Models across store updates. A store update swaps the whole app folder, and the models live in it, so every update starts with no models; settings, keys and chats already come back (#75). `/download0` can't hold them: it is about 321 MiB, and asking for more makes the PS5 refuse to start the title (#76, below). Copying models back over FTP ("Add models from a computer", #77) is the way until another place is found.
+- [ ] Models across store updates. A store update swaps the whole app folder, and the models live in it, so every update starts with no models; settings, keys and chats already come back (#75). `/download0` can't hold them: it is about 321 MiB, and asking for more makes the PS5 refuse to start the title (#76, below). Copying models back over FTP ("Add models from a computer", #77) is the way until another place is found. For the release after 01.003.000 (Jared, 2026-10-26): aim to keep the voice models and one or two models, perhaps just the one loaded at the time of the update; storing them as game save data is one idea to check.
 - [ ] The PS5's write limit for titles: a download on the console saves its first 100 MB to 2 GB at network speed, then 1-4 MB/s on every path the title can write (stdio, `write`, `O_DIRECT`, `fsync`, `/download0`), while the FTP server outside the title writes about 30 MB/s. Untested levers: `sceKernelSetFsstParam`, or a helper outside the title (needs Jared's go).
-- [ ] WireGuard in the title, then a Tailscale test (tailscale-rs), so phones and laptops reach the PS5 away from home without a computer at home relaying it.
+- [ ] WireGuard in the title ([#80](https://github.com/ThatRetiredDude/TokenStation5/pull/80), draft): held for a later release (Jared, 2026-10-26). It needs a home that can forward one UDP port to the PS5; Jared's building network takes nothing in (two layers of NAT), so the path from outside is untested there. Tailscale (#81) covers away from home meanwhile.
 - [ ] Our own PS5 runtime, so the title can ship without the GPL. The clean-room spec is written and the assessment is "same speed"; the code waits for a go ([#14](https://github.com/ThatRetiredDude/TokenStation5/pull/14), the first try, closed 2026-10-25).
 - [ ] No technical details on the app's screens (Jared, 2026-10-15): no file paths, script commands or `ts5.env` names. Where they show today:
   - Models: the empty list and a suggested model's "To add it" panel (`scripts/ts5-ps5.sh fetch KEY`, "copy its .gguf over FTP to" the title's folder), and a model's file name.
@@ -79,6 +79,9 @@ Nothing critical open.
 
 ## Done
 
+- [x] [#81](https://github.com/ThatRetiredDude/TokenStation5/pull/81) Tailscale: the PS5 joins the user's tailnet itself, with nothing set up on the router and no other device in between (merged 2026-10-26, tested on the console). Sign-in is a code on the TV, against Tailscale's own servers. Traffic goes through Tailscale's relays, reached over TLS 1.2: their certificate chains end in an Ed25519 certificate that Mbed TLS's TLS 1.3 code rejects. On the home network it goes direct on UDP 9031: about 15 ms from the Mac, against 130 through the relay. Jared's phone reached it on mobile data. A key is always needed over Tailscale ([#82](https://github.com/ThatRetiredDude/TokenStation5/pull/82), which let "Require a key" off open it, was closed at Jared's word).
+- [x] [#84](https://github.com/ThatRetiredDude/TokenStation5/pull/84) Settings in four groups, Chat, Voice, Console and Tuning, instead of six (merged 2026-10-26; the release's console pass is next).
+- [x] [#83](https://github.com/ThatRetiredDude/TokenStation5/pull/83) Docs for 01.003.000, and the TV's dates in the console's time zone instead of UTC (merged 2026-10-26; the release's console pass is next).
 - [x] [#77](https://github.com/ThatRetiredDude/TokenStation5/pull/77) Settings > Instructions > "Add models from a computer" (merged 2026-10-25, tested on the console): the PS5's FTP address and the models folder, the steps for copying a model in, and why (downloads on the console slow down after the first few hundred MB).
 - [x] [#76](https://github.com/ThatRetiredDude/TokenStation5/pull/76) A bigger `/download0` (closed 2026-10-25, a test): with `downloadDataSize` 65536 the PS5 refuses to start the title from the home screen (CE-107694-7); the PS5's own copy of the app's settings keeps 256 and `/download0` never grows. `downloadDataSize` stays 256.
 - [x] [#74](https://github.com/ThatRetiredDude/TokenStation5/pull/74) Downloads (merged 2026-10-25, tested on the console): three at once, 4 MiB receive buffers, no picture freezes while they save (the GPU driver's 10-second log line waited on the disk inside its submit lock; stderr is now buffered), resume after a restart, and sizes counted 1,024-based. Free space shows as unknown on the PS5 (it reports a made-up volume). 0 picture stalls over a 25-minute Qwen 3 8B download.
