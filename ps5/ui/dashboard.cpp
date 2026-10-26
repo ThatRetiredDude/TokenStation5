@@ -351,6 +351,8 @@ Action Dashboard::press(uint32_t b, const View &v) {
         } else if (ch.wg_answer) {
             a.kind = Action::WgAnswer;
             a.value = ch.wg_answer > 0 ? "1" : "0";
+        } else if (ch.ts_sign_out) {
+            a.kind = Action::TsSignOut;
         }
         if (b & kCircle) show(Home);
         return a;

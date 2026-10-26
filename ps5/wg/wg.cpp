@@ -18,6 +18,7 @@
 
 #include "log.h"
 #include "net.h"
+#include "../ts/tailscale.h"
 
 // The system's TCP_MSS (netinet/tcp.h) isn't the tunnel's (lwipopts.h).
 #undef TCP_MSS
@@ -142,13 +143,13 @@ Tunnel::~Tunnel() {
 bool Tunnel::apply(const Config &c, std::string &why) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!started_) {
-        if (!c.on) {
+        if (!c.on && !(c.tailscale && ts_)) {
             want_ = c;
             return true;
         }
         uint8_t key[WIREGUARD_PRIVATE_KEY_LEN];
         uint32_t ip;
-        if (!unb64(c.private_key, key)) {
+        if (c.on && !unb64(c.private_key, key)) {
             why = "no private key";
             return false;
         }
@@ -165,7 +166,7 @@ bool Tunnel::apply(const Config &c, std::string &why) {
     }
     if (c.address != want_.address)
         ts5::log_line("ts5-title: wireguard: a new tunnel address takes effect at the next start");
-    if (public_key_of(c.private_key).empty()) {
+    if (c.on && public_key_of(c.private_key).empty()) {
         why = "no private key";
         return false;
     }
@@ -184,6 +185,11 @@ std::string Tunnel::problem() {
 std::vector<PeerState> Tunnel::peers() {
     std::lock_guard<std::mutex> lk(mu_);
     return states_;
+}
+
+std::vector<PeerState> Tunnel::tailnet_peers() {
+    std::lock_guard<std::mutex> lk(mu_);
+    return ts_states_;
 }
 
 std::string Tunnel::client_for(uint16_t local_port) {
@@ -211,7 +217,35 @@ struct Loop {
     std::map<std::string, uint8_t> peers;  // public key: wireguardif's index
     std::map<std::string, Peer> peer_cfg;
     std::list<Conn *> conns;
+
+    // The PS5 on a tailnet: its own WireGuard device and interface, made
+    // once it has an address there. Its peers are the tailnet's devices
+    // that have sent it something, at most WIREGUARD_MAX_PEERS at a time
+    // (the one quiet longest makes room), each with a stand-in address
+    // (127.77.0.N, port 1) that tells ts5_ts_send which device a packet is
+    // for: the relay finds devices by key, not address.
+    ts::Client *ts = nullptr;
+    bool ts_on = false;
+    netif ts_nif{};
+    wireguardif_init_data ts_init{};
+    std::string ts_private_key;  // base64, as wireguardif takes it
+    bool ts_made = false, ts_up = false;
+    uint64_t ts_version = ~0ull;
+    std::string ts_address;
+    std::map<std::string, ts::Peer> ts_known;  // by node key (32 bytes): the tailnet's devices
+    struct TsPeer {
+        uint8_t index = WIREGUARDIF_INVALID_INDEX;
+        uint32_t standin = 0;  // network order
+        double last = 0;       // when it last sent something
+        std::string name, address;
+        bool was_up = false;
+    };
+    std::map<std::string, TsPeer> ts_peers;     // by node key
+    std::map<uint32_t, std::string> ts_standin;  // stand-in address: node key
+    uint32_t ts_next = 1;
 };
+
+Loop *g_loop = nullptr;  // for ts5_ts_send, which lwIP calls on the tunnel's thread
 
 void drop_client(Loop &L, Conn *c) {
     if (!c->local_port) return;
@@ -492,6 +526,158 @@ bool pump(Loop &L, Conn *c, short revents) {
     return true;
 }
 
+// Stops the tailnet's peers; their sessions end.
+void ts_drop_peers(Loop &L) {
+    for (auto &[key, p] : L.ts_peers)
+        if (p.index != WIREGUARDIF_INVALID_INDEX) wireguardif_remove_peer(&L.ts_nif, p.index);
+    L.ts_peers.clear();
+    L.ts_standin.clear();
+}
+
+// Brings the tailnet's device in line with what the client knows: the
+// PS5's key and address there, and the tailnet's devices.
+void ts_sync(Loop &L) {
+    if (!L.ts) return;
+    if (!L.ts_on) {
+        if (L.ts_up) {
+            ts_drop_peers(L);
+            netif_set_down(&L.ts_nif);
+            L.ts_up = false;
+            ts5::log_line("ts5-title: tailscale: off the tailnet");
+        }
+        L.ts_version = ~0ull;
+        return;
+    }
+    const uint64_t v = L.ts->netmap_version();
+    if (v == L.ts_version) return;
+    L.ts_version = v;
+    const ts::Netmap m = L.ts->netmap();
+    L.ts_known.clear();
+    for (const ts::Peer &p : m.peers) L.ts_known[std::string((const char *)p.key, 32)] = p;
+    uint32_t ip = 0;
+    if (m.address.empty() || !parse_ip(m.address, ip)) {
+        if (L.ts_up) {
+            ts_drop_peers(L);
+            netif_set_down(&L.ts_nif);
+            L.ts_up = false;
+        }
+        return;
+    }
+    const std::string priv = b64(m.node_priv);
+    ip4_addr_t addr, mask, gw;
+    ip4_addr_set_u32(&addr, ip);
+    ip4_addr_set_u32(&mask, htonl(0xFFC00000u));  // 100.64.0.0/10, where tailnets' addresses are
+    ip4_addr_set_u32(&gw, 0);
+    if (!L.ts_made) {
+        L.ts_private_key = priv;
+        L.ts_init.private_key = L.ts_private_key.c_str();
+        L.ts_init.listen_port = 1;  // no socket: its packets go through the relay
+        L.ts_init.bind_netif = nullptr;
+        ts5_udp_making(TS5_UDP_TAILSCALE);
+        const bool made = netif_add(&L.ts_nif, &addr, &mask, &gw, &L.ts_init, wireguardif_init, ip_input) != nullptr;
+        ts5_udp_making(TS5_UDP_WIREGUARD);
+        if (!made) {
+            ts5::log_line("ts5-title: tailscale: the tailnet's interface didn't start");
+            return;
+        }
+        L.ts_made = true;
+    } else if (priv != L.ts_private_key) {
+        uint8_t key[WIREGUARD_PRIVATE_KEY_LEN];
+        if (unb64(priv, key)) {
+            ts_drop_peers(L);
+            wireguard_device_init((wireguard_device *)L.ts_nif.state, key);
+            crypto_zero(key, sizeof key);
+            L.ts_private_key = priv;
+        }
+    }
+    if (m.address != L.ts_address) {
+        netif_set_ipaddr(&L.ts_nif, &addr);
+        L.ts_address = m.address;
+    }
+    if (!L.ts_up) {
+        netif_set_up(&L.ts_nif);
+        netif_set_link_up(&L.ts_nif);
+        L.ts_up = true;
+        ts5::log_line("ts5-title: tailscale: the PS5 is %s on the tailnet", m.address.c_str());
+    }
+    // Devices gone from the tailnet, or moved to another address.
+    for (auto it = L.ts_peers.begin(); it != L.ts_peers.end();) {
+        auto k = L.ts_known.find(it->first);
+        if (k == L.ts_known.end() || k->second.address != it->second.address) {
+            if (it->second.index != WIREGUARDIF_INVALID_INDEX) wireguardif_remove_peer(&L.ts_nif, it->second.index);
+            L.ts_standin.erase(it->second.standin);
+            it = L.ts_peers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// A tailnet device as a peer of the tailnet's WireGuard device, the first
+// time it sends something.
+std::map<std::string, Loop::TsPeer>::iterator ts_add_peer(Loop &L, const std::string &key) {
+    auto known = L.ts_known.find(key);
+    if (known == L.ts_known.end()) return L.ts_peers.end();
+    uint32_t ip;
+    if (!parse_ip(known->second.address, ip)) return L.ts_peers.end();
+    if (L.ts_peers.size() >= WIREGUARD_MAX_PEERS) {
+        auto quiet = L.ts_peers.begin();
+        for (auto it = L.ts_peers.begin(); it != L.ts_peers.end(); ++it)
+            if (it->second.last < quiet->second.last) quiet = it;
+        ts5::log_line("ts5-title: tailscale: %s makes room for %s", quiet->second.name.c_str(), known->second.name.c_str());
+        wireguardif_remove_peer(&L.ts_nif, quiet->second.index);
+        L.ts_standin.erase(quiet->second.standin);
+        L.ts_peers.erase(quiet);
+    }
+    Loop::TsPeer p;
+    do {
+        p.standin = htonl(0x7F4D0000u | (L.ts_next++ & 0xFFFFu));  // 127.77.x.y
+    } while (L.ts_standin.count(p.standin) || (ntohl(p.standin) & 0xFFFFu) == 0);
+    p.name = known->second.name;
+    p.address = known->second.address;
+    const std::string pub = b64((const uint8_t *)key.data());
+    wireguardif_peer peer;
+    wireguardif_peer_init(&peer);
+    peer.public_key = pub.c_str();
+    peer.preshared_key = nullptr;
+    ip_addr_set_ip4_u32_val(peer.allowed_ip, ip);
+    ip_addr_set_ip4_u32_val(peer.allowed_mask, 0xFFFFFFFFu);
+    ip_addr_set_ip4_u32_val(peer.endpoint_ip, p.standin);
+    peer.endport_port = 1;
+    if (wireguardif_add_peer(&L.ts_nif, &peer, &p.index) != ERR_OK || p.index == WIREGUARDIF_INVALID_INDEX) {
+        ts5::log_line("ts5-title: tailscale: can't add %s", p.name.c_str());
+        return L.ts_peers.end();
+    }
+    L.ts_standin[p.standin] = key;
+    return L.ts_peers.emplace(key, p).first;
+}
+
+// What came through the relay: WireGuard's packets to the tailnet's device.
+void ts_receive(Loop &L) {
+    if (!L.ts) return;
+    uint8_t from[32];
+    std::string d;
+    for (int k = 0; k < 512 && L.ts->receive(from, d); k++) {
+        if (!L.ts_up) continue;
+        // WireGuard's messages are types 1 to 4, then three zero bytes;
+        // anything else (Tailscale's own path finding) isn't for here.
+        if (d.size() < 4 || d[0] < 1 || d[0] > 4 || d[1] || d[2] || d[3]) continue;
+        const std::string key((const char *)from, 32);
+        auto it = L.ts_peers.find(key);
+        if (it == L.ts_peers.end() && (it = ts_add_peer(L, key)) == L.ts_peers.end()) continue;
+        it->second.last = now_s();
+        ts5_udp_input(TS5_UDP_TAILSCALE, d.data(), d.size(), it->second.standin, 1);
+        // Data for a session the PS5 doesn't have (it restarted since): a
+        // handshake from here, rather than the device's own after 15 s.
+        ip_addr_t at;
+        u16_t port;
+        wireguard_device *dev = (wireguard_device *)L.ts_nif.state;
+        if (d[0] == 4 && dev && it->second.index < WIREGUARD_MAX_PEERS &&
+            wireguardif_peer_is_up(&L.ts_nif, it->second.index, &at, &port) != ERR_OK)
+            dev->peers[it->second.index].send_handshake = true;
+    }
+}
+
 }  // namespace
 
 void Tunnel::loop() {
@@ -511,7 +697,16 @@ void Tunnel::loop() {
     ip4_addr_set_u32(&addr, ip);
     ip4_addr_set_u32(&mask, htonl(0xFFFFFF00u));
     ip4_addr_set_u32(&gw, 0);
+    L.ts = ts_;
+    L.ts_on = cfg.tailscale && ts_;
+    g_loop = &L;
     L.private_key = cfg.private_key;
+    if (public_key_of(L.private_key).empty()) {
+        // Started for the tailnet alone: the server's device gets a key of
+        // its own until it has one (it has no socket until it's on).
+        std::string unused;
+        make_keys(L.private_key, unused);
+    }
     L.init.private_key = L.private_key.c_str();
     L.init.listen_port = (u16_t)cfg.port;
     L.init.bind_netif = nullptr;
@@ -573,9 +768,12 @@ void Tunnel::loop() {
                 }
             }
             sync_peers(L, cfg.peers);
+            L.ts_on = cfg.tailscale && L.ts;
             std::lock_guard<std::mutex> lk(mu_);
             problem_ = why;
         }
+        ts_sync(L);
+        ts_receive(L);
 
         fds.clear();
         if (L.udp >= 0) fds.push_back({L.udp, POLLIN, 0});
@@ -590,6 +788,8 @@ void Tunnel::loop() {
         // With connections open, more often: on the PS5 poll doesn't wake for
         // a socket that's ready, so this is how soon their data moves on.
         if (!L.conns.empty() && sleep_ms > 5) sleep_ms = 5;
+        // And on the tailnet: the relay's packets wait in a queue poll can't see.
+        if (L.ts_up && sleep_ms > 5) sleep_ms = 5;
         if (fds.empty()) usleep(sleep_ms * 1000);
         else if (poll(fds.data(), (nfds_t)fds.size(), (int)sleep_ms) < 0) {
             // Then every socket is tried: they're all non-blocking.
@@ -641,6 +841,7 @@ void Tunnel::loop() {
                 it = L.conns.erase(it);
             }
         }
+        ts_receive(L);
         sys_check_timeouts();
 
         const double t = now_s();
@@ -671,12 +872,44 @@ void Tunnel::loop() {
                 was = s.up;
                 states.push_back(s);
             }
+            std::vector<PeerState> ts_states;
+            if (L.ts_up) {
+                const wireguard_device *tdev = (const wireguard_device *)L.ts_nif.state;
+                for (auto &[key, p] : L.ts_peers) {
+                    PeerState st;
+                    st.name = p.name;
+                    st.address = p.address;
+                    ip_addr_t from;
+                    u16_t port = 0;
+                    st.up = wireguardif_peer_is_up(&L.ts_nif, p.index, &from, &port) == ERR_OK;
+                    st.from = "relay";
+                    if (tdev && p.index < WIREGUARD_MAX_PEERS && tdev->peers[p.index].last_rx)
+                        st.seen_s = (double)(uint32_t)(now_ms - tdev->peers[p.index].last_rx) / 1000.0;
+                    if (st.up != p.was_up)
+                        ts5::log_line(st.up ? "ts5-title: tailscale: %s (%s) connected" : "ts5-title: tailscale: %s (%s)'s session ended",
+                                      p.name.c_str(), p.address.c_str());
+                    p.was_up = st.up;
+                    ts_states.push_back(st);
+                }
+            }
             std::lock_guard<std::mutex> lk(mu_);
             states_ = std::move(states);
+            ts_states_ = std::move(ts_states);
         }
     }
+    g_loop = nullptr;
     drop_conns(L);
     close_udp(L);
 }
 
 }  // namespace wg
+
+extern "C" bool ts5_ts_send(const void *data, size_t len, uint32_t ip_be, uint16_t port) {
+    (void)port;
+    wg::Loop *L = wg::g_loop;
+    if (!L || !L->ts) return false;
+    auto it = L->ts_standin.find(ip_be);
+    if (it == L->ts_standin.end()) return false;
+    L->ts->send((const uint8_t *)it->second.data(), data, len);
+    return true;
+}

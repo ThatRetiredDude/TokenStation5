@@ -20,6 +20,10 @@
 // square twice removes it), this PS5's key (square twice makes a new pair) and
 // the home address (cross types it). Left goes back to the list. A device
 // asking to join opens its item wherever the page was.
+//
+// Tailscale, above it, turns on and off with cross; its whole setup is on
+// the right: the code to scan to sign the PS5 in, then its tailnet name and
+// the devices that reached it. Square twice signs the PS5 out.
 #pragma once
 #include <cstdint>
 #include <map>
@@ -62,6 +66,24 @@ struct WgInfo {
     std::string added_id;  // the device last added on the TV, until Settings is left (its code may be gone)
 };
 
+// The PS5 on a tailnet (ts/tailscale.h), as the page shows it.
+struct TsDeviceInfo {
+    std::string name, address;  // its tailnet name and 100.x address
+    bool up = false;            // has a session with the PS5 now
+    double seen_s = -1;         // seconds since it last sent anything
+};
+
+struct TsInfo {
+    // ts::Status::State: 0 off, 1 starting, 2 needs sign-in, 3 connecting,
+    // 4 connected, 5 a problem.
+    int state = 0;
+    std::string sign_in_url;  // state 2: the page that approves the PS5
+    std::string problem;      // what went wrong last, plain words; "" if nothing
+    std::string name, address, account, relay;
+    int devices = 0;          // on the tailnet besides the PS5
+    std::vector<TsDeviceInfo> connected;  // the ones that have reached it since it started
+};
+
 // What the page shows besides the settings themselves.
 struct SettingsInfo {
     std::vector<ApiKeyInfo> keys;
@@ -77,6 +99,7 @@ struct SettingsInfo {
     bool kokoro_model = false;               // Kokoro's model is there too
     std::map<std::string, app::Download> downloads;  // by catalog key
     WgInfo wg;
+    TsInfo ts;
     std::string note;                        // the last change: saved, or why not
     bool note_failed = false;
     double note_at = -1e9;  // when (now's clock)
@@ -100,6 +123,7 @@ struct SettingChange {
     bool wg_new_key = false;  // a new key pair for this PS5
     bool wg_phone = false;    // name a phone or tablet on the console's keyboard, to add it with keys made here
     int wg_answer = 0;        // the device asking to join: 1 let it in, -1 refuse it
+    bool ts_sign_out = false;  // sign this PS5 out of its tailnet
 };
 
 struct Row;  // one row of the page (settings_page.cpp)
@@ -124,6 +148,8 @@ public:
     std::string square_does(const SettingsInfo &info) const;
 
 private:
+    // Tailscale's panel, from ty down.
+    void draw_tailscale(Canvas &c, const SettingsInfo &info, int dx, int &ty, int dw);
     SettingChange press_wg(uint32_t buttons, const SettingsInfo &info);
     SettingChange act(const Row &r, uint32_t buttons, const SettingsInfo &info);
     void follow_wg(const std::vector<Row> &rs, const SettingsInfo &info);

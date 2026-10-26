@@ -74,4 +74,29 @@ bool http_get_file(const std::string &url, const std::string &path, uint64_t off
                    const std::string &expected_sha256, FetchProgress &progress, std::string &err,
                    Sha256Resume *sha = nullptr);
 
+// A connection held open both ways, plain or TLS, for protocols that send and
+// receive as they go (Tailscale's control server and relays, ps5/ts). One
+// thread at a time.
+class Stream {
+public:
+    Stream();
+    ~Stream();
+    Stream(const Stream &) = delete;
+    Stream &operator=(const Stream &) = delete;
+    // Connects to host:port (TLS checks the certificate as the requests above
+    // do); timeout_s is for the connection and for each write.
+    bool open(const std::string &host, int port, bool tls, int timeout_s, std::string &err);
+    bool write(const void *data, size_t len, std::string &err);
+    // Up to cap bytes, waiting at most wait_ms for the first: how many, 0
+    // once the other side has closed, -1 on an error (err says), -2 when
+    // nothing came in time.
+    int read(void *buf, size_t cap, int wait_ms, std::string &err);
+    void close();
+    bool is_open() const;
+
+private:
+    struct Impl;
+    Impl *p_;
+};
+
 }  // namespace ts5
