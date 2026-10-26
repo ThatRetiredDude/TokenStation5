@@ -10,6 +10,10 @@
 // choose a guide, cross opens it and cross again goes back), turns "Require a key" on and off, makes API
 // keys (keys.h; cross names a new one, and it shows once on its row) and
 // turns each key on and off (cross) or removes it (square twice).
+//
+// AWAY FROM HOME has Tailscale, turned on and off with cross; its whole setup
+// is on the right: the code to scan to sign the PS5 in, then its tailnet
+// address and the devices that reached it. Square twice signs the PS5 out.
 #pragma once
 #include <cstdint>
 #include <map>
@@ -28,12 +32,34 @@ struct ApiKeyInfo {
     int64_t created = 0, used = 0;  // Unix seconds; used 0: never
 };
 
+// A device on the tailnet as the page shows it.
+struct TsDeviceInfo {
+    std::string name, address;  // its tailnet name and 100.x address
+    bool up = false;            // has a session with the PS5 now
+    double seen_s = -1;         // seconds since it last sent anything
+    bool direct = false;        // its packets go straight, not through the relay
+};
+
+// The PS5 on a tailnet (ts/tailscale.h), as the page shows it.
+struct TsInfo {
+    // ts::Status::State: 0 off, 1 starting, 2 needs sign-in, 3 connecting,
+    // 4 connected, 5 a problem.
+    int state = 0;
+    std::string sign_in_url;  // state 2: the page that approves the PS5
+    std::string problem;      // what went wrong last, plain words; "" if nothing
+    std::string name, address, account, relay;
+    int devices = 0;          // on the tailnet besides the PS5
+    std::vector<TsDeviceInfo> connected;  // the ones that have reached it since it started
+};
+
 // What the page shows besides the settings themselves.
 struct SettingsInfo {
     std::vector<ApiKeyInfo> keys;
     std::string fresh_key, fresh_key_id;  // a key just made, shown on its row until the title forgets it
     std::string url;                      // the address apps use
     bool on_network = false;
+    int api_port = 8081;                  // the API's port
+    TsInfo ts;
     std::string model_id;  // the served model's id in the API ("" with none)
     int n_ctx = 0;         // its context
     std::vector<std::string> speech_models;  // ggml-*.bin in the models folder
@@ -59,6 +85,7 @@ struct SettingChange {
     bool new_key = false;  // name a new API key on the console's keyboard
     std::string key_id;    // an API key to turn on or off (key_on), or to remove
     bool key_on = false, key_remove = false;
+    bool ts_sign_out = false;  // sign this PS5 out of its tailnet
 };
 
 class SettingsPage {
@@ -80,10 +107,12 @@ public:
     std::string square_does(const SettingsInfo &info) const;
 
 private:
+    // Tailscale's panel, from ty down to bottom.
+    void draw_tailscale(Canvas &c, const SettingsInfo &info, int dx, int &ty, int dw, int bottom);
     const Font &h2_, &body_, &bodyb_, &small_, &smallb_;
     int sel_ = 0;
     int scroll_ = 0;
-    double confirm_at_ = -1e9;  // square once on a key: press again to remove it
+    double confirm_at_ = -1e9;  // square once on a key (or Tailscale): press again to remove it (sign out)
     std::string fresh_seen_;    // the fresh key the selection last moved to
     bool in_guide_ = false;     // inside the Instructions row's panel
     int link_ = 0, open_ = -1;  // the guide chosen there, and the one open (-1: the list)

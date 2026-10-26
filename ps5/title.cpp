@@ -103,6 +103,8 @@
 #include "usage_store.h"
 #include "vk_context.h"
 #include "voice.h"
+#include "wg/wg.h"
+#include "ts/tailscale.h"
 
 #ifndef TS5_VERSION
 #define TS5_VERSION "dev"
@@ -169,9 +171,15 @@ constexpr const char *kRestart = TS5_HOME "/restart";
 constexpr const char *kUsage = TS5_HOME "/usage.tsv";
 constexpr const char *kUsageHours = TS5_HOME "/usage-hours.tsv";
 constexpr const char *kKeys = TS5_HOME "/keys.tsv";
+constexpr const char *kTsFile = TS5_HOME "/tailscale.tsv";  // the PS5's keys on its tailnet (ts/tailscale.h)
 constexpr const char *kChats = TS5_HOME "/chats";  // the Chat page's saved chats (chat_store.h)
 // Not ..._KEY: a name ending in _KEY is a secret, typed in (settings.h).
 constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
+// Tailscale on (1) or off; and, set from a computer only, another control
+// server than Tailscale's (a Headscale), the PS5's name on the tailnet, and an
+// auth key that signs it in without the code on the TV.
+constexpr const char *kTailscale = "TS5_TAILSCALE", *kTsServer = "TS5_TS_SERVER", *kTsName = "TS5_TS_NAME",
+                     *kTsAuthKey = "TS5_TS_AUTH_KEY";
 // typing_for while the keyboard names a new API key, or takes a search.
 constexpr const char *kNamingKey = "(new key)", *kSearching = "(search)", *kChatSearch = "(chat search)";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
@@ -198,7 +206,8 @@ ts5::UsageLog usage_log(kUsage);
 // (which swaps the whole folder) keeps them: put back at start, followed
 // every 30 s and before leaving.
 app::Backup backup(TS5_HOME, TS5_STORE "/ts5",
-                   {"ts5.env", "ts5.args", "keys.tsv", "usage.tsv", "usage.prev.tsv", "usage-hours.tsv", "results.tsv"},
+                   {"ts5.env", "ts5.args", "keys.tsv", "tailscale.tsv", "usage.tsv", "usage.prev.tsv", "usage-hours.tsv",
+                    "results.tsv"},
                    {"chats"});
 
 [[noreturn]] void leave(const char *path) {
@@ -698,8 +707,26 @@ int main(int, char **) {
     app::KeyStore keys;
     keys.load(kKeys);
     keys.set_required(app::setting(kRequireKey, "0") == "1");
-    server.set_authorize([&keys](const std::string &key, const std::string &client, std::string &name) {
-        return keys.authorize(key, client, name);
+    // Tailscale (ts/tailscale.h): this PS5 on a tailnet, its packets through
+    // the tunnel's thread (wg/wg.h). Its connections come from 127.0.0.1, so
+    // each is named by the device behind it (100.64.0.0/10), which always
+    // needs a key.
+    ts::Client tailnet;
+    wg::Tunnel tunnel;
+    tunnel.use_tailscale(&tailnet);
+    auto in_tunnel = [](const std::string &client) {
+        int a = 0, b = 0;
+        return sscanf(client.c_str(), "%d.%d.", &a, &b) == 2 && a == 100 && b >= 64 && b < 128;
+    };
+    server.set_client_name([&tunnel](const std::string &ip, int port) {
+        if (ip == "127.0.0.1") {
+            const std::string device = tunnel.client_for((uint16_t)port);
+            if (!device.empty()) return device;
+        }
+        return ip;
+    });
+    server.set_authorize([&keys, in_tunnel](const std::string &key, const std::string &client, std::string &name) {
+        return keys.authorize(key, client, name, in_tunnel(client));
     });
     std::string fresh_key, fresh_key_id;  // a key just made, shown on Settings until the page is left
     app::HfSearch hf;  // the Models page's search
@@ -720,6 +747,23 @@ int main(int, char **) {
                    " is in use. Restart the PS5 and open TokenStation5 again.");
         }
     }
+    // Brings Tailscale and its tunnel in line with Settings.
+    auto ts_apply = [&] {
+        ts::Config tc;
+        tc.on = app::setting(kTailscale, "0") == "1";
+        tc.control_url = app::setting(kTsServer, "https://controlplane.tailscale.com");
+        tc.hostname = app::setting(kTsName, "tokenstation5");
+        tc.auth_key = app::setting(kTsAuthKey);
+        tc.state_file = kTsFile;
+        tc.version = TS5_VERSION;
+        tailnet.apply(tc);
+        wg::Config wc;
+        wc.api_port = api_port;
+        wc.tailscale = tc.on;
+        std::string e;
+        if (!tunnel.apply(wc, e)) printf("ts5-title: tailscale: %s\n", e.c_str());
+    };
+    ts_apply();
     app::Runner runner(ctx, server, lib, lib_mutex, notify, network_url);
     // Models (and, from Settings, the speech model and voice) downloaded on
     // the console, beside whatever the Runner does.
@@ -809,6 +853,17 @@ int main(int, char **) {
         s.fresh_key_id = fresh_key_id;
         s.url = v.url;
         s.on_network = v.on_network;
+        s.api_port = api_port;
+        const ts::Status ts_status = tailnet.status();
+        s.ts.state = (int)ts_status.state;
+        s.ts.sign_in_url = ts_status.sign_in_url;
+        s.ts.problem = ts_status.problem;
+        s.ts.name = ts_status.name;
+        s.ts.address = ts_status.address;
+        s.ts.account = ts_status.account;
+        s.ts.relay = ts_status.relay;
+        s.ts.devices = ts_status.devices;
+        for (const wg::PeerState &p : tunnel.tailnet_peers()) s.ts.connected.push_back({p.name, p.address, p.up, p.seen_s, p.from == "direct"});
         if (!v.status.serving.empty()) {
             s.model_id = v.status.serving;
             const size_t g = s.model_id.size() > 5 ? s.model_id.size() - 5 : std::string::npos;
@@ -1097,6 +1152,10 @@ int main(int, char **) {
         // Nor does the screen go dark while a reply comes in on the chat page,
         // or is read aloud.
         if ((chat_active || v.speaking) && dash.page() == ui::Dashboard::Chat) last_input = t;
+        // Nor while Settings waits for this PS5 to be signed in to Tailscale:
+        // someone may be walking up to scan its code.
+        if (dash.page() == ui::Dashboard::Settings && tailnet.status().state == ts::Status::NeedsSignIn)
+            last_input = t;
         // A new key shows only until Settings is left.
         if (dash.page() != ui::Dashboard::Settings) {
             fresh_key.clear();
@@ -1179,11 +1238,13 @@ int main(int, char **) {
                 break;
             case ui::Action::Set: {
                 std::string e;
-                if (a.name == kRequireKey && a.value == "1") {
+                if ((a.name == kRequireKey || a.name == kTailscale) && a.value == "1") {
                     bool any_on = false;
                     for (const app::ApiKey &k : keys.list()) any_on |= k.on;
                     if (!any_on) {
-                        settings_note.note = "Make a key first, so your apps can still get in.";
+                        // Over Tailscale a key is always needed.
+                        settings_note.note = a.name == kTailscale ? "Make a key first: devices need one over Tailscale."
+                                                                  : "Make a key first, so your apps can still get in.";
                         settings_note.note_failed = true;
                         settings_note.note_at = t;
                         v.settings = settings_view(v);
@@ -1198,6 +1259,7 @@ int main(int, char **) {
                 settings_note.note_at = t;
                 v.settings = settings_view(v);
                 if (ok && a.name == "TS5_WHISPER_MODEL") voice.rescan();
+                if (ok && a.name == kTailscale) ts_apply();
                 break;
             }
             case ui::Action::ChatType:
@@ -1250,6 +1312,19 @@ int main(int, char **) {
                     fresh_key_id.clear();
                 }
                 settings_note.note = ok ? (remove ? "Removed" : "Saved") : std::string("Couldn't save it.") + plain::kDetails;
+                settings_note.note_failed = !ok;
+                settings_note.note_at = t;
+                v.settings = settings_view(v);
+                break;
+            }
+            case ui::Action::TsSignOut: {
+                // Signed out, and off: turning it on again shows a new code.
+                std::string e;
+                tailnet.sign_out();
+                const bool ok = app::set_setting(kEnv, kTailscale, "", e);
+                if (!ok) printf("ts5-title: settings: %s not saved: %s\n", kTailscale, e.c_str());
+                ts_apply();
+                settings_note.note = ok ? "Signed out" : std::string("Couldn't save it.") + plain::kDetails;
                 settings_note.note_failed = !ok;
                 settings_note.note_at = t;
                 v.settings = settings_view(v);
