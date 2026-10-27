@@ -91,6 +91,33 @@ std::string escape_bare_quotes(const std::string &s) {
     return out;
 }
 
+// JSON cut short of its last closing braces or brackets, as Llama 3.2 3B
+// ends a call one brace short ({"type": "function", "function": {"name": ...,
+// "parameters": {...}} seen on the console): s with them, or "" when it isn't
+// that (whole, cut inside a string, or more than 2 short).
+std::string closed_json(const std::string &s) {
+    std::string open;
+    bool in_str = false;
+    for (size_t i = 0; i < s.size(); i++) {
+        const char c = s[i];
+        if (in_str) {
+            if (c == '\\') i++;
+            else if (c == '"') in_str = false;
+        } else if (c == '"') {
+            in_str = true;
+        } else if (c == '{' || c == '[') {
+            open += c;
+        } else if (c == '}' || c == ']') {
+            if (open.empty() || open.back() != (c == '}' ? '{' : '[')) return "";
+            open.pop_back();
+        }
+    }
+    if (in_str || open.empty() || open.size() > 2) return "";
+    std::string out = s;
+    for (size_t i = open.size(); i-- > 0;) out += open[i] == '{' ? '}' : ']';
+    return out;
+}
+
 // {"name": ..., "arguments"/"parameters": {...}} as a call, or false.
 bool call_from_json(const std::string &text, ToolCall &call) {
     Json j;
@@ -847,7 +874,14 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
             return i == s.size() && !calls.empty();
         };
         std::vector<ToolCall> calls;
-        if (only_calls(s, calls) || (calls.clear(), only_calls(escape_bare_quotes(s), calls))) {
+        bool ok = only_calls(s, calls) || (calls.clear(), only_calls(escape_bare_quotes(s), calls));
+        // One call cut short of its closing braces.
+        if (!ok && starts(s, "{") && object_end(s, 0) == std::string::npos) {
+            std::string c = closed_json(s);
+            if (c.empty()) c = closed_json(escape_bare_quotes(s));
+            ok = !c.empty() && (calls.clear(), only_calls(c, calls)) && calls.size() == 1;
+        }
+        if (ok) {
             r.calls = calls;
             r.content.clear();
         }
