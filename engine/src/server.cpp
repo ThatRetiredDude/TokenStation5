@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cctype>
@@ -160,6 +161,35 @@ std::string api_id(const std::string &file) {
     if (file.size() > ext.size() && strcasecmp(file.c_str() + file.size() - ext.size(), ext.c_str()) == 0)
         return file.substr(0, file.size() - ext.size());
     return file;
+}
+
+// Where a model's sampling settings come from, for the log.
+std::string settings_source(const KnownMatch &k) {
+    if (!k) return "standard (no known-good settings for this model)";
+    const std::string checked = std::string(k.row->checked) + ": " + std::to_string(k.row->passed) + " of " +
+                                std::to_string(k.row->of) + " checks passed";
+    switch (k.how) {
+        case KnownMatch::File: return "known-good for this file (" + std::string(k.row->name) + ", checked " + checked + ")";
+        case KnownMatch::Model:
+            return "known-good for " + std::string(k.row->name) + ", checked in another file (" + checked + ")";
+        default: return "from " + std::string(k.row->name) + ", the checked model of its family (" + checked + ")";
+    }
+}
+
+// /v1/models' "settings": what a request gets for the sampling it doesn't
+// set, and where that comes from: known_good says whose checks they are
+// ("file": this file's, "model": this model's in another file, "family": a
+// model of its family's), with that check's day and count.
+std::string settings_json(const KnownMatch &k, const SampleParams &sp) {
+    char b[96];
+    snprintf(b, sizeof b, "{\"temperature\":%.3g,\"top_p\":%.3g,\"top_k\":%d", sp.temperature, sp.top_p, sp.top_k);
+    std::string j = b;
+    j += ",\"known_good\":";
+    j += !k ? "\"none\"" : k.how == KnownMatch::File ? "\"file\"" : k.how == KnownMatch::Model ? "\"model\"" : "\"family\"";
+    if (k)
+        j += ",\"checked_model\":" + json_escape(k.row->name) + ",\"checked_on\":" + json_escape(k.row->checked) +
+             ",\"checks_passed\":" + std::to_string(k.row->passed) + ",\"checks_run\":" + std::to_string(k.row->of);
+    return j + "}";
 }
 
 // At most this many rounds of web searches per answer; after that the model
@@ -318,11 +348,15 @@ void handle(int fd, Server::State &state, Usage &u) {
     } else if (r.path == "/v1/models" || r.path == "/models") {
         std::string model, tools;
         int n_ctx;
+        KnownMatch known;
+        SampleParams sampling;
         {
             std::lock_guard<std::mutex> g(state.stats);
             model = state.model;
             tools = state.tool_format;
             n_ctx = state.n_ctx;
+            known = state.known;
+            sampling = state.sampling;
         }
         // capabilities: whether the model takes OpenAI tools, and whether ts5
         // runs web searches for it (a Tavily key is set).
@@ -339,7 +373,8 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                             ",\"capabilities\":{\"tools\":" + (can ? "true" : "false") +
                                                             ",\"tool_format\":" + json_escape(tools) +
                                                             ",\"web_search\":" +
-                                                            (can && !tavily_key().empty() ? "true" : "false") + "}}") +
+                                                            (can && !tavily_key().empty() ? "true" : "false") + "}" +
+                                                            ",\"settings\":" + settings_json(known, sampling) + "}") +
                                        "]}"));
     } else if (completions) {
         const bool chat = r.path.find("chat") != std::string::npos;
@@ -459,9 +494,9 @@ void handle(int fd, Server::State &state, Usage &u) {
         }
         bool use_tools = !tools.empty();  // off for a last turn that must answer
         SampleParams sp;
-        sp.temperature = (float)req["temperature"].num(0.7);
-        sp.top_p = (float)req["top_p"].num(0.95);
-        sp.top_k = (int)req["top_k"].num(40);
+        sp.temperature = (float)req["temperature"].num(state.sampling.temperature);
+        sp.top_p = (float)req["top_p"].num(state.sampling.top_p);
+        sp.top_k = (int)req["top_k"].num(state.sampling.top_k);
         sp.max_tokens = limit >= 1 ? (int)std::min(limit, (double)n_ctx) : n_ctx;
         sp.seed = (uint64_t)req["seed"].num(0);
         const bool stream = req["stream"].boolean(false);
@@ -881,6 +916,21 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
     state_.unavailable = unavailable;
     state_.tool_format = e ? tool_format_name(tool_format(e->tok())) : "none";
     state_.n_ctx = e ? e->backend().n_ctx() : 0;
+    state_.known = {};
+    state_.sampling = SampleParams{};
+    if (e) {
+        const Gguf &g = e->model().gguf;
+        struct stat st {};
+        const uint64_t bytes = stat(g.path.c_str(), &st) == 0 ? (uint64_t)st.st_size : 0;
+        state_.known = known_good(bytes, g.get_str("general.name", model_name), e->model().hp.arch);
+        if (const KnownGood *k = state_.known.row) {
+            state_.sampling.temperature = k->temperature;
+            state_.sampling.top_p = k->top_p;
+            state_.sampling.top_k = k->top_k;
+        }
+        log_line("ts5: settings: %s (temperature %.2g, top_p %.2g, top_k %d)", settings_source(state_.known).c_str(),
+                 state_.sampling.temperature, state_.sampling.top_p, state_.sampling.top_k);
+    }
     if (e)
         log_line("ts5: tool calls: %s; web search: %s", state_.tool_format.c_str(),
                 state_.tool_format == "none" ? "off (no tool calls)"

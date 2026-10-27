@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "known_good.h"
 #include "pad.h"
 #include "plain.h"
 #include "style.h"
@@ -40,10 +41,20 @@ const app::CatalogEntry *catalog_of(const std::string &file) {
     return nullptr;
 }
 
-// What a model is good for: its catalog entry's words, found by its file name
-// or its own name (a copy under another file name is the same model), else a
-// guess from its name.
+// What a download is good for: what its checks on a PS5 found, for a
+// checked file; else its catalog entry's words.
+const char *good_for(const app::CatalogEntry &e) {
+    const ts5::KnownMatch k = ts5::known_good(e.bytes, e.name, "");
+    return k.how == ts5::KnownMatch::File && *k.row->good_for ? k.row->good_for : e.good_for;
+}
+
+// What a model is good for: what its checks on a PS5 found, for a checked
+// file; else its catalog entry's words, found by its file name or its own
+// name (a copy under another file name is the same model), else a guess from
+// its name.
 std::string good_for(const app::ModelInfo &m) {
+    const ts5::KnownMatch k = ts5::known_good(m.size, m.name, m.arch);
+    if (k.how == ts5::KnownMatch::File && *k.row->good_for) return k.row->good_for;
     std::string name = lower(m.name);
     for (auto &ch : name)
         if (ch == ' ') ch = '-';
@@ -54,6 +65,17 @@ std::string good_for(const app::ModelInfo &m) {
     // The tiny test model isn't in the catalog.
     if (name.find("0.5b") != std::string::npos) return "A quick test";
     return name.find("coder") != std::string::npos ? "Coding" : "General chat";
+}
+
+// Where the settings a model gets come from (engine/src/known_good.h), for
+// its details; "" for the standard ones.
+std::string settings_from(const ts5::KnownMatch &k) {
+    switch (k.how) {
+        case ts5::KnownMatch::File: return "Settings tested on a PS5";
+        case ts5::KnownMatch::Model: return "Settings from a PS5 test of this model";
+        case ts5::KnownMatch::Family: return "Settings from a PS5 test of a similar model";
+        default: return "";
+    }
 }
 
 // A model's name in the list: with its precision when another model there
@@ -590,7 +612,7 @@ void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &lis
             snprintf(pc, sizeof pc, "%d%%", app::percent(d));
             switch (d.phase) {
                 case D::None:
-                    line = std::string(e.good_for) + "  \xC2\xB7  " + app::format_bytes(e.bytes) + " download";
+                    line = std::string(good_for(e)) + "  \xC2\xB7  " + app::format_bytes(e.bytes) + " download";
                     lc = kMuted;
                     break;
                 case D::Queued:
@@ -769,8 +791,11 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
                             : d.phase == D::Running ? (d.held ? "Waiting while a model loads" : "Downloading")
                             : d.phase == D::Retrying ? "Waiting to try again"
                                                      : "Stopped";
-        c.text(small_, DX, 278, state, kText2, DW);
-        cell(DX, 306, "GOOD FOR", e.good_for);
+        std::string sub = state;
+        if (ts5::known_good(e.bytes, e.name, "").how == ts5::KnownMatch::File)
+            sub += "  \xC2\xB7  Settings tested on a PS5";
+        c.text(small_, DX, 278, sub, kText2, DW);
+        cell(DX, 306, "GOOD FOR", good_for(e));
         cell(col2, 306, "DOWNLOAD SIZE", app::format_bytes(d.total ? d.total : e.bytes));
         // The estimate the model will show once it's here, from the header
         // fields the catalog keeps.
@@ -836,7 +861,12 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
     const app::ModelInfo &m = v.models[it.index];
     const app::Results r = v.results.count(m.file) ? v.results.at(m.file) : app::Results{};
     c.text(h2_, DX, 244, shown_name(v.models, m), kText, DW);
-    c.text(small_, DX, 278, plain::capital("added " + ago(m.mtime, v.wall)), kText2, DW);
+    std::string sub = plain::capital("added " + ago(m.mtime, v.wall));
+    if (m.runnable) {
+        const std::string from = settings_from(ts5::known_good(m.size, m.name, m.arch));
+        if (!from.empty()) sub += "  \xC2\xB7  " + from;
+    }
+    c.text(small_, DX, 278, sub, kText2, DW);
     cell(DX, 306, "GOOD FOR", good_for(m));
     cell(col2, 306, "SIZE", m.params > 0 ? plain::parameters(m.params) : "\xE2\x80\x94");
     cell(DX, 390, "PRECISION", m.quant.empty() ? "\xE2\x80\x94" : plain::quant_detail(m.quant));

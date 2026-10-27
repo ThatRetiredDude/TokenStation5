@@ -41,6 +41,7 @@ public:
     // the backend; the model must outlive the engine.
     bool set_drafter(Model &dm, Backend *db, std::string &err);
     Tokenizer &tok() { return t_; }
+    const Model &model() const { return m_; }
     Backend &backend() { return *b_; }
     // After something else ran on the backend: its KV cache no longer holds
     // the last prompt.

@@ -6,6 +6,7 @@
 #include <thread>
 
 #include "engine.h"
+#include "known_good.h"
 #include "usage.h"
 
 namespace ts5 {
@@ -65,6 +66,10 @@ public:
         std::string model, unavailable = "no model";
         std::string tool_format = "none";  // the model's (tools.h), for /v1/models
         int n_ctx = 0;                     // the engine's context, for /v1/models
+        // The model's known-good row, and the sampling a request gets for
+        // what it doesn't set: the row's, else SampleParams'.
+        KnownMatch known;
+        SampleParams sampling;
         std::mutex stats;
         Activity activity;
         // Activity's live counters, kept without a lock: the generating
