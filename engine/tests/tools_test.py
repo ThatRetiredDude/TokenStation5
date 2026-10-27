@@ -247,6 +247,10 @@ def test_parser(ts5):
         ("hermes", '<get_weather city="Oslo" days="2" zip="0150"/>', "",
          [("get_weather", {"city": "Oslo", "days": 2, "zip": "0150"})], 0, ["get_weather"]),
         ("hermes", "<b>Bold</b> answer", "<b>Bold</b> answer", [], 0, ["get_weather"]),
+        # A fenced call one brace too long (Qwen 2.5 Coder, from the console).
+        ("hermes", '```json\n{"name": "write_file", "arguments": {"path": "f.py", "content": "print(1)"}}}\n```', "",
+         [("write_file", {"path": "f.py", "content": "print(1)"})], 0),
+        ("hermes", '{"answer": 42}}', '{"answer": 42}}', [], 0),
         ("llama3", '{"name": "web_search", "parameters": {"query": "a"}}', "", [("web_search", {"query": "a"})], 0),
         ("llama3", '<|python_tag|>{"name": "a", "parameters": {}}; {"name": "b", "parameters": {"x": "y"}}',
          "", [("a", {}), ("b", {"x": "y"})], 0),
@@ -262,6 +266,7 @@ def test_parser(ts5):
          [("get_weather", {"city": "Paris"})], 0),
         ("llama3", '{"name": "a", "parameters": {"x": "y', '{"name": "a", "parameters": {"x": "y', [], 0),
         ("llama3", '{"answer": [1, 2', '{"answer": [1, 2', [], 0),
+        ("llama3", '{"name": "a", "parameters": {"x": 1}}}', "", [("a", {"x": 1})], 0),
         # Mistral Nemo: [TOOL_CALLS] (one token, printed) and an array, maybe with Mistral's ids.
         ("mistral", '[TOOL_CALLS][{"name": "web_search", "arguments": {"query": "a"}}]', "",
          [("web_search", {"query": "a"})], 0),

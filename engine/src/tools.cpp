@@ -118,6 +118,18 @@ std::string closed_json(const std::string &s) {
     return out;
 }
 
+// From i, nothing but at most 2 closing braces or brackets and space: what
+// is left after a call one brace too long, as Qwen 2.5 Coder ends a fenced
+// call ({"name": ..., "arguments": {...}}} seen on the console).
+bool stray_closers(const std::string &s, size_t i) {
+    int n = 0;
+    for (; i < s.size(); i++) {
+        if (s[i] == '}' || s[i] == ']') n++;
+        else if (!isspace((unsigned char)s[i])) return false;
+    }
+    return n <= 2;
+}
+
 // {"name": ..., "arguments"/"parameters": {...}} as a call, or false.
 bool call_from_json(const std::string &text, ToolCall &call) {
     Json j;
@@ -535,7 +547,7 @@ bool calls_from_objects(const std::string &text, std::vector<ToolCall> &calls) {
             if (e == std::string::npos || !call_from_json(s.substr(i, e - i), call)) return false;
             out.push_back(call);
             i = s.find_first_not_of(" \t\r\n;,", e);
-            if (i == std::string::npos) i = s.size();
+            if (i == std::string::npos || stray_closers(s, i)) i = s.size();
         }
         return i == s.size() && out.size() > before;
     };
@@ -869,7 +881,7 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
                 if (e == std::string::npos || !call_from_json(s.substr(i, e - i), call)) return false;
                 calls.push_back(call);
                 i = s.find_first_not_of(" \t\r\n;", e);
-                if (i == std::string::npos) i = s.size();
+                if (i == std::string::npos || stray_closers(s, i)) i = s.size();
             }
             return i == s.size() && !calls.empty();
         };
