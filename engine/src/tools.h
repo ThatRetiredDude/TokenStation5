@@ -1,7 +1,8 @@
 // Tool calling (OpenAI "tools" / "tool_calls") in the formats the models were
-// trained on: the Hermes style of Qwen 2.5 and Qwen3, and the JSON style of
-// Llama 3.1 and 3.2. Each is written the way the model's own chat template
-// writes it, so the model sees what it saw in training.
+// trained on: the Hermes style of Qwen 2.5 and Qwen3, the JSON style of
+// Llama 3.1 and 3.2, and Mistral Nemo's [TOOL_CALLS]. Each is written the way
+// the model's own chat template writes it, so the model sees what it saw in
+// training.
 #pragma once
 #include <string>
 #include <vector>
@@ -15,6 +16,7 @@ enum class ToolFormat {
     NONE,    // the model's template has no tool calls
     HERMES,  // Qwen: <tool_call>{"name": ..., "arguments": {...}}</tool_call>
     LLAMA3,  // Llama 3.1/3.2: {"name": ..., "parameters": {...}}, results in the ipython role
+    MISTRAL, // Mistral Nemo: [TOOL_CALLS][{"name": ..., "arguments": {...}, "id": ...}], results in [TOOL_RESULTS]
 };
 // Read from the model's chat template.
 ToolFormat tool_format(const Tokenizer &t);
@@ -27,6 +29,7 @@ struct ToolCall {
 struct Message {
     std::string role, content;
     std::vector<ToolCall> calls;  // an assistant message's tool calls
+    std::string call_id;          // a tool message's tool_call_id
 };
 
 // An OpenAI request's "messages".
@@ -40,8 +43,9 @@ std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, co
                         const std::string &today);
 
 // After a turn of the model's that ended in tool calls: the text that closes
-// the turn, gives each result back in order, and opens the model's next turn.
-std::string render_results(ToolFormat f, const std::vector<std::string> &results);
+// the turn, gives each call's result back in order, and opens the model's
+// next turn.
+std::string render_results(ToolFormat f, const std::vector<ToolCall> &calls, const std::vector<std::string> &results);
 
 // A finished turn: its text without the calls, and the calls. A call whose JSON
 // does not parse stays in the text. names: the request's tools, for calls

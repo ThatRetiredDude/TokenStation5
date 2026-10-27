@@ -1,7 +1,8 @@
 #include "tools.h"
 
+#include <algorithm>
 #include <cctype>
-
+#include <cstdint>
 #include <random>
 
 namespace ts5 {
@@ -234,6 +235,81 @@ std::string render_llama3(const std::vector<Message> &all, const std::vector<Jso
     return s + "<|start_header_id|>assistant<|end_header_id|>\n\n";
 }
 
+// Mistral's call ids: 9 letters and digits, as its template demands. An id
+// of that form stays; any other (OpenAI's call_ and 24) becomes 9 from its
+// FNV-1a hash, so a call and its result still match.
+std::string mistral_call_id(const std::string &id) {
+    auto alnum = [](char c) { return std::isalnum((unsigned char)c) != 0; };
+    if (id.size() == 9 && std::all_of(id.begin(), id.end(), alnum)) return id;
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : id) h = (h ^ c) * 1099511628211ull;
+    static const char *chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    std::string out;
+    for (int i = 0; i < 9; i++, h /= 62) out += chars[h % 62];
+    return out;
+}
+
+std::string mistral_result(const std::string &content, const std::string &id) {
+    return "[TOOL_RESULTS]" +
+           Json::object().set("content", Json::string(content)).set("call_id", Json::string(id)).dump() +
+           "[/TOOL_RESULTS]";
+}
+
+// Mistral Nemo's template, with two changes to match how Mistral trains
+// (mistral_common): the system message goes in the last user message even
+// when the conversation ends with a tool's result (the template drops it
+// then, and an agent would lose its instructions mid-task), and strings are
+// JSON (the template pastes a tool's description and result in unquoted).
+std::string render_mistral(const Tokenizer &t, const std::vector<Message> &all, const std::vector<Json> &tools) {
+    // "[INST] " in Mistral 7B v0.3's template, "[INST]" in Nemo's.
+    const std::string inst = has(t.chat_template(), "[INST] ") ? "[INST] " : "[INST]";
+    std::string system;
+    std::vector<Message> msgs;
+    for (auto &m : all) {
+        if (m.role == "system") system += (system.empty() ? "" : "\n\n") + m.content;
+        else msgs.push_back(m);
+    }
+    size_t last_user = std::string::npos;
+    for (size_t i = 0; i < msgs.size(); i++)
+        if (msgs[i].role == "user") last_user = i;
+    std::string s;
+    std::vector<std::string> ids;  // the latest calls', for results without a tool_call_id
+    size_t result = 0;
+    for (size_t i = 0; i < msgs.size(); i++) {
+        const Message &m = msgs[i];
+        if (m.role == "user") {
+            if (i == last_user && !tools.empty()) {
+                s += "[AVAILABLE_TOOLS][";
+                for (size_t k = 0; k < tools.size(); k++)
+                    s += (k ? ", " : "") +
+                         Json::object().set("type", Json::string("function")).set("function", tools[k]["function"]).dump();
+                s += "][/AVAILABLE_TOOLS]";
+            }
+            s += inst + (i == last_user && !system.empty() ? system + "\n\n" : "") + m.content + "[/INST]";
+        } else if (!m.calls.empty()) {
+            ids.clear();
+            result = 0;
+            s += "[TOOL_CALLS][";
+            for (size_t k = 0; k < m.calls.size(); k++) {
+                const ToolCall &c = m.calls[k];
+                ids.push_back(mistral_call_id(c.id));
+                s += std::string(k ? ", " : "") + "{\"name\": " + Json::string(c.name).dump() +
+                     ", \"arguments\": " + arguments_json(c.arguments) + ", \"id\": \"" + ids.back() + "\"}";
+            }
+            s += "]</s>";
+        } else if (m.role == "tool") {
+            const std::string id = !m.call_id.empty()  ? mistral_call_id(m.call_id)
+                                   : result < ids.size() ? ids[result]
+                                                         : mistral_call_id("");
+            result++;
+            s += mistral_result(m.content, id);
+        } else {
+            s += m.content + "</s>";
+        }
+    }
+    return s;
+}
+
 }  // namespace
 
 bool can_skip_thinking(const Tokenizer &t) { return has(t.chat_template(), "enable_thinking"); }
@@ -244,6 +320,8 @@ ToolFormat tool_format(const Tokenizer &t) {
     const std::string &tmpl = t.chat_template();
     if (t.chat_format() == Tokenizer::CHATML && has(tmpl, "<tool_call>")) return ToolFormat::HERMES;
     if (t.chat_format() == Tokenizer::LLAMA3 && has(tmpl, "ipython")) return ToolFormat::LLAMA3;
+    if (t.chat_format() == Tokenizer::MISTRAL && has(tmpl, "[TOOL_CALLS]") && has(tmpl, "[AVAILABLE_TOOLS]"))
+        return ToolFormat::MISTRAL;
     return ToolFormat::NONE;
 }
 
@@ -251,6 +329,7 @@ const char *tool_format_name(ToolFormat f) {
     switch (f) {
         case ToolFormat::HERMES: return "hermes";
         case ToolFormat::LLAMA3: return "llama3";
+        case ToolFormat::MISTRAL: return "mistral";
         default: return "none";
     }
 }
@@ -274,6 +353,7 @@ std::vector<Message> parse_messages(const Json &messages) {
         const std::string thought = m["reasoning_content"].str();
         if (msg.role == "assistant" && !thought.empty() && msg.content.find("<think>") == std::string::npos)
             msg.content = "<think>\n" + thought + "\n</think>\n\n" + msg.content;
+        msg.call_id = m["tool_call_id"].str();
         for (auto &tc : m["tool_calls"].a) {
             const Json &f = tc["function"];
             ToolCall call;
@@ -290,6 +370,9 @@ std::vector<Message> parse_messages(const Json &messages) {
 std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, const std::vector<Json> &tools,
                         const std::string &today) {
     const ToolFormat f = tool_format(t);
+    // Nemo's chat without tools differs from the older Mistral format too
+    // ("[INST]" with no space, the system message in the last user message).
+    if (f == ToolFormat::MISTRAL) return render_mistral(t, msgs, tools);
     bool tool_msgs = false;
     for (auto &m : msgs) tool_msgs |= m.role == "tool" || !m.calls.empty();
     if (f == ToolFormat::NONE || (tools.empty() && !tool_msgs)) {
@@ -300,7 +383,7 @@ std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, co
     return f == ToolFormat::HERMES ? render_hermes(t, msgs, tools) : render_llama3(msgs, tools, today);
 }
 
-std::string render_results(ToolFormat f, const std::vector<std::string> &results) {
+std::string render_results(ToolFormat f, const std::vector<ToolCall> &calls, const std::vector<std::string> &results) {
     std::string s;
     if (f == ToolFormat::HERMES) {
         s = "<|im_end|>\n<|im_start|>user";
@@ -311,6 +394,10 @@ std::string render_results(ToolFormat f, const std::vector<std::string> &results
         for (auto &r : results)
             s += "<|start_header_id|>ipython<|end_header_id|>\n\n" + llama3_output(r) + "<|eot_id|>";
         s += "<|start_header_id|>assistant<|end_header_id|>\n\n";
+    } else if (f == ToolFormat::MISTRAL) {
+        s = "</s>";
+        for (size_t i = 0; i < results.size(); i++)
+            s += mistral_result(results[i], mistral_call_id(i < calls.size() ? calls[i].id : ""));
     }
     return s;
 }
@@ -658,6 +745,35 @@ std::string without_empty_fence(const std::string &text) {
     return rstrip(c.substr(0, open));
 }
 
+// Mistral's calls: a JSON array of call objects, or the objects alone, and
+// nothing else. A call keeps the id the model wrote, when it has Mistral's
+// form, so its result can name it.
+bool mistral_calls(const std::string &text, std::vector<ToolCall> &calls) {
+    std::string s = text;
+    if (starts(s, "[")) {
+        const size_t e = object_end(s, 0);
+        if (e == std::string::npos || !strip(s.substr(e)).empty()) return false;
+        s = strip(s.substr(1, e - 2));
+    }
+    size_t i = 0;
+    while (i < s.size() && s[i] == '{') {
+        const size_t e = object_end(s, i);
+        ToolCall call;
+        if (e == std::string::npos || !call_from_json(s.substr(i, e - i), call)) return false;
+        Json j;
+        if (Json::parse(s.substr(i, e - i), j) && j["id"].type == Json::STR) {
+            const std::string id = j["id"].s;
+            bool taken = false;
+            for (auto &c : calls) taken |= c.id == id;
+            if (!taken && mistral_call_id(id) == id) call.id = id;
+        }
+        calls.push_back(call);
+        i = s.find_first_not_of(" \t\r\n,", e);
+        if (i == std::string::npos) i = s.size();
+    }
+    return i == s.size() && !calls.empty();
+}
+
 ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names) {
     ParsedTurn r;
     r.content = text;
@@ -735,6 +851,16 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
             r.calls = calls;
             r.content.clear();
         }
+    } else if (f == ToolFormat::MISTRAL) {
+        // [TOOL_CALLS] and an array of calls, after any text; or the array
+        // (or the objects) alone.
+        const size_t p = text.find("[TOOL_CALLS]");
+        const std::string s = strip(p == std::string::npos ? text : text.substr(p + 12));
+        std::vector<ToolCall> calls;
+        if (mistral_calls(s, calls) || (calls.clear(), mistral_calls(escape_bare_quotes(s), calls))) {
+            r.calls = calls;
+            r.content = p == std::string::npos ? "" : rstrip(text.substr(0, p));
+        }
     }
     return r;
 }
@@ -771,6 +897,13 @@ size_t content_prefix(ToolFormat f, const std::string &text) {
         const std::string tag = "<|python_tag|>";
         if (text[i] == '{' || tag.compare(0, std::min(tag.size(), text.size() - i), text, i, tag.size()) == 0) return 0;
         return text.size();
+    }
+    if (f == ToolFormat::MISTRAL) {
+        // A reply that opens with { or [ may be calls ([TOOL_CALLS] is one
+        // token, so it comes whole); otherwise the text before [TOOL_CALLS].
+        size_t i = text.find_first_not_of(kSpace);
+        if (i != std::string::npos && (text[i] == '{' || text[i] == '[')) return 0;
+        return std::min(text.size(), text.find("[TOOL_CALLS]"));
     }
     return text.size();
 }

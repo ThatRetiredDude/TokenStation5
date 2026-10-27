@@ -25,7 +25,8 @@ import jinja2.ext
 import jinja2.sandbox
 
 TEMPLATES = ["Qwen-Qwen2.5-7B-Instruct", "Qwen-Qwen3-0.6B", "meta-llama-Llama-3.1-8B-Instruct",
-             "meta-llama-Llama-3.2-3B-Instruct"]
+             "meta-llama-Llama-3.2-3B-Instruct", "mistralai-Mistral-Nemo-Instruct-2407"]
+NEMO = "mistralai-Mistral-Nemo-Instruct-2407"
 
 SEARCH = {"type": "function", "function": {
     "name": "web_search", "description": "Search the web.",
@@ -88,7 +89,22 @@ LLAMA3_TOOLS = ("You can call the following functions. To call one, respond with
                 "language instead. When you receive a function's output, use it to answer the original question.")
 
 
+# What ts5 writes differently from Mistral Nemo's template, on purpose
+# (tools.cpp, render_mistral), as Mistral's own mistral_common does: the
+# system message in the last user message even when a tool's result ends the
+# conversation, and strings as JSON.
+NEMO_WORDS = [("{%- if loop.last and system_message is defined %}",
+               "{%- if message == user_messages[-1] and system_message is defined %}"),
+              ("""'"' + key + '": "' + val + '"'""", """'"' + key + '": ' + val|tojson"""),
+              ("content|string", "content|tojson")]
+
+
 def as_ts5_writes_it(name, template):
+    if name == NEMO:
+        for old, new in NEMO_WORDS:
+            assert old in template, (name, old)
+            template = template.replace(old, new)
+        return template
     if not name.startswith("meta-llama-"):
         return template
     words = [('"Given the following functions, please respond with a JSON for a function call "', "ts5_tools"),
@@ -103,7 +119,7 @@ def as_ts5_writes_it(name, template):
     return template
 
 
-def render(template, messages, tools):
+def render(template, messages, tools, bos="<|begin_of_text|>"):
     env = jinja2.sandbox.ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True,
                                                        extensions=[jinja2.ext.loopcontrols])
 
@@ -115,7 +131,7 @@ def render(template, messages, tools):
 
     env.filters["tojson"] = tojson
     env.globals["raise_exception"] = raise_exception
-    kw = {"messages": messages, "add_generation_prompt": True, "bos_token": "<|begin_of_text|>",
+    kw = {"messages": messages, "add_generation_prompt": True, "bos_token": bos, "eos_token": "</s>",
           "ts5_tools": LLAMA3_TOOLS}
     if tools:
         kw["tools"] = tools
@@ -133,6 +149,35 @@ def for_ts5(messages):
     return out
 
 
+def mistral_call_id(id_):
+    """tools.cpp's mistral_call_id: an id Mistral's template takes stays, any
+    other becomes 9 letters and digits from its FNV-1a hash."""
+    if len(id_) == 9 and id_.isascii() and id_.isalnum():
+        return id_
+    h = 1469598103934665603
+    for c in id_.encode():
+        h = ((h ^ c) * 1099511628211) % 2 ** 64
+    chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    out = ""
+    for _ in range(9):
+        out += chars[h % 62]
+        h //= 62
+    return out
+
+
+def with_mistral_ids(messages):
+    """The messages with the call ids ts5 gives Mistral's template."""
+    out = []
+    for m in messages:
+        m = dict(m)
+        if "tool_calls" in m:
+            m["tool_calls"] = [dict(c, id=mistral_call_id(c["id"])) for c in m["tool_calls"]]
+        if "tool_call_id" in m:
+            m["tool_call_id"] = mistral_call_id(m["tool_call_id"])
+        out.append(m)
+    return out
+
+
 def test_prompts(ts5, model, tdir):
     failed = 0
     for name in TEMPLATES:
@@ -141,7 +186,9 @@ def test_prompts(ts5, model, tdir):
         for case, messages, tools in CASES:
             if (name, case) in SKIP:
                 continue
-            want = render(template, messages, tools)
+            # ts5's tokenizer adds Mistral's BOS; Llama's is in the prompt.
+            want = (render(template, with_mistral_ids(messages), tools, bos="") if name == NEMO
+                    else render(template, messages, tools))
             req = json.dumps({"messages": for_ts5(messages), "tools": tools})
             got = subprocess.run([ts5, "prompt", "-m", model, "--chat-template", path], input=req, text=True,
                                  capture_output=True, env=dict(os.environ, TS5_TODAY="26 Jul 2024")).stdout
@@ -209,6 +256,17 @@ def test_parser(ts5):
          "", [("write_file", {"path": "f.py", "content": 'if x:\n    print("Fizz")'})], 0),
         ("llama3", '{"type": "function", "function": {"name": "a", "parameters": {"x": 1}}}', "", [("a", {"x": 1})], 0),
         ("llama3", "Hello {there}", "Hello {there}", [], 13),
+        # Mistral Nemo: [TOOL_CALLS] (one token, printed) and an array, maybe with Mistral's ids.
+        ("mistral", '[TOOL_CALLS][{"name": "web_search", "arguments": {"query": "a"}}]', "",
+         [("web_search", {"query": "a"})], 0),
+        ("mistral", 'Let me check.[TOOL_CALLS][{"name": "a", "arguments": {}, "id": "abc123def"}, '
+                    '{"name": "b", "arguments": {"n": 2}, "id": "xyz987uvw"}]', "Let me check.",
+         [("a", {}), ("b", {"n": 2})], 13),
+        ("mistral", '[{"name": "a", "arguments": {"x": "y"}}]', "", [("a", {"x": "y"})], 0),
+        ("mistral", '[TOOL_CALLS][{"name": "write_file", "arguments": {"path": "f.py", "content": "print("Fizz")"}}]',
+         "", [("write_file", {"path": "f.py", "content": 'print("Fizz")'})], 0),
+        ("mistral", "[1, 2] are numbers.", "[1, 2] are numbers.", [], 0),
+        ("mistral", "Plain answer, [a link](x).", "Plain answer, [a link](x).", [], 26),
     ]
     failed = 0
     for fmt, text, content, calls, prefix, *names in cases:
@@ -299,6 +357,7 @@ def test_search(ts5):
 
 
 CALL = '<tool_call>\n{"name": "web_search", "arguments": {"query": "PS5 firmware"}}\n</tool_call>'
+MISTRAL_CALL = '[TOOL_CALLS][{"name": "web_search", "arguments": {"query": "PS5 firmware"}, "id": "a1b2c3d4e"}]'
 MADE_UP = '<tool_call>\n{"name": "say_hello", "arguments": {}}\n</tool_call>'
 
 
@@ -323,9 +382,13 @@ def test_search_loop(ts5, model, tdir):
         ("made-up tool", "tvly-test", [MADE_UP, "Hello."], False, 0, "Hello.", "latest PS5 firmware", [WEATHER]),
         ("made-up tool, streaming", "tvly-test", [MADE_UP, "Hello."], True, 0, "Hello.", "latest PS5 firmware",
          [WEATHER]),
+        # Mistral Nemo: the result goes back under the id the model wrote.
+        ("Mistral: answers from a search", "tvly-test", [MISTRAL_CALL, "Done.", "Final answer."], False, 1, "Done.",
+         '"call_id": "a1b2c3d4e"}[/TOOL_RESULTS]', None, NEMO),
     ]
-    template = os.path.join(tdir, "Qwen-Qwen2.5-7B-Instruct.jinja")
-    for name, key, turns, stream, hits, answer, note, *tools in cases:
+    for name, key, turns, stream, hits, answer, note, *extra in cases:
+        tools = extra[0] if extra else None
+        template = os.path.join(tdir, (extra[1] if len(extra) > 1 else "Qwen-Qwen2.5-7B-Instruct") + ".jinja")
         with tempfile.TemporaryDirectory() as d:
             script = os.path.join(d, "turns.txt")
             open(script, "w").write("\n----\n".join(turns))
@@ -347,7 +410,7 @@ def test_search_loop(ts5, model, tdir):
                 req = {"messages": [{"role": "user", "content": "What is the latest PS5 firmware?"}],
                        "stream": stream, "max_tokens": 100}
                 if tools:
-                    req["tools"] = tools[0]
+                    req["tools"] = tools
                 r = urllib.request.urlopen(urllib.request.Request(
                     f"http://127.0.0.1:{port}/v1/chat/completions", json.dumps(req).encode(),
                     {"Content-Type": "application/json"}), timeout=60).read().decode()

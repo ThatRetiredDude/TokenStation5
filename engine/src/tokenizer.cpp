@@ -298,7 +298,9 @@ std::string Tokenizer::decode(int32_t tok) const {
     if (tok < 0 || tok >= (int32_t)tokens_.size()) return {};
     const std::string &s = tokens_[tok];
     int type = tok < (int32_t)types_.size() ? types_[tok] : 1;
-    if (type == 3) return {};  // control tokens print nothing
+    // Control tokens print nothing, but [TOOL_CALLS], which opens Mistral
+    // Nemo's tool calls, prints so the parser (tools.cpp) sees them.
+    if (type == 3) return s == "[TOOL_CALLS]" ? s : std::string();
     if (kind_ == SPM) {
         if (type == 6 && s.size() == 6) return std::string(1, (char)std::stoi(s.substr(3, 2), nullptr, 16));
         std::string r;
