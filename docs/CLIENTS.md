@@ -16,6 +16,14 @@ the PS5 has to refuse it. Coding tools send a long first prompt (10,000 to
 `-c auto` (the default: as much context as fits) rather than a small fixed
 context.
 
+`/v1/models` lists the model's sampling settings under `settings` too: what
+a request gets for the `temperature`, `top_p` and `top_k` it doesn't send.
+For a model checked on a PS5 they are the ones that did best in its checks
+(`known_good` says whose: `file` for this file, `model` for another download
+of it, `family` for a model like it, `none` for the standard 0.7, 0.95 and
+40), with the day of that check and how many of its checks passed. Leave
+these settings out of your app's config to get them.
+
 All of it is on the TV too: Settings, under Apps, Instructions, "Set up an app" shows the
 base URL, the model, the key to use and the context window. A DHCP
 reservation in the router keeps the address from changing.

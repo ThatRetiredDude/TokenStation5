@@ -91,6 +91,45 @@ std::string escape_bare_quotes(const std::string &s) {
     return out;
 }
 
+// JSON cut short of its last closing braces or brackets, as Llama 3.2 3B
+// ends a call one brace short ({"type": "function", "function": {"name": ...,
+// "parameters": {...}} seen on the console): s with them, or "" when it isn't
+// that (whole, cut inside a string, or more than 2 short).
+std::string closed_json(const std::string &s) {
+    std::string open;
+    bool in_str = false;
+    for (size_t i = 0; i < s.size(); i++) {
+        const char c = s[i];
+        if (in_str) {
+            if (c == '\\') i++;
+            else if (c == '"') in_str = false;
+        } else if (c == '"') {
+            in_str = true;
+        } else if (c == '{' || c == '[') {
+            open += c;
+        } else if (c == '}' || c == ']') {
+            if (open.empty() || open.back() != (c == '}' ? '{' : '[')) return "";
+            open.pop_back();
+        }
+    }
+    if (in_str || open.empty() || open.size() > 2) return "";
+    std::string out = s;
+    for (size_t i = open.size(); i-- > 0;) out += open[i] == '{' ? '}' : ']';
+    return out;
+}
+
+// From i, nothing but at most 2 closing braces or brackets and space: what
+// is left after a call one brace too long, as Qwen 2.5 Coder ends a fenced
+// call ({"name": ..., "arguments": {...}}} seen on the console).
+bool stray_closers(const std::string &s, size_t i) {
+    int n = 0;
+    for (; i < s.size(); i++) {
+        if (s[i] == '}' || s[i] == ']') n++;
+        else if (!isspace((unsigned char)s[i])) return false;
+    }
+    return n <= 2;
+}
+
 // {"name": ..., "arguments"/"parameters": {...}} as a call, or false.
 bool call_from_json(const std::string &text, ToolCall &call) {
     Json j;
@@ -508,14 +547,28 @@ bool calls_from_objects(const std::string &text, std::vector<ToolCall> &calls) {
             if (e == std::string::npos || !call_from_json(s.substr(i, e - i), call)) return false;
             out.push_back(call);
             i = s.find_first_not_of(" \t\r\n;,", e);
-            if (i == std::string::npos) i = s.size();
+            if (i == std::string::npos || stray_closers(s, i)) i = s.size();
         }
         return i == s.size() && out.size() > before;
+    };
+    // Or an array of them, each with its arguments, so a plain answer that
+    // lists names isn't taken for calls (Coder fences an array of two
+    // calls, seen on the console).
+    auto items = [&](const std::string &s, std::vector<ToolCall> &out) {
+        if (!starts(s, "[")) return objects(s, out);
+        const size_t e = object_end(s, 0);
+        Json j;
+        if (e == std::string::npos || !(e == s.size() || stray_closers(s, e)) || !Json::parse(s.substr(0, e), j))
+            return false;
+        for (auto &o : j.a)
+            if (o.type != Json::OBJ || (o["arguments"].is_null() && o["parameters"].is_null() && o["function"].is_null()))
+                return false;
+        return objects(strip(s.substr(1, e - 2)), out);
     };
     const std::string s = strip(text);
     std::vector<ToolCall> out;
     if (!starts(s, "```")) {
-        if (!objects(s, out)) return false;
+        if (!items(s, out)) return false;
     } else {
         // Fences, one for all the calls or one for each (Coder fences each
         // of two calls, seen on the console).
@@ -523,7 +576,7 @@ bool calls_from_objects(const std::string &text, std::vector<ToolCall> &calls) {
         while (i < s.size()) {
             if (!starts(s, "```", i)) return false;
             const size_t nl = s.find('\n', i), close = nl == std::string::npos ? nl : s.find("```", nl);
-            if (close == std::string::npos || !objects(strip(s.substr(nl + 1, close - nl - 1)), out)) return false;
+            if (close == std::string::npos || !items(strip(s.substr(nl + 1, close - nl - 1)), out)) return false;
             i = s.find_first_not_of(" \t\r\n", close + 3);
             if (i == std::string::npos) i = s.size();
         }
@@ -583,10 +636,11 @@ bool elements_object(const std::string &text, Json &j) {
 
 // A call written as child elements, nothing else in the text:
 // <name>get_weather</name> <arguments>{"city": "Paris"}</arguments>, the
-// arguments maybe elements themselves (<arguments><city>Paris</city></arguments>).
+// arguments maybe elements themselves (<arguments><city>Paris</city></arguments>),
+// the name maybe <function>get_weather</function> (Coder, seen on the console).
 bool element_call(const std::string &text, std::vector<ToolCall> &calls) {
     std::string s = text, name, args;
-    if (!take_element(s, "name", name) || name.empty()) return false;
+    if ((!take_element(s, "name", name) && !take_element(s, "function", name)) || name.empty()) return false;
     if (!take_element(s, "arguments", args) && !take_element(s, "parameters", args)) args = "{}";
     Json j;
     if (!strip(s).empty()) return false;
@@ -600,11 +654,37 @@ bool element_call(const std::string &text, std::vector<ToolCall> &calls) {
 }
 
 bool calls_in_any_wrapper(const std::string &text, std::vector<ToolCall> &calls);
+bool calls_in_elements(const std::string &text, std::vector<ToolCall> &calls);
 
-// What a call tag can hold: call objects, a call as child elements, or a
-// call in one more wrapper.
+// What a call tag can hold: call objects, a call as child elements, a call
+// in one more wrapper, or calls in an element each.
 bool calls_in_body(const std::string &body, std::vector<ToolCall> &calls) {
-    return calls_from_objects(body, calls) || element_call(body, calls) || calls_in_any_wrapper(body, calls);
+    return calls_from_objects(body, calls) || element_call(body, calls) || calls_in_any_wrapper(body, calls) ||
+           calls_in_elements(body, calls);
+}
+
+// Two or more elements of any name, each holding a call, and nothing else:
+// <action><function>get_weather</function>...</action> <action>...</action>
+// (Coder, in an <actions> wrapper, seen on the console).
+bool calls_in_elements(const std::string &text, std::vector<ToolCall> &calls) {
+    std::string s = strip(text);
+    std::vector<ToolCall> out;
+    int n = 0;
+    while (!s.empty()) {
+        const size_t gt = s.find('>');
+        if (s[0] != '<' || gt == std::string::npos || gt < 2) return false;
+        const std::string tag = s.substr(1, gt - 1);
+        for (char c : tag)
+            if (!isalnum((unsigned char)c) && c != '_' && c != '-') return false;
+        const std::string close = "</" + tag + ">";
+        const size_t e = s.find(close, gt + 1);
+        if (e == std::string::npos || !calls_in_body(s.substr(gt + 1, e - gt - 1), out)) return false;
+        s = lstrip(s.substr(e + close.size()));
+        n++;
+    }
+    if (n < 2) return false;
+    calls.insert(calls.end(), out.begin(), out.end());
+    return true;
 }
 
 bool calls_in_any_wrapper(const std::string &text, std::vector<ToolCall> &calls) {
@@ -842,12 +922,19 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
                 if (e == std::string::npos || !call_from_json(s.substr(i, e - i), call)) return false;
                 calls.push_back(call);
                 i = s.find_first_not_of(" \t\r\n;", e);
-                if (i == std::string::npos) i = s.size();
+                if (i == std::string::npos || stray_closers(s, i)) i = s.size();
             }
             return i == s.size() && !calls.empty();
         };
         std::vector<ToolCall> calls;
-        if (only_calls(s, calls) || (calls.clear(), only_calls(escape_bare_quotes(s), calls))) {
+        bool ok = only_calls(s, calls) || (calls.clear(), only_calls(escape_bare_quotes(s), calls));
+        // One call cut short of its closing braces.
+        if (!ok && starts(s, "{") && object_end(s, 0) == std::string::npos) {
+            std::string c = closed_json(s);
+            if (c.empty()) c = closed_json(escape_bare_quotes(s));
+            ok = !c.empty() && (calls.clear(), only_calls(c, calls)) && calls.size() == 1;
+        }
+        if (ok) {
             r.calls = calls;
             r.content.clear();
         }

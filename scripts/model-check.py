@@ -7,9 +7,13 @@ task, a long prompt and the error for one that's too long.
     python3 scripts/model-check.py                       # PS5_HOST from the env
     python3 scripts/model-check.py --host 10.35.12.121 --only chat,tools
     TS5_KEY=ts5-... python3 scripts/model-check.py      # when a key is needed
+    python3 scripts/model-check.py --repeat 3 --sampling '{"temperature": 0.6, "top_p": 0.9}'
 
 Every check prints PASS or FAIL with what came back, and --out FILE saves
-them all as JSON, with each check's last reply whole. Each request sends
+them all as JSON, with each check's last reply whole and the sampling
+settings they ran with (scripts/known-good.py reads it). --sampling gives every
+request settings it doesn't set itself, and --repeat runs the checks that many
+times and counts each one's passes, to compare settings for a model. Each request sends
 "web_search": false, so no check spends a search. The agent check never runs what the model writes: it compiles the
 file and looks at it. Standard library only.
 """
@@ -38,8 +42,9 @@ TIME = {"type": "function", "function": {
 
 
 class Api:
-    def __init__(self, base, key, timeout):
+    def __init__(self, base, key, timeout, sampling=None):
         self.base, self.key, self.timeout = base, key, timeout
+        self.sampling = sampling or {}  # what every request gets unless it sets its own
         self.last = None  # the last chat reply, whole, for --out
 
     def _req(self, path, body=None):
@@ -55,7 +60,7 @@ class Api:
 
     def chat(self, body):
         """The reply as JSON, or (status, error JSON) for an HTTP error."""
-        body = dict(body, web_search=False)
+        body = dict(self.sampling, **body, web_search=False)
         try:
             with urllib.request.urlopen(self._req("/v1/chat/completions", body), timeout=self.timeout) as r:
                 self.last = json.load(r)
@@ -68,7 +73,7 @@ class Api:
 
     def stream(self, body):
         """The stream's chunks, in order, and whether it ended with [DONE]."""
-        body = dict(body, web_search=False, stream=True)
+        body = dict(self.sampling, **body, web_search=False, stream=True)
         chunks, done = [], False
         with urllib.request.urlopen(self._req("/v1/chat/completions", body), timeout=self.timeout) as r:
             for raw in r:
@@ -83,6 +88,7 @@ class Api:
         return chunks, done
 
     def completion(self, body):
+        body = dict(self.sampling, **body)
         with urllib.request.urlopen(self._req("/v1/completions", body), timeout=self.timeout) as r:
             return json.load(r)
 
@@ -114,7 +120,10 @@ def check_models(api, ctx):
     ctx["model"] = data[0]["id"]
     ctx["tools"] = (data[0].get("capabilities") or {}).get("tools", False)
     ctx["n_ctx"] = data[0].get("context_length") or 0
-    return True, "%s, context %s, tools %s" % (ctx["model"], ctx["n_ctx"], ctx["tools"])
+    # What a request gets for the sampling it doesn't set (known-good.tsv).
+    ctx["settings"] = {k: v for k, v in (data[0].get("settings") or {}).items() if k in ("temperature", "top_p", "top_k")}
+    return True, "%s, context %s, tools %s, settings %s" % (ctx["model"], ctx["n_ctx"], ctx["tools"],
+                                                         json.dumps(ctx["settings"]) if ctx["settings"] else "-")
 
 
 def check_chat(api, ctx):
@@ -382,32 +391,52 @@ def main():
     ap.add_argument("--only", default="", help="comma-separated check names (models always runs)")
     ap.add_argument("--timeout", type=float, default=600)
     ap.add_argument("--out", default="", help="save the results as JSON")
+    ap.add_argument("--sampling", default="{}",
+                    help='JSON settings for every request that has none of its own, e.g. {"temperature": 0.6}')
+    ap.add_argument("--repeat", type=int, default=1, help="run the checks this many times")
     a = ap.parse_args()
-    api = Api("http://%s:%d" % (a.host, a.port), a.key, a.timeout)
+    api = Api("http://%s:%d" % (a.host, a.port), a.key, a.timeout, json.loads(a.sampling))
     only = {x for x in a.only.split(",") if x}
-    ctx, results = {}, []
-    for name, fn in CHECKS:
-        if only and name not in only and name != "models":
-            continue
-        t0 = time.time()
-        api.last = None
-        try:
-            ok, detail = fn(api, ctx)
-        except Exception as e:  # a check that throws is a failed check
-            ok, detail = False, "%s: %s" % (type(e).__name__, e)
-        s = time.time() - t0
-        mark = "SKIP" if ok is None else "PASS" if ok else "FAIL"
-        print("%-4s %-10s %6.1f s  %s" % (mark, name, s, detail), flush=True)
-        results.append({"check": name, "result": mark, "seconds": round(s, 1), "detail": detail,
-                        "last_reply": api.last})
-        if name == "models" and not ok:
+    ctx, runs = {}, []
+    for run in range(a.repeat):
+        if a.repeat > 1:
+            print("== run %d of %d" % (run + 1, a.repeat), flush=True)
+        results = []
+        for name, fn in CHECKS:
+            if only and name not in only and name != "models":
+                continue
+            t0 = time.time()
+            api.last = None
+            try:
+                ok, detail = fn(api, ctx)
+            except Exception as e:  # a check that throws is a failed check
+                ok, detail = False, "%s: %s" % (type(e).__name__, e)
+            s = time.time() - t0
+            mark = "SKIP" if ok is None else "PASS" if ok else "FAIL"
+            print("%-4s %-10s %6.1f s  %s" % (mark, name, s, detail), flush=True)
+            results.append({"check": name, "result": mark, "seconds": round(s, 1), "detail": detail,
+                            "last_reply": api.last})
+            if name == "models" and not ok:
+                break
+        runs.append(results)
+        if results and results[0]["result"] == "FAIL":
             break
     if a.out:
         with open(a.out, "w") as f:
-            json.dump({"model": ctx.get("model"), "results": results}, f, indent=1)
-    failed = [r["check"] for r in results if r["result"] == "FAIL"]
-    print("%s: %d passed, %d failed%s" % (ctx.get("model"), sum(r["result"] == "PASS" for r in results),
-                                          len(failed), (" (" + ", ".join(failed) + ")") if failed else ""))
+            out = {"model": ctx.get("model"), "sampling": dict(ctx.get("settings") or {}, **api.sampling),
+                   "results": runs[0]}
+            if a.repeat > 1:
+                out["runs"] = runs
+            json.dump(out, f, indent=1)
+    passes, failed = 0, []
+    for name in [r["check"] for r in runs[0]]:
+        marks = [r["result"] for results in runs for r in results if r["check"] == name]
+        passes += marks.count("PASS")
+        if "FAIL" in marks:
+            failed.append(name if len(runs) == 1 else "%s %d/%d" % (name, marks.count("PASS"), len(marks)))
+    print("%s: %d passed, %d failed%s%s" % (
+        ctx.get("model"), passes, sum(r["result"] == "FAIL" for results in runs for r in results),
+        " in %d runs" % len(runs) if len(runs) > 1 else "", (" (" + ", ".join(failed) + ")") if failed else ""))
     sys.exit(1 if failed else 0)
 
 
