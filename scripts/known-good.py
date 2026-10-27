@@ -28,7 +28,8 @@ COLUMNS = ["key", "name", "same", "bytes", "family", "good_for", "temperature", 
 # What a request gets when it sets nothing and the model has no row
 # (engine/src/engine.h SampleParams).
 STANDARD = {"temperature": 0.7, "top_p": 0.95, "top_k": 40}
-# What a model is good for, by the checks that must pass in every run.
+# What a model is good for, each use on top of the ones before it, by the
+# checks that must pass in most runs.
 USES = [("chat", ["chat", "stream", "system", "turns", "parts"]),
         ("tools", ["tools", "toolresult", "toolchoice", "notool", "twocalls", "toolstream"]),
         ("coding apps", ["agent"])]
@@ -70,10 +71,15 @@ def score(path):
 
 
 def good_for(runs):
-    passed = lambda name: all(r["result"] == "PASS" for results in runs for r in results if r["check"] == name) and \
-        any(r["check"] == name for results in runs for r in results)
-    uses = [use for use, checks in USES if all(passed(c) for c in checks)]
-    if not uses or uses[0] != "chat":
+    def passed(name):
+        marks = [r["result"] for results in runs for r in results if r["check"] == name]
+        return marks.count("PASS") * 2 > len(marks)
+    uses = []
+    for use, checks in USES:
+        if not all(passed(c) for c in checks):
+            break
+        uses.append(use)
+    if not uses:
         return "-"
     words = ", ".join(uses)  # short: it fits a cell on the Models page
     return words[0].upper() + words[1:]
