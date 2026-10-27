@@ -753,7 +753,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                 }
                 log_line("ts5: %s %s", id.c_str(), log.c_str());
             }
-            prompt += text + render_results(tf, results) + opening;
+            prompt += text + render_results(tf, searches, results) + opening;
         }
         {
             std::lock_guard<std::mutex> g(state.stats);

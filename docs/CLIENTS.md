@@ -117,6 +117,10 @@ need: asked for a poem about rain with only a weather tool, Llama 3.1 8B asks
 for the weather in London. Meta says the same of its 8B model. For plain chat with a
 Llama, leave the tools out, or use a Qwen model.
 
+Mistral Nemo 12B takes tools in its own format. On the PS5 it passed every
+tool check of the model check, the write-a-file agent task too, with 15,360
+tokens of context (what fits beside its weights).
+
 ## Continue, Cline, Roo Code and others
 
 Choose the "OpenAI compatible" (or "OpenAI", with a custom base URL)
