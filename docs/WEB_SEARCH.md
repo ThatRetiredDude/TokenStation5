@@ -43,6 +43,7 @@ ts5 reads the tool format from each model's own chat template when it loads it.
 | Llama 3.1 8B | yes (Llama JSON format) | good |
 | Qwen 2.5 Coder 7B | yes (Hermes format) | works; less sure about when to search |
 | Llama 3.2 3B | yes (Llama JSON format) | simple single searches |
+| Mistral Nemo 12B | yes (Mistral format) | not tried yet |
 
 A model whose template has no tool format gets no tools and no search;
 everything else works as before.
