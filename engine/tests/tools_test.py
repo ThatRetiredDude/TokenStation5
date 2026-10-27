@@ -256,6 +256,12 @@ def test_parser(ts5):
          "", [("write_file", {"path": "f.py", "content": 'if x:\n    print("Fizz")'})], 0),
         ("llama3", '{"type": "function", "function": {"name": "a", "parameters": {"x": 1}}}', "", [("a", {"x": 1})], 0),
         ("llama3", "Hello {there}", "Hello {there}", [], 13),
+        # A call one brace short (Llama 3.2 3B, from the console); cut inside a
+        # string, or plain JSON cut short, stays text.
+        ("llama3", '{ "type": "function", "function": { "name": "get_weather", "parameters": { "city": "Paris" } }', "",
+         [("get_weather", {"city": "Paris"})], 0),
+        ("llama3", '{"name": "a", "parameters": {"x": "y', '{"name": "a", "parameters": {"x": "y', [], 0),
+        ("llama3", '{"answer": [1, 2', '{"answer": [1, 2', [], 0),
         # Mistral Nemo: [TOOL_CALLS] (one token, printed) and an array, maybe with Mistral's ids.
         ("mistral", '[TOOL_CALLS][{"name": "web_search", "arguments": {"query": "a"}}]', "",
          [("web_search", {"query": "a"})], 0),
