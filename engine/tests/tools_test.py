@@ -251,6 +251,18 @@ def test_parser(ts5):
         ("hermes", '```json\n{"name": "write_file", "arguments": {"path": "f.py", "content": "print(1)"}}}\n```', "",
          [("write_file", {"path": "f.py", "content": "print(1)"})], 0),
         ("hermes", '{"answer": 42}}', '{"answer": 42}}', [], 0),
+        # Two calls as an array in a fence, and as <action> elements (Coder,
+        # from the console); an array of names alone stays text.
+        ("hermes", '```json\n[\n    {"name": "get_weather", "arguments": {"city": "Paris"}},\n'
+                   '    {"name": "get_time", "arguments": {"zone": "Asia/Tokyo"}}\n]\n```', "",
+         [("get_weather", {"city": "Paris"}), ("get_time", {"zone": "Asia/Tokyo"})], 0),
+        ("hermes", '[{"name": "Ada"}, {"name": "Bob"}]', '[{"name": "Ada"}, {"name": "Bob"}]', [], 34),
+        ("hermes", '```xml\n<actions>\n  <action>\n    <function>get_weather</function>\n    <arguments>\n'
+                   '      <city>Paris</city>\n    </arguments>\n  </action>\n  <action>\n    <function>get_time'
+                   '</function>\n    <arguments>\n      <zone>Asia/Tokyo</zone>\n    </arguments>\n  </action>\n'
+                   '</actions>\n```', "",
+         [("get_weather", {"city": "Paris"}), ("get_time", {"zone": "Asia/Tokyo"})], 0),
+        ("hermes", "<p>One</p>\n<p>Two</p>", "<p>One</p>\n<p>Two</p>", [], 0),
         ("llama3", '{"name": "web_search", "parameters": {"query": "a"}}', "", [("web_search", {"query": "a"})], 0),
         ("llama3", '<|python_tag|>{"name": "a", "parameters": {}}; {"name": "b", "parameters": {"x": "y"}}',
          "", [("a", {}), ("b", {"x": "y"})], 0),
