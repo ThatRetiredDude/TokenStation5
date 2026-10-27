@@ -10,7 +10,8 @@ task, a long prompt and the error for one that's too long.
     python3 scripts/model-check.py --repeat 3 --sampling '{"temperature": 0.6, "top_p": 0.9}'
 
 Every check prints PASS or FAIL with what came back, and --out FILE saves
-them all as JSON, with each check's last reply whole. --sampling gives every
+them all as JSON, with each check's last reply whole and the sampling
+settings they ran with (scripts/known-good.py reads it). --sampling gives every
 request settings it doesn't set itself, and --repeat runs the checks that many
 times and counts each one's passes, to compare settings for a model. Each request sends
 "web_search": false, so no check spends a search. The agent check never runs what the model writes: it compiles the
@@ -119,7 +120,10 @@ def check_models(api, ctx):
     ctx["model"] = data[0]["id"]
     ctx["tools"] = (data[0].get("capabilities") or {}).get("tools", False)
     ctx["n_ctx"] = data[0].get("context_length") or 0
-    return True, "%s, context %s, tools %s" % (ctx["model"], ctx["n_ctx"], ctx["tools"])
+    # What a request gets for the sampling it doesn't set (known-good.tsv).
+    ctx["settings"] = {k: v for k, v in (data[0].get("settings") or {}).items() if k in ("temperature", "top_p", "top_k")}
+    return True, "%s, context %s, tools %s, settings %s" % (ctx["model"], ctx["n_ctx"], ctx["tools"],
+                                                         json.dumps(ctx["settings"]) if ctx["settings"] else "-")
 
 
 def check_chat(api, ctx):
@@ -419,7 +423,8 @@ def main():
             break
     if a.out:
         with open(a.out, "w") as f:
-            out = {"model": ctx.get("model"), "sampling": api.sampling, "results": runs[0]}
+            out = {"model": ctx.get("model"), "sampling": dict(ctx.get("settings") or {}, **api.sampling),
+                   "results": runs[0]}
             if a.repeat > 1:
                 out["runs"] = runs
             json.dump(out, f, indent=1)
