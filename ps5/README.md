@@ -131,7 +131,7 @@ ranges outlast its rotation.
 
 **Models**: the models on the PS5, the built-in ones to download, and
 Search Hugging Face: type a name ("qwen coder"), and the most downloaded GGUF
-repos of a kind ts5 runs (Llama, Mistral, Qwen 2 and 3) are looked through
+repos of a kind ts5 runs (Llama, Mistral, Qwen 2 and 3, Gemma 3) are looked through
 for files of a type the GPU code takes (Q4_K_M first, through Q8_0 and F16)
 that fit in memory with at least 8,192 tokens of context, two a repo at
 most. Each one downloads like the built-in ones, pinned to the repo's
