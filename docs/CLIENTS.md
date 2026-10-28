@@ -129,6 +129,11 @@ Mistral Nemo 12B takes tools in its own format. On the PS5 it passed every
 tool check of the model check, the write-a-file agent task too, with 15,360
 tokens of context (what fits beside its weights).
 
+Gemma 3 12B takes tools as Qwen 3 does (`<tool_call>` JSON), inside Gemma's
+own turns. On the PS5 it passed 59 of 60 checks over three runs of the model
+check, the agent task included, with about 29,700 tokens of context. Once it
+made one call where a question asked for two at a time.
+
 ## Continue, Cline, Roo Code and others
 
 Choose the "OpenAI compatible" (or "OpenAI", with a custom base URL)
