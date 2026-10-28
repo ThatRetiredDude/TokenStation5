@@ -8,8 +8,12 @@
 // The cache is f16, or with KV_Q8 8-bit values with an f16 scale per 32
 // (attn_q8.comp). A sliding layer (win > 0) sees each query's last win keys,
 // its own included, from k_lo on (the first any of them sees), and keeps key
-// p in slot p % ring of its ring (ring > 0).
+// p in slot p % ring of its ring (ring > 0). Each score is the sum of TPS
+// threads' shares of its dot product, so a few rows of wide heads (Gemma 3's
+// 256, 8 keys a tile) keep every thread busy.
 #extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 layout(local_size_x = 128) in;
 
@@ -86,16 +90,24 @@ void main() {
             vs[vo] = v.x; vs[vo + 1] = v.y; vs[vo + 2] = v.z; vs[vo + 3] = v.w;
         }
         barrier();
-        for (uint e = tid; e < R * BK; e += 128) {
-            const uint r = e / BK, jj = e % BK;
-            float s = NEG_INF;
+        // Threads per score: as many as 128 threads give each of the tile's
+        // R x BK, a power of 2 within a subgroup. The loop's steps are the
+        // same for every thread, for the shuffles.
+        uint TPS = 1;
+        while (TPS < 32 && TPS * 2 <= gl_SubgroupSize && R * BK * TPS * 2 <= 128) TPS *= 2;
+        for (uint e0 = 0; e0 < R * BK * TPS; e0 += 128) {
+            const uint e = e0 + tid, pair = e / TPS, part = e % TPS;
+            const uint r = pair / BK, jj = pair % BK;
             const uint qp = pc.pos0 + t0 + r / G;
-            if (jj < nb && kb + jj <= qp && (pc.win == 0 || kb + jj + pc.win > qp)) {  // causal, and the window
-                s = 0.0;
+            // Causal, and the window.
+            const bool ok = pair < R * BK && jj < nb && kb + jj <= qp && (pc.win == 0 || kb + jj + pc.win > qp);
+            float s = 0.0;
+            if (ok) {
                 const uint qo = r * HD, ko = jj * (HD + 1);
-                for (uint d = 0; d < HD; d++) s += qs[qo + d] * ks[ko + d];
+                for (uint d = part; d < HD; d += TPS) s += qs[qo + d] * ks[ko + d];
             }
-            sc[e] = s;
+            for (uint b = 1; b < TPS; b <<= 1) s += subgroupShuffleXor(s, b);
+            if (part == 0 && pair < R * BK) sc[pair] = ok ? s : NEG_INF;
         }
         barrier();
         if (tid < R) {
