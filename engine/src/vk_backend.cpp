@@ -641,27 +641,43 @@ private:
             }
         }
         // Each layer's place in the caches: n_ctx_ slots, or a sliding
-        // layer's ring where that is fewer.
-        size_t slots = 0;
+        // layer's ring where that is fewer. The caches are cut into pieces of
+        // about 256 MiB, a few layers each: freed models leave the GPU's
+        // memory in holes, and one 2 GiB buffer for a whole cache may find
+        // no hole that big when the pieces would fit.
+        const size_t piece = 256ull << 20, per_value = kv_ == KvType::Q8 ? 1 : 2;
+        std::vector<size_t> values;  // per piece
         layer_off_.assign(hp_.n_layer, 0);
+        layer_buf_.assign(hp_.n_layer, 0);
         ring_.assign(hp_.n_layer, 0);
         for (int l = 0; l < hp_.n_layer; l++) {
             const int r = hp_.swa(l) ? ring_slots(hp_) : 0;
             ring_[l] = r > 0 && r < n_ctx_ ? (uint32_t)r : 0;
-            layer_off_[l] = (uint32_t)(slots * KVD);
-            slots += ring_[l] ? ring_[l] : (size_t)n_ctx_;
+            const size_t v = (ring_[l] ? ring_[l] : (size_t)n_ctx_) * KVD;
+            if (values.empty() || (values.back() > 0 && (values.back() + v) * per_value > piece)) values.push_back(0);
+            layer_buf_[l] = (uint32_t)(values.size() - 1);
+            layer_off_[l] = (uint32_t)values.back();
+            values.back() += v;
         }
         // Bytes of K (and as many of V): f16, or 8 bits plus a 2-byte scale per 32.
-        const size_t values = slots * KVD;
-        const size_t cache = kv_ == KvType::Q8 ? values : 2 * values, scales = kv_ == KvType::Q8 ? values / 16 : 0;
-        if (cache > props_.limits.maxStorageBufferRange) {
-            err = "KV cache larger than maxStorageBufferRange; use a smaller context";
-            return false;
-        }
         // Exact sizes: a 1 GiB block for the scales would take what
         // fit_context keeps free for everything else.
-        if (!mk(kc_, cache, false, true) || !mk(vc_, cache, false, true)) return false;
-        if (scales && (!mk(ks_, scales, false, true) || !mk(vs_, scales, false, true))) return false;
+        size_t cache = 0, scales = 0;
+        kc_.assign(values.size(), Buf{});
+        vc_.assign(values.size(), Buf{});
+        ks_.assign(values.size(), Buf{});
+        vs_.assign(values.size(), Buf{});
+        for (size_t i = 0; i < values.size(); i++) {
+            const size_t c = values[i] * per_value, sc = kv_ == KvType::Q8 ? values[i] / 16 : 0;
+            if (c > props_.limits.maxStorageBufferRange) {
+                err = "KV cache larger than maxStorageBufferRange; use a smaller context";
+                return false;
+            }
+            if (!mk(kc_[i], c, false, true) || !mk(vc_[i], c, false, true)) return false;
+            if (sc && (!mk(ks_[i], sc, false, true) || !mk(vs_[i], sc, false, true))) return false;
+            cache += c;
+            scales += sc;
+        }
         ts5::log_line("ts5: %s: weights %.2f GiB, KV cache %.2f GiB (%s, %d tokens), %s memory", name_.c_str(),
                 weight_bytes_ / 1073741824.0, 2.0 * (cache + scales) / 1073741824.0, kv_type_name(kv_), n_ctx_,
                 x_.map ? "unified" : "device");
@@ -909,16 +925,16 @@ private:
         return n;
     }
 
-    // Attention of n tokens at pos0 for the layer at cache_off, into att_.
-    // win: a sliding layer's window (0: all keys); ring: its ring's slots
+    // Attention of n tokens at pos0 for the layer at cache_off in cache
+    // piece kb, into att_. win: a sliding layer's window (0: all keys); ring: its ring's slots
     // (0: one per position). Only attn has them.
-    void attention(int n, int pos0, uint32_t cache_off, uint32_t win = 0, uint32_t ring = 0) {
+    void attention(int n, int pos0, uint32_t kb, uint32_t cache_off, uint32_t win = 0, uint32_t ring = 0) {
         const uint32_t HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
         const float scale = hp_.attn_scale;
         if (!attn_ok()) {
             struct { uint32_t head_dim, n_head, n_head_kv, pos0, cache_off; float scale; } pc{
                 HD, H, HKV, (uint32_t)pos0, cache_off, scale};
-            dispatch("attention", {&q_, &kc_, &vc_, &att_}, pc, H, (uint32_t)n);
+            dispatch("attention", {&q_, &kc_[kb], &vc_[kb], &att_}, pc, H, (uint32_t)n);
             return;
         }
         // Rows per workgroup: the query heads of one KV head, for as many
@@ -958,9 +974,9 @@ private:
         else if (pf && HD == 128 && attn_pf128_ && kv_ == KvType::F16)
             kern = "attn_pf128";
         if (kv_ == KvType::Q8)
-            dispatch(kern, {&q_, &kc_, &vc_, &att_, &part_, &ks_, &vs_}, pc, groups, n_split);
+            dispatch(kern, {&q_, &kc_[kb], &vc_[kb], &att_, &part_, &ks_[kb], &vs_[kb]}, pc, groups, n_split);
         else
-            dispatch(kern, {&q_, &kc_, &vc_, &att_, &part_}, pc, groups, n_split);
+            dispatch(kern, {&q_, &kc_[kb], &vc_[kb], &att_, &part_}, pc, groups, n_split);
         if (n_split > 1) {
             struct { uint32_t head_dim, n_head, n_tok, n_split; } mpc{HD, H, (uint32_t)n, n_split};
             dispatch("attn_merge", {&part_, &att_}, mpc, H, (uint32_t)n);
@@ -1113,7 +1129,7 @@ private:
             no_barrier_ = fuse_;
             matmul(L.wv, h_, v_, n, false);
             matmul(L.wq, h_, q_, n, false);
-            const uint32_t cache_off = layer_off_[l];
+            const uint32_t cache_off = layer_off_[l], kb = layer_buf_[l];
             const bool swa = hp_.swa(l);
             {
                 struct {
@@ -1129,13 +1145,13 @@ private:
                 const Buf &nq = L.q_norm ? W(L.q_norm) : dummy_, &nk = L.k_norm ? W(L.k_norm) : dummy_;
                 const Buf &ff = m_.rope_freqs ? W(m_.rope_freqs) : dummy_;
                 if (kv_ == KvType::Q8)
-                    dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_, &ks_, &vs_, &ff}, pc,
+                    dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
                 else
-                    dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_, &ff}, pc,
+                    dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
             }
-            attention(n, pos0, cache_off, swa ? (uint32_t)hp_.swa_window : 0, ring_[l]);
+            attention(n, pos0, kb, cache_off, swa ? (uint32_t)hp_.swa_window : 0, ring_[l]);
             // Gemma normalizes attention's output before it joins the residual.
             if (L.post_attn_norm) {
                 matmul(L.wo, att_, h_, n, false);
@@ -1293,9 +1309,10 @@ private:
     bool cpu_prof_ = false;  // TS5_PROFILE=1 or 2 (CPU times only)
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
-    Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_, kc_, vc_, ks_, vs_;
-    // Each layer's first cache element, and a sliding layer's ring slots (0: none).
-    std::vector<uint32_t> layer_off_, ring_;
+    Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_;
+    std::vector<Buf> kc_, vc_, ks_, vs_;  // the KV cache's pieces
+    // Each layer's first cache element and piece, and a sliding layer's ring slots (0: none).
+    std::vector<uint32_t> layer_off_, layer_buf_, ring_;
 };
 
 }  // namespace
