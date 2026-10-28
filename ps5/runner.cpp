@@ -73,10 +73,10 @@ std::string base(const std::string &p) {
 // anything stayed behind: the CPU's flexible memory, and the direct memory the
 // GPU allocates from, all its free runs added up (the largest alone hides what
 // a freed model left as smaller holes), with the largest run beside it.
-void log_memory(const std::string &when) {
-    size_t flex = 0, free_total = 0, largest = 0;
+// The direct memory's free runs, added up, and the largest. false: unknown.
+bool direct_free(size_t &free_total, size_t &largest) {
+    free_total = largest = 0;
     const size_t pool = sceKernelGetDirectMemorySize();
-    const bool fok = sceKernelAvailableFlexibleMemorySize(&flex) == 0;
     bool dok = false;
     for (off_t start = 0; pool > 0 && start < (off_t)pool;) {
         off_t at = 0;
@@ -87,10 +87,32 @@ void log_memory(const std::string &when) {
         largest = std::max(largest, run);
         start = at + (off_t)run;
     }
+    return dok;
+}
+
+void log_memory(const std::string &when) {
+    size_t flex = 0, free_total = 0, largest = 0;
+    const size_t pool = sceKernelGetDirectMemorySize();
+    const bool fok = sceKernelAvailableFlexibleMemorySize(&flex) == 0;
+    const bool dok = direct_free(free_total, largest);
     const double mib = 1024.0 * 1024.0;
     printf("ts5-title: memory %s: flexible free %.0f MiB%s, direct free %.0f of %.0f MiB (largest run %.0f)%s\n",
            when.c_str(), flex / mib, fok ? "" : " (unknown)", free_total / mib, pool / mib, largest / mib,
            dok ? "" : " (unknown)");
+}
+
+// Whether a check of n tokens has the memory it needs beside a model that is
+// already loaded: both sides' logits, and the CPU reference's cache,
+// activations and one weight at a time (Gemma 3's 262144-token vocabulary
+// makes this over 2 GiB at 512 tokens). Else the check loads the model again
+// with a context of its own, which frees the serving one's cache.
+bool check_fits(const ts5::Model &m, int n) {
+    const ts5::HParams &hp = m.hp;
+    const uint64_t kvd = (uint64_t)hp.n_head_kv * hp.head_dim;
+    const uint64_t need = 2ull * n * hp.n_vocab * 4 + 8ull * hp.n_layer * n * kvd + 8ull * n * hp.n_ff +
+                          (1ull << 30);
+    size_t free_total = 0, largest = 0;
+    return direct_free(free_total, largest) && free_total >= need;
 }
 
 }  // namespace
@@ -348,7 +370,8 @@ void Runner::run(const Job &job) {
     // An exception (out of memory, say) fails the job but not what follows it:
     // the serving model goes back on the API either way.
     try {
-        if (job.env.empty() && serving_ && serving_->path == job.path && serving_->n_ctx >= need_ctx) {
+        if (job.env.empty() && serving_ && serving_->path == job.path && serving_->n_ctx >= need_ctx &&
+            (!check || check_fits(serving_->model, job.n))) {
             // What an app's request gets meanwhile, and the Chat page shows.
             server_.set_engine(nullptr, "",
                                check ? "The model is busy with a GPU check. Try again in a moment."
@@ -382,15 +405,21 @@ void Runner::run(const Job &job) {
             if (ok) {
                 const std::string line = ts5::check_line(file, r);
                 printf("%s\n", line.c_str());
-                CheckRecord rec{r.pass, r.same_top, r.n, r.rel, r.gpu_ms, r.cpu_ms, (int64_t)time(nullptr)};
-                {
-                    std::lock_guard<std::mutex> lk(lib_mutex_);
-                    lib_.record(file, rec);
+                // A test window (TS5_SWA_WINDOW) isn't how the model runs: its
+                // result stays in the log, not on the Models page.
+                if (target->model.hp.swa_test) {
+                    event("GPU check on " + name + " with a test window: " + (r.pass ? "passed" : "failed"));
+                } else {
+                    CheckRecord rec{r.pass, r.same_top, r.n, r.rel, r.gpu_ms, r.cpu_ms, (int64_t)time(nullptr)};
+                    {
+                        std::lock_guard<std::mutex> lk(lib_mutex_);
+                        lib_.record(file, rec);
+                    }
+                    event(name + (r.pass ? " passed the GPU check: same answers as the CPU"
+                                         : " failed the GPU check: its answers may be wrong on this PS5"),
+                          !r.pass);
+                    notify_("TokenStation5: " + name + (r.pass ? " passed the GPU check" : " failed the GPU check"));
                 }
-                event(name + (r.pass ? " passed the GPU check: same answers as the CPU"
-                                     : " failed the GPU check: its answers may be wrong on this PS5"),
-                      !r.pass);
-                notify_("TokenStation5: " + name + (r.pass ? " passed the GPU check" : " failed the GPU check"));
             }
         } else if (ok) {
             ts5::BenchResult r;
