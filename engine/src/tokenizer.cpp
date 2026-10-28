@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstdio>
+#include <queue>
 
 namespace ts5 {
 
@@ -167,6 +168,9 @@ bool Tokenizer::load(const Gguf &g, std::string &err) {
         if (types_[i] == 3 || types_[i] == 4) specials_.push_back({tokens_[i], (int32_t)i});
     std::sort(specials_.begin(), specials_.end(),
               [](auto &a, auto &b) { return a.first.size() > b.first.size(); });
+    // By first byte: Gemma has thousands (<unused0> and the like).
+    for (size_t i = 0; i < specials_.size(); i++)
+        if (!specials_[i].first.empty()) by_byte_[(unsigned char)specials_[i].first[0]].push_back((int)i);
     if (eos_ >= 0) eog_.push_back(eos_);
     for (const char *s : {"<|im_end|>", "<|eot_id|>", "<|eom_id|>", "<|endoftext|>", "<|end|>", "</s>", "<end_of_turn>"}) {
         auto it = id_.find(s);
@@ -188,6 +192,7 @@ void Tokenizer::set_chat_template(const std::string &tmpl) {
     if (tmpl.find("<|im_start|>") != std::string::npos) chat_ = CHATML;
     else if (tmpl.find("<|start_header_id|>") != std::string::npos) chat_ = LLAMA3;
     else if (tmpl.find("[INST]") != std::string::npos) chat_ = MISTRAL;
+    else if (tmpl.find("<start_of_turn>") != std::string::npos) chat_ = GEMMA;
     else if (id_.count("<|im_start|>")) chat_ = CHATML;
     else chat_ = PLAIN;
 }
@@ -228,31 +233,51 @@ void Tokenizer::encode_bpe(const std::string &piece, std::vector<int32_t> &out) 
     }
 }
 
+// SentencePiece's BPE as llama.cpp runs it: the best-scoring pair of
+// neighbours that makes a token merges first (the leftmost of equals), from
+// a queue, so a long prompt (Gemma's, all SentencePiece) takes n log n.
 void Tokenizer::encode_spm(const std::string &text, std::vector<int32_t> &out) const {
     if (text.empty()) return;
     std::string s = add_space_prefix_ ? " " + text : text;
     std::string t;
     for (char c : s) t += c == ' ' ? std::string("\xE2\x96\x81") : std::string(1, c);
-    std::vector<std::string> sym;
+    struct Sym { size_t at, n; int prev, next; };
+    std::vector<Sym> sym;
     for (size_t i = 0; i < t.size();) {
         size_t j = i;
         next_cp(t, j);
-        sym.push_back(t.substr(i, j - i));
+        sym.push_back({i, j - i, (int)sym.size() - 1, (int)sym.size() + 1});
         i = j;
     }
-    while (sym.size() > 1) {
-        float best = -1e30f;
-        size_t at = SIZE_MAX;
-        for (size_t i = 0; i + 1 < sym.size(); i++) {
-            auto it = id_.find(sym[i] + sym[i + 1]);
-            if (it != id_.end() && (size_t)it->second < scores_.size() && scores_[it->second] > best)
-                best = scores_[it->second], at = i;
-        }
-        if (at == SIZE_MAX) break;
-        sym[at] += sym[at + 1];
-        sym.erase(sym.begin() + at + 1);
+    sym.back().next = -1;
+    struct Pair {
+        int left, right;
+        float score;
+        size_t n;
+        bool operator<(const Pair &o) const { return score < o.score || (score == o.score && left > o.left); }
+    };
+    std::priority_queue<Pair> q;
+    auto add = [&](int l, int r) {
+        if (l < 0 || r < 0) return;
+        auto it = id_.find(t.substr(sym[l].at, sym[l].n + sym[r].n));
+        if (it == id_.end() || (size_t)it->second >= scores_.size()) return;
+        q.push({l, r, scores_[it->second], sym[l].n + sym[r].n});
+    };
+    for (int i = 1; i < (int)sym.size(); i++) add(i - 1, i);
+    while (!q.empty()) {
+        const Pair p = q.top();
+        q.pop();
+        Sym &l = sym[p.left], &r = sym[p.right];
+        if (l.n == 0 || r.n == 0 || l.n + r.n != p.n) continue;  // one of them merged since
+        l.n += r.n;
+        r.n = 0;
+        l.next = r.next;
+        if (r.next >= 0) sym[r.next].prev = p.left;
+        add(l.prev, p.left);
+        add(p.left, l.next);
     }
-    for (auto &x : sym) {
+    for (int i = 0; i >= 0; i = sym[i].next) {
+        const std::string x = t.substr(sym[i].at, sym[i].n);
         auto it = id_.find(x);
         if (it != id_.end()) {
             out.push_back(it->second);
@@ -278,7 +303,8 @@ std::vector<int32_t> Tokenizer::encode(const std::string &text, bool add_bos) co
     size_t i = 0, start = 0;
     while (i < text.size()) {
         bool hit = false;
-        for (auto &sp : specials_) {
+        for (int k : by_byte_[(unsigned char)text[i]]) {
+            const auto &sp = specials_[k];
             if (text.compare(i, sp.first.size(), sp.first) == 0) {
                 encode_plain(text.substr(start, i - start), out);
                 out.push_back(sp.second);
@@ -347,6 +373,28 @@ std::string Tokenizer::apply_chat(const std::vector<ChatMessage> &msgs) const {
                 else if (m.role == "user") s += "[INST] " + sys + m.content + "[/INST]", sys.clear();
                 else s += m.content + "</s>";
             }
+            break;
+        }
+        case GEMMA: {
+            // As Gemma 3's template: no system turn (the system message opens
+            // the first user turn), the assistant is "model", contents trimmed.
+            auto trim = [](const std::string &x) {
+                const size_t b = x.find_first_not_of(" \t\r\n"), e = x.find_last_not_of(" \t\r\n");
+                return b == std::string::npos ? std::string() : x.substr(b, e - b + 1);
+            };
+            std::string sys;
+            for (auto &m : msgs) {
+                if (m.role == "system") {
+                    sys += (sys.empty() ? "" : "\n\n") + trim(m.content);
+                    continue;
+                }
+                std::string c = trim(m.content);
+                if (!sys.empty()) c = sys + "\n\n" + c, sys.clear();
+                s += "<start_of_turn>" + std::string(m.role == "assistant" ? "model" : "user") + "\n" + c +
+                     "<end_of_turn>\n";
+            }
+            if (!sys.empty()) s += "<start_of_turn>user\n" + sys + "<end_of_turn>\n";
+            s += "<start_of_turn>model\n";
             break;
         }
         case PLAIN:

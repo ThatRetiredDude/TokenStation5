@@ -32,6 +32,10 @@ public:
         return forward(tokens, n, pos0, nullptr, all_logits, err);
     }
     virtual int n_ctx() const = 0;
+    // How far before the furthest position forwarded so far a forward call
+    // may start and still find the keys it needs: a sliding layer's ring
+    // (Gemma 3) holds only so many positions; unlimited elsewhere.
+    virtual int rewind_limit() const { return 1 << 30; }
     virtual KvType kv_type() const { return KvType::F32; }
     // Since the last call, a few lines of text: with TS5_PROFILE set (vk),
     // the CPU's time per forward call, and with TS5_PROFILE=1 also the GPU's
@@ -47,10 +51,20 @@ struct VkContext;
 Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv = KvType::F32);
 // The cache type TS5_KV asks for: q8, else f16.
 KvType kv_type_setting();
-// Bytes of K and V per token of context, over all layers, in a cache of type kv.
+// Bytes of K and V per token of context, over the layers that see all keys,
+// in a cache of type kv.
 uint64_t kv_bytes_per_token(const HParams &hp, KvType kv);
+// The layers that see all keys (all but Gemma 3's sliding layers).
+int full_layers(const HParams &hp);
+// A sliding layer's ring in the Vulkan backend: its window, and room for a
+// forward call's tokens and a rewind (backtracking to an earlier prompt) of
+// as many again. 0 for a model without sliding layers.
+int ring_slots(const HParams &hp);
+// Bytes of K and V in all sliding layers' rings, beside the context.
+uint64_t kv_ring_bytes(const HParams &hp, KvType kv);
 // GPU memory a Vulkan backend takes before its KV cache: the weights and its
-// activations, in the 1 GiB blocks it allocates.
+// activations, in the 1 GiB blocks it allocates, and sliding layers' rings in
+// f16.
 uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes);
 // The context a Vulkan backend picks when asked for 0 tokens: what fits in
 // `memory` beside `used` bytes and 1 GiB kept for everything else (the

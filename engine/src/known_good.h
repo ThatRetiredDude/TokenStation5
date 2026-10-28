@@ -32,7 +32,7 @@ struct KnownMatch {
 std::string same_name(const std::string &name);
 // The family a model belongs to, from its architecture and its name
 // (general.name, or the file name): "qwen3", "qwen2.5-coder", "qwen2.5",
-// "llama3", "mistral-nemo", "mistral"; "" for none of these.
+// "llama3", "mistral-nemo", "mistral", "gemma3"; "" for none of these.
 std::string model_family(const std::string &arch, const std::string &name);
 // A model's known-good row: its file's (bytes, the file's size: one of
 // several GB is that file), else a checked model's of the same name, else its

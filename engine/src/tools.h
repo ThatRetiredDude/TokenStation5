@@ -2,7 +2,8 @@
 // trained on: the Hermes style of Qwen 2.5 and Qwen3, the JSON style of
 // Llama 3.1 and 3.2, and Mistral Nemo's [TOOL_CALLS]. Each is written the way
 // the model's own chat template writes it, so the model sees what it saw in
-// training.
+// training. Gemma 3, which has no tool format of its own, gets the Hermes one
+// in its own turns.
 #pragma once
 #include <string>
 #include <vector>
@@ -17,6 +18,7 @@ enum class ToolFormat {
     HERMES,  // Qwen: <tool_call>{"name": ..., "arguments": {...}}</tool_call>
     LLAMA3,  // Llama 3.1/3.2: {"name": ..., "parameters": {...}}, results in the ipython role
     MISTRAL, // Mistral Nemo: [TOOL_CALLS][{"name": ..., "arguments": {...}, "id": ...}], results in [TOOL_RESULTS]
+    GEMMA,   // Gemma 3 (no tool format of its own): HERMES's calls and results, in Gemma's turns
 };
 // Read from the model's chat template.
 ToolFormat tool_format(const Tokenizer &t);
