@@ -410,6 +410,66 @@ Json boolean(bool v) {
     return j;
 }
 
+// "*", an IPv4 address, a CIDR or a range of two addresses, as FilterRule's
+// SrcIPs and NetPortRange's IP write them; false for IPv6 and anything else.
+bool parse_range(const std::string &s, Filter::Range &r) {
+    if (s == "*") {
+        r.lo = 0;
+        r.hi = 0xFFFFFFFFu;
+        return true;
+    }
+    auto v4 = [](const std::string &t, uint32_t &ip) {
+        in_addr a{};
+        if (inet_pton(AF_INET, t.c_str(), &a) != 1) return false;
+        ip = ntohl(a.s_addr);
+        return true;
+    };
+    const size_t dash = s.find('-'), slash = s.find('/');
+    if (dash != std::string::npos) return v4(s.substr(0, dash), r.lo) && v4(s.substr(dash + 1), r.hi) && r.lo <= r.hi;
+    if (slash != std::string::npos) {
+        const std::string b = s.substr(slash + 1);
+        uint32_t ip;
+        if (b.empty() || b.size() > 2 || b.find_first_not_of("0123456789") != std::string::npos ||
+            !v4(s.substr(0, slash), ip))
+            return false;
+        const int bits = atoi(b.c_str());
+        if (bits > 32) return false;
+        const uint32_t mask = bits == 0 ? 0 : 0xFFFFFFFFu << (32 - bits);
+        r.lo = ip & mask;
+        r.hi = r.lo | ~mask;
+        return true;
+    }
+    if (!v4(s, r.lo)) return false;
+    r.hi = r.lo;
+    return true;
+}
+
+// A list of FilterRules: the ones that can let TCP in (IPProto empty means
+// TCP, UDP and ICMP; 6 is TCP). Capability grants and IPv6 are left out.
+std::vector<Filter::Rule> parse_rules(const Json &list) {
+    std::vector<Filter::Rule> out;
+    for (const Json &rj : list.a) {
+        bool tcp = rj["IPProto"].a.empty();
+        for (const Json &p : rj["IPProto"].a) tcp |= (int)p.num(-1) == 6;
+        if (!tcp) continue;
+        Filter::Rule r;
+        for (const Json &s : rj["SrcIPs"].a) {
+            Filter::Range x;
+            if (parse_range(s.str(), x)) r.src.push_back(x);
+        }
+        for (const Json &d : rj["DstPorts"].a) {
+            Filter::Dst x;
+            const double first = d["Ports"]["First"].num(0), last = d["Ports"]["Last"].num(0);
+            if (!parse_range(d["IP"].str(), x.ip) || first < 0 || last > 65535 || first > last) continue;
+            x.first = (uint16_t)first;
+            x.last = (uint16_t)last;
+            r.dst.push_back(x);
+        }
+        if (!r.src.empty() && !r.dst.empty()) out.push_back(r);
+    }
+    return out;
+}
+
 // A device in the tailnet, as the control server last described it.
 struct Node {
     std::string key;  // "nodekey:..."
@@ -419,6 +479,17 @@ struct Node {
 };
 
 }  // namespace
+
+bool Filter::allows_tcp(uint32_t src, uint32_t dst, uint16_t port) const {
+    for (const Rule &r : rules) {
+        bool from = false;
+        for (const Range &s : r.src) from |= src >= s.lo && src <= s.hi;
+        if (!from) continue;
+        for (const Dst &d : r.dst)
+            if (dst >= d.ip.lo && dst <= d.ip.hi && port >= d.first && port <= d.last) return true;
+    }
+    return false;
+}
 
 Client::~Client() {
     quit_ = true;
@@ -439,6 +510,7 @@ void Client::apply(const Config &c) {
         status_ = Status();
         map_.address.clear();
         map_.peers.clear();
+        map_.filter = Filter();
         map_.version++;
     }
     if (c.on && !started_) {
@@ -681,6 +753,7 @@ void Client::control_loop() {
                 status_ = Status();
                 map_.address.clear();
                 map_.peers.clear();
+                map_.filter = Filter();
                 map_.version++;
                 break;
             }
@@ -775,6 +848,10 @@ void Client::control_loop() {
             reported_endpoints = endpoints_gen_;
         }
         std::map<std::string, Node> nodes;  // by node ID
+        // The access rules, by the control server's names for them ("base"
+        // for PacketFilter's); none until it sends some.
+        std::map<std::string, std::vector<Filter::Rule>> filters;
+        bool have_filter = false;
         std::string self_name, self_address;
         int update_id = 0;
         bool ok = true;
@@ -899,6 +976,25 @@ void Client::control_loop() {
                     nodes.erase(id.s);
                     changed_map = true;
                 }
+                // The access rules: PacketFilter is all of them (an empty list
+                // lets nothing in, none leaves them as they were);
+                // PacketFilters changes named ones, "*": null first clearing
+                // them all.
+                if (m["PacketFilter"].type == Json::ARR) {
+                    filters["base"] = parse_rules(m["PacketFilter"]);
+                    have_filter = changed_map = true;
+                }
+                const Json &pfs = m["PacketFilters"];
+                if (pfs.type == Json::OBJ) {
+                    auto all = pfs.o.find("*");
+                    if (all != pfs.o.end() && all->second.type == Json::NUL) filters.clear();
+                    for (const auto &[name, rules] : pfs.o) {
+                        if (name == "*") continue;
+                        if (rules.type == Json::ARR) filters[name] = parse_rules(rules);
+                        else filters.erase(name);
+                    }
+                    have_filter = changed_map = true;
+                }
                 for (const Json &p : m["PeersChangedPatch"].a) {
                     auto it = nodes.find(p["NodeID"].s);
                     if (it == nodes.end()) continue;
@@ -922,7 +1018,12 @@ void Client::control_loop() {
                     p.endpoints = n.endpoints;
                     peers.push_back(p);
                 }
+                Filter filter;
+                filter.known = have_filter;
+                for (const auto &[name, rules] : filters) filter.rules.insert(filter.rules.end(), rules.begin(), rules.end());
                 std::lock_guard<std::mutex> lk(mu_);
+                if (filter.known && (!map_.filter.known || filter.rules.size() != map_.filter.rules.size()))
+                    log("the tailnet's access rules: %zu for TCP", filter.rules.size());
                 // The direct paths follow the devices.
                 std::map<std::string, Path> paths;
                 for (const Peer &p : peers) {
@@ -947,6 +1048,7 @@ void Client::control_loop() {
                     it = paths_.count(it->second) ? std::next(it) : by_addr_.erase(it);
                 map_.address = self_address;
                 map_.peers = peers;
+                map_.filter = filter;
                 map_.version++;
                 status_.name = self_name;
                 status_.address = self_address;

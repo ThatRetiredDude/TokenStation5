@@ -107,6 +107,7 @@ struct Conn {
     int fd = -1;
     uint16_t local_port = 0;
     bool connecting = true;
+    bool reached_api = false;  // its socket connected: the API will ask who it is
     bool tunnel_eof = false;  // the device sent everything
     bool api_eof = false;     // the API sent everything
     bool shut_wr = false;
@@ -195,7 +196,10 @@ std::vector<PeerState> Tunnel::tailnet_peers() {
 std::string Tunnel::client_for(uint16_t local_port) {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = clients_.find(local_port);
-    return it == clients_.end() ? std::string() : it->second;
+    if (it == clients_.end()) return std::string();
+    const std::string name = it->second.first;
+    clients_.erase(it);
+    return name;
 }
 
 namespace {
@@ -204,7 +208,7 @@ namespace {
 struct Loop {
     Tunnel *owner = nullptr;
     std::mutex *mu = nullptr;
-    std::map<uint16_t, std::string> *clients = nullptr;
+    std::map<uint16_t, std::pair<std::string, double>> *clients = nullptr;
     netif nif{};
     wireguardif_init_data init{};
     std::string private_key;
@@ -232,6 +236,9 @@ struct Loop {
     bool ts_made = false, ts_up = false;
     uint64_t ts_version = ~0ull;
     std::string ts_address;
+    uint32_t ts_ip = 0;     // ts_address, network order
+    ts::Filter ts_filter;   // the tailnet's access rules
+    std::map<uint32_t, double> ts_refused;  // device address: when its refusal was last logged
     std::map<std::string, ts::Peer> ts_known;  // by node key (32 bytes): the tailnet's devices
     struct TsPeer {
         uint8_t index = WIREGUARDIF_INVALID_INDEX;
@@ -250,7 +257,16 @@ Loop *g_loop = nullptr;  // for ts5_ts_send, which lwIP calls on the tunnel's th
 void drop_client(Loop &L, Conn *c) {
     if (!c->local_port) return;
     std::lock_guard<std::mutex> lk(*L.mu);
-    L.clients->erase(c->local_port);
+    const double now = now_s();
+    for (auto it = L.clients->begin(); it != L.clients->end();)
+        it = it->second.second && it->second.second < now ? L.clients->erase(it) : std::next(it);
+    auto it = L.clients->find(c->local_port);
+    if (it != L.clients->end()) {
+        // The API may not have taken the connection yet (a device can send a
+        // request and reset at once): its name waits for it a while.
+        if (c->reached_api) it->second.second = now + 30;
+        else L.clients->erase(it);
+    }
     c->local_port = 0;
 }
 
@@ -308,6 +324,24 @@ err_t on_accept(void *arg, tcp_pcb *pcb, err_t err) {
     Loop &L = *(Loop *)arg;
     if (err != ERR_OK || !pcb) return ERR_VAL;
     const std::string from = ip_text(ip4_addr_get_u32(ip_2_ip4(&pcb->remote_ip)));
+    // From the tailnet: only devices its access rules (ACLs) let reach the
+    // API's port, as Tailscale's own apps check them.
+    if (L.ts_up && L.ts_ip && ip4_addr_get_u32(ip_2_ip4(&pcb->local_ip)) == L.ts_ip) {
+        const uint32_t src = ip4_addr_get_u32(ip_2_ip4(&pcb->remote_ip));
+        if (!L.ts_filter.allows_tcp(ntohl(src), ntohl(L.ts_ip), (uint16_t)L.api_port)) {
+            const double now = now_s();
+            double &last = L.ts_refused[src];
+            if (now - last > 60) {
+                last = now;
+                ts5::log_line("ts5-title: tailscale: %s refused: %s", from.c_str(),
+                              L.ts_filter.known ? "the tailnet's access rules don't let it reach the API"
+                                                : "no access rules from the control server yet");
+            }
+            if (L.ts_refused.size() > 256) L.ts_refused.clear();
+            tcp_abort(pcb);
+            return ERR_ABRT;
+        }
+    }
     // A socket from 127.0.0.1 to the API, its port noted first, so the API
     // knows the request came through the tunnel the moment it accepts.
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -330,13 +364,16 @@ err_t on_accept(void *arg, tcp_pcb *pcb, err_t err) {
     c->local_port = ntohs(a.sin_port);
     {
         std::lock_guard<std::mutex> lk(*L.mu);
-        (*L.clients)[c->local_port] = from;
+        (*L.clients)[c->local_port] = {from, 0.0};
     }
     sockaddr_in api{};
     api.sin_family = AF_INET;
     api.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     api.sin_port = htons((uint16_t)L.api_port);
-    if (connect(fd, (sockaddr *)&api, sizeof api) == 0) c->connecting = false;
+    if (connect(fd, (sockaddr *)&api, sizeof api) == 0) {
+        c->connecting = false;
+        c->reached_api = true;
+    }
     else if (errno != EINPROGRESS) {
         ts5::log_line("ts5-title: wireguard: can't reach the API for %s (errno %d)", from.c_str(), errno);
         drop_client(L, c);
@@ -472,6 +509,7 @@ bool pump(Loop &L, Conn *c, short revents) {
             c->connecting = false;
         } else if (getpeername(c->fd, (sockaddr *)&peer, &plen) == 0) {
             c->connecting = false;
+            c->reached_api = true;
             if (detail()) ts5::log_line("ts5-title: wireguard: tcp: API socket from port %u connected", c->local_port);
         }
     }
@@ -554,6 +592,7 @@ void ts_sync(Loop &L) {
     const ts::Netmap m = L.ts->netmap();
     L.ts_known.clear();
     for (const ts::Peer &p : m.peers) L.ts_known[std::string((const char *)p.key, 32)] = p;
+    L.ts_filter = m.filter;
     uint32_t ip = 0;
     if (m.address.empty() || !parse_ip(m.address, ip)) {
         if (L.ts_up) {
@@ -594,6 +633,7 @@ void ts_sync(Loop &L) {
         netif_set_ipaddr(&L.ts_nif, &addr);
         L.ts_address = m.address;
     }
+    L.ts_ip = ip;
     if (!L.ts_up) {
         netif_set_up(&L.ts_nif);
         netif_set_link_up(&L.ts_nif);
