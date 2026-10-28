@@ -650,7 +650,7 @@ int main(int, char **) {
     if (last_version.empty() || last_version[0] != TS5_VERSION) {
         std::vector<int> ports = {2121, 1337};
         if (int p = atoi(app::setting("TS5_FTP_PORT").c_str()); p > 0) ports.insert(ports.begin(), p);
-        const app::BroughtBack b = app::bring_back_models(kModels, TS5_TITLE_ID, TS5_HOME "/eboot.bin", ports);
+        const app::BroughtBack b = app::bring_back_models(kModels, TS5_TITLE_ID, ports);
         if (!b.why.empty())
             printf("ts5-title: models from the last version: %s\n", b.why.c_str());
         else
