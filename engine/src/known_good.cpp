@@ -20,6 +20,7 @@ std::string model_family(const std::string &arch, const std::string &name) {
     const std::string n = same_name(name);
     auto has = [&](const char *w) { return n.find(w) != std::string::npos; };
     if (arch == "qwen3") return "qwen3";
+    if (arch == "gemma3") return "gemma3";
     if (arch == "qwen2") return has("coder") ? "qwen2.5-coder" : "qwen2.5";
     // Mistral Nemo's conversions say llama or mistral.
     if ((arch == "llama" || arch == "mistral") && has("nemo")) return "mistral-nemo";

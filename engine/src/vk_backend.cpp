@@ -34,6 +34,7 @@
 #include "attn_merge.spv.h"
 #include "attn_pf.spv.h"
 #include "attn_pf128.spv.h"
+#include "attn_pf256.spv.h"
 #include "attn_pf_q8.spv.h"
 #include "attn_q8.spv.h"
 #include "get_rows_f16.spv.h"
@@ -251,6 +252,12 @@ public:
     }
 
     const float *logits_view() const override { return (const float *)logits_.map; }
+
+    int rewind_limit() const override {
+        for (int l = 0; l < hp_.n_layer; l++)
+            if (ring_[l]) return (int)ring_[l] - hp_.swa_window + 1;
+        return Backend::rewind_limit();
+    }
 
     bool forward(const int32_t *tokens, int n, int pos0, float *logits, bool all, std::string &err) override {
         return fwd(tokens, n, pos0, logits, all, logits != nullptr, err);
@@ -507,7 +514,7 @@ private:
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
         P(rmsnorm, 3) P(qkv_post, 11) P(qkv_post_q8, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
-        P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf_q8, 7)
+        P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf256, 5) P(attn_pf_q8, 7)
         // Lanes per key in attn_dec: 8, 16 or 32, and no more than a subgroup.
         uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
         while (lpk > ctx_->subgroup_size) lpk = lpk > 8 ? lpk / 2 : 0;
@@ -615,10 +622,12 @@ private:
             // As much as fits, in what the weights and activations left, and
             // no more than one buffer can address.
             const int train = hp_.n_ctx_train > 0 ? hp_.n_ctx_train : 32768;
+            // Sliding layers' rings are a fixed size, beside the context.
             auto fit = [&](KvType t) {
-                const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * hp_.n_layer * KVD;
+                const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * full_layers(hp_) * KVD;
                 const int cap = (int)std::min<uint64_t>(train, props_.limits.maxStorageBufferRange / per_buf);
-                return fit_context(ctx_->device_memory(), allocated_ + fit_reserve_, kv_bytes_per_token(hp_, t), cap);
+                return fit_context(ctx_->device_memory(), allocated_ + fit_reserve_ + kv_ring_bytes(hp_, t),
+                                   kv_bytes_per_token(hp_, t), cap);
             };
             const int f16 = fit(KvType::F16);
             if (kv_ == KvType::Q8 && f16_reaches(f16, train)) {
@@ -632,17 +641,44 @@ private:
                 return false;
             }
         }
-        // Bytes of K (and as many of V): f16, or 8 bits plus a 2-byte scale per 32.
-        const size_t values = (size_t)hp_.n_layer * n_ctx_ * KVD;
-        const size_t cache = kv_ == KvType::Q8 ? values : 2 * values, scales = kv_ == KvType::Q8 ? values / 16 : 0;
-        if (cache > props_.limits.maxStorageBufferRange) {
-            err = "KV cache larger than maxStorageBufferRange; use a smaller context";
-            return false;
+        // Each layer's place in the caches: n_ctx_ slots, or a sliding
+        // layer's ring where that is fewer. The caches are cut into pieces of
+        // about 256 MiB, a few layers each: freed models leave the GPU's
+        // memory in holes, and one 2 GiB buffer for a whole cache may find
+        // no hole that big when the pieces would fit.
+        const size_t piece = 256ull << 20, per_value = kv_ == KvType::Q8 ? 1 : 2;
+        std::vector<size_t> values;  // per piece
+        layer_off_.assign(hp_.n_layer, 0);
+        layer_buf_.assign(hp_.n_layer, 0);
+        ring_.assign(hp_.n_layer, 0);
+        for (int l = 0; l < hp_.n_layer; l++) {
+            const int r = hp_.swa(l) ? ring_slots(hp_) : 0;
+            ring_[l] = r > 0 && r < n_ctx_ ? (uint32_t)r : 0;
+            const size_t v = (ring_[l] ? ring_[l] : (size_t)n_ctx_) * KVD;
+            if (values.empty() || (values.back() > 0 && (values.back() + v) * per_value > piece)) values.push_back(0);
+            layer_buf_[l] = (uint32_t)(values.size() - 1);
+            layer_off_[l] = (uint32_t)values.back();
+            values.back() += v;
         }
+        // Bytes of K (and as many of V): f16, or 8 bits plus a 2-byte scale per 32.
         // Exact sizes: a 1 GiB block for the scales would take what
         // fit_context keeps free for everything else.
-        if (!mk(kc_, cache, false, true) || !mk(vc_, cache, false, true)) return false;
-        if (scales && (!mk(ks_, scales, false, true) || !mk(vs_, scales, false, true))) return false;
+        size_t cache = 0, scales = 0;
+        kc_.assign(values.size(), Buf{});
+        vc_.assign(values.size(), Buf{});
+        ks_.assign(values.size(), Buf{});
+        vs_.assign(values.size(), Buf{});
+        for (size_t i = 0; i < values.size(); i++) {
+            const size_t c = values[i] * per_value, sc = kv_ == KvType::Q8 ? values[i] / 16 : 0;
+            if (c > props_.limits.maxStorageBufferRange) {
+                err = "KV cache larger than maxStorageBufferRange; use a smaller context";
+                return false;
+            }
+            if (!mk(kc_[i], c, false, true) || !mk(vc_[i], c, false, true)) return false;
+            if (sc && (!mk(ks_[i], sc, false, true) || !mk(vs_[i], sc, false, true))) return false;
+            cache += c;
+            scales += sc;
+        }
         ts5::log_line("ts5: %s: weights %.2f GiB, KV cache %.2f GiB (%s, %d tokens), %s memory", name_.c_str(),
                 weight_bytes_ / 1073741824.0, 2.0 * (cache + scales) / 1073741824.0, kv_type_name(kv_), n_ctx_,
                 x_.map ? "unified" : "device");
@@ -890,26 +926,34 @@ private:
         return n;
     }
 
-    // Attention of n tokens at pos0 for the layer at cache_off, into att_.
-    void attention(int n, int pos0, uint32_t cache_off) {
+    // Attention of n tokens at pos0 for the layer at cache_off in cache
+    // piece kb, into att_. win: a sliding layer's window (0: all keys); ring: its ring's slots
+    // (0: one per position). Only attn and attn_pf have them.
+    void attention(int n, int pos0, uint32_t kb, uint32_t cache_off, uint32_t win = 0, uint32_t ring = 0) {
         const uint32_t HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
-        const float scale = 1.0f / std::sqrt((float)HD);
+        const float scale = hp_.attn_scale;
         if (!attn_ok()) {
             struct { uint32_t head_dim, n_head, n_head_kv, pos0, cache_off; float scale; } pc{
                 HD, H, HKV, (uint32_t)pos0, cache_off, scale};
-            dispatch("attention", {&q_, &kc_, &vc_, &att_}, pc, H, (uint32_t)n);
+            dispatch("attention", {&q_, &kc_[kb], &vc_[kb], &att_}, pc, H, (uint32_t)n);
             return;
         }
         // Rows per workgroup: the query heads of one KV head, for as many
-        // tokens as fit attn's 1024 floats of queries, attn_pf's 64 rows
+        // tokens as fit attn's 1024 floats of queries, attn_pf's 64 rows (32 for heads of 256)
         // (prompts: attn_pf_min_ tokens or more) or attn_dec's 8 or 4 (generation
         // over attn_dec_min_ keys or more, f16 cache, heads of 128).
-        const uint32_t G = H / HKV, keys = (uint32_t)(pos0 + n);
-        const bool pf = attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && HD <= 128 && G <= 64;
-        const bool dec = !pf && attn_dec_min_ && keys >= (uint32_t)attn_dec_min_ && kv_ == KvType::F16 &&
+        // The first key any of the n tokens sees, and how many from there.
+        const uint32_t G = H / HKV, k_lo = win && (uint32_t)pos0 + 1 > win ? (uint32_t)pos0 + 1 - win : 0;
+        const uint32_t keys = (uint32_t)(pos0 + n) - k_lo;
+        const bool plain = !win && !ring;
+        // attn_pf: heads of up to 128 in 64 rows, or of 256 (f16 cache) in 32.
+        const bool pf256 = HD == 256 && kv_ == KvType::F16;
+        const uint32_t pf_rows = pf256 ? 32 : 64;
+        const bool pf = attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && (HD <= 128 || pf256) && G <= pf_rows;
+        const bool dec = plain && !pf && attn_dec_min_ && keys >= (uint32_t)attn_dec_min_ && kv_ == KvType::F16 &&
                          HD == 128 && G <= 8;
         const uint32_t dec_rows = G <= 4 ? 4 : 8;
-        const uint32_t tq = pf ? 64 / G : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / G);
+        const uint32_t tq = pf ? pf_rows / G : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / G);
         const uint32_t groups = HKV * (((uint32_t)n + tq - 1) / tq);
         // Few workgroups for many keys (generation, or a short prompt late in
         // a chat): split the keys so every compute unit gets some, about 256
@@ -923,27 +967,33 @@ private:
         uint32_t chunk = (keys + n_split - 1) / n_split;
         chunk = (chunk + bk - 1) / bk * bk;
         n_split = (keys + chunk - 1) / chunk;
-        struct { uint32_t head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split; float scale; } pc{
-            HD, H, HKV, (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale};
+        struct {
+            uint32_t head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split;
+            float scale;
+            uint32_t k_lo, win, ring;
+        } pc{HD, H, HKV, (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale, k_lo, win, ring};
         std::string kern = std::string(pf ? "attn_pf" : "attn") + (kv_ == KvType::Q8 ? "_q8" : "");
         if (dec)
             kern = dec_rows == 4 ? "attn_dec4" : "attn_dec";
         else if (pf && HD == 128 && attn_pf128_ && kv_ == KvType::F16)
             kern = "attn_pf128";
+        else if (pf && pf256)
+            kern = "attn_pf256";
         if (kv_ == KvType::Q8)
-            dispatch(kern, {&q_, &kc_, &vc_, &att_, &part_, &ks_, &vs_}, pc, groups, n_split);
+            dispatch(kern, {&q_, &kc_[kb], &vc_[kb], &att_, &part_, &ks_[kb], &vs_[kb]}, pc, groups, n_split);
         else
-            dispatch(kern, {&q_, &kc_, &vc_, &att_, &part_}, pc, groups, n_split);
+            dispatch(kern, {&q_, &kc_[kb], &vc_[kb], &att_, &part_}, pc, groups, n_split);
         if (n_split > 1) {
             struct { uint32_t head_dim, n_head, n_tok, n_split; } mpc{HD, H, (uint32_t)n, n_split};
             dispatch("attn_merge", {&part_, &att_}, mpc, H, (uint32_t)n);
         }
     }
 
-    // Whether attn fits the model's heads (else the one-workgroup-per-head kernel).
+    // Whether attn fits the model's heads (else the one-workgroup-per-head
+    // kernel, which has no sliding window: a model with one always uses attn).
     bool attn_ok() const {
         const int HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
-        return attn_fast_ && HKV > 0 && H % HKV == 0 && HD % 4 == 0 && HD >= 32 && HD <= 256 &&
+        return (attn_fast_ || hp_.swa_window > 0) && HKV > 0 && H % HKV == 0 && HD % 4 == 0 && HD >= 32 && HD <= 256 &&
                (H / HKV) * HD <= 1024;
     }
 
@@ -953,7 +1003,7 @@ private:
     // doesn't apply.
     bool ffn_glu(const Layer &L, int n) {
         const bool batch = n >= 2 && n <= 8 && mvt_ && mvt_glu_;
-        if ((n == 1 ? !mv16_ : !batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != GGML_Q4_K ||
+        if (hp_.gelu || (n == 1 ? !mv16_ : !batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != GGML_Q4_K ||
             L.w_up.type() != GGML_Q4_K || L.w_gate.ne0() != L.w_up.ne0() || L.w_gate.ne1() != L.w_up.ne1())
             return false;
         const uint32_t rows = (uint32_t)L.w_gate.ne1();
@@ -984,8 +1034,10 @@ private:
         dispatch(one ? name + ".1" : name, bufs, pc, mx, my, what);
     }
 
-    void rmsnorm(const Buf &x, const Weight &w, const Buf &y, int ntok, uint32_t x_row0 = 0) {
-        struct { uint32_t n, x_row0; float eps; } pc{(uint32_t)hp_.n_embd, x_row0, hp_.rms_eps};
+    // add: y += the normalized x (Gemma's norms after attention and the FFN).
+    void rmsnorm(const Buf &x, const Weight &w, const Buf &y, int ntok, uint32_t x_row0 = 0, bool add = false) {
+        struct { uint32_t n, x_row0; float eps; uint32_t add; } pc{(uint32_t)hp_.n_embd, x_row0, hp_.rms_eps,
+                                                                   add ? 1u : 0u};
         dispatch("rmsnorm", {&x, &W(w), &y}, pc, (uint32_t)ntok);
     }
 
@@ -1066,7 +1118,8 @@ private:
         const int per_flush = n < 64 && !layers_per_submit_ ? dec_submit_ : 0;
         if (!begin(err, target)) return false;
         {
-            struct { uint32_t ncols, row_bytes; } pc{(uint32_t)E, (uint32_t)m_.tok_embd.info->row_bytes()};
+            struct { uint32_t ncols, row_bytes; float scale; } pc{(uint32_t)E, (uint32_t)m_.tok_embd.info->row_bytes(),
+                                                                  hp_.embd_scale > 0 ? hp_.embd_scale : 1.0f};
             dispatch(std::string("get_rows_") + qname(m_.tok_embd.type()), {&W(m_.tok_embd), &ids_, &x_}, pc,
                      (uint32_t)n);
         }
@@ -1082,36 +1135,50 @@ private:
             no_barrier_ = fuse_;
             matmul(L.wv, h_, v_, n, false);
             matmul(L.wq, h_, q_, n, false);
-            const uint32_t cache_off = (uint32_t)((size_t)l * n_ctx_ * KVD);
+            const uint32_t cache_off = layer_off_[l], kb = layer_buf_[l];
+            const bool swa = hp_.swa(l);
             {
                 struct {
                     uint32_t head_dim, n_head, n_head_kv, pos0, rope_dims, neox, has_bias, has_norm, cache_off;
                     float rope_base, eps;
-                    uint32_t has_freqs;
+                    uint32_t has_freqs, ring;
+                    float rope_scale;
                 } pc{(uint32_t)HD, (uint32_t)H, (uint32_t)HKV, (uint32_t)pos0, (uint32_t)hp_.rope_dims,
-                     hp_.rope_neox ? 1u : 0u, L.bq ? 1u : 0u, L.q_norm ? 1u : 0u, cache_off, hp_.rope_base,
-                     hp_.rms_eps, m_.rope_freqs ? 1u : 0u};
+                     hp_.rope_neox ? 1u : 0u, L.bq ? 1u : 0u, L.q_norm ? 1u : 0u, cache_off,
+                     swa ? hp_.rope_base_swa : hp_.rope_base, hp_.rms_eps, m_.rope_freqs ? 1u : 0u, ring_[l],
+                     swa ? 1.0f : hp_.rope_scale};
                 const Buf &bq = L.bq ? W(L.bq) : dummy_, &bk = L.bk ? W(L.bk) : dummy_, &bv = L.bv ? W(L.bv) : dummy_;
                 const Buf &nq = L.q_norm ? W(L.q_norm) : dummy_, &nk = L.k_norm ? W(L.k_norm) : dummy_;
                 const Buf &ff = m_.rope_freqs ? W(m_.rope_freqs) : dummy_;
                 if (kv_ == KvType::Q8)
-                    dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_, &ks_, &vs_, &ff}, pc,
+                    dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
                 else
-                    dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_, &vc_, &ff}, pc,
+                    dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
             }
-            attention(n, pos0, cache_off);
-            matmul(L.wo, att_, x_, n, true);
+            attention(n, pos0, kb, cache_off, swa ? (uint32_t)hp_.swa_window : 0, ring_[l]);
+            // Gemma normalizes attention's output before it joins the residual.
+            if (L.post_attn_norm) {
+                matmul(L.wo, att_, h_, n, false);
+                rmsnorm(h_, L.post_attn_norm, x_, n, 0, true);
+            } else {
+                matmul(L.wo, att_, x_, n, true);
+            }
             rmsnorm(x_, L.ffn_norm, h_, n);
             if (!ffn_glu(L, n)) {
                 no_barrier_ = fuse_;
                 matmul(L.w_gate, h_, g_, n, false);
                 matmul(L.w_up, h_, u_, n, false);
-                struct { uint32_t n; } pc{(uint32_t)((size_t)n * hp_.n_ff)};
+                struct { uint32_t n, gelu; } pc{(uint32_t)((size_t)n * hp_.n_ff), hp_.gelu ? 1u : 0u};
                 dispatch("swiglu", {&g_, &u_}, pc, std::min<uint32_t>(65535, (pc.n + 255) / 256));
             }
-            matmul(L.w_down, g_, x_, n, true);
+            if (L.post_ffn_norm) {
+                matmul(L.w_down, g_, h_, n, false);
+                rmsnorm(h_, L.post_ffn_norm, x_, n, 0, true);
+            } else {
+                matmul(L.w_down, g_, x_, n, true);
+            }
             if (per_flush && (l + 1) % per_flush == 0 && l + 1 < hp_.n_layer) {
                 if (!flush(err)) return false;
             } else if ((l + 1) % per_submit == 0 && l + 1 < hp_.n_layer) {
@@ -1248,7 +1315,10 @@ private:
     bool cpu_prof_ = false;  // TS5_PROFILE=1 or 2 (CPU times only)
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
-    Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_, kc_, vc_, ks_, vs_;
+    Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_;
+    std::vector<Buf> kc_, vc_, ks_, vs_;  // the KV cache's pieces
+    // Each layer's first cache element and piece, and a sliding layer's ring slots (0: none).
+    std::vector<uint32_t> layer_off_, layer_buf_, ring_;
 };
 
 }  // namespace
@@ -1286,9 +1356,26 @@ KvType kv_type_setting() {
     return KvType::F16;
 }
 
-uint64_t kv_bytes_per_token(const HParams &hp, KvType kv) {
-    const uint64_t values = 2ull * hp.n_layer * hp.n_head_kv * hp.head_dim;  // K and V
+int full_layers(const HParams &hp) {
+    int n = 0;
+    for (int l = 0; l < hp.n_layer; l++) n += !hp.swa(l);
+    return n;
+}
+
+int ring_slots(const HParams &hp) {
+    return hp.swa_window > 0 ? hp.swa_window + std::max(VkBackend::TMAX, hp.swa_window) : 0;
+}
+
+static uint64_t kv_bytes(uint64_t values, KvType kv) {
     return kv == KvType::Q8 ? values + values / 16 : kv == KvType::F16 ? 2 * values : 4 * values;
+}
+
+uint64_t kv_bytes_per_token(const HParams &hp, KvType kv) {
+    return kv_bytes(2ull * full_layers(hp) * hp.n_head_kv * hp.head_dim, kv);  // K and V
+}
+
+uint64_t kv_ring_bytes(const HParams &hp, KvType kv) {
+    return kv_bytes(2ull * (hp.n_layer - full_layers(hp)) * ring_slots(hp) * hp.n_head_kv * hp.head_dim, kv);
 }
 
 uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
@@ -1297,7 +1384,7 @@ uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
     const uint64_t act =
         4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab) + 4 * (VkBackend::PART + VkBackend::SPLIT);
     const uint64_t gib = 1ull << 30;
-    return (weight_bytes + act + gib - 1) / gib * gib;
+    return (weight_bytes + act + gib - 1) / gib * gib + kv_ring_bytes(hp, KvType::F16);
 }
 
 bool f16_reaches(int f16_ctx, int train) { return train >= 1024 && f16_ctx >= train / 1024 * 1024; }

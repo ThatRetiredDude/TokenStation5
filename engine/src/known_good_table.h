@@ -16,6 +16,8 @@ inline const KnownGood kKnownGood[] = {
      0.7f, 0.95f, 40, "2026-10-27", 58, 60},
     {"nemo-12b", "Mistral Nemo Instruct 2407", "mistral nemo instruct 2407", 7477208192u, "mistral-nemo", "Chat, tools, coding apps",
      0.3f, 0.95f, 40, "2026-10-27", 60, 60},
+    {"gemma3-12b", "Gemma 3 12B Instruct", "gemma 3 12b it", 7300575264u, "gemma3", "Chat, tools, coding apps",
+     0.7f, 0.95f, 40, "2026-10-28", 59, 60},
 };
 
 }  // namespace ts5
