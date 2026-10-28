@@ -33,6 +33,7 @@ struct HParams {
     // sees only the last swa_window keys (its own included), with its own
     // RoPE base and no RoPE scaling. 0: every layer sees all keys.
     int swa_window = 0, swa_pattern = 0;
+    bool swa_test = false;  // swa_window is TS5_SWA_WINDOW's, not the file's
     float rope_base_swa = 10000.f;
     // Linear RoPE scaling of the full-attention layers: positions times this
     // (Gemma 3's 1/8); 1 elsewhere.
