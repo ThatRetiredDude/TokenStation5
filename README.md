@@ -117,9 +117,12 @@ Step-by-step setup is in [On the PS5](#on-the-ps5).
 > key is on.
 
 > [!NOTE]
-> A store update keeps your settings, keys and chats, but not the models you
-> downloaded: put them back from a computer (Settings > Instructions > Add
-> models from a computer) or download them again.
+> A store update keeps your settings, keys and chats, and the first start of
+> the new version brings back the models you downloaded, through the
+> jailbreak's FTP server. Start the title once after each update: the store
+> keeps the old models only until the next one. Without the FTP server, put
+> them back from a computer (Settings > Instructions > Add models from a
+> computer) or download them again.
 
 ---
 
