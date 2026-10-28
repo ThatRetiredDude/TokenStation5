@@ -1,0 +1,6 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Prompt attention over the f16 KV cache, heads of 256 (Gemma 3; see attn_pf.glsl).
+#define HEAD_DIM 256
+#define LANES 8
+#include "attn_pf.glsl"
