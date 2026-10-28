@@ -282,8 +282,8 @@ Every kernel is checked against an independent fp32 CPU implementation and
 against llama.cpp itself:
 
 - Logits at every position match the CPU reference to about 1e-4 across F32,
-  F16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K_M and Q5_K_M, for all three
-  architectures, and match llama.cpp to 2e-4 on unquantized models.
+  F16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K_M and Q5_K_M, for every architecture
+  ts5 runs, and match llama.cpp to 2e-4 on unquantized models.
 - KV-cache reuse across calls and 300-token prompts are covered.
 - The tokenizer matches `llama-tokenize` on 15 tricky strings (code,
   contractions, CJK, emoji, chat special tokens) for Qwen, Llama 3 and
