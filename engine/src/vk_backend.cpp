@@ -34,6 +34,7 @@
 #include "attn_merge.spv.h"
 #include "attn_pf.spv.h"
 #include "attn_pf128.spv.h"
+#include "attn_pf256.spv.h"
 #include "attn_pf_q8.spv.h"
 #include "attn_q8.spv.h"
 #include "get_rows_f16.spv.h"
@@ -513,7 +514,7 @@ private:
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
         P(rmsnorm, 3) P(qkv_post, 11) P(qkv_post_q8, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
-        P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf_q8, 7)
+        P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf256, 5) P(attn_pf_q8, 7)
         // Lanes per key in attn_dec: 8, 16 or 32, and no more than a subgroup.
         uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
         while (lpk > ctx_->subgroup_size) lpk = lpk > 8 ? lpk / 2 : 0;
@@ -927,7 +928,7 @@ private:
 
     // Attention of n tokens at pos0 for the layer at cache_off in cache
     // piece kb, into att_. win: a sliding layer's window (0: all keys); ring: its ring's slots
-    // (0: one per position). Only attn has them.
+    // (0: one per position). Only attn and attn_pf have them.
     void attention(int n, int pos0, uint32_t kb, uint32_t cache_off, uint32_t win = 0, uint32_t ring = 0) {
         const uint32_t HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
         const float scale = hp_.attn_scale;
@@ -938,18 +939,21 @@ private:
             return;
         }
         // Rows per workgroup: the query heads of one KV head, for as many
-        // tokens as fit attn's 1024 floats of queries, attn_pf's 64 rows
+        // tokens as fit attn's 1024 floats of queries, attn_pf's 64 rows (32 for heads of 256)
         // (prompts: attn_pf_min_ tokens or more) or attn_dec's 8 or 4 (generation
         // over attn_dec_min_ keys or more, f16 cache, heads of 128).
         // The first key any of the n tokens sees, and how many from there.
         const uint32_t G = H / HKV, k_lo = win && (uint32_t)pos0 + 1 > win ? (uint32_t)pos0 + 1 - win : 0;
         const uint32_t keys = (uint32_t)(pos0 + n) - k_lo;
         const bool plain = !win && !ring;
-        const bool pf = plain && attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && HD <= 128 && G <= 64;
+        // attn_pf: heads of up to 128 in 64 rows, or of 256 (f16 cache) in 32.
+        const bool pf256 = HD == 256 && kv_ == KvType::F16;
+        const uint32_t pf_rows = pf256 ? 32 : 64;
+        const bool pf = attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && (HD <= 128 || pf256) && G <= pf_rows;
         const bool dec = plain && !pf && attn_dec_min_ && keys >= (uint32_t)attn_dec_min_ && kv_ == KvType::F16 &&
                          HD == 128 && G <= 8;
         const uint32_t dec_rows = G <= 4 ? 4 : 8;
-        const uint32_t tq = pf ? 64 / G : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / G);
+        const uint32_t tq = pf ? pf_rows / G : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / G);
         const uint32_t groups = HKV * (((uint32_t)n + tq - 1) / tq);
         // Few workgroups for many keys (generation, or a short prompt late in
         // a chat): split the keys so every compute unit gets some, about 256
@@ -973,6 +977,8 @@ private:
             kern = dec_rows == 4 ? "attn_dec4" : "attn_dec";
         else if (pf && HD == 128 && attn_pf128_ && kv_ == KvType::F16)
             kern = "attn_pf128";
+        else if (pf && pf256)
+            kern = "attn_pf256";
         if (kv_ == KvType::Q8)
             dispatch(kern, {&q_, &kc_[kb], &vc_[kb], &att_, &part_, &ks_[kb], &vs_[kb]}, pc, groups, n_split);
         else

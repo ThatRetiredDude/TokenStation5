@@ -1,14 +1,16 @@
 // Causal attention for many tokens at once (prompts). A workgroup takes the
-// G query heads that share one KV head for TQ = 64 / G tokens: up to 64
-// rows. Four threads (a quad) work on one row, each holding a quarter of its
-// query in registers (dims 16 i + 4 c .. + 3 for lane c) and the same quarter
-// of its output. Keys and values come through shared memory 32 at a time;
+// G query heads that share one KV head for TQ = ROWS / G tokens: up to ROWS
+// rows. LANES threads work on one row (4, a quad: 64 rows; heads of 256: 8,
+// 32 rows), each holding its share of the query in registers (dims
+// 4 LANES i + 4 c .. + 3 for lane c) and the same share of its output. Keys and values come through shared memory 32 at a time;
 // the next tile is loaded into registers while the current one is used.
 // Online softmax per row, 16 keys at a time. Head size a multiple of 16, at
-// most 128. With n_split > 1, workgroup y takes one slice of the keys and
-// writes a partial result for attn_merge, as attn does. With HEAD_DIM
-// defined the head size is fixed, so every loop over it unrolls with no
-// branch per step (attn_pf128).
+// most 128 (HEAD_DIM 256 and LANES 8: 256). With n_split > 1, workgroup y
+// takes one slice of the keys and writes a partial result for attn_merge, as
+// attn does. With HEAD_DIM defined the head size is fixed, so every loop over
+// it unrolls with no branch per step (attn_pf128, attn_pf256). A sliding
+// layer's keys (win > 0) are its last win, from a ring of ring slots, as in
+// attn.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_control_flow_attributes : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -35,9 +37,18 @@ layout(std430, binding = 4) writeonly buffer Pbuf { float P[]; };
 layout(push_constant) uniform PC {
     uint head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split;
     float scale;
+    uint k_lo, win, ring;
 } pc;
 
-const uint BC = 32, STEP = 16, HDMAX = 128, NV = HDMAX / 16, WG = 256;
+#ifndef LANES
+#define LANES 4
+#endif
+#if defined(HEAD_DIM) && HEAD_DIM > 128
+const uint HDMAX = HEAD_DIM;
+#else
+const uint HDMAX = 128;
+#endif
+const uint BC = 32, STEP = 16, NV = HDMAX / (4 * LANES), WG = 256;
 const uint NL = BC * HDMAX / 4 / WG;  // vec4s of K (and of V) each thread loads per tile
 // The f16 cache's tiles stay f16 in shared memory: half the bytes to read,
 // and the GPU multiplies f16 by f32 into an f32 sum at the f32 rate.
@@ -51,13 +62,13 @@ shared TILE vs[BC * HDMAX / 4];
 
 const float NEG_INF = -1.0 / 0.0;
 #ifdef HEAD_DIM
-const uint HD = HEAD_DIM, HD4 = HD / 4, NI = HD / 16;
+const uint HD = HEAD_DIM, HD4 = HD / 4, NI = HD / (4 * LANES);
 #endif
 
 void main() {
-    const uint tid = gl_LocalInvocationID.x, c = tid & 3u, r = tid >> 2;
+    const uint tid = gl_LocalInvocationID.x, c = tid % LANES, r = tid / LANES;
 #ifndef HEAD_DIM
-    const uint HD = pc.head_dim, HD4 = HD / 4, NI = HD / 16;
+    const uint HD = pc.head_dim, HD4 = HD / 4, NI = HD / (4 * LANES);
 #endif
     const uint G = pc.n_head / pc.n_head_kv;
     const uint n_tblk = (pc.n_tok + pc.tq - 1) / pc.tq;
@@ -69,14 +80,16 @@ void main() {
     const uint t = t0 + (valid ? r / G : 0u), h = kh * G + (valid ? r % G : 0u);
     const uint kmax = pc.pos0 + t;  // the last key this row sees
     const uint split = gl_WorkGroupID.y;
-    const uint k_begin = split * pc.chunk;
-    const uint k_end = min(k_begin + pc.chunk, pc.pos0 + t0 + ntq);
+    const uint k_first = pc.k_lo + split * pc.chunk;
+    const uint k_end = min(k_first + pc.chunk, pc.pos0 + t0 + ntq);
+    // A window: none of the block's rows sees a key before its first row's first.
+    const uint k_begin = pc.win != 0 && pc.pos0 + t0 + 1 > pc.win ? max(k_first, pc.pos0 + t0 + 1 - pc.win) : k_first;
     const uint kv_stride = pc.n_head_kv * HD, ne = BC * HD4;
 
     vec4 q[NV], acc[NV];
     const uint qo = (t * pc.n_head + h) * HD4 + c;
     [[unroll]] for (uint i = 0; i < NV; i++) {
-        q[i] = i < NI ? Q4[qo + 4 * i] * pc.scale : vec4(0.0);
+        q[i] = i < NI ? Q4[qo + LANES * i] * pc.scale : vec4(0.0);
         acc[i] = vec4(0.0);
     }
     float m = NEG_INF, l = 0.0;
@@ -93,7 +106,8 @@ void main() {
     for (uint n = 0; n < NL; n++) {                                                \
         const uint e = tid + WG * n, key = (KB) + e / HD4;                         \
         if (e < ne && key < k_end) {                                               \
-            const uint src = (pc.cache_off + key * kv_stride + kh * HD) / 4 + e % HD4; \
+            const uint slot = pc.ring != 0 ? key % pc.ring : key;                  \
+            const uint src = (pc.cache_off + slot * kv_stride + kh * HD) / 4 + e % HD4; \
             LOAD_ONE(n, src)                                                       \
         } else {                                                                   \
             ZERO_ONE(n)                                                            \
@@ -126,10 +140,10 @@ void main() {
                 const uint ko = (j0 + jj) * HD4 + c;
                 float d = 0.0;
                 [[unroll]] for (uint i = 0; i < NV; i++)
-                    if (i < NI) d += dot(q[i], vec4(ks[ko + 4 * i]));
-                d = subgroupClusteredAdd(d, 4);
+                    if (i < NI) d += dot(q[i], vec4(ks[ko + LANES * i]));
+                d = subgroupClusteredAdd(d, LANES);
                 const uint key = kb + j0 + jj;
-                s[jj] = (j0 + jj < nb && key <= kmax) ? d : NEG_INF;
+                s[jj] = (j0 + jj < nb && key <= kmax && (pc.win == 0 || key + pc.win > kmax)) ? d : NEG_INF;
                 mx = max(mx, s[jj]);
             }
             if (mx != NEG_INF) {  // else none of these keys is this row's yet
@@ -141,7 +155,7 @@ void main() {
                     l += p;
                     const uint vo = (j0 + jj) * HD4 + c;
                     [[unroll]] for (uint i = 0; i < NV; i++)
-                        if (i < NI) acc[i] += p * vec4(vs[vo + 4 * i]);
+                        if (i < NI) acc[i] += p * vec4(vs[vo + LANES * i]);
                 }
                 m = mx;
             }
@@ -151,11 +165,11 @@ void main() {
     if (!valid) return;
     const uint row = t * pc.n_head + h;
     if (pc.n_split == 1) {
-        for (uint i = 0; i < NI; i++) O4[qo + 4 * i] = acc[i] / l;
+        for (uint i = 0; i < NI; i++) O4[qo + LANES * i] = acc[i] / l;
     } else {
         const uint o = (split * pc.n_tok * pc.n_head + row) * (HD + 2);
         for (uint i = 0; i < NI; i++) {
-            const uint d = 16 * i + 4 * c;
+            const uint d = 4 * LANES * i + 4 * c;
             P[o + d] = acc[i].x;
             P[o + d + 1] = acc[i].y;
             P[o + d + 2] = acc[i].z;
