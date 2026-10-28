@@ -41,8 +41,10 @@ and a ready-to-submit `PPSA99555.json` to the release.
    editing `version`, `artifact_url` and `sha256` (and `icon_url` if the icon
    moved). Never replace the asset on a release that's already listed — its
    SHA-256 would stop matching. An update keeps the user's settings, keys and
-   chats (they live in `/download0` and come back) but not their downloaded
-   models, so the release notes say so.
+   chats (they live in `/download0` and come back), and the first start of
+   the new version brings back their downloaded models through the
+   jailbreak's FTP server, so the release notes remind people to start the
+   title once after updating.
 
 ## The record
 
