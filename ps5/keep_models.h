@@ -26,10 +26,10 @@ struct BroughtBack {
 
 // models: the title's models folder as the title sees it (/app0/models);
 // title_id: its folder's name under /data/homebrew and the store's previous
-// folder; eboot: the title's eboot.bin as the title sees it, whose size shows
-// the FTP server's /data/homebrew/<title ID> is this folder. ports: where to
-// look for the FTP server, in order.
-BroughtBack bring_back_models(const std::string &models, const std::string &title_id, const std::string &eboot,
-                              const std::vector<int> &ports);
+// folder. A file the title writes there first, under a name of its own, shows
+// the FTP server's /data/homebrew/<title ID> is this folder (eboot.bin can't:
+// the server gives it decrypted, a different size). ports: where to look for
+// the FTP server, in order.
+BroughtBack bring_back_models(const std::string &models, const std::string &title_id, const std::vector<int> &ports);
 
 }  // namespace app

@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 
 #include "log.h"
 
@@ -51,8 +52,41 @@ public:
     // A command and its reply's code; 0 when the connection failed.
     int cmd(const std::string &line) { return send(line) ? reply() : 0; }
     const std::string &text() const { return text_; }
-    // The names in a folder (NLST), over a passive data connection.
+    // The files in a folder, over a passive data connection: NLST's names,
+    // else LIST's (the console's ftpsrv has no NLST), without its folders.
     bool names(const std::string &dir, std::vector<std::string> &out) {
+        std::string all;
+        if (transfer("NLST " + dir, all)) {
+            for (std::string &name : lines(all)) {
+                // Some servers give each name with the folder.
+                const size_t slash = name.rfind('/');
+                if (slash != std::string::npos) name = name.substr(slash + 1);
+                if (!name.empty() && name != "." && name != "..") out.push_back(name);
+            }
+            return true;
+        }
+        if (!transfer("LIST " + dir, all)) return false;
+        // ls -l lines: mode, links, owner, group, size, 3 for the time, name.
+        for (const std::string &l : lines(all)) {
+            if (l.empty() || l[0] != '-') continue;  // a folder, a link, or "total"
+            size_t i = 0;
+            for (int field = 0; field < 8 && i < l.size(); field++) {
+                while (i < l.size() && l[i] != ' ') i++;
+                while (i < l.size() && l[i] == ' ') i++;
+            }
+            if (i < l.size()) out.push_back(l.substr(i));
+        }
+        return true;
+    }
+    // A file's size, or -1.
+    long long size(const std::string &path) {
+        return cmd("SIZE " + path) == 213 ? strtoll(text_.c_str() + 4, nullptr, 10) : -1;
+    }
+
+private:
+    // A command whose answer comes over a passive data connection.
+    bool transfer(const std::string &command, std::string &all) {
+        all.clear();
         if (cmd("PASV") != 227) return false;
         unsigned h[4], p[2];
         const size_t paren = text_.find('(');
@@ -64,35 +98,28 @@ public:
         int data = dial(port);
         if (data < 0) data = dial(port, h[0] << 24 | h[1] << 16 | h[2] << 8 | h[3]);
         if (data < 0) return false;
-        const int code = cmd("NLST " + dir);
-        std::string all;
+        const int code = cmd(command);
         if (code == 150 || code == 125) {
             char buf[4096];
             ssize_t n;
             while ((n = recv(data, buf, sizeof buf, 0)) > 0) all.append(buf, (size_t)n);
         }
         close(data);
-        if ((code != 150 && code != 125) || reply() != 226) return false;
+        return (code == 150 || code == 125) && reply() / 100 == 2;
+    }
+    static std::vector<std::string> lines(const std::string &all) {
+        std::vector<std::string> out;
         size_t i = 0;
         while (i < all.size()) {
             size_t e = all.find('\n', i);
             if (e == std::string::npos) e = all.size();
-            std::string name = all.substr(i, e - i);
-            if (!name.empty() && name.back() == '\r') name.pop_back();
-            // Some servers give each name with the folder.
-            const size_t slash = name.rfind('/');
-            if (slash != std::string::npos) name = name.substr(slash + 1);
-            if (!name.empty() && name != "." && name != "..") out.push_back(name);
+            std::string l = all.substr(i, e - i);
+            if (!l.empty() && l.back() == '\r') l.pop_back();
+            out.push_back(l);
             i = e + 1;
         }
-        return true;
+        return out;
     }
-    // A file's size, or -1.
-    long long size(const std::string &path) {
-        return cmd("SIZE " + path) == 213 ? strtoll(text_.c_str() + 4, nullptr, 10) : -1;
-    }
-
-private:
     bool send(const std::string &line) {
         const std::string s = line + "\r\n";
         return ::send(fd_, s.data(), s.size(), 0) == (ssize_t)s.size();
@@ -140,8 +167,7 @@ bool skip(const std::string &name) {
 
 }  // namespace
 
-BroughtBack bring_back_models(const std::string &models, const std::string &title_id, const std::string &eboot,
-                              const std::vector<int> &ports) {
+BroughtBack bring_back_models(const std::string &models, const std::string &title_id, const std::vector<int> &ports) {
     BroughtBack r;
     Ftp ftp;
     int port = 0;
@@ -156,11 +182,18 @@ BroughtBack bring_back_models(const std::string &models, const std::string &titl
     }
     if (ftp.cmd("USER anonymous") == 331) ftp.cmd("PASS anonymous");
     ftp.cmd("TYPE I");
-    // The folder the server calls /data/homebrew/<title ID> is this one: its
-    // eboot.bin is the size this one's is.
+    // The folder the server calls /data/homebrew/<title ID> is this one: a
+    // file written here under a name of its own is there, the same size.
     const std::string home = "/data/homebrew/" + title_id, old = "/data/prosperostore/previous/" + title_id + "/models";
-    struct stat st {};
-    if (stat(eboot.c_str(), &st) != 0 || ftp.size(home + "/eboot.bin") != (long long)st.st_size) {
+    const std::string mark = ".ts5-here-" + std::to_string(getpid()) + "-" + std::to_string(time(nullptr));
+    bool seen = false;
+    if (FILE *f = fopen((models + "/" + mark).c_str(), "wb")) {
+        fputs(mark.c_str(), f);
+        fclose(f);
+        seen = ftp.size(home + "/models/" + mark) == (long long)mark.size();
+        unlink((models + "/" + mark).c_str());
+    }
+    if (!seen) {
         r.why = "the FTP server on port " + std::to_string(port) + " doesn't show this title's folder at " + home;
         return r;
     }
@@ -175,7 +208,8 @@ BroughtBack bring_back_models(const std::string &models, const std::string &titl
         struct stat here {};
         if (stat((models + "/" + name).c_str(), &here) == 0) continue;  // the new folder has it already
         if (ftp.size(old + "/" + name) < 0) continue;                    // a folder, or gone
-        if (ftp.cmd("RNFR " + old + "/" + name) == 350 && ftp.cmd("RNTO " + home + "/models/" + name) == 250 &&
+        // RNTO's success is 250, or 226 from the console's ftpsrv.
+        if (ftp.cmd("RNFR " + old + "/" + name) == 350 && ftp.cmd("RNTO " + home + "/models/" + name) / 100 == 2 &&
             stat((models + "/" + name).c_str(), &here) == 0) {
             r.moved.push_back(name);
         } else {
