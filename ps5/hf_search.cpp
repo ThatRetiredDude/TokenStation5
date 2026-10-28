@@ -28,7 +28,7 @@ constexpr size_t kHeaderBytes = 2u << 20;
 
 // What ts5 runs (model.cpp), and the file types its GPU code takes
 // (vk_backend.cpp), as the file names say them, in the order they're offered.
-const char *const kArchs[] = {"llama", "mistral", "qwen2", "qwen3"};
+const char *const kArchs[] = {"llama", "mistral", "qwen2", "qwen3", "gemma3"};
 const char *const kQuants[] = {"Q4_K_M", "Q4_K_S", "Q5_K_M", "Q5_K_S", "Q6_K", "Q8_0",
                                "Q4_0",   "Q5_0",   "Q4_1",   "Q5_1",   "F16"};
 

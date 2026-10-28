@@ -52,10 +52,11 @@ void rmsnorm(float *x, const float *w, int n, float eps) {
     for (int i = 0; i < n; i++) x[i] = x[i] * s * w[i];
 }
 
-// freqs: Llama 3.1's divisor for each frequency (Model::rope_freqs), or null.
-void rope(float *v, int head_dim, int n_rot, int pos, float base, bool neox, const float *freqs) {
+// freqs: Llama 3.1's divisor for each frequency (Model::rope_freqs), or null;
+// scale: linear RoPE scaling's factor on the position.
+void rope(float *v, int head_dim, int n_rot, int pos, float base, bool neox, const float *freqs, float scale = 1.f) {
     for (int i = 0; i < n_rot / 2; i++) {
-        float theta = pos * std::pow(base, -2.0f * i / n_rot);
+        float theta = pos * scale * std::pow(base, -2.0f * i / n_rot);
         if (freqs) theta /= freqs[i];
         float c = std::cos(theta), s = std::sin(theta);
         int a = neox ? i : 2 * i, b = neox ? i + n_rot / 2 : 2 * i + 1;
@@ -64,6 +65,11 @@ void rope(float *v, int head_dim, int n_rot, int pos, float base, bool neox, con
         v[b] = x0 * s + x1 * c;
     }
     (void)head_dim;
+}
+
+// GELU, tanh approximation (Gemma's gelu_pytorch_tanh, ggml's gelu).
+float gelu(float x) {
+    return 0.5f * x * (1.0f + std::tanh(0.7978845608f * (x + 0.044715f * x * x * x)));
 }
 
 // One token's K or V (n values, whole heads) as a cache of type t keeps it.
@@ -94,6 +100,7 @@ public:
             Norms n;
             n.attn = vec(L.attn_norm);
             n.ffn = vec(L.ffn_norm);
+            if (L.post_attn_norm) n.post_attn = vec(L.post_attn_norm), n.post_ffn = vec(L.post_ffn_norm);
             if (L.q_norm) n.q = vec(L.q_norm), n.k = vec(L.k_norm);
             if (L.bq) n.bq = vec(L.bq), n.bk = vec(L.bk), n.bv = vec(L.bv);
             norms_.push_back(std::move(n));
@@ -122,6 +129,8 @@ public:
             const uint8_t *src = te.data ? te.data + (int64_t)tokens[t] * rb : row.data();
             if (!te.data && !read_at(file_, m_, te, (uint64_t)tokens[t] * rb, rb, row.data())) return read_failed(err);
             dequantize_row(te.type(), src, x.data() + (size_t)t * E, E);
+            if (hp_.embd_scale > 0)
+                for (int i = 0; i < E; i++) x[(size_t)t * E + i] *= hp_.embd_scale;
         }
         for (int l = 0; l < hp_.n_layer; l++) {
             Layer L = m_.layers[l];
@@ -137,7 +146,7 @@ public:
     }
 
 private:
-    struct Norms { std::vector<float> attn, ffn, q, k, bq, bk, bv; };
+    struct Norms { std::vector<float> attn, ffn, q, k, bq, bk, bv, post_attn, post_ffn; };
 
     std::vector<float> vec(const Weight &w) {
         std::vector<float> v(w.info->nelements());
@@ -180,6 +189,7 @@ private:
         const int E = hp_.n_embd, HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
         const int KV = HKV * HD, F = hp_.n_ff;
         const Norms &N = norms_[l];
+        const bool swa = hp_.swa(l);
         std::vector<float> h(x, x + (size_t)n * E), q((size_t)n * H * HD), k((size_t)n * KV), v((size_t)n * KV);
         for (int t = 0; t < n; t++) rmsnorm(&h[(size_t)t * E], N.attn.data(), E, hp_.rms_eps);
         matmul(L.wq, h.data(), n, q.data());
@@ -195,13 +205,14 @@ private:
                 for (int i = 0; i < KV; i++) kt[i] += N.bk[i], vt[i] += N.bv[i];
             }
             const float *ff = rope_freqs_.empty() ? nullptr : rope_freqs_.data();
+            const float base = swa ? hp_.rope_base_swa : hp_.rope_base, rs = swa ? 1.f : hp_.rope_scale;
             for (int hh = 0; hh < H; hh++) {
                 if (!N.q.empty()) rmsnorm(&qt[hh * HD], N.q.data(), HD, hp_.rms_eps);
-                rope(&qt[hh * HD], HD, hp_.rope_dims, pos, hp_.rope_base, hp_.rope_neox, ff);
+                rope(&qt[hh * HD], HD, hp_.rope_dims, pos, base, hp_.rope_neox, ff, rs);
             }
             for (int hh = 0; hh < HKV; hh++) {
                 if (!N.k.empty()) rmsnorm(&kt[hh * HD], N.k.data(), HD, hp_.rms_eps);
-                rope(&kt[hh * HD], HD, hp_.rope_dims, pos, hp_.rope_base, hp_.rope_neox, ff);
+                rope(&kt[hh * HD], HD, hp_.rope_dims, pos, base, hp_.rope_neox, ff, rs);
             }
             round_kv(kv_, kt, KV);
             round_kv(kv_, vt, KV);
@@ -209,39 +220,48 @@ private:
             memcpy(vl + (size_t)pos * KV, vt, KV * 4);
         }
         std::vector<float> att((size_t)n * H * HD), o((size_t)n * E);
-        const float scale = 1.0f / std::sqrt((float)HD);
+        const float scale = hp_.attn_scale;
         for (int t = 0; t < n; t++) {
             const float *qt = &q[(size_t)t * H * HD];
             float *at = &att[(size_t)t * H * HD];
             const int pos = pos0 + t;
+            // A sliding layer sees the last swa_window keys, its own included.
+            const int lo = swa ? std::max(0, pos - hp_.swa_window + 1) : 0;
             std::vector<float> sc(pos + 1);
             for (int hh = 0; hh < H; hh++) {
                 int kh = hh / (H / HKV);
                 float mx = -INFINITY;
-                for (int p = 0; p <= pos; p++) {
+                for (int p = lo; p <= pos; p++) {
                     double s = 0;
                     for (int d = 0; d < HD; d++) s += (double)qt[hh * HD + d] * kl[(size_t)p * KV + kh * HD + d];
                     sc[p] = (float)s * scale;
                     mx = std::max(mx, sc[p]);
                 }
                 double sum = 0;
-                for (int p = 0; p <= pos; p++) sum += sc[p] = std::exp(sc[p] - mx);
+                for (int p = lo; p <= pos; p++) sum += sc[p] = std::exp(sc[p] - mx);
                 for (int d = 0; d < HD; d++) {
                     double acc = 0;
-                    for (int p = 0; p <= pos; p++) acc += sc[p] * vl[(size_t)p * KV + kh * HD + d];
+                    for (int p = lo; p <= pos; p++) acc += sc[p] * vl[(size_t)p * KV + kh * HD + d];
                     at[hh * HD + d] = (float)(acc / sum);
                 }
             }
         }
         matmul(L.wo, att.data(), n, o.data());
+        if (!N.post_attn.empty())
+            for (int t = 0; t < n; t++) rmsnorm(&o[(size_t)t * E], N.post_attn.data(), E, hp_.rms_eps);
         for (size_t i = 0; i < (size_t)n * E; i++) x[i] += o[i];
         h.assign(x, x + (size_t)n * E);
         for (int t = 0; t < n; t++) rmsnorm(&h[(size_t)t * E], N.ffn.data(), E, hp_.rms_eps);
         std::vector<float> g((size_t)n * F), u((size_t)n * F);
         matmul(L.w_gate, h.data(), n, g.data());
         matmul(L.w_up, h.data(), n, u.data());
-        for (size_t i = 0; i < (size_t)n * F; i++) g[i] = g[i] / (1.0f + std::exp(-g[i])) * u[i];
+        if (hp_.gelu)
+            for (size_t i = 0; i < (size_t)n * F; i++) g[i] = gelu(g[i]) * u[i];
+        else
+            for (size_t i = 0; i < (size_t)n * F; i++) g[i] = g[i] / (1.0f + std::exp(-g[i])) * u[i];
         matmul(L.w_down, g.data(), n, o.data());
+        if (!N.post_ffn.empty())
+            for (int t = 0; t < n; t++) rmsnorm(&o[(size_t)t * E], N.post_ffn.data(), E, hp_.rms_eps);
         for (size_t i = 0; i < (size_t)n * E; i++) x[i] += o[i];
     }
 

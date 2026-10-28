@@ -1,5 +1,5 @@
 // Tokenizers stored in GGUF: byte-level BPE ("gpt2": Qwen, Llama 3, Mistral
-// Nemo) and SentencePiece ("llama": Llama 2, Mistral 7B). Special tokens in
+// Nemo) and SentencePiece ("llama": Llama 2, Mistral 7B, Gemma 3). Special tokens in
 // the text (<|im_start|> and the like) are matched first and kept whole.
 #pragma once
 #include <cstdint>
@@ -33,7 +33,7 @@ public:
     // assistant turn opened.
     std::string apply_chat(const std::vector<ChatMessage> &msgs) const;
 
-    enum Chat { CHATML, LLAMA3, MISTRAL, PLAIN };
+    enum Chat { CHATML, LLAMA3, MISTRAL, GEMMA, PLAIN };
     Chat chat_format() const { return chat_; }
     // The model's own chat template (GGUF tokenizer.chat_template), or "".
     const std::string &chat_template() const { return template_; }
@@ -54,6 +54,7 @@ private:
     std::unordered_map<std::string, int32_t> id_;
     std::unordered_map<std::string, int> merge_rank_;
     std::vector<std::pair<std::string, int32_t>> specials_;  // longest first
+    std::vector<int> by_byte_[256];  // specials_ indexes by first byte, longest first
     std::vector<int32_t> eog_;
     int32_t bos_ = -1, eos_ = -1;
     bool add_bos_ = false, add_space_prefix_ = true;

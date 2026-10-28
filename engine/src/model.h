@@ -1,5 +1,6 @@
 // Model description: hyperparameters and weight tensors of a dense
-// llama-family decoder (llama, mistral, qwen2, qwen3), as stored in GGUF.
+// llama-family decoder (llama, mistral, qwen2, qwen3, gemma3), as stored in
+// GGUF.
 #pragma once
 #include <cstdint>
 #include <memory>
@@ -19,6 +20,25 @@ struct HParams {
     float rope_base = 10000.f;
     int rope_dims = 0;
     bool rope_neox = false;  // pairs (i, i + d/2) instead of (2i, 2i + 1)
+    // Queries are scaled by this before attention: 1 / sqrt(head_dim), or
+    // Gemma 3 27B's 1 / sqrt(n_embd / n_head).
+    float attn_scale = 0;
+    // Gemma 3: the token embeddings are multiplied by sqrt(n_embd), the FFN's
+    // gate goes through GELU (tanh) instead of SiLU, and attention's and the
+    // FFN's outputs are normalized again (post_attn_norm, post_ffn_norm)
+    // before they join the residual.
+    float embd_scale = 0;  // 0: none
+    bool gelu = false;
+    // Sliding-window attention (Gemma 3): every layer but each swa_pattern-th
+    // sees only the last swa_window keys (its own included), with its own
+    // RoPE base and no RoPE scaling. 0: every layer sees all keys.
+    int swa_window = 0, swa_pattern = 0;
+    bool swa_test = false;  // swa_window is TS5_SWA_WINDOW's, not the file's
+    float rope_base_swa = 10000.f;
+    // Linear RoPE scaling of the full-attention layers: positions times this
+    // (Gemma 3's 1/8); 1 elsewhere.
+    float rope_scale = 1.f;
+    bool swa(int layer) const { return swa_window > 0 && swa_pattern > 0 && layer % swa_pattern < swa_pattern - 1; }
 };
 
 // A tensor's bytes plus its type and shape. `data` points into host memory
@@ -35,6 +55,7 @@ struct Weight {
 struct Layer {
     Weight attn_norm, wq, wk, wv, wo, bq, bk, bv, q_norm, k_norm;
     Weight ffn_norm, w_gate, w_up, w_down;
+    Weight post_attn_norm, post_ffn_norm;  // Gemma 3
 };
 
 struct Model {

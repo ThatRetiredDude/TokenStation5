@@ -1,5 +1,7 @@
 // Per token and head, after the Q/K/V projections: optional bias (Qwen2),
-// optional per-head RMSNorm (Qwen3), RoPE, then K and V go into the cache:
+// optional per-head RMSNorm (Qwen3, Gemma 3), RoPE (positions times
+// rope_scale), then K and V go into the cache (position p in slot p % ring of
+// a sliding layer's ring, else slot p):
 // f16, or with KV_Q8 (qkv_post_q8.comp) 8-bit values with an f16 scale per
 // 32 (the largest magnitude over 127, values rounded to nearest even).
 // Workgroups 0..n_head-1 handle Q heads, the rest K/V heads.
@@ -54,6 +56,8 @@ layout(push_constant) uniform PC {
     uint cache_off;   // element offset of this layer in the caches
     float rope_base, eps;
     uint has_freqs;
+    uint ring;        // slots of a sliding layer's ring; 0: one per position
+    float rope_scale;
 } pc;
 
 shared float sh[256];
@@ -66,7 +70,7 @@ void main() {
     const uint h = is_q ? hi : hi - pc.n_head;
     const uint q_stride = pc.n_head * HD, kv_stride = pc.n_head_kv * HD;
     const uint base = is_q ? t * q_stride + h * HD : t * kv_stride + h * HD;
-    const uint pos = pc.pos0 + t;
+    const uint pos = pc.pos0 + t, slot = pc.ring != 0 ? pos % pc.ring : pos;
 
     float ss = 0.0;
     for (uint d = tid; d < HD; d += 128) {
@@ -92,7 +96,7 @@ void main() {
         float y = sh[d];
         if (d < rd) {
             uint i = pc.neox != 0 ? (d < half_rd ? d : d - half_rd) : d / 2;
-            float theta = float(pos) * pow(pc.rope_base, -2.0 * float(i) / float(rd));
+            float theta = float(pos) * pc.rope_scale * pow(pc.rope_base, -2.0 * float(i) / float(rd));
             if (pc.has_freqs != 0) theta /= freqs[i];
             float c = cos(theta), s = sin(theta);
             if (pc.neox != 0) y = d < half_rd ? sh[d] * c - sh[d + half_rd] * s : sh[d - half_rd] * s + sh[d] * c;
@@ -107,7 +111,7 @@ void main() {
             ky[d] = y;
             vy[d] = v;
 #else
-            const uint ci = pc.cache_off + pos * kv_stride + h * HD + d;
+            const uint ci = pc.cache_off + slot * kv_stride + h * HD + d;
             kc[ci] = float16_t(y);
             vc[ci] = float16_t(v);
 #endif
@@ -117,7 +121,7 @@ void main() {
     if (!is_q) {  // the same for the whole workgroup
         barrier();
         for (uint w = tid; w < HD / 4; w += 128) {
-            const uint ci = pc.cache_off + pos * kv_stride + h * HD + 4 * w;  // value index
+            const uint ci = pc.cache_off + slot * kv_stride + h * HD + 4 * w;  // value index
             float ks, vs;
             kc[ci / 4] = q8_word(w, false, ks);
             vc[ci / 4] = q8_word(w, true, vs);
