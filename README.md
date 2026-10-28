@@ -91,8 +91,10 @@ a stopped download picks up where it left off.
 
 ### 🧠 Good models, checked on the real hardware
 
-Qwen 2.5 Coder 7B for code, Qwen 3 8B and Llama 3.1 8B for everyday chat, and
-Llama 3.2 3B when you want speed. Every model passes a check that runs the
+Qwen 2.5 Coder 7B for code, Qwen 3 8B and Llama 3.1 8B for everyday chat,
+Google's Gemma 3 12B and Mistral Nemo 12B when you want a bigger model, and
+Llama 3.2 3B when you want speed. Each checked model comes with the sampling
+settings that did best in a run of app-style checks on the PS5. Every model passes a check that runs the
 same prompt on the PS5's GPU and on a separate reference, and compares the
 results at every word. Want another? The Models page searches Hugging Face
 and shows only the files that fit the console.
@@ -170,14 +172,14 @@ The full plan is in [engine/DESIGN.md](engine/DESIGN.md).
 | | |
 | --- | --- |
 | Engine core | ✅ Working on Linux and on the PS5. Logits match the reference at every position, on every quant type |
-| Models | ✅ Qwen 2.5, Qwen 2.5 Coder, Qwen 3, Llama, Mistral, Mistral Nemo |
+| Models | ✅ Qwen 2.5, Qwen 2.5 Coder, Qwen 3, Llama, Mistral, Mistral Nemo, Gemma 3 |
 | Quants | ✅ F32, F16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K_M, Q5_K_M |
 | OpenAI API | ✅ `/v1/chat/completions` (streaming), `/v1/completions`, `/v1/models` |
 | PS5 title | ✅ Runs on a real PS5 as **TokenStation5** (`PPSA99555`). The GPU check passes on the console, and the API serves the home network |
 | TV dashboard | ✅ Pick, check, benchmark and serve models with the controller, on the TV |
 | PS5 kernel tuning | 🔨 Ongoing: prompts read 13 to 16 times faster and generation about 3.5 times faster than the first console build; the new attention doubled generation again at 16k+ context |
 | Speculative decoding | ✅ Code editing with Coder 7B runs at 102 tok/s against 64 with drafting off, byte-identical output; free chat stays within 4% |
-| Hugging Face search | ✅ From the TV, finds other Llama, Mistral, Qwen 2.5 and Qwen 3 GGUFs that fit the console |
+| Hugging Face search | ✅ From the TV, finds other Llama, Mistral, Qwen 2.5, Qwen 3 and Gemma 3 GGUFs that fit the console |
 
 ## On the console today
 
@@ -191,10 +193,11 @@ ran there, before any kernel tuning:
 | Qwen 2.5 Coder 7B Q4_K_M | ✅ | **483** (31) | **70** (21) | 2.3 s | 4.4 + 0.4 GiB |
 | Qwen 3 8B Q4_K_M | ✅ | **429** (29) | **68** (19) | ~2.4 s | 4.7 + 1.1 GiB |
 | Llama 3.1 8B Q4_K_M | ✅ | **428** (28.5) | **70** (19.7) | ~2.3 s | 4.6 + 1.0 GiB |
+| Gemma 3 12B Q4_K_M | ✅ | **250** (188) | **40** (35) | ~3.5 s | 6.8 + 1.1 GiB |
 
 The GPU check runs the same prompt through the console's GPU and through
 ts5's CPU reference, and compares the logits at every position. With a
-512-token prompt, all four models pick the same top word as the CPU at every
+512-token prompt, all five models pick the same top word as the CPU at every
 one of the 512 positions, because prompts are summed in 32-bit (16-bit sums,
 `TS5_MMB_F16=1`, read prompts 9 to 14% faster but put Llama 3.2 3B over the
 check's bar). The first check of a model saves the CPU's answers next to it,
@@ -314,10 +317,14 @@ Models page offers; all are measured in
 | Llama 3.1 8B Instruct | Q4_K_M | ~4.6 GiB | general chat |
 
 For anything else, the Models page's Hugging Face search lists GGUFs of the
-architectures ts5 runs (Llama, Mistral, Qwen 2.5 and Qwen 3) and shows only
-the files that fit the console's memory with room for a working context,
-chat-tuned ones first. A 12B at Q4_K_M (about 7 GiB) is the practical
-ceiling. Gemma isn't supported yet.
+architectures ts5 runs (Llama, Mistral, Qwen 2.5, Qwen 3 and Gemma 3) and
+shows only the files that fit the console's memory with room for a working
+context, chat-tuned ones first. A 12B at Q4_K_M (about 7 GiB) is the practical
+ceiling: Gemma 3 12B (bartowski's `google_gemma-3-12b-it-Q4_K_M.gguf`, ~6.8
+GiB) and Mistral Nemo 12B are checked on the console and come with their own
+settings. Gemma 3 keeps most of its layers to a 1,024-token window, so it
+still fits a context of about 29,700 tokens. Qwen 3.5 and Gemma 4 aren't
+supported yet.
 
 ## Repo map
 
