@@ -80,6 +80,7 @@
 
 #include "audio_probe.h"
 #include "backup.h"
+#include "keep_models.h"
 #include "canvas.h"
 #include "chat.h"
 #include "chat_store.h"
@@ -173,6 +174,8 @@ constexpr const char *kUsageHours = TS5_HOME "/usage-hours.tsv";
 constexpr const char *kKeys = TS5_HOME "/keys.tsv";
 constexpr const char *kTsFile = TS5_HOME "/tailscale.tsv";  // the PS5's keys on its tailnet (ts/tailscale.h)
 constexpr const char *kChats = TS5_HOME "/chats";  // the Chat page's saved chats (chat_store.h)
+// The version that last started, in the title's own space (keep_models.h).
+constexpr const char *kVersionMark = TS5_STORE "/ts5/version";
 // Not ..._KEY: a name ending in _KEY is a secret, typed in (settings.h).
 constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
 // Tailscale on (1) or off; and, set from a computer only, another control
@@ -638,6 +641,32 @@ int main(int, char **) {
         setenv(name.c_str(), w.substr(eq + 1).c_str(), 1);
         // Keys stay out of the log, which anyone on the network can read over FTP.
         printf("ts5-title: %s\n", app::secret_setting(name) ? (name + "=(set)").c_str() : w.c_str());
+    }
+
+    // The first start of a new version: the last version's models, which a
+    // store update leaves in its old folder, come back (keep_models.h).
+    // TS5_FTP_PORT: where the console's FTP server is, if not 2121 or 1337.
+    const std::vector<std::string> last_version = read_words(kVersionMark);
+    if (last_version.empty() || last_version[0] != TS5_VERSION) {
+        std::vector<int> ports = {2121, 1337};
+        if (int p = atoi(app::setting("TS5_FTP_PORT").c_str()); p > 0) ports.insert(ports.begin(), p);
+        const app::BroughtBack b = app::bring_back_models(kModels, TS5_TITLE_ID, TS5_HOME "/eboot.bin", ports);
+        if (!b.why.empty())
+            printf("ts5-title: models from the last version: %s\n", b.why.c_str());
+        else
+            printf("ts5-title: models from the last version: %zu brought back, %d left behind\n", b.moved.size(),
+                   b.left);
+        for (const std::string &m : b.moved) printf("ts5-title: brought back %s\n", m.c_str());
+        if (!b.moved.empty())
+            notify(b.moved.size() == 1 ? "Your model from the last version is back."
+                                       : "Your " + std::to_string(b.moved.size()) +
+                                             " model files from the last version are back.");
+        if (b.left) notify("Some models from the last version couldn't be brought back." + std::string(plain::kDetails));
+        if (b.looked)
+            if (FILE *f = fopen(kVersionMark, "w")) {
+                fprintf(f, "%s\n", TS5_VERSION);
+                fclose(f);
+            }
     }
 
     for (const char *f :
