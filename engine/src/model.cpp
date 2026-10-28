@@ -57,7 +57,10 @@ bool Model::open(const std::string &path, std::string &err) {
         if (hp.n_layer == 62) hp.attn_scale = 1.0f / std::sqrt((float)(hp.n_embd / hp.n_head));
         // Tests: a small window, so a short check crosses it.
         if (const char *e = getenv("TS5_SWA_WINDOW"))
-            if (atoi(e) > 0 && hp.swa_window > 0) hp.swa_window = atoi(e);
+            if (atoi(e) > 0 && hp.swa_window > 0 && atoi(e) != hp.swa_window) {
+                hp.swa_window = atoi(e);
+                hp.swa_test = true;
+            }
     }
     if (auto *t = gguf.find("token_embd.weight")) hp.n_vocab = (int)t->ne[1];
     // Bind tensor descriptors now (data pointers are filled by load()).
