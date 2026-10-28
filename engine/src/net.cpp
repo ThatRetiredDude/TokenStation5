@@ -343,6 +343,36 @@ int locked_random(void *drbg, unsigned char *out, size_t len) {
     return mbedtls_ctr_drbg_random(drbg, out, len);
 }
 
+// Certificate authorities no longer to trust, whatever the bundle says: the
+// eMudhra TLS intermediates whose private keys leaked in October 2026 (also
+// cross-signed by Sectigo, under the same names) and the root Mozilla
+// removed over it. Browsers and Tailscale (TS-2026-013) block them too.
+const char *const kDistrusted[] = {
+    "EM DV TLS CA - G3B", "EM OV TLS CA - G3B", "EM EV TLS CA - G3B", "EM DV TLS CA - G3C",
+    "EM OV TLS CA - G3C", "EM EV TLS CA - G3C", "emSign ECC Root CA - G3",
+};
+
+// Mbed TLS calls it for each certificate of a chain it checks.
+int check_distrusted(void *, mbedtls_x509_crt *crt, int, uint32_t *flags) {
+    char dn[512];
+    if (mbedtls_x509_dn_gets(dn, sizeof dn, &crt->subject) < 0) return 0;
+    const std::string subject = dn;
+    for (const char *name : kDistrusted) {
+        const std::string cn = std::string("CN=") + name;
+        size_t at = subject.find(cn);
+        while (at != std::string::npos) {
+            const size_t end = at + cn.size();
+            if ((at == 0 || subject[at - 1] == ' ' || subject[at - 1] == ',') &&
+                (end == subject.size() || subject[end] == ',')) {
+                *flags |= MBEDTLS_X509_BADCERT_REVOKED;
+                return 0;
+            }
+            at = subject.find(cn, at + 1);
+        }
+    }
+    return 0;
+}
+
 // The first HTTPS request sets up what every one shares.
 Tls &tls() {
     static Tls t;
@@ -390,12 +420,14 @@ Tls &tls() {
         if (rc != 0) { t.why = "TLS setup failed (-0x" + Conn::hex(-rc) + ")"; return; }
         mbedtls_ssl_conf_authmode(&t.conf, MBEDTLS_SSL_VERIFY_REQUIRED);
         mbedtls_ssl_conf_ca_chain(&t.conf, &t.ca, nullptr);
+        mbedtls_ssl_conf_verify(&t.conf, check_distrusted, nullptr);
         mbedtls_ssl_conf_rng(&t.conf, locked_random, &t.drbg);
         rc = mbedtls_ssl_config_defaults(&t.conf12, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
                                          MBEDTLS_SSL_PRESET_DEFAULT);
         if (rc != 0) { t.why = "TLS setup failed (-0x" + Conn::hex(-rc) + ")"; return; }
         mbedtls_ssl_conf_authmode(&t.conf12, MBEDTLS_SSL_VERIFY_REQUIRED);
         mbedtls_ssl_conf_ca_chain(&t.conf12, &t.ca, nullptr);
+        mbedtls_ssl_conf_verify(&t.conf12, check_distrusted, nullptr);
         mbedtls_ssl_conf_rng(&t.conf12, locked_random, &t.drbg);
         mbedtls_ssl_conf_max_tls_version(&t.conf12, MBEDTLS_SSL_VERSION_TLS1_2);
         t.ready = true;
