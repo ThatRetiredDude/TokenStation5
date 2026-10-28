@@ -349,6 +349,63 @@ std::string render_mistral(const Tokenizer &t, const std::vector<Message> &all, 
     return s;
 }
 
+// Gemma 3 was trained without a tool format; Google's guide describes the
+// functions in the prompt and asks for a call in a fixed form. These words
+// ask for Hermes's (<tool_call>, parsed as Qwen's), in the first user turn,
+// as Gemma's template puts the system message there; results come back in a
+// user turn, as Hermes's do.
+const char *const kGemmaTools =
+    "You can call functions to help with the request. The functions are listed below as JSON within "
+    "<tools></tools> tags. To call one, reply with only a JSON object with the function's name and arguments "
+    "within <tool_call></tool_call> tags, one pair of tags per call:\n<tool_call>\n{\"name\": <function-name>, "
+    "\"arguments\": <args-json-object>}\n</tool_call>\nIf the request doesn't need any of the functions, answer "
+    "it directly instead. The results of your calls come back within <tool_response></tool_response> tags: use "
+    "them to answer.";
+
+std::string gemma_results(const std::vector<std::string> &results) {
+    std::string s;
+    for (auto &r : results) s += (s.empty() ? "" : "\n") + std::string("<tool_response>\n") + r + "\n</tool_response>";
+    return s;
+}
+
+std::string render_gemma(const std::vector<Message> &all, const std::vector<Json> &tools) {
+    std::string system, s;
+    std::vector<Message> msgs;
+    for (auto &m : all) {
+        if (m.role == "system") system += (system.empty() ? "" : "\n\n") + strip(m.content);
+        else msgs.push_back(m);
+    }
+    if (!tools.empty()) {
+        system += (system.empty() ? "" : "\n\n") + std::string(kGemmaTools) + "\n<tools>";
+        for (auto &tool : tools) system += "\n" + tool.dump();
+        system += "\n</tools>";
+    }
+    auto turn = [&](const std::string &role, const std::string &content) {
+        s += "<start_of_turn>" + role + "\n" + content + "<end_of_turn>\n";
+    };
+    for (size_t i = 0; i < msgs.size(); i++) {
+        const Message &m = msgs[i];
+        if (m.role == "tool") {
+            std::vector<std::string> results;
+            for (; i < msgs.size() && msgs[i].role == "tool"; i++) results.push_back(msgs[i].content);
+            i--;
+            turn("user", gemma_results(results));
+        } else if (m.role == "assistant") {
+            std::string c = strip(m.content);
+            for (auto &call : m.calls)
+                c += (c.empty() ? "" : "\n") + std::string("<tool_call>\n{\"name\": \"") + call.name +
+                     "\", \"arguments\": " + arguments_json(call.arguments) + "}\n</tool_call>";
+            turn("model", c);
+        } else {
+            std::string c = strip(m.content);
+            if (!system.empty()) c = system + "\n\n" + c, system.clear();
+            turn("user", c);
+        }
+    }
+    if (!system.empty()) turn("user", system);
+    return s + "<start_of_turn>model\n";
+}
+
 }  // namespace
 
 bool can_skip_thinking(const Tokenizer &t) { return has(t.chat_template(), "enable_thinking"); }
@@ -361,6 +418,7 @@ ToolFormat tool_format(const Tokenizer &t) {
     if (t.chat_format() == Tokenizer::LLAMA3 && has(tmpl, "ipython")) return ToolFormat::LLAMA3;
     if (t.chat_format() == Tokenizer::MISTRAL && has(tmpl, "[TOOL_CALLS]") && has(tmpl, "[AVAILABLE_TOOLS]"))
         return ToolFormat::MISTRAL;
+    if (t.chat_format() == Tokenizer::GEMMA) return ToolFormat::GEMMA;
     return ToolFormat::NONE;
 }
 
@@ -369,6 +427,7 @@ const char *tool_format_name(ToolFormat f) {
         case ToolFormat::HERMES: return "hermes";
         case ToolFormat::LLAMA3: return "llama3";
         case ToolFormat::MISTRAL: return "mistral";
+        case ToolFormat::GEMMA: return "gemma";
         default: return "none";
     }
 }
@@ -419,6 +478,7 @@ std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, co
         for (auto &m : msgs) plain.push_back({m.role, m.content});
         return t.apply_chat(plain);
     }
+    if (f == ToolFormat::GEMMA) return render_gemma(msgs, tools);
     return f == ToolFormat::HERMES ? render_hermes(t, msgs, tools) : render_llama3(msgs, tools, today);
 }
 
@@ -433,6 +493,8 @@ std::string render_results(ToolFormat f, const std::vector<ToolCall> &calls, con
         for (auto &r : results)
             s += "<|start_header_id|>ipython<|end_header_id|>\n\n" + llama3_output(r) + "<|eot_id|>";
         s += "<|start_header_id|>assistant<|end_header_id|>\n\n";
+    } else if (f == ToolFormat::GEMMA) {
+        s = "<end_of_turn>\n<start_of_turn>user\n" + gemma_results(results) + "<end_of_turn>\n<start_of_turn>model\n";
     } else if (f == ToolFormat::MISTRAL) {
         s = "</s>";
         for (size_t i = 0; i < results.size(); i++)
@@ -855,6 +917,7 @@ bool mistral_calls(const std::string &text, std::vector<ToolCall> &calls) {
 }
 
 ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names) {
+    if (f == ToolFormat::GEMMA) f = ToolFormat::HERMES;  // its calls are Hermes's
     ParsedTurn r;
     r.content = text;
     if (f == ToolFormat::HERMES) {
@@ -953,6 +1016,7 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
 }
 
 size_t content_prefix(ToolFormat f, const std::string &text) {
+    if (f == ToolFormat::GEMMA) f = ToolFormat::HERMES;
     if (f == ToolFormat::HERMES) {
         size_t from = 0;
         if (has(text, "<think>")) {

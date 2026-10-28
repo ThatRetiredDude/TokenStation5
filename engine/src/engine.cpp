@@ -158,6 +158,10 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     size_t keep = 0;
     while (keep < cached_.size() && keep < prompt.size() && cached_[keep] == prompt[keep]) keep++;
     if (keep == prompt.size()) keep--;
+    // A sliding layer's ring may no longer hold the keys before `keep`: then
+    // the whole prompt again (each of those keys depends on the ones before).
+    if (written_ - (int)keep > b_->rewind_limit()) keep = 0;
+    if (keep == 0) written_ = 0;
     cached_.resize(keep);
     if (dcached_ > keep) dcached_ = keep;
     // On unified memory the logits are sampled in place; the scratch vectors
@@ -175,6 +179,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
                                    : b_->forward(prompt.data() + i, n, (int)i, nullptr, false, err))
                            : b_->forward(prompt.data() + i, n, (int)i, logits.data(), false, err);
         if (!ok) { cached_.clear(); dcached_ = 0; return false; }
+        written_ = std::max(written_, (int)(i + n));
         cached_.insert(cached_.end(), prompt.begin() + i, prompt.begin() + i + n);
     }
     st.prompt_evaluated = (int)(prompt.size() - keep);
@@ -253,6 +258,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         bool ok = in_place ? b_->forward_in_place(batch.data(), nb, (int)cached_.size(), nb > 1, err)
                            : b_->forward(batch.data(), nb, (int)cached_.size(), lgb.data(), nb > 1, err);
         if (!ok) { cached_.clear(); dcached_ = 0; return false; }
+        written_ = std::max(written_, (int)cached_.size() + nb);
         const float *lg = in_place ? b_->logits_view() : lgb.data();
         st.drafted += nb - 1;
         int accepted = 0;

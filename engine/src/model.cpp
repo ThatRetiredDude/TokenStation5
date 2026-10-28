@@ -1,11 +1,13 @@
 #include "model.h"
 
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 namespace ts5 {
 
 static bool supported_arch(const std::string &a) {
-    return a == "llama" || a == "mistral" || a == "qwen2" || a == "qwen3";
+    return a == "llama" || a == "mistral" || a == "qwen2" || a == "qwen3" || a == "gemma3";
 }
 
 bool Model::open(const std::string &path, std::string &err) {
@@ -34,10 +36,28 @@ bool Model::open(const std::string &path, std::string &err) {
     hp.rms_eps = (float)gguf.get_float(a + "attention.layer_norm_rms_epsilon", 1e-6);
     hp.rope_base = (float)gguf.get_float(a + "rope.freq_base", 10000.0);
     hp.rope_dims = (int)gguf.get_int(a + "rope.dimension_count", hp.head_dim);
-    hp.rope_neox = hp.arch == "qwen2" || hp.arch == "qwen3";
+    hp.rope_neox = hp.arch == "qwen2" || hp.arch == "qwen3" || hp.arch == "gemma3";
     if (!hp.n_embd || !hp.n_layer || !hp.n_ff || !hp.n_head) {
         err = "missing hyperparameters";
         return false;
+    }
+    hp.attn_scale = 1.0f / std::sqrt((float)hp.head_dim);
+    if (hp.arch == "gemma3") {
+        // As llama.cpp has it: the RoPE base and window of the sliding
+        // layers aren't in the GGUF, nor the 27B's query scale (62 layers).
+        hp.embd_scale = std::sqrt((float)hp.n_embd);
+        hp.gelu = true;
+        hp.swa_window = (int)gguf.get_int(a + "attention.sliding_window", 0);
+        hp.swa_pattern = 6;
+        hp.rope_base_swa = 10000.f;
+        if (scaling == "linear") {
+            const double factor = gguf.get_float(a + "rope.scaling.factor", 1.0);
+            if (factor > 0) hp.rope_scale = (float)(1.0 / factor);
+        }
+        if (hp.n_layer == 62) hp.attn_scale = 1.0f / std::sqrt((float)(hp.n_embd / hp.n_head));
+        // Tests: a small window, so a short check crosses it.
+        if (const char *e = getenv("TS5_SWA_WINDOW"))
+            if (atoi(e) > 0 && hp.swa_window > 0) hp.swa_window = atoi(e);
     }
     if (auto *t = gguf.find("token_embd.weight")) hp.n_vocab = (int)t->ne[1];
     // Bind tensor descriptors now (data pointers are filled by load()).
@@ -88,6 +108,9 @@ bool Model::bind(std::string &err) {
         L.w_gate = weight(n("ffn_gate.weight"), true, err);
         L.w_up = weight(n("ffn_up.weight"), true, err);
         L.w_down = weight(n("ffn_down.weight"), true, err);
+        const bool gemma = hp.arch == "gemma3";
+        L.post_attn_norm = weight(n("post_attention_norm.weight"), gemma, err);
+        L.post_ffn_norm = weight(n("post_ffw_norm.weight"), gemma, err);
     }
     return err.empty();
 }

@@ -6,7 +6,9 @@
 // workgroup y takes one slice of the keys and writes a partial result
 // (unnormalized output, max score, sum of weights) that attn_merge combines.
 // The cache is f16, or with KV_Q8 8-bit values with an f16 scale per 32
-// (attn_q8.comp).
+// (attn_q8.comp). A sliding layer (win > 0) sees each query's last win keys,
+// its own included, from k_lo on (the first any of them sees), and keeps key
+// p in slot p % ring of its ring (ring > 0).
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 layout(local_size_x = 128) in;
@@ -31,6 +33,7 @@ layout(std430, binding = 4) writeonly buffer Pbuf { float P[]; };
 layout(push_constant) uniform PC {
     uint head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split;
     float scale;
+    uint k_lo, win, ring;
 } pc;
 
 // Sizes in floats: a tile holds TILE / head_dim keys (at most 32), the block
@@ -54,8 +57,10 @@ void main() {
     const uint q_stride = pc.n_head * HD, kv_stride = pc.n_head_kv * HD;
     const uint split = gl_WorkGroupID.y;
     // Row r is head kh * G + r % G of token t0 + r / G.
-    const uint k_begin = split * pc.chunk;
-    const uint k_end = min(k_begin + pc.chunk, pc.pos0 + t0 + R / G);
+    const uint k_first = pc.k_lo + split * pc.chunk;
+    const uint k_end = min(k_first + pc.chunk, pc.pos0 + t0 + R / G);
+    // The block's first token sees no key before this one.
+    const uint k_begin = pc.win != 0 && pc.pos0 + t0 + 1 > pc.win ? max(k_first, pc.pos0 + t0 + 1 - pc.win) : k_first;
 
     for (uint e = tid; e < R * HD; e += 128) {
         const uint r = e / HD;
@@ -67,9 +72,9 @@ void main() {
 
     for (uint kb = k_begin; kb < k_end; kb += BK) {
         const uint nb = min(BK, k_end - kb);
-        const uint src0 = (pc.cache_off + kb * kv_stride + kh * HD) / 4;
         for (uint e = tid; e < nb * HD4; e += 128) {
-            const uint jj = e / HD4, d = (e % HD4) * 4, src = src0 + jj * (kv_stride / 4) + e % HD4;
+            const uint jj = e / HD4, d = (e % HD4) * 4, slot = pc.ring != 0 ? (kb + jj) % pc.ring : kb + jj;
+            const uint src = (pc.cache_off + slot * kv_stride + kh * HD) / 4 + e % HD4;
 #ifdef KV_Q8
             const uint sc_i = src / 8;  // src counts 4 values
             const vec4 k = i8x4(kc[src]) * float(k_scale[sc_i]), v = i8x4(vc[src]) * float(v_scale[sc_i]);
@@ -84,7 +89,8 @@ void main() {
         for (uint e = tid; e < R * BK; e += 128) {
             const uint r = e / BK, jj = e % BK;
             float s = NEG_INF;
-            if (jj < nb && kb + jj <= pc.pos0 + t0 + r / G) {  // causal
+            const uint qp = pc.pos0 + t0 + r / G;
+            if (jj < nb && kb + jj <= qp && (pc.win == 0 || kb + jj + pc.win > qp)) {  // causal, and the window
                 s = 0.0;
                 const uint qo = r * HD, ko = jj * (HD + 1);
                 for (uint d = 0; d < HD; d++) s += qs[qo + d] * ks[ko + d];

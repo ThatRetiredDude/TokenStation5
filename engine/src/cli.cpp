@@ -9,7 +9,7 @@
 //   ts5 logits   -m model.gguf -o out.bin [--step] tok0 tok1 ...   (all positions, for tests)
 //   ts5 prompt   -m model.gguf [--chat-template FILE] < request.json
 //                                        the prompt a chat request becomes (for tests)
-//   ts5 tool-parse hermes|llama3|mistral [TOOL...] < text
+//   ts5 tool-parse hermes|llama3|mistral|gemma [TOOL...] < text
 //                                        a model's turn as content and tool calls (for tests)
 //   ts5 search "query"                   one web_search, as the model would get it
 //   ts5 usage-parse FILE                 a usage.tsv's requests, written again as v1 (for tests)
@@ -66,7 +66,7 @@ struct Args {
 int usage() {
     fprintf(stderr,
             "usage: ts5 serve|run|bench|check|tokenize|logits|prompt -m model.gguf [options]\n"
-            "       ts5 search QUERY | ts5 tool-parse hermes|llama3|mistral [TOOL...] < TEXT | ts5 usage-parse FILE\n"
+            "       ts5 search QUERY | ts5 tool-parse hermes|llama3|mistral|gemma [TOOL...] < TEXT | ts5 usage-parse FILE\n"
             "       ts5 fetch URL FILE [--sha256 HEX]\n"
             "  -c N|auto      context length (default 8192; auto: what fits in GPU memory)\n"
             "  --backend B    vk or cpu\n"
@@ -157,6 +157,7 @@ int no_model_command(int argc, char **argv) {
     ToolFormat tf = f == "hermes"    ? ToolFormat::HERMES
                     : f == "llama3"  ? ToolFormat::LLAMA3
                     : f == "mistral" ? ToolFormat::MISTRAL
+                    : f == "gemma"   ? ToolFormat::GEMMA
                                      : ToolFormat::NONE;
     std::string text = read_all(stdin);
     const std::vector<std::string> names(argv + 3, argv + argc);  // the request's tools

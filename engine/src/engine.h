@@ -45,7 +45,7 @@ public:
     Backend &backend() { return *b_; }
     // After something else ran on the backend: its KV cache no longer holds
     // the last prompt.
-    void forget_cache() { cached_.clear(); dcached_ = 0; }
+    void forget_cache() { cached_.clear(); dcached_ = 0; written_ = 0; }
 
 private:
     int32_t sample(const float *logits, int n, const SampleParams &p);
@@ -56,6 +56,9 @@ private:
     std::unique_ptr<Backend> b_;
     Tokenizer &t_;
     std::vector<int32_t> cached_;  // tokens whose K/V are in the cache
+    // One past the furthest position forwarded since the cache was last
+    // filled from 0 (rejected drafts included), for Backend::rewind_limit.
+    int written_ = 0;
     std::vector<int32_t> idx_;     // sample()'s top-k scratch, reused
     // Prompt-lookup index over cached_: a 3- or 2-gram, packed 21 bits per
     // token, maps to the position after its most recent occurrence.

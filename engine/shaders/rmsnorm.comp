@@ -1,5 +1,6 @@
 // Y[t][:] = X[x_row0 + t][:] * rsqrt(mean(X^2) + eps) * W[:], one workgroup
-// per token. Each thread loads its first NPT values at once and keeps them,
+// per token; with add, Y[t][:] += that (Gemma's norms after attention and
+// the FFN, into the residual). Each thread loads its first NPT values at once and keeps them,
 // so the row costs about one memory round trip rather than one per loop
 // step; rows wider than WG * NPT loop for the rest.
 #version 450
@@ -9,8 +10,8 @@
 layout(local_size_x = WG) in;
 layout(std430, binding = 0) readonly buffer Xbuf { float X[]; };
 layout(std430, binding = 1) readonly buffer Wbuf { float W[]; };
-layout(std430, binding = 2) writeonly buffer Ybuf { float Y[]; };
-layout(push_constant) uniform PC { uint n, x_row0; float eps; } pc;
+layout(std430, binding = 2) buffer Ybuf { float Y[]; };
+layout(push_constant) uniform PC { uint n, x_row0; float eps; uint add; } pc;
 shared float red[WG / 4];  // one per subgroup (4 lanes or more)
 
 void main() {
@@ -32,7 +33,7 @@ void main() {
     const float scale = inversesqrt(total / float(pc.n) + pc.eps);
     for (uint k = 0; k < NPT; k++) {
         const uint i = tid + k * WG;
-        if (i < pc.n) Y[yb + i] = v[k] * scale * W[i];
+        if (i < pc.n) Y[yb + i] = v[k] * scale * W[i] + (pc.add != 0 ? Y[yb + i] : 0.0);
     }
-    for (uint i = tid + NPT * WG; i < pc.n; i += WG) Y[yb + i] = X[xb + i] * scale * W[i];
+    for (uint i = tid + NPT * WG; i < pc.n; i += WG) Y[yb + i] = X[xb + i] * scale * W[i] + (pc.add != 0 ? Y[yb + i] : 0.0);
 }
