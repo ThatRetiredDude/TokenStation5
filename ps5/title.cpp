@@ -1193,6 +1193,13 @@ int main(int, char **) {
         timer.mark("the downloads, chats and usage");
         keys.save_used(v.wall = (int64_t)time(nullptr));
         timer.mark("keys.tsv");
+        // An auth key in ts5.env signs the PS5 in once, then goes: anyone on
+        // the home network can read ts5.env over FTP, and the key could add
+        // devices of their own to the tailnet.
+        if (!app::setting(kTsAuthKey).empty() && tailnet.status().state == ts::Status::Connected) {
+            std::string e;
+            if (!app::set_setting(kEnv, kTsAuthKey, "", e)) printf("ts5-title: settings: %s not cleared: %s\n", kTsAuthKey, e.c_str());
+        }
         v.settings = settings_view(v);
         v.now = t;
 

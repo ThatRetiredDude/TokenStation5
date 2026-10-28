@@ -75,7 +75,16 @@ shows as expired in Tailscale's admin console, where you can remove it.
 From a computer, `ts5.env` can also set `TS5_TS_SERVER` (another control
 server, such as a [Headscale](https://headscale.net)), `TS5_TS_NAME` (the
 PS5's name on the tailnet, `tokenstation5` by default) and `TS5_TS_AUTH_KEY`
-(an auth key from the admin console, which signs it in without the code).
+(an auth key from the admin console, which signs it in without the code; the
+PS5 removes it from `ts5.env` once it's signed in, so make it a one-off key).
+
+The PS5 checks your tailnet's access rules itself, as Tailscale's own apps
+do: a device the rules don't let reach the PS5's port 8081 can't connect to
+it. Over Tailscale an API key is always needed, and only the API's port is
+open there (FTP and everything else on the PS5 stay on the home network).
+Anyone on the home network can read the PS5's files over FTP, `tailscale.tsv`
+(the PS5's Tailscale keys) among them: someone who copies it could pose as
+the PS5 on your tailnet until you remove the PS5 in the admin console.
 
 Settings on the TV has the steps too, under Apps, Instructions: "At home and
 away with Tailscale".

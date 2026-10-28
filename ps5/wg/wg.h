@@ -96,7 +96,11 @@ private:
     std::string problem_;
     std::vector<PeerState> states_, ts_states_;
     ts::Client *ts_ = nullptr;
-    std::map<uint16_t, std::string> clients_;  // local port: tunnel address
+    // Local port: tunnel address, and when the entry lapses (0: its
+    // connection is open). client_for takes an entry; one whose connection
+    // reached the API stays until then, even closed, so a request never
+    // loses its name and passes for the console's own (127.0.0.1).
+    std::map<uint16_t, std::pair<std::string, double>> clients_;
     std::atomic<bool> quit_{false};
     std::thread thread_;
     bool started_ = false;

@@ -59,11 +59,34 @@ struct Peer {
     std::vector<std::string> endpoints;  // where it may be reached straight: "ip:port"
 };
 
+// The tailnet's access rules (its ACLs) for TCP to the PS5, as the control
+// server sends them. Tailscale's own apps check them where a connection
+// arrives, not where it starts, so the PS5 checks them too.
+struct Filter {
+    struct Range {
+        uint32_t lo = 0, hi = 0;  // IPv4, host order, inclusive
+    };
+    struct Dst {
+        Range ip;
+        uint16_t first = 0, last = 0;  // ports, inclusive
+    };
+    struct Rule {
+        std::vector<Range> src;
+        std::vector<Dst> dst;
+    };
+    bool known = false;  // false until the control server sends any: nothing gets in
+    std::vector<Rule> rules;
+    // Whether a TCP connection from src to dst:port is allowed (addresses in
+    // host order).
+    bool allows_tcp(uint32_t src, uint32_t dst, uint16_t port) const;
+};
+
 struct Netmap {
     uint64_t version = 0;   // grows with each change
     uint8_t node_priv[32] = {};  // the PS5's WireGuard private key
     std::string address;    // "" until signed in
     std::vector<Peer> peers;
+    Filter filter;
 };
 
 class Client {
