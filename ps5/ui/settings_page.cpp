@@ -73,6 +73,18 @@ const std::vector<Row> &setting_rows() {
          "With a key from Tavily, a model that calls tools can search the web, on the Chat page and from your "
          "apps. Each search uses one of the account's credits.",
          "From the next request", {}, ""},
+        {"MODELS", "TS5_CTX_MAX", "Longest context",
+         "How much text a model keeps in mind at once: the chat or the app's request, files included, and the "
+         "reply. As much as fits suits most uses. A cap leaves the rest of the memory free and makes the model "
+         "load a little faster.",
+         "Now: the model loads again, which takes a few seconds",
+         {{"", "As much as fits"}, {"4096", "4,096 tokens"}, {"8192", "8,192 tokens"}, {"16384", "16,384 tokens"},
+          {"32768", "32,768 tokens"}, {"65536", "65,536 tokens"}},
+         ""},
+        {"MODELS", "TS5_KV", "Room for longer contexts",
+         "Keeps what the model has read in half the memory, so about twice the context fits. It's used only when "
+         "a model's whole context doesn't fit otherwise. Answers can come out very slightly different.",
+         "Now: the model loads again, which takes a few seconds", {{"f16", "Off"}, {"q8", "On"}}, "f16"},
         {"VOICE", kSpeechModel, "Speech model",
          "The model that turns what you say into text when you hold R1 on the Chat page. Base (English) is a "
          "good start; Small (English) understands more and takes longer.",
@@ -134,8 +146,8 @@ const ApiKeyInfo *key_of(const Row &r, const SettingsInfo &info) {
 }
 
 // The page's rows: APPS (the instructions, the key setting, making a key and
-// the keys), AWAY FROM HOME (Tailscale), then the settings: CHAT, VOICE,
-// CONSOLE, and TUNING last, for what's rarely changed.
+// the keys), AWAY FROM HOME (Tailscale), then the settings: CHAT, MODELS,
+// VOICE, CONSOLE, and TUNING last, for what's rarely changed.
 std::vector<Row> rows(const SettingsInfo &info) {
     std::vector<Row> r;
     r.push_back({"APPS", "", "Instructions", "How to use the models on this PS5 from your apps, at home and away, and how to add more.",
@@ -408,6 +420,9 @@ SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
                 ch.key_id = k->id;
                 ch.key_remove = true;
                 confirm_at_ = -1e9;
+                // The row above stays chosen (another key, or New key): the
+                // removed key's place would go to the next section's row.
+                sel_ = std::max(0, sel_ - 1);
             } else {
                 confirm_at_ = info.now;
             }
@@ -640,7 +655,9 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
     } else if (r.kind == Row::Guide) {
         // The list of guides, drawn above.
     } else if (r.kind == Row::Tailscale) {
-        draw_tailscale(c, info, dx, ty, dw, y + h - 24);
+        // Its last lines stay above the bottom line, where a note ("Saved",
+        // "Removed") shows.
+        draw_tailscale(c, info, dx, ty, dw, y + h - 120);
     } else if (r.kind == Row::NewKey) {
         text_glyph(c, body_, dx, ty + 8, "Press", kGlyphCross, "to name a new key.", kText2);
         ty += 56;

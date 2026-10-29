@@ -720,6 +720,7 @@ void Client::control_loop() {
         }
         bool authorized = false;
         std::string followup;
+        int gone = 0;  // sign-in pages found gone, asked again for
         if (!sign_out && !login_url.empty() && login_key == node_key) {
             followup = login_url;
             std::lock_guard<std::mutex> lk(mu_);
@@ -733,6 +734,16 @@ void Client::control_loop() {
             std::string body;
             if (!c.post("/machine/register", reg.dump(), node_key, id, why) || !wait_for(id, body, status)) break;
             Json rr;
+            if (status == 410 && !followup.empty() && gone++ < 3) {
+                // The sign-in page asked about is gone (used up or old): ask
+                // again without it, for the device as it stands or a new page.
+                log("the sign-in page %s is gone; asking again", followup.c_str());
+                followup.clear();
+                login_url.clear();
+                reg.o.erase("Followup");
+                reg.keys.erase(std::remove(reg.keys.begin(), reg.keys.end(), "Followup"), reg.keys.end());
+                continue;
+            }
             if (status != 200 || !Json::parse(body, rr)) {
                 why = "the control server refused the sign-in (HTTP " + std::to_string(status) + "): " + body.substr(0, 200);
                 break;
