@@ -5,6 +5,7 @@
 #   build/ps5/PPSA99555/sce_sys/param.json      title metadata, icon0.png
 #   build/ps5/PPSA99555/sce_module/libc.prx     the runtime module titles carry
 #   build/ps5/PPSA99555/LICENSE, NOTICE.md      the GPL and the third-party notices
+#   build/ps5/PPSA99555/licenses/               license texts NOTICE.md points to
 #   build/ps5/PPSA99555/SOURCE.txt              the commits it was built from
 #
 # Needs ps5/setup.sh run once. The engine sources are the same ones the Linux
@@ -206,6 +207,7 @@ cp "$vk/runtime/libc.prx" "$app/sce_module/libc.prx"
 # What every copy of the title must carry (LICENSING.md): its license, the
 # notices, and where its source is.
 cp "$root/ps5/LICENSE" "$root/NOTICE.md" "$app/"
+cp -r "$root/licenses" "$app/"
 commit() { git -C "$1" rev-parse HEAD 2> /dev/null || echo "$2"; }
 # CI names a pull request's two commits: it builds their merge, which only the
 # pull request's ref keeps.
