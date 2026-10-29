@@ -1,5 +1,5 @@
 // Causal attention for one (head, token): online softmax over the f16 KV
-// cache in blocks of 128 keys. head_dim up to 256.
+// cache in blocks of 128 keys. head_dim up to 512 (Gemma 4's full layers).
 #version 450
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -15,7 +15,7 @@ layout(push_constant) uniform PC {
     float scale;
 } pc;
 
-shared float qs[256];
+shared float qs[512];
 shared float p[128];
 shared float red[128];
 
@@ -30,7 +30,7 @@ void main() {
     for (uint d = tid; d < HD; d += 128) qs[d] = Q[t * q_stride + h * HD + d] * pc.scale;
     barrier();
 
-    float m = -1.0 / 0.0, l = 0.0, acc0 = 0.0, acc1 = 0.0;
+    float m = -1.0 / 0.0, l = 0.0, acc0 = 0.0, acc1 = 0.0, acc2 = 0.0, acc3 = 0.0;
     for (uint kb = 0; kb < n_keys; kb += 128) {
         const uint j = kb + tid;
         float sc = -1.0 / 0.0;
@@ -59,12 +59,16 @@ void main() {
         l = l * corr + red[0];
         acc0 *= corr;
         acc1 *= corr;
+        acc2 *= corr;
+        acc3 *= corr;
         const uint nb = min(128u, n_keys - kb);
         const uint vbase = kbase + kb * kv_stride;
         for (uint jj = 0; jj < nb; jj++) {
             const uint vr = vbase + jj * kv_stride;
             if (tid < HD) acc0 += p[jj] * float(vc[vr + tid]);
             if (tid + 128 < HD) acc1 += p[jj] * float(vc[vr + tid + 128]);
+            if (tid + 256 < HD) acc2 += p[jj] * float(vc[vr + tid + 256]);
+            if (tid + 384 < HD) acc3 += p[jj] * float(vc[vr + tid + 384]);
         }
         m = m_new;
         barrier();
@@ -72,4 +76,6 @@ void main() {
     const uint ob = t * q_stride + h * HD;
     if (tid < HD) O[ob + tid] = acc0 / l;
     if (tid + 128 < HD) O[ob + tid + 128] = acc1 / l;
+    if (tid + 256 < HD) O[ob + tid + 256] = acc2 / l;
+    if (tid + 384 < HD) O[ob + tid + 384] = acc3 / l;
 }
