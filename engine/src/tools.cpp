@@ -225,6 +225,90 @@ std::string render_hermes(const Tokenizer &t, const std::vector<Message> &msgs, 
     return s + "<|im_start|>assistant\n";
 }
 
+// Qwen 3.5's template: the tools and its call format in the system turn,
+// contents trimmed, an assistant turn's thinking kept only after the last
+// question, calls as <function=name> with a <parameter=key> each.
+const char *const kQwen35Tools =
+    "\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n"
+    "<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n"
+    "<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n"
+    "</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified "
+    "format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- "
+    "Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural "
+    "language BEFORE the function call, but NOT after\n- If there is no function call available, answer the "
+    "question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>";
+
+// A value as Jinja's |string writes it (Python's str()).
+std::string py_str(const Json &v) {
+    switch (v.type) {
+        case Json::STR: return v.s;
+        case Json::BOOL: return v.b ? "True" : "False";
+        case Json::NUL: return "None";
+        case Json::NUM: return v.s.empty() ? Json(v).dump() : v.s;
+        default: return v.dump();
+    }
+}
+
+std::string render_qwen35(const std::vector<Message> &msgs, const std::vector<Json> &tools) {
+    std::string s;
+    const bool first_system = !msgs.empty() && msgs[0].role == "system";
+    if (!tools.empty()) {
+        s += "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>";
+        for (auto &tool : tools) s += "\n" + tool.dump();
+        s += "\n</tools>" + std::string(kQwen35Tools);
+        if (first_system && !strip(msgs[0].content).empty()) s += "\n\n" + strip(msgs[0].content);
+        s += "<|im_end|>\n";
+    } else if (first_system) {
+        s += "<|im_start|>system\n" + strip(msgs[0].content) + "<|im_end|>\n";
+    }
+    size_t last_query = msgs.empty() ? 0 : msgs.size() - 1;
+    for (size_t i = msgs.size(); i-- > 0;) {
+        const std::string c = strip(msgs[i].content);
+        if (msgs[i].role == "user" && !(starts(c, "<tool_response>") && ends(c, "</tool_response>"))) {
+            last_query = i;
+            break;
+        }
+    }
+    for (size_t i = 0; i < msgs.size(); i++) {
+        const Message &m = msgs[i];
+        std::string content = strip(m.content);
+        if (m.role == "user") {
+            s += "<|im_start|>user\n" + content + "<|im_end|>\n";
+        } else if (m.role == "assistant") {
+            std::string reasoning;
+            const size_t e = content.find("</think>");
+            if (e != std::string::npos) {
+                const std::string before = rstrip(content.substr(0, e), "\n");
+                const size_t b = before.rfind("<think>");
+                reasoning = strip(lstrip(b == std::string::npos ? before : before.substr(b + 7), "\n"));
+                content = lstrip(content.substr(content.rfind("</think>") + 8), "\n");
+            }
+            s += "<|im_start|>assistant\n";
+            if (i > last_query) s += "<think>\n" + reasoning + "\n</think>\n\n";
+            s += content;
+            for (size_t c = 0; c < m.calls.size(); c++) {
+                const ToolCall &call = m.calls[c];
+                s += c > 0 ? "\n<tool_call>\n" : !strip(content).empty() ? "\n\n<tool_call>\n" : "<tool_call>\n";
+                s += "<function=" + call.name + ">\n";
+                Json args;
+                if (Json::parse(call.arguments, args) && args.type == Json::OBJ)
+                    for (auto &k : args.keys) {
+                        const Json &v = args[k];
+                        s += "<parameter=" + k + ">\n" +
+                             (v.type == Json::OBJ || v.type == Json::ARR ? v.dump() : py_str(v)) + "\n</parameter>\n";
+                    }
+                s += "</function>\n</tool_call>";
+            }
+            s += "<|im_end|>\n";
+        } else if (m.role == "tool") {
+            if (i > 0 && msgs[i - 1].role != "tool") s += "<|im_start|>user";
+            s += "\n<tool_response>\n" + content + "\n</tool_response>";
+            if (i + 1 == msgs.size() || msgs[i + 1].role != "tool") s += "<|im_end|>\n";
+        }
+    }
+    return s + "<|im_start|>assistant\n";
+}
+
 // Llama 3's template only asks for a call, and given a tool's result as it
 // writes it (the text as a JSON string), Llama 3.1 8B and 3.2 3B called a tool
 // again instead of answering, every time, and called one for "Say hello in one
@@ -745,9 +829,16 @@ bool can_skip_thinking(const Tokenizer &t) {
 }
 
 const char *const kNoThinking = "<think>\n\n</think>\n\n";
+const char *const kThinking = "<think>\n";
+
+bool thinks_when_asked(const Tokenizer &t) {
+    return has(t.chat_template(), "enable_thinking is defined and enable_thinking is true");
+}
 
 ToolFormat tool_format(const Tokenizer &t) {
     const std::string &tmpl = t.chat_template();
+    if (t.chat_format() == Tokenizer::CHATML && has(tmpl, "<function=") && has(tmpl, "<parameter="))
+        return ToolFormat::QWEN35;
     if (t.chat_format() == Tokenizer::CHATML && has(tmpl, "<tool_call>")) return ToolFormat::HERMES;
     if (t.chat_format() == Tokenizer::LLAMA3 && has(tmpl, "ipython")) return ToolFormat::LLAMA3;
     if (t.chat_format() == Tokenizer::MISTRAL && has(tmpl, "[TOOL_CALLS]") && has(tmpl, "[AVAILABLE_TOOLS]"))
@@ -764,6 +855,7 @@ const char *tool_format_name(ToolFormat f) {
         case ToolFormat::MISTRAL: return "mistral";
         case ToolFormat::GEMMA: return "gemma";
         case ToolFormat::GEMMA4: return "gemma4";
+        case ToolFormat::QWEN35: return "qwen35";
         default: return "none";
     }
 }
@@ -807,6 +899,9 @@ std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, co
     // Nemo's chat without tools differs from the older Mistral format too
     // ("[INST]" with no space, the system message in the last user message).
     if (f == ToolFormat::MISTRAL) return render_mistral(t, msgs, tools);
+    // Qwen 3.5's turns differ from plain ChatML too (trimmed, thinking only
+    // after the last question).
+    if (f == ToolFormat::QWEN35) return render_qwen35(msgs, tools);
     bool tool_msgs = false;
     for (auto &m : msgs) tool_msgs |= m.role == "tool" || !m.calls.empty();
     if (f == ToolFormat::NONE || (tools.empty() && !tool_msgs)) {
@@ -821,7 +916,7 @@ std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, co
 
 std::string render_results(ToolFormat f, const std::vector<ToolCall> &calls, const std::vector<std::string> &results) {
     std::string s;
-    if (f == ToolFormat::HERMES) {
+    if (f == ToolFormat::HERMES || f == ToolFormat::QWEN35) {
         s = "<|im_end|>\n<|im_start|>user";
         for (auto &r : results) s += "\n<tool_response>\n" + r + "\n</tool_response>";
         s += "<|im_end|>\n<|im_start|>assistant\n";
@@ -889,7 +984,31 @@ bool tag_attr(const std::string &tag, const std::string &name, std::string &valu
 
 // A call in one of the named forms at p (tag kNamedEquals or kNamedAttrs).
 // next: just past it. false: not a call after all, or not finished.
-bool named_call(const std::string &text, size_t p, int tag, ToolCall &call, size_t &next) {
+// Qwen 3.5's arguments, <parameter=key>\nvalue\n</parameter> each, as a
+// JSON object: a value is text where the tool's schema (props: its
+// parameters' properties, or null) says string, else the JSON it reads as,
+// else text.
+bool xml_arguments(const std::string &s, const Json *props, Json &out) {
+    out = Json::object();
+    size_t at = s.find_first_not_of(kSpace);
+    while (at != std::string::npos && starts(s, "<parameter=", at)) {
+        const size_t gt = s.find('>', at), close = gt == std::string::npos ? gt : s.find("</parameter>", gt);
+        if (close == std::string::npos) return false;
+        const std::string key = strip(s.substr(at + 11, gt - at - 11));
+        std::string v = s.substr(gt + 1, close - gt - 1);
+        if (starts(v, "\n")) v.erase(0, 1);
+        if (ends(v, "\n")) v.pop_back();
+        Json j;
+        const bool text = props && (*props)[key]["type"].str() == "string";
+        if (key.empty() || text || !Json::parse(strip(v), j)) j = Json::string(v);
+        out.set(key, j);
+        at = s.find_first_not_of(kSpace, close + 12);
+    }
+    return at == std::string::npos;
+}
+
+bool named_call(const std::string &text, size_t p, int tag, ToolCall &call, size_t &next,
+                const std::vector<Json> *tools = nullptr) {
     std::string name, args;
     if (tag == kNamedEquals) {
         const size_t gt = text.find('>', p);
@@ -932,7 +1051,17 @@ bool named_call(const std::string &text, size_t p, int tag, ToolCall &call, size
         }
     }
     Json j;
-    if (name.empty() || !Json::parse(args, j) || j.type != Json::OBJ) return false;
+    // Qwen 3.5's: parameters, or none.
+    if (tag == kNamedEquals && (args.empty() || starts(args, "<parameter="))) {
+        const Json *props = nullptr;
+        if (tools)
+            for (const Json &t : *tools)
+                if (t["function"]["name"].str() == name) props = &t["function"]["parameters"]["properties"];
+        if (!xml_arguments(args, props, j)) return false;
+    } else if (!Json::parse(args, j)) {
+        return false;
+    }
+    if (name.empty() || j.type != Json::OBJ) return false;
     call.name = name;
     call.arguments = j.dump();
     call.id = new_call_id();
@@ -1257,8 +1386,9 @@ bool mistral_calls(const std::string &text, std::vector<ToolCall> &calls) {
     return i == s.size() && !calls.empty();
 }
 
-ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names) {
-    if (f == ToolFormat::GEMMA) f = ToolFormat::HERMES;  // its calls are Hermes's
+ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names,
+                      const std::vector<Json> *tools) {
+    if (f == ToolFormat::GEMMA || f == ToolFormat::QWEN35) f = ToolFormat::HERMES;  // their calls are Hermes's
     ParsedTurn r;
     r.content = text;
     if (f == ToolFormat::HERMES) {
@@ -1278,7 +1408,7 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
                 ToolCall call;
                 size_t next;
                 content += text.substr(pos, p - pos);
-                if (named_call(text, p, tag, call, next)) {
+                if (named_call(text, p, tag, call, next, tools)) {
                     r.calls.push_back(call);
                     pos = next;
                 } else {  // not a call: it stays text
@@ -1292,7 +1422,14 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
             size_t body_end = q == std::string::npos ? text.size() : q;
             size_t next = q == std::string::npos ? text.size() : q + close.size();
             content += text.substr(pos, p - pos);
-            if (!calls_in_body(text.substr(p + open.size(), body_end - p - open.size()), r.calls))
+            // Qwen 3.5's: one <function=name> with its parameters.
+            const std::string body = strip(text.substr(p + open.size(), body_end - p - open.size()));
+            ToolCall call;
+            size_t after;
+            if (starts(body, "<function=") && named_call(body, 0, kNamedEquals, call, after, tools) &&
+                strip(body.substr(after)).empty())
+                r.calls.push_back(call);
+            else if (!calls_in_body(text.substr(p + open.size(), body_end - p - open.size()), r.calls))
                 content += text.substr(p, next - p);
             pos = next;
         }
@@ -1370,7 +1507,7 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
 }
 
 size_t content_prefix(ToolFormat f, const std::string &text) {
-    if (f == ToolFormat::GEMMA) f = ToolFormat::HERMES;
+    if (f == ToolFormat::GEMMA || f == ToolFormat::QWEN35) f = ToolFormat::HERMES;
     if (f == ToolFormat::HERMES) {
         size_t from = 0;
         if (has(text, "<think>")) {

@@ -1,0 +1,12 @@
+// D = S over n floats, or D = 0 with zero (Qwen 3.5's recurrent states:
+// a fresh one, a checkpoint, going back to it).
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Sbuf { float S[]; };
+layout(std430, binding = 1) writeonly buffer Dbuf { float D[]; };
+layout(push_constant) uniform PC { uint n, zero; } pc;
+
+void main() {
+    for (uint i = gl_GlobalInvocationID.x; i < pc.n; i += gl_NumWorkGroups.x * 256)
+        D[i] = pc.zero != 0 ? 0.0 : S[i];
+}

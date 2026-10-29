@@ -161,6 +161,9 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // A sliding layer's ring may no longer hold the keys before `keep`: then
     // the whole prompt again (each of those keys depends on the ones before).
     if (written_ - (int)keep > b_->rewind_limit()) keep = 0;
+    // A recurrent state continues only from where it was or was saved.
+    const bool rec = b_->recurrent();
+    if (rec) keep = (size_t)b_->resume_point((int)keep);
     if (keep == 0) written_ = 0;
     cached_.resize(keep);
     if (dcached_ > keep) dcached_ = keep;
@@ -170,14 +173,22 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     std::vector<float> logits(in_place ? 0 : nv);
     double t0 = now_ms();
     const int chunk = 256;
-    for (size_t i = keep; i < prompt.size(); i += chunk) {
-        int n = (int)std::min<size_t>(chunk, prompt.size() - i);
+    for (size_t i = keep, n = 0; i < prompt.size(); i += n) {
+        n = std::min<size_t>(chunk, prompt.size() - i);
+        // A recurrent state is saved just before the prompt's last token, so
+        // the next request (this conversation and more) starts from it.
+        if (rec && i + n == prompt.size() && n > 1) n--;
+        if (rec && i == prompt.size() - 1 && i > keep && !b_->checkpoint(err)) {
+            cached_.clear();
+            dcached_ = 0;
+            return false;
+        }
         // Only the last chunk's logits are wanted; with a view, the chunks
         // before it skip the vocabulary matmul entirely.
         const bool last = i + (size_t)n >= prompt.size();
-        bool ok = in_place ? (last ? b_->forward_in_place(prompt.data() + i, n, (int)i, false, err)
-                                   : b_->forward(prompt.data() + i, n, (int)i, nullptr, false, err))
-                           : b_->forward(prompt.data() + i, n, (int)i, logits.data(), false, err);
+        bool ok = in_place ? (last ? b_->forward_in_place(prompt.data() + i, (int)n, (int)i, false, err)
+                                   : b_->forward(prompt.data() + i, (int)n, (int)i, nullptr, false, err))
+                           : b_->forward(prompt.data() + i, (int)n, (int)i, logits.data(), false, err);
         if (!ok) { cached_.clear(); dcached_ = 0; return false; }
         written_ = std::max(written_, (int)(i + n));
         cached_.insert(cached_.end(), prompt.begin() + i, prompt.begin() + i + n);
@@ -191,6 +202,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     int dmax = p.draft;
     if (const char *e = getenv("TS5_DRAFT")) dmax = atoi(e);
     if (dmax < 0) dmax = 7;    // batch of 8: one pass of the 8-token matmul kernels
+    if (rec) dmax = 0;
     if (dmax > 255) dmax = 255;  // the batch must fit one forward chunk: the vk
                                  // in-place logits buffer holds 256 rows
     gram3_.clear();
@@ -251,7 +263,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         room = std::min(room, b_->n_ctx() - (int)cached_.size() - 2);
         if (room > 0) draft_lookup(tok, room, batch);
         // The cascade: where the free lookup finds nothing, the draft model.
-        const bool by_model = batch.size() == 1 && room > 0 && db_ && drafter_ok_;
+        const bool by_model = batch.size() == 1 && room > 0 && db_ && drafter_ok_ && !rec;
         if (by_model) draft_model(tok, room, batch);
         const int nb = (int)batch.size();
         if (!in_place && (size_t)nb * nv > lgb.size()) lgb.resize((size_t)nb * nv);

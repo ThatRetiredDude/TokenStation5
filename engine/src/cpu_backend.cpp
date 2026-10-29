@@ -100,6 +100,10 @@ public:
         }
         kc_.assign(total, 0.f);
         vc_.assign(kc_.size(), 0.f);
+        // Qwen 3.5's recurrent layers: a state each, beside the cache.
+        for (int l = 0; l < hp_.n_layer; l++)
+            if (hp_.rec(l)) rs_off_.push_back(rs_.size()), rs_.resize(rs_.size() + hp_.ssm_floats());
+            else rs_off_.push_back(0);
         if (!m.tok_embd.data) file_ = fopen(m.gguf.path.c_str(), "rb");
         for (auto &L : m.layers) {
             Norms n;
@@ -111,6 +115,12 @@ public:
             if (L.q_norm) n.q = vec(L.q_norm);
             if (L.k_norm) n.k = vec(L.k_norm);
             if (L.bq) n.bq = vec(L.bq), n.bk = vec(L.bk), n.bv = vec(L.bv);
+            if (L.ssm_conv1d) {
+                n.conv = vec(L.ssm_conv1d);
+                n.a = vec(L.ssm_a);
+                n.dt = vec(L.ssm_dt);
+                n.ssm = vec(L.ssm_norm);
+            }
             norms_.push_back(std::move(n));
         }
         out_norm_ = vec(m.out_norm);
@@ -130,12 +140,32 @@ public:
     const char *name() const override { return "cpu"; }
     int n_ctx() const override { return n_ctx_; }
 
+    bool recurrent() const override { return !rs_.empty(); }
+    int resume_point(int pos) const override {
+        if (rs_.empty() || pos >= state_pos_) return rs_.empty() ? pos : state_pos_;
+        return mark_pos_ >= 0 && pos >= mark_pos_ ? mark_pos_ : 0;
+    }
+    bool checkpoint(std::string &) override {
+        mark_ = rs_;
+        mark_pos_ = state_pos_;
+        return true;
+    }
+
     // Layer by layer over all n tokens, so a model that was opened but not
     // loaded needs one layer's weights in memory at a time. Each token's
     // arithmetic is the same as one token per call.
     bool forward(const int32_t *tokens, int n, int pos0, float *logits, bool all, std::string &err) override {
         if (pos0 + n > n_ctx_) { err = "context full"; return false; }
         if (!m_.tok_embd.data && !(file_ && read_ok_)) return read_failed(err);
+        if (!rs_.empty()) {
+            if (pos0 == 0) std::fill(rs_.begin(), rs_.end(), 0.f);
+            else if (pos0 == mark_pos_ && pos0 != state_pos_) rs_ = mark_;
+            else if (pos0 != state_pos_) {
+                err = "the recurrent state is at " + std::to_string(state_pos_) + ", not " + std::to_string(pos0);
+                return false;
+            }
+            state_pos_ = pos0 + n;
+        }
         const int E = hp_.n_embd;
         std::vector<float> x((size_t)n * E);
         const Weight &te = m_.tok_embd;
@@ -168,6 +198,7 @@ public:
 private:
     struct Norms {
         std::vector<float> attn, ffn, q, k, bq, bk, bv, post_attn, post_ffn, ple;
+        std::vector<float> conv, a, dt, ssm;  // Qwen 3.5's recurrent layers
         float out_scale = 1.f;
     };
 
@@ -220,7 +251,9 @@ private:
 
     // Reads layer L's matrices from the file into buf_ and points L at them.
     bool load_layer(Layer &L, std::string &err) {
-        Weight *ws[] = {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.ple_gate, &L.ple_proj};
+        Weight *ws[] = {&L.wq,      &L.wk,     &L.wv,       &L.wo,        &L.w_gate,    &L.w_up,
+                        &L.w_down,  &L.ple_gate, &L.ple_proj, &L.ssm_qkv, &L.ssm_z,    &L.ssm_beta,
+                        &L.ssm_alpha, &L.ssm_out};
         uint64_t total = 0;
         for (Weight *w : ws)
             if (*w) total += (w->info->nbytes + 63) / 64 * 64;
@@ -235,15 +268,96 @@ private:
         return true;
     }
 
+    // Qwen 3.5's Gated DeltaNet layer l on h (the normed residuals of n
+    // tokens), into o, as llama.cpp's ggml_gated_delta_net runs it: a causal
+    // convolution over the q, k, v channels (its last inputs kept in the
+    // state), SiLU, q and k L2-normalized, then per value head and token the
+    // state S decays by exp(g), learns v at k by the delta rule with rate
+    // beta, and is read at q; the result is RMS-normed and gated by SiLU(z).
+    void recurrent_layer(int l, const Layer &L, const float *h, int n, float *o) {
+        const Norms &N = norms_[l];
+        const int K = hp_.ssm_conv, S = hp_.ssm_state, C = hp_.ssm_channels();
+        const int QK = hp_.ssm_qk(), HV = hp_.ssm_v_heads, HK = hp_.ssm_k_heads, VD = hp_.ssm_v();
+        std::vector<float> qkv((size_t)n * C), z((size_t)n * VD), b((size_t)n * HV), a((size_t)n * HV);
+        matmul(L.ssm_qkv, h, n, qkv.data());
+        matmul(L.ssm_z, h, n, z.data());
+        matmul(L.ssm_beta, h, n, b.data());
+        matmul(L.ssm_alpha, h, n, a.data());
+        float *conv_state = &rs_[rs_off_[l]];              // [K-1][C], oldest first
+        float *ssm = conv_state + (size_t)(K - 1) * C;     // [HV][S][S], M[j][i] = S[i][j]
+        for (int c = 0; c < C; c++) {
+            const float *w = &N.conv[(size_t)c * K];
+            for (int t = 0; t < n; t++) {
+                const float in = qkv[(size_t)t * C + c];
+                float sum = w[K - 1] * in;
+                for (int i = 0; i < K - 1; i++) sum += w[i] * conv_state[(size_t)i * C + c];
+                for (int i = 0; i + 1 < K - 1; i++) conv_state[(size_t)i * C + c] = conv_state[(size_t)(i + 1) * C + c];
+                conv_state[(size_t)(K - 2) * C + c] = in;
+                qkv[(size_t)t * C + c] = sum / (1.0f + std::exp(-sum));
+            }
+        }
+        auto l2norm = [&](float *v) {
+            double ss = 0;
+            for (int i = 0; i < S; i++) ss += (double)v[i] * v[i];
+            const float sc = 1.0f / std::max(std::sqrt((float)ss), hp_.rms_eps);
+            for (int i = 0; i < S; i++) v[i] *= sc;
+        };
+        std::vector<float> out(S);
+        for (int t = 0; t < n; t++) {
+            float *qt = &qkv[(size_t)t * C], *kt = qt + QK, *vt = qt + 2 * QK;
+            for (int hh = 0; hh < HK; hh++) l2norm(qt + hh * S), l2norm(kt + hh * S);
+            for (int vh = 0; vh < HV; vh++) {
+                const float *q = qt + (vh % HK) * S, *k = kt + (vh % HK) * S, *v = vt + vh * S;
+                const float x = a[(size_t)t * HV + vh] + N.dt[vh];
+                const float g = (x > 20.f ? x : std::log1p(std::exp(x))) * N.a[vh];
+                const float beta = 1.0f / (1.0f + std::exp(-b[(size_t)t * HV + vh]));
+                const float decay = std::exp(g);
+                float *M = ssm + (size_t)vh * S * S;
+                for (int j = 0; j < S; j++) {
+                    float *m = M + (size_t)j * S;
+                    double dot = 0;
+                    for (int i = 0; i < S; i++) dot += (double)(m[i] *= decay) * k[i];
+                    const float delta = (v[j] - (float)dot) * beta;
+                    double r = 0;
+                    for (int i = 0; i < S; i++) r += (double)(m[i] += k[i] * delta) * q[i];
+                    out[j] = (float)r / std::sqrt((float)S);
+                }
+                rmsnorm(out.data(), N.ssm.data(), S, hp_.rms_eps);
+                float *zt = &z[(size_t)t * VD + (size_t)vh * S];
+                for (int j = 0; j < S; j++) zt[j] = out[j] * (zt[j] / (1.0f + std::exp(-zt[j])));
+            }
+        }
+        matmul(L.ssm_out, z.data(), n, o);
+    }
+
     // Layer l for n tokens at positions pos0.., x holding their residuals.
     void layer(int l, const Layer &L, float *x, int n, int pos0) {
         const int E = hp_.n_embd, HD = hp_.hd(l), H = hp_.n_head, HKV = hp_.hkv(l);
-        const int KV = HKV * HD, F = (int)L.w_gate.ne1();
+        const int KV = HKV * HD;
         const Norms &N = norms_[l];
         const bool swa = hp_.swa(l), own_kv = hp_.has_kv(l);
         std::vector<float> h(x, x + (size_t)n * E), q((size_t)n * H * HD), k((size_t)n * KV), v((size_t)n * KV);
         for (int t = 0; t < n; t++) rmsnorm(&h[(size_t)t * E], N.attn.data(), E, hp_.rms_eps);
-        matmul(L.wq, h.data(), n, q.data());
+        if (hp_.rec(l)) {
+            std::vector<float> o((size_t)n * E);
+            recurrent_layer(l, L, h.data(), n, o.data());
+            for (size_t i = 0; i < (size_t)n * E; i++) x[i] += o[i];
+            ffn(l, L, x, n);
+            return;
+        }
+        // Qwen 3.5: each head's queries, then its gate.
+        std::vector<float> gate;
+        if (hp_.attn_gate) {
+            std::vector<float> qg((size_t)n * 2 * H * HD);
+            matmul(L.wq, h.data(), n, qg.data());
+            gate.resize(q.size());
+            for (size_t th = 0; th < (size_t)n * H; th++) {
+                memcpy(&q[th * HD], &qg[th * 2 * HD], HD * 4);
+                memcpy(&gate[th * HD], &qg[th * 2 * HD + HD], HD * 4);
+            }
+        } else {
+            matmul(L.wq, h.data(), n, q.data());
+        }
         if (own_kv) {
             matmul(L.wk, h.data(), n, k.data());
             // Gemma 4: no attn_v, the keys (before their norm) are the values.
@@ -309,11 +423,19 @@ private:
                 }
             }
         }
+        for (size_t i = 0; i < gate.size(); i++) att[i] /= 1.0f + std::exp(-gate[i]);
         matmul(L.wo, att.data(), n, o.data());
         if (!N.post_attn.empty())
             for (int t = 0; t < n; t++) rmsnorm(&o[(size_t)t * E], N.post_attn.data(), E, hp_.rms_eps);
         for (size_t i = 0; i < (size_t)n * E; i++) x[i] += o[i];
-        h.assign(x, x + (size_t)n * E);
+        ffn(l, L, x, n);
+    }
+
+    // The FFN and what follows it (Gemma 4's per-layer input, its scale).
+    void ffn(int l, const Layer &L, float *x, int n) {
+        const int E = hp_.n_embd, F = (int)L.w_gate.ne1();
+        const Norms &N = norms_[l];
+        std::vector<float> h(x, x + (size_t)n * E), o((size_t)n * E);
         for (int t = 0; t < n; t++) rmsnorm(&h[(size_t)t * E], N.ffn.data(), E, hp_.rms_eps);
         std::vector<float> g((size_t)n * F), u((size_t)n * F);
         matmul(L.w_gate, h.data(), n, g.data());
@@ -373,6 +495,11 @@ private:
     std::vector<float> ple_;         // Gemma 4: the forward call's per-layer inputs
     std::vector<uint8_t> ple_proj_;  // Gemma 4's ple_proj, read from the file
     std::vector<Norms> norms_;
+    // Qwen 3.5: the recurrent layers' states (rs_off_: each layer's place),
+    // the positions they and the checkpoint (mark_) are at.
+    std::vector<float> rs_, mark_;
+    std::vector<size_t> rs_off_;
+    int state_pos_ = 0, mark_pos_ = -1;
 };
 
 }  // namespace

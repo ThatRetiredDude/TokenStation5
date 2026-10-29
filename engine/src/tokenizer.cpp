@@ -38,8 +38,10 @@ bool is_space(uint32_t c) {
            c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F ||
            c == 0x205F || c == 0x3000;
 }
+// \p{N}, in part: digits, and Latin-1's superscripts and fractions (²³¹¼½¾).
 bool is_digit(uint32_t c) {
-    return (c >= '0' && c <= '9') || (c >= 0x660 && c <= 0x669) || (c >= 0xFF10 && c <= 0xFF19);
+    return (c >= '0' && c <= '9') || (c >= 0x660 && c <= 0x669) || (c >= 0xFF10 && c <= 0xFF19) || c == 0xB2 ||
+           c == 0xB3 || c == 0xB9 || (c >= 0xBC && c <= 0xBE);
 }
 // Approximation of \p{L}: ASCII letters exactly; outside ASCII, anything that
 // is not a space, digit or a common punctuation/symbol block.

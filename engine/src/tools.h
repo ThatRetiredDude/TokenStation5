@@ -1,6 +1,7 @@
 // Tool calling (OpenAI "tools" / "tool_calls") in the formats the models were
 // trained on: the Hermes style of Qwen 2.5 and Qwen3, the JSON style of
-// Llama 3.1 and 3.2, Mistral Nemo's [TOOL_CALLS] and Gemma 4's own. Each is
+// Llama 3.1 and 3.2, Mistral Nemo's [TOOL_CALLS], Qwen 3.5's XML and Gemma
+// 4's own. Each is
 // written the way the model's own chat template writes it, so the model sees
 // what it saw in training. Gemma 3, which has no tool format of its own, gets the Hermes one
 // in its own turns.
@@ -20,6 +21,7 @@ enum class ToolFormat {
     MISTRAL, // Mistral Nemo: [TOOL_CALLS][{"name": ..., "arguments": {...}, "id": ...}], results in [TOOL_RESULTS]
     GEMMA,   // Gemma 3 (no tool format of its own): HERMES's calls and results, in Gemma's turns
     GEMMA4,  // Gemma 4: <|tool_call>call:name{key:<|"|>text<|"|>}<tool_call|>, results in the same turn
+    QWEN35,  // Qwen 3.5: <tool_call><function=name><parameter=key>value</parameter></function></tool_call>, else HERMES
 };
 // Read from the model's chat template.
 ToolFormat tool_format(const Tokenizer &t);
@@ -52,12 +54,14 @@ std::string render_results(ToolFormat f, const std::vector<ToolCall> &calls, con
 
 // A finished turn: its text without the calls, and the calls. A call whose JSON
 // does not parse stays in the text. names: the request's tools, for calls
-// written as elements named after them.
+// written as elements named after them; tools: the tools themselves, whose
+// parameter types say which of Qwen 3.5's values are text.
 struct ParsedTurn {
     std::string content;
     std::vector<ToolCall> calls;
 };
-ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names = {});
+ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names = {},
+                      const std::vector<Json> *tools = nullptr);
 
 // While a turn streams: how many bytes of `text` are surely text for the user,
 // never part of a call (the rest is held until the turn ends).
@@ -68,6 +72,11 @@ size_t content_prefix(ToolFormat f, const std::string &text);
 // <think></think>, as the template writes it, and the model answers at once.
 bool can_skip_thinking(const Tokenizer &t);
 extern const char *const kNoThinking;
+// Whether the model thinks only when asked (Qwen 3.5's template, which
+// opens the turn with kNoThinking unless enable_thinking is true); its turn
+// then opens with kThinking when it is asked to think.
+bool thinks_when_asked(const Tokenizer &t);
+extern const char *const kThinking;
 
 // A finished turn's text as the model's tokens spell it, to go back into the
 // prompt: Gemma 4's thinking reads as <think></think> (Tokenizer::decode),

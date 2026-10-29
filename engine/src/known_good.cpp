@@ -22,6 +22,7 @@ std::string model_family(const std::string &arch, const std::string &name) {
     if (arch == "qwen3") return "qwen3";
     if (arch == "gemma3") return "gemma3";
     if (arch == "gemma4") return "gemma4";
+    if (arch == "qwen35") return "qwen3.5";
     if (arch == "qwen2") return has("coder") ? "qwen2.5-coder" : "qwen2.5";
     // Mistral Nemo's conversions say llama or mistral.
     if ((arch == "llama" || arch == "mistral") && has("nemo")) return "mistral-nemo";

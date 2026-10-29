@@ -1,0 +1,30 @@
+// Qwen 3.5's Gated DeltaNet, per channel: the causal convolution of K taps
+// over the n tokens' q, k, v channels in X ([t][C], overwritten with the
+// result), then SiLU. The K - 1 inputs before the first token come from
+// the layer's state ([K-1][C] at state_off, oldest first), which is left
+// holding the last K - 1. One thread a channel, the tokens in order.
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Xbuf { float X[]; };
+layout(std430, binding = 1) readonly buffer Wbuf { float W[]; };   // [C][K]
+layout(std430, binding = 2) buffer Sbuf { float ST[]; };
+layout(push_constant) uniform PC { uint C, K, n_tok, state_off; } pc;
+
+void main() {
+    const uint c = gl_GlobalInvocationID.x;
+    if (c >= pc.C) return;
+    const uint K = pc.K;
+    float win[7];  // up to 8 taps
+    for (uint i = 0; i + 1 < K; i++) win[i] = ST[pc.state_off + i * pc.C + c];
+    float w[8];
+    for (uint i = 0; i < K; i++) w[i] = W[c * K + i];
+    for (uint t = 0; t < pc.n_tok; t++) {
+        const float in_ = X[t * pc.C + c];
+        float sum = w[K - 1] * in_;
+        for (uint i = 0; i + 1 < K; i++) sum += w[i] * win[i];
+        for (uint i = 0; i + 2 < K; i++) win[i] = win[i + 1];
+        win[K - 2] = in_;
+        X[t * pc.C + c] = sum / (1.0 + exp(-sum));
+    }
+    for (uint i = 0; i + 1 < K; i++) ST[pc.state_off + i * pc.C + c] = win[i];
+}

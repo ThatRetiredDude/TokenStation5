@@ -37,6 +37,8 @@
 #include "attn_pf256.spv.h"
 #include "attn_pf_q8.spv.h"
 #include "attn_q8.spv.h"
+#include "gate_split.spv.h"
+#include "gdn.spv.h"
 #include "get_rows_bf16.spv.h"
 #include "get_rows_f16.spv.h"
 #include "get_rows_f32.spv.h"
@@ -89,6 +91,9 @@
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
 #include "scale.spv.h"
+#include "sigmoid_mul.spv.h"
+#include "ssm_conv.spv.h"
+#include "state_copy.spv.h"
 #include "swiglu.spv.h"
 #include "log.h"
 
@@ -286,6 +291,20 @@ public:
             }
         }
         if (f) fclose(f);
+        return true;
+    }
+
+    bool recurrent() const override { return !rs_off_.empty(); }
+    int resume_point(int pos) const override {
+        if (rs_off_.empty() || pos >= state_pos_) return rs_off_.empty() ? pos : state_pos_;
+        return mark_pos_ >= 0 && pos >= mark_pos_ ? mark_pos_ : 0;
+    }
+    bool checkpoint(std::string &err) override {
+        if (rs_off_.empty()) return true;
+        if (!begin(err)) return false;
+        state_copy(rs_, rs_mark_, false);
+        if (!submit(err)) return false;
+        mark_pos_ = state_pos_;
         return true;
     }
 
@@ -560,6 +579,7 @@ private:
             !make_pipe("attn_dec4", spv_attn_dec4, sizeof(spv_attn_dec4), 5, err, attn_dec_plain_ == 1, lpk))
             return false;
         P(swiglu, 2) P(ple_prep, 4) P(ple_mul, 2) P(scale, 1)
+        P(ssm_conv, 3) P(gdn, 8) P(gate_split, 3) P(sigmoid_mul, 2) P(state_copy, 2)
 #undef P
         return true;
     }
@@ -650,6 +670,8 @@ private:
         int F = hp_.n_ff;
         for (const Layer &L : m_.layers) F = std::max(F, (int)L.w_gate.ne1());
         const size_t QD = (size_t)hp_.n_head * HD, KVD = (size_t)hp_.n_head_kv * HD;
+        // Qwen 3.5's queries and gates go through g_.
+        if (hp_.attn_gate) F = std::max(F, (int)(2 * QD));
         auto mk = [&](Buf &b, size_t bytes, bool host = false, bool exact = false) {
             return create_buf(bytes, host, b, err, exact);
         };
@@ -666,6 +688,25 @@ private:
             const size_t W = (size_t)P * hp_.n_layer;
             if (!mk(ple_emb_, 4ull * TMAX * W) || !mk(ple_proj_, 4ull * TMAX * W) || !mk(ple_, 4ull * TMAX * W) ||
                 !mk(ple_g_, 4ull * TMAX * P))
+                return false;
+        }
+        // Qwen 3.5's recurrent layers: their inputs, value gates, alphas and
+        // betas, and all of their states, twice (rs_mark_: the checkpoint).
+        for (int l = 0; l < hp_.n_layer; l++) {
+            if (!hp_.rec(l)) continue;
+            rs_off_.resize(hp_.n_layer, 0);
+            rs_off_[l] = rs_floats_;
+            rs_floats_ += (uint32_t)hp_.ssm_floats();
+        }
+        if (rs_floats_) {
+            if (hp_.ssm_state != 128 || hp_.ssm_conv > 8) {
+                err = "Gated DeltaNet with a state of " + std::to_string(hp_.ssm_state) + " or " +
+                      std::to_string(hp_.ssm_conv) + " taps: the kernels take 128 and up to 8";
+                return false;
+            }
+            if (!mk(conv_, 4ull * TMAX * hp_.ssm_channels()) || !mk(z_, 4ull * TMAX * hp_.ssm_v()) ||
+                !mk(alpha_, 4ull * TMAX * hp_.ssm_v_heads) || !mk(beta_, 4ull * TMAX * hp_.ssm_v_heads) ||
+                !mk(rs_, 4ull * rs_floats_, false, true) || !mk(rs_mark_, 4ull * rs_floats_, false, true))
                 return false;
         }
         if (n_ctx_ <= 0) {
@@ -1113,7 +1154,7 @@ private:
         if (reuse) {
             cmd_ = aheads_[ahead_cur_];
             cpu_.reused++;
-        } else if (!record(n, pos0, want, all, VK_NULL_HANDLE, err)) {
+        } else if (!record(n, pos0, want, all, VK_NULL_HANDLE, err, state_pos_)) {
             return false;
         }
         if (!send(err, reuse)) return false;
@@ -1145,6 +1186,7 @@ private:
             cpu_.ahead += now_ms() - t;
         }
         if (!finish(err)) return false;
+        state_pos_ = pos0 + n;
         const double t1 = now_ms();
         if (logits) memcpy(logits, logits_.map, 4ull * (all ? n : 1) * hp_.n_vocab);
         const double t2 = now_ms();
@@ -1160,15 +1202,16 @@ private:
             err = "TS5_AHEAD_FAIL";
             return false;
         }
-        if (!record(1, pos, true, false, aheads_[ahead_cur_], err)) return false;
+        if (!record(1, pos, true, false, aheads_[ahead_cur_], err, pos)) return false;
         CHECK(vk.vkEndCommandBuffer(cmd_));
         return true;
     }
 
     // Records a forward call of n tokens from pos0 into target (or cmds_),
     // with the logits where want, submitting and waiting for parts of a big
-    // batch on the way; the last command buffer is left open in cmd_.
-    bool record(int n, int pos0, bool want, bool all, VkCommandBuffer target, std::string &err) {
+    // batch on the way; the last command buffer is left open in cmd_. at:
+    // where the recurrent state will be when it runs (Qwen 3.5).
+    bool record(int n, int pos0, bool want, bool all, VkCommandBuffer target, std::string &err, int at) {
         const int E = hp_.n_embd, H = hp_.n_head;
         // Big batches are split into several submits so no single submit
         // runs long (the PS5 driver drops the device after 10 s without
@@ -1178,6 +1221,18 @@ private:
         // dec_submit_ layers at a time without waiting in between.
         const int per_flush = n < 64 && !layers_per_submit_ ? dec_submit_ : 0;
         if (!begin(err, target)) return false;
+        if (!rs_off_.empty()) {
+            // A fresh state at 0, the checkpoint's where that is, else the
+            // state must already be at pos0.
+            if (pos0 == 0) {
+                state_copy(rs_, rs_, true);
+            } else if (pos0 != at && pos0 == mark_pos_) {
+                state_copy(rs_mark_, rs_, false);
+            } else if (pos0 != at) {
+                err = "the recurrent state is at " + std::to_string(at) + ", not " + std::to_string(pos0);
+                return false;
+            }
+        }
         {
             struct { uint32_t ncols, row_bytes; float scale; } pc{(uint32_t)E, (uint32_t)m_.tok_embd.info->row_bytes(),
                                                                   hp_.embd_scale > 0 ? hp_.embd_scale : 1.0f};
@@ -1190,52 +1245,68 @@ private:
             const int HD = hp_.hd(l), HKV = hp_.hkv(l);
             const bool own_kv = hp_.has_kv(l);
             rmsnorm(x_, L.attn_norm, h_, n);
-            // q, k and v only read h_: no barrier between them (nor between
-            // gate and up below). k and v first: a prompt's q may be split
-            // (mmb), with a barrier before its sums are added up, and the
-            // small k and v run alongside it rather than after it.
-            // Gemma 4: a layer reading an earlier layer's keys makes none,
-            // and one without attn_v uses its keys as values.
-            if (own_kv) {
-                no_barrier_ = fuse_;
-                matmul(L.wk, h_, k_, n, false);
-                no_barrier_ = fuse_;
-                matmul(L.wv ? L.wv : L.wk, h_, v_, n, false);
-            }
-            matmul(L.wq, h_, q_, n, false);
-            const uint32_t cache_off = layer_off_[l], kb = layer_buf_[l];
-            const bool swa = hp_.swa(l);
-            // Gemma 4's proportional RoPE is for its full layers; Llama 3.1's
-            // divisors are for every layer.
-            const bool freqs = m_.rope_freqs && !(hp_.arch == "gemma4" && swa);
-            {
-                struct {
-                    uint32_t head_dim, n_head, n_head_kv, pos0, rope_dims, neox, has_bias, has_norm, cache_off;
-                    float rope_base, eps;
-                    uint32_t has_freqs, ring;
-                    float rope_scale;
-                    uint32_t v_norm;
-                } pc{(uint32_t)HD, (uint32_t)H, (uint32_t)HKV, (uint32_t)pos0, (uint32_t)hp_.rdims(l),
-                     hp_.rope_neox ? 1u : 0u, L.bq ? 1u : 0u, L.q_norm ? 1u : 0u, cache_off,
-                     swa ? hp_.rope_base_swa : hp_.rope_base, hp_.rms_eps, freqs ? 1u : 0u, ring_[l],
-                     swa ? 1.0f : hp_.rope_scale, hp_.v_norm ? 1u : 0u};
-                const Buf &bq = L.bq ? W(L.bq) : dummy_, &bk = L.bk ? W(L.bk) : dummy_, &bv = L.bv ? W(L.bv) : dummy_;
-                const Buf &nq = L.q_norm ? W(L.q_norm) : dummy_, &nk = L.k_norm ? W(L.k_norm) : dummy_;
-                const Buf &ff = m_.rope_freqs ? W(m_.rope_freqs) : dummy_;
-                if (kv_ == KvType::Q8)
-                    dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
-                             (uint32_t)(H + (own_kv ? HKV : 0)), (uint32_t)n);
-                else
-                    dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ff}, pc,
-                             (uint32_t)(H + (own_kv ? HKV : 0)), (uint32_t)n);
-            }
-            attention(l, n, pos0, kb, cache_off, swa ? (uint32_t)hp_.swa_window : 0, ring_[l]);
-            // Gemma normalizes attention's output before it joins the residual.
-            if (L.post_attn_norm) {
-                matmul(L.wo, att_, h_, n, false);
-                rmsnorm(h_, L.post_attn_norm, x_, n, 0, true);
+            if (hp_.rec(l)) {
+                recurrent_layer(l, n);
             } else {
-                matmul(L.wo, att_, x_, n, true);
+                // q, k and v only read h_: no barrier between them (nor between
+                // gate and up below). k and v first: a prompt's q may be split
+                // (mmb), with a barrier before its sums are added up, and the
+                // small k and v run alongside it rather than after it.
+                // Gemma 4: a layer reading an earlier layer's keys makes none,
+                // and one without attn_v uses its keys as values.
+                if (own_kv) {
+                    no_barrier_ = fuse_;
+                    matmul(L.wk, h_, k_, n, false);
+                    no_barrier_ = fuse_;
+                    matmul(L.wv ? L.wv : L.wk, h_, v_, n, false);
+                }
+                // Qwen 3.5: each head's queries and gate into g_, split into q_
+                // and u_ (the FFN's, free until then).
+                if (hp_.attn_gate) {
+                    matmul(L.wq, h_, g_, n, false);
+                    struct { uint32_t n, head_dim; } gpc{(uint32_t)(n * H * HD), (uint32_t)HD};
+                    dispatch("gate_split", {&g_, &q_, &u_}, gpc, std::min<uint32_t>(65535, (gpc.n + 255) / 256));
+                } else {
+                    matmul(L.wq, h_, q_, n, false);
+                }
+                const uint32_t cache_off = layer_off_[l], kb = layer_buf_[l];
+                const bool swa = hp_.swa(l);
+                // Gemma 4's proportional RoPE is for its full layers; Llama 3.1's
+                // divisors are for every layer.
+                const bool freqs = m_.rope_freqs && !(hp_.arch == "gemma4" && swa);
+                {
+                    struct {
+                        uint32_t head_dim, n_head, n_head_kv, pos0, rope_dims, neox, has_bias, has_norm, cache_off;
+                        float rope_base, eps;
+                        uint32_t has_freqs, ring;
+                        float rope_scale;
+                        uint32_t v_norm;
+                    } pc{(uint32_t)HD, (uint32_t)H, (uint32_t)HKV, (uint32_t)pos0, (uint32_t)hp_.rdims(l),
+                         hp_.rope_neox ? 1u : 0u, L.bq ? 1u : 0u, L.q_norm ? 1u : 0u, cache_off,
+                         swa ? hp_.rope_base_swa : hp_.rope_base, hp_.rms_eps, freqs ? 1u : 0u, ring_[l],
+                         swa ? 1.0f : hp_.rope_scale, hp_.v_norm ? 1u : 0u};
+                    const Buf &bq = L.bq ? W(L.bq) : dummy_, &bk = L.bk ? W(L.bk) : dummy_, &bv = L.bv ? W(L.bv) : dummy_;
+                    const Buf &nq = L.q_norm ? W(L.q_norm) : dummy_, &nk = L.k_norm ? W(L.k_norm) : dummy_;
+                    const Buf &ff = m_.rope_freqs ? W(m_.rope_freqs) : dummy_;
+                    if (kv_ == KvType::Q8)
+                        dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
+                                 (uint32_t)(H + (own_kv ? HKV : 0)), (uint32_t)n);
+                    else
+                        dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ff}, pc,
+                                 (uint32_t)(H + (own_kv ? HKV : 0)), (uint32_t)n);
+                }
+                attention(l, n, pos0, kb, cache_off, swa ? (uint32_t)hp_.swa_window : 0, ring_[l]);
+                if (hp_.attn_gate) {
+                    struct { uint32_t n; } spc{(uint32_t)(n * H * HD)};
+                    dispatch("sigmoid_mul", {&att_, &u_}, spc, std::min<uint32_t>(65535, (spc.n + 255) / 256));
+                }
+                // Gemma normalizes attention's output before it joins the residual.
+                if (L.post_attn_norm) {
+                    matmul(L.wo, att_, h_, n, false);
+                    rmsnorm(h_, L.post_attn_norm, x_, n, 0, true);
+                } else {
+                    matmul(L.wo, att_, x_, n, true);
+                }
             }
             rmsnorm(x_, L.ffn_norm, h_, n);
             if (!ffn_glu(L, n)) {
@@ -1280,6 +1351,35 @@ private:
             }
         }
         return true;
+    }
+
+    // Qwen 3.5's Gated DeltaNet layer l on h_ (n tokens), added to x_: the
+    // projections, the convolution (ssm_conv.comp), the recurrence with the
+    // gated norm (gdn.comp), the output projection.
+    void recurrent_layer(int l, int n) {
+        const Layer &L = m_.layers[l];
+        no_barrier_ = fuse_;
+        matmul(L.ssm_qkv, h_, conv_, n, false);
+        no_barrier_ = fuse_;
+        matmul(L.ssm_z, h_, z_, n, false);
+        no_barrier_ = fuse_;
+        matmul(L.ssm_beta, h_, beta_, n, false);
+        matmul(L.ssm_alpha, h_, alpha_, n, false);
+        const uint32_t C = (uint32_t)hp_.ssm_channels(), K = (uint32_t)hp_.ssm_conv;
+        struct { uint32_t C, K, n_tok, state_off; } cpc{C, K, (uint32_t)n, rs_off_[l]};
+        dispatch("ssm_conv", {&conv_, &W(L.ssm_conv1d), &rs_}, cpc, (C + 255) / 256);
+        struct { uint32_t HK, HV, n_tok, C, state_off; float eps; } gpc{
+            (uint32_t)hp_.ssm_k_heads, (uint32_t)hp_.ssm_v_heads, (uint32_t)n, C,
+            rs_off_[l] + (K - 1) * C, hp_.rms_eps};
+        dispatch("gdn", {&conv_, &alpha_, &beta_, &z_, &rs_, &W(L.ssm_a), &W(L.ssm_dt), &W(L.ssm_norm)}, gpc,
+                 (uint32_t)hp_.ssm_v_heads);
+        matmul(L.ssm_out, z_, x_, n, true);
+    }
+
+    // All recurrent states: dst = src, or 0 with zero.
+    void state_copy(const Buf &src, const Buf &dst, bool zero) {
+        struct { uint32_t n, zero; } pc{rs_floats_, zero ? 1u : 0u};
+        dispatch("state_copy", {&src, &dst}, pc, std::min<uint32_t>(65535, (rs_floats_ + 255) / 256));
     }
 
     // Gemma 4's per-layer inputs for the n tokens in ids_ into ple_
@@ -1422,6 +1522,13 @@ private:
     std::map<std::string, Buf> weights_;
     Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_;
     Buf ple_emb_, ple_proj_, ple_, ple_g_;  // Gemma 4's per-layer inputs
+    // Qwen 3.5's recurrent layers: their q, k, v channels, value gates,
+    // alphas and betas; their states (rs_off_: each layer's place in rs_)
+    // and the checkpoint's, and the positions those are at.
+    Buf conv_, z_, alpha_, beta_, rs_, rs_mark_;
+    std::vector<uint32_t> rs_off_;
+    uint32_t rs_floats_ = 0;
+    int state_pos_ = 0, mark_pos_ = -1;
     std::vector<float> out_scale_;          // Gemma 4: each layer's layer_output_scale
     std::vector<Buf> kc_, vc_, ks_, vs_;  // the KV cache's pieces
     // Each layer's first cache element and piece, and a sliding layer's ring slots (0: none).
@@ -1465,7 +1572,7 @@ KvType kv_type_setting() {
 
 int full_layers(const HParams &hp) {
     int n = 0;
-    for (int l = 0; l < hp.n_layer; l++) n += !hp.swa(l);
+    for (int l = 0; l < hp.n_layer; l++) n += !hp.swa(l) && !hp.rec(l);
     return n;
 }
 
@@ -1499,7 +1606,12 @@ uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
     const uint64_t QD = (uint64_t)hp.n_head * hp.head_dim, KVD = (uint64_t)hp.n_head_kv * hp.head_dim;
     // Gemma 4's per-layer inputs: three blocks of all layers' values and a gate.
     const uint64_t ple = hp.n_embd_ple ? (3ull * hp.n_layer + 1) * hp.n_embd_ple : 0;
-    const uint64_t act = 4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab + ple) +
+    // Qwen 3.5's recurrent layers: their inputs and gates, and their states
+    // twice (the state and its checkpoint).
+    uint64_t rec = 0, states = 0;
+    for (int l = 0; l < hp.n_layer; l++) states += hp.rec(l) ? 2ull * 4 * hp.ssm_floats() : 0;
+    if (states) rec = (uint64_t)hp.ssm_channels() + hp.ssm_v() + 2ull * hp.ssm_v_heads + std::max<uint64_t>(F, 2 * QD);
+    const uint64_t act = 4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab + ple + rec) + states +
                          4 * (VkBackend::PART + VkBackend::SPLIT);
     const uint64_t gib = 1ull << 30;
     return (weight_bytes + act + gib - 1) / gib * gib + kv_ring_bytes(hp, KvType::F16);
