@@ -1,5 +1,6 @@
 // Per token and head, after the Q/K/V projections: optional bias (Qwen2),
-// optional per-head RMSNorm (Qwen3, Gemma 3), RoPE (positions times
+// optional per-head RMSNorm (Qwen3, Gemma 3 and 4; with v_norm, values too,
+// without a weight: Gemma 4), heads up to 512 wide, RoPE (positions times
 // rope_scale), then K and V go into the cache (position p in slot p % ring of
 // a sliding layer's ring, else slot p):
 // f16, or with KV_Q8 (qkv_post_q8.comp) 8-bit values with an f16 scale per
@@ -58,9 +59,10 @@ layout(push_constant) uniform PC {
     uint has_freqs;
     uint ring;        // slots of a sliding layer's ring; 0: one per position
     float rope_scale;
+    uint v_norm;
 } pc;
 
-shared float sh[256];
+shared float sh[512];
 shared float red[128];
 
 void main() {
@@ -90,6 +92,19 @@ void main() {
         for (uint d = tid; d < HD; d += 128) sh[d] *= scale * (is_q ? nq[d] : nk[d]);
     }
     barrier();
+    // Gemma 4: the values' RMS, for their norm.
+    float v_rms = 1.0;
+    if (!is_q && pc.v_norm != 0) {
+        float vs = 0.0;
+        for (uint d = tid; d < HD; d += 128) vs += V[base + d] * V[base + d];
+        red[tid] = vs;
+        barrier();
+        for (uint k = 64; k > 0; k >>= 1) {
+            if (tid < k) red[tid] += red[tid + k];
+            barrier();
+        }
+        v_rms = inversesqrt(red[0] / float(HD) + pc.eps);
+    }
 
     const uint rd = pc.rope_dims, half_rd = rd / 2;
     for (uint d = tid; d < HD; d += 128) {
@@ -107,6 +122,7 @@ void main() {
         } else {
             float v = V[base + d];
             if (pc.has_bias != 0) v += bv[h * HD + d];
+            v *= v_rms;
 #ifdef KV_Q8
             ky[d] = y;
             vy[d] = v;

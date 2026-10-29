@@ -18,9 +18,9 @@ small enough to reason about.
 
 | | v0 (this) | later |
 | --- | --- | --- |
-| Architectures | `llama` (Llama, Mistral, Mistral Nemo), `qwen2` (Qwen 2.5, Qwen 2.5 Coder), `qwen3`, `gemma3` (sliding-window layers in a ring cache, GELU, extra norms) | `qwen35` (Gated DeltaNet), `gemma4` (per-layer embeddings) |
-| Weight types | F32, F16, Q4_0, Q8_0, Q4_K, Q5_K, Q6_K (all of Q4_K_M / Q5_K_M) | IQ quants, Q3_K / Q2_K |
-| Tokenizers | byte-level BPE (Qwen2, Llama 3 pre-tokenizers), SentencePiece (Llama 2, Gemma) | Tekken's case-splitting pre-tokenizer (approximated now) |
+| Architectures | `llama` (Llama, Mistral, Mistral Nemo), `qwen2` (Qwen 2.5, Qwen 2.5 Coder), `qwen3`, `gemma3` (sliding-window layers in a ring cache, GELU, extra norms), `gemma4` (per-layer embeddings, keys shared across the last layers, heads of two sizes) | `qwen35` (Gated DeltaNet), Gemma 4's mixture-of-experts 26B |
+| Weight types | F32, F16, BF16, Q4_0, Q8_0, Q4_K, Q5_K, Q6_K (all of Q4_K_M / Q5_K_M) | IQ quants, Q3_K / Q2_K |
+| Tokenizers | byte-level BPE (Qwen2, Llama 3 pre-tokenizers), SentencePiece (Llama 2, Gemma 3), Gemma 4's BPE over SentencePiece pieces | Tekken's case-splitting pre-tokenizer (approximated now) |
 | Chat formats | ChatML, Llama 3, Mistral `[INST]` | Jinja templates, tool calls |
 | API | `/v1/chat/completions` (+ streaming), `/v1/completions`, `/v1/models`, `/health`; llama-server style `timings` | Anthropic `/v1/messages`, parallel slots |
 | KV cache | f16 | q8_0 |

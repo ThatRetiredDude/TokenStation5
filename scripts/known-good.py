@@ -33,7 +33,7 @@ STANDARD = {"temperature": 0.7, "top_p": 0.95, "top_k": 40}
 USES = [("chat", ["chat", "stream", "system", "turns", "parts"]),
         ("tools", ["tools", "toolresult", "toolchoice", "notool", "twocalls", "toolstream"]),
         ("coding apps", ["agent"])]
-FAMILIES = {"qwen3", "qwen2.5-coder", "qwen2.5", "llama3", "mistral-nemo", "mistral", "gemma3"}
+FAMILIES = {"qwen3", "qwen2.5-coder", "qwen2.5", "llama3", "mistral-nemo", "mistral", "gemma3", "gemma4"}
 
 
 def read_rows():

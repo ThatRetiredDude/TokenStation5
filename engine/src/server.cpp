@@ -520,6 +520,11 @@ void handle(int fd, Server::State &state, Usage &u) {
                 return text.size() - i < tag.size() && tag.compare(0, text.size() - i, text, i) == 0 ? text.size()
                                                                                                     : (size_t)0;
             open = i + tag.size();
+            // Gemma 4 names its channel: <|channel>thought\n.
+            const std::string label = "thought\n";
+            if (text.compare(open, label.size(), label) == 0) open += label.size();
+            else if (text.size() - open < label.size() && label.compare(0, text.size() - open, text, open) == 0)
+                open = text.size();
             const size_t close = text.find("</think>", open);
             if (close == std::string::npos) return text.size();
             const size_t a = text.find_first_not_of(" \t\r\n", close + 8);
@@ -788,7 +793,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                 }
                 log_line("ts5: %s %s", id.c_str(), log.c_str());
             }
-            prompt += text + render_results(tf, searches, results) + opening;
+            prompt += turn_text(tf, text) + render_results(tf, searches, results) + opening;
         }
         {
             std::lock_guard<std::mutex> g(state.stats);

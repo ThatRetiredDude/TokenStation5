@@ -49,7 +49,7 @@ void rmsnorm(float *x, const float *w, int n, float eps) {
     double ss = 0;
     for (int i = 0; i < n; i++) ss += (double)x[i] * x[i];
     float s = 1.0f / std::sqrt((float)(ss / n) + eps);
-    for (int i = 0; i < n; i++) x[i] = x[i] * s * w[i];
+    for (int i = 0; i < n; i++) x[i] = x[i] * s * (w ? w[i] : 1.0f);
 }
 
 // freqs: Llama 3.1's divisor for each frequency (Model::rope_freqs), or null;
@@ -92,21 +92,37 @@ void round_kv(KvType t, float *v, int n) {
 class CpuBackend : public Backend {
 public:
     CpuBackend(const Model &m, int n_ctx, KvType kv_type) : m_(m), hp_(m.hp), n_ctx_(n_ctx), kv_(kv_type) {
-        const int kv = hp_.n_head_kv * hp_.head_dim;
-        kc_.assign((size_t)hp_.n_layer * n_ctx * kv, 0.f);
+        // Each layer that keeps keys has n_ctx of its own heads' K and V.
+        size_t total = 0;
+        for (int l = 0; l < hp_.n_layer; l++) {
+            cache_off_.push_back(total);
+            if (hp_.has_kv(l)) total += (size_t)n_ctx * hp_.kvd(l);
+        }
+        kc_.assign(total, 0.f);
         vc_.assign(kc_.size(), 0.f);
         if (!m.tok_embd.data) file_ = fopen(m.gguf.path.c_str(), "rb");
         for (auto &L : m.layers) {
             Norms n;
+            if (L.ple_norm) n.ple = vec(L.ple_norm);
+            if (L.out_scale) n.out_scale = vec(L.out_scale)[0];
             n.attn = vec(L.attn_norm);
             n.ffn = vec(L.ffn_norm);
             if (L.post_attn_norm) n.post_attn = vec(L.post_attn_norm), n.post_ffn = vec(L.post_ffn_norm);
-            if (L.q_norm) n.q = vec(L.q_norm), n.k = vec(L.k_norm);
+            if (L.q_norm) n.q = vec(L.q_norm);
+            if (L.k_norm) n.k = vec(L.k_norm);
             if (L.bq) n.bq = vec(L.bq), n.bk = vec(L.bk), n.bv = vec(L.bv);
             norms_.push_back(std::move(n));
         }
         out_norm_ = vec(m.out_norm);
         if (m.rope_freqs) rope_freqs_ = vec(m.rope_freqs);
+        if (m.ple_proj) {
+            ple_norm_ = vec(m.ple_proj_norm);
+            if (!m.ple_proj.data) {
+                // Read once: every token goes through it.
+                ple_proj_.resize(m.ple_proj.info->nbytes);
+                if (!file_ || !read_at(file_, m_, m.ple_proj, 0, ple_proj_.size(), ple_proj_.data())) read_ok_ = false;
+            }
+        }
     }
     ~CpuBackend() override {
         if (file_) fclose(file_);
@@ -132,6 +148,7 @@ public:
             if (hp_.embd_scale > 0)
                 for (int i = 0; i < E; i++) x[(size_t)t * E + i] *= hp_.embd_scale;
         }
+        if (m_.ple_embd && !ple_inputs(tokens, n, x.data(), err)) return false;
         for (int l = 0; l < hp_.n_layer; l++) {
             Layer L = m_.layers[l];
             if (file_ && !load_layer(L, err)) return false;
@@ -142,11 +159,43 @@ public:
         const int nout = all ? n : 1;
         float *xo = x.data() + (size_t)(n - nout) * E;
         for (int t = 0; t < nout; t++) rmsnorm(xo + (size_t)t * E, out_norm_.data(), E, hp_.rms_eps);
-        return output(xo, nout, logits, err);
+        if (!output(xo, nout, logits, err)) return false;
+        if (const float c = hp_.logit_softcap)
+            for (size_t i = 0; i < (size_t)nout * hp_.n_vocab; i++) logits[i] = c * std::tanh(logits[i] / c);
+        return true;
     }
 
 private:
-    struct Norms { std::vector<float> attn, ffn, q, k, bq, bk, bv, post_attn, post_ffn; };
+    struct Norms {
+        std::vector<float> attn, ffn, q, k, bq, bk, bv, post_attn, post_ffn, ple;
+        float out_scale = 1.f;
+    };
+
+    // Gemma 4: each token's per-layer inputs into ple_ ([token][layer][P]),
+    // from its row of the per-layer embeddings and the embedding x
+    // (Model::ple_embd).
+    bool ple_inputs(const int32_t *tokens, int n, const float *x, std::string &err) {
+        const int E = hp_.n_embd, P = hp_.n_embd_ple, NL = hp_.n_layer, W = P * NL;
+        ple_.assign((size_t)n * W, 0.f);
+        const Weight &pe = m_.ple_embd, &pp = m_.ple_proj;
+        const int64_t rb = pe.info->row_bytes();
+        std::vector<uint8_t> row(pe.data ? 0 : rb);
+        std::vector<float> e(W);
+        std::vector<float> proj((size_t)n * W);
+        const uint8_t *pd = pp.data ? pp.data : ple_proj_.data();
+        matmul(pp.type(), pd, pp.info->row_bytes(), pp.ne0(), pp.ne1(), x, n, proj.data(), W);
+        for (int t = 0; t < n; t++) {
+            const uint8_t *src = pe.data ? pe.data + (int64_t)tokens[t] * rb : row.data();
+            if (!pe.data && !read_at(file_, m_, pe, (uint64_t)tokens[t] * rb, rb, row.data())) return read_failed(err);
+            dequantize_row(pe.type(), src, e.data(), W);
+            float *pt = &proj[(size_t)t * W];
+            for (int i = 0; i < W; i++) pt[i] /= std::sqrt((float)E);
+            for (int l = 0; l < NL; l++) rmsnorm(pt + (size_t)l * P, ple_norm_.data(), P, hp_.rms_eps);
+            for (int i = 0; i < W; i++)
+                ple_[(size_t)t * W + i] = (pt[i] + e[i] * std::sqrt((float)P)) / std::sqrt(2.0f);
+        }
+        return true;
+    }
 
     std::vector<float> vec(const Weight &w) {
         std::vector<float> v(w.info->nelements());
@@ -171,12 +220,14 @@ private:
 
     // Reads layer L's matrices from the file into buf_ and points L at them.
     bool load_layer(Layer &L, std::string &err) {
-        Weight *ws[] = {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down};
+        Weight *ws[] = {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down, &L.ple_gate, &L.ple_proj};
         uint64_t total = 0;
-        for (Weight *w : ws) total += (w->info->nbytes + 63) / 64 * 64;
+        for (Weight *w : ws)
+            if (*w) total += (w->info->nbytes + 63) / 64 * 64;
         if (buf_.size() < total) buf_.resize(total);
         uint64_t off = 0;
         for (Weight *w : ws) {
+            if (!*w) continue;
             if (!read_at(file_, m_, *w, 0, w->info->nbytes, buf_.data() + off)) return read_failed(err);
             w->data = buf_.data() + off;
             off += (w->info->nbytes + 63) / 64 * 64;
@@ -186,17 +237,29 @@ private:
 
     // Layer l for n tokens at positions pos0.., x holding their residuals.
     void layer(int l, const Layer &L, float *x, int n, int pos0) {
-        const int E = hp_.n_embd, HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
-        const int KV = HKV * HD, F = hp_.n_ff;
+        const int E = hp_.n_embd, HD = hp_.hd(l), H = hp_.n_head, HKV = hp_.hkv(l);
+        const int KV = HKV * HD, F = (int)L.w_gate.ne1();
         const Norms &N = norms_[l];
-        const bool swa = hp_.swa(l);
+        const bool swa = hp_.swa(l), own_kv = hp_.has_kv(l);
         std::vector<float> h(x, x + (size_t)n * E), q((size_t)n * H * HD), k((size_t)n * KV), v((size_t)n * KV);
         for (int t = 0; t < n; t++) rmsnorm(&h[(size_t)t * E], N.attn.data(), E, hp_.rms_eps);
         matmul(L.wq, h.data(), n, q.data());
-        matmul(L.wk, h.data(), n, k.data());
-        matmul(L.wv, h.data(), n, v.data());
-        float *kl = &kc_[((size_t)l * n_ctx_) * KV];
-        float *vl = &vc_[((size_t)l * n_ctx_) * KV];
+        if (own_kv) {
+            matmul(L.wk, h.data(), n, k.data());
+            // Gemma 4: no attn_v, the keys (before their norm) are the values.
+            if (L.wv) matmul(L.wv, h.data(), n, v.data());
+            else v = k;
+        }
+        // A shared layer reads the keys its source layer wrote.
+        const int src = hp_.kv_src(l);
+        float *kl = &kc_[cache_off_[src]];
+        float *vl = &vc_[cache_off_[src]];
+        // Gemma 4's proportional RoPE is for its full layers; Llama 3.1's
+        // divisors are for every layer.
+        const bool freqs = !rope_freqs_.empty() && !(hp_.arch == "gemma4" && swa);
+        const float *ff = freqs ? rope_freqs_.data() : nullptr;
+        const float base = swa ? hp_.rope_base_swa : hp_.rope_base, rs = swa ? 1.f : hp_.rope_scale;
+        const int rd = hp_.rdims(l);
         for (int t = 0; t < n; t++) {
             float *qt = &q[(size_t)t * H * HD], *kt = &k[(size_t)t * KV], *vt = &v[(size_t)t * KV];
             const int pos = pos0 + t;
@@ -204,15 +267,15 @@ private:
                 for (int i = 0; i < H * HD; i++) qt[i] += N.bq[i];
                 for (int i = 0; i < KV; i++) kt[i] += N.bk[i], vt[i] += N.bv[i];
             }
-            const float *ff = rope_freqs_.empty() ? nullptr : rope_freqs_.data();
-            const float base = swa ? hp_.rope_base_swa : hp_.rope_base, rs = swa ? 1.f : hp_.rope_scale;
             for (int hh = 0; hh < H; hh++) {
                 if (!N.q.empty()) rmsnorm(&qt[hh * HD], N.q.data(), HD, hp_.rms_eps);
-                rope(&qt[hh * HD], HD, hp_.rope_dims, pos, base, hp_.rope_neox, ff, rs);
+                rope(&qt[hh * HD], HD, rd, pos, base, hp_.rope_neox, ff, rs);
             }
+            if (!own_kv) continue;
             for (int hh = 0; hh < HKV; hh++) {
                 if (!N.k.empty()) rmsnorm(&kt[hh * HD], N.k.data(), HD, hp_.rms_eps);
-                rope(&kt[hh * HD], HD, hp_.rope_dims, pos, base, hp_.rope_neox, ff, rs);
+                rope(&kt[hh * HD], HD, rd, pos, base, hp_.rope_neox, ff, rs);
+                if (hp_.v_norm) rmsnorm(&vt[hh * HD], nullptr, HD, hp_.rms_eps);
             }
             round_kv(kv_, kt, KV);
             round_kv(kv_, vt, KV);
@@ -263,6 +326,20 @@ private:
         if (!N.post_ffn.empty())
             for (int t = 0; t < n; t++) rmsnorm(&o[(size_t)t * E], N.post_ffn.data(), E, hp_.rms_eps);
         for (size_t i = 0; i < (size_t)n * E; i++) x[i] += o[i];
+        if (L.ple_gate) {
+            // Gemma 4's per-layer input: x += post_norm(proj(gelu(gate x) * input)).
+            const int P = hp_.n_embd_ple, W = P * hp_.n_layer;
+            std::vector<float> pg((size_t)n * P);
+            matmul(L.ple_gate, x, n, pg.data());
+            for (int t = 0; t < n; t++)
+                for (int i = 0; i < P; i++)
+                    pg[(size_t)t * P + i] = gelu(pg[(size_t)t * P + i]) * ple_[(size_t)t * W + (size_t)l * P + i];
+            matmul(L.ple_proj, pg.data(), n, o.data());
+            for (int t = 0; t < n; t++) rmsnorm(&o[(size_t)t * E], N.ple.data(), E, hp_.rms_eps);
+            for (size_t i = 0; i < (size_t)n * E; i++) x[i] += o[i];
+        }
+        if (N.out_scale != 1.f)
+            for (size_t i = 0; i < (size_t)n * E; i++) x[i] *= N.out_scale;
     }
 
     // logits[t] = output . x[t] for n tokens. From the file, 64 MiB of rows at
@@ -291,7 +368,10 @@ private:
     FILE *file_ = nullptr;      // the model file, when its weights were not loaded
     bool read_ok_ = true;
     std::vector<uint8_t> buf_;  // the weights being used, read from file_
-    std::vector<float> kc_, vc_, out_norm_, rope_freqs_;
+    std::vector<float> kc_, vc_, out_norm_, rope_freqs_, ple_norm_;
+    std::vector<size_t> cache_off_;  // each layer's place in kc_ and vc_
+    std::vector<float> ple_;         // Gemma 4: the forward call's per-layer inputs
+    std::vector<uint8_t> ple_proj_;  // Gemma 4's ple_proj, read from the file
     std::vector<Norms> norms_;
 };
 

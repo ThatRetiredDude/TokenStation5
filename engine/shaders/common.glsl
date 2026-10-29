@@ -1,7 +1,7 @@
 // Shared helpers: extensions, byte access and the per-type "unit" dequantizer.
-// A unit is 32 consecutive values of a row: one block for F32/F16 and the
-// 32-value quants (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0), one eighth of a 256-value
-// block for the K-quants.
+// A unit is 32 consecutive values of a row: one block for F32/F16/BF16 and
+// the 32-value quants (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0), one eighth of a
+// 256-value block for the K-quants.
 #extension GL_EXT_shader_8bit_storage : require
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
@@ -16,6 +16,7 @@
 #define T_Q4_K 12
 #define T_Q5_K 13
 #define T_Q6_K 14
+#define T_BF16 30
 
 #ifdef QTYPE
 layout(std430, binding = 0) readonly buffer Wbuf { uint8_t wb[]; };
@@ -32,6 +33,10 @@ void load_unit(uint rb, uint u, out float v[32]) {
 #elif QTYPE == T_F16
     uint o = rb + u * 64;
     for (uint l = 0; l < 32; l++) v[l] = h16(o + 2 * l);
+#elif QTYPE == T_BF16
+    // The top 16 bits of an f32 (Gemma 4's per_layer_model_proj).
+    uint o = rb + u * 64;
+    for (uint l = 0; l < 32; l++) v[l] = uintBitsToFloat((b8(o + 2 * l) | (b8(o + 2 * l + 1) << 8)) << 16);
 #elif QTYPE == T_Q4_0
     uint o = rb + u * 18;
     float d = h16(o);
