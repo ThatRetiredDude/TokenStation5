@@ -8,7 +8,7 @@
 #   NO_UPLOAD=1 scripts/fetch-models.sh ...   # download only
 #   FORCE=1 scripts/fetch-models.sh qwen35-4b # one ts5 can't run yet, too
 #
-# A model of an architecture the engine can't run yet (Qwen 3.5, Gemma 4) is
+# A model of an architecture the engine can't run yet is
 # skipped before its download, since the title would refuse to load it.
 #
 # The exact file is found through the Hugging Face API: the first .gguf in the
@@ -29,7 +29,7 @@ grep -v '^#' "$root/models.tsv" | while IFS=$'\t' read -r key repo match gib _ct
     arch=$(curl -fsSL ${auth[@]+"${auth[@]}"} "https://huggingface.co/api/models/$repo" |
         python3 -c 'import json, sys; print((json.load(sys.stdin).get("gguf") or {}).get("architecture") or "")' 2> /dev/null || true)
     case $arch in
-        "" | llama | mistral | qwen2 | qwen3 | gemma3 | gemma4) ;;
+        "" | llama | mistral | qwen2 | qwen3 | gemma3 | gemma4 | qwen35) ;;
         *)
             if [ -z "${FORCE:-}" ]; then
                 echo "fetch-models: $key: ts5 can't run $arch models yet; skipped (FORCE=1 fetches it anyway)" >&2

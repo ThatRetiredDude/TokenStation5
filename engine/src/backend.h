@@ -36,6 +36,19 @@ public:
     // may start and still find the keys it needs: a sliding layer's ring
     // (Gemma 3) holds only so many positions; unlimited elsewhere.
     virtual int rewind_limit() const { return 1 << 30; }
+    // Recurrent layers (Qwen 3.5's Gated DeltaNet) keep a state that each
+    // token updates, not keys per position, so a forward call can start only
+    // where the state is: at 0 (a fresh state), where the last call ended,
+    // or where checkpoint() saved it. resume_point: the furthest of those at
+    // or before pos. A rejected draft can't be taken back either, so such a
+    // backend is never sent drafts.
+    virtual bool recurrent() const { return false; }
+    virtual int resume_point(int pos) const { return pos; }
+    // Saves the state where the last forward call left it.
+    virtual bool checkpoint(std::string &err) {
+        (void)err;
+        return true;
+    }
     virtual KvType kv_type() const { return KvType::F32; }
     // Since the last call, a few lines of text: with TS5_PROFILE set (vk),
     // the CPU's time per forward call, and with TS5_PROFILE=1 also the GPU's
@@ -54,7 +67,8 @@ KvType kv_type_setting();
 // Bytes of K and V per token of context, over the layers that see all keys,
 // in a cache of type kv.
 uint64_t kv_bytes_per_token(const HParams &hp, KvType kv);
-// The layers that see all keys (all but Gemma 3's sliding layers).
+// The layers that see all keys (all but sliding layers and Qwen 3.5's
+// recurrent ones).
 int full_layers(const HParams &hp);
 // A sliding layer's ring in the Vulkan backend: its window, and room for a
 // forward call's tokens and a rewind (backtracking to an earlier prompt) of

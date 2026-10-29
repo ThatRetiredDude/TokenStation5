@@ -9,7 +9,8 @@
 namespace ts5 {
 
 static bool supported_arch(const std::string &a) {
-    return a == "llama" || a == "mistral" || a == "qwen2" || a == "qwen3" || a == "gemma3" || a == "gemma4";
+    return a == "llama" || a == "mistral" || a == "qwen2" || a == "qwen3" || a == "gemma3" || a == "gemma4" ||
+           a == "qwen35";
 }
 
 // A key that is one number, or one per layer: its values for n layers (def
@@ -53,7 +54,8 @@ bool Model::open(const std::string &path, std::string &err) {
     hp.rms_eps = (float)gguf.get_float(a + "attention.layer_norm_rms_epsilon", 1e-6);
     hp.rope_base = (float)gguf.get_float(a + "rope.freq_base", 10000.0);
     hp.rope_dims = (int)gguf.get_int(a + "rope.dimension_count", hp.head_dim);
-    hp.rope_neox = hp.arch == "qwen2" || hp.arch == "qwen3" || hp.arch == "gemma3" || hp.arch == "gemma4";
+    hp.rope_neox = hp.arch == "qwen2" || hp.arch == "qwen3" || hp.arch == "gemma3" || hp.arch == "gemma4" ||
+                   hp.arch == "qwen35";
     if (!hp.n_embd || !hp.n_layer || !hp.n_ff || !hp.n_head) {
         err = "missing hyperparameters";
         return false;
@@ -112,6 +114,26 @@ bool Model::open(const std::string &path, std::string &err) {
         hp.head_dim = std::max(hd_full, hd_swa);
         if (hp.kv_shared < 0 || hp.kv_shared >= hp.n_layer) hp.kv_shared = 0;
     }
+    if (hp.arch == "qwen35") {
+        // As llama.cpp reads it (src/models/qwen35.cpp): each
+        // full_attention_interval-th layer attends, the rest are Gated
+        // DeltaNet. The text's RoPE is the multi-section kind with all
+        // sections at the same position, which is plain NeoX RoPE over
+        // rope.dimension_count of each head.
+        const int every = (int)gguf.get_int(a + "full_attention_interval", 4);
+        hp.recurrent.assign(hp.n_layer, 0);
+        for (int l = 0; l < hp.n_layer; l++) hp.recurrent[l] = every > 0 && (l + 1) % every != 0;
+        hp.ssm_conv = (int)gguf.get_int(a + "ssm.conv_kernel", 0);
+        hp.ssm_state = (int)gguf.get_int(a + "ssm.state_size", 0);
+        hp.ssm_k_heads = (int)gguf.get_int(a + "ssm.group_count", 0);
+        hp.ssm_v_heads = (int)gguf.get_int(a + "ssm.time_step_rank", 0);
+        hp.attn_gate = true;
+        if (hp.ssm_conv < 2 || hp.ssm_state <= 0 || hp.ssm_k_heads <= 0 || hp.ssm_v_heads % hp.ssm_k_heads != 0 ||
+            gguf.get_int(a + "ssm.inner_size", 0) != hp.ssm_v()) {
+            err = "unexpected Gated DeltaNet sizes";
+            return false;
+        }
+    }
     if (auto *t = gguf.find("token_embd.weight")) hp.n_vocab = (int)t->ne[1];
     // Bind tensor descriptors now (data pointers are filled by load()).
     return bind(err);
@@ -154,23 +176,40 @@ bool Model::bind(std::string &err) {
         auto n = [&](const char *s) { return "blk." + std::to_string(i) + "." + s; };
         Layer &L = layers[i];
         L.attn_norm = weight(n("attn_norm.weight"), true, err);
-        L.wq = weight(n("attn_q.weight"), true, err);
+        if (hp.rec(i)) {
+            L.ssm_qkv = weight(n("attn_qkv.weight"), true, err);
+            L.ssm_z = weight(n("attn_gate.weight"), true, err);
+            L.ssm_conv1d = weight(n("ssm_conv1d.weight"), true, err);
+            L.ssm_a = weight(n("ssm_a"), true, err);
+            L.ssm_dt = weight(n("ssm_dt.bias"), true, err);
+            L.ssm_beta = weight(n("ssm_beta.weight"), true, err);
+            L.ssm_alpha = weight(n("ssm_alpha.weight"), true, err);
+            L.ssm_norm = weight(n("ssm_norm.weight"), true, err);
+            L.ssm_out = weight(n("ssm_out.weight"), true, err);
+            for (const Weight *w : {&L.ssm_conv1d, &L.ssm_a, &L.ssm_dt, &L.ssm_norm})
+                if (*w && w->type() != 0 && err.empty()) err = w->info->name + " is not f32";
+        } else {
+            L.wq = weight(n("attn_q.weight"), true, err);
+            L.wo = weight(n("attn_output.weight"), true, err);
+        }
         // Gemma 4's shared layers have no keys of their own, and a layer
         // may use its keys as values.
         L.wk = weight(n("attn_k.weight"), hp.has_kv(i), err);
         L.wv = weight(n("attn_v.weight"), hp.has_kv(i) && !gemma4, err);
-        L.wo = weight(n("attn_output.weight"), true, err);
         L.bq = weight(n("attn_q.bias"), false, err);
         L.bk = weight(n("attn_k.bias"), false, err);
         L.bv = weight(n("attn_v.bias"), false, err);
         L.q_norm = weight(n("attn_q_norm.weight"), false, err);
+        if (hp.attn_gate && !hp.rec(i) && L.wq && L.wq.ne1() != 2 * hp.n_head * hp.head_dim && err.empty())
+            err = n("attn_q.weight") + ": not queries and a gate";
         L.k_norm = weight(n("attn_k_norm.weight"), gemma4 && hp.has_kv(i), err);
-        L.ffn_norm = weight(n("ffn_norm.weight"), true, err);
+        // Qwen 3.5's norm before the FFN is named post_attention_norm.
+        L.ffn_norm = weight(n(hp.arch == "qwen35" ? "post_attention_norm.weight" : "ffn_norm.weight"), true, err);
         L.w_gate = weight(n("ffn_gate.weight"), true, err);
         L.w_up = weight(n("ffn_up.weight"), true, err);
         L.w_down = weight(n("ffn_down.weight"), true, err);
         const bool gemma = hp.arch == "gemma3" || gemma4;
-        L.post_attn_norm = weight(n("post_attention_norm.weight"), gemma, err);
+        if (gemma) L.post_attn_norm = weight(n("post_attention_norm.weight"), true, err);
         L.post_ffn_norm = weight(n("post_ffw_norm.weight"), gemma, err);
         if (hp.n_embd_ple > 0) {
             L.ple_gate = weight(n("inp_gate.weight"), true, err);

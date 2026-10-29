@@ -1,0 +1,74 @@
+// Qwen 3.5's Gated DeltaNet recurrence, as llama.cpp's ggml_gated_delta_net
+// runs it, with the output's gated norm: a workgroup per value head h, a
+// thread per column j of its state S (S x S, kept as M[j][i] = S[i][j] at
+// state_off + h S S, its column in the thread's registers). Per token, in
+// order: q and k of key head h % HK (L2-normalized), v, the decay
+// g = softplus(alpha + dt) * a and beta = sigmoid(beta) of head h; then
+//   S *= exp(g); delta = (v - S^T k) * beta; S += k delta^T; o = S^T q / sqrt(S)
+// and Z = rmsnorm(o) * norm * silu(Z) over the head, in place.
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+#define SD 128
+layout(local_size_x = SD) in;
+layout(std430, binding = 0) readonly buffer Xbuf { float X[]; };   // [t][C]: q, k, v after the convolution
+layout(std430, binding = 1) readonly buffer Abuf { float AL[]; };  // [t][HV] alpha
+layout(std430, binding = 2) readonly buffer Bbuf { float BE[]; };  // [t][HV] beta
+layout(std430, binding = 3) buffer Zbuf { float Z[]; };            // [t][HV * SD]
+layout(std430, binding = 4) buffer Sbuf { float ST[]; };
+layout(std430, binding = 5) readonly buffer Abias { float A[]; };   // ssm_a
+layout(std430, binding = 6) readonly buffer Dbuf { float DT[]; };   // ssm_dt
+layout(std430, binding = 7) readonly buffer Nbuf { float NW[]; };   // ssm_norm
+layout(push_constant) uniform PC { uint HK, HV, n_tok, C, state_off; float eps; } pc;
+
+shared float qs[SD], ks[SD], red[SD];
+
+float sum_all(float v) {
+    const uint j = gl_LocalInvocationID.x;
+    red[j] = v;
+    barrier();
+    for (uint k = SD / 2; k > 0; k >>= 1) {
+        if (j < k) red[j] += red[j + k];
+        barrier();
+    }
+    const float s = red[0];
+    barrier();
+    return s;
+}
+
+void main() {
+    const uint h = gl_WorkGroupID.x, j = gl_LocalInvocationID.x;
+    const uint kh = h % pc.HK, QK = pc.HK * SD;
+    const uint base = pc.state_off + (h * SD + j) * SD;
+    float m[SD];
+    [[unroll]] for (uint i = 0; i < SD; i++) m[i] = ST[base + i];
+    const float a = A[h], dt = DT[h], nw = NW[j];
+    for (uint t = 0; t < pc.n_tok; t++) {
+        const uint row = t * pc.C;
+        const float q = X[row + kh * SD + j], k = X[row + QK + kh * SD + j], v = X[row + 2 * QK + h * SD + j];
+        const float qn = sum_all(q * q), kn = sum_all(k * k);
+        qs[j] = q / max(sqrt(qn), pc.eps);
+        ks[j] = k / max(sqrt(kn), pc.eps);
+        barrier();
+        const float x = AL[t * pc.HV + h] + dt;
+        const float g = (x > 20.0 ? x : log(1.0 + exp(x))) * a;
+        const float beta = 1.0 / (1.0 + exp(-BE[t * pc.HV + h]));
+        const float decay = exp(g);
+        float dot = 0.0;
+        [[unroll]] for (uint i = 0; i < SD; i++) {
+            m[i] *= decay;
+            dot += m[i] * ks[i];
+        }
+        const float delta = (v - dot) * beta;
+        float o = 0.0;
+        [[unroll]] for (uint i = 0; i < SD; i++) {
+            m[i] += ks[i] * delta;
+            o += m[i] * qs[i];
+        }
+        o *= inversesqrt(float(SD));
+        const float ss = sum_all(o * o);
+        const uint zi = t * pc.HV * SD + h * SD + j;
+        const float z = Z[zi];
+        Z[zi] = o * inversesqrt(ss / float(SD) + pc.eps) * nw * (z / (1.0 + exp(-z)));
+    }
+    [[unroll]] for (uint i = 0; i < SD; i++) ST[base + i] = m[i];
+}
