@@ -1296,6 +1296,19 @@ int main(int, char **) {
                 v.settings = settings_view(v);
                 if (ok && a.name == "TS5_WHISPER_MODEL") voice.rescan();
                 if (ok && a.name == kTailscale) ts_apply();
+                // The served model loads again with a new context cap or KV
+                // cache (read when a model loads, vk_backend.cpp).
+                if (ok && (a.name == "TS5_CTX_MAX" || a.name == "TS5_KV")) {
+                    const app::Status st = runner.status();
+                    if (!st.serving_path.empty()) {
+                        app::Job j;
+                        j.kind = app::Job::Serve;
+                        j.path = st.serving_path;
+                        j.n_ctx = opts.n_ctx;
+                        j.reload = true;
+                        runner.push(j);
+                    }
+                }
                 break;
             }
             case ui::Action::ChatType:

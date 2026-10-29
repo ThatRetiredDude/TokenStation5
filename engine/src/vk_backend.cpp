@@ -621,7 +621,11 @@ private:
         if (n_ctx_ <= 0) {
             // As much as fits, in what the weights and activations left, and
             // no more than one buffer can address.
-            const int train = hp_.n_ctx_train > 0 ? hp_.n_ctx_train : 32768;
+            // TS5_CTX_MAX (Settings > Longest context) caps it below that,
+            // leaving the rest of the memory free.
+            int train = hp_.n_ctx_train > 0 ? hp_.n_ctx_train : 32768;
+            if (const char *e = getenv("TS5_CTX_MAX"))
+                if (atoi(e) >= 1024) train = std::min(train, atoi(e));
             // Sliding layers' rings are a fixed size, beside the context.
             auto fit = [&](KvType t) {
                 const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * full_layers(hp_) * KVD;
@@ -631,7 +635,8 @@ private:
             };
             const int f16 = fit(KvType::F16);
             if (kv_ == KvType::Q8 && f16_reaches(f16, train)) {
-                ts5::log_line("ts5: f16 KV cache: the model's whole %d-token context fits in f16, the more exact",
+                ts5::log_line("ts5: f16 KV cache: the whole %d-token context (the model's, or the Settings cap) "
+                              "fits in f16, the more exact",
                               train);
                 kv_ = KvType::F16;
             }

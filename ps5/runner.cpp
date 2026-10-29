@@ -140,7 +140,9 @@ Runner::~Runner() = default;
 void Runner::push(const Job &job) {
     {
         std::lock_guard<std::mutex> lk(mu_);
-        jobs_.push_back(job);
+        // A setting stepped through several values reloads once, with the last.
+        const bool again = job.reload && !jobs_.empty() && jobs_.back().reload && jobs_.back().path == job.path;
+        if (!again) jobs_.push_back(job);
         status_.queued = (int)jobs_.size();
     }
     version_++;
@@ -299,8 +301,8 @@ void Runner::unload() {
     status_.serving_kv8 = false;
 }
 
-bool Runner::serve(const std::string &path, int n_ctx) {
-    if (serving_ && serving_->path == path && serving_->asked_ctx == n_ctx) return true;
+bool Runner::serve(const std::string &path, int n_ctx, bool reload) {
+    if (!reload && serving_ && serving_->path == path && serving_->asked_ctx == n_ctx) return true;
     unload();
     const std::string file = base(path), name = name_for(path);
     {
@@ -344,7 +346,7 @@ void Runner::run(const Job &job) {
         return;
     }
     if (job.kind == Job::Serve) {
-        serve(job.path, job.n_ctx);
+        serve(job.path, job.n_ctx, job.reload);
         return;
     }
     if (job.kind == Job::Fetch) {
