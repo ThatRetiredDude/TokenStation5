@@ -1,5 +1,6 @@
 // Model description: hyperparameters and weight tensors of a dense
-// llama-family decoder (llama, mistral, qwen2, qwen3, gemma3, gemma4), as
+// llama-family decoder (llama, mistral, qwen2, qwen3, gemma3, gemma4), and
+// Qwen 3.5 (qwen35: Gated DeltaNet layers between attention layers), as
 // stored in GGUF.
 #pragma once
 #include <cstdint>
@@ -54,6 +55,25 @@ struct HParams {
     int n_embd_ple = 0;
     // Logits capped as c * tanh(logit / c) (Gemma 4's 30); 0: none.
     float logit_softcap = 0;
+    // Qwen 3.5: the layers that are Gated DeltaNet (recurrent: a state per
+    // head instead of keys per position), three of each four. Their sizes:
+    // ssm_k_heads heads of ssm_state for queries and keys, ssm_v_heads of
+    // ssm_state for values (v head h reads k head h % ssm_k_heads), and a
+    // causal convolution of ssm_conv taps over the q, k, v channels.
+    std::vector<uint8_t> recurrent;
+    int ssm_conv = 0, ssm_state = 0, ssm_k_heads = 0, ssm_v_heads = 0;
+    // Qwen 3.5's attention layers: attn_q gives each head's queries and then
+    // as many gate values; the output goes through sigmoid(gate).
+    bool attn_gate = false;
+    bool rec(int l) const { return !recurrent.empty() && recurrent[l] != 0; }
+    int ssm_qk() const { return ssm_k_heads * ssm_state; }        // q (or k) channels
+    int ssm_v() const { return ssm_v_heads * ssm_state; }         // v channels, and the output's
+    int ssm_channels() const { return 2 * ssm_qk() + ssm_v(); }   // what the convolution sees
+    // Floats of one recurrent layer's state: the convolution's last inputs
+    // and each value head's ssm_state x ssm_state matrix.
+    int64_t ssm_floats() const {
+        return (int64_t)(ssm_conv - 1) * ssm_channels() + (int64_t)ssm_v_heads * ssm_state * ssm_state;
+    }
     bool swa(int layer) const {
         if (!swa_layers.empty()) return swa_window > 0 && swa_layers[layer] != 0;
         return swa_window > 0 && swa_pattern > 0 && layer % swa_pattern < swa_pattern - 1;
@@ -62,11 +82,11 @@ struct HParams {
     int hkv(int l) const { return n_head_kv_l.empty() ? n_head_kv : n_head_kv_l[l]; }
     int kvd(int l) const { return hd(l) * hkv(l); }
     int rdims(int l) const { return rope_dims_l.empty() ? rope_dims : rope_dims_l[l]; }
-    bool has_kv(int l) const { return l < n_layer - kv_shared; }
+    bool has_kv(int l) const { return l < n_layer - kv_shared && !rec(l); }
     // The layer whose keys layer l reads: itself, or for a shared layer the
     // last layer before the shared ones of the same kind.
     int kv_src(int l) const {
-        if (has_kv(l)) return l;
+        if (has_kv(l) || rec(l)) return l;
         for (int j = n_layer - kv_shared - 1; j >= 0; j--)
             if (swa(j) == swa(l)) return j;
         return l;
@@ -91,6 +111,11 @@ struct Layer {
     // Gemma 4's per-layer embedding: x += post_norm(proj(gelu(inp_gate x) *
     // this layer's per-layer input)); then x *= out_scale.
     Weight ple_gate, ple_proj, ple_norm, out_scale;
+    // Qwen 3.5's Gated DeltaNet: the q, k, v channels (ssm_qkv), the output
+    // gate (ssm_z), the convolution's taps, a and the dt bias of each value
+    // head's decay, its beta and alpha projections, the output's norm and
+    // projection.
+    Weight ssm_qkv, ssm_z, ssm_conv1d, ssm_a, ssm_dt, ssm_beta, ssm_alpha, ssm_norm, ssm_out;
 };
 
 struct Model {
