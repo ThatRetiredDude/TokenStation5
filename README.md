@@ -6,7 +6,7 @@
 
 ### The PS5 was built to push pixels. We're teaching it to push tokens.
 
-Your PS5 becomes a private AI assistant for the whole house. Talk to it with the controller, chat with it on the TV, or plug it into the coding tools and chat apps you already use, at home or away with Tailscale. No cloud, no subscription, and your conversations stay at home.
+Your PS5 becomes a private AI assistant at home or away with Tailscale. Talk to it with the controller, chat with it on the TV, or plug it into the coding tools and chat apps you already use, at home or away with Tailscale. No cloud, no subscription, and your conversations stay at home.
 
 [![Prospero Store](https://img.shields.io/badge/Prospero_Store-PPSA99555-003791?style=for-the-badge&logo=playstation&logoColor=white)](https://github.com/darkxex/ProsperoStore)
 [![License](https://img.shields.io/badge/license-PolyForm_SB_%2F_GPL--3.0-yellow?style=for-the-badge)](LICENSING.md)
