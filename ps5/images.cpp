@@ -1,0 +1,288 @@
+#include "images.h"
+
+#include <dirent.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <mutex>
+#include <random>
+
+#ifndef TS5_NO_PICTURES
+#include <vulkan/vulkan.h>
+
+#include <atomic>
+
+#include "ggml-backend.h"
+#include "ggml-vulkan.h"
+#include "stable-diffusion.h"
+
+// PNG files from memory only, its names local to this file.
+#define STB_IMAGE_WRITE_STATIC
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STBI_WRITE_NO_STDIO
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#include "stb_image_write.h"
+#pragma clang diagnostic pop
+#endif
+
+#ifndef TS5_NO_PICTURES
+// The title has no Vulkan loader (title.cpp): RADV is linked in whole and
+// answers vk_icdGetInstanceProcAddr. ggml's Vulkan backend starts vulkan.hpp's
+// dispatcher from vkGetInstanceProcAddr and calls three more commands by
+// name; they find RADV's through the instance it made.
+extern "C" {
+PFN_vkVoidFunction vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
+static std::atomic<VkInstance> ggml_instance{VK_NULL_HANDLE};
+
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char *name) {
+    if (instance) ggml_instance = instance;
+    return vk_icdGetInstanceProcAddr(instance, name);
+}
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char *name) {
+    static const auto f = (PFN_vkGetDeviceProcAddr)vk_icdGetInstanceProcAddr(ggml_instance, "vkGetDeviceProcAddr");
+    return f(device, name);
+}
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures2(VkPhysicalDevice dev, VkPhysicalDeviceFeatures2 *features) {
+    static const auto f =
+        (PFN_vkGetPhysicalDeviceFeatures2)vk_icdGetInstanceProcAddr(ggml_instance, "vkGetPhysicalDeviceFeatures2");
+    f(dev, features);
+}
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyBuffer(VkCommandBuffer cmd, VkBuffer src, VkBuffer dst, uint32_t n,
+                                           const VkBufferCopy *regions) {
+    static const auto f = (PFN_vkCmdCopyBuffer)vk_icdGetInstanceProcAddr(ggml_instance, "vkCmdCopyBuffer");
+    f(cmd, src, dst, n, regions);
+}
+}
+#endif
+
+namespace app {
+
+namespace {
+
+bool image_model_file(const std::string &n) {
+    auto ends = [&](const char *ext) {
+        const size_t k = strlen(ext);
+        return n.size() > k && n.compare(n.size() - k, k, ext) == 0;
+    };
+    return n[0] != '.' && (ends(".gguf") || ends(".safetensors"));
+}
+
+#ifndef TS5_NO_PICTURES
+double seconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// stable-diffusion.cpp's lines in the title's log; its debug lines only with
+// TS5_SD_DEBUG set.
+void on_log(sd_log_level_t level, const char *text, void *) {
+    if (level <= SD_LOG_VERBOSE && !getenv("TS5_SD_DEBUG")) return;
+    const size_t n = strlen(text);
+    printf("sd: %.*s\n", (int)(n && text[n - 1] == '\n' ? n - 1 : n), text);
+}
+
+struct Progress {
+    const std::function<void(int, int)> *f;
+};
+
+void on_progress(int step, int steps, float, void *data) {
+    const auto *p = static_cast<Progress *>(data);
+    if (p && p->f && *p->f) (*p->f)(step, steps);
+}
+
+// ggml starts with its CPU backend only (speech runs on it); the GPU joins
+// the registry the first time a picture is made.
+bool vulkan_ready(std::string &err) {
+    static std::once_flag once;
+    static bool ok = false;
+    std::call_once(once, [] {
+        if (ggml_backend_reg_t reg = ggml_backend_vk_reg()) {
+            ggml_backend_register(reg);
+            ok = ggml_backend_vk_get_device_count() > 0;
+        }
+        if (ok) {
+            char d[256];
+            ggml_backend_vk_get_device_description(0, d, sizeof d);
+            size_t free = 0, total = 0;
+            ggml_backend_vk_get_device_memory(0, &free, &total);
+            printf("ts5-title: pictures on %s, %zu of %zu MiB free\n", d, free >> 20, total >> 20);
+        }
+    });
+    if (!ok) err = "ggml's Vulkan backend found no GPU";
+    return ok;
+}
+
+void put_png(void *ctx, void *data, int size) {
+    static_cast<std::string *>(ctx)->append(static_cast<const char *>(data), (size_t)size);
+}
+#endif
+
+std::string base64(const std::string &in) {
+    static const char *k = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string r;
+    r.reserve((in.size() + 2) / 3 * 4);
+    size_t i = 0;
+    for (; i + 2 < in.size(); i += 3) {
+        const uint32_t v = (uint8_t)in[i] << 16 | (uint8_t)in[i + 1] << 8 | (uint8_t)in[i + 2];
+        r += k[v >> 18], r += k[v >> 12 & 63], r += k[v >> 6 & 63], r += k[v & 63];
+    }
+    if (i < in.size()) {
+        const uint32_t v = (uint8_t)in[i] << 16 | (i + 1 < in.size() ? (uint8_t)in[i + 1] << 8 : 0);
+        r += k[v >> 18], r += k[v >> 12 & 63];
+        r += i + 1 < in.size() ? k[v >> 6 & 63] : '=';
+        r += '=';
+    }
+    return r;
+}
+
+std::string without_ext(const std::string &n) {
+    const size_t dot = n.rfind('.');
+    return dot == std::string::npos ? n : n.substr(0, dot);
+}
+
+}  // namespace
+
+std::string image_models_dir(const std::string &models) { return models + "/images"; }
+
+std::vector<std::string> image_models(const std::string &models) {
+    std::vector<std::string> names;
+    if (DIR *d = opendir(image_models_dir(models).c_str())) {
+        while (dirent *e = readdir(d))
+            if (image_model_file(e->d_name)) names.push_back(e->d_name);
+        closedir(d);
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+bool image_ask(const ts5::Json &req, const std::string &models, ImageAsk &ask, std::string &err) {
+    ask.prompt = req["prompt"].str();
+    if (ask.prompt.empty()) {
+        err = "prompt is required";
+        return false;
+    }
+    const std::vector<std::string> files = image_models(models);
+    if (files.empty()) {
+        err = "This TokenStation5 has no image model yet. Put a Stable Diffusion .gguf or .safetensors file in " +
+              image_models_dir(models) + ".";
+        return false;
+    }
+    const std::string want = req["model"].str();
+    std::string file = files[0];
+    for (const auto &f : files)
+        if (f == want || without_ext(f) == want) file = f;
+    ask.model = image_models_dir(models) + "/" + file;
+    const std::string format = req["response_format"].str("b64_json");
+    if (format != "b64_json") {
+        err = "response_format " + format + " isn't supported: TokenStation5 answers with b64_json";
+        return false;
+    }
+    const std::string size = req["size"].str("512x512");
+    int w = 0, h = 0;
+    char x = 0;
+    if (sscanf(size.c_str(), "%d%c%d", &w, &x, &h) != 3 || x != 'x' || w < 64 || h < 64 || w > 2048 || h > 2048 ||
+        w % 64 || h % 64) {
+        err = "size must be WIDTHxHEIGHT, each a multiple of 64 from 64 to 2048, such as 512x512";
+        return false;
+    }
+    ask.width = w;
+    ask.height = h;
+    ask.n = (int)req["n"].num(1);
+    if (ask.n < 1 || ask.n > 4) {
+        err = "n must be 1 to 4";
+        return false;
+    }
+    ask.negative = req["negative_prompt"].str();
+    ask.steps = std::max(0, std::min(150, (int)req["steps"].num(0)));
+    ask.cfg = (float)std::max(0.0, std::min(30.0, req["cfg_scale"].num(0)));
+    ask.seed = (int64_t)req["seed"].num(-1);
+    ask.sampler = req["sampler"].str();
+    return true;
+}
+
+std::string image_reply(const ImageOut &out) {
+    std::string r = "{\"created\":" + std::to_string((long)time(nullptr)) + ",\"seed\":" + std::to_string(out.seed) +
+                    ",\"data\":[";
+    for (size_t i = 0; i < out.png.size(); i++) r += std::string(i ? "," : "") + "{\"b64_json\":\"" + base64(out.png[i]) + "\"}";
+    return r + "]}";
+}
+
+#ifdef TS5_NO_PICTURES
+// ps5/host-test.sh's title, built without stable-diffusion.cpp.
+bool make_images(const ImageAsk &, ImageOut &, std::string &err, const std::function<void(int, int)> &) {
+    err = "this build makes no pictures";
+    return false;
+}
+#else
+bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
+                 const std::function<void(int step, int steps)> &progress) {
+    const sample_method_t method = ask.sampler.empty() ? SAMPLE_METHOD_COUNT : str_to_sample_method(ask.sampler.c_str());
+    if (!ask.sampler.empty() && method == SAMPLE_METHOD_COUNT) {
+        err = "unknown sampler " + ask.sampler;
+        return false;
+    }
+    if (!vulkan_ready(err)) return false;
+    sd_set_log_callback(on_log, nullptr);
+    Progress p{&progress};
+    sd_set_progress_callback(on_progress, &p);
+
+    sd_ctx_params_t cp;
+    sd_ctx_params_init(&cp);
+    cp.model_path = ask.model.c_str();
+    // The title reads files with stdio; mapped files aren't how it loads.
+    cp.enable_mmap = false;
+    cp.n_threads = 4;
+    const double t0 = seconds();
+    sd_ctx_t *ctx = new_sd_ctx(&cp);
+    if (!ctx) {
+        sd_set_progress_callback(nullptr, nullptr);
+        err = "stable-diffusion.cpp couldn't load " + ask.model;
+        return false;
+    }
+    out.load_s = seconds() - t0;
+
+    sd_img_gen_params_t g;
+    sd_img_gen_params_init(&g);
+    g.prompt = ask.prompt.c_str();
+    g.negative_prompt = ask.negative.c_str();
+    g.width = ask.width;
+    g.height = ask.height;
+    g.batch_count = ask.n;
+    out.seed = ask.seed >= 0 ? ask.seed : (int64_t)(std::random_device{}() & 0x7fffffff);
+    g.seed = out.seed;
+    if (ask.steps > 0) g.sample_params.sample_steps = ask.steps;
+    if (ask.cfg > 0) g.sample_params.guidance.txt_cfg = ask.cfg;
+    g.sample_params.sample_method = method == SAMPLE_METHOD_COUNT ? sd_get_default_sample_method(ctx) : method;
+    g.sample_params.scheduler = sd_get_default_scheduler(ctx, g.sample_params.sample_method);
+
+    const double t1 = seconds();
+    sd_image_generation_result_t *res = nullptr;
+    const bool ok = generate_image(ctx, &g, &res) && res;
+    out.make_s = seconds() - t1;
+    if (ok) {
+        for (int i = 0; i < res->count; i++) {
+            const sd_image_t &im = res->items[i].image;
+            if (!im.data) continue;
+            std::string png;
+            stbi_write_png_to_func(put_png, &png, (int)im.width, (int)im.height, (int)im.channel, im.data,
+                                   (int)(im.width * im.channel));
+            out.png.push_back(std::move(png));
+        }
+        free_sd_image_generation_result(res);
+    }
+    free_sd_ctx(ctx);
+    sd_set_progress_callback(nullptr, nullptr);
+    if (out.png.empty()) {
+        err = "stable-diffusion.cpp made no picture";
+        return false;
+    }
+    printf("ts5-title: %zu picture%s of %dx%d in %.1f s (loading %.1f s)\n", out.png.size(),
+           out.png.size() == 1 ? "" : "s", ask.width, ask.height, out.make_s, out.load_s);
+    return true;
+}
+#endif
+
+}  // namespace app

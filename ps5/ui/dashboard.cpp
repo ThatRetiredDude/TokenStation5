@@ -313,7 +313,8 @@ bool Dashboard::animating(const View &v) const {
     if (page_ == Chat)
         return v.chat.busy || v.voice.phase != app::VoiceState::Idle || v.status.phase == app::Status::Loading;
     return v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
-           v.status.phase == app::Status::Benchmarking || v.api.generating;
+           v.status.phase == app::Status::Benchmarking || v.status.phase == app::Status::Picturing ||
+           v.api.generating;
 }
 
 Action Dashboard::press(uint32_t b, const View &v) {
@@ -444,7 +445,8 @@ Action Dashboard::press(uint32_t b, const View &v) {
         return a;
     }
     const bool busy = v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
-                      v.status.phase == app::Status::Benchmarking || v.status.queued > 0;
+                      v.status.phase == app::Status::Benchmarking || v.status.phase == app::Status::Picturing ||
+                      v.status.queued > 0;
     if (busy) return a;
     if (it.kind == Item::Model && v.models[it.index].runnable) {
         a.path = v.models[it.index].path;
@@ -502,6 +504,7 @@ void Dashboard::draw_header(Canvas &c, const View &v) {
         case app::Status::Loading: state = "LOADING", col = kAmber; break;
         case app::Status::Checking: state = "GPU CHECK", col = kAccent; break;
         case app::Status::Benchmarking: state = "SPEED TEST", col = kAccent; break;
+        case app::Status::Picturing: state = "PICTURE", col = kAccent; break;
         case app::Status::Serving: state = "READY", col = kGreen; break;
         case app::Status::Idle: break;
     }
@@ -720,7 +723,8 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
         }
     };
     const bool busy = v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
-                      v.status.phase == app::Status::Benchmarking || v.status.queued > 0;
+                      v.status.phase == app::Status::Benchmarking || v.status.phase == app::Status::Picturing ||
+                      v.status.queued > 0;
 
     // MEMORY NEEDED, its label's baseline at y: a meter and a line.
     auto memory = [&](int y, uint64_t need, const app::ModelInfo::Ctx &ctx, bool about) {
@@ -938,6 +942,9 @@ void Dashboard::draw_activity(Canvas &c, const View &v, const Item *sel) {
         case app::Status::Benchmarking:
             line = "Speed test on " + name_of(v, st.job_model) + ": " + (st.step.empty() ? "starting" : st.step) +
                    "  \xC2\xB7  " + took;
+            break;
+        case app::Status::Picturing:
+            line = "Making a picture: " + (st.step.empty() ? "starting" : st.step) + "  \xC2\xB7  " + took;
             break;
         case app::Status::Serving:
             spin = false;

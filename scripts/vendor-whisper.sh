@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Copies whisper.cpp into third_party/whisper.cpp: only what transcription on
 # the CPU needs (whisper itself, ggml's core and its CPU backend with the x86
-# code), at a pinned commit, plus its license and a test recording. Then
+# code), and ggml's Vulkan backend for stable-diffusion.cpp's pictures, at a
+# pinned commit, plus its license and a test recording. Then
 # applies scripts/vendor-whisper.patch (one change to ggml's backend
 # scheduler) and writes third_party/whisper.cpp/VENDOR.md, which says what
 # was kept and why.
@@ -38,6 +39,7 @@ files=(
     ggml/include/ggml-cpp.h
     ggml/include/ggml-cpu.h
     ggml/include/gguf.h
+    ggml/include/ggml-vulkan.h
     # ggml's core: tensors, graphs, allocation, the backend scheduler and
     # registry, and the GGUF reader the registry's code links
     ggml/src/ggml.c
@@ -87,6 +89,14 @@ files=(
     ggml/src/ggml-cpu/llamafile/sgemm.h
     ggml/src/ggml-cpu/arch/x86/quants.c
     ggml/src/ggml-cpu/arch/x86/repack.cpp
+    # the Vulkan backend (its shaders below)
+    ggml/src/ggml-vulkan/ggml-vulkan.cpp
+    ggml/src/ggml-vulkan/ggml-vulkan-buffers.cpp
+    ggml/src/ggml-vulkan/ggml-vulkan-debug.cpp
+    ggml/src/ggml-vulkan/ggml-vulkan-common.h
+    ggml/src/ggml-vulkan/ggml-vulkan-push-constants.h
+    ggml/src/ggml-vulkan/ggml-vulkan-types.h
+    ggml/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
 )
 
 tmp=$(mktemp -d)
@@ -100,6 +110,11 @@ git -C "$tmp/src" checkout -q FETCH_HEAD
 rm -rf -- "$dest"
 for f in "${files[@]}"; do
     install -D -m 0644 "$tmp/src/$f" "$dest/$f"
+done
+# The Vulkan backend's shaders, all of them: vulkan-shaders-gen compiles the
+# variants ggml-vulkan.cpp asks for from these.
+for f in "$tmp/src"/ggml/src/ggml-vulkan/vulkan-shaders/*.{comp,glsl}; do
+    install -D -m 0644 "$f" "$dest/ggml/src/ggml-vulkan/vulkan-shaders/${f##*/}"
 done
 # What CMake's configure_file makes of ggml/src/ggml-version.h.in.
 cat > "$dest/ggml/src/ggml-version.h" << EOF
@@ -118,15 +133,17 @@ cat > "$dest/VENDOR.md" << EOF
 2023-2026 The ggml authors". NOTICE.md at the top of this repo lists it.
 
 The title transcribes speech on the console's CPU with it (\`ps5/stt.cpp\`),
-and kokoro.cpp runs on its ggml. \`scripts/vendor-whisper.sh\` copies it, and
-only what CPU inference on x86 needs, then applies one change of ours
+kokoro.cpp runs on its ggml, and so does stable-diffusion.cpp
+(\`third_party/stable-diffusion.cpp\`), on ggml's Vulkan backend: the title
+carries one ggml. \`scripts/vendor-whisper.sh\` copies it, and only what CPU
+inference on x86 and the Vulkan backend need, then applies one change of ours
 (\`scripts/vendor-whisper.patch\`, marked "ts5" in the code):
-\`ggml/src/ggml-backend.cpp\`'s scheduler allows 64 splits of a graph, not
+\`ggml/src/ggml-backend.cpp\`'s scheduler allows 256 splits of a graph, not
 one per node. Upstream sets aside room for every split's input copies when a
 scheduler is made, graph_size × 60 tensors: 5 GB for kokoro.cpp's 262144-node
 graphs, which the PS5's malloc takes from the console's memory. On the CPU
-backend alone a graph is one split, and the scheduler checks that a graph
-still fits.
+backend alone a graph is one split, on Vulkan a few more where an op falls
+back to the CPU, and the scheduler checks that a graph still fits.
 
 What is kept:
 
@@ -141,12 +158,13 @@ What is kept:
 | \`ggml/src/ggml-cpu/\`, its top-level files | the CPU backend |
 | \`ggml/src/ggml-cpu/arch/x86/quants.c\`, \`repack.cpp\` | its x86 code (AVX2, FMA, F16C on both targets) |
 | \`ggml/src/ggml-cpu/tiled/\`, \`llamafile/\` | matrix multiplication the CPU backend calls (\`tiled\` always, \`llamafile\` with \`GGML_USE_LLAMAFILE\`) |
+| \`ggml/include/ggml-vulkan.h\`, \`ggml/src/ggml-vulkan/\`: its sources, \`vulkan-shaders/\`: the shaders and \`vulkan-shaders-gen.cpp\` | ggml's Vulkan backend, for pictures; the build compiles the shaders with \`glslc\` through the generator |
 | \`ggml/src/ggml-cpu/amx/amx.h\` | included by \`ggml-cpu.cpp\`; empty without AMX, so its sources stay out |
 | \`samples/jfk.wav\` | 11 s of speech, 16 kHz mono, for the host test |
 | \`LICENSE\` | the MIT license |
 
-Left out: every other backend (Metal, CUDA, Vulkan, SYCL, OpenCL, BLAS, and
-the rest), the other CPU architectures, \`arch/x86/cpu-feats.cpp\` (only for
+Left out: every other backend (Metal, CUDA, SYCL, OpenCL, BLAS, and the
+rest), the Vulkan backend's feature tests and CMake files, the other CPU architectures, \`arch/x86/cpu-feats.cpp\` (only for
 backends loaded as libraries), KleidiAI, AMX and HBM, ggml-opt (training),
 Parakeet, Core ML, OpenVINO and the other encoders, the examples, bindings,
 tests, models, and the CMake files.
@@ -155,12 +173,19 @@ tests, models, and the CMake files.
 
 There is no CMake: \`ps5/host-test.sh\` (Linux) and \`ps5/build.sh\` (PS5)
 compile these files into \`libts5speech.a\` (with kokoro.cpp) with CMake's defaults for a
-CPU-only build:
+CPU-only build, and \`ps5/build.sh\` the Vulkan backend into \`libts5images.a\`
+(with stable-diffusion.cpp, \`third_party/stable-diffusion.cpp/VENDOR.md\`):
 
 - \`GGML_USE_CPU\`: the registry knows the CPU backend.
 - \`GGML_USE_CPU_REPACK\` and \`GGML_USE_LLAMAFILE\`: the CPU backend's repacked
   quantized weights and its llamafile matrix multiplication.
 - \`GGML_SCHED_MAX_COPIES=4\`, \`WHISPER_VERSION="$version"\`, \`NDEBUG\`.
+- \`GGML_MAX_NAME=160\`, as stable-diffusion.cpp's CMake sets it for all of
+  ggml: its tensor names are longer than 64. Every file that includes
+  \`ggml.h\` gets it, since it sets the size of \`ggml_tensor\`.
+- \`GGML_USE_CPU\` only: the registry starts with the CPU backend, so
+  whisper and kokoro.cpp never see the GPU. The title registers the Vulkan
+  backend itself before a picture (\`ps5/images.cpp\`).
 - No OpenMP: ggml's own thread pool.
 
 llamafile's matrix multiplication compiles cleanly for both targets, so it

@@ -18,7 +18,7 @@
  
      // remember the actual graph_size for performing reallocation checks later [GGML_SCHED_DEBUG_REALLOC]
      sched->debug_prev_graph_size = sched->debug_graph_size;
-@@ -2033,8 +2037,15 @@
+@@ -2033,8 +2037,16 @@
      sched->hv_tensor_backend_ids = (int *) malloc(sched->hash_set.size * sizeof(sched->hv_tensor_backend_ids[0]));
      sched->hv_tensor_copies      = (ggml_tensor **) malloc(sched->hash_set.size * sched->n_backends * sched->n_copies * sizeof(struct ggml_tensor *));
  
@@ -27,9 +27,10 @@
 +    // node and sets aside room for every split's input copies up front:
 +    // graph_size*60 tensors, 5 GB for kokoro.cpp's 262144-node graphs, and on
 +    // the PS5 malloc takes that from the console's memory. On the CPU backend
-+    // alone a graph is a single split with no copies, so 64 is plenty;
++    // alone a graph is a single split with no copies; on Vulkan (pictures) a
++    // few more, where an op falls back to the CPU, so 256 is plenty;
 +    // ggml_backend_sched_split_graph checks the graph copy still fits.
-+    const size_t ggml_sched_max_splits = graph_size < 64 ? graph_size : 64;
++    const size_t ggml_sched_max_splits = graph_size < 256 ? graph_size : 256;
      const size_t nodes_size = graph_size + ggml_sched_max_splits*GGML_SCHED_MAX_SPLIT_INPUTS*2;
 +    sched->nodes_size = nodes_size;
      sched->node_backend_ids = (int *) calloc(nodes_size, sizeof(sched->node_backend_ids[0]));

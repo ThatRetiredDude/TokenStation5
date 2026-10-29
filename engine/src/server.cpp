@@ -127,6 +127,7 @@ std::string response(int code, const std::string &body, const char *type = "appl
                       : code == 404 ? "Not Found"
                       : code == 400 ? "Bad Request"
                       : code == 401 ? "Unauthorized"
+                      : code == 500 ? "Internal Server Error"
                       : code == 503 ? "Service Unavailable"
                                     : "Error";
     char h[256];
@@ -858,6 +859,17 @@ void handle(int fd, Server::State &state, Usage &u) {
         ur.first_ms = first < 0 ? 0 : std::lround(first - u.t0);
         done();
         return;
+    } else if (r.method == "POST" && state.images &&
+               (r.path == "/v1/images/generations" || r.path == "/images/generations")) {
+        Json req;
+        int status = 400;
+        std::string body = error_body("invalid JSON");
+        if (Json::parse(r.body, req)) {
+            status = 200;
+            body = state.images(req, status);
+        }
+        log_line("ts5: %s %s: %d", u.rec.client.c_str(), r.path.c_str(), status);
+        send_all(fd, response(status, body));
     } else {
         send_all(fd, response(404, error_body("not found: " + r.path)));
     }
@@ -993,6 +1005,8 @@ void Server::accept_loop() {
         }).detach();
     }
 }
+
+std::string error_json(const std::string &msg) { return error_body(msg); }
 
 int serve(Engine &e, const std::string &model_name, const std::string &host, int port,
           const std::function<void(int)> &on_listening, const std::function<void(const UsageRecord &)> &on_usage) {

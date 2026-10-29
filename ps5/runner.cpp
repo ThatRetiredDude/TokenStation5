@@ -351,6 +351,10 @@ void Runner::run(const Job &job) {
         fetch(job);
         return;
     }
+    if (job.kind == Job::Image) {
+        picture(job);
+        return;
+    }
 
     // A check or speed test: on the serving model's own backend when it has
     // room, else on a load of its own with the serving model put back after.
@@ -464,6 +468,60 @@ void Runner::run(const Job &job) {
         if (!error.empty()) fail(error, said);
     }
     log_memory(check ? "after the GPU check" : "after the speed test");
+}
+
+// Pictures on a GPU the chat model has let go of: stable-diffusion.cpp
+// loads its own model and frees it again (images.h), then the serving model
+// comes back. The request's thread waits on the task either way.
+void Runner::picture(const Job &job) {
+    ImageTask &t = *job.image;
+    const std::string file = base(t.ask.model);
+    std::string resume_path;
+    int resume_ctx = 0;
+    if (serving_) {
+        resume_path = serving_->path;
+        resume_ctx = serving_->asked_ctx;
+    }
+    unload();
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        status_.phase = Status::Picturing;
+    }
+    // What a chat request gets meanwhile, and the Chat page shows.
+    server_.set_engine(nullptr, "", "The GPU is making a picture. Try again in a moment.");
+    set_step("loading " + file);
+    log_memory("before the picture");
+    try {
+        t.ok = make_images(t.ask, t.out, t.err, [this](int step, int steps) {
+            set_step("step " + std::to_string(step) + " of " + std::to_string(steps));
+        });
+    } catch (const std::exception &e) {
+        t.ok = false;
+        t.err = e.what();
+    }
+    log_memory("after the picture");
+    if (t.ok) {
+        char took[32];
+        snprintf(took, sizeof took, "%.0f", t.out.make_s);
+        event(std::string(t.out.png.size() == 1 ? "Made a picture" : "Made pictures") + " with " +
+              plain::model_name(file) + " in " + took + " s");
+    } else {
+        fail("picture with " + file + " failed: " + t.err,
+             "Couldn't make the picture: " + plain::reason(t.err) + ".");
+    }
+    if (!resume_path.empty()) {
+        std::string error, said;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            error = status_.error;
+            said = status_.said;
+        }
+        serve(resume_path, resume_ctx);
+        if (!error.empty()) fail(error, said);
+    } else {
+        server_.set_engine(nullptr, "", "no model");
+    }
+    t.done.set_value();
 }
 
 // A download to the job's path, as .<file>.part beside it until its size

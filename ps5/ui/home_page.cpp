@@ -151,6 +151,9 @@ void HomePage::draw_tiles(Canvas &c, const HomeInfo &info) {
             case app::Status::Benchmarking:
                 value = info.job, line = "Speed test \xC2\xB7 " + (st.step.empty() ? "starting" : st.step), col = kAccent;
                 break;
+            case app::Status::Picturing:
+                line = "Making a picture \xC2\xB7 " + (st.step.empty() ? "starting" : st.step), col = kAccent;
+                break;
             case app::Status::Serving:
                 if (info.api.generating && info.api.phase == 1) {
                     line = "Reading a " + plain::count(info.api.prompt) + "-token prompt", col = kAccent;

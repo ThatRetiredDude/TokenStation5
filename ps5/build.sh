@@ -42,6 +42,41 @@ for src in "$root"/engine/shaders/*.comp; do
     fi
 done
 
+# Pictures (ps5/images.cpp): ggml's Vulkan backend needs vulkan.hpp and
+# SPIRV-Headers, pinned here (the title's own Vulkan headers are RADV's), and
+# its shaders, which vulkan-shaders-gen (built for this machine) compiles with
+# glslc into C++ arrays (third_party/stable-diffusion.cpp/VENDOR.md).
+command -v glslc > /dev/null || { echo "build: glslc was not found" >&2; exit 2; }
+hdeps="${TS5_PS5_DEPS:-$root/.deps/ps5}"
+fetch_rev() {  # repo dir rev
+    if ! git -C "$2" cat-file -e "$3^{commit}" 2> /dev/null; then
+        rm -rf -- "$2"
+        git init -q "$2"
+        git -C "$2" remote add origin "https://github.com/$1.git"
+        git -C "$2" fetch -q --depth 1 origin "$3"
+    fi
+    git -C "$2" checkout -q "$3"
+}
+# vulkan-sdk-1.4.363.0 of both
+fetch_rev KhronosGroup/Vulkan-Headers "$hdeps/Vulkan-Headers" 6802bb4733b63ed5efd3adb308a6c885ef180ea1
+fetch_rev KhronosGroup/SPIRV-Headers "$hdeps/SPIRV-Headers" 496543121ce6419f23d6fa5d7194ba66c36212d2
+vks="$root/third_party/whisper.cpp/ggml/src/ggml-vulkan/vulkan-shaders"
+vkgen="$out/vkshaders"
+mkdir -p "$vkgen/spv"
+if [ ! -x "$vkgen/vulkan-shaders-gen" ] || [ "$vks/vulkan-shaders-gen.cpp" -nt "$vkgen/vulkan-shaders-gen" ]; then
+    "${HOST_CXX:-c++}" -std=c++17 -O2 -pthread -o "$vkgen/vulkan-shaders-gen" "$vks/vulkan-shaders-gen.cpp"
+fi
+if [ ! -f "$vkgen/stamp" ] || [ -n "$(find "$vks" -newer "$vkgen/stamp" -print -quit)" ]; then
+    echo "build: compiling ggml's Vulkan shaders"
+    "$vkgen/vulkan-shaders-gen" --output-dir "$vkgen/spv" --target-hpp "$vkgen/ggml-vulkan-shaders.hpp"
+    # shellcheck disable=SC2016
+    printf '%s\n' "$vks"/*.comp | xargs -P "$(nproc)" -I{} sh -c \
+        '"$1/vulkan-shaders-gen" --glslc glslc --source "$2" --output-dir "$1/spv" \
+            --target-hpp "$1/ggml-vulkan-shaders.hpp" --target-cpp "$1/$(basename "$2").cpp" > /dev/null' \
+        sh "$vkgen" {}
+    touch "$vkgen/stamp"
+fi
+
 # Mbed TLS and the CA bundle for the web search tool's HTTPS (engine/deps.sh).
 deps=${TS5_DEPS:-$root/.deps}
 bash "$root/engine/deps.sh" "$deps"
@@ -53,11 +88,13 @@ mbedflags=(-I "$mbedtls/include" -I "$root/engine/src" "-DMBEDTLS_USER_CONFIG_FI
 # them off by default; the engine's C++ library code uses both).
 w="$root/third_party/whisper.cpp"
 k="$root/third_party/kokoro.cpp"
+sd="$root/third_party/stable-diffusion.cpp"
 cxxflags=(-std=c++17 -O2 -Wall -ffunction-sections -fdata-sections -fexceptions -fcxx-exceptions -frtti
     -DTS5_PS5=1 -DTS5_VULKAN=1 -DTS5_HTTPS=1 "-DTS5_VERSION=\"$version\"" "-DTS5_TITLE_ID=\"$title_id\""
     "-DTS5_CA_PEM=\"$ca_pem\"" "${mbedflags[@]}"
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$out/shaders" -I "$radv/include"
-    -I "$w/include" -I "$w/ggml/include" -I "$k/include" -I "$root/third_party/qrcodegen")
+    -I "$w/include" -I "$w/ggml/include" -I "$k/include" -I "$root/third_party/qrcodegen"
+    -I "$sd/include" -I "$sd/thirdparty" -DGGML_MAX_NAME=160)
 objects=()
 pids=()
 mkdir -p "$out/obj/mbedtls"
@@ -72,7 +109,7 @@ for src in "$mbedtls"/library/*.c; do
 done
 for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
         "$root"/engine/src/{tools,known_good,net,websearch,ca_bundle,log}.cpp \
-        "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup,local_time,keep_models}.cpp \
+        "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup,local_time,keep_models,images}.cpp \
         "$root"/third_party/qrcodegen/qrcodegen.cpp \
         "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page,logs_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp; do
     o="$out/obj/$(basename "$src" .cpp).o"
@@ -87,7 +124,7 @@ done
 # on the same ggml, for speech out (ps5/tts/synth.cpp), reading its models
 # with stdio (KOKORO_NO_MMAP).
 wflags=(-O2 -ffunction-sections -fdata-sections -DNDEBUG -DGGML_USE_CPU -DGGML_USE_CPU_REPACK -DGGML_USE_LLAMAFILE
-    -DGGML_SCHED_MAX_COPIES=4 "-DWHISPER_VERSION=\"$(sed -n 's/^version=//p' "$root/scripts/vendor-whisper.sh")\""
+    -DGGML_SCHED_MAX_COPIES=4 -DGGML_MAX_NAME=160 "-DWHISPER_VERSION=\"$(sed -n 's/^version=//p' "$root/scripts/vendor-whisper.sh")\""
     -DKOKORO_NO_MMAP -I "$w/include" -I "$w/ggml/include" -I "$w/ggml/src" -I "$w/ggml/src/ggml-cpu"
     -I "$k/include" -I "$k/src")
 mkdir -p "$out/obj/speech"
@@ -107,6 +144,36 @@ for src in "$w"/src/whisper.cpp "$w"/src/aneforge/whisper-aneforge.cpp \
         # kokoro.cpp asks for F32 matrix products with a call ggml 0.26 deprecates.
         "$k"/*) cc -std=c++17 -fexceptions -fcxx-exceptions -frtti -Wno-deprecated-declarations "${wflags[@]}" -c "$src" -o "$o" & ;;
         *) cc -std=c++17 -fexceptions -fcxx-exceptions -frtti "${wflags[@]}" -c "$src" -o "$o" & ;;
+    esac
+    pids+=($!)
+done
+# stable-diffusion.cpp (third_party/stable-diffusion.cpp) on the same ggml,
+# for pictures (ps5/images.cpp), with ggml's Vulkan backend and its shaders:
+# as upstream's CMake builds them, and only rebuilt when their source changes
+# (they are most of the build's time).
+sdflags=(-O2 -ffunction-sections -fdata-sections -DNDEBUG -DGGML_SCHED_MAX_COPIES=4 -DGGML_MAX_NAME=160
+    -DSD_USE_UPSTREAM_GGML -DONIG_STATIC -DUTF8PROC_STATIC
+    "-DSDCPP_BUILD_VERSION=$(sed -n 's/^tag=//p' "$root/scripts/vendor-sd.sh")"
+    "-DSDCPP_BUILD_COMMIT=$(sed -n 's/^commit=//p' "$root/scripts/vendor-sd.sh" | cut -c1-7)"
+    -I "$sd/include" -I "$sd/src" -I "$sd/thirdparty" -I "$sd/thirdparty/oniguruma" -I "$sd/thirdparty/utf8proc"
+    -I "$w/ggml/include" -I "$w/ggml/src" -I "$w/ggml/src/ggml-vulkan" -I "$vkgen"
+    -isystem "$hdeps/Vulkan-Headers/include" -isystem "$hdeps/SPIRV-Headers/include")
+mkdir -p "$out/obj/images"
+iobjects=()
+mapfile -t sd_sources < <(find "$sd/src" -name '*.cpp' | sort)
+for src in "${sd_sources[@]}" "$sd"/thirdparty/{zip.c,utf8proc/utf8proc.c} \
+        "$sd"/thirdparty/oniguruma/{ascii,regcomp,regenc,regerror,regexec,regparse,st,unicode}.c \
+        "$sd"/thirdparty/oniguruma/{unicode_fold1_key,unicode_fold2_key,unicode_fold3_key,unicode_unfold_key,utf8}.c \
+        "$w"/ggml/src/ggml-vulkan/{ggml-vulkan,ggml-vulkan-buffers,ggml-vulkan-debug}.cpp "$vkgen"/*.comp.cpp; do
+    rel=${src#"$root"/}
+    rel=${rel#build/ps5/}
+    o="$out/obj/images/${rel//\//_}.o"
+    iobjects+=("$o")
+    [ -f "$o" ] && [ "$o" -nt "$src" ] && [ "$o" -nt "$root/scripts/vendor-sd.sh" ] && [ "$o" -nt "$root/scripts/vendor-whisper.sh" ] &&
+        [ "$o" -nt "$vkgen/stamp" ] && continue
+    case $src in
+        *.c) cc -std=gnu11 -Wno-unreachable-code-generic-assoc "${sdflags[@]}" -c "$src" -o "$o" & ;;
+        *) cc -std=c++17 -fexceptions -fcxx-exceptions -frtti "${sdflags[@]}" -c "$src" -o "$o" & ;;
     esac
     pids+=($!)
 done
@@ -148,10 +215,12 @@ pids+=($!)
 for p in "${pids[@]}"; do wait "$p"; done
 # In an archive, so --exclude-libs keeps its names local: the SDK's stub
 # modules define some of them too, and the title converter refuses exports.
-# whisper.cpp and kokoro.cpp likewise: their names stay inside the title.
-rm -f "$out/obj/libts5compat.a" "$out/obj/libts5speech.a" "$out/obj/libts5wg.a"
+# whisper.cpp, kokoro.cpp and stable-diffusion.cpp likewise: their names stay
+# inside the title.
+rm -f "$out/obj/libts5compat.a" "$out/obj/libts5speech.a" "$out/obj/libts5wg.a" "$out/obj/libts5images.a"
 "$sdk/bin/llvm-ar" rcs "$out/obj/libts5compat.a" "$out/obj/compat.o"
 "$sdk/bin/llvm-ar" rcs "$out/obj/libts5speech.a" "${wobjects[@]}"
+"$sdk/bin/llvm-ar" rcs "$out/obj/libts5images.a" "${iobjects[@]}"
 "$sdk/bin/llvm-ar" rcs "$out/obj/libts5wg.a" "${wgobjects[@]}"
 rm -f "$out/obj/libts5mbedtls.a"
 "$sdk/bin/llvm-ar" rcs "$out/obj/libts5mbedtls.a" "${mbed_objects[@]}"
@@ -185,7 +254,7 @@ weak=(--no-dynamic-linker)
 "$sdk/bin/prospero-lld" "${radv_linker_script[@]}" --eh-frame-hdr "${weak[@]}" "${radv_link_flags[@]}" \
     --version-script "$vk/tooling/native/app-symbols.map" --exclude-libs=ALL \
     -e _start -o "$out/llvm-pie.elf" \
-    "$out/obj/app_crt.o" "${objects[@]}" "$out/obj/libts5speech.a" "$out/obj/libts5wg.a" "$out/obj/libts5compat.a" "$out/obj/libts5mbedtls.a" \
+    "$out/obj/app_crt.o" "${objects[@]}" "$out/obj/libts5images.a" "$out/obj/libts5speech.a" "$out/obj/libts5wg.a" "$out/obj/libts5compat.a" "$out/obj/libts5mbedtls.a" \
     "$out/stubs/libSceAgc.so" "$out/stubs/libSceAgcDriver.so" "$out/stubs/libSceAudioIn.so" \
     "$out/stubs/libSceCommonDialog.so" "${radv_link_inputs[@]}" \
     --as-needed "$sdk"/target/lib/*.so
