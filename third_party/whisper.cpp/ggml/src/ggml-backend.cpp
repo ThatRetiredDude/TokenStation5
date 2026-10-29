@@ -2041,9 +2041,10 @@ ggml_backend_sched_t ggml_backend_sched_new(
     // node and sets aside room for every split's input copies up front:
     // graph_size*60 tensors, 5 GB for kokoro.cpp's 262144-node graphs, and on
     // the PS5 malloc takes that from the console's memory. On the CPU backend
-    // alone a graph is a single split with no copies, so 64 is plenty;
+    // alone a graph is a single split with no copies; on Vulkan (pictures) a
+    // few more, where an op falls back to the CPU, so 256 is plenty;
     // ggml_backend_sched_split_graph checks the graph copy still fits.
-    const size_t ggml_sched_max_splits = graph_size < 64 ? graph_size : 64;
+    const size_t ggml_sched_max_splits = graph_size < 256 ? graph_size : 256;
     const size_t nodes_size = graph_size + ggml_sched_max_splits*GGML_SCHED_MAX_SPLIT_INPUTS*2;
     sched->nodes_size = nodes_size;
     sched->node_backend_ids = (int *) calloc(nodes_size, sizeof(sched->node_backend_ids[0]));

@@ -88,6 +88,7 @@
 #include "display.h"
 #include "downloads.h"
 #include "hf_search.h"
+#include "images.h"
 #include "keys.h"
 #include "library.h"
 #include "log.h"
@@ -600,6 +601,7 @@ std::string network_url() {
 
 int main(int, char **) {
     mkdir(kModels, 0777);
+    mkdir(app::image_models_dir(kModels).c_str(), 0777);  // for FTP
     rename(kLog, kPrevLog);
     // Both in append mode, so neither writes over the other's lines.
     if (freopen(kLog, "a", stdout)) {
@@ -757,6 +759,34 @@ int main(int, char **) {
     server.set_authorize([&keys, in_tunnel](const std::string &key, const std::string &client, std::string &name) {
         return keys.authorize(key, client, name, in_tunnel(client));
     });
+    // Pictures (POST /v1/images/generations, images.h): a job for the Runner,
+    // made once it exists, which the request's thread waits for.
+    std::atomic<app::Runner *> picture_runner{nullptr};
+    server.set_images([&picture_runner](const ts5::Json &req, int &status) {
+        app::Runner *runner = picture_runner.load();
+        if (!runner) {
+            status = 503;
+            return ts5::error_json("TokenStation5 is starting. Try again in a moment.");
+        }
+        auto task = std::make_shared<app::ImageTask>();
+        std::string err;
+        if (!app::image_ask(req, kModels, task->ask, err)) {
+            status = 400;
+            return ts5::error_json(err);
+        }
+        std::future<void> done = task->done.get_future();
+        app::Job job;
+        job.kind = app::Job::Image;
+        job.path = task->ask.model;
+        job.image = task;
+        runner->push(job);
+        done.wait();
+        if (!task->ok) {
+            status = 500;
+            return ts5::error_json("The picture couldn't be made: " + task->err);
+        }
+        return app::image_reply(task->out);
+    });
     std::string fresh_key, fresh_key_id;  // a key just made, shown on Settings until the page is left
     app::HfSearch hf;  // the Models page's search
     usage_log.start(TS5_VERSION);
@@ -794,6 +824,7 @@ int main(int, char **) {
     };
     ts_apply();
     app::Runner runner(ctx, server, lib, lib_mutex, notify, network_url);
+    picture_runner = &runner;
     // Models (and, from Settings, the speech model and voice) downloaded on
     // the console, beside whatever the Runner does.
     app::Downloads downloads(kModels, TS5_VERSION, notify);
@@ -1425,10 +1456,11 @@ int main(int, char **) {
         const bool dirty = buttons || lib_changed || version != drawn_version || shot || dark != drawn_dark ||
                            v.speaking != drawn_speaking;
         // The spinner turns at 15 frames a second while a model loads. While the
-        // GPU computes (a check, a speed test, a reply), a frame a second at
+        // GPU computes (a check, a speed test, a picture, a reply), a frame a second at
         // most, so the copy each frame costs the GPU never weighs on the work.
         const bool computing = v.status.phase == app::Status::Checking ||
-                               v.status.phase == app::Status::Benchmarking || v.api.generating;
+                               v.status.phase == app::Status::Benchmarking ||
+                               v.status.phase == app::Status::Picturing || v.api.generating;
         double period = dark ? 60.0 : dash.animating(v) && !computing ? 1.0 / 15 : 1.0;
         // The chat page shows a reply as it comes, a few frames a second.
         const bool on_chat = !dark && dash.page() == ui::Dashboard::Chat;
