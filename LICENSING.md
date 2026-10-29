@@ -7,20 +7,35 @@ GPL-3.0 code and the engine does not.
 table below nor a file's own header places under another license is licensed
 under [PolyForm Small Business 1.0.0](LICENSE.md). A new file takes the
 license of the folder it lands in; a new path this file doesn't name yet
-takes the default until a row here says otherwise.
+takes the default until a row here says otherwise. Everything the project
+made itself is copyright ThatRetiredDude, including files that carry no
+header and parts no row names.
+
+**Third-party parts keep their own terms.** Code, data, fonts and models
+from other projects keep the license their authors gave them, whether or not
+this file or [NOTICE.md](NOTICE.md) names them; the lists here aim to be
+complete but are not what grants or limits those rights. The default above
+never relicenses someone else's work.
 
 | Part | License | Why |
 | --- | --- | --- |
 | `engine/` (ts5: source, shaders, tests, design doc) | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code. Contains no GPL code. |
-| `scripts/`, `docs/`, `models.tsv`, `README.md`, `.github/` | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code and docs. The scripts download and talk to GPL programs (PS5LM) but contain none of their code. |
-| `ps5/` (title main, libc shims, build scripts, import checker) | [GPL-3.0-or-later](ps5/LICENSE) | Exists to link ts5 with PS5_Vulkan and the PS5 payload SDK, which are GPL-3.0-or-later. |
+| `scripts/`, `docs/`, `models.tsv`, `known-good.tsv`, `README.md`, `.github/` | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code and docs. The scripts download and talk to GPL programs (PS5LM) but contain none of their code. |
+| `ps5/` (title main, dashboard, voice, Tailscale client `ps5/ts`, tunnel glue `ps5/wg`, libc shims, build scripts, import checker) | [GPL-3.0-or-later](ps5/LICENSE) | Exists to link ts5 with PS5_Vulkan and the PS5 payload SDK, which are GPL-3.0-or-later. |
 | `third_party/whisper.cpp/` (whisper.cpp and ggml, for speech to text) | [MIT](third_party/whisper.cpp/LICENSE), as vendored | Third-party code, copied unchanged by `scripts/vendor-whisper.sh`. Linked into the PS5 title (GPL-3.0 as a whole, below), not into the Linux `ts5` binary. |
 | `third_party/kokoro.cpp/` (Kokoro-82M's model code, for spoken replies) | [MIT](third_party/kokoro.cpp/LICENSE), as vendored | Third-party code, copied by `scripts/vendor-kokoro.sh` with our patch (espeak-ng and Highway out). Linked into the PS5 title, not into the Linux `ts5` binary. |
+| `third_party/lwip/`, `third_party/wireguard-lwip/` (network stack and tunnel under the Tailscale client) | [BSD-3-Clause](third_party/lwip/COPYING), [BSD-3-Clause](third_party/wireguard-lwip/LICENSE) with MIT and public-domain crypto files, as vendored | Third-party code, copied by `scripts/vendor-wireguard.sh`. Linked into the PS5 title only. |
+| `third_party/qrcodegen/` (the sign-in QR codes) | MIT, as vendored | Third-party code. Linked into the PS5 title only. |
+| Any other file under `third_party/` | Its own license, in its folder | Third-party code is never under PolyForm. |
+| `ps5/ui/font.bin` (dashboard glyphs) | SIL OFL 1.1 (Inter) and the Bitstream Vera license (DejaVu Sans Mono) | Rendered from those fonts by `ps5/ui/make_font.py`; see NOTICE.md. |
+| `ps5/tts/lexicon.bin` (word pronunciations) | Apache-2.0 (misaki) and BSD-style (CMUdict) data, in our format | Built by `scripts/pack-g2p-lexicon.py`; see NOTICE.md. |
+| `licenses/` | Each text is its license's own | Full license texts NOTICE.md refers to; every title build carries them. |
 | `payloads/` (small diagnostic payloads for the jailbreak's ELF loader) | GPL-3.0-or-later | Built with the PS5 payload SDK, which is GPL-3.0-or-later. |
 | The built PS5 title (`eboot.bin`, `sce_module/libc.prx`) | GPL-3.0-or-later, as a whole | See below. |
 | The Linux `ts5` binary | PolyForm Small Business 1.0.0 | Built from `engine/` plus Mbed TLS (Apache-2.0) and the Mozilla CA bundle (MPL-2.0, unmodified data), see [NOTICE.md](NOTICE.md). Links only the system Vulkan loader. |
 | The TokenStation5 name and logo, `ps5/sce_sys/icon0.png` | Not licensed | Brand assets. Neither license grants trademark rights. |
-| Model weights (GGUF files) | Each model's own license | Not part of this repo. Qwen, Llama, Mistral and Gemma each have their own terms. |
+| Model weights (GGUF and whisper/Kokoro files) | Each model's own license | Not part of this repo or any build; downloaded by the user. NOTICE.md lists the terms of the models in `models.tsv` (Gemma 3 and Llama have use restrictions of their own). |
+| Online services (Tavily, Hugging Face, Tailscale) | Their own terms | Used with the user's own account or key; no code of theirs is here. |
 | Everything else in this repository | [PolyForm Small Business 1.0.0](LICENSE.md) | The default, for anything no row or file header covers. |
 
 Third-party code that ends up in the source or the binaries, and the notices
@@ -38,7 +53,8 @@ an OSI open source one.
 ## The PS5 title is GPL-3.0 as a whole
 
 The PS5 title is one program made of ts5, the files in `ps5/`, whisper.cpp,
-kokoro.cpp, RADV, and PS5_Vulkan's and the payload SDK's GPL-3.0 code. The GPL requires a
+kokoro.cpp, lwIP, wireguard-lwip, qrcodegen, Mbed TLS, RADV, and
+PS5_Vulkan's and the payload SDK's GPL-3.0 code. The GPL requires a
 distributed program like that to be licensed under the GPL as a whole. The
 copyright holder therefore also grants GPL-3.0-or-later on the `engine/`
 source, but only as part of the PS5 title and its corresponding source. So:
@@ -70,7 +86,8 @@ To keep the line clean:
 Every published build of the title (a CI artifact, a catalog release, a zip)
 must carry, in the title folder or next to it:
 
-- a copy of [ps5/LICENSE](ps5/LICENSE) and [NOTICE.md](NOTICE.md), and
+- a copy of [ps5/LICENSE](ps5/LICENSE), [NOTICE.md](NOTICE.md) and
+  [`licenses/`](licenses), and
 - the source: the commit of this repo it was built from and the pinned
   revisions `ps5/setup.sh` names, or a written offer of them (GPL section 6).
 
@@ -79,7 +96,8 @@ A catalog entry for the title should name its license as GPL-3.0.
 ## Trademarks
 
 This project is independent and is not affiliated with or endorsed by Sony
-Interactive Entertainment. "PlayStation" and "PS5" are trademarks of Sony
-Interactive Entertainment.
+Interactive Entertainment, Tailscale Inc., or any model maker. "PlayStation"
+and "PS5" are trademarks of Sony Interactive Entertainment; "Tailscale" is a
+trademark of Tailscale Inc.; model names belong to their makers.
 
 This file describes the project's intent. It is not legal advice.
