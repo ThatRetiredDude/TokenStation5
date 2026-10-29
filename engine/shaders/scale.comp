@@ -1,0 +1,18 @@
+// X *= s over n values (Gemma 4's layer_output_scale); with cap > 0,
+// X = cap * tanh(X / cap) instead (its final logit softcap).
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Xbuf { float X[]; };
+layout(push_constant) uniform PC { uint n; float s, cap; } pc;
+
+void main() {
+    for (uint i = gl_GlobalInvocationID.x; i < pc.n; i += gl_NumWorkGroups.x * 256) {
+        if (pc.cap > 0.0) {
+            // tanh(y) as 1 - 2 / (exp(2y) + 1), which saturates.
+            const float y = X[i] / pc.cap;
+            X[i] = pc.cap * (1.0 - 2.0 / (exp(2.0 * y) + 1.0));
+        } else {
+            X[i] *= pc.s;
+        }
+    }
+}

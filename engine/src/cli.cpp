@@ -158,6 +158,7 @@ int no_model_command(int argc, char **argv) {
                     : f == "llama3"  ? ToolFormat::LLAMA3
                     : f == "mistral" ? ToolFormat::MISTRAL
                     : f == "gemma"   ? ToolFormat::GEMMA
+                    : f == "gemma4"  ? ToolFormat::GEMMA4
                                      : ToolFormat::NONE;
     std::string text = read_all(stdin);
     const std::vector<std::string> names(argv + 3, argv + argc);  // the request's tools

@@ -406,9 +406,343 @@ std::string render_gemma(const std::vector<Message> &all, const std::vector<Json
     return s + "<start_of_turn>model\n";
 }
 
+// Gemma 4's tool format, as its template writes it: tools declared in the
+// system turn in its own notation (keys bare, strings in <|"|>, schema
+// types in capitals, keys sorted as Jinja's dictsort sorts them, without
+// case), calls as <|tool_call>call:name{...}<tool_call|>, and results as
+// <|tool_response>response:name{value:...}<tool_response|> in the same model
+// turn, which goes on after them.
+const char *const kQ = "<|\"|>";
+
+std::vector<std::string> sorted_keys(const Json &o) {
+    std::vector<std::string> k = o.keys;
+    auto lower = [](std::string x) {
+        for (char &c : x) c = (char)tolower((unsigned char)c);
+        return x;
+    };
+    std::stable_sort(k.begin(), k.end(), [&](const std::string &a, const std::string &b) { return lower(a) < lower(b); });
+    return k;
+}
+
+std::string upper(std::string x) {
+    for (char &c : x) c = (char)toupper((unsigned char)c);
+    return x;
+}
+
+std::string g4_value(const Json &v, bool quote_keys) {
+    switch (v.type) {
+        case Json::NUL: return "null";
+        case Json::BOOL: return v.b ? "true" : "false";
+        case Json::NUM: return v.s.empty() ? Json(v).dump() : v.s;
+        case Json::STR: return kQ + v.s + kQ;
+        case Json::ARR: {
+            std::string s = "[";
+            for (size_t i = 0; i < v.a.size(); i++) s += (i ? "," : "") + g4_value(v.a[i], quote_keys);
+            return s + "]";
+        }
+        case Json::OBJ: {
+            std::string s = "{";
+            bool first = true;
+            for (auto &k : sorted_keys(v)) {
+                s += (first ? "" : ",") + (quote_keys ? kQ + k + kQ : k) + ":" + g4_value(v[k], quote_keys);
+                first = false;
+            }
+            return s + "}";
+        }
+    }
+    return "";
+}
+
+std::string g4_type(const Json &v) { return upper(v["type"].str()); }
+
+std::string g4_required(const Json &req) {
+    std::string s = "required:[";
+    for (size_t i = 0; i < req.a.size(); i++) s += (i ? "," : "") + (kQ + req.a[i].str()) + kQ;
+    return s + "]";
+}
+
+// The template's format_parameters.
+std::string g4_params(const Json &props, bool filter_keys) {
+    static const char *standard[] = {"description", "type", "properties", "required", "nullable"};
+    std::string s;
+    bool first = true;
+    for (auto &key : sorted_keys(props)) {
+        if (filter_keys && std::find(std::begin(standard), std::end(standard), key) != std::end(standard)) continue;
+        const Json &v = props[key];
+        if (!first) s += ",";
+        first = false;
+        s += key + ":{";
+        bool comma = false;
+        auto sep = [&] {
+            if (comma) s += ",";
+            comma = true;
+        };
+        if (!v["description"].str().empty()) {
+            s += "description:" + (kQ + v["description"].str()) + kQ;
+            comma = true;
+        }
+        const std::string type = g4_type(v);
+        if (type == "STRING") {
+            if (!v["enum"].a.empty()) sep(), s += "enum:" + g4_value(v["enum"], true);
+        } else if (type == "ARRAY") {
+            const Json &items = v["items"];
+            if (items.type == Json::OBJ && !items.keys.empty()) {
+                sep();
+                s += "items:{";
+                bool f = true;
+                for (auto &k : sorted_keys(items)) {
+                    const Json &iv = items[k];
+                    if (iv.is_null()) continue;
+                    if (!f) s += ",";
+                    f = false;
+                    if (k == "properties") {
+                        s += "properties:{" + (iv.type == Json::OBJ ? g4_params(iv, false) : "") + "}";
+                    } else if (k == "required") {
+                        s += g4_required(iv);
+                    } else if (k == "type") {
+                        if (iv.type == Json::STR) {
+                            s += "type:" + g4_value(Json::string(upper(iv.s)), true);
+                        } else {
+                            Json u = iv;
+                            for (auto &x : u.a) x.s = upper(x.s);
+                            s += "type:" + g4_value(u, true);
+                        }
+                    } else {
+                        s += k + ":" + g4_value(iv, true);
+                    }
+                }
+                s += "}";
+            }
+        }
+        if (v["nullable"].boolean(false)) sep(), s += "nullable:true";
+        if (type == "OBJECT") {
+            sep();
+            if (v["properties"].type == Json::OBJ) s += "properties:{" + g4_params(v["properties"], false) + "}";
+            else s += "properties:{" + g4_params(v, true) + "}";
+            if (!v["required"].a.empty()) sep(), s += g4_required(v["required"]);
+        }
+        sep();
+        s += "type:" + (kQ + type) + kQ + "}";
+    }
+    return s;
+}
+
+// The template's format_function_declaration.
+std::string g4_declaration(const Json &tool) {
+    const Json &f = tool["function"];
+    std::string s = "declaration:" + f["name"].str() + "{description:" + kQ + f["description"].str() + kQ;
+    const Json &p = f["parameters"];
+    if (p.type == Json::OBJ && !p.keys.empty()) {
+        s += ",parameters:{";
+        if (p["properties"].type == Json::OBJ && !p["properties"].keys.empty())
+            s += "properties:{" + g4_params(p["properties"], false) + "},";
+        if (!p["required"].a.empty()) s += g4_required(p["required"]) + ",";
+        if (!p["type"].str().empty()) s += "type:" + (kQ + upper(p["type"].str())) + kQ + "}";
+    }
+    return s + "}";
+}
+
+std::string g4_call(const ToolCall &c) {
+    std::string s = "<|tool_call>call:" + c.name + "{";
+    Json args;
+    if (Json::parse(c.arguments, args) && args.type == Json::OBJ) {
+        const std::string v = g4_value(args, false);
+        s += v.substr(1, v.size() - 2);
+    } else {  // not JSON: as the template writes a string, its braces off
+        const std::string a = strip(c.arguments);
+        s += a.size() >= 2 && a.front() == '{' && a.back() == '}' ? a.substr(1, a.size() - 2) : c.arguments;
+    }
+    return s + "}<tool_call|>";
+}
+
+std::string g4_result(const std::string &name, const std::string &result) {
+    return "<|tool_response>response:" + (name.empty() ? std::string("unknown") : name) + "{value:" +
+           g4_value(Json::string(result), false) + "}<tool_response|>";
+}
+
+// A model turn's text with its <think></think> taken out.
+std::string without_thinking(std::string c) {
+    for (size_t a; (a = c.find("<think>")) != std::string::npos;) {
+        const size_t b = c.find("</think>", a);
+        c.erase(a, b == std::string::npos ? std::string::npos : b + 8 - a);
+    }
+    return c;
+}
+
+std::string render_gemma4(const std::vector<Message> &all, const std::vector<Json> &tools) {
+    std::string system, s;
+    std::vector<Message> msgs;
+    for (auto &m : all) {
+        if (m.role == "system") system += (system.empty() ? "" : "\n\n") + strip(m.content);
+        else msgs.push_back(m);
+    }
+    if (!system.empty() || !tools.empty()) {
+        s += "<|turn>system\n" + system;
+        for (auto &t : tools) s += "<|tool>" + strip(g4_declaration(t)) + "<tool|>";
+        s += "<turn|>\n";
+    }
+    std::string prev;   // the last role before tool results
+    bool open = false;  // a model turn left open: its calls' results follow in it
+    for (size_t i = 0; i < msgs.size(); i++) {
+        const Message &m = msgs[i];
+        if (m.role == "tool") continue;  // written with the call they answer
+        const bool model = m.role == "assistant";
+        if (!(model && prev == "assistant")) s += "<|turn>" + std::string(model ? "model" : m.role) + "\n";
+        for (auto &c : m.calls) s += g4_call(c);
+        bool results = false;
+        if (!m.calls.empty())
+            for (size_t k = i + 1, n = 0; k < msgs.size() && msgs[k].role == "tool"; k++, n++) {
+                std::string name;
+                for (auto &c : m.calls)
+                    if (!msgs[k].call_id.empty() && c.id == msgs[k].call_id) name = c.name;
+                if (name.empty() && n < m.calls.size()) name = m.calls[n].name;
+                s += g4_result(name, msgs[k].content);
+                results = true;
+            }
+        const std::string content = strip(model ? without_thinking(m.content) : m.content);
+        s += content;
+        std::string next;
+        for (size_t k = i + 1; k < msgs.size() && next.empty(); k++)
+            if (msgs[k].role != "tool") next = msgs[k].role;
+        open = false;
+        if (!m.calls.empty() && !results) {
+            s += "<|tool_response>";
+            open = true;
+        } else if (model && next == "assistant" && (m.calls.empty() || results)) {
+        } else if (results && content.empty() && next.empty()) {
+            open = true;
+        } else {
+            s += "<turn|>\n";
+        }
+        prev = m.role;
+    }
+    return open ? s : s + "<|turn>model\n";
+}
+
+// key:value,... of a call in Gemma 4's notation, from at (just past the
+// opening brace) to its closing brace, as a JSON object: at is left past
+// that brace. false: not that notation, or cut short.
+bool g4_parse_value(const std::string &s, size_t &at, Json &out);
+
+bool g4_parse_object(const std::string &s, size_t &at, Json &out) {
+    out = Json::object();
+    auto space = [&] {
+        while (at < s.size() && isspace((unsigned char)s[at])) at++;
+    };
+    space();
+    if (at < s.size() && s[at] == '}') return at++, true;
+    while (at < s.size()) {
+        space();
+        std::string key;
+        if (starts(s, kQ, at)) {
+            const size_t e = s.find(kQ, at + 5);
+            if (e == std::string::npos) return false;
+            key = s.substr(at + 5, e - at - 5);
+            at = e + 5;
+        } else {
+            const size_t e = s.find(':', at);
+            if (e == std::string::npos) return false;
+            key = strip(s.substr(at, e - at));
+            if (key.empty() || key.find_first_of("{}[],") != std::string::npos) return false;
+            at = e;
+        }
+        space();
+        if (at >= s.size() || s[at] != ':') return false;
+        at++;
+        Json v;
+        if (!g4_parse_value(s, at, v)) return false;
+        out.set(key, v);
+        space();
+        if (at < s.size() && s[at] == ',') { at++; continue; }
+        if (at < s.size() && s[at] == '}') return at++, true;
+        return false;
+    }
+    return false;
+}
+
+bool g4_parse_value(const std::string &s, size_t &at, Json &out) {
+    while (at < s.size() && isspace((unsigned char)s[at])) at++;
+    if (at >= s.size()) return false;
+    if (starts(s, kQ, at)) {
+        const size_t e = s.find(kQ, at + 5);
+        if (e == std::string::npos) return false;
+        out = Json::string(s.substr(at + 5, e - at - 5));
+        at = e + 5;
+        return true;
+    }
+    if (s[at] == '{') return at++, g4_parse_object(s, at, out);
+    if (s[at] == '[') {
+        at++;
+        out = Json();
+        out.type = Json::ARR;
+        while (at < s.size() && isspace((unsigned char)s[at])) at++;
+        if (at < s.size() && s[at] == ']') return at++, true;
+        while (true) {
+            Json v;
+            if (!g4_parse_value(s, at, v)) return false;
+            out.a.push_back(v);
+            while (at < s.size() && isspace((unsigned char)s[at])) at++;
+            if (at < s.size() && s[at] == ',') { at++; continue; }
+            if (at < s.size() && s[at] == ']') return at++, true;
+            return false;
+        }
+    }
+    // A number, true, false or null; or a JSON string, as the model may
+    // write one.
+    if (s[at] == '"') {
+        size_t e = at + 1;
+        while (e < s.size() && s[e] != '"') e += s[e] == '\\' ? 2 : 1;
+        if (e >= s.size()) return false;
+        if (!Json::parse(s.substr(at, e + 1 - at), out)) return false;
+        at = e + 1;
+        return true;
+    }
+    size_t e = at;
+    while (e < s.size() && std::string(",}]").find(s[e]) == std::string::npos) e++;
+    const std::string w = strip(s.substr(at, e - at));
+    if (w.empty()) return false;
+    if (!Json::parse(w, out)) out = Json::string(w);  // a bare word: as text
+    at = e;
+    return true;
+}
+
+// The calls in a Gemma 4 turn, from from on: the text without them.
+std::string g4_calls(const std::string &text, size_t from, std::vector<ToolCall> &calls) {
+    const std::string open = "<|tool_call>", close = "<tool_call|>";
+    std::string content = text.substr(0, from);
+    size_t pos = from;
+    for (size_t p; (p = text.find(open, pos)) != std::string::npos;) {
+        content += text.substr(pos, p - pos);
+        size_t at = p + open.size();
+        const size_t brace = text.find('{', at);
+        std::string name = brace == std::string::npos ? "" : strip(text.substr(at, brace - at));
+        if (starts(name, "call:")) name = strip(name.substr(5));
+        Json args;
+        at = brace == std::string::npos ? text.size() : brace + 1;
+        if (name.empty() || !g4_parse_object(text, at, args)) {  // not a call after all: it stays text
+            content += text.substr(p, open.size());
+            pos = p + open.size();
+            continue;
+        }
+        ToolCall c;
+        c.id = new_call_id();
+        c.name = name;
+        c.arguments = args.dump();
+        calls.push_back(c);
+        while (at < text.size() && isspace((unsigned char)text[at])) at++;
+        if (starts(text, close, at)) at += close.size();
+        pos = at;
+    }
+    return content + text.substr(pos);
+}
+
 }  // namespace
 
-bool can_skip_thinking(const Tokenizer &t) { return has(t.chat_template(), "enable_thinking"); }
+// Gemma 4's thinking is off unless asked for (<|think|> in its system turn),
+// so there's nothing to skip.
+bool can_skip_thinking(const Tokenizer &t) {
+    return has(t.chat_template(), "enable_thinking") && t.chat_format() != Tokenizer::GEMMA4;
+}
 
 const char *const kNoThinking = "<think>\n\n</think>\n\n";
 
@@ -419,6 +753,7 @@ ToolFormat tool_format(const Tokenizer &t) {
     if (t.chat_format() == Tokenizer::MISTRAL && has(tmpl, "[TOOL_CALLS]") && has(tmpl, "[AVAILABLE_TOOLS]"))
         return ToolFormat::MISTRAL;
     if (t.chat_format() == Tokenizer::GEMMA) return ToolFormat::GEMMA;
+    if (t.chat_format() == Tokenizer::GEMMA4) return ToolFormat::GEMMA4;
     return ToolFormat::NONE;
 }
 
@@ -428,6 +763,7 @@ const char *tool_format_name(ToolFormat f) {
         case ToolFormat::LLAMA3: return "llama3";
         case ToolFormat::MISTRAL: return "mistral";
         case ToolFormat::GEMMA: return "gemma";
+        case ToolFormat::GEMMA4: return "gemma4";
         default: return "none";
     }
 }
@@ -479,6 +815,7 @@ std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, co
         return t.apply_chat(plain);
     }
     if (f == ToolFormat::GEMMA) return render_gemma(msgs, tools);
+    if (f == ToolFormat::GEMMA4) return render_gemma4(msgs, tools);
     return f == ToolFormat::HERMES ? render_hermes(t, msgs, tools) : render_llama3(msgs, tools, today);
 }
 
@@ -495,6 +832,10 @@ std::string render_results(ToolFormat f, const std::vector<ToolCall> &calls, con
         s += "<|start_header_id|>assistant<|end_header_id|>\n\n";
     } else if (f == ToolFormat::GEMMA) {
         s = "<end_of_turn>\n<start_of_turn>user\n" + gemma_results(results) + "<end_of_turn>\n<start_of_turn>model\n";
+    } else if (f == ToolFormat::GEMMA4) {
+        // The model stopped at <|tool_response>, or closed its turn: the
+        // results go on in that turn either way, as the template has them.
+        for (size_t i = 0; i < results.size(); i++) s += g4_result(i < calls.size() ? calls[i].name : "", results[i]);
     } else if (f == ToolFormat::MISTRAL) {
         s = "</s>";
         for (size_t i = 0; i < results.size(); i++)
@@ -973,6 +1314,19 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
                 a.find(open, open.size()) == std::string::npos)
                 r.content = text.substr(0, from) + strip(a.substr(open.size(), a.size() - open.size() - close.size()));
         }
+    } else if (f == ToolFormat::GEMMA4) {
+        size_t from = 0;
+        if (has(text, "<think>")) {
+            from = text.find("</think>");
+            if (from == std::string::npos) return r;  // still thinking
+            from += 8;
+        }
+        std::vector<ToolCall> calls;
+        const std::string content = g4_calls(text, from, calls);
+        if (!calls.empty()) {
+            r.calls = calls;
+            r.content = rstrip(content);
+        }
     } else if (f == ToolFormat::LLAMA3) {
         std::string s = strip(text);
         if (starts(s, "<|python_tag|>")) s = lstrip(s.substr(14));
@@ -1042,6 +1396,15 @@ size_t content_prefix(ToolFormat f, const std::string &text) {
         }
         return hold;
     }
+    if (f == ToolFormat::GEMMA4) {  // <|tool_call> is one token, so it comes whole
+        size_t from = 0;
+        if (has(text, "<think>")) {
+            from = text.find("</think>");
+            if (from == std::string::npos) return text.size();
+            from += 8;
+        }
+        return std::min(text.size(), text.find("<|tool_call>", from));
+    }
     if (f == ToolFormat::LLAMA3) {
         size_t i = text.find_first_not_of(kSpace);
         if (i == std::string::npos) return 0;
@@ -1057,6 +1420,14 @@ size_t content_prefix(ToolFormat f, const std::string &text) {
         return std::min(text.size(), text.find("[TOOL_CALLS]"));
     }
     return text.size();
+}
+
+std::string turn_text(ToolFormat f, const std::string &text) {
+    if (f != ToolFormat::GEMMA4) return text;
+    std::string s = text;
+    for (size_t a; (a = s.find("<think>")) != std::string::npos;) s.replace(a, 7, "<|channel>");
+    for (size_t a; (a = s.find("</think>")) != std::string::npos;) s.replace(a, 8, "<channel|>");
+    return s;
 }
 
 std::string new_call_id() {

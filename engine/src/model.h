@@ -1,6 +1,6 @@
 // Model description: hyperparameters and weight tensors of a dense
-// llama-family decoder (llama, mistral, qwen2, qwen3, gemma3), as stored in
-// GGUF.
+// llama-family decoder (llama, mistral, qwen2, qwen3, gemma3, gemma4), as
+// stored in GGUF.
 #pragma once
 #include <cstdint>
 #include <memory>
@@ -38,7 +38,39 @@ struct HParams {
     // Linear RoPE scaling of the full-attention layers: positions times this
     // (Gemma 3's 1/8); 1 elsewhere.
     float rope_scale = 1.f;
-    bool swa(int layer) const { return swa_window > 0 && swa_pattern > 0 && layer % swa_pattern < swa_pattern - 1; }
+    // Gemma 4: which layers slide, from the file (swa_pattern 0), and heads
+    // whose size and count differ between the two kinds (512 and 256 on the
+    // E4B), so head_dim and n_head_kv above are the largest, for sizing.
+    std::vector<uint8_t> swa_layers;
+    std::vector<int> head_dim_l, n_head_kv_l, rope_dims_l;
+    // Gemma 4: the last kv_shared layers keep no keys of their own and read
+    // those of the last earlier layer of their kind (kv_src).
+    int kv_shared = 0;
+    // Gemma 4: values are RMS-normalized (no weight) as they go into the
+    // cache; a layer without attn_v uses its keys as values.
+    bool v_norm = false;
+    // Gemma 4's per-layer embeddings: n_embd_ple values per layer and token
+    // (0: none), see Model::ple_*.
+    int n_embd_ple = 0;
+    // Logits capped as c * tanh(logit / c) (Gemma 4's 30); 0: none.
+    float logit_softcap = 0;
+    bool swa(int layer) const {
+        if (!swa_layers.empty()) return swa_window > 0 && swa_layers[layer] != 0;
+        return swa_window > 0 && swa_pattern > 0 && layer % swa_pattern < swa_pattern - 1;
+    }
+    int hd(int l) const { return head_dim_l.empty() ? head_dim : head_dim_l[l]; }
+    int hkv(int l) const { return n_head_kv_l.empty() ? n_head_kv : n_head_kv_l[l]; }
+    int kvd(int l) const { return hd(l) * hkv(l); }
+    int rdims(int l) const { return rope_dims_l.empty() ? rope_dims : rope_dims_l[l]; }
+    bool has_kv(int l) const { return l < n_layer - kv_shared; }
+    // The layer whose keys layer l reads: itself, or for a shared layer the
+    // last layer before the shared ones of the same kind.
+    int kv_src(int l) const {
+        if (has_kv(l)) return l;
+        for (int j = n_layer - kv_shared - 1; j >= 0; j--)
+            if (swa(j) == swa(l)) return j;
+        return l;
+    }
 };
 
 // A tensor's bytes plus its type and shape. `data` points into host memory
@@ -55,7 +87,10 @@ struct Weight {
 struct Layer {
     Weight attn_norm, wq, wk, wv, wo, bq, bk, bv, q_norm, k_norm;
     Weight ffn_norm, w_gate, w_up, w_down;
-    Weight post_attn_norm, post_ffn_norm;  // Gemma 3
+    Weight post_attn_norm, post_ffn_norm;  // Gemma 3 and 4
+    // Gemma 4's per-layer embedding: x += post_norm(proj(gelu(inp_gate x) *
+    // this layer's per-layer input)); then x *= out_scale.
+    Weight ple_gate, ple_proj, ple_norm, out_scale;
 };
 
 struct Model {
@@ -65,6 +100,11 @@ struct Model {
     // Llama 3.1 and 3.2: a divisor for each RoPE frequency (rope_dims / 2),
     // which is how they reach 128k tokens; none for the others.
     Weight rope_freqs;
+    // Gemma 4: each token's per-layer inputs are its row of ple_embd (all
+    // layers' n_embd_ple values) times sqrt(n_embd_ple), plus ple_proj_norm
+    // (in pieces of n_embd_ple) of ple_proj times the embedding over
+    // sqrt(n_embd), the sum over sqrt(2).
+    Weight ple_embd, ple_proj, ple_proj_norm;
     std::vector<Layer> layers;
     std::vector<uint8_t> host;  // tensor data when loaded to host memory
 

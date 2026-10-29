@@ -141,6 +141,7 @@ bool Tokenizer::load(const Gguf &g, std::string &err) {
     std::string model = g.get_str("tokenizer.ggml.model");
     if (model == "gpt2") kind_ = BPE;
     else if (model == "llama") kind_ = SPM;
+    else if (model == "gemma4") kind_ = GEMMA4_BPE;
     else { err = "tokenizer '" + model + "' is not supported"; return false; }
     const GgufArray *toks = g.get_arr("tokenizer.ggml.tokens");
     if (!toks) { err = "no tokenizer.ggml.tokens"; return false; }
@@ -156,11 +157,12 @@ bool Tokenizer::load(const Gguf &g, std::string &err) {
     }
     bos_ = (int32_t)g.get_int("tokenizer.ggml.bos_token_id", -1);
     eos_ = (int32_t)g.get_int("tokenizer.ggml.eos_token_id", -1);
-    add_space_prefix_ = g.get_int("tokenizer.ggml.add_space_prefix", 1) != 0;
+    add_space_prefix_ = kind_ != GEMMA4_BPE && g.get_int("tokenizer.ggml.add_space_prefix", 1) != 0;
     std::string pre = g.get_str("tokenizer.ggml.pre", "default");
     // Default BOS behaviour per tokenizer, as llama.cpp has it.
     bool bos_default = kind_ == SPM || pre == "llama3" || pre == "llama-bpe" || pre == "tekken";
     add_bos_ = g.get_int("tokenizer.ggml.add_bos_token", bos_default) != 0;
+    if (kind_ == GEMMA4_BPE) add_bos_ = true;  // as llama.cpp: Gemma 4 goes wrong without it
     digits_ = (pre == "llama3" || pre == "llama-bpe" || pre == "smaug-bpe") ? 3 : 1;
     ignore_merges_ = pre == "llama3" || pre == "llama-bpe" || pre == "tekken";
     // Control (3) and user-defined (4) tokens are matched verbatim in text.
@@ -172,7 +174,8 @@ bool Tokenizer::load(const Gguf &g, std::string &err) {
     for (size_t i = 0; i < specials_.size(); i++)
         if (!specials_[i].first.empty()) by_byte_[(unsigned char)specials_[i].first[0]].push_back((int)i);
     if (eos_ >= 0) eog_.push_back(eos_);
-    for (const char *s : {"<|im_end|>", "<|eot_id|>", "<|eom_id|>", "<|endoftext|>", "<|end|>", "</s>", "<end_of_turn>"}) {
+    for (const char *s : {"<|im_end|>", "<|eot_id|>", "<|eom_id|>", "<|endoftext|>", "<|end|>", "</s>", "<end_of_turn>",
+                          "<turn|>", "<eos>", "<|tool_response>"}) {
         auto it = id_.find(s);
         if (it != id_.end() && std::find(eog_.begin(), eog_.end(), it->second) == eog_.end()) eog_.push_back(it->second);
     }
@@ -193,6 +196,7 @@ void Tokenizer::set_chat_template(const std::string &tmpl) {
     else if (tmpl.find("<|start_header_id|>") != std::string::npos) chat_ = LLAMA3;
     else if (tmpl.find("[INST]") != std::string::npos) chat_ = MISTRAL;
     else if (tmpl.find("<start_of_turn>") != std::string::npos) chat_ = GEMMA;
+    else if (tmpl.find("<|turn>") != std::string::npos) chat_ = GEMMA4;
     else if (id_.count("<|im_start|>")) chat_ = CHATML;
     else chat_ = PLAIN;
 }
@@ -292,8 +296,77 @@ void Tokenizer::encode_spm(const std::string &text, std::vector<int32_t> &out) c
     }
 }
 
+// Gemma 4's BPE, as llama.cpp runs it: spaces become ▁, the text splits
+// into runs of newlines and runs of the rest, a run of newlines is one token
+// where the vocabulary has it, and the rest merges by the merge list's rank
+// over UTF-8 characters (the lowest first, the leftmost of equals), with
+// <0xXX> tokens for bytes no token covers.
+void Tokenizer::encode_gemma4(const std::string &text, std::vector<int32_t> &out) const {
+    std::string t;
+    for (char c : text) t += c == ' ' ? std::string("\xE2\x96\x81") : std::string(1, c);
+    auto emit = [&](const std::string &x) {
+        auto it = id_.find(x);
+        if (it != id_.end()) {
+            out.push_back(it->second);
+            return;
+        }
+        for (unsigned char c : x) {
+            char buf[8];
+            snprintf(buf, sizeof buf, "<0x%02X>", c);
+            auto b = id_.find(buf);
+            if (b != id_.end()) out.push_back(b->second);
+        }
+    };
+    for (size_t at = 0; at < t.size();) {
+        const bool nl = t[at] == '\n';
+        size_t end = nl ? t.find_first_not_of('\n', at) : t.find('\n', at);
+        if (end == std::string::npos) end = t.size();
+        const std::string w = t.substr(at, end - at);
+        at = end;
+        if (nl && id_.count(w)) {
+            out.push_back(id_.at(w));
+            continue;
+        }
+        struct Sym { size_t at, n; int prev, next; };
+        std::vector<Sym> sym;
+        for (size_t i = 0; i < w.size();) {
+            size_t j = i;
+            next_cp(w, j);
+            sym.push_back({i, j - i, (int)sym.size() - 1, (int)sym.size() + 1});
+            i = j;
+        }
+        sym.back().next = -1;
+        struct Pair {
+            int left, right, rank;
+            size_t n;
+            bool operator<(const Pair &o) const { return rank > o.rank || (rank == o.rank && left > o.left); }
+        };
+        std::priority_queue<Pair> q;
+        auto add = [&](int l, int r) {
+            if (l < 0 || r < 0) return;
+            auto it = merge_rank_.find(w.substr(sym[l].at, sym[l].n) + " " + w.substr(sym[r].at, sym[r].n));
+            if (it != merge_rank_.end()) q.push({l, r, it->second, sym[l].n + sym[r].n});
+        };
+        for (int i = 1; i < (int)sym.size(); i++) add(i - 1, i);
+        while (!q.empty()) {
+            const Pair p = q.top();
+            q.pop();
+            Sym &l = sym[p.left], &r = sym[p.right];
+            if (l.n == 0 || r.n == 0 || l.n + r.n != p.n || l.next != p.right) continue;  // merged since
+            l.n += r.n;
+            r.n = 0;
+            l.next = r.next;
+            if (r.next >= 0) sym[r.next].prev = p.left;
+            add(l.prev, p.left);
+            add(p.left, l.next);
+        }
+        for (int i = 0; i >= 0; i = sym[i].next) emit(w.substr(sym[i].at, sym[i].n));
+    }
+}
+
 void Tokenizer::encode_plain(const std::string &text, std::vector<int32_t> &out) const {
     if (kind_ == SPM) return encode_spm(text, out);
+    if (kind_ == GEMMA4_BPE) return encode_gemma4(text, out);
     for (auto &p : pretokenize(text, digits_)) encode_bpe(p, out);
 }
 
@@ -327,7 +400,12 @@ std::string Tokenizer::decode(int32_t tok) const {
     // Control tokens print nothing, but [TOOL_CALLS], which opens Mistral
     // Nemo's tool calls, prints so the parser (tools.cpp) sees them.
     if (type == 3) return s == "[TOOL_CALLS]" ? s : std::string();
-    if (kind_ == SPM) {
+    // Gemma 4's thinking channel, as the <think></think> the rest of ts5 reads.
+    if (kind_ == GEMMA4_BPE && type == 4) {
+        if (s == "<|channel>") return "<think>";
+        if (s == "<channel|>") return "</think>";
+    }
+    if (kind_ == SPM || kind_ == GEMMA4_BPE) {
         if (type == 6 && s.size() == 6) return std::string(1, (char)std::stoi(s.substr(3, 2), nullptr, 16));
         std::string r;
         for (size_t i = 0; i < s.size();) {
@@ -395,6 +473,31 @@ std::string Tokenizer::apply_chat(const std::vector<ChatMessage> &msgs) const {
             }
             if (!sys.empty()) s += "<start_of_turn>user\n" + sys + "<end_of_turn>\n";
             s += "<start_of_turn>model\n";
+            break;
+        }
+        case GEMMA4: {
+            // As Gemma 4's template: a system turn, the assistant is "model",
+            // contents trimmed, and a model turn's thinking left out.
+            auto trim = [](const std::string &x) {
+                const size_t b = x.find_first_not_of(" \t\r\n"), e = x.find_last_not_of(" \t\r\n");
+                return b == std::string::npos ? std::string() : x.substr(b, e - b + 1);
+            };
+            std::string sys;
+            for (auto &m : msgs)
+                if (m.role == "system") sys += (sys.empty() ? "" : "\n\n") + trim(m.content);
+            if (!sys.empty()) s += "<|turn>system\n" + sys + "<turn|>\n";
+            for (auto &m : msgs) {
+                if (m.role == "system") continue;
+                std::string c = m.content;
+                const bool model = m.role == "assistant";
+                if (model)
+                    for (size_t a; (a = c.find("<think>")) != std::string::npos;) {
+                        const size_t b = c.find("</think>", a);
+                        c.erase(a, b == std::string::npos ? std::string::npos : b + 8 - a);
+                    }
+                s += "<|turn>" + std::string(model ? "model" : m.role) + "\n" + trim(c) + "<turn|>\n";
+            }
+            s += "<|turn>model\n";
             break;
         }
         case PLAIN:

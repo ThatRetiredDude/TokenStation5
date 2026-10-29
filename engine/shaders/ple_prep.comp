@@ -1,0 +1,37 @@
+// Gemma 4's per-layer inputs: for token t and layer l (workgroup x: t,
+// y: l), out[l][t][:] = (rmsnorm(proj[t][l*P..] / sqrt(n_embd)) * W +
+// emb[t][l*P..] * sqrt(P)) / sqrt(2), P values (at most 512). proj is
+// per_layer_model_proj times the scaled embedding, emb the token's row of
+// per_layer_token_embd; out is laid out by layer so each layer's inputs are
+// one block.
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Pbuf { float proj[]; };
+layout(std430, binding = 1) readonly buffer Ebuf { float emb[]; };
+layout(std430, binding = 2) readonly buffer Wbuf { float W[]; };
+layout(std430, binding = 3) writeonly buffer Obuf { float O[]; };
+layout(push_constant) uniform PC { uint P, n_layer, n_tok; float eps, proj_scale; } pc;
+shared float red[64];
+
+void main() {
+    const uint t = gl_WorkGroupID.x, l = gl_WorkGroupID.y, tid = gl_LocalInvocationID.x;
+    const uint P = pc.P, src = (t * pc.n_layer + l) * P, dst = (l * pc.n_tok + t) * P;
+    float v[2];
+    float s = 0.0;
+    for (uint k = 0; k < 2; k++) {
+        const uint i = tid + k * 256;
+        v[k] = i < P ? proj[src + i] * pc.proj_scale : 0.0;
+        s += v[k] * v[k];
+    }
+    s = subgroupAdd(s);
+    if (gl_SubgroupInvocationID == 0) red[gl_SubgroupID] = s;
+    barrier();
+    float total = 0.0;
+    for (uint i = 0; i < gl_NumSubgroups; i++) total += red[i];
+    const float r = inversesqrt(total / float(P) + pc.eps);
+    for (uint k = 0; k < 2; k++) {
+        const uint i = tid + k * 256;
+        if (i < P) O[dst + i] = (v[k] * r * W[i] + emb[src + i] * sqrt(float(P))) * 0.70710678;
+    }
+}

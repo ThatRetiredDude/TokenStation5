@@ -1,8 +1,8 @@
 // Tool calling (OpenAI "tools" / "tool_calls") in the formats the models were
 // trained on: the Hermes style of Qwen 2.5 and Qwen3, the JSON style of
-// Llama 3.1 and 3.2, and Mistral Nemo's [TOOL_CALLS]. Each is written the way
-// the model's own chat template writes it, so the model sees what it saw in
-// training. Gemma 3, which has no tool format of its own, gets the Hermes one
+// Llama 3.1 and 3.2, Mistral Nemo's [TOOL_CALLS] and Gemma 4's own. Each is
+// written the way the model's own chat template writes it, so the model sees
+// what it saw in training. Gemma 3, which has no tool format of its own, gets the Hermes one
 // in its own turns.
 #pragma once
 #include <string>
@@ -19,6 +19,7 @@ enum class ToolFormat {
     LLAMA3,  // Llama 3.1/3.2: {"name": ..., "parameters": {...}}, results in the ipython role
     MISTRAL, // Mistral Nemo: [TOOL_CALLS][{"name": ..., "arguments": {...}, "id": ...}], results in [TOOL_RESULTS]
     GEMMA,   // Gemma 3 (no tool format of its own): HERMES's calls and results, in Gemma's turns
+    GEMMA4,  // Gemma 4: <|tool_call>call:name{key:<|"|>text<|"|>}<tool_call|>, results in the same turn
 };
 // Read from the model's chat template.
 ToolFormat tool_format(const Tokenizer &t);
@@ -67,6 +68,11 @@ size_t content_prefix(ToolFormat f, const std::string &text);
 // <think></think>, as the template writes it, and the model answers at once.
 bool can_skip_thinking(const Tokenizer &t);
 extern const char *const kNoThinking;
+
+// A finished turn's text as the model's tokens spell it, to go back into the
+// prompt: Gemma 4's thinking reads as <think></think> (Tokenizer::decode),
+// and goes back as its own channel tokens.
+std::string turn_text(ToolFormat f, const std::string &text);
 
 // "call_" and 24 random letters and digits, as OpenAI's ids look.
 std::string new_call_id();

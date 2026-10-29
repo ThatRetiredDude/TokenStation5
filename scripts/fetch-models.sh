@@ -29,7 +29,7 @@ grep -v '^#' "$root/models.tsv" | while IFS=$'\t' read -r key repo match gib _ct
     arch=$(curl -fsSL ${auth[@]+"${auth[@]}"} "https://huggingface.co/api/models/$repo" |
         python3 -c 'import json, sys; print((json.load(sys.stdin).get("gguf") or {}).get("architecture") or "")' 2> /dev/null || true)
     case $arch in
-        "" | llama | mistral | qwen2 | qwen3 | gemma3) ;;
+        "" | llama | mistral | qwen2 | qwen3 | gemma3 | gemma4) ;;
         *)
             if [ -z "${FORCE:-}" ]; then
                 echo "fetch-models: $key: ts5 can't run $arch models yet; skipped (FORCE=1 fetches it anyway)" >&2

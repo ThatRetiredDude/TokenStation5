@@ -37,6 +37,7 @@
 #include "attn_pf256.spv.h"
 #include "attn_pf_q8.spv.h"
 #include "attn_q8.spv.h"
+#include "get_rows_bf16.spv.h"
 #include "get_rows_f16.spv.h"
 #include "get_rows_f32.spv.h"
 #include "get_rows_q4_0.spv.h"
@@ -47,6 +48,7 @@
 #include "get_rows_q5_k.spv.h"
 #include "get_rows_q6_k.spv.h"
 #include "get_rows_q8_0.spv.h"
+#include "matmul_bf16.spv.h"
 #include "matmul_f16.spv.h"
 #include "matmul_f32.spv.h"
 #include "matmul_q4_0.spv.h"
@@ -65,6 +67,7 @@
 #include "mvt_glu_q4_k.spv.h"
 #include "mvt_q4_k.spv.h"
 #include "mvt_q6_k.spv.h"
+#include "mm_bf16.spv.h"
 #include "mm_f16.spv.h"
 #include "mm_f32.spv.h"
 #include "mm_q4_0.spv.h"
@@ -80,9 +83,12 @@
 #include "mmb_reduce.spv.h"
 #include "mmb16_q4_k.spv.h"
 #include "mmb16_q6_k.spv.h"
+#include "ple_mul.spv.h"
+#include "ple_prep.spv.h"
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
+#include "scale.spv.h"
 #include "swiglu.spv.h"
 #include "log.h"
 
@@ -165,6 +171,7 @@ const char *qname(uint32_t t) {
         case GGML_Q4_K: return "q4_k";
         case GGML_Q5_K: return "q5_k";
         case GGML_Q6_K: return "q6_k";
+        case GGML_BF16: return "bf16";
         default: return nullptr;
     }
 }
@@ -248,10 +255,39 @@ public:
         if (!init_device(err)) return false;
         if (!init_pipelines(err)) return false;
         if (!upload_weights(path, err)) return false;
+        if (!read_out_scales(path, err)) return false;
         return init_buffers(err);
     }
 
     const float *logits_view() const override { return (const float *)logits_.map; }
+
+    // Gemma 4's layer_output_scale, one f32 a layer, for the scale kernel's
+    // push constants.
+    bool read_out_scales(const std::string &path, std::string &err) {
+        out_scale_.assign(hp_.n_layer, 1.0f);
+        FILE *f = nullptr;
+        for (int l = 0; l < hp_.n_layer; l++) {
+            const Weight &w = m_.layers[l].out_scale;
+            if (!w) continue;
+            if (w.type() != GGML_F32) {
+                err = "layer_output_scale is not f32";
+                if (f) fclose(f);
+                return false;
+            }
+            if (!f && !(f = fopen(path.c_str(), "rb"))) {
+                err = "cannot open " + path;
+                return false;
+            }
+            if (fseeko(f, (off_t)(m_.gguf.data_offset + w.info->offset), SEEK_SET) != 0 ||
+                fread(&out_scale_[l], 4, 1, f) != 1) {
+                fclose(f);
+                err = "cannot read " + path;
+                return false;
+            }
+        }
+        if (f) fclose(f);
+        return true;
+    }
 
     int rewind_limit() const override {
         for (int l = 0; l < hp_.n_layer; l++)
@@ -340,7 +376,9 @@ private:
         // GPU check's bar (0.78% at 512 tokens, 0.02-0.04% in f32).
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
         kv_ = kv_type_setting();
-        if (kv_ == KvType::Q8 && !(attn_ok() && hp_.head_dim % 32 == 0)) {
+        bool q8_ok = true;
+        for (int l = 0; l < hp_.n_layer; l++) q8_ok &= attn_ok(l) && hp_.hd(l) % 32 == 0;
+        if (kv_ == KvType::Q8 && !q8_ok) {
             ts5::log_line("ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16");
             kv_ = KvType::F16;
         }
@@ -485,7 +523,7 @@ private:
 #define P(n, nb) if (!make_pipe(#n, spv_##n, sizeof(spv_##n), nb, err)) return false;
         P(matmul_f32, 3) P(matmul_f16, 3) P(matmul_q4_0, 3) P(matmul_q8_0, 3)
         P(matmul_q4_1, 3) P(matmul_q5_0, 3) P(matmul_q5_1, 3)
-        P(matmul_q4_k, 3) P(matmul_q5_k, 3) P(matmul_q6_k, 3)
+        P(matmul_q4_k, 3) P(matmul_q5_k, 3) P(matmul_q6_k, 3) P(matmul_bf16, 3) P(mm_bf16, 3) P(get_rows_bf16, 3)
         P(mm_f32, 3) P(mm_f16, 3) P(mm_q4_0, 3) P(mm_q8_0, 3) P(mm_q4_1, 3) P(mm_q5_0, 3) P(mm_q5_1, 3)
         P(mm_q4_k, 3) P(mm_q5_k, 3) P(mm_q6_k, 3) P(mmb_q4_k, 4) P(mmb_q6_k, 4) P(mmb_reduce, 2)
         P(mmb16_q4_k, 4) P(mmb16_q6_k, 4)
@@ -521,7 +559,7 @@ private:
         if (!make_pipe("attn_dec", spv_attn_dec, sizeof(spv_attn_dec), 5, err, attn_dec_plain_ != 0, lpk) ||
             !make_pipe("attn_dec4", spv_attn_dec4, sizeof(spv_attn_dec4), 5, err, attn_dec_plain_ == 1, lpk))
             return false;
-        P(swiglu, 2)
+        P(swiglu, 2) P(ple_prep, 4) P(ple_mul, 2) P(scale, 1)
 #undef P
         return true;
     }
@@ -607,7 +645,10 @@ private:
     }
 
     bool init_buffers(std::string &err) {
-        const int E = hp_.n_embd, F = hp_.n_ff, HD = hp_.head_dim;
+        const int E = hp_.n_embd, HD = hp_.head_dim;
+        // The largest of each over the layers (Gemma 4's differ).
+        int F = hp_.n_ff;
+        for (const Layer &L : m_.layers) F = std::max(F, (int)L.w_gate.ne1());
         const size_t QD = (size_t)hp_.n_head * HD, KVD = (size_t)hp_.n_head_kv * HD;
         auto mk = [&](Buf &b, size_t bytes, bool host = false, bool exact = false) {
             return create_buf(bytes, host, b, err, exact);
@@ -618,13 +659,25 @@ private:
             !mk(split_, 4ull * SPLIT) ||
             !mk(ids_, 4ull * TMAX, true) || !mk(logits_, 4ull * TMAX * hp_.n_vocab, true))
             return false;
+        // Gemma 4's per-layer inputs: the embeddings' rows and projections
+        // (all layers' values a token), then ple_prep's blocks by layer, and
+        // a layer's gate.
+        if (const int P = hp_.n_embd_ple) {
+            const size_t W = (size_t)P * hp_.n_layer;
+            if (!mk(ple_emb_, 4ull * TMAX * W) || !mk(ple_proj_, 4ull * TMAX * W) || !mk(ple_, 4ull * TMAX * W) ||
+                !mk(ple_g_, 4ull * TMAX * P))
+                return false;
+        }
         if (n_ctx_ <= 0) {
             // As much as fits, in what the weights and activations left, and
             // no more than one buffer can address.
             const int train = hp_.n_ctx_train > 0 ? hp_.n_ctx_train : 32768;
             // Sliding layers' rings are a fixed size, beside the context.
             auto fit = [&](KvType t) {
-                const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * full_layers(hp_) * KVD;
+                uint64_t full_kvd = 0;
+                for (int l = 0; l < hp_.n_layer; l++)
+                    if (!hp_.swa(l) && hp_.has_kv(l)) full_kvd += hp_.kvd(l);
+                const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * full_kvd;
                 const int cap = (int)std::min<uint64_t>(train, props_.limits.maxStorageBufferRange / per_buf);
                 return fit_context(ctx_->device_memory(), allocated_ + fit_reserve_ + kv_ring_bytes(hp_, t),
                                    kv_bytes_per_token(hp_, t), cap);
@@ -654,11 +707,20 @@ private:
         for (int l = 0; l < hp_.n_layer; l++) {
             const int r = hp_.swa(l) ? ring_slots(hp_) : 0;
             ring_[l] = r > 0 && r < n_ctx_ ? (uint32_t)r : 0;
-            const size_t v = (ring_[l] ? ring_[l] : (size_t)n_ctx_) * KVD;
+            // A layer reading another's keys (Gemma 4) has none of its own:
+            // it gets its source's place below.
+            if (!hp_.has_kv(l)) continue;
+            const size_t v = (ring_[l] ? ring_[l] : (size_t)n_ctx_) * hp_.kvd(l);
             if (values.empty() || (values.back() > 0 && (values.back() + v) * per_value > piece)) values.push_back(0);
             layer_buf_[l] = (uint32_t)(values.size() - 1);
             layer_off_[l] = (uint32_t)values.back();
             values.back() += v;
+        }
+        for (int l = 0; l < hp_.n_layer; l++) {
+            const int src = hp_.kv_src(l);
+            layer_off_[l] = layer_off_[src];
+            layer_buf_[l] = layer_buf_[src];
+            ring_[l] = ring_[src];
         }
         // Bytes of K (and as many of V): f16, or 8 bits plus a 2-byte scale per 32.
         // Exact sizes: a 1 GiB block for the scales would take what
@@ -929,10 +991,10 @@ private:
     // Attention of n tokens at pos0 for the layer at cache_off in cache
     // piece kb, into att_. win: a sliding layer's window (0: all keys); ring: its ring's slots
     // (0: one per position). Only attn and attn_pf have them.
-    void attention(int n, int pos0, uint32_t kb, uint32_t cache_off, uint32_t win = 0, uint32_t ring = 0) {
-        const uint32_t HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
+    void attention(int l, int n, int pos0, uint32_t kb, uint32_t cache_off, uint32_t win = 0, uint32_t ring = 0) {
+        const uint32_t HD = hp_.hd(l), H = hp_.n_head, HKV = hp_.hkv(l);
         const float scale = hp_.attn_scale;
-        if (!attn_ok()) {
+        if (!attn_ok(l)) {
             struct { uint32_t head_dim, n_head, n_head_kv, pos0, cache_off; float scale; } pc{
                 HD, H, HKV, (uint32_t)pos0, cache_off, scale};
             dispatch("attention", {&q_, &kc_[kb], &vc_[kb], &att_}, pc, H, (uint32_t)n);
@@ -991,8 +1053,8 @@ private:
 
     // Whether attn fits the model's heads (else the one-workgroup-per-head
     // kernel, which has no sliding window: a model with one always uses attn).
-    bool attn_ok() const {
-        const int HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
+    bool attn_ok(int l) const {
+        const int HD = hp_.hd(l), H = hp_.n_head, HKV = hp_.hkv(l);
         return (attn_fast_ || hp_.swa_window > 0) && HKV > 0 && H % HKV == 0 && HD % 4 == 0 && HD >= 32 && HD <= 256 &&
                (H / HKV) * HD <= 1024;
     }
@@ -1107,8 +1169,7 @@ private:
     // with the logits where want, submitting and waiting for parts of a big
     // batch on the way; the last command buffer is left open in cmd_.
     bool record(int n, int pos0, bool want, bool all, VkCommandBuffer target, std::string &err) {
-        const int E = hp_.n_embd, HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
-        const size_t KVD = (size_t)HKV * HD;
+        const int E = hp_.n_embd, H = hp_.n_head;
         // Big batches are split into several submits so no single submit
         // runs long (the PS5 driver drops the device after 10 s without
         // progress).
@@ -1123,41 +1184,52 @@ private:
             dispatch(std::string("get_rows_") + qname(m_.tok_embd.type()), {&W(m_.tok_embd), &ids_, &x_}, pc,
                      (uint32_t)n);
         }
+        if (m_.ple_embd) ple_inputs(n);
         for (int l = 0; l < hp_.n_layer; l++) {
             const Layer &L = m_.layers[l];
+            const int HD = hp_.hd(l), HKV = hp_.hkv(l);
+            const bool own_kv = hp_.has_kv(l);
             rmsnorm(x_, L.attn_norm, h_, n);
             // q, k and v only read h_: no barrier between them (nor between
             // gate and up below). k and v first: a prompt's q may be split
             // (mmb), with a barrier before its sums are added up, and the
             // small k and v run alongside it rather than after it.
-            no_barrier_ = fuse_;
-            matmul(L.wk, h_, k_, n, false);
-            no_barrier_ = fuse_;
-            matmul(L.wv, h_, v_, n, false);
+            // Gemma 4: a layer reading an earlier layer's keys makes none,
+            // and one without attn_v uses its keys as values.
+            if (own_kv) {
+                no_barrier_ = fuse_;
+                matmul(L.wk, h_, k_, n, false);
+                no_barrier_ = fuse_;
+                matmul(L.wv ? L.wv : L.wk, h_, v_, n, false);
+            }
             matmul(L.wq, h_, q_, n, false);
             const uint32_t cache_off = layer_off_[l], kb = layer_buf_[l];
             const bool swa = hp_.swa(l);
+            // Gemma 4's proportional RoPE is for its full layers; Llama 3.1's
+            // divisors are for every layer.
+            const bool freqs = m_.rope_freqs && !(hp_.arch == "gemma4" && swa);
             {
                 struct {
                     uint32_t head_dim, n_head, n_head_kv, pos0, rope_dims, neox, has_bias, has_norm, cache_off;
                     float rope_base, eps;
                     uint32_t has_freqs, ring;
                     float rope_scale;
-                } pc{(uint32_t)HD, (uint32_t)H, (uint32_t)HKV, (uint32_t)pos0, (uint32_t)hp_.rope_dims,
+                    uint32_t v_norm;
+                } pc{(uint32_t)HD, (uint32_t)H, (uint32_t)HKV, (uint32_t)pos0, (uint32_t)hp_.rdims(l),
                      hp_.rope_neox ? 1u : 0u, L.bq ? 1u : 0u, L.q_norm ? 1u : 0u, cache_off,
-                     swa ? hp_.rope_base_swa : hp_.rope_base, hp_.rms_eps, m_.rope_freqs ? 1u : 0u, ring_[l],
-                     swa ? 1.0f : hp_.rope_scale};
+                     swa ? hp_.rope_base_swa : hp_.rope_base, hp_.rms_eps, freqs ? 1u : 0u, ring_[l],
+                     swa ? 1.0f : hp_.rope_scale, hp_.v_norm ? 1u : 0u};
                 const Buf &bq = L.bq ? W(L.bq) : dummy_, &bk = L.bk ? W(L.bk) : dummy_, &bv = L.bv ? W(L.bv) : dummy_;
                 const Buf &nq = L.q_norm ? W(L.q_norm) : dummy_, &nk = L.k_norm ? W(L.k_norm) : dummy_;
                 const Buf &ff = m_.rope_freqs ? W(m_.rope_freqs) : dummy_;
                 if (kv_ == KvType::Q8)
                     dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
-                             (uint32_t)(H + HKV), (uint32_t)n);
+                             (uint32_t)(H + (own_kv ? HKV : 0)), (uint32_t)n);
                 else
                     dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ff}, pc,
-                             (uint32_t)(H + HKV), (uint32_t)n);
+                             (uint32_t)(H + (own_kv ? HKV : 0)), (uint32_t)n);
             }
-            attention(n, pos0, kb, cache_off, swa ? (uint32_t)hp_.swa_window : 0, ring_[l]);
+            attention(l, n, pos0, kb, cache_off, swa ? (uint32_t)hp_.swa_window : 0, ring_[l]);
             // Gemma normalizes attention's output before it joins the residual.
             if (L.post_attn_norm) {
                 matmul(L.wo, att_, h_, n, false);
@@ -1170,7 +1242,7 @@ private:
                 no_barrier_ = fuse_;
                 matmul(L.w_gate, h_, g_, n, false);
                 matmul(L.w_up, h_, u_, n, false);
-                struct { uint32_t n, gelu; } pc{(uint32_t)((size_t)n * hp_.n_ff), hp_.gelu ? 1u : 0u};
+                struct { uint32_t n, gelu; } pc{(uint32_t)((size_t)n * L.w_gate.ne1()), hp_.gelu ? 1u : 0u};
                 dispatch("swiglu", {&g_, &u_}, pc, std::min<uint32_t>(65535, (pc.n + 255) / 256));
             }
             if (L.post_ffn_norm) {
@@ -1178,6 +1250,19 @@ private:
                 rmsnorm(h_, L.post_ffn_norm, x_, n, 0, true);
             } else {
                 matmul(L.w_down, g_, x_, n, true);
+            }
+            if (L.ple_gate) {
+                // Gemma 4's per-layer input: x += post_norm(proj(gelu(gate x) * input)).
+                const uint32_t P = (uint32_t)hp_.n_embd_ple;
+                matmul(L.ple_gate, x_, ple_g_, n, false);
+                struct { uint32_t n, off; } mpc{(uint32_t)n * P, (uint32_t)l * (uint32_t)n * P};
+                dispatch("ple_mul", {&ple_g_, &ple_}, mpc, std::min<uint32_t>(65535, (mpc.n + 255) / 256));
+                matmul(L.ple_proj, ple_g_, h_, n, false);
+                rmsnorm(h_, L.ple_norm, x_, n, 0, true);
+            }
+            if (L.out_scale) {
+                struct { uint32_t n; float s, cap; } spc{(uint32_t)(n * E), out_scale_[l], 0.0f};
+                dispatch("scale", {&x_}, spc, std::min<uint32_t>(65535, (spc.n + 255) / 256));
             }
             if (per_flush && (l + 1) % per_flush == 0 && l + 1 < hp_.n_layer) {
                 if (!flush(err)) return false;
@@ -1189,8 +1274,28 @@ private:
             const int nout = all ? n : 1;
             rmsnorm(x_, m_.out_norm, h_, nout, all ? 0 : (uint32_t)(n - 1));
             matmul(m_.output, h_, logits_, nout, false);
+            if (hp_.logit_softcap > 0) {
+                struct { uint32_t n; float s, cap; } spc{(uint32_t)nout * (uint32_t)hp_.n_vocab, 1.0f, hp_.logit_softcap};
+                dispatch("scale", {&logits_}, spc, std::min<uint32_t>(65535, (spc.n + 255) / 256));
+            }
         }
         return true;
+    }
+
+    // Gemma 4's per-layer inputs for the n tokens in ids_ into ple_
+    // (ple_prep.comp), from x_, the scaled embeddings.
+    void ple_inputs(int n) {
+        const uint32_t P = (uint32_t)hp_.n_embd_ple, NL = (uint32_t)hp_.n_layer;
+        const Weight &pe = m_.ple_embd;
+        {
+            struct { uint32_t ncols, row_bytes; float scale; } pc{P * NL, (uint32_t)pe.info->row_bytes(), 1.0f};
+            no_barrier_ = fuse_;
+            dispatch(std::string("get_rows_") + qname(pe.type()), {&W(pe), &ids_, &ple_emb_}, pc, (uint32_t)n);
+        }
+        matmul(m_.ple_proj, x_, ple_proj_, n, false);
+        struct { uint32_t P, n_layer, n_tok; float eps, proj_scale; } pc{
+            P, NL, (uint32_t)n, hp_.rms_eps, 1.0f / std::sqrt((float)hp_.n_embd)};
+        dispatch("ple_prep", {&ple_proj_, &ple_emb_, &W(m_.ple_proj_norm), &ple_}, pc, (uint32_t)n, NL);
     }
 
     Fns vk;
@@ -1316,6 +1421,8 @@ private:
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
     Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_;
+    Buf ple_emb_, ple_proj_, ple_, ple_g_;  // Gemma 4's per-layer inputs
+    std::vector<float> out_scale_;          // Gemma 4: each layer's layer_output_scale
     std::vector<Buf> kc_, vc_, ks_, vs_;  // the KV cache's pieces
     // Each layer's first cache element and piece, and a sliding layer's ring slots (0: none).
     std::vector<uint32_t> layer_off_, layer_buf_, ring_;
@@ -1370,19 +1477,30 @@ static uint64_t kv_bytes(uint64_t values, KvType kv) {
     return kv == KvType::Q8 ? values + values / 16 : kv == KvType::F16 ? 2 * values : 4 * values;
 }
 
+// Values of K (or V) per position over the layers that keep keys of their
+// own, the full ones or the sliding ones.
+static uint64_t kv_values(const HParams &hp, bool sliding) {
+    uint64_t v = 0;
+    for (int l = 0; l < hp.n_layer; l++)
+        if (hp.has_kv(l) && hp.swa(l) == sliding) v += (uint64_t)hp.kvd(l);
+    return v;
+}
+
 uint64_t kv_bytes_per_token(const HParams &hp, KvType kv) {
-    return kv_bytes(2ull * full_layers(hp) * hp.n_head_kv * hp.head_dim, kv);  // K and V
+    return kv_bytes(2ull * kv_values(hp, false), kv);  // K and V
 }
 
 uint64_t kv_ring_bytes(const HParams &hp, KvType kv) {
-    return kv_bytes(2ull * (hp.n_layer - full_layers(hp)) * ring_slots(hp) * hp.n_head_kv * hp.head_dim, kv);
+    return kv_bytes(2ull * kv_values(hp, true) * ring_slots(hp), kv);
 }
 
 uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
     const uint64_t T = VkBackend::TMAX, E = hp.n_embd, F = hp.n_ff;
     const uint64_t QD = (uint64_t)hp.n_head * hp.head_dim, KVD = (uint64_t)hp.n_head_kv * hp.head_dim;
-    const uint64_t act =
-        4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab) + 4 * (VkBackend::PART + VkBackend::SPLIT);
+    // Gemma 4's per-layer inputs: three blocks of all layers' values and a gate.
+    const uint64_t ple = hp.n_embd_ple ? (3ull * hp.n_layer + 1) * hp.n_embd_ple : 0;
+    const uint64_t act = 4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab + ple) +
+                         4 * (VkBackend::PART + VkBackend::SPLIT);
     const uint64_t gib = 1ull << 30;
     return (weight_bytes + act + gib - 1) / gib * gib + kv_ring_bytes(hp, KvType::F16);
 }
