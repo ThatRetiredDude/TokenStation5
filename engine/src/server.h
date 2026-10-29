@@ -70,6 +70,7 @@ public:
         // what it doesn't set: the row's, else SampleParams'.
         KnownMatch known;
         SampleParams sampling;
+        bool think = true;  // a model that can skip its thinking: whether it thinks when a request doesn't say
         std::mutex stats;
         Activity activity;
         // Activity's live counters, kept without a lock: the generating

@@ -151,8 +151,11 @@ case $cmd in
     install)
         app="$root/build/ps5/$id"
         [ -f "$app/eboot.bin" ] || { echo "ts5-ps5: build it first: ps5/build.sh" >&2; exit 2; }
-        # Files of a running title cannot be replaced.
-        put_text quit "" 2> /dev/null && sleep 3 || true
+        # Files of a running title cannot be replaced. A closed one gets no
+        # quit file (it would sit there until the next start clears it).
+        if [ "$(health_code)" != 000 ]; then
+            put_text quit "" 2> /dev/null && sleep 3 || true
+        fi
         # File by file: the models, args and logs in the folder stay.
         (cd "$app" && find . -type f | sort | while read -r f; do
             curl -sS --ftp-create-dirs -T "$f" "$ftp$dir/${f#./}"
