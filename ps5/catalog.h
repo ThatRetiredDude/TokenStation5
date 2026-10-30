@@ -1,5 +1,6 @@
 // What TokenStation5 can download on the console (downloads.h): the models
-// on the Models page, and the speech model and voices for Settings. Each is
+// on the Models page, the speech model and voices for Settings, and the
+// picture models' files (images.h), which go in its images folder. Each is
 // pinned to a commit on Hugging Face with its size and SHA-256, and a model
 // carries the header fields its memory estimate reads (library.h), so a row
 // can say how much memory the model needs before it's on the PS5.
@@ -10,14 +11,14 @@
 namespace app {
 
 struct CatalogEntry {
-    enum Kind { Model, Speech, Voice } kind;
+    enum Kind { Model, Speech, Voice, Image } kind;
     const char *key;       // its row in models.tsv, or its line in scripts/catalog.py
     const char *name;      // on screen; a model's general.name
     const char *good_for;  // a model's, on screen
     const char *same;      // lower case: a file on the PS5 whose name has it is this one already
     const char *repo;      // on huggingface.co
     const char *path;      // the file in the repo
-    const char *file;      // its name on the PS5, in the models folder
+    const char *file;      // its name on the PS5, in the models folder (an Image's: "images/" and it)
     const char *commit;    // the repo's commit it is pinned to
     uint64_t bytes;
     const char *sha256;    // hex
@@ -71,6 +72,30 @@ inline const CatalogEntry kCatalog[] = {
      "simonfxr/kokoro.cpp-GGUF", "voices/kokoro-voice-bf_emma.gguf",
      "kokoro-voice-bf_emma.gguf",
      "c64650d0950e0b718b6eeb2f18620e25daf5c90b", 522560u, "78d519c9bfd34b5e15475169d0757cc77a8a3053d05dce65d3fcb77bf6743448"},
+    {CatalogEntry::Image, "sd15", "Stable Diffusion 1.5", "", "stable-diffusion-v1-5-pruned-emaonly-q8_0.gguf",
+     "second-state/stable-diffusion-v1-5-GGUF", "stable-diffusion-v1-5-pruned-emaonly-Q8_0.gguf",
+     "images/stable-diffusion-v1-5-pruned-emaonly-Q8_0.gguf",
+     "031b5f5df991f511b3f5fa8fed6d99048ababb69", 1763578176u, "d0555243938c62faeefb4ac93f6c7a053ad373a4290c5256bce229aeb193bf94"},
+    {CatalogEntry::Image, "sdxl-lightning", "SDXL-Lightning 4-step", "", "sdxl_lightning_4step.safetensors",
+     "ByteDance/SDXL-Lightning", "sdxl_lightning_4step.safetensors",
+     "images/sdxl_lightning_4step.safetensors",
+     "c9a24f48e1c025556787b0c58dd67a091ece2e44", 6938040682u, "43f0501ac4ffcef84f3fc32a47779f24c181647fa97ef7f5ec4428107d732ae9"},
+    {CatalogEntry::Image, "sdxl-vae", "SDXL picture decoder", "", "sdxl_vae-fp16-fix.safetensors",
+     "madebyollin/sdxl-vae-fp16-fix", "sdxl_vae.safetensors",
+     "images/sdxl_vae-fp16-fix.safetensors",
+     "207b116dae70ace3637169f1ddd2434b91b3a8cd", 334641162u, "235745af8d86bf4a4c1b5b4f529868b37019a10f7c0b2e79ad0abca3a22bc6e1"},
+    {CatalogEntry::Image, "z-image-turbo", "Z-Image-Turbo", "", "z_image_turbo-q4_k.gguf",
+     "leejet/Z-Image-Turbo-GGUF", "z_image_turbo-Q4_K.gguf",
+     "images/z_image_turbo-Q4_K.gguf",
+     "c61c0e422dc8b541b7548cf33a4ef8302b0f8085", 3864250304u, "14b375ab4f226bc5378f68f37e899ef3c2242b8541e61e2bc1aff40976086fbd"},
+    {CatalogEntry::Image, "z-image-text", "Z-Image text reader", "", "qwen3-4b-instruct-2507-q4_k_m.gguf",
+     "unsloth/Qwen3-4B-Instruct-2507-GGUF", "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+     "images/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+     "a06e946bb6b655725eafa393f4a9745d460374c9", 2497281120u, "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597"},
+    {CatalogEntry::Image, "z-image-vae", "Z-Image picture decoder", "", "flux-ae.safetensors",
+     "Comfy-Org/z_image_turbo", "split_files/vae/ae.safetensors",
+     "images/flux-ae.safetensors",
+     "6fc90a3b1b653e935a0d175e260736de25b84df5", 335304388u, "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"},
 };
 
 }  // namespace app

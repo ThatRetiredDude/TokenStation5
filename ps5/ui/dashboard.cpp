@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "images.h"
 #include "known_good.h"
 #include "pad.h"
 #include "plain.h"
@@ -27,6 +28,8 @@ constexpr int DX = RX + 32, DW = RW - 64;
 constexpr int CLW = 500, CX = LX + CLW + 24, CW = 1848 - CX, CB = 884, IY = 900, IH = AY + AH - 900;
 // The settings page: two panels down to where the activity panel ends.
 constexpr int SB = AY + AH;
+// The Pictures page: the choices, then the picture.
+constexpr int PICW = 640, PICX = LX + PICW + 24;
 
 std::string lower(std::string s) {
     for (auto &c : s) c = (char)tolower((unsigned char)c);
@@ -186,6 +189,7 @@ const char *page_name(Dashboard::Page p) {
     return p == Dashboard::Home     ? "Home"
            : p == Dashboard::Models ? "Models"
            : p == Dashboard::Chat   ? "Chat"
+           : p == Dashboard::Pictures ? "Pictures"
            : p == Dashboard::Settings ? "Settings"
                                       : "Logs";
 }
@@ -209,19 +213,44 @@ const app::UsageSums *week_of(const View &v, const std::string &name) {
     return it == v.usage->week.end() ? nullptr : &it->second;
 }
 
+// A picture model (images.h): on the PS5 whole, and the files it still needs.
+bool picture_here(const View &v, const app::ImageModel &m) {
+    return std::find(v.pictures.begin(), v.pictures.end(), m.key) != v.pictures.end();
+}
+
+std::vector<std::string> picture_missing(const View &v, const app::ImageModel &m) {
+    const auto it = v.picture_missing.find(m.key);
+    return it == v.picture_missing.end() ? app::image_model_keys(m) : it->second;
+}
+
+uint64_t picture_bytes(const app::ImageModel &m) {
+    uint64_t n = 0;
+    for (const std::string &k : app::image_model_keys(m))
+        if (const app::CatalogEntry *e = app::Downloads::find(k)) n += e->bytes;
+    return n;
+}
+
+// Its download: the files it still needs, as one.
+app::Download picture_download(const View &v, const app::ImageModel &m) {
+    return app::joined(picture_missing(v, m), v.downloads);
+}
+
 }  // namespace
 
 struct Dashboard::Item {
-    enum Kind { Model, Header, Catalog, Empty, Search } kind;
-    int index;  // into View::models or the catalog (app::catalog_at); a Header's: 0 DOWNLOAD, 1 HUGGING FACE
+    enum Kind { Model, Header, Catalog, Empty, Search, Picture } kind;
+    // Into View::models, the catalog (app::catalog_at) or app::kImageModels;
+    // a Header's: 0 DOWNLOAD, 1 HUGGING FACE, 2 PICTURES
+    int index;
     int h;
     std::string key;
+    bool selectable() const { return kind == Model || kind == Catalog || kind == Search || kind == Picture; }
 };
 
 Dashboard::Dashboard(const Fonts &fonts, const uint8_t *logo, size_t logo_size)
     : title_(fonts.get("title")), h2_(fonts.get("h2")), body_(fonts.get("body")),
       bodyb_(fonts.get("bodyb")), small_(fonts.get("small")), smallb_(fonts.get("smallb")),
-      home_(fonts), logs_(fonts), chat_(fonts), settings_(fonts) {
+      home_(fonts), logs_(fonts), chat_(fonts), settings_(fonts), pictures_(fonts) {
     if (logo && logo_size >= 8 && memcmp(logo, "TS5L", 4) == 0) {
         uint16_t w, h;
         memcpy(&w, logo + 4, 2);
@@ -266,6 +295,14 @@ std::vector<Dashboard::Item> Dashboard::items(const View &v) const {
         out.push_back({Item::Header, 0, 56, ""});
         out.insert(out.end(), more.begin(), more.end());
     }
+    // The picture models, on the PS5 or to download.
+    out.push_back({Item::Header, 2, 56, ""});
+    for (size_t i = 0; i < sizeof app::kImageModels / sizeof app::kImageModels[0]; i++) {
+        const app::ImageModel &m = app::kImageModels[i];
+        const app::Download d = picture_download(v, m);
+        const bool bar = !picture_here(v, m) && (d.done > 0 || d.active());
+        out.push_back({Item::Picture, (int)i, bar ? 100 : 88, std::string("picture:") + m.key});
+    }
     out.push_back({Item::Header, 1, 56, ""});
     out.push_back({Item::Search, 0, 88, "search"});
     out.insert(out.end(), found.begin(), found.end());
@@ -275,7 +312,7 @@ std::vector<Dashboard::Item> Dashboard::items(const View &v) const {
 int Dashboard::selected(const std::vector<Item> &items) const {
     int first = -1;
     for (size_t i = 0; i < items.size(); i++) {
-        if (items[i].kind != Item::Model && items[i].kind != Item::Catalog && items[i].kind != Item::Search) continue;
+        if (!items[i].selectable()) continue;
         if (first < 0) first = (int)i;
         if (items[i].key == selected_key_) return (int)i;
     }
@@ -310,10 +347,12 @@ SettingsInfo Dashboard::settings_info(const View &v) const {
 
 bool Dashboard::animating(const View &v) const {
     if (page_ == Settings || page_ == Home || page_ == Logs) return false;
+    if (page_ == Pictures) return v.pictures_page.making;
     if (page_ == Chat)
         return v.chat.busy || v.voice.phase != app::VoiceState::Idle || v.status.phase == app::Status::Loading;
     return v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
-           v.status.phase == app::Status::Benchmarking || v.api.generating;
+           v.status.phase == app::Status::Benchmarking || v.status.phase == app::Status::Picturing ||
+           v.api.generating;
 }
 
 Action Dashboard::press(uint32_t b, const View &v) {
@@ -321,8 +360,11 @@ Action Dashboard::press(uint32_t b, const View &v) {
     if (!b) return a;
     if (confirm_ != NoConfirm) {
         if (b & kCross) {
-            a.kind = confirm_ == ConfirmClose ? Action::Close : confirm_ == ConfirmStop ? Action::Stop : Action::Remove;
-            if (confirm_ == ConfirmRemove) a.path = confirm_path_;
+            a.kind = confirm_ == ConfirmClose  ? Action::Close
+                     : confirm_ == ConfirmStop ? Action::Stop
+                     : confirm_picture_        ? Action::RemovePicture
+                                               : Action::Remove;
+            if (confirm_ == ConfirmRemove) a.path = a.name = confirm_path_;
         }
         if (b & (kCross | kCircle | kOptions)) confirm_ = NoConfirm;
         return a;
@@ -343,6 +385,26 @@ Action Dashboard::press(uint32_t b, const View &v) {
     }
     if (page_ == Logs) {
         logs_.press(b);
+        if (b & kCircle) show(Home);
+        return a;
+    }
+    if (page_ == Pictures) {
+        const PicturesPress p = pictures_.press(b, pictures_info(v));
+        switch (p.kind) {
+            case PicturesPress::Type:
+                a.kind = Action::PictureType;
+                a.value = p.prompt;
+                break;
+            case PicturesPress::Make:
+            case PicturesPress::Again:
+                a.kind = Action::MakePicture;
+                a.name = p.model;
+                a.value = p.prompt;
+                a.path = std::to_string(p.width) + "x" + std::to_string(p.height);
+                break;
+            case PicturesPress::Save: a.kind = Action::SavePicture; break;
+            case PicturesPress::None: break;
+        }
         if (b & kCircle) show(Home);
         return a;
     }
@@ -411,7 +473,7 @@ Action Dashboard::press(uint32_t b, const View &v) {
     }
     auto step = [&](int d) {
         for (int i = sel + d; i >= 0 && i < (int)list.size(); i += d)
-            if (list[i].kind == Item::Model || list[i].kind == Item::Catalog || list[i].kind == Item::Search) return i;
+            if (list[i].selectable()) return i;
         return sel;
     };
     if (b & kUp) sel = step(-1);
@@ -431,6 +493,24 @@ Action Dashboard::press(uint32_t b, const View &v) {
         else if ((b & kSquare) && !d.active() && d.done > 0) a.kind = Action::RemovePart;
         return a;
     }
+    if (it.kind == Item::Picture) {
+        const app::ImageModel &m = app::kImageModels[it.index];
+        if (picture_here(v, m)) {
+            if ((b & kRight) && v.status.phase != app::Status::Picturing) {
+                confirm_ = ConfirmRemove;
+                confirm_picture_ = true;
+                confirm_name_ = m.name;
+                confirm_path_ = m.key;
+                confirm_bytes_ = picture_bytes(m);
+            }
+            return a;
+        }
+        const app::Download d = picture_download(v, m);
+        a.keys = picture_missing(v, m);
+        if (b & kCross) a.kind = d.active() ? Action::StopDownload : Action::Download;
+        else if ((b & kSquare) && !d.active() && d.done > 0) a.kind = Action::RemovePart;
+        return a;
+    }
     if ((b & kSquare) && it.kind == Item::Model && cant_run(v.models[it.index])) {
         show_problems();
         return a;
@@ -438,13 +518,15 @@ Action Dashboard::press(uint32_t b, const View &v) {
     if ((b & kRight) && it.kind == Item::Model && removable(v, v.models[it.index])) {
         const app::ModelInfo &m = v.models[it.index];
         confirm_ = ConfirmRemove;
+        confirm_picture_ = false;
         confirm_name_ = m.name;
         confirm_path_ = m.path;
         confirm_bytes_ = m.size;
         return a;
     }
     const bool busy = v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
-                      v.status.phase == app::Status::Benchmarking || v.status.queued > 0;
+                      v.status.phase == app::Status::Benchmarking || v.status.phase == app::Status::Picturing ||
+                      v.status.queued > 0;
     if (busy) return a;
     if (it.kind == Item::Model && v.models[it.index].runnable) {
         a.path = v.models[it.index].path;
@@ -471,6 +553,7 @@ void Dashboard::draw_background(Canvas &c) {
             case Models: panels = {{LX, PT, LW, PB - PT}, {RX, PT, RW, PB - PT}, {LX, AY, 1848 - LX, AH}}; break;
             case Chat: panels = {{LX, PT, CLW, AY + AH - PT}, {CX, PT, CW, CB - PT}, {CX, IY, CW, IH}}; break;
             case Settings: panels = {{LX, PT, LW, SB - PT}, {RX, PT, RW, SB - PT}}; break;
+            case Pictures: panels = {{LX, PT, PICW, SB - PT}, {PICX, PT, 1848 - PICX, SB - PT}}; break;
             case Logs: panels = {{LX, PT, 1848 - LX, SB - PT}}; break;
         }
         Canvas bg(W, H);
@@ -502,6 +585,7 @@ void Dashboard::draw_header(Canvas &c, const View &v) {
         case app::Status::Loading: state = "LOADING", col = kAmber; break;
         case app::Status::Checking: state = "GPU CHECK", col = kAccent; break;
         case app::Status::Benchmarking: state = "SPEED TEST", col = kAccent; break;
+        case app::Status::Picturing: state = "PICTURE", col = kAccent; break;
         case app::Status::Serving: state = "READY", col = kGreen; break;
         case app::Status::Idle: break;
     }
@@ -519,15 +603,16 @@ void Dashboard::draw_header(Canvas &c, const View &v) {
 
 // The pages, as tabs right of the title, with the button that switches them.
 void Dashboard::draw_tabs(Canvas &c) {
-    int x = 700;
+    // Six tabs, clear of the subtitle on the left and the address on the right.
+    int x = 580;
     const int y = 140;
     x += key_cap(c, smallb_, x, y - 2, "L1") + 24;
-    for (Page p : {Home, Models, Chat, Settings, Logs}) {
+    for (Page p : {Home, Models, Chat, Pictures, Settings, Logs}) {
         const char *name = page_name(p);
         const int w = Canvas::measure(bodyb_, name);
         c.text(bodyb_, x, y, name, p == page_ ? kText : kText2);
         if (p == page_) c.round_rect((float)x, 163, (float)w, 5, 2.5f, kAccent);
-        x += w + 40;
+        x += w + 32;
     }
 }
 
@@ -560,7 +645,8 @@ void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &lis
         const bool is_sel = (int)i == sel;
         const int right = LIST_X + LIST_W - 24;
         if (it.kind == Item::Header) {
-            c.text(smallb_, LIST_X + 8, ry + 40, it.index == 1 ? "HUGGING FACE" : "DOWNLOAD", kMuted);
+            c.text(smallb_, LIST_X + 8, ry + 40,
+                   it.index == 1 ? "HUGGING FACE" : it.index == 2 ? "PICTURES" : "DOWNLOAD", kMuted);
             continue;
         }
         if (it.kind == Item::Empty) {
@@ -602,9 +688,25 @@ void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &lis
             c.text(small_, LIST_X + 24, ry + 72, line, lc, LIST_W - 48);
             continue;
         }
-        if (it.kind == Item::Catalog) {
-            const app::CatalogEntry &e = app::catalog_at(it.index);
-            const app::Download d = download_of(v, e.key);
+        if (it.kind == Item::Picture && picture_here(v, app::kImageModels[it.index])) {
+            const app::ImageModel &m = app::kImageModels[it.index];
+            const bool making = v.status.phase == app::Status::Picturing && v.status.job_model == m.key;
+            const int pl = making ? pill(c, smallb_, right, ry + 14, "PICTURE", kAccent)
+                                  : pill(c, smallb_, right, ry + 14, "READY", kGreen);
+            c.text(bodyb_, LIST_X + 24, ry + 40, m.name, kText, pl - 16 - (LIST_X + 24));
+            c.text(small_, LIST_X + 24, ry + 72,
+                   std::string(m.good_for) + "  \xC2\xB7  " + app::format_bytes(picture_bytes(m)), kText2,
+                   LIST_W - 48);
+            continue;
+        }
+        if (it.kind == Item::Catalog || it.kind == Item::Picture) {
+            const bool pic = it.kind == Item::Picture;
+            const app::ImageModel *pm = pic ? &app::kImageModels[it.index] : nullptr;
+            const app::CatalogEntry *ce = pic ? nullptr : &app::catalog_at(it.index);
+            const std::string row_name = pic ? pm->name : ce->name;
+            const std::string row_good = pic ? pm->good_for : good_for(*ce);
+            const uint64_t row_bytes = pic ? picture_bytes(*pm) : ce->bytes;
+            const app::Download d = pic ? picture_download(v, *pm) : download_of(v, ce->key);
             using D = app::Download;
             std::string tag = "DOWNLOAD", line;
             Color tc = kAccent, lc = kText2;
@@ -612,7 +714,7 @@ void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &lis
             snprintf(pc, sizeof pc, "%d%%", app::percent(d));
             switch (d.phase) {
                 case D::None:
-                    line = std::string(good_for(e)) + "  \xC2\xB7  " + app::format_bytes(e.bytes) + " download";
+                    line = row_good + "  \xC2\xB7  " + app::format_bytes(row_bytes) + " download";
                     lc = kMuted;
                     break;
                 case D::Queued:
@@ -642,7 +744,7 @@ void Dashboard::draw_list(Canvas &c, const View &v, const std::vector<Item> &lis
                     break;
             }
             const int pl = pill(c, smallb_, right, ry + 14, tag, tc);
-            c.text(bodyb_, LIST_X + 24, ry + 40, e.name, d.phase == D::None ? kText2 : kText, pl - 16 - (LIST_X + 24));
+            c.text(bodyb_, LIST_X + 24, ry + 40, row_name, d.phase == D::None ? kText2 : kText, pl - 16 - (LIST_X + 24));
             c.text(small_, LIST_X + 24, ry + 72, line, lc, LIST_W - 48);
             if (it.h > 88) {
                 // The progress bar along the foot of the row.
@@ -720,7 +822,8 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
         }
     };
     const bool busy = v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
-                      v.status.phase == app::Status::Benchmarking || v.status.queued > 0;
+                      v.status.phase == app::Status::Benchmarking || v.status.phase == app::Status::Picturing ||
+                      v.status.queued > 0;
 
     // MEMORY NEEDED, its label's baseline at y: a meter and a line.
     auto memory = [&](int y, uint64_t need, const app::ModelInfo::Ctx &ctx, bool about) {
@@ -857,6 +960,88 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
                  {kGlyphCircle, "Home", true}});
         return;
     }
+    if (it.kind == Item::Picture) {
+        using D = app::Download;
+        const app::ImageModel &m = app::kImageModels[it.index];
+        const bool here = picture_here(v, m);
+        const app::Download d = picture_download(v, m);
+        c.text(h2_, DX, 244, m.name, kText, DW);
+        const char *state = here                    ? "On your PS5, ready for apps"
+                            : d.phase == D::None    ? "Not on your PS5 yet"
+                            : d.phase == D::Queued  ? "Waiting to download"
+                            : d.phase == D::Running ? (d.held ? "Waiting while a model loads" : "Downloading")
+                            : d.phase == D::Retrying ? "Waiting to try again"
+                                                     : "Stopped";
+        c.text(small_, DX, 278, state, here ? kGreen : kText2, DW);
+        cell(DX, 306, "GOOD FOR", m.good_for);
+        cell(col2, 306, here ? "SIZE" : "DOWNLOAD SIZE", app::format_bytes(picture_bytes(m)));
+        char pics[64];
+        snprintf(pics, sizeof pics, "%d by %d, %d steps", m.size, m.size, m.steps);
+        cell(DX, 390, "PICTURES", pics);
+        cell(col2, 390, "LICENSE", m.license);
+
+        // What the GPU needs while it makes a picture: the chat model lets
+        // go of the GPU for it, so it's against all of it.
+        const bool fits = !v.gpu_memory || m.memory <= v.gpu_memory;
+        label(c, smallb_, DX, 486, "MEMORY NEEDED");
+        c.round_rect((float)DX, 502, (float)DW, 14, 7, kTrack);
+        if (v.gpu_memory)
+            c.round_rect((float)DX, 502, std::max(14.0f, DW * std::min(1.0f, (float)m.memory / (float)v.gpu_memory)),
+                         14, 7, fits ? kAccent : kRed);
+        std::string mem = "About " + app::format_bytes(m.memory);
+        if (v.gpu_memory) mem += " of the GPU's " + app::format_bytes(v.gpu_memory);
+        c.text(small_, DX, 548, fits ? mem + "  \xC2\xB7  the chat model makes room" : "Too big for this PS5's GPU",
+               fits ? kText2 : kRed, DW);
+
+        int y = 640;
+        auto para = [&](const std::string &text, Color col) {
+            for (auto &line : wrap(small_, text, DW)) {
+                if (y > 750) break;
+                c.text(small_, DX, y, line, col);
+                y += 32;
+            }
+        };
+        if (here) {
+            label(c, smallb_, DX, 600, "MAKING PICTURES");
+            para("Apps ask for pictures at " + v.url + "/v1/images/generations, with \"model\": \"" + m.key +
+                     "\". The chat model stops while a picture is made, then comes back by itself.",
+                 kText2);
+            if (v.status.phase != app::Status::Picturing && y <= 750)
+                c.text(small_, DX, y + 8, "\xE2\x86\x92  removes it from your PS5.", kMuted, DW);
+            buttons({{kGlyphCircle, "Home", true}});
+            return;
+        }
+        label(c, smallb_, DX, 600, "DOWNLOAD");
+        if (d.phase == D::None) {
+            text_glyph(c, body_, DX, 644, "Press", kGlyphCross, "to download it to your PS5.", kText);
+            if (v.have_free)
+                c.text(small_, DX, 684, "Free space on your PS5: " + app::format_bytes(v.free_bytes), kMuted, DW);
+        } else {
+            c.round_rect((float)DX, 616, (float)DW, 14, 7, kTrack);
+            const float f = d.total ? std::min(1.0f, (float)d.done / (float)d.total) : 0;
+            const Color mc = d.phase == D::Failed ? kRed : d.phase == D::Running && !d.held ? kAccent : kText2;
+            if (f > 0) c.round_rect((float)DX, 616, std::max(14.0f, DW * f), 14, 7, mc);
+            c.text(small_, DX, 664, std::to_string(app::percent(d)) + "%  \xC2\xB7  " + app::progress_text(d, true),
+                   kText2, DW);
+            y = 706;
+            switch (d.phase) {
+                case D::Retrying:
+                    para(d.problem + " Trying again in " +
+                             std::to_string(std::max(1, (int)std::ceil(d.retry_at - v.now))) + " s.",
+                         kAmber);
+                    break;
+                case D::Stopped:
+                    text_glyph(c, small_, DX, y, "Stopped. Press", kGlyphCross, "to go on.", kText2);
+                    break;
+                case D::Failed: para(d.problem, kRed); break;
+                default: para("It's ready to use when its files have downloaded.", kText2); break;
+            }
+        }
+        buttons({{kGlyphCross, d.active() ? "Stop" : d.done > 0 ? "Go on" : "Download", true},
+                 {kGlyphSquare, "Delete part", !d.active() && d.done > 0},
+                 {kGlyphCircle, "Home", true}});
+        return;
+    }
     if (it.kind != Item::Model) return;
     const app::ModelInfo &m = v.models[it.index];
     const app::Results r = v.results.count(m.file) ? v.results.at(m.file) : app::Results{};
@@ -939,6 +1124,9 @@ void Dashboard::draw_activity(Canvas &c, const View &v, const Item *sel) {
             line = "Speed test on " + name_of(v, st.job_model) + ": " + (st.step.empty() ? "starting" : st.step) +
                    "  \xC2\xB7  " + took;
             break;
+        case app::Status::Picturing:
+            line = "Making a picture: " + (st.step.empty() ? "starting" : st.step) + "  \xC2\xB7  " + took;
+            break;
         case app::Status::Serving:
             spin = false;
             line = name_of(v, st.serving) + (v.on_network ? " is ready for apps on your network" : " is ready");
@@ -969,11 +1157,15 @@ void Dashboard::draw_activity(Canvas &c, const View &v, const Item *sel) {
 
     const int ax = 1180, aw = 1848 - 32 - ax;
     // Downloading: the room there is for it.
-    if (sel && sel->kind == Item::Catalog) {
+    const bool picture_to_get = sel && sel->kind == Item::Picture && !picture_here(v, app::kImageModels[sel->index]);
+    if (sel && (sel->kind == Item::Catalog || picture_to_get)) {
         if (!v.have_free) return;
-        const app::CatalogEntry &e = app::catalog_at(sel->index);
-        const app::Download d = download_of(v, e.key);
-        const uint64_t total = d.total ? d.total : e.bytes, rest = total > d.done ? total - d.done : 0;
+        const app::Download d = sel->kind == Item::Catalog ? download_of(v, app::catalog_at(sel->index).key)
+                                                           : picture_download(v, app::kImageModels[sel->index]);
+        const uint64_t total = d.total ? d.total
+                               : sel->kind == Item::Catalog ? app::catalog_at(sel->index).bytes
+                                                            : picture_bytes(app::kImageModels[sel->index]);
+        const uint64_t rest = total > d.done ? total - d.done : 0;
         label(c, smallb_, ax, AY + 40, "STORAGE");
         c.text(bodyb_, ax, AY + 78, app::format_bytes(v.free_bytes) + " free", kText, aw);
         if (rest > 0)
@@ -1062,6 +1254,12 @@ void Dashboard::draw_footer(Canvas &c, const View &v, const Item *sel) {
     std::vector<Hint> hints;
     if (sel && sel->kind == Item::Search) {
         hints = {{kGlyphCross, "Search", true}};
+    } else if (sel && sel->kind == Item::Picture && picture_here(v, app::kImageModels[sel->index])) {
+        hints = {{kGlyphCross, "\xE2\x86\x92  Remove", v.status.phase != app::Status::Picturing, true}};
+    } else if (sel && sel->kind == Item::Picture) {
+        const app::Download d = picture_download(v, app::kImageModels[sel->index]);
+        hints = {{kGlyphCross, d.active() ? "Stop the download" : d.done > 0 ? "Go on" : "Download", true},
+                 {kGlyphSquare, "Delete part", !d.active() && d.done > 0}};
     } else if (sel && sel->kind == Item::Catalog) {
         const app::Download d = download_of(v, app::catalog_at(sel->index).key);
         hints = {{kGlyphCross, d.active() ? "Stop the download" : d.done > 0 ? "Go on" : "Download", true},
@@ -1122,6 +1320,48 @@ void Dashboard::draw_chat_footer(Canvas &c, const View &v) {
                  {kGlyphTriangle, v.speaking && !v.chat.busy ? "Stop speaking" : "Stop the reply",
                   v.chat.busy || v.speaking},
                  {kGlyphSquare, "New chat", !v.chat.turns.empty()},
+                 {kGlyphCircle, "Home", true}};
+    for (auto &h : hints) {
+        glyph(c, (float)x + 16, (float)y - 8, h.g, h.on);
+        x += 40 + c.text(small_, x + 40, y, h.text, h.on ? kText2 : kMuted) + 36;
+    }
+    draw_close_hint(c, x, y);
+}
+
+PicturesInfo Dashboard::pictures_info(const View &v) const {
+    PicturesInfo p = v.pictures_page;
+    p.models.clear();
+    for (const std::string &key : v.pictures) {
+        PicturesInfo::Model m;
+        m.key = m.name = key;
+        if (const app::ImageModel *im = app::find_image_model(key)) {
+            m.name = im->name;
+            m.size = im->size;
+            m.fits = !v.gpu_memory || im->memory <= v.gpu_memory;
+        }
+        p.models.push_back(m);
+    }
+    p.gpu_busy = !p.making && (v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
+                               v.status.phase == app::Status::Benchmarking || v.status.phase == app::Status::Picturing ||
+                               v.status.queued > 0);
+    p.now = v.now;
+    return p;
+}
+
+void Dashboard::draw_pictures_footer(Canvas &c, const View &v) {
+    int x = LX;
+    const int y = 1046;
+    x += key_cap(c, smallb_, x, y, "L1") + 12;
+    x += c.text(small_, x, y, page_name(next(Pictures)), kText2) + 40;
+    const PicturesInfo info = pictures_info(v);
+    x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
+    struct {
+        PadGlyph g;
+        std::string text;
+        bool on;
+    } hints[] = {{kGlyphCross, pictures_.cross_hint(info), !info.models.empty()},
+                 {kGlyphTriangle, "Another", info.picture && !info.making},
+                 {kGlyphSquare, "Save it", info.picture && info.saved.empty() && !info.making},
                  {kGlyphCircle, "Home", true}};
     for (auto &h : hints) {
         glyph(c, (float)x + 16, (float)y - 8, h.g, h.on);
@@ -1221,6 +1461,14 @@ void Dashboard::draw(Canvas &c, const View &v) {
     if (page_ == Logs) {
         logs_.draw(c, LX, PT, 1848 - LX, SB - PT, v.version, v.now);
         draw_logs_footer(c);
+        if (confirm_ != NoConfirm) draw_confirm(c);
+        return;
+    }
+    if (page_ == Pictures) {
+        const PicturesInfo info = pictures_info(v);
+        pictures_.draw(c, info, LX, PT, PICW, SB - PT);
+        pictures_.draw_picture(c, info, PICX, PT, 1848 - PICX, SB - PT);
+        draw_pictures_footer(c, v);
         if (confirm_ != NoConfirm) draw_confirm(c);
         return;
     }

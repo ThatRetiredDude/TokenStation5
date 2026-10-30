@@ -55,11 +55,12 @@ SOFTWARE.
 
 `third_party/whisper.cpp` is [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
 1.9.5 with the ggml it carries: the parts that transcribe speech on the CPU,
-with one change of ours to ggml's backend scheduler, so it sets aside less
-memory (`scripts/vendor-whisper.patch`; `third_party/whisper.cpp/VENDOR.md`
-lists the parts). The PS5 title
-links it for speech to text, and so does the Linux build of the title that
-`ps5/host-test.sh` runs; the Linux `ts5` binary doesn't. Its license, in
+and ggml's Vulkan backend with its shaders, which stable-diffusion.cpp makes
+pictures on, with one change of ours to ggml's backend scheduler, so it sets
+aside less memory (`scripts/vendor-whisper.patch`;
+`third_party/whisper.cpp/VENDOR.md` lists the parts). The PS5 title links it
+for speech to text and pictures, and the Linux build of the title that
+`ps5/host-test.sh` runs links it for speech; the Linux `ts5` binary doesn't. Its license, in
 `third_party/whisper.cpp/LICENSE`, covers whisper.cpp and its ggml:
 
 ```
@@ -132,6 +133,30 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+### stable-diffusion.cpp (MIT) and the libraries it carries
+
+`third_party/stable-diffusion.cpp` is
+[stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) at
+`master-1024-77b72a2`, "Copyright (c) 2023 leejet", MIT: the library that
+makes pictures, without the tokenizer data of the text encoders the title
+doesn't run (`scripts/vendor-sd.patch`, `third_party/stable-diffusion.cpp/VENDOR.md`).
+The PS5 title links it for the API's pictures (`ps5/images.cpp`), on
+whisper.cpp's ggml; the Linux `ts5` binary and the title `ps5/host-test.sh`
+builds don't. It carries, in `thirdparty/`:
+
+| Library | License |
+| --- | --- |
+| [nlohmann/json](https://github.com/nlohmann/json), Copyright (c) 2013-2022 Niels Lohmann | MIT |
+| [kuba--/zip](https://github.com/kuba--/zip) and [miniz](https://github.com/richgel999/miniz), Copyright 2013-2014 RAD Game Tools and Valve Software, Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC | The Unlicense; MIT |
+| [Darts-clone](https://github.com/s-yata/darts-clone), Copyright (c) 2008-2011 Susumu Yata | BSD-2-Clause |
+| [stb_image_write](https://github.com/nothings/stb), Copyright (c) 2017 Sean Barrett | MIT or public domain |
+| [utf8proc](https://github.com/JuliaStrings/utf8proc) 2.10.0, Copyright (c) 2014-2021 Steven G. Johnson, Jiahao Chen, Tony Kelman, Jonas Fonseca, and other contributors; Copyright (c) 2009, 2013 Public Software Group e. V., Berlin | MIT, and the Unicode data license for its tables |
+| [Oniguruma](https://github.com/kkos/oniguruma) 6.9.10, Copyright (c) 2002-2021 K.Kosako | BSD-2-Clause |
+
+Their full license texts, stable-diffusion.cpp's own included, are in
+[`licenses/stable-diffusion.cpp.txt`](licenses/stable-diffusion.cpp.txt),
+which every title build carries.
 
 ### lwIP (BSD-3-Clause) and wireguard-lwip (BSD-3-Clause)
 
@@ -514,6 +539,7 @@ revisions. None of their code is stored in this repo.
 | [PS5_PayloadSDK](https://github.com/mihawk-99/PS5_PayloadSDK) | cross toolchain wrapper, system module stubs, platform layer | GPL-3.0-or-later; its `include/freebsd` headers are BSD |
 | [PS5_Mesa](https://github.com/mihawk-99/PS5_Mesa) (Mesa 26.2 with RADV and ACO) | the Vulkan driver, linked in whole | MIT for RADV and most of Mesa; individual files carry their own SPDX identifiers |
 | [LLVM libc++](https://libcxx.llvm.org/) | the C++ standard library | Apache-2.0 WITH LLVM-exception |
+| [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) and [SPIRV-Headers](https://github.com/KhronosGroup/SPIRV-Headers), vulkan-sdk-1.4.363.0 (fetched by `ps5/build.sh`) | `vulkan.hpp` and the SPIR-V definitions ggml's Vulkan backend is compiled with | Apache-2.0 OR MIT; MIT |
 
 The full GPL-3.0 text is in [ps5/LICENSE](ps5/LICENSE). Whoever distributes a
 built title must also offer its corresponding source: this repo at the commit
@@ -529,7 +555,7 @@ driver the system has, such as Mesa (MIT) in CI.
 ## Build tools only
 
 These are used to build or test but are not part of any binary: glslang
-(compiles the shaders), the Khronos Vulkan headers (Apache-2.0 OR MIT), zlib
+and glslc from shaderc (compile the shaders), the Khronos Vulkan headers (Apache-2.0 OR MIT), zlib
 (in PS5_Vulkan's signing tool), Meson, and the Python `gguf` and `numpy`
 packages in the tests.
 
@@ -570,6 +596,22 @@ anyone who redistributes those weights (for example, ships them in a build)
 must pass the terms on; Llama's also asks for "Built with Llama" and its
 notice. The GGUF files come from community quantizers (bartowski, unsloth,
 Qwen); a model card on Hugging Face is the final word on each model's terms.
+
+### Image models
+
+The title makes pictures with Stable Diffusion and similar models in its
+`models/images` folder. None is stored here or shipped in a build. The
+Models page downloads these from Hugging Face when the user asks, and each
+stays under its maker's license, which whoever uses it accepts:
+
+| Model | Files | License |
+|---|---|---|
+| Stable Diffusion 1.5 | [second-state/stable-diffusion-v1-5-GGUF](https://huggingface.co/second-state/stable-diffusion-v1-5-GGUF) | CreativeML OpenRAIL-M (its use restrictions follow the model) |
+| SDXL-Lightning 4-step | [ByteDance/SDXL-Lightning](https://huggingface.co/ByteDance/SDXL-Lightning), with the decoder from [madebyollin/sdxl-vae-fp16-fix](https://huggingface.co/madebyollin/sdxl-vae-fp16-fix) (MIT) | CreativeML OpenRAIL++-M (its use restrictions follow the model) |
+| Z-Image-Turbo | [leejet/Z-Image-Turbo-GGUF](https://huggingface.co/leejet/Z-Image-Turbo-GGUF), with Qwen3 4B Instruct 2507 from [unsloth/Qwen3-4B-Instruct-2507-GGUF](https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF) and the FLUX decoder from [Comfy-Org/z_image_turbo](https://huggingface.co/Comfy-Org/z_image_turbo) | Apache-2.0 |
+
+A model the user copies there themselves is under its own license: SDXL
+Turbo and SD Turbo, for example, are for non-commercial use only.
 
 ### Online services
 

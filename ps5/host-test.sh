@@ -41,7 +41,7 @@ w="$root/third_party/whisper.cpp"
 k="$root/third_party/kokoro.cpp"
 wobj="$work/speech"
 wflags=(-O2 -march=x86-64-v3 -pthread -D_GNU_SOURCE -DNDEBUG -DGGML_USE_CPU -DGGML_USE_CPU_REPACK -DGGML_USE_LLAMAFILE
-    -DGGML_SCHED_MAX_COPIES=4 "-DWHISPER_VERSION=\"$(sed -n 's/^version=//p' "$root/scripts/vendor-whisper.sh")\""
+    -DGGML_SCHED_MAX_COPIES=4 -DGGML_MAX_NAME=160 "-DWHISPER_VERSION=\"$(sed -n 's/^version=//p' "$root/scripts/vendor-whisper.sh")\""
     -DKOKORO_NO_MMAP -I "$w/include" -I "$w/ggml/include" -I "$w/ggml/src" -I "$w/ggml/src/ggml-cpu"
     -I "$k/include" -I "$k/src")
 mkdir -p "$wobj"
@@ -98,12 +98,13 @@ for src in "$lw"/core/*.c "$lw"/core/ipv4/*.c "$wgl"/*.c "$wgl"/crypto/refc/*.c 
 done
 for p in "${pids[@]}"; do wait "$p"; done
 
-c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" "-DTS5_STORE=\"$work/download0\"" \
+# Without stable-diffusion.cpp: the API's pictures say this build makes none.
+c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 -DGGML_MAX_NAME=160 -DTS5_NO_PICTURES "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" "-DTS5_STORE=\"$work/download0\"" \
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" -I "$w/include" -I "$w/ggml/include" \
     -I "$k/include" -I "$root/third_party/qrcodegen" \
     "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks,tools,known_good,net,websearch,log}.cpp \
-    "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup,local_time,keep_models,host_shim}.cpp "$root"/third_party/qrcodegen/qrcodegen.cpp \
-    "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page,logs_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
+    "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup,local_time,keep_models,images,host_shim}.cpp "$root"/third_party/qrcodegen/qrcodegen.cpp \
+    "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page,logs_page,pictures_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -Wa,-I"$root/ps5/tts" "$root/ps5/tts/lexicon_data.S" \
     -x none "${wgobjects[@]}" "$wobj/libts5speech.a" -ldl -o "$work/eboot.bin"
 

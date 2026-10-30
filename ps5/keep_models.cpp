@@ -198,23 +198,44 @@ BroughtBack bring_back_models(const std::string &models, const std::string &titl
         return r;
     }
     r.looked = true;
-    std::vector<std::string> names;
-    if (!ftp.names(old, names)) {
-        r.why = "no models from a last version (" + old + ": " + ftp.text() + ")";
-        return r;
-    }
-    for (const std::string &name : names) {
-        if (skip(name)) continue;
-        struct stat here {};
-        if (stat((models + "/" + name).c_str(), &here) == 0) continue;  // the new folder has it already
-        if (ftp.size(old + "/" + name) < 0) continue;                    // a folder, or gone
-        // RNTO's success is 250, or 226 from the console's ftpsrv.
-        if (ftp.cmd("RNFR " + old + "/" + name) == 350 && ftp.cmd("RNTO " + home + "/models/" + name) / 100 == 2 &&
-            stat((models + "/" + name).c_str(), &here) == 0) {
-            r.moved.push_back(name);
-        } else {
-            r.left++;
-            ts5::log_line("ts5-title: couldn't bring back %s: %s", name.c_str(), ftp.text().c_str());
+    // The models, then the picture models in their own folder (images.h)
+    // and the pictures saved on the Images page, folders the new version
+    // has already, empty.
+    // Each as the title sees it, then as the FTP server does: the last
+    // version's folder, and this one's.
+    const std::string home_dir = models.substr(0, models.rfind('/'));
+    const std::string old_dir = old.substr(0, old.rfind('/'));
+    struct Folder {
+        std::string local, from, to;
+    };
+    const Folder folders[] = {{models, old, home + "/models"},
+                              {models + "/images", old + "/images", home + "/models/images"},
+                              {home_dir + "/pictures", old_dir + "/pictures", home + "/pictures"}};
+    for (const Folder &f : folders) {
+        const std::string &local = f.local, &from = f.from, &to = f.to;
+        const bool first = &f == folders;
+        std::vector<std::string> names;
+        if (!ftp.names(from, names)) {
+            if (first) {
+                r.why = "no models from a last version (" + old + ": " + ftp.text() + ")";
+                return r;
+            }
+            continue;
+        }
+        for (const std::string &name : names) {
+            if (skip(name)) continue;
+            const std::string here_path = local + "/" + name;
+            struct stat here {};
+            if (stat(here_path.c_str(), &here) == 0) continue;  // the new folder has it already
+            if (ftp.size(from + "/" + name) < 0) continue;      // a folder, or gone
+            // RNTO's success is 250, or 226 from the console's ftpsrv.
+            if (ftp.cmd("RNFR " + from + "/" + name) == 350 && ftp.cmd("RNTO " + to + "/" + name) / 100 == 2 &&
+                stat(here_path.c_str(), &here) == 0) {
+                r.moved.push_back(first ? name : local.substr(home_dir.size() + 1) + "/" + name);
+            } else {
+                r.left++;
+                ts5::log_line("ts5-title: couldn't bring back %s: %s", name.c_str(), ftp.text().c_str());
+            }
         }
     }
     return r;

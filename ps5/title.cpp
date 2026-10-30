@@ -66,6 +66,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -81,6 +82,7 @@
 #include "audio_probe.h"
 #include "backup.h"
 #include "keep_models.h"
+#include "local_time.h"
 #include "canvas.h"
 #include "chat.h"
 #include "chat_store.h"
@@ -88,6 +90,7 @@
 #include "display.h"
 #include "downloads.h"
 #include "hf_search.h"
+#include "images.h"
 #include "keys.h"
 #include "library.h"
 #include "log.h"
@@ -172,6 +175,8 @@ constexpr const char *kRestart = TS5_HOME "/restart";
 constexpr const char *kUsage = TS5_HOME "/usage.tsv";
 constexpr const char *kUsageHours = TS5_HOME "/usage-hours.tsv";
 constexpr const char *kKeys = TS5_HOME "/keys.tsv";
+// The pictures saved on the Pictures page (pictures_page.h).
+constexpr const char *kPictures = TS5_HOME "/pictures";
 constexpr const char *kTsFile = TS5_HOME "/tailscale.tsv";  // the PS5's keys on its tailnet (ts/tailscale.h)
 constexpr const char *kChats = TS5_HOME "/chats";  // the Chat page's saved chats (chat_store.h)
 // The version that last started, in the title's own space (keep_models.h).
@@ -184,7 +189,8 @@ constexpr const char *kRequireKey = "TS5_KEYS_REQUIRED";
 constexpr const char *kTailscale = "TS5_TAILSCALE", *kTsServer = "TS5_TS_SERVER", *kTsName = "TS5_TS_NAME",
                      *kTsAuthKey = "TS5_TS_AUTH_KEY";
 // typing_for while the keyboard names a new API key, or takes a search.
-constexpr const char *kNamingKey = "(new key)", *kSearching = "(search)", *kChatSearch = "(chat search)";
+constexpr const char *kNamingKey = "(new key)", *kSearching = "(search)", *kChatSearch = "(chat search)",
+                     *kPicturePrompt = "(picture)";
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
 
 constexpr int kWidth = 1920, kHeight = 1080;
@@ -600,6 +606,8 @@ std::string network_url() {
 
 int main(int, char **) {
     mkdir(kModels, 0777);
+    mkdir(app::image_models_dir(kModels).c_str(), 0777);  // for FTP
+    mkdir(kPictures, 0777);
     rename(kLog, kPrevLog);
     // Both in append mode, so neither writes over the other's lines.
     if (freopen(kLog, "a", stdout)) {
@@ -757,6 +765,35 @@ int main(int, char **) {
     server.set_authorize([&keys, in_tunnel](const std::string &key, const std::string &client, std::string &name) {
         return keys.authorize(key, client, name, in_tunnel(client));
     });
+    // Pictures (POST /v1/images/generations, images.h): a job for the Runner,
+    // made once it exists, which the request's thread waits for.
+    std::atomic<app::Runner *> picture_runner{nullptr};
+    server.set_images([&picture_runner](const ts5::Json &req, int &status) {
+        app::Runner *runner = picture_runner.load();
+        if (!runner) {
+            status = 503;
+            return ts5::error_json("TokenStation5 is starting. Try again in a moment.");
+        }
+        auto task = std::make_shared<app::ImageTask>();
+        std::string err;
+        if (!app::image_ask(req, kModels, task->ask, err)) {
+            status = 400;
+            return ts5::error_json(err);
+        }
+        std::future<void> done = task->done.get_future();
+        app::Job job;
+        job.kind = app::Job::Image;
+        job.path = task->ask.name;
+        job.image = task;
+        runner->push(job);
+        done.wait();
+        if (!task->ok) {
+            status = 500;
+            return ts5::error_json("The picture couldn't be made: " + task->err);
+        }
+        return app::image_reply(task->out);
+    });
+    server.set_image_models([] { return app::image_models(kModels); });
     std::string fresh_key, fresh_key_id;  // a key just made, shown on Settings until the page is left
     app::HfSearch hf;  // the Models page's search
     usage_log.start(TS5_VERSION);
@@ -794,6 +831,7 @@ int main(int, char **) {
     };
     ts_apply();
     app::Runner runner(ctx, server, lib, lib_mutex, notify, network_url);
+    picture_runner = &runner;
     // Models (and, from Settings, the speech model and voice) downloaded on
     // the console, beside whatever the Runner does.
     app::Downloads downloads(kModels, TS5_VERSION, notify);
@@ -902,6 +940,24 @@ int main(int, char **) {
         return s;
     };
     bool lib_changed = true;
+    // The Models page's picture models, and the files each still needs.
+    std::vector<std::string> pictures;
+    std::map<std::string, std::vector<std::string>> picture_missing;
+    auto scan_pictures = [&] {
+        std::vector<std::string> now = app::image_models(kModels);
+        std::map<std::string, std::vector<std::string>> missing;
+        for (const app::ImageModel &m : app::kImageModels) missing[m.key] = app::missing_image_files(kModels, m);
+        if (now == pictures && missing == picture_missing) return false;
+        pictures = std::move(now);
+        picture_missing = std::move(missing);
+        return true;
+    };
+    scan_pictures();
+    // The Pictures page's picture: the one being made, and the last made.
+    std::shared_ptr<app::ImageTask> picture_task;
+    std::future<void> picture_done;
+    ui::PicturesInfo picture_page;
+    std::string picture_png;  // the last one, as its PNG file, to save
     std::atomic<bool> audio_testing{false}, whisper_testing{false}, speak_testing{false};
     // The console's keyboard (text_input.h), for a chat message or a key.
     app::TextInput keyboard;
@@ -961,6 +1017,9 @@ int main(int, char **) {
             if (st == app::TextInput::Done && typing_for.empty()) {
                 const bool sent = !text.empty() && chat.send(text);
                 printf("ts5-title: chat: %s by keyboard (%zu bytes)\n", sent ? "message" : "not sent", text.size());
+            } else if (st == app::TextInput::Done && typing_for == kPicturePrompt) {
+                dash.set_picture_prompt(text);
+                printf("ts5-title: pictures: prompt typed (%zu bytes)\n", text.size());
             } else if (st == app::TextInput::Done && typing_for == kChatSearch) {
                 chat_query = text;  // "" shows every chat again
                 chats_version = 0;
@@ -1057,6 +1116,7 @@ int main(int, char **) {
                 settings_note.kokoro_model = kokoro;
                 lib_changed = true;
             }
+            lib_changed |= scan_pictures();
             std::lock_guard<std::mutex> lk(lib_mutex);
             lib_changed |= lib.scan();
             last_scan = t;
@@ -1099,7 +1159,8 @@ int main(int, char **) {
                 save_args(path, opts);
                 printf("ts5-title: download: starting %s, nothing else was running\n", e->file);
             }
-            if (e->kind != app::CatalogEntry::Model) voice.rescan();
+            if (e->kind == app::CatalogEntry::Speech || e->kind == app::CatalogEntry::Voice) voice.rescan();
+            if (e->kind == app::CatalogEntry::Image) scan_pictures();
         }
         ui::View v;
         v.version = TS5_VERSION;
@@ -1128,6 +1189,31 @@ int main(int, char **) {
         const uint64_t version = runner.version() + downloads.version() + hf.version();
         v.status = runner.status();
         v.events = runner.events();
+        // The Pictures page's picture, once it's made.
+        if (picture_task && picture_done.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            app::ImageTask &pt = *picture_task;
+            if (pt.ok && pt.out.first_w > 0) {
+                auto pic = std::make_shared<ui::Picture>();
+                pic->w = pt.out.first_w;
+                pic->h = pt.out.first_h;
+                pic->px = std::move(pt.out.first);
+                pic->prompt = pt.ask.prompt;
+                const app::ImageModel *im = app::find_image_model(pt.ask.name);
+                pic->model = im ? im->name : pt.ask.name;
+                pic->seed = pt.out.seed;
+                pic->secs = pt.out.make_s;
+                picture_page.picture = pic;
+                picture_page.saved.clear();
+                picture_png = pt.out.png.empty() ? std::string() : std::move(pt.out.png[0]);
+            } else {
+                picture_page.problem = "Couldn't make the picture: " + plain::reason(pt.err) + ".";
+            }
+            picture_page.making = false;
+            picture_task.reset();
+            lib_changed = true;
+        }
+        if (picture_page.making) picture_page.step = v.status.phase == app::Status::Picturing ? v.status.step : "waiting";
+        v.pictures_page = picture_page;
         // A download waits while a model loads, which wants the console's
         // CPU and storage to itself.
         downloads.hold(v.status.phase == app::Status::Loading);
@@ -1135,6 +1221,8 @@ int main(int, char **) {
         v.hf = hf.state();
         v.have_free = downloads.free_space(v.free_bytes);
         v.models_dir = kModels;
+        v.pictures = pictures;
+        v.picture_missing = picture_missing;
         v.api = server.activity();
         const int64_t now_ms = (int64_t)time(nullptr) * 1000;
         if (t - last_live >= 1) {
@@ -1329,6 +1417,56 @@ int main(int, char **) {
                 typing.max_chars = 80;
                 typing_pending = true;
                 break;
+            case ui::Action::PictureType:
+                typing = app::TextRequest();
+                typing_for = kPicturePrompt;
+                typing.title = "What to make a picture of";
+                typing.placeholder = "A red fox in the snow, at sunset";
+                typing.text = a.value;
+                typing.max_chars = 1000;
+                typing_pending = true;
+                break;
+            case ui::Action::MakePicture: {
+                if (picture_task) break;
+                ts5::Json req;
+                const std::string body = "{\"model\":" + ts5::json_escape(a.name) + ",\"prompt\":" +
+                                         ts5::json_escape(a.value) + ",\"size\":" + ts5::json_escape(a.path) + "}";
+                auto task = std::make_shared<app::ImageTask>();
+                std::string err;
+                if (!ts5::Json::parse(body, req) || !app::image_ask(req, kModels, task->ask, err)) {
+                    picture_page.problem = "Couldn't make the picture: " + plain::reason(err) + ".";
+                    break;
+                }
+                task->ask.keep_first = true;
+                picture_done = task->done.get_future();
+                app::Job job;
+                job.kind = app::Job::Image;
+                job.path = task->ask.name;
+                job.image = task;
+                runner.push(job);
+                picture_task = task;
+                picture_page.making = true;
+                picture_page.started = t;
+                picture_page.problem.clear();
+                printf("ts5-title: pictures: making one with %s at %s\n", a.name.c_str(), a.path.c_str());
+                break;
+            }
+            case ui::Action::SavePicture: {
+                if (picture_png.empty() || !picture_page.saved.empty()) break;
+                struct tm lt {};
+                const int64_t now_s = time(nullptr);
+                if (!app::local_tm(now_s, &lt)) gmtime_r((const time_t *)&now_s, &lt);
+                char name[64];
+                strftime(name, sizeof name, "picture-%Y%m%d-%H%M%S.png", &lt);
+                const std::string path = std::string(kPictures) + "/" + name;
+                FILE *f = fopen(path.c_str(), "wb");
+                bool ok = f && fwrite(picture_png.data(), 1, picture_png.size(), f) == picture_png.size();
+                if (f) ok = fclose(f) == 0 && ok;
+                printf("ts5-title: pictures: %s %s\n", ok ? "saved" : "couldn't save", path.c_str());
+                if (ok) picture_page.saved = name;
+                else runner.note(std::string("Couldn't save the picture.") + plain::kDetails, true);
+                break;
+            }
             case ui::Action::NewKey:
                 typing = app::TextRequest();
                 typing_for = kNamingKey;
@@ -1372,6 +1510,31 @@ int main(int, char **) {
             case ui::Action::RemovePart:
                 for (const std::string &k : a.keys) downloads.remove_part(k);
                 break;
+            case ui::Action::RemovePicture: {
+                // A picture model's files (the dashboard asked first), not
+                // while a picture is being made.
+                const app::ImageModel *m = app::find_image_model(a.name);
+                if (!m || runner.status().phase == app::Status::Picturing) break;
+                bool bad = false;
+                for (const std::string &key : app::image_model_keys(*m)) {
+                    const app::CatalogEntry *e = app::Downloads::find(key);
+                    if (!e) continue;
+                    const std::string path = std::string(kModels) + "/" + e->file;
+                    if (unlink(path.c_str()) == 0) {
+                        printf("ts5-title: removed %s\n", path.c_str());
+                    } else if (errno != ENOENT) {
+                        printf("ts5-title: remove failed: %s: %s\n", path.c_str(), strerror(errno));
+                        bad = true;
+                    }
+                }
+                scan_pictures();
+                lib_changed = true;
+                downloads.refresh();
+                runner.note(bad ? "Couldn't remove all of " + std::string(m->name) + "." + plain::kDetails
+                                : "Removed " + std::string(m->name),
+                            bad);
+                break;
+            }
             case ui::Action::Remove: {
                 // A model in the title's own folder that isn't in use (the
                 // dashboard asked first). Its results and usage stay.
@@ -1425,10 +1588,11 @@ int main(int, char **) {
         const bool dirty = buttons || lib_changed || version != drawn_version || shot || dark != drawn_dark ||
                            v.speaking != drawn_speaking;
         // The spinner turns at 15 frames a second while a model loads. While the
-        // GPU computes (a check, a speed test, a reply), a frame a second at
+        // GPU computes (a check, a speed test, a picture, a reply), a frame a second at
         // most, so the copy each frame costs the GPU never weighs on the work.
         const bool computing = v.status.phase == app::Status::Checking ||
-                               v.status.phase == app::Status::Benchmarking || v.api.generating;
+                               v.status.phase == app::Status::Benchmarking ||
+                               v.status.phase == app::Status::Picturing || v.api.generating;
         double period = dark ? 60.0 : dash.animating(v) && !computing ? 1.0 / 15 : 1.0;
         // The chat page shows a reply as it comes, a few frames a second.
         const bool on_chat = !dark && dash.page() == ui::Dashboard::Chat;

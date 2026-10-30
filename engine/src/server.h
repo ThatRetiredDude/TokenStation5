@@ -6,6 +6,7 @@
 #include <thread>
 
 #include "engine.h"
+#include "json.h"
 #include "known_good.h"
 #include "usage.h"
 
@@ -43,6 +44,17 @@ public:
     // connections by the device behind it. Set before start().
     using ClientName = std::function<std::string(const std::string &ip, int port)>;
     void set_client_name(ClientName f) { client_name_ = std::move(f); }
+    // Answers POST /v1/images/generations (OpenAI's images API) on the
+    // request's thread, with the request's JSON: the reply's body, and its
+    // HTTP status in `status` (200 unless set). It runs without the
+    // generation lock; the title takes the GPU from the chat model itself.
+    // Without one, the route is not found. Set before start().
+    using Images = std::function<std::string(const Json &req, int &status)>;
+    void set_images(Images f) { state_.images = std::move(f); }
+    // The picture models the images route can use, for /v1/models (each with
+    // "type": "image", after the chat model). Set before start().
+    using ImageModels = std::function<std::vector<std::string>()>;
+    void set_image_models(ImageModels f) { state_.image_models = std::move(f); }
 
     // For a status display.
     struct Activity {
@@ -78,6 +90,8 @@ public:
         std::atomic<int> phase{0}, waiting{0};
         std::function<void(const UsageRecord &)> on_usage;
         Authorize authorize;
+        Images images;
+        ImageModels image_models;
     };
 
 private:
@@ -87,6 +101,9 @@ private:
     State state_;
     ClientName client_name_;
 };
+
+// An error reply's body, as OpenAI writes one.
+std::string error_json(const std::string &msg);
 
 // The command line's server: start, answer with e, and block until the
 // process ends. Returns only when it cannot listen; on_listening runs once

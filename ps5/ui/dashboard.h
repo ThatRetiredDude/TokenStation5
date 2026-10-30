@@ -1,4 +1,4 @@
-// The TV screen, five pages under the header; L1 goes to the next, circle
+// The TV screen, six pages under the header; L1 goes to the next, circle
 // back to Home. Home (home_page.h): how apps have used the API, by model and
 // app, over 24 hours, 7 days or 30 days (left and right), and live; cross
 // goes to Chat, or to Models with nothing running. Models: the models on the
@@ -11,7 +11,8 @@
 // in a sidebar (left goes there, right back) and a conversation with the
 // running model; cross types a message on the console's keyboard (with
 // nothing running, it goes to Models), hold R1 to talk, up/down scroll,
-// triangle stops the reply, square starts a new chat. Settings
+// triangle stops the reply, square starts a new chat. Pictures
+// (pictures_page.h): a picture from a prompt with a picture model. Settings
 // (settings_page.h): the title's settings. Logs (logs_page.h): what the
 // title wrote in its log, the one page with raw text; square on Home (when
 // requests failed) or on a model that can't run opens it at the problems.
@@ -32,6 +33,7 @@
 #include "hf_search.h"
 #include "home_page.h"
 #include "logs_page.h"
+#include "pictures_page.h"
 #include "settings_page.h"
 #include "voice.h"
 #include "library.h"
@@ -66,6 +68,9 @@ struct View {
     bool have_free = false;   // free_bytes is known
     uint64_t free_bytes = 0;  // free space where models go
     std::string models_dir;   // the title's own models folder: only models there can be removed
+    std::vector<std::string> pictures;  // app::image_models: the picture models on the PS5
+    std::map<std::string, std::vector<std::string>> picture_missing;  // by kImageModels key: catalog keys not here
+    PicturesInfo pictures_page;  // the Pictures page's, but its models: those come from pictures
     double now = 0;    // seconds, steady clock (app::now_s)
     int64_t wall = 0;  // time(nullptr)
 };
@@ -73,28 +78,39 @@ struct View {
 struct Action {
     enum Kind {
         None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear, ChatType, Set, TypeSetting,
-        Download, StopDownload, RemovePart, Remove, NewKey, KeyOn, RemoveKey, Search,
-        ChatOpen, ChatSearch, ChatSearchClear, ChatRemove, TsSignOut
+        Download, StopDownload, RemovePart, Remove, RemovePicture, NewKey, KeyOn, RemoveKey, Search,
+        ChatOpen, ChatSearch, ChatSearchClear, ChatRemove, TsSignOut, PictureType, MakePicture, SavePicture
     } kind = None;
     std::string path;         // Remove: the model's file
+                              // RemovePicture: name is the picture model's key (images.h)
     std::vector<std::string> keys;  // Download, StopDownload, RemovePart: catalog entries
     std::string name, value;  // Set: NAME=VALUE in ts5.env ("": the default); TypeSetting: NAME
     std::string label;        // TypeSetting: the setting's name on the page
                               // KeyOn, RemoveKey: name is the key's id; KeyOn: value "1" or "0"
                               // ChatOpen, ChatRemove: name is the chat's id
+                              // PictureType: value is the prompt so far
+                              // MakePicture: name the model's key, value the prompt, path "WxH", label the
+                              // seed ("": a new one)
 };
 
 class Dashboard {
 public:
-    enum Page { Home, Models, Chat, Settings, Logs };
+    enum Page { Home, Models, Chat, Pictures, Settings, Logs };
     static Page next(Page p) {
-        return p == Home ? Models : p == Models ? Chat : p == Chat ? Settings : p == Settings ? Logs : Home;
+        return p == Home       ? Models
+               : p == Models   ? Chat
+               : p == Chat     ? Pictures
+               : p == Pictures ? Settings
+               : p == Settings ? Logs
+                               : Home;
     }
     Dashboard(const Fonts &fonts, const uint8_t *logo, size_t logo_size);
     Page page() const { return page_; }
     void show(Page p);
     // Logs, at its problems.
     void show_problems();
+    // The prompt typed for the Pictures page.
+    void set_picture_prompt(const std::string &p) { pictures_.set_prompt(p); }
     // The title's log and the run before's, for the Logs page.
     void set_log_files(const std::string &log, const std::string &prev_log) { logs_.set_files(log, prev_log); }
     // Applies a frame's button presses; at most one action comes of them.
@@ -120,6 +136,8 @@ private:
     void draw_chat_footer(Canvas &c, const View &v);
     void draw_settings_footer(Canvas &c, const View &v);
     void draw_logs_footer(Canvas &c);
+    void draw_pictures_footer(Canvas &c, const View &v);
+    PicturesInfo pictures_info(const View &v) const;
     // OPTIONS Close, after a page's hints.
     void draw_close_hint(Canvas &c, int x, int y);
     SettingsInfo settings_info(const View &v) const;
@@ -137,12 +155,14 @@ private:
     LogsPage logs_;
     ChatPage chat_;
     SettingsPage settings_;
+    PicturesPage pictures_;
     std::string selected_key_;  // the selected item's path, or "catalog:" and its key
     int scroll_ = 0;
     // Asking before closing the title, stopping the model in use, or removing
     // a model from the PS5 (its name, file and size).
     enum Confirm { NoConfirm, ConfirmClose, ConfirmStop, ConfirmRemove } confirm_ = NoConfirm;
-    std::string confirm_name_, confirm_path_;
+    std::string confirm_name_, confirm_path_;  // a picture model's: its key (images.h) for the path
+    bool confirm_picture_ = false;
     uint64_t confirm_bytes_ = 0;
 };
 
