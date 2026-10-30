@@ -289,7 +289,7 @@ bool wanted_entry(const std::string &line, CatalogText &t, CatalogEntry &e) {
     if (f.size() != 20 || f[1].empty() || f[7].empty()) return false;
     e = CatalogEntry{};
     const int kind = atoi(f[0].c_str());
-    if (kind < CatalogEntry::Model || kind > CatalogEntry::Voice) return false;
+    if (kind < CatalogEntry::Model || kind > CatalogEntry::Image) return false;
     e.kind = (CatalogEntry::Kind)kind;
     t = CatalogText{f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9]};
     e.bytes = strtoull(f[10].c_str(), nullptr, 10);
@@ -393,8 +393,17 @@ std::string Downloads::url(const CatalogEntry &e) {
     return std::string("https://huggingface.co/") + e.repo + "/resolve/" + e.commit + "/" + e.path;
 }
 
-std::string Downloads::part_of(const CatalogEntry &e) const { return dir_ + "/." + e.file + ".part"; }
-std::string Downloads::sha_of(const CatalogEntry &e) const { return dir_ + "/." + e.file + ".sha"; }
+namespace {
+// A dotfile beside the file, in its own folder (a picture model's is images/).
+std::string beside(const std::string &dir, const std::string &file, const char *ext) {
+    const size_t slash = file.rfind('/');
+    const size_t at = slash == std::string::npos ? 0 : slash + 1;
+    return dir + "/" + file.substr(0, at) + "." + file.substr(at) + ext;
+}
+}  // namespace
+
+std::string Downloads::part_of(const CatalogEntry &e) const { return beside(dir_, e.file, ".part"); }
+std::string Downloads::sha_of(const CatalogEntry &e) const { return beside(dir_, e.file, ".sha"); }
 
 void Downloads::start(const std::string &key) {
     const CatalogEntry *e = find(key);

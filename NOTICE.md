@@ -599,12 +599,19 @@ Qwen); a model card on Hugging Face is the final word on each model's terms.
 
 ### Image models
 
-The title makes pictures with Stable Diffusion models the user puts in its
-`models/images` folder. None is stored here, shipped in a build or downloaded
-by the title. Each stays under its maker's license, which whoever uses it
-accepts: Stable Diffusion 1.5 and SDXL are under the CreativeML OpenRAIL-M
-and OpenRAIL++-M licenses, whose use restrictions follow the model; SDXL
-Turbo and SD Turbo are for non-commercial use only.
+The title makes pictures with Stable Diffusion and similar models in its
+`models/images` folder. None is stored here or shipped in a build. The
+Models page downloads these from Hugging Face when the user asks, and each
+stays under its maker's license, which whoever uses it accepts:
+
+| Model | Files | License |
+|---|---|---|
+| Stable Diffusion 1.5 | [second-state/stable-diffusion-v1-5-GGUF](https://huggingface.co/second-state/stable-diffusion-v1-5-GGUF) | CreativeML OpenRAIL-M (its use restrictions follow the model) |
+| SDXL-Lightning 4-step | [ByteDance/SDXL-Lightning](https://huggingface.co/ByteDance/SDXL-Lightning), with the decoder from [madebyollin/sdxl-vae-fp16-fix](https://huggingface.co/madebyollin/sdxl-vae-fp16-fix) (MIT) | CreativeML OpenRAIL++-M (its use restrictions follow the model) |
+| Z-Image-Turbo | [leejet/Z-Image-Turbo-GGUF](https://huggingface.co/leejet/Z-Image-Turbo-GGUF), with Qwen3 4B Instruct 2507 from [unsloth/Qwen3-4B-Instruct-2507-GGUF](https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF) and the FLUX decoder from [Comfy-Org/z_image_turbo](https://huggingface.co/Comfy-Org/z_image_turbo) | Apache-2.0 |
+
+A model the user copies there themselves is under its own license: SDXL
+Turbo and SD Turbo, for example, are for non-commercial use only.
 
 ### Online services
 

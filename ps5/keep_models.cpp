@@ -198,23 +198,33 @@ BroughtBack bring_back_models(const std::string &models, const std::string &titl
         return r;
     }
     r.looked = true;
-    std::vector<std::string> names;
-    if (!ftp.names(old, names)) {
-        r.why = "no models from a last version (" + old + ": " + ftp.text() + ")";
-        return r;
-    }
-    for (const std::string &name : names) {
-        if (skip(name)) continue;
-        struct stat here {};
-        if (stat((models + "/" + name).c_str(), &here) == 0) continue;  // the new folder has it already
-        if (ftp.size(old + "/" + name) < 0) continue;                    // a folder, or gone
-        // RNTO's success is 250, or 226 from the console's ftpsrv.
-        if (ftp.cmd("RNFR " + old + "/" + name) == 350 && ftp.cmd("RNTO " + home + "/models/" + name) / 100 == 2 &&
-            stat((models + "/" + name).c_str(), &here) == 0) {
-            r.moved.push_back(name);
-        } else {
-            r.left++;
-            ts5::log_line("ts5-title: couldn't bring back %s: %s", name.c_str(), ftp.text().c_str());
+    // The models, then the picture models in their own folder (images.h),
+    // which the new folder has already, empty.
+    for (const char *folder : {"", "/images"}) {
+        const std::string sub = folder;
+        std::vector<std::string> names;
+        if (!ftp.names(old + sub, names)) {
+            if (sub.empty()) {
+                r.why = "no models from a last version (" + old + ": " + ftp.text() + ")";
+                return r;
+            }
+            continue;
+        }
+        for (const std::string &name : names) {
+            if (skip(name)) continue;
+            const std::string here_path = models + sub + "/" + name;
+            struct stat here {};
+            if (stat(here_path.c_str(), &here) == 0) continue;     // the new folder has it already
+            if (ftp.size(old + sub + "/" + name) < 0) continue;    // a folder, or gone
+            // RNTO's success is 250, or 226 from the console's ftpsrv.
+            if (ftp.cmd("RNFR " + old + sub + "/" + name) == 350 &&
+                ftp.cmd("RNTO " + home + "/models" + sub + "/" + name) / 100 == 2 &&
+                stat(here_path.c_str(), &here) == 0) {
+                r.moved.push_back(sub.empty() ? name : sub.substr(1) + "/" + name);
+            } else {
+                r.left++;
+                ts5::log_line("ts5-title: couldn't bring back %s: %s", name.c_str(), ftp.text().c_str());
+            }
         }
     }
     return r;

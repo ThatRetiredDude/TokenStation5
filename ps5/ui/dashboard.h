@@ -66,6 +66,8 @@ struct View {
     bool have_free = false;   // free_bytes is known
     uint64_t free_bytes = 0;  // free space where models go
     std::string models_dir;   // the title's own models folder: only models there can be removed
+    std::vector<std::string> pictures;  // app::image_models: the picture models on the PS5
+    std::map<std::string, std::vector<std::string>> picture_missing;  // by kImageModels key: catalog keys not here
     double now = 0;    // seconds, steady clock (app::now_s)
     int64_t wall = 0;  // time(nullptr)
 };
@@ -73,10 +75,11 @@ struct View {
 struct Action {
     enum Kind {
         None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear, ChatType, Set, TypeSetting,
-        Download, StopDownload, RemovePart, Remove, NewKey, KeyOn, RemoveKey, Search,
+        Download, StopDownload, RemovePart, Remove, RemovePicture, NewKey, KeyOn, RemoveKey, Search,
         ChatOpen, ChatSearch, ChatSearchClear, ChatRemove, TsSignOut
     } kind = None;
     std::string path;         // Remove: the model's file
+                              // RemovePicture: name is the picture model's key (images.h)
     std::vector<std::string> keys;  // Download, StopDownload, RemovePart: catalog entries
     std::string name, value;  // Set: NAME=VALUE in ts5.env ("": the default); TypeSetting: NAME
     std::string label;        // TypeSetting: the setting's name on the page
@@ -142,7 +145,8 @@ private:
     // Asking before closing the title, stopping the model in use, or removing
     // a model from the PS5 (its name, file and size).
     enum Confirm { NoConfirm, ConfirmClose, ConfirmStop, ConfirmRemove } confirm_ = NoConfirm;
-    std::string confirm_name_, confirm_path_;
+    std::string confirm_name_, confirm_path_;  // a picture model's: its key (images.h) for the path
+    bool confirm_picture_ = false;
     uint64_t confirm_bytes_ = 0;
 };
 
