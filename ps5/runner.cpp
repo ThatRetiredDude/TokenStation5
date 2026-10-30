@@ -475,7 +475,8 @@ void Runner::run(const Job &job) {
 // comes back. The request's thread waits on the task either way.
 void Runner::picture(const Job &job) {
     ImageTask &t = *job.image;
-    const std::string file = base(t.ask.model);
+    const ImageModel *known = find_image_model(t.ask.name);
+    const std::string file = t.ask.name, shown = known ? known->name : plain::model_name(file);
     std::string resume_path;
     int resume_ctx = 0;
     if (serving_) {
@@ -489,7 +490,7 @@ void Runner::picture(const Job &job) {
     }
     // What a chat request gets meanwhile, and the Chat page shows.
     server_.set_engine(nullptr, "", "The GPU is making a picture. Try again in a moment.");
-    set_step("loading " + file);
+    set_step("loading " + shown);
     log_memory("before the picture");
     try {
         t.ok = make_images(t.ask, t.out, t.err, [this](int step, int steps) {
@@ -503,8 +504,8 @@ void Runner::picture(const Job &job) {
     if (t.ok) {
         char took[32];
         snprintf(took, sizeof took, "%.0f", t.out.make_s);
-        event(std::string(t.out.png.size() == 1 ? "Made a picture" : "Made pictures") + " with " +
-              plain::model_name(file) + " in " + took + " s");
+        event(std::string(t.out.png.size() == 1 ? "Made a picture" : "Made pictures") + " with " + shown +
+              " in " + took + " s");
     } else {
         fail("picture with " + file + " failed: " + t.err,
              "Couldn't make the picture: " + plain::reason(t.err) + ".");

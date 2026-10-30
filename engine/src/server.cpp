@@ -362,6 +362,12 @@ void handle(int fd, Server::State &state, Usage &u) {
         // capabilities: whether the model takes OpenAI tools, and whether ts5
         // runs web searches for it (a Tavily key is set).
         const bool can = tools != "none";
+        // The picture models, for POST /v1/images/generations.
+        std::string pictures;
+        if (state.image_models)
+            for (const std::string &id : state.image_models())
+                pictures += std::string(model.empty() && pictures.empty() ? "" : ",") + "{\"id\":" + json_escape(id) +
+                            ",\"object\":\"model\",\"type\":\"image\",\"owned_by\":\"tokenstation5\"}";
         send_all(fd, response(200, "{\"object\":\"list\",\"data\":[" +
                                        (model.empty() ? std::string()
                                                       : "{\"id\":" + json_escape(api_id(model)) +
@@ -376,7 +382,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                             ",\"web_search\":" +
                                                             (can && !tavily_key().empty() ? "true" : "false") + "}" +
                                                             ",\"settings\":" + settings_json(known, sampling) + "}") +
-                                       "]}"));
+                                       pictures + "]}"));
     } else if (completions) {
         const bool chat = r.path.find("chat") != std::string::npos;
         u.rec.kind = chat ? "chat" : "completion";

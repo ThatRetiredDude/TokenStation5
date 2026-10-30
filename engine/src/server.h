@@ -51,6 +51,10 @@ public:
     // Without one, the route is not found. Set before start().
     using Images = std::function<std::string(const Json &req, int &status)>;
     void set_images(Images f) { state_.images = std::move(f); }
+    // The picture models the images route can use, for /v1/models (each with
+    // "type": "image", after the chat model). Set before start().
+    using ImageModels = std::function<std::vector<std::string>()>;
+    void set_image_models(ImageModels f) { state_.image_models = std::move(f); }
 
     // For a status display.
     struct Activity {
@@ -87,6 +91,7 @@ public:
         std::function<void(const UsageRecord &)> on_usage;
         Authorize authorize;
         Images images;
+        ImageModels image_models;
     };
 
 private:

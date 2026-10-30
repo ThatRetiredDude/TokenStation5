@@ -777,7 +777,7 @@ int main(int, char **) {
         std::future<void> done = task->done.get_future();
         app::Job job;
         job.kind = app::Job::Image;
-        job.path = task->ask.model;
+        job.path = task->ask.name;
         job.image = task;
         runner->push(job);
         done.wait();
@@ -787,6 +787,7 @@ int main(int, char **) {
         }
         return app::image_reply(task->out);
     });
+    server.set_image_models([] { return app::image_models(kModels); });
     std::string fresh_key, fresh_key_id;  // a key just made, shown on Settings until the page is left
     app::HfSearch hf;  // the Models page's search
     usage_log.start(TS5_VERSION);
@@ -933,6 +934,19 @@ int main(int, char **) {
         return s;
     };
     bool lib_changed = true;
+    // The Models page's picture models, and the files each still needs.
+    std::vector<std::string> pictures;
+    std::map<std::string, std::vector<std::string>> picture_missing;
+    auto scan_pictures = [&] {
+        std::vector<std::string> now = app::image_models(kModels);
+        std::map<std::string, std::vector<std::string>> missing;
+        for (const app::ImageModel &m : app::kImageModels) missing[m.key] = app::missing_image_files(kModels, m);
+        if (now == pictures && missing == picture_missing) return false;
+        pictures = std::move(now);
+        picture_missing = std::move(missing);
+        return true;
+    };
+    scan_pictures();
     std::atomic<bool> audio_testing{false}, whisper_testing{false}, speak_testing{false};
     // The console's keyboard (text_input.h), for a chat message or a key.
     app::TextInput keyboard;
@@ -1088,6 +1102,7 @@ int main(int, char **) {
                 settings_note.kokoro_model = kokoro;
                 lib_changed = true;
             }
+            lib_changed |= scan_pictures();
             std::lock_guard<std::mutex> lk(lib_mutex);
             lib_changed |= lib.scan();
             last_scan = t;
@@ -1130,7 +1145,8 @@ int main(int, char **) {
                 save_args(path, opts);
                 printf("ts5-title: download: starting %s, nothing else was running\n", e->file);
             }
-            if (e->kind != app::CatalogEntry::Model) voice.rescan();
+            if (e->kind == app::CatalogEntry::Speech || e->kind == app::CatalogEntry::Voice) voice.rescan();
+            if (e->kind == app::CatalogEntry::Image) scan_pictures();
         }
         ui::View v;
         v.version = TS5_VERSION;
@@ -1166,6 +1182,8 @@ int main(int, char **) {
         v.hf = hf.state();
         v.have_free = downloads.free_space(v.free_bytes);
         v.models_dir = kModels;
+        v.pictures = pictures;
+        v.picture_missing = picture_missing;
         v.api = server.activity();
         const int64_t now_ms = (int64_t)time(nullptr) * 1000;
         if (t - last_live >= 1) {
@@ -1403,6 +1421,31 @@ int main(int, char **) {
             case ui::Action::RemovePart:
                 for (const std::string &k : a.keys) downloads.remove_part(k);
                 break;
+            case ui::Action::RemovePicture: {
+                // A picture model's files (the dashboard asked first), not
+                // while a picture is being made.
+                const app::ImageModel *m = app::find_image_model(a.name);
+                if (!m || runner.status().phase == app::Status::Picturing) break;
+                bool bad = false;
+                for (const std::string &key : app::image_model_keys(*m)) {
+                    const app::CatalogEntry *e = app::Downloads::find(key);
+                    if (!e) continue;
+                    const std::string path = std::string(kModels) + "/" + e->file;
+                    if (unlink(path.c_str()) == 0) {
+                        printf("ts5-title: removed %s\n", path.c_str());
+                    } else if (errno != ENOENT) {
+                        printf("ts5-title: remove failed: %s: %s\n", path.c_str(), strerror(errno));
+                        bad = true;
+                    }
+                }
+                scan_pictures();
+                lib_changed = true;
+                downloads.refresh();
+                runner.note(bad ? "Couldn't remove all of " + std::string(m->name) + "." + plain::kDetails
+                                : "Removed " + std::string(m->name),
+                            bad);
+                break;
+            }
             case ui::Action::Remove: {
                 // A model in the title's own folder that isn't in use (the
                 // dashboard asked first). Its results and usage stay.

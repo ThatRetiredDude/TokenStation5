@@ -1,6 +1,7 @@
 #include "images.h"
 
 #include <dirent.h>
+#include <sys/stat.h>
 
 #include <algorithm>
 #include <chrono>
@@ -9,6 +10,8 @@
 #include <ctime>
 #include <mutex>
 #include <random>
+
+#include "catalog.h"
 
 #ifndef TS5_NO_PICTURES
 #include <vulkan/vulkan.h>
@@ -147,15 +150,65 @@ std::string without_ext(const std::string &n) {
 
 std::string image_models_dir(const std::string &models) { return models + "/images"; }
 
+namespace {
+
+const CatalogEntry *entry(const char *key) {
+    if (!*key) return nullptr;
+    for (const CatalogEntry &e : kCatalog)
+        if (e.kind == CatalogEntry::Image && strcmp(e.key, key) == 0) return &e;
+    return nullptr;
+}
+
+// A catalog file's path ("": none), in the models folder.
+std::string path_of(const std::string &models, const char *key) {
+    const CatalogEntry *e = entry(key);
+    return e ? models + "/" + e->file : "";
+}
+
+bool exists(const std::string &path) {
+    struct stat st {};
+    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+}  // namespace
+
+std::vector<std::string> missing_image_files(const std::string &models, const ImageModel &m) {
+    std::vector<std::string> keys;
+    for (const std::string &key : image_model_keys(m))
+        if (!exists(path_of(models, key.c_str()))) keys.push_back(key);
+    return keys;
+}
+
+std::vector<std::string> image_model_keys(const ImageModel &m) {
+    std::vector<std::string> keys;
+    for (const char *k : {m.model, m.diffusion, m.text, m.vae})
+        if (*k) keys.push_back(k);
+    return keys;
+}
+
+const ImageModel *find_image_model(const std::string &key) {
+    for (const ImageModel &m : kImageModels)
+        if (key == m.key) return &m;
+    return nullptr;
+}
+
 std::vector<std::string> image_models(const std::string &models) {
-    std::vector<std::string> names;
+    std::vector<std::string> out, files;
+    for (const ImageModel &m : kImageModels)
+        if (missing_image_files(models, m).empty()) out.push_back(m.key);
     if (DIR *d = opendir(image_models_dir(models).c_str())) {
         while (dirent *e = readdir(d))
-            if (image_model_file(e->d_name)) names.push_back(e->d_name);
+            if (image_model_file(e->d_name)) files.push_back(e->d_name);
         closedir(d);
     }
-    std::sort(names.begin(), names.end());
-    return names;
+    std::sort(files.begin(), files.end());
+    for (const std::string &f : files) {
+        bool theirs = false;  // one of the picture models' files, there or not
+        for (const CatalogEntry &e : kCatalog)
+            theirs |= e.kind == CatalogEntry::Image && std::string(e.file) == "images/" + f;
+        if (!theirs) out.push_back(f);
+    }
+    return out;
 }
 
 bool image_ask(const ts5::Json &req, const std::string &models, ImageAsk &ask, std::string &err) {
@@ -164,26 +217,39 @@ bool image_ask(const ts5::Json &req, const std::string &models, ImageAsk &ask, s
         err = "prompt is required";
         return false;
     }
-    const std::vector<std::string> files = image_models(models);
-    if (files.empty()) {
-        err = "This TokenStation5 has no image model yet. Put a Stable Diffusion .gguf or .safetensors file in " +
+    const std::vector<std::string> names = image_models(models);
+    if (names.empty()) {
+        err = "This TokenStation5 has no picture model yet. Download one on the Models page, or put a Stable "
+              "Diffusion .gguf or .safetensors file in " +
               image_models_dir(models) + ".";
         return false;
     }
     const std::string want = req["model"].str();
-    std::string file = files[0];
-    for (const auto &f : files)
-        if (f == want || without_ext(f) == want) file = f;
-    ask.model = image_models_dir(models) + "/" + file;
+    std::string name = names[0];
+    for (const auto &n : names)
+        if (n == want || without_ext(n) == want) name = n;
+    ask.name = name;
+    const ImageModel *m = find_image_model(name);
+    int size = 512;
+    if (m) {
+        ask.model = path_of(models, m->model);
+        ask.diffusion = path_of(models, m->diffusion);
+        ask.text = path_of(models, m->text);
+        ask.vae = path_of(models, m->vae);
+        ask.wtype = m->wtype;
+        size = m->size;
+    } else {
+        ask.model = image_models_dir(models) + "/" + name;
+    }
     const std::string format = req["response_format"].str("b64_json");
     if (format != "b64_json") {
         err = "response_format " + format + " isn't supported: TokenStation5 answers with b64_json";
         return false;
     }
-    const std::string size = req["size"].str("512x512");
+    const std::string size_text = req["size"].str(std::to_string(size) + "x" + std::to_string(size));
     int w = 0, h = 0;
     char x = 0;
-    if (sscanf(size.c_str(), "%d%c%d", &w, &x, &h) != 3 || x != 'x' || w < 64 || h < 64 || w > 2048 || h > 2048 ||
+    if (sscanf(size_text.c_str(), "%d%c%d", &w, &x, &h) != 3 || x != 'x' || w < 64 || h < 64 || w > 2048 || h > 2048 ||
         w % 64 || h % 64) {
         err = "size must be WIDTHxHEIGHT, each a multiple of 64 from 64 to 2048, such as 512x512";
         return false;
@@ -196,10 +262,11 @@ bool image_ask(const ts5::Json &req, const std::string &models, ImageAsk &ask, s
         return false;
     }
     ask.negative = req["negative_prompt"].str();
-    ask.steps = std::max(0, std::min(150, (int)req["steps"].num(0)));
-    ask.cfg = (float)std::max(0.0, std::min(30.0, req["cfg_scale"].num(0)));
+    ask.steps = std::max(0, std::min(150, (int)req["steps"].num(m ? m->steps : 0)));
+    ask.cfg = (float)std::max(0.0, std::min(30.0, req["cfg_scale"].num(m ? m->cfg : 0)));
     ask.seed = (int64_t)req["seed"].num(-1);
-    ask.sampler = req["sampler"].str();
+    ask.sampler = req["sampler"].str(m ? m->sampler : "");
+    ask.scheduler = req["scheduler"].str(m ? m->scheduler : "");
     return true;
 }
 
@@ -224,6 +291,12 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
         err = "unknown sampler " + ask.sampler;
         return false;
     }
+    const scheduler_t scheduler = ask.scheduler.empty() ? SCHEDULER_COUNT : str_to_scheduler(ask.scheduler.c_str());
+    if (!ask.scheduler.empty() && scheduler == SCHEDULER_COUNT) {
+        err = "unknown scheduler " + ask.scheduler;
+        return false;
+    }
+    const sd_type_t wtype = ask.wtype.empty() ? SD_TYPE_COUNT : str_to_sd_type(ask.wtype.c_str());
     if (!vulkan_ready(err)) return false;
     sd_set_log_callback(on_log, nullptr);
     Progress p{&progress};
@@ -231,7 +304,12 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
 
     sd_ctx_params_t cp;
     sd_ctx_params_init(&cp);
-    cp.model_path = ask.model.c_str();
+    auto c_or_null = [](const std::string &s) { return s.empty() ? nullptr : s.c_str(); };
+    cp.model_path = c_or_null(ask.model);
+    cp.diffusion_model_path = c_or_null(ask.diffusion);
+    cp.llm_path = c_or_null(ask.text);
+    cp.vae_path = c_or_null(ask.vae);
+    if (wtype != SD_TYPE_COUNT) cp.wtype = wtype;
     // The title reads files with stdio; mapped files aren't how it loads.
     cp.enable_mmap = false;
     cp.n_threads = 4;
@@ -239,7 +317,7 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
     sd_ctx_t *ctx = new_sd_ctx(&cp);
     if (!ctx) {
         sd_set_progress_callback(nullptr, nullptr);
-        err = "stable-diffusion.cpp couldn't load " + ask.model;
+        err = "stable-diffusion.cpp couldn't load " + ask.name;
         return false;
     }
     out.load_s = seconds() - t0;
@@ -256,7 +334,8 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
     if (ask.steps > 0) g.sample_params.sample_steps = ask.steps;
     if (ask.cfg > 0) g.sample_params.guidance.txt_cfg = ask.cfg;
     g.sample_params.sample_method = method == SAMPLE_METHOD_COUNT ? sd_get_default_sample_method(ctx) : method;
-    g.sample_params.scheduler = sd_get_default_scheduler(ctx, g.sample_params.sample_method);
+    g.sample_params.scheduler =
+        scheduler == SCHEDULER_COUNT ? sd_get_default_scheduler(ctx, g.sample_params.sample_method) : scheduler;
 
     const double t1 = seconds();
     sd_image_generation_result_t *res = nullptr;
@@ -279,8 +358,8 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
         err = "stable-diffusion.cpp made no picture";
         return false;
     }
-    printf("ts5-title: %zu picture%s of %dx%d in %.1f s (loading %.1f s)\n", out.png.size(),
-           out.png.size() == 1 ? "" : "s", ask.width, ask.height, out.make_s, out.load_s);
+    printf("ts5-title: %zu picture%s of %dx%d with %s in %.1f s (loading %.1f s)\n", out.png.size(),
+           out.png.size() == 1 ? "" : "s", ask.width, ask.height, ask.name.c_str(), out.make_s, out.load_s);
     return true;
 }
 #endif

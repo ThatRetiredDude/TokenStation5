@@ -45,6 +45,28 @@ VOICE = [
      "kokoro-voice-bf_emma.gguf", "Emma voice"),
 ]
 
+# Picture models (stable-diffusion.cpp, ps5/images.h): the files of each,
+# in the models folder's images folder. Z-Image-Turbo and SDXL-Lightning are
+# more than one file (images.h kImageModels says which is which). Pinned to
+# the commit given: these repos change seldom, and a picture model's file is
+# chosen by hand, not by file_match. key, repo, commit, path, name on the
+# PS5, name on screen.
+IMAGE = [
+    ("sd15", "second-state/stable-diffusion-v1-5-GGUF", "031b5f5df991f511b3f5fa8fed6d99048ababb69",
+     "stable-diffusion-v1-5-pruned-emaonly-Q8_0.gguf", "images/stable-diffusion-v1-5-pruned-emaonly-Q8_0.gguf",
+     "Stable Diffusion 1.5"),
+    ("sdxl-lightning", "ByteDance/SDXL-Lightning", "c9a24f48e1c025556787b0c58dd67a091ece2e44",
+     "sdxl_lightning_4step.safetensors", "images/sdxl_lightning_4step.safetensors", "SDXL-Lightning 4-step"),
+    ("sdxl-vae", "madebyollin/sdxl-vae-fp16-fix", "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+     "sdxl_vae.safetensors", "images/sdxl_vae-fp16-fix.safetensors", "SDXL picture decoder"),
+    ("z-image-turbo", "leejet/Z-Image-Turbo-GGUF", "c61c0e422dc8b541b7548cf33a4ef8302b0f8085",
+     "z_image_turbo-Q4_K.gguf", "images/z_image_turbo-Q4_K.gguf", "Z-Image-Turbo"),
+    ("z-image-text", "unsloth/Qwen3-4B-Instruct-2507-GGUF", "a06e946bb6b655725eafa393f4a9745d460374c9",
+     "Qwen3-4B-Instruct-2507-Q4_K_M.gguf", "images/Qwen3-4B-Instruct-2507-Q4_K_M.gguf", "Z-Image text reader"),
+    ("z-image-vae", "Comfy-Org/z_image_turbo", "6fc90a3b1b653e935a0d175e260736de25b84df5",
+     "split_files/vae/ae.safetensors", "images/flux-ae.safetensors", "Z-Image picture decoder"),
+]
+
 # GGML types the engine has blocks for: values per block, bytes per block.
 # Any other type counts 0 bytes, as in gguf.cpp.
 BLOCKS = {0: (1, 4), 1: (1, 2), 30: (1, 2), 2: (32, 18), 3: (32, 20), 6: (32, 22), 7: (32, 24),
@@ -264,6 +286,12 @@ def write(out):
             lines.append("    {CatalogEntry::%s, %s, %s, \"\", %s,\n     %s, %s,\n     %s,\n     %s, %du, %s},"
                          % (kind, c_str(key), c_str(name), c_str(file.lower()), c_str(repo), c_str(path),
                             c_str(file), c_str(commit), size, c_str(sha)))
+    for key, repo, commit, path, file, name in IMAGE:
+        size, sha = pinned(repo, commit, path)
+        print("catalog: %s: %s at %s, %d bytes" % (key, path, commit[:12], size), file=sys.stderr)
+        lines.append("    {CatalogEntry::Image, %s, %s, \"\", %s,\n     %s, %s,\n     %s,\n     %s, %du, %s},"
+                     % (c_str(key), c_str(name), c_str(os.path.basename(file).lower()), c_str(repo), c_str(path),
+                        c_str(file), c_str(commit), size, c_str(sha)))
     text = HEAD + "\n".join(lines) + "\n" + TAIL
     if out == "-":
         sys.stdout.write(text)
@@ -274,7 +302,8 @@ def write(out):
 
 
 HEAD = """// What TokenStation5 can download on the console (downloads.h): the models
-// on the Models page, and the speech model and voices for Settings. Each is
+// on the Models page, the speech model and voices for Settings, and the
+// picture models' files (images.h), which go in its images folder. Each is
 // pinned to a commit on Hugging Face with its size and SHA-256, and a model
 // carries the header fields its memory estimate reads (library.h), so a row
 // can say how much memory the model needs before it's on the PS5.
@@ -285,14 +314,14 @@ HEAD = """// What TokenStation5 can download on the console (downloads.h): the m
 namespace app {
 
 struct CatalogEntry {
-    enum Kind { Model, Speech, Voice } kind;
+    enum Kind { Model, Speech, Voice, Image } kind;
     const char *key;       // its row in models.tsv, or its line in scripts/catalog.py
     const char *name;      // on screen; a model's general.name
     const char *good_for;  // a model's, on screen
     const char *same;      // lower case: a file on the PS5 whose name has it is this one already
     const char *repo;      // on huggingface.co
     const char *path;      // the file in the repo
-    const char *file;      // its name on the PS5, in the models folder
+    const char *file;      // its name on the PS5, in the models folder (an Image's: "images/" and it)
     const char *commit;    // the repo's commit it is pinned to
     uint64_t bytes;
     const char *sha256;    // hex
