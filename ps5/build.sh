@@ -111,7 +111,7 @@ for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backe
         "$root"/engine/src/{tools,known_good,net,websearch,ca_bundle,log}.cpp \
         "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup,local_time,keep_models,images}.cpp \
         "$root"/third_party/qrcodegen/qrcodegen.cpp \
-        "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page,logs_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp; do
+        "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page,logs_page,pictures_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp; do
     o="$out/obj/$(basename "$src" .cpp).o"
     objects+=("$o")
     cc "${cxxflags[@]}" -c "$src" -o "$o" &

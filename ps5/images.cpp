@@ -345,6 +345,15 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
         for (int i = 0; i < res->count; i++) {
             const sd_image_t &im = res->items[i].image;
             if (!im.data) continue;
+            if (ask.keep_first && out.first.empty() && im.channel >= 3) {
+                out.first_w = (int)im.width;
+                out.first_h = (int)im.height;
+                out.first.resize((size_t)im.width * im.height);
+                for (size_t k = 0; k < out.first.size(); k++) {
+                    const uint8_t *p = im.data + k * im.channel;
+                    out.first[k] = (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
+                }
+            }
             std::string png;
             stbi_write_png_to_func(put_png, &png, (int)im.width, (int)im.height, (int)im.channel, im.data,
                                    (int)(im.width * im.channel));

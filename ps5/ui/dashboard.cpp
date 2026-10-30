@@ -28,6 +28,8 @@ constexpr int DX = RX + 32, DW = RW - 64;
 constexpr int CLW = 500, CX = LX + CLW + 24, CW = 1848 - CX, CB = 884, IY = 900, IH = AY + AH - 900;
 // The settings page: two panels down to where the activity panel ends.
 constexpr int SB = AY + AH;
+// The Pictures page: the choices, then the picture.
+constexpr int PICW = 640, PICX = LX + PICW + 24;
 
 std::string lower(std::string s) {
     for (auto &c : s) c = (char)tolower((unsigned char)c);
@@ -187,6 +189,7 @@ const char *page_name(Dashboard::Page p) {
     return p == Dashboard::Home     ? "Home"
            : p == Dashboard::Models ? "Models"
            : p == Dashboard::Chat   ? "Chat"
+           : p == Dashboard::Pictures ? "Pictures"
            : p == Dashboard::Settings ? "Settings"
                                       : "Logs";
 }
@@ -247,7 +250,7 @@ struct Dashboard::Item {
 Dashboard::Dashboard(const Fonts &fonts, const uint8_t *logo, size_t logo_size)
     : title_(fonts.get("title")), h2_(fonts.get("h2")), body_(fonts.get("body")),
       bodyb_(fonts.get("bodyb")), small_(fonts.get("small")), smallb_(fonts.get("smallb")),
-      home_(fonts), logs_(fonts), chat_(fonts), settings_(fonts) {
+      home_(fonts), logs_(fonts), chat_(fonts), settings_(fonts), pictures_(fonts) {
     if (logo && logo_size >= 8 && memcmp(logo, "TS5L", 4) == 0) {
         uint16_t w, h;
         memcpy(&w, logo + 4, 2);
@@ -344,6 +347,7 @@ SettingsInfo Dashboard::settings_info(const View &v) const {
 
 bool Dashboard::animating(const View &v) const {
     if (page_ == Settings || page_ == Home || page_ == Logs) return false;
+    if (page_ == Pictures) return v.pictures_page.making;
     if (page_ == Chat)
         return v.chat.busy || v.voice.phase != app::VoiceState::Idle || v.status.phase == app::Status::Loading;
     return v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
@@ -381,6 +385,26 @@ Action Dashboard::press(uint32_t b, const View &v) {
     }
     if (page_ == Logs) {
         logs_.press(b);
+        if (b & kCircle) show(Home);
+        return a;
+    }
+    if (page_ == Pictures) {
+        const PicturesPress p = pictures_.press(b, pictures_info(v));
+        switch (p.kind) {
+            case PicturesPress::Type:
+                a.kind = Action::PictureType;
+                a.value = p.prompt;
+                break;
+            case PicturesPress::Make:
+            case PicturesPress::Again:
+                a.kind = Action::MakePicture;
+                a.name = p.model;
+                a.value = p.prompt;
+                a.path = std::to_string(p.width) + "x" + std::to_string(p.height);
+                break;
+            case PicturesPress::Save: a.kind = Action::SavePicture; break;
+            case PicturesPress::None: break;
+        }
         if (b & kCircle) show(Home);
         return a;
     }
@@ -529,6 +553,7 @@ void Dashboard::draw_background(Canvas &c) {
             case Models: panels = {{LX, PT, LW, PB - PT}, {RX, PT, RW, PB - PT}, {LX, AY, 1848 - LX, AH}}; break;
             case Chat: panels = {{LX, PT, CLW, AY + AH - PT}, {CX, PT, CW, CB - PT}, {CX, IY, CW, IH}}; break;
             case Settings: panels = {{LX, PT, LW, SB - PT}, {RX, PT, RW, SB - PT}}; break;
+            case Pictures: panels = {{LX, PT, PICW, SB - PT}, {PICX, PT, 1848 - PICX, SB - PT}}; break;
             case Logs: panels = {{LX, PT, 1848 - LX, SB - PT}}; break;
         }
         Canvas bg(W, H);
@@ -578,15 +603,16 @@ void Dashboard::draw_header(Canvas &c, const View &v) {
 
 // The pages, as tabs right of the title, with the button that switches them.
 void Dashboard::draw_tabs(Canvas &c) {
-    int x = 700;
+    // Six tabs, clear of the subtitle on the left and the address on the right.
+    int x = 580;
     const int y = 140;
     x += key_cap(c, smallb_, x, y - 2, "L1") + 24;
-    for (Page p : {Home, Models, Chat, Settings, Logs}) {
+    for (Page p : {Home, Models, Chat, Pictures, Settings, Logs}) {
         const char *name = page_name(p);
         const int w = Canvas::measure(bodyb_, name);
         c.text(bodyb_, x, y, name, p == page_ ? kText : kText2);
         if (p == page_) c.round_rect((float)x, 163, (float)w, 5, 2.5f, kAccent);
-        x += w + 40;
+        x += w + 32;
     }
 }
 
@@ -1302,6 +1328,48 @@ void Dashboard::draw_chat_footer(Canvas &c, const View &v) {
     draw_close_hint(c, x, y);
 }
 
+PicturesInfo Dashboard::pictures_info(const View &v) const {
+    PicturesInfo p = v.pictures_page;
+    p.models.clear();
+    for (const std::string &key : v.pictures) {
+        PicturesInfo::Model m;
+        m.key = m.name = key;
+        if (const app::ImageModel *im = app::find_image_model(key)) {
+            m.name = im->name;
+            m.size = im->size;
+            m.fits = !v.gpu_memory || im->memory <= v.gpu_memory;
+        }
+        p.models.push_back(m);
+    }
+    p.gpu_busy = !p.making && (v.status.phase == app::Status::Loading || v.status.phase == app::Status::Checking ||
+                               v.status.phase == app::Status::Benchmarking || v.status.phase == app::Status::Picturing ||
+                               v.status.queued > 0);
+    p.now = v.now;
+    return p;
+}
+
+void Dashboard::draw_pictures_footer(Canvas &c, const View &v) {
+    int x = LX;
+    const int y = 1046;
+    x += key_cap(c, smallb_, x, y, "L1") + 12;
+    x += c.text(small_, x, y, page_name(next(Pictures)), kText2) + 40;
+    const PicturesInfo info = pictures_info(v);
+    x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
+    struct {
+        PadGlyph g;
+        std::string text;
+        bool on;
+    } hints[] = {{kGlyphCross, pictures_.cross_hint(info), !info.models.empty()},
+                 {kGlyphTriangle, "Another", info.picture && !info.making},
+                 {kGlyphSquare, "Save it", info.picture && info.saved.empty() && !info.making},
+                 {kGlyphCircle, "Home", true}};
+    for (auto &h : hints) {
+        glyph(c, (float)x + 16, (float)y - 8, h.g, h.on);
+        x += 40 + c.text(small_, x + 40, y, h.text, h.on ? kText2 : kMuted) + 36;
+    }
+    draw_close_hint(c, x, y);
+}
+
 void Dashboard::draw_settings_footer(Canvas &c, const View &v) {
     int x = LX;
     const int y = 1046;
@@ -1393,6 +1461,14 @@ void Dashboard::draw(Canvas &c, const View &v) {
     if (page_ == Logs) {
         logs_.draw(c, LX, PT, 1848 - LX, SB - PT, v.version, v.now);
         draw_logs_footer(c);
+        if (confirm_ != NoConfirm) draw_confirm(c);
+        return;
+    }
+    if (page_ == Pictures) {
+        const PicturesInfo info = pictures_info(v);
+        pictures_.draw(c, info, LX, PT, PICW, SB - PT);
+        pictures_.draw_picture(c, info, PICX, PT, 1848 - PICX, SB - PT);
+        draw_pictures_footer(c, v);
         if (confirm_ != NoConfirm) draw_confirm(c);
         return;
     }
