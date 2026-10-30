@@ -24,7 +24,8 @@ struct BroughtBack {
     std::string why;                 // why none were looked for, for the log; "" if they were
 };
 
-// The picture models in its images folder come back the same way.
+// The picture models in its images folder, and the pictures saved in the
+// title's pictures folder, come back the same way.
 // models: the title's models folder as the title sees it (/app0/models);
 // title_id: its folder's name under /data/homebrew and the store's previous
 // folder. A file the title writes there first, under a name of its own, shows

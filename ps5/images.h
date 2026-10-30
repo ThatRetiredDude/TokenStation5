@@ -70,10 +70,13 @@ struct ImageAsk {
     int64_t seed = -1;  // -1: a random one
     std::string sampler;    // stable-diffusion.cpp's name (euler_a, dpm++2m, ...); "": the model's
     std::string scheduler;  // discrete, karras, sgm_uniform, ...; "": the sampler's
+    bool keep_first = false;  // ImageOut::first too, for the Pictures page
 };
 
 struct ImageOut {
     std::vector<std::string> png;  // each picture, as a PNG file
+    std::vector<uint32_t> first;   // keep_first: the first one's pixels, 0xRRGGBB row by row
+    int first_w = 0, first_h = 0;
     int64_t seed = 0;              // the one they were made from
     double load_s = 0, make_s = 0;
 };
