@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <memory>
@@ -308,6 +309,76 @@ std::string image_reply(const ImageOut &out) {
     for (size_t i = 0; i < out.png.size(); i++) r += std::string(i ? "," : "") + "{\"b64_json\":\"" + base64(out.png[i]) + "\"}";
     return r + "]}";
 }
+
+#ifdef TS5_NO_PICTURES
+bool read_png(const std::string &, int &, int &, std::vector<uint32_t> &) { return false; }
+#else
+}  // namespace app
+// miniz's inflate, built with stable-diffusion.cpp (thirdparty/zip.c).
+extern "C" size_t tinfl_decompress_mem_to_mem(void *out, size_t out_len, const void *src, size_t src_len, int flags);
+namespace app {
+
+bool read_png(const std::string &png, int &w, int &h, std::vector<uint32_t> &px) {
+    auto be32 = [&](size_t at) {
+        const auto *b = (const uint8_t *)png.data() + at;
+        return (uint32_t)b[0] << 24 | (uint32_t)b[1] << 16 | (uint32_t)b[2] << 8 | b[3];
+    };
+    if (png.size() < 33 || png.compare(0, 8, "\x89PNG\r\n\x1a\n", 8) != 0) return false;
+    int channels = 0;
+    std::string z;
+    for (size_t at = 8; at + 12 <= png.size();) {
+        const uint32_t len = be32(at);
+        if (len > png.size() - at - 12) return false;
+        const std::string type = png.substr(at + 4, 4);
+        const size_t data = at + 8;
+        if (type == "IHDR") {
+            if (len < 13) return false;
+            w = (int)be32(data), h = (int)be32(data + 4);
+            const uint8_t depth = png[data + 8], color = png[data + 9], interlace = png[data + 12];
+            channels = color == 0 ? 1 : color == 2 ? 3 : color == 6 ? 4 : 0;
+            if (depth != 8 || interlace || !channels || w <= 0 || h <= 0 || w > 8192 || h > 8192) return false;
+        } else if (type == "IDAT") {
+            z.append(png, data, len);
+        } else if (type == "IEND") {
+            break;
+        }
+        at = data + len + 4;
+    }
+    if (!channels || z.empty()) return false;
+    const size_t stride = (size_t)w * channels, raw_len = (stride + 1) * h;
+    std::vector<uint8_t> raw(raw_len);
+    if (tinfl_decompress_mem_to_mem(raw.data(), raw_len, z.data(), z.size(), 1 /* zlib header */) != raw_len)
+        return false;
+    // Each row's filter undone, against the row above as it is undone.
+    std::vector<uint8_t> prev(stride, 0), cur(stride);
+    px.assign((size_t)w * h, 0);
+    for (int y = 0; y < h; y++) {
+        const uint8_t f = raw[y * (stride + 1)];
+        const uint8_t *in = &raw[y * (stride + 1) + 1];
+        for (size_t i = 0; i < stride; i++) {
+            const int a = i >= (size_t)channels ? cur[i - channels] : 0, b = prev[i],
+                      c = i >= (size_t)channels ? prev[i - channels] : 0;
+            int pr = 0;
+            if (f == 1) pr = a;
+            else if (f == 2) pr = b;
+            else if (f == 3) pr = (a + b) / 2;
+            else if (f == 4) {
+                const int p = a + b - c, pa = abs(p - a), pb = abs(p - b), pc = abs(p - c);
+                pr = pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+            } else if (f != 0) {
+                return false;
+            }
+            cur[i] = (uint8_t)(in[i] + pr);
+        }
+        for (int x = 0; x < w; x++) {
+            const uint8_t *q = &cur[(size_t)x * channels];
+            px[(size_t)y * w + x] = channels < 3 ? (uint32_t)q[0] * 0x010101u : (uint32_t)q[0] << 16 | (uint32_t)q[1] << 8 | q[2];
+        }
+        std::swap(prev, cur);
+    }
+    return true;
+}
+#endif
 
 #ifdef TS5_NO_PICTURES
 // ps5/host-test.sh's title, built without stable-diffusion.cpp.

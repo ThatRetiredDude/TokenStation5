@@ -389,6 +389,7 @@ Action Dashboard::press(uint32_t b, const View &v) {
         return a;
     }
     if (page_ == Pictures) {
+        const bool gallery = pictures_.in_gallery();
         const PicturesPress p = pictures_.press(b, pictures_info(v));
         switch (p.kind) {
             case PicturesPress::Type:
@@ -402,10 +403,14 @@ Action Dashboard::press(uint32_t b, const View &v) {
                 a.value = p.prompt;
                 a.path = std::to_string(p.width) + "x" + std::to_string(p.height);
                 break;
-            case PicturesPress::Save: a.kind = Action::SavePicture; break;
+            case PicturesPress::Open:
+            case PicturesPress::Delete:
+                a.kind = p.kind == PicturesPress::Open ? Action::OpenPicture : Action::DeletePicture;
+                a.name = p.model;
+                break;
             case PicturesPress::None: break;
         }
-        if (b & kCircle) show(Home);
+        if ((b & kCircle) && !gallery) show(Home);
         return a;
     }
     if (page_ == Settings) {
@@ -1354,16 +1359,20 @@ void Dashboard::draw_pictures_footer(Canvas &c, const View &v) {
     x += key_cap(c, smallb_, x, y, "L1") + 12;
     x += c.text(small_, x, y, page_name(next(Pictures)), kText2) + 40;
     const PicturesInfo info = pictures_info(v);
-    x += c.text(small_, x, y, "\xE2\x86\x91\xE2\x86\x93  Choose", kText2) + 40;
+    const bool gallery = pictures_.in_gallery();
+    x += c.text(small_, x, y, gallery ? "\xE2\x86\x90\xE2\x86\x92\xE2\x86\x91\xE2\x86\x93  Choose" : "\xE2\x86\x91\xE2\x86\x93  Choose",
+                kText2) + 40;
+    const std::string cross = pictures_.cross_hint(info), square = pictures_.square_hint(info);
     struct {
         PadGlyph g;
         std::string text;
         bool on;
-    } hints[] = {{kGlyphCross, pictures_.cross_hint(info), !info.models.empty()},
-                 {kGlyphTriangle, "Another", info.picture && !info.making},
-                 {kGlyphSquare, "Save it", info.picture && info.saved.empty() && !info.making},
-                 {kGlyphCircle, "Home", true}};
+    } hints[] = {{kGlyphCross, cross.empty() ? std::string("Open it") : cross, !cross.empty()},
+                 {kGlyphTriangle, "Another", !gallery && info.picture && !info.making},
+                 {kGlyphSquare, square.empty() ? std::string("Delete it") : square, !square.empty()},
+                 {kGlyphCircle, gallery ? "Back" : "Home", true}};
     for (auto &h : hints) {
+        if (gallery && h.g == kGlyphTriangle) continue;
         glyph(c, (float)x + 16, (float)y - 8, h.g, h.on);
         x += 40 + c.text(small_, x + 40, y, h.text, h.on ? kText2 : kMuted) + 36;
     }

@@ -56,6 +56,7 @@
 #include <vulkan/vulkan.h>
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -194,6 +195,74 @@ constexpr const char *kNamingKey = "(new key)", *kSearching = "(search)", *kChat
 const std::vector<std::string> kModelDirs = {kModels, TS5_DATA "/ts5/models", TS5_DATA "/PS5LM/models"};
 
 constexpr int kWidth = 1920, kHeight = 1080;
+
+// A picture's PNG saved in the pictures folder, named for when it was made
+// (-2, -3 ... after it when one has that name already). Its file name, or ""
+// when it couldn't be saved. Apps' pictures are saved from the server's
+// threads, the page's from the main one.
+std::string save_picture(const std::string &png) {
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lk(mu);
+    struct tm lt {};
+    const int64_t now_s = time(nullptr);
+    if (!app::local_tm(now_s, &lt)) gmtime_r((const time_t *)&now_s, &lt);
+    char base[48];
+    strftime(base, sizeof base, "picture-%Y%m%d-%H%M%S", &lt);
+    for (int k = 1; k < 100; k++) {
+        const std::string name = std::string(base) + (k > 1 ? "-" + std::to_string(k) : "") + ".png";
+        const std::string path = std::string(kPictures) + "/" + name;
+        struct stat st;
+        if (stat(path.c_str(), &st) == 0) continue;
+        FILE *f = fopen(path.c_str(), "wb");
+        bool ok = f && fwrite(png.data(), 1, png.size(), f) == png.size();
+        if (f) ok = fclose(f) == 0 && ok;
+        printf("ts5-title: pictures: %s %s\n", ok ? "saved" : "couldn't save", path.c_str());
+        if (!ok) unlink(path.c_str());
+        return ok ? name : std::string();
+    }
+    return {};
+}
+
+// The pictures folder's PNG files, newest first.
+std::vector<std::string> gallery_files() {
+    std::vector<std::pair<int64_t, std::string>> found;
+    if (DIR *d = opendir(kPictures)) {
+        while (const dirent *e = readdir(d)) {
+            const std::string n = e->d_name;
+            if (n.size() < 5 || n[0] == '.' || n.compare(n.size() - 4, 4, ".png") != 0) continue;
+            struct stat st;
+            if (stat((std::string(kPictures) + "/" + n).c_str(), &st) == 0 && S_ISREG(st.st_mode))
+                found.push_back({(int64_t)st.st_mtime, n});
+        }
+        closedir(d);
+    }
+    std::sort(found.begin(), found.end(), [](const auto &a, const auto &b) { return a > b; });
+    std::vector<std::string> out;
+    for (auto &f : found) out.push_back(f.second);
+    return out;
+}
+
+// A gallery picture read from its file, whole or made to fit a thumbnail
+// (null: it couldn't be read).
+std::shared_ptr<const ui::Picture> read_picture(const std::string &name, bool thumb) {
+    std::string png;
+    if (FILE *f = fopen((std::string(kPictures) + "/" + name).c_str(), "rb")) {
+        char buf[1 << 16];
+        for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) png.append(buf, n);
+        fclose(f);
+    }
+    auto p = std::make_shared<ui::Picture>();
+    if (!app::read_png(png, p->w, p->h, p->px)) return nullptr;
+    if (thumb) {
+        const double f = std::min(1.0, (double)ui::kThumb / std::max(p->w, p->h));
+        const int tw = std::max(1, (int)(p->w * f)), th = std::max(1, (int)(p->h * f));
+        std::vector<uint32_t> small;
+        ui::scale_picture(*p, tw, th, small);
+        p->px = std::move(small);
+        p->w = tw, p->h = th;
+    }
+    return p;
+}
 
 // A notification on the TV. The request is the system's layout: 45 bytes of
 // header fields this title leaves at zero, then the text.
@@ -772,7 +841,7 @@ int main(int, char **) {
     struct ApiPicture {
         std::mutex mu;
         std::shared_ptr<ui::Picture> picture;
-        std::string png;
+        std::string saved;  // its file in the gallery
         uint64_t made = 0;  // bumped with each one
     } api_picture;
     server.set_images([&picture_runner, &api_picture](const ts5::Json &req, int &status) {
@@ -799,6 +868,12 @@ int main(int, char **) {
             status = 500;
             return ts5::error_json("The picture couldn't be made: " + task->err);
         }
+        // Every one is saved in the gallery.
+        std::string first_saved;
+        for (const std::string &png : task->out.png) {
+            const std::string name = save_picture(png);
+            if (first_saved.empty()) first_saved = name;
+        }
         if (task->out.first_w > 0 && !task->out.png.empty()) {
             auto pic = std::make_shared<ui::Picture>();
             pic->w = task->out.first_w;
@@ -811,7 +886,7 @@ int main(int, char **) {
             pic->secs = task->out.make_s;
             std::lock_guard<std::mutex> lk(api_picture.mu);
             api_picture.picture = pic;
-            api_picture.png = task->out.png[0];
+            api_picture.saved = first_saved;
             api_picture.made++;
         }
         return app::image_reply(task->out);
@@ -980,8 +1055,22 @@ int main(int, char **) {
     std::shared_ptr<app::ImageTask> picture_task;
     std::future<void> picture_done;
     ui::PicturesInfo picture_page;
-    std::string picture_png;  // the last one, as its PNG file, to save
     uint64_t api_picture_seen = 0;
+    // The gallery: the pictures folder's files, their thumbnails as they're
+    // read (one at a time, off the main thread), and the one opened.
+    std::vector<std::string> gallery = gallery_files();
+    std::map<std::string, std::shared_ptr<const ui::Picture>> thumbs;  // null: unreadable
+    std::string thumb_reading;
+    std::future<std::shared_ptr<const ui::Picture>> thumb_job, open_job;
+    std::string open_reading;
+    auto scan_gallery = [&] {
+        std::vector<std::string> now = gallery_files();
+        if (now == gallery) return false;
+        gallery = std::move(now);
+        for (auto it = thumbs.begin(); it != thumbs.end();)
+            it = std::find(gallery.begin(), gallery.end(), it->first) == gallery.end() ? thumbs.erase(it) : std::next(it);
+        return true;
+    };
     std::atomic<bool> audio_testing{false}, whisper_testing{false}, speak_testing{false};
     // The console's keyboard (text_input.h), for a chat message or a key.
     app::TextInput keyboard;
@@ -1141,6 +1230,7 @@ int main(int, char **) {
                 lib_changed = true;
             }
             lib_changed |= scan_pictures();
+            lib_changed |= scan_gallery();
             std::lock_guard<std::mutex> lk(lib_mutex);
             lib_changed |= lib.scan();
             last_scan = t;
@@ -1228,7 +1318,13 @@ int main(int, char **) {
                 pic->secs = pt.out.make_s;
                 picture_page.picture = pic;
                 picture_page.saved.clear();
-                picture_png = pt.out.png.empty() ? std::string() : std::move(pt.out.png[0]);
+                for (const std::string &png : pt.out.png) {
+                    const std::string name = save_picture(png);
+                    if (picture_page.saved.empty()) picture_page.saved = name;
+                }
+                if (picture_page.saved.empty())
+                    runner.note(std::string("Couldn't save the picture.") + plain::kDetails, true);
+                scan_gallery();
             } else {
                 picture_page.problem = "Couldn't make the picture: " + plain::reason(pt.err) + ".";
             }
@@ -1236,18 +1332,47 @@ int main(int, char **) {
             picture_task.reset();
             lib_changed = true;
         }
-        // An app's picture shows on the page too, to save with square.
+        // An app's picture shows on the page too (it's in the gallery already).
         {
             std::lock_guard<std::mutex> lk(api_picture.mu);
             if (api_picture.made != api_picture_seen) {
                 api_picture_seen = api_picture.made;
                 picture_page.picture = api_picture.picture;
-                picture_png = api_picture.png;
-                picture_page.saved.clear();
+                picture_page.saved = api_picture.saved;
+                scan_gallery();
                 lib_changed = true;
             }
         }
         if (picture_page.making) picture_page.step = v.status.phase == app::Status::Picturing ? v.status.step : "waiting";
+        // The gallery's thumbnails, one read at a time, and the one opened.
+        if (thumb_job.valid() && thumb_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            thumbs[thumb_reading] = thumb_job.get();
+            lib_changed = true;
+        }
+        if (!thumb_job.valid())
+            for (const std::string &g : gallery)
+                if (!thumbs.count(g)) {
+                    thumb_reading = g;
+                    thumb_job = std::async(std::launch::async, read_picture, g, true);
+                    break;
+                }
+        if (open_job.valid() && open_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            std::shared_ptr<const ui::Picture> p = open_job.get();
+            if (open_reading == picture_page.viewing) {
+                picture_page.opened = p;
+                picture_page.open_failed = !p;
+            }
+            lib_changed = true;
+        }
+        if (!open_job.valid() && !picture_page.viewing.empty() && !picture_page.opened && !picture_page.open_failed) {
+            open_reading = picture_page.viewing;
+            open_job = std::async(std::launch::async, read_picture, open_reading, false);
+        }
+        picture_page.gallery.clear();
+        for (const std::string &g : gallery) {
+            const auto it = thumbs.find(g);
+            picture_page.gallery.push_back({g, it == thumbs.end() ? nullptr : it->second});
+        }
         v.pictures_page = picture_page;
         // A download waits while a model loads, which wants the console's
         // CPU and storage to itself.
@@ -1486,20 +1611,23 @@ int main(int, char **) {
                 printf("ts5-title: pictures: making one with %s at %s\n", a.name.c_str(), a.path.c_str());
                 break;
             }
-            case ui::Action::SavePicture: {
-                if (picture_png.empty() || !picture_page.saved.empty()) break;
-                struct tm lt {};
-                const int64_t now_s = time(nullptr);
-                if (!app::local_tm(now_s, &lt)) gmtime_r((const time_t *)&now_s, &lt);
-                char name[64];
-                strftime(name, sizeof name, "picture-%Y%m%d-%H%M%S.png", &lt);
-                const std::string path = std::string(kPictures) + "/" + name;
-                FILE *f = fopen(path.c_str(), "wb");
-                bool ok = f && fwrite(picture_png.data(), 1, picture_png.size(), f) == picture_png.size();
-                if (f) ok = fclose(f) == 0 && ok;
-                printf("ts5-title: pictures: %s %s\n", ok ? "saved" : "couldn't save", path.c_str());
-                if (ok) picture_page.saved = name;
-                else runner.note(std::string("Couldn't save the picture.") + plain::kDetails, true);
+            case ui::Action::OpenPicture:
+                picture_page.viewing = a.name;
+                picture_page.opened.reset();
+                picture_page.open_failed = false;
+                break;
+            case ui::Action::DeletePicture: {
+                const std::string path = std::string(kPictures) + "/" + a.name;
+                const bool ok = a.name.find('/') == std::string::npos && unlink(path.c_str()) == 0;
+                printf("ts5-title: pictures: %s %s\n", ok ? "deleted" : "couldn't delete", path.c_str());
+                if (!ok) runner.note(std::string("Couldn't delete the picture.") + plain::kDetails, true);
+                if (picture_page.viewing == a.name) {
+                    picture_page.viewing.clear();
+                    picture_page.opened.reset();
+                }
+                if (picture_page.saved == a.name) picture_page.saved.clear();
+                scan_gallery();
+                lib_changed = true;
                 break;
             }
             case ui::Action::NewKey:

@@ -79,7 +79,8 @@ struct Action {
     enum Kind {
         None, Serve, Check, Bench, Stop, Close, ChatStop, ChatClear, ChatType, Set, TypeSetting,
         Download, StopDownload, RemovePart, Remove, RemovePicture, NewKey, KeyOn, RemoveKey, Search,
-        ChatOpen, ChatSearch, ChatSearchClear, ChatRemove, TsSignOut, PictureType, MakePicture, SavePicture
+        ChatOpen, ChatSearch, ChatSearchClear, ChatRemove, TsSignOut, PictureType, MakePicture, OpenPicture,
+        DeletePicture
     } kind = None;
     std::string path;         // Remove: the model's file
                               // RemovePicture: name is the picture model's key (images.h)
@@ -91,6 +92,7 @@ struct Action {
                               // PictureType: value is the prompt so far
                               // MakePicture: name the model's key, value the prompt, path "WxH", label the
                               // seed ("": a new one)
+                              // OpenPicture, DeletePicture: name is the gallery picture's file name
 };
 
 class Dashboard {

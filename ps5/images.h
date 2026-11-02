@@ -107,6 +107,11 @@ bool image_ask(const ts5::Json &req, const std::string &models, ImageAsk &ask, s
 // The reply's body: {"created": ..., "seed": ..., "data": [{"b64_json": ...}, ...]}.
 std::string image_reply(const ImageOut &out);
 
+// A PNG file as make_images writes them (8 bits a channel, grey, RGB or
+// RGBA, not interlaced), as 0xRRGGBB pixels row by row. False for anything
+// else, and in a build without pictures.
+bool read_png(const std::string &png, int &w, int &h, std::vector<uint32_t> &px);
+
 // Runs on the caller's thread; progress(step, steps) as the sampler goes,
 // progress(step, -steps) through a second pass, and progress(0, 0) while
 // the model's weights load.
