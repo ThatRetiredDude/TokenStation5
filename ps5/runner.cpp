@@ -519,8 +519,23 @@ void Runner::picture(const Job &job) {
             error = status_.error;
             said = status_.said;
         }
-        serve(resume_path, resume_ctx);
-        if (!error.empty()) fail(error, said);
+        // When both fail, the log gets both, and the screen the reload's:
+        // the chat model being gone is what matters next.
+        if (!serve(resume_path, resume_ctx)) {
+            std::string back_error, back_said;
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                back_error = status_.error;
+                back_said = status_.said;
+            }
+            if (!error.empty()) {
+                printf("ts5-title: %s\n", error.c_str());
+                event(said, true);
+            }
+            fail(back_error, back_said);
+        } else if (!error.empty()) {
+            fail(error, said);
+        }
     } else {
         server_.set_engine(nullptr, "", "no model");
     }
