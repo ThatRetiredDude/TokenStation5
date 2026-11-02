@@ -186,6 +186,8 @@ void PicturesPage::draw(Canvas &c, const PicturesInfo &info, int x, int y, int w
         c.text(small_, px, ry, "The GPU is busy. Make one once it's done.", kAmber, pw);
     } else if (prompt_.empty()) {
         text_glyph(c, small_, px, ry, "Press", kGlyphCross, "on PROMPT to type what to make.", kText2);
+    } else if (row_ == 0) {
+        text_glyph(c, small_, px, ry, "Press", kGlyphCross, "to change the prompt, or \xE2\x86\x93 to make it.", kText2);
     } else {
         text_glyph(c, small_, px, ry, "Press", kGlyphCross, "to make the picture.", kText2);
     }

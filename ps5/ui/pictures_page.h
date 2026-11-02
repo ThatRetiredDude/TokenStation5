@@ -1,7 +1,8 @@
 // The Pictures page: a picture from a prompt, made on the PS5's GPU with a
 // picture model from the Models page (images.h). On the left, what to make:
-// the prompt (cross types it on the console's keyboard), the model and the
-// size (left and right change them); cross on either makes the picture. On
+// the prompt (cross types it on the console's keyboard, then the model row
+// is chosen), the model and the size (left and right change them); cross on
+// either makes the picture. On
 // the right, the last picture, as big as it fits. Triangle makes another of
 // the same prompt with a new seed, square saves the one on show in the
 // title's pictures folder (FTP gets them off the PS5). The chat model lets
@@ -55,8 +56,12 @@ class PicturesPage {
 public:
     explicit PicturesPage(const Fonts &fonts);
     PicturesPress press(uint32_t buttons, const PicturesInfo &info);
-    // The prompt typed on the keyboard.
-    void set_prompt(const std::string &p) { prompt_ = p; }
+    // The prompt typed on the keyboard. With one, the model row is chosen,
+    // so the next cross makes the picture instead of typing again.
+    void set_prompt(const std::string &p) {
+        prompt_ = p;
+        if (!p.empty()) row_ = 1;
+    }
     // The choices on the left, then the picture on the right.
     void draw(Canvas &c, const PicturesInfo &info, int x, int y, int w, int h);
     void draw_picture(Canvas &c, const PicturesInfo &info, int x, int y, int w, int h);
