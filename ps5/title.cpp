@@ -768,7 +768,14 @@ int main(int, char **) {
     // Pictures (POST /v1/images/generations, images.h): a job for the Runner,
     // made once it exists, which the request's thread waits for.
     std::atomic<app::Runner *> picture_runner{nullptr};
-    server.set_images([&picture_runner](const ts5::Json &req, int &status) {
+    // The last picture an app asked for, for the Pictures page to show too.
+    struct ApiPicture {
+        std::mutex mu;
+        std::shared_ptr<ui::Picture> picture;
+        std::string png;
+        uint64_t made = 0;  // bumped with each one
+    } api_picture;
+    server.set_images([&picture_runner, &api_picture](const ts5::Json &req, int &status) {
         app::Runner *runner = picture_runner.load();
         if (!runner) {
             status = 503;
@@ -780,6 +787,7 @@ int main(int, char **) {
             status = 400;
             return ts5::error_json(err);
         }
+        task->ask.keep_first = true;
         std::future<void> done = task->done.get_future();
         app::Job job;
         job.kind = app::Job::Image;
@@ -790,6 +798,21 @@ int main(int, char **) {
         if (!task->ok) {
             status = 500;
             return ts5::error_json("The picture couldn't be made: " + task->err);
+        }
+        if (task->out.first_w > 0 && !task->out.png.empty()) {
+            auto pic = std::make_shared<ui::Picture>();
+            pic->w = task->out.first_w;
+            pic->h = task->out.first_h;
+            pic->px = std::move(task->out.first);
+            pic->prompt = task->ask.prompt;
+            const app::ImageModel *im = app::find_image_model(task->ask.name);
+            pic->model = im ? im->name : task->ask.name;
+            pic->seed = task->out.seed;
+            pic->secs = task->out.make_s;
+            std::lock_guard<std::mutex> lk(api_picture.mu);
+            api_picture.picture = pic;
+            api_picture.png = task->out.png[0];
+            api_picture.made++;
         }
         return app::image_reply(task->out);
     });
@@ -958,6 +981,7 @@ int main(int, char **) {
     std::future<void> picture_done;
     ui::PicturesInfo picture_page;
     std::string picture_png;  // the last one, as its PNG file, to save
+    uint64_t api_picture_seen = 0;
     std::atomic<bool> audio_testing{false}, whisper_testing{false}, speak_testing{false};
     // The console's keyboard (text_input.h), for a chat message or a key.
     app::TextInput keyboard;
@@ -1211,6 +1235,17 @@ int main(int, char **) {
             picture_page.making = false;
             picture_task.reset();
             lib_changed = true;
+        }
+        // An app's picture shows on the page too, to save with square.
+        {
+            std::lock_guard<std::mutex> lk(api_picture.mu);
+            if (api_picture.made != api_picture_seen) {
+                api_picture_seen = api_picture.made;
+                picture_page.picture = api_picture.picture;
+                picture_png = api_picture.png;
+                picture_page.saved.clear();
+                lib_changed = true;
+            }
         }
         if (picture_page.making) picture_page.step = v.status.phase == app::Status::Picturing ? v.status.step : "waiting";
         v.pictures_page = picture_page;

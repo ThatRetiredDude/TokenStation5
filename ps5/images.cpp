@@ -89,11 +89,17 @@ void on_log(sd_log_level_t level, const char *text, void *) {
 
 struct Progress {
     const std::function<void(int, int)> *f;
+    int steps = -1;  // the sampler's; until known, everything is loading
 };
 
+// stable-diffusion.cpp reports its tensors loading (it loads them on first
+// use, in generate_image) the way it reports the sampler's steps: only a
+// count of the sampler's steps is one, the rest is loading (0 steps).
 void on_progress(int step, int steps, float, void *data) {
     const auto *p = static_cast<Progress *>(data);
-    if (p && p->f && *p->f) (*p->f)(step, steps);
+    if (!p || !p->f || !*p->f) return;
+    if (steps == p->steps) (*p->f)(step, steps);
+    else (*p->f)(0, 0);
 }
 
 // ggml starts with its CPU backend only (speech runs on it); the GPU joins
@@ -332,6 +338,7 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
     out.seed = ask.seed >= 0 ? ask.seed : (int64_t)(std::random_device{}() & 0x7fffffff);
     g.seed = out.seed;
     if (ask.steps > 0) g.sample_params.sample_steps = ask.steps;
+    p.steps = g.sample_params.sample_steps;
     if (ask.cfg > 0) g.sample_params.guidance.txt_cfg = ask.cfg;
     g.sample_params.sample_method = method == SAMPLE_METHOD_COUNT ? sd_get_default_sample_method(ctx) : method;
     g.sample_params.scheduler =

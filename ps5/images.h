@@ -91,7 +91,8 @@ bool image_ask(const ts5::Json &req, const std::string &models, ImageAsk &ask, s
 // The reply's body: {"created": ..., "seed": ..., "data": [{"b64_json": ...}, ...]}.
 std::string image_reply(const ImageOut &out);
 
-// Runs on the caller's thread; progress(step, steps) as the sampler goes.
+// Runs on the caller's thread; progress(step, steps) as the sampler goes,
+// and progress(0, 0) while the model's weights load.
 bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
                  const std::function<void(int step, int steps)> &progress = nullptr);
 

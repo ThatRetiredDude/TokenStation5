@@ -2,11 +2,11 @@
 // picture model from the Models page (images.h). On the left, what to make:
 // the prompt (cross types it on the console's keyboard, then the model row
 // is chosen), the model and the size (left and right change them); cross on
-// either makes the picture. On
-// the right, the last picture, as big as it fits. Triangle makes another of
-// the same prompt with a new seed, square saves the one on show in the
-// title's pictures folder (FTP gets them off the PS5). The chat model lets
-// go of the GPU while a picture is made and comes back after (runner.h).
+// either makes the picture. On the right, the last picture, made here or
+// asked for by an app, as big as it fits. Triangle makes another of the same
+// prompt with a new seed, square saves the one on show in the title's
+// pictures folder (FTP gets them off the PS5). The chat model lets go of the
+// GPU while a picture is made and comes back after (runner.h).
 #pragma once
 #include <cstdint>
 #include <memory>

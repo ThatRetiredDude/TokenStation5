@@ -493,8 +493,8 @@ void Runner::picture(const Job &job) {
     set_step("loading " + shown);
     log_memory("before the picture");
     try {
-        t.ok = make_images(t.ask, t.out, t.err, [this](int step, int steps) {
-            set_step("step " + std::to_string(step) + " of " + std::to_string(steps));
+        t.ok = make_images(t.ask, t.out, t.err, [this, &shown](int step, int steps) {
+            set_step(steps ? "step " + std::to_string(step) + " of " + std::to_string(steps) : "loading " + shown);
         });
     } catch (const std::exception &e) {
         t.ok = false;
