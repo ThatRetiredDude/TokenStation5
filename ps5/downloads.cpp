@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "ftp.h"
 #include "library.h"
 #include "net.h"
 #include "plain.h"
@@ -393,6 +394,11 @@ std::string Downloads::url(const CatalogEntry &e) {
     return std::string("https://huggingface.co/") + e.repo + "/resolve/" + e.commit + "/" + e.path;
 }
 
+void Downloads::through_ftp(const std::string &dir_on_server) {
+    std::lock_guard<std::mutex> lk(ftp_mu_);
+    ftp_dir_ = dir_on_server;
+}
+
 std::string Downloads::part_of(const CatalogEntry &e) const { return dir_ + "/." + e.file + ".part"; }
 std::string Downloads::sha_of(const CatalogEntry &e) const { return dir_ + "/." + e.file + ".sha"; }
 
@@ -588,6 +594,22 @@ void Downloads::run(const std::string &key) {
            setting("TS5_CATALOG_URL").empty() ? (std::string("huggingface.co/") + e.repo).c_str() : from.c_str(),
            pinned ? "" : " (not pinned to a SHA-256 in this build: only its size is checked)");
 
+    // The console's FTP server writes the bytes, if it shows the models
+    // folder: looked for once, by the first download.
+    std::string ftp_dir;
+    int ftp_port = 0;
+    {
+        std::lock_guard<std::mutex> lk(ftp_mu_);
+        if (!ftp_dir_.empty() && ftp_port_ < 0) {
+            std::string why;
+            ftp_port_ = find_console_ftp(dir_, ftp_dir_, ftp_ports(), &why);
+            if (ftp_port_) printf("ts5-title: downloads go through the FTP server on port %d\n", ftp_port_);
+            else printf("ts5-title: downloads are written by the title (slower): %s\n", why.c_str());
+        }
+        ftp_dir = ftp_dir_;
+        ftp_port = ftp_port_ > 0 ? ftp_port_ : 0;
+    }
+
     for (int attempt = 0;; attempt++) {
         ts5::Sha256Resume resume;
         const bool have_checkpoint = read_checkpoint(sha_path, build_, from, resume);
@@ -620,7 +642,8 @@ void Downloads::run(const std::string &key) {
         std::string err, room;  // room: no room after all, in plain words
         std::atomic<bool> fin{false};
         std::thread t([&] {
-            ok = ts5::http_get_file(from, part, offset, e.sha256, progress, err, &resume);
+            FtpSink sink(ftp_port, ftp_dir + part.substr(dir_.size()));
+            ok = ts5::http_get_file(from, part, offset, e.sha256, progress, err, &resume, ftp_port ? &sink : nullptr);
             fin = true;
         });
         double last_line = now_s(), last_shown = 0;

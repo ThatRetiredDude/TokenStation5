@@ -81,6 +81,12 @@ public:
     Downloads(std::string dir, std::string build, Notify notify);
     ~Downloads();
 
+    // Downloads go through the console's FTP server (ftp.h), which shows the
+    // models folder as dir_on_server, when it's there; else the title writes
+    // them itself, at about 2 MB/s. The server is looked for at the first
+    // download.
+    void through_ftp(const std::string &dir_on_server);
+
     static const CatalogEntry *find(const std::string &key);
     // Where an entry downloads from: Hugging Face at its commit, or
     // TS5_CATALOG_URL/<file> when that is set (a server on the LAN, to try
@@ -136,6 +142,9 @@ private:
     std::map<std::string, ts5::FetchProgress *> progress_;  // the running transfers', under mu_
     bool held_ = false, quit_ = false, refresh_ = true;
     bool have_free_ = false, said_unknown_ = false;
+    std::mutex ftp_mu_;    // for the two below, apart from mu_: looking takes a moment
+    std::string ftp_dir_;  // through_ftp's
+    int ftp_port_ = -1;    // the server's; 0: none, -1: not looked for yet
     uint64_t free_ = 0;
     std::atomic<uint64_t> version_{0};
     std::vector<std::thread> threads_;

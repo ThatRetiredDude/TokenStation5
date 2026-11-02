@@ -91,11 +91,13 @@ seconds. A model still arriving shows as COPYING until it's whole. Settings
 has the same steps on the TV: Instructions, "Add models from a computer",
 with the PS5's FTP address filled in.
 
-This is the fast way in. The PS5 lets a title save only so fast: a download
-on the console writes its first few hundred MB at network speed, then slows
-to about 1 to 4 MB/s, while the FTP server (outside the title) writes about
-30 MB/s, so a 5 GB model takes a few minutes over FTP instead of about half an
-hour on the console.
+The PS5 lets a title save only so fast: about 1 to 4 MB/s once its first few
+hundred MB are written, while the FTP server (outside the title) writes 20 to
+30 MB/s. So the Models page's downloads hand their bytes to the console's own
+FTP server at 127.0.0.1 (`ps5/ftp.h`), which writes them at its speed; the log
+says "downloads go through the FTP server on port 2121". Without the FTP
+server they are written by the title, and a 5 GB model takes about half an
+hour. `TS5_DOWNLOAD_FTP=0` in `ts5.env` makes the title write them itself.
 
 | To add | From the TokenStation5 folder on your computer |
 | --- | --- |

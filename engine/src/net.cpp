@@ -758,7 +758,7 @@ bool write_from(const std::string &path, const std::string &url, const std::stri
 // a time, and the hash follows the writes; a checkpoint is reported only
 // after a flush, so it never describes bytes that aren't on disk yet.
 bool get_file(const std::string &url, const std::string &path, uint64_t offset, const std::string &expected_sha256,
-              FetchProgress &progress, std::string &err, Sha256Resume *sha) {
+              FetchProgress &progress, std::string &err, Sha256Resume *sha, FileSink *sink) {
     constexpr int timeout_s = 30;
     constexpr size_t block = 256 << 10;
     constexpr uint64_t checkpoint_every = 64ull << 20;
@@ -876,6 +876,7 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
     }
 
     uint64_t done = start, total = 0;
+    bool via_sink = false;
     for (int hop = 0;; hop++) {
         if (start > 0) trace("GET %s from byte %llu", u.shown.c_str(), (unsigned long long)start);
         else trace("GET %s", u.shown.c_str());
@@ -1007,6 +1008,17 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
         trace("reading the body (%s)", kind == Body::Counted   ? (std::to_string(length_n) + " bytes").c_str()
                                        : kind == Body::Chunked ? "chunked"
                                                                : "until the server closes");
+        // The sink, once the file is cut to where it goes on from.
+        if (sink && !via_sink) {
+            std::string why;
+            if (fflush(f) == 0 && sink->open(done, why)) {
+                via_sink = true;
+                trace("the bytes go through the sink");
+            } else {
+                trace("writing it here: the sink didn't open (%s)", why.c_str());
+                sink = nullptr;
+            }
+        }
         Body body(c, std::move(ahead), kind, length_n);
         size_t filled = 0;
         auto t_win = clock::now();
@@ -1030,9 +1042,13 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
                 hash.update(wbuf.data(), filled);
                 const auto t1 = clock::now();
                 t_hash += seconds(t1 - t0);
-                if (fwrite(wbuf.data(), 1, filled, f) != filled || ferror(f)) return write_failed();
+                if (via_sink) {
+                    if (!sink->write(wbuf.data(), filled, err)) return false;
+                } else if (fwrite(wbuf.data(), 1, filled, f) != filled || ferror(f)) {
+                    return write_failed();
+                }
                 done += filled;
-                if (done - last_sync >= sync_every) {
+                if (!via_sink && done - last_sync >= sync_every) {
                     if (fflush(f) != 0 || fsync(fileno(f)) != 0) return write_failed();
                     last_sync = done;
                 }
@@ -1055,7 +1071,7 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
                 b_win = done;
             }
             if (sha && sha->on_checkpoint && Hasher::available() && done - last_checkpoint >= checkpoint_every) {
-                if (fflush(f) != 0) return write_failed();
+                if (!via_sink && fflush(f) != 0) return write_failed();
                 last_checkpoint = done;
                 sha->on_checkpoint(done, hash.state());
             }
@@ -1069,7 +1085,7 @@ bool get_file(const std::string &url, const std::string &path, uint64_t offset, 
         break;
     }
     progress.total = total;
-    if (fflush(f) != 0) return write_failed();
+    if (via_sink ? !sink->close(err) : fflush(f) != 0) return via_sink ? false : write_failed();
     if (total > 0 && done != total) {
         err = "the server sent " + std::to_string(done) + " of " + std::to_string(total) + " bytes";
         return done < total ? false : damaged();  // short: the next call asks for the rest
@@ -1409,27 +1425,29 @@ bool http_get(const std::string &url, const std::vector<std::string> &headers, H
 
 // A download too, on a thread of its own with 1 MiB, for the same reason.
 bool http_get_file(const std::string &url, const std::string &path, uint64_t offset,
-                   const std::string &expected_sha256, FetchProgress &progress, std::string &err, Sha256Resume *sha) {
+                   const std::string &expected_sha256, FetchProgress &progress, std::string &err, Sha256Resume *sha,
+                   FileSink *sink) {
     struct Job {
         const std::string &url, &path, &expected_sha256;
         uint64_t offset;
         FetchProgress &progress;
         std::string &err;
         Sha256Resume *sha;
+        FileSink *sink;
         bool ok;
-    } job{url, path, expected_sha256, offset, progress, err, sha, false};
+    } job{url, path, expected_sha256, offset, progress, err, sha, sink, false};
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 1 << 20);
     pthread_t th;
     auto run = [](void *p) -> void * {
         Job &j = *(Job *)p;
-        j.ok = get_file(j.url, j.path, j.offset, j.expected_sha256, j.progress, j.err, j.sha);
+        j.ok = get_file(j.url, j.path, j.offset, j.expected_sha256, j.progress, j.err, j.sha, j.sink);
         return nullptr;
     };
     int rc = pthread_create(&th, &attr, run, &job);
     pthread_attr_destroy(&attr);
-    if (rc != 0) job.ok = get_file(url, path, offset, expected_sha256, progress, err, sha);  // no thread: on this one
+    if (rc != 0) job.ok = get_file(url, path, offset, expected_sha256, progress, err, sha, sink);  // no thread: here
     else pthread_join(th, nullptr);
     // A download that failed before its first byte leaves nothing behind.
     struct stat st;

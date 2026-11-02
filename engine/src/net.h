@@ -54,6 +54,17 @@ struct Sha256Resume {
     std::function<void(uint64_t offset, const std::vector<unsigned char> &state)> on_checkpoint;
 };
 
+// Somewhere else to write a download's bytes than the title's own writes
+// (the PS5's FTP server, ps5/ftp.h). open() comes once the file is cut to
+// `at` bytes, which the sink goes on after; close() returns once every byte
+// is in the file.
+struct FileSink {
+    virtual ~FileSink() = default;
+    virtual bool open(uint64_t at, std::string &err) = 0;
+    virtual bool write(const void *data, size_t n, std::string &err) = 0;
+    virtual bool close(std::string &err) = 0;
+};
+
 // GET url into the file at path, which already holds its first `offset`
 // bytes (0: none), asking the server for the rest with Range. Follows up to
 // 5 redirects. Writes 256 KiB at a time through a 1 MiB buffer, with the
@@ -69,10 +80,14 @@ struct Sha256Resume {
 // have, or longer than the file), so that call starts over. sha: a
 // checkpoint to go on from, and where to report new ones; without one, a
 // resume hashes the file's first `offset` bytes first. Each socket
-// operation has 30 s. A full disk reports "storage full".
+// operation has 30 s. A full disk reports "storage full". sink: writes the
+// body instead of the title, if it opens (else the title writes it); the
+// title still reads, cuts and renames the file. A checkpoint then may be
+// ahead of what's on the drive after a crash; the next call sees the file is
+// shorter and hashes it instead.
 bool http_get_file(const std::string &url, const std::string &path, uint64_t offset,
                    const std::string &expected_sha256, FetchProgress &progress, std::string &err,
-                   Sha256Resume *sha = nullptr);
+                   Sha256Resume *sha = nullptr, FileSink *sink = nullptr);
 
 // A connection held open both ways, plain or TLS, for protocols that send and
 // receive as they go (Tailscale's control server and relays, ps5/ts). One

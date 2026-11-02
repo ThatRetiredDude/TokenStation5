@@ -80,6 +80,7 @@
 
 #include "audio_probe.h"
 #include "backup.h"
+#include "ftp.h"
 #include "keep_models.h"
 #include "canvas.h"
 #include "chat.h"
@@ -648,9 +649,7 @@ int main(int, char **) {
     // TS5_FTP_PORT: where the console's FTP server is, if not 2121 or 1337.
     const std::vector<std::string> last_version = read_words(kVersionMark);
     if (last_version.empty() || last_version[0] != TS5_VERSION) {
-        std::vector<int> ports = {2121, 1337};
-        if (int p = atoi(app::setting("TS5_FTP_PORT").c_str()); p > 0) ports.insert(ports.begin(), p);
-        const app::BroughtBack b = app::bring_back_models(kModels, TS5_TITLE_ID, ports);
+        const app::BroughtBack b = app::bring_back_models(kModels, TS5_TITLE_ID, app::ftp_ports());
         if (!b.why.empty())
             printf("ts5-title: models from the last version: %s\n", b.why.c_str());
         else
@@ -797,6 +796,8 @@ int main(int, char **) {
     // Models (and, from Settings, the speech model and voice) downloaded on
     // the console, beside whatever the Runner does.
     app::Downloads downloads(kModels, TS5_VERSION, notify);
+    // TS5_DOWNLOAD_FTP=0: the title writes its downloads itself.
+    if (app::setting("TS5_DOWNLOAD_FTP") != "0") downloads.through_ftp("/data/homebrew/" TS5_TITLE_ID "/models");
     // Which folders the title can write to, and the free space each one's
     // volume reports, to find where models and the rest can live so a store
     // update (which swaps the app's folder) keeps them.
