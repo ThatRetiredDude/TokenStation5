@@ -693,7 +693,12 @@ void Downloads::run(const std::string &key) {
             d.speed = 0;
             d.held = false;
         }
-        if (ok && rename(part.c_str(), file.c_str()) != 0) {
+        // A file that arrived another way meanwhile (copied over FTP) stays:
+        // it may be loaded, and a job using it fails when it's replaced.
+        if (ok && exists(file)) {
+            printf("ts5-title: download: %s arrived another way meanwhile; keeping that one\n", e.file);
+            unlink(part.c_str());
+        } else if (ok && rename(part.c_str(), file.c_str()) != 0) {
             ok = false;
             err = std::string("cannot rename the part: ") + strerror(errno);
         }
