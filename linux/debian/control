@@ -1,0 +1,12 @@
+Package: tokenstation
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: ThatRetiredDude <128261747+ThatRetiredDude@users.noreply.github.com>
+Section: misc
+Priority: optional
+Depends: libc6, libstdc++6, libvulkan1, mesa-vulkan-drivers, adduser
+Homepage: https://github.com/ThatRetiredDude/TokenStation5
+Description: Local AI endpoint with an OpenAI-style API
+ TokenStation runs GGUF language models on the GPU through Vulkan and
+ serves them on your network with an OpenAI-style API. Built for a PS5
+ running Linux, it works on any Linux machine with a Vulkan GPU.

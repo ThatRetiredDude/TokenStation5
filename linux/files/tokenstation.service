@@ -1,0 +1,25 @@
+[Unit]
+Description=TokenStation local AI endpoint
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/tokenstation
+# Runs as root ("+"): PS5 clock boost and fan, skipped on other machines.
+ExecStartPre=+/usr/lib/tokenstation/boost.sh
+ExecStart=/usr/lib/tokenstation/start.sh
+User=tokenstation
+Group=tokenstation
+# GPU access comes from the render and video groups (postinst adds them).
+WorkingDirectory=/var/lib/tokenstation
+Restart=on-failure
+RestartSec=5
+LimitMEMLOCK=infinity
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

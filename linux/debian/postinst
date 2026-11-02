@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+    if ! getent passwd tokenstation >/dev/null; then
+        adduser --system --group --home /var/lib/tokenstation --no-create-home tokenstation
+    fi
+    for g in render video; do
+        getent group "$g" >/dev/null && adduser tokenstation "$g" >/dev/null || true
+    done
+    mkdir -p /var/lib/tokenstation/models
+    chown -R tokenstation:tokenstation /var/lib/tokenstation
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+        systemctl enable tokenstation.service >/dev/null
+        systemctl restart tokenstation.service || true
+    fi
+fi
+exit 0

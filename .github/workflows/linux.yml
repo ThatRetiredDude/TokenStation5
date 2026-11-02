@@ -1,0 +1,58 @@
+name: linux
+
+# Builds the TokenStation Linux package (linux/build-deb.sh). On a
+# linux-v<version> tag it also publishes a GitHub Release with the .deb and
+# .tar.gz. These releases are never marked "latest", so the PS5 store side
+# (release.yml) keeps pointing at the PS5 title.
+#
+#   git tag linux-v0.1.0 && git push origin linux-v0.1.0
+
+on:
+  push:
+    branches: [main]
+    tags: ["linux-v*"]
+    paths: ["engine/**", "linux/**", ".github/workflows/linux.yml"]
+  pull_request:
+    paths: ["engine/**", "linux/**", ".github/workflows/linux.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake g++ glslang-tools libvulkan-dev
+      - name: Build the package
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/linux-v* ]]; then v=${GITHUB_REF_NAME#linux-v}; else v=; fi
+          linux/build-deb.sh $v
+      - name: Check the package
+        run: |
+          deb=$(ls build/linux/*.deb)
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb"
+          dpkg-deb -x "$deb" /tmp/pkg
+          sh -n /tmp/pkg/usr/lib/tokenstation/start.sh
+          sh -n /tmp/pkg/usr/lib/tokenstation/boost.sh
+          /tmp/pkg/usr/bin/ts5 2>&1 | grep -q "usage: ts5"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tokenstation-linux
+          path: |
+            build/linux/*.deb
+            build/linux/*.tar.gz
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/linux-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" build/linux/*.deb build/linux/*.tar.gz \
+            --title "TokenStation for Linux ${GITHUB_REF_NAME#linux-v}" \
+            --notes "Linux package. Install: sudo apt install ./tokenstation_*.deb. See linux/README.md." \
+            --latest=false

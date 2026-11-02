@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+# Models in /var/lib/tokenstation stay unless the package is purged.
+if [ "$1" = purge ]; then
+    rm -rf /var/lib/tokenstation
+    getent passwd tokenstation >/dev/null && deluser --system tokenstation >/dev/null || true
+fi
+[ -d /run/systemd/system ] && systemctl daemon-reload || true
+exit 0

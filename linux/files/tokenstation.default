@@ -1,0 +1,22 @@
+# TokenStation settings, read by tokenstation.service.
+# After changing them: sudo systemctl restart tokenstation
+
+# The model to serve. Empty: the first .gguf in MODELS_DIR, by name.
+MODEL=
+MODELS_DIR=/var/lib/tokenstation/models
+
+# Where the API listens. 0.0.0.0 = every network on this machine.
+HOST=0.0.0.0
+PORT=8081
+
+# Context length in tokens, or "auto" for what fits in GPU memory.
+CONTEXT=8192
+
+# PS5 only: run the CPU at 3.5 GHz and the GPU at 2.23 GHz with the fan on,
+# using ps5_control from ps5-linux-tools. Set to 0 to leave clocks alone.
+PS5_BOOST=1
+# Where ps5_control lives, if it is not on the PATH.
+PS5_CONTROL=
+
+# Anything else to pass to "ts5 serve".
+EXTRA_ARGS=
