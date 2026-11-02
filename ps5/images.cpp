@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <memory>
 #include <mutex>
 #include <random>
 
@@ -329,6 +330,12 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
     }
     const sd_type_t wtype = ask.wtype.empty() ? SD_TYPE_COUNT : str_to_sd_type(ask.wtype.c_str());
     if (!vulkan_ready(err)) return false;
+    // ggml keeps its Vulkan device, and what the device holds, until told:
+    // on every way out, a failed picture's too, the chat model gets the
+    // whole GPU back.
+    struct Release {
+        ~Release() { printf("ts5-title: pictures: released %d Vulkan device(s)\n", ggml_backend_vk_release_devices()); }
+    } release;
     sd_set_log_callback(on_log, nullptr);
     Progress p{&progress};
     sd_set_progress_callback(on_progress, &p);
@@ -351,6 +358,8 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
         err = "stable-diffusion.cpp couldn't load " + ask.name;
         return false;
     }
+    // Freed before the device is released, an exception's way out too.
+    std::unique_ptr<sd_ctx_t, void (*)(sd_ctx_t *)> owned(ctx, free_sd_ctx);
     out.load_s = seconds() - t0;
 
     sd_img_gen_params_t g;
@@ -406,11 +415,8 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
         }
         free_sd_image_generation_result(res);
     }
-    free_sd_ctx(ctx);
+    owned.reset();
     sd_set_progress_callback(nullptr, nullptr);
-    // ggml keeps its Vulkan device, and what the device holds, until told:
-    // the chat model gets the whole GPU back.
-    printf("ts5-title: pictures: released %d Vulkan device(s)\n", ggml_backend_vk_release_devices());
     if (out.png.empty()) {
         err = "stable-diffusion.cpp made no picture";
         return false;
