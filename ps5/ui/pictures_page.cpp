@@ -74,6 +74,8 @@ std::vector<PicturesPage::Size> PicturesPage::sizes(const PicturesInfo &info) co
     const int s = m ? m->size : 512;
     // Its own, then wide and tall at about as many pixels, then smaller.
     if (s <= 512) return {{s, s}, {768, 512}, {512, 768}};
+    // SD 1.5: made at 512 and enlarged, so wide and tall are 3 to 2.
+    if (s == 768) return {{768, 768}, {1152, 768}, {768, 1152}, {512, 512}};
     return {{s, s}, {s, s * 3 / 4 / 64 * 64}, {s * 3 / 4 / 64 * 64, s}, {s * 3 / 4 / 64 * 64, s * 3 / 4 / 64 * 64}};
 }
 

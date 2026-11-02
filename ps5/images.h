@@ -34,15 +34,27 @@ struct ImageModel {
     const char *scheduler;    // "": stable-diffusion.cpp's for the sampler
     const char *wtype;        // "": its weights as they are; else what they become on the GPU
     uint64_t memory;          // about what the GPU needs at its size, in bytes
+    const char *negative;     // what to steer away from, unless asked
+    // The size it was trained at (0: any size). A picture bigger than that
+    // is made there first, then enlarged and sampled again (stable-
+    // diffusion.cpp's hires fix) with hires_steps at hires_denoise.
+    int native;
+    int hires_steps;
+    float hires_denoise;
 };
 
+// SD 1.5 makes its best pictures with these words to avoid.
+constexpr const char *kSd15Negative =
+    "lowres, blurry, jpeg artifacts, low quality, worst quality, deformed, disfigured, bad anatomy, bad hands, "
+    "extra fingers, extra limbs, watermark, signature, text";
+
 inline const ImageModel kImageModels[] = {
-    {"sd15", "Stable Diffusion 1.5", "Quick pictures, 512 by 512", "CreativeML OpenRAIL-M",
-     "sd15", "", "", "", 512, 20, 7.0f, "", "", "", 3ull << 30},
+    {"sd15", "Stable Diffusion 1.5", "Quick pictures, 768 by 768", "CreativeML OpenRAIL-M",
+     "sd15", "", "", "", 768, 25, 7.0f, "dpm++2m", "karras", "", 7ull << 29, kSd15Negative, 512, 12, 0.5f},
     {"sdxl-lightning", "SDXL-Lightning", "Good pictures in 4 steps, 1024 by 1024", "CreativeML OpenRAIL++-M",
-     "sdxl-lightning", "", "", "sdxl-vae", 1024, 4, 1.0f, "euler", "sgm_uniform", "q8_0", 7ull << 30},
+     "sdxl-lightning", "", "", "sdxl-vae", 1024, 4, 1.0f, "euler", "sgm_uniform", "q8_0", 7ull << 30, "", 0, 0, 0},
     {"z-image-turbo", "Z-Image-Turbo", "The best pictures, and words in them", "Apache 2.0",
-     "", "z-image-turbo", "z-image-text", "z-image-vae", 1024, 8, 1.0f, "", "", "", 17ull << 29},
+     "", "z-image-turbo", "z-image-text", "z-image-vae", 1024, 8, 1.0f, "", "", "", 17ull << 29, "", 0, 0, 0},
 };
 
 // Its catalog keys, in the order above; the ones whose files aren't in the
@@ -71,6 +83,9 @@ struct ImageAsk {
     std::string sampler;    // stable-diffusion.cpp's name (euler_a, dpm++2m, ...); "": the model's
     std::string scheduler;  // discrete, karras, sgm_uniform, ...; "": the sampler's
     bool keep_first = false;  // ImageOut::first too, for the Pictures page
+    // A second pass to this size (0: none), from width by height.
+    int hires_w = 0, hires_h = 0, hires_steps = 0;
+    float hires_denoise = 0.5f;
 };
 
 struct ImageOut {
@@ -83,7 +98,8 @@ struct ImageOut {
 
 // A request's fields, as OpenAI's images API names them (model, prompt, n,
 // size "WxH", response_format b64_json), and negative_prompt, steps,
-// cfg_scale, seed, sampler and scheduler, which its clients don't send; what
+// cfg_scale, seed, sampler, scheduler and hires (false: no second pass), which
+// its clients don't send; what
 // isn't asked for is the model's (kImageModels). A model the folder doesn't
 // have (apps send "dall-e-3") gets its first one. False, with err for the
 // reply, for a request it can't make.
@@ -92,7 +108,8 @@ bool image_ask(const ts5::Json &req, const std::string &models, ImageAsk &ask, s
 std::string image_reply(const ImageOut &out);
 
 // Runs on the caller's thread; progress(step, steps) as the sampler goes,
-// and progress(0, 0) while the model's weights load.
+// progress(step, -steps) through a second pass, and progress(0, 0) while
+// the model's weights load.
 bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
                  const std::function<void(int step, int steps)> &progress = nullptr);
 

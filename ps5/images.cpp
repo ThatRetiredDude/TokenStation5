@@ -89,17 +89,27 @@ void on_log(sd_log_level_t level, const char *text, void *) {
 
 struct Progress {
     const std::function<void(int, int)> *f;
-    int steps = -1;  // the sampler's; until known, everything is loading
+    int steps = -1;        // the sampler's; until known, everything is loading
+    int hires_steps = -1;  // the second pass's, if there is one
+    bool sampled = false;  // the first pass is done
 };
 
 // stable-diffusion.cpp reports its tensors loading (it loads them on first
 // use, in generate_image) the way it reports the sampler's steps: only a
-// count of the sampler's steps is one, the rest is loading (0 steps).
+// count of the sampler's steps is one, the rest is loading (0 steps). The
+// second pass's steps come as a negative count.
 void on_progress(int step, int steps, float, void *data) {
-    const auto *p = static_cast<Progress *>(data);
+    auto *p = static_cast<Progress *>(data);
     if (!p || !p->f || !*p->f) return;
-    if (steps == p->steps) (*p->f)(step, steps);
-    else (*p->f)(0, 0);
+    if (!p->sampled && steps == p->steps) {
+        p->sampled = step >= steps;
+        (*p->f)(step, steps);
+    } else if (p->sampled && p->hires_steps > 0 && steps <= p->hires_steps) {
+        // (its count can be cut down by how much of the picture it redoes)
+        (*p->f)(step, -steps);
+    } else {
+        (*p->f)(0, 0);
+    }
 }
 
 // ggml starts with its CPU backend only (speech runs on it); the GPU joins
@@ -262,12 +272,24 @@ bool image_ask(const ts5::Json &req, const std::string &models, ImageAsk &ask, s
     }
     ask.width = w;
     ask.height = h;
+    // Bigger than the model was trained at: made at that size, then
+    // enlarged to this one and sampled again.
+    if (m && m->native && std::max(w, h) > m->native && req["hires"].boolean(true)) {
+        const double f = (double)m->native / std::min(w, h);
+        auto down = [&](int v) { return std::max(64, (int)(v * f) / 64 * 64); };
+        ask.width = down(w);
+        ask.height = down(h);
+        ask.hires_w = w;
+        ask.hires_h = h;
+        ask.hires_steps = m->hires_steps;
+        ask.hires_denoise = m->hires_denoise;
+    }
     ask.n = (int)req["n"].num(1);
     if (ask.n < 1 || ask.n > 4) {
         err = "n must be 1 to 4";
         return false;
     }
-    ask.negative = req["negative_prompt"].str();
+    ask.negative = req["negative_prompt"].str(m ? m->negative : "");
     ask.steps = std::max(0, std::min(150, (int)req["steps"].num(m ? m->steps : 0)));
     ask.cfg = (float)std::max(0.0, std::min(30.0, req["cfg_scale"].num(m ? m->cfg : 0)));
     ask.seed = (int64_t)req["seed"].num(-1);
@@ -339,6 +361,15 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
     g.seed = out.seed;
     if (ask.steps > 0) g.sample_params.sample_steps = ask.steps;
     p.steps = g.sample_params.sample_steps;
+    if (ask.hires_w > 0) {
+        p.hires_steps = ask.hires_steps;
+        g.hires.enabled = true;
+        g.hires.upscaler = SD_HIRES_UPSCALER_LATENT;
+        g.hires.target_width = ask.hires_w;
+        g.hires.target_height = ask.hires_h;
+        g.hires.steps = ask.hires_steps;
+        g.hires.denoising_strength = ask.hires_denoise;
+    }
     if (ask.cfg > 0) g.sample_params.guidance.txt_cfg = ask.cfg;
     g.sample_params.sample_method = method == SAMPLE_METHOD_COUNT ? sd_get_default_sample_method(ctx) : method;
     g.sample_params.scheduler =
@@ -374,8 +405,10 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
         err = "stable-diffusion.cpp made no picture";
         return false;
     }
-    printf("ts5-title: %zu picture%s of %dx%d with %s in %.1f s (loading %.1f s)\n", out.png.size(),
-           out.png.size() == 1 ? "" : "s", ask.width, ask.height, ask.name.c_str(), out.make_s, out.load_s);
+    printf("ts5-title: %zu picture%s of %dx%d%s with %s in %.1f s (loading %.1f s)\n", out.png.size(),
+           out.png.size() == 1 ? "" : "s", ask.hires_w ? ask.hires_w : ask.width,
+           ask.hires_w ? ask.hires_h : ask.height, ask.hires_w ? " (in two passes)" : "", ask.name.c_str(),
+           out.make_s, out.load_s);
     return true;
 }
 #endif
