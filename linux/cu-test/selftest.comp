@@ -1,0 +1,61 @@
+#version 450
+// GPU self-test kernels. Every job has an answer the host can check, so a
+// faulty compute unit shows up as a wrong number, not just a crash.
+//   mode 0  integer hash chains        (host checks every value)
+//   mode 1  float FMA/sqrt/div chains  (must match the same run every time
+//                                       and the saved baseline)
+//   mode 2  shared memory exchange     (host checks every value)
+//   mode 3  write a pattern to the big buffer
+//   mode 4  read it back, count mismatches
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Params {
+    uint mode;
+    uint seed;
+    uint rounds;
+    uint count;  // values in `data`
+};
+layout(std430, binding = 0) buffer Out { uint outv[]; };
+layout(std430, binding = 1) buffer Data { uint data[]; };
+layout(std430, binding = 2) buffer Errors { uint errors; };
+
+shared uint lds[256];
+
+uint hash(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint lid = gl_LocalInvocationID.x;
+    if (mode == 0u) {
+        uint x = gid ^ seed;
+        for (uint r = 0u; r < rounds; r++) x = hash(x + r);
+        outv[gid] = x;
+    } else if (mode == 1u) {
+        precise float a = float(hash(gid ^ seed) & 0xffffu) * (1.0 / 65536.0) + 0.5;
+        precise float b = float(gid & 1023u) * (1.0 / 1024.0);
+        for (uint r = 0u; r < rounds; r++) {
+            a = fma(a, 1.0001, b * 0.25);
+            b = sqrt(abs(b * a) + 1.0) / (a + 1.5);
+        }
+        outv[gid] = floatBitsToUint(a) ^ floatBitsToUint(b);
+    } else if (mode == 2u) {
+        lds[lid] = hash(gid ^ seed);
+        barrier();
+        uint j = (lid * 7u + 13u) & 255u;
+        uint base = gid - lid;
+        uint v = lds[j];
+        outv[gid] = v ^ hash((base + j) ^ seed) ^ hash(gid);  // = hash(gid) when right
+    } else if (mode == 3u) {
+        for (uint i = gid; i < count; i += gl_NumWorkGroups.x * 256u) data[i] = hash(i ^ seed);
+    } else {
+        uint bad = 0u;
+        for (uint i = gid; i < count; i += gl_NumWorkGroups.x * 256u)
+            if (data[i] != hash(i ^ seed)) bad++;
+        if (bad != 0u) atomicAdd(errors, bad);
+    }
+}

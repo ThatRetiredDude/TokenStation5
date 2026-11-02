@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.16)
+project(gpu_selftest CXX)
+set(CMAKE_CXX_STANDARD 17)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+find_package(Vulkan REQUIRED)
+find_program(GLSLANG glslangValidator REQUIRED)
+set(SPV ${CMAKE_CURRENT_BINARY_DIR}/selftest.spv.h)
+add_custom_command(OUTPUT ${SPV}
+  COMMAND ${GLSLANG} -V --target-env vulkan1.1 --vn spv_selftest -o ${SPV} ${CMAKE_CURRENT_SOURCE_DIR}/selftest.comp
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/selftest.comp)
+add_executable(gpu-selftest gpu_selftest.cpp ${SPV})
+target_include_directories(gpu-selftest PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(gpu-selftest PRIVATE Vulkan::Vulkan)

@@ -21,6 +21,8 @@ never relicenses someone else's work.
 | --- | --- | --- |
 | `engine/` (ts5: source, shaders, tests, design doc) | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code. Contains no GPL code. |
 | `scripts/`, `docs/`, `models.tsv`, `known-good.tsv`, `README.md`, `.github/` | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code and docs. The scripts download and talk to GPL programs (PS5LM) but contain none of their code. |
+| `linux/` (Linux package scripts, service, release notes) | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code. Contains no GPL code. |
+| `linux/cu-test/` (GPU self-test `gpu-selftest` and the `tokenstation-cu` compute unit tool) | [MIT](linux/cu-test/LICENSE) | Standalone and permissive so other PS5 Linux projects can use it. |
 | `ps5/` (title main, dashboard, voice, Tailscale client `ps5/ts`, tunnel glue `ps5/wg`, libc shims, build scripts, import checker) | [GPL-3.0-or-later](ps5/LICENSE) | Exists to link ts5 with PS5_Vulkan and the PS5 payload SDK, which are GPL-3.0-or-later. |
 | `third_party/whisper.cpp/` (whisper.cpp and ggml, for speech to text) | [MIT](third_party/whisper.cpp/LICENSE), as vendored | Third-party code, copied unchanged by `scripts/vendor-whisper.sh`. Linked into the PS5 title (GPL-3.0 as a whole, below), not into the Linux `ts5` binary. |
 | `third_party/kokoro.cpp/` (Kokoro-82M's model code, for spoken replies) | [MIT](third_party/kokoro.cpp/LICENSE), as vendored | Third-party code, copied by `scripts/vendor-kokoro.sh` with our patch (espeak-ng and Highway out). Linked into the PS5 title, not into the Linux `ts5` binary. |

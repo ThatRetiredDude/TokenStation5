@@ -40,6 +40,8 @@ jobs:
           dpkg-deb -x "$deb" /tmp/pkg
           sh -n /tmp/pkg/usr/lib/tokenstation/start.sh
           sh -n /tmp/pkg/usr/lib/tokenstation/boost.sh
+          sh -n /tmp/pkg/usr/bin/tokenstation-cu
+          test -x /tmp/pkg/usr/lib/tokenstation/gpu-selftest
           /tmp/pkg/usr/bin/ts5 2>&1 | grep -q "usage: ts5"
       - uses: actions/upload-artifact@v4
         with:

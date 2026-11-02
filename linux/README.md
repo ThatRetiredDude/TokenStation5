@@ -23,6 +23,11 @@ unlock anything by itself:
 
 For a lighter system, turn the desktop off: `sudo systemctl set-default multi-user.target`.
 
+## GPU compute units
+
+The package includes `tokenstation-cu` to see, choose (36, 38 or 40) and test
+how many GPU compute units the PS5 uses. See [cu-test/README.md](cu-test/README.md).
+
 ## Install
 
 ```sh

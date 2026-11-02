@@ -1,0 +1,117 @@
+#!/bin/sh
+# tokenstation-cu: see and choose how many GPU compute units a PS5 running
+# Linux uses, and test whether this chip gets the extra ones right.
+#
+#   tokenstation-cu status        active CUs now, and the boot setting
+#   tokenstation-cu set 36|38|40  boot setting (takes effect after a reboot)
+#   tokenstation-cu probe         next boot only logs which GPU sections have
+#                                 disabled CUs, without turning them on
+#   tokenstation-cu test [SECS]   GPU self-test (and ts5 check if a model is
+#                                 installed); run it once at 36 first
+#
+# Sony ships 36 of the chip's 40 CUs on; on some chips one of the extra pairs
+# is faulty. The kernel option is amdgpu.ps5_cu_unlock from the ps5-linux
+# kernel: 0 = off (36), 2 = first GPU section only (38 if that section has a
+# disabled pair, else 36), 3 = all (40), 4 = probe. CUs come on in pairs.
+# Nothing here changes the setting by itself: you decide.
+#
+# If a setting won't boot, edit cmdline.txt on the boot drive's FAT32
+# partition from another computer and set amdgpu.ps5_cu_unlock=0.
+set -eu
+
+state=/var/lib/tokenstation/cu-test
+selftest=${GPU_SELFTEST:-/usr/lib/tokenstation/gpu-selftest}
+
+find_cmdline() {
+    if [ -n "${CMDLINE:-}" ]; then echo "$CMDLINE"; return; fi
+    for f in /boot/efi/cmdline.txt /efi/cmdline.txt /boot/firmware/cmdline.txt /boot/cmdline.txt; do
+        [ -f "$f" ] && { echo "$f"; return; }
+    done
+    echo "tokenstation-cu: can't find cmdline.txt; set CMDLINE=/path/to/cmdline.txt" >&2
+    exit 2
+}
+
+active_cus() {
+    n=$(dmesg 2>/dev/null | grep -o 'active_cu_number[^0-9]*[0-9]*' | tail -n 1 | grep -o '[0-9]*$' || true)
+    echo "${n:-unknown}"
+}
+
+boot_mode() {
+    grep -o 'amdgpu\.ps5_cu_unlock=[0-9]*' "$(find_cmdline)" 2>/dev/null | head -n 1 | cut -d= -f2 || true
+}
+
+set_mode() {  # mode
+    f=$(find_cmdline)
+    [ "$(id -u)" = 0 ] || { echo "tokenstation-cu: run with sudo" >&2; exit 2; }
+    cp "$f" "$f.bak"
+    line=$(head -n 1 "$f" | sed 's/[[:space:]]*amdgpu\.ps5_cu_unlock=[0-9]*//g')
+    if [ "$1" = 0 ]; then printf '%s\n' "$line" > "$f"; else printf '%s amdgpu.ps5_cu_unlock=%s\n' "$line" "$1" > "$f"; fi
+    sync
+    echo "boot setting saved in $f (old one in $f.bak). Reboot and run the loader again for it to take effect."
+}
+
+case "${1:-status}" in
+status)
+    m=$(boot_mode)
+    case "${m:-0}" in
+        0) want="36 (stock)";;
+        2) want="38 (first GPU section; 36 if that section has no disabled pair)";;
+        3) want="40 (all)";;
+        1|4) want="probe only (36, logs the disabled sections)";;
+        *) want="unknown mode $m";;
+    esac
+    echo "active compute units now: $(active_cus)"
+    echo "boot setting:             $want"
+    dmesg 2>/dev/null | grep -E 'ps5-[0-9]+cu-(enable|probe)' | sed 's/^/  /' || true
+    ;;
+set)
+    case "${2:-}" in
+        36) set_mode 0;;
+        38) set_mode 2;;
+        40) set_mode 3;;
+        *) echo "usage: tokenstation-cu set 36|38|40" >&2; exit 2;;
+    esac
+    ;;
+probe)
+    set_mode 4
+    echo "after the reboot, 'tokenstation-cu status' lists which sections have disabled CUs."
+    ;;
+test)
+    secs=${2:-120}
+    mkdir -p "$state" 2>/dev/null || state=${TMPDIR:-/tmp}/tokenstation-cu
+    mkdir -p "$state"
+    cus=$(active_cus)
+    log=$state/test-$cus-$(date +%Y%m%d-%H%M%S).log
+    echo "testing with $cus active compute units for $secs s; log: $log"
+    since=$(date '+%Y-%m-%d %H:%M:%S')
+    rc=0
+    if [ "$cus" = 36 ] || [ ! -f "$state/baseline.txt" ]; then
+        [ "$cus" = 36 ] || echo "no baseline from a 36 CU run yet; this run only checks itself"
+        "$selftest" --seconds "$secs" --save "$state/baseline-$cus.txt" | tee "$log" || rc=$?
+        [ "$cus" = 36 ] && [ "$rc" = 0 ] && cp "$state/baseline-$cus.txt" "$state/baseline.txt"
+    else
+        "$selftest" --seconds "$secs" --compare "$state/baseline.txt" | tee "$log" || rc=$?
+    fi
+    model=$(find /var/lib/tokenstation/models -maxdepth 1 -name '*.gguf' 2>/dev/null | LC_ALL=C sort | head -n 1)
+    if [ -n "$model" ] && command -v ts5 >/dev/null; then
+        echo "ts5 check on $(basename "$model") (GPU against a CPU reference)" | tee -a "$log"
+        if ts5 check -m "$model" -n 64 > "$state/check.out" 2>&1; then :; else rc=1; fi
+        cat "$state/check.out" >> "$log"
+        tail -n 3 "$state/check.out"
+        ts5 bench -m "$model" --pp 512 --tg 128 2>&1 | tee -a "$log" | tail -n 2 || true
+    fi
+    gpu_errors=$(journalctl -k --since "$since" 2>/dev/null | grep -Eci 'amdgpu.*(timeout|reset|fault|hang)' || true)
+    echo "GPU errors in the kernel log during the test: ${gpu_errors:-0}" | tee -a "$log"
+    [ "${gpu_errors:-0}" = 0 ] || rc=1
+    if [ "$rc" = 0 ]; then
+        echo "verdict: PASS with $cus compute units" | tee -a "$log"
+    else
+        echo "verdict: FAIL with $cus compute units. 'sudo tokenstation-cu set 36' (or 38) and reboot." | tee -a "$log"
+    fi
+    exit "$rc"
+    ;;
+*)
+    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+esac

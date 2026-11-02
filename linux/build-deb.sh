@@ -15,13 +15,19 @@ out=${2:-$root/build/linux}
 arch=$(dpkg --print-architecture)
 build=$out/engine
 pkg=$out/tokenstation_${version}_${arch}
+doc_cu=$pkg/usr/share/doc/tokenstation/cu-test
 
 cmake -S "$root/engine" -B "$build" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$build" -j"$(nproc)"
+cmake -S "$root/linux/cu-test" -B "$out/cu-test" -DCMAKE_BUILD_TYPE=Release
+cmake --build "$out/cu-test" -j"$(nproc)"
 
 rm -rf "$pkg"
 install -Dm755 "$build/ts5" "$pkg/usr/bin/ts5"
 install -Dm755 "$root/linux/files/start.sh" "$pkg/usr/lib/tokenstation/start.sh"
+install -Dm755 "$out/cu-test/gpu-selftest" "$pkg/usr/lib/tokenstation/gpu-selftest"
+install -Dm755 "$root/linux/cu-test/tokenstation-cu" "$pkg/usr/bin/tokenstation-cu"
+install -Dm644 "$root/linux/cu-test/LICENSE" "$doc_cu/LICENSE"
 install -Dm755 "$root/linux/files/boost.sh" "$pkg/usr/lib/tokenstation/boost.sh"
 install -Dm644 "$root/linux/files/tokenstation.service" "$pkg/lib/systemd/system/tokenstation.service"
 install -Dm644 "$root/linux/files/tokenstation.default" "$pkg/etc/default/tokenstation"
