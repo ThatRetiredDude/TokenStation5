@@ -24,6 +24,11 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_vk_host_buffer_type(voi
 
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_vk_reg(void);
 
+// ts5: destroys each Vulkan device ggml opened, with every buffer, pipeline
+// and pool on it, once no backend or buffer uses it; the next use opens it
+// again. How many it destroyed.
+GGML_BACKEND_API int ggml_backend_vk_release_devices(void);
+
 #ifdef  __cplusplus
 }
 #endif

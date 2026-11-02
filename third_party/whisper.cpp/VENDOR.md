@@ -8,14 +8,18 @@ The title transcribes speech on the console's CPU with it (`ps5/stt.cpp`),
 kokoro.cpp runs on its ggml, and so does stable-diffusion.cpp
 (`third_party/stable-diffusion.cpp`), on ggml's Vulkan backend: the title
 carries one ggml. `scripts/vendor-whisper.sh` copies it, and only what CPU
-inference on x86 and the Vulkan backend need, then applies one change of ours
-(`scripts/vendor-whisper.patch`, marked "ts5" in the code):
+inference on x86 and the Vulkan backend need, then applies two changes of ours
+(`scripts/vendor-whisper.patch`, marked "ts5" in the code). First,
 `ggml/src/ggml-backend.cpp`'s scheduler allows 256 splits of a graph, not
 one per node. Upstream sets aside room for every split's input copies when a
 scheduler is made, graph_size × 60 tensors: 5 GB for kokoro.cpp's 262144-node
 graphs, which the PS5's malloc takes from the console's memory. On the CPU
 backend alone a graph is one split, on Vulkan a few more where an op falls
 back to the CPU, and the scheduler checks that a graph still fits.
+Second, `ggml_backend_vk_release_devices()` destroys the Vulkan devices ggml
+opened, which hold themselves through their buffer type and so are never
+freed: the title calls it after each picture, so the GPU's memory all goes
+back to the chat model.
 
 What is kept:
 

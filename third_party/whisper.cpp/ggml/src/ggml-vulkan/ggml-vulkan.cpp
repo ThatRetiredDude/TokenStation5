@@ -15175,6 +15175,26 @@ bool ggml_backend_is_vk(ggml_backend_t backend) {
     return backend != NULL && ggml_guid_matches(backend->guid, ggml_backend_vk_guid());
 }
 
+// ts5: a device holds its own buffer type, whose context holds the device,
+// so it is never freed by its count; this breaks that loop.
+int ggml_backend_vk_release_devices() {
+    int n = 0;
+    for (auto &d : vk_instance.devices) {
+        if (!d) continue;
+        d->device.waitIdle();
+        delete static_cast<ggml_backend_vk_buffer_type_context *>(d->buffer_type.context);
+        d->buffer_type.context = nullptr;
+        if (d.use_count() > 1) {
+            GGML_LOG_WARN("ggml_vulkan: %s is still in use (%ld), not released\n", d->name.c_str(), d.use_count());
+            d->buffer_type.context = new ggml_backend_vk_buffer_type_context{ d->name, d };
+            continue;
+        }
+        d.reset();
+        n++;
+    }
+    return n;
+}
+
 int ggml_backend_vk_get_device_count() {
     return ggml_vk_get_device_count();
 }

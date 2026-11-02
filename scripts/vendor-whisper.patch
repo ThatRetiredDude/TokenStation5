@@ -36,3 +36,46 @@
      sched->node_backend_ids = (int *) calloc(nodes_size, sizeof(sched->node_backend_ids[0]));
      sched->leaf_backend_ids = (int *) calloc(nodes_size, sizeof(sched->leaf_backend_ids[0]));
      sched->prev_node_backend_ids = (int *) calloc(nodes_size, sizeof(sched->prev_node_backend_ids[0]));
+--- a/ggml/include/ggml-vulkan.h
++++ b/ggml/include/ggml-vulkan.h
+@@ -24,6 +24,11 @@ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_vk_host_buffer_type(voi
+ 
+ GGML_BACKEND_API ggml_backend_reg_t ggml_backend_vk_reg(void);
+ 
++// ts5: destroys each Vulkan device ggml opened, with every buffer, pipeline
++// and pool on it, once no backend or buffer uses it; the next use opens it
++// again. How many it destroyed.
++GGML_BACKEND_API int ggml_backend_vk_release_devices(void);
++
+ #ifdef  __cplusplus
+ }
+ #endif
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -15175,6 +15175,26 @@ bool ggml_backend_is_vk(ggml_backend_t backend) {
+     return backend != NULL && ggml_guid_matches(backend->guid, ggml_backend_vk_guid());
+ }
+ 
++// ts5: a device holds its own buffer type, whose context holds the device,
++// so it is never freed by its count; this breaks that loop.
++int ggml_backend_vk_release_devices() {
++    int n = 0;
++    for (auto &d : vk_instance.devices) {
++        if (!d) continue;
++        d->device.waitIdle();
++        delete static_cast<ggml_backend_vk_buffer_type_context *>(d->buffer_type.context);
++        d->buffer_type.context = nullptr;
++        if (d.use_count() > 1) {
++            GGML_LOG_WARN("ggml_vulkan: %s is still in use (%ld), not released\n", d->name.c_str(), d.use_count());
++            d->buffer_type.context = new ggml_backend_vk_buffer_type_context{ d->name, d };
++            continue;
++        }
++        d.reset();
++        n++;
++    }
++    return n;
++}
++
+ int ggml_backend_vk_get_device_count() {
+     return ggml_vk_get_device_count();
+ }

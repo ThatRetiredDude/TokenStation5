@@ -113,7 +113,8 @@ void on_progress(int step, int steps, float, void *data) {
 }
 
 // ggml starts with its CPU backend only (speech runs on it); the GPU joins
-// the registry the first time a picture is made.
+// the registry the first time a picture is made, and its device opens for
+// each picture (make_images releases it after).
 bool vulkan_ready(std::string &err) {
     static std::once_flag once;
     static bool ok = false;
@@ -122,16 +123,18 @@ bool vulkan_ready(std::string &err) {
             ggml_backend_register(reg);
             ok = ggml_backend_vk_get_device_count() > 0;
         }
-        if (ok) {
-            char d[256];
-            ggml_backend_vk_get_device_description(0, d, sizeof d);
-            size_t free = 0, total = 0;
-            ggml_backend_vk_get_device_memory(0, &free, &total);
-            printf("ts5-title: pictures on %s, %zu of %zu MiB free\n", d, free >> 20, total >> 20);
-        }
     });
-    if (!ok) err = "ggml's Vulkan backend found no GPU";
-    return ok;
+    if (!ok) {
+        err = "ggml's Vulkan backend found no GPU";
+        return false;
+    }
+    // Each time: what the picture has to work with.
+    char d[256];
+    ggml_backend_vk_get_device_description(0, d, sizeof d);
+    size_t free = 0, total = 0;
+    ggml_backend_vk_get_device_memory(0, &free, &total);
+    printf("ts5-title: pictures on %s, %zu of %zu MiB free\n", d, free >> 20, total >> 20);
+    return true;
 }
 
 void put_png(void *ctx, void *data, int size) {
@@ -361,6 +364,10 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
     g.seed = out.seed;
     if (ask.steps > 0) g.sample_params.sample_steps = ask.steps;
     p.steps = g.sample_params.sample_steps;
+    // A big picture is decoded a tile at a time: Z-Image's decoder wants
+    // 6 GB for 1024 by 1024 in one go.
+    const int out_w = ask.hires_w ? ask.hires_w : ask.width, out_h = ask.hires_w ? ask.hires_h : ask.height;
+    g.vae_tiling_params.enabled = (int64_t)out_w * out_h > 768 * 768;
     if (ask.hires_w > 0) {
         p.hires_steps = ask.hires_steps;
         g.hires.enabled = true;
@@ -401,6 +408,9 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
     }
     free_sd_ctx(ctx);
     sd_set_progress_callback(nullptr, nullptr);
+    // ggml keeps its Vulkan device, and what the device holds, until told:
+    // the chat model gets the whole GPU back.
+    printf("ts5-title: pictures: released %d Vulkan device(s)\n", ggml_backend_vk_release_devices());
     if (out.png.empty()) {
         err = "stable-diffusion.cpp made no picture";
         return false;
