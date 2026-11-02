@@ -79,7 +79,7 @@ inline const CatalogEntry kCatalog[] = {
     {CatalogEntry::Image, "sdxl-lightning", "SDXL-Lightning 4-step", "", "sdxl_lightning_4step.safetensors",
      "ByteDance/SDXL-Lightning", "sdxl_lightning_4step.safetensors",
      "images/sdxl_lightning_4step.safetensors",
-     "c9a24f48e1c025556787b0c58dd67a091ece2e44", 6938040682u, "43f0501ac4ffcef84f3fc32a47779f24c181647fa97ef7f5ec4428107d732ae9"},
+     "c9a24f48e1c025556787b0c58dd67a091ece2e44", 6938040682u, "e0d996ee0013e79d9d3561f50fcafb9a17e3ff07b780358e3b66d67932c4d490"},
     {CatalogEntry::Image, "sdxl-vae", "SDXL picture decoder", "", "sdxl_vae-fp16-fix.safetensors",
      "madebyollin/sdxl-vae-fp16-fix", "sdxl_vae.safetensors",
      "images/sdxl_vae-fp16-fix.safetensors",
