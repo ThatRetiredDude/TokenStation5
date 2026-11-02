@@ -373,10 +373,11 @@ bool make_images(const ImageAsk &ask, ImageOut &out, std::string &err,
     g.seed = out.seed;
     if (ask.steps > 0) g.sample_params.sample_steps = ask.steps;
     p.steps = g.sample_params.sample_steps;
-    // A big picture is decoded a tile at a time: Z-Image's decoder wants
-    // 6 GB for 1024 by 1024 in one go.
+    // A picture bigger than 512 by 512 is decoded a tile at a time: SD 1.5's
+    // decoder wants 6.3 GB for 768 by 768 in one go, Z-Image's 6 GB for
+    // 1024 by 1024, more than is free beside the model.
     const int out_w = ask.hires_w ? ask.hires_w : ask.width, out_h = ask.hires_w ? ask.hires_h : ask.height;
-    g.vae_tiling_params.enabled = (int64_t)out_w * out_h > 768 * 768;
+    g.vae_tiling_params.enabled = (int64_t)out_w * out_h > 512 * 512;
     if (ask.hires_w > 0) {
         p.hires_steps = ask.hires_steps;
         g.hires.enabled = true;
