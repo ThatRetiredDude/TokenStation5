@@ -1006,17 +1006,21 @@ private:
         // over attn_dec_min_ keys or more, f16 cache, heads of 128).
         // The first key any of the n tokens sees, and how many from there.
         const uint32_t G = H / HKV, k_lo = win && (uint32_t)pos0 + 1 > win ? (uint32_t)pos0 + 1 - win : 0;
+        // The query heads of a group a block: all G, or as many as fit attn's
+        // 1024 floats of queries (and divide G).
+        uint32_t hg = G;
+        while (hg > 1 && (hg * HD > 1024 || G % hg)) hg--;
         const uint32_t keys = (uint32_t)(pos0 + n) - k_lo;
         const bool plain = !win && !ring;
         // attn_pf: heads of up to 128 in 64 rows, or of 256 (f16 cache) in 32.
         const bool pf256 = HD == 256 && kv_ == KvType::F16;
         const uint32_t pf_rows = pf256 ? 32 : 64;
-        const bool pf = attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && (HD <= 128 || pf256) && G <= pf_rows;
+        const bool pf = hg == G && attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && (HD <= 128 || pf256) && G <= pf_rows;
         const bool dec = plain && !pf && attn_dec_min_ && keys >= (uint32_t)attn_dec_min_ && kv_ == KvType::F16 &&
                          HD == 128 && G <= 8;
         const uint32_t dec_rows = G <= 4 ? 4 : 8;
-        const uint32_t tq = pf ? pf_rows / G : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / G);
-        const uint32_t groups = HKV * (((uint32_t)n + tq - 1) / tq);
+        const uint32_t tq = pf ? pf_rows / G : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / hg);
+        const uint32_t groups = HKV * (G / hg) * (((uint32_t)n + tq - 1) / tq);
         // Few workgroups for many keys (generation, or a short prompt late in
         // a chat): split the keys so every compute unit gets some, about 256
         // workgroups and 32 keys or more each (attn_dec: 128).
@@ -1032,8 +1036,9 @@ private:
         struct {
             uint32_t head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split;
             float scale;
-            uint32_t k_lo, win, ring;
-        } pc{HD, H, HKV, (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale, k_lo, win, ring};
+            uint32_t k_lo, win, ring, hg;
+        } pc{HD, H, HKV, (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale, k_lo, win, ring,
+             hg == G ? 0u : hg};
         std::string kern = std::string(pf ? "attn_pf" : "attn") + (kv_ == KvType::Q8 ? "_q8" : "");
         if (dec)
             kern = dec_rows == 4 ? "attn_dec4" : "attn_dec";
@@ -1055,8 +1060,10 @@ private:
     // kernel, which has no sliding window: a model with one always uses attn).
     bool attn_ok(int l) const {
         const int HD = hp_.hd(l), H = hp_.n_head, HKV = hp_.hkv(l);
-        return (attn_fast_ || hp_.swa_window > 0) && HKV > 0 && H % HKV == 0 && HD % 4 == 0 && HD >= 32 && HD <= 256 &&
-               (H / HKV) * HD <= 1024;
+        // Heads over 256 (Gemma 4's 512) take fewer than all of a group a
+        // block (attention()'s hg).
+        return (attn_fast_ || hp_.swa_window > 0) && HKV > 0 && H % HKV == 0 && HD % 4 == 0 && HD >= 32 &&
+               (HD <= 256 ? (H / HKV) * HD <= 1024 : HD <= 512);
     }
 
     // Gate and up of Q4_K with swiglu in one kernel, into g_: one token
