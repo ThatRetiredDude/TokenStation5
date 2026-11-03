@@ -251,14 +251,16 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     };
     // The best number of draft tokens, up to k, for a source kept with
     // chance q and costing per_tok ms a token to draft; 0: one token alone.
-    auto best_k = [&](int k, float q, double per_tok) {
+    // fixed: ms paid once for drafting at all this step (a draft model's
+    // catch-up on the tokens it missed while it sat out).
+    auto best_k = [&](int k, float q, double per_tok, double fixed) {
         double best = 1.0 / fwd_ms(1);
         int bk = 0;
         double e = 0, qi = 1;
         for (int i = 1; i <= k && i <= 8; i++) {
             qi *= q;
             e += qi;
-            const double v = (1.0 + e) / (fwd_ms(i + 1) + i * per_tok);
+            const double v = (1.0 + e) / (fwd_ms(i + 1) + i * per_tok + fixed);
             if (v > best * 1.02) { best = v; bk = i; }
         }
         return bk;
@@ -287,7 +289,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         if (room > 0) {
             draft_lookup(tok, room, batch);
             if (adapt && batch.size() > 1 && !probe) {
-                const int k = best_k((int)batch.size() - 1, by_lookup.p(0.5f), 0.0);
+                const int k = best_k((int)batch.size() - 1, by_lookup.p(0.5f), 0.0, 0.0);
                 batch.resize(1 + k);
             }
         }
@@ -297,7 +299,14 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         int mk = room;
         bool dprobe = false;
         if (by_model && adapt) {
-            mk = best_k(room, by_drafter.p(0.6f), t_draft > 0 ? t_draft : fwd_ms(1) / 8);
+            // The catch-up: the drafter enters what it missed as one batch,
+            // at about a fifth of its per-token decode cost. A helper that
+            // keeps few drafts sits out for long stretches, and this is what
+            // made each return a net loss (Qwen3 0.6B on prose: 9% slower
+            // with a third of its drafts kept, even costed per token).
+            const double per = t_draft > 0 ? t_draft : fwd_ms(1) / 8;
+            const double behind = (double)(cached_.size() - dcached_);
+            mk = best_k(room, by_drafter.p(0.6f), per, 0.2 * per * behind);
             if (mk == 0 && step >= dprobe_next) {
                 mk = std::min(room, 2);
                 dprobe = true;
