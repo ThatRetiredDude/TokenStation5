@@ -336,6 +336,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         written_ = std::max(written_, (int)cached_.size() + nb);
         const float *lg = in_place ? b_->logits_view() : lgb.data();
         st.drafted += nb - 1;
+        st.has_drafter = db_ != nullptr;
         int accepted = 0;
         int32_t next = -1;
         ts = now_ms();
@@ -346,6 +347,10 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         }
         st.sample_ms += now_ms() - ts;
         st.draft_accepted += accepted;
+        if (nb > 1 && !from_lookup) {
+            st.model_drafted += nb - 1;
+            st.model_accepted += accepted;
+        }
         if (dprobe) {
             dprobe_every = accepted > 0 ? 16 : std::min(dprobe_every * 2, 128);
             dprobe_next = step + dprobe_every;
@@ -369,6 +374,16 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     if (!pending.empty()) on_text(pending);
     st.gen_ms = now_ms() - t0;
     return true;
+}
+
+std::string draft_summary(const GenStats &st) {
+    char b[96];
+    const int ld = st.drafted - st.model_drafted, la = st.draft_accepted - st.model_accepted;
+    if (st.has_drafter)
+        snprintf(b, sizeof b, "lookup %d/%d, helper %d/%d accepted", la, ld, st.model_accepted, st.model_drafted);
+    else
+        snprintf(b, sizeof b, "lookup %d/%d accepted", la, ld);
+    return b;
 }
 
 }  // namespace ts5

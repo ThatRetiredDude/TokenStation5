@@ -5,7 +5,9 @@
 // 4 LANES i + 4 c .. + 3 for lane c) and the same share of its output. Keys and values come through shared memory 32 at a time;
 // the next tile is loaded into registers while the current one is used.
 // Online softmax per row, 16 keys at a time. Head size a multiple of 16, at
-// most 128 (HEAD_DIM 256 and LANES 8: 256). With n_split > 1, workgroup y
+// most 128 (HEAD_DIM 256 and LANES 8: 256; HEAD_DIM 512, LANES 16 and
+// tiles of KEYS 16, since 32 keys of 512 wouldn't fit shared memory: 512,
+// Gemma 4's full layers, one token's 16 heads per workgroup). With n_split > 1, workgroup y
 // takes one slice of the keys and writes a partial result for attn_merge, as
 // attn does. With HEAD_DIM defined the head size is fixed, so every loop over
 // it unrolls with no branch per step (attn_pf128, attn_pf256). A sliding
@@ -48,7 +50,10 @@ const uint HDMAX = HEAD_DIM;
 #else
 const uint HDMAX = 128;
 #endif
-const uint BC = 32, STEP = 16, NV = HDMAX / (4 * LANES), WG = 256;
+#ifndef KEYS
+#define KEYS 32
+#endif
+const uint BC = KEYS, STEP = 16, NV = HDMAX / (4 * LANES), WG = 256;
 const uint NL = BC * HDMAX / 4 / WG;  // vec4s of K (and of V) each thread loads per tile
 // The f16 cache's tiles stay f16 in shared memory: half the bytes to read,
 // and the GPU multiplies f16 by f32 into an f32 sum at the f32 rate.

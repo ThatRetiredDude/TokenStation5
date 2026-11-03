@@ -24,7 +24,9 @@ struct SampleParams {
 
 struct GenStats {
     int prompt_tokens = 0, prompt_evaluated = 0, gen_tokens = 0;
-    int drafted = 0, draft_accepted = 0;  // speculation (lookup or draft model)
+    int drafted = 0, draft_accepted = 0;  // speculation: prompt lookup and the draft model together
+    int model_drafted = 0, model_accepted = 0;  // the draft model's share of those
+    bool has_drafter = false;  // a draft model is loaded (the rest is prompt lookup)
     double prompt_ms = 0, gen_ms = 0;
     double sample_ms = 0;  // CPU time in sample(), its logits reads included
     std::string finish = "length";
@@ -76,5 +78,9 @@ private:
     int draft_n_ = 0;
     std::mt19937_64 rng_{std::random_device{}()};
 };
+
+// The speculation line of a run's stats: "lookup 3/9 accepted", or with a
+// draft model "lookup 3/9, helper 12/20 accepted" (drafts kept / proposed).
+std::string draft_summary(const GenStats &st);
 
 }  // namespace ts5

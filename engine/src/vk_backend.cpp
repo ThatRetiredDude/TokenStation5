@@ -35,6 +35,7 @@
 #include "attn_pf.spv.h"
 #include "attn_pf128.spv.h"
 #include "attn_pf256.spv.h"
+#include "attn_pf512.spv.h"
 #include "attn_pf_q8.spv.h"
 #include "attn_q8.spv.h"
 #include "get_rows_f16.spv.h"
@@ -100,6 +101,7 @@
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
+#include "rmsnorm2.spv.h"
 #include "softcap.spv.h"
 #include "swiglu.spv.h"
 #include "log.h"
@@ -563,8 +565,8 @@ private:
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
-        P(rmsnorm, 3) P(qkv_post, 11) P(qkv_post_q8, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
-        P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf256, 5) P(attn_pf_q8, 7)
+        P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
+        P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf256, 5) P(attn_pf512, 5) P(attn_pf_q8, 7)
         // Lanes per key in attn_dec: 8, 16 or 32, and no more than a subgroup.
         uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
         while (lpk > ctx_->subgroup_size) lpk = lpk > 8 ? lpk / 2 : 0;
@@ -758,6 +760,7 @@ private:
             vk.vkCmdResetQueryPool(cmd_, qpool_, 0, QMAX);
             vk.vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool_, 0);
             qlabels_.clear();
+            qpending_.clear();
         }
         return true;
     }
@@ -801,6 +804,7 @@ private:
                 p.calls++;
             }
             qlabels_.clear();
+            qpending_.clear();
         }
         return true;
     }
@@ -865,8 +869,17 @@ private:
         if (bar) barrier();
         no_barrier_ = false;
         if (qpool_ && qlabels_.size() + 1 < QMAX) {
-            vk.vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool_, (uint32_t)qlabels_.size() + 1);
-            qlabels_.push_back(what.empty() ? name : name + " " + what);
+            // Dispatches with no barrier between them (k and v, the
+            // mmb_reduce chain) overlap, so they get one timestamp and one
+            // line between them: a stamp after the first would be written
+            // when both are done and book the second as nothing.
+            const std::string label = what.empty() ? name : name + " " + what;
+            qpending_ += qpending_.empty() ? label : " + " + label;
+            if (bar) {
+                vk.vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool_, (uint32_t)qlabels_.size() + 1);
+                qlabels_.push_back(qpending_);
+                qpending_.clear();
+            }
         }
         if (bar) add_up();
     }
@@ -1014,15 +1027,20 @@ private:
         // (prompts: attn_pf_min_ tokens or more) or attn_dec's 8 or 4 (generation
         // over attn_dec_min_ keys or more, f16 cache, heads of 128).
         // The first key any of the n tokens sees, and how many from there.
-        const uint32_t hsplit = head_split(l), G = H / HKV / hsplit;
         const uint32_t k_lo = win && (uint32_t)pos0 + 1 > win ? (uint32_t)pos0 + 1 - win : 0;
         const uint32_t keys = (uint32_t)(pos0 + n) - k_lo;
         const bool plain = !win && !ring;
-        // attn_pf: heads of up to 128 in 64 rows, or of 256 (f16 cache) in 32.
+        // attn_pf: heads of up to 128 in 64 rows, of 256 (f16 cache) in 32,
+        // or of 512 in 16 (all of one KV head's query heads, where attn
+        // would split them over hsplit workgroups, each reading the keys).
+        // attn_pf512's 16 lanes per row need subgroups of 16 or more.
+        const uint32_t G_all = H / HKV;
         const bool pf256 = HD == 256 && kv_ == KvType::F16;
-        const uint32_t pf_rows = pf256 ? 32 : 64;
-        const bool pf = hsplit == 1 && attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && (HD <= 128 || pf256) &&
-                        G <= pf_rows;
+        const bool pf512 = HD == 512 && kv_ == KvType::F16 && ctx_->subgroup_size >= 16;
+        const uint32_t pf_rows = pf512 ? 16 : pf256 ? 32 : 64;
+        const bool pf = attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && (HD <= 128 || pf256 || pf512) &&
+                        G_all <= pf_rows && (pf512 || head_split(l) == 1);
+        const uint32_t hsplit = pf ? 1 : head_split(l), G = G_all / hsplit;
         const bool dec = hsplit == 1 && plain && !pf && attn_dec_min_ && keys >= (uint32_t)attn_dec_min_ &&
                          kv_ == KvType::F16 && HD == 128 && G <= 8;
         const uint32_t dec_rows = G <= 4 ? 4 : 8;
@@ -1052,6 +1070,8 @@ private:
             kern = "attn_pf128";
         else if (pf && pf256)
             kern = "attn_pf256";
+        else if (pf && pf512)
+            kern = "attn_pf512";
         if (kv_ == KvType::Q8)
             dispatch(kern, {&q_, &kc_[kb], &vc_[kb], &att_, &part_, &ks_[kb], &vs_[kb]}, pc, groups, n_split);
         else
@@ -1152,6 +1172,13 @@ private:
                                                                               hp_.rms_eps, add ? 1u : 0u, mul};
         dispatch("rmsnorm", {&x, &W(w), &y}, pc, (uint32_t)ntok);
     }
+    // Gemma's norm after a block into the residual x (times mul) and the
+    // next block's norm of x into y, in one pass (rmsnorm2.comp).
+    void rmsnorm2(const Buf &h, const Weight &w1, const Buf &x, const Weight &w2, const Buf &y, int ntok,
+                  float mul = 1.0f) {
+        struct { uint32_t n; float eps, mul; } pc{(uint32_t)hp_.n_embd, hp_.rms_eps, mul};
+        dispatch("rmsnorm2", {&h, &W(w1), &x, &W(w2), &y}, pc, (uint32_t)ntok);
+    }
 
     bool run(const int32_t *tokens, int n, int pos0, float *logits, bool all, bool want, std::string &err) {
         const double t0 = now_ms();
@@ -1234,11 +1261,13 @@ private:
             dispatch(std::string("get_rows_") + qname(m_.tok_embd.type()), {&W(m_.tok_embd), &ids_, &x_}, pc,
                      (uint32_t)n);
         }
+        bool pre_normed = false;  // h_ already holds this layer's attention norm (rmsnorm2 at the end of the last)
         for (int l = 0; l < hp_.n_layer; l++) {
             const Layer &L = m_.layers[l];
             const int HD = hp_.hd(l), HKV = hp_.hkv(l);
             const bool fold_attn = L.wv ? fold_norm(n, {&L.wq, &L.wk, &L.wv}) : fold_norm(n, {&L.wq, &L.wk});
-            if (!fold_attn) rmsnorm(x_, L.attn_norm, h_, n);
+            if (!fold_attn && !pre_normed) rmsnorm(x_, L.attn_norm, h_, n);
+            pre_normed = false;
             const Buf &hin = fold_attn ? x_ : h_;
             norm_ = fold_attn ? &L.attn_norm : nullptr;
             // q, k and v only read h_: no barrier between them (nor between
@@ -1279,15 +1308,22 @@ private:
             }
             attention(l, n, pos0, kb, cache_off, swa ? (uint32_t)hp_.swa_window : 0, ring_[l]);
             // Gemma normalizes attention's output before it joins the residual.
-            if (L.post_attn_norm) {
+            if (L.post_attn_norm)
                 matmul(L.wo, att_, h_, n, false);
-                rmsnorm(h_, L.post_attn_norm, x_, n, 0, true);
-            } else {
+            else
                 matmul(L.wo, att_, x_, n, true);
-            }
-            // The FFN's norm folds into gate+up when they run as one kernel.
+            // The FFN's norm folds into gate+up when they run as one kernel
+            // (set only now: matmul folds norm_ into whatever it runs).
             norm_ = n == 1 && glu_applies(L, n) && fold_norm(n, {&L.w_gate, &L.w_up}) ? &L.ffn_norm : nullptr;
-            if (!norm_) rmsnorm(x_, L.ffn_norm, h_, n);
+            if (L.post_attn_norm) {
+                // The post-norm and the FFN's norm run as one pass.
+                if (norm_)
+                    rmsnorm(h_, L.post_attn_norm, x_, n, 0, true);
+                else
+                    rmsnorm2(h_, L.post_attn_norm, x_, L.ffn_norm, h_, n);
+            } else if (!norm_) {
+                rmsnorm(x_, L.ffn_norm, h_, n);
+            }
             const bool glu = ffn_glu(L, n);
             norm_ = nullptr;
             if (!glu) {
@@ -1299,7 +1335,17 @@ private:
             }
             if (L.post_ffn_norm) {
                 matmul(L.w_down, g_, h_, n, false);
-                rmsnorm(h_, L.post_ffn_norm, x_, n, 0, true, L.out_scale ? L.out_scale_v : 1.0f);
+                const float mul = L.out_scale ? L.out_scale_v : 1.0f;
+                // With the next layer's attention norm, unless that folds
+                // into its projections.
+                const Layer *N = l + 1 < hp_.n_layer ? &m_.layers[l + 1] : nullptr;
+                const bool next_fold = N && (N->wv ? fold_norm(n, {&N->wq, &N->wk, &N->wv}) : fold_norm(n, {&N->wq, &N->wk}));
+                if (N && !next_fold) {
+                    rmsnorm2(h_, L.post_ffn_norm, x_, N->attn_norm, h_, n, mul);
+                    pre_normed = true;
+                } else {
+                    rmsnorm(h_, L.post_ffn_norm, x_, n, 0, true, mul);
+                }
             } else {
                 matmul(L.w_down, g_, x_, n, true);
             }
@@ -1393,8 +1439,9 @@ private:
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).
     bool mmb_ = true;
-    // One token of Q4_K and Q6_K: mv16_q4_k's 16-byte loads and mv16_q6_k's
-    // 8 threads per block (TS5_MV16=0: matvec_q4_k and matvec_q6_k).
+    // One token of Q4_K, Q5_K, Q6_K or Q8_0: the mv16 kernels' 8 threads per
+    // block of 256 values (TS5_MV16=0: matvec_q4_k and matvec_q6_k, and the
+    // generic kernel for the other two).
     bool mv16_ = true;
     bool mvt_ = true;
     // The fused gate+up verify kernel: off until a console A/B shows a win
@@ -1437,6 +1484,7 @@ private:
     KvType kv_ = KvType::F16;
     // TS5_PROFILE=1: a timestamp after each dispatch, summed per kernel.
     static constexpr uint32_t QMAX = 4096;
+    std::string qpending_;  // the labels of the dispatches since the last timestamp
     VkQueryPool qpool_ = VK_NULL_HANDLE;
     std::vector<std::string> qlabels_;
     struct Prof {

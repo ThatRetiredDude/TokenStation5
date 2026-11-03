@@ -213,7 +213,7 @@ rep="one two three one two three one two three one two three one two"
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-off.txt" 2> /dev/null
 TS5_DRAFT=7 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-on.txt" 2> "$work/sd-on.err"
 cmp "$work/sd-off.txt" "$work/sd-on.txt"
-grep -q "draft [0-9]*/[1-9]" "$work/sd-on.err"  # drafts were actually proposed
+grep -q "lookup [0-9]*/[1-9]" "$work/sd-on.err"  # drafts were actually proposed
 TS5_ADAPT=0 TS5_DRAFT=7 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-fix.txt" 2> /dev/null
 cmp "$work/sd-off.txt" "$work/sd-fix.txt"  # the fixed-length policy too
 # Served, the request's timings and log line count the drafts.
@@ -224,13 +224,13 @@ curl -sf http://127.0.0.1:18190/v1/completions -H 'Content-Type: application/jso
     -d "{\"prompt\": \"$rep\", \"max_tokens\": 300, \"temperature\": 0}" > "$work/sd-serve.json"
 kill $spid; wait $spid || true
 grep -q '"draft_n":[1-9]' "$work/sd-serve.json"
-grep -q "draft [0-9]*/[1-9][0-9]*, sample [0-9]* ms" "$work/sd-serve.err"
+grep -q "lookup [0-9]*/[1-9][0-9]* accepted, sample [0-9]* ms" "$work/sd-serve.err"
 # Drafting on the GPU, where each generated token's command buffer is
 # recorded ahead (the default): verify batches and rejected drafts record
 # anew, and the output is the same as without recording ahead.
 TS5_DRAFT=7 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-vk.txt" \
     2> "$work/sd-vk.err"
-grep -q "draft [0-9]*/[1-9]" "$work/sd-vk.err"
+grep -q "lookup [0-9]*/[1-9]" "$work/sd-vk.err"
 TS5_AHEAD=0 TS5_DRAFT=7 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 \
     > "$work/sd-vk0.txt" 2> /dev/null
 cmp "$work/sd-vk.txt" "$work/sd-vk0.txt"
@@ -241,7 +241,7 @@ TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-Q8_0.gguf" "$ts5" run --backend cpu -m 
     -p "$nr" -n 200 --temp 0 > "$work/dm-on.txt" 2> "$work/dm-on.err"
 cmp "$work/dm-off.txt" "$work/dm-on.txt"
 grep -q "draft model .* ready" "$work/dm-on.err"
-grep -q "draft [0-9]*/[1-9]" "$work/dm-on.err"  # the drafter actually proposed
+grep -q "helper [0-9]*/[1-9]" "$work/dm-on.err"  # the drafter actually proposed
 echo "== a drafter whose weight rows are padded past the token list (and the reverse), as released models pad"
 mk_k qwen2-pad qwen2 qwen2 --pad-vocab 128
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-pad.gguf" -p "$nr" -n 100 --temp 0 > "$work/pad-off.txt" 2> /dev/null
@@ -249,14 +249,14 @@ TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-kmix.gguf" "$ts5" run --backend cpu -m 
     -p "$nr" -n 100 --temp 0 > "$work/pad-on.txt" 2> "$work/pad-on.err"
 cmp "$work/pad-off.txt" "$work/pad-on.txt"
 grep -q "draft model .* ready" "$work/pad-on.err"  # narrower drafter accepted (the console case)
-grep -q "draft [0-9]*/[1-9][0-9]* accepted" "$work/pad-on.err"  # and it kept proposing
+grep -q "helper [0-9]*/[1-9][0-9]* accepted" "$work/pad-on.err"  # and it kept proposing
 ! grep -q "draft model \(stopped\|failed\)" "$work/pad-on.err"
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" -p "$nr" -n 100 --temp 0 > "$work/padr-off.txt" 2> /dev/null
 TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-pad.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
     -p "$nr" -n 100 --temp 0 > "$work/padr-on.txt" 2> "$work/padr-on.err"
 cmp "$work/padr-off.txt" "$work/padr-on.txt"
 grep -q "draft model .* ready" "$work/padr-on.err"  # wider drafter accepted too
-grep -q "draft [0-9]*/[1-9][0-9]* accepted" "$work/padr-on.err"
+grep -q "helper [0-9]*/[1-9][0-9]* accepted" "$work/padr-on.err"
 ! grep -q "draft model \(stopped\|failed\)" "$work/padr-on.err"
 echo "== a target whose token list itself is padded (and the reverse), as Qwen 7B pads against the 0.5B"
 mk_k qwen2-padlist qwen2 qwen2 --pad-tokens 128
@@ -265,7 +265,7 @@ TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-kmix.gguf" "$ts5" run --backend cpu -m 
     -p "$nr" -n 100 --temp 0 > "$work/padl-on.txt" 2> "$work/padl-on.err"
 cmp "$work/padl-off.txt" "$work/padl-on.txt"
 grep -q "draft model .* ready" "$work/padl-on.err"  # the drafter's shorter token list is accepted
-grep -q "draft [0-9]*/[1-9][0-9]* accepted" "$work/padl-on.err"
+grep -q "helper [0-9]*/[1-9][0-9]* accepted" "$work/padl-on.err"
 ! grep -q "draft model \(stopped\|failed\)" "$work/padl-on.err"
 TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-padlist.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
     -p "$nr" -n 100 --temp 0 > "$work/padlr-on.txt" 2> "$work/padlr-on.err"

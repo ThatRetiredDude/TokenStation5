@@ -65,6 +65,12 @@ back):
 5. `matmul` output projection, accumulating into the residual
 6. `rmsnorm` (FFN norm), `matmul` gate and up, `swiglu`, `matmul` down accumulating into the residual. For one token of Q4_K, gate, up and swiglu are one kernel (`mv16_glu_q4_k`)
 
+Gemma's post-norms (the attention output's and the FFN's, which join the
+residual) each run as one pass with the norm that follows them
+(`rmsnorm2.comp`: post-attention norm with the FFN norm, post-FFN norm with
+the next layer's attention norm), which saves a dispatch and a read of the
+residual per block, unless the following norm folds into its mat-vecs.
+
 With `TS5_NORM_FUSE=1`, for one token (generation), the RMSNorms before q, k
 and v, before gate+up (when they run as `mv16_glu_q4_k`) and before the output matrix fold into
 those mat-vecs (`mv16n_*`): each workgroup reads the residual instead of
@@ -123,7 +129,8 @@ Kernels read them through 8-bit storage access and dequantize 32-value "units"
 
 Each matmul picks one of four kernels by how many tokens it multiplies:
 
-- 9 or more of Q4_K or Q6_K, where that makes at least 48 blocks, or
+- 9 or more of Q4_K, Q5_K, Q6_K or Q8_0 (rows of whole 256-value groups),
+  where that makes at least 48 blocks, or
   splitting the columns does for 128 or more tokens (`mmb_*`,
   `shaders/matmul_big.glsl`): 128 rows x 128 tokens per workgroup, 8 x 8
   outputs per thread, so each value read from shared memory is used 8 times.
@@ -155,8 +162,8 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   memory while the other half load the matching slice of X, then each thread
   accumulates 4 x 4 outputs. Each weight is read once per 64 tokens instead
   of once per 8. `TS5_TILED_MIN` sets the threshold.
-- One token of Q4_K or Q6_K, as in generation with a Q4_K_M model
-  (`matvec_*`, `shaders/matvec_k.glsl`): 4 rows per workgroup
+- One token of Q4_K, Q5_K, Q6_K or Q8_0, as in generation
+  (`matvec_*`, `shaders/matvec_k.glsl`, Q4_K and Q6_K only): 4 rows per workgroup
   (`TS5_MV_ROWS`, 1 to 8; 4 beat 8 and 1 on the console), which load their
   part of x once for all 4, since a long x doesn't stay in the nearest
   cache; one row per workgroup for
@@ -165,7 +172,12 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   32-bit words, subgroup reductions. `mv16_q4_k` and `mv16_q6_k` are used
   instead (`TS5_MV16=0` for the others): 8 threads per super-block, Q4_K's
   each loading the 16-byte header (scales and mins) and one 16-byte word of
-  nibbles, Q6_K's 32 values each. `TS5_FAST_MATVEC=0` turns them all off.
+  nibbles (Q5_K's one word of fifth bits too), Q6_K's 32 values each.
+  `mv16_q8_0` takes eight 34-byte blocks per 8 threads, one each, read as
+  nine 4-byte words and shifted, since the blocks are only 2-byte aligned.
+  The same shapes serve a verify batch of 2 to 8 tokens (`mvt_*`), which
+  dot each row's words with every token's x. `TS5_FAST_MATVEC=0` turns them
+  all off.
 - Anything else (`matmul_*`): one workgroup per row, 8 tokens per pass.
 
 Attention (`shaders/attn.comp`) gives each workgroup the query heads that
@@ -195,7 +207,12 @@ A short prompt late in a chat splits its keys too. With heads of 128 (all four
 console models) it runs as `attn_pf128`, the same code built with the head
 size fixed, so its loops unroll: built for any size it branches on every 16
 dims and waits for each shared-memory read before the next
-(`TS5_ATTN_PF128=0` runs that build).
+(`TS5_ATTN_PF128=0` runs that build). Heads of 256 run as `attn_pf256`
+(8 threads per row, 32 rows) and Gemma 4's full layers' heads of 512 as
+`attn_pf512`: 16 threads per row, 16 rows (one token's 16 query heads, where
+attn needs 4 workgroups each reading the keys) and tiles of 16 keys, since
+32 keys of 512 wouldn't fit shared memory; its 16-lane sums need subgroups of
+16 or more, so a smaller GPU (llvmpipe) keeps attn.
 
 Generation over 256 keys or more (`TS5_ATTN_DEC` sets how many; 0: never),
 with an f16 cache and heads of 128, uses `shaders/attn_dec.glsl`: up to 8

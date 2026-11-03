@@ -376,9 +376,14 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
                                st, err);
         printf("\n");
         if (!ok) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
-        fprintf(stderr, "ts5: prompt %d tok %.1f tok/s, gen %d tok %.1f tok/s, draft %d/%d accepted, sample %.0f ms\n",
+        fprintf(stderr, "ts5: prompt %d tok %.1f tok/s, gen %d tok %.1f tok/s, %s, sample %.0f ms\n",
                 st.prompt_evaluated, st.prompt_evaluated * 1000.0 / st.prompt_ms, st.gen_tokens,
-                st.gen_tokens * 1000.0 / st.gen_ms, st.draft_accepted, st.drafted, st.sample_ms);
+                st.gen_tokens * 1000.0 / st.gen_ms, draft_summary(st).c_str(), st.sample_ms);
+        // With TS5_PROFILE set, the CPU time per forward call, and with
+        // TS5_PROFILE=1 the per-kernel GPU table for the whole run (prompt
+        // and generation together, as the server prints per request).
+        const std::string prof = be->take_profile();
+        if (!prof.empty()) fprintf(stderr, "run (%d prompt + %d generated tokens), %s", st.prompt_evaluated, st.gen_tokens, prof.c_str());
         return 0;
     }
     if (a.cmd == "serve") {
