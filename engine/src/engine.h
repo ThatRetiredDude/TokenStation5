@@ -70,6 +70,10 @@ private:
     bool drafter_ok_ = true;    // false after a drafter forward fails
     std::vector<float> dl_;     // drafter logits, for backends without a view
     std::vector<int32_t> cu_;   // the drafter's catch-up batch, reused
+    // Time of the drafter's last one-token forwards (ms, count): its cost
+    // per draft token in steady state, without the catch-up of a backlog.
+    double draft_ms_ = 0;
+    int draft_n_ = 0;
     std::mt19937_64 rng_{std::random_device{}()};
 };
 

@@ -109,12 +109,16 @@ void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
     cu_.push_back(tok);
     if (!fits(cu_.data(), cu_.size())) return;
     int32_t t = -1;
+    draft_ms_ = 0;
+    draft_n_ = 0;
     for (int i = 0; i < k; i++) {
         const int32_t *in = i == 0 ? cu_.data() : &t;
         const int n = i == 0 ? (int)cu_.size() : 1;
         const int p0 = i == 0 ? (int)dcached_ : pos + i;
+        const double t0 = now_ms();
         bool ok = ip ? db_->forward_in_place(in, n, p0, false, err)
                      : db_->forward(in, n, p0, dl_.data(), false, err);
+        if (n == 1) { draft_ms_ += now_ms() - t0; draft_n_++; }
         if (!ok) {
             drafter_ok_ = false;
             ts5::log_line("ts5: draft model failed (%s); drafting by lookup only", err.c_str());
@@ -301,11 +305,12 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
             by_model = mk > 0;
         }
         if (by_model) {
-            const double td0 = now_ms();
             draft_model(tok, mk, batch);
-            const size_t got = batch.size() - 1;
-            if (got > 0) {
-                const double per = (now_ms() - td0) / (double)got;
+            // Its cost per token is that of its one-token forwards: the
+            // catch-up on a backlog is paid once on resuming, not per draft
+            // (counted in, a drafter that paused never looked worth resuming).
+            if (draft_n_ > 0) {
+                const double per = draft_ms_ / draft_n_;
                 t_draft = t_draft > 0 ? 0.8 * t_draft + 0.2 * per : per;
             }
         }
