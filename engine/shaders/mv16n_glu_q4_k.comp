@@ -1,0 +1,6 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// One token of the mat-vec with the RMSNorm before it folded in (see the .glsl).
+#define GLU
+#define NORM
+#include "mv16_q4_k.glsl"

@@ -31,6 +31,7 @@ import time
 GEN = [
     ("TS5_MV_ROWS", ["4", "2", "8", "1"]),
     ("TS5_MV16", ["1", "0"]),
+    ("TS5_MV_ROWS_MIN", ["2048", "0", "512", "4096"]),
     ("TS5_ATTN_DEC_PLAIN", ["-1", "1", "0"]),
     ("TS5_ATTN_DEC_KEYS", ["16", "8", "32"]),
     ("TS5_AHEAD", ["1", "0"]),
@@ -46,6 +47,7 @@ PROMPT = [
 BOTH = [
     ("RADV_PERFTEST", ["", "cswave32"]),
     ("TS5_FUSE", ["1", "0"]),
+    ("TS5_NORM_FUSE", ["1", "0"]),
     ("TS5_BARRIER", ["1", "0"]),
 ]
 NOISE = 0.02  # a change has to be 2% faster to count

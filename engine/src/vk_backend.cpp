@@ -60,6 +60,9 @@
 #include "matvec_q4_k.spv.h"
 #include "matvec_q6_k.spv.h"
 #include "mv16_glu_q4_k.spv.h"
+#include "mv16n_glu_q4_k.spv.h"
+#include "mv16n_q4_k.spv.h"
+#include "mv16n_q6_k.spv.h"
 #include "mv16_q4_k.spv.h"
 #include "mv16_q6_k.spv.h"
 #include "mvt_glu_q4_k.spv.h"
@@ -332,6 +335,7 @@ private:
         mvt_glu_rows_ = std::min(mvt_rows_, 2u);
         if (const char *e = getenv("TS5_BARRIER")) barrier_mode_ = std::min(2, std::max(0, atoi(e)));
         if (const char *e = getenv("TS5_FUSE")) fuse_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_NORM_FUSE")) norm_fuse_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
         if (const char *e = getenv("TS5_MMB_SPLIT")) mmb_split_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SLICES")) mmb_slices_ = std::max(0, atoi(e));
@@ -507,6 +511,7 @@ private:
         !make_pipe(#n ".1", spv_##n, sizeof(spv_##n), nb, err, 1))                      \
         return false;
         MV(matvec_q4_k, 3) MV(matvec_q6_k, 3) MV(mv16_q4_k, 3) MV(mv16_q6_k, 3) MV(mv16_glu_q4_k, 4)
+        MV(mv16n_q4_k, 4) MV(mv16n_q6_k, 4) MV(mv16n_glu_q4_k, 5)
 #undef MV
         // The verify-batch mat-vecs once per batch size (their token loop is
         // compile-time), each twice like the one-token ones: mvt_rows_ rows
@@ -872,6 +877,13 @@ private:
         // One token of Q4_K or Q6_K (generation with a Q4_K_M model): the
         // kernels that read the weights as words.
         if (ntok == 1 && fast_matvec_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
+            if (norm_) {
+                struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; float eps; } npc{
+                    pc.ncols, pc.nrows, pc.ntok, pc.row_bytes, pc.x_stride, pc.y_stride, pc.accumulate, pc.x_off,
+                    hp_.rms_eps};
+                mat_vec(std::string("mv16n_") + qname(w.type()), {&W(w), &x, &y, &W(*norm_)}, npc, rows, what);
+                return;
+            }
             mat_vec(std::string(mv16_ ? "mv16_" : "matvec_") + qname(w.type()), {&W(w), &x, &y}, pc, rows, what);
             return;
         }
@@ -1017,15 +1029,35 @@ private:
     // through mv16_glu_q4_k, a verify batch through mvt_glu_q4_k, which
     // loads each token's x once for both matrices. False where that
     // doesn't apply.
-    bool ffn_glu(const Layer &L, int n) {
+    bool glu_applies(const Layer &L, int n) const {
         const bool batch = n >= 2 && n <= 8 && mvt_ && mvt_glu_;
-        if (hp_.gelu || (n == 1 ? !mv16_ : !batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != GGML_Q4_K ||
-            L.w_up.type() != GGML_Q4_K || L.w_gate.ne0() != L.w_up.ne0() || L.w_gate.ne1() != L.w_up.ne1())
-            return false;
+        return !(hp_.gelu || (n == 1 ? !mv16_ : !batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != GGML_Q4_K ||
+                 L.w_up.type() != GGML_Q4_K || L.w_gate.ne0() != L.w_up.ne0() || L.w_gate.ne1() != L.w_up.ne1());
+    }
+
+    // Whether one token's RMSNorm can fold into all of these mat-vecs (the
+    // mv16n kernels: Q4_K or Q6_K, whole 256-value blocks, mv16 on).
+    bool fold_norm(int n, std::initializer_list<const Weight *> ws) const {
+        if (n != 1 || !norm_fuse_ || !fast_matvec_ || !mv16_) return false;
+        for (const Weight *w : ws)
+            if (!(w->type() == GGML_Q4_K || w->type() == GGML_Q6_K) || w->ne0() % 256 != 0 || w->ne0() != hp_.n_embd)
+                return false;
+        return true;
+    }
+
+    bool ffn_glu(const Layer &L, int n) {
+        if (!glu_applies(L, n)) return false;
         const uint32_t rows = (uint32_t)L.w_gate.ne1();
         struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; } pc{
             (uint32_t)L.w_gate.ne0(), rows, (uint32_t)n, (uint32_t)L.w_gate.info->row_bytes(),
             (uint32_t)L.w_gate.ne0(), rows, 0, 0};
+        if (n == 1 && norm_) {
+            struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; float eps; } npc{
+                pc.ncols, pc.nrows, pc.ntok, pc.row_bytes, pc.x_stride, pc.y_stride, pc.accumulate, pc.x_off,
+                hp_.rms_eps};
+            mat_vec("mv16n_glu_q4_k", {&W(L.w_gate), &x_, &g_, &W(L.w_up), &W(*norm_)}, npc, rows, "ffn_gate+up");
+            return true;
+        }
         if (n == 1) {
             mat_vec("mv16_glu_q4_k", {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, rows, "ffn_gate+up");
             return true;
@@ -1141,16 +1173,20 @@ private:
         }
         for (int l = 0; l < hp_.n_layer; l++) {
             const Layer &L = m_.layers[l];
-            rmsnorm(x_, L.attn_norm, h_, n);
+            const bool fold_attn = fold_norm(n, {&L.wq, &L.wk, &L.wv});
+            if (!fold_attn) rmsnorm(x_, L.attn_norm, h_, n);
+            const Buf &hin = fold_attn ? x_ : h_;
+            norm_ = fold_attn ? &L.attn_norm : nullptr;
             // q, k and v only read h_: no barrier between them (nor between
             // gate and up below). k and v first: a prompt's q may be split
             // (mmb), with a barrier before its sums are added up, and the
             // small k and v run alongside it rather than after it.
             no_barrier_ = fuse_;
-            matmul(L.wk, h_, k_, n, false);
+            matmul(L.wk, hin, k_, n, false);
             no_barrier_ = fuse_;
-            matmul(L.wv, h_, v_, n, false);
-            matmul(L.wq, h_, q_, n, false);
+            matmul(L.wv, hin, v_, n, false);
+            matmul(L.wq, hin, q_, n, false);
+            norm_ = nullptr;
             const uint32_t cache_off = layer_off_[l], kb = layer_buf_[l];
             const bool swa = hp_.swa(l);
             {
@@ -1181,8 +1217,12 @@ private:
             } else {
                 matmul(L.wo, att_, x_, n, true);
             }
-            rmsnorm(x_, L.ffn_norm, h_, n);
-            if (!ffn_glu(L, n)) {
+            // The FFN's norm folds into gate+up when they run as one kernel.
+            norm_ = n == 1 && glu_applies(L, n) && fold_norm(n, {&L.w_gate, &L.w_up}) ? &L.ffn_norm : nullptr;
+            if (!norm_) rmsnorm(x_, L.ffn_norm, h_, n);
+            const bool glu = ffn_glu(L, n);
+            norm_ = nullptr;
+            if (!glu) {
                 no_barrier_ = fuse_;
                 matmul(L.w_gate, h_, g_, n, false);
                 matmul(L.w_up, h_, u_, n, false);
@@ -1203,8 +1243,11 @@ private:
         }
         if (want) {
             const int nout = all ? n : 1;
-            rmsnorm(x_, m_.out_norm, h_, nout, all ? 0 : (uint32_t)(n - 1));
-            matmul(m_.output, h_, logits_, nout, false);
+            const bool fold_out = !all && fold_norm(n, {&m_.output});
+            if (!fold_out) rmsnorm(x_, m_.out_norm, h_, nout, all ? 0 : (uint32_t)(n - 1));
+            norm_ = fold_out ? &m_.out_norm : nullptr;
+            matmul(m_.output, fold_out ? x_ : h_, logits_, nout, false);
+            norm_ = nullptr;
         }
         return true;
     }
@@ -1295,6 +1338,12 @@ private:
     // inputs, and gate, up and swiglu in one kernel for one token (TS5_FUSE=0:
     // off).
     bool fuse_ = true;
+    // One token: the RMSNorm before q, k, v, gate and up and the output
+    // folded into those mat-vecs (mv16n_*), which read the residual and
+    // scale their sums, rather than a one-workgroup rmsnorm dispatch and a
+    // barrier the whole GPU waits on. TS5_NORM_FUSE=0 turns it off.
+    bool norm_fuse_ = true;
+    const Weight *norm_ = nullptr;  // set: matmul folds this RMSNorm in (one token)
     bool no_barrier_ = false;  // skip the barrier after the next dispatch
     int mmb_min_ = 48;
     // mmb splits matrices of fewer blocks than this (TS5_MMB_SPLIT; 0: never),

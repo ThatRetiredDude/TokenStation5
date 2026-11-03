@@ -11,6 +11,12 @@
 // With GLU, the feed-forward's gate (binding 0) and up (binding 3) matrices
 // at once: y[r] = silu(gate[r] . x) * (up[r] . x), sparing the swiglu kernel
 // and a second read of x.
+// With NORM, x is the residual before its RMSNorm (binding 3, or 4 with
+// GLU, holds the norm's weights g): the kernel dots W with x * g and scales
+// the sums by rsqrt(mean(x^2) + eps), whose sum of squares the workgroup
+// gathers from the same x loads (its threads read all of x once). That
+// spares the rmsnorm dispatch and its barrier, which on one token keep the
+// whole GPU waiting on one workgroup.
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_control_flow_attributes : require
 
@@ -25,13 +31,24 @@ layout(std430, binding = 2) buffer Ybuf { float Y[]; };
 #ifdef GLU
 layout(std430, binding = 3) readonly buffer U128 { uvec4 u128[]; };
 #endif
+#ifdef NORM
+#ifdef GLU
+layout(std430, binding = 4) readonly buffer Gbuf { vec4 G4[]; };
+#else
+layout(std430, binding = 3) readonly buffer Gbuf { vec4 G4[]; };
+#endif
+#endif
 
 layout(push_constant) uniform PC {
     uint ncols, nrows, ntok, row_bytes;
     uint x_stride, y_stride, accumulate, x_off;
+    float eps;  // NORM
 } pc;
 
 shared float partial[2 * NRMAX * WG];  // [row][subgroup]: gate rows, then up rows
+#ifdef NORM
+shared float sq[WG];  // [subgroup]: sums of x^2
+#endif
 
 // Sub-blocks 2p and 2p + 1's 6-bit scales (bytes 0 and 1 of the result)
 // and mins (bytes 2 and 3), from the block's header h. Sub-block j < 4 has
@@ -69,6 +86,7 @@ void main() {
     const uint th = tid % 8, p = th >> 1;
     float acc[NRMAX], accu[NRMAX];
     for (uint i = 0; i < NRMAX; i++) acc[i] = accu[i] = 0.0;
+    float ss = 0.0;
     for (uint b = tid / 8; b < nb; b += WG / 8) {
         const uint x0 = (pc.x_off + b * 256) / 4 + 16 * p + 4 * (th & 1u), x1 = x0 + 8;
         vec4 a[4], e[4];
@@ -76,6 +94,12 @@ void main() {
         for (uint c = 0; c < 4; c++) {
             a[c] = X4[x0 + c];
             e[c] = X4[x1 + c];
+#ifdef NORM
+            ss += dot(a[c], a[c]) + dot(e[c], e[c]);
+            const uint g0 = x0 - pc.x_off / 4 + c;
+            a[c] *= G4[g0];
+            e[c] *= G4[g0 + 8];
+#endif
             ta += a[c].x + a[c].y + a[c].z + a[c].w;
             te += e[c].x + e[c].y + e[c].z + e[c].w;
         }
@@ -97,14 +121,27 @@ void main() {
         if (gl_SubgroupInvocationID == 0) partial[(NRMAX + i) * WG + gl_SubgroupID] = u;
 #endif
     }
+#ifdef NORM
+    ss = subgroupAdd(ss);
+    if (gl_SubgroupInvocationID == 0) sq[gl_SubgroupID] = ss;
+#endif
     barrier();
     if (tid < nr) {
         float s = 0.0;
         for (uint i = 0; i < gl_NumSubgroups; i++) s += partial[tid * WG + i];
         const uint r = r0 + tid;
+#ifdef NORM
+        float tot = 0.0;
+        for (uint i = 0; i < gl_NumSubgroups; i++) tot += sq[i];
+        const float scale = inversesqrt(tot / float(pc.ncols) + pc.eps);
+        s *= scale;
+#endif
 #ifdef GLU
         float u = 0.0;
         for (uint i = 0; i < gl_NumSubgroups; i++) u += partial[(NRMAX + tid) * WG + i];
+#ifdef NORM
+        u *= scale;
+#endif
         Y[r] = s / (1.0 + exp(-s)) * u;
 #else
         Y[r] = pc.accumulate != 0 ? Y[r] + s : s;

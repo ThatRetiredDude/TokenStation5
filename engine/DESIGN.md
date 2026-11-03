@@ -65,6 +65,16 @@ back):
 5. `matmul` output projection, accumulating into the residual
 6. `rmsnorm` (FFN norm), `matmul` gate and up, `swiglu`, `matmul` down accumulating into the residual. For one token of Q4_K, gate, up and swiglu are one kernel (`mv16_glu_q4_k`)
 
+For one token (generation), the RMSNorms before q, k and v, before gate+up
+(when they run as `mv16_glu_q4_k`) and before the output matrix fold into
+those mat-vecs (`mv16n_*`): each workgroup reads the residual instead of
+the normalized copy, multiplies it by the norm's weights as it loads it,
+adds up its squares from the same loads (a workgroup reads all of x once),
+and scales its sums by rsqrt(mean + eps) at the end. That drops 2 dispatches
+and barriers per layer, each a one-workgroup kernel the whole GPU waited on:
+3.3% of a Qwen3 8B token on the PS5 under Linux (`TS5_NORM_FUSE=0` turns it
+off).
+
 Then the output norm and the vocabulary matmul for the last token (or every
 token for tests). Prompts are processed 256 tokens per call; big batches are
 split into submits of 4 layers so no submit runs anywhere near the PS5
