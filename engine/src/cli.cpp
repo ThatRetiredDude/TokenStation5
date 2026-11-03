@@ -250,6 +250,9 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     fprintf(stderr, "ts5: %s: %s, %d layers, embd %d, ff %d, heads %d/%d, head_dim %d, vocab %d\n",
             basename_of(a.model).c_str(), hp.arch.c_str(), hp.n_layer, hp.n_embd, hp.n_ff, hp.n_head, hp.n_head_kv,
             hp.head_dim, hp.n_vocab);
+    if (hp.head_dim_swa)
+        fprintf(stderr, "ts5: sliding layers: %d of %d, window %d, heads %d/%d, head_dim %d\n",
+                hp.n_layer - full_layers(hp), hp.n_layer, hp.swa_window, hp.n_head, hp.hkv(0), hp.head_dim_swa);
     Tokenizer tok;
     if (!tok.load(model.gguf, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
     if (!a.chat_template.empty()) {

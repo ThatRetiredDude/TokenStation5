@@ -1,7 +1,9 @@
 // Per token and head, after the Q/K/V projections: optional bias (Qwen2),
-// optional per-head RMSNorm (Qwen3, Gemma 3), RoPE (positions times
-// rope_scale), then K and V go into the cache (position p in slot p % ring of
-// a sliding layer's ring, else slot p):
+// optional per-head RMSNorm (Qwen3, Gemma 3; Gemma 4 also normalizes V,
+// without weights, and its full layers take V from K's projection: norm
+// bits 1 and 2 and v_from_k), RoPE (positions times rope_scale), then K and
+// V go into the cache (position p in slot p % ring of a sliding layer's ring,
+// else slot p). Heads up to 512 wide (Gemma 4's full layers).
 // f16, or with KV_Q8 (qkv_post_q8.comp) 8-bit values with an f16 scale per
 // 32 (the largest magnitude over 127, values rounded to nearest even).
 // Workgroups 0..n_head-1 handle Q heads, the rest K/V heads.
@@ -22,7 +24,7 @@ layout(std430, binding = 8) writeonly buffer KC { uint kc[]; };  // 4 values a w
 layout(std430, binding = 9) writeonly buffer VC { uint vc[]; };
 layout(std430, binding = 10) writeonly buffer KS { float16_t k_scale[]; };
 layout(std430, binding = 11) writeonly buffer VS { float16_t v_scale[]; };
-shared float ky[256], vy[256];
+shared float ky[512], vy[512];
 
 // Values 4w .. 4w + 3 of the head in y as one word of 8-bit values, and
 // their block's scale when they start one. Returns the word.
@@ -58,10 +60,11 @@ layout(push_constant) uniform PC {
     uint has_freqs;
     uint ring;        // slots of a sliding layer's ring; 0: one per position
     float rope_scale;
+    uint v_from_k;    // V is K's projection (Gemma 4's full layers)
 } pc;
 
-shared float sh[256];
-shared float red[128];
+shared float sh[512], vsh[512];
+shared float red[128], vred[128];
 
 void main() {
     const uint hi = gl_WorkGroupID.x, t = gl_WorkGroupID.y, tid = gl_LocalInvocationID.x;
@@ -72,22 +75,35 @@ void main() {
     const uint base = is_q ? t * q_stride + h * HD : t * kv_stride + h * HD;
     const uint pos = pc.pos0 + t, slot = pc.ring != 0 ? pos % pc.ring : pos;
 
-    float ss = 0.0;
+    float ss = 0.0, vss = 0.0;
     for (uint d = tid; d < HD; d += 128) {
         float x = is_q ? Q[base + d] : K[base + d];
         if (pc.has_bias != 0) x += is_q ? bq[h * HD + d] : bk[h * HD + d];
         sh[d] = x;
         ss += x * x;
+        if (!is_q) {
+            float v = pc.v_from_k != 0 ? x : V[base + d];
+            if (pc.has_bias != 0) v += bv[h * HD + d];
+            vsh[d] = v;
+            vss += v * v;
+        }
     }
     if (pc.has_norm != 0) {
         red[tid] = ss;
+        vred[tid] = vss;
         barrier();
         for (uint k = 64; k > 0; k >>= 1) {
-            if (tid < k) red[tid] += red[tid + k];
+            if (tid < k) red[tid] += red[tid + k], vred[tid] += vred[tid + k];
             barrier();
         }
-        float scale = inversesqrt(red[0] / float(HD) + pc.eps);
-        for (uint d = tid; d < HD; d += 128) sh[d] *= scale * (is_q ? nq[d] : nk[d]);
+        if ((pc.has_norm & 1u) != 0) {
+            float scale = inversesqrt(red[0] / float(HD) + pc.eps);
+            for (uint d = tid; d < HD; d += 128) sh[d] *= scale * (is_q ? nq[d] : nk[d]);
+        }
+        if ((pc.has_norm & 2u) != 0 && !is_q) {
+            float vscale = inversesqrt(vred[0] / float(HD) + pc.eps);
+            for (uint d = tid; d < HD; d += 128) vsh[d] *= vscale;
+        }
     }
     barrier();
 
@@ -105,8 +121,7 @@ void main() {
         if (is_q) {
             Q[base + d] = y;
         } else {
-            float v = V[base + d];
-            if (pc.has_bias != 0) v += bv[h * HD + d];
+            const float v = vsh[d];
 #ifdef KV_Q8
             ky[d] = y;
             vy[d] = v;

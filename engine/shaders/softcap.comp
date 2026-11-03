@@ -1,0 +1,15 @@
+// X[i] = cap * tanh(X[i] / cap) over n values: Gemma 4's final logit
+// soft-capping (cap 30).
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Xbuf { float X[]; };
+layout(push_constant) uniform PC { uint n; float cap; } pc;
+
+void main() {
+    for (uint i = gl_GlobalInvocationID.x; i < pc.n; i += gl_NumWorkGroups.x * 256) {
+        // tanh(y) as 1 - 2 / (exp(2y) + 1), which saturates instead of
+        // overflowing for large |y|.
+        const float y = X[i] / pc.cap;
+        X[i] = pc.cap * (1.0 - 2.0 / (exp(2.0 * y) + 1.0));
+    }
+}

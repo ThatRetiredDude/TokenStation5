@@ -408,7 +408,12 @@ std::string render_gemma(const std::vector<Message> &all, const std::vector<Json
 
 }  // namespace
 
-bool can_skip_thinking(const Tokenizer &t) { return has(t.chat_template(), "enable_thinking"); }
+// Gemma 4's template has the switch too, but its thinking is off until the
+// engine renders its thought channel: for now its turns open with an empty
+// thought (Tokenizer::apply_chat).
+bool can_skip_thinking(const Tokenizer &t) {
+    return t.chat_format() != Tokenizer::GEMMA4 && has(t.chat_template(), "enable_thinking");
+}
 
 const char *const kNoThinking = "<think>\n\n</think>\n\n";
 

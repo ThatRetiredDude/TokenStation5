@@ -1,7 +1,8 @@
 // Model description: hyperparameters and weight tensors of a dense
-// llama-family decoder (llama, mistral, qwen2, qwen3, gemma3), as stored in
-// GGUF.
+// llama-family decoder (llama, mistral, qwen2, qwen3, gemma3, gemma4), as
+// stored in GGUF.
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -38,7 +39,28 @@ struct HParams {
     // Linear RoPE scaling of the full-attention layers: positions times this
     // (Gemma 3's 1/8); 1 elsewhere.
     float rope_scale = 1.f;
-    bool swa(int layer) const { return swa_window > 0 && swa_pattern > 0 && layer % swa_pattern < swa_pattern - 1; }
+    // Gemma 4: which layers slide is a list in the GGUF (swa_layers), not
+    // every swa_pattern-th; sliding layers have their own K/V head count,
+    // head size and RoPE dimensions (the 12B: 8 heads of 256 against the full
+    // layers' one of 512); V is RMS-normalized without weights; rope_freqs
+    // apply to the full-attention layers only; the logits are soft-capped
+    // (logit_softcap * tanh(x / logit_softcap)) when logit_softcap is set.
+    std::vector<uint8_t> swa_layers;  // per layer, when not empty
+    int n_head_kv_swa = 0, head_dim_swa = 0, rope_dims_swa = 0;  // 0: the full layers'
+    bool v_norm = false, rope_freqs_full_only = false;
+    float logit_softcap = 0;
+    bool swa(int layer) const {
+        if (!swa_layers.empty()) return swa_window > 0 && swa_layers[layer] != 0;
+        return swa_window > 0 && swa_pattern > 0 && layer % swa_pattern < swa_pattern - 1;
+    }
+    int hd(int layer) const { return swa(layer) && head_dim_swa ? head_dim_swa : head_dim; }
+    int hkv(int layer) const { return swa(layer) && n_head_kv_swa ? n_head_kv_swa : n_head_kv; }
+    int rd(int layer) const { return swa(layer) && rope_dims_swa ? rope_dims_swa : rope_dims; }
+    // K (or V) values per token in a layer's cache, and the most of any layer.
+    int kv_values(int layer) const { return hkv(layer) * hd(layer); }
+    int max_hd() const { return std::max(head_dim, head_dim_swa); }
+    int max_qd() const { return n_head * max_hd(); }
+    int max_kvd() const { return std::max(n_head_kv * head_dim, n_head_kv_swa * head_dim_swa); }
 };
 
 // A tensor's bytes plus its type and shape. `data` points into host memory
@@ -55,7 +77,9 @@ struct Weight {
 struct Layer {
     Weight attn_norm, wq, wk, wv, wo, bq, bk, bv, q_norm, k_norm;
     Weight ffn_norm, w_gate, w_up, w_down;
-    Weight post_attn_norm, post_ffn_norm;  // Gemma 3
+    Weight post_attn_norm, post_ffn_norm;  // Gemma 3 and 4
+    Weight out_scale;                      // Gemma 4: one factor on the layer's output, if any
+    float out_scale_v = 1.f;               // its value (read when the model opens)
 };
 
 struct Model {
@@ -78,6 +102,7 @@ struct Model {
 private:
     Weight weight(const std::string &name, bool required, std::string &err);
     bool bind(std::string &err);
+    bool read_scalars(std::string &err);
     const uint8_t *base_ = nullptr;
 };
 

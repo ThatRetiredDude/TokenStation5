@@ -18,9 +18,9 @@ small enough to reason about.
 
 | | v0 (this) | later |
 | --- | --- | --- |
-| Architectures | `llama` (Llama, Mistral, Mistral Nemo), `qwen2` (Qwen 2.5, Qwen 2.5 Coder), `qwen3`, `gemma3` (sliding-window layers in a ring cache, GELU, extra norms) | `qwen35` (Gated DeltaNet), `gemma4` (per-layer embeddings) |
+| Architectures | `llama` (Llama, Mistral, Mistral Nemo), `qwen2` (Qwen 2.5, Qwen 2.5 Coder), `qwen3`, `gemma3` (sliding-window layers in a ring cache, GELU, extra norms), `gemma4` (the dense 12B and 31B: see below) | `qwen35` (Gated DeltaNet), Gemma 4 E2B/E4B (per-layer embeddings, shared KV layers) and 26B A4B (experts) |
 | Weight types | F32, F16, Q4_0, Q8_0, Q4_K, Q5_K, Q6_K (all of Q4_K_M / Q5_K_M) | IQ quants, Q3_K / Q2_K |
-| Tokenizers | byte-level BPE (Qwen2, Llama 3 pre-tokenizers), SentencePiece (Llama 2, Gemma) | Tekken's case-splitting pre-tokenizer (approximated now) |
+| Tokenizers | byte-level BPE (Qwen2, Llama 3 pre-tokenizers), SentencePiece (Llama 2, Gemma 3), Gemma 4's (BPE merges over code points, spaces as U+2581, split only at newlines) | Tekken's case-splitting pre-tokenizer (approximated now) |
 | Chat formats | ChatML, Llama 3, Mistral `[INST]` | Jinja templates, tool calls |
 | API | `/v1/chat/completions` (+ streaming), `/v1/completions`, `/v1/models`, `/health`; llama-server style `timings` | Anthropic `/v1/messages`, parallel slots |
 | KV cache | f16 | q8_0 |
@@ -76,6 +76,31 @@ and barriers per layer, each a one-workgroup kernel the whole GPU waited on:
 on the PS5 under Debian 13 (Mesa 26.1.6), Qwen3 8B generated 61.3 tok/s with it
 and 68.4 without, because each of the thousands of workgroups re-reads all of x
 and reduces its squares, which costs more than the dispatches it saves.
+
+Gemma 4 (`gemma4`, the dense 12B and 31B) differs from Gemma 3 in ways the
+GGUF spells out per layer, which `HParams` keeps as the full layers' values
+and the sliding layers' (`hd(l)`, `hkv(l)`, `rd(l)`): which layers slide is a
+list (`attention.sliding_window_pattern`, five sliding then one full in the
+12B), the sliding layers have 8 K/V heads of 256 with a 1024-token window
+and RoPE base 10000, the full layers one K/V head of 512 with base 1e6 and
+proportional RoPE (`rope_freqs.weight`, applied to the full layers only).
+The full layers have no V projection: V is K's projection, and every
+layer's V is RMS-normalized without weights (qkv_post's norm bit 2 and
+`v_from_k`). Queries aren't scaled (`attn_scale` 1), each layer's output is
+multiplied by its `layer_output_scale` (folded into the post-FFN rmsnorm's
+`mul`), and the logits are soft-capped at 30 (`softcap.comp`). The KV cache
+is laid out per layer with each layer's own width, so the full layers take a
+quarter of a sliding layer's bytes per token. The fast attention kernels
+don't fit 16 query heads of 512 on one K/V head (8192 floats of queries for
+one key), so the full layers take the one-workgroup-per-head kernel
+(`attention.comp`, now up to 512 wide) and the sliding layers `attn` as Gemma
+3's do; a wider `attn` for the full layers is the next step for speed. The
+E2B and E4B (per-layer embeddings, the last layers reading an earlier
+layer's cache) and the 26B A4B (experts) are refused with a message. Its
+chat format is `<|turn>role\n...<turn|>\n`, with the model's turn opened by an
+empty thought channel (`<|channel>thought\n<channel|>`) as the template does
+with thinking off; thinking on and its native tool-call format are not
+rendered yet.
 
 Then the output norm and the vocabulary matmul for the last token (or every
 token for tests). Prompts are processed 256 tokens per call; big batches are

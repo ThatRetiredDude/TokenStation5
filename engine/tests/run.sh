@@ -44,6 +44,17 @@ for q in Q4_1 Q5_0 Q5_1; do
 done
 mk llama llama-spm Q5_0
 
+g4=()
+for q in F32 Q8_0; do
+    out="$work/gemma4-$q.gguf"
+    [ -s "$out" ] || python3 "$here/make_test_model.py" --arch gemma4 --quant $q --layers 3 --global-hd 512 \
+        --vocab "$work/ggml-vocab-qwen2.gguf" "$out" > /dev/null
+    g4+=("$out")
+done
+echo "== Gemma 4: at once, one token per call and 72 tokens across its 8-token window"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${g4[@]}"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${g4[@]}"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${g4[@]}"
 echo "== Vulkan vs CPU reference"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${models[@]}"
 echo "== one token per call (KV cache across calls)"
@@ -69,6 +80,10 @@ mk_k qwen2-kmix qwen2 qwen2
 mk_k qwen3-kmix qwen3 qwen2
 mk_k llama-kmix llama llama-spm
 mk_k llama-kmix-kv1 llama llama-spm --kv-heads 1 --ff 768
+# Gemma 4 as the 12B's file has it: every 3rd layer here has heads of 512
+# on one K/V head with V from K, the rest 2 heads of 64 and an 8-token
+# window; V normalized, scaled layer outputs, soft-capped logits.
+mk_k gemma4-kmix gemma4 qwen2 --layers 3 --global-hd 512
 echo "== K-quants: 300 tokens in 128 x 128 blocks, 72 in 64 x 64 blocks, one token per call"
 TS5_MMB_MIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${kmix[@]}"
 # The columns split in 5 slices, which don't start on a block, and not at all.

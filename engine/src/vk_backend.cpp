@@ -86,6 +86,7 @@
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
+#include "softcap.spv.h"
 #include "swiglu.spv.h"
 #include "log.h"
 
@@ -349,7 +350,7 @@ private:
         // GPU check's bar (0.78% at 512 tokens, 0.02-0.04% in f32).
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
         kv_ = kv_type_setting();
-        if (kv_ == KvType::Q8 && !(attn_ok() && hp_.head_dim % 32 == 0)) {
+        if (kv_ == KvType::Q8 && !(attn_ok_all() && hp_.max_hd() % 32 == 0)) {
             ts5::log_line("ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16");
             kv_ = KvType::F16;
         }
@@ -542,7 +543,7 @@ private:
         if (!make_pipe("attn_dec", spv_attn_dec, sizeof(spv_attn_dec), 5, err, attn_dec_plain_ != 0, lpk) ||
             !make_pipe("attn_dec4", spv_attn_dec4, sizeof(spv_attn_dec4), 5, err, attn_dec_plain_ == 1, lpk))
             return false;
-        P(swiglu, 2)
+        P(swiglu, 2) P(softcap, 1)
 #undef P
         return true;
     }
@@ -628,8 +629,9 @@ private:
     }
 
     bool init_buffers(std::string &err) {
-        const int E = hp_.n_embd, F = hp_.n_ff, HD = hp_.head_dim;
-        const size_t QD = (size_t)hp_.n_head * HD, KVD = (size_t)hp_.n_head_kv * HD;
+        // The widest layer's Q and K/V rows (Gemma 4's kinds of layers differ).
+        const int E = hp_.n_embd, F = hp_.n_ff;
+        const size_t QD = (size_t)hp_.max_qd(), KVD = (size_t)hp_.max_kvd();
         auto mk = [&](Buf &b, size_t bytes, bool host = false, bool exact = false) {
             return create_buf(bytes, host, b, err, exact);
         };
@@ -649,7 +651,11 @@ private:
                 if (atoi(e) >= 1024) train = std::min(train, atoi(e));
             // Sliding layers' rings are a fixed size, beside the context.
             auto fit = [&](KvType t) {
-                const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * full_layers(hp_) * KVD;
+                // One buffer holds about 256 MiB of layers, or one whole layer.
+                uint64_t widest = 0;
+                for (int l = 0; l < hp_.n_layer; l++)
+                    if (!hp_.swa(l)) widest = std::max<uint64_t>(widest, hp_.kv_values(l));
+                const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * std::max<uint64_t>(1, widest);
                 const int cap = (int)std::min<uint64_t>(train, props_.limits.maxStorageBufferRange / per_buf);
                 return fit_context(ctx_->device_memory(), allocated_ + fit_reserve_ + kv_ring_bytes(hp_, t),
                                    kv_bytes_per_token(hp_, t), cap);
@@ -680,7 +686,7 @@ private:
         for (int l = 0; l < hp_.n_layer; l++) {
             const int r = hp_.swa(l) ? ring_slots(hp_) : 0;
             ring_[l] = r > 0 && r < n_ctx_ ? (uint32_t)r : 0;
-            const size_t v = (ring_[l] ? ring_[l] : (size_t)n_ctx_) * KVD;
+            const size_t v = (ring_[l] ? ring_[l] : (size_t)n_ctx_) * hp_.kv_values(l);
             if (values.empty() || (values.back() > 0 && (values.back() + v) * per_value > piece)) values.push_back(0);
             layer_buf_[l] = (uint32_t)(values.size() - 1);
             layer_off_[l] = (uint32_t)values.back();
@@ -962,10 +968,10 @@ private:
     // Attention of n tokens at pos0 for the layer at cache_off in cache
     // piece kb, into att_. win: a sliding layer's window (0: all keys); ring: its ring's slots
     // (0: one per position). Only attn and attn_pf have them.
-    void attention(int n, int pos0, uint32_t kb, uint32_t cache_off, uint32_t win = 0, uint32_t ring = 0) {
-        const uint32_t HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
+    void attention(int l, int n, int pos0, uint32_t kb, uint32_t cache_off, uint32_t win = 0, uint32_t ring = 0) {
+        const uint32_t HD = hp_.hd(l), H = hp_.n_head, HKV = hp_.hkv(l);
         const float scale = hp_.attn_scale;
-        if (!attn_ok()) {
+        if (!attn_ok(l)) {
             struct { uint32_t head_dim, n_head, n_head_kv, pos0, cache_off; float scale; } pc{
                 HD, H, HKV, (uint32_t)pos0, cache_off, scale};
             dispatch("attention", {&q_, &kc_[kb], &vc_[kb], &att_}, pc, H, (uint32_t)n);
@@ -1022,12 +1028,18 @@ private:
         }
     }
 
-    // Whether attn fits the model's heads (else the one-workgroup-per-head
-    // kernel, which has no sliding window: a model with one always uses attn).
-    bool attn_ok() const {
-        const int HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
-        return (attn_fast_ || hp_.swa_window > 0) && HKV > 0 && H % HKV == 0 && HD % 4 == 0 && HD >= 32 && HD <= 256 &&
+    // Whether attn fits a layer's heads (else the one-workgroup-per-head
+    // kernel, which has no sliding window: a sliding layer always uses attn).
+    // Gemma 4's full layers (16 heads of 512 on one K/V head) take the other.
+    bool attn_ok(int l) const {
+        const int HD = hp_.hd(l), H = hp_.n_head, HKV = hp_.hkv(l);
+        return (attn_fast_ || hp_.swa(l)) && HKV > 0 && H % HKV == 0 && HD % 4 == 0 && HD >= 32 && HD <= 256 &&
                (H / HKV) * HD <= 1024;
+    }
+    bool attn_ok_all() const {
+        for (int l = 0; l < hp_.n_layer; l++)
+            if (!attn_ok(l)) return false;
+        return true;
     }
 
     // Gate and up of Q4_K with swiglu in one kernel, into g_: one token
@@ -1087,10 +1099,12 @@ private:
         dispatch(one ? name + ".1" : name, bufs, pc, mx, my, what);
     }
 
-    // add: y += the normalized x (Gemma's norms after attention and the FFN).
-    void rmsnorm(const Buf &x, const Weight &w, const Buf &y, int ntok, uint32_t x_row0 = 0, bool add = false) {
-        struct { uint32_t n, x_row0; float eps; uint32_t add; } pc{(uint32_t)hp_.n_embd, x_row0, hp_.rms_eps,
-                                                                   add ? 1u : 0u};
+    // add: y += the normalized x (Gemma's norms after attention and the FFN);
+    // mul: the result times this (Gemma 4's layer_output_scale).
+    void rmsnorm(const Buf &x, const Weight &w, const Buf &y, int ntok, uint32_t x_row0 = 0, bool add = false,
+                 float mul = 1.0f) {
+        struct { uint32_t n, x_row0; float eps; uint32_t add; float mul; } pc{(uint32_t)hp_.n_embd, x_row0,
+                                                                              hp_.rms_eps, add ? 1u : 0u, mul};
         dispatch("rmsnorm", {&x, &W(w), &y}, pc, (uint32_t)ntok);
     }
 
@@ -1160,8 +1174,7 @@ private:
     // with the logits where want, submitting and waiting for parts of a big
     // batch on the way; the last command buffer is left open in cmd_.
     bool record(int n, int pos0, bool want, bool all, VkCommandBuffer target, std::string &err) {
-        const int E = hp_.n_embd, HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
-        const size_t KVD = (size_t)HKV * HD;
+        const int E = hp_.n_embd, H = hp_.n_head;
         // Big batches are split into several submits so no single submit
         // runs long (the PS5 driver drops the device after 10 s without
         // progress).
@@ -1178,7 +1191,8 @@ private:
         }
         for (int l = 0; l < hp_.n_layer; l++) {
             const Layer &L = m_.layers[l];
-            const bool fold_attn = fold_norm(n, {&L.wq, &L.wk, &L.wv});
+            const int HD = hp_.hd(l), HKV = hp_.hkv(l);
+            const bool fold_attn = L.wv ? fold_norm(n, {&L.wq, &L.wk, &L.wv}) : fold_norm(n, {&L.wq, &L.wk});
             if (!fold_attn) rmsnorm(x_, L.attn_norm, h_, n);
             const Buf &hin = fold_attn ? x_ : h_;
             norm_ = fold_attn ? &L.attn_norm : nullptr;
@@ -1188,25 +1202,29 @@ private:
             // small k and v run alongside it rather than after it.
             no_barrier_ = fuse_;
             matmul(L.wk, hin, k_, n, false);
-            no_barrier_ = fuse_;
-            matmul(L.wv, hin, v_, n, false);
+            if (L.wv) {  // else V is K's projection (Gemma 4's full layers)
+                no_barrier_ = fuse_;
+                matmul(L.wv, hin, v_, n, false);
+            }
             matmul(L.wq, hin, q_, n, false);
             norm_ = nullptr;
             const uint32_t cache_off = layer_off_[l], kb = layer_buf_[l];
             const bool swa = hp_.swa(l);
+            const bool freqs = m_.rope_freqs && !(hp_.rope_freqs_full_only && swa);
             {
                 struct {
                     uint32_t head_dim, n_head, n_head_kv, pos0, rope_dims, neox, has_bias, has_norm, cache_off;
                     float rope_base, eps;
                     uint32_t has_freqs, ring;
                     float rope_scale;
-                } pc{(uint32_t)HD, (uint32_t)H, (uint32_t)HKV, (uint32_t)pos0, (uint32_t)hp_.rope_dims,
-                     hp_.rope_neox ? 1u : 0u, L.bq ? 1u : 0u, L.q_norm ? 1u : 0u, cache_off,
-                     swa ? hp_.rope_base_swa : hp_.rope_base, hp_.rms_eps, m_.rope_freqs ? 1u : 0u, ring_[l],
-                     swa ? 1.0f : hp_.rope_scale};
+                    uint32_t v_from_k;
+                } pc{(uint32_t)HD, (uint32_t)H, (uint32_t)HKV, (uint32_t)pos0, (uint32_t)hp_.rd(l),
+                     hp_.rope_neox ? 1u : 0u, L.bq ? 1u : 0u, (L.q_norm ? 1u : 0u) | (hp_.v_norm ? 2u : 0u), cache_off,
+                     swa ? hp_.rope_base_swa : hp_.rope_base, hp_.rms_eps, freqs ? 1u : 0u, ring_[l],
+                     swa ? 1.0f : hp_.rope_scale, L.wv ? 0u : 1u};
                 const Buf &bq = L.bq ? W(L.bq) : dummy_, &bk = L.bk ? W(L.bk) : dummy_, &bv = L.bv ? W(L.bv) : dummy_;
                 const Buf &nq = L.q_norm ? W(L.q_norm) : dummy_, &nk = L.k_norm ? W(L.k_norm) : dummy_;
-                const Buf &ff = m_.rope_freqs ? W(m_.rope_freqs) : dummy_;
+                const Buf &ff = freqs ? W(m_.rope_freqs) : dummy_;
                 if (kv_ == KvType::Q8)
                     dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
@@ -1214,7 +1232,7 @@ private:
                     dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
             }
-            attention(n, pos0, kb, cache_off, swa ? (uint32_t)hp_.swa_window : 0, ring_[l]);
+            attention(l, n, pos0, kb, cache_off, swa ? (uint32_t)hp_.swa_window : 0, ring_[l]);
             // Gemma normalizes attention's output before it joins the residual.
             if (L.post_attn_norm) {
                 matmul(L.wo, att_, h_, n, false);
@@ -1236,7 +1254,7 @@ private:
             }
             if (L.post_ffn_norm) {
                 matmul(L.w_down, g_, h_, n, false);
-                rmsnorm(h_, L.post_ffn_norm, x_, n, 0, true);
+                rmsnorm(h_, L.post_ffn_norm, x_, n, 0, true, L.out_scale ? L.out_scale_v : 1.0f);
             } else {
                 matmul(L.w_down, g_, x_, n, true);
             }
@@ -1253,6 +1271,10 @@ private:
             norm_ = fold_out ? &m_.out_norm : nullptr;
             matmul(m_.output, fold_out ? x_ : h_, logits_, nout, false);
             norm_ = nullptr;
+            if (hp_.logit_softcap > 0) {
+                struct { uint32_t n; float cap; } pc{(uint32_t)((size_t)nout * hp_.n_vocab), hp_.logit_softcap};
+                dispatch("softcap", {&logits_}, pc, std::min<uint32_t>(65535, (pc.n + 255) / 256));
+            }
         }
         return true;
     }
@@ -1434,6 +1456,14 @@ int full_layers(const HParams &hp) {
     return n;
 }
 
+// K values per token over the full layers, or the sliding ones.
+static uint64_t kv_values(const HParams &hp, bool sliding) {
+    uint64_t n = 0;
+    for (int l = 0; l < hp.n_layer; l++)
+        if (hp.swa(l) == sliding) n += hp.kv_values(l);
+    return n;
+}
+
 int ring_slots(const HParams &hp) {
     return hp.swa_window > 0 ? hp.swa_window + std::max(VkBackend::TMAX, hp.swa_window) : 0;
 }
@@ -1443,16 +1473,16 @@ static uint64_t kv_bytes(uint64_t values, KvType kv) {
 }
 
 uint64_t kv_bytes_per_token(const HParams &hp, KvType kv) {
-    return kv_bytes(2ull * full_layers(hp) * hp.n_head_kv * hp.head_dim, kv);  // K and V
+    return kv_bytes(2ull * kv_values(hp, false), kv);  // K and V
 }
 
 uint64_t kv_ring_bytes(const HParams &hp, KvType kv) {
-    return kv_bytes(2ull * (hp.n_layer - full_layers(hp)) * ring_slots(hp) * hp.n_head_kv * hp.head_dim, kv);
+    return kv_bytes(2ull * ring_slots(hp) * kv_values(hp, true), kv);
 }
 
 uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
     const uint64_t T = VkBackend::TMAX, E = hp.n_embd, F = hp.n_ff;
-    const uint64_t QD = (uint64_t)hp.n_head * hp.head_dim, KVD = (uint64_t)hp.n_head_kv * hp.head_dim;
+    const uint64_t QD = (uint64_t)hp.max_qd(), KVD = (uint64_t)hp.max_kvd();
     const uint64_t act =
         4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab) + 4 * (VkBackend::PART + VkBackend::SPLIT);
     const uint64_t gib = 1ull << 30;

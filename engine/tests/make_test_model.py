@@ -87,13 +87,17 @@ def quantize_q6_k(x):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--arch", default="qwen2", choices=["llama", "qwen2", "qwen3"])
+    ap.add_argument("--arch", default="qwen2", choices=["llama", "qwen2", "qwen3", "gemma4"])
     ap.add_argument("--vocab", required=True)
     ap.add_argument("--layers", type=int, default=2)
     ap.add_argument("--embd", type=int, default=256)
     ap.add_argument("--ff", type=int, default=512)
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--kv-heads", type=int, default=2)
+    ap.add_argument("--global-hd", type=int, default=0,
+                    help="gemma4: the full-attention layers' head size (every 3rd layer; default twice the others'), "
+                         "on one K/V head without a V projection, as the 12B has it")
+    ap.add_argument("--window", type=int, default=8, help="gemma4: the sliding layers' window")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--pad-vocab", type=int, default=0,
                     help="extra embedding and output rows past the token list, as released models pad")
@@ -119,12 +123,34 @@ def main():
     w.add_block_count(a.layers)
     w.add_feed_forward_length(a.ff)
     w.add_head_count(a.heads)
-    w.add_head_count_kv(a.kv_heads)
+    if a.arch != "gemma4":
+        w.add_head_count_kv(a.kv_heads)
     w.add_layer_norm_rms_eps(1e-6)
     w.add_rope_freq_base(1000000.0 if a.arch != "llama" else 10000.0)
     if a.arch == "qwen3":
         w.add_key_length(hd)
         w.add_value_length(hd)
+    # Gemma 4 as the 12B's file has it: every 3rd layer here (6th there) is a
+    # full-attention layer with wider heads on one K/V head and no V
+    # projection; the rest slide; V is normalized; each layer's output is
+    # scaled; the logits are soft-capped.
+    g4 = a.arch == "gemma4"
+    ghd = a.global_hd or 2 * hd
+    swa = [(i % 3) != 2 for i in range(a.layers)]
+    if g4:
+        w.add_array("gemma4.attention.sliding_window_pattern", swa)
+        w.add_array("gemma4.attention.head_count_kv", [a.kv_heads if s else 1 for s in swa])
+        w.add_key_length(ghd)
+        w.add_value_length(ghd)
+        w.add_key_length_swa(hd)
+        w.add_value_length_swa(hd)
+        w.add_rope_dimension_count(ghd)
+        w.add_key_value("gemma4.rope.dimension_count_swa", hd, GGUFValueType.UINT32)
+        w.add_key_value("gemma4.rope.freq_base_swa", 10000.0, GGUFValueType.FLOAT32)
+        w.add_sliding_window(a.window)
+        w.add_final_logit_softcapping(30.0)
+        w.add_key_value("gemma4.attention.shared_kv_layers", 0, GGUFValueType.UINT32)
+        w.add_key_value("gemma4.embedding_length_per_layer_input", 0, GGUFValueType.UINT32)
     w.add_file_type(0)
     copy_tokenizer(reader, w, a.pad_tokens)
 
@@ -156,13 +182,23 @@ def main():
         w.add_tensor(name, (1.0 + 0.1 * rng.standard_normal(n)).astype(np.float32))
 
     t("token_embd.weight", n_vocab + a.pad_tokens + a.pad_vocab, a.embd, scale=1.0)
+    if g4:
+        w.add_tensor("rope_freqs.weight", (1.0 + rng.random(ghd // 2)).astype(np.float32))
     for i in range(a.layers):
         p = f"blk.{i}."
+        lhd, lkv = (hd, a.kv_heads) if not g4 or swa[i] else (ghd, 1)
         norm(p + "attn_norm.weight", a.embd)
-        t(p + "attn_q.weight", a.heads * hd, a.embd)
-        t(p + "attn_k.weight", a.kv_heads * hd, a.embd)
-        t(p + "attn_v.weight", a.kv_heads * hd, a.embd)
-        t(p + "attn_output.weight", a.embd, a.heads * hd)
+        t(p + "attn_q.weight", a.heads * lhd, a.embd)
+        t(p + "attn_k.weight", lkv * lhd, a.embd)
+        if not g4 or swa[i]:
+            t(p + "attn_v.weight", lkv * lhd, a.embd)
+        t(p + "attn_output.weight", a.embd, a.heads * lhd)
+        if g4:
+            norm(p + "attn_q_norm.weight", lhd)
+            norm(p + "attn_k_norm.weight", lhd)
+            norm(p + "post_attention_norm.weight", a.embd)
+            norm(p + "post_ffw_norm.weight", a.embd)
+            w.add_tensor(p + "layer_output_scale.weight", np.array([0.9 + 0.2 * rng.random()], np.float32))
         if a.arch == "qwen2":
             for n, dim in (("q", a.heads * hd), ("k", a.kv_heads * hd), ("v", a.kv_heads * hd)):
                 w.add_tensor(p + f"attn_{n}.bias", (0.1 * rng.standard_normal(dim)).astype(np.float32))
