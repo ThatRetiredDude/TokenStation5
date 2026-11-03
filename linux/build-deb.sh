@@ -33,6 +33,7 @@ install -Dm755 "$out/cu-test/gpu-selftest" "$pkg/usr/lib/tokenstation/gpu-selfte
 install -Dm755 "$root/linux/cu-test/tokenstation-cu" "$pkg/usr/bin/tokenstation-cu"
 install -Dm755 "$root/linux/files/tokenstation-memory" "$pkg/usr/bin/tokenstation-memory"
 install -Dm755 "$root/linux/files/hw" "$pkg/usr/lib/tokenstation/hw"
+install -Dm755 "$root/linux/files/system-setup" "$pkg/usr/lib/tokenstation/system-setup"
 install -Dm440 "$root/linux/files/tokenstation.sudoers" "$pkg/etc/sudoers.d/tokenstation"
 install -Dm644 "$root/linux/files/tokenstation.service" "$pkg/lib/systemd/system/tokenstation.service"
 install -Dm644 "$root/linux/files/tokenstation-tv.service" "$pkg/lib/systemd/system/tokenstation-tv.service"
@@ -57,6 +58,16 @@ echo /etc/default/tokenstation > "$pkg/DEBIAN/conffiles"
 
 command -v visudo >/dev/null && visudo -cqf "$pkg/etc/sudoers.d/tokenstation"
 dpkg-deb --root-owner-group --build "$pkg" "$pkg.deb"
+# The same files for the Fedora and Arch packages (linux/build-rpm.sh,
+# linux/build-arch.sh), with the services under /usr/lib, as those expect.
+rootdir=$out/tokenstation-root
+rm -rf "$rootdir"
+mkdir -p "$rootdir"
+cp -a "$pkg/usr" "$pkg/etc" "$rootdir/"
+mkdir -p "$rootdir/usr/lib/systemd"
+cp -a "$pkg/lib/systemd/system" "$rootdir/usr/lib/systemd/"
+tar --owner=0 --group=0 -C "$rootdir" -czf "$out/tokenstation-root.tar.gz" usr etc
+
 # The portable build, for systems without apt or with a read-only /usr
 # (Bazzite, SteamOS): the same programs, and install.sh to put them in
 # ~/.local.

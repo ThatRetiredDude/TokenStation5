@@ -49,10 +49,18 @@ unlock anything by itself:
 One build runs on Debian 12 and anything newer: Ubuntu, Fedora, Bazzite,
 SteamOS, Arch. It comes two ways.
 
-**Debian 12 and Ubuntu**: the `.deb`.
+**Debian 12 or 13, and Ubuntu**: the `.deb`.
 
 ```sh
 sudo apt install ./tokenstation_<version>_amd64.deb
+```
+
+**Fedora**: the `.rpm`. **Arch**: the `.pkg.tar.zst`. Same programs, same
+services, same files as the `.deb`.
+
+```sh
+sudo dnf install ./tokenstation-<version>-1.x86_64.rpm
+sudo pacman -U tokenstation-<version>-1-x86_64.pkg.tar.zst
 ```
 
 **Bazzite, SteamOS, Fedora and others**: the portable `.tar.gz`. Their
@@ -72,10 +80,10 @@ asks for your password once to install the PS5 hardware controls
 after. `./install.sh --no-hardware` leaves those out and touches nothing
 outside your home; `./install.sh --uninstall` removes it all except your
 models and settings. It needs SDL2 and the Vulkan loader, which Bazzite and
-SteamOS have. The services below come with the `.deb` only; the portable
+SteamOS have. The services below come with the `.deb`, `.rpm` and Arch package only; the portable
 build is the app (way 1) and `ts5`.
 
-With the `.deb`, pick one of three ways to run it.
+With a package (not the portable build), pick one of three ways to run it.
 
 ### 1. On the Ubuntu desktop
 
@@ -178,8 +186,9 @@ Fan and boost need `ps5_control` (ps5-linux-tools). The app changes these
 through `/usr/lib/tokenstation/hw`, which checks every value against a fixed
 list; `/etc/sudoers.d/tokenstation` lets the `tokenstation` group run that one
 script as root without a password. The TV service's user is in the group, and
-so is whoever ran `sudo apt install`. For another desktop user:
-`sudo adduser $USER tokenstation`, then log in again.
+so is whoever installed it with sudo. For another desktop user:
+`sudo usermod -aG tokenstation $USER`, then log in again. (The portable
+build puts the helper in `/usr/local/lib/tokenstation` instead.)
 
 ## GPU compute units
 
@@ -191,7 +200,9 @@ units the PS5 uses. See [cu-test/README.md](cu-test/README.md).
 ```sh
 sudo apt install cmake g++ glslang-tools libvulkan-dev libsdl2-dev mesa-vulkan-drivers
 linux/build.sh                 # build/linux/tokenstation and build/linux/ts5
-linux/build-deb.sh 0.2.0       # the .deb and a .tar.gz in build/linux/
+linux/build-deb.sh 0.2.0       # the .deb, the portable .tar.gz, and the files for:
+linux/build-rpm.sh 0.2.0       #   the .rpm (needs rpm-build)
+linux/build-arch.sh 0.2.0      #   the Arch package (on Arch, as a normal user)
 linux/smoke-test.sh small.gguf # the app on a scratch folder: serve, API, chat, restart
 ```
 
@@ -204,7 +215,8 @@ unchanged. `TS5_MARCH=znver2` builds for the PS5's Zen 2 alone (the default,
 
 Linux releases use their own tags, `linux-v<version>` (for example
 `linux-v0.2.0`). `.github/workflows/linux.yml` builds them and attaches the
-`.deb` and `.tar.gz`. They are never marked as the repo's latest release, so
+`.deb`, `.rpm`, Arch package and portable `.tar.gz`, after installing each on
+Debian 12 and 13, Ubuntu 24.04 and 26.04, Fedora 44 and Arch. They are never marked as the repo's latest release, so
 the PS5 store side (`release.yml`, tags like `01.004.001`) is unaffected.
 
 ## Not here yet
@@ -213,4 +225,6 @@ the PS5 store side (`release.yml`, tags like `01.004.001`) is unaffected.
 - The TV service (kmsdrm on tty1) hasn't been tried on a PS5 yet.
 - The checked-model list doesn't include 14B models yet: find them with the
   Models page's search.
-- No apt repository yet; install the `.deb` from a release.
+- No apt, dnf or pacman repository yet; download the package from a release.
+- Build it on Debian 12 (as CI does) for a package that runs everywhere; one
+  built on a newer system won't run on Debian 12.
