@@ -91,7 +91,8 @@ Copy to keep in mind:
   for those who already run it, and best kept to a line or two.
 - **Don't use Sony's marks as branding**: no PlayStation logos, PS button
   glyphs in the capsules, or "PS5" in the title art. "Works with the DualSense"
-  is fine. "TokenStation5" itself is your call (see the open question below).
+  is fine. The Steam release keeps the TokenStation5 name (decided
+  2026-11-03), which makes the rest of this list matter more.
 - **Don't present it as a way to unlock a console.** Valve won't list
   something that reads as a jailbreak tool. The Linux loader belongs to other
   projects; the store page needn't mention it.
@@ -139,9 +140,6 @@ changes.
 
 ## Open questions
 
-- **The name.** "TokenStation5" sits close to "PlayStation 5". Valve checks
-  store pages for others' trademarks, and Sony is protective. A name for the
-  Steam release that doesn't lean on it is safer; keeping it is your call.
 - **PS5 hardware controls in the Steam version.** Steam's container can't
   run the root helper. Possible later: a small host service the portable
   build installs, which the app talks to over a socket. Not in the first
