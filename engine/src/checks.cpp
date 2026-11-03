@@ -177,11 +177,12 @@ bool run_bench(const Model &m, Backend &b, int pp, int tg, BenchResult &r, std::
     r.pp = pp;
     r.tg = tg;
     r.backend = b.name();
-    const std::vector<int32_t> toks = test_tokens(pp, m.hp.n_vocab);
+    // --pp 0 measures generation alone: one token warms up and seeds it.
+    const std::vector<int32_t> toks = test_tokens(std::max(pp, 1), m.hp.n_vocab);
     std::vector<float> lg(m.hp.n_vocab);
     // Warm-up: compiles pipelines and touches the weights once.
     if (progress) progress("warming up");
-    if (!b.forward(toks.data(), std::min(pp, 8), 0, lg.data(), false, err)) return false;
+    if (!b.forward(toks.data(), std::min((int)toks.size(), 8), 0, lg.data(), false, err)) return false;
     b.take_profile();
     if (progress) progress("prompt: " + std::to_string(pp) + " tokens");
     double t = now_ms();
@@ -190,8 +191,9 @@ bool run_bench(const Model &m, Backend &b, int pp, int tg, BenchResult &r, std::
         int n = std::min(chunk, pp - i);
         if (!b.forward(toks.data() + i, n, i, lg.data(), false, err)) return false;
     }
-    r.pp_tps = pp * 1000.0 / (now_ms() - t);
+    r.pp_tps = pp > 0 ? pp * 1000.0 / (now_ms() - t) : 0;
     r.pp_profile = b.take_profile();
+    if (pp == 0) r.pp_profile.clear();
     if (progress) progress("generating " + std::to_string(tg) + " tokens");
     t = now_ms();
     int32_t tk = toks[0];
