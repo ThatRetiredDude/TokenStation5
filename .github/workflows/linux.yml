@@ -57,7 +57,7 @@ jobs:
           done
           sh -n linux/files/install.sh
           test -x /tmp/pkg/usr/lib/tokenstation/gpu-selftest
-          /tmp/pkg/usr/bin/ts5 2>&1 | grep -q "usage: ts5"
+          { /tmp/pkg/usr/bin/ts5 2>&1 || true; } | grep -q "usage: ts5"
           visudo -cf /tmp/pkg/etc/sudoers.d/tokenstation
           /tmp/pkg/usr/lib/tokenstation/hw status
           /tmp/pkg/usr/bin/tokenstation --version | grep -q "^tokenstation "
@@ -97,7 +97,7 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq sudo ./dist/*.deb
           tokenstation --version
-          ts5 2>&1 | grep -q "usage: ts5"
+          { ts5 2>&1 || true; } | grep -q "usage: ts5"
           id tokenstation
           sudo -l -U tokenstation | grep -q /usr/lib/tokenstation/hw
           sudo -u tokenstation sudo -n /usr/lib/tokenstation/hw status
@@ -122,7 +122,7 @@ jobs:
         run: |
           dnf install -y -q ./build/linux/tokenstation-*.rpm
           tokenstation --version
-          ts5 2>&1 | grep -q "usage: ts5"
+          { ts5 2>&1 || true; } | grep -q "usage: ts5"
           id tokenstation
           sudo -l -U tokenstation | grep -q /usr/lib/tokenstation/hw
           sudo -u tokenstation sudo -n /usr/lib/tokenstation/hw status
@@ -154,7 +154,7 @@ jobs:
         run: |
           pacman -U --noconfirm build/linux/tokenstation-*.pkg.tar.*
           tokenstation --version
-          ts5 2>&1 | grep -q "usage: ts5"
+          { ts5 2>&1 || true; } | grep -q "usage: ts5"
           id tokenstation
           sudo -l -U tokenstation | grep -q /usr/lib/tokenstation/hw
           sudo -u tokenstation sudo -n /usr/lib/tokenstation/hw status
