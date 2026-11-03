@@ -313,9 +313,12 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
     std::string derr;
     bool dopen = false;
     // The helper's own context: past it, drafting stops and lookup goes on.
-    // A found helper keeps 16k (Qwen3 0.6B's f16 cache is 112 KiB a token,
-    // 1.8 GiB at 16k), so the main model keeps most of the memory.
+    // At most 32k, or 16k for one found beside the model (Qwen3 0.6B's f16
+    // cache is 112 KiB a token, 1.8 GiB at 16k). An auto-fit main context
+    // leaves room for the helper with 4k of context; the helper then takes
+    // what is free, up to that cap, and is skipped if not even 1k fits.
     int dctx = 32768;
+    uint64_t dweights = 0;
 #ifdef TS5_LINUX
     if (!auto_dp.empty()) dctx = 16384;
 #endif
@@ -328,10 +331,9 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
             // set_drafter still needs, is dropped before the main load.
             for (const char *k : {"tokenizer.ggml.scores", "tokenizer.ggml.token_type", "tokenizer.ggml.merges"})
                 l->dmodel.gguf.kv.erase(k);
-            uint64_t dw = 0;
-            for (const auto &t : l->dmodel.gguf.tensors) dw += t.nbytes;
-            dreserve = ts5::vk_fixed_bytes(l->dmodel.hp, dw) +
-                       (uint64_t)dctx * ts5::kv_bytes_per_token(l->dmodel.hp, ts5::KvType::F16);
+            for (const auto &t : l->dmodel.gguf.tensors) dweights += t.nbytes;
+            dreserve = ts5::vk_fixed_bytes(l->dmodel.hp, dweights) +
+                       (uint64_t)std::min(dctx, 4096) * ts5::kv_bytes_per_token(l->dmodel.hp, ts5::KvType::F16);
         }
     }
     const double t0 = now_s();
@@ -344,11 +346,15 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
     l->engine = std::make_unique<ts5::Engine>(l->model, b, l->tok);
     if (dp && *dp) {
         ts5::Backend *db = nullptr;
-        if (dopen) db = ts5::make_vk_backend(ctx_, l->dmodel, dp, std::min(l->n_ctx, dctx), derr);
+        const int fits = dopen ? ts5::draft_context(ctx_->free_memory(), l->dmodel.hp, dweights,
+                                                    std::min(l->n_ctx, dctx))
+                               : 0;
+        if (dopen && fits == 0) derr = "not enough GPU memory left for it beside " + l->file;
+        if (dopen && fits > 0) db = ts5::make_vk_backend(ctx_, l->dmodel, dp, fits, derr);
         if (!db || !l->engine->set_drafter(l->dmodel, db, derr))
             printf("ts5: draft model not used: %s\n", derr.c_str());
         else
-            printf("ts5: draft model %s ready\n", base(dp).c_str());
+            printf("ts5: draft model %s ready, context %d\n", base(dp).c_str(), db->n_ctx());
         l->dmodel.gguf.kv.erase("tokenizer.ggml.tokens");
     }
     log_memory("after loading " + l->file);

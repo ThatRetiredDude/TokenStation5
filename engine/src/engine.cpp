@@ -228,8 +228,37 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // every 16 steps lets a dried-up stream pick drafting back up.
     bool adapt = true;
     if (const char *e = getenv("TS5_ADAPT")) adapt = atoi(e) != 0;
-    float acc = -1;  // accepted/proposed, EWMA; <0: nothing judged yet
     int step = 0;
+    // The cost model (adapt on): each source's chance that a draft token is
+    // kept given the ones before it were (decayed counts of kept tokens and
+    // of trials: kept ones plus the first rejected), the measured time of a
+    // forward per batch size, and the draft model's time per token. A step
+    // drafts k tokens only where (1 + expected kept) / (time of the batch +
+    // drafting) beats 1 / (time of one token), so a drafter that guesses
+    // too little for its cost (Qwen3 0.6B on prose: 40-54% kept, a net loss
+    // on the PS5) stops by itself, and comes back where text repeats.
+    struct Source { float kept = 0, trials = 0; float p(float prior) const { return trials > 2 ? kept / trials : prior; } };
+    Source by_lookup, by_drafter;
+    double t_fwd[10] = {0}, t_draft = 0;  // ms; 0: not measured yet
+    auto fwd_ms = [&](int nb) {
+        if (t_fwd[nb] > 0) return t_fwd[nb];
+        const double one = t_fwd[1] > 0 ? t_fwd[1] : 10.0;
+        return one * (1.0 + 0.06 * (nb - 1));  // a guess until measured
+    };
+    // The best number of draft tokens, up to k, for a source kept with
+    // chance q and costing per_tok ms a token to draft; 0: one token alone.
+    auto best_k = [&](int k, float q, double per_tok) {
+        double best = 1.0 / fwd_ms(1);
+        int bk = 0;
+        double e = 0, qi = 1;
+        for (int i = 1; i <= k && i <= 8; i++) {
+            qi *= q;
+            e += qi;
+            const double v = (1.0 + e) / (fwd_ms(i + 1) + i * per_tok);
+            if (v > best * 1.02) { best = v; bk = i; }
+        }
+        return bk;
+    };
     std::vector<int32_t> batch;
     std::vector<float> lgb;  // one row of logits per batch position
     double ts = now_ms();
@@ -241,22 +270,44 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         if (st.gen_tokens >= p.max_tokens) { st.finish = "length"; break; }
         if ((int)cached_.size() + 1 >= b_->n_ctx()) { st.finish = "length"; break; }
         batch.assign(1, tok);
-        int want = dmax;
-        if (adapt && acc >= 0) {
-            want = acc < 0.15f ? 0 : acc < 0.5f ? std::min(dmax, 3) : dmax;
-            if (want == 0 && step % 16 == 0) want = std::min(dmax, 3);
-        }
+        const int want = dmax;  // with adapt, the cost model below picks how many
         step++;
         int room = std::min(want, p.max_tokens - st.gen_tokens);
         room = std::min(room, b_->n_ctx() - (int)cached_.size() - 2);
-        if (room > 0) draft_lookup(tok, room, batch);
+        const bool probe = step % 16 == 0;
+        if (room > 0) {
+            draft_lookup(tok, room, batch);
+            if (adapt && batch.size() > 1 && !probe) {
+                const int k = best_k((int)batch.size() - 1, by_lookup.p(0.5f), 0.0);
+                batch.resize(1 + k);
+            }
+        }
+        const bool from_lookup = batch.size() > 1;
         // The cascade: where the free lookup finds nothing, the draft model.
-        const bool by_model = batch.size() == 1 && room > 0 && db_ && drafter_ok_;
-        if (by_model) draft_model(tok, room, batch);
+        bool by_model = batch.size() == 1 && room > 0 && db_ && drafter_ok_;
+        int mk = room;
+        if (by_model && adapt) {
+            mk = probe ? std::min(room, 2) : best_k(room, by_drafter.p(0.6f), t_draft > 0 ? t_draft : fwd_ms(1) / 8);
+            by_model = mk > 0;
+        }
+        if (by_model) {
+            const double td0 = now_ms();
+            draft_model(tok, mk, batch);
+            const size_t got = batch.size() - 1;
+            if (got > 0) {
+                const double per = (now_ms() - td0) / (double)got;
+                t_draft = t_draft > 0 ? 0.8 * t_draft + 0.2 * per : per;
+            }
+        }
         const int nb = (int)batch.size();
         if (!in_place && (size_t)nb * nv > lgb.size()) lgb.resize((size_t)nb * nv);
+        const double tf0 = now_ms();
         bool ok = in_place ? b_->forward_in_place(batch.data(), nb, (int)cached_.size(), nb > 1, err)
                            : b_->forward(batch.data(), nb, (int)cached_.size(), lgb.data(), nb > 1, err);
+        if (ok && nb <= 9) {
+            const double dt = now_ms() - tf0;
+            t_fwd[nb] = t_fwd[nb] > 0 ? 0.8 * t_fwd[nb] + 0.2 * dt : dt;
+        }
         if (!ok) { cached_.clear(); dcached_ = 0; return false; }
         written_ = std::max(written_, (int)cached_.size() + nb);
         const float *lg = in_place ? b_->logits_view() : lgb.data();
@@ -272,8 +323,9 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         st.sample_ms += now_ms() - ts;
         st.draft_accepted += accepted;
         if (nb > 1) {
-            float r = (float)accepted / (nb - 1);
-            acc = acc < 0 ? r : 0.8f * acc + 0.2f * r;
+            Source &src = from_lookup ? by_lookup : by_drafter;
+            src.kept = 0.9f * src.kept + accepted;
+            src.trials = 0.9f * src.trials + accepted + (accepted < nb - 1 ? 1 : 0);
         }
         cached_.insert(cached_.end(), batch.begin(), batch.begin() + accepted + 1);
         if (dmax > 0) index_grams(cached_.size() - (accepted + 1));

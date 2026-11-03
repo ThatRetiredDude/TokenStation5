@@ -260,6 +260,23 @@ tenth of a 7B token), so the lookup still serves echo spans first and the
 adaptive draft length throttles both. A drafter that fails logs once and
 turns itself off; generation continues on lookup alone.
 
+With `TS5_ADAPT` on (the default), how many tokens a step drafts comes from
+a cost model rather than a fixed policy: each source (lookup, draft model)
+has a decayed estimate of the chance a draft token is kept given the ones
+before it were (kept tokens over kept plus first rejections), every batch
+size's forward time and the draft model's time per token are measured as
+they run, and a step drafts the k that maximises (1 + expected kept) / (time
+of a k + 1 batch + k drafted tokens), only when that beats one token alone
+by 2%. Every 16th step proposes anyway, so estimates recover. Measured on the
+PS5 under Linux before it (Qwen3 8B, 0.6B drafter): prose kept 40-54% of the
+0.6B's drafts and ran 18-27% slower than no drafting, code renames kept 79%
+and ran 38% faster; the cost model keeps the second and drops the first.
+
+A draft model's context is what fits in the memory free once the main model
+is loaded (`draft_context`, from the driver's budget less its usage), at most
+the main context (32k; 16k for one the app finds by itself); none fits, no
+draft model, with a log line, rather than a submit that fails later.
+
 ## Memory
 
 Every buffer is sub-allocated from 1 GiB blocks. Host-visible device-local

@@ -44,6 +44,9 @@
 #include "tools.h"
 #include "usage.h"
 #include "websearch.h"
+#ifdef TS5_VULKAN
+#include "vk_context.h"
+#endif
 
 #ifndef TS5_VERSION
 #define TS5_VERSION "dev"
@@ -301,7 +304,16 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             if (dmodel.load(nullptr, derr)) db = make_cpu_backend(dmodel, be->n_ctx());
         } else {
 #ifdef TS5_VULKAN
-            db = make_vk_backend(dmodel, dp, be->n_ctx(), a.device, derr);
+            // As much of the main context as fits in what is free now.
+            uint64_t dw = 0, freeb = UINT64_MAX;
+            for (const auto &t : dmodel.gguf.tensors) dw += t.nbytes;
+            if (VkContext *c = create_vk_context(a.device, false, derr)) {
+                freeb = c->free_memory();
+                destroy_vk_context(c);
+            }
+            const int dctx = draft_context(freeb, dmodel.hp, dw, be->n_ctx());
+            if (dctx == 0) derr = "not enough GPU memory left for it";
+            else db = make_vk_backend(dmodel, dp, dctx, a.device, derr);
 #endif
         }
         if (!db || !eng.set_drafter(dmodel, db, derr))

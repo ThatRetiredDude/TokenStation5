@@ -68,6 +68,27 @@ uint64_t VkContext::device_memory() const {
     return n;
 }
 
+uint64_t VkContext::free_memory() const {
+#ifndef TS5_PS5
+    if (memory_budget) {
+        auto props2 = (PFN_vkGetPhysicalDeviceMemoryProperties2)get_instance_proc(
+            instance, "vkGetPhysicalDeviceMemoryProperties2");
+        if (!props2) return UINT64_MAX;
+        const bool shared = props.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT b{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+        VkPhysicalDeviceMemoryProperties2 m2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+        m2.pNext = &b;
+        props2(physical, &m2);
+        uint64_t n = 0;
+        for (uint32_t i = 0; i < m2.memoryProperties.memoryHeapCount; i++)
+            if (shared || (m2.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT))
+                n += b.heapBudget[i] > b.heapUsage[i] ? b.heapBudget[i] - b.heapUsage[i] : 0;
+        return n;
+    }
+#endif
+    return UINT64_MAX;
+}
+
 namespace {
 
 bool has_extension(const std::vector<VkExtensionProperties> &exts, const char *name) {

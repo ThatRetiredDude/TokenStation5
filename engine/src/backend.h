@@ -71,6 +71,11 @@ uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes);
 // display, a GPU check's CPU reference), a multiple of 1024 up to cap. 0 if
 // not even 1024 tokens fit.
 int fit_context(uint64_t memory, uint64_t used, uint64_t per_token, int cap);
+// A helper (draft) model's context, loaded after the main one: what fits in
+// `free` bytes (VkContext::free_memory) beside its weights and buffers,
+// keeping 0.5 GiB spare, at most `cap`, in whole thousands of tokens; 0 if
+// not even 1024 tokens fit. free == UINT64_MAX (unknown): cap.
+int draft_context(uint64_t free, const HParams &dhp, uint64_t draft_weight_bytes, int cap);
 // Whether a context of what fits in f16 (f16_ctx tokens) is the model's whole
 // training context. Then TS5_KV=q8 gets an f16 cache anyway: 8 bits would
 // only cost precision (on Qwen 2.5 Coder 7B, more than the GPU check allows).

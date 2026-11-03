@@ -35,6 +35,10 @@ struct VkContext {
     // driver's budget for them (VK_EXT_memory_budget: on an APU, the system
     // memory the rest of the machine leaves), or TS5_GPU_MEMORY_GIB.
     uint64_t device_memory() const;
+    // Off the PS5 with VK_EXT_memory_budget: what is free right now (the
+    // budget less what this device already holds), asked fresh each call.
+    // UINT64_MAX where it can't be told.
+    uint64_t free_memory() const;
     // VK_EXT_memory_budget is on (never on the PS5).
     bool memory_budget = false;
     mutable std::mutex budget_mutex;

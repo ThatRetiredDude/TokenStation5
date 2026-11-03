@@ -1457,6 +1457,15 @@ uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
     return (weight_bytes + act + gib - 1) / gib * gib + kv_ring_bytes(hp, KvType::F16);
 }
 
+int draft_context(uint64_t free, const HParams &dhp, uint64_t draft_weight_bytes, int cap) {
+    if (free == UINT64_MAX) return cap;
+    const uint64_t fixed = vk_fixed_bytes(dhp, draft_weight_bytes), spare = 1ull << 29;
+    const uint64_t per = kv_bytes_per_token(dhp, KvType::F16);
+    if (per == 0 || free < fixed + spare) return 0;
+    const uint64_t n = std::min<uint64_t>((free - fixed - spare) / per, cap > 0 ? (uint64_t)cap : 0) / 1024 * 1024;
+    return n >= 1024 ? (int)n : 0;
+}
+
 bool f16_reaches(int f16_ctx, int train) { return train >= 1024 && f16_ctx >= train / 1024 * 1024; }
 
 int fit_context(uint64_t memory, uint64_t used, uint64_t per_token, int cap) {
