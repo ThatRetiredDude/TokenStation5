@@ -28,24 +28,21 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - name: The SDK's compilers, and glslang
+      - name: The SDK's compilers and glslang
         run: |
           grep -E '^(PRETTY_NAME|BUILD_ID)=' /etc/os-release
           ls /usr/bin | grep -E '^(gcc|g\+\+)(-[0-9]+)?$' || true
-          if ! command -v glslangValidator > /dev/null; then
-            apt-get update -qq && apt-get install -y -qq glslang-tools || true
-          fi
-          if ! command -v glslangValidator > /dev/null; then
-            curl -fsSL -o /tmp/glslang.zip https://github.com/KhronosGroup/glslang/releases/download/main-tot/glslang-main-linux-Release.zip
-            python3 -c "import zipfile; zipfile.ZipFile('/tmp/glslang.zip').extractall('/opt/glslang')"
-            chmod +x /opt/glslang/bin/*
-            echo /opt/glslang/bin >> "$GITHUB_PATH"
-          fi
+          glslangValidator --version | head -1
       - name: Build the depot
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           steam/linux/build-depot.sh "0.0.0+$(git rev-parse --short HEAD)"
           find build/steam/linux/depot -type f | sort
+      - name: A Vulkan driver (lavapipe), as Steam passes in the host's GPU driver
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq mesa-vulkan-drivers
+          ls /usr/share/vulkan/icd.d/
       - name: Run it as Steam would
         run: |
           depot=build/steam/linux/depot
