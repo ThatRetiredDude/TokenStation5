@@ -1,0 +1,82 @@
+name: steam
+
+# Builds the Steam depot (steam/linux/build-depot.sh) on Debian 12, then runs
+# it inside the Steam Linux Runtime 3.0 (sniper) SDK image, the container
+# Steam itself runs the app in, and checks that it starts and serves the API.
+# The depot is an artifact; uploading it to Steam is steam/steampipe/
+# upload.sh, by hand, with the Steamworks build account.
+
+on:
+  push:
+    branches: [steam]
+    paths: ["engine/**", "ps5/**", "linux/**", "steam/**", "third_party/**", ".github/workflows/steam.yml"]
+  pull_request:
+    paths: ["engine/**", "ps5/**", "linux/**", "steam/**", "third_party/**", ".github/workflows/steam.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  depot:
+    runs-on: ubuntu-24.04
+    container: debian:12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq git ca-certificates curl bzip2 xz-utils python3 make cmake g++ glslang-tools libvulkan-dev libsdl2-dev binutils
+      - uses: actions/checkout@v4
+      - name: Build the depot
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          steam/linux/build-depot.sh "0.0.0+$(git rev-parse --short HEAD)"
+          find build/steam/linux/depot -type f | sort
+      - name: Fill the SteamPipe scripts (no upload)
+        run: |
+          mkdir -p /tmp/steamcmd && printf '#!/bin/sh\necho "steamcmd $*"\n' > /tmp/steamcmd/steamcmd && chmod +x /tmp/steamcmd/steamcmd
+          STEAMCMD=/tmp/steamcmd/steamcmd STEAM_APP_ID=480 STEAM_DEPOT_ID=481 STEAM_USER=ci steam/steampipe/upload.sh
+          cat build/steam/steampipe/app_build.vdf build/steam/steampipe/depot_build.vdf
+      - name: Pack it (keeps the execute bits)
+        run: tar -C build/steam/linux -czf build/steam/linux/depot.tar.gz depot
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tokenstation-steam-depot
+          path: build/steam/linux/depot.tar.gz
+
+  sniper:
+    needs: depot
+    runs-on: ubuntu-24.04
+    container: registry.gitlab.steamos.cloud/steamrt/sniper/sdk:latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tokenstation-steam-depot
+      - name: Run it as Steam would
+        run: |
+          tar xzf depot.tar.gz
+          cat /etc/os-release | head -3
+          if ldd depot/bin/tokenstation depot/bin/ts5 | grep "not found"; then exit 1; fi
+          depot/launch.sh --version
+          data=$(mktemp -d)
+          export SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy TS5_DESKTOP_NOTIFY=0
+          depot/launch.sh --data "$data" --windowed & pid=$!
+          up=
+          for _ in $(seq 1 300); do
+            if grep -q "ts5-title: TokenStation5 " "$data/ts5.log" 2> /dev/null &&
+               curl -s -o /dev/null http://127.0.0.1:8081/v1/models; then up=1; break; fi
+            kill -0 $pid 2> /dev/null || break
+            sleep 0.1
+          done
+          tail -40 "$data/ts5.log" || true
+          [ -n "$up" ] || { echo "it didn't come up in the sniper runtime"; exit 1; }
+          touch "$data/quit"
+          for _ in $(seq 1 100); do kill -0 $pid 2> /dev/null || break; sleep 0.1; done
+          kill -0 $pid 2> /dev/null && { echo "it didn't quit"; kill $pid; exit 1; }
+          grep -q "leaving (exit)" "$data/ts5.log"

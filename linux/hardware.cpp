@@ -66,6 +66,16 @@ std::vector<std::pair<std::string, double>> read_temps() {
     return out;
 }
 
+// Steam runs the app in its container (pressure-vessel), Flatpak in its
+// sandbox: both forbid sudo there (no_new_privs), so the helper can't run.
+bool sandboxed() {
+    if (const char *e = getenv("TS5_SANDBOXED")) return strcmp(e, "1") == 0;
+    return access("/run/host", F_OK) == 0 || access("/.flatpak-info", F_OK) == 0 || getenv("PRESSURE_VESSEL_RUNTIME");
+}
+constexpr const char *kSandboxed =
+    "Steam runs TokenStation5 in a sandbox, so it can't change the PS5's fan, boost, GPU memory or compute units. "
+    "The portable build's install.sh adds those controls, outside Steam.";
+
 bool present() {
     if (getenv("TS5_FAKE_PS5")) return true;  // tests on a machine that isn't one
     return access("/dev/mp1", F_OK) == 0 || access("/dev/icc", F_OK) == 0;
@@ -76,6 +86,10 @@ bool present() {
 // sudo -n HELPER ARGS..., its output in out; false if it failed (out then
 // has why, from its stderr too).
 bool Hardware::run(const std::vector<std::string> &args, std::string &out) {
+    if (sandboxed()) {
+        out = kSandboxed;
+        return false;
+    }
     std::string cmd = "sudo -n ";
     cmd += helper();
     for (const std::string &a : args) cmd += " '" + a + "'";  // fixed words and numbers only
@@ -95,6 +109,10 @@ void Hardware::start(Notify notify) {
     {
         std::lock_guard<std::mutex> lk(mu_);
         info_.present = true;
+        if (sandboxed()) {
+            info_.problem = kSandboxed;
+            return;
+        }
     }
     std::thread([this] {
         // As the settings say, from the start: a desktop session has no
@@ -110,6 +128,11 @@ void Hardware::start(Notify notify) {
 }
 
 void Hardware::refresh() {
+    if (sandboxed()) {
+        std::lock_guard<std::mutex> lk(mu_);
+        info_.problem = kSandboxed;
+        return;
+    }
     std::string out;
     const bool ok = run({"status"}, out);
     std::map<std::string, std::string> kv;

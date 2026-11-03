@@ -1,0 +1,12 @@
+"AppBuild"
+{
+	"AppID" "@APPID@"
+	"Desc" "TokenStation5 @VERSION@ (@COMMIT@)"
+	"ContentRoot" "@DEPOT@"
+	"BuildOutput" "@OUTPUT@"
+	"SetLive" "@BRANCH@"
+	"Depots"
+	{
+		"@DEPOTID@" "depot_build.vdf"
+	}
+}
