@@ -12,6 +12,9 @@
 #include <thread>
 
 #include <sys/stat.h>
+#ifdef TS5_LINUX
+#include <dirent.h>
+#endif
 #include <sys/types.h>
 
 #include "backend.h"
@@ -68,6 +71,51 @@ std::string base(const std::string &p) {
     const size_t s = p.find_last_of('/');
     return s == std::string::npos ? p : p.substr(s + 1);
 }
+
+#ifdef TS5_LINUX
+// The helper (draft) model for `path` when TS5_DRAFT_MODEL is unset: the
+// smallest .gguf beside it with the same architecture and vocabulary and at
+// most a quarter of its size (Qwen3 0.6B for Qwen3 8B, Llama 3.2 1B for
+// Llama 3.1 8B, Gemma 3 1B for Gemma 3 12B). "" if there is none.
+// TS5_DRAFT_MODEL=off turns it off; a path picks that file.
+std::string auto_drafter(const std::string &path) {
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) return "";
+    const uint64_t main_bytes = (uint64_t)st.st_size;
+    const size_t slash = path.find_last_of('/');
+    const std::string dir = slash == std::string::npos ? "." : path.substr(0, slash);
+    std::vector<std::pair<uint64_t, std::string>> cands;
+    if (DIR *d = opendir(dir.c_str())) {
+        while (dirent *e = readdir(d)) {
+            const std::string n = e->d_name;
+            if (n.size() < 6 || n.compare(n.size() - 5, 5, ".gguf") != 0) continue;
+            std::string lower = n;
+            for (char &c : lower) c = (char)tolower((unsigned char)c);
+            if (lower.find("mmproj") != std::string::npos) continue;
+            const std::string f = dir + "/" + n;
+            if (f == path || stat(f.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+            if ((uint64_t)st.st_size * 4 > main_bytes || st.st_size < (64 << 20)) continue;
+            cands.push_back({(uint64_t)st.st_size, f});
+        }
+        closedir(d);
+    }
+    if (cands.empty()) return "";
+    std::sort(cands.begin(), cands.end());
+    ts5::Model m;
+    std::string err;
+    try {
+        if (!m.open(path, err)) return "";
+    } catch (const std::exception &) { return ""; }
+    for (auto &c : cands) {
+        ts5::Model d;
+        try {
+            if (!d.open(c.second, err)) continue;
+        } catch (const std::exception &) { continue; }
+        if (d.hp.arch == m.hp.arch && d.hp.n_vocab == m.hp.n_vocab) return c.second;
+    }
+    return "";
+}
+#endif
 
 // What's free once a model is loaded or a job is done, so the log shows whether
 // anything stayed behind: the CPU's flexible memory, and the direct memory the
@@ -250,9 +298,27 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
     // A draft model must fit beside the main one, so an auto-fit context
     // leaves its budget free: weights and activations plus a 32k f16 cache.
     const char *dp = drafter ? getenv("TS5_DRAFT_MODEL") : nullptr;
+    if (dp && strcmp(dp, "off") == 0) dp = nullptr;
+#ifdef TS5_LINUX
+    std::string auto_dp;
+    if (drafter && (!dp || !*dp)) {
+        auto_dp = auto_drafter(path);
+        if (!auto_dp.empty()) {
+            printf("ts5: helper model for %s: %s (found beside it)\n", base(path).c_str(), base(auto_dp).c_str());
+            dp = auto_dp.c_str();
+        }
+    }
+#endif
     uint64_t dreserve = 0;
     std::string derr;
     bool dopen = false;
+    // The helper's own context: past it, drafting stops and lookup goes on.
+    // A found helper keeps 16k (Qwen3 0.6B's f16 cache is 112 KiB a token,
+    // 1.8 GiB at 16k), so the main model keeps most of the memory.
+    int dctx = 32768;
+#ifdef TS5_LINUX
+    if (!auto_dp.empty()) dctx = 16384;
+#endif
     if (dp && *dp) {
         try {
             dopen = l->dmodel.open(dp, derr);
@@ -265,7 +331,7 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
             uint64_t dw = 0;
             for (const auto &t : l->dmodel.gguf.tensors) dw += t.nbytes;
             dreserve = ts5::vk_fixed_bytes(l->dmodel.hp, dw) +
-                       32768ull * ts5::kv_bytes_per_token(l->dmodel.hp, ts5::KvType::F16);
+                       (uint64_t)dctx * ts5::kv_bytes_per_token(l->dmodel.hp, ts5::KvType::F16);
         }
     }
     const double t0 = now_s();
@@ -278,7 +344,7 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
     l->engine = std::make_unique<ts5::Engine>(l->model, b, l->tok);
     if (dp && *dp) {
         ts5::Backend *db = nullptr;
-        if (dopen) db = ts5::make_vk_backend(ctx_, l->dmodel, dp, std::min(l->n_ctx, 32768), derr);
+        if (dopen) db = ts5::make_vk_backend(ctx_, l->dmodel, dp, std::min(l->n_ctx, dctx), derr);
         if (!db || !l->engine->set_drafter(l->dmodel, db, derr))
             printf("ts5: draft model not used: %s\n", derr.c_str());
         else

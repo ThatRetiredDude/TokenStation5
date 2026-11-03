@@ -97,6 +97,13 @@ const std::vector<Row> &setting_rows() {
          "Keeps what the model has read in half the memory, so about twice the context fits. It's used only when "
          "a model's whole context doesn't fit otherwise. Answers can come out very slightly different.",
          "Now: the model loads again, which takes a few seconds", {{"f16", "Off"}, {"q8", "On"}}, "f16"},
+#ifdef TS5_LINUX
+        {"MODELS", "TS5_DRAFT_MODEL", "Helper model",
+         "A small model of the same family (such as Qwen3 0.6B for Qwen3 8B, or Llama 3.2 1B for Llama 3.1 8B) "
+         "guesses a few words ahead and the big model checks them all at once, so replies come faster. Answers "
+         "are exactly the same. Automatic uses one when a matching small model is in the models folder.",
+         "Now: the model loads again, which takes a few seconds", {{"", "Automatic"}, {"off", "Off"}}, ""},
+#endif
         {"VOICE", kSpeechModel, "Speech model",
          "The model that turns what you say into text when you hold R1 on the Chat page. Base (English) is a "
          "good start; Small (English) understands more and takes longer.",

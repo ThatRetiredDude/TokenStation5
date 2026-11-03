@@ -175,6 +175,17 @@ settings such as `TS5_KV=q8`).
 
 Speed test: `ts5 bench -m model.gguf --pp 512 --tg 128`.
 
+## Helper model (faster replies)
+
+Settings > MODELS > Helper model, Automatic by default: when the models
+folder has a small model of the same family as the one served (same
+architecture and vocabulary, a quarter of its size or less, such as Qwen3
+0.6B beside Qwen3 8B), it guesses a few tokens ahead and the big model checks
+them in one pass. The output is exactly what the big model alone writes; only
+the speed changes. The helper keeps a 16k context of its own (past that,
+drafting from the conversation's own text goes on). Off turns it off;
+`TS5_DRAFT_MODEL=/path/to.gguf` in `ts5.env` picks one.
+
 ## Tune for your machine
 
 The engine's kernel choices were tuned on the PS5's own driver. Linux runs
