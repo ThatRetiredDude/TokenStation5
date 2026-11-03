@@ -977,23 +977,26 @@ private:
             dispatch("attention", {&q_, &kc_[kb], &vc_[kb], &att_}, pc, H, (uint32_t)n);
             return;
         }
-        // Rows per workgroup: the query heads of one KV head, for as many
+        // Rows per workgroup: the query heads of one KV head (or a share of
+        // them, hsplit workgroups each: Gemma 4's 16 heads of 512), for as many
         // tokens as fit attn's 1024 floats of queries, attn_pf's 64 rows (32 for heads of 256)
         // (prompts: attn_pf_min_ tokens or more) or attn_dec's 8 or 4 (generation
         // over attn_dec_min_ keys or more, f16 cache, heads of 128).
         // The first key any of the n tokens sees, and how many from there.
-        const uint32_t G = H / HKV, k_lo = win && (uint32_t)pos0 + 1 > win ? (uint32_t)pos0 + 1 - win : 0;
+        const uint32_t hsplit = head_split(l), G = H / HKV / hsplit;
+        const uint32_t k_lo = win && (uint32_t)pos0 + 1 > win ? (uint32_t)pos0 + 1 - win : 0;
         const uint32_t keys = (uint32_t)(pos0 + n) - k_lo;
         const bool plain = !win && !ring;
         // attn_pf: heads of up to 128 in 64 rows, or of 256 (f16 cache) in 32.
         const bool pf256 = HD == 256 && kv_ == KvType::F16;
         const uint32_t pf_rows = pf256 ? 32 : 64;
-        const bool pf = attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && (HD <= 128 || pf256) && G <= pf_rows;
-        const bool dec = plain && !pf && attn_dec_min_ && keys >= (uint32_t)attn_dec_min_ && kv_ == KvType::F16 &&
-                         HD == 128 && G <= 8;
+        const bool pf = hsplit == 1 && attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && (HD <= 128 || pf256) &&
+                        G <= pf_rows;
+        const bool dec = hsplit == 1 && plain && !pf && attn_dec_min_ && keys >= (uint32_t)attn_dec_min_ &&
+                         kv_ == KvType::F16 && HD == 128 && G <= 8;
         const uint32_t dec_rows = G <= 4 ? 4 : 8;
         const uint32_t tq = pf ? pf_rows / G : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / G);
-        const uint32_t groups = HKV * (((uint32_t)n + tq - 1) / tq);
+        const uint32_t groups = HKV * hsplit * (((uint32_t)n + tq - 1) / tq);
         // Few workgroups for many keys (generation, or a short prompt late in
         // a chat): split the keys so every compute unit gets some, about 256
         // workgroups and 32 keys or more each (attn_dec: 128).
@@ -1009,8 +1012,8 @@ private:
         struct {
             uint32_t head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split;
             float scale;
-            uint32_t k_lo, win, ring;
-        } pc{HD, H, HKV, (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale, k_lo, win, ring};
+            uint32_t k_lo, win, ring, hsplit;
+        } pc{HD, H, HKV, (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale, k_lo, win, ring, hsplit};
         std::string kern = std::string(pf ? "attn_pf" : "attn") + (kv_ == KvType::Q8 ? "_q8" : "");
         if (dec)
             kern = dec_rows == 4 ? "attn_dec4" : "attn_dec";
@@ -1028,13 +1031,22 @@ private:
         }
     }
 
+    // How many workgroups share one KV head's query heads in attn: 1, or
+    // (Gemma 4's full layers: 16 heads of 512 on one KV head) the power of 2
+    // that gets a workgroup's rows into its 1024 floats of queries.
+    uint32_t head_split(int l) const {
+        const uint32_t HD = hp_.hd(l), G = hp_.n_head / hp_.hkv(l);
+        uint32_t s = 1;
+        while ((G / s) * HD > 1024 && (G / s) % 2 == 0) s *= 2;
+        return s;
+    }
+
     // Whether attn fits a layer's heads (else the one-workgroup-per-head
     // kernel, which has no sliding window: a sliding layer always uses attn).
-    // Gemma 4's full layers (16 heads of 512 on one K/V head) take the other.
     bool attn_ok(int l) const {
         const int HD = hp_.hd(l), H = hp_.n_head, HKV = hp_.hkv(l);
-        return (attn_fast_ || hp_.swa(l)) && HKV > 0 && H % HKV == 0 && HD % 4 == 0 && HD >= 32 && HD <= 256 &&
-               (H / HKV) * HD <= 1024;
+        return (attn_fast_ || hp_.swa(l)) && HKV > 0 && H % HKV == 0 && HD % 4 == 0 && HD >= 32 && HD <= 512 &&
+               (H / HKV / head_split(l)) * HD <= 1024;
     }
     bool attn_ok_all() const {
         for (int l = 0; l < hp_.n_layer; l++)

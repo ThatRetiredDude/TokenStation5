@@ -90,12 +90,12 @@ layer's V is RMS-normalized without weights (qkv_post's norm bit 2 and
 multiplied by its `layer_output_scale` (folded into the post-FFN rmsnorm's
 `mul`), and the logits are soft-capped at 30 (`softcap.comp`). The KV cache
 is laid out per layer with each layer's own width, so the full layers take a
-quarter of a sliding layer's bytes per token. The fast attention kernels
-don't fit 16 query heads of 512 on one K/V head (8192 floats of queries for
-one key), so the full layers take the one-workgroup-per-head kernel
-(`attention.comp`, now up to 512 wide) and the sliding layers `attn` as Gemma
-3's do; a wider `attn` for the full layers is the next step for speed. The
-E2B and E4B (per-layer embeddings, the last layers reading an earlier
+quarter of a sliding layer's bytes per token. `attn` holds 1024 floats of
+queries, which doesn't fit 16 query heads of 512 on one K/V head, so for
+such layers the heads of one K/V head are spread over `hsplit` workgroups
+(8 here, 2 heads each; the key slices for generation apply as usual), and
+the one-workgroup-per-head kernel (`attention.comp`, now up to 512 wide)
+is only for shapes that still don't fit. The E2B and E4B (per-layer embeddings, the last layers reading an earlier
 layer's cache) and the 26B A4B (experts) are refused with a message. Its
 chat format is `<|turn>role\n...<turn|>\n`, with the model's turn opened by an
 empty thought channel (`<|channel>thought\n<channel|>`) as the template does
