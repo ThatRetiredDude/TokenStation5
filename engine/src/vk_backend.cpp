@@ -337,6 +337,11 @@ private:
         if (const char *e = getenv("TS5_FUSE")) fuse_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_NORM_FUSE")) norm_fuse_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
+#ifndef TS5_PS5
+        // RADV (with wave32): splitting the small matrices' columns down to
+        // 128 blocks was 2% faster on the PS5 under Linux (472 -> 482 tok/s).
+        if (strstr(props_.deviceName, "RADV")) mmb_split_ = 128;
+#endif
         if (const char *e = getenv("TS5_MMB_SPLIT")) mmb_split_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SLICES")) mmb_slices_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SMALL")) mmb_small_ = atoi(e) != 0;

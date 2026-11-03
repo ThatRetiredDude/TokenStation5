@@ -45,7 +45,7 @@ PROMPT = [
     ("TS5_LAYERS_PER_SUBMIT", ["0", "8"]),
 ]
 BOTH = [
-    ("RADV_PERFTEST", ["", "cswave32"]),
+    ("RADV_PERFTEST", ["cswave32", "nocswave32"]),
     ("TS5_FUSE", ["1", "0"]),
     ("TS5_NORM_FUSE", ["1", "0"]),
     ("TS5_BARRIER", ["1", "0"]),

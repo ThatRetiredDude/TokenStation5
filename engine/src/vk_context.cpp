@@ -128,6 +128,10 @@ void load_tune_file() {
 VkContext *create_vk_context(int index, bool want_display, std::string &err) {
 #ifndef TS5_PS5
     load_tune_file();
+    // Wave32 compute on RADV: on the PS5 under Linux, prompts 9% faster
+    // (Qwen3 8B, 433 -> 472 tok/s), generation the same, ts5 check passes.
+    // Other drivers ignore it; a RADV_PERFTEST already set wins.
+    if (!getenv("RADV_PERFTEST")) setenv("RADV_PERFTEST", "cswave32", 0);
 #endif
     auto *c = new VkContext;
     c->get_instance_proc = ts5_vk_entry();

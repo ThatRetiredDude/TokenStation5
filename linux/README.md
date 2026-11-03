@@ -195,7 +195,7 @@ choices can be faster there. With the app closed, run:
     ts5-tune
 
 It benches the model you used last with each choice (rows per matvec
-workgroup, attention splits, wave32 compute via `RADV_PERFTEST=cswave32`,
+workgroup, attention splits, wave32 or wave64 compute (`RADV_PERFTEST`, wave32 by default),
 barriers, prompt tiling and more), one at a time, and keeps a change only
 when it beats twice the run-to-run noise and at least 2%. Then `ts5 check`
 confirms the output still matches the CPU, and the winners are saved to
