@@ -176,7 +176,7 @@ jobs:
           path: dist
       - name: Install it with install.sh
         run: |
-          dnf install -y -q SDL2 vulkan-loader sudo tar findutils shadow-utils
+          dnf install -y -q SDL2 vulkan-loader sudo tar findutils shadow-utils util-linux
           useradd -m tester
           echo "tester ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/tester
           tar -C /home/tester -xzf dist/tokenstation-*-linux-*.tar.gz
