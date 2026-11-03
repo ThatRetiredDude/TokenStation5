@@ -65,6 +65,33 @@ def quantize_q4_k(x):
     return out.reshape(x.shape[0], -1)
 
 
+def quantize_q5_k(x):
+    """Q5_K: as Q4_K (d, dmin, 6-bit scales and mins per 32), then 32 bytes
+    of fifth bits (bit j of byte l: sub-block j, value l) and the 4-bit low
+    parts; x ~ d * sc * q - dmin * m with q < 32."""
+    b = x.reshape(-1, 8, 32).astype(np.float64)
+    lo = np.minimum(b.min(axis=2), 0.0)
+    scale = (b.max(axis=2) - lo) / 31.0
+    d = np.maximum(scale.max(axis=1), 1e-12) / 63.0
+    dmin = np.maximum((-lo).max(axis=1), 1e-12) / 63.0
+    d16, dmin16 = d.astype(np.float16), dmin.astype(np.float16)
+    d, dmin = d16.astype(np.float64), dmin16.astype(np.float64)
+    sc = np.clip(np.round(scale / d[:, None]), 0, 63).astype(np.uint8)
+    mn = np.clip(np.round(-lo / dmin[:, None]), 0, 63).astype(np.uint8)
+    step = np.maximum(d[:, None] * sc, 1e-30)[:, :, None]
+    q = np.clip(np.round((b + (dmin[:, None] * mn)[:, :, None]) / step), 0, 31).astype(np.uint8)
+    s = np.zeros((b.shape[0], 12), np.uint8)
+    s[:, 0:4] = (sc[:, :4] & 63) | ((sc[:, 4:] >> 4) << 6)
+    s[:, 4:8] = (mn[:, :4] & 63) | ((mn[:, 4:] >> 4) << 6)
+    s[:, 8:12] = (sc[:, 4:] & 15) | ((mn[:, 4:] & 15) << 4)
+    qs = ((q[:, 0::2, :] & 15) | ((q[:, 1::2, :] & 15) << 4)).reshape(-1, 128)
+    qh = np.zeros((b.shape[0], 32), np.uint8)
+    for j in range(8):
+        qh |= ((q[:, j, :] >> 4) << j).astype(np.uint8)
+    out = np.concatenate([d16.view(np.uint8).reshape(-1, 2), dmin16.view(np.uint8).reshape(-1, 2), s, qh, qs], axis=1)
+    return out.reshape(x.shape[0], -1)
+
+
 def quantize_q6_k(x):
     """Q6_K: per 256 values 6-bit values (low nibbles, then high 2 bits),
     an int8 scale per 16 and d (f16); x ~ d * sc * (q - 32)."""
@@ -105,9 +132,9 @@ def main():
                     help="placeholder entries added to the token list itself (with rows to match), as Qwen 7B pads")
     ap.add_argument("--boost-token", type=int, default=-1,
                     help="make this output row huge, so greedy sampling soon picks it: for guard tests")
-    ap.add_argument("--quant", default="F32", choices=["F32", "F16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q4_K_M"],
+    ap.add_argument("--quant", default="F32", choices=["F32", "F16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q4_K_M", "Q5_K_M"],
                     help="type for the 2-D weights; Q4_K_M: Q4_K, with Q6_K for attn_v, ffn_down and output, "
-                         "as llama-quantize's mix")
+                         "as llama-quantize's mix; Q5_K_M: the same with Q5_K")
     ap.add_argument("out")
     a = ap.parse_args()
 
@@ -154,8 +181,8 @@ def main():
     w.add_file_type(0)
     copy_tokenizer(reader, w, a.pad_tokens)
 
-    kmix = a.quant == "Q4_K_M"
-    qtype = GGMLQuantizationType.Q4_K if kmix else getattr(GGMLQuantizationType, a.quant)
+    kmix = a.quant in ("Q4_K_M", "Q5_K_M")
+    qtype = getattr(GGMLQuantizationType, a.quant[:4]) if kmix else getattr(GGMLQuantizationType, a.quant)
 
     def t(name, *shape, scale=None, boost_row=-1):
         # numpy shape is (ne1, ne0): rows are outputs, columns are inputs.
@@ -169,6 +196,8 @@ def main():
                              raw_dtype=GGMLQuantizationType.Q8_0)
             elif any(k in name for k in ("attn_v", "ffn_down", "output")) and "attn_output" not in name:
                 w.add_tensor(name, quantize_q6_k(data), raw_dtype=GGMLQuantizationType.Q6_K)
+            elif qtype == GGMLQuantizationType.Q5_K:
+                w.add_tensor(name, quantize_q5_k(data), raw_dtype=GGMLQuantizationType.Q5_K)
             else:
                 w.add_tensor(name, quantize_q4_k(data), raw_dtype=GGMLQuantizationType.Q4_K)
         elif qtype == GGMLQuantizationType.F32:

@@ -5,7 +5,7 @@
 // along the row 32 values (one K-quant sub-block) at a time; each thread
 // dequantizes 16 values of one row and loads 16 of one token, from 16-byte
 // words, for the next step while the block computes the current one.
-// K-quants only (Q4_K, Q6_K); X rows 16-byte aligned.
+// Q4_K, Q5_K, Q6_K and Q8_0; X rows 16-byte aligned.
 // With n_split > 1, workgroup z takes `units` of the row's 32-value units
 // and writes its sums to P (from p_off: [slice][token][row]) for mmb_reduce
 // to add up: a matrix with few blocks then still keeps the GPU busy.
@@ -21,7 +21,9 @@
 #define SV vec4
 #define SF float
 #endif
+#define T_Q8_0 8
 #define T_Q4_K 12
+#define T_Q5_K 13
 #define T_Q6_K 14
 
 #define BM 128
@@ -30,7 +32,7 @@
 #define WG 256
 layout(local_size_x = WG) in;
 
-#if QTYPE == T_Q4_K
+#if QTYPE == T_Q4_K || QTYPE == T_Q5_K
 layout(std430, binding = 0) readonly buffer Wbuf { uvec4 w128[]; };
 #else
 layout(std430, binding = 0) readonly buffer Wbuf { uint16_t w16[]; };
@@ -49,16 +51,29 @@ layout(push_constant) uniform PC {
 shared SV Ws[BK][BM / 4];
 shared SV Xs[BK][BN / 4];
 
-#if QTYPE == T_Q4_K
-// A 144-byte block is 9 words of 16 bytes: d, dmin and the 12 bytes of
+#if QTYPE == T_Q4_K || QTYPE == T_Q5_K
+// A 144-byte Q4_K block is 9 words of 16 bytes: d, dmin and the 12 bytes of
 // scales and mins, then 128 bytes of nibbles (group p of 32 bytes holds
-// sub-block 2p in its low nibbles and 2p + 1 in its high ones).
+// sub-block 2p in its low nibbles and 2p + 1 in its high ones). A 176-byte
+// Q5_K block has two words of high bits between them: bit j of byte l is
+// value l's fifth bit in sub-block j.
+#if QTYPE == T_Q4_K
+#define BW 9
+#define QW 1
 struct Raw { uvec4 head, q; };
+#else
+#define BW 11
+#define QW 3
+struct Raw { uvec4 head, q, qh; };
+#endif
 Raw load_w(uint row, uint u, uint half_) {
-    const uint b = (row * pc.row_bytes) / 16 + (u >> 3) * 9, j = u & 7u;
+    const uint b = (row * pc.row_bytes) / 16 + (u >> 3) * BW, j = u & 7u;
     Raw w;
     w.head = w128[b];
-    w.q = w128[b + 1 + 2 * (j >> 1) + half_];
+    w.q = w128[b + QW + 2 * (j >> 1) + half_];
+#if QTYPE == T_Q5_K
+    w.qh = w128[b + 1 + half_];
+#endif
     return w;
 }
 uint sbyte(uvec4 h, uint i) {  // byte i of the scales (byte 4 + i of the block)
@@ -77,7 +92,28 @@ void dequant(Raw w, uint u, out float v[16]) {
     }
     const vec2 dm = unpackHalf2x16(w.head.x);
     const float d1 = dm.x * float(sc), m1 = dm.y * float(mn);
-    for (uint l = 0; l < 16; l++) v[l] = d1 * float((w.q[l >> 2] >> (8u * (l & 3u) + shift)) & 15u) - m1;
+    for (uint l = 0; l < 16; l++) {
+        uint q = (w.q[l >> 2] >> (8u * (l & 3u) + shift)) & 15u;
+#if QTYPE == T_Q5_K
+        q |= ((w.qh[l >> 2] >> (8u * (l & 3u) + j)) & 1u) << 4;
+#endif
+        v[l] = d1 * float(q) - m1;
+    }
+}
+#elif QTYPE == T_Q8_0
+// Q8_0: a 34-byte block (d as f16, then 32 signed bytes) per unit, only
+// 2-byte aligned, so 16-bit loads.
+struct Raw { uint q[8], d; };
+Raw load_w(uint row, uint u, uint half_) {
+    const uint o = (row * pc.row_bytes + u * 34) / 2 + 1 + 8 * half_;
+    Raw w;
+    for (uint i = 0; i < 8; i++) w.q[i] = uint(w16[o + i]);
+    w.d = uint(w16[o - 1 - 8 * half_]);
+    return w;
+}
+void dequant(Raw w, uint u, out float v[16]) {
+    const float d = unpackHalf2x16(w.d).x;
+    for (uint l = 0; l < 16; l++) v[l] = d * float(bitfieldExtract(int(w.q[l >> 1]), int(8u * (l & 1u)), 8));
 }
 #else
 // Q6_K: 210-byte blocks, only 2-byte aligned, so 16-bit loads. Sub-block j

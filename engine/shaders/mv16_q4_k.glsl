@@ -3,7 +3,9 @@
 // loading its header (d, dmin and the 12 bytes of scales and mins) and one
 // word of nibbles, 32 values: bytes 16 i .. + 15 of the nibbles hold values
 // 16 (i % 2) .. + 15 of sub-block i / 2 * 2 (low nibbles) and of the next
-// (high nibbles). The workgroup's 64 threads take 8 blocks of a row at a
+// (high nibbles). With Q5K, a Q5_K matrix: 176-byte blocks (eleven words)
+// whose header is followed by two words of high bits (bit j of byte l is
+// value l's fifth bit in sub-block j), then the eight words of nibbles. The workgroup's 64 threads take 8 blocks of a row at a
 // time, for NR rows (a specialization constant, at most 8): each thread
 // loads its 32 values of x once and uses them for all NR rows, so x, which
 // for a long row doesn't fit in the nearest cache, is read once per NR rows
@@ -24,6 +26,13 @@
 #define NRMAX 8
 layout(local_size_x = WG) in;
 layout(constant_id = 0) const uint NR = 1;  // rows per workgroup, at most NRMAX
+#ifdef Q5K
+#define BW 11  // 16-byte words per block
+#define QW 3   // the first word of nibbles
+#else
+#define BW 9
+#define QW 1
+#endif
 
 layout(std430, binding = 0) readonly buffer W128 { uvec4 w128[]; };
 layout(std430, binding = 1) readonly buffer Xbuf { vec4 X4[]; };
@@ -67,12 +76,23 @@ vec4 bytes4(uint w) { return vec4(float(w & 255u), float((w >> 8) & 255u), float
 
 // A block's header h and nibble word q (thread th of 8), with the thread's x:
 // a holds the low nibbles' 16 values, e the high ones', ta and te their sums.
+#ifdef Q5K
+// Q5_K: qh is the thread's word of high bits (bytes 16 (th % 2) .. + 15).
+float block_dot(uvec4 h, uvec4 q, uvec4 qh, vec4 a[4], vec4 e[4], float ta, float te, uint th) {
+    float s0 = 0.0, s1 = 0.0;
+    const uint j = th & ~1u;  // the low nibbles' sub-block; the high ones' is j + 1
+    for (uint c = 0; c < 4; c++) {
+        s0 += dot(bytes4((q[c] & 0x0F0F0F0Fu) | (((qh[c] >> j) & 0x01010101u) << 4)), a[c]);
+        s1 += dot(bytes4(((q[c] >> 4) & 0x0F0F0F0Fu) | (((qh[c] >> (j + 1)) & 0x01010101u) << 4)), e[c]);
+    }
+#else
 float block_dot(uvec4 h, uvec4 q, vec4 a[4], vec4 e[4], float ta, float te, uint th) {
     float s0 = 0.0, s1 = 0.0;
     for (uint c = 0; c < 4; c++) {
         s0 += dot(bytes4(q[c] & 0x0F0F0F0Fu), a[c]);
         s1 += dot(bytes4((q[c] >> 4) & 0x0F0F0F0Fu), e[c]);
     }
+#endif
     const vec4 sm = bytes4(scales_mins(h, th >> 1));  // scale 2p, 2p + 1, min 2p, 2p + 1
     const vec2 dm = unpackHalf2x16(h.x);
     return dm.x * (sm.x * s0 + sm.y * s1) - dm.y * (sm.z * ta + sm.w * te);
@@ -106,10 +126,17 @@ void main() {
         // Rows past the matrix read its last row; their sums aren't written.
         // Unrolled, so that all NR rows' loads are in flight at once.
         [[unroll]] for (uint i = 0; i < NR; i++) {
-            const uint o = min(r0 + i, pc.nrows - 1) * row_words + b * 9;
-            acc[i] += block_dot(w128[o], w128[o + 1 + th], a, e, ta, te, th);
+            const uint o = min(r0 + i, pc.nrows - 1) * row_words + b * BW;
+#ifdef Q5K
+            acc[i] += block_dot(w128[o], w128[o + QW + th], w128[o + 1 + (th & 1u)], a, e, ta, te, th);
 #ifdef GLU
-            accu[i] += block_dot(u128[o], u128[o + 1 + th], a, e, ta, te, th);
+            accu[i] += block_dot(u128[o], u128[o + QW + th], u128[o + 1 + (th & 1u)], a, e, ta, te, th);
+#endif
+#else
+            acc[i] += block_dot(w128[o], w128[o + QW + th], a, e, ta, te, th);
+#ifdef GLU
+            accu[i] += block_dot(u128[o], u128[o + QW + th], a, e, ta, te, th);
+#endif
 #endif
         }
     }

@@ -65,9 +65,19 @@
 #include "mv16n_q6_k.spv.h"
 #include "mv16_q4_k.spv.h"
 #include "mv16_q6_k.spv.h"
+#include "mv16_q5_k.spv.h"
+#include "mv16_q8_0.spv.h"
+#include "mv16_glu_q5_k.spv.h"
+#include "mv16_glu_q8_0.spv.h"
+#include "mv16n_q5_k.spv.h"
+#include "mv16n_q8_0.spv.h"
+#include "mv16n_glu_q5_k.spv.h"
+#include "mv16n_glu_q8_0.spv.h"
 #include "mvt_glu_q4_k.spv.h"
 #include "mvt_q4_k.spv.h"
 #include "mvt_q6_k.spv.h"
+#include "mvt_q5_k.spv.h"
+#include "mvt_q8_0.spv.h"
 #include "mm_f16.spv.h"
 #include "mm_f32.spv.h"
 #include "mm_q4_0.spv.h"
@@ -83,6 +93,10 @@
 #include "mmb_reduce.spv.h"
 #include "mmb16_q4_k.spv.h"
 #include "mmb16_q6_k.spv.h"
+#include "mmb_q5_k.spv.h"
+#include "mmb_q8_0.spv.h"
+#include "mmb16_q5_k.spv.h"
+#include "mmb16_q8_0.spv.h"
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
@@ -171,6 +185,14 @@ const char *qname(uint32_t t) {
         case GGML_Q6_K: return "q6_k";
         default: return nullptr;
     }
+}
+
+// The types with word-load kernels: mv16 (one token), mv16n (with the
+// RMSNorm folded in), mv16_glu (gate and up at once) and mmb (prompts).
+// Their rows must be whole 256-value groups (eight Q8_0 blocks).
+static bool fast_type(const Weight &w) {
+    const uint32_t t = w.type();
+    return (t == GGML_Q4_K || t == GGML_Q5_K || t == GGML_Q6_K || t == GGML_Q8_0) && w.ne0() % 256 == 0;
 }
 
 #define CHECK(x)                                                                   \
@@ -509,7 +531,7 @@ private:
         P(matmul_q4_k, 3) P(matmul_q5_k, 3) P(matmul_q6_k, 3)
         P(mm_f32, 3) P(mm_f16, 3) P(mm_q4_0, 3) P(mm_q8_0, 3) P(mm_q4_1, 3) P(mm_q5_0, 3) P(mm_q5_1, 3)
         P(mm_q4_k, 3) P(mm_q5_k, 3) P(mm_q6_k, 3) P(mmb_q4_k, 4) P(mmb_q6_k, 4) P(mmb_reduce, 2)
-        P(mmb16_q4_k, 4) P(mmb16_q6_k, 4)
+        P(mmb16_q4_k, 4) P(mmb16_q6_k, 4) P(mmb_q5_k, 4) P(mmb_q8_0, 4) P(mmb16_q5_k, 4) P(mmb16_q8_0, 4)
         // The one-token mat-vecs twice: mv_rows_ rows per workgroup, and one
         // (".1") for matrices with few rows.
 #define MV(n, nb)                                                                       \
@@ -518,6 +540,8 @@ private:
         return false;
         MV(matvec_q4_k, 3) MV(matvec_q6_k, 3) MV(mv16_q4_k, 3) MV(mv16_q6_k, 3) MV(mv16_glu_q4_k, 4)
         MV(mv16n_q4_k, 4) MV(mv16n_q6_k, 4) MV(mv16n_glu_q4_k, 5)
+        MV(mv16_q5_k, 3) MV(mv16_q8_0, 3) MV(mv16_glu_q5_k, 4) MV(mv16_glu_q8_0, 4)
+        MV(mv16n_q5_k, 4) MV(mv16n_q8_0, 4) MV(mv16n_glu_q5_k, 5) MV(mv16n_glu_q8_0, 5)
 #undef MV
         // The verify-batch mat-vecs once per batch size (their token loop is
         // compile-time), each twice like the one-token ones: mvt_rows_ rows
@@ -528,6 +552,10 @@ private:
                 !make_pipe("mvt_q4_k" + s + ".1", spv_mvt_q4_k, sizeof(spv_mvt_q4_k), 3, err, nt, 1) ||
                 !make_pipe("mvt_q6_k" + s, spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, mvt_rows_) ||
                 !make_pipe("mvt_q6_k" + s + ".1", spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, 1) ||
+                !make_pipe("mvt_q5_k" + s, spv_mvt_q5_k, sizeof(spv_mvt_q5_k), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvt_q5_k" + s + ".1", spv_mvt_q5_k, sizeof(spv_mvt_q5_k), 3, err, nt, 1) ||
+                !make_pipe("mvt_q8_0" + s, spv_mvt_q8_0, sizeof(spv_mvt_q8_0), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvt_q8_0" + s + ".1", spv_mvt_q8_0, sizeof(spv_mvt_q8_0), 3, err, nt, 1) ||
                 !make_pipe("mvt_glu_q4_k" + s, spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, mvt_glu_rows_) ||
                 !make_pipe("mvt_glu_q4_k" + s + ".1", spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, 1))
                 return false;
@@ -874,8 +902,7 @@ private:
         const uint32_t split_big = mmb_small_ && mmb_split_ && ntok >= 128 && big < (uint32_t)mmb_min_
                                        ? big * std::min({(mmb_split_ + big - 1) / big, (uint32_t)w.ne0() / 256, 16u})
                                        : big;
-        if (ntok >= tiled_min_ && mmb_ && split_big >= (uint32_t)mmb_min_ && x_off % 4 == 0 && w.ne0() % 4 == 0 &&
-            (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
+        if (ntok >= tiled_min_ && mmb_ && split_big >= (uint32_t)mmb_min_ && x_off % 4 == 0 && fast_type(w)) {
             mmb(w, x, y, pc, big, what);
             return;
         }
@@ -885,9 +912,11 @@ private:
             return;
         }
         uint32_t gx = std::min<uint32_t>(rows, 65535), gy = (rows + gx - 1) / gx;
-        // One token of Q4_K or Q6_K (generation with a Q4_K_M model): the
-        // kernels that read the weights as words.
-        if (ntok == 1 && fast_matvec_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
+        // One token of Q4_K, Q5_K, Q6_K or Q8_0 (generation): the kernels
+        // that read the weights as words (TS5_MV16=0: the older matvec_*
+        // kernels, Q4_K and Q6_K only).
+        const bool old_mv = !mv16_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K);
+        if (ntok == 1 && fast_matvec_ && (fast_type(w) || old_mv)) {
             if (norm_) {
                 struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; float eps; } npc{
                     pc.ncols, pc.nrows, pc.ntok, pc.row_bytes, pc.x_stride, pc.y_stride, pc.accumulate, pc.x_off,
@@ -895,15 +924,17 @@ private:
                 mat_vec(std::string("mv16n_") + qname(w.type()), {&W(w), &x, &y, &W(*norm_)}, npc, rows, what);
                 return;
             }
-            mat_vec(std::string(mv16_ ? "mv16_" : "matvec_") + qname(w.type()), {&W(w), &x, &y}, pc, rows, what);
-            return;
+            if (mv16_ || old_mv) {
+                mat_vec(std::string(mv16_ ? "mv16_" : "matvec_") + qname(w.type()), {&W(w), &x, &y}, pc, rows, what);
+                return;
+            }
         }
         // A few tokens (speculation's verify batch): the word-load kernels
         // that read each row's words once and dot them with every token, so
         // the weight stream is paid once for the whole batch. As mat_vec:
         // mvt_rows_ rows per workgroup, sharing each token's x loads, or one
         // for a matrix with few rows.
-        if (ntok >= 2 && ntok <= 8 && fast_matvec_ && mvt_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
+        if (ntok >= 2 && ntok <= 8 && fast_matvec_ && mvt_ && fast_type(w)) {
             const bool one = rows < (uint32_t)mv_rows_min_ || mvt_rows_ == 1;
             const uint32_t nr = one ? 1 : mvt_rows_, groups = (rows + nr - 1) / nr;
             const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
@@ -1054,23 +1085,23 @@ private:
         return true;
     }
 
-    // Gate and up of Q4_K with swiglu in one kernel, into g_: one token
-    // through mv16_glu_q4_k, a verify batch through mvt_glu_q4_k, which
-    // loads each token's x once for both matrices. False where that
-    // doesn't apply.
+    // Gate and up with swiglu in one kernel, into g_: one token of Q4_K,
+    // Q5_K or Q8_0 through mv16_glu_*, a verify batch of Q4_K through
+    // mvt_glu_q4_k, which loads each token's x once for both matrices.
+    // False where that doesn't apply.
     bool glu_applies(const Layer &L, int n) const {
-        const bool batch = n >= 2 && n <= 8 && mvt_ && mvt_glu_;
-        return !(hp_.gelu || (n == 1 ? !mv16_ : !batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != GGML_Q4_K ||
-                 L.w_up.type() != GGML_Q4_K || L.w_gate.ne0() != L.w_up.ne0() || L.w_gate.ne1() != L.w_up.ne1());
+        const bool batch = n >= 2 && n <= 8 && mvt_ && mvt_glu_ && L.w_gate.type() == GGML_Q4_K;
+        const bool one = n == 1 && mv16_ && fast_type(L.w_gate) && L.w_gate.type() != GGML_Q6_K;
+        return !(hp_.gelu || !(n == 1 ? one : batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != L.w_up.type() ||
+                 L.w_gate.ne0() != L.w_up.ne0() || L.w_gate.ne1() != L.w_up.ne1());
     }
 
     // Whether one token's RMSNorm can fold into all of these mat-vecs (the
-    // mv16n kernels: Q4_K or Q6_K, whole 256-value blocks, mv16 on).
+    // mv16n kernels: a fast type's whole 256-value blocks, mv16 on).
     bool fold_norm(int n, std::initializer_list<const Weight *> ws) const {
         if (n != 1 || !norm_fuse_ || !fast_matvec_ || !mv16_) return false;
         for (const Weight *w : ws)
-            if (!(w->type() == GGML_Q4_K || w->type() == GGML_Q6_K) || w->ne0() % 256 != 0 || w->ne0() != hp_.n_embd)
-                return false;
+            if (!fast_type(*w) || w->ne0() != hp_.n_embd) return false;
         return true;
     }
 
@@ -1084,11 +1115,13 @@ private:
             struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; float eps; } npc{
                 pc.ncols, pc.nrows, pc.ntok, pc.row_bytes, pc.x_stride, pc.y_stride, pc.accumulate, pc.x_off,
                 hp_.rms_eps};
-            mat_vec("mv16n_glu_q4_k", {&W(L.w_gate), &x_, &g_, &W(L.w_up), &W(*norm_)}, npc, rows, "ffn_gate+up");
+            mat_vec(std::string("mv16n_glu_") + qname(L.w_gate.type()), {&W(L.w_gate), &x_, &g_, &W(L.w_up), &W(*norm_)},
+                    npc, rows, "ffn_gate+up");
             return true;
         }
         if (n == 1) {
-            mat_vec("mv16_glu_q4_k", {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, rows, "ffn_gate+up");
+            mat_vec(std::string("mv16_glu_") + qname(L.w_gate.type()), {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, rows,
+                    "ffn_gate+up");
             return true;
         }
         const bool one = rows < (uint32_t)mv_rows_min_ || mvt_glu_rows_ == 1;
