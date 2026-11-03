@@ -9,7 +9,8 @@
 #   hw status             key=value lines: memory, compute units, boot settings
 #   hw fan auto|max       the fan (ps5_control): the PS5's own curve, or full speed
 #   hw boost on|off       CPU 3.5 GHz and GPU 2.23 GHz (ps5_control), or stock
-#   hw memory 0|8..14     GiB the GPU may map at the next boot (0: the kernel's default)
+#   hw memory max|0|8..14 GiB the GPU may map at the next boot (max: all but 1 GiB;
+#                         0: the kernel's default)
 #   hw cu 36|38|40        compute units at the next boot (tokenstation-cu)
 #   hw cutest SECONDS     tokenstation-cu test, 30 to 600 s
 set -eu
@@ -63,8 +64,9 @@ boost)
 memory)
     case "${2:-}" in
         0) exec tokenstation-memory unset ;;
+        max) exec tokenstation-memory set max ;;
         8 | 9 | 10 | 11 | 12 | 13 | 14) exec tokenstation-memory set "$2" ;;
-        *) echo "memory 0|8..14" >&2; exit 2 ;;
+        *) echo "memory max|0|8..14" >&2; exit 2 ;;
     esac
     ;;
 cu)
@@ -76,7 +78,7 @@ cutest)
     exec tokenstation-cu test "$2"
     ;;
 *)
-    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

@@ -24,6 +24,11 @@ configure)
     if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && getent passwd "$SUDO_USER" >/dev/null; then
         usermod -a -G tokenstation "$SUDO_USER" || true
     fi
+    # On a PS5: the GPU may use the most memory, unless a limit is set
+    # already (Settings > PS5 HARDWARE can change it).
+    if [ -e /dev/mp1 ] || [ -e /dev/icc ]; then
+        /usr/bin/tokenstation-memory first || true
+    fi
     mkdir -p /var/lib/tokenstation/models
     chown -R tokenstation:tokenstation /var/lib/tokenstation
     chmod 0440 /etc/sudoers.d/tokenstation 2>/dev/null || true

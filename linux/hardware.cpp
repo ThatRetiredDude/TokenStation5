@@ -162,7 +162,7 @@ void Hardware::apply(const std::string &name, const std::string &value) {
         done = value == "0" ? "Clock boost off." : "Clock boost on: CPU 3.5 GHz, GPU 2.23 GHz.";
     } else if (name == "TS5_PS5_GPU_GIB") {
         const int g = atoi(value.c_str());
-        args = {"memory", std::to_string(g >= 8 && g <= 14 ? g : 0)};
+        args = {"memory", value == "max" ? "max" : std::to_string(g >= 8 && g <= 14 ? g : 0)};
         done = "GPU memory set for the next start. Restart the PS5 and run the loader again.";
     } else if (name == "TS5_PS5_CUS") {
         const int n = atoi(value.c_str());

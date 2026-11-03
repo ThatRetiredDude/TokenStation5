@@ -90,6 +90,10 @@ if [ "$hardware" = 1 ]; then
         for f in tokenstation-memory tokenstation-cu; do install -o root -g root -m 755 "$2/bin/$f" "/usr/local/bin/$f"; done
         getent group tokenstation >/dev/null || groupadd -r tokenstation
         usermod -a -G tokenstation "$3"
+        # On a PS5: the GPU may use the most memory (Settings can change it).
+        if [ -e /dev/mp1 ] || [ -e /dev/icc ]; then
+            /usr/local/bin/tokenstation-memory first || true
+        fi
         tmp=$(mktemp)
         printf "%s\n" "# TokenStation5 (installed by install.sh): Settings > PS5 HARDWARE runs this" \
             "# one helper, which checks every value against a fixed list." \

@@ -19,8 +19,8 @@ everything the title does:
 Linux adds a few things the console can't do:
 
 - **More memory for models.** The console gives a title 11.4 GiB. On Linux the
-  GPU can have up to 12.5 GiB (Linux sees 14.1 GiB of the 16 GB and keeps 2
-  for itself), which fits a 14B model (Qwen 2.5 Coder 14B, Qwen 3 14B). See
+  GPU may use all the memory Linux isn't using (Linux sees 14.1 GiB of the
+  16 GB), about 12 GiB with Steam open, which fits a 14B model (Qwen 2.5 Coder 14B, Qwen 3 14B). See
   [Bigger models](#bigger-models).
 - **All 8 CPU cores** for speech (the console gives a title about 6).
 - **Clock boost and fan control** (`ps5_control`), and **36, 38 or 40 GPU
@@ -128,18 +128,21 @@ every boot on a machine without a desktop.
 
 ```sh
 tokenstation-memory status          # what the GPU may use now, and what fits
-sudo tokenstation-memory set 12     # 12 GiB at the next boot; reboot and run the loader again
+sudo tokenstation-memory set max    # the most at the next boot; reboot and run the loader again
 ```
 
 Linux on a PS5 sees 14.1 GiB of memory, and the kernel lets the GPU map half
 of it by default: 7.0 GiB, plus the 0.5 GiB carve-out, so 7.5 GiB, less than
-the console (measured on Bazzite 44). `set 12` raises that through
-`cmdline.txt` (as `tokenstation-cu` does) and `/etc/modprobe.d`; 12 is the
-most, leaving Linux 2 GiB. Use 12 without a desktop and 11 with one. TokenStation itself never takes more than the GPU driver's
+the console (measured on Bazzite 44). `set max` raises that through
+`cmdline.txt` (as `tokenstation-cu` does) and `/etc/modprobe.d` to all but 1
+GiB, which the packages and `install.sh` do on a PS5 when no limit is set yet.
+It's a limit, not a reservation: Linux and Steam keep using the memory, and
+TokenStation sizes each model to what the driver says is free when it loads.
+`set 11` (any whole GiB up to all but 2) keeps a fixed amount for other apps. TokenStation itself never takes more than the GPU driver's
 budget (what's free), so a model that doesn't fit is refused instead of
 pushing Linux into swap. `TS5_GPU_MEMORY_GIB` overrides what it thinks it has.
 
-With 12 GiB (12.5 with the carve-out):
+With about 12 GiB free for models:
 
 | Model | Quant | Weights | Context that fits (estimate) |
 | --- | --- | ---: | ---: |
@@ -178,7 +181,8 @@ On a PS5, Settings has a PS5 HARDWARE section, all from the controller:
 
 - **Fan**: the PS5's own curve, or full speed. There is no off.
 - **Clock boost**: CPU 3.5 GHz and GPU 2.23 GHz, or stock. Nothing past that.
-- **GPU memory for models**: as `tokenstation-memory set`, for the next start.
+- **GPU memory for models**: Most available (the default), or a fixed size,
+  as `tokenstation-memory set`, for the next start.
 - **Compute units**: 36, 38 or 40, as `tokenstation-cu set`, for the next start.
   More units can be unstable on some consoles: run the test after.
 - **Test the compute units**: stops the model, runs the GPU test for two

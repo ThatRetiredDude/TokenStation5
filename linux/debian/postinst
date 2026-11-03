@@ -14,6 +14,11 @@ if [ "$1" = configure ]; then
     if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && getent passwd "$SUDO_USER" >/dev/null; then
         adduser "$SUDO_USER" tokenstation >/dev/null 2>&1 || true
     fi
+    # On a PS5: the GPU may use the most memory, unless a limit is set
+    # already (Settings > PS5 HARDWARE can change it).
+    if [ -e /dev/mp1 ] || [ -e /dev/icc ]; then
+        /usr/bin/tokenstation-memory first || true
+    fi
     mkdir -p /var/lib/tokenstation/models
     chown -R tokenstation:tokenstation /var/lib/tokenstation
     command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true

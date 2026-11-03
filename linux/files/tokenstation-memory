@@ -4,8 +4,12 @@
 #
 #   tokenstation-memory status     RAM, the GPU's VRAM and GTT limits now, the
 #                                  boot setting, and what size of model fits
-#   tokenstation-memory set GIB    the GTT limit at the next boot (e.g. 13)
+#   tokenstation-memory set max    the GTT limit at the next boot: all but 1 GiB
+#                                  of RAM (the app takes only what's free)
+#   tokenstation-memory set GIB    the GTT limit at the next boot (e.g. 11)
 #   tokenstation-memory unset      back to the kernel's default
+#   tokenstation-memory first      set max, unless a limit is set already (the
+#                                  packages run this on a PS5)
 #
 # On an APU like the PS5's, models live in GTT: system memory the GPU maps.
 # The kernel lets the GPU have half of RAM by default (ttm.pages_limit), so
@@ -55,7 +59,7 @@ status)
             g = t / 1073741824
             if (g >= 12)      print "fits:                   14B Q4_K_M (~9 GiB) with a 16k-24k context, e.g. Qwen 2.5 Coder 14B, Qwen 3 14B"
             else if (g >= 10) print "fits:                   12B Q4_K_M (~7 GiB) with a long context; 14B with a short one"
-            else              print "fits:                   7B-8B Q4_K_M comfortably; 12B with a short context. Raise it: sudo tokenstation-memory set 12"
+            else              print "fits:                   7B-8B Q4_K_M comfortably; 12B with a short context. Raise it: sudo tokenstation-memory set max"
         }'
     else
         echo "no amdgpu GPU found in /sys/class/drm"
@@ -67,20 +71,36 @@ status)
     fi
     [ -f "$conf" ] && echo "modprobe setting:       $conf"
     ;;
+first)
+    f=$(find_cmdline || true)
+    if [ -f "$conf" ] || { [ -n "$f" ] && grep -q 'ttm\.pages_limit=' "$f"; }; then
+        echo "tokenstation-memory: a GPU memory limit is set already; keeping it"
+        exit 0
+    fi
+    exec "$0" set max
+    ;;
 set | unset)
     [ "$(id -u)" = 0 ] || { echo "tokenstation-memory: run with sudo" >&2; exit 2; }
     if [ "$1" = set ]; then
         g=${2:-}
-        case "$g" in '' | *[!0-9]*) echo "usage: sudo tokenstation-memory set GIB (whole GiB, e.g. 13)" >&2; exit 2;; esac
         ram=$(ram_bytes)
-        max=$(((ram / 1073741824) - 2))
-        if [ "$g" -gt "$max" ]; then
-            echo "tokenstation-memory: $g GiB leaves Linux less than 2 GiB of $(gib "$ram"); at most $max" >&2
-            exit 2
+        if [ "$g" = max ]; then
+            # A cap, not a reservation: Linux keeps using the memory until a
+            # model loads, and TokenStation sizes a model to what the driver
+            # says is free then. The 1 GiB is for the kernel.
+            mib=$(((ram / 1048576) - 1024))
+        else
+            case "$g" in '' | *[!0-9]*) echo "usage: sudo tokenstation-memory set max|GIB (whole GiB, e.g. 11)" >&2; exit 2;; esac
+            max=$(((ram / 1073741824) - 2))
+            if [ "$g" -gt "$max" ]; then
+                echo "tokenstation-memory: $g GiB leaves Linux less than 2 GiB of $(gib "$ram"); at most $max, or max" >&2
+                exit 2
+            fi
+            mib=$((g * 1024))
         fi
-        pages=$((g * 262144))
-        mib=$((g * 1024))
+        pages=$((mib * 256))
         args="ttm.pages_limit=$pages ttm.page_pool_size=$pages amdgpu.gttsize=$mib"
+        mkdir -p "$(dirname "$conf")"
         printf 'options ttm pages_limit=%s page_pool_size=%s\noptions amdgpu gttsize=%s\n' "$pages" "$pages" "$mib" > "$conf"
     else
         args=
@@ -101,7 +121,7 @@ set | unset)
     echo "Reboot (and run the loader again), then: tokenstation-memory status"
     ;;
 *)
-    sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac
