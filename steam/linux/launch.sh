@@ -1,7 +1,7 @@
 #!/bin/sh
 # What Steam starts (Steamworks > Installation > General: executable
 # "launch.sh"). Steam runs it inside Steam Linux Runtime 3.0 (sniper), a
-# Debian 12 container, which is what the app is built against.
+# Debian 11 container, which is what the Steam build is built against.
 #
 # Models, settings, keys and chats go in ~/.local/share/tokenstation, as with
 # the .deb and the portable build, never in the Steam folder: Steam replaces

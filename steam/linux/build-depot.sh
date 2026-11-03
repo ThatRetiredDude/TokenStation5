@@ -5,8 +5,12 @@
 #   steam/linux/build-depot.sh VERSION        builds first (linux/build.sh)
 #   TS5_PREBUILT=build/linux steam/linux/build-depot.sh VERSION
 #
-# Build on Debian 12 or in the Steam Runtime 3.0 (sniper) SDK, which is
-# Debian 12: the depot must need nothing newer than its C library (2.36).
+# Build it in the Steam Runtime 3 (sniper) SDK, the container Steam runs it
+# in (Debian 11, glibc 2.31):
+#   docker run --rm -v "$PWD:/src" -w /src \
+#       registry.gitlab.steamos.cloud/steamrt/sniper/sdk steam/linux/build-depot.sh 0.1.0
+# There it uses the SDK's newest gcc, with the C++ library linked in (cc and
+# cxx here). The depot must need nothing newer than sniper's C library.
 # The depot has no root helper, sudo rule or service: Steam installs as the
 # user, in a container, and can't install those.
 set -euo pipefail
@@ -17,6 +21,11 @@ out="$root/build/steam/linux"
 depot="$out/depot"
 bin=${TS5_PREBUILT:-}
 if [ -z "$bin" ]; then
+    if grep -qE '^ID="?steamrt' /etc/os-release 2> /dev/null; then
+        export CC="$root/steam/linux/cc" CXX="$root/steam/linux/cxx"
+        # gcc 10 has no x86-64-v3; haswell is the same AVX2 and FMA.
+        "$CXX" -march=x86-64-v3 -E -x c++ /dev/null > /dev/null 2>&1 || export TS5_MARCH=${TS5_MARCH:-haswell}
+    fi
     TS5_VERSION="$version" "$root/linux/build.sh"
     bin="$root/build/linux"
 fi
@@ -49,9 +58,10 @@ license, and NOTICE.md lists the third-party code inside it. The source of
 this exact build stays available at the link above for at least three years.
 TXT
 
-# Nothing newer than Debian 12's C library, so it runs in sniper.
-if objdump -T "$depot/bin/tokenstation" "$depot/bin/ts5" | grep -E "GLIBC_2\.(3[7-9]|[4-9][0-9])"; then
-    echo "build-depot: the build needs a C library newer than 2.36; build it on Debian 12 or in the sniper SDK" >&2
+# Nothing newer than sniper's C library (2.31), and no C++ library from the
+# system at all.
+if objdump -T "$depot/bin/tokenstation" "$depot/bin/ts5" | grep -E "GLIBC_2\.(3[2-9]|[4-9][0-9])|GLIBCXX|CXXABI"; then
+    echo "build-depot: the build needs a newer C or C++ library than sniper has; build it in the sniper SDK" >&2
     exit 1
 fi
 "$depot/bin/tokenstation" --version

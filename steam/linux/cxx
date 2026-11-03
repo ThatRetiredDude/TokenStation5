@@ -1,0 +1,9 @@
+#!/bin/sh
+# The C++ compiler for the Steam build, as build.sh's CXX: the newest g++ in
+# the Steam Runtime SDK, with its C++ library linked in. Sniper's own
+# libstdc++ is gcc 10's, older than what gcc 11+ builds need, and the host's
+# can't be counted on.
+for v in 14 13 12 11; do
+    command -v "g++-$v" > /dev/null && exec "g++-$v" -static-libstdc++ -static-libgcc "$@"
+done
+exec g++ -static-libstdc++ -static-libgcc "$@"

@@ -1,0 +1,6 @@
+#!/bin/sh
+# The C compiler for the Steam build, the same gcc as ./cxx.
+for v in 14 13 12 11; do
+    command -v "gcc-$v" > /dev/null && exec "gcc-$v" -static-libgcc "$@"
+done
+exec gcc -static-libgcc "$@"

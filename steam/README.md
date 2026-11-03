@@ -12,10 +12,10 @@ is Vulkan and SDL2, so a Windows port is possible later).
 
 | File | What it does |
 | --- | --- |
-| `linux/build-depot.sh VERSION` | Builds the app (`linux/build.sh`) and lays out `build/steam/linux/depot`: `launch.sh`, `bin/tokenstation`, `bin/ts5`, the licenses, `NOTICE.md` and `SOURCE.txt` (the GPL source offer, with the exact commit). Fails if the build needs a C library newer than Debian 12's. |
+| `linux/build-depot.sh VERSION` | Builds the app (`linux/build.sh`) and lays out `build/steam/linux/depot`: `launch.sh`, `bin/tokenstation`, `bin/ts5`, the licenses, `NOTICE.md` and `SOURCE.txt` (the GPL source offer, with the exact commit). Built in Valve's sniper SDK, it uses the SDK's newest gcc with the C++ library linked in (`linux/cc`, `linux/cxx`), and fails if the build needs a newer C library than sniper's (2.31). |
 | `linux/launch.sh` | What Steam starts. Sets `TS5_STEAM=1` and runs the app. Data stays in `~/.local/share/tokenstation`, never in the Steam folder, so updates and uninstalls keep your models. |
 | `steampipe/upload.sh [BRANCH]` | Fills in the SteamPipe scripts with your app and depot IDs and uploads with `steamcmd`. Sets the build live on `beta` by default. It refuses to set the default branch: you do that in Steamworks once the beta is tested. |
-| `.github/workflows/steam.yml` | Builds the depot on Debian 12, then runs it inside Valve's Steam Linux Runtime 3.0 (sniper) SDK image and checks that it starts, serves the API and quits cleanly. The depot is an artifact (`tokenstation-steam-depot`). |
+| `.github/workflows/steam.yml` | Builds the depot in Valve's Steam Runtime 3 (sniper) SDK image, then runs it there and checks that it starts, serves the API and quits cleanly. The depot is an artifact (`tokenstation-steam-depot`). |
 
 The app itself changed in one place. Inside Steam's container (and Flatpak),
 `sudo` can't run, so the PS5 HARDWARE section says the Steam version can't
@@ -30,7 +30,7 @@ from `/sys`.
 2. **Installation > General**: one launch option, executable `launch.sh`,
    OS **Linux + SteamOS**, no arguments.
 3. **Installation > Linux Runtime**: **Steam Linux Runtime 3.0 (sniper)**.
-   Sniper is Debian 12, which is what the build targets (glibc 2.36, SDL2, the
+   Sniper is Debian 11 (glibc 2.31), which the Steam build targets (SDL2 and the
    Vulkan loader all come from it). Without this setting Steam uses the old
    scout runtime.
 4. **SteamPipe > Depots**: one depot, OS Linux, all languages. Note its ID.
@@ -47,7 +47,8 @@ from `/sys`.
 ## Uploading a build
 
 ```sh
-steam/linux/build-depot.sh 0.1.0      # on Debian 12, or use the CI artifact
+docker run --rm -v "$PWD:/src" -w /src registry.gitlab.steamos.cloud/steamrt/sniper/sdk \
+    steam/linux/build-depot.sh 0.1.0  # or use the CI artifact
 STEAM_APP_ID=... STEAM_DEPOT_ID=... STEAM_USER=... steam/steampipe/upload.sh
 ```
 
