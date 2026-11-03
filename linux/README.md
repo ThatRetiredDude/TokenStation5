@@ -19,8 +19,8 @@ everything the title does:
 Linux adds a few things the console can't do:
 
 - **More memory for models.** The console gives a title 11.4 GiB. On Linux the
-  GPU can have up to about 13 GiB of the 16 GB, which fits a 14B model (Qwen
-  2.5 Coder 14B, Qwen 3 14B) with a long context. See
+  GPU can have up to 12.5 GiB (Linux sees 14.1 GiB of the 16 GB and keeps 2
+  for itself), which fits a 14B model (Qwen 2.5 Coder 14B, Qwen 3 14B). See
   [Bigger models](#bigger-models).
 - **All 8 CPU cores** for speech (the console gives a title about 6).
 - **Clock boost and fan control** (`ps5_control`), and **36, 38 or 40 GPU
@@ -73,11 +73,13 @@ cd tokenstation-<version>-linux-amd64
 ./install.sh
 ```
 
-It puts the app in `~/.local/opt/tokenstation`, adds it to the app menu, and
+It puts the app in `~/.local/opt/tokenstation`, adds it to the app menu (and
+to Steam for Game Mode, when Steam is running), and
 asks for your password once to install the PS5 hardware controls
 (`/usr/local/lib/tokenstation`, `/usr/local/bin/tokenstation-memory` and
 `tokenstation-cu`, `/etc/sudoers.d/tokenstation`). Log out and back in once
-after. `./install.sh --no-hardware` leaves those out and touches nothing
+after, or start it from the installer's last question, which runs it with the
+group already. `./install.sh --no-hardware` leaves those out and touches nothing
 outside your home; `./install.sh --uninstall` removes it all except your
 models and settings. It needs SDL2 and the Vulkan loader, which Bazzite and
 SteamOS have. The services below come with the `.deb`, `.rpm` and Arch package only; the portable
@@ -126,22 +128,23 @@ every boot on a machine without a desktop.
 
 ```sh
 tokenstation-memory status          # what the GPU may use now, and what fits
-sudo tokenstation-memory set 13     # 13 GiB at the next boot; reboot and run the loader again
+sudo tokenstation-memory set 12     # 12 GiB at the next boot; reboot and run the loader again
 ```
 
-The kernel lets the GPU have half the memory by default, about 7.5 GiB on a
-PS5: less than the console. `set 13` raises that through `cmdline.txt` (as
-`tokenstation-cu` does) and `/etc/modprobe.d`. Use 13 without a desktop and 11
-or 12 with one. TokenStation itself never takes more than the GPU driver's
+Linux on a PS5 sees 14.1 GiB of memory, and the kernel lets the GPU map half
+of it by default: 7.0 GiB, plus the 0.5 GiB carve-out, so 7.5 GiB, less than
+the console (measured on Bazzite 44). `set 12` raises that through
+`cmdline.txt` (as `tokenstation-cu` does) and `/etc/modprobe.d`; 12 is the
+most, leaving Linux 2 GiB. Use 12 without a desktop and 11 with one. TokenStation itself never takes more than the GPU driver's
 budget (what's free), so a model that doesn't fit is refused instead of
 pushing Linux into swap. `TS5_GPU_MEMORY_GIB` overrides what it thinks it has.
 
-With 13 GiB:
+With 12 GiB (12.5 with the carve-out):
 
 | Model | Quant | Weights | Context that fits (estimate) |
 | --- | --- | ---: | ---: |
-| Qwen 2.5 Coder 14B Instruct | Q4_K_M | ~9.0 GiB | ~32k with the 8-bit KV cache |
-| Qwen 3 14B | Q4_K_M | ~9.0 GiB | ~32k with the 8-bit KV cache |
+| Qwen 2.5 Coder 14B Instruct | Q4_K_M | ~9.0 GiB | ~16k with the 8-bit KV cache |
+| Qwen 3 14B | Q4_K_M | ~9.0 GiB | ~24k with the 8-bit KV cache |
 | Gemma 3 12B | Q4_K_M | ~6.8 GiB | ~64k (sliding layers keep it small) |
 | Mistral Nemo 12B | Q4_K_M | ~7.0 GiB | ~32k |
 

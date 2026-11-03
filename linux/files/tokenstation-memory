@@ -9,9 +9,9 @@
 #
 # On an APU like the PS5's, models live in GTT: system memory the GPU maps.
 # The kernel lets the GPU have half of RAM by default (ttm.pages_limit), so
-# on a 16 GB PS5 about 7.5 GiB: less than the 11.4 GiB the console's own
-# system gives a title. Raising it to 12 to 13 GiB fits a 14B model with a
-# long context, which the console can't run. Keep at least 2.5 GiB for
+# on a PS5 (Linux sees 14.1 GiB) 7.0 GiB plus the 0.5 GiB carve-out: less
+# than the 11.4 GiB the console's own system gives a title. Raising it to 12
+# GiB fits a 14B model, which the console can't run. Keep at least 2.5 GiB for
 # Linux itself (more with a desktop): past that the machine swaps or kills
 # processes when a big model loads. TokenStation never takes more than the
 # driver's budget, so a high limit with a desktop open is safe, just not
@@ -53,9 +53,9 @@ status)
         echo "for models, at most:    $(gib "$total") GiB (TokenStation also stays inside the driver's budget)"
         awk -v t="$total" 'BEGIN {
             g = t / 1073741824
-            if (g >= 12)      print "fits:                   14B Q4_K_M (~9 GiB) with a 32k context, e.g. Qwen 2.5 Coder 14B, Qwen 3 14B"
+            if (g >= 12)      print "fits:                   14B Q4_K_M (~9 GiB) with a 16k-24k context, e.g. Qwen 2.5 Coder 14B, Qwen 3 14B"
             else if (g >= 10) print "fits:                   12B Q4_K_M (~7 GiB) with a long context; 14B with a short one"
-            else              print "fits:                   7B-8B Q4_K_M comfortably; 12B with a short context. Raise it: sudo tokenstation-memory set 13"
+            else              print "fits:                   7B-8B Q4_K_M comfortably; 12B with a short context. Raise it: sudo tokenstation-memory set 12"
         }'
     else
         echo "no amdgpu GPU found in /sys/class/drm"

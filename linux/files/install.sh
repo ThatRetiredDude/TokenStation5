@@ -6,6 +6,8 @@
 #   ./install.sh                  the app in ~/.local, plus the PS5 hardware
 #                                 controls (asks for your password once)
 #   ./install.sh --no-hardware    the app only; nothing outside your home
+#   ./install.sh --no-start       don't offer to start it when done
+#   ./install.sh --no-steam       don't add it to Steam (Game Mode)
 #   ./install.sh --uninstall      removes both (your models and chats stay)
 #
 # The app goes in ~/.local/opt/tokenstation, with tokenstation and ts5 in
@@ -35,10 +37,18 @@ if [ "$(id -u)" = 0 ]; then
     exit 2
 fi
 
-hardware=1
-case "${1:-}" in
-    --no-hardware) hardware=0 ;;
-    --uninstall)
+hardware=1 start=1 steam=1 uninstall=0
+for a in "$@"; do
+    case "$a" in
+        --no-hardware) hardware=0 ;;
+        --no-start) start=0 ;;
+        --no-steam) steam=0 ;;
+        --uninstall) uninstall=1 ;;
+        *) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    esac
+done
+case "$uninstall" in
+    1)
         rm -rf "$opt"
         rm -f "$bin/tokenstation" "$bin/ts5" "$apps/tokenstation.desktop" "$icons/tokenstation.png"
         if [ -e "$sys" ] || [ -e "$sudoers" ]; then
@@ -46,10 +56,9 @@ case "${1:-}" in
             sudo rm -rf "$sys" "$sudoers" /usr/local/bin/tokenstation-memory /usr/local/bin/tokenstation-cu
         fi
         echo "TokenStation5 removed. Your models and settings are still in ~/.local/share/tokenstation."
+        echo "If you added it to Steam, remove it there too (Library, TokenStation5, Manage)."
         exit 0
         ;;
-    "") ;;
-    *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
 
 # What the app needs from the system.
@@ -92,10 +101,65 @@ if [ "$hardware" = 1 ]; then
         fi
         rm -f "$tmp"
     ' sh "$sys" "$opt" "$(id -un)" "$sudoers"
-    echo "Log out and back in once, so the hardware controls work without a password."
 fi
 
+# Bazzite and SteamOS: offer it to Steam, for Game Mode.
+in_steam=0
+if [ "$steam" = 1 ] && command -v steamos-add-to-steam >/dev/null 2>&1 && pgrep -x steam >/dev/null 2>&1; then
+    echo "Adding TokenStation5 to Steam, for Game Mode (--no-steam to skip)."
+    steamos-add-to-steam "$opt/bin/tokenstation" >/dev/null 2>&1 && in_steam=1 || true
+fi
+
+cat <<DONE
+
+TokenStation5 is installed. It's a full-screen TV app, like on the console
+(there's no web page; the API is for other apps).
+
+  Start it
+    Desktop Mode:  the app menu, TokenStation5, or run $bin/tokenstation
+    Game Mode:     $( [ "$in_steam" = 1 ] && echo "it's in your Steam library (non-Steam games)" || echo "in Desktop Mode, Steam > Add a Non-Steam Game, and pick
+                   $opt/bin/tokenstation" )
+
+  Drive it
+    Controller:    as on the console. Cross selects, Circle goes back
+                   (Home), L1/R1 switch pages, hold R1 to talk in Chat,
+                   OPTIONS closes it.
+    Keyboard:      arrows; Enter = Cross, Esc = Circle, F1 = Square,
+                   F2 = Triangle, F3 = OPTIONS, Page Up = L1,
+                   Page Down = R1 (hold to talk). F11: window or full screen.
+
+  First steps      Models: download one, then Cross on it to serve it. Then
+                   Chat. Or copy .gguf files to
+                   ~/.local/share/tokenstation/models
+  API              http://localhost:8081/v1 (OpenAI-style), from other
+                   computers too, once a model is served
+DONE
+if [ "$hardware" = 1 ]; then
+    cat <<DONE
+  PS5 hardware     Settings > PS5 HARDWARE: fan, clock boost, GPU memory,
+                   compute units, temperatures. Log out and back in once so
+                   they work without a password (started from here, they
+                   already do).
+DONE
+fi
+case ":$PATH:" in *":$bin:"*) ;; *) echo "  ($bin is on your PATH after you log in again on most systems.)" ;; esac
+echo "  Remove it        ./install.sh --uninstall (your models and chats stay)"
 echo
-echo "Done. Start TokenStation5 from the app menu, or run: $bin/tokenstation"
-case ":$PATH:" in *":$bin:"*) ;; *) echo "($bin isn't on your PATH yet; it is after you log in again on most systems.)" ;; esac
-echo "Put .gguf models in ~/.local/share/tokenstation/models, or download them in the app."
+
+# Start it now, with the tokenstation group already (sg), so the hardware
+# controls work before logging in again.
+if [ "$start" = 1 ] && [ -t 0 ] && { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; }; then
+    printf "Start TokenStation5 now? [Y/n] "
+    read -r ans || ans=n
+    case "$ans" in
+        [nN]*) ;;
+        *)
+            if [ "$hardware" = 1 ] && command -v sg >/dev/null 2>&1; then
+                setsid sg tokenstation -c "exec '$opt/bin/tokenstation'" </dev/null >/dev/null 2>&1 &
+            else
+                setsid "$opt/bin/tokenstation" </dev/null >/dev/null 2>&1 &
+            fi
+            echo "Starting. It fills the screen; F11 for a window."
+            ;;
+    esac
+fi

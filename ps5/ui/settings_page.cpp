@@ -182,13 +182,17 @@ void hardware_rows(const SettingsInfo &info, std::vector<Row> &r) {
                  "every model. It's as high as the PS5 goes: nothing on Linux sets clocks past it." + blocked,
                  "Now", {{"1", "On"}, {"0", "Off"}}, "1"});
     std::string mem = "How much of the PS5's memory the GPU may use for models. Linux gives it half by default; the "
-                      "console gives a title 11.4 GiB. 13 GiB fits 14B models with a long context, with the desktop "
-                      "off. TokenStation never takes more than is free, so a high setting is safe.";
+                      "console gives a title 11.4 GiB. Linux keeps 2 GiB for itself: 12 GiB fits 14B models with the "
+                      "desktop off, 11 GiB with it on. TokenStation never takes more than is free, so a high setting "
+                      "is safe.";
     if (h.gpu_gib > 0) mem += " Now the GPU may use " + gib_text(h.gpu_gib) + " of " + gib_text(h.ram_gib) + ".";
     if (h.boot_gtt_gib > 0) mem += " Set for the next start: " + gib_text(h.boot_gtt_gib) + ".";
-    r.push_back({sec, "TS5_PS5_GPU_GIB", "GPU memory for models", mem + blocked, after_restart,
-                 {{"0", "Linux's default"}, {"10", "10 GiB"}, {"11", "11 GiB"}, {"12", "12 GiB"}, {"13", "13 GiB"}},
-                 "0"});
+    // Up to all but 2 GiB of what Linux sees (14.1 GiB on a PS5), as
+    // tokenstation-memory allows.
+    std::vector<Choice> sizes = {{"0", "Linux's default"}};
+    const int most = h.ram_gib > 0 ? (int)h.ram_gib - 2 : 12;
+    for (int g = 10; g <= std::min(most, 13); g++) sizes.push_back({std::to_string(g), std::to_string(g) + " GiB"});
+    r.push_back({sec, "TS5_PS5_GPU_GIB", "GPU memory for models", mem + blocked, after_restart, sizes, "0"});
     std::string cus = "The PS5's GPU has 40 compute units and ships with 36 on. 38 or 40 read prompts faster, but on "
                       "some chips an extra pair gives wrong answers or hangs. Test at 36 first, then after each step "
                       "up.";
