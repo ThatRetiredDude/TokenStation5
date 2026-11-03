@@ -1426,7 +1426,9 @@ private:
     // their x loads, for matrices of at least mv_rows_min_ rows
     // (TS5_MV_ROWS_MIN); one for smaller ones.
     uint32_t mv_rows_ = 4;
-    int mv_rows_min_ = 2048;
+    // 1024 takes in Qwen3 8B and 14B's K and V (8 heads of 128: +1.4% and
+    // +0.9% generation on the console); 512-row ones (4 KV heads) stay at one.
+    int mv_rows_min_ = 1024;
     // Attention with attn (TS5_ATTN=0: the old kernel); TS5_ATTN_SPLITS=N
     // sets how many slices generation splits the keys into.
     bool attn_fast_ = true;

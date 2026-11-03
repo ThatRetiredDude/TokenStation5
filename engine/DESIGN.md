@@ -167,7 +167,7 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   (`TS5_MV_ROWS`, 1 to 8; 4 beat 8 and 1 on the console), which load their
   part of x once for all 4, since a long x doesn't stay in the nearest
   cache; one row per workgroup for
-  matrices of fewer than 2048 rows (`TS5_MV_ROWS_MIN`), so they still make
+  matrices of fewer than 1024 rows (`TS5_MV_ROWS_MIN`), so they still make
   enough workgroups. 16 threads per super-block reading its quants as
   32-bit words, subgroup reductions. `mv16_q4_k` and `mv16_q6_k` are used
   instead (`TS5_MV16=0` for the others): 8 threads per super-block, Q4_K's
