@@ -45,6 +45,7 @@ if [ -d /run/systemd/system ]; then systemctl daemon-reload || true; fi
 %files
 /usr/bin/tokenstation
 /usr/bin/ts5
+/usr/bin/ts5-tune
 /usr/bin/tokenstation-cu
 /usr/bin/tokenstation-memory
 /usr/lib/tokenstation

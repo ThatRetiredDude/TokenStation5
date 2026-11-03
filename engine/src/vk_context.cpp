@@ -10,6 +10,8 @@
 
 #ifndef TS5_PS5
 #include <dlfcn.h>
+#include <fstream>
+#include <string>
 #endif
 
 namespace ts5 {
@@ -82,9 +84,51 @@ bool fail(VkContext *c, std::string &err, const std::string &what) {
     return false;
 }
 
+#ifndef TS5_PS5
+// The speed settings `ts5-tune` measured as fastest on this machine:
+// TS5_TUNE_FILE, else ~/.config/tokenstation/tune.env, else
+// /etc/tokenstation/tune.env (for the services). KEY=VALUE lines; only TS5_
+// and RADV_ keys, and a variable already set wins, so an A/B from the shell
+// still works. Read once, before the driver loads (RADV reads RADV_PERFTEST
+// when an instance is created).
+void load_tune_file() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    std::vector<std::string> paths;
+    if (const char *f = getenv("TS5_TUNE_FILE")) {
+        if (!*f) return;  // TS5_TUNE_FILE= : defaults (what ts5-tune measures against)
+        paths.push_back(f);
+    } else {
+        if (const char *x = getenv("XDG_CONFIG_HOME"); x && *x) paths.push_back(std::string(x) + "/tokenstation/tune.env");
+        else if (const char *h = getenv("HOME"); h && *h) paths.push_back(std::string(h) + "/.config/tokenstation/tune.env");
+        paths.push_back("/etc/tokenstation/tune.env");
+    }
+    for (auto &path : paths) {
+        std::ifstream in(path);
+        if (!in) continue;
+        std::string line, set;
+        while (std::getline(in, line)) {
+            size_t eq = line.find('=');
+            if (line.empty() || line[0] == '#' || eq == std::string::npos) continue;
+            std::string k = line.substr(0, eq), v = line.substr(eq + 1);
+            if (k.rfind("TS5_", 0) != 0 && k.rfind("RADV_", 0) != 0) continue;
+            if (getenv(k.c_str())) continue;
+            setenv(k.c_str(), v.c_str(), 0);
+            set += " " + k + "=" + v;
+        }
+        ts5::log_line("ts5: tuning from %s:%s", path.c_str(), set.empty() ? " (nothing new)" : set.c_str());
+        return;
+    }
+}
+#endif
+
 }  // namespace
 
 VkContext *create_vk_context(int index, bool want_display, std::string &err) {
+#ifndef TS5_PS5
+    load_tune_file();
+#endif
     auto *c = new VkContext;
     c->get_instance_proc = ts5_vk_entry();
     if (!c->get_instance_proc) { fail(c, err, "no Vulkan loader/driver"); return nullptr; }

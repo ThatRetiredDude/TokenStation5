@@ -175,6 +175,28 @@ settings such as `TS5_KV=q8`).
 
 Speed test: `ts5 bench -m model.gguf --pp 512 --tg 128`.
 
+## Tune for your machine
+
+The engine's kernel choices were tuned on the PS5's own driver. Linux runs
+the same GPU through RADV (Mesa), whose shader compiler differs, so other
+choices can be faster there. With the app closed, run:
+
+    ts5-tune
+
+It benches the model you used last with each choice (rows per matvec
+workgroup, attention splits, wave32 compute via `RADV_PERFTEST=cswave32`,
+barriers, prompt tiling and more), one at a time, and keeps a change only
+when it beats twice the run-to-run noise and at least 2%. Then `ts5 check`
+confirms the output still matches the CPU, and the winners are saved to
+`~/.config/tokenstation/tune.env`, which the app and `ts5` read at start-up
+(they log `tuning from ...`). About 10 minutes for an 8B model. Settings
+that change the arithmetic or leave the Vulkan spec are never tried.
+
+- `ts5-tune MODEL.gguf`: tune with another model.
+- `ts5-tune --reset`: back to the built-in settings.
+- The services read `/etc/tokenstation/tune.env`: copy the file there to use it for them.
+- A variable set in the shell or `ts5.env` wins over the file.
+
 ## PS5 hardware in the app
 
 On a PS5, Settings has a PS5 HARDWARE section, all from the controller:

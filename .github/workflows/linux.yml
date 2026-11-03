@@ -95,9 +95,10 @@ jobs:
       - name: Install it and check it
         run: |
           apt-get update -qq
-          apt-get install -y -qq sudo ./dist/*.deb
+          apt-get install -y -qq sudo python3 ./dist/*.deb
           tokenstation --version
           { ts5 2>&1 || true; } | grep -q "usage: ts5"
+          ts5-tune --help | grep -q "fastest GPU settings"
           id tokenstation
           sudo -l -U tokenstation | grep -q /usr/lib/tokenstation/hw
           sudo -u tokenstation sudo -n /usr/lib/tokenstation/hw status
@@ -123,6 +124,7 @@ jobs:
           dnf install -y -q ./build/linux/tokenstation-*.rpm
           tokenstation --version
           { ts5 2>&1 || true; } | grep -q "usage: ts5"
+          ts5-tune --help | grep -q "fastest GPU settings"
           id tokenstation
           sudo -l -U tokenstation | grep -q /usr/lib/tokenstation/hw
           sudo -u tokenstation sudo -n /usr/lib/tokenstation/hw status
@@ -215,6 +217,16 @@ jobs:
           curl -fsSL -o /tmp/model/vocab.gguf https://raw.githubusercontent.com/ggml-org/llama.cpp/master/models/ggml-vocab-qwen2.gguf
           python3 engine/tests/make_test_model.py --arch qwen2 --vocab /tmp/model/vocab.gguf --quant Q4_K_M /tmp/model/test.gguf
           linux/smoke-test.sh /tmp/model/test.gguf /usr/bin/tokenstation
+      - name: Tune it (ts5-tune, then the engine reads tune.env)
+        run: |
+          ts5-tune --quick --pp 64 --tg 16 /tmp/model/test.gguf
+          mkdir -p ~/.config/tokenstation
+          echo TS5_MV_ROWS=8 > ~/.config/tokenstation/tune.env
+          ts5 bench -m /tmp/model/test.gguf --pp 16 --tg 4 2>&1 | tee /tmp/bench.txt
+          grep -q "tuning from $HOME/.config/tokenstation/tune.env: TS5_MV_ROWS=8" /tmp/bench.txt
+          TS5_MV_ROWS=2 ts5 bench -m /tmp/model/test.gguf --pp 16 --tg 4 2>&1 | grep -q "(nothing new)"
+          ts5-tune --reset
+          test ! -e ~/.config/tokenstation/tune.env
 
   release:
     if: startsWith(github.ref, 'refs/tags/linux-v')

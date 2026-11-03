@@ -50,7 +50,7 @@ done
 case "$uninstall" in
     1)
         rm -rf "$opt"
-        rm -f "$bin/tokenstation" "$bin/ts5" "$apps/tokenstation.desktop" "$icons/tokenstation.png"
+        rm -f "$bin/tokenstation" "$bin/ts5" "$bin/ts5-tune" "$apps/tokenstation.desktop" "$icons/tokenstation.png"
         if [ -e "$sys" ] || [ -e "$sudoers" ]; then
             echo "Removing the hardware controls (sudo):"
             sudo rm -rf "$sys" "$sudoers" /usr/local/bin/tokenstation-memory /usr/local/bin/tokenstation-cu
@@ -78,6 +78,7 @@ rm -rf "$opt"
 mv "$opt.new" "$opt"
 ln -sf "$opt/bin/tokenstation" "$bin/tokenstation"
 ln -sf "$opt/bin/ts5" "$bin/ts5"
+ln -sf "$opt/bin/ts5-tune" "$bin/ts5-tune"
 cp "$opt/share/tokenstation.png" "$icons/tokenstation.png"
 sed "s#^Exec=.*#Exec=$opt/bin/tokenstation#" "$opt/share/tokenstation.desktop" > "$apps/tokenstation.desktop"
 command -v update-desktop-database >/dev/null && update-desktop-database "$apps" 2>/dev/null || true
@@ -137,6 +138,9 @@ TokenStation5 is installed. It's a full-screen TV app, like on the console
                    ~/.local/share/tokenstation/models
   API              http://localhost:8081/v1 (OpenAI-style), from other
                    computers too, once a model is served
+  Faster           With a model downloaded and the app closed, run
+                   ts5-tune once (about 10 minutes): it finds the fastest
+                   GPU settings for this machine and saves them.
 DONE
 if [ "$hardware" = 1 ]; then
     cat <<DONE
