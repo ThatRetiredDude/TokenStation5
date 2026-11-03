@@ -647,7 +647,13 @@ int main(int, char **) {
     // store update leaves in its old folder, come back (keep_models.h).
     // TS5_FTP_PORT: where the console's FTP server is, if not 2121 or 1337.
     const std::vector<std::string> last_version = read_words(kVersionMark);
+#ifdef TS5_LINUX
+    // A package update on Linux leaves the data folder as it is: nothing to
+    // bring back.
+    if (false) {
+#else
     if (last_version.empty() || last_version[0] != TS5_VERSION) {
+#endif
         std::vector<int> ports = {2121, 1337};
         if (int p = atoi(app::setting("TS5_FTP_PORT").c_str()); p > 0) ports.insert(ports.begin(), p);
         const app::BroughtBack b = app::bring_back_models(kModels, TS5_TITLE_ID, ports);
@@ -695,8 +701,14 @@ int main(int, char **) {
     ui::Fonts fonts;
     fonts.load(ts5_font_data, (size_t)(ts5_font_data_end - ts5_font_data));
     ui::Display display;
+#ifdef TS5_LINUX
+    // An SDL window (linux/display.cpp), whatever the Vulkan device offers.
+    bool screen = display.open(ctx, kWidth, kHeight, err);
+    if (!screen) printf("ts5-title: no picture on the TV: %s\n", err.c_str());
+#else
     bool screen = ctx->display && display.open(ctx, kWidth, kHeight, err);
     if (!screen) printf("ts5-title: no picture on the TV: %s\n", ctx->display ? err.c_str() : "no display on this device");
+#endif
     ui::Pad pad;
     pad.open();
 
@@ -800,7 +812,7 @@ int main(int, char **) {
     // Which folders the title can write to, and the free space each one's
     // volume reports, to find where models and the rest can live so a store
     // update (which swaps the app's folder) keeps them.
-    for (const char *dir : {TS5_HOME, "/download0", TS5_DATA}) {
+    for (const char *dir : {TS5_HOME, TS5_STORE, TS5_DATA}) {
         struct statvfs vs;
         if (statvfs(dir, &vs) != 0) {
             printf("ts5-title: folder %s: can't read its volume (%s)\n", dir, strerror(errno));

@@ -1,0 +1,36 @@
+[Unit]
+Description=TokenStation5 on the TV: the full app, full screen, with the controller
+Documentation=file:///usr/share/doc/tokenstation/README.md
+# The app serves the API itself, on the same port, and takes the screen
+# from the text console on tty1. Not for a machine running a desktop: there,
+# start "TokenStation5" from the app menu instead.
+Conflicts=tokenstation.service getty@tty1.service
+After=systemd-user-sessions.service network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/tokenstation
+Environment=SDL_VIDEODRIVER=kmsdrm
+# Runs as root ("+"): PS5 clock boost and fan, skipped on other machines.
+ExecStartPre=+/usr/lib/tokenstation/boost.sh
+ExecStart=/usr/bin/tokenstation --data /var/lib/tokenstation
+User=tokenstation
+Group=tokenstation
+SupplementaryGroups=video render input audio
+# A login session on tty1, so the app may draw on the screen (DRM master)
+# and read the controller.
+PAMName=login
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+TTYReset=yes
+TTYVHangup=yes
+WorkingDirectory=/var/lib/tokenstation
+Restart=on-failure
+RestartSec=5
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

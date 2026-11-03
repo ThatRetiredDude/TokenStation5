@@ -12,6 +12,9 @@
 #include "qrcodegen.hpp"
 #include "settings.h"
 #include "style.h"
+#ifdef TS5_LINUX
+#include "platform.h"
+#endif
 
 namespace ui {
 
@@ -52,9 +55,15 @@ const GuideLink kGuides[] = {
     {"At home and away with Tailscale", "This PS5 joins your tailnet itself. Nothing to set up on the router.",
      "Tailscale connects your devices into a private network of their own (a tailnet), wherever each one is. "
      "This PS5 joins it as a device of its own, so it works at home and away, even where no port can be opened."},
+#ifdef TS5_LINUX
+    {"Add models from a computer", "Copy models into the models folder, from this PS5 or over your network.",
+     "Any .gguf in the models folder shows on the Models page: one you downloaded in a browser here, or one "
+     "copied from another computer."},
+#else
     {"Add models from a computer", "Copy models over your network with FTP, much faster than downloading here.",
      "Big downloads on the PS5 slow down after the first few hundred MB: the PS5 seems to limit how fast apps "
      "can save. FTP from a computer is much faster."},
+#endif
 };
 constexpr int kGuideCount = sizeof kGuides / sizeof kGuides[0];
 constexpr int kLinkH = 104;
@@ -618,6 +627,23 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
              "carry the traffic, which works even where no port can be opened. TokenStation5 has to be open on the "
              "PS5.",
              kText2);
+#ifdef TS5_LINUX
+    } else if (open == 2) {
+        ty -= 12;
+        field("FOLDER", linuxp::data_dir() + "/models", kText, bodyb_);
+        if (info.on_network) field("FROM A COMPUTER", "scp MODEL.gguf you@" + host + ":" + linuxp::data_dir() + "/models/", kAccent, body_);
+        para("1. Download the model's .gguf file, from Hugging Face for example. For 7B to 14B models, Q4_K_M is "
+             "a good choice.",
+             kText);
+        ty += 8;
+        para("2. Copy it into the folder above: with the file manager on this PS5, or from another computer with "
+             "scp, rsync or a shared folder.",
+             kText);
+        ty += 8;
+        para("3. The Models page lists it within seconds, as COPYING until the whole file is there. Models stay "
+             "when TokenStation5 is updated.",
+             kText);
+#else
     } else if (open == 2) {
         ty -= 12;
         // ftpsrv, which the jailbreak runs, listens on 2121.
@@ -637,6 +663,7 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
              kText);
         ty += 8;
         para("Keep a copy on your computer: updating or deleting the app removes its models.", kText2);
+#endif
     } else if (r.kind == Row::Guide) {
         // The list of guides, drawn above.
     } else if (r.kind == Row::Tailscale) {

@@ -11,9 +11,9 @@ on:
   push:
     branches: [main]
     tags: ["linux-v*"]
-    paths: ["engine/**", "linux/**", ".github/workflows/linux.yml"]
+    paths: ["engine/**", "ps5/**", "linux/**", "third_party/**", ".github/workflows/linux.yml"]
   pull_request:
-    paths: ["engine/**", "linux/**", ".github/workflows/linux.yml"]
+    paths: ["engine/**", "ps5/**", "linux/**", "third_party/**", ".github/workflows/linux.yml"]
   workflow_dispatch:
 
 permissions:
@@ -27,7 +27,7 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq cmake g++ glslang-tools libvulkan-dev
+          sudo apt-get install -y -qq cmake g++ glslang-tools libvulkan-dev libsdl2-dev mesa-vulkan-drivers
       - name: Build the package
         run: |
           if [[ "$GITHUB_REF" == refs/tags/linux-v* ]]; then v=${GITHUB_REF_NAME#linux-v}; else v=; fi
@@ -43,6 +43,15 @@ jobs:
           sh -n /tmp/pkg/usr/bin/tokenstation-cu
           test -x /tmp/pkg/usr/lib/tokenstation/gpu-selftest
           /tmp/pkg/usr/bin/ts5 2>&1 | grep -q "usage: ts5"
+          sh -n /tmp/pkg/usr/bin/tokenstation-memory
+          /tmp/pkg/usr/bin/tokenstation --version | grep -q "^tokenstation "
+      - name: Run the app (lavapipe, no screen)
+        run: |
+          python3 -m pip install --user --break-system-packages -q gguf
+          mkdir -p /tmp/model
+          curl -fsSL -o /tmp/model/vocab.gguf https://raw.githubusercontent.com/ggml-org/llama.cpp/master/models/ggml-vocab-qwen2.gguf
+          python3 engine/tests/make_test_model.py --arch qwen2 --vocab /tmp/model/vocab.gguf --quant Q4_K_M /tmp/model/test.gguf
+          linux/smoke-test.sh /tmp/model/test.gguf /tmp/pkg/usr/bin/tokenstation
       - uses: actions/upload-artifact@v4
         with:
           name: tokenstation-linux

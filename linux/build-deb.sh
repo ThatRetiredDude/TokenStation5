@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Builds the TokenStation Linux package: the ts5 engine (Vulkan) plus a
-# service that serves the OpenAI-style API on boot.
+# Builds the TokenStation Linux package: the full app (tokenstation: the TV
+# dashboard, chat, voice, keys, Tailscale, downloads; linux/build.sh), the
+# engine's command line (ts5), the API-only service, the TV service, and the
+# PS5 tools (tokenstation-cu, tokenstation-memory).
 #
 #   linux/build-deb.sh [VERSION] [OUTDIR]
 #
 # VERSION defaults to 0.0.0+<short commit>; OUTDIR to build/linux. Needs
-# cmake, a C++17 compiler, glslang-tools, libvulkan-dev and dpkg-deb.
+# what linux/build.sh needs (a C++17 compiler, glslang-tools, libvulkan-dev,
+# libsdl2-dev), plus cmake and dpkg-deb.
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,28 +16,32 @@ version=${1:-0.0.0+$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo l
 version=${version#linux-v}
 out=${2:-$root/build/linux}
 arch=$(dpkg --print-architecture)
-build=$out/engine
 pkg=$out/tokenstation_${version}_${arch}
-doc_cu=$pkg/usr/share/doc/tokenstation/cu-test
+doc=$pkg/usr/share/doc/tokenstation
 
-cmake -S "$root/engine" -B "$build" -DCMAKE_BUILD_TYPE=Release
-cmake --build "$build" -j"$(nproc)"
+TS5_VERSION="linux-$version" TS5_LINUX_OUT="$out" bash "$root/linux/build.sh"
 cmake -S "$root/linux/cu-test" -B "$out/cu-test" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$out/cu-test" -j"$(nproc)"
 
 rm -rf "$pkg"
-install -Dm755 "$build/ts5" "$pkg/usr/bin/ts5"
+install -Dm755 "$out/tokenstation" "$pkg/usr/bin/tokenstation"
+install -Dm755 "$out/ts5" "$pkg/usr/bin/ts5"
 install -Dm755 "$root/linux/files/start.sh" "$pkg/usr/lib/tokenstation/start.sh"
+install -Dm755 "$root/linux/files/boost.sh" "$pkg/usr/lib/tokenstation/boost.sh"
 install -Dm755 "$out/cu-test/gpu-selftest" "$pkg/usr/lib/tokenstation/gpu-selftest"
 install -Dm755 "$root/linux/cu-test/tokenstation-cu" "$pkg/usr/bin/tokenstation-cu"
-install -Dm644 "$root/linux/cu-test/LICENSE" "$doc_cu/LICENSE"
-install -Dm755 "$root/linux/files/boost.sh" "$pkg/usr/lib/tokenstation/boost.sh"
+install -Dm755 "$root/linux/files/tokenstation-memory" "$pkg/usr/bin/tokenstation-memory"
 install -Dm644 "$root/linux/files/tokenstation.service" "$pkg/lib/systemd/system/tokenstation.service"
+install -Dm644 "$root/linux/files/tokenstation-tv.service" "$pkg/lib/systemd/system/tokenstation-tv.service"
 install -Dm644 "$root/linux/files/tokenstation.default" "$pkg/etc/default/tokenstation"
-doc=$pkg/usr/share/doc/tokenstation
+install -Dm644 "$root/linux/files/tokenstation.desktop" "$pkg/usr/share/applications/tokenstation.desktop"
+install -Dm644 "$root/ps5/sce_sys/icon0.png" "$pkg/usr/share/icons/hicolor/512x512/apps/tokenstation.png"
 install -Dm644 "$root/LICENSE.md" "$doc/LICENSE.md"
+install -Dm644 "$root/ps5/LICENSE" "$doc/LICENSE-GPL-3.0"
 install -Dm644 "$root/NOTICE.md" "$doc/NOTICE.md"
 install -Dm644 "$root/linux/README.md" "$doc/README.md"
+install -Dm644 "$root/linux/cu-test/README.md" "$doc/cu-test/README.md"
+install -Dm644 "$root/linux/cu-test/LICENSE" "$doc/cu-test/LICENSE"
 cp -r "$root/licenses" "$doc/licenses"
 git -C "$root" rev-parse HEAD > "$doc/SOURCE.txt" 2>/dev/null || echo unknown > "$doc/SOURCE.txt"
 

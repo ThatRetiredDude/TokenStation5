@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=TokenStation5
+GenericName=Local AI
+Comment=Your PS5's own AI: chat, voice and an OpenAI-compatible API for your apps
+Exec=tokenstation
+Icon=tokenstation
+Terminal=false
+Categories=Utility;Development;
+Keywords=AI;LLM;chat;OpenAI;

@@ -1,7 +1,9 @@
 #!/bin/sh
 set -e
 if [ -d /run/systemd/system ]; then
-    systemctl stop tokenstation.service || true
-    [ "$1" = remove ] && systemctl disable tokenstation.service >/dev/null || true
+    for s in tokenstation.service tokenstation-tv.service; do
+        systemctl stop "$s" || true
+        [ "$1" = remove ] && systemctl disable "$s" >/dev/null 2>&1 || true
+    done
 fi
 exit 0

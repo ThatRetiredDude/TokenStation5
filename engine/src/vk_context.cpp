@@ -1,7 +1,10 @@
 #include "vk_context.h"
 #include "log.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -30,6 +33,36 @@ uint64_t VkContext::device_memory() const {
     uint64_t n = 0;
     for (uint32_t i = 0; i < memory.memoryHeapCount; i++)
         if (shared || (memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) n += memory.memoryHeaps[i].size;
+#ifndef TS5_PS5
+    // On Linux an APU's heaps are the system's memory, which the desktop and
+    // everything else running want too: RADV reports its GTT heap as up to
+    // all of it. The driver's budget says what this process can have
+    // (what it has, plus what's free), so a context that "fits" doesn't
+    // push the machine into swap or the OOM killer. Asked at most every 2 s:
+    // the dashboard reads this every frame.
+    if (const char *e = getenv("TS5_GPU_MEMORY_GIB"); e && atof(e) > 0) return (uint64_t)(atof(e) * 1073741824.0);
+    if (memory_budget) {
+        std::lock_guard<std::mutex> lk(budget_mutex);
+        const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (budget_at < 0 || t - budget_at > 2) {
+            auto props2 = (PFN_vkGetPhysicalDeviceMemoryProperties2)get_instance_proc(
+                instance, "vkGetPhysicalDeviceMemoryProperties2");
+            VkPhysicalDeviceMemoryBudgetPropertiesEXT b{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+            VkPhysicalDeviceMemoryProperties2 m2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+            m2.pNext = &b;
+            uint64_t sum = 0;
+            if (props2) {
+                props2(physical, &m2);
+                for (uint32_t i = 0; i < m2.memoryProperties.memoryHeapCount; i++)
+                    if (shared || (m2.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT))
+                        sum += std::min<uint64_t>(b.heapBudget[i], m2.memoryProperties.memoryHeaps[i].size);
+            }
+            budget_bytes = sum;
+            budget_at = t;
+        }
+        if (budget_bytes > 0) n = std::min(n, budget_bytes);
+    }
+#endif
     return n;
 }
 
@@ -141,6 +174,12 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
         return nullptr;
     }
     std::vector<const char *> dev_exts = {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
+#ifndef TS5_PS5
+    if (has_extension(dev_have, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
+        dev_exts.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+        c->memory_budget = true;
+    }
+#endif
     if (!inst_exts.empty() && has_extension(dev_have, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
         dev_exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
         c->display = true;
@@ -168,6 +207,9 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
     if (r != VK_SUCCESS) { fail(c, err, "vkCreateDevice failed: " + std::to_string((int)r)); return nullptr; }
     LOAD(c->get_device_proc, c->device, vkGetDeviceQueue);
     vkGetDeviceQueue(c->device, c->queue_family, 0, &c->queue);
+#ifndef TS5_PS5
+    if (c->memory_budget) ts5::log_line("ts5: memory for models: %.2f GiB (the driver's budget)", c->device_memory() / 1073741824.0);
+#endif
     return c;
 }
 

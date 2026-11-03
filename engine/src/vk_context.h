@@ -31,8 +31,15 @@ struct VkContext {
     std::mutex queue_mutex;
 
     // Bytes models can use: the device-local heaps, or every heap on a GPU
-    // that shares the system's memory.
+    // that shares the system's memory. Off the PS5, no more than the
+    // driver's budget for them (VK_EXT_memory_budget: on an APU, the system
+    // memory the rest of the machine leaves), or TS5_GPU_MEMORY_GIB.
     uint64_t device_memory() const;
+    // VK_EXT_memory_budget is on (never on the PS5).
+    bool memory_budget = false;
+    mutable std::mutex budget_mutex;
+    mutable double budget_at = -1;
+    mutable uint64_t budget_bytes = 0;
 };
 
 // Makes the instance and device on physical device `index`; with

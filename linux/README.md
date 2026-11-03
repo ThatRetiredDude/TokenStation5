@@ -1,13 +1,36 @@
-# TokenStation for Linux
+# TokenStation5 for Linux
 
-The same ts5 engine as the PS5 app, packaged for Linux. It serves one GGUF
-model on the GPU through Vulkan, with the OpenAI-style API on port 8081.
-The main target is a PS5 running Linux; any Linux machine with a Vulkan GPU
-works too.
+The PS5 app, on Linux. It's the same code as the Prospero Store title, with
+the console's own pieces (the TV picture, the controller, the on-screen
+keyboard, notifications and audio) taken from Linux instead. So you get
+everything the title does:
+
+- **The TV dashboard**: Home with usage per app, Models, Chat, Settings and
+  Logs, driven with a DualSense or a keyboard.
+- **Models**: download the checked ones, search Hugging Face for others that
+  fit, run the GPU check and the speed test.
+- **Chat on the TV**, typed with the on-screen keyboard (controller), a real
+  keyboard, or pasted (Ctrl+V).
+- **Talk to it**: hold R1 and speak (whisper.cpp), hear the reply (Kokoro).
+- **The OpenAI-compatible API** on port 8081, with **API keys** per app.
+- **Tailscale**, built in, to reach it from anywhere.
+- **Web search** with a Tavily key.
+
+Linux adds a few things the console can't do:
+
+- **More memory for models.** The console gives a title 11.4 GiB. On Linux the
+  GPU can have up to about 13 GiB of the 16 GB, which fits a 14B model (Qwen
+  2.5 Coder 14B, Qwen 3 14B) with a long context. See
+  [Bigger models](#bigger-models).
+- **All 8 CPU cores** for speech (the console gives a title about 6).
+- **Clock boost and fan control** (`ps5_control`), and **36, 38 or 40 GPU
+  compute units** (`tokenstation-cu`).
+- **No 13.60 firmware cap on updates**: install a new `.deb`, and your models,
+  keys, chats and usage stay where they are.
 
 ## On a PS5
 
-Linux on the PS5 comes from other projects. This package does not boot or
+Linux on the PS5 comes from other projects. This package doesn't boot or
 unlock anything by itself:
 
 1. [ps5-linux-loader](https://github.com/rmuxwashere/ps5-linux-loader) and its
@@ -16,70 +39,133 @@ unlock anything by itself:
    and kstuff must be off. Re-run the loader on every boot.
 2. Install [ps5-linux-tools](https://github.com/ps5-linux/ps5-linux-tools)
    so that `ps5_control` is on the PATH, or set `PS5_CONTROL` (below). The
-   service uses it to turn on the fan and the clock boost.
+   services use it to turn on the fan and the clock boost.
 3. GPU memory: leave `vram.txt` on the image's FAT32 partition at its default
-   (512 MB). That default makes the GPU take more of system memory as it needs
-   it, which is what lets bigger models fit.
-
-For a lighter system, turn the desktop off: `sudo systemctl set-default multi-user.target`.
-
-## GPU compute units
-
-The package includes `tokenstation-cu` to see, choose (36, 38 or 40) and test
-how many GPU compute units the PS5 uses. See [cu-test/README.md](cu-test/README.md).
+   (512 MB). Models go in GTT, system memory the GPU maps, which
+   `tokenstation-memory` sets the size of.
 
 ## Install
 
 ```sh
 sudo apt install ./tokenstation_<version>_amd64.deb
+```
+
+Then pick one of three ways to run it.
+
+### 1. On the Ubuntu desktop
+
+Open **TokenStation5** from the app menu. It fills the screen (F11 for a
+window) and works like the title: the controller, or the keyboard's arrows,
+Enter (✕), Esc (○), F1 (□), F2 (△), F3 (OPTIONS), Page Up (L1) and Page Down
+(R1, held to talk). Its models, settings and chats are in
+`~/.local/share/tokenstation`, and it serves the API itself, so the API-only
+service stays off on a desktop.
+
+To start it when you log in: `cp /usr/share/applications/tokenstation.desktop ~/.config/autostart/`.
+
+### 2. On the TV with no desktop (the console experience)
+
+The lightest setup, and the one with the most memory for models: no desktop,
+and the app on the TV from boot.
+
+```sh
+sudo systemctl set-default multi-user.target
+sudo systemctl enable --now tokenstation-tv
+```
+
+It runs full screen on the first text console, with the controller, and
+keeps its models, keys and chats in `/var/lib/tokenstation`. It replaces the
+API-only service (the two can't both have port 8081). Logs:
+`journalctl -u tokenstation-tv -f`, and `/var/lib/tokenstation/ts5.log`.
+
+### 3. API only
+
+```sh
 sudo cp model.gguf /var/lib/tokenstation/models/
-sudo systemctl restart tokenstation
+sudo systemctl enable --now tokenstation
 curl http://localhost:8081/v1/models
 ```
 
-The service starts on every boot. Logs: `journalctl -u tokenstation -f`.
+This is the engine alone (`ts5 serve`), with the settings below. It starts on
+every boot on a machine without a desktop.
+
+## Bigger models
+
+```sh
+tokenstation-memory status          # what the GPU may use now, and what fits
+sudo tokenstation-memory set 13     # 13 GiB at the next boot; reboot and run the loader again
+```
+
+The kernel lets the GPU have half the memory by default, about 7.5 GiB on a
+PS5: less than the console. `set 13` raises that through `cmdline.txt` (as
+`tokenstation-cu` does) and `/etc/modprobe.d`. Use 13 without a desktop and 11
+or 12 with one. TokenStation itself never takes more than the GPU driver's
+budget (what's free), so a model that doesn't fit is refused instead of
+pushing Linux into swap. `TS5_GPU_MEMORY_GIB` overrides what it thinks it has.
+
+With 13 GiB:
+
+| Model | Quant | Weights | Context that fits (estimate) |
+| --- | --- | ---: | ---: |
+| Qwen 2.5 Coder 14B Instruct | Q4_K_M | ~9.0 GiB | ~32k with the 8-bit KV cache |
+| Qwen 3 14B | Q4_K_M | ~9.0 GiB | ~32k with the 8-bit KV cache |
+| Gemma 3 12B | Q4_K_M | ~6.8 GiB | ~64k (sliding layers keep it small) |
+| Mistral Nemo 12B | Q4_K_M | ~7.0 GiB | ~32k |
+
+The Models page's Hugging Face search uses the same budget, so 14B models show
+up there once the memory is raised. These are estimates until they are
+measured on a PS5.
 
 ## Settings
 
-`/etc/default/tokenstation` (kept on upgrades):
+The app's own settings are on its Settings page, as on the console.
+`/etc/default/tokenstation` (kept on upgrades) is for the services:
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `MODEL` | empty | The model file. Empty: the first `.gguf` in `MODELS_DIR`. |
-| `MODELS_DIR` | `/var/lib/tokenstation/models` | Where models live. |
-| `HOST`, `PORT` | `0.0.0.0`, `8081` | Where the API listens. |
-| `CONTEXT` | `8192` | Context length, or `auto` for what fits. |
-| `PS5_BOOST` | `1` | Fan on, CPU 3.5 GHz, GPU 2.23 GHz. Skipped if `ps5_control` is missing. |
+| `MODEL` | empty | API-only: the model file. Empty: the first `.gguf` in `MODELS_DIR`. |
+| `MODELS_DIR` | `/var/lib/tokenstation/models` | API-only: where models live. |
+| `HOST`, `PORT` | `0.0.0.0`, `8081` | API-only: where the API listens. |
+| `CONTEXT` | `8192` | API-only: context length, or `auto` for what fits. |
+| `PS5_BOOST` | `1` | Both: fan on, CPU 3.5 GHz, GPU 2.23 GHz. Skipped if `ps5_control` is missing. |
 | `PS5_CONTROL` | empty | Path to `ps5_control` if it isn't on the PATH. |
-| `EXTRA_ARGS` | empty | More options for `ts5 serve`. |
+| `EXTRA_ARGS` | empty | API-only: more options for `ts5 serve`. |
 
-Speed test: `ts5 bench -m /var/lib/tokenstation/models/model.gguf --pp 512 --tg 128`.
+The app reads `ts5.env` in its data folder, as the title does (engine
+settings such as `TS5_KV=q8`).
+
+Speed test: `ts5 bench -m model.gguf --pp 512 --tg 128`.
+
+## GPU compute units
+
+`tokenstation-cu` shows, chooses (36, 38 or 40) and tests how many GPU compute
+units the PS5 uses. See [cu-test/README.md](cu-test/README.md).
 
 ## Build
 
 ```sh
-sudo apt install cmake g++ glslang-tools libvulkan-dev
-linux/build-deb.sh 0.1.0
+sudo apt install cmake g++ glslang-tools libvulkan-dev libsdl2-dev mesa-vulkan-drivers
+linux/build.sh                 # build/linux/tokenstation and build/linux/ts5
+linux/build-deb.sh 0.2.0       # the .deb and a .tar.gz in build/linux/
+linux/smoke-test.sh small.gguf # the app on a scratch folder: serve, API, chat, restart
 ```
 
-The `.deb` and a `.tar.gz` end up in `build/linux/`.
+`linux/build.sh` builds the PS5 title's code (`ps5/`) with `-DTS5_LINUX`, and
+`linux/platform.cpp` in place of the console's functions. The PS5 build is
+unchanged. `TS5_MARCH=znver2` builds for the PS5's Zen 2 alone (the default,
+`x86-64-v3`, runs on any recent x86 PC and is tuned for Zen 2 too).
 
 ## Releases
 
 Linux releases use their own tags, `linux-v<version>` (for example
-`linux-v0.1.0`). `.github/workflows/linux.yml` builds them and attaches the
+`linux-v0.2.0`). `.github/workflows/linux.yml` builds them and attaches the
 `.deb` and `.tar.gz`. They are never marked as the repo's latest release, so
 the PS5 store side (`release.yml`, tags like `01.004.001`) is unaffected.
 
 ## Not here yet
 
-- The on-TV dashboard, model downloads, voice and web search pages are part
-  of the PS5 app. On Linux, use the API.
+- Speeds on PS5 Linux haven't been measured yet, nor the 14B models.
+- The TV service (kmsdrm on tty1) hasn't been tried on a PS5 yet.
+- The checked-model list doesn't include 14B models yet: find them with the
+  Models page's search.
 - No apt repository yet; install the `.deb` from a release.
-- Speeds on PS5 Linux haven't been measured yet.
-
-## License
-
-The package is the engine, under the repo's PolyForm Small Business license
-(`LICENSE.md`), with the third-party notices in `NOTICE.md`. It doesn't
-include any of the GPL PS5 title code.

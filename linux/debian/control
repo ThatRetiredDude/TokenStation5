@@ -4,9 +4,13 @@ Architecture: @ARCH@
 Maintainer: ThatRetiredDude <128261747+ThatRetiredDude@users.noreply.github.com>
 Section: misc
 Priority: optional
-Depends: libc6, libstdc++6, libvulkan1, mesa-vulkan-drivers, adduser
+Depends: libc6, libstdc++6, libvulkan1, mesa-vulkan-drivers, libsdl2-2.0-0, adduser
+Recommends: libnotify-bin
 Homepage: https://github.com/ThatRetiredDude/TokenStation5
-Description: Local AI endpoint with an OpenAI-style API
- TokenStation runs GGUF language models on the GPU through Vulkan and
- serves them on your network with an OpenAI-style API. Built for a PS5
- running Linux, it works on any Linux machine with a Vulkan GPU.
+Description: Your PS5's own AI, on Linux: chat, voice and an OpenAI-style API
+ TokenStation5 runs GGUF language models on the GPU through Vulkan. The app
+ is the PS5 title's dashboard on the TV: pick and download models, chat with
+ the controller or a keyboard, talk to it, make API keys, and reach it from
+ anywhere with Tailscale. Apps on your network use its OpenAI-style API.
+ Built for a PS5 running Linux; it works on any Linux machine with a
+ Vulkan GPU.

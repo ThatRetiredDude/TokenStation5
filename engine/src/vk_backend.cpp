@@ -396,6 +396,17 @@ private:
             add(HV);
         } else {
             add(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+#ifndef TS5_PS5
+            // Past the device-local heap (an APU's carve-out on Linux, often
+            // small), write-combined system memory before cached: the GPU
+            // reads cached (snooped) memory through the CPU's caches, slower
+            // for weights it streams every token.
+            for (uint32_t i = 0; i < memprops_.memoryTypeCount; i++)
+                if ((req.memoryTypeBits & (1u << i)) &&
+                    !(memprops_.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) &&
+                    std::find(types.begin(), types.end(), (int)i) == types.end())
+                    types.push_back((int)i);
+#endif
             add(0);
         }
         if (types.empty()) { err = "no suitable memory type"; return false; }

@@ -4,15 +4,31 @@ if [ "$1" = configure ]; then
     if ! getent passwd tokenstation >/dev/null; then
         adduser --system --group --home /var/lib/tokenstation --no-create-home tokenstation
     fi
-    for g in render video; do
+    # The GPU (render, video), and for the TV service the controller (input)
+    # and the sound card (audio).
+    for g in render video input audio; do
         getent group "$g" >/dev/null && adduser tokenstation "$g" >/dev/null || true
     done
     mkdir -p /var/lib/tokenstation/models
     chown -R tokenstation:tokenstation /var/lib/tokenstation
+    command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
     if [ -d /run/systemd/system ]; then
         systemctl daemon-reload
-        systemctl enable tokenstation.service >/dev/null
-        systemctl restart tokenstation.service || true
+        if [ -z "$2" ]; then
+            # A fresh install: the API service starts on boot, unless this
+            # machine boots to a desktop, where the app (from the app menu)
+            # serves the API itself and would find the port taken.
+            if [ "$(systemctl get-default)" != graphical.target ]; then
+                systemctl enable tokenstation.service >/dev/null
+            else
+                echo "tokenstation: a desktop: start TokenStation5 from the app menu. The API-only service is off (sudo systemctl enable --now tokenstation for it)."
+            fi
+        fi
+        for s in tokenstation.service tokenstation-tv.service; do
+            systemctl is-active --quiet "$s" && systemctl restart "$s" || true
+        done
+        systemctl is-enabled --quiet tokenstation.service && ! systemctl is-active --quiet tokenstation-tv.service &&
+            systemctl start tokenstation.service || true
     fi
 fi
 exit 0
