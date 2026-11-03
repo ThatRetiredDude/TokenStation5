@@ -1346,8 +1346,10 @@ private:
     // One token: the RMSNorm before q, k, v, gate and up and the output
     // folded into those mat-vecs (mv16n_*), which read the residual and
     // scale their sums, rather than a one-workgroup rmsnorm dispatch and a
-    // barrier the whole GPU waits on. TS5_NORM_FUSE=0 turns it off.
-    bool norm_fuse_ = true;
+    // barrier the whole GPU waits on. Off unless TS5_NORM_FUSE=1: on the PS5
+    // under Linux (Mesa 26.1) it measured 61 tok/s against 68 without, since
+    // every workgroup re-reads and reduces all of x for its sum of squares.
+    bool norm_fuse_ = false;
     const Weight *norm_ = nullptr;  // set: matmul folds this RMSNorm in (one token)
     bool no_barrier_ = false;  // skip the barrier after the next dispatch
     int mmb_min_ = 48;

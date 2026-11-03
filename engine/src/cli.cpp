@@ -296,7 +296,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     fprintf(stderr, "ts5: %s backend ready in %.1f s, context %d\n", be->name(), (now_ms() - t0) / 1000, be->n_ctx());
     Model dmodel;  // the draft model, when TS5_DRAFT_MODEL names one; outlives eng
     Engine eng(model, be, tok);
-    if (const char *dp = getenv("TS5_DRAFT_MODEL"); dp && *dp && (a.cmd == "run" || a.cmd == "serve")) {
+    if (const char *dp = getenv("TS5_DRAFT_MODEL"); dp && *dp && strcmp(dp, "off") != 0 && (a.cmd == "run" || a.cmd == "serve")) {
         std::string derr;
         Backend *db = nullptr;
         if (!dmodel.open(dp, derr)) {
@@ -319,7 +319,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         if (!db || !eng.set_drafter(dmodel, db, derr))
             fprintf(stderr, "ts5: draft model not used: %s\n", derr.c_str());
         else
-            fprintf(stderr, "ts5: draft model %s ready\n", basename_of(dp).c_str());
+            fprintf(stderr, "ts5: draft model %s ready, context %d\n", basename_of(dp).c_str(), db->n_ctx());
     }
 
     if (a.cmd == "logits") {
