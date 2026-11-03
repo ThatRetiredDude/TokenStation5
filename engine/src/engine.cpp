@@ -259,6 +259,11 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         }
         return bk;
     };
+    // A probe of the draft model costs its catch-up on everything since it
+    // last ran plus a wider verify; where it keeps coming back empty (Qwen3
+    // 0.6B on prose: 8% slower with a probe every 16 steps) the next one
+    // waits twice as long, up to 128 steps, and a kept token resets it.
+    int dprobe_every = 16, dprobe_next = 16;
     std::vector<int32_t> batch;
     std::vector<float> lgb;  // one row of logits per batch position
     double ts = now_ms();
@@ -286,8 +291,13 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         // The cascade: where the free lookup finds nothing, the draft model.
         bool by_model = batch.size() == 1 && room > 0 && db_ && drafter_ok_;
         int mk = room;
+        bool dprobe = false;
         if (by_model && adapt) {
-            mk = probe ? std::min(room, 2) : best_k(room, by_drafter.p(0.6f), t_draft > 0 ? t_draft : fwd_ms(1) / 8);
+            mk = best_k(room, by_drafter.p(0.6f), t_draft > 0 ? t_draft : fwd_ms(1) / 8);
+            if (mk == 0 && step >= dprobe_next) {
+                mk = std::min(room, 2);
+                dprobe = true;
+            }
             by_model = mk > 0;
         }
         if (by_model) {
@@ -322,6 +332,10 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         }
         st.sample_ms += now_ms() - ts;
         st.draft_accepted += accepted;
+        if (dprobe) {
+            dprobe_every = accepted > 0 ? 16 : std::min(dprobe_every * 2, 128);
+            dprobe_next = step + dprobe_every;
+        }
         if (nb > 1) {
             Source &src = from_lookup ? by_lookup : by_drafter;
             src.kept = 0.9f * src.kept + accepted;
