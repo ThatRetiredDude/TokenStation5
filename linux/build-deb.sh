@@ -57,5 +57,20 @@ echo /etc/default/tokenstation > "$pkg/DEBIAN/conffiles"
 
 command -v visudo >/dev/null && visudo -cqf "$pkg/etc/sudoers.d/tokenstation"
 dpkg-deb --root-owner-group --build "$pkg" "$pkg.deb"
-tar -C "$pkg" -czf "$out/tokenstation_${version}_${arch}.tar.gz" usr lib etc
-echo "built $pkg.deb"
+# The portable build, for systems without apt or with a read-only /usr
+# (Bazzite, SteamOS): the same programs, and install.sh to put them in
+# ~/.local.
+port=$out/tokenstation-${version}-linux-${arch}
+rm -rf "$port"
+install -Dm755 "$out/tokenstation" "$port/bin/tokenstation"
+install -Dm755 "$out/ts5" "$port/bin/ts5"
+install -Dm755 "$root/linux/cu-test/tokenstation-cu" "$port/bin/tokenstation-cu"
+install -Dm755 "$root/linux/files/tokenstation-memory" "$port/bin/tokenstation-memory"
+install -Dm755 "$root/linux/files/hw" "$port/lib/hw"
+install -Dm755 "$out/cu-test/gpu-selftest" "$port/lib/gpu-selftest"
+install -Dm644 "$root/linux/files/tokenstation.desktop" "$port/share/tokenstation.desktop"
+install -Dm644 "$root/ps5/sce_sys/icon0.png" "$port/share/tokenstation.png"
+install -Dm755 "$root/linux/files/install.sh" "$port/install.sh"
+cp -r "$doc" "$port/doc"
+tar -C "$out" -czf "$port.tar.gz" "$(basename "$port")"
+echo "built $pkg.deb and $port.tar.gz"

@@ -20,16 +20,23 @@ permissions:
   contents: write
 
 jobs:
+  # Built on Debian 12, the oldest system it supports, so the same programs
+  # run there and on anything newer: Ubuntu, Fedora, Bazzite, SteamOS.
   package:
     runs-on: ubuntu-24.04
+    container: debian:12
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
       - name: Install build tools
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq cmake g++ glslang-tools libvulkan-dev libsdl2-dev mesa-vulkan-drivers
+          apt-get update -qq
+          apt-get install -y -qq git ca-certificates cmake g++ glslang-tools libvulkan-dev libsdl2-dev dpkg-dev sudo binutils
+      - uses: actions/checkout@v4
       - name: Build the package
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           if [[ "$GITHUB_REF" == refs/tags/linux-v* ]]; then v=${GITHUB_REF_NAME#linux-v}; else v=; fi
           linux/build-deb.sh $v
       - name: Check the package
@@ -45,28 +52,88 @@ jobs:
           /tmp/pkg/usr/bin/ts5 2>&1 | grep -q "usage: ts5"
           sh -n /tmp/pkg/usr/bin/tokenstation-memory
           sh -n /tmp/pkg/usr/lib/tokenstation/hw
-          sudo visudo -cf /tmp/pkg/etc/sudoers.d/tokenstation
+          visudo -cf /tmp/pkg/etc/sudoers.d/tokenstation
           /tmp/pkg/usr/lib/tokenstation/hw status
           /tmp/pkg/usr/bin/tokenstation --version | grep -q "^tokenstation "
-      - name: Run the app (lavapipe, no screen)
-        run: |
-          python3 -m pip install --user --break-system-packages -q gguf
-          mkdir -p /tmp/model
-          curl -fsSL -o /tmp/model/vocab.gguf https://raw.githubusercontent.com/ggml-org/llama.cpp/master/models/ggml-vocab-qwen2.gguf
-          python3 engine/tests/make_test_model.py --arch qwen2 --vocab /tmp/model/vocab.gguf --quant Q4_K_M /tmp/model/test.gguf
-          linux/smoke-test.sh /tmp/model/test.gguf /tmp/pkg/usr/bin/tokenstation
+          tar -tzf build/linux/tokenstation-*-linux-*.tar.gz
+          sh -n linux/files/install.sh
+          # Nothing newer than Debian 12's C library (2.36).
+          if objdump -T /tmp/pkg/usr/bin/tokenstation /tmp/pkg/usr/bin/ts5 | grep -E "GLIBC_2\.(3[7-9]|[4-9][0-9])"; then exit 1; fi
       - uses: actions/upload-artifact@v4
         with:
           name: tokenstation-linux
           path: |
             build/linux/*.deb
             build/linux/*.tar.gz
+
+  # The Debian 12 build, installed with apt on Ubuntu 24.04, running a model.
+  run-ubuntu:
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tokenstation-linux
+          path: dist
+      - name: Install it
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mesa-vulkan-drivers
+          sudo apt-get install -y -qq ./dist/*.deb
+          tokenstation --version
+          id tokenstation
+          sudo -l -U tokenstation | grep -q /usr/lib/tokenstation/hw
+      - name: Run the app (lavapipe, no screen)
+        run: |
+          python3 -m pip install --user --break-system-packages -q gguf
+          mkdir -p /tmp/model
+          curl -fsSL -o /tmp/model/vocab.gguf https://raw.githubusercontent.com/ggml-org/llama.cpp/master/models/ggml-vocab-qwen2.gguf
+          python3 engine/tests/make_test_model.py --arch qwen2 --vocab /tmp/model/vocab.gguf --quant Q4_K_M /tmp/model/test.gguf
+          linux/smoke-test.sh /tmp/model/test.gguf /usr/bin/tokenstation
+
+  # The portable build on Fedora, as on Bazzite: install.sh as a user.
+  run-fedora:
+    needs: package
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tokenstation-linux
+          path: dist
+      - name: Install it with install.sh
+        run: |
+          dnf install -y -q SDL2 vulkan-loader mesa-vulkan-drivers sudo tar findutils
+          useradd -m tester
+          echo "tester ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/tester
+          tar -C /home/tester -xzf dist/tokenstation-*-linux-*.tar.gz
+          chown -R tester /home/tester
+          su - tester -c 'cd tokenstation-*-linux-* && ./install.sh'
+          su - tester -c '~/.local/bin/tokenstation --version'
+          su - tester -c '~/.local/bin/ts5 2>&1 | grep -q "usage: ts5"'
+          test -x /usr/local/lib/tokenstation/hw
+          id -nG tester | grep -q tokenstation
+          sudo -l -U tester | grep -q /usr/local/lib/tokenstation/hw
+          su - tester -c 'sudo -n /usr/local/lib/tokenstation/hw status'
+          grep -q "Exec=/home/tester/.local/opt/tokenstation/bin/tokenstation" /home/tester/.local/share/applications/tokenstation.desktop
+          su - tester -c 'cd tokenstation-*-linux-* && ./install.sh --uninstall'
+          test ! -e /usr/local/lib/tokenstation
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/linux-v')
+    needs: [package, run-ubuntu, run-fedora]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tokenstation-linux
+          path: dist
       - name: Publish the release
-        if: startsWith(github.ref, 'refs/tags/linux-v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" build/linux/*.deb build/linux/*.tar.gz \
+          gh release create "$GITHUB_REF_NAME" dist/*.deb dist/*.tar.gz --repo "$GITHUB_REPOSITORY" \
             --title "TokenStation for Linux ${GITHUB_REF_NAME#linux-v}" \
-            --notes "Linux package. Install: sudo apt install ./tokenstation_*.deb. See linux/README.md." \
+            --notes "Debian 12, Ubuntu: sudo apt install ./tokenstation_*.deb. Bazzite, SteamOS, Fedora and others: unpack the .tar.gz and run ./install.sh. See linux/README.md." \
             --latest=false

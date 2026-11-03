@@ -17,7 +17,14 @@ namespace linuxp {
 
 namespace {
 
-constexpr const char *kHelper = "/usr/lib/tokenstation/hw";
+// From the .deb, or from the portable build's install.sh (/usr is read-only
+// on Bazzite and SteamOS). The sudo rule names the one that's installed.
+const char *helper() {
+    if (const char *h = getenv("TS5_HW_HELPER")) return h;
+    static const char *found =
+        access("/usr/lib/tokenstation/hw", X_OK) == 0 ? "/usr/lib/tokenstation/hw" : "/usr/local/lib/tokenstation/hw";
+    return found;
+}
 constexpr double kGiB = 1073741824.0;
 
 double now_s() {
@@ -70,7 +77,7 @@ bool present() {
 // has why, from its stderr too).
 bool Hardware::run(const std::vector<std::string> &args, std::string &out) {
     std::string cmd = "sudo -n ";
-    cmd += getenv("TS5_HW_HELPER") ? getenv("TS5_HW_HELPER") : kHelper;
+    cmd += helper();
     for (const std::string &a : args) cmd += " '" + a + "'";  // fixed words and numbers only
     cmd += " 2>&1";
     out.clear();

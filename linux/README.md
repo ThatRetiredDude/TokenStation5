@@ -25,7 +25,7 @@ Linux adds a few things the console can't do:
 - **All 8 CPU cores** for speech (the console gives a title about 6).
 - **Clock boost and fan control** (`ps5_control`), and **36, 38 or 40 GPU
   compute units** (`tokenstation-cu`).
-- **No 13.60 firmware cap on updates**: install a new `.deb`, and your models,
+- **No 13.60 firmware cap on updates**: install a new build, and your models,
   keys, chats and usage stay where they are.
 
 ## On a PS5
@@ -33,8 +33,8 @@ Linux adds a few things the console can't do:
 Linux on the PS5 comes from other projects. This package doesn't boot or
 unlock anything by itself:
 
-1. [ps5-linux-loader](https://github.com/rmuxwashere/ps5-linux-loader) and its
-   Ubuntu image, booted from a USB SSD or a Linux-only M.2. Follow its README.
+1. [ps5-linux-loader](https://github.com/rmuxwashere/ps5-linux-loader) and a
+   Linux image (Ubuntu, Debian 12 or Bazzite), booted from a USB SSD or a Linux-only M.2. Follow its README.
    Firmware 3.00 to 13.60 only, so don't update the console's firmware. etaHEN
    and kstuff must be off. Re-run the loader on every boot.
 2. Install [ps5-linux-tools](https://github.com/ps5-linux/ps5-linux-tools)
@@ -46,11 +46,36 @@ unlock anything by itself:
 
 ## Install
 
+One build runs on Debian 12 and anything newer: Ubuntu, Fedora, Bazzite,
+SteamOS, Arch. It comes two ways.
+
+**Debian 12 and Ubuntu**: the `.deb`.
+
 ```sh
 sudo apt install ./tokenstation_<version>_amd64.deb
 ```
 
-Then pick one of three ways to run it.
+**Bazzite, SteamOS, Fedora and others**: the portable `.tar.gz`. Their
+`/usr` is read-only and there's no apt, so it installs into your home folder.
+Run it as yourself, not with sudo:
+
+```sh
+tar xzf tokenstation-<version>-linux-amd64.tar.gz
+cd tokenstation-<version>-linux-amd64
+./install.sh
+```
+
+It puts the app in `~/.local/opt/tokenstation`, adds it to the app menu, and
+asks for your password once to install the PS5 hardware controls
+(`/usr/local/lib/tokenstation`, `/usr/local/bin/tokenstation-memory` and
+`tokenstation-cu`, `/etc/sudoers.d/tokenstation`). Log out and back in once
+after. `./install.sh --no-hardware` leaves those out and touches nothing
+outside your home; `./install.sh --uninstall` removes it all except your
+models and settings. It needs SDL2 and the Vulkan loader, which Bazzite and
+SteamOS have. The services below come with the `.deb` only; the portable
+build is the app (way 1) and `ts5`.
+
+With the `.deb`, pick one of three ways to run it.
 
 ### 1. On the Ubuntu desktop
 

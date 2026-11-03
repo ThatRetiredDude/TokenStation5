@@ -1,5 +1,6 @@
 #!/bin/sh
-# /usr/lib/tokenstation/hw: the PS5 hardware settings TokenStation5's
+# /usr/lib/tokenstation/hw (or /usr/local/lib/tokenstation/hw from the
+# portable build's install.sh): the PS5 hardware settings TokenStation5's
 # Settings page changes, as root. /etc/sudoers.d/tokenstation lets members
 # of the tokenstation group run this one script without a password, so the
 # app can change them from the controller. Every value is checked here
@@ -16,6 +17,9 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # PS5_CONTROL, if ps5_control isn't on the PATH.
 [ -r /etc/default/tokenstation ] && . /etc/default/tokenstation
 ctl=${PS5_CONTROL:-$(command -v ps5_control 2>/dev/null || true)}
+# The portable install keeps the GPU test beside this script.
+here=$(dirname "$(readlink -f "$0")")
+[ -x "$here/gpu-selftest" ] && export GPU_SELFTEST="$here/gpu-selftest"
 
 need_ctl() {
     [ -n "$ctl" ] && [ -x "$ctl" ] || { echo "ps5_control isn't installed (ps5-linux-tools)" >&2; exit 3; }
@@ -72,7 +76,7 @@ cutest)
     exec tokenstation-cu test "$2"
     ;;
 *)
-    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac
