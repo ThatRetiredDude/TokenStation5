@@ -18,6 +18,7 @@ struct KnownGood {
     const char *good_for;  // on screen, from its checks
     float temperature, top_p;
     int top_k;
+    int thinking;         // 1: thinks first unless a request says not to; 0: doesn't unless asked; -1: no switch
     const char *checked;  // the day of its check, YYYY-MM-DD
     int passed, of;       // checks passed of those run, over every run
 };

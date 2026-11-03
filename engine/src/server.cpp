@@ -180,10 +180,12 @@ std::string settings_source(const KnownMatch &k) {
 // set, and where that comes from: known_good says whose checks they are
 // ("file": this file's, "model": this model's in another file, "family": a
 // model of its family's), with that check's day and count.
-std::string settings_json(const KnownMatch &k, const SampleParams &sp) {
+std::string settings_json(const KnownMatch &k, const SampleParams &sp, bool think) {
     char b[96];
     snprintf(b, sizeof b, "{\"temperature\":%.3g,\"top_p\":%.3g,\"top_k\":%d", sp.temperature, sp.top_p, sp.top_k);
     std::string j = b;
+    // Only for a model whose template can skip its thinking.
+    if (k && k.row->thinking >= 0) j += std::string(",\"thinking\":") + (think ? "true" : "false");
     j += ",\"known_good\":";
     j += !k ? "\"none\"" : k.how == KnownMatch::File ? "\"file\"" : k.how == KnownMatch::Model ? "\"model\"" : "\"family\"";
     if (k)
@@ -350,6 +352,7 @@ void handle(int fd, Server::State &state, Usage &u) {
         int n_ctx;
         KnownMatch known;
         SampleParams sampling;
+        bool think;
         {
             std::lock_guard<std::mutex> g(state.stats);
             model = state.model;
@@ -357,6 +360,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             n_ctx = state.n_ctx;
             known = state.known;
             sampling = state.sampling;
+            think = state.think;
         }
         // capabilities: whether the model takes OpenAI tools, and whether ts5
         // runs web searches for it (a Tavily key is set).
@@ -374,7 +378,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                             ",\"tool_format\":" + json_escape(tools) +
                                                             ",\"web_search\":" +
                                                             (can && !tavily_key().empty() ? "true" : "false") + "}" +
-                                                            ",\"settings\":" + settings_json(known, sampling) + "}") +
+                                                            ",\"settings\":" + settings_json(known, sampling, think) + "}") +
                                        "]}"));
     } else if (completions) {
         const bool chat = r.path.find("chat") != std::string::npos;
@@ -430,14 +434,16 @@ void handle(int fd, Server::State &state, Usage &u) {
         // {"enable_thinking": false}, or at the top level), "reasoning_effort":
         // "none", or a reply capped under kThinkRoom (an app naming a chat or
         // finishing a line), where the thinking would use up the limit and
-        // leave the answer empty.
+        // leave the answer empty. A request that says nothing gets the
+        // model's known-good choice (known-good.tsv's thinking).
         std::string opening;  // what opens the model's turn
         if (chat && can_skip_thinking(e.tok())) {
             const Json &kw = req["chat_template_kwargs"]["enable_thinking"];
             const Json &asked = kw.type == Json::BOOL ? kw : req["enable_thinking"];
             const bool think = asked.type == Json::BOOL            ? asked.boolean(true)
                                : req["reasoning_effort"].str() == "none" ? false
-                                                                         : !(limit >= 1 && limit < kThinkRoom);
+                               : limit >= 1 && limit < kThinkRoom        ? false
+                                                                         : state.think;
             if (!think) opening = kNoThinking;
         }
         if (chat) {
@@ -918,6 +924,7 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
     state_.n_ctx = e ? e->backend().n_ctx() : 0;
     state_.known = {};
     state_.sampling = SampleParams{};
+    state_.think = true;
     if (e) {
         const Gguf &g = e->model().gguf;
         struct stat st {};
@@ -927,6 +934,7 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
             state_.sampling.temperature = k->temperature;
             state_.sampling.top_p = k->top_p;
             state_.sampling.top_k = k->top_k;
+            if (k->thinking >= 0) state_.think = k->thinking != 0;
         }
         log_line("ts5: settings: %s (temperature %.2g, top_p %.2g, top_k %d)", settings_source(state_.known).c_str(),
                  state_.sampling.temperature, state_.sampling.top_p, state_.sampling.top_k);
