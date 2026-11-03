@@ -31,6 +31,8 @@
 #include "attn.spv.h"
 #include "attn_dec.spv.h"
 #include "attn_dec4.spv.h"
+#include "attn_dec4_256.spv.h"
+#include "attn_dec4_512.spv.h"
 #include "attn_merge.spv.h"
 #include "attn_pf.spv.h"
 #include "attn_pf128.spv.h"
@@ -573,6 +575,12 @@ private:
         if (!make_pipe("attn_dec", spv_attn_dec, sizeof(spv_attn_dec), 5, err, attn_dec_plain_ != 0, lpk) ||
             !make_pipe("attn_dec4", spv_attn_dec4, sizeof(spv_attn_dec4), 5, err, attn_dec_plain_ == 1, lpk))
             return false;
+        // The wide-head builds score keys with LPK lanes only (a thread can't
+        // hold a whole key): without them, those heads keep attn.
+        attn_dec_lpk_ = lpk;
+        if (lpk && (!make_pipe("attn_dec4_256", spv_attn_dec4_256, sizeof(spv_attn_dec4_256), 5, err, 0, lpk) ||
+                    !make_pipe("attn_dec4_512", spv_attn_dec4_512, sizeof(spv_attn_dec4_512), 5, err, 0, lpk)))
+            return false;
         P(swiglu, 2) P(softcap, 1)
 #undef P
         return true;
@@ -1025,7 +1033,8 @@ private:
         // them, hsplit workgroups each: Gemma 4's 16 heads of 512), for as many
         // tokens as fit attn's 1024 floats of queries, attn_pf's 64 rows (32 for heads of 256)
         // (prompts: attn_pf_min_ tokens or more) or attn_dec's 8 or 4 (generation
-        // over attn_dec_min_ keys or more, f16 cache, heads of 128).
+        // over attn_dec_min_ keys or more, f16 cache; heads of 128, or of 256
+        // and 512 in 4 rows, one KV head's heads over dec_split workgroups).
         // The first key any of the n tokens sees, and how many from there.
         const uint32_t k_lo = win && (uint32_t)pos0 + 1 > win ? (uint32_t)pos0 + 1 - win : 0;
         const uint32_t keys = (uint32_t)(pos0 + n) - k_lo;
@@ -1040,9 +1049,13 @@ private:
         const uint32_t pf_rows = pf512 ? 16 : pf256 ? 32 : 64;
         const bool pf = attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && (HD <= 128 || pf256 || pf512) &&
                         G_all <= pf_rows && (pf512 || head_split(l) == 1);
-        const uint32_t hsplit = pf ? 1 : head_split(l), G = G_all / hsplit;
-        const bool dec = hsplit == 1 && plain && !pf && attn_dec_min_ && keys >= (uint32_t)attn_dec_min_ &&
-                         kv_ == KvType::F16 && HD == 128 && G <= 8;
+        const bool wide = (HD == 256 || HD == 512) && attn_dec_lpk_ != 0;
+        const uint32_t dec_max = HD == 128 ? 8 : 4;
+        uint32_t dec_split = 1;
+        while (G_all / dec_split > dec_max && (G_all / dec_split) % 2 == 0) dec_split *= 2;
+        const bool dec = !pf && attn_dec_min_ && keys >= (uint32_t)attn_dec_min_ && kv_ == KvType::F16 &&
+                         (HD == 128 || wide) && G_all / dec_split <= dec_max;
+        const uint32_t hsplit = pf ? 1 : dec ? dec_split : head_split(l), G = G_all / hsplit;
         const uint32_t dec_rows = G <= 4 ? 4 : 8;
         const uint32_t tq = pf ? pf_rows / G : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / G);
         const uint32_t groups = HKV * hsplit * (((uint32_t)n + tq - 1) / tq);
@@ -1065,7 +1078,7 @@ private:
         } pc{HD, H, HKV, (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale, k_lo, win, ring, hsplit};
         std::string kern = std::string(pf ? "attn_pf" : "attn") + (kv_ == KvType::Q8 ? "_q8" : "");
         if (dec)
-            kern = dec_rows == 4 ? "attn_dec4" : "attn_dec";
+            kern = HD == 256 ? "attn_dec4_256" : HD == 512 ? "attn_dec4_512" : dec_rows == 4 ? "attn_dec4" : "attn_dec";
         else if (pf && HD == 128 && attn_pf128_ && kv_ == KvType::F16)
             kern = "attn_pf128";
         else if (pf && pf256)
@@ -1436,6 +1449,7 @@ private:
     // +6% on Coder 7B, +31% on Qwen 3 8B and +37% on Llama 3.2 3B against 0;
     // 32 is slower than 0 on Coder 7B.
     int attn_dec_keys_ = 16;
+    uint32_t attn_dec_lpk_ = 0;  // the lanes per key the attn_dec builds got (0: thread per key, heads of 128 only)
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).
     bool mmb_ = true;

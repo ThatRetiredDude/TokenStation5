@@ -228,7 +228,17 @@ reads stay in flight across the barriers; attn_dec loads each tile's keys at
 its start, all 16 words at once. That split is what the console measured at
 16k tokens of context: the prefetch made Qwen3 8B's attn_dec4 2.5% faster
 and Coder 7B's attn_dec 9% slower (`TS5_ATTN_DEC_PLAIN=0` prefetches in both,
-`=1` in neither).
+`=1` in neither). By default each key is scored by 16 lanes side by side
+(`TS5_ATTN_DEC_KEYS`: 8, 16 or 32), each reading its share of the key, so a
+load instruction reads whole keys. Heads of 256 and 512 (Gemma's) run as
+`attn_dec4_256` and `attn_dec4_512`, the same code with the head size fixed
+and 4 rows: lanes-per-key scoring only (a thread can't hold a whole key),
+each thread's 4 value columns over a half or all of the tile's keys, and a
+KV head's query heads over several workgroups where 4 rows don't hold them
+(Gemma 4's full layers: 16 heads, 4 workgroups). The kernel takes a sliding
+layer's window and ring like attn, so Gemma's sliding layers use it too:
+attn's tiles hold 8 keys of 256 (4 of 512), four barriers each, and on the
+console Gemma 4 12B spent 12 ms of a 35 ms token in attn at a 4k context.
 On the console, Coder 7B wrote 65 tok/s at 0.5k tokens of context and 23 at
 18k with attn, 47 at 18k with the first version of attn_dec (the queries and
 weights in shared memory, one value column per thread). Under 256 keys attn
