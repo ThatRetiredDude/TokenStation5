@@ -35,7 +35,7 @@ find_cmdline() {
 
 gib() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1073741824 }'; }
 
-ram_bytes() { awk '/^MemTotal:/ { print $2 * 1024 }' /proc/meminfo; }
+ram_bytes() { awk '/^MemTotal:/ { printf "%.0f\n", $2 * 1024 }' /proc/meminfo; }
 
 amdgpu_file() {  # name: the first amdgpu card's sysfs file
     for d in /sys/class/drm/card*/device; do

@@ -40,7 +40,7 @@ status)
         echo "vram_total=$(cat "$d/mem_info_vram_total" 2>/dev/null || echo 0)"
         break
     done
-    echo "ram_total=$(awk '/^MemTotal:/ { print $2 * 1024 }' /proc/meminfo)"
+    echo "ram_total=$(awk '/^MemTotal:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)"
     n=$(dmesg 2>/dev/null | grep -o 'active_cu_number[^0-9]*[0-9]*' | tail -n 1 | grep -o '[0-9]*$' || true)
     echo "cus_active=${n:-0}"
     f=$(find_cmdline || true)
