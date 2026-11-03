@@ -145,7 +145,7 @@ done
 for src in "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup,local_time,keep_models}.cpp \
         "$root"/ps5/wg/wg.cpp "$root"/ps5/ts/*.cpp "$root"/third_party/qrcodegen/qrcodegen.cpp \
         "$root"/ps5/ui/{canvas,pad,dashboard,chat_page,settings_page,home_page,logs_page}.cpp \
-        "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp "$root"/linux/{platform,display}.cpp; do
+        "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp "$root"/linux/{platform,display,hardware}.cpp; do
     rel=${src#"$root"/}
     o="$out/obj/own/${rel//\//_}.o"
     title_objects+=("$o")

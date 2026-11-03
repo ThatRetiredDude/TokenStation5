@@ -136,6 +136,26 @@ settings such as `TS5_KV=q8`).
 
 Speed test: `ts5 bench -m model.gguf --pp 512 --tg 128`.
 
+## PS5 hardware in the app
+
+On a PS5, Settings has a PS5 HARDWARE section, all from the controller:
+
+- **Fan**: the PS5's own curve, or full speed. There is no off.
+- **Clock boost**: CPU 3.5 GHz and GPU 2.23 GHz, or stock. Nothing past that.
+- **GPU memory for models**: as `tokenstation-memory set`, for the next start.
+- **Compute units**: 36, 38 or 40, as `tokenstation-cu set`, for the next start.
+  More units can be unstable on some consoles: run the test after.
+- **Test the compute units**: stops the model, runs the GPU test for two
+  minutes and shows the verdict.
+- **Temperatures**: whatever the kernel reports in `/sys/class/hwmon`.
+
+Fan and boost need `ps5_control` (ps5-linux-tools). The app changes these
+through `/usr/lib/tokenstation/hw`, which checks every value against a fixed
+list; `/etc/sudoers.d/tokenstation` lets the `tokenstation` group run that one
+script as root without a password. The TV service's user is in the group, and
+so is whoever ran `sudo apt install`. For another desktop user:
+`sudo adduser $USER tokenstation`, then log in again.
+
 ## GPU compute units
 
 `tokenstation-cu` shows, chooses (36, 38 or 40) and tests how many GPU compute

@@ -1,0 +1,6 @@
+# TokenStation5's Settings page changes the PS5's fan, clock boost, GPU
+# memory and compute units through this one script, which checks every
+# value against a fixed list. Members of the tokenstation group (the TV
+# service's user, and desktop users added with
+# "sudo adduser $USER tokenstation") may run it without a password.
+%tokenstation ALL=(root) NOPASSWD: /usr/lib/tokenstation/hw

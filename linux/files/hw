@@ -1,0 +1,78 @@
+#!/bin/sh
+# /usr/lib/tokenstation/hw: the PS5 hardware settings TokenStation5's
+# Settings page changes, as root. /etc/sudoers.d/tokenstation lets members
+# of the tokenstation group run this one script without a password, so the
+# app can change them from the controller. Every value is checked here
+# against a fixed list; nothing else runs as root.
+#
+#   hw status             key=value lines: memory, compute units, boot settings
+#   hw fan auto|max       the fan (ps5_control): the PS5's own curve, or full speed
+#   hw boost on|off       CPU 3.5 GHz and GPU 2.23 GHz (ps5_control), or stock
+#   hw memory 0|8..14     GiB the GPU may map at the next boot (0: the kernel's default)
+#   hw cu 36|38|40        compute units at the next boot (tokenstation-cu)
+#   hw cutest SECONDS     tokenstation-cu test, 30 to 600 s
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# PS5_CONTROL, if ps5_control isn't on the PATH.
+[ -r /etc/default/tokenstation ] && . /etc/default/tokenstation
+ctl=${PS5_CONTROL:-$(command -v ps5_control 2>/dev/null || true)}
+
+need_ctl() {
+    [ -n "$ctl" ] && [ -x "$ctl" ] || { echo "ps5_control isn't installed (ps5-linux-tools)" >&2; exit 3; }
+}
+
+find_cmdline() {
+    for f in /boot/efi/cmdline.txt /efi/cmdline.txt /boot/firmware/cmdline.txt /boot/cmdline.txt; do
+        [ -f "$f" ] && { echo "$f"; return; }
+    done
+}
+
+case "${1:-}" in
+status)
+    for d in /sys/class/drm/card*/device; do
+        [ -f "$d/mem_info_gtt_total" ] || continue
+        echo "gtt_total=$(cat "$d/mem_info_gtt_total")"
+        echo "vram_total=$(cat "$d/mem_info_vram_total" 2>/dev/null || echo 0)"
+        break
+    done
+    echo "ram_total=$(awk '/^MemTotal:/ { print $2 * 1024 }' /proc/meminfo)"
+    n=$(dmesg 2>/dev/null | grep -o 'active_cu_number[^0-9]*[0-9]*' | tail -n 1 | grep -o '[0-9]*$' || true)
+    echo "cus_active=${n:-0}"
+    f=$(find_cmdline || true)
+    if [ -n "$f" ]; then
+        echo "cmdline=$f"
+        p=$(grep -o 'ttm\.pages_limit=[0-9]*' "$f" | head -n 1 | cut -d= -f2 || true)
+        echo "boot_gtt_pages=${p:-0}"
+        m=$(grep -o 'amdgpu\.ps5_cu_unlock=[0-9]*' "$f" | head -n 1 | cut -d= -f2 || true)
+        echo "boot_cu_mode=${m:-0}"
+    fi
+    echo "ps5_control=${ctl:-}"
+    ;;
+fan)
+    need_ctl
+    case "${2:-}" in auto) "$ctl" --fan on ;; max) "$ctl" --fan max ;; *) echo "fan auto|max" >&2; exit 2 ;; esac
+    ;;
+boost)
+    need_ctl
+    case "${2:-}" in on | off) "$ctl" --boost "$2" ;; *) echo "boost on|off" >&2; exit 2 ;; esac
+    ;;
+memory)
+    case "${2:-}" in
+        0) exec tokenstation-memory unset ;;
+        8 | 9 | 10 | 11 | 12 | 13 | 14) exec tokenstation-memory set "$2" ;;
+        *) echo "memory 0|8..14" >&2; exit 2 ;;
+    esac
+    ;;
+cu)
+    case "${2:-}" in 36 | 38 | 40) exec tokenstation-cu set "$2" ;; *) echo "cu 36|38|40" >&2; exit 2 ;; esac
+    ;;
+cutest)
+    case "${2:-}" in '' | *[!0-9]*) echo "cutest SECONDS" >&2; exit 2 ;; esac
+    [ "$2" -ge 30 ] && [ "$2" -le 600 ] || { echo "cutest: 30 to 600 seconds" >&2; exit 2; }
+    exec tokenstation-cu test "$2"
+    ;;
+*)
+    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+esac

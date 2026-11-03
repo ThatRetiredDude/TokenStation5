@@ -106,6 +106,9 @@
 #include "voice.h"
 #include "wg/wg.h"
 #include "ts/tailscale.h"
+#ifdef TS5_LINUX
+#include "hardware.h"
+#endif
 
 #ifndef TS5_VERSION
 #define TS5_VERSION "dev"
@@ -846,6 +849,11 @@ int main(int, char **) {
         printf("ts5-title: chat: %s by voice (%zu bytes)\n", sent ? "message" : "not sent", text.size());
     });
     app::Speaker speaker(user, kModels);
+#ifdef TS5_LINUX
+    // The PS5's fan, clocks, GPU memory and compute units, on Settings.
+    linuxp::Hardware hardware;
+    hardware.start(notify);
+#endif
 
     if (!once.empty()) {
         app::Job j;
@@ -903,6 +911,9 @@ int main(int, char **) {
         s.ts.address = ts_status.address;
         s.ts.account = ts_status.account;
         s.ts.relay = ts_status.relay;
+#ifdef TS5_LINUX
+        s.hw = hardware.info();
+#endif
         s.ts.devices = ts_status.devices;
         for (const wg::PeerState &p : tunnel.tailnet_peers()) s.ts.connected.push_back({p.name, p.address, p.up, p.seen_s, p.from == "direct"});
         if (!v.status.serving.empty()) {
@@ -1286,6 +1297,33 @@ int main(int, char **) {
                 break;
             case ui::Action::Set: {
                 std::string e;
+#ifdef TS5_LINUX
+                // The compute unit test: the served model stops for it (the
+                // test's GPU check loads one of its own) and comes back after.
+                if (a.name == "TS5_PS5_CUTEST") {
+                    const app::Status st = runner.status();
+                    const std::string path = st.serving_path;
+                    if (!path.empty()) {
+                        app::Job j;
+                        j.kind = app::Job::Stop;
+                        runner.push(j);
+                    }
+                    const int n_ctx = opts.n_ctx;
+                    hardware.test(120, [&runner, path, n_ctx] {
+                        if (path.empty()) return;
+                        app::Job j;
+                        j.kind = app::Job::Serve;
+                        j.path = path;
+                        j.n_ctx = n_ctx;
+                        runner.push(j);
+                    });
+                    settings_note.note = "Testing";
+                    settings_note.note_failed = false;
+                    settings_note.note_at = t;
+                    v.settings = settings_view(v);
+                    break;
+                }
+#endif
                 if ((a.name == kRequireKey || a.name == kTailscale) && a.value == "1") {
                     bool any_on = false;
                     for (const app::ApiKey &k : keys.list()) any_on |= k.on;
@@ -1307,6 +1345,9 @@ int main(int, char **) {
                 settings_note.note_at = t;
                 v.settings = settings_view(v);
                 if (ok && a.name == "TS5_WHISPER_MODEL") voice.rescan();
+#ifdef TS5_LINUX
+                if (ok && a.name.rfind("TS5_PS5_", 0) == 0) hardware.apply(a.name, a.value);
+#endif
                 if (ok && a.name == kTailscale) ts_apply();
                 // The served model loads again with a new context cap or KV
                 // cache (read when a model loads, vk_backend.cpp).

@@ -9,6 +9,11 @@ if [ "$1" = configure ]; then
     for g in render video input audio; do
         getent group "$g" >/dev/null && adduser tokenstation "$g" >/dev/null || true
     done
+    # Whoever installed it may change the PS5 hardware settings from the
+    # desktop app too (/etc/sudoers.d/tokenstation), after logging in again.
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && getent passwd "$SUDO_USER" >/dev/null; then
+        adduser "$SUDO_USER" tokenstation >/dev/null 2>&1 || true
+    fi
     mkdir -p /var/lib/tokenstation/models
     chown -R tokenstation:tokenstation /var/lib/tokenstation
     command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true

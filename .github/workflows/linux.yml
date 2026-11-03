@@ -44,6 +44,9 @@ jobs:
           test -x /tmp/pkg/usr/lib/tokenstation/gpu-selftest
           /tmp/pkg/usr/bin/ts5 2>&1 | grep -q "usage: ts5"
           sh -n /tmp/pkg/usr/bin/tokenstation-memory
+          sh -n /tmp/pkg/usr/lib/tokenstation/hw
+          sudo visudo -cf /tmp/pkg/etc/sudoers.d/tokenstation
+          /tmp/pkg/usr/lib/tokenstation/hw status
           /tmp/pkg/usr/bin/tokenstation --version | grep -q "^tokenstation "
       - name: Run the app (lavapipe, no screen)
         run: |

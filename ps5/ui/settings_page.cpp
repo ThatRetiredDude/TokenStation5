@@ -34,7 +34,10 @@ struct Row {
     std::vector<Choice> choices;
     std::string def;  // the value with nothing in ts5.env, as each reader's default
     bool files = false;
-    enum Kind { Setting, Guide, NewKey, ApiKey, Tailscale } kind = Setting;
+    // Info: a reading, not a setting (Linux's PS5 HARDWARE); Action: cross
+    // runs it (value "run" for name).
+    enum Kind { Setting, Guide, NewKey, ApiKey, Tailscale, Info, Action } kind = Setting;
+    std::string value;  // Info and Action: shown on the row
 };
 
 constexpr const char *kSpeechModel = "TS5_WHISPER_MODEL", *kVoice = "TS5_TTS_VOICE";
@@ -154,6 +157,65 @@ const ApiKeyInfo *key_of(const Row &r, const SettingsInfo &info) {
     return nullptr;
 }
 
+#ifdef TS5_LINUX
+std::string gib_text(double g) {
+    char b[32];
+    snprintf(b, sizeof b, "%.1f GiB", g);
+    return b;
+}
+
+// PS5 HARDWARE, on a PS5 running Linux (linux/hardware.h): the fan, the
+// clock boost, the GPU's memory and compute units, the compute unit test and
+// the temperatures.
+void hardware_rows(const SettingsInfo &info, std::vector<Row> &r) {
+    const HwInfo &h = info.hw;
+    if (!h.present) return;
+    const char *sec = "PS5 HARDWARE";
+    const std::string after_restart = "After a restart (and the loader again)";
+    const std::string blocked = h.problem.empty() ? "" : " " + h.problem;
+    r.push_back({sec, "TS5_PS5_FAN", "Fan",
+                 "Automatic follows the PS5's own fan curve. Full speed is louder, and keeps the chip coolest "
+                 "through long jobs and with the clock boost on." + blocked,
+                 "Now", {{"auto", "Automatic"}, {"max", "Full speed"}}, "auto"});
+    r.push_back({sec, "TS5_PS5_BOOST", "Clock boost",
+                 "The fastest clocks Sony's firmware runs: CPU 3.5 GHz, GPU 2.23 GHz, as in games. On is faster for "
+                 "every model. It's as high as the PS5 goes: nothing on Linux sets clocks past it." + blocked,
+                 "Now", {{"1", "On"}, {"0", "Off"}}, "1"});
+    std::string mem = "How much of the PS5's memory the GPU may use for models. Linux gives it half by default; the "
+                      "console gives a title 11.4 GiB. 13 GiB fits 14B models with a long context, with the desktop "
+                      "off. TokenStation never takes more than is free, so a high setting is safe.";
+    if (h.gpu_gib > 0) mem += " Now the GPU may use " + gib_text(h.gpu_gib) + " of " + gib_text(h.ram_gib) + ".";
+    if (h.boot_gtt_gib > 0) mem += " Set for the next start: " + gib_text(h.boot_gtt_gib) + ".";
+    r.push_back({sec, "TS5_PS5_GPU_GIB", "GPU memory for models", mem + blocked, after_restart,
+                 {{"0", "Linux's default"}, {"10", "10 GiB"}, {"11", "11 GiB"}, {"12", "12 GiB"}, {"13", "13 GiB"}},
+                 "0"});
+    std::string cus = "The PS5's GPU has 40 compute units and ships with 36 on. 38 or 40 read prompts faster, but on "
+                      "some chips an extra pair gives wrong answers or hangs. Test at 36 first, then after each step "
+                      "up.";
+    if (h.cus_active > 0) cus += " On now: " + std::to_string(h.cus_active) + ".";
+    if (h.boot_cus != 36) cus += " Set for the next start: " + std::to_string(h.boot_cus) + ".";
+    r.push_back({sec, "TS5_PS5_CUS", "Compute units", cus + blocked, after_restart,
+                 {{"36", "36 (stock)"}, {"38", "38"}, {"40", "40"}}, "36"});
+    const char *test_shown[] = {"Not run yet", "Testing", "Passed", "Failed"};
+    r.push_back({sec, "TS5_PS5_CUTEST", "Test the compute units",
+                 "Two minutes of GPU work checked against the results at 36 compute units, then the GPU check on a "
+                 "model. Any wrong result, hang or reset fails it. The served model stops while it runs, and comes "
+                 "back after." + blocked,
+                 "", {}, "", false, Row::Action, test_shown[h.test]});
+    std::string hottest = "None reported";
+    double top = -1;
+    for (const auto &t : h.temps)
+        if (t.second > top) {
+            top = t.second;
+            hottest = std::to_string((int)(t.second + 0.5)) + " \xC2\xB0" "C";
+        }
+    r.push_back({sec, "", "Temperatures",
+                 h.temps.empty() ? "Linux on this PS5 reports no temperatures (no hwmon sensors)."
+                                 : "Every sensor Linux reports, hottest on the row.",
+                 "", {}, "", false, Row::Info, hottest});
+}
+#endif
+
 // The page's rows: APPS (the instructions, the key setting, making a key and
 // the keys), AWAY FROM HOME (Tailscale), then the settings: CHAT, MODELS,
 // VOICE, CONSOLE, and TUNING last, for what's rarely changed.
@@ -180,6 +242,9 @@ std::vector<Row> rows(const SettingsInfo &info) {
                  "joins your tailnet as a device of its own: nothing to set up on your router, and only your "
                  "tailnet's devices can reach it.",
                  "", {{"1", "On"}, {"0", "Off"}}, "0", false, Row::Tailscale});
+#ifdef TS5_LINUX
+    hardware_rows(info, r);
+#endif
     const auto &s = setting_rows();
     r.insert(r.end(), s.begin(), s.end());
     return r;
@@ -313,6 +378,7 @@ std::string other(const Row &r) {
 }
 
 std::string shown(const Row &r, const SettingsInfo &info) {
+    if (r.kind == Row::Info || r.kind == Row::Action) return r.value;
     if (r.kind == Row::Guide) return "Open";
     if (r.kind == Row::NewKey) return "Make one";
     if (r.kind == Row::Tailscale && current(r) == "1") {
@@ -416,6 +482,15 @@ SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
     }
     if (r.kind == Row::NewKey) {
         ch.new_key = (b & kCross) != 0;
+        return ch;
+    }
+    if (r.kind == Row::Info) return ch;
+    if (r.kind == Row::Action) {
+        if ((b & kCross) && r.value != "Testing") {
+            ch.any = true;
+            ch.name = r.name;
+            ch.value = "run";
+        }
         return ch;
     }
     if (const ApiKeyInfo *k = key_of(r, info)) {
@@ -681,6 +756,24 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
 #endif
     } else if (r.kind == Row::Guide) {
         // The list of guides, drawn above.
+    } else if (r.kind == Row::Info || r.kind == Row::Action) {
+        const std::vector<std::string> *lines = &info.hw.test_lines;
+        std::vector<std::string> temps;
+        if (r.kind == Row::Info) {
+            for (const auto &t : info.hw.temps)
+                temps.push_back(t.first + ": " + std::to_string((int)(t.second + 0.5)) + " \xC2\xB0" "C");
+            lines = &temps;
+        } else if (r.value == "Testing") {
+            c.text(body_, dx, ty, "Testing now.", kAmber);
+            ty += 56;
+        } else {
+            text_glyph(c, body_, dx, ty, "Press", kGlyphCross, "to run it.", kText2);
+            ty += 56;
+        }
+        for (const std::string &l : *lines) {
+            c.text(small_, dx, ty, l, l.find("FAIL") != std::string::npos ? kRed : kText2, dw);
+            ty += 32;
+        }
     } else if (r.kind == Row::Tailscale) {
         // Its last lines stay above the bottom line, where a note ("Saved",
         // "Removed") shows.
@@ -942,6 +1035,8 @@ std::string SettingsPage::cross_does(const SettingsInfo &info) const {
     const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
     if (r.kind == Row::Guide) return in_guide_ && open_ >= 0 ? "Back" : "Open";
     if (r.kind == Row::NewKey) return "New key";
+    if (r.kind == Row::Info) return "";
+    if (r.kind == Row::Action) return r.value == "Testing" ? "" : "Run the test";
     if (r.kind == Row::Tailscale) return current(r) == "1" ? "Turn off" : "Turn on";
     if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "Turn off" : "Turn on";
     if (is_key(r)) return "Type";
@@ -956,6 +1051,7 @@ std::string SettingsPage::cross_does(const SettingsInfo &info) const {
 std::string SettingsPage::arrows_do(const SettingsInfo &info) const {
     const auto rs = rows(info);
     const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
+    if (r.kind == Row::Info || r.kind == Row::Action) return "";
     if (r.kind != Row::Guide) return "\xE2\x86\x90\xE2\x86\x92  Change";
     if (!in_guide_) return "";
     return open_ >= 0 ? "" : "\xE2\x86\x90  Back to the settings";  // on a guide, cross says Back
@@ -964,7 +1060,7 @@ std::string SettingsPage::arrows_do(const SettingsInfo &info) const {
 std::string SettingsPage::square_does(const SettingsInfo &info) const {
     const auto rs = rows(info);
     const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
-    if (r.kind == Row::Guide || r.kind == Row::NewKey) return "";
+    if (r.kind == Row::Guide || r.kind == Row::NewKey || r.kind == Row::Info || r.kind == Row::Action) return "";
     if (r.kind == Row::Tailscale) return info.ts.account.empty() && info.ts.address.empty() ? "" : "Sign out";
     if (r.kind == Row::ApiKey || is_key(r)) return "Remove";
     return "Default";

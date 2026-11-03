@@ -2,7 +2,8 @@
 # Builds the TokenStation Linux package: the full app (tokenstation: the TV
 # dashboard, chat, voice, keys, Tailscale, downloads; linux/build.sh), the
 # engine's command line (ts5), the API-only service, the TV service, and the
-# PS5 tools (tokenstation-cu, tokenstation-memory).
+# PS5 tools (tokenstation-cu, tokenstation-memory, and the Settings page's
+# helper with its sudo rule).
 #
 #   linux/build-deb.sh [VERSION] [OUTDIR]
 #
@@ -31,6 +32,8 @@ install -Dm755 "$root/linux/files/boost.sh" "$pkg/usr/lib/tokenstation/boost.sh"
 install -Dm755 "$out/cu-test/gpu-selftest" "$pkg/usr/lib/tokenstation/gpu-selftest"
 install -Dm755 "$root/linux/cu-test/tokenstation-cu" "$pkg/usr/bin/tokenstation-cu"
 install -Dm755 "$root/linux/files/tokenstation-memory" "$pkg/usr/bin/tokenstation-memory"
+install -Dm755 "$root/linux/files/hw" "$pkg/usr/lib/tokenstation/hw"
+install -Dm440 "$root/linux/files/tokenstation.sudoers" "$pkg/etc/sudoers.d/tokenstation"
 install -Dm644 "$root/linux/files/tokenstation.service" "$pkg/lib/systemd/system/tokenstation.service"
 install -Dm644 "$root/linux/files/tokenstation-tv.service" "$pkg/lib/systemd/system/tokenstation-tv.service"
 install -Dm644 "$root/linux/files/tokenstation.default" "$pkg/etc/default/tokenstation"
@@ -52,6 +55,7 @@ install -m755 "$root/linux/debian/prerm" "$pkg/DEBIAN/prerm"
 install -m755 "$root/linux/debian/postrm" "$pkg/DEBIAN/postrm"
 echo /etc/default/tokenstation > "$pkg/DEBIAN/conffiles"
 
+command -v visudo >/dev/null && visudo -cqf "$pkg/etc/sudoers.d/tokenstation"
 dpkg-deb --root-owner-group --build "$pkg" "$pkg.deb"
 tar -C "$pkg" -czf "$out/tokenstation_${version}_${arch}.tar.gz" usr lib etc
 echo "built $pkg.deb"

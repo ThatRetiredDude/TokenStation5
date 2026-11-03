@@ -54,6 +54,19 @@ struct TsInfo {
     std::vector<TsDeviceInfo> connected;  // the ones that have reached it since it started
 };
 
+// The PS5's hardware under Linux (linux/hardware.h), for the PS5 HARDWARE
+// section; present is false on the console and on other machines.
+struct HwInfo {
+    bool present = false;
+    std::string problem;  // why settings can't be changed ("" when they can)
+    double ram_gib = 0, gpu_gib = 0, vram_gib = 0, gtt_gib = 0;  // now; 0: unknown
+    double boot_gtt_gib = 0;  // the boot setting; 0: the kernel's default
+    int cus_active = 0, boot_cus = 36;
+    enum Test { NotRun, Running, Passed, Failed } test = NotRun;
+    std::vector<std::string> test_lines;  // the last test's summary
+    std::vector<std::pair<std::string, double>> temps;  // sensor, deg C
+};
+
 // What the page shows besides the settings themselves.
 struct SettingsInfo {
     std::vector<ApiKeyInfo> keys;
@@ -73,6 +86,7 @@ struct SettingsInfo {
     bool note_failed = false;
     double note_at = -1e9;  // when (now's clock)
     double now = 0;
+    HwInfo hw;
 };
 
 // A change to save: NAME=VALUE; an empty value puts back the default. Or,

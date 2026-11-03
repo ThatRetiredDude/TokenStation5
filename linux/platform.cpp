@@ -415,18 +415,41 @@ void draw_ime(ui::Canvas &c) {
     }
 }
 
+// A toast's lines: its words wrapped to w, two lines at most.
+std::vector<std::string> toast_lines(const ui::Font &f, const std::string &text, int w) {
+    std::vector<std::string> lines(1);
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t sp = text.find(' ', at);
+        if (sp == std::string::npos) sp = text.size();
+        const std::string word = text.substr(at, sp - at);
+        const std::string tried = lines.back().empty() ? word : lines.back() + " " + word;
+        if (!lines.back().empty() && ui::Canvas::measure(f, tried) > w && lines.size() < 2) lines.push_back(word);
+        else lines.back() = tried;
+        at = sp + 1;
+    }
+    return lines;
+}
+
 void draw_toasts(ui::Canvas &c) {
     using namespace ui;
     const Font &f = fonts->get("body");
+    constexpr int kW = 960, kLine = 40;
     // Bottom right, above the page's button hints, newest lowest.
-    int y = c.height() - 140 - 88 * ((int)toasts.size() - 1);
+    int total = 0;
+    std::vector<std::vector<std::string>> all;
     for (const Toast &t : toasts) {
-        const int w = std::min(900, Canvas::measure(f, t.text) + 64);
-        const int x = c.width() - w - 72;
-        c.round_rect((float)x, (float)y, (float)w, 72, 14, alpha(kPanel, 0xF0));
-        c.round_rect_line((float)x, (float)y, (float)w, 72, 14, 2, kAccent);
-        c.text(f, x + 32, y + 46, t.text, kText, w - 64);
-        y += 88;
+        all.push_back(toast_lines(f, t.text, kW - 64));
+        total += 32 + kLine * (int)all.back().size() + 16;
+    }
+    int y = c.height() - 120 - total;
+    for (const auto &lines : all) {
+        const int h = 32 + kLine * (int)lines.size();
+        const int x = c.width() - kW - 72;
+        c.round_rect((float)x, (float)y, (float)kW, (float)h, 14, alpha(kPanel, 0xF4));
+        c.round_rect_line((float)x, (float)y, (float)kW, (float)h, 14, 2, kAccent);
+        for (size_t i = 0; i < lines.size(); i++) c.text(f, x + 32, y + 44 + kLine * (int)i, lines[i], kText, kW - 64);
+        y += h + 16;
     }
 }
 
@@ -701,6 +724,13 @@ int sceKernelSendNotificationRequest(int, void *request, size_t, int) {
     const std::string text = static_cast<const char *>(request) + 45;
     {
         std::lock_guard<std::recursive_mutex> lk(mu);
+        // The same words again replace the first ones (a setting stepped
+        // through its choices says the same each time).
+        for (auto it = toasts.begin(); it != toasts.end(); ++it)
+            if (it->text == text) {
+                toasts.erase(it);
+                break;
+            }
         toasts.push_back({text, now_s() + 6});
         while (toasts.size() > 4) toasts.pop_front();
         need_render = true;
