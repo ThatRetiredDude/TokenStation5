@@ -8,6 +8,12 @@ name: linux
 # (release.yml) keeps pointing at the PS5 title.
 #
 #   git tag linux-v0.1.0 && git push origin linux-v0.1.0
+#
+# Run by hand (workflow_dispatch), it instead replaces the "linux-latest"
+# pre-release with this build, under fixed names too, so a PS5 can install
+# the newest build with one command and no GitHub sign-in:
+#
+#   curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation_latest_amd64.deb
 
 on:
   push:
@@ -246,3 +252,28 @@ jobs:
             --title "TokenStation for Linux ${GITHUB_REF_NAME#linux-v}" \
             --notes "Debian 12/13 and Ubuntu: sudo apt install ./tokenstation_*.deb. Fedora: sudo dnf install ./tokenstation-*.rpm. Arch: sudo pacman -U tokenstation-*.pkg.tar.zst. Bazzite and SteamOS: unpack tokenstation-*-linux-amd64.tar.gz and run ./install.sh. See linux/README.md." \
             --latest=false
+
+  latest:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [package, deb, fedora, arch, portable, run-ubuntu]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tokenstation-*
+          path: dist
+          merge-multiple: true
+      - name: Replace the linux-latest pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          cp tokenstation_*_amd64.deb tokenstation_latest_amd64.deb
+          cp tokenstation-*.x86_64.rpm tokenstation-latest.x86_64.rpm
+          cp tokenstation-*-linux-amd64.tar.gz tokenstation-latest-linux-amd64.tar.gz
+          cp tokenstation-*.pkg.tar.* tokenstation-latest-x86_64.pkg.tar.zst 2>/dev/null || true
+          ls -l
+          gh release delete linux-latest --repo "$GITHUB_REPOSITORY" --cleanup-tag -y || true
+          gh release create linux-latest ./* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "TokenStation for Linux, newest build (${GITHUB_SHA::7})" \
+            --notes "The newest build from ${GITHUB_REF_NAME}, for testing. Debian/Ubuntu: curl -LO .../tokenstation_latest_amd64.deb && sudo apt install ./tokenstation_latest_amd64.deb"
