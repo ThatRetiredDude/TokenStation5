@@ -21,6 +21,8 @@ Load is the time from picking a model to ready; the loader reads at about 2 GB/s
 
 ## Linux on a PS5 (Debian 13, Mesa 26.1.6 RADV, boost off, 36 compute units)
 
+The full campaign, with the 40-CU column, boost on against off, thermals, long contexts and the helper model, is on [Test results on PS5 Linux](Test-results-on-PS5-Linux).
+
 Every model below passed the GPU check. The 14B models need the GPU memory raised ([PS5 hardware on Linux](PS5-hardware-on-Linux#gpu-memory-for-models)).
 
 | Model | File | Prompt tok/s | Generation tok/s |

@@ -25,6 +25,8 @@ There are two editions, built from the same code:
 - [Web search](Web-search): a Tavily key and the model looks things up
 - [PS5 hardware on Linux](PS5-hardware-on-Linux): GPU memory, compute units, clock boost, fan, tuning
 - [Benchmarks](Benchmarks): measured speeds on the console and on Linux
+- [Test results on PS5 Linux](Test-results-on-PS5-Linux): what was tested on a PS5 with Linux, and what came out
+- [Recommended settings](Recommended-settings): what to run, and which model for what
 - [Building from source](Building-from-source): the title, the Linux packages, the engine
 - [Troubleshooting](Troubleshooting)
 - [Licensing](Licensing): what you may do with it
