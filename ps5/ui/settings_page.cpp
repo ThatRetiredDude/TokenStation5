@@ -181,10 +181,13 @@ void hardware_rows(const SettingsInfo &info, std::vector<Row> &r) {
     const std::string after_restart = "After a restart (and the loader again)";
     const std::string blocked = h.problem.empty() ? "" : " " + h.problem;
     r.push_back({sec, "TS5_PS5_FAN", "Fan",
-                 "Automatic follows the PS5's own fan curve. Cooler ramps the fan up sooner (full speed from a 65 C "
-                 "board reading): quiet when idle, and about 5 C cooler on long prompts, where the PS5 otherwise slows "
-                 "the GPU at 85 C. Full speed is loudest. Past 90 C the fan runs flat out whatever is set." + blocked,
-                 "Now", {{"auto", "Automatic"}, {"cool", "Cooler"}, {"max", "Full speed"}}, "auto"});
+                 "Performance runs the fan flat out whenever a model is working and lets it idle down after: the "
+                 "PS5's own curve watches the board, which stays cool while the chip itself hits its 85 C limit and "
+                 "slows the GPU on every prompt. Automatic is that curve. Cooler ramps it up sooner (full speed from "
+                 "a 65 C board reading). Full speed is loudest. Past 90 C the fan runs flat out whatever is set." +
+                     blocked,
+                 "Now", {{"perf", "Performance"}, {"auto", "Automatic"}, {"cool", "Cooler"}, {"max", "Full speed"}},
+                 "auto"});
     r.push_back({sec, "TS5_PS5_BOOST", "Clock boost",
                  "Off is faster for models: Linux then runs the GPU at its full 2.23 GHz, where the boost's own "
                  "power management holds it lower. On is the console's game clocks (CPU 3.5 GHz), cooler and about "

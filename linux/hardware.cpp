@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -101,12 +102,86 @@ void Hardware::start(Notify notify) {
         // service that did it at boot.
         std::string out;
         const std::string fan = app::setting("TS5_PS5_FAN", "auto"), boost = app::setting("TS5_PS5_BOOST", "0");
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            fan_mode_ = fan;
+        }
         if (!run({"fan", fan == "max" || fan == "cool" ? fan : "auto"}, out))
             printf("ts5-title: hardware: fan: %s\n", out.c_str());
         if (!run({"boost", boost == "0" ? "off" : "on"}, out))
             printf("ts5-title: hardware: boost: %s\n", out.c_str());
         refresh();
     }).detach();
+    watcher_ = std::thread([this] { watch(); });
+}
+
+Hardware::~Hardware() {
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        quit_ = true;
+    }
+    cv_.notify_all();
+    if (watcher_.joinable()) watcher_.join();
+}
+
+void Hardware::fan(const std::string &mode) {
+    std::thread([this, mode] {
+        std::string out;
+        if (!run({"fan", mode}, out)) printf("ts5-title: hardware: fan %s: %s\n", mode.c_str(), out.c_str());
+    }).detach();
+}
+
+// The PS5's own fan curve follows the board sensor, which reads 50-62 C
+// while the die (k10temp Tctl, what the kernel's 85 C clock limiter
+// watches) is at 85-94 C and being clipped: the fan sits near idle through
+// a whole prompt (measured, 2026-11-04). Performance doesn't wait for a
+// temperature: full speed the moment the engine starts working, the curve
+// again 30 s after it stops, once the die reads under 70 C. And full speed
+// whenever the die passes 75 C for any other reason.
+void Hardware::work(bool busy) {
+    bool to_max = false;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        working_ += busy ? 1 : -1;
+        if (working_ < 0) working_ = 0;
+        if (!busy) idle_at_ = now_s();
+        if (busy && fan_mode_ == "perf" && !fan_max_) fan_max_ = to_max = true;
+    }
+    if (to_max) fan("max");
+}
+
+double die_c() {
+    for (const auto &t : read_temps())
+        if (t.first == "k10temp Tctl") return t.second;
+    return -1;
+}
+
+void Hardware::watch() {
+    std::unique_lock<std::mutex> lk(mu_);
+    while (!quit_) {
+        cv_.wait_for(lk, std::chrono::seconds(2));
+        if (quit_ || fan_mode_ != "perf") continue;
+        if (fan_max_) {
+            if (working_ == 0 && now_s() - idle_at_ > 30) {
+                lk.unlock();
+                const double c = die_c();
+                lk.lock();
+                if (c < 70 && working_ == 0 && fan_mode_ == "perf" && fan_max_) {
+                    fan_max_ = false;
+                    fan("auto");
+                }
+            }
+        } else {
+            lk.unlock();
+            const double c = die_c();
+            lk.lock();
+            if (c > 75 && fan_mode_ == "perf" && !fan_max_) {
+                fan_max_ = true;
+                idle_at_ = now_s();
+                fan("max");
+            }
+        }
+    }
 }
 
 void Hardware::refresh() {
@@ -155,9 +230,17 @@ void Hardware::apply(const std::string &name, const std::string &value) {
     std::vector<std::string> args;
     std::string done;
     if (name == "TS5_PS5_FAN") {
-        args = {"fan", value == "max" || value == "cool" ? value : "auto"};
+        bool busy;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            fan_mode_ = value;
+            busy = working_ > 0;
+            fan_max_ = value == "perf" && busy;
+        }
+        args = {"fan", value == "max" || value == "cool" ? value : value == "perf" && busy ? "max" : "auto"};
         done = value == "max"    ? "The fan runs at full speed."
                : value == "cool" ? "The fan ramps up sooner: full speed from a 65 C board reading."
+               : value == "perf" ? "The fan runs at full speed while a model works, and follows the PS5's curve when idle."
                                  : "The fan follows the PS5's own curve.";
     } else if (name == "TS5_PS5_BOOST") {
         args = {"boost", value == "0" ? "off" : "on"};

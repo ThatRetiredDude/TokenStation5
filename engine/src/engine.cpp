@@ -1,4 +1,6 @@
 #include "engine.h"
+
+#include <mutex>
 #include "log.h"
 
 #include <algorithm>
@@ -155,6 +157,35 @@ void Engine::draft_lookup(int32_t tok, int k, std::vector<int32_t> &out) {
     for (size_t i = p; i <= sz && (int)out.size() < k + 1; i++) out.push_back(i < sz ? cached_[i] : tok);
 }
 
+namespace {
+std::mutex work_mu;
+std::function<void(bool)> work_hook;
+int work_depth = 0;
+}  // namespace
+
+void set_work_hook(std::function<void(bool)> hook) {
+    std::lock_guard<std::mutex> lk(work_mu);
+    work_hook = std::move(hook);
+}
+
+WorkScope::WorkScope() {
+    std::function<void(bool)> h;
+    {
+        std::lock_guard<std::mutex> lk(work_mu);
+        if (work_depth++ == 0) h = work_hook;
+    }
+    if (h) h(true);
+}
+
+WorkScope::~WorkScope() {
+    std::function<void(bool)> h;
+    {
+        std::lock_guard<std::mutex> lk(work_mu);
+        if (--work_depth == 0) h = work_hook;
+    }
+    if (h) h(false);
+}
+
 bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
                       const std::function<bool(const std::string &)> &on_text, GenStats &st, std::string &err) {
     if (p.seed) rng_.seed(p.seed);
@@ -163,6 +194,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     st.prompt_tokens = (int)prompt.size();
     if (prompt.empty()) { err = "empty prompt"; return false; }
     if ((int)prompt.size() + 1 > b_->n_ctx()) { err = "prompt longer than the context"; return false; }
+    WorkScope work;
     // Reuse the cached prefix; always evaluate at least the last prompt token.
     size_t keep = 0;
     while (keep < cached_.size() && keep < prompt.size() && cached_[keep] == prompt[keep]) keep++;

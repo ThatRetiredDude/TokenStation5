@@ -438,6 +438,7 @@ void Runner::run(const Job &job) {
     // A check or speed test: on the serving model's own backend when it has
     // room, else on a load of its own with the serving model put back after.
     const bool check = job.kind == Job::Check;
+    const ts5::WorkScope work;  // the fan, on Performance
     const int need_ctx = check ? std::max(1, job.n) : job.pp + job.tg + 1;
     const std::string name = name_for(job.path);
     {

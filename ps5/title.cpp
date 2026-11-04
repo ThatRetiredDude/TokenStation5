@@ -853,6 +853,8 @@ int main(int, char **) {
     // The PS5's fan, clocks, GPU memory and compute units, on Settings.
     linuxp::Hardware hardware;
     hardware.start(notify);
+    // The fan on Performance: full speed while the engine works.
+    ts5::set_work_hook([&hardware](bool busy) { hardware.work(busy); });
 #endif
 
     if (!once.empty()) {

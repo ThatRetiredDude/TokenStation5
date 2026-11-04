@@ -4,6 +4,7 @@
 // /usr/lib/tokenstation/hw as root (sudo -n: /etc/sudoers.d/tokenstation
 // lets the tokenstation group run it, and only it, without a password).
 #pragma once
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -30,15 +31,31 @@ public:
     // The compute unit test (tokenstation-cu test); done() runs after it.
     void test(int seconds, std::function<void()> done);
     bool testing();
+    // The engine started (true) or stopped (false) working. With the fan on
+    // Performance (TS5_PS5_FAN=perf): full speed at once, and the PS5's own
+    // curve again 30 s after the last stop, once the die has cooled.
+    void work(bool busy);
+    ~Hardware();
 
 private:
     void refresh();  // hw status, in the background
     bool run(const std::vector<std::string> &args, std::string &out);
+    void fan(const std::string &mode);  // hw fan, in the background
+    void watch();                       // the Performance fan's thread
     std::mutex mu_;
     Notify notify_;
     ui::HwInfo info_;
     double temps_at_ = -1;
     std::map<std::string, uint64_t> gens_;  // per setting: its latest change
+    // The fan setting, whether Performance has the fan at full speed, how
+    // many stretches of work are on, and when the last one ended.
+    std::string fan_mode_ = "auto";
+    bool fan_max_ = false;
+    int working_ = 0;
+    double idle_at_ = 0;
+    std::condition_variable cv_;
+    bool quit_ = false;
+    std::thread watcher_;
 };
 
 }  // namespace linuxp

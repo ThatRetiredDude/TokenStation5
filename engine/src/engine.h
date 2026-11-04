@@ -89,4 +89,16 @@ private:
 // draft model "lookup 3/9, helper 12/20 accepted" (drafts kept / proposed).
 std::string draft_summary(const GenStats &st);
 
+// Told when the engine starts (true) and stops (false) working: a
+// generation, a GPU check or a speed test. The Linux app runs the PS5's fan
+// up for the stretch. One hook for the process; null to unset.
+void set_work_hook(std::function<void(bool)> hook);
+// Marks a stretch of work for the hook; stretches nest.
+struct WorkScope {
+    WorkScope();
+    ~WorkScope();
+    WorkScope(const WorkScope &) = delete;
+    WorkScope &operator=(const WorkScope &) = delete;
+};
+
 }  // namespace ts5

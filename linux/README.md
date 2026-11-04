@@ -216,9 +216,15 @@ that change the arithmetic or leave the Vulkan spec are never tried.
 
 On a PS5, Settings has a PS5 HARDWARE section, all from the controller:
 
-- **Fan**: the PS5's own curve, a cooler one (full speed from a 65 C board
-  reading, for long prompts, where the kernel's 85 C limit otherwise clips
-  the GPU clock), or full speed. There is no off.
+- **Fan**: Performance (full speed whenever a model is working, the PS5's
+  own curve again 30 s after it stops and the chip has cooled; full speed
+  too whenever the chip passes 75 C), the PS5's own curve, a cooler one (full
+  speed from a 65 C board reading), or full speed. There is no off. The
+  PS5's curve watches the board sensor, which reads 50-62 C while the chip
+  itself (the die, what the kernel's 85 C clock limiter watches) sits at
+  85-94 C and gets its clock clipped on every prompt, so with that curve the
+  fan idles through the work (measured on a PS5: the limiter fired on every
+  pass of an hour's benchmarks at 10% fan).
 - **Clock boost**: off by default, which is faster for models: the kernel's
   own driver then runs the GPU at its full 2.23 GHz, where the boost's power
   management holds it lower (about 8% slower on prompts, measured on every
