@@ -10,7 +10,8 @@
  * exits; it reads no kernel memory itself. Everything goes to stdout and to
  * /data/ts5-memprobe.txt (payloads/memprobe/run.sh fetches it).
  *
- * Copyright (C) 2026 ThatRetiredDude. GPL-3.0-or-later (links the PS5
+ * Copyright (C) 2026 ThatRetiredDude. PolyForm Small Business 1.0.0 as source;
+ * the built payload is GPL-3.0-or-later (it links the PS5
  * payload SDK). */
 
 #include <sys/types.h>

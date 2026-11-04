@@ -143,15 +143,16 @@ can't be reversed.
 
 ## Licensing
 
-- **The engine, scripts, docs and Linux packaging:**
-  [PolyForm Small Business 1.0.0](LICENSE.md). Free for individuals and for
-  companies under 100 people and about $1M in revenue; larger companies need
-  a commercial license.
-- **The PS5 title and the Linux app** (`ps5/`, `payloads/` and the built
-  programs): [GPL-3.0-or-later](ps5/LICENSE), because they link GPL-3.0 code.
+- **Everything the project wrote** (the engine, the app, the Linux
+  packages, scripts and docs): [PolyForm Small Business 1.0.0](LICENSE.md).
+  Free for individuals and for companies under 100 people and about $1M in
+  revenue; larger companies need a commercial license.
+- **The built PS5 title**: [GPL-3.0-or-later](licenses/GPL-3.0.txt) as a
+  whole, because it links PS5_Vulkan's and the PS5 payload SDK's GPL-3.0
+  code. The Linux app links no GPL code and stays PolyForm.
 
 [LICENSING.md](LICENSING.md) has the full map, including what the GPL means
-for the engine code inside the title, and [NOTICE.md](NOTICE.md) lists the
+for the source inside the title, and [NOTICE.md](NOTICE.md) lists the
 third-party code. Model weights are downloaded by you under each model's own
 license. TokenStation5 is independent and not affiliated with or endorsed by
 Sony Interactive Entertainment, Tailscale Inc. or any model maker.

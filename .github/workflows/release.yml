@@ -93,7 +93,7 @@ jobs:
               "category": "ai",
               "description": "Private AI server on your PS5: Qwen, Llama, Mistral and Gemma on its GPU behind an OpenAI-compatible API, with API keys, Tailscale, voice in and out, chat on the TV and Hugging Face downloads.",
               # The repo is dual-licensed (PolyForm root, GPL-3.0-or-later for
-              # the ps5/ title), so GitHub detects no single SPDX license
+              # the built title), so GitHub detects no single SPDX license
               # (NOASSERTION). The catalog's sentinel for that case is
               # "Unlicensed", which its validator accepts with no warning while
               # leaving the repo's actual licensing untouched. See docs/STORE.md.

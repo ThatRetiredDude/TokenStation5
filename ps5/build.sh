@@ -206,7 +206,8 @@ cp "$param" "$root/ps5/sce_sys/icon0.png" "$app/sce_sys/"
 cp "$vk/runtime/libc.prx" "$app/sce_module/libc.prx"
 # What every copy of the title must carry (LICENSING.md): its license, the
 # notices, and where its source is.
-cp "$root/ps5/LICENSE" "$root/NOTICE.md" "$app/"
+cp "$root/NOTICE.md" "$app/"
+cp "$root/licenses/GPL-3.0.txt" "$app/LICENSE"
 cp -r "$root/licenses" "$app/"
 commit() { git -C "$1" rev-parse HEAD 2> /dev/null || echo "$2"; }
 # CI names a pull request's two commits: it builds their merge, which only the
