@@ -116,6 +116,14 @@
 #include "mmbq_q5_k.spv.h"
 #include "mmbq_q6_k.spv.h"
 #include "mmbq_q8_0.spv.h"
+#include "mmb16qp_q4_k.spv.h"
+#include "mmb16qp_q5_k.spv.h"
+#include "mmb16qp_q6_k.spv.h"
+#include "mmb16qp_q8_0.spv.h"
+#include "mmbqp_q4_k.spv.h"
+#include "mmbqp_q5_k.spv.h"
+#include "mmbqp_q6_k.spv.h"
+#include "mmbqp_q8_0.spv.h"
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
@@ -416,7 +424,9 @@ private:
         if (const char *e = getenv("TS5_MMB_F16_SKIP")) mmb_f16_skip_ = std::string(",") + e + ",";
         // Prompt kernel variants under test (TS5_MMB_VAR): "d" double-buffers
         // the shared tiles (one barrier a step; f16 only), "q" loads x by
-        // quads of tokens (vector stores to shared memory), "dq" both.
+        // quads of tokens (vector stores to shared memory), "dq" both, "qp"
+        // the quad loads with the x tile's rows padded (bank-conflict-free
+        // stores).
         if (const char *e = getenv("TS5_MMB_VAR")) mmb_var_ = e;
         kv_ = kv_type_setting();
         if (kv_ == KvType::Q8 && !(attn_ok_all() && hp_.max_hd() % 32 == 0)) {
@@ -583,6 +593,8 @@ private:
         P(mmb16q_q4_k, 4) P(mmb16q_q5_k, 4) P(mmb16q_q6_k, 4) P(mmb16q_q8_0, 4)
         P(mmb16dq_q4_k, 4) P(mmb16dq_q5_k, 4) P(mmb16dq_q6_k, 4) P(mmb16dq_q8_0, 4)
         P(mmbq_q4_k, 4) P(mmbq_q5_k, 4) P(mmbq_q6_k, 4) P(mmbq_q8_0, 4)
+        P(mmb16qp_q4_k, 4) P(mmb16qp_q5_k, 4) P(mmb16qp_q6_k, 4) P(mmb16qp_q8_0, 4)
+        P(mmbqp_q4_k, 4) P(mmbqp_q5_k, 4) P(mmbqp_q6_k, 4) P(mmbqp_q8_0, 4)
         // The one-token mat-vecs twice: mv_rows_ rows per workgroup, and one
         // (".1") for matrices with few rows.
 #define MV(n, nb)                                                                       \
