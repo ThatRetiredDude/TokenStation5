@@ -85,11 +85,18 @@ fan)
         case "$2" in
             max) echo 0 > "$hm/pwm1_enable" ;;
             cool)
+                # The driver keeps the points in order (a point's pwm may
+                # not drop below the one before it), so the speeds go in
+                # from the top point down, then the temperatures from the
+                # bottom up.
+                i=8
+                for pwm in 255 255 255 255 255 204 153 77; do
+                    echo "$pwm" > "$hm/pwm1_auto_point${i}_pwm"
+                    i=$((i - 1))
+                done
                 i=1
-                for pt in "50000 77" "55000 153" "60000 204" "65000 255" "70000 255" "75000 255" "80000 255" "87000 255"; do
-                    set -- $pt
-                    [ -w "$hm/pwm1_auto_point${i}_temp" ] && echo "$1" > "$hm/pwm1_auto_point${i}_temp"
-                    [ -w "$hm/pwm1_auto_point${i}_pwm" ] && echo "$2" > "$hm/pwm1_auto_point${i}_pwm"
+                for temp in 50000 55000 60000 65000 70000 75000 80000 87000; do
+                    echo "$temp" > "$hm/pwm1_auto_point${i}_temp"
                     i=$((i + 1))
                 done
                 echo 2 > "$hm/pwm1_enable"
