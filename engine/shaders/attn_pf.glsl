@@ -12,7 +12,8 @@
 // attn does. With HEAD_DIM defined the head size is fixed, so every loop over
 // it unrolls with no branch per step (attn_pf128, attn_pf256). A sliding
 // layer's keys (win > 0) are its last win, from a ring of ring slots, as in
-// attn.
+// attn. With KV_Q8 (the _q8 builds) the cache is 8-bit values with an f16
+// scale per 32, as attn_q8 reads it.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_control_flow_attributes : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -55,15 +56,11 @@ const uint HDMAX = 128;
 #endif
 const uint BC = KEYS, STEP = 16, NV = HDMAX / (4 * LANES), WG = 256;
 const uint NL = BC * HDMAX / 4 / WG;  // vec4s of K (and of V) each thread loads per tile
-// The f16 cache's tiles stay f16 in shared memory: half the bytes to read,
-// and the GPU multiplies f16 by f32 into an f32 sum at the f32 rate.
-#ifdef KV_Q8
-#define TILE vec4
-#else
-#define TILE f16vec4
-#endif
-shared TILE ks[BC * HDMAX / 4];      // [key][dim / 4]
-shared TILE vs[BC * HDMAX / 4];
+// The tiles are f16 in shared memory (the 8-bit cache's values times their
+// scales, rounded as the f16 cache rounds them): half the bytes to read, and
+// the GPU multiplies f16 by f32 into an f32 sum at the f32 rate.
+shared f16vec4 ks[BC * HDMAX / 4];      // [key][dim / 4]
+shared f16vec4 vs[BC * HDMAX / 4];
 
 const float NEG_INF = -1.0 / 0.0;
 #ifdef HEAD_DIM
@@ -121,7 +118,7 @@ void main() {
 #ifdef KV_Q8
 #define LOAD_ONE(n, src) kr[n] = kc[src]; vr[n] = vc[src]; ksc[n] = float(k_scale[(src) / 8]); vsc[n] = float(v_scale[(src) / 8]);
 #define ZERO_ONE(n) kr[n] = 0u; vr[n] = 0u; ksc[n] = 0.0; vsc[n] = 0.0;
-#define STORE_ONE(n, e) ks[e] = i8x4(kr[n]) * ksc[n]; vs[e] = i8x4(vr[n]) * vsc[n];
+#define STORE_ONE(n, e) ks[e] = f16vec4(i8x4(kr[n]) * ksc[n]); vs[e] = f16vec4(i8x4(vr[n]) * vsc[n]);
 #else
 #define LOAD_ONE(n, src) kr[n] = kc[src]; vr[n] = vc[src];
 #define ZERO_ONE(n) kr[n] = f16vec4(0.0); vr[n] = f16vec4(0.0);

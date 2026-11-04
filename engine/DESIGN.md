@@ -23,7 +23,7 @@ small enough to reason about.
 | Tokenizers | byte-level BPE (Qwen2, Llama 3 pre-tokenizers), SentencePiece (Llama 2, Gemma 3), Gemma 4's (BPE merges over code points, spaces as U+2581, split only at newlines) | Tekken's case-splitting pre-tokenizer (approximated now) |
 | Chat formats | ChatML, Llama 3, Mistral `[INST]` | Jinja templates, tool calls |
 | API | `/v1/chat/completions` (+ streaming), `/v1/completions`, `/v1/models`, `/health`; llama-server style `timings` | Anthropic `/v1/messages`, parallel slots |
-| KV cache | f16 | q8_0 |
+| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`) | |
 
 Not in scope: training, multi-GPU, CUDA/ROCm, Python.
 
@@ -239,7 +239,7 @@ attn needs 4 workgroups each reading the keys) and tiles of 16 keys, since
 16 or more, so a smaller GPU (llvmpipe) keeps attn.
 
 Generation over 256 keys or more (`TS5_ATTN_DEC` sets how many; 0: never),
-with an f16 cache and heads of 128, uses `shaders/attn_dec.glsl`: up to 8
+with heads of 128, uses `shaders/attn_dec.glsl`: up to 8
 rows per workgroup (`attn_dec`; `attn_dec4` for 4, where a KV head has 3 or
 4 query heads), its slice of the keys 128 at a time. Thread t scores key t
 against every row, reading the key's 256 bytes straight from the cache; the
@@ -412,8 +412,17 @@ values, 2 bytes each in f16, or 1 byte plus an f16 scale per 32 values
 The 8-bit cache is q8_0's layout split in two: the values (4 to a word, as
 `attn` loads them) and the scales, which are the largest magnitude of the 32
 values over 127, rounded to f16; values round to nearest even. `qkv_post_q8`
-writes it, `attn_q8` reads it (both are the f16 shaders compiled with
-`KV_Q8`). It needs `attn` (the old attention kernel only reads f16) and heads
+writes it, and every attention kernel has a build that reads it (the f16
+shaders compiled with `KV_Q8`, named `_q8`: attn, attn_pf and its 128, 256
+and 512 builds, attn_dec and its 4-row and wide-head builds), so the 8-bit
+cache takes the same kernels as f16 at every head size and context: attn_pf
+dequantizes its tiles into f16 shared memory, attn_dec reads a key as 8
+words of 16 values and its 4 scales (half the bytes of f16) and each value
+word with its block's scale. Before that (up to a6aa2c8) only `attn` and
+`attn_pf` up to heads of 128 had 8-bit builds, so long contexts and Gemma's
+wide heads fell back to attn: Qwen3 14B generated 18 tok/s at an 8k context
+in q8 against 33 in f16, Gemma 4 12B read prompts at 94 against 288. It
+needs `attn` (the old attention kernel only reads f16) and heads
 a multiple of 32 wide, else the backend falls back to f16. On the test
 models it moves logits by about 0.3% of the largest one against an fp32
 cache, where the f16 cache moves them by 0.01%. On the console it runs at

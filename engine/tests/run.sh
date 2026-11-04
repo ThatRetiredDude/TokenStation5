@@ -188,8 +188,29 @@ for k in 8 16; do
         --tol 0.002 --backend vk --ntok 160 --step "${shapes[1]}" "${shapes[4]}"
 done
 echo "== 8-bit KV cache (TS5_KV=q8), against the CPU's fp32 cache: about 0.3% of the largest logit"
+# Every attention kernel has an 8-bit build: attn_pf (and attn_pf128,
+# attn_pf256; attn_pf512 below, with Gemma 4), attn_dec (lanes per key, and
+# a thread per key) and attn.
 TS5_KV=q8 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 300 "${shapes[@]}"
+TS5_KV=q8 TS5_ATTN_PF128=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 300 "${shapes[@]}"
 TS5_KV=q8 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 60 --step "${shapes[@]}"
+TS5_KV=q8 TS5_ATTN_DEC=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 160 --step \
+    "${shapes[@]}"
+TS5_KV=q8 TS5_ATTN_DEC=1 TS5_ATTN_DEC_KEYS=0 TS5_ATTN_DEC_PLAIN=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu \
+    --tol 0.01 --backend vk --ntok 160 --step "${shapes[1]}" "${shapes[4]}"
+LP_NATIVE_VECTOR_WIDTH=512 TS5_KV=q8 TS5_ATTN_DEC=1 TS5_ATTN_DEC_KEYS=16 python3 "$here/compare.py" --ts5 "$ts5" \
+    --ref cpu --tol 0.01 --backend vk --ntok 160 --step "${shapes[1]}" "${shapes[3]}" "${shapes[4]}"
+TS5_KV=q8 TS5_ATTN_SPLITS=7 TS5_ATTN_DEC=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk \
+    --ntok 40 --step "${shapes[@]}"
+# Gemma 4's heads of 512 (attn_pf512, which needs subgroups of 16 or more,
+# and attn_dec4_512) and its sliding layers, with the f16 and the 8-bit
+# cache. In lavapipe's subgroups made 16 wide the f16 attn_pf512 build's
+# 16-lane sums come out wrong (4.5% off, where the 8-bit build and the
+# console are fine), so these run in 32-wide subgroups.
+LP_NATIVE_VECTOR_WIDTH=1024 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${g4[@]}"
+LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk "${g4[@]}"
+LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 TS5_ATTN_DEC=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 \
+    --backend vk --ntok 40 --step "${g4[@]}"
 
 echo "== speculative decoding: the small verify batch, then draft-on output == draft-off output"
 mk qwen2 qwen2 Q4_K_M  # the mvt_* verify kernels serve only the K-quants
