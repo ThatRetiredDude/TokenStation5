@@ -23,7 +23,7 @@ Linux adds a few things the console can't do:
   16 GB), about 12 GiB with Steam open, which fits a 14B model (Qwen 2.5 Coder 14B, Qwen 3 14B). See
   [Bigger models](#bigger-models).
 - **All 8 CPU cores** for speech (the console gives a title about 6).
-- **Clock boost and fan control** (`ps5_control`), and **36, 38 or 40 GPU
+- **Fan and clock control** (`ps5_control`), and **36, 38 or 40 GPU
   compute units** (`tokenstation-cu`).
 - **No 13.60 firmware cap on updates**: install a new build, and your models,
   keys, chats and usage stay where they are.
@@ -39,7 +39,10 @@ unlock anything by itself:
    and kstuff must be off. Re-run the loader on every boot.
 2. Install [ps5-linux-tools](https://github.com/ps5-linux/ps5-linux-tools)
    so that `ps5_control` is on the PATH, or set `PS5_CONTROL` (below). The
-   services use it to turn on the fan and the clock boost.
+   services use it to turn on the fan and to set the clock boost. Its
+   `ps5boost.service` turns the boost on at every boot; disable it
+   (`sudo systemctl disable --now ps5boost`) to keep the faster boost-off
+   clocks (below) between TokenStation's starts.
 3. GPU memory: leave `vram.txt` on the image's FAT32 partition at its default
    (512 MB). Models go in GTT, system memory the GPU maps, which
    `tokenstation-memory` sets the size of.
@@ -166,7 +169,7 @@ The app's own settings are on its Settings page, as on the console.
 | `MODELS_DIR` | `/var/lib/tokenstation/models` | API-only: where models live. |
 | `HOST`, `PORT` | `0.0.0.0`, `8081` | API-only: where the API listens. |
 | `CONTEXT` | `8192` | API-only: context length, or `auto` for what fits. |
-| `PS5_BOOST` | `1` | Both: fan on, CPU 3.5 GHz, GPU 2.23 GHz. Skipped if `ps5_control` is missing. |
+| `PS5_BOOST` | `0` | Both: the fan on, and the clock boost off (`0`, faster for models: see below) or on (`1`). Skipped if `ps5_control` is missing. |
 | `PS5_CONTROL` | empty | Path to `ps5_control` if it isn't on the PATH. |
 | `EXTRA_ARGS` | empty | API-only: more options for `ts5 serve`. |
 
@@ -213,7 +216,11 @@ that change the arithmetic or leave the Vulkan spec are never tried.
 On a PS5, Settings has a PS5 HARDWARE section, all from the controller:
 
 - **Fan**: the PS5's own curve, or full speed. There is no off.
-- **Clock boost**: CPU 3.5 GHz and GPU 2.23 GHz, or stock. Nothing past that.
+- **Clock boost**: off by default, which is faster for models: the kernel's
+  own driver then runs the GPU at its full 2.23 GHz, where the boost's power
+  management holds it lower (about 8% slower on prompts, measured on every
+  model). On is the console's game clocks, CPU 3.5 GHz, and runs cooler.
+  Nothing on Linux sets clocks past 2.23 GHz.
 - **GPU memory for models**: Most available (the default), or a fixed size,
   as `tokenstation-memory set`, for the next start.
 - **Compute units**: 36, 38 or 40, as `tokenstation-cu set`, for the next start.

@@ -182,12 +182,13 @@ void hardware_rows(const SettingsInfo &info, std::vector<Row> &r) {
     const std::string blocked = h.problem.empty() ? "" : " " + h.problem;
     r.push_back({sec, "TS5_PS5_FAN", "Fan",
                  "Automatic follows the PS5's own fan curve. Full speed is louder, and keeps the chip coolest "
-                 "through long jobs and with the clock boost on." + blocked,
+                 "through long jobs." + blocked,
                  "Now", {{"auto", "Automatic"}, {"max", "Full speed"}}, "auto"});
     r.push_back({sec, "TS5_PS5_BOOST", "Clock boost",
-                 "The fastest clocks Sony's firmware runs: CPU 3.5 GHz, GPU 2.23 GHz, as in games. On is faster for "
-                 "every model. It's as high as the PS5 goes: nothing on Linux sets clocks past it." + blocked,
-                 "Now", {{"1", "On"}, {"0", "Off"}}, "1"});
+                 "Off is faster for models: Linux then runs the GPU at its full 2.23 GHz, where the boost's own "
+                 "power management holds it lower. On is the console's game clocks (CPU 3.5 GHz), cooler and about "
+                 "8% slower on prompts. Nothing on Linux sets clocks past 2.23 GHz." + blocked,
+                 "Now", {{"0", "Off"}, {"1", "On"}}, "0"});
     std::string mem = "How much of the PS5's memory the GPU may use for models. Linux gives it half by default. "
                       "Most available lets the GPU map all but 1 GiB; it's a limit, not "
                       "a reservation, and TokenStation sizes each model to the memory that's free when it loads, so "

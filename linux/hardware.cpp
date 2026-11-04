@@ -100,7 +100,7 @@ void Hardware::start(Notify notify) {
         // As the settings say, from the start: a desktop session has no
         // service that did it at boot.
         std::string out;
-        const std::string fan = app::setting("TS5_PS5_FAN", "auto"), boost = app::setting("TS5_PS5_BOOST", "1");
+        const std::string fan = app::setting("TS5_PS5_FAN", "auto"), boost = app::setting("TS5_PS5_BOOST", "0");
         if (!run({"fan", fan == "max" ? "max" : "auto"}, out))
             printf("ts5-title: hardware: fan: %s\n", out.c_str());
         if (!run({"boost", boost == "0" ? "off" : "on"}, out))
