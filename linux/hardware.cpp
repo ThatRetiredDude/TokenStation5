@@ -101,7 +101,7 @@ void Hardware::start(Notify notify) {
         // service that did it at boot.
         std::string out;
         const std::string fan = app::setting("TS5_PS5_FAN", "auto"), boost = app::setting("TS5_PS5_BOOST", "0");
-        if (!run({"fan", fan == "max" ? "max" : "auto"}, out))
+        if (!run({"fan", fan == "max" || fan == "cool" ? fan : "auto"}, out))
             printf("ts5-title: hardware: fan: %s\n", out.c_str());
         if (!run({"boost", boost == "0" ? "off" : "on"}, out))
             printf("ts5-title: hardware: boost: %s\n", out.c_str());
@@ -155,8 +155,10 @@ void Hardware::apply(const std::string &name, const std::string &value) {
     std::vector<std::string> args;
     std::string done;
     if (name == "TS5_PS5_FAN") {
-        args = {"fan", value == "max" ? "max" : "auto"};
-        done = value == "max" ? "The fan runs at full speed." : "The fan follows the PS5's own curve.";
+        args = {"fan", value == "max" || value == "cool" ? value : "auto"};
+        done = value == "max"    ? "The fan runs at full speed."
+               : value == "cool" ? "The fan ramps up sooner: full speed from a 65 C board reading."
+                                 : "The fan follows the PS5's own curve.";
     } else if (name == "TS5_PS5_BOOST") {
         args = {"boost", value == "0" ? "off" : "on"};
         done = value == "0" ? "Clock boost off." : "Clock boost on: CPU 3.5 GHz, GPU 2.23 GHz.";

@@ -7,7 +7,7 @@
 # against a fixed list; nothing else runs as root.
 #
 #   hw status             key=value lines: memory, compute units, boot settings
-#   hw fan auto|max       the fan: the kernel's curve (ps5_fan hwmon), or full speed
+#   hw fan auto|cool|max  the fan: the kernel's curve (ps5_fan hwmon), a steeper one, or full speed
 #   hw boost on|off       CPU 3.5 GHz and GPU 2.23 GHz (ps5_control), or stock
 #   hw memory max|0|8..14 GiB the GPU may map at the next boot (max: all but 1 GiB;
 #                         0: the kernel's default)
@@ -57,7 +57,11 @@ status)
     echo "ps5_control=${ctl:-}"
     for d in /sys/class/hwmon/hwmon*; do
         [ "$(cat "$d/name" 2>/dev/null)" = ps5_fan ] || continue
-        case "$(cat "$d/pwm1_enable" 2>/dev/null)" in 0) echo "fan=max" ;; 1) echo "fan=manual" ;; 2) echo "fan=auto" ;; esac
+        case "$(cat "$d/pwm1_enable" 2>/dev/null)" in
+            0) echo "fan=max" ;;
+            1) echo "fan=manual" ;;
+            2) [ "$(cat "$d/pwm1_auto_point4_pwm" 2>/dev/null)" = 255 ] && echo "fan=cool" || echo "fan=auto" ;;
+        esac
         break
     done
     ;;
@@ -65,15 +69,36 @@ fan)
     # The ps5-linux kernel's own fan driver (hwmon "ps5_fan") runs the fan
     # from its curve and overrides the servo pattern ps5_control --fan max
     # sets within a second, so full speed means its pwm1_enable=0 (full),
-    # 2 being the curve. Above 90 C the driver takes over whatever is set.
-    # Without that driver (an older kernel), ps5_control does both.
-    case "${2:-}" in auto | max) ;; *) echo "fan auto|max" >&2; exit 2 ;; esac
+    # 2 being the curve. "cool" is the curve made steeper (full speed from
+    # a 65 C board reading instead of 87; stock is 50 C 10%, 60 30%, 65 40%,
+    # 70 50%, 75 65%, 80 80%, 85 95%, 87 100%): quiet at idle, and about
+    # 5 C cooler on long prompts (measured on a PS5), where the kernel's
+    # 85 C limiter otherwise clips the GPU clock. Above 90 C the driver
+    # takes over whatever is set.
+    # Without that driver (an older kernel), ps5_control does auto and max.
+    case "${2:-}" in auto | cool | max) ;; *) echo "fan auto|cool|max" >&2; exit 2 ;; esac
     hm=
     for d in /sys/class/hwmon/hwmon*; do
         [ "$(cat "$d/name" 2>/dev/null)" = ps5_fan ] && [ -w "$d/pwm1_enable" ] && { hm=$d; break; }
     done
     if [ -n "$hm" ]; then
-        if [ "$2" = max ]; then echo 0 > "$hm/pwm1_enable"; else echo 2 > "$hm/pwm1_enable"; fi
+        case "$2" in
+            max) echo 0 > "$hm/pwm1_enable" ;;
+            cool)
+                i=1
+                for pt in "50000 77" "55000 153" "60000 204" "65000 255" "70000 255" "75000 255" "80000 255" "87000 255"; do
+                    set -- $pt
+                    [ -w "$hm/pwm1_auto_point${i}_temp" ] && echo "$1" > "$hm/pwm1_auto_point${i}_temp"
+                    [ -w "$hm/pwm1_auto_point${i}_pwm" ] && echo "$2" > "$hm/pwm1_auto_point${i}_pwm"
+                    i=$((i + 1))
+                done
+                echo 2 > "$hm/pwm1_enable"
+                ;;
+            auto)
+                [ -w "$hm/curve_reset" ] && echo 1 > "$hm/curve_reset"
+                echo 2 > "$hm/pwm1_enable"
+                ;;
+        esac
         # The console's own fan servo stays on under the kernel's control.
         [ -n "$ctl" ] && [ -x "$ctl" ] && "$ctl" --fan on >/dev/null 2>&1 || true
     else
