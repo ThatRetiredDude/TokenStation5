@@ -69,8 +69,8 @@ The workflow writes these fields; they already match this repo:
 The catalog's submission check compares the record's `license` with the
 license GitHub detects for the repository. GitHub reports this repo as
 **`NOASSERTION`** — it can't map it to a single SPDX id — because the root is
-[PolyForm Small Business](../LICENSE.md) and only the `ps5/` title and the
-built artifact are GPL-3.0-or-later (see [LICENSING.md](../LICENSING.md)).
+[PolyForm Small Business](../LICENSE.md) and only the built title is
+GPL-3.0-or-later (see [LICENSING.md](../LICENSING.md)).
 
 For exactly this case the catalog validator
 ([`catalog/verify.py`](https://github.com/darkxex/ps5-homebrew-catalog/blob/main/catalog/verify.py))

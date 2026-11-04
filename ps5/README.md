@@ -292,7 +292,7 @@ On the console, everything lives in the title's own folder,
 | `usage.tsv`, `usage.prev.tsv` | a line per API request (chat and completions, the TV's own chat too): when, the model, the app's address, tokens and times, and why it wasn't answered if it wasn't; never the prompt, the reply or a key. Tab-separated, its columns named on its second line (`engine/src/usage.h`). Written every 2 s and as the title closes; past 2 MiB it becomes `usage.prev.tsv` |
 | `chats/` | the Chat page's saved chats, a JSON file each (`ID.json`: its title, when it began and was last written, and every message and reply), written after each message and each reply; square twice on a chat in the sidebar removes its file (`chat_store.h`) |
 | `usage-hours.tsv` | the same requests summed by hour, model, app address and key, a row each, written a few seconds after each hour ends (a request that ends up in an hour already written gets a row of its own; readers add rows with the same hour, model, address and key). Home's 7- and 30-day charts read it; it keeps 400 days, trimmed once it passes 4 MiB |
-| `LICENSE`, `NOTICE.md`, `SOURCE.txt` | from the build: the title's license (GPL-3.0), the third-party notices, and the commits of its source |
+| `LICENSE`, `NOTICE.md`, `SOURCE.txt` | from the build: the built title's license (GPL-3.0 as a whole), the third-party notices, and the commits of its source |
 
 The title takes each command file as soon as it sees it. A title can't count
 on seeing the console's `/data`: ShadowMountPlus only puts it in a title's
@@ -335,9 +335,12 @@ build used `PPSA05005`, and came up as "A Monster's Expedition"). The
 
 ## License note
 
-The `eboot.bin` links PS5_Vulkan's platform code and start files, which are
-GPL-3.0-or-later, so a distributed title is GPL-3.0. RADV and Mesa are MIT,
-and so are whisper.cpp and ggml (`third_party/whisper.cpp`) and kokoro.cpp
-(`third_party/kokoro.cpp`).
-The dashboard's text comes from Inter (SIL Open Font License 1.1) and DejaVu
-Sans Mono (Bitstream Vera license), rendered into `ui/font.bin`.
+The code in this folder is the project's own, under PolyForm Small Business
+like the rest of the repository. The built title is GPL-3.0-or-later as a
+whole, because `eboot.bin` links PS5_Vulkan's platform code and start files,
+which are GPL-3.0-or-later; every copy of the title carries the GPL text as
+`LICENSE`, `NOTICE.md` and `SOURCE.txt` for that reason. RADV and Mesa are
+MIT, as are whisper.cpp, ggml and kokoro.cpp. The dashboard's text comes from
+Inter (SIL Open Font License 1.1) and DejaVu Sans Mono (Bitstream Vera
+license), rendered into `ui/font.bin`. [LICENSING.md](../LICENSING.md) has
+the full map.

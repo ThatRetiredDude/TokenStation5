@@ -206,7 +206,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 Author: Daniel Hope <daniel.hope@smartalock.com>
 ```
 
-In its crypto, BLAKE2s follows RFC 7693, and Poly1305 is from
+In its crypto, BLAKE2s is the reference code of RFC 7693 (under the IETF
+Trust's Simplified BSD terms for code in RFCs), and Poly1305 is from
 [poly1305-donna](https://github.com/floodyberry/poly1305-donna) (public domain
 or MIT). X25519 is from Mike Hamburg's STROBE, under the MIT license in
 `third_party/wireguard-lwip/src/crypto/refc/x25519-license.txt`:
@@ -238,7 +239,8 @@ THE SOFTWARE.
 ### Tailscale client (`ps5/ts`)
 
 `ps5/ts` (`tailscale.cpp`, `noise.cpp`, `h2.cpp`, `nacl.cpp`) is this
-project's own code, GPL-3.0-or-later with the rest of `ps5/`. It speaks the
+project's own code, PolyForm Small Business like the rest of `ps5/` (and
+GPL-3.0 as part of the built title, see LICENSING.md). It speaks the
 protocol of [Tailscale](https://github.com/tailscale/tailscale)'s
 coordination and DERP relay servers so the PS5 can join a tailnet, but it
 contains no code from Tailscale's client (BSD-3-Clause). Its crypto uses
@@ -515,11 +517,17 @@ revisions. None of their code is stored in this repo.
 | [PS5_Mesa](https://github.com/mihawk-99/PS5_Mesa) (Mesa 26.2 with RADV and ACO) | the Vulkan driver, linked in whole | MIT for RADV and most of Mesa; individual files carry their own SPDX identifiers |
 | [LLVM libc++](https://libcxx.llvm.org/) | the C++ standard library | Apache-2.0 WITH LLVM-exception |
 
-The full GPL-3.0 text is in [ps5/LICENSE](ps5/LICENSE). Whoever distributes a
+The full GPL-3.0 text is in [licenses/GPL-3.0.txt](licenses/GPL-3.0.txt). Whoever distributes a
 built title must also offer its corresponding source: this repo at the commit
 it was built from, plus the pinned revisions of the projects above.
 
 ## Linux build
+
+The Linux app (`tokenstation`) is built from `ps5/` and `linux/` with the
+same third-party parts as the title except PS5_Vulkan, the payload SDK and
+PS5_Mesa: whisper.cpp, kokoro.cpp, lwIP, wireguard-lwip, qrcodegen and Mbed
+TLS, plus SDL2 (zlib) and the system's Vulkan loader, dynamically. It
+contains no GPL code, so it stays under PolyForm Small Business.
 
 The Linux `ts5` binary is built from `engine/` alone (no whisper.cpp). It
 links only the system's Vulkan loader (Apache-2.0) and the C++ runtime (libstdc++, GPL-3.0 WITH GCC-exception-3.1, which places no
