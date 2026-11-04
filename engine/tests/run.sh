@@ -286,6 +286,18 @@ TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-tok.gguf" "$ts5" run --backend cpu -m "
     -p "$nr" -n 100 --temp 0 > "$work/tok-on.txt" 2> "$work/tok-on.err"
 cmp "$work/padr-off.txt" "$work/tok-on.txt"
 grep -q 'draft model not used: the draft model.s vocabulary differs (token 1000 is "\[RENAMED\]"' "$work/tok-on.err"
+echo "== placeholders under other names (Gemma 4's <unusedN> rows, typed as text, against Gemma 3's) draft; a text token named like one doesn't"
+mk_k qwen2-padnorm qwen2 qwen2 --pad-tokens 128 --pad-name "<unused" --pad-type 1
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-padnorm.gguf" "$ts5" run --backend cpu -m "$work/qwen2-padlist.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/padn-on.txt" 2> "$work/padn-on.err"
+cmp "$work/padl-off.txt" "$work/padn-on.txt"
+grep -q "draft model: 128 control or placeholder tokens named differently (ids 151936 to 152063)" "$work/padn-on.err"
+grep -q "helper [0-9]*/[1-9][0-9]* accepted" "$work/padn-on.err"
+mk_k qwen2-unusedtok qwen2 qwen2 --rename-token 1000 --rename-to "<unused9>"
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-unusedtok.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/unu-on.txt" 2> "$work/unu-on.err"
+cmp "$work/padr-off.txt" "$work/unu-on.txt"
+grep -q 'draft model not used: the draft model.s vocabulary differs (token 1000 is "<unused9>", not "atus")' "$work/unu-on.err"
 echo "== the guards at the vocabulary seams, forced to fire (a boosted row the greedy target soon picks)"
 mk_k qwen2-padhot qwen2 qwen2 --pad-tokens 128 --boost-token 151940
 # A target that samples into its pad range stops the draft model with a

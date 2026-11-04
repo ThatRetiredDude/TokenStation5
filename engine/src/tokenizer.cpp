@@ -511,15 +511,21 @@ bool Tokenizer::drafter_vocab_ok(const Gguf &g, std::string &err, std::string &n
     if (n == 0) { err = "the draft model's token list is empty"; return false; }
     // Token types 3 (control), 4 (user-defined) and 5 (unused) are never
     // produced by text; a different name at the same id is a different chat
-    // format, not a different vocabulary.
+    // format, not a different vocabulary. Gemma's <unusedN> placeholders
+    // (6,000 of them, typed as text in Gemma 4's files and shifted by the
+    // seven tool tokens it added) and [PADN] rows count the same way.
     auto special = [](int t) { return t == 3 || t == 4 || t == 5; };
+    auto placeholder = [](const std::string &n) {
+        return (n.compare(0, 7, "<unused") == 0 && n.back() == '>') || (n.compare(0, 4, "[PAD") == 0 && n.back() == ']');
+    };
     size_t renamed = 0, first = 0, last = 0;
     for (size_t i = 0; i < n; i++) {
         const std::string *s = std::get_if<std::string>(&(*toks)[i]);
         if (!s) { err = "the draft model's token list is malformed"; return false; }
         if (*s == tokens_[i]) continue;
         const int64_t *dt = dty && i < dty->size() ? std::get_if<int64_t>(&(*dty)[i]) : nullptr;
-        const bool ok = i < types_.size() && special(types_[i]) && dt && special((int)*dt);
+        const bool ok = (placeholder(tokens_[i]) || (i < types_.size() && special(types_[i]))) &&
+                        (placeholder(*s) || (dt && special((int)*dt)));
         if (!ok) {
             char buf[96];
             snprintf(buf, sizeof buf, "the draft model's vocabulary differs (token %zu is ", i);
@@ -531,7 +537,7 @@ bool Tokenizer::drafter_vocab_ok(const Gguf &g, std::string &err, std::string &n
     }
     if (renamed) {
         char buf[160];
-        snprintf(buf, sizeof buf, "%zu control tokens named differently (ids %zu to %zu); every draft is verified",
+        snprintf(buf, sizeof buf, "%zu control or placeholder tokens named differently (ids %zu to %zu); every draft is verified",
                  renamed, first, last);
         note = buf;
     }
