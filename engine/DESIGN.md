@@ -168,13 +168,19 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   Llama 3.x's large activations put Llama 3.2 3B over the bar at 512
   tokens (0.78%, against 0.04% in f32), so Llama stays in f32. Moving the
   f16 sums into f32 every 8 products instead of 32 didn't help and cost as
-  much as f32. Two variants of the kernel are built for measuring
-  (`TS5_MMB_VAR=d|q|dq`): `d` keeps two steps' tiles in shared memory, so
-  a step takes one barrier instead of two and a wave's stores of the next
-  step overlap the others' sums (f16 only: the f32 tiles would fill the 64
-  KiB); `q` has each thread load 4 values of each of its quad's 4 tokens
-  and store them as 4 vectors instead of 16 scalars. Both sum in the same
-  order as the kernel they vary, so their output is the same.
+  much as f32. The kernel's x loads: by default (`TS5_MMB_VAR=q`) each
+  thread loads 4 values of each of its quad's 4 tokens and stores them to
+  shared memory as 4 vectors instead of 16 scalars, which on the PS5 made
+  the f16 kernel 20-26% faster on the Qwen family (Qwen3 14B 342 -> 431
+  tok/s, Qwen3 8B 583 -> 712, DeepSeek 14B 370 -> 443) and 7% on Gemma 4
+  (375 -> 402), as much at 4096 tokens as at 512; the plain loads
+  (`TS5_MMB_VAR=`) stay for the f32 kernel, where the quad loads ran 3%
+  slower. `d` keeps two steps' tiles in shared memory, so a step takes one
+  barrier instead of two and a wave's stores of the next step overlap the
+  others' sums (f16 only: the f32 tiles would fill the 64 KiB): worth half
+  of q alone, nothing on top of it (`dq`). `qp` pads the x tile's rows so
+  the quad stores spread over four banks (being measured). Every variant
+  sums in the same order, so their output is the same.
 - 9 or more (`mm_*`, `shaders/matmul_tiled.glsl`): 64 rows x 64 tokens per
   workgroup. Half the threads dequantize a 64 x 64 slice of W into shared
   memory while the other half load the matching slice of X, then each thread

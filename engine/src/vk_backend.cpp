@@ -422,12 +422,23 @@ private:
         if (gemma) mmb_f16_skip_ = ",ffn_gate,ffn_up,";
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_F16_SKIP")) mmb_f16_skip_ = std::string(",") + e + ",";
-        // Prompt kernel variants under test (TS5_MMB_VAR): "d" double-buffers
-        // the shared tiles (one barrier a step; f16 only), "q" loads x by
-        // quads of tokens (vector stores to shared memory), "dq" both, "qp"
-        // the quad loads with the x tile's rows padded (bank-conflict-free
-        // stores).
-        if (const char *e = getenv("TS5_MMB_VAR")) mmb_var_ = e;
+        // The prompt kernel's variants (TS5_MMB_VAR): "q" loads x by quads of
+        // tokens and stores them to shared memory as vectors, "d"
+        // double-buffers the shared tiles (one barrier a step; f16 only),
+        // "dq" both, "qp" the quad loads with the x tile's rows padded. On
+        // the PS5 (fan at full, 2026-11-04) q is the fastest on every model
+        // and the f16 default: prompts Qwen3 14B 342 -> 431 tok/s (+26%),
+        // Qwen3 8B 583 -> 712, DeepSeek 14B 370 -> 443, Gemma 4 12B 375 ->
+        // 402 (+7%), as much at 4096 tokens, checks unchanged; d alone is
+        // worth half of that and dq no more than q. The f32 kernel's quad
+        // variant ran 3% slower than its plain one (Gemma 4), so f32 stays
+        // plain unless TS5_MMB_VAR says.
+        mmb_var_ = "q";
+        if (const char *e = getenv("TS5_MMB_VAR")) {
+            mmb_var_ = e;
+            mmb_var32_ = e;
+            mmb_var32_.erase(std::remove(mmb_var32_.begin(), mmb_var32_.end(), 'd'), mmb_var32_.end());
+        }
         kv_ = kv_type_setting();
         if (kv_ == KvType::Q8 && !(attn_ok_all() && hp_.max_hd() % 32 == 0)) {
             ts5::log_line("ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16");
@@ -1059,8 +1070,7 @@ private:
             split_used_ = p_off + S * slice;
         }
         const bool f16 = mmb_f16_ && (mmb_f16_skip_.empty() || mmb_f16_skip_.find("," + role(w) + ",") == std::string::npos);
-        std::string var = mmb_var_;
-        if (!f16) var.erase(std::remove(var.begin(), var.end(), 'd'), var.end());  // no f32 double-buffer (64 KiB)
+        const std::string &var = f16 ? mmb_var_ : mmb_var32_;  // no f32 double-buffer (64 KiB)
         dispatch(std::string(f16 ? "mmb16" : "mmb") + var + "_" + qname(w.type()), {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128,
                  (ntok + 127) / 128, what, S);
     }
@@ -1564,7 +1574,7 @@ private:
     // find which matmuls put a model over the check's bar, and to keep them
     // there.
     std::string mmb_f16_skip_;
-    std::string mmb_var_;  // TS5_MMB_VAR: prompt kernel variant under test
+    std::string mmb_var_, mmb_var32_;  // the f16 and f32 prompt kernels' variants (TS5_MMB_VAR)
     size_t split_used_ = 0;  // floats of split_ that kernels may still read
     // The KV cache's type (TS5_KV=q8 or f16).
     KvType kv_ = KvType::F16;
