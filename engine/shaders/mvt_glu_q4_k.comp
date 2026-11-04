@@ -4,7 +4,9 @@
 // a verify batch through what mv16_glu_q4_k is for one token. Laid out as
 // mvt_q4_k (the nibbles made floats and the scales and mins decoded once
 // per row and block, before the token loop, the low nibbles first and the
-// high ones after), but each block's words are loaded from both matrices
+// high ones after, each block summed in mv16_q4_k's order so that a verify
+// batch agrees bit for bit with the one-token forward), but each block's
+// words are loaded from both matrices
 // and dotted with the same x values, so the x traffic is paid once for the
 // two biggest lines of a verify pass, and the swiglu kernel and its
 // barrier are spared. Holding two matrices' words doubles the register
@@ -43,13 +45,9 @@ uint scales_mins(uvec4 h, uint p) {
 }
 vec4 bytes4(uint w) { return vec4(float(w & 255u), float((w >> 8) & 255u), float((w >> 16) & 255u), float(w >> 24)); }
 
-// Thread th's two sub-blocks' scales and mins, times the block's d and
-// dmin: (d s_lo, d s_hi, dmin m_lo, dmin m_hi).
-vec4 factors(uvec4 h, uint th) {
-    const vec4 sm = bytes4(scales_mins(h, th >> 1));
-    const vec2 dm = unpackHalf2x16(h.x);
-    return vec4(dm.x * sm.x, dm.x * sm.y, dm.y * sm.z, dm.y * sm.w);
-}
+// Thread th's two sub-blocks' scales and mins as floats: (s_lo, s_hi,
+// m_lo, m_hi), as mv16_q4_k's block_dot decodes them.
+vec4 scales(uvec4 h, uint th) { return bytes4(scales_mins(h, th >> 1)); }
 
 // The thread's 16 low (hi == 0) or high nibbles of word q as floats.
 void nibbles(uvec4 q, uint hi, out vec4 w[4]) {
@@ -87,34 +85,68 @@ void main() {
             hu[i] = u128[o];
             qu[i] = u128[o + 1 + th];
         }
-        vec4 fg[NRMAX], fu[NRMAX];
+        vec4 smg[NRMAX], smu[NRMAX];
+        vec2 dmg[NRMAX], dmu[NRMAX];
         [[unroll]] for (uint i = 0; i < NR; i++) {
-            fg[i] = factors(hg[i], th);
-            fu[i] = factors(hu[i], th);
+            smg[i] = scales(hg[i], th);
+            dmg[i] = unpackHalf2x16(hg[i].x);
+            smu[i] = scales(hu[i], th);
+            dmu[i] = unpackHalf2x16(hu[i].x);
         }
         const uint x0 = (b * 256) / 4 + 16 * (th >> 1) + 4 * (th & 1u);
-        [[unroll]] for (uint hi = 0; hi < 2; hi++) {
+        // The low nibbles against each token's first 16 x values: the sums
+        // s0 and ta of mv16_q4_k's block_dot, held until the high half.
+        float s0g[NRMAX * NTMAX], s0u[NRMAX * NTMAX], ta[NTMAX];
+        {
             vec4 wg[NRMAX][4], wu[NRMAX][4];
             [[unroll]] for (uint i = 0; i < NR; i++) {
-                nibbles(qg[i], hi, wg[i]);
-                nibbles(qu[i], hi, wu[i]);
+                nibbles(qg[i], 0, wg[i]);
+                nibbles(qu[i], 0, wu[i]);
             }
             [[unroll]] for (uint t = 0; t < NT; t++) {
-                const uint xt = (pc.x_off + t * pc.x_stride) / 4 + x0 + 8 * hi;
-                vec4 x[4];
+                const uint xt = (pc.x_off + t * pc.x_stride) / 4 + x0;
+                vec4 a[4];
                 float xs = 0.0;
                 [[unroll]] for (uint c = 0; c < 4; c++) {
-                    x[c] = X4[xt + c];
-                    xs += x[c].x + x[c].y + x[c].z + x[c].w;
+                    a[c] = X4[xt + c];
+                    xs += a[c].x + a[c].y + a[c].z + a[c].w;
+                }
+                ta[t] = xs;
+                [[unroll]] for (uint i = 0; i < NR; i++) {
+                    float sg = 0.0, su = 0.0;
+                    [[unroll]] for (uint c = 0; c < 4; c++) {
+                        sg += dot(wg[i][c], a[c]);
+                        su += dot(wu[i][c], a[c]);
+                    }
+                    s0g[i * NTMAX + t] = sg;
+                    s0u[i * NTMAX + t] = su;
+                }
+            }
+        }
+        // The high nibbles against the other 16, then each block's sum into
+        // its row, in block_dot's order.
+        {
+            vec4 wg[NRMAX][4], wu[NRMAX][4];
+            [[unroll]] for (uint i = 0; i < NR; i++) {
+                nibbles(qg[i], 1, wg[i]);
+                nibbles(qu[i], 1, wu[i]);
+            }
+            [[unroll]] for (uint t = 0; t < NT; t++) {
+                const uint xt = (pc.x_off + t * pc.x_stride) / 4 + x0 + 8;
+                vec4 e[4];
+                float te = 0.0;
+                [[unroll]] for (uint c = 0; c < 4; c++) {
+                    e[c] = X4[xt + c];
+                    te += e[c].x + e[c].y + e[c].z + e[c].w;
                 }
                 [[unroll]] for (uint i = 0; i < NR; i++) {
                     float sg = 0.0, su = 0.0;
                     [[unroll]] for (uint c = 0; c < 4; c++) {
-                        sg += dot(wg[i][c], x[c]);
-                        su += dot(wu[i][c], x[c]);
+                        sg += dot(wg[i][c], e[c]);
+                        su += dot(wu[i][c], e[c]);
                     }
-                    accg[i * NTMAX + t] += fg[i][hi] * sg - fg[i][2 + hi] * xs;
-                    accu[i * NTMAX + t] += fu[i][hi] * su - fu[i][2 + hi] * xs;
+                    accg[i * NTMAX + t] += dmg[i].x * (smg[i].x * s0g[i * NTMAX + t] + smg[i].y * sg) - dmg[i].y * (smg[i].z * ta[t] + smg[i].w * te);
+                    accu[i * NTMAX + t] += dmu[i].x * (smu[i].x * s0u[i * NTMAX + t] + smu[i].y * su) - dmu[i].y * (smu[i].z * ta[t] + smu[i].w * te);
                 }
             }
         }

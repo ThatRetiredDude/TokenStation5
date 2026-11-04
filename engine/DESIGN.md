@@ -301,15 +301,25 @@ batch's x sits in the 4 MB L2, but at one row per workgroup a 19k-row
 matrix re-read it from L2 per (row, token) — several GB a layer at 7
 tokens, measured on the console as a verify pass costing 5.7x a single
 step — which the row tiling divides by NR. The Q4_K and Q5_K batch
-kernels turn the nibbles into floats and decode the scales and mins (times
-d and dmin) once per row and block, before the token loop, which is then
-8 dot products and 4 multiply-adds a token and row: done per token, as
-the one-token kernels do it, the ALU work set the pace on the PS5 under
-Linux (Qwen 2.5 Coder 7B: a 2-token batch 1.58x a one-token mat-vec, 8
-tokens 3.9x, each token about 40% of a mat-vec, where the Q6_K batch
-kernel, with more bytes per block, ran 1.05x and 1.5x). The low nibbles go
-through the token loop first and the high ones after, so a row holds 16
-floats at a time. The feed-forward's gate and up,
+kernels turn the nibbles into floats and decode the scales and mins once
+per row and block, before the token loop, which is then 8 dot products
+and a few multiply-adds a token and row: done per token, as the one-token
+kernels do it, the ALU work set the pace on the PS5 under Linux (Qwen 2.5
+Coder 7B: a 2-token batch 1.58x a one-token mat-vec, 8 tokens 3.9x, each
+token about 40% of a mat-vec, where the Q6_K batch kernel, with more
+bytes per block, ran 1.05x and 1.5x). The low nibbles go through the
+token loop first and the high ones after, so a row holds 16 floats at a
+time, and the low halves' sums wait for the high ones so that each block
+is summed into its row in exactly the one-token kernel's order, d (s_lo
+sum_lo + s_hi sum_hi) - dmin (m_lo x_lo + m_hi x_hi). That order is a
+correctness rule, not a style: speculative decoding reproduces the
+one-token output only while the verify batch's logits are bit for bit
+the one-token forward's, and a first version that folded d and dmin into
+the scales ahead of the token loop rounded differently and sent Qwen3 8B's
+prose, with the helper on at temperature 0, off the helper-off text at a
+near-tie. Any change to a batch kernel is checked by `ts5 logits` with
+and without `--step`, whose dumps must agree at position 0 (later
+positions differ through attention). The feed-forward's gate and up,
 the two biggest lines of a verify pass, can run as one kernel
 (`TS5_MVT_GLU=1` picks `mvt_glu_q4_k`): both matrices' blocks are dotted
 with the same x loads and swiglu is applied in place, as `mv16_glu_q4_k`
