@@ -298,6 +298,15 @@ TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-unusedtok.gguf" "$ts5" run --backend cp
     -p "$nr" -n 100 --temp 0 > "$work/unu-on.txt" 2> "$work/unu-on.err"
 cmp "$work/padr-off.txt" "$work/unu-on.txt"
 grep -q 'draft model not used: the draft model.s vocabulary differs (token 1000 is "<unused9>", not "atus")' "$work/unu-on.err"
+echo "== a SentencePiece drafter whose files spell the space mark as a space (Gemma 4 against Gemma 3) drafts"
+mk_k llama-spaces llama llama-spm --plain-spaces
+TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/llama-kmix.gguf" -p "$nr" -n 100 --temp 0 > "$work/sp-off.txt" 2> /dev/null
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/llama-spaces.gguf" "$ts5" run --backend cpu -m "$work/llama-kmix.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/sp-on.txt" 2> "$work/sp-on.err"
+cmp "$work/sp-off.txt" "$work/sp-on.txt"
+grep -q "draft model .* ready" "$work/sp-on.err"
+! grep -q "named differently\|draft model \(stopped\|failed\|not used\)" "$work/sp-on.err"
+grep -q "helper [0-9]*/[1-9][0-9]* accepted" "$work/sp-on.err"
 echo "== the guards at the vocabulary seams, forced to fire (a boosted row the greedy target soon picks)"
 mk_k qwen2-padhot qwen2 qwen2 --pad-tokens 128 --boost-token 151940
 # A target that samples into its pad range stops the draft model with a

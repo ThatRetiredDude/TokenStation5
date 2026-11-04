@@ -36,7 +36,8 @@ public:
     // placeholders): every draft is verified by this model, so such a token
     // can only cost a rejected draft; `note` then says how many differ. Any
     // text token differing (a different vocabulary) fails, with the reason
-    // in err.
+    // in err. A space spelled as SentencePiece's U+2581 on one side and as
+    // a space on the other (Gemma 3 against Gemma 4) is the same token.
     bool drafter_vocab_ok(const Gguf &g, std::string &err, std::string &note) const;
     // Formats a conversation with the model's chat format, ending with the
     // assistant turn opened.

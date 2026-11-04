@@ -16,7 +16,7 @@ from gguf import GGMLQuantizationType, GGUFReader, GGUFValueType, GGUFWriter, qu
 
 
 def copy_tokenizer(reader, writer, pad_tokens=0, rename_controls=False, rename_token=-1, rename_to="[RENAMED]",
-                   pad_name="[PAD", pad_type=5):
+                   pad_name="[PAD", pad_type=5, plain_spaces=False):
     tf = reader.fields.get("tokenizer.ggml.token_type")
     types = [tf.parts[i].tolist()[0] for i in tf.data] if tf else []
     for field in reader.fields.values():
@@ -36,6 +36,8 @@ def copy_tokenizer(reader, writer, pad_tokens=0, rename_controls=False, rename_t
                     vals = [f"<|ctl{i}|>" if i < len(types) and types[i] in (3, 4) else v for i, v in enumerate(vals)]
                 if rename_token >= 0:
                     vals[rename_token] = rename_to
+                if plain_spaces:
+                    vals = [v.replace("\u2581", " ") for v in vals]
             # Qwen 2.5 7B GGUFs pad the token list itself with placeholders;
             # the parallel scores and types arrays grow with it.
             if field.name == "tokenizer.ggml.tokens":
@@ -145,6 +147,8 @@ def main():
                     help="name the control tokens differently (a drafter with another chat format)")
     ap.add_argument("--rename-token", type=int, default=-1, help="name this one text token differently")
     ap.add_argument("--rename-to", default="[RENAMED]", help="the renamed token's new name")
+    ap.add_argument("--plain-spaces", action="store_true",
+                    help="spell SentencePiece's U+2581 as a space in every token, as Gemma 4's files do")
     ap.add_argument("--pad-name", default="[PAD", help="the padding tokens' name prefix ([PAD or <unused, as Gemma)")
     ap.add_argument("--pad-type", type=int, default=5, help="the padding tokens' type (5 unused; Gemma 4 types its placeholders 1)")
     ap.add_argument("--boost-token", type=int, default=-1,
@@ -196,7 +200,8 @@ def main():
         w.add_key_value("gemma4.attention.shared_kv_layers", 0, GGUFValueType.UINT32)
         w.add_key_value("gemma4.embedding_length_per_layer_input", 0, GGUFValueType.UINT32)
     w.add_file_type(0)
-    copy_tokenizer(reader, w, a.pad_tokens, a.rename_controls, a.rename_token, a.rename_to, a.pad_name, a.pad_type)
+    copy_tokenizer(reader, w, a.pad_tokens, a.rename_controls, a.rename_token, a.rename_to, a.pad_name, a.pad_type,
+                   a.plain_spaces)
 
     kmix = a.quant in ("Q4_K_M", "Q5_K_M")
     qtype = getattr(GGMLQuantizationType, a.quant[:4]) if kmix else getattr(GGMLQuantizationType, a.quant)

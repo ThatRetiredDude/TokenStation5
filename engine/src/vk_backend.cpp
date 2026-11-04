@@ -389,7 +389,13 @@ private:
         // they're the default for qwen2 and qwen3. Off for the rest: Gemma
         // 3 and 4 fail the check (0.8-0.9%), and Llama 3.2 3B went over it
         // at 512 tokens (0.78%; 0.02-0.04% in f32). TS5_MMB_F16=0|1 decides.
-        mmb_f16_ = ctx_->float16 && (hp_.arch == "qwen2" || hp_.arch == "qwen3");
+        // Gemma passes the check with f16 everywhere but gate and up, whose
+        // inputs carry its large activations (the PS5: Gemma 4 12B prompts
+        // +7% with the rest in f16, 0.9% of the largest logit with gate and
+        // up in f16 too).
+        const bool gemma = hp_.arch == "gemma3" || hp_.arch == "gemma4";
+        mmb_f16_ = ctx_->float16 && (hp_.arch == "qwen2" || hp_.arch == "qwen3" || gemma);
+        if (gemma) mmb_f16_skip_ = ",ffn_gate,ffn_up,";
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_F16_SKIP")) mmb_f16_skip_ = std::string(",") + e + ",";
         kv_ = kv_type_setting();
@@ -1516,8 +1522,9 @@ private:
     // default.
     bool mmb_f16_ = false;
     // Roles (attn_q, ffn_down, output, ...) that stay on the f32 kernel with
-    // f16 on, comma-separated (TS5_MMB_F16_SKIP): to find which matmuls put
-    // a model over the check's bar.
+    // f16 on, comma-separated (TS5_MMB_F16_SKIP; Gemma: gate and up): to
+    // find which matmuls put a model over the check's bar, and to keep them
+    // there.
     std::string mmb_f16_skip_;
     size_t split_used_ = 0;  // floats of split_ that kernels may still read
     // The KV cache's type (TS5_KV=q8 or f16).

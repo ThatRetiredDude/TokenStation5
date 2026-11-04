@@ -518,11 +518,17 @@ bool Tokenizer::drafter_vocab_ok(const Gguf &g, std::string &err, std::string &n
     auto placeholder = [](const std::string &n) {
         return (n.compare(0, 7, "<unused") == 0 && n.back() == '>') || (n.compare(0, 4, "[PAD") == 0 && n.back() == ']');
     };
+    // SentencePiece files spell a space as U+2581 (Gemma 3); Gemma 4's
+    // spell it as a space. The same token either way.
+    auto spaces = [](std::string n) {
+        for (size_t p; (p = n.find("\xE2\x96\x81")) != std::string::npos;) n.replace(p, 3, " ");
+        return n;
+    };
     size_t renamed = 0, first = 0, last = 0;
     for (size_t i = 0; i < n; i++) {
         const std::string *s = std::get_if<std::string>(&(*toks)[i]);
         if (!s) { err = "the draft model's token list is malformed"; return false; }
-        if (*s == tokens_[i]) continue;
+        if (*s == tokens_[i] || spaces(*s) == spaces(tokens_[i])) continue;
         const int64_t *dt = dty && i < dty->size() ? std::get_if<int64_t>(&(*dty)[i]) : nullptr;
         const bool ok = (placeholder(tokens_[i]) || (i < types_.size() && special(types_[i]))) &&
                         (placeholder(*s) || (dt && special((int)*dt)));
