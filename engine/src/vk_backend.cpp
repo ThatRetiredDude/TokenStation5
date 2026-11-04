@@ -362,14 +362,22 @@ private:
         mvt_glu_rows_ = std::min(mvt_rows_, 2u);
         if (const char *e = getenv("TS5_BARRIER")) barrier_mode_ = std::min(2, std::max(0, atoi(e)));
         if (const char *e = getenv("TS5_FUSE")) fuse_ = atoi(e) != 0;
+        // Gemma's gate and up through the fused GLU kernels (tanh-GELU in
+        // place of SiLU): it passes the checks and is more exact than the
+        // two-pass path (Gemma 3 12B 0.36% against 0.45%), but on the PS5
+        // it generates 1% slower (Gemma 4 12B 40.6 -> 40.2 tok/s, Gemma 3
+        // 12B 42.9 -> 42.4, 4B 111.7 -> 110.2), so it waits for a faster
+        // fused kernel. TS5_GLU_GELU=1 turns it on.
+        if (const char *e = getenv("TS5_GLU_GELU")) glu_gelu_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_NORM_FUSE")) norm_fuse_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
 #ifndef TS5_PS5
         // RADV (with wave32): splitting the small matrices' columns down to
-        // 128 blocks was 2% faster on the PS5 under Linux (472 -> 482 tok/s)
-        // at 36 compute units; at 40, 256 is another 2% on Qwen3 8B and
-        // even on the 14B (512: +3% on the 8B, -2.5% on the 14B).
-        if (strstr(props_.deviceName, "RADV")) mmb_split_ = 256;
+        // 128 blocks is faster on the PS5 under Linux: 2% at 36 compute
+        // units with the f32 kernel (472 -> 482 tok/s), and with the f16
+        // kernel at 40 it beats 256 by 1.3% on Qwen3 8B and 3-3.6% on the
+        // 14B (256 was 2% ahead of 128 only with the f32 kernel at 40).
+        if (strstr(props_.deviceName, "RADV")) mmb_split_ = 128;
 #endif
         if (const char *e = getenv("TS5_MMB_SPLIT")) mmb_split_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SLICES")) mmb_slices_ = std::max(0, atoi(e));
@@ -1131,6 +1139,7 @@ private:
     // a verify batch of Q4_K through mvt_glu_q4_k, which loads each token's
     // x once for both matrices. False where that doesn't apply.
     bool glu_applies(const Layer &L, int n) const {
+        if (hp_.gelu && !glu_gelu_) return false;
         const bool batch = n >= 2 && n <= 8 && mvt_ && mvt_glu_ && L.w_gate.type() == GGML_Q4_K;
         const bool one = n == 1 && mv16_ && fast_type(L.w_gate) && L.w_gate.type() != GGML_Q6_K;
         return !(!(n == 1 ? one : batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != L.w_up.type() ||
@@ -1481,6 +1490,7 @@ private:
     // inputs, and gate, up and swiglu in one kernel for one token (TS5_FUSE=0:
     // off).
     bool fuse_ = true;
+    bool glu_gelu_ = false;  // the fused GLU kernels for Gemma's GELU too (TS5_GLU_GELU=1)
     // One token: the RMSNorm before q, k, v, gate and up and the output
     // folded into those mat-vecs (mv16n_*), which read the residual and
     // scale their sums, rather than a one-workgroup rmsnorm dispatch and a

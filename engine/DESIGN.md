@@ -63,7 +63,7 @@ back):
 3. `qkv_post`: bias (Qwen2), per-head RMSNorm (Qwen3), RoPE (normal or NeoX), write K and V to the cache (f16 or 8-bit, below)
 4. `attn`: attention over the cache (below), plus `attn_merge` when it splits the keys
 5. `matmul` output projection, accumulating into the residual
-6. `rmsnorm` (FFN norm), `matmul` gate and up, `swiglu`, `matmul` down accumulating into the residual. For one token of Q4_K, gate, up and swiglu are one kernel (`mv16_glu_q4_k`; Gemma's gelu through the same kernels, `pc.accumulate` picking the activation)
+6. `rmsnorm` (FFN norm), `matmul` gate and up, `swiglu`, `matmul` down accumulating into the residual. For one token of Q4_K, gate, up and swiglu are one kernel (`mv16_glu_q4_k`; the same kernels can apply Gemma's gelu, `pc.accumulate` picking the activation, with `TS5_GLU_GELU=1`: it is more exact but 1% slower on the PS5, so Gemma takes the two-pass path by default)
 
 Gemma's post-norms (the attention output's and the FFN's, which join the
 residual) each run as one pass with the norm that follows them
@@ -141,7 +141,8 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   blocks for 256 tokens of Qwen 2.5 7B) would leave compute units idle, so
   under 256 blocks the columns are split in slices of one super-block or
   more, for about 256 workgroups, each writing its partial sums for
-  `mmb_reduce` to add up (`TS5_MMB_SPLIT` sets the 256, 0 for never;
+  `mmb_reduce` to add up (`TS5_MMB_SPLIT` sets the 256, 128 under RADV on
+  Linux, 0 for never;
   `TS5_MMB_SLICES=N` splits every matrix in N). attn_k and attn_v (8 blocks
   for 256 tokens of Qwen 3 8B, 4 of Qwen 2.5 7B) take mmb this way too, in
   up to 16 slices (`TS5_MMB_SMALL=0`: the 64 x 64 kernel); k, v and q's

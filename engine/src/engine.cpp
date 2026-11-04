@@ -120,8 +120,8 @@ void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
         const double t0 = now_ms();
         bool ok = ip ? db_->forward_in_place(in, n, p0, false, err)
                      : db_->forward(in, n, p0, dl_.data(), false, err);
-        if (n < 9) { draft_ms_ += now_ms() - t0; draft_n_++; }  // a few tokens cost as one
-        else { catch_ms_ += now_ms() - t0; catch_n_ += n - 1; }  // a real backlog
+        if (n == 1) { draft_ms_ += now_ms() - t0; draft_n_++; }
+        else if (n >= 9) { catch_ms_ += now_ms() - t0; catch_n_ += n - 1; }  // a real backlog; a few tokens cost as one
         if (!ok) {
             drafter_ok_ = false;
             ts5::log_line("ts5: draft model failed (%s); drafting by lookup only", err.c_str());
@@ -269,17 +269,20 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         return bk;
     };
     // A probe of the draft model costs its catch-up on everything since it
-    // last ran plus a wider verify; where it keeps coming back empty (Qwen3
-    // 0.6B on prose: 8% slower with a probe every 16 steps) the next one
-    // waits twice as long, up to 128 steps, and a kept token resets it.
+    // last ran plus a wider verify; where it comes back without making
+    // drafting worth it (Qwen3 0.6B on prose: 8% slower with a probe every
+    // 16 steps, and still 5% slower when a kept token reset the wait, since
+    // half its drafts are kept and that is short of paying) the next one
+    // waits twice as long, up to 128 steps.
     int dprobe_every = 16, dprobe_next = 16;
-    // The drafter's catch-up, per token of backlog (ms; 0: not measured),
-    // and how many steps in a row it tends to draft once it resumes
-    // (decayed), which its catch-up is spread over: on code, prompt lookup
-    // serves long stretches and the drafter falls behind by them, and
-    // charging the whole catch-up to the one step that resumes kept it
-    // out until a probe (Qwen3 8B on code: 65 against 69 tok/s).
-    double t_catch = 0, run_len = 4, run_cur = 0;
+    // The drafter's catch-up, per token of backlog (ms; 0: not measured).
+    // It is spread over the 16 steps to the next lookup probe, which is how
+    // long a resumed drafter tends to run: charging it all to the step that
+    // resumes kept the drafter out on code (Qwen3 8B: 65 against 69 tok/s),
+    // and spreading it over a measured run length fed on itself (short runs
+    // made the charge too high to resume, which kept the runs short: 44
+    // drafts in 256 tokens of code with 86% kept, 3% slower than no helper).
+    double t_catch = 0;
     std::vector<int32_t> batch;
     std::vector<float> lgb;  // one row of logits per batch position
     double ts = now_ms();
@@ -319,7 +322,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
             const double per = t_draft > 0 ? t_draft : fwd_ms(1) / 8;
             const double behind = (double)(cached_.size() - dcached_);
             const double catch_per = t_catch > 0 ? t_catch : 0.2 * per;
-            mk = best_k(room, by_drafter.p(0.6f), per, catch_per * behind / std::max(1.0, run_len));
+            mk = best_k(room, by_drafter.p(0.6f), per, catch_per * behind / 16);
             if (mk == 0 && step >= dprobe_next) {
                 mk = std::min(room, 2);
                 dprobe = true;
@@ -342,10 +345,6 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
                 const double per = catch_ms_ / catch_n_;
                 t_catch = t_catch > 0 ? 0.8 * t_catch + 0.2 * per : per;
             }
-            run_cur++;
-        } else if (run_cur > 0) {
-            run_len = 0.8 * run_len + 0.2 * run_cur;
-            run_cur = 0;
         }
         const int nb = (int)batch.size();
         if (!in_place && (size_t)nb * nv > lgb.size()) lgb.resize((size_t)nb * nv);
@@ -375,14 +374,17 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
             st.model_drafted += nb - 1;
             st.model_accepted += accepted;
         }
-        if (dprobe) {
-            dprobe_every = accepted > 0 ? 16 : std::min(dprobe_every * 2, 128);
-            dprobe_next = step + dprobe_every;
-        }
         if (nb > 1) {
             Source &src = from_lookup ? by_lookup : by_drafter;
             src.kept = 0.9f * src.kept + accepted;
             src.trials = 0.9f * src.trials + accepted + (accepted < nb - 1 ? 1 : 0);
+        }
+        if (dprobe) {
+            // Worth it: with what the probe showed, the cost model would draft.
+            const double per = t_draft > 0 ? t_draft : fwd_ms(1) / 8;
+            const bool worth = best_k(room, by_drafter.p(0.6f), per, 0.0) > 0;
+            dprobe_every = worth ? 16 : std::min(dprobe_every * 2, 128);
+            dprobe_next = step + dprobe_every;
         }
         cached_.insert(cached_.end(), batch.begin(), batch.begin() + accepted + 1);
         if (dmax > 0) index_grams(cached_.size() - (accepted + 1));
@@ -400,9 +402,9 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // What the cost model saw (TS5_DRAFT_LOG=1): the helper's measured costs
     // and the verify batches' times, to tell a wrong estimate from a wrong rule.
     if (db_ && getenv("TS5_DRAFT_LOG"))
-        ts5::log_line("ts5: helper: %.2f ms a draft token, catch-up %.3f ms a token, kept %.0f%% of %.0f trials, "
-                      "run length %.1f; target forward 1: %.2f, 2: %.2f, 3: %.2f, 4: %.2f ms; %d probes, %.0f ms in the helper",
-                      t_draft, t_catch, 100 * by_drafter.p(0.6f), by_drafter.trials, run_len, t_fwd[1], t_fwd[2], t_fwd[3],
+        ts5::log_line("ts5: helper: %.2f ms a draft token, catch-up %.3f ms a token, kept %.0f%% of %.0f trials; "
+                      "target forward 1: %.2f, 2: %.2f, 3: %.2f, 4: %.2f ms; %d probes, %.0f ms in the helper",
+                      t_draft, t_catch, 100 * by_drafter.p(0.6f), by_drafter.trials, t_fwd[1], t_fwd[2], t_fwd[3],
                       t_fwd[4], st.probes, st.draft_ms);
     return true;
 }
