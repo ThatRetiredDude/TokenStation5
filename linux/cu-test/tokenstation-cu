@@ -31,8 +31,11 @@ find_cmdline() {
     exit 2
 }
 
+# From the kernel's boot messages: dmesg's ring buffer, or, once that has
+# rotated them out (hours of uptime), the journal of this boot.
 active_cus() {
     n=$(dmesg 2>/dev/null | grep -o 'active_cu_number[^0-9]*[0-9]*' | tail -n 1 | grep -o '[0-9]*$' || true)
+    [ -n "$n" ] || n=$(journalctl -k -b 2>/dev/null | grep -o 'active_cu_number[^0-9]*[0-9]*' | tail -n 1 | grep -o '[0-9]*$' || true)
     echo "${n:-unknown}"
 }
 
@@ -62,7 +65,9 @@ status)
     esac
     echo "active compute units now: $(active_cus)"
     echo "boot setting:             $want"
-    dmesg 2>/dev/null | grep -E 'ps5-[0-9]+cu-(enable|probe)' | sed 's/^/  /' || true
+    lines=$(dmesg 2>/dev/null | grep -E 'ps5-[0-9]+cu-(enable|probe)' || true)
+    [ -n "$lines" ] || lines=$(journalctl -k -b -o cat 2>/dev/null | grep -E 'ps5-[0-9]+cu-(enable|probe)' || true)
+    [ -z "$lines" ] || echo "$lines" | sed 's/^/  /'
     ;;
 set)
     case "${2:-}" in
@@ -100,7 +105,7 @@ test)
         tail -n 3 "$state/check.out"
         ts5 bench -m "$model" --pp 512 --tg 128 2>&1 | tee -a "$log" | tail -n 2 || true
     fi
-    gpu_errors=$(journalctl -k --since "$since" 2>/dev/null | grep -Eci 'amdgpu.*(timeout|reset|fault|hang)' || true)
+    gpu_errors=$(journalctl -k --since "$since" 2>/dev/null | grep -Eci 'amdgpu.*\b(timeout|reset|fault|hang)' || true)  # \b: "default" (TMZ ... disabled as experimental (default)) isn't a fault
     echo "GPU errors in the kernel log during the test: ${gpu_errors:-0}" | tee -a "$log"
     [ "${gpu_errors:-0}" = 0 ] || rc=1
     if [ "$rc" = 0 ]; then
