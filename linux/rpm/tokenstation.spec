@@ -4,7 +4,7 @@ Name:           tokenstation
 Version:        %{ts_version}
 Release:        1
 Summary:        Your PS5's own AI, on Linux: chat, voice and an OpenAI-style API
-License:        Proprietary and GPL-3.0 (see /usr/share/doc/tokenstation)
+License:        LicenseRef-PolyForm-Small-Business-1.0.0
 URL:            https://github.com/ThatRetiredDude/TokenStation5
 Source0:        tokenstation-root.tar.gz
 ExclusiveArch:  x86_64

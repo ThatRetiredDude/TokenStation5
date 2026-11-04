@@ -280,3 +280,10 @@ the PS5 store side (`release.yml`, tags like `01.004.001`) is unaffected.
 - No apt, dnf or pacman repository yet; download the package from a release.
 - Build it on Debian 12 (as CI does) for a package that runs everywhere; one
   built on a newer system won't run on Debian 12.
+
+## License
+
+TokenStation5 for Linux is licensed under [PolyForm Small Business 1.0.0](../LICENSE.md):
+it is our own code plus permissively licensed third-party parts (listed in
+[NOTICE.md](../NOTICE.md) and the package's `licenses/` folder), and no GPL
+code is linked into the Linux build.

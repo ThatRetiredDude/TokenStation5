@@ -42,7 +42,6 @@ install -Dm644 "$root/linux/files/tokenstation.default" "$pkg/etc/default/tokens
 install -Dm644 "$root/linux/files/tokenstation.desktop" "$pkg/usr/share/applications/tokenstation.desktop"
 install -Dm644 "$root/ps5/sce_sys/icon0.png" "$pkg/usr/share/icons/hicolor/512x512/apps/tokenstation.png"
 install -Dm644 "$root/LICENSE.md" "$doc/LICENSE.md"
-install -Dm644 "$root/ps5/LICENSE" "$doc/LICENSE-GPL-3.0"
 install -Dm644 "$root/NOTICE.md" "$doc/NOTICE.md"
 install -Dm644 "$root/linux/README.md" "$doc/README.md"
 install -Dm644 "$root/linux/cu-test/README.md" "$doc/cu-test/README.md"
