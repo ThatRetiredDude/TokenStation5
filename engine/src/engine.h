@@ -27,6 +27,8 @@ struct GenStats {
     int drafted = 0, draft_accepted = 0;  // speculation: prompt lookup and the draft model together
     int model_drafted = 0, model_accepted = 0;  // the draft model's share of those
     bool has_drafter = false;  // a draft model is loaded (the rest is prompt lookup)
+    double draft_ms = 0;  // wall time in the draft model: its drafts, catch-up and probes
+    int probes = 0;       // steps that tried the draft model only to see whether it keeps up
     double prompt_ms = 0, gen_ms = 0;
     double sample_ms = 0;  // CPU time in sample(), its logits reads included
     std::string finish = "length";
@@ -76,6 +78,10 @@ private:
     // per draft token in steady state, without the catch-up of a backlog.
     double draft_ms_ = 0;
     int draft_n_ = 0;
+    // The catch-up it just did (ms, tokens): what a token of backlog costs
+    // to enter as a batch, for the controller's fixed cost of resuming.
+    double catch_ms_ = 0;
+    int catch_n_ = 0;
     std::mt19937_64 rng_{std::random_device{}()};
 };
 

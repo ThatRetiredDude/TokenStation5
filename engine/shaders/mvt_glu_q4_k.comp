@@ -1,5 +1,5 @@
 #version 450
-// Y[t][r] = silu(G[r] . X[t]) * (U[r] . X[t]) for NT tokens of the
+// Y[t][r] = silu(G[r] . X[t]) * (U[r] . X[t]) (gelu for Gemma) for NT tokens of the
 // feed-forward's Q4_K gate (binding 0) and up (binding 3) matrices at once:
 // a verify batch through what mv16_glu_q4_k is for one token. Laid out as
 // mvt_q4_k, but each block's words are loaded from both matrices and dotted
@@ -52,6 +52,16 @@ float block_dot(uvec4 h, uvec4 q, vec4 a[4], vec4 e[4], float ta, float te, uint
     const vec4 sm = bytes4(scales_mins(h, th >> 1));  // scale 2p, 2p + 1, min 2p, 2p + 1
     const vec2 dm = unpackHalf2x16(h.x);
     return dm.x * (sm.x * s0 + sm.y * s1) - dm.y * (sm.z * ta + sm.w * te);
+}
+
+// The gate's activation times up: silu, or with pc.accumulate != 0 (unused
+// otherwise with GLU) Gemma's gelu, the tanh approximation as swiglu.comp.
+float glu_act(float g) {
+    if (pc.accumulate != 0) {
+        const float y = 0.7978845608 * (g + 0.044715 * g * g * g);
+        return 0.5 * g * (2.0 - 2.0 / (exp(2.0 * y) + 1.0));
+    }
+    return g / (1.0 + exp(-g));
 }
 
 void main() {
@@ -116,6 +126,6 @@ void main() {
         const uint i = tid / NT, t = tid % NT;
         float u = 0.0;
         for (uint sg = 0; sg < gl_NumSubgroups; sg++) u += partial[(i * NTMAX + t) * WG + sg];
-        Y[t * pc.y_stride + r0 + i] = g / (1.0 + exp(-g)) * u;
+        Y[t * pc.y_stride + r0 + i] = glu_act(g) * u;
     }
 }

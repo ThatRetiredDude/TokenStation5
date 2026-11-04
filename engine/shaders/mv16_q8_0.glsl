@@ -67,6 +67,18 @@ float block_dot(uint o, vec4 x[8], bool up) {
     return d * s;
 }
 
+#ifdef GLU
+// The gate's activation times up: silu, or with pc.accumulate != 0 (unused
+// otherwise with GLU) Gemma's gelu, the tanh approximation as swiglu.comp.
+float glu_act(float g) {
+    if (pc.accumulate != 0) {
+        const float y = 0.7978845608 * (g + 0.044715 * g * g * g);
+        return 0.5 * g * (2.0 - 2.0 / (exp(2.0 * y) + 1.0));
+    }
+    return g / (1.0 + exp(-g));
+}
+#endif
+
 void main() {
     const uint r0 = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * NR;
     if (r0 >= pc.nrows) return;
@@ -124,7 +136,7 @@ void main() {
 #ifdef NORM
         u *= scale;
 #endif
-        Y[r] = s / (1.0 + exp(-s)) * u;
+        Y[r] = glu_act(s) * u;
 #else
         Y[r] = pc.accumulate != 0 ? Y[r] + s : s;
 #endif

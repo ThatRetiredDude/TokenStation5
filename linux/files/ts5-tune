@@ -40,7 +40,7 @@ GEN = [
 PROMPT = [
     ("TS5_MMB", ["1", "0"]),
     ("TS5_MMB_SMALL", ["1", "0"]),
-    ("TS5_MMB_SPLIT", ["256", "128", "512"]),
+    ("TS5_MMB_SPLIT", ["128", "256", "512"]),  # the built-in is 128 on RADV
     ("TS5_ATTN_PF128", ["1", "0"]),
     ("TS5_LAYERS_PER_SUBMIT", ["0", "8"]),
 ]

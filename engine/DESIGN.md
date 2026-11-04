@@ -63,7 +63,7 @@ back):
 3. `qkv_post`: bias (Qwen2), per-head RMSNorm (Qwen3), RoPE (normal or NeoX), write K and V to the cache (f16 or 8-bit, below)
 4. `attn`: attention over the cache (below), plus `attn_merge` when it splits the keys
 5. `matmul` output projection, accumulating into the residual
-6. `rmsnorm` (FFN norm), `matmul` gate and up, `swiglu`, `matmul` down accumulating into the residual. For one token of Q4_K, gate, up and swiglu are one kernel (`mv16_glu_q4_k`)
+6. `rmsnorm` (FFN norm), `matmul` gate and up, `swiglu`, `matmul` down accumulating into the residual. For one token of Q4_K, gate, up and swiglu are one kernel (`mv16_glu_q4_k`; Gemma's gelu through the same kernels, `pc.accumulate` picking the activation)
 
 Gemma's post-norms (the attention output's and the FFN's, which join the
 residual) each run as one pass with the norm that follows them
@@ -146,17 +146,22 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   for 256 tokens of Qwen 3 8B, 4 of Qwen 2.5 7B) take mmb this way too, in
   up to 16 slices (`TS5_MMB_SMALL=0`: the 64 x 64 kernel); k, v and q's
   partial sums fit in `split_` together (12M floats), so their splits add
-  no barriers. mmb sums in f32. With `TS5_MMB_F16=1`, where the device has
+  no barriers. mmb sums in f32, or in f16 for the qwen2 and qwen3
+  architectures (the default there; `TS5_MMB_F16=0|1` decides for any
+  model): where the device has
   f16 arithmetic (`mmb16_*`, the same shader with `MMB_F16`), shared memory
   holds f16 and each step's 32 products are summed in packed f16, two per
   `v_pk_fma_f16`, before they're added to f32 sums (`v_fma_mix_f32`): half
   the instructions of f32 FMAs, and no f16 sum longer than 32 products. It
-  reads prompts 8% faster on Llama 3.2 3B and 13% on Qwen 2.5 Coder 7B
-  (pp512 on the PS5), but Llama 3.x's large activations make the 3B's logits
-  move by 0.78% of their range over 512 tokens (over the GPU check's 0.5%
-  bar) against 0.04% in f32, so f16 is off by default. Moving the f16 sums
-  into f32 every 8 products instead of 32 didn't help and cost as much as
-  f32.
+  reads prompts 9-28% faster on the PS5 (Qwen3 8B 534 -> 583 tok/s, Qwen3
+  14B 302 -> 342, Qwen 2.5 Coder 7B 605 -> 775, DeepSeek R1 14B 305 -> 376
+  at pp512, as much at pp4096), and the Qwen-family models stay within the
+  GPU check's bar with it (0.16-0.26% of the largest logit at 128 tokens,
+  one top token in 128 moved). Gemma 3 and 4 fail the check with it (0.8-0.9%)
+  and Llama 3.x's large activations put Llama 3.2 3B over the bar at 512
+  tokens (0.78%, against 0.04% in f32), so those stay in f32. Moving the
+  f16 sums into f32 every 8 products instead of 32 didn't help and cost as
+  much as f32.
 - 9 or more (`mm_*`, `shaders/matmul_tiled.glsl`): 64 rows x 64 tokens per
   workgroup. Half the threads dequantize a 64 x 64 slice of W into shared
   memory while the other half load the matching slice of X, then each thread

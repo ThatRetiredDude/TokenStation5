@@ -366,14 +366,22 @@ private:
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
 #ifndef TS5_PS5
         // RADV (with wave32): splitting the small matrices' columns down to
-        // 128 blocks was 2% faster on the PS5 under Linux (472 -> 482 tok/s).
-        if (strstr(props_.deviceName, "RADV")) mmb_split_ = 128;
+        // 128 blocks was 2% faster on the PS5 under Linux (472 -> 482 tok/s)
+        // at 36 compute units; at 40, 256 is another 2% on Qwen3 8B and
+        // even on the 14B (512: +3% on the 8B, -2.5% on the 14B).
+        if (strstr(props_.deviceName, "RADV")) mmb_split_ = 256;
 #endif
         if (const char *e = getenv("TS5_MMB_SPLIT")) mmb_split_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SLICES")) mmb_slices_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SMALL")) mmb_small_ = atoi(e) != 0;
-        // f32 by default: on the PS5 the f16 sums put Llama 3.2 3B over the
-        // GPU check's bar (0.78% at 512 tokens, 0.02-0.04% in f32).
+        // The f16 prompt sums are 9-28% faster on the PS5 (Qwen3 8B 534 ->
+        // 583 tok/s, 14B 302 -> 342, Coder 7B 605 -> 775, DeepSeek 14B 305
+        // -> 376) and the Qwen-family models keep within the GPU check's bar
+        // with them (0.16-0.26% of the largest logit at 128 tokens), so
+        // they're the default for qwen2 and qwen3. Off for the rest: Gemma
+        // 3 and 4 fail the check (0.8-0.9%), and Llama 3.2 3B went over it
+        // at 512 tokens (0.78%; 0.02-0.04% in f32). TS5_MMB_F16=0|1 decides.
+        mmb_f16_ = ctx_->float16 && (hp_.arch == "qwen2" || hp_.arch == "qwen3");
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
         kv_ = kv_type_setting();
         if (kv_ == KvType::Q8 && !(attn_ok_all() && hp_.max_hd() % 32 == 0)) {
@@ -1118,14 +1126,14 @@ private:
         return true;
     }
 
-    // Gate and up with swiglu in one kernel, into g_: one token of Q4_K,
-    // Q5_K or Q8_0 through mv16_glu_*, a verify batch of Q4_K through
-    // mvt_glu_q4_k, which loads each token's x once for both matrices.
-    // False where that doesn't apply.
+    // Gate and up with swiglu (or Gemma's gelu: pc.accumulate) in one
+    // kernel, into g_: one token of Q4_K, Q5_K or Q8_0 through mv16_glu_*,
+    // a verify batch of Q4_K through mvt_glu_q4_k, which loads each token's
+    // x once for both matrices. False where that doesn't apply.
     bool glu_applies(const Layer &L, int n) const {
         const bool batch = n >= 2 && n <= 8 && mvt_ && mvt_glu_ && L.w_gate.type() == GGML_Q4_K;
         const bool one = n == 1 && mv16_ && fast_type(L.w_gate) && L.w_gate.type() != GGML_Q6_K;
-        return !(hp_.gelu || !(n == 1 ? one : batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != L.w_up.type() ||
+        return !(!(n == 1 ? one : batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != L.w_up.type() ||
                  L.w_gate.ne0() != L.w_up.ne0() || L.w_gate.ne1() != L.w_up.ne1());
     }
 
@@ -1143,7 +1151,7 @@ private:
         const uint32_t rows = (uint32_t)L.w_gate.ne1();
         struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; } pc{
             (uint32_t)L.w_gate.ne0(), rows, (uint32_t)n, (uint32_t)L.w_gate.info->row_bytes(),
-            (uint32_t)L.w_gate.ne0(), rows, 0, 0};
+            (uint32_t)L.w_gate.ne0(), rows, hp_.gelu ? 1u : 0u, 0};  // accumulate: the activation (gelu)
         if (n == 1 && norm_) {
             struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; float eps; } npc{
                 pc.ncols, pc.nrows, pc.ntok, pc.row_bytes, pc.x_stride, pc.y_stride, pc.accumulate, pc.x_off,

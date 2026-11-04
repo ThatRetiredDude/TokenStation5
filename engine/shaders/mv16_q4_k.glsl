@@ -11,8 +11,8 @@
 // for a long row doesn't fit in the nearest cache, is read once per NR rows
 // rather than once per row.
 // With GLU, the feed-forward's gate (binding 0) and up (binding 3) matrices
-// at once: y[r] = silu(gate[r] . x) * (up[r] . x), sparing the swiglu kernel
-// and a second read of x.
+// at once: y[r] = silu(gate[r] . x) * (up[r] . x) (gelu with pc.accumulate,
+// Gemma), sparing the swiglu kernel and a second read of x.
 // With NORM, x is the residual before its RMSNorm (binding 3, or 4 with
 // GLU, holds the norm's weights g): the kernel dots W with x * g and scales
 // the sums by rsqrt(mean(x^2) + eps), whose sum of squares the workgroup
@@ -98,6 +98,18 @@ float block_dot(uvec4 h, uvec4 q, vec4 a[4], vec4 e[4], float ta, float te, uint
     return dm.x * (sm.x * s0 + sm.y * s1) - dm.y * (sm.z * ta + sm.w * te);
 }
 
+#ifdef GLU
+// The gate's activation times up: silu, or with pc.accumulate != 0 (unused
+// otherwise with GLU) Gemma's gelu, the tanh approximation as swiglu.comp.
+float glu_act(float g) {
+    if (pc.accumulate != 0) {
+        const float y = 0.7978845608 * (g + 0.044715 * g * g * g);
+        return 0.5 * g * (2.0 - 2.0 / (exp(2.0 * y) + 1.0));
+    }
+    return g / (1.0 + exp(-g));
+}
+#endif
+
 void main() {
     const uint r0 = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * NR;
     if (r0 >= pc.nrows) return;
@@ -169,7 +181,7 @@ void main() {
 #ifdef NORM
         u *= scale;
 #endif
-        Y[r] = s / (1.0 + exp(-s)) * u;
+        Y[r] = glu_act(s) * u;
 #else
         Y[r] = pc.accumulate != 0 ? Y[r] + s : s;
 #endif

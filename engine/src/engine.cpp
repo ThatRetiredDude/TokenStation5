@@ -111,6 +111,8 @@ void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
     int32_t t = -1;
     draft_ms_ = 0;
     draft_n_ = 0;
+    catch_ms_ = 0;
+    catch_n_ = 0;
     for (int i = 0; i < k; i++) {
         const int32_t *in = i == 0 ? cu_.data() : &t;
         const int n = i == 0 ? (int)cu_.size() : 1;
@@ -118,7 +120,8 @@ void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
         const double t0 = now_ms();
         bool ok = ip ? db_->forward_in_place(in, n, p0, false, err)
                      : db_->forward(in, n, p0, dl_.data(), false, err);
-        if (n == 1) { draft_ms_ += now_ms() - t0; draft_n_++; }
+        if (n < 9) { draft_ms_ += now_ms() - t0; draft_n_++; }  // a few tokens cost as one
+        else { catch_ms_ += now_ms() - t0; catch_n_ += n - 1; }  // a real backlog
         if (!ok) {
             drafter_ok_ = false;
             ts5::log_line("ts5: draft model failed (%s); drafting by lookup only", err.c_str());
@@ -270,6 +273,13 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // 0.6B on prose: 8% slower with a probe every 16 steps) the next one
     // waits twice as long, up to 128 steps, and a kept token resets it.
     int dprobe_every = 16, dprobe_next = 16;
+    // The drafter's catch-up, per token of backlog (ms; 0: not measured),
+    // and how many steps in a row it tends to draft once it resumes
+    // (decayed), which its catch-up is spread over: on code, prompt lookup
+    // serves long stretches and the drafter falls behind by them, and
+    // charging the whole catch-up to the one step that resumes kept it
+    // out until a probe (Qwen3 8B on code: 65 against 69 tok/s).
+    double t_catch = 0, run_len = 4, run_cur = 0;
     std::vector<int32_t> batch;
     std::vector<float> lgb;  // one row of logits per batch position
     double ts = now_ms();
@@ -300,13 +310,16 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         bool dprobe = false;
         if (by_model && adapt) {
             // The catch-up: the drafter enters what it missed as one batch,
-            // at about a fifth of its per-token decode cost. A helper that
-            // keeps few drafts sits out for long stretches, and this is what
-            // made each return a net loss (Qwen3 0.6B on prose: 9% slower
-            // with a third of its drafts kept, even costed per token).
+            // at the measured cost per token of backlog (a fifth of its
+            // per-token decode cost until measured), spread over the steps
+            // it will then draft for. A helper that keeps few drafts sits
+            // out for long stretches, and this is what made each return a
+            // net loss (Qwen3 0.6B on prose: 9% slower with a third of its
+            // drafts kept, even costed per token).
             const double per = t_draft > 0 ? t_draft : fwd_ms(1) / 8;
             const double behind = (double)(cached_.size() - dcached_);
-            mk = best_k(room, by_drafter.p(0.6f), per, 0.2 * per * behind);
+            const double catch_per = t_catch > 0 ? t_catch : 0.2 * per;
+            mk = best_k(room, by_drafter.p(0.6f), per, catch_per * behind / std::max(1.0, run_len));
             if (mk == 0 && step >= dprobe_next) {
                 mk = std::min(room, 2);
                 dprobe = true;
@@ -314,7 +327,10 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
             by_model = mk > 0;
         }
         if (by_model) {
+            const double td0 = now_ms();
             draft_model(tok, mk, batch);
+            st.draft_ms += now_ms() - td0;
+            if (dprobe) st.probes++;
             // Its cost per token is that of its one-token forwards: the
             // catch-up on a backlog is paid once on resuming, not per draft
             // (counted in, a drafter that paused never looked worth resuming).
@@ -322,6 +338,14 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
                 const double per = draft_ms_ / draft_n_;
                 t_draft = t_draft > 0 ? 0.8 * t_draft + 0.2 * per : per;
             }
+            if (catch_n_ > 0) {
+                const double per = catch_ms_ / catch_n_;
+                t_catch = t_catch > 0 ? 0.8 * t_catch + 0.2 * per : per;
+            }
+            run_cur++;
+        } else if (run_cur > 0) {
+            run_len = 0.8 * run_len + 0.2 * run_cur;
+            run_cur = 0;
         }
         const int nb = (int)batch.size();
         if (!in_place && (size_t)nb * nv > lgb.size()) lgb.resize((size_t)nb * nv);
@@ -373,14 +397,22 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     }
     if (!pending.empty()) on_text(pending);
     st.gen_ms = now_ms() - t0;
+    // What the cost model saw (TS5_DRAFT_LOG=1): the helper's measured costs
+    // and the verify batches' times, to tell a wrong estimate from a wrong rule.
+    if (db_ && getenv("TS5_DRAFT_LOG"))
+        ts5::log_line("ts5: helper: %.2f ms a draft token, catch-up %.3f ms a token, kept %.0f%% of %.0f trials, "
+                      "run length %.1f; target forward 1: %.2f, 2: %.2f, 3: %.2f, 4: %.2f ms; %d probes, %.0f ms in the helper",
+                      t_draft, t_catch, 100 * by_drafter.p(0.6f), by_drafter.trials, run_len, t_fwd[1], t_fwd[2], t_fwd[3],
+                      t_fwd[4], st.probes, st.draft_ms);
     return true;
 }
 
 std::string draft_summary(const GenStats &st) {
-    char b[96];
+    char b[128];
     const int ld = st.drafted - st.model_drafted, la = st.draft_accepted - st.model_accepted;
     if (st.has_drafter)
-        snprintf(b, sizeof b, "lookup %d/%d, helper %d/%d accepted", la, ld, st.model_accepted, st.model_drafted);
+        snprintf(b, sizeof b, "lookup %d/%d, helper %d/%d accepted (%.0f ms, %d probes)", la, ld, st.model_accepted,
+                 st.model_drafted, st.draft_ms, st.probes);
     else
         snprintf(b, sizeof b, "lookup %d/%d accepted", la, ld);
     return b;
