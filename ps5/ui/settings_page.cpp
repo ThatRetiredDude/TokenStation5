@@ -182,7 +182,7 @@ void hardware_rows(const SettingsInfo &info, std::vector<Row> &r) {
     const std::string blocked = h.problem.empty() ? "" : " " + h.problem;
     r.push_back({sec, "TS5_PS5_FAN", "Fan",
                  "Automatic follows the PS5's own fan curve. Full speed is louder, and keeps the chip coolest "
-                 "through long jobs." + blocked,
+                 "through long jobs. Past 90 C the PS5 runs the fan flat out whatever is set." + blocked,
                  "Now", {{"auto", "Automatic"}, {"max", "Full speed"}}, "auto"});
     r.push_back({sec, "TS5_PS5_BOOST", "Clock boost",
                  "Off is faster for models: Linux then runs the GPU at its full 2.23 GHz, where the boost's own "

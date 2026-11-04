@@ -229,7 +229,10 @@ On a PS5, Settings has a PS5 HARDWARE section, all from the controller:
   minutes and shows the verdict.
 - **Temperatures**: whatever the kernel reports in `/sys/class/hwmon`.
 
-Fan and boost need `ps5_control` (ps5-linux-tools). The app changes these
+The fan switch uses the ps5-linux kernel's own fan driver (full speed is its
+`pwm1_enable=0`; `ps5_control --fan max` alone is overridden by that driver
+within a second); the boost, and the fan on older kernels, need `ps5_control`
+(ps5-linux-tools). The app changes these
 through `/usr/lib/tokenstation/hw`, which checks every value against a fixed
 list; `/etc/sudoers.d/tokenstation` lets the `tokenstation` group run that one
 script as root without a password. The TV service's user is in the group, and

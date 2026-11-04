@@ -7,7 +7,7 @@
 # against a fixed list; nothing else runs as root.
 #
 #   hw status             key=value lines: memory, compute units, boot settings
-#   hw fan auto|max       the fan (ps5_control): the PS5's own curve, or full speed
+#   hw fan auto|max       the fan: the kernel's curve (ps5_fan hwmon), or full speed
 #   hw boost on|off       CPU 3.5 GHz and GPU 2.23 GHz (ps5_control), or stock
 #   hw memory max|0|8..14 GiB the GPU may map at the next boot (max: all but 1 GiB;
 #                         0: the kernel's default)
@@ -41,7 +41,10 @@ status)
         break
     done
     echo "ram_total=$(awk '/^MemTotal:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)"
+    # dmesg's ring buffer rotates the boot messages out after hours of
+    # uptime; the journal of this boot keeps them.
     n=$(dmesg 2>/dev/null | grep -o 'active_cu_number[^0-9]*[0-9]*' | tail -n 1 | grep -o '[0-9]*$' || true)
+    [ -n "$n" ] || n=$(journalctl -k -b 2>/dev/null | grep -o 'active_cu_number[^0-9]*[0-9]*' | tail -n 1 | grep -o '[0-9]*$' || true)
     echo "cus_active=${n:-0}"
     f=$(find_cmdline || true)
     if [ -n "$f" ]; then
@@ -52,10 +55,31 @@ status)
         echo "boot_cu_mode=${m:-0}"
     fi
     echo "ps5_control=${ctl:-}"
+    for d in /sys/class/hwmon/hwmon*; do
+        [ "$(cat "$d/name" 2>/dev/null)" = ps5_fan ] || continue
+        case "$(cat "$d/pwm1_enable" 2>/dev/null)" in 0) echo "fan=max" ;; 1) echo "fan=manual" ;; 2) echo "fan=auto" ;; esac
+        break
+    done
     ;;
 fan)
-    need_ctl
-    case "${2:-}" in auto) "$ctl" --fan on ;; max) "$ctl" --fan max ;; *) echo "fan auto|max" >&2; exit 2 ;; esac
+    # The ps5-linux kernel's own fan driver (hwmon "ps5_fan") runs the fan
+    # from its curve and overrides the servo pattern ps5_control --fan max
+    # sets within a second, so full speed means its pwm1_enable=0 (full),
+    # 2 being the curve. Above 90 C the driver takes over whatever is set.
+    # Without that driver (an older kernel), ps5_control does both.
+    case "${2:-}" in auto | max) ;; *) echo "fan auto|max" >&2; exit 2 ;; esac
+    hm=
+    for d in /sys/class/hwmon/hwmon*; do
+        [ "$(cat "$d/name" 2>/dev/null)" = ps5_fan ] && [ -w "$d/pwm1_enable" ] && { hm=$d; break; }
+    done
+    if [ -n "$hm" ]; then
+        if [ "$2" = max ]; then echo 0 > "$hm/pwm1_enable"; else echo 2 > "$hm/pwm1_enable"; fi
+        # The console's own fan servo stays on under the kernel's control.
+        [ -n "$ctl" ] && [ -x "$ctl" ] && "$ctl" --fan on >/dev/null 2>&1 || true
+    else
+        need_ctl
+        if [ "$2" = max ]; then "$ctl" --fan max; else "$ctl" --fan on; fi
+    fi
     ;;
 boost)
     need_ctl
