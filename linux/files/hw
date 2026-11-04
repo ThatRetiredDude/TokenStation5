@@ -7,7 +7,7 @@
 # against a fixed list; nothing else runs as root.
 #
 #   hw status             key=value lines: memory, compute units, boot settings
-#   hw fan auto|cool|max  the fan: the kernel's curve (ps5_fan hwmon), a steeper one, or full speed
+#   hw fan auto|cool|early|max  the fan: the kernel's curve (ps5_fan hwmon), steeper, aggressive from idle, or full speed
 #   hw boost on|off       CPU 3.5 GHz and GPU 2.23 GHz (ps5_control), or stock
 #   hw memory max|0|8..14 GiB the GPU may map at the next boot (max: all but 1 GiB;
 #                         0: the kernel's default)
@@ -60,7 +60,9 @@ status)
         case "$(cat "$d/pwm1_enable" 2>/dev/null)" in
             0) echo "fan=max" ;;
             1) echo "fan=manual" ;;
-            2) [ "$(cat "$d/pwm1_auto_point4_pwm" 2>/dev/null)" = 255 ] && echo "fan=cool" || echo "fan=auto" ;;
+            2)  if [ "$(cat "$d/pwm1_auto_point4_pwm" 2>/dev/null)" = 255 ]; then
+                    [ "$(cat "$d/pwm1_auto_point1_temp" 2>/dev/null)" = 40000 ] && echo "fan=early" || echo "fan=cool"
+                else echo "fan=auto"; fi ;;
         esac
         break
     done
@@ -73,10 +75,14 @@ fan)
     # a 65 C board reading instead of 87; stock is 50 C 10%, 60 30%, 65 40%,
     # 70 50%, 75 65%, 80 80%, 85 95%, 87 100%): quiet at idle, and about
     # 5 C cooler on long prompts (measured on a PS5), where the kernel's
-    # 85 C limiter otherwise clips the GPU clock. Above 90 C the driver
-    # takes over whatever is set.
+    # 85 C limiter otherwise clips the GPU clock. "early" is more aggressive
+    # still, for a box that runs long prompts back to back: the fan ramps
+    # from a 40 C board reading and is at full speed by 55 C, trading noise
+    # for keeping the die well clear of the 85 C limiter even when the board
+    # sensor sits away from the hotspot. Above 90 C the driver takes over
+    # whatever is set.
     # Without that driver (an older kernel), ps5_control does auto and max.
-    case "${2:-}" in auto | cool | max) ;; *) echo "fan auto|cool|max" >&2; exit 2 ;; esac
+    case "${2:-}" in auto | cool | early | max) ;; *) echo "fan auto|cool|early|max" >&2; exit 2 ;; esac
     hm=
     for d in /sys/class/hwmon/hwmon*; do
         [ "$(cat "$d/name" 2>/dev/null)" = ps5_fan ] && [ -w "$d/pwm1_enable" ] && { hm=$d; break; }
@@ -96,6 +102,22 @@ fan)
                 done
                 i=1
                 for temp in 50000 55000 60000 65000 70000 75000 80000 87000; do
+                    echo "$temp" > "$hm/pwm1_auto_point${i}_temp"
+                    i=$((i + 1))
+                done
+                echo 2 > "$hm/pwm1_enable"
+                ;;
+            early)
+                # Steeper than cool and starting from a lower board reading,
+                # so the fan leads the die. Same ordering rule as cool: full
+                # speed (255) by point 4 (55 C), a 120 floor from 40 C.
+                i=8
+                for pwm in 255 255 255 255 255 200 160 120; do
+                    echo "$pwm" > "$hm/pwm1_auto_point${i}_pwm"
+                    i=$((i - 1))
+                done
+                i=1
+                for temp in 40000 45000 50000 55000 60000 65000 70000 75000; do
                     echo "$temp" > "$hm/pwm1_auto_point${i}_temp"
                     i=$((i + 1))
                 done

@@ -21,6 +21,14 @@ CONTEXT=8192
 PS5_BOOST=0
 # Where ps5_control lives, if it is not on the PATH.
 PS5_CONTROL=
+# PS5 only: the fan curve, reapplied at every boot (the kernel's fan driver
+# starts at its stock curve each time). auto = the stock curve; cool = the
+# same curve steepened to full speed from a 65 C board reading; early = an
+# aggressive curve that ramps from a 40 C reading and is at full speed by
+# 55 C, for a box that runs long prompts back to back and wants the fan well
+# ahead of the die; max = full speed always. Default auto. "early" trades
+# noise for headroom under the kernel's 85 C clock limiter.
+PS5_FAN=auto
 
 # Anything else to pass to "ts5 serve".
 EXTRA_ARGS=

@@ -169,8 +169,9 @@ The app's own settings are on its Settings page, as on the console.
 | `MODELS_DIR` | `/var/lib/tokenstation/models` | API-only: where models live. |
 | `HOST`, `PORT` | `0.0.0.0`, `8081` | API-only: where the API listens. |
 | `CONTEXT` | `8192` | API-only: context length, or `auto` for what fits. |
-| `PS5_BOOST` | `0` | Both: the fan on, and the clock boost off (`0`, faster for models: see below) or on (`1`). Skipped if `ps5_control` is missing. |
+| `PS5_BOOST` | `0` | PS5: the clock boost off (`0`, faster for models: see below) or on (`1`). Skipped if `ps5_control` is missing. |
 | `PS5_CONTROL` | empty | Path to `ps5_control` if it isn't on the PATH. |
+| `PS5_FAN` | `auto` | PS5: the fan curve, reapplied at every boot. `auto` (the stock curve), `cool` (full speed from a 65 C board reading), `early` (aggressive: ramps from a 40 C reading, full by 55 C, for a box that runs long prompts back to back), or `max` (full speed always). |
 | `EXTRA_ARGS` | empty | API-only: more options for `ts5 serve`. |
 
 The app reads `ts5.env` in its data folder, as the title does (engine
@@ -217,7 +218,11 @@ On a PS5, Settings has a PS5 HARDWARE section, all from the controller:
 
 - **Fan**: the PS5's own curve, a cooler one (full speed from a 65 C board
   reading, for long prompts, where the kernel's 85 C limit otherwise clips
-  the GPU clock), or full speed. There is no off.
+  the GPU clock), or full speed. There is no off. For a box that runs long
+  prompts back to back, an even more aggressive **early** curve (full speed
+  from a 55 C reading, ramping from 40 C, so the fan leads the die when the
+  board sensor sits away from the hotspot) is available to the services as
+  `PS5_FAN=early` in `/etc/default/tokenstation`, reapplied at every boot.
 - **Clock boost**: off by default, which is faster for models: the kernel's
   own driver then runs the GPU at its full 2.23 GHz, where the boost's power
   management holds it lower (about 8% slower on prompts, measured on every
