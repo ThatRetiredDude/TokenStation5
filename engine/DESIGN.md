@@ -168,7 +168,13 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   Llama 3.x's large activations put Llama 3.2 3B over the bar at 512
   tokens (0.78%, against 0.04% in f32), so Llama stays in f32. Moving the
   f16 sums into f32 every 8 products instead of 32 didn't help and cost as
-  much as f32.
+  much as f32. Two variants of the kernel are built for measuring
+  (`TS5_MMB_VAR=d|q|dq`): `d` keeps two steps' tiles in shared memory, so
+  a step takes one barrier instead of two and a wave's stores of the next
+  step overlap the others' sums (f16 only: the f32 tiles would fill the 64
+  KiB); `q` has each thread load 4 values of each of its quad's 4 tokens
+  and store them as 4 vectors instead of 16 scalars. Both sum in the same
+  order as the kernel they vary, so their output is the same.
 - 9 or more (`mm_*`, `shaders/matmul_tiled.glsl`): 64 rows x 64 tokens per
   workgroup. Half the threads dequantize a 64 x 64 slice of W into shared
   memory while the other half load the matching slice of X, then each thread

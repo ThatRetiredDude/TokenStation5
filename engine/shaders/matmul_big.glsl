@@ -12,6 +12,11 @@
 // With MMB_F16, shared memory holds f16 and each step's 32 products are
 // summed in packed f16 (two per instruction, twice the f32 rate), then added
 // to the f32 sums: an f16 sum is never more than 32 products long.
+// With MMB_DBUF, shared memory holds two steps: a thread stores the next
+// step's values after its share of the current one, so each step takes one
+// barrier instead of two and the stores of one wave overlap another's sums.
+// With MMB_XQ, a thread loads 4 values of each of its quad's 4 tokens
+// (instead of 16 of one token) and stores them as 4 vectors, not 16 scalars.
 #extension GL_EXT_shader_16bit_storage : require
 #ifdef MMB_F16
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -47,9 +52,14 @@ layout(push_constant) uniform PC {
     uint n_split, units, p_off;
 } pc;
 
-// [k][row / 4] and [k][token / 4].
-shared SV Ws[BK][BM / 4];
-shared SV Xs[BK][BN / 4];
+#ifdef MMB_DBUF
+#define NB 2
+#else
+#define NB 1
+#endif
+// [buffer][k][row / 4] and [buffer][k][token / 4].
+shared SV Ws[NB][BK][BM / 4];
+shared SV Xs[NB][BK][BN / 4];
 
 #if QTYPE == T_Q4_K || QTYPE == T_Q5_K
 // A 144-byte Q4_K block is 9 words of 16 bytes: d, dmin and the 12 bytes of
@@ -144,16 +154,48 @@ void dequant(Raw w, uint u, out float v[16]) {
 }
 #endif
 
+// Dequantizes w (unit u) and stores it and x into shared buffer b.
+void store(uint b, uint u, bool w_ok, Raw w, vec4 x[4], uint lr, uint lh) {
+    float v[16];
+    if (w_ok) {
+        dequant(w, u, v);
+    } else {
+        for (uint l = 0; l < 16; l++) v[l] = 0.0;
+    }
+    for (uint l = 0; l < 16; l++) Ws[b][16 * lh + l][lr / 4][lr % 4] = SF(v[l]);
+#ifdef MMB_XQ
+    for (uint c = 0; c < 4; c++) Xs[b][16 * lh + 4 * (lr % 4) + c][lr / 4] = SV(x[0][c], x[1][c], x[2][c], x[3][c]);
+#else
+    for (uint i = 0; i < 4; i++) {
+        Xs[b][16 * lh + 4 * i][lr / 4][lr % 4] = SF(x[i].x);
+        Xs[b][16 * lh + 4 * i + 1][lr / 4][lr % 4] = SF(x[i].y);
+        Xs[b][16 * lh + 4 * i + 2][lr / 4][lr % 4] = SF(x[i].z);
+        Xs[b][16 * lh + 4 * i + 3][lr / 4][lr % 4] = SF(x[i].w);
+    }
+#endif
+}
+
 void main() {
     const uint tid = gl_LocalInvocationID.x;
     const uint r0 = gl_WorkGroupID.x * BM, t0 = gl_WorkGroupID.y * BN;
     const uint tr = tid % 16, tt = tid / 16;  // rows 4 tr + {0..3, 64..67}, tokens 4 tt + {0..3, 64..67}
     const uint split = gl_WorkGroupID.z;
     const uint u0 = split * pc.units, u1 = min(pc.ncols / 32, u0 + pc.units);
-    // Loads: row (and token) tid % 128, values 16 (tid / 128) .. + 15 of the unit.
+    // Loads: row tid % 128, values 16 (tid / 128) .. + 15 of the unit.
     const uint lr = tid % 128, lh = tid / 128;
-    const bool w_ok = r0 + lr < pc.nrows, x_ok = t0 + lr < pc.ntok;
+    const bool w_ok = r0 + lr < pc.nrows;
+#ifdef MMB_XQ
+    // Tokens 4 (lr / 4) + j, values 16 lh + 4 (lr % 4) .. + 3 of the unit.
+    const uint tq = t0 + 4 * (lr / 4), xs4 = pc.x_stride / 4;
+    const uint xb = (pc.x_off + tq * pc.x_stride) / 4 + 4 * lh + lr % 4;
+    bool x_ok[4];
+    for (uint j = 0; j < 4; j++) x_ok[j] = tq + j < pc.ntok;
+#define LOAD_X(u) for (uint j = 0; j < 4; j++) x[j] = x_ok[j] ? X4[xb + j * xs4 + 8 * (u)] : vec4(0.0)
+#else
+    const bool x_ok = t0 + lr < pc.ntok;
     const uint xb = (pc.x_off + (t0 + lr) * pc.x_stride) / 4 + 4 * lh;
+#define LOAD_X(u) for (uint i = 0; i < 4; i++) x[i] = x_ok ? X4[xb + 8 * (u) + i] : vec4(0.0)
+#endif
 
     vec4 acc[2][8];
     for (uint a = 0; a < 2; a++)
@@ -162,28 +204,30 @@ void main() {
     Raw w;
     vec4 x[4];
     if (w_ok) w = load_w(r0 + lr, u0, lh);
-    for (uint i = 0; i < 4; i++) x[i] = x_ok ? X4[xb + 8 * u0 + i] : vec4(0.0);
+    LOAD_X(u0);
 
+#ifdef MMB_DBUF
+    store(0, u0, w_ok, w, x, lr, lh);
+    barrier();
+#endif
     for (uint u = u0; u < u1; u++) {
+#ifdef MMB_DBUF
+        const uint b = (u - u0) & 1u;
+        const bool more = u + 1 < u1;
+        if (more) {
+            if (w_ok) w = load_w(r0 + lr, u + 1, lh);
+            LOAD_X(u + 1);
+        }
+#else
+        const uint b = 0;
         barrier();  // everyone is done with the previous step
-        float v[16];
-        if (w_ok) {
-            dequant(w, u, v);
-        } else {
-            for (uint l = 0; l < 16; l++) v[l] = 0.0;
-        }
-        for (uint l = 0; l < 16; l++) Ws[16 * lh + l][lr / 4][lr % 4] = SF(v[l]);
-        for (uint i = 0; i < 4; i++) {
-            Xs[16 * lh + 4 * i][lr / 4][lr % 4] = SF(x[i].x);
-            Xs[16 * lh + 4 * i + 1][lr / 4][lr % 4] = SF(x[i].y);
-            Xs[16 * lh + 4 * i + 2][lr / 4][lr % 4] = SF(x[i].z);
-            Xs[16 * lh + 4 * i + 3][lr / 4][lr % 4] = SF(x[i].w);
-        }
+        store(0, u, w_ok, w, x, lr, lh);
         barrier();
         if (u + 1 < u1) {
             if (w_ok) w = load_w(r0 + lr, u + 1, lh);
-            for (uint i = 0; i < 4; i++) x[i] = x_ok ? X4[xb + 8 * (u + 1) + i] : vec4(0.0);
+            LOAD_X(u + 1);
         }
+#endif
 #ifdef MMB_F16
         SV s[2][8];
         for (uint a = 0; a < 2; a++)
@@ -193,7 +237,7 @@ void main() {
 #define S acc
 #endif
         for (uint k = 0; k < BK; k++) {
-            const SV w0 = Ws[k][tr], w1 = Ws[k][16 + tr], x0 = Xs[k][tt], x1 = Xs[k][16 + tt];
+            const SV w0 = Ws[b][k][tr], w1 = Ws[b][k][16 + tr], x0 = Xs[b][k][tt], x1 = Xs[b][k][16 + tt];
             S[0][0] += w0 * x0.x; S[0][1] += w0 * x0.y; S[0][2] += w0 * x0.z; S[0][3] += w0 * x0.w;
             S[0][4] += w0 * x1.x; S[0][5] += w0 * x1.y; S[0][6] += w0 * x1.z; S[0][7] += w0 * x1.w;
             S[1][0] += w1 * x0.x; S[1][1] += w1 * x0.y; S[1][2] += w1 * x0.z; S[1][3] += w1 * x0.w;
@@ -202,6 +246,10 @@ void main() {
 #ifdef MMB_F16
         for (uint a = 0; a < 2; a++)
             for (uint j = 0; j < 8; j++) acc[a][j] += vec4(s[a][j]);
+#endif
+#ifdef MMB_DBUF
+        if (more) store(b ^ 1u, u + 1, w_ok, w, x, lr, lh);
+        barrier();  // the next step's values are in; everyone is done with this one's
 #endif
     }
 

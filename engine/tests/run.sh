@@ -94,6 +94,12 @@ TS5_MMB_MIN=1 TS5_MMB_SPLIT=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu 
 # The f32 sums throughout (where the device has f16, mmb sums each step in f16).
 TS5_MMB_MIN=1 TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
     "${kmix[@]}"
+# The prompt kernel variants under test: double-buffered tiles with quad
+# loads of x (f16), and quad loads with f32 sums.
+TS5_MMB_MIN=1 TS5_MMB_VAR=dq python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
+    "${kmix[@]}"
+TS5_MMB_MIN=1 TS5_MMB_VAR=q TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
+    --ntok 300 "${kmix[@]}"
 # A wider model with the minimum at 12 blocks: attn_k, attn_v, ffn_gate and
 # ffn_up (4 or 8 blocks) take mmb only by splitting their columns in 4
 # slices, attn_q and ffn_down have the blocks; the last 44 tokens take the

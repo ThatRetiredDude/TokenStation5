@@ -100,6 +100,22 @@
 #include "mmb_q8_0.spv.h"
 #include "mmb16_q5_k.spv.h"
 #include "mmb16_q8_0.spv.h"
+#include "mmb16d_q4_k.spv.h"
+#include "mmb16d_q5_k.spv.h"
+#include "mmb16d_q6_k.spv.h"
+#include "mmb16d_q8_0.spv.h"
+#include "mmb16q_q4_k.spv.h"
+#include "mmb16q_q5_k.spv.h"
+#include "mmb16q_q6_k.spv.h"
+#include "mmb16q_q8_0.spv.h"
+#include "mmb16dq_q4_k.spv.h"
+#include "mmb16dq_q5_k.spv.h"
+#include "mmb16dq_q6_k.spv.h"
+#include "mmb16dq_q8_0.spv.h"
+#include "mmbq_q4_k.spv.h"
+#include "mmbq_q5_k.spv.h"
+#include "mmbq_q6_k.spv.h"
+#include "mmbq_q8_0.spv.h"
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
@@ -398,6 +414,10 @@ private:
         if (gemma) mmb_f16_skip_ = ",ffn_gate,ffn_up,";
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_F16_SKIP")) mmb_f16_skip_ = std::string(",") + e + ",";
+        // Prompt kernel variants under test (TS5_MMB_VAR): "d" double-buffers
+        // the shared tiles (one barrier a step; f16 only), "q" loads x by
+        // quads of tokens (vector stores to shared memory), "dq" both.
+        if (const char *e = getenv("TS5_MMB_VAR")) mmb_var_ = e;
         kv_ = kv_type_setting();
         if (kv_ == KvType::Q8 && !(attn_ok_all() && hp_.max_hd() % 32 == 0)) {
             ts5::log_line("ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16");
@@ -559,6 +579,10 @@ private:
         P(mm_f32, 3) P(mm_f16, 3) P(mm_q4_0, 3) P(mm_q8_0, 3) P(mm_q4_1, 3) P(mm_q5_0, 3) P(mm_q5_1, 3)
         P(mm_q4_k, 3) P(mm_q5_k, 3) P(mm_q6_k, 3) P(mmb_q4_k, 4) P(mmb_q6_k, 4) P(mmb_reduce, 2)
         P(mmb16_q4_k, 4) P(mmb16_q6_k, 4) P(mmb_q5_k, 4) P(mmb_q8_0, 4) P(mmb16_q5_k, 4) P(mmb16_q8_0, 4)
+        P(mmb16d_q4_k, 4) P(mmb16d_q5_k, 4) P(mmb16d_q6_k, 4) P(mmb16d_q8_0, 4)
+        P(mmb16q_q4_k, 4) P(mmb16q_q5_k, 4) P(mmb16q_q6_k, 4) P(mmb16q_q8_0, 4)
+        P(mmb16dq_q4_k, 4) P(mmb16dq_q5_k, 4) P(mmb16dq_q6_k, 4) P(mmb16dq_q8_0, 4)
+        P(mmbq_q4_k, 4) P(mmbq_q5_k, 4) P(mmbq_q6_k, 4) P(mmbq_q8_0, 4)
         // The one-token mat-vecs twice: mv_rows_ rows per workgroup, and one
         // (".1") for matrices with few rows.
 #define MV(n, nb)                                                                       \
@@ -1023,7 +1047,9 @@ private:
             split_used_ = p_off + S * slice;
         }
         const bool f16 = mmb_f16_ && (mmb_f16_skip_.empty() || mmb_f16_skip_.find("," + role(w) + ",") == std::string::npos);
-        dispatch(std::string(f16 ? "mmb16_" : "mmb_") + qname(w.type()), {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128,
+        std::string var = mmb_var_;
+        if (!f16) var.erase(std::remove(var.begin(), var.end(), 'd'), var.end());  // no f32 double-buffer (64 KiB)
+        dispatch(std::string(f16 ? "mmb16" : "mmb") + var + "_" + qname(w.type()), {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128,
                  (ntok + 127) / 128, what, S);
     }
     struct Reduce {
@@ -1526,6 +1552,7 @@ private:
     // find which matmuls put a model over the check's bar, and to keep them
     // there.
     std::string mmb_f16_skip_;
+    std::string mmb_var_;  // TS5_MMB_VAR: prompt kernel variant under test
     size_t split_used_ = 0;  // floats of split_ that kernels may still read
     // The KV cache's type (TS5_KV=q8 or f16).
     KvType kv_ = KvType::F16;
