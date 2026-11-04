@@ -1,0 +1,111 @@
+#version 450
+// Y[t][r] (+)= sum_c W[r][c] * X[t][c] for NT tokens (a specialization
+// constant, 2..8) of a Q8_0 matrix: the verify batch of speculative
+// decoding, summed exactly as mvt_q8_0 and mv16_q8_0 sum it, with the
+// tokens' x staged in shared memory: RG groups of 64 threads, each
+// mvt_q8_0's workgroup for its own NR rows, share one workgroup, and the
+// x of the 8 groups of blocks a step covers (2048 columns, TB tokens at a
+// time) is loaded into shared memory once for all RG * NR rows (see
+// mvtx_q4_k.glsl for why: the batch's x traffic, not the weight stream,
+// set the pace). See mv16_q8_0.glsl for the block layout.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+
+#define RG 4    // row groups of 64 threads
+#define WG 256  // 64 * RG
+#define NTMAX 8
+#define NRMAX 4
+#define TBMAX 4  // tokens staged at once: 32 KiB of shared memory
+#define SGMAX 8  // subgroups per group (of at least 8 invocations)
+layout(local_size_x = WG) in;
+layout(constant_id = 0) const uint NT = 2;  // tokens, at most NTMAX
+layout(constant_id = 1) const uint NR = 1;  // rows per group, at most NRMAX
+
+layout(std430, binding = 0) readonly buffer W32 { uint w32[]; };
+layout(std430, binding = 1) readonly buffer Xbuf { vec4 X4[]; };
+layout(std430, binding = 2) buffer Ybuf { float Y[]; };
+
+layout(push_constant) uniform PC {
+    uint ncols, nrows, ntok, row_bytes;
+    uint x_stride, y_stride, accumulate, x_off;
+} pc;
+
+shared vec4 xs[TBMAX * 512];                       // [token][column / 4] of the step's 2048 columns
+shared float partial[RG * NRMAX * NTMAX * SGMAX];  // [group][row][token][subgroup]
+
+vec4 sbytes4(uint w) {
+    const int v = int(w);
+    return vec4(bitfieldExtract(v, 0, 8), bitfieldExtract(v, 8, 8), bitfieldExtract(v, 16, 8), bitfieldExtract(v, 24, 8));
+}
+
+// The block at byte o (2-byte aligned): its scale, and its 32 values as 8
+// words. The last word read is only needed for its low half, which may be
+// the two bytes past the block: clamped to the buffer.
+struct Blk { float d; uint q[8]; };
+Blk load_block(uint o) {
+    const uint i = o >> 2, sh = (o & 2u) * 8u;
+    uint w[9];
+    [[unroll]] for (uint k = 0; k < 8; k++) w[k] = w32[i + k];
+    w[8] = w32[min(i + 8, w32.length() - 1)];
+    Blk b;
+    b.d = unpackHalf2x16(w[0] >> sh).x;
+    [[unroll]] for (uint k = 0; k < 8; k++) b.q[k] = sh == 0 ? (w[k] >> 16) | (w[k + 1] << 16) : w[k + 1];
+    return b;
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x, g = tid / 64, lt = tid % 64, th = tid % 8, lb = lt / 8;
+    const uint r0 = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * (NR * RG) + g * NR;
+    const uint nb = pc.ncols / 256;
+    const uint lx0 = lb * 64 + th * 8;  // the thread's x within the step's 2048 columns
+    float acc[NRMAX * NTMAX];
+    for (uint i = 0; i < NRMAX * NTMAX; i++) acc[i] = 0.0;
+    for (uint b0 = 0; b0 < nb; b0 += 8) {
+        const uint b = b0 + lb;
+        const bool live = b < nb;  // a group of blocks of the row, or idle past its end
+        // The NR rows' blocks, all in flight at once. Rows past the matrix
+        // read its last row; their sums aren't written.
+        Blk w[NRMAX];
+        [[unroll]] for (uint i = 0; i < NR; i++)
+            w[i] = load_block(min(r0 + i, pc.nrows - 1) * pc.row_bytes + min(b, nb - 1) * 272 + th * 34);
+        [[unroll]] for (uint p0 = 0; p0 < NT; p0 += TBMAX) {
+            const uint tb = min(TBMAX, NT - p0);
+            // Tokens p0 .. p0 + tb - 1's x of the step's columns, by the
+            // whole workgroup, once the last pass is done reading.
+            barrier();
+            for (uint e = tid; e < tb * 512; e += WG) {
+                const uint t = e / 512, c = e % 512;
+                xs[e] = b0 * 64 + c < nb * 64 ? X4[(pc.x_off + (p0 + t) * pc.x_stride) / 4 + b0 * 64 + c] : vec4(0.0);
+            }
+            barrier();
+            if (!live) continue;  // to the next pass's barrier, with everyone
+            [[unroll]] for (uint t = 0; t < TBMAX; t++) {
+                if (t >= tb) continue;
+                const uint xt = t * 512 + lx0;
+                vec4 x[8];
+                [[unroll]] for (uint c = 0; c < 8; c++) x[c] = xs[xt + c];
+                [[unroll]] for (uint i = 0; i < NR; i++) {
+                    float s = 0.0;
+                    [[unroll]] for (uint k = 0; k < 8; k++) s += dot(sbytes4(w[i].q[k]), x[k]);
+                    acc[i * NTMAX + p0 + t] += w[i].d * s;
+                }
+            }
+        }
+    }
+    // Each group's rows: its subgroups' sums, then one thread per row and token.
+    const uint sgl = lt / gl_SubgroupSize, nsg = max(1u, 64 / gl_SubgroupSize);
+    [[unroll]] for (uint t = 0; t < NT; t++)
+        [[unroll]] for (uint i = 0; i < NR; i++) {
+            const float s = subgroupAdd(acc[i * NTMAX + t]);
+            if (gl_SubgroupInvocationID == 0) partial[((g * NRMAX + i) * NTMAX + t) * SGMAX + sgl] = s;
+        }
+    barrier();
+    const uint nr = r0 < pc.nrows ? min(NR, pc.nrows - r0) : 0;
+    if (lt < nr * NT) {
+        const uint i = lt / NT, t = lt % NT;
+        float s = 0.0;
+        for (uint sg = 0; sg < nsg; sg++) s += partial[((g * NRMAX + i) * NTMAX + t) * SGMAX + sg];
+        const uint yi = t * pc.y_stride + r0 + i;
+        Y[yi] = pc.accumulate != 0 ? Y[yi] + s : s;
+    }
+}

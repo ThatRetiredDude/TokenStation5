@@ -78,6 +78,10 @@
 #include "mv16n_glu_q8_0.spv.h"
 #include "mvt_glu_q4_k.spv.h"
 #include "mvt_q4_k.spv.h"
+#include "mvtx_q4_k.spv.h"
+#include "mvtx_q5_k.spv.h"
+#include "mvtx_q6_k.spv.h"
+#include "mvtx_q8_0.spv.h"
 #include "mvt_q6_k.spv.h"
 #include "mvt_q5_k.spv.h"
 #include "mvt_q8_0.spv.h"
@@ -380,6 +384,7 @@ private:
         if (const char *e = getenv("TS5_MVT")) mvt_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT_GLU")) mvt_glu_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT_ROWS")) mvt_rows_ = std::min(4, std::max(1, atoi(e)));
+        if (const char *e = getenv("TS5_MVTX")) mvtx_ = atoi(e) != 0;
         // The fused kernel holds two matrices' words: past 2 rows it spills
         // registers on the PS5 (1376 VGPRs into scratch at 4 rows, a 7x
         // regression), so its row tiling is capped where the plain one's isn't.
@@ -628,6 +633,10 @@ private:
                 !make_pipe("mvt_q6_k" + s + ".1", spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, 1) ||
                 !make_pipe("mvt_q5_k" + s, spv_mvt_q5_k, sizeof(spv_mvt_q5_k), 3, err, nt, mvt_rows_) ||
                 !make_pipe("mvt_q5_k" + s + ".1", spv_mvt_q5_k, sizeof(spv_mvt_q5_k), 3, err, nt, 1) ||
+                !make_pipe("mvtx_q4_k" + s, spv_mvtx_q4_k, sizeof(spv_mvtx_q4_k), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvtx_q5_k" + s, spv_mvtx_q5_k, sizeof(spv_mvtx_q5_k), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvtx_q6_k" + s, spv_mvtx_q6_k, sizeof(spv_mvtx_q6_k), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvtx_q8_0" + s, spv_mvtx_q8_0, sizeof(spv_mvtx_q8_0), 3, err, nt, mvt_rows_) ||
                 !make_pipe("mvt_q8_0" + s, spv_mvt_q8_0, sizeof(spv_mvt_q8_0), 3, err, nt, mvt_rows_) ||
                 !make_pipe("mvt_q8_0" + s + ".1", spv_mvt_q8_0, sizeof(spv_mvt_q8_0), 3, err, nt, 1) ||
                 !make_pipe("mvt_glu_q4_k" + s, spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, mvt_glu_rows_) ||
@@ -1027,9 +1036,12 @@ private:
         // for a matrix with few rows.
         if (ntok >= 2 && ntok <= 8 && fast_matvec_ && mvt_ && fast_type(w)) {
             const bool one = rows < (uint32_t)mv_rows_min_ || mvt_rows_ == 1;
-            const uint32_t nr = one ? 1 : mvt_rows_, groups = (rows + nr - 1) / nr;
+            // Matrices of mvt_rows_ rows per group: the x-staging kernels, 4
+            // groups a workgroup (TS5_MVTX=0: a workgroup per group).
+            const bool staged = !one && mvtx_;
+            const uint32_t nr = one ? 1 : mvt_rows_ * (staged ? 4 : 1), groups = (rows + nr - 1) / nr;
             const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
-            dispatch(std::string("mvt_") + qname(w.type()) + "." + std::to_string(ntok) + (one ? ".1" : ""),
+            dispatch(std::string(staged ? "mvtx_" : "mvt_") + qname(w.type()) + "." + std::to_string(ntok) + (one ? ".1" : ""),
                      {&W(w), &x, &y}, pc, mx, my, what);
             return;
         }
@@ -1533,6 +1545,9 @@ private:
     // generic kernel for the other two).
     bool mv16_ = true;
     bool mvt_ = true;
+    // The verify batch's x staged in shared memory for 4 groups of rows
+    // (mvtx_*; TS5_MVTX=0: each group's workgroup reads it, mvt_*).
+    bool mvtx_ = true;
     // The fused gate+up verify kernel: off until a console A/B shows a win
     // (phase L measured it 7x slower at 4 rows from register spills).
     bool mvt_glu_ = false;

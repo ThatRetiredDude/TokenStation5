@@ -346,6 +346,24 @@ load, so its rows per workgroup are capped at 2 (at 4 the PS5 spills
 1376 VGPRs into scratch, measured as a 7x slower verify), and it stays
 off by default until a console A/B shows the capped version winning.
 
+With the decode moved out of the token loop, what set the batch's pace
+was the x traffic itself: each thread reads 32 floats of x per token and
+block against 18 bytes of Q4_K weights, once per NR rows, so a batch of
+NT tokens pulls 7 NT / NR bytes of x through the L1 per byte of weights,
+and at 4 tokens that is more than the L1 serves at the pace of the weight
+stream (the model: a 4-token verify at 2.2x a one-token mat-vec, 8 tokens
+4.4x; measured 2.1x and 3.5x). The default batch kernels (`mvtx_*`;
+`TS5_MVTX=0` reverts) therefore stage x in shared memory: four of the
+64-thread groups share a workgroup of 256 threads, and the x of the 8
+blocks a step covers (2048 columns, 4 tokens at a time, 32 KiB) is loaded
+once for all four groups' rows, a quarter of the traffic; each thread
+still holds its 32 values in registers across its NR rows. Each group's
+sums are the unstaged kernel's, block for block and lane for lane (the
+same subgroup reduction over the same 64 lanes), so the staged kernels
+reproduce the one-token forward bit for bit as the others do; the lanes
+of a group are taken to be whole subgroups, as every driver lays them
+out. Matrices under `TS5_MV_ROWS_MIN` rows keep the one-row kernels.
+
 When `TS5_DRAFT_MODEL` names a smaller GGUF with the same vocabulary (for
 Qwen 2.5 Coder 7B, a Qwen 2.5 0.5B; the text tokens must match, while the
 chat's control tokens may be named differently, as DeepSeek's distilled
