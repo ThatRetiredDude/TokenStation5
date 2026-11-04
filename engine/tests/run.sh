@@ -277,7 +277,7 @@ mk_k qwen2-ctl qwen2 qwen2 --rename-controls
 TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-ctl.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
     -p "$nr" -n 100 --temp 0 > "$work/ctl-on.txt" 2> "$work/ctl-on.err"
 cmp "$work/padr-off.txt" "$work/ctl-on.txt"
-grep -q "draft model: [1-9][0-9]* control tokens named differently" "$work/ctl-on.err"
+grep -q "draft model: [1-9][0-9]* control or placeholder tokens named differently" "$work/ctl-on.err"
 grep -q "draft model .* ready" "$work/ctl-on.err"
 grep -q "helper [0-9]*/[1-9][0-9]* accepted" "$work/ctl-on.err"
 ! grep -q "draft model \(stopped\|failed\|not used\)" "$work/ctl-on.err"
