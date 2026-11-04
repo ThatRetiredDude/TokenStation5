@@ -3,14 +3,24 @@
 // for its block): the verify batch of speculative decoding. Laid out as
 // mv16_q4_k: 8 threads share a block from 16-byte loads, and the
 // workgroup's 64 threads take 8 blocks at a time of NR rows (a
-// specialization constant, at most 4). Each row's words are
-// loaded once per block and dotted, raw, with every token's x, so the
-// weight stream, which decode is bound by, is paid once for the whole
-// batch; each token's 32 x values and their sums are loaded once per NR
-// rows, where one row per workgroup re-read them per row from the L2 — at
-// 7 tokens and 19k rows several GB a layer, the measured cost of a verify
-// pass. Both loops are compile-time, so every token's loads are in flight
-// at once.
+// specialization constant, at most 4). Each row's words are loaded once
+// per block, so the weight stream, which decode is bound by, is paid once
+// for the whole batch; each token's 32 x values and their sums are loaded
+// once per NR rows, where one row per workgroup re-read them per row from
+// the L2 — at 7 tokens and 19k rows several GB a layer, the measured cost
+// of a verify pass. Both loops are compile-time, so every token's loads
+// are in flight at once.
+//
+// The nibbles are turned into floats, and the block's scales and mins
+// decoded and multiplied by d and dmin, once per row and block, before the
+// token loop, which is then 8 dot products and 4 multiply-adds a token and
+// row. Doing that per token (as mv16_q4_k does for its one token) made
+// each token of a batch cost about 40% of a whole one-token mat-vec on the
+// PS5 (Qwen 2.5 Coder 7B: 1.58x for 2 tokens, 3.9x for 8, where the Q6_K
+// batch kernel, the same bytes per block, ran 1.05x and 1.5x): the ALU
+// work, not the weight stream, set the pace. The low nibbles go through
+// the token loop first and the high ones after, so a row holds 16 floats
+// at a time (64 for the 4 rows) and the workgroup keeps its occupancy.
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_control_flow_attributes : require
 
@@ -49,28 +59,27 @@ uint scales_mins(uvec4 h, uint p) {
 }
 vec4 bytes4(uint w) { return vec4(float(w & 255u), float((w >> 8) & 255u), float((w >> 16) & 255u), float(w >> 24)); }
 
-// A block's header h and nibble word q (thread th of 8), with one token's x:
-// a holds the low nibbles' 16 values, e the high ones', ta and te their sums.
-#ifdef Q5K
-float block_dot(uvec4 h, uvec4 q, uvec4 qh, vec4 a[4], vec4 e[4], float ta, float te, uint th) {
-    float s0 = 0.0, s1 = 0.0;
-    const uint j = th & ~1u;  // the low nibbles' sub-block; the high ones' is j + 1
-    for (uint c = 0; c < 4; c++) {
-        s0 += dot(bytes4((q[c] & 0x0F0F0F0Fu) | (((qh[c] >> j) & 0x01010101u) << 4)), a[c]);
-        s1 += dot(bytes4(((q[c] >> 4) & 0x0F0F0F0Fu) | (((qh[c] >> (j + 1)) & 0x01010101u) << 4)), e[c]);
-    }
-#else
-float block_dot(uvec4 h, uvec4 q, vec4 a[4], vec4 e[4], float ta, float te, uint th) {
-    float s0 = 0.0, s1 = 0.0;
-    for (uint c = 0; c < 4; c++) {
-        s0 += dot(bytes4(q[c] & 0x0F0F0F0Fu), a[c]);
-        s1 += dot(bytes4((q[c] >> 4) & 0x0F0F0F0Fu), e[c]);
-    }
-#endif
-    const vec4 sm = bytes4(scales_mins(h, th >> 1));  // scale 2p, 2p + 1, min 2p, 2p + 1
+// Thread th's two sub-blocks' scales and mins, times the block's d and
+// dmin: (d s_lo, d s_hi, dmin m_lo, dmin m_hi).
+vec4 factors(uvec4 h, uint th) {
+    const vec4 sm = bytes4(scales_mins(h, th >> 1));
     const vec2 dm = unpackHalf2x16(h.x);
-    return dm.x * (sm.x * s0 + sm.y * s1) - dm.y * (sm.z * ta + sm.w * te);
+    return vec4(dm.x * sm.x, dm.x * sm.y, dm.y * sm.z, dm.y * sm.w);
 }
+
+// The thread's 16 low (hi == 0) or high nibbles of word q as floats.
+#ifdef Q5K
+void nibbles(uvec4 q, uvec4 qh, uint th, uint hi, out vec4 w[4]) {
+    const uint j = (th & ~1u) + hi, sh = 4 * hi;
+    [[unroll]] for (uint c = 0; c < 4; c++)
+        w[c] = bytes4(((q[c] >> sh) & 0x0F0F0F0Fu) | (((qh[c] >> j) & 0x01010101u) << 4));
+}
+#else
+void nibbles(uvec4 q, uint th, uint hi, out vec4 w[4]) {
+    const uint sh = 4 * hi;
+    [[unroll]] for (uint c = 0; c < 4; c++) w[c] = bytes4((q[c] >> sh) & 0x0F0F0F0Fu);
+}
+#endif
 
 void main() {
     const uint r0 = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * NR;
@@ -95,23 +104,33 @@ void main() {
             qh[i] = w128[o + 1 + (th & 1u)];
 #endif
         }
+        vec4 f[NRMAX];
+        [[unroll]] for (uint i = 0; i < NR; i++) f[i] = factors(h[i], th);
         const uint x0 = (b * 256) / 4 + 16 * (th >> 1) + 4 * (th & 1u);
-        [[unroll]] for (uint t = 0; t < NT; t++) {
-            const uint xt = (pc.x_off + t * pc.x_stride) / 4 + x0;
-            vec4 a[4], e[4];
-            float ta = 0.0, te = 0.0;
-            [[unroll]] for (uint c = 0; c < 4; c++) {
-                a[c] = X4[xt + c];
-                e[c] = X4[xt + 8 + c];
-                ta += a[c].x + a[c].y + a[c].z + a[c].w;
-                te += e[c].x + e[c].y + e[c].z + e[c].w;
-            }
+        // The low nibbles against each token's first 16 x values, then the
+        // high ones against the other 16.
+        [[unroll]] for (uint hi = 0; hi < 2; hi++) {
+            vec4 w[NRMAX][4];
             [[unroll]] for (uint i = 0; i < NR; i++)
 #ifdef Q5K
-                acc[i * NTMAX + t] += block_dot(h[i], q[i], qh[i], a, e, ta, te, th);
+                nibbles(q[i], qh[i], th, hi, w[i]);
 #else
-                acc[i * NTMAX + t] += block_dot(h[i], q[i], a, e, ta, te, th);
+                nibbles(q[i], th, hi, w[i]);
 #endif
+            [[unroll]] for (uint t = 0; t < NT; t++) {
+                const uint xt = (pc.x_off + t * pc.x_stride) / 4 + x0 + 8 * hi;
+                vec4 x[4];
+                float xs = 0.0;
+                [[unroll]] for (uint c = 0; c < 4; c++) {
+                    x[c] = X4[xt + c];
+                    xs += x[c].x + x[c].y + x[c].z + x[c].w;
+                }
+                [[unroll]] for (uint i = 0; i < NR; i++) {
+                    float s = 0.0;
+                    [[unroll]] for (uint c = 0; c < 4; c++) s += dot(w[i][c], x[c]);
+                    acc[i * NTMAX + t] += f[i][hi] * s - f[i][2 + hi] * xs;
+                }
+            }
         }
     }
     [[unroll]] for (uint t = 0; t < NT; t++)
