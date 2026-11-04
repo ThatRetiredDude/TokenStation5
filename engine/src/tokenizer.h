@@ -25,12 +25,17 @@ public:
     bool is_eog(int32_t tok) const;
     int32_t bos() const { return bos_; }
     int n_vocab() const { return (int)tokens_.size(); }
-    // Whether g holds this tokenizer's token list. A draft model with the
-    // same vocabulary may pad its weight rows differently, and Qwen 2.5 7B
-    // GGUFs pad the token list itself with placeholders (to 152064, where
-    // the 0.5B stops at 151936), so the test is the lists' shared prefix;
-    // ids past either list are guarded where drafts are made and fed.
-    bool same_vocab(const Gguf &g) const;
+    // Whether a draft model with g's token list can draft for this one. A
+    // draft model with the same vocabulary may pad its weight rows
+    // differently, and Qwen 2.5 7B GGUFs pad the token list itself with
+    // placeholders (to 152064, where the 0.5B stops at 151936), so the test
+    // is the lists' shared prefix; ids past either list are guarded where
+    // drafts are made and fed. Control tokens may be named differently
+    // (DeepSeek's distilled Qwens and Gemma 4 renamed their chat tokens): every
+    // draft is verified by this model, so a draft of such a token is only
+    // ever rejected; `note` then says how many differ. Any other token
+    // differing (a different vocabulary) fails, with the reason in err.
+    bool drafter_vocab_ok(const Gguf &g, std::string &err, std::string &note) const;
     // Formats a conversation with the model's chat format, ending with the
     // assistant turn opened.
     std::string apply_chat(const std::vector<ChatMessage> &msgs) const;

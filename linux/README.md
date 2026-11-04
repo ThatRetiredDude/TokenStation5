@@ -181,10 +181,11 @@ Speed test: `ts5 bench -m model.gguf --pp 512 --tg 128`.
 ## Helper model (faster replies)
 
 Settings > MODELS > Helper model, Automatic by default: when the models
-folder has a small model of the same family as the one served (same
-architecture and vocabulary, a quarter of its size or less, such as Qwen3
-0.6B beside Qwen3 8B), it guesses a few tokens ahead and the big model checks
-them in one pass. The output is exactly what the big model alone writes; only
+folder has a small model with the same vocabulary as the one served, a
+quarter of its size or less (Qwen3 0.6B beside Qwen3 8B or 14B, Qwen 2.5
+Coder 0.5B beside DeepSeek R1 Distill Qwen 14B, Gemma 3 1B beside Gemma 4
+12B; the chat's control tokens may differ), it guesses a few tokens ahead and
+the big model checks them in one pass. The output is exactly what the big model alone writes; only
 the speed changes. The helper keeps a 16k context of its own (past that,
 drafting from the conversation's own text goes on). Off turns it off;
 `TS5_DRAFT_MODEL=/path/to.gguf` in `ts5.env` picks one.

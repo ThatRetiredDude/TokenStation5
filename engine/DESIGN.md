@@ -162,7 +162,9 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   and Llama 3.x's large activations put Llama 3.2 3B over the bar at 512
   tokens (0.78%, against 0.04% in f32), so those stay in f32. Moving the
   f16 sums into f32 every 8 products instead of 32 didn't help and cost as
-  much as f32.
+  much as f32. `TS5_MMB_F16_SKIP=ffn_down,output` (any weight roles) keeps
+  those matmuls on the f32 kernel with f16 on, to find which of a model's
+  matmuls put it over the bar.
 - 9 or more (`mm_*`, `shaders/matmul_tiled.glsl`): 64 rows x 64 tokens per
   workgroup. Half the threads dequantize a 64 x 64 slice of W into shared
   memory while the other half load the matching slice of X, then each thread
@@ -329,7 +331,10 @@ load, so its rows per workgroup are capped at 2 (at 4 the PS5 spills
 off by default until a console A/B shows the capped version winning.
 
 When `TS5_DRAFT_MODEL` names a smaller GGUF with the same vocabulary (for
-Qwen 2.5 Coder 7B, a Qwen 2.5 0.5B), steps where the lookup finds nothing
+Qwen 2.5 Coder 7B, a Qwen 2.5 0.5B; the text tokens must match, while the
+chat's control tokens may be named differently, as DeepSeek's distilled
+Qwens name Qwen's and Gemma 4 names Gemma 3's, since every draft is
+verified), steps where the lookup finds nothing
 draft that model's greedy continuation instead: its own cache is caught up to
 the confirmed history in one batch, then it extends one token at a time, and
 the big model verifies the batch as usual. The acceptance walk keeps the

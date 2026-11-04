@@ -503,14 +503,37 @@ std::string Tokenizer::apply_chat(const std::vector<ChatMessage> &msgs) const {
     return s;
 }
 
-bool Tokenizer::same_vocab(const Gguf &g) const {
+bool Tokenizer::drafter_vocab_ok(const Gguf &g, std::string &err, std::string &note) const {
     const GgufArray *toks = g.get_arr("tokenizer.ggml.tokens");
-    if (!toks) return false;
+    if (!toks) { err = "the draft model has no token list"; return false; }
+    const GgufArray *dty = g.get_arr("tokenizer.ggml.token_type");
     const size_t n = std::min(toks->size(), tokens_.size());
-    if (n == 0) return false;
+    if (n == 0) { err = "the draft model's token list is empty"; return false; }
+    // Token types 3 (control), 4 (user-defined) and 5 (unused) are never
+    // produced by text; a different name at the same id is a different chat
+    // format, not a different vocabulary.
+    auto special = [](int t) { return t == 3 || t == 4 || t == 5; };
+    size_t renamed = 0, first = 0, last = 0;
     for (size_t i = 0; i < n; i++) {
         const std::string *s = std::get_if<std::string>(&(*toks)[i]);
-        if (!s || *s != tokens_[i]) return false;
+        if (!s) { err = "the draft model's token list is malformed"; return false; }
+        if (*s == tokens_[i]) continue;
+        const int64_t *dt = dty && i < dty->size() ? std::get_if<int64_t>(&(*dty)[i]) : nullptr;
+        const bool ok = i < types_.size() && special(types_[i]) && dt && special((int)*dt);
+        if (!ok) {
+            char buf[96];
+            snprintf(buf, sizeof buf, "the draft model's vocabulary differs (token %zu is ", i);
+            err = buf + ("\"" + *s + "\", not \"" + tokens_[i] + "\")");
+            return false;
+        }
+        if (renamed++ == 0) first = i;
+        last = i;
+    }
+    if (renamed) {
+        char buf[160];
+        snprintf(buf, sizeof buf, "%zu control tokens named differently (ids %zu to %zu); every draft is verified",
+                 renamed, first, last);
+        note = buf;
     }
     return true;
 }

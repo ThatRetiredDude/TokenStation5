@@ -272,6 +272,20 @@ TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-padlist.gguf" "$ts5" run --backend cpu 
 cmp "$work/padr-off.txt" "$work/padlr-on.txt"
 grep -q "draft model .* ready" "$work/padlr-on.err"  # a longer one too
 ! grep -q "draft model \(stopped\|failed\)" "$work/padlr-on.err"
+echo "== a drafter whose control tokens are named differently drafts (DeepSeek's Qwens, Gemma 4); one text token differing is refused"
+mk_k qwen2-ctl qwen2 qwen2 --rename-controls
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-ctl.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/ctl-on.txt" 2> "$work/ctl-on.err"
+cmp "$work/padr-off.txt" "$work/ctl-on.txt"
+grep -q "draft model: [1-9][0-9]* control tokens named differently" "$work/ctl-on.err"
+grep -q "draft model .* ready" "$work/ctl-on.err"
+grep -q "helper [0-9]*/[1-9][0-9]* accepted" "$work/ctl-on.err"
+! grep -q "draft model \(stopped\|failed\|not used\)" "$work/ctl-on.err"
+mk_k qwen2-tok qwen2 qwen2 --rename-token 1000
+TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-tok.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
+    -p "$nr" -n 100 --temp 0 > "$work/tok-on.txt" 2> "$work/tok-on.err"
+cmp "$work/padr-off.txt" "$work/tok-on.txt"
+grep -q 'draft model not used: the draft model.s vocabulary differs (token 1000 is "\[RENAMED\]"' "$work/tok-on.err"
 echo "== the guards at the vocabulary seams, forced to fire (a boosted row the greedy target soon picks)"
 mk_k qwen2-padhot qwen2 qwen2 --pad-tokens 128 --boost-token 151940
 # A target that samples into its pad range stops the draft model with a

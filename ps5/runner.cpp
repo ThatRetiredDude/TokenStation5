@@ -74,9 +74,12 @@ std::string base(const std::string &p) {
 
 #ifdef TS5_LINUX
 // The helper (draft) model for `path` when TS5_DRAFT_MODEL is unset: the
-// smallest .gguf beside it with the same architecture and vocabulary and at
-// most a quarter of its size (Qwen3 0.6B for Qwen3 8B, Llama 3.2 1B for
-// Llama 3.1 8B, Gemma 3 1B for Gemma 3 12B). "" if there is none.
+// smallest .gguf beside it whose token list the engine accepts as a
+// drafter's (the same text tokens; the chat's control tokens may be named
+// differently, as DeepSeek's distilled Qwens and Gemma 4 name theirs) and at
+// most a quarter of its size (Qwen3 0.6B for Qwen3 8B or 14B, Llama 3.2 1B
+// for Llama 3.1 8B, Gemma 3 1B for Gemma 3 12B and Gemma 4 12B, Qwen 2.5
+// Coder 0.5B for DeepSeek R1 Distill Qwen 14B). "" if there is none.
 // TS5_DRAFT_MODEL=off turns it off; a path picks that file.
 std::string auto_drafter(const std::string &path) {
     struct stat st;
@@ -102,16 +105,17 @@ std::string auto_drafter(const std::string &path) {
     if (cands.empty()) return "";
     std::sort(cands.begin(), cands.end());
     ts5::Model m;
-    std::string err;
+    ts5::Tokenizer t;
+    std::string err, note;
     try {
-        if (!m.open(path, err)) return "";
+        if (!m.open(path, err) || !t.load(m.gguf, err)) return "";
     } catch (const std::exception &) { return ""; }
     for (auto &c : cands) {
         ts5::Model d;
         try {
             if (!d.open(c.second, err)) continue;
         } catch (const std::exception &) { continue; }
-        if (d.hp.arch == m.hp.arch && d.hp.n_vocab == m.hp.n_vocab) return c.second;
+        if (t.drafter_vocab_ok(d.gguf, err, note)) return c.second;
     }
     return "";
 }

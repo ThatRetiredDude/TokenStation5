@@ -15,7 +15,9 @@ import numpy as np
 from gguf import GGMLQuantizationType, GGUFReader, GGUFValueType, GGUFWriter, quants
 
 
-def copy_tokenizer(reader, writer, pad_tokens=0):
+def copy_tokenizer(reader, writer, pad_tokens=0, rename_controls=False, rename_token=-1):
+    tf = reader.fields.get("tokenizer.ggml.token_type")
+    types = [tf.parts[i].tolist()[0] for i in tf.data] if tf else []
     for field in reader.fields.values():
         if not field.name.startswith("tokenizer."):
             continue
@@ -26,6 +28,13 @@ def copy_tokenizer(reader, writer, pad_tokens=0):
                 vals = [bytes(field.parts[i]).decode("utf-8", errors="surrogateescape") for i in field.data]
             else:
                 vals = [field.parts[i].tolist()[0] for i in field.data]
+            if field.name == "tokenizer.ggml.tokens":
+                # As DeepSeek's distilled Qwens and Gemma 4 do: the chat's
+                # control tokens under other names, the text tokens as they were.
+                if rename_controls:
+                    vals = [f"<|ctl{i}|>" if i < len(types) and types[i] in (3, 4) else v for i, v in enumerate(vals)]
+                if rename_token >= 0:
+                    vals[rename_token] = "[RENAMED]"
             # Qwen 2.5 7B GGUFs pad the token list itself with placeholders;
             # the parallel scores and types arrays grow with it.
             if field.name == "tokenizer.ggml.tokens":
@@ -130,6 +139,9 @@ def main():
                     help="extra embedding and output rows past the token list, as released models pad")
     ap.add_argument("--pad-tokens", type=int, default=0,
                     help="placeholder entries added to the token list itself (with rows to match), as Qwen 7B pads")
+    ap.add_argument("--rename-controls", action="store_true",
+                    help="name the control tokens differently (a drafter with another chat format)")
+    ap.add_argument("--rename-token", type=int, default=-1, help="name this one text token differently")
     ap.add_argument("--boost-token", type=int, default=-1,
                     help="make this output row huge, so greedy sampling soon picks it: for guard tests")
     ap.add_argument("--quant", default="F32", choices=["F32", "F16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q4_K_M", "Q5_K_M"],
@@ -179,7 +191,7 @@ def main():
         w.add_key_value("gemma4.attention.shared_kv_layers", 0, GGUFValueType.UINT32)
         w.add_key_value("gemma4.embedding_length_per_layer_input", 0, GGUFValueType.UINT32)
     w.add_file_type(0)
-    copy_tokenizer(reader, w, a.pad_tokens)
+    copy_tokenizer(reader, w, a.pad_tokens, a.rename_controls, a.rename_token)
 
     kmix = a.quant in ("Q4_K_M", "Q5_K_M")
     qtype = getattr(GGMLQuantizationType, a.quant[:4]) if kmix else getattr(GGMLQuantizationType, a.quant)

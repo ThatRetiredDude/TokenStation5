@@ -391,6 +391,7 @@ private:
         // at 512 tokens (0.78%; 0.02-0.04% in f32). TS5_MMB_F16=0|1 decides.
         mmb_f16_ = ctx_->float16 && (hp_.arch == "qwen2" || hp_.arch == "qwen3");
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
+        if (const char *e = getenv("TS5_MMB_F16_SKIP")) mmb_f16_skip_ = std::string(",") + e + ",";
         kv_ = kv_type_setting();
         if (kv_ == KvType::Q8 && !(attn_ok_all() && hp_.max_hd() % 32 == 0)) {
             ts5::log_line("ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16");
@@ -1015,7 +1016,8 @@ private:
             reduces_.push_back({{rows, ntok, pc.y_stride, pc.accumulate, S, p_off}, &y, what});
             split_used_ = p_off + S * slice;
         }
-        dispatch(std::string(mmb_f16_ ? "mmb16_" : "mmb_") + qname(w.type()), {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128,
+        const bool f16 = mmb_f16_ && (mmb_f16_skip_.empty() || mmb_f16_skip_.find("," + role(w) + ",") == std::string::npos);
+        dispatch(std::string(f16 ? "mmb16_" : "mmb_") + qname(w.type()), {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128,
                  (ntok + 127) / 128, what, S);
     }
     struct Reduce {
@@ -1513,6 +1515,10 @@ private:
     // TS5_MMB_F16=1, where the device has f16 arithmetic; f32 throughout by
     // default.
     bool mmb_f16_ = false;
+    // Roles (attn_q, ffn_down, output, ...) that stay on the f32 kernel with
+    // f16 on, comma-separated (TS5_MMB_F16_SKIP): to find which matmuls put
+    // a model over the check's bar.
+    std::string mmb_f16_skip_;
     size_t split_used_ = 0;  // floats of split_ that kernels may still read
     // The KV cache's type (TS5_KV=q8 or f16).
     KvType kv_ = KvType::F16;

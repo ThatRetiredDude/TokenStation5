@@ -58,7 +58,9 @@ void Engine::index_grams(size_t from) {
 
 bool Engine::set_drafter(Model &dm, Backend *db, std::string &err) {
     std::unique_ptr<Backend> b(db);
-    if (!t_.same_vocab(dm.gguf)) { err = "the draft model's vocabulary differs"; return false; }
+    std::string note;
+    if (!t_.drafter_vocab_ok(dm.gguf, err, note)) return false;
+    if (!note.empty()) ts5::log_line("ts5: draft model: %s", note.c_str());
     dm_ = &dm;
     db_ = std::move(b);
     dl_.clear();
