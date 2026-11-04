@@ -98,6 +98,7 @@ Install the newer package the same way; your models, keys, chats and usage stay 
 
 ## Next
 
+- [Recommended settings](Recommended-settings): what to run on a PS5, and which model
 - [Models](Models): with the memory raised, 14B models fit
 - [PS5 hardware on Linux](PS5-hardware-on-Linux)
 - [Connecting apps](Connecting-apps)

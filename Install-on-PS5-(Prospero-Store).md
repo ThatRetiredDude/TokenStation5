@@ -26,6 +26,8 @@ export PS5_HOST=192.168.1.50
 scripts/ts5-ps5.sh install          # title -> /data/homebrew/PPSA99555
 ```
 
+An app you installed by hand can be handed to the store afterwards with "Manage with ProsperoStore" on its page, so updates come through the store.
+
 ## First start
 
 The title opens on the Models page when there is no model yet. Choose one of the built-in downloads (Llama 3.2 3B is the quickest way to see it work, Qwen 2.5 Coder 7B is the one for coding) and press cross. The download runs on the console, checked against its SHA-256, and a stopped download picks up where it left off. When it's done the model starts, and a notification on the TV gives the address apps use.
@@ -39,6 +41,7 @@ Install the new version from the store's Updates section (or Update all). A stor
 ## Next
 
 - [Using the TV app](Using-the-TV-app)
+- [Recommended settings](Recommended-settings)
 - [Connecting apps](Connecting-apps)
 - [Troubleshooting](Troubleshooting)
 
