@@ -127,14 +127,6 @@
 #include "mmbq_q5_k.spv.h"
 #include "mmbq_q6_k.spv.h"
 #include "mmbq_q8_0.spv.h"
-#include "mmb16qp_q4_k.spv.h"
-#include "mmb16qp_q5_k.spv.h"
-#include "mmb16qp_q6_k.spv.h"
-#include "mmb16qp_q8_0.spv.h"
-#include "mmbqp_q4_k.spv.h"
-#include "mmbqp_q5_k.spv.h"
-#include "mmbqp_q6_k.spv.h"
-#include "mmbqp_q8_0.spv.h"
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
@@ -437,14 +429,16 @@ private:
         // The prompt kernel's variants (TS5_MMB_VAR): "q" loads x by quads of
         // tokens and stores them to shared memory as vectors, "d"
         // double-buffers the shared tiles (one barrier a step; f16 only),
-        // "dq" both, "qp" the quad loads with the x tile's rows padded. On
-        // the PS5 (fan at full, 2026-11-04) q is the fastest on every model
-        // and the f16 default: prompts Qwen3 14B 342 -> 431 tok/s (+26%),
-        // Qwen3 8B 583 -> 712, DeepSeek 14B 370 -> 443, Gemma 4 12B 375 ->
-        // 402 (+7%), as much at 4096 tokens, checks unchanged; d alone is
-        // worth half of that and dq no more than q. The f32 kernel's quad
-        // variant ran 3% slower than its plain one (Gemma 4), so f32 stays
-        // plain unless TS5_MMB_VAR says.
+        // "dq" both. On the PS5 (fan at full, 2026-11-04) q is the fastest
+        // on every model and the f16 default: prompts Qwen3 14B 342 -> 431
+        // tok/s (+26%), Qwen3 8B 583 -> 712, DeepSeek 14B 370 -> 443, Gemma
+        // 4 12B 375 -> 402 (+7%), as much at 4096 tokens, checks unchanged;
+        // d alone is worth half of that and dq no more than q, and padding
+        // the x tile's rows against bank conflicts on the quad stores (a
+        // "qp" variant, since dropped) changed nothing (2026-11-05: every
+        // model within 0.3% of q). The f32 kernel's quad variant ran 3%
+        // slower than its plain one (Gemma 4), so f32 stays plain unless
+        // TS5_MMB_VAR says.
         mmb_var_ = "q";
         if (const char *e = getenv("TS5_MMB_VAR")) {
             mmb_var_ = e;
@@ -616,8 +610,6 @@ private:
         P(mmb16q_q4_k, 4) P(mmb16q_q5_k, 4) P(mmb16q_q6_k, 4) P(mmb16q_q8_0, 4)
         P(mmb16dq_q4_k, 4) P(mmb16dq_q5_k, 4) P(mmb16dq_q6_k, 4) P(mmb16dq_q8_0, 4)
         P(mmbq_q4_k, 4) P(mmbq_q5_k, 4) P(mmbq_q6_k, 4) P(mmbq_q8_0, 4)
-        P(mmb16qp_q4_k, 4) P(mmb16qp_q5_k, 4) P(mmb16qp_q6_k, 4) P(mmb16qp_q8_0, 4)
-        P(mmbqp_q4_k, 4) P(mmbqp_q5_k, 4) P(mmbqp_q6_k, 4) P(mmbqp_q8_0, 4)
         // The one-token mat-vecs twice: mv_rows_ rows per workgroup, and one
         // (".1") for matrices with few rows.
 #define MV(n, nb)                                                                       \

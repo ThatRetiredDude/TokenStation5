@@ -178,9 +178,11 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   slower. `d` keeps two steps' tiles in shared memory, so a step takes one
   barrier instead of two and a wave's stores of the next step overlap the
   others' sums (f16 only: the f32 tiles would fill the 64 KiB): worth half
-  of q alone, nothing on top of it (`dq`). `qp` pads the x tile's rows so
-  the quad stores spread over four banks (being measured). Every variant
-  sums in the same order, so their output is the same.
+  of q alone, nothing on top of it (`dq`). Padding the x tile's rows so the
+  quad stores spread over four banks (a `qp` variant, since dropped) made
+  no difference on the PS5 (every model within 0.3% of q at 512 and 4096
+  tokens): those stores were never the pace. Every variant sums in the same
+  order, so their output is the same.
 - 9 or more (`mm_*`, `shaders/matmul_tiled.glsl`): 64 rows x 64 tokens per
   workgroup. Half the threads dequantize a 64 x 64 slice of W into shared
   memory while the other half load the matching slice of X, then each thread

@@ -57,17 +57,11 @@ layout(push_constant) uniform PC {
 #else
 #define NB 1
 #endif
-// With MMB_XPAD, each k row of the x tile is one vector longer, so the
-// quad stores of MMB_XQ (4 lanes to 4 consecutive rows of one column) hit
-// 4 different banks instead of one.
-#ifdef MMB_XPAD
-#define XP 1
-#else
-#define XP 0
-#endif
-// [buffer][k][row / 4] and [buffer][k][token / 4].
+// [buffer][k][row / 4] and [buffer][k][token / 4]. (Padding each k row
+// of Xs by one vector, so MMB_XQ's quad stores hit 4 banks instead of one,
+// changed nothing on the PS5.)
 shared SV Ws[NB][BK][BM / 4];
-shared SV Xs[NB][BK][BN / 4 + XP];
+shared SV Xs[NB][BK][BN / 4];
 
 #if QTYPE == T_Q4_K || QTYPE == T_Q5_K
 // A 144-byte Q4_K block is 9 words of 16 bytes: d, dmin and the 12 bytes of
