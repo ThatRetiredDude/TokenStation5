@@ -251,6 +251,58 @@ struct Peak {
         }
         return true;
     }
+
+    // The GPU time (ms, best of `reps`) of `n` dispatches of p, the i-th
+    // reading `slice` bytes of b0 from i * slice on (each slice new to the
+    // caches while the buffer holds more than n slices), with a compute to
+    // compute barrier between them when `barrier`, as a token's dependent
+    // kernels have.
+    bool chain(VkPipeline p, VkBuffer b0, VkDeviceSize b0_size, VkBuffer b1, VkDeviceSize slice, uint32_t groups,
+               int n, bool barrier, int reps, double &ms, std::string &err) {
+        ms = 1e30;
+        const uint32_t words = (uint32_t)(slice / 16);
+        const PC pc{words, 0, (words + groups - 1) / groups};
+        for (int r = 0; r < reps; r++) {
+            if (!ok(vk.vkResetCommandBuffer(cmd, 0), "vkResetCommandBuffer", err)) return false;
+            VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            if (!ok(vk.vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer", err)) return false;
+            vk.vkCmdResetQueryPool(cmd, qp, 0, 2);
+            vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p);
+            vk.vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PC), &pc);
+            vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qp, 0);
+            for (int i = 0; i < n; i++) {
+                const VkDeviceSize off = ((VkDeviceSize)i * slice) % (b0_size - slice + 1) / 256 * 256;
+                VkDescriptorBufferInfo di[2] = {{b0, off, slice}, {b1, 0, VK_WHOLE_SIZE}};
+                VkWriteDescriptorSet w[2] = {};
+                for (uint32_t k = 0; k < 2; k++) {
+                    w[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                    w[k].dstBinding = k;
+                    w[k].descriptorCount = 1;
+                    w[k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    w[k].pBufferInfo = &di[k];
+                }
+                vk.vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 2, w);
+                vk.vkCmdDispatch(cmd, groups, 1, 1);
+                if (barrier && i + 1 < n) {
+                    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                    vk.vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+                }
+            }
+            vk.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qp, 1);
+            if (!run_cmd(err)) return false;
+            uint64_t ts[2];
+            if (!ok(vk.vkGetQueryPoolResults(dev, qp, 0, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT),
+                    "vkGetQueryPoolResults", err))
+                return false;
+            const uint64_t mask = ctx->timestamp_bits >= 64 ? ~0ull : (1ull << ctx->timestamp_bits) - 1;
+            ms = std::min(ms, ((ts[1] - ts[0]) & mask) * (double)ctx->props.limits.timestampPeriod * 1e-6);
+        }
+        return true;
+    }
 };
 
 }  // namespace
@@ -293,6 +345,31 @@ int peak_command(int device, double read_gib) {
                 printf("read %.2f GiB, %5u workgroups: %7.3f ms, %6.1f GB/s\n", bytes / 1073741824.0, groups, ms, gbs);
             }
             printf("read best: %.1f GB/s\n", best);
+            // A generated token's mat-vecs are 9-60 MB reads, one after another
+            // with a barrier between: what that costs against one long read.
+            // The slices are the sizes of Qwen3 8B's (Q4_K_M) attn_output, a
+            // Q4_K ffn_down and gate+up, 9 KiB of weights per 64 threads as
+            // the one-token kernels read them, 36 KiB per workgroup of 256.
+            // An empty dispatch (one workgroup, nothing to read) gives the
+            // cost of the barrier and the dispatch alone.
+            const int chain_n = 64;
+            for (double mb : {9.44, 28.3, 56.6}) {
+                const VkDeviceSize slice = (VkDeviceSize)(mb * 1e6) / 256 * 256;
+                if (!err.empty() || slice * 2 > bytes) break;
+                const uint32_t g = (uint32_t)(slice / 36864);
+                double with = 0, without = 0;
+                if (!pk.chain(pread, big, bytes, out, slice, g, chain_n, true, 3, with, err) ||
+                    !pk.chain(pread, big, bytes, out, slice, g, chain_n, false, 3, without, err))
+                    break;
+                const double us_with = with * 1e3 / chain_n, us_without = without * 1e3 / chain_n;
+                printf("reads of %.1f MB, %u workgroups, %d in a row: %.1f us each (%.1f GB/s) with a barrier "
+                       "between, %.1f us (%.1f GB/s) without\n",
+                       slice / 1e6, g, chain_n, us_with, slice / (us_with * 1e3), us_without,
+                       slice / (us_without * 1e3));
+            }
+            double empty = 0;
+            if (err.empty() && pk.chain(pread, big, bytes, out, 256, 1, 256, true, 3, empty, err))
+                printf("an empty dispatch after a barrier: %.2f us\n", empty * 1e3 / 256);
             // Arithmetic: 32 4-wide FMAs x 16 steps a loop iteration per thread.
             const uint32_t groups = 4096, iters = 256;
             const double fmas = (double)groups * 256 * iters * 16 * 8 * 4;
