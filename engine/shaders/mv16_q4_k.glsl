@@ -102,36 +102,6 @@ float block_dot(uvec4 h, uvec4 q, vec4 a[4], vec4 e[4], float ta, float te, uint
     return dm.x * (sm.x * s0 + sm.y * s1) - dm.y * (sm.z * ta + sm.w * te);
 }
 
-// block_dot's last step, from its two sums (HALVES).
-float block_sum(uvec4 h, float s0, float s1, float ta, float te, uint th) {
-    const vec4 sm = bytes4(scales_mins(h, th >> 1));
-    const vec2 dm = unpackHalf2x16(h.x);
-    return dm.x * (sm.x * s0 + sm.y * s1) - dm.y * (sm.z * ta + sm.w * te);
-}
-
-#ifndef Q5K
-// DIAG (mv16x1_* to mv16x5_*, TS5_MV_DIAG=1 to 5, for timing only: their
-// sums are wrong): 1, the same loads of the weights and x with almost no
-// arithmetic; 2, the arithmetic twice over. How the time moves between the
-// two tells a kernel short of memory bandwidth from one short of ALU time.
-// 3 to 5 are 1 with fewer loads: 3 without x's, 4 without the block
-// headers' (8 threads load each), 5 with neither, the nibbles alone: what
-// each kind of load costs.
-#if defined(DIAG) && DIAG != 2
-#define BDOT(h, q) (float(((h).x ^ (h).y ^ (h).z ^ (h).w ^ (q).x ^ (q).y ^ (q).z ^ (q).w) & 255u) + ta + te)
-#elif defined(DIAG) && DIAG == 2
-#define BDOT(h, q) (block_dot(h, q, a, e, ta, te, th) + \
-                    block_dot((h) ^ uvec4(0x00010001u), (q) ^ uvec4(0x01010101u), a, e, ta, te, th))
-#else
-#define BDOT(h, q) block_dot(h, q, a, e, ta, te, th)
-#endif
-#elif defined(DIAG)
-#error "DIAG is for Q4_K"
-#endif
-#if defined(HALVES) && (defined(Q5K) || defined(NORM) || defined(DIAG))
-#error "HALVES is for plain Q4_K"
-#endif
-
 #ifdef GLU
 // The gate's activation times up: silu, or with pc.accumulate != 0 (unused
 // otherwise with GLU) Gemma's gelu, the tanh approximation as swiglu.comp.
@@ -153,80 +123,13 @@ void main() {
     float acc[NRMAX], accu[NRMAX];
     for (uint i = 0; i < NRMAX; i++) acc[i] = accu[i] = 0.0;
     float ss = 0.0;
-#ifdef HALVES
-    for (uint b = tid / 8; b < nb; b += WG / 8) {
-        // HALVES (mv16h_*): the rows' words first, then x a half at a time,
-        // the low nibbles against the first 16 values and the high ones
-        // against the other 16: the same sums in the same order as
-        // block_dot, with half of x held at once, which leaves registers for
-        // more rows per workgroup (each row more is a load of x saved).
-        const uint x0 = (pc.x_off + b * 256) / 4 + 16 * p + 4 * (th & 1u);
-        uvec4 wq[NRMAX][2];
-#ifdef GLU
-        uvec4 uq[NRMAX][2];
-#endif
-        [[unroll]] for (uint i = 0; i < NR; i++) {
-            const uint o = min(r0 + i, pc.nrows - 1) * row_words + b * BW;
-            wq[i][0] = w128[o];
-            wq[i][1] = w128[o + QW + th];
-#ifdef GLU
-            uq[i][0] = u128[o];
-            uq[i][1] = u128[o + QW + th];
-#endif
-        }
-        float s0[NRMAX], ta = 0.0;
-#ifdef GLU
-        float u0[NRMAX];
-#endif
-        {
-            vec4 a[4];
-            [[unroll]] for (uint c = 0; c < 4; c++) {
-                a[c] = X4[x0 + c];
-                ta += a[c].x + a[c].y + a[c].z + a[c].w;
-            }
-            [[unroll]] for (uint i = 0; i < NR; i++) {
-                float sl = 0.0;
-                [[unroll]] for (uint c = 0; c < 4; c++) sl += dot(bytes4(wq[i][1][c] & 0x0F0F0F0Fu), a[c]);
-                s0[i] = sl;
-#ifdef GLU
-                float ul = 0.0;
-                [[unroll]] for (uint c = 0; c < 4; c++) ul += dot(bytes4(uq[i][1][c] & 0x0F0F0F0Fu), a[c]);
-                u0[i] = ul;
-#endif
-            }
-        }
-        {
-            vec4 e[4];
-            float te = 0.0;
-            [[unroll]] for (uint c = 0; c < 4; c++) {
-                e[c] = X4[x0 + 8 + c];
-                te += e[c].x + e[c].y + e[c].z + e[c].w;
-            }
-            [[unroll]] for (uint i = 0; i < NR; i++) {
-                float s1 = 0.0;
-                [[unroll]] for (uint c = 0; c < 4; c++) s1 += dot(bytes4((wq[i][1][c] >> 4) & 0x0F0F0F0Fu), e[c]);
-                acc[i] += block_sum(wq[i][0], s0[i], s1, ta, te, th);
-#ifdef GLU
-                float u1 = 0.0;
-                [[unroll]] for (uint c = 0; c < 4; c++) u1 += dot(bytes4((uq[i][1][c] >> 4) & 0x0F0F0F0Fu), e[c]);
-                accu[i] += block_sum(uq[i][0], u0[i], u1, ta, te, th);
-#endif
-            }
-        }
-    }
-#else
     for (uint b = tid / 8; b < nb; b += WG / 8) {
         const uint x0 = (pc.x_off + b * 256) / 4 + 16 * p + 4 * (th & 1u), x1 = x0 + 8;
         vec4 a[4], e[4];
         float ta = 0.0, te = 0.0;
         for (uint c = 0; c < 4; c++) {
-#if defined(DIAG) && (DIAG == 3 || DIAG == 5)
-            a[c] = vec4(float(b + c));
-            e[c] = a[c] + 1.0;
-#else
             a[c] = X4[x0 + c];
             e[c] = X4[x1 + c];
-#endif
 #ifdef NORM
             ss += dot(a[c], a[c]) + dot(e[c], e[c]);
             const uint g0 = x0 - pc.x_off / 4 + c;
@@ -250,21 +153,13 @@ void main() {
 #endif
         [[unroll]] for (uint i = 0; i < NR; i++) {
             const uint o = min(r0 + i, pc.nrows - 1) * row_words + b * BW;
-#if defined(DIAG) && DIAG >= 4
-            wq[i][0] = uvec4(o);
-#else
             wq[i][0] = w128[o];
-#endif
             wq[i][1] = w128[o + QW + th];
 #ifdef Q5K
             wq[i][2] = w128[o + 1 + (th & 1u)];
 #endif
 #ifdef GLU
-#if defined(DIAG) && DIAG >= 4
-            uq[i][0] = uvec4(o);
-#else
             uq[i][0] = u128[o];
-#endif
             uq[i][1] = u128[o + QW + th];
 #ifdef Q5K
             uq[i][2] = u128[o + 1 + (th & 1u)];
@@ -278,14 +173,13 @@ void main() {
             accu[i] += block_dot(uq[i][0], uq[i][1], uq[i][2], a, e, ta, te, th);
 #endif
 #else
-            acc[i] += BDOT(wq[i][0], wq[i][1]);
+            acc[i] += block_dot(wq[i][0], wq[i][1], a, e, ta, te, th);
 #ifdef GLU
-            accu[i] += BDOT(uq[i][0], uq[i][1]);
+            accu[i] += block_dot(uq[i][0], uq[i][1], a, e, ta, te, th);
 #endif
 #endif
         }
     }
-#endif
     for (uint i = 0; i < NR; i++) {
         const float s = subgroupAdd(acc[i]);
         if (gl_SubgroupInvocationID == 0) partial[i * WG + gl_SubgroupID] = s;

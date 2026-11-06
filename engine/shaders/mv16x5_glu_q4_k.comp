@@ -1,6 +1,0 @@
-#version 450
-#extension GL_GOOGLE_include_directive : require
-// Timing only (TS5_MV_DIAG=5): the one-token Q4_K gate and up with almost no arithmetic and with only its loads of the nibbles (see mv16_q4_k.glsl).
-#define GLU
-#define DIAG 5
-#include "mv16_q4_k.glsl"

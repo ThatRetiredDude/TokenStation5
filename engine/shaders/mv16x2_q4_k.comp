@@ -1,5 +1,0 @@
-#version 450
-#extension GL_GOOGLE_include_directive : require
-// Timing only (TS5_MV_DIAG=2): the one-token Q4_K mat-vec with its arithmetic twice (see mv16_q4_k.glsl).
-#define DIAG 2
-#include "mv16_q4_k.glsl"

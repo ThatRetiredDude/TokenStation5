@@ -1,5 +1,0 @@
-#version 450
-#extension GL_GOOGLE_include_directive : require
-// One-token Q4_K mat-vec, x loaded a half at a time (see mv16_q4_k.glsl).
-#define HALVES
-#include "mv16_q4_k.glsl"

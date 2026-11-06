@@ -70,18 +70,6 @@
 #include "matvec_q4_k.spv.h"
 #include "matvec_q6_k.spv.h"
 #include "mv16_glu_q4_k.spv.h"
-#include "mv16x1_q4_k.spv.h"
-#include "mv16x2_q4_k.spv.h"
-#include "mv16x1_glu_q4_k.spv.h"
-#include "mv16x2_glu_q4_k.spv.h"
-#include "mv16x3_q4_k.spv.h"
-#include "mv16x4_q4_k.spv.h"
-#include "mv16x5_q4_k.spv.h"
-#include "mv16x3_glu_q4_k.spv.h"
-#include "mv16x4_glu_q4_k.spv.h"
-#include "mv16x5_glu_q4_k.spv.h"
-#include "mv16h_q4_k.spv.h"
-#include "mv16h_glu_q4_k.spv.h"
 #include "mv16n_glu_q4_k.spv.h"
 #include "mv16n_q4_k.spv.h"
 #include "mv16n_q6_k.spv.h"
@@ -97,7 +85,6 @@
 #include "mv16n_glu_q8_0.spv.h"
 #include "mvt_glu_q4_k.spv.h"
 #include "mvt_q4_k.spv.h"
-#include "mvtc_q4_k.spv.h"
 #include "mvtx_q4_k.spv.h"
 #include "mvtx_q5_k.spv.h"
 #include "mvtx_q6_k.spv.h"
@@ -418,8 +405,6 @@ private:
         if (const char *e = getenv("TS5_FAST_MATVEC")) fast_matvec_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV_ROWS")) mv_rows_ = std::min(8, std::max(1, atoi(e)));
         if (const char *e = getenv("TS5_MV_ROWS_MIN")) mv_rows_min_ = std::max(0, atoi(e));
-        if (const char *e = getenv("TS5_MV_HALVES")) mvh_rows_ = (uint32_t)std::min(8, std::max(0, atoi(e)));
-        if (const char *e = getenv("TS5_MV_DIAG")) mv_diag_ = atoi(e) >= 1 && atoi(e) <= 5 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN")) attn_fast_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_SPLITS")) attn_splits_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
@@ -433,7 +418,6 @@ private:
         if (const char *e = getenv("TS5_MVT_GLU")) mvt_glu_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT_ROWS")) mvt_rows_ = std::min(4, std::max(1, atoi(e)));
         if (const char *e = getenv("TS5_MVTX")) mvtx_ = atoi(e) != 0;
-        if (const char *e = getenv("TS5_MVTC")) mvtc_rows_ = (uint32_t)std::min(8, std::max(0, atoi(e)));
         // The fused kernel holds two matrices' words: past 2 rows it spills
         // registers on the PS5 (1376 VGPRs into scratch at 4 rows, a 7x
         // regression), so its row tiling is capped where the plain one's isn't.
@@ -760,18 +744,7 @@ private:
         MV(mv16n_q4_k, 4) MV(mv16n_q6_k, 4) MV(mv16n_glu_q4_k, 5)
         MV(mv16_q5_k, 3) MV(mv16_q8_0, 3) MV(mv16_glu_q5_k, 4) MV(mv16_glu_q8_0, 4)
         MV(mv16n_q5_k, 4) MV(mv16n_q8_0, 4) MV(mv16n_glu_q5_k, 5) MV(mv16n_glu_q8_0, 5)
-        // The timing-only builds only when asked for (TS5_MV_DIAG).
-        if (mv_diag_) {
-            MV(mv16x1_q4_k, 3) MV(mv16x2_q4_k, 3) MV(mv16x1_glu_q4_k, 4) MV(mv16x2_glu_q4_k, 4)
-            MV(mv16x3_q4_k, 3) MV(mv16x4_q4_k, 3) MV(mv16x5_q4_k, 3)
-            MV(mv16x3_glu_q4_k, 4) MV(mv16x4_glu_q4_k, 4) MV(mv16x5_glu_q4_k, 4)
-        }
 #undef MV
-        // x a half at a time (TS5_MV_HALVES=N: N rows a workgroup, up to 8).
-        if (mvh_rows_ && (!make_pipe("mv16h_q4_k", spv_mv16h_q4_k, sizeof(spv_mv16h_q4_k), 3, err, mvh_rows_) ||
-                          !make_pipe("mv16h_glu_q4_k", spv_mv16h_glu_q4_k, sizeof(spv_mv16h_glu_q4_k), 4, err,
-                                     mvh_rows_)))
-            return false;
         // The verify-batch mat-vecs once per batch size (their token loop is
         // compile-time), each twice like the one-token ones: mvt_rows_ rows
         // per workgroup and one.
@@ -791,8 +764,6 @@ private:
                 !make_pipe("mvt_q8_0" + s + ".1", spv_mvt_q8_0, sizeof(spv_mvt_q8_0), 3, err, nt, 1) ||
                 !make_pipe("mvt_glu_q4_k" + s, spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, mvt_glu_rows_) ||
                 !make_pipe("mvt_glu_q4_k" + s + ".1", spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, 1))
-                return false;
-            if (mvtc_rows_ && !make_pipe("mvtc_q4_k" + s, spv_mvtc_q4_k, sizeof(spv_mvtc_q4_k), 3, err, nt, mvtc_nr(nt)))
                 return false;
         }
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
@@ -1205,12 +1176,10 @@ private:
             // Matrices of mvt_rows_ rows per group: a workgroup per group, or
             // the x-staging kernels, 4 groups a workgroup (TS5_MVTX=1).
             const bool staged = !one && mvtx_;
-            // TS5_MVTC=N: Q4_K through mvtc_q4_k, N rows a workgroup.
-            const bool outer = !one && !staged && mvtc_rows_ && w.type() == GGML_Q4_K;
-            const uint32_t nr = one ? 1 : outer ? mvtc_nr((uint32_t)ntok) : mvt_rows_ * (staged ? 4 : 1);
+            const uint32_t nr = one ? 1 : mvt_rows_ * (staged ? 4 : 1);
             const uint32_t groups = (rows + nr - 1) / nr;
             const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
-            dispatch(std::string(outer ? "mvtc_" : staged ? "mvtx_" : "mvt_") + qname(w.type()) + "." + std::to_string(ntok) +
+            dispatch(std::string(staged ? "mvtx_" : "mvt_") + qname(w.type()) + "." + std::to_string(ntok) +
                          (one ? ".1" : ""),
                      {&W(w), &x, &y}, pc, mx, my, what);
             return;
@@ -1455,20 +1424,7 @@ private:
         const bool one = rows < (uint32_t)mv_rows_min_ || mv_rows_ == 1;
         const uint32_t nr = one ? 1 : mv_rows_, groups = (rows + nr - 1) / nr;
         const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
-        // TS5_MV_DIAG=1 to 5 (timing only, wrong answers): the Q4_K kernels
-        // with their arithmetic left out or done twice, or fewer loads
-        // (mv16_q4_k.glsl).
-        std::string n = name;
-        if (mv_diag_ && (n == "mv16_q4_k" || n == "mv16_glu_q4_k")) n = "mv16x" + std::to_string(mv_diag_) + n.substr(4);
-        // TS5_MV_HALVES=N: the Q4_K kernels that hold half of x at a time,
-        // N rows a workgroup (the same sums bit for bit).
-        if (mvh_rows_ && !one && !mv_diag_ && (n == "mv16_q4_k" || n == "mv16_glu_q4_k")) {
-            const uint32_t hg = (rows + mvh_rows_ - 1) / mvh_rows_;
-            const uint32_t hx = std::min<uint32_t>(hg, 65535), hy = (hg + hx - 1) / hx;
-            dispatch("mv16h" + n.substr(4), bufs, pc, hx, hy, what);
-            return;
-        }
-        dispatch(one ? n + ".1" : n, bufs, pc, mx, my, what);
+        dispatch(one ? name + ".1" : name, bufs, pc, mx, my, what);
     }
 
     // add: y += the normalized x (Gemma's norms after attention and the FFN);
@@ -1719,10 +1675,6 @@ private:
     // 1024 takes in Qwen3 8B and 14B's K and V (8 heads of 128: +1.4% and
     // +0.9% generation on the console); 512-row ones (4 KV heads) stay at one.
     int mv_rows_min_ = 1024;
-    // TS5_MV_DIAG: 0, or 1 to 5 for the Q4_K diagnostic builds (mat_vec).
-    int mv_diag_ = 0;
-    // TS5_MV_HALVES: 0 (off), or the rows a workgroup of the mv16h_* builds.
-    uint32_t mvh_rows_ = 0;
     // Attention with attn (TS5_ATTN=0: the old kernel); TS5_ATTN_SPLITS=N
     // sets how many slices generation splits the keys into.
     bool attn_fast_ = true;
@@ -1770,10 +1722,6 @@ private:
     // code +26% with mvt_, -1% with mvtx_), so each group's workgroup
     // reads x itself.
     bool mvtx_ = false;
-    // TS5_MVTC=N (0: off): the Q4_K verify batches through mvtc_q4_k, N
-    // rows a workgroup (at most 4 from 5 tokens, where more spill).
-    uint32_t mvtc_rows_ = 0;
-    uint32_t mvtc_nr(uint32_t nt) const { return nt >= 5 ? std::min(mvtc_rows_, 4u) : mvtc_rows_; }
     // The fused gate+up verify kernel: off until a console A/B shows a win
     // (phase L measured it 7x slower at 4 rows from register spills).
     bool mvt_glu_ = false;
