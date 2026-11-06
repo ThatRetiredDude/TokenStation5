@@ -36,6 +36,7 @@
 #include "attn_merge.spv.h"
 #include "attn_pf.spv.h"
 #include "attn_pf128.spv.h"
+#include "attn_pf128r2.spv.h"
 #include "attn_pf256.spv.h"
 #include "attn_pf512.spv.h"
 #include "attn_pf_q8.spv.h"
@@ -45,6 +46,7 @@
 #include "attn_dec4_256_q8.spv.h"
 #include "attn_dec4_512_q8.spv.h"
 #include "attn_pf128_q8.spv.h"
+#include "attn_pf128r2_q8.spv.h"
 #include "attn_pf256_q8.spv.h"
 #include "attn_pf512_q8.spv.h"
 #include "get_rows_f16.spv.h"
@@ -410,6 +412,7 @@ private:
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_DEC")) attn_dec_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_PF128")) attn_pf128_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_ATTN_PF_R2")) attn_pf_r2_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_PLAIN")) attn_dec_plain_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_KEYS")) attn_dec_keys_ = atoi(e);
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
@@ -770,8 +773,8 @@ private:
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
         P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
-        P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf256, 5) P(attn_pf512, 5)
-        P(attn_pf_q8, 7) P(attn_pf128_q8, 7) P(attn_pf256_q8, 7) P(attn_pf512_q8, 7)
+        P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf128r2, 5) P(attn_pf256, 5) P(attn_pf512, 5)
+        P(attn_pf_q8, 7) P(attn_pf128_q8, 7) P(attn_pf128r2_q8, 7) P(attn_pf256_q8, 7) P(attn_pf512_q8, 7)
         // Lanes per key in attn_dec: 8, 16 or 32, and no more than a subgroup.
         uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
         while (lpk > ctx_->subgroup_size) lpk = lpk > 8 ? lpk / 2 : 0;
@@ -1323,7 +1326,7 @@ private:
         if (dec)
             kern = HD == 256 ? "attn_dec4_256" : HD == 512 ? "attn_dec4_512" : dec_rows == 4 ? "attn_dec4" : "attn_dec";
         else if (pf && HD == 128 && attn_pf128_)
-            kern = "attn_pf128";
+            kern = attn_pf_r2_ ? "attn_pf128r2" : "attn_pf128";
         else if (pf && pf256)
             kern = "attn_pf256";
         else if (pf && pf512)
@@ -1678,6 +1681,9 @@ private:
     // its build for heads of 128 where they are (TS5_ATTN_PF128=0: never).
     int attn_pf_min_ = 8;
     bool attn_pf128_ = true;
+    // Heads of 128 with two rows a thread (attn_pf128r2, TS5_ATTN_PF_R2=1):
+    // half the shared-memory reads per product. Off until the PS5 A/B.
+    bool attn_pf_r2_ = false;
     // Generation over at least this many keys uses attn_dec (TS5_ATTN_DEC;
     // 0: never).
     int attn_dec_min_ = 256;

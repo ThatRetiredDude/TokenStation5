@@ -1,0 +1,9 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Prompt attention over the f16 KV cache, heads of 128, two rows a thread
+// (see attn_pf.glsl).
+#define HEAD_DIM 128
+#define LANES 8
+#define RPT 2
+#define STEPK 8  // 8 keys a step: 128 registers, 8 subgroups per SIMD as attn_pf128 (16: 168, 6)
+#include "attn_pf.glsl"

@@ -336,6 +336,16 @@ dims and waits for each shared-memory read before the next
 attn needs 4 workgroups each reading the keys) and tiles of 16 keys, since
 32 keys of 512 wouldn't fit shared memory; its 16-lane sums need subgroups of
 16 or more, so a smaller GPU (llvmpipe) keeps attn.
+On the PS5 a long prompt's attention grows to the biggest cost (Qwen3 8B,
+attn_pf128: 18.6% of a 4096-token prompt, 47.2% of 16384, at 4.6 TFLOPS
+throughout, 40% of the f32 peak), and the kernel is bound by its
+shared-memory reads: four lanes a row each read a f16 vec4 of K or V per
+four products, 2 bytes per product, which at the f32 rate is the CU's
+whole 128 bytes a clock. `attn_pf128r2` (`TS5_ATTN_PF_R2=1`) gives each
+thread two rows (p and p + 32, 16 dims of each, 8 lanes a row), so every
+value read serves both: 1 byte per product. It steps 8 keys at a time to
+stay at 128 registers (8 subgroups per SIMD, as attn_pf128; 16 keys need
+168, 6).
 
 Generation over 256 keys or more (`TS5_ATTN_DEC` sets how many; 0: never),
 with heads of 128, uses `shaders/attn_dec.glsl`: up to 8
