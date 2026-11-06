@@ -354,8 +354,8 @@ block against 18 bytes of Q4_K weights, once per NR rows, so a batch of
 NT tokens pulls 7 NT / NR bytes of x through the L1 per byte of weights,
 and at 4 tokens that is more than the L1 serves at the pace of the weight
 stream (the model: a 4-token verify at 2.2x a one-token mat-vec, 8 tokens
-4.4x; measured 2.1x and 3.5x). The default batch kernels (`mvtx_*`;
-`TS5_MVTX=0` reverts) therefore stage x in shared memory: four of the
+4.4x; measured 2.1x and 3.5x). The `mvtx_*` batch kernels (`TS5_MVTX=1`;
+off by default, see below) stage x in shared memory: four of the
 64-thread groups share a workgroup of 256 threads, and the x of the 8
 blocks a step covers (2048 columns, 4 tokens at a time, 32 KiB) is loaded
 once for all four groups' rows, a quarter of the traffic; each thread
@@ -365,6 +365,15 @@ same subgroup reduction over the same 64 lanes), so the staged kernels
 reproduce the one-token forward bit for bit as the others do; the lanes
 of a group are taken to be whole subgroups, as every driver lays them
 out. Matrices under `TS5_MV_ROWS_MIN` rows keep the one-row kernels.
+Measured on the PS5 (round 7, 2026-11-05, Coder 7B, fan at full) the
+staged kernels cost 1.6x, 1.8x and 1.9x the unstaged ones per call at 2,
+4 and 8 tokens on gate, up and down alike (2.2x, 3.8x and 6.7x a one-token
+mat-vec against 1.35x, 2.1x and 3.5x), and with them the helper lost its
+gains on every pairing (Qwen3 14B on code +26% with `mvt_*`, -1% with
+`mvtx_*`), so `mvt_*` stays the default and `mvtx_*` is kept for study
+behind `TS5_MVTX=1`. The x re-read model was wrong for this GPU: the
+barrier and the shared-memory round trip cost more than the L1 traffic
+they save.
 
 When `TS5_DRAFT_MODEL` names a smaller GGUF with the same vocabulary (for
 Qwen 2.5 Coder 7B, a Qwen 2.5 0.5B; the text tokens must match, while the

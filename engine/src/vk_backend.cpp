@@ -1037,8 +1037,8 @@ private:
         // for a matrix with few rows.
         if (ntok >= 2 && ntok <= 8 && fast_matvec_ && mvt_ && fast_type(w)) {
             const bool one = rows < (uint32_t)mv_rows_min_ || mvt_rows_ == 1;
-            // Matrices of mvt_rows_ rows per group: the x-staging kernels, 4
-            // groups a workgroup (TS5_MVTX=0: a workgroup per group).
+            // Matrices of mvt_rows_ rows per group: a workgroup per group, or
+            // the x-staging kernels, 4 groups a workgroup (TS5_MVTX=1).
             const bool staged = !one && mvtx_;
             const uint32_t nr = one ? 1 : mvt_rows_ * (staged ? 4 : 1), groups = (rows + nr - 1) / nr;
             const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
@@ -1549,8 +1549,13 @@ private:
     bool mv16_ = true;
     bool mvt_ = true;
     // The verify batch's x staged in shared memory for 4 groups of rows
-    // (mvtx_*; TS5_MVTX=0: each group's workgroup reads it, mvt_*).
-    bool mvtx_ = true;
+    // (mvtx_*; TS5_MVTX=1). Off: on the PS5 (round 7, 2026-11-05) the
+    // staged kernels ran 1.6x (2 tokens) to 1.9x (8 tokens) slower per
+    // call than the unstaged mvt_* ones on Coder 7B's gate, up and down
+    // matrices, and the helper lost its gains on every pairing (Qwen3 14B
+    // code +26% with mvt_, -1% with mvtx_), so each group's workgroup
+    // reads x itself.
+    bool mvtx_ = false;
     // The fused gate+up verify kernel: off until a console A/B shows a win
     // (phase L measured it 7x slower at 4 rows from register spills).
     bool mvt_glu_ = false;

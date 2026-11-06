@@ -225,12 +225,12 @@ TS5_MVT=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backen
 # the Q8_0 file.
 for n in 4 7; do
     t=$(echo 12 34 56 78 90 11 22 | cut -d' ' -f1-$n)
-    TS5_MV_ROWS_MIN=1 TS5_PROFILE=1 "$ts5" logits -m "$work/qwen2-kmix.gguf" -o "$work/mvtx-on.bin" $t 2> "$work/mvtx-on.err"
+    TS5_MV_ROWS_MIN=1 TS5_MVTX=1 TS5_PROFILE=1 "$ts5" logits -m "$work/qwen2-kmix.gguf" -o "$work/mvtx-on.bin" $t 2> "$work/mvtx-on.err"
     grep -q "mvtx_q4_k\.$n " "$work/mvtx-on.err"
     grep -q "mvtx_q6_k\.$n " "$work/mvtx-on.err"
     TS5_MV_ROWS_MIN=1 TS5_MVTX=0 "$ts5" logits -m "$work/qwen2-kmix.gguf" -o "$work/mvtx-off.bin" $t 2> /dev/null
     cmp "$work/mvtx-on.bin" "$work/mvtx-off.bin"
-    TS5_MV_ROWS_MIN=1 TS5_PROFILE=1 "$ts5" logits -m "$work/qwen2-Q8_0.gguf" -o "$work/mvtx-on.bin" $t 2> "$work/mvtx-on.err"
+    TS5_MV_ROWS_MIN=1 TS5_MVTX=1 TS5_PROFILE=1 "$ts5" logits -m "$work/qwen2-Q8_0.gguf" -o "$work/mvtx-on.bin" $t 2> "$work/mvtx-on.err"
     grep -q "mvtx_q8_0\.$n " "$work/mvtx-on.err"
     TS5_MV_ROWS_MIN=1 TS5_MVTX=0 "$ts5" logits -m "$work/qwen2-Q8_0.gguf" -o "$work/mvtx-off.bin" $t 2> /dev/null
     cmp "$work/mvtx-on.bin" "$work/mvtx-off.bin"
