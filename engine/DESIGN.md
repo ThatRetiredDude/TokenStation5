@@ -408,7 +408,9 @@ Single-stream decode streams every weight byte per token, so it is capped by
 memory bandwidth (~96 tok/s for a 7B Q4_K_M at 448 GB/s). Verifying several
 tokens in one forward pass rides one weight stream, which is the only way past
 that wall. `Engine::generate` drafts up to `TS5_DRAFT` tokens per step (default
-7, so the batch of 8 fits one pass of the 8-token matmul kernels; 0 disables)
+5, a batch of 6; up to 7 fit one pass of the 8-token matmul kernels, but on
+the PS5 a pass of 8 costs 2.59x one token and 5 ran 1.2-1.3% faster than 7
+with Qwen3 8B and its 0.6B helper; 0 disables)
 by prompt lookup: the most recent earlier occurrence of the text's final
 3-gram (then 2-gram) proposes what followed it last time. The drafted tokens
 ride the next token's forward pass as one batch, and a draft is kept only when

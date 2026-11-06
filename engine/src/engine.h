@@ -19,7 +19,7 @@ struct SampleParams {
     int top_k = 40;
     int max_tokens = 512;
     uint64_t seed = 0;  // 0: random
-    int draft = -1;     // tokens drafted per step by prompt lookup; -1: TS5_DRAFT or 7; 0: off
+    int draft = -1;     // tokens drafted per step by prompt lookup; -1: TS5_DRAFT or 5; 0: off
 };
 
 struct GenStats {

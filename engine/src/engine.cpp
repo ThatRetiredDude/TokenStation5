@@ -231,7 +231,11 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // accepted draft rides the same weight stream as the token before it.
     int dmax = p.draft;
     if (const char *e = getenv("TS5_DRAFT")) dmax = atoi(e);
-    if (dmax < 0) dmax = 7;    // batch of 8: one pass of the 8-token matmul kernels
+    // At most 5 drafts a step (a batch of 6). On the PS5 (Qwen3 8B Q4_K_M with
+    // its 0.6B helper) 5 ran 1.2-1.3% faster than 7 on chat and on code, the
+    // text the same: a pass of 8 tokens costs 2.59x one token, of 6 about 2x,
+    // and the cost model still drafts fewer whenever acceptance drops.
+    if (dmax < 0) dmax = 5;
     if (dmax > 255) dmax = 255;  // the batch must fit one forward chunk: the vk
                                  // in-place logits buffer holds 256 rows
     gram3_.clear();
