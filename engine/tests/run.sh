@@ -390,10 +390,12 @@ txt=$(head -c 3000 "$engine/DESIGN.md")
 ls "$work"/qwen3-Q4_0.gguf.t*.ts5ref > /dev/null
 ! "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "hi" 2>&1 | grep -q PASS
 echo "== memory: a load that would leave the system less than its reserve is refused, with the numbers"
-TS5_SYSTEM_RESERVE_GIB=100000 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null |
+# (The refused runs exit 1, which pipefail would take for the grep's.)
+{ TS5_SYSTEM_RESERVE_GIB=100000 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null || true; } |
     grep "not enough memory: the weights and buffers take [0-9.]* GiB and the smallest context [0-9.]* GiB, [0-9.]* GiB is free"
-TS5_SYSTEM_RESERVE_GIB=100000 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c 2048 -p hi -n 1 2>&1 > /dev/null |
+{ TS5_SYSTEM_RESERVE_GIB=100000 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c 2048 -p hi -n 1 2>&1 > /dev/null || true; } |
     grep "and a context of 2048 tokens [0-9.]* GiB"
+! TS5_SYSTEM_RESERVE_GIB=100000 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c 2048 -p hi -n 1 > /dev/null 2>&1
 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "GiB of it kept free for the system"
 echo "== -c auto with TS5_KV=q8: an f16 cache, as the test model's whole context fits in f16"
 TS5_KV=q8 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "KV cache [0-9.]* GiB (f16, "
