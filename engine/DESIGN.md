@@ -539,6 +539,17 @@ is loaded (`draft_context`, from the driver's budget less its usage), at most
 the main context (32k; 16k for one the app finds by itself); none fits, no
 draft model, with a log line, rather than a submit that fails later.
 
+A draft model's output layer is read as a Q4_K copy, made on the CPU as it
+loads (`output_q4k`: dequantized row by row, then each 32 values' scale and
+min fitted by least squares; `TS5_DRAFT_OUT_Q4K=0` keeps the file's). The
+helper reads every weight per draft token, and its output layer is a large
+part of that: Qwen3 0.6B's tied output is 1024 x 151936 values in Q6_K,
+128 MB of its 373 MB and 17.7% of its time on the PS5, at 88% of peak
+bandwidth already; the copy is 85 MB. Only the helper's argmax matters (it
+picks which tokens are tried, the verify pass which are kept), so a copy
+whose logits are within 0.3% of the file's in cosine changes the speed,
+never the output. The embedding lookup keeps the file's rows.
+
 ## Memory
 
 Every buffer is sub-allocated from 1 GiB blocks. Host-visible device-local

@@ -857,11 +857,86 @@ private:
             close(fd);
             if (bad) { err = "short read"; return false; }
         }
+        if (!output_q4k(path, err)) return false;
         const double ls = std::chrono::duration<double>(std::chrono::steady_clock::now() - lt0).count();
         ts5::log_line("ts5: weights %.2f GB read in %.1f s (%.0f MB/s, %d threads)", weight_bytes_ / 1e9, ls,
                 ls > 0 ? weight_bytes_ / 1e6 / ls : 0.0, threads);
         return true;
     }
+
+    // A helper model's output layer, re-quantized to Q4_K from the file's
+    // wider type (Model::drafter; TS5_DRAFT_OUT_Q4K=0 keeps the file's).
+    // Qwen3 0.6B's tied output is 1024 x 151936 in Q6_K, 128 MB of the
+    // 373 MB its every draft token reads (17.7% of its time on the PS5, 88%
+    // of peak bandwidth already); as Q4_K it is 85 MB. A helper's argmax only
+    // picks which tokens are tried, and the verify pass decides which are
+    // kept, so the output stays exactly the target's. The embedding lookup
+    // keeps the file's rows.
+    bool output_q4k(const std::string &path, std::string &err) {
+        // TS5_DRAFT_OUT_Q4K=2: for any model, as tests/run.sh checks the copy.
+        const char *e = getenv("TS5_DRAFT_OUT_Q4K");
+        const int mode = e ? atoi(e) : 1;
+        if (!(mode == 2 || (mode == 1 && m_.drafter)) || !m_.output) return true;
+        const GgufTensor &t = *m_.output.info;
+        if (t.ne.size() < 2 || t.ne[0] % 256 != 0) return true;
+        switch (t.type) {
+            case GGML_Q5_K: case GGML_Q6_K: case GGML_Q8_0: case GGML_F16: case GGML_BF16: case GGML_F32: break;
+            default: return true;
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        const int64_t cols = t.ne[0], rows = t.ne[1];
+        const uint64_t in_row = (uint64_t)t.row_bytes(), out_row = (uint64_t)cols / 256 * 144;
+        out_q4k_info_ = t;
+        out_q4k_info_.name = t.name + "#q4_k";
+        out_q4k_info_.type = GGML_Q4_K;
+        out_q4k_info_.nbytes = out_row * (uint64_t)rows;
+        Buf b, staging;
+        if (!create_buf(out_q4k_info_.nbytes, false, b, err)) return false;
+        const int fd = open(path.c_str(), O_RDONLY);
+        if (fd < 0) { err = "cannot open " + path; return false; }
+        // Pieces of rows: read, dequantized and re-quantized by up to 4
+        // threads a row at a time, into the buffer or a staging one.
+        const int64_t piece = std::max<int64_t>(1, (int64_t)((32ull << 20) / in_row));
+        std::vector<uint8_t> in((size_t)(piece * in_row));
+        if (!b.map && !create_buf((VkDeviceSize)(piece * out_row), true, staging, err)) { close(fd); return false; }
+        bool ok = true;
+        for (int64_t r0 = 0; ok && r0 < rows; r0 += piece) {
+            const int64_t nr = std::min(piece, rows - r0);
+            const uint64_t len = (uint64_t)nr * in_row, at = m_.gguf.data_offset + t.offset + (uint64_t)r0 * in_row;
+            for (uint64_t done = 0; done < len;) {
+                const ssize_t got = pread(fd, in.data() + done, len - done, (off_t)(at + done));
+                if (got <= 0) { ok = false; break; }
+                done += (uint64_t)got;
+            }
+            if (!ok) { err = "short read"; break; }
+            uint8_t *dst = b.map ? (uint8_t *)b.map + (uint64_t)r0 * out_row : (uint8_t *)staging.map;
+            std::atomic<int64_t> next{0};
+            auto work = [&] {
+                std::vector<float> x((size_t)cols);
+                for (int64_t i; (i = next++) < nr;) {
+                    dequantize_row(t.type, in.data() + (uint64_t)i * in_row, x.data(), cols);
+                    quantize_row_q4_k(x.data(), dst + (uint64_t)i * out_row, cols);
+                }
+            };
+            std::vector<std::thread> th;
+            for (int i = 1; i < 4; i++) th.emplace_back(work);
+            work();
+            for (auto &h : th) h.join();
+            if (!b.map && !copy(staging, b, (VkDeviceSize)((uint64_t)r0 * out_row), (VkDeviceSize)((uint64_t)nr * out_row), err))
+                ok = false;
+        }
+        close(fd);
+        if (!ok) return false;
+        weights_[out_q4k_info_.name] = b;
+        weight_bytes_ += out_q4k_info_.nbytes;
+        out_q4k_.info = &out_q4k_info_;
+        ts5::log_line("ts5: helper output layer as Q4_K: %.0f MB a token instead of %.0f (%s), made in %.1f s",
+                      out_q4k_info_.nbytes / 1e6, t.nbytes / 1e6, type_name(t.type),
+                      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        return true;
+    }
+    // The output layer the logits come from: the Q4_K copy, if made.
+    const Weight &out_w() const { return out_q4k_ ? out_q4k_ : m_.output; }
 
     bool copy(Buf &src, Buf &dst, VkDeviceSize dst_off, VkDeviceSize len, std::string &err) {
         if (!begin(err)) return false;
@@ -1616,10 +1691,10 @@ private:
         }
         if (want) {
             const int nout = all ? n : 1;
-            const bool fold_out = !all && fold_norm(n, {&m_.output});
+            const bool fold_out = !all && fold_norm(n, {&out_w()});
             if (!fold_out) rmsnorm(x_, m_.out_norm, h_, nout, all ? 0 : (uint32_t)(n - 1));
             norm_ = fold_out ? &m_.out_norm : nullptr;
-            matmul(m_.output, fold_out ? x_ : h_, logits_, nout, false);
+            matmul(out_w(), fold_out ? x_ : h_, logits_, nout, false);
             norm_ = nullptr;
             if (hp_.logit_softcap > 0) {
                 struct { uint32_t n; float cap; } pc{(uint32_t)((size_t)nout * hp_.n_vocab), hp_.logit_softcap};
@@ -1797,6 +1872,8 @@ private:
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
     Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_, rope_turn_[2];
+    GgufTensor out_q4k_info_;  // output_q4k's
+    Weight out_q4k_;
     std::vector<Buf> kc_, vc_, ks_, vs_;  // the KV cache's pieces
     // Each layer's first cache element and piece, and a sliding layer's ring slots (0: none).
     std::vector<uint32_t> layer_off_, layer_buf_, ring_;

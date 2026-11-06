@@ -335,7 +335,10 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             }
             const int dctx = draft_context(freeb, dmodel.hp, dw, be->n_ctx());
             if (dctx == 0) derr = "not enough GPU memory left for it";
-            else db = make_vk_backend(dmodel, dp, dctx, a.device, derr);
+            else {
+                dmodel.drafter = true;
+                db = make_vk_backend(dmodel, dp, dctx, a.device, derr);
+            }
 #endif
         }
         if (!db || !eng.set_drafter(dmodel, db, derr))

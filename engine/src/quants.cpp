@@ -1,5 +1,7 @@
 #include "quants.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 
@@ -202,6 +204,65 @@ void dequantize_row(uint32_t type, const void *src, float *y, int64_t n) {
             return;
         default:
             throw std::runtime_error(std::string("dequantize: unsupported type ") + type_name(type));
+    }
+}
+
+void quantize_row_q4_k(const float *x, uint8_t *out, int64_t n) {
+    for (int64_t b = 0; b < n / 256; b++, x += 256, out += 144) {
+        float lo[8], scale[8], smax = 0, mmax = 0;
+        for (int j = 0; j < 8; j++) {
+            const float *v = x + 32 * j;
+            float mn = 0, mx = -INFINITY;
+            for (int l = 0; l < 32; l++) mn = std::min(mn, v[l]), mx = std::max(mx, v[l]);
+            float a = (mx - mn) / 15.0f, b = mn;
+            // From the range, then a few least-squares fits of v ~ a q + b
+            // to the levels the last one picked (min at most 0, as Q4_K's).
+            for (int it = 0; it < 4 && a > 0; it++) {
+                float sq = 0, sqq = 0, sv = 0, sqv = 0;
+                const float ia = 1.0f / a;
+                for (int l = 0; l < 32; l++) {
+                    const float q = std::min(15.0f, std::max(0.0f, std::nearbyint((v[l] - b) * ia)));
+                    sq += q, sqq += q * q, sv += v[l], sqv += q * v[l];
+                }
+                const float det = 32 * sqq - sq * sq;
+                if (det <= 0) break;
+                const float na = (32 * sqv - sq * sv) / det, nb = std::min(0.0f, (sv - na * sq) / 32);
+                if (!(na > 0)) break;
+                a = na, b = nb;
+            }
+            lo[j] = b;
+            scale[j] = a;
+            smax = std::max(smax, scale[j]);
+            mmax = std::max(mmax, -b);
+        }
+        const uint16_t d16 = fp32_to_fp16(std::max(smax, 1e-12f) / 63.0f);
+        const uint16_t m16 = fp32_to_fp16(std::max(mmax, 1e-12f) / 63.0f);
+        const float d = fp16_to_fp32(d16), dmin = fp16_to_fp32(m16);
+        uint8_t sc[8], mn[8];
+        for (int j = 0; j < 8; j++) {
+            sc[j] = (uint8_t)std::min(63.0f, std::max(0.0f, std::nearbyint(d > 0 ? scale[j] / d : 0.0f)));
+            mn[j] = (uint8_t)std::min(63.0f, std::max(0.0f, std::nearbyint(dmin > 0 ? -lo[j] / dmin : 0.0f)));
+        }
+        float inv[8];
+        for (int j = 0; j < 8; j++) inv[j] = 1.0f / std::max(d * sc[j], 1e-30f);
+        memcpy(out, &d16, 2);
+        memcpy(out + 2, &m16, 2);
+        uint8_t *s = out + 4, *q = out + 16;
+        for (int j = 0; j < 4; j++) {
+            s[j] = (uint8_t)((sc[j] & 63) | ((sc[j + 4] >> 4) << 6));
+            s[j + 4] = (uint8_t)((mn[j] & 63) | ((mn[j + 4] >> 4) << 6));
+            s[j + 8] = (uint8_t)((sc[j + 4] & 15) | ((mn[j + 4] & 15) << 4));
+        }
+        // Sub-blocks 2k and 2k + 1 share 32 bytes: low nibbles, then high.
+        for (int k = 0; k < 4; k++)
+            for (int l = 0; l < 32; l++) {
+                uint8_t v[2];
+                for (int h = 0; h < 2; h++) {
+                    const int j = 2 * k + h;
+                    v[h] = (uint8_t)std::min(15.0f, std::max(0.0f, std::nearbyint((x[32 * j + l] + dmin * mn[j]) * inv[j])));
+                }
+                q[32 * k + l] = (uint8_t)(v[0] | (v[1] << 4));
+            }
     }
 }
 

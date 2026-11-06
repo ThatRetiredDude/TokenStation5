@@ -311,6 +311,21 @@ TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-Q8_0.gguf" "$ts5" run --backend cpu -m 
 cmp "$work/dm-off.txt" "$work/dm-on.txt"
 grep -q "draft model .* ready" "$work/dm-on.err"
 grep -q "helper [0-9]*/[1-9]" "$work/dm-on.err"  # the drafter actually proposed
+# A helper's output layer read as a Q4_K copy (on for helpers on Vulkan;
+# TS5_DRAFT_OUT_Q4K=2 makes it for a model alone, 0 never): the copy is
+# made, its logits stay close to the file's, and with it as the helper the
+# output is still the target's own.
+TS5_DRAFT_OUT_Q4K=2 "$ts5" logits -m "$work/qwen2-kmix.gguf" -o "$work/oq-on.bin" 12 34 56 78 90 2> "$work/oq-on.err"
+grep -q "helper output layer as Q4_K: .* (Q6_K)" "$work/oq-on.err"
+"$ts5" logits -m "$work/qwen2-kmix.gguf" -o "$work/oq-off.bin" 12 34 56 78 90 2> /dev/null
+python3 -c "import sys, numpy as np; a, b = (np.fromfile(f, np.float32) for f in sys.argv[1:]); \
+c = a @ b / np.linalg.norm(a) / np.linalg.norm(b); sys.exit(0 if c > 0.99 else 'Q4_K output: cosine %f' % c)" \
+    "$work/oq-on.bin" "$work/oq-off.bin"
+TS5_DRAFT=0 "$ts5" run -m "$work/qwen2-kmix.gguf" -p "$nr" -n 60 --temp 0 > "$work/oq-gen-off.txt" 2> /dev/null
+TS5_DRAFT_MODEL="$work/qwen2-kmix.gguf" "$ts5" run -m "$work/qwen2-kmix.gguf" -p "$nr" -n 60 --temp 0 \
+    > "$work/oq-gen-on.txt" 2> "$work/oq-gen-on.err"
+grep -q "helper output layer as Q4_K" "$work/oq-gen-on.err"
+cmp "$work/oq-gen-off.txt" "$work/oq-gen-on.txt"
 echo "== a drafter whose weight rows are padded past the token list (and the reverse), as released models pad"
 mk_k qwen2-pad qwen2 qwen2 --pad-vocab 128
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-pad.gguf" -p "$nr" -n 100 --temp 0 > "$work/pad-off.txt" 2> /dev/null

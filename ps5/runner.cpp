@@ -363,7 +363,10 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
                                                     std::min(l->n_ctx, dctx))
                                : 0;
         if (dopen && fits == 0) derr = "not enough GPU memory left for it beside " + l->file;
-        if (dopen && fits > 0) db = ts5::make_vk_backend(ctx_, l->dmodel, dp, fits, derr);
+        if (dopen && fits > 0) {
+            l->dmodel.drafter = true;
+            db = ts5::make_vk_backend(ctx_, l->dmodel, dp, fits, derr);
+        }
         if (!db || !l->engine->set_drafter(l->dmodel, db, derr))
             printf("ts5: draft model not used: %s\n", derr.c_str());
         else
