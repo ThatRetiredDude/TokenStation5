@@ -14,11 +14,6 @@
 // layer's keys (win > 0) are its last win, from a ring of ring slots, as in
 // attn. With KV_Q8 (the _q8 builds) the cache is 8-bit values with an f16
 // scale per 32, as attn_q8 reads it.
-// With RPT 2 (attn_pf128r2: heads of 128, LANES 8) a thread works on two
-// rows, rows p and p + 32 of the workgroup's 64 (p = tid / LANES), with
-// 16 of each row's dims: every K and V value it reads from shared memory
-// serves both rows, half the shared-memory reads per product of the
-// one-row build, whose 4 lanes a row read each value once per row.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_control_flow_attributes : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -59,13 +54,7 @@ const uint HDMAX = 128;
 #ifndef KEYS
 #define KEYS 32
 #endif
-#ifndef RPT
-#define RPT 1
-#endif
-#ifndef STEPK
-#define STEPK 16
-#endif
-const uint BC = KEYS, STEP = STEPK, NV = HDMAX / (4 * LANES), WG = 256;
+const uint BC = KEYS, STEP = 16, NV = HDMAX / (4 * LANES), WG = 256;
 const uint NL = BC * HDMAX / 4 / WG;  // vec4s of K (and of V) each thread loads per tile
 // The tiles are f16 in shared memory (the 8-bit cache's values times their
 // scales, rounded as the f16 cache rounds them): half the bytes to read, and
@@ -78,7 +67,6 @@ const float NEG_INF = -1.0 / 0.0;
 const uint HD = HEAD_DIM, HD4 = HD / 4, NI = HD / (4 * LANES);
 #endif
 
-#if RPT == 1
 void main() {
     const uint tid = gl_LocalInvocationID.x, c = tid % LANES, r = tid / LANES;
 #ifndef HEAD_DIM
@@ -195,165 +183,3 @@ void main() {
         }
     }
 }
-#else
-void main() {
-    const uint tid = gl_LocalInvocationID.x, c = tid % LANES, p = tid / LANES;
-#ifndef HEAD_DIM
-    const uint HD = pc.head_dim, HD4 = HD / 4, NI = HD / (4 * LANES);
-#endif
-    const uint G = pc.n_head / pc.n_head_kv;
-    const uint n_tblk = (pc.n_tok + pc.tq - 1) / pc.tq;
-    const uint kh = gl_WorkGroupID.x / n_tblk, t0 = (gl_WorkGroupID.x % n_tblk) * pc.tq;
-    const uint ntq = min(pc.tq, pc.n_tok - t0);
-    const uint split = gl_WorkGroupID.y;
-    const uint k_first = pc.k_lo + split * pc.chunk;
-    const uint k_end = min(k_first + pc.chunk, pc.pos0 + t0 + ntq);
-    // A window: none of the block's rows sees a key before its first row's first.
-    const uint k_begin = pc.win != 0 && pc.pos0 + t0 + 1 > pc.win ? max(k_first, pc.pos0 + t0 + 1 - pc.win) : k_first;
-    const uint kv_stride = pc.n_head_kv * HD, ne = BC * HD4;
-
-    // Row r (this thread's rows p + WG / LANES * k) is head kh * G + r % G of
-    // token t0 + r / G; rows past the block's are computed as token t0's but
-    // not written.
-    bool valid[RPT];
-    uint t[RPT], h[RPT], kmax[RPT], qo[RPT];
-    vec4 q[RPT][NV], acc[RPT][NV];
-    float m[RPT], l[RPT];
-    [[unroll]] for (uint k = 0; k < RPT; k++) {
-        const uint r = p + (WG / LANES) * k;
-        valid[k] = r < G * ntq;
-        t[k] = t0 + (valid[k] ? r / G : 0u);
-        h[k] = kh * G + (valid[k] ? r % G : 0u);
-        kmax[k] = pc.pos0 + t[k];  // the last key this row sees
-        qo[k] = (t[k] * pc.n_head + h[k]) * HD4 + c;
-        [[unroll]] for (uint i = 0; i < NV; i++) {
-            q[k][i] = i < NI ? Q4[qo[k] + LANES * i] * pc.scale : vec4(0.0);
-            acc[k][i] = vec4(0.0);
-        }
-        m[k] = NEG_INF;
-        l[k] = 0.0;
-    }
-
-    // Tile loads: thread tid takes vec4 e = tid + WG n of the tile's keys
-    // (key e / HD4, dims 4 (e % HD4) ..).
-#ifdef KV_Q8
-    uint kr[NL], vr[NL];
-    float ksc[NL], vsc[NL];
-#else
-    f16vec4 kr[NL], vr[NL];
-#endif
-#define LOAD_TILE(KB)                                                              \
-    for (uint n = 0; n < NL; n++) {                                                \
-        const uint e = tid + WG * n, key = (KB) + e / HD4;                         \
-        if (e < ne && key < k_end) {                                               \
-            const uint slot = pc.ring != 0 ? key % pc.ring : key;                  \
-            const uint src = (pc.cache_off + slot * kv_stride + kh * HD) / 4 + e % HD4; \
-            LOAD_ONE(n, src)                                                       \
-        } else {                                                                   \
-            ZERO_ONE(n)                                                            \
-        }                                                                          \
-    }
-#ifdef KV_Q8
-#define LOAD_ONE(n, src) kr[n] = kc[src]; vr[n] = vc[src]; ksc[n] = float(k_scale[(src) / 8]); vsc[n] = float(v_scale[(src) / 8]);
-#define ZERO_ONE(n) kr[n] = 0u; vr[n] = 0u; ksc[n] = 0.0; vsc[n] = 0.0;
-#define STORE_ONE(n, e) ks[e] = f16vec4(i8x4(kr[n]) * ksc[n]); vs[e] = f16vec4(i8x4(vr[n]) * vsc[n]);
-#else
-#define LOAD_ONE(n, src) kr[n] = kc[src]; vr[n] = vc[src];
-#define ZERO_ONE(n) kr[n] = f16vec4(0.0); vr[n] = f16vec4(0.0);
-#define STORE_ONE(n, e) ks[e] = kr[n]; vs[e] = vr[n];
-#endif
-
-    LOAD_TILE(k_begin)
-    for (uint kb = k_begin; kb < k_end; kb += BC) {
-        barrier();  // everyone is done with the previous tile
-        for (uint n = 0; n < NL; n++) {
-            const uint e = tid + WG * n;
-            if (e < ne) { STORE_ONE(n, e) }
-        }
-        barrier();
-        if (kb + BC < k_end) { LOAD_TILE(kb + BC) }
-        const uint nb = min(BC, k_end - kb);
-        for (uint j0 = 0; j0 < nb; j0 += STEP) {
-            float s[RPT][STEP];
-            float mx[RPT];
-            [[unroll]] for (uint k = 0; k < RPT; k++) mx[k] = m[k];
-            [[unroll]] for (uint jj = 0; jj < STEP; jj++) {
-                const uint ko = (j0 + jj) * HD4 + c;
-                float d[RPT];
-                [[unroll]] for (uint k = 0; k < RPT; k++) d[k] = 0.0;
-                [[unroll]] for (uint i = 0; i < NV; i++)
-                    if (i < NI) {
-                        const vec4 kv = vec4(ks[ko + LANES * i]);
-                        [[unroll]] for (uint k = 0; k < RPT; k++) d[k] += dot(q[k][i], kv);
-                    }
-                const uint key = kb + j0 + jj;
-                [[unroll]] for (uint k = 0; k < RPT; k++) {
-                    d[k] = subgroupClusteredAdd(d[k], LANES);
-                    s[k][jj] = (j0 + jj < nb && key <= kmax[k] && (pc.win == 0 || key + pc.win > kmax[k])) ? d[k] : NEG_INF;
-                    mx[k] = max(mx[k], s[k][jj]);
-                }
-            }
-#if RPT == 1
-            if (mx[0] != NEG_INF) {  // else none of these keys is this row's yet
-                const float cf = exp(m[0] - mx[0]);  // 0 while m is -inf
-                l[0] *= cf;
-                [[unroll]] for (uint i = 0; i < NV; i++) acc[0][i] *= cf;
-                [[unroll]] for (uint jj = 0; jj < STEP; jj++) {
-                    const float pr = exp(s[0][jj] - mx[0]);
-                    l[0] += pr;
-                    const uint vo = (j0 + jj) * HD4 + c;
-                    [[unroll]] for (uint i = 0; i < NV; i++)
-                        if (i < NI) acc[0][i] += pr * vec4(vs[vo + LANES * i]);
-                }
-                m[0] = mx[0];
-            }
-#else
-            // Both rows at once, so each V value read serves both: a row none
-            // of whose keys these are yet keeps its sums (its weights are 0
-            // and its scale 1 rather than exp(-inf + inf)).
-            float cf[RPT], pr[RPT][STEP];
-            [[unroll]] for (uint k = 0; k < RPT; k++) {
-                const bool any = mx[k] != NEG_INF;
-                cf[k] = any ? exp(m[k] - mx[k]) : 1.0;  // 0 while m is -inf
-                l[k] *= cf[k];
-                [[unroll]] for (uint i = 0; i < NV; i++) acc[k][i] *= cf[k];
-                [[unroll]] for (uint jj = 0; jj < STEP; jj++) {
-                    pr[k][jj] = any ? exp(s[k][jj] - mx[k]) : 0.0;
-                    l[k] += pr[k][jj];
-                }
-                if (any) m[k] = mx[k];
-            }
-            [[unroll]] for (uint jj = 0; jj < STEP; jj++) {
-                const uint vo = (j0 + jj) * HD4 + c;
-                [[unroll]] for (uint i = 0; i < NV; i++)
-                    if (i < NI) {
-                        const vec4 vv = vec4(vs[vo + LANES * i]);
-                        [[unroll]] for (uint k = 0; k < RPT; k++) acc[k][i] += pr[k][jj] * vv;
-                    }
-            }
-#endif
-        }
-    }
-
-    [[unroll]] for (uint k = 0; k < RPT; k++) {
-        if (!valid[k]) continue;
-        const uint row = t[k] * pc.n_head + h[k];
-        if (pc.n_split == 1) {
-            for (uint i = 0; i < NI; i++) O4[qo[k] + LANES * i] = acc[k][i] / l[k];
-        } else {
-            const uint o = (split * pc.n_tok * pc.n_head + row) * (HD + 2);
-            for (uint i = 0; i < NI; i++) {
-                const uint d = 4 * LANES * i + 4 * c;
-                P[o + d] = acc[k][i].x;
-                P[o + d + 1] = acc[k][i].y;
-                P[o + d + 2] = acc[k][i].z;
-                P[o + d + 3] = acc[k][i].w;
-            }
-            if (c == 0) {
-                P[o + HD] = m[k];
-                P[o + HD + 1] = l[k];
-            }
-        }
-    }
-}
-#endif

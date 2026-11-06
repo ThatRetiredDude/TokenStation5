@@ -306,11 +306,13 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   for 9.4 MB, 425 for 56.6 MB; Qwen3 8B's attn_output 329 GB/s, gate+up
   378, Q4_K ffn_down 360, Q6_K 357, the LM head 368). A workgroup's 64
   threads read all of x for its 4 rows, 1.75 bytes of x through the L1 per
-  byte of weights (0.875 for gate+up's 8 rows). `mv16g_*` (`TS5_MV_RG=4`;
-  Q4_K, Q6_K and the Q4_K gate+up) put 4 such groups in one workgroup,
-  each with its own rows and the same sums (the same logits bit for bit),
-  so they load the same x at the same time and one L1 read can serve 16
-  rows.
+  byte of weights (0.875 for gate+up's 8 rows). Putting 4 such groups
+  in one workgroup, so they load the same x at the same time, made no
+  difference that way: on the PS5 generation was 4.0% slower (gate+up
+  +5.5% at 4 rows), better only at 2 rows and by under 2% on three
+  matrices. x stays in the caches; the cost is in the weight stream,
+  which these kernels run at about 85% of the read peak. 2, 4 or 8 rows
+  per matrix picked one by one would save 0.6% (Qwen3 8B).
 - Anything else (`matmul_*`): one workgroup per row, 8 tokens per pass.
 
 Attention (`shaders/attn.comp`) gives each workgroup the query heads that
@@ -351,11 +353,12 @@ attn_pf128: 18.6% of a 4096-token prompt, 47.2% of 16384, at 4.6 TFLOPS
 throughout, 40% of the f32 peak), and the kernel is bound by its
 shared-memory reads: four lanes a row each read a f16 vec4 of K or V per
 four products, 2 bytes per product, which at the f32 rate is the CU's
-whole 128 bytes a clock. `attn_pf128r2` (`TS5_ATTN_PF_R2=1`) gives each
-thread two rows (p and p + 32, 16 dims of each, 8 lanes a row), so every
-value read serves both: 1 byte per product. It steps 8 keys at a time to
-stay at 128 registers (8 subgroups per SIMD, as attn_pf128; 16 keys need
-168, 6).
+whole 128 bytes a clock. A build with two rows a thread (8 lanes a row, 16
+dims of each, every value read serving both rows: 1 byte a product, at
+the same 128 registers) ran 2.1x faster on llvmpipe but 10.8% slower on
+the PS5 (8192 tokens: 4821 ms against 4350; prompts -2.2% at 4096, -4.7%
+at 16384), so the shared-memory reads are not what holds it back there;
+it was dropped.
 
 Generation over 256 keys or more (`TS5_ATTN_DEC` sets how many; 0: never),
 with heads of 128, uses `shaders/attn_dec.glsl`: up to 8

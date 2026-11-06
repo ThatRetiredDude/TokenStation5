@@ -36,7 +36,6 @@
 #include "attn_merge.spv.h"
 #include "attn_pf.spv.h"
 #include "attn_pf128.spv.h"
-#include "attn_pf128r2.spv.h"
 #include "attn_pf256.spv.h"
 #include "attn_pf512.spv.h"
 #include "attn_pf_q8.spv.h"
@@ -46,7 +45,6 @@
 #include "attn_dec4_256_q8.spv.h"
 #include "attn_dec4_512_q8.spv.h"
 #include "attn_pf128_q8.spv.h"
-#include "attn_pf128r2_q8.spv.h"
 #include "attn_pf256_q8.spv.h"
 #include "attn_pf512_q8.spv.h"
 #include "get_rows_f16.spv.h"
@@ -76,9 +74,6 @@
 #include "mv16n_q4_k.spv.h"
 #include "mv16n_q6_k.spv.h"
 #include "mv16_q4_k.spv.h"
-#include "mv16g_q4_k.spv.h"
-#include "mv16g_q6_k.spv.h"
-#include "mv16g_glu_q4_k.spv.h"
 #include "mv16_q6_k.spv.h"
 #include "mv16_q5_k.spv.h"
 #include "mv16_q8_0.spv.h"
@@ -410,13 +405,11 @@ private:
         if (const char *e = getenv("TS5_FAST_MATVEC")) fast_matvec_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV_ROWS")) mv_rows_ = std::min(8, std::max(1, atoi(e)));
         if (const char *e = getenv("TS5_MV_ROWS_MIN")) mv_rows_min_ = std::max(0, atoi(e));
-        if (const char *e = getenv("TS5_MV_RG")) mv_rg_ = atoi(e) == 4 ? 4 : 1;
         if (const char *e = getenv("TS5_ATTN")) attn_fast_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_SPLITS")) attn_splits_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_DEC")) attn_dec_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_PF128")) attn_pf128_ = atoi(e) != 0;
-        if (const char *e = getenv("TS5_ATTN_PF_R2")) attn_pf_r2_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_PLAIN")) attn_dec_plain_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_KEYS")) attn_dec_keys_ = atoi(e);
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
@@ -751,7 +744,6 @@ private:
         MV(mv16n_q4_k, 4) MV(mv16n_q6_k, 4) MV(mv16n_glu_q4_k, 5)
         MV(mv16_q5_k, 3) MV(mv16_q8_0, 3) MV(mv16_glu_q5_k, 4) MV(mv16_glu_q8_0, 4)
         MV(mv16n_q5_k, 4) MV(mv16n_q8_0, 4) MV(mv16n_glu_q5_k, 5) MV(mv16n_glu_q8_0, 5)
-        MV(mv16g_q4_k, 3) MV(mv16g_q6_k, 3) MV(mv16g_glu_q4_k, 4)
 #undef MV
         // The verify-batch mat-vecs once per batch size (their token loop is
         // compile-time), each twice like the one-token ones: mvt_rows_ rows
@@ -778,8 +770,8 @@ private:
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
         P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
-        P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf128r2, 5) P(attn_pf256, 5) P(attn_pf512, 5)
-        P(attn_pf_q8, 7) P(attn_pf128_q8, 7) P(attn_pf128r2_q8, 7) P(attn_pf256_q8, 7) P(attn_pf512_q8, 7)
+        P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf256, 5) P(attn_pf512, 5)
+        P(attn_pf_q8, 7) P(attn_pf128_q8, 7) P(attn_pf256_q8, 7) P(attn_pf512_q8, 7)
         // Lanes per key in attn_dec: 8, 16 or 32, and no more than a subgroup.
         uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
         while (lpk > ctx_->subgroup_size) lpk = lpk > 8 ? lpk / 2 : 0;
@@ -1331,7 +1323,7 @@ private:
         if (dec)
             kern = HD == 256 ? "attn_dec4_256" : HD == 512 ? "attn_dec4_512" : dec_rows == 4 ? "attn_dec4" : "attn_dec";
         else if (pf && HD == 128 && attn_pf128_)
-            kern = attn_pf_r2_ ? "attn_pf128r2" : "attn_pf128";
+            kern = "attn_pf128";
         else if (pf && pf256)
             kern = "attn_pf256";
         else if (pf && pf512)
@@ -1425,17 +1417,9 @@ private:
     void mat_vec(const std::string &name, std::initializer_list<const Buf *> bufs, const PC &pc, uint32_t rows,
                  const std::string &what) {
         const bool one = rows < (uint32_t)mv_rows_min_ || mv_rows_ == 1;
-        // TS5_MV_RG=4: the mv16g_* builds where there is one, 4 groups of
-        // rows a workgroup.
-        std::string n = name;
-        uint32_t nr = one ? 1 : mv_rows_;
-        if (mv_rg_ > 1 && name.compare(0, 5, "mv16_") == 0 && pipes_.count("mv16g_" + name.substr(5))) {
-            n = "mv16g_" + name.substr(5);
-            nr *= mv_rg_;
-        }
-        const uint32_t groups = (rows + nr - 1) / nr;
+        const uint32_t nr = one ? 1 : mv_rows_, groups = (rows + nr - 1) / nr;
         const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
-        dispatch(one ? n + ".1" : n, bufs, pc, mx, my, what);
+        dispatch(one ? name + ".1" : name, bufs, pc, mx, my, what);
     }
 
     // add: y += the normalized x (Gemma's norms after attention and the FFN);
@@ -1686,10 +1670,6 @@ private:
     // 1024 takes in Qwen3 8B and 14B's K and V (8 heads of 128: +1.4% and
     // +0.9% generation on the console); 512-row ones (4 KV heads) stay at one.
     int mv_rows_min_ = 1024;
-    // Groups of 64 threads a one-token workgroup (TS5_MV_RG: 1, or 4 for
-    // the mv16g_* builds of Q4_K, Q6_K and the Q4_K gate+up, whose groups
-    // load the same x at once). 1 until the PS5 A/B.
-    uint32_t mv_rg_ = 1;
     // Attention with attn (TS5_ATTN=0: the old kernel); TS5_ATTN_SPLITS=N
     // sets how many slices generation splits the keys into.
     bool attn_fast_ = true;
@@ -1698,9 +1678,6 @@ private:
     // its build for heads of 128 where they are (TS5_ATTN_PF128=0: never).
     int attn_pf_min_ = 8;
     bool attn_pf128_ = true;
-    // Heads of 128 with two rows a thread (attn_pf128r2, TS5_ATTN_PF_R2=1):
-    // half the shared-memory reads per product. Off until the PS5 A/B.
-    bool attn_pf_r2_ = false;
     // Generation over at least this many keys uses attn_dec (TS5_ATTN_DEC;
     // 0: never).
     int attn_dec_min_ = 256;
