@@ -23,16 +23,12 @@
 // issued, so each step stalled a whole memory latency before its sums.
 // The step's 32 values are unrolled: with a loop there, the compiler moved
 // the next step's loads past it, again to wait for them at once. Unrolled,
-// they are issued before the sums and waited for after them. (Built with
-// MMB_KLOOP the loop stays, and with MMB_VOLATILE the loads are volatile,
-// which also keeps them in place but skips the GPU's L0 and L1 caches.)
+// they are issued before the sums and waited for after them. (Volatile
+// loads also stay in place, but skip the GPU's L0 and L1 caches: 28% slower
+// prompts on the PS5.) Nothing may touch a loaded value before the sums
+// either, not even a shift: see the Q6_K and Q8_0 Raw below.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_control_flow_attributes : require
-#ifdef MMB_VOLATILE
-#define LOADQ volatile readonly
-#else
-#define LOADQ readonly
-#endif
 #ifdef MMB_F16
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #define SV f16vec4
@@ -53,11 +49,12 @@
 layout(local_size_x = WG) in;
 
 #if QTYPE == T_Q4_K || QTYPE == T_Q5_K
-layout(std430, binding = 0) LOADQ buffer Wbuf { uvec4 w128[]; };
+layout(std430, binding = 0) readonly buffer Wbuf { uvec4 w128[]; };
 #else
-layout(std430, binding = 0) LOADQ buffer Wbuf { uint16_t w16[]; };
+layout(std430, binding = 0) readonly buffer Wbuf { uint16_t w16[]; };
+layout(std430, binding = 0) readonly buffer Wbuf32 { uint w32[]; };
 #endif
-layout(std430, binding = 1) LOADQ buffer Xbuf { vec4 X4[]; };
+layout(std430, binding = 1) readonly buffer Xbuf { vec4 X4[]; };
 layout(std430, binding = 2) buffer Ybuf { float Y[]; };
 layout(std430, binding = 3) writeonly buffer Pbuf { float P[]; };
 
@@ -127,48 +124,72 @@ void dequant(Raw w, uint u, out float v[16]) {
         v[l] = d1 * float(q) - m1;
     }
 }
-#elif QTYPE == T_Q8_0
-// Q8_0: a 34-byte block (d as f16, then 32 signed bytes) per unit, only
-// 2-byte aligned, so 16-bit loads.
-struct Raw { uint q[8], d; };
+#else
+// Q8_0 and Q6_K blocks are only 2-byte aligned. A 16-byte run of quants is
+// loaded as the 4 aligned words from its start rounded down, plus its last
+// 16-bit word (the run's last 2 bytes when it starts 2 bytes past a word;
+// otherwise unused), and shifted into place in dequant: shifting them here,
+// or loading 16-bit words that the compiler merges and shifts itself, makes
+// it wait for the loads before the sums instead of during them.
+struct Run { uint w[4], tail; };
+Run load_run(uint byte_off) {
+    const uint i = byte_off / 4;
+    Run r;
+    for (uint k = 0; k < 4; k++) r.w[k] = w32[i + k];
+    r.tail = uint(w16[byte_off / 2 + 7]);
+    return r;
+}
+uint run_word(Run r, uint k, bool odd) {  // bytes 4 k .. 4 k + 3 of the run
+    return odd ? (r.w[k] >> 16) | ((k < 3 ? r.w[k + 1] : r.tail) << 16) : r.w[k];
+}
+#if QTYPE == T_Q8_0
+// Q8_0: a 34-byte block (d as f16, then 32 signed bytes) per unit.
+struct Raw { Run q; uint d; bool odd; };
 Raw load_w(uint row, uint u, uint half_) {
-    const uint o = (row * pc.row_bytes + u * 34) / 2 + 1 + 8 * half_;
+    const uint b = row * pc.row_bytes + u * 34, o = b + 2 + 16 * half_;
     Raw w;
-    for (uint i = 0; i < 8; i++) w.q[i] = uint(w16[o + i]);
-    w.d = uint(w16[o - 1 - 8 * half_]);
+    w.q = load_run(o);
+    w.d = uint(w16[b / 2]);
+    w.odd = (o & 2u) != 0;
     return w;
 }
 void dequant(Raw w, uint u, out float v[16]) {
     const float d = unpackHalf2x16(w.d).x;
-    for (uint l = 0; l < 16; l++) v[l] = d * float(bitfieldExtract(int(w.q[l >> 1]), int(8u * (l & 1u)), 8));
+    for (uint k = 0; k < 4; k++) {
+        const int q = int(run_word(w.q, k, w.odd));
+        for (uint l = 0; l < 4; l++) v[4 * k + l] = d * float(bitfieldExtract(q, int(8 * l), 8));
+    }
 }
 #else
-// Q6_K: 210-byte blocks, only 2-byte aligned, so 16-bit loads. Sub-block j
-// (h = j / 4, k = j % 4) takes value l's low bits from ql[64 h + 32 (k & 1)
-// + l] (nibble k / 2), its high bits from qh[32 h + l] (bits 2k, 2k + 1) and
-// its scale from scales[8 h + 2 k + l / 16].
-struct Raw { uint ql[8], qh[8], sc, d; };
+// Q6_K: 210-byte blocks. Sub-block j (h = j / 4, k = j % 4) takes value l's
+// low bits from ql[64 h + 32 (k & 1) + l] (nibble k / 2), its high bits from
+// qh[32 h + l] (bits 2k, 2k + 1) and its scale from scales[8 h + 2 k + l / 16].
+// The scale's pair of bytes is kept unshifted, like the runs.
+struct Raw { Run ql, qh; uint sc, d; bool odd; };
 Raw load_w(uint row, uint u, uint half_) {
-    const uint o = (row * pc.row_bytes + (u >> 3) * 210) / 2, j = u & 7u, h = j >> 2, k = j & 3u;
-    const uint ql = o + 32 * h + 16 * (k & 1u) + 8 * half_, qh = o + 64 + 16 * h + 8 * half_;
+    const uint b = row * pc.row_bytes + (u >> 3) * 210, j = u & 7u, h = j >> 2, k = j & 3u;
+    const uint ql = b + 64 * h + 32 * (k & 1u) + 16 * half_, qh = b + 128 + 32 * h + 16 * half_;
     Raw w;
-    for (uint i = 0; i < 8; i++) {
-        w.ql[i] = uint(w16[ql + i]);
-        w.qh[i] = uint(w16[qh + i]);
-    }
-    w.sc = uint(w16[o + 96 + 4 * h + k]) >> (8u * half_);
-    w.d = uint(w16[o + 104]);
+    w.ql = load_run(ql);
+    w.qh = load_run(qh);
+    w.sc = uint(w16[b / 2 + 96 + 4 * h + k]);
+    w.d = uint(w16[b / 2 + 104]);
+    w.odd = (b & 2u) != 0;
     return w;
 }
 void dequant(Raw w, uint u, out float v[16]) {
     const uint k = u & 3u, qs = (k >> 1) * 4u, hs = k * 2u;
-    const float d = unpackHalf2x16(w.d).x * float(int(w.sc << 24) >> 24);
-    for (uint l = 0; l < 16; l++) {
-        const uint sh = 8u * (l & 1u);
-        const uint lo = (w.ql[l >> 1] >> (sh + qs)) & 15u, hi = (w.qh[l >> 1] >> (sh + hs)) & 3u;
-        v[l] = d * float(int(lo | (hi << 4)) - 32);
+    const uint sc = w.sc >> (8u * (gl_LocalInvocationID.x / 128));  // this thread's half's scale
+    const float d = unpackHalf2x16(w.d).x * float(int(sc << 24) >> 24);
+    for (uint m = 0; m < 4; m++) {
+        const uint lw = run_word(w.ql, m, w.odd), hw = run_word(w.qh, m, w.odd);
+        for (uint l = 0; l < 4; l++) {
+            const uint lo = (lw >> (8u * l + qs)) & 15u, hi = (hw >> (8u * l + hs)) & 3u;
+            v[4 * m + l] = d * float(int(lo | (hi << 4)) - 32);
+        }
     }
 }
+#endif
 #endif
 
 // Dequantizes w (unit u) and stores it and x into shared buffer b; rows
@@ -260,11 +281,7 @@ void main() {
 #else
 #define S acc
 #endif
-#ifdef MMB_KLOOP
-        for (uint k = 0; k < BK; k++) {
-#else
         [[unroll]] for (uint k = 0; k < BK; k++) {
-#endif
             const SV w0 = Ws[b][k][tr], w1 = Ws[b][k][16 + tr], x0 = Xs[b][k][tt], x1 = Xs[b][k][16 + tt];
             S[0][0] += w0 * x0.x; S[0][1] += w0 * x0.y; S[0][2] += w0 * x0.z; S[0][3] += w0 * x0.w;
             S[0][4] += w0 * x1.x; S[0][5] += w0 * x1.y; S[0][6] += w0 * x1.z; S[0][7] += w0 * x1.w;

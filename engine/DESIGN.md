@@ -189,10 +189,16 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   and places a load whose only use is in the next loop step after the
   inner loop, waiting for it there too; either way the next step's tile
   arrived only after the sums, not during them. The inner k loop is
-  unrolled (`[[unroll]]`) so the loads are issued before it. Built with
-  `-DTS5_GLSL_DEFINES="MMB_KLOOP;MMB_VOLATILE"` the shader keeps the k loop
-  and marks the buffers volatile instead, the other way to keep the loads
-  in place; both sum in the same order as before.
+  unrolled (`[[unroll]]`) so the loads are issued before it. Nothing may
+  touch a loaded value before the sums, either: Q6_K's and Q8_0's blocks
+  are 2-byte aligned, and loading them as 16-bit words let the compiler
+  merge the words into aligned 16-byte loads and shift them into place
+  right away, waiting for the loads to do it; that made Q6_K's kernel 31%
+  slower than before. Their runs are now loaded as aligned words plus a
+  16-bit tail and shifted in dequant. On the PS5 the Q4_K kernels took 7%
+  (ffn_down) to 10% (gate and up) less time. Volatile buffers, the other
+  way to keep loads in place, skip the L0 and L1 caches: 28% slower
+  prompts.
 - 9 or more (`mm_*`, `shaders/matmul_tiled.glsl`): 64 rows x 64 tokens per
   workgroup. Half the threads dequantize a 64 x 64 slice of W into shared
   memory while the other half load the matching slice of X, then each thread

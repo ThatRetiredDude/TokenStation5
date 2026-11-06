@@ -20,8 +20,8 @@ if(TS5_VULKAN)
   find_package(Vulkan REQUIRED)
   find_program(GLSLANG glslangValidator REQUIRED)
   file(GLOB SHADERS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.comp)
-  # Extra preprocessor names for every shader, for experiments
-  # (-DTS5_GLSL_DEFINES="MMB_KLOOP;MMB_VOLATILE").
+  # Extra preprocessor names for every shader, to build a variant of a
+  # kernel for a comparison on the device (-DTS5_GLSL_DEFINES="A;B").
   set(TS5_GLSL_DEFINES "" CACHE STRING "names #defined in every compute shader")
   set(GLSL_DEFS)
   foreach(d ${TS5_GLSL_DEFINES})
