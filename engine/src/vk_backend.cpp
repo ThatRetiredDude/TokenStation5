@@ -70,6 +70,10 @@
 #include "matvec_q4_k.spv.h"
 #include "matvec_q6_k.spv.h"
 #include "mv16_glu_q4_k.spv.h"
+#include "mv16x1_q4_k.spv.h"
+#include "mv16x2_q4_k.spv.h"
+#include "mv16x1_glu_q4_k.spv.h"
+#include "mv16x2_glu_q4_k.spv.h"
 #include "mv16n_glu_q4_k.spv.h"
 #include "mv16n_q4_k.spv.h"
 #include "mv16n_q6_k.spv.h"
@@ -405,6 +409,7 @@ private:
         if (const char *e = getenv("TS5_FAST_MATVEC")) fast_matvec_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV_ROWS")) mv_rows_ = std::min(8, std::max(1, atoi(e)));
         if (const char *e = getenv("TS5_MV_ROWS_MIN")) mv_rows_min_ = std::max(0, atoi(e));
+        if (const char *e = getenv("TS5_MV_DIAG")) mv_diag_ = atoi(e) == 1 ? 1 : atoi(e) == 2 ? 2 : 0;
         if (const char *e = getenv("TS5_ATTN")) attn_fast_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_SPLITS")) attn_splits_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
@@ -744,6 +749,7 @@ private:
         MV(mv16n_q4_k, 4) MV(mv16n_q6_k, 4) MV(mv16n_glu_q4_k, 5)
         MV(mv16_q5_k, 3) MV(mv16_q8_0, 3) MV(mv16_glu_q5_k, 4) MV(mv16_glu_q8_0, 4)
         MV(mv16n_q5_k, 4) MV(mv16n_q8_0, 4) MV(mv16n_glu_q5_k, 5) MV(mv16n_glu_q8_0, 5)
+        MV(mv16x1_q4_k, 3) MV(mv16x2_q4_k, 3) MV(mv16x1_glu_q4_k, 4) MV(mv16x2_glu_q4_k, 4)
 #undef MV
         // The verify-batch mat-vecs once per batch size (their token loop is
         // compile-time), each twice like the one-token ones: mvt_rows_ rows
@@ -1419,7 +1425,11 @@ private:
         const bool one = rows < (uint32_t)mv_rows_min_ || mv_rows_ == 1;
         const uint32_t nr = one ? 1 : mv_rows_, groups = (rows + nr - 1) / nr;
         const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
-        dispatch(one ? name + ".1" : name, bufs, pc, mx, my, what);
+        // TS5_MV_DIAG=1 or 2 (timing only, wrong answers): the Q4_K kernels
+        // with their arithmetic left out or done twice (mv16_q4_k.glsl).
+        std::string n = name;
+        if (mv_diag_ && (n == "mv16_q4_k" || n == "mv16_glu_q4_k")) n = "mv16x" + std::to_string(mv_diag_) + n.substr(4);
+        dispatch(one ? n + ".1" : n, bufs, pc, mx, my, what);
     }
 
     // add: y += the normalized x (Gemma's norms after attention and the FFN);
@@ -1670,6 +1680,8 @@ private:
     // 1024 takes in Qwen3 8B and 14B's K and V (8 heads of 128: +1.4% and
     // +0.9% generation on the console); 512-row ones (4 KV heads) stay at one.
     int mv_rows_min_ = 1024;
+    // TS5_MV_DIAG: 0, or 1 or 2 for the Q4_K diagnostic builds (mat_vec).
+    int mv_diag_ = 0;
     // Attention with attn (TS5_ATTN=0: the old kernel); TS5_ATTN_SPLITS=N
     // sets how many slices generation splits the keys into.
     bool attn_fast_ = true;

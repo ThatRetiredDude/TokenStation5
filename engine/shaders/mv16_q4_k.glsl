@@ -102,6 +102,23 @@ float block_dot(uvec4 h, uvec4 q, vec4 a[4], vec4 e[4], float ta, float te, uint
     return dm.x * (sm.x * s0 + sm.y * s1) - dm.y * (sm.z * ta + sm.w * te);
 }
 
+#ifndef Q5K
+// DIAG (mv16x1_* and mv16x2_*, TS5_MV_DIAG=1 or 2, for timing only: their
+// sums are wrong): 1, the same loads of the weights and x with almost no
+// arithmetic; 2, the arithmetic twice over. How the time moves between the
+// two tells a kernel short of memory bandwidth from one short of ALU time.
+#if defined(DIAG) && DIAG == 1
+#define BDOT(h, q) (float(((h).x ^ (h).y ^ (h).z ^ (h).w ^ (q).x ^ (q).y ^ (q).z ^ (q).w) & 255u) + ta + te)
+#elif defined(DIAG) && DIAG == 2
+#define BDOT(h, q) (block_dot(h, q, a, e, ta, te, th) + \
+                    block_dot((h) ^ uvec4(0x00010001u), (q) ^ uvec4(0x01010101u), a, e, ta, te, th))
+#else
+#define BDOT(h, q) block_dot(h, q, a, e, ta, te, th)
+#endif
+#elif defined(DIAG)
+#error "DIAG is for Q4_K"
+#endif
+
 #ifdef GLU
 // The gate's activation times up: silu, or with pc.accumulate != 0 (unused
 // otherwise with GLU) Gemma's gelu, the tanh approximation as swiglu.comp.
@@ -173,9 +190,9 @@ void main() {
             accu[i] += block_dot(uq[i][0], uq[i][1], uq[i][2], a, e, ta, te, th);
 #endif
 #else
-            acc[i] += block_dot(wq[i][0], wq[i][1], a, e, ta, te, th);
+            acc[i] += BDOT(wq[i][0], wq[i][1]);
 #ifdef GLU
-            accu[i] += block_dot(uq[i][0], uq[i][1], a, e, ta, te, th);
+            accu[i] += BDOT(uq[i][0], uq[i][1]);
 #endif
 #endif
         }

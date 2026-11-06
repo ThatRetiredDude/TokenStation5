@@ -1,0 +1,5 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Timing only (TS5_MV_DIAG=1): the one-token Q4_K mat-vec with its arithmetic left out (see mv16_q4_k.glsl).
+#define DIAG 1
+#include "mv16_q4_k.glsl"
