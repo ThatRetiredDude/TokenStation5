@@ -102,6 +102,13 @@ float block_dot(uvec4 h, uvec4 q, vec4 a[4], vec4 e[4], float ta, float te, uint
     return dm.x * (sm.x * s0 + sm.y * s1) - dm.y * (sm.z * ta + sm.w * te);
 }
 
+// block_dot's last step, from its two sums (HALVES).
+float block_sum(uvec4 h, float s0, float s1, float ta, float te, uint th) {
+    const vec4 sm = bytes4(scales_mins(h, th >> 1));
+    const vec2 dm = unpackHalf2x16(h.x);
+    return dm.x * (sm.x * s0 + sm.y * s1) - dm.y * (sm.z * ta + sm.w * te);
+}
+
 #ifndef Q5K
 // DIAG (mv16x1_* to mv16x5_*, TS5_MV_DIAG=1 to 5, for timing only: their
 // sums are wrong): 1, the same loads of the weights and x with almost no
@@ -120,6 +127,9 @@ float block_dot(uvec4 h, uvec4 q, vec4 a[4], vec4 e[4], float ta, float te, uint
 #endif
 #elif defined(DIAG)
 #error "DIAG is for Q4_K"
+#endif
+#if defined(HALVES) && (defined(Q5K) || defined(NORM) || defined(DIAG))
+#error "HALVES is for plain Q4_K"
 #endif
 
 #ifdef GLU
@@ -143,6 +153,68 @@ void main() {
     float acc[NRMAX], accu[NRMAX];
     for (uint i = 0; i < NRMAX; i++) acc[i] = accu[i] = 0.0;
     float ss = 0.0;
+#ifdef HALVES
+    for (uint b = tid / 8; b < nb; b += WG / 8) {
+        // HALVES (mv16h_*): the rows' words first, then x a half at a time,
+        // the low nibbles against the first 16 values and the high ones
+        // against the other 16: the same sums in the same order as
+        // block_dot, with half of x held at once, which leaves registers for
+        // more rows per workgroup (each row more is a load of x saved).
+        const uint x0 = (pc.x_off + b * 256) / 4 + 16 * p + 4 * (th & 1u);
+        uvec4 wq[NRMAX][2];
+#ifdef GLU
+        uvec4 uq[NRMAX][2];
+#endif
+        [[unroll]] for (uint i = 0; i < NR; i++) {
+            const uint o = min(r0 + i, pc.nrows - 1) * row_words + b * BW;
+            wq[i][0] = w128[o];
+            wq[i][1] = w128[o + QW + th];
+#ifdef GLU
+            uq[i][0] = u128[o];
+            uq[i][1] = u128[o + QW + th];
+#endif
+        }
+        float s0[NRMAX], ta = 0.0;
+#ifdef GLU
+        float u0[NRMAX];
+#endif
+        {
+            vec4 a[4];
+            [[unroll]] for (uint c = 0; c < 4; c++) {
+                a[c] = X4[x0 + c];
+                ta += a[c].x + a[c].y + a[c].z + a[c].w;
+            }
+            [[unroll]] for (uint i = 0; i < NR; i++) {
+                float sl = 0.0;
+                [[unroll]] for (uint c = 0; c < 4; c++) sl += dot(bytes4(wq[i][1][c] & 0x0F0F0F0Fu), a[c]);
+                s0[i] = sl;
+#ifdef GLU
+                float ul = 0.0;
+                [[unroll]] for (uint c = 0; c < 4; c++) ul += dot(bytes4(uq[i][1][c] & 0x0F0F0F0Fu), a[c]);
+                u0[i] = ul;
+#endif
+            }
+        }
+        {
+            vec4 e[4];
+            float te = 0.0;
+            [[unroll]] for (uint c = 0; c < 4; c++) {
+                e[c] = X4[x0 + 8 + c];
+                te += e[c].x + e[c].y + e[c].z + e[c].w;
+            }
+            [[unroll]] for (uint i = 0; i < NR; i++) {
+                float s1 = 0.0;
+                [[unroll]] for (uint c = 0; c < 4; c++) s1 += dot(bytes4((wq[i][1][c] >> 4) & 0x0F0F0F0Fu), e[c]);
+                acc[i] += block_sum(wq[i][0], s0[i], s1, ta, te, th);
+#ifdef GLU
+                float u1 = 0.0;
+                [[unroll]] for (uint c = 0; c < 4; c++) u1 += dot(bytes4((uq[i][1][c] >> 4) & 0x0F0F0F0Fu), e[c]);
+                accu[i] += block_sum(uq[i][0], u0[i], u1, ta, te, th);
+#endif
+            }
+        }
+    }
+#else
     for (uint b = tid / 8; b < nb; b += WG / 8) {
         const uint x0 = (pc.x_off + b * 256) / 4 + 16 * p + 4 * (th & 1u), x1 = x0 + 8;
         vec4 a[4], e[4];
@@ -213,6 +285,7 @@ void main() {
 #endif
         }
     }
+#endif
     for (uint i = 0; i < NR; i++) {
         const float s = subgroupAdd(acc[i]);
         if (gl_SubgroupInvocationID == 0) partial[i * WG + gl_SubgroupID] = s;

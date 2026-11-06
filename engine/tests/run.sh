@@ -264,6 +264,17 @@ cmp "$work/glu-on.bin" "$work/glu-r2.bin"
 TS5_MVT_GLU=1 TS5_MV_ROWS_MIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
     --ntok 7 "$work/qwen2-Q4_K_M.gguf"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 5 "$work/qwen2-Q8_0.gguf" "$work/llama-Q8_0.gguf"
+# The one-token Q4_K kernels that hold half of x at a time (TS5_MV_HALVES,
+# off by default) against the default ones, byte for byte, one token a call
+# (the verify kernels must keep matching them), at 4 and 8 rows; the
+# profile line proves they ran.
+"$ts5" logits -m "$work/qwen2-Q4_K_M.gguf" -o "$work/mvh-off.bin" --step 12 34 56 78 90 2> /dev/null
+for r in 4 8; do
+    TS5_MV_ROWS_MIN=1 TS5_MV_HALVES=$r TS5_PROFILE=1 "$ts5" logits -m "$work/qwen2-Q4_K_M.gguf" -o "$work/mvh-on.bin" \
+        --step 12 34 56 78 90 2> "$work/mvh-on.err"
+    grep -q "mv16h_glu_q4_k" "$work/mvh-on.err"
+    cmp "$work/mvh-on.bin" "$work/mvh-off.bin"
+done
 rep="one two three one two three one two three one two three one two"
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-off.txt" 2> /dev/null
 TS5_DRAFT=7 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-on.txt" 2> "$work/sd-on.err"
