@@ -264,6 +264,19 @@ cmp "$work/glu-on.bin" "$work/glu-r2.bin"
 TS5_MVT_GLU=1 TS5_MV_ROWS_MIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
     --ntok 7 "$work/qwen2-Q4_K_M.gguf"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 5 "$work/qwen2-Q8_0.gguf" "$work/llama-Q8_0.gguf"
+# The Q4_K verify kernel with up to 8 rows a workgroup (TS5_MVTC, off by
+# default) against mvt_q4_k, byte for byte, at 2, 4 and 7 tokens and 4 and
+# 8 rows; the profile line proves it ran.
+for n in 2 4 7; do
+    t=$(echo 12 34 56 78 90 11 22 | cut -d' ' -f1-$n)
+    TS5_MV_ROWS_MIN=1 "$ts5" logits -m "$work/qwen2-Q4_K_M.gguf" -o "$work/mvtc-off.bin" $t 2> /dev/null
+    for r in 4 8; do
+        TS5_MV_ROWS_MIN=1 TS5_MVTC=$r TS5_PROFILE=1 "$ts5" logits -m "$work/qwen2-Q4_K_M.gguf" -o "$work/mvtc-on.bin" $t \
+            2> "$work/mvtc-on.err"
+        grep -q "mvtc_q4_k\.$n " "$work/mvtc-on.err"
+        cmp "$work/mvtc-on.bin" "$work/mvtc-off.bin"
+    done
+done
 # The one-token Q4_K kernels that hold half of x at a time (TS5_MV_HALVES,
 # off by default) against the default ones, byte for byte, one token a call
 # (the verify kernels must keep matching them), at 4 and 8 rows; the

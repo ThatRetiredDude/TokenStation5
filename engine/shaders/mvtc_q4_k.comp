@@ -1,0 +1,5 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// A verify batch (2..8 tokens) of a Q4_K matrix, up to 8 rows a workgroup (see mvt_q4_k.glsl).
+#define COUTER
+#include "mvt_q4_k.glsl"

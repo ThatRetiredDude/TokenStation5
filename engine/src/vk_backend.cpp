@@ -97,6 +97,7 @@
 #include "mv16n_glu_q8_0.spv.h"
 #include "mvt_glu_q4_k.spv.h"
 #include "mvt_q4_k.spv.h"
+#include "mvtc_q4_k.spv.h"
 #include "mvtx_q4_k.spv.h"
 #include "mvtx_q5_k.spv.h"
 #include "mvtx_q6_k.spv.h"
@@ -432,6 +433,7 @@ private:
         if (const char *e = getenv("TS5_MVT_GLU")) mvt_glu_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT_ROWS")) mvt_rows_ = std::min(4, std::max(1, atoi(e)));
         if (const char *e = getenv("TS5_MVTX")) mvtx_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_MVTC")) mvtc_rows_ = (uint32_t)std::min(8, std::max(0, atoi(e)));
         // The fused kernel holds two matrices' words: past 2 rows it spills
         // registers on the PS5 (1376 VGPRs into scratch at 4 rows, a 7x
         // regression), so its row tiling is capped where the plain one's isn't.
@@ -758,9 +760,12 @@ private:
         MV(mv16n_q4_k, 4) MV(mv16n_q6_k, 4) MV(mv16n_glu_q4_k, 5)
         MV(mv16_q5_k, 3) MV(mv16_q8_0, 3) MV(mv16_glu_q5_k, 4) MV(mv16_glu_q8_0, 4)
         MV(mv16n_q5_k, 4) MV(mv16n_q8_0, 4) MV(mv16n_glu_q5_k, 5) MV(mv16n_glu_q8_0, 5)
-        MV(mv16x1_q4_k, 3) MV(mv16x2_q4_k, 3) MV(mv16x1_glu_q4_k, 4) MV(mv16x2_glu_q4_k, 4)
-        MV(mv16x3_q4_k, 3) MV(mv16x4_q4_k, 3) MV(mv16x5_q4_k, 3)
-        MV(mv16x3_glu_q4_k, 4) MV(mv16x4_glu_q4_k, 4) MV(mv16x5_glu_q4_k, 4)
+        // The timing-only builds only when asked for (TS5_MV_DIAG).
+        if (mv_diag_) {
+            MV(mv16x1_q4_k, 3) MV(mv16x2_q4_k, 3) MV(mv16x1_glu_q4_k, 4) MV(mv16x2_glu_q4_k, 4)
+            MV(mv16x3_q4_k, 3) MV(mv16x4_q4_k, 3) MV(mv16x5_q4_k, 3)
+            MV(mv16x3_glu_q4_k, 4) MV(mv16x4_glu_q4_k, 4) MV(mv16x5_glu_q4_k, 4)
+        }
 #undef MV
         // x a half at a time (TS5_MV_HALVES=N: N rows a workgroup, up to 8).
         if (mvh_rows_ && (!make_pipe("mv16h_q4_k", spv_mv16h_q4_k, sizeof(spv_mv16h_q4_k), 3, err, mvh_rows_) ||
@@ -786,6 +791,8 @@ private:
                 !make_pipe("mvt_q8_0" + s + ".1", spv_mvt_q8_0, sizeof(spv_mvt_q8_0), 3, err, nt, 1) ||
                 !make_pipe("mvt_glu_q4_k" + s, spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, mvt_glu_rows_) ||
                 !make_pipe("mvt_glu_q4_k" + s + ".1", spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, 1))
+                return false;
+            if (mvtc_rows_ && !make_pipe("mvtc_q4_k" + s, spv_mvtc_q4_k, sizeof(spv_mvtc_q4_k), 3, err, nt, mvtc_nr(nt)))
                 return false;
         }
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
@@ -1198,9 +1205,13 @@ private:
             // Matrices of mvt_rows_ rows per group: a workgroup per group, or
             // the x-staging kernels, 4 groups a workgroup (TS5_MVTX=1).
             const bool staged = !one && mvtx_;
-            const uint32_t nr = one ? 1 : mvt_rows_ * (staged ? 4 : 1), groups = (rows + nr - 1) / nr;
+            // TS5_MVTC=N: Q4_K through mvtc_q4_k, N rows a workgroup.
+            const bool outer = !one && !staged && mvtc_rows_ && w.type() == GGML_Q4_K;
+            const uint32_t nr = one ? 1 : outer ? mvtc_nr((uint32_t)ntok) : mvt_rows_ * (staged ? 4 : 1);
+            const uint32_t groups = (rows + nr - 1) / nr;
             const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
-            dispatch(std::string(staged ? "mvtx_" : "mvt_") + qname(w.type()) + "." + std::to_string(ntok) + (one ? ".1" : ""),
+            dispatch(std::string(outer ? "mvtc_" : staged ? "mvtx_" : "mvt_") + qname(w.type()) + "." + std::to_string(ntok) +
+                         (one ? ".1" : ""),
                      {&W(w), &x, &y}, pc, mx, my, what);
             return;
         }
@@ -1759,6 +1770,10 @@ private:
     // code +26% with mvt_, -1% with mvtx_), so each group's workgroup
     // reads x itself.
     bool mvtx_ = false;
+    // TS5_MVTC=N (0: off): the Q4_K verify batches through mvtc_q4_k, N
+    // rows a workgroup (at most 4 from 5 tokens, where more spill).
+    uint32_t mvtc_rows_ = 0;
+    uint32_t mvtc_nr(uint32_t nt) const { return nt >= 5 ? std::min(mvtc_rows_, 4u) : mvtc_rows_; }
     // The fused gate+up verify kernel: off until a console A/B shows a win
     // (phase L measured it 7x slower at 4 rows from register spills).
     bool mvt_glu_ = false;

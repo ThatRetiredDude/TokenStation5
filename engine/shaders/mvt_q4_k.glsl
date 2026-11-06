@@ -31,10 +31,17 @@
 // the same output only while this kernel and mv16_q4_k agree bit for bit.
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_control_flow_attributes : require
+#if defined(COUTER) && defined(Q5K)
+#error "COUTER is for Q4_K"
+#endif
 
 #define WG 64
 #define NTMAX 8
+#ifdef COUTER
+#define NRMAX 8  // mvtc_q4_k
+#else
 #define NRMAX 4
+#endif
 layout(local_size_x = WG) in;
 layout(constant_id = 0) const uint NT = 2;  // tokens, at most NTMAX
 layout(constant_id = 1) const uint NR = 1;  // rows per workgroup, at most NRMAX
@@ -55,7 +62,12 @@ layout(push_constant) uniform PC {
     uint x_stride, y_stride, accumulate, x_off;
 } pc;
 
+#ifdef COUTER
+#define NSG (WG / 4)  // subgroups a workgroup, at most (llvmpipe: 4 lanes or more)
+shared float partial[NRMAX * NTMAX * NSG];  // [row][token][subgroup]
+#else
 shared float partial[NRMAX * NTMAX * WG];  // [row][token][subgroup]
+#endif
 
 // As mv16_q4_k: sub-blocks 2p and 2p + 1's 6-bit scales (bytes 0 and 1) and
 // mins (bytes 2 and 3), from the block's header h.
@@ -89,6 +101,84 @@ void nibbles(uvec4 q, uint th, uint hi, out vec4 w[4]) {
 }
 #endif
 
+#ifdef COUTER
+// mvtc_q4_k (TS5_MVTC=N, N rows a workgroup, up to 8): the same sums in the
+// same order, with the nibble words' four 32-bit parts in the outer loop
+// and the tokens inside it. A row then holds 4 of its values as floats at a
+// time rather than 16, and a token's x one 16-byte word, which leaves
+// registers for more rows: each token's x is read once for N rows, and at
+// 4 rows the batch reads NT times x's 4 bytes a value for 2.25 bytes of
+// weights (a 2-row workgroup was 66% slower at 3 tokens on the PS5).
+void main() {
+    const uint r0 = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * NR;
+    if (r0 >= pc.nrows) return;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint nb = pc.ncols / 256, row_words = pc.row_bytes / 16;
+    const uint th = tid % 8;
+    float acc[NRMAX * NTMAX];
+    [[unroll]] for (uint i = 0; i < NRMAX * NTMAX; i++) acc[i] = 0.0;
+    for (uint b = tid / 8; b < nb; b += WG / 8) {
+        uvec4 h[NRMAX], q[NRMAX];
+        [[unroll]] for (uint i = 0; i < NR; i++) {
+            const uint o = min(r0 + i, pc.nrows - 1) * row_words + b * BW;
+            h[i] = w128[o];
+            q[i] = w128[o + QW + th];
+        }
+        const uint x0 = (b * 256) / 4 + 16 * (th >> 1) + 4 * (th & 1u);
+        // The low nibbles: s0 and ta of block_dot, a 32-bit part at a time.
+        float s0[NRMAX * NTMAX], ta[NTMAX];
+        [[unroll]] for (uint t = 0; t < NT; t++) {
+            ta[t] = 0.0;
+            [[unroll]] for (uint i = 0; i < NR; i++) s0[i * NTMAX + t] = 0.0;
+        }
+        [[unroll]] for (uint c = 0; c < 4; c++) {
+            vec4 w[NRMAX];
+            [[unroll]] for (uint i = 0; i < NR; i++) w[i] = bytes4(q[i][c] & 0x0F0F0F0Fu);
+            [[unroll]] for (uint t = 0; t < NT; t++) {
+                const vec4 a = X4[(pc.x_off + t * pc.x_stride) / 4 + x0 + c];
+                ta[t] += a.x + a.y + a.z + a.w;
+                [[unroll]] for (uint i = 0; i < NR; i++) s0[i * NTMAX + t] += dot(w[i], a);
+            }
+        }
+        // The high nibbles, then the block into the row in block_dot's order.
+        float s1[NRMAX * NTMAX], te[NTMAX];
+        [[unroll]] for (uint t = 0; t < NT; t++) {
+            te[t] = 0.0;
+            [[unroll]] for (uint i = 0; i < NR; i++) s1[i * NTMAX + t] = 0.0;
+        }
+        [[unroll]] for (uint c = 0; c < 4; c++) {
+            vec4 w[NRMAX];
+            [[unroll]] for (uint i = 0; i < NR; i++) w[i] = bytes4((q[i][c] >> 4) & 0x0F0F0F0Fu);
+            [[unroll]] for (uint t = 0; t < NT; t++) {
+                const vec4 e = X4[(pc.x_off + t * pc.x_stride) / 4 + x0 + 8 + c];
+                te[t] += e.x + e.y + e.z + e.w;
+                [[unroll]] for (uint i = 0; i < NR; i++) s1[i * NTMAX + t] += dot(w[i], e);
+            }
+        }
+        [[unroll]] for (uint i = 0; i < NR; i++) {
+            const vec4 sm = scales(h[i], th);
+            const vec2 dm = unpackHalf2x16(h[i].x);
+            [[unroll]] for (uint t = 0; t < NT; t++)
+                acc[i * NTMAX + t] += dm.x * (sm.x * s0[i * NTMAX + t] + sm.y * s1[i * NTMAX + t]) -
+                                      dm.y * (sm.z * ta[t] + sm.w * te[t]);
+        }
+    }
+    [[unroll]] for (uint t = 0; t < NT; t++)
+        [[unroll]] for (uint i = 0; i < NR; i++) {
+            const float s = subgroupAdd(acc[i * NTMAX + t]);
+            if (gl_SubgroupInvocationID == 0) partial[(i * NTMAX + t) * NSG + gl_SubgroupID] = s;
+        }
+    barrier();
+    const uint nr = min(NR, pc.nrows - r0);
+    if (tid < nr * NT) {
+        const uint i = tid / NT, t = tid % NT;
+        float s = 0.0;
+        for (uint sg = 0; sg < gl_NumSubgroups; sg++) s += partial[(i * NTMAX + t) * NSG + sg];
+        const uint yi = t * pc.y_stride + r0 + i;
+        Y[yi] = pc.accumulate != 0 ? Y[yi] + s : s;
+    }
+}
+#else
 void main() {
     const uint r0 = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * NR;
     if (r0 >= pc.nrows) return;
@@ -187,3 +277,4 @@ void main() {
         Y[yi] = pc.accumulate != 0 ? Y[yi] + s : s;
     }
 }
+#endif
