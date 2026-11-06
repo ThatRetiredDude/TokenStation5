@@ -381,11 +381,13 @@ echo "== ts5 check (GPU vs CPU in one command, as run on the console), then agai
 rm -f "$work"/qwen3-Q4_0.gguf*.ts5ref
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
+! "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep -q perplexity  # test tokens: no next-token measure
 TS5_KV=q8 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
 TS5_KV=q8 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
 # On a text's tokens (-p): answers saved apart from the test tokens', then used again.
 txt=$(head -c 3000 "$engine/DESIGN.md")
-"$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "$txt" 2> /dev/null | grep ", over the bar at 0, .*, cpu [0-9]* ms: PASS$"
+"$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "$txt" 2> /dev/null |
+    grep ", over the bar at 0, on the text's next tokens perplexity [0-9.e+]* on the GPU and [0-9.e+]* on the CPU, KL [0-9.e-]* on average .*, cpu [0-9]* ms: PASS$"
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "$txt" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
 ls "$work"/qwen3-Q4_0.gguf.t*.ts5ref > /dev/null
 ! "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "hi" 2>&1 | grep -q PASS

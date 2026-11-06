@@ -216,8 +216,18 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   attention on normalized q and k, one K/V head of 512 on the full layers)
   turning the last bits of f32 into large logit changes at a few
   positions rather than at one kernel. `ts5 check -p TEXT` runs the check on a
-  text's tokens (its answers saved apart, MODEL.gguf.t<hash>.ts5ref), and
-  the check line counts the positions over the bar. Moving the
+  text's tokens (its answers saved apart, MODEL.gguf.t<hash>.ts5ref); the
+  check line counts the positions over the bar and, on a text, gives each
+  side's perplexity on the text's next tokens and the KL divergence from
+  the CPU's distribution to the GPU's, which say whether a difference
+  changes what the model writes. On 512 tokens of English text Gemma 4 12B
+  is 41% off at one position (230), 34 positions over the bar, 509 top
+  tokens the same; Gemma 3 12B on the same text 0.053%, none over, all 512
+  the same, so it is Gemma 4's own. Qwen3 8B (Q4_K_M) on that text is
+  0.74% off at one position (448) with its f16 prompt kernel, all 512 top
+  tokens the same; 0.12% in f32 (`TS5_MMB_F16=0`). No one matrix group
+  causes it: f32 attn_output alone gives 0.56%, f32 ffn_down or gate and
+  up alone 0.74-0.77%. Moving the
   f16 sums into f32 every 8 products instead of 32 didn't help and cost as
   much as f32. The kernel's x loads: with `TS5_MMB_VAR=q` each
   thread loads 4 values of each of its quad's 4 tokens and stores them to

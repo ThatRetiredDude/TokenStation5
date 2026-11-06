@@ -182,6 +182,34 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     const double bar = gpu.kv_type() == KvType::Q8 ? 2e-2 : 5e-3;
     for (int i = 0; i < n; i++) r.over += pos_diff[i] > bar * max_ref;
     r.pass = std::isfinite(r.rel) && r.rel < bar;
+    // On a text, whether a difference changes what the model would write: how
+    // likely each side finds the text's own next token (perplexity), and how
+    // far the GPU's whole distribution is from the CPU's (KL divergence, CPU
+    // to GPU, in nats).
+    if (!text.empty() && n > 1) {
+        double nll_g = 0, nll_f = 0, kl_sum = 0;
+        for (int i = 0; i + 1 < n; i++) {
+            const float *g = got.data() + (size_t)i * nv, *f = ref.data() + (size_t)i * nv;
+            const double mg = *std::max_element(g, g + nv), mf = *std::max_element(f, f + nv);
+            double sg = 0, sf = 0;
+            for (int j = 0; j < nv; j++) sg += std::exp(g[j] - mg), sf += std::exp(f[j] - mf);
+            const double zg = mg + std::log(sg), zf = mf + std::log(sf);
+            const int32_t next = toks[i + 1];
+            nll_g += zg - g[next];
+            nll_f += zf - f[next];
+            double kl = 0;
+            for (int j = 0; j < nv; j++) {
+                const double lf = f[j] - zf;
+                kl += std::exp(lf) * (lf - (g[j] - zg));
+            }
+            kl_sum += kl;
+            if (kl > r.kl_max) r.kl_max = kl, r.kl_worst = i;
+        }
+        r.on_text = true;
+        r.ppl_gpu = std::exp(nll_g / (n - 1));
+        r.ppl_cpu = std::exp(nll_f / (n - 1));
+        r.kl_mean = kl_sum / (n - 1);
+    }
     return true;
 }
 
@@ -189,12 +217,21 @@ std::string check_line(const std::string &model, const CheckResult &r) {
     char b[512];
     snprintf(b, sizeof b, "cpu %.0f ms", r.cpu_ms);
     const std::string cpu = r.saved ? "cpu answers saved earlier" : b;
-    snprintf(b, sizeof b,
+    std::string text;
+    if (r.on_text) {
+        snprintf(b, sizeof b,
+                 ", on the text's next tokens perplexity %.6g on the GPU and %.6g on the CPU, KL %.2g on average "
+                 "(%.2g at most, at token %d)",
+                 r.ppl_gpu, r.ppl_cpu, r.kl_mean, r.kl_max, r.kl_worst);
+        text = b;
+    }
+    char line[1024];
+    snprintf(line, sizeof line,
              "ts5 check: %s, %d tokens: max |diff| %.3g (%.2g of the largest logit) at token %d, same top token at "
-             "%d/%d, over the bar at %d, %s %.0f ms, %s: %s",
-             model.c_str(), r.n, r.max_diff, r.rel, r.worst, r.same_top, r.n, r.over, r.backend.c_str(), r.gpu_ms,
-             cpu.c_str(), r.pass ? "PASS" : "FAIL");
-    return b;
+             "%d/%d, over the bar at %d%s, %s %.0f ms, %s: %s",
+             model.c_str(), r.n, r.max_diff, r.rel, r.worst, r.same_top, r.n, r.over, text.c_str(),
+             r.backend.c_str(), r.gpu_ms, cpu.c_str(), r.pass ? "PASS" : "FAIL");
+    return line;
 }
 
 bool run_bench(const Model &m, Backend &b, int pp, int tg, BenchResult &r, std::string &err, const Progress &progress) {

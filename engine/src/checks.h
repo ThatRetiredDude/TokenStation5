@@ -17,6 +17,11 @@ using Progress = std::function<void(const std::string &step)>;
 struct CheckResult {
     int n = 0, same_top = 0, worst = 0;  // worst: the position of max_diff
     int over = 0;                        // positions off by more than the bar
+    // On a text (-p): perplexity of its next tokens on each side, and the KL
+    // divergence from the CPU's distribution to the GPU's (nats per position).
+    bool on_text = false;
+    double ppl_gpu = 0, ppl_cpu = 0, kl_mean = 0, kl_max = 0;
+    int kl_worst = 0;
     double max_diff = 0, rel = 0, gpu_ms = 0, cpu_ms = 0;
     bool pass = false;
     bool saved = false;  // the CPU's logits came from the model's saved answers
