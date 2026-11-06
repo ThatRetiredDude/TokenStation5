@@ -68,8 +68,12 @@ shared float sq[WG];  // [subgroup]: sums of x^2
 uint scales_mins(uvec4 h, uint p) {
     const uint sh = 16u * (p & 1u);
     const uint a = (h.y >> sh) & 0xFFFFu, b = (h.z >> sh) & 0xFFFFu, c = (h.w >> sh) & 0xFFFFu;
-    if (p < 2) return (a & 0x3F3Fu) | ((b & 0x3F3Fu) << 16);
-    return ((c & 0x0F0Fu) | ((a >> 2) & 0x3030u)) | ((((c >> 4) & 0x0F0Fu) | ((b >> 2) & 0x3030u)) << 16);
+    // Both, then a select: a branch on p (which differs between threads)
+    // split the caller's row loop into blocks, and the compiler then waited
+    // for each row's loads before issuing the next row's.
+    const uint lo = (a & 0x3F3Fu) | ((b & 0x3F3Fu) << 16);
+    const uint hi = ((c & 0x0F0Fu) | ((a >> 2) & 0x3030u)) | ((((c >> 4) & 0x0F0Fu) | ((b >> 2) & 0x3030u)) << 16);
+    return p < 2 ? lo : hi;
 }
 // The 4 bytes of a word as floats (one conversion each on AMD hardware).
 vec4 bytes4(uint w) { return vec4(float(w & 255u), float((w >> 8) & 255u), float((w >> 16) & 255u), float(w >> 24)); }
@@ -136,18 +140,42 @@ void main() {
             te += e[c].x + e[c].y + e[c].z + e[c].w;
         }
         // Rows past the matrix read its last row; their sums aren't written.
-        // Unrolled, so that all NR rows' loads are in flight at once.
+        // Every row's words are loaded first, then summed, so that all NR
+        // rows' loads are in flight at once.
+#ifdef Q5K
+#define NW 3
+#else
+#define NW 2
+#endif
+        uvec4 wq[NRMAX][NW];
+#ifdef GLU
+        uvec4 uq[NRMAX][NW];
+#endif
         [[unroll]] for (uint i = 0; i < NR; i++) {
             const uint o = min(r0 + i, pc.nrows - 1) * row_words + b * BW;
+            wq[i][0] = w128[o];
+            wq[i][1] = w128[o + QW + th];
 #ifdef Q5K
-            acc[i] += block_dot(w128[o], w128[o + QW + th], w128[o + 1 + (th & 1u)], a, e, ta, te, th);
+            wq[i][2] = w128[o + 1 + (th & 1u)];
+#endif
 #ifdef GLU
-            accu[i] += block_dot(u128[o], u128[o + QW + th], u128[o + 1 + (th & 1u)], a, e, ta, te, th);
+            uq[i][0] = u128[o];
+            uq[i][1] = u128[o + QW + th];
+#ifdef Q5K
+            uq[i][2] = u128[o + 1 + (th & 1u)];
+#endif
+#endif
+        }
+        [[unroll]] for (uint i = 0; i < NR; i++) {
+#ifdef Q5K
+            acc[i] += block_dot(wq[i][0], wq[i][1], wq[i][2], a, e, ta, te, th);
+#ifdef GLU
+            accu[i] += block_dot(uq[i][0], uq[i][1], uq[i][2], a, e, ta, te, th);
 #endif
 #else
-            acc[i] += block_dot(w128[o], w128[o + QW + th], a, e, ta, te, th);
+            acc[i] += block_dot(wq[i][0], wq[i][1], a, e, ta, te, th);
 #ifdef GLU
-            accu[i] += block_dot(u128[o], u128[o + QW + th], a, e, ta, te, th);
+            accu[i] += block_dot(uq[i][0], uq[i][1], a, e, ta, te, th);
 #endif
 #endif
         }

@@ -183,6 +183,16 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   no difference on the PS5 (every model within 0.3% of q at 512 and 4096
   tokens): those stores were never the pace. Every variant sums in the same
   order, so their output is the same.
+  The kernel's loads are unconditional: a row or token past the end loads
+  the last one (clamped address) and the store writes zeros for it. RADV's
+  compiler (ACO) waits for a load under a per-thread `if` right after it,
+  and places a load whose only use is in the next loop step after the
+  inner loop, waiting for it there too; either way the next step's tile
+  arrived only after the sums, not during them. The inner k loop is
+  unrolled (`[[unroll]]`) so the loads are issued before it. Built with
+  `-DTS5_GLSL_DEFINES="MMB_KLOOP;MMB_VOLATILE"` the shader keeps the k loop
+  and marks the buffers volatile instead, the other way to keep the loads
+  in place; both sum in the same order as before.
 - 9 or more (`mm_*`, `shaders/matmul_tiled.glsl`): 64 rows x 64 tokens per
   workgroup. Half the threads dequantize a 64 x 64 slice of W into shared
   memory while the other half load the matching slice of X, then each thread
@@ -203,7 +213,10 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   nine 4-byte words and shifted, since the blocks are only 2-byte aligned.
   The same shapes serve a verify batch of 2 to 8 tokens (`mvt_*`), which
   dot each row's words with every token's x. `TS5_FAST_MATVEC=0` turns them
-  all off.
+  all off. The K-quant kernels load every row's words before the first sum
+  and pick a super-block's scales without a branch: a per-row branch split
+  the shader into blocks and ACO waited for each row's loads before the
+  next row's, so 4 rows took 4 memory round trips instead of one.
 - Anything else (`matmul_*`): one workgroup per row, 8 tokens per pass.
 
 Attention (`shaders/attn.comp`) gives each workgroup the query heads that

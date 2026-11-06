@@ -59,8 +59,12 @@ shared float partial[RG * NRMAX * NTMAX * SGMAX];  // [group][row][token][subgro
 uint scales_mins(uvec4 h, uint p) {
     const uint sh = 16u * (p & 1u);
     const uint a = (h.y >> sh) & 0xFFFFu, b = (h.z >> sh) & 0xFFFFu, c = (h.w >> sh) & 0xFFFFu;
-    if (p < 2) return (a & 0x3F3Fu) | ((b & 0x3F3Fu) << 16);
-    return ((c & 0x0F0Fu) | ((a >> 2) & 0x3030u)) | ((((c >> 4) & 0x0F0Fu) | ((b >> 2) & 0x3030u)) << 16);
+    // Both, then a select: a branch on p (which differs between threads)
+    // split the caller's row loop into blocks, and the compiler then waited
+    // for each row's loads before issuing the next row's.
+    const uint lo = (a & 0x3F3Fu) | ((b & 0x3F3Fu) << 16);
+    const uint hi = ((c & 0x0F0Fu) | ((a >> 2) & 0x3030u)) | ((((c >> 4) & 0x0F0Fu) | ((b >> 2) & 0x3030u)) << 16);
+    return p < 2 ? lo : hi;
 }
 vec4 bytes4(uint w) { return vec4(float(w & 255u), float((w >> 8) & 255u), float((w >> 16) & 255u), float(w >> 24)); }
 

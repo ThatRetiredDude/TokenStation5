@@ -17,7 +17,22 @@
 // barrier instead of two and the stores of one wave overlap another's sums.
 // With MMB_XQ, a thread loads 4 values of each of its quad's 4 tokens
 // (instead of 16 of one token) and stores them as 4 vectors, not 16 scalars.
+// Every load is unconditional: rows and tokens past the matrix's read its
+// last row and token, and store() zeroes them. A load under a per-thread
+// condition made the compiler (RADV's ACO) wait for it right where it was
+// issued, so each step stalled a whole memory latency before its sums.
+// The step's 32 values are unrolled: with a loop there, the compiler moved
+// the next step's loads past it, again to wait for them at once. Unrolled,
+// they are issued before the sums and waited for after them. (Built with
+// MMB_KLOOP the loop stays, and with MMB_VOLATILE the loads are volatile,
+// which also keeps them in place but skips the GPU's L0 and L1 caches.)
 #extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+#ifdef MMB_VOLATILE
+#define LOADQ volatile readonly
+#else
+#define LOADQ readonly
+#endif
 #ifdef MMB_F16
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #define SV f16vec4
@@ -38,11 +53,11 @@
 layout(local_size_x = WG) in;
 
 #if QTYPE == T_Q4_K || QTYPE == T_Q5_K
-layout(std430, binding = 0) readonly buffer Wbuf { uvec4 w128[]; };
+layout(std430, binding = 0) LOADQ buffer Wbuf { uvec4 w128[]; };
 #else
-layout(std430, binding = 0) readonly buffer Wbuf { uint16_t w16[]; };
+layout(std430, binding = 0) LOADQ buffer Wbuf { uint16_t w16[]; };
 #endif
-layout(std430, binding = 1) readonly buffer Xbuf { vec4 X4[]; };
+layout(std430, binding = 1) LOADQ buffer Xbuf { vec4 X4[]; };
 layout(std430, binding = 2) buffer Ybuf { float Y[]; };
 layout(std430, binding = 3) writeonly buffer Pbuf { float P[]; };
 
@@ -156,8 +171,11 @@ void dequant(Raw w, uint u, out float v[16]) {
 }
 #endif
 
-// Dequantizes w (unit u) and stores it and x into shared buffer b.
-void store(uint b, uint u, bool w_ok, Raw w, vec4 x[4], uint lr, uint lh) {
+// Dequantizes w (unit u) and stores it and x into shared buffer b; rows
+// past the matrix (!w_ok) and tokens past the batch (!x_ok) store zeros.
+void store(uint b, uint u, bool w_ok, Raw w, vec4 x[4], bvec4 x_ok, uint lr, uint lh) {
+    for (uint i = 0; i < 4; i++)
+        if (!x_ok[i]) x[i] = vec4(0.0);
     float v[16];
     if (w_ok) {
         dequant(w, u, v);
@@ -186,17 +204,21 @@ void main() {
     // Loads: row tid % 128, values 16 (tid / 128) .. + 15 of the unit.
     const uint lr = tid % 128, lh = tid / 128;
     const bool w_ok = r0 + lr < pc.nrows;
+    const uint wr = min(r0 + lr, pc.nrows - 1);
 #ifdef MMB_XQ
     // Tokens 4 (lr / 4) + j, values 16 lh + 4 (lr % 4) .. + 3 of the unit.
-    const uint tq = t0 + 4 * (lr / 4), xs4 = pc.x_stride / 4;
-    const uint xb = (pc.x_off + tq * pc.x_stride) / 4 + 4 * lh + lr % 4;
-    bool x_ok[4];
-    for (uint j = 0; j < 4; j++) x_ok[j] = tq + j < pc.ntok;
-#define LOAD_X(u) for (uint j = 0; j < 4; j++) x[j] = x_ok[j] ? X4[xb + j * xs4 + 8 * (u)] : vec4(0.0)
+    const uint tq = t0 + 4 * (lr / 4);
+    bvec4 x_ok;
+    uint xb[4];
+    for (uint j = 0; j < 4; j++) {
+        x_ok[j] = tq + j < pc.ntok;
+        xb[j] = (pc.x_off + min(tq + j, pc.ntok - 1) * pc.x_stride) / 4 + 4 * lh + lr % 4;
+    }
+#define LOAD_X(u) for (uint j = 0; j < 4; j++) x[j] = X4[xb[j] + 8 * (u)]
 #else
-    const bool x_ok = t0 + lr < pc.ntok;
-    const uint xb = (pc.x_off + (t0 + lr) * pc.x_stride) / 4 + 4 * lh;
-#define LOAD_X(u) for (uint i = 0; i < 4; i++) x[i] = x_ok ? X4[xb + 8 * (u) + i] : vec4(0.0)
+    const bvec4 x_ok = bvec4(t0 + lr < pc.ntok);
+    const uint xb = (pc.x_off + min(t0 + lr, pc.ntok - 1) * pc.x_stride) / 4 + 4 * lh;
+#define LOAD_X(u) for (uint i = 0; i < 4; i++) x[i] = X4[xb + 8 * (u) + i]
 #endif
 
     vec4 acc[2][8];
@@ -205,30 +227,30 @@ void main() {
 
     Raw w;
     vec4 x[4];
-    if (w_ok) w = load_w(r0 + lr, u0, lh);
+    w = load_w(wr, u0, lh);
     LOAD_X(u0);
 
 #ifdef MMB_DBUF
-    store(0, u0, w_ok, w, x, lr, lh);
+    store(0, u0, w_ok, w, x, x_ok, lr, lh);
     barrier();
 #endif
     for (uint u = u0; u < u1; u++) {
 #ifdef MMB_DBUF
         const uint b = (u - u0) & 1u;
         const bool more = u + 1 < u1;
-        if (more) {
-            if (w_ok) w = load_w(r0 + lr, u + 1, lh);
-            LOAD_X(u + 1);
-        }
+        // The last step loads its own unit again, unused: no branch.
+        const uint un = min(u + 1, u1 - 1);
+        w = load_w(wr, un, lh);
+        LOAD_X(un);
 #else
         const uint b = 0;
         barrier();  // everyone is done with the previous step
-        store(0, u, w_ok, w, x, lr, lh);
+        store(0, u, w_ok, w, x, x_ok, lr, lh);
         barrier();
-        if (u + 1 < u1) {
-            if (w_ok) w = load_w(r0 + lr, u + 1, lh);
-            LOAD_X(u + 1);
-        }
+        // The last step loads its own unit again, unused: no branch.
+        const uint un = min(u + 1, u1 - 1);
+        w = load_w(wr, un, lh);
+        LOAD_X(un);
 #endif
 #ifdef MMB_F16
         SV s[2][8];
@@ -238,7 +260,11 @@ void main() {
 #else
 #define S acc
 #endif
+#ifdef MMB_KLOOP
         for (uint k = 0; k < BK; k++) {
+#else
+        [[unroll]] for (uint k = 0; k < BK; k++) {
+#endif
             const SV w0 = Ws[b][k][tr], w1 = Ws[b][k][16 + tr], x0 = Xs[b][k][tt], x1 = Xs[b][k][16 + tt];
             S[0][0] += w0 * x0.x; S[0][1] += w0 * x0.y; S[0][2] += w0 * x0.z; S[0][3] += w0 * x0.w;
             S[0][4] += w0 * x1.x; S[0][5] += w0 * x1.y; S[0][6] += w0 * x1.z; S[0][7] += w0 * x1.w;
@@ -250,7 +276,7 @@ void main() {
             for (uint j = 0; j < 8; j++) acc[a][j] += vec4(s[a][j]);
 #endif
 #ifdef MMB_DBUF
-        if (more) store(b ^ 1u, u + 1, w_ok, w, x, lr, lh);
+        if (more) store(b ^ 1u, u + 1, w_ok, w, x, x_ok, lr, lh);
         barrier();  // the next step's values are in; everyone is done with this one's
 #endif
     }
