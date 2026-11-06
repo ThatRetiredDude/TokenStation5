@@ -80,6 +80,8 @@
 #include "mv16x3_glu_q4_k.spv.h"
 #include "mv16x4_glu_q4_k.spv.h"
 #include "mv16x5_glu_q4_k.spv.h"
+#include "mv16h_q4_k.spv.h"
+#include "mv16h_glu_q4_k.spv.h"
 #include "mv16n_glu_q4_k.spv.h"
 #include "mv16n_q4_k.spv.h"
 #include "mv16n_q6_k.spv.h"
@@ -415,6 +417,7 @@ private:
         if (const char *e = getenv("TS5_FAST_MATVEC")) fast_matvec_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV_ROWS")) mv_rows_ = std::min(8, std::max(1, atoi(e)));
         if (const char *e = getenv("TS5_MV_ROWS_MIN")) mv_rows_min_ = std::max(0, atoi(e));
+        if (const char *e = getenv("TS5_MV_HALVES")) mvh_rows_ = (uint32_t)std::min(8, std::max(0, atoi(e)));
         if (const char *e = getenv("TS5_MV_DIAG")) mv_diag_ = atoi(e) >= 1 && atoi(e) <= 5 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN")) attn_fast_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_SPLITS")) attn_splits_ = std::max(0, atoi(e));
@@ -759,6 +762,11 @@ private:
         MV(mv16x3_q4_k, 3) MV(mv16x4_q4_k, 3) MV(mv16x5_q4_k, 3)
         MV(mv16x3_glu_q4_k, 4) MV(mv16x4_glu_q4_k, 4) MV(mv16x5_glu_q4_k, 4)
 #undef MV
+        // x a half at a time (TS5_MV_HALVES=N: N rows a workgroup, up to 8).
+        if (mvh_rows_ && (!make_pipe("mv16h_q4_k", spv_mv16h_q4_k, sizeof(spv_mv16h_q4_k), 3, err, mvh_rows_) ||
+                          !make_pipe("mv16h_glu_q4_k", spv_mv16h_glu_q4_k, sizeof(spv_mv16h_glu_q4_k), 4, err,
+                                     mvh_rows_)))
+            return false;
         // The verify-batch mat-vecs once per batch size (their token loop is
         // compile-time), each twice like the one-token ones: mvt_rows_ rows
         // per workgroup and one.
@@ -1309,8 +1317,11 @@ private:
         const uint32_t dec_max = HD == 128 ? 8 : 4;
         uint32_t dec_split = 1;
         while (G_all / dec_split > dec_max && (G_all / dec_split) % 2 == 0) dec_split *= 2;
-        const bool dec = !pf && attn_dec_min_ && keys >= (uint32_t)attn_dec_min_ && (HD == 128 || wide) &&
-                         G_all / dec_split <= dec_max;
+        // From the first key for heads of 128 in 4 rows (attn_dec4: a KV
+        // head's 2 to 4 query heads), from 256 for the others.
+        const uint32_t dec_from = attn_dec_min_ >= 0 ? (uint32_t)attn_dec_min_
+                                  : HD == 128 && G_all / dec_split <= 4 ? 1u : 256u;
+        const bool dec = !pf && dec_from && keys >= dec_from && (HD == 128 || wide) && G_all / dec_split <= dec_max;
         const uint32_t hsplit = pf ? 1 : dec ? dec_split : head_split(l), G = G_all / hsplit;
         const uint32_t dec_rows = G <= 4 ? 4 : 8;
         const uint32_t tq = pf ? pf_rows / G : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / G);
@@ -1438,6 +1449,14 @@ private:
         // (mv16_q4_k.glsl).
         std::string n = name;
         if (mv_diag_ && (n == "mv16_q4_k" || n == "mv16_glu_q4_k")) n = "mv16x" + std::to_string(mv_diag_) + n.substr(4);
+        // TS5_MV_HALVES=N: the Q4_K kernels that hold half of x at a time,
+        // N rows a workgroup (the same sums bit for bit).
+        if (mvh_rows_ && !one && !mv_diag_ && (n == "mv16_q4_k" || n == "mv16_glu_q4_k")) {
+            const uint32_t hg = (rows + mvh_rows_ - 1) / mvh_rows_;
+            const uint32_t hx = std::min<uint32_t>(hg, 65535), hy = (hg + hx - 1) / hx;
+            dispatch("mv16h" + n.substr(4), bufs, pc, hx, hy, what);
+            return;
+        }
         dispatch(one ? n + ".1" : n, bufs, pc, mx, my, what);
     }
 
@@ -1691,6 +1710,8 @@ private:
     int mv_rows_min_ = 1024;
     // TS5_MV_DIAG: 0, or 1 to 5 for the Q4_K diagnostic builds (mat_vec).
     int mv_diag_ = 0;
+    // TS5_MV_HALVES: 0 (off), or the rows a workgroup of the mv16h_* builds.
+    uint32_t mvh_rows_ = 0;
     // Attention with attn (TS5_ATTN=0: the old kernel); TS5_ATTN_SPLITS=N
     // sets how many slices generation splits the keys into.
     bool attn_fast_ = true;
@@ -1700,8 +1721,16 @@ private:
     int attn_pf_min_ = 8;
     bool attn_pf128_ = true;
     // Generation over at least this many keys uses attn_dec (TS5_ATTN_DEC;
-    // 0: never).
-    int attn_dec_min_ = 256;
+    // 0: never). By default (-1) attn_dec4's heads of 128 from the first key
+    // and the rest from 256. On the PS5 (2026-11-06, Qwen3 8B Q4_K_M, 64 and
+    // 200 tokens of context) attn_dec4 from the first key generates 2.7-3.1%
+    // faster than attn below 256 keys, Qwen3 0.6B 8.9% (attention 33.7 ->
+    // 22.6 ms in 64 tokens), and chat with the 0.6B helper 6.4% (81.4 ->
+    // 86.6 tok/s); check -n 512 is unchanged. In October, with an older
+    // attn_dec, short contexts were even and Llama 3.2 3B 2% slower, which
+    // set 256; Coder 7B (attn_dec, 8 rows) and the wide heads keep it until
+    // they're measured again.
+    int attn_dec_min_ = -1;
     // Whether attn_dec loads each tile's keys at the tile's start (1) or
     // during the tile before (0), TS5_ATTN_DEC_PLAIN; by default (-1) the
     // 8-row kernel at the start and attn_dec4 the tile before, the faster of

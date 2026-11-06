@@ -360,8 +360,13 @@ the PS5 (8192 tokens: 4821 ms against 4350; prompts -2.2% at 4096, -4.7%
 at 16384), so the shared-memory reads are not what holds it back there;
 it was dropped.
 
-Generation over 256 keys or more (`TS5_ATTN_DEC` sets how many; 0: never),
-with heads of 128, uses `shaders/attn_dec.glsl`: up to 8
+Generation with heads of 128 uses `shaders/attn_dec.glsl` from the first
+key where a KV head has 2 to 4 query heads (attn_dec4), and from 256 keys
+otherwise (`TS5_ATTN_DEC` sets how many for all; 0: never). The first-key
+start is from the PS5 on 2026-11-06: below 256 keys attn_dec4 generates
+Qwen3 8B 2.7-3.1% faster than attn, Qwen3 0.6B 8.9%, and chat with the
+0.6B helper 6.4% (the helper's drafts and the verify batches get cheaper
+too), with the same check. attn_dec: up to 8
 rows per workgroup (`attn_dec`; `attn_dec4` for 4, where a KV head has 3 or
 4 query heads), its slice of the keys 128 at a time. Thread t scores key t
 against every row, reading the key's 256 bytes straight from the cache; the
@@ -388,7 +393,7 @@ console Gemma 4 12B spent 12 ms of a 35 ms token in attn at a 4k context.
 On the console, Coder 7B wrote 65 tok/s at 0.5k tokens of context and 23 at
 18k with attn, 47 at 18k with the first version of attn_dec (the queries and
 weights in shared memory, one value column per thread). Under 256 keys attn
-is as fast.
+was as fast then (October; the 4-row build has caught up since, see above).
 
 `TS5_PROFILE=1` writes a GPU timestamp after every dispatch; `ts5 bench`
 then prints the GPU's time per kernel (matmuls by weight) for the prompt and
