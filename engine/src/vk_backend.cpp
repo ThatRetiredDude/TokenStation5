@@ -407,6 +407,12 @@ private:
         // 14B (256 was 2% ahead of 128 only with the f32 kernel at 40).
         if (strstr(props_.deviceName, "RADV")) mmb_split_ = 128;
 #endif
+        // Slices from the compute units where the driver tells them: on the
+        // PS5 (40) prompts +6.1% on Qwen3 8B (766 -> 813, beating its best
+        // TS5_MMB_SPLIT, 48, by 2.8%) and +5.3% on Coder 7B (896 -> 943,
+        // level with its best, 64); 60 and 80 were slower, so one workgroup
+        // runs per compute unit.
+        mmb_wgs_ = ctx_->compute_units;
         if (const char *e = getenv("TS5_MMB_WGS"))
             mmb_wgs_ = !strcmp(e, "cu") ? ctx_->compute_units : (uint32_t)std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SLICE_COST")) mmb_slice_cost_ = atof(e);
@@ -444,8 +450,12 @@ private:
         // "qp" variant, since dropped) changed nothing (2026-11-05: every
         // model within 0.3% of q). The f32 kernel's quad variant ran 3%
         // slower than its plain one (Gemma 4), so f32 stays plain unless
-        // TS5_MMB_VAR says.
-        mmb_var_ = "q";
+        // TS5_MMB_VAR says. Since the loads overlap the sums (75b9fa2, and
+        // dq storing a step ahead so the compiler keeps its loads ahead of
+        // the sums too), dq is the f16 default: on the PS5 the old dq,
+        // whose loads still waited, was already ahead of q by 2.5% (Qwen3
+        // 8B, 765 -> 784) and 6.4% (Coder 7B, 896 -> 953).
+        mmb_var_ = "dq";
         if (const char *e = getenv("TS5_MMB_VAR")) {
             mmb_var_ = e;
             mmb_var32_ = e;
@@ -1611,11 +1621,13 @@ private:
     // TS5_MMB_SLICES=N: every matrix in N.
     uint32_t mmb_split_ = 256;
     int mmb_slices_ = 0;
-    // Slices from how many workgroups run at once (mmb_slices_for) with
-    // TS5_MMB_WGS=N, or =cu for the GPU's compute units;
-    // TS5_MMB_SLICE_COST sets a slice's cost. 0: mmb_split_'s rule.
+    // Slices from how many workgroups run at once (mmb_slices_for): the
+    // GPU's compute units by default, TS5_MMB_WGS=N to set it;
+    // TS5_MMB_SLICE_COST sets a slice's cost (0.05 fits the PS5's profiles
+    // of 1 to 8 slices on Qwen3 8B and Coder 7B within 2%). 0, or
+    // TS5_MMB_SPLIT set: mmb_split_'s rule.
     uint32_t mmb_wgs_ = 0;
-    double mmb_slice_cost_ = 0.03;
+    double mmb_slice_cost_ = 0.05;
     // Matrices of fewer blocks than mmb_min_ use mmb too where their split
     // makes that many workgroups (TS5_MMB_SMALL=0: the 64 x 64 kernel).
     bool mmb_small_ = true;

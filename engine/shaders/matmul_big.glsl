@@ -13,8 +13,8 @@
 // summed in packed f16 (two per instruction, twice the f32 rate), then added
 // to the f32 sums: an f16 sum is never more than 32 products long.
 // With MMB_DBUF, shared memory holds two steps: a thread stores the next
-// step's values after its share of the current one, so each step takes one
-// barrier instead of two and the stores of one wave overlap another's sums.
+// step's values before its share of the current one's sums, so each step
+// takes one barrier instead of two, and loads two steps ahead.
 // With MMB_XQ, a thread loads 4 values of each of its quad's 4 tokens
 // (instead of 16 of one token) and stores them as 4 vectors, not 16 scalars.
 // Every load is unconditional: rows and tokens past the matrix's read its
@@ -253,14 +253,21 @@ void main() {
 
 #ifdef MMB_DBUF
     store(0, u0, w_ok, w, x, x_ok, lr, lh);
+    w = load_w(wr, min(u0 + 1, u1 - 1), lh);
+    LOAD_X(min(u0 + 1, u1 - 1));
     barrier();
 #endif
     for (uint u = u0; u < u1; u++) {
 #ifdef MMB_DBUF
+        // Step u + 1's values, loaded during the last step's sums, go to
+        // the other buffer, which everyone finished reading before the last
+        // barrier; then step u + 2's loads go out, to arrive during this
+        // step's sums. (Stored after the sums, as before, the compiler moved
+        // the loads down to the store and waited for them there.) Past the
+        // end both repeat the last unit, unused: no branch.
         const uint b = (u - u0) & 1u;
-        const bool more = u + 1 < u1;
-        // The last step loads its own unit again, unused: no branch.
-        const uint un = min(u + 1, u1 - 1);
+        store(b ^ 1u, min(u + 1, u1 - 1), w_ok, w, x, x_ok, lr, lh);
+        const uint un = min(u + 2, u1 - 1);
         w = load_w(wr, un, lh);
         LOAD_X(un);
 #else
@@ -293,7 +300,6 @@ void main() {
             for (uint j = 0; j < 8; j++) acc[a][j] += vec4(s[a][j]);
 #endif
 #ifdef MMB_DBUF
-        if (more) store(b ^ 1u, u + 1, w_ok, w, x, x_ok, lr, lh);
         barrier();  // the next step's values are in; everyone is done with this one's
 #endif
     }

@@ -143,7 +143,19 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   more, for about 256 workgroups, each writing its partial sums for
   `mmb_reduce` to add up (`TS5_MMB_SPLIT` sets the 256, 128 under RADV on
   Linux, 0 for never;
-  `TS5_MMB_SLICES=N` splits every matrix in N). attn_k and attn_v (8 blocks
+  `TS5_MMB_SLICES=N` splits every matrix in N). Where the driver tells the
+  GPU's compute units (VK_AMD_shader_core_properties), each matrix's slices
+  come from them instead: the kernel's 168 registers a thread leave room
+  for one workgroup per compute unit, so a matrix of B blocks in S slices
+  takes ceil(B S / CUs) rounds of 1/S of a block's work, and each slice
+  costs about 5% of a round per block in partial sums written and added
+  up; the fewest slices within 2% of the least cost (`TS5_MMB_WGS=N` sets
+  the count, `TS5_MMB_SLICE_COST` the 5%). The best fixed split differed
+  per model on the PS5 (48 for Qwen3 8B, 64 for Coder 7B, where 48 cost
+  5%); from the 40 compute units, prompts were 6.1% (Qwen3 8B, 766 -> 813
+  tok/s) and 5.3% (Coder 7B, 896 -> 943) faster than the default 128, as
+  fast as or faster than each model's best split. Profiles of 1 to 8
+  slices fit the cost model within 2%. attn_k and attn_v (8 blocks
   for 256 tokens of Qwen 3 8B, 4 of Qwen 2.5 7B) take mmb this way too, in
   up to 16 slices (`TS5_MMB_SMALL=0`: the 64 x 64 kernel); k, v and q's
   partial sums fit in `split_` together (12M floats), so their splits add
@@ -168,7 +180,7 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   Llama 3.x's large activations put Llama 3.2 3B over the bar at 512
   tokens (0.78%, against 0.04% in f32), so Llama stays in f32. Moving the
   f16 sums into f32 every 8 products instead of 32 didn't help and cost as
-  much as f32. The kernel's x loads: by default (`TS5_MMB_VAR=q`) each
+  much as f32. The kernel's x loads: with `TS5_MMB_VAR=q` each
   thread loads 4 values of each of its quad's 4 tokens and stores them to
   shared memory as 4 vectors instead of 16 scalars, which on the PS5 made
   the f16 kernel 20-26% faster on the Qwen family (Qwen3 14B 342 -> 431
@@ -176,9 +188,14 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   (375 -> 402), as much at 4096 tokens as at 512; the plain loads
   (`TS5_MMB_VAR=`) stay for the f32 kernel, where the quad loads ran 3%
   slower. `d` keeps two steps' tiles in shared memory, so a step takes one
-  barrier instead of two and a wave's stores of the next step overlap the
-  others' sums (f16 only: the f32 tiles would fill the 64 KiB): worth half
-  of q alone, nothing on top of it (`dq`). Padding the x tile's rows so the
+  barrier instead of two (f16 only: the f32 tiles would fill the 64 KiB): a
+  thread stores the next step's values, loaded during the last step's sums,
+  then sends the loads for the step after it and does this step's sums.
+  `dq` (both) is the f16 default. (It used to store the next step after
+  the sums; the compiler then moved its loads down to that store and
+  waited for them there, and dq was worth no more than q until the loads
+  of every kernel overlapped the sums; even so it beat q by 2.5% on Qwen3
+  8B and 6.4% on Coder 7B.) Padding the x tile's rows so the
   quad stores spread over four banks (a `qp` variant, since dropped) made
   no difference on the PS5 (every model within 0.3% of q at 512 and 4096
   tokens): those stores were never the pace. Every variant sums in the same
