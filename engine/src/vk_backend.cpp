@@ -440,10 +440,14 @@ private:
         // -> 376, Llama 3.1 8B 557 -> 774) and the Qwen-family models keep
         // within the GPU check's bar with them (0.16-0.26% of the largest
         // logit at 128 tokens), so they're the default for qwen2 and qwen3.
-        // Gemma 3 and 4 fail the check (0.8-0.9%) but pass with f16
-        // everywhere but gate and up, whose inputs carry its large
-        // activations (the PS5: Gemma 4 12B prompts +7% with the rest in
-        // f16, 0.9% of the largest logit with gate and up in f16 too).
+        // Gemma 3 and 4 are f32: they fail the check at 512 tokens with f16
+        // anywhere (the PS5: Gemma 3 4B 1.8% of the largest logit and 12B
+        // 2.4% with only gate and up in f32, against 0.35% all in f32). At
+        // 128 tokens (124 in one batch) every matrix of theirs but gate and
+        // up is under mmb's 48 blocks and takes the f32 64 x 64 kernel, so
+        // the check there never saw the f16 sums; its 0.2% passes with
+        // gate and up in f32 were the f32 kernels'. TS5_MMB_F16=1 puts them
+        // on f16, gate and up still in f32 unless TS5_MMB_F16_SKIP says.
         // Llama, since 82c2ccc's kernels (the PS5, 512 tokens, f32 0.01-0.06%):
         // 3.1 8B 0.27%, 3.2 3B 0.34% in f16 throughout, and leaving ffn_down
         // in f32 changed neither; the 3.2 1B went over at 0.51%, 0.33% with
@@ -451,7 +455,7 @@ private:
         // (n_embd 2048 and less) keep those two in f32. TS5_MMB_F16=0|1 and
         // TS5_MMB_F16_SKIP decide.
         const bool gemma = hp_.arch == "gemma3" || hp_.arch == "gemma4";
-        mmb_f16_ = ctx_->float16 && (hp_.arch == "qwen2" || hp_.arch == "qwen3" || hp_.arch == "llama" || gemma);
+        mmb_f16_ = ctx_->float16 && (hp_.arch == "qwen2" || hp_.arch == "qwen3" || hp_.arch == "llama");
         if (gemma) mmb_f16_skip_ = ",ffn_gate,ffn_up,";
         if (hp_.arch == "llama" && hp_.n_embd <= 2048) mmb_f16_skip_ = ",ffn_down,attn_output,";
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;

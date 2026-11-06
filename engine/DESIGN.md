@@ -164,8 +164,8 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   for 256 tokens of Qwen 3 8B, 4 of Qwen 2.5 7B) take mmb this way too, in
   up to 16 slices (`TS5_MMB_SMALL=0`: the 64 x 64 kernel); k, v and q's
   partial sums fit in `split_` together (12M floats), so their splits add
-  no barriers. mmb sums in f32, or in f16 for the qwen2, qwen3, gemma3 and
-  gemma4 architectures (the default there; `TS5_MMB_F16=0|1` decides for
+  no barriers. mmb sums in f32, or in f16 for the qwen2, qwen3 and llama
+  architectures (the default there; `TS5_MMB_F16=0|1` decides for
   any model): where the device has
   f16 arithmetic (`mmb16_*`, the same shader with `MMB_F16`), shared memory
   holds f16 and each step's 32 products are summed in packed f16, two per
@@ -175,13 +175,19 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   14B 302 -> 342, Qwen 2.5 Coder 7B 605 -> 775, DeepSeek R1 14B 305 -> 376
   at pp512, as much at pp4096), and the Qwen-family models stay within the
   GPU check's bar with it (0.16-0.26% of the largest logit at 128 tokens,
-  one top token in 128 moved). Gemma 3 and 4 fail the check with it (0.8-0.9%),
-  and on the PS5 every bit of that comes from gate and up, whose inputs
-  carry Gemma's large activations (Gemma 4 12B: 0.92% with everything in
-  f16, 0.20% with gate and up back in f32, 0.16% all in f32), so Gemma runs
-  f16 with gate and up on the f32 kernel (`TS5_MMB_F16_SKIP=ffn_gate,ffn_up`
-  is its default; the variable names any weight roles to keep in f32, to
-  find which of a model's matmuls put it over the bar), +7% on its prompts.
+  one top token in 128 moved). A check of 128 tokens (124 in one batch)
+  proves less than it seems, though: under 128 tokens a matrix of fewer
+  than 48 blocks (attn_q/k/v/output and ffn_down of a 4096-wide model)
+  takes the f32 64 x 64 kernel, so only the wide matrices ran f16 there;
+  check prompt kernels at 512 tokens. Gemma 3 and 4 fail the check with
+  f16 (0.8-0.9% at 128 tokens, from gate and up, whose inputs carry
+  Gemma's large activations), and with gate and up in f32 they passed at
+  128 (0.20%) only because nothing else was on f16 there: at 512 tokens
+  Gemma 3 4B is at 1.8% and 12B at 2.4% with only gate and up in f32,
+  0.35% all in f32. So Gemma stays f32 (`TS5_MMB_F16=1` puts it on f16
+  with gate and up in f32 by default; `TS5_MMB_F16_SKIP` names any weight
+  roles to keep in f32, to find which of a model's matmuls put it over
+  the bar).
   Llama 3.x's large activations put Llama 3.2 3B over the bar at 512
   tokens (0.78%, against 0.04% in f32) with the kernels before 82c2ccc;
   with them (the PS5, 512 tokens) Llama 3.1 8B is at 0.27% and 3.2 3B at
