@@ -145,12 +145,15 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   Linux, 0 for never;
   `TS5_MMB_SLICES=N` splits every matrix in N). Where the driver tells the
   GPU's compute units (VK_AMD_shader_core_properties), each matrix's slices
-  come from them instead: the kernel's 168 registers a thread leave room
-  for one workgroup per compute unit, so a matrix of B blocks in S slices
-  takes ceil(B S / CUs) rounds of 1/S of a block's work, and each slice
+  come from them instead: the driver tells each prompt kernel's waves a
+  SIMD holds (VK_KHR_pipeline_executable_properties; RADV's "Subgroups per
+  SIMD", from its registers and shared memory), so a compute unit holds
+  floor(waves x SIMDs / 8) of its workgroups (dq's 168 registers a thread:
+  6 waves, one workgroup; 128 or fewer: two), W in all, and a matrix of B
+  blocks in S slices takes ceil(B S / W) rounds of 1/S of a block's work, and each slice
   costs about 5% of a round per block in partial sums written and added
   up; the fewest slices within 2% of the least cost (`TS5_MMB_WGS=N` sets
-  the count, `TS5_MMB_SLICE_COST` the 5%). The best fixed split differed
+  W, `cu` one per compute unit, `TS5_MMB_SLICE_COST` the 5%). The best fixed split differed
   per model on the PS5 (48 for Qwen3 8B, 64 for Coder 7B, where 48 cost
   5%); from the 40 compute units, prompts were 6.1% (Qwen3 8B, 766 -> 813
   tok/s) and 5.3% (Coder 7B, 896 -> 943) faster than the default 128, as
@@ -178,7 +181,12 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   is its default; the variable names any weight roles to keep in f32, to
   find which of a model's matmuls put it over the bar), +7% on its prompts.
   Llama 3.x's large activations put Llama 3.2 3B over the bar at 512
-  tokens (0.78%, against 0.04% in f32), so Llama stays in f32. Moving the
+  tokens (0.78%, against 0.04% in f32) with the kernels before 82c2ccc;
+  with them (the PS5, 512 tokens) Llama 3.1 8B is at 0.27% and 3.2 3B at
+  0.34%, f32 at ffn_down changing neither, and the 3.2 1B at 0.51%, 0.33%
+  with ffn_down and attn_output in f32. So llama runs f16 (3.1 8B prompts
+  557 -> 774 tok/s), the narrow ones (n_embd 2048 or less) with those two
+  in f32. Moving the
   f16 sums into f32 every 8 products instead of 32 didn't help and cost as
   much as f32. The kernel's x loads: with `TS5_MMB_VAR=q` each
   thread loads 4 values of each of its quad's 4 tokens and stores them to
@@ -195,7 +203,17 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   the sums; the compiler then moved its loads down to that store and
   waited for them there, and dq was worth no more than q until the loads
   of every kernel overlapped the sums; even so it beat q by 2.5% on Qwen3
-  8B and 6.4% on Coder 7B.) Padding the x tile's rows so the
+  8B and 6.4% on Coder 7B.) That old form is `dql` (`MMB_LATE`): since
+  its loads aren't live during the sums it needs 128 registers a thread
+  (Q4_K, Q8_0; Q6_K 152) against dq's 168, so two workgroups share a
+  compute unit, and on the PS5 it reads Coder 7B's prompts 3.5% faster
+  (986 against 953 tok/s; gate+up 264 against 282 ms) and Qwen3 8B Q8_0's
+  3.6% (893 against 861), while dq is 12% faster on Qwen3 8B Q6_K (where
+  dql still fits one workgroup) and 1% on its Q4_K_M. The `n` variants
+  (`MMB_N64`: `n`, `dn`, `dln`) take blocks of 128 rows x 64 tokens, a
+  thread summing 8 rows x 4 tokens: 80-100 registers (Q6_K 128 for dn),
+  two or more workgroups a compute unit, at 1.5x the shared-memory reads a
+  product; x comes in 2-value loads by quads of tokens. Padding the x tile's rows so the
   quad stores spread over four banks (a `qp` variant, since dropped) made
   no difference on the PS5 (every model within 0.3% of q at 512 and 4096
   tokens): those stores were never the pace. Every variant sums in the same

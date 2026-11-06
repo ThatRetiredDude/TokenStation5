@@ -25,6 +25,11 @@ struct VkContext {
     uint32_t subgroup_size = 0;  // compute shaders' (RADV: 64; lavapipe: 4 to 16)
     // The GPU's compute units (VK_AMD_shader_core_properties; 0: not told).
     uint32_t compute_units = 0;
+    uint32_t simds_per_cu = 0;  // and the SIMDs in each
+    // VK_KHR_pipeline_executable_properties is on: pipelines made with
+    // VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR tell their registers and
+    // occupancy.
+    bool pipeline_stats = false;
     // VK_KHR_display and VK_KHR_swapchain are on (asked for, and offered).
     bool display = false;
     // Arithmetic on f16 in shaders (shaderFloat16), on where the device has it.

@@ -249,7 +249,19 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
         cp.pNext = &core;
         vkGetPhysicalDeviceProperties2(c->physical, &cp);
         c->compute_units = core.shaderEngineCount * core.shaderArraysPerEngineCount * core.computeUnitsPerShaderArray;
+        c->simds_per_cu = core.simdPerComputeUnit;
         ts5::log_line("ts5: %u compute units", c->compute_units);
+    }
+    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pe{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
+    if (has_extension(dev_have, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 pf{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        pf.pNext = &pe;
+        vkGetPhysicalDeviceFeatures2(c->physical, &pf);
+        if (pe.pipelineExecutableInfo) {
+            dev_exts.push_back(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+            c->pipeline_stats = true;
+        }
     }
 #ifndef TS5_PS5
     if (has_extension(dev_have, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
@@ -269,6 +281,10 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
     e12.shaderFloat16 = f12.shaderFloat16;
     c->float16 = f12.shaderFloat16 == VK_TRUE;
     e11.pNext = &e12;
+    if (c->pipeline_stats) {
+        pe.pNext = e12.pNext;
+        e12.pNext = &pe;
+    }
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qci.queueFamilyIndex = c->queue_family;
