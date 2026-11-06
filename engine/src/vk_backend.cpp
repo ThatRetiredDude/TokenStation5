@@ -452,10 +452,14 @@ private:
         // 3.1 8B 0.27%, 3.2 3B 0.34% in f16 throughout, and leaving ffn_down
         // in f32 changed neither; the 3.2 1B went over at 0.51%, 0.33% with
         // ffn_down and attn_output in f32. So llama is f16, and narrow ones
-        // (n_embd 2048 and less) keep those two in f32. TS5_MMB_F16=0|1 and
-        // TS5_MMB_F16_SKIP decide.
+        // (n_embd 2048 and less) keep those two in f32. Qwen at 512 tokens
+        // (3b28668): Qwen3 8B 0.21-0.25% (Q4_K_M, Q6_K, Q8_0), Coder 7B
+        // 0.19%, Coder 0.5B 0.13%, but Qwen3 0.6B (n_embd 1024) 1.1% (all
+        // f32: 0.069%), so a Qwen3 that narrow stays in f32. TS5_MMB_F16=0|1
+        // and TS5_MMB_F16_SKIP decide.
         const bool gemma = hp_.arch == "gemma3" || hp_.arch == "gemma4";
         mmb_f16_ = ctx_->float16 && (hp_.arch == "qwen2" || hp_.arch == "qwen3" || hp_.arch == "llama");
+        if (hp_.arch == "qwen3" && hp_.n_embd <= 1024) mmb_f16_ = false;
         if (gemma) mmb_f16_skip_ = ",ffn_gate,ffn_up,";
         if (hp_.arch == "llama" && hp_.n_embd <= 2048) mmb_f16_skip_ = ",ffn_down,attn_output,";
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;

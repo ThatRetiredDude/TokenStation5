@@ -113,12 +113,13 @@ TS5_MMB_MIN=1 TS5_MMB_VAR=q TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5
 # A wider model with the minimum at 12 blocks: attn_k, attn_v, ffn_gate and
 # ffn_up (4 or 8 blocks) take mmb only by splitting their columns in 4
 # slices, attn_q and ffn_down have the blocks; the last 44 tokens take the
-# 64 x 64 kernel for the small ones.
+# 64 x 64 kernel for the small ones. (A Qwen3 this narrow is f32 by default,
+# as Qwen3 0.6B: TS5_MMB_F16=1 keeps these on the f16 kernel.)
 wide="$work/qwen3-kmix-wide.gguf"
 [ -s "$wide" ] || python3 "$here/make_test_model.py" --arch qwen3 --quant Q4_K_M --vocab "$work/ggml-vocab-qwen2.gguf" \
     --embd 1024 --heads 8 --kv-heads 2 "$wide" > /dev/null
-TS5_MMB_MIN=12 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "$wide"
-TS5_MMB_MIN=12 TS5_MMB_SMALL=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "$wide"
+TS5_MMB_F16=1 TS5_MMB_MIN=12 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "$wide"
+TS5_MMB_F16=1 TS5_MMB_MIN=12 TS5_MMB_SMALL=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "$wide"
 TS5_MMB=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${kmix[@]}"
 # One token per call: a row per workgroup (these matrices are small), 8 rows
 # (TS5_MV_ROWS_MIN=1), 3 (a partial last group), and the older mat-vecs.
@@ -382,6 +383,12 @@ rm -f "$work"/qwen3-Q4_0.gguf*.ts5ref
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
 TS5_KV=q8 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
 TS5_KV=q8 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
+# On a text's tokens (-p): answers saved apart from the test tokens', then used again.
+txt=$(head -c 3000 "$engine/DESIGN.md")
+"$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "$txt" 2> /dev/null | grep ", over the bar at 0, .*, cpu [0-9]* ms: PASS$"
+"$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "$txt" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
+ls "$work"/qwen3-Q4_0.gguf.t*.ts5ref > /dev/null
+! "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "hi" 2>&1 | grep -q PASS
 echo "== -c auto with TS5_KV=q8: an f16 cache, as the test model's whole context fits in f16"
 TS5_KV=q8 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "KV cache [0-9.]* GiB (f16, "
 echo "== tool calls: prompts against the models' own templates, the parser, web_search over HTTP(S)"

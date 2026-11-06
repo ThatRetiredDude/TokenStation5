@@ -203,7 +203,21 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   0.34%, f32 at ffn_down changing neither, and the 3.2 1B at 0.51%, 0.33%
   with ffn_down and attn_output in f32. So llama runs f16 (3.1 8B prompts
   557 -> 774 tok/s), the narrow ones (n_embd 2048 or less) with those two
-  in f32. Moving the
+  in f32. Qwen at 512 tokens: Qwen3 8B 0.21-0.25% (Q4_K_M, Q6_K, Q8_0),
+  Coder 7B 0.19%, Coder 0.5B 0.13% on f16, but Qwen3 0.6B (n_embd 1024)
+  1.1% against 0.069% in f32, so a Qwen3 that narrow stays f32.
+  Gemma 4 12B is past the bar at 512 tokens however its prompts run: 10%
+  of the largest logit with the defaults, 2.3% with every matmul and
+  attention on the plain f32 kernels, the worst position always the same
+  (305; 256 tokens pass at 0.19%). Its own GPU paths disagree there by as
+  much (`ts5 logits`, default against `TS5_MMB=0` and `TS5_ATTN=0`: 1% to
+  7%), and on English text by more (11% to 65% at one position, 507-512
+  top tokens of 512 the same). So far that points at the model (unscaled
+  attention on normalized q and k, one K/V head of 512 on the full layers)
+  turning the last bits of f32 into large logit changes at a few
+  positions rather than at one kernel. `ts5 check -p TEXT` runs the check on a
+  text's tokens (its answers saved apart, MODEL.gguf.t<hash>.ts5ref), and
+  the check line counts the positions over the bar. Moving the
   f16 sums into f32 every 8 products instead of 32 didn't help and cost as
   much as f32. The kernel's x loads: with `TS5_MMB_VAR=q` each
   thread loads 4 values of each of its quad's 4 tokens and stores them to

@@ -5,7 +5,8 @@
 //   ts5 run      -m model.gguf -p "prompt" [--chat] [-n 256] [--temp 0.7]
 //   ts5 bench    -m model.gguf [--pp 512] [--tg 128]
 //   ts5 tokenize -m model.gguf -p "text"
-//   ts5 check    -m model.gguf [-n 16]   GPU logits against the CPU reference
+//   ts5 check    -m model.gguf [-n 16] [-p TEXT]   GPU logits against the CPU reference
+//                                        (-p: on TEXT's first n tokens)
 //   ts5 logits   -m model.gguf -o out.bin [--step] tok0 tok1 ...   (all positions, for tests)
 //   ts5 prompt   -m model.gguf [--chat-template FILE] < request.json
 //                                        the prompt a chat request becomes (for tests)
@@ -79,7 +80,8 @@ int usage() {
             "  serve: --host ADDR --port N\n"
             "  run:   -p PROMPT [--chat] [-n N] [--temp T]\n"
             "  bench: --pp N --tg N\n"
-            "  check: [-n TOKENS] [--fresh]  (--fresh: run the CPU even if its answers are saved)\n"
+            "  check: [-n TOKENS] [-p TEXT] [--fresh]  (-p: on TEXT's tokens; --fresh: run the CPU even if\n"
+            "         its answers are saved)\n"
             "  logits: -o FILE TOKENS...\n");
     return 2;
 }
@@ -368,7 +370,9 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     if (a.cmd == "check") {
         if (a.backend == "cpu") return usage();
         CheckResult r;
-        if (!run_check(model, *be, a.n_ctx, r, err, nullptr, a.fresh)) {
+        // -p: the check runs on that text's tokens in place of the test tokens.
+        const std::vector<int32_t> text = a.prompt.empty() ? std::vector<int32_t>() : tok.encode(a.prompt, true);
+        if (!run_check(model, *be, a.n_ctx, r, err, nullptr, a.fresh, text)) {
             fprintf(stderr, "ts5: %s\n", err.c_str());
             return 1;
         }

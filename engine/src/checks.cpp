@@ -52,9 +52,23 @@ bool model_id(const std::string &path, uint64_t &size, uint64_t &hash) {
 // 0 is f16, which the files saved before this field all are.
 uint32_t kv_code(KvType t) { return t == KvType::F16 ? 0 : t == KvType::Q8 ? 1 : 2; }
 
-// One file per cache type, so trying one doesn't throw away the other's.
-std::string ref_path(const std::string &model, KvType kv) {
-    return model + (kv == KvType::F16 ? "" : std::string(".") + kv_type_name(kv)) + ".ts5ref";
+// One file per cache type, so trying one doesn't throw away the other's, and
+// per text (tag: its tokens' hash) for checks of a text's tokens.
+std::string ref_path(const std::string &model, KvType kv, const std::string &tag) {
+    return model + (kv == KvType::F16 ? "" : std::string(".") + kv_type_name(kv)) + (tag.empty() ? "" : "." + tag) +
+           ".ts5ref";
+}
+
+// The saved answers' tag for a text's tokens: their FNV-1a hash in hex ("" for
+// the test tokens).
+std::string tokens_tag(const std::vector<int32_t> &t) {
+    if (t.empty()) return "";
+    uint64_t h = 1469598103934665603ull;
+    for (int32_t v : t)
+        for (int i = 0; i < 4; i++) h = (h ^ ((uint32_t)v >> (8 * i) & 0xff)) * 1099511628211ull;
+    char b[24];
+    snprintf(b, sizeof b, "t%016llx", (unsigned long long)h);
+    return b;
 }
 
 RefHeader ref_header(const std::string &model, int n, int n_vocab, KvType kv) {
@@ -70,8 +84,9 @@ RefHeader ref_header(const std::string &model, int n, int n_vocab, KvType kv) {
 
 // The first n positions' logits from a saved file of the same model and at
 // least n positions.
-bool load_ref(const std::string &model, int n, int n_vocab, KvType kv, std::vector<float> &out) {
-    FILE *f = fopen(ref_path(model, kv).c_str(), "rb");
+bool load_ref(const std::string &model, int n, int n_vocab, KvType kv, const std::string &tag,
+              std::vector<float> &out) {
+    FILE *f = fopen(ref_path(model, kv, tag).c_str(), "rb");
     if (!f) return false;
     RefHeader h{}, want = ref_header(model, n, n_vocab, kv);
     bool ok = fread(&h, sizeof h, 1, f) == 1 && memcmp(h.magic, want.magic, 8) == 0 && h.version == want.version &&
@@ -83,8 +98,9 @@ bool load_ref(const std::string &model, int n, int n_vocab, KvType kv, std::vect
 }
 
 // Keeps the saved file if it already has more positions for the same cache type.
-void save_ref(const std::string &model, int n, int n_vocab, KvType kv, const std::vector<float> &ref) {
-    const std::string path = ref_path(model, kv), part = path + ".part";
+void save_ref(const std::string &model, int n, int n_vocab, KvType kv, const std::string &tag,
+              const std::vector<float> &ref) {
+    const std::string path = ref_path(model, kv, tag), part = path + ".part";
     if (FILE *f = fopen(path.c_str(), "rb")) {
         RefHeader h{};
         const bool more =
@@ -106,12 +122,17 @@ void save_ref(const std::string &model, int n, int n_vocab, KvType kv, const std
 }  // namespace
 
 bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string &err, const Progress &progress,
-               bool fresh) {
+               bool fresh, const std::vector<int32_t> &text) {
     const int nv = m.hp.n_vocab;
     r = CheckResult{};
     r.n = n;
     r.backend = gpu.name();
-    const std::vector<int32_t> toks = test_tokens(n, nv);
+    if (!text.empty() && (int)text.size() < n) {
+        err = "the text has " + std::to_string(text.size()) + " tokens, fewer than the check's " + std::to_string(n);
+        return false;
+    }
+    const std::vector<int32_t> toks = text.empty() ? test_tokens(n, nv) : std::vector<int32_t>(text.begin(), text.begin() + n);
+    const std::string tag = tokens_tag(text.empty() ? std::vector<int32_t>() : toks);
     std::vector<float> got((size_t)n * nv), ref(got.size());
     if (progress) progress("running on the GPU");
     // The prompt's way for most positions, then generation's for the last few:
@@ -123,7 +144,7 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
         if (!gpu.forward(&toks[i], 1, i, got.data() + (size_t)i * nv, false, err)) return false;
     r.gpu_ms = now_ms() - t;
     // Saved answers are the file's own window's: a test window needs its own.
-    r.saved = !fresh && !m.hp.swa_test && load_ref(m.gguf.path, n, nv, gpu.kv_type(), ref);
+    r.saved = !fresh && !m.hp.swa_test && load_ref(m.gguf.path, n, nv, gpu.kv_type(), tag, ref);
     bool ok = true;
     if (!r.saved) {
         if (progress) progress("loading the CPU reference");
@@ -138,15 +159,17 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
         t = now_ms();
         ok = cpu->forward(toks.data(), n, 0, ref.data(), true, err);
         r.cpu_ms = now_ms() - t;
-        if (ok && !m.hp.swa_test) save_ref(m.gguf.path, n, nv, gpu.kv_type(), ref);
+        if (ok && !m.hp.swa_test) save_ref(m.gguf.path, n, nv, gpu.kv_type(), tag, ref);
     }
     if (!ok) return false;
     double max_ref = 0;
+    std::vector<double> pos_diff(n, 0.0);
     for (int i = 0; i < n; i++) {
         const float *g = got.data() + (size_t)i * nv, *f = ref.data() + (size_t)i * nv;
         for (int j = 0; j < nv; j++) {
             const double d = std::fabs(g[j] - f[j]);
             if (d > r.max_diff) r.max_diff = d, r.worst = i;
+            pos_diff[i] = std::max(pos_diff[i], d);
             max_ref = std::max(max_ref, (double)std::fabs(f[j]));
         }
         r.same_top += std::max_element(g, g + nv) - g == std::max_element(f, f + nv) - f;
@@ -156,7 +179,9 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     // inputs differ in the last bits near a rounding boundary, a step of 1/127
     // of the block's largest value, so it gets a wider margin. A wrong kernel
     // is off by far more than either.
-    r.pass = std::isfinite(r.rel) && r.rel < (gpu.kv_type() == KvType::Q8 ? 2e-2 : 5e-3);
+    const double bar = gpu.kv_type() == KvType::Q8 ? 2e-2 : 5e-3;
+    for (int i = 0; i < n; i++) r.over += pos_diff[i] > bar * max_ref;
+    r.pass = std::isfinite(r.rel) && r.rel < bar;
     return true;
 }
 
@@ -166,8 +191,8 @@ std::string check_line(const std::string &model, const CheckResult &r) {
     const std::string cpu = r.saved ? "cpu answers saved earlier" : b;
     snprintf(b, sizeof b,
              "ts5 check: %s, %d tokens: max |diff| %.3g (%.2g of the largest logit) at token %d, same top token at "
-             "%d/%d, %s %.0f ms, %s: %s",
-             model.c_str(), r.n, r.max_diff, r.rel, r.worst, r.same_top, r.n, r.backend.c_str(), r.gpu_ms,
+             "%d/%d, over the bar at %d, %s %.0f ms, %s: %s",
+             model.c_str(), r.n, r.max_diff, r.rel, r.worst, r.same_top, r.n, r.over, r.backend.c_str(), r.gpu_ms,
              cpu.c_str(), r.pass ? "PASS" : "FAIL");
     return b;
 }
