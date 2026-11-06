@@ -61,6 +61,15 @@ back):
 1. `rmsnorm` (attention norm)
 2. `matmul` Q, K, V (one per projection)
 3. `qkv_post`: bias (Qwen2), per-head RMSNorm (Qwen3), RoPE (normal or NeoX), write K and V to the cache (f16 or 8-bit, below)
+   RoPE's angles are exact: each pair's turn per position (base, scaling and
+   `rope_freqs` in it) is a 64-bit binary fraction of a revolution made on
+   the CPU in double precision (`Model::rope_turn`), the shader takes the
+   top 32 bits of position x turn (`umulExtended`) as a signed fraction of a
+   turn, and cos and sin see at most half a turn. Computed in f32, position
+   x frequency and then RADV's cos and sin (which scale the angle by 1/2pi
+   and lose its fraction) were off by up to 1e-4 radians at 512 tokens, the
+   error growing with the position; the CPU reference does the same math,
+   in double.
 4. `attn`: attention over the cache (below), plus `attn_merge` when it splits the keys
 5. `matmul` output projection, accumulating into the residual
 6. `rmsnorm` (FFN norm), `matmul` gate and up, `swiglu`, `matmul` down accumulating into the residual. For one token of Q4_K, gate, up and swiglu are one kernel (`mv16_glu_q4_k`; the same kernels can apply Gemma's gelu, `pc.accumulate` picking the activation, with `TS5_GLU_GELU=1`: it is more exact but 1% slower on the PS5, so Gemma takes the two-pass path by default)

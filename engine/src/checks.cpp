@@ -28,7 +28,7 @@ std::vector<int32_t> test_tokens(int n, int n_vocab) {
 // The reference's logits for a model's test tokens, saved next to the model
 // so a check runs the CPU once per model. Bump kRefVersion when the
 // reference's math or test_tokens change, so older files are not used.
-constexpr uint32_t kRefVersion = 1;
+constexpr uint32_t kRefVersion = 2;  // 2: exact RoPE angles (Model::rope_turn)
 struct RefHeader {
     char magic[8];
     uint32_t version, n, n_vocab;

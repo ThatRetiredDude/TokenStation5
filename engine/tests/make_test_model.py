@@ -138,6 +138,12 @@ def main():
                     help="gemma4: the full-attention layers' head size (every 3rd layer; default twice the others'), "
                          "on one K/V head without a V projection, as the 12B has it")
     ap.add_argument("--window", type=int, default=8, help="gemma4: the sliding layers' window")
+    ap.add_argument("--rope-base", type=float, default=0, help="gemma4: the full layers' RoPE base (0: the default)")
+    ap.add_argument("--prop-rope", type=float, default=0,
+                    help="gemma4: proportional RoPE, rotating this fraction of the full layers' pairs (rope_freqs "
+                         "1, the rest 1e30) in place of random rope_freqs")
+    ap.add_argument("--qk-gain", type=float, default=1.0,
+                    help="gemma4: scale on the q and k norms' weights, for sharp attention as trained models have")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--pad-vocab", type=int, default=0,
                     help="extra embedding and output rows past the token list, as released models pad")
@@ -196,6 +202,8 @@ def main():
         w.add_key_value("gemma4.rope.dimension_count_swa", hd, GGUFValueType.UINT32)
         w.add_key_value("gemma4.rope.freq_base_swa", 10000.0, GGUFValueType.FLOAT32)
         w.add_sliding_window(a.window)
+        if a.rope_base:
+            w.add_rope_freq_base(a.rope_base)
         w.add_final_logit_softcapping(30.0)
         w.add_key_value("gemma4.attention.shared_kv_layers", 0, GGUFValueType.UINT32)
         w.add_key_value("gemma4.embedding_length_per_layer_input", 0, GGUFValueType.UINT32)
@@ -234,7 +242,12 @@ def main():
 
     t("token_embd.weight", n_vocab + a.pad_tokens + a.pad_vocab, a.embd, scale=1.0)
     if g4:
-        w.add_tensor("rope_freqs.weight", (1.0 + rng.random(ghd // 2)).astype(np.float32))
+        if a.prop_rope:
+            f = np.full(ghd // 2, 1e30, np.float32)
+            f[: int(a.prop_rope * (ghd // 2))] = 1.0
+        else:
+            f = (1.0 + rng.random(ghd // 2)).astype(np.float32)
+        w.add_tensor("rope_freqs.weight", f)
     for i in range(a.layers):
         p = f"blk.{i}."
         lhd, lkv = (hd, a.kv_heads) if not g4 or swa[i] else (ghd, 1)
@@ -245,8 +258,8 @@ def main():
             t(p + "attn_v.weight", lkv * lhd, a.embd)
         t(p + "attn_output.weight", a.embd, a.heads * lhd)
         if g4:
-            norm(p + "attn_q_norm.weight", lhd)
-            norm(p + "attn_k_norm.weight", lhd)
+            for n in ("q", "k"):
+                w.add_tensor(p + f"attn_{n}_norm.weight", (a.qk_gain * (1.0 + 0.1 * rng.standard_normal(lhd))).astype(np.float32))
             norm(p + "post_attention_norm.weight", a.embd)
             norm(p + "post_ffw_norm.weight", a.embd)
             w.add_tensor(p + "layer_output_scale.weight", np.array([0.9 + 0.2 * rng.random()], np.float32))

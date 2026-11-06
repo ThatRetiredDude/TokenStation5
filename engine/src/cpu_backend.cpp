@@ -53,19 +53,19 @@ void rmsnorm(float *x, const float *w, int n, float eps) {
     for (int i = 0; i < n; i++) x[i] = x[i] * s * (w ? w[i] : 1.0f);
 }
 
-// freqs: Llama 3.1's divisor for each frequency (Model::rope_freqs), or null;
-// scale: linear RoPE scaling's factor on the position.
-void rope(float *v, int head_dim, int n_rot, int pos, float base, bool neox, const float *freqs, float scale = 1.f) {
+// turn: each pair's turn per position (Model::rope_turn), whose product with
+// the position, modulo 2^64, is the angle in 2^-64 revolutions; as the GPU
+// (qkv_post), its top 32 bits, a signed angle within half a turn.
+void rope(float *v, int n_rot, int pos, bool neox, const uint64_t *turn) {
     for (int i = 0; i < n_rot / 2; i++) {
-        float theta = pos * scale * std::pow(base, -2.0f * i / n_rot);
-        if (freqs) theta /= freqs[i];
-        float c = std::cos(theta), s = std::sin(theta);
+        const int32_t top = (int32_t)(uint32_t)(((uint64_t)(uint32_t)pos * turn[i]) >> 32);
+        const double ang = top * (2 * M_PI / 4294967296.0);
+        const float c = (float)std::cos(ang), s = (float)std::sin(ang);
         int a = neox ? i : 2 * i, b = neox ? i + n_rot / 2 : 2 * i + 1;
         float x0 = v[a], x1 = v[b];
         v[a] = x0 * c - x1 * s;
         v[b] = x0 * s + x1 * c;
     }
-    (void)head_dim;
 }
 
 // GELU, tanh approximation (Gemma's gelu_pytorch_tanh, ggml's gelu).
@@ -112,7 +112,8 @@ public:
             norms_.push_back(std::move(n));
         }
         out_norm_ = vec(m.out_norm);
-        if (m.rope_freqs) rope_freqs_ = vec(m.rope_freqs);
+        for (int swa = 0; swa < 2; swa++)
+            for (int i = 0; i < m.rope_dims(swa) / 2; i++) turn_[swa].push_back(m.rope_turn(swa, i));
     }
     ~CpuBackend() override {
         if (file_) fclose(file_);
@@ -216,16 +217,15 @@ private:
                 for (int i = 0; i < H * HD; i++) qt[i] += N.bq[i];
                 for (int i = 0; i < KV; i++) kt[i] += N.bk[i], vt[i] += N.bv[i];
             }
-            const float *ff = rope_freqs_.empty() || (hp_.rope_freqs_full_only && swa) ? nullptr : rope_freqs_.data();
-            const float base = swa ? hp_.rope_base_swa : hp_.rope_base, rs = swa ? 1.f : hp_.rope_scale;
+            const uint64_t *turn = turn_[swa ? 1 : 0].data();
             const int RD = hp_.rd(l);
             for (int hh = 0; hh < H; hh++) {
                 if (!N.q.empty()) rmsnorm(&qt[hh * HD], N.q.data(), HD, hp_.rms_eps);
-                rope(&qt[hh * HD], HD, RD, pos, base, hp_.rope_neox, ff, rs);
+                rope(&qt[hh * HD], RD, pos, hp_.rope_neox, turn);
             }
             for (int hh = 0; hh < HKV; hh++) {
                 if (!N.k.empty()) rmsnorm(&kt[hh * HD], N.k.data(), HD, hp_.rms_eps);
-                rope(&kt[hh * HD], HD, RD, pos, base, hp_.rope_neox, ff, rs);
+                rope(&kt[hh * HD], RD, pos, hp_.rope_neox, turn);
                 if (hp_.v_norm) rmsnorm(&vt[hh * HD], nullptr, HD, hp_.rms_eps);
             }
             round_kv(kv_, kt, KV);
@@ -307,7 +307,8 @@ private:
     FILE *file_ = nullptr;      // the model file, when its weights were not loaded
     bool read_ok_ = true;
     std::vector<uint8_t> buf_;  // the weights being used, read from file_
-    std::vector<float> kc_, vc_, out_norm_, rope_freqs_;
+    std::vector<float> kc_, vc_, out_norm_;
+    std::vector<uint64_t> turn_[2];  // RoPE turns of the full and the sliding layers
     std::vector<size_t> cache_off_;  // each layer's start in kc_ and vc_
     std::vector<Norms> norms_;
 };

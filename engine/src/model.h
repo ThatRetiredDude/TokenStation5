@@ -89,6 +89,7 @@ struct Model {
     // Llama 3.1 and 3.2: a divisor for each RoPE frequency (rope_dims / 2),
     // which is how they reach 128k tokens; none for the others.
     Weight rope_freqs;
+    std::vector<float> rope_freqs_v;  // its values (read when the model opens)
     std::vector<Layer> layers;
     std::vector<uint8_t> host;  // tensor data when loaded to host memory
 
@@ -98,6 +99,15 @@ struct Model {
     // memory when dst is null, and points every Weight into it.
     bool load(uint8_t *dst, std::string &err);
     uint64_t data_bytes() const;
+    // RoPE pair i's turn per position on a sliding (swa) or full layer, in
+    // revolutions, as a 64-bit binary fraction (whole turns don't matter):
+    // the base, the frequency's divisor and linear scaling in it, from
+    // double-precision math. A position's angle is then (pos x turn) mod
+    // 2^64, exact at any position; f32 angles (pos x frequency, then cos)
+    // were off by up to 1e-4 radians at 512 tokens, which Gemma 4's sharp,
+    // unscaled attention turned into wrong logits.
+    uint64_t rope_turn(bool swa, int i) const;
+    int rope_dims(bool swa) const { return swa && hp.rope_dims_swa ? hp.rope_dims_swa : hp.rope_dims; }
 
 private:
     Weight weight(const std::string &name, bool required, std::string &err);

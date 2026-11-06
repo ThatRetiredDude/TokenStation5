@@ -1,7 +1,8 @@
 // Per token and head, after the Q/K/V projections: optional bias (Qwen2),
 // optional per-head RMSNorm (Qwen3, Gemma 3; Gemma 4 also normalizes V,
 // without weights, and its full layers take V from K's projection: norm
-// bits 1 and 2 and v_from_k), RoPE (positions times rope_scale), then K and
+// bits 1 and 2 and v_from_k), RoPE (exact angles, from each pair's turn per
+// position as a 64-bit fraction: Model::rope_turn), then K and
 // V go into the cache (position p in slot p % ring of a sliding layer's ring,
 // else slot p). Heads up to 512 wide (Gemma 4's full layers).
 // f16, or with KV_Q8 (qkv_post_q8.comp) 8-bit values with an f16 scale per
@@ -45,21 +46,20 @@ uint q8_word(uint w, bool is_v, out float sc) {
 layout(std430, binding = 8) writeonly buffer KC { float16_t kc[]; };
 layout(std430, binding = 9) writeonly buffer VC { float16_t vc[]; };
 #endif
-// Llama 3.1's divisor for each RoPE frequency, with has_freqs (after the caches).
+// Each RoPE pair's turn per position (after the caches): words 2i (high)
+// and 2i + 1 (low) of a 64-bit binary fraction of a revolution.
 #ifdef KV_Q8
-layout(std430, binding = 12) readonly buffer FF { float freqs[]; };
+layout(std430, binding = 12) readonly buffer RT { uint turn[]; };
 #else
-layout(std430, binding = 10) readonly buffer FF { float freqs[]; };
+layout(std430, binding = 10) readonly buffer RT { uint turn[]; };
 #endif
 
 layout(push_constant) uniform PC {
     uint head_dim, n_head, n_head_kv, pos0;
     uint rope_dims, neox, has_bias, has_norm;
     uint cache_off;   // element offset of this layer in the caches
-    float rope_base, eps;
-    uint has_freqs;
+    float eps;
     uint ring;        // slots of a sliding layer's ring; 0: one per position
-    float rope_scale;
     uint v_from_k;    // V is K's projection (Gemma 4's full layers)
 } pc;
 
@@ -112,9 +112,13 @@ void main() {
         float y = sh[d];
         if (d < rd) {
             uint i = pc.neox != 0 ? (d < half_rd ? d : d - half_rd) : d / 2;
-            float theta = float(pos) * pc.rope_scale * pow(pc.rope_base, -2.0 * float(i) / float(rd));
-            if (pc.has_freqs != 0) theta /= freqs[i];
-            float c = cos(theta), s = sin(theta);
+            // The angle: the top 32 bits of (pos x turn) mod 2^64, a signed
+            // fraction of a revolution, so cos and sin see at most half a
+            // turn (in f32, pos x frequency at 512 tokens was off by 1e-4).
+            uint msb, lsb;
+            umulExtended(pos, turn[2 * i + 1], msb, lsb);
+            const float a = float(int(pos * turn[2 * i] + msb)) * 1.4629180792671596e-9;  // 2 pi / 2^32
+            float c = cos(a), s = sin(a);
             if (pc.neox != 0) y = d < half_rd ? sh[d] * c - sh[d + half_rd] * s : sh[d - half_rd] * s + sh[d] * c;
             else y = (d & 1u) == 0 ? sh[d] * c - sh[d + 1] * s : sh[d - 1] * s + sh[d] * c;
         }

@@ -854,6 +854,18 @@ private:
             !mk(split_, 4ull * SPLIT) ||
             !mk(ids_, 4ull * TMAX, true) || !mk(logits_, 4ull * TMAX * hp_.n_vocab, true))
             return false;
+        // Each RoPE pair's turn per position (Model::rope_turn), for the full
+        // and the sliding layers: high word, then low.
+        for (int swa = 0; swa < 2; swa++) {
+            const int pairs = std::max(1, m_.rope_dims(swa) / 2);
+            if (!mk(rope_turn_[swa], 8ull * pairs, true)) return false;
+            uint32_t *t = (uint32_t *)rope_turn_[swa].map;
+            for (int i = 0; i < m_.rope_dims(swa) / 2; i++) {
+                const uint64_t v = m_.rope_turn(swa, i);
+                t[2 * i] = (uint32_t)(v >> 32);
+                t[2 * i + 1] = (uint32_t)v;
+            }
+        }
         if (n_ctx_ <= 0) {
             // As much as fits, in what the weights and activations left, and
             // no more than one buffer can address.
@@ -1501,21 +1513,17 @@ private:
             norm_ = nullptr;
             const uint32_t cache_off = layer_off_[l], kb = layer_buf_[l];
             const bool swa = hp_.swa(l);
-            const bool freqs = m_.rope_freqs && !(hp_.rope_freqs_full_only && swa);
             {
                 struct {
                     uint32_t head_dim, n_head, n_head_kv, pos0, rope_dims, neox, has_bias, has_norm, cache_off;
-                    float rope_base, eps;
-                    uint32_t has_freqs, ring;
-                    float rope_scale;
-                    uint32_t v_from_k;
+                    float eps;
+                    uint32_t ring, v_from_k;
                 } pc{(uint32_t)HD, (uint32_t)H, (uint32_t)HKV, (uint32_t)pos0, (uint32_t)hp_.rd(l),
                      hp_.rope_neox ? 1u : 0u, L.bq ? 1u : 0u, (L.q_norm ? 1u : 0u) | (hp_.v_norm ? 2u : 0u), cache_off,
-                     swa ? hp_.rope_base_swa : hp_.rope_base, hp_.rms_eps, freqs ? 1u : 0u, ring_[l],
-                     swa ? 1.0f : hp_.rope_scale, L.wv ? 0u : 1u};
+                     hp_.rms_eps, ring_[l], L.wv ? 0u : 1u};
                 const Buf &bq = L.bq ? W(L.bq) : dummy_, &bk = L.bk ? W(L.bk) : dummy_, &bv = L.bv ? W(L.bv) : dummy_;
                 const Buf &nq = L.q_norm ? W(L.q_norm) : dummy_, &nk = L.k_norm ? W(L.k_norm) : dummy_;
-                const Buf &ff = freqs ? W(m_.rope_freqs) : dummy_;
+                const Buf &ff = rope_turn_[swa ? 1 : 0];
                 if (kv_ == KvType::Q8)
                     dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
@@ -1746,7 +1754,7 @@ private:
     bool cpu_prof_ = false;  // TS5_PROFILE=1 or 2 (CPU times only)
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
-    Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_;
+    Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_, rope_turn_[2];
     std::vector<Buf> kc_, vc_, ks_, vs_;  // the KV cache's pieces
     // Each layer's first cache element and piece, and a sliding layer's ring slots (0: none).
     std::vector<uint32_t> layer_off_, layer_buf_, ring_;

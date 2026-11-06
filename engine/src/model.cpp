@@ -143,6 +143,17 @@ bool Model::open(const std::string &path, std::string &err) {
     return bind(err);
 }
 
+uint64_t Model::rope_turn(bool swa, int i) const {
+    const int rd = rope_dims(swa);
+    const double base = swa ? hp.rope_base_swa : hp.rope_base, scale = swa ? 1.0 : hp.rope_scale;
+    double w = scale * std::pow(base, -2.0 * i / rd) / (2 * M_PI);
+    if (!rope_freqs_v.empty() && !(hp.rope_freqs_full_only && swa) && i < (int)rope_freqs_v.size())
+        w /= rope_freqs_v[i];
+    w -= std::floor(w);
+    const double f = std::ldexp(w, 64);
+    return f >= 18446744073709551616.0 ? 0 : (uint64_t)f;
+}
+
 uint64_t Model::data_bytes() const {
     uint64_t end = 0;
     for (auto &t : gguf.tensors) end = std::max(end, t.offset + t.nbytes);
@@ -209,11 +220,25 @@ bool Model::bind(std::string &err) {
 // Reads the one-value tensors (Gemma 4's layer_output_scale) from the file,
 // whether or not the weights are loaded to host memory.
 bool Model::read_scalars(std::string &err) {
-    bool any = false;
+    bool any = (bool)rope_freqs;
     for (auto &L : layers) any |= (bool)L.out_scale;
     if (!any) return true;
     FILE *f = fopen(gguf.path.c_str(), "rb");
     if (!f) { err = "cannot open " + gguf.path; return false; }
+    if (rope_freqs) {
+        if (rope_freqs.type() != GGML_F32) {
+            fclose(f);
+            err = "rope_freqs.weight: not f32";
+            return false;
+        }
+        rope_freqs_v.resize(rope_freqs.info->nelements());
+        if (fseeko(f, (off_t)(gguf.data_offset + rope_freqs.info->offset), SEEK_SET) != 0 ||
+            fread(rope_freqs_v.data(), 4, rope_freqs_v.size(), f) != rope_freqs_v.size()) {
+            fclose(f);
+            err = "cannot read rope_freqs.weight";
+            return false;
+        }
+    }
     for (auto &L : layers) {
         if (!L.out_scale) continue;
         if (fseeko(f, (off_t)(gguf.data_offset + L.out_scale.info->offset), SEEK_SET) != 0 ||
