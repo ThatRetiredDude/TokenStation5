@@ -54,37 +54,7 @@ layout(push_constant) uniform PC {
 shared vec4 xs[TBMAX * 512];                       // [token][column / 4] of the step's 2048 columns
 shared float partial[RG * NRMAX * NTMAX * SGMAX];  // [group][row][token][subgroup]
 
-// As mv16_q4_k: sub-blocks 2p and 2p + 1's 6-bit scales (bytes 0 and 1) and
-// mins (bytes 2 and 3), from the block's header h.
-uint scales_mins(uvec4 h, uint p) {
-    const uint sh = 16u * (p & 1u);
-    const uint a = (h.y >> sh) & 0xFFFFu, b = (h.z >> sh) & 0xFFFFu, c = (h.w >> sh) & 0xFFFFu;
-    // Both, then a select: a branch on p (which differs between threads)
-    // split the caller's row loop into blocks, and the compiler then waited
-    // for each row's loads before issuing the next row's.
-    const uint lo = (a & 0x3F3Fu) | ((b & 0x3F3Fu) << 16);
-    const uint hi = ((c & 0x0F0Fu) | ((a >> 2) & 0x3030u)) | ((((c >> 4) & 0x0F0Fu) | ((b >> 2) & 0x3030u)) << 16);
-    return p < 2 ? lo : hi;
-}
-vec4 bytes4(uint w) { return vec4(float(w & 255u), float((w >> 8) & 255u), float((w >> 16) & 255u), float(w >> 24)); }
-
-// Thread th's two sub-blocks' scales and mins as floats: (s_lo, s_hi,
-// m_lo, m_hi), as mv16_q4_k's block_dot decodes them.
-vec4 scales(uvec4 h, uint th) { return bytes4(scales_mins(h, th >> 1)); }
-
-// The thread's 16 low (hi == 0) or high nibbles of word q as floats.
-#ifdef Q5K
-void nibbles(uvec4 q, uvec4 qh, uint th, uint hi, out vec4 w[4]) {
-    const uint j = (th & ~1u) + hi, sh = 4 * hi;
-    [[unroll]] for (uint c = 0; c < 4; c++)
-        w[c] = bytes4(((q[c] >> sh) & 0x0F0F0F0Fu) | (((qh[c] >> j) & 0x01010101u) << 4));
-}
-#else
-void nibbles(uvec4 q, uint th, uint hi, out vec4 w[4]) {
-    const uint sh = 4 * hi;
-    [[unroll]] for (uint c = 0; c < 4; c++) w[c] = bytes4((q[c] >> sh) & 0x0F0F0F0Fu);
-}
-#endif
+#include "q4k_sum.glsl"
 
 void main() {
     const uint tid = gl_LocalInvocationID.x, g = tid / 64, lt = tid % 64, th = tid % 8, lb = lt / 8;
@@ -112,6 +82,8 @@ void main() {
             qh[i] = w128[o + 1 + (th & 1u)];
 #endif
         }
+        vec4 k[NRMAX];
+        [[unroll]] for (uint i = 0; i < NR; i++) k[i] = block_coefs(h[i], th);
         [[unroll]] for (uint p0 = 0; p0 < NT; p0 += TBMAX) {
             const uint tb = min(TBMAX, NT - p0);
             // Tokens p0 .. p0 + tb - 1's x of the step's columns, by the
@@ -123,60 +95,25 @@ void main() {
             }
             barrier();
             if (!live) continue;  // to the next pass's barrier, with everyone
-            // The low nibbles against each token's first 16 x values: the
-            // sums s0 and ta of mv16_q4_k's block_dot, held until the high half.
-            float s0[NRMAX * TBMAX], ta[TBMAX];
-            {
+            // The low nibbles against each token's first 16 x values, then
+            // the high ones against the other 16, as mvt_q4_k.
+            [[unroll]] for (uint hi = 0; hi < 2; hi++) {
                 vec4 w[NRMAX][4];
                 [[unroll]] for (uint i = 0; i < NR; i++)
 #ifdef Q5K
-                    nibbles(q[i], qh[i], th, 0, w[i]);
+                    nibbles(q[i], qh[i], th, hi, w[i]);
 #else
-                    nibbles(q[i], th, 0, w[i]);
+                    nibbles(q[i], th, hi, w[i]);
 #endif
                 [[unroll]] for (uint t = 0; t < TBMAX; t++) {
                     if (t >= tb) continue;
-                    const uint xi = t * 512 + lx0;
-                    vec4 a[4];
-                    float xsum = 0.0;
-                    [[unroll]] for (uint c = 0; c < 4; c++) {
-                        a[c] = xs[xi + c];
-                        xsum += a[c].x + a[c].y + a[c].z + a[c].w;
-                    }
-                    ta[t] = xsum;
-                    [[unroll]] for (uint i = 0; i < NR; i++) {
-                        float s = 0.0;
-                        [[unroll]] for (uint c = 0; c < 4; c++) s += dot(w[i][c], a[c]);
-                        s0[i * TBMAX + t] = s;
-                    }
-                }
-            }
-            // The high nibbles against the other 16, then the block's sum
-            // into the row, in block_dot's order.
-            {
-                vec4 w[NRMAX][4];
-                [[unroll]] for (uint i = 0; i < NR; i++)
-#ifdef Q5K
-                    nibbles(q[i], qh[i], th, 1, w[i]);
-#else
-                    nibbles(q[i], th, 1, w[i]);
-#endif
-                [[unroll]] for (uint t = 0; t < TBMAX; t++) {
-                    if (t >= tb) continue;
-                    const uint xi = t * 512 + lx0 + 8;
-                    vec4 e[4];
-                    float te = 0.0;
-                    [[unroll]] for (uint c = 0; c < 4; c++) {
-                        e[c] = xs[xi + c];
-                        te += e[c].x + e[c].y + e[c].z + e[c].w;
-                    }
-                    [[unroll]] for (uint i = 0; i < NR; i++) {
-                        const vec4 sm = scales(h[i], th);
-                        const vec2 dm = unpackHalf2x16(h[i].x);
-                        float s1 = 0.0;
-                        [[unroll]] for (uint c = 0; c < 4; c++) s1 += dot(w[i][c], e[c]);
-                        acc[i * NTMAX + p0 + t] += dm.x * (sm.x * s0[i * TBMAX + t] + sm.y * s1) - dm.y * (sm.z * ta[t] + sm.w * te);
-                    }
+                    const uint xi = t * 512 + lx0 + 8 * hi;
+                    vec4 x[4];
+                    [[unroll]] for (uint c = 0; c < 4; c++) x[c] = xs[xi + c];
+                    const float xsum = half_sum(x);
+                    [[unroll]] for (uint i = 0; i < NR; i++)
+                        acc[i * NTMAX + p0 + t] = half_acc(acc[i * NTMAX + p0 + t], w[i], x, hi == 0 ? k[i].x : k[i].y,
+                                                           hi == 0 ? k[i].z : k[i].w, xsum);
                 }
             }
         }

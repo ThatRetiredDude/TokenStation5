@@ -456,15 +456,21 @@ Coder 7B: a 2-token batch 1.58x a one-token mat-vec, 8 tokens 3.9x, each
 token about 40% of a mat-vec, where the Q6_K batch kernel, with more
 bytes per block, ran 1.05x and 1.5x). The low nibbles go through the
 token loop first and the high ones after, so a row holds 16 floats at a
-time, and the low halves' sums wait for the high ones so that each block
-is summed into its row in exactly the one-token kernel's order, d (s_lo
-sum_lo + s_hi sum_hi) - dmin (m_lo x_lo + m_hi x_hi). That order is a
+time, and each half is added to its row exactly as the one-token kernel
+adds it: its 16 weights dotted with x as a chain of fused multiply-adds,
+then d s times that sum and - dmin m times the sum of x, two more. The
+one-token and batch kernels share that code (`shaders/q4k_sum.glsl`);
+d s and dmin m (an f16 times a 6-bit integer) are exact in f32, so the
+batch kernels form them once per row and block. The order is a
 correctness rule, not a style: speculative decoding reproduces the
 one-token output only while the verify batch's logits are bit for bit
 the one-token forward's, and a first version that folded d and dmin into
-the scales ahead of the token loop rounded differently and sent Qwen3 8B's
-prose, with the helper on at temperature 0, off the helper-off text at a
-near-tie. Any change to a batch kernel is checked by `ts5 logits` with
+the scales in the batch kernel only rounded differently and sent Qwen3
+8B's prose, with the helper on at temperature 0, off the helper-off text
+at a near-tie. The chains (from `s += dot(w, x)` per 4 values and a
+combine of 7 operations a row and token) cut the batch kernel's VALU
+instructions 7-10% (Q4_K, 4 rows, 2-8 tokens) and its registers enough
+for one more wave at 4 and 8 tokens. Any change to a batch kernel is checked by `ts5 logits` with
 and without `--step`, whose dumps must agree at position 0 (later
 positions differ through attention). The feed-forward's gate and up,
 the two biggest lines of a verify pass, can run as one kernel

@@ -264,6 +264,20 @@ cmp "$work/glu-on.bin" "$work/glu-r2.bin"
 TS5_MVT_GLU=1 TS5_MV_ROWS_MIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
     --ntok 7 "$work/qwen2-Q4_K_M.gguf"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 5 "$work/qwen2-Q8_0.gguf" "$work/llama-Q8_0.gguf"
+# Every K-quant verify kernel sums a block as the one-token kernel does
+# (shaders/q4k_sum.glsl): a 7-token batch's logits at position 0 (later
+# positions differ through attention) equal one token's, byte for byte,
+# with the 4-row, 3-row (row tails), x-staging and fused gate+up kernels.
+mk qwen2 qwen2 Q5_K_M qwen2-mk-Q5_K_M
+for m in qwen2-Q4_K_M qwen2-kmix qwen2-mk-Q5_K_M; do
+    "$ts5" logits -m "$work/$m.gguf" -o "$work/vt-step.bin" --step 12 34 56 78 90 11 22 2> /dev/null
+    n=$(( $(stat -c %s "$work/vt-step.bin") / 7 ))
+    for e in "TS5_MV_ROWS_MIN=1" "TS5_MV_ROWS_MIN=1 TS5_MVT_ROWS=3" "TS5_MV_ROWS_MIN=1 TS5_MVTX=1" \
+        "TS5_MV_ROWS_MIN=1 TS5_MVT_GLU=1" "TS5_MVT_GLU=1"; do
+        env $e "$ts5" logits -m "$work/$m.gguf" -o "$work/vt-batch.bin" 12 34 56 78 90 11 22 2> /dev/null
+        cmp -n $n "$work/vt-batch.bin" "$work/vt-step.bin"
+    done
+done
 rep="one two three one two three one two three one two three one two"
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-off.txt" 2> /dev/null
 TS5_DRAFT=7 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-on.txt" 2> "$work/sd-on.err"

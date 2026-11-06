@@ -59,47 +59,31 @@ shared float partial[2 * NRMAX * WG];  // [row][subgroup]: gate rows, then up ro
 shared float sq[WG];  // [subgroup]: sums of x^2
 #endif
 
-// Sub-blocks 2p and 2p + 1's 6-bit scales (bytes 0 and 1 of the result)
-// and mins (bytes 2 and 3), from the block's header h. Sub-block j < 4 has
-// its scale in the low 6 bits of byte j of the scales and its min in those
-// of byte j + 4; j >= 4 has their low 4 bits in byte j + 4 (scale low
-// nibble, min high) and their top 2 bits in the top bits of bytes j - 4
-// (scale) and j (min).
-uint scales_mins(uvec4 h, uint p) {
-    const uint sh = 16u * (p & 1u);
-    const uint a = (h.y >> sh) & 0xFFFFu, b = (h.z >> sh) & 0xFFFFu, c = (h.w >> sh) & 0xFFFFu;
-    // Both, then a select: a branch on p (which differs between threads)
-    // split the caller's row loop into blocks, and the compiler then waited
-    // for each row's loads before issuing the next row's.
-    const uint lo = (a & 0x3F3Fu) | ((b & 0x3F3Fu) << 16);
-    const uint hi = ((c & 0x0F0Fu) | ((a >> 2) & 0x3030u)) | ((((c >> 4) & 0x0F0Fu) | ((b >> 2) & 0x3030u)) << 16);
-    return p < 2 ? lo : hi;
-}
-// The 4 bytes of a word as floats (one conversion each on AMD hardware).
-vec4 bytes4(uint w) { return vec4(float(w & 255u), float((w >> 8) & 255u), float((w >> 16) & 255u), float(w >> 24)); }
+#include "q4k_sum.glsl"
 
-// A block's header h and nibble word q (thread th of 8), with the thread's x:
-// a holds the low nibbles' 16 values, e the high ones', ta and te their sums.
+// acc plus a block: its header h and nibble word q (thread th of 8; with
+// Q5K, qh its word of high bits) against the thread's x, a the low
+// nibbles' 16 values and e the high ones', ta and te their sums. The verify
+// kernels add the same two halves in the same order (q4k_sum.glsl).
 #ifdef Q5K
-// Q5_K: qh is the thread's word of high bits (bytes 16 (th % 2) .. + 15).
-float block_dot(uvec4 h, uvec4 q, uvec4 qh, vec4 a[4], vec4 e[4], float ta, float te, uint th) {
-    float s0 = 0.0, s1 = 0.0;
-    const uint j = th & ~1u;  // the low nibbles' sub-block; the high ones' is j + 1
-    for (uint c = 0; c < 4; c++) {
-        s0 += dot(bytes4((q[c] & 0x0F0F0F0Fu) | (((qh[c] >> j) & 0x01010101u) << 4)), a[c]);
-        s1 += dot(bytes4(((q[c] >> 4) & 0x0F0F0F0Fu) | (((qh[c] >> (j + 1)) & 0x01010101u) << 4)), e[c]);
-    }
+float block_acc(float acc, uvec4 h, uvec4 q, uvec4 qh, vec4 a[4], vec4 e[4], float ta, float te, uint th) {
 #else
-float block_dot(uvec4 h, uvec4 q, vec4 a[4], vec4 e[4], float ta, float te, uint th) {
-    float s0 = 0.0, s1 = 0.0;
-    for (uint c = 0; c < 4; c++) {
-        s0 += dot(bytes4(q[c] & 0x0F0F0F0Fu), a[c]);
-        s1 += dot(bytes4((q[c] >> 4) & 0x0F0F0F0Fu), e[c]);
-    }
+float block_acc(float acc, uvec4 h, uvec4 q, vec4 a[4], vec4 e[4], float ta, float te, uint th) {
 #endif
-    const vec4 sm = bytes4(scales_mins(h, th >> 1));  // scale 2p, 2p + 1, min 2p, 2p + 1
-    const vec2 dm = unpackHalf2x16(h.x);
-    return dm.x * (sm.x * s0 + sm.y * s1) - dm.y * (sm.z * ta + sm.w * te);
+    const vec4 k = block_coefs(h, th);
+    vec4 w[4];
+#ifdef Q5K
+    nibbles(q, qh, th, 0, w);
+#else
+    nibbles(q, th, 0, w);
+#endif
+    acc = half_acc(acc, w, a, k.x, k.z, ta);
+#ifdef Q5K
+    nibbles(q, qh, th, 1, w);
+#else
+    nibbles(q, th, 1, w);
+#endif
+    return half_acc(acc, w, e, k.y, k.w, te);
 }
 
 #ifdef GLU
@@ -126,7 +110,6 @@ void main() {
     for (uint b = tid / 8; b < nb; b += WG / 8) {
         const uint x0 = (pc.x_off + b * 256) / 4 + 16 * p + 4 * (th & 1u), x1 = x0 + 8;
         vec4 a[4], e[4];
-        float ta = 0.0, te = 0.0;
         for (uint c = 0; c < 4; c++) {
             a[c] = X4[x0 + c];
             e[c] = X4[x1 + c];
@@ -136,9 +119,8 @@ void main() {
             a[c] *= G4[g0];
             e[c] *= G4[g0 + 8];
 #endif
-            ta += a[c].x + a[c].y + a[c].z + a[c].w;
-            te += e[c].x + e[c].y + e[c].z + e[c].w;
         }
+        const float ta = half_sum(a), te = half_sum(e);
         // Rows past the matrix read its last row; their sums aren't written.
         // Every row's words are loaded first, then summed, so that all NR
         // rows' loads are in flight at once.
@@ -168,14 +150,14 @@ void main() {
         }
         [[unroll]] for (uint i = 0; i < NR; i++) {
 #ifdef Q5K
-            acc[i] += block_dot(wq[i][0], wq[i][1], wq[i][2], a, e, ta, te, th);
+            acc[i] = block_acc(acc[i], wq[i][0], wq[i][1], wq[i][2], a, e, ta, te, th);
 #ifdef GLU
-            accu[i] += block_dot(uq[i][0], uq[i][1], uq[i][2], a, e, ta, te, th);
+            accu[i] = block_acc(accu[i], uq[i][0], uq[i][1], uq[i][2], a, e, ta, te, th);
 #endif
 #else
-            acc[i] += block_dot(wq[i][0], wq[i][1], a, e, ta, te, th);
+            acc[i] = block_acc(acc[i], wq[i][0], wq[i][1], a, e, ta, te, th);
 #ifdef GLU
-            accu[i] += block_dot(uq[i][0], uq[i][1], a, e, ta, te, th);
+            accu[i] = block_acc(accu[i], uq[i][0], uq[i][1], a, e, ta, te, th);
 #endif
 #endif
         }

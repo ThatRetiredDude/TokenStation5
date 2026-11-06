@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 // Y[t][r] = silu(G[r] . X[t]) * (U[r] . X[t]) (gelu for Gemma) for NT tokens of the
 // feed-forward's Q4_K gate (binding 0) and up (binding 3) matrices at once:
 // a verify batch through what mv16_glu_q4_k is for one token. Laid out as
@@ -35,25 +36,7 @@ layout(push_constant) uniform PC {
 
 shared float partial[NRMAX * NTMAX * WG];  // [row][token][subgroup]
 
-// As mv16_q4_k: sub-blocks 2p and 2p + 1's 6-bit scales (bytes 0 and 1) and
-// mins (bytes 2 and 3), from the block's header h.
-uint scales_mins(uvec4 h, uint p) {
-    const uint sh = 16u * (p & 1u);
-    const uint a = (h.y >> sh) & 0xFFFFu, b = (h.z >> sh) & 0xFFFFu, c = (h.w >> sh) & 0xFFFFu;
-    if (p < 2) return (a & 0x3F3Fu) | ((b & 0x3F3Fu) << 16);
-    return ((c & 0x0F0Fu) | ((a >> 2) & 0x3030u)) | ((((c >> 4) & 0x0F0Fu) | ((b >> 2) & 0x3030u)) << 16);
-}
-vec4 bytes4(uint w) { return vec4(float(w & 255u), float((w >> 8) & 255u), float((w >> 16) & 255u), float(w >> 24)); }
-
-// Thread th's two sub-blocks' scales and mins as floats: (s_lo, s_hi,
-// m_lo, m_hi), as mv16_q4_k's block_dot decodes them.
-vec4 scales(uvec4 h, uint th) { return bytes4(scales_mins(h, th >> 1)); }
-
-// The thread's 16 low (hi == 0) or high nibbles of word q as floats.
-void nibbles(uvec4 q, uint hi, out vec4 w[4]) {
-    const uint sh = 4 * hi;
-    [[unroll]] for (uint c = 0; c < 4; c++) w[c] = bytes4((q[c] >> sh) & 0x0F0F0F0Fu);
-}
+#include "q4k_sum.glsl"
 
 // The gate's activation times up: silu, or with pc.accumulate != 0 (unused
 // otherwise with GLU) Gemma's gelu, the tanh approximation as swiglu.comp.
@@ -85,68 +68,30 @@ void main() {
             hu[i] = u128[o];
             qu[i] = u128[o + 1 + th];
         }
-        vec4 smg[NRMAX], smu[NRMAX];
-        vec2 dmg[NRMAX], dmu[NRMAX];
+        vec4 kg[NRMAX], ku[NRMAX];
         [[unroll]] for (uint i = 0; i < NR; i++) {
-            smg[i] = scales(hg[i], th);
-            dmg[i] = unpackHalf2x16(hg[i].x);
-            smu[i] = scales(hu[i], th);
-            dmu[i] = unpackHalf2x16(hu[i].x);
+            kg[i] = block_coefs(hg[i], th);
+            ku[i] = block_coefs(hu[i], th);
         }
         const uint x0 = (b * 256) / 4 + 16 * (th >> 1) + 4 * (th & 1u);
-        // The low nibbles against each token's first 16 x values: the sums
-        // s0 and ta of mv16_q4_k's block_dot, held until the high half.
-        float s0g[NRMAX * NTMAX], s0u[NRMAX * NTMAX], ta[NTMAX];
-        {
+        // The low nibbles against each token's first 16 x values, then the
+        // high ones against the other 16, as mvt_q4_k.
+        [[unroll]] for (uint hi = 0; hi < 2; hi++) {
             vec4 wg[NRMAX][4], wu[NRMAX][4];
             [[unroll]] for (uint i = 0; i < NR; i++) {
-                nibbles(qg[i], 0, wg[i]);
-                nibbles(qu[i], 0, wu[i]);
+                nibbles(qg[i], th, hi, wg[i]);
+                nibbles(qu[i], th, hi, wu[i]);
             }
             [[unroll]] for (uint t = 0; t < NT; t++) {
-                const uint xt = (pc.x_off + t * pc.x_stride) / 4 + x0;
-                vec4 a[4];
-                float xs = 0.0;
-                [[unroll]] for (uint c = 0; c < 4; c++) {
-                    a[c] = X4[xt + c];
-                    xs += a[c].x + a[c].y + a[c].z + a[c].w;
-                }
-                ta[t] = xs;
+                const uint xt = (pc.x_off + t * pc.x_stride) / 4 + x0 + 8 * hi;
+                vec4 x[4];
+                [[unroll]] for (uint c = 0; c < 4; c++) x[c] = X4[xt + c];
+                const float xs = half_sum(x);
                 [[unroll]] for (uint i = 0; i < NR; i++) {
-                    float sg = 0.0, su = 0.0;
-                    [[unroll]] for (uint c = 0; c < 4; c++) {
-                        sg += dot(wg[i][c], a[c]);
-                        su += dot(wu[i][c], a[c]);
-                    }
-                    s0g[i * NTMAX + t] = sg;
-                    s0u[i * NTMAX + t] = su;
-                }
-            }
-        }
-        // The high nibbles against the other 16, then each block's sum into
-        // its row, in block_dot's order.
-        {
-            vec4 wg[NRMAX][4], wu[NRMAX][4];
-            [[unroll]] for (uint i = 0; i < NR; i++) {
-                nibbles(qg[i], 1, wg[i]);
-                nibbles(qu[i], 1, wu[i]);
-            }
-            [[unroll]] for (uint t = 0; t < NT; t++) {
-                const uint xt = (pc.x_off + t * pc.x_stride) / 4 + x0 + 8;
-                vec4 e[4];
-                float te = 0.0;
-                [[unroll]] for (uint c = 0; c < 4; c++) {
-                    e[c] = X4[xt + c];
-                    te += e[c].x + e[c].y + e[c].z + e[c].w;
-                }
-                [[unroll]] for (uint i = 0; i < NR; i++) {
-                    float sg = 0.0, su = 0.0;
-                    [[unroll]] for (uint c = 0; c < 4; c++) {
-                        sg += dot(wg[i][c], e[c]);
-                        su += dot(wu[i][c], e[c]);
-                    }
-                    accg[i * NTMAX + t] += dmg[i].x * (smg[i].x * s0g[i * NTMAX + t] + smg[i].y * sg) - dmg[i].y * (smg[i].z * ta[t] + smg[i].w * te);
-                    accu[i * NTMAX + t] += dmu[i].x * (smu[i].x * s0u[i * NTMAX + t] + smu[i].y * su) - dmu[i].y * (smu[i].z * ta[t] + smu[i].w * te);
+                    accg[i * NTMAX + t] = half_acc(accg[i * NTMAX + t], wg[i], x, hi == 0 ? kg[i].x : kg[i].y,
+                                                   hi == 0 ? kg[i].z : kg[i].w, xs);
+                    accu[i * NTMAX + t] = half_acc(accu[i * NTMAX + t], wu[i], x, hi == 0 ? ku[i].x : ku[i].y,
+                                                   hi == 0 ? ku[i].z : ku[i].w, xs);
                 }
             }
         }
