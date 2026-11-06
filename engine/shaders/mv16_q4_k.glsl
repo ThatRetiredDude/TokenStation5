@@ -103,11 +103,14 @@ float block_dot(uvec4 h, uvec4 q, vec4 a[4], vec4 e[4], float ta, float te, uint
 }
 
 #ifndef Q5K
-// DIAG (mv16x1_* and mv16x2_*, TS5_MV_DIAG=1 or 2, for timing only: their
+// DIAG (mv16x1_* to mv16x5_*, TS5_MV_DIAG=1 to 5, for timing only: their
 // sums are wrong): 1, the same loads of the weights and x with almost no
 // arithmetic; 2, the arithmetic twice over. How the time moves between the
 // two tells a kernel short of memory bandwidth from one short of ALU time.
-#if defined(DIAG) && DIAG == 1
+// 3 to 5 are 1 with fewer loads: 3 without x's, 4 without the block
+// headers' (8 threads load each), 5 with neither, the nibbles alone: what
+// each kind of load costs.
+#if defined(DIAG) && DIAG != 2
 #define BDOT(h, q) (float(((h).x ^ (h).y ^ (h).z ^ (h).w ^ (q).x ^ (q).y ^ (q).z ^ (q).w) & 255u) + ta + te)
 #elif defined(DIAG) && DIAG == 2
 #define BDOT(h, q) (block_dot(h, q, a, e, ta, te, th) + \
@@ -145,8 +148,13 @@ void main() {
         vec4 a[4], e[4];
         float ta = 0.0, te = 0.0;
         for (uint c = 0; c < 4; c++) {
+#if defined(DIAG) && (DIAG == 3 || DIAG == 5)
+            a[c] = vec4(float(b + c));
+            e[c] = a[c] + 1.0;
+#else
             a[c] = X4[x0 + c];
             e[c] = X4[x1 + c];
+#endif
 #ifdef NORM
             ss += dot(a[c], a[c]) + dot(e[c], e[c]);
             const uint g0 = x0 - pc.x_off / 4 + c;
@@ -170,13 +178,21 @@ void main() {
 #endif
         [[unroll]] for (uint i = 0; i < NR; i++) {
             const uint o = min(r0 + i, pc.nrows - 1) * row_words + b * BW;
+#if defined(DIAG) && DIAG >= 4
+            wq[i][0] = uvec4(o);
+#else
             wq[i][0] = w128[o];
+#endif
             wq[i][1] = w128[o + QW + th];
 #ifdef Q5K
             wq[i][2] = w128[o + 1 + (th & 1u)];
 #endif
 #ifdef GLU
+#if defined(DIAG) && DIAG >= 4
+            uq[i][0] = uvec4(o);
+#else
             uq[i][0] = u128[o];
+#endif
             uq[i][1] = u128[o + QW + th];
 #ifdef Q5K
             uq[i][2] = u128[o + 1 + (th & 1u)];
