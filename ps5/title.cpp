@@ -710,7 +710,9 @@ int main(int, char **) {
     if (!screen) printf("ts5-title: no picture on the TV: %s\n", err.c_str());
 #else
     bool screen = ctx->display && display.open(ctx, kWidth, kHeight, err);
-    if (!screen) printf("ts5-title: no picture on the TV: %s\n", ctx->display ? err.c_str() : "no display on this device");
+    if (!screen)
+        printf("ts5-title: no picture on the TV: %s\n",
+               ctx->display ? err.c_str() : "the GPU offered no display to this title");
 #endif
     ui::Pad pad;
     pad.open();

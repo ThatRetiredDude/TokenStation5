@@ -28,6 +28,67 @@ static PFN_vkGetInstanceProcAddr ts5_vk_entry() {
 }
 #endif
 
+uint64_t system_reserve() {
+    const char *e = getenv("TS5_SYSTEM_RESERVE_GIB");
+    const double g = e && *e ? std::max(0.0, atof(e)) : 2.0;
+    return (uint64_t)(g * 1073741824.0);
+}
+
+#ifndef TS5_PS5
+// /proc/meminfo's MemAvailable in bytes; 0 if it can't be read.
+static uint64_t mem_available() {
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return 0;
+    char line[256];
+    unsigned long long kb = 0;
+    bool found = false;
+    while (!found && fgets(line, sizeof line, f)) found = sscanf(line, "MemAvailable: %llu kB", &kb) == 1;
+    fclose(f);
+    return found ? (uint64_t)kb * 1024 : 0;
+}
+#endif
+
+uint64_t VkContext::heap_usage() const {
+#ifndef TS5_PS5
+    if (!memory_budget) return 0;
+    auto props2 =
+        (PFN_vkGetPhysicalDeviceMemoryProperties2)get_instance_proc(instance, "vkGetPhysicalDeviceMemoryProperties2");
+    if (!props2) return 0;
+    const bool shared = props.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT b{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 m2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+    m2.pNext = &b;
+    props2(physical, &m2);
+    uint64_t n = 0;
+    for (uint32_t i = 0; i < m2.memoryProperties.memoryHeapCount; i++)
+        if (shared || (m2.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT))
+            n += b.heapUsage[i];
+    return n;
+#else
+    return 0;
+#endif
+}
+
+uint64_t VkContext::ram_total(bool cached) const {
+#ifndef TS5_PS5
+    if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) return UINT64_MAX;
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    {
+        std::lock_guard<std::mutex> lk(budget_mutex);
+        if (cached && ram_at >= 0 && t - ram_at <= 2) return ram_bytes;
+    }
+    const uint64_t avail = mem_available();
+    const uint64_t used = avail ? heap_usage() : 0, total = used + avail;
+    std::lock_guard<std::mutex> lk(budget_mutex);
+    if (avail && (idle_total == 0 || used < (256ull << 20))) idle_total = total;
+    ram_bytes = avail ? std::min(total, idle_total) : UINT64_MAX;
+    ram_at = t;
+    return ram_bytes;
+#else
+    return UINT64_MAX;
+#endif
+}
+
 uint64_t VkContext::device_memory() const {
     // A GPU that shares the system's memory (the PS5, an APU, a CPU driver)
     // can use every heap: they are all that memory.
@@ -64,6 +125,11 @@ uint64_t VkContext::device_memory() const {
         }
         if (budget_bytes > 0) n = std::min(n, budget_bytes);
     }
+    // The system's reserve, less the 1 GiB fit_context keeps.
+    if (const uint64_t ram = ram_total(true); ram != UINT64_MAX) {
+        const uint64_t keep = system_reserve() - std::min<uint64_t>(system_reserve(), 1ull << 30);
+        n = std::min(n, ram > keep ? ram - keep : 0);
+    }
 #endif
     return n;
 }
@@ -79,12 +145,20 @@ uint64_t VkContext::free_memory() const {
         VkPhysicalDeviceMemoryProperties2 m2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
         m2.pNext = &b;
         props2(physical, &m2);
-        uint64_t n = 0;
+        uint64_t n = 0, used = 0;
         for (uint32_t i = 0; i < m2.memoryProperties.memoryHeapCount; i++)
-            if (shared || (m2.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT))
+            if (shared || (m2.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) {
                 n += b.heapBudget[i] > b.heapUsage[i] ? b.heapBudget[i] - b.heapUsage[i] : 0;
+                used += b.heapUsage[i];
+            }
+        if (const uint64_t ram = ram_total(); ram != UINT64_MAX) {
+            const uint64_t keep = system_reserve() + used;
+            n = std::min(n, ram > keep ? ram - keep : 0);
+        }
         return n;
     }
+    // Without the budget: the system's RAM alone.
+    if (const uint64_t ram = ram_total(); ram != UINT64_MAX) return ram > system_reserve() ? ram - system_reserve() : 0;
 #endif
     return UINT64_MAX;
 }
@@ -300,7 +374,16 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
     LOAD(c->get_device_proc, c->device, vkGetDeviceQueue);
     vkGetDeviceQueue(c->device, c->queue_family, 0, &c->queue);
 #ifndef TS5_PS5
-    if (c->memory_budget) ts5::log_line("ts5: memory for models: %.2f GiB (the driver's budget)", c->device_memory() / 1073741824.0);
+    if (c->memory_budget || c->ram_total() != UINT64_MAX) {
+        const double gib = 1073741824.0;
+        const uint64_t ram = c->ram_total();
+        if (ram != UINT64_MAX)
+            ts5::log_line("ts5: memory for models: %.2f GiB (the driver's budget and %.2f GiB of system RAM, "
+                          "%.1f GiB of it kept free for the system: TS5_SYSTEM_RESERVE_GIB)",
+                          c->device_memory() / gib, ram / gib, system_reserve() / gib);
+        else
+            ts5::log_line("ts5: memory for models: %.2f GiB (the driver's budget)", c->device_memory() / gib);
+    }
 #endif
     return c;
 }

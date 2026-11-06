@@ -285,9 +285,19 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                     r.path == "/chat/completions" || r.path == "/completions");
     u.pending = completions;  // the only requests recorded
     if (r.method == "OPTIONS") {
-        send_all(fd, "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n"
-                     "Access-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-                     "Connection: close\r\n\r\n");
+        // How long a browser may keep this answer. On the console the web
+        // apps are on other devices and the answer can't change while the
+        // title runs: 2 hours. On a computer a web app on the same desktop
+        // may come and go with a new build of the app: 10 minutes.
+#ifdef TS5_PS5
+        static const char kPreflightAge[] = "7200";
+#else
+        static const char kPreflightAge[] = "600";
+#endif
+        send_all(fd, std::string("HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n"
+                                 "Access-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                                 "Access-Control-Max-Age: ") +
+                         kPreflightAge + "\r\nConnection: close\r\n\r\n");
         close(fd);
         return;
     }
@@ -867,7 +877,16 @@ void handle(int fd, Server::State &state, Usage &u) {
         done();
         return;
     } else {
-        send_all(fd, response(404, error_body("not found: " + r.path)));
+        // Where the API is, for someone trying addresses by hand.
+#ifdef TS5_PS5
+        send_all(fd, response(404, error_body("not found: " + r.path +
+                                              " (the API is under /v1: GET /v1/models on the console's address "
+                                              "lists what's loaded)")));
+#else
+        send_all(fd, response(404, error_body("not found: " + r.path +
+                                              " (the API is under /v1: GET /v1/models lists what's loaded "
+                                              "on this computer)")));
+#endif
     }
     close(fd);
     u.closed = true;

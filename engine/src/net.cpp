@@ -125,7 +125,9 @@ bool resolve(const std::string &host, std::vector<uint32_t> &addrs, std::string 
     std::lock_guard<std::mutex> lk(mu);
     if (pool < 0) {
         sceNetInit();  // already done by the system for most titles; harmless again
-        pool = sceNetPoolCreate("ts5-net", 64 * 1024, 0);
+        // 80 KiB: answers for a few hosts at once (the model sites and
+        // their download mirrors) with room to spare.
+        pool = sceNetPoolCreate("ts5-net", 80 * 1024, 0);
         if (pool < 0) {
             err = "sceNetPoolCreate failed (" + std::to_string(pool) + ")";
             return false;

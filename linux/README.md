@@ -142,10 +142,17 @@ GiB, which the packages and `install.sh` do on a PS5 when no limit is set yet.
 It's a limit, not a reservation: Linux and Steam keep using the memory, and
 TokenStation sizes each model to what the driver says is free when it loads.
 `set 11` (any whole GiB up to all but 2) keeps a fixed amount for other apps. TokenStation itself never takes more than the GPU driver's
-budget (what's free), so a model that doesn't fit is refused instead of
-pushing Linux into swap. `TS5_GPU_MEMORY_GIB` overrides what it thinks it has.
+budget (what's free), and it always leaves 2 GiB of the system's RAM free
+for Linux, the desktop and the app: a model, its context and a helper model
+are sized to what is available less that, and a load that wouldn't leave it
+is refused with the numbers ("not enough memory: the weights and buffers
+take 8.6 GiB and ..., 7.9 GiB is free"). A GPU allocation that leaves
+Linux nothing can't be swapped out, and the OOM killer then stops
+everything else. `TS5_SYSTEM_RESERVE_GIB` changes the 2 GiB;
+`TS5_GPU_MEMORY_GIB` overrides what it thinks it has.
 
-With about 12 GiB free for models:
+With about 11 GiB for models (an idle PS5 under Debian has about 13.2 GiB
+available, less the 2 GiB kept free):
 
 | Model | Quant | Weights | Context that fits (estimate) |
 | --- | --- | ---: | ---: |

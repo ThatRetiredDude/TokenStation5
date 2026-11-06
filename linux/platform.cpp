@@ -435,14 +435,15 @@ void draw_toasts(ui::Canvas &c) {
     using namespace ui;
     const Font &f = fonts->get("body");
     constexpr int kW = 960, kLine = 40;
-    // Bottom right, above the page's button hints, newest lowest.
+    // Bottom right, above the page's button hints (118 px clears their row
+    // at 1080p with the TV's overscan off), newest lowest.
     int total = 0;
     std::vector<std::vector<std::string>> all;
     for (const Toast &t : toasts) {
         all.push_back(toast_lines(f, t.text, kW - 64));
         total += 32 + kLine * (int)all.back().size() + 16;
     }
-    int y = c.height() - 120 - total;
+    int y = c.height() - 118 - total;
     for (const auto &lines : all) {
         const int h = 32 + kLine * (int)lines.size();
         const int x = c.width() - kW - 72;
@@ -559,7 +560,9 @@ void pump() {
                 note_pad();
                 break;
             case SDL_CONTROLLERAXISMOTION: {
-                // The left stick as the arrows, with some slack in the middle.
+                // The left stick as the arrows, with some slack in the middle:
+                // pressed past 20000, let go inside 11800 (a stick on its way
+                // back doesn't flick the arrow off and on).
                 const int v = e.caxis.value;
                 uint32_t lo = 0, hi = 0;
                 if (e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) lo = kLeft, hi = kRight;
@@ -569,7 +572,7 @@ void pump() {
                 pad_stick &= ~(lo | hi);
                 if (v < -20000) pad_stick |= lo;
                 else if (v > 20000) pad_stick |= hi;
-                else if (v > -12000 && v < 12000) {}
+                else if (v > -11800 && v < 11800) {}
                 else pad_stick |= was & (lo | hi);
                 if (ime_typing() && (pad_stick & ~was)) {
                     const uint32_t n = pad_stick & ~was;
@@ -755,7 +758,8 @@ int sceSystemServiceParamGetInt(int id, int *value) {
 }
 
 // The console's memory pools: Linux has one memory; the log's "flexible
-// free" is what /proc/meminfo calls available.
+// free" is what /proc/meminfo calls available (free pages, and the cache the
+// kernel would hand back before it swaps).
 size_t sceKernelGetDirectMemorySize(void) { return 0; }
 int sceKernelAvailableDirectMemorySize(off_t, off_t, size_t, off_t *, size_t *) { return -1; }
 int sceKernelAvailableFlexibleMemorySize(size_t *size) {

@@ -312,9 +312,34 @@ public:
 
     bool init(const std::string &path, std::string &err) {
         if (!init_device(err)) return false;
+        if (!memory_fits(err)) return false;
         if (!init_pipelines(err)) return false;
         if (!upload_weights(path, err)) return false;
         return init_buffers(err);
+    }
+
+    // Before any weight is uploaded: whether the weights, buffers and the
+    // context asked for (an auto-fit one: 1024 tokens and the room it keeps
+    // for a helper) fit in what is free (VkContext::free_memory, which on
+    // Linux keeps system_reserve() of the system's RAM free). Where that
+    // can't be told, true.
+    bool memory_fits(std::string &err) {
+        const uint64_t free = ctx_->free_memory();
+        if (free == UINT64_MAX) return true;
+        uint64_t weights = 0;
+        for (const auto &t : m_.gguf.tensors) weights += t.nbytes;
+        const uint64_t fixed = vk_fixed_bytes(hp_, weights), per = kv_bytes_per_token(hp_, kv_);
+        const uint64_t ctx = (uint64_t)(n_ctx_ > 0 ? n_ctx_ : 1024) * per + (n_ctx_ > 0 ? 0 : fit_reserve_);
+        if (fixed + ctx <= free) return true;
+        const double gib = 1073741824.0;
+        char b[400];
+        snprintf(b, sizeof b,
+                 "not enough memory: the weights and buffers take %.2f GiB and %s %.2f GiB, %.2f GiB is free "
+                 "(%.1f GiB of the system's RAM is kept for the system: TS5_SYSTEM_RESERVE_GIB)",
+                 fixed / gib, n_ctx_ > 0 ? ("a context of " + std::to_string(n_ctx_) + " tokens").c_str()
+                                         : "the smallest context", ctx / gib, free / gib, system_reserve() / gib);
+        err = b;
+        return false;
     }
 
     const float *logits_view() const override { return (const float *)logits_.map; }

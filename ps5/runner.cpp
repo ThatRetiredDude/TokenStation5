@@ -341,8 +341,12 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
             for (const char *k : {"tokenizer.ggml.scores", "tokenizer.ggml.token_type", "tokenizer.ggml.merges"})
                 l->dmodel.gguf.kv.erase(k);
             for (const auto &t : l->dmodel.gguf.tensors) dweights += t.nbytes;
+            // The main context leaves the helper its weights, buffers and
+            // 4k of context, and the 0.5 GiB draft_context keeps spare (else
+            // the helper never fits beside an auto-fit model).
             dreserve = ts5::vk_fixed_bytes(l->dmodel.hp, dweights) +
-                       (uint64_t)std::min(dctx, 4096) * ts5::kv_bytes_per_token(l->dmodel.hp, ts5::KvType::F16);
+                       (uint64_t)std::min(dctx, 4096) * ts5::kv_bytes_per_token(l->dmodel.hp, ts5::KvType::F16) +
+                       (1ull << 29);
         }
     }
     const double t0 = now_s();
