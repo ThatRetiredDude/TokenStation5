@@ -243,6 +243,14 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
         return nullptr;
     }
     std::vector<const char *> dev_exts = {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME};
+    if (has_extension(dev_have, VK_AMD_SHADER_CORE_PROPERTIES_EXTENSION_NAME)) {
+        VkPhysicalDeviceShaderCorePropertiesAMD core{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CORE_PROPERTIES_AMD};
+        VkPhysicalDeviceProperties2 cp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        cp.pNext = &core;
+        vkGetPhysicalDeviceProperties2(c->physical, &cp);
+        c->compute_units = core.shaderEngineCount * core.shaderArraysPerEngineCount * core.computeUnitsPerShaderArray;
+        ts5::log_line("ts5: %u compute units", c->compute_units);
+    }
 #ifndef TS5_PS5
     if (has_extension(dev_have, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
         dev_exts.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);

@@ -23,6 +23,8 @@ struct VkContext {
     VkPhysicalDeviceProperties props{};
     VkPhysicalDeviceMemoryProperties memory{};
     uint32_t subgroup_size = 0;  // compute shaders' (RADV: 64; lavapipe: 4 to 16)
+    // The GPU's compute units (VK_AMD_shader_core_properties; 0: not told).
+    uint32_t compute_units = 0;
     // VK_KHR_display and VK_KHR_swapchain are on (asked for, and offered).
     bool display = false;
     // Arithmetic on f16 in shaders (shaderFloat16), on where the device has it.

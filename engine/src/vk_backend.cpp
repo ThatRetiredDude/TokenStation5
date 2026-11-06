@@ -407,7 +407,13 @@ private:
         // 14B (256 was 2% ahead of 128 only with the f32 kernel at 40).
         if (strstr(props_.deviceName, "RADV")) mmb_split_ = 128;
 #endif
-        if (const char *e = getenv("TS5_MMB_SPLIT")) mmb_split_ = std::max(0, atoi(e));
+        if (const char *e = getenv("TS5_MMB_WGS"))
+            mmb_wgs_ = !strcmp(e, "cu") ? ctx_->compute_units : (uint32_t)std::max(0, atoi(e));
+        if (const char *e = getenv("TS5_MMB_SLICE_COST")) mmb_slice_cost_ = atof(e);
+        if (const char *e = getenv("TS5_MMB_SPLIT")) {
+            mmb_split_ = std::max(0, atoi(e));
+            mmb_wgs_ = 0;
+        }
         if (const char *e = getenv("TS5_MMB_SLICES")) mmb_slices_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SMALL")) mmb_small_ = atoi(e) != 0;
         // The f16 prompt sums are 9-28% faster on the PS5 (Qwen3 8B 534 ->
@@ -1061,6 +1067,8 @@ private:
         uint32_t S = 1;
         if (mmb_slices_)
             S = std::min({(uint32_t)mmb_slices_, nunits, (uint32_t)(SPLIT / slice)});
+        else if (mmb_wgs_)
+            S = mmb_slices_for(big, std::min({nunits / 8, 16u, (uint32_t)(SPLIT / slice)}));
         else if (mmb_split_ && big < mmb_split_)
             S = std::min({(mmb_split_ + big - 1) / big, nunits / 8, 16u, (uint32_t)(SPLIT / slice)});
         S = std::max(1u, S);
@@ -1086,6 +1094,24 @@ private:
         const std::string &var = f16 ? mmb_var_ : mmb_var32_;  // no f32 double-buffer (64 KiB)
         dispatch(std::string(f16 ? "mmb16" : "mmb") + var + "_" + qname(w.type()), {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128,
                  (ntok + 127) / 128, what, S);
+    }
+    // Slices (at most smax) for a matrix of `big` blocks. The GPU runs about
+    // mmb_wgs_ of the kernel's workgroups at once, so in S slices the matrix
+    // takes ceil(big S / mmb_wgs_) rounds of 1/S of a block's work each, and
+    // each slice adds a write and a read of its partial sums, about
+    // mmb_slice_cost_ of a round per block. The fewest slices within 2% of
+    // the least cost.
+    uint32_t mmb_slices_for(uint32_t big, uint32_t smax) const {
+        smax = std::max(1u, smax);
+        std::vector<double> cost(smax + 1);
+        double best = 1e30;
+        for (uint32_t s = 1; s <= smax; s++) {
+            cost[s] = std::ceil((double)big * s / mmb_wgs_) / s + (s > 1 ? mmb_slice_cost_ * s * big / mmb_wgs_ : 0.0);
+            best = std::min(best, cost[s]);
+        }
+        uint32_t s = 1;
+        while (cost[s] > best * 1.02) s++;
+        return s;
     }
     struct Reduce {
         struct { uint32_t nrows, ntok, y_stride, accumulate, n_split, p_off; } pc;
@@ -1585,6 +1611,11 @@ private:
     // TS5_MMB_SLICES=N: every matrix in N.
     uint32_t mmb_split_ = 256;
     int mmb_slices_ = 0;
+    // Slices from how many workgroups run at once (mmb_slices_for) with
+    // TS5_MMB_WGS=N, or =cu for the GPU's compute units;
+    // TS5_MMB_SLICE_COST sets a slice's cost. 0: mmb_split_'s rule.
+    uint32_t mmb_wgs_ = 0;
+    double mmb_slice_cost_ = 0.03;
     // Matrices of fewer blocks than mmb_min_ use mmb too where their split
     // makes that many workgroups (TS5_MMB_SMALL=0: the 64 x 64 kernel).
     bool mmb_small_ = true;
