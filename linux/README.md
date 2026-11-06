@@ -197,6 +197,13 @@ the speed changes. The helper keeps a 16k context of its own (past that,
 drafting from the conversation's own text goes on). Off turns it off;
 `TS5_DRAFT_MODEL=/path/to.gguf` in `ts5.env` picks one.
 
+Which file: the helper is read once for every token it guesses, so a
+smaller quantization pays. On the PS5 with Qwen3 8B, Qwen3 0.6B in Q4_K_M
+(0.37 GiB, unsloth/Qwen3-0.6B-GGUF) guesses 23% faster than in Q8_0 and
+its guesses are kept as often, so replies come 5-7% faster on chat and
+4-5% on code than with Q8_0: about +20% on chat and +26% on code over no
+helper. With several matching files beside the model, the smallest is used.
+
 ## Tune for your machine
 
 The engine's kernel choices were tuned on the PS5's own driver. Linux runs
