@@ -14,6 +14,7 @@
 //   ts5 search "query"                   one web_search, as the model would get it
 //   ts5 usage-parse FILE                 a usage.tsv's requests, written again as v1 (for tests)
 //   ts5 fetch URL FILE [--sha256 HEX]    download URL to FILE, going on from a stopped one
+//   ts5 peak [--device N] [--gib G]      the GPU's read bandwidth and FMA rates (speed ceilings)
 //
 // Common: --backend vk|cpu (default vk when built with Vulkan), --device N.
 // serve with TS5_USAGE_LOG=FILE writes a line per API request to FILE
@@ -45,6 +46,7 @@
 #include "usage.h"
 #include "websearch.h"
 #ifdef TS5_VULKAN
+#include "peak.h"
 #include "vk_context.h"
 #endif
 
@@ -70,7 +72,7 @@ int usage() {
     fprintf(stderr,
             "usage: ts5 serve|run|bench|check|tokenize|logits|prompt -m model.gguf [options]\n"
             "       ts5 search QUERY | ts5 tool-parse hermes|llama3|mistral|gemma [TOOL...] < TEXT | ts5 usage-parse FILE\n"
-            "       ts5 fetch URL FILE [--sha256 HEX]\n"
+            "       ts5 fetch URL FILE [--sha256 HEX] | ts5 peak [--device N] [--gib G]\n"
             "  -c N|auto      context length (default 8192; auto: what fits in GPU memory)\n"
             "  --backend B    vk or cpu\n"
             "  --device N     Vulkan device index\n"
@@ -238,6 +240,21 @@ int fetch_command(int argc, char **argv) {
 
 int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     if (argc >= 2 && std::string(argv[1]) == "fetch") return fetch_command(argc, argv);
+    if (argc >= 2 && std::string(argv[1]) == "peak") {
+#ifdef TS5_VULKAN
+        int device = 0;
+        double gib = 1.0;
+        for (int i = 2; i + 1 < argc; i += 2) {
+            if (std::string(argv[i]) == "--device") device = atoi(argv[i + 1]);
+            else if (std::string(argv[i]) == "--gib") gib = std::max(0.0625, atof(argv[i + 1]));
+            else return usage();
+        }
+        return peak_command(device, gib);
+#else
+        fprintf(stderr, "ts5: built without Vulkan\n");
+        return 1;
+#endif
+    }
     if (argc >= 2 && (std::string(argv[1]) == "search" || std::string(argv[1]) == "tool-parse" ||
                       std::string(argv[1]) == "usage-parse"))
         return no_model_command(argc, argv);
