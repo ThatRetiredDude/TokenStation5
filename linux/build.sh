@@ -136,7 +136,7 @@ done
 # TokenStation5's own files, every time.
 title_objects=()
 engine_objects=()
-for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
+for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,peak,tokenizer,engine,server,checks}.cpp \
         "$root"/engine/src/{tools,known_good,net,websearch,ca_bundle,log}.cpp; do
     o="$out/obj/own/engine_$(basename "$src" .cpp).o"
     engine_objects+=("$o")
