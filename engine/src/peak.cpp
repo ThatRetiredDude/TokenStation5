@@ -257,11 +257,12 @@ struct Peak {
     // caches while the buffer holds more than n slices), with a compute to
     // compute barrier between them when `barrier`, as a token's dependent
     // kernels have.
+    // two: each workgroup reads half its words from each half of the slice.
     bool chain(VkPipeline p, VkBuffer b0, VkDeviceSize b0_size, VkBuffer b1, VkDeviceSize slice, uint32_t groups,
-               int n, bool barrier, int reps, double &ms, std::string &err) {
+               int n, bool barrier, int reps, double &ms, std::string &err, bool two = false) {
         ms = 1e30;
         const uint32_t words = (uint32_t)(slice / 16);
-        const PC pc{words, 0, (words + groups - 1) / groups};
+        const PC pc{words, two ? words / 2 : 0, (words + groups - 1) / groups};
         for (int r = 0; r < reps; r++) {
             if (!ok(vk.vkResetCommandBuffer(cmd, 0), "vkResetCommandBuffer", err)) return false;
             VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -366,6 +367,19 @@ int peak_command(int device, double read_gib) {
                        "between, %.1f us (%.1f GB/s) without\n",
                        slice / 1e6, g, chain_n, us_with, slice / (us_with * 1e3), us_without,
                        slice / (us_without * 1e3));
+            }
+            // Qwen3 8B's gate+up as its kernel reads it: each workgroup's
+            // rows of the two matrices, 28.3 MB apart.
+            if (err.empty()) {
+                const VkDeviceSize slice = (VkDeviceSize)(56.6 * 1e6) / 512 * 512;
+                const uint32_t g = (uint32_t)(slice / 36864);
+                double one = 0, two = 0;
+                if (slice * 2 <= bytes && pk.chain(pread, big, bytes, out, slice, g, chain_n, true, 3, one, err) &&
+                    pk.chain(pread, big, bytes, out, slice, g, chain_n, true, 3, two, err, true))
+                    printf("reads of %.1f MB with a barrier between: %.1f us from one stream, %.1f us from two halves "
+                           "(%.1f GB/s against %.1f)\n",
+                           slice / 1e6, one * 1e3 / chain_n, two * 1e3 / chain_n, slice / (one * 1e6 / chain_n),
+                           slice / (two * 1e6 / chain_n));
             }
             double empty = 0;
             if (err.empty() && pk.chain(pread, big, bytes, out, 256, 1, 256, true, 3, empty, err))
