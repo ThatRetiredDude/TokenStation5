@@ -1,8 +1,0 @@
-#version 450
-#extension GL_GOOGLE_include_directive : require
-#define QTYPE T_Q5_K
-#define MMB_F16
-#define MMB_DBUF
-#define MMB_LATE
-#define MMB_N64
-#include "matmul_big.glsl"

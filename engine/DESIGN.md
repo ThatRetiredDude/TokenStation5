@@ -145,15 +145,17 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   Linux, 0 for never;
   `TS5_MMB_SLICES=N` splits every matrix in N). Where the driver tells the
   GPU's compute units (VK_AMD_shader_core_properties), each matrix's slices
-  come from them instead: the driver tells each prompt kernel's waves a
-  SIMD holds (VK_KHR_pipeline_executable_properties; RADV's "Subgroups per
-  SIMD", from its registers and shared memory), so a compute unit holds
-  floor(waves x SIMDs / 8) of its workgroups (dq's 168 registers a thread:
-  6 waves, one workgroup; 128 or fewer: two), W in all, and a matrix of B
-  blocks in S slices takes ceil(B S / W) rounds of 1/S of a block's work, and each slice
+  come from them instead: one workgroup a compute unit, W in all, so a
+  matrix of B blocks in S slices takes ceil(B S / W) rounds of 1/S of a
+  block's work, and each slice
   costs about 5% of a round per block in partial sums written and added
   up; the fewest slices within 2% of the least cost (`TS5_MMB_WGS=N` sets
-  W, `cu` one per compute unit, `TS5_MMB_SLICE_COST` the 5%). The best fixed split differed
+  W, `cu` one per compute unit, `TS5_MMB_SLICE_COST` the 5%). W stays the
+  compute units even for a kernel that fits two workgroups on one (dql at
+  128 registers, which the driver's statistics tell: the log prints each
+  prompt kernel's waves a SIMD, VK_KHR_pipeline_executable_properties):
+  slices for 80 made Qwen3 8B Q8_0's prompts 8% slower and Coder 7B's no
+  faster, since the second workgroup shares the unit's ALUs. The best fixed split differed
   per model on the PS5 (48 for Qwen3 8B, 64 for Coder 7B, where 48 cost
   5%); from the 40 compute units, prompts were 6.1% (Qwen3 8B, 766 -> 813
   tok/s) and 5.3% (Coder 7B, 896 -> 943) faster than the default 128, as
@@ -208,12 +210,14 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   (Q4_K, Q8_0; Q6_K 152) against dq's 168, so two workgroups share a
   compute unit, and on the PS5 it reads Coder 7B's prompts 3.5% faster
   (986 against 953 tok/s; gate+up 264 against 282 ms) and Qwen3 8B Q8_0's
-  3.6% (893 against 861), while dq is 12% faster on Qwen3 8B Q6_K (where
-  dql still fits one workgroup) and 1% on its Q4_K_M. The `n` variants
-  (`MMB_N64`: `n`, `dn`, `dln`) take blocks of 128 rows x 64 tokens, a
-  thread summing 8 rows x 4 tokens: 80-100 registers (Q6_K 128 for dn),
-  two or more workgroups a compute unit, at 1.5x the shared-memory reads a
-  product; x comes in 2-value loads by quads of tokens. Padding the x tile's rows so the
+  3.9% (894 against 860), so Q8_0 weights take dql by default. dq stays
+  the rest's: Qwen3 8B Q4_K_M 845 against 765, Q6_K 833 against 698 (where
+  dql's 152 registers still fit one workgroup), Llama 3.1 8B 849 against
+  793; only Coder 7B (958 against 975) goes the other way. Blocks of 128
+  rows x 64 tokens (a thread summing 8 rows x 4 tokens, 80-100 registers,
+  two workgroups a compute unit, 1.5x the shared-memory reads a product)
+  were 35-50% slower on every model (Qwen3 8B 495 against 845), with each
+  step's dequantizing spread over half the products. Padding the x tile's rows so the
   quad stores spread over four banks (a `qp` variant, since dropped) made
   no difference on the PS5 (every model within 0.3% of q at 512 and 4096
   tokens): those stores were never the pace. Every variant sums in the same

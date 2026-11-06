@@ -17,14 +17,10 @@
 // takes one barrier instead of two, and loads two steps ahead.
 // With MMB_LATE (and MMB_DBUF), the next step's values are stored after
 // the current one's sums, as before 82c2ccc: the compiler then waits for
-// their loads after the sums, yet some models' prompts ran faster so.
+// their loads after the sums, but the loads aren't live during them, so
+// the kernel needs fewer registers (Q4_K and Q8_0: 128 against 168).
 // With MMB_XQ, a thread loads 4 values of each of its quad's 4 tokens
 // (instead of 16 of one token) and stores them as 4 vectors, not 16 scalars.
-// With MMB_N64, a block is 128 rows x 64 tokens and a thread computes 8
-// rows x 4 tokens: half the sums, so it needs far fewer registers and two
-// or more workgroups fit on a compute unit (at 168 registers only one did,
-// and its barriers and stores left the unit idle). A thread loads 2 values
-// of each of its quad's 4 tokens (always the quad loads).
 // Every load is unconditional: rows and tokens past the matrix's read its
 // last row and token, and store() zeroes them. A load under a per-thread
 // condition made the compiler (RADV's ACO) wait for it right where it was
@@ -51,13 +47,7 @@
 #define T_Q6_K 14
 
 #define BM 128
-#ifdef MMB_N64
-#define BN 64
-#define TN 4  // tokens a thread sums
-#else
 #define BN 128
-#define TN 8
-#endif
 #define BK 32
 #define WG 256
 layout(local_size_x = WG) in;
@@ -69,12 +59,6 @@ layout(std430, binding = 0) readonly buffer Wbuf { uint16_t w16[]; };
 layout(std430, binding = 0) readonly buffer Wbuf32 { uint w32[]; };
 #endif
 layout(std430, binding = 1) readonly buffer Xbuf { vec4 X4[]; };
-layout(std430, binding = 1) readonly buffer Xbuf2 { vec2 X2[]; };
-#ifdef MMB_N64
-#define XV vec2
-#else
-#define XV vec4
-#endif
 layout(std430, binding = 2) buffer Ybuf { float Y[]; };
 layout(std430, binding = 3) writeonly buffer Pbuf { float P[]; };
 
@@ -214,9 +198,9 @@ void dequant(Raw w, uint u, out float v[16]) {
 
 // Dequantizes w (unit u) and stores it and x into shared buffer b; rows
 // past the matrix (!w_ok) and tokens past the batch (!x_ok) store zeros.
-void store(uint b, uint u, bool w_ok, Raw w, XV x[4], bvec4 x_ok, uint lr, uint lh) {
+void store(uint b, uint u, bool w_ok, Raw w, vec4 x[4], bvec4 x_ok, uint lr, uint lh) {
     for (uint i = 0; i < 4; i++)
-        if (!x_ok[i]) x[i] = XV(0.0);
+        if (!x_ok[i]) x[i] = vec4(0.0);
     float v[16];
     if (w_ok) {
         dequant(w, u, v);
@@ -224,10 +208,7 @@ void store(uint b, uint u, bool w_ok, Raw w, XV x[4], bvec4 x_ok, uint lr, uint 
         for (uint l = 0; l < 16; l++) v[l] = 0.0;
     }
     for (uint l = 0; l < 16; l++) Ws[b][16 * lh + l][lr / 4][lr % 4] = SF(v[l]);
-#if defined(MMB_N64)
-    const uint tid = gl_LocalInvocationID.x;
-    for (uint c = 0; c < 2; c++) Xs[b][2 * (tid / 16) + c][tid % 16] = SV(x[0][c], x[1][c], x[2][c], x[3][c]);
-#elif defined(MMB_XQ)
+#ifdef MMB_XQ
     for (uint c = 0; c < 4; c++) Xs[b][16 * lh + 4 * (lr % 4) + c][lr / 4] = SV(x[0][c], x[1][c], x[2][c], x[3][c]);
 #else
     for (uint i = 0; i < 4; i++) {
@@ -242,24 +223,14 @@ void store(uint b, uint u, bool w_ok, Raw w, XV x[4], bvec4 x_ok, uint lr, uint 
 void main() {
     const uint tid = gl_LocalInvocationID.x;
     const uint r0 = gl_WorkGroupID.x * BM, t0 = gl_WorkGroupID.y * BN;
-    const uint tr = tid % 16, tt = tid / 16;  // rows 4 tr + {0..3, 64..67}, tokens 4 tt + {0..3, 64..67 (TN 8)}
+    const uint tr = tid % 16, tt = tid / 16;  // rows 4 tr + {0..3, 64..67}, tokens 4 tt + {0..3, 64..67}
     const uint split = gl_WorkGroupID.z;
     const uint u0 = split * pc.units, u1 = min(pc.ncols / 32, u0 + pc.units);
     // Loads: row tid % 128, values 16 (tid / 128) .. + 15 of the unit.
     const uint lr = tid % 128, lh = tid / 128;
     const bool w_ok = r0 + lr < pc.nrows;
     const uint wr = min(r0 + lr, pc.nrows - 1);
-#if defined(MMB_N64)
-    // Tokens 4 (tid % 16) + j, values 2 (tid / 16) and + 1 of the unit.
-    const uint tq = t0 + 4 * (tid % 16);
-    bvec4 x_ok;
-    uint xb[4];
-    for (uint j = 0; j < 4; j++) {
-        x_ok[j] = tq + j < pc.ntok;
-        xb[j] = (pc.x_off + min(tq + j, pc.ntok - 1) * pc.x_stride) / 2 + tid / 16;
-    }
-#define LOAD_X(u) for (uint j = 0; j < 4; j++) x[j] = X2[xb[j] + 16 * (u)]
-#elif defined(MMB_XQ)
+#ifdef MMB_XQ
     // Tokens 4 (lr / 4) + j, values 16 lh + 4 (lr % 4) .. + 3 of the unit.
     const uint tq = t0 + 4 * (lr / 4);
     bvec4 x_ok;
@@ -275,12 +246,12 @@ void main() {
 #define LOAD_X(u) for (uint i = 0; i < 4; i++) x[i] = X4[xb + 8 * (u) + i]
 #endif
 
-    vec4 acc[2][TN];
+    vec4 acc[2][8];
     for (uint a = 0; a < 2; a++)
-        for (uint j = 0; j < TN; j++) acc[a][j] = vec4(0.0);
+        for (uint j = 0; j < 8; j++) acc[a][j] = vec4(0.0);
 
     Raw w;
-    XV x[4];
+    vec4 x[4];
     w = load_w(wr, u0, lh);
     LOAD_X(u0);
 
@@ -323,26 +294,23 @@ void main() {
         LOAD_X(un);
 #endif
 #ifdef MMB_F16
-        SV s[2][TN];
+        SV s[2][8];
         for (uint a = 0; a < 2; a++)
-            for (uint j = 0; j < TN; j++) s[a][j] = SV(0.0);
+            for (uint j = 0; j < 8; j++) s[a][j] = SV(0.0);
 #define S s
 #else
 #define S acc
 #endif
         [[unroll]] for (uint k = 0; k < BK; k++) {
-            const SV w0 = Ws[b][k][tr], w1 = Ws[b][k][16 + tr], x0 = Xs[b][k][tt];
+            const SV w0 = Ws[b][k][tr], w1 = Ws[b][k][16 + tr], x0 = Xs[b][k][tt], x1 = Xs[b][k][16 + tt];
             S[0][0] += w0 * x0.x; S[0][1] += w0 * x0.y; S[0][2] += w0 * x0.z; S[0][3] += w0 * x0.w;
-            S[1][0] += w1 * x0.x; S[1][1] += w1 * x0.y; S[1][2] += w1 * x0.z; S[1][3] += w1 * x0.w;
-#if TN == 8
-            const SV x1 = Xs[b][k][16 + tt];
             S[0][4] += w0 * x1.x; S[0][5] += w0 * x1.y; S[0][6] += w0 * x1.z; S[0][7] += w0 * x1.w;
+            S[1][0] += w1 * x0.x; S[1][1] += w1 * x0.y; S[1][2] += w1 * x0.z; S[1][3] += w1 * x0.w;
             S[1][4] += w1 * x1.x; S[1][5] += w1 * x1.y; S[1][6] += w1 * x1.z; S[1][7] += w1 * x1.w;
-#endif
         }
 #ifdef MMB_F16
         for (uint a = 0; a < 2; a++)
-            for (uint j = 0; j < TN; j++) acc[a][j] += vec4(s[a][j]);
+            for (uint j = 0; j < 8; j++) acc[a][j] += vec4(s[a][j]);
 #endif
 #ifdef MMB_DBUF
 #ifdef MMB_LATE
@@ -352,7 +320,7 @@ void main() {
 #endif
     }
 
-    for (uint j = 0; j < TN; j++) {
+    for (uint j = 0; j < 8; j++) {
         const uint t = t0 + (j < 4 ? 4 * tt + j : 64 + 4 * tt + j - 4);
         if (t >= pc.ntok) continue;
         for (uint a = 0; a < 2; a++)

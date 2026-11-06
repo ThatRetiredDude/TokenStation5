@@ -249,7 +249,6 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
         cp.pNext = &core;
         vkGetPhysicalDeviceProperties2(c->physical, &cp);
         c->compute_units = core.shaderEngineCount * core.shaderArraysPerEngineCount * core.computeUnitsPerShaderArray;
-        c->simds_per_cu = core.simdPerComputeUnit;
         ts5::log_line("ts5: %u compute units", c->compute_units);
     }
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pe{

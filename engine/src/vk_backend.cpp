@@ -127,18 +127,6 @@
 #include "mmb16dql_q5_k.spv.h"
 #include "mmb16dql_q6_k.spv.h"
 #include "mmb16dql_q8_0.spv.h"
-#include "mmb16dn_q4_k.spv.h"
-#include "mmb16dn_q5_k.spv.h"
-#include "mmb16dn_q6_k.spv.h"
-#include "mmb16dn_q8_0.spv.h"
-#include "mmb16dln_q4_k.spv.h"
-#include "mmb16dln_q5_k.spv.h"
-#include "mmb16dln_q6_k.spv.h"
-#include "mmb16dln_q8_0.spv.h"
-#include "mmb16n_q4_k.spv.h"
-#include "mmb16n_q5_k.spv.h"
-#include "mmb16n_q6_k.spv.h"
-#include "mmb16n_q8_0.spv.h"
 #include "mmbq_q4_k.spv.h"
 #include "mmbq_q5_k.spv.h"
 #include "mmbq_q6_k.spv.h"
@@ -217,8 +205,9 @@ struct Pipe {
     VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
     uint32_t nbind = 0;
     // Where the driver tells (VK_KHR_pipeline_executable_properties, asked
-    // for the prompt kernels): its waves (subgroups) a SIMD holds at once,
-    // which its registers and shared memory decide, and its subgroup size.
+    // for the prompt kernels, for the log): its waves (subgroups) a SIMD
+    // holds at once, which its registers and shared memory decide, and its
+    // subgroup size.
     uint32_t waves = 0, wave_size = 0;
 };
 
@@ -432,15 +421,13 @@ private:
         // TS5_MMB_SPLIT, 48, by 2.8%) and +5.3% on Coder 7B (896 -> 943,
         // level with its best, 64); 60 and 80 were slower, so one workgroup
         // runs per compute unit.
-        // How many run at once comes from the kernel (concurrent_wgs): the
-        // workgroups a compute unit holds, which its registers decide. A
-        // number in TS5_MMB_WGS fixes it ("cu": one per compute unit).
+        // (Slices from the workgroups that fit at once, two a compute unit
+        // for the kernels of 128 registers or fewer, were 8% slower with
+        // dql on Qwen3 8B Q8_0 and no faster on Coder 7B: a second
+        // workgroup shares the unit's ALUs, so it doesn't make a round.)
         mmb_wgs_ = ctx_->compute_units;
-        mmb_wgs_auto_ = true;
-        if (const char *e = getenv("TS5_MMB_WGS")) {
+        if (const char *e = getenv("TS5_MMB_WGS"))
             mmb_wgs_ = !strcmp(e, "cu") ? ctx_->compute_units : (uint32_t)std::max(0, atoi(e));
-            mmb_wgs_auto_ = false;
-        }
         if (const char *e = getenv("TS5_MMB_SLICE_COST")) mmb_slice_cost_ = atof(e);
         if (const char *e = getenv("TS5_MMB_SPLIT")) {
             mmb_split_ = std::max(0, atoi(e));
@@ -486,11 +473,18 @@ private:
         // the sums too), dq is the f16 default: on the PS5 the old dq,
         // whose loads still waited, was already ahead of q by 2.5% (Qwen3
         // 8B, 765 -> 784) and 6.4% (Coder 7B, 896 -> 953).
+        // Q8_0 weights take dql (dq storing after the sums: 128 registers
+        // against 168, so two workgroups share a compute unit): on the PS5
+        // Qwen3 8B Q8_0 prompts 860 -> 894 tok/s. On Q4_K and Q6_K dq is
+        // ahead (Qwen3 8B Q4_K_M 845 against 765, Q6_K 833 against 698,
+        // Llama 3.1 8B 849 against 793; Coder 7B 958 against 975).
         mmb_var_ = "dq";
+        mmb_var_q8_ = "dql";
         if (const char *e = getenv("TS5_MMB_VAR")) {
             mmb_var_ = e;
+            mmb_var_q8_ = e;
             mmb_var32_ = e;
-            for (char c : {'d', 'l', 'n'})  // f16 only
+            for (char c : {'d', 'l'})  // f16 only
                 mmb_var32_.erase(std::remove(mmb_var32_.begin(), mmb_var32_.end(), c), mmb_var32_.end());
         }
         kv_ = kv_type_setting();
@@ -673,20 +667,12 @@ private:
         if (p.waves) ts5::log_line("ts5: %s: %u waves of %u a SIMD", name.c_str(), p.waves, p.wave_size);
     }
 
-    // How many of the prompt kernel `name`'s workgroups (256 threads) the
-    // GPU runs at once: the compute units times the workgroups each holds,
-    // from the driver's statistics (1 where it doesn't tell).
-    uint32_t concurrent_wgs(const std::string &name) const {
-        uint32_t per_cu = 1;
-        auto it = pipes_.find(name);
-        if (it != pipes_.end() && it->second.waves && it->second.wave_size && ctx_->simds_per_cu)
-            per_cu = std::max(1u, it->second.waves * ctx_->simds_per_cu / ((256 + it->second.wave_size - 1) / it->second.wave_size));
-        return ctx_->compute_units * per_cu;
-    }
-
-    // Of the prompt kernels (mmb*), the variants TS5_MMB_VAR chose only.
+    // Of the prompt kernels (mmb*), the variants in use only.
     bool wanted(const std::string &n) const {
-        if (n.rfind("mmb16", 0) == 0) return n.substr(5, n.find('_') - 5) == mmb_var_;
+        if (n.rfind("mmb16", 0) == 0) {
+            const std::string v = n.substr(5, n.find('_') - 5);
+            return v == mmb_var_ || (v == mmb_var_q8_ && n.find("_q8_0") != std::string::npos);
+        }
         if (n.rfind("mmb", 0) == 0 && n != "mmb_reduce") return n.substr(3, n.find('_') - 3) == mmb_var32_;
         return true;
     }
@@ -710,9 +696,6 @@ private:
         P(mmb16q_q4_k, 4) P(mmb16q_q5_k, 4) P(mmb16q_q6_k, 4) P(mmb16q_q8_0, 4)
         P(mmb16dq_q4_k, 4) P(mmb16dq_q5_k, 4) P(mmb16dq_q6_k, 4) P(mmb16dq_q8_0, 4)
         P(mmb16dql_q4_k, 4) P(mmb16dql_q5_k, 4) P(mmb16dql_q6_k, 4) P(mmb16dql_q8_0, 4)
-        P(mmb16dn_q4_k, 4) P(mmb16dn_q5_k, 4) P(mmb16dn_q6_k, 4) P(mmb16dn_q8_0, 4)
-        P(mmb16dln_q4_k, 4) P(mmb16dln_q5_k, 4) P(mmb16dln_q6_k, 4) P(mmb16dln_q8_0, 4)
-        P(mmb16n_q4_k, 4) P(mmb16n_q5_k, 4) P(mmb16n_q6_k, 4) P(mmb16n_q8_0, 4)
         P(mmbq_q4_k, 4) P(mmbq_q5_k, 4) P(mmbq_q6_k, 4) P(mmbq_q8_0, 4)
         if (mmb_ && !pipes_.count("mmb16" + mmb_var_ + "_q4_k")) {
             err = "no prompt kernel variant \"" + mmb_var_ + "\" (TS5_MMB_VAR)";
@@ -1167,17 +1150,14 @@ private:
         const uint32_t rows = pc.nrows, ntok = pc.ntok, nunits = pc.ncols / 32;
         const size_t slice = (size_t)rows * ntok;
         const bool f16 = mmb_f16_ && (mmb_f16_skip_.empty() || mmb_f16_skip_.find("," + role(w) + ",") == std::string::npos);
-        const std::string &var = f16 ? mmb_var_ : mmb_var32_;  // no f32 double-buffer (64 KiB)
+        // (The f32 kernel has no double buffer: its tiles would fill 64 KiB.)
+        const std::string &var = !f16 ? mmb_var32_ : w.type() == GGML_Q8_0 ? mmb_var_q8_ : mmb_var_;
         const std::string name = std::string(f16 ? "mmb16" : "mmb") + var + "_" + qname(w.type());
-        // Blocks of 128 rows x 128 tokens, or 64 tokens (the "n" variants).
-        const uint32_t bn = var.find('n') != std::string::npos ? 64 : 128;
-        if (bn != 128) big = ((rows + 127) / 128) * ((ntok + bn - 1) / bn);
         uint32_t S = 1;
         if (mmb_slices_)
             S = std::min({(uint32_t)mmb_slices_, nunits, (uint32_t)(SPLIT / slice)});
         else if (mmb_wgs_)
-            S = mmb_slices_for(big, mmb_wgs_auto_ ? concurrent_wgs(name) : mmb_wgs_,
-                               std::min({nunits / 8, 16u, (uint32_t)(SPLIT / slice)}));
+            S = mmb_slices_for(big, mmb_wgs_, std::min({nunits / 8, 16u, (uint32_t)(SPLIT / slice)}));
         else if (mmb_split_ && big < mmb_split_)
             S = std::min({(mmb_split_ + big - 1) / big, nunits / 8, 16u, (uint32_t)(SPLIT / slice)});
         S = std::max(1u, S);
@@ -1199,7 +1179,7 @@ private:
             reduces_.push_back({{rows, ntok, pc.y_stride, pc.accumulate, S, p_off}, &y, what});
             split_used_ = p_off + S * slice;
         }
-        dispatch(name, {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128, (ntok + bn - 1) / bn, what, S);
+        dispatch(name, {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128, (ntok + 127) / 128, what, S);
     }
     // Slices (at most smax) for a matrix of `big` blocks. The GPU runs about
     // wgs of the kernel's workgroups at once, so in S slices the matrix
@@ -1723,7 +1703,6 @@ private:
     // of 1 to 8 slices on Qwen3 8B and Coder 7B within 2%). 0, or
     // TS5_MMB_SPLIT set: mmb_split_'s rule.
     uint32_t mmb_wgs_ = 0;
-    bool mmb_wgs_auto_ = false;
     PFN_vkGetPipelineExecutablePropertiesKHR get_props_ = nullptr;
     PFN_vkGetPipelineExecutableStatisticsKHR get_stats_ = nullptr;
     double mmb_slice_cost_ = 0.05;
@@ -1739,7 +1718,7 @@ private:
     // find which matmuls put a model over the check's bar, and to keep them
     // there.
     std::string mmb_f16_skip_;
-    std::string mmb_var_, mmb_var32_;  // the f16 and f32 prompt kernels' variants (TS5_MMB_VAR)
+    std::string mmb_var_, mmb_var32_, mmb_var_q8_;  // the f16 and f32 prompt kernels' variants (TS5_MMB_VAR)
     size_t split_used_ = 0;  // floats of split_ that kernels may still read
     // The KV cache's type (TS5_KV=q8 or f16).
     KvType kv_ = KvType::F16;

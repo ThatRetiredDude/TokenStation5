@@ -101,12 +101,8 @@ TS5_MMB_MIN=1 TS5_MMB_VAR= python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --t
     "${kmix[@]}"
 TS5_MMB_MIN=1 TS5_MMB_VAR=q python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
     "${kmix[@]}"
-# The old double buffer (stores after the sums), and blocks of 64 tokens.
+# The old double buffer (stores after the sums; Q8_0's default) everywhere.
 TS5_MMB_MIN=1 TS5_MMB_VAR=dql python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
-    "${kmix[@]}"
-TS5_MMB_MIN=1 TS5_MMB_VAR=dn TS5_MMB_WGS=4 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
-    --ntok 300 "${kmix[@]}"
-TS5_MMB_MIN=1 TS5_MMB_VAR=n python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
     "${kmix[@]}"
 # Slices from how many workgroups run at once (the compute units on AMD
 # GPUs; lavapipe doesn't tell them): 4 makes these small matrices split.
