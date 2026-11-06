@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -257,6 +258,28 @@ bool run_bench(const Model &m, Backend &b, int pp, int tg, BenchResult &r, std::
     r.pp_profile = b.take_profile();
     if (pp == 0) r.pp_profile.clear();
     if (progress) progress("generating " + std::to_string(tg) + " tokens");
+    // TS5_BENCH_BATCH=N (2 to 8): generation in passes of N tokens with
+    // every position's logits, as a helper's drafts are checked, so the
+    // profile is the verify kernels' and tg tok/s counts N tokens a pass.
+    int batch = 1;
+    if (const char *e = getenv("TS5_BENCH_BATCH")) batch = std::min(8, std::max(1, atoi(e)));
+    if (batch > 1) {
+        std::vector<float> lgb((size_t)batch * m.hp.n_vocab);
+        std::vector<int32_t> bt(toks.begin(), toks.begin() + std::min<size_t>(toks.size(), batch));
+        while ((int)bt.size() < batch) bt.push_back(toks[0]);
+        // One pass first: the batch's pipelines and their first use.
+        if (!b.forward(bt.data(), batch, pp, lgb.data(), true, err)) return false;
+        b.take_profile();
+        t = now_ms();
+        int passes = 0;
+        for (int i = 0; i + batch <= tg; i += batch, passes++)
+            if (!b.forward(bt.data(), batch, pp + i, lgb.data(), true, err)) return false;
+        const double ms = now_ms() - t;
+        r.tg_tps = passes ? passes * batch * 1000.0 / ms : 0;
+        if (passes) ts5::log_line("ts5: bench: %d passes of %d tokens, %.3f ms a pass", passes, batch, ms / passes);
+        r.tg_profile = b.take_profile();
+        return true;
+    }
     t = now_ms();
     int32_t tk = toks[0];
     for (int i = 0; i < tg; i++)
