@@ -76,6 +76,9 @@
 #include "mv16n_q4_k.spv.h"
 #include "mv16n_q6_k.spv.h"
 #include "mv16_q4_k.spv.h"
+#include "mv16g_q4_k.spv.h"
+#include "mv16g_q6_k.spv.h"
+#include "mv16g_glu_q4_k.spv.h"
 #include "mv16_q6_k.spv.h"
 #include "mv16_q5_k.spv.h"
 #include "mv16_q8_0.spv.h"
@@ -407,6 +410,7 @@ private:
         if (const char *e = getenv("TS5_FAST_MATVEC")) fast_matvec_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV_ROWS")) mv_rows_ = std::min(8, std::max(1, atoi(e)));
         if (const char *e = getenv("TS5_MV_ROWS_MIN")) mv_rows_min_ = std::max(0, atoi(e));
+        if (const char *e = getenv("TS5_MV_RG")) mv_rg_ = atoi(e) == 4 ? 4 : 1;
         if (const char *e = getenv("TS5_ATTN")) attn_fast_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_SPLITS")) attn_splits_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
@@ -747,6 +751,7 @@ private:
         MV(mv16n_q4_k, 4) MV(mv16n_q6_k, 4) MV(mv16n_glu_q4_k, 5)
         MV(mv16_q5_k, 3) MV(mv16_q8_0, 3) MV(mv16_glu_q5_k, 4) MV(mv16_glu_q8_0, 4)
         MV(mv16n_q5_k, 4) MV(mv16n_q8_0, 4) MV(mv16n_glu_q5_k, 5) MV(mv16n_glu_q8_0, 5)
+        MV(mv16g_q4_k, 3) MV(mv16g_q6_k, 3) MV(mv16g_glu_q4_k, 4)
 #undef MV
         // The verify-batch mat-vecs once per batch size (their token loop is
         // compile-time), each twice like the one-token ones: mvt_rows_ rows
@@ -1420,9 +1425,17 @@ private:
     void mat_vec(const std::string &name, std::initializer_list<const Buf *> bufs, const PC &pc, uint32_t rows,
                  const std::string &what) {
         const bool one = rows < (uint32_t)mv_rows_min_ || mv_rows_ == 1;
-        const uint32_t nr = one ? 1 : mv_rows_, groups = (rows + nr - 1) / nr;
+        // TS5_MV_RG=4: the mv16g_* builds where there is one, 4 groups of
+        // rows a workgroup.
+        std::string n = name;
+        uint32_t nr = one ? 1 : mv_rows_;
+        if (mv_rg_ > 1 && name.compare(0, 5, "mv16_") == 0 && pipes_.count("mv16g_" + name.substr(5))) {
+            n = "mv16g_" + name.substr(5);
+            nr *= mv_rg_;
+        }
+        const uint32_t groups = (rows + nr - 1) / nr;
         const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
-        dispatch(one ? name + ".1" : name, bufs, pc, mx, my, what);
+        dispatch(one ? n + ".1" : n, bufs, pc, mx, my, what);
     }
 
     // add: y += the normalized x (Gemma's norms after attention and the FFN);
@@ -1673,6 +1686,10 @@ private:
     // 1024 takes in Qwen3 8B and 14B's K and V (8 heads of 128: +1.4% and
     // +0.9% generation on the console); 512-row ones (4 KV heads) stay at one.
     int mv_rows_min_ = 1024;
+    // Groups of 64 threads a one-token workgroup (TS5_MV_RG: 1, or 4 for
+    // the mv16g_* builds of Q4_K, Q6_K and the Q4_K gate+up, whose groups
+    // load the same x at once). 1 until the PS5 A/B.
+    uint32_t mv_rg_ = 1;
     // Attention with attn (TS5_ATTN=0: the old kernel); TS5_ATTN_SPLITS=N
     // sets how many slices generation splits the keys into.
     bool attn_fast_ = true;

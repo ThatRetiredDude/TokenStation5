@@ -16,7 +16,14 @@
 
 #define WG 64
 #define NRMAX 8
-layout(local_size_x = WG) in;
+// RG (mv16g_*: 4) groups of WG threads share a workgroup, each its own NR
+// rows: they load the same x at the same time, so one load of x through
+// the GPU's L1 serves RG * NR rows rather than NR.
+#ifndef RG
+#define RG 1
+#endif
+#define WGT (WG * RG)
+layout(local_size_x = WGT) in;
 layout(constant_id = 0) const uint NR = 1;  // rows per workgroup, at most NRMAX
 
 layout(std430, binding = 0) readonly buffer W32 { uint w32[]; };
@@ -26,7 +33,7 @@ layout(std430, binding = 2) buffer Ybuf { float Y[]; };
 // NORM (as mv16_q4_k.glsl): x before its RMSNorm, g its weights.
 #ifdef NORM
 layout(std430, binding = 3) readonly buffer Gbuf { vec4 G4[]; };
-shared float sq[WG];
+shared float sq[WGT];
 #endif
 
 layout(push_constant) uniform PC {
@@ -35,7 +42,7 @@ layout(push_constant) uniform PC {
     float eps;  // NORM
 } pc;
 
-shared float partial[NRMAX * WG];  // [row][subgroup]
+shared float partial[NRMAX * WGT];  // [row][subgroup]
 
 // The 8 bytes at a 2-byte-aligned offset. The third word is read only to be
 // shifted in; at most 2 bytes past the run, clamped to the buffer.
@@ -69,10 +76,23 @@ float block_dot(uint o, vec4 x[8], vec4 xs, uint t) {
 }
 
 void main() {
+#if RG == 1
     const uint r0 = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * NR;
     if (r0 >= pc.nrows) return;
     const uint tid = gl_LocalInvocationID.x;
+#else
+    // Group grp's rows; a group past the matrix loads nothing and writes
+    // nothing, but stays for the barrier.
+    const uint grp = gl_LocalInvocationID.x / WG;
+    const uint r0 = ((gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * RG + grp) * NR;
+    const bool live = r0 < pc.nrows;
+    const uint tid = gl_LocalInvocationID.x % WG;
+#endif
+#if RG == 1
     const uint nb = pc.ncols / 256, nr = min(NR, pc.nrows - r0);
+#else
+    const uint nb = live ? pc.ncols / 256 : 0u, nr = live ? min(NR, pc.nrows - r0) : 0u;
+#endif
     const uint t = tid % 8, h = t >> 2, l = 8 * (t & 3u);
     float acc[NRMAX];
     for (uint i = 0; i < NRMAX; i++) acc[i] = 0.0;
@@ -98,20 +118,29 @@ void main() {
     }
     for (uint i = 0; i < NR; i++) {
         const float s = subgroupAdd(acc[i]);
-        if (gl_SubgroupInvocationID == 0) partial[i * WG + gl_SubgroupID] = s;
+        if (gl_SubgroupInvocationID == 0) partial[i * WGT + gl_SubgroupID] = s;
     }
 #ifdef NORM
     ss = subgroupAdd(ss);
     if (gl_SubgroupInvocationID == 0) sq[gl_SubgroupID] = ss;
 #endif
     barrier();
+    // This group's subgroups (none straddles two groups).
+#if RG == 1
+#define SG_BEGIN 0
+#define SG_END gl_NumSubgroups
+#else
+    const uint sg_n = gl_NumSubgroups / RG;
+#define SG_BEGIN grp * sg_n
+#define SG_END (grp + 1) * sg_n
+#endif
     if (tid < nr) {
         float s = 0.0;
-        for (uint i = 0; i < gl_NumSubgroups; i++) s += partial[tid * WG + i];
+        for (uint i = SG_BEGIN; i < SG_END; i++) s += partial[tid * WGT + i];
         const uint r = r0 + tid;
 #ifdef NORM
         float tot = 0.0;
-        for (uint i = 0; i < gl_NumSubgroups; i++) tot += sq[i];
+        for (uint i = SG_BEGIN; i < SG_END; i++) tot += sq[i];
         s *= inversesqrt(tot / float(pc.ncols) + pc.eps);
 #endif
         Y[r] = pc.accumulate != 0 ? Y[r] + s : s;

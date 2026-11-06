@@ -130,6 +130,13 @@ TS5_MV_ROWS_MIN=1 TS5_MV_ROWS=3 python3 "$here/compare.py" --ts5 "$ts5" --ref cp
     --step "${kmix[@]}"
 TS5_MV_ROWS_MIN=1 TS5_MV16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 12 \
     --step "${kmix[@]}"
+# 4 groups of rows a workgroup (mv16g_*, TS5_MV_RG=4): the same sums, so the
+# same logits bit for bit.
+TS5_MV_ROWS_MIN=1 TS5_MV_RG=4 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 12 \
+    --step "${kmix[@]}"
+TS5_MV_ROWS_MIN=1 "$ts5" logits -m "$work/qwen3-kmix.gguf" --backend vk --step -o "$work/rg1.bin" 1 450 4996 17354 1701 2> /dev/null
+TS5_MV_ROWS_MIN=1 TS5_MV_RG=4 "$ts5" logits -m "$work/qwen3-kmix.gguf" --backend vk --step -o "$work/rg4.bin" 1 450 4996 17354 1701 2> /dev/null
+cmp "$work/rg1.bin" "$work/rg4.bin"
 # Attention's head layouts: query heads per KV head and head size.
 shapes=()
 mk_shape() {  # name embd heads kv_heads

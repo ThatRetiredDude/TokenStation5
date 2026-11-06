@@ -1,0 +1,6 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// One token of the feed-forward's gate and up (Q4_K) with swiglu, 4 groups of rows a workgroup (see mv16_q4_k.glsl).
+#define GLU
+#define RG 4
+#include "mv16_q4_k.glsl"

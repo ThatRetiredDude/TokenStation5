@@ -301,6 +301,16 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   and pick a super-block's scales without a branch: a per-row branch split
   the shader into blocks and ACO waited for each row's loads before the
   next row's, so 4 rows took 4 memory round trips instead of one.
+  On the PS5 they run 12-20% slower than a plain read of the same bytes in
+  the same number of dispatches with a barrier between (`ts5 peak`: 393 GB/s
+  for 9.4 MB, 425 for 56.6 MB; Qwen3 8B's attn_output 329 GB/s, gate+up
+  378, Q4_K ffn_down 360, Q6_K 357, the LM head 368). A workgroup's 64
+  threads read all of x for its 4 rows, 1.75 bytes of x through the L1 per
+  byte of weights (0.875 for gate+up's 8 rows). `mv16g_*` (`TS5_MV_RG=4`;
+  Q4_K, Q6_K and the Q4_K gate+up) put 4 such groups in one workgroup,
+  each with its own rows and the same sums (the same logits bit for bit),
+  so they load the same x at the same time and one L1 read can serve 16
+  rows.
 - Anything else (`matmul_*`): one workgroup per row, 8 tokens per pass.
 
 Attention (`shaders/attn.comp`) gives each workgroup the query heads that
