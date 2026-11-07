@@ -1718,8 +1718,12 @@ private:
     // Heads of 64 (Llama 3.2 1B and Qwen 2.5 0.5B, the helpers of Llama 3.1
     // 8B and Coder 7B, and small models of their own) through attn_dec's _64
     // builds, as heads of 128, rather than attn at every context length
-    // (TS5_ATTN_DEC64=1). Off until the console has measured it.
-    bool attn_dec64_ = false;
+    // (TS5_ATTN_DEC64; 0: attn). On the PS5 (2026-11-07) Llama 3.2 1B Q4_K_M
+    // generates 2.6% faster at 64 tokens of context, 10.2% at 512 and 74.5%
+    // at 4096 (Q8_0: 1.3, 8.7, 52.6%), Coder 0.5B 3.4% at 64; as Llama 3.1
+    // 8B's helper it drafts 9.5% cheaper (2.75 ms a token against 3.04); the
+    // check is unchanged.
+    bool attn_dec64_ = true;
     uint32_t attn_dec_lpk_ = 0;  // the lanes per key the attn_dec builds got (0: thread per key, heads of 128 only)
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).

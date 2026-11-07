@@ -393,8 +393,10 @@ console Gemma 4 12B spent 12 ms of a 35 ms token in attn at a 4k context.
 Heads of 64 (Llama 3.2 1B, Qwen 2.5 0.5B: the helpers of Llama 3.1 8B and
 Coder 7B) have `attn_dec_64` and `attn_dec4_64`, the same code with 8
 groups of 16 keys summing the values and at most 16 lanes a key (a lane's
-share is 4 values or more), behind `TS5_ATTN_DEC64=1` until the console
-has measured them; without it those heads use attn at every context length.
+share is 4 values or more), from the first key (`TS5_ATTN_DEC64=0`: attn,
+at every context length, as before). On the console Llama 3.2 1B Q4_K_M
+generates 2.6% faster with them at 64 tokens of context, 10.2% at 512 and
+74.5% at 4096, and drafts for Llama 3.1 8B 9.5% cheaper.
 On the console, Coder 7B wrote 65 tok/s at 0.5k tokens of context and 23 at
 18k with attn, 47 at 18k with the first version of attn_dec (the queries and
 weights in shared memory, one value column per thread). Under 256 keys attn
