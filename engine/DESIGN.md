@@ -390,6 +390,11 @@ KV head's query heads over several workgroups where 4 rows don't hold them
 layer's window and ring like attn, so Gemma's sliding layers use it too:
 attn's tiles hold 8 keys of 256 (4 of 512), four barriers each, and on the
 console Gemma 4 12B spent 12 ms of a 35 ms token in attn at a 4k context.
+Heads of 64 (Llama 3.2 1B, Qwen 2.5 0.5B: the helpers of Llama 3.1 8B and
+Coder 7B) have `attn_dec_64` and `attn_dec4_64`, the same code with 8
+groups of 16 keys summing the values and at most 16 lanes a key (a lane's
+share is 4 values or more), behind `TS5_ATTN_DEC64=1` until the console
+has measured them; without it those heads use attn at every context length.
 On the console, Coder 7B wrote 65 tok/s at 0.5k tokens of context and 23 at
 18k with attn, 47 at 18k with the first version of attn_dec (the queries and
 weights in shared memory, one value column per thread). Under 256 keys attn

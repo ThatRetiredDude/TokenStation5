@@ -15,8 +15,10 @@
 // HD * 2 / LPK bytes of it, so a load instruction reads whole keys rather than
 // 16 bytes of 64 keys, and sums their products across the lanes: lane j
 // keeps the score of the j-th key its lanes took. Head size HEAD_DIM: 128
-// (attn_dec, attn_dec4), 256 or 512 (attn_dec4_256, attn_dec4_512: Gemma's
-// wide heads; LPK only, since a thread can't hold a whole key). A sliding
+// (attn_dec, attn_dec4), 64 (attn_dec_64, attn_dec4_64: 8 groups of 16 keys
+// for the values; LPK 8 or 16 only, a lane's share of a key being 4 values
+// or more), 256 or 512 (attn_dec4_256, attn_dec4_512: Gemma's wide heads;
+// LPK only, since a thread can't hold a whole key). A sliding
 // layer (win > 0) sees each query's last win keys from k_lo on, kept in slots
 // key % ring (ring > 0), and with hsplit > 1 one KV head's query heads are
 // spread over hsplit workgroups, as in attn. Partial results as attn's, for
@@ -276,8 +278,9 @@ void main() {
         if (r >= R) break;
         const uint row = (t0 + r / G) * pc.n_head + h0 + r % G;  // token * n_head + head
         const uint o = (split * pc.n_tok * pc.n_head + row) * (HD + 2);
-        [[unroll]] for (uint i = 0; i < HD / 128; i++) {
+        [[unroll]] for (uint i = 0; i < (HD + 127) / 128; i++) {
             const uint d = tid + 128 * i;
+            if (HD < 128 && d >= HD) break;  // heads of 64: threads 0 .. 63
             const float a = pw[r * GK + d / 4][d % 4];
             if (pc.n_split == 1)
                 O[row * HD + d] = a / l[r];

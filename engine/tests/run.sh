@@ -195,6 +195,25 @@ for k in 8 16; do
     LP_NATIVE_VECTOR_WIDTH=512 TS5_ATTN_DEC=1 TS5_ATTN_DEC_KEYS=$k python3 "$here/compare.py" --ts5 "$ts5" --ref cpu \
         --tol 0.002 --backend vk --ntok 160 --step "${shapes[1]}" "${shapes[4]}"
 done
+# Heads of 64 through attn_dec's _64 builds (TS5_ATTN_DEC64=1): 8 rows for
+# 7 query heads a KV head, 4 for 4; lanes per key, a thread per key, 300
+# tokens at once, slices. The profile shows the build that ran.
+h64=("${shapes[0]}" "${shapes[2]}")
+TS5_ATTN_DEC64=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 --step "${h64[@]}"
+TS5_ATTN_DEC64=1 TS5_ATTN_DEC_KEYS=0 TS5_ATTN_DEC_PLAIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 \
+    --backend vk --ntok 300 --step "${h64[@]}"
+TS5_ATTN_DEC64=1 TS5_ATTN_DEC_KEYS=0 TS5_ATTN_DEC_PLAIN=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 \
+    --backend vk --ntok 300 --step "${h64[@]}"
+TS5_ATTN_DEC64=1 TS5_ATTN_PF=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
+    "${h64[@]}"
+LP_NATIVE_VECTOR_WIDTH=512 TS5_ATTN_DEC64=1 TS5_ATTN_DEC_KEYS=16 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu \
+    --tol 0.002 --backend vk --ntok 160 --step "${h64[@]}"
+TS5_ATTN_DEC64=1 TS5_ATTN_SPLITS=7 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 40 \
+    --step "${h64[@]}"
+TS5_ATTN_DEC64=1 TS5_PROFILE=1 "$ts5" bench -m "${shapes[0]}" --backend vk --pp 16 --tg 8 > "$work/bench-dec64.txt"
+grep -q "attn_dec_64 " "$work/bench-dec64.txt"
+TS5_ATTN_DEC64=1 TS5_PROFILE=1 "$ts5" bench -m "${shapes[2]}" --backend vk --pp 16 --tg 8 > "$work/bench-dec64.txt"
+grep -q "attn_dec4_64 " "$work/bench-dec64.txt"
 echo "== 8-bit KV cache (TS5_KV=q8), against the CPU's fp32 cache: about 0.3% of the largest logit"
 # Every attention kernel has an 8-bit build: attn_pf (and attn_pf128,
 # attn_pf256; attn_pf512 below, with Gemma 4), attn_dec (lanes per key, and
@@ -210,6 +229,10 @@ LP_NATIVE_VECTOR_WIDTH=512 TS5_KV=q8 TS5_ATTN_DEC=1 TS5_ATTN_DEC_KEYS=16 python3
     --ref cpu --tol 0.01 --backend vk --ntok 160 --step "${shapes[1]}" "${shapes[3]}" "${shapes[4]}"
 TS5_KV=q8 TS5_ATTN_SPLITS=7 TS5_ATTN_DEC=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk \
     --ntok 40 --step "${shapes[@]}"
+TS5_KV=q8 TS5_ATTN_DEC64=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 160 --step \
+    "${h64[@]}"
+TS5_KV=q8 TS5_ATTN_DEC64=1 TS5_ATTN_DEC_KEYS=0 TS5_ATTN_DEC_PLAIN=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu \
+    --tol 0.01 --backend vk --ntok 160 --step "${h64[@]}"
 # Gemma 4's heads of 512 (attn_pf512, which needs subgroups of 16 or more,
 # and attn_dec4_512) and its sliding layers, with the f16 and the 8-bit
 # cache. In lavapipe's subgroups made 16 wide the f16 attn_pf512 build's

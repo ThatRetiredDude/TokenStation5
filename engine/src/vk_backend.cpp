@@ -33,6 +33,8 @@
 #include "attn_dec4.spv.h"
 #include "attn_dec4_256.spv.h"
 #include "attn_dec4_512.spv.h"
+#include "attn_dec_64.spv.h"
+#include "attn_dec4_64.spv.h"
 #include "attn_merge.spv.h"
 #include "attn_pf.spv.h"
 #include "attn_pf128.spv.h"
@@ -44,6 +46,8 @@
 #include "attn_dec4_q8.spv.h"
 #include "attn_dec4_256_q8.spv.h"
 #include "attn_dec4_512_q8.spv.h"
+#include "attn_dec_64_q8.spv.h"
+#include "attn_dec4_64_q8.spv.h"
 #include "attn_pf128_q8.spv.h"
 #include "attn_pf256_q8.spv.h"
 #include "attn_pf512_q8.spv.h"
@@ -412,6 +416,7 @@ private:
         if (const char *e = getenv("TS5_ATTN_PF128")) attn_pf128_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_PLAIN")) attn_dec_plain_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_KEYS")) attn_dec_keys_ = atoi(e);
+        if (const char *e = getenv("TS5_ATTN_DEC64")) attn_dec64_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV16")) mv16_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT")) mvt_ = atoi(e) != 0;
@@ -776,14 +781,16 @@ private:
         uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
         while (lpk > ctx_->subgroup_size) lpk = lpk > 8 ? lpk / 2 : 0;
         // Each attn_dec build twice: for the f16 cache (5 buffers) and the 8-bit one (7).
-#define PD(n, spec) \
-        if (!make_pipe(#n, spv_##n, sizeof(spv_##n), 5, err, spec, lpk) || \
-            !make_pipe(#n "_q8", spv_##n##_q8, sizeof(spv_##n##_q8), 7, err, spec, lpk)) return false;
-        PD(attn_dec, attn_dec_plain_ != 0) PD(attn_dec4, attn_dec_plain_ == 1)
+#define PD(n, spec, lanes) \
+        if (!make_pipe(#n, spv_##n, sizeof(spv_##n), 5, err, spec, lanes) || \
+            !make_pipe(#n "_q8", spv_##n##_q8, sizeof(spv_##n##_q8), 7, err, spec, lanes)) return false;
+        PD(attn_dec, attn_dec_plain_ != 0, lpk) PD(attn_dec4, attn_dec_plain_ == 1, lpk)
+        // Heads of 64: a lane's share of a key is 4 values or more (8 or 16 lanes).
+        PD(attn_dec_64, attn_dec_plain_ != 0, std::min(lpk, 16u)) PD(attn_dec4_64, attn_dec_plain_ == 1, std::min(lpk, 16u))
         // The wide-head builds score keys with LPK lanes only (a thread can't
         // hold a whole key): without them, those heads keep attn.
         attn_dec_lpk_ = lpk;
-        if (lpk) { PD(attn_dec4_256, 0) PD(attn_dec4_512, 0) }
+        if (lpk) { PD(attn_dec4_256, 0, lpk) PD(attn_dec4_512, 0, lpk) }
 #undef PD
         P(swiglu, 2) P(softcap, 1)
 #undef P
@@ -1294,13 +1301,15 @@ private:
         const bool pf = attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && (HD <= 128 || pf256 || pf512) &&
                         G_all <= pf_rows && (pf512 || head_split(l) == 1);
         const bool wide = (HD == 256 || HD == 512) && attn_dec_lpk_ != 0;
-        const uint32_t dec_max = HD == 128 ? 8 : 4;
+        const bool h64 = HD == 64 && attn_dec64_;
+        const uint32_t dec_max = HD <= 128 ? 8 : 4;
         uint32_t dec_split = 1;
         while (G_all / dec_split > dec_max && (G_all / dec_split) % 2 == 0) dec_split *= 2;
-        // From the first key for heads of 128 (attn_dec4 or attn_dec), from
-        // 256 for the wide heads.
-        const uint32_t dec_from = attn_dec_min_ >= 0 ? (uint32_t)attn_dec_min_ : HD == 128 ? 1u : 256u;
-        const bool dec = !pf && dec_from && keys >= dec_from && (HD == 128 || wide) && G_all / dec_split <= dec_max;
+        // From the first key for heads of 128 and 64 (attn_dec4 or attn_dec,
+        // and their _64 builds), from 256 for the wide heads.
+        const uint32_t dec_from = attn_dec_min_ >= 0 ? (uint32_t)attn_dec_min_ : HD <= 128 ? 1u : 256u;
+        const bool dec =
+            !pf && dec_from && keys >= dec_from && (HD == 128 || h64 || wide) && G_all / dec_split <= dec_max;
         const uint32_t hsplit = pf ? 1 : dec ? dec_split : head_split(l), G = G_all / hsplit;
         const uint32_t dec_rows = G <= 4 ? 4 : 8;
         const uint32_t tq = pf ? pf_rows / G : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / G);
@@ -1324,9 +1333,10 @@ private:
         } pc{HD, H, HKV, (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale, k_lo, win, ring, hsplit};
         // Every kernel has a build for the 8-bit cache, named _q8.
         std::string kern = pf ? "attn_pf" : "attn";
-        if (dec)
+        if (dec) {
             kern = HD == 256 ? "attn_dec4_256" : HD == 512 ? "attn_dec4_512" : dec_rows == 4 ? "attn_dec4" : "attn_dec";
-        else if (pf && HD == 128 && attn_pf128_)
+            if (HD == 64) kern += "_64";
+        } else if (pf && HD == 128 && attn_pf128_)
             kern = "attn_pf128";
         else if (pf && pf256)
             kern = "attn_pf256";
@@ -1705,6 +1715,11 @@ private:
     // +6% on Coder 7B, +31% on Qwen 3 8B and +37% on Llama 3.2 3B against 0;
     // 32 is slower than 0 on Coder 7B.
     int attn_dec_keys_ = 16;
+    // Heads of 64 (Llama 3.2 1B and Qwen 2.5 0.5B, the helpers of Llama 3.1
+    // 8B and Coder 7B, and small models of their own) through attn_dec's _64
+    // builds, as heads of 128, rather than attn at every context length
+    // (TS5_ATTN_DEC64=1). Off until the console has measured it.
+    bool attn_dec64_ = false;
     uint32_t attn_dec_lpk_ = 0;  // the lanes per key the attn_dec builds got (0: thread per key, heads of 128 only)
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).
