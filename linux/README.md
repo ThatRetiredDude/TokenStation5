@@ -190,8 +190,9 @@ Speed test: `ts5 bench -m model.gguf --pp 512 --tg 128`.
 Settings > MODELS > Helper model, Automatic by default: when the models
 folder has a small model with the same vocabulary as the one served, a
 quarter of its size or less (Qwen3 0.6B beside Qwen3 8B or 14B, and beside
-Qwen2.5 Coder 7B or DeepSeek R1 Distill Qwen 14B, Gemma 3 1B beside Gemma 4
-12B; the chat's control tokens may differ), it guesses a few tokens ahead and the big model
+Qwen2.5 Coder 7B or DeepSeek R1 Distill Qwen 14B, Llama 3.2 1B in Q4_K_M
+beside Llama 3.1 8B, Gemma 3 1B beside Gemma 4 12B; the chat's control
+tokens may differ), it guesses a few tokens ahead and the big model
 checks them in one pass. The output is exactly what the big model alone writes; only
 the speed changes. The helper keeps a 16k context of its own (past that,
 drafting from the conversation's own text goes on). Off turns it off;
@@ -204,7 +205,13 @@ its guesses are kept as often, so replies come 5-7% faster on chat and
 4-5% on code than with Q8_0: about +20% on chat and +26% on code over no
 helper. With several matching files beside the model, the smallest is used:
 for Qwen2.5 Coder 7B, Qwen3 0.6B in Q4_K_M makes replies 11-12% faster than
-Qwen2.5 Coder 0.5B in Q8_0, whose guesses cost 1.8 times as much.
+Qwen2.5 Coder 0.5B in Q8_0, whose guesses cost 1.8 times as much. For
+Llama 3.1 8B, Llama 3.2 1B in Q4_K_M (0.75 GiB,
+bartowski/Llama-3.2-1B-Instruct-GGUF) guesses for 3.0 ms a token against
+4.5 in Q8_0, and replies come 11% faster on chat and 13% on code: +41% and
++57% over the 8B writing one token at a time. Its Q8_0 (1.23 GiB) is more
+than a quarter of the 8B's size, so it's only used when TS5_DRAFT_MODEL
+names it.
 
 ## Tune for your machine
 
