@@ -60,6 +60,11 @@ struct ParsedTurn {
 };
 ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names = {});
 
+// Whether a finished turn's text (after any thinking) is nothing but an empty
+// call tag pair, such as "<tools> </tools>" (Qwen 2.5 Coder 14B, asked for a
+// poem with tools offered, seen on the console): no call and no answer.
+bool empty_call_block(ToolFormat f, const std::string &content);
+
 // While a turn streams: how many bytes of `text` are surely text for the user,
 // never part of a call (the rest is held until the turn ends).
 size_t content_prefix(ToolFormat f, const std::string &text);

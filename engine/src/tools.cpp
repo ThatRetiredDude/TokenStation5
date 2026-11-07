@@ -136,6 +136,10 @@ bool stray_closers(const std::string &s, size_t i) {
 bool call_from_json(const std::string &text, ToolCall &call) {
     Json j;
     if (!Json::parse(strip(text), j) || j.type != Json::OBJ) return false;
+    // {"tool_call": {"name": ...}} (Gemma 3 4B in a json fence, seen on the
+    // console) and OpenAI's older {"function_call": {...}}.
+    for (const char *w : {"tool_call", "function_call"})
+        if (j["name"].type != Json::STR && j[w].type == Json::OBJ) j = Json(j[w]);
     // {"type": "function", "function": {"name": ...}}, as OpenAI sends calls
     // (Llama 3.2 3B, seen on the console).
     if (j["name"].type != Json::STR && j["function"].type == Json::OBJ) j = Json(j["function"]);
@@ -1276,6 +1280,24 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
         }
     }
     return r;
+}
+
+bool empty_call_block(ToolFormat f, const std::string &content) {
+    if (f != ToolFormat::HERMES && f != ToolFormat::GEMMA) return false;
+    size_t from = 0;
+    if (has(content, "<think>")) {
+        from = content.find("</think>");
+        if (from == std::string::npos) return false;
+        from += 8;
+    }
+    const std::string s = strip(content.substr(from));
+    for (int t = 0; t < kNamedEquals; t++) {
+        const std::string open = kHermesTags[t][0], close = kHermesTags[t][1];
+        if (starts(s, open) && ends(s, close) && s.size() >= open.size() + close.size() &&
+            strip(s.substr(open.size(), s.size() - open.size() - close.size())).empty())
+            return true;
+    }
+    return false;
 }
 
 size_t content_prefix(ToolFormat f, const std::string &text) {

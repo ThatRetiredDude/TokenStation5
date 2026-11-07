@@ -742,6 +742,10 @@ void handle(int fd, Server::State &state, Usage &u) {
                     break;
                 }
             }
+            // A turn that is only an empty call block ("<tools> </tools>",
+            // Qwen 2.5 Coder 14B asked for a poem, seen on the console) has
+            // neither a call nor an answer: the same as a made-up tool.
+            if (made_up.empty() && pt.calls.empty() && empty_call_block(tf, text)) made_up = "(empty call)";
             if (!made_up.empty()) {
                 if (!answered_without_tools && open == std::string::npos && sent <= answer && !stopped &&
                     st.gen_tokens < max_tokens) {

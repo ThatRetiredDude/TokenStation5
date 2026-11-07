@@ -284,6 +284,11 @@ def test_parser(ts5):
         ("llama3", '{"name": "a", "parameters": {"x": "y', '{"name": "a", "parameters": {"x": "y', [], 0),
         ("llama3", '{"answer": [1, 2', '{"answer": [1, 2', [], 0),
         ("llama3", '{"name": "a", "parameters": {"x": 1}}}', "", [("a", {"x": 1})], 0),
+        # The call inside {"tool_call": ...} (Gemma 3 4B, seen on the console) or {"function_call": ...}.
+        ("gemma", '```json\n{"tool_call": {"name": "add_calendar_event", "arguments": {"title": "x"}}}\n```', "",
+         [("add_calendar_event", {"title": "x"})], 0),
+        ("hermes", '{"function_call": {"name": "a", "arguments": {"n": 1}}}', "", [("a", {"n": 1})], 0),
+        ("hermes", '{"tool_call": "not a call"}', '{"tool_call": "not a call"}', [], 0),
         # Mistral Nemo: [TOOL_CALLS] (one token, printed) and an array, maybe with Mistral's ids.
         ("mistral", '[TOOL_CALLS][{"name": "web_search", "arguments": {"query": "a"}}]', "",
          [("web_search", {"query": "a"})], 0),
@@ -420,6 +425,11 @@ def test_search_loop(ts5, model, tdir):
         ("made-up tool", "tvly-test", [MADE_UP, "Hello."], False, 0, "Hello.", "latest PS5 firmware", [WEATHER]),
         ("made-up tool, streaming", "tvly-test", [MADE_UP, "Hello."], True, 0, "Hello.", "latest PS5 firmware",
          [WEATHER]),
+        # Only an empty call block (Qwen 2.5 Coder 14B): the same, one more turn without tools.
+        ("empty call block", "tvly-test", ["<tools> </tools>", "Hello."], False, 0, "Hello.", "latest PS5 firmware",
+         [WEATHER]),
+        ("empty call block, streaming", "tvly-test", ["<tools>\n</tools>", "Hello."], True, 0, "Hello.",
+         "latest PS5 firmware", [WEATHER]),
         # Mistral Nemo: the result goes back under the id the model wrote.
         ("Mistral: answers from a search", "tvly-test", [MISTRAL_CALL, "Done.", "Final answer."], False, 1, "Done.",
          '"call_id": "a1b2c3d4e"}[/TOOL_RESULTS]', None, NEMO),
