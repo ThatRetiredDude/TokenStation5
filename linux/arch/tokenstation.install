@@ -1,0 +1,15 @@
+post_install() {
+    /usr/lib/tokenstation/system-setup configure
+}
+
+post_upgrade() {
+    /usr/lib/tokenstation/system-setup configure
+}
+
+pre_remove() {
+    /usr/lib/tokenstation/system-setup remove
+}
+
+post_remove() {
+    [ -d /run/systemd/system ] && systemctl daemon-reload || true
+}

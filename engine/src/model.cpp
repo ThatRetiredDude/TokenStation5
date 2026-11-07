@@ -7,7 +7,32 @@
 namespace ts5 {
 
 static bool supported_arch(const std::string &a) {
-    return a == "llama" || a == "mistral" || a == "qwen2" || a == "qwen3" || a == "gemma3";
+    return a == "llama" || a == "mistral" || a == "qwen2" || a == "qwen3" || a == "gemma3" || a == "gemma4";
+}
+
+// A value that is one number for every layer or a list with one per layer
+// (Gemma 4's head_count_kv): the full layers' (list: the last layer's) and
+// the sliding layers' (the first's), or false where the list has any other
+// shape. hp.swa_layers must be set.
+static bool per_kind(const Gguf &g, const HParams &hp, const std::string &key, int def, int &full, int &swa,
+                     std::string &err) {
+    full = swa = (int)g.get_int(key, def);
+    const GgufArray *arr = g.get_arr(key);
+    if (!arr) return true;
+    if ((int)arr->size() != hp.n_layer) { err = key + ": not one value per layer"; return false; }
+    bool seen_full = false, seen_swa = false;
+    for (int l = 0; l < hp.n_layer; l++) {
+        const int64_t *v = std::get_if<int64_t>(&(*arr)[l]);
+        if (!v) { err = key + ": not integers"; return false; }
+        int &dst = hp.swa(l) ? swa : full;
+        bool &seen = hp.swa(l) ? seen_swa : seen_full;
+        if (seen && dst != (int)*v) { err = key + ": differs between layers of one kind"; return false; }
+        dst = (int)*v;
+        seen = true;
+    }
+    if (!seen_full) full = swa;
+    if (!seen_swa) swa = full;
+    return true;
 }
 
 bool Model::open(const std::string &path, std::string &err) {
@@ -24,6 +49,38 @@ bool Model::open(const std::string &path, std::string &err) {
     hp.n_head = (int)gguf.get_int(a + "attention.head_count", 0);
     hp.n_head_kv = (int)gguf.get_int(a + "attention.head_count_kv", hp.n_head);
     hp.head_dim = (int)gguf.get_int(a + "attention.key_length", hp.n_head ? hp.n_embd / hp.n_head : 0);
+    if (hp.arch == "gemma4") {
+        // Which layers slide is a list in the file; the sliding and the full
+        // layers have their own K/V head counts, head sizes and RoPE
+        // dimensions and bases.
+        const GgufArray *pat = gguf.get_arr(a + "attention.sliding_window_pattern");
+        if (!pat || (int)pat->size() != hp.n_layer) { err = "gemma4: no sliding_window_pattern per layer"; return false; }
+        hp.swa_window = (int)gguf.get_int(a + "attention.sliding_window", 0);
+        for (auto &v : *pat) {  // bools read as integers
+            const int64_t *i = std::get_if<int64_t>(&v);
+            hp.swa_layers.push_back(i && *i != 0);
+        }
+        int head_full = 0, head_swa = 0;
+        if (!per_kind(gguf, hp, a + "attention.head_count", hp.n_head, head_full, head_swa, err)) return false;
+        if (head_full != head_swa) { err = "gemma4: head_count differs between layer kinds"; return false; }
+        if (!per_kind(gguf, hp, a + "attention.head_count_kv", hp.n_head, hp.n_head_kv, hp.n_head_kv_swa, err))
+            return false;
+        hp.head_dim_swa = (int)gguf.get_int(a + "attention.key_length_swa", hp.head_dim);
+        if ((int)gguf.get_int(a + "attention.value_length", hp.head_dim) != hp.head_dim ||
+            (int)gguf.get_int(a + "attention.value_length_swa", hp.head_dim_swa) != hp.head_dim_swa) {
+            err = "gemma4: value heads not as wide as key heads";
+            return false;
+        }
+        if (gguf.get_int(a + "attention.shared_kv_layers", 0) > 0 ||
+            gguf.get_int(a + "embedding_length_per_layer_input", 0) > 0) {
+            err = "gemma4: shared KV layers and per-layer embeddings (E2B, E4B) are not supported yet";
+            return false;
+        }
+        if (gguf.has(a + "expert_count") && gguf.get_int(a + "expert_count", 0) > 0) {
+            err = "gemma4: mixture-of-experts models are not supported";
+            return false;
+        }
+    }
     hp.n_ctx_train = (int)gguf.get_int(a + "context_length", 4096);
     // A window stretched by RoPE scaling (YaRN, linear), which the engine
     // doesn't do: past the original window the model loses the thread.
@@ -36,7 +93,7 @@ bool Model::open(const std::string &path, std::string &err) {
     hp.rms_eps = (float)gguf.get_float(a + "attention.layer_norm_rms_epsilon", 1e-6);
     hp.rope_base = (float)gguf.get_float(a + "rope.freq_base", 10000.0);
     hp.rope_dims = (int)gguf.get_int(a + "rope.dimension_count", hp.head_dim);
-    hp.rope_neox = hp.arch == "qwen2" || hp.arch == "qwen3" || hp.arch == "gemma3";
+    hp.rope_neox = hp.arch == "qwen2" || hp.arch == "qwen3" || hp.arch == "gemma3" || hp.arch == "gemma4";
     if (!hp.n_embd || !hp.n_layer || !hp.n_ff || !hp.n_head) {
         err = "missing hyperparameters";
         return false;
@@ -55,6 +112,25 @@ bool Model::open(const std::string &path, std::string &err) {
             if (factor > 0) hp.rope_scale = (float)(1.0 / factor);
         }
         if (hp.n_layer == 62) hp.attn_scale = 1.0f / std::sqrt((float)(hp.n_embd / hp.n_head));
+    }
+    if (hp.arch == "gemma4") {
+        // As llama.cpp has it: queries aren't scaled, V is normalized without
+        // weights, rope_freqs (proportional RoPE) apply to the full layers
+        // only, and the logits are soft-capped.
+        hp.embd_scale = std::sqrt((float)hp.n_embd);
+        hp.gelu = true;
+        hp.attn_scale = 1.0f;
+        hp.v_norm = true;
+        hp.rope_freqs_full_only = true;
+        hp.rope_dims_swa = (int)gguf.get_int(a + "rope.dimension_count_swa", hp.head_dim_swa);
+        hp.rope_base_swa = (float)gguf.get_float(a + "rope.freq_base_swa", 10000.0);
+        hp.logit_softcap = (float)gguf.get_float(a + "final_logit_softcapping", 0.0);
+        if (scaling == "linear") {
+            const double factor = gguf.get_float(a + "rope.scaling.factor", 1.0);
+            if (factor > 0) hp.rope_scale = (float)(1.0 / factor);
+        }
+    }
+    if (hp.arch == "gemma3" || hp.arch == "gemma4") {
         // Tests: a small window, so a short check crosses it.
         if (const char *e = getenv("TS5_SWA_WINDOW"))
             if (atoi(e) > 0 && hp.swa_window > 0 && atoi(e) != hp.swa_window) {
@@ -65,6 +141,17 @@ bool Model::open(const std::string &path, std::string &err) {
     if (auto *t = gguf.find("token_embd.weight")) hp.n_vocab = (int)t->ne[1];
     // Bind tensor descriptors now (data pointers are filled by load()).
     return bind(err);
+}
+
+uint64_t Model::rope_turn(bool swa, int i) const {
+    const int rd = rope_dims(swa);
+    const double base = swa ? hp.rope_base_swa : hp.rope_base, scale = swa ? 1.0 : hp.rope_scale;
+    double w = scale * std::pow(base, -2.0 * i / rd) / (2 * M_PI);
+    if (!rope_freqs_v.empty() && !(hp.rope_freqs_full_only && swa) && i < (int)rope_freqs_v.size())
+        w /= rope_freqs_v[i];
+    w -= std::floor(w);
+    const double f = std::ldexp(w, 64);
+    return f >= 18446744073709551616.0 ? 0 : (uint64_t)f;
 }
 
 uint64_t Model::data_bytes() const {
@@ -100,7 +187,8 @@ bool Model::bind(std::string &err) {
         L.attn_norm = weight(n("attn_norm.weight"), true, err);
         L.wq = weight(n("attn_q.weight"), true, err);
         L.wk = weight(n("attn_k.weight"), true, err);
-        L.wv = weight(n("attn_v.weight"), true, err);
+        // Gemma 4's full layers have no V projection: V is K, normalized.
+        L.wv = weight(n("attn_v.weight"), hp.arch != "gemma4", err);
         L.wo = weight(n("attn_output.weight"), true, err);
         L.bq = weight(n("attn_q.bias"), false, err);
         L.bk = weight(n("attn_k.bias"), false, err);
@@ -111,11 +199,57 @@ bool Model::bind(std::string &err) {
         L.w_gate = weight(n("ffn_gate.weight"), true, err);
         L.w_up = weight(n("ffn_up.weight"), true, err);
         L.w_down = weight(n("ffn_down.weight"), true, err);
-        const bool gemma = hp.arch == "gemma3";
+        const bool gemma = hp.arch == "gemma3" || hp.arch == "gemma4";
         L.post_attn_norm = weight(n("post_attention_norm.weight"), gemma, err);
         L.post_ffn_norm = weight(n("post_ffw_norm.weight"), gemma, err);
+        L.out_scale = weight(n("layer_output_scale.weight"), false, err);
+        if (L.out_scale && (L.out_scale.type() != GGML_F32 || L.out_scale.info->nelements() != 1) && err.empty())
+            err = n("layer_output_scale.weight") + ": not one f32 value";
+        if (hp.arch == "gemma4" && err.empty()) {
+            // The shapes the kinds of layers call for.
+            const int64_t q = (int64_t)hp.n_head * hp.hd(i), kv = (int64_t)hp.hkv(i) * hp.hd(i);
+            if (L.wq.ne1() != q || L.wk.ne1() != kv || (L.wv && L.wv.ne1() != kv) || L.wo.ne0() != q ||
+                L.q_norm.info->nelements() != hp.hd(i) || L.k_norm.info->nelements() != hp.hd(i))
+                err = "layer " + std::to_string(i) + ": attention shapes don't match the hyperparameters";
+        }
     }
+    if (err.empty() && !read_scalars(err)) return false;
     return err.empty();
+}
+
+// Reads the one-value tensors (Gemma 4's layer_output_scale) from the file,
+// whether or not the weights are loaded to host memory.
+bool Model::read_scalars(std::string &err) {
+    bool any = (bool)rope_freqs;
+    for (auto &L : layers) any |= (bool)L.out_scale;
+    if (!any) return true;
+    FILE *f = fopen(gguf.path.c_str(), "rb");
+    if (!f) { err = "cannot open " + gguf.path; return false; }
+    if (rope_freqs) {
+        if (rope_freqs.type() != GGML_F32) {
+            fclose(f);
+            err = "rope_freqs.weight: not f32";
+            return false;
+        }
+        rope_freqs_v.resize(rope_freqs.info->nelements());
+        if (fseeko(f, (off_t)(gguf.data_offset + rope_freqs.info->offset), SEEK_SET) != 0 ||
+            fread(rope_freqs_v.data(), 4, rope_freqs_v.size(), f) != rope_freqs_v.size()) {
+            fclose(f);
+            err = "cannot read rope_freqs.weight";
+            return false;
+        }
+    }
+    for (auto &L : layers) {
+        if (!L.out_scale) continue;
+        if (fseeko(f, (off_t)(gguf.data_offset + L.out_scale.info->offset), SEEK_SET) != 0 ||
+            fread(&L.out_scale_v, 4, 1, f) != 1) {
+            fclose(f);
+            err = "cannot read " + L.out_scale.info->name;
+            return false;
+        }
+    }
+    fclose(f);
+    return true;
 }
 
 bool Model::load(uint8_t *dst, std::string &err) {

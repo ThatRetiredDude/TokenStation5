@@ -20,6 +20,13 @@ if(TS5_VULKAN)
   find_package(Vulkan REQUIRED)
   find_program(GLSLANG glslangValidator REQUIRED)
   file(GLOB SHADERS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.comp)
+  # Extra preprocessor names for every shader, to build a variant of a
+  # kernel for a comparison on the device (-DTS5_GLSL_DEFINES="A;B").
+  set(TS5_GLSL_DEFINES "" CACHE STRING "names #defined in every compute shader")
+  set(GLSL_DEFS)
+  foreach(d ${TS5_GLSL_DEFINES})
+    list(APPEND GLSL_DEFS -D${d})
+  endforeach()
   set(SPV_HEADERS)
   foreach(src ${SHADERS})
     get_filename_component(stem ${src} NAME_WE)
@@ -27,14 +34,14 @@ if(TS5_VULKAN)
     add_custom_command(
       OUTPUT ${hdr}
       COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/shaders
-      COMMAND ${GLSLANG} -V --target-env vulkan1.2 -I${CMAKE_CURRENT_SOURCE_DIR}/shaders
+      COMMAND ${GLSLANG} -V --target-env vulkan1.2 ${GLSL_DEFS} -I${CMAKE_CURRENT_SOURCE_DIR}/shaders
               --vn spv_${stem} -o ${hdr} ${src}
-      DEPENDS ${src} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matmul.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matmul_tiled.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matmul_big.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matvec_k.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mv16_q4_k.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/get_rows.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/attn.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/attn_pf.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/attn_dec.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/qkv_post.glsl
+      DEPENDS ${src} ${CMAKE_CURRENT_SOURCE_DIR}/shaders/common.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matmul.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matmul_tiled.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matmul_big.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/matvec_k.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mv16_q4_k.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/q4k_sum.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mv16_q6_k.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mv16_q8_0.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mvt_q4_k.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mvtx_q4_k.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mvt_q8_0.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mv16_q5_0.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mvt_q5_0.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/q5_0.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/get_rows.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/attn.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/attn_pf.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/attn_dec.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/qkv_post.glsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/peak_fma.glsl
       COMMENT "glslang ${stem}.comp")
     list(APPEND SPV_HEADERS ${hdr})
   endforeach()
   add_custom_target(ts5shaders DEPENDS ${SPV_HEADERS})
-  target_sources(ts5core PRIVATE src/vk_backend.cpp src/vk_context.cpp)
+  target_sources(ts5core PRIVATE src/vk_backend.cpp src/vk_context.cpp src/peak.cpp)
   add_dependencies(ts5core ts5shaders)
   target_include_directories(ts5core PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/shaders)
   target_include_directories(ts5core PRIVATE ${Vulkan_INCLUDE_DIRS})

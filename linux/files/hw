@@ -1,0 +1,140 @@
+#!/bin/sh
+# /usr/lib/tokenstation/hw (or /usr/local/lib/tokenstation/hw from the
+# portable build's install.sh): the PS5 hardware settings TokenStation5's
+# Settings page changes, as root. /etc/sudoers.d/tokenstation lets members
+# of the tokenstation group run this one script without a password, so the
+# app can change them from the controller. Every value is checked here
+# against a fixed list; nothing else runs as root.
+#
+#   hw status             key=value lines: memory, compute units, boot settings
+#   hw fan auto|cool|max  the fan: the kernel's curve (ps5_fan hwmon), a steeper one, or full speed
+#   hw boost on|off       CPU 3.5 GHz and GPU 2.23 GHz (ps5_control), or stock
+#   hw memory max|0|8..14 GiB the GPU may map at the next boot (max: all but 1 GiB;
+#                         0: the kernel's default)
+#   hw cu 36|38|40        compute units at the next boot (tokenstation-cu)
+#   hw cutest SECONDS     tokenstation-cu test, 30 to 600 s
+set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# PS5_CONTROL, if ps5_control isn't on the PATH.
+[ -r /etc/default/tokenstation ] && . /etc/default/tokenstation
+ctl=${PS5_CONTROL:-$(command -v ps5_control 2>/dev/null || true)}
+# The portable install keeps the GPU test beside this script.
+here=$(dirname "$(readlink -f "$0")")
+[ -x "$here/gpu-selftest" ] && export GPU_SELFTEST="$here/gpu-selftest"
+
+need_ctl() {
+    [ -n "$ctl" ] && [ -x "$ctl" ] || { echo "ps5_control isn't installed (ps5-linux-tools)" >&2; exit 3; }
+}
+
+find_cmdline() {
+    for f in /boot/efi/cmdline.txt /efi/cmdline.txt /boot/firmware/cmdline.txt /boot/cmdline.txt; do
+        [ -f "$f" ] && { echo "$f"; return; }
+    done
+}
+
+case "${1:-}" in
+status)
+    for d in /sys/class/drm/card*/device; do
+        [ -f "$d/mem_info_gtt_total" ] || continue
+        echo "gtt_total=$(cat "$d/mem_info_gtt_total")"
+        echo "vram_total=$(cat "$d/mem_info_vram_total" 2>/dev/null || echo 0)"
+        break
+    done
+    echo "ram_total=$(awk '/^MemTotal:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)"
+    # dmesg's ring buffer rotates the boot messages out after hours of
+    # uptime; the journal of this boot keeps them.
+    n=$(dmesg 2>/dev/null | grep -o 'active_cu_number[^0-9]*[0-9]*' | tail -n 1 | grep -o '[0-9]*$' || true)
+    [ -n "$n" ] || n=$(journalctl -k -b 2>/dev/null | grep -o 'active_cu_number[^0-9]*[0-9]*' | tail -n 1 | grep -o '[0-9]*$' || true)
+    echo "cus_active=${n:-0}"
+    f=$(find_cmdline || true)
+    if [ -n "$f" ]; then
+        echo "cmdline=$f"
+        p=$(grep -o 'ttm\.pages_limit=[0-9]*' "$f" | head -n 1 | cut -d= -f2 || true)
+        echo "boot_gtt_pages=${p:-0}"
+        m=$(grep -o 'amdgpu\.ps5_cu_unlock=[0-9]*' "$f" | head -n 1 | cut -d= -f2 || true)
+        echo "boot_cu_mode=${m:-0}"
+    fi
+    echo "ps5_control=${ctl:-}"
+    for d in /sys/class/hwmon/hwmon*; do
+        [ "$(cat "$d/name" 2>/dev/null)" = ps5_fan ] || continue
+        case "$(cat "$d/pwm1_enable" 2>/dev/null)" in
+            0) echo "fan=max" ;;
+            1) echo "fan=manual" ;;
+            2) [ "$(cat "$d/pwm1_auto_point4_pwm" 2>/dev/null)" = 255 ] && echo "fan=cool" || echo "fan=auto" ;;
+        esac
+        break
+    done
+    ;;
+fan)
+    # The ps5-linux kernel's own fan driver (hwmon "ps5_fan") runs the fan
+    # from its curve and overrides the servo pattern ps5_control --fan max
+    # sets within a second, so full speed means its pwm1_enable=0 (full),
+    # 2 being the curve. "cool" is the curve made steeper (full speed from
+    # a 65 C board reading instead of 87; stock is 50 C 10%, 60 30%, 65 40%,
+    # 70 50%, 75 65%, 80 80%, 85 95%, 87 100%): quiet at idle, and about
+    # 5 C cooler on long prompts (measured on a PS5), where the kernel's
+    # 85 C limiter otherwise clips the GPU clock. Above 90 C the driver
+    # takes over whatever is set.
+    # Without that driver (an older kernel), ps5_control does auto and max.
+    case "${2:-}" in auto | cool | max) ;; *) echo "fan auto|cool|max" >&2; exit 2 ;; esac
+    hm=
+    for d in /sys/class/hwmon/hwmon*; do
+        [ "$(cat "$d/name" 2>/dev/null)" = ps5_fan ] && [ -w "$d/pwm1_enable" ] && { hm=$d; break; }
+    done
+    if [ -n "$hm" ]; then
+        case "$2" in
+            max) echo 0 > "$hm/pwm1_enable" ;;
+            cool)
+                # The driver keeps the points in order (a point's pwm may
+                # not drop below the one before it), so the speeds go in
+                # from the top point down, then the temperatures from the
+                # bottom up.
+                i=8
+                for pwm in 255 255 255 255 255 204 153 77; do
+                    echo "$pwm" > "$hm/pwm1_auto_point${i}_pwm"
+                    i=$((i - 1))
+                done
+                i=1
+                for temp in 50000 55000 60000 65000 70000 75000 80000 87000; do
+                    echo "$temp" > "$hm/pwm1_auto_point${i}_temp"
+                    i=$((i + 1))
+                done
+                echo 2 > "$hm/pwm1_enable"
+                ;;
+            auto)
+                [ -w "$hm/curve_reset" ] && echo 1 > "$hm/curve_reset"
+                echo 2 > "$hm/pwm1_enable"
+                ;;
+        esac
+        # The console's own fan servo stays on under the kernel's control.
+        [ -n "$ctl" ] && [ -x "$ctl" ] && "$ctl" --fan on >/dev/null 2>&1 || true
+    else
+        need_ctl
+        if [ "$2" = max ]; then "$ctl" --fan max; else "$ctl" --fan on; fi
+    fi
+    ;;
+boost)
+    need_ctl
+    case "${2:-}" in on | off) "$ctl" --boost "$2" ;; *) echo "boost on|off" >&2; exit 2 ;; esac
+    ;;
+memory)
+    case "${2:-}" in
+        0) exec tokenstation-memory unset ;;
+        max) exec tokenstation-memory set max ;;
+        8 | 9 | 10 | 11 | 12 | 13 | 14) exec tokenstation-memory set "$2" ;;
+        *) echo "memory max|0|8..14" >&2; exit 2 ;;
+    esac
+    ;;
+cu)
+    case "${2:-}" in 36 | 38 | 40) exec tokenstation-cu set "$2" ;; *) echo "cu 36|38|40" >&2; exit 2 ;; esac
+    ;;
+cutest)
+    case "${2:-}" in '' | *[!0-9]*) echo "cutest SECONDS" >&2; exit 2 ;; esac
+    [ "$2" -ge 30 ] && [ "$2" -le 600 ] || { echo "cutest: 30 to 600 seconds" >&2; exit 2; }
+    exec tokenstation-cu test "$2"
+    ;;
+*)
+    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+esac

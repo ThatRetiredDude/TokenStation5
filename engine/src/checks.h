@@ -4,6 +4,7 @@
 #pragma once
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "backend.h"
 #include "model.h"
@@ -13,11 +14,28 @@ namespace ts5 {
 // Called with a short description of each step as it starts.
 using Progress = std::function<void(const std::string &step)>;
 
+// A position where the GPU's top token isn't the CPU's: the two tokens, each
+// side's probability for both, and the tokens up to and including this one.
+struct TopChange {
+    int pos = 0;
+    int32_t cpu_top = 0, gpu_top = 0, next = -1;  // next: the text's own next token (-1: test tokens)
+    double cpu_p_cpu = 0, cpu_p_gpu = 0;          // the CPU's probability of its top and of the GPU's
+    double gpu_p_gpu = 0, gpu_p_cpu = 0;          // the GPU's probability of its top and of the CPU's
+    std::vector<int32_t> before;                  // up to 12 tokens ending at pos
+};
+
 struct CheckResult {
     int n = 0, same_top = 0, worst = 0;  // worst: the position of max_diff
+    int over = 0;                        // positions off by more than the bar
+    // On a text (-p): perplexity of its next tokens on each side, and the KL
+    // divergence from the CPU's distribution to the GPU's (nats per position).
+    bool on_text = false;
+    double ppl_gpu = 0, ppl_cpu = 0, kl_mean = 0, kl_max = 0;
+    int kl_worst = 0;
     double max_diff = 0, rel = 0, gpu_ms = 0, cpu_ms = 0;
     bool pass = false;
     bool saved = false;  // the CPU's logits came from the model's saved answers
+    std::vector<TopChange> changes;  // the first 16 positions whose top token differs
     std::string backend;
 };
 
@@ -34,9 +52,11 @@ struct CheckResult {
 // The reference's logits are saved next to the model (MODEL.gguf.ts5ref, or
 // MODEL.gguf.q8.ts5ref for an 8-bit cache) the first time, and later checks
 // of as many tokens or fewer compare against those instead of running the
-// CPU again; fresh: run the CPU anyway.
+// CPU again; fresh: run the CPU anyway. text: the check's tokens (its first
+// n; a text's tokens, whose answers are saved apart, MODEL.gguf.t<hash>.ts5ref)
+// in place of the test tokens, which are spread over the vocabulary.
 bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string &err,
-               const Progress &progress = nullptr, bool fresh = false);
+               const Progress &progress = nullptr, bool fresh = false, const std::vector<int32_t> &text = {});
 // "ts5 check: <model>, N tokens: max |diff| ..., ...: PASS|FAIL"
 std::string check_line(const std::string &model, const CheckResult &r);
 

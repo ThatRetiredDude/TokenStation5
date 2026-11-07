@@ -19,12 +19,16 @@ struct SampleParams {
     int top_k = 40;
     int max_tokens = 512;
     uint64_t seed = 0;  // 0: random
-    int draft = -1;     // tokens drafted per step by prompt lookup; -1: TS5_DRAFT or 7; 0: off
+    int draft = -1;     // tokens drafted per step by prompt lookup; -1: TS5_DRAFT or 5; 0: off
 };
 
 struct GenStats {
     int prompt_tokens = 0, prompt_evaluated = 0, gen_tokens = 0;
-    int drafted = 0, draft_accepted = 0;  // speculation (lookup or draft model)
+    int drafted = 0, draft_accepted = 0;  // speculation: prompt lookup and the draft model together
+    int model_drafted = 0, model_accepted = 0;  // the draft model's share of those
+    bool has_drafter = false;  // a draft model is loaded (the rest is prompt lookup)
+    double draft_ms = 0;  // wall time in the draft model: its drafts, catch-up and probes
+    int probes = 0;       // steps that tried the draft model only to see whether it keeps up
     double prompt_ms = 0, gen_ms = 0;
     double sample_ms = 0;  // CPU time in sample(), its logits reads included
     std::string finish = "length";
@@ -70,7 +74,31 @@ private:
     bool drafter_ok_ = true;    // false after a drafter forward fails
     std::vector<float> dl_;     // drafter logits, for backends without a view
     std::vector<int32_t> cu_;   // the drafter's catch-up batch, reused
+    // Time of the drafter's last one-token forwards (ms, count): its cost
+    // per draft token in steady state, without the catch-up of a backlog.
+    double draft_ms_ = 0;
+    int draft_n_ = 0;
+    // The catch-up it just did (ms, tokens): what a token of backlog costs
+    // to enter as a batch, for the controller's fixed cost of resuming.
+    double catch_ms_ = 0;
+    int catch_n_ = 0;
     std::mt19937_64 rng_{std::random_device{}()};
+};
+
+// The speculation line of a run's stats: "lookup 3/9 accepted", or with a
+// draft model "lookup 3/9, helper 12/20 accepted" (drafts kept / proposed).
+std::string draft_summary(const GenStats &st);
+
+// Told when the engine starts (true) and stops (false) working: a
+// generation, a GPU check or a speed test. The Linux app runs the PS5's fan
+// up for the stretch. One hook for the process; null to unset.
+void set_work_hook(std::function<void(bool)> hook);
+// Marks a stretch of work for the hook; stretches nest.
+struct WorkScope {
+    WorkScope();
+    ~WorkScope();
+    WorkScope(const WorkScope &) = delete;
+    WorkScope &operator=(const WorkScope &) = delete;
 };
 
 }  // namespace ts5

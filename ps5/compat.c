@@ -4,7 +4,8 @@
 #include <errno.h>
 
 /* RADV asks whether a path is a symbolic link (ac_gpu_info.c); the console's
- * file systems give a title none. */
+ * file systems give a title none, and EINVAL is what a path that is no link
+ * gets anyway. */
 #include <stddef.h>
 #include <sys/types.h>
 
@@ -17,7 +18,8 @@ ssize_t readlink(const char *restrict path, char *restrict buf, size_t size) {
 }
 
 /* ACO's disassembly path makes a temporary file. Six X's replaced from a
- * counter and the clock until the name is new. */
+ * counter and the clock until the name is new, for as many tries as the last
+ * two characters have pairs (36 x 36). */
 #include <fcntl.h>
 #include <string.h>
 #include <time.h>
@@ -30,7 +32,7 @@ int mkstemp(char *path) {
         errno = EINVAL;
         return -1;
     }
-    for (int attempt = 0; attempt < 1000; attempt++) {
+    for (int attempt = 0; attempt < 1296; attempt++) {
         unsigned long v = (unsigned long)time(NULL) ^ (++counter * 2654435761ul);
         for (int i = 0; i < 6; i++, v /= 36) path[n - 6 + i] = alphabet[v % 36];
         const int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);

@@ -12,9 +12,13 @@ PORT=8081
 # Context length in tokens, or "auto" for what fits in GPU memory.
 CONTEXT=8192
 
-# PS5 only: run the CPU at 3.5 GHz and the GPU at 2.23 GHz with the fan on,
-# using ps5_control from ps5-linux-tools. Set to 0 to leave clocks alone.
-PS5_BOOST=1
+# PS5 only, with ps5_control from ps5-linux-tools: the fan on, and the clock
+# boost off (0) or on (1). Off is faster for models: the kernel then runs the
+# GPU at its full 2.23 GHz, where the boost's power management holds it
+# lower. 1 is the console's game clocks (CPU 3.5 GHz), cooler and about 8%
+# slower on prompts. If ps5-linux-tools' ps5boost.service is on, it turns
+# the boost on at every boot before this takes effect.
+PS5_BOOST=0
 # Where ps5_control lives, if it is not on the PATH.
 PS5_CONTROL=
 

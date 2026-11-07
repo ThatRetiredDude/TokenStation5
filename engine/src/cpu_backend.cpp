@@ -45,26 +45,27 @@ bool read_at(FILE *f, const Model &m, const Weight &w, uint64_t off, uint64_t n,
     return fseeko(f, (off_t)(m.gguf.data_offset + w.info->offset + off), SEEK_SET) == 0 && fread(dst, 1, n, f) == n;
 }
 
+// w null: no weights (Gemma 4's V).
 void rmsnorm(float *x, const float *w, int n, float eps) {
     double ss = 0;
     for (int i = 0; i < n; i++) ss += (double)x[i] * x[i];
     float s = 1.0f / std::sqrt((float)(ss / n) + eps);
-    for (int i = 0; i < n; i++) x[i] = x[i] * s * w[i];
+    for (int i = 0; i < n; i++) x[i] = x[i] * s * (w ? w[i] : 1.0f);
 }
 
-// freqs: Llama 3.1's divisor for each frequency (Model::rope_freqs), or null;
-// scale: linear RoPE scaling's factor on the position.
-void rope(float *v, int head_dim, int n_rot, int pos, float base, bool neox, const float *freqs, float scale = 1.f) {
+// turn: each pair's turn per position (Model::rope_turn), whose product with
+// the position, modulo 2^64, is the angle in 2^-64 revolutions; as the GPU
+// (qkv_post), its top 32 bits, a signed angle within half a turn.
+void rope(float *v, int n_rot, int pos, bool neox, const uint64_t *turn) {
     for (int i = 0; i < n_rot / 2; i++) {
-        float theta = pos * scale * std::pow(base, -2.0f * i / n_rot);
-        if (freqs) theta /= freqs[i];
-        float c = std::cos(theta), s = std::sin(theta);
+        const int32_t top = (int32_t)(uint32_t)(((uint64_t)(uint32_t)pos * turn[i]) >> 32);
+        const double ang = top * (2 * M_PI / 4294967296.0);
+        const float c = (float)std::cos(ang), s = (float)std::sin(ang);
         int a = neox ? i : 2 * i, b = neox ? i + n_rot / 2 : 2 * i + 1;
         float x0 = v[a], x1 = v[b];
         v[a] = x0 * c - x1 * s;
         v[b] = x0 * s + x1 * c;
     }
-    (void)head_dim;
 }
 
 // GELU, tanh approximation (Gemma's gelu_pytorch_tanh, ggml's gelu).
@@ -92,9 +93,14 @@ void round_kv(KvType t, float *v, int n) {
 class CpuBackend : public Backend {
 public:
     CpuBackend(const Model &m, int n_ctx, KvType kv_type) : m_(m), hp_(m.hp), n_ctx_(n_ctx), kv_(kv_type) {
-        const int kv = hp_.n_head_kv * hp_.head_dim;
-        kc_.assign((size_t)hp_.n_layer * n_ctx * kv, 0.f);
-        vc_.assign(kc_.size(), 0.f);
+        // Each layer's K (and V) cache: n_ctx tokens of its own width.
+        size_t total = 0;
+        for (int l = 0; l < hp_.n_layer; l++) {
+            cache_off_.push_back(total);
+            total += (size_t)n_ctx * hp_.kv_values(l);
+        }
+        kc_.assign(total, 0.f);
+        vc_.assign(total, 0.f);
         if (!m.tok_embd.data) file_ = fopen(m.gguf.path.c_str(), "rb");
         for (auto &L : m.layers) {
             Norms n;
@@ -106,7 +112,8 @@ public:
             norms_.push_back(std::move(n));
         }
         out_norm_ = vec(m.out_norm);
-        if (m.rope_freqs) rope_freqs_ = vec(m.rope_freqs);
+        for (int swa = 0; swa < 2; swa++)
+            for (int i = 0; i < m.rope_dims(swa) / 2; i++) turn_[swa].push_back(m.rope_turn(swa, i));
     }
     ~CpuBackend() override {
         if (file_) fclose(file_);
@@ -142,7 +149,11 @@ public:
         const int nout = all ? n : 1;
         float *xo = x.data() + (size_t)(n - nout) * E;
         for (int t = 0; t < nout; t++) rmsnorm(xo + (size_t)t * E, out_norm_.data(), E, hp_.rms_eps);
-        return output(xo, nout, logits, err);
+        if (!output(xo, nout, logits, err)) return false;
+        if (hp_.logit_softcap > 0)  // Gemma 4: cap * tanh(x / cap)
+            for (size_t i = 0; i < (size_t)nout * hp_.n_vocab; i++)
+                logits[i] = hp_.logit_softcap * std::tanh(logits[i] / hp_.logit_softcap);
+        return true;
     }
 
 private:
@@ -173,10 +184,11 @@ private:
     bool load_layer(Layer &L, std::string &err) {
         Weight *ws[] = {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down};
         uint64_t total = 0;
-        for (Weight *w : ws) total += (w->info->nbytes + 63) / 64 * 64;
+        for (Weight *w : ws) total += *w ? (w->info->nbytes + 63) / 64 * 64 : 0;
         if (buf_.size() < total) buf_.resize(total);
         uint64_t off = 0;
         for (Weight *w : ws) {
+            if (!*w) continue;  // Gemma 4's full layers have no V projection
             if (!read_at(file_, m_, *w, 0, w->info->nbytes, buf_.data() + off)) return read_failed(err);
             w->data = buf_.data() + off;
             off += (w->info->nbytes + 63) / 64 * 64;
@@ -186,7 +198,7 @@ private:
 
     // Layer l for n tokens at positions pos0.., x holding their residuals.
     void layer(int l, const Layer &L, float *x, int n, int pos0) {
-        const int E = hp_.n_embd, HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
+        const int E = hp_.n_embd, HD = hp_.hd(l), H = hp_.n_head, HKV = hp_.hkv(l);
         const int KV = HKV * HD, F = hp_.n_ff;
         const Norms &N = norms_[l];
         const bool swa = hp_.swa(l);
@@ -194,9 +206,10 @@ private:
         for (int t = 0; t < n; t++) rmsnorm(&h[(size_t)t * E], N.attn.data(), E, hp_.rms_eps);
         matmul(L.wq, h.data(), n, q.data());
         matmul(L.wk, h.data(), n, k.data());
-        matmul(L.wv, h.data(), n, v.data());
-        float *kl = &kc_[((size_t)l * n_ctx_) * KV];
-        float *vl = &vc_[((size_t)l * n_ctx_) * KV];
+        if (L.wv) matmul(L.wv, h.data(), n, v.data());
+        else v = k;  // Gemma 4's full layers: V is K before its norm and RoPE
+        float *kl = &kc_[cache_off_[l]];
+        float *vl = &vc_[cache_off_[l]];
         for (int t = 0; t < n; t++) {
             float *qt = &q[(size_t)t * H * HD], *kt = &k[(size_t)t * KV], *vt = &v[(size_t)t * KV];
             const int pos = pos0 + t;
@@ -204,15 +217,16 @@ private:
                 for (int i = 0; i < H * HD; i++) qt[i] += N.bq[i];
                 for (int i = 0; i < KV; i++) kt[i] += N.bk[i], vt[i] += N.bv[i];
             }
-            const float *ff = rope_freqs_.empty() ? nullptr : rope_freqs_.data();
-            const float base = swa ? hp_.rope_base_swa : hp_.rope_base, rs = swa ? 1.f : hp_.rope_scale;
+            const uint64_t *turn = turn_[swa ? 1 : 0].data();
+            const int RD = hp_.rd(l);
             for (int hh = 0; hh < H; hh++) {
                 if (!N.q.empty()) rmsnorm(&qt[hh * HD], N.q.data(), HD, hp_.rms_eps);
-                rope(&qt[hh * HD], HD, hp_.rope_dims, pos, base, hp_.rope_neox, ff, rs);
+                rope(&qt[hh * HD], RD, pos, hp_.rope_neox, turn);
             }
             for (int hh = 0; hh < HKV; hh++) {
                 if (!N.k.empty()) rmsnorm(&kt[hh * HD], N.k.data(), HD, hp_.rms_eps);
-                rope(&kt[hh * HD], HD, hp_.rope_dims, pos, base, hp_.rope_neox, ff, rs);
+                rope(&kt[hh * HD], RD, pos, hp_.rope_neox, turn);
+                if (hp_.v_norm) rmsnorm(&vt[hh * HD], nullptr, HD, hp_.rms_eps);
             }
             round_kv(kv_, kt, KV);
             round_kv(kv_, vt, KV);
@@ -263,6 +277,8 @@ private:
         if (!N.post_ffn.empty())
             for (int t = 0; t < n; t++) rmsnorm(&o[(size_t)t * E], N.post_ffn.data(), E, hp_.rms_eps);
         for (size_t i = 0; i < (size_t)n * E; i++) x[i] += o[i];
+        if (L.out_scale)  // Gemma 4: the layer's output, scaled
+            for (size_t i = 0; i < (size_t)n * E; i++) x[i] *= L.out_scale_v;
     }
 
     // logits[t] = output . x[t] for n tokens. From the file, 64 MiB of rows at
@@ -291,7 +307,9 @@ private:
     FILE *file_ = nullptr;      // the model file, when its weights were not loaded
     bool read_ok_ = true;
     std::vector<uint8_t> buf_;  // the weights being used, read from file_
-    std::vector<float> kc_, vc_, out_norm_, rope_freqs_;
+    std::vector<float> kc_, vc_, out_norm_;
+    std::vector<uint64_t> turn_[2];  // RoPE turns of the full and the sliding layers
+    std::vector<size_t> cache_off_;  // each layer's start in kc_ and vc_
     std::vector<Norms> norms_;
 };
 

@@ -31,12 +31,30 @@
 #include "attn.spv.h"
 #include "attn_dec.spv.h"
 #include "attn_dec4.spv.h"
+#include "attn_dec4_256.spv.h"
+#include "attn_dec4_512.spv.h"
+#include "attn_dec_64.spv.h"
+#include "attn_dec4_64.spv.h"
 #include "attn_merge.spv.h"
 #include "attn_pf.spv.h"
 #include "attn_pf128.spv.h"
 #include "attn_pf256.spv.h"
+#include "attn_pf512.spv.h"
 #include "attn_pf_q8.spv.h"
 #include "attn_q8.spv.h"
+#include "attn_dec_q8.spv.h"
+#include "attn_dec4_q8.spv.h"
+#include "attn_dec4_256_q8.spv.h"
+#include "attn_dec4_512_q8.spv.h"
+#include "attn_dec4_256w.spv.h"
+#include "attn_dec4_512w.spv.h"
+#include "attn_dec4_256w_q8.spv.h"
+#include "attn_dec4_512w_q8.spv.h"
+#include "attn_dec_64_q8.spv.h"
+#include "attn_dec4_64_q8.spv.h"
+#include "attn_pf128_q8.spv.h"
+#include "attn_pf256_q8.spv.h"
+#include "attn_pf512_q8.spv.h"
 #include "get_rows_f16.spv.h"
 #include "get_rows_f32.spv.h"
 #include "get_rows_q4_0.spv.h"
@@ -60,11 +78,33 @@
 #include "matvec_q4_k.spv.h"
 #include "matvec_q6_k.spv.h"
 #include "mv16_glu_q4_k.spv.h"
+#include "mv16n_glu_q4_k.spv.h"
+#include "mv16n_q4_k.spv.h"
+#include "mv16n_q6_k.spv.h"
 #include "mv16_q4_k.spv.h"
 #include "mv16_q6_k.spv.h"
+#include "mv16_q5_k.spv.h"
+#include "mv16_q8_0.spv.h"
+#include "mv16_glu_q5_k.spv.h"
+#include "mv16_glu_q8_0.spv.h"
+#include "mv16n_q5_k.spv.h"
+#include "mv16n_q8_0.spv.h"
+#include "mv16n_glu_q5_k.spv.h"
+#include "mv16n_glu_q8_0.spv.h"
 #include "mvt_glu_q4_k.spv.h"
 #include "mvt_q4_k.spv.h"
+#include "mvtx_q4_k.spv.h"
+#include "mvtx_q5_k.spv.h"
+#include "mvtx_q6_k.spv.h"
+#include "mvtx_q8_0.spv.h"
 #include "mvt_q6_k.spv.h"
+#include "mvt_q5_k.spv.h"
+#include "mvt_q8_0.spv.h"
+#include "mv16_q5_0.spv.h"
+#include "mv16n_q5_0.spv.h"
+#include "mv16_glu_q5_0.spv.h"
+#include "mv16n_glu_q5_0.spv.h"
+#include "mvt_q5_0.spv.h"
 #include "mm_f16.spv.h"
 #include "mm_f32.spv.h"
 #include "mm_q4_0.spv.h"
@@ -80,9 +120,35 @@
 #include "mmb_reduce.spv.h"
 #include "mmb16_q4_k.spv.h"
 #include "mmb16_q6_k.spv.h"
+#include "mmb_q5_k.spv.h"
+#include "mmb_q8_0.spv.h"
+#include "mmb16_q5_k.spv.h"
+#include "mmb16_q8_0.spv.h"
+#include "mmb16d_q4_k.spv.h"
+#include "mmb16d_q5_k.spv.h"
+#include "mmb16d_q6_k.spv.h"
+#include "mmb16d_q8_0.spv.h"
+#include "mmb16q_q4_k.spv.h"
+#include "mmb16q_q5_k.spv.h"
+#include "mmb16q_q6_k.spv.h"
+#include "mmb16q_q8_0.spv.h"
+#include "mmb16dq_q4_k.spv.h"
+#include "mmb16dq_q5_k.spv.h"
+#include "mmb16dq_q6_k.spv.h"
+#include "mmb16dq_q8_0.spv.h"
+#include "mmb16dql_q4_k.spv.h"
+#include "mmb16dql_q5_k.spv.h"
+#include "mmb16dql_q6_k.spv.h"
+#include "mmb16dql_q8_0.spv.h"
+#include "mmbq_q4_k.spv.h"
+#include "mmbq_q5_k.spv.h"
+#include "mmbq_q6_k.spv.h"
+#include "mmbq_q8_0.spv.h"
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
+#include "rmsnorm2.spv.h"
+#include "softcap.spv.h"
 #include "swiglu.spv.h"
 #include "log.h"
 
@@ -151,6 +217,11 @@ struct Pipe {
     VkPipelineLayout layout = VK_NULL_HANDLE;
     VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
     uint32_t nbind = 0;
+    // Where the driver tells (VK_KHR_pipeline_executable_properties, asked
+    // for the prompt kernels, for the log): its waves (subgroups) a SIMD
+    // holds at once, which its registers and shared memory decide, and its
+    // subgroup size.
+    uint32_t waves = 0, wave_size = 0;
 };
 
 const char *qname(uint32_t t) {
@@ -169,6 +240,31 @@ const char *qname(uint32_t t) {
     }
 }
 
+// The types with word-load mat-vec kernels: mv16 (one token), mv16n (with
+// the RMSNorm folded in), mv16_glu (gate and up at once) and mvt (verify
+// batches). K-quant rows are whole 256-value groups; Q8_0 and Q5_0 rows any
+// whole number of 32-value blocks (Gemma 3 1B's 1,152 values, Qwen 2.5
+// 0.5B's 896), with the matrix whole 4-byte words (the kernels read a
+// block's last bytes as one). Before (TS5_MV32=0): Q8_0 only, and only in
+// whole 256-value groups; the others took the generic matmul_* kernels.
+static bool mv32_on() {
+    static const bool on = [] {
+        const char *e = getenv("TS5_MV32");
+        return !e || atoi(e) != 0;
+    }();
+    return on;
+}
+static bool fast_type(const Weight &w) {
+    const uint32_t t = w.type();
+    if (t == GGML_Q4_K || t == GGML_Q5_K || t == GGML_Q6_K) return w.ne0() % 256 == 0;
+    if (t == GGML_Q8_0 && w.ne0() % 256 == 0) return true;
+    return mv32_on() && (t == GGML_Q8_0 || t == GGML_Q5_0) && w.ne0() % 32 == 0 && w.info->nbytes % 4 == 0;
+}
+// The types with prompt kernels (mmb): K-quants and Q8_0, in 32-value units.
+static bool mmb_type(const Weight &w) { return fast_type(w) && w.type() != GGML_Q5_0; }
+// The x-staging verify kernels (mvtx, TS5_MVTX=1): whole 256-value groups.
+static bool mvtx_type(const Weight &w) { return mmb_type(w) && w.ne0() % 256 == 0; }
+
 #define CHECK(x)                                                                   \
     do {                                                                           \
         VkResult r_ = (x);                                                         \
@@ -181,7 +277,7 @@ const char *qname(uint32_t t) {
 class VkBackend : public Backend {
 public:
     static constexpr int TMAX = 256;  // tokens per forward call
-    static constexpr size_t PART = 1u << 20;  // floats of attn's partial results, when it splits the keys
+    static constexpr size_t PART = 1u << 22;  // floats of attn's partial results, when it splits the keys
     static constexpr size_t SPLIT = 12u << 20;  // floats of mmb's partial results, when it splits the rows
 
     VkBackend(VkContext *ctx, bool owns_ctx, Model &m, int n_ctx)
@@ -246,9 +342,34 @@ public:
 
     bool init(const std::string &path, std::string &err) {
         if (!init_device(err)) return false;
+        if (!memory_fits(err)) return false;
         if (!init_pipelines(err)) return false;
         if (!upload_weights(path, err)) return false;
         return init_buffers(err);
+    }
+
+    // Before any weight is uploaded: whether the weights, buffers and the
+    // context asked for (an auto-fit one: 1024 tokens and the room it keeps
+    // for a helper) fit in what is free (VkContext::free_memory, which on
+    // Linux keeps system_reserve() of the system's RAM free). Where that
+    // can't be told, true.
+    bool memory_fits(std::string &err) {
+        const uint64_t free = ctx_->free_memory();
+        if (free == UINT64_MAX) return true;
+        uint64_t weights = 0;
+        for (const auto &t : m_.gguf.tensors) weights += t.nbytes;
+        const uint64_t fixed = vk_fixed_bytes(hp_, weights), per = kv_bytes_per_token(hp_, kv_);
+        const uint64_t ctx = (uint64_t)(n_ctx_ > 0 ? n_ctx_ : 1024) * per + (n_ctx_ > 0 ? 0 : fit_reserve_);
+        if (fixed + ctx <= free) return true;
+        const double gib = 1073741824.0;
+        char b[400];
+        snprintf(b, sizeof b,
+                 "not enough memory: the weights and buffers take %.2f GiB and %s %.2f GiB, %.2f GiB is free "
+                 "(%.1f GiB of the system's RAM is kept for the system: TS5_SYSTEM_RESERVE_GIB)",
+                 fixed / gib, n_ctx_ > 0 ? ("a context of " + std::to_string(n_ctx_) + " tokens").c_str()
+                                         : "the smallest context", ctx / gib, free / gib, system_reserve() / gib);
+        err = b;
+        return false;
     }
 
     const float *logits_view() const override { return (const float *)logits_.map; }
@@ -321,26 +442,118 @@ private:
         if (const char *e = getenv("TS5_ATTN_PF128")) attn_pf128_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_PLAIN")) attn_dec_plain_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_KEYS")) attn_dec_keys_ = atoi(e);
+        if (const char *e = getenv("TS5_ATTN_DEC64")) attn_dec64_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_ATTN_WIDE8")) attn_wide8_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV16")) mv16_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT")) mvt_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT_GLU")) mvt_glu_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT_ROWS")) mvt_rows_ = std::min(4, std::max(1, atoi(e)));
+        if (const char *e = getenv("TS5_MVTX")) mvtx_ = atoi(e) != 0;
         // The fused kernel holds two matrices' words: past 2 rows it spills
         // registers on the PS5 (1376 VGPRs into scratch at 4 rows, a 7x
         // regression), so its row tiling is capped where the plain one's isn't.
         mvt_glu_rows_ = std::min(mvt_rows_, 2u);
         if (const char *e = getenv("TS5_BARRIER")) barrier_mode_ = std::min(2, std::max(0, atoi(e)));
         if (const char *e = getenv("TS5_FUSE")) fuse_ = atoi(e) != 0;
+        // Gemma's gate and up through the fused GLU kernels (tanh-GELU in
+        // place of SiLU): it passes the checks and is more exact than the
+        // two-pass path (Gemma 3 12B 0.36% against 0.45%), but on the PS5
+        // it generates 1% slower (Gemma 4 12B 40.6 -> 40.2 tok/s, Gemma 3
+        // 12B 42.9 -> 42.4, 4B 111.7 -> 110.2), so it waits for a faster
+        // fused kernel. TS5_GLU_GELU=1 turns it on.
+        if (const char *e = getenv("TS5_GLU_GELU")) glu_gelu_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_NORM_FUSE")) norm_fuse_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
-        if (const char *e = getenv("TS5_MMB_SPLIT")) mmb_split_ = std::max(0, atoi(e));
+#ifndef TS5_PS5
+        // RADV (with wave32): splitting the small matrices' columns down to
+        // 128 blocks is faster on the PS5 under Linux: 2% at 36 compute
+        // units with the f32 kernel (472 -> 482 tok/s), and with the f16
+        // kernel at 40 it beats 256 by 1.3% on Qwen3 8B and 3-3.6% on the
+        // 14B (256 was 2% ahead of 128 only with the f32 kernel at 40).
+        if (strstr(props_.deviceName, "RADV")) mmb_split_ = 128;
+#endif
+        // Slices from the compute units where the driver tells them: on the
+        // PS5 (40) prompts +6.1% on Qwen3 8B (766 -> 813, beating its best
+        // TS5_MMB_SPLIT, 48, by 2.8%) and +5.3% on Coder 7B (896 -> 943,
+        // level with its best, 64); 60 and 80 were slower, so one workgroup
+        // runs per compute unit.
+        // (Slices from the workgroups that fit at once, two a compute unit
+        // for the kernels of 128 registers or fewer, were 8% slower with
+        // dql on Qwen3 8B Q8_0 and no faster on Coder 7B: a second
+        // workgroup shares the unit's ALUs, so it doesn't make a round.)
+        mmb_wgs_ = ctx_->compute_units;
+        if (const char *e = getenv("TS5_MMB_WGS"))
+            mmb_wgs_ = !strcmp(e, "cu") ? ctx_->compute_units : (uint32_t)std::max(0, atoi(e));
+        if (const char *e = getenv("TS5_MMB_SLICE_COST")) mmb_slice_cost_ = atof(e);
+        if (const char *e = getenv("TS5_MMB_SPLIT")) {
+            mmb_split_ = std::max(0, atoi(e));
+            mmb_wgs_ = 0;
+        }
         if (const char *e = getenv("TS5_MMB_SLICES")) mmb_slices_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_MMB_SMALL")) mmb_small_ = atoi(e) != 0;
-        // f32 by default: on the PS5 the f16 sums put Llama 3.2 3B over the
-        // GPU check's bar (0.78% at 512 tokens, 0.02-0.04% in f32).
+        // The f16 prompt sums are 9-39% faster on the PS5 (Qwen3 8B 534 ->
+        // 583 tok/s, 14B 302 -> 342, Coder 7B 605 -> 775, DeepSeek 14B 305
+        // -> 376, Llama 3.1 8B 557 -> 774) and the Qwen-family models keep
+        // within the GPU check's bar with them (0.16-0.26% of the largest
+        // logit at 128 tokens), so they're the default for qwen2 and qwen3.
+        // Gemma 3 and 4 are f32: they fail the check at 512 tokens with f16
+        // anywhere (the PS5: Gemma 3 4B 1.8% of the largest logit and 12B
+        // 2.4% with only gate and up in f32, against 0.35% all in f32). At
+        // 128 tokens (124 in one batch) every matrix of theirs but gate and
+        // up is under mmb's 48 blocks and takes the f32 64 x 64 kernel, so
+        // the check there never saw the f16 sums; its 0.2% passes with
+        // gate and up in f32 were the f32 kernels'. TS5_MMB_F16=1 puts them
+        // on f16, gate and up still in f32 unless TS5_MMB_F16_SKIP says.
+        // Llama, since 82c2ccc's kernels (the PS5, 512 tokens, f32 0.01-0.06%):
+        // 3.1 8B 0.27%, 3.2 3B 0.34% in f16 throughout, and leaving ffn_down
+        // in f32 changed neither; the 3.2 1B went over at 0.51%, 0.33% with
+        // ffn_down and attn_output in f32. So llama is f16, and narrow ones
+        // (n_embd 2048 and less) keep those two in f32. Qwen at 512 tokens
+        // (3b28668): Qwen3 8B 0.21-0.25% (Q4_K_M, Q6_K, Q8_0), Coder 7B
+        // 0.19%, Coder 0.5B 0.13%, but Qwen3 0.6B (n_embd 1024) 1.1% (all
+        // f32: 0.069%), so a Qwen3 that narrow stays in f32. TS5_MMB_F16=0|1
+        // and TS5_MMB_F16_SKIP decide.
+        const bool gemma = hp_.arch == "gemma3" || hp_.arch == "gemma4";
+        mmb_f16_ = ctx_->float16 && (hp_.arch == "qwen2" || hp_.arch == "qwen3" || hp_.arch == "llama");
+        if (hp_.arch == "qwen3" && hp_.n_embd <= 1024) mmb_f16_ = false;
+        if (gemma) mmb_f16_skip_ = ",ffn_gate,ffn_up,";
+        if (hp_.arch == "llama" && hp_.n_embd <= 2048) mmb_f16_skip_ = ",ffn_down,attn_output,";
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
+        if (const char *e = getenv("TS5_MMB_F16_SKIP")) mmb_f16_skip_ = std::string(",") + e + ",";
+        // The prompt kernel's variants (TS5_MMB_VAR): "q" loads x by quads of
+        // tokens and stores them to shared memory as vectors, "d"
+        // double-buffers the shared tiles (one barrier a step; f16 only),
+        // "dq" both. On the PS5 (fan at full, 2026-11-04) q is the fastest
+        // on every model and the f16 default: prompts Qwen3 14B 342 -> 431
+        // tok/s (+26%), Qwen3 8B 583 -> 712, DeepSeek 14B 370 -> 443, Gemma
+        // 4 12B 375 -> 402 (+7%), as much at 4096 tokens, checks unchanged;
+        // d alone is worth half of that and dq no more than q, and padding
+        // the x tile's rows against bank conflicts on the quad stores (a
+        // "qp" variant, since dropped) changed nothing (2026-11-05: every
+        // model within 0.3% of q). The f32 kernel's quad variant ran 3%
+        // slower than its plain one (Gemma 4), so f32 stays plain unless
+        // TS5_MMB_VAR says. Since the loads overlap the sums (75b9fa2, and
+        // dq storing a step ahead so the compiler keeps its loads ahead of
+        // the sums too), dq is the f16 default: on the PS5 the old dq,
+        // whose loads still waited, was already ahead of q by 2.5% (Qwen3
+        // 8B, 765 -> 784) and 6.4% (Coder 7B, 896 -> 953).
+        // Q8_0 weights take dql (dq storing after the sums: 128 registers
+        // against 168, so two workgroups share a compute unit): on the PS5
+        // Qwen3 8B Q8_0 prompts 860 -> 894 tok/s. On Q4_K and Q6_K dq is
+        // ahead (Qwen3 8B Q4_K_M 845 against 765, Q6_K 833 against 698,
+        // Llama 3.1 8B 849 against 793; Coder 7B 958 against 975).
+        mmb_var_ = "dq";
+        mmb_var_q8_ = "dql";
+        if (const char *e = getenv("TS5_MMB_VAR")) {
+            mmb_var_ = e;
+            mmb_var_q8_ = e;
+            mmb_var32_ = e;
+            for (char c : {'d', 'l'})  // f16 only
+                mmb_var32_.erase(std::remove(mmb_var32_.begin(), mmb_var32_.end(), c), mmb_var32_.end());
+        }
         kv_ = kv_type_setting();
-        if (kv_ == KvType::Q8 && !(attn_ok() && hp_.head_dim % 32 == 0)) {
+        if (kv_ == KvType::Q8 && !(attn_ok_all() && hp_.max_hd() % 32 == 0)) {
             ts5::log_line("ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16");
             kv_ = KvType::F16;
         }
@@ -396,6 +609,17 @@ private:
             add(HV);
         } else {
             add(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+#ifndef TS5_PS5
+            // Past the device-local heap (an APU's carve-out on Linux, often
+            // small), write-combined system memory before cached: the GPU
+            // reads cached (snooped) memory through the CPU's caches, slower
+            // for weights it streams every token.
+            for (uint32_t i = 0; i < memprops_.memoryTypeCount; i++)
+                if ((req.memoryTypeBits & (1u << i)) &&
+                    !(memprops_.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) &&
+                    std::find(types.begin(), types.end(), (int)i) == types.end())
+                    types.push_back((int)i);
+#endif
             add(0);
         }
         if (types.empty()) { err = "no suitable memory type"; return false; }
@@ -438,7 +662,7 @@ private:
     // spec, spec1: the values of the shader's specialization constants 0 and
     // 1, where not 0.
     bool make_pipe(const std::string &name, const uint32_t *code, size_t bytes, uint32_t nbind, std::string &err,
-                   uint32_t spec = 0, uint32_t spec1 = 0) {
+                   uint32_t spec = 0, uint32_t spec1 = 0, bool stats = false) {
         Pipe p;
         p.nbind = nbind;
         std::vector<VkDescriptorSetLayoutBinding> b(nbind);
@@ -475,20 +699,73 @@ private:
         VkSpecializationInfo si{spec1 ? 2u : 1u, se, spec1 ? 8u : 4u, sv};
         if (spec || spec1) cp.stage.pSpecializationInfo = &si;
         cp.layout = p.layout;
+        stats = stats && get_stats_;
+        if (stats) cp.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
         CHECK(vk.vkCreateComputePipelines(dev_, VK_NULL_HANDLE, 1, &cp, nullptr, &p.pipe));
         vk.vkDestroyShaderModule(dev_, mod, nullptr);
+        if (stats) read_stats(name, p);
         pipes_[name] = p;
         return true;
     }
 
+    // p.waves and p.wave_size from the driver's statistics (RADV: "Subgroups
+    // per SIMD").
+    void read_stats(const std::string &name, Pipe &p) {
+        VkPipelineInfoKHR pi{VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR};
+        pi.pipeline = p.pipe;
+        uint32_t n = 1;
+        VkPipelineExecutablePropertiesKHR ep{VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR};
+        if (get_props_(dev_, &pi, &n, &ep) < 0 || n < 1) return;
+        VkPipelineExecutableInfoKHR ei{VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR};
+        ei.pipeline = p.pipe;
+        ei.executableIndex = 0;
+        uint32_t ns = 0;
+        if (get_stats_(dev_, &ei, &ns, nullptr) < 0) return;
+        std::vector<VkPipelineExecutableStatisticKHR> st(ns, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR});
+        if (get_stats_(dev_, &ei, &ns, st.data()) < 0) return;
+        for (auto &e : st) {
+            if (strcmp(e.name, "Subgroups per SIMD")) continue;
+            if (e.format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR) p.waves = (uint32_t)e.value.u64;
+            else if (e.format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR) p.waves = (uint32_t)e.value.i64;
+        }
+        p.wave_size = ep.subgroupSize;
+        if (p.waves) ts5::log_line("ts5: %s: %u waves of %u a SIMD", name.c_str(), p.waves, p.wave_size);
+    }
+
+    // Of the prompt kernels (mmb*), the variants in use only.
+    bool wanted(const std::string &n) const {
+        if (n.rfind("mmb16", 0) == 0) {
+            const std::string v = n.substr(5, n.find('_') - 5);
+            return v == mmb_var_ || (v == mmb_var_q8_ && n.find("_q8_0") != std::string::npos);
+        }
+        if (n.rfind("mmb", 0) == 0 && n != "mmb_reduce") return n.substr(3, n.find('_') - 3) == mmb_var32_;
+        return true;
+    }
+
     bool init_pipelines(std::string &err) {
-#define P(n, nb) if (!make_pipe(#n, spv_##n, sizeof(spv_##n), nb, err)) return false;
+        if (ctx_->pipeline_stats) {
+            get_props_ = (PFN_vkGetPipelineExecutablePropertiesKHR)ctx_->get_device_proc(dev_, "vkGetPipelineExecutablePropertiesKHR");
+            get_stats_ = (PFN_vkGetPipelineExecutableStatisticsKHR)ctx_->get_device_proc(dev_, "vkGetPipelineExecutableStatisticsKHR");
+            if (!get_props_) get_stats_ = nullptr;
+        }
+#define P(n, nb)                                                                                     \
+    if (wanted(#n) && !make_pipe(#n, spv_##n, sizeof(spv_##n), nb, err, 0, 0, std::string(#n).rfind("mmb", 0) == 0)) \
+        return false;
         P(matmul_f32, 3) P(matmul_f16, 3) P(matmul_q4_0, 3) P(matmul_q8_0, 3)
         P(matmul_q4_1, 3) P(matmul_q5_0, 3) P(matmul_q5_1, 3)
         P(matmul_q4_k, 3) P(matmul_q5_k, 3) P(matmul_q6_k, 3)
         P(mm_f32, 3) P(mm_f16, 3) P(mm_q4_0, 3) P(mm_q8_0, 3) P(mm_q4_1, 3) P(mm_q5_0, 3) P(mm_q5_1, 3)
         P(mm_q4_k, 3) P(mm_q5_k, 3) P(mm_q6_k, 3) P(mmb_q4_k, 4) P(mmb_q6_k, 4) P(mmb_reduce, 2)
-        P(mmb16_q4_k, 4) P(mmb16_q6_k, 4)
+        P(mmb16_q4_k, 4) P(mmb16_q6_k, 4) P(mmb_q5_k, 4) P(mmb_q8_0, 4) P(mmb16_q5_k, 4) P(mmb16_q8_0, 4)
+        P(mmb16d_q4_k, 4) P(mmb16d_q5_k, 4) P(mmb16d_q6_k, 4) P(mmb16d_q8_0, 4)
+        P(mmb16q_q4_k, 4) P(mmb16q_q5_k, 4) P(mmb16q_q6_k, 4) P(mmb16q_q8_0, 4)
+        P(mmb16dq_q4_k, 4) P(mmb16dq_q5_k, 4) P(mmb16dq_q6_k, 4) P(mmb16dq_q8_0, 4)
+        P(mmb16dql_q4_k, 4) P(mmb16dql_q5_k, 4) P(mmb16dql_q6_k, 4) P(mmb16dql_q8_0, 4)
+        P(mmbq_q4_k, 4) P(mmbq_q5_k, 4) P(mmbq_q6_k, 4) P(mmbq_q8_0, 4)
+        if (mmb_ && !pipes_.count("mmb16" + mmb_var_ + "_q4_k")) {
+            err = "no prompt kernel variant \"" + mmb_var_ + "\" (TS5_MMB_VAR)";
+            return false;
+        }
         // The one-token mat-vecs twice: mv_rows_ rows per workgroup, and one
         // (".1") for matrices with few rows.
 #define MV(n, nb)                                                                       \
@@ -496,6 +773,10 @@ private:
         !make_pipe(#n ".1", spv_##n, sizeof(spv_##n), nb, err, 1))                      \
         return false;
         MV(matvec_q4_k, 3) MV(matvec_q6_k, 3) MV(mv16_q4_k, 3) MV(mv16_q6_k, 3) MV(mv16_glu_q4_k, 4)
+        MV(mv16n_q4_k, 4) MV(mv16n_q6_k, 4) MV(mv16n_glu_q4_k, 5)
+        MV(mv16_q5_k, 3) MV(mv16_q8_0, 3) MV(mv16_glu_q5_k, 4) MV(mv16_glu_q8_0, 4)
+        MV(mv16n_q5_k, 4) MV(mv16n_q8_0, 4) MV(mv16n_glu_q5_k, 5) MV(mv16n_glu_q8_0, 5)
+        MV(mv16_q5_0, 3) MV(mv16n_q5_0, 4) MV(mv16_glu_q5_0, 4) MV(mv16n_glu_q5_0, 5)
 #undef MV
         // The verify-batch mat-vecs once per batch size (their token loop is
         // compile-time), each twice like the one-token ones: mvt_rows_ rows
@@ -506,6 +787,16 @@ private:
                 !make_pipe("mvt_q4_k" + s + ".1", spv_mvt_q4_k, sizeof(spv_mvt_q4_k), 3, err, nt, 1) ||
                 !make_pipe("mvt_q6_k" + s, spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, mvt_rows_) ||
                 !make_pipe("mvt_q6_k" + s + ".1", spv_mvt_q6_k, sizeof(spv_mvt_q6_k), 3, err, nt, 1) ||
+                !make_pipe("mvt_q5_k" + s, spv_mvt_q5_k, sizeof(spv_mvt_q5_k), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvt_q5_k" + s + ".1", spv_mvt_q5_k, sizeof(spv_mvt_q5_k), 3, err, nt, 1) ||
+                !make_pipe("mvtx_q4_k" + s, spv_mvtx_q4_k, sizeof(spv_mvtx_q4_k), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvtx_q5_k" + s, spv_mvtx_q5_k, sizeof(spv_mvtx_q5_k), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvtx_q6_k" + s, spv_mvtx_q6_k, sizeof(spv_mvtx_q6_k), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvtx_q8_0" + s, spv_mvtx_q8_0, sizeof(spv_mvtx_q8_0), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvt_q8_0" + s, spv_mvt_q8_0, sizeof(spv_mvt_q8_0), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvt_q8_0" + s + ".1", spv_mvt_q8_0, sizeof(spv_mvt_q8_0), 3, err, nt, 1) ||
+                !make_pipe("mvt_q5_0" + s, spv_mvt_q5_0, sizeof(spv_mvt_q5_0), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvt_q5_0" + s + ".1", spv_mvt_q5_0, sizeof(spv_mvt_q5_0), 3, err, nt, 1) ||
                 !make_pipe("mvt_glu_q4_k" + s, spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, mvt_glu_rows_) ||
                 !make_pipe("mvt_glu_q4_k" + s + ".1", spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, 1))
                 return false;
@@ -513,15 +804,25 @@ private:
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
-        P(rmsnorm, 3) P(qkv_post, 11) P(qkv_post_q8, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
-        P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf256, 5) P(attn_pf_q8, 7)
+        P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
+        P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf256, 5) P(attn_pf512, 5)
+        P(attn_pf_q8, 7) P(attn_pf128_q8, 7) P(attn_pf256_q8, 7) P(attn_pf512_q8, 7)
         // Lanes per key in attn_dec: 8, 16 or 32, and no more than a subgroup.
         uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
         while (lpk > ctx_->subgroup_size) lpk = lpk > 8 ? lpk / 2 : 0;
-        if (!make_pipe("attn_dec", spv_attn_dec, sizeof(spv_attn_dec), 5, err, attn_dec_plain_ != 0, lpk) ||
-            !make_pipe("attn_dec4", spv_attn_dec4, sizeof(spv_attn_dec4), 5, err, attn_dec_plain_ == 1, lpk))
-            return false;
-        P(swiglu, 2)
+        // Each attn_dec build twice: for the f16 cache (5 buffers) and the 8-bit one (7).
+#define PD(n, spec, lanes) \
+        if (!make_pipe(#n, spv_##n, sizeof(spv_##n), 5, err, spec, lanes) || \
+            !make_pipe(#n "_q8", spv_##n##_q8, sizeof(spv_##n##_q8), 7, err, spec, lanes)) return false;
+        PD(attn_dec, attn_dec_plain_ != 0, lpk) PD(attn_dec4, attn_dec_plain_ == 1, lpk)
+        // Heads of 64: a lane's share of a key is 4 values or more (8 or 16 lanes).
+        PD(attn_dec_64, attn_dec_plain_ != 0, std::min(lpk, 16u)) PD(attn_dec4_64, attn_dec_plain_ == 1, std::min(lpk, 16u))
+        // The wide-head builds score keys with LPK lanes only (a thread can't
+        // hold a whole key): without them, those heads keep attn.
+        attn_dec_lpk_ = lpk;
+        if (lpk) { PD(attn_dec4_256, 0, lpk) PD(attn_dec4_512, 0, lpk) PD(attn_dec4_256w, 0, lpk) PD(attn_dec4_512w, 0, lpk) }
+#undef PD
+        P(swiglu, 2) P(softcap, 1)
 #undef P
         return true;
     }
@@ -607,8 +908,9 @@ private:
     }
 
     bool init_buffers(std::string &err) {
-        const int E = hp_.n_embd, F = hp_.n_ff, HD = hp_.head_dim;
-        const size_t QD = (size_t)hp_.n_head * HD, KVD = (size_t)hp_.n_head_kv * HD;
+        // The widest layer's Q and K/V rows (Gemma 4's kinds of layers differ).
+        const int E = hp_.n_embd, F = hp_.n_ff;
+        const size_t QD = (size_t)hp_.max_qd(), KVD = (size_t)hp_.max_kvd();
         auto mk = [&](Buf &b, size_t bytes, bool host = false, bool exact = false) {
             return create_buf(bytes, host, b, err, exact);
         };
@@ -618,20 +920,41 @@ private:
             !mk(split_, 4ull * SPLIT) ||
             !mk(ids_, 4ull * TMAX, true) || !mk(logits_, 4ull * TMAX * hp_.n_vocab, true))
             return false;
+        // Each RoPE pair's turn per position (Model::rope_turn), for the full
+        // and the sliding layers: high word, then low.
+        for (int swa = 0; swa < 2; swa++) {
+            const int pairs = std::max(1, m_.rope_dims(swa) / 2);
+            if (!mk(rope_turn_[swa], 8ull * pairs, true)) return false;
+            uint32_t *t = (uint32_t *)rope_turn_[swa].map;
+            for (int i = 0; i < m_.rope_dims(swa) / 2; i++) {
+                const uint64_t v = m_.rope_turn(swa, i);
+                t[2 * i] = (uint32_t)(v >> 32);
+                t[2 * i + 1] = (uint32_t)v;
+            }
+        }
         if (n_ctx_ <= 0) {
             // As much as fits, in what the weights and activations left, and
             // no more than one buffer can address.
-            const int train = hp_.n_ctx_train > 0 ? hp_.n_ctx_train : 32768;
+            // TS5_CTX_MAX (Settings > Longest context) caps it below that,
+            // leaving the rest of the memory free.
+            int train = hp_.n_ctx_train > 0 ? hp_.n_ctx_train : 32768;
+            if (const char *e = getenv("TS5_CTX_MAX"))
+                if (atoi(e) >= 1024) train = std::min(train, atoi(e));
             // Sliding layers' rings are a fixed size, beside the context.
             auto fit = [&](KvType t) {
-                const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * full_layers(hp_) * KVD;
+                // One buffer holds about 256 MiB of layers, or one whole layer.
+                uint64_t widest = 0;
+                for (int l = 0; l < hp_.n_layer; l++)
+                    if (!hp_.swa(l)) widest = std::max<uint64_t>(widest, hp_.kv_values(l));
+                const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * std::max<uint64_t>(1, widest);
                 const int cap = (int)std::min<uint64_t>(train, props_.limits.maxStorageBufferRange / per_buf);
                 return fit_context(ctx_->device_memory(), allocated_ + fit_reserve_ + kv_ring_bytes(hp_, t),
                                    kv_bytes_per_token(hp_, t), cap);
             };
             const int f16 = fit(KvType::F16);
             if (kv_ == KvType::Q8 && f16_reaches(f16, train)) {
-                ts5::log_line("ts5: f16 KV cache: the model's whole %d-token context fits in f16, the more exact",
+                ts5::log_line("ts5: f16 KV cache: the whole %d-token context (the model's, or the Settings cap) "
+                              "fits in f16, the more exact",
                               train);
                 kv_ = KvType::F16;
             }
@@ -654,7 +977,7 @@ private:
         for (int l = 0; l < hp_.n_layer; l++) {
             const int r = hp_.swa(l) ? ring_slots(hp_) : 0;
             ring_[l] = r > 0 && r < n_ctx_ ? (uint32_t)r : 0;
-            const size_t v = (ring_[l] ? ring_[l] : (size_t)n_ctx_) * KVD;
+            const size_t v = (ring_[l] ? ring_[l] : (size_t)n_ctx_) * hp_.kv_values(l);
             if (values.empty() || (values.back() > 0 && (values.back() + v) * per_value > piece)) values.push_back(0);
             layer_buf_[l] = (uint32_t)(values.size() - 1);
             layer_off_[l] = (uint32_t)values.back();
@@ -698,6 +1021,7 @@ private:
             vk.vkCmdResetQueryPool(cmd_, qpool_, 0, QMAX);
             vk.vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool_, 0);
             qlabels_.clear();
+            qpending_.clear();
         }
         return true;
     }
@@ -741,6 +1065,7 @@ private:
                 p.calls++;
             }
             qlabels_.clear();
+            qpending_.clear();
         }
         return true;
     }
@@ -805,8 +1130,17 @@ private:
         if (bar) barrier();
         no_barrier_ = false;
         if (qpool_ && qlabels_.size() + 1 < QMAX) {
-            vk.vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool_, (uint32_t)qlabels_.size() + 1);
-            qlabels_.push_back(what.empty() ? name : name + " " + what);
+            // Dispatches with no barrier between them (k and v, the
+            // mmb_reduce chain) overlap, so they get one timestamp and one
+            // line between them: a stamp after the first would be written
+            // when both are done and book the second as nothing.
+            const std::string label = what.empty() ? name : name + " " + what;
+            qpending_ += qpending_.empty() ? label : " + " + label;
+            if (bar) {
+                vk.vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool_, (uint32_t)qlabels_.size() + 1);
+                qlabels_.push_back(qpending_);
+                qpending_.clear();
+            }
         }
         if (bar) add_up();
     }
@@ -842,8 +1176,7 @@ private:
         const uint32_t split_big = mmb_small_ && mmb_split_ && ntok >= 128 && big < (uint32_t)mmb_min_
                                        ? big * std::min({(mmb_split_ + big - 1) / big, (uint32_t)w.ne0() / 256, 16u})
                                        : big;
-        if (ntok >= tiled_min_ && mmb_ && split_big >= (uint32_t)mmb_min_ && x_off % 4 == 0 && w.ne0() % 4 == 0 &&
-            (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
+        if (ntok >= tiled_min_ && mmb_ && split_big >= (uint32_t)mmb_min_ && x_off % 4 == 0 && mmb_type(w)) {
             mmb(w, x, y, pc, big, what);
             return;
         }
@@ -853,22 +1186,38 @@ private:
             return;
         }
         uint32_t gx = std::min<uint32_t>(rows, 65535), gy = (rows + gx - 1) / gx;
-        // One token of Q4_K or Q6_K (generation with a Q4_K_M model): the
-        // kernels that read the weights as words.
-        if (ntok == 1 && fast_matvec_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
-            mat_vec(std::string(mv16_ ? "mv16_" : "matvec_") + qname(w.type()), {&W(w), &x, &y}, pc, rows, what);
-            return;
+        // One token of Q4_K, Q5_K, Q6_K, Q8_0 or Q5_0 (generation): the kernels
+        // that read the weights as words (TS5_MV16=0: the older matvec_*
+        // kernels, Q4_K and Q6_K only).
+        const bool old_mv = !mv16_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K);
+        if (ntok == 1 && fast_matvec_ && (fast_type(w) || old_mv)) {
+            if (norm_) {
+                struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; float eps; } npc{
+                    pc.ncols, pc.nrows, pc.ntok, pc.row_bytes, pc.x_stride, pc.y_stride, pc.accumulate, pc.x_off,
+                    hp_.rms_eps};
+                mat_vec(std::string("mv16n_") + qname(w.type()), {&W(w), &x, &y, &W(*norm_)}, npc, rows, what);
+                return;
+            }
+            if (mv16_ || old_mv) {
+                mat_vec(std::string(mv16_ ? "mv16_" : "matvec_") + qname(w.type()), {&W(w), &x, &y}, pc, rows, what);
+                return;
+            }
         }
         // A few tokens (speculation's verify batch): the word-load kernels
         // that read each row's words once and dot them with every token, so
         // the weight stream is paid once for the whole batch. As mat_vec:
         // mvt_rows_ rows per workgroup, sharing each token's x loads, or one
         // for a matrix with few rows.
-        if (ntok >= 2 && ntok <= 8 && fast_matvec_ && mvt_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K)) {
+        if (ntok >= 2 && ntok <= 8 && fast_matvec_ && mvt_ && fast_type(w)) {
             const bool one = rows < (uint32_t)mv_rows_min_ || mvt_rows_ == 1;
-            const uint32_t nr = one ? 1 : mvt_rows_, groups = (rows + nr - 1) / nr;
+            // Matrices of mvt_rows_ rows per group: a workgroup per group, or
+            // the x-staging kernels, 4 groups a workgroup (TS5_MVTX=1).
+            const bool staged = !one && mvtx_ && mvtx_type(w);
+            const uint32_t nr = one ? 1 : mvt_rows_ * (staged ? 4 : 1);
+            const uint32_t groups = (rows + nr - 1) / nr;
             const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
-            dispatch(std::string("mvt_") + qname(w.type()) + "." + std::to_string(ntok) + (one ? ".1" : ""),
+            dispatch(std::string(staged ? "mvtx_" : "mvt_") + qname(w.type()) + "." + std::to_string(ntok) +
+                         (one ? ".1" : ""),
                      {&W(w), &x, &y}, pc, mx, my, what);
             return;
         }
@@ -884,9 +1233,15 @@ private:
     void mmb(const Weight &w, const Buf &x, const Buf &y, const PC &pc, uint32_t big, const std::string &what) {
         const uint32_t rows = pc.nrows, ntok = pc.ntok, nunits = pc.ncols / 32;
         const size_t slice = (size_t)rows * ntok;
+        const bool f16 = mmb_f16_ && (mmb_f16_skip_.empty() || mmb_f16_skip_.find("," + role(w) + ",") == std::string::npos);
+        // (The f32 kernel has no double buffer: its tiles would fill 64 KiB.)
+        const std::string &var = !f16 ? mmb_var32_ : w.type() == GGML_Q8_0 ? mmb_var_q8_ : mmb_var_;
+        const std::string name = std::string(f16 ? "mmb16" : "mmb") + var + "_" + qname(w.type());
         uint32_t S = 1;
         if (mmb_slices_)
             S = std::min({(uint32_t)mmb_slices_, nunits, (uint32_t)(SPLIT / slice)});
+        else if (mmb_wgs_)
+            S = mmb_slices_for(big, mmb_wgs_, std::min({nunits / 8, 16u, (uint32_t)(SPLIT / slice)}));
         else if (mmb_split_ && big < mmb_split_)
             S = std::min({(mmb_split_ + big - 1) / big, nunits / 8, 16u, (uint32_t)(SPLIT / slice)});
         S = std::max(1u, S);
@@ -908,8 +1263,25 @@ private:
             reduces_.push_back({{rows, ntok, pc.y_stride, pc.accumulate, S, p_off}, &y, what});
             split_used_ = p_off + S * slice;
         }
-        dispatch(std::string(mmb_f16_ ? "mmb16_" : "mmb_") + qname(w.type()), {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128,
-                 (ntok + 127) / 128, what, S);
+        dispatch(name, {&W(w), &x, &y, &split_}, bp, (rows + 127) / 128, (ntok + 127) / 128, what, S);
+    }
+    // Slices (at most smax) for a matrix of `big` blocks. The GPU runs about
+    // wgs of the kernel's workgroups at once, so in S slices the matrix
+    // takes ceil(big S / wgs) rounds of 1/S of a block's work each, and
+    // each slice adds a write and a read of its partial sums, about
+    // mmb_slice_cost_ of a round per block. The fewest slices within 2% of
+    // the least cost.
+    uint32_t mmb_slices_for(uint32_t big, uint32_t wgs, uint32_t smax) const {
+        smax = std::max(1u, smax);
+        std::vector<double> cost(smax + 1);
+        double best = 1e30;
+        for (uint32_t s = 1; s <= smax; s++) {
+            cost[s] = std::ceil((double)big * s / wgs) / s + (s > 1 ? mmb_slice_cost_ * s * big / wgs : 0.0);
+            best = std::min(best, cost[s]);
+        }
+        uint32_t s = 1;
+        while (cost[s] > best * 1.02) s++;
+        return s;
     }
     struct Reduce {
         struct { uint32_t nrows, ntok, y_stride, accumulate, n_split, p_off; } pc;
@@ -929,56 +1301,103 @@ private:
     // Attention of n tokens at pos0 for the layer at cache_off in cache
     // piece kb, into att_. win: a sliding layer's window (0: all keys); ring: its ring's slots
     // (0: one per position). Only attn and attn_pf have them.
-    void attention(int n, int pos0, uint32_t kb, uint32_t cache_off, uint32_t win = 0, uint32_t ring = 0) {
-        const uint32_t HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
+    void attention(int l, int n, int pos0, uint32_t kb, uint32_t cache_off, uint32_t win = 0, uint32_t ring = 0) {
+        const uint32_t HD = hp_.hd(l), H = hp_.n_head, HKV = hp_.hkv(l);
         const float scale = hp_.attn_scale;
-        if (!attn_ok()) {
+        if (!attn_ok(l)) {
             struct { uint32_t head_dim, n_head, n_head_kv, pos0, cache_off; float scale; } pc{
                 HD, H, HKV, (uint32_t)pos0, cache_off, scale};
             dispatch("attention", {&q_, &kc_[kb], &vc_[kb], &att_}, pc, H, (uint32_t)n);
             return;
         }
-        // Rows per workgroup: the query heads of one KV head, for as many
+        // Rows per workgroup: the query heads of one KV head (or a share of
+        // them, hsplit workgroups each: Gemma 4's 16 heads of 512), for as many
         // tokens as fit attn's 1024 floats of queries, attn_pf's 64 rows (32 for heads of 256)
         // (prompts: attn_pf_min_ tokens or more) or attn_dec's 8 or 4 (generation
-        // over attn_dec_min_ keys or more, f16 cache, heads of 128).
+        // over attn_dec_min_ keys or more; heads of 128, or of 256
+        // and 512 in 4 rows, one KV head's heads over dec_split workgroups).
         // The first key any of the n tokens sees, and how many from there.
-        const uint32_t G = H / HKV, k_lo = win && (uint32_t)pos0 + 1 > win ? (uint32_t)pos0 + 1 - win : 0;
+        const uint32_t k_lo = win && (uint32_t)pos0 + 1 > win ? (uint32_t)pos0 + 1 - win : 0;
         const uint32_t keys = (uint32_t)(pos0 + n) - k_lo;
         const bool plain = !win && !ring;
-        // attn_pf: heads of up to 128 in 64 rows, or of 256 (f16 cache) in 32.
-        const bool pf256 = HD == 256 && kv_ == KvType::F16;
-        const uint32_t pf_rows = pf256 ? 32 : 64;
-        const bool pf = attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && (HD <= 128 || pf256) && G <= pf_rows;
-        const bool dec = plain && !pf && attn_dec_min_ && keys >= (uint32_t)attn_dec_min_ && kv_ == KvType::F16 &&
-                         HD == 128 && G <= 8;
+        // attn_pf: heads of up to 128 in 64 rows, of 256 in 32,
+        // or of 512 in 16 (all of one KV head's query heads, where attn
+        // would split them over hsplit workgroups, each reading the keys).
+        // attn_pf512's 16 lanes per row need subgroups of 16 or more.
+        const uint32_t G_all = H / HKV;
+        const bool pf256 = HD == 256;
+        const bool pf512 = HD == 512 && ctx_->subgroup_size >= 16;
+        const uint32_t pf_rows = pf512 ? 16 : pf256 ? 32 : 64;
+        const bool pf = attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && (HD <= 128 || pf256 || pf512) &&
+                        G_all <= pf_rows && (pf512 || head_split(l) == 1);
+        const bool wide = (HD == 256 || HD == 512) && attn_dec_lpk_ != 0;
+        const bool h64 = HD == 64 && attn_dec64_;
+        const uint32_t dec_max = HD <= 128 ? 8 : 4;
+        uint32_t dec_split = 1;
+        while (G_all / dec_split > dec_max && (G_all / dec_split) % 2 == 0) dec_split *= 2;
+        // From the first key wherever attn_dec serves the heads (128 and 64,
+        // and with lanes per key 256 and 512), so a verify batch and the
+        // one-token calls it stands for take the same kernel at any length.
+        const uint32_t dec_from = attn_dec_min_ >= 0 ? (uint32_t)attn_dec_min_ : 1u;
+        const bool dec =
+            !pf && dec_from && keys >= dec_from && (HD == 128 || h64 || wide) && G_all / dec_split <= dec_max;
+        const uint32_t hsplit = pf ? 1 : dec ? dec_split : head_split(l), G = G_all / hsplit;
         const uint32_t dec_rows = G <= 4 ? 4 : 8;
-        const uint32_t tq = pf ? pf_rows / G : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / G);
-        const uint32_t groups = HKV * (((uint32_t)n + tq - 1) / tq);
+        // Generation and verify batches (at most 8 tokens; attn_pf takes 9 or
+        // more): one token a workgroup, and each token's keys split in the
+        // kernel as a one-token call at its position would split them, so
+        // speculative decoding's verify reproduces generation bit for bit.
+        const bool per_tok = n <= 8 && !pf;
+        const uint32_t tq = pf ? pf_rows / G : per_tok ? 1 : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / G);
+        const uint32_t groups = HKV * hsplit * (((uint32_t)n + tq - 1) / tq);
         // Few workgroups for many keys (generation, or a short prompt late in
         // a chat): split the keys so every compute unit gets some, about 256
-        // workgroups and 32 keys or more each (attn_dec: 128).
+        // workgroups and 32 keys or more each (attn_dec: 128). One token's
+        // rule takes at most s_max slices, from its workgroups as one token
+        // has them and the partial results 8 tokens' slices fit.
         const uint32_t bk = dec ? 128u : pf ? 32u : std::min(32u, 2048 / HD), min_keys = dec ? 128u : 32u;
-        uint32_t n_split = 1;
-        const uint32_t fit = (uint32_t)(PART / ((size_t)n * H * (HD + 2)));
-        if (groups < 64) n_split = std::min({(256 + groups - 1) / groups, (keys + min_keys - 1) / min_keys, 64u, fit});
-        if (attn_splits_) n_split = std::min({(uint32_t)attn_splits_, keys, 64u, fit});
-        n_split = std::max(1u, n_split);
-        uint32_t chunk = (keys + n_split - 1) / n_split;
-        chunk = (chunk + bk - 1) / bk * bk;
-        n_split = (keys + chunk - 1) / chunk;
+        const uint32_t g1 = HKV * hsplit, fit8 = (uint32_t)(PART / (8 * (size_t)H * (HD + 2)));
+        uint32_t s_max = g1 < 64 ? std::min({(256 + g1 - 1) / g1, 64u, fit8}) : 1, s_keys = min_keys;
+        if (attn_splits_) s_max = std::min({(uint32_t)attn_splits_, 64u, fit8}), s_keys = 1;
+        s_max = std::max(1u, s_max);
+        uint32_t n_split = 1, chunk = 0;
+        if (per_tok) {
+            // The most slices any of the tokens takes (the kernel's tok_chunk).
+            for (uint32_t t = 0; t < (uint32_t)n; t++) {
+                const uint32_t p1 = (uint32_t)pos0 + t + 1, lo = win && p1 > win ? p1 - win : 0, kt = p1 - lo;
+                const uint32_t ns = std::max(1u, std::min(s_max, (kt + s_keys - 1) / s_keys));
+                const uint32_t c = ((kt + ns - 1) / ns + bk - 1) / bk * bk;
+                n_split = std::max(n_split, (kt + c - 1) / c);
+            }
+        } else {
+            const uint32_t fit = (uint32_t)(PART / ((size_t)n * H * (HD + 2)));
+            if (groups < 64) n_split = std::min({(256 + groups - 1) / groups, (keys + min_keys - 1) / min_keys, 64u, fit});
+            if (attn_splits_) n_split = std::min({(uint32_t)attn_splits_, keys, 64u, fit});
+            n_split = std::max(1u, n_split);
+            chunk = (keys + n_split - 1) / n_split;
+            chunk = (chunk + bk - 1) / bk * bk;
+            n_split = (keys + chunk - 1) / chunk;
+        }
         struct {
             uint32_t head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split;
             float scale;
-            uint32_t k_lo, win, ring;
-        } pc{HD, H, HKV, (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale, k_lo, win, ring};
-        std::string kern = std::string(pf ? "attn_pf" : "attn") + (kv_ == KvType::Q8 ? "_q8" : "");
-        if (dec)
-            kern = dec_rows == 4 ? "attn_dec4" : "attn_dec";
-        else if (pf && HD == 128 && attn_pf128_ && kv_ == KvType::F16)
+            uint32_t k_lo, win, ring, hsplit;
+            uint32_t s_max, s_keys, s_bk;
+        } pc{HD,    H,     HKV,  (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale, k_lo, win, ring,
+             hsplit, per_tok ? s_max : 0u, s_keys, bk};
+        // Every kernel has a build for the 8-bit cache, named _q8.
+        std::string kern = pf ? "attn_pf" : "attn";
+        if (dec) {
+            kern = HD == 256 ? "attn_dec4_256" : HD == 512 ? "attn_dec4_512" : dec_rows == 4 ? "attn_dec4" : "attn_dec";
+            if (wide && attn_wide8_) kern += "w";
+            if (HD == 64) kern += "_64";
+        } else if (pf && HD == 128 && attn_pf128_)
             kern = "attn_pf128";
         else if (pf && pf256)
             kern = "attn_pf256";
+        else if (pf && pf512)
+            kern = "attn_pf512";
+        if (kv_ == KvType::Q8) kern += "_q8";
         if (kv_ == KvType::Q8)
             dispatch(kern, {&q_, &kc_[kb], &vc_[kb], &att_, &part_, &ks_[kb], &vs_[kb]}, pc, groups, n_split);
         else
@@ -989,29 +1408,67 @@ private:
         }
     }
 
-    // Whether attn fits the model's heads (else the one-workgroup-per-head
-    // kernel, which has no sliding window: a model with one always uses attn).
-    bool attn_ok() const {
-        const int HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
-        return (attn_fast_ || hp_.swa_window > 0) && HKV > 0 && H % HKV == 0 && HD % 4 == 0 && HD >= 32 && HD <= 256 &&
-               (H / HKV) * HD <= 1024;
+    // How many workgroups share one KV head's query heads in attn: 1, or
+    // (Gemma 4's full layers: 16 heads of 512 on one KV head) the power of 2
+    // that gets a workgroup's rows into its 1024 floats of queries.
+    uint32_t head_split(int l) const {
+        const uint32_t HD = hp_.hd(l), G = hp_.n_head / hp_.hkv(l);
+        uint32_t s = 1;
+        while ((G / s) * HD > 1024 && (G / s) % 2 == 0) s *= 2;
+        return s;
     }
 
-    // Gate and up of Q4_K with swiglu in one kernel, into g_: one token
-    // through mv16_glu_q4_k, a verify batch through mvt_glu_q4_k, which
-    // loads each token's x once for both matrices. False where that
-    // doesn't apply.
+    // Whether attn fits a layer's heads (else the one-workgroup-per-head
+    // kernel, which has no sliding window: a sliding layer always uses attn).
+    bool attn_ok(int l) const {
+        const int HD = hp_.hd(l), H = hp_.n_head, HKV = hp_.hkv(l);
+        return (attn_fast_ || hp_.swa(l)) && HKV > 0 && H % HKV == 0 && HD % 4 == 0 && HD >= 32 && HD <= 512 &&
+               (H / HKV / head_split(l)) * HD <= 1024;
+    }
+    bool attn_ok_all() const {
+        for (int l = 0; l < hp_.n_layer; l++)
+            if (!attn_ok(l)) return false;
+        return true;
+    }
+
+    // Gate and up with swiglu (or Gemma's gelu: pc.accumulate) in one
+    // kernel, into g_: one token of Q4_K, Q5_K, Q8_0 or Q5_0 through mv16_glu_*,
+    // a verify batch of Q4_K through mvt_glu_q4_k, which loads each token's
+    // x once for both matrices. False where that doesn't apply.
+    bool glu_applies(const Layer &L, int n) const {
+        if (hp_.gelu && !glu_gelu_) return false;
+        const bool batch = n >= 2 && n <= 8 && mvt_ && mvt_glu_ && L.w_gate.type() == GGML_Q4_K;
+        const bool one = n == 1 && mv16_ && fast_type(L.w_gate) && L.w_gate.type() != GGML_Q6_K;
+        return !(!(n == 1 ? one : batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != L.w_up.type() ||
+                 L.w_gate.ne0() != L.w_up.ne0() || L.w_gate.ne1() != L.w_up.ne1());
+    }
+
+    // Whether one token's RMSNorm can fold into all of these mat-vecs (the
+    // mv16n kernels: a fast type's rows, mv16 on).
+    bool fold_norm(int n, std::initializer_list<const Weight *> ws) const {
+        if (n != 1 || !norm_fuse_ || !fast_matvec_ || !mv16_) return false;
+        for (const Weight *w : ws)
+            if (!fast_type(*w) || w->ne0() != hp_.n_embd) return false;
+        return true;
+    }
+
     bool ffn_glu(const Layer &L, int n) {
-        const bool batch = n >= 2 && n <= 8 && mvt_ && mvt_glu_;
-        if (hp_.gelu || (n == 1 ? !mv16_ : !batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != GGML_Q4_K ||
-            L.w_up.type() != GGML_Q4_K || L.w_gate.ne0() != L.w_up.ne0() || L.w_gate.ne1() != L.w_up.ne1())
-            return false;
+        if (!glu_applies(L, n)) return false;
         const uint32_t rows = (uint32_t)L.w_gate.ne1();
         struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; } pc{
             (uint32_t)L.w_gate.ne0(), rows, (uint32_t)n, (uint32_t)L.w_gate.info->row_bytes(),
-            (uint32_t)L.w_gate.ne0(), rows, 0, 0};
+            (uint32_t)L.w_gate.ne0(), rows, hp_.gelu ? 1u : 0u, 0};  // accumulate: the activation (gelu)
+        if (n == 1 && norm_) {
+            struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; float eps; } npc{
+                pc.ncols, pc.nrows, pc.ntok, pc.row_bytes, pc.x_stride, pc.y_stride, pc.accumulate, pc.x_off,
+                hp_.rms_eps};
+            mat_vec(std::string("mv16n_glu_") + qname(L.w_gate.type()), {&W(L.w_gate), &x_, &g_, &W(L.w_up), &W(*norm_)},
+                    npc, rows, "ffn_gate+up");
+            return true;
+        }
         if (n == 1) {
-            mat_vec("mv16_glu_q4_k", {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, rows, "ffn_gate+up");
+            mat_vec(std::string("mv16_glu_") + qname(L.w_gate.type()), {&W(L.w_gate), &h_, &g_, &W(L.w_up)}, pc, rows,
+                    "ffn_gate+up");
             return true;
         }
         const bool one = rows < (uint32_t)mv_rows_min_ || mvt_glu_rows_ == 1;
@@ -1034,11 +1491,20 @@ private:
         dispatch(one ? name + ".1" : name, bufs, pc, mx, my, what);
     }
 
-    // add: y += the normalized x (Gemma's norms after attention and the FFN).
-    void rmsnorm(const Buf &x, const Weight &w, const Buf &y, int ntok, uint32_t x_row0 = 0, bool add = false) {
-        struct { uint32_t n, x_row0; float eps; uint32_t add; } pc{(uint32_t)hp_.n_embd, x_row0, hp_.rms_eps,
-                                                                   add ? 1u : 0u};
+    // add: y += the normalized x (Gemma's norms after attention and the FFN);
+    // mul: the result times this (Gemma 4's layer_output_scale).
+    void rmsnorm(const Buf &x, const Weight &w, const Buf &y, int ntok, uint32_t x_row0 = 0, bool add = false,
+                 float mul = 1.0f) {
+        struct { uint32_t n, x_row0; float eps; uint32_t add; float mul; } pc{(uint32_t)hp_.n_embd, x_row0,
+                                                                              hp_.rms_eps, add ? 1u : 0u, mul};
         dispatch("rmsnorm", {&x, &W(w), &y}, pc, (uint32_t)ntok);
+    }
+    // Gemma's norm after a block into the residual x (times mul) and the
+    // next block's norm of x into y, in one pass (rmsnorm2.comp).
+    void rmsnorm2(const Buf &h, const Weight &w1, const Buf &x, const Weight &w2, const Buf &y, int ntok,
+                  float mul = 1.0f) {
+        struct { uint32_t n; float eps, mul; } pc{(uint32_t)hp_.n_embd, hp_.rms_eps, mul};
+        dispatch("rmsnorm2", {&h, &W(w1), &x, &W(w2), &y}, pc, (uint32_t)ntok);
     }
 
     bool run(const int32_t *tokens, int n, int pos0, float *logits, bool all, bool want, std::string &err) {
@@ -1107,8 +1573,7 @@ private:
     // with the logits where want, submitting and waiting for parts of a big
     // batch on the way; the last command buffer is left open in cmd_.
     bool record(int n, int pos0, bool want, bool all, VkCommandBuffer target, std::string &err) {
-        const int E = hp_.n_embd, HD = hp_.head_dim, H = hp_.n_head, HKV = hp_.n_head_kv;
-        const size_t KVD = (size_t)HKV * HD;
+        const int E = hp_.n_embd, H = hp_.n_head;
         // Big batches are split into several submits so no single submit
         // runs long (the PS5 driver drops the device after 10 s without
         // progress).
@@ -1123,33 +1588,40 @@ private:
             dispatch(std::string("get_rows_") + qname(m_.tok_embd.type()), {&W(m_.tok_embd), &ids_, &x_}, pc,
                      (uint32_t)n);
         }
+        bool pre_normed = false;  // h_ already holds this layer's attention norm (rmsnorm2 at the end of the last)
         for (int l = 0; l < hp_.n_layer; l++) {
             const Layer &L = m_.layers[l];
-            rmsnorm(x_, L.attn_norm, h_, n);
+            const int HD = hp_.hd(l), HKV = hp_.hkv(l);
+            const bool fold_attn = L.wv ? fold_norm(n, {&L.wq, &L.wk, &L.wv}) : fold_norm(n, {&L.wq, &L.wk});
+            if (!fold_attn && !pre_normed) rmsnorm(x_, L.attn_norm, h_, n);
+            pre_normed = false;
+            const Buf &hin = fold_attn ? x_ : h_;
+            norm_ = fold_attn ? &L.attn_norm : nullptr;
             // q, k and v only read h_: no barrier between them (nor between
             // gate and up below). k and v first: a prompt's q may be split
             // (mmb), with a barrier before its sums are added up, and the
             // small k and v run alongside it rather than after it.
             no_barrier_ = fuse_;
-            matmul(L.wk, h_, k_, n, false);
-            no_barrier_ = fuse_;
-            matmul(L.wv, h_, v_, n, false);
-            matmul(L.wq, h_, q_, n, false);
+            matmul(L.wk, hin, k_, n, false);
+            if (L.wv) {  // else V is K's projection (Gemma 4's full layers)
+                no_barrier_ = fuse_;
+                matmul(L.wv, hin, v_, n, false);
+            }
+            matmul(L.wq, hin, q_, n, false);
+            norm_ = nullptr;
             const uint32_t cache_off = layer_off_[l], kb = layer_buf_[l];
             const bool swa = hp_.swa(l);
             {
                 struct {
                     uint32_t head_dim, n_head, n_head_kv, pos0, rope_dims, neox, has_bias, has_norm, cache_off;
-                    float rope_base, eps;
-                    uint32_t has_freqs, ring;
-                    float rope_scale;
-                } pc{(uint32_t)HD, (uint32_t)H, (uint32_t)HKV, (uint32_t)pos0, (uint32_t)hp_.rope_dims,
-                     hp_.rope_neox ? 1u : 0u, L.bq ? 1u : 0u, L.q_norm ? 1u : 0u, cache_off,
-                     swa ? hp_.rope_base_swa : hp_.rope_base, hp_.rms_eps, m_.rope_freqs ? 1u : 0u, ring_[l],
-                     swa ? 1.0f : hp_.rope_scale};
+                    float eps;
+                    uint32_t ring, v_from_k;
+                } pc{(uint32_t)HD, (uint32_t)H, (uint32_t)HKV, (uint32_t)pos0, (uint32_t)hp_.rd(l),
+                     hp_.rope_neox ? 1u : 0u, L.bq ? 1u : 0u, (L.q_norm ? 1u : 0u) | (hp_.v_norm ? 2u : 0u), cache_off,
+                     hp_.rms_eps, ring_[l], L.wv ? 0u : 1u};
                 const Buf &bq = L.bq ? W(L.bq) : dummy_, &bk = L.bk ? W(L.bk) : dummy_, &bv = L.bv ? W(L.bv) : dummy_;
                 const Buf &nq = L.q_norm ? W(L.q_norm) : dummy_, &nk = L.k_norm ? W(L.k_norm) : dummy_;
-                const Buf &ff = m_.rope_freqs ? W(m_.rope_freqs) : dummy_;
+                const Buf &ff = rope_turn_[swa ? 1 : 0];
                 if (kv_ == KvType::Q8)
                     dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
@@ -1157,16 +1629,27 @@ private:
                     dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
             }
-            attention(n, pos0, kb, cache_off, swa ? (uint32_t)hp_.swa_window : 0, ring_[l]);
+            attention(l, n, pos0, kb, cache_off, swa ? (uint32_t)hp_.swa_window : 0, ring_[l]);
             // Gemma normalizes attention's output before it joins the residual.
-            if (L.post_attn_norm) {
+            if (L.post_attn_norm)
                 matmul(L.wo, att_, h_, n, false);
-                rmsnorm(h_, L.post_attn_norm, x_, n, 0, true);
-            } else {
+            else
                 matmul(L.wo, att_, x_, n, true);
+            // The FFN's norm folds into gate+up when they run as one kernel
+            // (set only now: matmul folds norm_ into whatever it runs).
+            norm_ = n == 1 && glu_applies(L, n) && fold_norm(n, {&L.w_gate, &L.w_up}) ? &L.ffn_norm : nullptr;
+            if (L.post_attn_norm) {
+                // The post-norm and the FFN's norm run as one pass.
+                if (norm_)
+                    rmsnorm(h_, L.post_attn_norm, x_, n, 0, true);
+                else
+                    rmsnorm2(h_, L.post_attn_norm, x_, L.ffn_norm, h_, n);
+            } else if (!norm_) {
+                rmsnorm(x_, L.ffn_norm, h_, n);
             }
-            rmsnorm(x_, L.ffn_norm, h_, n);
-            if (!ffn_glu(L, n)) {
+            const bool glu = ffn_glu(L, n);
+            norm_ = nullptr;
+            if (!glu) {
                 no_barrier_ = fuse_;
                 matmul(L.w_gate, h_, g_, n, false);
                 matmul(L.w_up, h_, u_, n, false);
@@ -1175,7 +1658,17 @@ private:
             }
             if (L.post_ffn_norm) {
                 matmul(L.w_down, g_, h_, n, false);
-                rmsnorm(h_, L.post_ffn_norm, x_, n, 0, true);
+                const float mul = L.out_scale ? L.out_scale_v : 1.0f;
+                // With the next layer's attention norm, unless that folds
+                // into its projections.
+                const Layer *N = l + 1 < hp_.n_layer ? &m_.layers[l + 1] : nullptr;
+                const bool next_fold = N && (N->wv ? fold_norm(n, {&N->wq, &N->wk, &N->wv}) : fold_norm(n, {&N->wq, &N->wk}));
+                if (N && !next_fold) {
+                    rmsnorm2(h_, L.post_ffn_norm, x_, N->attn_norm, h_, n, mul);
+                    pre_normed = true;
+                } else {
+                    rmsnorm(h_, L.post_ffn_norm, x_, n, 0, true, mul);
+                }
             } else {
                 matmul(L.w_down, g_, x_, n, true);
             }
@@ -1187,8 +1680,15 @@ private:
         }
         if (want) {
             const int nout = all ? n : 1;
-            rmsnorm(x_, m_.out_norm, h_, nout, all ? 0 : (uint32_t)(n - 1));
-            matmul(m_.output, h_, logits_, nout, false);
+            const bool fold_out = !all && fold_norm(n, {&m_.output});
+            if (!fold_out) rmsnorm(x_, m_.out_norm, h_, nout, all ? 0 : (uint32_t)(n - 1));
+            norm_ = fold_out ? &m_.out_norm : nullptr;
+            matmul(m_.output, fold_out ? x_ : h_, logits_, nout, false);
+            norm_ = nullptr;
+            if (hp_.logit_softcap > 0) {
+                struct { uint32_t n; float cap; } pc{(uint32_t)((size_t)nout * hp_.n_vocab), hp_.logit_softcap};
+                dispatch("softcap", {&logits_}, pc, std::min<uint32_t>(65535, (pc.n + 255) / 256));
+            }
         }
         return true;
     }
@@ -1236,18 +1736,32 @@ private:
     // their x loads, for matrices of at least mv_rows_min_ rows
     // (TS5_MV_ROWS_MIN); one for smaller ones.
     uint32_t mv_rows_ = 4;
-    int mv_rows_min_ = 2048;
+    // 1024 takes in Qwen3 8B and 14B's K and V (8 heads of 128: +1.4% and
+    // +0.9% generation on the console); 512-row ones (4 KV heads) stay at one.
+    int mv_rows_min_ = 1024;
     // Attention with attn (TS5_ATTN=0: the old kernel); TS5_ATTN_SPLITS=N
     // sets how many slices generation splits the keys into.
     bool attn_fast_ = true;
     int attn_splits_ = 0;
     // Prompts of at least this many tokens use attn_pf (TS5_ATTN_PF; 0: never),
     // its build for heads of 128 where they are (TS5_ATTN_PF128=0: never).
-    int attn_pf_min_ = 8;
+    // 9: more than a verify batch's 8 tokens, which keep generation's kernels
+    // (below 9, TS5_ATTN_PF breaks the helper's same-output promise).
+    int attn_pf_min_ = 9;
     bool attn_pf128_ = true;
     // Generation over at least this many keys uses attn_dec (TS5_ATTN_DEC;
-    // 0: never).
-    int attn_dec_min_ = 256;
+    // 0: never). By default (-1) from the first key, the only setting at
+    // which a verify batch across the start takes generation's kernel for
+    // each of its tokens (speculative decoding's same output). On the PS5 (2026-11-06, Qwen3 8B Q4_K_M, 64 and
+    // 200 tokens of context) attn_dec4 from the first key generates 2.7-3.1%
+    // faster than attn below 256 keys, Qwen3 0.6B 8.9% (attention 33.7 ->
+    // 22.6 ms in 64 tokens), and chat with the 0.6B helper 6.4% (81.4 ->
+    // 86.6 tok/s); Coder 7B's 8-row attn_dec (7 query heads a KV head) 3.4%
+    // at 64 tokens (73.8 -> 76.3 tok/s); check -n 512 is unchanged for both.
+    // Gemma 3 12B's heads of 256 0.7% at 64 (43.65 -> 43.95) and Gemma 4
+    // 12B's 256 and 512 1.0% (41.5 -> 41.9), the same at 512. In October, with an older attn_dec, short contexts were even and
+    // Llama 3.2 3B 2% slower, which had set 256.
+    int attn_dec_min_ = -1;
     // Whether attn_dec loads each tile's keys at the tile's start (1) or
     // during the tile before (0), TS5_ATTN_DEC_PLAIN; by default (-1) the
     // 8-row kernel at the start and attn_dec4 the tile before, the faster of
@@ -1259,13 +1773,41 @@ private:
     // +6% on Coder 7B, +31% on Qwen 3 8B and +37% on Llama 3.2 3B against 0;
     // 32 is slower than 0 on Coder 7B.
     int attn_dec_keys_ = 16;
+    // Heads of 64 (Llama 3.2 1B and Qwen 2.5 0.5B, the helpers of Llama 3.1
+    // 8B and Coder 7B, and small models of their own) through attn_dec's _64
+    // builds, as heads of 128, rather than attn at every context length
+    // (TS5_ATTN_DEC64; 0: attn). On the PS5 (2026-11-07) Llama 3.2 1B Q4_K_M
+    // generates 2.6% faster at 64 tokens of context, 10.2% at 512 and 74.5%
+    // at 4096 (Q8_0: 1.3, 8.7, 52.6%), Coder 0.5B 3.4% at 64; as Llama 3.1
+    // 8B's helper it drafts 9.5% cheaper (2.75 ms a token against 3.04); the
+    // check is unchanged.
+    bool attn_dec64_ = true;
+    // Heads of 256 and 512 (Gemma) through the WIDE8 builds of attn_dec
+    // (attn_dec4_256w, attn_dec4_512w: 8 value columns a thread, half the
+    // value round trips a tile, key passes past the last key skipped;
+    // TS5_ATTN_WIDE8=0: the 4-column builds). On the PS5 (2026-11-07) a
+    // call of Gemma 3 1B's takes 20.2 us at 64 keys against 28.4 (21.8 and
+    // 28.9 at 2,048), and generation is 5.2% faster (Gemma 3 1B), 1.7%
+    // (Gemma 3 12B, Gemma 4 12B at 64 tokens of context; 1.7 and 1.5% at
+    // 2,048); the checks are the same to the last digit.
+    bool attn_wide8_ = true;
+    uint32_t attn_dec_lpk_ = 0;  // the lanes per key the attn_dec builds got (0: thread per key, heads of 128 only)
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).
     bool mmb_ = true;
-    // One token of Q4_K and Q6_K: mv16_q4_k's 16-byte loads and mv16_q6_k's
-    // 8 threads per block (TS5_MV16=0: matvec_q4_k and matvec_q6_k).
+    // One token of Q4_K, Q5_K, Q6_K or Q8_0: the mv16 kernels' 8 threads per
+    // block of 256 values (TS5_MV16=0: matvec_q4_k and matvec_q6_k, and the
+    // generic kernel for the other two).
     bool mv16_ = true;
     bool mvt_ = true;
+    // The verify batch's x staged in shared memory for 4 groups of rows
+    // (mvtx_*; TS5_MVTX=1). Off: on the PS5 (round 7, 2026-11-05) the
+    // staged kernels ran 1.6x (2 tokens) to 1.9x (8 tokens) slower per
+    // call than the unstaged mvt_* ones on Coder 7B's gate, up and down
+    // matrices, and the helper lost its gains on every pairing (Qwen3 14B
+    // code +26% with mvt_, -1% with mvtx_), so each group's workgroup
+    // reads x itself.
+    bool mvtx_ = false;
     // The fused gate+up verify kernel: off until a console A/B shows a win
     // (phase L measured it 7x slower at 4 rows from register spills).
     bool mvt_glu_ = false;
@@ -1279,6 +1821,15 @@ private:
     // inputs, and gate, up and swiglu in one kernel for one token (TS5_FUSE=0:
     // off).
     bool fuse_ = true;
+    bool glu_gelu_ = false;  // the fused GLU kernels for Gemma's GELU too (TS5_GLU_GELU=1)
+    // One token: the RMSNorm before q, k, v, gate and up and the output
+    // folded into those mat-vecs (mv16n_*), which read the residual and
+    // scale their sums, rather than a one-workgroup rmsnorm dispatch and a
+    // barrier the whole GPU waits on. Off unless TS5_NORM_FUSE=1: on the PS5
+    // under Linux (Mesa 26.1) it measured 61 tok/s against 68 without, since
+    // every workgroup re-reads and reduces all of x for its sum of squares.
+    bool norm_fuse_ = false;
+    const Weight *norm_ = nullptr;  // set: matmul folds this RMSNorm in (one token)
     bool no_barrier_ = false;  // skip the barrier after the next dispatch
     int mmb_min_ = 48;
     // mmb splits matrices of fewer blocks than this (TS5_MMB_SPLIT; 0: never),
@@ -1286,6 +1837,15 @@ private:
     // TS5_MMB_SLICES=N: every matrix in N.
     uint32_t mmb_split_ = 256;
     int mmb_slices_ = 0;
+    // Slices from how many workgroups run at once (mmb_slices_for): the
+    // GPU's compute units by default, TS5_MMB_WGS=N to set it;
+    // TS5_MMB_SLICE_COST sets a slice's cost (0.05 fits the PS5's profiles
+    // of 1 to 8 slices on Qwen3 8B and Coder 7B within 2%). 0, or
+    // TS5_MMB_SPLIT set: mmb_split_'s rule.
+    uint32_t mmb_wgs_ = 0;
+    PFN_vkGetPipelineExecutablePropertiesKHR get_props_ = nullptr;
+    PFN_vkGetPipelineExecutableStatisticsKHR get_stats_ = nullptr;
+    double mmb_slice_cost_ = 0.05;
     // Matrices of fewer blocks than mmb_min_ use mmb too where their split
     // makes that many workgroups (TS5_MMB_SMALL=0: the 64 x 64 kernel).
     bool mmb_small_ = true;
@@ -1293,11 +1853,18 @@ private:
     // TS5_MMB_F16=1, where the device has f16 arithmetic; f32 throughout by
     // default.
     bool mmb_f16_ = false;
+    // Roles (attn_q, ffn_down, output, ...) that stay on the f32 kernel with
+    // f16 on, comma-separated (TS5_MMB_F16_SKIP; Gemma: gate and up): to
+    // find which matmuls put a model over the check's bar, and to keep them
+    // there.
+    std::string mmb_f16_skip_;
+    std::string mmb_var_, mmb_var32_, mmb_var_q8_;  // the f16 and f32 prompt kernels' variants (TS5_MMB_VAR)
     size_t split_used_ = 0;  // floats of split_ that kernels may still read
     // The KV cache's type (TS5_KV=q8 or f16).
     KvType kv_ = KvType::F16;
     // TS5_PROFILE=1: a timestamp after each dispatch, summed per kernel.
     static constexpr uint32_t QMAX = 4096;
+    std::string qpending_;  // the labels of the dispatches since the last timestamp
     VkQueryPool qpool_ = VK_NULL_HANDLE;
     std::vector<std::string> qlabels_;
     struct Prof {
@@ -1315,7 +1882,7 @@ private:
     bool cpu_prof_ = false;  // TS5_PROFILE=1 or 2 (CPU times only)
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
-    Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_;
+    Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_, rope_turn_[2];
     std::vector<Buf> kc_, vc_, ks_, vs_;  // the KV cache's pieces
     // Each layer's first cache element and piece, and a sliding layer's ring slots (0: none).
     std::vector<uint32_t> layer_off_, layer_buf_, ring_;
@@ -1362,6 +1929,14 @@ int full_layers(const HParams &hp) {
     return n;
 }
 
+// K values per token over the full layers, or the sliding ones.
+static uint64_t kv_values(const HParams &hp, bool sliding) {
+    uint64_t n = 0;
+    for (int l = 0; l < hp.n_layer; l++)
+        if (hp.swa(l) == sliding) n += hp.kv_values(l);
+    return n;
+}
+
 int ring_slots(const HParams &hp) {
     return hp.swa_window > 0 ? hp.swa_window + std::max(VkBackend::TMAX, hp.swa_window) : 0;
 }
@@ -1371,20 +1946,29 @@ static uint64_t kv_bytes(uint64_t values, KvType kv) {
 }
 
 uint64_t kv_bytes_per_token(const HParams &hp, KvType kv) {
-    return kv_bytes(2ull * full_layers(hp) * hp.n_head_kv * hp.head_dim, kv);  // K and V
+    return kv_bytes(2ull * kv_values(hp, false), kv);  // K and V
 }
 
 uint64_t kv_ring_bytes(const HParams &hp, KvType kv) {
-    return kv_bytes(2ull * (hp.n_layer - full_layers(hp)) * ring_slots(hp) * hp.n_head_kv * hp.head_dim, kv);
+    return kv_bytes(2ull * ring_slots(hp) * kv_values(hp, true), kv);
 }
 
 uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
     const uint64_t T = VkBackend::TMAX, E = hp.n_embd, F = hp.n_ff;
-    const uint64_t QD = (uint64_t)hp.n_head * hp.head_dim, KVD = (uint64_t)hp.n_head_kv * hp.head_dim;
+    const uint64_t QD = (uint64_t)hp.max_qd(), KVD = (uint64_t)hp.max_kvd();
     const uint64_t act =
         4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab) + 4 * (VkBackend::PART + VkBackend::SPLIT);
     const uint64_t gib = 1ull << 30;
     return (weight_bytes + act + gib - 1) / gib * gib + kv_ring_bytes(hp, KvType::F16);
+}
+
+int draft_context(uint64_t free, const HParams &dhp, uint64_t draft_weight_bytes, int cap) {
+    if (free == UINT64_MAX) return cap;
+    const uint64_t fixed = vk_fixed_bytes(dhp, draft_weight_bytes), spare = 1ull << 29;
+    const uint64_t per = kv_bytes_per_token(dhp, KvType::F16);
+    if (per == 0 || free < fixed + spare) return 0;
+    const uint64_t n = std::min<uint64_t>((free - fixed - spare) / per, cap > 0 ? (uint64_t)cap : 0) / 1024 * 1024;
+    return n >= 1024 ? (int)n : 0;
 }
 
 bool f16_reaches(int f16_ctx, int train) { return train >= 1024 && f16_ctx >= train / 1024 * 1024; }

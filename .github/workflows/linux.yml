@@ -1,60 +1,279 @@
 name: linux
 
-# Builds the TokenStation Linux package (linux/build-deb.sh). On a
-# linux-v<version> tag it also publishes a GitHub Release with the .deb and
-# .tar.gz. These releases are never marked "latest", so the PS5 store side
+# Builds TokenStation for Linux once, on Debian 12 (linux/build-deb.sh), and
+# packages that one build for Debian and Ubuntu (.deb), Fedora (.rpm), Arch
+# (.pkg.tar.zst) and Bazzite or SteamOS (the portable .tar.gz with
+# install.sh), then installs each on its own distribution and checks it.
+# On a linux-v<version> tag it also publishes a GitHub Release with all four. These releases are never marked "latest", so the PS5 store side
 # (release.yml) keeps pointing at the PS5 title.
 #
 #   git tag linux-v0.1.0 && git push origin linux-v0.1.0
+#
+# Run by hand (workflow_dispatch), it instead replaces the "linux-latest"
+# pre-release with this build, under fixed names too, so a PS5 can install
+# the newest build with one command and no GitHub sign-in:
+#
+#   curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation_latest_amd64.deb
 
 on:
   push:
     branches: [main]
     tags: ["linux-v*"]
-    paths: ["engine/**", "linux/**", ".github/workflows/linux.yml"]
+    paths: ["engine/**", "ps5/**", "linux/**", "third_party/**", ".github/workflows/linux.yml"]
   pull_request:
-    paths: ["engine/**", "linux/**", ".github/workflows/linux.yml"]
+    paths: ["engine/**", "ps5/**", "linux/**", "third_party/**", ".github/workflows/linux.yml"]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  # Built on Debian 12, the oldest system it supports, so the same programs
+  # run there and on anything newer.
   package:
     runs-on: ubuntu-24.04
+    container: debian:12
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      version: ${{ steps.build.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
       - name: Install build tools
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq cmake g++ glslang-tools libvulkan-dev
+          apt-get update -qq
+          apt-get install -y -qq git ca-certificates curl bzip2 xz-utils python3 make cmake g++ glslang-tools libvulkan-dev libsdl2-dev dpkg-dev sudo binutils
+      - uses: actions/checkout@v4
       - name: Build the package
+        id: build
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/linux-v* ]]; then v=${GITHUB_REF_NAME#linux-v}; else v=; fi
-          linux/build-deb.sh $v
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if [[ "$GITHUB_REF" == refs/tags/linux-v* ]]; then v=${GITHUB_REF_NAME#linux-v}; else v=0.0.0+$(git rev-parse --short HEAD); fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          linux/build-deb.sh "$v"
       - name: Check the package
         run: |
           deb=$(ls build/linux/*.deb)
           dpkg-deb --info "$deb"
           dpkg-deb --contents "$deb"
           dpkg-deb -x "$deb" /tmp/pkg
-          sh -n /tmp/pkg/usr/lib/tokenstation/start.sh
-          sh -n /tmp/pkg/usr/lib/tokenstation/boost.sh
-          sh -n /tmp/pkg/usr/bin/tokenstation-cu
+          for f in usr/lib/tokenstation/start.sh usr/lib/tokenstation/boost.sh usr/bin/tokenstation-cu \
+                   usr/bin/tokenstation-memory usr/lib/tokenstation/hw usr/lib/tokenstation/system-setup; do
+            sh -n /tmp/pkg/$f
+          done
+          sh -n linux/files/install.sh
           test -x /tmp/pkg/usr/lib/tokenstation/gpu-selftest
-          /tmp/pkg/usr/bin/ts5 2>&1 | grep -q "usage: ts5"
+          { /tmp/pkg/usr/bin/ts5 2>&1 || true; } | grep -q "usage: ts5"
+          visudo -cf /tmp/pkg/etc/sudoers.d/tokenstation
+          /tmp/pkg/usr/lib/tokenstation/hw status
+          /tmp/pkg/usr/bin/tokenstation --version | grep -q "^tokenstation "
+          tar -tzf build/linux/tokenstation-*-linux-*.tar.gz
+          # Nothing newer than Debian 12's C library (2.36).
+          if objdump -T /tmp/pkg/usr/bin/tokenstation /tmp/pkg/usr/bin/ts5 | grep -E "GLIBC_2\.(3[7-9]|[4-9][0-9])"; then exit 1; fi
       - uses: actions/upload-artifact@v4
         with:
-          name: tokenstation-linux
-          path: |
-            build/linux/*.deb
-            build/linux/*.tar.gz
+          name: tokenstation-debian-ubuntu
+          path: build/linux/*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tokenstation-bazzite-steamos
+          path: build/linux/tokenstation-*-linux-*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: root
+          path: build/linux/tokenstation-root.tar.gz
+          retention-days: 3
+
+  # The .deb, installed with apt on each Debian and Ubuntu.
+  deb:
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:12", "debian:13", "ubuntu:24.04", "ubuntu:26.04"]
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tokenstation-debian-ubuntu
+          path: dist
+      - name: Install it and check it
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq sudo python3 ./dist/*.deb
+          tokenstation --version
+          { ts5 2>&1 || true; } | grep -q "usage: ts5"
+          ts5-tune --help | grep -q "fastest GPU settings"
+          id tokenstation
+          sudo -l -U tokenstation | grep -q /usr/lib/tokenstation/hw
+          sudo -u tokenstation sudo -n /usr/lib/tokenstation/hw status
+          apt-get remove -y -qq tokenstation
+
+  # The same build, made into an .rpm on Fedora, then installed with dnf.
+  fedora:
+    needs: package
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: root
+          path: build/linux
+      - name: Build the .rpm
+        run: |
+          dnf install -y -q rpm-build
+          linux/build-rpm.sh "${{ needs.package.outputs.version }}"
+      - name: Install it and check it
+        run: |
+          dnf install -y -q ./build/linux/tokenstation-*.rpm
+          tokenstation --version
+          { ts5 2>&1 || true; } | grep -q "usage: ts5"
+          ts5-tune --help | grep -q "fastest GPU settings"
+          id tokenstation
+          sudo -l -U tokenstation | grep -q /usr/lib/tokenstation/hw
+          sudo -u tokenstation sudo -n /usr/lib/tokenstation/hw status
+          dnf remove -y -q tokenstation
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tokenstation-fedora
+          path: build/linux/tokenstation-*.rpm
+
+  # And into an Arch package, installed with pacman.
+  arch:
+    needs: package
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - name: Install build tools
+        run: pacman -Syu --noconfirm --needed base-devel git
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: root
+          path: build/linux
+      - name: Build the package
+        run: |
+          useradd -m builder
+          chown -R builder build/linux
+          su builder -c "linux/build-arch.sh '${{ needs.package.outputs.version }}'"
+      - name: Install it and check it
+        run: |
+          pacman -U --noconfirm build/linux/tokenstation-*.pkg.tar.*
+          tokenstation --version
+          { ts5 2>&1 || true; } | grep -q "usage: ts5"
+          id tokenstation
+          sudo -l -U tokenstation | grep -q /usr/lib/tokenstation/hw
+          sudo -u tokenstation sudo -n /usr/lib/tokenstation/hw status
+          pacman -R --noconfirm tokenstation
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tokenstation-arch
+          path: build/linux/tokenstation-*.pkg.tar.*
+
+  # The portable build on Fedora 44, as on Bazzite: install.sh as a user.
+  portable:
+    needs: package
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tokenstation-bazzite-steamos
+          path: dist
+      - name: Install it with install.sh
+        run: |
+          dnf install -y -q SDL2 vulkan-loader sudo tar findutils shadow-utils util-linux
+          useradd -m tester
+          echo "tester ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/tester
+          tar -C /home/tester -xzf dist/tokenstation-*-linux-*.tar.gz
+          chown -R tester /home/tester
+          su - tester -c 'cd tokenstation-*-linux-* && ./install.sh'
+          su - tester -c '~/.local/bin/tokenstation --version'
+          su - tester -c '~/.local/bin/ts5 2>&1 | grep -q "usage: ts5"'
+          test -x /usr/local/lib/tokenstation/hw
+          id -nG tester | grep -q tokenstation
+          sudo -l -U tester | grep -q /usr/local/lib/tokenstation/hw
+          su - tester -c 'sudo -n /usr/local/lib/tokenstation/hw status'
+          grep -q "Exec=/home/tester/.local/opt/tokenstation/bin/tokenstation" /home/tester/.local/share/applications/tokenstation.desktop
+          su - tester -c 'cd tokenstation-*-linux-* && ./install.sh --uninstall'
+          test ! -e /usr/local/lib/tokenstation
+
+  # The .deb on Ubuntu 24.04 running a model end to end.
+  run-ubuntu:
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tokenstation-debian-ubuntu
+          path: dist
+      - name: Install it
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mesa-vulkan-drivers ./dist/*.deb
+          # The API-only service would want port 8081, which the test uses.
+          sudo systemctl disable --now tokenstation.service || true
+      - name: Run the app (lavapipe, no screen)
+        run: |
+          python3 -m pip install --user --break-system-packages -q gguf
+          mkdir -p /tmp/model
+          curl -fsSL -o /tmp/model/vocab.gguf https://raw.githubusercontent.com/ggml-org/llama.cpp/master/models/ggml-vocab-qwen2.gguf
+          python3 engine/tests/make_test_model.py --arch qwen2 --vocab /tmp/model/vocab.gguf --quant Q4_K_M /tmp/model/test.gguf
+          linux/smoke-test.sh /tmp/model/test.gguf /usr/bin/tokenstation
+      - name: Tune it (ts5-tune, then the engine reads tune.env)
+        run: |
+          ts5-tune --quick --pp 64 --tg 16 /tmp/model/test.gguf
+          mkdir -p ~/.config/tokenstation
+          echo TS5_MV_ROWS=8 > ~/.config/tokenstation/tune.env
+          ts5 bench -m /tmp/model/test.gguf --pp 16 --tg 4 2>&1 | tee /tmp/bench.txt
+          grep -q "tuning from $HOME/.config/tokenstation/tune.env: TS5_MV_ROWS=8" /tmp/bench.txt
+          TS5_MV_ROWS=2 ts5 bench -m /tmp/model/test.gguf --pp 16 --tg 4 2>&1 | grep -q "(nothing new)"
+          ts5-tune --reset
+          test ! -e ~/.config/tokenstation/tune.env
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/linux-v')
+    needs: [package, deb, fedora, arch, portable, run-ubuntu]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tokenstation-*
+          path: dist
+          merge-multiple: true
       - name: Publish the release
-        if: startsWith(github.ref, 'refs/tags/linux-v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" build/linux/*.deb build/linux/*.tar.gz \
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
             --title "TokenStation for Linux ${GITHUB_REF_NAME#linux-v}" \
-            --notes "Linux package. Install: sudo apt install ./tokenstation_*.deb. See linux/README.md." \
+            --notes "Debian 12/13 and Ubuntu: sudo apt install ./tokenstation_*.deb. Fedora: sudo dnf install ./tokenstation-*.rpm. Arch: sudo pacman -U tokenstation-*.pkg.tar.zst. Bazzite and SteamOS: unpack tokenstation-*-linux-amd64.tar.gz and run ./install.sh. See linux/README.md." \
             --latest=false
+
+  latest:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [package, deb, fedora, arch, portable, run-ubuntu]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tokenstation-*
+          path: dist
+          merge-multiple: true
+      - name: Replace the linux-latest pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          cp tokenstation_*_amd64.deb tokenstation_latest_amd64.deb
+          cp tokenstation-*.x86_64.rpm tokenstation-latest.x86_64.rpm
+          cp tokenstation-*-linux-amd64.tar.gz tokenstation-latest-linux-amd64.tar.gz
+          cp tokenstation-*.pkg.tar.* tokenstation-latest-x86_64.pkg.tar.zst 2>/dev/null || true
+          ls -l
+          gh release delete linux-latest --repo "$GITHUB_REPOSITORY" --cleanup-tag -y || true
+          gh release create linux-latest ./* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "TokenStation for Linux, newest build (${GITHUB_SHA::7})" \
+            --notes "The newest build from ${GITHUB_REF_NAME}, for testing. Debian/Ubuntu: curl -LO .../tokenstation_latest_amd64.deb && sudo apt install ./tokenstation_latest_amd64.deb"

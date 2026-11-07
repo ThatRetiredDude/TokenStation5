@@ -10,7 +10,9 @@
 // its own included, from k_lo on (the first any of them sees), and keeps key
 // p in slot p % ring of its ring (ring > 0). Each score is the sum of TPS
 // threads' shares of its dot product, so a few rows of wide heads (Gemma 3's
-// 256, 8 keys a tile) keep every thread busy.
+// 256, 8 keys a tile) keep every thread busy. With hsplit > 1 the query
+// heads of one KV head are spread over hsplit workgroups, G / hsplit each
+// (Gemma 4's full layers: 16 heads of 512 on one KV head, 2 a workgroup).
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_shuffle : require
@@ -37,8 +39,21 @@ layout(std430, binding = 4) writeonly buffer Pbuf { float P[]; };
 layout(push_constant) uniform PC {
     uint head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split;
     float scale;
-    uint k_lo, win, ring;
+    uint k_lo, win, ring, hsplit;
+    uint s_max, s_keys, s_bk;
 } pc;
+
+// Generation and verify batches (s_max > 0, one token a workgroup) split
+// each token's keys as a one-token call at its position splits them, so a
+// verify batch's attention is generation's bit for bit: at most s_max slices
+// of s_keys keys or more, each a multiple of s_bk keys. Workgroups past a
+// token's last slice (a verify batch's earlier tokens) write empty slices,
+// which attn_merge adds as nothing.
+uint tok_chunk(uint keys) {
+    const uint ns = max(1u, min(pc.s_max, (keys + pc.s_keys - 1) / pc.s_keys));
+    const uint c = (keys + ns - 1) / ns;
+    return (c + pc.s_bk - 1) / pc.s_bk * pc.s_bk;
+}
 
 // Sizes in floats: a tile holds TILE / head_dim keys (at most 32), the block
 // at most QMAX / head_dim rows. The host keeps to these.
@@ -53,22 +68,29 @@ const float NEG_INF = -1.0 / 0.0;
 
 void main() {
     const uint tid = gl_LocalInvocationID.x;
-    const uint HD = pc.head_dim, HD4 = HD / 4, G = pc.n_head / pc.n_head_kv;
+    const uint HD = pc.head_dim, HD4 = HD / 4, G = pc.n_head / pc.n_head_kv / pc.hsplit;
     const uint BK = min(BKMAX, TILE / HD);
     const uint n_tblk = (pc.n_tok + pc.tq - 1) / pc.tq;
-    const uint kh = gl_WorkGroupID.x / n_tblk, t0 = (gl_WorkGroupID.x % n_tblk) * pc.tq;
+    const uint grp = gl_WorkGroupID.x / n_tblk, t0 = (gl_WorkGroupID.x % n_tblk) * pc.tq;
+    const uint kh = grp / pc.hsplit, h0 = kh * G * pc.hsplit + (grp % pc.hsplit) * G;  // KV head, first query head
     const uint R = G * min(pc.tq, pc.n_tok - t0);
     const uint q_stride = pc.n_head * HD, kv_stride = pc.n_head_kv * HD;
     const uint split = gl_WorkGroupID.y;
-    // Row r is head kh * G + r % G of token t0 + r / G.
-    const uint k_first = pc.k_lo + split * pc.chunk;
-    const uint k_end = min(k_first + pc.chunk, pc.pos0 + t0 + R / G);
+    // Row r is head h0 + r % G of token t0 + r / G.
+    uint k_lo = pc.k_lo, chunk = pc.chunk;
+    if (pc.s_max != 0) {
+        const uint p1 = pc.pos0 + t0 + 1;  // the token's keys end at its own
+        k_lo = pc.win != 0 && p1 > pc.win ? p1 - pc.win : 0;
+        chunk = tok_chunk(p1 - k_lo);
+    }
+    const uint k_first = k_lo + split * chunk;
+    const uint k_end = min(k_first + chunk, pc.pos0 + t0 + R / G);
     // The block's first token sees no key before this one.
     const uint k_begin = pc.win != 0 && pc.pos0 + t0 + 1 > pc.win ? max(k_first, pc.pos0 + t0 + 1 - pc.win) : k_first;
 
     for (uint e = tid; e < R * HD; e += 128) {
         const uint r = e / HD;
-        qs[e] = Q[(t0 + r / G) * q_stride + (kh * G + r % G) * HD + e % HD] * pc.scale;
+        qs[e] = Q[(t0 + r / G) * q_stride + (h0 + r % G) * HD + e % HD] * pc.scale;
     }
     float m = NEG_INF, l = 0.0;  // row tid's, for tid < R
     float acc[NACC];
@@ -148,13 +170,13 @@ void main() {
         const uint e = tid + 128 * i;
         if (e < R * HD) {
             const uint r = e / HD, d = e % HD;
-            const uint row = (t0 + r / G) * pc.n_head + kh * G + r % G;  // token * n_head + head
+            const uint row = (t0 + r / G) * pc.n_head + h0 + r % G;  // token * n_head + head
             if (pc.n_split == 1) O[row * HD + d] = acc[i] / row_l[r];
             else P[(split * pc.n_tok * pc.n_head + row) * (HD + 2) + d] = acc[i];
         }
     }
     if (pc.n_split > 1 && tid < R) {
-        const uint row = (t0 + tid / G) * pc.n_head + kh * G + tid % G;
+        const uint row = (t0 + tid / G) * pc.n_head + h0 + tid % G;
         const uint o = (split * pc.n_tok * pc.n_head + row) * (HD + 2) + HD;
         P[o] = m;
         P[o + 1] = l;

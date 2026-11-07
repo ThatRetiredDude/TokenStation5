@@ -180,10 +180,12 @@ std::string settings_source(const KnownMatch &k) {
 // set, and where that comes from: known_good says whose checks they are
 // ("file": this file's, "model": this model's in another file, "family": a
 // model of its family's), with that check's day and count.
-std::string settings_json(const KnownMatch &k, const SampleParams &sp) {
+std::string settings_json(const KnownMatch &k, const SampleParams &sp, bool think) {
     char b[96];
     snprintf(b, sizeof b, "{\"temperature\":%.3g,\"top_p\":%.3g,\"top_k\":%d", sp.temperature, sp.top_p, sp.top_k);
     std::string j = b;
+    // Only for a model whose template can skip its thinking.
+    if (k && k.row->thinking >= 0) j += std::string(",\"thinking\":") + (think ? "true" : "false");
     j += ",\"known_good\":";
     j += !k ? "\"none\"" : k.how == KnownMatch::File ? "\"file\"" : k.how == KnownMatch::Model ? "\"model\"" : "\"family\"";
     if (k)
@@ -283,9 +285,19 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                     r.path == "/chat/completions" || r.path == "/completions");
     u.pending = completions;  // the only requests recorded
     if (r.method == "OPTIONS") {
-        send_all(fd, "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n"
-                     "Access-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-                     "Connection: close\r\n\r\n");
+        // How long a browser may keep this answer. On the console the web
+        // apps are on other devices and the answer can't change while the
+        // title runs: 2 hours. On a computer a web app on the same desktop
+        // may come and go with a new build of the app: 10 minutes.
+#ifdef TS5_PS5
+        static const char kPreflightAge[] = "7200";
+#else
+        static const char kPreflightAge[] = "600";
+#endif
+        send_all(fd, std::string("HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n"
+                                 "Access-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                                 "Access-Control-Max-Age: ") +
+                         kPreflightAge + "\r\nConnection: close\r\n\r\n");
         close(fd);
         return;
     }
@@ -350,6 +362,7 @@ void handle(int fd, Server::State &state, Usage &u) {
         int n_ctx;
         KnownMatch known;
         SampleParams sampling;
+        bool think;
         {
             std::lock_guard<std::mutex> g(state.stats);
             model = state.model;
@@ -357,6 +370,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             n_ctx = state.n_ctx;
             known = state.known;
             sampling = state.sampling;
+            think = state.think;
         }
         // capabilities: whether the model takes OpenAI tools, and whether ts5
         // runs web searches for it (a Tavily key is set).
@@ -374,7 +388,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                             ",\"tool_format\":" + json_escape(tools) +
                                                             ",\"web_search\":" +
                                                             (can && !tavily_key().empty() ? "true" : "false") + "}" +
-                                                            ",\"settings\":" + settings_json(known, sampling) + "}") +
+                                                            ",\"settings\":" + settings_json(known, sampling, think) + "}") +
                                        "]}"));
     } else if (completions) {
         const bool chat = r.path.find("chat") != std::string::npos;
@@ -430,14 +444,16 @@ void handle(int fd, Server::State &state, Usage &u) {
         // {"enable_thinking": false}, or at the top level), "reasoning_effort":
         // "none", or a reply capped under kThinkRoom (an app naming a chat or
         // finishing a line), where the thinking would use up the limit and
-        // leave the answer empty.
+        // leave the answer empty. A request that says nothing gets the
+        // model's known-good choice (known-good.tsv's thinking).
         std::string opening;  // what opens the model's turn
         if (chat && can_skip_thinking(e.tok())) {
             const Json &kw = req["chat_template_kwargs"]["enable_thinking"];
             const Json &asked = kw.type == Json::BOOL ? kw : req["enable_thinking"];
             const bool think = asked.type == Json::BOOL            ? asked.boolean(true)
                                : req["reasoning_effort"].str() == "none" ? false
-                                                                         : !(limit >= 1 && limit < kThinkRoom);
+                               : limit >= 1 && limit < kThinkRoom        ? false
+                                                                         : state.think;
             if (!think) opening = kNoThinking;
         }
         if (chat) {
@@ -692,6 +708,9 @@ void handle(int fd, Server::State &state, Usage &u) {
             st.gen_ms += turn.gen_ms;
             st.drafted += turn.drafted;
             st.draft_accepted += turn.draft_accepted;
+            st.model_drafted += turn.model_drafted;
+            st.model_accepted += turn.model_accepted;
+            st.has_drafter |= turn.has_drafter;
             st.sample_ms += turn.sample_ms;
             st.finish = stopped ? "stop" : turn.finish;
             // The turn's answer, its thinking aside (split_think).
@@ -832,11 +851,10 @@ void handle(int fd, Server::State &state, Usage &u) {
             body += ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st) + "}";
             client_ok &= send_all(fd, response(200, body));
         }
-        log_line("ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, draft %d/%d, sample %.0f ms",
+        log_line("ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, %s, sample %.0f ms",
                 id.c_str(), st.prompt_tokens, st.prompt_evaluated,
                 st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0, st.gen_tokens,
-                st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0, st.draft_accepted, st.drafted,
-                st.sample_ms);
+                st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0, draft_summary(st).c_str(), st.sample_ms);
         // With TS5_PROFILE set (take_profile is empty otherwise): the CPU's
         // time per call and, with TS5_PROFILE=1, the per-kernel GPU table for
         // this request, in serve mode as everywhere else.
@@ -859,7 +877,16 @@ void handle(int fd, Server::State &state, Usage &u) {
         done();
         return;
     } else {
-        send_all(fd, response(404, error_body("not found: " + r.path)));
+        // Where the API is, for someone trying addresses by hand.
+#ifdef TS5_PS5
+        send_all(fd, response(404, error_body("not found: " + r.path +
+                                              " (the API is under /v1: GET /v1/models on the console's address "
+                                              "lists what's loaded)")));
+#else
+        send_all(fd, response(404, error_body("not found: " + r.path +
+                                              " (the API is under /v1: GET /v1/models lists what's loaded "
+                                              "on this computer)")));
+#endif
     }
     close(fd);
     u.closed = true;
@@ -918,6 +945,7 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
     state_.n_ctx = e ? e->backend().n_ctx() : 0;
     state_.known = {};
     state_.sampling = SampleParams{};
+    state_.think = true;
     if (e) {
         const Gguf &g = e->model().gguf;
         struct stat st {};
@@ -927,6 +955,7 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
             state_.sampling.temperature = k->temperature;
             state_.sampling.top_p = k->top_p;
             state_.sampling.top_k = k->top_k;
+            if (k->thinking >= 0) state_.think = k->thinking != 0;
         }
         log_line("ts5: settings: %s (temperature %.2g, top_p %.2g, top_k %d)", settings_source(state_.known).c_str(),
                  state_.sampling.temperature, state_.sampling.top_p, state_.sampling.top_k);

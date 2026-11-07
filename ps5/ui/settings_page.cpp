@@ -12,6 +12,9 @@
 #include "qrcodegen.hpp"
 #include "settings.h"
 #include "style.h"
+#ifdef TS5_LINUX
+#include "platform.h"
+#endif
 
 namespace ui {
 
@@ -31,7 +34,10 @@ struct Row {
     std::vector<Choice> choices;
     std::string def;  // the value with nothing in ts5.env, as each reader's default
     bool files = false;
-    enum Kind { Setting, Guide, NewKey, ApiKey, Tailscale } kind = Setting;
+    // Info: a reading, not a setting (Linux's PS5 HARDWARE); Action: cross
+    // runs it (value "run" for name).
+    enum Kind { Setting, Guide, NewKey, ApiKey, Tailscale, Info, Action } kind = Setting;
+    std::string value;  // Info and Action: shown on the row
 };
 
 constexpr const char *kSpeechModel = "TS5_WHISPER_MODEL", *kVoice = "TS5_TTS_VOICE";
@@ -52,9 +58,15 @@ const GuideLink kGuides[] = {
     {"At home and away with Tailscale", "This PS5 joins your tailnet itself. Nothing to set up on the router.",
      "Tailscale connects your devices into a private network of their own (a tailnet), wherever each one is. "
      "This PS5 joins it as a device of its own, so it works at home and away, even where no port can be opened."},
+#ifdef TS5_LINUX
+    {"Add models from a computer", "Copy models into the models folder, from this PS5 or over your network.",
+     "Any .gguf in the models folder shows on the Models page: one you downloaded in a browser here, or one "
+     "copied from another computer."},
+#else
     {"Add models from a computer", "Copy models over your network with FTP, much faster than downloading here.",
      "Big downloads on the PS5 slow down after the first few hundred MB: the PS5 seems to limit how fast apps "
      "can save. FTP from a computer is much faster."},
+#endif
 };
 constexpr int kGuideCount = sizeof kGuides / sizeof kGuides[0];
 constexpr int kLinkH = 104;
@@ -73,6 +85,30 @@ const std::vector<Row> &setting_rows() {
          "With a key from Tavily, a model that calls tools can search the web, on the Chat page and from your "
          "apps. Each search uses one of the account's credits.",
          "From the next request", {}, ""},
+        {"MODELS", "TS5_CTX_MAX", "Longest context",
+         "How much text a model keeps in mind at once: the chat or the app's request, files included, and the "
+         "reply. As much as fits suits most uses. A cap leaves the rest of the memory free and makes the model "
+         "load a little faster.",
+         "Now: the model loads again, which takes a few seconds",
+         {{"", "As much as fits"}, {"4096", "4,096 tokens"}, {"8192", "8,192 tokens"}, {"16384", "16,384 tokens"},
+          {"32768", "32,768 tokens"}, {"65536", "65,536 tokens"}},
+         ""},
+        {"MODELS", "TS5_KV", "Room for longer contexts",
+         "Keeps what the model has read in half the memory, so about twice the context fits. It's used only when "
+         "a model's whole context doesn't fit otherwise. Answers can come out very slightly different.",
+         "Now: the model loads again, which takes a few seconds", {{"f16", "Off"}, {"q8", "On"}}, "f16"},
+        {"MODELS", "TS5_MMB_F16", "Exact prompt reading",
+         "Reads every prompt with 32-bit math. Off, Qwen, DeepSeek and Llama models read prompts with 16-bit "
+         "math, about 40% faster, and their answers very rarely come out different. Gemma always reads in 32-bit. "
+         "Replies are written at the same speed either way.",
+         "Now: the model loads again, which takes a few seconds", {{"", "Off"}, {"0", "On"}}, ""},
+#ifdef TS5_LINUX
+        {"MODELS", "TS5_DRAFT_MODEL", "Helper model",
+         "A small model of the same family (such as Qwen3 0.6B for Qwen3 8B, or Llama 3.2 1B for Llama 3.1 8B) "
+         "guesses a few words ahead and the big model checks them all at once, so replies come faster. Answers "
+         "are exactly the same. Automatic uses one when a matching small model is in the models folder.",
+         "Now: the model loads again, which takes a few seconds", {{"", "Automatic"}, {"off", "Off"}}, ""},
+#endif
         {"VOICE", kSpeechModel, "Speech model",
          "The model that turns what you say into text when you hold R1 on the Chat page. Base (English) is a "
          "good start; Small (English) understands more and takes longer.",
@@ -133,9 +169,77 @@ const ApiKeyInfo *key_of(const Row &r, const SettingsInfo &info) {
     return nullptr;
 }
 
+#ifdef TS5_LINUX
+std::string gib_text(double g) {
+    char b[32];
+    snprintf(b, sizeof b, "%.1f GiB", g);
+    return b;
+}
+
+// PS5 HARDWARE, on a PS5 running Linux (linux/hardware.h): the fan, the
+// clock boost, the GPU's memory and compute units, the compute unit test and
+// the temperatures.
+void hardware_rows(const SettingsInfo &info, std::vector<Row> &r) {
+    const HwInfo &h = info.hw;
+    if (!h.present) return;
+    const char *sec = "PS5 HARDWARE";
+    const std::string after_restart = "After a restart (and the loader again)";
+    const std::string blocked = h.problem.empty() ? "" : " " + h.problem;
+    r.push_back({sec, "TS5_PS5_FAN", "Fan",
+                 "Performance runs the fan flat out whenever a model is working and lets it idle down after: the "
+                 "PS5's own curve watches the board, which stays cool while the chip itself hits its 85 C limit and "
+                 "slows the GPU on every prompt. Automatic is that curve. Cooler ramps it up sooner (full speed from "
+                 "a 65 C board reading). Full speed is loudest. Past 90 C the fan runs flat out whatever is set." +
+                     blocked,
+                 "Now", {{"perf", "Performance"}, {"auto", "Automatic"}, {"cool", "Cooler"}, {"max", "Full speed"}},
+                 "auto"});
+    r.push_back({sec, "TS5_PS5_BOOST", "Clock boost",
+                 "Off is faster for models: Linux then runs the GPU at its full 2.23 GHz, where the boost's own "
+                 "power management holds it lower. On is the console's game clocks (CPU 3.5 GHz), cooler and about "
+                 "8% slower on prompts. Nothing on Linux sets clocks past 2.23 GHz." + blocked,
+                 "Now", {{"0", "Off"}, {"1", "On"}}, "0"});
+    std::string mem = "How much of the PS5's memory the GPU may use for models. Linux gives it half by default. "
+                      "Most available lets the GPU map all but 1 GiB; it's a limit, not "
+                      "a reservation, and TokenStation sizes each model to the memory that's free when it loads, so "
+                      "Linux and Steam keep what they use. A fixed size is for keeping room for other apps.";
+    if (h.gpu_gib > 0) mem += " Now the GPU may use " + gib_text(h.gpu_gib) + " of " + gib_text(h.ram_gib) + ".";
+    if (h.boot_gtt_gib > 0) mem += " Set for the next start: " + gib_text(h.boot_gtt_gib) + ".";
+    // Up to all but 2 GiB of what Linux sees (14.1 GiB on a PS5), as
+    // tokenstation-memory allows.
+    std::vector<Choice> sizes = {{"max", "Most available"}, {"0", "Linux's default"}};
+    const int most = h.ram_gib > 0 ? (int)h.ram_gib - 2 : 12;
+    for (int g = 10; g <= std::min(most, 13); g++) sizes.push_back({std::to_string(g), std::to_string(g) + " GiB"});
+    r.push_back({sec, "TS5_PS5_GPU_GIB", "GPU memory for models", mem + blocked, after_restart, sizes, "max"});
+    std::string cus = "The PS5's GPU has 40 compute units and ships with 36 on. 38 or 40 read prompts faster, but on "
+                      "some chips an extra pair gives wrong answers or hangs. Test at 36 first, then after each step "
+                      "up.";
+    if (h.cus_active > 0) cus += " On now: " + std::to_string(h.cus_active) + ".";
+    if (h.boot_cus != 36) cus += " Set for the next start: " + std::to_string(h.boot_cus) + ".";
+    r.push_back({sec, "TS5_PS5_CUS", "Compute units", cus + blocked, after_restart,
+                 {{"36", "36 (stock)"}, {"38", "38"}, {"40", "40"}}, "36"});
+    const char *test_shown[] = {"Not run yet", "Testing", "Passed", "Failed"};
+    r.push_back({sec, "TS5_PS5_CUTEST", "Test the compute units",
+                 "Two minutes of GPU work checked against the results at 36 compute units, then the GPU check on a "
+                 "model. Any wrong result, hang or reset fails it. The served model stops while it runs, and comes "
+                 "back after." + blocked,
+                 "", {}, "", false, Row::Action, test_shown[h.test]});
+    std::string hottest = "None reported";
+    double top = -1;
+    for (const auto &t : h.temps)
+        if (t.second > top) {
+            top = t.second;
+            hottest = std::to_string((int)(t.second + 0.5)) + " \xC2\xB0" "C";
+        }
+    r.push_back({sec, "", "Temperatures",
+                 h.temps.empty() ? "Linux on this PS5 reports no temperatures (no hwmon sensors)."
+                                 : "Every sensor Linux reports, hottest on the row.",
+                 "", {}, "", false, Row::Info, hottest});
+}
+#endif
+
 // The page's rows: APPS (the instructions, the key setting, making a key and
-// the keys), AWAY FROM HOME (Tailscale), then the settings: CHAT, VOICE,
-// CONSOLE, and TUNING last, for what's rarely changed.
+// the keys), AWAY FROM HOME (Tailscale), then the settings: CHAT, MODELS,
+// VOICE, CONSOLE, and TUNING last, for what's rarely changed.
 std::vector<Row> rows(const SettingsInfo &info) {
     std::vector<Row> r;
     r.push_back({"APPS", "", "Instructions", "How to use the models on this PS5 from your apps, at home and away, and how to add more.",
@@ -159,6 +263,9 @@ std::vector<Row> rows(const SettingsInfo &info) {
                  "joins your tailnet as a device of its own: nothing to set up on your router, and only your "
                  "tailnet's devices can reach it.",
                  "", {{"1", "On"}, {"0", "Off"}}, "0", false, Row::Tailscale});
+#ifdef TS5_LINUX
+    hardware_rows(info, r);
+#endif
     const auto &s = setting_rows();
     r.insert(r.end(), s.begin(), s.end());
     return r;
@@ -292,6 +399,7 @@ std::string other(const Row &r) {
 }
 
 std::string shown(const Row &r, const SettingsInfo &info) {
+    if (r.kind == Row::Info || r.kind == Row::Action) return r.value;
     if (r.kind == Row::Guide) return "Open";
     if (r.kind == Row::NewKey) return "Make one";
     if (r.kind == Row::Tailscale && current(r) == "1") {
@@ -397,6 +505,15 @@ SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
         ch.new_key = (b & kCross) != 0;
         return ch;
     }
+    if (r.kind == Row::Info) return ch;
+    if (r.kind == Row::Action) {
+        if ((b & kCross) && r.value != "Testing") {
+            ch.any = true;
+            ch.name = r.name;
+            ch.value = "run";
+        }
+        return ch;
+    }
     if (const ApiKeyInfo *k = key_of(r, info)) {
         // On is the first choice, Off the second.
         const bool want = (b & kCross) ? !k->on : (b & kLeft) ? true : (b & kRight) ? false : k->on;
@@ -408,6 +525,9 @@ SettingChange SettingsPage::press(uint32_t b, const SettingsInfo &info) {
                 ch.key_id = k->id;
                 ch.key_remove = true;
                 confirm_at_ = -1e9;
+                // The row above stays chosen (another key, or New key): the
+                // removed key's place would go to the next section's row.
+                sel_ = std::max(0, sel_ - 1);
             } else {
                 confirm_at_ = info.now;
             }
@@ -618,6 +738,23 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
              "carry the traffic, which works even where no port can be opened. TokenStation5 has to be open on the "
              "PS5.",
              kText2);
+#ifdef TS5_LINUX
+    } else if (open == 2) {
+        ty -= 12;
+        field("FOLDER", linuxp::data_dir() + "/models", kText, bodyb_);
+        if (info.on_network) field("FROM A COMPUTER", "scp MODEL.gguf you@" + host + ":" + linuxp::data_dir() + "/models/", kAccent, body_);
+        para("1. Download the model's .gguf file, from Hugging Face for example. For 7B to 14B models, Q4_K_M is "
+             "a good choice.",
+             kText);
+        ty += 8;
+        para("2. Copy it into the folder above: with the file manager on this PS5, or from another computer with "
+             "scp, rsync or a shared folder.",
+             kText);
+        ty += 8;
+        para("3. The Models page lists it within seconds, as COPYING until the whole file is there. Models stay "
+             "when TokenStation5 is updated.",
+             kText);
+#else
     } else if (open == 2) {
         ty -= 12;
         // ftpsrv, which the jailbreak runs, listens on 2121.
@@ -637,10 +774,31 @@ void SettingsPage::draw_details(Canvas &c, const SettingsInfo &info, int x, int 
              kText);
         ty += 8;
         para("Keep a copy on your computer: updating or deleting the app removes its models.", kText2);
+#endif
     } else if (r.kind == Row::Guide) {
         // The list of guides, drawn above.
+    } else if (r.kind == Row::Info || r.kind == Row::Action) {
+        const std::vector<std::string> *lines = &info.hw.test_lines;
+        std::vector<std::string> temps;
+        if (r.kind == Row::Info) {
+            for (const auto &t : info.hw.temps)
+                temps.push_back(t.first + ": " + std::to_string((int)(t.second + 0.5)) + " \xC2\xB0" "C");
+            lines = &temps;
+        } else if (r.value == "Testing") {
+            c.text(body_, dx, ty, "Testing now.", kAmber);
+            ty += 56;
+        } else {
+            text_glyph(c, body_, dx, ty, "Press", kGlyphCross, "to run it.", kText2);
+            ty += 56;
+        }
+        for (const std::string &l : *lines) {
+            c.text(small_, dx, ty, l, l.find("FAIL") != std::string::npos ? kRed : kText2, dw);
+            ty += 32;
+        }
     } else if (r.kind == Row::Tailscale) {
-        draw_tailscale(c, info, dx, ty, dw, y + h - 24);
+        // Its last lines stay above the bottom line, where a note ("Saved",
+        // "Removed") shows.
+        draw_tailscale(c, info, dx, ty, dw, y + h - 120);
     } else if (r.kind == Row::NewKey) {
         text_glyph(c, body_, dx, ty + 8, "Press", kGlyphCross, "to name a new key.", kText2);
         ty += 56;
@@ -898,6 +1056,8 @@ std::string SettingsPage::cross_does(const SettingsInfo &info) const {
     const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
     if (r.kind == Row::Guide) return in_guide_ && open_ >= 0 ? "Back" : "Open";
     if (r.kind == Row::NewKey) return "New key";
+    if (r.kind == Row::Info) return "";
+    if (r.kind == Row::Action) return r.value == "Testing" ? "" : "Run the test";
     if (r.kind == Row::Tailscale) return current(r) == "1" ? "Turn off" : "Turn on";
     if (const ApiKeyInfo *k = key_of(r, info)) return k->on ? "Turn off" : "Turn on";
     if (is_key(r)) return "Type";
@@ -912,6 +1072,7 @@ std::string SettingsPage::cross_does(const SettingsInfo &info) const {
 std::string SettingsPage::arrows_do(const SettingsInfo &info) const {
     const auto rs = rows(info);
     const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
+    if (r.kind == Row::Info || r.kind == Row::Action) return "";
     if (r.kind != Row::Guide) return "\xE2\x86\x90\xE2\x86\x92  Change";
     if (!in_guide_) return "";
     return open_ >= 0 ? "" : "\xE2\x86\x90  Back to the settings";  // on a guide, cross says Back
@@ -920,7 +1081,7 @@ std::string SettingsPage::arrows_do(const SettingsInfo &info) const {
 std::string SettingsPage::square_does(const SettingsInfo &info) const {
     const auto rs = rows(info);
     const Row &r = rs[std::max(0, std::min(sel_, (int)rs.size() - 1))];
-    if (r.kind == Row::Guide || r.kind == Row::NewKey) return "";
+    if (r.kind == Row::Guide || r.kind == Row::NewKey || r.kind == Row::Info || r.kind == Row::Action) return "";
     if (r.kind == Row::Tailscale) return info.ts.account.empty() && info.ts.address.empty() ? "" : "Sign out";
     if (r.kind == Row::ApiKey || is_key(r)) return "Remove";
     return "Default";

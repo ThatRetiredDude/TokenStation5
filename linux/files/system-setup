@@ -1,0 +1,55 @@
+#!/bin/sh
+# /usr/lib/tokenstation/system-setup: what the Fedora (.rpm) and Arch
+# packages do on install and removal, the same as the .deb's postinst and
+# prerm, with tools every distribution has (groupadd, useradd, usermod).
+#
+#   system-setup configure    the tokenstation user and group, its folder,
+#                             and the installing user in the group
+#   system-setup remove       stops and disables the services
+set -eu
+case "${1:-}" in
+configure)
+    getent group tokenstation >/dev/null || groupadd -r tokenstation
+    if ! getent passwd tokenstation >/dev/null; then
+        nologin=$(command -v nologin || echo /sbin/nologin)
+        useradd -r -g tokenstation -d /var/lib/tokenstation -M -s "$nologin" tokenstation
+    fi
+    # The GPU (render, video), and for the TV service the controller (input)
+    # and the sound card (audio).
+    for g in render video input audio; do
+        getent group "$g" >/dev/null && usermod -a -G "$g" tokenstation || true
+    done
+    # Whoever installed it may change the PS5 hardware settings from the
+    # desktop app too (/etc/sudoers.d/tokenstation), after logging in again.
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && getent passwd "$SUDO_USER" >/dev/null; then
+        usermod -a -G tokenstation "$SUDO_USER" || true
+    fi
+    # On a PS5: the GPU may use the most memory, unless a limit is set
+    # already (Settings > PS5 HARDWARE can change it).
+    if [ -e /dev/mp1 ] || [ -e /dev/icc ]; then
+        /usr/bin/tokenstation-memory first || true
+    fi
+    mkdir -p /var/lib/tokenstation/models
+    chown -R tokenstation:tokenstation /var/lib/tokenstation
+    chmod 0440 /etc/sudoers.d/tokenstation 2>/dev/null || true
+    command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload || true
+        for s in tokenstation.service tokenstation-tv.service; do
+            systemctl is-active --quiet "$s" && systemctl restart "$s" || true
+        done
+    fi
+    ;;
+remove)
+    if [ -d /run/systemd/system ]; then
+        for s in tokenstation.service tokenstation-tv.service; do
+            systemctl stop "$s" 2>/dev/null || true
+            systemctl disable "$s" >/dev/null 2>&1 || true
+        done
+    fi
+    ;;
+*)
+    echo "system-setup configure|remove" >&2
+    exit 2
+    ;;
+esac

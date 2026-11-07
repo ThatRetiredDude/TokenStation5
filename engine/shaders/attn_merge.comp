@@ -1,6 +1,9 @@
 // Combines attn's partial results over the slices of the keys: one
 // workgroup per (head, token). Thread s reads slice s's max score and weight
 // sum, so the slices are read in parallel rather than one after another.
+// Slice s adds into sum s % 4 however many slices there are, so the empty
+// slices a verify batch's earlier tokens get past their own last one (max
+// -inf, weight 0, sums 0) leave each row as one-token generation has it.
 #version 450
 layout(local_size_x = 128) in;
 
@@ -34,15 +37,13 @@ void main() {
     for (uint s = 0; s < ns; s++) total += lw[s];
     for (uint d = tid; d < HD; d += 128) {
         float o0 = 0.0, o1 = 0.0, o2 = 0.0, o3 = 0.0;
-        uint s = 0;
-        for (; s + 4 <= ns; s += 4) {
+        for (uint s = 0; s < ns; s += 4) {
             const uint p = base + s * sstride + d;
             o0 += w[s] * P[p];
-            o1 += w[s + 1] * P[p + sstride];
-            o2 += w[s + 2] * P[p + 2 * sstride];
-            o3 += w[s + 3] * P[p + 3 * sstride];
+            if (s + 1 < ns) o1 += w[s + 1] * P[p + sstride];
+            if (s + 2 < ns) o2 += w[s + 2] * P[p + 2 * sstride];
+            if (s + 3 < ns) o3 += w[s + 3] * P[p + 3 * sstride];
         }
-        for (; s < ns; s++) o0 += w[s] * P[base + s * sstride + d];
         O[row * HD + d] = (o0 + o1 + o2 + o3) / total;
     }
 }

@@ -70,7 +70,7 @@ for src in "$mbedtls"/library/*.c; do
         pids+=($!)
     fi
 done
-for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks}.cpp \
+for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,peak,tokenizer,engine,server,checks}.cpp \
         "$root"/engine/src/{tools,known_good,net,websearch,ca_bundle,log}.cpp \
         "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup,local_time,keep_models}.cpp \
         "$root"/third_party/qrcodegen/qrcodegen.cpp \

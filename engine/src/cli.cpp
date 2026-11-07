@@ -5,8 +5,9 @@
 //   ts5 run      -m model.gguf -p "prompt" [--chat] [-n 256] [--temp 0.7]
 //   ts5 bench    -m model.gguf [--pp 512] [--tg 128]
 //   ts5 tokenize -m model.gguf -p "text"
-//   ts5 check    -m model.gguf [-n 16]   GPU logits against the CPU reference
-//   ts5 logits   -m model.gguf -o out.bin [--step] tok0 tok1 ...   (all positions, for tests)
+//   ts5 check    -m model.gguf [-n 16] [-p TEXT]   GPU logits against the CPU reference
+//                                        (-p: on TEXT's first n tokens)
+//   ts5 logits   -m model.gguf -o out.bin [--step | --verify K] tok0 tok1 ...   (all positions, for tests)
 //   ts5 prompt   -m model.gguf [--chat-template FILE] < request.json
 //                                        the prompt a chat request becomes (for tests)
 //   ts5 tool-parse hermes|llama3|mistral|gemma [TOOL...] < text
@@ -14,6 +15,7 @@
 //   ts5 search "query"                   one web_search, as the model would get it
 //   ts5 usage-parse FILE                 a usage.tsv's requests, written again as v1 (for tests)
 //   ts5 fetch URL FILE [--sha256 HEX]    download URL to FILE, going on from a stopped one
+//   ts5 peak [--device N] [--gib G]      the GPU's read bandwidth and FMA rates (speed ceilings)
 //
 // Common: --backend vk|cpu (default vk when built with Vulkan), --device N.
 // serve with TS5_USAGE_LOG=FILE writes a line per API request to FILE
@@ -44,6 +46,10 @@
 #include "tools.h"
 #include "usage.h"
 #include "websearch.h"
+#ifdef TS5_VULKAN
+#include "peak.h"
+#include "vk_context.h"
+#endif
 
 #ifndef TS5_VERSION
 #define TS5_VERSION "dev"
@@ -58,6 +64,7 @@ struct Args {
     int port = 8081, n_ctx = 8192, n_predict = 256, pp = 512, tg = 128, device = 0;
     float temp = 0.7f;
     bool chat = false, step = false, n_set = false, fresh = false;
+    int verify = 0;  // logits --verify K
     std::vector<int32_t> tokens;
 };
 
@@ -67,14 +74,15 @@ int usage() {
     fprintf(stderr,
             "usage: ts5 serve|run|bench|check|tokenize|logits|prompt -m model.gguf [options]\n"
             "       ts5 search QUERY | ts5 tool-parse hermes|llama3|mistral|gemma [TOOL...] < TEXT | ts5 usage-parse FILE\n"
-            "       ts5 fetch URL FILE [--sha256 HEX]\n"
+            "       ts5 fetch URL FILE [--sha256 HEX] | ts5 peak [--device N] [--gib G]\n"
             "  -c N|auto      context length (default 8192; auto: what fits in GPU memory)\n"
             "  --backend B    vk or cpu\n"
             "  --device N     Vulkan device index\n"
             "  serve: --host ADDR --port N\n"
             "  run:   -p PROMPT [--chat] [-n N] [--temp T]\n"
             "  bench: --pp N --tg N\n"
-            "  check: [-n TOKENS] [--fresh]  (--fresh: run the CPU even if its answers are saved)\n"
+            "  check: [-n TOKENS] [-p TEXT] [--fresh]  (-p: on TEXT's tokens; --fresh: run the CPU even if\n"
+            "         its answers are saved)\n"
             "  logits: -o FILE TOKENS...\n");
     return 2;
 }
@@ -108,6 +116,7 @@ bool parse(int argc, char **argv, Args &a) {
         else if (s == "--device") a.device = atoi(next().c_str());
         else if (s == "--chat") a.chat = true;
         else if (s == "--step") a.step = true;
+        else if (s == "--verify") a.verify = atoi(next().c_str());
         else if (s == "--fresh") a.fresh = true;
         else if (s == "--chat-template") a.chat_template = next();
         else if (!s.empty() && (isdigit((unsigned char)s[0]))) a.tokens.push_back(atoi(s.c_str()));
@@ -235,6 +244,21 @@ int fetch_command(int argc, char **argv) {
 
 int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     if (argc >= 2 && std::string(argv[1]) == "fetch") return fetch_command(argc, argv);
+    if (argc >= 2 && std::string(argv[1]) == "peak") {
+#ifdef TS5_VULKAN
+        int device = 0;
+        double gib = 1.0;
+        for (int i = 2; i + 1 < argc; i += 2) {
+            if (std::string(argv[i]) == "--device") device = atoi(argv[i + 1]);
+            else if (std::string(argv[i]) == "--gib") gib = std::max(0.0625, atof(argv[i + 1]));
+            else return usage();
+        }
+        return peak_command(device, gib);
+#else
+        fprintf(stderr, "ts5: built without Vulkan\n");
+        return 1;
+#endif
+    }
     if (argc >= 2 && (std::string(argv[1]) == "search" || std::string(argv[1]) == "tool-parse" ||
                       std::string(argv[1]) == "usage-parse"))
         return no_model_command(argc, argv);
@@ -247,6 +271,9 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     fprintf(stderr, "ts5: %s: %s, %d layers, embd %d, ff %d, heads %d/%d, head_dim %d, vocab %d\n",
             basename_of(a.model).c_str(), hp.arch.c_str(), hp.n_layer, hp.n_embd, hp.n_ff, hp.n_head, hp.n_head_kv,
             hp.head_dim, hp.n_vocab);
+    if (hp.head_dim_swa)
+        fprintf(stderr, "ts5: sliding layers: %d of %d, window %d, heads %d/%d, head_dim %d\n",
+                hp.n_layer - full_layers(hp), hp.n_layer, hp.swa_window, hp.n_head, hp.hkv(0), hp.head_dim_swa);
     Tokenizer tok;
     if (!tok.load(model.gguf, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
     if (!a.chat_template.empty()) {
@@ -293,7 +320,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     fprintf(stderr, "ts5: %s backend ready in %.1f s, context %d\n", be->name(), (now_ms() - t0) / 1000, be->n_ctx());
     Model dmodel;  // the draft model, when TS5_DRAFT_MODEL names one; outlives eng
     Engine eng(model, be, tok);
-    if (const char *dp = getenv("TS5_DRAFT_MODEL"); dp && *dp && (a.cmd == "run" || a.cmd == "serve")) {
+    if (const char *dp = getenv("TS5_DRAFT_MODEL"); dp && *dp && strcmp(dp, "off") != 0 && (a.cmd == "run" || a.cmd == "serve")) {
         std::string derr;
         Backend *db = nullptr;
         if (!dmodel.open(dp, derr)) {
@@ -301,23 +328,40 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             if (dmodel.load(nullptr, derr)) db = make_cpu_backend(dmodel, be->n_ctx());
         } else {
 #ifdef TS5_VULKAN
-            db = make_vk_backend(dmodel, dp, be->n_ctx(), a.device, derr);
+            // As much of the main context as fits in what is free now.
+            uint64_t dw = 0, freeb = UINT64_MAX;
+            for (const auto &t : dmodel.gguf.tensors) dw += t.nbytes;
+            if (VkContext *c = create_vk_context(a.device, false, derr)) {
+                freeb = c->free_memory();
+                destroy_vk_context(c);
+            }
+            const int dctx = draft_context(freeb, dmodel.hp, dw, be->n_ctx());
+            if (dctx == 0) derr = "not enough GPU memory left for it";
+            else db = make_vk_backend(dmodel, dp, dctx, a.device, derr);
 #endif
         }
         if (!db || !eng.set_drafter(dmodel, db, derr))
             fprintf(stderr, "ts5: draft model not used: %s\n", derr.c_str());
         else
-            fprintf(stderr, "ts5: draft model %s ready\n", basename_of(dp).c_str());
+            fprintf(stderr, "ts5: draft model %s ready, context %d\n", basename_of(dp).c_str(), db->n_ctx());
     }
 
     if (a.cmd == "logits") {
         if (a.tokens.empty() || a.out.empty()) return usage();
         std::vector<float> lg((size_t)a.tokens.size() * hp.n_vocab);
-        // --step: one token per call, exercising the KV cache across calls
+        // --step: one token per call, exercising the KV cache across calls.
+        // --verify K: K tokens a call with every position's logits, as a
+        // helper's drafts are checked; the dump must be --step's byte for
+        // byte (speculative decoding's same-output promise).
         bool ok = true;
         if (a.step)
             for (size_t i = 0; i < a.tokens.size() && ok; i++)
                 ok = be->forward(&a.tokens[i], 1, (int)i, lg.data() + i * hp.n_vocab, false, err);
+        else if (a.verify > 0)
+            for (size_t i = 0; i < a.tokens.size() && ok; i += a.verify) {
+                const int k = (int)std::min<size_t>(a.verify, a.tokens.size() - i);
+                ok = be->forward(&a.tokens[i], k, (int)i, lg.data() + i * hp.n_vocab, true, err);
+            }
         else
             ok = be->forward(a.tokens.data(), (int)a.tokens.size(), 0, lg.data(), true, err);
         if (!ok) {
@@ -336,11 +380,29 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     if (a.cmd == "check") {
         if (a.backend == "cpu") return usage();
         CheckResult r;
-        if (!run_check(model, *be, a.n_ctx, r, err, nullptr, a.fresh)) {
+        // -p: the check runs on that text's tokens in place of the test tokens.
+        const std::vector<int32_t> text = a.prompt.empty() ? std::vector<int32_t>() : tok.encode(a.prompt, true);
+        if (!run_check(model, *be, a.n_ctx, r, err, nullptr, a.fresh, text)) {
             fprintf(stderr, "ts5: %s\n", err.c_str());
             return 1;
         }
         printf("%s\n", check_line(basename_of(a.model), r).c_str());
+        // Where the top token differs: the two candidates and how sure each side is.
+        auto show = [&](int32_t t) {
+            std::string s;
+            for (char c : tok.decode(t)) s += c == '\n' ? std::string("\\n") : std::string(1, c);
+            return "\"" + s + "\"";
+        };
+        for (const TopChange &c : r.changes) {
+            std::string before;
+            for (int32_t t : c.before) before += tok.decode(t);
+            std::string ctx;
+            for (char ch : before) ctx += ch == '\n' ? std::string("\\n") : std::string(1, ch);
+            printf("  top token differs at %d, after \"...%s\": CPU %s %.3g, %s %.3g; GPU %s %.3g, %s %.3g%s\n", c.pos,
+                   ctx.c_str(), show(c.cpu_top).c_str(), c.cpu_p_cpu, show(c.gpu_top).c_str(), c.cpu_p_gpu,
+                   show(c.gpu_top).c_str(), c.gpu_p_gpu, show(c.cpu_top).c_str(), c.gpu_p_cpu,
+                   c.next < 0 ? "" : ("; the text has " + show(c.next)).c_str());
+        }
         return r.pass ? 0 : 1;
     }
     if (a.cmd == "bench") {
@@ -361,9 +423,14 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
                                st, err);
         printf("\n");
         if (!ok) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
-        fprintf(stderr, "ts5: prompt %d tok %.1f tok/s, gen %d tok %.1f tok/s, draft %d/%d accepted, sample %.0f ms\n",
+        fprintf(stderr, "ts5: prompt %d tok %.1f tok/s, gen %d tok %.1f tok/s, %s, sample %.0f ms\n",
                 st.prompt_evaluated, st.prompt_evaluated * 1000.0 / st.prompt_ms, st.gen_tokens,
-                st.gen_tokens * 1000.0 / st.gen_ms, st.draft_accepted, st.drafted, st.sample_ms);
+                st.gen_tokens * 1000.0 / st.gen_ms, draft_summary(st).c_str(), st.sample_ms);
+        // With TS5_PROFILE set, the CPU time per forward call, and with
+        // TS5_PROFILE=1 the per-kernel GPU table for the whole run (prompt
+        // and generation together, as the server prints per request).
+        const std::string prof = be->take_profile();
+        if (!prof.empty()) fprintf(stderr, "run (%d prompt + %d generated tokens), %s", st.prompt_evaluated, st.gen_tokens, prof.c_str());
         return 0;
     }
     if (a.cmd == "serve") {

@@ -1,14 +1,19 @@
 #version 450
-// Y[t][r] = silu(G[r] . X[t]) * (U[r] . X[t]) for NT tokens of the
+#extension GL_GOOGLE_include_directive : require
+// Y[t][r] = silu(G[r] . X[t]) * (U[r] . X[t]) (gelu for Gemma) for NT tokens of the
 // feed-forward's Q4_K gate (binding 0) and up (binding 3) matrices at once:
 // a verify batch through what mv16_glu_q4_k is for one token. Laid out as
-// mvt_q4_k, but each block's words are loaded from both matrices and dotted
-// with the same x values, so the x traffic — the dominant stream once the
-// batch shares the weights — is paid once for the two biggest lines of a
-// verify pass, and the swiglu kernel and its barrier are spared. Holding
-// two matrices' words doubles the register load: past NR = 2 the PS5
-// spills (1376 VGPRs into 36 KB of scratch at NR 4, NT 8 — a 7x
-// regression, measured), so the backend caps this kernel's rows at 2.
+// mvt_q4_k (the nibbles made floats and the scales and mins decoded once
+// per row and block, before the token loop, the low nibbles first and the
+// high ones after, each block summed in mv16_q4_k's order so that a verify
+// batch agrees bit for bit with the one-token forward), but each block's
+// words are loaded from both matrices
+// and dotted with the same x values, so the x traffic is paid once for the
+// two biggest lines of a verify pass, and the swiglu kernel and its
+// barrier are spared. Holding two matrices' words doubles the register
+// load: past NR = 2 the PS5 spilled with the earlier layout (1376 VGPRs
+// into 36 KB of scratch at NR 4, NT 8 — a 7x regression, measured), so the
+// backend caps this kernel's rows at 2.
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_control_flow_attributes : require
 
@@ -31,27 +36,16 @@ layout(push_constant) uniform PC {
 
 shared float partial[NRMAX * NTMAX * WG];  // [row][token][subgroup]
 
-// As mv16_q4_k: sub-blocks 2p and 2p + 1's 6-bit scales (bytes 0 and 1) and
-// mins (bytes 2 and 3), from the block's header h.
-uint scales_mins(uvec4 h, uint p) {
-    const uint sh = 16u * (p & 1u);
-    const uint a = (h.y >> sh) & 0xFFFFu, b = (h.z >> sh) & 0xFFFFu, c = (h.w >> sh) & 0xFFFFu;
-    if (p < 2) return (a & 0x3F3Fu) | ((b & 0x3F3Fu) << 16);
-    return ((c & 0x0F0Fu) | ((a >> 2) & 0x3030u)) | ((((c >> 4) & 0x0F0Fu) | ((b >> 2) & 0x3030u)) << 16);
-}
-vec4 bytes4(uint w) { return vec4(float(w & 255u), float((w >> 8) & 255u), float((w >> 16) & 255u), float(w >> 24)); }
+#include "q4k_sum.glsl"
 
-// A block's header h and nibble word q (thread th of 8), with one token's x:
-// a holds the low nibbles' 16 values, e the high ones', ta and te their sums.
-float block_dot(uvec4 h, uvec4 q, vec4 a[4], vec4 e[4], float ta, float te, uint th) {
-    float s0 = 0.0, s1 = 0.0;
-    for (uint c = 0; c < 4; c++) {
-        s0 += dot(bytes4(q[c] & 0x0F0F0F0Fu), a[c]);
-        s1 += dot(bytes4((q[c] >> 4) & 0x0F0F0F0Fu), e[c]);
+// The gate's activation times up: silu, or with pc.accumulate != 0 (unused
+// otherwise with GLU) Gemma's gelu, the tanh approximation as swiglu.comp.
+float glu_act(float g) {
+    if (pc.accumulate != 0) {
+        const float y = 0.7978845608 * (g + 0.044715 * g * g * g);
+        return 0.5 * g * (2.0 - 2.0 / (exp(2.0 * y) + 1.0));
     }
-    const vec4 sm = bytes4(scales_mins(h, th >> 1));  // scale 2p, 2p + 1, min 2p, 2p + 1
-    const vec2 dm = unpackHalf2x16(h.x);
-    return dm.x * (sm.x * s0 + sm.y * s1) - dm.y * (sm.z * ta + sm.w * te);
+    return g / (1.0 + exp(-g));
 }
 
 void main() {
@@ -74,20 +68,31 @@ void main() {
             hu[i] = u128[o];
             qu[i] = u128[o + 1 + th];
         }
+        vec4 kg[NRMAX], ku[NRMAX];
+        [[unroll]] for (uint i = 0; i < NR; i++) {
+            kg[i] = block_coefs(hg[i], th);
+            ku[i] = block_coefs(hu[i], th);
+        }
         const uint x0 = (b * 256) / 4 + 16 * (th >> 1) + 4 * (th & 1u);
-        [[unroll]] for (uint t = 0; t < NT; t++) {
-            const uint xt = (pc.x_off + t * pc.x_stride) / 4 + x0;
-            vec4 a[4], e[4];
-            float ta = 0.0, te = 0.0;
-            [[unroll]] for (uint c = 0; c < 4; c++) {
-                a[c] = X4[xt + c];
-                e[c] = X4[xt + 8 + c];
-                ta += a[c].x + a[c].y + a[c].z + a[c].w;
-                te += e[c].x + e[c].y + e[c].z + e[c].w;
-            }
+        // The low nibbles against each token's first 16 x values, then the
+        // high ones against the other 16, as mvt_q4_k.
+        [[unroll]] for (uint hi = 0; hi < 2; hi++) {
+            vec4 wg[NRMAX][4], wu[NRMAX][4];
             [[unroll]] for (uint i = 0; i < NR; i++) {
-                accg[i * NTMAX + t] += block_dot(hg[i], qg[i], a, e, ta, te, th);
-                accu[i * NTMAX + t] += block_dot(hu[i], qu[i], a, e, ta, te, th);
+                nibbles(qg[i], th, hi, wg[i]);
+                nibbles(qu[i], th, hi, wu[i]);
+            }
+            [[unroll]] for (uint t = 0; t < NT; t++) {
+                const uint xt = (pc.x_off + t * pc.x_stride) / 4 + x0 + 8 * hi;
+                vec4 x[4];
+                [[unroll]] for (uint c = 0; c < 4; c++) x[c] = X4[xt + c];
+                const float xs = half_sum(x);
+                [[unroll]] for (uint i = 0; i < NR; i++) {
+                    accg[i * NTMAX + t] = half_acc(accg[i * NTMAX + t], wg[i], x, hi == 0 ? kg[i].x : kg[i].y,
+                                                   hi == 0 ? kg[i].z : kg[i].w, xs);
+                    accu[i * NTMAX + t] = half_acc(accu[i * NTMAX + t], wu[i], x, hi == 0 ? ku[i].x : ku[i].y,
+                                                   hi == 0 ? ku[i].z : ku[i].w, xs);
+                }
             }
         }
     }
@@ -116,6 +121,6 @@ void main() {
         const uint i = tid / NT, t = tid % NT;
         float u = 0.0;
         for (uint sg = 0; sg < gl_NumSubgroups; sg++) u += partial[(i * NTMAX + t) * WG + sg];
-        Y[t * pc.y_stride + r0 + i] = g / (1.0 + exp(-g)) * u;
+        Y[t * pc.y_stride + r0 + i] = glu_act(g) * u;
     }
 }

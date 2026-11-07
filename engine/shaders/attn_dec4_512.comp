@@ -1,0 +1,6 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Generation attention over a long f16 cache, heads of 512 (Gemma), up to 4 rows (see attn_dec.glsl).
+#define HEAD_DIM 512
+#define RM 4
+#include "attn_dec.glsl"

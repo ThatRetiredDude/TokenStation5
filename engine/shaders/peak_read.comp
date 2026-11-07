@@ -1,0 +1,28 @@
+#version 450
+// ts5 peak: streaming read bandwidth. Each workgroup reads its own
+// contiguous chunk of A (16-byte words, every thread a word apart, 4 in
+// flight), as a mat-vec workgroup reads its rows.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Abuf { uvec4 a[]; };
+layout(std430, binding = 1) writeonly buffer Obuf { uint o[]; };
+layout(push_constant) uniform PC { uint n, iters, chunk; } pc;
+void main() {
+    uvec4 s = uvec4(0);
+    if (pc.iters != 0) {
+        // Two streams (iters: where the second half starts, in words): each
+        // workgroup reads half its words from the first half of A and half
+        // from the same place in the second, as the feed-forward's gate+up
+        // kernel reads its rows of the two matrices.
+        const uint h = pc.chunk / 2, b = gl_WorkGroupID.x * h, e = min(pc.iters, b + h);
+        uint i = b + gl_LocalInvocationID.x;
+        for (; i + 256 < e; i += 512) s ^= a[i] ^ a[i + 256] ^ a[pc.iters + i] ^ a[pc.iters + i + 256];
+        for (; i < e; i += 256) s ^= a[i] ^ a[pc.iters + i];
+        if ((s.x ^ s.y ^ s.z ^ s.w) == 0x9e3779b9u) o[gl_WorkGroupID.x] = s.x;
+        return;
+    }
+    const uint b = gl_WorkGroupID.x * pc.chunk, e = min(pc.n, b + pc.chunk);
+    uint i = b + gl_LocalInvocationID.x;
+    for (; i + 768 < e; i += 1024) s ^= a[i] ^ a[i + 256] ^ a[i + 512] ^ a[i + 768];
+    for (; i < e; i += 256) s ^= a[i];
+    if ((s.x ^ s.y ^ s.z ^ s.w) == 0x9e3779b9u) o[gl_WorkGroupID.x] = s.x;
+}

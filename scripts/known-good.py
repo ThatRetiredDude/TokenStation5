@@ -10,7 +10,8 @@ and how its checks went (engine/src/known_good.h says how a model finds its row)
 --result takes model-check.py --out files of one model, one per set of
 settings (--sampling), each over the same checks and runs (--repeat): the one
 with the most passes wins, a tie going to the one named first. It sets row
-KEY's settings, its count of passes, its day and what it's good for, then
+KEY's settings (thinking too, when the files' --sampling set
+"enable_thinking"), its count of passes, its day and what it's good for, then
 writes the table. The row's name, size, family and the name its other files
 go by are set by hand, once, from the checked file.
 """
@@ -24,7 +25,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TSV = os.path.join(ROOT, "known-good.tsv")
 OUT = os.path.join(ROOT, "engine", "src", "known_good_table.h")
 COLUMNS = ["key", "name", "same", "bytes", "family", "good_for", "temperature", "top_p", "top_k",
-           "checked", "passed", "of"]
+           "thinking", "checked", "passed", "of"]
+# thinking: "on" or "off" for a model whose template can skip its thinking
+# (Qwen 3), what a request gets when it doesn't say; "-" for the rest.
+THINKING = {"on": 1, "off": 0, "-": -1}
 # What a request gets when it sets nothing and the model has no row
 # (engine/src/engine.h SampleParams).
 STANDARD = {"temperature": 0.7, "top_p": 0.95, "top_k": 40}
@@ -101,6 +105,9 @@ def result(rows, key, paths):
     row.update(temperature=sampling["temperature"], top_p=sampling["top_p"], top_k=int(sampling["top_k"]),
                passed=passed, of=of, good_for=good_for(runs),
                checked=datetime.date.fromtimestamp(os.path.getmtime(paths[0])).isoformat())
+    think = (out.get("sampling") or {}).get("enable_thinking")
+    if isinstance(think, bool):
+        row.update(thinking="on" if think else "off")
 
 
 def c_str(s):
@@ -122,8 +129,11 @@ def table(rows):
         lines.append("    {%s, %s, %s, %su, %s, %s," % (c_str(r["key"]), c_str(r["name"]), c_str(r["same"]),
                                                      int(r["bytes"]), c_str(r["family"]),
                                                      c_str("" if r["good_for"] == "-" else r["good_for"])))
-        lines.append("     %sf, %sf, %d, %s, %d, %d}," % (float(r["temperature"]), float(r["top_p"]), int(r["top_k"]),
-                                                    c_str(r["checked"]), int(r["passed"]), int(r["of"])))
+        if r["thinking"] not in THINKING:
+            sys.exit("known-good: %s: thinking %s isn't on, off or -" % (r["key"], r["thinking"]))
+        lines.append("     %sf, %sf, %d, %d, %s, %d, %d}," % (float(r["temperature"]), float(r["top_p"]),
+                                                        int(r["top_k"]), THINKING[r["thinking"]],
+                                                        c_str(r["checked"]), int(r["passed"]), int(r["of"])))
     lines += ["};", "", "}  // namespace ts5", ""]
     return "\n".join(lines)
 

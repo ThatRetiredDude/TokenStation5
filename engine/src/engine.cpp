@@ -1,4 +1,6 @@
 #include "engine.h"
+
+#include <mutex>
 #include "log.h"
 
 #include <algorithm>
@@ -58,7 +60,9 @@ void Engine::index_grams(size_t from) {
 
 bool Engine::set_drafter(Model &dm, Backend *db, std::string &err) {
     std::unique_ptr<Backend> b(db);
-    if (!t_.same_vocab(dm.gguf)) { err = "the draft model's vocabulary differs"; return false; }
+    std::string note;
+    if (!t_.drafter_vocab_ok(dm.gguf, err, note)) return false;
+    if (!note.empty()) ts5::log_line("ts5: draft model: %s", note.c_str());
     dm_ = &dm;
     db_ = std::move(b);
     dl_.clear();
@@ -109,12 +113,19 @@ void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
     cu_.push_back(tok);
     if (!fits(cu_.data(), cu_.size())) return;
     int32_t t = -1;
+    draft_ms_ = 0;
+    draft_n_ = 0;
+    catch_ms_ = 0;
+    catch_n_ = 0;
     for (int i = 0; i < k; i++) {
         const int32_t *in = i == 0 ? cu_.data() : &t;
         const int n = i == 0 ? (int)cu_.size() : 1;
         const int p0 = i == 0 ? (int)dcached_ : pos + i;
+        const double t0 = now_ms();
         bool ok = ip ? db_->forward_in_place(in, n, p0, false, err)
                      : db_->forward(in, n, p0, dl_.data(), false, err);
+        if (n == 1) { draft_ms_ += now_ms() - t0; draft_n_++; }
+        else if (n >= 9) { catch_ms_ += now_ms() - t0; catch_n_ += n - 1; }  // a real backlog; a few tokens cost as one
         if (!ok) {
             drafter_ok_ = false;
             ts5::log_line("ts5: draft model failed (%s); drafting by lookup only", err.c_str());
@@ -146,6 +157,35 @@ void Engine::draft_lookup(int32_t tok, int k, std::vector<int32_t> &out) {
     for (size_t i = p; i <= sz && (int)out.size() < k + 1; i++) out.push_back(i < sz ? cached_[i] : tok);
 }
 
+namespace {
+std::mutex work_mu;
+std::function<void(bool)> work_hook;
+int work_depth = 0;
+}  // namespace
+
+void set_work_hook(std::function<void(bool)> hook) {
+    std::lock_guard<std::mutex> lk(work_mu);
+    work_hook = std::move(hook);
+}
+
+WorkScope::WorkScope() {
+    std::function<void(bool)> h;
+    {
+        std::lock_guard<std::mutex> lk(work_mu);
+        if (work_depth++ == 0) h = work_hook;
+    }
+    if (h) h(true);
+}
+
+WorkScope::~WorkScope() {
+    std::function<void(bool)> h;
+    {
+        std::lock_guard<std::mutex> lk(work_mu);
+        if (--work_depth == 0) h = work_hook;
+    }
+    if (h) h(false);
+}
+
 bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
                       const std::function<bool(const std::string &)> &on_text, GenStats &st, std::string &err) {
     if (p.seed) rng_.seed(p.seed);
@@ -154,6 +194,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     st.prompt_tokens = (int)prompt.size();
     if (prompt.empty()) { err = "empty prompt"; return false; }
     if ((int)prompt.size() + 1 > b_->n_ctx()) { err = "prompt longer than the context"; return false; }
+    WorkScope work;
     // Reuse the cached prefix; always evaluate at least the last prompt token.
     size_t keep = 0;
     while (keep < cached_.size() && keep < prompt.size() && cached_[keep] == prompt[keep]) keep++;
@@ -190,9 +231,16 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // accepted draft rides the same weight stream as the token before it.
     int dmax = p.draft;
     if (const char *e = getenv("TS5_DRAFT")) dmax = atoi(e);
-    if (dmax < 0) dmax = 7;    // batch of 8: one pass of the 8-token matmul kernels
-    if (dmax > 255) dmax = 255;  // the batch must fit one forward chunk: the vk
-                                 // in-place logits buffer holds 256 rows
+    // At most 5 drafts a step (a batch of 6). On the PS5 (Qwen3 8B Q4_K_M with
+    // its 0.6B helper) 5 ran 1.2-1.3% faster than 7 on chat and on code, the
+    // text the same: a pass of 8 tokens costs 2.59x one token, of 6 about 2x,
+    // and the cost model still drafts fewer whenever acceptance drops.
+    if (dmax < 0) dmax = 5;
+    // At most 7 (a batch of 8): the verify kernels (mvt_*, and attention's
+    // per-token key splits) reproduce the one-token forward bit for bit up
+    // to 8 tokens; past that a batch goes through the prompt kernels, which
+    // round differently, and the output would no longer be the same.
+    if (dmax > 7) dmax = 7;
     gram3_.clear();
     gram2_.clear();
     if (dmax > 0) {
@@ -228,8 +276,54 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // every 16 steps lets a dried-up stream pick drafting back up.
     bool adapt = true;
     if (const char *e = getenv("TS5_ADAPT")) adapt = atoi(e) != 0;
-    float acc = -1;  // accepted/proposed, EWMA; <0: nothing judged yet
     int step = 0;
+    // The cost model (adapt on): each source's chance that a draft token is
+    // kept given the ones before it were (decayed counts of kept tokens and
+    // of trials: kept ones plus the first rejected), the measured time of a
+    // forward per batch size, and the draft model's time per token. A step
+    // drafts k tokens only where (1 + expected kept) / (time of the batch +
+    // drafting) beats 1 / (time of one token), so a drafter that guesses
+    // too little for its cost (Qwen3 0.6B on prose: 40-54% kept, a net loss
+    // on the PS5) stops by itself, and comes back where text repeats.
+    struct Source { float kept = 0, trials = 0; float p(float prior) const { return trials > 2 ? kept / trials : prior; } };
+    Source by_lookup, by_drafter;
+    double t_fwd[10] = {0}, t_draft = 0;  // ms; 0: not measured yet
+    auto fwd_ms = [&](int nb) {
+        if (t_fwd[nb] > 0) return t_fwd[nb];
+        const double one = t_fwd[1] > 0 ? t_fwd[1] : 10.0;
+        return one * (1.0 + 0.06 * (nb - 1));  // a guess until measured
+    };
+    // The best number of draft tokens, up to k, for a source kept with
+    // chance q and costing per_tok ms a token to draft; 0: one token alone.
+    // fixed: ms paid once for drafting at all this step (a draft model's
+    // catch-up on the tokens it missed while it sat out).
+    auto best_k = [&](int k, float q, double per_tok, double fixed) {
+        double best = 1.0 / fwd_ms(1);
+        int bk = 0;
+        double e = 0, qi = 1;
+        for (int i = 1; i <= k && i <= 8; i++) {
+            qi *= q;
+            e += qi;
+            const double v = (1.0 + e) / (fwd_ms(i + 1) + i * per_tok + fixed);
+            if (v > best * 1.02) { best = v; bk = i; }
+        }
+        return bk;
+    };
+    // A probe of the draft model costs its catch-up on everything since it
+    // last ran plus a wider verify; where it comes back without making
+    // drafting worth it (Qwen3 0.6B on prose: 8% slower with a probe every
+    // 16 steps, and still 5% slower when a kept token reset the wait, since
+    // half its drafts are kept and that is short of paying) the next one
+    // waits twice as long, up to 128 steps.
+    int dprobe_every = 16, dprobe_next = 16;
+    // The drafter's catch-up, per token of backlog (ms; 0: not measured).
+    // It is spread over the 16 steps to the next lookup probe, which is how
+    // long a resumed drafter tends to run: charging it all to the step that
+    // resumes kept the drafter out on code (Qwen3 8B: 65 against 69 tok/s),
+    // and spreading it over a measured run length fed on itself (short runs
+    // made the charge too high to resume, which kept the runs short: 44
+    // drafts in 256 tokens of code with 86% kept, 3% slower than no helper).
+    double t_catch = 0;
     std::vector<int32_t> batch;
     std::vector<float> lgb;  // one row of logits per batch position
     double ts = now_ms();
@@ -241,26 +335,72 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         if (st.gen_tokens >= p.max_tokens) { st.finish = "length"; break; }
         if ((int)cached_.size() + 1 >= b_->n_ctx()) { st.finish = "length"; break; }
         batch.assign(1, tok);
-        int want = dmax;
-        if (adapt && acc >= 0) {
-            want = acc < 0.15f ? 0 : acc < 0.5f ? std::min(dmax, 3) : dmax;
-            if (want == 0 && step % 16 == 0) want = std::min(dmax, 3);
-        }
+        const int want = dmax;  // with adapt, the cost model below picks how many
         step++;
         int room = std::min(want, p.max_tokens - st.gen_tokens);
         room = std::min(room, b_->n_ctx() - (int)cached_.size() - 2);
-        if (room > 0) draft_lookup(tok, room, batch);
+        const bool probe = step % 16 == 0;
+        if (room > 0) {
+            draft_lookup(tok, room, batch);
+            if (adapt && batch.size() > 1 && !probe) {
+                const int k = best_k((int)batch.size() - 1, by_lookup.p(0.5f), 0.0, 0.0);
+                batch.resize(1 + k);
+            }
+        }
+        const bool from_lookup = batch.size() > 1;
         // The cascade: where the free lookup finds nothing, the draft model.
-        const bool by_model = batch.size() == 1 && room > 0 && db_ && drafter_ok_;
-        if (by_model) draft_model(tok, room, batch);
+        bool by_model = batch.size() == 1 && room > 0 && db_ && drafter_ok_;
+        int mk = room;
+        bool dprobe = false;
+        if (by_model && adapt) {
+            // The catch-up: the drafter enters what it missed as one batch,
+            // at the measured cost per token of backlog (a fifth of its
+            // per-token decode cost until measured), spread over the steps
+            // it will then draft for. A helper that keeps few drafts sits
+            // out for long stretches, and this is what made each return a
+            // net loss (Qwen3 0.6B on prose: 9% slower with a third of its
+            // drafts kept, even costed per token).
+            const double per = t_draft > 0 ? t_draft : fwd_ms(1) / 8;
+            const double behind = (double)(cached_.size() - dcached_);
+            const double catch_per = t_catch > 0 ? t_catch : 0.2 * per;
+            mk = best_k(room, by_drafter.p(0.6f), per, catch_per * behind / 16);
+            if (mk == 0 && step >= dprobe_next) {
+                mk = std::min(room, 2);
+                dprobe = true;
+            }
+            by_model = mk > 0;
+        }
+        if (by_model) {
+            const double td0 = now_ms();
+            draft_model(tok, mk, batch);
+            st.draft_ms += now_ms() - td0;
+            if (dprobe) st.probes++;
+            // Its cost per token is that of its one-token forwards: the
+            // catch-up on a backlog is paid once on resuming, not per draft
+            // (counted in, a drafter that paused never looked worth resuming).
+            if (draft_n_ > 0) {
+                const double per = draft_ms_ / draft_n_;
+                t_draft = t_draft > 0 ? 0.8 * t_draft + 0.2 * per : per;
+            }
+            if (catch_n_ > 0) {
+                const double per = catch_ms_ / catch_n_;
+                t_catch = t_catch > 0 ? 0.8 * t_catch + 0.2 * per : per;
+            }
+        }
         const int nb = (int)batch.size();
         if (!in_place && (size_t)nb * nv > lgb.size()) lgb.resize((size_t)nb * nv);
+        const double tf0 = now_ms();
         bool ok = in_place ? b_->forward_in_place(batch.data(), nb, (int)cached_.size(), nb > 1, err)
                            : b_->forward(batch.data(), nb, (int)cached_.size(), lgb.data(), nb > 1, err);
+        if (ok && nb <= 9) {
+            const double dt = now_ms() - tf0;
+            t_fwd[nb] = t_fwd[nb] > 0 ? 0.8 * t_fwd[nb] + 0.2 * dt : dt;
+        }
         if (!ok) { cached_.clear(); dcached_ = 0; return false; }
         written_ = std::max(written_, (int)cached_.size() + nb);
         const float *lg = in_place ? b_->logits_view() : lgb.data();
         st.drafted += nb - 1;
+        st.has_drafter = db_ != nullptr;
         int accepted = 0;
         int32_t next = -1;
         ts = now_ms();
@@ -271,9 +411,21 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         }
         st.sample_ms += now_ms() - ts;
         st.draft_accepted += accepted;
+        if (nb > 1 && !from_lookup) {
+            st.model_drafted += nb - 1;
+            st.model_accepted += accepted;
+        }
         if (nb > 1) {
-            float r = (float)accepted / (nb - 1);
-            acc = acc < 0 ? r : 0.8f * acc + 0.2f * r;
+            Source &src = from_lookup ? by_lookup : by_drafter;
+            src.kept = 0.9f * src.kept + accepted;
+            src.trials = 0.9f * src.trials + accepted + (accepted < nb - 1 ? 1 : 0);
+        }
+        if (dprobe) {
+            // Worth it: with what the probe showed, the cost model would draft.
+            const double per = t_draft > 0 ? t_draft : fwd_ms(1) / 8;
+            const bool worth = best_k(room, by_drafter.p(0.6f), per, 0.0) > 0;
+            dprobe_every = worth ? 16 : std::min(dprobe_every * 2, 128);
+            dprobe_next = step + dprobe_every;
         }
         cached_.insert(cached_.end(), batch.begin(), batch.begin() + accepted + 1);
         if (dmax > 0) index_grams(cached_.size() - (accepted + 1));
@@ -288,7 +440,25 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     }
     if (!pending.empty()) on_text(pending);
     st.gen_ms = now_ms() - t0;
+    // What the cost model saw (TS5_DRAFT_LOG=1): the helper's measured costs
+    // and the verify batches' times, to tell a wrong estimate from a wrong rule.
+    if (db_ && getenv("TS5_DRAFT_LOG"))
+        ts5::log_line("ts5: helper: %.2f ms a draft token, catch-up %.3f ms a token, kept %.0f%% of %.0f trials; "
+                      "target forward 1: %.2f, 2: %.2f, 3: %.2f, 4: %.2f ms; %d probes, %.0f ms in the helper",
+                      t_draft, t_catch, 100 * by_drafter.p(0.6f), by_drafter.trials, t_fwd[1], t_fwd[2], t_fwd[3],
+                      t_fwd[4], st.probes, st.draft_ms);
     return true;
+}
+
+std::string draft_summary(const GenStats &st) {
+    char b[128];
+    const int ld = st.drafted - st.model_drafted, la = st.draft_accepted - st.model_accepted;
+    if (st.has_drafter)
+        snprintf(b, sizeof b, "lookup %d/%d, helper %d/%d accepted (%.0f ms, %d probes)", la, ld, st.model_accepted,
+                 st.model_drafted, st.draft_ms, st.probes);
+    else
+        snprintf(b, sizeof b, "lookup %d/%d accepted", la, ld);
+    return b;
 }
 
 }  // namespace ts5
