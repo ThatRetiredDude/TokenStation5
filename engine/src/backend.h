@@ -76,6 +76,10 @@ int fit_context(uint64_t memory, uint64_t used, uint64_t per_token, int cap);
 // keeping 0.5 GiB spare, at most `cap`, in whole thousands of tokens; 0 if
 // not even 1024 tokens fit. free == UINT64_MAX (unknown): cap.
 int draft_context(uint64_t free, const HParams &dhp, uint64_t draft_weight_bytes, int cap);
+// What an auto-fit main context leaves free for a helper loaded after it:
+// the helper's weights and buffers, 4k of its f16 context, and the 0.5 GiB
+// draft_context keeps spare (else the helper never fits beside the model).
+uint64_t draft_reserve(const HParams &dhp, uint64_t draft_weight_bytes);
 // Whether a context of what fits in f16 (f16_ctx tokens) is the model's whole
 // training context. Then TS5_KV=q8 gets an f16 cache anyway: 8 bits would
 // only cost precision (on Qwen 2.5 Coder 7B, more than the GPU check allows).
@@ -84,7 +88,9 @@ bool f16_reaches(int f16_ctx, int train);
 // On Vulkan device `device`, with a device of its own. n_ctx 0: the context
 // that fits (fit_context), at most the model's training context, in an f16
 // cache where that reaches it (f16_reaches).
-Backend *make_vk_backend(Model &m, const std::string &path, int n_ctx, int device, std::string &err);
+// fit_reserve as below.
+Backend *make_vk_backend(Model &m, const std::string &path, int n_ctx, int device, std::string &err,
+                         uint64_t fit_reserve = 0);
 // On a device the process shares (vk_context.h); ctx must outlive it.
 // fit_reserve: bytes an auto-fit context (n_ctx 0) keeps free beyond its
 // usual 1 GiB, the budget of a second backend loaded after this one.

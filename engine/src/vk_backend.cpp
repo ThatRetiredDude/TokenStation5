@@ -1901,10 +1901,12 @@ Backend *make_vk_backend(VkContext *ctx, Model &m, const std::string &path, int 
     return b;
 }
 
-Backend *make_vk_backend(Model &m, const std::string &path, int n_ctx, int device, std::string &err) {
+Backend *make_vk_backend(Model &m, const std::string &path, int n_ctx, int device, std::string &err,
+                         uint64_t fit_reserve) {
     VkContext *ctx = create_vk_context(device, false, err);
     if (!ctx) return nullptr;
     auto *b = new VkBackend(ctx, true, m, n_ctx);
+    b->set_fit_reserve(fit_reserve);
     if (!b->init(path, err)) {
         delete b;
         return nullptr;
@@ -1969,6 +1971,10 @@ int draft_context(uint64_t free, const HParams &dhp, uint64_t draft_weight_bytes
     if (per == 0 || free < fixed + spare) return 0;
     const uint64_t n = std::min<uint64_t>((free - fixed - spare) / per, cap > 0 ? (uint64_t)cap : 0) / 1024 * 1024;
     return n >= 1024 ? (int)n : 0;
+}
+
+uint64_t draft_reserve(const HParams &dhp, uint64_t draft_weight_bytes) {
+    return vk_fixed_bytes(dhp, draft_weight_bytes) + 4096ull * kv_bytes_per_token(dhp, KvType::F16) + (1ull << 29);
 }
 
 bool f16_reaches(int f16_ctx, int train) { return train >= 1024 && f16_ctx >= train / 1024 * 1024; }

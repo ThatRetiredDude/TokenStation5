@@ -343,16 +343,18 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
             for (const char *k : {"tokenizer.ggml.scores", "tokenizer.ggml.token_type", "tokenizer.ggml.merges"})
                 l->dmodel.gguf.kv.erase(k);
             for (const auto &t : l->dmodel.gguf.tensors) dweights += t.nbytes;
-            // The main context leaves the helper its weights, buffers and
-            // 4k of context, and the 0.5 GiB draft_context keeps spare (else
-            // the helper never fits beside an auto-fit model).
-            dreserve = ts5::vk_fixed_bytes(l->dmodel.hp, dweights) +
-                       (uint64_t)std::min(dctx, 4096) * ts5::kv_bytes_per_token(l->dmodel.hp, ts5::KvType::F16) +
-                       (1ull << 29);
+            dreserve = ts5::draft_reserve(l->dmodel.hp, dweights);
         }
     }
     const double t0 = now_s();
     ts5::Backend *b = ts5::make_vk_backend(ctx_, l->model, path, n_ctx, err, dreserve);
+    if (!b && dreserve > 0 && err.rfind("not enough", 0) == 0) {
+        // The model with room for its helper doesn't fit: the model alone.
+        printf("ts5: %s doesn't fit with room for its helper (%s); loading it alone\n", l->file.c_str(), err.c_str());
+        derr = "no room for it beside " + l->file;
+        dopen = false;
+        b = ts5::make_vk_backend(ctx_, l->model, path, n_ctx, err, 0);
+    }
     if (!b) return nullptr;
     l->n_ctx = b->n_ctx();
     l->kv8 = b->kv_type() == ts5::KvType::Q8;

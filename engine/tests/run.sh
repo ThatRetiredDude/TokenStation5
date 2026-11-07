@@ -488,6 +488,13 @@ echo "== memory: a load that would leave the system less than its reserve is ref
 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "GiB of it kept free for the system"
 echo "== -c auto with TS5_KV=q8: an f16 cache, as the test model's whole context fits in f16"
 TS5_KV=q8 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "KV cache [0-9.]* GiB (f16, "
+echo "== -c auto with a draft model: room kept for it, or the model alone where that doesn't fit"
+TS5_GPU_MEMORY_GIB=4.5 TS5_DRAFT_MODEL="$work/qwen3-Q4_0.gguf" "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 \
+    2>&1 > /dev/null | grep "draft model qwen3-Q4_0.gguf ready"
+TS5_GPU_MEMORY_GIB=3 TS5_DRAFT_MODEL="$work/qwen3-Q4_0.gguf" "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 \
+    2> "$work/alone.err" > /dev/null
+grep "qwen3-F32.gguf doesn't fit with room for the draft model (not enough .*); loading it alone" "$work/alone.err"
+grep "draft model not used: no room for it beside qwen3-F32.gguf" "$work/alone.err"
 echo "== a model's own tuned settings (ts5-tune --models): where nothing set them, for that file only"
 tune=$(mktemp -d)
 mkdir -p "$tune/tokenstation/tune"

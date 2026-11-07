@@ -635,7 +635,11 @@ buffers get blocks of memory of their own size (everything else comes in
 1 GiB blocks), so the 8-bit scales don't take a block out of that 1 GiB. On
 the PS5 that leaves about 5.4 GiB of cache beside a 7B or 8B Q4_K_M model:
 the full 32k of Qwen 2.5 Coder 7B and of Qwen3 8B (as its file gives it), 43k
-of Llama 3.1 8B's 128k (81k with q8) and 68k of Llama 3.2 3B's.
+of Llama 3.1 8B's 128k (81k with q8) and 68k of Llama 3.2 3B's. With a
+helper model (`TS5_DRAFT_MODEL`, or one the title finds beside the model),
+the main context also leaves the helper its weights and buffers, 4k of its
+f16 cache and 0.5 GiB spare (`draft_reserve`, about 1.9 GiB for Qwen3 0.6B),
+in the title and in `ts5 serve`/`run` alike.
 
 ## Correctness
 

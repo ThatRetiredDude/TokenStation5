@@ -187,6 +187,40 @@ int no_model_command(int argc, char **argv) {
     return 0;
 }
 
+// Token text for a check line: newlines as \n, and bytes that are not a
+// whole UTF-8 character as \xNN. A token can hold part of a character, and a
+// window of the last few tokens can start inside one; a script reading the
+// line as UTF-8 then stops on it.
+std::string printable(const std::string &s) {
+    std::string out;
+    for (size_t i = 0; i < s.size();) {
+        const unsigned char c = (unsigned char)s[i];
+        const size_t len = c < 0x80                ? 1
+                           : c >= 0xc2 && c < 0xe0 ? 2
+                           : c >= 0xe0 && c < 0xf0 ? 3
+                           : c >= 0xf0 && c < 0xf5 ? 4
+                                                   : 0;
+        bool ok = len > 0 && i + len <= s.size();
+        for (size_t k = 1; ok && k < len; k++) ok = ((unsigned char)s[i + k] & 0xc0) == 0x80;
+        if (ok && len > 2) {  // no overlong forms, UTF-16 surrogates or code points past U+10FFFF
+            const unsigned char d = (unsigned char)s[i + 1];
+            ok = !(c == 0xe0 && d < 0xa0) && !(c == 0xed && d >= 0xa0) && !(c == 0xf0 && d < 0x90) &&
+                 !(c == 0xf4 && d >= 0x90);
+        }
+        if (!ok) {
+            char b[8];
+            snprintf(b, sizeof b, "\\x%02x", c);
+            out += b;
+            i++;
+        } else {
+            if (c == '\n') out += "\\n";
+            else out.append(s, i, len);
+            i += len;
+        }
+    }
+    return out;
+}
+
 std::string basename_of(const std::string &p) {
     size_t s = p.find_last_of('/');
     return s == std::string::npos ? p : p.substr(s + 1);
@@ -304,6 +338,17 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         a.n_ctx = std::max(1, a.n_predict);
     }
 
+    // The draft model, when TS5_DRAFT_MODEL names one; outlives eng. Opened
+    // first: an auto-fit main context (-c auto) leaves room for it, as the app's does.
+    Model dmodel;
+    const char *dp = getenv("TS5_DRAFT_MODEL");
+    const bool draft = dp && *dp && strcmp(dp, "off") != 0 && (a.cmd == "run" || a.cmd == "serve");
+    std::string derr;
+    bool dopen = draft && dmodel.open(dp, derr);
+    uint64_t dw = 0;
+    if (dopen)
+        for (const auto &t : dmodel.gguf.tensors) dw += t.nbytes;
+
     double t0 = now_ms();
     Backend *be = nullptr;
     if (a.backend == "cpu") {
@@ -312,26 +357,32 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         be = make_cpu_backend(model, a.n_ctx);
     } else {
 #ifdef TS5_VULKAN
-        be = make_vk_backend(model, a.model, a.n_ctx, a.device, err);
+        const uint64_t reserve = dopen && a.n_ctx <= 0 ? draft_reserve(dmodel.hp, dw) : 0;
+        be = make_vk_backend(model, a.model, a.n_ctx, a.device, err, reserve);
+        if (!be && reserve > 0 && err.rfind("not enough", 0) == 0) {
+            // The model with room for its draft model doesn't fit: the model alone.
+            fprintf(stderr, "ts5: %s doesn't fit with room for the draft model (%s); loading it alone\n",
+                    basename_of(a.model).c_str(), err.c_str());
+            derr = "no room for it beside " + basename_of(a.model);
+            dopen = false;
+            be = make_vk_backend(model, a.model, a.n_ctx, a.device, err);
+        }
 #else
         err = "built without Vulkan";
 #endif
         if (!be) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
     }
     fprintf(stderr, "ts5: %s backend ready in %.1f s, context %d\n", be->name(), (now_ms() - t0) / 1000, be->n_ctx());
-    Model dmodel;  // the draft model, when TS5_DRAFT_MODEL names one; outlives eng
     Engine eng(model, be, tok);
-    if (const char *dp = getenv("TS5_DRAFT_MODEL"); dp && *dp && strcmp(dp, "off") != 0 && (a.cmd == "run" || a.cmd == "serve")) {
-        std::string derr;
+    if (draft) {
         Backend *db = nullptr;
-        if (!dmodel.open(dp, derr)) {
+        if (!dopen) {
         } else if (a.backend == "cpu") {
             if (dmodel.load(nullptr, derr)) db = make_cpu_backend(dmodel, be->n_ctx());
         } else {
 #ifdef TS5_VULKAN
             // As much of the main context as fits in what is free now.
-            uint64_t dw = 0, freeb = UINT64_MAX;
-            for (const auto &t : dmodel.gguf.tensors) dw += t.nbytes;
+            uint64_t freeb = UINT64_MAX;
             if (VkContext *c = create_vk_context(a.device, false, derr)) {
                 freeb = c->free_memory();
                 destroy_vk_context(c);
@@ -389,16 +440,11 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         }
         printf("%s\n", check_line(basename_of(a.model), r).c_str());
         // Where the top token differs: the two candidates and how sure each side is.
-        auto show = [&](int32_t t) {
-            std::string s;
-            for (char c : tok.decode(t)) s += c == '\n' ? std::string("\\n") : std::string(1, c);
-            return "\"" + s + "\"";
-        };
+        auto show = [&](int32_t t) { return "\"" + printable(tok.decode(t)) + "\""; };
         for (const TopChange &c : r.changes) {
             std::string before;
             for (int32_t t : c.before) before += tok.decode(t);
-            std::string ctx;
-            for (char ch : before) ctx += ch == '\n' ? std::string("\\n") : std::string(1, ch);
+            const std::string ctx = printable(before);
             printf("  top token differs at %d, after \"...%s\": CPU %s %.3g, %s %.3g; GPU %s %.3g, %s %.3g%s\n", c.pos,
                    ctx.c_str(), show(c.cpu_top).c_str(), c.cpu_p_cpu, show(c.gpu_top).c_str(), c.cpu_p_gpu,
                    show(c.gpu_top).c_str(), c.gpu_p_gpu, show(c.cpu_top).c_str(), c.gpu_p_cpu,
