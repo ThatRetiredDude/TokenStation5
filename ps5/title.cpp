@@ -1353,9 +1353,10 @@ int main(int, char **) {
                 if (ok && a.name.rfind("TS5_PS5_", 0) == 0) hardware.apply(a.name, a.value);
 #endif
                 if (ok && a.name == kTailscale) ts_apply();
-                // The served model loads again with a new context cap or KV
-                // cache (read when a model loads, vk_backend.cpp).
-                if (ok && (a.name == "TS5_CTX_MAX" || a.name == "TS5_KV" || a.name == "TS5_DRAFT_MODEL")) {
+                // The served model loads again with a new context cap, KV
+                // cache or prompt math (read when a model loads, vk_backend.cpp).
+                if (ok && (a.name == "TS5_CTX_MAX" || a.name == "TS5_KV" || a.name == "TS5_MMB_F16" ||
+                           a.name == "TS5_DRAFT_MODEL")) {
                     const app::Status st = runner.status();
                     if (!st.serving_path.empty()) {
                         app::Job j;

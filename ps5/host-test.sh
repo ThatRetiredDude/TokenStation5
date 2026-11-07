@@ -412,7 +412,7 @@ fi
 echo "== settings: L1 again goes to Settings; right changes a setting in ts5.env, square puts back its default"
 press l1
 shot settings
-press down down down down down down down down down down down down down down down  # Frames while a reply comes in, under Tuning
+press down down down down down down down down down down down down down down down down  # Frames while a reply comes in, under Tuning
 press right
 wait_log "^ts5-title: settings: TS5_CHAT_FPS=15$"
 grep -qx "TS5_CHAT_FPS=15" "$home/ts5.env" || fail "ts5.env: $(cat "$home/ts5.env" 2> /dev/null)"
@@ -421,7 +421,7 @@ press square
 wait_log "^ts5-title: settings: TS5_CHAT_FPS cleared$"
 ! grep -q "TS5_CHAT_FPS" "$home/ts5.env" || fail "square left it in ts5.env: $(cat "$home/ts5.env")"
 echo "== settings: cross on the Tavily key opens the keyboard; the key goes in ts5.env, never the log"
-press up up up up up up up up up up  # Web search key, under Chat
+press up up up up up up up up up up up  # Web search key, under Chat
 press cross
 wait_log "^ts5-title: keyboard: open 0x00000000, user 0x00000001, a key$"
 printf 'tvly-typed-on-the-tv' > "$home/typed"
