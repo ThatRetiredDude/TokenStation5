@@ -297,26 +297,14 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // chance q and costing per_tok ms a token to draft; 0: one token alone.
     // fixed: ms paid once for drafting at all this step (a draft model's
     // catch-up on the tokens it missed while it sat out).
-    // A step's cost also has the sampling of every logits row it reads
-    // (t_row: ms a row; a row of Gemma's 262,144 logits is not free), one
-    // more than the drafts kept. And the one-token forward it is weighed
-    // against is measured on the first step, which drafts nothing: where
-    // every later step drafted, it stayed the 10 ms guess, so a drafter
-    // looked better than it was the faster the model (Gemma 3 1B beside
-    // Gemma 3 4B, a 9 ms forward: drafting predicted 8% ahead, ran 1-2%
-    // behind lookup alone on the PS5, 2026-11-07). TS5_DRAFT_COST=0: as
-    // before (no sampling cost, no first-step measurement).
-    bool cost_rows = true;
-    if (const char *e = getenv("TS5_DRAFT_COST")) cost_rows = atoi(e) != 0;
-    double t_row = 0;
     auto best_k = [&](int k, float q, double per_tok, double fixed) {
-        double best = 1.0 / (fwd_ms(1) + t_row);
+        double best = 1.0 / fwd_ms(1);
         int bk = 0;
         double e = 0, qi = 1;
         for (int i = 1; i <= k && i <= 8; i++) {
             qi *= q;
             e += qi;
-            const double v = (1.0 + e) / (fwd_ms(i + 1) + i * per_tok + fixed + (1.0 + e) * t_row);
+            const double v = (1.0 + e) / (fwd_ms(i + 1) + i * per_tok + fixed);
             if (v > best * 1.02) { best = v; bk = i; }
         }
         return bk;
@@ -351,7 +339,6 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         step++;
         int room = std::min(want, p.max_tokens - st.gen_tokens);
         room = std::min(room, b_->n_ctx() - (int)cached_.size() - 2);
-        if (adapt && cost_rows && t_fwd[1] <= 0) room = 0;  // measure one token alone first
         const bool probe = step % 16 == 0;
         if (room > 0) {
             draft_lookup(tok, room, batch);
@@ -422,14 +409,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
             if (i + 1 < nb && next == batch[i + 1] && !t_.is_eog(next)) { accepted++; continue; }
             break;
         }
-        {
-            const double dt = now_ms() - ts;
-            st.sample_ms += dt;
-            if (cost_rows) {
-                const double per = dt / (accepted + 1);
-                t_row = t_row > 0 ? 0.8 * t_row + 0.2 * per : per;
-            }
-        }
+        st.sample_ms += now_ms() - ts;
         st.draft_accepted += accepted;
         if (nb > 1 && !from_lookup) {
             st.model_drafted += nb - 1;

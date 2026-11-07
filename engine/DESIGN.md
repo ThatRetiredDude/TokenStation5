@@ -569,15 +569,16 @@ before it were (kept tokens over kept plus first rejections), every batch
 size's forward time and the draft model's time per token are measured as
 they run, and a step drafts the k that maximises (1 + expected kept) / (time
 of a k + 1 batch + k drafted tokens), only when that beats one token alone
-by 2%. A step's cost includes sampling each logits row it reads (measured
-per row; one more row than the drafts kept), and the one-token forward is
-measured on the first step, which drafts nothing (`TS5_DRAFT_COST=0`: neither):
-where every step drafts it was never measured otherwise, and its 10 ms
-guess made a drafter beside a fast model look better than it was (Gemma 3
-1B beside Gemma 3 4B, a 9 ms forward, predicted 8% ahead, ran 1-2% behind
-lookup alone; a higher bar for drafting at all, 1.06 to 1.15, didn't
-rescue it and cost Qwen3 8B 1.8% at 1.10). Every
-16th step proposes anyway, so estimates recover. Measured on the
+by 2%. Every 16th step proposes anyway, so estimates recover. Where a
+helper drafts on every step, the one-token forward is never measured and
+stays a 10 ms guess; measuring it on a first step that drafts nothing, and
+costing the sampling of each logits row a step reads, made the model draft
+less and run slower on the PS5 (2026-11-07, 13a6d4d, reverted: Llama 3.2
+3B with its 1B helper -3.2% / -3.1% chat / code, Gemma 3 4B -4.3% / -1.9%,
+Gemma 3 12B -2.0% chat, Qwen3 8B -1%): the model is pessimistic about
+drafting, and the guess happened to offset it. A higher bar for drafting
+at all (1.06 to 1.15 instead of 1.02) gained nothing either. Gemma 3 1B
+beside Gemma 3 4B stays 1-2% behind lookup alone under every variant. Measured on the
 PS5 under Linux before it (Qwen3 8B, 0.6B drafter): prose kept 40-54% of the
 0.6B's drafts and ran 18-27% slower than no drafting, code renames kept 79%
 and ran 38% faster; the cost model keeps the second and drops the first.
