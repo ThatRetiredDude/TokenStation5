@@ -245,7 +245,9 @@ that change the arithmetic or leave the Vulkan spec are never tried.
 
 goes through each model of 1.5 GiB or more in the models folder (or the
 ones named after `--models`). For each, `ts5 check -n 128` compares it with
-the CPU; if 16-bit prompt math fails there and 32-bit passes, the model
+the CPU, and where that fails, a check on 256 tokens of English text decides
+(the built-in tokens are arbitrary ones, where a single near-tie can land
+just over the bar); if 16-bit prompt math fails and 32-bit passes, the model
 keeps 32-bit. Then it writes four answers (two of prose, two of code) at a
 4,096-token context, where a 14B has room for a helper, alone and with each
 possible helper beside it (half its size or less, one the engine accepts;

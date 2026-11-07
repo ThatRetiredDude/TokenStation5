@@ -19,8 +19,9 @@ Close TokenStation5 first: the bench needs the GPU's memory. It takes about
 
 --models tunes what differs from model to model, for each model named or
 each one of 1.5 GiB and more in the models folder: it checks the model
-against the CPU (`ts5 check -n 128`) and keeps 32-bit prompt math if 16-bit
-fails where 32-bit passes; then it writes four prompts' answers, at a
+against the CPU (`ts5 check -n 128`, and on 256 tokens of English text where
+that fails) and keeps 32-bit prompt math if 16-bit fails where 32-bit
+passes; then it writes four prompts' answers, at a
 4,096-token context (where a 14B has room for a helper), alone and with each
 helper model beside it (half its size or less, and one the engine accepts)
 at 3 and at 5 drafts a step, keeps the fastest whose answers are the very
@@ -78,6 +79,32 @@ PROMPTS = [
     "reverses it and prints it.",
 ]
 DRAFTS = ["3", "5"]  # drafts a step to try; the engine's default is 5
+# --models: plain English for a check on real text, where the check on its
+# built-in tokens fails. Those are arbitrary tokens, where one near-tie can
+# land a single position just over the bar (Gemma 3 12B: 0.52% at one of 128
+# in 32-bit too, while 512 tokens of English pass at 0.05%).
+CHECK_TEXT = (
+    "Bread is one of the oldest foods people make, and the way it is made has changed less than you might think. "
+    "Flour, water, salt and something to make it rise are still the whole of it. The flour is ground from wheat, "
+    "or from rye, barley or oats, and the finer it is ground the softer the loaf. Water wakes the proteins in the "
+    "flour, and as the dough is kneaded they stretch into long strands that hold the gas the yeast gives off. "
+    "Salt slows the yeast a little and gives the crust its taste. Left in a warm place for an hour or two, the "
+    "dough grows to about twice its size. The baker then presses the air out, shapes the loaf, and lets it rise "
+    "once more before it goes into a hot oven. In the first minutes the gas swells quickly and the loaf springs "
+    "up; then the crust sets, browns and cracks a little along the cuts made on top. A loaf is done when it "
+    "sounds hollow when tapped underneath. Before yeast was sold in shops, bakers kept a piece of each day's "
+    "dough to start the next, and some families still keep a starter that is many years old. A starter is a "
+    "mix of flour and water in which wild yeasts and bacteria live together; fed every day, it stays lively, "
+    "and the bread it makes is slightly sour and keeps fresh for longer. Different places made different "
+    "breads from what grew there: flat breads baked on hot stones, dark rye loaves in the cold north, white "
+    "rolls in the cities once mills could grind fine flour cheaply. Today a small bakery and a large factory "
+    "follow the same steps, only at different speeds. The factory mixes the dough in minutes with machines and "
+    "bakes thousands of loaves an hour in long ovens, while the small baker may let a dough rest overnight in "
+    "a cool room so that its taste can grow. Many people now bake at home again, often on the weekend, and "
+    "find that the hardest part is waiting. A good loaf needs time more than skill: time for the flour to "
+    "soak, for the yeast to work, and for the bread to cool before it is cut, because the inside goes on "
+    "cooking for a while after it leaves the oven. Cut too soon, it is gummy; left an hour, it is just right."
+)
 # The answers' context: the app's "as much as fits" leaves a helper its room
 # (its weights and 4k of context) and a 14B at ts5's own 8192 doesn't, so
 # the helper is judged where it fits, as the app runs it.
@@ -162,7 +189,7 @@ def score(r, kind):
     return (r[0] * r[1]) ** 0.5
 
 
-def check(model, env, n=None):
+def check(model, env, n=None, text=None):
     full = dict(os.environ)
     full["TS5_TUNE_FILE"] = ""
     for k, v in env.items():
@@ -170,7 +197,7 @@ def check(model, env, n=None):
             full.pop(k, None)
         else:
             full[k] = v
-    cmd = [ts5(), "check", "-m", model] + (["-n", str(n)] if n else [])
+    cmd = [ts5(), "check", "-m", model] + (["-n", str(n)] if n else []) + (["-p", text] if text else [])
     # The lines on differing tokens print a token's own bytes, which can be
     # part of a character.
     out = subprocess.run(cmd, env=full, capture_output=True, text=True, errors="replace", timeout=3600)
@@ -239,12 +266,20 @@ def tune_model(model, n):
     chosen, notes = {}, []
     # 128 tokens: a full block, so every matrix takes the prompt kernel
     # whose math is 16-bit on Qwen, DeepSeek and Llama models.
-    ok, line = check(model, {}, 128)
-    print("  check: " + line)
-    if not ok:
-        ok32, line32 = check(model, {"TS5_MMB_F16": "0"}, 128)
-        print("  check with 32-bit prompt math: " + line32)
-        if not ok32:
+    # Where that fails, 256 tokens of English decide (see CHECK_TEXT).
+    def passes(env, what):
+        ok, line = check(model, env, 128)
+        print("  check%s: %s" % (what, line))
+        if ok:
+            return True
+        ok, line = check(model, env, 256, CHECK_TEXT)
+        print("  check%s on English text: %s" % (what, line))
+        if ok:
+            notes.append("the check on its built-in tokens was over the bar%s and on English text it passed" % what)
+        return ok
+
+    if not passes({}, ""):
+        if not passes({"TS5_MMB_F16": "0"}, " with 32-bit prompt math"):
             print("  %s fails the check either way, so it isn't tuned. Please report it, with the lines above." % name)
             return False
         chosen["TS5_MMB_F16"] = "0"
