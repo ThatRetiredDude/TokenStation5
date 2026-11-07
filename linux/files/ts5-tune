@@ -20,14 +20,16 @@ Close TokenStation5 first: the bench needs the GPU's memory. It takes about
 --models tunes what differs from model to model, for each model named or
 each one of 1.5 GiB and more in the models folder: it checks the model
 against the CPU (`ts5 check -n 128`) and keeps 32-bit prompt math if 16-bit
-fails where 32-bit passes; then it writes four prompts' answers with each
+fails where 32-bit passes; then it writes four prompts' answers, at a
+4,096-token context (where a 14B has room for a helper), alone and with each
 helper model beside it (half its size or less, and one the engine accepts)
 at 3 and at 5 drafts a step, keeps the fastest whose answers are the very
-text the model writes alone, and turns the helper off when none is faster.
-The results go to ~/.config/tokenstation/tune/<model file>.env, which the
-app and ts5 read when they load that file (a setting chosen in the app or
-the shell still wins); delete it, or run --models --reset, to go back. It
-takes about 5 minutes for an 8B model and 15 for a 14B, with a helper.
+text the model writes alone, and turns the helper off when none it could
+measure is faster. The results go to ~/.config/tokenstation/tune/<model
+file>.env, which the app and ts5 read when they load that file (a setting
+chosen in the app or the shell still wins); delete it, or run --models
+--reset, to go back. It takes about 10 minutes for an 8B model and 15-20 for
+a 14B (on the PS5).
 """
 import argparse
 import glob
@@ -76,6 +78,10 @@ PROMPTS = [
     "reverses it and prints it.",
 ]
 DRAFTS = ["3", "5"]  # drafts a step to try; the engine's default is 5
+# The answers' context: the app's "as much as fits" leaves a helper its room
+# (its weights and 4k of context) and a 14B at ts5's own 8192 doesn't, so
+# the helper is judged where it fits, as the app runs it.
+CONTEXT = 4096
 MAIN_MIN = 1536 << 20  # --models without names: files this big or bigger
 HELPER_MIN = int(os.environ.get("TS5_TUNE_HELPER_MIN", 64 << 20))  # as the app's pick (the tests' models are smaller)
 
@@ -118,7 +124,7 @@ def bench(model, env, pp, tg):
             full[k] = v
     try:
         out = subprocess.run([ts5(), "bench", "-m", model, "--pp", str(pp), "--tg", str(tg)],
-                             env=full, capture_output=True, text=True, timeout=900)
+                             env=full, capture_output=True, text=True, errors="replace", timeout=900)
     except subprocess.TimeoutExpired:
         return None
     m = re.search(r"\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|\s*$", out.stdout, re.M)
@@ -165,7 +171,9 @@ def check(model, env, n=None):
         else:
             full[k] = v
     cmd = [ts5(), "check", "-m", model] + (["-n", str(n)] if n else [])
-    out = subprocess.run(cmd, env=full, capture_output=True, text=True, timeout=3600)
+    # The lines on differing tokens print a token's own bytes, which can be
+    # part of a character.
+    out = subprocess.run(cmd, env=full, capture_output=True, text=True, errors="replace", timeout=3600)
     lines = out.stdout.strip().splitlines()
     # The check's own line, then any "top token differs at" lines.
     line = next((l for l in lines if not l.startswith("  ")), lines[-1] if lines else "")
@@ -188,8 +196,8 @@ def write(model, prompt, env, n):
             full[k] = v
     try:
         # Bytes: an answer cut at the token limit can end inside a character.
-        out = subprocess.run([ts5(), "run", "-m", model, "--chat", "-p", prompt, "-n", str(n), "--temp", "0"],
-                             env=full, capture_output=True, timeout=1800)
+        out = subprocess.run([ts5(), "run", "-m", model, "-c", str(CONTEXT), "--chat", "-p", prompt, "-n", str(n),
+                              "--temp", "0"], env=full, capture_output=True, timeout=1800)
     except subprocess.TimeoutExpired:
         return None
     err = out.stderr.decode(errors="replace")
@@ -252,6 +260,7 @@ def tune_model(model, n):
     print("  alone: %s tok/s" % ", ".join("%.1f" % r[1] for r in alone))
     best, best_env = base, None
     cands = helpers(model)
+    tried, refusals = 0, []
     for h in cands:
         refused = None
         for d in DRAFTS:
@@ -267,6 +276,7 @@ def tune_model(model, n):
                 runs.append(r)
             if refused:
                 print("  %s: not used: %s" % (os.path.basename(h), refused))
+                refusals.append("%s: %s" % (os.path.basename(h), refused))
                 break
             if len(runs) < len(PROMPTS):
                 print("  %s, %s drafts: a run failed, skipped" % (os.path.basename(h), d))
@@ -277,6 +287,7 @@ def tune_model(model, n):
                 print("  %s, %s drafts: the answers differ from the model's own, so it isn't used. "
                       "Please report it." % (os.path.basename(h), d))
                 continue
+            tried += 1
             sc = mean([r[1] for r in runs])
             print("  %s, %s drafts: %s tok/s (%+.0f%%)" % (os.path.basename(h), d,
                                                          ", ".join("%.1f" % r[1] for r in runs), (sc / base - 1) * 100))
@@ -287,9 +298,13 @@ def tune_model(model, n):
         chosen["TS5_DRAFT"] = best_env[1]
         notes.append("helper %s at %s drafts a step: %.1f tok/s against %.1f alone (%+.0f%%), the same text"
                      % (os.path.basename(best_env[0]), best_env[1], best, base, (best / base - 1) * 100))
-    elif cands:
+    elif tried:
         chosen["TS5_DRAFT_MODEL"] = "off"
         notes.append("no helper was faster than the model alone (%.1f tok/s)" % base)
+    elif refusals:
+        # None measured: the app's own pick stays (it finds none either, or
+        # a memory refusal here may not hold in the app's context).
+        notes.append("no helper could be measured (%s); %.1f tok/s alone" % ("; ".join(refusals), base))
     else:
         notes.append("no helper beside it (%.1f tok/s alone)" % base)
     os.makedirs(model_tune_dir(), exist_ok=True)
@@ -327,7 +342,15 @@ def models_main(names, reset, n):
         return
     print("ts5-tune: %d model(s): %s" % (len(models), ", ".join(os.path.basename(m) for m in models)))
     print("ts5-tune: keep TokenStation5 closed until this finishes.")
-    failed = [m for m in models if not tune_model(m, n)]
+    failed = []
+    for m in models:
+        try:
+            ok = tune_model(m, n)
+        except Exception as e:  # one model's failure doesn't stop the others
+            print("  ts5-tune: %s: %s: %s" % (os.path.basename(m), type(e).__name__, e))
+            ok = False
+        if not ok:
+            failed.append(m)
     if failed:
         sys.exit("\nts5-tune: not tuned: %s" % ", ".join(os.path.basename(m) for m in failed))
     print("\nts5-tune: done. TokenStation5 uses these from the next time it loads each model.")
