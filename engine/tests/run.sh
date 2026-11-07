@@ -466,6 +466,14 @@ txt=$(head -c 3000 "$engine/DESIGN.md")
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "$txt" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
 ls "$work"/qwen3-Q4_0.gguf.t*.ts5ref > /dev/null
 ! "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "hi" 2>&1 | grep -q PASS
+# Saved answers of an older version are kept beside the new file, not written over.
+python3 -c 'import struct, sys; f = open(sys.argv[1], "r+b"); f.seek(8); f.write(struct.pack("<I", 1))' \
+    "$work/qwen3-Q4_0.gguf.ts5ref"
+"$ts5" check -m "$work/qwen3-Q4_0.gguf" 2>&1 > /dev/null |
+    grep "kept the earlier saved answers (another version or model file) as $work/qwen3-Q4_0.gguf.ts5ref.v1-[0-9]*$"
+ls "$work"/qwen3-Q4_0.gguf.ts5ref.v1-* > /dev/null
+"$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
+rm -f "$work"/qwen3-Q4_0.gguf.ts5ref.v1-*
 # A check whose logits and CPU reference don't fit in the RAM left beside the
 # system's reserve is refused before it takes any, with how many tokens would.
 { "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 100000 2>&1 > /dev/null || true; } |

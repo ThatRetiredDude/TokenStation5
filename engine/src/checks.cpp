@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <memory>
 #include <vector>
 
@@ -160,18 +161,29 @@ bool load_ref(const std::string &model, int n, int n_vocab, KvType kv, const std
     return ok;
 }
 
-// Keeps the saved file if it already has more positions for the same cache type.
+// Keeps the saved file if it already has more positions of the same answers.
+// One with answers the new file won't hold (an older version's math, or
+// another model file under this name) is kept beside it, as
+// NAME.ts5ref.v<its version>-<time>, not written over: saved answers are
+// test results, and an older version's can't be made again.
 void save_ref(const std::string &model, int n, int n_vocab, KvType kv, const std::string &tag,
               const std::vector<float> &ref) {
     const std::string path = ref_path(model, kv, tag), part = path + ".part";
-    if (FILE *f = fopen(path.c_str(), "rb")) {
-        RefHeader h{};
-        const bool more =
-            fread(&h, sizeof h, 1, f) == 1 && h.version == kRefVersion && h.kv == kv_code(kv) && (int)h.n > n;
-        fclose(f);
-        if (more) return;
-    }
     const RefHeader h = ref_header(model, n, n_vocab, kv);
+    if (FILE *f = fopen(path.c_str(), "rb")) {
+        RefHeader old{};
+        const bool read = fread(&old, sizeof old, 1, f) == 1;
+        fclose(f);
+        const bool same = read && memcmp(old.magic, h.magic, 8) == 0 && old.version == h.version && old.kv == h.kv &&
+                          old.n_vocab == h.n_vocab && old.file_size == h.file_size && old.file_hash == h.file_hash;
+        if (same && old.n > h.n) return;
+        if (!same) {
+            const std::string keep = path + ".v" + std::to_string(read ? old.version : 0) + "-" +
+                                     std::to_string((long long)time(nullptr));
+            if (rename(path.c_str(), keep.c_str()) == 0)
+                ts5::log_line("ts5: kept the earlier saved answers (another version or model file) as %s", keep.c_str());
+        }
+    }
     FILE *f = fopen(part.c_str(), "wb");
     bool ok = f && fwrite(&h, sizeof h, 1, f) == 1 && fwrite(ref.data(), 4, ref.size(), f) == ref.size();
     if (f) ok = fclose(f) == 0 && ok;
