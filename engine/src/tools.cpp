@@ -495,35 +495,49 @@ std::string render_gemma4(const std::vector<Message> &all, const std::vector<Jso
         for (auto &tool : tools) s += g4_declaration(tool);
         s += "<turn|>\n";
     }
+    // An assistant message writes its calls, then the results of the tool
+    // messages that follow it, then its own text; with calls, its turn stays
+    // open for the next assistant message, and for the model where nothing
+    // follows (its text then closes it, as the template has it).
     std::map<std::string, std::string> names;  // call id -> function
-    bool open = false;  // a model turn its calls left open: results and the model's next words go in it
+    bool open = false;                         // the model's turn is open
+    bool ends_open = false;                    // the conversation ends inside it
     for (size_t i = 0; i < msgs.size(); i++) {
         const Message &m = msgs[i];
-        if (m.role == "tool") {
-            auto it = names.find(m.call_id);
-            const std::string name = it != names.end() ? it->second : !m.name.empty() ? m.name : "unknown";
+        if (m.role == "assistant" || m.role == "tool") {
             if (!open) s += "<|turn>model\n", open = true;
-            s += g4_response(name, m.content);
-            continue;
-        }
-        if (m.role == "assistant") {
-            if (!open) s += "<|turn>model\n";
-            s += strip(m.content);
             for (auto &c : m.calls) {
                 names[c.id] = c.name;
                 s += g4_call(c);
             }
-            open = !m.calls.empty();
-            if (!open) s += "<turn|>\n";
+            size_t k = i + 1;
+            const bool results = k < msgs.size() && msgs[k].role == "tool";
+            for (; k < msgs.size() && msgs[k].role == "tool"; k++) {
+                auto it = names.find(msgs[k].call_id);
+                s += g4_response(it != names.end() ? it->second : !msgs[k].name.empty() ? msgs[k].name : "unknown",
+                                 msgs[k].content);
+            }
+            if (m.role == "tool") s += g4_response(!m.name.empty() ? m.name : "unknown", m.content);  // a stray result
+            const std::string text = strip(m.content);
+            if (m.role == "assistant") s += text;
+            i = k - 1;
+            const bool calls = !m.calls.empty() || m.role == "tool";
+            if (calls && k < msgs.size() && msgs[k].role == "assistant") continue;  // the next one goes on in this turn
+            if (calls && k == msgs.size() && (m.role == "tool" || text.empty())) {
+                ends_open = true;
+                if (!results) s += "<|tool_response>";  // calls with no results yet: where the model stopped
+                continue;
+            }
+            s += "<turn|>\n";
+            open = false;
+            if (calls && k == msgs.size()) ends_open = true;  // closed by its text, with no new turn after it
             continue;
         }
         if (open) s += "<turn|>\n", open = false;
         s += "<|turn>user\n" + strip(m.content) + "<turn|>\n";
     }
-    // Calls with no results yet end where the model stops; results the model
-    // goes on from; otherwise its turn opens, with an empty thought.
-    if (open && !msgs.empty() && msgs.back().role == "assistant") return s + "<|tool_response>";
-    return open ? s : s + "<|turn>model\n<|channel>thought\n<channel|>";
+    // Results the model goes on from; otherwise its turn opens, with an empty thought.
+    return ends_open ? s : s + "<|turn>model\n<|channel>thought\n<channel|>";
 }
 
 // Gemma 4's argument syntax as JSON: bare keys, strings between <|"|> marks
