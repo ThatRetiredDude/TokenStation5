@@ -73,15 +73,17 @@ std::string base(const std::string &p) {
 }
 
 #ifdef TS5_LINUX
-// The helper (draft) model for `path` when TS5_DRAFT_MODEL is unset: a
-// .gguf beside it, at most a quarter of its size, whose token list the
-// engine accepts as a drafter's: the smallest with the very same list
-// (Qwen3 0.6B for Qwen3 8B or 14B, Llama 3.2 1B for Llama 3.1 8B, Qwen 2.5
-// Coder 0.5B for Coder 7B), else the largest whose control tokens differ
-// (the newer generation drafts better: on the PS5, DeepSeek R1 Distill Qwen
-// 14B gets +8% on code from Qwen3 0.6B and +1% from Coder 0.5B; Gemma 3 1B
-// for Gemma 4 12B). "" if there is none. TS5_DRAFT_MODEL=off turns it off;
-// a path picks that file.
+// The helper (draft) model for `path` when TS5_DRAFT_MODEL is unset: the
+// smallest .gguf beside it, at most a quarter of its size, whose token list
+// the engine accepts as a drafter's, control tokens named differently or
+// not. A helper reads all its weights for every draft, so the smallest
+// drafts cheapest, and the measured guesses were as good: on the PS5 Qwen3
+// 0.6B Q4_K_M beats its Q8_0 by 5-7% on Qwen3 8B, and for Coder 7B (whose
+// control tokens differ from it) beats Qwen 2.5 Coder 0.5B Q8_0 by 12% on
+// chat and 11% on code (2.1 ms a draft token against 3.7, about as many
+// kept); DeepSeek R1 Distill Qwen 14B got +8% on code from Qwen3 0.6B and
+// +1% from Coder 0.5B. Gemma 3 1B for Gemma 4 12B. "" if there is none.
+// TS5_DRAFT_MODEL=off turns it off; a path picks that file.
 std::string auto_drafter(const std::string &path) {
     struct stat st;
     if (stat(path.c_str(), &st) != 0) return "";
@@ -111,18 +113,14 @@ std::string auto_drafter(const std::string &path) {
     try {
         if (!m.open(path, err) || !t.load(m.gguf, err)) return "";
     } catch (const std::exception &) { return ""; }
-    std::string renamed;  // the largest that passes with control tokens renamed
     for (auto &c : cands) {
         ts5::Model d;
         try {
             if (!d.open(c.second, err)) continue;
         } catch (const std::exception &) { continue; }
-        note.clear();
-        if (!t.drafter_vocab_ok(d.gguf, err, note)) continue;
-        if (note.empty()) return c.second;
-        renamed = c.second;
+        if (t.drafter_vocab_ok(d.gguf, err, note)) return c.second;
     }
-    return renamed;
+    return "";
 }
 #endif
 
