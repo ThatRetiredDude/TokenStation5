@@ -127,7 +127,7 @@ def quantize_q6_k(x):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--arch", default="qwen2", choices=["llama", "qwen2", "qwen3", "gemma4"])
+    ap.add_argument("--arch", default="qwen2", choices=["llama", "qwen2", "qwen3", "gemma4", "qwen35"])
     ap.add_argument("--vocab", required=True)
     ap.add_argument("--layers", type=int, default=2)
     ap.add_argument("--embd", type=int, default=256)
@@ -144,6 +144,10 @@ def main():
                          "1, the rest 1e30) in place of random rope_freqs")
     ap.add_argument("--qk-gain", type=float, default=1.0,
                     help="gemma4: scale on the q and k norms' weights, for sharp attention as trained models have")
+    ap.add_argument("--ssm-k-heads", type=int, default=2, help="qwen35: the linear-attention layers' key heads")
+    ap.add_argument("--ssm-v-heads", type=int, default=4, help="qwen35: their value heads (a multiple of the keys')")
+    ap.add_argument("--decay", type=float, default=1.0,
+                    help="qwen35: scale on the linear layers' decay (A), smaller for a longer memory")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--pad-vocab", type=int, default=0,
                     help="extra embedding and output rows past the token list, as released models pad")
@@ -174,16 +178,40 @@ def main():
     w.add_name(f"ts5-test-{a.arch}")
     w.add_context_length(4096)
     w.add_embedding_length(a.embd)
-    w.add_block_count(a.layers)
+    # Qwen3.5's files count its multi-token-prediction layer, whose weights
+    # they leave out.
+    w.add_block_count(a.layers + (1 if a.arch == "qwen35" else 0))
     w.add_feed_forward_length(a.ff)
     w.add_head_count(a.heads)
     if a.arch != "gemma4":
         w.add_head_count_kv(a.kv_heads)
     w.add_layer_norm_rms_eps(1e-6)
     w.add_rope_freq_base(1000000.0 if a.arch != "llama" else 10000.0)
-    if a.arch == "qwen3":
+    if a.arch in ("qwen3", "qwen35"):
         w.add_key_length(hd)
         w.add_value_length(hd)
+    # Qwen3.5 as the 9B's file has it: every 4th layer full attention (its
+    # query projection gives each head's query and an output gate, a quarter
+    # of each head rotates, M-RoPE sections), the rest Gated DeltaNet linear
+    # attention with fewer key heads than value heads and heads as wide as the
+    # full layers'.
+    q35 = a.arch == "qwen35"
+    full = [(i + 1) % 4 == 0 for i in range(a.layers)]
+    nk, nv = a.ssm_k_heads, a.ssm_v_heads
+    conv_dim = 2 * nk * hd + nv * hd
+    if q35:
+        w.add_rope_dimension_count(hd // 4)
+        pairs = hd // 8  # the rotated quarter's pairs, split over M-RoPE's axes as the 9B's [11, 11, 10]
+        s = -(-pairs // 3)
+        w.add_array("qwen35.rope.dimension_sections", [s, s, pairs - 2 * s, 0])
+        w.add_key_value("qwen35.full_attention_interval", 4, GGUFValueType.UINT32)
+        w.add_key_value("qwen35.nextn_predict_layers", 1, GGUFValueType.UINT32)
+        w.add_array("qwen35.attention.recurrent_layers", [not f for f in full] + [False])
+        w.add_key_value("qwen35.ssm.conv_kernel", 4, GGUFValueType.UINT32)
+        w.add_key_value("qwen35.ssm.inner_size", nv * hd, GGUFValueType.UINT32)
+        w.add_key_value("qwen35.ssm.state_size", hd, GGUFValueType.UINT32)
+        w.add_key_value("qwen35.ssm.time_step_rank", nv, GGUFValueType.UINT32)
+        w.add_key_value("qwen35.ssm.group_count", nk, GGUFValueType.UINT32)
     # Gemma 4 as the 12B's file has it: every 3rd layer here (6th there) is a
     # full-attention layer with wider heads on one K/V head and no V
     # projection; the rest slide; V is normalized; each layer's output is
@@ -240,6 +268,9 @@ def main():
     def norm(name, n):
         w.add_tensor(name, (1.0 + 0.1 * rng.standard_normal(n)).astype(np.float32))
 
+    def f32(name, data):
+        w.add_tensor(name, np.asarray(data, np.float32))
+
     t("token_embd.weight", n_vocab + a.pad_tokens + a.pad_vocab, a.embd, scale=1.0)
     if g4:
         if a.prop_rope:
@@ -252,6 +283,31 @@ def main():
         p = f"blk.{i}."
         lhd, lkv = (hd, a.kv_heads) if not g4 or swa[i] else (ghd, 1)
         norm(p + "attn_norm.weight", a.embd)
+        if q35:
+            # The norm before the FFN goes by post_attention_norm here.
+            norm(p + "post_attention_norm.weight", a.embd)
+            if full[i]:
+                t(p + "attn_q.weight", 2 * a.heads * hd, a.embd)
+                t(p + "attn_k.weight", a.kv_heads * hd, a.embd)
+                t(p + "attn_v.weight", a.kv_heads * hd, a.embd)
+                t(p + "attn_output.weight", a.embd, a.heads * hd)
+                norm(p + "attn_q_norm.weight", hd)
+                norm(p + "attn_k_norm.weight", hd)
+            else:
+                t(p + "attn_qkv.weight", conv_dim, a.embd)
+                t(p + "attn_gate.weight", nv * hd, a.embd)
+                f32(p + "ssm_conv1d.weight", rng.standard_normal((conv_dim, 4)) * 0.5)
+                f32(p + "ssm_dt.bias", rng.standard_normal(nv) * 0.5)
+                # -exp(A_log), as the converter stores it: decays of exp(softplus(.) * a).
+                f32(p + "ssm_a", -a.decay * rng.uniform(0.2, 2.0, nv))
+                t(p + "ssm_beta.weight", nv, a.embd)
+                t(p + "ssm_alpha.weight", nv, a.embd)
+                norm(p + "ssm_norm.weight", hd)
+                t(p + "ssm_out.weight", a.embd, nv * hd)
+            t(p + "ffn_gate.weight", a.ff, a.embd)
+            t(p + "ffn_up.weight", a.ff, a.embd)
+            t(p + "ffn_down.weight", a.embd, a.ff)
+            continue
         t(p + "attn_q.weight", a.heads * lhd, a.embd)
         t(p + "attn_k.weight", lkv * lhd, a.embd)
         if not g4 or swa[i]:

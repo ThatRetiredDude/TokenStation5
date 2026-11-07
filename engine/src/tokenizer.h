@@ -24,6 +24,10 @@ public:
     std::string decode(int32_t tok) const;  // bytes of one token (may be partial UTF-8)
     bool is_eog(int32_t tok) const;
     int32_t bos() const { return bos_; }
+    int32_t token_id(const std::string &piece) const {  // -1: not in the vocabulary
+        auto it = id_.find(piece);
+        return it == id_.end() ? -1 : it->second;
+    }
     int n_vocab() const { return (int)tokens_.size(); }
     // Whether a draft model with g's token list can draft for this one. A
     // draft model with the same vocabulary may pad its weight rows
@@ -72,6 +76,7 @@ private:
     bool add_bos_ = false, add_space_prefix_ = true;
     bool ignore_merges_ = false;
     int digits_ = 1;  // digits per pre-token: 1 for Qwen2, 3 for Llama 3
+    bool marks_ = false;  // marks (\p{M}) belong to words: Qwen3.5, Tekken
     std::string byte_enc_[256];
     std::unordered_map<std::string, uint8_t> byte_dec_;
 };

@@ -27,6 +27,7 @@ const char *tool_format_name(ToolFormat f);
 
 struct ToolCall {
     std::string id, name, arguments;  // arguments: a JSON object, as text
+    bool xml = false;  // written as <parameter=KEY> elements: every value text until fit_to_schemas
 };
 
 struct Message {
@@ -74,6 +75,18 @@ size_t content_prefix(ToolFormat f, const std::string &text);
 // <think></think>, as the template writes it, and the model answers at once.
 bool can_skip_thinking(const Tokenizer &t);
 extern const char *const kNoThinking;
+extern const char *const kThinkingOpen;  // "<think>\n"
+// What opens the model's turn after render_chat: kNoThinking with thinking
+// off (where the template can skip it), "<think>\n" with it on where the
+// template opens the thinking itself (Qwen3.5), else nothing.
+std::string turn_opening(const Tokenizer &t, bool think);
+
+// Calls whose arguments came as <parameter=KEY> text (Qwen3.5): each value
+// as the tool's schema types it, as vLLM's Qwen3-Coder parser does: a string
+// stays text, a number, boolean, object or list is read as JSON (text if it
+// isn't), a "null" is null where the schema allows it; a key the schema
+// doesn't name stays text.
+void fit_to_schemas(std::vector<ToolCall> &calls, const std::vector<Json> &tools);
 
 // "call_" and 24 random letters and digits, as OpenAI's ids look.
 std::string new_call_id();

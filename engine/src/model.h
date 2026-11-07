@@ -1,6 +1,6 @@
 // Model description: hyperparameters and weight tensors of a dense
-// llama-family decoder (llama, mistral, qwen2, qwen3, gemma3, gemma4), as
-// stored in GGUF.
+// llama-family decoder (llama, mistral, qwen2, qwen3, gemma3, gemma4,
+// qwen35), as stored in GGUF.
 #pragma once
 #include <algorithm>
 #include <cstdint>
@@ -49,6 +49,30 @@ struct HParams {
     int n_head_kv_swa = 0, head_dim_swa = 0, rope_dims_swa = 0;  // 0: the full layers'
     bool v_norm = false, rope_freqs_full_only = false;
     float logit_softcap = 0;
+    // Qwen3.5: most layers are Gated DeltaNet linear attention (rec_layers),
+    // which keeps a fixed-size state per layer instead of K and V per token:
+    // ssm_k_heads key heads and ssm_v_heads value heads (each key head
+    // serves ssm_v_heads / ssm_k_heads of them, tiled: value head h reads key
+    // head h % ssm_k_heads), all ssm_state wide, after a causal convolution
+    // of ssm_conv taps over their projections. The full-attention layers'
+    // query projection gives each head its query and then an output gate
+    // (attn_gate: the head's output times sigmoid(gate)).
+    std::vector<uint8_t> rec_layers;  // per layer, when the model has them
+    int ssm_conv = 0, ssm_state = 0, ssm_k_heads = 0, ssm_v_heads = 0;
+    bool attn_gate = false;
+    bool rec(int layer) const { return !rec_layers.empty() && rec_layers[layer] != 0; }
+    int ssm_conv_dim() const { return (2 * ssm_k_heads + ssm_v_heads) * ssm_state; }
+    int ssm_inner() const { return ssm_v_heads * ssm_state; }
+    // A linear layer's state: the convolution's last ssm_conv - 1 inputs and
+    // the value heads' ssm_state x ssm_state matrices, in floats.
+    int64_t rec_state_floats() const {
+        return (int64_t)(ssm_conv - 1) * ssm_conv_dim() + (int64_t)ssm_v_heads * ssm_state * ssm_state;
+    }
+    int rec_count() const {
+        int n = 0;
+        for (uint8_t r : rec_layers) n += r != 0;
+        return n;
+    }
     bool swa(int layer) const {
         if (!swa_layers.empty()) return swa_window > 0 && swa_layers[layer] != 0;
         return swa_window > 0 && swa_pattern > 0 && layer % swa_pattern < swa_pattern - 1;
@@ -57,7 +81,7 @@ struct HParams {
     int hkv(int layer) const { return swa(layer) && n_head_kv_swa ? n_head_kv_swa : n_head_kv; }
     int rd(int layer) const { return swa(layer) && rope_dims_swa ? rope_dims_swa : rope_dims; }
     // K (or V) values per token in a layer's cache, and the most of any layer.
-    int kv_values(int layer) const { return hkv(layer) * hd(layer); }
+    int kv_values(int layer) const { return rec(layer) ? 0 : hkv(layer) * hd(layer); }
     int max_hd() const { return std::max(head_dim, head_dim_swa); }
     int max_qd() const { return n_head * max_hd(); }
     int max_kvd() const { return std::max(n_head_kv * head_dim, n_head_kv_swa * head_dim_swa); }
@@ -80,6 +104,12 @@ struct Layer {
     Weight post_attn_norm, post_ffn_norm;  // Gemma 3 and 4
     Weight out_scale;                      // Gemma 4: one factor on the layer's output, if any
     float out_scale_v = 1.f;               // its value (read when the model opens)
+    // Qwen3.5's linear layers (HParams::rec): Q, K and V in one projection
+    // (wqkv), the output gate (wz), the convolution's taps (ssm_conv x
+    // conv_dim, f32), the per-head time step bias (ssm_dt) and decay rate
+    // (ssm_a, -exp(A_log)), the projections to each head's beta and alpha,
+    // the output norm (one head wide) and projection.
+    Weight wqkv, wz, ssm_conv1d, ssm_dt, ssm_a, ssm_beta, ssm_alpha, ssm_norm, ssm_out;
 };
 
 struct Model {

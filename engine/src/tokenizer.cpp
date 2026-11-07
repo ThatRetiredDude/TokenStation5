@@ -1,7 +1,9 @@
 #include "tokenizer.h"
+#include "unicode_table.h"
 
 #include <algorithm>
 #include <climits>
+#include <iterator>
 #include <cstdio>
 #include <queue>
 
@@ -38,29 +40,25 @@ bool is_space(uint32_t c) {
            c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F ||
            c == 0x205F || c == 0x3000;
 }
-bool is_digit(uint32_t c) {
-    return (c >= '0' && c <= '9') || (c >= 0x660 && c <= 0x669) || (c >= 0xFF10 && c <= 0xFF19);
+// Unicode's class of c: 1 a letter (\p{L}), 2 a mark (\p{M}), 3 a number
+// (\p{N}), 0 none of these.
+int unicode_kind(uint32_t c) {
+    if (c < 0x80) return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ? 1 : c >= '0' && c <= '9' ? 3 : 0;
+    const UnicodeRange *r = std::upper_bound(std::begin(kUnicodeRanges), std::end(kUnicodeRanges), c,
+                                             [](uint32_t v, const UnicodeRange &u) { return v < u.lo; });
+    return r != std::begin(kUnicodeRanges) && c <= r[-1].hi ? r[-1].kind : 0;
 }
-// Approximation of \p{L}: ASCII letters exactly; outside ASCII, anything that
-// is not a space, digit or a common punctuation/symbol block.
-bool is_letter(uint32_t c) {
-    if (c < 0x80) return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-    if (is_space(c) || is_digit(c)) return false;
-    if (c >= 0xA1 && c <= 0xBF && c != 0xAA && c != 0xB5 && c != 0xBA) return false;
-    if (c == 0xD7 || c == 0xF7) return false;
-    if (c >= 0x2000 && c <= 0x2BFF) return false;  // punctuation, symbols, arrows, math
-    if (c >= 0x3000 && c <= 0x303F) return false;  // CJK punctuation
-    if (c >= 0xFF00 && c <= 0xFF0F) return false;
-    if (c >= 0xFF1A && c <= 0xFF20) return false;
-    if (c >= 0x1F000) return false;                // emoji
-    if (c >= 0xE000 && c <= 0xF8FF) return false;  // private use
-    return true;
-}
+bool is_digit(uint32_t c) { return unicode_kind(c) == 3; }
 
 // Splits text the way the Llama 3 / Qwen2 pre-tokenizer regex does:
 // (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
-// Qwen2 uses \p{N} single digits; Llama 3 groups up to three.
-std::vector<std::string> pretokenize(const std::string &s, int digits) {
+// Qwen2 uses \p{N} single digits; Llama 3 groups up to three. With marks
+// (Qwen3.5, Tekken) a word is [\p{L}\p{M}]+, and marks aren't symbols.
+std::vector<std::string> pretokenize(const std::string &s, int digits, bool marks) {
+    auto is_letter = [marks](uint32_t c) {
+        const int k = unicode_kind(c);
+        return k == 1 || (marks && k == 2);
+    };
     std::vector<uint32_t> cp;
     std::vector<size_t> off;
     for (size_t i = 0; i < s.size();) {
@@ -165,6 +163,7 @@ bool Tokenizer::load(const Gguf &g, std::string &err) {
     if (kind_ == SPM_BPE) add_bos_ = true;  // as llama.cpp: its files say so, and the model needs it
     digits_ = (pre == "llama3" || pre == "llama-bpe" || pre == "smaug-bpe") ? 3 : 1;
     ignore_merges_ = pre == "llama3" || pre == "llama-bpe" || pre == "tekken";
+    marks_ = pre == "qwen35" || pre == "tekken";
     // Control (3) and user-defined (4) tokens are matched verbatim in text.
     for (size_t i = 0; i < tokens_.size() && i < types_.size(); i++)
         if (types_[i] == 3 || types_[i] == 4) specials_.push_back({tokens_[i], (int32_t)i});
@@ -372,7 +371,7 @@ void Tokenizer::merge_ranked(const std::string &t, std::vector<int32_t> &out) co
 void Tokenizer::encode_plain(const std::string &text, std::vector<int32_t> &out) const {
     if (kind_ == SPM) return encode_spm(text, out);
     if (kind_ == SPM_BPE) return encode_gemma4(text, out);
-    for (auto &p : pretokenize(text, digits_)) encode_bpe(p, out);
+    for (auto &p : pretokenize(text, digits_, marks_)) encode_bpe(p, out);
 }
 
 std::vector<int32_t> Tokenizer::encode(const std::string &text, bool add_bos) const {

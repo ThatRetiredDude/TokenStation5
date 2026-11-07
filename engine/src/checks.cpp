@@ -364,13 +364,15 @@ bool run_bench(const Model &m, Backend &b, int pp, int tg, BenchResult &r, std::
         std::vector<float> lgb((size_t)batch * m.hp.n_vocab);
         std::vector<int32_t> bt(toks.begin(), toks.begin() + std::min<size_t>(toks.size(), batch));
         while ((int)bt.size() < batch) bt.push_back(toks[0]);
-        // One pass first: the batch's pipelines and their first use.
+        // One pass first: the batch's pipelines and their first use. A
+        // backend that only goes forward (Qwen3.5) goes on after it.
         if (!b.forward(bt.data(), batch, pp, lgb.data(), true, err)) return false;
         b.take_profile();
+        const int p0 = pp + (b.rewind_limit() < batch ? batch : 0);
         t = now_ms();
         int passes = 0;
         for (int i = 0; i + batch <= tg; i += batch, passes++)
-            if (!b.forward(bt.data(), batch, pp + i, lgb.data(), true, err)) return false;
+            if (!b.forward(bt.data(), batch, p0 + i, lgb.data(), true, err)) return false;
         const double ms = now_ms() - t;
         r.tg_tps = passes ? passes * batch * 1000.0 / ms : 0;
         if (passes) ts5::log_line("ts5: bench: %d passes of %d tokens, %.3f ms a pass", passes, batch, ms / passes);

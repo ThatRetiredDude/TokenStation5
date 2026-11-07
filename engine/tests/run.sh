@@ -21,9 +21,17 @@ ts5="$engine/build/ts5"
 
 # Vocab-only GGUFs from llama.cpp, pinned.
 rev=6868a52cb337450658006ad2f9281c2eb63f1666
-for v in qwen2 llama-spm llama-bpe; do
-    f="$work/ggml-vocab-$v.gguf"
-    [ -s "$f" ] || curl -fsSL -o "$f" "https://raw.githubusercontent.com/ggml-org/llama.cpp/$rev/models/ggml-vocab-$v.gguf"
+# Qwen3.5's came later; the .inp and .out files are llama.cpp's own
+# tokenizer cases (the texts and their tokens).
+rev35=954de248ac6907dd05dc19f0f511ab18f2807a54
+for v in qwen2 llama-spm llama-bpe qwen35; do
+    r=$rev
+    [ "$v" = qwen35 ] && r=$rev35
+    for x in "" .inp .out; do
+        [ "$v" = llama-spm ] && [ -n "$x" ] && continue
+        f="$work/ggml-vocab-$v.gguf$x"
+        [ -s "$f" ] || curl -fsSL -o "$f" "https://raw.githubusercontent.com/ggml-org/llama.cpp/$r/models/ggml-vocab-$v.gguf$x"
+    done
 done
 
 models=()
@@ -55,6 +63,43 @@ echo "== Gemma 4: at once, one token per call and 72 tokens across its 8-token w
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${g4[@]}"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${g4[@]}"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${g4[@]}"
+# Qwen3.5 as the 9B's file has it: linear-attention (Gated DeltaNet) layers
+# with every 4th one full attention, gated by a sigmoid, M-RoPE on a quarter
+# of each head; heads of 128 in both.
+q35=()
+for q in F32 Q4_K_M; do
+    out="$work/qwen35-$q.gguf"
+    [ -s "$out" ] || python3 "$here/make_test_model.py" --arch qwen35 --quant $q --layers 8 --heads 2 --kv-heads 1 \
+        --seed 3 --vocab "$work/ggml-vocab-qwen35.gguf" "$out" > /dev/null
+    q35+=("$out")
+done
+echo "== Qwen3.5: at once, one token per call, and 300 tokens in chunks (the linear layers' state across calls)"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${q35[@]}"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${q35[@]}"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${q35[@]}"
+echo "== Qwen3.5: no drafts and no helper (that state only goes forward), the same text as with drafting off"
+p35="the cat sat on the mat. the cat sat on the mat. the cat sat on the mat. the cat sat on the"
+for be in vk cpu; do
+    a35=$("$ts5" run -m "${q35[1]}" --backend $be -c 256 -p "$p35" -n 24 --temp 0 2> /dev/null)
+    b35=$(TS5_DRAFT=0 "$ts5" run -m "${q35[1]}" --backend $be -c 256 -p "$p35" -n 24 --temp 0 2> /dev/null)
+    [ -n "$a35" ] && [ "$a35" = "$b35" ] || { echo "FAIL qwen35 $be: the text differs with drafting allowed"; exit 1; }
+done
+o35=$(TS5_DRAFT_MODEL="${q35[0]}" "$ts5" run -m "${q35[1]}" -c 256 -p hi -n 4 2>&1)
+grep -q "draft model not used: .*only goes forward" <<< "$o35" || { echo "FAIL qwen35: a helper was not refused"; exit 1; }
+echo "PASS qwen35 run: the same text with and without drafting, the helper refused"
+echo "== Qwen3.5: a conversation's next turn goes on from the state saved where the last turn started"
+t35="$work/Qwen3.5-4B.jinja"
+[ -s "$t35" ] || curl -fsSL -o "$t35" "https://raw.githubusercontent.com/ggml-org/llama.cpp/$rev35/models/templates/Qwen3.5-4B.jinja"
+python3 "$here/resume_test.py" "$ts5" "${q35[1]}" "$t35" vk
+python3 "$here/resume_test.py" "$ts5" "${q35[1]}" "$t35" cpu
+echo "== tokenizer vs llama.cpp's own cases (Qwen2, Llama 3, Qwen3.5: \\p{L}, \\p{M} and \\p{N} as Unicode has them)"
+l3="$work/llama3-Q8_0.gguf"
+[ -s "$l3" ] || python3 "$here/make_test_model.py" --arch llama --quant Q8_0 --vocab "$work/ggml-vocab-llama-bpe.gguf" \
+    "$l3" > /dev/null
+python3 "$here/vocab_test.py" --ts5 "$ts5" "$work/qwen2-Q4_0.gguf" "$work/ggml-vocab-qwen2.gguf.inp" "$work/ggml-vocab-qwen2.gguf.out"
+python3 "$here/vocab_test.py" --ts5 "$ts5" "$work/llama3-Q8_0.gguf" "$work/ggml-vocab-llama-bpe.gguf.inp" \
+    "$work/ggml-vocab-llama-bpe.gguf.out"
+python3 "$here/vocab_test.py" --ts5 "$ts5" "${q35[1]}" "$work/ggml-vocab-qwen35.gguf.inp" "$work/ggml-vocab-qwen35.gguf.out"
 echo "== Vulkan vs CPU reference"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${models[@]}"
 echo "== one token per call (KV cache across calls)"
@@ -548,10 +593,9 @@ if [ -n "${LLAMA_CPP:-}" ]; then
         "$work/qwen3-Q4_K_M.gguf" "$work/llama-Q4_K_M.gguf"
     echo "== vs llama.cpp (llama.cpp quantizes activations, so quantized models differ a little)"
     python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk "$work/qwen2-F32.gguf" "$work/qwen3-F32.gguf" \
-        "$work/llama-F32.gguf" "$work/qwen3-Q4_K_M.gguf"
+        "$work/llama-F32.gguf" "$work/qwen3-Q4_K_M.gguf" "$work/qwen35-F32.gguf"
     echo "== tokenizer vs llama-tokenize"
-    mk llama llama-bpe Q8_0 llama3-Q8_0
     python3 "$here/tokenizer_test.py" --ts5 "$ts5" --ref "$bin/llama-tokenize" "$work/qwen2-Q4_0.gguf" \
-        "$work/llama-Q4_0.gguf" "$work/llama3-Q8_0.gguf"
+        "$work/llama-Q4_0.gguf" "$work/llama3-Q8_0.gguf" "$work/qwen35-Q4_K_M.gguf"
 fi
 echo "all tests passed"

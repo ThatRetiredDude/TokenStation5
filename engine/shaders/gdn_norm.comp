@@ -1,0 +1,29 @@
+// Qwen3.5's linear layers, after the scan: each value head's output
+// RMS-normed over its D values, times the norm's weights W and SiLU of the
+// gate Z, in place in Y. Workgroup (head, t).
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#define WG 128
+layout(local_size_x = WG) in;
+layout(std430, binding = 0) buffer Ybuf { float Y[]; };
+layout(std430, binding = 1) readonly buffer Zbuf { float Z[]; };
+layout(std430, binding = 2) readonly buffer Wbuf { float W[]; };
+layout(push_constant) uniform PC { uint dim, v_heads; float eps; } pc;
+shared float red[WG / 4];
+
+void main() {
+    const uint h = gl_WorkGroupID.x, t = gl_WorkGroupID.y, tid = gl_LocalInvocationID.x;
+    const uint base = (t * pc.v_heads + h) * pc.dim;
+    float s = 0.0;
+    for (uint i = tid; i < pc.dim; i += WG) s += Y[base + i] * Y[base + i];
+    s = subgroupAdd(s);
+    if (gl_SubgroupInvocationID == 0) red[gl_SubgroupID] = s;
+    barrier();
+    float total = 0.0;
+    for (uint i = 0; i < gl_NumSubgroups; i++) total += red[i];
+    const float r = inversesqrt(total / float(pc.dim) + pc.eps);
+    for (uint i = tid; i < pc.dim; i += WG) {
+        const float z = Z[base + i];
+        Y[base + i] = Y[base + i] * r * W[i] * (z / (1.0 + exp(-z)));
+    }
+}

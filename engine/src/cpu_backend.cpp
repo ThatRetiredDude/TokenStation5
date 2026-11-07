@@ -101,6 +101,11 @@ public:
         }
         kc_.assign(total, 0.f);
         vc_.assign(total, 0.f);
+        // Each linear layer's state (Qwen3.5).
+        for (int l = 0; l < hp_.n_layer; l++) {
+            rec_off_.push_back(rec_.size());
+            if (hp_.rec(l)) rec_.resize(rec_.size() + hp_.rec_state_floats(), 0.f);
+        }
         if (!m.tok_embd.data) file_ = fopen(m.gguf.path.c_str(), "rb");
         for (auto &L : m.layers) {
             Norms n;
@@ -109,6 +114,8 @@ public:
             if (L.post_attn_norm) n.post_attn = vec(L.post_attn_norm), n.post_ffn = vec(L.post_ffn_norm);
             if (L.q_norm) n.q = vec(L.q_norm), n.k = vec(L.k_norm);
             if (L.bq) n.bq = vec(L.bq), n.bk = vec(L.bk), n.bv = vec(L.bv);
+            if (L.ssm_conv1d)
+                n.conv = vec(L.ssm_conv1d), n.dt = vec(L.ssm_dt), n.a = vec(L.ssm_a), n.ssm = vec(L.ssm_norm);
             norms_.push_back(std::move(n));
         }
         out_norm_ = vec(m.out_norm);
@@ -120,12 +127,36 @@ public:
     }
     const char *name() const override { return "cpu"; }
     int n_ctx() const override { return n_ctx_; }
+    int rewind_limit() const override { return rec_.empty() ? Backend::rewind_limit() : 0; }
+    bool save_state(std::string &) override {
+        if (rec_.empty()) return false;
+        saved_ = rec_;
+        saved_pos_ = rec_pos_;
+        return true;
+    }
+    bool restore_state(std::string &) override {
+        if (rec_.empty() || saved_pos_ < 0) return false;
+        rec_ = saved_;
+        rec_pos_ = saved_pos_;
+        return true;
+    }
 
     // Layer by layer over all n tokens, so a model that was opened but not
     // loaded needs one layer's weights in memory at a time. Each token's
     // arithmetic is the same as one token per call.
     bool forward(const int32_t *tokens, int n, int pos0, float *logits, bool all, std::string &err) override {
         if (pos0 + n > n_ctx_) { err = "context full"; return false; }
+        // The linear layers' state holds the tokens before rec_pos_: a call
+        // goes on from there, or starts over at 0.
+        if (!rec_.empty()) {
+            if (pos0 == 0) std::fill(rec_.begin(), rec_.end(), 0.f);
+            else if (pos0 != rec_pos_) {
+                err = "the linear layers' state is at position " + std::to_string(rec_pos_) + ", not " +
+                      std::to_string(pos0);
+                return false;
+            }
+            rec_pos_ = pos0 + n;
+        }
         if (!m_.tok_embd.data && !(file_ && read_ok_)) return read_failed(err);
         const int E = hp_.n_embd;
         std::vector<float> x((size_t)n * E);
@@ -157,7 +188,7 @@ public:
     }
 
 private:
-    struct Norms { std::vector<float> attn, ffn, q, k, bq, bk, bv, post_attn, post_ffn; };
+    struct Norms { std::vector<float> attn, ffn, q, k, bq, bk, bv, post_attn, post_ffn, conv, dt, a, ssm; };
 
     std::vector<float> vec(const Weight &w) {
         std::vector<float> v(w.info->nelements());
@@ -182,13 +213,14 @@ private:
 
     // Reads layer L's matrices from the file into buf_ and points L at them.
     bool load_layer(Layer &L, std::string &err) {
-        Weight *ws[] = {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down};
+        Weight *ws[] = {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down,
+                        &L.wqkv, &L.wz, &L.ssm_beta, &L.ssm_alpha, &L.ssm_out};
         uint64_t total = 0;
         for (Weight *w : ws) total += *w ? (w->info->nbytes + 63) / 64 * 64 : 0;
         if (buf_.size() < total) buf_.resize(total);
         uint64_t off = 0;
         for (Weight *w : ws) {
-            if (!*w) continue;  // Gemma 4's full layers have no V projection
+            if (!*w) continue;  // Gemma 4's full layers have no V projection, and only Qwen3.5's linear ones the rest
             if (!read_at(file_, m_, *w, 0, w->info->nbytes, buf_.data() + off)) return read_failed(err);
             w->data = buf_.data() + off;
             off += (w->info->nbytes + 63) / 64 * 64;
@@ -199,12 +231,31 @@ private:
     // Layer l for n tokens at positions pos0.., x holding their residuals.
     void layer(int l, const Layer &L, float *x, int n, int pos0) {
         const int E = hp_.n_embd, HD = hp_.hd(l), H = hp_.n_head, HKV = hp_.hkv(l);
-        const int KV = HKV * HD, F = hp_.n_ff;
+        const int KV = HKV * HD;
         const Norms &N = norms_[l];
         const bool swa = hp_.swa(l);
-        std::vector<float> h(x, x + (size_t)n * E), q((size_t)n * H * HD), k((size_t)n * KV), v((size_t)n * KV);
+        std::vector<float> h(x, x + (size_t)n * E), o((size_t)n * E);
         for (int t = 0; t < n; t++) rmsnorm(&h[(size_t)t * E], N.attn.data(), E, hp_.rms_eps);
-        matmul(L.wq, h.data(), n, q.data());
+        if (hp_.rec(l)) {
+            linear_attention(l, L, h.data(), n, o.data());
+            ffn(L, N, x, o, n);
+            return;
+        }
+        std::vector<float> q((size_t)n * H * HD), k((size_t)n * KV), v((size_t)n * KV), gate;
+        if (hp_.attn_gate) {
+            // Each head's query, then its output gate (Qwen3.5).
+            std::vector<float> qg((size_t)n * H * 2 * HD);
+            matmul(L.wq, h.data(), n, qg.data());
+            gate.resize((size_t)n * H * HD);
+            for (int t = 0; t < n; t++)
+                for (int hh = 0; hh < H; hh++) {
+                    const float *src = &qg[((size_t)t * H + hh) * 2 * HD];
+                    memcpy(&q[((size_t)t * H + hh) * HD], src, HD * 4);
+                    memcpy(&gate[((size_t)t * H + hh) * HD], src + HD, HD * 4);
+                }
+        } else {
+            matmul(L.wq, h.data(), n, q.data());
+        }
         matmul(L.wk, h.data(), n, k.data());
         if (L.wv) matmul(L.wv, h.data(), n, v.data());
         else v = k;  // Gemma 4's full layers: V is K before its norm and RoPE
@@ -233,7 +284,7 @@ private:
             memcpy(kl + (size_t)pos * KV, kt, KV * 4);
             memcpy(vl + (size_t)pos * KV, vt, KV * 4);
         }
-        std::vector<float> att((size_t)n * H * HD), o((size_t)n * E);
+        std::vector<float> att((size_t)n * H * HD);
         const float scale = hp_.attn_scale;
         for (int t = 0; t < n; t++) {
             const float *qt = &q[(size_t)t * H * HD];
@@ -260,11 +311,18 @@ private:
                 }
             }
         }
+        for (size_t i = 0; i < gate.size(); i++) att[i] *= 1.0f / (1.0f + std::exp(-gate[i]));
         matmul(L.wo, att.data(), n, o.data());
         if (!N.post_attn.empty())
             for (int t = 0; t < n; t++) rmsnorm(&o[(size_t)t * E], N.post_attn.data(), E, hp_.rms_eps);
+        ffn(L, N, x, o, n);
+    }
+
+    // The attention's output o joins the residual x, then the FFN's.
+    void ffn(const Layer &L, const Norms &N, float *x, std::vector<float> &o, int n) {
+        const int E = hp_.n_embd, F = hp_.n_ff;
         for (size_t i = 0; i < (size_t)n * E; i++) x[i] += o[i];
-        h.assign(x, x + (size_t)n * E);
+        std::vector<float> h(x, x + (size_t)n * E);
         for (int t = 0; t < n; t++) rmsnorm(&h[(size_t)t * E], N.ffn.data(), E, hp_.rms_eps);
         std::vector<float> g((size_t)n * F), u((size_t)n * F);
         matmul(L.w_gate, h.data(), n, g.data());
@@ -279,6 +337,85 @@ private:
         for (size_t i = 0; i < (size_t)n * E; i++) x[i] += o[i];
         if (L.out_scale)  // Gemma 4: the layer's output, scaled
             for (size_t i = 0; i < (size_t)n * E; i++) x[i] *= L.out_scale_v;
+    }
+
+    // Qwen3.5's Gated DeltaNet layer l on n tokens' normed inputs h, as
+    // llama.cpp computes it, into o (n_embd each). Per token: Q, K and V
+    // projected together and run through a causal convolution (its last
+    // ssm_conv - 1 inputs kept in the state) and SiLU; Q and K L2-normalized
+    // per head (x / sqrt(sum x^2 + eps)), Q scaled by 1/sqrt(width); for each value head h (reading
+    // key head h % ssm_k_heads), with beta = sigmoid(b) and decay
+    // exp(softplus(a + dt) * A): S = S * decay, then the delta rule
+    // S += k (beta (v - S^T k))^T, and the head's output S^T q, RMS-normed
+    // and gated by SiLU(z) before the output projection.
+    void linear_attention(int l, const Layer &L, const float *h, int n, float *o) {
+        const int E = hp_.n_embd, D = hp_.ssm_state, NK = hp_.ssm_k_heads, NV = hp_.ssm_v_heads;
+        const int C = hp_.ssm_conv_dim(), K = hp_.ssm_conv, I = hp_.ssm_inner();
+        const Norms &N = norms_[l];
+        std::vector<float> qkv((size_t)n * C), z((size_t)n * I), b((size_t)n * NV), a((size_t)n * NV);
+        matmul(L.wqkv, h, n, qkv.data());
+        matmul(L.wz, h, n, z.data());
+        matmul(L.ssm_beta, h, n, b.data());
+        matmul(L.ssm_alpha, h, n, a.data());
+        float *conv = &rec_[rec_off_[l]];             // (K - 1) x C: the oldest input first
+        float *S = conv + (size_t)(K - 1) * C;        // NV x D x D: S[h][key][value]
+        std::vector<float> y((size_t)n * I), c(C);
+        const float qscale = 1.0f / std::sqrt((float)D);
+        for (int t = 0; t < n; t++) {
+            const float *in = &qkv[(size_t)t * C];
+            // The convolution over the last K inputs of each channel, the
+            // newest last, then SiLU.
+            for (int ch = 0; ch < C; ch++) {
+                const float *w = &N.conv[(size_t)ch * K];
+                double s = (double)w[K - 1] * in[ch];
+                for (int j = 0; j < K - 1; j++) s += (double)w[j] * conv[(size_t)j * C + ch];
+                const float v = (float)s;
+                c[ch] = v / (1.0f + std::exp(-v));
+            }
+            for (int j = 0; j + 1 < K - 1; j++) memcpy(conv + (size_t)j * C, conv + (size_t)(j + 1) * C, C * 4);
+            memcpy(conv + (size_t)(K - 2) * C, in, C * 4);
+            float *q = c.data(), *k = q + NK * D, *v = k + NK * D;
+            for (int hh = 0; hh < NK; hh++) {
+                for (float *u : {q + hh * D, k + hh * D}) {
+                    double ss = 0;
+                    for (int d = 0; d < D; d++) ss += (double)u[d] * u[d];
+                    // As llama.cpp: x / sqrt(sum x^2 + eps), an RMS norm over the head scaled.
+                    const float r = 1.0f / std::sqrt((float)ss + hp_.rms_eps);
+                    for (int d = 0; d < D; d++) u[d] *= r;
+                }
+                for (int d = 0; d < D; d++) q[hh * D + d] *= qscale;
+            }
+            for (int hh = 0; hh < NV; hh++) {
+                const float *qh = q + (hh % NK) * D, *kh = k + (hh % NK) * D, *vh = v + hh * D;
+                const float beta = 1.0f / (1.0f + std::exp(-b[(size_t)t * NV + hh]));
+                const float sp = a[(size_t)t * NV + hh] + N.dt[hh];
+                const float softplus = sp > 20.f ? sp : std::log1p(std::exp(sp));
+                const float decay = std::exp(softplus * N.a[hh]);
+                float *Sh = S + (size_t)hh * D * D;
+                std::vector<double> sk(D, 0.0);
+                for (int i = 0; i < D; i++)
+                    for (int j = 0; j < D; j++) {
+                        Sh[(size_t)i * D + j] *= decay;
+                        sk[j] += (double)Sh[(size_t)i * D + j] * kh[i];
+                    }
+                std::vector<float> dlt(D);
+                for (int j = 0; j < D; j++) dlt[j] = (vh[j] - (float)sk[j]) * beta;
+                float *yh = &y[(size_t)t * I + hh * D];
+                std::vector<double> acc(D, 0.0);
+                for (int i = 0; i < D; i++)
+                    for (int j = 0; j < D; j++) {
+                        Sh[(size_t)i * D + j] += kh[i] * dlt[j];
+                        acc[j] += (double)Sh[(size_t)i * D + j] * qh[i];
+                    }
+                for (int j = 0; j < D; j++) yh[j] = (float)acc[j];
+                // The gated norm: RMS over the head, its weights, times SiLU(z).
+                rmsnorm(yh, N.ssm.data(), D, hp_.rms_eps);
+                const float *zh = &z[(size_t)t * I + hh * D];
+                for (int j = 0; j < D; j++) yh[j] *= zh[j] / (1.0f + std::exp(-zh[j]));
+            }
+        }
+        matmul(L.ssm_out, y.data(), n, o);
+        (void)E;
     }
 
     // logits[t] = output . x[t] for n tokens. From the file, 64 MiB of rows at
@@ -310,6 +447,11 @@ private:
     std::vector<float> kc_, vc_, out_norm_;
     std::vector<uint64_t> turn_[2];  // RoPE turns of the full and the sliding layers
     std::vector<size_t> cache_off_;  // each layer's start in kc_ and vc_
+    std::vector<float> rec_;         // the linear layers' states (Qwen3.5)
+    std::vector<size_t> rec_off_;    // each layer's start in rec_
+    int rec_pos_ = 0;                // the tokens rec_ holds
+    std::vector<float> saved_;       // save_state()'s copy of rec_
+    int saved_pos_ = -1;             // its tokens; -1: none
     std::vector<Norms> norms_;
 };
 

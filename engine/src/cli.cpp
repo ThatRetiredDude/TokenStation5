@@ -170,8 +170,21 @@ int no_model_command(int argc, char **argv) {
                     : f == "gemma4"  ? ToolFormat::GEMMA4
                                      : ToolFormat::NONE;
     std::string text = read_all(stdin);
-    const std::vector<std::string> names(argv + 3, argv + argc);  // the request's tools
+    // The request's tools: names, or OpenAI tool objects (their schemas type
+    // <parameter=KEY> values).
+    std::vector<std::string> names;
+    std::vector<Json> tools;
+    for (int i = 3; i < argc; i++) {
+        Json t;
+        if (argv[i][0] == '{' && Json::parse(argv[i], t)) {
+            names.push_back(t["function"]["name"].str());
+            tools.push_back(t);
+        } else {
+            names.push_back(argv[i]);
+        }
+    }
     ParsedTurn pt = parse_turn(tf, text, names);
+    fit_to_schemas(pt.calls, tools);
     Json out = Json::object();
     out.set("content", Json::string(pt.content));
     Json calls;
@@ -323,7 +336,9 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         if (!Json::parse(read_all(stdin), req)) { fprintf(stderr, "ts5: invalid JSON\n"); return 1; }
         std::vector<Json> tools(req["tools"].a.begin(), req["tools"].a.end());
         const char *date = getenv("TS5_TODAY");
-        printf("%s", render_chat(tok, parse_messages(req["messages"]), tools, date ? date : "26 Jul 2024").c_str());
+        printf("%s", (render_chat(tok, parse_messages(req["messages"]), tools, date ? date : "26 Jul 2024") +
+                      turn_opening(tok, !req["enable_thinking"].is_null() ? req["enable_thinking"].boolean(true) : true))
+                         .c_str());
         fprintf(stderr, "ts5: tool calls: %s\n", tool_format_name(tool_format(tok)));
         return 0;
     }
@@ -344,8 +359,15 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     // TS5_HELPER_ROOM=1 an auto-fit main context (-c auto) leaves room for it.
     Model dmodel;
     const char *dp = getenv("TS5_DRAFT_MODEL");
-    const bool draft = dp && *dp && strcmp(dp, "off") != 0 && (a.cmd == "run" || a.cmd == "serve");
+    bool draft = dp && *dp && strcmp(dp, "off") != 0 && (a.cmd == "run" || a.cmd == "serve");
     std::string derr;
+    // A linear layer's state (Qwen3.5) only goes forward: a rejected draft
+    // couldn't be taken back, so no helper and no room kept for one.
+    if (draft && hp.rec_count() > 0) {
+        fprintf(stderr, "ts5: draft model not used: %s's linear layers keep a state that only goes forward\n",
+                basename_of(a.model).c_str());
+        draft = false;
+    }
     bool no_room = false;  // the main model fits only without that room
 
     double t0 = now_ms();
@@ -464,7 +486,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         return 0;
     }
     if (a.cmd == "run") {
-        std::string prompt = a.chat ? tok.apply_chat({{"user", a.prompt}}) : a.prompt;
+        std::string prompt = a.chat ? tok.apply_chat({{"user", a.prompt}}) + turn_opening(tok, true) : a.prompt;
         SampleParams sp;
         sp.temperature = a.temp;
         sp.max_tokens = a.n_predict;

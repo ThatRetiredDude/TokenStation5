@@ -62,6 +62,12 @@ bool Engine::set_drafter(Model &dm, Backend *db, std::string &err) {
     std::unique_ptr<Backend> b(db);
     std::string note;
     if (!t_.drafter_vocab_ok(dm.gguf, err, note)) return false;
+    // Its rejected guesses are written over, which a state that only goes
+    // forward can't take.
+    if (b->rewind_limit() < 8 || b_->rewind_limit() < 8) {
+        err = "a model with linear layers (their state only goes forward) can't draft or be drafted for";
+        return false;
+    }
     if (!note.empty()) ts5::log_line("ts5: draft model: %s", note.c_str());
     dm_ = &dm;
     db_ = std::move(b);
@@ -201,9 +207,32 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     if (keep == prompt.size()) keep--;
     // A sliding layer's ring may no longer hold the keys before `keep`: then
     // the whole prompt again (each of those keys depends on the ones before).
-    if (written_ - (int)keep > b_->rewind_limit()) keep = 0;
+    // A state that only goes forward (Qwen3.5) goes back to its saved copy
+    // where that is within the shared prefix.
+    std::string serr;
+    if (written_ - (int)keep > b_->rewind_limit()) {
+        if (saved_ > 0 && saved_ <= (int)keep && b_->restore_state(serr)) {
+            keep = saved_;
+            written_ = saved_;
+        } else {
+            keep = 0;
+        }
+    }
+    if ((int)keep < saved_) saved_ = -1;  // what it holds is written over
     if (keep == 0) written_ = 0;
     cached_.resize(keep);
+    // Such a state is saved where the prompt's last turn starts (its last
+    // <|im_start|>): a conversation's next request shares the prompt up to
+    // there, the model's answer and the new message coming after it.
+    int save_at = -1;
+    if (b_->rewind_limit() == 0) {
+        const int32_t turn = t_.token_id("<|im_start|>");
+        for (size_t i = prompt.size(); turn >= 0 && i-- > keep + 1;)
+            if (prompt[i] == turn) {
+                save_at = (int)i;
+                break;
+            }
+    }
     if (dcached_ > keep) dcached_ = keep;
     // On unified memory the logits are sampled in place; the scratch vectors
     // are for backends without a view.
@@ -211,8 +240,10 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     std::vector<float> logits(in_place ? 0 : nv);
     double t0 = now_ms();
     const int chunk = 256;
-    for (size_t i = keep; i < prompt.size(); i += chunk) {
-        int n = (int)std::min<size_t>(chunk, prompt.size() - i);
+    int n = 0;
+    for (size_t i = keep; i < prompt.size(); i += (size_t)n) {
+        n = (int)std::min<size_t>(chunk, prompt.size() - i);
+        if (save_at > (int)i && save_at < (int)i + n) n = save_at - (int)i;
         // Only the last chunk's logits are wanted; with a view, the chunks
         // before it skip the vocabulary matmul entirely.
         const bool last = i + (size_t)n >= prompt.size();
@@ -222,6 +253,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         if (!ok) { cached_.clear(); dcached_ = 0; return false; }
         written_ = std::max(written_, (int)(i + n));
         cached_.insert(cached_.end(), prompt.begin() + i, prompt.begin() + i + n);
+        if ((int)i + n == save_at && b_->save_state(serr)) saved_ = save_at;
     }
     st.prompt_evaluated = (int)(prompt.size() - keep);
     // Each step forwards the next token plus up to `dmax` lookup-drafted
@@ -241,6 +273,9 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // to 8 tokens; past that a batch goes through the prompt kernels, which
     // round differently, and the output would no longer be the same.
     if (dmax > 7) dmax = 7;
+    // Rejected drafts are taken back by writing over them, which a backend
+    // that only goes forward (Qwen3.5's linear layers) can't do.
+    if (dmax > b_->rewind_limit()) dmax = b_->rewind_limit();
     gram3_.clear();
     gram2_.clear();
     if (dmax > 0) {

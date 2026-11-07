@@ -14,7 +14,8 @@
 namespace ts5 {
 
 static bool supported_arch(const std::string &a) {
-    return a == "llama" || a == "mistral" || a == "qwen2" || a == "qwen3" || a == "gemma3" || a == "gemma4";
+    return a == "llama" || a == "mistral" || a == "qwen2" || a == "qwen3" || a == "gemma3" || a == "gemma4" ||
+           a == "qwen35";
 }
 
 // A value that is one number for every layer or a list with one per layer
@@ -56,6 +57,50 @@ bool Model::open(const std::string &path, std::string &err) {
     hp.n_head = (int)gguf.get_int(a + "attention.head_count", 0);
     hp.n_head_kv = (int)gguf.get_int(a + "attention.head_count_kv", hp.n_head);
     hp.head_dim = (int)gguf.get_int(a + "attention.key_length", hp.n_head ? hp.n_embd / hp.n_head : 0);
+    if (hp.arch == "qwen35") {
+        // block_count counts the multi-token-prediction layer, which comes
+        // after the others and isn't run (its weights are often left out).
+        hp.n_layer -= (int)gguf.get_int(a + "nextn_predict_layers", 0);
+        hp.ssm_conv = (int)gguf.get_int(a + "ssm.conv_kernel", 0);
+        hp.ssm_state = (int)gguf.get_int(a + "ssm.state_size", 0);
+        hp.ssm_k_heads = (int)gguf.get_int(a + "ssm.group_count", 0);
+        hp.ssm_v_heads = (int)gguf.get_int(a + "ssm.time_step_rank", 0);
+        if (hp.n_layer <= 0 || hp.ssm_conv < 2 || hp.ssm_state <= 0 || hp.ssm_k_heads <= 0 ||
+            hp.ssm_v_heads % hp.ssm_k_heads != 0 ||
+            gguf.get_int(a + "ssm.inner_size", 0) != (int64_t)hp.ssm_v_heads * hp.ssm_state) {
+            err = "qwen35: linear attention hyperparameters missing or inconsistent";
+            return false;
+        }
+        if (gguf.has(a + "expert_count") && gguf.get_int(a + "expert_count", 0) > 0) {
+            err = "qwen35: mixture-of-experts models are not supported";
+            return false;
+        }
+        // Which layers are linear: a list in the file, else all but every
+        // full_attention_interval-th.
+        hp.rec_layers.assign(hp.n_layer, 0);
+        if (const GgufArray *rl = gguf.get_arr(a + "attention.recurrent_layers")) {
+            if ((int)rl->size() < hp.n_layer) { err = "qwen35: recurrent_layers is shorter than the layers"; return false; }
+            for (int l = 0; l < hp.n_layer; l++) {
+                const int64_t *v = std::get_if<int64_t>(&(*rl)[l]);
+                hp.rec_layers[l] = v && *v != 0;
+            }
+        } else {
+            const int every = (int)gguf.get_int(a + "full_attention_interval", 4);
+            for (int l = 0; l < hp.n_layer; l++) hp.rec_layers[l] = every > 0 && (l + 1) % every != 0;
+        }
+        hp.attn_gate = true;
+        // M-RoPE: text puts one position on every axis, so it is plain RoPE
+        // as long as the sections cover all rotated pairs (else some would
+        // take a fourth axis's position, which text doesn't have).
+        int64_t sect = 0;
+        if (const GgufArray *s = gguf.get_arr(a + "rope.dimension_sections"))
+            for (auto &v : *s)
+                if (const int64_t *i = std::get_if<int64_t>(&v)) sect += *i;
+        if (sect * 2 != gguf.get_int(a + "rope.dimension_count", 0)) {
+            err = "qwen35: M-RoPE sections that don't cover the rotated dimensions are not supported";
+            return false;
+        }
+    }
     if (hp.arch == "gemma4") {
         // Which layers slide is a list in the file; the sliding and the full
         // layers have their own K/V head counts, head sizes and RoPE
@@ -100,7 +145,8 @@ bool Model::open(const std::string &path, std::string &err) {
     hp.rms_eps = (float)gguf.get_float(a + "attention.layer_norm_rms_epsilon", 1e-6);
     hp.rope_base = (float)gguf.get_float(a + "rope.freq_base", 10000.0);
     hp.rope_dims = (int)gguf.get_int(a + "rope.dimension_count", hp.head_dim);
-    hp.rope_neox = hp.arch == "qwen2" || hp.arch == "qwen3" || hp.arch == "gemma3" || hp.arch == "gemma4";
+    hp.rope_neox = hp.arch == "qwen2" || hp.arch == "qwen3" || hp.arch == "gemma3" || hp.arch == "gemma4" ||
+                   hp.arch == "qwen35";
     if (!hp.n_embd || !hp.n_layer || !hp.n_ff || !hp.n_head) {
         err = "missing hyperparameters";
         return false;
@@ -192,26 +238,59 @@ bool Model::bind(std::string &err) {
         auto n = [&](const char *s) { return "blk." + std::to_string(i) + "." + s; };
         Layer &L = layers[i];
         L.attn_norm = weight(n("attn_norm.weight"), true, err);
-        L.wq = weight(n("attn_q.weight"), true, err);
-        L.wk = weight(n("attn_k.weight"), true, err);
+        const bool rec = hp.rec(i);
+        L.wq = weight(n("attn_q.weight"), !rec, err);
+        L.wk = weight(n("attn_k.weight"), !rec, err);
         // Gemma 4's full layers have no V projection: V is K, normalized.
-        L.wv = weight(n("attn_v.weight"), hp.arch != "gemma4", err);
-        L.wo = weight(n("attn_output.weight"), true, err);
+        L.wv = weight(n("attn_v.weight"), hp.arch != "gemma4" && !rec, err);
+        L.wo = weight(n("attn_output.weight"), !rec, err);
+        if (rec) {
+            L.wqkv = weight(n("attn_qkv.weight"), true, err);
+            L.wz = weight(n("attn_gate.weight"), true, err);
+            L.ssm_conv1d = weight(n("ssm_conv1d.weight"), true, err);
+            L.ssm_dt = weight(n("ssm_dt.bias"), true, err);
+            L.ssm_a = weight(n("ssm_a"), true, err);
+            L.ssm_beta = weight(n("ssm_beta.weight"), true, err);
+            L.ssm_alpha = weight(n("ssm_alpha.weight"), true, err);
+            L.ssm_norm = weight(n("ssm_norm.weight"), true, err);
+            L.ssm_out = weight(n("ssm_out.weight"), true, err);
+        }
         L.bq = weight(n("attn_q.bias"), false, err);
         L.bk = weight(n("attn_k.bias"), false, err);
         L.bv = weight(n("attn_v.bias"), false, err);
         L.q_norm = weight(n("attn_q_norm.weight"), false, err);
         L.k_norm = weight(n("attn_k_norm.weight"), false, err);
-        L.ffn_norm = weight(n("ffn_norm.weight"), true, err);
+        // Qwen3.5 calls the norm before the FFN post_attention_norm.
+        L.ffn_norm = weight(n(hp.arch == "qwen35" ? "post_attention_norm.weight" : "ffn_norm.weight"), true, err);
         L.w_gate = weight(n("ffn_gate.weight"), true, err);
         L.w_up = weight(n("ffn_up.weight"), true, err);
         L.w_down = weight(n("ffn_down.weight"), true, err);
         const bool gemma = hp.arch == "gemma3" || hp.arch == "gemma4";
-        L.post_attn_norm = weight(n("post_attention_norm.weight"), gemma, err);
-        L.post_ffn_norm = weight(n("post_ffw_norm.weight"), gemma, err);
+        if (gemma) {
+            L.post_attn_norm = weight(n("post_attention_norm.weight"), true, err);
+            L.post_ffn_norm = weight(n("post_ffw_norm.weight"), true, err);
+        }
         L.out_scale = weight(n("layer_output_scale.weight"), false, err);
         if (L.out_scale && (L.out_scale.type() != GGML_F32 || L.out_scale.info->nelements() != 1) && err.empty())
             err = n("layer_output_scale.weight") + ": not one f32 value";
+        if (hp.arch == "qwen35" && err.empty()) {
+            // The shapes the kinds of layers call for, and f32 for the small
+            // vectors the kernels read as floats.
+            const int64_t q = (int64_t)hp.n_head * hp.head_dim, kv = (int64_t)hp.n_head_kv * hp.head_dim;
+            const int64_t inner = hp.ssm_inner(), vh = hp.ssm_v_heads;
+            bool ok = true;
+            if (rec) {
+                ok = L.wqkv.ne1() == hp.ssm_conv_dim() && L.wz.ne1() == inner && L.ssm_out.ne0() == inner &&
+                     L.ssm_conv1d.ne0() == hp.ssm_conv && L.ssm_conv1d.ne1() == hp.ssm_conv_dim() &&
+                     L.ssm_beta.ne1() == vh && L.ssm_alpha.ne1() == vh && L.ssm_dt.info->nelements() == vh &&
+                     L.ssm_a.info->nelements() == vh && L.ssm_norm.info->nelements() == hp.ssm_state;
+                for (const Weight *w : {&L.ssm_conv1d, &L.ssm_dt, &L.ssm_a, &L.ssm_norm}) ok &= w->type() == GGML_F32;
+            } else {
+                ok = L.wq.ne1() == 2 * q && L.wk.ne1() == kv && L.wv.ne1() == kv && L.wo.ne0() == q && L.q_norm &&
+                     L.k_norm && L.q_norm.info->nelements() == hp.head_dim;
+            }
+            if (!ok) err = "layer " + std::to_string(i) + ": qwen35 shapes or types don't match the hyperparameters";
+        }
         if (hp.arch == "gemma4" && err.empty()) {
             // The shapes the kinds of layers call for.
             const int64_t q = (int64_t)hp.n_head * hp.hd(i), kv = (int64_t)hp.hkv(i) * hp.hd(i);

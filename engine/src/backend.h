@@ -36,6 +36,14 @@ public:
     // may start and still find the keys it needs: a sliding layer's ring
     // (Gemma 3) holds only so many positions; unlimited elsewhere.
     virtual int rewind_limit() const { return 1 << 30; }
+    // A backend whose state only goes forward (rewind_limit() 0: Qwen3.5's
+    // linear layers) keeps one copy of it, so a conversation's next request
+    // goes on from where the last turn started, not from the start:
+    // save_state() copies the state as it stands, after the tokens forwarded
+    // so far; restore_state() puts the copy back, and the next forward goes
+    // on from its tokens. false: no copy kept (or none saved).
+    virtual bool save_state(std::string &) { return false; }
+    virtual bool restore_state(std::string &) { return false; }
     virtual KvType kv_type() const { return KvType::F32; }
     // Since the last call, a few lines of text: with TS5_PROFILE set (vk),
     // the CPU's time per forward call, and with TS5_PROFILE=1 also the GPU's

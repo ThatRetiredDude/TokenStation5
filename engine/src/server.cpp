@@ -447,15 +447,21 @@ void handle(int fd, Server::State &state, Usage &u) {
         // leave the answer empty. A request that says nothing gets the
         // model's known-good choice (known-good.tsv's thinking).
         std::string opening;  // what opens the model's turn
-        if (chat && can_skip_thinking(e.tok())) {
-            const Json &kw = req["chat_template_kwargs"]["enable_thinking"];
-            const Json &asked = kw.type == Json::BOOL ? kw : req["enable_thinking"];
-            const bool think = asked.type == Json::BOOL            ? asked.boolean(true)
-                               : req["reasoning_effort"].str() == "none" ? false
-                               : limit >= 1 && limit < kThinkRoom        ? false
-                                                                         : state.think;
-            if (!think) opening = kNoThinking;
+        if (chat) {
+            bool think = true;
+            if (can_skip_thinking(e.tok())) {
+                const Json &kw = req["chat_template_kwargs"]["enable_thinking"];
+                const Json &asked = kw.type == Json::BOOL ? kw : req["enable_thinking"];
+                think = asked.type == Json::BOOL                    ? asked.boolean(true)
+                        : req["reasoning_effort"].str() == "none" ? false
+                        : limit >= 1 && limit < kThinkRoom        ? false
+                                                                  : state.think;
+            }
+            opening = turn_opening(e.tok(), think);
         }
+        // A turn that opens in its thinking (Qwen3.5) reads as if the model
+        // had written the <think> itself: its text starts with it.
+        const std::string seed = opening == kThinkingOpen ? opening : std::string();
         if (chat) {
             msgs = parse_messages(req["messages"]);
             if (tf != ToolFormat::NONE && req["tool_choice"].str() != "none") {
@@ -595,7 +601,7 @@ void handle(int fd, Server::State &state, Usage &u) {
         // searches and lets it go on, so one request can be several turns.
         for (int round = 0;; round++) {
             const std::vector<int32_t> toks = round == 0 ? std::move(first_toks) : encode();
-            std::string text;
+            std::string text = seed;
             size_t sent = 0;  // bytes of this turn's `text` already streamed
             size_t thought = 0;  // and of its thinking, as reasoning_content
             {
@@ -727,6 +733,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             std::vector<std::string> names;
             for (const Json &t : tools) names.push_back(t["function"]["name"].str());
             ParsedTurn pt = parse_turn(tf, text, names);
+            fit_to_schemas(pt.calls, tools);
             // A call to a tool the request doesn't have is the model making
             // one up (say_hello for "Say hello in one word.", math.multiply
             // for "What is 7 times 6?", seen on the console): no tool fits,
@@ -811,7 +818,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                 }
                 log_line("ts5: %s %s", id.c_str(), log.c_str());
             }
-            prompt += text + render_results(tf, searches, results) + opening;
+            prompt += text.substr(seed.size()) + render_results(tf, searches, results) + opening;
         }
         {
             std::lock_guard<std::mutex> g(state.stats);

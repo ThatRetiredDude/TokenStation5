@@ -28,7 +28,11 @@ constexpr size_t kHeaderBytes = 2u << 20;
 
 // What ts5 runs (model.cpp), and the file types its GPU code takes
 // (vk_backend.cpp), as the file names say them, in the order they're offered.
-const char *const kArchs[] = {"llama", "mistral", "qwen2", "qwen3", "gemma3"};
+const char *const kArchs[] = {"llama", "mistral", "qwen2", "qwen3", "gemma3",
+#ifdef TS5_LINUX
+                              "qwen35",  // checked on the Linux edition only so far
+#endif
+};
 const char *const kQuants[] = {"Q4_K_M", "Q4_K_S", "Q5_K_M", "Q5_K_S", "Q6_K", "Q8_0",
                                "Q4_0",   "Q5_0",   "Q4_1",   "Q5_1",   "F16"};
 
@@ -336,6 +340,8 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
                     const double bytes = f["lfs"]["size"].num(f["size"].num(0));
                     if (f["type"].str() != "file" || q < 0 || oid.size() != 64 || bytes <= 0) continue;
                     if (path.find('/') != std::string::npos) continue;  // in a folder: the PS5 keeps one level
+                    // A vision model's image encoder (Qwen3.5 and Gemma repos carry one) isn't a model to chat with.
+                    if (lower(path).find("mmproj") != std::string::npos) continue;
                     files.push_back({path, oid, (uint64_t)bytes, q});
                 }
                 std::stable_sort(files.begin(), files.end(), [](const File &a, const File &b) { return a.quant < b.quant; });

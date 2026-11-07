@@ -18,9 +18,9 @@ small enough to reason about.
 
 | | v0 (this) | later |
 | --- | --- | --- |
-| Architectures | `llama` (Llama, Mistral, Mistral Nemo), `qwen2` (Qwen 2.5, Qwen 2.5 Coder), `qwen3`, `gemma3` (sliding-window layers in a ring cache, GELU, extra norms), `gemma4` (the dense 12B and 31B: see below) | `qwen35` (Gated DeltaNet), Gemma 4 E2B/E4B (per-layer embeddings, shared KV layers) and 26B A4B (experts) |
+| Architectures | `llama` (Llama, Mistral, Mistral Nemo), `qwen2` (Qwen 2.5, Qwen 2.5 Coder), `qwen3`, `gemma3` (sliding-window layers in a ring cache, GELU, extra norms), `gemma4` (the dense 12B and 31B: see below), `qwen35` (Qwen3.5's dense models: Gated DeltaNet layers, see below) | Qwen3.5's experts (`qwen35moe`) and its MTP head, Gemma 4 E2B/E4B (per-layer embeddings, shared KV layers) and 26B A4B (experts) |
 | Weight types | F32, F16, Q4_0, Q8_0, Q4_K, Q5_K, Q6_K (all of Q4_K_M / Q5_K_M) | IQ quants, Q3_K / Q2_K |
-| Tokenizers | byte-level BPE (Qwen2, Llama 3 pre-tokenizers), SentencePiece (Llama 2, Gemma 3), Gemma 4's (BPE merges over code points, spaces as U+2581, split only at newlines) | Tekken's case-splitting pre-tokenizer (approximated now) |
+| Tokenizers | byte-level BPE (Qwen2, Llama 3 and Qwen3.5 pre-tokenizers, with Unicode's letter, mark and number classes from a generated table), SentencePiece (Llama 2, Gemma 3), Gemma 4's (BPE merges over code points, spaces as U+2581, split only at newlines) | Tekken's case-splitting pre-tokenizer (approximated now) |
 | Chat formats | ChatML, Llama 3, Mistral `[INST]` | Jinja templates, tool calls |
 | API | `/v1/chat/completions` (+ streaming), `/v1/completions`, `/v1/models`, `/health`; llama-server style `timings` | Anthropic `/v1/messages`, parallel slots |
 | KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`) | |
@@ -116,6 +116,37 @@ chat format is `<|turn>role\n...<turn|>\n`, with the model's turn opened by an
 empty thought channel (`<|channel>thought\n<channel|>`) as the template does
 with thinking off; thinking on and its native tool-call format are not
 rendered yet.
+
+Qwen3.5 (`qwen35`, the dense 0.8B to 27B) has one full-attention layer in
+four (`full_attention_interval`; the 9B's layers 3, 7, ... 31) and Gated
+DeltaNet layers between them, whose memory is a fixed-size state instead of
+a cache. The file counts its MTP layer in `block_count` (`nextn_predict_layers`,
+weights not in the file), which `HParams` takes off. A full layer's `attn_q`
+gives each head's query and a gate side by side (`split_gate.comp`); the
+attention output is multiplied by the gate's sigmoid (`gate_mul.comp`), Q and
+K are RMS-normed per head, and RoPE turns the first quarter of each head
+(M-RoPE sections that, for text, are plain NeoX RoPE). A linear layer
+projects x to Q, K, V (`attn_qkv`) and to a gate z (`attn_gate`), runs a
+causal convolution of 4 taps over QKV with SiLU (`ssm_conv.comp`, the last
+3 inputs kept in the state), L2-norms each Q and K head and scales Q by
+1/sqrt(128), and turns `ssm_beta` and `ssm_alpha` into each value head's
+write strength (a sigmoid) and decay (exp(softplus(a + dt) * A)) in
+`gdn_prep.comp`. `gdn_scan.comp` then walks the tokens in order: per value
+head (32 in the 9B, reading key head h mod 16) a 128 x 128 state S decays,
+takes the delta rule's write S += k (beta (v - S^T k))^T and answers
+o = S^T q; each thread keeps one column of S in registers. The output is
+RMS-normed per head with `ssm_norm`, multiplied by silu(z) (`gdn_norm.comp`)
+and goes through `ssm_out`. The CPU reference does the same in double sums
+and matches llama.cpp on the test models. The state (2.2 MB a layer in the
+9B) can't go back, so a backend with linear layers has `rewind_limit()` 0:
+no drafting and no helper, and a prompt that doesn't go on from the last
+one is read from the start, except that the engine saves the state where a
+prompt's last turn starts (its last `<|im_start|>`, `save_state()`) and
+goes back to it for the next request of the same conversation. Only the 8
+full layers have a KV cache, 32 KiB a token in f16. Its chat template opens
+the model's turn inside its thinking (`<think>\n`, `turn_opening()`), and
+its tool calls are `<function=NAME>` with `<parameter=KEY>` elements, whose
+values the tools' schemas type (`fit_to_schemas()`).
 
 Then the output norm and the vocabulary matmul for the last token (or every
 token for tests). Prompts are processed 256 tokens per call; big batches are

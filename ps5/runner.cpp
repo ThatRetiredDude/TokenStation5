@@ -319,6 +319,12 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
         }
     }
 #endif
+    // A linear layer's state (Qwen3.5) only goes forward: a rejected draft
+    // couldn't be taken back, so no helper.
+    if (dp && *dp && hp.rec_count() > 0) {
+        printf("ts5: helper not used: %s's linear layers keep a state that only goes forward\n", l->file.c_str());
+        dp = nullptr;
+    }
     uint64_t dreserve = 0;
     std::string derr;
     bool no_room = false;  // the model fits only without the helper's room

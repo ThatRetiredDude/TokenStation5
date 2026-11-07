@@ -150,6 +150,13 @@
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "rmsnorm.spv.h"
+#include "split_gate.spv.h"
+#include "gate_mul.spv.h"
+#include "ssm_conv.spv.h"
+#include "gdn_prep.spv.h"
+#include "gdn_scan.spv.h"
+#include "gdn_norm.spv.h"
+#include "zero.spv.h"
 #include "rmsnorm2.spv.h"
 #include "softcap.spv.h"
 #include "swiglu.spv.h"
@@ -284,7 +291,9 @@ public:
     static constexpr size_t SPLIT = 12u << 20;  // floats of mmb's partial results, when it splits the rows
 
     VkBackend(VkContext *ctx, bool owns_ctx, Model &m, int n_ctx)
-        : ctx_(ctx), owns_ctx_(owns_ctx), m_(m), hp_(m.hp), n_ctx_(n_ctx) {}
+        : ctx_(ctx), owns_ctx_(owns_ctx), m_(m), hp_(m.hp), n_ctx_(n_ctx) {
+        rec_layers_ = hp_.rec_count();
+    }
     // Every submit has been waited for, so nothing of this backend's is in
     // flight on the shared queue.
     ~VkBackend() override {
@@ -344,6 +353,10 @@ public:
     void set_fit_reserve(uint64_t bytes) { fit_reserve_ = bytes; }
 
     bool init(const std::string &path, std::string &err) {
+        if (rec_layers_ && hp_.ssm_state != 128) {
+            err = "linear attention heads " + std::to_string(hp_.ssm_state) + " wide: the GPU kernels take 128";
+            return false;
+        }
         if (!init_device(err)) return false;
         if (!memory_fits(err)) return false;
         if (!init_pipelines(err)) return false;
@@ -386,7 +399,24 @@ public:
 
     const float *logits_view() const override { return (const float *)logits_.map; }
 
+    bool save_state(std::string &err) override {
+        if (!rec_layers_) return false;
+        const VkDeviceSize bytes = 4ull * rec_layers_ * hp_.rec_state_floats();
+        if (!saved_.buf && !create_buf(bytes, false, saved_, err)) return false;
+        if (!copy(rec_, saved_, 0, bytes, err)) return false;
+        saved_pos_ = rec_pos_;
+        return true;
+    }
+
+    bool restore_state(std::string &err) override {
+        if (!rec_layers_ || saved_pos_ < 0) return false;
+        if (!copy(saved_, rec_, 0, 4ull * rec_layers_ * hp_.rec_state_floats(), err)) return false;
+        rec_pos_ = saved_pos_;
+        return true;
+    }
+
     int rewind_limit() const override {
+        if (rec_layers_) return 0;  // the linear layers' state only goes forward
         for (int l = 0; l < hp_.n_layer; l++)
             if (ring_[l]) return (int)ring_[l] - hp_.swa_window + 1;
         return Backend::rewind_limit();
@@ -402,6 +432,16 @@ public:
 
     bool fwd(const int32_t *tokens, int n, int pos0, float *logits, bool all, bool want, std::string &err) {
         if (pos0 + n > n_ctx_) { err = "context full"; return false; }
+        // The linear layers' state holds the tokens before rec_pos_: a call
+        // goes on from there, or starts over at 0 (record zeroes it).
+        if (rec_layers_) {
+            if (pos0 != 0 && pos0 != rec_pos_) {
+                err = "the linear layers' state is at position " + std::to_string(rec_pos_) + ", not " +
+                      std::to_string(pos0);
+                return false;
+            }
+            rec_pos_ = pos0 + n;
+        }
         for (int i = 0; i < n; i += TMAX) {
             int c = std::min(TMAX, n - i);
             bool last = i + c == n;
@@ -835,6 +875,8 @@ private:
         if (lpk) { PD(attn_dec4_256, 0, lpk) PD(attn_dec4_512, 0, lpk) PD(attn_dec4_256w, 0, lpk) PD(attn_dec4_512w, 0, lpk) }
 #undef PD
         P(swiglu, 2) P(softcap, 1)
+        if (hp_.attn_gate) { P(split_gate, 2) P(gate_mul, 2) }
+        if (rec_layers_) { P(ssm_conv, 3) P(gdn_prep, 5) P(gdn_scan, 5) P(gdn_norm, 3) P(zero, 1) }
 #undef P
         return true;
     }
@@ -932,6 +974,16 @@ private:
             !mk(split_, 4ull * SPLIT) ||
             !mk(ids_, 4ull * TMAX, true) || !mk(logits_, 4ull * TMAX * hp_.n_vocab, true))
             return false;
+        // Qwen3.5: the full layers' queries with their gates, and the linear
+        // layers' projections, output and state.
+        if (hp_.attn_gate && !mk(qg_, 8ull * TMAX * QD)) return false;
+        if (rec_layers_) {
+            const size_t C = hp_.ssm_conv_dim(), I = hp_.ssm_inner(), NV = hp_.ssm_v_heads;
+            if (!mk(qkv_, 4ull * TMAX * C) || !mk(z_, 4ull * TMAX * I) || !mk(beta_, 4ull * TMAX * NV) ||
+                !mk(alpha_, 4ull * TMAX * NV) || !mk(y_, 4ull * TMAX * I) ||
+                !mk(rec_, 4ull * rec_layers_ * hp_.rec_state_floats()))
+                return false;
+        }
         // Each RoPE pair's turn per position (Model::rope_turn), for the full
         // and the sliding layers: high word, then low.
         for (int swa = 0; swa < 2; swa++) {
@@ -1584,6 +1636,86 @@ private:
     // Records a forward call of n tokens from pos0 into target (or cmds_),
     // with the logits where want, submitting and waiting for parts of a big
     // batch on the way; the last command buffer is left open in cmd_.
+    // A Qwen3.5 linear (Gated DeltaNet) layer on h_ (its normed input), its
+    // output added to the residual x_; state_off: its state in rec_ (the
+    // convolution's last inputs, then the heads' matrices). As
+    // cpu_backend.cpp's linear_attention: the projections, the convolution
+    // and SiLU (ssm_conv), Q and K normalized and beta and the decay worked
+    // out (gdn_prep), the delta rule over the tokens in order (gdn_scan),
+    // the gated norm (gdn_norm) and the output projection.
+    void linear_attention(const Layer &L, int n, uint32_t state_off) {
+        const uint32_t C = (uint32_t)hp_.ssm_conv_dim(), NK = (uint32_t)hp_.ssm_k_heads,
+                       NV = (uint32_t)hp_.ssm_v_heads, D = (uint32_t)hp_.ssm_state;
+        no_barrier_ = fuse_;
+        matmul(L.wz, h_, z_, n, false);
+        no_barrier_ = fuse_;
+        matmul(L.ssm_beta, h_, beta_, n, false);
+        no_barrier_ = fuse_;
+        matmul(L.ssm_alpha, h_, alpha_, n, false);
+        matmul(L.wqkv, h_, qkv_, n, false);
+        {
+            struct { uint32_t channels, taps, n, state_off; } pc{C, (uint32_t)hp_.ssm_conv, (uint32_t)n, state_off};
+            dispatch("ssm_conv", {&qkv_, &W(L.ssm_conv1d), &rec_}, pc, (C + 255) / 256);
+        }
+        {
+            struct { uint32_t dim, k_heads, v_heads, channels; float eps; } pc{D, NK, NV, C, hp_.rms_eps};
+            dispatch("gdn_prep", {&qkv_, &beta_, &alpha_, &W(L.ssm_dt), &W(L.ssm_a)}, pc, 2 * NK, (uint32_t)n);
+        }
+        {
+            const uint32_t heads_off = state_off + (uint32_t)(hp_.ssm_conv - 1) * C;
+            struct { uint32_t k_heads, v_heads, channels, n, state_off; } pc{NK, NV, C, (uint32_t)n, heads_off};
+            dispatch("gdn_scan", {&qkv_, &beta_, &alpha_, &rec_, &y_}, pc, NV * (D / 32));
+        }
+        {
+            struct { uint32_t dim, v_heads; float eps; } pc{D, NV, hp_.rms_eps};
+            dispatch("gdn_norm", {&y_, &z_, &W(L.ssm_norm)}, pc, NV, (uint32_t)n);
+        }
+        matmul(L.ssm_out, y_, x_, n, true);
+    }
+
+    // Layer l's FFN after its attention (whose output is in x_, or in h_ for
+    // Gemma's post-norm), through to the residual; pre_normed: whether the
+    // next layer's attention norm was done here too (Gemma's rmsnorm2).
+    void record_ffn(int l, const Layer &L, int n, bool &pre_normed) {
+        // The FFN's norm folds into gate+up when they run as one kernel
+        // (set only now: matmul folds norm_ into whatever it runs).
+        norm_ = n == 1 && glu_applies(L, n) && fold_norm(n, {&L.w_gate, &L.w_up}) ? &L.ffn_norm : nullptr;
+        if (L.post_attn_norm) {
+            // The post-norm and the FFN's norm run as one pass.
+            if (norm_)
+                rmsnorm(h_, L.post_attn_norm, x_, n, 0, true);
+            else
+                rmsnorm2(h_, L.post_attn_norm, x_, L.ffn_norm, h_, n);
+        } else if (!norm_) {
+            rmsnorm(x_, L.ffn_norm, h_, n);
+        }
+        const bool glu = ffn_glu(L, n);
+        norm_ = nullptr;
+        if (!glu) {
+            no_barrier_ = fuse_;
+            matmul(L.w_gate, h_, g_, n, false);
+            matmul(L.w_up, h_, u_, n, false);
+            struct { uint32_t n, gelu; } pc{(uint32_t)((size_t)n * hp_.n_ff), hp_.gelu ? 1u : 0u};
+            dispatch("swiglu", {&g_, &u_}, pc, std::min<uint32_t>(65535, (pc.n + 255) / 256));
+        }
+        if (L.post_ffn_norm) {
+            matmul(L.w_down, g_, h_, n, false);
+            const float mul = L.out_scale ? L.out_scale_v : 1.0f;
+            // With the next layer's attention norm, unless that folds
+            // into its projections.
+            const Layer *N = l + 1 < hp_.n_layer ? &m_.layers[l + 1] : nullptr;
+            const bool next_fold = N && (N->wv ? fold_norm(n, {&N->wq, &N->wk, &N->wv}) : fold_norm(n, {&N->wq, &N->wk}));
+            if (N && !next_fold) {
+                rmsnorm2(h_, L.post_ffn_norm, x_, N->attn_norm, h_, n, mul);
+                pre_normed = true;
+            } else {
+                rmsnorm(h_, L.post_ffn_norm, x_, n, 0, true, mul);
+            }
+        } else {
+            matmul(L.w_down, g_, x_, n, true);
+        }
+    }
+
     bool record(int n, int pos0, bool want, bool all, VkCommandBuffer target, std::string &err) {
         const int E = hp_.n_embd, H = hp_.n_head;
         // Big batches are split into several submits so no single submit
@@ -1600,10 +1732,29 @@ private:
             dispatch(std::string("get_rows_") + qname(m_.tok_embd.type()), {&W(m_.tok_embd), &ids_, &x_}, pc,
                      (uint32_t)n);
         }
+        if (rec_layers_ && pos0 == 0) {
+            const uint64_t nf = (uint64_t)rec_layers_ * hp_.rec_state_floats();
+            struct { uint32_t off, n; } pc{0, (uint32_t)nf};
+            dispatch("zero", {&rec_}, pc, std::min<uint32_t>(65535, (uint32_t)((nf + 255) / 256)));
+        }
         bool pre_normed = false;  // h_ already holds this layer's attention norm (rmsnorm2 at the end of the last)
+        uint32_t rec_off = 0;     // the next linear layer's state in rec_
         for (int l = 0; l < hp_.n_layer; l++) {
             const Layer &L = m_.layers[l];
             const int HD = hp_.hd(l), HKV = hp_.hkv(l);
+            if (hp_.rec(l)) {
+                if (!pre_normed) rmsnorm(x_, L.attn_norm, h_, n);
+                pre_normed = false;
+                linear_attention(L, n, rec_off);
+                rec_off += (uint32_t)hp_.rec_state_floats();
+                record_ffn(l, L, n, pre_normed);
+                if (per_flush && (l + 1) % per_flush == 0 && l + 1 < hp_.n_layer) {
+                    if (!flush(err)) return false;
+                } else if ((l + 1) % per_submit == 0 && l + 1 < hp_.n_layer) {
+                    if (!submit(err) || !begin(err)) return false;
+                }
+                continue;
+            }
             const bool fold_attn = L.wv ? fold_norm(n, {&L.wq, &L.wk, &L.wv}) : fold_norm(n, {&L.wq, &L.wk});
             if (!fold_attn && !pre_normed) rmsnorm(x_, L.attn_norm, h_, n);
             pre_normed = false;
@@ -1619,8 +1770,12 @@ private:
                 no_barrier_ = fuse_;
                 matmul(L.wv, hin, v_, n, false);
             }
-            matmul(L.wq, hin, q_, n, false);
+            matmul(L.wq, hin, hp_.attn_gate ? qg_ : q_, n, false);
             norm_ = nullptr;
+            if (hp_.attn_gate) {
+                struct { uint32_t hd, n; } pc{(uint32_t)HD, (uint32_t)((size_t)n * H * HD)};
+                dispatch("split_gate", {&qg_, &q_}, pc, std::min<uint32_t>(65535, (pc.n + 255) / 256));
+            }
             const uint32_t cache_off = layer_off_[l], kb = layer_buf_[l];
             const bool swa = hp_.swa(l);
             {
@@ -1642,48 +1797,16 @@ private:
                              (uint32_t)(H + HKV), (uint32_t)n);
             }
             attention(l, n, pos0, kb, cache_off, swa ? (uint32_t)hp_.swa_window : 0, ring_[l]);
+            if (hp_.attn_gate) {
+                struct { uint32_t hd, n; } pc{(uint32_t)HD, (uint32_t)((size_t)n * H * HD)};
+                dispatch("gate_mul", {&att_, &qg_}, pc, std::min<uint32_t>(65535, (pc.n + 255) / 256));
+            }
             // Gemma normalizes attention's output before it joins the residual.
             if (L.post_attn_norm)
                 matmul(L.wo, att_, h_, n, false);
             else
                 matmul(L.wo, att_, x_, n, true);
-            // The FFN's norm folds into gate+up when they run as one kernel
-            // (set only now: matmul folds norm_ into whatever it runs).
-            norm_ = n == 1 && glu_applies(L, n) && fold_norm(n, {&L.w_gate, &L.w_up}) ? &L.ffn_norm : nullptr;
-            if (L.post_attn_norm) {
-                // The post-norm and the FFN's norm run as one pass.
-                if (norm_)
-                    rmsnorm(h_, L.post_attn_norm, x_, n, 0, true);
-                else
-                    rmsnorm2(h_, L.post_attn_norm, x_, L.ffn_norm, h_, n);
-            } else if (!norm_) {
-                rmsnorm(x_, L.ffn_norm, h_, n);
-            }
-            const bool glu = ffn_glu(L, n);
-            norm_ = nullptr;
-            if (!glu) {
-                no_barrier_ = fuse_;
-                matmul(L.w_gate, h_, g_, n, false);
-                matmul(L.w_up, h_, u_, n, false);
-                struct { uint32_t n, gelu; } pc{(uint32_t)((size_t)n * hp_.n_ff), hp_.gelu ? 1u : 0u};
-                dispatch("swiglu", {&g_, &u_}, pc, std::min<uint32_t>(65535, (pc.n + 255) / 256));
-            }
-            if (L.post_ffn_norm) {
-                matmul(L.w_down, g_, h_, n, false);
-                const float mul = L.out_scale ? L.out_scale_v : 1.0f;
-                // With the next layer's attention norm, unless that folds
-                // into its projections.
-                const Layer *N = l + 1 < hp_.n_layer ? &m_.layers[l + 1] : nullptr;
-                const bool next_fold = N && (N->wv ? fold_norm(n, {&N->wq, &N->wk, &N->wv}) : fold_norm(n, {&N->wq, &N->wk}));
-                if (N && !next_fold) {
-                    rmsnorm2(h_, L.post_ffn_norm, x_, N->attn_norm, h_, n, mul);
-                    pre_normed = true;
-                } else {
-                    rmsnorm(h_, L.post_ffn_norm, x_, n, 0, true, mul);
-                }
-            } else {
-                matmul(L.w_down, g_, x_, n, true);
-            }
+            record_ffn(l, L, n, pre_normed);
             if (per_flush && (l + 1) % per_flush == 0 && l + 1 < hp_.n_layer) {
                 if (!flush(err)) return false;
             } else if ((l + 1) % per_submit == 0 && l + 1 < hp_.n_layer) {
@@ -1895,6 +2018,14 @@ private:
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
     Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_, rope_turn_[2];
+    // Qwen3.5: queries and gates (qg_); the linear layers' projections
+    // (qkv_, z_, beta_, alpha_), output (y_) and state (rec_, each linear
+    // layer's in turn, rec_state_floats() floats).
+    Buf qg_, qkv_, z_, beta_, alpha_, y_, rec_;
+    int rec_layers_ = 0;  // how many linear layers
+    int rec_pos_ = 0;     // the tokens rec_ holds
+    Buf saved_;           // save_state()'s copy of rec_
+    int saved_pos_ = -1;  // its tokens; -1: none
     std::vector<Buf> kc_, vc_, ks_, vs_;  // the KV cache's pieces
     // Each layer's first cache element and piece, and a sliding layer's ring slots (0: none).
     std::vector<uint32_t> layer_off_, layer_buf_, ring_;
@@ -1970,8 +2101,12 @@ uint64_t kv_ring_bytes(const HParams &hp, KvType kv) {
 uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
     const uint64_t T = VkBackend::TMAX, E = hp.n_embd, F = hp.n_ff;
     const uint64_t QD = (uint64_t)hp.max_qd(), KVD = (uint64_t)hp.max_kvd();
+    // Qwen3.5: the queries with their gates, the linear layers' projections
+    // and output, and their state twice (save_state's copy).
+    const uint64_t rec = hp.rec_count() ? (uint64_t)hp.ssm_conv_dim() + 2ull * hp.ssm_inner() + 2ull * hp.ssm_v_heads : 0;
     const uint64_t act =
-        4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab) + 4 * (VkBackend::PART + VkBackend::SPLIT);
+        4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab + (hp.attn_gate ? 2 * QD : 0) + rec) +
+        4 * (VkBackend::PART + VkBackend::SPLIT) + 8ull * hp.rec_count() * (uint64_t)std::max<int64_t>(0, hp.rec_state_floats());
     const uint64_t gib = 1ull << 30;
     return (weight_bytes + act + gib - 1) / gib * gib + kv_ring_bytes(hp, KvType::F16);
 }
