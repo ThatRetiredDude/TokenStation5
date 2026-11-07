@@ -191,8 +191,8 @@ Settings > MODELS > Helper model, Automatic by default: when the models
 folder has a small model with the same vocabulary as the one served, a
 quarter of its size or less (Qwen3 0.6B beside Qwen3 8B or 14B, and beside
 Qwen2.5 Coder 7B or DeepSeek R1 Distill Qwen 14B, Llama 3.2 1B in Q4_K_M
-beside Llama 3.1 8B, Gemma 3 1B beside Gemma 4 12B; the chat's control
-tokens may differ), it guesses a few tokens ahead and the big model
+beside Llama 3.1 8B, Gemma 3 1B beside Gemma 3 12B or Gemma 4 12B; the
+chat's control tokens may differ), it guesses a few tokens ahead and the big model
 checks them in one pass. The output is exactly what the big model alone writes; only
 the speed changes. The helper keeps a 16k context of its own (past that,
 drafting from the conversation's own text goes on). Off turns it off;
