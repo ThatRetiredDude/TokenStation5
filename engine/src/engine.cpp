@@ -236,8 +236,11 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // text the same: a pass of 8 tokens costs 2.59x one token, of 6 about 2x,
     // and the cost model still drafts fewer whenever acceptance drops.
     if (dmax < 0) dmax = 5;
-    if (dmax > 255) dmax = 255;  // the batch must fit one forward chunk: the vk
-                                 // in-place logits buffer holds 256 rows
+    // At most 7 (a batch of 8): the verify kernels (mvt_*, and attention's
+    // per-token key splits) reproduce the one-token forward bit for bit up
+    // to 8 tokens; past that a batch goes through the prompt kernels, which
+    // round differently, and the output would no longer be the same.
+    if (dmax > 7) dmax = 7;
     gram3_.clear();
     gram2_.clear();
     if (dmax > 0) {

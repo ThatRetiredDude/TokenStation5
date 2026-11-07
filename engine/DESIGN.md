@@ -360,13 +360,15 @@ the PS5 (8192 tokens: 4821 ms against 4350; prompts -2.2% at 4096, -4.7%
 at 16384), so the shared-memory reads are not what holds it back there;
 it was dropped.
 
-Generation with heads of 128 uses `shaders/attn_dec.glsl` from the first
-key, heads of 256 and 512 from 256 keys (`TS5_ATTN_DEC` sets how many for
-all; 0: never). The first-key start is from the PS5 on 2026-11-06: below
-256 keys attn_dec4 generates Qwen3 8B 2.7-3.1% faster than attn, Qwen3
-0.6B 8.9%, and chat with the 0.6B helper 6.4% (the helper's drafts and the
-verify batches get cheaper too), and the 8-row attn_dec Coder 7B 3.4% at
-64 tokens, each with the same check. attn_dec: up to 8
+Generation uses `shaders/attn_dec.glsl` from the first key (`TS5_ATTN_DEC`
+sets from how many; 0: never; any other start breaks the helper's
+same-output rule where a verify batch crosses it, see below). The
+first-key start is from the PS5 on 2026-11-06 and 07: below 256 keys
+attn_dec4 generates Qwen3 8B 2.7-3.1% faster than attn, Qwen3 0.6B 8.9%,
+and chat with the 0.6B helper 6.4% (the helper's drafts and the verify
+batches get cheaper too), the 8-row attn_dec Coder 7B 3.4% at 64 tokens
+and attn_dec4_256 Gemma 3 12B 0.7% (Gemma 4 12B 1.0%), each with the same
+check. attn_dec: up to 8
 rows per workgroup (`attn_dec`; `attn_dec4` for 4, where a KV head has 3 or
 4 query heads), its slice of the keys 128 at a time. Thread t scores key t
 against every row, reading the key's 256 bytes straight from the cache; the
@@ -478,8 +480,24 @@ at a near-tie. The chains (from `s += dot(w, x)` per 4 values and a
 combine of 7 operations a row and token) cut the batch kernel's VALU
 instructions 7-10% (Q4_K, 4 rows, 2-8 tokens) and its registers enough
 for one more wave at 4 and 8 tokens. Any change to a batch kernel is checked by `ts5 logits` with
-and without `--step`, whose dumps must agree at position 0 (later
-positions differ through attention). The feed-forward's gate and up,
+and without `--step`, whose dumps must agree at position 0 (a prompt's
+attention differs from generation's), and by `ts5 logits --verify K`
+(K tokens a call with every position's logits, as drafts are checked),
+whose dump must be `--step`'s byte for byte at every position. Attention
+holds to the same rule: a batch of up to 8 tokens takes generation's
+kernel (attn_dec from the first key wherever it serves the heads; attn_pf
+only from 9 tokens), one token a workgroup, and each token's keys are
+split into slices in the kernel exactly as a one-token call at its
+position splits them (the slice count from the workgroups one token has
+and the partial results 8 tokens' slices fit); a batch's earlier tokens
+get empty slices past their own last one, and attn_merge adds slice s
+into sum s % 4 however many there are, so those change nothing. Before
+that, a batch split all its tokens' keys by its last token's count, and
+by 2026-11-07 the PS5 showed it: on Gemma 3 12B (heads of 256, whose
+attn_dec started at 256 keys, and attn's 8-key tiles below) 7 of 14
+drafting runs wrote a different word or line break than one token at a
+time on one of 10 prompts. Drafts are capped at 7 a step for the same
+reason: a bigger batch goes through the prompt kernels. The feed-forward's gate and up,
 the two biggest lines of a verify pass, can run as one kernel
 (`TS5_MVT_GLU=1` picks `mvt_glu_q4_k`): both matrices' blocks are dotted
 with the same x loads and swiglu is applied in place, as `mv16_glu_q4_k`

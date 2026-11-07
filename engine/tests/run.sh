@@ -303,6 +303,24 @@ for m in qwen2-Q4_K_M qwen2-kmix qwen2-mk-Q5_K_M; do
         cmp -n $n "$work/vt-batch.bin" "$work/vt-step.bin"
     done
 done
+# And at every position, attention included: `logits --verify K` runs K
+# tokens a call with every position's logits, as a helper's drafts are
+# checked, and its dump must be --step's byte for byte (each token's keys
+# split as one token's would be, slices merged in a fixed order): heads of
+# 128 (7 a KV head), 64 and 256, Q4_K, and Gemma 4's 512 with its 8-token
+# window; batches of 6 and 8, forced key slices, the 8-bit cache. 140
+# tokens: more than one 128-key slice for attn_dec. (The build before this
+# rule failed it on the heads of 256 and with the forced slices.)
+vt=$(seq 3 7 975)
+for m in "${shapes[1]}" "${shapes[2]}" "${shapes[3]}" "$work/qwen2-Q4_K_M.gguf" "$work/gemma4-kmix.gguf"; do
+    for e in "TS5_ATTN_SPLITS=0:6 8" "TS5_ATTN_SPLITS=3:8" "TS5_KV=q8:6"; do
+        env ${e%%:*} "$ts5" logits -m "$m" -o "$work/vf-step.bin" --step $vt 2> /dev/null
+        for k in ${e#*:}; do
+            env ${e%%:*} "$ts5" logits -m "$m" -o "$work/vf-verify.bin" --verify $k $vt 2> /dev/null
+            cmp "$work/vf-verify.bin" "$work/vf-step.bin"
+        done
+    done
+done
 rep="one two three one two three one two three one two three one two"
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-off.txt" 2> /dev/null
 TS5_DRAFT=7 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/sd-on.txt" 2> "$work/sd-on.err"

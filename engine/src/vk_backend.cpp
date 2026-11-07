@@ -251,7 +251,7 @@ static bool fast_type(const Weight &w) {
 class VkBackend : public Backend {
 public:
     static constexpr int TMAX = 256;  // tokens per forward call
-    static constexpr size_t PART = 1u << 20;  // floats of attn's partial results, when it splits the keys
+    static constexpr size_t PART = 1u << 22;  // floats of attn's partial results, when it splits the keys
     static constexpr size_t SPLIT = 12u << 20;  // floats of mmb's partial results, when it splits the rows
 
     VkBackend(VkContext *ctx, bool owns_ctx, Model &m, int n_ctx)
@@ -1305,32 +1305,56 @@ private:
         const uint32_t dec_max = HD <= 128 ? 8 : 4;
         uint32_t dec_split = 1;
         while (G_all / dec_split > dec_max && (G_all / dec_split) % 2 == 0) dec_split *= 2;
-        // From the first key for heads of 128 and 64 (attn_dec4 or attn_dec,
-        // and their _64 builds), from 256 for the wide heads.
-        const uint32_t dec_from = attn_dec_min_ >= 0 ? (uint32_t)attn_dec_min_ : HD <= 128 ? 1u : 256u;
+        // From the first key wherever attn_dec serves the heads (128 and 64,
+        // and with lanes per key 256 and 512), so a verify batch and the
+        // one-token calls it stands for take the same kernel at any length.
+        const uint32_t dec_from = attn_dec_min_ >= 0 ? (uint32_t)attn_dec_min_ : 1u;
         const bool dec =
             !pf && dec_from && keys >= dec_from && (HD == 128 || h64 || wide) && G_all / dec_split <= dec_max;
         const uint32_t hsplit = pf ? 1 : dec ? dec_split : head_split(l), G = G_all / hsplit;
         const uint32_t dec_rows = G <= 4 ? 4 : 8;
-        const uint32_t tq = pf ? pf_rows / G : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / G);
+        // Generation and verify batches (at most 8 tokens; attn_pf takes 9 or
+        // more): one token a workgroup, and each token's keys split in the
+        // kernel as a one-token call at its position would split them, so
+        // speculative decoding's verify reproduces generation bit for bit.
+        const bool per_tok = n <= 8 && !pf;
+        const uint32_t tq = pf ? pf_rows / G : per_tok ? 1 : dec ? dec_rows / G : std::max<uint32_t>(1, 1024 / HD / G);
         const uint32_t groups = HKV * hsplit * (((uint32_t)n + tq - 1) / tq);
         // Few workgroups for many keys (generation, or a short prompt late in
         // a chat): split the keys so every compute unit gets some, about 256
-        // workgroups and 32 keys or more each (attn_dec: 128).
+        // workgroups and 32 keys or more each (attn_dec: 128). One token's
+        // rule takes at most s_max slices, from its workgroups as one token
+        // has them and the partial results 8 tokens' slices fit.
         const uint32_t bk = dec ? 128u : pf ? 32u : std::min(32u, 2048 / HD), min_keys = dec ? 128u : 32u;
-        uint32_t n_split = 1;
-        const uint32_t fit = (uint32_t)(PART / ((size_t)n * H * (HD + 2)));
-        if (groups < 64) n_split = std::min({(256 + groups - 1) / groups, (keys + min_keys - 1) / min_keys, 64u, fit});
-        if (attn_splits_) n_split = std::min({(uint32_t)attn_splits_, keys, 64u, fit});
-        n_split = std::max(1u, n_split);
-        uint32_t chunk = (keys + n_split - 1) / n_split;
-        chunk = (chunk + bk - 1) / bk * bk;
-        n_split = (keys + chunk - 1) / chunk;
+        const uint32_t g1 = HKV * hsplit, fit8 = (uint32_t)(PART / (8 * (size_t)H * (HD + 2)));
+        uint32_t s_max = g1 < 64 ? std::min({(256 + g1 - 1) / g1, 64u, fit8}) : 1, s_keys = min_keys;
+        if (attn_splits_) s_max = std::min({(uint32_t)attn_splits_, 64u, fit8}), s_keys = 1;
+        s_max = std::max(1u, s_max);
+        uint32_t n_split = 1, chunk = 0;
+        if (per_tok) {
+            // The most slices any of the tokens takes (the kernel's tok_chunk).
+            for (uint32_t t = 0; t < (uint32_t)n; t++) {
+                const uint32_t p1 = (uint32_t)pos0 + t + 1, lo = win && p1 > win ? p1 - win : 0, kt = p1 - lo;
+                const uint32_t ns = std::max(1u, std::min(s_max, (kt + s_keys - 1) / s_keys));
+                const uint32_t c = ((kt + ns - 1) / ns + bk - 1) / bk * bk;
+                n_split = std::max(n_split, (kt + c - 1) / c);
+            }
+        } else {
+            const uint32_t fit = (uint32_t)(PART / ((size_t)n * H * (HD + 2)));
+            if (groups < 64) n_split = std::min({(256 + groups - 1) / groups, (keys + min_keys - 1) / min_keys, 64u, fit});
+            if (attn_splits_) n_split = std::min({(uint32_t)attn_splits_, keys, 64u, fit});
+            n_split = std::max(1u, n_split);
+            chunk = (keys + n_split - 1) / n_split;
+            chunk = (chunk + bk - 1) / bk * bk;
+            n_split = (keys + chunk - 1) / chunk;
+        }
         struct {
             uint32_t head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split;
             float scale;
             uint32_t k_lo, win, ring, hsplit;
-        } pc{HD, H, HKV, (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale, k_lo, win, ring, hsplit};
+            uint32_t s_max, s_keys, s_bk;
+        } pc{HD,    H,     HKV,  (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale, k_lo, win, ring,
+             hsplit, per_tok ? s_max : 0u, s_keys, bk};
         // Every kernel has a build for the 8-bit cache, named _q8.
         std::string kern = pf ? "attn_pf" : "attn";
         if (dec) {
@@ -1690,19 +1714,22 @@ private:
     int attn_splits_ = 0;
     // Prompts of at least this many tokens use attn_pf (TS5_ATTN_PF; 0: never),
     // its build for heads of 128 where they are (TS5_ATTN_PF128=0: never).
-    int attn_pf_min_ = 8;
+    // 9: more than a verify batch's 8 tokens, which keep generation's kernels
+    // (below 9, TS5_ATTN_PF breaks the helper's same-output promise).
+    int attn_pf_min_ = 9;
     bool attn_pf128_ = true;
     // Generation over at least this many keys uses attn_dec (TS5_ATTN_DEC;
-    // 0: never). By default (-1) heads of 128 from the first key and the
-    // wide ones from 256. On the PS5 (2026-11-06, Qwen3 8B Q4_K_M, 64 and
+    // 0: never). By default (-1) from the first key, the only setting at
+    // which a verify batch across the start takes generation's kernel for
+    // each of its tokens (speculative decoding's same output). On the PS5 (2026-11-06, Qwen3 8B Q4_K_M, 64 and
     // 200 tokens of context) attn_dec4 from the first key generates 2.7-3.1%
     // faster than attn below 256 keys, Qwen3 0.6B 8.9% (attention 33.7 ->
     // 22.6 ms in 64 tokens), and chat with the 0.6B helper 6.4% (81.4 ->
     // 86.6 tok/s); Coder 7B's 8-row attn_dec (7 query heads a KV head) 3.4%
     // at 64 tokens (73.8 -> 76.3 tok/s); check -n 512 is unchanged for both.
-    // In October, with an older attn_dec, short contexts were even and Llama
-    // 3.2 3B 2% slower, which set 256; the wide heads keep it until they're
-    // measured again.
+    // Gemma 3 12B's heads of 256 0.7% at 64 (43.65 -> 43.95) and Gemma 4
+    // 12B's 256 and 512 1.0% (41.5 -> 41.9), the same at 512. In October, with an older attn_dec, short contexts were even and
+    // Llama 3.2 3B 2% slower, which had set 256.
     int attn_dec_min_ = -1;
     // Whether attn_dec loads each tile's keys at the tile's start (1) or
     // during the tile before (0), TS5_ATTN_DEC_PLAIN; by default (-1) the

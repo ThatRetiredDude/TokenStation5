@@ -60,7 +60,20 @@ layout(push_constant) uniform PC {
     uint head_dim, n_head, n_head_kv, pos0, cache_off, n_tok, tq, chunk, n_split;
     float scale;
     uint k_lo, win, ring, hsplit;
+    uint s_max, s_keys, s_bk;
 } pc;
+
+// Generation and verify batches (s_max > 0, one token a workgroup) split
+// each token's keys as a one-token call at its position splits them, so a
+// verify batch's attention is generation's bit for bit: at most s_max slices
+// of s_keys keys or more, each a multiple of s_bk keys. Workgroups past a
+// token's last slice (a verify batch's earlier tokens) write empty slices,
+// which attn_merge adds as nothing.
+uint tok_chunk(uint keys) {
+    const uint ns = max(1u, min(pc.s_max, (keys + pc.s_keys - 1) / pc.s_keys));
+    const uint c = (keys + ns - 1) / ns;
+    return (c + pc.s_bk - 1) / pc.s_bk * pc.s_bk;
+}
 
 #ifndef HEAD_DIM
 #define HEAD_DIM 128
@@ -97,8 +110,14 @@ void main() {
     const uint split = gl_WorkGroupID.y;
     // Row r is head h0 + r % G of token t0 + r / G. Rows past R repeat
     // row R - 1 and are never written.
-    const uint k_first = pc.k_lo + split * pc.chunk;
-    const uint k_end = min(k_first + pc.chunk, pc.pos0 + t0 + R / G);
+    uint k_lo = pc.k_lo, chunk = pc.chunk;
+    if (pc.s_max != 0) {
+        const uint p1 = pc.pos0 + t0 + 1;  // the token's keys end at its own
+        k_lo = pc.win != 0 && p1 > pc.win ? p1 - pc.win : 0;
+        chunk = tok_chunk(p1 - k_lo);
+    }
+    const uint k_first = k_lo + split * chunk;
+    const uint k_end = min(k_first + chunk, pc.pos0 + t0 + R / G);
     // The block's first token sees no key before this one.
     const uint k_begin = pc.win != 0 && pc.pos0 + t0 + 1 > pc.win ? max(k_first, pc.pos0 + t0 + 1 - pc.win) : k_first;
     uint qo[RM];

@@ -7,7 +7,7 @@
 //   ts5 tokenize -m model.gguf -p "text"
 //   ts5 check    -m model.gguf [-n 16] [-p TEXT]   GPU logits against the CPU reference
 //                                        (-p: on TEXT's first n tokens)
-//   ts5 logits   -m model.gguf -o out.bin [--step] tok0 tok1 ...   (all positions, for tests)
+//   ts5 logits   -m model.gguf -o out.bin [--step | --verify K] tok0 tok1 ...   (all positions, for tests)
 //   ts5 prompt   -m model.gguf [--chat-template FILE] < request.json
 //                                        the prompt a chat request becomes (for tests)
 //   ts5 tool-parse hermes|llama3|mistral|gemma [TOOL...] < text
@@ -64,6 +64,7 @@ struct Args {
     int port = 8081, n_ctx = 8192, n_predict = 256, pp = 512, tg = 128, device = 0;
     float temp = 0.7f;
     bool chat = false, step = false, n_set = false, fresh = false;
+    int verify = 0;  // logits --verify K
     std::vector<int32_t> tokens;
 };
 
@@ -115,6 +116,7 @@ bool parse(int argc, char **argv, Args &a) {
         else if (s == "--device") a.device = atoi(next().c_str());
         else if (s == "--chat") a.chat = true;
         else if (s == "--step") a.step = true;
+        else if (s == "--verify") a.verify = atoi(next().c_str());
         else if (s == "--fresh") a.fresh = true;
         else if (s == "--chat-template") a.chat_template = next();
         else if (!s.empty() && (isdigit((unsigned char)s[0]))) a.tokens.push_back(atoi(s.c_str()));
@@ -347,11 +349,19 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     if (a.cmd == "logits") {
         if (a.tokens.empty() || a.out.empty()) return usage();
         std::vector<float> lg((size_t)a.tokens.size() * hp.n_vocab);
-        // --step: one token per call, exercising the KV cache across calls
+        // --step: one token per call, exercising the KV cache across calls.
+        // --verify K: K tokens a call with every position's logits, as a
+        // helper's drafts are checked; the dump must be --step's byte for
+        // byte (speculative decoding's same-output promise).
         bool ok = true;
         if (a.step)
             for (size_t i = 0; i < a.tokens.size() && ok; i++)
                 ok = be->forward(&a.tokens[i], 1, (int)i, lg.data() + i * hp.n_vocab, false, err);
+        else if (a.verify > 0)
+            for (size_t i = 0; i < a.tokens.size() && ok; i += a.verify) {
+                const int k = (int)std::min<size_t>(a.verify, a.tokens.size() - i);
+                ok = be->forward(&a.tokens[i], k, (int)i, lg.data() + i * hp.n_vocab, true, err);
+            }
         else
             ok = be->forward(a.tokens.data(), (int)a.tokens.size(), 0, lg.data(), true, err);
         if (!ok) {
