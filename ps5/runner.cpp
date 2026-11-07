@@ -321,31 +321,22 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
 #endif
     uint64_t dreserve = 0;
     std::string derr;
-    bool dopen = false;
+    bool no_room = false;  // the model fits only without the helper's room
     // The helper's own context: past it, drafting stops and lookup goes on.
     // At most 32k, or 16k for one found beside the model or tuned for it
     // (Qwen3 0.6B's f16 cache is 112 KiB a token, 1.8 GiB at 16k). An
     // auto-fit main context takes all it can first (with TS5_HELPER_ROOM=1
     // it leaves the helper room for 4k of context: ts5::helper_room); the
-    // helper then takes what is free, up to that cap, and is skipped if not
-    // even 1k fits.
+    // helper, opened only then (ts5::helper_room_bytes), takes what is free,
+    // up to that cap, and is skipped if not even 1k fits.
     int dctx = 32768;
-    uint64_t dweights = 0;
 #ifdef TS5_LINUX
     if (!auto_dp.empty() || ts5::from_model_tune("TS5_DRAFT_MODEL")) dctx = 16384;
 #endif
-    if (dp && *dp) {
+    if (dp && *dp && n_ctx <= 0) {
         try {
-            dopen = l->dmodel.open(dp, derr);
+            dreserve = ts5::helper_room_bytes(dp, derr);
         } catch (const std::exception &e) { derr = e.what(); }
-        if (dopen) {
-            // Everything but the token list, which the vocabulary check in
-            // set_drafter still needs, is dropped before the main load.
-            for (const char *k : {"tokenizer.ggml.scores", "tokenizer.ggml.token_type", "tokenizer.ggml.merges"})
-                l->dmodel.gguf.kv.erase(k);
-            for (const auto &t : l->dmodel.gguf.tensors) dweights += t.nbytes;
-            if (ts5::helper_room()) dreserve = ts5::draft_reserve(l->dmodel.hp, dweights);
-        }
     }
     const double t0 = now_s();
     ts5::Backend *b = ts5::make_vk_backend(ctx_, l->model, path, n_ctx, err, dreserve);
@@ -353,7 +344,7 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
         // The model with room for its helper doesn't fit: the model alone.
         printf("ts5: %s doesn't fit with room for its helper (%s); loading it alone\n", l->file.c_str(), err.c_str());
         derr = "no room for it beside " + l->file;
-        dopen = false;
+        no_room = true;
         b = ts5::make_vk_backend(ctx_, l->model, path, n_ctx, err, 0);
     }
     if (!b) return nullptr;
@@ -363,6 +354,21 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
            n_ctx <= 0 ? " (what fits)" : "", l->kv8 ? "8-bit" : "f16");
     l->engine = std::make_unique<ts5::Engine>(l->model, b, l->tok);
     if (dp && *dp) {
+        bool dopen = false;
+        uint64_t dweights = 0;
+        if (!no_room) {
+            try {
+                dopen = l->dmodel.open(dp, derr);
+            } catch (const std::exception &e) { derr = e.what(); }
+        }
+        if (dopen) {
+            // Everything but the token list, which the vocabulary check in
+            // set_drafter still needs, is dropped: the helper stays open as
+            // long as the model is loaded.
+            for (const char *k : {"tokenizer.ggml.scores", "tokenizer.ggml.token_type", "tokenizer.ggml.merges"})
+                l->dmodel.gguf.kv.erase(k);
+            for (const auto &t : l->dmodel.gguf.tensors) dweights += t.nbytes;
+        }
         ts5::Backend *db = nullptr;
         const int fits = dopen ? ts5::draft_context(ctx_->free_memory(), l->dmodel.hp, dweights,
                                                     std::min(l->n_ctx, dctx))
@@ -372,7 +378,8 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
         if (!db || !l->engine->set_drafter(l->dmodel, db, derr))
             printf("ts5: draft model not used: %s\n", derr.c_str());
         else
-            printf("ts5: draft model %s ready, context %d\n", base(dp).c_str(), db->n_ctx());
+            printf("ts5: draft model %s ready, context %d%s\n", base(dp).c_str(), db->n_ctx(),
+                   db->n_ctx() < l->n_ctx ? " (past that, a conversation goes on without it)" : "");
         l->dmodel.gguf.kv.erase("tokenizer.ggml.tokens");
     }
     log_memory("after loading " + l->file);

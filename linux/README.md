@@ -204,13 +204,19 @@ drafting from the conversation's own text goes on). Off turns it off;
 
 Memory: with Longest context at "As much as fits", the model takes its whole
 context first and the helper gets what is left, if that is enough for it.
-On the PS5 that leaves a 14B or 12B model no room for one (Qwen3 14B keeps
-its 13,312 tokens and runs alone). A fixed Longest context, say 8,192,
-leaves a 14B room for its helper (+32% on short answers). `TS5_HELPER_ROOM=1`
-in `ts5.env` keeps the helper's room instead (its weights and 4k of its
-context, about 1.9 GiB for Qwen3 0.6B), at the cost of the model's context:
-Qwen3 8B 20,480 tokens instead of 32,768, for 9% faster writing on a long
-document. Where a model doesn't fit beside that room, it loads alone.
+On the PS5 (about 13 GiB free) Qwen3 8B keeps all 32,768 tokens and its
+helper gets 2,048 of its own, enough to write 9% faster on an 800-token
+document (past its context, a conversation goes on without it). Llama 3.1
+8B (49,152 tokens) and the 12B and 14B models have no room left for one.
+A fixed Longest context of 4,096 leaves a 14B room for its helper (+32 to
+34% on short answers, as `ts5-tune` measures); at 8,192 there is none.
+`TS5_HELPER_ROOM=1` in `ts5.env` keeps the helper's room instead (its
+weights and 4k of its context, about 1.9 GiB for Qwen3 0.6B), at the cost
+of the model's context: Llama 3.1 8B gets 35,840 tokens and its helper
+instead of 49,152 alone. A model that doesn't fit beside that room loads
+alone, with the context it has without a helper. The helper pays off most
+on short answers: on long documents and code it guesses right less often
+(the Gemma 12Bs at 8,192 wrote 5 to 9% slower with it in 3 of 4 tests).
 
 Which file: the helper is read once for every token it guesses, so a
 smaller quantization pays. On the PS5 with Qwen3 8B, Qwen3 0.6B in Q4_K_M

@@ -86,6 +86,15 @@ uint64_t draft_reserve(const HParams &dhp, uint64_t draft_weight_bytes);
 // 8B 32,768 tokens of context against 20,480 for +9%, and a 14B or 12B can't
 // fit its helper either way.
 bool helper_room();
+// The room helper_room() keeps for the helper model in the file at `path`
+// (draft_reserve), read from its header and let go again, so that none of
+// it is in memory while the main context is fitted: 0 when no room is kept
+// or the file can't be read (err says why). The helper itself is opened
+// after the main model: on the PS5 its token list and merges alone (about
+// 25 MB) cost Qwen3 14B 1,024 tokens of context in 3 of 4 loads.
+uint64_t helper_room_bytes(const char *path, std::string &err);
+// Hands memory the process freed back to the system (glibc keeps it).
+void release_freed_memory();
 // Whether a context of what fits in f16 (f16_ctx tokens) is the model's whole
 // training context. Then TS5_KV=q8 gets an f16 cache anyway: 8 bits would
 // only cost precision (on Qwen 2.5 Coder 7B, more than the GPU check allows).

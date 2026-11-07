@@ -7,6 +7,9 @@
 
 #include <fcntl.h>
 #include <unistd.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -1985,6 +1988,26 @@ int draft_context(uint64_t free, const HParams &dhp, uint64_t draft_weight_bytes
 bool helper_room() {
     const char *e = getenv("TS5_HELPER_ROOM");
     return e && atoi(e) != 0;
+}
+
+uint64_t helper_room_bytes(const char *path, std::string &err) {
+    if (!helper_room() || !path || !*path) return 0;
+    uint64_t room = 0;
+    {
+        Model m;
+        if (!m.open(path, err)) return 0;
+        uint64_t w = 0;
+        for (const auto &t : m.gguf.tensors) w += t.nbytes;
+        room = draft_reserve(m.hp, w);
+    }
+    release_freed_memory();
+    return room;
+}
+
+void release_freed_memory() {
+#ifdef __GLIBC__
+    malloc_trim(0);
+#endif
 }
 
 uint64_t draft_reserve(const HParams &dhp, uint64_t draft_weight_bytes) {

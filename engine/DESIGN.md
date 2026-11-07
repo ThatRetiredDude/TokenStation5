@@ -637,9 +637,13 @@ the PS5 that leaves about 5.4 GiB of cache beside a 7B or 8B Q4_K_M model:
 the full 32k of Qwen 2.5 Coder 7B and of Qwen3 8B (as its file gives it), 43k
 of Llama 3.1 8B's 128k (81k with q8) and 68k of Llama 3.2 3B's. With a
 helper model (`TS5_DRAFT_MODEL`, or one the title finds beside the model),
-the main context also leaves the helper its weights and buffers, 4k of its
-f16 cache and 0.5 GiB spare (`draft_reserve`, about 1.9 GiB for Qwen3 0.6B),
-in the title and in `ts5 serve`/`run` alike.
+the main context takes all that first, and the helper, opened only after it
+(so not even its token list is in memory while the main context is fitted),
+gets what is left (`draft_context`; skipped if not even 1k fits). With
+`TS5_HELPER_ROOM=1` the main context leaves the helper its weights and
+buffers, 4k of its f16 cache and 0.5 GiB spare (`draft_reserve`, about
+1.9 GiB for Qwen3 0.6B); a model that doesn't fit beside that loads alone,
+before any weight goes up. The title and `ts5 serve`/`run` do the same.
 
 ## Correctness
 

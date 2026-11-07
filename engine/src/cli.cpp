@@ -340,15 +340,13 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     }
 
     // The draft model, when TS5_DRAFT_MODEL names one; outlives eng. Opened
-    // first: an auto-fit main context (-c auto) leaves room for it, as the app's does.
+    // after the main model (helper_room_bytes), as the app's is; with
+    // TS5_HELPER_ROOM=1 an auto-fit main context (-c auto) leaves room for it.
     Model dmodel;
     const char *dp = getenv("TS5_DRAFT_MODEL");
     const bool draft = dp && *dp && strcmp(dp, "off") != 0 && (a.cmd == "run" || a.cmd == "serve");
     std::string derr;
-    bool dopen = draft && dmodel.open(dp, derr);
-    uint64_t dw = 0;
-    if (dopen)
-        for (const auto &t : dmodel.gguf.tensors) dw += t.nbytes;
+    bool no_room = false;  // the main model fits only without that room
 
     double t0 = now_ms();
     Backend *be = nullptr;
@@ -358,14 +356,14 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         be = make_cpu_backend(model, a.n_ctx);
     } else {
 #ifdef TS5_VULKAN
-        const uint64_t reserve = dopen && a.n_ctx <= 0 && helper_room() ? draft_reserve(dmodel.hp, dw) : 0;
+        const uint64_t reserve = draft && a.n_ctx <= 0 ? helper_room_bytes(dp, derr) : 0;
         be = make_vk_backend(model, a.model, a.n_ctx, a.device, err, reserve);
         if (!be && reserve > 0 && err.rfind("not enough", 0) == 0) {
             // The model with room for its draft model doesn't fit: the model alone.
             fprintf(stderr, "ts5: %s doesn't fit with room for the draft model (%s); loading it alone\n",
                     basename_of(a.model).c_str(), err.c_str());
             derr = "no room for it beside " + basename_of(a.model);
-            dopen = false;
+            no_room = true;
             be = make_vk_backend(model, a.model, a.n_ctx, a.device, err);
         }
 #else
@@ -377,6 +375,10 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     Engine eng(model, be, tok);
     if (draft) {
         Backend *db = nullptr;
+        const bool dopen = !no_room && dmodel.open(dp, derr);
+        uint64_t dw = 0;
+        if (dopen)
+            for (const auto &t : dmodel.gguf.tensors) dw += t.nbytes;
         if (!dopen) {
         } else if (a.backend == "cpu") {
             if (dmodel.load(nullptr, derr)) db = make_cpu_backend(dmodel, be->n_ctx());
@@ -396,7 +398,8 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         if (!db || !eng.set_drafter(dmodel, db, derr))
             fprintf(stderr, "ts5: draft model not used: %s\n", derr.c_str());
         else
-            fprintf(stderr, "ts5: draft model %s ready, context %d\n", basename_of(dp).c_str(), db->n_ctx());
+            fprintf(stderr, "ts5: draft model %s ready, context %d%s\n", basename_of(dp).c_str(), db->n_ctx(),
+                    db->n_ctx() < be->n_ctx() ? " (past that, a conversation goes on without it)" : "");
     }
 
     if (a.cmd == "logits") {
