@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Builds TokenStation5 for Linux: the PS5 title's own code (ps5/) with the
-# console's functions from SDL2 and the system (linux/platform.cpp), and the
-# engine's command line (ts5) beside it.
+# console's functions from SDL2 and the system (linux/platform.cpp), the
+# engine's command line (ts5) beside it, and the terminal app (ts5-tui).
 #
-#   linux/build.sh            # build/linux/tokenstation and build/linux/ts5
+#   linux/build.sh            # build/linux/tokenstation, ts5 and ts5-tui
 #
 # Needs: a C++17 compiler, glslang-tools, libvulkan-dev, libsdl2-dev, curl
 # (engine/deps.sh fetches Mbed TLS and the CA bundle, hash-checked).
@@ -151,6 +151,10 @@ for src in "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voi
     title_objects+=("$o")
     run "$CXX" "${cxxflags[@]}" -I "$root/ps5/wg" -I "$lw/include" -I "$wgl" -c "$src" -o "$o"
 done
+for src in "$root"/linux/tui/*.cpp; do
+    o="$out/obj/own/tui_$(basename "$src" .cpp).o"
+    run "$CXX" "${cxxflags[@]}" -I "$root/linux/tui" -c "$src" -o "$o"
+done
 for src in "$root"/engine/src/{main,cli}.cpp; do
     o="$out/obj/own/cli_$(basename "$src" .cpp).o"
     run "$CXX" "${cxxflags[@]}" -c "$src" -o "$o"
@@ -178,4 +182,5 @@ ar_if_stale "$out/obj/libts5wg.a" "${wgobjects[@]}"
     $(pkg-config --libs sdl2) -ldl
 "$CXX" "${opt[@]}" -o "$out/ts5" "$out/obj/own/cli_main.o" "$out/obj/own/cli_cli.o" "${engine_objects[@]}" \
     "$out/obj/libts5mbedtls.a" -ldl
-echo "build: $out/tokenstation and $out/ts5 ($version, tuned for $march)"
+"$CXX" "${opt[@]}" -o "$out/ts5-tui" "$out"/obj/own/tui_*.o
+echo "build: $out/tokenstation, $out/ts5 and $out/ts5-tui ($version, tuned for $march)"
