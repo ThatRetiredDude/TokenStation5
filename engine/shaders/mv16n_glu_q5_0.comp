@@ -1,0 +1,6 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// One token of the Q5_0 gate and up with swiglu and the RMSNorm folded in (see mv16_q5_0.glsl).
+#define GLU
+#define NORM
+#include "mv16_q5_0.glsl"

@@ -1,9 +1,10 @@
-// y[r] (+)= sum_c W[r][c] * x[c] for one token of a Q8_0 matrix, laid out
-// as mv16_q4_k: 8 threads share 8 blocks (256 values, 272 bytes), each
-// taking one 34-byte block (d as f16, then 32 signed bytes), and the
-// workgroup's 64 threads take 8 such groups of a row at a time for NR rows
-// (a specialization constant, at most 8); each thread loads its 32 values
-// of x once for all NR rows. Blocks are only 2-byte aligned, so a block is
+// y[r] (+)= sum_c W[r][c] * x[c] for one token of a Q8_0 matrix: each of
+// the workgroup's 64 threads takes one 34-byte block (d as f16, then 32
+// signed bytes) of a row at a time, blocks tid, tid + 64, ..., for NR rows
+// (a specialization constant, at most 8), so a row may be any whole number
+// of blocks (Gemma 3 1B's 1,152 values, Qwen 2.5 0.5B's 896); with whole
+// 256-value groups that is mv16_q4_k's layout, 8 threads sharing 8 blocks.
+// Each thread loads its 32 values of x once for all NR rows. Blocks are only 2-byte aligned, so a block is
 // read as nine 4-byte words and shifted into place; the words are
 // consecutive, so the loads cost what 16-byte ones would.
 // GLU and NORM as mv16_q4_k.glsl: gate and up at once with swiglu, and the
@@ -83,13 +84,12 @@ void main() {
     const uint r0 = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * NR;
     if (r0 >= pc.nrows) return;
     const uint tid = gl_LocalInvocationID.x;
-    const uint nb = pc.ncols / 256, nr = min(NR, pc.nrows - r0);
-    const uint th = tid % 8;
+    const uint nblk = pc.ncols / 32, nr = min(NR, pc.nrows - r0);
     float acc[NRMAX], accu[NRMAX];
     for (uint i = 0; i < NRMAX; i++) acc[i] = accu[i] = 0.0;
     float ss = 0.0;
-    for (uint b = tid / 8; b < nb; b += WG / 8) {
-        const uint x0 = (pc.x_off + b * 256 + th * 32) / 4;
+    for (uint j = tid; j < nblk; j += WG) {
+        const uint x0 = (pc.x_off + j * 32) / 4;
         vec4 x[8];
         for (uint c = 0; c < 8; c++) {
             x[c] = X4[x0 + c];
@@ -100,7 +100,7 @@ void main() {
         }
         // Rows past the matrix read its last row; their sums aren't written.
         [[unroll]] for (uint i = 0; i < NR; i++) {
-            const uint o = min(r0 + i, pc.nrows - 1) * pc.row_bytes + b * 272 + th * 34;
+            const uint o = min(r0 + i, pc.nrows - 1) * pc.row_bytes + j * 34;
             acc[i] += block_dot(o, x, false);
 #ifdef GLU
             accu[i] += block_dot(o, x, true);

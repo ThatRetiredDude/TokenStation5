@@ -138,7 +138,8 @@ Kernels read them through 8-bit storage access and dequantize 32-value "units"
 
 Each matmul picks one of four kernels by how many tokens it multiplies:
 
-- 9 or more of Q4_K, Q5_K, Q6_K or Q8_0 (rows of whole 256-value groups),
+- 9 or more of Q4_K, Q5_K, Q6_K or Q8_0 (K-quant rows are whole 256-value
+  groups; Q8_0's any whole number of 32-value blocks),
   where that makes at least 48 blocks, or
   splitting the columns does for 128 or more tokens (`mmb_*`,
   `shaders/matmul_big.glsl`): 128 rows x 128 tokens per workgroup, 8 x 8
@@ -295,6 +296,14 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   nibbles (Q5_K's one word of fifth bits too), Q6_K's 32 values each.
   `mv16_q8_0` takes eight 34-byte blocks per 8 threads, one each, read as
   nine 4-byte words and shifted, since the blocks are only 2-byte aligned.
+  It and `mv16_q5_0` (22-byte blocks, six words) loop over a row's blocks
+  one a thread (tid, tid + 64, ...), so their rows may be any whole number
+  of 32-value blocks: Gemma 3 1B's are 1,152 values and Qwen 2.5 0.5B's
+  896, and llama.cpp stores Q4_K_M's Q4_K tensors with such rows as Q5_0
+  (and Q6_K ones as Q8_0). Before, those took the generic `matmul_*`
+  kernels (`TS5_MV32=0`): byte loads and a shared-memory tree sum, which
+  made Gemma 3 1B's drafts for Gemma 3 and 4 12B cost 5.9-6.2 ms against
+  Llama 3.2 1B's 2.75 at about the same file size.
   The same shapes serve a verify batch of 2 to 8 tokens (`mvt_*`), which
   dot each row's words with every token's x. `TS5_FAST_MATVEC=0` turns them
   all off. The K-quant kernels load every row's words before the first sum

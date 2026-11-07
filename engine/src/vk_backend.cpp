@@ -96,6 +96,11 @@
 #include "mvt_q6_k.spv.h"
 #include "mvt_q5_k.spv.h"
 #include "mvt_q8_0.spv.h"
+#include "mv16_q5_0.spv.h"
+#include "mv16n_q5_0.spv.h"
+#include "mv16_glu_q5_0.spv.h"
+#include "mv16n_glu_q5_0.spv.h"
+#include "mvt_q5_0.spv.h"
 #include "mm_f16.spv.h"
 #include "mm_f32.spv.h"
 #include "mm_q4_0.spv.h"
@@ -231,13 +236,30 @@ const char *qname(uint32_t t) {
     }
 }
 
-// The types with word-load kernels: mv16 (one token), mv16n (with the
-// RMSNorm folded in), mv16_glu (gate and up at once) and mmb (prompts).
-// Their rows must be whole 256-value groups (eight Q8_0 blocks).
+// The types with word-load mat-vec kernels: mv16 (one token), mv16n (with
+// the RMSNorm folded in), mv16_glu (gate and up at once) and mvt (verify
+// batches). K-quant rows are whole 256-value groups; Q8_0 and Q5_0 rows any
+// whole number of 32-value blocks (Gemma 3 1B's 1,152 values, Qwen 2.5
+// 0.5B's 896), with the matrix whole 4-byte words (the kernels read a
+// block's last bytes as one). Before (TS5_MV32=0): Q8_0 only, and only in
+// whole 256-value groups; the others took the generic matmul_* kernels.
+static bool mv32_on() {
+    static const bool on = [] {
+        const char *e = getenv("TS5_MV32");
+        return !e || atoi(e) != 0;
+    }();
+    return on;
+}
 static bool fast_type(const Weight &w) {
     const uint32_t t = w.type();
-    return (t == GGML_Q4_K || t == GGML_Q5_K || t == GGML_Q6_K || t == GGML_Q8_0) && w.ne0() % 256 == 0;
+    if (t == GGML_Q4_K || t == GGML_Q5_K || t == GGML_Q6_K) return w.ne0() % 256 == 0;
+    if (t == GGML_Q8_0 && w.ne0() % 256 == 0) return true;
+    return mv32_on() && (t == GGML_Q8_0 || t == GGML_Q5_0) && w.ne0() % 32 == 0 && w.info->nbytes % 4 == 0;
 }
+// The types with prompt kernels (mmb): K-quants and Q8_0, in 32-value units.
+static bool mmb_type(const Weight &w) { return fast_type(w) && w.type() != GGML_Q5_0; }
+// The x-staging verify kernels (mvtx, TS5_MVTX=1): whole 256-value groups.
+static bool mvtx_type(const Weight &w) { return mmb_type(w) && w.ne0() % 256 == 0; }
 
 #define CHECK(x)                                                                   \
     do {                                                                           \
@@ -749,6 +771,7 @@ private:
         MV(mv16n_q4_k, 4) MV(mv16n_q6_k, 4) MV(mv16n_glu_q4_k, 5)
         MV(mv16_q5_k, 3) MV(mv16_q8_0, 3) MV(mv16_glu_q5_k, 4) MV(mv16_glu_q8_0, 4)
         MV(mv16n_q5_k, 4) MV(mv16n_q8_0, 4) MV(mv16n_glu_q5_k, 5) MV(mv16n_glu_q8_0, 5)
+        MV(mv16_q5_0, 3) MV(mv16n_q5_0, 4) MV(mv16_glu_q5_0, 4) MV(mv16n_glu_q5_0, 5)
 #undef MV
         // The verify-batch mat-vecs once per batch size (their token loop is
         // compile-time), each twice like the one-token ones: mvt_rows_ rows
@@ -767,6 +790,8 @@ private:
                 !make_pipe("mvtx_q8_0" + s, spv_mvtx_q8_0, sizeof(spv_mvtx_q8_0), 3, err, nt, mvt_rows_) ||
                 !make_pipe("mvt_q8_0" + s, spv_mvt_q8_0, sizeof(spv_mvt_q8_0), 3, err, nt, mvt_rows_) ||
                 !make_pipe("mvt_q8_0" + s + ".1", spv_mvt_q8_0, sizeof(spv_mvt_q8_0), 3, err, nt, 1) ||
+                !make_pipe("mvt_q5_0" + s, spv_mvt_q5_0, sizeof(spv_mvt_q5_0), 3, err, nt, mvt_rows_) ||
+                !make_pipe("mvt_q5_0" + s + ".1", spv_mvt_q5_0, sizeof(spv_mvt_q5_0), 3, err, nt, 1) ||
                 !make_pipe("mvt_glu_q4_k" + s, spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, mvt_glu_rows_) ||
                 !make_pipe("mvt_glu_q4_k" + s + ".1", spv_mvt_glu_q4_k, sizeof(spv_mvt_glu_q4_k), 4, err, nt, 1))
                 return false;
@@ -1146,7 +1171,7 @@ private:
         const uint32_t split_big = mmb_small_ && mmb_split_ && ntok >= 128 && big < (uint32_t)mmb_min_
                                        ? big * std::min({(mmb_split_ + big - 1) / big, (uint32_t)w.ne0() / 256, 16u})
                                        : big;
-        if (ntok >= tiled_min_ && mmb_ && split_big >= (uint32_t)mmb_min_ && x_off % 4 == 0 && fast_type(w)) {
+        if (ntok >= tiled_min_ && mmb_ && split_big >= (uint32_t)mmb_min_ && x_off % 4 == 0 && mmb_type(w)) {
             mmb(w, x, y, pc, big, what);
             return;
         }
@@ -1156,7 +1181,7 @@ private:
             return;
         }
         uint32_t gx = std::min<uint32_t>(rows, 65535), gy = (rows + gx - 1) / gx;
-        // One token of Q4_K, Q5_K, Q6_K or Q8_0 (generation): the kernels
+        // One token of Q4_K, Q5_K, Q6_K, Q8_0 or Q5_0 (generation): the kernels
         // that read the weights as words (TS5_MV16=0: the older matvec_*
         // kernels, Q4_K and Q6_K only).
         const bool old_mv = !mv16_ && (w.type() == GGML_Q4_K || w.type() == GGML_Q6_K);
@@ -1182,7 +1207,7 @@ private:
             const bool one = rows < (uint32_t)mv_rows_min_ || mvt_rows_ == 1;
             // Matrices of mvt_rows_ rows per group: a workgroup per group, or
             // the x-staging kernels, 4 groups a workgroup (TS5_MVTX=1).
-            const bool staged = !one && mvtx_;
+            const bool staged = !one && mvtx_ && mvtx_type(w);
             const uint32_t nr = one ? 1 : mvt_rows_ * (staged ? 4 : 1);
             const uint32_t groups = (rows + nr - 1) / nr;
             const uint32_t mx = std::min<uint32_t>(groups, 65535), my = (groups + mx - 1) / mx;
@@ -1401,7 +1426,7 @@ private:
     }
 
     // Gate and up with swiglu (or Gemma's gelu: pc.accumulate) in one
-    // kernel, into g_: one token of Q4_K, Q5_K or Q8_0 through mv16_glu_*,
+    // kernel, into g_: one token of Q4_K, Q5_K, Q8_0 or Q5_0 through mv16_glu_*,
     // a verify batch of Q4_K through mvt_glu_q4_k, which loads each token's
     // x once for both matrices. False where that doesn't apply.
     bool glu_applies(const Layer &L, int n) const {
@@ -1413,7 +1438,7 @@ private:
     }
 
     // Whether one token's RMSNorm can fold into all of these mat-vecs (the
-    // mv16n kernels: a fast type's whole 256-value blocks, mv16 on).
+    // mv16n kernels: a fast type's rows, mv16 on).
     bool fold_norm(int n, std::initializer_list<const Weight *> ws) const {
         if (n != 1 || !norm_fuse_ || !fast_matvec_ || !mv16_) return false;
         for (const Weight *w : ws)

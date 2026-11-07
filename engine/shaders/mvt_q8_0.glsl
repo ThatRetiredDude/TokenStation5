@@ -1,8 +1,8 @@
 // Y[t][r] (+)= sum_c W[r][c] * X[t][c] for NT tokens (a specialization
 // constant, 2..8) of a Q8_0 matrix: the verify batch of speculative
-// decoding. Laid out as mv16_q8_0 (8 threads share 8 blocks, one 34-byte
-// block each, read as nine 4-byte words and shifted; the workgroup's 64
-// threads take 8 such groups at a time), for NR rows (a specialization
+// decoding. Laid out as mv16_q8_0 (a thread takes one 34-byte block of a
+// row at a time, blocks tid, tid + 64, ..., read as nine 4-byte words and
+// shifted), so its sums are mv16_q8_0's bit for bit, for NR rows (a specialization
 // constant, at most 4): each row's words are loaded once per group and
 // dotted with every token's x, so the weight stream is paid once for the
 // whole batch, and each token's 32 x values are loaded once per NR rows.
@@ -53,17 +53,16 @@ void main() {
     const uint r0 = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * NR;
     if (r0 >= pc.nrows) return;
     const uint tid = gl_LocalInvocationID.x;
-    const uint nb = pc.ncols / 256;
-    const uint th = tid % 8;
+    const uint nblk = pc.ncols / 32;
     float acc[NRMAX * NTMAX];
     for (uint i = 0; i < NRMAX * NTMAX; i++) acc[i] = 0.0;
-    for (uint b = tid / 8; b < nb; b += WG / 8) {
+    for (uint j = tid; j < nblk; j += WG) {
         // The NR rows' blocks, all in flight at once. Rows past the matrix
         // read its last row; their sums aren't written.
         Blk w[NRMAX];
         [[unroll]] for (uint i = 0; i < NR; i++)
-            w[i] = load_block(min(r0 + i, pc.nrows - 1) * pc.row_bytes + b * 272 + th * 34);
-        const uint x0 = (b * 256 + th * 32) / 4;
+            w[i] = load_block(min(r0 + i, pc.nrows - 1) * pc.row_bytes + j * 34);
+        const uint x0 = j * 8;
         [[unroll]] for (uint t = 0; t < NT; t++) {
             const uint xt = (pc.x_off + t * pc.x_stride) / 4 + x0;
             vec4 x[8];

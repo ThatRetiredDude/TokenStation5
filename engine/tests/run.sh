@@ -143,6 +143,18 @@ mk_shape heads7-kv1 896 7 1    # 7 per KV head, size 128 (Qwen 2.5 7B)
 mk_shape heads8-kv2 512 8 2    # 4 per KV head, size 64
 mk_shape heads2-kv2 512 2 2    # size 256
 mk_shape heads4-kv1 512 4 1    # 4 per KV head, size 128 (Llama 3 8B, Qwen 3 8B)
+# Rows that are not whole 256-value groups (896 values, as Qwen 2.5 0.5B;
+# Gemma 3 1B has 1,152) in Q5_0, as llama.cpp stores Q4_K_M's Q4_K tensors
+# there: the word-load mat-vecs take any whole number of 32-value blocks
+# of Q8_0 (heads14-kv2 above) and Q5_0.
+q50="$work/q50-896.gguf"
+[ -s "$q50" ] || python3 "$here/make_test_model.py" --arch llama --quant Q5_0 --embd 896 --heads 14 --kv-heads 2 \
+    --vocab "$work/ggml-vocab-llama-spm.gguf" "$q50" > /dev/null
+echo "== Q8_0 and Q5_0 rows of 896 values: one token a call, and with TS5_MV32=0 (generic kernels)"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 100 "$q50"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 40 --step "$q50" "${shapes[0]}"
+TS5_MV32=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 40 --step "$q50" \
+    "${shapes[0]}"
 echo "== attention: head layouts, 300 tokens at once (attn_pf, then attn), then one per call (keys split in slices)"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${shapes[@]}"
 TS5_ATTN_PF=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${shapes[@]}"
@@ -308,11 +320,13 @@ done
 # checked, and its dump must be --step's byte for byte (each token's keys
 # split as one token's would be, slices merged in a fixed order): heads of
 # 128 (7 a KV head), 64 and 256, Q4_K, and Gemma 4's 512 with its 8-token
-# window; batches of 6 and 8, forced key slices, the 8-bit cache. 140
-# tokens: more than one 128-key slice for attn_dec. (The build before this
-# rule failed it on the heads of 256 and with the forced slices.)
+# window; batches of 6 and 8, forced key slices, the 8-bit cache; Q8_0
+# and Q5_0 in rows of 896 values. 140 tokens: more than one 128-key slice
+# for attn_dec. (The build before this rule failed it on the heads of 256
+# and with the forced slices.)
 vt=$(seq 3 7 975)
-for m in "${shapes[1]}" "${shapes[2]}" "${shapes[3]}" "$work/qwen2-Q4_K_M.gguf" "$work/gemma4-kmix.gguf"; do
+for m in "${shapes[1]}" "${shapes[2]}" "${shapes[3]}" "$work/qwen2-Q4_K_M.gguf" "$work/gemma4-kmix.gguf" \
+    "${shapes[0]}" "$q50"; do
     for e in "TS5_ATTN_SPLITS=0:6 8" "TS5_ATTN_SPLITS=3:8" "TS5_KV=q8:6"; do
         env ${e%%:*} "$ts5" logits -m "$m" -o "$work/vf-step.bin" --step $vt 2> /dev/null
         for k in ${e#*:}; do
