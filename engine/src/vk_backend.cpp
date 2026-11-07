@@ -1297,10 +1297,9 @@ private:
         const uint32_t dec_max = HD == 128 ? 8 : 4;
         uint32_t dec_split = 1;
         while (G_all / dec_split > dec_max && (G_all / dec_split) % 2 == 0) dec_split *= 2;
-        // From the first key for heads of 128 in 4 rows (attn_dec4: a KV
-        // head's 2 to 4 query heads), from 256 for the others.
-        const uint32_t dec_from = attn_dec_min_ >= 0 ? (uint32_t)attn_dec_min_
-                                  : HD == 128 && G_all / dec_split <= 4 ? 1u : 256u;
+        // From the first key for heads of 128 (attn_dec4 or attn_dec), from
+        // 256 for the wide heads.
+        const uint32_t dec_from = attn_dec_min_ >= 0 ? (uint32_t)attn_dec_min_ : HD == 128 ? 1u : 256u;
         const bool dec = !pf && dec_from && keys >= dec_from && (HD == 128 || wide) && G_all / dec_split <= dec_max;
         const uint32_t hsplit = pf ? 1 : dec ? dec_split : head_split(l), G = G_all / hsplit;
         const uint32_t dec_rows = G <= 4 ? 4 : 8;
@@ -1684,15 +1683,16 @@ private:
     int attn_pf_min_ = 8;
     bool attn_pf128_ = true;
     // Generation over at least this many keys uses attn_dec (TS5_ATTN_DEC;
-    // 0: never). By default (-1) attn_dec4's heads of 128 from the first key
-    // and the rest from 256. On the PS5 (2026-11-06, Qwen3 8B Q4_K_M, 64 and
+    // 0: never). By default (-1) heads of 128 from the first key and the
+    // wide ones from 256. On the PS5 (2026-11-06, Qwen3 8B Q4_K_M, 64 and
     // 200 tokens of context) attn_dec4 from the first key generates 2.7-3.1%
     // faster than attn below 256 keys, Qwen3 0.6B 8.9% (attention 33.7 ->
     // 22.6 ms in 64 tokens), and chat with the 0.6B helper 6.4% (81.4 ->
-    // 86.6 tok/s); check -n 512 is unchanged. In October, with an older
-    // attn_dec, short contexts were even and Llama 3.2 3B 2% slower, which
-    // set 256; Coder 7B (attn_dec, 8 rows) and the wide heads keep it until
-    // they're measured again.
+    // 86.6 tok/s); Coder 7B's 8-row attn_dec (7 query heads a KV head) 3.4%
+    // at 64 tokens (73.8 -> 76.3 tok/s); check -n 512 is unchanged for both.
+    // In October, with an older attn_dec, short contexts were even and Llama
+    // 3.2 3B 2% slower, which set 256; the wide heads keep it until they're
+    // measured again.
     int attn_dec_min_ = -1;
     // Whether attn_dec loads each tile's keys at the tile's start (1) or
     // during the tile before (0), TS5_ATTN_DEC_PLAIN; by default (-1) the

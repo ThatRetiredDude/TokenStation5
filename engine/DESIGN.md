@@ -361,12 +361,12 @@ at 16384), so the shared-memory reads are not what holds it back there;
 it was dropped.
 
 Generation with heads of 128 uses `shaders/attn_dec.glsl` from the first
-key where a KV head has 2 to 4 query heads (attn_dec4), and from 256 keys
-otherwise (`TS5_ATTN_DEC` sets how many for all; 0: never). The first-key
-start is from the PS5 on 2026-11-06: below 256 keys attn_dec4 generates
-Qwen3 8B 2.7-3.1% faster than attn, Qwen3 0.6B 8.9%, and chat with the
-0.6B helper 6.4% (the helper's drafts and the verify batches get cheaper
-too), with the same check. attn_dec: up to 8
+key, heads of 256 and 512 from 256 keys (`TS5_ATTN_DEC` sets how many for
+all; 0: never). The first-key start is from the PS5 on 2026-11-06: below
+256 keys attn_dec4 generates Qwen3 8B 2.7-3.1% faster than attn, Qwen3
+0.6B 8.9%, and chat with the 0.6B helper 6.4% (the helper's drafts and the
+verify batches get cheaper too), and the 8-row attn_dec Coder 7B 3.4% at
+64 tokens, each with the same check. attn_dec: up to 8
 rows per workgroup (`attn_dec`; `attn_dec4` for 4, where a KV head has 3 or
 4 query heads), its slice of the keys 128 at a time. Thread t scores key t
 against every row, reading the key's 256 bytes straight from the cache; the
