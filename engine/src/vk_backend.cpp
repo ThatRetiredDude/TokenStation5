@@ -46,6 +46,10 @@
 #include "attn_dec4_q8.spv.h"
 #include "attn_dec4_256_q8.spv.h"
 #include "attn_dec4_512_q8.spv.h"
+#include "attn_dec4_256w.spv.h"
+#include "attn_dec4_512w.spv.h"
+#include "attn_dec4_256w_q8.spv.h"
+#include "attn_dec4_512w_q8.spv.h"
 #include "attn_dec_64_q8.spv.h"
 #include "attn_dec4_64_q8.spv.h"
 #include "attn_pf128_q8.spv.h"
@@ -439,6 +443,7 @@ private:
         if (const char *e = getenv("TS5_ATTN_DEC_PLAIN")) attn_dec_plain_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_KEYS")) attn_dec_keys_ = atoi(e);
         if (const char *e = getenv("TS5_ATTN_DEC64")) attn_dec64_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_ATTN_WIDE8")) attn_wide8_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV16")) mv16_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT")) mvt_ = atoi(e) != 0;
@@ -815,7 +820,7 @@ private:
         // The wide-head builds score keys with LPK lanes only (a thread can't
         // hold a whole key): without them, those heads keep attn.
         attn_dec_lpk_ = lpk;
-        if (lpk) { PD(attn_dec4_256, 0, lpk) PD(attn_dec4_512, 0, lpk) }
+        if (lpk) { PD(attn_dec4_256, 0, lpk) PD(attn_dec4_512, 0, lpk) PD(attn_dec4_256w, 0, lpk) PD(attn_dec4_512w, 0, lpk) }
 #undef PD
         P(swiglu, 2) P(softcap, 1)
 #undef P
@@ -1384,6 +1389,7 @@ private:
         std::string kern = pf ? "attn_pf" : "attn";
         if (dec) {
             kern = HD == 256 ? "attn_dec4_256" : HD == 512 ? "attn_dec4_512" : dec_rows == 4 ? "attn_dec4" : "attn_dec";
+            if (wide && attn_wide8_) kern += "w";
             if (HD == 64) kern += "_64";
         } else if (pf && HD == 128 && attn_pf128_)
             kern = "attn_pf128";
@@ -1776,6 +1782,13 @@ private:
     // 8B's helper it drafts 9.5% cheaper (2.75 ms a token against 3.04); the
     // check is unchanged.
     bool attn_dec64_ = true;
+    // Heads of 256 and 512 (Gemma) through the WIDE8 builds of attn_dec
+    // (attn_dec4_256w, attn_dec4_512w: 8 value columns a thread, half the
+    // value round trips a tile, key passes past the last key skipped).
+    // TS5_ATTN_WIDE8=1; off until the PS5 measures it. attn_dec4_256 costs
+    // about 28.5 us a call there at any context (Gemma 3 1B, 2026-11-07:
+    // 28.4 us at 64 keys, 28.8 at 2048), against about 9 for heads of 128.
+    bool attn_wide8_ = false;
     uint32_t attn_dec_lpk_ = 0;  // the lanes per key the attn_dec builds got (0: thread per key, heads of 128 only)
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).

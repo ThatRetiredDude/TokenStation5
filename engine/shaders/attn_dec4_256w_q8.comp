@@ -1,0 +1,8 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Generation attention over a long 8-bit cache, heads of 256 (Gemma), up to 4 rows, 8 value columns a thread (see attn_dec.glsl).
+#define KV_Q8
+#define HEAD_DIM 256
+#define RM 4
+#define WIDE8
+#include "attn_dec.glsl"

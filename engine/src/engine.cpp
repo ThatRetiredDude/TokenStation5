@@ -297,8 +297,18 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // chance q and costing per_tok ms a token to draft; 0: one token alone.
     // fixed: ms paid once for drafting at all this step (a draft model's
     // catch-up on the tokens it missed while it sat out).
+    // A draft model drafts only where that beats one token alone by
+    // draft_gain (TS5_DRAFT_GAIN, default 1.02: the step any draft length
+    // must make): what it costs beyond its measured forwards (the step's
+    // own work, sampling, and the share of catch-up the spread misses) is
+    // left out, so a helper predicted a few percent ahead can still lose
+    // (Gemma 3 1B beside Gemma 3 4B on the PS5, 2026-11-07: 1.4% slower
+    // than lookup alone, kept 71%, its draft token 46% of a 4B forward).
+    double draft_gain = 1.02;
+    if (const char *e = getenv("TS5_DRAFT_GAIN")) draft_gain = std::max(1.0, atof(e));
     auto best_k = [&](int k, float q, double per_tok, double fixed) {
-        double best = 1.0 / fwd_ms(1);
+        const double one = 1.0 / fwd_ms(1);
+        double best = one;
         int bk = 0;
         double e = 0, qi = 1;
         for (int i = 1; i <= k && i <= 8; i++) {
@@ -307,6 +317,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
             const double v = (1.0 + e) / (fwd_ms(i + 1) + i * per_tok + fixed);
             if (v > best * 1.02) { best = v; bk = i; }
         }
+        if (bk > 0 && per_tok > 0 && best < one * draft_gain) return 0;
         return bk;
     };
     // A probe of the draft model costs its catch-up on everything since it

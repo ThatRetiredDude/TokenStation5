@@ -26,6 +26,12 @@
 // is 8-bit values with an f16 scale per 32, as attn_q8 reads it: a key is
 // half the bytes, loaded as words of 16 values plus its scales, and each
 // value word comes with its block's scale.
+// With WIDE8 (attn_dec4_256w, attn_dec4_512w): each thread sums 8 value
+// columns instead of 4, so twice the groups take half the keys each, and a
+// tile's value loads take half the round trips (4 for heads of 256, 8 for
+// 512, rather than 8 and 16); and a tile's key passes past its last key are
+// skipped, not run on copies of it. The scores and every column's sum over
+// keys are as before, only the keys' split between groups differs.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_shader_subgroup_basic : require
@@ -78,7 +84,12 @@ uint tok_chunk(uint keys) {
 #ifndef HEAD_DIM
 #define HEAD_DIM 128
 #endif
-const uint HD = HEAD_DIM, BK = 128, NG = 512 / HD, GK = BK / NG, SGMAX = 32, RV = RM / 4;
+#ifdef WIDE8
+const uint CPT = 8;  // value columns a thread
+#else
+const uint CPT = 4;
+#endif
+const uint HD = HEAD_DIM, BK = 128, NG = 128 * CPT / HD, GK = BK / NG, SGMAX = 32, RV = RM / 4, VW = CPT / 4;
 layout(constant_id = 0) const uint PLAIN = 0;
 layout(constant_id = 1) const uint LPK = 0;  // 0, 8, 16 or 32; at most the subgroup's size
 // With LPK: lanes per key, keys a pass (one per LPK lanes) and words of 4
@@ -92,7 +103,7 @@ const uint KW = HD <= 128 ? HD / KWV : 1;
 const uint NKS = HD <= 128 ? HD / SB : 1, NLS = (WPL + 7) / 8;
 #endif
 // The tile's weights, [key][row / 4]; at the end, the row sums [row][col / 4].
-shared vec4 pw[BK * RV > RM * GK ? BK * RV : RM * GK];
+shared vec4 pw[BK * RV > RM * HD / 4 ? BK * RV : RM * HD / 4];
 shared float red[RM][SGMAX];   // each subgroup's highest score per row
 shared float redl[RM][SGMAX];  // each subgroup's sum of weights per row
 
@@ -125,13 +136,13 @@ void main() {
         const uint rr = min(r, R - 1);
         qo[r] = ((t0 + rr / G) * q_stride + (h0 + rr % G) * HD) / 4;
     }
-    const uint g = tid / GK, c4 = tid % GK;  // values: key group, columns 4 c4 ..
+    const uint g = tid / GK, c4 = tid % GK;  // values: key group, columns CPT c4 ..
     float m[RM], l[RM];
-    vec4 acc[RM];
+    vec4 acc[RM][VW];
     [[unroll]] for (uint r = 0; r < RM; r++) {
         m[r] = NEG_INF;
         l[r] = 0.0;
-        acc[r] = vec4(0.0);
+        [[unroll]] for (uint q = 0; q < VW; q++) acc[r][q] = vec4(0.0);
     }
     const uint head = pc.cache_off + kh * HD;  // halves
     // With LPK: lane jl of the cl-th LPK lanes, and its values of each row's
@@ -178,6 +189,9 @@ void main() {
             // p the cl-th lanes take key kb + NC p + cl (keys past the end
             // read the last one, and are masked below).
             [[unroll]] for (uint h = 0; h < NB; h++) {
+#ifdef WIDE8
+                if (kb + NC * h * PB >= k_end) break;  // all of these passes' keys are past the end
+#endif
 #ifdef KV_Q8
                 uint kx[PB][WPL];
                 float ksl[PB][NLS];
@@ -255,13 +269,13 @@ void main() {
             float ps = redl[r][0];
             for (uint i = 1; i < gl_NumSubgroups; i++) ps += redl[r][i];
             l[r] = l[r] * c[r] + ps;
-            acc[r] *= c[r];
+            [[unroll]] for (uint q = 0; q < VW; q++) acc[r][q] *= c[r];
         }
         // The next tile's keys, in flight while this one's values are summed.
         if (PLAIN == 0 && LPK == 0 && kb + BK < k_end) LOAD_KEYS(kb + BK)
-        // Values: group g, keys kb + GK g ..; thread c4, columns 4 c4 ...
+        // Values: group g, keys kb + GK g ..; thread c4, columns CPT c4 ...
         const uint j0 = g * GK, nj = min(GK, max(k_end - kb, j0) - j0);
-        const uint vo = (head + (kb + j0) * kv_stride) / 4 + c4, vs = kv_stride / 4;
+        const uint vo = (head + (kb + j0) * kv_stride) / 4 + VW * c4, vs = kv_stride / 4;
         // A value word's 4 values; from the 8-bit cache, times their block's
         // scale (word w holds values 4 w .., in block 4 w / 32).
 #ifdef KV_Q8
@@ -271,26 +285,35 @@ void main() {
 #endif
         uint j = 0;
         if (nj == GK && pc.ring == 0) {
-            [[unroll]] for (uint jb = 0; jb < GK; jb += 8) {  // eight loads in flight
-                vec4 v[8];
-                [[unroll]] for (uint u = 0; u < 8; u++) v[u] = VALUES(vo + (jb + u) * vs);
+            [[unroll]] for (uint jb = 0; jb < GK; jb += 8) {  // eight keys' loads in flight
+                vec4 v[8][VW];
                 [[unroll]] for (uint u = 0; u < 8; u++)
-                    [[unroll]] for (uint r = 0; r < RM; r++) acc[r] += pw[(j0 + jb + u) * RV + r / 4][r % 4] * v[u];
+                    [[unroll]] for (uint q = 0; q < VW; q++) v[u][q] = VALUES(vo + (jb + u) * vs + q);
+                [[unroll]] for (uint u = 0; u < 8; u++)
+                    [[unroll]] for (uint r = 0; r < RM; r++)
+                        [[unroll]] for (uint q = 0; q < VW; q++) acc[r][q] += pw[(j0 + jb + u) * RV + r / 4][r % 4] * v[u][q];
             }
             j = GK;
         }
         for (; j < nj; j++) {
-            const vec4 v = VALUES((head + slot(kb + j0 + j) * kv_stride) / 4 + c4);
-            [[unroll]] for (uint r = 0; r < RM; r++) acc[r] += pw[(j0 + j) * RV + r / 4][r % 4] * v;
+            const uint w = (head + slot(kb + j0 + j) * kv_stride) / 4 + VW * c4;
+            [[unroll]] for (uint q = 0; q < VW; q++) {
+                const vec4 v = VALUES(w + q);
+                [[unroll]] for (uint r = 0; r < RM; r++) acc[r][q] += pw[(j0 + j) * RV + r / 4][r % 4] * v;
+            }
         }
         barrier();  // before the next tile's weights
     }
 
-    // Add up the groups' sums in pw, one group at a time; thread d then has
-    // column d (and d + 128, ...) of every row.
+    // Add up the groups' sums in pw ([row][column / 4]), one group at a
+    // time; thread d then has column d (and d + 128, ...) of every row.
     for (uint i = 0; i < NG; i++) {
         if (g == i)
-            [[unroll]] for (uint r = 0; r < RM; r++) pw[r * GK + c4] = i == 0 ? acc[r] : pw[r * GK + c4] + acc[r];
+            [[unroll]] for (uint r = 0; r < RM; r++)
+                [[unroll]] for (uint q = 0; q < VW; q++) {
+                    const uint e = r * (HD / 4) + VW * c4 + q;
+                    pw[e] = i == 0 ? acc[r][q] : pw[e] + acc[r][q];
+                }
         barrier();
     }
     [[unroll]] for (uint r = 0; r < RM; r++) {
@@ -300,7 +323,7 @@ void main() {
         [[unroll]] for (uint i = 0; i < (HD + 127) / 128; i++) {
             const uint d = tid + 128 * i;
             if (HD < 128 && d >= HD) break;  // heads of 64: threads 0 .. 63
-            const float a = pw[r * GK + d / 4][d % 4];
+            const float a = pw[r * (HD / 4) + d / 4][d % 4];
             if (pc.n_split == 1)
                 O[row * HD + d] = a / l[r];
             else

@@ -397,7 +397,12 @@ load instruction reads whole keys. Heads of 256 and 512 (Gemma's) run as
 and 4 rows: lanes-per-key scoring only (a thread can't hold a whole key),
 each thread's 4 value columns over a half or all of the tile's keys, and a
 KV head's query heads over several workgroups where 4 rows don't hold them
-(Gemma 4's full layers: 16 heads, 4 workgroups). The kernel takes a sliding
+(Gemma 4's full layers: 16 heads, 4 workgroups). Such a call costs about
+28.5 us on the PS5 at 64 keys or 2,048 (one 128-key tile a workgroup: its
+memory round trips, 8 batches of value loads for heads of 256): the WIDE8
+builds (`TS5_ATTN_WIDE8=1`, `attn_dec4_256w`, `attn_dec4_512w`) sum 8 value
+columns a thread, so twice the groups take half the keys each, and skip
+the key passes past a tile's last key. The kernel takes a sliding
 layer's window and ring like attn, so Gemma's sliding layers use it too:
 attn's tiles hold 8 keys of 256 (4 of 512), four barriers each, and on the
 console Gemma 4 12B spent 12 ms of a 35 ms token in attn at a 4k context.
@@ -563,7 +568,10 @@ before it were (kept tokens over kept plus first rejections), every batch
 size's forward time and the draft model's time per token are measured as
 they run, and a step drafts the k that maximises (1 + expected kept) / (time
 of a k + 1 batch + k drafted tokens), only when that beats one token alone
-by 2%. Every 16th step proposes anyway, so estimates recover. Measured on the
+by 2% (a draft model: by `TS5_DRAFT_GAIN`, default 1.02, since what a step
+costs beyond its measured forwards is left out; Gemma 3 1B beside Gemma 3
+4B kept 71%, predicted ahead, and ran 1.4% slower than lookup alone). Every
+16th step proposes anyway, so estimates recover. Measured on the
 PS5 under Linux before it (Qwen3 8B, 0.6B drafter): prose kept 40-54% of the
 0.6B's drafts and ran 18-27% slower than no drafting, code renames kept 79%
 and ran 38% faster; the cost model keeps the second and drops the first.
