@@ -199,7 +199,8 @@ chat's control tokens may differ), it guesses a few tokens ahead and the big mod
 checks them in one pass. The output is exactly what the big model alone writes; only
 the speed changes. The helper keeps a 16k context of its own (past that,
 drafting from the conversation's own text goes on). Off turns it off;
-`TS5_DRAFT_MODEL=/path/to.gguf` in `ts5.env` picks one.
+`TS5_DRAFT_MODEL=/path/to.gguf` in `ts5.env` picks one, and
+`ts5-tune --models` (below) picks the fastest one for each model.
 
 Which file: the helper is read once for every token it guesses, so a
 smaller quantization pays. On the PS5 with Qwen3 8B, Qwen3 0.6B in Q4_K_M
@@ -237,6 +238,29 @@ that change the arithmetic or leave the Vulkan spec are never tried.
 - `ts5-tune --reset`: back to the built-in settings.
 - The services read `/etc/tokenstation/tune.env`: copy the file there to use it for them.
 - A variable set in the shell or `ts5.env` wins over the file.
+
+### Each model's own settings
+
+    ts5-tune --models
+
+goes through each model of 1.5 GiB or more in the models folder (or the
+ones named after `--models`). For each, `ts5 check -n 128` compares it with
+the CPU; if 16-bit prompt math fails there and 32-bit passes, the model
+keeps 32-bit. Then it writes four answers (two of prose, two of code) alone
+and with each possible helper beside it (a quarter of its size or less, one
+the engine accepts), at 3 and at 5 guessed tokens a step, and keeps the
+fastest whose answers are the very text the model writes alone; if none is
+faster, the helper is off for that model. The results go to
+`~/.config/tokenstation/tune/<model file>.env` (with the file's size, so a
+new download under the same name doesn't use them), and the app and `ts5`
+read them whenever they load that model (they log `settings for ...`).
+About 5 minutes for an 8B model and 15 for a 14B with a helper beside it.
+
+- `ts5-tune --models --reset`: delete them.
+- A setting chosen in the app (Helper model: Off, Exact prompt reading:
+  On) or set in the shell or `ts5.env` wins over the file.
+- The services read `/etc/tokenstation/tune/`: copy the files there to use
+  them for them.
 
 ## PS5 hardware in the app
 

@@ -480,6 +480,21 @@ echo "== memory: a load that would leave the system less than its reserve is ref
 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "GiB of it kept free for the system"
 echo "== -c auto with TS5_KV=q8: an f16 cache, as the test model's whole context fits in f16"
 TS5_KV=q8 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "KV cache [0-9.]* GiB (f16, "
+echo "== a model's own tuned settings (ts5-tune --models): where nothing set them, for that file only"
+tune=$(mktemp -d)
+mkdir -p "$tune/tokenstation/tune"
+printf '# a test\nsize=%s\nTS5_DRAFT=2\nTS5_DRAFT_MODEL=helper.gguf\nRADV_PERFTEST=nocswave32\n' \
+    "$(stat -c %s "$work/qwen3-Q4_0.gguf")" > "$tune/tokenstation/tune/qwen3-Q4_0.gguf.env"
+XDG_CONFIG_HOME="$tune" "$ts5" run -m "$work/qwen3-Q4_0.gguf" -p hi -n 1 2>&1 > /dev/null |
+    grep -x "ts5: settings for qwen3-Q4_0.gguf from $tune/tokenstation/tune/qwen3-Q4_0.gguf.env: TS5_DRAFT=2 TS5_DRAFT_MODEL=$work/helper.gguf"
+XDG_CONFIG_HOME="$tune" TS5_DRAFT=4 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -p hi -n 1 2>&1 > /dev/null |
+    grep -x "ts5: settings for qwen3-Q4_0.gguf from .*: TS5_DRAFT_MODEL=$work/helper.gguf"
+! XDG_CONFIG_HOME="$tune" TS5_MODEL_TUNE= "$ts5" run -m "$work/qwen3-Q4_0.gguf" -p hi -n 1 2>&1 > /dev/null | grep -q "settings for"
+! XDG_CONFIG_HOME="$tune" "$ts5" run -m "$work/qwen2-Q4_0.gguf" -p hi -n 1 2>&1 > /dev/null | grep -q "settings for"
+sed -i 's/^size=.*/size=1/' "$tune/tokenstation/tune/qwen3-Q4_0.gguf.env"
+XDG_CONFIG_HOME="$tune" "$ts5" run -m "$work/qwen3-Q4_0.gguf" -p hi -n 1 2>&1 > /dev/null |
+    grep "qwen3-Q4_0.gguf.env is for another qwen3-Q4_0.gguf (not this size), so it isn't used"
+rm -rf "$tune"
 echo "== tool calls: prompts against the models' own templates, the parser, web_search over HTTP(S)"
 for t in Qwen-Qwen2.5-7B-Instruct Qwen-Qwen3-0.6B meta-llama-Llama-3.1-8B-Instruct meta-llama-Llama-3.2-3B-Instruct; do
     f="$work/$t.jinja"

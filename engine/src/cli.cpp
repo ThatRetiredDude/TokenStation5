@@ -264,6 +264,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         return no_model_command(argc, argv);
     Args a;
     if (!parse(argc, argv, a)) return usage();
+    apply_model_tune(a.model);  // ts5-tune --models' settings for this file, where nothing set them
     std::string err;
     Model model;
     if (!model.open(a.model, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }

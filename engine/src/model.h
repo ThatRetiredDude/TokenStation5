@@ -116,4 +116,21 @@ private:
     const uint8_t *base_ = nullptr;
 };
 
+// The settings `ts5-tune --models` found best for one model file (its
+// helper model, drafts per step, prompt math): KEY=VALUE lines in
+// ~/.config/tokenstation/tune/<file name>.env, else
+// /etc/tokenstation/tune/<file name>.env (for the services). TS5_MODEL_TUNE
+// names the file instead; TS5_MODEL_TUNE= and TS5_TUNE_FILE= (the defaults,
+// what ts5-tune measures from) turn it off. As with tune.env, only TS5_
+// keys, and a variable already set wins, so Settings and the shell still
+// decide. A `size=` line other than the file's size (another file under
+// the same name) skips it, and a helper named without a folder is the one
+// beside the model. Whatever the previous call set, and still has the value
+// it set, is taken back first, so a process that loads model after model
+// (the app) doesn't carry one's settings over to the next. Nothing on the
+// PS5's own system.
+void apply_model_tune(const std::string &model_path);
+// Whether `key`'s current value came from apply_model_tune.
+bool from_model_tune(const char *key);
+
 }  // namespace ts5

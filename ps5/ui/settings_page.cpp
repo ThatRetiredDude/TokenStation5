@@ -99,14 +99,15 @@ const std::vector<Row> &setting_rows() {
          "Now: the model loads again, which takes a few seconds", {{"f16", "Off"}, {"q8", "On"}}, "f16"},
         {"MODELS", "TS5_MMB_F16", "Exact prompt reading",
          "Reads every prompt with 32-bit math. Off, Qwen, DeepSeek and Llama models read prompts with 16-bit "
-         "math, about 40% faster, and their answers very rarely come out different. Gemma always reads in 32-bit. "
+         "math, about 40% faster; a few answers come out worded differently. Gemma always reads in 32-bit. "
          "Replies are written at the same speed either way.",
          "Now: the model loads again, which takes a few seconds", {{"", "Off"}, {"0", "On"}}, ""},
 #ifdef TS5_LINUX
         {"MODELS", "TS5_DRAFT_MODEL", "Helper model",
          "A small model of the same family (such as Qwen3 0.6B for Qwen3 8B, or Llama 3.2 1B for Llama 3.1 8B) "
          "guesses a few words ahead and the big model checks them all at once, so replies come faster. Answers "
-         "are exactly the same. Automatic uses one when a matching small model is in the models folder.",
+         "are exactly the same. Automatic uses one when a matching small model is in the models folder, or "
+         "the one ts5-tune --models found fastest for this model.",
          "Now: the model loads again, which takes a few seconds", {{"", "Automatic"}, {"off", "Off"}}, ""},
 #endif
         {"VOICE", kSpeechModel, "Speech model",

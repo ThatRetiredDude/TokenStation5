@@ -1,8 +1,15 @@
 #include "model.h"
 
+#include <sys/stat.h>
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <utility>
+
+#include "log.h"
 
 namespace ts5 {
 
@@ -269,6 +276,79 @@ bool Model::load(uint8_t *dst, std::string &err) {
     fclose(f);
     base_ = dst;
     return bind(err);
+}
+
+namespace {
+std::vector<std::pair<std::string, std::string>> &model_tune_set() {
+    static std::vector<std::pair<std::string, std::string>> set;
+    return set;
+}
+}  // namespace
+
+void apply_model_tune(const std::string &model_path) {
+#ifndef TS5_PS5
+    auto &applied = model_tune_set();
+    for (auto &kv : applied)
+        if (const char *v = getenv(kv.first.c_str()); v && kv.second == v) unsetenv(kv.first.c_str());
+    applied.clear();
+    if (const char *t = getenv("TS5_TUNE_FILE"); t && !*t) return;
+    const size_t slash = model_path.find_last_of('/');
+    const std::string name = slash == std::string::npos ? model_path : model_path.substr(slash + 1);
+    const std::string dir = slash == std::string::npos ? "." : model_path.substr(0, slash);
+    std::vector<std::string> paths;
+    if (const char *f = getenv("TS5_MODEL_TUNE")) {
+        if (!*f) return;
+        paths.push_back(f);
+    } else {
+        if (const char *x = getenv("XDG_CONFIG_HOME"); x && *x)
+            paths.push_back(std::string(x) + "/tokenstation/tune/" + name + ".env");
+        else if (const char *h = getenv("HOME"); h && *h)
+            paths.push_back(std::string(h) + "/.config/tokenstation/tune/" + name + ".env");
+        paths.push_back("/etc/tokenstation/tune/" + name + ".env");
+    }
+    for (const std::string &path : paths) {
+        std::ifstream in(path);
+        if (!in) continue;
+        std::vector<std::pair<std::string, std::string>> kvs;
+        long long size = -1;
+        std::string line;
+        while (std::getline(in, line)) {
+            const size_t eq = line.find('=');
+            if (line.empty() || line[0] == '#' || eq == std::string::npos) continue;
+            const std::string k = line.substr(0, eq), v = line.substr(eq + 1);
+            if (k == "size") size = atoll(v.c_str());
+            else if (k.rfind("TS5_", 0) == 0) kvs.push_back({k, v});
+        }
+        struct stat st;
+        if (size >= 0 && (stat(model_path.c_str(), &st) != 0 || (long long)st.st_size != size)) {
+            log_line("ts5: %s is for another %s (not this size), so it isn't used", path.c_str(), name.c_str());
+            return;
+        }
+        std::string set;
+        for (auto &kv : kvs) {
+            if (getenv(kv.first.c_str())) continue;
+            std::string v = kv.second;
+            if (kv.first == "TS5_DRAFT_MODEL" && v != "off" && !v.empty() && v.find('/') == std::string::npos)
+                v = dir + "/" + v;
+            setenv(kv.first.c_str(), v.c_str(), 1);
+            applied.push_back({kv.first, v});
+            set += " " + kv.first + "=" + v;
+        }
+        log_line("ts5: settings for %s from %s:%s", name.c_str(), path.c_str(),
+                 set.empty() ? " (nothing new)" : set.c_str());
+        return;
+    }
+#else
+    (void)model_path;
+#endif
+}
+
+bool from_model_tune(const char *key) {
+    const char *v = getenv(key);
+    if (!v) return false;
+    for (auto &kv : model_tune_set())
+        if (kv.first == key && kv.second == v) return true;
+    return false;
 }
 
 }  // namespace ts5

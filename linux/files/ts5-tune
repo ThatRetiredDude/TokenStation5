@@ -4,6 +4,7 @@
     ts5-tune                 # the model you used last (from your models folder)
     ts5-tune MODEL.gguf      # a model of your choice
     ts5-tune --reset         # back to the built-in settings
+    ts5-tune --models [MODEL.gguf ...]   # each model's own settings (below)
 
 The engine's kernel choices were tuned on the PS5's own driver. Under Linux
 the same GPU runs RADV (Mesa), whose compiler and scheduling differ, so the
@@ -15,6 +16,19 @@ start-up; delete it (or run --reset) to go back.
 
 Close TokenStation5 first: the bench needs the GPU's memory. It takes about
 10 minutes for an 8B model.
+
+--models tunes what differs from model to model, for each model named or
+each one of 1.5 GiB and more in the models folder: it checks the model
+against the CPU (`ts5 check -n 128`) and keeps 32-bit prompt math if 16-bit
+fails where 32-bit passes; then it writes four prompts' answers with each
+helper model beside it (a quarter of its size or less, and one the engine
+accepts) at 3 and at 5 drafts a step, keeps the fastest whose answers are
+the very text the model writes alone, and turns the helper off when none is
+faster. The results go to ~/.config/tokenstation/tune/<model file>.env,
+which the app and ts5 read when they load that file (a setting chosen in the
+app or the shell still wins); delete it, or run --models --reset, to go
+back. It takes about 5 minutes for an 8B model and 15 for a 14B, with a
+helper.
 """
 import argparse
 import glob
@@ -51,6 +65,20 @@ BOTH = [
     ("TS5_BARRIER", ["1", "0"]),
 ]
 NOISE = 0.02  # a change has to be 2% faster to count
+
+# --models: prompts for the helper's speed and same-text test, two of
+# prose and two of code (a helper guesses code better, so both count).
+PROMPTS = [
+    "Explain in a few paragraphs how a refrigerator keeps food cold, for someone who never thought about it.",
+    "Write a short, friendly email inviting the neighbours to a garden barbecue on Saturday afternoon.",
+    "Write a Python function that splits one CSV line with quoted fields (commas inside quotes, doubled "
+    "quotes) into a list of strings, and a few tests for it.",
+    "Write a C function that reverses a singly linked list in place, and a main() that builds a list, "
+    "reverses it and prints it.",
+]
+DRAFTS = ["3", "5"]  # drafts a step to try; the engine's default is 5
+MAIN_MIN = 1536 << 20  # --models without names: files this big or bigger
+HELPER_MIN = int(os.environ.get("TS5_TUNE_HELPER_MIN", 64 << 20))  # as the app's pick (the tests' models are smaller)
 
 
 def data_dir():
@@ -129,7 +157,7 @@ def score(r, kind):
     return (r[0] * r[1]) ** 0.5
 
 
-def check(model, env):
+def check(model, env, n=None):
     full = dict(os.environ)
     full["TS5_TUNE_FILE"] = ""
     for k, v in env.items():
@@ -137,9 +165,161 @@ def check(model, env):
             full.pop(k, None)
         else:
             full[k] = v
-    out = subprocess.run([ts5(), "check", "-m", model], env=full, capture_output=True, text=True, timeout=1800)
-    line = (out.stdout.strip().splitlines() or [""])[-1]
+    cmd = [ts5(), "check", "-m", model] + (["-n", str(n)] if n else [])
+    out = subprocess.run(cmd, env=full, capture_output=True, text=True, timeout=3600)
+    lines = out.stdout.strip().splitlines()
+    # The check's own line, then any "top token differs at" lines.
+    line = next((l for l in lines if not l.startswith("  ")), lines[-1] if lines else "")
     return out.returncode == 0, line
+
+
+def model_tune_dir():
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "tokenstation", "tune")
+
+
+def write(model, prompt, env, n):
+    """(text, generation tok/s, why the helper wasn't used or None), or None."""
+    full = dict(os.environ)
+    full["TS5_MODEL_TUNE"] = ""  # not the file this writes; tune.env's speed settings stay
+    for k, v in env.items():
+        if v == "":
+            full.pop(k, None)
+        else:
+            full[k] = v
+    try:
+        # Bytes: an answer cut at the token limit can end inside a character.
+        out = subprocess.run([ts5(), "run", "-m", model, "--chat", "-p", prompt, "-n", str(n), "--temp", "0"],
+                             env=full, capture_output=True, timeout=1800)
+    except subprocess.TimeoutExpired:
+        return None
+    err = out.stderr.decode(errors="replace")
+    m = re.search(r"gen (\d+) tok ([\d.]+) tok/s", err)
+    if out.returncode != 0 or not m:
+        return None
+    refused = re.search(r"draft model not used: (.*)", err)
+    return out.stdout, float(m.group(2)), refused.group(1) if refused else None
+
+
+def helpers(model):
+    """The files a helper may be: beside it, a quarter of its size or less, 64 MiB or more."""
+    size = os.path.getsize(model)
+    found = []
+    for f in glob.glob(os.path.join(os.path.dirname(os.path.abspath(model)), "*.gguf")):
+        if os.path.samefile(f, model) or "mmproj" in os.path.basename(f).lower():
+            continue
+        s = os.path.getsize(f)
+        if s * 4 <= size and s >= HELPER_MIN:
+            found.append((s, f))
+    return [f for _, f in sorted(found)]
+
+
+def mean(v):
+    p = 1.0
+    for x in v:
+        p *= x
+    return p ** (1.0 / len(v))
+
+
+def tune_model(model, n):
+    """Checks one model, finds its helper and drafts, and saves them; False if the model fails the check."""
+    name = os.path.basename(model)
+    print("\n== %s (%.1f GiB)" % (name, os.path.getsize(model) / (1 << 30)))
+    chosen, notes = {}, []
+    # 128 tokens: a full block, so every matrix takes the prompt kernel
+    # whose math is 16-bit on Qwen, DeepSeek and Llama models.
+    ok, line = check(model, {}, 128)
+    print("  check: " + line)
+    if not ok:
+        ok32, line32 = check(model, {"TS5_MMB_F16": "0"}, 128)
+        print("  check with 32-bit prompt math: " + line32)
+        if not ok32:
+            print("  %s fails the check either way, so it isn't tuned. Please report it, with the lines above." % name)
+            return False
+        chosen["TS5_MMB_F16"] = "0"
+        notes.append("16-bit prompt math failed the check and 32-bit passed")
+    alone = []
+    for p in PROMPTS:
+        r = write(model, p, dict(chosen, TS5_DRAFT_MODEL="off"), n)
+        if not r:
+            print("  `ts5 run` failed on this model; is TokenStation5 still open?")
+            return False
+        alone.append(r)
+    base = mean([r[1] for r in alone])
+    print("  alone: %s tok/s" % ", ".join("%.1f" % r[1] for r in alone))
+    best, best_env = base, None
+    cands = helpers(model)
+    for h in cands:
+        for d in DRAFTS:
+            env = dict(chosen, TS5_DRAFT_MODEL=h, TS5_DRAFT=d)
+            runs = [write(model, p, env, n) for p in PROMPTS]
+            if any(r is None for r in runs):
+                print("  %s, %s drafts: a run failed, skipped" % (os.path.basename(h), d))
+                continue
+            refused = next((r[2] for r in runs if r[2]), None)
+            if refused:
+                print("  %s: not used: %s" % (os.path.basename(h), refused))
+                break
+            if any(r[0] != a[0] for r, a in zip(runs, alone)):
+                # The engine keeps a draft only where the model writes the
+                # same token, so this is a bug, not a slow helper.
+                print("  %s, %s drafts: the answers differ from the model's own, so it isn't used. "
+                      "Please report it." % (os.path.basename(h), d))
+                continue
+            sc = mean([r[1] for r in runs])
+            print("  %s, %s drafts: %s tok/s (%+.0f%%)" % (os.path.basename(h), d,
+                                                         ", ".join("%.1f" % r[1] for r in runs), (sc / base - 1) * 100))
+            if sc > best * (1 + NOISE):
+                best, best_env = sc, (h, d)
+    if best_env:
+        chosen["TS5_DRAFT_MODEL"] = os.path.basename(best_env[0])
+        chosen["TS5_DRAFT"] = best_env[1]
+        notes.append("helper %s at %s drafts a step: %.1f tok/s against %.1f alone (%+.0f%%), the same text"
+                     % (os.path.basename(best_env[0]), best_env[1], best, base, (best / base - 1) * 100))
+    elif cands:
+        chosen["TS5_DRAFT_MODEL"] = "off"
+        notes.append("no helper was faster than the model alone (%.1f tok/s)" % base)
+    else:
+        notes.append("no helper beside it (%.1f tok/s alone)" % base)
+    os.makedirs(model_tune_dir(), exist_ok=True)
+    path = os.path.join(model_tune_dir(), name + ".env")
+    with open(path, "w") as f:
+        f.write("# Written by ts5-tune --models on %s for %s.\n" % (time.strftime("%Y-%m-%d"), name))
+        for note in notes:
+            f.write("# %s%s.\n" % (note[0].upper(), note[1:]))
+        f.write("# A setting chosen in the app or the shell wins. Delete this file to go back.\n")
+        f.write("size=%d\n" % os.path.getsize(model))
+        for k, v in chosen.items():
+            f.write("%s=%s\n" % (k, v))
+    print("  -> %s" % (" ".join("%s=%s" % kv for kv in chosen.items()) or "the defaults"))
+    print("  saved to %s" % path)
+    return True
+
+
+def models_main(names, reset, n):
+    if names:
+        models = names
+    else:
+        models = sorted(f for f in glob.glob(os.path.join(data_dir(), "models", "**", "*.gguf"), recursive=True)
+                        if "mmproj" not in os.path.basename(f).lower() and os.path.getsize(f) >= MAIN_MIN)
+        if not models:
+            sys.exit("ts5-tune: no models of 1.5 GiB or more in %s; name one: ts5-tune --models MODEL.gguf"
+                     % os.path.join(data_dir(), "models"))
+    if reset:
+        for m in models:
+            path = os.path.join(model_tune_dir(), os.path.basename(m) + ".env")
+            try:
+                os.remove(path)
+                print("ts5-tune: removed %s" % path)
+            except FileNotFoundError:
+                pass
+        return
+    print("ts5-tune: %d model(s): %s" % (len(models), ", ".join(os.path.basename(m) for m in models)))
+    print("ts5-tune: keep TokenStation5 closed until this finishes.")
+    failed = [m for m in models if not tune_model(m, n)]
+    if failed:
+        sys.exit("\nts5-tune: not tuned: %s" % ", ".join(os.path.basename(m) for m in failed))
+    print("\nts5-tune: done. TokenStation5 uses these from the next time it loads each model.")
 
 
 def save(chosen, model, before, after):
@@ -157,13 +337,22 @@ def save(chosen, model, before, after):
 
 def main():
     ap = argparse.ArgumentParser(description="Find TokenStation5's fastest GPU settings on this machine.")
-    ap.add_argument("model", nargs="?", help="a .gguf model (default: the one you used last)")
+    ap.add_argument("model", nargs="*", help="a .gguf model (default: the one you used last; --models: each "
+                    "one of 1.5 GiB or more in the models folder)")
     ap.add_argument("--reset", action="store_true", help="delete the saved settings")
+    ap.add_argument("--models", action="store_true", help="each model's own settings: prompt math and helper")
+    ap.add_argument("--tokens", type=int, default=256, help="--models: tokens per answer (256)")
     ap.add_argument("--pp", type=int, default=512, help="prompt tokens per bench (512)")
     ap.add_argument("--tg", type=int, default=64, help="generated tokens per bench (64)")
     ap.add_argument("--quick", action="store_true", help="one run per choice instead of two")
     a = ap.parse_args()
 
+    if a.models:
+        models_main(a.model, a.reset, a.tokens)
+        return
+    if len(a.model) > 1:
+        ap.error("one model at a time, or --models")
+    a.model = a.model[0] if a.model else None
     if a.reset:
         try:
             os.remove(tune_file())
