@@ -21,14 +21,13 @@ Close TokenStation5 first: the bench needs the GPU's memory. It takes about
 each one of 1.5 GiB and more in the models folder: it checks the model
 against the CPU (`ts5 check -n 128`) and keeps 32-bit prompt math if 16-bit
 fails where 32-bit passes; then it writes four prompts' answers with each
-helper model beside it (a quarter of its size or less, and one the engine
-accepts) at 3 and at 5 drafts a step, keeps the fastest whose answers are
-the very text the model writes alone, and turns the helper off when none is
-faster. The results go to ~/.config/tokenstation/tune/<model file>.env,
-which the app and ts5 read when they load that file (a setting chosen in the
-app or the shell still wins); delete it, or run --models --reset, to go
-back. It takes about 5 minutes for an 8B model and 15 for a 14B, with a
-helper.
+helper model beside it (half its size or less, and one the engine accepts)
+at 3 and at 5 drafts a step, keeps the fastest whose answers are the very
+text the model writes alone, and turns the helper off when none is faster.
+The results go to ~/.config/tokenstation/tune/<model file>.env, which the
+app and ts5 read when they load that file (a setting chosen in the app or
+the shell still wins); delete it, or run --models --reset, to go back. It
+takes about 5 minutes for an 8B model and 15 for a 14B, with a helper.
 """
 import argparse
 import glob
@@ -202,14 +201,18 @@ def write(model, prompt, env, n):
 
 
 def helpers(model):
-    """The files a helper may be: beside it, a quarter of its size or less, 64 MiB or more."""
+    """The files a helper may be: beside it, half its size or less, 64 MiB or more.
+
+    Half, where the app's own pick takes a quarter: what's tried here is
+    measured, so a larger helper only stays if it's faster (Llama 3.2 1B
+    makes Llama 3.2 3B 11-15% faster on the PS5 at 40% of its size)."""
     size = os.path.getsize(model)
     found = []
     for f in glob.glob(os.path.join(os.path.dirname(os.path.abspath(model)), "*.gguf")):
         if os.path.samefile(f, model) or "mmproj" in os.path.basename(f).lower():
             continue
         s = os.path.getsize(f)
-        if s * 4 <= size and s >= HELPER_MIN:
+        if s * 2 <= size and s >= HELPER_MIN:
             found.append((s, f))
     return [f for _, f in sorted(found)]
 
@@ -250,16 +253,24 @@ def tune_model(model, n):
     best, best_env = base, None
     cands = helpers(model)
     for h in cands:
+        refused = None
         for d in DRAFTS:
             env = dict(chosen, TS5_DRAFT_MODEL=h, TS5_DRAFT=d)
-            runs = [write(model, p, env, n) for p in PROMPTS]
-            if any(r is None for r in runs):
-                print("  %s, %s drafts: a run failed, skipped" % (os.path.basename(h), d))
-                continue
-            refused = next((r[2] for r in runs if r[2]), None)
+            runs = []
+            for p in PROMPTS:
+                r = write(model, p, env, n)
+                if r is None:
+                    break
+                refused = r[2]  # the engine says so at load, so after the first prompt
+                if refused:
+                    break
+                runs.append(r)
             if refused:
                 print("  %s: not used: %s" % (os.path.basename(h), refused))
                 break
+            if len(runs) < len(PROMPTS):
+                print("  %s, %s drafts: a run failed, skipped" % (os.path.basename(h), d))
+                continue
             if any(r[0] != a[0] for r, a in zip(runs, alone)):
                 # The engine keeps a draft only where the model writes the
                 # same token, so this is a bug, not a slow helper.

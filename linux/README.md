@@ -247,14 +247,15 @@ goes through each model of 1.5 GiB or more in the models folder (or the
 ones named after `--models`). For each, `ts5 check -n 128` compares it with
 the CPU; if 16-bit prompt math fails there and 32-bit passes, the model
 keeps 32-bit. Then it writes four answers (two of prose, two of code) alone
-and with each possible helper beside it (a quarter of its size or less, one
-the engine accepts), at 3 and at 5 guessed tokens a step, and keeps the
-fastest whose answers are the very text the model writes alone; if none is
-faster, the helper is off for that model. The results go to
-`~/.config/tokenstation/tune/<model file>.env` (with the file's size, so a
-new download under the same name doesn't use them), and the app and `ts5`
-read them whenever they load that model (they log `settings for ...`).
-About 5 minutes for an 8B model and 15 for a 14B with a helper beside it.
+and with each possible helper beside it (half its size or less, one the
+engine accepts; the app's own pick takes a quarter), at 3 and at 5 guessed
+tokens a step, and keeps the fastest whose answers are the very text the
+model writes alone; if none is faster, the helper is off for that model.
+The results go to `~/.config/tokenstation/tune/<model file>.env` (with the
+file's size, so a new download under the same name doesn't use them), and
+the app and `ts5` read them whenever they load that model (they log
+`settings for ...`). About 5 minutes for an 8B model and 15 for a 14B with
+a helper beside it.
 
 - `ts5-tune --models --reset`: delete them.
 - A setting chosen in the app (Helper model: Off, Exact prompt reading:
