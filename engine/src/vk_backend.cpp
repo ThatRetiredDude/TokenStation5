@@ -360,7 +360,16 @@ public:
         for (const auto &t : m_.gguf.tensors) weights += t.nbytes;
         const uint64_t fixed = vk_fixed_bytes(hp_, weights), per = kv_bytes_per_token(hp_, kv_);
         const uint64_t ctx = (uint64_t)(n_ctx_ > 0 ? n_ctx_ : 1024) * per + (n_ctx_ > 0 ? 0 : fit_reserve_);
-        if (fixed + ctx <= free) return true;
+        // With room kept for a helper, the context's own measure too, before
+        // the weights go up: a load that fails after uploading them leaves
+        // the driver's budget lower for a second try without the helper.
+        if (fixed + ctx <= free && (n_ctx_ > 0 || fit_reserve_ == 0 ||
+                                    fit_context(ctx_->device_memory(), fixed + fit_reserve_, per, 1 << 30) >= 1024))
+            return true;
+        if (fixed + ctx <= free) {
+            err = "not enough GPU memory left for a context of 1024 tokens beside the room kept for the helper";
+            return false;
+        }
         const double gib = 1073741824.0;
         char b[400];
         snprintf(b, sizeof b,
@@ -1971,6 +1980,11 @@ int draft_context(uint64_t free, const HParams &dhp, uint64_t draft_weight_bytes
     if (per == 0 || free < fixed + spare) return 0;
     const uint64_t n = std::min<uint64_t>((free - fixed - spare) / per, cap > 0 ? (uint64_t)cap : 0) / 1024 * 1024;
     return n >= 1024 ? (int)n : 0;
+}
+
+bool helper_room() {
+    const char *e = getenv("TS5_HELPER_ROOM");
+    return e && atoi(e) != 0;
 }
 
 uint64_t draft_reserve(const HParams &dhp, uint64_t draft_weight_bytes) {

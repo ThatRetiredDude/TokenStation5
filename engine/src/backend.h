@@ -80,6 +80,12 @@ int draft_context(uint64_t free, const HParams &dhp, uint64_t draft_weight_bytes
 // the helper's weights and buffers, 4k of its f16 context, and the 0.5 GiB
 // draft_context keeps spare (else the helper never fits beside the model).
 uint64_t draft_reserve(const HParams &dhp, uint64_t draft_weight_bytes);
+// Whether an auto-fit context keeps that room (TS5_HELPER_ROOM=1: speed
+// first). Unset or 0, the model takes its whole context first and the helper
+// gets what is left, if that is enough for it: on the PS5 the room cost Qwen3
+// 8B 32,768 tokens of context against 20,480 for +9%, and a 14B or 12B can't
+// fit its helper either way.
+bool helper_room();
 // Whether a context of what fits in f16 (f16_ctx tokens) is the model's whole
 // training context. Then TS5_KV=q8 gets an f16 cache anyway: 8 bits would
 // only cost precision (on Qwen 2.5 Coder 7B, more than the GPU check allows).

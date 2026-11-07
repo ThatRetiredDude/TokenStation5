@@ -358,7 +358,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         be = make_cpu_backend(model, a.n_ctx);
     } else {
 #ifdef TS5_VULKAN
-        const uint64_t reserve = dopen && a.n_ctx <= 0 ? draft_reserve(dmodel.hp, dw) : 0;
+        const uint64_t reserve = dopen && a.n_ctx <= 0 && helper_room() ? draft_reserve(dmodel.hp, dw) : 0;
         be = make_vk_backend(model, a.model, a.n_ctx, a.device, err, reserve);
         if (!be && reserve > 0 && err.rfind("not enough", 0) == 0) {
             // The model with room for its draft model doesn't fit: the model alone.

@@ -325,9 +325,10 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
     // The helper's own context: past it, drafting stops and lookup goes on.
     // At most 32k, or 16k for one found beside the model or tuned for it
     // (Qwen3 0.6B's f16 cache is 112 KiB a token, 1.8 GiB at 16k). An
-    // auto-fit main context leaves room for the helper with 4k of context;
-    // the helper then takes what is free, up to that cap, and is skipped if
-    // not even 1k fits.
+    // auto-fit main context takes all it can first (with TS5_HELPER_ROOM=1
+    // it leaves the helper room for 4k of context: ts5::helper_room); the
+    // helper then takes what is free, up to that cap, and is skipped if not
+    // even 1k fits.
     int dctx = 32768;
     uint64_t dweights = 0;
 #ifdef TS5_LINUX
@@ -343,7 +344,7 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
             for (const char *k : {"tokenizer.ggml.scores", "tokenizer.ggml.token_type", "tokenizer.ggml.merges"})
                 l->dmodel.gguf.kv.erase(k);
             for (const auto &t : l->dmodel.gguf.tensors) dweights += t.nbytes;
-            dreserve = ts5::draft_reserve(l->dmodel.hp, dweights);
+            if (ts5::helper_room()) dreserve = ts5::draft_reserve(l->dmodel.hp, dweights);
         }
     }
     const double t0 = now_s();

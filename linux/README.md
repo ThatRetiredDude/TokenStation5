@@ -202,6 +202,16 @@ drafting from the conversation's own text goes on). Off turns it off;
 `TS5_DRAFT_MODEL=/path/to.gguf` in `ts5.env` picks one, and
 `ts5-tune --models` (below) picks the fastest one for each model.
 
+Memory: with Longest context at "As much as fits", the model takes its whole
+context first and the helper gets what is left, if that is enough for it.
+On the PS5 that leaves a 14B or 12B model no room for one (Qwen3 14B keeps
+its 13,312 tokens and runs alone). A fixed Longest context, say 8,192,
+leaves a 14B room for its helper (+32% on short answers). `TS5_HELPER_ROOM=1`
+in `ts5.env` keeps the helper's room instead (its weights and 4k of its
+context, about 1.9 GiB for Qwen3 0.6B), at the cost of the model's context:
+Qwen3 8B 20,480 tokens instead of 32,768, for 9% faster writing on a long
+document. Where a model doesn't fit beside that room, it loads alone.
+
 Which file: the helper is read once for every token it guesses, so a
 smaller quantization pays. On the PS5 with Qwen3 8B, Qwen3 0.6B in Q4_K_M
 (0.37 GiB, unsloth/Qwen3-0.6B-GGUF) guesses 23% faster than in Q8_0 and
