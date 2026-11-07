@@ -27,6 +27,10 @@ import jinja2.sandbox
 TEMPLATES = ["Qwen-Qwen2.5-7B-Instruct", "Qwen-Qwen3-0.6B", "meta-llama-Llama-3.1-8B-Instruct",
              "meta-llama-Llama-3.2-3B-Instruct", "mistralai-Mistral-Nemo-Instruct-2407"]
 NEMO = "mistralai-Mistral-Nemo-Instruct-2407"
+# Templates llama.cpp doesn't keep, compared when TEMPLATES_DIR has them:
+# Gemma 4's, as its GGUF files carry it (tokenizer.chat_template).
+OPTIONAL = ["google-gemma-4"]
+GEMMA4 = "google-gemma-4"
 
 SEARCH = {"type": "function", "function": {
     "name": "web_search", "description": "Search the web.",
@@ -180,14 +184,15 @@ def with_mistral_ids(messages):
 
 def test_prompts(ts5, model, tdir):
     failed = 0
-    for name in TEMPLATES:
+    for name in TEMPLATES + [n for n in OPTIONAL if os.path.exists(os.path.join(tdir, n + ".jinja"))]:
         path = os.path.join(tdir, name + ".jinja")
         template = as_ts5_writes_it(name, open(path).read())
         for case, messages, tools in CASES:
             if (name, case) in SKIP:
                 continue
-            # ts5's tokenizer adds Mistral's BOS; Llama's is in the prompt.
+            # ts5's tokenizer adds Mistral's and Gemma's BOS; Llama's is in the prompt.
             want = (render(template, with_mistral_ids(messages), tools, bos="") if name == NEMO
+                    else render(template, messages, tools, bos="") if name == GEMMA4
                     else render(template, messages, tools))
             req = json.dumps({"messages": for_ts5(messages), "tools": tools})
             got = subprocess.run([ts5, "prompt", "-m", model, "--chat-template", path], input=req, text=True,
@@ -290,6 +295,16 @@ def test_parser(ts5):
          "", [("write_file", {"path": "f.py", "content": 'print("Fizz")'})], 0),
         ("mistral", "[1, 2] are numbers.", "[1, 2] are numbers.", [], 0),
         ("mistral", "Plain answer, [a link](x).", "Plain answer, [a link](x).", [], 26),
+        # Gemma 4: bare keys, strings between <|"|> marks, calls back to back.
+        ("gemma4", '<|tool_call>call:get_weather{city:<|"|>Oslo<|"|>,days:2}<tool_call|>', "",
+         [("get_weather", {"city": "Oslo", "days": 2})], 0),
+        ("gemma4", 'Checking.<|tool_call>call:a{}<tool_call|><|tool_call>call:b{n:2.5,opts:{hourly:true,unit:<|"|>c<|"|>},'
+                   'tags:[<|"|>x, {y}<|"|>,1,null]}<tool_call|>', "Checking.",
+         [("a", {}), ("b", {"n": 2.5, "opts": {"hourly": True, "unit": "c"}, "tags": ["x, {y}", 1, None]})], 9),
+        ("gemma4", '<|tool_call>call:a{"q": "hi", r: Oslo}<tool_call|>', "", [("a", {"q": "hi", "r": "Oslo"})], 0),
+        ("gemma4", "<|tool_call>call:a{q:1}", "", [("a", {"q": 1})], 0),  # cut off by the token limit
+        ("gemma4", '<|tool_call>call:a{q:<|"|>open}<tool_call|>', '<|tool_call>call:a{q:<|"|>open}<tool_call|>', [], 0),
+        ("gemma4", "Plain answer {x: 1}.", "Plain answer {x: 1}.", [], 20),
     ]
     failed = 0
     for fmt, text, content, calls, prefix, *names in cases:

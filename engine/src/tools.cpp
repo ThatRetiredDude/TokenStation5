@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstring>
+#include <map>
 #include <random>
 
 namespace ts5 {
@@ -406,6 +408,218 @@ std::string render_gemma(const std::vector<Message> &all, const std::vector<Json
     return s + "<start_of_turn>model\n";
 }
 
+// Gemma 4's own format, as its template writes it: the tools declared in the
+// system turn, <|tool>declaration:NAME{description:...,parameters:{...}}<tool|>
+// each; a call <|tool_call>call:NAME{key:value,...}<tool_call|>; its result
+// <|tool_response>response:NAME{value:...}<tool_response|> in the same model
+// turn, which the model then goes on with. Keys go bare and in sorted order,
+// strings between <|"|> marks, schema types in capitals.
+const char *const kG4Quote = "<|\"|>";
+const size_t kG4QuoteLen = 5;
+
+std::string g4_str(const std::string &s) { return kG4Quote + s + kG4Quote; }
+
+std::string g4_value(const Json &v) {
+    switch (v.type) {
+        case Json::STR: return g4_str(v.s);
+        case Json::NUM: return v.s.empty() ? Json(v).dump() : v.s;
+        case Json::BOOL: return v.b ? "true" : "false";
+        case Json::ARR: {
+            std::string r = "[";
+            for (size_t i = 0; i < v.a.size(); i++) r += (i ? "," : "") + g4_value(v.a[i]);
+            return r + "]";
+        }
+        case Json::OBJ: {
+            std::string r = "{";
+            for (auto &kv : v.o) r += (r.size() > 1 ? "," : "") + kv.first + ":" + g4_value(kv.second);
+            return r + "}";
+        }
+        default: return "null";
+    }
+}
+
+// A JSON schema (the parameters, one of them, an array's items).
+std::string g4_schema(const Json &p) {
+    std::string r = "{";
+    for (auto &kv : p.o) {
+        const std::string &k = kv.first;
+        const Json &v = kv.second;
+        std::string val;
+        if (k == "type" && v.type == Json::STR) {
+            std::string up = v.s;
+            for (char &c : up) c = (char)toupper((unsigned char)c);
+            val = g4_str(up);
+        } else if (k == "properties" && v.type == Json::OBJ) {
+            val = "{";
+            for (auto &q : v.o) val += (val.size() > 1 ? "," : "") + q.first + ":" + g4_schema(q.second);
+            val += "}";
+        } else if (k == "items" && v.type == Json::OBJ) {
+            val = g4_schema(v);
+        } else {
+            val = g4_value(v);
+        }
+        r += (r.size() > 1 ? "," : "") + k + ":" + val;
+    }
+    return r + "}";
+}
+
+std::string g4_declaration(const Json &tool) {
+    const Json &f = tool["function"].type == Json::OBJ ? tool["function"] : tool;
+    std::string r = "<|tool>declaration:" + f["name"].str() + "{description:" + g4_str(f["description"].str());
+    if (f["parameters"].type == Json::OBJ) r += ",parameters:" + g4_schema(f["parameters"]);
+    if (f["response"].type == Json::OBJ) r += ",response:" + g4_schema(f["response"]);
+    return r + "}<tool|>";
+}
+
+std::string g4_call(const ToolCall &c) {
+    Json args;
+    if (!Json::parse(arguments_json(c.arguments), args) || args.type != Json::OBJ) args = Json::object();
+    return "<|tool_call>call:" + c.name + g4_value(args) + "<tool_call|>";
+}
+
+// A result as the template writes a tool message's text (an OpenAI client's
+// is always text, JSON or not).
+std::string g4_response(const std::string &name, const std::string &result) {
+    return "<|tool_response>response:" + name + "{value:" + g4_str(result) + "}<tool_response|>";
+}
+
+std::string render_gemma4(const std::vector<Message> &all, const std::vector<Json> &tools) {
+    std::string system, s;
+    std::vector<Message> msgs;
+    for (auto &m : all) {
+        if (m.role == "system") system += (system.empty() ? "" : "\n\n") + strip(m.content);
+        else msgs.push_back(m);
+    }
+    if (!system.empty() || !tools.empty()) {
+        s += "<|turn>system\n" + system;
+        for (auto &tool : tools) s += g4_declaration(tool);
+        s += "<turn|>\n";
+    }
+    std::map<std::string, std::string> names;  // call id -> function
+    bool open = false;  // a model turn its calls left open: results and the model's next words go in it
+    for (size_t i = 0; i < msgs.size(); i++) {
+        const Message &m = msgs[i];
+        if (m.role == "tool") {
+            auto it = names.find(m.call_id);
+            const std::string name = it != names.end() ? it->second : !m.name.empty() ? m.name : "unknown";
+            if (!open) s += "<|turn>model\n", open = true;
+            s += g4_response(name, m.content);
+            continue;
+        }
+        if (m.role == "assistant") {
+            if (!open) s += "<|turn>model\n";
+            s += strip(m.content);
+            for (auto &c : m.calls) {
+                names[c.id] = c.name;
+                s += g4_call(c);
+            }
+            open = !m.calls.empty();
+            if (!open) s += "<turn|>\n";
+            continue;
+        }
+        if (open) s += "<turn|>\n", open = false;
+        s += "<|turn>user\n" + strip(m.content) + "<turn|>\n";
+    }
+    // Calls with no results yet end where the model stops; results the model
+    // goes on from; otherwise its turn opens, with an empty thought.
+    if (open && !msgs.empty() && msgs.back().role == "assistant") return s + "<|tool_response>";
+    return open ? s : s + "<|turn>model\n<|channel>thought\n<channel|>";
+}
+
+// Gemma 4's argument syntax as JSON: bare keys, strings between <|"|> marks
+// (or JSON's quotes), numbers, true, false and null; a bare word is a string.
+bool g4_json(const std::string &s, size_t &i, std::string &out, int depth) {
+    auto skip = [&] {
+        while (i < s.size() && strchr(kSpace, s[i])) i++;
+    };
+    skip();
+    if (i >= s.size() || depth > 64) return false;
+    if (starts(s, kG4Quote, i)) {
+        const size_t e = s.find(kG4Quote, i + kG4QuoteLen);
+        if (e == std::string::npos) return false;
+        out += Json::string(s.substr(i + kG4QuoteLen, e - i - kG4QuoteLen)).dump();
+        i = e + kG4QuoteLen;
+        return true;
+    }
+    if (s[i] == '"') {
+        size_t e = i + 1;
+        while (e < s.size() && s[e] != '"') e += s[e] == '\\' ? 2 : 1;
+        Json j;
+        if (e >= s.size() || !Json::parse(s.substr(i, e + 1 - i), j)) return false;
+        out += j.dump();
+        i = e + 1;
+        return true;
+    }
+    if (s[i] == '{' || s[i] == '[') {
+        const bool obj = s[i] == '{';
+        const char close = obj ? '}' : ']';
+        out += s[i++];
+        skip();
+        if (i < s.size() && s[i] == close) return out += close, i++, true;
+        while (true) {
+            if (obj) {
+                skip();
+                std::string key;
+                if (starts(s, kG4Quote, i) || (i < s.size() && s[i] == '"')) {
+                    std::string k;
+                    if (!g4_json(s, i, k, depth + 1)) return false;
+                    Json kj;
+                    if (!Json::parse(k, kj) || kj.type != Json::STR) return false;
+                    key = kj.s;
+                } else {
+                    const size_t k = i;
+                    while (i < s.size() && s[i] != ':' && s[i] != ',' && s[i] != '}') i++;
+                    key = strip(s.substr(k, i - k));
+                }
+                skip();
+                if (key.empty() || i >= s.size() || s[i] != ':') return false;
+                i++;
+                out += Json::string(key).dump() + ":";
+            }
+            if (!g4_json(s, i, out, depth + 1)) return false;
+            skip();
+            if (i < s.size() && s[i] == ',') {
+                out += ',';
+                i++;
+                continue;
+            }
+            if (i < s.size() && s[i] == close) return out += close, i++, true;
+            return false;
+        }
+    }
+    const size_t k = i;
+    while (i < s.size() && s[i] != ',' && s[i] != '}' && s[i] != ']') i++;
+    const std::string v = strip(s.substr(k, i - k));
+    if (v.empty()) return false;
+    Json j;
+    if (v == "true" || v == "True") out += "true";
+    else if (v == "false" || v == "False") out += "false";
+    else if (v == "null" || v == "None") out += "null";
+    else if (Json::parse(v, j) && j.type == Json::NUM) out += v;
+    else out += Json::string(v).dump();
+    return true;
+}
+
+// One call's text between <|tool_call> and <tool_call|>: call:NAME{...}.
+bool g4_call_from(const std::string &body, ToolCall &call) {
+    const std::string b = strip(body);
+    if (!starts(b, "call:")) return false;
+    size_t i = 5;
+    while (i < b.size() && b[i] != '{' && !strchr(kSpace, b[i])) i++;
+    const std::string name = b.substr(5, i - 5);
+    while (i < b.size() && strchr(kSpace, b[i])) i++;
+    std::string args = "{}";
+    if (i < b.size()) {
+        args.clear();
+        if (b[i] != '{' || !g4_json(b, i, args, 0) || i != b.size()) return false;
+    }
+    if (name.empty()) return false;
+    call.id = new_call_id();
+    call.name = name;
+    call.arguments = args;
+    return true;
+}
+
 }  // namespace
 
 // Gemma 4's template has the switch too, but its thinking is off until the
@@ -424,6 +638,7 @@ ToolFormat tool_format(const Tokenizer &t) {
     if (t.chat_format() == Tokenizer::MISTRAL && has(tmpl, "[TOOL_CALLS]") && has(tmpl, "[AVAILABLE_TOOLS]"))
         return ToolFormat::MISTRAL;
     if (t.chat_format() == Tokenizer::GEMMA) return ToolFormat::GEMMA;
+    if (t.chat_format() == Tokenizer::GEMMA4 && has(tmpl, "<|tool_call>")) return ToolFormat::GEMMA4;
     return ToolFormat::NONE;
 }
 
@@ -433,6 +648,7 @@ const char *tool_format_name(ToolFormat f) {
         case ToolFormat::LLAMA3: return "llama3";
         case ToolFormat::MISTRAL: return "mistral";
         case ToolFormat::GEMMA: return "gemma";
+        case ToolFormat::GEMMA4: return "gemma4";
         default: return "none";
     }
 }
@@ -457,6 +673,7 @@ std::vector<Message> parse_messages(const Json &messages) {
         if (msg.role == "assistant" && !thought.empty() && msg.content.find("<think>") == std::string::npos)
             msg.content = "<think>\n" + thought + "\n</think>\n\n" + msg.content;
         msg.call_id = m["tool_call_id"].str();
+        if (msg.role == "tool") msg.name = m["name"].str();
         for (auto &tc : m["tool_calls"].a) {
             const Json &f = tc["function"];
             ToolCall call;
@@ -484,6 +701,7 @@ std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, co
         return t.apply_chat(plain);
     }
     if (f == ToolFormat::GEMMA) return render_gemma(msgs, tools);
+    if (f == ToolFormat::GEMMA4) return render_gemma4(msgs, tools);
     return f == ToolFormat::HERMES ? render_hermes(t, msgs, tools) : render_llama3(msgs, tools, today);
 }
 
@@ -500,6 +718,10 @@ std::string render_results(ToolFormat f, const std::vector<ToolCall> &calls, con
         s += "<|start_header_id|>assistant<|end_header_id|>\n\n";
     } else if (f == ToolFormat::GEMMA) {
         s = "<end_of_turn>\n<start_of_turn>user\n" + gemma_results(results) + "<end_of_turn>\n<start_of_turn>model\n";
+    } else if (f == ToolFormat::GEMMA4) {
+        // The model stopped at <|tool_response>: the results, then it goes on in its turn.
+        for (size_t i = 0; i < results.size(); i++)
+            s += g4_response(i < calls.size() ? calls[i].name : "unknown", results[i]);
     } else if (f == ToolFormat::MISTRAL) {
         s = "</s>";
         for (size_t i = 0; i < results.size(); i++)
@@ -1006,6 +1228,28 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
             r.calls = calls;
             r.content.clear();
         }
+    } else if (f == ToolFormat::GEMMA4) {
+        // Each <|tool_call>...<tool_call|> (the last maybe cut short) that
+        // parses is a call; one that doesn't stays text.
+        const std::string open = "<|tool_call>", close = "<tool_call|>";
+        std::string content;
+        size_t pos = 0;
+        std::vector<ToolCall> calls;
+        for (size_t p; (p = text.find(open, pos)) != std::string::npos;) {
+            const size_t q = text.find(close, p + open.size());
+            const size_t body_end = q == std::string::npos ? text.size() : q;
+            const size_t next = q == std::string::npos ? text.size() : q + close.size();
+            ToolCall call;
+            content += text.substr(pos, p - pos);
+            if (g4_call_from(text.substr(p + open.size(), body_end - p - open.size()), call)) calls.push_back(call);
+            else content += text.substr(p, next - p);
+            pos = next;
+        }
+        content += text.substr(pos);
+        if (!calls.empty()) {
+            r.calls = calls;
+            r.content = rstrip(content);
+        }
     } else if (f == ToolFormat::MISTRAL) {
         // [TOOL_CALLS] and an array of calls, after any text; or the array
         // (or the objects) alone.
@@ -1054,6 +1298,7 @@ size_t content_prefix(ToolFormat f, const std::string &text) {
         if (text[i] == '{' || tag.compare(0, std::min(tag.size(), text.size() - i), text, i, tag.size()) == 0) return 0;
         return text.size();
     }
+    if (f == ToolFormat::GEMMA4) return std::min(text.size(), text.find("<|tool_call>"));  // one token: comes whole
     if (f == ToolFormat::MISTRAL) {
         // A reply that opens with { or [ may be calls ([TOOL_CALLS] is one
         // token, so it comes whole); otherwise the text before [TOOL_CALLS].

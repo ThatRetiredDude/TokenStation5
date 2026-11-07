@@ -143,6 +143,11 @@ own turns. On the PS5 it passed 59 of 60 checks over three runs of the model
 check, the agent task included, with about 29,700 tokens of context. Once it
 made one call where a question asked for two at a time.
 
+Gemma 4 12B takes tools in its own format, as its template writes it: the
+tools declared in the system turn, a call as
+`<|tool_call>call:NAME{key:value}<tool_call|>`, and its result in the same
+model turn. Not yet run through the model check on the PS5.
+
 ## Continue, Cline, Roo Code and others
 
 Choose the "OpenAI compatible" (or "OpenAI", with a custom base URL)
