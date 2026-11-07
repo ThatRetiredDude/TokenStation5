@@ -466,6 +466,10 @@ txt=$(head -c 3000 "$engine/DESIGN.md")
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "$txt" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
 ls "$work"/qwen3-Q4_0.gguf.t*.ts5ref > /dev/null
 ! "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "hi" 2>&1 | grep -q PASS
+# A check whose logits and CPU reference don't fit in the RAM left beside the
+# system's reserve is refused before it takes any, with how many tokens would.
+{ "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 100000 2>&1 > /dev/null || true; } |
+    grep "not enough memory for a 100000-token check: the two sides' logits take about [0-9.]* GiB of RAM, [0-9.]* GiB is free and [0-9.]* GiB is kept for the system (TS5_SYSTEM_RESERVE_GIB); about [0-9]* tokens would fit"
 echo "== memory: a load that would leave the system less than its reserve is refused, with the numbers"
 # (The refused runs exit 1, which pipefail would take for the grep's.)
 { TS5_SYSTEM_RESERVE_GIB=100000 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null || true; } |

@@ -1,5 +1,8 @@
 #include "checks.h"
 #include "log.h"
+#ifdef TS5_VULKAN
+#include "vk_context.h"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -13,6 +16,65 @@
 namespace ts5 {
 
 namespace {
+
+// /proc/meminfo's MemAvailable in bytes; 0 where it can't be read (not Linux).
+uint64_t mem_available() {
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return 0;
+    char line[256];
+    unsigned long long kb = 0;
+    bool found = false;
+    while (!found && fgets(line, sizeof line, f)) found = sscanf(line, "MemAvailable: %llu kB", &kb) == 1;
+    fclose(f);
+    return found ? (uint64_t)kb * 1024 : 0;
+}
+
+// The system's RAM a check keeps free for Linux, the desktop and the app.
+uint64_t check_reserve() {
+#ifdef TS5_VULKAN
+    return system_reserve();
+#else
+    return 2ull << 30;
+#endif
+}
+
+// RAM the CPU reference takes for n tokens beside the two sets of logits:
+// its K and V caches (fp32), the largest layer's weights read from the file
+// (or the output matrix's 64 MiB slices) and n tokens' activations, with a
+// quarter's margin on those for what the estimate leaves out.
+uint64_t cpu_ref_fixed(const Model &m) {
+    uint64_t layer = 64ull << 20;
+    for (const auto &L : m.layers) {
+        uint64_t b = 0;
+        for (const Weight *w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down})
+            b += *w ? (w->info->nbytes + 63) / 64 * 64 : 0;
+        layer = std::max(layer, b);
+    }
+    return layer;
+}
+uint64_t cpu_ref_per_token(const HParams &hp) {
+    uint64_t kv = 0;
+    for (int l = 0; l < hp.n_layer; l++) kv += 2ull * hp.kv_values(l) * 4;
+    const uint64_t E = hp.n_embd, QD = hp.max_qd(), KVD = hp.max_kvd(), F = hp.n_ff;
+    const uint64_t act = 4 * (3 * E + 2 * QD + 2 * KVD + 2 * F);
+    return kv + act + act / 4;
+}
+
+// Refuses a check whose RAM, with the system's reserve, is more than what's
+// free. On the PS5, a 14B on the GPU and a 2,048-token check went from 4.18
+// GiB free before the CPU started to 1.09 GiB when a watcher stopped it.
+bool check_fits(uint64_t need, uint64_t avail, int n, int n_fit, const char *what, std::string &err) {
+    const uint64_t keep = check_reserve();
+    if (avail == 0 || need + keep <= avail) return true;
+    const double gib = 1073741824.0;
+    char b[400];
+    snprintf(b, sizeof b,
+             "not enough memory for a %d-token check: %s about %.2f GiB of RAM, %.2f GiB is free and %.1f GiB "
+             "is kept for the system (TS5_SYSTEM_RESERVE_GIB); about %d tokens would fit",
+             n, what, need / gib, avail / gib, keep / gib, std::max(0, n_fit));
+    err = b;
+    return false;
+}
 
 double now_ms() {
     using namespace std::chrono;
@@ -134,6 +196,12 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     }
     const std::vector<int32_t> toks = text.empty() ? test_tokens(n, nv) : std::vector<int32_t>(text.begin(), text.begin() + n);
     const std::string tag = tokens_tag(text.empty() ? std::vector<int32_t>() : toks);
+    // RAM before anything is taken: both sides' logits, then the CPU's run.
+    const uint64_t avail0 = mem_available(), logit_bytes = 4ull * nv;
+    const uint64_t per_token = 2 * logit_bytes + cpu_ref_per_token(m.hp), fixed = cpu_ref_fixed(m);
+    const uint64_t room = avail0 > check_reserve() + fixed ? avail0 - check_reserve() - fixed : 0;
+    const int n_fit = (int)std::min<uint64_t>(n, room / per_token) / 64 * 64;
+    if (!check_fits(2 * (uint64_t)n * logit_bytes, avail0, n, n_fit, "the two sides' logits take", err)) return false;
     std::vector<float> got((size_t)n * nv), ref(got.size());
     if (progress) progress("running on the GPU");
     // The prompt's way for most positions, then generation's for the last few:
@@ -148,6 +216,9 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     r.saved = !fresh && !m.hp.swa_test && load_ref(m.gguf.path, n, nv, gpu.kv_type(), tag, ref);
     bool ok = true;
     if (!r.saved) {
+        if (!check_fits(fixed + (uint64_t)n * cpu_ref_per_token(m.hp), mem_available(), n, n_fit,
+                        "the CPU reference takes", err))
+            return false;
         if (progress) progress("loading the CPU reference");
         Model cpu_model;
         // Opened, not loaded: the reference reads one layer's weights from the

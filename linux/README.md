@@ -148,7 +148,10 @@ are sized to what is available less that, and a load that wouldn't leave it
 is refused with the numbers ("not enough memory: the weights and buffers
 take 8.6 GiB and ..., 7.9 GiB is free"). A GPU allocation that leaves
 Linux nothing can't be swapped out, and the OOM killer then stops
-everything else. `TS5_SYSTEM_RESERVE_GIB` changes the 2 GiB;
+everything else. `ts5 check` keeps the same 2 GiB: a check whose two sets
+of scores and CPU reference wouldn't leave it is refused before it starts,
+with how many tokens would fit (a 14B at 2,048 tokens needs about 3.8 GiB
+beside the model; 512 tokens need about 1.1 GiB). `TS5_SYSTEM_RESERVE_GIB` changes the 2 GiB;
 `TS5_GPU_MEMORY_GIB` overrides what it thinks it has.
 
 With about 11 GiB for models (an idle PS5 under Debian has about 13.2 GiB
