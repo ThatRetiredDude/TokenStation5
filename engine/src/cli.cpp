@@ -387,6 +387,22 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             return 1;
         }
         printf("%s\n", check_line(basename_of(a.model), r).c_str());
+        // Where the top token differs: the two candidates and how sure each side is.
+        auto show = [&](int32_t t) {
+            std::string s;
+            for (char c : tok.decode(t)) s += c == '\n' ? std::string("\\n") : std::string(1, c);
+            return "\"" + s + "\"";
+        };
+        for (const TopChange &c : r.changes) {
+            std::string before;
+            for (int32_t t : c.before) before += tok.decode(t);
+            std::string ctx;
+            for (char ch : before) ctx += ch == '\n' ? std::string("\\n") : std::string(1, ch);
+            printf("  top token differs at %d, after \"...%s\": CPU %s %.3g, %s %.3g; GPU %s %.3g, %s %.3g%s\n", c.pos,
+                   ctx.c_str(), show(c.cpu_top).c_str(), c.cpu_p_cpu, show(c.gpu_top).c_str(), c.cpu_p_gpu,
+                   show(c.gpu_top).c_str(), c.gpu_p_gpu, show(c.cpu_top).c_str(), c.gpu_p_cpu,
+                   c.next < 0 ? "" : ("; the text has " + show(c.next)).c_str());
+        }
         return r.pass ? 0 : 1;
     }
     if (a.cmd == "bench") {

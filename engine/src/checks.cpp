@@ -244,7 +244,21 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
             pos_diff[i] = std::max(pos_diff[i], d);
             max_ref = std::max(max_ref, (double)std::fabs(f[j]));
         }
-        r.same_top += std::max_element(g, g + nv) - g == std::max_element(f, f + nv) - f;
+        const int32_t tg = (int32_t)(std::max_element(g, g + nv) - g), tf = (int32_t)(std::max_element(f, f + nv) - f);
+        r.same_top += tg == tf;
+        if (tg != tf && r.changes.size() < 16) {
+            // Each side's probabilities (softmax) of the two tokens.
+            double sg = 0, sf = 0;
+            for (int j = 0; j < nv; j++) sg += std::exp((double)g[j] - g[tg]), sf += std::exp((double)f[j] - f[tf]);
+            TopChange c;
+            c.pos = i;
+            c.cpu_top = tf, c.gpu_top = tg;
+            c.next = !text.empty() && i + 1 < n ? toks[i + 1] : -1;
+            c.cpu_p_cpu = 1 / sf, c.cpu_p_gpu = std::exp((double)f[tg] - f[tf]) / sf;
+            c.gpu_p_gpu = 1 / sg, c.gpu_p_cpu = std::exp((double)g[tf] - g[tg]) / sg;
+            c.before.assign(toks.begin() + std::max(0, i - 11), toks.begin() + i + 1);
+            r.changes.push_back(c);
+        }
     }
     r.rel = max_ref > 0 ? r.max_diff / max_ref : r.max_diff;
     // An 8-bit cache rounds a value differently on the two sides whenever their
