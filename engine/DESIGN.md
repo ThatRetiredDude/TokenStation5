@@ -400,9 +400,10 @@ KV head's query heads over several workgroups where 4 rows don't hold them
 (Gemma 4's full layers: 16 heads, 4 workgroups). Such a call costs about
 28.5 us on the PS5 at 64 keys or 2,048 (one 128-key tile a workgroup: its
 memory round trips, 8 batches of value loads for heads of 256): the WIDE8
-builds (`TS5_ATTN_WIDE8=1`, `attn_dec4_256w`, `attn_dec4_512w`) sum 8 value
-columns a thread, so twice the groups take half the keys each, and skip
-the key passes past a tile's last key. The kernel takes a sliding
+builds (`attn_dec4_256w`, `attn_dec4_512w`, the default; `TS5_ATTN_WIDE8=0`
+for the others) sum 8 value columns a thread, so twice the groups take half
+the keys each, and skip the key passes past a tile's last key: 20.2 us a
+call, Gemma 3 1B generation +5.2%, Gemma 3 and 4 12B +1.7%. The kernel takes a sliding
 layer's window and ring like attn, so Gemma's sliding layers use it too:
 attn's tiles hold 8 keys of 256 (4 of 512), four barriers each, and on the
 console Gemma 4 12B spent 12 ms of a 35 ms token in attn at a 4k context.
@@ -568,9 +569,14 @@ before it were (kept tokens over kept plus first rejections), every batch
 size's forward time and the draft model's time per token are measured as
 they run, and a step drafts the k that maximises (1 + expected kept) / (time
 of a k + 1 batch + k drafted tokens), only when that beats one token alone
-by 2% (a draft model: by `TS5_DRAFT_GAIN`, default 1.02, since what a step
-costs beyond its measured forwards is left out; Gemma 3 1B beside Gemma 3
-4B kept 71%, predicted ahead, and ran 1.4% slower than lookup alone). Every
+by 2%. A step's cost includes sampling each logits row it reads (measured
+per row; one more row than the drafts kept), and the one-token forward is
+measured on the first step, which drafts nothing (`TS5_DRAFT_COST=0`: neither):
+where every step drafts it was never measured otherwise, and its 10 ms
+guess made a drafter beside a fast model look better than it was (Gemma 3
+1B beside Gemma 3 4B, a 9 ms forward, predicted 8% ahead, ran 1-2% behind
+lookup alone; a higher bar for drafting at all, 1.06 to 1.15, didn't
+rescue it and cost Qwen3 8B 1.8% at 1.10). Every
 16th step proposes anyway, so estimates recover. Measured on the
 PS5 under Linux before it (Qwen3 8B, 0.6B drafter): prose kept 40-54% of the
 0.6B's drafts and ran 18-27% slower than no drafting, code renames kept 79%

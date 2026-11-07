@@ -1784,11 +1784,13 @@ private:
     bool attn_dec64_ = true;
     // Heads of 256 and 512 (Gemma) through the WIDE8 builds of attn_dec
     // (attn_dec4_256w, attn_dec4_512w: 8 value columns a thread, half the
-    // value round trips a tile, key passes past the last key skipped).
-    // TS5_ATTN_WIDE8=1; off until the PS5 measures it. attn_dec4_256 costs
-    // about 28.5 us a call there at any context (Gemma 3 1B, 2026-11-07:
-    // 28.4 us at 64 keys, 28.8 at 2048), against about 9 for heads of 128.
-    bool attn_wide8_ = false;
+    // value round trips a tile, key passes past the last key skipped;
+    // TS5_ATTN_WIDE8=0: the 4-column builds). On the PS5 (2026-11-07) a
+    // call of Gemma 3 1B's takes 20.2 us at 64 keys against 28.4 (21.8 and
+    // 28.9 at 2,048), and generation is 5.2% faster (Gemma 3 1B), 1.7%
+    // (Gemma 3 12B, Gemma 4 12B at 64 tokens of context; 1.7 and 1.5% at
+    // 2,048); the checks are the same to the last digit.
+    bool attn_wide8_ = true;
     uint32_t attn_dec_lpk_ = 0;  // the lanes per key the attn_dec builds got (0: thread per key, heads of 128 only)
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).
