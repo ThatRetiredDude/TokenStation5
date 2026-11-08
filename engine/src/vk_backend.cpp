@@ -1920,8 +1920,15 @@ private:
     bool attn_pf128_ = true;
     // Heads of 256 and 512 in attn_pf's builds that need 128 registers a
     // thread instead of 168 on the PS5 (two workgroups a compute unit instead
-    // of one), with the same output (TS5_ATTN_PF_SLIM=1; being measured).
+    // of one), with the same output. On the PS5's Linux, 32k-token prompts
+    // read 5.5% faster on Qwen3.5 9B and Gemma 3 12B and 9.9% on Gemma 4 12B,
+    // generation unchanged (TS5_ATTN_PF_SLIM=0: the wider builds). The store
+    // title keeps the wider builds until measured there.
+#ifdef TS5_PS5
     bool attn_pf_slim_ = false;
+#else
+    bool attn_pf_slim_ = true;
+#endif
     // Generation over at least this many keys uses attn_dec (TS5_ATTN_DEC;
     // 0: never). By default (-1) from the first key, the only setting at
     // which a verify batch across the start takes generation's kernel for

@@ -405,7 +405,11 @@ thread, so a compute unit holds two of its 256-thread workgroups, but
 attn_pf256 and attn_pf512 need 168, so it holds one: half the waves to hide
 memory and shared-memory waits behind. `attn_pf256s` (tiles of 16 keys) and
 `attn_pf512s` (no tile loaded into registers ahead) need 128 again
-(`TS5_ATTN_PF_SLIM=1`, off by default until the PS5 measures them). Keys
+(on by default on Linux since the PS5 measured them, 2026-11-08: 32k-token
+prompts 5.5% faster on Qwen3.5 9B and Gemma 3 12B, 9.9% on Gemma 4 12B,
+generation unchanged; `TS5_ATTN_PF_SLIM=0` keeps the wider builds, which
+the store title still uses). Splitting the keys (`TS5_ATTN_SPLITS=3`) on top
+adds 0.2 to 3.6% to prompts but costs generation 7.5 to 24%. Keys
 are scored 16 at a time in every build, in the same order, so their logits
 are byte for byte the same (the suite checks it). Register counts come from
 RADV's null device: `RADV_FORCE_FAMILY=gfx1013` with

@@ -309,7 +309,7 @@ LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 python3 "$here/compare.py" --ts5 "$ts5" --
 LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 TS5_ATTN_DEC=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 \
     --backend vk --ntok 40 --step "${g4[@]}"
 
-echo "== attn_pf256s and attn_pf512s (TS5_ATTN_PF_SLIM=1): the same logits as attn_pf256 and attn_pf512, byte for byte"
+echo "== attn_pf256s and attn_pf512s (the default; TS5_ATTN_PF_SLIM=0 the wider builds): the same logits as attn_pf256 and attn_pf512, byte for byte"
 # The builds with fewer registers (tiles of 16 keys; no tile loaded ahead)
 # score the keys in the same order, so 600 tokens (three prompt chunks) come
 # out identical with the f16 and the 8-bit cache, and with the keys split.
@@ -321,10 +321,12 @@ for m in "${shapes[3]}" "$work/gemma4-kmix.gguf"; do
                 -o "$work/slim-$s.bin" $slim_toks 2> "$work/slim-$s.err"
         done
         grep -q "attn_pf[25][51][62]s" "$work/slim-1.err"
-        if grep -q "attn_pf[25][51][62]s" "$work/slim-0.err"; then echo "slim build without TS5_ATTN_PF_SLIM"; exit 1; fi
+        if grep -q "attn_pf[25][51][62]s" "$work/slim-0.err"; then echo "slim build with TS5_ATTN_PF_SLIM=0"; exit 1; fi
         cmp "$work/slim-0.bin" "$work/slim-1.bin"
         echo "same logits: $(basename "$m") $env"
     done
+    LP_NATIVE_VECTOR_WIDTH=1024 TS5_PROFILE=1 "$ts5" logits -m "$m" -o "$work/slim-d.bin" $slim_toks 2> "$work/slim-d.err"
+    grep -q "attn_pf[25][51][62]s" "$work/slim-d.err" || { echo "FAIL: the slim builds are not the default"; exit 1; }
 done
 
 echo "== speculative decoding: the small verify batch, then draft-on output == draft-off output"
