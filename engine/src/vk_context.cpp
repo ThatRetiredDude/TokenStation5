@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 #ifndef TS5_PS5
@@ -64,6 +65,32 @@ uint64_t VkContext::heap_usage() const {
         if (shared || (m2.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT))
             n += b.heapUsage[i];
     return n;
+#else
+    return 0;
+#endif
+}
+
+int VkContext::settle_memory() const {
+#ifndef TS5_PS5
+    if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) return 0;
+    const char *e = getenv("TS5_MEMORY_SETTLE_MS");
+    const int max_ms = e && *e ? std::max(0, atoi(e)) : 3000, step = 250;
+    uint64_t prev = mem_available();
+    int waited = 0;
+    // On the PS5, a load 2 to 3 s after the model before it ended (or after
+    // a build) saw 0.4 to 0.6 GiB less than a load after a pause: DeepSeek
+    // R1 14B got 22,528 tokens instead of 24,576 to 25,600. Still climbing
+    // means more than 16 MiB in a quarter second.
+    while (prev && waited < max_ms) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(step));
+        waited += step;
+        const uint64_t now = mem_available();
+        if (now < prev + (16ull << 20)) break;
+        prev = now;
+    }
+    std::lock_guard<std::mutex> lk(budget_mutex);
+    ram_at = budget_at = -1;
+    return waited;
 #else
     return 0;
 #endif
