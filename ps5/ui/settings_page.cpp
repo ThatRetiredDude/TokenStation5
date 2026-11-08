@@ -93,10 +93,20 @@ const std::vector<Row> &setting_rows() {
          {{"", "As much as fits"}, {"4096", "4,096 tokens"}, {"8192", "8,192 tokens"}, {"16384", "16,384 tokens"},
           {"32768", "32,768 tokens"}, {"65536", "65,536 tokens"}},
          ""},
+#ifdef TS5_LINUX
+        {"MODELS", "TS5_KV", "Room for longer contexts",
+         "Keeps what the model has read in half the memory, so about twice the context fits. It's used only when "
+         "a model's whole context doesn't fit otherwise. Automatic uses it where a model would otherwise get "
+         "fewer than 24,576 tokens (the 14B models on the PS5: about 20,000 instead of 11,000). Answers can come "
+         "out very slightly different.",
+         "Now: the model loads again, which takes a few seconds", {{"", "Automatic"}, {"f16", "Off"}, {"q8", "On"}},
+         ""},
+#else
         {"MODELS", "TS5_KV", "Room for longer contexts",
          "Keeps what the model has read in half the memory, so about twice the context fits. It's used only when "
          "a model's whole context doesn't fit otherwise. Answers can come out very slightly different.",
          "Now: the model loads again, which takes a few seconds", {{"f16", "Off"}, {"q8", "On"}}, "f16"},
+#endif
         {"MODELS", "TS5_MMB_F16", "Exact prompt reading",
          "Reads every prompt with 32-bit math. Off, Qwen, DeepSeek and Llama models read prompts with 16-bit "
          "math, about 40% faster; a few answers come out worded differently. Gemma always reads in 32-bit. "

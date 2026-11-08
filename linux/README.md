@@ -155,18 +155,24 @@ beside the model; 512 tokens need about 1.1 GiB). `TS5_SYSTEM_RESERVE_GIB` chang
 `TS5_GPU_MEMORY_GIB` overrides what it thinks it has.
 
 With about 11 GiB for models (an idle PS5 under Debian has about 13.2 GiB
-available, less the 2 GiB kept free):
+available, less the 2 GiB kept free), Longest context at "As much as fits",
+no helper, measured on a PS5 (the 16-bit cache, or 8 bits where Room for
+longer contexts is Automatic and a model would get under 24,576 tokens):
 
-| Model | Quant | Weights | Context that fits (estimate) |
-| --- | --- | ---: | ---: |
-| Qwen 2.5 Coder 14B Instruct | Q4_K_M | ~9.0 GiB | ~16k with the 8-bit KV cache |
-| Qwen 3 14B | Q4_K_M | ~9.0 GiB | ~24k with the 8-bit KV cache |
-| Gemma 3 12B | Q4_K_M | ~6.8 GiB | ~64k (sliding layers keep it small) |
-| Mistral Nemo 12B | Q4_K_M | ~7.0 GiB | ~32k |
+| Model | Quant | Context | Cache |
+| --- | --- | ---: | --- |
+| Qwen 3 14B | Q4_K_M | 24,576 (13,312 in 16-bit) | 8-bit (Automatic) |
+| DeepSeek R1 Distill Qwen 14B | Q4_K_M | 20,480 (11,264) | 8-bit (Automatic) |
+| Qwen 2.5 Coder 14B Instruct | Q4_K_M | 20,480 (11,264) | 8-bit (Automatic) |
+| Gemma 3 12B | Q4_K_M | 39,936 | 16-bit |
+| Gemma 4 12B | Q4_K_M | 131,072 (its whole length) | 16-bit |
+| Qwen3.5 9B | Q4_K_M | 164,864 (262,144 with Room for longer contexts On) | 16-bit |
+| Llama 3.1 8B | Q4_K_M | 49,152 (92,160 with Room for longer contexts On) | 16-bit |
+| Qwen 3 8B, Qwen 2.5 Coder 7B | Q4_K_M | 32,768 (their limit; longer with YaRN, below) | 16-bit |
 
-The Models page's Hugging Face search uses the same budget, so 14B models show
-up there once the memory is raised. These are estimates until they are
-measured on a PS5.
+On the 14Bs the 8-bit cache found the same long-document answers as 16-bit
+(10 of 11 at about twice the length); some longer answers are worded
+differently. The Models page's Hugging Face search uses the same budget.
 
 ## Settings
 

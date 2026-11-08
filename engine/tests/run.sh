@@ -554,6 +554,16 @@ echo "== memory: a load that would leave the system less than its reserve is ref
 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "GiB of it kept free for the system"
 echo "== -c auto with TS5_KV=q8: an f16 cache, as the test model's whole context fits in f16"
 TS5_KV=q8 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "KV cache [0-9.]* GiB (f16, "
+echo "== -c auto with TS5_KV unset: 8 bits where f16 holds under 24,576 tokens and less than the model's context"
+# 2.002 GiB leaves this model 2,048 tokens of f16 (tests' arithmetic, as the
+# 4.5 and 3 GiB below: a change in what a load takes moves it).
+TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2> "$work/kvauto.err" > /dev/null
+grep "8-bit KV cache: [0-9]* tokens, where f16 fits 2048 (TS5_KV=f16 keeps f16)" "$work/kvauto.err"
+grep "KV cache [0-9.]* GiB (q8, " "$work/kvauto.err"
+TS5_KV=f16 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2>&1 > /dev/null |
+    grep "KV cache [0-9.]* GiB (f16, 2048 tokens)"
+TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 2048 -p hi -n 1 2>&1 > /dev/null |
+    grep "KV cache [0-9.]* GiB (f16, 2048 tokens)"
 echo "== YaRN (TS5_YARN): Vulkan vs CPU stretched 4x, 300 tokens and one per call; ts5 check; -c auto past the window"
 TS5_YARN=4 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
     "$work/qwen3-Q4_0.gguf" "$work/qwen2-Q8_0.gguf"

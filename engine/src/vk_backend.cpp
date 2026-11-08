@@ -609,11 +609,14 @@ private:
             for (char c : {'d', 'l'})  // f16 only
                 mmb_var32_.erase(std::remove(mmb_var32_.begin(), mmb_var32_.end(), c), mmb_var32_.end());
         }
-        kv_ = kv_type_setting();
-        if (kv_ == KvType::Q8 && !(attn_ok_all() && hp_.max_hd() % 32 == 0)) {
+        bool kv_auto = false;
+        kv_ = kv_type_setting(&kv_auto);
+        const bool q8_ok = attn_ok_all() && hp_.max_hd() % 32 == 0;
+        if (kv_ == KvType::Q8 && !q8_ok) {
             ts5::log_line("ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16");
             kv_ = KvType::F16;
         }
+        kv_auto_ = kv_auto && q8_ok;
         const char *prof = getenv("TS5_PROFILE");
         cpu_prof_ = prof && atoi(prof) != 0;
         if (prof && atoi(prof) == 1) {
@@ -1020,6 +1023,14 @@ private:
                                    kv_bytes_per_token(hp_, t), cap);
             };
             const int f16 = fit(KvType::F16);
+            if (kv_auto_ && f16 < kQ8Below && !f16_reaches(f16, train)) {
+                const int q8 = fit(KvType::Q8);
+                if (q8 > f16) {
+                    ts5::log_line("ts5: 8-bit KV cache: %d tokens, where f16 fits %d (TS5_KV=f16 keeps f16)", q8,
+                                  f16);
+                    kv_ = KvType::Q8;
+                }
+            }
             if (kv_ == KvType::Q8 && f16_reaches(f16, train)) {
                 ts5::log_line("ts5: f16 KV cache: the whole %d-token context (the model's, or the Settings cap) "
                               "fits in f16, the more exact",
@@ -2022,8 +2033,10 @@ private:
     std::string mmb_f16_skip_;
     std::string mmb_var_, mmb_var32_, mmb_var_q8_;  // the f16 and f32 prompt kernels' variants (TS5_MMB_VAR)
     size_t split_used_ = 0;  // floats of split_ that kernels may still read
-    // The KV cache's type (TS5_KV=q8 or f16).
+    // The KV cache's type (TS5_KV=q8 or f16), and whether TS5_KV left it to
+    // the auto fit (kQ8Below) on a model that can take q8.
     KvType kv_ = KvType::F16;
+    bool kv_auto_ = false;
     // TS5_PROFILE=1: a timestamp after each dispatch, summed per kernel.
     static constexpr uint32_t QMAX = 4096;
     std::string qpending_;  // the labels of the dispatches since the last timestamp
@@ -2086,10 +2099,18 @@ Backend *make_vk_backend(Model &m, const std::string &path, int n_ctx, int devic
 
 bool vk_supports_type(uint32_t type) { return qname(type) != nullptr; }
 
-KvType kv_type_setting() {
+KvType kv_type_setting(bool *automatic) {
     const char *e = getenv("TS5_KV");
+#ifdef TS5_PS5
+    // The store title keeps f16 unless asked: the automatic choice was
+    // measured on Linux.
+    if (automatic) *automatic = e && std::string(e) == "auto";
+#else
+    if (automatic) *automatic = !e || !*e || std::string(e) == "auto";
+#endif
     if (!e || !*e) return KvType::F16;
     const std::string v = e;
+    if (v == "auto") return KvType::F16;
     if (v == "q8" || v == "8") return KvType::Q8;
     if (v != "f16" && v != "16") ts5::log_line("ts5: TS5_KV=%s: not q8 or f16, using f16", e);
     return KvType::F16;

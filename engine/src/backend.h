@@ -57,8 +57,16 @@ struct VkContext;
 // stores them, so a comparison with that GPU measures its kernels rather
 // than the cache's precision.
 Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv = KvType::F32);
-// The cache type TS5_KV asks for: q8, else f16.
-KvType kv_type_setting();
+// The cache type TS5_KV asks for: q8, else f16. *automatic: TS5_KV is
+// unset, empty or auto, so an auto-fit context (-c auto) may take q8 where f16
+// is short (kQ8Below).
+KvType kv_type_setting(bool *automatic = nullptr);
+// With TS5_KV automatic, an auto-fit context whose f16 cache holds fewer
+// tokens than this (and less than the model's training context) takes a q8
+// cache, about twice as long. On the PS5 that is the 14Bs (10,240 to 16,384
+// tokens in f16, 20,480 to 24,576 in q8, the same long-document questions
+// right); Gemma 3 12B (39,936) and Llama 3.1 8B (49,152) keep f16.
+constexpr int kQ8Below = 24576;
 // Bytes of K and V per token of context, over the layers that see all keys,
 // in a cache of type kv.
 uint64_t kv_bytes_per_token(const HParams &hp, KvType kv);
