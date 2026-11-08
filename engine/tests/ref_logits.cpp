@@ -3,6 +3,7 @@
 // Writes n_tokens x n_vocab float32 (logits of every position).
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #include "llama.h"
@@ -19,6 +20,12 @@ int main(int argc, char **argv) {
     auto cp = llama_context_default_params();
     cp.n_ctx = 1024;
     cp.n_batch = cp.n_ubatch = (uint32_t)toks.size();
+    // TS5_REF_YARN=FACTOR:WINDOW: YaRN over that window, to compare with ts5's TS5_YARN.
+    if (const char *e = getenv("TS5_REF_YARN"); e && *e) {
+        cp.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_YARN;
+        cp.rope_freq_scale = 1.0f / (float)atof(e);
+        if (const char *w = strchr(e, ':')) cp.yarn_orig_ctx = (uint32_t)atoi(w + 1);
+    }
     llama_context *ctx = llama_init_from_model(model, cp);
     const int nv = llama_vocab_n_tokens(llama_model_get_vocab(model));
     llama_batch b = llama_batch_init((int)toks.size(), 0, 1);

@@ -3,6 +3,7 @@
 // qwen35), as stored in GGUF.
 #pragma once
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -39,6 +40,21 @@ struct HParams {
     // Linear RoPE scaling of the full-attention layers: positions times this
     // (Gemma 3's 1/8); 1 elsewhere.
     float rope_scale = 1.f;
+    // YaRN (Qwen 2.5 and Qwen3 past their 32,768-token window, or a file
+    // that declares it): the full layers' slow RoPE frequencies are divided
+    // by yarn_factor, the fast ones kept, a ramp between them, and attention
+    // sharpened by (1 + 0.1 ln yarn_factor)^2 (as Qwen's YaRN and llama.cpp
+    // do). yarn_orig is the window it stretches (0: no YaRN for this model),
+    // yarn_max the longest context it allows; Model::use_context picks the
+    // factor for a context (1: none, the default up to the window).
+    int yarn_orig = 0, yarn_max = 0;
+    float yarn_factor = 1.f, yarn_beta_fast = 32.f, yarn_beta_slow = 1.f;
+    // What YaRN multiplies the attention scale by: 1 without it.
+    float yarn_attn() const {
+        if (yarn_factor <= 1.f) return 1.f;
+        const float m = 1.f + 0.1f * std::log(yarn_factor);
+        return m * m;
+    }
     // Gemma 4: which layers slide is a list in the GGUF (swa_layers), not
     // every swa_pattern-th; sliding layers have their own K/V head count,
     // head size and RoPE dimensions (the 12B: 8 heads of 256 against the full
@@ -137,6 +153,15 @@ struct Model {
     // were off by up to 1e-4 radians at 512 tokens, which Gemma 4's sharp,
     // unscaled attention turned into wrong logits.
     uint64_t rope_turn(bool swa, int i) const;
+    // Sets hp.yarn_factor for a context of n_ctx tokens, before RoPE is set
+    // up. Only with TS5_YARN: 1 (or on, auto) gives n_ctx / yarn_orig past
+    // n_ctx_train, a number above 1 that factor whatever the context (so a
+    // short check tests it, and a GPU run and its CPU reference agree);
+    // without it 1, positions as the model was trained.
+    void use_context(int n_ctx);
+    // The longest context to fit: n_ctx_train, or with TS5_YARN on (1, or a
+    // factor) what YaRN allows: yarn_max, or the window times that factor.
+    int context_cap() const;
     int rope_dims(bool swa) const { return swa && hp.rope_dims_swa ? hp.rope_dims_swa : hp.rope_dims; }
 
 private:

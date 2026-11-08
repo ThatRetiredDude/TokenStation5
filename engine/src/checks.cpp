@@ -224,8 +224,10 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     for (int i = batch; i < n; i++)
         if (!gpu.forward(&toks[i], 1, i, got.data() + (size_t)i * nv, false, err)) return false;
     r.gpu_ms = now_ms() - t;
-    // Saved answers are the file's own window's: a test window needs its own.
-    r.saved = !fresh && !m.hp.swa_test && load_ref(m.gguf.path, n, nv, gpu.kv_type(), tag, ref);
+    // Saved answers are the file's own window's and RoPE's: a test window,
+    // or positions stretched by YaRN, need their own.
+    const bool own = m.hp.swa_test || m.hp.yarn_factor > 1.f;
+    r.saved = !fresh && !own && load_ref(m.gguf.path, n, nv, gpu.kv_type(), tag, ref);
     bool ok = true;
     if (!r.saved) {
         if (!check_fits(fixed + (uint64_t)n * cpu_ref_per_token(m.hp), mem_available(), n, n_fit,
@@ -236,14 +238,16 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
         // Opened, not loaded: the reference reads one layer's weights from the
         // file at a time, so the check needs little memory beside the GPU's.
         if (!cpu_model.open(m.gguf.path, err)) return false;
-        // The GPU's window, where a test window was asked for when it loaded.
+        // The GPU's window, where a test window was asked for when it loaded,
+        // and its YaRN stretch, which its context set.
         cpu_model.hp.swa_window = m.hp.swa_window;
+        cpu_model.hp.yarn_factor = m.hp.yarn_factor;
         std::unique_ptr<Backend> cpu(make_cpu_backend(cpu_model, n, gpu.kv_type()));
         if (progress) progress("running on the CPU");
         t = now_ms();
         ok = cpu->forward(toks.data(), n, 0, ref.data(), true, err);
         r.cpu_ms = now_ms() - t;
-        if (ok && !m.hp.swa_test) save_ref(m.gguf.path, n, nv, gpu.kv_type(), tag, ref);
+        if (ok && !own) save_ref(m.gguf.path, n, nv, gpu.kv_type(), tag, ref);
     }
     if (!ok) return false;
     double max_ref = 0;

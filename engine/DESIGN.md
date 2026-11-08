@@ -24,6 +24,7 @@ small enough to reason about.
 | Chat formats | ChatML, Llama 3, Mistral `[INST]` | Jinja templates, tool calls |
 | API | `/v1/chat/completions` (+ streaming), `/v1/completions`, `/v1/models`, `/health`; llama-server style `timings` | Anthropic `/v1/messages`, parallel slots |
 | KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`) | |
+| Long context | the model's own window; YaRN for Qwen 2.5 and Qwen3 past 32k (`TS5_YARN=1`) | YaRN for other families |
 
 Not in scope: training, multi-GPU, CUDA/ROCm, Python.
 
@@ -656,6 +657,28 @@ way) finds it 0.4% to 1% off on Llama 3.1 8B, Llama 3.2 3B and Qwen3 8B but
 of what fits, `TS5_KV=q8` gets an f16 cache wherever f16 already reaches the
 model's training context: 8 bits are only worth their precision where they
 buy context.
+
+Qwen 2.5 and Qwen3 were trained on a 32,768-token window (Qwen3's files say
+40,960: the window and room to answer), and their model cards stretch it to
+131,072 with YaRN. `TS5_YARN=1` (or `on`, `auto`) does that past the file's
+own context. `-c auto` then fits up to 131,072 tokens, and a context of N
+tokens slows RoPE by N / 32768. It isn't on by default because YaRN is fixed
+for the whole load: a model loaded with 64k of room answers a short chat
+with stretched positions too, which Qwen's cards say may cost a little
+quality. `Model::rope_turn` applies it per pair, as Qwen's YaRN and
+llama.cpp do:
+- a pair that turns more than 32 times over the window keeps its frequency;
+- one that turns less than once is slowed by the factor;
+- the pairs between ramp linearly (by pair index, rounded out);
+- attention is scaled by (1 + 0.1 ln factor)², the square of the magnitude
+  both sides' cos and sin carry.
+
+A file that declares `rope.scaling.type = yarn` with an
+`original_context_length` (the 128K repacks) is read the same way. A number
+above 1 (`TS5_YARN=2`) is a fixed factor whatever the context. The suite uses
+that to check the GPU against the CPU and against llama.cpp's YaRN on short
+sequences. `ts5 check` runs its CPU reference with the same factor and keeps
+no saved answers for it.
 
 Context 0 (`ts5 serve -c auto`, and the PS5 title's default) means as much as
 fits: after the weights and activations are allocated, the backend takes

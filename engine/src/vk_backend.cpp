@@ -984,24 +984,12 @@ private:
                 !mk(rec_, 4ull * rec_layers_ * hp_.rec_state_floats()))
                 return false;
         }
-        // Each RoPE pair's turn per position (Model::rope_turn), for the full
-        // and the sliding layers: high word, then low.
-        for (int swa = 0; swa < 2; swa++) {
-            const int pairs = std::max(1, m_.rope_dims(swa) / 2);
-            if (!mk(rope_turn_[swa], 8ull * pairs, true)) return false;
-            uint32_t *t = (uint32_t *)rope_turn_[swa].map;
-            for (int i = 0; i < m_.rope_dims(swa) / 2; i++) {
-                const uint64_t v = m_.rope_turn(swa, i);
-                t[2 * i] = (uint32_t)(v >> 32);
-                t[2 * i + 1] = (uint32_t)v;
-            }
-        }
         if (n_ctx_ <= 0) {
             // As much as fits, in what the weights and activations left, and
             // no more than one buffer can address.
             // TS5_CTX_MAX (Settings > Longest context) caps it below that,
             // leaving the rest of the memory free.
-            int train = hp_.n_ctx_train > 0 ? hp_.n_ctx_train : 32768;
+            int train = m_.context_cap();
             if (const char *e = getenv("TS5_CTX_MAX"))
                 if (atoi(e) >= 1024) train = std::min(train, atoi(e));
             // Sliding layers' rings are a fixed size, beside the context.
@@ -1026,6 +1014,23 @@ private:
             if (n_ctx_ <= 0) {
                 err = "not enough GPU memory left for a context of 1024 tokens";
                 return false;
+            }
+        }
+        // RoPE for this context: YaRN past the model's window (use_context).
+        m_.use_context(n_ctx_);
+        if (hp_.yarn_factor > 1.f)
+            ts5::log_line("ts5: YaRN: positions stretched %.2fx over the %d-token window, for %d tokens of context",
+                          hp_.yarn_factor, hp_.yarn_orig, n_ctx_);
+        // Each RoPE pair's turn per position (Model::rope_turn), for the full
+        // and the sliding layers: high word, then low.
+        for (int swa = 0; swa < 2; swa++) {
+            const int pairs = std::max(1, m_.rope_dims(swa) / 2);
+            if (!mk(rope_turn_[swa], 8ull * pairs, true)) return false;
+            uint32_t *t = (uint32_t *)rope_turn_[swa].map;
+            for (int i = 0; i < m_.rope_dims(swa) / 2; i++) {
+                const uint64_t v = m_.rope_turn(swa, i);
+                t[2 * i] = (uint32_t)(v >> 32);
+                t[2 * i + 1] = (uint32_t)v;
             }
         }
         // Each layer's place in the caches: n_ctx_ slots, or a sliding
@@ -1367,7 +1372,7 @@ private:
     // (0: one per position). Only attn and attn_pf have them.
     void attention(int l, int n, int pos0, uint32_t kb, uint32_t cache_off, uint32_t win = 0, uint32_t ring = 0) {
         const uint32_t HD = hp_.hd(l), H = hp_.n_head, HKV = hp_.hkv(l);
-        const float scale = hp_.attn_scale;
+        const float scale = hp_.attn_scale * hp_.yarn_attn();
         if (!attn_ok(l)) {
             struct { uint32_t head_dim, n_head, n_head_kv, pos0, cache_off; float scale; } pc{
                 HD, H, HKV, (uint32_t)pos0, cache_off, scale};

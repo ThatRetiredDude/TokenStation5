@@ -375,6 +375,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     if (a.backend == "cpu") {
         if (a.n_ctx <= 0) a.n_ctx = 8192;
         if (!model.load(nullptr, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
+        model.use_context(a.n_ctx);
         be = make_cpu_backend(model, a.n_ctx);
     } else {
 #ifdef TS5_VULKAN
@@ -403,7 +404,10 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             for (const auto &t : dmodel.gguf.tensors) dw += t.nbytes;
         if (!dopen) {
         } else if (a.backend == "cpu") {
-            if (dmodel.load(nullptr, derr)) db = make_cpu_backend(dmodel, be->n_ctx());
+            if (dmodel.load(nullptr, derr)) {
+                dmodel.use_context(be->n_ctx());
+                db = make_cpu_backend(dmodel, be->n_ctx());
+            }
         } else {
 #ifdef TS5_VULKAN
             // As much of the main context as fits in what is free now.

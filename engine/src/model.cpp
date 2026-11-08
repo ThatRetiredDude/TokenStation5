@@ -134,14 +134,28 @@ bool Model::open(const std::string &path, std::string &err) {
         }
     }
     hp.n_ctx_train = (int)gguf.get_int(a + "context_length", 4096);
-    // A window stretched by RoPE scaling (YaRN, linear), which the engine
-    // doesn't do: past the original window the model loses the thread.
+    // A window stretched by RoPE scaling: the model's own context is the
+    // original window, and past it only YaRN (use_context) keeps the thread.
     const std::string scaling = gguf.get_str(a + "rope.scaling.type");
     const int original = (int)gguf.get_int(a + "rope.scaling.original_context_length", 0);
-    if (!scaling.empty() && scaling != "none" && original > 0 && original < hp.n_ctx_train) hp.n_ctx_train = original;
-    // Qwen 2.5's own GGUFs declare 131072 with no scaling keys: its window is
-    // 32768, and more needs YaRN (its model card).
-    else if (hp.arch == "qwen2" && scaling.empty() && hp.n_ctx_train > 32768) hp.n_ctx_train = 32768;
+    const bool qwen = hp.arch == "qwen2" || hp.arch == "qwen3";
+    if (!scaling.empty() && scaling != "none" && original > 0 && original < hp.n_ctx_train) {
+        if (scaling == "yarn" && qwen) {
+            hp.yarn_orig = original;
+            hp.yarn_max = hp.n_ctx_train;
+            hp.yarn_beta_fast = (float)gguf.get_float(a + "rope.scaling.yarn_beta_fast", 32.0);
+            hp.yarn_beta_slow = (float)gguf.get_float(a + "rope.scaling.yarn_beta_slow", 1.0);
+        }
+        hp.n_ctx_train = original;
+    } else if (qwen && scaling.empty()) {
+        // Qwen 2.5's own GGUFs declare 131072 with no scaling keys: its
+        // window is 32768 (Qwen3's 40960 is its 32768 and room to answer).
+        // Past that YaRN stretches 32768 up to 131072 (their model cards:
+        // factor 4 over 32768).
+        if (hp.arch == "qwen2") hp.n_ctx_train = std::min(hp.n_ctx_train, 32768);
+        hp.yarn_orig = std::min(hp.n_ctx_train, 32768);
+        hp.yarn_max = 4 * hp.yarn_orig;
+    }
     hp.rms_eps = (float)gguf.get_float(a + "attention.layer_norm_rms_epsilon", 1e-6);
     hp.rope_base = (float)gguf.get_float(a + "rope.freq_base", 10000.0);
     hp.rope_dims = (int)gguf.get_int(a + "rope.dimension_count", hp.head_dim);
@@ -202,9 +216,44 @@ uint64_t Model::rope_turn(bool swa, int i) const {
     double w = scale * std::pow(base, -2.0 * i / rd) / (2 * M_PI);
     if (!rope_freqs_v.empty() && !(hp.rope_freqs_full_only && swa) && i < (int)rope_freqs_v.size())
         w /= rope_freqs_v[i];
+    if (!swa && hp.yarn_factor > 1.f) {
+        // The pairs that turn more than beta_fast times over the window keep
+        // their frequency, those under beta_slow times are slowed by the
+        // factor, and a straight ramp between (pair indices, rounded out).
+        auto dim = [&](double turns) {
+            return rd * std::log(hp.yarn_orig / (turns * 2 * M_PI)) / (2 * std::log(base));
+        };
+        const double low = std::max(0.0, std::floor(dim(hp.yarn_beta_fast)));
+        const double high = std::min(rd - 1.0, std::ceil(dim(hp.yarn_beta_slow)));
+        const double keep = 1.0 - std::clamp((i - low) / std::max(0.001, high - low), 0.0, 1.0);
+        w *= keep + (1.0 - keep) / hp.yarn_factor;
+    }
     w -= std::floor(w);
     const double f = std::ldexp(w, 64);
     return f >= 18446744073709551616.0 ? 0 : (uint64_t)f;
+}
+
+// TS5_YARN: unset, 0 or off: no YaRN; 1, on or auto: as the context needs;
+// a number above 1: that factor. 0 for no YaRN, else the factor or -1.
+static double yarn_setting() {
+    const char *e = getenv("TS5_YARN");
+    if (!e || !*e || strcmp(e, "0") == 0 || strcmp(e, "off") == 0) return 0;
+    return atof(e) > 1.0 ? atof(e) : -1;
+}
+
+void Model::use_context(int n_ctx) {
+    hp.yarn_factor = 1.f;
+    const double set = yarn_setting();
+    if (hp.yarn_orig <= 0 || set == 0) return;
+    const double f = set > 0 ? set : n_ctx > hp.n_ctx_train ? (double)n_ctx / hp.yarn_orig : 1.0;
+    if (f > 1.0) hp.yarn_factor = (float)f;
+}
+
+int Model::context_cap() const {
+    const int train = hp.n_ctx_train > 0 ? hp.n_ctx_train : 32768;
+    const double set = yarn_setting();
+    if (hp.yarn_max <= train || set == 0) return train;
+    return set > 0 ? std::max(train, std::min(hp.yarn_max, (int)(hp.yarn_orig * set))) : hp.yarn_max;
 }
 
 uint64_t Model::data_bytes() const {

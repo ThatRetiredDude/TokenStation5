@@ -285,7 +285,7 @@ private:
             memcpy(vl + (size_t)pos * KV, vt, KV * 4);
         }
         std::vector<float> att((size_t)n * H * HD);
-        const float scale = hp_.attn_scale;
+        const float scale = hp_.attn_scale * hp_.yarn_attn();
         for (int t = 0; t < n; t++) {
             const float *qt = &q[(size_t)t * H * HD];
             float *at = &att[(size_t)t * H * HD];

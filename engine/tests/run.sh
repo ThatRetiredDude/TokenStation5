@@ -533,6 +533,25 @@ echo "== memory: a load that would leave the system less than its reserve is ref
 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "GiB of it kept free for the system"
 echo "== -c auto with TS5_KV=q8: an f16 cache, as the test model's whole context fits in f16"
 TS5_KV=q8 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "KV cache [0-9.]* GiB (f16, "
+echo "== YaRN (TS5_YARN): Vulkan vs CPU stretched 4x, 300 tokens and one per call; ts5 check; -c auto past the window"
+TS5_YARN=4 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
+    "$work/qwen3-Q4_0.gguf" "$work/qwen2-Q8_0.gguf"
+TS5_YARN=4 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --step "$work/qwen3-Q4_0.gguf"
+# It changes the logits (so the passes above test it), and only with TS5_YARN.
+"$ts5" logits -m "$work/qwen3-Q4_0.gguf" -o "$work/yarn0.bin" 1 2 3 4 5 6 7 8 2> /dev/null
+TS5_YARN=2 "$ts5" logits -m "$work/qwen3-Q4_0.gguf" -o "$work/yarn2.bin" 1 2 3 4 5 6 7 8 2> /dev/null
+! cmp -s "$work/yarn0.bin" "$work/yarn2.bin"
+TS5_YARN=0 "$ts5" logits -m "$work/qwen3-Q4_0.gguf" -o "$work/yarn2.bin" 1 2 3 4 5 6 7 8 2> /dev/null
+cmp "$work/yarn0.bin" "$work/yarn2.bin"
+# The check runs its CPU reference stretched alike, and keeps no saved answers for it.
+TS5_YARN=2 "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
+TS5_YARN=2 "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
+TS5_YARN=1 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null |
+    grep "YaRN: positions stretched 4.00x over the 4096-token window, for 16384 tokens of context"
+TS5_YARN=1 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c 6144 -p hi -n 1 2>&1 > /dev/null |
+    grep "YaRN: positions stretched 1.50x over the 4096-token window, for 6144 tokens of context"
+TS5_YARN=1 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c 4096 -p hi -n 1 2>&1 > /dev/null | grep -c YaRN | grep -x 0
+TS5_YARN=1 "$ts5" run -m "$work/llama-Q8_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "context 4096$"
 echo "== -c auto with a draft model: what is left after the context, or room kept for it (TS5_HELPER_ROOM=1)"
 TS5_GPU_MEMORY_GIB=4.5 TS5_DRAFT_MODEL="$work/qwen3-Q4_0.gguf" "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 \
     2>&1 > /dev/null | grep "draft model qwen3-Q4_0.gguf ready"
@@ -594,6 +613,11 @@ if [ -n "${LLAMA_CPP:-}" ]; then
     echo "== vs llama.cpp (llama.cpp quantizes activations, so quantized models differ a little)"
     python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk "$work/qwen2-F32.gguf" "$work/qwen3-F32.gguf" \
         "$work/llama-F32.gguf" "$work/qwen3-Q4_K_M.gguf" "$work/qwen35-F32.gguf"
+    echo "== YaRN vs llama.cpp's (rope scaling yarn over the test models' 4096-token window)"
+    for f in 1.5 4; do
+        TS5_YARN=$f TS5_REF_YARN=$f:4096 python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk \
+            "$work/qwen2-F32.gguf" "$work/qwen3-F32.gguf"
+    done
     echo "== tokenizer vs llama-tokenize"
     python3 "$here/tokenizer_test.py" --ts5 "$ts5" --ref "$bin/llama-tokenize" "$work/qwen2-Q4_0.gguf" \
         "$work/llama-Q4_0.gguf" "$work/llama3-Q8_0.gguf" "$work/qwen35-Q4_K_M.gguf"
