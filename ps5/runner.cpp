@@ -176,7 +176,7 @@ struct Runner::Loaded {
     std::string path, file, name;  // name: general.name, else the file name
     int asked_ctx = 0;  // as the job asked: 0 for what fits
     int n_ctx = 0;      // as loaded
-    bool kv8 = false;   // its KV cache is 8-bit
+    ts5::KvType kv = ts5::KvType::F16;  // its KV cache
     ts5::Model model;
     ts5::Model dmodel;  // the draft model, when TS5_DRAFT_MODEL names one
     ts5::Tokenizer tok;
@@ -355,9 +355,13 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
     }
     if (!b) return nullptr;
     l->n_ctx = b->n_ctx();
-    l->kv8 = b->kv_type() == ts5::KvType::Q8;
+    l->kv = b->kv_type();
     printf("ts5: %s backend ready in %.1f s, context %d%s, %s KV cache\n", b->name(), now_s() - t0, l->n_ctx,
-           n_ctx <= 0 ? " (what fits)" : "", l->kv8 ? "8-bit" : "f16");
+           n_ctx <= 0 ? " (what fits)" : "",
+           l->kv == ts5::KvType::Q8     ? "8-bit"
+           : l->kv == ts5::KvType::Q4   ? "4-bit"
+           : l->kv == ts5::KvType::K8V4 ? "8-bit K, 4-bit V"
+                                        : "f16");
     l->engine = std::make_unique<ts5::Engine>(l->model, b, l->tok);
     if (dp && *dp) {
         bool dopen = false;
@@ -401,7 +405,7 @@ void Runner::unload() {
     status_.serving.clear();
     status_.serving_path.clear();
     status_.serving_ctx = 0;
-    status_.serving_kv8 = false;
+    status_.serving_kv = ts5::KvType::F16;
 }
 
 bool Runner::serve(const std::string &path, int n_ctx, bool reload) {
@@ -431,7 +435,7 @@ bool Runner::serve(const std::string &path, int n_ctx, bool reload) {
         status_.serving = file;
         status_.serving_path = path;
         status_.serving_ctx = serving_->n_ctx;
-        status_.serving_kv8 = serving_->kv8;
+        status_.serving_kv = serving_->kv;
         status_.phase = Status::Serving;
     }
     // No address while the console isn't on a network: then just "is ready".

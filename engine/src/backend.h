@@ -1,6 +1,7 @@
 // A backend runs the forward pass and owns the KV cache.
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -136,6 +137,13 @@ void release_freed_memory();
 // would only cost precision (on Qwen 2.5 Coder 7B, more than the GPU check
 // allows). TS5_KV=q4 also takes q8 where q8 reaches it.
 bool f16_reaches(int f16_ctx, int train);
+// The cache an auto-fit context (-c auto) takes, as the Vulkan backend
+// chooses it: kv and automatic as kv_type_setting gives them (automatic only
+// where the heads allow a quantized cache), train the most tokens the context
+// may hold, fit(t) the tokens a cache of type t fits. The app's estimates use
+// it too. log: each change gets its reason.
+KvType auto_kv_type(KvType kv, bool automatic, int train, const std::function<int(KvType)> &fit,
+                    std::vector<std::string> *log = nullptr);
 
 // On Vulkan device `device`, with a device of its own. n_ctx 0: the context
 // that fits (fit_context), at most the model's training context, in an f16

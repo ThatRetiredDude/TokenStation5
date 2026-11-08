@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "backend.h"
+
 namespace app {
 
 struct CatalogEntry;
@@ -27,20 +29,23 @@ struct ModelInfo {
     double params = 0;  // parameter count
     int layers = 0, ctx_train = 0;
     uint64_t weight_bytes = 0;
-    uint64_t kv_bytes[2] = {};  // K and V over all layers per token: f16, 8-bit
-    bool kv8 = false;           // TS5_KV=q8 asks for an 8-bit cache and the heads allow it
+    uint64_t kv_bytes[5] = {};  // K and V over all layers per token, by ts5::KvType
+    // The cache TS5_KV asks for, and whether it is automatic (both only where
+    // the heads allow an 8- or 4-bit cache), as the engine reads them.
+    ts5::KvType kv = ts5::KvType::F16;
+    bool kv_auto = false;
     uint64_t fixed_bytes = 0;   // GPU memory for weights and activations, as allocated
 
     struct Ctx {
         int n = 0;          // tokens
-        bool kv8 = false;   // in an 8-bit cache
+        ts5::KvType kv = ts5::KvType::F16;  // its cache
     };
     // The context serving it with -c `asked` gets on a GPU with this much
     // memory. asked 0 (no -c, or -c auto): what fits, at most the training
-    // context (n 0: not 1024), in f16 where that reaches it.
+    // context (n 0: not 1024), in the cache ts5::auto_kv_type picks.
     Ctx serve_ctx(int asked, uint64_t gpu_memory) const;
     // Weights plus a KV cache of that context.
-    uint64_t memory_for(Ctx c) const { return weight_bytes + kv_bytes[c.kv8] * (uint64_t)c.n; }
+    uint64_t memory_for(Ctx c) const { return weight_bytes + kv_bytes[(int)c.kv] * (uint64_t)c.n; }
 };
 
 struct CheckRecord {

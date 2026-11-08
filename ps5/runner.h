@@ -43,7 +43,7 @@ struct Status {
     double job_started = 0;  // seconds, steady clock
     std::string serving, serving_path;  // file name and path of the model the API answers with
     int serving_ctx = 0;
-    bool serving_kv8 = false;  // its KV cache is 8-bit
+    ts5::KvType serving_kv = ts5::KvType::F16;  // its KV cache
     std::string error;  // the last job's failure, until the next job starts, as the log has it
     std::string said;   // the same failure in plain words, for the screen and the notification
     int queued = 0;

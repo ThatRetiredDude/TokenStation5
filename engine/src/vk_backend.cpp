@@ -1074,26 +1074,10 @@ private:
                 return fit_context(ctx_->device_memory(), allocated_ + fit_reserve_ + kv_ring_bytes(hp_, t),
                                    kv_bytes_per_token(hp_, t), cap);
             };
-            const int f16 = fit(KvType::F16);
-            if (kv_auto_ && f16 < kQ8Below && !f16_reaches(f16, train)) {
-                const int q8 = fit(KvType::Q8);
-                if (q8 > f16) {
-                    ts5::log_line("ts5: 8-bit KV cache: %d tokens, where f16 fits %d (TS5_KV=f16 keeps f16)", q8,
-                                  f16);
-                    kv_ = KvType::Q8;
-                }
-            }
-            if (kv_quantized(kv_) && f16_reaches(f16, train)) {
-                ts5::log_line("ts5: f16 KV cache: the whole %d-token context (the model's, or the Settings cap) "
-                              "fits in f16, the more exact",
-                              train);
-                kv_ = KvType::F16;
-            }
-            if ((kv_ == KvType::Q4 || kv_ == KvType::K8V4) && f16_reaches(fit(KvType::Q8), train)) {
-                ts5::log_line("ts5: 8-bit KV cache: the whole %d-token context fits in 8 bits, the more exact", train);
-                kv_ = KvType::Q8;
-            }
-            n_ctx_ = kv_ == KvType::F16 ? f16 : fit(kv_);
+            std::vector<std::string> why;
+            kv_ = auto_kv_type(kv_, kv_auto_, train, fit, &why);
+            for (auto &w : why) ts5::log_line("ts5: %s", w.c_str());
+            n_ctx_ = fit(kv_);
             if (n_ctx_ <= 0) {
                 err = "not enough GPU memory left for a context of 1024 tokens";
                 return false;
@@ -2283,6 +2267,32 @@ uint64_t draft_reserve(const HParams &dhp, uint64_t draft_weight_bytes) {
 }
 
 bool f16_reaches(int f16_ctx, int train) { return train >= 1024 && f16_ctx >= train / 1024 * 1024; }
+
+KvType auto_kv_type(KvType kv, bool automatic, int train, const std::function<int(KvType)> &fit,
+                    std::vector<std::string> *log) {
+    auto say = [&](const std::string &s) {
+        if (log) log->push_back(s);
+    };
+    const int f16 = fit(KvType::F16);
+    if (automatic && f16 < kQ8Below && !f16_reaches(f16, train)) {
+        const int q8 = fit(KvType::Q8);
+        if (q8 > f16) {
+            say("8-bit KV cache: " + std::to_string(q8) + " tokens, where f16 fits " + std::to_string(f16) +
+                " (TS5_KV=f16 keeps f16)");
+            kv = KvType::Q8;
+        }
+    }
+    if (kv_quantized(kv) && f16_reaches(f16, train)) {
+        say("f16 KV cache: the whole " + std::to_string(train) +
+            "-token context (the model's, or the Settings cap) fits in f16, the more exact");
+        kv = KvType::F16;
+    }
+    if ((kv == KvType::Q4 || kv == KvType::K8V4) && f16_reaches(fit(KvType::Q8), train)) {
+        say("8-bit KV cache: the whole " + std::to_string(train) + "-token context fits in 8 bits, the more exact");
+        kv = KvType::Q8;
+    }
+    return kv;
+}
 
 int fit_context(uint64_t memory, uint64_t used, uint64_t per_token, int cap) {
     const uint64_t reserve = 1ull << 30;
