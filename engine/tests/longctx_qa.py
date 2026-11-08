@@ -220,7 +220,8 @@ def main():
         r, wall = ask(url, model, doc, qs, max_tokens, a.think, 7200)
         msg = r["choices"][0]["message"]
         finish = r["choices"][0].get("finish_reason")
-        res = score(msg.get("content") or "", qs)
+        content = msg.get("content") or ""
+        res = score(content, qs)
         t1, tm = r1.get("timings", {}), r.get("timings", {})
         right = sum(x["ok"] for x in res)
         out = {"model": os.path.basename(a.model or model), "kind": a.kind, "ctx": n_ctx,
@@ -229,11 +230,14 @@ def main():
                "prompt_tok_s": t1.get("prompt_per_second"), "gen_tok_s": tm.get("predicted_per_second"),
                "cache_n": tm.get("cache_n"), "read_s": round(wall1, 1), "wall_s": round(wall, 1),
                "finish": finish, "thought_chars": len(msg.get("reasoning_content") or ""),
-               "env": a.env, "seed": a.seed, "answers": res}
+               "env": a.env, "seed": a.seed, "answers": res, "reply": content[:4000]}
         print(f"{out['model']} {a.kind} ctx {n_ctx}, prompt {out['prompt_tokens']} tokens: {right}/{len(res)} right"
               f" (missed at depths {out['missed_depths'] or 'none'}), prompt {out['prompt_tok_s']} tok/s,"
               f" writing {out['gen_tok_s']} tok/s; reading took {out['read_s']} s, answering {out['wall_s']} s"
               f" ({out['cache_n']} tokens from the cache)")
+        if not any(x["got"] for x in res) and content.strip():
+            # Nothing read as "N: answer": the reply's form, not its facts.
+            print("longctx_qa: no line of the reply reads as \"N: answer\"; it begins: " + json.dumps(content[:300]))
         if finish == "length":
             # A model that always thinks (DeepSeek R1) can spend the whole
             # answer room thinking: then the misses are the room's, not its.
