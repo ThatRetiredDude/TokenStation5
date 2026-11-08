@@ -3,7 +3,10 @@
 // Writes n_tokens x n_vocab float32 (logits of every position); with
 // TS5_REF_EVERY=N only positions N-1, 2N-1, ... and the last, as
 // `ts5 logits --every N` writes them; with TS5_REF_TAIL=K only the last K,
-// as `ts5 logits --tail K` writes them.
+// as `ts5 logits --tail K` writes them. TS5_REF_LOAD_ALL=1 reads the whole
+// file into memory instead of mapping it: a GPU build on a machine whose
+// GPU shares the system's memory (the PS5) otherwise re-reads mapped weights
+// from disk once the GPU holds most of it.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -18,6 +21,7 @@ int main(int argc, char **argv) {
     llama_backend_init();
     llama_log_set([](ggml_log_level, const char *, void *) {}, nullptr);
     auto mp = llama_model_default_params();
+    if (const char *e = getenv("TS5_REF_LOAD_ALL"); e && atoi(e)) mp.load_mode = LLAMA_LOAD_MODE_NONE;
     llama_model *model = llama_model_load_from_file(argv[1], mp);
     if (!model) { fprintf(stderr, "load failed\n"); return 1; }
     auto cp = llama_context_default_params();
