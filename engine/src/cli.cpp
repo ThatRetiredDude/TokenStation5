@@ -382,7 +382,14 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         if (a.n_ctx <= 0) a.n_ctx = 8192;
         if (!model.load(nullptr, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
         model.use_context(a.n_ctx);
-        be = make_cpu_backend(model, a.n_ctx);
+        // TS5_CPU_KV=f16, q8 or q4 (tests): K and V rounded as that GPU cache
+        // keeps them, so a comparison measures the GPU's kernels; else fp32.
+        KvType kv = KvType::F32;
+        if (const char *e = getenv("TS5_CPU_KV"); e && *e) {
+            const std::string v = e;
+            kv = v == "f16" ? KvType::F16 : v == "q8" ? KvType::Q8 : v == "q4" ? KvType::Q4 : KvType::F32;
+        }
+        be = make_cpu_backend(model, a.n_ctx, kv);
     } else {
 #ifdef TS5_VULKAN
         const uint64_t reserve = draft && a.n_ctx <= 0 ? helper_room_bytes(dp, derr) : 0;

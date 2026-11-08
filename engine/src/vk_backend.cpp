@@ -46,22 +46,37 @@
 #include "attn_pf256s.spv.h"
 #include "attn_pf512s.spv.h"
 #include "attn_pf_q8.spv.h"
+#include "attn_pf_q4.spv.h"
 #include "attn_q8.spv.h"
+#include "attn_q4.spv.h"
 #include "attn_dec_q8.spv.h"
+#include "attn_dec_q4.spv.h"
 #include "attn_dec4_q8.spv.h"
+#include "attn_dec4_q4.spv.h"
 #include "attn_dec4_256_q8.spv.h"
+#include "attn_dec4_256_q4.spv.h"
 #include "attn_dec4_512_q8.spv.h"
+#include "attn_dec4_512_q4.spv.h"
 #include "attn_dec4_256w.spv.h"
 #include "attn_dec4_512w.spv.h"
 #include "attn_dec4_256w_q8.spv.h"
+#include "attn_dec4_256w_q4.spv.h"
 #include "attn_dec4_512w_q8.spv.h"
+#include "attn_dec4_512w_q4.spv.h"
 #include "attn_dec_64_q8.spv.h"
+#include "attn_dec_64_q4.spv.h"
 #include "attn_dec4_64_q8.spv.h"
+#include "attn_dec4_64_q4.spv.h"
 #include "attn_pf128_q8.spv.h"
+#include "attn_pf128_q4.spv.h"
 #include "attn_pf256_q8.spv.h"
+#include "attn_pf256_q4.spv.h"
 #include "attn_pf512_q8.spv.h"
+#include "attn_pf512_q4.spv.h"
 #include "attn_pf256s_q8.spv.h"
+#include "attn_pf256s_q4.spv.h"
 #include "attn_pf512s_q8.spv.h"
+#include "attn_pf512s_q4.spv.h"
 #include "get_rows_f16.spv.h"
 #include "get_rows_f32.spv.h"
 #include "get_rows_q4_0.spv.h"
@@ -154,6 +169,8 @@
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "qkv_post_q8t.spv.h"
+#include "qkv_post_q4.spv.h"
+#include "qkv_post_q4t.spv.h"
 #include "rmsnorm.spv.h"
 #include "split_gate.spv.h"
 #include "gate_mul.spv.h"
@@ -619,8 +636,8 @@ private:
         bool kv_auto = false;
         kv_ = kv_type_setting(&kv_auto);
         const bool q8_ok = attn_ok_all() && hp_.max_hd() % 32 == 0;
-        if (kv_ == KvType::Q8 && !q8_ok) {
-            ts5::log_line("ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16");
+        if (kv_quantized(kv_) && !q8_ok) {
+            ts5::log_line("ts5: an 8- or 4-bit KV cache needs attn and heads a multiple of 32 wide; using f16");
             kv_ = KvType::F16;
         }
         kv_auto_ = kv_auto && q8_ok;
@@ -876,17 +893,21 @@ private:
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
-        P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(qkv_post_q8t, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
+        P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(qkv_post_q8t, 13) P(qkv_post_q4, 13) P(qkv_post_q4t, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_q4, 7) P(attn_merge, 2) 
         P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf256, 5) P(attn_pf512, 5)
         P(attn_pf_q8, 7) P(attn_pf128_q8, 7) P(attn_pf256_q8, 7) P(attn_pf512_q8, 7)
         P(attn_pf256s, 5) P(attn_pf512s, 5) P(attn_pf256s_q8, 7) P(attn_pf512s_q8, 7)
+        P(attn_pf_q4, 7) P(attn_pf128_q4, 7) P(attn_pf256_q4, 7) P(attn_pf512_q4, 7)
+        P(attn_pf256s_q4, 7) P(attn_pf512s_q4, 7)
         // Lanes per key in attn_dec: 8, 16 or 32, and no more than a subgroup.
         uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
         while (lpk > ctx_->subgroup_size) lpk = lpk > 8 ? lpk / 2 : 0;
-        // Each attn_dec build twice: for the f16 cache (5 buffers) and the 8-bit one (7).
+        // Each attn_dec build three times: for the f16 cache (5 buffers), the
+        // 8-bit one and the 4-bit one (7).
 #define PD(n, spec, lanes) \
         if (!make_pipe(#n, spv_##n, sizeof(spv_##n), 5, err, spec, lanes) || \
-            !make_pipe(#n "_q8", spv_##n##_q8, sizeof(spv_##n##_q8), 7, err, spec, lanes)) return false;
+            !make_pipe(#n "_q8", spv_##n##_q8, sizeof(spv_##n##_q8), 7, err, spec, lanes) || \
+            !make_pipe(#n "_q4", spv_##n##_q4, sizeof(spv_##n##_q4), 7, err, spec, lanes)) return false;
         PD(attn_dec, attn_dec_plain_ != 0, lpk) PD(attn_dec4, attn_dec_plain_ == 1, lpk)
         // Heads of 64: a lane's share of a key is 4 values or more (8 or 16 lanes).
         PD(attn_dec_64, attn_dec_plain_ != 0, std::min(lpk, 16u)) PD(attn_dec4_64, attn_dec_plain_ == 1, std::min(lpk, 16u))
@@ -1024,7 +1045,7 @@ private:
                 uint64_t widest = 0;
                 for (int l = 0; l < hp_.n_layer; l++)
                     if (!hp_.swa(l)) widest = std::max<uint64_t>(widest, hp_.kv_values(l));
-                const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * std::max<uint64_t>(1, widest);
+                const uint64_t per_buf = std::max<uint64_t>(1, kv_bits(t) * std::max<uint64_t>(1, widest) / 8);
                 const int cap = (int)std::min<uint64_t>(train, props_.limits.maxStorageBufferRange / per_buf);
                 return fit_context(ctx_->device_memory(), allocated_ + fit_reserve_ + kv_ring_bytes(hp_, t),
                                    kv_bytes_per_token(hp_, t), cap);
@@ -1038,11 +1059,15 @@ private:
                     kv_ = KvType::Q8;
                 }
             }
-            if (kv_ == KvType::Q8 && f16_reaches(f16, train)) {
+            if (kv_quantized(kv_) && f16_reaches(f16, train)) {
                 ts5::log_line("ts5: f16 KV cache: the whole %d-token context (the model's, or the Settings cap) "
                               "fits in f16, the more exact",
                               train);
                 kv_ = KvType::F16;
+            }
+            if (kv_ == KvType::Q4 && f16_reaches(fit(KvType::Q8), train)) {
+                ts5::log_line("ts5: 8-bit KV cache: the whole %d-token context fits in 8 bits, the more exact", train);
+                kv_ = KvType::Q8;
             }
             n_ctx_ = kv_ == KvType::F16 ? f16 : fit(kv_);
             if (n_ctx_ <= 0) {
@@ -1073,7 +1098,7 @@ private:
         // about 256 MiB, a few layers each: freed models leave the GPU's
         // memory in holes, and one 2 GiB buffer for a whole cache may find
         // no hole that big when the pieces would fit.
-        const size_t piece = 256ull << 20, per_value = kv_ == KvType::Q8 ? 1 : 2;
+        const size_t piece = 256ull << 20, bits = kv_bits(kv_);
         std::vector<size_t> values;  // per piece
         layer_off_.assign(hp_.n_layer, 0);
         layer_buf_.assign(hp_.n_layer, 0);
@@ -1082,12 +1107,12 @@ private:
             const int r = hp_.swa(l) ? ring_slots(hp_) : 0;
             ring_[l] = r > 0 && r < n_ctx_ ? (uint32_t)r : 0;
             const size_t v = (ring_[l] ? ring_[l] : (size_t)n_ctx_) * hp_.kv_values(l);
-            if (values.empty() || (values.back() > 0 && (values.back() + v) * per_value > piece)) values.push_back(0);
+            if (values.empty() || (values.back() > 0 && (values.back() + v) * bits / 8 > piece)) values.push_back(0);
             layer_buf_[l] = (uint32_t)(values.size() - 1);
             layer_off_[l] = (uint32_t)values.back();
             values.back() += v;
         }
-        // Bytes of K (and as many of V): f16, or 8 bits plus a 2-byte scale per 32.
+        // Bytes of K (and as many of V): f16, or 8 or 4 bits plus a 2-byte scale per 32.
         // Exact sizes: a 1 GiB block for the scales would take what
         // fit_context keeps free for everything else.
         size_t cache = 0, scales = 0;
@@ -1096,7 +1121,7 @@ private:
         ks_.assign(values.size(), Buf{});
         vs_.assign(values.size(), Buf{});
         for (size_t i = 0; i < values.size(); i++) {
-            const size_t c = values[i] * per_value, sc = kv_ == KvType::Q8 ? values[i] / 16 : 0;
+            const size_t c = values[i] * bits / 8, sc = kv_quantized(kv_) ? values[i] / 16 : 0;
             if (c > props_.limits.maxStorageBufferRange) {
                 err = "KV cache larger than maxStorageBufferRange; use a smaller context";
                 return false;
@@ -1108,7 +1133,7 @@ private:
         }
         ts5::log_line("ts5: %s: weights %.2f GiB, KV cache %.2f GiB (%s%s, %d tokens), %s memory", name_.c_str(),
                 weight_bytes_ / 1073741824.0, 2.0 * (cache + scales) / 1073741824.0, kv_type_name(kv_),
-                kv_ == KvType::Q8 && kv_turn_setting() ? ", Q and K turned" : "", n_ctx_,
+                kv_quantized(kv_) && kv_turn_setting() ? ", Q and K turned" : "", n_ctx_,
                 x_.map ? "unified" : "device");
         return true;
     }
@@ -1490,7 +1515,7 @@ private:
             uint32_t s_max, s_keys, s_bk;
         } pc{HD,    H,     HKV,  (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale, k_lo, win, ring,
              hsplit, per_tok ? s_max : 0u, s_keys, bk};
-        // Every kernel has a build for the 8-bit cache, named _q8.
+        // Every kernel has a build for the 8-bit cache, named _q8, and the 4-bit one, _q4.
         std::string kern = pf ? "attn_pf" : "attn";
         if (dec) {
             kern = HD == 256 ? "attn_dec4_256" : HD == 512 ? "attn_dec4_512" : dec_rows == 4 ? "attn_dec4" : "attn_dec";
@@ -1502,8 +1527,8 @@ private:
             kern = attn_pf_slim_ ? "attn_pf256s" : "attn_pf256";
         else if (pf && pf512)
             kern = attn_pf_slim_ ? "attn_pf512s" : "attn_pf512";
-        if (kv_ == KvType::Q8) kern += "_q8";
-        if (kv_ == KvType::Q8)
+        if (kv_quantized(kv_)) kern += kv_ == KvType::Q4 ? "_q4" : "_q8";
+        if (kv_quantized(kv_))
             dispatch(kern, {&q_, &kc_[kb], &vc_[kb], &att_, &part_, &ks_[kb], &vs_[kb]}, pc, groups, n_split);
         else
             dispatch(kern, {&q_, &kc_[kb], &vc_[kb], &att_, &part_}, pc, groups, n_split);
@@ -1830,8 +1855,9 @@ private:
                 const Buf &bq = L.bq ? W(L.bq) : dummy_, &bk = L.bk ? W(L.bk) : dummy_, &bv = L.bv ? W(L.bv) : dummy_;
                 const Buf &nq = L.q_norm ? W(L.q_norm) : dummy_, &nk = L.k_norm ? W(L.k_norm) : dummy_;
                 const Buf &ff = rope_turn_[swa ? 1 : 0];
-                if (kv_ == KvType::Q8)
-                    dispatch(kv_turn_setting() && (HD & (HD - 1)) == 0 ? "qkv_post_q8t" : "qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
+                if (kv_quantized(kv_))
+                    dispatch(std::string(kv_ == KvType::Q4 ? "qkv_post_q4" : "qkv_post_q8") +
+                                 (kv_turn_setting() && (HD & (HD - 1)) == 0 ? "t" : ""), {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
                 else
                     dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ff}, pc,
@@ -2127,7 +2153,8 @@ KvType kv_type_setting(bool *automatic) {
     const std::string v = e;
     if (v == "auto") return KvType::F16;
     if (v == "q8" || v == "8") return KvType::Q8;
-    if (v != "f16" && v != "16") ts5::log_line("ts5: TS5_KV=%s: not q8 or f16, using f16", e);
+    if (v == "q4" || v == "4") return KvType::Q4;
+    if (v != "f16" && v != "16") ts5::log_line("ts5: TS5_KV=%s: not q8, q4 or f16, using f16", e);
     return KvType::F16;
 }
 
@@ -2150,7 +2177,7 @@ int ring_slots(const HParams &hp) {
 }
 
 static uint64_t kv_bytes(uint64_t values, KvType kv) {
-    return kv == KvType::Q8 ? values + values / 16 : kv == KvType::F16 ? 2 * values : 4 * values;
+    return kv_bits(kv) * values / 8 + (kv_quantized(kv) ? values / 16 : 0);
 }
 
 uint64_t kv_bytes_per_token(const HParams &hp, KvType kv) {

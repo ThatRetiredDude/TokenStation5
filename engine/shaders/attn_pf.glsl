@@ -13,7 +13,7 @@
 // it unrolls with no branch per step (attn_pf128, attn_pf256). A sliding
 // layer's keys (win > 0) are its last win, from a ring of ring slots, as in
 // attn. With KV_Q8 (the _q8 builds) the cache is 8-bit values with an f16
-// scale per 32, as attn_q8 reads it.
+// scale per 32, as attn_q8 reads it, and with KV_Q4 as well (_q4) 4-bit ones.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_control_flow_attributes : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -22,14 +22,16 @@ layout(local_size_x = 256) in;
 
 layout(std430, binding = 0) readonly buffer Qbuf { vec4 Q4[]; };
 #ifdef KV_Q8
+#ifdef KV_Q4
+layout(std430, binding = 1) readonly buffer KC { uint16_t kc[]; };  // 4 values a word
+layout(std430, binding = 2) readonly buffer VC { uint16_t vc[]; };
+#else
 layout(std430, binding = 1) readonly buffer KC { uint kc[]; };  // 4 values a word
 layout(std430, binding = 2) readonly buffer VC { uint vc[]; };
+#endif
 layout(std430, binding = 5) readonly buffer KS { float16_t k_scale[]; };  // one per 32 values
 layout(std430, binding = 6) readonly buffer VS { float16_t v_scale[]; };
-vec4 i8x4(uint w) {
-    const int i = int(w);
-    return vec4(bitfieldExtract(i, 0, 8), bitfieldExtract(i, 8, 8), bitfieldExtract(i, 16, 8), bitfieldExtract(i, 24, 8));
-}
+#include "kv_word.glsl"
 #else
 layout(std430, binding = 1) readonly buffer KC { f16vec4 kc[]; };
 layout(std430, binding = 2) readonly buffer VC { f16vec4 vc[]; };
@@ -116,9 +118,9 @@ void main() {
         }                                                                          \
     }
 #ifdef KV_Q8
-#define LOAD_ONE(n, src) kr[n] = kc[src]; vr[n] = vc[src]; ksc[n] = float(k_scale[(src) / 8]); vsc[n] = float(v_scale[(src) / 8]);
+#define LOAD_ONE(n, src) kr[n] = uint(kc[src]); vr[n] = uint(vc[src]); ksc[n] = float(k_scale[(src) / 8]); vsc[n] = float(v_scale[(src) / 8]);
 #define ZERO_ONE(n) kr[n] = 0u; vr[n] = 0u; ksc[n] = 0.0; vsc[n] = 0.0;
-#define STORE_ONE(n, e) ks[e] = f16vec4(i8x4(kr[n]) * ksc[n]); vs[e] = f16vec4(i8x4(vr[n]) * vsc[n]);
+#define STORE_ONE(n, e) ks[e] = f16vec4(kv4(kr[n]) * ksc[n]); vs[e] = f16vec4(kv4(vr[n]) * vsc[n]);
 #else
 #define LOAD_ONE(n, src) kr[n] = kc[src]; vr[n] = vc[src];
 #define ZERO_ONE(n) kr[n] = f16vec4(0.0); vr[n] = f16vec4(0.0);

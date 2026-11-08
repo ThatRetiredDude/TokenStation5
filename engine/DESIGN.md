@@ -23,7 +23,7 @@ small enough to reason about.
 | Tokenizers | byte-level BPE (Qwen2, Llama 3 and Qwen3.5 pre-tokenizers, with Unicode's letter, mark and number classes from a generated table), SentencePiece (Llama 2, Gemma 3), Gemma 4's (BPE merges over code points, spaces as U+2581, split only at newlines) | Tekken's case-splitting pre-tokenizer (approximated now) |
 | Chat formats | ChatML, Llama 3, Mistral `[INST]` | Jinja templates, tool calls |
 | API | `/v1/chat/completions` (+ streaming), `/v1/completions`, `/v1/models`, `/health`; llama-server style `timings` | Anthropic `/v1/messages`, parallel slots |
-| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`; on Linux with Q and K turned per head first) | 4-bit |
+| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`; on Linux with Q and K turned per head first), 4-bit with the same scales (`TS5_KV=q4`, only when asked) | |
 | Long context | the model's own window; YaRN for Qwen 2.5 and Qwen3 past 32k (`TS5_YARN=1`) | YaRN for other families |
 
 Not in scope: training, multi-GPU, CUDA/ROCm, Python.
@@ -703,7 +703,27 @@ rounded. Against the 16-bit answers that took Qwen3 14B from 0.021 to
 0.013 and Llama 3.1 8B stayed at 0.006. It costs 0.1% to 0.5% of the speed
 (Qwen3 14B and Gemma 4 12B, 512 and 4,096-token prompts), within the runs'
 spread. Its answers are saved apart (`.q8t.ts5ref`) from the plain cache's
-(`.q8.ts5ref`).
+(`.q8.ts5ref`). In exact math (the CPU against its 16-bit answers, PS5 job
+CJ) the turn helps where K has large channels (Gemma 3 12B 0.111 to 0.060,
+Qwen3 14B 0.020 to 0.007) and costs a little where it hasn't (Gemma 4 12B,
+whose K is flat, 0.071 to 0.085; Coder 14B 0.0075 to 0.016, still passing).
+
+The 4-bit cache (`TS5_KV=q4`, never automatic) keeps the 8-bit cache's
+scales, one f16 per 32 values, with the values in 4 bits: a word of 4 values
+is 16 bits, so a word's index means the same 4 values in both and each
+kernel's `_q4` build differs from its `_q8` one only in its loads
+(`kv_word.glsl`; the shaders compiled with `KV_Q8` and `KV_Q4`). That is
+0.56 bytes a value, 1.9 times the 8-bit cache's tokens in the same memory.
+As Q4_0, a block's scale is its value of the largest magnitude (the first,
+on a tie) over -8, so that value is exactly -8 and the others round to
+nearest even in -8 .. 7; Q and K are turned first, as for 8 bits
+(`qkv_post_q4t`; `qkv_post_q4` with `TS5_KV_TURN=0`). With `-c auto` it
+gets f16 where f16 reaches the whole context, and 8 bits where those do. On
+the test models (no large channels) the GPU and a CPU rounding the same way
+(`TS5_CPU_KV=q4` for `ts5 logits --backend cpu`, the suite's reference)
+agree within about 1% of the largest logit at 300 tokens, and either moves
+the logits 7 to 10% from the 16-bit cache's; its answers are saved as
+`.q4t.ts5ref` (`.q4` without the turn).
 
 Qwen 2.5 and Qwen3 were trained on a 32,768-token window (Qwen3's files say
 40,960: the window and room to answer), and their model cards stretch it to

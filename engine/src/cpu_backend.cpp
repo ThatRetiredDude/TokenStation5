@@ -75,7 +75,9 @@ float gelu(float x) {
 
 // One token's K or V (n values, whole heads) as a cache of type t keeps it.
 // Q8 rounds as the GPU's qkv_post does: per 32 values, the scale is the
-// largest magnitude over 127 in f16, and values round to nearest even.
+// largest magnitude over 127 in f16, and values round to nearest even. Q4 as
+// qkv_post_q4: the scale is the value of the largest magnitude (the first, on
+// a tie) over -8 in f16, values to nearest even in -8 .. 7.
 void round_kv(KvType t, float *v, int n) {
     if (t == KvType::F16) {
         for (int i = 0; i < n; i++) v[i] = fp16_to_fp32(fp32_to_fp16(v[i]));
@@ -86,6 +88,15 @@ void round_kv(KvType t, float *v, int n) {
             const float sc = fp16_to_fp32(fp32_to_fp16(amax / 127.0f));
             for (int i = 0; i < 32; i++)
                 v[b + i] = sc > 0 ? std::min(127.0f, std::max(-127.0f, std::nearbyint(v[b + i] / sc))) * sc : 0.0f;
+        }
+    } else if (t == KvType::Q4) {
+        for (int b = 0; b + 32 <= n; b += 32) {
+            float vmax = 0;
+            for (int i = 0; i < 32; i++)
+                if (std::fabs(v[b + i]) > std::fabs(vmax)) vmax = v[b + i];
+            const float sc = fp16_to_fp32(fp32_to_fp16(vmax / -8.0f));
+            for (int i = 0; i < 32; i++)
+                v[b + i] = sc != 0 ? std::min(7.0f, std::max(-8.0f, std::nearbyint(v[b + i] / sc))) * sc : 0.0f;
         }
     }
 }
@@ -295,7 +306,7 @@ private:
                 rope(&kt[hh * HD], RD, pos, hp_.rope_neox, turn);
                 if (hp_.v_norm) rmsnorm(&vt[hh * HD], nullptr, HD, hp_.rms_eps);
             }
-            if (kv_ == KvType::Q8 && kv_turn_setting() && (HD & (HD - 1)) == 0) {
+            if (kv_quantized(kv_) && kv_turn_setting() && (HD & (HD - 1)) == 0) {
                 for (int hh = 0; hh < H; hh++) kv_turn(&qt[hh * HD], HD, true);
                 for (int hh = 0; hh < HKV; hh++) kv_turn(&kt[hh * HD], HD, false);
             }
@@ -491,6 +502,8 @@ bool kv_turn_setting() {
     return on;
 }
 
-const char *kv_type_name(KvType t) { return t == KvType::Q8 ? "q8" : t == KvType::F16 ? "f16" : "f32"; }
+const char *kv_type_name(KvType t) {
+    return t == KvType::Q4 ? "q4" : t == KvType::Q8 ? "q8" : t == KvType::F16 ? "f16" : "f32";
+}
 
 }  // namespace ts5

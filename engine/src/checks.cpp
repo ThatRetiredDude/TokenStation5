@@ -113,14 +113,22 @@ bool model_id(const std::string &path, uint64_t &size, uint64_t &hash) {
     return true;
 }
 
-// 0 is f16, which the files saved before this field all are. 3: an 8-bit
-// cache with Q and K turned (kv_turn_setting()), which rounds other values.
-uint32_t kv_code(KvType t) { return t == KvType::F16 ? 0 : t == KvType::Q8 ? (kv_turn_setting() ? 3 : 1) : 2; }
+// 0 is f16, which the files saved before this field all are. 3 and 5: an
+// 8-bit and a 4-bit cache with Q and K turned (kv_turn_setting()), which
+// rounds other values.
+uint32_t kv_code(KvType t) {
+    switch (t) {
+    case KvType::F16: return 0;
+    case KvType::Q8: return kv_turn_setting() ? 3 : 1;
+    case KvType::Q4: return kv_turn_setting() ? 5 : 4;
+    default: return 2;
+    }
+}
 
 // One file per cache type, so trying one doesn't throw away the other's, and
 // per text (tag: its tokens' hash) for checks of a text's tokens.
 std::string ref_path(const std::string &model, KvType kv, const std::string &tag) {
-    const std::string kind = kv == KvType::Q8 && kv_turn_setting() ? "q8t" : kv_type_name(kv);
+    const std::string kind = std::string(kv_type_name(kv)) + (kv_quantized(kv) && kv_turn_setting() ? "t" : "");
     return model + (kv == KvType::F16 ? "" : "." + kind) + (tag.empty() ? "" : "." + tag) +
            ".ts5ref";
 }
@@ -229,7 +237,7 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     // Saved answers are the file's own window's and RoPE's: a test window,
     // or positions stretched by YaRN, need their own.
     const bool own = m.hp.swa_test || m.hp.yarn_factor > 1.f;
-    // TS5_CHECK_REF_KV=f16 (or q8): the reference keeps its cache in that type
+    // TS5_CHECK_REF_KV=f16 (or q8, q4): the reference keeps its cache in that type
     // instead of the GPU's, e.g. how far an 8-bit cache on the GPU is from a
     // 16-bit one. The pass bar is still the GPU's cache type's.
     KvType ref_kv = gpu.kv_type();
@@ -237,7 +245,8 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
         const std::string v = e;
         if (v == "f16" || v == "16") ref_kv = KvType::F16;
         else if (v == "q8" || v == "8") ref_kv = KvType::Q8;
-        else ts5::log_line("ts5: TS5_CHECK_REF_KV=%s: not f16 or q8, using the GPU's", e);
+        else if (v == "q4" || v == "4") ref_kv = KvType::Q4;
+        else ts5::log_line("ts5: TS5_CHECK_REF_KV=%s: not f16, q8 or q4, using the GPU's", e);
         if (ref_kv != gpu.kv_type())
             ts5::log_line("ts5: check against the answers with a cache in %s (the GPU keeps %s)", kv_type_name(ref_kv),
                           kv_type_name(gpu.kv_type()));
@@ -295,8 +304,10 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     // An 8-bit cache rounds a value differently on the two sides whenever their
     // inputs differ in the last bits near a rounding boundary, a step of 1/127
     // of the block's largest value, so it gets a wider margin. A wrong kernel
-    // is off by far more than either.
-    const double bar = gpu.kv_type() == KvType::Q8 ? 2e-2 : 5e-3;
+    // is off by far more than either. A 4-bit cache's step is 1/8 of the
+    // block's largest value: each flipped rounding moves a value 16 times as
+    // far.
+    const double bar = gpu.kv_type() == KvType::Q4 ? 1e-1 : gpu.kv_type() == KvType::Q8 ? 2e-2 : 5e-3;
     for (int i = 0; i < n; i++) r.over += pos_diff[i] > bar * max_ref;
     // On a text, whether a difference changes what the model would write: how
     // likely each side finds the text's own next token (perplexity), and how

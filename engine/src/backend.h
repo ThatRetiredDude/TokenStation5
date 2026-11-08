@@ -8,10 +8,18 @@
 
 namespace ts5 {
 
-// How a KV cache holds keys and values: fp32 (the CPU's), f16, or 8 bits
-// per value with an f16 scale per 32 (the largest magnitude over 127).
-enum class KvType { F32, F16, Q8 };
+// How a KV cache holds keys and values: fp32 (the CPU's), f16, 8 bits per
+// value with an f16 scale per 32 (the largest magnitude over 127), or 4 bits
+// with an f16 scale per 32 (as Q4_0: the value of the largest magnitude over
+// -8, values -8 .. 7).
+enum class KvType { F32, F16, Q8, Q4 };
 const char *kv_type_name(KvType t);
+// An 8- or 4-bit cache: values in blocks of 32 with a scale each.
+inline bool kv_quantized(KvType t) { return t == KvType::Q8 || t == KvType::Q4; }
+// Bits of one value (a quantized cache's scales come on top).
+inline uint64_t kv_bits(KvType t) {
+    return t == KvType::Q4 ? 4 : t == KvType::Q8 ? 8 : t == KvType::F16 ? 16 : 32;
+}
 
 class Backend {
 public:
@@ -57,11 +65,11 @@ struct VkContext;
 // stores them, so a comparison with that GPU measures its kernels rather
 // than the cache's precision.
 Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv = KvType::F32);
-// The cache type TS5_KV asks for: q8, else f16. *automatic: TS5_KV is
+// The cache type TS5_KV asks for: q8, q4, else f16. *automatic: TS5_KV is
 // unset, empty or auto, so an auto-fit context (-c auto) may take q8 where f16
-// is short (kQ8Below).
+// is short (kQ8Below). q4 is only ever asked for, never automatic.
 KvType kv_type_setting(bool *automatic = nullptr);
-// Whether an 8-bit cache turns Q and K per head (fixed signs, then
+// Whether an 8- or 4-bit cache turns Q and K per head (fixed signs, then
 // Walsh-Hadamard) before rounding K, which keeps every score and spreads K's
 // few large channels: on Linux unless TS5_KV_TURN=0, in the store title only
 // with TS5_KV_TURN=1. Both backends do it.
@@ -117,8 +125,9 @@ uint64_t helper_room_bytes(const char *path, std::string &err);
 // Hands memory the process freed back to the system (glibc keeps it).
 void release_freed_memory();
 // Whether a context of what fits in f16 (f16_ctx tokens) is the model's whole
-// training context. Then TS5_KV=q8 gets an f16 cache anyway: 8 bits would
-// only cost precision (on Qwen 2.5 Coder 7B, more than the GPU check allows).
+// training context. Then TS5_KV=q8 (or q4) gets an f16 cache anyway: 8 bits
+// would only cost precision (on Qwen 2.5 Coder 7B, more than the GPU check
+// allows). TS5_KV=q4 also takes q8 where q8 reaches it.
 bool f16_reaches(int f16_ctx, int train);
 
 // On Vulkan device `device`, with a device of its own. n_ctx 0: the context
