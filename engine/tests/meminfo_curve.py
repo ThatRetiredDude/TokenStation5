@@ -5,11 +5,13 @@
 # With PERIOD, the rise comes in steps every PERIOD s instead (as the kernel
 # shows it, folding each CPU's count in about once a second), the first one
 # at PERIOD / 2. With SECONDS "ck", it replays the PS5's own curve right
-# after a full build (job CK, 16:11:22 on 2026-11-08): +572 MiB in 22 s.
+# after a full build (job CK, 16:11:22 on 2026-11-08): +572 MiB in 22 s;
+# with "serve", its curve after a server of Qwen3 14B stopped (job CM part
+# 5, 20:18:59): +98 MiB in 13 s, with up to 2.5 s of nothing between steps.
 #   meminfo_curve.py FILE RISE SECONDS TOTAL [PERIOD]
 import os, sys, time
 path, total = sys.argv[1], float(sys.argv[4])
-ck = sys.argv[3] == 'ck'
+ck = sys.argv[3] in ('ck', 'serve')
 rise, secs = float(sys.argv[2]), 0.0 if ck else float(sys.argv[3])
 period = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0
 # (s after the build, MiB above the reading at its exit)
@@ -20,6 +22,10 @@ CK = [(0.50, 49), (1.26, 74), (1.51, 114), (2.26, 171), (2.51, 176), (3.51, 231)
 # Past 10 s the trace has a reading every 2 s; the steps still came about
 # once a second, so each 2 s splits into two.
 CK += [((a + c) / 2, (b + d) / 2) for (a, b), (c, d) in zip(CK[16:], CK[17:])]
+SERVE = [(0.50, 1), (1.51, 5), (2.26, 10), (2.51, 32), (3.26, 39), (3.51, 41), (4.27, 43), (4.52, 46),
+         (5.27, 48), (5.52, 49), (6.28, 67), (7.28, 69), (7.53, 72), (8.28, 80), (8.79, 81), (10.54, 82),
+         (11.30, 96), (13.30, 98)]
+if sys.argv[3] == 'serve': CK = SERVE
 base = next(int(l.split()[1]) for l in open('/proc/meminfo') if l.startswith('MemAvailable:'))
 t0 = time.time()
 while True:

@@ -64,8 +64,8 @@ struct VkContext {
     // Linux, a GPU sharing the system's memory: waits while /proc/meminfo's
     // MemAvailable is still climbing (memory a process that just ended, a
     // model before this one or a build, is still giving back): past the
-    // first 1.5 s (4 MiB or more), while it rose 16 MiB or more over the
-    // last 2 s, at most TS5_MEMORY_SETTLE_MS (30000 by default, 0: no
+    // first 1.5 s (4 MiB or more), then to 4 s at least and while it rose
+    // 16 MiB or more over the last 4 s, at most TS5_MEMORY_SETTLE_MS (30000 by default, 0: no
     // wait). Then drops the cached budget so the next reading is fresh.
     // Returns the ms waited.
     int settle_memory() const;

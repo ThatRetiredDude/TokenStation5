@@ -752,12 +752,12 @@ moe="$work/llama-experts.gguf"
 ! "$ts5" run -m "$moe" -p hi -n 1 > /dev/null 2>&1 || unexpected $LINENO
 echo "== -c auto waits while memory just freed is still coming back (TS5_MEMINFO: a scripted /proc/meminfo)"
 # 12 MiB more every quarter second, here for 3 s, then flat. The wait goes on
-# while 2 s add 16 MiB or more.
+# while 4 s add 16 MiB or more.
 python3 "$here/meminfo_curve.py" "$work/meminfo" 12 3 10 &
 mc=$!
 sleep 0.2
 TS5_MEMINFO="$work/meminfo" "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null |
-    grep "waited [2-6]\.[0-9]* s for memory just freed to come back"
+    grep "waited [4-7]\.[0-9]* s for memory just freed to come back"
 wait $mc
 # As the kernel shows it: steps of 60 MiB every 1.25 s, with nothing between
 # (a rule that looks at 1 s or less stops in a gap), for 5 s.
@@ -765,15 +765,24 @@ python3 "$here/meminfo_curve.py" "$work/meminfo" 12 5 12 1.25 &
 mc=$!
 sleep 0.2
 TS5_MEMINFO="$work/meminfo" "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null |
-    grep "waited [4-7]\.[0-9]* s for memory just freed to come back"
+    grep "waited [6-9]\.[0-9]* s for memory just freed to come back"
 wait $mc
 # The PS5's own curve right after a full build (+572 MiB over 22 s): the
-# wait stops near 18 s, when 2 s add less than 16 MiB.
-python3 "$here/meminfo_curve.py" "$work/meminfo" 0 ck 25 &
+# wait stops near 22 s, when 4 s add less than 16 MiB.
+python3 "$here/meminfo_curve.py" "$work/meminfo" 0 ck 28 &
 mc=$!
 sleep 0.2
 TS5_MEMINFO="$work/meminfo" "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null |
-    grep "waited 1[4-9]\.[0-9]* s for memory just freed to come back"
+    grep "waited 2[0-4]\.[0-9]* s for memory just freed to come back"
+wait $mc
+# And after a server stopped (+98 MiB over 13 s, steps 1 to 3 s apart): the
+# wait goes on past 9 s (a 2 s window stopped near 7.5 s, 0.03 GiB short)
+# and stops in the tail (the last 16 MiB come over 4 s).
+python3 "$here/meminfo_curve.py" "$work/meminfo" 0 serve 20 &
+mc=$!
+sleep 0.2
+TS5_MEMINFO="$work/meminfo" "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null |
+    grep -E "waited (9|1[0-5])\.[0-9]* s for memory just freed to come back"
 wait $mc
 # Nothing coming back: the wait ends at its first look (1.5 s), no line.
 python3 "$here/meminfo_curve.py" "$work/meminfo" 0 0 4 &

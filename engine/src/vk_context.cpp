@@ -86,9 +86,13 @@ int VkContext::settle_memory() const {
     // each CPU's count to MemAvailable about once a second, so readings a
     // quarter second apart show +25 to +65 MiB, then nothing for 0.5 to
     // 1.25 s. A rule that looks at 1 s or less can land between two steps
-    // and stop: one did at 0.5 s, 0.45 GiB short. So the first decision
-    // comes at 1.5 s (at least one step: a machine with nothing coming back
-    // moves by less than 4 MiB), then the wait goes on while 2 s add 16 MiB.
+    // and stop: one did at 0.5 s, 0.45 GiB short. After a server stops,
+    // about 100 MiB come back over 13 s in steps of 2 to 22 MiB with up to
+    // 2.5 s of nothing between, so a 2 s window stopped there too. So the
+    // first decision comes at 1.5 s (at least one step: a machine with
+    // nothing coming back moves by less than 4 MiB, and a plain model exit
+    // has given everything back by the time the process is gone); past it
+    // the wait goes on at least to 4 s, then while 4 s add 16 MiB.
     std::vector<uint64_t> seen{mem_available()};  // a reading every step
     int waited = 0;
     while (seen[0] && waited < max_ms) {
@@ -97,7 +101,7 @@ int VkContext::settle_memory() const {
         seen.push_back(mem_available());
         const size_t n = seen.size();
         if (n == 7 && seen[6] < seen[0] + (4ull << 20)) break;
-        if (n >= 9 && seen[n - 1] < seen[n - 9] + (16ull << 20)) break;
+        if (n >= 17 && seen[n - 1] < seen[n - 17] + (16ull << 20)) break;
     }
     std::lock_guard<std::mutex> lk(budget_mutex);
     ram_at = budget_at = -1;
