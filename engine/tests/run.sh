@@ -633,6 +633,31 @@ TS5_KV=q4 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answe
 python3 "$here/q8_refcmp.py" "$work/qwen3-Q4_0.gguf" | grep -q "4-bit turned vs 16-bit cache, CPU, 16 positions"
 TS5_KV=q4 TS5_CHECK_REF_KV=f16 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2>&1 > /dev/null |
     grep -q "check against the answers with a cache in f16 (the GPU keeps q4)"
+# What each half of the cache costs, in the CPU's answers (saved apart):
+# only K in 4 bits, and only V, turned and back. Turning V and back without
+# rounding changes nothing (within 1e-5 of the largest logit). Only the
+# saved answers count here, not the GPU's pass or fail against them.
+TS5_CPU_KV_V=f16 TS5_CHECK_REF_KV=q4 "$ts5" check -m "$work/qwen3-Q4_0.gguf" --fresh > /dev/null 2>&1 || true
+TS5_CPU_KV_K=f16 TS5_CPU_KV_TURN_V=1 TS5_CHECK_REF_KV=q4 "$ts5" check -m "$work/qwen3-Q4_0.gguf" --fresh \
+    > /dev/null 2>&1 || true
+python3 "$here/q8_refcmp.py" "$work/qwen3-Q4_0.gguf" 16 "$work/qwen3-Q4_0.gguf.q4t-Vf16.ts5ref" \
+    "$work/qwen3-Q4_0.gguf.q4t-Kf16-Vt.ts5ref" | grep -c "q4t-[KV]f16.* vs 16-bit cache, CPU, 16 positions" | grep -qx 2
+for t in 0 1; do
+    TS5_CPU_KV_V=f32 TS5_CPU_KV_TURN_V=$t TS5_CHECK_REF_KV=q4 "$ts5" check -m "$work/qwen3-Q4_0.gguf" --fresh \
+        > /dev/null 2>&1 || true
+done
+python3 - "$work/qwen3-Q4_0.gguf" <<'PY'
+import struct, sys
+import numpy as np
+def load(p):
+    with open(p, 'rb') as f:
+        h = struct.unpack('<8s4I2Q', f.read(40))
+        return np.fromfile(f, dtype=np.float32).reshape(h[2], h[3])
+a, b = load(sys.argv[1] + '.q4t-Vf32.ts5ref'), load(sys.argv[1] + '.q4t-Vf32-Vt.ts5ref')
+d = float(np.abs(a - b).max() / np.abs(a).max())
+print(f"V turned and back, unrounded: {d:.2g} of the largest logit")
+assert d < 1e-5, d
+PY
 # On a text's tokens (-p): answers saved apart from the test tokens', then used again.
 txt=$(head -c 3000 "$engine/DESIGN.md")
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "$txt" 2> /dev/null |

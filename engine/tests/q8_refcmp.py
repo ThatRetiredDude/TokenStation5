@@ -7,7 +7,10 @@
 # exact math, in the check's measure: max |q - f16| over all positions and
 # the vocabulary, as a share of max |f16|. With TS5_CHECK_REF_KV=f16, ts5 check
 # gives the GPU's side of the same measure.
-#   python3 q8_refcmp.py MODEL.gguf [N]   (the first N positions, 128 by default)
+#   python3 q8_refcmp.py MODEL.gguf [N] [FILE.ts5ref ...]
+# (the first N positions, 128 by default). Each FILE is compared too: the
+# answers of a measurement (TS5_CPU_KV_K, TS5_CPU_KV_V, TS5_CPU_KV_TURN_V),
+# such as MODEL.gguf.q4t-Vf16.ts5ref.
 import os, struct, sys
 import numpy as np
 
@@ -22,15 +25,19 @@ def load(path, rows):
 
 m = sys.argv[1]
 rows = int(sys.argv[2]) if len(sys.argv) > 2 else 128
+extra = sys.argv[3:]
 v0, n0, nv, k0, f16 = load(m + '.ts5ref', rows)
 assert k0 == 0, k0
 print(f"{m.split('/')[-1]}: vocab {nv}, 16-bit answers for {n0} positions")
 found = False
-for suffix, code, name in (('.q8.ts5ref', 1, '8-bit plain'), ('.q8t.ts5ref', 3, '8-bit turned'),
-                           ('.q4.ts5ref', 4, '4-bit plain'), ('.q4t.ts5ref', 5, '4-bit turned')):
-    if not os.path.exists(m + suffix): continue
+files = [(m + suffix, code, name) for suffix, code, name in (
+    ('.q8.ts5ref', 1, '8-bit plain'), ('.q8t.ts5ref', 3, '8-bit turned'),
+    ('.q4.ts5ref', 4, '4-bit plain'), ('.q4t.ts5ref', 5, '4-bit turned'))]
+files += [(f, 0x100, f.split('.gguf.')[-1].replace('.ts5ref', '')) for f in extra]
+for path, code, name in files:
+    if not os.path.exists(path): continue
     found = True
-    v1, n1, nv1, k1, q = load(m + suffix, rows)
+    v1, n1, nv1, k1, q = load(path, rows)
     assert nv == nv1 and k1 == code, (nv, nv1, k1, code)
     if v0 != v1:
         print(f"  {name}: saved by another version of the reference ({v1}, the 16-bit answers {v0}); "

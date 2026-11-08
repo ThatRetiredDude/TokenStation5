@@ -117,9 +117,36 @@ static void kv_turn(float *v, int n, bool is_q) {
         for (int i = 0; i < n; i++) v[i] *= 1.0f / (float)n;
 }
 
+// kv_turn undone: the butterflies, then the signs, then 1/n (H H = n I).
+static void kv_unturn(float *v, int n) {
+    for (int h = 1; h < n; h *= 2)
+        for (int i = 0; i < n; i += 2 * h)
+            for (int j = i; j < i + h; j++) {
+                const float a = v[j], b = v[j + h];
+                v[j] = a + b, v[j + h] = a - b;
+            }
+    for (int i = 0; i < n; i++) v[i] *= ((((uint32_t)i * 2654435761u) >> 13) & 1 ? -1.0f : 1.0f) / (float)n;
+}
+
+// Measurements of what each half of a cache costs (the check's CPU answers,
+// saved apart: cpu_kv_tag()): TS5_CPU_KV_K and TS5_CPU_KV_V round only K or
+// only V as that type (f16, q8, q4, f32) instead of the cache's, and
+// TS5_CPU_KV_TURN_V=1 turns each V head before rounding and back after, as a
+// GPU would by turning the attention's output back.
+static void kv_override(const char *name, KvType &t) {
+    const char *e = getenv(name);
+    if (!e || !*e) return;
+    const std::string v = e;
+    t = v == "q4" ? KvType::Q4 : v == "q8" ? KvType::Q8 : v == "f16" ? KvType::F16 : KvType::F32;
+}
+
 class CpuBackend : public Backend {
 public:
-    CpuBackend(const Model &m, int n_ctx, KvType kv_type) : m_(m), hp_(m.hp), n_ctx_(n_ctx), kv_(kv_type) {
+    CpuBackend(const Model &m, int n_ctx, KvType kv_type)
+        : m_(m), hp_(m.hp), n_ctx_(n_ctx), kv_(kv_type), kv_k_(kv_type), kv_v_(kv_type) {
+        kv_override("TS5_CPU_KV_K", kv_k_);
+        kv_override("TS5_CPU_KV_V", kv_v_);
+        if (const char *e = getenv("TS5_CPU_KV_TURN_V")) turn_v_ = atoi(e) != 0;
         // Each layer's K (and V) cache: n_ctx tokens of its own width.
         size_t total = 0;
         for (int l = 0; l < hp_.n_layer; l++) {
@@ -306,12 +333,17 @@ private:
                 rope(&kt[hh * HD], RD, pos, hp_.rope_neox, turn);
                 if (hp_.v_norm) rmsnorm(&vt[hh * HD], nullptr, HD, hp_.rms_eps);
             }
-            if (kv_quantized(kv_) && kv_turn_setting() && (HD & (HD - 1)) == 0) {
+            const bool pow2 = (HD & (HD - 1)) == 0;
+            if (kv_quantized(kv_k_) && kv_turn_setting() && pow2) {
                 for (int hh = 0; hh < H; hh++) kv_turn(&qt[hh * HD], HD, true);
                 for (int hh = 0; hh < HKV; hh++) kv_turn(&kt[hh * HD], HD, false);
             }
-            round_kv(kv_, kt, KV);
-            round_kv(kv_, vt, KV);
+            round_kv(kv_k_, kt, KV);
+            if (turn_v_ && pow2)
+                for (int hh = 0; hh < HKV; hh++) kv_turn(&vt[hh * HD], HD, false);
+            round_kv(kv_v_, vt, KV);
+            if (turn_v_ && pow2)
+                for (int hh = 0; hh < HKV; hh++) kv_unturn(&vt[hh * HD], HD);
             memcpy(kl + (size_t)pos * KV, kt, KV * 4);
             memcpy(vl + (size_t)pos * KV, vt, KV * 4);
         }
@@ -471,7 +503,8 @@ private:
     const Model &m_;
     const HParams &hp_;
     int n_ctx_;
-    KvType kv_;
+    KvType kv_, kv_k_, kv_v_;  // the cache's type, and what K and V round to (kv_override)
+    bool turn_v_ = false;
     FILE *file_ = nullptr;      // the model file, when its weights were not loaded
     bool read_ok_ = true;
     std::vector<uint8_t> buf_;  // the weights being used, read from file_

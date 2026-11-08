@@ -113,10 +113,22 @@ bool model_id(const std::string &path, uint64_t &size, uint64_t &hash) {
     return true;
 }
 
+// The CPU reference's measurement settings (TS5_CPU_KV_K, TS5_CPU_KV_V,
+// TS5_CPU_KV_TURN_V: cpu_backend.cpp), as a suffix of its answers' file:
+// "-Kq8", "-Vf16", "-Vt". Empty without them.
+static std::string cpu_kv_tag() {
+    std::string t;
+    if (const char *e = getenv("TS5_CPU_KV_K"); e && *e) t += std::string("-K") + e;
+    if (const char *e = getenv("TS5_CPU_KV_V"); e && *e) t += std::string("-V") + e;
+    if (const char *e = getenv("TS5_CPU_KV_TURN_V"); e && atoi(e)) t += "-Vt";
+    return t;
+}
+
 // 0 is f16, which the files saved before this field all are. 3 and 5: an
 // 8-bit and a 4-bit cache with Q and K turned (kv_turn_setting()), which
 // rounds other values.
 uint32_t kv_code(KvType t) {
+    if (!cpu_kv_tag().empty()) return 0x100;  // a measurement's: never anything else's
     switch (t) {
     case KvType::F16: return 0;
     case KvType::Q8: return kv_turn_setting() ? 3 : 1;
@@ -128,8 +140,9 @@ uint32_t kv_code(KvType t) {
 // One file per cache type, so trying one doesn't throw away the other's, and
 // per text (tag: its tokens' hash) for checks of a text's tokens.
 std::string ref_path(const std::string &model, KvType kv, const std::string &tag) {
-    const std::string kind = std::string(kv_type_name(kv)) + (kv_quantized(kv) && kv_turn_setting() ? "t" : "");
-    return model + (kv == KvType::F16 ? "" : "." + kind) + (tag.empty() ? "" : "." + tag) +
+    const std::string x = cpu_kv_tag();
+    const std::string kind = std::string(kv_type_name(kv)) + (kv_quantized(kv) && kv_turn_setting() ? "t" : "") + x;
+    return model + (kv == KvType::F16 && x.empty() ? "" : "." + kind) + (tag.empty() ? "" : "." + tag) +
            ".ts5ref";
 }
 
