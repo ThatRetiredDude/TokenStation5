@@ -66,6 +66,30 @@ echo "== Gemma 4: at once, one token per call and 72 tokens across its 8-token w
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${g4[@]}"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${g4[@]}"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${g4[@]}"
+# Gemma 3 as the 4B to 27B have it: every 6th layer full attention with RoPE
+# scaled linearly by 8, the rest sliding (over 64 tokens here, 1,024 there),
+# heads of 256. 600 tokens cross the window nine times.
+g3="$work/gemma3-F32.gguf"
+[ -s "$g3" ] || python3 "$here/make_test_model.py" --arch gemma3 --quant F32 --layers 6 --embd 512 --heads 2 \
+    --kv-heads 1 --window 64 --rope-linear 8 --vocab "$work/ggml-vocab-llama-spm.gguf" "$g3" > /dev/null
+echo "== Gemma 3: 600 tokens across its 64-token window, and one token per call"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 600 "$g3"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 100 --step "$g3"
+echo "== logits --every: positions N-1, 2N-1, ... and the last of the full dump, byte for byte"
+every_toks=$(seq 5 7 2400)
+"$ts5" logits -m "$g3" -o "$work/every-all.bin" $every_toks 2> /dev/null
+"$ts5" logits -m "$g3" -o "$work/every.bin" --every 128 $every_toks 2> /dev/null
+python3 - "$work/every-all.bin" "$work/every.bin" <<'PY'
+import sys
+import numpy as np
+a = np.fromfile(sys.argv[1], np.float32).reshape(-1, 32000)
+e = np.fromfile(sys.argv[2], np.float32).reshape(-1, 32000)
+pos = [p for p in range(len(a)) if (p + 1) % 128 == 0 or p == len(a) - 1]
+if not np.array_equal(a[pos], e):
+    sys.exit(f"FAIL: --every 128 rows differ from the full dump ({len(pos)} wanted, {len(e)} written)")
+print(f"same rows: {len(pos)} of {len(a)}")
+PY
+rm -f "$work/every-all.bin" "$work/every.bin"
 # Qwen3.5 as the 9B's file has it: linear-attention (Gated DeltaNet) layers
 # with every 4th one full attention, gated by a sigmoid, M-RoPE on a quarter
 # of each head; heads of 128 in both.
@@ -655,6 +679,8 @@ if [ -n "${LLAMA_CPP:-}" ]; then
     echo "== vs llama.cpp (llama.cpp quantizes activations, so quantized models differ a little)"
     python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk "$work/qwen2-F32.gguf" "$work/qwen3-F32.gguf" \
         "$work/llama-F32.gguf" "$work/qwen3-Q4_K_M.gguf" "$work/qwen35-F32.gguf"
+    echo "== Gemma 3 vs llama.cpp: 600 tokens across the window, with its linear RoPE scale"
+    python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk --ntok 600 "$g3"
     echo "== YaRN vs llama.cpp's (rope scaling yarn over the test models' 4096-token window)"
     for f in 1.5 4; do
         TS5_YARN=$f TS5_REF_YARN=$f:4096 python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk \

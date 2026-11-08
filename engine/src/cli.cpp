@@ -7,7 +7,7 @@
 //   ts5 tokenize -m model.gguf -p "text"
 //   ts5 check    -m model.gguf [-n 16] [-p TEXT]   GPU logits against the CPU reference
 //                                        (-p: on TEXT's first n tokens)
-//   ts5 logits   -m model.gguf -o out.bin [--step | --verify K] tok0 tok1 ...   (all positions, for tests)
+//   ts5 logits   -m model.gguf -o out.bin [--step | --verify K | --every N] tok0 tok1 ...   (all positions, for tests)
 //   ts5 prompt   -m model.gguf [--chat-template FILE] < request.json
 //                                        the prompt a chat request becomes (for tests)
 //   ts5 tool-parse hermes|llama3|mistral|gemma|gemma4 [TOOL...] < text
@@ -65,6 +65,7 @@ struct Args {
     float temp = 0.7f;
     bool chat = false, step = false, n_set = false, fresh = false;
     int verify = 0;  // logits --verify K
+    int every = 0;   // logits --every N
     std::vector<int32_t> tokens;
 };
 
@@ -83,7 +84,7 @@ int usage() {
             "  bench: --pp N --tg N\n"
             "  check: [-n TOKENS] [-p TEXT] [--fresh]  (-p: on TEXT's tokens; --fresh: run the CPU even if\n"
             "         its answers are saved)\n"
-            "  logits: -o FILE TOKENS...\n");
+            "  logits: -o FILE [--every N] TOKENS...  (--every N: positions N-1, 2N-1, ... and the last)\n");
     return 2;
 }
 
@@ -117,6 +118,7 @@ bool parse(int argc, char **argv, Args &a) {
         else if (s == "--chat") a.chat = true;
         else if (s == "--step") a.step = true;
         else if (s == "--verify") a.verify = atoi(next().c_str());
+        else if (s == "--every") a.every = atoi(next().c_str());
         else if (s == "--fresh") a.fresh = true;
         else if (s == "--chat-template") a.chat_template = next();
         else if (!s.empty() && (isdigit((unsigned char)s[0]))) a.tokens.push_back(atoi(s.c_str()));
@@ -430,6 +432,29 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
 
     if (a.cmd == "logits") {
         if (a.tokens.empty() || a.out.empty()) return usage();
+        // --every N: a real prompt's every logit would take tokens x vocab
+        // floats (Gemma 3's 7,918 x 262,144 is 8.3 GB), so the prompt goes
+        // in chunks of 256 and only positions N-1, 2N-1, ... and the last
+        // are written, in order.
+        if (a.every > 0) {
+            const int n = (int)a.tokens.size(), chunk = 256;
+            std::vector<float> lg((size_t)chunk * hp.n_vocab);
+            FILE *f = fopen(a.out.c_str(), "wb");
+            if (!f) { fprintf(stderr, "ts5: can't write %s\n", a.out.c_str()); return 1; }
+            for (int i = 0; i < n; i += chunk) {
+                const int k = std::min(chunk, n - i);
+                if (!be->forward(&a.tokens[i], k, i, lg.data(), true, err)) {
+                    fprintf(stderr, "ts5: %s\n", err.c_str());
+                    fclose(f);
+                    return 1;
+                }
+                for (int j = 0; j < k; j++)
+                    if ((i + j + 1) % a.every == 0 || i + j == n - 1)
+                        fwrite(lg.data() + (size_t)j * hp.n_vocab, 4, hp.n_vocab, f);
+            }
+            fclose(f);
+            return 0;
+        }
         std::vector<float> lg((size_t)a.tokens.size() * hp.n_vocab);
         // --step: one token per call, exercising the KV cache across calls.
         // --verify K: K tokens a call with every position's logits, as a
