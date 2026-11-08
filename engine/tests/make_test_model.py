@@ -134,6 +134,9 @@ def main():
     ap.add_argument("--ff", type=int, default=512)
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--kv-heads", type=int, default=2)
+    ap.add_argument("--head-dim", type=int, default=0,
+                    help="gemma3: the heads' size apart from the width (the 12B's 16 heads of 256 on 3,840); "
+                         "default the width over the heads")
     ap.add_argument("--global-hd", type=int, default=0,
                     help="gemma4: the full-attention layers' head size (every 3rd layer; default twice the others'), "
                          "on one K/V head without a V projection, as the 12B has it")
@@ -176,7 +179,7 @@ def main():
     rng = np.random.default_rng(a.seed)
     reader = GGUFReader(a.vocab)
     n_vocab = len(reader.fields["tokenizer.ggml.tokens"].data)
-    hd = a.embd // a.heads
+    hd = a.head_dim or a.embd // a.heads
 
     w = GGUFWriter(a.out, a.arch)
     w.add_name(f"ts5-test-{a.arch}")

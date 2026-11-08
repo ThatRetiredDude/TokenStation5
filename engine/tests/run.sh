@@ -90,6 +90,30 @@ if not np.array_equal(a[pos], e):
 print(f"same rows: {len(pos)} of {len(a)}")
 PY
 rm -f "$work/every-all.bin" "$work/every.bin"
+# Gemma 3 12B's attention as the real file has it: 16 heads of 256 on 8 KV
+# heads, wider than the model (3,840 there), over a 1,024-token window. A
+# 1,100-token prompt (past the window), then its last 8 tokens as generation
+# takes them: one a call, and 4 a call as drafts are checked.
+g3w="$work/gemma3-12b-shape.gguf"
+[ -s "$g3w" ] || python3 "$here/make_test_model.py" --arch gemma3 --quant F16 --layers 6 --embd 384 --heads 16 \
+    --kv-heads 8 --head-dim 256 --window 1024 --rope-linear 8 --vocab "$work/ggml-vocab-llama-spm.gguf" "$g3w" > /dev/null
+echo "== Gemma 3 12B's heads: generation after a 1,100-token prompt, GPU vs CPU, and drafts' checks == one a call"
+tail_toks=$(seq 7 13 14300)
+"$ts5" logits -m "$g3w" -o "$work/tail-vk.bin" --tail 8 $tail_toks 2> /dev/null
+"$ts5" logits -m "$g3w" --backend cpu -o "$work/tail-cpu.bin" --tail 8 $tail_toks 2> /dev/null
+"$ts5" logits -m "$g3w" -o "$work/tail-v4.bin" --tail 8 --verify 4 $tail_toks 2> /dev/null
+cmp -s "$work/tail-vk.bin" "$work/tail-v4.bin" || { echo "FAIL: --tail 8 --verify 4 differs from one token a call"; exit 1; }
+python3 - "$work/tail-vk.bin" "$work/tail-cpu.bin" <<'PY'
+import sys
+import numpy as np
+a = np.fromfile(sys.argv[1], np.float32).reshape(-1, 32000)
+b = np.fromfile(sys.argv[2], np.float32).reshape(-1, 32000)
+d = float((np.abs(a - b).max(axis=1) / (b.max(axis=1) - b.min(axis=1))).max())
+if len(a) != 8 or d > 0.002:
+    sys.exit(f"FAIL: generation rows {len(a)}, GPU vs CPU {d:.5f} of the logit range")
+print(f"8 rows, GPU vs CPU {d:.6f} of the logit range, drafts' checks byte for byte")
+PY
+rm -f "$work/tail-vk.bin" "$work/tail-cpu.bin" "$work/tail-v4.bin"
 # Qwen3.5 as the 9B's file has it: linear-attention (Gated DeltaNet) layers
 # with every 4th one full attention, gated by a sigmoid, M-RoPE on a quarter
 # of each head; heads of 128 in both.
@@ -681,6 +705,20 @@ if [ -n "${LLAMA_CPP:-}" ]; then
         "$work/llama-F32.gguf" "$work/qwen3-Q4_K_M.gguf" "$work/qwen35-F32.gguf"
     echo "== Gemma 3 vs llama.cpp: 600 tokens across the window, with its linear RoPE scale"
     python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk --ntok 600 "$g3"
+    echo "== Gemma 3 12B's heads vs llama.cpp: generation after a 1,100-token prompt"
+    "$ts5" logits -m "$g3w" -o "$work/tail-vk.bin" --tail 8 $tail_toks 2> /dev/null
+    TS5_REF_TAIL=8 "$ref" "$g3w" "$work/tail-ref.bin" $tail_toks 2> /dev/null
+    python3 - "$work/tail-vk.bin" "$work/tail-ref.bin" <<'PY'
+import sys
+import numpy as np
+a = np.fromfile(sys.argv[1], np.float32).reshape(-1, 32000)
+b = np.fromfile(sys.argv[2], np.float32).reshape(-1, 32000)
+d = float((np.abs(a - b).max(axis=1) / (b.max(axis=1) - b.min(axis=1))).max())
+if a.shape != b.shape or d > 0.002:
+    sys.exit(f"FAIL: generation rows {len(a)} and {len(b)}, ts5 vs llama.cpp {d:.5f} of the logit range")
+print(f"8 rows, ts5 vs llama.cpp {d:.6f} of the logit range")
+PY
+    rm -f "$work/tail-vk.bin" "$work/tail-ref.bin"
     echo "== YaRN vs llama.cpp's (rope scaling yarn over the test models' 4096-token window)"
     for f in 1.5 4; do
         TS5_YARN=$f TS5_REF_YARN=$f:4096 python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk \

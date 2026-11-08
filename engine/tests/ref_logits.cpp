@@ -2,7 +2,8 @@
 //   ref_logits model.gguf out.bin tok0 tok1 ...
 // Writes n_tokens x n_vocab float32 (logits of every position); with
 // TS5_REF_EVERY=N only positions N-1, 2N-1, ... and the last, as
-// `ts5 logits --every N` writes them.
+// `ts5 logits --every N` writes them; with TS5_REF_TAIL=K only the last K,
+// as `ts5 logits --tail K` writes them.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -24,10 +25,15 @@ int main(int argc, char **argv) {
     cp.n_batch = cp.n_ubatch = (uint32_t)toks.size();
     const char *ev = getenv("TS5_REF_EVERY");
     const int every = ev ? atoi(ev) : 0;
-    auto wanted = [&](size_t i) { return every <= 0 || (i + 1) % every == 0 || i + 1 == toks.size(); };
+    const char *tv = getenv("TS5_REF_TAIL");
+    const size_t tail = tv ? (size_t)atoi(tv) : 0;
+    auto wanted = [&](size_t i) {
+        if (tail) return i + tail >= toks.size();
+        return every <= 0 || (i + 1) % every == 0 || i + 1 == toks.size();
+    };
     // A long prompt in batches of 512: one batch of all of it would need a
     // tokens x tokens score matrix per head.
-    if (every > 0) cp.n_ubatch = 512;
+    if (every > 0 || tail) cp.n_ubatch = 512;
     // TS5_REF_YARN=FACTOR:WINDOW: YaRN over that window, to compare with ts5's TS5_YARN.
     if (const char *e = getenv("TS5_REF_YARN"); e && *e) {
         cp.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_YARN;

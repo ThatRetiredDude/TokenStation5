@@ -7,7 +7,7 @@
 //   ts5 tokenize -m model.gguf -p "text"
 //   ts5 check    -m model.gguf [-n 16] [-p TEXT]   GPU logits against the CPU reference
 //                                        (-p: on TEXT's first n tokens)
-//   ts5 logits   -m model.gguf -o out.bin [--step | --verify K | --every N] tok0 tok1 ...   (all positions, for tests)
+//   ts5 logits   -m model.gguf -o out.bin [--step | --verify K | --every N | --tail K [--verify V]] tok0 tok1 ...   (all positions, for tests)
 //   ts5 prompt   -m model.gguf [--chat-template FILE] < request.json
 //                                        the prompt a chat request becomes (for tests)
 //   ts5 tool-parse hermes|llama3|mistral|gemma|gemma4 [TOOL...] < text
@@ -66,6 +66,7 @@ struct Args {
     bool chat = false, step = false, n_set = false, fresh = false;
     int verify = 0;  // logits --verify K
     int every = 0;   // logits --every N
+    int tail = 0;    // logits --tail K
     std::vector<int32_t> tokens;
 };
 
@@ -84,7 +85,9 @@ int usage() {
             "  bench: --pp N --tg N\n"
             "  check: [-n TOKENS] [-p TEXT] [--fresh]  (-p: on TEXT's tokens; --fresh: run the CPU even if\n"
             "         its answers are saved)\n"
-            "  logits: -o FILE [--every N] TOKENS...  (--every N: positions N-1, 2N-1, ... and the last)\n");
+            "  logits: -o FILE [--every N] TOKENS...  (--every N: positions N-1, 2N-1, ... and the last)\n"
+            "          --tail K [--verify V]: the prompt up to its last K tokens, then those as generation\n"
+            "          takes them (one a call, or V a call as drafts are checked), writing their K rows\n");
     return 2;
 }
 
@@ -119,6 +122,7 @@ bool parse(int argc, char **argv, Args &a) {
         else if (s == "--step") a.step = true;
         else if (s == "--verify") a.verify = atoi(next().c_str());
         else if (s == "--every") a.every = atoi(next().c_str());
+        else if (s == "--tail") a.tail = atoi(next().c_str());
         else if (s == "--fresh") a.fresh = true;
         else if (s == "--chat-template") a.chat_template = next();
         else if (!s.empty() && (isdigit((unsigned char)s[0]))) a.tokens.push_back(atoi(s.c_str()));
@@ -453,6 +457,27 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
                         fwrite(lg.data() + (size_t)j * hp.n_vocab, 4, hp.n_vocab, f);
             }
             fclose(f);
+            return 0;
+        }
+        // --tail K: a long prompt's prefill in chunks of 256, then its last K
+        // tokens one a call (or --verify V a call): generation's path, the
+        // attention of single tokens over keys a prompt wrote, at a length
+        // whose every logit would not fit. Writes the K rows.
+        if (a.tail > 0) {
+            const int n = (int)a.tokens.size(), k = std::min(a.tail, n), p = n - k, v = std::max(1, a.verify);
+            std::vector<float> lg((size_t)v * hp.n_vocab);
+            FILE *f = fopen(a.out.c_str(), "wb");
+            if (!f) { fprintf(stderr, "ts5: can't write %s\n", a.out.c_str()); return 1; }
+            bool ok = true;
+            for (int i = 0; i < p && ok; i += 256)
+                ok = be->forward(&a.tokens[i], std::min(256, p - i), i, lg.data(), false, err);
+            for (int i = p; i < n && ok; i += v) {
+                const int m = std::min(v, n - i);
+                ok = be->forward(&a.tokens[i], m, i, lg.data(), m > 1, err);
+                if (ok) fwrite(lg.data(), 4, (size_t)m * hp.n_vocab, f);
+            }
+            fclose(f);
+            if (!ok) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
             return 0;
         }
         std::vector<float> lg((size_t)a.tokens.size() * hp.n_vocab);
