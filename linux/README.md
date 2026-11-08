@@ -154,24 +154,25 @@ with how many tokens would fit (a 14B at 2,048 tokens needs about 3.8 GiB
 beside the model; 512 tokens need about 1.1 GiB). `TS5_SYSTEM_RESERVE_GIB` changes the 1.5 GiB;
 `TS5_GPU_MEMORY_GIB` overrides what it thinks it has.
 
-With about 11 GiB for models (an idle PS5 under Debian has about 13.2 GiB
-available, less what's kept free), Longest context at "As much as fits",
-no helper, measured on a PS5 with 2 GiB kept free, the default until
-2026-11-08 (the 16-bit cache, or 8 bits where Room for longer contexts is
-Automatic and a model would get under 24,576 tokens). With today's 1.5 GiB
-the models that memory limits get more: in 16-bit Qwen 3 14B 16,384,
-DeepSeek and Coder 14B 13,312, Gemma 3 12B 48,128, Llama 3.1 8B 53,248.
+Longest context at "As much as fits", no helper, measured on a PS5 under
+Debian on 2026-11-08 with the defaults (1.5 GiB of RAM kept free; the
+16-bit cache, or 8 bits where Room for longer contexts is Automatic and a
+model would get under 24,576 tokens). A load can land one step lower or
+higher with how much RAM is free at that moment. Cold load times are from
+the original 5 Gb/s USB SATA drive (about 290 MB/s).
 
-| Model | Quant | Context | Cache |
-| --- | --- | ---: | --- |
-| Qwen 3 14B | Q4_K_M | 24,576 (13,312 in 16-bit) | 8-bit (Automatic) |
-| DeepSeek R1 Distill Qwen 14B | Q4_K_M | 20,480 (11,264) | 8-bit (Automatic) |
-| Qwen 2.5 Coder 14B Instruct | Q4_K_M | 20,480 (11,264) | 8-bit (Automatic) |
-| Gemma 3 12B | Q4_K_M | 39,936 | 16-bit |
-| Gemma 4 12B | Q4_K_M | 131,072 (its whole length) | 16-bit |
-| Qwen3.5 9B | Q4_K_M | 164,864 (262,144 with Room for longer contexts On) | 16-bit |
-| Llama 3.1 8B | Q4_K_M | 49,152 (92,160 with Room for longer contexts On) | 16-bit |
-| Qwen 3 8B, Qwen 2.5 Coder 7B | Q4_K_M | 32,768 (their limit; longer with YaRN, below) | 16-bit |
+| Model | Quant | Context | Cache | Cold load |
+| --- | --- | ---: | --- | ---: |
+| Qwen 3 14B | Q4_K_M | 29,696 (15,360 in 16-bit) | 8-bit (Automatic) | 31 s |
+| DeepSeek R1 Distill Qwen 14B | Q4_K_M | 24,576 (13,312) | 8-bit (Automatic) | 32 s |
+| Qwen 2.5 Coder 14B Instruct | Q4_K_M | 24,576 (13,312) | 8-bit (Automatic) | 32 s |
+| Gemma 3 12B | Q4_K_M | 45,056 | 16-bit | 26 s |
+| Gemma 4 12B | Q4_K_M | 131,072 (its whole length) | 16-bit | 31 s |
+| Qwen3.5 9B | Q4_K_M | 175,104 (262,144 with Room for longer contexts On) | 16-bit | 22 s |
+| Llama 3.1 8B | Q4_K_M | 52,224 (over 92,160 with Room for longer contexts On) | 16-bit | 18 s |
+| Qwen 3 8B, Qwen 2.5 Coder 7B | Q4_K_M | 32,768 (their limit; longer with YaRN, below) | 16-bit | 16 to 17 s |
+| Gemma 3 4B | Q4_K_M | 131,072 (its whole length) | 16-bit | 9 s |
+| Llama 3.2 3B | Q4_K_M | 74,752 | 16-bit | 8 s |
 
 On the 14Bs the 8-bit cache found the same long-document answers as 16-bit
 (10 of 11 at about twice the length); some longer answers are worded
