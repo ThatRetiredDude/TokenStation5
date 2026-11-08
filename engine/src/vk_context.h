@@ -63,9 +63,11 @@ struct VkContext {
     uint64_t heap_usage() const;
     // Linux, a GPU sharing the system's memory: waits while /proc/meminfo's
     // MemAvailable is still climbing (memory a process that just ended, a
-    // model before this one or a build, is still giving back), at most
-    // TS5_MEMORY_SETTLE_MS (3000 by default, 0: no wait), then drops the
-    // cached budget so the next reading is fresh. Returns the ms waited.
+    // model before this one or a build, is still giving back): past the
+    // first half second (4 MiB or more), while it rose 8 MiB or more over
+    // the last second, at most TS5_MEMORY_SETTLE_MS (20000 by default, 0: no
+    // wait). Then drops the cached budget so the next reading is fresh.
+    // Returns the ms waited.
     int settle_memory() const;
     // VK_EXT_memory_budget is on (never on the PS5).
     bool memory_budget = false;

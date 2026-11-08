@@ -36,9 +36,11 @@ uint64_t system_reserve() {
 }
 
 #ifndef TS5_PS5
-// /proc/meminfo's MemAvailable in bytes; 0 if it can't be read.
+// /proc/meminfo's MemAvailable in bytes; 0 if it can't be read. TS5_MEMINFO:
+// another file in its format instead (tests).
 static uint64_t mem_available() {
-    FILE *f = fopen("/proc/meminfo", "r");
+    const char *path = getenv("TS5_MEMINFO");
+    FILE *f = fopen(path && *path ? path : "/proc/meminfo", "r");
     if (!f) return 0;
     char line[256];
     unsigned long long kb = 0;
@@ -74,19 +76,25 @@ int VkContext::settle_memory() const {
 #ifndef TS5_PS5
     if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) return 0;
     const char *e = getenv("TS5_MEMORY_SETTLE_MS");
-    const int max_ms = e && *e ? std::max(0, atoi(e)) : 3000, step = 250;
-    uint64_t prev = mem_available();
-    int waited = 0;
+    const int max_ms = e && *e ? std::max(0, atoi(e)) : 20000, step = 250;
     // On the PS5, a load 2 to 3 s after the model before it ended (or after
     // a build) saw 0.4 to 0.6 GiB less than a load after a pause: DeepSeek
-    // R1 14B got 22,528 tokens instead of 24,576 to 25,600. Still climbing
-    // means more than 16 MiB in a quarter second.
-    while (prev && waited < max_ms) {
+    // R1 14B got 21,504 to 22,528 tokens instead of 26,624. Right after a
+    // full build MemAvailable was 12,953 MiB, 49 MiB more a second later,
+    // then 13,239 at 5 s, 13,490 at 15 s and 13,525 at 30 s (the compilers'
+    // memory coming back as free pages, nothing in the page cache): an
+    // earlier rule (16 MiB a quarter second) stopped at 0.5 s, 0.45 GiB
+    // short. An idle machine moves by less than 4 MiB in half a second (a
+    // quarter second may fall between two pieces a process hands back).
+    std::vector<uint64_t> seen{mem_available()};  // a reading every step
+    int waited = 0;
+    while (seen[0] && waited < max_ms) {
         std::this_thread::sleep_for(std::chrono::milliseconds(step));
         waited += step;
-        const uint64_t now = mem_available();
-        if (now < prev + (16ull << 20)) break;
-        prev = now;
+        seen.push_back(mem_available());
+        const size_t n = seen.size();
+        if (n == 3 && seen[2] < seen[0] + (4ull << 20)) break;
+        if (n >= 5 && seen[n - 1] < seen[n - 5] + (8ull << 20)) break;
     }
     std::lock_guard<std::mutex> lk(budget_mutex);
     ram_at = budget_at = -1;
