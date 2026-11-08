@@ -146,7 +146,8 @@ public:
         : m_(m), hp_(m.hp), n_ctx_(n_ctx), kv_(kv_type), kv_k_(kv_type), kv_v_(kv_type) {
         kv_override("TS5_CPU_KV_K", kv_k_);
         kv_override("TS5_CPU_KV_V", kv_v_);
-        if (const char *e = getenv("TS5_CPU_KV_TURN_V")) turn_v_ = atoi(e) != 0;
+        turn_v_ = kv_quantized(kv_v_) && kv_turn_v_setting();
+        if (const char *e = getenv("TS5_CPU_KV_TURN_V"); e && *e) turn_v_ = atoi(e) != 0;
         // Each layer's K (and V) cache: n_ctx tokens of its own width.
         size_t total = 0;
         for (int l = 0; l < hp_.n_layer; l++) {
@@ -504,7 +505,7 @@ private:
     const HParams &hp_;
     int n_ctx_;
     KvType kv_, kv_k_, kv_v_;  // the cache's type, and what K and V round to (kv_override)
-    bool turn_v_ = false;
+    bool turn_v_ = false;  // V turned before rounding and back after: kv_turn_v_setting()
     FILE *file_ = nullptr;      // the model file, when its weights were not loaded
     bool read_ok_ = true;
     std::vector<uint8_t> buf_;  // the weights being used, read from file_
@@ -531,6 +532,14 @@ bool kv_turn_setting() {
 #else
         return true;
 #endif
+    }();
+    return on;
+}
+
+bool kv_turn_v_setting() {
+    static const bool on = [] {
+        const char *e = getenv("TS5_KV_TURN_V");
+        return e && *e && atoi(e) != 0 && kv_turn_setting();
     }();
     return on;
 }

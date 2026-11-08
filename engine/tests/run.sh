@@ -356,6 +356,13 @@ LP_NATIVE_VECTOR_WIDTH=1024 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --
 LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk "${g4[@]}"
 LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 TS5_ATTN_DEC=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 \
     --backend vk --ntok 40 --step "${g4[@]}"
+# V turned too (TS5_KV_TURN_V=1: qkv_post_q8tv, attn_unturn turning each
+# head of the output back): still within 1% of the fp32 reference.
+TS5_KV=q8 TS5_KV_TURN_V=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 300 "${shapes[@]}"
+TS5_KV=q8 TS5_KV_TURN_V=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 60 --step \
+    "${shapes[@]}" "${h64[@]}"
+LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 TS5_KV_TURN_V=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 \
+    --backend vk --ntok 40 --step "${g4[@]}"
 echo "== 8-bit KV cache without the turn of Q and K (TS5_KV_TURN=0, as the store title has it)"
 # The steps above turn Q and K (the Linux default), which keeps every Q.K, so
 # the fp32 reference (which doesn't turn) holds for both: heads of 64 to 512,
@@ -390,11 +397,25 @@ cq4=(python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.025 --backend vk)
 "${q4[@]}" TS5_KV_TURN=0 "${cq4[@]}" --ntok 300 "${shapes[@]}"
 "${q4[@]}" TS5_KV_TURN=0 "${cq4[@]}" --ntok 60 --step "${shapes[@]}" "${h64[@]}"
 "${q4[@]}" TS5_KV_TURN=0 LP_NATIVE_VECTOR_WIDTH=1024 "${cq4[@]}" --ntok 40 --step "${g4[@]}"
+# V turned too (TS5_KV_TURN_V=1), the CPU turning each V head before
+# rounding and back after: the same 1%. Turned on the GPU only, the two
+# land 6% apart.
+"${q4[@]}" TS5_KV_TURN_V=1 "${cq4[@]}" --ntok 300 "${shapes[@]}"
+"${q4[@]}" TS5_KV_TURN_V=1 TS5_ATTN_PF=0 "${cq4[@]}" --ntok 300 "${shapes[1]}" "${shapes[3]}"
+"${q4[@]}" TS5_KV_TURN_V=1 "${cq4[@]}" --ntok 60 --step "${shapes[@]}" "${h64[@]}"
+"${q4[@]}" TS5_KV_TURN_V=1 TS5_ATTN_DEC=1 "${cq4[@]}" --ntok 160 --step "${shapes[0]}" "${shapes[1]}" "${shapes[3]}"
+"${q4[@]}" TS5_KV_TURN_V=1 LP_NATIVE_VECTOR_WIDTH=1024 "${cq4[@]}" "${g4[@]}"
+"${q4[@]}" TS5_KV_TURN_V=1 LP_NATIVE_VECTOR_WIDTH=1024 TS5_ATTN_DEC=1 "${cq4[@]}" --ntok 40 --step "${g4[@]}"
+! "${q4[@]}" TS5_KV_TURN_V=1 TS5_CPU_KV_TURN_V=0 "${cq4[@]}" --ntok 300 "${shapes[4]}" > /dev/null || unexpected $LINENO
 # The profile names the 4-bit builds.
 TS5_KV=q4 TS5_PROFILE=1 "$ts5" bench -m "${shapes[1]}" --backend vk --pp 16 --tg 8 > "$work/bench-q4.txt"
 grep -q "qkv_post_q4t " "$work/bench-q4.txt"
 grep -q "attn_pf128_q4 " "$work/bench-q4.txt"
 grep -q "attn_dec[4]*_q4 " "$work/bench-q4.txt"
+TS5_KV=q4 TS5_KV_TURN_V=1 TS5_PROFILE=1 "$ts5" bench -m "${shapes[1]}" --backend vk --pp 16 --tg 8 > "$work/bench-q4tv.txt" 2>&1
+grep -q "qkv_post_q4tv " "$work/bench-q4tv.txt"
+grep -q "attn_unturn " "$work/bench-q4tv.txt"
+grep -q "KV cache .*(q4, Q, K and V turned" "$work/bench-q4tv.txt"
 
 echo "== attn_pf256s and attn_pf512s (the default; TS5_ATTN_PF_SLIM=0 the wider builds): the same logits as attn_pf256 and attn_pf512, byte for byte"
 # The builds with fewer registers (tiles of 16 keys; no tile loaded ahead)
@@ -633,6 +654,12 @@ TS5_KV=q4 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answe
 python3 "$here/q8_refcmp.py" "$work/qwen3-Q4_0.gguf" | grep -q "4-bit turned vs 16-bit cache, CPU, 16 positions"
 TS5_KV=q4 TS5_CHECK_REF_KV=f16 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2>&1 > /dev/null |
     grep -q "check against the answers with a cache in f16 (the GPU keeps q4)"
+# With V turned too (TS5_KV_TURN_V=1): answers of their own (.q4tv, .q8tv).
+TS5_KV=q4 TS5_KV_TURN_V=1 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
+TS5_KV=q4 TS5_KV_TURN_V=1 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
+TS5_KV=q8 TS5_KV_TURN_V=1 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
+[ -s "$work/qwen3-Q4_0.gguf.q4tv.ts5ref" ] && [ -s "$work/qwen3-Q4_0.gguf.q8tv.ts5ref" ]
+python3 "$here/q8_refcmp.py" "$work/qwen3-Q4_0.gguf" | grep -c "turned, V too vs 16-bit cache, CPU, 16 positions" | grep -qx 2
 # What each half of the cache costs, in the CPU's answers (saved apart):
 # only K in 4 bits, and only V, turned and back. Turning V and back without
 # rounding changes nothing (within 1e-5 of the largest logit). Only the

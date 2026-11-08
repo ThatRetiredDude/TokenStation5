@@ -177,9 +177,17 @@ void main() {
     // butterflies (no 1/sqrt(n)): K's large channels spread over the whole
     // head before the 8-bit cache rounds it in blocks of 32. Q is also scaled
     // by 1/HD, a power of two, so every score Q.K stays the same.
+    // With KV_TURN_V (kv_turn_v_setting()) V goes through them too, which
+    // spreads its large channels the same way; attn_unturn turns the
+    // attention's output back.
     barrier();
     for (uint d = tid; d < HD; d += 128)
-        if ((((d * 2654435761u) >> 13) & 1u) != 0) ky[d] = -ky[d];
+        if ((((d * 2654435761u) >> 13) & 1u) != 0) {
+            ky[d] = -ky[d];
+#ifdef KV_TURN_V
+            vy[d] = -vy[d];
+#endif
+        }
     barrier();
     for (uint hh = 1; hh < HD; hh *= 2) {
         for (uint j = tid; j < HD / 2; j += 128) {
@@ -187,6 +195,11 @@ void main() {
             const float a = ky[i], b = ky[i + hh];
             ky[i] = a + b;
             ky[i + hh] = a - b;
+#ifdef KV_TURN_V
+            const float c = vy[i], e = vy[i + hh];
+            vy[i] = c + e;
+            vy[i + hh] = c - e;
+#endif
         }
         barrier();
     }

@@ -171,6 +171,9 @@
 #include "qkv_post_q8t.spv.h"
 #include "qkv_post_q4.spv.h"
 #include "qkv_post_q4t.spv.h"
+#include "qkv_post_q8tv.spv.h"
+#include "qkv_post_q4tv.spv.h"
+#include "attn_unturn.spv.h"
 #include "rmsnorm.spv.h"
 #include "split_gate.spv.h"
 #include "gate_mul.spv.h"
@@ -893,7 +896,7 @@ private:
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
-        P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(qkv_post_q8t, 13) P(qkv_post_q4, 13) P(qkv_post_q4t, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_q4, 7) P(attn_merge, 2) 
+        P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(qkv_post_q8t, 13) P(qkv_post_q4, 13) P(qkv_post_q4t, 13) P(qkv_post_q8tv, 13) P(qkv_post_q4tv, 13) P(attn_unturn, 1) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_q4, 7) P(attn_merge, 2) 
         P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf256, 5) P(attn_pf512, 5)
         P(attn_pf_q8, 7) P(attn_pf128_q8, 7) P(attn_pf256_q8, 7) P(attn_pf512_q8, 7)
         P(attn_pf256s, 5) P(attn_pf512s, 5) P(attn_pf256s_q8, 7) P(attn_pf512s_q8, 7)
@@ -1133,7 +1136,7 @@ private:
         }
         ts5::log_line("ts5: %s: weights %.2f GiB, KV cache %.2f GiB (%s%s, %d tokens), %s memory", name_.c_str(),
                 weight_bytes_ / 1073741824.0, 2.0 * (cache + scales) / 1073741824.0, kv_type_name(kv_),
-                kv_quantized(kv_) && kv_turn_setting() ? ", Q and K turned" : "", n_ctx_,
+                !kv_quantized(kv_) ? "" : kv_turn_v_setting() ? ", Q, K and V turned" : kv_turn_setting() ? ", Q and K turned" : "", n_ctx_,
                 x_.map ? "unified" : "device");
         return true;
     }
@@ -1536,6 +1539,18 @@ private:
             struct { uint32_t head_dim, n_head, n_tok, n_split; } mpc{HD, H, (uint32_t)n, n_split};
             dispatch("attn_merge", {&part_, &att_}, mpc, H, (uint32_t)n);
         }
+        // V turned in the cache (qkv_post_*tv): each head's output turned back.
+        if (turned(l) && kv_turn_v_setting()) {
+            struct { uint32_t head_dim, n_head; } upc{HD, H};
+            dispatch("attn_unturn", {&att_}, upc, H, (uint32_t)n);
+        }
+    }
+
+    // Whether layer l's cache turns Q and K (and V: kv_turn_v_setting()): a
+    // quantized cache, kv_turn_setting(), heads a power of two wide.
+    bool turned(int l) const {
+        const uint32_t HD = hp_.hd(l);
+        return kv_quantized(kv_) && kv_turn_setting() && (HD & (HD - 1)) == 0;
     }
 
     // How many workgroups share one KV head's query heads in attn: 1, or
@@ -1857,7 +1872,7 @@ private:
                 const Buf &ff = rope_turn_[swa ? 1 : 0];
                 if (kv_quantized(kv_))
                     dispatch(std::string(kv_ == KvType::Q4 ? "qkv_post_q4" : "qkv_post_q8") +
-                                 (kv_turn_setting() && (HD & (HD - 1)) == 0 ? "t" : ""), {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
+                                 (!turned(l) ? "" : kv_turn_v_setting() ? "tv" : "t"), {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
                 else
                     dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ff}, pc,

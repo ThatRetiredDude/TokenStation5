@@ -23,7 +23,7 @@ small enough to reason about.
 | Tokenizers | byte-level BPE (Qwen2, Llama 3 and Qwen3.5 pre-tokenizers, with Unicode's letter, mark and number classes from a generated table), SentencePiece (Llama 2, Gemma 3), Gemma 4's (BPE merges over code points, spaces as U+2581, split only at newlines) | Tekken's case-splitting pre-tokenizer (approximated now) |
 | Chat formats | ChatML, Llama 3, Mistral `[INST]` | Jinja templates, tool calls |
 | API | `/v1/chat/completions` (+ streaming), `/v1/completions`, `/v1/models`, `/health`; llama-server style `timings` | Anthropic `/v1/messages`, parallel slots |
-| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`; on Linux with Q and K turned per head first), 4-bit with the same scales (`TS5_KV=q4`, only when asked) | |
+| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`; on Linux with Q and K turned per head first), 4-bit with the same scales (`TS5_KV=q4`, only when asked); V turned too with `TS5_KV_TURN_V=1` | |
 | Long context | the model's own window; YaRN for Qwen 2.5 and Qwen3 past 32k (`TS5_YARN=1`) | YaRN for other families |
 
 Not in scope: training, multi-GPU, CUDA/ROCm, Python.
@@ -724,6 +724,20 @@ the test models (no large channels) the GPU and a CPU rounding the same way
 agree within about 1% of the largest logit at 300 tokens, and either moves
 the logits 7 to 10% from the 16-bit cache's; its answers are saved as
 `.q4t.ts5ref` (`.q4` without the turn).
+
+On the PS5 the 4-bit cache costs 5 to 12 times what the turned 8-bit one
+does (job CK, exact math against the 16-bit answers: Qwen3 14B 0.083,
+DeepSeek 14B 0.22). Rounding only one half at a time (job CL, the CPU's
+`TS5_CPU_KV_K`, `TS5_CPU_KV_V`), K and V cost about the same on DeepSeek
+14B (0.135 and 0.134), and V turned the same way before rounding costs half
+(0.072). `TS5_KV_TURN_V=1` (with the turn of Q and K) does that on the GPU:
+`qkv_post_q8tv` and `qkv_post_q4tv` turn V too, and `attn_unturn` turns
+each head of attention's output back, (1/HD) D H O, since the output is a
+sum of turned V rows. The CPU reference turns each V row before rounding and
+back after, the same in exact math; the two agree within 1% (4-bit) and
+0.2% (8-bit) on the test models, 6% apart when only the GPU turns. Its
+answers are saved as `.q4tv.ts5ref` and `.q8tv.ts5ref`. It is off by
+default until the PS5 measures it on every model.
 
 Qwen 2.5 and Qwen3 were trained on a 32,768-token window (Qwen3's files say
 40,960: the window and room to answer), and their model cards stretch it to

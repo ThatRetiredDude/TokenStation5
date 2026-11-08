@@ -126,13 +126,13 @@ static std::string cpu_kv_tag() {
 
 // 0 is f16, which the files saved before this field all are. 3 and 5: an
 // 8-bit and a 4-bit cache with Q and K turned (kv_turn_setting()), which
-// rounds other values.
+// rounds other values; 6 and 7 with V turned as well (kv_turn_v_setting()).
 uint32_t kv_code(KvType t) {
     if (!cpu_kv_tag().empty()) return 0x100;  // a measurement's: never anything else's
     switch (t) {
     case KvType::F16: return 0;
-    case KvType::Q8: return kv_turn_setting() ? 3 : 1;
-    case KvType::Q4: return kv_turn_setting() ? 5 : 4;
+    case KvType::Q8: return kv_turn_v_setting() ? 6 : kv_turn_setting() ? 3 : 1;
+    case KvType::Q4: return kv_turn_v_setting() ? 7 : kv_turn_setting() ? 5 : 4;
     default: return 2;
     }
 }
@@ -141,7 +141,8 @@ uint32_t kv_code(KvType t) {
 // per text (tag: its tokens' hash) for checks of a text's tokens.
 std::string ref_path(const std::string &model, KvType kv, const std::string &tag) {
     const std::string x = cpu_kv_tag();
-    const std::string kind = std::string(kv_type_name(kv)) + (kv_quantized(kv) && kv_turn_setting() ? "t" : "") + x;
+    const std::string kind = std::string(kv_type_name(kv)) + (kv_quantized(kv) && kv_turn_setting() ? "t" : "") +
+                             (kv_quantized(kv) && kv_turn_v_setting() ? "v" : "") + x;
     return model + (kv == KvType::F16 && x.empty() ? "" : "." + kind) + (tag.empty() ? "" : "." + tag) +
            ".ts5ref";
 }
