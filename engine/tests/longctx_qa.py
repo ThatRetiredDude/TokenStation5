@@ -116,11 +116,18 @@ def ask(url, model, doc, qs, max_tokens, think, timeout):
 
 
 def score(text, qs):
-    got = {}
+    got, literal = {}, []
     for line in text.splitlines():
         m = re.match(r"\s*\**\s*(\d+)\s*[:.)]\s*(.*)", line)
         if m and 1 <= int(m.group(1)) <= len(qs):
             got.setdefault(int(m.group(1)), m.group(2))
+        # Qwen3 8B once wrote the prompt's "N: answer" as it stands, every
+        # line "N: ...", in the questions' order.
+        m = re.match(r"\s*\**\s*N\s*[:.)]\s*(.*)", line)
+        if m:
+            literal.append(m.group(1))
+    if not got and len(literal) == len(qs):
+        got = {i + 1: a for i, a in enumerate(literal)}
     res = []
     for i, q in enumerate(qs):
         a = got.get(i + 1, "")
