@@ -27,7 +27,8 @@
 // half the bytes, loaded as words of 16 values plus its scales, and each
 // value word comes with its block's scale. With KV_Q4 as well (the _q4
 // builds) the values are 4-bit, the scales the same: a key is a quarter of
-// the bytes, a word of 4 values 16 bits (kv_word.glsl).
+// the bytes, a word of 4 values 16 bits (kv_word.glsl); with KV_V4 alone
+// (the _k8v4 builds) only V's.
 // With WIDE8 (attn_dec4_256w, attn_dec4_512w): each thread sums 8 value
 // columns instead of 4, so twice the groups take half the keys each, and a
 // tile's value loads take half the round trips (4 for heads of 256, 8 for
@@ -46,13 +47,8 @@ layout(std430, binding = 0) restrict readonly buffer Qbuf { vec4 Q4[]; };
 #ifdef KV_Q8
 #include "kv_word.glsl"
 layout(std430, binding = 1) restrict readonly buffer KC { KV16 kc[]; };  // 16 values a word
-#ifdef KV_Q4
-layout(std430, binding = 1) restrict readonly buffer KC2 { uint16_t kc2[]; };  // the same, 4 a word
-layout(std430, binding = 2) restrict readonly buffer VC { uint16_t vc[]; };    // 4 values a word
-#else
-layout(std430, binding = 1) restrict readonly buffer KC2 { uint kc2[]; };  // the same, 4 a word
-layout(std430, binding = 2) restrict readonly buffer VC { uint vc[]; };    // 4 values a word
-#endif
+layout(std430, binding = 1) restrict readonly buffer KC2 { KW_T kc2[]; };  // the same, 4 a word
+layout(std430, binding = 2) restrict readonly buffer VC { VW_T vc[]; };    // 4 values a word
 layout(std430, binding = 5) restrict readonly buffer KS { float16_t k_scale[]; };  // one per 32 values
 layout(std430, binding = 6) restrict readonly buffer VS { float16_t v_scale[]; };
 // Values a key word holds, and the cache's unit of scales.
@@ -220,7 +216,7 @@ void main() {
                     [[unroll]] for (uint r = 0; r < RM; r++) x[r] = 0.0;
                     [[unroll]] for (uint i = 0; i < WPL; i++) {
 #ifdef KV_Q8
-                        const vec4 k4 = kv4(kx[pp][i]) * ksl[pp][i / 8];
+                        const vec4 k4 = kk4(kx[pp][i]) * ksl[pp][i / 8];
 #else
                         const vec4 k4 = vec4(unpackHalf2x16(kx[pp][i].x), unpackHalf2x16(kx[pp][i].y));
 #endif
@@ -287,7 +283,7 @@ void main() {
         // A value word's 4 values; from the 8-bit (or 4-bit) cache, times their block's
         // scale (word w holds values 4 w .., in block 4 w / 32).
 #ifdef KV_Q8
-#define VALUES(w) (kv4(uint(vc[w])) * float(v_scale[(w) / (SB / 4)]))
+#define VALUES(w) (vv4(uint(vc[w])) * float(v_scale[(w) / (SB / 4)]))
 #else
 #define VALUES(w) vec4(vc[w])
 #endif

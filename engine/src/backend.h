@@ -9,17 +9,20 @@
 namespace ts5 {
 
 // How a KV cache holds keys and values: fp32 (the CPU's), f16, 8 bits per
-// value with an f16 scale per 32 (the largest magnitude over 127), or 4 bits
+// value with an f16 scale per 32 (the largest magnitude over 127), 4 bits
 // with an f16 scale per 32 (as Q4_0: the value of the largest magnitude over
-// -8, values -8 .. 7).
-enum class KvType { F32, F16, Q8, Q4 };
+// -8, values -8 .. 7), or K in 8 bits and V in 4 (K8V4).
+enum class KvType { F32, F16, Q8, Q4, K8V4 };
 const char *kv_type_name(KvType t);
+// "f16" (or 16), "q8" (8), "q4" (4), "k8v4", "f32" (32); otherwise for anything else.
+KvType kv_type_from(const std::string &name, KvType otherwise);
 // An 8- or 4-bit cache: values in blocks of 32 with a scale each.
-inline bool kv_quantized(KvType t) { return t == KvType::Q8 || t == KvType::Q4; }
-// Bits of one value (a quantized cache's scales come on top).
-inline uint64_t kv_bits(KvType t) {
-    return t == KvType::Q4 ? 4 : t == KvType::Q8 ? 8 : t == KvType::F16 ? 16 : 32;
+inline bool kv_quantized(KvType t) { return t == KvType::Q8 || t == KvType::Q4 || t == KvType::K8V4; }
+// Bits of one value of K, and of V (a quantized cache's scales come on top).
+inline uint64_t kv_k_bits(KvType t) {
+    return t == KvType::Q4 ? 4 : t == KvType::Q8 || t == KvType::K8V4 ? 8 : t == KvType::F16 ? 16 : 32;
 }
+inline uint64_t kv_v_bits(KvType t) { return t == KvType::K8V4 ? 4 : kv_k_bits(t); }
 
 class Backend {
 public:

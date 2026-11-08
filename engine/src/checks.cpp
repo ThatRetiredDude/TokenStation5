@@ -127,12 +127,14 @@ static std::string cpu_kv_tag() {
 // 0 is f16, which the files saved before this field all are. 3 and 5: an
 // 8-bit and a 4-bit cache with Q and K turned (kv_turn_setting()), which
 // rounds other values; 6 and 7 with V turned as well (kv_turn_v_setting()).
+// 8, 9 and 10: 8-bit K with 4-bit V, plain, turned, and with V turned too.
 uint32_t kv_code(KvType t) {
     if (!cpu_kv_tag().empty()) return 0x100;  // a measurement's: never anything else's
     switch (t) {
     case KvType::F16: return 0;
     case KvType::Q8: return kv_turn_v_setting() ? 6 : kv_turn_setting() ? 3 : 1;
     case KvType::Q4: return kv_turn_v_setting() ? 7 : kv_turn_setting() ? 5 : 4;
+    case KvType::K8V4: return kv_turn_v_setting() ? 10 : kv_turn_setting() ? 9 : 8;
     default: return 2;
     }
 }
@@ -257,10 +259,11 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     KvType ref_kv = gpu.kv_type();
     if (const char *e = getenv("TS5_CHECK_REF_KV"); e && *e) {
         const std::string v = e;
-        if (v == "f16" || v == "16") ref_kv = KvType::F16;
-        else if (v == "q8" || v == "8") ref_kv = KvType::Q8;
-        else if (v == "q4" || v == "4") ref_kv = KvType::Q4;
-        else ts5::log_line("ts5: TS5_CHECK_REF_KV=%s: not f16, q8 or q4, using the GPU's", e);
+        ref_kv = kv_type_from(v, KvType::F32);
+        if (ref_kv == KvType::F32) {
+            ts5::log_line("ts5: TS5_CHECK_REF_KV=%s: not f16, q8, q4 or k8v4, using the GPU's", e);
+            ref_kv = gpu.kv_type();
+        }
         if (ref_kv != gpu.kv_type())
             ts5::log_line("ts5: check against the answers with a cache in %s (the GPU keeps %s)", kv_type_name(ref_kv),
                           kv_type_name(gpu.kv_type()));
@@ -321,7 +324,9 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     // is off by far more than either. A 4-bit cache's step is 1/8 of the
     // block's largest value: each flipped rounding moves a value 16 times as
     // far.
-    const double bar = gpu.kv_type() == KvType::Q4 ? 1e-1 : gpu.kv_type() == KvType::Q8 ? 2e-2 : 5e-3;
+    const double bar = gpu.kv_type() == KvType::Q4 || gpu.kv_type() == KvType::K8V4 ? 1e-1
+                       : gpu.kv_type() == KvType::Q8                                 ? 2e-2
+                                                                                     : 5e-3;
     for (int i = 0; i < n; i++) r.over += pos_diff[i] > bar * max_ref;
     // On a text, whether a difference changes what the model would write: how
     // likely each side finds the text's own next token (perplexity), and how

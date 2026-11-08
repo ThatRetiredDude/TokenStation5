@@ -137,13 +137,14 @@ static void kv_override(const char *name, KvType &t) {
     const char *e = getenv(name);
     if (!e || !*e) return;
     const std::string v = e;
-    t = v == "q4" ? KvType::Q4 : v == "q8" ? KvType::Q8 : v == "f16" ? KvType::F16 : KvType::F32;
+    t = kv_type_from(v, KvType::F32);
 }
 
 class CpuBackend : public Backend {
 public:
     CpuBackend(const Model &m, int n_ctx, KvType kv_type)
-        : m_(m), hp_(m.hp), n_ctx_(n_ctx), kv_(kv_type), kv_k_(kv_type), kv_v_(kv_type) {
+        : m_(m), hp_(m.hp), n_ctx_(n_ctx), kv_(kv_type), kv_k_(kv_type == KvType::K8V4 ? KvType::Q8 : kv_type),
+          kv_v_(kv_type == KvType::K8V4 ? KvType::Q4 : kv_type) {
         kv_override("TS5_CPU_KV_K", kv_k_);
         kv_override("TS5_CPU_KV_V", kv_v_);
         turn_v_ = kv_quantized(kv_v_) && kv_turn_v_setting();
@@ -544,8 +545,17 @@ bool kv_turn_v_setting() {
     return on;
 }
 
+KvType kv_type_from(const std::string &v, KvType otherwise) {
+    if (v == "f16" || v == "16") return KvType::F16;
+    if (v == "q8" || v == "8") return KvType::Q8;
+    if (v == "q4" || v == "4") return KvType::Q4;
+    if (v == "k8v4") return KvType::K8V4;
+    if (v == "f32" || v == "32") return KvType::F32;
+    return otherwise;
+}
+
 const char *kv_type_name(KvType t) {
-    return t == KvType::Q4 ? "q4" : t == KvType::Q8 ? "q8" : t == KvType::F16 ? "f16" : "f32";
+    return t == KvType::K8V4 ? "k8v4" : t == KvType::Q4 ? "q4" : t == KvType::Q8 ? "q8" : t == KvType::F16 ? "f16" : "f32";
 }
 
 }  // namespace ts5

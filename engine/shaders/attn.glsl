@@ -6,7 +6,7 @@
 // workgroup y takes one slice of the keys and writes a partial result
 // (unnormalized output, max score, sum of weights) that attn_merge combines.
 // The cache is f16, or with KV_Q8 8-bit values with an f16 scale per 32
-// (attn_q8.comp), or with KV_Q4 as well 4-bit ones, 4 to a 16-bit word, with
+// (attn_q8.comp), or with KV_Q4 as well 4-bit ones (KV_V4: V only), 4 to a 16-bit word, with
 // the same scales (attn_q4.comp). A sliding layer (win > 0) sees each query's last win keys,
 // its own included, from k_lo on (the first any of them sees), and keeps key
 // p in slot p % ring of its ring (ring > 0). Each score is the sum of TPS
@@ -22,16 +22,11 @@ layout(local_size_x = 128) in;
 
 layout(std430, binding = 0) readonly buffer Qbuf { float Q[]; };
 #ifdef KV_Q8
-#ifdef KV_Q4
-layout(std430, binding = 1) readonly buffer KC { uint16_t kc[]; };  // 4 values a word
-layout(std430, binding = 2) readonly buffer VC { uint16_t vc[]; };
-#else
-layout(std430, binding = 1) readonly buffer KC { uint kc[]; };  // 4 values a word
-layout(std430, binding = 2) readonly buffer VC { uint vc[]; };
-#endif
+#include "kv_word.glsl"
+layout(std430, binding = 1) readonly buffer KC { KW_T kc[]; };  // 4 values a word
+layout(std430, binding = 2) readonly buffer VC { VW_T vc[]; };
 layout(std430, binding = 5) readonly buffer KS { float16_t k_scale[]; };  // one per 32 values
 layout(std430, binding = 6) readonly buffer VS { float16_t v_scale[]; };
-#include "kv_word.glsl"
 #else
 layout(std430, binding = 1) readonly buffer KC { f16vec4 kc[]; };
 layout(std430, binding = 2) readonly buffer VC { f16vec4 vc[]; };
@@ -106,7 +101,7 @@ void main() {
             const uint src = (pc.cache_off + slot * kv_stride + kh * HD) / 4 + e % HD4;
 #ifdef KV_Q8
             const uint sc_i = src / 8;  // src counts 4 values
-            const vec4 k = kv4(uint(kc[src])) * float(k_scale[sc_i]), v = kv4(uint(vc[src])) * float(v_scale[sc_i]);
+            const vec4 k = kk4(uint(kc[src])) * float(k_scale[sc_i]), v = vv4(uint(vc[src])) * float(v_scale[sc_i]);
 #else
             const vec4 k = vec4(kc[src]), v = vec4(vc[src]);
 #endif

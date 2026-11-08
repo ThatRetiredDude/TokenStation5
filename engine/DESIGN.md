@@ -23,7 +23,7 @@ small enough to reason about.
 | Tokenizers | byte-level BPE (Qwen2, Llama 3 and Qwen3.5 pre-tokenizers, with Unicode's letter, mark and number classes from a generated table), SentencePiece (Llama 2, Gemma 3), Gemma 4's (BPE merges over code points, spaces as U+2581, split only at newlines) | Tekken's case-splitting pre-tokenizer (approximated now) |
 | Chat formats | ChatML, Llama 3, Mistral `[INST]` | Jinja templates, tool calls |
 | API | `/v1/chat/completions` (+ streaming), `/v1/completions`, `/v1/models`, `/health`; llama-server style `timings` | Anthropic `/v1/messages`, parallel slots |
-| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`; on Linux with Q and K turned per head first), 4-bit with the same scales (`TS5_KV=q4`, only when asked); V turned too with `TS5_KV_TURN_V=1` | |
+| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`; on Linux with Q and K turned per head first), 4-bit with the same scales (`TS5_KV=q4`, only when asked); V turned too with `TS5_KV_TURN_V=1`; 8-bit K with 4-bit V (`TS5_KV=k8v4`) | |
 | Long context | the model's own window; YaRN for Qwen 2.5 and Qwen3 past 32k (`TS5_YARN=1`) | YaRN for other families |
 
 Not in scope: training, multi-GPU, CUDA/ROCm, Python.
@@ -738,6 +738,20 @@ back after, the same in exact math; the two agree within 1% (4-bit) and
 0.2% (8-bit) on the test models, 6% apart when only the GPU turns. Its
 answers are saved as `.q4tv.ts5ref` and `.q8tv.ts5ref`. It is off by
 default until the PS5 measures it on every model.
+
+On Coder 14B (job CL) K in 4 bits costs more than V (median 0.023 against
+0.015 of the largest logit), and 8-bit K with V in 4 bits turned costs
+0.058 at worst against 4 bits' 0.161 (DeepSeek 14B: 0.109 against 0.223).
+`TS5_KV=k8v4` is that cache: K as the 8-bit cache keeps it, V as the 4-bit
+one, the same scales, 0.81 bytes a value against q8's 1.06 (1.31 times its
+tokens; q4 1.89). The shaders read K and V words through `kk4` and `vv4`
+(`kv_word.glsl`: `KV_Q4` makes both 4-bit, `KV_V4` only V), so the `_k8v4`
+builds of every attention kernel and of `qkv_post` differ from the others
+only in those loads; the `_q8` and `_q4` builds compile to the same
+logits as before, byte for byte. Its answers are `.k8v4t.ts5ref`
+(`.k8v4tv` with V turned, `.k8v4` plain), its check bar 4 bits'. Like q4 it
+is only used when asked, and `-c auto` takes q8 where q8 reaches the whole
+context.
 
 Qwen 2.5 and Qwen3 were trained on a 32,768-token window (Qwen3's files say
 40,960: the window and room to answer), and their model cards stretch it to
