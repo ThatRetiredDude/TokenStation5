@@ -46,6 +46,16 @@ static bool per_kind(const Gguf &g, const HParams &hp, const std::string &key, i
 bool Model::open(const std::string &path, std::string &err) {
     if (!gguf.open(path, err)) return false;
     hp.arch = gguf.get_str("general.architecture");
+    // Mixture-of-experts files (Mixtral, Qwen3 30B A3B, gpt-oss, DeepSeek V3)
+    // replace the feed-forward with many experts and a router, which the
+    // engine doesn't run. Some carry an architecture name it otherwise reads
+    // (Mixtral's is "llama"), so the expert count is checked for every one.
+    const int64_t experts = gguf.get_int(hp.arch + ".expert_count", 0);
+    if (experts > 0 || hp.arch.find("moe") != std::string::npos) {
+        err = "mixture-of-experts models are not supported yet";
+        if (experts > 0) err += " (this one has " + std::to_string(experts) + " experts)";
+        return false;
+    }
     if (!supported_arch(hp.arch)) {
         err = "architecture '" + hp.arch + "' is not supported yet";
         return false;
@@ -69,10 +79,6 @@ bool Model::open(const std::string &path, std::string &err) {
             hp.ssm_v_heads % hp.ssm_k_heads != 0 ||
             gguf.get_int(a + "ssm.inner_size", 0) != (int64_t)hp.ssm_v_heads * hp.ssm_state) {
             err = "qwen35: linear attention hyperparameters missing or inconsistent";
-            return false;
-        }
-        if (gguf.has(a + "expert_count") && gguf.get_int(a + "expert_count", 0) > 0) {
-            err = "qwen35: mixture-of-experts models are not supported";
             return false;
         }
         // Which layers are linear: a list in the file, else all but every
@@ -126,10 +132,6 @@ bool Model::open(const std::string &path, std::string &err) {
         if (gguf.get_int(a + "attention.shared_kv_layers", 0) > 0 ||
             gguf.get_int(a + "embedding_length_per_layer_input", 0) > 0) {
             err = "gemma4: shared KV layers and per-layer embeddings (E2B, E4B) are not supported yet";
-            return false;
-        }
-        if (gguf.has(a + "expert_count") && gguf.get_int(a + "expert_count", 0) > 0) {
-            err = "gemma4: mixture-of-experts models are not supported";
             return false;
         }
     }

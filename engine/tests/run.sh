@@ -544,6 +544,13 @@ rm -f "$work"/qwen3-Q4_0.gguf.ts5ref.v1-*
 # system's reserve is refused before it takes any, with how many tokens would.
 { "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 100000 2>&1 > /dev/null || true; } |
     grep "not enough memory for a 100000-token check: the two sides' logits take about [0-9.]* GiB of RAM, [0-9.]* GiB is free and [0-9.]* GiB is kept for the system (TS5_SYSTEM_RESERVE_GIB); about [0-9]* tokens would fit"
+echo "== a mixture-of-experts file is refused as one, also under an architecture name the engine reads (Mixtral's is llama)"
+moe="$work/llama-experts.gguf"
+[ -s "$moe" ] || python3 "$here/make_test_model.py" --arch llama --quant F32 --layers 1 --experts 8 \
+    --vocab "$work/ggml-vocab-qwen2.gguf" "$moe" > /dev/null
+{ "$ts5" run -m "$moe" -p hi -n 1 2>&1 > /dev/null || true; } |
+    grep "mixture-of-experts models are not supported yet (this one has 8 experts)"
+! "$ts5" run -m "$moe" -p hi -n 1 > /dev/null 2>&1 || unexpected $LINENO
 echo "== memory: a load that would leave the system less than its reserve is refused, with the numbers"
 # (The refused runs exit 1, which pipefail would take for the grep's.)
 { TS5_SYSTEM_RESERVE_GIB=100000 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null || true; } |

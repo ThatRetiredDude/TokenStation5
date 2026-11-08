@@ -148,6 +148,8 @@ def main():
     ap.add_argument("--ssm-v-heads", type=int, default=4, help="qwen35: their value heads (a multiple of the keys')")
     ap.add_argument("--decay", type=float, default=1.0,
                     help="qwen35: scale on the linear layers' decay (A), smaller for a longer memory")
+    ap.add_argument("--experts", type=int, default=0,
+                    help="write <arch>.expert_count (the weights stay dense): a mixture-of-experts file's header")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--pad-vocab", type=int, default=0,
                     help="extra embedding and output rows past the token list, as released models pad")
@@ -182,6 +184,8 @@ def main():
     # they leave out.
     w.add_block_count(a.layers + (1 if a.arch == "qwen35" else 0))
     w.add_feed_forward_length(a.ff)
+    if a.experts:
+        w.add_key_value(f"{a.arch}.expert_count", a.experts, GGUFValueType.UINT32)
     w.add_head_count(a.heads)
     if a.arch != "gemma4":
         w.add_head_count_kv(a.kv_heads)
