@@ -30,7 +30,7 @@ static PFN_vkGetInstanceProcAddr ts5_vk_entry() {
 
 uint64_t system_reserve() {
     const char *e = getenv("TS5_SYSTEM_RESERVE_GIB");
-    const double g = e && *e ? std::max(0.0, atof(e)) : 2.0;
+    const double g = e && *e ? std::max(0.0, atof(e)) : 1.5;
     return (uint64_t)(g * 1073741824.0);
 }
 

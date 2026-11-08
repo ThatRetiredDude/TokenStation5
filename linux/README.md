@@ -142,22 +142,25 @@ GiB, which the packages and `install.sh` do on a PS5 when no limit is set yet.
 It's a limit, not a reservation: Linux and Steam keep using the memory, and
 TokenStation sizes each model to what the driver says is free when it loads.
 `set 11` (any whole GiB up to all but 2) keeps a fixed amount for other apps. TokenStation itself never takes more than the GPU driver's
-budget (what's free), and it always leaves 2 GiB of the system's RAM free
+budget (what's free), and it always leaves 1.5 GiB of the system's RAM free
 for Linux, the desktop and the app: a model, its context and a helper model
 are sized to what is available less that, and a load that wouldn't leave it
 is refused with the numbers ("not enough memory: the weights and buffers
 take 8.6 GiB and ..., 7.9 GiB is free"). A GPU allocation that leaves
 Linux nothing can't be swapped out, and the OOM killer then stops
-everything else. `ts5 check` keeps the same 2 GiB: a check whose two sets
+everything else. `ts5 check` keeps the same 1.5 GiB: a check whose two sets
 of scores and CPU reference wouldn't leave it is refused before it starts,
 with how many tokens would fit (a 14B at 2,048 tokens needs about 3.8 GiB
-beside the model; 512 tokens need about 1.1 GiB). `TS5_SYSTEM_RESERVE_GIB` changes the 2 GiB;
+beside the model; 512 tokens need about 1.1 GiB). `TS5_SYSTEM_RESERVE_GIB` changes the 1.5 GiB;
 `TS5_GPU_MEMORY_GIB` overrides what it thinks it has.
 
 With about 11 GiB for models (an idle PS5 under Debian has about 13.2 GiB
-available, less the 2 GiB kept free), Longest context at "As much as fits",
-no helper, measured on a PS5 (the 16-bit cache, or 8 bits where Room for
-longer contexts is Automatic and a model would get under 24,576 tokens):
+available, less what's kept free), Longest context at "As much as fits",
+no helper, measured on a PS5 with 2 GiB kept free, the default until
+2026-11-08 (the 16-bit cache, or 8 bits where Room for longer contexts is
+Automatic and a model would get under 24,576 tokens). With today's 1.5 GiB
+the models that memory limits get more: in 16-bit Qwen 3 14B 16,384,
+DeepSeek and Coder 14B 13,312, Gemma 3 12B 48,128, Llama 3.1 8B 53,248.
 
 | Model | Quant | Context | Cache |
 | --- | --- | ---: | --- |

@@ -72,10 +72,13 @@ struct VkContext {
 };
 
 // System RAM models leave free on Linux with a GPU that shares it
-// (TS5_SYSTEM_RESERVE_GIB, default 2): Linux, the desktop, the app and a
+// (TS5_SYSTEM_RESERVE_GIB, default 1.5): Linux, the desktop, the app and a
 // GPU check's CPU reference live there, and a GPU allocation that leaves
 // them none makes the OOM killer stop everything else (the PS5 froze
-// that way with a 14B model and a helper).
+// that way with a 14B model and a helper). 1.5 rather than 2 since the
+// PS5 measured it (2026-11-08): the memory-limited models got 16 to 23%
+// more context, and free memory stayed above the reserve on long prompts
+// once every buffer was counted before the context was sized.
 uint64_t system_reserve();
 
 // Makes the instance and device on physical device `index`; with
