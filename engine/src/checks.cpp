@@ -283,7 +283,6 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     // is off by far more than either.
     const double bar = gpu.kv_type() == KvType::Q8 ? 2e-2 : 5e-3;
     for (int i = 0; i < n; i++) r.over += pos_diff[i] > bar * max_ref;
-    r.pass = std::isfinite(r.rel) && r.rel < bar;
     // On a text, whether a difference changes what the model would write: how
     // likely each side finds the text's own next token (perplexity), and how
     // far the GPU's whole distribution is from the CPU's (KL divergence, CPU
@@ -312,6 +311,20 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
         r.ppl_cpu = std::exp(nll_f / (n - 1));
         r.kl_mean = kl_sum / (n - 1);
     }
+    r.pass = std::isfinite(r.rel) && r.rel < bar;
+    // Past 512 tokens, rounding noise alone reaches the bar now and then: on
+    // the PS5, Qwen3 8B in exact 32-bit math was 0.52% off at one position of
+    // 2,048, the same top token everywhere, KL 1e-7 (16-bit math there: 0.68%,
+    // 4 positions, 2 top tokens and KL 7.8e-6). So a long check also passes
+    // when the positions over the bar are rare (one in 1,024), none of them
+    // twice the bar, the top token differs at no more than one in 1,024, and,
+    // on a text, the distributions agree (KL under 1e-6 on average). A wrong
+    // kernel is off everywhere, by far more.
+    if (!r.pass && n > 512 && std::isfinite(r.rel)) {
+        const int rare = std::max(1, n / 1024);
+        r.by_length = r.rel < 2 * bar && r.over <= rare && n - r.same_top <= rare && (!r.on_text || r.kl_mean < 1e-6);
+        r.pass = r.by_length;
+    }
     return true;
 }
 
@@ -330,8 +343,9 @@ std::string check_line(const std::string &model, const CheckResult &r) {
     char line[1024];
     snprintf(line, sizeof line,
              "ts5 check: %s, %d tokens: max |diff| %.3g (%.2g of the largest logit) at token %d, same top token at "
-             "%d/%d, over the bar at %d%s, %s %.0f ms, %s: %s",
-             model.c_str(), r.n, r.max_diff, r.rel, r.worst, r.same_top, r.n, r.over, text.c_str(),
+             "%d/%d, over the bar at %d%s%s, %s %.0f ms, %s: %s",
+             model.c_str(), r.n, r.max_diff, r.rel, r.worst, r.same_top, r.n, r.over,
+             r.by_length ? " (rare, and they change nothing: noise at this length)" : "", text.c_str(),
              r.backend.c_str(), r.gpu_ms, cpu.c_str(), r.pass ? "PASS" : "FAIL");
     return line;
 }

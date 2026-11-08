@@ -721,7 +721,15 @@ llama.cpp. The Vulkan backend is checked against both:
   cache; 4 bytes x vocabulary x tokens) the first
   time, so later checks of the same file run only the GPU; `--fresh` runs the
   CPU again. The file records the model's size and a hash of its first MiB,
-  and a version that changes when the reference's math does.
+  and a version that changes when the reference's math does. It passes
+  under 0.5% of the largest logit (2% with an 8-bit cache). Past 512
+  tokens rounding noise alone reaches that bar now and then (on the PS5,
+  Qwen3 8B in exact 32-bit math: 0.52% at one position of 2,048, every top
+  token the same, KL 1e-7), so a longer check also passes when the
+  positions over the bar are rare (one in 1,024) and under twice it, the
+  top token differs at no more than as many, and on a text the KL is under
+  1e-6 on average; the line says so. 16-bit prompt math on the same 2,048
+  tokens still fails (0.68%, 4 positions, KL 7.8e-6).
 - `tests/tokenizer_test.py` matches `llama-tokenize` on 15 strings (code,
   contractions, digits, CJK, emoji, special tokens) for Qwen2, Llama 3 and
   SentencePiece vocabularies.
