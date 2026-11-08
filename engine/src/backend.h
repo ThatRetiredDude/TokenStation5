@@ -61,6 +61,10 @@ Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv = KvType::F32);
 // unset, empty or auto, so an auto-fit context (-c auto) may take q8 where f16
 // is short (kQ8Below).
 KvType kv_type_setting(bool *automatic = nullptr);
+// TS5_KV_TURN=1 (an experiment, off by default): an 8-bit cache turns Q and K
+// per head (fixed signs, then Walsh-Hadamard) before rounding K, which keeps
+// every score and spreads K's few large channels. Both backends do it.
+bool kv_turn_setting();
 // With TS5_KV automatic, an auto-fit context whose f16 cache holds fewer
 // tokens than this (and less than the model's training context) takes a q8
 // cache, about twice as long. On the PS5 that is the 14Bs (10,240 to 16,384

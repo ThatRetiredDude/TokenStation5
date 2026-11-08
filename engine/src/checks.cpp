@@ -226,8 +226,24 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     r.gpu_ms = now_ms() - t;
     // Saved answers are the file's own window's and RoPE's: a test window,
     // or positions stretched by YaRN, need their own.
-    const bool own = m.hp.swa_test || m.hp.yarn_factor > 1.f;
-    r.saved = !fresh && !own && load_ref(m.gguf.path, n, nv, gpu.kv_type(), tag, ref);
+    bool own = m.hp.swa_test || m.hp.yarn_factor > 1.f;
+    // TS5_CHECK_REF_KV=f16 (or q8): the reference keeps its cache in that type
+    // instead of the GPU's, e.g. how far an 8-bit cache on the GPU is from a
+    // 16-bit one. The pass bar is still the GPU's cache type's.
+    KvType ref_kv = gpu.kv_type();
+    if (const char *e = getenv("TS5_CHECK_REF_KV"); e && *e) {
+        const std::string v = e;
+        if (v == "f16" || v == "16") ref_kv = KvType::F16;
+        else if (v == "q8" || v == "8") ref_kv = KvType::Q8;
+        else ts5::log_line("ts5: TS5_CHECK_REF_KV=%s: not f16 or q8, using the GPU's", e);
+        if (ref_kv != gpu.kv_type())
+            ts5::log_line("ts5: check against the answers with a cache in %s (the GPU keeps %s)", kv_type_name(ref_kv),
+                          kv_type_name(gpu.kv_type()));
+    }
+    // A turned 8-bit cache (TS5_KV_TURN) rounds other values than the saved
+    // 8-bit answers did: its reference runs afresh and isn't saved.
+    own = own || (ref_kv == KvType::Q8 && kv_turn_setting());
+    r.saved = !fresh && !own && load_ref(m.gguf.path, n, nv, ref_kv, tag, ref);
     bool ok = true;
     if (!r.saved) {
         if (!check_fits(fixed + (uint64_t)n * cpu_ref_per_token(m.hp), mem_available(), n, n_fit,
@@ -242,12 +258,12 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
         // and its YaRN stretch, which its context set.
         cpu_model.hp.swa_window = m.hp.swa_window;
         cpu_model.hp.yarn_factor = m.hp.yarn_factor;
-        std::unique_ptr<Backend> cpu(make_cpu_backend(cpu_model, n, gpu.kv_type()));
+        std::unique_ptr<Backend> cpu(make_cpu_backend(cpu_model, n, ref_kv));
         if (progress) progress("running on the CPU");
         t = now_ms();
         ok = cpu->forward(toks.data(), n, 0, ref.data(), true, err);
         r.cpu_ms = now_ms() - t;
-        if (ok && !own) save_ref(m.gguf.path, n, nv, gpu.kv_type(), tag, ref);
+        if (ok && !own) save_ref(m.gguf.path, n, nv, ref_kv, tag, ref);
     }
     if (!ok) return false;
     double max_ref = 0;

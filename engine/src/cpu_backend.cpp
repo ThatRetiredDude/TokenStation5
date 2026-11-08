@@ -90,6 +90,22 @@ void round_kv(KvType t, float *v, int n) {
     }
 }
 
+// kv_turn_setting(): one head through fixed signs and the Walsh-Hadamard
+// butterflies (n a power of two), as qkv_post_q8t does. Q is also scaled by
+// 1/n, so Q.K stays the same.
+static void kv_turn(float *v, int n, bool is_q) {
+    for (int i = 0; i < n; i++)
+        if (((uint32_t)i * 2654435761u >> 13) & 1) v[i] = -v[i];
+    for (int h = 1; h < n; h *= 2)
+        for (int i = 0; i < n; i += 2 * h)
+            for (int j = i; j < i + h; j++) {
+                const float a = v[j], b = v[j + h];
+                v[j] = a + b, v[j + h] = a - b;
+            }
+    if (is_q)
+        for (int i = 0; i < n; i++) v[i] *= 1.0f / (float)n;
+}
+
 class CpuBackend : public Backend {
 public:
     CpuBackend(const Model &m, int n_ctx, KvType kv_type) : m_(m), hp_(m.hp), n_ctx_(n_ctx), kv_(kv_type) {
@@ -279,6 +295,10 @@ private:
                 rope(&kt[hh * HD], RD, pos, hp_.rope_neox, turn);
                 if (hp_.v_norm) rmsnorm(&vt[hh * HD], nullptr, HD, hp_.rms_eps);
             }
+            if (kv_ == KvType::Q8 && kv_turn_setting() && (HD & (HD - 1)) == 0) {
+                for (int hh = 0; hh < H; hh++) kv_turn(&qt[hh * HD], HD, true);
+                for (int hh = 0; hh < HKV; hh++) kv_turn(&kt[hh * HD], HD, false);
+            }
             round_kv(kv_, kt, KV);
             round_kv(kv_, vt, KV);
             memcpy(kl + (size_t)pos * KV, kt, KV * 4);
@@ -458,6 +478,14 @@ private:
 }  // namespace
 
 Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv) { return new CpuBackend(m, n_ctx, kv); }
+
+bool kv_turn_setting() {
+    static const bool on = [] {
+        const char *e = getenv("TS5_KV_TURN");
+        return e && atoi(e) != 0;
+    }();
+    return on;
+}
 
 const char *kv_type_name(KvType t) { return t == KvType::Q8 ? "q8" : t == KvType::F16 ? "f16" : "f32"; }
 

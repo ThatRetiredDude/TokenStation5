@@ -123,7 +123,11 @@ void main() {
             else y = (d & 1u) == 0 ? sh[d] * c - sh[d + 1] * s : sh[d - 1] * s + sh[d] * c;
         }
         if (is_q) {
+#ifdef KV_TURN
+            ky[d] = y;
+#else
             Q[base + d] = y;
+#endif
         } else {
             const float v = vsh[d];
 #ifdef KV_Q8
@@ -136,6 +140,27 @@ void main() {
 #endif
         }
     }
+#ifdef KV_TURN
+    // Q and K, after RoPE, through the same fixed signs and Walsh-Hadamard
+    // butterflies (no 1/sqrt(n)): K's large channels spread over the whole
+    // head before the 8-bit cache rounds it in blocks of 32. Q is also scaled
+    // by 1/HD, a power of two, so every score Q.K stays the same.
+    barrier();
+    for (uint d = tid; d < HD; d += 128)
+        if ((((d * 2654435761u) >> 13) & 1u) != 0) ky[d] = -ky[d];
+    barrier();
+    for (uint hh = 1; hh < HD; hh *= 2) {
+        for (uint j = tid; j < HD / 2; j += 128) {
+            const uint i = (j / hh) * 2 * hh + (j % hh);
+            const float a = ky[i], b = ky[i + hh];
+            ky[i] = a + b;
+            ky[i + hh] = a - b;
+        }
+        barrier();
+    }
+    if (is_q)
+        for (uint d = tid; d < HD; d += 128) Q[base + d] = ky[d] * (1.0 / float(HD));
+#endif
 #ifdef KV_Q8
     if (!is_q) {  // the same for the whole workgroup
         barrier();

@@ -356,6 +356,14 @@ LP_NATIVE_VECTOR_WIDTH=1024 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --
 LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk "${g4[@]}"
 LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 TS5_ATTN_DEC=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 \
     --backend vk --ntok 40 --step "${g4[@]}"
+echo "== 8-bit KV cache with Q and K turned (TS5_KV_TURN=1): the same scores, so as close to the CPU's fp32 cache"
+# The turn keeps every Q.K, so the fp32 reference (which doesn't turn) still
+# holds: heads of 64 to 512, the prompt's kernels and one token a call.
+TS5_KV=q8 TS5_KV_TURN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 300 "${shapes[@]}"
+TS5_KV=q8 TS5_KV_TURN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 60 --step \
+    "${shapes[@]}" "${h64[@]}"
+LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 TS5_KV_TURN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 \
+    --backend vk --ntok 40 --step "${g4[@]}"
 
 echo "== attn_pf256s and attn_pf512s (the default; TS5_ATTN_PF_SLIM=0 the wider builds): the same logits as attn_pf256 and attn_pf512, byte for byte"
 # The builds with fewer registers (tiles of 16 keys; no tile loaded ahead)
@@ -575,6 +583,13 @@ rm -f "$work"/qwen3-Q4_0.gguf*.ts5ref
 ! "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep -q perplexity || unexpected $LINENO  # test tokens: no next-token measure
 TS5_KV=q8 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
 TS5_KV=q8 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
+# TS5_CHECK_REF_KV=f16: the GPU's 8-bit cache against the 16-bit answers
+# saved above, with no CPU run. A turned cache's reference turns too, and its
+# answers aren't saved, so the CPU runs again.
+TS5_KV=q8 TS5_CHECK_REF_KV=f16 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null |
+    grep "cpu answers saved earlier: PASS$"
+TS5_KV=q8 TS5_KV_TURN=1 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
+TS5_KV=q8 TS5_KV_TURN=1 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
 # On a text's tokens (-p): answers saved apart from the test tokens', then used again.
 txt=$(head -c 3000 "$engine/DESIGN.md")
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "$txt" 2> /dev/null |

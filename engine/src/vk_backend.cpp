@@ -153,6 +153,7 @@
 #include "mmbq_q8_0.spv.h"
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
+#include "qkv_post_q8t.spv.h"
 #include "rmsnorm.spv.h"
 #include "split_gate.spv.h"
 #include "gate_mul.spv.h"
@@ -875,7 +876,7 @@ private:
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
-        P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
+        P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(qkv_post_q8t, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
         P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf256, 5) P(attn_pf512, 5)
         P(attn_pf_q8, 7) P(attn_pf128_q8, 7) P(attn_pf256_q8, 7) P(attn_pf512_q8, 7)
         P(attn_pf256s, 5) P(attn_pf512s, 5) P(attn_pf256s_q8, 7) P(attn_pf512s_q8, 7)
@@ -1829,7 +1830,7 @@ private:
                 const Buf &nq = L.q_norm ? W(L.q_norm) : dummy_, &nk = L.k_norm ? W(L.k_norm) : dummy_;
                 const Buf &ff = rope_turn_[swa ? 1 : 0];
                 if (kv_ == KvType::Q8)
-                    dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
+                    dispatch(kv_turn_setting() && (HD & (HD - 1)) == 0 ? "qkv_post_q8t" : "qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
                 else
                     dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ff}, pc,
