@@ -539,8 +539,13 @@ bool kv_turn_setting() {
 
 bool kv_turn_v_setting() {
     static const bool on = [] {
-        const char *e = getenv("TS5_KV_TURN_V");
-        return e && *e && atoi(e) != 0 && kv_turn_setting();
+        if (!kv_turn_setting()) return false;
+        if (const char *e = getenv("TS5_KV_TURN_V"); e && *e) return atoi(e) != 0;
+#ifdef TS5_PS5
+        return false;  // as the turn of Q and K: measured on Linux
+#else
+        return true;
+#endif
     }();
     return on;
 }

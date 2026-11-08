@@ -23,7 +23,7 @@ small enough to reason about.
 | Tokenizers | byte-level BPE (Qwen2, Llama 3 and Qwen3.5 pre-tokenizers, with Unicode's letter, mark and number classes from a generated table), SentencePiece (Llama 2, Gemma 3), Gemma 4's (BPE merges over code points, spaces as U+2581, split only at newlines) | Tekken's case-splitting pre-tokenizer (approximated now) |
 | Chat formats | ChatML, Llama 3, Mistral `[INST]` | Jinja templates, tool calls |
 | API | `/v1/chat/completions` (+ streaming), `/v1/completions`, `/v1/models`, `/health`; llama-server style `timings` | Anthropic `/v1/messages`, parallel slots |
-| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`; on Linux with Q and K turned per head first), 4-bit with the same scales (`TS5_KV=q4`, only when asked); V turned too with `TS5_KV_TURN_V=1`; 8-bit K with 4-bit V (`TS5_KV=k8v4`) | |
+| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`; on Linux with Q and K turned per head first), 4-bit with the same scales (`TS5_KV=q4`, only when asked); on Linux V turned too (`TS5_KV_TURN_V=0` keeps it as it comes); 8-bit K with 4-bit V (`TS5_KV=k8v4`) | |
 | Long context | the model's own window; YaRN for Qwen 2.5 and Qwen3 past 32k (`TS5_YARN=1`) | YaRN for other families |
 
 Not in scope: training, multi-GPU, CUDA/ROCm, Python.
@@ -736,8 +736,22 @@ each head of attention's output back, (1/HD) D H O, since the output is a
 sum of turned V rows. The CPU reference turns each V row before rounding and
 back after, the same in exact math; the two agree within 1% (4-bit) and
 0.2% (8-bit) on the test models, 6% apart when only the GPU turns. Its
-answers are saved as `.q4tv.ts5ref` and `.q8tv.ts5ref`. It is off by
-default until the PS5 measures it on every model.
+answers are saved as `.q4tv.ts5ref` and `.q8tv.ts5ref`.
+
+On the PS5 (job CM) it is the Linux default since it helps or does nothing
+everywhere it was measured, at under 1% of the speed. In exact math against
+the 16-bit answers, the 8-bit cache's worst position goes from 0.019 to
+0.016 (DeepSeek 14B), 0.016 to 0.0074 (Coder 14B), 0.018 to 0.014 (Qwen3 8B)
+and 0.0070 to 0.0064 (Qwen3 14B), medians unchanged; the 4-bit cache's from
+0.22 to 0.14 (DeepSeek), 0.16 to 0.087 (Coder 14B) and 0.13 to 0.11 (Qwen3
+8B), while Qwen3 14B, whose 4-bit loss is in K, stays at 0.083 to 0.087.
+The GPU lands where the exact math does (8 bits against 16: 0.0056 to
+0.012). Long-document questions with 4 bits and YaRN at 42k to 50k tokens:
+DeepSeek 14B 3 to 5 of 11, Coder 14B 8 to 10, Qwen3 14B 8 and 8; DeepSeek
+at 25,600 tokens 8 to 9, its 8-bit score. Qwen3 14B with a 4-bit cache
+writes 39.7 instead of 40.0 tok/s and reads a 512-token prompt at 480
+instead of 483 (`attn_unturn` 0.4% of generation). `TS5_KV_TURN_V=0` keeps
+V as it comes (`.q8t`, `.q4t`); the store title keeps it off.
 
 On Coder 14B (job CL) K in 4 bits costs more than V (median 0.023 against
 0.015 of the largest logit), and 8-bit K with V in 4 bits turned costs
@@ -748,8 +762,8 @@ tokens; q4 1.89). The shaders read K and V words through `kk4` and `vv4`
 (`kv_word.glsl`: `KV_Q4` makes both 4-bit, `KV_V4` only V), so the `_k8v4`
 builds of every attention kernel and of `qkv_post` differ from the others
 only in those loads; the `_q8` and `_q4` builds compile to the same
-logits as before, byte for byte. Its answers are `.k8v4t.ts5ref`
-(`.k8v4tv` with V turned, `.k8v4` plain), its check bar 4 bits'. Like q4 it
+logits as before, byte for byte. Its answers are `.k8v4tv.ts5ref`
+(`.k8v4t` with V as it comes, `.k8v4` plain), its check bar 4 bits'. Like q4 it
 is only used when asked, and `-c auto` takes q8 where q8 reaches the whole
 context.
 

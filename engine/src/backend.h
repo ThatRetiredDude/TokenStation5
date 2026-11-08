@@ -78,7 +78,8 @@ KvType kv_type_setting(bool *automatic = nullptr);
 // with TS5_KV_TURN=1. Both backends do it.
 bool kv_turn_setting();
 // Whether such a cache turns V the same way too (and attention's output
-// back): TS5_KV_TURN_V=1, with the turn of Q and K only. Off by default.
+// back), with the turn of Q and K only: on Linux unless TS5_KV_TURN_V=0, in
+// the store title only with TS5_KV_TURN_V=1.
 bool kv_turn_v_setting();
 // With TS5_KV automatic, an auto-fit context whose f16 cache holds fewer
 // tokens than this (and less than the model's training context) takes a q8

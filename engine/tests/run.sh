@@ -356,12 +356,13 @@ LP_NATIVE_VECTOR_WIDTH=1024 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --
 LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk "${g4[@]}"
 LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 TS5_ATTN_DEC=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 \
     --backend vk --ntok 40 --step "${g4[@]}"
-# V turned too (TS5_KV_TURN_V=1: qkv_post_q8tv, attn_unturn turning each
-# head of the output back): still within 1% of the fp32 reference.
-TS5_KV=q8 TS5_KV_TURN_V=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 300 "${shapes[@]}"
-TS5_KV=q8 TS5_KV_TURN_V=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 60 --step \
+# The steps above turn V too (the Linux default: qkv_post_q8tv, and
+# attn_unturn turning each head of the output back); with V as it comes
+# (TS5_KV_TURN_V=0, qkv_post_q8t) it is still within 1% of the fp32 reference.
+TS5_KV=q8 TS5_KV_TURN_V=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 300 "${shapes[@]}"
+TS5_KV=q8 TS5_KV_TURN_V=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 60 --step \
     "${shapes[@]}" "${h64[@]}"
-LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 TS5_KV_TURN_V=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 \
+LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 TS5_KV_TURN_V=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 \
     --backend vk --ntok 40 --step "${g4[@]}"
 echo "== 8-bit KV cache without the turn of Q and K (TS5_KV_TURN=0, as the store title has it)"
 # The steps above turn Q and K (the Linux default), which keeps every Q.K, so
@@ -397,19 +398,19 @@ cq4=(python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.025 --backend vk)
 "${q4[@]}" TS5_KV_TURN=0 "${cq4[@]}" --ntok 300 "${shapes[@]}"
 "${q4[@]}" TS5_KV_TURN=0 "${cq4[@]}" --ntok 60 --step "${shapes[@]}" "${h64[@]}"
 "${q4[@]}" TS5_KV_TURN=0 LP_NATIVE_VECTOR_WIDTH=1024 "${cq4[@]}" --ntok 40 --step "${g4[@]}"
-# V turned too (TS5_KV_TURN_V=1), the CPU turning each V head before
-# rounding and back after: the same 1%. Turned on the GPU only, the two
-# land 6% apart.
-"${q4[@]}" TS5_KV_TURN_V=1 "${cq4[@]}" --ntok 300 "${shapes[@]}"
-"${q4[@]}" TS5_KV_TURN_V=1 TS5_ATTN_PF=0 "${cq4[@]}" --ntok 300 "${shapes[1]}" "${shapes[3]}"
-"${q4[@]}" TS5_KV_TURN_V=1 "${cq4[@]}" --ntok 60 --step "${shapes[@]}" "${h64[@]}"
-"${q4[@]}" TS5_KV_TURN_V=1 TS5_ATTN_DEC=1 "${cq4[@]}" --ntok 160 --step "${shapes[0]}" "${shapes[1]}" "${shapes[3]}"
-"${q4[@]}" TS5_KV_TURN_V=1 LP_NATIVE_VECTOR_WIDTH=1024 "${cq4[@]}" "${g4[@]}"
-"${q4[@]}" TS5_KV_TURN_V=1 LP_NATIVE_VECTOR_WIDTH=1024 TS5_ATTN_DEC=1 "${cq4[@]}" --ntok 40 --step "${g4[@]}"
-! "${q4[@]}" TS5_KV_TURN_V=1 TS5_CPU_KV_TURN_V=0 "${cq4[@]}" --ntok 300 "${shapes[4]}" > /dev/null || unexpected $LINENO
+# The steps above turn V too (the default), the CPU turning each V head
+# before rounding and back after. With V as it comes (TS5_KV_TURN_V=0) the
+# same 1%. Turned on the GPU only, the two land 6% apart.
+"${q4[@]}" TS5_KV_TURN_V=0 "${cq4[@]}" --ntok 300 "${shapes[@]}"
+"${q4[@]}" TS5_KV_TURN_V=0 TS5_ATTN_PF=0 "${cq4[@]}" --ntok 300 "${shapes[1]}" "${shapes[3]}"
+"${q4[@]}" TS5_KV_TURN_V=0 "${cq4[@]}" --ntok 60 --step "${shapes[@]}" "${h64[@]}"
+"${q4[@]}" TS5_KV_TURN_V=0 TS5_ATTN_DEC=1 "${cq4[@]}" --ntok 160 --step "${shapes[0]}" "${shapes[1]}" "${shapes[3]}"
+"${q4[@]}" TS5_KV_TURN_V=0 LP_NATIVE_VECTOR_WIDTH=1024 "${cq4[@]}" "${g4[@]}"
+"${q4[@]}" TS5_KV_TURN_V=0 LP_NATIVE_VECTOR_WIDTH=1024 TS5_ATTN_DEC=1 "${cq4[@]}" --ntok 40 --step "${g4[@]}"
+! "${q4[@]}" TS5_CPU_KV_TURN_V=0 "${cq4[@]}" --ntok 300 "${shapes[4]}" > /dev/null || unexpected $LINENO
 echo "== 8-bit K with 4-bit V (TS5_KV=k8v4), against the CPU rounding the same way (TS5_CPU_KV=k8v4)"
 # Every attention kernel's _k8v4 build (K words as the 8-bit cache's, V
-# words as the 4-bit one's), turned and not, V turned too. Against a CPU
+# words as the 4-bit one's), turned and not, V turned (the default) and not. Against a CPU
 # rounding both in 8 bits, the GPU lands 4% off, not under 1%.
 k8v4=(env TS5_KV=k8v4 TS5_CPU_KV=k8v4)
 "${k8v4[@]}" "${cq4[@]}" --ntok 300 "${shapes[@]}"
@@ -423,24 +424,25 @@ k8v4=(env TS5_KV=k8v4 TS5_CPU_KV=k8v4)
 "${k8v4[@]}" LP_NATIVE_VECTOR_WIDTH=1024 TS5_ATTN_PF_SLIM=0 "${cq4[@]}" "${g4[@]}"
 "${k8v4[@]}" LP_NATIVE_VECTOR_WIDTH=1024 TS5_ATTN_DEC=1 "${cq4[@]}" --ntok 40 --step "${g4[@]}"
 "${k8v4[@]}" TS5_KV_TURN=0 "${cq4[@]}" --ntok 300 "${shapes[@]}"
-"${k8v4[@]}" TS5_KV_TURN_V=1 "${cq4[@]}" --ntok 300 "${shapes[@]}"
-"${k8v4[@]}" TS5_KV_TURN_V=1 "${cq4[@]}" --ntok 60 --step "${shapes[@]}" "${h64[@]}"
-"${k8v4[@]}" TS5_KV_TURN_V=1 LP_NATIVE_VECTOR_WIDTH=1024 "${cq4[@]}" --ntok 40 --step "${g4[@]}"
+"${k8v4[@]}" TS5_KV_TURN_V=0 "${cq4[@]}" --ntok 300 "${shapes[@]}"
+"${k8v4[@]}" TS5_KV_TURN_V=0 "${cq4[@]}" --ntok 60 --step "${shapes[@]}" "${h64[@]}"
+"${k8v4[@]}" TS5_KV_TURN_V=0 LP_NATIVE_VECTOR_WIDTH=1024 "${cq4[@]}" --ntok 40 --step "${g4[@]}"
 ! TS5_KV=k8v4 TS5_CPU_KV=q8 "${cq4[@]}" --ntok 300 "${shapes[4]}" > /dev/null || unexpected $LINENO
 TS5_KV=k8v4 TS5_PROFILE=1 "$ts5" bench -m "${shapes[1]}" --backend vk --pp 16 --tg 8 > "$work/bench-k8v4.txt" 2>&1
-grep -q "qkv_post_k8v4t " "$work/bench-k8v4.txt"
+grep -q "qkv_post_k8v4tv " "$work/bench-k8v4.txt"
 grep -q "attn_pf128_k8v4 " "$work/bench-k8v4.txt"
 grep -q "attn_dec[4]*_k8v4 " "$work/bench-k8v4.txt"
-grep -q "KV cache .*(k8v4, Q and K turned" "$work/bench-k8v4.txt"
+grep -q "KV cache .*(k8v4, Q, K and V turned" "$work/bench-k8v4.txt"
 # The profile names the 4-bit builds.
 TS5_KV=q4 TS5_PROFILE=1 "$ts5" bench -m "${shapes[1]}" --backend vk --pp 16 --tg 8 > "$work/bench-q4.txt"
-grep -q "qkv_post_q4t " "$work/bench-q4.txt"
+grep -q "qkv_post_q4tv " "$work/bench-q4.txt"
+grep -q "attn_unturn " "$work/bench-q4.txt"
 grep -q "attn_pf128_q4 " "$work/bench-q4.txt"
 grep -q "attn_dec[4]*_q4 " "$work/bench-q4.txt"
-TS5_KV=q4 TS5_KV_TURN_V=1 TS5_PROFILE=1 "$ts5" bench -m "${shapes[1]}" --backend vk --pp 16 --tg 8 > "$work/bench-q4tv.txt" 2>&1
-grep -q "qkv_post_q4tv " "$work/bench-q4tv.txt"
-grep -q "attn_unturn " "$work/bench-q4tv.txt"
-grep -q "KV cache .*(q4, Q, K and V turned" "$work/bench-q4tv.txt"
+TS5_KV=q4 TS5_KV_TURN_V=0 TS5_PROFILE=1 "$ts5" bench -m "${shapes[1]}" --backend vk --pp 16 --tg 8 > "$work/bench-q4t.txt" 2>&1
+grep -q "qkv_post_q4t " "$work/bench-q4t.txt"
+! grep -q "attn_unturn" "$work/bench-q4t.txt" || unexpected $LINENO
+grep -q "KV cache .*(q4, Q and K turned" "$work/bench-q4t.txt"
 
 echo "== attn_pf256s and attn_pf512s (the default; TS5_ATTN_PF_SLIM=0 the wider builds): the same logits as attn_pf256 and attn_pf512, byte for byte"
 # The builds with fewer registers (tiles of 16 keys; no tile loaded ahead)
@@ -660,9 +662,9 @@ rm -f "$work"/qwen3-Q4_0.gguf*.ts5ref
 ! "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep -q perplexity || unexpected $LINENO  # test tokens: no next-token measure
 TS5_KV=q8 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
 TS5_KV=q8 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
-# The turned cache's answers (.q8t) are saved apart from the plain one's
-# (.q8, TS5_KV_TURN=0), which round other values.
-[ -s "$work/qwen3-Q4_0.gguf.q8t.ts5ref" ] && [ ! -e "$work/qwen3-Q4_0.gguf.q8.ts5ref" ]
+# The turned cache's answers (.q8tv: Q, K and V turned) are saved apart from
+# the plain one's (.q8, TS5_KV_TURN=0), which round other values.
+[ -s "$work/qwen3-Q4_0.gguf.q8tv.ts5ref" ] && [ ! -e "$work/qwen3-Q4_0.gguf.q8.ts5ref" ]
 TS5_KV=q8 TS5_KV_TURN=0 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
 TS5_KV=q8 TS5_KV_TURN=0 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
 python3 "$here/q8_refcmp.py" "$work/qwen3-Q4_0.gguf" | grep -c "vs 16-bit cache, CPU" | grep -qx 2
@@ -670,33 +672,36 @@ python3 "$here/q8_refcmp.py" "$work/qwen3-Q4_0.gguf" | grep -c "vs 16-bit cache,
 # saved above, with no CPU run.
 TS5_KV=q8 TS5_CHECK_REF_KV=f16 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null |
     grep "cpu answers saved earlier: PASS$"
-# The 4-bit cache: its own answers (.q4t), then against the 16-bit ones (its
+# The 4-bit cache: its own answers (.q4tv), then against the 16-bit ones (its
 # cost, which no bar judges here: on these test models about as much as the
 # CPU's own, 7 to 10% of the largest logit).
 TS5_KV=q4 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
 TS5_KV=q4 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
-[ -s "$work/qwen3-Q4_0.gguf.q4t.ts5ref" ] && [ ! -e "$work/qwen3-Q4_0.gguf.q4.ts5ref" ]
-python3 "$here/q8_refcmp.py" "$work/qwen3-Q4_0.gguf" | grep -q "4-bit turned vs 16-bit cache, CPU, 16 positions"
-TS5_KV=q4 TS5_CHECK_REF_KV=f16 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2>&1 > /dev/null |
+[ -s "$work/qwen3-Q4_0.gguf.q4tv.ts5ref" ] && [ ! -e "$work/qwen3-Q4_0.gguf.q4.ts5ref" ]
+python3 "$here/q8_refcmp.py" "$work/qwen3-Q4_0.gguf" | grep -q "4-bit turned, V too vs 16-bit cache, CPU, 16 positions"
+{ TS5_KV=q4 TS5_CHECK_REF_KV=f16 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2>&1 > /dev/null || true; } |
     grep -q "check against the answers with a cache in f16 (the GPU keeps q4)"
-# With V turned too (TS5_KV_TURN_V=1): answers of their own (.q4tv, .q8tv).
-TS5_KV=q4 TS5_KV_TURN_V=1 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
-TS5_KV=q4 TS5_KV_TURN_V=1 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
-TS5_KV=q8 TS5_KV_TURN_V=1 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
-[ -s "$work/qwen3-Q4_0.gguf.q4tv.ts5ref" ] && [ -s "$work/qwen3-Q4_0.gguf.q8tv.ts5ref" ]
-python3 "$here/q8_refcmp.py" "$work/qwen3-Q4_0.gguf" | grep -c "[48]-bit turned, V too vs 16-bit cache, CPU, 16 positions" | grep -qx 2
-# 8-bit K with 4-bit V: answers of their own (.k8v4t, .k8v4tv).
+# With V as it comes (TS5_KV_TURN_V=0): answers of their own (.q4t, .q8t).
+TS5_KV=q4 TS5_KV_TURN_V=0 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
+TS5_KV=q4 TS5_KV_TURN_V=0 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
+TS5_KV=q8 TS5_KV_TURN_V=0 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
+[ -s "$work/qwen3-Q4_0.gguf.q4t.ts5ref" ] && [ -s "$work/qwen3-Q4_0.gguf.q8t.ts5ref" ]
+python3 "$here/q8_refcmp.py" "$work/qwen3-Q4_0.gguf" | grep -c "[48]-bit turned vs 16-bit cache, CPU, 16 positions" | grep -qx 2
+# 8-bit K with 4-bit V: answers of their own (.k8v4tv, .k8v4t).
 TS5_KV=k8v4 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
 TS5_KV=k8v4 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
-TS5_KV=k8v4 TS5_KV_TURN_V=1 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
+TS5_KV=k8v4 TS5_KV_TURN_V=0 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
 [ -s "$work/qwen3-Q4_0.gguf.k8v4t.ts5ref" ] && [ -s "$work/qwen3-Q4_0.gguf.k8v4tv.ts5ref" ]
 python3 "$here/q8_refcmp.py" "$work/qwen3-Q4_0.gguf" | grep -q "8-bit K 4-bit V turned, V too vs 16-bit cache, CPU, 16 positions"
-TS5_KV=k8v4 TS5_CHECK_REF_KV=f16 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2>&1 > /dev/null |
+{ TS5_KV=k8v4 TS5_CHECK_REF_KV=f16 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2>&1 > /dev/null || true; } |
     grep -q "check against the answers with a cache in f16 (the GPU keeps k8v4)"
 # What each half of the cache costs, in the CPU's answers (saved apart):
 # only K in 4 bits, and only V, turned and back. Turning V and back without
 # rounding changes nothing (within 1e-5 of the largest logit). Only the
-# saved answers count here, not the GPU's pass or fail against them.
+# saved answers count here, not the GPU's pass or fail against them. These
+# keep V's default turn off (TS5_KV_TURN_V=0), so TS5_CPU_KV_TURN_V alone
+# decides V's, and the names say so (.q4t-...).
+export TS5_KV_TURN_V=0
 TS5_CPU_KV_V=f16 TS5_CHECK_REF_KV=q4 "$ts5" check -m "$work/qwen3-Q4_0.gguf" --fresh > /dev/null 2>&1 || true
 TS5_CPU_KV_K=f16 TS5_CPU_KV_TURN_V=1 TS5_CHECK_REF_KV=q4 "$ts5" check -m "$work/qwen3-Q4_0.gguf" --fresh \
     > /dev/null 2>&1 || true
@@ -718,6 +723,7 @@ d = float(np.abs(a - b).max() / np.abs(a).max())
 print(f"V turned and back, unrounded: {d:.2g} of the largest logit")
 assert d < 1e-5, d
 PY
+unset TS5_KV_TURN_V
 # On a text's tokens (-p): answers saved apart from the test tokens', then used again.
 txt=$(head -c 3000 "$engine/DESIGN.md")
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "$txt" 2> /dev/null |
@@ -791,17 +797,17 @@ echo "== -c auto with TS5_KV unset: 8 bits where f16 holds under 24,576 tokens a
 # 4.5 and 3 GiB below: a change in what a load takes moves it).
 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2> "$work/kvauto.err" > /dev/null
 grep "8-bit KV cache: [0-9]* tokens, where f16 fits 2048 (TS5_KV=f16 keeps f16)" "$work/kvauto.err"
-grep "KV cache [0-9.]* GiB (q8, Q and K turned, " "$work/kvauto.err"
+grep "KV cache [0-9.]* GiB (q8, Q, K and V turned, " "$work/kvauto.err"
 TS5_KV=f16 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2>&1 > /dev/null |
     grep "KV cache [0-9.]* GiB (f16, 2048 tokens)"
 # TS5_KV=q4 (asked for, never automatic): 4 bits, more tokens than 8.
 TS5_KV=q4 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2> "$work/kvq4.err" > /dev/null
-q8_tok=$(sed -n 's/.*KV cache [0-9.]* GiB (q8, Q and K turned, \([0-9]*\) tokens).*/\1/p' "$work/kvauto.err")
-q4_tok=$(sed -n 's/.*KV cache [0-9.]* GiB (q4, Q and K turned, \([0-9]*\) tokens).*/\1/p' "$work/kvq4.err")
+q8_tok=$(sed -n 's/.*KV cache [0-9.]* GiB (q8, Q, K and V turned, \([0-9]*\) tokens).*/\1/p' "$work/kvauto.err")
+q4_tok=$(sed -n 's/.*KV cache [0-9.]* GiB (q4, Q, K and V turned, \([0-9]*\) tokens).*/\1/p' "$work/kvq4.err")
 [ -n "$q4_tok" ] && [ "$q4_tok" -gt "$q8_tok" ] || { echo "FAIL: 4-bit context $q4_tok, 8-bit $q8_tok"; exit 1; }
 # TS5_KV=k8v4 (asked for): more than 8 bits, at most as many as 4.
 TS5_KV=k8v4 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2> "$work/kvk8v4.err" > /dev/null
-k8v4_tok=$(sed -n 's/.*KV cache [0-9.]* GiB (k8v4, Q and K turned, \([0-9]*\) tokens).*/\1/p' "$work/kvk8v4.err")
+k8v4_tok=$(sed -n 's/.*KV cache [0-9.]* GiB (k8v4, Q, K and V turned, \([0-9]*\) tokens).*/\1/p' "$work/kvk8v4.err")
 [ -n "$k8v4_tok" ] && [ "$k8v4_tok" -gt "$q8_tok" ] && [ "$k8v4_tok" -le "$q4_tok" ] ||
     { echo "FAIL: 8-bit K 4-bit V context $k8v4_tok, 8-bit $q8_tok, 4-bit $q4_tok"; exit 1; }
 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 2048 -p hi -n 1 2>&1 > /dev/null |
