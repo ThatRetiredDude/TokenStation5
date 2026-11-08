@@ -685,14 +685,31 @@ moe="$work/llama-experts.gguf"
     grep "mixture-of-experts models are not supported yet (this one has 8 experts)"
 ! "$ts5" run -m "$moe" -p hi -n 1 > /dev/null 2>&1 || unexpected $LINENO
 echo "== -c auto waits while memory just freed is still coming back (TS5_MEMINFO: a scripted /proc/meminfo)"
-# As on the PS5 right after a build: 12 MiB more every quarter second, here
-# for 3 s, then flat. The wait goes on while a second adds 8 MiB or more.
+# 12 MiB more every quarter second, here for 3 s, then flat. The wait goes on
+# while 2 s add 16 MiB or more.
 python3 "$here/meminfo_curve.py" "$work/meminfo" 12 3 10 &
 mc=$!
 sleep 0.2
 TS5_MEMINFO="$work/meminfo" "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null |
-    grep "waited [2-5]\.[0-9]* s for memory just freed to come back"
+    grep "waited [2-6]\.[0-9]* s for memory just freed to come back"
 wait $mc
+# As the kernel shows it: steps of 60 MiB every 1.25 s, with nothing between
+# (a rule that looks at 1 s or less stops in a gap), for 5 s.
+python3 "$here/meminfo_curve.py" "$work/meminfo" 12 5 12 1.25 &
+mc=$!
+sleep 0.2
+TS5_MEMINFO="$work/meminfo" "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null |
+    grep "waited [4-7]\.[0-9]* s for memory just freed to come back"
+wait $mc
+# The PS5's own curve right after a full build (+572 MiB over 22 s): the
+# wait stops near 18 s, when 2 s add less than 16 MiB.
+python3 "$here/meminfo_curve.py" "$work/meminfo" 0 ck 25 &
+mc=$!
+sleep 0.2
+TS5_MEMINFO="$work/meminfo" "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null |
+    grep "waited 1[4-9]\.[0-9]* s for memory just freed to come back"
+wait $mc
+# Nothing coming back: the wait ends at its first look (1.5 s), no line.
 python3 "$here/meminfo_curve.py" "$work/meminfo" 0 0 4 &
 mc=$!
 sleep 0.2

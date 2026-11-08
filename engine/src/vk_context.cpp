@@ -76,16 +76,19 @@ int VkContext::settle_memory() const {
 #ifndef TS5_PS5
     if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) return 0;
     const char *e = getenv("TS5_MEMORY_SETTLE_MS");
-    const int max_ms = e && *e ? std::max(0, atoi(e)) : 20000, step = 250;
+    const int max_ms = e && *e ? std::max(0, atoi(e)) : 30000, step = 250;
     // On the PS5, a load 2 to 3 s after the model before it ended (or after
     // a build) saw 0.4 to 0.6 GiB less than a load after a pause: DeepSeek
     // R1 14B got 21,504 to 22,528 tokens instead of 26,624. Right after a
-    // full build MemAvailable was 12,953 MiB, 49 MiB more a second later,
-    // then 13,239 at 5 s, 13,490 at 15 s and 13,525 at 30 s (the compilers'
-    // memory coming back as free pages, nothing in the page cache): an
-    // earlier rule (16 MiB a quarter second) stopped at 0.5 s, 0.45 GiB
-    // short. An idle machine moves by less than 4 MiB in half a second (a
-    // quarter second may fall between two pieces a process hands back).
+    // full build MemAvailable was 12,953 MiB, 13,239 at 5 s, 13,490 at 15 s
+    // and 13,525 from 22 s on (the compilers' memory coming back as free
+    // pages, nothing in the page cache). It comes in steps: the kernel adds
+    // each CPU's count to MemAvailable about once a second, so readings a
+    // quarter second apart show +25 to +65 MiB, then nothing for 0.5 to
+    // 1.25 s. A rule that looks at 1 s or less can land between two steps
+    // and stop: one did at 0.5 s, 0.45 GiB short. So the first decision
+    // comes at 1.5 s (at least one step: a machine with nothing coming back
+    // moves by less than 4 MiB), then the wait goes on while 2 s add 16 MiB.
     std::vector<uint64_t> seen{mem_available()};  // a reading every step
     int waited = 0;
     while (seen[0] && waited < max_ms) {
@@ -93,8 +96,8 @@ int VkContext::settle_memory() const {
         waited += step;
         seen.push_back(mem_available());
         const size_t n = seen.size();
-        if (n == 3 && seen[2] < seen[0] + (4ull << 20)) break;
-        if (n >= 5 && seen[n - 1] < seen[n - 5] + (8ull << 20)) break;
+        if (n == 7 && seen[6] < seen[0] + (4ull << 20)) break;
+        if (n >= 9 && seen[n - 1] < seen[n - 9] + (16ull << 20)) break;
     }
     std::lock_guard<std::mutex> lk(budget_mutex);
     ram_at = budget_at = -1;

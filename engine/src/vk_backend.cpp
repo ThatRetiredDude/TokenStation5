@@ -383,7 +383,7 @@ public:
         // An auto-fit context is sized once, from what is free now: let
         // memory a process just gave back come in first.
         if (n_ctx_ <= 0)
-            if (const int ms = ctx_->settle_memory(); ms > 500)
+            if (const int ms = ctx_->settle_memory(); ms > 1500)
                 ts5::log_line("ts5: waited %.2f s for memory just freed to come back; memory for models now %.2f GiB",
                               ms / 1000.0, ctx_->device_memory() / 1073741824.0);
         if (!memory_fits(err)) return false;
