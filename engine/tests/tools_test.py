@@ -28,6 +28,16 @@ TEMPLATES = ["Qwen-Qwen2.5-7B-Instruct", "Qwen-Qwen3-0.6B", "Qwen3.5-4B", "meta-
              "meta-llama-Llama-3.2-3B-Instruct", "mistralai-Mistral-Nemo-Instruct-2407"]
 QWEN35 = "Qwen3.5-4B"
 NEMO = "mistralai-Mistral-Nemo-Instruct-2407"
+# DeepSeek R1 distills' earlier template (as in DeepSeek-R1-Distill-Qwen-14B
+# files): the generation prompt doesn't open the thinking, which the model
+# starts without a <think> and ends with </think>. Cut down to its turns.
+R1_OLD = "deepseek-r1-distill-old"
+R1_OLD_TEMPLATE = ("{% for message in messages %}{% if message['role'] == 'user' %}"
+                   "{{'<｜User｜>' + message['content']}}{% elif message['role'] == 'assistant' %}"
+                   "{% set content = message['content'] %}{% if '</think>' in content %}"
+                   "{% set content = content.split('</think>')[-1] %}{% endif %}"
+                   "{{'<｜Assistant｜>' + content + '<｜end▁of▁sentence｜>'}}{% endif %}{% endfor %}"
+                   "{% if add_generation_prompt %}{{'<｜Assistant｜>'}}{% endif %}")
 # Templates llama.cpp doesn't keep, compared when TEMPLATES_DIR has them:
 # Gemma 4's, as its GGUF files carry it (tokenizer.chat_template).
 OPTIONAL = ["google-gemma-4"]
@@ -472,7 +482,15 @@ def test_search_loop(ts5, model, tdir):
          False, 1, "Done.", None, None, QWEN35, Q35_PROMPT),
         ("Qwen3.5: answers from a search, streaming", "tvly-test",
          [Q35_CALL, "Found it.\n</think>\n\nDone.", "Final answer."], True, 1, "Done.", None, None, QWEN35, Q35_PROMPT),
+        # DeepSeek R1 with its earlier template: the turn opens the thinking,
+        # so the answer comes without it or a stray </think>.
+        ("DeepSeek R1: thinking kept out of the answer", "tvly-test", ["Codes first.\n</think>\n\nDone."], False, 0,
+         "Done.", None, None, R1_OLD, "<|im_start|>assistant\n<think>\n"),
+        ("DeepSeek R1: thinking kept out of the answer, streaming", "tvly-test", ["Codes first.\n</think>\n\nDone."],
+         True, 0, "Done.", None, None, R1_OLD, "<|im_start|>assistant\n<think>\n"),
     ]
+    with open(os.path.join(tdir, R1_OLD + ".jinja"), "w") as f:
+        f.write(R1_OLD_TEMPLATE)
     for name, key, turns, stream, hits, answer, note, *extra in cases:
         tools = extra[0] if extra else None
         template = os.path.join(tdir, (extra[1] if len(extra) > 1 else "Qwen-Qwen2.5-7B-Instruct") + ".jinja")
