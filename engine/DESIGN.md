@@ -410,7 +410,9 @@ are scored 16 at a time in every build, in the same order, so their logits
 are byte for byte the same (the suite checks it). Register counts come from
 RADV's null device: `RADV_FORCE_FAMILY=gfx1013` with
 VK_KHR_pipeline_executable_properties compiles for the console's GPU on
-any machine.
+any machine (`tests/shader_stats.c` prints them; `RADV_DEBUG=shaders` the
+assembly, where attn_pf128's products are all `v_fma_mix_f32`, f16 times
+f32 into f32 in one instruction).
 
 Generation uses `shaders/attn_dec.glsl` from the first key (`TS5_ATTN_DEC`
 sets from how many; 0: never; any other start breaks the helper's
