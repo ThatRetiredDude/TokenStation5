@@ -23,7 +23,7 @@ small enough to reason about.
 | Tokenizers | byte-level BPE (Qwen2, Llama 3 and Qwen3.5 pre-tokenizers, with Unicode's letter, mark and number classes from a generated table), SentencePiece (Llama 2, Gemma 3), Gemma 4's (BPE merges over code points, spaces as U+2581, split only at newlines) | Tekken's case-splitting pre-tokenizer (approximated now) |
 | Chat formats | ChatML, Llama 3, Mistral `[INST]` | Jinja templates, tool calls |
 | API | `/v1/chat/completions` (+ streaming), `/v1/completions`, `/v1/models`, `/health`; llama-server style `timings` | Anthropic `/v1/messages`, parallel slots |
-| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`; on Linux with Q and K turned per head first), 4-bit with the same scales (`TS5_KV=q4`, only when asked); on Linux V turned too (`TS5_KV_TURN_V=0` keeps it as it comes); 8-bit K with 4-bit V (`TS5_KV=k8v4`) | |
+| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`; on Linux with Q and K turned per head first), 4-bit with the same scales (`TS5_KV=q4`, only when asked); on Linux V turned too (`TS5_KV_TURN_V=0` keeps it as it comes); 8-bit K with 4-bit V (`TS5_KV=k8v4`, automatic on Linux where 8 bits fall short of the window) | |
 | Long context | the model's own window; YaRN for Qwen 2.5 and Qwen3 past 32k (`TS5_YARN=1`) | YaRN for other families |
 
 Not in scope: training, multi-GPU, CUDA/ROCm, Python.
@@ -763,9 +763,23 @@ tokens; q4 1.89). The shaders read K and V words through `kk4` and `vv4`
 builds of every attention kernel and of `qkv_post` differ from the others
 only in those loads; the `_q8` and `_q4` builds compile to the same
 logits as before, byte for byte. Its answers are `.k8v4tv.ts5ref`
-(`.k8v4t` with V as it comes, `.k8v4` plain), its check bar 4 bits'. Like q4 it
-is only used when asked, and `-c auto` takes q8 where q8 reaches the whole
-context.
+(`.k8v4t` with V as it comes, `.k8v4` plain), its check bar 4 bits'. Asked
+for, `-c auto` still takes q8 where q8 reaches the whole context.
+
+On the PS5 (job CM) the V turn is what makes it pass: against the 16-bit
+answers the GPU's k8v4 cache is 0.028 to 0.059 off with V turned on Qwen3
+8B and the three 14Bs, and 0.11 to 0.12, over the bar, without it on
+DeepSeek and Coder 14B. So `-c auto` takes it by itself where the automatic
+8-bit cache still falls short of the window and V is turned
+(`auto_kv_type`): DeepSeek and Coder 14B, 26,624 tokens in 8 bits, get
+their whole 32,768. Long-document questions (job CN, no YaRN, the same seed
+as each other): at the whole window DeepSeek answered 10 and 7 of 11 on two
+documents against 7 and 8 with 8 bits at 26,624, and Coder 14B 10 against
+9; on the same document at 26,624 tokens DeepSeek's 8-bit and k8v4 answers
+differ in one (7 and 6 of 11). Writing after that 20k-token document is 2%
+slower (27.4 against 28.0 tok/s), reading the same. `TS5_KV=q8` keeps 8
+bits. With YaRN on, Qwen3 14B gets 41,984 tokens this way (10 of 11 at
+37,800).
 
 Qwen 2.5 and Qwen3 were trained on a 32,768-token window (Qwen3's files say
 40,960: the window and room to answer), and their model cards stretch it to

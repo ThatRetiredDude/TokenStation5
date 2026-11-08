@@ -801,24 +801,37 @@ echo "== memory: a load that would leave the system less than its reserve is ref
 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "GiB of it kept free for the system"
 echo "== -c auto with TS5_KV=q8: an f16 cache, as the test model's whole context fits in f16"
 TS5_KV=q8 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "KV cache [0-9.]* GiB (f16, "
-echo "== -c auto with TS5_KV unset: 8 bits where f16 holds under 24,576 tokens and less than the model's context"
+echo "== -c auto with TS5_KV unset: 8 bits where f16 holds under 24,576 tokens and less than the model's context,"
+echo "   then 8-bit K and 4-bit V where 8 bits still hold less"
 # 2.002 GiB leaves this model 2,048 tokens of f16 (tests' arithmetic, as the
-# 4.5 and 3 GiB below: a change in what a load takes moves it).
+# 4.5 and 3 GiB below: a change in what a load takes moves it), 3,072 in 8
+# bits and its whole 4,096 in 8-bit K and 4-bit V.
 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2> "$work/kvauto.err" > /dev/null
 grep "8-bit KV cache: [0-9]* tokens, where f16 fits 2048 (TS5_KV=f16 keeps f16)" "$work/kvauto.err"
-grep "KV cache [0-9.]* GiB (q8, Q, K and V turned, " "$work/kvauto.err"
+grep "8-bit K and 4-bit V KV cache: [0-9]* tokens, where 8 bits fit [0-9]* (TS5_KV=q8 keeps 8 bits)" "$work/kvauto.err"
+grep "KV cache [0-9.]* GiB (k8v4, Q, K and V turned, " "$work/kvauto.err"
 TS5_KV=f16 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2>&1 > /dev/null |
     grep "KV cache [0-9.]* GiB (f16, 2048 tokens)"
+# Asked for, 8 bits stay 8 bits; without the V turn the automatic choice
+# stops at 8 bits too (4-bit V unturned failed the check on the PS5).
+TS5_KV=q8 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2> "$work/kvq8.err" > /dev/null
+grep "KV cache [0-9.]* GiB (q8, Q, K and V turned, " "$work/kvq8.err"
+! grep "4-bit V KV cache:" "$work/kvq8.err" || unexpected $LINENO
+TS5_KV_TURN_V=0 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2> "$work/kvnov.err" > /dev/null
+grep "KV cache [0-9.]* GiB (q8, Q and K turned, " "$work/kvnov.err"
+! grep "4-bit V KV cache:" "$work/kvnov.err" || unexpected $LINENO
 # TS5_KV=q4 (asked for, never automatic): 4 bits, more tokens than 8.
 TS5_KV=q4 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2> "$work/kvq4.err" > /dev/null
-q8_tok=$(sed -n 's/.*KV cache [0-9.]* GiB (q8, Q, K and V turned, \([0-9]*\) tokens).*/\1/p' "$work/kvauto.err")
+q8_tok=$(sed -n 's/.*KV cache [0-9.]* GiB (q8, Q, K and V turned, \([0-9]*\) tokens).*/\1/p' "$work/kvq8.err")
 q4_tok=$(sed -n 's/.*KV cache [0-9.]* GiB (q4, Q, K and V turned, \([0-9]*\) tokens).*/\1/p' "$work/kvq4.err")
 [ -n "$q4_tok" ] && [ "$q4_tok" -gt "$q8_tok" ] || { echo "FAIL: 4-bit context $q4_tok, 8-bit $q8_tok"; exit 1; }
-# TS5_KV=k8v4 (asked for): more than 8 bits, at most as many as 4.
+# TS5_KV=k8v4 (asked for): more than 8 bits, at most as many as 4, and as
+# many as the automatic choice.
 TS5_KV=k8v4 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2> "$work/kvk8v4.err" > /dev/null
 k8v4_tok=$(sed -n 's/.*KV cache [0-9.]* GiB (k8v4, Q, K and V turned, \([0-9]*\) tokens).*/\1/p' "$work/kvk8v4.err")
-[ -n "$k8v4_tok" ] && [ "$k8v4_tok" -gt "$q8_tok" ] && [ "$k8v4_tok" -le "$q4_tok" ] ||
-    { echo "FAIL: 8-bit K 4-bit V context $k8v4_tok, 8-bit $q8_tok, 4-bit $q4_tok"; exit 1; }
+auto_tok=$(sed -n 's/.*KV cache [0-9.]* GiB (k8v4, Q, K and V turned, \([0-9]*\) tokens).*/\1/p' "$work/kvauto.err")
+[ -n "$k8v4_tok" ] && [ "$k8v4_tok" -gt "$q8_tok" ] && [ "$k8v4_tok" -le "$q4_tok" ] && [ "$k8v4_tok" = "$auto_tok" ] ||
+    { echo "FAIL: 8-bit K 4-bit V context $k8v4_tok (automatic $auto_tok), 8-bit $q8_tok, 4-bit $q4_tok"; exit 1; }
 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 2048 -p hi -n 1 2>&1 > /dev/null |
     grep "KV cache [0-9.]* GiB (f16, 2048 tokens)"
 echo "== YaRN (TS5_YARN): Vulkan vs CPU stretched 4x, 300 tokens and one per call; ts5 check; -c auto past the window"

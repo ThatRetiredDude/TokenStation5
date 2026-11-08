@@ -71,7 +71,8 @@ struct VkContext;
 Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv = KvType::F32);
 // The cache type TS5_KV asks for: q8, q4, else f16. *automatic: TS5_KV is
 // unset, empty or auto, so an auto-fit context (-c auto) may take q8 where f16
-// is short (kQ8Below). q4 is only ever asked for, never automatic.
+// is short (kQ8Below), and K8V4 where q8 is still short (auto_kv_type). q4
+// is only ever asked for, never automatic.
 KvType kv_type_setting(bool *automatic = nullptr);
 // Whether an 8- or 4-bit cache turns Q and K per head (fixed signs, then
 // Walsh-Hadamard) before rounding K, which keeps every score and spreads K's
@@ -140,9 +141,12 @@ bool f16_reaches(int f16_ctx, int train);
 // The cache an auto-fit context (-c auto) takes, as the Vulkan backend
 // chooses it: kv and automatic as kv_type_setting gives them (automatic only
 // where the heads allow a quantized cache), train the most tokens the context
-// may hold, fit(t) the tokens a cache of type t fits. The app's estimates use
-// it too. log: each change gets its reason.
-KvType auto_kv_type(KvType kv, bool automatic, int train, const std::function<int(KvType)> &fit,
+// may hold, fit(t) the tokens a cache of type t fits. Automatic, f16 short of
+// kQ8Below and of train takes q8 where that fits more, and q8 short of train
+// takes K8V4 where that fits more and V is turned (kv_turn_v_setting, heads
+// a power of two wide). The app's estimates use it too. log: each change gets
+// its reason.
+KvType auto_kv_type(const HParams &hp, KvType kv, bool automatic, int train, const std::function<int(KvType)> &fit,
                     std::vector<std::string> *log = nullptr);
 
 // On Vulkan device `device`, with a device of its own. n_ctx 0: the context

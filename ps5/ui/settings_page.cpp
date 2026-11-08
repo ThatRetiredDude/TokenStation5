@@ -95,12 +95,15 @@ const std::vector<Row> &setting_rows() {
          ""},
 #ifdef TS5_LINUX
         {"MODELS", "TS5_KV", "Room for longer contexts",
-         "Keeps what the model has read in half the memory, so about twice the context fits. It's used only when "
-         "a model's whole context doesn't fit otherwise. Automatic uses it where a model would otherwise get "
-         "fewer than 24,576 tokens (the 14B models on the PS5: about 20,000 instead of 11,000). Answers can come "
-         "out very slightly different.",
-         "Now: the model loads again, which takes a few seconds", {{"", "Automatic"}, {"f16", "Off"}, {"q8", "On"}},
-         ""},
+         "Keeps what the model has read in less memory, so a longer context fits; only where a model's whole "
+         "context doesn't fit otherwise. Half size holds about twice as many tokens, Smaller about 2.5 times "
+         "(keys in 8 bits, values in 4) and Smallest about 3.5 times. Automatic uses Half size where a model "
+         "would get fewer than 24,576 tokens, and Smaller where that still falls short of the model's limit: "
+         "on the PS5 Qwen3 14B gets 32,768 tokens instead of 17,408, DeepSeek R1 and Coder 14B 32,768 instead "
+         "of about 14,000. Answers can come out slightly different, and the smaller the cache the more often a "
+         "long document's facts get mixed up.",
+         "Now: the model loads again, which takes a few seconds",
+         {{"", "Automatic"}, {"f16", "Off"}, {"q8", "Half size"}, {"k8v4", "Smaller"}, {"q4", "Smallest"}}, ""},
 #else
         {"MODELS", "TS5_KV", "Room for longer contexts",
          "Keeps what the model has read in half the memory, so about twice the context fits. It's used only when "
@@ -116,8 +119,9 @@ const std::vector<Row> &setting_rows() {
         {"MODELS", "TS5_YARN", "Longer context for Qwen3 8B and Coder 7B",
          "Lets Qwen3 8B and Qwen 2.5 Coder 7B read past their 32,768-token limit (YaRN), as far as memory "
          "allows: on the PS5 about 41,000 tokens for Qwen3 8B (83,000 with Room for longer contexts) and "
-         "112,000 for Coder 7B. Other models don't change. With Longest context at 32,768 tokens or less it "
-         "changes nothing; past that, every chat with these two models reads with stretched positions, which "
+         "112,000 for Coder 7B. The 14B Qwen models gain less: Qwen3 14B about 42,000, DeepSeek R1 and Coder 14B "
+         "about 34,000. With Longest context at 32,768 tokens or less it "
+         "changes nothing; past that, every chat with these models reads with stretched positions, which "
          "can word a few short answers differently.",
          "Now: the model loads again, which takes a few seconds", {{"", "Off"}, {"1", "On"}}, ""},
         {"MODELS", "TS5_DRAFT_MODEL", "Helper model",

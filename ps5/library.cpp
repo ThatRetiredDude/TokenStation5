@@ -61,6 +61,8 @@ void set_kv(ModelInfo &m, const ts5::HParams &hp) {
     const bool quant_ok = hp.head_dim % 32 == 0;
     if (!quant_ok) m.kv = ts5::KvType::F16;
     m.kv_auto = automatic && quant_ok;
+    m.head_dim = hp.head_dim;
+    m.head_dim_swa = hp.head_dim_swa;
 }
 
 ModelInfo inspect(const std::string &path, const std::string &file, uint64_t size, int64_t mtime) {
@@ -158,7 +160,10 @@ ModelInfo::Ctx ModelInfo::serve_ctx(int asked, uint64_t gpu_memory) const {
     if (asked > 0) return {asked, kv};
     const int train = ctx_train > 0 ? ctx_train : 32768;
     auto fit = [&](ts5::KvType t) { return ts5::fit_context(gpu_memory, fixed_bytes, kv_bytes[(int)t], train); };
-    const ts5::KvType t = ts5::auto_kv_type(kv, kv_auto, train, fit);
+    ts5::HParams hp;
+    hp.head_dim = head_dim;
+    hp.head_dim_swa = head_dim_swa;
+    const ts5::KvType t = ts5::auto_kv_type(hp, kv, kv_auto, train, fit);
     return {fit(t), t};
 }
 

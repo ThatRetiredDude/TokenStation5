@@ -156,16 +156,17 @@ beside the model; 512 tokens need about 1.1 GiB). `TS5_SYSTEM_RESERVE_GIB` chang
 
 Longest context at "As much as fits", no helper, measured on a PS5 under
 Debian on 2026-11-08 with the defaults (1.5 GiB of RAM kept free; the
-16-bit cache, or 8 bits where Room for longer contexts is Automatic and a
-model would get under 24,576 tokens). A load can land one step lower or
+16-bit cache, or with Room for longer contexts at Automatic 8 bits where a
+model would get under 24,576 tokens, and 8-bit keys with 4-bit values where
+8 bits still fall short of its window). A load can land one step lower or
 higher with how much RAM is free at that moment. Cold load times are from
 the original 5 Gb/s USB SATA drive (about 290 MB/s).
 
 | Model | Quant | Context | Cache | Cold load |
 | --- | --- | ---: | --- | ---: |
-| Qwen 3 14B | Q4_K_M | 29,696 (15,360 in 16-bit) | 8-bit (Automatic) | 31 s |
-| DeepSeek R1 Distill Qwen 14B | Q4_K_M | 24,576 (13,312) | 8-bit (Automatic) | 32 s |
-| Qwen 2.5 Coder 14B Instruct | Q4_K_M | 24,576 (13,312) | 8-bit (Automatic) | 32 s |
+| Qwen 3 14B | Q4_K_M | 32,768 (its limit; 17,408 in 16-bit) | 8-bit (Automatic) | 31 s |
+| DeepSeek R1 Distill Qwen 14B | Q4_K_M | 32,768 (its limit; 26,624 in 8-bit, 14,336 in 16-bit) | 8-bit keys, 4-bit values (Automatic) | 32 s |
+| Qwen 2.5 Coder 14B Instruct | Q4_K_M | 32,768 (its limit; 26,624 in 8-bit, 14,336 in 16-bit) | 8-bit keys, 4-bit values (Automatic) | 32 s |
 | Gemma 3 12B | Q4_K_M | 45,056 | 16-bit | 26 s |
 | Gemma 4 12B | Q4_K_M | 131,072 (its whole length) | 16-bit | 31 s |
 | Qwen3.5 9B | Q4_K_M | 175,104 (262,144 with Room for longer contexts On) | 16-bit | 22 s |
@@ -176,7 +177,10 @@ the original 5 Gb/s USB SATA drive (about 290 MB/s).
 
 On the 14Bs the 8-bit cache found the same long-document answers as 16-bit
 (10 of 11 at about twice the length); some longer answers are worded
-differently. The Models page's Hugging Face search uses the same budget.
+differently. With 8-bit keys and 4-bit values at their whole 32,768 tokens,
+Coder 14B answered 10 of 11 and DeepSeek 10 and 7 on two documents, against
+9, 7 and 8 with 8 bits at 26,624. The Models page and its Hugging Face
+search estimate contexts the same way.
 
 ## Settings
 
@@ -201,8 +205,9 @@ context for Qwen3 8B and Coder 7B (`TS5_YARN=1`) stretches their 32,768-token
 window with YaRN, as their model cards do, up to 131,072 tokens. On the PS5
 that is 40,960 tokens for Qwen3 8B (82,944 with Room for longer contexts)
 and 112,640 for Coder 7B, with 10 of 11 long-document questions right at
-78k on Qwen3 8B. The 14Bs run out of memory before 32k, so it doesn't change
-them. For the API service, add `TS5_YARN=1` to `/etc/default/tokenstation`
+78k on Qwen3 8B. The 14Bs reach about their 32k with the automatic cache
+first, so it adds less there: Qwen3 14B gets 41,984 tokens (10 of 11 right
+at 37,800), DeepSeek and Coder 14B about 34,000. For the API service, add `TS5_YARN=1` to `/etc/default/tokenstation`
 and set `CONTEXT=auto` or a number. It's off by default: while it's on and
 the context is past 32k, short chats run with stretched positions too. With
 a context of 32,768 or less it changes nothing.

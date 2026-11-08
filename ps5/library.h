@@ -34,6 +34,7 @@ struct ModelInfo {
     // the heads allow an 8- or 4-bit cache), as the engine reads them.
     ts5::KvType kv = ts5::KvType::F16;
     bool kv_auto = false;
+    int head_dim = 0, head_dim_swa = 0;  // the heads, for that choice
     uint64_t fixed_bytes = 0;   // GPU memory for weights and activations, as allocated
 
     struct Ctx {

@@ -1075,7 +1075,7 @@ private:
                                    kv_bytes_per_token(hp_, t), cap);
             };
             std::vector<std::string> why;
-            kv_ = auto_kv_type(kv_, kv_auto_, train, fit, &why);
+            kv_ = auto_kv_type(hp_, kv_, kv_auto_, train, fit, &why);
             for (auto &w : why) ts5::log_line("ts5: %s", w.c_str());
             n_ctx_ = fit(kv_);
             if (n_ctx_ <= 0) {
@@ -2268,7 +2268,7 @@ uint64_t draft_reserve(const HParams &dhp, uint64_t draft_weight_bytes) {
 
 bool f16_reaches(int f16_ctx, int train) { return train >= 1024 && f16_ctx >= train / 1024 * 1024; }
 
-KvType auto_kv_type(KvType kv, bool automatic, int train, const std::function<int(KvType)> &fit,
+KvType auto_kv_type(const HParams &hp, KvType kv, bool automatic, int train, const std::function<int(KvType)> &fit,
                     std::vector<std::string> *log) {
     auto say = [&](const std::string &s) {
         if (log) log->push_back(s);
@@ -2280,6 +2280,22 @@ KvType auto_kv_type(KvType kv, bool automatic, int train, const std::function<in
             say("8-bit KV cache: " + std::to_string(q8) + " tokens, where f16 fits " + std::to_string(f16) +
                 " (TS5_KV=f16 keeps f16)");
             kv = KvType::Q8;
+        }
+        // Still short of the window: V in 4 bits, turned. On the PS5 that
+        // is DeepSeek and Coder 14B, 26,624 tokens to their whole 32,768
+        // (job CN: long-document questions right 10 against 7 and 7 against
+        // 8 on DeepSeek, 10 against 9 on Coder; on the same document at
+        // 26,624 tokens one answer apart). Without the V turn 4-bit V
+        // fails the check on both.
+        auto pow2 = [](int d) { return d > 0 && (d & (d - 1)) == 0; };
+        if (kv == KvType::Q8 && !f16_reaches(q8, train) && kv_turn_v_setting() && pow2(hp.head_dim) &&
+            (!hp.head_dim_swa || pow2(hp.head_dim_swa))) {
+            const int k8v4 = fit(KvType::K8V4);
+            if (k8v4 > q8) {
+                say("8-bit K and 4-bit V KV cache: " + std::to_string(k8v4) + " tokens, where 8 bits fit " +
+                    std::to_string(q8) + " (TS5_KV=q8 keeps 8 bits)");
+                kv = KvType::K8V4;
+            }
         }
     }
     if (kv_quantized(kv) && f16_reaches(f16, train)) {
