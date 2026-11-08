@@ -706,6 +706,11 @@ private:
             arenas_.push_back(a);
             ar = &arenas_.back();
             allocated_ += a.size;
+            // After the context is sized only its own exact blocks count;
+            // anything else comes out of what was kept free for the system.
+            if (sized_ && !exact)
+                ts5::log_line("ts5: warning: %llu MiB of GPU memory taken after the context was sized, not counted in it",
+                              (unsigned long long)(a.size >> 20));
         }
         if (!ar) { err = "vkAllocateMemory failed (" + std::to_string((int)r) + "), out of GPU memory?"; return false; }
         VkDeviceSize off = (ar->used + req.alignment - 1) / req.alignment * req.alignment;
@@ -981,13 +986,18 @@ private:
             !mk(ids_, 4ull * TMAX, true) || !mk(logits_, 4ull * TMAX * hp_.n_vocab, true))
             return false;
         // Qwen3.5: the full layers' queries with their gates, and the linear
-        // layers' projections, output and state.
+        // layers' projections, output and state, and save_state's copy of the
+        // state. That copy is made here, before the context is sized, and to
+        // its size: made at a prompt's first save it took a fresh 1 GiB
+        // arena the sizing never counted (on the PS5 free memory fell from
+        // 2.36 to 1.33 GiB the moment a long prompt ended).
         if (hp_.attn_gate && !mk(qg_, 8ull * TMAX * QD)) return false;
         if (rec_layers_) {
             const size_t C = hp_.ssm_conv_dim(), I = hp_.ssm_inner(), NV = hp_.ssm_v_heads;
+            const size_t state = 4ull * rec_layers_ * hp_.rec_state_floats();
             if (!mk(qkv_, 4ull * TMAX * C) || !mk(z_, 4ull * TMAX * I) || !mk(beta_, 4ull * TMAX * NV) ||
-                !mk(alpha_, 4ull * TMAX * NV) || !mk(y_, 4ull * TMAX * I) ||
-                !mk(rec_, 4ull * rec_layers_ * hp_.rec_state_floats()))
+                !mk(alpha_, 4ull * TMAX * NV) || !mk(y_, 4ull * TMAX * I) || !mk(rec_, state) ||
+                !mk(saved_, state, false, true))
                 return false;
         }
         if (n_ctx_ <= 0) {
@@ -1022,6 +1032,7 @@ private:
                 return false;
             }
         }
+        sized_ = true;
         // RoPE for this context: YaRN past the model's window (use_context).
         m_.use_context(n_ctx_);
         if (hp_.yarn_factor > 1.f)
@@ -1868,6 +1879,7 @@ private:
     std::vector<Arena> arenas_;
     std::vector<VkBuffer> all_bufs_;
     VkDeviceSize allocated_ = 0;
+    bool sized_ = false;  // init_buffers sized the context and made its caches
     uint64_t fit_reserve_ = 0;  // set_fit_reserve
     uint64_t weight_bytes_ = 0;
     int layers_per_submit_ = 0;

@@ -72,6 +72,9 @@ def main():
             problems.append(f"the second request read its whole prompt again: {t}")
         if t2.get("cache_n", 0) != 0 or tf.get("cache_n", 0) != 0:
             problems.append(f"a prompt before the saved state reused it: {t2}, {tf}")
+        log.seek(0)
+        if "taken after the context was sized" in log.read():
+            problems.append("GPU memory was taken after the context was sized (save_state's copy?)")
         name = os.path.basename(model) + " " + backend
         if problems:
             log.seek(0)
