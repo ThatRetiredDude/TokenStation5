@@ -103,6 +103,8 @@ ModelInfo inspect(const std::string &path, const std::string &file, uint64_t siz
     const ts5::HParams &hp = model.hp;
     m.layers = hp.n_layer;
     m.ctx_train = hp.n_ctx_train;
+    m.yarn_orig = hp.yarn_orig;
+    m.yarn_max = hp.yarn_max;
     m.weight_bytes = model.data_bytes();
     set_kv(m, hp);
     m.fixed_bytes = ts5::vk_fixed_bytes(hp, m.weight_bytes);
@@ -139,6 +141,7 @@ ModelInfo estimate(const CatalogEntry &e) {
     m.file = e.file;
     m.name = e.name;
     m.size = e.bytes;
+    m.arch = e.arch ? e.arch : "";
     ts5::HParams hp;
     hp.n_vocab = e.n_vocab;
     hp.n_embd = e.n_embd;
@@ -158,11 +161,15 @@ ModelInfo estimate(const CatalogEntry &e) {
 
 ModelInfo::Ctx ModelInfo::serve_ctx(int asked, uint64_t gpu_memory) const {
     if (asked > 0) return {asked, kv};
-    const int train = ctx_train > 0 ? ctx_train : 32768;
-    auto fit = [&](ts5::KvType t) { return ts5::fit_context(gpu_memory, fixed_bytes, kv_bytes[(int)t], train); };
     ts5::HParams hp;
+    hp.arch = arch;
+    hp.n_ctx_train = ctx_train;
+    hp.yarn_orig = yarn_orig;
+    hp.yarn_max = yarn_max;
     hp.head_dim = head_dim;
     hp.head_dim_swa = head_dim_swa;
+    const int train = ts5::auto_context_cap(hp);
+    auto fit = [&](ts5::KvType t) { return ts5::fit_context(gpu_memory, fixed_bytes, kv_bytes[(int)t], train); };
     const ts5::KvType t = ts5::auto_kv_type(hp, kv, kv_auto, train, fit);
     return {fit(t), t};
 }

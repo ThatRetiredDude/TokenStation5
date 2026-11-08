@@ -71,8 +71,8 @@ struct VkContext;
 Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv = KvType::F32);
 // The cache type TS5_KV asks for: q8, q4, else f16. *automatic: TS5_KV is
 // unset, empty or auto, so an auto-fit context (-c auto) may take q8 where f16
-// is short (kQ8Below), and K8V4 where q8 is still short (auto_kv_type). q4
-// is only ever asked for, never automatic.
+// is short (auto_kv_type), and K8V4 where q8 is still short. q4 is only ever
+// asked for, never automatic.
 KvType kv_type_setting(bool *automatic = nullptr);
 // Whether an 8- or 4-bit cache turns Q and K per head (fixed signs, then
 // Walsh-Hadamard) before rounding K, which keeps every score and spreads K's
@@ -84,10 +84,11 @@ bool kv_turn_setting();
 // the store title only with TS5_KV_TURN_V=1.
 bool kv_turn_v_setting();
 // With TS5_KV automatic, an auto-fit context whose f16 cache holds fewer
-// tokens than this (and less than the model's training context) takes a q8
-// cache, about twice as long. On the PS5 that is the 14Bs (10,240 to 16,384
-// tokens in f16, 20,480 to 24,576 in q8, the same long-document questions
-// right); Gemma 3 12B (39,936) and Llama 3.1 8B (49,152) keep f16.
+// tokens than this (and less than the context may hold) takes a q8 cache,
+// about twice as long, on any model but a Gemma, with YaRN too. On the PS5
+// that is the 14Bs: 13,312 to 17,408 tokens in f16, 26,624 to 32,768 in q8
+// (job BL, at 20,480 to 24,576 in q8: the same long-document questions
+// right as in f16 at about half that). Past it, see auto_kv_type.
 constexpr int kQ8Below = 24576;
 // Bytes of K and V per token of context, over the layers that see all keys,
 // in a cache of type kv.
@@ -141,11 +142,15 @@ bool f16_reaches(int f16_ctx, int train);
 // The cache an auto-fit context (-c auto) takes, as the Vulkan backend
 // chooses it: kv and automatic as kv_type_setting gives them (automatic only
 // where the heads allow a quantized cache), train the most tokens the context
-// may hold, fit(t) the tokens a cache of type t fits. Automatic, f16 short of
-// kQ8Below and of train takes q8 where that fits more, and q8 short of train
-// takes K8V4 where that fits an eighth more or better and V is turned
-// (kv_turn_v_setting, heads a power of two wide). The app's estimates use it too. log: each change gets
-// its reason.
+// may hold (auto_context_cap), fit(t) the tokens a cache of type t fits.
+// Automatic, never on Gemma 3 or 4, f16 short of train and either under
+// kQ8Below or, on llama, qwen3 and qwen35, an eighth or more short of the
+// model's own window (hp.n_ctx_train; YaRN stretches past it) takes q8 where
+// that fits an eighth more tokens or better; then q8 short of train takes
+// K8V4 where that fits an eighth more than q8 and V is turned
+// (kv_turn_v_setting, heads a power of two wide). On the PS5: the 14Bs,
+// Llama 3.1 8B and 3.2 3B and Qwen3.5 9B. The app's estimates use it too.
+// log: each change gets its reason.
 KvType auto_kv_type(const HParams &hp, KvType kv, bool automatic, int train, const std::function<int(KvType)> &fit,
                     std::vector<std::string> *log = nullptr);
 

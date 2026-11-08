@@ -251,12 +251,21 @@ void Model::use_context(int n_ctx) {
     if (f > 1.0) hp.yarn_factor = (float)f;
 }
 
-int Model::context_cap() const {
+int context_cap(const HParams &hp) {
     const int train = hp.n_ctx_train > 0 ? hp.n_ctx_train : 32768;
     const double set = yarn_setting();
     if (hp.yarn_max <= train || set == 0) return train;
     return set > 0 ? std::max(train, std::min(hp.yarn_max, (int)(hp.yarn_orig * set))) : hp.yarn_max;
 }
+
+int auto_context_cap(const HParams &hp) {
+    int cap = context_cap(hp);
+    if (const char *e = getenv("TS5_CTX_MAX"))
+        if (atoi(e) >= 1024) cap = std::min(cap, atoi(e));
+    return cap;
+}
+
+int Model::context_cap() const { return ts5::context_cap(hp); }
 
 uint64_t Model::data_bytes() const {
     uint64_t end = 0;

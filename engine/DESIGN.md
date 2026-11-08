@@ -23,7 +23,7 @@ small enough to reason about.
 | Tokenizers | byte-level BPE (Qwen2, Llama 3 and Qwen3.5 pre-tokenizers, with Unicode's letter, mark and number classes from a generated table), SentencePiece (Llama 2, Gemma 3), Gemma 4's (BPE merges over code points, spaces as U+2581, split only at newlines) | Tekken's case-splitting pre-tokenizer (approximated now) |
 | Chat formats | ChatML, Llama 3, Mistral `[INST]` | Jinja templates, tool calls |
 | API | `/v1/chat/completions` (+ streaming), `/v1/completions`, `/v1/models`, `/health`; llama-server style `timings` | Anthropic `/v1/messages`, parallel slots |
-| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`; on Linux with Q and K turned per head first), 4-bit with the same scales (`TS5_KV=q4`, only when asked); on Linux V turned too (`TS5_KV_TURN_V=0` keeps it as it comes); 8-bit K with 4-bit V (`TS5_KV=k8v4`, automatic on Linux where 8 bits fall short of the window) | |
+| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`; on Linux with Q and K turned per head first), 4-bit with the same scales (`TS5_KV=q4`, only when asked); on Linux V turned too (`TS5_KV_TURN_V=0` keeps it as it comes); 8-bit K with 4-bit V (`TS5_KV=k8v4`); on Linux automatic where f16 falls short of the window, 8 bits and then 8-bit K with 4-bit V, not on Gemma | |
 | Long context | the model's own window; YaRN for Qwen 2.5 and Qwen3 past 32k (`TS5_YARN=1`) | YaRN for other families |
 
 Not in scope: training, multi-GPU, CUDA/ROCm, Python.
@@ -783,6 +783,34 @@ slower (27.4 against 28.0 tok/s), reading the same. `TS5_KV=q8` keeps 8
 bits. With YaRN on, Qwen3 14B gets 41,984 tokens this way (10 of 11 at
 37,800).
 
+Past 24,576 tokens the smaller caches are automatic too, on llama, qwen3
+and qwen35 (every model of theirs checked on the PS5 passed in 8 bits),
+where f16 falls an eighth or more short of the model's own window (not the
+window YaRN stretches it to), and every step down only for an eighth more
+tokens or better. Job CP set the caches by hand on the build before this
+rule, which now picks the same ones: Llama 3.1 8B, 54,272 tokens in f16 and
+101,376 in 8 bits, gets its whole 131,072 in 8-bit K and 4-bit V. Checked
+against the 16-bit answers that is 0.033 of the largest logit at the worst
+position (bar 0.10), 123 of 128 top tokens the same, and it answered 10 of
+11 long-document questions at 104,756 tokens, as in f16 at 47,383. Qwen3.5
+9B, 175,104 tokens in f16 (job BS), gets its whole 262,144 in 8 bits
+(0.0053, all 128 top tokens; 8 of 11 at 233,035 tokens, against 9 of 11 at
+159,741 in f16 in job BX), which take 4.25 GiB and leave 3.37 GiB free at
+the end of that document. Llama 3.2 3B, 74,752 in f16, passes in 8 bits
+(job CR: 0.018, 127 of 128). Writing short chats costs at most 2% (job CR:
+Llama 3.1 8B 72.0 against 72.8 tok/s, Qwen3.5 the same, Llama 3.2 3B 149
+against 152), and deep in a document the smaller cache is faster: Llama 3.1
+8B writes 49.8 tok/s at 32k in k8v4 against 40.0 in f16, and 26.9 at 120k.
+Not qwen2: Coder 7B fails the check in 8 bits (job CJ; its f16 holds its
+32,768 tokens anyway, 114,688 with YaRN in job CC), and DeepSeek and Coder
+14B get theirs under 24,576. Never a Gemma, at any length: Gemma 3 and 4 12B
+fail the check in 8 bits (0.051 and 0.042 of the largest logit at the worst
+position, 39 and 78 of 128 positions over the bar of 0.02), and 4-bit V
+costs them 0.42 to 0.54 at the worst position even in exact math
+(`q8_refcmp.py`), against 0.058 and 0.109 on Coder and DeepSeek 14B, so
+Gemma 3 12B keeps
+f16 at 45,056 of its 131,072 tokens.
+
 Qwen 2.5 and Qwen3 were trained on a 32,768-token window (Qwen3's files say
 40,960: the window and room to answer), and their model cards stretch it to
 131,072 with YaRN. `TS5_YARN=1` (or `on`, `auto`) does that past the file's
@@ -812,9 +840,10 @@ display, a GPU check's CPU reference), in multiples of 1024 tokens, up to the
 model's training context and what one buffer can address. The cache's
 buffers get blocks of memory of their own size (everything else comes in
 1 GiB blocks), so the 8-bit scales don't take a block out of that 1 GiB. On
-the PS5 that leaves about 5.4 GiB of cache beside a 7B or 8B Q4_K_M model:
-the full 32k of Qwen 2.5 Coder 7B and of Qwen3 8B (as its file gives it), 43k
-of Llama 3.1 8B's 128k (81k with q8) and 68k of Llama 3.2 3B's. With a
+the PS5 that leaves about 6.6 GiB of cache beside a 7B or 8B Q4_K_M model:
+the full 32k of Qwen 2.5 Coder 7B and of Qwen3 8B (as its file gives it),
+and in f16 54k of Llama 3.1 8B's 128k and 74k of Llama 3.2 3B's, which the
+automatic cache (above) takes to their whole 128k. With a
 helper model (`TS5_DRAFT_MODEL`, or one the title finds beside the model),
 the main context takes all that first, and the helper, opened only after it
 (so not even its token list is in memory while the main context is fitted),

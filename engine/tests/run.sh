@@ -840,6 +840,66 @@ auto_tok=$(sed -n 's/.*KV cache [0-9.]* GiB (k8v4, Q, K and V turned, \([0-9]*\)
     { echo "FAIL: 8-bit K 4-bit V context $k8v4_tok (automatic $auto_tok), 8-bit $q8_tok, 4-bit $q4_tok"; exit 1; }
 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 2048 -p hi -n 1 2>&1 > /dev/null |
     grep "KV cache [0-9.]* GiB (f16, 2048 tokens)"
+echo "== -c auto with TS5_KV unset, past 24,576 tokens of f16: on llama, qwen3 and qwen35 a smaller cache"
+echo "   where f16 falls an eighth or more short of the model's own window; never on a Gemma"
+ql="$work/qwen3-long-F32.gguf"
+[ -s "$ql" ] || python3 "$here/make_test_model.py" --arch qwen3 --quant F32 --ctx 65536 \
+    --vocab "$work/ggml-vocab-qwen2.gguf" "$ql" > /dev/null
+g3l="$work/gemma3-long-F32.gguf"
+[ -s "$g3l" ] || python3 "$here/make_test_model.py" --arch gemma3 --quant F32 --layers 6 --embd 512 --heads 2 \
+    --kv-heads 1 --window 64 --rope-linear 8 --ctx 65536 --vocab "$work/ggml-vocab-llama-spm.gguf" "$g3l" > /dev/null
+g4l="$work/gemma4-long-F32.gguf"
+[ -s "$g4l" ] || python3 "$here/make_test_model.py" --arch gemma4 --quant F32 --layers 3 --global-hd 512 --ctx 65536 \
+    --vocab "$work/ggml-vocab-qwen2.gguf" "$g4l" > /dev/null
+# The f16 tokens a run's cache line says, or the "where f16 fits" line's.
+f16_of() { sed -n -e 's/.*where f16 fits \([0-9]*\) .*/\1/p' -e 's/.*KV cache [0-9.]* GiB (f16, \([0-9]*\) tokens).*/\1/p' "$1" | head -1; }
+# 2.028 GiB: f16 about 28,700 of its 65,536 tokens, 8 bits about 54,000,
+# 8-bit K and 4-bit V the whole window (Llama 3.1 8B on the PS5: 54,272,
+# 101,376, 131,072).
+TS5_GPU_MEMORY_GIB=2.028 "$ts5" run -m "$ql" -c auto -p hi -n 1 2> "$work/kvlong.err" > /dev/null
+n=$(f16_of "$work/kvlong.err")
+[ -n "$n" ] && [ "$n" -ge 24576 ] && [ $((n + n / 8)) -le 65536 ] || { echo "FAIL: f16 '$n' tokens at 2.028 GiB"; exit 1; }
+grep "8-bit KV cache: [0-9]* tokens, where f16 fits $n (TS5_KV=f16 keeps f16)" "$work/kvlong.err"
+grep "8-bit K and 4-bit V KV cache: 65536 tokens, where 8 bits fit [0-9]* (TS5_KV=q8 keeps 8 bits)" "$work/kvlong.err"
+grep "KV cache [0-9.]* GiB (k8v4, Q, K and V turned, 65536 tokens)" "$work/kvlong.err"
+# 2.04: f16 40,960, 8 bits the whole window, and 8 bits stay (Qwen3.5 9B:
+# 175,104 in f16, 262,144 in 8 bits).
+TS5_GPU_MEMORY_GIB=2.04 "$ts5" run -m "$ql" -c auto -p hi -n 1 2> "$work/kvlong8.err" > /dev/null
+grep "KV cache [0-9.]* GiB (q8, Q, K and V turned, 65536 tokens)" "$work/kvlong8.err"
+! grep "4-bit V KV cache:" "$work/kvlong8.err" || unexpected $LINENO
+# 2.06: f16 62,464, less than an eighth short of the window: f16 stays, and
+# with YaRN too (it doesn't stretch a context within the window).
+for yarn in 0 1; do
+    TS5_YARN=$yarn TS5_GPU_MEMORY_GIB=2.06 "$ts5" run -m "$ql" -c auto -p hi -n 1 2> "$work/kvlongf.err" > /dev/null
+    n=$(f16_of "$work/kvlongf.err")
+    [ -n "$n" ] && [ "$n" -lt 65536 ] && [ $((n + n / 8)) -gt 65536 ] ||
+        { echo "FAIL: f16 '$n' tokens at 2.06 GiB, TS5_YARN=$yarn: not just short of the window"; exit 1; }
+    ! grep "8-bit KV cache:" "$work/kvlongf.err" || unexpected $LINENO
+done
+echo "f16 keeps $n of 65536 tokens, with YaRN and without"
+# With YaRN, f16 that holds the model's own window stays f16 past it (Coder
+# 7B on the PS5: 114,688 tokens), and f16 well short of it takes 8 bits and
+# then 8-bit K and 4-bit V past it.
+TS5_YARN=1 TS5_GPU_MEMORY_GIB=2.07 "$ts5" run -m "$ql" -c auto -p hi -n 1 2> "$work/kvyarnf.err" > /dev/null
+grep "YaRN: positions stretched" "$work/kvyarnf.err"
+grep "KV cache [0-9.]* GiB (f16, " "$work/kvyarnf.err"
+TS5_YARN=1 TS5_GPU_MEMORY_GIB=2.04 "$ts5" run -m "$ql" -c auto -p hi -n 1 2> "$work/kvyarn8.err" > /dev/null
+grep "8-bit KV cache: [0-9]* tokens, where f16 fits 40960 (TS5_KV=f16 keeps f16)" "$work/kvyarn8.err"
+grep "KV cache [0-9.]* GiB (k8v4, Q, K and V turned, " "$work/kvyarn8.err"
+grep "YaRN: positions stretched" "$work/kvyarn8.err"
+# The Gemmas keep f16 under 24,576 tokens and past it (Gemma 3 and 4 12B
+# fail the check in 8 bits): Gemma 3 at 19,456 and 29,696, Gemma 4 (V from K,
+# heads of 512) at 15,360.
+for run in "$g3l 2.021" "$g3l 2.03" "$g4l 2.03"; do
+    set -- $run
+    TS5_GPU_MEMORY_GIB=$2 "$ts5" run -m "$1" -c auto -p hi -n 1 2> "$work/kvgemma.err" > /dev/null
+    grep "KV cache [0-9.]* GiB (f16, " "$work/kvgemma.err"
+    ! grep "8-bit KV cache:" "$work/kvgemma.err" || unexpected $LINENO
+done
+# Not even 1,024 tokens: refused, with no cache changes on the way.
+{ TS5_GPU_MEMORY_GIB=1.5 "$ts5" run -m "$ql" -c auto -p hi -n 1 2> "$work/kvnone.err" > /dev/null || true; }
+grep "not enough GPU memory left for a context of 1024 tokens" "$work/kvnone.err"
+! grep "KV cache:" "$work/kvnone.err" || unexpected $LINENO
 echo "== YaRN (TS5_YARN): Vulkan vs CPU stretched 4x, 300 tokens and one per call; ts5 check; -c auto past the window"
 TS5_YARN=4 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
     "$work/qwen3-Q4_0.gguf" "$work/qwen2-Q8_0.gguf"

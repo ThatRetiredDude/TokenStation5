@@ -28,6 +28,7 @@ struct ModelInfo {
     std::string arch, quant;
     double params = 0;  // parameter count
     int layers = 0, ctx_train = 0;
+    int yarn_orig = 0, yarn_max = 0;  // the window YaRN stretches and how far (model.h); 0 for none
     uint64_t weight_bytes = 0;
     uint64_t kv_bytes[5] = {};  // K and V over all layers per token, by ts5::KvType
     // The cache TS5_KV asks for, and whether it is automatic (both only where
@@ -42,8 +43,10 @@ struct ModelInfo {
         ts5::KvType kv = ts5::KvType::F16;  // its cache
     };
     // The context serving it with -c `asked` gets on a GPU with this much
-    // memory. asked 0 (no -c, or -c auto): what fits, at most the training
-    // context (n 0: not 1024), in the cache ts5::auto_kv_type picks.
+    // memory. asked 0 (no -c, or -c auto): what fits, at most what the
+    // engine allows (ts5::auto_context_cap: the window, YaRN's reach with
+    // TS5_YARN, TS5_CTX_MAX) (n 0: not 1024), in the cache
+    // ts5::auto_kv_type picks.
     Ctx serve_ctx(int asked, uint64_t gpu_memory) const;
     // Weights plus a KV cache of that context.
     uint64_t memory_for(Ctx c) const { return weight_bytes + kv_bytes[(int)c.kv] * (uint64_t)c.n; }

@@ -372,6 +372,7 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
                     e.head_dim = (int)(hp.key_length ? hp.key_length : hp.n_embd / hp.n_head);
                     e.ctx_train = (int)hp.ctx;
                     e.weight_bytes = f.bytes;
+                    e.arch = hp.arch.c_str();
                     const ModelInfo est = estimate(e);
                     const int need = hp.ctx > 0 && hp.ctx < kMinContext ? (int)hp.ctx : kMinContext;
                     if (est.serve_ctx(0, gpu_memory).n < need) {
@@ -390,6 +391,7 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
                     t.file = f.path;
                     t.commit = sha;
                     t.sha256 = lower(f.sha256);
+                    t.arch = hp.arch;
                     found.push_back(add_catalog_entry(t, e));
                 }
             }

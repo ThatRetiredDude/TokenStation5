@@ -1060,9 +1060,7 @@ private:
             // no more than one buffer can address.
             // TS5_CTX_MAX (Settings > Longest context) caps it below that,
             // leaving the rest of the memory free.
-            int train = m_.context_cap();
-            if (const char *e = getenv("TS5_CTX_MAX"))
-                if (atoi(e) >= 1024) train = std::min(train, atoi(e));
+            const int train = auto_context_cap(m_.hp);
             // Sliding layers' rings are a fixed size, beside the context.
             auto fit = [&](KvType t) {
                 // One buffer holds about 256 MiB of layers, or one whole layer.
@@ -2274,9 +2272,33 @@ KvType auto_kv_type(const HParams &hp, KvType kv, bool automatic, int train, con
         if (log) log->push_back(s);
     };
     const int f16 = fit(KvType::F16);
-    if (automatic && f16 < kQ8Below && !f16_reaches(f16, train)) {
+    // Where f16 falls short of the context: under kQ8Below tokens (the
+    // 14Bs, YaRN or not), and past that where it falls an eighth or more
+    // short of the model's own window (YaRN stretches past it) on the
+    // architectures whose every model checked on the PS5 passed in 8 bits.
+    // Job CP set the caches by hand, on the build before this rule, which
+    // now picks the same ones: Llama 3.1 8B, 54,272 tokens in f16, gets its
+    // whole 131,072 in 8-bit K and 4-bit V (10 of 11 long-document
+    // questions right at 104,756 tokens, as in f16 at 47,383); Qwen3.5 9B,
+    // 175,104 in f16 (job BS), its whole 262,144 in 8 bits (8 of 11 at
+    // 233,035; job BX, f16: 9 of 11 at 159,741); Llama 3.2 3B passes the
+    // 8-bit check (job CR, 0.018 of the largest logit at the worst
+    // position). Not qwen2: Coder 7B fails the 8-bit check (job CJ), and
+    // its f16 holds its window anyway. Never a Gemma, at any length: Gemma
+    // 3 and 4 12B fail the check in 8 bits (0.051 and 0.042 of the largest
+    // logit at the worst position, 39 and 78 of 128 positions over the bar
+    // of 0.02), and 4-bit V costs them 0.42 to 0.54 even in exact math,
+    // against 0.058 and 0.109 on Coder and DeepSeek 14B.
+    const bool gemma = hp.arch == "gemma3" || hp.arch == "gemma4";
+    const bool long_ok = hp.arch == "llama" || hp.arch == "qwen3" || hp.arch == "qwen35";
+    const int own = hp.n_ctx_train > 0 ? std::min(train, hp.n_ctx_train) : train;
+    // Each smaller cache only for an eighth more tokens or better, so a
+    // model whose f16 falls a few thousand short keeps f16.
+    auto more = [](int smaller, int bigger) { return smaller > bigger && smaller >= bigger + bigger / 8; };
+    if (automatic && !gemma && !f16_reaches(f16, train) &&
+        (f16 < kQ8Below || (long_ok && f16 + f16 / 8 <= own))) {
         const int q8 = fit(KvType::Q8);
-        if (q8 > f16) {
+        if (more(q8, f16)) {
             say("8-bit KV cache: " + std::to_string(q8) + " tokens, where f16 fits " + std::to_string(f16) +
                 " (TS5_KV=f16 keeps f16)");
             kv = KvType::Q8;
@@ -2285,15 +2307,15 @@ KvType auto_kv_type(const HParams &hp, KvType kv, bool automatic, int train, con
         // is DeepSeek and Coder 14B, 26,624 tokens to their whole 32,768
         // (job CN: long-document questions right 10 against 7 and 7 against
         // 8 on DeepSeek, 10 against 9 on Coder; on the same document at
-        // 26,624 tokens one answer apart). Without the V turn 4-bit V
-        // fails the check on both. Only for an eighth more tokens or more:
-        // Qwen3 14B's 8 bits reach 31,744 or 32,768 of its 32,768 by a
-        // few MiB of free memory, and 1,024 tokens aren't worth 4-bit V.
+        // 26,624 tokens one answer apart), and Llama 3.1 8B, 101,376 to
+        // 131,072. Without the V turn 4-bit V fails the check on both
+        // 14Bs. Qwen3 14B's 8 bits reach 31,744 or 32,768 of its 32,768 by
+        // a few MiB of free memory, and 1,024 tokens aren't worth 4-bit V.
         auto pow2 = [](int d) { return d > 0 && (d & (d - 1)) == 0; };
         if (kv == KvType::Q8 && !f16_reaches(q8, train) && kv_turn_v_setting() && pow2(hp.head_dim) &&
             (!hp.head_dim_swa || pow2(hp.head_dim_swa))) {
             const int k8v4 = fit(KvType::K8V4);
-            if (k8v4 >= q8 + q8 / 8) {
+            if (more(k8v4, q8)) {
                 say("8-bit K and 4-bit V KV cache: " + std::to_string(k8v4) + " tokens, where 8 bits fit " +
                     std::to_string(q8) + " (TS5_KV=q8 keeps 8 bits)");
                 kv = KvType::K8V4;

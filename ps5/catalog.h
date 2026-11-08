@@ -24,6 +24,7 @@ struct CatalogEntry {
     // A model's header fields (model.h HParams) and its weight bytes.
     int n_vocab = 0, n_embd = 0, n_layer = 0, n_ff = 0, n_head = 0, n_head_kv = 0, head_dim = 0, ctx_train = 0;
     uint64_t weight_bytes = 0;
+    const char *arch = "";  // general.architecture: the cache the context estimate picks depends on it
 };
 
 inline const CatalogEntry kCatalog[] = {
@@ -31,22 +32,22 @@ inline const CatalogEntry kCatalog[] = {
      "bartowski/Llama-3.2-3B-Instruct-GGUF", "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
      "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
      "5ab33fa94d1d04e903623ae72c95d1696f09f9e8", 2019377696u, "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff",
-     128256, 3072, 28, 8192, 24, 8, 128, 131072, 2011539712u},
+     128256, 3072, 28, 8192, 24, 8, 128, 131072, 2011539712u, "llama"},
     {CatalogEntry::Model, "qwen25-coder-7b", "Qwen2.5 Coder 7B Instruct", "Coding", "qwen2.5-coder-7b",
      "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF", "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
      "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
      "1f629da0c8bed16b9e50cee91c70693650e66c35", 4683074336u, "1664fccab734674a50763490a8c6931b70e3f2f8ec10031b54806d30e5f956b6",
-     152064, 3584, 28, 18944, 28, 4, 128, 32768, 4677120000u},
+     152064, 3584, 28, 18944, 28, 4, 128, 32768, 4677120000u, "qwen2"},
     {CatalogEntry::Model, "qwen3-8b", "Qwen3 8B", "General chat and thinking", "qwen3-8b",
      "bartowski/Qwen_Qwen3-8B-GGUF", "Qwen_Qwen3-8B-Q4_K_M.gguf",
      "Qwen_Qwen3-8B-Q4_K_M.gguf",
      "0b69f75b7472688e6808490aa2b85efdb81b5ce7", 5027784224u, "54fffa050078e984116639c83dfb64b5aa6d4cd474e018b076777c632bbccccd",
-     151936, 4096, 36, 12288, 32, 8, 128, 32768, 5021827072u},
+     151936, 4096, 36, 12288, 32, 8, 128, 32768, 5021827072u, "qwen3"},
     {CatalogEntry::Model, "llama31-8b", "Meta Llama 3.1 8B Instruct", "General chat", "llama-3.1-8b",
      "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF", "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
      "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
      "bf5b95e96dac0462e2a09145ec66cae9a3f12067", 4920739232u, "7b064f5842bf9532c91456deda288a1b672397a54fa729aa665952863033557c",
-     128256, 4096, 32, 14336, 32, 8, 128, 131072, 4912898304u},
+     128256, 4096, 32, 14336, 32, 8, 128, 131072, 4912898304u, "llama"},
     {CatalogEntry::Speech, "speech-base-en", "Speech model Base (English)", "", "ggml-base.en.bin",
      "ggerganov/whisper.cpp", "ggml-base.en.bin",
      "ggml-base.en.bin",

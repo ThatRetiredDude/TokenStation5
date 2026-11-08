@@ -188,4 +188,11 @@ void apply_model_tune(const std::string &model_path);
 // Whether `key`'s current value came from apply_model_tune.
 bool from_model_tune(const char *key);
 
+// Model::context_cap for these hyperparameters (n_ctx_train, yarn_orig,
+// yarn_max), then no more than TS5_CTX_MAX (Settings > Longest context)
+// where that is 1024 or more: the most tokens an auto-fit context (-c auto)
+// may hold. The app's context estimates use it too.
+int context_cap(const HParams &hp);
+int auto_context_cap(const HParams &hp);
+
 }  // namespace ts5

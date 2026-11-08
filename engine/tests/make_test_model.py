@@ -141,6 +141,7 @@ def main():
                     help="gemma4: the full-attention layers' head size (every 3rd layer; default twice the others'), "
                          "on one K/V head without a V projection, as the 12B has it")
     ap.add_argument("--window", type=int, default=8, help="gemma3, gemma4: the sliding layers' window")
+    ap.add_argument("--ctx", type=int, default=4096, help="the context it says it was trained to (context_length)")
     ap.add_argument("--rope-linear", type=float, default=0,
                     help="gemma3: linear RoPE scaling of the full layers by this factor (the 4B to 27B: 8)")
     ap.add_argument("--rope-base", type=float, default=0, help="gemma4: the full layers' RoPE base (0: the default)")
@@ -183,7 +184,7 @@ def main():
 
     w = GGUFWriter(a.out, a.arch)
     w.add_name(f"ts5-test-{a.arch}")
-    w.add_context_length(4096)
+    w.add_context_length(a.ctx)
     w.add_embedding_length(a.embd)
     # Qwen3.5's files count its multi-token-prediction layer, whose weights
     # they leave out.

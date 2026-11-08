@@ -57,6 +57,7 @@ const CatalogEntry &catalog_at(size_t i);
 // An entry to add, with its own text.
 struct CatalogText {
     std::string key, name, good_for, same, repo, path, file, commit, sha256;
+    std::string arch;
 };
 // Adds e (its text from t); the index it has. One with the same key is kept
 // as it was and its index returned.
