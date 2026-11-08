@@ -164,7 +164,8 @@ def main():
     ap.add_argument("--tokens", type=int, default=0, help="document size (default: 95%% of the context)")
     ap.add_argument("--facts", type=int, default=10)
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--think", action="store_true", help="let the model think first (more answer tokens)")
+    ap.add_argument("--think", action="store_true",
+                    help="let the model think first (more answer tokens; needed for models that always think, as DeepSeek R1)")
     ap.add_argument("--max-tokens", type=int, default=0, help="answer room (default 512, 4096 with --think)")
     ap.add_argument("--root", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
     ap.add_argument("--json", help="append the result as one JSON line to this file")
@@ -218,6 +219,7 @@ def main():
             sys.exit("longctx_qa: no document size left room for the answers")
         r, wall = ask(url, model, doc, qs, max_tokens, a.think, 7200)
         msg = r["choices"][0]["message"]
+        finish = r["choices"][0].get("finish_reason")
         res = score(msg.get("content") or "", qs)
         t1, tm = r1.get("timings", {}), r.get("timings", {})
         right = sum(x["ok"] for x in res)
@@ -226,11 +228,17 @@ def main():
                "missed_depths": sorted(round(x["depth"], 2) for x in res if not x["ok"]),
                "prompt_tok_s": t1.get("prompt_per_second"), "gen_tok_s": tm.get("predicted_per_second"),
                "cache_n": tm.get("cache_n"), "read_s": round(wall1, 1), "wall_s": round(wall, 1),
+               "finish": finish, "thought_chars": len(msg.get("reasoning_content") or ""),
                "env": a.env, "seed": a.seed, "answers": res}
         print(f"{out['model']} {a.kind} ctx {n_ctx}, prompt {out['prompt_tokens']} tokens: {right}/{len(res)} right"
               f" (missed at depths {out['missed_depths'] or 'none'}), prompt {out['prompt_tok_s']} tok/s,"
               f" writing {out['gen_tok_s']} tok/s; reading took {out['read_s']} s, answering {out['wall_s']} s"
               f" ({out['cache_n']} tokens from the cache)")
+        if finish == "length":
+            # A model that always thinks (DeepSeek R1) can spend the whole
+            # answer room thinking: then the misses are the room's, not its.
+            print(f"longctx_qa: the answer was cut off at {max_tokens} tokens"
+                  f" ({out['thought_chars']} characters of thinking); run again with --think or a larger --max-tokens")
         if a.json:
             with open(a.json, "a") as f:
                 f.write(json.dumps(out) + "\n")
