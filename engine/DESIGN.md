@@ -400,6 +400,17 @@ the same 128 registers) ran 2.1x faster on llvmpipe but 10.8% slower on
 the PS5 (8192 tokens: 4821 ms against 4350; prompts -2.2% at 4096, -4.7%
 at 16384), so the shared-memory reads are not what holds it back there;
 it was dropped.
+On gfx1013 (wave32, as RADV compiles them) attn_pf128 needs 128 registers a
+thread, so a compute unit holds two of its 256-thread workgroups, but
+attn_pf256 and attn_pf512 need 168, so it holds one: half the waves to hide
+memory and shared-memory waits behind. `attn_pf256s` (tiles of 16 keys) and
+`attn_pf512s` (no tile loaded into registers ahead) need 128 again
+(`TS5_ATTN_PF_SLIM=1`, off by default until the PS5 measures them). Keys
+are scored 16 at a time in every build, in the same order, so their logits
+are byte for byte the same (the suite checks it). Register counts come from
+RADV's null device: `RADV_FORCE_FAMILY=gfx1013` with
+VK_KHR_pipeline_executable_properties compiles for the console's GPU on
+any machine.
 
 Generation uses `shaders/attn_dec.glsl` from the first key (`TS5_ATTN_DEC`
 sets from how many; 0: never; any other start breaks the helper's

@@ -125,15 +125,25 @@ void main() {
 #define STORE_ONE(n, e) ks[e] = kr[n]; vs[e] = vr[n];
 #endif
 
+    // NO_PREFETCH: each tile loaded where it's stored, which frees the
+    // registers that hold the next tile meanwhile (the order of the sums is
+    // the same, so the output too).
+#ifndef NO_PREFETCH
     LOAD_TILE(k_begin)
+#endif
     for (uint kb = k_begin; kb < k_end; kb += BC) {
+#ifdef NO_PREFETCH
+        LOAD_TILE(kb)
+#endif
         barrier();  // everyone is done with the previous tile
         for (uint n = 0; n < NL; n++) {
             const uint e = tid + WG * n;
             if (e < ne) { STORE_ONE(n, e) }
         }
         barrier();
+#ifndef NO_PREFETCH
         if (kb + BC < k_end) { LOAD_TILE(kb + BC) }
+#endif
         const uint nb = min(BC, k_end - kb);
         for (uint j0 = 0; j0 < nb; j0 += STEP) {
             float s[STEP];

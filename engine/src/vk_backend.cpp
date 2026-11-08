@@ -43,6 +43,8 @@
 #include "attn_pf128.spv.h"
 #include "attn_pf256.spv.h"
 #include "attn_pf512.spv.h"
+#include "attn_pf256s.spv.h"
+#include "attn_pf512s.spv.h"
 #include "attn_pf_q8.spv.h"
 #include "attn_q8.spv.h"
 #include "attn_dec_q8.spv.h"
@@ -58,6 +60,8 @@
 #include "attn_pf128_q8.spv.h"
 #include "attn_pf256_q8.spv.h"
 #include "attn_pf512_q8.spv.h"
+#include "attn_pf256s_q8.spv.h"
+#include "attn_pf512s_q8.spv.h"
 #include "get_rows_f16.spv.h"
 #include "get_rows_f32.spv.h"
 #include "get_rows_q4_0.spv.h"
@@ -492,6 +496,7 @@ private:
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_DEC")) attn_dec_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_PF128")) attn_pf128_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_ATTN_PF_SLIM")) attn_pf_slim_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_PLAIN")) attn_dec_plain_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_KEYS")) attn_dec_keys_ = atoi(e);
         if (const char *e = getenv("TS5_ATTN_DEC64")) attn_dec64_ = atoi(e) != 0;
@@ -859,6 +864,7 @@ private:
         P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
         P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf256, 5) P(attn_pf512, 5)
         P(attn_pf_q8, 7) P(attn_pf128_q8, 7) P(attn_pf256_q8, 7) P(attn_pf512_q8, 7)
+        P(attn_pf256s, 5) P(attn_pf512s, 5) P(attn_pf256s_q8, 7) P(attn_pf512s_q8, 7)
         // Lanes per key in attn_dec: 8, 16 or 32, and no more than a subgroup.
         uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
         while (lpk > ctx_->subgroup_size) lpk = lpk > 8 ? lpk / 2 : 0;
@@ -1463,9 +1469,9 @@ private:
         } else if (pf && HD == 128 && attn_pf128_)
             kern = "attn_pf128";
         else if (pf && pf256)
-            kern = "attn_pf256";
+            kern = attn_pf_slim_ ? "attn_pf256s" : "attn_pf256";
         else if (pf && pf512)
-            kern = "attn_pf512";
+            kern = attn_pf_slim_ ? "attn_pf512s" : "attn_pf512";
         if (kv_ == KvType::Q8) kern += "_q8";
         if (kv_ == KvType::Q8)
             dispatch(kern, {&q_, &kc_[kb], &vc_[kb], &att_, &part_, &ks_[kb], &vs_[kb]}, pc, groups, n_split);
@@ -1889,6 +1895,10 @@ private:
     // (below 9, TS5_ATTN_PF breaks the helper's same-output promise).
     int attn_pf_min_ = 9;
     bool attn_pf128_ = true;
+    // Heads of 256 and 512 in attn_pf's builds that need 128 registers a
+    // thread instead of 168 on the PS5 (two workgroups a compute unit instead
+    // of one), with the same output (TS5_ATTN_PF_SLIM=1; being measured).
+    bool attn_pf_slim_ = false;
     // Generation over at least this many keys uses attn_dec (TS5_ATTN_DEC;
     // 0: never). By default (-1) from the first key, the only setting at
     // which a verify batch across the start takes generation's kernel for
