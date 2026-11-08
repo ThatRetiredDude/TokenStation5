@@ -356,13 +356,14 @@ LP_NATIVE_VECTOR_WIDTH=1024 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --
 LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk "${g4[@]}"
 LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 TS5_ATTN_DEC=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 \
     --backend vk --ntok 40 --step "${g4[@]}"
-echo "== 8-bit KV cache with Q and K turned (TS5_KV_TURN=1): the same scores, so as close to the CPU's fp32 cache"
-# The turn keeps every Q.K, so the fp32 reference (which doesn't turn) still
-# holds: heads of 64 to 512, the prompt's kernels and one token a call.
-TS5_KV=q8 TS5_KV_TURN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 300 "${shapes[@]}"
-TS5_KV=q8 TS5_KV_TURN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 60 --step \
+echo "== 8-bit KV cache without the turn of Q and K (TS5_KV_TURN=0, as the store title has it)"
+# The steps above turn Q and K (the Linux default), which keeps every Q.K, so
+# the fp32 reference (which doesn't turn) holds for both: heads of 64 to 512,
+# the prompt's kernels and one token a call.
+TS5_KV=q8 TS5_KV_TURN=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 300 "${shapes[@]}"
+TS5_KV=q8 TS5_KV_TURN=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 60 --step \
     "${shapes[@]}" "${h64[@]}"
-LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 TS5_KV_TURN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 \
+LP_NATIVE_VECTOR_WIDTH=1024 TS5_KV=q8 TS5_KV_TURN=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 \
     --backend vk --ntok 40 --step "${g4[@]}"
 
 echo "== attn_pf256s and attn_pf512s (the default; TS5_ATTN_PF_SLIM=0 the wider builds): the same logits as attn_pf256 and attn_pf512, byte for byte"
@@ -583,13 +584,16 @@ rm -f "$work"/qwen3-Q4_0.gguf*.ts5ref
 ! "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep -q perplexity || unexpected $LINENO  # test tokens: no next-token measure
 TS5_KV=q8 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
 TS5_KV=q8 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
+# The turned cache's answers (.q8t) are saved apart from the plain one's
+# (.q8, TS5_KV_TURN=0), which round other values.
+[ -s "$work/qwen3-Q4_0.gguf.q8t.ts5ref" ] && [ ! -e "$work/qwen3-Q4_0.gguf.q8.ts5ref" ]
+TS5_KV=q8 TS5_KV_TURN=0 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
+TS5_KV=q8 TS5_KV_TURN=0 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
+python3 "$here/q8_refcmp.py" "$work/qwen3-Q4_0.gguf" | grep -c "vs 16-bit cache, CPU" | grep -qx 2
 # TS5_CHECK_REF_KV=f16: the GPU's 8-bit cache against the 16-bit answers
-# saved above, with no CPU run. A turned cache's reference turns too, and its
-# answers aren't saved, so the CPU runs again.
+# saved above, with no CPU run.
 TS5_KV=q8 TS5_CHECK_REF_KV=f16 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null |
     grep "cpu answers saved earlier: PASS$"
-TS5_KV=q8 TS5_KV_TURN=1 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
-TS5_KV=q8 TS5_KV_TURN=1 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
 # On a text's tokens (-p): answers saved apart from the test tokens', then used again.
 txt=$(head -c 3000 "$engine/DESIGN.md")
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "$txt" 2> /dev/null |
@@ -631,7 +635,7 @@ echo "== -c auto with TS5_KV unset: 8 bits where f16 holds under 24,576 tokens a
 # 4.5 and 3 GiB below: a change in what a load takes moves it).
 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2> "$work/kvauto.err" > /dev/null
 grep "8-bit KV cache: [0-9]* tokens, where f16 fits 2048 (TS5_KV=f16 keeps f16)" "$work/kvauto.err"
-grep "KV cache [0-9.]* GiB (q8, " "$work/kvauto.err"
+grep "KV cache [0-9.]* GiB (q8, Q and K turned, " "$work/kvauto.err"
 TS5_KV=f16 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2>&1 > /dev/null |
     grep "KV cache [0-9.]* GiB (f16, 2048 tokens)"
 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 2048 -p hi -n 1 2>&1 > /dev/null |

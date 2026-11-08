@@ -1106,8 +1106,9 @@ private:
             cache += c;
             scales += sc;
         }
-        ts5::log_line("ts5: %s: weights %.2f GiB, KV cache %.2f GiB (%s, %d tokens), %s memory", name_.c_str(),
-                weight_bytes_ / 1073741824.0, 2.0 * (cache + scales) / 1073741824.0, kv_type_name(kv_), n_ctx_,
+        ts5::log_line("ts5: %s: weights %.2f GiB, KV cache %.2f GiB (%s%s, %d tokens), %s memory", name_.c_str(),
+                weight_bytes_ / 1073741824.0, 2.0 * (cache + scales) / 1073741824.0, kv_type_name(kv_),
+                kv_ == KvType::Q8 && kv_turn_setting() ? ", Q and K turned" : "", n_ctx_,
                 x_.map ? "unified" : "device");
         return true;
     }

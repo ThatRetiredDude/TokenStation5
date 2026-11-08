@@ -1,7 +1,7 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// qkv_post_q8 with Q and K turned before the 8-bit cache (TS5_KV_TURN=1, see
-// qkv_post.glsl).
+// qkv_post_q8 with Q and K turned before the 8-bit cache (kv_turn_setting(),
+// see qkv_post.glsl).
 #define KV_Q8
 #define KV_TURN
 #include "qkv_post.glsl"

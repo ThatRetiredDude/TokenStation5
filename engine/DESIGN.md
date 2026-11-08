@@ -23,7 +23,7 @@ small enough to reason about.
 | Tokenizers | byte-level BPE (Qwen2, Llama 3 and Qwen3.5 pre-tokenizers, with Unicode's letter, mark and number classes from a generated table), SentencePiece (Llama 2, Gemma 3), Gemma 4's (BPE merges over code points, spaces as U+2581, split only at newlines) | Tekken's case-splitting pre-tokenizer (approximated now) |
 | Chat formats | ChatML, Llama 3, Mistral `[INST]` | Jinja templates, tool calls |
 | API | `/v1/chat/completions` (+ streaming), `/v1/completions`, `/v1/models`, `/health`; llama-server style `timings` | Anthropic `/v1/messages`, parallel slots |
-| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`) | |
+| KV cache | f16, 8-bit with an f16 scale per 32 values (`TS5_KV=q8`; on Linux with Q and K turned per head first) | 4-bit |
 | Long context | the model's own window; YaRN for Qwen 2.5 and Qwen3 past 32k (`TS5_YARN=1`) | YaRN for other families |
 
 Not in scope: training, multi-GPU, CUDA/ROCm, Python.
@@ -674,6 +674,36 @@ way) finds it 0.4% to 1% off on Llama 3.1 8B, Llama 3.2 3B and Qwen3 8B but
 of what fits, `TS5_KV=q8` gets an f16 cache wherever f16 already reaches the
 model's training context: 8 bits are only worth their precision where they
 buy context.
+
+That check is loose on real models: their two sides' values differ by about
+1e-3 before rounding, enough to flip roundings, so the GPU's and the CPU's
+8-bit caches can be as far apart as either is from f16. The fair measure is
+how far each lands from the 16-bit answers: `TS5_CHECK_REF_KV=f16 ts5
+check` for the GPU (no CPU run), `tests/q8_refcmp.py` for the CPU's own cost
+from the two saved answer files. On the PS5 (128 tokens, share of the largest
+logit) the GPU matched the exact math on 7 of 8 models: Coder 7B 0.26 (exact
+0.25), Gemma 3 12B 0.11 (0.11), Qwen3 8B 0.025, Qwen3 14B 0.021, DeepSeek
+14B 0.022, Coder 14B 0.009, Llama 3.1 8B 0.008. Gemma 4 12B lost 0.15, twice
+the exact 0.071, in attn_pf's 8-bit builds (0.074 with `TS5_ATTN_PF=0`; test
+models with its layout, 16 heads of 512 on one K/V head, don't show it). The
+cost follows K's uneven channels (`tests/k_channels.py`:
+Coder 7B's K bias peaks at 1,297 times its head's median, the 14Bs' at about
+155, Gemma 3's K norm at 17): one large value in a block of 32 sets the scale
+the other 31 round to.
+
+So on Linux the 8-bit cache turns Q and K per head first (`qkv_post_q8t`,
+and the CPU reference the same way; `TS5_KV_TURN=0` doesn't, the store title
+only with `TS5_KV_TURN=1`): after RoPE, both go through fixed signs and the
+Walsh-Hadamard butterflies (no 1/sqrt(n)), and Q is also scaled by 1/HD, a
+power of two. H times H is HD times the identity, so every score Q.K stays
+the same, and K's large channels spread over the whole head before it is
+rounded. Against the 16-bit answers that took Qwen3 14B from 0.021 to
+0.0074, Qwen3 8B 0.025 to 0.011, DeepSeek 14B 0.022 to 0.016, Gemma 3 12B
+0.11 to 0.092 and Gemma 4 12B 0.15 to 0.073; Coder 14B went from 0.009 to
+0.013 and Llama 3.1 8B stayed at 0.006. It costs 0.1% to 0.5% of the speed
+(Qwen3 14B and Gemma 4 12B, 512 and 4,096-token prompts), within the runs'
+spread. Its answers are saved apart (`.q8t.ts5ref`) from the plain cache's
+(`.q8.ts5ref`).
 
 Qwen 2.5 and Qwen3 were trained on a 32,768-token window (Qwen3's files say
 40,960: the window and room to answer), and their model cards stretch it to

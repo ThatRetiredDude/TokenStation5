@@ -113,13 +113,15 @@ bool model_id(const std::string &path, uint64_t &size, uint64_t &hash) {
     return true;
 }
 
-// 0 is f16, which the files saved before this field all are.
-uint32_t kv_code(KvType t) { return t == KvType::F16 ? 0 : t == KvType::Q8 ? 1 : 2; }
+// 0 is f16, which the files saved before this field all are. 3: an 8-bit
+// cache with Q and K turned (kv_turn_setting()), which rounds other values.
+uint32_t kv_code(KvType t) { return t == KvType::F16 ? 0 : t == KvType::Q8 ? (kv_turn_setting() ? 3 : 1) : 2; }
 
 // One file per cache type, so trying one doesn't throw away the other's, and
 // per text (tag: its tokens' hash) for checks of a text's tokens.
 std::string ref_path(const std::string &model, KvType kv, const std::string &tag) {
-    return model + (kv == KvType::F16 ? "" : std::string(".") + kv_type_name(kv)) + (tag.empty() ? "" : "." + tag) +
+    const std::string kind = kv == KvType::Q8 && kv_turn_setting() ? "q8t" : kv_type_name(kv);
+    return model + (kv == KvType::F16 ? "" : "." + kind) + (tag.empty() ? "" : "." + tag) +
            ".ts5ref";
 }
 
@@ -226,7 +228,7 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     r.gpu_ms = now_ms() - t;
     // Saved answers are the file's own window's and RoPE's: a test window,
     // or positions stretched by YaRN, need their own.
-    bool own = m.hp.swa_test || m.hp.yarn_factor > 1.f;
+    const bool own = m.hp.swa_test || m.hp.yarn_factor > 1.f;
     // TS5_CHECK_REF_KV=f16 (or q8): the reference keeps its cache in that type
     // instead of the GPU's, e.g. how far an 8-bit cache on the GPU is from a
     // 16-bit one. The pass bar is still the GPU's cache type's.
@@ -240,9 +242,6 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
             ts5::log_line("ts5: check against the answers with a cache in %s (the GPU keeps %s)", kv_type_name(ref_kv),
                           kv_type_name(gpu.kv_type()));
     }
-    // A turned 8-bit cache (TS5_KV_TURN) rounds other values than the saved
-    // 8-bit answers did: its reference runs afresh and isn't saved.
-    own = own || (ref_kv == KvType::Q8 && kv_turn_setting());
     r.saved = !fresh && !own && load_ref(m.gguf.path, n, nv, ref_kv, tag, ref);
     bool ok = true;
     if (!r.saved) {

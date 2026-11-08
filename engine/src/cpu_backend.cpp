@@ -481,8 +481,12 @@ Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv) { return new Cpu
 
 bool kv_turn_setting() {
     static const bool on = [] {
-        const char *e = getenv("TS5_KV_TURN");
-        return e && atoi(e) != 0;
+        if (const char *e = getenv("TS5_KV_TURN"); e && *e) return atoi(e) != 0;
+#ifdef TS5_PS5
+        return false;  // the store title keeps the plain 8-bit cache
+#else
+        return true;
+#endif
     }();
     return on;
 }
