@@ -158,7 +158,7 @@ Longest context at "As much as fits", no helper, measured on a PS5 under
 Debian on 2026-11-08 with the defaults (1.5 GiB of RAM kept free; the
 16-bit cache, or with Room for longer contexts at Automatic 8 bits where a
 model would get under 24,576 tokens, and 8-bit keys with 4-bit values where
-8 bits still fall short of its window). A load can land one step lower or
+8 bits still fall short of its window by more than an eighth). A load can land one step lower or
 higher with how much RAM is free at that moment. Cold load times are from
 the original 5 Gb/s USB SATA drive (about 290 MB/s).
 

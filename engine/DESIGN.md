@@ -770,9 +770,11 @@ On the PS5 (job CM) the V turn is what makes it pass: against the 16-bit
 answers the GPU's k8v4 cache is 0.028 to 0.059 off with V turned on Qwen3
 8B and the three 14Bs, and 0.11 to 0.12, over the bar, without it on
 DeepSeek and Coder 14B. So `-c auto` takes it by itself where the automatic
-8-bit cache still falls short of the window and V is turned
-(`auto_kv_type`): DeepSeek and Coder 14B, 26,624 tokens in 8 bits, get
-their whole 32,768. Long-document questions (job CN, no YaRN, the same seed
+8-bit cache still falls short of the window, V is turned and it holds an
+eighth more tokens or better (`auto_kv_type`): DeepSeek and Coder 14B,
+26,624 tokens in 8 bits, get their whole 32,768. Qwen3 14B stays at 8 bits:
+they hold 31,744 or 32,768 of its 32,768 tokens by a few MiB of free memory
+(job CO), and one more block isn't worth 4-bit V. Long-document questions (job CN, no YaRN, the same seed
 as each other): at the whole window DeepSeek answered 10 and 7 of 11 on two
 documents against 7 and 8 with 8 bits at 26,624, and Coder 14B 10 against
 9; on the same document at 26,624 tokens DeepSeek's 8-bit and k8v4 answers

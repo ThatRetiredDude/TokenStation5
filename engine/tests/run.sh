@@ -802,7 +802,7 @@ echo "== memory: a load that would leave the system less than its reserve is ref
 echo "== -c auto with TS5_KV=q8: an f16 cache, as the test model's whole context fits in f16"
 TS5_KV=q8 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "KV cache [0-9.]* GiB (f16, "
 echo "== -c auto with TS5_KV unset: 8 bits where f16 holds under 24,576 tokens and less than the model's context,"
-echo "   then 8-bit K and 4-bit V where 8 bits still hold less"
+echo "   then 8-bit K and 4-bit V where 8 bits still hold less and that holds an eighth more"
 # 2.002 GiB leaves this model 2,048 tokens of f16 (tests' arithmetic, as the
 # 4.5 and 3 GiB below: a change in what a load takes moves it), 3,072 in 8
 # bits and its whole 4,096 in 8-bit K and 4-bit V.
@@ -820,6 +820,12 @@ grep "KV cache [0-9.]* GiB (q8, Q, K and V turned, " "$work/kvq8.err"
 TS5_KV_TURN_V=0 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2> "$work/kvnov.err" > /dev/null
 grep "KV cache [0-9.]* GiB (q8, Q and K turned, " "$work/kvnov.err"
 ! grep "4-bit V KV cache:" "$work/kvnov.err" || unexpected $LINENO
+# Only for an eighth more tokens or better: at 2.005 GiB, with YaRN past the
+# 4,096-token window and a 10,240-token cap, 8 bits hold 9,216 and stay.
+TS5_YARN=1 TS5_CTX_MAX=10240 TS5_GPU_MEMORY_GIB=2.005 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 \
+    2> "$work/kvmargin.err" > /dev/null
+grep "KV cache [0-9.]* GiB (q8, Q, K and V turned, 9216 tokens)" "$work/kvmargin.err"
+! grep "4-bit V KV cache:" "$work/kvmargin.err" || unexpected $LINENO
 # TS5_KV=q4 (asked for, never automatic): 4 bits, more tokens than 8.
 TS5_KV=q4 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2> "$work/kvq4.err" > /dev/null
 q8_tok=$(sed -n 's/.*KV cache [0-9.]* GiB (q8, Q, K and V turned, \([0-9]*\) tokens).*/\1/p' "$work/kvq8.err")

@@ -143,8 +143,8 @@ bool f16_reaches(int f16_ctx, int train);
 // where the heads allow a quantized cache), train the most tokens the context
 // may hold, fit(t) the tokens a cache of type t fits. Automatic, f16 short of
 // kQ8Below and of train takes q8 where that fits more, and q8 short of train
-// takes K8V4 where that fits more and V is turned (kv_turn_v_setting, heads
-// a power of two wide). The app's estimates use it too. log: each change gets
+// takes K8V4 where that fits an eighth more or better and V is turned
+// (kv_turn_v_setting, heads a power of two wide). The app's estimates use it too. log: each change gets
 // its reason.
 KvType auto_kv_type(const HParams &hp, KvType kv, bool automatic, int train, const std::function<int(KvType)> &fit,
                     std::vector<std::string> *log = nullptr);

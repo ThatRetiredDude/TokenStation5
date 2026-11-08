@@ -2286,12 +2286,14 @@ KvType auto_kv_type(const HParams &hp, KvType kv, bool automatic, int train, con
         // (job CN: long-document questions right 10 against 7 and 7 against
         // 8 on DeepSeek, 10 against 9 on Coder; on the same document at
         // 26,624 tokens one answer apart). Without the V turn 4-bit V
-        // fails the check on both.
+        // fails the check on both. Only for an eighth more tokens or more:
+        // Qwen3 14B's 8 bits reach 31,744 or 32,768 of its 32,768 by a
+        // few MiB of free memory, and 1,024 tokens aren't worth 4-bit V.
         auto pow2 = [](int d) { return d > 0 && (d & (d - 1)) == 0; };
         if (kv == KvType::Q8 && !f16_reaches(q8, train) && kv_turn_v_setting() && pow2(hp.head_dim) &&
             (!hp.head_dim_swa || pow2(hp.head_dim_swa))) {
             const int k8v4 = fit(KvType::K8V4);
-            if (k8v4 > q8) {
+            if (k8v4 >= q8 + q8 / 8) {
                 say("8-bit K and 4-bit V KV cache: " + std::to_string(k8v4) + " tokens, where 8 bits fit " +
                     std::to_string(q8) + " (TS5_KV=q8 keeps 8 bits)");
                 kv = KvType::K8V4;
