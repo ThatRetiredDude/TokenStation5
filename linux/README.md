@@ -186,11 +186,16 @@ The app's own settings are on its Settings page, as on the console.
 The app reads `ts5.env` in its data folder, as the title does (engine
 settings such as `TS5_KV=q8`).
 
-Longer than 32k on Qwen3 and Qwen 2.5 (Coder): `TS5_YARN=1` stretches their
-32,768-token window with YaRN, as their model cards do, up to 131,072 tokens.
-For the API service, add `TS5_YARN=1` to `/etc/default/tokenstation` and set
-`CONTEXT=auto` or a number. It's off by default: while it's on, short chats
-run with stretched positions too.
+Longer than 32k on Qwen3 and Qwen 2.5 (Coder): Settings > MODELS > Longer
+context for Qwen3 8B and Coder 7B (`TS5_YARN=1`) stretches their 32,768-token
+window with YaRN, as their model cards do, up to 131,072 tokens. On the PS5
+that is 40,960 tokens for Qwen3 8B (82,944 with Room for longer contexts)
+and 112,640 for Coder 7B, with 10 of 11 long-document questions right at
+78k on Qwen3 8B. The 14Bs run out of memory before 32k, so it doesn't change
+them. For the API service, add `TS5_YARN=1` to `/etc/default/tokenstation`
+and set `CONTEXT=auto` or a number. It's off by default: while it's on and
+the context is past 32k, short chats run with stretched positions too. With
+a context of 32,768 or less it changes nothing.
 
 Speed test: `ts5 bench -m model.gguf --pp 512 --tg 128`.
 

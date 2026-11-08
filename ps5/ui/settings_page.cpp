@@ -103,6 +103,13 @@ const std::vector<Row> &setting_rows() {
          "Replies are written at the same speed either way.",
          "Now: the model loads again, which takes a few seconds", {{"", "Off"}, {"0", "On"}}, ""},
 #ifdef TS5_LINUX
+        {"MODELS", "TS5_YARN", "Longer context for Qwen3 8B and Coder 7B",
+         "Lets Qwen3 8B and Qwen 2.5 Coder 7B read past their 32,768-token limit (YaRN), as far as memory "
+         "allows: on the PS5 about 41,000 tokens for Qwen3 8B (83,000 with Room for longer contexts) and "
+         "112,000 for Coder 7B. Other models don't change. With Longest context at 32,768 tokens or less it "
+         "changes nothing; past that, every chat with these two models reads with stretched positions, which "
+         "can word a few short answers differently.",
+         "Now: the model loads again, which takes a few seconds", {{"", "Off"}, {"1", "On"}}, ""},
         {"MODELS", "TS5_DRAFT_MODEL", "Helper model",
          "A small model of the same family (such as Qwen3 0.6B for Qwen3 8B, or Llama 3.2 1B for Llama 3.1 8B) "
          "guesses a few words ahead and the big model checks them all at once, so replies come faster. Answers "
