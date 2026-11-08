@@ -18,6 +18,9 @@ mkdir -p "$work"
 cmake -S "$engine" -B "$engine/build" > /dev/null
 cmake --build "$engine/build" -j"$(nproc)" > /dev/null
 ts5="$engine/build/ts5"
+# `! cmd` alone never stops a set -e script, so a negated check ends in
+# `|| unexpected $LINENO`: the command that should have failed succeeded.
+unexpected() { echo "run.sh line $1: succeeded where it should fail"; exit 1; }
 
 # Vocab-only GGUFs from llama.cpp, pinned.
 rev=6868a52cb337450658006ad2f9281c2eb63f1666
@@ -443,14 +446,14 @@ TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-kmix.gguf" "$ts5" run --backend cpu -m 
 cmp "$work/pad-off.txt" "$work/pad-on.txt"
 grep -q "draft model .* ready" "$work/pad-on.err"  # narrower drafter accepted (the console case)
 grep -q "helper [0-9]*/[1-9][0-9]* accepted" "$work/pad-on.err"  # and it kept proposing
-! grep -q "draft model \(stopped\|failed\)" "$work/pad-on.err"
+! grep -q "draft model \(stopped\|failed\)" "$work/pad-on.err" || unexpected $LINENO
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" -p "$nr" -n 100 --temp 0 > "$work/padr-off.txt" 2> /dev/null
 TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-pad.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
     -p "$nr" -n 100 --temp 0 > "$work/padr-on.txt" 2> "$work/padr-on.err"
 cmp "$work/padr-off.txt" "$work/padr-on.txt"
 grep -q "draft model .* ready" "$work/padr-on.err"  # wider drafter accepted too
 grep -q "helper [0-9]*/[1-9][0-9]* accepted" "$work/padr-on.err"
-! grep -q "draft model \(stopped\|failed\)" "$work/padr-on.err"
+! grep -q "draft model \(stopped\|failed\)" "$work/padr-on.err" || unexpected $LINENO
 echo "== a target whose token list itself is padded (and the reverse), as Qwen 7B pads against the 0.5B"
 mk_k qwen2-padlist qwen2 qwen2 --pad-tokens 128
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-padlist.gguf" -p "$nr" -n 100 --temp 0 > "$work/padl-off.txt" 2> /dev/null
@@ -459,12 +462,12 @@ TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-kmix.gguf" "$ts5" run --backend cpu -m 
 cmp "$work/padl-off.txt" "$work/padl-on.txt"
 grep -q "draft model .* ready" "$work/padl-on.err"  # the drafter's shorter token list is accepted
 grep -q "helper [0-9]*/[1-9][0-9]* accepted" "$work/padl-on.err"
-! grep -q "draft model \(stopped\|failed\)" "$work/padl-on.err"
+! grep -q "draft model \(stopped\|failed\)" "$work/padl-on.err" || unexpected $LINENO
 TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-padlist.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
     -p "$nr" -n 100 --temp 0 > "$work/padlr-on.txt" 2> "$work/padlr-on.err"
 cmp "$work/padr-off.txt" "$work/padlr-on.txt"
 grep -q "draft model .* ready" "$work/padlr-on.err"  # a longer one too
-! grep -q "draft model \(stopped\|failed\)" "$work/padlr-on.err"
+! grep -q "draft model \(stopped\|failed\)" "$work/padlr-on.err" || unexpected $LINENO
 echo "== a drafter whose control tokens are named differently drafts (DeepSeek's Qwens, Gemma 4); one text token differing is refused"
 mk_k qwen2-ctl qwen2 qwen2 --rename-controls
 TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-ctl.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
@@ -473,7 +476,7 @@ cmp "$work/padr-off.txt" "$work/ctl-on.txt"
 grep -q "draft model: [1-9][0-9]* control or placeholder tokens named differently" "$work/ctl-on.err"
 grep -q "draft model .* ready" "$work/ctl-on.err"
 grep -q "helper [0-9]*/[1-9][0-9]* accepted" "$work/ctl-on.err"
-! grep -q "draft model \(stopped\|failed\|not used\)" "$work/ctl-on.err"
+! grep -q "draft model \(stopped\|failed\|not used\)" "$work/ctl-on.err" || unexpected $LINENO
 mk_k qwen2-tok qwen2 qwen2 --rename-token 1000
 TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-tok.gguf" "$ts5" run --backend cpu -m "$work/qwen2-kmix.gguf" \
     -p "$nr" -n 100 --temp 0 > "$work/tok-on.txt" 2> "$work/tok-on.err"
@@ -498,7 +501,7 @@ TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/llama-spaces.gguf" "$ts5" run --backend cpu -
     -p "$nr" -n 100 --temp 0 > "$work/sp-on.txt" 2> "$work/sp-on.err"
 cmp "$work/sp-off.txt" "$work/sp-on.txt"
 grep -q "draft model .* ready" "$work/sp-on.err"
-! grep -q "named differently\|draft model \(stopped\|failed\|not used\)" "$work/sp-on.err"
+! grep -q "named differently\|draft model \(stopped\|failed\|not used\)" "$work/sp-on.err" || unexpected $LINENO
 grep -q "helper [0-9]*/[1-9][0-9]* accepted" "$work/sp-on.err"
 echo "== the guards at the vocabulary seams, forced to fire (a boosted row the greedy target soon picks)"
 mk_k qwen2-padhot qwen2 qwen2 --pad-tokens 128 --boost-token 151940
@@ -514,12 +517,12 @@ TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-padhot.gguf" "$ts5" run --backend cpu -
     -p "$nr" -n 100 --temp 0 > "$work/padb-on.txt" 2> "$work/padb-on.err"
 cmp "$work/padr-off.txt" "$work/padb-on.txt"
 grep -q "draft model .* ready" "$work/padb-on.err"
-! grep -q "draft model \(stopped\|failed\)" "$work/padb-on.err"
+! grep -q "draft model \(stopped\|failed\)" "$work/padb-on.err" || unexpected $LINENO
 echo "== ts5 check (GPU vs CPU in one command, as run on the console), then again on the saved answers"
 rm -f "$work"/qwen3-Q4_0.gguf*.ts5ref
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
-! "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep -q perplexity  # test tokens: no next-token measure
+! "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep -q perplexity || unexpected $LINENO  # test tokens: no next-token measure
 TS5_KV=q8 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep ", cpu [0-9]* ms: PASS$"
 TS5_KV=q8 "$ts5" check -m "$work/qwen3-Q4_0.gguf" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
 # On a text's tokens (-p): answers saved apart from the test tokens', then used again.
@@ -528,7 +531,7 @@ txt=$(head -c 3000 "$engine/DESIGN.md")
     grep ", over the bar at 0, on the text's next tokens perplexity [0-9.e+]* on the GPU and [0-9.e+]* on the CPU, KL [0-9.e-]* on average .*, cpu [0-9]* ms: PASS$"
 "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "$txt" 2> /dev/null | grep "cpu answers saved earlier: PASS$"
 ls "$work"/qwen3-Q4_0.gguf.t*.ts5ref > /dev/null
-! "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "hi" 2>&1 | grep -q PASS
+! "$ts5" check -m "$work/qwen3-Q4_0.gguf" -n 64 -p "hi" 2>&1 | grep -q PASS || unexpected $LINENO
 # Saved answers of an older version are kept beside the new file, not written over.
 python3 -c 'import struct, sys; f = open(sys.argv[1], "r+b"); f.seek(8); f.write(struct.pack("<I", 1))' \
     "$work/qwen3-Q4_0.gguf.ts5ref"
@@ -547,7 +550,7 @@ echo "== memory: a load that would leave the system less than its reserve is ref
     grep "not enough memory: the weights and buffers take [0-9.]* GiB and the smallest context [0-9.]* GiB, [0-9.]* GiB is free"
 { TS5_SYSTEM_RESERVE_GIB=100000 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c 2048 -p hi -n 1 2>&1 > /dev/null || true; } |
     grep "and a context of 2048 tokens [0-9.]* GiB"
-! TS5_SYSTEM_RESERVE_GIB=100000 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c 2048 -p hi -n 1 > /dev/null 2>&1
+! TS5_SYSTEM_RESERVE_GIB=100000 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c 2048 -p hi -n 1 > /dev/null 2>&1 || unexpected $LINENO
 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "GiB of it kept free for the system"
 echo "== -c auto with TS5_KV=q8: an f16 cache, as the test model's whole context fits in f16"
 TS5_KV=q8 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "KV cache [0-9.]* GiB (f16, "
@@ -558,7 +561,7 @@ TS5_YARN=4 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backe
 # It changes the logits (so the passes above test it), and only with TS5_YARN.
 "$ts5" logits -m "$work/qwen3-Q4_0.gguf" -o "$work/yarn0.bin" 1 2 3 4 5 6 7 8 2> /dev/null
 TS5_YARN=2 "$ts5" logits -m "$work/qwen3-Q4_0.gguf" -o "$work/yarn2.bin" 1 2 3 4 5 6 7 8 2> /dev/null
-! cmp -s "$work/yarn0.bin" "$work/yarn2.bin"
+if cmp -s "$work/yarn0.bin" "$work/yarn2.bin"; then echo "TS5_YARN=2 changed nothing"; exit 1; fi
 TS5_YARN=0 "$ts5" logits -m "$work/qwen3-Q4_0.gguf" -o "$work/yarn2.bin" 1 2 3 4 5 6 7 8 2> /dev/null
 cmp "$work/yarn0.bin" "$work/yarn2.bin"
 # The check runs its CPU reference stretched alike, and keeps no saved answers for it.
@@ -568,7 +571,9 @@ TS5_YARN=1 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/
     grep "YaRN: positions stretched 4.00x over the 4096-token window, for 16384 tokens of context"
 TS5_YARN=1 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c 6144 -p hi -n 1 2>&1 > /dev/null |
     grep "YaRN: positions stretched 1.50x over the 4096-token window, for 6144 tokens of context"
-TS5_YARN=1 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c 4096 -p hi -n 1 2>&1 > /dev/null | grep -c YaRN | grep -x 0
+if TS5_YARN=1 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -c 4096 -p hi -n 1 2>&1 > /dev/null | grep YaRN; then
+    echo "YaRN on within the model's own window"; exit 1
+fi
 TS5_YARN=1 "$ts5" run -m "$work/llama-Q8_0.gguf" -c auto -p hi -n 1 2>&1 > /dev/null | grep "context 4096$"
 echo "== -c auto with a draft model: what is left after the context, or room kept for it (TS5_HELPER_ROOM=1)"
 TS5_GPU_MEMORY_GIB=4.5 TS5_DRAFT_MODEL="$work/qwen3-Q4_0.gguf" "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 \
@@ -593,8 +598,8 @@ XDG_CONFIG_HOME="$tune" "$ts5" run -m "$work/qwen3-Q4_0.gguf" -p hi -n 1 2>&1 > 
     grep -x "ts5: settings for qwen3-Q4_0.gguf from $tune/tokenstation/tune/qwen3-Q4_0.gguf.env: TS5_DRAFT=2 TS5_DRAFT_MODEL=$work/helper.gguf"
 XDG_CONFIG_HOME="$tune" TS5_DRAFT=4 "$ts5" run -m "$work/qwen3-Q4_0.gguf" -p hi -n 1 2>&1 > /dev/null |
     grep -x "ts5: settings for qwen3-Q4_0.gguf from .*: TS5_DRAFT_MODEL=$work/helper.gguf"
-! XDG_CONFIG_HOME="$tune" TS5_MODEL_TUNE= "$ts5" run -m "$work/qwen3-Q4_0.gguf" -p hi -n 1 2>&1 > /dev/null | grep -q "settings for"
-! XDG_CONFIG_HOME="$tune" "$ts5" run -m "$work/qwen2-Q4_0.gguf" -p hi -n 1 2>&1 > /dev/null | grep -q "settings for"
+! XDG_CONFIG_HOME="$tune" TS5_MODEL_TUNE= "$ts5" run -m "$work/qwen3-Q4_0.gguf" -p hi -n 1 2>&1 > /dev/null | grep -q "settings for" || unexpected $LINENO
+! XDG_CONFIG_HOME="$tune" "$ts5" run -m "$work/qwen2-Q4_0.gguf" -p hi -n 1 2>&1 > /dev/null | grep -q "settings for" || unexpected $LINENO
 sed -i 's/^size=.*/size=1/' "$tune/tokenstation/tune/qwen3-Q4_0.gguf.env"
 XDG_CONFIG_HOME="$tune" "$ts5" run -m "$work/qwen3-Q4_0.gguf" -p hi -n 1 2>&1 > /dev/null |
     grep "qwen3-Q4_0.gguf.env is for another qwen3-Q4_0.gguf (not this size), so it isn't used"
