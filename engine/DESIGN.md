@@ -439,12 +439,20 @@ RADV's null device: `RADV_FORCE_FAMILY=gfx1013` with
 VK_KHR_pipeline_executable_properties compiles for the console's GPU on
 any machine (`tests/shader_stats.c` prints them; `RADV_DEBUG=shaders` the
 assembly, where attn_pf128's products are all `v_fma_mix_f32`, f16 times
-f32 into f32 in one instruction). ts5's pipelines ask for no subgroup size,
-so RADV picks the wave: 32 under `RADV_PERFTEST=cswave32` (ts5 sets it),
+f32 into f32 in one instruction). By default ts5's pipelines ask for no
+subgroup size, so RADV picks the wave: 32 under `RADV_PERFTEST=cswave32` (ts5 sets it),
 except that a kernel using subgroup operations in workgroups of a multiple
 of 64 threads stays at 64 (the API's subgroup size). On the null device
 that is 106 of the 189 kernels: every attention, mat-vec, norm and
 recurrent-layer kernel; the prompt matmuls and the rest are wave32.
+`TS5_WAVE=32` (Linux) has every pipeline ask for subgroups of 32
+(VK_EXT_subgroup_size_control), `TS5_WAVE=32:mv,attn` only those whose
+names start so (`mv` takes the one-token and the verify-batch mat-vecs
+together, as the helper's same-output rule needs; a workgroup bigger than
+the device allows at that size is left to the driver), to measure what
+wave32 does for generation's kernels (`ts5 peak`'s take it too);
+`TS5_PIPE_STATS=1` logs every pipeline's subgroup size, registers and waves a
+SIMD as the driver built it.
 shader_stats requires wave32 unless `NO_RS=1` (ts5's way). Register counts
 in this file from before 2026-11-09 are its wave32 ones; for a wave64
 kernel the count ts5 gets can differ (the 8-row attn_dec: 256, not 200).

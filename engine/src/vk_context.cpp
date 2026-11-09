@@ -267,7 +267,10 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
     load_tune_file();
     // Wave32 compute on RADV: on the PS5 under Linux, prompts 9% faster
     // (Qwen3 8B, 433 -> 472 tok/s), generation the same, ts5 check passes.
-    // Other drivers ignore it; a RADV_PERFTEST already set wins.
+    // Under it RADV still makes a kernel with subgroup operations in
+    // workgroups of a multiple of 64 threads wave64 (generation's mat-vecs,
+    // attention and norms, so generation stayed the same); TS5_WAVE asks for
+    // a size. Other drivers ignore it; a RADV_PERFTEST already set wins.
     if (!getenv("RADV_PERFTEST")) setenv("RADV_PERFTEST", "cswave32", 0);
 #endif
     auto *c = new VkContext;
@@ -379,6 +382,44 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
         }
     }
 #ifndef TS5_PS5
+    // TS5_WAVE=32 or 64: compute pipelines ask for subgroups that wide instead
+    // of leaving it to the driver. RADV, even under cswave32, keeps a kernel
+    // with subgroup operations in workgroups of a multiple of 64 threads at
+    // 64 (every mat-vec, attention and norm kernel) and makes the rest 32.
+    // TS5_WAVE=32:mv,attn asks only for the pipelines whose names start so
+    // ("mv" takes the one-token and the verify-batch mat-vecs together, as
+    // the helper's same-output rule needs). A workgroup too big for that
+    // size (maxComputeWorkgroupSubgroups) is left to the driver.
+    VkPhysicalDeviceSubgroupSizeControlFeaturesEXT esc{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
+    if (const char *e = getenv("TS5_WAVE"); e && atoi(e) > 0) {
+        const uint32_t want = (uint32_t)atoi(e);
+        const char *only = strchr(e, ':');
+        VkPhysicalDeviceSubgroupSizeControlFeaturesEXT sc{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
+        VkPhysicalDeviceSubgroupSizeControlPropertiesEXT sp{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES_EXT};
+        if (has_extension(dev_have, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME)) {
+            VkPhysicalDeviceFeatures2 sf{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+            sf.pNext = &sc;
+            vkGetPhysicalDeviceFeatures2(c->physical, &sf);
+            VkPhysicalDeviceProperties2 spp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+            spp.pNext = &sp;
+            vkGetPhysicalDeviceProperties2(c->physical, &spp);
+        }
+        if (sc.subgroupSizeControl && (sp.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) &&
+            (want & (want - 1)) == 0 && want >= sp.minSubgroupSize && want <= sp.maxSubgroupSize) {
+            dev_exts.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+            esc.subgroupSizeControl = VK_TRUE;
+            c->required_subgroup = want;
+            c->required_subgroup_max_wg =
+                (uint32_t)std::min<uint64_t>(UINT32_MAX, (uint64_t)want * sp.maxComputeWorkgroupSubgroups);
+            c->required_subgroup_only = only ? only + 1 : "";
+            c->subgroup_size = std::min(c->subgroup_size, want);
+            ts5::log_line("ts5: TS5_WAVE: subgroups of %u for %s", want, only ? only + 1 : "every compute pipeline");
+        } else {
+            ts5::log_line("ts5: TS5_WAVE=%s ignored: compute subgroups here are %u to %u wide%s", e, sp.minSubgroupSize,
+                          sp.maxSubgroupSize, sc.subgroupSizeControl ? "" : ", and no size can be asked for");
+        }
+    }
     if (has_extension(dev_have, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
         dev_exts.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
         c->memory_budget = true;
@@ -400,6 +441,12 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
         pe.pNext = e12.pNext;
         e12.pNext = &pe;
     }
+#ifndef TS5_PS5
+    if (c->required_subgroup) {
+        esc.pNext = e12.pNext;
+        e12.pNext = &esc;
+    }
+#endif
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qci.queueFamilyIndex = c->queue_family;
@@ -428,6 +475,28 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
     }
 #endif
     return c;
+}
+
+bool asks_subgroup(const VkContext &c, const std::string &name, const uint32_t *code, size_t bytes) {
+    if (!c.required_subgroup) return false;
+    const std::string &only = c.required_subgroup_only;
+    bool named = only.empty();
+    for (size_t s = 0; !named && s < only.size();) {
+        size_t e = only.find(',', s);
+        if (e == std::string::npos) e = only.size();
+        named = e > s && name.compare(0, e - s, only, s, e - s) == 0;
+        s = e + 1;
+    }
+    if (!named) return false;
+    const size_t words = bytes / 4;
+    for (size_t i = 5; i < words;) {  // OpExecutionMode (16) main LocalSize (17) x y z
+        const uint32_t op = code[i] & 0xffff, len = code[i] >> 16;
+        if (!len || i + len > words) break;
+        if (op == 16 && len >= 6 && code[i + 2] == 17)
+            return (uint64_t)code[i + 3] * code[i + 4] * code[i + 5] <= c.required_subgroup_max_wg;
+        i += len;
+    }
+    return true;
 }
 
 void destroy_vk_context(VkContext *c) {

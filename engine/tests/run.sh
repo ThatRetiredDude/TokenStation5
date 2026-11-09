@@ -380,6 +380,44 @@ for e in TS5_KV=f16 TS5_KV=k8v4; do
     echo "same logits: gemma4-kmix $e"
 done
 rm -f "$work/xr-0.bin" "$work/xr-1.bin"
+echo "== TS5_WAVE: pipelines asking for a subgroup size the device has: the CPU's answers, verify batches == one token a call; one it hasn't: ignored"
+# A size no device has (4,096) is ignored, and its log line gives the sizes
+# this one has; the test asks for the smallest. lavapipe's come in one size
+# (8 wide at its usual 256 bits, 32 with LP_NATIVE_VECTOR_WIDTH=1024), so
+# asking for it leaves the kernels as they are but for how lavapipe lowers
+# subgroup sums (at 16 and 32 wide the logits' last bits differ). On RADV it
+# is the experiment: 32 for the kernels RADV keeps at 64.
+mk qwen2 qwen2 Q4_K_M
+wt=$(seq 3 7 300)
+wv_m=("$work/qwen2-Q4_K_M.gguf" "${rows[0]}" "$work/gemma4-kmix.gguf")
+wv_lp=("" "" LP_NATIVE_VECTOR_WIDTH=1024)
+for i in 0 1 2; do
+    m=${wv_m[$i]} lp=${wv_lp[$i]}
+    env $lp TS5_WAVE=4096 "$ts5" logits -m "$m" -o "$work/wv-i.bin" --step $wt 2> "$work/wv-i.err"
+    sizes=$(grep -oE 'TS5_WAVE=4096 ignored: compute subgroups here are [0-9]+ to [0-9]+ wide' "$work/wv-i.err" || true)
+    [ -n "$sizes" ] || { echo "FAIL: TS5_WAVE=4096 wasn't ignored with the device's sizes on $(basename "$m")"; exit 1; }
+    env $lp "$ts5" logits -m "$m" -o "$work/wv-0.bin" --step $wt 2> /dev/null
+    cmp "$work/wv-0.bin" "$work/wv-i.bin"
+    w=$(awk '{print $7}' <<< "$sizes")
+    if [ "$w" -eq 0 ] || grep -q "no size can be asked for" "$work/wv-i.err"; then
+        echo "TS5_WAVE: this device can't ask for a subgroup size; skipped on $(basename "$m")"
+        continue
+    fi
+    env $lp TS5_WAVE=$w python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 60 --step "$m"
+    env $lp TS5_WAVE=$w "$ts5" logits -m "$m" -o "$work/wv-1.bin" --step $wt 2> "$work/wv-1.err"
+    grep -q "TS5_WAVE: subgroups of $w for every compute pipeline" "$work/wv-1.err"
+    grep -qE "TS5_WAVE: [1-9][0-9]* of [0-9]+ pipelines ask for subgroups of $w" "$work/wv-1.err"
+    env $lp TS5_WAVE=$w "$ts5" logits -m "$m" -o "$work/wv-v.bin" --verify 5 $wt 2> /dev/null
+    cmp "$work/wv-1.bin" "$work/wv-v.bin"
+    env $lp TS5_WAVE=$w:mv,attn "$ts5" logits -m "$m" -o "$work/wv-f.bin" 3 5 7 2> "$work/wv-f.err"
+    n=$(grep -oE 'TS5_WAVE: [0-9]+ of [0-9]+ pipelines' "$work/wv-f.err" || true)
+    a=$(awk '{print $2}' <<< "$n"); b=$(awk '{print $4}' <<< "$n")
+    if [ -z "$a" ] || [ "$a" -eq 0 ] || [ "$a" -ge "$b" ]; then
+        echo "FAIL: TS5_WAVE=$w:mv,attn asked for ${a:-no} of ${b:-?} pipelines on $(basename "$m")"; exit 1
+    fi
+    echo "TS5_WAVE=$w: $(basename "$m") (mv,attn: $a of $b pipelines)"
+done
+rm -f "$work"/wv-*.bin
 echo "== 8-bit KV cache (TS5_KV=q8), against the CPU's fp32 cache: about 0.3% of the largest logit"
 # Every attention kernel has an 8-bit build: attn_pf (and attn_pf128,
 # attn_pf256; attn_pf512 below, with Gemma 4), attn_dec (lanes per key, and

@@ -559,6 +559,7 @@ private:
         if (const char *e = getenv("TS5_ATTN_PF_SLIM")) attn_pf_slim_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_PLAIN")) attn_dec_plain_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_KEYS")) attn_dec_keys_ = atoi(e);
+        if (const char *e = getenv("TS5_PIPE_STATS")) pipe_stats_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC64")) attn_dec64_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_WIDE8")) attn_wide8_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_EXACT")) attn_dec_exact_ = atoi(e) != 0;
@@ -836,8 +837,15 @@ private:
         }
         VkSpecializationInfo si{nsc, se, 4 * nsc, sv};
         if (nsc) cp.stage.pSpecializationInfo = &si;
+        VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT rss{
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT};
+        if (asks_subgroup(*ctx_, name, code, bytes)) {
+            rss.requiredSubgroupSize = ctx_->required_subgroup;
+            cp.stage.pNext = &rss;
+            waved_++;
+        }
         cp.layout = p.layout;
-        stats = stats && get_stats_;
+        stats = (stats || pipe_stats_) && get_stats_;
         if (stats) cp.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
         CHECK(vk.vkCreateComputePipelines(dev_, VK_NULL_HANDLE, 1, &cp, nullptr, &p.pipe));
         vk.vkDestroyShaderModule(dev_, mod, nullptr);
@@ -846,8 +854,13 @@ private:
         return true;
     }
 
+    // TS5_WAVE: whether this pipeline asks for VkContext::required_subgroup:
+    // its name starts with one of required_subgroup_only's prefixes (or there
+    // are none), and its workgroup (the SPIR-V's LocalSize) is no bigger than
+    // the device allows at that size.
     // p.waves and p.wave_size from the driver's statistics (RADV: "Subgroups
-    // per SIMD").
+    // per SIMD"), and with TS5_PIPE_STATS=1 a line for every pipeline: its
+    // subgroup size, registers ("VGPRs") and waves a SIMD.
     void read_stats(const std::string &name, Pipe &p) {
         VkPipelineInfoKHR pi{VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR};
         pi.pipeline = p.pipe;
@@ -861,13 +874,21 @@ private:
         if (get_stats_(dev_, &ei, &ns, nullptr) < 0) return;
         std::vector<VkPipelineExecutableStatisticKHR> st(ns, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR});
         if (get_stats_(dev_, &ei, &ns, st.data()) < 0) return;
+        uint32_t regs = 0;
         for (auto &e : st) {
-            if (strcmp(e.name, "Subgroups per SIMD")) continue;
-            if (e.format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR) p.waves = (uint32_t)e.value.u64;
-            else if (e.format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR) p.waves = (uint32_t)e.value.i64;
+            const bool waves = !strcmp(e.name, "Subgroups per SIMD");
+            if (!waves && strcmp(e.name, "VGPRs")) continue;
+            const uint32_t v = e.format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR  ? (uint32_t)e.value.u64
+                               : e.format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR ? (uint32_t)e.value.i64
+                                                                                               : 0;
+            (waves ? p.waves : regs) = v;
         }
         p.wave_size = ep.subgroupSize;
-        if (p.waves) ts5::log_line("ts5: %s: %u waves of %u a SIMD", name.c_str(), p.waves, p.wave_size);
+        if (pipe_stats_)
+            ts5::log_line("ts5: %s: subgroups of %u, %u registers, %u waves a SIMD", name.c_str(), p.wave_size, regs,
+                          p.waves);
+        else if (p.waves)
+            ts5::log_line("ts5: %s: %u waves of %u a SIMD", name.c_str(), p.waves, p.wave_size);
     }
 
     // Of the prompt kernels (mmb*), the variants in use only.
@@ -1032,6 +1053,9 @@ private:
         if (hp_.attn_gate) { P(split_gate, 2) P(gate_mul, 2) }
         if (rec_layers_) { P(ssm_conv, 3) P(gdn_prep, 5) P(gdn_scan, 5) P(gdn_norm, 3) P(zero, 1) }
 #undef P
+        if (ctx_->required_subgroup)
+            ts5::log_line("ts5: TS5_WAVE: %u of %zu pipelines ask for subgroups of %u", waved_, pipes_.size(),
+                          ctx_->required_subgroup);
         return true;
     }
 
@@ -2256,6 +2280,9 @@ private:
     uint32_t mmb_wgs_ = 0;
     PFN_vkGetPipelineExecutablePropertiesKHR get_props_ = nullptr;
     PFN_vkGetPipelineExecutableStatisticsKHR get_stats_ = nullptr;
+    // TS5_PIPE_STATS=1: every pipeline's statistics in the log (read_stats).
+    bool pipe_stats_ = false;
+    uint32_t waved_ = 0;  // pipelines that asked for TS5_WAVE's subgroup size
     double mmb_slice_cost_ = 0.05;
     // Matrices of fewer blocks than mmb_min_ use mmb too where their split
     // makes that many workgroups (TS5_MMB_SMALL=0: the 64 x 64 kernel).

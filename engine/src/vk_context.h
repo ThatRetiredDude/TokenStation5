@@ -23,6 +23,13 @@ struct VkContext {
     VkPhysicalDeviceProperties props{};
     VkPhysicalDeviceMemoryProperties memory{};
     uint32_t subgroup_size = 0;  // compute shaders' (RADV: 64; lavapipe: 4 to 16)
+    // TS5_WAVE (Linux): the subgroup size compute pipelines ask for
+    // (VK_EXT_subgroup_size_control), 0 where unset or the device can't give
+    // it; subgroup_size is then no more than it. required_subgroup_only: the
+    // pipeline name prefixes that ask, comma-separated (empty: all);
+    // required_subgroup_max_wg: the largest workgroup that may ask.
+    uint32_t required_subgroup = 0, required_subgroup_max_wg = 0;
+    std::string required_subgroup_only;
     // The GPU's compute units (VK_AMD_shader_core_properties; 0: not told).
     uint32_t compute_units = 0;
     // VK_KHR_pipeline_executable_properties is on: pipelines made with
@@ -95,5 +102,10 @@ uint64_t system_reserve();
 VkContext *create_vk_context(int index, bool want_display, std::string &err);
 // Destroys the device and instance. Everything made on them must be gone.
 void destroy_vk_context(VkContext *ctx);
+// Whether a compute pipeline named `name` (SPIR-V `code`, `bytes` long) asks
+// for TS5_WAVE's subgroup size: one is set, the name starts with one of its
+// prefixes (or it has none), and the workgroup (the SPIR-V's LocalSize) is
+// no bigger than that size allows.
+bool asks_subgroup(const VkContext &c, const std::string &name, const uint32_t *code, size_t bytes);
 
 }  // namespace ts5
