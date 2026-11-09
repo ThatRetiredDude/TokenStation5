@@ -277,6 +277,41 @@ for r in 0:1 40:3; do
         { echo "FAIL: TS5_ATTN_PF_ROUNDS=${r%:*}: not ${r#*:} attn_merge calls in the prompt"; exit 1; }
 done
 echo "PASS TS5_ATTN_PF_ROUNDS: the CPU's answers, and the chunks deep in the prompt split 3 ways"
+# TS5_ATTN_PF_TRIM (Linux): attn_pf128/256s/512s with whole tiles unmasked,
+# rows summed by shuffles and, in layers with no ring, no ring arithmetic.
+# =1 is the PS5's build: the CPU's answers (llvmpipe adds a cluster in
+# another order than the shuffles). =3 also scores in base 2 with each key's
+# dot product one fma chain: the CPU's answers, through attn_merge too
+# (TS5_ATTN_SPLITS, TS5_ATTN_PF_ROUNDS). =2 keeps subgroupClusteredAdd: the
+# default's logits byte for byte, so the trim alone changes nothing (slow on
+# llvmpipe, so fewer tokens).
+echo "== TS5_ATTN_PF_TRIM: the CPU's answers with =1 and =3, the default's logits with =2"
+trim=("${shapes[1]}" "${shapes[3]}" "${shapes[4]}")
+for s in 1 3; do
+    TS5_ATTN_PF_TRIM=$s python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
+        "${trim[@]}"
+    TS5_ATTN_PF_TRIM=$s TS5_ATTN_SPLITS=3 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
+        --ntok 300 "${trim[@]}"
+    TS5_ATTN_PF_TRIM=$s python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 600 "$g3"
+    LP_NATIVE_VECTOR_WIDTH=1024 TS5_ATTN_PF_TRIM=$s python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 \
+        --backend vk --ntok 72 "${g4[@]}"
+    TS5_KV=q8 TS5_ATTN_PF_TRIM=$s python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk \
+        --ntok 300 "${trim[@]}"
+    TS5_KV=k8v4 TS5_CPU_KV=k8v4 TS5_ATTN_PF_TRIM=$s python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.025 \
+        --backend vk --ntok 300 "${trim[@]}"
+    TS5_ATTN_PF_TRIM=$s TS5_ATTN_PF_ROUNDS=40 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 \
+        --backend vk --ntok 3400 "$r32"
+done
+trim_toks=$(seq 3 7 2200 | head -100)
+for c in "${shapes[1]}:TS5_KV=f16:attn_pf128.tn" "${shapes[3]}:TS5_KV=k8v4:attn_pf256s_k8v4.tn" \
+         "${shapes[4]}:TS5_KV=q4:attn_pf128_q4.tn" "$g3:TS5_KV=q8:attn_pf256s_q8.t"; do
+    IFS=: read -r m e k <<< "$c"
+    env $e "$ts5" logits -m "$m" -o "$work/trim-0.bin" $trim_toks 2> /dev/null
+    env $e TS5_ATTN_PF_TRIM=2 TS5_PROFILE=1 "$ts5" logits -m "$m" -o "$work/trim-2.bin" $trim_toks 2> "$work/trim-2.err"
+    cmp "$work/trim-0.bin" "$work/trim-2.bin"
+    grep -q "^  $k " "$work/trim-2.err" || { echo "FAIL: TS5_ATTN_PF_TRIM=2 $(basename "$m") $e: no $k"; exit 1; }
+    echo "same logits: $(basename "$m") $e ($k)"
+done
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 100 --step "${shapes[@]}"
 # Heads of 256 and 512 in attn_dec's 4-column builds (the 8-column WIDE8
 # ones are the default).

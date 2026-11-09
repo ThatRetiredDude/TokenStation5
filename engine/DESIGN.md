@@ -460,7 +460,30 @@ their rounds, or under 64. From the PS5's profiles that is about +10% on
 Llama 3.1 8B's 32k-token prompt and +15% at 120k, +6-7% on the 14Bs at 30k
 and +3.6% on Qwen3.5 (estimates). The logits change in the last bits (the
 order the slices are added in); the suite checks them against the CPU at
-3,400 tokens on a test model with Qwen3 8B's heads. Keys
+3,400 tokens on a test model with Qwen3 8B's heads.
+`TS5_ATTN_PF_TRIM=1` (Linux, off until measured on the PS5) runs attn_pf128,
+attn_pf256s and attn_pf512s with less around the same sums (the `_t` builds,
+`PF_TRIM`). A tile that every row of the workgroup sees in full (all its keys
+at or before the first row's token, and inside the last row's window) skips
+the mask; a row's sum over its 4, 8 or 16 lanes is XOR shuffles (lane pairs,
+then pairs of pairs) in place of `subgroupClusteredAdd`; and a layer with no
+ring gets a pipeline with specialization constant 0 set, which drops the
+`key % ring` from every key loaded. In RADV's gfx1013 code the clustered add is
+built from the same lane pairs, so the logits should stay byte for byte the
+same (to be confirmed on the PS5), and the step over 16 keys is 6 to 7% fewer
+vector instructions (attn_pf128 and its cache builds; 9% in attn_pf256s, 12%
+in attn_pf512s): about 3 to 5% off the attention deep in a prompt, an
+estimate. llvmpipe adds a cluster in another order, so the suite checks =1
+against the CPU, and =2 (the `_tc` builds: the trim with the clustered add
+kept, slow on llvmpipe) against the default byte for byte. `=3` (the `_te`
+builds, `PF_EXP2`) adds scores in base 2 (log2(e) folded into the query's
+scale, exp2 for exp, and attn_merge given each slice's largest score back in
+base e) and each key's dot product as one chain of fmas in place of four-value
+dots added up: on gfx1013 9 to 10% fewer vector instructions again in the
+full-tile loop (attn_pf128 1,318 to 1,185, its k8v4 build 1,311 to 1,192,
+attn_pf256s 1,378 to 1,253, attn_pf512s 1,361 to 1,235), still 128 registers;
+about 4% more off the attention, an estimate. Its logits differ from the
+default's in the last bits, so the suite checks it against the CPU. Keys
 are scored 16 at a time in every build, in the same order, so their logits
 are byte for byte the same (the suite checks it). Register counts come from
 RADV's null device: `RADV_FORCE_FAMILY=gfx1013` with

@@ -105,6 +105,42 @@
 #include "attn_pf512s_q8.spv.h"
 #include "attn_pf512s_q4.spv.h"
 #include "attn_pf512s_k8v4.spv.h"
+#include "attn_pf128_t.spv.h"
+#include "attn_pf128_q8_t.spv.h"
+#include "attn_pf128_q4_t.spv.h"
+#include "attn_pf128_k8v4_t.spv.h"
+#include "attn_pf256s_t.spv.h"
+#include "attn_pf256s_q8_t.spv.h"
+#include "attn_pf256s_q4_t.spv.h"
+#include "attn_pf256s_k8v4_t.spv.h"
+#include "attn_pf512s_t.spv.h"
+#include "attn_pf512s_q8_t.spv.h"
+#include "attn_pf512s_q4_t.spv.h"
+#include "attn_pf512s_k8v4_t.spv.h"
+#include "attn_pf128_tc.spv.h"
+#include "attn_pf128_q8_tc.spv.h"
+#include "attn_pf128_q4_tc.spv.h"
+#include "attn_pf128_k8v4_tc.spv.h"
+#include "attn_pf256s_tc.spv.h"
+#include "attn_pf256s_q8_tc.spv.h"
+#include "attn_pf256s_q4_tc.spv.h"
+#include "attn_pf256s_k8v4_tc.spv.h"
+#include "attn_pf512s_tc.spv.h"
+#include "attn_pf512s_q8_tc.spv.h"
+#include "attn_pf512s_q4_tc.spv.h"
+#include "attn_pf512s_k8v4_tc.spv.h"
+#include "attn_pf128_te.spv.h"
+#include "attn_pf128_q8_te.spv.h"
+#include "attn_pf128_q4_te.spv.h"
+#include "attn_pf128_k8v4_te.spv.h"
+#include "attn_pf256s_te.spv.h"
+#include "attn_pf256s_q8_te.spv.h"
+#include "attn_pf256s_q4_te.spv.h"
+#include "attn_pf256s_k8v4_te.spv.h"
+#include "attn_pf512s_te.spv.h"
+#include "attn_pf512s_q8_te.spv.h"
+#include "attn_pf512s_q4_te.spv.h"
+#include "attn_pf512s_k8v4_te.spv.h"
 #include "get_rows_f16.spv.h"
 #include "get_rows_f32.spv.h"
 #include "get_rows_q4_0.spv.h"
@@ -561,6 +597,7 @@ private:
         if (const char *e = getenv("TS5_EMBD_FILE"))
             embd_file_ = atoi(e) != 0 && m_.tok_embd && m_.output.info != m_.tok_embd.info;
         if (const char *e = getenv("TS5_FIT_TAILS")) fit_tails_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_ATTN_PF_TRIM")) pf_trim_ = (uint32_t)std::min(3, std::max(0, atoi(e)));
 #endif
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_DEC")) attn_dec_min_ = atoi(e) > 0 ? atoi(e) : 0;
@@ -989,6 +1026,24 @@ private:
         P(attn_pf256s_q4, 7) P(attn_pf512s_q4, 7)
         P(attn_pf_k8v4, 7) P(attn_pf128_k8v4, 7) P(attn_pf256_k8v4, 7) P(attn_pf512_k8v4, 7)
         P(attn_pf256s_k8v4, 7) P(attn_pf512s_k8v4, 7)
+#ifndef TS5_PS5
+        // TS5_ATTN_PF_TRIM: each slim build's t build twice, NAME.t for a
+        // sliding layer's ring and NAME.tn (constant 0 = 1) for the rest;
+        // =2 the tc builds, which keep subgroupClusteredAdd, =3 the te
+        // builds (base-2 scores, chained dot products).
+#define PT(n, nb)                                                                                     \
+    if (pf_trim_) {                                                                                   \
+        const uint32_t *c = pf_trim_ == 1 ? spv_##n##_t : pf_trim_ == 2 ? spv_##n##_tc : spv_##n##_te; \
+        const size_t z = pf_trim_ == 1   ? sizeof(spv_##n##_t)                                        \
+                         : pf_trim_ == 2 ? sizeof(spv_##n##_tc)                                       \
+                                         : sizeof(spv_##n##_te);                                      \
+        if (!make_pipe(#n ".t", c, z, nb, err) || !make_pipe(#n ".tn", c, z, nb, err, 1)) return false; \
+    }
+        PT(attn_pf128, 5) PT(attn_pf128_q8, 7) PT(attn_pf128_q4, 7) PT(attn_pf128_k8v4, 7)
+        PT(attn_pf256s, 5) PT(attn_pf256s_q8, 7) PT(attn_pf256s_q4, 7) PT(attn_pf256s_k8v4, 7)
+        PT(attn_pf512s, 5) PT(attn_pf512s_q8, 7) PT(attn_pf512s_q4, 7) PT(attn_pf512s_k8v4, 7)
+#undef PT
+#endif
         // Lanes per key in attn_dec: 8, 16 or 32, and no more than a subgroup.
         uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
         while (lpk > ctx_->subgroup_size) lpk = lpk > 8 ? lpk / 2 : 0;
@@ -1698,7 +1753,6 @@ private:
         // The first key any of the n tokens sees, and how many from there.
         const uint32_t k_lo = win && (uint32_t)pos0 + 1 > win ? (uint32_t)pos0 + 1 - win : 0;
         const uint32_t keys = (uint32_t)(pos0 + n) - k_lo;
-        const bool plain = !win && !ring;
         // attn_pf: heads of up to 128 in 64 rows, of 256 in 32,
         // or of 512 in 16 (all of one KV head's query heads, where attn
         // would split them over hsplit workgroups, each reading the keys).
@@ -1776,6 +1830,9 @@ private:
         else if (pf && pf512)
             kern = attn_pf_slim_ ? "attn_pf512s" : "attn_pf512";
         if (kv_quantized(kv_)) kern += kv_suffix();
+        // TS5_ATTN_PF_TRIM: the slim build's t build, without the ring's
+        // arithmetic where the layer has no ring.
+        if (pf && pf_trim_ && pipes_.count(kern + ".t")) kern += ring ? ".t" : ".tn";
         // A layer's ring: attn_dec's builds that take slots key % ring.
         if (dec && ring && attn_dec_noring_) kern += ".ring";
         if (kv_quantized(kv_))
@@ -2307,6 +2364,14 @@ private:
     // counts the room the cache's pieces take at the ends of the blocks
     // already made (kv_new_bytes).
     bool fit_tails_ = false;
+    // TS5_ATTN_PF_TRIM=1 (Linux; off until measured): attn_pf128, 256s and
+    // 512s (and their cache builds) as their t builds (attn_pf.glsl's
+    // PF_TRIM): the same sums with fewer instructions around them. 2: with
+    // subgroupClusteredAdd kept (the tests on lavapipe, which adds a
+    // cluster in another order than shuffles do). 3: the te builds (PF_EXP2:
+    // base-2 scores, each key's dot product one fma chain), fewer again, the
+    // logits different in the last bits.
+    uint32_t pf_trim_ = 0;
     // Prompts of at least this many tokens use attn_pf (TS5_ATTN_PF; 0: never),
     // its build for heads of 128 where they are (TS5_ATTN_PF128=0: never).
     // 9: more than a verify batch's 8 tokens, which keep generation's kernels
