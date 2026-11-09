@@ -1143,6 +1143,7 @@ private:
         const double ls = std::chrono::duration<double>(std::chrono::steady_clock::now() - lt0).count();
         ts5::log_line("ts5: weights %.2f GB read in %.1f s (%.0f MB/s, %d threads)", weight_bytes_ / 1e9, ls,
                 ls > 0 ? weight_bytes_ / 1e6 / ls : 0.0, threads);
+#ifndef TS5_PS5  // TS5_EMBD_FILE is Linux's (the title's libc has no posix_fadvise)
         if (embd_file_) {
             emb_fd_ = open(path.c_str(), O_RDONLY | O_CLOEXEC);
             if (emb_fd_ < 0) { err = "cannot open " + path; return false; }
@@ -1154,6 +1155,7 @@ private:
             ts5::log_line("ts5: token table (%.0f MiB) not in GPU memory: each call reads its tokens' rows from the "
                           "file (TS5_EMBD_FILE)", t.nbytes / 1048576.0);
         }
+#endif
         return true;
     }
 
