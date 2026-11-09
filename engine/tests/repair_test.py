@@ -149,6 +149,11 @@ def main():
         kept = ref[1][2]["cache_n"]
         if kept < 600:
             sys.exit(f"FAIL {name} ({tag}): the third turn kept only {kept} tokens with no side request")
+        # Before any side request (and with or without a helper) the second
+        # turn is the reference's: the same prompt, the same cached prefix.
+        if (r[1][1]["prompt_n"], r[1][1]["cache_n"]) != (ref[1][1]["prompt_n"], ref[1][1]["cache_n"]):
+            sys.exit(f"FAIL {name} ({tag}): the second turn read {r[1][1]['prompt_n']} new and kept "
+                     f"{r[1][1]['cache_n']}, against {ref[1][1]['prompt_n']} and {ref[1][1]['cache_n']}")
         t = r[1][2]
         if t["cache_n"] != kept or not t.get("repaired_n"):
             sys.exit(f"FAIL {name} ({tag}): the third turn kept {t['cache_n']} of {kept} tokens, "

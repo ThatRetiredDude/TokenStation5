@@ -706,7 +706,18 @@ by 2026-11-07 the PS5 showed it: on Gemma 3 12B (heads of 256, whose
 attn_dec started at 256 keys, and attn's 8-key tiles below) 7 of 14
 drafting runs wrote a different word or line break than one token at a
 time on one of 10 prompts. Drafts are capped at 7 a step for the same
-reason: a bigger batch goes through the prompt kernels. The feed-forward's gate and up,
+reason: a bigger batch goes through the prompt kernels. The rule reaches
+past the answer, into the next turn: without drafting the answer's last
+token is never forwarded, and the next turn's prompt reads it with the
+prompt kernels, which round it otherwise than one token's do; an answer
+that ends at max_tokens on a kept draft has that token's keys and values
+in the cache already, from the verify pass. On the PS5 (job CY, Llama 3.1
+8B with Llama 3.2 1B, 2026-11-09) that one position changed a second
+turn's answer by a token in the k8v4 cache and its logits in f16. On
+Linux the engine now drops that token from the cache when the answer
+ends there, so the next turn sees the cache it would without drafting;
+the suite checks the cache's length after 1 and 24 drafted tokens, and
+the repair test the second turn's cache against the helper-off one. The feed-forward's gate and up,
 the two biggest lines of a verify pass, can run as one kernel
 (`TS5_MVT_GLU=1` picks `mvt_glu_q4_k`): both matrices' blocks are dotted
 with the same x loads and swiglu is applied in place, as `mv16_glu_q4_k`

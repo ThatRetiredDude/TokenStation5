@@ -713,7 +713,23 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         // one short (a re-fed token is idempotent: positions are absolute).
         if (by_model && batch.size() > 1) dcached_ = cached_.size() - (accepted == nb - 1 ? 1 : 0);
         for (int i = 1; i <= accepted; i++) emit(batch[i]);
-        if (st.gen_tokens >= p.max_tokens) { st.finish = "length"; break; }
+        if (st.gen_tokens >= p.max_tokens) {
+#ifndef TS5_PS5
+            // The answer ends on a kept draft, which this pass entered into
+            // the cache. Without drafting the last token is never forwarded:
+            // the next turn reads it with its prompt, whose kernels round it
+            // otherwise than one token's do. Drop it, so the next turn sees
+            // the cache it would without drafting (on the PS5, Llama 3.1 8B
+            // with its helper kept one more token and a second turn's answer
+            // came out one token different).
+            if (accepted > 0) {
+                cached_.pop_back();
+                if (dcached_ > cached_.size()) dcached_ = cached_.size();
+            }
+#endif
+            st.finish = "length";
+            break;
+        }
         if (!flush()) { st.finish = "stop"; break; }
         tok = next;
     }
@@ -723,9 +739,10 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // and the verify batches' times, to tell a wrong estimate from a wrong rule.
     if (db_ && getenv("TS5_DRAFT_LOG"))
         ts5::log_line("ts5: helper: %.2f ms a draft token, catch-up %.3f ms a token, kept %.0f%% of %.0f trials; "
-                      "target forward 1: %.2f, 2: %.2f, 3: %.2f, 4: %.2f ms; %d probes, %.0f ms in the helper",
+                      "target forward 1: %.2f, 2: %.2f, 3: %.2f, 4: %.2f ms; %d probes, %.0f ms in the helper; "
+                      "the cache holds %zu tokens",
                       t_draft, t_catch, 100 * by_drafter.p(0.6f), by_drafter.trials, t_fwd[1], t_fwd[2], t_fwd[3],
-                      t_fwd[4], st.probes, st.draft_ms);
+                      t_fwd[4], st.probes, st.draft_ms, cached_.size());
     return true;
 }
 

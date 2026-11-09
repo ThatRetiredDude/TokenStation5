@@ -878,6 +878,19 @@ TS5_DRAFT=7 TS5_DRAFT_MODEL="$work/qwen2-Q8_0.gguf" "$ts5" run --backend cpu -m 
 cmp "$work/dm-off.txt" "$work/dm-on.txt"
 grep -q "draft model .* ready" "$work/dm-on.err"
 grep -q "helper [0-9]*/[1-9]" "$work/dm-on.err"  # the drafter actually proposed
+# An answer that ends at max_tokens on a kept draft leaves the cache as it
+# would be without drafting: everything but the last token, which the next
+# turn reads with its prompt (it was one more, written by the verify pass,
+# and on the PS5 a second turn came out different). The model as its own
+# drafter at a fixed width keeps every draft, so the answer ends on one.
+for b in cpu vk; do
+    c1=$(TS5_ADAPT=0 TS5_DRAFT=4 TS5_DRAFT_LOG=1 TS5_DRAFT_MODEL="$work/qwen2-Q8_0.gguf" "$ts5" run --backend $b \
+        -m "$work/qwen2-Q8_0.gguf" -p "$nr" -n 1 --temp 0 2>&1 > /dev/null | sed -n 's/.*the cache holds \([0-9]*\) tokens/\1/p')
+    c24=$(TS5_ADAPT=0 TS5_DRAFT=4 TS5_DRAFT_LOG=1 TS5_DRAFT_MODEL="$work/qwen2-Q8_0.gguf" "$ts5" run --backend $b \
+        -m "$work/qwen2-Q8_0.gguf" -p "$nr" -n 24 --temp 0 2>&1 > /dev/null | sed -n 's/.*the cache holds \([0-9]*\) tokens/\1/p')
+    [ -n "$c1" ] && [ "$c24" = "$((c1 + 23))" ] ||
+        { echo "FAIL ($b): after 24 tokens with drafts the cache holds $c24 tokens, after 1 $c1"; exit 1; }
+done
 echo "== a drafter whose weight rows are padded past the token list (and the reverse), as released models pad"
 mk_k qwen2-pad qwen2 qwen2 --pad-vocab 128
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-pad.gguf" -p "$nr" -n 100 --temp 0 > "$work/pad-off.txt" 2> /dev/null
