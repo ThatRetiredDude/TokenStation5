@@ -67,14 +67,14 @@ void Engine::written_over(int pos, int n) {
 }
 
 void Engine::note_call(int pos, int n) {
-    if (!repair_) return;
+    if (!track_) return;
     written_over(pos, n);
     while (!runs_.empty() && runs_.back().start >= pos) runs_.pop_back();
     if (n > 8 || runs_.empty() || runs_.back().n > 8) runs_.push_back({pos, n});
 }
 
 void Engine::cut_cache(size_t keep) {
-    if (repair_ && keep < cached_.size() && !runs_.empty()) {
+    if (track_ && keep < cached_.size() && !runs_.empty()) {
         shadows_.push_back({cached_, runs_, (int)keep, (int)keep});
         if (shadows_.size() > 4) shadows_.erase(shadows_.begin());
     }
@@ -130,6 +130,8 @@ bool Engine::repair(const std::vector<int32_t> &prompt, size_t &keep, GenStats &
         }
     }
     if (best < 0) return true;
+    st.prompt_repairable = (int)best_m;
+    if (!repair_) return true;
     Shadow sh = std::move(shadows_[(size_t)best]);
     shadows_.erase(shadows_.begin() + best);
     const double t0 = now_ms();
@@ -355,8 +357,9 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     size_t keep = 0;
     while (keep < cached_.size() && keep < prompt.size() && cached_[keep] == prompt[keep]) keep++;
     if (keep == prompt.size()) keep--;
+    st.prompt_shared = (int)keep;
     double repair_ms = 0;
-    if (repair_ && !shadows_.empty() && b_->rewind_limit() >= (1 << 30) && b_->state_slots() == 0) {
+    if (track_ && !shadows_.empty() && b_->rewind_limit() >= (1 << 30) && b_->state_slots() == 0) {
         const double tr = now_ms();
         if (!repair(prompt, keep, st, err)) return false;
         repair_ms = now_ms() - tr;

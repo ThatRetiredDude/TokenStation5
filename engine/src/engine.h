@@ -34,6 +34,11 @@ struct GenStats {
     // TS5_KV_REPAIR: positions forwarded again (in prompt_ms) to put back
     // what a shorter request wrote over, so the cached prefix held
     int prompt_repaired = 0;
+    // For the usage log (Linux): the prompt's prefix the cache held when the
+    // request came (before a ring or a forward-only state took some back),
+    // and the longer one a cache an earlier request cut could give back by
+    // forwarding again what was written over it (TS5_KV_REPAIR does; 0: none)
+    int prompt_shared = 0, prompt_repairable = 0;
     std::string finish = "length";
 };
 
@@ -95,13 +100,21 @@ private:
         int lo, hi;  // the positions written over since: [lo, hi)
     };
     std::vector<Shadow> shadows_;  // newest last, at most 4
+    // Linux keeps the runs and shadows whether or not it repairs, for the
+    // usage log's prompt_repairable.
+#ifdef TS5_PS5
+    static constexpr bool track_ = false;
+#else
+    static constexpr bool track_ = true;
+#endif
     bool repair_ = kv_repair_wanted();
     void note_call(int pos, int n);
     void written_over(int pos, int n);
     void cut_cache(size_t keep);
     // Raises keep to the longest prefix of the prompt a shadow gives back
     // once what was written over it is forwarded again, where that saves
-    // more than it costs. False if a forward fails (the cache is dropped).
+    // more than it costs (without repair_, only notes it in st). False if a
+    // forward fails (the cache is dropped).
     bool repair(const std::vector<int32_t> &prompt, size_t &keep, GenStats &st, std::string &err);
     // One past the furthest position forwarded since the cache was last
     // filled from 0 (rejected drafts included), for Backend::rewind_limit.

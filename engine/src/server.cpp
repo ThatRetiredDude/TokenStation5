@@ -713,6 +713,8 @@ void handle(int fd, Server::State &state, Usage &u) {
             st.prompt_tokens += turn.prompt_tokens;
             st.prompt_evaluated += turn.prompt_evaluated;
             st.prompt_repaired += turn.prompt_repaired;
+            st.prompt_shared += turn.prompt_shared;
+            st.prompt_repairable += turn.prompt_repairable;
             st.prompt_ms += turn.prompt_ms;
             st.gen_tokens += turn.gen_tokens;
             st.gen_ms += turn.gen_ms;
@@ -880,6 +882,9 @@ void handle(int fd, Server::State &state, Usage &u) {
         ur.finish = !ok ? "error" : !client_ok ? "left" : st.finish;
         ur.prompt = st.prompt_tokens;
         ur.prompt_new = st.prompt_evaluated;
+        ur.prompt_shared = st.prompt_shared;
+        ur.prompt_repairable = st.prompt_repairable;
+        ur.prompt_repaired = st.prompt_repaired;
         ur.prompt_ms = std::lround(st.prompt_ms);
         ur.gen = st.gen_tokens;
         ur.gen_ms = std::lround(st.gen_ms);

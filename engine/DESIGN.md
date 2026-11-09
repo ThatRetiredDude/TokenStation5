@@ -801,7 +801,13 @@ again, and on the GPU those logits differed in the last bits. From the PS5's
 rates that is 0.2 to 2 s instead of 94 s at 30k tokens on Qwen3 8B or 981 s
 at 120k on Llama 3.1 8B (estimates). The helper goes back to where the side
 requests first parted from the conversation and catches up as before; a GPU
-check or speed test on the serving model still drops the cache.
+check or speed test on the serving model still drops the cache. Linux keeps
+the cut caches and their calls whether or not the switch is on, and the
+usage log says, per request, how much of the prompt the cache held
+(`prompt_shared`), how much a cut cache could have given back that way
+(`prompt_repairable`, 0 for none) and what was forwarded again for it
+(`prompt_repaired`), so how often a repair would pay can be read off real
+use before the switch goes on.
 
 The 8-bit cache is q8_0's layout split in two: the values (4 to a word, as
 `attn` loads them) and the scales, which are the largest magnitude of the 32

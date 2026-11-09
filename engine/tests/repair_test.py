@@ -5,7 +5,9 @@ wrote over, and goes on exactly as it would have with no side request: the
 same cached prefix, the logits its prompt ends on byte for byte, the same
 answer. Without the switch the turn reads its whole prompt again, and on the
 GPU those logits differ in the last bits (so the comparison can tell; the
-CPU backend rounds the same whatever the calls).
+CPU backend rounds the same whatever the calls). The usage log's
+prompt_shared, prompt_repairable and prompt_repaired say so too, the switch
+on or off.
 
     repair_test.py TS5 MODEL.gguf BACKEND [--ctx N] [--paras N] [--helper HELPER.gguf] [--keep DIR]
 
@@ -29,7 +31,7 @@ def serve(ts5, model, backend, log, dump, repair, helper, ctx):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    env = dict(os.environ, TS5_PROMPT_LOGITS=dump)
+    env = dict(os.environ, TS5_PROMPT_LOGITS=dump, TS5_USAGE_LOG=dump[:-4] + ".tsv")
     env.pop("TS5_KV_REPAIR", None)
     env.pop("TS5_DRAFT_MODEL", None)
     if repair:
@@ -90,6 +92,12 @@ def run(a, d, tag, sides, repair, helper=False, chat=False):
         x3, t3 = comp(port, l2 + x2 + "\nQ: and ledger 28?\nA:")
         if "cache repaired" in open(os.path.join(d, tag + ".log")).read() and not t3.get("repaired_n"):
             sys.exit(f"repair_test {tag}: a repair before the third turn")
+        # The server writes a request's usage line after its answer.
+        tsv = os.path.join(d, tag + ".tsv")
+        for _ in range(100):
+            if sum(1 for line in open(tsv) if not line.startswith("#")) >= 3 + len(sides):
+                break
+            time.sleep(0.1)
     finally:
         p.terminate()
         p.wait()
@@ -100,7 +108,14 @@ def run(a, d, tag, sides, repair, helper=False, chat=False):
     if len(raw) % rows:
         sys.exit(f"repair_test {tag}: {len(raw)} bytes of logits for {rows} requests")
     w = len(raw) // rows
-    return (x1, x2, x3), (t1, t2, t3), raw[-w:], text
+    names, last = None, None
+    for line in open(os.path.join(d, tag + ".tsv")):
+        f = line.rstrip("\n").split("\t")
+        if line.startswith("#") and len(f) > 1:
+            names = [f[0].lstrip("# ")] + f[1:]
+        elif not line.startswith("#"):
+            last = dict(zip(names, f))
+    return (x1, x2, x3), (t1, t2, t3), raw[-w:], text, last
 
 
 def main():
@@ -144,11 +159,21 @@ def main():
             sys.exit(f"FAIL {name} ({tag}): the third turn's logits differ from those with no side request")
         if r[0] != ref[0]:
             sys.exit(f"FAIL {name} ({tag}): the answers differ: {r[0]!r} against {ref[0]!r}")
+        u = r[4]
+        if (int(u["prompt_repaired"]), int(u["prompt_repairable"])) != (t["repaired_n"], kept) or \
+                int(u["prompt_shared"]) >= kept or int(u["prompt_new"]) != t["prompt_n"]:
+            sys.exit(f"FAIL {name} ({tag}): the usage log says {u}")
+        if int(ref[4]["prompt_repairable"]) or int(ref[4]["prompt_repaired"]) or \
+                int(ref[4]["prompt_shared"]) != kept:
+            sys.exit(f"FAIL {name} ({tag}): with no side request the usage log says {ref[4]}")
     ref = cases[0][2]
     kept = ref[1][2]["cache_n"]
     t = old[1][2]
     if t["cache_n"] >= kept or t.get("repaired_n"):
         sys.exit(f"FAIL {name}: without TS5_KV_REPAIR the third turn kept {t['cache_n']} tokens")
+    u = old[4]
+    if int(u["prompt_repairable"]) != kept or int(u["prompt_repaired"]) or int(u["prompt_shared"]) != t["cache_n"]:
+        sys.exit(f"FAIL {name}: without TS5_KV_REPAIR the usage log says {u}")
     if old[2] == ref[2] and backend != "cpu":
         sys.exit(f"FAIL {name}: reading the whole prompt again gave the same logits, so the comparison can't tell")
     for tag, r in (("no side request", cases[0][2]), ("one side request", rep), ("two side requests", two),
