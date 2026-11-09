@@ -150,6 +150,10 @@ l3="$work/llama3-Q8_0.gguf"
 python3 "$here/vocab_test.py" --ts5 "$ts5" "$work/qwen2-Q4_0.gguf" "$work/ggml-vocab-qwen2.gguf.inp" "$work/ggml-vocab-qwen2.gguf.out"
 python3 "$here/vocab_test.py" --ts5 "$ts5" "$work/llama3-Q8_0.gguf" "$work/ggml-vocab-llama-bpe.gguf.inp" \
     "$work/ggml-vocab-llama-bpe.gguf.out"
+echo "== TS5_KV_REPAIR: after a short side request the next turn forwards again only what it wrote over, bit for bit"
+python3 "$here/repair_test.py" "$ts5" "$l3" vk
+python3 "$here/repair_test.py" "$ts5" "$l3" cpu
+python3 "$here/repair_test.py" "$ts5" "$work/qwen3-Q8_0.gguf" cpu
 python3 "$here/vocab_test.py" --ts5 "$ts5" "${q35[1]}" "$work/ggml-vocab-qwen35.gguf.inp" "$work/ggml-vocab-qwen35.gguf.out"
 echo "== Vulkan vs CPU reference"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${models[@]}"

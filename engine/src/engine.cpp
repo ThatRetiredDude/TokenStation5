@@ -47,6 +47,119 @@ int32_t Engine::sample(const float *lg, int n, const SampleParams &p) {
     return idx_[d(rng_)];
 }
 
+bool kv_repair_wanted() {
+#ifdef TS5_PS5
+    return false;
+#else
+    const char *e = getenv("TS5_KV_REPAIR");
+    return e && atoi(e) != 0;
+#endif
+}
+
+void Engine::written_over(int pos, int n) {
+    for (size_t i = 0; i < shadows_.size();) {
+        Shadow &s = shadows_[i];
+        s.lo = std::min(s.lo, pos);
+        s.hi = std::max(s.hi, pos + n);
+        if (s.hi >= (int)s.tokens.size()) shadows_.erase(shadows_.begin() + (long)i);  // nothing past it left
+        else i++;
+    }
+}
+
+void Engine::note_call(int pos, int n) {
+    if (!repair_) return;
+    written_over(pos, n);
+    while (!runs_.empty() && runs_.back().start >= pos) runs_.pop_back();
+    if (n > 8 || runs_.empty() || runs_.back().n > 8) runs_.push_back({pos, n});
+}
+
+void Engine::cut_cache(size_t keep) {
+    if (repair_ && keep < cached_.size() && !runs_.empty()) {
+        shadows_.push_back({cached_, runs_, (int)keep, (int)keep});
+        if (shadows_.size() > 4) shadows_.erase(shadows_.begin());
+    }
+    while (!runs_.empty() && runs_.back().start >= (int)keep) runs_.pop_back();
+    cached_.resize(keep);
+}
+
+bool Engine::repair(const std::vector<int32_t> &prompt, size_t &keep, GenStats &st, std::string &err) {
+    // A shadow's calls to forward again: from the run that holds lo, while
+    // a position before both m and the end of what was written over (hi,
+    // or past it where a call forwarded again writes beyond its run) is not
+    // yet back. Positions of up to 8-token calls cost about 3 prompt
+    // positions each, forwarded 8 at a time.
+    struct Call { int pos, n; };
+    auto plan = [&](const Shadow &sh, int m, std::vector<Call> &calls) {
+        calls.clear();
+        long cost = 0;
+        size_t j = 0;
+        while (j + 1 < sh.runs.size() && sh.runs[j + 1].start <= sh.lo) j++;
+        int need = sh.hi;
+        for (; j < sh.runs.size(); j++) {
+            const Run &r = sh.runs[j];
+            if (r.start >= need || r.start >= m) break;
+            const int end = j + 1 < sh.runs.size() ? sh.runs[j + 1].start : (int)sh.tokens.size();
+            if (r.n > 8) {
+                calls.push_back({r.start, r.n});
+                cost += r.n;
+                need = std::max(need, r.start + r.n);
+            } else {
+                const int to = std::min({end, need, m});
+                for (int i = std::max(r.start, sh.lo); i < to; i += 8) calls.push_back({i, std::min(8, to - i)});
+                cost += 3L * std::max(0, to - std::max(r.start, sh.lo));
+            }
+        }
+        return cost;
+    };
+    int best = -1;
+    size_t best_m = keep;
+    long best_gain = 64;  // not for a handful of tokens
+    std::vector<Call> calls, best_calls;
+    for (int s = 0; s < (int)shadows_.size(); s++) {
+        const Shadow &sh = shadows_[s];
+        size_t m = 0;
+        while (m < sh.tokens.size() && m < prompt.size() && sh.tokens[m] == prompt[m]) m++;
+        if (m == prompt.size()) m--;
+        if ((int)m <= sh.hi || m <= keep) continue;
+        const long gain = (long)(m - keep) - plan(sh, (int)m, calls);
+        if (gain > best_gain) {
+            best = s;
+            best_m = m;
+            best_gain = gain;
+            best_calls.swap(calls);
+        }
+    }
+    if (best < 0) return true;
+    Shadow sh = std::move(shadows_[(size_t)best]);
+    shadows_.erase(shadows_.begin() + best);
+    const double t0 = now_ms();
+    std::vector<float> lg(b_->logits_view() ? 0 : m_.hp.n_vocab);
+    std::vector<int32_t> call;
+    for (const Call &c : best_calls) {
+        // A prompt-kernel call as it was made: the tokens past its run were
+        // another call's then, and only give the call its size (a position
+        // depends on those before it, never on those after).
+        call.assign(sh.tokens.begin() + c.pos, sh.tokens.begin() + std::min<size_t>(c.pos + c.n, sh.tokens.size()));
+        call.resize(c.n, call.back());
+        if (!b_->forward(call.data(), c.n, c.pos, lg.empty() ? nullptr : lg.data(), false, err)) {
+            forget_cache();
+            return false;
+        }
+        written_over(c.pos, c.n);
+        st.prompt_repaired += c.n;
+    }
+    cached_.assign(sh.tokens.begin(), sh.tokens.begin() + (long)best_m);
+    runs_ = std::move(sh.runs);
+    while (!runs_.empty() && runs_.back().start >= (int)best_m) runs_.pop_back();
+    // The drafter's entries before lo are the conversation's too.
+    if (dcached_ > (size_t)sh.lo) dcached_ = (size_t)sh.lo;
+    ts5::log_line("ts5: cache repaired: %d positions a shorter request wrote over forwarded again (%zu calls, %.0f ms), "
+                  "%zu of the prompt's %zu kept",
+                  st.prompt_repaired, best_calls.size(), now_ms() - t0, best_m, prompt.size());
+    keep = best_m;
+    return true;
+}
+
 static uint64_t gram_key(int32_t a, int32_t b) { return ((uint64_t)(uint32_t)a << 21) | (uint32_t)b; }
 
 // Index the grams ending at positions from.. of cached_, overwriting earlier
@@ -242,6 +355,12 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     size_t keep = 0;
     while (keep < cached_.size() && keep < prompt.size() && cached_[keep] == prompt[keep]) keep++;
     if (keep == prompt.size()) keep--;
+    double repair_ms = 0;
+    if (repair_ && !shadows_.empty() && b_->rewind_limit() >= (1 << 30) && b_->state_slots() == 0) {
+        const double tr = now_ms();
+        if (!repair(prompt, keep, st, err)) return false;
+        repair_ms = now_ms() - tr;
+    }
     // A sliding layer's ring may no longer hold the keys before `keep`: then
     // the whole prompt again (each of those keys depends on the ones before).
     // A state that only goes forward (Qwen3.5) goes back to the latest of its
@@ -262,7 +381,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     for (int &s : saved_)
         if ((int)keep < s) s = -1;  // what it holds is written over
     if (keep == 0) written_ = 0;
-    cached_.resize(keep);
+    cut_cache(keep);
     // Such a state is saved where the prompt's last turn starts (its last
     // <|im_start|>): a conversation's next request shares the prompt up to
     // there, the model's answer and the new message coming after it. With
@@ -312,7 +431,8 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         bool ok = in_place ? (last ? b_->forward_in_place(prompt.data() + i, n, (int)i, false, err)
                                    : b_->forward(prompt.data() + i, n, (int)i, nullptr, false, err))
                            : b_->forward(prompt.data() + i, n, (int)i, logits.data(), false, err);
-        if (!ok) { cached_.clear(); dcached_ = 0; return false; }
+        if (!ok) { forget_cache(); return false; }
+        note_call((int)i, n);
         written_ = std::max(written_, (int)(i + n));
         cached_.insert(cached_.end(), prompt.begin() + i, prompt.begin() + i + n);
         if (std::find(saves.begin(), saves.end(), (int)i + n) != saves.end()) {
@@ -325,6 +445,14 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         }
     }
     st.prompt_evaluated = (int)(prompt.size() - keep);
+#ifndef TS5_PS5
+    // For the tests: the logits the prompt ended on, appended as floats.
+    if (const char *e = getenv("TS5_PROMPT_LOGITS"))
+        if (FILE *f = fopen(e, "ab")) {
+            fwrite(in_place ? b_->logits_view() : logits.data(), sizeof(float), (size_t)nv, f);
+            fclose(f);
+        }
+#endif
     // Each step forwards the next token plus up to `dmax` lookup-drafted
     // tokens in one batch, then keeps the drafts the model itself would have
     // produced: the output is exactly what one-token-at-a-time sampling gives
@@ -361,7 +489,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         gram2_.reserve(cached_.size());
         index_grams(0);
     }
-    st.prompt_ms = now_ms() - t0;
+    st.prompt_ms = now_ms() - t0 + repair_ms;
     t0 = now_ms();
     std::string pending;  // decoded but unsent bytes (one send per step)
     auto emit = [&](int32_t t) {
@@ -532,7 +660,8 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
             const double dt = now_ms() - tf0;
             t_fwd[nb] = t_fwd[nb] > 0 ? 0.8 * t_fwd[nb] + 0.2 * dt : dt;
         }
-        if (!ok) { cached_.clear(); dcached_ = 0; return false; }
+        if (!ok) { forget_cache(); return false; }
+        note_call((int)cached_.size(), nb);
         written_ = std::max(written_, (int)cached_.size() + nb);
         const float *lg = in_place ? b_->logits_view() : lgb.data();
         st.drafted += nb - 1;

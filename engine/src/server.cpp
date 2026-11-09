@@ -223,7 +223,10 @@ std::string timings_json(const GenStats &st) {
              st.prompt_evaluated, st.prompt_ms, st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0,
              st.gen_tokens, st.gen_ms, st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0,
              st.prompt_tokens - st.prompt_evaluated, st.drafted, st.draft_accepted);
-    return b;
+    std::string s = b;
+    // TS5_KV_REPAIR: what was forwarded again to keep cache_n.
+    if (st.prompt_repaired) s.insert(s.size() - 1, ",\"repaired_n\":" + std::to_string(st.prompt_repaired));
+    return s;
 }
 
 std::string usage_json(const GenStats &st) {
@@ -709,6 +712,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             count();  // what on_text didn't see: the test turns, a turn with no text
             st.prompt_tokens += turn.prompt_tokens;
             st.prompt_evaluated += turn.prompt_evaluated;
+            st.prompt_repaired += turn.prompt_repaired;
             st.prompt_ms += turn.prompt_ms;
             st.gen_tokens += turn.gen_tokens;
             st.gen_ms += turn.gen_ms;

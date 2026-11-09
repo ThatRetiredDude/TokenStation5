@@ -778,6 +778,31 @@ values, 2 bytes each in f16, or 1 byte plus an f16 scale per 32 values
 (1.06 bytes) with `TS5_KV=q8`. Qwen 2.5 Coder 7B Q4_K_M at 32k context: 4.4 +
 1.75 (f16) or 0.93 (q8) + 0.3 GiB.
 
+A request writes K/V only from where it parts from the cached prompt on, so
+a conversation cut by a short request between its turns (a chat app's title
+or tags request) is still in the cache past what that request wrote. With
+`TS5_KV_REPAIR=1` (Linux, off until measured on the PS5; not on a sliding
+layer's ring or Qwen3.5's state) the engine keeps a cut cache's tokens (4
+bytes a token, up to 4 such) and the calls that wrote it, and when a request
+shares more with one of them than with the cache, forwards again only the
+positions written over since, then goes on as if nothing had come between.
+To come back bit for bit a call of more than 8 tokens (the prompt kernels,
+whose rounding depends on the call's start and size) is made again as it
+was, from its start at its size, and the positions of calls of up to 8 (one
+token's kernels, which give the same bits whatever the batch, as speculative
+decoding already needs) 8 at a time; a call made again writes past what was
+written over, which the calls after it put back. It is done where it saves
+64 positions or more, a position of the up-to-8-token calls counted as 3. On
+the test models, after a title request the next turn kept all 670 of its
+cached tokens by forwarding 256 again, after a longer one 293, and the
+logits its prompt ended on were byte for byte those with no side request, on
+the GPU and the CPU, with a helper too; without the switch it read all 670
+again, and on the GPU those logits differed in the last bits. From the PS5's
+rates that is 0.2 to 2 s instead of 94 s at 30k tokens on Qwen3 8B or 981 s
+at 120k on Llama 3.1 8B (estimates). The helper goes back to where the side
+requests first parted from the conversation and catches up as before; a GPU
+check or speed test on the serving model still drops the cache.
+
 The 8-bit cache is q8_0's layout split in two: the values (4 to a word, as
 `attn` loads them) and the scales, which are the largest magnitude of the 32
 values over 127, rounded to f16; values round to nearest even. `qkv_post_q8`

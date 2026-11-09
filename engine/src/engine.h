@@ -31,8 +31,15 @@ struct GenStats {
     int probes = 0;       // steps that tried the draft model only to see whether it keeps up
     double prompt_ms = 0, gen_ms = 0;
     double sample_ms = 0;  // CPU time in sample(), its logits reads included
+    // TS5_KV_REPAIR: positions forwarded again (in prompt_ms) to put back
+    // what a shorter request wrote over, so the cached prefix held
+    int prompt_repaired = 0;
     std::string finish = "length";
 };
+
+// TS5_KV_REPAIR=1 (Linux; the PS5 title never reads it): Engine's repair of
+// a cache a shorter request cut.
+bool kv_repair_wanted();
 
 class Engine {
 public:
@@ -54,6 +61,8 @@ public:
         dcached_ = 0;
         written_ = 0;
         saved_.clear();
+        runs_.clear();
+        shadows_.clear();
     }
 
 private:
@@ -66,6 +75,34 @@ private:
     std::unique_ptr<Backend> b_;
     Tokenizer &t_;
     std::vector<int32_t> cached_;  // tokens whose K/V are in the cache
+    // TS5_KV_REPAIR (Linux, off until measured on the PS5), on a backend
+    // that can go back to any position (not a sliding layer's ring, not
+    // Qwen3.5's state): a request writes K/V only from where it parts from
+    // the cache, so a conversation cut by a short request between its turns
+    // (a chat app's title or tags) is still in the cache past what that
+    // request wrote, and only that span is read again. To come back bit for
+    // bit it is forwarded as it was: a call of more than 8 tokens (the
+    // prompt kernels, whose rounding depends on the call's start and size)
+    // as that call, and the positions of calls of up to 8 (one token's
+    // kernels, which give the same bits whatever the batch) 8 at a time.
+    struct Run {
+        int start, n;  // n > 8: one call's start and size; otherwise calls of up to 8 tokens from start on
+    };
+    std::vector<Run> runs_;  // what wrote cached_'s K/V, by position; each ends where the next starts
+    struct Shadow {
+        std::vector<int32_t> tokens;  // a cache a request cut
+        std::vector<Run> runs;
+        int lo, hi;  // the positions written over since: [lo, hi)
+    };
+    std::vector<Shadow> shadows_;  // newest last, at most 4
+    bool repair_ = kv_repair_wanted();
+    void note_call(int pos, int n);
+    void written_over(int pos, int n);
+    void cut_cache(size_t keep);
+    // Raises keep to the longest prefix of the prompt a shadow gives back
+    // once what was written over it is forwarded again, where that saves
+    // more than it costs. False if a forward fails (the cache is dropped).
+    bool repair(const std::vector<int32_t> &prompt, size_t &keep, GenStats &st, std::string &err);
     // One past the furthest position forwarded since the cache was last
     // filled from 0 (rejected drafts included), for Backend::rewind_limit.
     int written_ = 0;
