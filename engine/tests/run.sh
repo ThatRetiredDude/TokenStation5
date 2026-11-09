@@ -138,7 +138,7 @@ done
 o35=$(TS5_DRAFT_MODEL="${q35[0]}" "$ts5" run -m "${q35[1]}" -c 256 -p hi -n 4 2>&1)
 grep -q "draft model not used: .*only goes forward" <<< "$o35" || { echo "FAIL qwen35: a helper was not refused"; exit 1; }
 echo "PASS qwen35 run: the same text with and without drafting, the helper refused"
-echo "== Qwen3.5: a conversation's next turn goes on from the state saved where the last turn started"
+echo "== Qwen3.5: a request goes on from a saved copy of the state (the next turn, a fresh chat with the same document, an edited last message)"
 t35="$work/Qwen3.5-4B.jinja"
 [ -s "$t35" ] || curl -fsSL -o "$t35" "https://raw.githubusercontent.com/ggml-org/llama.cpp/$rev35/models/templates/Qwen3.5-4B.jinja"
 python3 "$here/resume_test.py" "$ts5" "${q35[1]}" "$t35" vk

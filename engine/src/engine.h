@@ -49,7 +49,12 @@ public:
     Backend &backend() { return *b_; }
     // After something else ran on the backend: its KV cache no longer holds
     // the last prompt.
-    void forget_cache() { cached_.clear(); dcached_ = 0; written_ = 0; saved_ = -1; }
+    void forget_cache() {
+        cached_.clear();
+        dcached_ = 0;
+        written_ = 0;
+        saved_.clear();
+    }
 
 private:
     int32_t sample(const float *logits, int n, const SampleParams &p);
@@ -64,9 +69,9 @@ private:
     // One past the furthest position forwarded since the cache was last
     // filled from 0 (rejected drafts included), for Backend::rewind_limit.
     int written_ = 0;
-    // Where the backend's saved state is (Backend::save_state): the
-    // cached_ prefix it holds; -1: none.
-    int saved_ = -1;
+    // Where the backend's saved states are (Backend::save_state), a slot
+    // each: the cached_ prefix it holds; -1: none.
+    std::vector<int> saved_;
     std::vector<int32_t> idx_;     // sample()'s top-k scratch, reused
     // Prompt-lookup index over cached_: a 3- or 2-gram, packed 21 bits per
     // token, maps to the position after its most recent occurrence.

@@ -2,7 +2,10 @@
 """A conversation's next request on a model whose state only goes forward
 (Qwen3.5's linear layers): the server goes back to the state it saved where
 the last turn started instead of reading the whole prompt again, and answers
-exactly as a fresh server does.
+exactly as a fresh server does. With the copies Linux keeps by default
+(TS5_STATE_SLOTS=4), also a fresh chat with the same document and another
+question, and an edited last message, go on from a copy; with one copy (the
+PS5 title's) they read the whole prompt again.
 
     resume_test.py TS5 MODEL.gguf TEMPLATE.jinja BACKEND
 """
@@ -16,12 +19,16 @@ import time
 import urllib.request
 
 
-def serve(ts5, model, template, backend, log):
+def serve(ts5, model, template, backend, log, slots=None):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
+    env = dict(os.environ)
+    env.pop("TS5_STATE_SLOTS", None)
+    if slots:
+        env["TS5_STATE_SLOTS"] = str(slots)
     p = subprocess.Popen([ts5, "serve", "-m", model, "--chat-template", template, "--host", "127.0.0.1",
-                          "--port", str(port), "--backend", backend, "-c", "1024"], stdout=log, stderr=log)
+                          "--port", str(port), "--backend", backend, "-c", "2048"], stdout=log, stderr=log, env=env)
     for _ in range(600):
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
@@ -52,7 +59,8 @@ def main():
             a, _ = ask(port, first)
             second = first + [{"role": "assistant", "content": a}, {"role": "user", "content": "And dogs?"}]
             b, t = ask(port, second)
-            # Back to the first conversation: before the saved state, so all again.
+            # Back to the first conversation: before the copy at the last
+            # turn's start, but after the one where the turn before it starts.
             c, t2 = ask(port, first)
         finally:
             p.terminate()
@@ -63,15 +71,55 @@ def main():
         finally:
             p.terminate()
             p.wait()
+        # A document of about 1,300 tokens, then a question about it.
+        doc = " ".join(f"Paragraph {i}: the archive keeps ledger {i * 7 % 101} beside crate {i * 13 % 97}."
+                       for i in range(60))
+        sys_m = {"role": "system", "content": "You are terse."}
+        q1 = [sys_m, {"role": "user", "content": doc + "\n\nWhich crate is beside ledger 14?"}]
+        q2 = [sys_m, {"role": "user", "content": doc + "\n\nWhich ledger is beside crate 5?"}]
+        d1 = {"role": "user", "content": doc}
+        runs = {}
+        for slots in (None, 1):
+            p, port = serve(ts5, model, template, backend, log, slots)
+            try:
+                r = runs[slots] = {}
+                ask(port, q1)
+                r["B"] = ask(port, q2)  # a fresh chat: the same document, another question
+                c1, _ = ask(port, [sys_m, d1])
+                c2, _ = ask(port, [sys_m, d1, {"role": "assistant", "content": c1},
+                                   {"role": "user", "content": "Which crate is beside ledger 21?"}])
+                edited = [sys_m, d1, {"role": "assistant", "content": c1},
+                          {"role": "user", "content": "Which crate is beside ledger 28?"}]
+                r["C3"] = ask(port, edited)  # the last message edited
+            finally:
+                p.terminate()
+                p.wait()
+        p, port = serve(ts5, model, template, backend, log)
+        try:
+            fresh_b, _ = ask(port, q2)
+            fresh_c3, _ = ask(port, edited)
+        finally:
+            p.terminate()
+            p.wait()
         problems = []
+        for case, fresh_x, most in (("B", fresh_b, 600), ("C3", fresh_c3, 64)):
+            (x, tx), (y, ty) = runs[None][case], runs[1][case]
+            if x != fresh_x or y != fresh_x:
+                problems.append(f"{case}: the answers {x!r} (4 copies) and {y!r} (1) differ from a fresh server's {fresh_x!r}")
+            if not 0 < tx.get("prompt_n", 0) <= most:
+                problems.append(f"{case}: with 4 copies {tx.get('prompt_n')} tokens were read again, not 1 to {most}: {tx}")
+            if ty.get("cache_n", 0) != 0:
+                problems.append(f"{case}: with one copy a copy was used: {ty}")
         if b != fresh:
             problems.append(f"the answer {b!r} differs from a fresh server's {fresh!r}")
         if c != a:
             problems.append(f"the first conversation again gave {c!r}, not {a!r}")
         if not t.get("cache_n", 0) > 0:
             problems.append(f"the second request read its whole prompt again: {t}")
-        if t2.get("cache_n", 0) != 0 or tf.get("cache_n", 0) != 0:
-            problems.append(f"a prompt before the saved state reused it: {t2}, {tf}")
+        if not t2.get("cache_n", 0) > 0:
+            problems.append(f"the first conversation again read its whole prompt again: {t2}")
+        if tf.get("cache_n", 0) != 0:
+            problems.append(f"a fresh server's first request reused a cache: {tf}")
         log.seek(0)
         if "taken after the context was sized" in log.read():
             problems.append("GPU memory was taken after the context was sized (save_state's copy?)")
@@ -80,8 +128,11 @@ def main():
             log.seek(0)
             print(f"FAIL resume {name}: " + "; ".join(problems) + "\n" + log.read()[-3000:])
             sys.exit(1)
+        tb, tc = runs[None]["B"][1], runs[None]["C3"][1]
         print(f"PASS resume {name}: the next turn went on from token {t['cache_n']} of {t['cache_n'] + t['prompt_n']}, "
-              "the same answer as a fresh server")
+              f"a fresh chat with the same document from {tb['cache_n']} of {tb['cache_n'] + tb['prompt_n']}, "
+              f"an edited last message from {tc['cache_n']} of {tc['cache_n'] + tc['prompt_n']} (with one copy: "
+              "from 0), the same answers as a fresh server")
 
 
 if __name__ == "__main__":

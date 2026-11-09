@@ -162,6 +162,10 @@ public:
             rec_off_.push_back(rec_.size());
             if (hp_.rec(l)) rec_.resize(rec_.size() + hp_.rec_state_floats(), 0.f);
         }
+        if (!rec_.empty()) {
+            saved_.assign(state_slots_wanted(), {});
+            saved_pos_.assign(saved_.size(), -1);
+        }
         if (!m.tok_embd.data) file_ = fopen(m.gguf.path.c_str(), "rb");
         for (auto &L : m.layers) {
             Norms n;
@@ -184,16 +188,17 @@ public:
     const char *name() const override { return "cpu"; }
     int n_ctx() const override { return n_ctx_; }
     int rewind_limit() const override { return rec_.empty() ? Backend::rewind_limit() : 0; }
-    bool save_state(std::string &) override {
-        if (rec_.empty()) return false;
-        saved_ = rec_;
-        saved_pos_ = rec_pos_;
+    int state_slots() const override { return (int)saved_.size(); }
+    bool save_state(int slot, std::string &) override {
+        if (slot < 0 || slot >= (int)saved_.size()) return false;
+        saved_[slot] = rec_;
+        saved_pos_[slot] = rec_pos_;
         return true;
     }
-    bool restore_state(std::string &) override {
-        if (rec_.empty() || saved_pos_ < 0) return false;
-        rec_ = saved_;
-        rec_pos_ = saved_pos_;
+    bool restore_state(int slot, std::string &) override {
+        if (slot < 0 || slot >= (int)saved_.size() || saved_pos_[slot] < 0) return false;
+        rec_ = saved_[slot];
+        rec_pos_ = saved_pos_[slot];
         return true;
     }
 
@@ -516,8 +521,8 @@ private:
     std::vector<float> rec_;         // the linear layers' states (Qwen3.5)
     std::vector<size_t> rec_off_;    // each layer's start in rec_
     int rec_pos_ = 0;                // the tokens rec_ holds
-    std::vector<float> saved_;       // save_state()'s copy of rec_
-    int saved_pos_ = -1;             // its tokens; -1: none
+    std::vector<std::vector<float>> saved_;  // save_state()'s copies of rec_
+    std::vector<int> saved_pos_;             // their tokens; -1: none
     std::vector<Norms> norms_;
 };
 
@@ -548,6 +553,15 @@ bool kv_turn_v_setting() {
 #endif
     }();
     return on;
+}
+
+int state_slots_wanted() {
+    if (const char *e = getenv("TS5_STATE_SLOTS"); e && *e) return std::min(std::max(atoi(e), 1), 8);
+#ifdef TS5_PS5
+    return 1;  // the store title keeps the one copy at the last turn's start
+#else
+    return 4;
+#endif
 }
 
 KvType kv_type_from(const std::string &v, KvType otherwise) {

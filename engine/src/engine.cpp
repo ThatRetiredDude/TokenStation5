@@ -244,31 +244,58 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     if (keep == prompt.size()) keep--;
     // A sliding layer's ring may no longer hold the keys before `keep`: then
     // the whole prompt again (each of those keys depends on the ones before).
-    // A state that only goes forward (Qwen3.5) goes back to its saved copy
-    // where that is within the shared prefix.
+    // A state that only goes forward (Qwen3.5) goes back to the latest of its
+    // saved copies within the shared prefix.
     std::string serr;
+    if ((int)saved_.size() != b_->state_slots()) saved_.assign(b_->state_slots(), -1);
     if (written_ - (int)keep > b_->rewind_limit()) {
-        if (saved_ > 0 && saved_ <= (int)keep && b_->restore_state(serr)) {
-            keep = saved_;
-            written_ = saved_;
+        int best = -1;
+        for (int s = 0; s < (int)saved_.size(); s++)
+            if (saved_[s] > 0 && saved_[s] <= (int)keep && (best < 0 || saved_[s] > saved_[best])) best = s;
+        if (best >= 0 && b_->restore_state(best, serr)) {
+            keep = saved_[best];
+            written_ = saved_[best];
         } else {
             keep = 0;
         }
     }
-    if ((int)keep < saved_) saved_ = -1;  // what it holds is written over
+    for (int &s : saved_)
+        if ((int)keep < s) s = -1;  // what it holds is written over
     if (keep == 0) written_ = 0;
     cached_.resize(keep);
     // Such a state is saved where the prompt's last turn starts (its last
     // <|im_start|>): a conversation's next request shares the prompt up to
-    // there, the model's answer and the new message coming after it.
-    int save_at = -1;
-    if (b_->rewind_limit() == 0) {
+    // there, the model's answer and the new message coming after it. With
+    // more copies, also where the turn before it starts (an edited last
+    // message), and at the chunk ends nearest before 512 and 2,048 tokens
+    // from the prompt's end (another question after the same document, in a
+    // fresh chat). The first two cut the prompt's chunks there; the others
+    // are ends the chunks have anyway, so they read as without the copies.
+    std::vector<int> cuts, saves;  // cuts ascending; saves by priority
+    if (!saved_.empty()) {
         const int32_t turn = t_.token_id("<|im_start|>");
-        for (size_t i = prompt.size(); turn >= 0 && i-- > keep + 1;)
-            if (prompt[i] == turn) {
-                save_at = (int)i;
-                break;
-            }
+        const int ncut = std::min<int>(2, (int)saved_.size());
+        for (size_t i = prompt.size(); turn >= 0 && (int)cuts.size() < ncut && i-- > keep + 1;)
+            if (prompt[i] == turn) cuts.insert(cuts.begin(), (int)i);
+        saves.assign(cuts.rbegin(), cuts.rend());
+    }
+    const int chunk = 256;
+    auto chunk_len = [&](int i) {
+        int n = std::min<int>(chunk, (int)prompt.size() - i);
+        for (int c : cuts)
+            if (c > i && c < i + n) return c - i;
+        return n;
+    };
+    if (saved_.size() > 2) {
+        std::vector<int> ends;
+        for (int i = (int)keep; i < (int)prompt.size(); i += chunk_len(i)) ends.push_back(i + chunk_len(i));
+        for (int back : {512, 2048}) {
+            int at = -1;
+            for (int e : ends)
+                if (e <= (int)prompt.size() - back) at = e;
+            if (at > (int)keep && std::find(saves.begin(), saves.end(), at) == saves.end()) saves.push_back(at);
+        }
+        if (saves.size() > saved_.size()) saves.resize(saved_.size());
     }
     if (dcached_ > keep) dcached_ = keep;
     // On unified memory the logits are sampled in place; the scratch vectors
@@ -276,11 +303,9 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     const bool in_place = b_->logits_view() != nullptr;
     std::vector<float> logits(in_place ? 0 : nv);
     double t0 = now_ms();
-    const int chunk = 256;
     int n = 0;
     for (size_t i = keep; i < prompt.size(); i += (size_t)n) {
-        n = (int)std::min<size_t>(chunk, prompt.size() - i);
-        if (save_at > (int)i && save_at < (int)i + n) n = save_at - (int)i;
+        n = chunk_len((int)i);
         // Only the last chunk's logits are wanted; with a view, the chunks
         // before it skip the vocabulary matmul entirely.
         const bool last = i + (size_t)n >= prompt.size();
@@ -290,7 +315,14 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         if (!ok) { cached_.clear(); dcached_ = 0; return false; }
         written_ = std::max(written_, (int)(i + n));
         cached_.insert(cached_.end(), prompt.begin() + i, prompt.begin() + i + n);
-        if ((int)i + n == save_at && b_->save_state(serr)) saved_ = save_at;
+        if (std::find(saves.begin(), saves.end(), (int)i + n) != saves.end()) {
+            // Into an empty slot, else over the copy of the shortest prefix.
+            int s = 0;
+            for (int j = 1; j < (int)saved_.size(); j++)
+                if (saved_[j] < saved_[s]) s = j;
+            saved_[s] = -1;
+            if (b_->save_state(s, serr)) saved_[s] = (int)i + n;
+        }
     }
     st.prompt_evaluated = (int)(prompt.size() - keep);
     // Each step forwards the next token plus up to `dmax` lookup-drafted

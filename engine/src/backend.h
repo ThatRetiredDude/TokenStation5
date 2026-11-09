@@ -49,13 +49,16 @@ public:
     // (Gemma 3) holds only so many positions; unlimited elsewhere.
     virtual int rewind_limit() const { return 1 << 30; }
     // A backend whose state only goes forward (rewind_limit() 0: Qwen3.5's
-    // linear layers) keeps one copy of it, so a conversation's next request
-    // goes on from where the last turn started, not from the start:
-    // save_state() copies the state as it stands, after the tokens forwarded
-    // so far; restore_state() puts the copy back, and the next forward goes
-    // on from its tokens. false: no copy kept (or none saved).
-    virtual bool save_state(std::string &) { return false; }
-    virtual bool restore_state(std::string &) { return false; }
+    // linear layers) keeps state_slots() copies of it, so a request that
+    // shares the start of the last one goes on from a copy, not from the
+    // start: save_state(slot) copies the state as it stands, after the tokens
+    // forwarded so far; restore_state(slot) puts that copy back, and the next
+    // forward goes on from its tokens. false: no such copy kept (or none
+    // saved). The copies are made when the backend is, before the context
+    // is sized.
+    virtual int state_slots() const { return 0; }
+    virtual bool save_state(int, std::string &) { return false; }
+    virtual bool restore_state(int, std::string &) { return false; }
     virtual KvType kv_type() const { return KvType::F32; }
     // Since the last call, a few lines of text: with TS5_PROFILE set (vk),
     // the CPU's time per forward call, and with TS5_PROFILE=1 also the GPU's
@@ -105,6 +108,11 @@ uint64_t kv_ring_bytes(const HParams &hp, KvType kv);
 // activations, in the 1 GiB blocks it allocates, and sliding layers' rings in
 // f16.
 uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes);
+// How many copies of a state that only goes forward a backend keeps
+// (Backend::state_slots): TS5_STATE_SLOTS, 1 to 8; by default 4 on Linux
+// (the start of the prompt's last two turns, and 512 and 2,048 tokens before
+// its end), 1 in the PS5 title (the last turn's start).
+int state_slots_wanted();
 // The context a Vulkan backend picks when asked for 0 tokens: what fits in
 // `memory` beside `used` bytes and 1 GiB kept for everything else (the
 // display, a GPU check's CPU reference), a multiple of 1024 up to cap. 0 if

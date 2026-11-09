@@ -164,9 +164,21 @@ and goes through `ssm_out`. The CPU reference does the same in double sums
 and matches llama.cpp on the test models. The state (2.2 MB a layer in the
 9B) can't go back, so a backend with linear layers has `rewind_limit()` 0:
 no drafting and no helper, and a prompt that doesn't go on from the last
-one is read from the start, except that the engine saves the state where a
-prompt's last turn starts (its last `<|im_start|>`, `save_state()`) and
-goes back to it for the next request of the same conversation. Only the 8
+one is read from the start, except from a copy of the state the engine
+saved on the way (`save_state(slot)`; the latest within the shared prefix).
+The PS5 title keeps one copy, where a prompt's last turn starts (its last
+`<|im_start|>`), for the next request of the same conversation. Linux keeps
+four (`TS5_STATE_SLOTS`, 1 to 8): also where the turn before it starts, for
+an edited last message, and at the chunk ends nearest before 512 and 2,048
+tokens from the prompt's end, for another question after the same document
+in a fresh chat. Those two are ends the chunks have anyway; the turn starts
+cut a chunk there. Each copy is the state's size (52.7 MB in the 9B), made
+at load before the context is sized; at `-c auto` the 9B's 8-bit cache
+reaches its 262,144-token window with 1.3 GiB to spare, so the three more
+cost it no context. On the test model a fresh chat with the same document
+reads 562 of its 1,083 tokens again instead of all of them, an edited last
+message 20 of 1,121; from the PS5's rates that is 3 to 19 s instead of 497
+to 1,281 s at 130k to 233k tokens on the 9B. Only the 8
 full layers have a KV cache, 32 KiB a token in f16. Its chat template opens
 the model's turn inside its thinking (`<think>\n`, `turn_opening()`), and
 its tool calls are `<function=NAME>` with `<parameter=KEY>` elements, whose

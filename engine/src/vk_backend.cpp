@@ -463,19 +463,19 @@ public:
 
     const float *logits_view() const override { return (const float *)logits_.map; }
 
-    bool save_state(std::string &err) override {
-        if (!rec_layers_) return false;
-        const VkDeviceSize bytes = 4ull * rec_layers_ * hp_.rec_state_floats();
-        if (!saved_.buf && !create_buf(bytes, false, saved_, err)) return false;
-        if (!copy(rec_, saved_, 0, bytes, err)) return false;
-        saved_pos_ = rec_pos_;
+    int state_slots() const override { return rec_layers_ ? (int)saved_.size() : 0; }
+
+    bool save_state(int slot, std::string &err) override {
+        if (!rec_layers_ || slot < 0 || slot >= (int)saved_.size()) return false;
+        if (!copy(rec_, saved_[slot], 0, 4ull * rec_layers_ * hp_.rec_state_floats(), err)) return false;
+        saved_pos_[slot] = rec_pos_;
         return true;
     }
 
-    bool restore_state(std::string &err) override {
-        if (!rec_layers_ || saved_pos_ < 0) return false;
-        if (!copy(saved_, rec_, 0, 4ull * rec_layers_ * hp_.rec_state_floats(), err)) return false;
-        rec_pos_ = saved_pos_;
+    bool restore_state(int slot, std::string &err) override {
+        if (!rec_layers_ || slot < 0 || slot >= (int)saved_.size() || saved_pos_[slot] < 0) return false;
+        if (!copy(saved_[slot], rec_, 0, 4ull * rec_layers_ * hp_.rec_state_floats(), err)) return false;
+        rec_pos_ = saved_pos_[slot];
         return true;
     }
 
@@ -1153,9 +1153,9 @@ private:
             !mk(ids_, 4ull * TMAX, true) || !mk(logits_, 4ull * TMAX * hp_.n_vocab, true))
             return false;
         // Qwen3.5: the full layers' queries with their gates, and the linear
-        // layers' projections, output and state, and save_state's copy of the
-        // state. That copy is made here, before the context is sized, and to
-        // its size: made at a prompt's first save it took a fresh 1 GiB
+        // layers' projections, output and state, and save_state's copies of
+        // the state. Those are made here, before the context is sized, and to
+        // their size: made at a prompt's first save, one took a fresh 1 GiB
         // arena the sizing never counted (on the PS5 free memory fell from
         // 2.36 to 1.33 GiB the moment a long prompt ended).
         if (hp_.attn_gate && !mk(qg_, 8ull * TMAX * QD)) return false;
@@ -1163,9 +1163,12 @@ private:
             const size_t C = hp_.ssm_conv_dim(), I = hp_.ssm_inner(), NV = hp_.ssm_v_heads;
             const size_t state = 4ull * rec_layers_ * hp_.rec_state_floats();
             if (!mk(qkv_, 4ull * TMAX * C) || !mk(z_, 4ull * TMAX * I) || !mk(beta_, 4ull * TMAX * NV) ||
-                !mk(alpha_, 4ull * TMAX * NV) || !mk(y_, 4ull * TMAX * I) || !mk(rec_, state) ||
-                !mk(saved_, state, false, true))
+                !mk(alpha_, 4ull * TMAX * NV) || !mk(y_, 4ull * TMAX * I) || !mk(rec_, state))
                 return false;
+            saved_.resize(state_slots_wanted());
+            saved_pos_.assign(saved_.size(), -1);
+            for (Buf &b : saved_)
+                if (!mk(b, state, false, true)) return false;
         }
         if (n_ctx_ <= 0) {
             // As much as fits, in what the weights and activations left, and
@@ -2329,8 +2332,8 @@ private:
     Buf qg_, qkv_, z_, beta_, alpha_, y_, rec_;
     int rec_layers_ = 0;  // how many linear layers
     int rec_pos_ = 0;     // the tokens rec_ holds
-    Buf saved_;           // save_state()'s copy of rec_
-    int saved_pos_ = -1;  // its tokens; -1: none
+    std::vector<Buf> saved_;      // save_state()'s copies of rec_
+    std::vector<int> saved_pos_;  // their tokens; -1: none
     std::vector<Buf> kc_, vc_, ks_, vs_;  // the KV cache's pieces
     // Each layer's first cache element and piece, and a sliding layer's ring slots (0: none).
     std::vector<uint32_t> layer_off_, layer_buf_, ring_;
@@ -2419,11 +2422,13 @@ uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
     const uint64_t T = VkBackend::TMAX, E = hp.n_embd, F = hp.n_ff;
     const uint64_t QD = (uint64_t)hp.max_qd(), KVD = (uint64_t)hp.max_kvd();
     // Qwen3.5: the queries with their gates, the linear layers' projections
-    // and output, and their state twice (save_state's copy).
+    // and output, and their state with save_state's copies.
     const uint64_t rec = hp.rec_count() ? (uint64_t)hp.ssm_conv_dim() + 2ull * hp.ssm_inner() + 2ull * hp.ssm_v_heads : 0;
     const uint64_t act =
         4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab + (hp.attn_gate ? 2 * QD : 0) + rec) +
-        4 * (VkBackend::PART + VkBackend::SPLIT) + 8ull * hp.rec_count() * (uint64_t)std::max<int64_t>(0, hp.rec_state_floats());
+        4 * (VkBackend::PART + VkBackend::SPLIT) +
+        4ull * (1 + (hp.rec_count() ? state_slots_wanted() : 0)) * hp.rec_count() *
+            (uint64_t)std::max<int64_t>(0, hp.rec_state_floats());
     const uint64_t gib = 1ull << 30;
     return (weight_bytes + act + gib - 1) / gib * gib + kv_ring_bytes(hp, KvType::F16);
 }
