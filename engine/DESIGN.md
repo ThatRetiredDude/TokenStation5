@@ -483,7 +483,19 @@ dots added up: on gfx1013 9 to 10% fewer vector instructions again in the
 full-tile loop (attn_pf128 1,318 to 1,185, its k8v4 build 1,311 to 1,192,
 attn_pf256s 1,378 to 1,253, attn_pf512s 1,361 to 1,235), still 128 registers;
 about 4% more off the attention, an estimate. Its logits differ from the
-default's in the last bits, so the suite checks it against the CPU. Keys
+default's in the last bits, so the suite checks it against the CPU. `=4`
+(the `_tp` builds, `PF_PVH`) is `=3` with each 16-key step's p V added up
+in packed f16, two values an instruction (`v_pk_fma_f16`), and folded into
+the f32 output with the step's rescale; p is at most 1, but a V of more than
+about 4,000 could overflow a step's f16 sum, so a Gemma (large values) runs
+it as `=3`. The f16 sum held beside the f32 one would take 160 registers,
+one workgroup a compute unit instead of two, so these builds load each tile
+where they store it (`NO_PREFETCH`, as attn_pf512s does): 128 registers,
+and the full-tile loop 23% fewer vector instructions than `=3`'s (attn_pf128
+and its cache builds 1,185-1,192 to 915, attn_pf256s 1,253 to 981). The LDS
+reads stay as they were and now about match that work, so the estimate is
++3 to 8% on a prompt deep in a document, and the logits move by f16
+rounding of each step's sum (the suite checks them against the CPU). Keys
 are scored 16 at a time in every build, in the same order, so their logits
 are byte for byte the same (the suite checks it). Register counts come from
 RADV's null device: `RADV_FORCE_FAMILY=gfx1013` with

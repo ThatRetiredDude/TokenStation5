@@ -23,7 +23,10 @@
 // set to 1 drops the ring's arithmetic for layers with none. PF_EXP2 (the te
 // builds, TS5_ATTN_PF_TRIM=3) also scores in base 2, log2(e) in the query's
 // scale and exp2 for exp, each key's dot product one chain of fmas: fewer
-// instructions again, the logits different in the last bits.
+// instructions again, the logits different in the last bits. PF_PVH (the tp
+// builds, TS5_ATTN_PF_TRIM=4, never on a Gemma) adds a 16-key step's p V in
+// packed f16, two values an instruction, and folds that into the f32 output
+// once a step: f16 rounding on each step's sum (p is at most 1).
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_control_flow_attributes : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -59,6 +62,19 @@ const float PF_LOG2E = 1.4426950408889634, PF_LN2 = 0.6931471805599453;
 #define PF_EXP(x) exp(x)
 #define PF_QK(i, ko, d) d += dot(q[i], vec4(ks[(ko) + LANES * (i)]));
 #define PF_M_OUT(m) (m)
+#endif
+#ifdef PF_PVH
+#define PF_PV_START                                                                \
+    f16vec4 sv[NV];                                                                \
+    [[unroll]] for (uint i = 0; i < NV; i++) sv[i] = f16vec4(0.0);
+#define PF_PV_SCALE(cf)
+#define PF_PV_ADD(i, p, vo) sv[i] = fma(f16vec4(float16_t(p)), vs[(vo) + LANES * (i)], sv[i]);
+#define PF_PV_END(cf) [[unroll]] for (uint i = 0; i < NV; i++) acc[i] = fma(acc[i], vec4(cf), vec4(sv[i]));
+#else
+#define PF_PV_START
+#define PF_PV_SCALE(cf) [[unroll]] for (uint i = 0; i < NV; i++) acc[i] *= cf;
+#define PF_PV_ADD(i, p, vo) acc[i] += p * vec4(vs[(vo) + LANES * (i)]);
+#define PF_PV_END(cf)
 #endif
 layout(local_size_x = 256) in;
 
@@ -217,14 +233,16 @@ void main() {
             if (mx != NEG_INF) {  /* else none of these keys is this row's yet */  \
                 const float cf = PF_EXP(m - mx);  /* 0 while m is -inf */          \
                 l *= cf;                                                           \
-                [[unroll]] for (uint i = 0; i < NV; i++) acc[i] *= cf;             \
+                PF_PV_SCALE(cf)                                                    \
+                PF_PV_START                                                        \
                 [[unroll]] for (uint jj = 0; jj < STEP; jj++) {                    \
                     const float p = PF_EXP(s[jj] - mx);                            \
                     l += p;                                                        \
                     const uint vo = (j0 + jj) * HD4 + c;                           \
                     [[unroll]] for (uint i = 0; i < NV; i++)                       \
-                        if (i < NI) acc[i] += p * vec4(vs[vo + LANES * i]);        \
+                        if (i < NI) PF_PV_ADD(i, p, vo)                            \
                 }                                                                  \
+                PF_PV_END(cf)                                                      \
                 m = mx;                                                            \
             }                                                                      \
         }

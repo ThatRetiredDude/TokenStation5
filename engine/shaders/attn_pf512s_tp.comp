@@ -1,0 +1,15 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// attn_pf512s with PF_TRIM, PF_EXP2 and PF_PVH (TS5_ATTN_PF_TRIM=4, never on a Gemma): the te
+// build with each 16-key step's p V in packed f16 (see attn_pf.glsl).
+// attn_pf512 with no tile loaded ahead: 128 registers a thread on the PS5
+// (gfx1013, wave64 or 32) instead of 168, so a compute unit holds two workgroups
+// instead of one. The sums are the same, so the output too.
+#define HEAD_DIM 512
+#define LANES 16
+#define KEYS 16
+#define NO_PREFETCH
+#define PF_TRIM
+#define PF_EXP2
+#define PF_PVH
+#include "attn_pf.glsl"

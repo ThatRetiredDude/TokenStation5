@@ -141,6 +141,18 @@
 #include "attn_pf512s_q8_te.spv.h"
 #include "attn_pf512s_q4_te.spv.h"
 #include "attn_pf512s_k8v4_te.spv.h"
+#include "attn_pf128_tp.spv.h"
+#include "attn_pf128_q8_tp.spv.h"
+#include "attn_pf128_q4_tp.spv.h"
+#include "attn_pf128_k8v4_tp.spv.h"
+#include "attn_pf256s_tp.spv.h"
+#include "attn_pf256s_q8_tp.spv.h"
+#include "attn_pf256s_q4_tp.spv.h"
+#include "attn_pf256s_k8v4_tp.spv.h"
+#include "attn_pf512s_tp.spv.h"
+#include "attn_pf512s_q8_tp.spv.h"
+#include "attn_pf512s_q4_tp.spv.h"
+#include "attn_pf512s_k8v4_tp.spv.h"
 #include "get_rows_f16.spv.h"
 #include "get_rows_f32.spv.h"
 #include "get_rows_q4_0.spv.h"
@@ -622,7 +634,12 @@ private:
         if (const char *e = getenv("TS5_EMBD_FILE"))
             embd_file_ = atoi(e) != 0 && m_.tok_embd && m_.output.info != m_.tok_embd.info;
         if (const char *e = getenv("TS5_FIT_TAILS")) fit_tails_ = atoi(e) != 0;
-        if (const char *e = getenv("TS5_ATTN_PF_TRIM")) pf_trim_ = (uint32_t)std::min(3, std::max(0, atoi(e)));
+        if (const char *e = getenv("TS5_ATTN_PF_TRIM")) pf_trim_ = (uint32_t)std::min(4, std::max(0, atoi(e)));
+        // f16 p V would overflow on Gemma's large values: 3 there.
+        if (pf_trim_ == 4 && (hp_.arch == "gemma3" || hp_.arch == "gemma4")) {
+            pf_trim_ = 3;
+            ts5::log_line("ts5: TS5_ATTN_PF_TRIM=4 runs as 3 on a Gemma (no f16 p V)");
+        }
 #endif
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_DEC")) attn_dec_min_ = atoi(e) > 0 ? atoi(e) : 0;
@@ -1055,13 +1072,18 @@ private:
         // TS5_ATTN_PF_TRIM: each slim build's t build twice, NAME.t for a
         // sliding layer's ring and NAME.tn (constant 0 = 1) for the rest;
         // =2 the tc builds, which keep subgroupClusteredAdd, =3 the te
-        // builds (base-2 scores, chained dot products).
+        // builds (base-2 scores, chained dot products), =4 the tp builds
+        // (the te builds with p V in packed f16).
 #define PT(n, nb)                                                                                     \
     if (pf_trim_) {                                                                                   \
-        const uint32_t *c = pf_trim_ == 1 ? spv_##n##_t : pf_trim_ == 2 ? spv_##n##_tc : spv_##n##_te; \
+        const uint32_t *c = pf_trim_ == 1   ? spv_##n##_t                                             \
+                            : pf_trim_ == 2 ? spv_##n##_tc                                            \
+                            : pf_trim_ == 3 ? spv_##n##_te                                            \
+                                            : spv_##n##_tp;                                           \
         const size_t z = pf_trim_ == 1   ? sizeof(spv_##n##_t)                                        \
                          : pf_trim_ == 2 ? sizeof(spv_##n##_tc)                                       \
-                                         : sizeof(spv_##n##_te);                                      \
+                         : pf_trim_ == 3 ? sizeof(spv_##n##_te)                                       \
+                                         : sizeof(spv_##n##_tp);                                      \
         if (!make_pipe(#n ".t", c, z, nb, err) || !make_pipe(#n ".tn", c, z, nb, err, 1)) return false; \
     }
         PT(attn_pf128, 5) PT(attn_pf128_q8, 7) PT(attn_pf128_q4, 7) PT(attn_pf128_k8v4, 7)
@@ -2413,7 +2435,8 @@ private:
     // subgroupClusteredAdd kept (the tests on lavapipe, which adds a
     // cluster in another order than shuffles do). 3: the te builds (PF_EXP2:
     // base-2 scores, each key's dot product one fma chain), fewer again, the
-    // logits different in the last bits.
+    // logits different in the last bits. 4: the tp builds (3 with each 16-key
+    // step's p V in packed f16; 3 on a Gemma).
     uint32_t pf_trim_ = 0;
     // Prompts of at least this many tokens use attn_pf (TS5_ATTN_PF; 0: never),
     // its build for heads of 128 where they are (TS5_ATTN_PF128=0: never).

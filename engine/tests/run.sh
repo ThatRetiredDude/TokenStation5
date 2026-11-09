@@ -309,10 +309,11 @@ echo "PASS TS5_ATTN_PF_ROUNDS: the CPU's answers, and the chunks deep in the pro
 # dot product one fma chain: the CPU's answers, through attn_merge too
 # (TS5_ATTN_SPLITS, TS5_ATTN_PF_ROUNDS). =2 keeps subgroupClusteredAdd: the
 # default's logits byte for byte, so the trim alone changes nothing (slow on
-# llvmpipe, so fewer tokens).
-echo "== TS5_ATTN_PF_TRIM: the CPU's answers with =1 and =3, the default's logits with =2"
+# llvmpipe, so fewer tokens). =4 is =3 with each 16-key step's p V in packed
+# f16: the CPU's answers too; on a Gemma it runs as =3.
+echo "== TS5_ATTN_PF_TRIM: the CPU's answers with =1, =3 and =4, the default's logits with =2"
 trim=("${shapes[1]}" "${shapes[3]}" "${shapes[4]}")
-for s in 1 3; do
+for s in 1 3 4; do
     TS5_ATTN_PF_TRIM=$s python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
         "${trim[@]}"
     TS5_ATTN_PF_TRIM=$s TS5_ATTN_SPLITS=3 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
@@ -337,6 +338,18 @@ for c in "${shapes[1]}:TS5_KV=f16:attn_pf128.tn" "${shapes[3]}:TS5_KV=k8v4:attn_
     grep -q "^  $k " "$work/trim-2.err" || { echo "FAIL: TS5_ATTN_PF_TRIM=2 $(basename "$m") $e: no $k"; exit 1; }
     echo "same logits: $(basename "$m") $e ($k)"
 done
+# =4's own logits where it runs (not =3's), and =3's on a Gemma.
+for m in "${shapes[4]}" "$g3"; do
+    TS5_ATTN_PF_TRIM=3 "$ts5" logits -m "$m" -o "$work/trim-3.bin" $trim_toks 2> /dev/null
+    TS5_ATTN_PF_TRIM=4 "$ts5" logits -m "$m" -o "$work/trim-4.bin" $trim_toks 2> "$work/trim-4.err"
+    if [ "$m" = "$g3" ]; then
+        cmp "$work/trim-3.bin" "$work/trim-4.bin"
+        grep -q "TS5_ATTN_PF_TRIM=4 runs as 3 on a Gemma" "$work/trim-4.err"
+    else
+        ! cmp -s "$work/trim-3.bin" "$work/trim-4.bin" || { echo "FAIL: TS5_ATTN_PF_TRIM=4 gave =3's logits"; exit 1; }
+    fi
+done
+rm -f "$work"/trim-*.bin
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 100 --step "${shapes[@]}"
 # Heads of 256 and 512 in attn_dec's 4-column builds (the 8-column WIDE8
 # ones are the default).
