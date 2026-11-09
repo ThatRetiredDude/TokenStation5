@@ -345,6 +345,18 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   (ffn_down) to 10% (gate and up) less time. Volatile buffers, the other
   way to keep loads in place, skip the L0 and L1 caches: 28% slower
   prompts.
+  The zeros aren't needed: a row or token past the end only feeds its own
+  sums, which are never stored, and its clamped loads are real, finite
+  values. `TS5_MMB_NOZERO=1` (Linux, off until the PS5 has measured it)
+  takes the default variants' z builds (`mmb16dqz_*`, `mmb16dqlz_*`,
+  `mmbz_*`), whose store skips the selects: 3.5-5% fewer instructions in
+  RADV's gfx1013 code and 4.5-7% lower estimated latency, and Q4_K's
+  `d1 * q - m1` goes from a multiply-add and an f16 conversion to one
+  mixed-precision fma (`v_fma_mixlo_f16`), one rounding instead of two.
+  That gives the same bits wherever `d1 * q - m1` is exact in f32 (`d1 * q`
+  always is: 11 bits of `d`, 6 of the scale, 5 of q); Q6_K, Q8_0 and the f32
+  kernel give the same bits always. On lavapipe, which doesn't fuse the
+  conversion, every build gives the default's bytes.
 - 9 or more (`mm_*`, `shaders/matmul_tiled.glsl`): 64 rows x 64 tokens per
   workgroup. Half the threads dequantize a 64 x 64 slice of W into shared
   memory while the other half load the matching slice of X, then each thread

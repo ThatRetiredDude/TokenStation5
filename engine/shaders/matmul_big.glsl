@@ -198,15 +198,21 @@ void dequant(Raw w, uint u, out float v[16]) {
 
 // Dequantizes w (unit u) and stores it and x into shared buffer b; rows
 // past the matrix (!w_ok) and tokens past the batch (!x_ok) store zeros.
+// With MMB_NOZERO they store the clamped last row and token instead: only
+// their own sums read them, and those are never stored.
 void store(uint b, uint u, bool w_ok, Raw w, vec4 x[4], bvec4 x_ok, uint lr, uint lh) {
+    float v[16];
+#ifdef MMB_NOZERO
+    dequant(w, u, v);
+#else
     for (uint i = 0; i < 4; i++)
         if (!x_ok[i]) x[i] = vec4(0.0);
-    float v[16];
     if (w_ok) {
         dequant(w, u, v);
     } else {
         for (uint l = 0; l < 16; l++) v[l] = 0.0;
     }
+#endif
     for (uint l = 0; l < 16; l++) Ws[b][16 * lh + l][lr / 4][lr % 4] = SF(v[l]);
 #ifdef MMB_XQ
     for (uint c = 0; c < 4; c++) Xs[b][16 * lh + 4 * (lr % 4) + c][lr / 4] = SV(x[0][c], x[1][c], x[2][c], x[3][c]);

@@ -212,6 +212,30 @@ TS5_MMB_MIN=1 TS5_MMB_WGS=4 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --
     "${kmix[@]}"
 TS5_MMB_MIN=1 TS5_MMB_VAR=q TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
     --ntok 300 "${kmix[@]}"
+# TS5_MMB_NOZERO=1 (Linux): the default variants' z builds, which don't
+# zero the rows and tokens past the block's edges (never stored). The same
+# bytes as the default here (lavapipe doesn't fuse the dequant into the f16
+# conversion; on the PS5's GPU Q4_K and Q5_K keep them wherever d1 q - m1 is
+# exact in f32), f16 and f32, every weight type, 300 tokens (ragged blocks).
+echo "== Prompt kernels without the edge zeroing (TS5_MMB_NOZERO=1): the default's bytes, and the CPU's answers"
+TS5_MMB_MIN=1 TS5_MMB_NOZERO=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
+    "${kmix[@]}"
+TS5_MMB_MIN=1 TS5_MMB_NOZERO=1 TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 \
+    --backend vk --ntok 300 "${kmix[@]}"
+[ -s "$work/qwen2-mk-Q5_K_M.gguf" ] || python3 "$here/make_test_model.py" --arch qwen2 --quant Q5_K_M \
+    --vocab "$work/ggml-vocab-qwen2.gguf" "$work/qwen2-mk-Q5_K_M.gguf" > /dev/null
+nz_toks=$(seq 5 7 2100 | head -300)
+for m in "$work/qwen3-kmix.gguf" "$work/gemma4-kmix.gguf" "$work/qwen2-mk-Q5_K_M.gguf" "$work/qwen2-Q8_0.gguf"; do
+    for f in 1 0; do
+        TS5_MMB_MIN=1 TS5_MMB_F16=$f TS5_LOGITS_ROWS=256 "$ts5" logits -m "$m" -o "$work/nz-0.bin" $nz_toks 2> /dev/null
+        TS5_MMB_MIN=1 TS5_MMB_F16=$f TS5_LOGITS_ROWS=256 TS5_MMB_NOZERO=1 TS5_PROFILE=1 "$ts5" logits -m "$m" \
+            -o "$work/nz-1.bin" $nz_toks 2> "$work/nz-1.err"
+        cmp "$work/nz-0.bin" "$work/nz-1.bin"
+        grep -qE "mmb(16dqz|16dqlz|z)_" "$work/nz-1.err" || { echo "FAIL: no z prompt kernel ran on $m"; exit 1; }
+        ! grep -qE "mmb(16dq|16dql|)_q" "$work/nz-1.err" || { echo "FAIL: a zeroing prompt kernel ran on $m"; exit 1; }
+    done
+done
+rm -f "$work"/nz-*.bin
 echo "== The logits of more positions than the GPU's buffer holds (TS5_LOGITS_ROWS, 8 by default on Linux): a piece"
 echo "   at a time, pieces of 8, 3 and 1 the same bytes; the store title's 256 (one piece of 256) within tolerance"
 # Above, the output's 300 rows went 8 at a time through the verify kernels;

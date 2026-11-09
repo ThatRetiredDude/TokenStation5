@@ -242,6 +242,18 @@
 #include "mmbq_q5_k.spv.h"
 #include "mmbq_q6_k.spv.h"
 #include "mmbq_q8_0.spv.h"
+#include "mmb16dqz_q4_k.spv.h"
+#include "mmb16dqz_q5_k.spv.h"
+#include "mmb16dqz_q6_k.spv.h"
+#include "mmb16dqz_q8_0.spv.h"
+#include "mmb16dqlz_q4_k.spv.h"
+#include "mmb16dqlz_q5_k.spv.h"
+#include "mmb16dqlz_q6_k.spv.h"
+#include "mmb16dqlz_q8_0.spv.h"
+#include "mmbz_q4_k.spv.h"
+#include "mmbz_q5_k.spv.h"
+#include "mmbz_q6_k.spv.h"
+#include "mmbz_q8_0.spv.h"
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "qkv_post_q8t.spv.h"
@@ -765,6 +777,21 @@ private:
             for (char c : {'d', 'l'})  // f16 only
                 mmb_var32_.erase(std::remove(mmb_var32_.begin(), mmb_var32_.end(), c), mmb_var32_.end());
         }
+#ifndef TS5_PS5
+        // TS5_MMB_NOZERO=1 (Linux): the default variants' z builds, whose
+        // store() doesn't zero the rows past the matrix and the tokens past
+        // the batch. Their loads are clamped to the last row and token, so
+        // what they compute is finite and never stored, and only their own
+        // sums read it. Without the select RADV fuses Q4_K's and Q5_K's
+        // d1 * q - m1 into the f16 conversion (one rounding, not two): the
+        // same bits wherever d1 * q - m1 is exact in f32 (Q6_K, Q8_0 and the
+        // f32 kernel always are).
+        if (const char *e = getenv("TS5_MMB_NOZERO"); e && atoi(e)) {
+            for (std::string *v : {&mmb_var_, &mmb_var_q8_})
+                if (*v == "dq" || *v == "dql") *v += "z";
+            if (mmb_var32_.empty()) mmb_var32_ = "z";
+        }
+#endif
         bool kv_auto = false;
         kv_ = kv_type_setting(&kv_auto);
         const bool q8_ok = attn_ok_all() && hp_.max_hd() % 32 == 0;
@@ -1014,6 +1041,11 @@ private:
         P(mmb16dq_q4_k, 4) P(mmb16dq_q5_k, 4) P(mmb16dq_q6_k, 4) P(mmb16dq_q8_0, 4)
         P(mmb16dql_q4_k, 4) P(mmb16dql_q5_k, 4) P(mmb16dql_q6_k, 4) P(mmb16dql_q8_0, 4)
         P(mmbq_q4_k, 4) P(mmbq_q5_k, 4) P(mmbq_q6_k, 4) P(mmbq_q8_0, 4)
+#ifndef TS5_PS5
+        P(mmb16dqz_q4_k, 4) P(mmb16dqz_q5_k, 4) P(mmb16dqz_q6_k, 4) P(mmb16dqz_q8_0, 4)
+        P(mmb16dqlz_q4_k, 4) P(mmb16dqlz_q5_k, 4) P(mmb16dqlz_q6_k, 4) P(mmb16dqlz_q8_0, 4)
+        P(mmbz_q4_k, 4) P(mmbz_q5_k, 4) P(mmbz_q6_k, 4) P(mmbz_q8_0, 4)
+#endif
         if (mmb_ && !pipes_.count("mmb16" + mmb_var_ + "_q4_k")) {
             err = "no prompt kernel variant \"" + mmb_var_ + "\" (TS5_MMB_VAR)";
             return false;
