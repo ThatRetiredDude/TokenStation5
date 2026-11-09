@@ -444,7 +444,23 @@ memory and shared-memory waits behind. `attn_pf256s` (tiles of 16 keys) and
 prompts 5.5% faster on Qwen3.5 9B and Gemma 3 12B, 9.9% on Gemma 4 12B,
 generation unchanged; `TS5_ATTN_PF_SLIM=0` keeps the wider builds, which
 the store title still uses). Splitting the keys (`TS5_ATTN_SPLITS=3`) on top
-adds 0.2 to 3.6% to prompts but costs generation 7.5 to 24%. Keys
+adds 0.2 to 3.6% to prompts but costs generation 7.5 to 24%.
+`TS5_ATTN_PF_ROUNDS=cu` (Linux, off until measured on the PS5; a number in
+place of `cu` sets the compute units) splits only prompts' keys, and only
+where that fills the GPU's rounds. Deep in a prompt a chunk's attn_pf
+workgroups are all as long and the next kernel waits for the last, so 128 of
+them (Llama 3.1 8B, Qwen3 8B, Qwen3.5 9B) take 4 rounds of the PS5's 40
+compute units, the last a fifth full, and the 14Bs' 176 take 5, the last two
+fifths full. Split s ways (attn_merge adds the slices) each round is 1/s the
+work; the backend takes the s from 2 to 4 whose rounds come out shortest
+against no split, under the worse of one and two workgroups a compute unit,
+with slices of 1,024 keys or more and at least 2% to gain: 3 for 128 (0.83 of
+the attention time), 2 for 176 (0.90), none for Coder 7B's 116, which fill
+their rounds, or under 64. From the PS5's profiles that is about +10% on
+Llama 3.1 8B's 32k-token prompt and +15% at 120k, +6-7% on the 14Bs at 30k
+and +3.6% on Qwen3.5 (estimates). The logits change in the last bits (the
+order the slices are added in); the suite checks them against the CPU at
+3,400 tokens on a test model with Qwen3 8B's heads. Keys
 are scored 16 at a time in every build, in the same order, so their logits
 are byte for byte the same (the suite checks it). Register counts come from
 RADV's null device: `RADV_FORCE_FAMILY=gfx1013` with

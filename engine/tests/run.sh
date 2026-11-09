@@ -256,6 +256,21 @@ python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --nto
 TS5_ATTN_PF=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${shapes[@]}"
 TS5_ATTN_PF128=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${shapes[@]}"
 TS5_ATTN_SPLITS=3 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${shapes[@]}"
+# TS5_ATTN_PF_ROUNDS: a prompt chunk's 128 attn_pf workgroups (Qwen3 8B's
+# heads, 32 of 128 on 8) split 3 ways once the keys reach 3,072, to fill
+# rounds of 40 compute units: the CPU's answers at 3,400 tokens, and the
+# profile's attn_merge calls say the chunks ending at 3,072 and 3,328 split
+# (3 in its one layer, the last chunk's small split included; 1 without).
+r32="$work/heads32-kv8.gguf"
+[ -s "$r32" ] || python3 "$here/make_test_model.py" --arch qwen3 --quant Q8_0 --layers 1 --heads 32 --kv-heads 8 \
+    --head-dim 128 --vocab "$work/ggml-vocab-qwen2.gguf" "$r32" > /dev/null
+TS5_ATTN_PF_ROUNDS=40 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 3400 "$r32"
+for r in 0:1 40:3; do
+    TS5_ATTN_PF_ROUNDS=${r%:*} TS5_PROFILE=1 "$ts5" bench -m "$r32" --pp 3400 --tg 1 2> /dev/null |
+        sed -n '/^prompt/,/^generation/p' | grep -Eq "attn_merge +[0-9.]+ ms +[0-9.]+% +${r#*:} calls" ||
+        { echo "FAIL: TS5_ATTN_PF_ROUNDS=${r%:*}: not ${r#*:} attn_merge calls in the prompt"; exit 1; }
+done
+echo "PASS TS5_ATTN_PF_ROUNDS: the CPU's answers, and the chunks deep in the prompt split 3 ways"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 100 --step "${shapes[@]}"
 # Heads of 256 and 512 in attn_dec's 4-column builds (the 8-column WIDE8
 # ones are the default).

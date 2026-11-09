@@ -553,6 +553,10 @@ private:
         if (const char *e = getenv("TS5_MV_ROWS_MIN")) mv_rows_min_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_ATTN")) attn_fast_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_SPLITS")) attn_splits_ = std::max(0, atoi(e));
+#ifndef TS5_PS5
+        if (const char *e = getenv("TS5_ATTN_PF_ROUNDS"))
+            pf_rounds_ = !strcmp(e, "cu") ? ctx_->compute_units : (uint32_t)std::max(0, atoi(e));
+#endif
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_DEC")) attn_dec_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_PF128")) attn_pf128_ = atoi(e) != 0;
@@ -1621,6 +1625,7 @@ private:
         } else {
             const uint32_t fit = (uint32_t)(PART / ((size_t)n * H * (HD + 2)));
             if (groups < 64) n_split = std::min({(256 + groups - 1) / groups, (keys + min_keys - 1) / min_keys, 64u, fit});
+            else if (pf && pf_rounds_) n_split = rounds_split(groups, keys, fit);
             if (attn_splits_) n_split = std::min({(uint32_t)attn_splits_, keys, 64u, fit});
             n_split = std::max(1u, n_split);
             chunk = (keys + n_split - 1) / n_split;
@@ -1663,6 +1668,30 @@ private:
             struct { uint32_t head_dim, n_head; } upc{HD, H};
             dispatch("attn_unturn", {&att_}, upc, H, (uint32_t)n);
         }
+    }
+
+    // How many ways to split each of a prompt chunk's g attn_pf workgroups'
+    // keys (TS5_ATTN_PF_ROUNDS). Deep in a prompt they are all as long, and
+    // the next kernel waits for the last, so g of them on U compute units
+    // take ceil(g / U) rounds, the last part empty: 128 on the PS5's 40 take
+    // 4, the last a fifth full. Split s ways (attn_merge sums the slices)
+    // they take ceil(g s / U) rounds of a sixth the work. Of s from 2 to 4
+    // (slices of 1,024 keys or more, within what the partial results hold),
+    // the one whose rounds are shortest against no split, taking the worse
+    // of one workgroup a unit at a time and two (both are possible for these
+    // kernels at 128 registers), at least 2% shorter: 3 for 128 workgroups
+    // (Llama 3.1 8B, Qwen3 8B, Qwen3.5 9B; 0.83), 2 for 176 (the 14Bs; 0.90),
+    // none for 116 (Coder 7B, which fills its rounds) or fewer than 64.
+    uint32_t rounds_split(uint32_t g, uint32_t keys, uint32_t fit) const {
+        double best = 1.0;
+        uint32_t bs = 1;
+        for (uint32_t s = 2; s <= 4 && s <= fit && keys >= s * 1024; s++) {
+            double worst = 0;
+            for (uint32_t u : {pf_rounds_, 2 * pf_rounds_})
+                worst = std::max(worst, (double)((g * s + u - 1) / u) / s / ((g + u - 1) / u));
+            if (worst < best - 0.02) best = worst, bs = s;
+        }
+        return bs;
     }
 
     // The quantized cache's kernel builds: _q8, _q4 or _k8v4.
@@ -2135,6 +2164,10 @@ private:
     // sets how many slices generation splits the keys into.
     bool attn_fast_ = true;
     int attn_splits_ = 0;
+    // TS5_ATTN_PF_ROUNDS=cu (the driver's compute units) or a number of
+    // units (Linux; off by default until measured): split a prompt chunk's
+    // keys so its attn_pf workgroups fill whole rounds (rounds_split()).
+    uint32_t pf_rounds_ = 0;
     // Prompts of at least this many tokens use attn_pf (TS5_ATTN_PF; 0: never),
     // its build for heads of 128 where they are (TS5_ATTN_PF128=0: never).
     // 9: more than a verify batch's 8 tokens, which keep generation's kernels
