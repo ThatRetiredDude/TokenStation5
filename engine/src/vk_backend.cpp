@@ -367,6 +367,7 @@ public:
             if (fence_) vk.vkDestroyFence(dev_, fence_, nullptr);
             if (pool_) vk.vkDestroyCommandPool(dev_, pool_, nullptr);
         }
+        if (emb_fd_ >= 0) close(emb_fd_);
         if (owns_ctx_) destroy_vk_context(ctx_);
     }
 
@@ -437,7 +438,8 @@ public:
         const uint64_t free = ctx_->free_memory();
         if (free == UINT64_MAX) return true;
         uint64_t weights = 0;
-        for (const auto &t : m_.gguf.tensors) weights += t.nbytes;
+        for (const auto &t : m_.gguf.tensors)
+            if (!(embd_file_ && &t == m_.tok_embd.info)) weights += t.nbytes;
         const uint64_t fixed = vk_fixed_bytes(hp_, weights), per = kv_bytes_per_token(hp_, kv_);
         const uint64_t ctx = (uint64_t)(n_ctx_ > 0 ? n_ctx_ : 1024) * per + (n_ctx_ > 0 ? 0 : fit_reserve_);
         // With room kept for a helper, the context's own measure too, before
@@ -556,6 +558,9 @@ private:
 #ifndef TS5_PS5
         if (const char *e = getenv("TS5_ATTN_PF_ROUNDS"))
             pf_rounds_ = !strcmp(e, "cu") ? ctx_->compute_units : (uint32_t)std::max(0, atoi(e));
+        if (const char *e = getenv("TS5_EMBD_FILE"))
+            embd_file_ = atoi(e) != 0 && m_.tok_embd && m_.output.info != m_.tok_embd.info;
+        if (const char *e = getenv("TS5_FIT_TAILS")) fit_tails_ = atoi(e) != 0;
 #endif
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_DEC")) attn_dec_min_ = atoi(e) > 0 ? atoi(e) : 0;
@@ -723,37 +728,7 @@ private:
         all_bufs_.push_back(b.buf);
         VkMemoryRequirements req;
         vk.vkGetBufferMemoryRequirements(dev_, b.buf, &req);
-        // The memory types to use, best first. Host-visible requests prefer
-        // device-local too (unified memory: PS5, APUs, ReBAR); weights prefer
-        // device-local and fall back to anything. A type whose memory runs out
-        // falls through to the next: on the PS5, RADV's device-local heap is
-        // two thirds of the memory and its host-visible GTT types hold the rest.
-        const VkMemoryPropertyFlags HV = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        std::vector<int> types;
-        auto add = [&](VkMemoryPropertyFlags want) {
-            for (uint32_t i = 0; i < memprops_.memoryTypeCount; i++)
-                if ((req.memoryTypeBits & (1u << i)) && (memprops_.memoryTypes[i].propertyFlags & want) == want &&
-                    std::find(types.begin(), types.end(), (int)i) == types.end())
-                    types.push_back((int)i);
-        };
-        add(HV | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (host) {
-            add(HV);
-        } else {
-            add(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-#ifndef TS5_PS5
-            // Past the device-local heap (an APU's carve-out on Linux, often
-            // small), write-combined system memory before cached: the GPU
-            // reads cached (snooped) memory through the CPU's caches, slower
-            // for weights it streams every token.
-            for (uint32_t i = 0; i < memprops_.memoryTypeCount; i++)
-                if ((req.memoryTypeBits & (1u << i)) &&
-                    !(memprops_.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) &&
-                    std::find(types.begin(), types.end(), (int)i) == types.end())
-                    types.push_back((int)i);
-#endif
-            add(0);
-        }
+        const std::vector<int> types = mem_types(req, host);
         if (types.empty()) { err = "no suitable memory type"; return false; }
         Arena *ar = nullptr;
         for (int type : types) {
@@ -794,6 +769,41 @@ private:
         b.size = size;
         b.map = ar->map ? ar->map + off : nullptr;
         return true;
+    }
+
+    std::vector<int> mem_types(const VkMemoryRequirements &req, bool host) const {
+        // The memory types to use, best first. Host-visible requests prefer
+        // device-local too (unified memory: PS5, APUs, ReBAR); weights prefer
+        // device-local and fall back to anything. A type whose memory runs out
+        // falls through to the next: on the PS5, RADV's device-local heap is
+        // two thirds of the memory and its host-visible GTT types hold the rest.
+        const VkMemoryPropertyFlags HV = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        std::vector<int> types;
+        auto add = [&](VkMemoryPropertyFlags want) {
+            for (uint32_t i = 0; i < memprops_.memoryTypeCount; i++)
+                if ((req.memoryTypeBits & (1u << i)) && (memprops_.memoryTypes[i].propertyFlags & want) == want &&
+                    std::find(types.begin(), types.end(), (int)i) == types.end())
+                    types.push_back((int)i);
+        };
+        add(HV | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (host) {
+            add(HV);
+        } else {
+            add(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+#ifndef TS5_PS5
+            // Past the device-local heap (an APU's carve-out on Linux, often
+            // small), write-combined system memory before cached: the GPU
+            // reads cached (snooped) memory through the CPU's caches, slower
+            // for weights it streams every token.
+            for (uint32_t i = 0; i < memprops_.memoryTypeCount; i++)
+                if ((req.memoryTypeBits & (1u << i)) &&
+                    !(memprops_.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) &&
+                    std::find(types.begin(), types.end(), (int)i) == types.end())
+                    types.push_back((int)i);
+#endif
+            add(0);
+        }
+        return types;
     }
 
     // spec, spec1: the values of the shader's specialization constants 0 and
@@ -1084,7 +1094,7 @@ private:
         struct Piece { char *dst; uint64_t off, len; };
         std::vector<Piece> pieces;
         for (auto &t : m_.gguf.tensors) {
-            if (t.nbytes == 0) continue;
+            if (t.nbytes == 0 || (embd_file_ && &t == m_.tok_embd.info)) continue;
             if (!qname(t.type)) { fclose(f); err = t.name + ": type " + type_name(t.type) + " not supported on Vulkan yet"; return false; }
             Buf b;
             if (!create_buf(t.nbytes, false, b, err)) { fclose(f); return false; }
@@ -1133,6 +1143,36 @@ private:
         const double ls = std::chrono::duration<double>(std::chrono::steady_clock::now() - lt0).count();
         ts5::log_line("ts5: weights %.2f GB read in %.1f s (%.0f MB/s, %d threads)", weight_bytes_ / 1e9, ls,
                 ls > 0 ? weight_bytes_ / 1e6 / ls : 0.0, threads);
+        if (embd_file_) {
+            emb_fd_ = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+            if (emb_fd_ < 0) { err = "cannot open " + path; return false; }
+            const GgufTensor &t = *m_.tok_embd.info;
+            // Read ahead into the page cache, which the system takes back
+            // when it needs the memory, so a first prompt's rows don't each
+            // wait for the drive.
+            posix_fadvise(emb_fd_, (off_t)(m_.gguf.data_offset + t.offset), (off_t)t.nbytes, POSIX_FADV_WILLNEED);
+            ts5::log_line("ts5: token table (%.0f MiB) not in GPU memory: each call reads its tokens' rows from the "
+                          "file (TS5_EMBD_FILE)", t.nbytes / 1048576.0);
+        }
+        return true;
+    }
+
+    // TS5_EMBD_FILE: the n tokens' rows of the token table, from the file
+    // into emb_ in order (get_rows reads them as tokens 0..n-1 by seq_).
+    bool read_rows(const int32_t *tokens, int n, std::string &err) {
+        const GgufTensor &t = *m_.tok_embd.info;
+        const uint64_t rb = (uint64_t)t.row_bytes(), at = m_.gguf.data_offset + t.offset;
+        for (int i = 0; i < n; i++) {
+            if (tokens[i] < 0 || tokens[i] >= t.ne[1]) {
+                err = "token " + std::to_string(tokens[i]) + " is not in the model's vocabulary";
+                return false;
+            }
+            for (uint64_t done = 0; done < rb;) {
+                const ssize_t r = pread(emb_fd_, emb_.map + i * rb + done, rb - done, (off_t)(at + tokens[i] * rb + done));
+                if (r <= 0) { err = "reading the token table from the model's file failed"; return false; }
+                done += (uint64_t)r;
+            }
+        }
         return true;
     }
 
@@ -1156,6 +1196,11 @@ private:
             !mk(split_, 4ull * SPLIT) ||
             !mk(ids_, 4ull * TMAX, true) || !mk(logits_, 4ull * TMAX * hp_.n_vocab, true))
             return false;
+        if (embd_file_) {
+            if (!mk(emb_, TMAX * (size_t)m_.tok_embd.info->row_bytes(), true) || !mk(seq_, 4ull * TMAX, true))
+                return false;
+            for (int i = 0; i < TMAX; i++) ((int32_t *)seq_.map)[i] = i;
+        }
         // Qwen3.5: the full layers' queries with their gates, and the linear
         // layers' projections, output and state, and save_state's copies of
         // the state. Those are made here, before the context is sized, and to
@@ -1174,6 +1219,11 @@ private:
             for (Buf &b : saved_)
                 if (!mk(b, state, false, true)) return false;
         }
+        // RoPE's turns, made here and filled once the context is known: made
+        // after the sizing, they would take a fresh 1 GiB block it never
+        // counted wherever the blocks before had no room left.
+        for (int swa = 0; swa < 2; swa++)
+            if (!mk(rope_turn_[swa], 8ull * std::max(1, m_.rope_dims(swa) / 2), true)) return false;
         if (n_ctx_ <= 0) {
             // As much as fits, in what the weights and activations left, and
             // no more than one buffer can address.
@@ -1181,15 +1231,17 @@ private:
             // leaving the rest of the memory free.
             const int train = auto_context_cap(m_.hp);
             // Sliding layers' rings are a fixed size, beside the context.
-            auto fit = [&](KvType t) {
+            auto cap_of = [&](KvType t) {
                 // One buffer holds about 256 MiB of layers, or one whole layer.
                 uint64_t widest = 0;
                 for (int l = 0; l < hp_.n_layer; l++)
                     if (!hp_.swa(l)) widest = std::max<uint64_t>(widest, hp_.kv_values(l));
                 const uint64_t per_buf = std::max<uint64_t>(1, kv_k_bits(t) * std::max<uint64_t>(1, widest) / 8);
-                const int cap = (int)std::min<uint64_t>(train, props_.limits.maxStorageBufferRange / per_buf);
+                return (int)std::min<uint64_t>(train, props_.limits.maxStorageBufferRange / per_buf);
+            };
+            auto fit = [&](KvType t) {
                 return fit_context(ctx_->device_memory(), allocated_ + fit_reserve_ + kv_ring_bytes(hp_, t),
-                                   kv_bytes_per_token(hp_, t), cap);
+                                   kv_bytes_per_token(hp_, t), cap_of(t));
             };
             std::vector<std::string> why;
             kv_ = auto_kv_type(hp_, kv_, kv_auto_, train, fit, &why);
@@ -1198,6 +1250,21 @@ private:
             if (n_ctx_ <= 0) {
                 err = "not enough GPU memory left for a context of 1024 tokens";
                 return false;
+            }
+            // TS5_FIT_TAILS (Linux): fit counts the cache as new blocks, but
+            // its pieces go first into the room left at the ends of the 1 GiB
+            // blocks the weights and buffers took. Past the cache type picked
+            // above, 1,024 more tokens at a time while what the pieces would
+            // take beyond that room still leaves fit's reserve free.
+            if (fit_tails_ && n_ctx_ < cap_of(kv_)) {
+                const int was = n_ctx_, cap = cap_of(kv_);
+                const uint64_t memory = ctx_->device_memory(), keep = allocated_ + fit_reserve_ + (1ull << 30);
+                uint64_t fresh = 0;
+                while (n_ctx_ + 1024 <= cap && kv_new_bytes(n_ctx_ + 1024, kv_, fresh) && keep + fresh <= memory)
+                    n_ctx_ += 1024;
+                if (n_ctx_ > was)
+                    ts5::log_line("ts5: the cache's pieces use room left in the blocks already made: %d tokens, where "
+                                  "%d counted them as new blocks (TS5_FIT_TAILS)", n_ctx_, was);
             }
         }
         sized_ = true;
@@ -1209,8 +1276,6 @@ private:
         // Each RoPE pair's turn per position (Model::rope_turn), for the full
         // and the sliding layers: high word, then low.
         for (int swa = 0; swa < 2; swa++) {
-            const int pairs = std::max(1, m_.rope_dims(swa) / 2);
-            if (!mk(rope_turn_[swa], 8ull * pairs, true)) return false;
             uint32_t *t = (uint32_t *)rope_turn_[swa].map;
             for (int i = 0; i < m_.rope_dims(swa) / 2; i++) {
                 const uint64_t v = m_.rope_turn(swa, i);
@@ -1223,23 +1288,11 @@ private:
         // about 256 MiB, a few layers each: freed models leave the GPU's
         // memory in holes, and one 2 GiB buffer for a whole cache may find
         // no hole that big when the pieces would fit.
-        const size_t piece = 256ull << 20, bits = kv_k_bits(kv_), v_bits = kv_v_bits(kv_);
-        std::vector<size_t> values;  // per piece
-        layer_off_.assign(hp_.n_layer, 0);
-        layer_buf_.assign(hp_.n_layer, 0);
-        ring_.assign(hp_.n_layer, 0);
-        for (int l = 0; l < hp_.n_layer; l++) {
-            const int r = hp_.swa(l) ? ring_slots(hp_) : 0;
-            ring_[l] = r > 0 && r < n_ctx_ ? (uint32_t)r : 0;
-            const size_t v = (ring_[l] ? ring_[l] : (size_t)n_ctx_) * hp_.kv_values(l);
-            if (values.empty() || (values.back() > 0 && (values.back() + v) * bits / 8 > piece)) values.push_back(0);
-            layer_buf_[l] = (uint32_t)(values.size() - 1);
-            layer_off_[l] = (uint32_t)values.back();
-            values.back() += v;
-        }
+        const std::vector<size_t> values = kv_layout(n_ctx_, kv_, &layer_off_, &layer_buf_, &ring_);
         // Bytes of K and of V: f16, or 8 or 4 bits plus a 2-byte scale per 32.
         // Exact sizes: a 1 GiB block for the scales would take what
         // fit_context keeps free for everything else.
+        const size_t bits = kv_k_bits(kv_), v_bits = kv_v_bits(kv_);
         size_t cache = 0, scales = 0;
         kc_.assign(values.size(), Buf{});
         vc_.assign(values.size(), Buf{});
@@ -1261,6 +1314,74 @@ private:
                 weight_bytes_ / 1073741824.0, (cache + scales) / 1073741824.0, kv_type_name(kv_),
                 !kv_quantized(kv_) ? "" : kv_turn_v_setting() ? ", Q, K and V turned" : kv_turn_setting() ? ", Q and K turned" : "", n_ctx_,
                 x_.map ? "unified" : "device");
+        if (embd_file_ || fit_tails_) {
+            VkDeviceSize unused = 0;
+            for (const auto &a : arenas_) unused += a.size - a.used;
+            ts5::log_line("ts5: GPU memory taken: %.3f GiB in %zu blocks, %.0f MiB of it unused, of %.3f GiB",
+                          allocated_ / 1073741824.0, arenas_.size(), unused / 1048576.0,
+                          ctx_->device_memory() / 1073741824.0);
+        }
+        return true;
+    }
+
+    // The KV cache's pieces for n tokens: the values (K's or V's elements)
+    // each holds. Each layer gets n slots, or a sliding layer its ring where
+    // that is fewer; the pieces are about 256 MiB of K, a few layers each:
+    // freed models leave the GPU's memory in holes, and one 2 GiB buffer for
+    // a whole cache may find no hole that big when the pieces would fit.
+    // With off, buf and ring: each layer's first element, its piece, and its
+    // ring's slots (0: none).
+    std::vector<size_t> kv_layout(int n, KvType t, std::vector<uint32_t> *off = nullptr,
+                                  std::vector<uint32_t> *buf = nullptr, std::vector<uint32_t> *ring = nullptr) const {
+        const size_t piece = 256ull << 20, bits = kv_k_bits(t);
+        std::vector<size_t> values;
+        if (off) off->assign(hp_.n_layer, 0), buf->assign(hp_.n_layer, 0), ring->assign(hp_.n_layer, 0);
+        for (int l = 0; l < hp_.n_layer; l++) {
+            const int r = hp_.swa(l) ? ring_slots(hp_) : 0;
+            const uint32_t rl = r > 0 && r < n ? (uint32_t)r : 0;
+            const size_t v = (rl ? rl : (size_t)n) * hp_.kv_values(l);
+            if (values.empty() || (values.back() > 0 && (values.back() + v) * bits / 8 > piece)) values.push_back(0);
+            if (off) (*ring)[l] = rl, (*buf)[l] = (uint32_t)(values.size() - 1), (*off)[l] = (uint32_t)values.back();
+            values.back() += v;
+        }
+        return values;
+    }
+
+    // TS5_FIT_TAILS: the bytes of new blocks the caches of n tokens of type
+    // t would take, placed as create_buf places them (each piece in the
+    // first block with room, in the order they are made, else a new block
+    // of its own size). False where a piece can't be made.
+    bool kv_new_bytes(int n, KvType t, uint64_t &fresh) {
+        std::vector<VkDeviceSize> used;
+        for (const auto &a : arenas_) used.push_back(a.used);
+        fresh = 0;
+        auto place = [&](size_t size) {
+            VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bci.size = std::max<VkDeviceSize>(size, 16);
+            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+            VkBuffer b = VK_NULL_HANDLE;
+            if (vk.vkCreateBuffer(dev_, &bci, nullptr, &b) != VK_SUCCESS) return false;
+            VkMemoryRequirements req;
+            vk.vkGetBufferMemoryRequirements(dev_, b, &req);
+            vk.vkDestroyBuffer(dev_, b, nullptr);
+            for (int type : mem_types(req, false))
+                for (size_t i = 0; i < arenas_.size(); i++) {
+                    const VkDeviceSize at = (used[i] + req.alignment - 1) / req.alignment * req.alignment;
+                    if (arenas_[i].type == type && at + req.size <= arenas_[i].size) {
+                        used[i] = at + req.size;
+                        return true;
+                    }
+                }
+            fresh += req.size;
+            return true;
+        };
+        const size_t bits = kv_k_bits(t), v_bits = kv_v_bits(t);
+        for (size_t v : kv_layout(n, t)) {
+            if (v * bits / 8 > props_.limits.maxStorageBufferRange) return false;
+            if (!place(v * bits / 8) || !place(v * v_bits / 8)) return false;
+            if (kv_quantized(t) && (!place(v / 16) || !place(v / 16))) return false;
+        }
         return true;
     }
 
@@ -1862,6 +1983,7 @@ private:
         const bool reuse = ahead_pos_ >= 0 && n == 1 && pos0 == ahead_pos_ && want && !all;
         ahead_pos_ = -1;
         memcpy(ids_.map, tokens, 4 * (size_t)n);
+        if (embd_file_ && !read_rows(tokens, n, err)) return false;
         if (reuse) {
             cmd_ = aheads_[ahead_cur_];
             cpu_.reused++;
@@ -2013,8 +2135,11 @@ private:
         {
             struct { uint32_t ncols, row_bytes; float scale; } pc{(uint32_t)E, (uint32_t)m_.tok_embd.info->row_bytes(),
                                                                   hp_.embd_scale > 0 ? hp_.embd_scale : 1.0f};
-            dispatch(std::string("get_rows_") + qname(m_.tok_embd.type()), {&W(m_.tok_embd), &ids_, &x_}, pc,
-                     (uint32_t)n);
+            if (embd_file_)  // TS5_EMBD_FILE: the call's rows, in order
+                dispatch(std::string("get_rows_") + qname(m_.tok_embd.type()), {&emb_, &seq_, &x_}, pc, (uint32_t)n);
+            else
+                dispatch(std::string("get_rows_") + qname(m_.tok_embd.type()), {&W(m_.tok_embd), &ids_, &x_}, pc,
+                         (uint32_t)n);
         }
         if (rec_layers_ && pos0 == 0) {
             const uint64_t nf = (uint64_t)rec_layers_ * hp_.rec_state_floats();
@@ -2168,6 +2293,18 @@ private:
     // units (Linux; off by default until measured): split a prompt chunk's
     // keys so its attn_pf workgroups fill whole rounds (rounds_split()).
     uint32_t pf_rounds_ = 0;
+    // TS5_EMBD_FILE=1 (Linux; off until measured): an untied token table
+    // (one the output doesn't share) stays out of GPU memory, 0.29 to 0.41
+    // GiB on the PS5's 8B and 14B models; each call reads its tokens' rows
+    // from the file (emb_fd_) into emb_, which get_rows reads by seq_
+    // (0..TMAX-1). The same kernel on the same bytes: the same output.
+    bool embd_file_ = false;
+    int emb_fd_ = -1;
+    Buf emb_, seq_;
+    // TS5_FIT_TAILS=1 (Linux; off until measured): the context's sizing
+    // counts the room the cache's pieces take at the ends of the blocks
+    // already made (kv_new_bytes).
+    bool fit_tails_ = false;
     // Prompts of at least this many tokens use attn_pf (TS5_ATTN_PF; 0: never),
     // its build for heads of 128 where they are (TS5_ATTN_PF128=0: never).
     // 9: more than a verify batch's 8 tokens, which keep generation's kernels

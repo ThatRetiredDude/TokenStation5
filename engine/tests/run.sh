@@ -1101,6 +1101,40 @@ done
 { TS5_GPU_MEMORY_GIB=1.5 "$ts5" run -m "$ql" -c auto -p hi -n 1 2> "$work/kvnone.err" > /dev/null || true; }
 grep "not enough GPU memory left for a context of 1024 tokens" "$work/kvnone.err"
 ! grep "KV cache:" "$work/kvnone.err" || unexpected $LINENO
+echo "== TS5_FIT_TAILS=1: the sizing counts the cache's pieces that go into room left in the blocks already made;"
+echo "   the cache type is picked as before, and what is taken still leaves fit's 1 GiB"
+# taken_ok FILE: the "GPU memory taken" line's GiB plus 1 at most its memory.
+taken_ok() {
+    sed -n 's/.*GPU memory taken: \([0-9.]*\) GiB in [0-9]* blocks, [0-9]* MiB of it unused, of \([0-9.]*\) GiB.*/\1 \2/p' "$1" |
+        awk '{ ok = $1 + 1 <= $2 + 0.0005 } END { exit !(NR == 1 && ok) }' || { echo "FAIL: $(grep "GPU memory taken" "$1")"; exit 1; }
+    ! grep "taken after the context was sized" "$1" || unexpected $LINENO
+}
+TS5_FIT_TAILS=1 TS5_KV=f16 TS5_GPU_MEMORY_GIB=2.028 "$ts5" run -m "$ql" -c auto -p hi -n 1 2> "$work/tails.err" > /dev/null
+grep "the cache's pieces use room left in the blocks already made: 65536 tokens, where [0-9]* counted them as new blocks" \
+    "$work/tails.err"
+grep "KV cache [0-9.]* GiB (f16, 65536 tokens)" "$work/tails.err"
+taken_ok "$work/tails.err"
+TS5_FIT_TAILS=1 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2> "$work/tails2.err" > /dev/null
+diff <(grep -E "KV cache: [0-9]* tokens|KV cache [0-9.]* GiB" "$work/kvauto.err") \
+    <(grep -E "KV cache: [0-9]* tokens|KV cache [0-9.]* GiB" "$work/tails2.err")
+taken_ok "$work/tails2.err"
+echo "== TS5_EMBD_FILE=1: an untied token table stays out of GPU memory, each call reading its tokens' rows from"
+echo "   the file; the same logits, prompts and one token a call"
+for m in qwen2-Q4_K_M qwen3-F32 llama-Q8_0; do
+    for mode in "" "--step"; do
+        toks=$xt
+        [ -z "$mode" ] || toks=$(seq 3 7 300)
+        "$ts5" logits -m "$work/$m.gguf" -o "$work/embd-0.bin" $mode $toks 2> "$work/embd-0.err"
+        TS5_EMBD_FILE=1 "$ts5" logits -m "$work/$m.gguf" -o "$work/embd-1.bin" $mode $toks 2> "$work/embd-1.err"
+        cmp "$work/embd-0.bin" "$work/embd-1.bin"
+    done
+    mib=$(sed -n 's/.*token table (\([0-9]*\) MiB) not in GPU memory.*/\1/p' "$work/embd-1.err")
+    w0=$(sed -n 's/.*: weights \([0-9.]*\) GiB, KV cache.*/\1/p' "$work/embd-0.err")
+    w1=$(sed -n 's/.*: weights \([0-9.]*\) GiB, KV cache.*/\1/p' "$work/embd-1.err")
+    awk -v a="$w0" -v b="$w1" -v m="$mib" 'BEGIN { d = (a - b) * 1024; exit !(m > 0 && d > m - 12 && d < m + 12) }' ||
+        { echo "FAIL: $m: weights $w0 GiB, $w1 with the token table ($mib MiB) out"; exit 1; }
+    echo "same logits: $m, weights $w0 -> $w1 GiB"
+done
 echo "== YaRN (TS5_YARN): Vulkan vs CPU stretched 4x, 300 tokens and one per call; ts5 check; -c auto past the window"
 TS5_YARN=4 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
     "$work/qwen3-Q4_0.gguf" "$work/qwen2-Q8_0.gguf"

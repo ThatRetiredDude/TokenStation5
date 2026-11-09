@@ -778,6 +778,25 @@ values, 2 bytes each in f16, or 1 byte plus an f16 scale per 32 values
 (1.06 bytes) with `TS5_KV=q8`. Qwen 2.5 Coder 7B Q4_K_M at 32k context: 4.4 +
 1.75 (f16) or 0.93 (q8) + 0.3 GiB.
 
+Two Linux switches, off until measured on the PS5, take memory back from
+that budget. `TS5_EMBD_FILE=1` keeps a token table the output doesn't share
+out of GPU memory (Qwen3 14B and DeepSeek 14B 438 MB, Qwen3 8B 350, Coder 7B
+307, Llama 3.1 8B 296; tied ones, the small models and the Gemmas, stay):
+each call reads its tokens' rows from the file (2.3 to 2.9 KB a token on
+those models, from the page cache, where the load asks the system to read
+the table ahead) into a buffer of 256 rows that `get_rows` reads in order,
+the same kernel on the same bytes, so the logits are the same to the bit.
+`TS5_FIT_TAILS=1` lets the context's sizing count what the 1 GiB blocks
+have left at their ends: the cache's pieces go there first (`create_buf`
+takes the first block with room), but the sizing counted them all as new
+blocks, so that room only ever showed as free memory to spare. Today's
+sizing still picks the cache type; past its token count the switch adds
+1,024 tokens at a time while the pieces, placed as `create_buf` will place
+them, leave the sizing's reserve free. On the PS5's 8B and 14B models the
+ends hold 0.08 to 0.38 GiB, and 0.40 to 0.79 GiB with the token table out
+(modelled from the files' tensor sizes), which a model short of its window
+takes as tokens and one at its window keeps free.
+
 A request writes K/V only from where it parts from the cached prompt on, so
 a conversation cut by a short request between its turns (a chat app's title
 or tags request) is still in the cache past what that request wrote. With
