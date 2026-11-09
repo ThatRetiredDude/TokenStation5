@@ -51,6 +51,25 @@ bool send_all(int fd, const std::string &s) {
     return true;
 }
 
+// The client closed its end or reset it: a peek finds the end of the
+// stream, or fails for another reason than no data yet.
+static bool peer_gone(int fd) {
+    char c;
+    const ssize_t n = recv(fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+    return n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR);
+}
+
+// TS5_STOP_GONE=1 (Linux, off until measured on the PS5): a request whose
+// client has left is not run, or stops between prompt chunks.
+static bool stop_gone_wanted() {
+#ifdef TS5_PS5
+    return false;
+#else
+    const char *e = getenv("TS5_STOP_GONE");
+    return e && atoi(e) != 0;
+#endif
+}
+
 bool read_request(int fd, Request &r) {
     std::string buf;
     char tmp[16384];
@@ -517,6 +536,18 @@ void handle(int fd, Server::State &state, Usage &u) {
             done();
             return;
         }
+        // Gone while it waited for the engine: nothing to run it for.
+        const bool stop_gone = stop_gone_wanted();
+        if (stop_gone && peer_gone(fd)) {
+            u.rec.finish = "left";
+            u.rec.prompt = (int64_t)first_toks.size();
+            log_line("ts5: %s left while its request waited, not run (%zu prompt tokens)", u.rec.client.c_str(),
+                     first_toks.size());
+            done();
+            return;
+        }
+        std::function<bool()> gone;
+        if (stop_gone) gone = [fd] { return peer_gone(fd); };
         bool use_tools = !tools.empty();  // off for a last turn that must answer
         SampleParams sp;
         sp.temperature = (float)req["temperature"].num(state.sampling.temperature);
@@ -706,7 +737,8 @@ void handle(int fd, Server::State &state, Usage &u) {
                 turn.gen_tokens = 1;
                 turn.finish = "stop";
             } else {
-                ok = e.generate(toks, sp, on_text, turn, err);
+                ok = e.generate(toks, sp, on_text, turn, err, gone);
+                if (ok && turn.finish == "left") client_ok = false;
                 if (!ok) u.rec.why = (int)toks.size() + 1 > e.backend().n_ctx() ? "too_long" : "gpu_error";
             }
             count();  // what on_text didn't see: the test turns, a turn with no text

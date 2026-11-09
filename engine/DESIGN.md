@@ -809,6 +809,22 @@ usage log says, per request, how much of the prompt the cache held
 (`prompt_repaired`), so how often a repair would pay can be read off real
 use before the switch goes on.
 
+With `TS5_STOP_GONE=1` (Linux, off until measured on the PS5) the server
+asks the socket whether the client is still there (a peek that finds the
+stream's end, or a reset) once it has the engine, between prompt chunks and
+every 32 generated tokens. A request whose client left while it waited is
+not run; one whose client leaves during its prompt stops at the next chunk
+with finish "left", and the part read stays cached, so asking again goes on
+from there. Before, a client's leaving showed only when a streamed token
+failed to send, after the whole prompt, and never for a request that wasn't
+streamed: a 120k-token prompt on Llama 3.1 8B reads for 981 s on the PS5,
+and every other request waited through an abandoned one. On the test model a
+request closed 0.6 s in read 768 of its 3,383 prompt tokens (886 ms against
+8,404), and a request that left while queued behind it wasn't run (without
+the switch it read 3,122 tokens and wrote 4). A client that shuts its
+sending side while it waits for the answer would read as gone, which is why
+it is a switch.
+
 The 8-bit cache is q8_0's layout split in two: the values (4 to a word, as
 `attn` loads them) and the scales, which are the largest magnitude of the 32
 values over 127, rounded to f16; values round to nearest even. `qkv_post_q8`

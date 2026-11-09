@@ -154,6 +154,8 @@ echo "== TS5_KV_REPAIR: after a short side request the next turn forwards again 
 python3 "$here/repair_test.py" "$ts5" "$l3" vk
 python3 "$here/repair_test.py" "$ts5" "$l3" cpu
 python3 "$here/repair_test.py" "$ts5" "$work/qwen3-Q8_0.gguf" cpu
+echo "== TS5_STOP_GONE: a request whose client left stops at the next prompt chunk, one that left while queued isn't run"
+python3 "$here/gone_test.py" "$ts5" "$l3" vk
 python3 "$here/vocab_test.py" --ts5 "$ts5" "${q35[1]}" "$work/ggml-vocab-qwen35.gguf.inp" "$work/ggml-vocab-qwen35.gguf.out"
 echo "== Vulkan vs CPU reference"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${models[@]}"

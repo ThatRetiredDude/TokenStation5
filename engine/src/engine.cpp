@@ -345,7 +345,8 @@ WorkScope::~WorkScope() {
 }
 
 bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
-                      const std::function<bool(const std::string &)> &on_text, GenStats &st, std::string &err) {
+                      const std::function<bool(const std::string &)> &on_text, GenStats &st, std::string &err,
+                      const std::function<bool()> &gone) {
     if (p.seed) rng_.seed(p.seed);
     const int nv = m_.hp.n_vocab;
     st = GenStats{};
@@ -445,6 +446,12 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
                 if (saved_[j] < saved_[s]) s = j;
             saved_[s] = -1;
             if (b_->save_state(s, serr)) saved_[s] = (int)i + n;
+        }
+        if (!last && gone && gone()) {
+            st.finish = "left";
+            st.prompt_evaluated = (int)(i + n - keep);
+            st.prompt_ms = now_ms() - t0 + repair_ms;
+            return true;
         }
     }
     st.prompt_evaluated = (int)(prompt.size() - keep);
@@ -585,6 +592,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         emit(tok);
         if (st.gen_tokens >= p.max_tokens) { st.finish = "length"; break; }
         if ((int)cached_.size() + 1 >= b_->n_ctx()) { st.finish = "length"; break; }
+        if (gone && step % 32 == 31 && gone()) { st.finish = "left"; break; }
         batch.assign(1, tok);
         const int want = dmax;  // with adapt, the cost model below picks how many
         step++;

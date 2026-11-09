@@ -50,8 +50,12 @@ class Engine {
 public:
     Engine(Model &m, Backend *b, Tokenizer &t) : m_(m), b_(b), t_(t) {}
     // Calls on_text with each decoded piece; returning false stops early.
+    // gone, when set, is asked between prompt chunks and every 32 generated
+    // tokens whether whoever asked has left; then the request ends there,
+    // finish "left", the prompt read so far kept in the cache.
     bool generate(const std::vector<int32_t> &prompt, const SampleParams &p,
-                  const std::function<bool(const std::string &)> &on_text, GenStats &st, std::string &err);
+                  const std::function<bool(const std::string &)> &on_text, GenStats &st, std::string &err,
+                  const std::function<bool()> &gone = {});
     // A smaller model with the same vocabulary whose greedy continuations
     // become the drafts when prompt lookup finds nothing. Takes ownership of
     // the backend; the model must outlive the engine.
