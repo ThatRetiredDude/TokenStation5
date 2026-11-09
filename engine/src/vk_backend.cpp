@@ -21,6 +21,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -77,6 +78,18 @@
 #include "attn_dec4_64_q8.spv.h"
 #include "attn_dec4_64_q4.spv.h"
 #include "attn_dec4_64_k8v4.spv.h"
+#include "attn_decx.spv.h"
+#include "attn_decx_q8.spv.h"
+#include "attn_decx_q4.spv.h"
+#include "attn_decx_k8v4.spv.h"
+#include "attn_decx_64.spv.h"
+#include "attn_decx_64_q8.spv.h"
+#include "attn_decx_64_q4.spv.h"
+#include "attn_decx_64_k8v4.spv.h"
+#include "attn_decx_256w.spv.h"
+#include "attn_decx_256w_q8.spv.h"
+#include "attn_decx_256w_q4.spv.h"
+#include "attn_decx_256w_k8v4.spv.h"
 #include "attn_pf128_q8.spv.h"
 #include "attn_pf128_q4.spv.h"
 #include "attn_pf128_k8v4.spv.h"
@@ -546,6 +559,8 @@ private:
         if (const char *e = getenv("TS5_ATTN_DEC_KEYS")) attn_dec_keys_ = atoi(e);
         if (const char *e = getenv("TS5_ATTN_DEC64")) attn_dec64_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_WIDE8")) attn_wide8_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_ATTN_DEC_EXACT")) attn_dec_exact_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_ATTN_DEC_NORING")) attn_dec_noring_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV16")) mv16_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT")) mvt_ = atoi(e) != 0;
@@ -770,9 +785,10 @@ private:
     }
 
     // spec, spec1: the values of the shader's specialization constants 0 and
-    // 1, where not 0.
+    // 1, where not 0; more: those of constants 2, 3, ... (with 0 and 1 set
+    // as given).
     bool make_pipe(const std::string &name, const uint32_t *code, size_t bytes, uint32_t nbind, std::string &err,
-                   uint32_t spec = 0, uint32_t spec1 = 0, bool stats = false) {
+                   uint32_t spec = 0, uint32_t spec1 = 0, bool stats = false, const std::vector<uint32_t> &more = {}) {
         Pipe p;
         p.nbind = nbind;
         std::vector<VkDescriptorSetLayoutBinding> b(nbind);
@@ -804,10 +820,15 @@ private:
         cp.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         cp.stage.module = mod;
         cp.stage.pName = "main";
-        const VkSpecializationMapEntry se[2] = {{0, 0, 4}, {1, 4, 4}};
-        const uint32_t sv[2] = {spec, spec1};
-        VkSpecializationInfo si{spec1 ? 2u : 1u, se, spec1 ? 8u : 4u, sv};
-        if (spec || spec1) cp.stage.pSpecializationInfo = &si;
+        VkSpecializationMapEntry se[8];
+        uint32_t sv[8];
+        const uint32_t nsc = !more.empty() ? 2 + (uint32_t)std::min<size_t>(more.size(), 6) : spec1 ? 2 : spec ? 1 : 0;
+        for (uint32_t i = 0; i < nsc; i++) {
+            se[i] = {i, 4 * i, 4};
+            sv[i] = i == 0 ? spec : i == 1 ? spec1 : more[i - 2];
+        }
+        VkSpecializationInfo si{nsc, se, 4 * nsc, sv};
+        if (nsc) cp.stage.pSpecializationInfo = &si;
         cp.layout = p.layout;
         stats = stats && get_stats_;
         if (stats) cp.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
@@ -925,21 +946,77 @@ private:
         // Lanes per key in attn_dec: 8, 16 or 32, and no more than a subgroup.
         uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
         while (lpk > ctx_->subgroup_size) lpk = lpk > 8 ? lpk / 2 : 0;
+        attn_dec_lpk_ = lpk;
         // Each attn_dec build four times: for the f16 cache (5 buffers), the
-        // 8-bit one, the 4-bit one and 8-bit K with 4-bit V (7).
-#define PD(n, spec, lanes) \
-        if (!make_pipe(#n, spv_##n, sizeof(spv_##n), 5, err, spec, lanes) || \
-            !make_pipe(#n "_q8", spv_##n##_q8, sizeof(spv_##n##_q8), 7, err, spec, lanes) || \
-            !make_pipe(#n "_q4", spv_##n##_q4, sizeof(spv_##n##_q4), 7, err, spec, lanes) || \
-            !make_pipe(#n "_k8v4", spv_##n##_k8v4, sizeof(spv_##n##_k8v4), 7, err, spec, lanes)) return false;
+        // 8-bit one, the 4-bit one and 8-bit K with 4-bit V (7). With
+        // attn_dec_noring_, constant RING 0 (a key's slot is the key), and
+        // for the builds a sliding layer can take, NAME.ring with RING 1 as
+        // well (slots key % ring): its exact-row build for one token a
+        // workgroup, and the padded one where it has none or a batch of 9 or
+        // more can skip attn_pf. rows > 0 sets constant RM (the exact-row builds).
+        std::set<std::string> rings;
+        for (int l = 0; attn_dec_noring_ && l < hp_.n_layer; l++) {
+            if (!hp_.swa(l)) continue;
+            const uint32_t HD = hp_.hd(l), G = dec_heads(l);
+            const std::string x = dec_exact(HD, G);
+            if (!x.empty()) rings.insert(x);
+            if (x.empty() || !attn_pf_min_ || attn_pf_min_ > 9 || !pf_fits(l)) rings.insert(dec_padded(HD, G));
+        }
+        auto dec_builds = [&](const std::string &n, const uint32_t *const code[4], const size_t bytes[4], uint32_t spec,
+                              uint32_t lanes, uint32_t rows) {
+            static const char *const sfx[4] = {"", "_q8", "_q4", "_k8v4"};
+            const bool ring_too = rings.count(n) != 0;
+            for (int c = 0; c < 4; c++) {
+                std::vector<uint32_t> more{attn_dec_noring_ ? 0u : 1u};
+                if (rows) more.push_back(rows);
+                if (!make_pipe(n + sfx[c], code[c], bytes[c], c ? 7 : 5, err, spec, lanes, false, more)) return false;
+                more[0] = 1;
+                if (ring_too && !make_pipe(n + sfx[c] + ".ring", code[c], bytes[c], c ? 7 : 5, err, spec, lanes, false, more))
+                    return false;
+            }
+            return true;
+        };
+#define PD(n, spec, lanes)                                                                           \
+        {                                                                                            \
+            const uint32_t *const c_[4] = {spv_##n, spv_##n##_q8, spv_##n##_q4, spv_##n##_k8v4};     \
+            const size_t b_[4] = {sizeof(spv_##n), sizeof(spv_##n##_q8), sizeof(spv_##n##_q4),        \
+                                  sizeof(spv_##n##_k8v4)};                                           \
+            if (!dec_builds(#n, c_, b_, spec, lanes, 0)) return false;                                \
+        }
         PD(attn_dec, attn_dec_plain_ != 0, lpk) PD(attn_dec4, attn_dec_plain_ == 1, lpk)
         // Heads of 64: a lane's share of a key is 4 values or more (8 or 16 lanes).
-        PD(attn_dec_64, attn_dec_plain_ != 0, std::min(lpk, 16u)) PD(attn_dec4_64, attn_dec_plain_ == 1, std::min(lpk, 16u))
+        PD(attn_dec_64, attn_dec_plain_ != 0, std::min(lpk, 16u))
+        PD(attn_dec4_64, attn_dec_plain_ == 1, std::min(lpk, 16u))
         // The wide-head builds score keys with LPK lanes only (a thread can't
         // hold a whole key): without them, those heads keep attn.
-        attn_dec_lpk_ = lpk;
-        if (lpk) { PD(attn_dec4_256, 0, lpk) PD(attn_dec4_512, 0, lpk) PD(attn_dec4_256w, 0, lpk) PD(attn_dec4_512w, 0, lpk) }
+        if (lpk) {
+            PD(attn_dec4_256, 0, lpk) PD(attn_dec4_512, 0, lpk)
+            PD(attn_dec4_256w, 0, lpk) PD(attn_dec4_512w, 0, lpk)
+        }
 #undef PD
+        // The exact-row builds this model's layers take (dec_exact).
+        for (int l = 0; l < hp_.n_layer; l++) {
+            const uint32_t HD = hp_.hd(l), G = dec_heads(l);
+            const std::string n = dec_exact(HD, G);
+            if (n.empty() || pipes_.count(n)) continue;
+            const uint32_t *const c128[4] = {spv_attn_decx, spv_attn_decx_q8, spv_attn_decx_q4, spv_attn_decx_k8v4};
+            const size_t b128[4] = {sizeof(spv_attn_decx), sizeof(spv_attn_decx_q8), sizeof(spv_attn_decx_q4),
+                                    sizeof(spv_attn_decx_k8v4)};
+            const uint32_t *const c64[4] = {spv_attn_decx_64, spv_attn_decx_64_q8, spv_attn_decx_64_q4,
+                                            spv_attn_decx_64_k8v4};
+            const size_t b64[4] = {sizeof(spv_attn_decx_64), sizeof(spv_attn_decx_64_q8), sizeof(spv_attn_decx_64_q4),
+                                   sizeof(spv_attn_decx_64_k8v4)};
+            const uint32_t *const c256[4] = {spv_attn_decx_256w, spv_attn_decx_256w_q8, spv_attn_decx_256w_q4,
+                                             spv_attn_decx_256w_k8v4};
+            const size_t b256[4] = {sizeof(spv_attn_decx_256w), sizeof(spv_attn_decx_256w_q8),
+                                    sizeof(spv_attn_decx_256w_q4), sizeof(spv_attn_decx_256w_k8v4)};
+            // The padded builds' constants: the 4-row ones' up to 4 rows, the 8-row ones' past that.
+            const uint32_t plain = HD == 256 ? 0u : G <= 4 ? attn_dec_plain_ == 1 : attn_dec_plain_ != 0;
+            const bool ok = HD == 256 ? dec_builds(n, c256, b256, plain, lpk, G)
+                            : HD == 64 ? dec_builds(n, c64, b64, plain, std::min(lpk, 16u), G)
+                                       : dec_builds(n, c128, b128, plain, lpk, G);
+            if (!ok) return false;
+        }
         P(swiglu, 2) P(softcap, 1)
         if (hp_.attn_gate) { P(split_gate, 2) P(gate_mul, 2) }
         if (rec_layers_) { P(ssm_conv, 3) P(gdn_prep, 5) P(gdn_scan, 5) P(gdn_norm, 3) P(zero, 1) }
@@ -1465,13 +1542,10 @@ private:
         const bool pf256 = HD == 256;
         const bool pf512 = HD == 512 && ctx_->subgroup_size >= 16;
         const uint32_t pf_rows = pf512 ? 16 : pf256 ? 32 : 64;
-        const bool pf = attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && (HD <= 128 || pf256 || pf512) &&
-                        G_all <= pf_rows && (pf512 || head_split(l) == 1);
+        const bool pf = attn_pf_min_ && n >= attn_pf_min_ && pf_fits(l);
         const bool wide = (HD == 256 || HD == 512) && attn_dec_lpk_ != 0;
         const bool h64 = HD == 64 && attn_dec64_;
-        const uint32_t dec_max = HD <= 128 ? 8 : 4;
-        uint32_t dec_split = 1;
-        while (G_all / dec_split > dec_max && (G_all / dec_split) % 2 == 0) dec_split *= 2;
+        const uint32_t dec_max = HD <= 128 ? 8 : 4, dec_split = dec_split_of(G_all, HD);
         // From the first key wherever attn_dec serves the heads (128 and 64,
         // and with lanes per key 256 and 512), so a verify batch and the
         // one-token calls it stands for take the same kernel at any length.
@@ -1525,9 +1599,10 @@ private:
         // Every kernel has a build for the 8-bit cache, named _q8, and the 4-bit one, _q4.
         std::string kern = pf ? "attn_pf" : "attn";
         if (dec) {
-            kern = HD == 256 ? "attn_dec4_256" : HD == 512 ? "attn_dec4_512" : dec_rows == 4 ? "attn_dec4" : "attn_dec";
-            if (wide && attn_wide8_) kern += "w";
-            if (HD == 64) kern += "_64";
+            // One token a workgroup (generation, verify batches): the build
+            // for exactly G rows, where the model has one.
+            const std::string x = per_tok ? dec_exact(HD, G) : std::string();
+            kern = !x.empty() && pipes_.count(x) ? x : dec_padded(HD, G);
         } else if (pf && HD == 128 && attn_pf128_)
             kern = "attn_pf128";
         else if (pf && pf256)
@@ -1535,6 +1610,8 @@ private:
         else if (pf && pf512)
             kern = attn_pf_slim_ ? "attn_pf512s" : "attn_pf512";
         if (kv_quantized(kv_)) kern += kv_suffix();
+        // A layer's ring: attn_dec's builds that take slots key % ring.
+        if (dec && ring && attn_dec_noring_) kern += ".ring";
         if (kv_quantized(kv_))
             dispatch(kern, {&q_, &kc_[kb], &vc_[kb], &att_, &part_, &ks_[kb], &vs_[kb]}, pc, groups, n_split);
         else
@@ -1558,6 +1635,51 @@ private:
     bool turned(int l) const {
         const uint32_t HD = hp_.hd(l);
         return kv_quantized(kv_) && kv_turn_setting() && (HD & (HD - 1)) == 0;
+    }
+
+    // attn_dec's workgroups a KV head: as few as bring its G_all query heads
+    // to 8 or fewer a workgroup (heads of up to 128), 4 (256 and 512).
+    static uint32_t dec_split_of(uint32_t G_all, uint32_t HD) {
+        const uint32_t dec_max = HD <= 128 ? 8 : 4;
+        uint32_t s = 1;
+        while (G_all / s > dec_max && (G_all / s) % 2 == 0) s *= 2;
+        return s;
+    }
+    // Layer l's query heads in one attn_dec workgroup (0: no KV heads).
+    uint32_t dec_heads(int l) const {
+        const uint32_t HD = hp_.hd(l), HKV = hp_.hkv(l);
+        if (!HKV || hp_.n_head % HKV) return 0;
+        const uint32_t G_all = hp_.n_head / HKV;
+        return G_all / dec_split_of(G_all, HD);
+    }
+    // The attn_dec build in exactly G rows for heads of HD (attn_dec5,
+    // attn_dec7_64, attn_dec2_256w, ...), or "" where the padded 4- or 8-row
+    // build serves them: G is 4 or 8, exact rows are off, or no such build.
+    std::string dec_exact(uint32_t HD, uint32_t G) const {
+        if (!attn_dec_exact_ || G == 0 || G == 4 || G >= 8) return "";
+        const std::string n = "attn_dec" + std::to_string(G);
+        if (HD == 128) return n;
+        if (HD == 64 && attn_dec64_) return n + "_64";
+        if (HD == 256 && G < 4 && attn_dec_lpk_ && attn_wide8_) return n + "_256w";
+        return "";
+    }
+    // The padded 4- or 8-row attn_dec build for G rows of HD (before the
+    // cache's suffix): the 4-row one for 4 or fewer and for heads of 256 and
+    // 512, with 8 columns (w) where attn_wide8_ has them.
+    std::string dec_padded(uint32_t HD, uint32_t G) const {
+        std::string k = HD == 256 ? "attn_dec4_256" : HD == 512 ? "attn_dec4_512" : G <= 4 ? "attn_dec4" : "attn_dec";
+        if ((HD == 256 || HD == 512) && attn_dec_lpk_ && attn_wide8_) k += "w";
+        if (HD == 64) k += "_64";
+        return k;
+    }
+    // Whether attn_pf fits a layer's heads (its prompts of attn_pf_min_
+    // tokens or more): heads of up to 128 in 64 rows, of 256 in 32, of 512 in
+    // 16 (subgroups of 16 or more), all of one KV head's query heads.
+    bool pf_fits(int l) const {
+        const uint32_t HD = hp_.hd(l), G_all = hp_.n_head / hp_.hkv(l);
+        const bool pf256 = HD == 256, pf512 = HD == 512 && ctx_->subgroup_size >= 16;
+        const uint32_t pf_rows = pf512 ? 16 : pf256 ? 32 : 64;
+        return HD % 16 == 0 && (HD <= 128 || pf256 || pf512) && G_all <= pf_rows && (pf512 || head_split(l) == 1);
     }
 
     // How many workgroups share one KV head's query heads in attn: 1, or
@@ -2027,6 +2149,27 @@ private:
     // (Gemma 3 12B, Gemma 4 12B at 64 tokens of context; 1.7 and 1.5% at
     // 2,048); the checks are the same to the last digit.
     bool attn_wide8_ = true;
+    // Generation and verify batches (one token a workgroup) through attn_dec
+    // built for exactly as many rows as a KV head has query heads (attn_dec5
+    // for 5, also 1, 2, 3, 6 and 7 with heads of 128 and 64, and 1 to 3 with
+    // Gemma's 256), instead of the 8- or 4-row build with the rest padding
+    // (TS5_ATTN_DEC_EXACT=0). Each row's sums are the same either way, and
+    // the suite checks the logits are, byte for byte. On the PS5's GPU (RADV's
+    // null device, wave64 as RADV builds these) the 14Bs' 5 heads (Qwen3,
+    // DeepSeek R1, Coder) take 128 registers a thread with the 8-bit, 4-bit
+    // and k8v4 caches and 168 with f16, instead of 256, so a SIMD runs 4 (3)
+    // of the kernel's waves instead of 2; Coder 7B's 7 168 instead of 256,
+    // Llama 3.2 3B's 3 100 instead of 128, Gemma 3's 2 of 256 128 instead of
+    // 168 (f16).
+    // And attn_dec without the modulo a key (key % ring) where a layer keeps
+    // no ring, which every layer but a sliding one's is (TS5_ATTN_DEC_NORING=0:
+    // the modulo everywhere, as before): only addresses change. The store
+    // title keeps both off until measured there.
+#ifdef TS5_PS5
+    bool attn_dec_exact_ = false, attn_dec_noring_ = false;
+#else
+    bool attn_dec_exact_ = true, attn_dec_noring_ = true;
+#endif
     uint32_t attn_dec_lpk_ = 0;  // the lanes per key the attn_dec builds got (0: thread per key, heads of 128 only)
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).

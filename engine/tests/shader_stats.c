@@ -6,10 +6,14 @@
 //   glslangValidator -V --target-env vulkan1.2 -Iengine/shaders -o pf.spv engine/shaders/attn_pf256.comp
 //   RADV_FORCE_FAMILY=gfx1013 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json ./shader_stats pf.spv
 //
-// Shaders compile as wave32 (ts5 sets RADV_PERFTEST=cswave32; NO_RS=1 lets
-// the driver pick). RADV_DEBUG=shaders also prints the assembly. On gfx1013
-// a SIMD has 1024 registers a lane: a 256-thread workgroup (8 waves of 32)
-// at 128 registers leaves room for two per compute unit, at 168 for one.
+// Shaders compile as wave32 (required); NO_RS=1 lets the driver pick, as ts5
+// does: under RADV_PERFTEST=cswave32 (ts5 sets it) RADV still makes a kernel
+// that uses subgroup operations in workgroups of a multiple of 64 threads
+// wave64. SPEC0=v .. SPEC7=v set specialization constants 0 to 7
+// (attn_dec: PLAIN, LPK, RING, RM). RADV_DEBUG=shaders also prints the assembly. On gfx1013
+// a SIMD has 1024 registers a lane for wave32 (512 for wave64, the same
+// threads): a 256-thread workgroup at 128 registers leaves room for two per
+// compute unit, at 168 for one.
 #include <vulkan/vulkan.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,9 +55,19 @@ int main(int argc, char **argv) {
         fclose(f);
         VkShaderModuleCreateInfo sm = {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, 0, 0, sz, code};
         VkShaderModule mod; CK(vkCreateShaderModule(dev, &sm, 0, &mod));
+        VkSpecializationMapEntry se[8];
+        uint32_t sv[8], nsc = 0;
+        for (uint32_t i = 0; i < 8; i++) {
+            char nm[8];
+            snprintf(nm, sizeof nm, "SPEC%u", i);
+            if (!getenv(nm)) continue;
+            se[nsc] = (VkSpecializationMapEntry){i, 4 * nsc, 4};
+            sv[nsc++] = (uint32_t)atoi(getenv(nm));
+        }
+        VkSpecializationInfo si = {nsc, se, 4 * nsc, sv};
         VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, 0, 32};
         VkComputePipelineCreateInfo cp = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, 0, VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR,
-            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, getenv("NO_RS") ? 0 : &rs, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", 0}, lay};
+            {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, getenv("NO_RS") ? 0 : &rs, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", nsc ? &si : 0}, lay};
         VkPipeline p; CK(vkCreateComputePipelines(dev, 0, 1, &cp, 0, &p));
         VkPipelineInfoKHR pi = {VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR, 0, p};
         uint32_t ne = 1; VkPipelineExecutablePropertiesKHR ep = {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR};

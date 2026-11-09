@@ -120,9 +120,9 @@ const std::vector<Row> &setting_rows() {
 #ifdef TS5_LINUX
         {"MODELS", "TS5_YARN", "Longer context for Qwen3 8B and Coder 7B",
          "Lets Qwen3 8B and Qwen 2.5 Coder 7B read past their 32,768-token limit (YaRN), as far as memory "
-         "allows: on the PS5 about 41,000 tokens for Qwen3 8B (83,000 with Room for longer contexts) and "
-         "112,000 for Coder 7B. The 14B Qwen models gain less: Qwen3 14B about 42,000, DeepSeek R1 and Coder 14B "
-         "about 34,000. With Longest context at 32,768 tokens or less it "
+         "allows: on the PS5 about 47,000 tokens for Qwen3 8B (more than 80,000 with Room for longer contexts) and "
+         "123,000 for Coder 7B. The 14B Qwen models gain less: Qwen3 14B about 42,000, DeepSeek R1 and Coder 14B "
+         "about 35,000. With Longest context at 32,768 tokens or less it "
          "changes nothing; past that, every chat with these models reads with stretched positions, which "
          "can word a few short answers differently.",
          "Now: the model loads again, which takes a few seconds", {{"", "Off"}, {"1", "On"}}, ""},

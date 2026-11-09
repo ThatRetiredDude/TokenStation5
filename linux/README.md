@@ -185,7 +185,7 @@ Coder 14B answered 10 of 11 and DeepSeek 10 and 7 on two documents, against
 and Qwen3.5 9B 8 of 11 at 233,035 tokens in 8 bits (9 of 11 at 160k in
 16-bit); reading that document took 21 minutes. The Gemmas keep 16 bits:
 they fail the accuracy check even in 8 bits. The Models page and its
-Hugging Face search estimate contexts the same way.
+search estimate contexts the same way.
 
 ## Settings
 
@@ -208,11 +208,12 @@ settings such as `TS5_KV=q8`).
 Longer than 32k on Qwen3 and Qwen 2.5 (Coder): Settings > MODELS > Longer
 context for Qwen3 8B and Coder 7B (`TS5_YARN=1`) stretches their 32,768-token
 window with YaRN, as their model cards do, up to 131,072 tokens. On the PS5
-that is 40,960 tokens for Qwen3 8B (82,944 with Room for longer contexts)
-and 112,640 for Coder 7B, with 10 of 11 long-document questions right at
-78k on Qwen3 8B. The 14Bs reach about their 32k with the automatic cache
-first, so it adds less there: Qwen3 14B gets 41,984 tokens (10 of 11 right
-at 37,800), DeepSeek and Coder 14B about 34,000. For the API service, add `TS5_YARN=1` to `/etc/default/tokenstation`
+that is 47,104 tokens for Qwen3 8B and 122,880 for Coder 7B in 16 bits;
+Qwen3 8B with Room for longer contexts on Half size reached a context of
+82,944 tokens (with the 2 GiB system reserve of the time) and answered 10
+of 11 long-document questions right at 78k. The 14Bs reach about their 32k with
+the automatic cache first, so it adds less there: Qwen3 14B gets 41,984
+tokens (10 of 11 right at 37,800), DeepSeek and Coder 14B 34,816. For the API service, add `TS5_YARN=1` to `/etc/default/tokenstation`
 and set `CONTEXT=auto` or a number. It's off by default: while it's on and
 the context is past 32k, short chats run with stretched positions too. With
 a context of 32,768 or less it changes nothing.

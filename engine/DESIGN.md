@@ -400,8 +400,8 @@ the same 128 registers) ran 2.1x faster on llvmpipe but 10.8% slower on
 the PS5 (8192 tokens: 4821 ms against 4350; prompts -2.2% at 4096, -4.7%
 at 16384), so the shared-memory reads are not what holds it back there;
 it was dropped.
-On gfx1013 (wave32, as RADV compiles them) attn_pf128 needs 128 registers a
-thread, so a compute unit holds two of its 256-thread workgroups, but
+On gfx1013 (wave64, as RADV compiles them, see below) attn_pf128 needs 128
+registers a thread, so a compute unit holds two of its 256-thread workgroups, but
 attn_pf256 and attn_pf512 need 168, so it holds one: half the waves to hide
 memory and shared-memory waits behind. `attn_pf256s` (tiles of 16 keys) and
 `attn_pf512s` (no tile loaded into registers ahead) need 128 again
@@ -416,7 +416,16 @@ RADV's null device: `RADV_FORCE_FAMILY=gfx1013` with
 VK_KHR_pipeline_executable_properties compiles for the console's GPU on
 any machine (`tests/shader_stats.c` prints them; `RADV_DEBUG=shaders` the
 assembly, where attn_pf128's products are all `v_fma_mix_f32`, f16 times
-f32 into f32 in one instruction).
+f32 into f32 in one instruction). ts5's pipelines ask for no subgroup size,
+so RADV picks the wave: 32 under `RADV_PERFTEST=cswave32` (ts5 sets it),
+except that a kernel using subgroup operations in workgroups of a multiple
+of 64 threads stays at 64 (the API's subgroup size). On the null device
+that is 106 of the 189 kernels: every attention, mat-vec, norm and
+recurrent-layer kernel; the prompt matmuls and the rest are wave32.
+shader_stats requires wave32 unless `NO_RS=1` (ts5's way). Register counts
+in this file from before 2026-11-09 are its wave32 ones; for a wave64
+kernel the count ts5 gets can differ (the 8-row attn_dec: 256, not 200).
+The attn_pf counts above are the same either way.
 
 Generation uses `shaders/attn_dec.glsl` from the first key (`TS5_ATTN_DEC`
 sets from how many; 0: never; any other start breaks the helper's
@@ -467,6 +476,36 @@ On the console, Coder 7B wrote 65 tok/s at 0.5k tokens of context and 23 at
 18k with attn, 47 at 18k with the first version of attn_dec (the queries and
 weights in shared memory, one value column per thread). Under 256 keys attn
 was as fast then (October; the 4-row build has caught up since, see above).
+
+Generation and verify batches (one token a workgroup) run attn_dec in
+exactly as many rows as a KV head has query heads: `attn_dec5` for the 14Bs'
+5 (Qwen3, DeepSeek R1 and Coder: 40 heads on 8), `attn_dec7` for Coder
+7B's 7, `attn_dec3` for Llama 3.2 3B, `attn_dec2` for Qwen3 0.6B, and
+`attn_dec7_64`, `attn_dec2_256w` and the like for heads of 64 and Gemma 3's
+256 (`attn_decx*.comp`: the rows are specialization constant RM;
+`TS5_ATTN_DEC_EXACT=0` keeps the 8- and 4-row builds, whose extra rows
+repeat the last and are never written). Each row's scores, softmax and
+sums are the same work in the same order, so the logits are byte for byte
+the padded builds' (the suite checks every cache's build, a slice over two
+key tiles and verify batches). The padding was the 14Bs' problem at depth.
+On the PS5 (job CQ) DeepSeek R1 14B's 8-row kernel read its 8-bit and k8v4
+caches at 130 to 173 GB/s, its time set by the arithmetic, where the 4-row
+kernel read Llama 3.1 8B's and Qwen3 8B's f16 caches at 365 to 370; and in
+job CK Qwen3 14B wrote no faster from the 4-bit cache than from the 8-bit
+one after a 16,384-token prompt (30.2 against 30.1 tok/s). On RADV's null
+device for the PS5's GPU, as wave64, the 8-row build takes 256 registers a
+thread (2 waves a SIMD) with every cache; with 5 rows it takes 128 with the
+8-bit, 4-bit and k8v4 caches (4 waves) and 168 with f16 (3), and 24 to 30%
+fewer instructions. Coder 7B's 7 rows take 168 instead of 256, Llama 3.2
+3B's 3 rows 100 instead of 128, and Gemma 3's 2 rows of 256 128 instead of
+168 (f16, the cache the Gemmas keep). (Required to be wave32, the 8-row
+build takes 200 and the 5-row one 128, or 144 with f16.) And every attn_dec
+build takes constant RING: 0 where a layer keeps no ring (all but a sliding
+layer's), so a key's slot is the key, without the per-key modulo, a
+quarter-rate multiply sequence in every tile (`NAME.ring`, RING 1, serves
+the sliding layers; `TS5_ATTN_DEC_NORING=0` the modulo everywhere, as
+before): fewer arithmetic cycles in every tile and up to 1.8 KB less code,
+the same output. The store title keeps both off until measured there.
 
 `TS5_PROFILE=1` writes a GPU timestamp after every dispatch; `ts5 bench`
 then prints the GPU's time per kernel (matmuls by weight) for the prompt and

@@ -308,7 +308,8 @@ for k in 8 16; do
         --tol 0.002 --backend vk --ntok 160 --step "${shapes[1]}" "${shapes[4]}"
 done
 # Heads of 64 through attn_dec's _64 builds (the default; TS5_ATTN_DEC64=0
-# keeps attn): 8 rows for 7 query heads a KV head, 4 for 4; lanes per key,
+# keeps attn): 7 rows for 7 query heads a KV head (8 with
+# TS5_ATTN_DEC_EXACT=0, as the store title has it), 4 for 4; lanes per key,
 # a thread per key, 300 tokens at once, slices. The profile shows the build
 # that ran.
 h64=("${shapes[0]}" "${shapes[2]}")
@@ -324,10 +325,61 @@ LP_NATIVE_VECTOR_WIDTH=512 TS5_ATTN_DEC_KEYS=16 python3 "$here/compare.py" --ts5
     --tol 0.002 --backend vk --ntok 160 --step "${h64[@]}"
 TS5_ATTN_SPLITS=7 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 40 \
     --step "${h64[@]}"
-TS5_PROFILE=1 "$ts5" bench -m "${shapes[0]}" --backend vk --pp 16 --tg 8 > "$work/bench-dec64.txt"
+TS5_ATTN_DEC_EXACT=0 TS5_PROFILE=1 "$ts5" bench -m "${shapes[0]}" --backend vk --pp 16 --tg 8 > "$work/bench-dec64.txt"
 grep -q "attn_dec_64 " "$work/bench-dec64.txt"
 TS5_PROFILE=1 "$ts5" bench -m "${shapes[2]}" --backend vk --pp 16 --tg 8 > "$work/bench-dec64.txt"
 grep -q "attn_dec4_64 " "$work/bench-dec64.txt"
+echo "== attn_dec in as many rows as a KV head has query heads, and without the ring's modulo where a layer keeps none: the same logits as the 4- and 8-row builds with the modulo, byte for byte"
+# Heads of 128 with 5 query heads a KV head (Qwen3 14B, DeepSeek R1 14B,
+# Coder 14B), 3 (Llama 3.2 3B), 2 (Qwen3 0.6B), 6 and 1; the shapes above
+# with 7 of 128 and of 64 and 1 of 256; Gemma 4's sliding layers past
+# their 264-slot ring. One token a call against the CPU, then byte for byte
+# against TS5_ATTN_DEC_EXACT=0 TS5_ATTN_DEC_NORING=0 (the builds before, the
+# store title's), each cache's build, one slice over two 128-key tiles
+# (TS5_ATTN_SPLITS=1: tokens 129 to 139), and the profile names the build
+# that ran.
+rows=()
+mk_rows() {  # name embd heads kv_heads
+    local out="$work/$1.gguf"
+    [ -s "$out" ] || python3 "$here/make_test_model.py" --arch llama --quant Q8_0 --embd "$2" --heads "$3" \
+        --kv-heads "$4" --vocab "$work/ggml-vocab-llama-spm.gguf" "$out" > /dev/null
+    rows+=("$out")
+}
+mk_rows heads5-kv1 640 5 1
+mk_rows heads3-kv1 384 3 1
+mk_rows heads2-kv1 256 2 1
+mk_rows heads6-kv1 768 6 1
+mk_rows heads1-kv1 128 1 1
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 100 --step "${rows[@]}"
+TS5_KV=q8 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.01 --backend vk --ntok 100 --step "${rows[0]}" \
+    "${rows[1]}"
+xt=$(seq 3 7 975)
+before=(TS5_ATTN_DEC_EXACT=0 TS5_ATTN_DEC_NORING=0)
+for c in "${rows[0]}:attn_dec5:TS5_KV=f16" "${rows[0]}:attn_dec5_q8:TS5_KV=q8" "${rows[0]}:attn_dec5_q4:TS5_KV=q4" \
+    "${rows[0]}:attn_dec5_k8v4:TS5_KV=k8v4" "${rows[0]}:attn_dec5:TS5_ATTN_SPLITS=1" \
+    "${rows[1]}:attn_dec3_k8v4:TS5_KV=k8v4" "${rows[2]}:attn_dec2:TS5_KV=f16" "${rows[3]}:attn_dec6_q8:TS5_KV=q8" \
+    "${rows[4]}:attn_dec1_q4:TS5_KV=q4" "${shapes[0]}:attn_dec7_64_k8v4:TS5_KV=k8v4" \
+    "${shapes[0]}:attn_dec7_64:TS5_KV=f16" "${shapes[0]}:attn_dec7_64_q8:TS5_KV=q8" \
+    "${shapes[0]}:attn_dec7_64_q4:TS5_KV=q4" "${shapes[0]}:attn_dec7_64:TS5_ATTN_SPLITS=1" \
+    "${shapes[1]}:attn_dec7_q8:TS5_KV=q8" "${shapes[3]}:attn_dec1_256w:TS5_KV=f16"; do
+    IFS=: read -r m k e <<< "$c"
+    env $e TS5_PROFILE=1 "$ts5" logits -m "$m" -o "$work/xr-1.bin" --step $xt 2> "$work/xr-1.err"
+    env $e "${before[@]}" TS5_PROFILE=1 "$ts5" logits -m "$m" -o "$work/xr-0.bin" --step $xt 2> "$work/xr-0.err"
+    cmp "$work/xr-1.bin" "$work/xr-0.bin"
+    grep -q "$k " "$work/xr-1.err" || { echo "FAIL: $k didn't run on $(basename "$m") ($e)"; exit 1; }
+    if grep -q "$k " "$work/xr-0.err"; then echo "FAIL: $k ran with ${before[*]}"; exit 1; fi
+    echo "same logits: $(basename "$m") $e ($k)"
+done
+g4t=$(seq 3 3 840)
+for e in TS5_KV=f16 TS5_KV=k8v4; do
+    env $e TS5_PROFILE=1 "$ts5" logits -m "$work/gemma4-kmix.gguf" -o "$work/xr-1.bin" --step $g4t 2> "$work/xr-1.err"
+    env $e "${before[@]}" "$ts5" logits -m "$work/gemma4-kmix.gguf" -o "$work/xr-0.bin" --step $g4t 2> /dev/null
+    cmp "$work/xr-1.bin" "$work/xr-0.bin"
+    grep -q "attn_dec2_64[_a-z0-9]*\.ring " "$work/xr-1.err"
+    grep -q "attn_dec4_512w[_a-z0-9]* " "$work/xr-1.err"
+    echo "same logits: gemma4-kmix $e"
+done
+rm -f "$work/xr-0.bin" "$work/xr-1.bin"
 echo "== 8-bit KV cache (TS5_KV=q8), against the CPU's fp32 cache: about 0.3% of the largest logit"
 # Every attention kernel has an 8-bit build: attn_pf (and attn_pf128,
 # attn_pf256; attn_pf512 below, with Gemma 4), attn_dec (lanes per key, and
@@ -431,14 +483,14 @@ k8v4=(env TS5_KV=k8v4 TS5_CPU_KV=k8v4)
 TS5_KV=k8v4 TS5_PROFILE=1 "$ts5" bench -m "${shapes[1]}" --backend vk --pp 16 --tg 8 > "$work/bench-k8v4.txt" 2>&1
 grep -q "qkv_post_k8v4tv " "$work/bench-k8v4.txt"
 grep -q "attn_pf128_k8v4 " "$work/bench-k8v4.txt"
-grep -q "attn_dec[4]*_k8v4 " "$work/bench-k8v4.txt"
+grep -q "attn_dec[0-9]*_k8v4 " "$work/bench-k8v4.txt"
 grep -q "KV cache .*(k8v4, Q, K and V turned" "$work/bench-k8v4.txt"
 # The profile names the 4-bit builds.
 TS5_KV=q4 TS5_PROFILE=1 "$ts5" bench -m "${shapes[1]}" --backend vk --pp 16 --tg 8 > "$work/bench-q4.txt"
 grep -q "qkv_post_q4tv " "$work/bench-q4.txt"
 grep -q "attn_unturn " "$work/bench-q4.txt"
 grep -q "attn_pf128_q4 " "$work/bench-q4.txt"
-grep -q "attn_dec[4]*_q4 " "$work/bench-q4.txt"
+grep -q "attn_dec[0-9]*_q4 " "$work/bench-q4.txt"
 TS5_KV=q4 TS5_KV_TURN_V=0 TS5_PROFILE=1 "$ts5" bench -m "${shapes[1]}" --backend vk --pp 16 --tg 8 > "$work/bench-q4t.txt" 2>&1
 grep -q "qkv_post_q4t " "$work/bench-q4t.txt"
 ! grep -q "attn_unturn" "$work/bench-q4t.txt" || unexpected $LINENO
@@ -526,15 +578,16 @@ done
 # tokens a call with every position's logits, as a helper's drafts are
 # checked, and its dump must be --step's byte for byte (each token's keys
 # split as one token's would be, slices merged in a fixed order): heads of
-# 128 (7 a KV head), 64 and 256, Q4_K, and Gemma 4's 512 with its 8-token
-# window; batches of 6 and 8, forced key slices, the 8- and 4-bit caches; Q8_0
-# and Q5_0 in rows of 896 values. 140 tokens: more than one 128-key slice
-# for attn_dec. (The build before this rule failed it on the heads of 256
-# and with the forced slices.)
+# 128 (7 and 5 a KV head), 64 and 256, Q4_K, and Gemma 4's 512 with its 8-token
+# window; batches of 6 and 8, one slice over two 128-key tiles
+# (TS5_ATTN_SPLITS=1), the 8- and 4-bit caches; Q8_0 and Q5_0 in rows of 896
+# values. 140 tokens: more than one 128-key slice for attn_dec. (The build
+# before this rule failed it on the heads of 256 and with TS5_ATTN_SPLITS=3,
+# which now splits these lengths as the default does.)
 vt=$(seq 3 7 975)
 for m in "${shapes[1]}" "${shapes[2]}" "${shapes[3]}" "$work/qwen2-Q4_K_M.gguf" "$work/gemma4-kmix.gguf" \
-    "${shapes[0]}" "$q50"; do
-    for e in "TS5_ATTN_SPLITS=0:6 8" "TS5_ATTN_SPLITS=3:8" "TS5_KV=q8:6" "TS5_KV=q4:6"; do
+    "${shapes[0]}" "$q50" "${rows[0]}"; do
+    for e in "TS5_ATTN_SPLITS=0:6 8" "TS5_ATTN_SPLITS=1:8" "TS5_KV=q8:6" "TS5_KV=q4:6"; do
         env ${e%%:*} "$ts5" logits -m "$m" -o "$work/vf-step.bin" --step $vt 2> /dev/null
         for k in ${e#*:}; do
             env ${e%%:*} "$ts5" logits -m "$m" -o "$work/vf-verify.bin" --verify $k $vt 2> /dev/null

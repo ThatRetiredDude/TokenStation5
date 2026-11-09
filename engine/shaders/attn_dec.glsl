@@ -35,6 +35,12 @@
 // 512, rather than 8 and 16); and a tile's key passes past its last key are
 // skipped, not run on copies of it. The scores and every column's sum over
 // keys are as before, only the keys' split between groups differs.
+// The builds without RM in their name (attn_decx, attn_decx_64,
+// attn_decx_256w and their cache builds) take the rows from constant RM, so
+// a KV head's G query heads run in G rows (attn_dec5 for 5) instead of
+// padded to 4 or 8: each row's sums are the same either way, only the
+// padding's work is gone. Constant RING = 0: the layer keeps no ring, so a
+// key's slot is the key (no modulo a key); 1: slots key % ring where ring > 0.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_shader_subgroup_basic : require
@@ -89,9 +95,14 @@ const uint CPT = 8;  // value columns a thread
 #else
 const uint CPT = 4;
 #endif
-const uint HD = HEAD_DIM, BK = 128, NG = 128 * CPT / HD, GK = BK / NG, SGMAX = 32, RV = RM / 4, VW = CPT / 4;
 layout(constant_id = 0) const uint PLAIN = 0;
 layout(constant_id = 1) const uint LPK = 0;  // 0, 8, 16 or 32; at most the subgroup's size
+layout(constant_id = 2) const uint RING = 1;
+#ifndef RM
+layout(constant_id = 3) const uint RM = 8;  // 1 to 8
+#endif
+// RV: words of 4 rows' weights a key (a last word's rows past RM repeat row RM - 1).
+const uint HD = HEAD_DIM, BK = 128, NG = 128 * CPT / HD, GK = BK / NG, SGMAX = 32, RV = (RM + 3) / 4, VW = CPT / 4;
 // With LPK: lanes per key, keys a pass (one per LPK lanes) and words of 4
 // values a lane. A pass's keys load NB batches at a time (16 words a lane).
 const uint LP = LPK == 0 ? 16 : LPK, NC = BK / LP, WPL = HD / 4 / LP;
@@ -109,7 +120,7 @@ shared float redl[RM][SGMAX];  // each subgroup's sum of weights per row
 
 const float NEG_INF = -1.0 / 0.0;
 
-uint slot(uint key) { return pc.ring != 0 ? key % pc.ring : key; }
+uint slot(uint key) { return RING != 0 && pc.ring != 0 ? key % pc.ring : key; }
 
 void main() {
     const uint tid = gl_LocalInvocationID.x, G = pc.n_head / pc.n_head_kv / pc.hsplit;
@@ -267,7 +278,9 @@ void main() {
             const float ps = subgroupAdd(p[r]);
             if (subgroupElect()) redl[r][gl_SubgroupID] = ps;
         }
-        [[unroll]] for (uint v = 0; v < RV; v++) pw[kl * RV + v] = vec4(p[4 * v], p[4 * v + 1], p[4 * v + 2], p[4 * v + 3]);
+        [[unroll]] for (uint v = 0; v < RV; v++)
+            pw[kl * RV + v] = vec4(p[min(4 * v, RM - 1)], p[min(4 * v + 1, RM - 1)], p[min(4 * v + 2, RM - 1)],
+                                   p[min(4 * v + 3, RM - 1)]);
         barrier();
         [[unroll]] for (uint r = 0; r < RM; r++) {
             float ps = redl[r][0];
@@ -288,7 +301,7 @@ void main() {
 #define VALUES(w) vec4(vc[w])
 #endif
         uint j = 0;
-        if (nj == GK && pc.ring == 0) {
+        if (nj == GK && (RING == 0 || pc.ring == 0)) {
             [[unroll]] for (uint jb = 0; jb < GK; jb += 8) {  // eight keys' loads in flight
                 vec4 v[8][VW];
                 [[unroll]] for (uint u = 0; u < 8; u++)

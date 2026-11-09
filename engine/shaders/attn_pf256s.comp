@@ -1,7 +1,7 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 // attn_pf256 in tiles of 16 keys: 128 registers a thread on the PS5 (gfx1013,
-// wave32) instead of 168, so a compute unit holds two workgroups instead of
+// wave64 or 32) instead of 168, so a compute unit holds two workgroups instead of
 // one. Keys are scored 16 at a time either way, so the output is the same.
 #define HEAD_DIM 256
 #define LANES 8
