@@ -7,11 +7,12 @@ answer. Without the switch the turn reads its whole prompt again, and on the
 GPU those logits differ in the last bits (so the comparison can tell; the
 CPU backend rounds the same whatever the calls).
 
-    repair_test.py TS5 MODEL.gguf BACKEND [--ctx N] [--paras N] [--helper HELPER.gguf]
+    repair_test.py TS5 MODEL.gguf BACKEND [--ctx N] [--paras N] [--helper HELPER.gguf] [--keep DIR]
 
 --paras sets the document's length (40 paragraphs, about 600 tokens; 1,500
 about 25,000), --ctx the context (2,048), --helper the helper model (the
-model itself). Each case's third turn's prompt time is printed.
+model itself), --keep a folder for the servers' logs and logits (a temporary
+one otherwise). Each case's third turn's prompt time is printed.
 """
 import argparse
 import json
@@ -110,10 +111,14 @@ def main():
     ap.add_argument("--ctx", type=int, default=2048)
     ap.add_argument("--paras", type=int, default=40)
     ap.add_argument("--helper")
+    ap.add_argument("--keep")
     a = ap.parse_args()
     backend = a.backend
     name = f"repair_test {os.path.basename(a.model)} {backend}"
-    with tempfile.TemporaryDirectory() as d:
+    if a.keep:
+        os.makedirs(a.keep, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        d = a.keep or tmp
         ref = run(a, d, "ref", [], True)
         rep = run(a, d, "rep", SIDE[:1], True)
         two = run(a, d, "two", SIDE, True)
