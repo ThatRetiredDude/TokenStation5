@@ -827,6 +827,23 @@ ends hold 0.08 to 0.38 GiB, and 0.40 to 0.79 GiB with the token table out
 (modelled from the files' tensor sizes), which a model short of its window
 takes as tokens and one at its window keeps free.
 
+The logits buffer holds 8 rows on Linux (`TS5_LOGITS_ROWS`, 1 to 256; the
+title keeps 256). Serving never wants more than a verify batch's 8 at once,
+and 256 rows were 0.14 GiB of a Qwen's 151,936-word vocabulary, 0.12 of
+Llama 3's and 0.25 of Gemma's 262,144. A call that wants every position's
+logits past 8 rows (`ts5 logits`, `ts5 check`, the app's GPU check) gets
+them a piece at a time: the output matmul on 8 rows, a wait, the rows copied
+out, the next piece. Pieces of 8, 3 and 1 rows give the same bytes (the
+verify kernels reproduce the one-token kernel), so those calls' logits now
+come from the verify kernels instead of the prompt kernels and move in the
+last bits, or come closer to the CPU's where the prompt kernel summed in
+f16 (0.0001 of the logits' range against 0.0007 on two test models; 300
+tokens through 256-row pieces is still a suite check). `forward_in_place` leaves at most that many
+rows at `logits_view()`, so below 8 the engine drafts fewer tokens. The
+memory comes back inside the 1 GiB blocks: the context grows by it with
+`TS5_FIT_TAILS=1`, and without it only where the smaller buffer frees a
+whole block.
+
 A request writes K/V only from where it parts from the cached prompt on, so
 a conversation cut by a short request between its turns (a chat app's title
 or tags request) is still in the cache past what that request wrote. With

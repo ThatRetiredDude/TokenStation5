@@ -212,6 +212,31 @@ TS5_MMB_MIN=1 TS5_MMB_WGS=4 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --
     "${kmix[@]}"
 TS5_MMB_MIN=1 TS5_MMB_VAR=q TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
     --ntok 300 "${kmix[@]}"
+echo "== The logits of more positions than the GPU's buffer holds (TS5_LOGITS_ROWS, 8 by default on Linux): a piece"
+echo "   at a time, pieces of 8, 3 and 1 the same bytes; the store title's 256 (one piece of 256) within tolerance"
+# Above, the output's 300 rows went 8 at a time through the verify kernels;
+# with 256 they take the prompt kernels, as in the title.
+TS5_LOGITS_ROWS=256 TS5_MMB_MIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
+    --ntok 300 "${kmix[@]}"
+lr_toks=$(seq 5 7 2400 | head -60)
+for m in "$work/qwen3-kmix.gguf" "$work/gemma4-kmix.gguf" "$g3"; do
+    for r in 8 3 1; do
+        TS5_LOGITS_ROWS=$r "$ts5" logits -m "$m" -o "$work/lr-$r.bin" $lr_toks 2> /dev/null
+    done
+    cmp "$work/lr-8.bin" "$work/lr-3.bin"
+    cmp "$work/lr-8.bin" "$work/lr-1.bin"
+done
+rm -f "$work"/lr-*.bin
+# What it gives back, in the blocks' unused ends: 248 rows of 151,936 words, 144 MiB.
+lr_unused() {
+    TS5_LOGITS_ROWS=$1 TS5_FIT_TAILS=1 "$ts5" run -m "$work/qwen3-F32.gguf" -c 2048 -p hi -n 1 2>&1 > /dev/null |
+        sed -n 's/.*GPU memory taken: .*, \([0-9]*\) MiB of it unused.*/\1/p'
+}
+u256=$(lr_unused 256)
+u8=$(lr_unused 8)
+[ -n "$u8" ] && [ -n "$u256" ] && [ $((u8 - u256)) -ge 142 ] && [ $((u8 - u256)) -le 146 ] ||
+    { echo "FAIL: unused $u8 MiB with 8 rows, $u256 MiB with 256"; exit 1; }
+echo "unused: $u256 MiB with 256 rows, $u8 MiB with 8"
 # A wider model with the minimum at 12 blocks: attn_k, attn_v, ffn_gate and
 # ffn_up (4 or 8 blocks) take mmb only by splitting their columns in 4
 # slices, attn_q and ffn_down have the blocks; the last 44 tokens take the
@@ -746,6 +771,11 @@ grep -q "lookup [0-9]*/[1-9]" "$work/sd-vk.err"
 TS5_AHEAD=0 TS5_DRAFT=7 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 \
     > "$work/sd-vk0.txt" 2> /dev/null
 cmp "$work/sd-vk.txt" "$work/sd-vk0.txt"
+# A buffer of 4 rows: verify batches of at most 4 (3 drafts), the same text.
+TS5_LOGITS_ROWS=4 TS5_DRAFT=7 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 \
+    > "$work/sd-vk4.txt" 2> "$work/sd-vk4.err"
+cmp "$work/sd-vk.txt" "$work/sd-vk4.txt"
+grep -q "lookup [0-9]*/[1-9]" "$work/sd-vk4.err"
 echo "== TS5_LOOKUP: lookup from the earlier occurrence whose history matches longest, the same text"
 # draft-replay: a scripted model that writes a known answer, here the
 # engine's own source with one name changed throughout, after the original

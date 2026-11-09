@@ -43,6 +43,9 @@ public:
     virtual bool forward_in_place(const int32_t *tokens, int n, int pos0, bool all_logits, std::string &err) {
         return forward(tokens, n, pos0, nullptr, all_logits, err);
     }
+    // The most positions whose logits forward_in_place can leave at
+    // logits_view() at once (all_logits).
+    virtual int in_place_rows() const { return 1 << 30; }
     virtual int n_ctx() const = 0;
     // How far before the furthest position forwarded so far a forward call
     // may start and still find the keys it needs: a sliding layer's ring

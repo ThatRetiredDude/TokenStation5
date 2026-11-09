@@ -369,6 +369,24 @@ static bool mmb_type(const Weight &w) { return fast_type(w) && w.type() != GGML_
 // The x-staging verify kernels (mvtx, TS5_MVTX=1): whole 256-value groups.
 static bool mvtx_type(const Weight &w) { return mmb_type(w) && w.ne0() % 256 == 0; }
 
+// Rows of logits the GPU's buffer holds, 4 bytes for each word of the
+// vocabulary each (Gemma's 262,144 words: 1 MiB a row). Serving never wants
+// more than a verify batch's 8 at once; a call that wants more (ts5 logits,
+// ts5 check) gets them 8 at a time, each piece copied out before the next.
+// TS5_LOGITS_ROWS (Linux, 1 to 256; 8 by default) sets it. The store title
+// keeps 256: a call's logits in one piece.
+static int logits_rows() {
+#ifdef TS5_PS5
+    return 256;
+#else
+    static const int rows = [] {
+        const char *e = getenv("TS5_LOGITS_ROWS");
+        return e && *e ? std::min(256, std::max(1, atoi(e))) : 8;
+    }();
+    return rows;
+#endif
+}
+
 #define CHECK(x)                                                                   \
     do {                                                                           \
         VkResult r_ = (x);                                                         \
@@ -500,6 +518,7 @@ public:
     }
 
     const float *logits_view() const override { return (const float *)logits_.map; }
+    int in_place_rows() const override { return out_rows_; }
 
     int state_slots() const override { return rec_layers_ ? (int)saved_.size() : 0; }
 
@@ -534,6 +553,12 @@ public:
 
     bool fwd(const int32_t *tokens, int n, int pos0, float *logits, bool all, bool want, std::string &err) {
         if (pos0 + n > n_ctx_) { err = "context full"; return false; }
+        // Logits left in the buffer: no more rows than it holds.
+        if (want && all && !logits && n > out_rows_) {
+            err = "the logits of " + std::to_string(n) + " positions in place: the buffer holds " +
+                  std::to_string(out_rows_) + " (TS5_LOGITS_ROWS)";
+            return false;
+        }
         // The linear layers' state holds the tokens before rec_pos_: a call
         // goes on from there, or starts over at 0 (record zeroes it).
         if (rec_layers_) {
@@ -1251,7 +1276,7 @@ private:
             !mk(k_, 4ull * TMAX * KVD) || !mk(v_, 4ull * TMAX * KVD) || !mk(att_, 4ull * TMAX * QD) ||
             !mk(g_, 4ull * TMAX * F) || !mk(u_, 4ull * TMAX * F) || !mk(dummy_, 256) || !mk(part_, 4ull * PART) ||
             !mk(split_, 4ull * SPLIT) ||
-            !mk(ids_, 4ull * TMAX, true) || !mk(logits_, 4ull * TMAX * hp_.n_vocab, true))
+            !mk(ids_, 4ull * TMAX, true) || !mk(logits_, 4ull * out_rows_ * hp_.n_vocab, true))
             return false;
         if (embd_file_) {
             if (!mk(emb_, TMAX * (size_t)m_.tok_embd.info->row_bytes(), true) || !mk(seq_, 4ull * TMAX, true))
@@ -2043,6 +2068,8 @@ private:
         ahead_pos_ = -1;
         memcpy(ids_.map, tokens, 4 * (size_t)n);
         if (embd_file_ && !read_rows(tokens, n, err)) return false;
+        out_dst_ = logits;
+        out_last_ = 0;
         if (reuse) {
             cmd_ = aheads_[ahead_cur_];
             cpu_.reused++;
@@ -2079,7 +2106,10 @@ private:
         }
         if (!finish(err)) return false;
         const double t1 = now_ms();
-        if (logits) memcpy(logits, logits_.map, 4ull * (all ? n : 1) * hp_.n_vocab);
+        // The rows the buffer still holds: all of them, or the last piece.
+        if (logits)
+            memcpy(logits + (size_t)out_last_ * hp_.n_vocab, logits_.map,
+                   4ull * ((all ? n : 1) - out_last_) * hp_.n_vocab);
         const double t2 = now_ms();
         cpu_.copy += t2 - t1;
         cpu_.call += t2 - t0;
@@ -2287,12 +2317,25 @@ private:
             const bool fold_out = !all && fold_norm(n, {&m_.output});
             if (!fold_out) rmsnorm(x_, m_.out_norm, h_, nout, all ? 0 : (uint32_t)(n - 1));
             norm_ = fold_out ? &m_.out_norm : nullptr;
-            matmul(m_.output, fold_out ? x_ : h_, logits_, nout, false);
-            norm_ = nullptr;
-            if (hp_.logit_softcap > 0) {
-                struct { uint32_t n; float cap; } pc{(uint32_t)((size_t)nout * hp_.n_vocab), hp_.logit_softcap};
-                dispatch("softcap", {&logits_}, pc, std::min<uint32_t>(65535, (pc.n + 255) / 256));
+            // More rows than the buffer holds: out_rows_ at a time, each
+            // piece waited for and copied out (run copies the last).
+            for (int c = 0; c < nout; c += out_rows_) {
+                const int k = std::min(out_rows_, nout - c);
+                if (c > 0) {
+                    if (!submit(err)) return false;
+                    if (out_dst_)
+                        memcpy(out_dst_ + (size_t)(c - out_rows_) * hp_.n_vocab, logits_.map,
+                               4ull * out_rows_ * hp_.n_vocab);
+                    if (!begin(err)) return false;
+                    out_last_ = c;
+                }
+                matmul(m_.output, fold_out ? x_ : h_, logits_, k, false, (uint32_t)((size_t)c * E));
+                if (hp_.logit_softcap > 0) {
+                    struct { uint32_t n; float cap; } pc{(uint32_t)((size_t)k * hp_.n_vocab), hp_.logit_softcap};
+                    dispatch("softcap", {&logits_}, pc, std::min<uint32_t>(65535, (pc.n + 255) / 256));
+                }
             }
+            norm_ = nullptr;
         }
         return true;
     }
@@ -2563,6 +2606,11 @@ private:
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
     Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_, rope_turn_[2];
+    // Rows logits_ holds (logits_rows), and where a call's pieces go: the
+    // caller's array, and the first row the buffer still holds after it.
+    const int out_rows_ = logits_rows();
+    float *out_dst_ = nullptr;
+    int out_last_ = 0;
     // Qwen3.5: queries and gates (qg_); the linear layers' projections
     // (qkv_, z_, beta_, alpha_), output (y_) and state (rec_, each linear
     // layer's in turn, rec_state_floats() floats).
@@ -2662,7 +2710,8 @@ uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
     // and output, and their state with save_state's copies.
     const uint64_t rec = hp.rec_count() ? (uint64_t)hp.ssm_conv_dim() + 2ull * hp.ssm_inner() + 2ull * hp.ssm_v_heads : 0;
     const uint64_t act =
-        4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab + (hp.attn_gate ? 2 * QD : 0) + rec) +
+        4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + (hp.attn_gate ? 2 * QD : 0) + rec) +
+        4ull * logits_rows() * hp.n_vocab +
         4 * (VkBackend::PART + VkBackend::SPLIT) +
         4ull * (1 + (hp.rec_count() ? state_slots_wanted() : 0)) * hp.rec_count() *
             (uint64_t)std::max<int64_t>(0, hp.rec_state_floats());
