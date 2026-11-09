@@ -516,6 +516,38 @@ for m in "${shapes[3]}" "$work/gemma4-kmix.gguf"; do
     grep -q "attn_pf[25][51][62]s" "$work/slim-d.err" || { echo "FAIL: the slim builds are not the default"; exit 1; }
 done
 
+echo "== rmsnorm_early and rmsnorm2_early (the norms with their loads up front, the default; TS5_NORM_EARLY=0 the old kernels): the same logits, byte for byte"
+# The same sums in the same order: a prompt at once (and on Gemma 4 one
+# token a call) comes out identical, also with 16 values a thread
+# (TS5_NORM_EARLY=16, the build for rows of up to 8,192, here with most of its
+# slots clamped). Rows of 256, 512 and 896, and 5,376 (Gemma 3 27B's), past
+# the old kernels' 4,096, so their loops for the rest run (3 passes for half
+# the threads, 2 for the others) against the early builds' 11 values a
+# thread, the last clamped for half of them. Gemma's norms add into the
+# residual, two at once (rmsnorm2_early), and Gemma 4's times its layer scale.
+g3x="$work/gemma3-5376.gguf"
+[ -s "$g3x" ] || python3 "$here/make_test_model.py" --arch gemma3 --quant Q8_0 --layers 1 --embd 5376 --heads 2 \
+    --kv-heads 1 --head-dim 256 --ff 256 --window 64 --vocab "$work/ggml-vocab-llama-spm.gguf" "$g3x" > /dev/null
+for m in "$work/llama-Q8_0.gguf" "${shapes[1]}" "$g3" "$g3x" "$work/gemma4-kmix.gguf"; do
+    ne_toks=$(seq 5 11 600)
+    [ "$m" = "$g3x" ] && ne_toks=$(seq 5 13 520)  # its 32,000 x 5,376 output, on the CPU's Vulkan
+    steps=("")
+    case "$(basename "$m")" in gemma4*) steps=("" --step) ;; esac
+    for step in "${steps[@]}"; do
+        TS5_NORM_EARLY=0 TS5_PROFILE=1 "$ts5" logits -m "$m" -o "$work/ne-0.bin" $step $ne_toks 2> "$work/ne-0.err"
+        if grep -q "rmsnorm2*_early " "$work/ne-0.err"; then echo "FAIL: an early norm ran with TS5_NORM_EARLY=0"; exit 1; fi
+        for e in "" TS5_NORM_EARLY=16; do
+            env $e TS5_PROFILE=1 "$ts5" logits -m "$m" -o "$work/ne-1.bin" $step $ne_toks 2> "$work/ne-1.err"
+            cmp "$work/ne-0.bin" "$work/ne-1.bin"
+            grep -q "rmsnorm_early " "$work/ne-1.err" || { echo "FAIL: rmsnorm_early didn't run ($e)"; exit 1; }
+            case "$(basename "$m")" in gemma*) grep -q "rmsnorm2_early " "$work/ne-1.err" ||
+                { echo "FAIL: rmsnorm2_early didn't run ($e)"; exit 1; } ;; esac
+        done
+        echo "same logits: $(basename "$m") ${step:-at once}"
+    done
+done
+rm -f "$work/ne-0.bin" "$work/ne-1.bin"
+
 echo "== speculative decoding: the small verify batch, then draft-on output == draft-off output"
 mk qwen2 qwen2 Q4_K_M  # the mvt_* verify kernels serve only the K-quants
 for n in 2 5 8; do

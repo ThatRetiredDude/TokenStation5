@@ -93,6 +93,29 @@ on the PS5 under Debian 13 (Mesa 26.1.6), Qwen3 8B generated 61.3 tok/s with it
 and 68.4 without, because each of the thousands of workgroups re-reads all of x
 and reduces its squares, which costs more than the dispatches it saves.
 
+On Linux the norms run as `rmsnorm_early.comp` and `rmsnorm2_early.comp`
+(`TS5_NORM_EARLY=0`: the old kernels, which the store title keeps until
+measured there). They do `rmsnorm.comp`'s and `rmsnorm2.comp`'s arithmetic in
+the same order, so the output is the same bit for bit, but issue every load
+(x, the weights and, for add, y; Gemma's h, residual and both weights) before
+the first wait. In the old kernels the loads sit under per-thread ifs, which
+ACO waits for one at a time, and the weights' loads come after the barrier: on
+the PS5's GPU (wave64, as RADV builds the norms) a row of 4,096 waits for
+memory 15 times one after another, 7 times for x and then 8 for the weights
+(and y, when adding), and each pass of the loops for the rest of a wider row
+adds 3 (the 14Bs' rows of 5,120: 21); Gemma's pair waits 23 times. The early
+builds wait about once. ACO's latency estimate for a row of 4,096, leaving out
+the loops that don't run there: 7,231 cycles against 3,265 for the early
+build; Gemma's pair 13,379 against 7,380. Indices past the row are clamped
+and their values zeroed before use and never stored (a zero adds nothing to a
+sum of squares), and the weights' buffers are `volatile` only to keep their
+loads up front: NIR otherwise sinks each to its use past the barrier, and a
+norm's weights are read once a token. The values a thread are a
+specialization constant, the row over 512 rounded up (rows past 8,192 take the
+old kernels). Before them the norms were 2.4 to 3.8% of a token in the PS5's
+profiles (0.0063 ms a call, 73 a token, on Qwen3 8B; 0.0097 ms for Gemma 4's
+pairs, 95 a token).
+
 Gemma 4 (`gemma4`, the dense 12B and 31B) differs from Gemma 3 in ways the
 GGUF spells out per layer, which `HParams` keeps as the full layers' values
 and the sliding layers' (`hd(l)`, `hkv(l)`, `rd(l)`): which layers slide is a

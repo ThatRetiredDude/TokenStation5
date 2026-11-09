@@ -1,0 +1,62 @@
+// rmsnorm2.comp's arithmetic in its order, with every load (h, the residual
+// x and both norms' weights) issued before the first wait, as
+// rmsnorm_early.comp does for rmsnorm.comp: the same output bit for bit.
+// NPT as there (rows of at most 8192). Y may be H: each thread writes only
+// the values it read (a clamped index's value is never used).
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+#define WG 512
+#define NMAX 16
+layout(local_size_x = WG) in;
+layout(constant_id = 0) const uint NPT = 8;
+layout(std430, binding = 0) readonly buffer Hbuf { float H[]; };
+layout(std430, binding = 1) volatile readonly buffer W1buf { float W1[]; };
+layout(std430, binding = 2) buffer Xbuf { float X[]; };
+layout(std430, binding = 3) volatile readonly buffer W2buf { float W2[]; };
+layout(std430, binding = 4) writeonly buffer Ybuf { float Y[]; };
+layout(push_constant) uniform PC { uint n; float eps, mul; } pc;
+shared float red[WG / 4];  // one per subgroup (4 lanes or more)
+
+float sum_all(float s) {
+    s = subgroupAdd(s);
+    barrier();  // the previous sum's readers are done with red
+    if (gl_SubgroupInvocationID == 0) red[gl_SubgroupID] = s;
+    barrier();
+    float total = 0.0;
+    for (uint i = 0; i < gl_NumSubgroups; i++) total += red[i];
+    return total;
+}
+
+void main() {
+    const uint t = gl_WorkGroupID.x, tid = gl_LocalInvocationID.x, b = t * pc.n;
+    float v[NMAX], xr[NMAX], w1[NMAX], w2[NMAX];
+    [[unroll]] for (uint k = 0; k < NPT; k++) {
+        const uint i = min(tid + k * WG, pc.n - 1);
+        v[k] = H[b + i];
+        xr[k] = X[b + i];
+        w1[k] = W1[i];
+        w2[k] = W2[i];
+    }
+    float s = 0.0;
+    [[unroll]] for (uint k = 0; k < NPT; k++) {
+        if (tid + k * WG >= pc.n) v[k] = 0.0;
+        s += v[k] * v[k];
+    }
+    const float scale1 = inversesqrt(sum_all(s) / float(pc.n) + pc.eps);
+    // The new residual, kept in v.
+    s = 0.0;
+    [[unroll]] for (uint k = 0; k < NPT; k++) {
+        const uint i = tid + k * WG;
+        if (i < pc.n) {
+            v[k] = (xr[k] + v[k] * scale1 * w1[k]) * pc.mul;
+            X[b + i] = v[k];
+            s += v[k] * v[k];
+        }
+    }
+    const float scale2 = inversesqrt(sum_all(s) / float(pc.n) + pc.eps);
+    [[unroll]] for (uint k = 0; k < NPT; k++) {
+        const uint i = tid + k * WG;
+        if (i < pc.n) Y[b + i] = v[k] * scale2 * w2[k];
+    }
+}

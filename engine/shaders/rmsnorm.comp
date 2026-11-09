@@ -1,9 +1,12 @@
 // Y[t][:] = X[x_row0 + t][:] * rsqrt(mean(X^2) + eps) * W[:], one workgroup
 // per token; with add, Y[t][:] += that (Gemma's norms after attention and
 // the FFN, into the residual), and the result is times mul (Gemma 4's
-// layer_output_scale on the residual after its FFN; 1 elsewhere). Each thread loads its first NPT values at once and keeps them,
-// so the row costs about one memory round trip rather than one per loop
-// step; rows wider than WG * NPT loop for the rest.
+// layer_output_scale on the residual after its FFN; 1 elsewhere). Each
+// thread keeps its first NPT values in registers for the store; rows wider
+// than WG * NPT loop for the rest. The compiler (ACO) waits for those loads
+// one at a time and for the weights after the barrier, 15 memory round trips
+// one after another for a row of 4,096 on the PS5's GPU: rmsnorm_early.comp,
+// Linux's default, issues them all before the first wait.
 #version 450
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #define WG 512

@@ -206,6 +206,7 @@
 #include "qkv_post_k8v4tv.spv.h"
 #include "attn_unturn.spv.h"
 #include "rmsnorm.spv.h"
+#include "rmsnorm_early.spv.h"
 #include "split_gate.spv.h"
 #include "gate_mul.spv.h"
 #include "ssm_conv.spv.h"
@@ -214,6 +215,7 @@
 #include "gdn_norm.spv.h"
 #include "zero.spv.h"
 #include "rmsnorm2.spv.h"
+#include "rmsnorm2_early.spv.h"
 #include "softcap.spv.h"
 #include "swiglu.spv.h"
 #include "log.h"
@@ -581,6 +583,11 @@ private:
         // fused kernel. TS5_GLU_GELU=1 turns it on.
         if (const char *e = getenv("TS5_GLU_GELU")) glu_gelu_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_NORM_FUSE")) norm_fuse_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_NORM_EARLY")) {
+            const int v = atoi(e);
+            norm_early_ = v != 0;
+            norm_early_npt_ = (uint32_t)std::min(std::max(v, 1), 16);
+        }
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
 #ifndef TS5_PS5
         // RADV (with wave32): splitting the small matrices' columns down to
@@ -936,6 +943,10 @@ private:
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
         P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(qkv_post_q8t, 13) P(qkv_post_q4, 13) P(qkv_post_q4t, 13) P(qkv_post_q8tv, 13) P(qkv_post_q4tv, 13) P(qkv_post_k8v4, 13) P(qkv_post_k8v4t, 13) P(qkv_post_k8v4tv, 13) P(attn_unturn, 1) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_q4, 7) P(attn_k8v4, 7) P(attn_merge, 2) 
+        if (const uint32_t npt = norm_npt();
+            npt && (!make_pipe("rmsnorm_early", spv_rmsnorm_early, sizeof(spv_rmsnorm_early), 3, err, npt) ||
+                    !make_pipe("rmsnorm2_early", spv_rmsnorm2_early, sizeof(spv_rmsnorm2_early), 5, err, npt)))
+            return false;
         P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf256, 5) P(attn_pf512, 5)
         P(attn_pf_q8, 7) P(attn_pf128_q8, 7) P(attn_pf256_q8, 7) P(attn_pf512_q8, 7)
         P(attn_pf256s, 5) P(attn_pf512s, 5) P(attn_pf256s_q8, 7) P(attn_pf512s_q8, 7)
@@ -1765,20 +1776,27 @@ private:
         dispatch(one ? name + ".1" : name, bufs, pc, mx, my, what);
     }
 
+    // rmsnorm_early's and rmsnorm2_early's values a thread for this model's
+    // rows (the row over 512 rounded up, or more by TS5_NORM_EARLY), or 0 for
+    // rmsnorm.comp and rmsnorm2.comp: TS5_NORM_EARLY=0, or rows past 8,192.
+    uint32_t norm_npt() const {
+        const uint32_t n = (uint32_t)hp_.n_embd, npt = (n + 511) / 512;
+        return norm_early_ && n && npt <= 16 ? std::max(npt, norm_early_npt_) : 0;
+    }
     // add: y += the normalized x (Gemma's norms after attention and the FFN);
     // mul: the result times this (Gemma 4's layer_output_scale).
     void rmsnorm(const Buf &x, const Weight &w, const Buf &y, int ntok, uint32_t x_row0 = 0, bool add = false,
                  float mul = 1.0f) {
         struct { uint32_t n, x_row0; float eps; uint32_t add; float mul; } pc{(uint32_t)hp_.n_embd, x_row0,
                                                                               hp_.rms_eps, add ? 1u : 0u, mul};
-        dispatch("rmsnorm", {&x, &W(w), &y}, pc, (uint32_t)ntok);
+        dispatch(norm_npt() ? "rmsnorm_early" : "rmsnorm", {&x, &W(w), &y}, pc, (uint32_t)ntok);
     }
     // Gemma's norm after a block into the residual x (times mul) and the
     // next block's norm of x into y, in one pass (rmsnorm2.comp).
     void rmsnorm2(const Buf &h, const Weight &w1, const Buf &x, const Weight &w2, const Buf &y, int ntok,
                   float mul = 1.0f) {
         struct { uint32_t n; float eps, mul; } pc{(uint32_t)hp_.n_embd, hp_.rms_eps, mul};
-        dispatch("rmsnorm2", {&h, &W(w1), &x, &W(w2), &y}, pc, (uint32_t)ntok);
+        dispatch(norm_npt() ? "rmsnorm2_early" : "rmsnorm2", {&h, &W(w1), &x, &W(w2), &y}, pc, (uint32_t)ntok);
     }
 
     bool run(const int32_t *tokens, int n, int pos0, float *logits, bool all, bool want, std::string &err) {
@@ -2208,6 +2226,20 @@ private:
     // under Linux (Mesa 26.1) it measured 61 tok/s against 68 without, since
     // every workgroup re-reads and reduces all of x for its sum of squares.
     bool norm_fuse_ = false;
+    // The norms with every load issued before the first wait
+    // (rmsnorm_early.comp and rmsnorm2_early.comp): the same output bit for
+    // bit, a row of 4,096 in about one memory round trip where rmsnorm.comp
+    // waits 15 times one after another on the PS5's GPU (ACO's latency
+    // estimate 7,231 cycles to 3,265). On by default on Linux; the store
+    // title keeps the old kernels until measured there. TS5_NORM_EARLY=0:
+    // the old kernels; 2 to 16: at least that many values a thread (the
+    // wider builds on narrow rows, for the tests).
+#ifdef TS5_PS5
+    bool norm_early_ = false;
+#else
+    bool norm_early_ = true;
+#endif
+    uint32_t norm_early_npt_ = 1;
     const Weight *norm_ = nullptr;  // set: matmul folds this RMSNorm in (one token)
     bool no_barrier_ = false;  // skip the barrier after the next dispatch
     int mmb_min_ = 48;
