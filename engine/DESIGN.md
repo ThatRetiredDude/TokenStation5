@@ -730,7 +730,8 @@ PS5 under Linux before it (Qwen3 8B, 0.6B drafter): prose kept 40-54% of the
 0.6B's drafts and ran 18-27% slower than no drafting, code renames kept 79%
 and ran 38% faster; the cost model keeps the second and drops the first.
 
-`TS5_LOOKUP` (Linux only, 0 until measured on the PS5) changes which earlier
+`TS5_LOOKUP` (Linux only, 1 by default since the PS5 measured it; 0 keeps the
+most recent occurrence, as the store title does) changes which earlier
 occurrence the lookup drafts from. The gram index keeps each gram's most
 recent occurrence, and in a rewrite, an edit or a quote the most recent copy
 of a short gram is often in another line, already rewritten, so its draft
@@ -746,7 +747,13 @@ is what re-measures the widest batch: without it one slow pass priced that
 batch high for good, and 2 ran 5% behind 1). On real Qwen3 tokens, drafts
 from long matches kept 92-100% of their tokens on rewrites, edits and
 quotes, short ones 11-52%. Only the proposals change, never the acceptance
-walk or its random draws, so the text is the same.
+walk or its random draws, so the text is the same. On the PS5 (2026-11-09,
+every text the same as without drafting) 1 against 0 wrote document
+rewrites 36% faster on Qwen3 8B (118 to 161 tokens/s), 37% on Llama 3.1 8B
+(127 to 174) and 26% on DeepSeek R1 14B with the k8v4 cache (59 to 75), a
+second-turn summary 26% faster on Qwen3 8B, quoted answers 1 to 4%, and
+short or long-document questions the same; its drafts were 94-99.8%
+accepted against 62-66%, and 2 ran within 0.3 tokens/s of 1.
 
 `ts5 draft-replay` runs the engine's own drafting on a scripted model that
 writes a given answer, each pass lasting what a pass of that size costs on

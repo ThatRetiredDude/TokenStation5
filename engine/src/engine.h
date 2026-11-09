@@ -130,11 +130,12 @@ private:
     // Prompt-lookup index over cached_: a 3- or 2-gram, packed 21 bits per
     // token, maps to the position after its most recent occurrence.
     std::unordered_map<uint64_t, int32_t> gram3_, gram2_;
-    // TS5_LOOKUP (Linux): 0, the most recent occurrence; 1, the one whose
-    // history matches the text's longest; 2, that plus separate acceptance
-    // estimates for long and short matches. For 1 and 2, the position after
-    // a gram's occurrence maps to the position after its previous one (-1:
-    // none), so the occurrences chain back from the map's.
+    // TS5_LOOKUP (Linux, 1 by default; the store title 0): 0, the most recent
+    // occurrence; 1, the one whose history matches the text's longest; 2,
+    // that plus separate acceptance estimates for long and short matches.
+    // For 1 and 2, the position after a gram's occurrence maps to the
+    // position after its previous one (-1: none), so the occurrences chain
+    // back from the map's.
     int lookup_ = 0;
     std::vector<int32_t> prev3_, prev2_;
     // The draft model, when one is set (TS5_DRAFT_MODEL).

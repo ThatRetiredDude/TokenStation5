@@ -483,11 +483,11 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // Rejected drafts are taken back by writing over them, which a backend
     // that only goes forward (Qwen3.5's linear layers) can't do.
     if (dmax > b_->rewind_limit()) dmax = b_->rewind_limit();
-    // Which earlier occurrence lookup drafts from (TS5_LOOKUP, Linux only,
-    // off until measured on the PS5): it changes only what is proposed,
-    // never what is kept, so the output stays the same.
+    // Which earlier occurrence lookup drafts from (TS5_LOOKUP, Linux only;
+    // 1 by default since the PS5 measured it, 0 the most recent): it changes
+    // only what is proposed, never what is kept, so the output stays the same.
 #ifndef TS5_PS5
-    lookup_ = 0;
+    lookup_ = 1;
     if (const char *e = getenv("TS5_LOOKUP")) lookup_ = std::min(std::max(atoi(e), 0), 2);
 #endif
     gram3_.clear();
