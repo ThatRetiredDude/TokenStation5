@@ -16,6 +16,8 @@
 //   ts5 usage-parse FILE                 a usage.tsv's requests, written again as v1 (for tests)
 //   ts5 fetch URL FILE [--sha256 HEX]    download URL to FILE, going on from a stopped one
 //   ts5 peak [--device N] [--gib G]      the GPU's read bandwidth and FMA rates (speed ceilings)
+//   ts5 draft-replay -m model.gguf [--temp T] [-o IDS] < PROMPT, a NUL byte, ANSWER
+//                                        the engine's drafting on a model that writes ANSWER (Linux, for tests)
 //
 // Common: --backend vk|cpu (default vk when built with Vulkan), --device N.
 // serve with TS5_USAGE_LOG=FILE writes a line per API request to FILE
@@ -94,7 +96,11 @@ int usage() {
 bool parse(int argc, char **argv, Args &a) {
     if (argc < 2) return false;
     a.cmd = argv[1];
-    const char *cmds[] = {"serve", "run", "bench", "check", "tokenize", "logits", "prompt"};
+    const char *cmds[] = {"serve", "run", "bench", "check", "tokenize", "logits", "prompt",
+#ifndef TS5_PS5
+                          "draft-replay",
+#endif
+    };
     if (std::none_of(std::begin(cmds), std::end(cmds), [&](const char *c) { return a.cmd == c; })) return false;
     bool ok = true;
     for (int i = 2; i < argc && ok; i++) {
@@ -294,6 +300,116 @@ int fetch_command(int argc, char **argv) {
     return 0;
 }
 
+#ifndef TS5_PS5
+// A model that writes a given text: every row's logits favour the token after
+// that position in it (past its end, its last), 4 against 0 for the rest of
+// the vocabulary and 3 for the token after that, whatever came before. At
+// temperature 0 it writes exactly the text; above it, a sample's draws.
+// For draft-replay. A pass of a generated token and its drafts is costed as
+// a pass of that many tokens took on the PS5 under Linux (Qwen3 8B at short
+// context, TS5_BENCH_BATCH, 72c1dd4); with TS5_REPLAY_MS=U it also lasts that
+// times U ms, which is what the engine's cost model measures and drafts by.
+// Without it every pass is near free: replay with TS5_ADAPT=0.
+class ScriptBackend : public Backend {
+public:
+    ScriptBackend(const std::vector<int32_t> &s, size_t np, int nv, double unit) : s_(s), np_(np), nv_(nv), unit_(unit) {}
+    const char *name() const override { return "script"; }
+    bool forward(const int32_t *, int n, int pos0, float *logits, bool all, std::string &) override {
+        const double t0 = now_ms();
+        if (logits)
+            for (int i = all ? 0 : n - 1; i < n; i++) {
+                float *row = logits + (size_t)(all ? i : 0) * nv_;
+                std::fill(row, row + nv_, 0.0f);
+                const size_t at = std::min((size_t)pos0 + i + 1, s_.size() - 1);
+                row[s_[std::min(at + 1, s_.size() - 1)]] = 3.0f;
+                row[s_[at]] = 4.0f;
+            }
+        if ((size_t)pos0 >= np_) {  // a generated token and its drafts, not the prompt
+            static const double R[8] = {1.0, 1.12, 1.29, 1.54, 1.77, 2.0, 2.3, 2.59};
+            const double c = R[std::min(n, 8) - 1];
+            cost += c;
+            passes++;
+            while (unit_ > 0 && now_ms() < t0 + c * unit_) {
+            }
+        }
+        return true;
+    }
+    int n_ctx() const override { return (int)s_.size() + 16; }
+    double cost = 0;  // in one-token passes
+    int passes = 0;
+
+private:
+    const std::vector<int32_t> &s_;
+    size_t np_;
+    int nv_;
+    double unit_;
+};
+
+// ts5 draft-replay: generation after PROMPT on a model that writes ANSWER
+// (stdin: the prompt, a NUL byte, the answer; a prompt may be longer than a
+// command line takes), through the engine's own drafting, as many tokens as
+// ANSWER has. Writes the text (stdout) and the drafts kept and what the
+// passes would cost (stderr). At --temp 0 the text is ANSWER whatever is
+// drafted; above it a fixed seed's sample, the same whatever is drafted.
+// -o: the prompt's token ids and the answer's, a line each.
+int draft_replay(Model &model, Tokenizer &tok, float temp, const std::string &out) {
+    const std::string in = read_all(stdin);
+    const size_t nul = in.find('\0');
+    std::vector<int32_t> s = tok.encode(in.substr(0, nul), true);
+    const size_t np = s.size();
+    const std::vector<int32_t> ans =
+        nul == std::string::npos ? std::vector<int32_t>() : tok.encode(in.substr(nul + 1), false);
+    if (np == 0 || ans.empty()) {
+        fprintf(stderr, "ts5: draft-replay reads a prompt, a NUL byte and an answer\n");
+        return 2;
+    }
+    std::string want;
+    for (int32_t t : ans) {
+        if (tok.is_eog(t)) {
+            fprintf(stderr, "ts5: the answer holds an end-of-turn token (%d)\n", t);
+            return 2;
+        }
+        want += tok.decode(t);
+    }
+    // A control token's name in the text (<|im_start|> in a source file) is
+    // read as that token, which writes nothing: the model would write
+    // another text, so the replay would measure the wrong one.
+    if (want != in.substr(nul + 1)) {
+        fprintf(stderr, "ts5: the answer's tokens don't spell it back (a control token's name in it?)\n");
+        return 2;
+    }
+    s.insert(s.end(), ans.begin(), ans.end());
+    if (!out.empty()) {
+        FILE *f = fopen(out.c_str(), "w");
+        if (!f) {
+            fprintf(stderr, "ts5: can't write %s\n", out.c_str());
+            return 1;
+        }
+        for (size_t i = 0; i < s.size(); i++) fprintf(f, "%d%c", s[i], i + 1 == np || i + 1 == s.size() ? '\n' : ' ');
+        fclose(f);
+    }
+    const char *u = getenv("TS5_REPLAY_MS");
+    auto *sb = new ScriptBackend(s, np, model.hp.n_vocab, u ? atof(u) : 0.0);
+    Engine eng(model, sb, tok);  // owns sb
+    SampleParams p;
+    p.temperature = temp;
+    p.seed = 1;
+    p.max_tokens = (int)ans.size();
+    std::string text, err;
+    GenStats st;
+    const std::vector<int32_t> pr(s.begin(), s.begin() + np);
+    if (!eng.generate(pr, p, [&](const std::string &x) { text += x; return true; }, st, err)) {
+        fprintf(stderr, "ts5: %s\n", err.c_str());
+        return 1;
+    }
+    fwrite(text.data(), 1, text.size(), stdout);
+    fprintf(stderr, "ts5: draft-replay: %d tokens in %d passes, %s, costing %.1f one-token passes (%.3fx), %s\n",
+            st.gen_tokens, sb->passes, draft_summary(st).c_str(), sb->cost, sb->cost > 0 ? st.gen_tokens / sb->cost : 0.0,
+            text == want ? "the answer exactly" : "another text");
+    return 0;
+}
+#endif
+
 }  // namespace
 
 int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
@@ -337,6 +453,9 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         tok.set_chat_template(read_all(f));
         fclose(f);
     }
+#ifndef TS5_PS5
+    if (a.cmd == "draft-replay") return draft_replay(model, tok, a.temp, a.out);
+#endif
     if (a.cmd == "prompt") {
         Json req;
         if (!Json::parse(read_all(stdin), req)) { fprintf(stderr, "ts5: invalid JSON\n"); return 1; }

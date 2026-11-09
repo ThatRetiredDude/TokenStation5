@@ -702,6 +702,35 @@ PS5 under Linux before it (Qwen3 8B, 0.6B drafter): prose kept 40-54% of the
 0.6B's drafts and ran 18-27% slower than no drafting, code renames kept 79%
 and ran 38% faster; the cost model keeps the second and drops the first.
 
+`TS5_LOOKUP` (Linux only, 0 until measured on the PS5) changes which earlier
+occurrence the lookup drafts from. The gram index keeps each gram's most
+recent occurrence, and in a rewrite, an edit or a quote the most recent copy
+of a short gram is often in another line, already rewritten, so its draft
+dies at the first token. With `TS5_LOOKUP=1` each occurrence also links to
+the one before it (two 4-byte links a token of context), and the lookup walks
+the gram's last 64 occurrences and drafts from the one whose tokens before the
+gram match the text's own for longest (up to 32; the most recent on ties).
+`TS5_LOOKUP=2` also prices long matches apart: a draft whose history matched
+for 8 tokens or more has its own acceptance estimate (prior 0.9), and the
+every-16th-step probe goes only to the short ones, sized for a chance of 0.6
+rather than the whole room (long matches keep the full-width probe, which
+is what re-measures the widest batch: without it one slow pass priced that
+batch high for good, and 2 ran 5% behind 1). On real Qwen3 tokens, drafts
+from long matches kept 92-100% of their tokens on rewrites, edits and
+quotes, short ones 11-52%. Only the proposals change, never the acceptance
+walk or its random draws, so the text is the same.
+
+`ts5 draft-replay` runs the engine's own drafting on a scripted model that
+writes a given answer, each pass lasting what a pass of that size costs on
+the PS5 (`TS5_REPLAY_MS`, the cost curve at short context), so the cost model
+drafts as it would there. On the research's 122 answers from this
+repository's history (26 code rewrites, 36 Markdown rewrites, 26
+search/replace edits, 30 quoting answers, 4 novel texts; real Qwen3 tokens)
+1 wrote code rewrites 38% faster than the most recent occurrence, Markdown
+rewrites 30%, quotes 18%, search/replace edits 10%, novel text 1% slower;
+2 added 0.3% (code) to 2% (novel text). The tests use it to check the
+lookup's counts against the research's replay and the cost model's path.
+
 A draft model's context is what fits in the memory free once the main model
 is loaded (`draft_context`, from the driver's budget less its usage), at most
 the main context (32k; 16k for one the app finds by itself); none fits, no

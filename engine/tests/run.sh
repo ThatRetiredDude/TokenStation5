@@ -690,6 +690,63 @@ grep -q "lookup [0-9]*/[1-9]" "$work/sd-vk.err"
 TS5_AHEAD=0 TS5_DRAFT=7 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 \
     > "$work/sd-vk0.txt" 2> /dev/null
 cmp "$work/sd-vk.txt" "$work/sd-vk0.txt"
+echo "== TS5_LOOKUP: lookup from the earlier occurrence whose history matches longest, the same text"
+# draft-replay: a scripted model that writes a known answer, here the
+# engine's own source with one name changed throughout, after the original
+# (a rewrite, where the most recent copy of a short gram is often in a line
+# already rewritten). With the draft length fixed (TS5_ADAPT=0) what is kept
+# depends on the lookup alone: the engine's counts must be the research
+# replay's (lookup_replay.py), the longest match must keep more, and the
+# length split (2) prices drafts without changing them.
+# A control token's name in the answer (the source's <|im_start|>) would be
+# read as that token, which writes nothing, so draft-replay refuses it.
+printf 'Say it.\n\0<|im_start|>' | "$ts5" draft-replay -m "$work/qwen2-Q8_0.gguf" 2> "$work/lk-ctl.err" \
+    && unexpected $LINENO
+grep -q "don't spell it back" "$work/lk-ctl.err"
+sed 's/<|\([a-z_]*\)|>/<\1>/g' "$here/../src/engine.cpp" > "$work/lk-old.txt"
+sed 's/cached_/kept_/g' "$work/lk-old.txt" > "$work/lk-new.txt"
+{ printf 'File engine.cpp:\n'; cat "$work/lk-old.txt"; printf '\nRewrite the whole file with the change.\n\0'
+  cat "$work/lk-new.txt"; } > "$work/lk-in.txt"
+for l in 0 1 2; do
+    TS5_ADAPT=0 TS5_LOOKUP=$l "$ts5" draft-replay -m "$work/qwen2-Q8_0.gguf" --temp 0 -o "$work/lk-ids.txt" \
+        < "$work/lk-in.txt" > "$work/lk-$l.txt" 2> "$work/lk-$l.err"
+    grep -q "the answer exactly" "$work/lk-$l.err"
+    cmp "$work/lk-$l.txt" "$work/lk-new.txt"
+done
+python3 "$here/lookup_replay.py" "$work/lk-ids.txt" > "$work/lk-py.txt"
+k0=$(grep -o 'lookup [0-9]*/[0-9]*' "$work/lk-0.err") k1=$(grep -o 'lookup [0-9]*/[0-9]*' "$work/lk-1.err")
+grep -qx "recent ${k0#lookup }" "$work/lk-py.txt"
+grep -qx "longest ${k1#lookup }" "$work/lk-py.txt"
+grep -q "$k1 accepted" "$work/lk-2.err"
+k0=${k0#lookup } k1=${k1#lookup }
+[ "${k1%/*}" -gt "${k0%/*}" ] || { echo "FAIL: the longest match kept ${k1%/*} drafts, the most recent ${k0%/*}"; exit 1; }
+echo "a rename rewrite: drafts kept/proposed $k0 by the most recent occurrence, $k1 by the longest match"
+# The cost model's path too (each pass lasting what that size costs on the
+# PS5, so it drafts as it would there), and above temperature 0 the same
+# sample whatever is drafted: one random draw per token written.
+for l in 0 1 2; do
+    TS5_REPLAY_MS=0.5 TS5_LOOKUP=$l "$ts5" draft-replay -m "$work/qwen2-Q8_0.gguf" --temp 0 < "$work/lk-in.txt" \
+        2> "$work/lk-a$l.err" | cmp - "$work/lk-new.txt"
+    grep -q "lookup [1-9][0-9]*/[0-9]* accepted, .*the answer exactly" "$work/lk-a$l.err"
+done
+TS5_DRAFT=0 "$ts5" draft-replay -m "$work/qwen2-Q8_0.gguf" --temp 0.7 < "$work/lk-in.txt" > "$work/lk-t0.txt" 2> /dev/null
+for l in 0 1 2; do
+    TS5_REPLAY_MS=0.5 TS5_LOOKUP=$l "$ts5" draft-replay -m "$work/qwen2-Q8_0.gguf" --temp 0.7 < "$work/lk-in.txt" \
+        2> "$work/lk-t$l.err" | cmp - "$work/lk-t0.txt"
+    grep -q "lookup [1-9][0-9]*/[0-9]* accepted, .*another text" "$work/lk-t$l.err"
+done
+# A real model's text, without drafting and with each lookup, on the CPU and the GPU.
+TS5_DRAFT=0 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 > "$work/lk-vk.txt" 2> /dev/null
+cmp "$work/sd-vk.txt" "$work/lk-vk.txt"
+for l in 1 2; do
+    TS5_LOOKUP=$l TS5_DRAFT=7 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 \
+        > "$work/lk-cpu$l.txt" 2> "$work/lk-cpu$l.err"
+    cmp "$work/sd-off.txt" "$work/lk-cpu$l.txt"
+    grep -q "lookup [0-9]*/[1-9]" "$work/lk-cpu$l.err"
+    TS5_LOOKUP=$l TS5_DRAFT=7 "$ts5" run --backend vk -m "$work/qwen2-Q8_0.gguf" -p "$rep" -n 300 --temp 0 \
+        > "$work/lk-vk$l.txt" 2> /dev/null
+    cmp "$work/lk-vk.txt" "$work/lk-vk$l.txt"
+done
 echo "== the draft model cascade: a non-repeating prompt, the model as its own drafter"
 nr="The sky turned a deep shade of violet over the quiet harbor town that evening"
 TS5_DRAFT=0 "$ts5" run --backend cpu -m "$work/qwen2-Q8_0.gguf" -p "$nr" -n 200 --temp 0 > "$work/dm-off.txt" 2> /dev/null

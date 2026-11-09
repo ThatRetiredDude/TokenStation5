@@ -54,7 +54,8 @@ public:
 private:
     int32_t sample(const float *logits, int n, const SampleParams &p);
     void index_grams(size_t from);
-    void draft_lookup(int32_t tok, int k, std::vector<int32_t> &out);
+    // Returns how many tokens before the gram matched (lookup_ > 0), else 0.
+    int draft_lookup(int32_t tok, int k, std::vector<int32_t> &out);
     void draft_model(int32_t tok, int k, std::vector<int32_t> &out);
     Model &m_;
     std::unique_ptr<Backend> b_;
@@ -70,6 +71,13 @@ private:
     // Prompt-lookup index over cached_: a 3- or 2-gram, packed 21 bits per
     // token, maps to the position after its most recent occurrence.
     std::unordered_map<uint64_t, int32_t> gram3_, gram2_;
+    // TS5_LOOKUP (Linux): 0, the most recent occurrence; 1, the one whose
+    // history matches the text's longest; 2, that plus separate acceptance
+    // estimates for long and short matches. For 1 and 2, the position after
+    // a gram's occurrence maps to the position after its previous one (-1:
+    // none), so the occurrences chain back from the map's.
+    int lookup_ = 0;
+    std::vector<int32_t> prev3_, prev2_;
     // The draft model, when one is set (TS5_DRAFT_MODEL).
     Model *dm_ = nullptr;
     std::unique_ptr<Backend> db_;

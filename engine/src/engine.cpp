@@ -50,11 +50,23 @@ int32_t Engine::sample(const float *lg, int n, const SampleParams &p) {
 static uint64_t gram_key(int32_t a, int32_t b) { return ((uint64_t)(uint32_t)a << 21) | (uint32_t)b; }
 
 // Index the grams ending at positions from.. of cached_, overwriting earlier
-// occurrences, so a lookup always finds the most recent one.
+// occurrences, so a lookup always finds the most recent one (and, with
+// lookup_, chaining each to the one before it).
 void Engine::index_grams(size_t from) {
+    const bool chain = lookup_ > 0;
+    if (chain) {
+        prev2_.resize(cached_.size() + 1, -1);
+        prev3_.resize(cached_.size() + 1, -1);
+    }
+    auto put = [&](std::unordered_map<uint64_t, int32_t> &m, std::vector<int32_t> &prev, uint64_t key, int32_t at) {
+        auto r = m.try_emplace(key, at);
+        if (chain) prev[at] = r.second ? -1 : r.first->second;
+        r.first->second = at;
+    };
     for (size_t j = std::max(from, (size_t)1); j < cached_.size(); j++) {
-        gram2_[gram_key(cached_[j - 1], cached_[j])] = (int32_t)j + 1;
-        if (j >= 2) gram3_[(gram_key(cached_[j - 2], cached_[j - 1]) << 21) | (uint32_t)cached_[j]] = (int32_t)j + 1;
+        put(gram2_, prev2_, gram_key(cached_[j - 1], cached_[j]), (int32_t)j + 1);
+        if (j >= 2)
+            put(gram3_, prev3_, (gram_key(cached_[j - 2], cached_[j - 1]) << 21) | (uint32_t)cached_[j], (int32_t)j + 1);
     }
 }
 
@@ -148,19 +160,44 @@ void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
 // Propose up to k tokens by prompt lookup: the most recent earlier occurrence
 // of the text's final n-gram (n = 3, then 2) says what came next last time.
 // Free to be wrong: every draft is verified against the model's own logits.
-void Engine::draft_lookup(int32_t tok, int k, std::vector<int32_t> &out) {
-    const size_t sz = cached_.size();
+// With lookup_, the occurrence is instead the one of the gram's last 64 whose
+// tokens before the gram match the text's own for longest (up to 32; the
+// most recent on ties): in a rewrite or a quote the most recent copy of a
+// short gram is often another line's, and following it ends the draft at
+// the first token. Through the engine (ts5 draft-replay, the PS5's pass
+// costs at short context, real Qwen3 tokens of this repository's history):
+// code rewrites 38% faster, Markdown rewrites 30%, quoting answers 18%,
+// search/replace edits 10%, novel text 1% slower.
+int Engine::draft_lookup(int32_t tok, int k, std::vector<int32_t> &out) {
+    const int sz = (int)cached_.size();
     int32_t p = -1;
+    int n = 0;
     if (sz >= 2) {
         auto it = gram3_.find((gram_key(cached_[sz - 2], cached_[sz - 1]) << 21) | (uint32_t)tok);
-        if (it != gram3_.end()) p = it->second;
+        if (it != gram3_.end()) p = it->second, n = 3;
     }
     if (p < 0 && sz >= 1) {
         auto it = gram2_.find(gram_key(cached_[sz - 1], tok));
-        if (it != gram2_.end()) p = it->second;
+        if (it != gram2_.end()) p = it->second, n = 2;
     }
-    if (p < 0) return;
-    for (size_t i = p; i <= sz && (int)out.size() < k + 1; i++) out.push_back(i < sz ? cached_[i] : tok);
+    if (p < 0) return 0;
+    int len = 0;
+    if (lookup_ > 0) {
+        // An occurrence at q (the position after it) has the gram at q-n..q-1
+        // and its history before q-n; the text's gram starts at sz+1-n, its
+        // history before that. q <= sz, so the text's index never runs out first.
+        const std::vector<int32_t> &prev = n == 3 ? prev3_ : prev2_;
+        int best = p, bl = -1;
+        for (int c = 0, q = p; c < 64 && q >= 0; c++, q = prev[q]) {
+            int l = 0;
+            while (l < 32 && q - n - 1 - l >= 0 && cached_[q - n - 1 - l] == cached_[sz - n - l]) l++;
+            if (l > bl) bl = l, best = q;
+        }
+        p = best;
+        len = bl;
+    }
+    for (int i = p; i <= sz && (int)out.size() < k + 1; i++) out.push_back(i < sz ? cached_[i] : tok);
+    return len;
 }
 
 namespace {
@@ -276,8 +313,17 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // Rejected drafts are taken back by writing over them, which a backend
     // that only goes forward (Qwen3.5's linear layers) can't do.
     if (dmax > b_->rewind_limit()) dmax = b_->rewind_limit();
+    // Which earlier occurrence lookup drafts from (TS5_LOOKUP, Linux only,
+    // off until measured on the PS5): it changes only what is proposed,
+    // never what is kept, so the output stays the same.
+#ifndef TS5_PS5
+    lookup_ = 0;
+    if (const char *e = getenv("TS5_LOOKUP")) lookup_ = std::min(std::max(atoi(e), 0), 2);
+#endif
     gram3_.clear();
     gram2_.clear();
+    prev3_.clear();
+    prev2_.clear();
     if (dmax > 0) {
         gram3_.reserve(cached_.size());
         gram2_.reserve(cached_.size());
@@ -321,7 +367,14 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // too little for its cost (Qwen3 0.6B on prose: 40-54% kept, a net loss
     // on the PS5) stops by itself, and comes back where text repeats.
     struct Source { float kept = 0, trials = 0; float p(float prior) const { return trials > 2 ? kept / trials : prior; } };
-    Source by_lookup, by_drafter;
+    // by_long: TS5_LOOKUP=2's drafts whose history matched the text's for 8
+    // tokens or more. On real Qwen3 tokens they kept 92-100% of their drafted
+    // tokens on rewrites, edits and quotes, the shorter matches 11-52%: one
+    // estimate for both drafted long matches short after a run of short
+    // ones, and paid for the short ones' misses after a run of long ones.
+    // Through the engine it wrote 0.3-1.4% faster than one estimate on
+    // rewrites, edits and quotes, 2% on novel text.
+    Source by_lookup, by_long, by_drafter;
     double t_fwd[10] = {0}, t_draft = 0;  // ms; 0: not measured yet
     auto fwd_ms = [&](int nb) {
         if (t_fwd[nb] > 0) return t_fwd[nb];
@@ -375,11 +428,27 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         int room = std::min(want, p.max_tokens - st.gen_tokens);
         room = std::min(room, b_->n_ctx() - (int)cached_.size() - 2);
         const bool probe = step % 16 == 0;
+        bool long_match = false;
         if (room > 0) {
-            draft_lookup(tok, room, batch);
-            if (adapt && batch.size() > 1 && !probe) {
-                const int k = best_k((int)batch.size() - 1, by_lookup.p(0.5f), 0.0, 0.0);
-                batch.resize(1 + k);
+            const int len = draft_lookup(tok, room, batch);
+            long_match = lookup_ == 2 && len >= 8;
+            if (adapt && batch.size() > 1) {
+                const int n = (int)batch.size() - 1;
+                if (lookup_ < 2) {
+                    if (!probe) batch.resize(1 + best_k(n, by_lookup.p(0.5f), 0.0, 0.0));
+                } else if (long_match) {
+                    // Probed at full width as before: that pass is what
+                    // re-measures the widest batch, and without it one slow
+                    // pass priced it high for good (the engine's replays on
+                    // a busy machine ran 5% behind one estimate).
+                    if (!probe) batch.resize(1 + best_k(n, by_long.p(0.9f), 0.0, 0.0));
+                } else {
+                    // A short match's probe drafts what a chance of 0.6 would,
+                    // not the whole room: replayed, that wrote novel answers 2%
+                    // faster at short context, more deep in a document.
+                    const int k = probe ? std::max(1, best_k(n, 0.6f, 0.0, 0.0)) : best_k(n, by_lookup.p(0.5f), 0.0, 0.0);
+                    batch.resize(1 + k);
+                }
             }
         }
         const bool from_lookup = batch.size() > 1;
@@ -451,7 +520,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
             st.model_accepted += accepted;
         }
         if (nb > 1) {
-            Source &src = from_lookup ? by_lookup : by_drafter;
+            Source &src = !from_lookup ? by_drafter : long_match ? by_long : by_lookup;
             src.kept = 0.9f * src.kept + accepted;
             src.trials = 0.9f * src.trials + accepted + (accepted < nb - 1 ? 1 : 0);
         }
