@@ -235,6 +235,7 @@ size_t add_catalog_entry(const CatalogText &t, CatalogEntry e) {
     a.entry.file = a.text.file.c_str();
     a.entry.commit = a.text.commit.c_str();
     a.entry.sha256 = a.text.sha256.c_str();
+    a.entry.arch = a.text.arch.c_str();
     return kBuiltIn + added.size() - 1;
 }
 
@@ -265,7 +266,9 @@ namespace {
 
 // The downloads asked for and not ended, a line each, so they go on after
 // the title restarts: the entry's fields, tab-separated (a search's entries
-// last only as long as the title, so the whole entry is kept).
+// last only as long as the title, so the whole entry is kept), its
+// architecture last (a line without one, from an older build, reads as
+// none).
 std::string wanted_line(const CatalogEntry &e) {
     char nums[256];
     snprintf(nums, sizeof nums, "%llu\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%llu", (unsigned long long)e.bytes, e.n_vocab,
@@ -274,7 +277,7 @@ std::string wanted_line(const CatalogEntry &e) {
     std::string l = std::to_string((int)e.kind);
     for (const char *f : {e.key, e.name, e.good_for, e.same, e.repo, e.path, e.file, e.commit, e.sha256})
         l += std::string("\t") + (f ? f : "");
-    return l + "\t" + nums + "\n";
+    return l + "\t" + nums + "\t" + (e.arch ? e.arch : "") + "\n";
 }
 
 // The entry a line names; false for a line this build can't read.
@@ -286,7 +289,7 @@ bool wanted_entry(const std::string &line, CatalogText &t, CatalogEntry &e) {
         if (tab == std::string::npos) break;
         i = tab + 1;
     }
-    if (f.size() != 20 || f[1].empty() || f[7].empty()) return false;
+    if ((f.size() != 20 && f.size() != 21) || f[1].empty() || f[7].empty()) return false;
     e = CatalogEntry{};
     const int kind = atoi(f[0].c_str());
     if (kind < CatalogEntry::Model || kind > CatalogEntry::Voice) return false;
@@ -296,6 +299,7 @@ bool wanted_entry(const std::string &line, CatalogText &t, CatalogEntry &e) {
     int *ints[] = {&e.n_vocab, &e.n_embd, &e.n_layer, &e.n_ff, &e.n_head, &e.n_head_kv, &e.head_dim, &e.ctx_train};
     for (int i = 0; i < 8; i++) *ints[i] = atoi(f[11 + i].c_str());
     e.weight_bytes = strtoull(f[19].c_str(), nullptr, 10);
+    if (f.size() == 21) t.arch = f[20];
     return true;
 }
 

@@ -24,14 +24,34 @@ import urllib.request
 import jinja2.ext
 import jinja2.sandbox
 
-TEMPLATES = ["Qwen-Qwen2.5-7B-Instruct", "Qwen-Qwen3-0.6B", "meta-llama-Llama-3.1-8B-Instruct",
+TEMPLATES = ["Qwen-Qwen2.5-7B-Instruct", "Qwen-Qwen3-0.6B", "Qwen3.5-4B", "meta-llama-Llama-3.1-8B-Instruct",
              "meta-llama-Llama-3.2-3B-Instruct", "mistralai-Mistral-Nemo-Instruct-2407"]
+QWEN35 = "Qwen3.5-4B"
 NEMO = "mistralai-Mistral-Nemo-Instruct-2407"
+# DeepSeek R1 distills' earlier template (as in DeepSeek-R1-Distill-Qwen-14B
+# files): the generation prompt doesn't open the thinking, which the model
+# starts without a <think> and ends with </think>. Cut down to its turns.
+R1_OLD = "deepseek-r1-distill-old"
+R1_OLD_TEMPLATE = ("{% for message in messages %}{% if message['role'] == 'user' %}"
+                   "{{'<｜User｜>' + message['content']}}{% elif message['role'] == 'assistant' %}"
+                   "{% set content = message['content'] %}{% if '</think>' in content %}"
+                   "{% set content = content.split('</think>')[-1] %}{% endif %}"
+                   "{{'<｜Assistant｜>' + content + '<｜end▁of▁sentence｜>'}}{% endif %}{% endfor %}"
+                   "{% if add_generation_prompt %}{{'<｜Assistant｜>'}}{% endif %}")
+# Templates llama.cpp doesn't keep, compared when TEMPLATES_DIR has them:
+# Gemma 4's, as its GGUF files carry it (tokenizer.chat_template).
+OPTIONAL = ["google-gemma-4"]
+GEMMA4 = "google-gemma-4"
 
 SEARCH = {"type": "function", "function": {
     "name": "web_search", "description": "Search the web.",
     "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "the query"}},
                    "required": ["query"]}}}
+NOTE = {"type": "function", "function": {
+    "name": "save_note", "description": "Save a note.",
+    "parameters": {"type": "object", "properties": {
+        "title": {"type": "string"}, "body": {"type": "string"}, "pinned": {"type": "boolean"},
+        "tags": {"type": "array", "items": {"type": "string"}}, "due": {"type": ["string", "null"]}}}}}
 WEATHER = {"type": "function", "function": {
     "name": "get_weather", "description": "Weather \"now\" in a city, in °C.",
     "parameters": {"type": "object", "properties": {"city": {"type": "string"}, "days": {"type": "integer"}},
@@ -180,14 +200,15 @@ def with_mistral_ids(messages):
 
 def test_prompts(ts5, model, tdir):
     failed = 0
-    for name in TEMPLATES:
+    for name in TEMPLATES + [n for n in OPTIONAL if os.path.exists(os.path.join(tdir, n + ".jinja"))]:
         path = os.path.join(tdir, name + ".jinja")
         template = as_ts5_writes_it(name, open(path).read())
         for case, messages, tools in CASES:
             if (name, case) in SKIP:
                 continue
-            # ts5's tokenizer adds Mistral's BOS; Llama's is in the prompt.
+            # ts5's tokenizer adds Mistral's and Gemma's BOS; Llama's is in the prompt.
             want = (render(template, with_mistral_ids(messages), tools, bos="") if name == NEMO
+                    else render(template, messages, tools, bos="") if name == GEMMA4
                     else render(template, messages, tools))
             req = json.dumps({"messages": for_ts5(messages), "tools": tools})
             got = subprocess.run([ts5, "prompt", "-m", model, "--chat-template", path], input=req, text=True,
@@ -279,6 +300,11 @@ def test_parser(ts5):
         ("llama3", '{"name": "a", "parameters": {"x": "y', '{"name": "a", "parameters": {"x": "y', [], 0),
         ("llama3", '{"answer": [1, 2', '{"answer": [1, 2', [], 0),
         ("llama3", '{"name": "a", "parameters": {"x": 1}}}', "", [("a", {"x": 1})], 0),
+        # The call inside {"tool_call": ...} (Gemma 3 4B, seen on the console) or {"function_call": ...}.
+        ("gemma", '```json\n{"tool_call": {"name": "add_calendar_event", "arguments": {"title": "x"}}}\n```', "",
+         [("add_calendar_event", {"title": "x"})], 0),
+        ("hermes", '{"function_call": {"name": "a", "arguments": {"n": 1}}}', "", [("a", {"n": 1})], 0),
+        ("hermes", '{"tool_call": "not a call"}', '{"tool_call": "not a call"}', [], 0),
         # Mistral Nemo: [TOOL_CALLS] (one token, printed) and an array, maybe with Mistral's ids.
         ("mistral", '[TOOL_CALLS][{"name": "web_search", "arguments": {"query": "a"}}]', "",
          [("web_search", {"query": "a"})], 0),
@@ -290,6 +316,37 @@ def test_parser(ts5):
          "", [("write_file", {"path": "f.py", "content": 'print("Fizz")'})], 0),
         ("mistral", "[1, 2] are numbers.", "[1, 2] are numbers.", [], 0),
         ("mistral", "Plain answer, [a link](x).", "Plain answer, [a link](x).", [], 26),
+        # Gemma 4: bare keys, strings between <|"|> marks, calls back to back.
+        ("gemma4", '<|tool_call>call:get_weather{city:<|"|>Oslo<|"|>,days:2}<tool_call|>', "",
+         [("get_weather", {"city": "Oslo", "days": 2})], 0),
+        ("gemma4", 'Checking.<|tool_call>call:a{}<tool_call|><|tool_call>call:b{n:2.5,opts:{hourly:true,unit:<|"|>c<|"|>},'
+                   'tags:[<|"|>x, {y}<|"|>,1,null]}<tool_call|>', "Checking.",
+         [("a", {}), ("b", {"n": 2.5, "opts": {"hourly": True, "unit": "c"}, "tags": ["x, {y}", 1, None]})], 9),
+        ("gemma4", '<|tool_call>call:a{"q": "hi", r: Oslo}<tool_call|>', "", [("a", {"q": "hi", "r": "Oslo"})], 0),
+        ("gemma4", "<|tool_call>call:a{q:1}", "", [("a", {"q": 1})], 0),  # cut off by the token limit
+        ("gemma4", '<|tool_call>call:a{q:<|"|>open}<tool_call|>', '<|tool_call>call:a{q:<|"|>open}<tool_call|>', [], 0),
+        ("gemma4", "Plain answer {x: 1}.", "Plain answer {x: 1}.", [], 20),
+        # Qwen3.5: <function=NAME> with <parameter=KEY> elements, each value
+        # typed by the tool's schema (text where it has none).
+        ("hermes", "<tool_call>\n<function=get_weather>\n<parameter=city>\nOslo\n</parameter>\n<parameter=days>\n2\n"
+                   "</parameter>\n</function>\n</tool_call>", "", [("get_weather", {"city": "Oslo", "days": 2})], 0,
+         [json.dumps(WEATHER)]),
+        ("hermes", "<tool_call>\n<function=get_weather>\n<parameter=days>\n2\n</parameter>\n</function>\n</tool_call>", "",
+         [("get_weather", {"days": "2"})], 0),
+        ("hermes", "<think>\nLook it up.\n</think>\n\nLet me check.\n\n<tool_call>\n<function=web_search>\n"
+                   "<parameter=query>\nPS5 firmware 2026\n</parameter>\n</function>\n</tool_call>",
+         "<think>\nLook it up.\n</think>\n\nLet me check.", [("web_search", {"query": "PS5 firmware 2026"})], 45),
+        ("hermes", "<tool_call>\n<function=save_note>\n<parameter=title>\n2026\n</parameter>\n<parameter=body>\nline one\n"
+                   "line two\n</parameter>\n<parameter=pinned>\nTrue\n</parameter>\n<parameter=tags>\n[\"a\", \"b\"]\n"
+                   "</parameter>\n<parameter=due>\nnull\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n"
+                   "<function=web_search>\n<parameter=query>\nx\n</parameter>\n</function>\n</tool_call>", "",
+         [("save_note", {"title": "2026", "body": "line one\nline two", "pinned": True, "tags": ["a", "b"], "due": None}),
+          ("web_search", {"query": "x"})], 0, [json.dumps(NOTE), "web_search"]),
+        # No arguments, no <tool_call> around it; a value whose closing tag is left out.
+        ("hermes", "<function=get_time>\n</function>", "", [("get_time", {})], 0),
+        ("hermes", "<tool_call>\n<function=a>\n<parameter=x>\n1\n<parameter=y>\n2\n</function>\n</tool_call>", "",
+         [("a", {"x": "1", "y": "2"})], 0),
+        ("hermes", "<function=a>\nnot a call\n</function>", "<function=a>\nnot a call\n</function>", [], 0),
     ]
     failed = 0
     for fmt, text, content, calls, prefix, *names in cases:
@@ -382,6 +439,12 @@ def test_search(ts5):
 CALL = '<tool_call>\n{"name": "web_search", "arguments": {"query": "PS5 firmware"}}\n</tool_call>'
 MISTRAL_CALL = '[TOOL_CALLS][{"name": "web_search", "arguments": {"query": "PS5 firmware"}, "id": "a1b2c3d4e"}]'
 MADE_UP = '<tool_call>\n{"name": "say_hello", "arguments": {}}\n</tool_call>'
+# Qwen3.5's turns start inside the thinking its template opens.
+Q35_CALL = ("The user wants the firmware.\n</think>\n\n<tool_call>\n<function=web_search>\n<parameter=query>\n"
+            "PS5 firmware\n</parameter>\n</function>\n</tool_call>")
+Q35_PROMPT = ("<|im_start|>assistant\n<think>\nThe user wants the firmware.\n</think>\n\n<tool_call>\n"
+              "<function=web_search>\n<parameter=query>\nPS5 firmware\n</parameter>\n</function>\n</tool_call>"
+              "<|im_end|>\n<|im_start|>user\n<tool_response>\n")
 
 
 def test_search_loop(ts5, model, tdir):
@@ -405,10 +468,29 @@ def test_search_loop(ts5, model, tdir):
         ("made-up tool", "tvly-test", [MADE_UP, "Hello."], False, 0, "Hello.", "latest PS5 firmware", [WEATHER]),
         ("made-up tool, streaming", "tvly-test", [MADE_UP, "Hello."], True, 0, "Hello.", "latest PS5 firmware",
          [WEATHER]),
+        # Only an empty call block (Qwen 2.5 Coder 14B): the same, one more turn without tools.
+        ("empty call block", "tvly-test", ["<tools> </tools>", "Hello."], False, 0, "Hello.", "latest PS5 firmware",
+         [WEATHER]),
+        ("empty call block, streaming", "tvly-test", ["<tools>\n</tools>", "Hello."], True, 0, "Hello.",
+         "latest PS5 firmware", [WEATHER]),
         # Mistral Nemo: the result goes back under the id the model wrote.
         ("Mistral: answers from a search", "tvly-test", [MISTRAL_CALL, "Done.", "Final answer."], False, 1, "Done.",
          '"call_id": "a1b2c3d4e"}[/TOOL_RESULTS]', None, NEMO),
+        # Qwen3.5: the call after the thinking its template opened, the result
+        # back in a user turn, the answer apart from the thinking.
+        ("Qwen3.5: answers from a search", "tvly-test", [Q35_CALL, "Found it.\n</think>\n\nDone.", "Final answer."],
+         False, 1, "Done.", None, None, QWEN35, Q35_PROMPT),
+        ("Qwen3.5: answers from a search, streaming", "tvly-test",
+         [Q35_CALL, "Found it.\n</think>\n\nDone.", "Final answer."], True, 1, "Done.", None, None, QWEN35, Q35_PROMPT),
+        # DeepSeek R1 with its earlier template: the turn opens the thinking,
+        # so the answer comes without it or a stray </think>.
+        ("DeepSeek R1: thinking kept out of the answer", "tvly-test", ["Codes first.\n</think>\n\nDone."], False, 0,
+         "Done.", None, None, R1_OLD, "<|im_start|>assistant\n<think>\n"),
+        ("DeepSeek R1: thinking kept out of the answer, streaming", "tvly-test", ["Codes first.\n</think>\n\nDone."],
+         True, 0, "Done.", None, None, R1_OLD, "<|im_start|>assistant\n<think>\n"),
     ]
+    with open(os.path.join(tdir, R1_OLD + ".jinja"), "w") as f:
+        f.write(R1_OLD_TEMPLATE)
     for name, key, turns, stream, hits, answer, note, *extra in cases:
         tools = extra[0] if extra else None
         template = os.path.join(tdir, (extra[1] if len(extra) > 1 else "Qwen-Qwen2.5-7B-Instruct") + ".jinja")
@@ -434,6 +516,9 @@ def test_search_loop(ts5, model, tdir):
                        "stream": stream, "max_tokens": 100}
                 if tools:
                     req["tools"] = tools
+                if template.endswith(QWEN35 + ".jinja"):
+                    # 100 tokens would turn its thinking off (kThinkRoom).
+                    req["chat_template_kwargs"] = {"enable_thinking": True}
                 r = urllib.request.urlopen(urllib.request.Request(
                     f"http://127.0.0.1:{port}/v1/chat/completions", json.dumps(req).encode(),
                     {"Content-Type": "application/json"}), timeout=60).read().decode()
@@ -450,6 +535,8 @@ def test_search_loop(ts5, model, tdir):
                 if len(Tavily.seen) - before != hits:
                     problems.append(f"{len(Tavily.seen) - before} requests to Tavily")
                 if note and (note not in last or "<tools>" in last):
+                    problems.append("last prompt:\n" + last)
+                if len(extra) > 2 and (extra[2] not in last or not last.endswith("<|im_start|>assistant\n<think>\n")):
                     problems.append("last prompt:\n" + last)
             finally:
                 p.terminate()

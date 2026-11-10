@@ -1,0 +1,30 @@
+// Qwen3.5's linear layers: the causal convolution over each channel of the
+// Q, K and V projections, then SiLU, in place: for token t, channel c,
+// X[t][c] = silu(sum_j W[c][j] * in[t - (K - 1) + j]), the newest input
+// last; the inputs before the call's first token are the state's
+// S[j][c] (K - 1 of them, the oldest first), which then holds the last
+// K - 1 inputs. A thread per channel walks the tokens in order.
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Xbuf { float X[]; };
+layout(std430, binding = 1) readonly buffer Wbuf { float W[]; };
+layout(std430, binding = 2) buffer Sbuf { float S[]; };
+layout(push_constant) uniform PC { uint channels, taps, n, state_off; } pc;
+
+void main() {
+    const uint c = gl_GlobalInvocationID.x;
+    if (c >= pc.channels) return;
+    const uint K = pc.taps;  // at most 8
+    float w[8], h[8];
+    for (uint j = 0; j < K; j++) w[j] = W[c * K + j];
+    for (uint j = 0; j + 1 < K; j++) h[j] = S[pc.state_off + j * pc.channels + c];
+    for (uint t = 0; t < pc.n; t++) {
+        const float x = X[t * pc.channels + c];
+        float s = w[K - 1] * x;
+        for (uint j = 0; j + 1 < K; j++) s += w[j] * h[j];
+        for (uint j = 0; j + 2 < K; j++) h[j] = h[j + 1];
+        h[K - 2] = x;
+        X[t * pc.channels + c] = s / (1.0 + exp(-s));
+    }
+    for (uint j = 0; j + 1 < K; j++) S[pc.state_off + j * pc.channels + c] = h[j];
+}

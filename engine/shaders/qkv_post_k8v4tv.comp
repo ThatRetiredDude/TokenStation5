@@ -1,0 +1,9 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// qkv_post_k8v4 with Q, K and V turned before the cache of 8-bit K and 4-bit V (kv_turn_v_setting(),
+// see qkv_post.glsl).
+#define KV_Q8
+#define KV_V4
+#define KV_TURN
+#define KV_TURN_V
+#include "qkv_post.glsl"

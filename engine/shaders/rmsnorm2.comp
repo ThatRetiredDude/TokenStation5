@@ -1,0 +1,63 @@
+// Two of Gemma's norms in one pass, one workgroup per token: the norm after
+// a block joins the residual, X[t][:] = (X[t][:] + rmsnorm(H[t][:]) * W1)
+// * mul (mul: Gemma 4's layer_output_scale, 1 elsewhere), and the next
+// block's norm reads the result, Y[t][:] = rmsnorm(X[t][:]) * W2. Saves a
+// dispatch and a read of the residual per block. Y may be H: each thread
+// writes only the values it read. As rmsnorm.comp, each thread keeps its
+// first NPT values in registers; wider rows loop for the rest.
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#define WG 512
+#define NPT 8
+layout(local_size_x = WG) in;
+layout(std430, binding = 0) readonly buffer Hbuf { float H[]; };
+layout(std430, binding = 1) readonly buffer W1buf { float W1[]; };
+layout(std430, binding = 2) buffer Xbuf { float X[]; };
+layout(std430, binding = 3) readonly buffer W2buf { float W2[]; };
+layout(std430, binding = 4) writeonly buffer Ybuf { float Y[]; };
+layout(push_constant) uniform PC { uint n; float eps, mul; } pc;
+shared float red[WG / 4];  // one per subgroup (4 lanes or more)
+
+float sum_all(float s) {
+    s = subgroupAdd(s);
+    barrier();  // the previous sum's readers are done with red
+    if (gl_SubgroupInvocationID == 0) red[gl_SubgroupID] = s;
+    barrier();
+    float total = 0.0;
+    for (uint i = 0; i < gl_NumSubgroups; i++) total += red[i];
+    return total;
+}
+
+void main() {
+    const uint t = gl_WorkGroupID.x, tid = gl_LocalInvocationID.x, b = t * pc.n;
+    float v[NPT];
+    float s = 0.0;
+    for (uint k = 0; k < NPT; k++) {
+        const uint i = tid + k * WG;
+        v[k] = i < pc.n ? H[b + i] : 0.0;
+        s += v[k] * v[k];
+    }
+    for (uint i = tid + NPT * WG; i < pc.n; i += WG) s += H[b + i] * H[b + i];
+    const float scale1 = inversesqrt(sum_all(s) / float(pc.n) + pc.eps);
+    // The new residual, kept in v (and written back for the rest).
+    s = 0.0;
+    for (uint k = 0; k < NPT; k++) {
+        const uint i = tid + k * WG;
+        if (i < pc.n) {
+            v[k] = (X[b + i] + v[k] * scale1 * W1[i]) * pc.mul;
+            X[b + i] = v[k];
+            s += v[k] * v[k];
+        }
+    }
+    for (uint i = tid + NPT * WG; i < pc.n; i += WG) {
+        const float x = (X[b + i] + H[b + i] * scale1 * W1[i]) * pc.mul;
+        X[b + i] = x;
+        s += x * x;
+    }
+    const float scale2 = inversesqrt(sum_all(s) / float(pc.n) + pc.eps);
+    for (uint k = 0; k < NPT; k++) {
+        const uint i = tid + k * WG;
+        if (i < pc.n) Y[b + i] = v[k] * scale2 * W2[i];
+    }
+    for (uint i = tid + NPT * WG; i < pc.n; i += WG) Y[b + i] = X[b + i] * scale2 * W2[i];
+}

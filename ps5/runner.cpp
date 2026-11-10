@@ -12,6 +12,9 @@
 #include <thread>
 
 #include <sys/stat.h>
+#ifdef TS5_LINUX
+#include <dirent.h>
+#endif
 #include <sys/types.h>
 
 #include "backend.h"
@@ -69,6 +72,58 @@ std::string base(const std::string &p) {
     return s == std::string::npos ? p : p.substr(s + 1);
 }
 
+#ifdef TS5_LINUX
+// The helper (draft) model for `path` when TS5_DRAFT_MODEL is unset: the
+// smallest .gguf beside it, at most a quarter of its size, whose token list
+// the engine accepts as a drafter's, control tokens named differently or
+// not. A helper reads all its weights for every draft, so the smallest
+// drafts cheapest, and the measured guesses were as good: on the PS5 Qwen3
+// 0.6B Q4_K_M beats its Q8_0 by 5-7% on Qwen3 8B, and for Coder 7B (whose
+// control tokens differ from it) beats Qwen 2.5 Coder 0.5B Q8_0 by 12% on
+// chat and 11% on code (2.1 ms a draft token against 3.7, about as many
+// kept); DeepSeek R1 Distill Qwen 14B got +8% on code from Qwen3 0.6B and
+// +1% from Coder 0.5B. Gemma 3 1B for Gemma 4 12B. "" if there is none.
+// TS5_DRAFT_MODEL=off turns it off; a path picks that file.
+std::string auto_drafter(const std::string &path) {
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) return "";
+    const uint64_t main_bytes = (uint64_t)st.st_size;
+    const size_t slash = path.find_last_of('/');
+    const std::string dir = slash == std::string::npos ? "." : path.substr(0, slash);
+    std::vector<std::pair<uint64_t, std::string>> cands;
+    if (DIR *d = opendir(dir.c_str())) {
+        while (dirent *e = readdir(d)) {
+            const std::string n = e->d_name;
+            if (n.size() < 6 || n.compare(n.size() - 5, 5, ".gguf") != 0) continue;
+            std::string lower = n;
+            for (char &c : lower) c = (char)tolower((unsigned char)c);
+            if (lower.find("mmproj") != std::string::npos) continue;
+            const std::string f = dir + "/" + n;
+            if (f == path || stat(f.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+            if ((uint64_t)st.st_size * 4 > main_bytes || st.st_size < (64 << 20)) continue;
+            cands.push_back({(uint64_t)st.st_size, f});
+        }
+        closedir(d);
+    }
+    if (cands.empty()) return "";
+    std::sort(cands.begin(), cands.end());
+    ts5::Model m;
+    ts5::Tokenizer t;
+    std::string err, note;
+    try {
+        if (!m.open(path, err) || !t.load(m.gguf, err)) return "";
+    } catch (const std::exception &) { return ""; }
+    for (auto &c : cands) {
+        ts5::Model d;
+        try {
+            if (!d.open(c.second, err)) continue;
+        } catch (const std::exception &) { continue; }
+        if (t.drafter_vocab_ok(d.gguf, err, note)) return c.second;
+    }
+    return "";
+}
+#endif
+
 // What's free once a model is loaded or a job is done, so the log shows whether
 // anything stayed behind: the CPU's flexible memory, and the direct memory the
 // GPU allocates from, all its free runs added up (the largest alone hides what
@@ -121,7 +176,7 @@ struct Runner::Loaded {
     std::string path, file, name;  // name: general.name, else the file name
     int asked_ctx = 0;  // as the job asked: 0 for what fits
     int n_ctx = 0;      // as loaded
-    bool kv8 = false;   // its KV cache is 8-bit
+    ts5::KvType kv = ts5::KvType::F16;  // its KV cache
     ts5::Model model;
     ts5::Model dmodel;  // the draft model, when TS5_DRAFT_MODEL names one
     ts5::Tokenizer tok;
@@ -140,7 +195,9 @@ Runner::~Runner() = default;
 void Runner::push(const Job &job) {
     {
         std::lock_guard<std::mutex> lk(mu_);
-        jobs_.push_back(job);
+        // A setting stepped through several values reloads once, with the last.
+        const bool again = job.reload && !jobs_.empty() && jobs_.back().reload && jobs_.back().path == job.path;
+        if (!again) jobs_.push_back(job);
         status_.queued = (int)jobs_.size();
     }
     version_++;
@@ -230,6 +287,9 @@ void Runner::loop() {
 }
 
 std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx, std::string &err, bool drafter) {
+    // What ts5-tune --models found best for this file (helper, drafts,
+    // prompt math), where Settings and the job's own settings don't say.
+    ts5::apply_model_tune(path);
     auto l = std::make_unique<Loaded>();
     l->path = path;
     l->file = base(path);
@@ -248,39 +308,88 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
     // A draft model must fit beside the main one, so an auto-fit context
     // leaves its budget free: weights and activations plus a 32k f16 cache.
     const char *dp = drafter ? getenv("TS5_DRAFT_MODEL") : nullptr;
+    if (dp && strcmp(dp, "off") == 0) dp = nullptr;
+#ifdef TS5_LINUX
+    std::string auto_dp;
+    if (drafter && (!dp || !*dp)) {
+        auto_dp = auto_drafter(path);
+        if (!auto_dp.empty()) {
+            printf("ts5: helper model for %s: %s (found beside it)\n", base(path).c_str(), base(auto_dp).c_str());
+            dp = auto_dp.c_str();
+        }
+    }
+#endif
+    // A linear layer's state (Qwen3.5) only goes forward: a rejected draft
+    // couldn't be taken back, so no helper.
+    if (dp && *dp && hp.rec_count() > 0) {
+        printf("ts5: helper not used: %s's linear layers keep a state that only goes forward\n", l->file.c_str());
+        dp = nullptr;
+    }
     uint64_t dreserve = 0;
     std::string derr;
-    bool dopen = false;
-    if (dp && *dp) {
+    bool no_room = false;  // the model fits only without the helper's room
+    // The helper's own context: past it, drafting stops and lookup goes on.
+    // At most 32k, or 16k for one found beside the model or tuned for it
+    // (Qwen3 0.6B's f16 cache is 112 KiB a token, 1.8 GiB at 16k). An
+    // auto-fit main context takes all it can first (with TS5_HELPER_ROOM=1
+    // it leaves the helper room for 4k of context: ts5::helper_room); the
+    // helper, opened only then (ts5::helper_room_bytes), takes what is free,
+    // up to that cap, and is skipped if not even 1k fits.
+    int dctx = 32768;
+#ifdef TS5_LINUX
+    if (!auto_dp.empty() || ts5::from_model_tune("TS5_DRAFT_MODEL")) dctx = 16384;
+#endif
+    if (dp && *dp && n_ctx <= 0) {
         try {
-            dopen = l->dmodel.open(dp, derr);
+            dreserve = ts5::helper_room_bytes(dp, derr);
         } catch (const std::exception &e) { derr = e.what(); }
-        if (dopen) {
-            // Everything but the token list, which the vocabulary check in
-            // set_drafter still needs, is dropped before the main load.
-            for (const char *k : {"tokenizer.ggml.scores", "tokenizer.ggml.token_type", "tokenizer.ggml.merges"})
-                l->dmodel.gguf.kv.erase(k);
-            uint64_t dw = 0;
-            for (const auto &t : l->dmodel.gguf.tensors) dw += t.nbytes;
-            dreserve = ts5::vk_fixed_bytes(l->dmodel.hp, dw) +
-                       32768ull * ts5::kv_bytes_per_token(l->dmodel.hp, ts5::KvType::F16);
-        }
     }
     const double t0 = now_s();
     ts5::Backend *b = ts5::make_vk_backend(ctx_, l->model, path, n_ctx, err, dreserve);
+    if (!b && dreserve > 0 && err.rfind("not enough", 0) == 0) {
+        // The model with room for its helper doesn't fit: the model alone.
+        printf("ts5: %s doesn't fit with room for its helper (%s); loading it alone\n", l->file.c_str(), err.c_str());
+        derr = "no room for it beside " + l->file;
+        no_room = true;
+        b = ts5::make_vk_backend(ctx_, l->model, path, n_ctx, err, 0);
+    }
     if (!b) return nullptr;
     l->n_ctx = b->n_ctx();
-    l->kv8 = b->kv_type() == ts5::KvType::Q8;
+    l->kv = b->kv_type();
     printf("ts5: %s backend ready in %.1f s, context %d%s, %s KV cache\n", b->name(), now_s() - t0, l->n_ctx,
-           n_ctx <= 0 ? " (what fits)" : "", l->kv8 ? "8-bit" : "f16");
+           n_ctx <= 0 ? " (what fits)" : "",
+           l->kv == ts5::KvType::Q8     ? "8-bit"
+           : l->kv == ts5::KvType::Q4   ? "4-bit"
+           : l->kv == ts5::KvType::K8V4 ? "8-bit K, 4-bit V"
+                                        : "f16");
     l->engine = std::make_unique<ts5::Engine>(l->model, b, l->tok);
     if (dp && *dp) {
+        bool dopen = false;
+        uint64_t dweights = 0;
+        if (!no_room) {
+            try {
+                dopen = l->dmodel.open(dp, derr);
+            } catch (const std::exception &e) { derr = e.what(); }
+        }
+        if (dopen) {
+            // Everything but the token list, which the vocabulary check in
+            // set_drafter still needs, is dropped: the helper stays open as
+            // long as the model is loaded.
+            for (const char *k : {"tokenizer.ggml.scores", "tokenizer.ggml.token_type", "tokenizer.ggml.merges"})
+                l->dmodel.gguf.kv.erase(k);
+            for (const auto &t : l->dmodel.gguf.tensors) dweights += t.nbytes;
+        }
         ts5::Backend *db = nullptr;
-        if (dopen) db = ts5::make_vk_backend(ctx_, l->dmodel, dp, std::min(l->n_ctx, 32768), derr);
+        const int fits = dopen ? ts5::draft_context(ctx_->free_memory(), l->dmodel.hp, dweights,
+                                                    std::min(l->n_ctx, dctx))
+                               : 0;
+        if (dopen && fits == 0) derr = "not enough GPU memory left for it beside " + l->file;
+        if (dopen && fits > 0) db = ts5::make_vk_backend(ctx_, l->dmodel, dp, fits, derr);
         if (!db || !l->engine->set_drafter(l->dmodel, db, derr))
             printf("ts5: draft model not used: %s\n", derr.c_str());
         else
-            printf("ts5: draft model %s ready\n", base(dp).c_str());
+            printf("ts5: draft model %s ready, context %d%s\n", base(dp).c_str(), db->n_ctx(),
+                   db->n_ctx() < l->n_ctx ? " (past that, a conversation goes on without it)" : "");
         l->dmodel.gguf.kv.erase("tokenizer.ggml.tokens");
     }
     log_memory("after loading " + l->file);
@@ -296,11 +405,11 @@ void Runner::unload() {
     status_.serving.clear();
     status_.serving_path.clear();
     status_.serving_ctx = 0;
-    status_.serving_kv8 = false;
+    status_.serving_kv = ts5::KvType::F16;
 }
 
-bool Runner::serve(const std::string &path, int n_ctx) {
-    if (serving_ && serving_->path == path && serving_->asked_ctx == n_ctx) return true;
+bool Runner::serve(const std::string &path, int n_ctx, bool reload) {
+    if (!reload && serving_ && serving_->path == path && serving_->asked_ctx == n_ctx) return true;
     unload();
     const std::string file = base(path), name = name_for(path);
     {
@@ -326,7 +435,7 @@ bool Runner::serve(const std::string &path, int n_ctx) {
         status_.serving = file;
         status_.serving_path = path;
         status_.serving_ctx = serving_->n_ctx;
-        status_.serving_kv8 = serving_->kv8;
+        status_.serving_kv = serving_->kv;
         status_.phase = Status::Serving;
     }
     // No address while the console isn't on a network: then just "is ready".
@@ -344,7 +453,7 @@ void Runner::run(const Job &job) {
         return;
     }
     if (job.kind == Job::Serve) {
-        serve(job.path, job.n_ctx);
+        serve(job.path, job.n_ctx, job.reload);
         return;
     }
     if (job.kind == Job::Fetch) {
@@ -355,6 +464,7 @@ void Runner::run(const Job &job) {
     // A check or speed test: on the serving model's own backend when it has
     // room, else on a load of its own with the serving model put back after.
     const bool check = job.kind == Job::Check;
+    const ts5::WorkScope work;  // the fan, on Performance
     const int need_ctx = check ? std::max(1, job.n) : job.pp + job.tg + 1;
     const std::string name = name_for(job.path);
     {

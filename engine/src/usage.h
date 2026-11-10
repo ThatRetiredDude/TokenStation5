@@ -3,10 +3,12 @@
 //
 // Line 1 is "# ts5 usage v1", line 2 "#" and the column names, then one line
 // per request, its fields split by tabs, and a "# start <unix> <version>"
-// line at each start. Readers go by the names: they skip columns they don't
-// know and take a missing one as 0 or empty, so a later version can add
-// columns at the end. Numbers are integers (milliseconds rounded); an empty
-// field means none. Never prompt or reply text, request headers or keys.
+// line at each start (in a file begun before, with the names again after it,
+// as the columns may have changed). Readers go by the latest names: they
+// skip columns they don't know and take a missing one as 0 or empty, so a
+// later version can add columns at the end. Numbers are integers
+// (milliseconds rounded); an empty field means none. Never prompt or reply
+// text, request headers or keys.
 #pragma once
 #include <sys/stat.h>
 
@@ -45,6 +47,14 @@ struct UsageRecord {
     // when it was. trimmed: too long, and the TV's Chat page asks again
     // without its oldest turn.
     std::string why;
+    // From the cache (Linux; 0 on the PS5 title), over all rounds: the
+    // prompt's prefix the cache held when the request came, before a sliding
+    // layer's ring or Qwen3.5's state took some back (prompt - prompt_new
+    // short of it was read again for that); the longer prefix a cache an
+    // earlier request cut could give back by forwarding again what was
+    // written over it (0: none); and what TS5_KV_REPAIR forwarded again to
+    // do so.
+    int64_t prompt_shared = 0, prompt_repairable = 0, prompt_repaired = 0;
 };
 
 struct UsageColumn {
@@ -80,15 +90,21 @@ inline constexpr UsageColumn kUsageColumns[] = {
     {"first_ms", nullptr, &UsageRecord::first_ms},
     {"total_ms", nullptr, &UsageRecord::total_ms},
     {"why", &UsageRecord::why, nullptr},
+    {"prompt_shared", nullptr, &UsageRecord::prompt_shared},
+    {"prompt_repairable", nullptr, &UsageRecord::prompt_repairable},
+    {"prompt_repaired", nullptr, &UsageRecord::prompt_repaired},
 };
 constexpr size_t kUsageFields = std::size(kUsageColumns);
 
-// The file's first two lines.
-inline std::string usage_header() {
-    std::string h = "# ts5 usage v1\n#";
+// "#" and the column names.
+inline std::string usage_names() {
+    std::string h = "#";
     for (size_t i = 0; i < kUsageFields; i++) h += (i ? "\t" : "") + std::string(kUsageColumns[i].name);
     return h + "\n";
 }
+
+// The file's first two lines.
+inline std::string usage_header() { return "# ts5 usage v1\n" + usage_names(); }
 
 // A request as a line, newline included. Text loses its tabs and line
 // breaks: each becomes a space.
@@ -192,7 +208,10 @@ public:
         if (!fresh && (uint64_t)st.st_size > max_bytes()) fresh = rename(path_.c_str(), prev_.c_str()) == 0;
         FILE *f = fopen(path_.c_str(), "a");
         if (!f) return false;
+        // A start in a file an older version began says its columns again,
+        // so the lines after it read by this version's names.
         if (fresh) out = usage_header() + out;
+        else if (out.compare(0, 8, "# start ") == 0) out.insert(out.find('\n') + 1, usage_names());
         const bool ok = fwrite(out.data(), 1, out.size(), f) == out.size();
         return fclose(f) == 0 && ok;
     }

@@ -1,0 +1,23 @@
+# Arch package, built by linux/build-arch.sh from the files the .deb has
+# (one build for every distribution: see linux/build-deb.sh).
+pkgname=tokenstation
+pkgver=${TS5_PKGVER:-0.0.0}
+pkgrel=1
+pkgdesc="Your PS5's own AI, on Linux: chat, voice and an OpenAI-style API"
+arch=(x86_64)
+url="https://github.com/ThatRetiredDude/TokenStation5"
+license=(LicenseRef-PolyForm-Small-Business-1.0.0)
+depends=(glibc gcc-libs vulkan-icd-loader sdl2 sudo)
+optdepends=('vulkan-radeon: the AMD GPU driver (the PS5 GPU)' 'libnotify: desktop notifications' 'python: ts5-tune')
+backup=(etc/default/tokenstation etc/sudoers.d/tokenstation)
+install=tokenstation.install
+source=(tokenstation-root.tar.gz)
+noextract=(tokenstation-root.tar.gz)
+sha256sums=(SKIP)
+options=(!strip !debug)
+
+package() {
+    tar -C "$pkgdir" -xzf "$srcdir/tokenstation-root.tar.gz"
+    chmod 0750 "$pkgdir/etc/sudoers.d"
+    chmod 0440 "$pkgdir/etc/sudoers.d/tokenstation"
+}

@@ -1,0 +1,13 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// attn_pf512s_q4 with PF_TRIM: unmasked whole tiles, shuffled sums, and (constant 0 = 1)
+// no ring arithmetic; the same output (see attn_pf.glsl).
+// attn_pf512s over the 4-bit KV cache (see attn_pf512s.comp).
+#define KV_Q8
+#define KV_Q4
+#define HEAD_DIM 512
+#define LANES 16
+#define KEYS 16
+#define NO_PREFETCH
+#define PF_TRIM
+#include "attn_pf.glsl"

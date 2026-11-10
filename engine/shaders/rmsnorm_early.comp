@@ -1,0 +1,52 @@
+// rmsnorm.comp's arithmetic in its order, with every load (x, the norm's
+// weights, and y for add) issued before the first wait. In rmsnorm.comp
+// the loads sit under per-thread ifs, which the compiler (ACO) waits for one
+// at a time, and the weights' loads come after the barrier: on the PS5's
+// GPU a row of 4,096 there waits for memory 15 times one after another (and
+// 3 more for each pass of the loops for the rest of a wider row), here
+// about once. Indices past the row are clamped and their values zeroed
+// before use and never stored, so the sums and the output are rmsnorm.comp's
+// bit for bit (a zero adds 0 to a sum of squares). The weights are volatile
+// only to keep their loads up here (read once a token, they lose nothing by
+// skipping the first-level caches); y is read only for add. NPT, the values
+// a thread, is the row over WG rounded up, at most NMAX: the host takes
+// rmsnorm.comp for rows wider than 8192.
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+#define WG 512
+#define NMAX 16
+layout(local_size_x = WG) in;
+layout(constant_id = 0) const uint NPT = 8;
+layout(std430, binding = 0) readonly buffer Xbuf { float X[]; };
+layout(std430, binding = 1) volatile readonly buffer Wbuf { float W[]; };
+layout(std430, binding = 2) buffer Ybuf { float Y[]; };
+layout(push_constant) uniform PC { uint n, x_row0; float eps; uint add; float mul; } pc;
+shared float red[WG / 4];  // one per subgroup (4 lanes or more)
+
+void main() {
+    const uint t = gl_WorkGroupID.x, tid = gl_LocalInvocationID.x;
+    const uint xb = (pc.x_row0 + t) * pc.n, yb = t * pc.n;
+    float v[NMAX], g[NMAX], a[NMAX];
+    [[unroll]] for (uint k = 0; k < NPT; k++) {
+        const uint i = min(tid + k * WG, pc.n - 1);
+        v[k] = X[xb + i];
+        g[k] = W[i];
+        a[k] = pc.add != 0 ? Y[yb + i] : 0.0;
+    }
+    float s = 0.0;
+    [[unroll]] for (uint k = 0; k < NPT; k++) {
+        if (tid + k * WG >= pc.n) v[k] = 0.0;
+        s += v[k] * v[k];
+    }
+    s = subgroupAdd(s);
+    if (gl_SubgroupInvocationID == 0) red[gl_SubgroupID] = s;
+    barrier();
+    float total = 0.0;
+    for (uint i = 0; i < gl_NumSubgroups; i++) total += red[i];
+    const float scale = inversesqrt(total / float(pc.n) + pc.eps);
+    [[unroll]] for (uint k = 0; k < NPT; k++) {
+        const uint i = tid + k * WG;
+        if (i < pc.n) Y[yb + i] = (v[k] * scale * g[k] + (pc.add != 0 ? a[k] : 0.0)) * pc.mul;
+    }
+}

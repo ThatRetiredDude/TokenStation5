@@ -1,9 +1,9 @@
 // Tool calling (OpenAI "tools" / "tool_calls") in the formats the models were
 // trained on: the Hermes style of Qwen 2.5 and Qwen3, the JSON style of
-// Llama 3.1 and 3.2, and Mistral Nemo's [TOOL_CALLS]. Each is written the way
-// the model's own chat template writes it, so the model sees what it saw in
-// training. Gemma 3, which has no tool format of its own, gets the Hermes one
-// in its own turns.
+// Llama 3.1 and 3.2, Mistral Nemo's [TOOL_CALLS] and Gemma 4's
+// <|tool_call>call:NAME{...}. Each is written the way the model's own chat
+// template writes it, so the model sees what it saw in training. Gemma 3,
+// which has no tool format of its own, gets the Hermes one in its own turns.
 #pragma once
 #include <string>
 #include <vector>
@@ -19,6 +19,7 @@ enum class ToolFormat {
     LLAMA3,  // Llama 3.1/3.2: {"name": ..., "parameters": {...}}, results in the ipython role
     MISTRAL, // Mistral Nemo: [TOOL_CALLS][{"name": ..., "arguments": {...}, "id": ...}], results in [TOOL_RESULTS]
     GEMMA,   // Gemma 3 (no tool format of its own): HERMES's calls and results, in Gemma's turns
+    GEMMA4,  // Gemma 4: <|tool_call>call:NAME{key:value}<tool_call|>, results in the model's own turn
 };
 // Read from the model's chat template.
 ToolFormat tool_format(const Tokenizer &t);
@@ -26,12 +27,14 @@ const char *tool_format_name(ToolFormat f);
 
 struct ToolCall {
     std::string id, name, arguments;  // arguments: a JSON object, as text
+    bool xml = false;  // written as <parameter=KEY> elements: every value text until fit_to_schemas
 };
 
 struct Message {
     std::string role, content;
     std::vector<ToolCall> calls;  // an assistant message's tool calls
     std::string call_id;          // a tool message's tool_call_id
+    std::string name;             // a tool message's name (Gemma 4's results name the function)
 };
 
 // An OpenAI request's "messages".
@@ -58,6 +61,11 @@ struct ParsedTurn {
 };
 ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names = {});
 
+// Whether a finished turn's text (after any thinking) is nothing but an empty
+// call tag pair, such as "<tools> </tools>" (Qwen 2.5 Coder 14B, asked for a
+// poem with tools offered, seen on the console): no call and no answer.
+bool empty_call_block(ToolFormat f, const std::string &content);
+
 // While a turn streams: how many bytes of `text` are surely text for the user,
 // never part of a call (the rest is held until the turn ends).
 size_t content_prefix(ToolFormat f, const std::string &text);
@@ -67,6 +75,18 @@ size_t content_prefix(ToolFormat f, const std::string &text);
 // <think></think>, as the template writes it, and the model answers at once.
 bool can_skip_thinking(const Tokenizer &t);
 extern const char *const kNoThinking;
+extern const char *const kThinkingOpen;  // "<think>\n"
+// What opens the model's turn after render_chat: kNoThinking with thinking
+// off (where the template can skip it), "<think>\n" with it on where the
+// template opens the thinking itself (Qwen3.5), else nothing.
+std::string turn_opening(const Tokenizer &t, bool think);
+
+// Calls whose arguments came as <parameter=KEY> text (Qwen3.5): each value
+// as the tool's schema types it, as vLLM's Qwen3-Coder parser does: a string
+// stays text, a number, boolean, object or list is read as JSON (text if it
+// isn't), a "null" is null where the schema allows it; a key the schema
+// doesn't name stays text.
+void fit_to_schemas(std::vector<ToolCall> &calls, const std::vector<Json> &tools);
 
 // "call_" and 24 random letters and digits, as OpenAI's ids look.
 std::string new_call_id();

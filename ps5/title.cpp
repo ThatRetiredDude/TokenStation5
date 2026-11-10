@@ -106,6 +106,9 @@
 #include "voice.h"
 #include "wg/wg.h"
 #include "ts/tailscale.h"
+#ifdef TS5_LINUX
+#include "hardware.h"
+#endif
 
 #ifndef TS5_VERSION
 #define TS5_VERSION "dev"
@@ -647,7 +650,13 @@ int main(int, char **) {
     // store update leaves in its old folder, come back (keep_models.h).
     // TS5_FTP_PORT: where the console's FTP server is, if not 2121 or 1337.
     const std::vector<std::string> last_version = read_words(kVersionMark);
+#ifdef TS5_LINUX
+    // A package update on Linux leaves the data folder as it is: nothing to
+    // bring back.
+    if (false) {
+#else
     if (last_version.empty() || last_version[0] != TS5_VERSION) {
+#endif
         std::vector<int> ports = {2121, 1337};
         if (int p = atoi(app::setting("TS5_FTP_PORT").c_str()); p > 0) ports.insert(ports.begin(), p);
         const app::BroughtBack b = app::bring_back_models(kModels, TS5_TITLE_ID, ports);
@@ -695,8 +704,16 @@ int main(int, char **) {
     ui::Fonts fonts;
     fonts.load(ts5_font_data, (size_t)(ts5_font_data_end - ts5_font_data));
     ui::Display display;
+#ifdef TS5_LINUX
+    // An SDL window (linux/display.cpp), whatever the Vulkan device offers.
+    bool screen = display.open(ctx, kWidth, kHeight, err);
+    if (!screen) printf("ts5-title: no picture on the TV: %s\n", err.c_str());
+#else
     bool screen = ctx->display && display.open(ctx, kWidth, kHeight, err);
-    if (!screen) printf("ts5-title: no picture on the TV: %s\n", ctx->display ? err.c_str() : "no display on this device");
+    if (!screen)
+        printf("ts5-title: no picture on the TV: %s\n",
+               ctx->display ? err.c_str() : "the GPU offered no display to this title");
+#endif
     ui::Pad pad;
     pad.open();
 
@@ -800,7 +817,7 @@ int main(int, char **) {
     // Which folders the title can write to, and the free space each one's
     // volume reports, to find where models and the rest can live so a store
     // update (which swaps the app's folder) keeps them.
-    for (const char *dir : {TS5_HOME, "/download0", TS5_DATA}) {
+    for (const char *dir : {TS5_HOME, TS5_STORE, TS5_DATA}) {
         struct statvfs vs;
         if (statvfs(dir, &vs) != 0) {
             printf("ts5-title: folder %s: can't read its volume (%s)\n", dir, strerror(errno));
@@ -834,6 +851,13 @@ int main(int, char **) {
         printf("ts5-title: chat: %s by voice (%zu bytes)\n", sent ? "message" : "not sent", text.size());
     });
     app::Speaker speaker(user, kModels);
+#ifdef TS5_LINUX
+    // The PS5's fan, clocks, GPU memory and compute units, on Settings.
+    linuxp::Hardware hardware;
+    hardware.start(notify);
+    // The fan on Performance: full speed while the engine works.
+    ts5::set_work_hook([&hardware](bool busy) { hardware.work(busy); });
+#endif
 
     if (!once.empty()) {
         app::Job j;
@@ -891,6 +915,9 @@ int main(int, char **) {
         s.ts.address = ts_status.address;
         s.ts.account = ts_status.account;
         s.ts.relay = ts_status.relay;
+#ifdef TS5_LINUX
+        s.hw = hardware.info();
+#endif
         s.ts.devices = ts_status.devices;
         for (const wg::PeerState &p : tunnel.tailnet_peers()) s.ts.connected.push_back({p.name, p.address, p.up, p.seen_s, p.from == "direct"});
         if (!v.status.serving.empty()) {
@@ -1274,6 +1301,33 @@ int main(int, char **) {
                 break;
             case ui::Action::Set: {
                 std::string e;
+#ifdef TS5_LINUX
+                // The compute unit test: the served model stops for it (the
+                // test's GPU check loads one of its own) and comes back after.
+                if (a.name == "TS5_PS5_CUTEST") {
+                    const app::Status st = runner.status();
+                    const std::string path = st.serving_path;
+                    if (!path.empty()) {
+                        app::Job j;
+                        j.kind = app::Job::Stop;
+                        runner.push(j);
+                    }
+                    const int n_ctx = opts.n_ctx;
+                    hardware.test(120, [&runner, path, n_ctx] {
+                        if (path.empty()) return;
+                        app::Job j;
+                        j.kind = app::Job::Serve;
+                        j.path = path;
+                        j.n_ctx = n_ctx;
+                        runner.push(j);
+                    });
+                    settings_note.note = "Testing";
+                    settings_note.note_failed = false;
+                    settings_note.note_at = t;
+                    v.settings = settings_view(v);
+                    break;
+                }
+#endif
                 if ((a.name == kRequireKey || a.name == kTailscale) && a.value == "1") {
                     bool any_on = false;
                     for (const app::ApiKey &k : keys.list()) any_on |= k.on;
@@ -1295,7 +1349,25 @@ int main(int, char **) {
                 settings_note.note_at = t;
                 v.settings = settings_view(v);
                 if (ok && a.name == "TS5_WHISPER_MODEL") voice.rescan();
+#ifdef TS5_LINUX
+                if (ok && a.name.rfind("TS5_PS5_", 0) == 0) hardware.apply(a.name, a.value);
+#endif
                 if (ok && a.name == kTailscale) ts_apply();
+                // The served model loads again with a new context cap, KV
+                // cache, prompt math or YaRN (read when a model loads,
+                // vk_backend.cpp and Model::context_cap).
+                if (ok && (a.name == "TS5_CTX_MAX" || a.name == "TS5_KV" || a.name == "TS5_MMB_F16" ||
+                           a.name == "TS5_DRAFT_MODEL" || a.name == "TS5_YARN")) {
+                    const app::Status st = runner.status();
+                    if (!st.serving_path.empty()) {
+                        app::Job j;
+                        j.kind = app::Job::Serve;
+                        j.path = st.serving_path;
+                        j.n_ctx = opts.n_ctx;
+                        j.reload = true;
+                        runner.push(j);
+                    }
+                }
                 break;
             }
             case ui::Action::ChatType:

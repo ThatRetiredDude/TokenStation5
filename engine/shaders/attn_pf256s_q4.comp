@@ -1,0 +1,9 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// attn_pf256s over the 4-bit KV cache (see attn_pf256s.comp).
+#define KV_Q8
+#define KV_Q4
+#define HEAD_DIM 256
+#define LANES 8
+#define KEYS 16
+#include "attn_pf.glsl"

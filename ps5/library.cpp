@@ -50,6 +50,21 @@ bool is_model_file(const std::string &n) {
            n.find("-of-0") == std::string::npos && n[0] != '.' && n.compare(0, 7, "kokoro-") != 0;
 }
 
+// Its cache bytes per token of each type, and the cache TS5_KV asks for, as
+// the Vulkan backend reads it (no 8- or 4-bit cache for heads that aren't a
+// multiple of 32 wide).
+void set_kv(ModelInfo &m, const ts5::HParams &hp) {
+    for (ts5::KvType t : {ts5::KvType::F32, ts5::KvType::F16, ts5::KvType::Q8, ts5::KvType::Q4, ts5::KvType::K8V4})
+        m.kv_bytes[(int)t] = ts5::kv_bytes_per_token(hp, t);
+    bool automatic = false;
+    m.kv = ts5::kv_type_setting(&automatic);
+    const bool quant_ok = hp.head_dim % 32 == 0;
+    if (!quant_ok) m.kv = ts5::KvType::F16;
+    m.kv_auto = automatic && quant_ok;
+    m.head_dim = hp.head_dim;
+    m.head_dim_swa = hp.head_dim_swa;
+}
+
 ModelInfo inspect(const std::string &path, const std::string &file, uint64_t size, int64_t mtime) {
     ModelInfo m;
     m.path = path;
@@ -88,10 +103,10 @@ ModelInfo inspect(const std::string &path, const std::string &file, uint64_t siz
     const ts5::HParams &hp = model.hp;
     m.layers = hp.n_layer;
     m.ctx_train = hp.n_ctx_train;
+    m.yarn_orig = hp.yarn_orig;
+    m.yarn_max = hp.yarn_max;
     m.weight_bytes = model.data_bytes();
-    m.kv_bytes[0] = ts5::kv_bytes_per_token(hp, ts5::KvType::F16);
-    m.kv_bytes[1] = ts5::kv_bytes_per_token(hp, ts5::KvType::Q8);
-    m.kv8 = ts5::kv_type_setting() == ts5::KvType::Q8 && hp.head_dim % 32 == 0;
+    set_kv(m, hp);
     m.fixed_bytes = ts5::vk_fixed_bytes(hp, m.weight_bytes);
     m.full_size = g.data_offset + m.weight_bytes;
     if (m.full_size > size) {
@@ -126,6 +141,7 @@ ModelInfo estimate(const CatalogEntry &e) {
     m.file = e.file;
     m.name = e.name;
     m.size = e.bytes;
+    m.arch = e.arch ? e.arch : "";
     ts5::HParams hp;
     hp.n_vocab = e.n_vocab;
     hp.n_embd = e.n_embd;
@@ -138,19 +154,24 @@ ModelInfo estimate(const CatalogEntry &e) {
     m.layers = hp.n_layer;
     m.ctx_train = hp.n_ctx_train;
     m.weight_bytes = e.weight_bytes;
-    m.kv_bytes[0] = ts5::kv_bytes_per_token(hp, ts5::KvType::F16);
-    m.kv_bytes[1] = ts5::kv_bytes_per_token(hp, ts5::KvType::Q8);
-    m.kv8 = ts5::kv_type_setting() == ts5::KvType::Q8 && hp.head_dim % 32 == 0;
+    set_kv(m, hp);
     m.fixed_bytes = ts5::vk_fixed_bytes(hp, m.weight_bytes);
     return m;
 }
 
 ModelInfo::Ctx ModelInfo::serve_ctx(int asked, uint64_t gpu_memory) const {
-    if (asked > 0) return {asked, kv8};
-    const int train = ctx_train > 0 ? ctx_train : 32768;
-    const int f16 = ts5::fit_context(gpu_memory, fixed_bytes, kv_bytes[0], train);
-    if (!kv8 || ts5::f16_reaches(f16, train)) return {f16, false};
-    return {ts5::fit_context(gpu_memory, fixed_bytes, kv_bytes[1], train), true};
+    if (asked > 0) return {asked, kv};
+    ts5::HParams hp;
+    hp.arch = arch;
+    hp.n_ctx_train = ctx_train;
+    hp.yarn_orig = yarn_orig;
+    hp.yarn_max = yarn_max;
+    hp.head_dim = head_dim;
+    hp.head_dim_swa = head_dim_swa;
+    const int train = ts5::auto_context_cap(hp);
+    auto fit = [&](ts5::KvType t) { return ts5::fit_context(gpu_memory, fixed_bytes, kv_bytes[(int)t], train); };
+    const ts5::KvType t = ts5::auto_kv_type(hp, kv, kv_auto, train, fit);
+    return {fit(t), t};
 }
 
 Library::Library(std::vector<std::string> dirs, std::string results_path)

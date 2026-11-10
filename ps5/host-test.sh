@@ -101,7 +101,7 @@ for p in "${pids[@]}"; do wait "$p"; done
 c++ -std=c++17 -O2 -Wall -pthread -DTS5_PS5=1 -DTS5_VULKAN=1 "-DTS5_DATA=\"$data\"" "-DTS5_HOME=\"$home\"" "-DTS5_STORE=\"$work/download0\"" \
     -I "$root/engine/src" -I "$root/ps5" -I "$root/ps5/ui" -I "$work/shaders" -I "$w/include" -I "$w/ggml/include" \
     -I "$k/include" -I "$root/third_party/qrcodegen" \
-    "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,tokenizer,engine,server,checks,tools,known_good,net,websearch,log}.cpp \
+    "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backend,peak,tokenizer,engine,server,checks,tools,known_good,net,websearch,log}.cpp \
     "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup,local_time,keep_models,host_shim}.cpp "$root"/third_party/qrcodegen/qrcodegen.cpp \
     "$root"/ps5/ui/{canvas,display,pad,dashboard,chat_page,settings_page,home_page,logs_page}.cpp "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp \
     -x assembler-with-cpp -Wa,-I"$root/ps5/ui" "$root/ps5/ui/font_data.S" -Wa,-I"$root/ps5/tts" "$root/ps5/tts/lexicon_data.S" \
@@ -397,12 +397,12 @@ if [ -n "${TS5_TEST_KOKORO_MODEL:-}" ] && [ -n "${TS5_TEST_KOKORO_VOICE:-}" ]; t
     echo "== spoken replies off in Settings: Kokoro is unloaded at once, and loaded again when they're back on"
     loads=$(grep -cE "^ts5-title: speak: kokoro-test.gguf with the voice test, loaded in [0-9]+ ms$" "$home/ts5.log")
     press l1
-    press down down down down down down down  # Read replies aloud, under Voice
+    press down down down down down down down down down  # Read replies aloud, under Voice
     press right
     wait_log "^ts5-title: speak: replies aren't read aloud, so Kokoro is unloaded$"
     press square
     wait_lines "^ts5-title: speak: kokoro-test.gguf with the voice test, loaded in [0-9]+ ms$" $((loads + 1)) 60
-    press up up up up up up up
+    press up up up up up up up up up
     press circle
     press l1
     rm "$home/models/kokoro-test.gguf" "$home/models/kokoro-voice-test.gguf"
@@ -412,7 +412,7 @@ fi
 echo "== settings: L1 again goes to Settings; right changes a setting in ts5.env, square puts back its default"
 press l1
 shot settings
-press down down down down down down down down down down down down down  # Frames while a reply comes in, under Tuning
+press down down down down down down down down down down down down down down down down  # Frames while a reply comes in, under Tuning
 press right
 wait_log "^ts5-title: settings: TS5_CHAT_FPS=15$"
 grep -qx "TS5_CHAT_FPS=15" "$home/ts5.env" || fail "ts5.env: $(cat "$home/ts5.env" 2> /dev/null)"
@@ -421,7 +421,7 @@ press square
 wait_log "^ts5-title: settings: TS5_CHAT_FPS cleared$"
 ! grep -q "TS5_CHAT_FPS" "$home/ts5.env" || fail "square left it in ts5.env: $(cat "$home/ts5.env")"
 echo "== settings: cross on the Tavily key opens the keyboard; the key goes in ts5.env, never the log"
-press up up up up up up up up  # Web search key, under Chat
+press up up up up up up up up up up up  # Web search key, under Chat
 press cross
 wait_log "^ts5-title: keyboard: open 0x00000000, user 0x00000001, a key$"
 printf 'tvly-typed-on-the-tv' > "$home/typed"

@@ -1,0 +1,4 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// A verify batch (2..8 tokens) of a Q5_0 matrix (see mvt_q5_0.glsl).
+#include "mvt_q5_0.glsl"

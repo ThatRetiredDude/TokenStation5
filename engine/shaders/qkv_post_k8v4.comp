@@ -1,0 +1,6 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Q/K/V after the projections, into a KV cache of 8-bit K and 4-bit V (see qkv_post.glsl).
+#define KV_Q8
+#define KV_V4
+#include "qkv_post.glsl"

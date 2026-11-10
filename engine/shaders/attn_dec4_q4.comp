@@ -1,0 +1,7 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Generation attention over a long 4-bit cache, up to 4 rows (see attn_dec.glsl).
+#define KV_Q8
+#define KV_Q4
+#define RM 4
+#include "attn_dec.glsl"

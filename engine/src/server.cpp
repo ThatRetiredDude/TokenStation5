@@ -51,6 +51,25 @@ bool send_all(int fd, const std::string &s) {
     return true;
 }
 
+// The client closed its end or reset it: a peek finds the end of the
+// stream, or fails for another reason than no data yet.
+static bool peer_gone(int fd) {
+    char c;
+    const ssize_t n = recv(fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+    return n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR);
+}
+
+// TS5_STOP_GONE=1 (Linux, off until measured on the PS5): a request whose
+// client has left is not run, or stops between prompt chunks.
+static bool stop_gone_wanted() {
+#ifdef TS5_PS5
+    return false;
+#else
+    const char *e = getenv("TS5_STOP_GONE");
+    return e && atoi(e) != 0;
+#endif
+}
+
 bool read_request(int fd, Request &r) {
     std::string buf;
     char tmp[16384];
@@ -180,10 +199,12 @@ std::string settings_source(const KnownMatch &k) {
 // set, and where that comes from: known_good says whose checks they are
 // ("file": this file's, "model": this model's in another file, "family": a
 // model of its family's), with that check's day and count.
-std::string settings_json(const KnownMatch &k, const SampleParams &sp) {
+std::string settings_json(const KnownMatch &k, const SampleParams &sp, bool think) {
     char b[96];
     snprintf(b, sizeof b, "{\"temperature\":%.3g,\"top_p\":%.3g,\"top_k\":%d", sp.temperature, sp.top_p, sp.top_k);
     std::string j = b;
+    // Only for a model whose template can skip its thinking.
+    if (k && k.row->thinking >= 0) j += std::string(",\"thinking\":") + (think ? "true" : "false");
     j += ",\"known_good\":";
     j += !k ? "\"none\"" : k.how == KnownMatch::File ? "\"file\"" : k.how == KnownMatch::Model ? "\"model\"" : "\"family\"";
     if (k)
@@ -221,7 +242,10 @@ std::string timings_json(const GenStats &st) {
              st.prompt_evaluated, st.prompt_ms, st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0,
              st.gen_tokens, st.gen_ms, st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0,
              st.prompt_tokens - st.prompt_evaluated, st.drafted, st.draft_accepted);
-    return b;
+    std::string s = b;
+    // TS5_KV_REPAIR: what was forwarded again to keep cache_n.
+    if (st.prompt_repaired) s.insert(s.size() - 1, ",\"repaired_n\":" + std::to_string(st.prompt_repaired));
+    return s;
 }
 
 std::string usage_json(const GenStats &st) {
@@ -283,9 +307,19 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                     r.path == "/chat/completions" || r.path == "/completions");
     u.pending = completions;  // the only requests recorded
     if (r.method == "OPTIONS") {
-        send_all(fd, "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n"
-                     "Access-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-                     "Connection: close\r\n\r\n");
+        // How long a browser may keep this answer. On the console the web
+        // apps are on other devices and the answer can't change while the
+        // title runs: 2 hours. On a computer a web app on the same desktop
+        // may come and go with a new build of the app: 10 minutes.
+#ifdef TS5_PS5
+        static const char kPreflightAge[] = "7200";
+#else
+        static const char kPreflightAge[] = "600";
+#endif
+        send_all(fd, std::string("HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\n"
+                                 "Access-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                                 "Access-Control-Max-Age: ") +
+                         kPreflightAge + "\r\nConnection: close\r\n\r\n");
         close(fd);
         return;
     }
@@ -350,6 +384,7 @@ void handle(int fd, Server::State &state, Usage &u) {
         int n_ctx;
         KnownMatch known;
         SampleParams sampling;
+        bool think;
         {
             std::lock_guard<std::mutex> g(state.stats);
             model = state.model;
@@ -357,6 +392,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             n_ctx = state.n_ctx;
             known = state.known;
             sampling = state.sampling;
+            think = state.think;
         }
         // capabilities: whether the model takes OpenAI tools, and whether ts5
         // runs web searches for it (a Tavily key is set).
@@ -374,7 +410,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                             ",\"tool_format\":" + json_escape(tools) +
                                                             ",\"web_search\":" +
                                                             (can && !tavily_key().empty() ? "true" : "false") + "}" +
-                                                            ",\"settings\":" + settings_json(known, sampling) + "}") +
+                                                            ",\"settings\":" + settings_json(known, sampling, think) + "}") +
                                        "]}"));
     } else if (completions) {
         const bool chat = r.path.find("chat") != std::string::npos;
@@ -430,16 +466,24 @@ void handle(int fd, Server::State &state, Usage &u) {
         // {"enable_thinking": false}, or at the top level), "reasoning_effort":
         // "none", or a reply capped under kThinkRoom (an app naming a chat or
         // finishing a line), where the thinking would use up the limit and
-        // leave the answer empty.
+        // leave the answer empty. A request that says nothing gets the
+        // model's known-good choice (known-good.tsv's thinking).
         std::string opening;  // what opens the model's turn
-        if (chat && can_skip_thinking(e.tok())) {
-            const Json &kw = req["chat_template_kwargs"]["enable_thinking"];
-            const Json &asked = kw.type == Json::BOOL ? kw : req["enable_thinking"];
-            const bool think = asked.type == Json::BOOL            ? asked.boolean(true)
-                               : req["reasoning_effort"].str() == "none" ? false
-                                                                         : !(limit >= 1 && limit < kThinkRoom);
-            if (!think) opening = kNoThinking;
+        if (chat) {
+            bool think = true;
+            if (can_skip_thinking(e.tok())) {
+                const Json &kw = req["chat_template_kwargs"]["enable_thinking"];
+                const Json &asked = kw.type == Json::BOOL ? kw : req["enable_thinking"];
+                think = asked.type == Json::BOOL                    ? asked.boolean(true)
+                        : req["reasoning_effort"].str() == "none" ? false
+                        : limit >= 1 && limit < kThinkRoom        ? false
+                                                                  : state.think;
+            }
+            opening = turn_opening(e.tok(), think);
         }
+        // A turn that opens in its thinking (Qwen3.5) reads as if the model
+        // had written the <think> itself: its text starts with it.
+        const std::string seed = opening == kThinkingOpen ? opening : std::string();
         if (chat) {
             msgs = parse_messages(req["messages"]);
             if (tf != ToolFormat::NONE && req["tool_choice"].str() != "none") {
@@ -492,6 +536,18 @@ void handle(int fd, Server::State &state, Usage &u) {
             done();
             return;
         }
+        // Gone while it waited for the engine: nothing to run it for.
+        const bool stop_gone = stop_gone_wanted();
+        if (stop_gone && peer_gone(fd)) {
+            u.rec.finish = "left";
+            u.rec.prompt = (int64_t)first_toks.size();
+            log_line("ts5: %s left while its request waited, not run (%zu prompt tokens)", u.rec.client.c_str(),
+                     first_toks.size());
+            done();
+            return;
+        }
+        std::function<bool()> gone;
+        if (stop_gone) gone = [fd] { return peer_gone(fd); };
         bool use_tools = !tools.empty();  // off for a last turn that must answer
         SampleParams sp;
         sp.temperature = (float)req["temperature"].num(state.sampling.temperature);
@@ -579,7 +635,7 @@ void handle(int fd, Server::State &state, Usage &u) {
         // searches and lets it go on, so one request can be several turns.
         for (int round = 0;; round++) {
             const std::vector<int32_t> toks = round == 0 ? std::move(first_toks) : encode();
-            std::string text;
+            std::string text = seed;
             size_t sent = 0;  // bytes of this turn's `text` already streamed
             size_t thought = 0;  // and of its thinking, as reasoning_content
             {
@@ -681,17 +737,24 @@ void handle(int fd, Server::State &state, Usage &u) {
                 turn.gen_tokens = 1;
                 turn.finish = "stop";
             } else {
-                ok = e.generate(toks, sp, on_text, turn, err);
+                ok = e.generate(toks, sp, on_text, turn, err, gone);
+                if (ok && turn.finish == "left") client_ok = false;
                 if (!ok) u.rec.why = (int)toks.size() + 1 > e.backend().n_ctx() ? "too_long" : "gpu_error";
             }
             count();  // what on_text didn't see: the test turns, a turn with no text
             st.prompt_tokens += turn.prompt_tokens;
             st.prompt_evaluated += turn.prompt_evaluated;
+            st.prompt_repaired += turn.prompt_repaired;
+            st.prompt_shared += turn.prompt_shared;
+            st.prompt_repairable += turn.prompt_repairable;
             st.prompt_ms += turn.prompt_ms;
             st.gen_tokens += turn.gen_tokens;
             st.gen_ms += turn.gen_ms;
             st.drafted += turn.drafted;
             st.draft_accepted += turn.draft_accepted;
+            st.model_drafted += turn.model_drafted;
+            st.model_accepted += turn.model_accepted;
+            st.has_drafter |= turn.has_drafter;
             st.sample_ms += turn.sample_ms;
             st.finish = stopped ? "stop" : turn.finish;
             // The turn's answer, its thinking aside (split_think).
@@ -708,6 +771,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             std::vector<std::string> names;
             for (const Json &t : tools) names.push_back(t["function"]["name"].str());
             ParsedTurn pt = parse_turn(tf, text, names);
+            fit_to_schemas(pt.calls, tools);
             // A call to a tool the request doesn't have is the model making
             // one up (say_hello for "Say hello in one word.", math.multiply
             // for "What is 7 times 6?", seen on the console): no tool fits,
@@ -723,6 +787,10 @@ void handle(int fd, Server::State &state, Usage &u) {
                     break;
                 }
             }
+            // A turn that is only an empty call block ("<tools> </tools>",
+            // Qwen 2.5 Coder 14B asked for a poem, seen on the console) has
+            // neither a call nor an answer: the same as a made-up tool.
+            if (made_up.empty() && pt.calls.empty() && empty_call_block(tf, text)) made_up = "(empty call)";
             if (!made_up.empty()) {
                 if (!answered_without_tools && open == std::string::npos && sent <= answer && !stopped &&
                     st.gen_tokens < max_tokens) {
@@ -788,7 +856,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                 }
                 log_line("ts5: %s %s", id.c_str(), log.c_str());
             }
-            prompt += text + render_results(tf, searches, results) + opening;
+            prompt += text.substr(seed.size()) + render_results(tf, searches, results) + opening;
         }
         {
             std::lock_guard<std::mutex> g(state.stats);
@@ -832,11 +900,10 @@ void handle(int fd, Server::State &state, Usage &u) {
             body += ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st) + "}";
             client_ok &= send_all(fd, response(200, body));
         }
-        log_line("ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, draft %d/%d, sample %.0f ms",
+        log_line("ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, %s, sample %.0f ms",
                 id.c_str(), st.prompt_tokens, st.prompt_evaluated,
                 st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0, st.gen_tokens,
-                st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0, st.draft_accepted, st.drafted,
-                st.sample_ms);
+                st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0, draft_summary(st).c_str(), st.sample_ms);
         // With TS5_PROFILE set (take_profile is empty otherwise): the CPU's
         // time per call and, with TS5_PROFILE=1, the per-kernel GPU table for
         // this request, in serve mode as everywhere else.
@@ -847,6 +914,9 @@ void handle(int fd, Server::State &state, Usage &u) {
         ur.finish = !ok ? "error" : !client_ok ? "left" : st.finish;
         ur.prompt = st.prompt_tokens;
         ur.prompt_new = st.prompt_evaluated;
+        ur.prompt_shared = st.prompt_shared;
+        ur.prompt_repairable = st.prompt_repairable;
+        ur.prompt_repaired = st.prompt_repaired;
         ur.prompt_ms = std::lround(st.prompt_ms);
         ur.gen = st.gen_tokens;
         ur.gen_ms = std::lround(st.gen_ms);
@@ -859,7 +929,16 @@ void handle(int fd, Server::State &state, Usage &u) {
         done();
         return;
     } else {
-        send_all(fd, response(404, error_body("not found: " + r.path)));
+        // Where the API is, for someone trying addresses by hand.
+#ifdef TS5_PS5
+        send_all(fd, response(404, error_body("not found: " + r.path +
+                                              " (the API is under /v1: GET /v1/models on the console's address "
+                                              "lists what's loaded)")));
+#else
+        send_all(fd, response(404, error_body("not found: " + r.path +
+                                              " (the API is under /v1: GET /v1/models lists what's loaded "
+                                              "on this computer)")));
+#endif
     }
     close(fd);
     u.closed = true;
@@ -918,6 +997,7 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
     state_.n_ctx = e ? e->backend().n_ctx() : 0;
     state_.known = {};
     state_.sampling = SampleParams{};
+    state_.think = true;
     if (e) {
         const Gguf &g = e->model().gguf;
         struct stat st {};
@@ -927,6 +1007,7 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
             state_.sampling.temperature = k->temperature;
             state_.sampling.top_p = k->top_p;
             state_.sampling.top_k = k->top_k;
+            if (k->thinking >= 0) state_.think = k->thinking != 0;
         }
         log_line("ts5: settings: %s (temperature %.2g, top_p %.2g, top_k %d)", settings_source(state_.known).c_str(),
                  state_.sampling.temperature, state_.sampling.top_p, state_.sampling.top_k);

@@ -1,0 +1,6 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Generation attention over a long 8-bit cache, heads of 64 (Qwen 2.5 0.5B), in as many rows as constant RM (see attn_dec.glsl).
+#define KV_Q8
+#define HEAD_DIM 64
+#include "attn_dec.glsl"

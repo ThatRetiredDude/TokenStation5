@@ -1,7 +1,9 @@
 #include "tokenizer.h"
+#include "unicode_table.h"
 
 #include <algorithm>
 #include <climits>
+#include <iterator>
 #include <cstdio>
 #include <queue>
 
@@ -38,29 +40,25 @@ bool is_space(uint32_t c) {
            c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F ||
            c == 0x205F || c == 0x3000;
 }
-bool is_digit(uint32_t c) {
-    return (c >= '0' && c <= '9') || (c >= 0x660 && c <= 0x669) || (c >= 0xFF10 && c <= 0xFF19);
+// Unicode's class of c: 1 a letter (\p{L}), 2 a mark (\p{M}), 3 a number
+// (\p{N}), 0 none of these.
+int unicode_kind(uint32_t c) {
+    if (c < 0x80) return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ? 1 : c >= '0' && c <= '9' ? 3 : 0;
+    const UnicodeRange *r = std::upper_bound(std::begin(kUnicodeRanges), std::end(kUnicodeRanges), c,
+                                             [](uint32_t v, const UnicodeRange &u) { return v < u.lo; });
+    return r != std::begin(kUnicodeRanges) && c <= r[-1].hi ? r[-1].kind : 0;
 }
-// Approximation of \p{L}: ASCII letters exactly; outside ASCII, anything that
-// is not a space, digit or a common punctuation/symbol block.
-bool is_letter(uint32_t c) {
-    if (c < 0x80) return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-    if (is_space(c) || is_digit(c)) return false;
-    if (c >= 0xA1 && c <= 0xBF && c != 0xAA && c != 0xB5 && c != 0xBA) return false;
-    if (c == 0xD7 || c == 0xF7) return false;
-    if (c >= 0x2000 && c <= 0x2BFF) return false;  // punctuation, symbols, arrows, math
-    if (c >= 0x3000 && c <= 0x303F) return false;  // CJK punctuation
-    if (c >= 0xFF00 && c <= 0xFF0F) return false;
-    if (c >= 0xFF1A && c <= 0xFF20) return false;
-    if (c >= 0x1F000) return false;                // emoji
-    if (c >= 0xE000 && c <= 0xF8FF) return false;  // private use
-    return true;
-}
+bool is_digit(uint32_t c) { return unicode_kind(c) == 3; }
 
 // Splits text the way the Llama 3 / Qwen2 pre-tokenizer regex does:
 // (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
-// Qwen2 uses \p{N} single digits; Llama 3 groups up to three.
-std::vector<std::string> pretokenize(const std::string &s, int digits) {
+// Qwen2 uses \p{N} single digits; Llama 3 groups up to three. With marks
+// (Qwen3.5, Tekken) a word is [\p{L}\p{M}]+, and marks aren't symbols.
+std::vector<std::string> pretokenize(const std::string &s, int digits, bool marks) {
+    auto is_letter = [marks](uint32_t c) {
+        const int k = unicode_kind(c);
+        return k == 1 || (marks && k == 2);
+    };
     std::vector<uint32_t> cp;
     std::vector<size_t> off;
     for (size_t i = 0; i < s.size();) {
@@ -141,6 +139,7 @@ bool Tokenizer::load(const Gguf &g, std::string &err) {
     std::string model = g.get_str("tokenizer.ggml.model");
     if (model == "gpt2") kind_ = BPE;
     else if (model == "llama") kind_ = SPM;
+    else if (model == "gemma4") kind_ = SPM_BPE;
     else { err = "tokenizer '" + model + "' is not supported"; return false; }
     const GgufArray *toks = g.get_arr("tokenizer.ggml.tokens");
     if (!toks) { err = "no tokenizer.ggml.tokens"; return false; }
@@ -161,8 +160,10 @@ bool Tokenizer::load(const Gguf &g, std::string &err) {
     // Default BOS behaviour per tokenizer, as llama.cpp has it.
     bool bos_default = kind_ == SPM || pre == "llama3" || pre == "llama-bpe" || pre == "tekken";
     add_bos_ = g.get_int("tokenizer.ggml.add_bos_token", bos_default) != 0;
+    if (kind_ == SPM_BPE) add_bos_ = true;  // as llama.cpp: its files say so, and the model needs it
     digits_ = (pre == "llama3" || pre == "llama-bpe" || pre == "smaug-bpe") ? 3 : 1;
     ignore_merges_ = pre == "llama3" || pre == "llama-bpe" || pre == "tekken";
+    marks_ = pre == "qwen35" || pre == "tekken";
     // Control (3) and user-defined (4) tokens are matched verbatim in text.
     for (size_t i = 0; i < tokens_.size() && i < types_.size(); i++)
         if (types_[i] == 3 || types_[i] == 4) specials_.push_back({tokens_[i], (int32_t)i});
@@ -172,7 +173,8 @@ bool Tokenizer::load(const Gguf &g, std::string &err) {
     for (size_t i = 0; i < specials_.size(); i++)
         if (!specials_[i].first.empty()) by_byte_[(unsigned char)specials_[i].first[0]].push_back((int)i);
     if (eos_ >= 0) eog_.push_back(eos_);
-    for (const char *s : {"<|im_end|>", "<|eot_id|>", "<|eom_id|>", "<|endoftext|>", "<|end|>", "</s>", "<end_of_turn>"}) {
+    for (const char *s : {"<|im_end|>", "<|eot_id|>", "<|eom_id|>", "<|endoftext|>", "<|end|>", "</s>", "<end_of_turn>",
+                          "<turn|>", "<|tool_response>"}) {
         auto it = id_.find(s);
         if (it != id_.end() && std::find(eog_.begin(), eog_.end(), it->second) == eog_.end()) eog_.push_back(it->second);
     }
@@ -193,6 +195,7 @@ void Tokenizer::set_chat_template(const std::string &tmpl) {
     else if (tmpl.find("<|start_header_id|>") != std::string::npos) chat_ = LLAMA3;
     else if (tmpl.find("[INST]") != std::string::npos) chat_ = MISTRAL;
     else if (tmpl.find("<start_of_turn>") != std::string::npos) chat_ = GEMMA;
+    else if (tmpl.find("<|turn>") != std::string::npos) chat_ = GEMMA4;
     else if (id_.count("<|im_start|>")) chat_ = CHATML;
     else chat_ = PLAIN;
 }
@@ -292,9 +295,83 @@ void Tokenizer::encode_spm(const std::string &text, std::vector<int32_t> &out) c
     }
 }
 
+// Gemma 4's: the text with spaces as U+2581 (no prefix), split into runs of
+// newlines (a token where the whole run is one) and runs of everything else,
+// each merged by rank over its code points.
+void Tokenizer::encode_gemma4(const std::string &text, std::vector<int32_t> &out) const {
+    std::string t;
+    for (char c : text) t += c == ' ' ? std::string("\xE2\x96\x81") : std::string(1, c);
+    for (size_t i = 0; i < t.size();) {
+        const bool nl = t[i] == '\n';
+        size_t j = i;
+        while (j < t.size() && (t[j] == '\n') == nl) j++;
+        const std::string run = t.substr(i, j - i);
+        auto it = nl ? id_.find(run) : id_.end();
+        if (it != id_.end()) out.push_back(it->second);
+        else merge_ranked(run, out);
+        i = j;
+    }
+}
+
+// BPE by merge rank over t's code points, from a queue (the lowest rank
+// first, the leftmost of equals), as llama.cpp merges; leftovers not in the
+// vocabulary become byte tokens (<0xXX>).
+void Tokenizer::merge_ranked(const std::string &t, std::vector<int32_t> &out) const {
+    if (t.empty()) return;
+    struct Sym { size_t at, n; int prev, next; };
+    std::vector<Sym> sym;
+    for (size_t i = 0; i < t.size();) {
+        size_t j = i;
+        next_cp(t, j);
+        sym.push_back({i, j - i, (int)sym.size() - 1, (int)sym.size() + 1});
+        i = j;
+    }
+    sym.back().next = -1;
+    struct Pair {
+        int left, right, rank;
+        size_t n;
+        bool operator<(const Pair &o) const { return rank > o.rank || (rank == o.rank && left > o.left); }
+    };
+    std::priority_queue<Pair> q;
+    auto add = [&](int l, int r) {
+        if (l < 0 || r < 0) return;
+        auto it = merge_rank_.find(t.substr(sym[l].at, sym[l].n) + " " + t.substr(sym[r].at, sym[r].n));
+        if (it == merge_rank_.end()) return;
+        q.push({l, r, it->second, sym[l].n + sym[r].n});
+    };
+    for (int i = 1; i < (int)sym.size(); i++) add(i - 1, i);
+    while (!q.empty()) {
+        const Pair p = q.top();
+        q.pop();
+        Sym &l = sym[p.left], &r = sym[p.right];
+        if (l.n == 0 || r.n == 0 || l.n + r.n != p.n) continue;  // one of them merged since
+        l.n += r.n;
+        r.n = 0;
+        l.next = r.next;
+        if (r.next >= 0) sym[r.next].prev = p.left;
+        add(l.prev, p.left);
+        add(p.left, l.next);
+    }
+    for (int i = 0; i >= 0; i = sym[i].next) {
+        const std::string x = t.substr(sym[i].at, sym[i].n);
+        auto it = id_.find(x);
+        if (it != id_.end()) {
+            out.push_back(it->second);
+            continue;
+        }
+        for (unsigned char c : x) {  // byte fallback <0xXX>
+            char buf[8];
+            snprintf(buf, sizeof buf, "<0x%02X>", c);
+            auto b = id_.find(buf);
+            if (b != id_.end()) out.push_back(b->second);
+        }
+    }
+}
+
 void Tokenizer::encode_plain(const std::string &text, std::vector<int32_t> &out) const {
     if (kind_ == SPM) return encode_spm(text, out);
-    for (auto &p : pretokenize(text, digits_)) encode_bpe(p, out);
+    if (kind_ == SPM_BPE) return encode_gemma4(text, out);
+    for (auto &p : pretokenize(text, digits_, marks_)) encode_bpe(p, out);
 }
 
 std::vector<int32_t> Tokenizer::encode(const std::string &text, bool add_bos) const {
@@ -327,7 +404,7 @@ std::string Tokenizer::decode(int32_t tok) const {
     // Control tokens print nothing, but [TOOL_CALLS], which opens Mistral
     // Nemo's tool calls, prints so the parser (tools.cpp) sees them.
     if (type == 3) return s == "[TOOL_CALLS]" ? s : std::string();
-    if (kind_ == SPM) {
+    if (kind_ == SPM || kind_ == SPM_BPE) {
         if (type == 6 && s.size() == 6) return std::string(1, (char)std::stoi(s.substr(3, 2), nullptr, 16));
         std::string r;
         for (size_t i = 0; i < s.size();) {
@@ -397,6 +474,26 @@ std::string Tokenizer::apply_chat(const std::vector<ChatMessage> &msgs) const {
             s += "<start_of_turn>model\n";
             break;
         }
+        case GEMMA4: {
+            // As Gemma 4's template with thinking off: a system turn where
+            // there is a system message, the assistant is "model", contents
+            // trimmed, and the model's turn opens with an empty thought.
+            auto trim = [](const std::string &x) {
+                const size_t b = x.find_first_not_of(" \t\r\n"), e = x.find_last_not_of(" \t\r\n");
+                return b == std::string::npos ? std::string() : x.substr(b, e - b + 1);
+            };
+            std::string sys;
+            for (auto &m : msgs)
+                if (m.role == "system") sys += (sys.empty() ? "" : "\n\n") + trim(m.content);
+            if (!sys.empty()) s += "<|turn>system\n" + sys + "<turn|>\n";
+            for (auto &m : msgs) {
+                if (m.role == "system") continue;
+                s += "<|turn>" + std::string(m.role == "assistant" ? "model" : "user") + "\n" + trim(m.content) +
+                     "<turn|>\n";
+            }
+            s += "<|turn>model\n<|channel>thought\n<channel|>";
+            break;
+        }
         case PLAIN:
             for (auto &m : msgs) s += m.role + ": " + m.content + "\n";
             s += "assistant: ";
@@ -405,14 +502,49 @@ std::string Tokenizer::apply_chat(const std::vector<ChatMessage> &msgs) const {
     return s;
 }
 
-bool Tokenizer::same_vocab(const Gguf &g) const {
+bool Tokenizer::drafter_vocab_ok(const Gguf &g, std::string &err, std::string &note) const {
     const GgufArray *toks = g.get_arr("tokenizer.ggml.tokens");
-    if (!toks) return false;
+    if (!toks) { err = "the draft model has no token list"; return false; }
+    const GgufArray *dty = g.get_arr("tokenizer.ggml.token_type");
     const size_t n = std::min(toks->size(), tokens_.size());
-    if (n == 0) return false;
+    if (n == 0) { err = "the draft model's token list is empty"; return false; }
+    // Token types 3 (control), 4 (user-defined) and 5 (unused) are never
+    // produced by text; a different name at the same id is a different chat
+    // format, not a different vocabulary. Gemma's <unusedN> placeholders
+    // (6,000 of them, typed as text in Gemma 4's files and shifted by the
+    // seven tool tokens it added) and [PADN] rows count the same way.
+    auto special = [](int t) { return t == 3 || t == 4 || t == 5; };
+    auto placeholder = [](const std::string &n) {
+        return (n.compare(0, 7, "<unused") == 0 && n.back() == '>') || (n.compare(0, 4, "[PAD") == 0 && n.back() == ']');
+    };
+    // SentencePiece files spell a space as U+2581 (Gemma 3); Gemma 4's
+    // spell it as a space. The same token either way.
+    auto spaces = [](std::string n) {
+        for (size_t p; (p = n.find("\xE2\x96\x81")) != std::string::npos;) n.replace(p, 3, " ");
+        return n;
+    };
+    size_t renamed = 0, first = 0, last = 0;
     for (size_t i = 0; i < n; i++) {
         const std::string *s = std::get_if<std::string>(&(*toks)[i]);
-        if (!s || *s != tokens_[i]) return false;
+        if (!s) { err = "the draft model's token list is malformed"; return false; }
+        if (*s == tokens_[i] || spaces(*s) == spaces(tokens_[i])) continue;
+        const int64_t *dt = dty && i < dty->size() ? std::get_if<int64_t>(&(*dty)[i]) : nullptr;
+        const bool ok = (placeholder(tokens_[i]) || (i < types_.size() && special(types_[i]))) &&
+                        (placeholder(*s) || (dt && special((int)*dt)));
+        if (!ok) {
+            char buf[96];
+            snprintf(buf, sizeof buf, "the draft model's vocabulary differs (token %zu is ", i);
+            err = buf + ("\"" + *s + "\", not \"" + tokens_[i] + "\")");
+            return false;
+        }
+        if (renamed++ == 0) first = i;
+        last = i;
+    }
+    if (renamed) {
+        char buf[160];
+        snprintf(buf, sizeof buf, "%zu control or placeholder tokens named differently (ids %zu to %zu); every draft is verified",
+                 renamed, first, last);
+        note = buf;
     }
     return true;
 }

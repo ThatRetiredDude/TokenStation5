@@ -1,0 +1,16 @@
+// Qwen3.5's full-attention layers: the query projection gives each head its
+// query and then its output gate, QG[t][h] = [q (hd), gate (hd)]. Copies the
+// queries out to Q[t][h] (hd each), as the rest of attention reads them;
+// the gates stay in QG for gate_mul.
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer QGbuf { float QG[]; };
+layout(std430, binding = 1) writeonly buffer Qbuf { float Q[]; };
+layout(push_constant) uniform PC { uint hd, n; } pc;  // n: tokens x heads x hd
+
+void main() {
+    for (uint i = gl_GlobalInvocationID.x; i < pc.n; i += gl_NumWorkGroups.x * 256) {
+        const uint head = i / pc.hd, d = i - head * pc.hd;
+        Q[i] = QG[head * 2 * pc.hd + d];
+    }
+}

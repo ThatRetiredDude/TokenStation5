@@ -891,7 +891,7 @@ void Dashboard::draw_details(Canvas &c, const View &v, const Item &it) {
         // Serving: its context. Else what serving it would get: the args'
         // -c, or what fits (no -c).
         const app::ModelInfo::Ctx ctx = is_serving && v.status.serving_ctx
-                                            ? app::ModelInfo::Ctx{v.status.serving_ctx, v.status.serving_kv8}
+                                            ? app::ModelInfo::Ctx{v.status.serving_ctx, v.status.serving_kv}
                                             : m.serve_ctx(v.n_ctx, v.gpu_memory);
         memory(500, m.memory_for(ctx), ctx, false);
 

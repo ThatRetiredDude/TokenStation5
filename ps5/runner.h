@@ -27,6 +27,7 @@ struct Job {
     std::string url;       // Fetch: where from
     std::string sha256;    // Fetch: the hash the file must have (hex); "": not checked
     int n_ctx = 0;         // Serve: 0 for what fits in the GPU's memory
+    bool reload = false;   // Serve: load it again even if it's serving (its engine settings changed)
     int n = 16;            // Check: tokens
     bool fresh = false;    // Check: run the CPU even if its answers are saved
     // Check, Bench: engine settings (NAME=VALUE, as in ts5.env) for this job's
@@ -42,7 +43,7 @@ struct Status {
     double job_started = 0;  // seconds, steady clock
     std::string serving, serving_path;  // file name and path of the model the API answers with
     int serving_ctx = 0;
-    bool serving_kv8 = false;  // its KV cache is 8-bit
+    ts5::KvType serving_kv = ts5::KvType::F16;  // its KV cache
     std::string error;  // the last job's failure, until the next job starts, as the log has it
     std::string said;   // the same failure in plain words, for the screen and the notification
     int queued = 0;
@@ -74,7 +75,7 @@ private:
     struct Loaded;
     void loop();
     void run(const Job &job);
-    bool serve(const std::string &path, int n_ctx);
+    bool serve(const std::string &path, int n_ctx, bool reload = false);
     void fetch(const Job &job);
     void unload();
     // drafter: also load TS5_DRAFT_MODEL (serve jobs; check and bench never

@@ -1,0 +1,9 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// attn_pf512s over the 8-bit KV cache (see attn_pf512s.comp).
+#define KV_Q8
+#define HEAD_DIM 512
+#define LANES 16
+#define KEYS 16
+#define NO_PREFETCH
+#include "attn_pf.glsl"

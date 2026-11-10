@@ -1,0 +1,40 @@
+// Qwen3.5's linear layers, before the scan: in X[t] (the convolved Q, K and
+// V, nk heads of Q, then nk of K, each D wide), Q and K L2-normalized per
+// head (x / sqrt(sum x^2 + eps), as llama.cpp), Q then scaled by 1/sqrt(D);
+// and per value head, beta = sigmoid(B[t][h]) into B and the decay
+// exp(softplus(A[t][h] + DT[h]) * AL[h]) into A. Workgroup (head, t), the
+// heads being Q's and K's (2 nk of them).
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#define WG 128
+layout(local_size_x = WG) in;
+layout(std430, binding = 0) buffer Xbuf { float X[]; };
+layout(std430, binding = 1) buffer Bbuf { float B[]; };
+layout(std430, binding = 2) buffer Abuf { float A[]; };
+layout(std430, binding = 3) readonly buffer DTbuf { float DT[]; };
+layout(std430, binding = 4) readonly buffer ALbuf { float AL[]; };
+layout(push_constant) uniform PC { uint dim, k_heads, v_heads, channels; float eps; } pc;
+shared float red[WG / 4];
+
+void main() {
+    const uint head = gl_WorkGroupID.x, t = gl_WorkGroupID.y, tid = gl_LocalInvocationID.x;
+    const uint base = t * pc.channels + head * pc.dim;
+    float s = 0.0;
+    for (uint i = tid; i < pc.dim; i += WG) s += X[base + i] * X[base + i];
+    s = subgroupAdd(s);
+    if (gl_SubgroupInvocationID == 0) red[gl_SubgroupID] = s;
+    barrier();
+    float total = 0.0;
+    for (uint i = 0; i < gl_NumSubgroups; i++) total += red[i];
+    float r = inversesqrt(total + pc.eps);
+    if (head < pc.k_heads) r *= inversesqrt(float(pc.dim));  // a query head
+    for (uint i = tid; i < pc.dim; i += WG) X[base + i] *= r;
+    if (head == 0)
+        for (uint h = tid; h < pc.v_heads; h += WG) {
+            const uint i = t * pc.v_heads + h;
+            B[i] = 1.0 / (1.0 + exp(-B[i]));
+            const float x = A[i] + DT[h];
+            const float sp = x > 20.0 ? x : log(1.0 + exp(x));
+            A[i] = exp(sp * AL[h]);
+        }
+}

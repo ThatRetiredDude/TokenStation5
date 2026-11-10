@@ -1,0 +1,53 @@
+// Qwen3.5's linear layers: the gated delta rule over a call's tokens, in
+// order. Value head h (reading key head h % k_heads) keeps a D x D state,
+// S[i][j] at state_off + (h * D + i) * D + j (key i, value j). Per token,
+// with decay g and beta b (gdn_prep):
+//   S = g S;  d_j = b (v_j - sum_i S[i][j] k_i);  S[i][j] += k_i d_j;
+//   Y[t][h][j] = sum_i S[i][j] q_i.
+// Each thread owns one value column j and holds it in registers for the
+// whole call; a workgroup is 32 columns of one head, with that head's q and
+// k for the token in shared memory.
+#version 450
+#define D 128
+#define WG 32
+layout(local_size_x = WG) in;
+layout(std430, binding = 0) readonly buffer Xbuf { float X[]; };  // convolved q, k, v (gdn_prep'd)
+layout(std430, binding = 1) readonly buffer Bbuf { float B[]; };  // beta per token and value head
+layout(std430, binding = 2) readonly buffer Abuf { float A[]; };  // decay per token and value head
+layout(std430, binding = 3) buffer Sbuf { float S[]; };
+layout(std430, binding = 4) writeonly buffer Ybuf { float Y[]; };
+layout(push_constant) uniform PC { uint k_heads, v_heads, channels, n, state_off; } pc;
+shared float qs[D], ks[D];
+
+void main() {
+    const uint blocks = D / WG;
+    const uint h = gl_WorkGroupID.x / blocks, j = (gl_WorkGroupID.x % blocks) * WG + gl_LocalInvocationID.x;
+    const uint kh = h % pc.k_heads, tid = gl_LocalInvocationID.x;
+    const uint sbase = pc.state_off + h * D * D + j;
+    float s[D];
+    for (uint i = 0; i < D; i++) s[i] = S[sbase + i * D];
+    for (uint t = 0; t < pc.n; t++) {
+        const uint xb = t * pc.channels;
+        barrier();
+        for (uint i = tid; i < D; i += WG) {
+            qs[i] = X[xb + kh * D + i];
+            ks[i] = X[xb + (pc.k_heads + kh) * D + i];
+        }
+        barrier();
+        const float g = A[t * pc.v_heads + h], b = B[t * pc.v_heads + h];
+        const float v = X[xb + 2 * pc.k_heads * D + h * D + j];
+        float sk = 0.0;
+        for (uint i = 0; i < D; i++) {
+            s[i] *= g;
+            sk += s[i] * ks[i];
+        }
+        const float dj = (v - sk) * b;
+        float o = 0.0;
+        for (uint i = 0; i < D; i++) {
+            s[i] += ks[i] * dj;
+            o += s[i] * qs[i];
+        }
+        Y[t * pc.v_heads * D + h * D + j] = o;
+    }
+    for (uint i = 0; i < D; i++) S[sbase + i * D] = s[i];
+}

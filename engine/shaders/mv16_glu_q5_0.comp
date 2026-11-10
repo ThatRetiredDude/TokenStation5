@@ -1,0 +1,5 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// One token of the feed-forward's gate and up (Q5_0) with swiglu (see mv16_q5_0.glsl).
+#define GLU
+#include "mv16_q5_0.glsl"
