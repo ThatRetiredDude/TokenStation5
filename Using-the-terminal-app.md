@@ -62,7 +62,9 @@ Run it **on the PS5** (over SSH) for the whole experience. Pointed at a PS5 from
 
 On a narrow window the least needed items drop off first (fan, then RAM). When the die reaches **85 °C**, where the PS5 starts slowing its GPU, a red warning line flashes under the bar: `/fan max` helps.
 
-**Five pages** fill the middle. Switch with **F1** to **F5**, **Tab** (next) and **Shift+Tab** (previous), or **Alt+1** to **Alt+5**. On every page but Chat, **1** to **5** switch too, **q** quits, and **/** jumps to the prompt with a command started.
+**Five pages** fill the middle. Switch with **F1** to **F5**, **Tab** (next) and **Shift+Tab** (previous), or **Alt+1** to **Alt+5**. On every page but Chat, **1** to **5** switch too, **q** quits, and **/** jumps to the prompt with a command started. From the prompt, `/chat`, `/models`, `/status`, `/settings` and `/logs` go to a page.
+
+> **On a Mac**, macOS keeps the F keys for itself (F3 is Mission Control). Use **Tab** / **Shift+Tab**, **1** to **5** on the pages, the commands above, or **fn+F1** to **fn+F5**. **Option+1** to **Option+5** work when the terminal sends Option as Meta: in Terminal, Settings → Profiles → Keyboard → *Use Option as Meta key*; in iTerm2, Profiles → Keys → *Left Option key: Esc+*.
 
 ## Chat (F1)
 
@@ -101,8 +103,9 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | Command | What it does |
 | --- | --- |
 | `/model NAME` | Loads another model (see [Models](#models-f2)). Part of the name is enough. `/model` alone opens the Models page. |
-| `/models` | The Models page. |
+| `/models` | The Models page. `/chat`, `/status`, `/settings` and `/logs` go to the others. |
 | `/download NAME` | Downloads a model from the catalog (see [Downloading models](#downloading-models)): `llama32-3b`, `qwen25-coder-7b`, `qwen3-8b`, `llama31-8b`. `/download` alone opens the catalog on the Models page. |
+| `/download URL [FILE] [--sha256 HEX]` | Downloads any other `.gguf`. A `ts5 fetch URL FILE --sha256 HEX` line, as on [Models tested on PS5](Models-tested-on-PS5), works pasted at the prompt as it is. |
 | `/new` | A new chat (`/clear` too). The one you leave is kept. |
 | `/chats [TEXT]` | Your saved chats, or the ones with TEXT (see [Saved chats](#saved-chats)). |
 | `/open N` | Opens saved chat N from `/chats` (or `/open TEXT`: the newest with TEXT). |
@@ -111,12 +114,14 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | `/tune [NAME]` | Runs `ts5-tune` on the loaded model (or NAME), live on the Models page. |
 | `/check [NAME]` | The GPU check on the loaded model (or NAME): `ts5 check`, the GPU's answers against the CPU's. |
 | `/bench [NAME]` | The speed test on the loaded model (or NAME): `ts5 bench`, prompt and answer tok/s. |
+| `/usage` | The API's use over the last day and week, by app (its API key's name, else its address) and by model: requests, prompt and generated tokens, tok/s. From the TV or desktop app's `usage.tsv`. |
+| `/keys` | The API keys: name, on or off, when made, when last used. Keys are made on the TV app's Settings page, and only their SHA-256 is kept, so they can't be shown again. |
 | `/think on`, `off`, `auto` | Thinking before answering, for models that can switch it. `auto` leaves it to the model. |
 | `/fan auto`, `cool`, `early`, `max` | The PS5's fan (see [PS5 hardware on Linux](PS5-hardware-on-Linux)). `early` ramps from 40 °C and is at full speed by 55 °C. |
 | `/theme NAME` | Colors: Ocean, Neon, Sunset, Forest, Mono. Without a name, the next one. |
 | `/status`, `/settings`, `/logs` | Those pages. |
 | `/help` | Every command and key, in the chat. |
-| `/quit` | Leaves (`/exit` and `/q` too). The server keeps running. |
+| `/quit` | Leaves (`/exit` and `/q` too, and plain `exit`, `quit` or `q`). The server keeps running. |
 
 ## Models (F2)
 
@@ -157,7 +162,13 @@ The catalog is the TV app's: the models tested on the PS5, each pinned to a comm
 - **X** stops it. The `.part` stays, and downloading it again goes on from there. Quitting ts5-tui stops it the same way.
 - It goes to the service's models folder when your user may write there, else to `~/.local/share/tokenstation/models` (or `$TS5_MODELS`). The API-only service only reads its own folder, so ts5-tui then shows the `sudo mv` command that moves the file there.
 
-For other models, or to download from a script, see [Models tested on PS5](Models-tested-on-PS5).
+**Any other model**: `/download URL [FILE] [--sha256 HEX]`, or paste a `ts5 fetch` line from [Models tested on PS5](Models-tested-on-PS5) at the prompt as it is:
+
+```
+ts5> ts5 fetch https://huggingface.co/…/resolve/…/Model.Q4_K_M.gguf Model.Q4_K_M.gguf --sha256 5bc6f9…
+```
+
+It downloads the same way and shows under the catalog while it runs. FILE is a name only (it goes where downloads go); without it, the name at the end of the URL. Hugging Face page links (`/blob/`) work too. Without `--sha256` only the size is checked.
 
 ### Tuning, the GPU check and the speed test
 
@@ -211,7 +222,7 @@ In an **IDE's terminal** (VS Code, Cursor, JetBrains, including their Remote-SSH
 
 ## When you quit
 
-**Ctrl+Q**, `/quit`, or **q** on a page other than Chat. The chat is printed into your terminal, so it stays in its scrollback (also after a tmux session). The server and its model keep running.
+**Ctrl+Q** (always shown at the bottom right), `exit`, `quit` or `q` at the prompt, `/quit`, or **q** on a page other than Chat. In ts5's tmux session, **Ctrl+A d** leaves it running instead. The chat is printed into your terminal, so it stays in its scrollback (also after a tmux session). The server and its model keep running.
 
 ## If something's off
 
