@@ -1,6 +1,6 @@
 # Using the terminal app (ts5-tui)
 
-`ts5-tui` is TokenStation5 in a terminal: a colorful, keyboard-driven app for when you SSH into the PS5, or sit at its text console. It chats with the loaded model, switches and tunes models, and shows the PS5's GPU memory, temperatures and fan live. Linux edition only.
+`ts5-tui` is TokenStation5 in a terminal: a colorful, keyboard-driven app for when you SSH into the PS5, or sit at its text console. It chats with the loaded model and keeps every chat, downloads, switches, checks and tunes models, and shows the PS5's GPU memory, temperatures and fan live. Linux edition only.
 
 ![Chat in ts5-tui](images/terminal-app-chat.png)
 
@@ -74,7 +74,7 @@ Type at `ts5>` and press **Enter**. The answer streams in with its formatting: h
 | Ctrl+J or Alt+Enter | A new line in the message. Pasting several lines works too. |
 | ↑ / ↓ | The messages and commands you typed before. |
 | Esc | Stops an answer (Ctrl+C too). With no answer running, clears what you typed. |
-| Ctrl+N | A new chat. |
+| Ctrl+N | A new chat. The one you leave is kept (see [Saved chats](#saved-chats)). |
 | Ctrl+T | Show or hide the thinking. |
 | PgUp / PgDn | Scroll the chat a page. Ctrl+↑ / Ctrl+↓ scroll a line, and so does the mouse wheel in tmux. End (with nothing typed) goes back to the bottom. |
 | ← → Home End | Move in what you're typing. Ctrl+← / Ctrl+→ by word. |
@@ -84,9 +84,17 @@ Type at `ts5>` and press **Enter**. The answer streams in with its formatting: h
 
 The status line over the prompt shows the model and how full the context is (yellow from 75%, red from 90%). When a chat outgrows the context, the server says so and **Ctrl+N** starts fresh.
 
+### Saved chats
+
+Every chat is saved after each answer, the way the TV app saves them: one file per chat in `~/.local/share/tokenstation/chats/` (or `$TS5_DATA_DIR/chats`). Nothing to do: quit, come back, and they're there.
+
+- `/chats` lists them, newest first, with when and how many messages. The TV service's chats (`/var/lib/tokenstation/chats`) are listed too when your user can read them.
+- `/chats TEXT` lists only the chats that have every word of TEXT.
+- `/open N` opens number N from the list, and you go on where it ended. `/open TEXT` opens the newest chat that has TEXT. Going on with a TV chat makes a copy of your own.
+
 ### Commands
 
-Type `/` and the matching commands show above the prompt. **Tab** completes the command, and after `/model` or `/tune` the model name (press Tab again to step through the matches).
+Type `/` and the matching commands show above the prompt. **Tab** completes the command, the model name after `/model`, `/tune`, `/check` or `/bench`, and the catalog name after `/download` (press Tab again to step through the matches).
 
 ![Commands as you type](images/terminal-app-commands.png)
 
@@ -94,12 +102,17 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | --- | --- |
 | `/model NAME` | Loads another model (see [Models](#models-f2)). Part of the name is enough. `/model` alone opens the Models page. |
 | `/models` | The Models page. |
-| `/new` | A new chat (`/clear` too). |
+| `/download NAME` | Downloads a model from the catalog (see [Downloading models](#downloading-models)): `llama32-3b`, `qwen25-coder-7b`, `qwen3-8b`, `llama31-8b`. `/download` alone opens the catalog on the Models page. |
+| `/new` | A new chat (`/clear` too). The one you leave is kept. |
+| `/chats [TEXT]` | Your saved chats, or the ones with TEXT (see [Saved chats](#saved-chats)). |
+| `/open N` | Opens saved chat N from `/chats` (or `/open TEXT`: the newest with TEXT). |
 | `/save [FILE]` | Saves this chat as Markdown, thinking included. Without a file: `~/tokenstation-chat-YYYYMMDD-HHMM.md`. |
 | `/find TEXT` | Scrolls to the newest message containing TEXT. |
 | `/tune [NAME]` | Runs `ts5-tune` on the loaded model (or NAME), live on the Models page. |
+| `/check [NAME]` | The GPU check on the loaded model (or NAME): `ts5 check`, the GPU's answers against the CPU's. |
+| `/bench [NAME]` | The speed test on the loaded model (or NAME): `ts5 bench`, prompt and answer tok/s. |
 | `/think on`, `off`, `auto` | Thinking before answering, for models that can switch it. `auto` leaves it to the model. |
-| `/fan auto`, `cool`, `max` | The PS5's fan (see [PS5 hardware on Linux](PS5-hardware-on-Linux)). |
+| `/fan auto`, `cool`, `early`, `max` | The PS5's fan (see [PS5 hardware on Linux](PS5-hardware-on-Linux)). `early` ramps from 40 °C and is at full speed by 55 °C. |
 | `/theme NAME` | Colors: Ocean, Neon, Sunset, Forest, Mono. Without a name, the next one. |
 | `/status`, `/settings`, `/logs` | Those pages. |
 | `/help` | Every command and key, in the chat. |
@@ -107,17 +120,19 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 
 ## Models (F2)
 
-To download the models tested on the PS5 from the terminal, with one command each, see [Models tested on PS5](Models-tested-on-PS5).
-
 ![The Models page](images/terminal-app-models.png)
 
-Every `.gguf` on this machine, biggest first, with its size, the helper `ts5-tune` picked for it, and the date it was tuned. **●** marks the one loaded. Below the list, the selected model's tuned settings, each with what it costs: 16- or 32-bit prompt math, the helper, the cache (f16, or 8-bit for twice the context) and, for the loaded one, its context.
+Every `.gguf` on this machine, biggest first, with its size, the helper `ts5-tune` picked for it, and the date it was tuned. **●** marks the one loaded. Under them, **⇣ Download**: the catalog's models you don't have yet. Below the list, the selected model's tuned settings, each with what it costs: 16- or 32-bit prompt math, the helper, the cache (f16, or 8-bit for twice the context) and, for the loaded one, its context.
 
 | Key | What it does |
 | --- | --- |
 | ↑ ↓, PgUp PgDn | Choose. |
-| Enter | Load it. |
+| Enter | Load it. On a catalog row: download it. |
 | T | Tune it with `ts5-tune --models` (10 to 20 minutes). |
+| C | The GPU check (`ts5 check`): the model's answers on the GPU against the CPU's. |
+| B | The speed test (`ts5 bench`): a 512-token prompt and 128 tokens of answer. |
+| D | On a catalog row: download it. |
+| X | Stop the download (it goes on from there next time). |
 | R | Look for model files again. |
 
 It looks in `/var/lib/tokenstation/models` (or the service's `MODELS_DIR`), `~/.local/share/tokenstation/models` (the desktop app's), `~/models`, and `$TS5_MODELS` if set. Files under 1.5 GiB are listed as helper size and aren't tuned.
@@ -133,7 +148,20 @@ It looks in `/var/lib/tokenstation/models` (or the service's `MODELS_DIR`), `~/.
 
 The top bar shows **loading…** with the seconds until the server reports the new model.
 
-**Tuning** opens a pane with `ts5-tune`'s output as it runs. **Esc** hides it and tuning goes on (T shows it again), **X** stops it, PgUp/PgDn scroll. Tuning needs the GPU's memory: a `ts5 serve` that ts5-tui started is stopped for it. If the service holds a model, stop it first (`sudo systemctl stop tokenstation`). ts5-tune saves the results in your own `~/.config/tokenstation/tune/`. The API-only service runs as its own user and reads `/etc/tokenstation/tune/`, so copy the file there for the service (`sudo mkdir -p /etc/tokenstation/tune && sudo cp ~/.config/tokenstation/tune/<model>.gguf.env /etc/tokenstation/tune/`).
+### Downloading models
+
+The catalog is the TV app's: the models tested on the PS5, each pinned to a commit on Hugging Face with its size and SHA-256. Choose one under **⇣ Download** and press **Enter** (or `/download NAME` from the prompt). The row shows a bar, the speed and the time left, and the box below where the file goes and how much space is free there.
+
+- It downloads with `ts5 fetch` into a `.part` file and keeps the model only when its size and SHA-256 match, so a broken download never shows up as a model.
+- It checks the free space first and won't start when the drive can't hold the file.
+- **X** stops it. The `.part` stays, and downloading it again goes on from there. Quitting ts5-tui stops it the same way.
+- It goes to the service's models folder when your user may write there, else to `~/.local/share/tokenstation/models` (or `$TS5_MODELS`). The API-only service only reads its own folder, so ts5-tui then shows the `sudo mv` command that moves the file there.
+
+For other models, or to download from a script, see [Models tested on PS5](Models-tested-on-PS5).
+
+### Tuning, the GPU check and the speed test
+
+**Tuning** (T), the **GPU check** (C) and the **speed test** (B) open a pane with the output as it runs. **Esc** hides it and the job goes on (T shows it again), **X** stops it, PgUp/PgDn scroll. The GPU check runs the CPU side too, which takes a few minutes the first time for a model and is saved after. They need the GPU's memory: a `ts5 serve` that ts5-tui started is stopped for them. If the service holds a model, stop it first (`sudo systemctl stop tokenstation`). ts5-tune saves the results in your own `~/.config/tokenstation/tune/`. The API-only service runs as its own user and reads `/etc/tokenstation/tune/`, so copy the file there for the service (`sudo mkdir -p /etc/tokenstation/tune && sudo cp ~/.config/tokenstation/tune/<model>.gguf.env /etc/tokenstation/tune/`).
 
 ## Status (F3)
 
@@ -141,7 +169,7 @@ The top bar shows **loading…** with the seconds until the server reports the n
 
 btop-style bars for this machine: GPU memory (with GiB free), RAM, the die (Tctl), board and GPU edge temperatures, fan (percent, rpm and mode), GPU load and clock. Below them, the die's temperature over the last minutes, and the generation and prompt speeds of recent answers: every app's when ts5-tui can read the server's log (see [Logs](#logs-f5)), else its own.
 
-**F** steps the fan through auto, cool and max (as `/fan` does).
+**F** steps the fan through auto, cool, early and max (as `/fan` does).
 
 ## Settings (F4)
 
@@ -156,7 +184,7 @@ btop-style bars for this machine: GPU memory (with GiB free), RAM, the die (Tctl
 | Temperature | The model's own, or 0.1 to 1.5. Lower is steadier. |
 | Answer length | No limit, or a cap of 512 to 8,192 tokens. Under 1,024 turns thinking off. |
 | Context (own) | The context for a model ts5-tui starts itself: 4,096 to 32,768, or auto (what fits). |
-| Fan (PS5) | auto (quiet), cool (keeps long prompts under the 85 °C limiter), max (loud). |
+| Fan (PS5) | auto (quiet), cool (keeps long prompts under the 85 °C limiter), early (ramps from 40 °C, for long prompts back to back), max (loud). |
 | tmux | Its own tmux session from a plain terminal. |
 | Opening title | The title at start. |
 
