@@ -17,7 +17,7 @@ There are two editions, built from the same code:
 
 ## Start here
 
-1. Install one edition (links above).
+1. Install one edition (links above). On Linux, the [Quick start](Install-on-Linux#quick-start) is five steps, copy and paste.
 2. [Pick a model](Models). The Models page downloads the checked ones straight to the console.
 3. [Connect an app](Connecting-apps), or just chat on the TV (or, on Linux, [in a terminal over SSH](Using-the-terminal-app)).
 4. Optional: [reach it from anywhere with Tailscale](Away-from-home-with-Tailscale), and [give it web search](Web-search).

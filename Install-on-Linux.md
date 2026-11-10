@@ -6,6 +6,91 @@ Linux on a PS5 adds things the console can't do: more memory for models (about 1
 
 > The Linux edition is new. Its packages come from the `linux-latest` pre-release and the `linux-v*` releases; the PS5 title's releases are separate. If something here doesn't match what you see, [open an issue](https://github.com/ThatRetiredDude/TokenStation5/issues).
 
+## Quick start
+
+Five steps. Copy each command, paste it in a terminal on the PS5 (or over SSH), press Enter.
+
+**Before you start:** your PS5 already boots Linux (see [step 1 below](#1-linux-on-the-ps5-skip-on-a-pc) if it doesn't). On a Linux PC, skip to step 2.
+
+### Step 1: check the GPU works
+
+```sh
+vulkaninfo --summary | grep -i deviceName
+```
+
+You should see a line with **RADV GFX1013** (on a PC: your graphics card).
+"vulkaninfo: command not found"? Install it first: `sudo apt install vulkan-tools` (Fedora: `sudo dnf install vulkan-tools`, Arch: `sudo pacman -S vulkan-tools`), then run the line again.
+Nothing, or an error? Your Mesa is too old. You need Mesa 25.3 or newer. See [Linux on the PS5](#1-linux-on-the-ps5-skip-on-a-pc), point 2.
+
+### Step 2: install TokenStation5
+
+Pick **one** line, the one for your system:
+
+**Debian or Ubuntu**
+```sh
+curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation_latest_amd64.deb && sudo apt install ./tokenstation_latest_amd64.deb
+```
+
+**Fedora**
+```sh
+sudo dnf install https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest.x86_64.rpm
+```
+
+**Arch**
+```sh
+curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-x86_64.pkg.tar.zst && sudo pacman -U ./tokenstation-latest-x86_64.pkg.tar.zst
+```
+
+**Bazzite, SteamOS, or anything else** (no sudo; it asks for your password when it needs it)
+```sh
+curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz | tar xz && cd tokenstation-*-linux-amd64 && ./install.sh
+```
+
+It asks for your password once. When it finishes, it's installed.
+
+### Step 3: restart (PS5 only)
+
+The install gives the GPU as much memory as possible, and that only takes effect after a restart.
+
+```sh
+sudo reboot
+```
+
+Then boot Linux again the way you always do (run the Linux loader again).
+
+### Step 4: start it
+
+- **With a screen and desktop:** open **TokenStation5** from the app menu.
+- **Over SSH, or no desktop:** type
+  ```sh
+  ts5-tui
+  ```
+  That's the [terminal app](Using-the-terminal-app). Press **F2** for Models.
+
+### Step 5: get a model and chat
+
+- **In the app:** go to **Models**, pick **Qwen3 8B**, press the button to download it (about 5 GB). When it's done, go to **Chat** and type.
+- **In the terminal app:** download Qwen3 8B with one command, then pick it on the Models page (**F2**, arrows, **Enter**):
+  ```sh
+  mkdir -p ~/.local/share/tokenstation/models && cd ~/.local/share/tokenstation/models
+  ts5 fetch https://huggingface.co/bartowski/Qwen_Qwen3-8B-GGUF/resolve/0b69f75b7472688e6808490aa2b85efdb81b5ce7/Qwen_Qwen3-8B-Q4_K_M.gguf Qwen_Qwen3-8B-Q4_K_M.gguf --sha256 54fffa050078e984116639c83dfb64b5aa6d4cd474e018b076777c632bbccccd
+  ```
+  Other models, each with its own one-line download: [Models tested on PS5](Models-tested-on-PS5).
+
+That's it. To update later, run your step 2 line again.
+
+### If something goes wrong
+
+| What you see | What to do |
+| --- | --- |
+| "no Vulkan device" or no RADV GFX1013 | Mesa is too old: you need 25.3 or newer (step 1). |
+| A 14B model won't load, "not enough memory" | Did you restart after installing (step 3)? Check with `tokenstation-memory status`. Or use a smaller model (Qwen3 8B). |
+| `ts5-tui: command not found` | Close the terminal and open a new one. Portable install: log out and back in once. |
+| The app won't open over SSH | Normal: the app needs a screen. Use `ts5-tui` over SSH. |
+| Anything else | [Troubleshooting](Troubleshooting), or [open an issue](https://github.com/ThatRetiredDude/TokenStation5/issues/new) with what you typed and what it printed. |
+
+The rest of this page has the details: what each install does, running it on the TV with no desktop, and the API-only service.
+
 ## Testers wanted
 
 The Linux build is new and needs people to try it on their own machines: a PS5 running Linux, or any Linux PC with a Vulkan GPU. Install it with one command (the details for each system are in [step 2](#2-install-the-package)):
