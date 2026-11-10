@@ -84,7 +84,7 @@ Type at `ts5>` and press **Enter**. The answer streams in with its formatting: h
 | Ctrl+U / Ctrl+K / Ctrl+W | Delete to the start / to the end / the word before. |
 | Ctrl+Q | Quit. |
 
-The top bar always shows how full the chat is (**chat 7.8k/32k**), and the line over the prompt reads "chat N of M tokens": yellow from 75%, red from 90%. When an answer stops because the chat filled the context, a note under it says so, with the numbers, and that **Ctrl+N** starts a new chat (the full one stays saved). For a model loaded at a fixed context, it adds that Settings → Context → auto gives it more. If the answer hit your **Answer length** cap instead, the note says that.
+The top bar always shows how full the chat is (**chat 7.8k/32k**), and the line over the prompt reads "chat N of M tokens": yellow from 75%, red from 90%. When an answer stops because the chat filled the context, a note under it says so, with the numbers, and that **Ctrl+N** starts a new chat (the full one stays saved). For a model loaded at a fixed context, it adds that Settings → Context → auto gives it more. If the answer hit your **Answer length** cap instead, the note says that. A message sent to a chat that's already full gets "This chat is full" in place of an answer, with the same Ctrl+N tip.
 
 ### Saved chats
 
@@ -104,7 +104,7 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | --- | --- |
 | `/model NAME` | Loads another model (see [Models](#models-f2)). Part of the name is enough. `/model` alone opens the Models page. |
 | `/models` | The Models page. `/chat`, `/status`, `/settings` and `/logs` go to the others. |
-| `/download NAME` | Downloads a model from the catalog (see [Downloading models](#downloading-models)): `llama32-3b`, `qwen25-coder-7b`, `qwen3-8b`, `llama31-8b`. `/download` alone opens the catalog on the Models page. |
+| `/download NAME` | Downloads one of the models tested on the PS5 (see [Downloading models](#downloading-models)): `qwen3-14b`, `qwen35-9b`, `deepseek-r1-14b`, `qwen3-8b`, `llama31-8b`, `qwen25-coder-7b`, `qwen25-coder-14b`, `gemma3-12b`, `gemma4-12b`, `llama32-3b`, and the helpers `qwen3-0.6b`, `llama32-1b`, `gemma3-1b`. Tab completes the name. `/download` alone opens the list on the Models page. |
 | `/download URL [FILE] [--sha256 HEX]` | Downloads any other `.gguf`. A `ts5 fetch URL FILE --sha256 HEX` line, as on [Models tested on PS5](Models-tested-on-PS5), works pasted at the prompt as it is. |
 | `/new` | A new chat (`/clear` too). The one you leave is kept. |
 | `/chats [TEXT]` | Your saved chats, or the ones with TEXT (see [Saved chats](#saved-chats)). |
@@ -127,7 +127,7 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 
 ![The Models page](images/terminal-app-models.png)
 
-Every `.gguf` on this machine, biggest first, with its size, the helper `ts5-tune` picked for it, and the date it was tuned. **●** marks the one loaded. Under them, **⇣ Download**: the catalog's models you don't have yet. Below the list, the selected model's tuned settings, each with what it costs: 16- or 32-bit prompt math, the helper, the chat memory (automatic: full precision, or 8-bit where that fits a longer chat) and, for the loaded one, its context.
+Every `.gguf` on this machine, biggest first, with its size, the helper `ts5-tune` picked for it, and the date it was tuned. **●** marks the one loaded. Under them, **⇣ Download**: the tested models you don't have yet. Below the list, the selected model's tuned settings, each with what it costs: 16- or 32-bit prompt math, the helper, the chat memory (automatic: full precision, or 8-bit where that fits a longer chat) and, for the loaded one, its context.
 
 | Key | What it does |
 | --- | --- |
@@ -157,7 +157,7 @@ The top bar shows **loading…** with the seconds until the server reports the n
 
 ### Downloading models
 
-The catalog is the TV app's: the models tested on the PS5, each pinned to a commit on Hugging Face with its size and SHA-256. Choose one under **⇣ Download** and press **Enter** (or `/download NAME` from the prompt). The row shows a bar and the speed; the box below shows where the file goes, how much space is free there, what it's doing (connecting, downloading with the time so far and left, checking it's the exact file), and its steps ticked off. The top bar shows the download's percent and time left on every page.
+The list under **⇣ Download** is every model on [Models tested on PS5](Models-tested-on-PS5), best first, with the helpers last. Each is pinned to the exact upload that was tested, with its size and SHA-256. Models already on this machine aren't listed. Choose one and press **Enter** (or `/download NAME` from the prompt). After a helper downloads, press **T** on its big model: tuning picks the helper up. The row shows a bar and the speed; the box below shows where the file goes, how much space is free there, what it's doing (connecting, downloading with the time so far and left, checking it's the exact file), and its steps ticked off. The top bar shows the download's percent and time left on every page.
 
 - It downloads with `ts5 fetch` into a `.part` file and keeps the model only when its size and SHA-256 match, so a broken download never shows up as a model.
 - It checks the free space first and won't start when the drive can't hold the file.

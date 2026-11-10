@@ -2,7 +2,7 @@
 
 Every model here ran on a PS5 with Linux (40 GPU compute units, GPU memory set to max) on the Linux edition, and was checked against ts5's CPU reference (all pass except two Gemma cases noted below). Speeds are tokens per second, one request at a time, with no helper: **prompt** is reading a 512-token prompt, **writing** is generating the answer. **Context** is what `-c auto` gives with the current defaults. All files are Q4_K_M unless named.
 
-No terminal? The app's **Models** page downloads the checked models for you, and its **Search Hugging Face** finds others. This page is for installing these exact files from a terminal (SSH or the text console), for example to use with [the terminal app](Using-the-terminal-app).
+The [terminal app](Using-the-terminal-app) downloads every model on this page for you: **F2**, pick it under **⇣ Download**, **Enter**, or type `/download qwen3-14b` (the keys are in [its command list](Using-the-terminal-app#commands)). The desktop app's **Models** page downloads the checked models, and its **Search Hugging Face** finds others. The commands below install these exact files from a shell instead.
 
 ## The models
 

@@ -71,7 +71,7 @@ Then boot Linux again the way you always do (run the Linux loader again).
 
 - **In the app:** go to **Models**, pick **Qwen3 8B**, press the button to download it (about 5 GB). When it's done, go to **Chat** and type.
 - **In the terminal app:** type `/download qwen3-8b` and press **Enter** (or **F2**, pick **Qwen3 8B** under **⇣ Download**, **Enter**). A bar shows the progress. When it's done, select it on the same page and press **Enter** to load it, then chat on **F1**.
-  Other models, with one-line downloads you can paste at the `ts5>` prompt or in a shell: [Models tested on PS5](Models-tested-on-PS5).
+  Every other tested model is on the same list (`/download qwen3-14b` for the best answers, about 9 GB). Which one to pick: [Models tested on PS5](Models-tested-on-PS5).
 
 That's it. To update later, run your step 2 line again.
 
