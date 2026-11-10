@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 #ifndef TS5_PS5
@@ -30,14 +31,16 @@ static PFN_vkGetInstanceProcAddr ts5_vk_entry() {
 
 uint64_t system_reserve() {
     const char *e = getenv("TS5_SYSTEM_RESERVE_GIB");
-    const double g = e && *e ? std::max(0.0, atof(e)) : 2.0;
+    const double g = e && *e ? std::max(0.0, atof(e)) : 1.5;
     return (uint64_t)(g * 1073741824.0);
 }
 
 #ifndef TS5_PS5
-// /proc/meminfo's MemAvailable in bytes; 0 if it can't be read.
+// /proc/meminfo's MemAvailable in bytes; 0 if it can't be read. TS5_MEMINFO:
+// another file in its format instead (tests).
 static uint64_t mem_available() {
-    FILE *f = fopen("/proc/meminfo", "r");
+    const char *path = getenv("TS5_MEMINFO");
+    FILE *f = fopen(path && *path ? path : "/proc/meminfo", "r");
     if (!f) return 0;
     char line[256];
     unsigned long long kb = 0;
@@ -64,6 +67,45 @@ uint64_t VkContext::heap_usage() const {
         if (shared || (m2.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT))
             n += b.heapUsage[i];
     return n;
+#else
+    return 0;
+#endif
+}
+
+int VkContext::settle_memory() const {
+#ifndef TS5_PS5
+    if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) return 0;
+    const char *e = getenv("TS5_MEMORY_SETTLE_MS");
+    const int max_ms = e && *e ? std::max(0, atoi(e)) : 30000, step = 250;
+    // On the PS5, a load 2 to 3 s after the model before it ended (or after
+    // a build) saw 0.4 to 0.6 GiB less than a load after a pause: DeepSeek
+    // R1 14B got 21,504 to 22,528 tokens instead of 26,624. Right after a
+    // full build MemAvailable was 12,953 MiB, 13,239 at 5 s, 13,490 at 15 s
+    // and 13,525 from 22 s on (the compilers' memory coming back as free
+    // pages, nothing in the page cache). It comes in steps: the kernel adds
+    // each CPU's count to MemAvailable about once a second, so readings a
+    // quarter second apart show +25 to +65 MiB, then nothing for 0.5 to
+    // 1.25 s. A rule that looks at 1 s or less can land between two steps
+    // and stop: one did at 0.5 s, 0.45 GiB short. After a server stops,
+    // about 100 MiB come back over 13 s in steps of 2 to 22 MiB with up to
+    // 2.5 s of nothing between, so a 2 s window stopped there too. So the
+    // first decision comes at 1.5 s (at least one step: a machine with
+    // nothing coming back moves by less than 4 MiB, and a plain model exit
+    // has given everything back by the time the process is gone); past it
+    // the wait goes on at least to 4 s, then while 4 s add 16 MiB.
+    std::vector<uint64_t> seen{mem_available()};  // a reading every step
+    int waited = 0;
+    while (seen[0] && waited < max_ms) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(step));
+        waited += step;
+        seen.push_back(mem_available());
+        const size_t n = seen.size();
+        if (n == 7 && seen[6] < seen[0] + (4ull << 20)) break;
+        if (n >= 17 && seen[n - 1] < seen[n - 17] + (16ull << 20)) break;
+    }
+    std::lock_guard<std::mutex> lk(budget_mutex);
+    ram_at = budget_at = -1;
+    return waited;
 #else
     return 0;
 #endif
@@ -225,7 +267,10 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
     load_tune_file();
     // Wave32 compute on RADV: on the PS5 under Linux, prompts 9% faster
     // (Qwen3 8B, 433 -> 472 tok/s), generation the same, ts5 check passes.
-    // Other drivers ignore it; a RADV_PERFTEST already set wins.
+    // Under it RADV still makes a kernel with subgroup operations in
+    // workgroups of a multiple of 64 threads wave64 (generation's mat-vecs,
+    // attention and norms, so generation stayed the same); TS5_WAVE asks for
+    // a size. Other drivers ignore it; a RADV_PERFTEST already set wins.
     if (!getenv("RADV_PERFTEST")) setenv("RADV_PERFTEST", "cswave32", 0);
 #endif
     auto *c = new VkContext;
@@ -337,6 +382,44 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
         }
     }
 #ifndef TS5_PS5
+    // TS5_WAVE=32 or 64: compute pipelines ask for subgroups that wide instead
+    // of leaving it to the driver. RADV, even under cswave32, keeps a kernel
+    // with subgroup operations in workgroups of a multiple of 64 threads at
+    // 64 (every mat-vec, attention and norm kernel) and makes the rest 32.
+    // TS5_WAVE=32:mv,attn asks only for the pipelines whose names start so
+    // ("mv" takes the one-token and the verify-batch mat-vecs together, as
+    // the helper's same-output rule needs). A workgroup too big for that
+    // size (maxComputeWorkgroupSubgroups) is left to the driver.
+    VkPhysicalDeviceSubgroupSizeControlFeaturesEXT esc{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
+    if (const char *e = getenv("TS5_WAVE"); e && atoi(e) > 0) {
+        const uint32_t want = (uint32_t)atoi(e);
+        const char *only = strchr(e, ':');
+        VkPhysicalDeviceSubgroupSizeControlFeaturesEXT sc{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
+        VkPhysicalDeviceSubgroupSizeControlPropertiesEXT sp{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES_EXT};
+        if (has_extension(dev_have, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME)) {
+            VkPhysicalDeviceFeatures2 sf{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+            sf.pNext = &sc;
+            vkGetPhysicalDeviceFeatures2(c->physical, &sf);
+            VkPhysicalDeviceProperties2 spp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+            spp.pNext = &sp;
+            vkGetPhysicalDeviceProperties2(c->physical, &spp);
+        }
+        if (sc.subgroupSizeControl && (sp.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) &&
+            (want & (want - 1)) == 0 && want >= sp.minSubgroupSize && want <= sp.maxSubgroupSize) {
+            dev_exts.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+            esc.subgroupSizeControl = VK_TRUE;
+            c->required_subgroup = want;
+            c->required_subgroup_max_wg =
+                (uint32_t)std::min<uint64_t>(UINT32_MAX, (uint64_t)want * sp.maxComputeWorkgroupSubgroups);
+            c->required_subgroup_only = only ? only + 1 : "";
+            c->subgroup_size = std::min(c->subgroup_size, want);
+            ts5::log_line("ts5: TS5_WAVE: subgroups of %u for %s", want, only ? only + 1 : "every compute pipeline");
+        } else {
+            ts5::log_line("ts5: TS5_WAVE=%s ignored: compute subgroups here are %u to %u wide%s", e, sp.minSubgroupSize,
+                          sp.maxSubgroupSize, sc.subgroupSizeControl ? "" : ", and no size can be asked for");
+        }
+    }
     if (has_extension(dev_have, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
         dev_exts.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
         c->memory_budget = true;
@@ -358,6 +441,12 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
         pe.pNext = e12.pNext;
         e12.pNext = &pe;
     }
+#ifndef TS5_PS5
+    if (c->required_subgroup) {
+        esc.pNext = e12.pNext;
+        e12.pNext = &esc;
+    }
+#endif
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qci.queueFamilyIndex = c->queue_family;
@@ -386,6 +475,28 @@ VkContext *create_vk_context(int index, bool want_display, std::string &err) {
     }
 #endif
     return c;
+}
+
+bool asks_subgroup(const VkContext &c, const std::string &name, const uint32_t *code, size_t bytes) {
+    if (!c.required_subgroup) return false;
+    const std::string &only = c.required_subgroup_only;
+    bool named = only.empty();
+    for (size_t s = 0; !named && s < only.size();) {
+        size_t e = only.find(',', s);
+        if (e == std::string::npos) e = only.size();
+        named = e > s && name.compare(0, e - s, only, s, e - s) == 0;
+        s = e + 1;
+    }
+    if (!named) return false;
+    const size_t words = bytes / 4;
+    for (size_t i = 5; i < words;) {  // OpExecutionMode (16) main LocalSize (17) x y z
+        const uint32_t op = code[i] & 0xffff, len = code[i] >> 16;
+        if (!len || i + len > words) break;
+        if (op == 16 && len >= 6 && code[i + 2] == 17)
+            return (uint64_t)code[i + 3] * code[i + 4] * code[i + 5] <= c.required_subgroup_max_wg;
+        i += len;
+    }
+    return true;
 }
 
 void destroy_vk_context(VkContext *c) {

@@ -93,16 +93,39 @@ const std::vector<Row> &setting_rows() {
          {{"", "As much as fits"}, {"4096", "4,096 tokens"}, {"8192", "8,192 tokens"}, {"16384", "16,384 tokens"},
           {"32768", "32,768 tokens"}, {"65536", "65,536 tokens"}},
          ""},
+#ifdef TS5_LINUX
+        {"MODELS", "TS5_KV", "Room for longer contexts",
+         "Keeps what the model has read in less memory, so a longer context fits; only where a model's whole "
+         "context doesn't fit otherwise. Half size holds about twice as many tokens, Smaller about 2.5 times "
+         "(keys in 8 bits, values in 4) and Smallest about 3.5 times. Automatic uses Half size where a model "
+         "would otherwise fall well short of its limit, and Smaller where that still does: on the PS5 Qwen3 14B "
+         "gets 32,768 tokens instead of 17,408, DeepSeek R1 and Coder 14B 32,768 instead of about 14,000, Llama "
+         "3.1 8B 131,072 instead of 54,272, Llama 3.2 3B 131,072 instead of 74,752 and Qwen3.5 9B 262,144 "
+         "instead of 175,104. The Gemma models keep the full size: their answers drift on the smaller ones. "
+         "Answers can come out slightly different, and the smaller the cache the more often a long document's "
+         "facts get mixed up.",
+         "Now: the model loads again, which takes a few seconds",
+         {{"", "Automatic"}, {"f16", "Off"}, {"q8", "Half size"}, {"k8v4", "Smaller"}, {"q4", "Smallest"}}, ""},
+#else
         {"MODELS", "TS5_KV", "Room for longer contexts",
          "Keeps what the model has read in half the memory, so about twice the context fits. It's used only when "
          "a model's whole context doesn't fit otherwise. Answers can come out very slightly different.",
          "Now: the model loads again, which takes a few seconds", {{"f16", "Off"}, {"q8", "On"}}, "f16"},
+#endif
         {"MODELS", "TS5_MMB_F16", "Exact prompt reading",
          "Reads every prompt with 32-bit math. Off, Qwen, DeepSeek and Llama models read prompts with 16-bit "
          "math, about 40% faster; a few answers come out worded differently. Gemma always reads in 32-bit. "
          "Replies are written at the same speed either way.",
          "Now: the model loads again, which takes a few seconds", {{"", "Off"}, {"0", "On"}}, ""},
 #ifdef TS5_LINUX
+        {"MODELS", "TS5_YARN", "Longer context for Qwen3 8B and Coder 7B",
+         "Lets Qwen3 8B and Qwen 2.5 Coder 7B read past their 32,768-token limit (YaRN), as far as memory "
+         "allows: on the PS5 about 47,000 tokens for Qwen3 8B (more than 80,000 with Room for longer contexts) and "
+         "123,000 for Coder 7B. The 14B Qwen models gain less: Qwen3 14B about 42,000, DeepSeek R1 and Coder 14B "
+         "about 35,000. With Longest context at 32,768 tokens or less it "
+         "changes nothing; past that, every chat with these models reads with stretched positions, which "
+         "can word a few short answers differently.",
+         "Now: the model loads again, which takes a few seconds", {{"", "Off"}, {"1", "On"}}, ""},
         {"MODELS", "TS5_DRAFT_MODEL", "Helper model",
          "A small model of the same family (such as Qwen3 0.6B for Qwen3 8B, or Llama 3.2 1B for Llama 3.1 8B) "
          "guesses a few words ahead and the big model checks them all at once, so replies come faster. Answers "

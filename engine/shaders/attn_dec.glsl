@@ -25,13 +25,22 @@
 // attn_merge. With KV_Q8 (attn_dec_q8 and the others' _q8 builds) the cache
 // is 8-bit values with an f16 scale per 32, as attn_q8 reads it: a key is
 // half the bytes, loaded as words of 16 values plus its scales, and each
-// value word comes with its block's scale.
+// value word comes with its block's scale. With KV_Q4 as well (the _q4
+// builds) the values are 4-bit, the scales the same: a key is a quarter of
+// the bytes, a word of 4 values 16 bits (kv_word.glsl); with KV_V4 alone
+// (the _k8v4 builds) only V's.
 // With WIDE8 (attn_dec4_256w, attn_dec4_512w): each thread sums 8 value
 // columns instead of 4, so twice the groups take half the keys each, and a
 // tile's value loads take half the round trips (4 for heads of 256, 8 for
 // 512, rather than 8 and 16); and a tile's key passes past its last key are
 // skipped, not run on copies of it. The scores and every column's sum over
 // keys are as before, only the keys' split between groups differs.
+// The builds without RM in their name (attn_decx, attn_decx_64,
+// attn_decx_256w and their cache builds) take the rows from constant RM, so
+// a KV head's G query heads run in G rows (attn_dec5 for 5) instead of
+// padded to 4 or 8: each row's sums are the same either way, only the
+// padding's work is gone. Constant RING = 0: the layer keeps no ring, so a
+// key's slot is the key (no modulo a key); 1: slots key % ring where ring > 0.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_shader_subgroup_basic : require
@@ -42,15 +51,12 @@ layout(local_size_x = 128) in;
 
 layout(std430, binding = 0) restrict readonly buffer Qbuf { vec4 Q4[]; };
 #ifdef KV_Q8
-layout(std430, binding = 1) restrict readonly buffer KC { uvec4 kc[]; };  // 16 values a word
-layout(std430, binding = 1) restrict readonly buffer KC2 { uint kc2[]; };  // the same, 4 a word
-layout(std430, binding = 2) restrict readonly buffer VC { uint vc[]; };    // 4 values a word
+#include "kv_word.glsl"
+layout(std430, binding = 1) restrict readonly buffer KC { KV16 kc[]; };  // 16 values a word
+layout(std430, binding = 1) restrict readonly buffer KC2 { KW_T kc2[]; };  // the same, 4 a word
+layout(std430, binding = 2) restrict readonly buffer VC { VW_T vc[]; };    // 4 values a word
 layout(std430, binding = 5) restrict readonly buffer KS { float16_t k_scale[]; };  // one per 32 values
 layout(std430, binding = 6) restrict readonly buffer VS { float16_t v_scale[]; };
-vec4 i8x4(uint w) {
-    const int i = int(w);
-    return vec4(bitfieldExtract(i, 0, 8), bitfieldExtract(i, 8, 8), bitfieldExtract(i, 16, 8), bitfieldExtract(i, 24, 8));
-}
 // Values a key word holds, and the cache's unit of scales.
 const uint KWV = 16, SB = 32;
 #else
@@ -89,9 +95,14 @@ const uint CPT = 8;  // value columns a thread
 #else
 const uint CPT = 4;
 #endif
-const uint HD = HEAD_DIM, BK = 128, NG = 128 * CPT / HD, GK = BK / NG, SGMAX = 32, RV = RM / 4, VW = CPT / 4;
 layout(constant_id = 0) const uint PLAIN = 0;
 layout(constant_id = 1) const uint LPK = 0;  // 0, 8, 16 or 32; at most the subgroup's size
+layout(constant_id = 2) const uint RING = 1;
+#ifndef RM
+layout(constant_id = 3) const uint RM = 8;  // 1 to 8
+#endif
+// RV: words of 4 rows' weights a key (a last word's rows past RM repeat row RM - 1).
+const uint HD = HEAD_DIM, BK = 128, NG = 128 * CPT / HD, GK = BK / NG, SGMAX = 32, RV = (RM + 3) / 4, VW = CPT / 4;
 // With LPK: lanes per key, keys a pass (one per LPK lanes) and words of 4
 // values a lane. A pass's keys load NB batches at a time (16 words a lane).
 const uint LP = LPK == 0 ? 16 : LPK, NC = BK / LP, WPL = HD / 4 / LP;
@@ -109,7 +120,7 @@ shared float redl[RM][SGMAX];  // each subgroup's sum of weights per row
 
 const float NEG_INF = -1.0 / 0.0;
 
-uint slot(uint key) { return pc.ring != 0 ? key % pc.ring : key; }
+uint slot(uint key) { return RING != 0 && pc.ring != 0 ? key % pc.ring : key; }
 
 void main() {
     const uint tid = gl_LocalInvocationID.x, G = pc.n_head / pc.n_head_kv / pc.hsplit;
@@ -154,9 +165,9 @@ void main() {
             [[unroll]] for (uint i = 0; i < WPL; i++) qs[r][i] = Q4[qo[r] + WPL * jl + i];
 
     // Thread t's key of a tile, all 16 words loaded at once (8 and its 4
-    // scales from the 8-bit cache).
-    uvec4 kw[KW];
+    // scales from the 8-bit cache, 4 and its scales from the 4-bit one).
 #ifdef KV_Q8
+    KV16 kw[KW];
     float ksc[NKS];
 #define LOAD_KEYS(KB)                                                         \
     {                                                                         \
@@ -168,6 +179,7 @@ void main() {
         }                                                                     \
     }
 #else
+    uvec4 kw[KW];
 #define LOAD_KEYS(KB)                                                         \
     {                                                                         \
         const uint k_ = (KB) + tid;                                           \
@@ -202,10 +214,12 @@ void main() {
                     const uint k_ = min(kb + NC * (h * PB + pp) + cl, k_end - 1);
                     const uint v0 = head + slot(k_) * kv_stride;
                     const uint w0 = v0 / 4 + WPL * jl;
-                    [[unroll]] for (uint i = 0; i < WPL; i++) kx[pp][i] = kc2[w0 + i];
 #ifdef KV_Q8
+                    [[unroll]] for (uint i = 0; i < WPL; i++) kx[pp][i] = uint(kc2[w0 + i]);
                     // The lane's values start at 4 WPL jl: their scales from there.
                     [[unroll]] for (uint i = 0; i < NLS; i++) ksl[pp][i] = float(k_scale[v0 / SB + (4 * WPL * jl) / SB + i]);
+#else
+                    [[unroll]] for (uint i = 0; i < WPL; i++) kx[pp][i] = kc2[w0 + i];
 #endif
                 }
                 [[unroll]] for (uint pp = 0; pp < PB; pp++) {
@@ -213,7 +227,7 @@ void main() {
                     [[unroll]] for (uint r = 0; r < RM; r++) x[r] = 0.0;
                     [[unroll]] for (uint i = 0; i < WPL; i++) {
 #ifdef KV_Q8
-                        const vec4 k4 = i8x4(kx[pp][i]) * ksl[pp][i / 8];
+                        const vec4 k4 = kk4(kx[pp][i]) * ksl[pp][i / 8];
 #else
                         const vec4 k4 = vec4(unpackHalf2x16(kx[pp][i].x), unpackHalf2x16(kx[pp][i].y));
 #endif
@@ -227,14 +241,15 @@ void main() {
             }
         } else if (HD <= 128 && key < k_end) {
             [[unroll]] for (uint i = 0; i < KW; i++) {
-                const uvec4 w = kw[i];
 #ifdef KV_Q8
                 // 16 values of one scale block: scaled once, after the sum.
-                const vec4 k0 = i8x4(w.x), k1 = i8x4(w.y), k2 = i8x4(w.z), k3 = i8x4(w.w);
+                const KV16 w = kw[i];
+                const vec4 k0 = kv4x4(w, 0), k1 = kv4x4(w, 1), k2 = kv4x4(w, 2), k3 = kv4x4(w, 3);
                 [[unroll]] for (uint r = 0; r < RM; r++)
                     s[r] += (dot(Q4[qo[r] + 4 * i], k0) + dot(Q4[qo[r] + 4 * i + 1], k1) +
                              dot(Q4[qo[r] + 4 * i + 2], k2) + dot(Q4[qo[r] + 4 * i + 3], k3)) * ksc[i / 2];
 #else
+                const uvec4 w = kw[i];
                 const vec4 k0 = vec4(unpackHalf2x16(w.x), unpackHalf2x16(w.y));
                 const vec4 k1 = vec4(unpackHalf2x16(w.z), unpackHalf2x16(w.w));
                 [[unroll]] for (uint r = 0; r < RM; r++)
@@ -263,7 +278,9 @@ void main() {
             const float ps = subgroupAdd(p[r]);
             if (subgroupElect()) redl[r][gl_SubgroupID] = ps;
         }
-        [[unroll]] for (uint v = 0; v < RV; v++) pw[kl * RV + v] = vec4(p[4 * v], p[4 * v + 1], p[4 * v + 2], p[4 * v + 3]);
+        [[unroll]] for (uint v = 0; v < RV; v++)
+            pw[kl * RV + v] = vec4(p[min(4 * v, RM - 1)], p[min(4 * v + 1, RM - 1)], p[min(4 * v + 2, RM - 1)],
+                                   p[min(4 * v + 3, RM - 1)]);
         barrier();
         [[unroll]] for (uint r = 0; r < RM; r++) {
             float ps = redl[r][0];
@@ -276,15 +293,15 @@ void main() {
         // Values: group g, keys kb + GK g ..; thread c4, columns CPT c4 ...
         const uint j0 = g * GK, nj = min(GK, max(k_end - kb, j0) - j0);
         const uint vo = (head + (kb + j0) * kv_stride) / 4 + VW * c4, vs = kv_stride / 4;
-        // A value word's 4 values; from the 8-bit cache, times their block's
+        // A value word's 4 values; from the 8-bit (or 4-bit) cache, times their block's
         // scale (word w holds values 4 w .., in block 4 w / 32).
 #ifdef KV_Q8
-#define VALUES(w) (i8x4(vc[w]) * float(v_scale[(w) / (SB / 4)]))
+#define VALUES(w) (vv4(uint(vc[w])) * float(v_scale[(w) / (SB / 4)]))
 #else
 #define VALUES(w) vec4(vc[w])
 #endif
         uint j = 0;
-        if (nj == GK && pc.ring == 0) {
+        if (nj == GK && (RING == 0 || pc.ring == 0)) {
             [[unroll]] for (uint jb = 0; jb < GK; jb += 8) {  // eight keys' loads in flight
                 vec4 v[8][VW];
                 [[unroll]] for (uint u = 0; u < 8; u++)

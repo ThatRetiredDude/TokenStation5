@@ -1,0 +1,13 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// attn_pf128_q8 with PF_TRIM, PF_EXP2 and PF_PVH (TS5_ATTN_PF_TRIM=4, never on a Gemma): the te
+// build with each 16-key step's p V in packed f16, and no next tile held in registers
+// (NO_PREFETCH), which keeps it at 128 registers (see attn_pf.glsl).
+// Prompt attention over the 8-bit KV cache, heads of 128 (see attn_pf.glsl).
+#define KV_Q8
+#define HEAD_DIM 128
+#define PF_TRIM
+#define PF_EXP2
+#define PF_PVH
+#define NO_PREFETCH
+#include "attn_pf.glsl"

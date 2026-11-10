@@ -21,6 +21,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -43,21 +44,115 @@
 #include "attn_pf128.spv.h"
 #include "attn_pf256.spv.h"
 #include "attn_pf512.spv.h"
+#include "attn_pf256s.spv.h"
+#include "attn_pf512s.spv.h"
 #include "attn_pf_q8.spv.h"
+#include "attn_pf_q4.spv.h"
+#include "attn_pf_k8v4.spv.h"
 #include "attn_q8.spv.h"
+#include "attn_q4.spv.h"
+#include "attn_k8v4.spv.h"
 #include "attn_dec_q8.spv.h"
+#include "attn_dec_q4.spv.h"
+#include "attn_dec_k8v4.spv.h"
 #include "attn_dec4_q8.spv.h"
+#include "attn_dec4_q4.spv.h"
+#include "attn_dec4_k8v4.spv.h"
 #include "attn_dec4_256_q8.spv.h"
+#include "attn_dec4_256_q4.spv.h"
+#include "attn_dec4_256_k8v4.spv.h"
 #include "attn_dec4_512_q8.spv.h"
+#include "attn_dec4_512_q4.spv.h"
+#include "attn_dec4_512_k8v4.spv.h"
 #include "attn_dec4_256w.spv.h"
 #include "attn_dec4_512w.spv.h"
 #include "attn_dec4_256w_q8.spv.h"
+#include "attn_dec4_256w_q4.spv.h"
+#include "attn_dec4_256w_k8v4.spv.h"
 #include "attn_dec4_512w_q8.spv.h"
+#include "attn_dec4_512w_q4.spv.h"
+#include "attn_dec4_512w_k8v4.spv.h"
 #include "attn_dec_64_q8.spv.h"
+#include "attn_dec_64_q4.spv.h"
+#include "attn_dec_64_k8v4.spv.h"
 #include "attn_dec4_64_q8.spv.h"
+#include "attn_dec4_64_q4.spv.h"
+#include "attn_dec4_64_k8v4.spv.h"
+#include "attn_decx.spv.h"
+#include "attn_decx_q8.spv.h"
+#include "attn_decx_q4.spv.h"
+#include "attn_decx_k8v4.spv.h"
+#include "attn_decx_64.spv.h"
+#include "attn_decx_64_q8.spv.h"
+#include "attn_decx_64_q4.spv.h"
+#include "attn_decx_64_k8v4.spv.h"
+#include "attn_decx_256w.spv.h"
+#include "attn_decx_256w_q8.spv.h"
+#include "attn_decx_256w_q4.spv.h"
+#include "attn_decx_256w_k8v4.spv.h"
 #include "attn_pf128_q8.spv.h"
+#include "attn_pf128_q4.spv.h"
+#include "attn_pf128_k8v4.spv.h"
 #include "attn_pf256_q8.spv.h"
+#include "attn_pf256_q4.spv.h"
+#include "attn_pf256_k8v4.spv.h"
 #include "attn_pf512_q8.spv.h"
+#include "attn_pf512_q4.spv.h"
+#include "attn_pf512_k8v4.spv.h"
+#include "attn_pf256s_q8.spv.h"
+#include "attn_pf256s_q4.spv.h"
+#include "attn_pf256s_k8v4.spv.h"
+#include "attn_pf512s_q8.spv.h"
+#include "attn_pf512s_q4.spv.h"
+#include "attn_pf512s_k8v4.spv.h"
+#include "attn_pf128_t.spv.h"
+#include "attn_pf128_q8_t.spv.h"
+#include "attn_pf128_q4_t.spv.h"
+#include "attn_pf128_k8v4_t.spv.h"
+#include "attn_pf256s_t.spv.h"
+#include "attn_pf256s_q8_t.spv.h"
+#include "attn_pf256s_q4_t.spv.h"
+#include "attn_pf256s_k8v4_t.spv.h"
+#include "attn_pf512s_t.spv.h"
+#include "attn_pf512s_q8_t.spv.h"
+#include "attn_pf512s_q4_t.spv.h"
+#include "attn_pf512s_k8v4_t.spv.h"
+#include "attn_pf128_tc.spv.h"
+#include "attn_pf128_q8_tc.spv.h"
+#include "attn_pf128_q4_tc.spv.h"
+#include "attn_pf128_k8v4_tc.spv.h"
+#include "attn_pf256s_tc.spv.h"
+#include "attn_pf256s_q8_tc.spv.h"
+#include "attn_pf256s_q4_tc.spv.h"
+#include "attn_pf256s_k8v4_tc.spv.h"
+#include "attn_pf512s_tc.spv.h"
+#include "attn_pf512s_q8_tc.spv.h"
+#include "attn_pf512s_q4_tc.spv.h"
+#include "attn_pf512s_k8v4_tc.spv.h"
+#include "attn_pf128_te.spv.h"
+#include "attn_pf128_q8_te.spv.h"
+#include "attn_pf128_q4_te.spv.h"
+#include "attn_pf128_k8v4_te.spv.h"
+#include "attn_pf256s_te.spv.h"
+#include "attn_pf256s_q8_te.spv.h"
+#include "attn_pf256s_q4_te.spv.h"
+#include "attn_pf256s_k8v4_te.spv.h"
+#include "attn_pf512s_te.spv.h"
+#include "attn_pf512s_q8_te.spv.h"
+#include "attn_pf512s_q4_te.spv.h"
+#include "attn_pf512s_k8v4_te.spv.h"
+#include "attn_pf128_tp.spv.h"
+#include "attn_pf128_q8_tp.spv.h"
+#include "attn_pf128_q4_tp.spv.h"
+#include "attn_pf128_k8v4_tp.spv.h"
+#include "attn_pf256s_tp.spv.h"
+#include "attn_pf256s_q8_tp.spv.h"
+#include "attn_pf256s_q4_tp.spv.h"
+#include "attn_pf256s_k8v4_tp.spv.h"
+#include "attn_pf512s_tp.spv.h"
+#include "attn_pf512s_q8_tp.spv.h"
+#include "attn_pf512s_q4_tp.spv.h"
+#include "attn_pf512s_k8v4_tp.spv.h"
 #include "get_rows_f16.spv.h"
 #include "get_rows_f32.spv.h"
 #include "get_rows_q4_0.spv.h"
@@ -147,9 +242,31 @@
 #include "mmbq_q5_k.spv.h"
 #include "mmbq_q6_k.spv.h"
 #include "mmbq_q8_0.spv.h"
+#include "mmb16dqz_q4_k.spv.h"
+#include "mmb16dqz_q5_k.spv.h"
+#include "mmb16dqz_q6_k.spv.h"
+#include "mmb16dqz_q8_0.spv.h"
+#include "mmb16dqlz_q4_k.spv.h"
+#include "mmb16dqlz_q5_k.spv.h"
+#include "mmb16dqlz_q6_k.spv.h"
+#include "mmb16dqlz_q8_0.spv.h"
+#include "mmbz_q4_k.spv.h"
+#include "mmbz_q5_k.spv.h"
+#include "mmbz_q6_k.spv.h"
+#include "mmbz_q8_0.spv.h"
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
+#include "qkv_post_q8t.spv.h"
+#include "qkv_post_q4.spv.h"
+#include "qkv_post_k8v4.spv.h"
+#include "qkv_post_q4t.spv.h"
+#include "qkv_post_k8v4t.spv.h"
+#include "qkv_post_q8tv.spv.h"
+#include "qkv_post_q4tv.spv.h"
+#include "qkv_post_k8v4tv.spv.h"
+#include "attn_unturn.spv.h"
 #include "rmsnorm.spv.h"
+#include "rmsnorm_early.spv.h"
 #include "split_gate.spv.h"
 #include "gate_mul.spv.h"
 #include "ssm_conv.spv.h"
@@ -158,6 +275,7 @@
 #include "gdn_norm.spv.h"
 #include "zero.spv.h"
 #include "rmsnorm2.spv.h"
+#include "rmsnorm2_early.spv.h"
 #include "softcap.spv.h"
 #include "swiglu.spv.h"
 #include "log.h"
@@ -275,6 +393,24 @@ static bool mmb_type(const Weight &w) { return fast_type(w) && w.type() != GGML_
 // The x-staging verify kernels (mvtx, TS5_MVTX=1): whole 256-value groups.
 static bool mvtx_type(const Weight &w) { return mmb_type(w) && w.ne0() % 256 == 0; }
 
+// Rows of logits the GPU's buffer holds, 4 bytes for each word of the
+// vocabulary each (Gemma's 262,144 words: 1 MiB a row). Serving never wants
+// more than a verify batch's 8 at once; a call that wants more (ts5 logits,
+// ts5 check) gets them 8 at a time, each piece copied out before the next.
+// TS5_LOGITS_ROWS (Linux, 1 to 256; 8 by default) sets it. The store title
+// keeps 256: a call's logits in one piece.
+static int logits_rows() {
+#ifdef TS5_PS5
+    return 256;
+#else
+    static const int rows = [] {
+        const char *e = getenv("TS5_LOGITS_ROWS");
+        return e && *e ? std::min(256, std::max(1, atoi(e))) : 8;
+    }();
+    return rows;
+#endif
+}
+
 #define CHECK(x)                                                                   \
     do {                                                                           \
         VkResult r_ = (x);                                                         \
@@ -309,6 +445,7 @@ public:
             if (fence_) vk.vkDestroyFence(dev_, fence_, nullptr);
             if (pool_) vk.vkDestroyCommandPool(dev_, pool_, nullptr);
         }
+        if (emb_fd_ >= 0) close(emb_fd_);
         if (owns_ctx_) destroy_vk_context(ctx_);
     }
 
@@ -358,6 +495,12 @@ public:
             return false;
         }
         if (!init_device(err)) return false;
+        // An auto-fit context is sized once, from what is free now: let
+        // memory a process just gave back come in first.
+        if (n_ctx_ <= 0)
+            if (const int ms = ctx_->settle_memory(); ms > 1500)
+                ts5::log_line("ts5: waited %.2f s for memory just freed to come back; memory for models now %.2f GiB",
+                              ms / 1000.0, ctx_->device_memory() / 1073741824.0);
         if (!memory_fits(err)) return false;
         if (!init_pipelines(err)) return false;
         if (!upload_weights(path, err)) return false;
@@ -373,7 +516,8 @@ public:
         const uint64_t free = ctx_->free_memory();
         if (free == UINT64_MAX) return true;
         uint64_t weights = 0;
-        for (const auto &t : m_.gguf.tensors) weights += t.nbytes;
+        for (const auto &t : m_.gguf.tensors)
+            if (!(embd_file_ && &t == m_.tok_embd.info)) weights += t.nbytes;
         const uint64_t fixed = vk_fixed_bytes(hp_, weights), per = kv_bytes_per_token(hp_, kv_);
         const uint64_t ctx = (uint64_t)(n_ctx_ > 0 ? n_ctx_ : 1024) * per + (n_ctx_ > 0 ? 0 : fit_reserve_);
         // With room kept for a helper, the context's own measure too, before
@@ -398,20 +542,21 @@ public:
     }
 
     const float *logits_view() const override { return (const float *)logits_.map; }
+    int in_place_rows() const override { return out_rows_; }
 
-    bool save_state(std::string &err) override {
-        if (!rec_layers_) return false;
-        const VkDeviceSize bytes = 4ull * rec_layers_ * hp_.rec_state_floats();
-        if (!saved_.buf && !create_buf(bytes, false, saved_, err)) return false;
-        if (!copy(rec_, saved_, 0, bytes, err)) return false;
-        saved_pos_ = rec_pos_;
+    int state_slots() const override { return rec_layers_ ? (int)saved_.size() : 0; }
+
+    bool save_state(int slot, std::string &err) override {
+        if (!rec_layers_ || slot < 0 || slot >= (int)saved_.size()) return false;
+        if (!copy(rec_, saved_[slot], 0, 4ull * rec_layers_ * hp_.rec_state_floats(), err)) return false;
+        saved_pos_[slot] = rec_pos_;
         return true;
     }
 
-    bool restore_state(std::string &err) override {
-        if (!rec_layers_ || saved_pos_ < 0) return false;
-        if (!copy(saved_, rec_, 0, 4ull * rec_layers_ * hp_.rec_state_floats(), err)) return false;
-        rec_pos_ = saved_pos_;
+    bool restore_state(int slot, std::string &err) override {
+        if (!rec_layers_ || slot < 0 || slot >= (int)saved_.size() || saved_pos_[slot] < 0) return false;
+        if (!copy(saved_[slot], rec_, 0, 4ull * rec_layers_ * hp_.rec_state_floats(), err)) return false;
+        rec_pos_ = saved_pos_[slot];
         return true;
     }
 
@@ -432,6 +577,12 @@ public:
 
     bool fwd(const int32_t *tokens, int n, int pos0, float *logits, bool all, bool want, std::string &err) {
         if (pos0 + n > n_ctx_) { err = "context full"; return false; }
+        // Logits left in the buffer: no more rows than it holds.
+        if (want && all && !logits && n > out_rows_) {
+            err = "the logits of " + std::to_string(n) + " positions in place: the buffer holds " +
+                  std::to_string(out_rows_) + " (TS5_LOGITS_ROWS)";
+            return false;
+        }
         // The linear layers' state holds the tokens before rec_pos_: a call
         // goes on from there, or starts over at 0 (record zeroes it).
         if (rec_layers_) {
@@ -489,13 +640,44 @@ private:
         if (const char *e = getenv("TS5_MV_ROWS_MIN")) mv_rows_min_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_ATTN")) attn_fast_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_SPLITS")) attn_splits_ = std::max(0, atoi(e));
+#ifndef TS5_PS5
+        if (const char *e = getenv("TS5_ATTN_PF_ROUNDS"))
+            pf_rounds_ = !strcmp(e, "cu") ? ctx_->compute_units : (uint32_t)std::max(0, atoi(e));
+        // The token table out of GPU memory where the output doesn't share it
+        // and the sizing counting the blocks' unused ends, both on by
+        // default since the PS5 measured them (job DA: the same logits byte
+        // for byte; Qwen3 14B 29,696 -> 32,768 tokens, 55,296 with YaRN,
+        // 10 of 11 long-document answers as before, prompts 0.2-1.1%
+        // slower, at least 1.7 GiB left free). TS5_EMBD_FILE=0 and
+        // TS5_FIT_TAILS=0 go back.
+        bool embd_file = true;
+        if (const char *e = getenv("TS5_EMBD_FILE")) embd_file = atoi(e) != 0;
+        embd_file_ = embd_file && m_.tok_embd && m_.output.info != m_.tok_embd.info;
+        fit_tails_ = true;
+        if (const char *e = getenv("TS5_FIT_TAILS")) fit_tails_ = atoi(e) != 0;
+        // The trimmed prompt attention's exact build by default (=1: on the
+        // PS5 the logits byte for byte the untrimmed kernels' on five
+        // models at up to 57k tokens, job DC; 32k prompts 2.6-6.6% faster).
+        // =0 the untrimmed kernels; =3 and =4 change the last bits.
+        pf_trim_ = 1;
+        if (const char *e = getenv("TS5_ATTN_PF_TRIM")) pf_trim_ = (uint32_t)std::min(4, std::max(0, atoi(e)));
+        // f16 p V would overflow on Gemma's large values: 3 there.
+        if (pf_trim_ == 4 && (hp_.arch == "gemma3" || hp_.arch == "gemma4")) {
+            pf_trim_ = 3;
+            ts5::log_line("ts5: TS5_ATTN_PF_TRIM=4 runs as 3 on a Gemma (no f16 p V)");
+        }
+#endif
         if (const char *e = getenv("TS5_ATTN_PF")) attn_pf_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_DEC")) attn_dec_min_ = atoi(e) > 0 ? atoi(e) : 0;
         if (const char *e = getenv("TS5_ATTN_PF128")) attn_pf128_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_ATTN_PF_SLIM")) attn_pf_slim_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_PLAIN")) attn_dec_plain_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC_KEYS")) attn_dec_keys_ = atoi(e);
+        if (const char *e = getenv("TS5_PIPE_STATS")) pipe_stats_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_DEC64")) attn_dec64_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_ATTN_WIDE8")) attn_wide8_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_ATTN_DEC_EXACT")) attn_dec_exact_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_ATTN_DEC_NORING")) attn_dec_noring_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB")) mmb_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV16")) mv16_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MVT")) mvt_ = atoi(e) != 0;
@@ -516,6 +698,11 @@ private:
         // fused kernel. TS5_GLU_GELU=1 turns it on.
         if (const char *e = getenv("TS5_GLU_GELU")) glu_gelu_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_NORM_FUSE")) norm_fuse_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_NORM_EARLY")) {
+            const int v = atoi(e);
+            norm_early_ = v != 0;
+            norm_early_npt_ = (uint32_t)std::min(std::max(v, 1), 16);
+        }
         if (const char *e = getenv("TS5_MMB_MIN")) mmb_min_ = atoi(e);
 #ifndef TS5_PS5
         // RADV (with wave32): splitting the small matrices' columns down to
@@ -569,10 +756,32 @@ private:
         const bool gemma = hp_.arch == "gemma3" || hp_.arch == "gemma4";
         mmb_f16_ = ctx_->float16 && (hp_.arch == "qwen2" || hp_.arch == "qwen3" || hp_.arch == "llama");
         if (hp_.arch == "qwen3" && hp_.n_embd <= 1024) mmb_f16_ = false;
+#ifndef TS5_PS5
+        // Qwen3.5 too on Linux (the PS5, job DB: Qwen3.5 9B passes the
+        // check in f16 at 256 tokens of text, 512 and 2,048, within 0.2% of
+        // the largest logit; prompts 589 -> 826 tok/s; 11 of 11 right on a
+        // 111,468-token document).
+        if (hp_.arch == "qwen35") mmb_f16_ = ctx_->float16;
+#endif
         if (gemma) mmb_f16_skip_ = ",ffn_gate,ffn_up,";
         if (hp_.arch == "llama" && hp_.n_embd <= 2048) mmb_f16_skip_ = ",ffn_down,attn_output,";
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_F16_SKIP")) mmb_f16_skip_ = std::string(",") + e + ",";
+#ifndef TS5_PS5
+        // Chunks of 9 to 127 tokens (a short follow-up, a tool result, a
+        // long prompt's last chunk) on the f16 128 x 128 kernel however few
+        // blocks they make (TS5_MMB_SHORT=0|1, on by default on Linux; not
+        // for the f32 models or the roles TS5_MMB_F16_SKIP keeps on f32).
+        // The block count's rule sent q, o and down to the f32 64 x 64
+        // kernel there; on the PS5 (job CZ, TS5_MMB_MIN=1 for the
+        // same choice) prompts of 9-127 tokens read 1.14-1.76x faster
+        // (Qwen3 8B, 100 tokens: 280 -> 160 ms; DeepSeek 14B 474 -> 267),
+        // the same at 8 and 128, checks passing (0.0027 and 0.0025 of the
+        // largest logit). 128 tokens and more keep the rule, with its
+        // column splits.
+        mmb_short_ = true;
+        if (const char *e = getenv("TS5_MMB_SHORT")) mmb_short_ = atoi(e) != 0;
+#endif
         // The prompt kernel's variants (TS5_MMB_VAR): "q" loads x by quads of
         // tokens and stores them to shared memory as vectors, "d"
         // double-buffers the shared tiles (one barrier a step; f16 only),
@@ -604,11 +813,34 @@ private:
             for (char c : {'d', 'l'})  // f16 only
                 mmb_var32_.erase(std::remove(mmb_var32_.begin(), mmb_var32_.end(), c), mmb_var32_.end());
         }
-        kv_ = kv_type_setting();
-        if (kv_ == KvType::Q8 && !(attn_ok_all() && hp_.max_hd() % 32 == 0)) {
-            ts5::log_line("ts5: an 8-bit KV cache needs attn and heads a multiple of 32 wide; using f16");
+#ifndef TS5_PS5
+        // TS5_MMB_NOZERO (Linux): the default variants' z builds, whose
+        // store() doesn't zero the rows past the matrix and the tokens past
+        // the batch. Their loads are clamped to the last row and token, so
+        // what they compute is finite and never stored, and only their own
+        // sums read it. Without the select RADV fuses Q4_K's and Q5_K's
+        // d1 * q - m1 into the f16 conversion (one rounding, not two): the
+        // same bits wherever d1 * q - m1 is exact in f32 (Q6_K, Q8_0 and the
+        // f32 kernel always are).
+        // On by default for the f16 kernel (=1) since the PS5 measured it
+        // (job DE: the same logits byte for byte on 8 models, prompts 1.3-2.6%
+        // faster); the f32 kernel's z build made Gemma 4's 2.4% slower, so
+        // only =2 takes it too. =0: the zeroing builds.
+        int nozero = 1;
+        if (const char *e = getenv("TS5_MMB_NOZERO")) nozero = atoi(e);
+        if (nozero >= 1)
+            for (std::string *v : {&mmb_var_, &mmb_var_q8_})
+                if (*v == "dq" || *v == "dql") *v += "z";
+        if (nozero >= 2 && mmb_var32_.empty()) mmb_var32_ = "z";
+#endif
+        bool kv_auto = false;
+        kv_ = kv_type_setting(&kv_auto);
+        const bool q8_ok = attn_ok_all() && hp_.max_hd() % 32 == 0;
+        if (kv_quantized(kv_) && !q8_ok) {
+            ts5::log_line("ts5: an 8- or 4-bit KV cache needs attn and heads a multiple of 32 wide; using f16");
             kv_ = KvType::F16;
         }
+        kv_auto_ = kv_auto && q8_ok;
         const char *prof = getenv("TS5_PROFILE");
         cpu_prof_ = prof && atoi(prof) != 0;
         if (prof && atoi(prof) == 1) {
@@ -643,6 +875,50 @@ private:
         all_bufs_.push_back(b.buf);
         VkMemoryRequirements req;
         vk.vkGetBufferMemoryRequirements(dev_, b.buf, &req);
+        const std::vector<int> types = mem_types(req, host);
+        if (types.empty()) { err = "no suitable memory type"; return false; }
+        Arena *ar = nullptr;
+        for (int type : types) {
+            for (auto &a : arenas_)
+                if (a.type == type && (a.used + req.alignment - 1) / req.alignment * req.alignment + req.size <= a.size) { ar = &a; break; }
+            if (ar) break;
+        }
+        VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        for (size_t t = 0; !ar && t < types.size(); t++) {
+            Arena a;
+            a.type = types[t];
+            a.size = exact ? req.size : std::max<VkDeviceSize>(req.size, 1ull << 30);
+            VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            mai.allocationSize = a.size;
+            mai.memoryTypeIndex = (uint32_t)a.type;
+            r = vk.vkAllocateMemory(dev_, &mai, nullptr, &a.mem);
+            if (r != VK_SUCCESS && a.size > req.size) {  // retry with just what is needed
+                a.size = req.size;
+                mai.allocationSize = a.size;
+                r = vk.vkAllocateMemory(dev_, &mai, nullptr, &a.mem);
+            }
+            if (r != VK_SUCCESS) continue;
+            if (memprops_.memoryTypes[a.type].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+                CHECK(vk.vkMapMemory(dev_, a.mem, 0, VK_WHOLE_SIZE, 0, (void **)&a.map));
+            arenas_.push_back(a);
+            ar = &arenas_.back();
+            allocated_ += a.size;
+            // After the context is sized only its own exact blocks count;
+            // anything else comes out of what was kept free for the system.
+            if (sized_ && !exact)
+                ts5::log_line("ts5: warning: %llu MiB of GPU memory taken after the context was sized, not counted in it",
+                              (unsigned long long)(a.size >> 20));
+        }
+        if (!ar) { err = "vkAllocateMemory failed (" + std::to_string((int)r) + "), out of GPU memory?"; return false; }
+        VkDeviceSize off = (ar->used + req.alignment - 1) / req.alignment * req.alignment;
+        CHECK(vk.vkBindBufferMemory(dev_, b.buf, ar->mem, off));
+        ar->used = off + req.size;
+        b.size = size;
+        b.map = ar->map ? ar->map + off : nullptr;
+        return true;
+    }
+
+    std::vector<int> mem_types(const VkMemoryRequirements &req, bool host) const {
         // The memory types to use, best first. Host-visible requests prefer
         // device-local too (unified memory: PS5, APUs, ReBAR); weights prefer
         // device-local and fall back to anything. A type whose memory runs out
@@ -674,47 +950,14 @@ private:
 #endif
             add(0);
         }
-        if (types.empty()) { err = "no suitable memory type"; return false; }
-        Arena *ar = nullptr;
-        for (int type : types) {
-            for (auto &a : arenas_)
-                if (a.type == type && (a.used + req.alignment - 1) / req.alignment * req.alignment + req.size <= a.size) { ar = &a; break; }
-            if (ar) break;
-        }
-        VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-        for (size_t t = 0; !ar && t < types.size(); t++) {
-            Arena a;
-            a.type = types[t];
-            a.size = exact ? req.size : std::max<VkDeviceSize>(req.size, 1ull << 30);
-            VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-            mai.allocationSize = a.size;
-            mai.memoryTypeIndex = (uint32_t)a.type;
-            r = vk.vkAllocateMemory(dev_, &mai, nullptr, &a.mem);
-            if (r != VK_SUCCESS && a.size > req.size) {  // retry with just what is needed
-                a.size = req.size;
-                mai.allocationSize = a.size;
-                r = vk.vkAllocateMemory(dev_, &mai, nullptr, &a.mem);
-            }
-            if (r != VK_SUCCESS) continue;
-            if (memprops_.memoryTypes[a.type].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
-                CHECK(vk.vkMapMemory(dev_, a.mem, 0, VK_WHOLE_SIZE, 0, (void **)&a.map));
-            arenas_.push_back(a);
-            ar = &arenas_.back();
-            allocated_ += a.size;
-        }
-        if (!ar) { err = "vkAllocateMemory failed (" + std::to_string((int)r) + "), out of GPU memory?"; return false; }
-        VkDeviceSize off = (ar->used + req.alignment - 1) / req.alignment * req.alignment;
-        CHECK(vk.vkBindBufferMemory(dev_, b.buf, ar->mem, off));
-        ar->used = off + req.size;
-        b.size = size;
-        b.map = ar->map ? ar->map + off : nullptr;
-        return true;
+        return types;
     }
 
     // spec, spec1: the values of the shader's specialization constants 0 and
-    // 1, where not 0.
+    // 1, where not 0; more: those of constants 2, 3, ... (with 0 and 1 set
+    // as given).
     bool make_pipe(const std::string &name, const uint32_t *code, size_t bytes, uint32_t nbind, std::string &err,
-                   uint32_t spec = 0, uint32_t spec1 = 0, bool stats = false) {
+                   uint32_t spec = 0, uint32_t spec1 = 0, bool stats = false, const std::vector<uint32_t> &more = {}) {
         Pipe p;
         p.nbind = nbind;
         std::vector<VkDescriptorSetLayoutBinding> b(nbind);
@@ -746,12 +989,24 @@ private:
         cp.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         cp.stage.module = mod;
         cp.stage.pName = "main";
-        const VkSpecializationMapEntry se[2] = {{0, 0, 4}, {1, 4, 4}};
-        const uint32_t sv[2] = {spec, spec1};
-        VkSpecializationInfo si{spec1 ? 2u : 1u, se, spec1 ? 8u : 4u, sv};
-        if (spec || spec1) cp.stage.pSpecializationInfo = &si;
+        VkSpecializationMapEntry se[8];
+        uint32_t sv[8];
+        const uint32_t nsc = !more.empty() ? 2 + (uint32_t)std::min<size_t>(more.size(), 6) : spec1 ? 2 : spec ? 1 : 0;
+        for (uint32_t i = 0; i < nsc; i++) {
+            se[i] = {i, 4 * i, 4};
+            sv[i] = i == 0 ? spec : i == 1 ? spec1 : more[i - 2];
+        }
+        VkSpecializationInfo si{nsc, se, 4 * nsc, sv};
+        if (nsc) cp.stage.pSpecializationInfo = &si;
+        VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT rss{
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT};
+        if (asks_subgroup(*ctx_, name, code, bytes)) {
+            rss.requiredSubgroupSize = ctx_->required_subgroup;
+            cp.stage.pNext = &rss;
+            waved_++;
+        }
         cp.layout = p.layout;
-        stats = stats && get_stats_;
+        stats = (stats || pipe_stats_) && get_stats_;
         if (stats) cp.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
         CHECK(vk.vkCreateComputePipelines(dev_, VK_NULL_HANDLE, 1, &cp, nullptr, &p.pipe));
         vk.vkDestroyShaderModule(dev_, mod, nullptr);
@@ -760,8 +1015,13 @@ private:
         return true;
     }
 
+    // TS5_WAVE: whether this pipeline asks for VkContext::required_subgroup:
+    // its name starts with one of required_subgroup_only's prefixes (or there
+    // are none), and its workgroup (the SPIR-V's LocalSize) is no bigger than
+    // the device allows at that size.
     // p.waves and p.wave_size from the driver's statistics (RADV: "Subgroups
-    // per SIMD").
+    // per SIMD"), and with TS5_PIPE_STATS=1 a line for every pipeline: its
+    // subgroup size, registers ("VGPRs") and waves a SIMD.
     void read_stats(const std::string &name, Pipe &p) {
         VkPipelineInfoKHR pi{VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR};
         pi.pipeline = p.pipe;
@@ -775,13 +1035,21 @@ private:
         if (get_stats_(dev_, &ei, &ns, nullptr) < 0) return;
         std::vector<VkPipelineExecutableStatisticKHR> st(ns, {VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR});
         if (get_stats_(dev_, &ei, &ns, st.data()) < 0) return;
+        uint32_t regs = 0;
         for (auto &e : st) {
-            if (strcmp(e.name, "Subgroups per SIMD")) continue;
-            if (e.format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR) p.waves = (uint32_t)e.value.u64;
-            else if (e.format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR) p.waves = (uint32_t)e.value.i64;
+            const bool waves = !strcmp(e.name, "Subgroups per SIMD");
+            if (!waves && strcmp(e.name, "VGPRs")) continue;
+            const uint32_t v = e.format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR  ? (uint32_t)e.value.u64
+                               : e.format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR ? (uint32_t)e.value.i64
+                                                                                               : 0;
+            (waves ? p.waves : regs) = v;
         }
         p.wave_size = ep.subgroupSize;
-        if (p.waves) ts5::log_line("ts5: %s: %u waves of %u a SIMD", name.c_str(), p.waves, p.wave_size);
+        if (pipe_stats_)
+            ts5::log_line("ts5: %s: subgroups of %u, %u registers, %u waves a SIMD", name.c_str(), p.wave_size, regs,
+                          p.waves);
+        else if (p.waves)
+            ts5::log_line("ts5: %s: %u waves of %u a SIMD", name.c_str(), p.waves, p.wave_size);
     }
 
     // Of the prompt kernels (mmb*), the variants in use only.
@@ -814,6 +1082,11 @@ private:
         P(mmb16dq_q4_k, 4) P(mmb16dq_q5_k, 4) P(mmb16dq_q6_k, 4) P(mmb16dq_q8_0, 4)
         P(mmb16dql_q4_k, 4) P(mmb16dql_q5_k, 4) P(mmb16dql_q6_k, 4) P(mmb16dql_q8_0, 4)
         P(mmbq_q4_k, 4) P(mmbq_q5_k, 4) P(mmbq_q6_k, 4) P(mmbq_q8_0, 4)
+#ifndef TS5_PS5
+        P(mmb16dqz_q4_k, 4) P(mmb16dqz_q5_k, 4) P(mmb16dqz_q6_k, 4) P(mmb16dqz_q8_0, 4)
+        P(mmb16dqlz_q4_k, 4) P(mmb16dqlz_q5_k, 4) P(mmb16dqlz_q6_k, 4) P(mmb16dqlz_q8_0, 4)
+        P(mmbz_q4_k, 4) P(mmbz_q5_k, 4) P(mmbz_q6_k, 4) P(mmbz_q8_0, 4)
+#endif
         if (mmb_ && !pipes_.count("mmb16" + mmb_var_ + "_q4_k")) {
             err = "no prompt kernel variant \"" + mmb_var_ + "\" (TS5_MMB_VAR)";
             return false;
@@ -856,28 +1129,122 @@ private:
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
-        P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_merge, 2) 
+        P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(qkv_post_q8t, 13) P(qkv_post_q4, 13) P(qkv_post_q4t, 13) P(qkv_post_q8tv, 13) P(qkv_post_q4tv, 13) P(qkv_post_k8v4, 13) P(qkv_post_k8v4t, 13) P(qkv_post_k8v4tv, 13) P(attn_unturn, 1) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_q4, 7) P(attn_k8v4, 7) P(attn_merge, 2) 
+        if (const uint32_t npt = norm_npt();
+            npt && (!make_pipe("rmsnorm_early", spv_rmsnorm_early, sizeof(spv_rmsnorm_early), 3, err, npt) ||
+                    !make_pipe("rmsnorm2_early", spv_rmsnorm2_early, sizeof(spv_rmsnorm2_early), 5, err, npt)))
+            return false;
         P(attn_pf, 5) P(attn_pf128, 5) P(attn_pf256, 5) P(attn_pf512, 5)
         P(attn_pf_q8, 7) P(attn_pf128_q8, 7) P(attn_pf256_q8, 7) P(attn_pf512_q8, 7)
+        P(attn_pf256s, 5) P(attn_pf512s, 5) P(attn_pf256s_q8, 7) P(attn_pf512s_q8, 7)
+        P(attn_pf_q4, 7) P(attn_pf128_q4, 7) P(attn_pf256_q4, 7) P(attn_pf512_q4, 7)
+        P(attn_pf256s_q4, 7) P(attn_pf512s_q4, 7)
+        P(attn_pf_k8v4, 7) P(attn_pf128_k8v4, 7) P(attn_pf256_k8v4, 7) P(attn_pf512_k8v4, 7)
+        P(attn_pf256s_k8v4, 7) P(attn_pf512s_k8v4, 7)
+#ifndef TS5_PS5
+        // TS5_ATTN_PF_TRIM: each slim build's t build twice, NAME.t for a
+        // sliding layer's ring and NAME.tn (constant 0 = 1) for the rest;
+        // =2 the tc builds, which keep subgroupClusteredAdd, =3 the te
+        // builds (base-2 scores, chained dot products), =4 the tp builds
+        // (the te builds with p V in packed f16).
+#define PT(n, nb)                                                                                     \
+    if (pf_trim_) {                                                                                   \
+        const uint32_t *c = pf_trim_ == 1   ? spv_##n##_t                                             \
+                            : pf_trim_ == 2 ? spv_##n##_tc                                            \
+                            : pf_trim_ == 3 ? spv_##n##_te                                            \
+                                            : spv_##n##_tp;                                           \
+        const size_t z = pf_trim_ == 1   ? sizeof(spv_##n##_t)                                        \
+                         : pf_trim_ == 2 ? sizeof(spv_##n##_tc)                                       \
+                         : pf_trim_ == 3 ? sizeof(spv_##n##_te)                                       \
+                                         : sizeof(spv_##n##_tp);                                      \
+        if (!make_pipe(#n ".t", c, z, nb, err) || !make_pipe(#n ".tn", c, z, nb, err, 1)) return false; \
+    }
+        PT(attn_pf128, 5) PT(attn_pf128_q8, 7) PT(attn_pf128_q4, 7) PT(attn_pf128_k8v4, 7)
+        PT(attn_pf256s, 5) PT(attn_pf256s_q8, 7) PT(attn_pf256s_q4, 7) PT(attn_pf256s_k8v4, 7)
+        PT(attn_pf512s, 5) PT(attn_pf512s_q8, 7) PT(attn_pf512s_q4, 7) PT(attn_pf512s_k8v4, 7)
+#undef PT
+#endif
         // Lanes per key in attn_dec: 8, 16 or 32, and no more than a subgroup.
         uint32_t lpk = attn_dec_keys_ >= 32 ? 32 : attn_dec_keys_ >= 16 ? 16 : attn_dec_keys_ >= 8 ? 8 : 0;
         while (lpk > ctx_->subgroup_size) lpk = lpk > 8 ? lpk / 2 : 0;
-        // Each attn_dec build twice: for the f16 cache (5 buffers) and the 8-bit one (7).
-#define PD(n, spec, lanes) \
-        if (!make_pipe(#n, spv_##n, sizeof(spv_##n), 5, err, spec, lanes) || \
-            !make_pipe(#n "_q8", spv_##n##_q8, sizeof(spv_##n##_q8), 7, err, spec, lanes)) return false;
+        attn_dec_lpk_ = lpk;
+        // Each attn_dec build four times: for the f16 cache (5 buffers), the
+        // 8-bit one, the 4-bit one and 8-bit K with 4-bit V (7). With
+        // attn_dec_noring_, constant RING 0 (a key's slot is the key), and
+        // for the builds a sliding layer can take, NAME.ring with RING 1 as
+        // well (slots key % ring): its exact-row build for one token a
+        // workgroup, and the padded one where it has none or a batch of 9 or
+        // more can skip attn_pf. rows > 0 sets constant RM (the exact-row builds).
+        std::set<std::string> rings;
+        for (int l = 0; attn_dec_noring_ && l < hp_.n_layer; l++) {
+            if (!hp_.swa(l)) continue;
+            const uint32_t HD = hp_.hd(l), G = dec_heads(l);
+            const std::string x = dec_exact(HD, G);
+            if (!x.empty()) rings.insert(x);
+            if (x.empty() || !attn_pf_min_ || attn_pf_min_ > 9 || !pf_fits(l)) rings.insert(dec_padded(HD, G));
+        }
+        auto dec_builds = [&](const std::string &n, const uint32_t *const code[4], const size_t bytes[4], uint32_t spec,
+                              uint32_t lanes, uint32_t rows) {
+            static const char *const sfx[4] = {"", "_q8", "_q4", "_k8v4"};
+            const bool ring_too = rings.count(n) != 0;
+            for (int c = 0; c < 4; c++) {
+                std::vector<uint32_t> more{attn_dec_noring_ ? 0u : 1u};
+                if (rows) more.push_back(rows);
+                if (!make_pipe(n + sfx[c], code[c], bytes[c], c ? 7 : 5, err, spec, lanes, false, more)) return false;
+                more[0] = 1;
+                if (ring_too && !make_pipe(n + sfx[c] + ".ring", code[c], bytes[c], c ? 7 : 5, err, spec, lanes, false, more))
+                    return false;
+            }
+            return true;
+        };
+#define PD(n, spec, lanes)                                                                           \
+        {                                                                                            \
+            const uint32_t *const c_[4] = {spv_##n, spv_##n##_q8, spv_##n##_q4, spv_##n##_k8v4};     \
+            const size_t b_[4] = {sizeof(spv_##n), sizeof(spv_##n##_q8), sizeof(spv_##n##_q4),        \
+                                  sizeof(spv_##n##_k8v4)};                                           \
+            if (!dec_builds(#n, c_, b_, spec, lanes, 0)) return false;                                \
+        }
         PD(attn_dec, attn_dec_plain_ != 0, lpk) PD(attn_dec4, attn_dec_plain_ == 1, lpk)
         // Heads of 64: a lane's share of a key is 4 values or more (8 or 16 lanes).
-        PD(attn_dec_64, attn_dec_plain_ != 0, std::min(lpk, 16u)) PD(attn_dec4_64, attn_dec_plain_ == 1, std::min(lpk, 16u))
+        PD(attn_dec_64, attn_dec_plain_ != 0, std::min(lpk, 16u))
+        PD(attn_dec4_64, attn_dec_plain_ == 1, std::min(lpk, 16u))
         // The wide-head builds score keys with LPK lanes only (a thread can't
         // hold a whole key): without them, those heads keep attn.
-        attn_dec_lpk_ = lpk;
-        if (lpk) { PD(attn_dec4_256, 0, lpk) PD(attn_dec4_512, 0, lpk) PD(attn_dec4_256w, 0, lpk) PD(attn_dec4_512w, 0, lpk) }
+        if (lpk) {
+            PD(attn_dec4_256, 0, lpk) PD(attn_dec4_512, 0, lpk)
+            PD(attn_dec4_256w, 0, lpk) PD(attn_dec4_512w, 0, lpk)
+        }
 #undef PD
+        // The exact-row builds this model's layers take (dec_exact).
+        for (int l = 0; l < hp_.n_layer; l++) {
+            const uint32_t HD = hp_.hd(l), G = dec_heads(l);
+            const std::string n = dec_exact(HD, G);
+            if (n.empty() || pipes_.count(n)) continue;
+            const uint32_t *const c128[4] = {spv_attn_decx, spv_attn_decx_q8, spv_attn_decx_q4, spv_attn_decx_k8v4};
+            const size_t b128[4] = {sizeof(spv_attn_decx), sizeof(spv_attn_decx_q8), sizeof(spv_attn_decx_q4),
+                                    sizeof(spv_attn_decx_k8v4)};
+            const uint32_t *const c64[4] = {spv_attn_decx_64, spv_attn_decx_64_q8, spv_attn_decx_64_q4,
+                                            spv_attn_decx_64_k8v4};
+            const size_t b64[4] = {sizeof(spv_attn_decx_64), sizeof(spv_attn_decx_64_q8), sizeof(spv_attn_decx_64_q4),
+                                   sizeof(spv_attn_decx_64_k8v4)};
+            const uint32_t *const c256[4] = {spv_attn_decx_256w, spv_attn_decx_256w_q8, spv_attn_decx_256w_q4,
+                                             spv_attn_decx_256w_k8v4};
+            const size_t b256[4] = {sizeof(spv_attn_decx_256w), sizeof(spv_attn_decx_256w_q8),
+                                    sizeof(spv_attn_decx_256w_q4), sizeof(spv_attn_decx_256w_k8v4)};
+            // The padded builds' constants: the 4-row ones' up to 4 rows, the 8-row ones' past that.
+            const uint32_t plain = HD == 256 ? 0u : G <= 4 ? attn_dec_plain_ == 1 : attn_dec_plain_ != 0;
+            const bool ok = HD == 256 ? dec_builds(n, c256, b256, plain, lpk, G)
+                            : HD == 64 ? dec_builds(n, c64, b64, plain, std::min(lpk, 16u), G)
+                                       : dec_builds(n, c128, b128, plain, lpk, G);
+            if (!ok) return false;
+        }
         P(swiglu, 2) P(softcap, 1)
         if (hp_.attn_gate) { P(split_gate, 2) P(gate_mul, 2) }
         if (rec_layers_) { P(ssm_conv, 3) P(gdn_prep, 5) P(gdn_scan, 5) P(gdn_norm, 3) P(zero, 1) }
 #undef P
+        if (ctx_->required_subgroup)
+            ts5::log_line("ts5: TS5_WAVE: %u of %zu pipelines ask for subgroups of %u", waved_, pipes_.size(),
+                          ctx_->required_subgroup);
         return true;
     }
 
@@ -902,7 +1269,7 @@ private:
         struct Piece { char *dst; uint64_t off, len; };
         std::vector<Piece> pieces;
         for (auto &t : m_.gguf.tensors) {
-            if (t.nbytes == 0) continue;
+            if (t.nbytes == 0 || (embd_file_ && &t == m_.tok_embd.info)) continue;
             if (!qname(t.type)) { fclose(f); err = t.name + ": type " + type_name(t.type) + " not supported on Vulkan yet"; return false; }
             Buf b;
             if (!create_buf(t.nbytes, false, b, err)) { fclose(f); return false; }
@@ -951,6 +1318,38 @@ private:
         const double ls = std::chrono::duration<double>(std::chrono::steady_clock::now() - lt0).count();
         ts5::log_line("ts5: weights %.2f GB read in %.1f s (%.0f MB/s, %d threads)", weight_bytes_ / 1e9, ls,
                 ls > 0 ? weight_bytes_ / 1e6 / ls : 0.0, threads);
+#ifndef TS5_PS5  // TS5_EMBD_FILE is Linux's (the title's libc has no posix_fadvise)
+        if (embd_file_) {
+            emb_fd_ = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+            if (emb_fd_ < 0) { err = "cannot open " + path; return false; }
+            const GgufTensor &t = *m_.tok_embd.info;
+            // Read ahead into the page cache, which the system takes back
+            // when it needs the memory, so a first prompt's rows don't each
+            // wait for the drive.
+            posix_fadvise(emb_fd_, (off_t)(m_.gguf.data_offset + t.offset), (off_t)t.nbytes, POSIX_FADV_WILLNEED);
+            ts5::log_line("ts5: token table (%.0f MiB) not in GPU memory: each call reads its tokens' rows from the "
+                          "file (TS5_EMBD_FILE)", t.nbytes / 1048576.0);
+        }
+#endif
+        return true;
+    }
+
+    // TS5_EMBD_FILE: the n tokens' rows of the token table, from the file
+    // into emb_ in order (get_rows reads them as tokens 0..n-1 by seq_).
+    bool read_rows(const int32_t *tokens, int n, std::string &err) {
+        const GgufTensor &t = *m_.tok_embd.info;
+        const uint64_t rb = (uint64_t)t.row_bytes(), at = m_.gguf.data_offset + t.offset;
+        for (int i = 0; i < n; i++) {
+            if (tokens[i] < 0 || tokens[i] >= t.ne[1]) {
+                err = "token " + std::to_string(tokens[i]) + " is not in the model's vocabulary";
+                return false;
+            }
+            for (uint64_t done = 0; done < rb;) {
+                const ssize_t r = pread(emb_fd_, emb_.map + i * rb + done, rb - done, (off_t)(at + tokens[i] * rb + done));
+                if (r <= 0) { err = "reading the token table from the model's file failed"; return false; }
+                done += (uint64_t)r;
+            }
+        }
         return true;
     }
 
@@ -972,23 +1371,88 @@ private:
             !mk(k_, 4ull * TMAX * KVD) || !mk(v_, 4ull * TMAX * KVD) || !mk(att_, 4ull * TMAX * QD) ||
             !mk(g_, 4ull * TMAX * F) || !mk(u_, 4ull * TMAX * F) || !mk(dummy_, 256) || !mk(part_, 4ull * PART) ||
             !mk(split_, 4ull * SPLIT) ||
-            !mk(ids_, 4ull * TMAX, true) || !mk(logits_, 4ull * TMAX * hp_.n_vocab, true))
+            !mk(ids_, 4ull * TMAX, true) || !mk(logits_, 4ull * out_rows_ * hp_.n_vocab, true))
             return false;
+        if (embd_file_) {
+            if (!mk(emb_, TMAX * (size_t)m_.tok_embd.info->row_bytes(), true) || !mk(seq_, 4ull * TMAX, true))
+                return false;
+            for (int i = 0; i < TMAX; i++) ((int32_t *)seq_.map)[i] = i;
+        }
         // Qwen3.5: the full layers' queries with their gates, and the linear
-        // layers' projections, output and state.
+        // layers' projections, output and state, and save_state's copies of
+        // the state. Those are made here, before the context is sized, and to
+        // their size: made at a prompt's first save, one took a fresh 1 GiB
+        // arena the sizing never counted (on the PS5 free memory fell from
+        // 2.36 to 1.33 GiB the moment a long prompt ended).
         if (hp_.attn_gate && !mk(qg_, 8ull * TMAX * QD)) return false;
         if (rec_layers_) {
             const size_t C = hp_.ssm_conv_dim(), I = hp_.ssm_inner(), NV = hp_.ssm_v_heads;
+            const size_t state = 4ull * rec_layers_ * hp_.rec_state_floats();
             if (!mk(qkv_, 4ull * TMAX * C) || !mk(z_, 4ull * TMAX * I) || !mk(beta_, 4ull * TMAX * NV) ||
-                !mk(alpha_, 4ull * TMAX * NV) || !mk(y_, 4ull * TMAX * I) ||
-                !mk(rec_, 4ull * rec_layers_ * hp_.rec_state_floats()))
+                !mk(alpha_, 4ull * TMAX * NV) || !mk(y_, 4ull * TMAX * I) || !mk(rec_, state))
                 return false;
+            saved_.resize(state_slots_wanted());
+            saved_pos_.assign(saved_.size(), -1);
+            for (Buf &b : saved_)
+                if (!mk(b, state, false, true)) return false;
         }
+        // RoPE's turns, made here and filled once the context is known: made
+        // after the sizing, they would take a fresh 1 GiB block it never
+        // counted wherever the blocks before had no room left.
+        for (int swa = 0; swa < 2; swa++)
+            if (!mk(rope_turn_[swa], 8ull * std::max(1, m_.rope_dims(swa) / 2), true)) return false;
+        if (n_ctx_ <= 0) {
+            // As much as fits, in what the weights and activations left, and
+            // no more than one buffer can address.
+            // TS5_CTX_MAX (Settings > Longest context) caps it below that,
+            // leaving the rest of the memory free.
+            const int train = auto_context_cap(m_.hp);
+            // Sliding layers' rings are a fixed size, beside the context.
+            auto cap_of = [&](KvType t) {
+                // One buffer holds about 256 MiB of layers, or one whole layer.
+                uint64_t widest = 0;
+                for (int l = 0; l < hp_.n_layer; l++)
+                    if (!hp_.swa(l)) widest = std::max<uint64_t>(widest, hp_.kv_values(l));
+                const uint64_t per_buf = std::max<uint64_t>(1, kv_k_bits(t) * std::max<uint64_t>(1, widest) / 8);
+                return (int)std::min<uint64_t>(train, props_.limits.maxStorageBufferRange / per_buf);
+            };
+            auto fit = [&](KvType t) {
+                return fit_context(ctx_->device_memory(), allocated_ + fit_reserve_ + kv_ring_bytes(hp_, t),
+                                   kv_bytes_per_token(hp_, t), cap_of(t));
+            };
+            std::vector<std::string> why;
+            kv_ = auto_kv_type(hp_, kv_, kv_auto_, train, fit, &why);
+            for (auto &w : why) ts5::log_line("ts5: %s", w.c_str());
+            n_ctx_ = fit(kv_);
+            if (n_ctx_ <= 0) {
+                err = "not enough GPU memory left for a context of 1024 tokens";
+                return false;
+            }
+            // TS5_FIT_TAILS (Linux): fit counts the cache as new blocks, but
+            // its pieces go first into the room left at the ends of the 1 GiB
+            // blocks the weights and buffers took. Past the cache type picked
+            // above, 1,024 more tokens at a time while what the pieces would
+            // take beyond that room still leaves fit's reserve free.
+            if (fit_tails_ && n_ctx_ < cap_of(kv_)) {
+                const int was = n_ctx_, cap = cap_of(kv_);
+                const uint64_t memory = ctx_->device_memory(), keep = allocated_ + fit_reserve_ + (1ull << 30);
+                uint64_t fresh = 0;
+                while (n_ctx_ + 1024 <= cap && kv_new_bytes(n_ctx_ + 1024, kv_, fresh) && keep + fresh <= memory)
+                    n_ctx_ += 1024;
+                if (n_ctx_ > was)
+                    ts5::log_line("ts5: the cache's pieces use room left in the blocks already made: %d tokens, where "
+                                  "%d counted them as new blocks (TS5_FIT_TAILS)", n_ctx_, was);
+            }
+        }
+        sized_ = true;
+        // RoPE for this context: YaRN past the model's window (use_context).
+        m_.use_context(n_ctx_);
+        if (hp_.yarn_factor > 1.f)
+            ts5::log_line("ts5: YaRN: positions stretched %.2fx over the %d-token window, for %d tokens of context",
+                          hp_.yarn_factor, hp_.yarn_orig, n_ctx_);
         // Each RoPE pair's turn per position (Model::rope_turn), for the full
         // and the sliding layers: high word, then low.
         for (int swa = 0; swa < 2; swa++) {
-            const int pairs = std::max(1, m_.rope_dims(swa) / 2);
-            if (!mk(rope_turn_[swa], 8ull * pairs, true)) return false;
             uint32_t *t = (uint32_t *)rope_turn_[swa].map;
             for (int i = 0; i < m_.rope_dims(swa) / 2; i++) {
                 const uint64_t v = m_.rope_turn(swa, i);
@@ -996,79 +1460,105 @@ private:
                 t[2 * i + 1] = (uint32_t)v;
             }
         }
-        if (n_ctx_ <= 0) {
-            // As much as fits, in what the weights and activations left, and
-            // no more than one buffer can address.
-            // TS5_CTX_MAX (Settings > Longest context) caps it below that,
-            // leaving the rest of the memory free.
-            int train = hp_.n_ctx_train > 0 ? hp_.n_ctx_train : 32768;
-            if (const char *e = getenv("TS5_CTX_MAX"))
-                if (atoi(e) >= 1024) train = std::min(train, atoi(e));
-            // Sliding layers' rings are a fixed size, beside the context.
-            auto fit = [&](KvType t) {
-                // One buffer holds about 256 MiB of layers, or one whole layer.
-                uint64_t widest = 0;
-                for (int l = 0; l < hp_.n_layer; l++)
-                    if (!hp_.swa(l)) widest = std::max<uint64_t>(widest, hp_.kv_values(l));
-                const uint64_t per_buf = (t == KvType::Q8 ? 1ull : 2ull) * std::max<uint64_t>(1, widest);
-                const int cap = (int)std::min<uint64_t>(train, props_.limits.maxStorageBufferRange / per_buf);
-                return fit_context(ctx_->device_memory(), allocated_ + fit_reserve_ + kv_ring_bytes(hp_, t),
-                                   kv_bytes_per_token(hp_, t), cap);
-            };
-            const int f16 = fit(KvType::F16);
-            if (kv_ == KvType::Q8 && f16_reaches(f16, train)) {
-                ts5::log_line("ts5: f16 KV cache: the whole %d-token context (the model's, or the Settings cap) "
-                              "fits in f16, the more exact",
-                              train);
-                kv_ = KvType::F16;
-            }
-            n_ctx_ = kv_ == KvType::F16 ? f16 : fit(kv_);
-            if (n_ctx_ <= 0) {
-                err = "not enough GPU memory left for a context of 1024 tokens";
-                return false;
-            }
-        }
         // Each layer's place in the caches: n_ctx_ slots, or a sliding
         // layer's ring where that is fewer. The caches are cut into pieces of
         // about 256 MiB, a few layers each: freed models leave the GPU's
         // memory in holes, and one 2 GiB buffer for a whole cache may find
         // no hole that big when the pieces would fit.
-        const size_t piece = 256ull << 20, per_value = kv_ == KvType::Q8 ? 1 : 2;
-        std::vector<size_t> values;  // per piece
-        layer_off_.assign(hp_.n_layer, 0);
-        layer_buf_.assign(hp_.n_layer, 0);
-        ring_.assign(hp_.n_layer, 0);
-        for (int l = 0; l < hp_.n_layer; l++) {
-            const int r = hp_.swa(l) ? ring_slots(hp_) : 0;
-            ring_[l] = r > 0 && r < n_ctx_ ? (uint32_t)r : 0;
-            const size_t v = (ring_[l] ? ring_[l] : (size_t)n_ctx_) * hp_.kv_values(l);
-            if (values.empty() || (values.back() > 0 && (values.back() + v) * per_value > piece)) values.push_back(0);
-            layer_buf_[l] = (uint32_t)(values.size() - 1);
-            layer_off_[l] = (uint32_t)values.back();
-            values.back() += v;
-        }
-        // Bytes of K (and as many of V): f16, or 8 bits plus a 2-byte scale per 32.
+        const std::vector<size_t> values = kv_layout(n_ctx_, kv_, &layer_off_, &layer_buf_, &ring_);
+        // Bytes of K and of V: f16, or 8 or 4 bits plus a 2-byte scale per 32.
         // Exact sizes: a 1 GiB block for the scales would take what
         // fit_context keeps free for everything else.
+        const size_t bits = kv_k_bits(kv_), v_bits = kv_v_bits(kv_);
         size_t cache = 0, scales = 0;
         kc_.assign(values.size(), Buf{});
         vc_.assign(values.size(), Buf{});
         ks_.assign(values.size(), Buf{});
         vs_.assign(values.size(), Buf{});
         for (size_t i = 0; i < values.size(); i++) {
-            const size_t c = values[i] * per_value, sc = kv_ == KvType::Q8 ? values[i] / 16 : 0;
+            const size_t c = values[i] * bits / 8, cv = values[i] * v_bits / 8,
+                         sc = kv_quantized(kv_) ? values[i] / 16 : 0;
             if (c > props_.limits.maxStorageBufferRange) {
                 err = "KV cache larger than maxStorageBufferRange; use a smaller context";
                 return false;
             }
-            if (!mk(kc_[i], c, false, true) || !mk(vc_[i], c, false, true)) return false;
+            if (!mk(kc_[i], c, false, true) || !mk(vc_[i], cv, false, true)) return false;
             if (sc && (!mk(ks_[i], sc, false, true) || !mk(vs_[i], sc, false, true))) return false;
-            cache += c;
-            scales += sc;
+            cache += c + cv;
+            scales += 2 * sc;
         }
-        ts5::log_line("ts5: %s: weights %.2f GiB, KV cache %.2f GiB (%s, %d tokens), %s memory", name_.c_str(),
-                weight_bytes_ / 1073741824.0, 2.0 * (cache + scales) / 1073741824.0, kv_type_name(kv_), n_ctx_,
+        ts5::log_line("ts5: %s: weights %.2f GiB, KV cache %.2f GiB (%s%s, %d tokens), %s memory", name_.c_str(),
+                weight_bytes_ / 1073741824.0, (cache + scales) / 1073741824.0, kv_type_name(kv_),
+                !kv_quantized(kv_) ? "" : kv_turn_v_setting() ? ", Q, K and V turned" : kv_turn_setting() ? ", Q and K turned" : "", n_ctx_,
                 x_.map ? "unified" : "device");
+        if (embd_file_ || fit_tails_) {
+            VkDeviceSize unused = 0;
+            for (const auto &a : arenas_) unused += a.size - a.used;
+            ts5::log_line("ts5: GPU memory taken: %.3f GiB in %zu blocks, %.0f MiB of it unused, of %.3f GiB",
+                          allocated_ / 1073741824.0, arenas_.size(), unused / 1048576.0,
+                          ctx_->device_memory() / 1073741824.0);
+        }
+        return true;
+    }
+
+    // The KV cache's pieces for n tokens: the values (K's or V's elements)
+    // each holds. Each layer gets n slots, or a sliding layer its ring where
+    // that is fewer; the pieces are about 256 MiB of K, a few layers each:
+    // freed models leave the GPU's memory in holes, and one 2 GiB buffer for
+    // a whole cache may find no hole that big when the pieces would fit.
+    // With off, buf and ring: each layer's first element, its piece, and its
+    // ring's slots (0: none).
+    std::vector<size_t> kv_layout(int n, KvType t, std::vector<uint32_t> *off = nullptr,
+                                  std::vector<uint32_t> *buf = nullptr, std::vector<uint32_t> *ring = nullptr) const {
+        const size_t piece = 256ull << 20, bits = kv_k_bits(t);
+        std::vector<size_t> values;
+        if (off) off->assign(hp_.n_layer, 0), buf->assign(hp_.n_layer, 0), ring->assign(hp_.n_layer, 0);
+        for (int l = 0; l < hp_.n_layer; l++) {
+            const int r = hp_.swa(l) ? ring_slots(hp_) : 0;
+            const uint32_t rl = r > 0 && r < n ? (uint32_t)r : 0;
+            const size_t v = (rl ? rl : (size_t)n) * hp_.kv_values(l);
+            if (values.empty() || (values.back() > 0 && (values.back() + v) * bits / 8 > piece)) values.push_back(0);
+            if (off) (*ring)[l] = rl, (*buf)[l] = (uint32_t)(values.size() - 1), (*off)[l] = (uint32_t)values.back();
+            values.back() += v;
+        }
+        return values;
+    }
+
+    // TS5_FIT_TAILS: the bytes of new blocks the caches of n tokens of type
+    // t would take, placed as create_buf places them (each piece in the
+    // first block with room, in the order they are made, else a new block
+    // of its own size). False where a piece can't be made.
+    bool kv_new_bytes(int n, KvType t, uint64_t &fresh) {
+        std::vector<VkDeviceSize> used;
+        for (const auto &a : arenas_) used.push_back(a.used);
+        fresh = 0;
+        auto place = [&](size_t size) {
+            VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bci.size = std::max<VkDeviceSize>(size, 16);
+            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+            VkBuffer b = VK_NULL_HANDLE;
+            if (vk.vkCreateBuffer(dev_, &bci, nullptr, &b) != VK_SUCCESS) return false;
+            VkMemoryRequirements req;
+            vk.vkGetBufferMemoryRequirements(dev_, b, &req);
+            vk.vkDestroyBuffer(dev_, b, nullptr);
+            for (int type : mem_types(req, false))
+                for (size_t i = 0; i < arenas_.size(); i++) {
+                    const VkDeviceSize at = (used[i] + req.alignment - 1) / req.alignment * req.alignment;
+                    if (arenas_[i].type == type && at + req.size <= arenas_[i].size) {
+                        used[i] = at + req.size;
+                        return true;
+                    }
+                }
+            fresh += req.size;
+            return true;
+        };
+        const size_t bits = kv_k_bits(t), v_bits = kv_v_bits(t);
+        for (size_t v : kv_layout(n, t)) {
+            if (v * bits / 8 > props_.limits.maxStorageBufferRange) return false;
+            if (!place(v * bits / 8) || !place(v * v_bits / 8)) return false;
+            if (kv_quantized(t) && (!place(v / 16) || !place(v / 16))) return false;
+        }
         return true;
     }
 
@@ -1240,7 +1730,8 @@ private:
         const uint32_t split_big = mmb_small_ && mmb_split_ && ntok >= 128 && big < (uint32_t)mmb_min_
                                        ? big * std::min({(mmb_split_ + big - 1) / big, (uint32_t)w.ne0() / 256, 16u})
                                        : big;
-        if (ntok >= tiled_min_ && mmb_ && split_big >= (uint32_t)mmb_min_ && x_off % 4 == 0 && mmb_type(w)) {
+        if (ntok >= tiled_min_ && mmb_ && (split_big >= (uint32_t)mmb_min_ || (mmb_short_ && ntok < 128 && mmb_f16_for(w))) &&
+            x_off % 4 == 0 && mmb_type(w)) {
             mmb(w, x, y, pc, big, what);
             return;
         }
@@ -1293,11 +1784,14 @@ private:
     // slices, a workgroup per block and slice, which write their sums to
     // split_ for mmb_reduce to add up, so all of the GPU's compute units get
     // some.
+    bool mmb_f16_for(const Weight &w) const {
+        return mmb_f16_ && (mmb_f16_skip_.empty() || mmb_f16_skip_.find("," + role(w) + ",") == std::string::npos);
+    }
     template <class PC>
     void mmb(const Weight &w, const Buf &x, const Buf &y, const PC &pc, uint32_t big, const std::string &what) {
         const uint32_t rows = pc.nrows, ntok = pc.ntok, nunits = pc.ncols / 32;
         const size_t slice = (size_t)rows * ntok;
-        const bool f16 = mmb_f16_ && (mmb_f16_skip_.empty() || mmb_f16_skip_.find("," + role(w) + ",") == std::string::npos);
+        const bool f16 = mmb_f16_for(w);
         // (The f32 kernel has no double buffer: its tiles would fill 64 KiB.)
         const std::string &var = !f16 ? mmb_var32_ : w.type() == GGML_Q8_0 ? mmb_var_q8_ : mmb_var_;
         const std::string name = std::string(f16 ? "mmb16" : "mmb") + var + "_" + qname(w.type());
@@ -1367,7 +1861,7 @@ private:
     // (0: one per position). Only attn and attn_pf have them.
     void attention(int l, int n, int pos0, uint32_t kb, uint32_t cache_off, uint32_t win = 0, uint32_t ring = 0) {
         const uint32_t HD = hp_.hd(l), H = hp_.n_head, HKV = hp_.hkv(l);
-        const float scale = hp_.attn_scale;
+        const float scale = hp_.attn_scale * hp_.yarn_attn();
         if (!attn_ok(l)) {
             struct { uint32_t head_dim, n_head, n_head_kv, pos0, cache_off; float scale; } pc{
                 HD, H, HKV, (uint32_t)pos0, cache_off, scale};
@@ -1383,7 +1877,6 @@ private:
         // The first key any of the n tokens sees, and how many from there.
         const uint32_t k_lo = win && (uint32_t)pos0 + 1 > win ? (uint32_t)pos0 + 1 - win : 0;
         const uint32_t keys = (uint32_t)(pos0 + n) - k_lo;
-        const bool plain = !win && !ring;
         // attn_pf: heads of up to 128 in 64 rows, of 256 in 32,
         // or of 512 in 16 (all of one KV head's query heads, where attn
         // would split them over hsplit workgroups, each reading the keys).
@@ -1392,13 +1885,10 @@ private:
         const bool pf256 = HD == 256;
         const bool pf512 = HD == 512 && ctx_->subgroup_size >= 16;
         const uint32_t pf_rows = pf512 ? 16 : pf256 ? 32 : 64;
-        const bool pf = attn_pf_min_ && n >= attn_pf_min_ && HD % 16 == 0 && (HD <= 128 || pf256 || pf512) &&
-                        G_all <= pf_rows && (pf512 || head_split(l) == 1);
+        const bool pf = attn_pf_min_ && n >= attn_pf_min_ && pf_fits(l);
         const bool wide = (HD == 256 || HD == 512) && attn_dec_lpk_ != 0;
         const bool h64 = HD == 64 && attn_dec64_;
-        const uint32_t dec_max = HD <= 128 ? 8 : 4;
-        uint32_t dec_split = 1;
-        while (G_all / dec_split > dec_max && (G_all / dec_split) % 2 == 0) dec_split *= 2;
+        const uint32_t dec_max = HD <= 128 ? 8 : 4, dec_split = dec_split_of(G_all, HD);
         // From the first key wherever attn_dec serves the heads (128 and 64,
         // and with lanes per key 256 and 512), so a verify batch and the
         // one-token calls it stands for take the same kernel at any length.
@@ -1436,6 +1926,7 @@ private:
         } else {
             const uint32_t fit = (uint32_t)(PART / ((size_t)n * H * (HD + 2)));
             if (groups < 64) n_split = std::min({(256 + groups - 1) / groups, (keys + min_keys - 1) / min_keys, 64u, fit});
+            else if (pf && pf_rounds_) n_split = rounds_split(groups, keys, fit);
             if (attn_splits_) n_split = std::min({(uint32_t)attn_splits_, keys, 64u, fit});
             n_split = std::max(1u, n_split);
             chunk = (keys + n_split - 1) / n_split;
@@ -1449,20 +1940,26 @@ private:
             uint32_t s_max, s_keys, s_bk;
         } pc{HD,    H,     HKV,  (uint32_t)pos0, cache_off, (uint32_t)n, tq, chunk, n_split, scale, k_lo, win, ring,
              hsplit, per_tok ? s_max : 0u, s_keys, bk};
-        // Every kernel has a build for the 8-bit cache, named _q8.
+        // Every kernel has a build for the 8-bit cache, named _q8, and the 4-bit one, _q4.
         std::string kern = pf ? "attn_pf" : "attn";
         if (dec) {
-            kern = HD == 256 ? "attn_dec4_256" : HD == 512 ? "attn_dec4_512" : dec_rows == 4 ? "attn_dec4" : "attn_dec";
-            if (wide && attn_wide8_) kern += "w";
-            if (HD == 64) kern += "_64";
+            // One token a workgroup (generation, verify batches): the build
+            // for exactly G rows, where the model has one.
+            const std::string x = per_tok ? dec_exact(HD, G) : std::string();
+            kern = !x.empty() && pipes_.count(x) ? x : dec_padded(HD, G);
         } else if (pf && HD == 128 && attn_pf128_)
             kern = "attn_pf128";
         else if (pf && pf256)
-            kern = "attn_pf256";
+            kern = attn_pf_slim_ ? "attn_pf256s" : "attn_pf256";
         else if (pf && pf512)
-            kern = "attn_pf512";
-        if (kv_ == KvType::Q8) kern += "_q8";
-        if (kv_ == KvType::Q8)
+            kern = attn_pf_slim_ ? "attn_pf512s" : "attn_pf512";
+        if (kv_quantized(kv_)) kern += kv_suffix();
+        // TS5_ATTN_PF_TRIM: the slim build's t build, without the ring's
+        // arithmetic where the layer has no ring.
+        if (pf && pf_trim_ && pipes_.count(kern + ".t")) kern += ring ? ".t" : ".tn";
+        // A layer's ring: attn_dec's builds that take slots key % ring.
+        if (dec && ring && attn_dec_noring_) kern += ".ring";
+        if (kv_quantized(kv_))
             dispatch(kern, {&q_, &kc_[kb], &vc_[kb], &att_, &part_, &ks_[kb], &vs_[kb]}, pc, groups, n_split);
         else
             dispatch(kern, {&q_, &kc_[kb], &vc_[kb], &att_, &part_}, pc, groups, n_split);
@@ -1470,6 +1967,90 @@ private:
             struct { uint32_t head_dim, n_head, n_tok, n_split; } mpc{HD, H, (uint32_t)n, n_split};
             dispatch("attn_merge", {&part_, &att_}, mpc, H, (uint32_t)n);
         }
+        // V turned in the cache (qkv_post_*tv): each head's output turned back.
+        if (turned(l) && kv_turn_v_setting()) {
+            struct { uint32_t head_dim, n_head; } upc{HD, H};
+            dispatch("attn_unturn", {&att_}, upc, H, (uint32_t)n);
+        }
+    }
+
+    // How many ways to split each of a prompt chunk's g attn_pf workgroups'
+    // keys (TS5_ATTN_PF_ROUNDS). Deep in a prompt they are all as long, and
+    // the next kernel waits for the last, so g of them on U compute units
+    // take ceil(g / U) rounds, the last part empty: 128 on the PS5's 40 take
+    // 4, the last a fifth full. Split s ways (attn_merge sums the slices)
+    // they take ceil(g s / U) rounds of a sixth the work. Of s from 2 to 4
+    // (slices of 1,024 keys or more, within what the partial results hold),
+    // the one whose rounds are shortest against no split, taking the worse
+    // of one workgroup a unit at a time and two (both are possible for these
+    // kernels at 128 registers), at least 2% shorter: 3 for 128 workgroups
+    // (Llama 3.1 8B, Qwen3 8B, Qwen3.5 9B; 0.83), 2 for 176 (the 14Bs; 0.90),
+    // none for 116 (Coder 7B, which fills its rounds) or fewer than 64.
+    uint32_t rounds_split(uint32_t g, uint32_t keys, uint32_t fit) const {
+        double best = 1.0;
+        uint32_t bs = 1;
+        for (uint32_t s = 2; s <= 4 && s <= fit && keys >= s * 1024; s++) {
+            double worst = 0;
+            for (uint32_t u : {pf_rounds_, 2 * pf_rounds_})
+                worst = std::max(worst, (double)((g * s + u - 1) / u) / s / ((g + u - 1) / u));
+            if (worst < best - 0.02) best = worst, bs = s;
+        }
+        return bs;
+    }
+
+    // The quantized cache's kernel builds: _q8, _q4 or _k8v4.
+    const char *kv_suffix() const { return kv_ == KvType::Q4 ? "_q4" : kv_ == KvType::K8V4 ? "_k8v4" : "_q8"; }
+
+    // Whether layer l's cache turns Q and K (and V: kv_turn_v_setting()): a
+    // quantized cache, kv_turn_setting(), heads a power of two wide.
+    bool turned(int l) const {
+        const uint32_t HD = hp_.hd(l);
+        return kv_quantized(kv_) && kv_turn_setting() && (HD & (HD - 1)) == 0;
+    }
+
+    // attn_dec's workgroups a KV head: as few as bring its G_all query heads
+    // to 8 or fewer a workgroup (heads of up to 128), 4 (256 and 512).
+    static uint32_t dec_split_of(uint32_t G_all, uint32_t HD) {
+        const uint32_t dec_max = HD <= 128 ? 8 : 4;
+        uint32_t s = 1;
+        while (G_all / s > dec_max && (G_all / s) % 2 == 0) s *= 2;
+        return s;
+    }
+    // Layer l's query heads in one attn_dec workgroup (0: no KV heads).
+    uint32_t dec_heads(int l) const {
+        const uint32_t HD = hp_.hd(l), HKV = hp_.hkv(l);
+        if (!HKV || hp_.n_head % HKV) return 0;
+        const uint32_t G_all = hp_.n_head / HKV;
+        return G_all / dec_split_of(G_all, HD);
+    }
+    // The attn_dec build in exactly G rows for heads of HD (attn_dec5,
+    // attn_dec7_64, attn_dec2_256w, ...), or "" where the padded 4- or 8-row
+    // build serves them: G is 4 or 8, exact rows are off, or no such build.
+    std::string dec_exact(uint32_t HD, uint32_t G) const {
+        if (!attn_dec_exact_ || G == 0 || G == 4 || G >= 8) return "";
+        const std::string n = "attn_dec" + std::to_string(G);
+        if (HD == 128) return n;
+        if (HD == 64 && attn_dec64_) return n + "_64";
+        if (HD == 256 && G < 4 && attn_dec_lpk_ && attn_wide8_) return n + "_256w";
+        return "";
+    }
+    // The padded 4- or 8-row attn_dec build for G rows of HD (before the
+    // cache's suffix): the 4-row one for 4 or fewer and for heads of 256 and
+    // 512, with 8 columns (w) where attn_wide8_ has them.
+    std::string dec_padded(uint32_t HD, uint32_t G) const {
+        std::string k = HD == 256 ? "attn_dec4_256" : HD == 512 ? "attn_dec4_512" : G <= 4 ? "attn_dec4" : "attn_dec";
+        if ((HD == 256 || HD == 512) && attn_dec_lpk_ && attn_wide8_) k += "w";
+        if (HD == 64) k += "_64";
+        return k;
+    }
+    // Whether attn_pf fits a layer's heads (its prompts of attn_pf_min_
+    // tokens or more): heads of up to 128 in 64 rows, of 256 in 32, of 512 in
+    // 16 (subgroups of 16 or more), all of one KV head's query heads.
+    bool pf_fits(int l) const {
+        const uint32_t HD = hp_.hd(l), G_all = hp_.n_head / hp_.hkv(l);
+        const bool pf256 = HD == 256, pf512 = HD == 512 && ctx_->subgroup_size >= 16;
+        const uint32_t pf_rows = pf512 ? 16 : pf256 ? 32 : 64;
+        return HD % 16 == 0 && (HD <= 128 || pf256 || pf512) && G_all <= pf_rows && (pf512 || head_split(l) == 1);
     }
 
     // How many workgroups share one KV head's query heads in attn: 1, or
@@ -1555,20 +2136,27 @@ private:
         dispatch(one ? name + ".1" : name, bufs, pc, mx, my, what);
     }
 
+    // rmsnorm_early's and rmsnorm2_early's values a thread for this model's
+    // rows (the row over 512 rounded up, or more by TS5_NORM_EARLY), or 0 for
+    // rmsnorm.comp and rmsnorm2.comp: TS5_NORM_EARLY=0, or rows past 8,192.
+    uint32_t norm_npt() const {
+        const uint32_t n = (uint32_t)hp_.n_embd, npt = (n + 511) / 512;
+        return norm_early_ && n && npt <= 16 ? std::max(npt, norm_early_npt_) : 0;
+    }
     // add: y += the normalized x (Gemma's norms after attention and the FFN);
     // mul: the result times this (Gemma 4's layer_output_scale).
     void rmsnorm(const Buf &x, const Weight &w, const Buf &y, int ntok, uint32_t x_row0 = 0, bool add = false,
                  float mul = 1.0f) {
         struct { uint32_t n, x_row0; float eps; uint32_t add; float mul; } pc{(uint32_t)hp_.n_embd, x_row0,
                                                                               hp_.rms_eps, add ? 1u : 0u, mul};
-        dispatch("rmsnorm", {&x, &W(w), &y}, pc, (uint32_t)ntok);
+        dispatch(norm_npt() ? "rmsnorm_early" : "rmsnorm", {&x, &W(w), &y}, pc, (uint32_t)ntok);
     }
     // Gemma's norm after a block into the residual x (times mul) and the
     // next block's norm of x into y, in one pass (rmsnorm2.comp).
     void rmsnorm2(const Buf &h, const Weight &w1, const Buf &x, const Weight &w2, const Buf &y, int ntok,
                   float mul = 1.0f) {
         struct { uint32_t n; float eps, mul; } pc{(uint32_t)hp_.n_embd, hp_.rms_eps, mul};
-        dispatch("rmsnorm2", {&h, &W(w1), &x, &W(w2), &y}, pc, (uint32_t)ntok);
+        dispatch(norm_npt() ? "rmsnorm2_early" : "rmsnorm2", {&h, &W(w1), &x, &W(w2), &y}, pc, (uint32_t)ntok);
     }
 
     bool run(const int32_t *tokens, int n, int pos0, float *logits, bool all, bool want, std::string &err) {
@@ -1578,6 +2166,9 @@ private:
         const bool reuse = ahead_pos_ >= 0 && n == 1 && pos0 == ahead_pos_ && want && !all;
         ahead_pos_ = -1;
         memcpy(ids_.map, tokens, 4 * (size_t)n);
+        if (embd_file_ && !read_rows(tokens, n, err)) return false;
+        out_dst_ = logits;
+        out_last_ = 0;
         if (reuse) {
             cmd_ = aheads_[ahead_cur_];
             cpu_.reused++;
@@ -1614,7 +2205,10 @@ private:
         }
         if (!finish(err)) return false;
         const double t1 = now_ms();
-        if (logits) memcpy(logits, logits_.map, 4ull * (all ? n : 1) * hp_.n_vocab);
+        // The rows the buffer still holds: all of them, or the last piece.
+        if (logits)
+            memcpy(logits + (size_t)out_last_ * hp_.n_vocab, logits_.map,
+                   4ull * ((all ? n : 1) - out_last_) * hp_.n_vocab);
         const double t2 = now_ms();
         cpu_.copy += t2 - t1;
         cpu_.call += t2 - t0;
@@ -1729,8 +2323,11 @@ private:
         {
             struct { uint32_t ncols, row_bytes; float scale; } pc{(uint32_t)E, (uint32_t)m_.tok_embd.info->row_bytes(),
                                                                   hp_.embd_scale > 0 ? hp_.embd_scale : 1.0f};
-            dispatch(std::string("get_rows_") + qname(m_.tok_embd.type()), {&W(m_.tok_embd), &ids_, &x_}, pc,
-                     (uint32_t)n);
+            if (embd_file_)  // TS5_EMBD_FILE: the call's rows, in order
+                dispatch(std::string("get_rows_") + qname(m_.tok_embd.type()), {&emb_, &seq_, &x_}, pc, (uint32_t)n);
+            else
+                dispatch(std::string("get_rows_") + qname(m_.tok_embd.type()), {&W(m_.tok_embd), &ids_, &x_}, pc,
+                         (uint32_t)n);
         }
         if (rec_layers_ && pos0 == 0) {
             const uint64_t nf = (uint64_t)rec_layers_ * hp_.rec_state_floats();
@@ -1789,8 +2386,9 @@ private:
                 const Buf &bq = L.bq ? W(L.bq) : dummy_, &bk = L.bk ? W(L.bk) : dummy_, &bv = L.bv ? W(L.bv) : dummy_;
                 const Buf &nq = L.q_norm ? W(L.q_norm) : dummy_, &nk = L.k_norm ? W(L.k_norm) : dummy_;
                 const Buf &ff = rope_turn_[swa ? 1 : 0];
-                if (kv_ == KvType::Q8)
-                    dispatch("qkv_post_q8", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
+                if (kv_quantized(kv_))
+                    dispatch(std::string("qkv_post") + kv_suffix() +
+                                 (!turned(l) ? "" : kv_turn_v_setting() ? "tv" : "t"), {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ks_[kb], &vs_[kb], &ff}, pc,
                              (uint32_t)(H + HKV), (uint32_t)n);
                 else
                     dispatch("qkv_post", {&q_, &k_, &v_, &bq, &bk, &bv, &nq, &nk, &kc_[kb], &vc_[kb], &ff}, pc,
@@ -1818,12 +2416,25 @@ private:
             const bool fold_out = !all && fold_norm(n, {&m_.output});
             if (!fold_out) rmsnorm(x_, m_.out_norm, h_, nout, all ? 0 : (uint32_t)(n - 1));
             norm_ = fold_out ? &m_.out_norm : nullptr;
-            matmul(m_.output, fold_out ? x_ : h_, logits_, nout, false);
-            norm_ = nullptr;
-            if (hp_.logit_softcap > 0) {
-                struct { uint32_t n; float cap; } pc{(uint32_t)((size_t)nout * hp_.n_vocab), hp_.logit_softcap};
-                dispatch("softcap", {&logits_}, pc, std::min<uint32_t>(65535, (pc.n + 255) / 256));
+            // More rows than the buffer holds: out_rows_ at a time, each
+            // piece waited for and copied out (run copies the last).
+            for (int c = 0; c < nout; c += out_rows_) {
+                const int k = std::min(out_rows_, nout - c);
+                if (c > 0) {
+                    if (!submit(err)) return false;
+                    if (out_dst_)
+                        memcpy(out_dst_ + (size_t)(c - out_rows_) * hp_.n_vocab, logits_.map,
+                               4ull * out_rows_ * hp_.n_vocab);
+                    if (!begin(err)) return false;
+                    out_last_ = c;
+                }
+                matmul(m_.output, fold_out ? x_ : h_, logits_, k, false, (uint32_t)((size_t)c * E));
+                if (hp_.logit_softcap > 0) {
+                    struct { uint32_t n; float cap; } pc{(uint32_t)((size_t)k * hp_.n_vocab), hp_.logit_softcap};
+                    dispatch("softcap", {&logits_}, pc, std::min<uint32_t>(65535, (pc.n + 255) / 256));
+                }
             }
+            norm_ = nullptr;
         }
         return true;
     }
@@ -1857,6 +2468,7 @@ private:
     std::vector<Arena> arenas_;
     std::vector<VkBuffer> all_bufs_;
     VkDeviceSize allocated_ = 0;
+    bool sized_ = false;  // init_buffers sized the context and made its caches
     uint64_t fit_reserve_ = 0;  // set_fit_reserve
     uint64_t weight_bytes_ = 0;
     int layers_per_submit_ = 0;
@@ -1878,12 +2490,48 @@ private:
     // sets how many slices generation splits the keys into.
     bool attn_fast_ = true;
     int attn_splits_ = 0;
+    // TS5_ATTN_PF_ROUNDS=cu (the driver's compute units) or a number of
+    // units (Linux; off by default until measured): split a prompt chunk's
+    // keys so its attn_pf workgroups fill whole rounds (rounds_split()).
+    uint32_t pf_rounds_ = 0;
+    // TS5_EMBD_FILE=1 (Linux; off until measured): an untied token table
+    // (one the output doesn't share) stays out of GPU memory, 0.29 to 0.41
+    // GiB on the PS5's 8B and 14B models; each call reads its tokens' rows
+    // from the file (emb_fd_) into emb_, which get_rows reads by seq_
+    // (0..TMAX-1). The same kernel on the same bytes: the same output.
+    bool embd_file_ = false;
+    int emb_fd_ = -1;
+    Buf emb_, seq_;
+    // TS5_FIT_TAILS=1 (Linux; off until measured): the context's sizing
+    // counts the room the cache's pieces take at the ends of the blocks
+    // already made (kv_new_bytes).
+    bool fit_tails_ = false;
+    // TS5_ATTN_PF_TRIM=1 (Linux; off until measured): attn_pf128, 256s and
+    // 512s (and their cache builds) as their t builds (attn_pf.glsl's
+    // PF_TRIM): the same sums with fewer instructions around them. 2: with
+    // subgroupClusteredAdd kept (the tests on lavapipe, which adds a
+    // cluster in another order than shuffles do). 3: the te builds (PF_EXP2:
+    // base-2 scores, each key's dot product one fma chain), fewer again, the
+    // logits different in the last bits. 4: the tp builds (3 with each 16-key
+    // step's p V in packed f16; 3 on a Gemma).
+    uint32_t pf_trim_ = 0;
     // Prompts of at least this many tokens use attn_pf (TS5_ATTN_PF; 0: never),
     // its build for heads of 128 where they are (TS5_ATTN_PF128=0: never).
     // 9: more than a verify batch's 8 tokens, which keep generation's kernels
     // (below 9, TS5_ATTN_PF breaks the helper's same-output promise).
     int attn_pf_min_ = 9;
     bool attn_pf128_ = true;
+    // Heads of 256 and 512 in attn_pf's builds that need 128 registers a
+    // thread instead of 168 on the PS5 (two workgroups a compute unit instead
+    // of one), with the same output. On the PS5's Linux, 32k-token prompts
+    // read 5.5% faster on Qwen3.5 9B and Gemma 3 12B and 9.9% on Gemma 4 12B,
+    // generation unchanged (TS5_ATTN_PF_SLIM=0: the wider builds). The store
+    // title keeps the wider builds until measured there.
+#ifdef TS5_PS5
+    bool attn_pf_slim_ = false;
+#else
+    bool attn_pf_slim_ = true;
+#endif
     // Generation over at least this many keys uses attn_dec (TS5_ATTN_DEC;
     // 0: never). By default (-1) from the first key, the only setting at
     // which a verify batch across the start takes generation's kernel for
@@ -1926,6 +2574,27 @@ private:
     // (Gemma 3 12B, Gemma 4 12B at 64 tokens of context; 1.7 and 1.5% at
     // 2,048); the checks are the same to the last digit.
     bool attn_wide8_ = true;
+    // Generation and verify batches (one token a workgroup) through attn_dec
+    // built for exactly as many rows as a KV head has query heads (attn_dec5
+    // for 5, also 1, 2, 3, 6 and 7 with heads of 128 and 64, and 1 to 3 with
+    // Gemma's 256), instead of the 8- or 4-row build with the rest padding
+    // (TS5_ATTN_DEC_EXACT=0). Each row's sums are the same either way, and
+    // the suite checks the logits are, byte for byte. On the PS5's GPU (RADV's
+    // null device, wave64 as RADV builds these) the 14Bs' 5 heads (Qwen3,
+    // DeepSeek R1, Coder) take 128 registers a thread with the 8-bit, 4-bit
+    // and k8v4 caches and 168 with f16, instead of 256, so a SIMD runs 4 (3)
+    // of the kernel's waves instead of 2; Coder 7B's 7 168 instead of 256,
+    // Llama 3.2 3B's 3 100 instead of 128, Gemma 3's 2 of 256 128 instead of
+    // 168 (f16).
+    // And attn_dec without the modulo a key (key % ring) where a layer keeps
+    // no ring, which every layer but a sliding one's is (TS5_ATTN_DEC_NORING=0:
+    // the modulo everywhere, as before): only addresses change. The store
+    // title keeps both off until measured there.
+#ifdef TS5_PS5
+    bool attn_dec_exact_ = false, attn_dec_noring_ = false;
+#else
+    bool attn_dec_exact_ = true, attn_dec_noring_ = true;
+#endif
     uint32_t attn_dec_lpk_ = 0;  // the lanes per key the attn_dec builds got (0: thread per key, heads of 128 only)
     // The 128 x 128 matmul blocks (TS5_MMB=0: never), where there are at
     // least mmb_min_ of them (TS5_MMB_MIN).
@@ -1964,9 +2633,24 @@ private:
     // under Linux (Mesa 26.1) it measured 61 tok/s against 68 without, since
     // every workgroup re-reads and reduces all of x for its sum of squares.
     bool norm_fuse_ = false;
+    // The norms with every load issued before the first wait
+    // (rmsnorm_early.comp and rmsnorm2_early.comp): the same output bit for
+    // bit, a row of 4,096 in about one memory round trip where rmsnorm.comp
+    // waits 15 times one after another on the PS5's GPU (ACO's latency
+    // estimate 7,231 cycles to 3,265). On by default on Linux; the store
+    // title keeps the old kernels until measured there. TS5_NORM_EARLY=0:
+    // the old kernels; 2 to 16: at least that many values a thread (the
+    // wider builds on narrow rows, for the tests).
+#ifdef TS5_PS5
+    bool norm_early_ = false;
+#else
+    bool norm_early_ = true;
+#endif
+    uint32_t norm_early_npt_ = 1;
     const Weight *norm_ = nullptr;  // set: matmul folds this RMSNorm in (one token)
     bool no_barrier_ = false;  // skip the barrier after the next dispatch
     int mmb_min_ = 48;
+    bool mmb_short_ = false;  // chunks under 128 tokens on mmb whatever their block count (TS5_MMB_SHORT)
     // mmb splits matrices of fewer blocks than this (TS5_MMB_SPLIT; 0: never),
     // in about as many workgroups, each one Q4_K or Q6_K block or more wide;
     // TS5_MMB_SLICES=N: every matrix in N.
@@ -1980,6 +2664,9 @@ private:
     uint32_t mmb_wgs_ = 0;
     PFN_vkGetPipelineExecutablePropertiesKHR get_props_ = nullptr;
     PFN_vkGetPipelineExecutableStatisticsKHR get_stats_ = nullptr;
+    // TS5_PIPE_STATS=1: every pipeline's statistics in the log (read_stats).
+    bool pipe_stats_ = false;
+    uint32_t waved_ = 0;  // pipelines that asked for TS5_WAVE's subgroup size
     double mmb_slice_cost_ = 0.05;
     // Matrices of fewer blocks than mmb_min_ use mmb too where their split
     // makes that many workgroups (TS5_MMB_SMALL=0: the 64 x 64 kernel).
@@ -1995,8 +2682,10 @@ private:
     std::string mmb_f16_skip_;
     std::string mmb_var_, mmb_var32_, mmb_var_q8_;  // the f16 and f32 prompt kernels' variants (TS5_MMB_VAR)
     size_t split_used_ = 0;  // floats of split_ that kernels may still read
-    // The KV cache's type (TS5_KV=q8 or f16).
+    // The KV cache's type (TS5_KV=q8 or f16), and whether TS5_KV left it to
+    // the auto fit (kQ8Below) on a model that can take q8.
     KvType kv_ = KvType::F16;
+    bool kv_auto_ = false;
     // TS5_PROFILE=1: a timestamp after each dispatch, summed per kernel.
     static constexpr uint32_t QMAX = 4096;
     std::string qpending_;  // the labels of the dispatches since the last timestamp
@@ -2018,14 +2707,19 @@ private:
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
     Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_, rope_turn_[2];
+    // Rows logits_ holds (logits_rows), and where a call's pieces go: the
+    // caller's array, and the first row the buffer still holds after it.
+    const int out_rows_ = logits_rows();
+    float *out_dst_ = nullptr;
+    int out_last_ = 0;
     // Qwen3.5: queries and gates (qg_); the linear layers' projections
     // (qkv_, z_, beta_, alpha_), output (y_) and state (rec_, each linear
     // layer's in turn, rec_state_floats() floats).
     Buf qg_, qkv_, z_, beta_, alpha_, y_, rec_;
     int rec_layers_ = 0;  // how many linear layers
     int rec_pos_ = 0;     // the tokens rec_ holds
-    Buf saved_;           // save_state()'s copy of rec_
-    int saved_pos_ = -1;  // its tokens; -1: none
+    std::vector<Buf> saved_;      // save_state()'s copies of rec_
+    std::vector<int> saved_pos_;  // their tokens; -1: none
     std::vector<Buf> kc_, vc_, ks_, vs_;  // the KV cache's pieces
     // Each layer's first cache element and piece, and a sliding layer's ring slots (0: none).
     std::vector<uint32_t> layer_off_, layer_buf_, ring_;
@@ -2059,13 +2753,24 @@ Backend *make_vk_backend(Model &m, const std::string &path, int n_ctx, int devic
 
 bool vk_supports_type(uint32_t type) { return qname(type) != nullptr; }
 
-KvType kv_type_setting() {
+KvType kv_type_setting(bool *automatic) {
     const char *e = getenv("TS5_KV");
+#ifdef TS5_PS5
+    // The store title keeps f16 unless asked: the automatic choice was
+    // measured on Linux.
+    if (automatic) *automatic = e && std::string(e) == "auto";
+#else
+    if (automatic) *automatic = !e || !*e || std::string(e) == "auto";
+#endif
     if (!e || !*e) return KvType::F16;
     const std::string v = e;
-    if (v == "q8" || v == "8") return KvType::Q8;
-    if (v != "f16" && v != "16") ts5::log_line("ts5: TS5_KV=%s: not q8 or f16, using f16", e);
-    return KvType::F16;
+    if (v == "auto") return KvType::F16;
+    const KvType t = kv_type_from(v, KvType::F32);
+    if (t == KvType::F32) {
+        ts5::log_line("ts5: TS5_KV=%s: not q8, q4, k8v4 or f16, using f16", e);
+        return KvType::F16;
+    }
+    return t;
 }
 
 int full_layers(const HParams &hp) {
@@ -2086,27 +2791,31 @@ int ring_slots(const HParams &hp) {
     return hp.swa_window > 0 ? hp.swa_window + std::max(VkBackend::TMAX, hp.swa_window) : 0;
 }
 
+// Bytes of a cache's K and V for values of each.
 static uint64_t kv_bytes(uint64_t values, KvType kv) {
-    return kv == KvType::Q8 ? values + values / 16 : kv == KvType::F16 ? 2 * values : 4 * values;
+    return (kv_k_bits(kv) + kv_v_bits(kv)) * values / 8 + (kv_quantized(kv) ? 2 * values / 16 : 0);
 }
 
 uint64_t kv_bytes_per_token(const HParams &hp, KvType kv) {
-    return kv_bytes(2ull * kv_values(hp, false), kv);  // K and V
+    return kv_bytes(kv_values(hp, false), kv);
 }
 
 uint64_t kv_ring_bytes(const HParams &hp, KvType kv) {
-    return kv_bytes(2ull * ring_slots(hp) * kv_values(hp, true), kv);
+    return kv_bytes((uint64_t)ring_slots(hp) * kv_values(hp, true), kv);
 }
 
 uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
     const uint64_t T = VkBackend::TMAX, E = hp.n_embd, F = hp.n_ff;
     const uint64_t QD = (uint64_t)hp.max_qd(), KVD = (uint64_t)hp.max_kvd();
     // Qwen3.5: the queries with their gates, the linear layers' projections
-    // and output, and their state twice (save_state's copy).
+    // and output, and their state with save_state's copies.
     const uint64_t rec = hp.rec_count() ? (uint64_t)hp.ssm_conv_dim() + 2ull * hp.ssm_inner() + 2ull * hp.ssm_v_heads : 0;
     const uint64_t act =
-        4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + hp.n_vocab + (hp.attn_gate ? 2 * QD : 0) + rec) +
-        4 * (VkBackend::PART + VkBackend::SPLIT) + 8ull * hp.rec_count() * (uint64_t)std::max<int64_t>(0, hp.rec_state_floats());
+        4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + (hp.attn_gate ? 2 * QD : 0) + rec) +
+        4ull * logits_rows() * hp.n_vocab +
+        4 * (VkBackend::PART + VkBackend::SPLIT) +
+        4ull * (1 + (hp.rec_count() ? state_slots_wanted() : 0)) * hp.rec_count() *
+            (uint64_t)std::max<int64_t>(0, hp.rec_state_floats());
     const uint64_t gib = 1ull << 30;
     return (weight_bytes + act + gib - 1) / gib * gib + kv_ring_bytes(hp, KvType::F16);
 }
@@ -2150,6 +2859,74 @@ uint64_t draft_reserve(const HParams &dhp, uint64_t draft_weight_bytes) {
 }
 
 bool f16_reaches(int f16_ctx, int train) { return train >= 1024 && f16_ctx >= train / 1024 * 1024; }
+
+KvType auto_kv_type(const HParams &hp, KvType kv, bool automatic, int train, const std::function<int(KvType)> &fit,
+                    std::vector<std::string> *log) {
+    auto say = [&](const std::string &s) {
+        if (log) log->push_back(s);
+    };
+    const int f16 = fit(KvType::F16);
+    // Where f16 falls short of the context: under kQ8Below tokens (the
+    // 14Bs, YaRN or not), and past that where it falls an eighth or more
+    // short of the model's own window (YaRN stretches past it) on the
+    // architectures whose every model checked on the PS5 passed in 8 bits.
+    // Job CP set the caches by hand, on the build before this rule, which
+    // now picks the same ones: Llama 3.1 8B, 54,272 tokens in f16, gets its
+    // whole 131,072 in 8-bit K and 4-bit V (10 of 11 long-document
+    // questions right at 104,756 tokens, as in f16 at 47,383); Qwen3.5 9B,
+    // 175,104 in f16 (job BS), its whole 262,144 in 8 bits (8 of 11 at
+    // 233,035; job BX, f16: 9 of 11 at 159,741); Llama 3.2 3B passes the
+    // 8-bit check (job CR, 0.018 of the largest logit at the worst
+    // position). Not qwen2: Coder 7B fails the 8-bit check (job CJ), and
+    // its f16 holds its window anyway. Never a Gemma, at any length: Gemma
+    // 3 and 4 12B fail the check in 8 bits (0.051 and 0.042 of the largest
+    // logit at the worst position, 39 and 78 of 128 positions over the bar
+    // of 0.02), and 4-bit V costs them 0.42 to 0.54 even in exact math,
+    // against 0.058 and 0.109 on Coder and DeepSeek 14B.
+    const bool gemma = hp.arch == "gemma3" || hp.arch == "gemma4";
+    const bool long_ok = hp.arch == "llama" || hp.arch == "qwen3" || hp.arch == "qwen35";
+    const int own = hp.n_ctx_train > 0 ? std::min(train, hp.n_ctx_train) : train;
+    // Each smaller cache only for an eighth more tokens or better, so a
+    // model whose f16 falls a few thousand short keeps f16.
+    auto more = [](int smaller, int bigger) { return smaller > bigger && smaller >= bigger + bigger / 8; };
+    if (automatic && !gemma && !f16_reaches(f16, train) &&
+        (f16 < kQ8Below || (long_ok && f16 + f16 / 8 <= own))) {
+        const int q8 = fit(KvType::Q8);
+        if (more(q8, f16)) {
+            say("8-bit KV cache: " + std::to_string(q8) + " tokens, where f16 fits " + std::to_string(f16) +
+                " (TS5_KV=f16 keeps f16)");
+            kv = KvType::Q8;
+        }
+        // Still short of the window: V in 4 bits, turned. On the PS5 that
+        // is DeepSeek and Coder 14B, 26,624 tokens to their whole 32,768
+        // (job CN: long-document questions right 10 against 7 and 7 against
+        // 8 on DeepSeek, 10 against 9 on Coder; on the same document at
+        // 26,624 tokens one answer apart), and Llama 3.1 8B, 101,376 to
+        // 131,072. Without the V turn 4-bit V fails the check on both
+        // 14Bs. Qwen3 14B's 8 bits reach 31,744 or 32,768 of its 32,768 by
+        // a few MiB of free memory, and 1,024 tokens aren't worth 4-bit V.
+        auto pow2 = [](int d) { return d > 0 && (d & (d - 1)) == 0; };
+        if (kv == KvType::Q8 && !f16_reaches(q8, train) && kv_turn_v_setting() && pow2(hp.head_dim) &&
+            (!hp.head_dim_swa || pow2(hp.head_dim_swa))) {
+            const int k8v4 = fit(KvType::K8V4);
+            if (more(k8v4, q8)) {
+                say("8-bit K and 4-bit V KV cache: " + std::to_string(k8v4) + " tokens, where 8 bits fit " +
+                    std::to_string(q8) + " (TS5_KV=q8 keeps 8 bits)");
+                kv = KvType::K8V4;
+            }
+        }
+    }
+    if (kv_quantized(kv) && f16_reaches(f16, train)) {
+        say("f16 KV cache: the whole " + std::to_string(train) +
+            "-token context (the model's, or the Settings cap) fits in f16, the more exact");
+        kv = KvType::F16;
+    }
+    if ((kv == KvType::Q4 || kv == KvType::K8V4) && f16_reaches(fit(KvType::Q8), train)) {
+        say("8-bit KV cache: the whole " + std::to_string(train) + "-token context fits in 8 bits, the more exact");
+        kv = KvType::Q8;
+    }
+    return kv;
+}
 
 int fit_context(uint64_t memory, uint64_t used, uint64_t per_token, int cap) {
     const uint64_t reserve = 1ull << 30;

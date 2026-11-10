@@ -745,9 +745,14 @@ std::string turn_opening(const Tokenizer &t, bool think) {
     // Qwen3.5's template opens the thinking itself ({{- '<think>\n' }}, the
     // end of its generation prompt); Qwen3's leaves it to the model.
     const std::string &tmpl = t.chat_template();
-    return t.chat_format() == Tokenizer::CHATML && (has(tmpl, "<think>\\n' }}") || has(tmpl, "<think>\\n\" }}"))
-               ? kThinkingOpen
-               : "";
+    if (t.chat_format() == Tokenizer::CHATML && (has(tmpl, "<think>\\n' }}") || has(tmpl, "<think>\\n\" }}")))
+        return kThinkingOpen;
+    // DeepSeek R1's distills start thinking without writing the <think>, so
+    // their later templates open it ('<｜Assistant｜><think>\n'); with an
+    // earlier one the thinking ended in a bare </think> and landed in the
+    // answer. Their turns open it here whichever template the file has.
+    if (has(tmpl, "<｜Assistant｜>") && has(tmpl, "</think>")) return kThinkingOpen;
+    return "";
 }
 
 ToolFormat tool_format(const Tokenizer &t) {

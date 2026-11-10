@@ -127,17 +127,23 @@ def quantize_q6_k(x):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--arch", default="qwen2", choices=["llama", "qwen2", "qwen3", "gemma4", "qwen35"])
+    ap.add_argument("--arch", default="qwen2", choices=["llama", "qwen2", "qwen3", "gemma3", "gemma4", "qwen35"])
     ap.add_argument("--vocab", required=True)
     ap.add_argument("--layers", type=int, default=2)
     ap.add_argument("--embd", type=int, default=256)
     ap.add_argument("--ff", type=int, default=512)
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--kv-heads", type=int, default=2)
+    ap.add_argument("--head-dim", type=int, default=0,
+                    help="gemma3: the heads' size apart from the width (the 12B's 16 heads of 256 on 3,840); "
+                         "default the width over the heads")
     ap.add_argument("--global-hd", type=int, default=0,
                     help="gemma4: the full-attention layers' head size (every 3rd layer; default twice the others'), "
                          "on one K/V head without a V projection, as the 12B has it")
-    ap.add_argument("--window", type=int, default=8, help="gemma4: the sliding layers' window")
+    ap.add_argument("--window", type=int, default=8, help="gemma3, gemma4: the sliding layers' window")
+    ap.add_argument("--ctx", type=int, default=4096, help="the context it says it was trained to (context_length)")
+    ap.add_argument("--rope-linear", type=float, default=0,
+                    help="gemma3: linear RoPE scaling of the full layers by this factor (the 4B to 27B: 8)")
     ap.add_argument("--rope-base", type=float, default=0, help="gemma4: the full layers' RoPE base (0: the default)")
     ap.add_argument("--prop-rope", type=float, default=0,
                     help="gemma4: proportional RoPE, rotating this fraction of the full layers' pairs (rope_freqs "
@@ -148,6 +154,8 @@ def main():
     ap.add_argument("--ssm-v-heads", type=int, default=4, help="qwen35: their value heads (a multiple of the keys')")
     ap.add_argument("--decay", type=float, default=1.0,
                     help="qwen35: scale on the linear layers' decay (A), smaller for a longer memory")
+    ap.add_argument("--experts", type=int, default=0,
+                    help="write <arch>.expert_count (the weights stay dense): a mixture-of-experts file's header")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--pad-vocab", type=int, default=0,
                     help="extra embedding and output rows past the token list, as released models pad")
@@ -172,18 +180,20 @@ def main():
     rng = np.random.default_rng(a.seed)
     reader = GGUFReader(a.vocab)
     n_vocab = len(reader.fields["tokenizer.ggml.tokens"].data)
-    hd = a.embd // a.heads
+    hd = a.head_dim or a.embd // a.heads
 
     w = GGUFWriter(a.out, a.arch)
     w.add_name(f"ts5-test-{a.arch}")
-    w.add_context_length(4096)
+    w.add_context_length(a.ctx)
     w.add_embedding_length(a.embd)
     # Qwen3.5's files count its multi-token-prediction layer, whose weights
     # they leave out.
     w.add_block_count(a.layers + (1 if a.arch == "qwen35" else 0))
     w.add_feed_forward_length(a.ff)
+    if a.experts:
+        w.add_key_value(f"{a.arch}.expert_count", a.experts, GGUFValueType.UINT32)
     w.add_head_count(a.heads)
-    if a.arch != "gemma4":
+    if a.arch not in ("gemma3", "gemma4"):
         w.add_head_count_kv(a.kv_heads)
     w.add_layer_norm_rms_eps(1e-6)
     w.add_rope_freq_base(1000000.0 if a.arch != "llama" else 10000.0)
@@ -235,6 +245,18 @@ def main():
         w.add_final_logit_softcapping(30.0)
         w.add_key_value("gemma4.attention.shared_kv_layers", 0, GGUFValueType.UINT32)
         w.add_key_value("gemma4.embedding_length_per_layer_input", 0, GGUFValueType.UINT32)
+    # Gemma 3 as the 4B to 27B have it: every 6th layer full attention, the
+    # rest sliding (neither in the file), q and k normed, post-norms, and a
+    # linear RoPE scale on the full layers only.
+    g3 = a.arch == "gemma3"
+    if g3:
+        w.add_head_count_kv(a.kv_heads)
+        w.add_key_length(hd)
+        w.add_value_length(hd)
+        w.add_sliding_window(a.window)
+        if a.rope_linear:
+            w.add_key_value("gemma3.rope.scaling.type", "linear", GGUFValueType.STRING)
+            w.add_key_value("gemma3.rope.scaling.factor", a.rope_linear, GGUFValueType.FLOAT32)
     w.add_file_type(0)
     copy_tokenizer(reader, w, a.pad_tokens, a.rename_controls, a.rename_token, a.rename_to, a.pad_name, a.pad_type,
                    a.plain_spaces)
@@ -322,6 +344,11 @@ def main():
         if a.arch == "qwen2":
             for n, dim in (("q", a.heads * hd), ("k", a.kv_heads * hd), ("v", a.kv_heads * hd)):
                 w.add_tensor(p + f"attn_{n}.bias", (0.1 * rng.standard_normal(dim)).astype(np.float32))
+        if g3:
+            for n in ("q", "k"):
+                w.add_tensor(p + f"attn_{n}_norm.weight", (a.qk_gain * (1.0 + 0.1 * rng.standard_normal(hd))).astype(np.float32))
+            norm(p + "post_attention_norm.weight", a.embd)
+            norm(p + "post_ffw_norm.weight", a.embd)
         if a.arch == "qwen3":
             norm(p + "attn_q_norm.weight", hd)
             norm(p + "attn_k_norm.weight", hd)

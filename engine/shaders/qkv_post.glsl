@@ -6,7 +6,10 @@
 // V go into the cache (position p in slot p % ring of a sliding layer's ring,
 // else slot p). Heads up to 512 wide (Gemma 4's full layers).
 // f16, or with KV_Q8 (qkv_post_q8.comp) 8-bit values with an f16 scale per
-// 32 (the largest magnitude over 127, values rounded to nearest even).
+// 32 (the largest magnitude over 127, values rounded to nearest even), or
+// with KV_Q4 as well (qkv_post_q4.comp) 4-bit values with the same scales,
+// a word of 4 values in 16 bits, or with KV_V4 (qkv_post_k8v4.comp) K in 8
+// bits and V in 4.
 // Workgroups 0..n_head-1 handle Q heads, the rest K/V heads.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
@@ -21,15 +24,36 @@ layout(std430, binding = 5) readonly buffer BV { float bv[]; };
 layout(std430, binding = 6) readonly buffer NQ { float nq[]; };
 layout(std430, binding = 7) readonly buffer NK { float nk[]; };
 #ifdef KV_Q8
-layout(std430, binding = 8) writeonly buffer KC { uint kc[]; };  // 4 values a word
-layout(std430, binding = 9) writeonly buffer VC { uint vc[]; };
+#include "kv_word.glsl"
+layout(std430, binding = 8) writeonly buffer KC { KW_T kc[]; };  // 4 values a word
+layout(std430, binding = 9) writeonly buffer VC { VW_T vc[]; };
 layout(std430, binding = 10) writeonly buffer KS { float16_t k_scale[]; };
 layout(std430, binding = 11) writeonly buffer VS { float16_t v_scale[]; };
 shared float ky[512], vy[512];
 
+// Values 4w .. 4w + 3 of the head in y as one word of 4-bit values (value i
+// in bits 4i ..), and their block's scale when they start one: as Q4_0, the
+// block's value of the largest magnitude (the first, on a tie) over -8, so
+// that value is -8 and the others round to nearest even in -8 .. 7.
+uint cache_word4(uint w, bool is_v, out float sc) {
+    const uint b = (4 * w) & ~31u;
+    float vmax = 0.0;
+    for (uint i = 0; i < 32; i++) {
+        const float y = is_v ? vy[b + i] : ky[b + i];
+        if (abs(y) > abs(vmax)) vmax = y;
+    }
+    sc = float(float16_t(vmax / -8.0));
+    uint word = 0;
+    for (uint i = 0; i < 4; i++) {
+        const float y = is_v ? vy[4 * w + i] : ky[4 * w + i];
+        const int q = sc != 0.0 ? int(clamp(roundEven(y / sc), -8.0, 7.0)) : 0;
+        word |= (uint(q) & 15u) << (4 * i);
+    }
+    return word;
+}
 // Values 4w .. 4w + 3 of the head in y as one word of 8-bit values, and
 // their block's scale when they start one. Returns the word.
-uint q8_word(uint w, bool is_v, out float sc) {
+uint cache_word8(uint w, bool is_v, out float sc) {
     const uint b = (4 * w) & ~31u;
     float amax = 0.0;
     for (uint i = 0; i < 32; i++) amax = max(amax, abs(is_v ? vy[b + i] : ky[b + i]));
@@ -42,6 +66,16 @@ uint q8_word(uint w, bool is_v, out float sc) {
     }
     return word;
 }
+#ifdef KV_K4
+#define K_WORD(w, sc) uint16_t(cache_word4(w, false, sc))
+#else
+#define K_WORD(w, sc) cache_word8(w, false, sc)
+#endif
+#ifdef KV_V4
+#define V_WORD(w, sc) uint16_t(cache_word4(w, true, sc))
+#else
+#define V_WORD(w, sc) cache_word8(w, true, sc)
+#endif
 #else
 layout(std430, binding = 8) writeonly buffer KC { float16_t kc[]; };
 layout(std430, binding = 9) writeonly buffer VC { float16_t vc[]; };
@@ -123,7 +157,11 @@ void main() {
             else y = (d & 1u) == 0 ? sh[d] * c - sh[d + 1] * s : sh[d - 1] * s + sh[d] * c;
         }
         if (is_q) {
+#ifdef KV_TURN
+            ky[d] = y;
+#else
             Q[base + d] = y;
+#endif
         } else {
             const float v = vsh[d];
 #ifdef KV_Q8
@@ -136,14 +174,48 @@ void main() {
 #endif
         }
     }
+#ifdef KV_TURN
+    // Q and K, after RoPE, through the same fixed signs and Walsh-Hadamard
+    // butterflies (no 1/sqrt(n)): K's large channels spread over the whole
+    // head before the 8-bit cache rounds it in blocks of 32. Q is also scaled
+    // by 1/HD, a power of two, so every score Q.K stays the same.
+    // With KV_TURN_V (kv_turn_v_setting()) V goes through them too, which
+    // spreads its large channels the same way; attn_unturn turns the
+    // attention's output back.
+    barrier();
+    for (uint d = tid; d < HD; d += 128)
+        if ((((d * 2654435761u) >> 13) & 1u) != 0) {
+            ky[d] = -ky[d];
+#ifdef KV_TURN_V
+            vy[d] = -vy[d];
+#endif
+        }
+    barrier();
+    for (uint hh = 1; hh < HD; hh *= 2) {
+        for (uint j = tid; j < HD / 2; j += 128) {
+            const uint i = (j / hh) * 2 * hh + (j % hh);
+            const float a = ky[i], b = ky[i + hh];
+            ky[i] = a + b;
+            ky[i + hh] = a - b;
+#ifdef KV_TURN_V
+            const float c = vy[i], e = vy[i + hh];
+            vy[i] = c + e;
+            vy[i + hh] = c - e;
+#endif
+        }
+        barrier();
+    }
+    if (is_q)
+        for (uint d = tid; d < HD; d += 128) Q[base + d] = ky[d] * (1.0 / float(HD));
+#endif
 #ifdef KV_Q8
     if (!is_q) {  // the same for the whole workgroup
         barrier();
         for (uint w = tid; w < HD / 4; w += 128) {
             const uint ci = pc.cache_off + slot * kv_stride + h * HD + 4 * w;  // value index
             float ks, vs;
-            kc[ci / 4] = q8_word(w, false, ks);
-            vc[ci / 4] = q8_word(w, true, vs);
+            kc[ci / 4] = K_WORD(w, ks);
+            vc[ci / 4] = V_WORD(w, vs);
             if ((4 * w) % 32 == 0) {
                 k_scale[ci / 32] = float16_t(ks);
                 v_scale[ci / 32] = float16_t(vs);

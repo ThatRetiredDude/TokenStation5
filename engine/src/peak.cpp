@@ -146,7 +146,7 @@ struct Peak {
         return ok(vk.vkCreatePipelineLayout(dev, &pl, nullptr, &layout), "vkCreatePipelineLayout", err);
     }
 
-    bool pipe(const uint32_t *code, size_t bytes, VkPipeline &p, std::string &err) {
+    bool pipe(const char *name, const uint32_t *code, size_t bytes, VkPipeline &p, std::string &err) {
         VkShaderModuleCreateInfo sm{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         sm.codeSize = bytes;
         sm.pCode = code;
@@ -158,6 +158,14 @@ struct Peak {
         cp.stage.module = mod;
         cp.stage.pName = "main";
         cp.layout = layout;
+        // TS5_WAVE as the backend's pipelines take it (peak_read: TS5_WAVE=64
+        // or 32 for the plain read in either wave size).
+        VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT rss{
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT};
+        if (asks_subgroup(*ctx, name, code, bytes)) {
+            rss.requiredSubgroupSize = ctx->required_subgroup;
+            cp.stage.pNext = &rss;
+        }
         const VkResult r = vk.vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cp, nullptr, &p);
         vk.vkDestroyShaderModule(dev, mod, nullptr);
         if (!ok(r, "vkCreateComputePipelines", err)) return false;
@@ -322,12 +330,12 @@ int peak_command(int device, double read_gib) {
         VkPipeline pread, p32, p16 = VK_NULL_HANDLE, pmmb = VK_NULL_HANDLE;
         VkBuffer big, out;
         const VkDeviceSize bytes = (VkDeviceSize)(read_gib * 1073741824.0) / 4096 * 4096;
-        bool good = pk.init(err) && pk.pipe(spv_peak_read, sizeof spv_peak_read, pread, err) &&
-                    pk.pipe(spv_peak_fma32, sizeof spv_peak_fma32, p32, err) && pk.buffer(bytes, big, err) &&
-                    pk.buffer(1 << 20, out, err) && pk.fill(big, bytes, err);
+        bool good = pk.init(err) && pk.pipe("peak_read", spv_peak_read, sizeof spv_peak_read, pread, err) &&
+                    pk.pipe("peak_fma32", spv_peak_fma32, sizeof spv_peak_fma32, p32, err) &&
+                    pk.buffer(bytes, big, err) && pk.buffer(1 << 20, out, err) && pk.fill(big, bytes, err);
         if (good && ctx->float16)
-            good = pk.pipe(spv_peak_fma16, sizeof spv_peak_fma16, p16, err) &&
-                   pk.pipe(spv_peak_mmb, sizeof spv_peak_mmb, pmmb, err);
+            good = pk.pipe("peak_fma16", spv_peak_fma16, sizeof spv_peak_fma16, p16, err) &&
+                   pk.pipe("peak_mmb", spv_peak_mmb, sizeof spv_peak_mmb, pmmb, err);
         if (!good) {
             fprintf(stderr, "ts5: %s\n", err.c_str());
             rc = 1;

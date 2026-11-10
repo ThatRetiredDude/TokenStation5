@@ -187,31 +187,50 @@ GiB, which the packages and `install.sh` do on a PS5 when no limit is set yet.
 It's a limit, not a reservation: Linux and Steam keep using the memory, and
 TokenStation sizes each model to what the driver says is free when it loads.
 `set 11` (any whole GiB up to all but 2) keeps a fixed amount for other apps. TokenStation itself never takes more than the GPU driver's
-budget (what's free), and it always leaves 2 GiB of the system's RAM free
+budget (what's free), and it always leaves 1.5 GiB of the system's RAM free
 for Linux, the desktop and the app: a model, its context and a helper model
 are sized to what is available less that, and a load that wouldn't leave it
 is refused with the numbers ("not enough memory: the weights and buffers
 take 8.6 GiB and ..., 7.9 GiB is free"). A GPU allocation that leaves
 Linux nothing can't be swapped out, and the OOM killer then stops
-everything else. `ts5 check` keeps the same 2 GiB: a check whose two sets
+everything else. `ts5 check` keeps the same 1.5 GiB: a check whose two sets
 of scores and CPU reference wouldn't leave it is refused before it starts,
 with how many tokens would fit (a 14B at 2,048 tokens needs about 3.8 GiB
-beside the model; 512 tokens need about 1.1 GiB). `TS5_SYSTEM_RESERVE_GIB` changes the 2 GiB;
+beside the model; 512 tokens need about 1.1 GiB). `TS5_SYSTEM_RESERVE_GIB` changes the 1.5 GiB;
 `TS5_GPU_MEMORY_GIB` overrides what it thinks it has.
 
-With about 11 GiB for models (an idle PS5 under Debian has about 13.2 GiB
-available, less the 2 GiB kept free):
+Longest context at "As much as fits", no helper, measured on a PS5 under
+Debian on 2026-11-08 with the defaults (1.5 GiB of RAM kept free, and Room
+for longer contexts at Automatic: the 16-bit cache, 8 bits where 16 bits
+fall well short of a model's window, as on the 14Bs, Llama and Qwen3.5 but
+never the Gemmas, and 8-bit keys with 4-bit values where 8 bits still do).
+A load can land one step lower or higher with how much RAM is free at that
+moment. Cold load times are from
+the original 5 Gb/s USB SATA drive (about 290 MB/s).
 
-| Model | Quant | Weights | Context that fits (estimate) |
-| --- | --- | ---: | ---: |
-| Qwen 2.5 Coder 14B Instruct | Q4_K_M | ~9.0 GiB | ~16k with the 8-bit KV cache |
-| Qwen 3 14B | Q4_K_M | ~9.0 GiB | ~24k with the 8-bit KV cache |
-| Gemma 3 12B | Q4_K_M | ~6.8 GiB | ~64k (sliding layers keep it small) |
-| Mistral Nemo 12B | Q4_K_M | ~7.0 GiB | ~32k |
+| Model | Quant | Context | Cache | Cold load |
+| --- | --- | ---: | --- | ---: |
+| Qwen 3 14B | Q4_K_M | 32,768 (its limit; 17,408 in 16-bit) | 8-bit (Automatic) | 31 s |
+| DeepSeek R1 Distill Qwen 14B | Q4_K_M | 32,768 (its limit; 26,624 in 8-bit, 14,336 in 16-bit) | 8-bit keys, 4-bit values (Automatic) | 32 s |
+| Qwen 2.5 Coder 14B Instruct | Q4_K_M | 32,768 (its limit; 26,624 in 8-bit, 14,336 in 16-bit) | 8-bit keys, 4-bit values (Automatic) | 32 s |
+| Gemma 3 12B | Q4_K_M | 45,056 | 16-bit | 26 s |
+| Gemma 4 12B | Q4_K_M | 131,072 (its whole length) | 16-bit | 31 s |
+| Qwen3.5 9B | Q4_K_M | 262,144 (its whole length; 175,104 in 16-bit) | 8-bit (Automatic) | 22 s |
+| Llama 3.1 8B | Q4_K_M | 131,072 (its whole length; 101,376 in 8-bit, 54,272 in 16-bit) | 8-bit keys, 4-bit values (Automatic) | 18 s |
+| Qwen 3 8B, Qwen 2.5 Coder 7B | Q4_K_M | 32,768 (their limit; longer with YaRN, below) | 16-bit | 16 to 17 s |
+| Gemma 3 4B | Q4_K_M | 131,072 (its whole length) | 16-bit | 9 s |
+| Llama 3.2 3B | Q4_K_M | 131,072 (its whole length; 74,752 in 16-bit) | 8-bit (Automatic) | 8 s |
 
-The Models page's Hugging Face search uses the same budget, so 14B models show
-up there once the memory is raised. These are estimates until they are
-measured on a PS5.
+On the 14Bs the 8-bit cache found the same long-document answers as 16-bit
+(10 of 11 at about twice the length); some longer answers are worded
+differently. With 8-bit keys and 4-bit values at their whole 32,768 tokens,
+Coder 14B answered 10 of 11 and DeepSeek 10 and 7 on two documents, against
+9, 7 and 8 with 8 bits at 26,624. Llama 3.1 8B answered 10 of 11 at
+104,756 tokens with 8-bit keys and 4-bit values, as in 16-bit at 47,383,
+and Qwen3.5 9B 8 of 11 at 233,035 tokens in 8 bits (9 of 11 at 160k in
+16-bit); reading that document took 21 minutes. The Gemmas keep 16 bits:
+they fail the accuracy check even in 8 bits. The Models page and its
+search estimate contexts the same way.
 
 ## Settings
 
@@ -230,6 +249,19 @@ The app's own settings are on its Settings page, as on the console.
 
 The app reads `ts5.env` in its data folder, as the title does (engine
 settings such as `TS5_KV=q8`).
+
+Longer than 32k on Qwen3 and Qwen 2.5 (Coder): Settings > MODELS > Longer
+context for Qwen3 8B and Coder 7B (`TS5_YARN=1`) stretches their 32,768-token
+window with YaRN, as their model cards do, up to 131,072 tokens. On the PS5
+that is 47,104 tokens for Qwen3 8B and 122,880 for Coder 7B in 16 bits;
+Qwen3 8B with Room for longer contexts on Half size reached a context of
+82,944 tokens (with the 2 GiB system reserve of the time) and answered 10
+of 11 long-document questions right at 78k. The 14Bs reach about their 32k with
+the automatic cache first, so it adds less there: Qwen3 14B gets 41,984
+tokens (10 of 11 right at 37,800), DeepSeek and Coder 14B 34,816. For the API service, add `TS5_YARN=1` to `/etc/default/tokenstation`
+and set `CONTEXT=auto` or a number. It's off by default: while it's on and
+the context is past 32k, short chats run with stretched positions too. With
+a context of 32,768 or less it changes nothing.
 
 Speed test: `ts5 bench -m model.gguf --pp 512 --tg 128`.
 
@@ -252,13 +284,14 @@ context first and the helper gets what is left, if that is enough for it.
 On the PS5 (about 13 GiB free) Qwen3 8B keeps all 32,768 tokens and its
 helper gets 2,048 of its own, enough to write 9% faster on an 800-token
 document (past its context, a conversation goes on without it). Llama 3.1
-8B (49,152 tokens) and the 12B and 14B models have no room left for one.
+8B (131,072 tokens) and the 12B and 14B models have no room left for one.
 A fixed Longest context of 4,096 leaves a 14B room for its helper (+32 to
 34% on short answers, as `ts5-tune` measures); at 8,192 there is none.
 `TS5_HELPER_ROOM=1` in `ts5.env` keeps the helper's room instead (its
 weights and 4k of its context, about 1.9 GiB for Qwen3 0.6B), at the cost
-of the model's context: Llama 3.1 8B gets 35,840 tokens and its helper
-instead of 49,152 alone. A model that doesn't fit beside that room loads
+of the model's context: Llama 3.1 8B gets about 100,000 tokens beside its
+helper instead of its whole 131,072 alone, in 8-bit keys and 4-bit values
+either way. A model that doesn't fit beside that room loads
 alone, with the context it has without a helper. The helper pays off most
 on short answers: on long documents and code it guesses right less often
 (the Gemma 12Bs at 8,192 wrote 5 to 9% slower with it in 3 of 4 tests).

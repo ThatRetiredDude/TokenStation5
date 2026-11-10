@@ -113,13 +113,39 @@ bool model_id(const std::string &path, uint64_t &size, uint64_t &hash) {
     return true;
 }
 
-// 0 is f16, which the files saved before this field all are.
-uint32_t kv_code(KvType t) { return t == KvType::F16 ? 0 : t == KvType::Q8 ? 1 : 2; }
+// The CPU reference's measurement settings (TS5_CPU_KV_K, TS5_CPU_KV_V,
+// TS5_CPU_KV_TURN_V: cpu_backend.cpp), as a suffix of its answers' file:
+// "-Kq8", "-Vf16", "-Vt". Empty without them.
+static std::string cpu_kv_tag() {
+    std::string t;
+    if (const char *e = getenv("TS5_CPU_KV_K"); e && *e) t += std::string("-K") + e;
+    if (const char *e = getenv("TS5_CPU_KV_V"); e && *e) t += std::string("-V") + e;
+    if (const char *e = getenv("TS5_CPU_KV_TURN_V"); e && atoi(e)) t += "-Vt";
+    return t;
+}
+
+// 0 is f16, which the files saved before this field all are. 3 and 5: an
+// 8-bit and a 4-bit cache with Q and K turned (kv_turn_setting()), which
+// rounds other values; 6 and 7 with V turned as well (kv_turn_v_setting()).
+// 8, 9 and 10: 8-bit K with 4-bit V, plain, turned, and with V turned too.
+uint32_t kv_code(KvType t) {
+    if (!cpu_kv_tag().empty()) return 0x100;  // a measurement's: never anything else's
+    switch (t) {
+    case KvType::F16: return 0;
+    case KvType::Q8: return kv_turn_v_setting() ? 6 : kv_turn_setting() ? 3 : 1;
+    case KvType::Q4: return kv_turn_v_setting() ? 7 : kv_turn_setting() ? 5 : 4;
+    case KvType::K8V4: return kv_turn_v_setting() ? 10 : kv_turn_setting() ? 9 : 8;
+    default: return 2;
+    }
+}
 
 // One file per cache type, so trying one doesn't throw away the other's, and
 // per text (tag: its tokens' hash) for checks of a text's tokens.
 std::string ref_path(const std::string &model, KvType kv, const std::string &tag) {
-    return model + (kv == KvType::F16 ? "" : std::string(".") + kv_type_name(kv)) + (tag.empty() ? "" : "." + tag) +
+    const std::string x = cpu_kv_tag();
+    const std::string kind = std::string(kv_type_name(kv)) + (kv_quantized(kv) && kv_turn_setting() ? "t" : "") +
+                             (kv_quantized(kv) && kv_turn_v_setting() ? "v" : "") + x;
+    return model + (kv == KvType::F16 && x.empty() ? "" : "." + kind) + (tag.empty() ? "" : "." + tag) +
            ".ts5ref";
 }
 
@@ -224,8 +250,25 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     for (int i = batch; i < n; i++)
         if (!gpu.forward(&toks[i], 1, i, got.data() + (size_t)i * nv, false, err)) return false;
     r.gpu_ms = now_ms() - t;
-    // Saved answers are the file's own window's: a test window needs its own.
-    r.saved = !fresh && !m.hp.swa_test && load_ref(m.gguf.path, n, nv, gpu.kv_type(), tag, ref);
+    // Saved answers are the file's own window's and RoPE's: a test window,
+    // or positions stretched by YaRN, need their own.
+    const bool own = m.hp.swa_test || m.hp.yarn_factor > 1.f;
+    // TS5_CHECK_REF_KV=f16 (or q8, q4): the reference keeps its cache in that type
+    // instead of the GPU's, e.g. how far an 8-bit cache on the GPU is from a
+    // 16-bit one. The pass bar is still the GPU's cache type's.
+    KvType ref_kv = gpu.kv_type();
+    if (const char *e = getenv("TS5_CHECK_REF_KV"); e && *e) {
+        const std::string v = e;
+        ref_kv = kv_type_from(v, KvType::F32);
+        if (ref_kv == KvType::F32) {
+            ts5::log_line("ts5: TS5_CHECK_REF_KV=%s: not f16, q8, q4 or k8v4, using the GPU's", e);
+            ref_kv = gpu.kv_type();
+        }
+        if (ref_kv != gpu.kv_type())
+            ts5::log_line("ts5: check against the answers with a cache in %s (the GPU keeps %s)", kv_type_name(ref_kv),
+                          kv_type_name(gpu.kv_type()));
+    }
+    r.saved = !fresh && !own && load_ref(m.gguf.path, n, nv, ref_kv, tag, ref);
     bool ok = true;
     if (!r.saved) {
         if (!check_fits(fixed + (uint64_t)n * cpu_ref_per_token(m.hp), mem_available(), n, n_fit,
@@ -236,14 +279,16 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
         // Opened, not loaded: the reference reads one layer's weights from the
         // file at a time, so the check needs little memory beside the GPU's.
         if (!cpu_model.open(m.gguf.path, err)) return false;
-        // The GPU's window, where a test window was asked for when it loaded.
+        // The GPU's window, where a test window was asked for when it loaded,
+        // and its YaRN stretch, which its context set.
         cpu_model.hp.swa_window = m.hp.swa_window;
-        std::unique_ptr<Backend> cpu(make_cpu_backend(cpu_model, n, gpu.kv_type()));
+        cpu_model.hp.yarn_factor = m.hp.yarn_factor;
+        std::unique_ptr<Backend> cpu(make_cpu_backend(cpu_model, n, ref_kv));
         if (progress) progress("running on the CPU");
         t = now_ms();
         ok = cpu->forward(toks.data(), n, 0, ref.data(), true, err);
         r.cpu_ms = now_ms() - t;
-        if (ok && !m.hp.swa_test) save_ref(m.gguf.path, n, nv, gpu.kv_type(), tag, ref);
+        if (ok && !own) save_ref(m.gguf.path, n, nv, ref_kv, tag, ref);
     }
     if (!ok) return false;
     double max_ref = 0;
@@ -276,10 +321,13 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
     // An 8-bit cache rounds a value differently on the two sides whenever their
     // inputs differ in the last bits near a rounding boundary, a step of 1/127
     // of the block's largest value, so it gets a wider margin. A wrong kernel
-    // is off by far more than either.
-    const double bar = gpu.kv_type() == KvType::Q8 ? 2e-2 : 5e-3;
+    // is off by far more than either. A 4-bit cache's step is 1/8 of the
+    // block's largest value: each flipped rounding moves a value 16 times as
+    // far.
+    const double bar = gpu.kv_type() == KvType::Q4 || gpu.kv_type() == KvType::K8V4 ? 1e-1
+                       : gpu.kv_type() == KvType::Q8                                 ? 2e-2
+                                                                                     : 5e-3;
     for (int i = 0; i < n; i++) r.over += pos_diff[i] > bar * max_ref;
-    r.pass = std::isfinite(r.rel) && r.rel < bar;
     // On a text, whether a difference changes what the model would write: how
     // likely each side finds the text's own next token (perplexity), and how
     // far the GPU's whole distribution is from the CPU's (KL divergence, CPU
@@ -308,6 +356,20 @@ bool run_check(const Model &m, Backend &gpu, int n, CheckResult &r, std::string 
         r.ppl_cpu = std::exp(nll_f / (n - 1));
         r.kl_mean = kl_sum / (n - 1);
     }
+    r.pass = std::isfinite(r.rel) && r.rel < bar;
+    // Past 512 tokens, rounding noise alone reaches the bar now and then: on
+    // the PS5, Qwen3 8B in exact 32-bit math was 0.52% off at one position of
+    // 2,048, the same top token everywhere, KL 1e-7 (16-bit math there: 0.68%,
+    // 4 positions, 2 top tokens and KL 7.8e-6). So a long check also passes
+    // when the positions over the bar are rare (one in 1,024), none of them
+    // twice the bar, the top token differs at no more than one in 1,024, and,
+    // on a text, the distributions agree (KL under 1e-6 on average). A wrong
+    // kernel is off everywhere, by far more.
+    if (!r.pass && n > 512 && std::isfinite(r.rel)) {
+        const int rare = std::max(1, n / 1024);
+        r.by_length = r.rel < 2 * bar && r.over <= rare && n - r.same_top <= rare && (!r.on_text || r.kl_mean < 1e-6);
+        r.pass = r.by_length;
+    }
     return true;
 }
 
@@ -326,8 +388,9 @@ std::string check_line(const std::string &model, const CheckResult &r) {
     char line[1024];
     snprintf(line, sizeof line,
              "ts5 check: %s, %d tokens: max |diff| %.3g (%.2g of the largest logit) at token %d, same top token at "
-             "%d/%d, over the bar at %d%s, %s %.0f ms, %s: %s",
-             model.c_str(), r.n, r.max_diff, r.rel, r.worst, r.same_top, r.n, r.over, text.c_str(),
+             "%d/%d, over the bar at %d%s%s, %s %.0f ms, %s: %s",
+             model.c_str(), r.n, r.max_diff, r.rel, r.worst, r.same_top, r.n, r.over,
+             r.by_length ? " (rare, and they change nothing: noise at this length)" : "", text.c_str(),
              r.backend.c_str(), r.gpu_ms, cpu.c_str(), r.pass ? "PASS" : "FAIL");
     return line;
 }

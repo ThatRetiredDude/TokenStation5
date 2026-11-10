@@ -1,6 +1,7 @@
 // A backend runs the forward pass and owns the KV cache.
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -8,10 +9,21 @@
 
 namespace ts5 {
 
-// How a KV cache holds keys and values: fp32 (the CPU's), f16, or 8 bits
-// per value with an f16 scale per 32 (the largest magnitude over 127).
-enum class KvType { F32, F16, Q8 };
+// How a KV cache holds keys and values: fp32 (the CPU's), f16, 8 bits per
+// value with an f16 scale per 32 (the largest magnitude over 127), 4 bits
+// with an f16 scale per 32 (as Q4_0: the value of the largest magnitude over
+// -8, values -8 .. 7), or K in 8 bits and V in 4 (K8V4).
+enum class KvType { F32, F16, Q8, Q4, K8V4 };
 const char *kv_type_name(KvType t);
+// "f16" (or 16), "q8" (8), "q4" (4), "k8v4", "f32" (32); otherwise for anything else.
+KvType kv_type_from(const std::string &name, KvType otherwise);
+// An 8- or 4-bit cache: values in blocks of 32 with a scale each.
+inline bool kv_quantized(KvType t) { return t == KvType::Q8 || t == KvType::Q4 || t == KvType::K8V4; }
+// Bits of one value of K, and of V (a quantized cache's scales come on top).
+inline uint64_t kv_k_bits(KvType t) {
+    return t == KvType::Q4 ? 4 : t == KvType::Q8 || t == KvType::K8V4 ? 8 : t == KvType::F16 ? 16 : 32;
+}
+inline uint64_t kv_v_bits(KvType t) { return t == KvType::K8V4 ? 4 : kv_k_bits(t); }
 
 class Backend {
 public:
@@ -31,19 +43,25 @@ public:
     virtual bool forward_in_place(const int32_t *tokens, int n, int pos0, bool all_logits, std::string &err) {
         return forward(tokens, n, pos0, nullptr, all_logits, err);
     }
+    // The most positions whose logits forward_in_place can leave at
+    // logits_view() at once (all_logits).
+    virtual int in_place_rows() const { return 1 << 30; }
     virtual int n_ctx() const = 0;
     // How far before the furthest position forwarded so far a forward call
     // may start and still find the keys it needs: a sliding layer's ring
     // (Gemma 3) holds only so many positions; unlimited elsewhere.
     virtual int rewind_limit() const { return 1 << 30; }
     // A backend whose state only goes forward (rewind_limit() 0: Qwen3.5's
-    // linear layers) keeps one copy of it, so a conversation's next request
-    // goes on from where the last turn started, not from the start:
-    // save_state() copies the state as it stands, after the tokens forwarded
-    // so far; restore_state() puts the copy back, and the next forward goes
-    // on from its tokens. false: no copy kept (or none saved).
-    virtual bool save_state(std::string &) { return false; }
-    virtual bool restore_state(std::string &) { return false; }
+    // linear layers) keeps state_slots() copies of it, so a request that
+    // shares the start of the last one goes on from a copy, not from the
+    // start: save_state(slot) copies the state as it stands, after the tokens
+    // forwarded so far; restore_state(slot) puts that copy back, and the next
+    // forward goes on from its tokens. false: no such copy kept (or none
+    // saved). The copies are made when the backend is, before the context
+    // is sized.
+    virtual int state_slots() const { return 0; }
+    virtual bool save_state(int, std::string &) { return false; }
+    virtual bool restore_state(int, std::string &) { return false; }
     virtual KvType kv_type() const { return KvType::F32; }
     // Since the last call, a few lines of text: with TS5_PROFILE set (vk),
     // the CPU's time per forward call, and with TS5_PROFILE=1 also the GPU's
@@ -57,8 +75,27 @@ struct VkContext;
 // stores them, so a comparison with that GPU measures its kernels rather
 // than the cache's precision.
 Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv = KvType::F32);
-// The cache type TS5_KV asks for: q8, else f16.
-KvType kv_type_setting();
+// The cache type TS5_KV asks for: q8, q4, else f16. *automatic: TS5_KV is
+// unset, empty or auto, so an auto-fit context (-c auto) may take q8 where f16
+// is short (auto_kv_type), and K8V4 where q8 is still short. q4 is only ever
+// asked for, never automatic.
+KvType kv_type_setting(bool *automatic = nullptr);
+// Whether an 8- or 4-bit cache turns Q and K per head (fixed signs, then
+// Walsh-Hadamard) before rounding K, which keeps every score and spreads K's
+// few large channels: on Linux unless TS5_KV_TURN=0, in the store title only
+// with TS5_KV_TURN=1. Both backends do it.
+bool kv_turn_setting();
+// Whether such a cache turns V the same way too (and attention's output
+// back), with the turn of Q and K only: on Linux unless TS5_KV_TURN_V=0, in
+// the store title only with TS5_KV_TURN_V=1.
+bool kv_turn_v_setting();
+// With TS5_KV automatic, an auto-fit context whose f16 cache holds fewer
+// tokens than this (and less than the context may hold) takes a q8 cache,
+// about twice as long, on any model but a Gemma, with YaRN too. On the PS5
+// that is the 14Bs: 13,312 to 17,408 tokens in f16, 26,624 to 32,768 in q8
+// (job BL, at 20,480 to 24,576 in q8: the same long-document questions
+// right as in f16 at about half that). Past it, see auto_kv_type.
+constexpr int kQ8Below = 24576;
 // Bytes of K and V per token of context, over the layers that see all keys,
 // in a cache of type kv.
 uint64_t kv_bytes_per_token(const HParams &hp, KvType kv);
@@ -74,6 +111,11 @@ uint64_t kv_ring_bytes(const HParams &hp, KvType kv);
 // activations, in the 1 GiB blocks it allocates, and sliding layers' rings in
 // f16.
 uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes);
+// How many copies of a state that only goes forward a backend keeps
+// (Backend::state_slots): TS5_STATE_SLOTS, 1 to 8; by default 4 on Linux
+// (the start of the prompt's last two turns, and 512 and 2,048 tokens before
+// its end), 1 in the PS5 title (the last turn's start).
+int state_slots_wanted();
 // The context a Vulkan backend picks when asked for 0 tokens: what fits in
 // `memory` beside `used` bytes and 1 GiB kept for everything else (the
 // display, a GPU check's CPU reference), a multiple of 1024 up to cap. 0 if
@@ -104,9 +146,24 @@ uint64_t helper_room_bytes(const char *path, std::string &err);
 // Hands memory the process freed back to the system (glibc keeps it).
 void release_freed_memory();
 // Whether a context of what fits in f16 (f16_ctx tokens) is the model's whole
-// training context. Then TS5_KV=q8 gets an f16 cache anyway: 8 bits would
-// only cost precision (on Qwen 2.5 Coder 7B, more than the GPU check allows).
+// training context. Then TS5_KV=q8 (or q4) gets an f16 cache anyway: 8 bits
+// would only cost precision (on Qwen 2.5 Coder 7B, more than the GPU check
+// allows). TS5_KV=q4 also takes q8 where q8 reaches it.
 bool f16_reaches(int f16_ctx, int train);
+// The cache an auto-fit context (-c auto) takes, as the Vulkan backend
+// chooses it: kv and automatic as kv_type_setting gives them (automatic only
+// where the heads allow a quantized cache), train the most tokens the context
+// may hold (auto_context_cap), fit(t) the tokens a cache of type t fits.
+// Automatic, never on Gemma 3 or 4, f16 short of train and either under
+// kQ8Below or, on llama, qwen3 and qwen35, an eighth or more short of the
+// model's own window (hp.n_ctx_train; YaRN stretches past it) takes q8 where
+// that fits an eighth more tokens or better; then q8 short of train takes
+// K8V4 where that fits an eighth more than q8 and V is turned
+// (kv_turn_v_setting, heads a power of two wide). On the PS5: the 14Bs,
+// Llama 3.1 8B and 3.2 3B and Qwen3.5 9B. The app's estimates use it too.
+// log: each change gets its reason.
+KvType auto_kv_type(const HParams &hp, KvType kv, bool automatic, int train, const std::function<int(KvType)> &fit,
+                    std::vector<std::string> *log = nullptr);
 
 // On Vulkan device `device`, with a device of its own. n_ctx 0: the context
 // that fits (fit_context), at most the model's training context, in an f16

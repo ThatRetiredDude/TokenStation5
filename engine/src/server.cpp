@@ -51,6 +51,25 @@ bool send_all(int fd, const std::string &s) {
     return true;
 }
 
+// The client closed its end or reset it: a peek finds the end of the
+// stream, or fails for another reason than no data yet.
+static bool peer_gone(int fd) {
+    char c;
+    const ssize_t n = recv(fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+    return n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR);
+}
+
+// TS5_STOP_GONE=1 (Linux, off until measured on the PS5): a request whose
+// client has left is not run, or stops between prompt chunks.
+static bool stop_gone_wanted() {
+#ifdef TS5_PS5
+    return false;
+#else
+    const char *e = getenv("TS5_STOP_GONE");
+    return e && atoi(e) != 0;
+#endif
+}
+
 bool read_request(int fd, Request &r) {
     std::string buf;
     char tmp[16384];
@@ -223,7 +242,10 @@ std::string timings_json(const GenStats &st) {
              st.prompt_evaluated, st.prompt_ms, st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0,
              st.gen_tokens, st.gen_ms, st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0,
              st.prompt_tokens - st.prompt_evaluated, st.drafted, st.draft_accepted);
-    return b;
+    std::string s = b;
+    // TS5_KV_REPAIR: what was forwarded again to keep cache_n.
+    if (st.prompt_repaired) s.insert(s.size() - 1, ",\"repaired_n\":" + std::to_string(st.prompt_repaired));
+    return s;
 }
 
 std::string usage_json(const GenStats &st) {
@@ -514,6 +536,18 @@ void handle(int fd, Server::State &state, Usage &u) {
             done();
             return;
         }
+        // Gone while it waited for the engine: nothing to run it for.
+        const bool stop_gone = stop_gone_wanted();
+        if (stop_gone && peer_gone(fd)) {
+            u.rec.finish = "left";
+            u.rec.prompt = (int64_t)first_toks.size();
+            log_line("ts5: %s left while its request waited, not run (%zu prompt tokens)", u.rec.client.c_str(),
+                     first_toks.size());
+            done();
+            return;
+        }
+        std::function<bool()> gone;
+        if (stop_gone) gone = [fd] { return peer_gone(fd); };
         bool use_tools = !tools.empty();  // off for a last turn that must answer
         SampleParams sp;
         sp.temperature = (float)req["temperature"].num(state.sampling.temperature);
@@ -703,12 +737,16 @@ void handle(int fd, Server::State &state, Usage &u) {
                 turn.gen_tokens = 1;
                 turn.finish = "stop";
             } else {
-                ok = e.generate(toks, sp, on_text, turn, err);
+                ok = e.generate(toks, sp, on_text, turn, err, gone);
+                if (ok && turn.finish == "left") client_ok = false;
                 if (!ok) u.rec.why = (int)toks.size() + 1 > e.backend().n_ctx() ? "too_long" : "gpu_error";
             }
             count();  // what on_text didn't see: the test turns, a turn with no text
             st.prompt_tokens += turn.prompt_tokens;
             st.prompt_evaluated += turn.prompt_evaluated;
+            st.prompt_repaired += turn.prompt_repaired;
+            st.prompt_shared += turn.prompt_shared;
+            st.prompt_repairable += turn.prompt_repairable;
             st.prompt_ms += turn.prompt_ms;
             st.gen_tokens += turn.gen_tokens;
             st.gen_ms += turn.gen_ms;
@@ -876,6 +914,9 @@ void handle(int fd, Server::State &state, Usage &u) {
         ur.finish = !ok ? "error" : !client_ok ? "left" : st.finish;
         ur.prompt = st.prompt_tokens;
         ur.prompt_new = st.prompt_evaluated;
+        ur.prompt_shared = st.prompt_shared;
+        ur.prompt_repairable = st.prompt_repairable;
+        ur.prompt_repaired = st.prompt_repaired;
         ur.prompt_ms = std::lround(st.prompt_ms);
         ur.gen = st.gen_tokens;
         ur.gen_ms = std::lround(st.gen_ms);

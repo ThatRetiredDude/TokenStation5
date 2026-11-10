@@ -1,0 +1,29 @@
+#version 450
+// With V turned in the cache (kv_turn_v_setting(): qkv_post's fixed signs D
+// and Walsh-Hadamard butterflies H, so the cache holds H D v), attention's
+// output is turned too: this turns each head of it back, A = (1/HD) D H A'
+// (H H = HD I). One workgroup per head and token; heads up to 512 wide, a
+// power of two.
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) buffer Abuf { float A[]; };  // [token][head][HD]
+layout(push_constant) uniform PC { uint head_dim, n_head; } pc;
+
+shared float a[512];
+
+void main() {
+    const uint h = gl_WorkGroupID.x, t = gl_WorkGroupID.y, tid = gl_LocalInvocationID.x;
+    const uint HD = pc.head_dim, base = (t * pc.n_head + h) * HD;
+    for (uint d = tid; d < HD; d += 128) a[d] = A[base + d];
+    barrier();
+    for (uint hh = 1; hh < HD; hh *= 2) {
+        for (uint j = tid; j < HD / 2; j += 128) {
+            const uint i = (j / hh) * 2 * hh + (j % hh);
+            const float x = a[i], y = a[i + hh];
+            a[i] = x + y;
+            a[i + hh] = x - y;
+        }
+        barrier();
+    }
+    for (uint d = tid; d < HD; d += 128)
+        A[base + d] = ((((d * 2654435761u) >> 13) & 1u) != 0 ? -a[d] : a[d]) * (1.0 / float(HD));
+}

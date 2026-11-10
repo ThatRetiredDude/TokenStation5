@@ -160,6 +160,7 @@ def hparams(kv, tensors):
     n_head = kv.get(a + "attention.head_count", 0)
     h = {
         "name": kv.get("general.name", ""),
+        "arch": kv.get("general.architecture", ""),
         "n_vocab": tensors["token_embd.weight"][0][1] if "token_embd.weight" in tensors else 0,
         "n_embd": n_embd,
         "n_layer": kv.get(a + "block_count", 0),
@@ -171,7 +172,7 @@ def hparams(kv, tensors):
         "weight_bytes": max((end for _, end in tensors.values()), default=0),
     }
     for k, v in h.items():
-        if k != "name" and not isinstance(v, int):
+        if k not in ("name", "arch") and not isinstance(v, int):
             sys.exit("catalog: %s is %r, not a number" % (k, v))
     return h
 
@@ -248,11 +249,11 @@ def write(out):
         print("catalog: %s: %s at %s, %d bytes, %s" % (key, path, commit[:12], size, h["name"]), file=sys.stderr)
         same = same_as(os.path.basename(path), match)
         lines.append("    {CatalogEntry::Model, %s, %s, %s, %s,\n     %s, %s,\n     %s,\n     %s, %du, %s,\n"
-                     "     %d, %d, %d, %d, %d, %d, %d, %d, %du},"
+                     "     %d, %d, %d, %d, %d, %d, %d, %d, %du, %s},"
                      % (c_str(key), c_str(h["name"] or stem), c_str(good_for), c_str(same), c_str(repo),
                         c_str(path), c_str(os.path.basename(path)), c_str(commit), size, c_str(sha),
                         h["n_vocab"], h["n_embd"], h["n_layer"], h["n_ff"], h["n_head"], h["n_head_kv"],
-                        h["head_dim"], h["ctx_train"], h["weight_bytes"]))
+                        h["head_dim"], h["ctx_train"], h["weight_bytes"], c_str(h["arch"])))
     commits = {}
     for kind, rows in (("Speech", SPEECH), ("Voice", VOICE)):
         for key, repo, path, file, name in rows:
@@ -299,6 +300,7 @@ struct CatalogEntry {
     // A model's header fields (model.h HParams) and its weight bytes.
     int n_vocab = 0, n_embd = 0, n_layer = 0, n_ff = 0, n_head = 0, n_head_kv = 0, head_dim = 0, ctx_train = 0;
     uint64_t weight_bytes = 0;
+    const char *arch = "";  // general.architecture: the cache the context estimate picks depends on it
 };
 
 inline const CatalogEntry kCatalog[] = {

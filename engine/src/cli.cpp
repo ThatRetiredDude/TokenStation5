@@ -7,7 +7,7 @@
 //   ts5 tokenize -m model.gguf -p "text"
 //   ts5 check    -m model.gguf [-n 16] [-p TEXT]   GPU logits against the CPU reference
 //                                        (-p: on TEXT's first n tokens)
-//   ts5 logits   -m model.gguf -o out.bin [--step | --verify K] tok0 tok1 ...   (all positions, for tests)
+//   ts5 logits   -m model.gguf -o out.bin [--step | --verify K | --every N | --tail K [--verify V]] tok0 tok1 ...   (all positions, for tests)
 //   ts5 prompt   -m model.gguf [--chat-template FILE] < request.json
 //                                        the prompt a chat request becomes (for tests)
 //   ts5 tool-parse hermes|llama3|mistral|gemma|gemma4 [TOOL...] < text
@@ -16,6 +16,8 @@
 //   ts5 usage-parse FILE                 a usage.tsv's requests, written again as v1 (for tests)
 //   ts5 fetch URL FILE [--sha256 HEX]    download URL to FILE, going on from a stopped one
 //   ts5 peak [--device N] [--gib G]      the GPU's read bandwidth and FMA rates (speed ceilings)
+//   ts5 draft-replay -m model.gguf [--temp T] [-o IDS] < PROMPT, a NUL byte, ANSWER
+//                                        the engine's drafting on a model that writes ANSWER (Linux, for tests)
 //
 // Common: --backend vk|cpu (default vk when built with Vulkan), --device N.
 // serve with TS5_USAGE_LOG=FILE writes a line per API request to FILE
@@ -65,6 +67,8 @@ struct Args {
     float temp = 0.7f;
     bool chat = false, step = false, n_set = false, fresh = false;
     int verify = 0;  // logits --verify K
+    int every = 0;   // logits --every N
+    int tail = 0;    // logits --tail K
     std::vector<int32_t> tokens;
 };
 
@@ -83,14 +87,20 @@ int usage() {
             "  bench: --pp N --tg N\n"
             "  check: [-n TOKENS] [-p TEXT] [--fresh]  (-p: on TEXT's tokens; --fresh: run the CPU even if\n"
             "         its answers are saved)\n"
-            "  logits: -o FILE TOKENS...\n");
+            "  logits: -o FILE [--every N] TOKENS...  (--every N: positions N-1, 2N-1, ... and the last)\n"
+            "          --tail K [--verify V]: the prompt up to its last K tokens, then those as generation\n"
+            "          takes them (one a call, or V a call as drafts are checked), writing their K rows\n");
     return 2;
 }
 
 bool parse(int argc, char **argv, Args &a) {
     if (argc < 2) return false;
     a.cmd = argv[1];
-    const char *cmds[] = {"serve", "run", "bench", "check", "tokenize", "logits", "prompt"};
+    const char *cmds[] = {"serve", "run", "bench", "check", "tokenize", "logits", "prompt",
+#ifndef TS5_PS5
+                          "draft-replay",
+#endif
+    };
     if (std::none_of(std::begin(cmds), std::end(cmds), [&](const char *c) { return a.cmd == c; })) return false;
     bool ok = true;
     for (int i = 2; i < argc && ok; i++) {
@@ -117,6 +127,8 @@ bool parse(int argc, char **argv, Args &a) {
         else if (s == "--chat") a.chat = true;
         else if (s == "--step") a.step = true;
         else if (s == "--verify") a.verify = atoi(next().c_str());
+        else if (s == "--every") a.every = atoi(next().c_str());
+        else if (s == "--tail") a.tail = atoi(next().c_str());
         else if (s == "--fresh") a.fresh = true;
         else if (s == "--chat-template") a.chat_template = next();
         else if (!s.empty() && (isdigit((unsigned char)s[0]))) a.tokens.push_back(atoi(s.c_str()));
@@ -288,6 +300,116 @@ int fetch_command(int argc, char **argv) {
     return 0;
 }
 
+#ifndef TS5_PS5
+// A model that writes a given text: every row's logits favour the token after
+// that position in it (past its end, its last), 4 against 0 for the rest of
+// the vocabulary and 3 for the token after that, whatever came before. At
+// temperature 0 it writes exactly the text; above it, a sample's draws.
+// For draft-replay. A pass of a generated token and its drafts is costed as
+// a pass of that many tokens took on the PS5 under Linux (Qwen3 8B at short
+// context, TS5_BENCH_BATCH, 72c1dd4); with TS5_REPLAY_MS=U it also lasts that
+// times U ms, which is what the engine's cost model measures and drafts by.
+// Without it every pass is near free: replay with TS5_ADAPT=0.
+class ScriptBackend : public Backend {
+public:
+    ScriptBackend(const std::vector<int32_t> &s, size_t np, int nv, double unit) : s_(s), np_(np), nv_(nv), unit_(unit) {}
+    const char *name() const override { return "script"; }
+    bool forward(const int32_t *, int n, int pos0, float *logits, bool all, std::string &) override {
+        const double t0 = now_ms();
+        if (logits)
+            for (int i = all ? 0 : n - 1; i < n; i++) {
+                float *row = logits + (size_t)(all ? i : 0) * nv_;
+                std::fill(row, row + nv_, 0.0f);
+                const size_t at = std::min((size_t)pos0 + i + 1, s_.size() - 1);
+                row[s_[std::min(at + 1, s_.size() - 1)]] = 3.0f;
+                row[s_[at]] = 4.0f;
+            }
+        if ((size_t)pos0 >= np_) {  // a generated token and its drafts, not the prompt
+            static const double R[8] = {1.0, 1.12, 1.29, 1.54, 1.77, 2.0, 2.3, 2.59};
+            const double c = R[std::min(n, 8) - 1];
+            cost += c;
+            passes++;
+            while (unit_ > 0 && now_ms() < t0 + c * unit_) {
+            }
+        }
+        return true;
+    }
+    int n_ctx() const override { return (int)s_.size() + 16; }
+    double cost = 0;  // in one-token passes
+    int passes = 0;
+
+private:
+    const std::vector<int32_t> &s_;
+    size_t np_;
+    int nv_;
+    double unit_;
+};
+
+// ts5 draft-replay: generation after PROMPT on a model that writes ANSWER
+// (stdin: the prompt, a NUL byte, the answer; a prompt may be longer than a
+// command line takes), through the engine's own drafting, as many tokens as
+// ANSWER has. Writes the text (stdout) and the drafts kept and what the
+// passes would cost (stderr). At --temp 0 the text is ANSWER whatever is
+// drafted; above it a fixed seed's sample, the same whatever is drafted.
+// -o: the prompt's token ids and the answer's, a line each.
+int draft_replay(Model &model, Tokenizer &tok, float temp, const std::string &out) {
+    const std::string in = read_all(stdin);
+    const size_t nul = in.find('\0');
+    std::vector<int32_t> s = tok.encode(in.substr(0, nul), true);
+    const size_t np = s.size();
+    const std::vector<int32_t> ans =
+        nul == std::string::npos ? std::vector<int32_t>() : tok.encode(in.substr(nul + 1), false);
+    if (np == 0 || ans.empty()) {
+        fprintf(stderr, "ts5: draft-replay reads a prompt, a NUL byte and an answer\n");
+        return 2;
+    }
+    std::string want;
+    for (int32_t t : ans) {
+        if (tok.is_eog(t)) {
+            fprintf(stderr, "ts5: the answer holds an end-of-turn token (%d)\n", t);
+            return 2;
+        }
+        want += tok.decode(t);
+    }
+    // A control token's name in the text (<|im_start|> in a source file) is
+    // read as that token, which writes nothing: the model would write
+    // another text, so the replay would measure the wrong one.
+    if (want != in.substr(nul + 1)) {
+        fprintf(stderr, "ts5: the answer's tokens don't spell it back (a control token's name in it?)\n");
+        return 2;
+    }
+    s.insert(s.end(), ans.begin(), ans.end());
+    if (!out.empty()) {
+        FILE *f = fopen(out.c_str(), "w");
+        if (!f) {
+            fprintf(stderr, "ts5: can't write %s\n", out.c_str());
+            return 1;
+        }
+        for (size_t i = 0; i < s.size(); i++) fprintf(f, "%d%c", s[i], i + 1 == np || i + 1 == s.size() ? '\n' : ' ');
+        fclose(f);
+    }
+    const char *u = getenv("TS5_REPLAY_MS");
+    auto *sb = new ScriptBackend(s, np, model.hp.n_vocab, u ? atof(u) : 0.0);
+    Engine eng(model, sb, tok);  // owns sb
+    SampleParams p;
+    p.temperature = temp;
+    p.seed = 1;
+    p.max_tokens = (int)ans.size();
+    std::string text, err;
+    GenStats st;
+    const std::vector<int32_t> pr(s.begin(), s.begin() + np);
+    if (!eng.generate(pr, p, [&](const std::string &x) { text += x; return true; }, st, err)) {
+        fprintf(stderr, "ts5: %s\n", err.c_str());
+        return 1;
+    }
+    fwrite(text.data(), 1, text.size(), stdout);
+    fprintf(stderr, "ts5: draft-replay: %d tokens in %d passes, %s, costing %.1f one-token passes (%.3fx), %s\n",
+            st.gen_tokens, sb->passes, draft_summary(st).c_str(), sb->cost, sb->cost > 0 ? st.gen_tokens / sb->cost : 0.0,
+            text == want ? "the answer exactly" : "another text");
+    return 0;
+}
+#endif
+
 }  // namespace
 
 int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
@@ -331,6 +453,9 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         tok.set_chat_template(read_all(f));
         fclose(f);
     }
+#ifndef TS5_PS5
+    if (a.cmd == "draft-replay") return draft_replay(model, tok, a.temp, a.out);
+#endif
     if (a.cmd == "prompt") {
         Json req;
         if (!Json::parse(read_all(stdin), req)) { fprintf(stderr, "ts5: invalid JSON\n"); return 1; }
@@ -375,7 +500,15 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     if (a.backend == "cpu") {
         if (a.n_ctx <= 0) a.n_ctx = 8192;
         if (!model.load(nullptr, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
-        be = make_cpu_backend(model, a.n_ctx);
+        model.use_context(a.n_ctx);
+        // TS5_CPU_KV=f16, q8, q4 or k8v4 (tests): K and V rounded as that GPU cache
+        // keeps them, so a comparison measures the GPU's kernels; else fp32.
+        KvType kv = KvType::F32;
+        if (const char *e = getenv("TS5_CPU_KV"); e && *e) {
+            const std::string v = e;
+            kv = kv_type_from(v, KvType::F32);
+        }
+        be = make_cpu_backend(model, a.n_ctx, kv);
     } else {
 #ifdef TS5_VULKAN
         const uint64_t reserve = draft && a.n_ctx <= 0 ? helper_room_bytes(dp, derr) : 0;
@@ -403,7 +536,10 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             for (const auto &t : dmodel.gguf.tensors) dw += t.nbytes;
         if (!dopen) {
         } else if (a.backend == "cpu") {
-            if (dmodel.load(nullptr, derr)) db = make_cpu_backend(dmodel, be->n_ctx());
+            if (dmodel.load(nullptr, derr)) {
+                dmodel.use_context(be->n_ctx());
+                db = make_cpu_backend(dmodel, be->n_ctx());
+            }
         } else {
 #ifdef TS5_VULKAN
             // As much of the main context as fits in what is free now.
@@ -426,6 +562,50 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
 
     if (a.cmd == "logits") {
         if (a.tokens.empty() || a.out.empty()) return usage();
+        // --every N: a real prompt's every logit would take tokens x vocab
+        // floats (Gemma 3's 7,918 x 262,144 is 8.3 GB), so the prompt goes
+        // in chunks of 256 and only positions N-1, 2N-1, ... and the last
+        // are written, in order.
+        if (a.every > 0) {
+            const int n = (int)a.tokens.size(), chunk = 256;
+            std::vector<float> lg((size_t)chunk * hp.n_vocab);
+            FILE *f = fopen(a.out.c_str(), "wb");
+            if (!f) { fprintf(stderr, "ts5: can't write %s\n", a.out.c_str()); return 1; }
+            for (int i = 0; i < n; i += chunk) {
+                const int k = std::min(chunk, n - i);
+                if (!be->forward(&a.tokens[i], k, i, lg.data(), true, err)) {
+                    fprintf(stderr, "ts5: %s\n", err.c_str());
+                    fclose(f);
+                    return 1;
+                }
+                for (int j = 0; j < k; j++)
+                    if ((i + j + 1) % a.every == 0 || i + j == n - 1)
+                        fwrite(lg.data() + (size_t)j * hp.n_vocab, 4, hp.n_vocab, f);
+            }
+            fclose(f);
+            return 0;
+        }
+        // --tail K: a long prompt's prefill in chunks of 256, then its last K
+        // tokens one a call (or --verify V a call): generation's path, the
+        // attention of single tokens over keys a prompt wrote, at a length
+        // whose every logit would not fit. Writes the K rows.
+        if (a.tail > 0) {
+            const int n = (int)a.tokens.size(), k = std::min(a.tail, n), p = n - k, v = std::max(1, a.verify);
+            std::vector<float> lg((size_t)v * hp.n_vocab);
+            FILE *f = fopen(a.out.c_str(), "wb");
+            if (!f) { fprintf(stderr, "ts5: can't write %s\n", a.out.c_str()); return 1; }
+            bool ok = true;
+            for (int i = 0; i < p && ok; i += 256)
+                ok = be->forward(&a.tokens[i], std::min(256, p - i), i, lg.data(), false, err);
+            for (int i = p; i < n && ok; i += v) {
+                const int m = std::min(v, n - i);
+                ok = be->forward(&a.tokens[i], m, i, lg.data(), m > 1, err);
+                if (ok) fwrite(lg.data(), 4, (size_t)m * hp.n_vocab, f);
+            }
+            fclose(f);
+            if (!ok) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
+            return 0;
+        }
         std::vector<float> lg((size_t)a.tokens.size() * hp.n_vocab);
         // --step: one token per call, exercising the KV cache across calls.
         // --verify K: K tokens a call with every position's logits, as a

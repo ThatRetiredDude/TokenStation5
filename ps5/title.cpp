@@ -1354,9 +1354,10 @@ int main(int, char **) {
 #endif
                 if (ok && a.name == kTailscale) ts_apply();
                 // The served model loads again with a new context cap, KV
-                // cache or prompt math (read when a model loads, vk_backend.cpp).
+                // cache, prompt math or YaRN (read when a model loads,
+                // vk_backend.cpp and Model::context_cap).
                 if (ok && (a.name == "TS5_CTX_MAX" || a.name == "TS5_KV" || a.name == "TS5_MMB_F16" ||
-                           a.name == "TS5_DRAFT_MODEL")) {
+                           a.name == "TS5_DRAFT_MODEL" || a.name == "TS5_YARN")) {
                     const app::Status st = runner.status();
                     if (!st.serving_path.empty()) {
                         app::Job j;

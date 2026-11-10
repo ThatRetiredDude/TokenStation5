@@ -1,0 +1,16 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// attn_pf256s with PF_TRIM, PF_EXP2 and PF_PVH (TS5_ATTN_PF_TRIM=4, never on a Gemma): the te
+// build with each 16-key step's p V in packed f16, and no next tile held in registers
+// (NO_PREFETCH), which keeps it at 128 registers (see attn_pf.glsl).
+// attn_pf256 in tiles of 16 keys: 128 registers a thread on the PS5 (gfx1013,
+// wave64 or 32) instead of 168, so a compute unit holds two workgroups instead of
+// one. Keys are scored 16 at a time either way, so the output is the same.
+#define HEAD_DIM 256
+#define LANES 8
+#define KEYS 16
+#define PF_TRIM
+#define PF_EXP2
+#define PF_PVH
+#define NO_PREFETCH
+#include "attn_pf.glsl"

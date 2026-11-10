@@ -1,0 +1,14 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// attn_pf512s_k8v4 with PF_TRIM and PF_EXP2 (TS5_ATTN_PF_TRIM=3): base-2 scores and chained
+// dot products on top of the t build's trim, the logits different in the last bits (see attn_pf.glsl).
+// attn_pf512s over a KV cache of 8-bit K and 4-bit V (see attn_pf512s.comp).
+#define KV_Q8
+#define KV_V4
+#define HEAD_DIM 512
+#define LANES 16
+#define KEYS 16
+#define NO_PREFETCH
+#define PF_TRIM
+#define PF_EXP2
+#include "attn_pf.glsl"

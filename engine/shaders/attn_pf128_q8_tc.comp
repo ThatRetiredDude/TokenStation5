@@ -1,0 +1,10 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// attn_pf128_q8_t with subgroupClusteredAdd kept (TS5_ATTN_PF_TRIM=2, the tests on
+// lavapipe; see attn_pf.glsl).
+// Prompt attention over the 8-bit KV cache, heads of 128 (see attn_pf.glsl).
+#define KV_Q8
+#define HEAD_DIM 128
+#define PF_TRIM
+#define PF_CLUSTER_ADD
+#include "attn_pf.glsl"

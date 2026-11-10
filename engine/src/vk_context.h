@@ -23,6 +23,13 @@ struct VkContext {
     VkPhysicalDeviceProperties props{};
     VkPhysicalDeviceMemoryProperties memory{};
     uint32_t subgroup_size = 0;  // compute shaders' (RADV: 64; lavapipe: 4 to 16)
+    // TS5_WAVE (Linux): the subgroup size compute pipelines ask for
+    // (VK_EXT_subgroup_size_control), 0 where unset or the device can't give
+    // it; subgroup_size is then no more than it. required_subgroup_only: the
+    // pipeline name prefixes that ask, comma-separated (empty: all);
+    // required_subgroup_max_wg: the largest workgroup that may ask.
+    uint32_t required_subgroup = 0, required_subgroup_max_wg = 0;
+    std::string required_subgroup_only;
     // The GPU's compute units (VK_AMD_shader_core_properties; 0: not told).
     uint32_t compute_units = 0;
     // VK_KHR_pipeline_executable_properties is on: pipelines made with
@@ -61,6 +68,14 @@ struct VkContext {
     // What this device holds now (VK_EXT_memory_budget's heap usage; 0
     // without it).
     uint64_t heap_usage() const;
+    // Linux, a GPU sharing the system's memory: waits while /proc/meminfo's
+    // MemAvailable is still climbing (memory a process that just ended, a
+    // model before this one or a build, is still giving back): past the
+    // first 1.5 s (4 MiB or more), then to 4 s at least and while it rose
+    // 16 MiB or more over the last 4 s, at most TS5_MEMORY_SETTLE_MS (30000 by default, 0: no
+    // wait). Then drops the cached budget so the next reading is fresh.
+    // Returns the ms waited.
+    int settle_memory() const;
     // VK_EXT_memory_budget is on (never on the PS5).
     bool memory_budget = false;
     mutable std::mutex budget_mutex;
@@ -72,10 +87,13 @@ struct VkContext {
 };
 
 // System RAM models leave free on Linux with a GPU that shares it
-// (TS5_SYSTEM_RESERVE_GIB, default 2): Linux, the desktop, the app and a
+// (TS5_SYSTEM_RESERVE_GIB, default 1.5): Linux, the desktop, the app and a
 // GPU check's CPU reference live there, and a GPU allocation that leaves
 // them none makes the OOM killer stop everything else (the PS5 froze
-// that way with a 14B model and a helper).
+// that way with a 14B model and a helper). 1.5 rather than 2 since the
+// PS5 measured it (2026-11-08): the memory-limited models got 16 to 23%
+// more context, and free memory stayed above the reserve on long prompts
+// once every buffer was counted before the context was sized.
 uint64_t system_reserve();
 
 // Makes the instance and device on physical device `index`; with
@@ -84,5 +102,10 @@ uint64_t system_reserve();
 VkContext *create_vk_context(int index, bool want_display, std::string &err);
 // Destroys the device and instance. Everything made on them must be gone.
 void destroy_vk_context(VkContext *ctx);
+// Whether a compute pipeline named `name` (SPIR-V `code`, `bytes` long) asks
+// for TS5_WAVE's subgroup size: one is set, the name starts with one of its
+// prefixes (or it has none), and the workgroup (the SPIR-V's LocalSize) is
+// no bigger than that size allows.
+bool asks_subgroup(const VkContext &c, const std::string &name, const uint32_t *code, size_t bytes);
 
 }  // namespace ts5

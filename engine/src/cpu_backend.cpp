@@ -75,7 +75,9 @@ float gelu(float x) {
 
 // One token's K or V (n values, whole heads) as a cache of type t keeps it.
 // Q8 rounds as the GPU's qkv_post does: per 32 values, the scale is the
-// largest magnitude over 127 in f16, and values round to nearest even.
+// largest magnitude over 127 in f16, and values round to nearest even. Q4 as
+// qkv_post_q4: the scale is the value of the largest magnitude (the first, on
+// a tie) over -8 in f16, values to nearest even in -8 .. 7.
 void round_kv(KvType t, float *v, int n) {
     if (t == KvType::F16) {
         for (int i = 0; i < n; i++) v[i] = fp16_to_fp32(fp32_to_fp16(v[i]));
@@ -87,12 +89,66 @@ void round_kv(KvType t, float *v, int n) {
             for (int i = 0; i < 32; i++)
                 v[b + i] = sc > 0 ? std::min(127.0f, std::max(-127.0f, std::nearbyint(v[b + i] / sc))) * sc : 0.0f;
         }
+    } else if (t == KvType::Q4) {
+        for (int b = 0; b + 32 <= n; b += 32) {
+            float vmax = 0;
+            for (int i = 0; i < 32; i++)
+                if (std::fabs(v[b + i]) > std::fabs(vmax)) vmax = v[b + i];
+            const float sc = fp16_to_fp32(fp32_to_fp16(vmax / -8.0f));
+            for (int i = 0; i < 32; i++)
+                v[b + i] = sc != 0 ? std::min(7.0f, std::max(-8.0f, std::nearbyint(v[b + i] / sc))) * sc : 0.0f;
+        }
     }
+}
+
+// kv_turn_setting(): one head through fixed signs and the Walsh-Hadamard
+// butterflies (n a power of two), as qkv_post_q8t does. Q is also scaled by
+// 1/n, so Q.K stays the same.
+static void kv_turn(float *v, int n, bool is_q) {
+    for (int i = 0; i < n; i++)
+        if (((uint32_t)i * 2654435761u >> 13) & 1) v[i] = -v[i];
+    for (int h = 1; h < n; h *= 2)
+        for (int i = 0; i < n; i += 2 * h)
+            for (int j = i; j < i + h; j++) {
+                const float a = v[j], b = v[j + h];
+                v[j] = a + b, v[j + h] = a - b;
+            }
+    if (is_q)
+        for (int i = 0; i < n; i++) v[i] *= 1.0f / (float)n;
+}
+
+// kv_turn undone: the butterflies, then the signs, then 1/n (H H = n I).
+static void kv_unturn(float *v, int n) {
+    for (int h = 1; h < n; h *= 2)
+        for (int i = 0; i < n; i += 2 * h)
+            for (int j = i; j < i + h; j++) {
+                const float a = v[j], b = v[j + h];
+                v[j] = a + b, v[j + h] = a - b;
+            }
+    for (int i = 0; i < n; i++) v[i] *= ((((uint32_t)i * 2654435761u) >> 13) & 1 ? -1.0f : 1.0f) / (float)n;
+}
+
+// Measurements of what each half of a cache costs (the check's CPU answers,
+// saved apart: cpu_kv_tag()): TS5_CPU_KV_K and TS5_CPU_KV_V round only K or
+// only V as that type (f16, q8, q4, f32) instead of the cache's, and
+// TS5_CPU_KV_TURN_V=1 turns each V head before rounding and back after, as a
+// GPU would by turning the attention's output back.
+static void kv_override(const char *name, KvType &t) {
+    const char *e = getenv(name);
+    if (!e || !*e) return;
+    const std::string v = e;
+    t = kv_type_from(v, KvType::F32);
 }
 
 class CpuBackend : public Backend {
 public:
-    CpuBackend(const Model &m, int n_ctx, KvType kv_type) : m_(m), hp_(m.hp), n_ctx_(n_ctx), kv_(kv_type) {
+    CpuBackend(const Model &m, int n_ctx, KvType kv_type)
+        : m_(m), hp_(m.hp), n_ctx_(n_ctx), kv_(kv_type), kv_k_(kv_type == KvType::K8V4 ? KvType::Q8 : kv_type),
+          kv_v_(kv_type == KvType::K8V4 ? KvType::Q4 : kv_type) {
+        kv_override("TS5_CPU_KV_K", kv_k_);
+        kv_override("TS5_CPU_KV_V", kv_v_);
+        turn_v_ = kv_quantized(kv_v_) && kv_turn_v_setting();
+        if (const char *e = getenv("TS5_CPU_KV_TURN_V"); e && *e) turn_v_ = atoi(e) != 0;
         // Each layer's K (and V) cache: n_ctx tokens of its own width.
         size_t total = 0;
         for (int l = 0; l < hp_.n_layer; l++) {
@@ -105,6 +161,10 @@ public:
         for (int l = 0; l < hp_.n_layer; l++) {
             rec_off_.push_back(rec_.size());
             if (hp_.rec(l)) rec_.resize(rec_.size() + hp_.rec_state_floats(), 0.f);
+        }
+        if (!rec_.empty()) {
+            saved_.assign(state_slots_wanted(), {});
+            saved_pos_.assign(saved_.size(), -1);
         }
         if (!m.tok_embd.data) file_ = fopen(m.gguf.path.c_str(), "rb");
         for (auto &L : m.layers) {
@@ -128,16 +188,17 @@ public:
     const char *name() const override { return "cpu"; }
     int n_ctx() const override { return n_ctx_; }
     int rewind_limit() const override { return rec_.empty() ? Backend::rewind_limit() : 0; }
-    bool save_state(std::string &) override {
-        if (rec_.empty()) return false;
-        saved_ = rec_;
-        saved_pos_ = rec_pos_;
+    int state_slots() const override { return (int)saved_.size(); }
+    bool save_state(int slot, std::string &) override {
+        if (slot < 0 || slot >= (int)saved_.size()) return false;
+        saved_[slot] = rec_;
+        saved_pos_[slot] = rec_pos_;
         return true;
     }
-    bool restore_state(std::string &) override {
-        if (rec_.empty() || saved_pos_ < 0) return false;
-        rec_ = saved_;
-        rec_pos_ = saved_pos_;
+    bool restore_state(int slot, std::string &) override {
+        if (slot < 0 || slot >= (int)saved_.size() || saved_pos_[slot] < 0) return false;
+        rec_ = saved_[slot];
+        rec_pos_ = saved_pos_[slot];
         return true;
     }
 
@@ -279,13 +340,22 @@ private:
                 rope(&kt[hh * HD], RD, pos, hp_.rope_neox, turn);
                 if (hp_.v_norm) rmsnorm(&vt[hh * HD], nullptr, HD, hp_.rms_eps);
             }
-            round_kv(kv_, kt, KV);
-            round_kv(kv_, vt, KV);
+            const bool pow2 = (HD & (HD - 1)) == 0;
+            if (kv_quantized(kv_k_) && kv_turn_setting() && pow2) {
+                for (int hh = 0; hh < H; hh++) kv_turn(&qt[hh * HD], HD, true);
+                for (int hh = 0; hh < HKV; hh++) kv_turn(&kt[hh * HD], HD, false);
+            }
+            round_kv(kv_k_, kt, KV);
+            if (turn_v_ && pow2)
+                for (int hh = 0; hh < HKV; hh++) kv_turn(&vt[hh * HD], HD, false);
+            round_kv(kv_v_, vt, KV);
+            if (turn_v_ && pow2)
+                for (int hh = 0; hh < HKV; hh++) kv_unturn(&vt[hh * HD], HD);
             memcpy(kl + (size_t)pos * KV, kt, KV * 4);
             memcpy(vl + (size_t)pos * KV, vt, KV * 4);
         }
         std::vector<float> att((size_t)n * H * HD);
-        const float scale = hp_.attn_scale;
+        const float scale = hp_.attn_scale * hp_.yarn_attn();
         for (int t = 0; t < n; t++) {
             const float *qt = &q[(size_t)t * H * HD];
             float *at = &att[(size_t)t * H * HD];
@@ -440,7 +510,8 @@ private:
     const Model &m_;
     const HParams &hp_;
     int n_ctx_;
-    KvType kv_;
+    KvType kv_, kv_k_, kv_v_;  // the cache's type, and what K and V round to (kv_override)
+    bool turn_v_ = false;  // V turned before rounding and back after: kv_turn_v_setting()
     FILE *file_ = nullptr;      // the model file, when its weights were not loaded
     bool read_ok_ = true;
     std::vector<uint8_t> buf_;  // the weights being used, read from file_
@@ -450,8 +521,8 @@ private:
     std::vector<float> rec_;         // the linear layers' states (Qwen3.5)
     std::vector<size_t> rec_off_;    // each layer's start in rec_
     int rec_pos_ = 0;                // the tokens rec_ holds
-    std::vector<float> saved_;       // save_state()'s copy of rec_
-    int saved_pos_ = -1;             // its tokens; -1: none
+    std::vector<std::vector<float>> saved_;  // save_state()'s copies of rec_
+    std::vector<int> saved_pos_;             // their tokens; -1: none
     std::vector<Norms> norms_;
 };
 
@@ -459,6 +530,51 @@ private:
 
 Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv) { return new CpuBackend(m, n_ctx, kv); }
 
-const char *kv_type_name(KvType t) { return t == KvType::Q8 ? "q8" : t == KvType::F16 ? "f16" : "f32"; }
+bool kv_turn_setting() {
+    static const bool on = [] {
+        if (const char *e = getenv("TS5_KV_TURN"); e && *e) return atoi(e) != 0;
+#ifdef TS5_PS5
+        return false;  // the store title keeps the plain 8-bit cache
+#else
+        return true;
+#endif
+    }();
+    return on;
+}
+
+bool kv_turn_v_setting() {
+    static const bool on = [] {
+        if (!kv_turn_setting()) return false;
+        if (const char *e = getenv("TS5_KV_TURN_V"); e && *e) return atoi(e) != 0;
+#ifdef TS5_PS5
+        return false;  // as the turn of Q and K: measured on Linux
+#else
+        return true;
+#endif
+    }();
+    return on;
+}
+
+int state_slots_wanted() {
+    if (const char *e = getenv("TS5_STATE_SLOTS"); e && *e) return std::min(std::max(atoi(e), 1), 8);
+#ifdef TS5_PS5
+    return 1;  // the store title keeps the one copy at the last turn's start
+#else
+    return 4;
+#endif
+}
+
+KvType kv_type_from(const std::string &v, KvType otherwise) {
+    if (v == "f16" || v == "16") return KvType::F16;
+    if (v == "q8" || v == "8") return KvType::Q8;
+    if (v == "q4" || v == "4") return KvType::Q4;
+    if (v == "k8v4") return KvType::K8V4;
+    if (v == "f32" || v == "32") return KvType::F32;
+    return otherwise;
+}
+
+const char *kv_type_name(KvType t) {
+    return t == KvType::K8V4 ? "k8v4" : t == KvType::Q4 ? "q4" : t == KvType::Q8 ? "q8" : t == KvType::F16 ? "f16" : "f32";
+}
 
 }  // namespace ts5

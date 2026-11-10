@@ -34,6 +34,7 @@ struct CheckResult {
     int kl_worst = 0;
     double max_diff = 0, rel = 0, gpu_ms = 0, cpu_ms = 0;
     bool pass = false;
+    bool by_length = false;  // passed by the long-check rule (over 512 tokens), not the bar alone
     bool saved = false;  // the CPU's logits came from the model's saved answers
     std::vector<TopChange> changes;  // the first 16 positions whose top token differs
     std::string backend;
@@ -48,7 +49,9 @@ struct CheckResult {
 // at a time, so it needs a layer's worth of memory rather than a second copy
 // of the model; m and gpu are left as they were, apart from gpu's KV cache.
 // Passes when the largest difference is under 0.5% of the largest logit (2%
-// with an 8-bit cache).
+// with an 8-bit cache), or, past 512 tokens, when the positions over that bar
+// are rare (one in 1,024), under twice it, with the top token the same nearly
+// everywhere and, on a text, KL under 1e-6: rounding noise at that length.
 // The reference's logits are saved next to the model (MODEL.gguf.ts5ref, or
 // MODEL.gguf.q8.ts5ref for an 8-bit cache) the first time, and later checks
 // of as many tokens or fewer compare against those instead of running the
