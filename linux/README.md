@@ -167,17 +167,22 @@ ts5-tui --url http://ps5.local:8081  # another one
   starts a new line, the up arrow brings back what you typed before, Esc
   stops an answer. Commands start with `/` and Tab completes them, and model
   names after `/model`: `/model`, `/download`, `/new`, `/chats`, `/open`,
-  `/save`, `/find`, `/tune`, `/check`, `/bench`, `/think on|off`,
-  `/fan auto|cool|early|max`, `/theme`, `/help`, `/quit`.
+  `/save`, `/find`, `/tune`, `/check`, `/bench`, `/usage`, `/keys`,
+  `/think on|off`, `/fan auto|cool|early|max`, `/theme`, `/help`, `/quit`
+  (`exit`, `quit` or `q` work too). A `ts5 fetch URL FILE --sha256 HEX`
+  line pasted at the prompt downloads that model.
 - **In between**: the chat (markdown, highlighted code, the thinking folded
   away; Ctrl+T shows it), or a page: **F1** Chat, **F2** Models (Enter
   loads one, T tunes it with `ts5-tune`, C runs the GPU check, B the speed
   test; below them, the catalog's models to download), **F3** Status (bars
   for GPU memory, RAM, temperatures, fan, GPU load and speed), **F4**
   Settings (theme, thinking, temperature, answer length, fan, tmux), **F5**
-  Logs. Tab goes to the next page.
+  Logs. Tab and Shift+Tab step through the pages, and so do 1 to 5 on any
+  page but Chat. On a Mac, where macOS keeps the F keys, use those, fn+F1
+  to fn+F5, or `/chat`, `/models`, `/status`, `/settings`, `/logs`.
 - **Downloads**: the same catalog as the TV app, each file pinned to a
-  commit on Hugging Face and checked by SHA-256 (`ts5 fetch`). They go to
+  commit on Hugging Face and checked by SHA-256 (`ts5 fetch`), or any other
+  `.gguf` with `/download URL [FILE] [--sha256 HEX]`. They go to
   the service's models folder when you may write there, else to
   `~/.local/share/tokenstation/models`. A stopped download goes on from
   where it was.

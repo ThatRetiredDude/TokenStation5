@@ -81,7 +81,12 @@ struct App {
     std::vector<ModelFile> models;
     int model_sel = 0;
     Proc loader, tuner, fanproc, logs, downloader;
-    const app::CatalogEntry *dl = nullptr;  // what downloader fetches
+    struct DlJob {
+        const app::CatalogEntry *cat = nullptr;  // a catalog model, or none for a URL of the user's
+        std::string name, file, url, sha256;     // name: on screen
+        double bytes = 0;                        // the size, when known before (the catalog's)
+    } dl;
+    bool dl_on = false;  // dl is what downloader fetches
     std::string dl_dir;
     std::vector<SavedChat> chat_list;  // the last /chats
     int answers_saved = 0;
@@ -427,7 +432,7 @@ std::vector<const app::CatalogEntry *> catalog_missing() {
         if (e.kind != app::CatalogEntry::Model) continue;
         bool have = false;
         for (auto &m : g->models) have = have || lower(m.name).find(e.same) != std::string::npos;
-        if (!have || g->dl == &e) out.push_back(&e);
+        if (!have || (g->dl_on && g->dl.cat == &e)) out.push_back(&e);
     }
     return out;
 }
@@ -460,16 +465,21 @@ double free_bytes(const std::string &dir) {
     return (double)v.f_bavail * (double)v.f_frsize;
 }
 
-double part_bytes(const std::string &dir, const app::CatalogEntry &e) {
+double part_bytes(const std::string &dir, const std::string &file) {
     struct stat st;
-    return stat((dir + "/." + e.file + ".part").c_str(), &st) == 0 ? (double)st.st_size : 0;
+    return stat((dir + "/." + file + ".part").c_str(), &st) == 0 ? (double)st.st_size : 0;
 }
 
-void start_download(const app::CatalogEntry &e) {
+bool downloading(const app::CatalogEntry &e) { return g->dl_on && g->dl.cat == &e && g->downloader.running(); }
+
+// Downloads job into download_dir() with ts5 fetch: into .FILE.part, going
+// on from one a stopped download left, kept only once the size (and the
+// SHA-256, when known) match.
+void start_fetch(const App::DlJob &job) {
     if (g->downloader.running()) {
-        show_toast(g->dl == &e ? "Already downloading it" : std::string("One download at a time: ") + g->dl->name +
-                                                                 " is downloading (X stops it)",
-                   g->th->warn, 4);
+        show_toast(g->dl.file == job.file ? "Already downloading it"
+                                          : "One download at a time: " + g->dl.name + " is downloading (X on Models stops it)",
+                   g->th->warn, 5);
         return;
     }
     const std::string ts5 = which("ts5");
@@ -482,55 +492,130 @@ void start_download(const app::CatalogEntry &e) {
         show_toast("Can't make " + dir, g->th->bad, 6);
         return;
     }
-    const double need = (double)e.bytes - part_bytes(dir, e), have = free_bytes(dir);
-    if (have >= 0 && have < need + 512.0 * 1024 * 1024) {
-        show_toast("Not enough space in " + dir + ": it needs " + gib(need) + ", " + gib(have) + " is free", g->th->bad,
-                   8);
+    if (file_exists(dir + "/" + job.file)) {
+        show_toast(job.file + " is already in " + dir, g->th->warn, 5);
         return;
     }
-    const std::string url = std::string("https://huggingface.co/") + e.repo + "/resolve/" + e.commit + "/" + e.path;
-    g->downloader.start(shell_quote(ts5) + " fetch " + shell_quote(url) + " " + shell_quote(dir + "/" + e.file) +
-                            " --sha256 " + e.sha256 + " 2>&1",
-                        std::string("Downloading ") + e.name);
-    g->dl = &e;
+    const double have = free_bytes(dir);
+    if (job.bytes > 0) {
+        const double need = job.bytes - part_bytes(dir, job.file);
+        if (have >= 0 && have < need + 512.0 * 1024 * 1024) {
+            show_toast("Not enough space in " + dir + ": it needs " + gib(need) + ", " + gib(have) + " is free",
+                       g->th->bad, 8);
+            return;
+        }
+    }
+    std::string cmd = shell_quote(ts5) + " fetch " + shell_quote(job.url) + " " + shell_quote(dir + "/" + job.file);
+    if (!job.sha256.empty()) cmd += " --sha256 " + job.sha256;
+    g->downloader.start(cmd + " 2>&1", "Downloading " + job.name);
+    g->dl = job;
+    g->dl_on = true;
     g->dl_dir = dir;
-    show_toast(std::string("Downloading ") + e.name + " (" + gib((double)e.bytes) + ") to " + dir, g->th->accent, 4);
+    std::string msg = "Downloading " + job.name + (job.bytes > 0 ? " (" + gib(job.bytes) + ")" : "") + " to " + dir;
+    if (job.bytes <= 0 && have >= 0) msg += " (" + gib(have) + " free)";
+    if (job.sha256.empty()) msg += ". No --sha256: only its size is checked";
+    show_toast(msg, job.sha256.empty() ? g->th->warn : g->th->accent, 5);
 }
 
-// The download's progress: bytes so far and MB/s (from ts5 fetch's lines).
-void download_progress(double &done, double &mbps) {
-    done = g->dl ? part_bytes(g->dl_dir, *g->dl) : 0;
+void start_download(const app::CatalogEntry &e) {
+    App::DlJob j;
+    j.cat = &e;
+    j.name = e.name;
+    j.file = e.file;
+    j.url = std::string("https://huggingface.co/") + e.repo + "/resolve/" + e.commit + "/" + e.path;
+    j.sha256 = e.sha256;
+    j.bytes = (double)e.bytes;
+    start_fetch(j);
+}
+
+// "/download URL [FILE] [--sha256 HEX]", also as `ts5 fetch` takes it (a
+// "ts5 fetch" in front is fine): a model from anywhere, Hugging Face's
+// /blob/ links too. FILE is a name only; it goes where downloads go.
+bool parse_fetch(const std::string &arg, App::DlJob &j, std::string &why) {
+    std::vector<std::string> w;
+    std::istringstream in(arg);
+    for (std::string x; in >> x;) w.push_back(x);
+    size_t i = 0;
+    if (i < w.size() && w[i] == "ts5") i++;
+    if (i < w.size() && w[i] == "fetch") i++;
+    for (; i < w.size(); i++) {
+        if (w[i] == "--sha256" && i + 1 < w.size()) j.sha256 = lower(w[++i]);
+        else if (j.url.empty() && (w[i].rfind("https://", 0) == 0 || w[i].rfind("http://", 0) == 0)) j.url = w[i];
+        else if (j.file.empty() && w[i].rfind("--", 0) != 0) j.file = w[i];
+        else {
+            why = "`" + w[i] + "` isn't something /download takes";
+            return false;
+        }
+    }
+    if (j.url.empty()) {
+        why = "no URL";
+        return false;
+    }
+    // A Hugging Face page link ("blob") as its download link ("resolve").
+    if (j.url.find("huggingface.co/") != std::string::npos) {
+        const size_t b = j.url.find("/blob/");
+        if (b != std::string::npos) j.url.replace(b, 6, "/resolve/");
+    }
+    if (j.file.empty()) {
+        std::string path = j.url.substr(0, j.url.find_first_of("?#"));
+        j.file = path.substr(path.rfind('/') + 1);
+    } else if (j.file.find('/') != std::string::npos) {
+        j.file = j.file.substr(j.file.rfind('/') + 1);
+    }
+    if (j.file.empty() || j.file[0] == '.' || j.file.find_first_not_of(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+-") != std::string::npos) {
+        why = "`" + j.file + "` isn't a plain file name: give one after the URL";
+        return false;
+    }
+    if (j.file.size() < 6 || strcasecmp(j.file.c_str() + j.file.size() - 5, ".gguf") != 0) {
+        why = "`" + j.file + "` isn't a .gguf (the models are .gguf files): give the name after the URL";
+        return false;
+    }
+    if (!j.sha256.empty() && (j.sha256.size() != 64 || j.sha256.find_first_not_of("0123456789abcdef") != std::string::npos)) {
+        why = "--sha256 takes the file's 64 hex digits";
+        return false;
+    }
+    j.name = api_id(j.file);
+    return true;
+}
+
+// The download's progress: bytes so far, the size (0: not known yet) and MB/s,
+// from the .part and ts5 fetch's lines ("ts5: fetch: X of Y MB, Z MB/s").
+void download_progress(double &done, double &total, double &mbps) {
+    done = g->dl_on ? part_bytes(g->dl_dir, g->dl.file) : 0;
+    total = g->dl.bytes;
     mbps = 0;
     const std::string l = g->downloader.last_line();
     const size_t c = l.rfind(", ");
     if (c != std::string::npos) mbps = atof(l.c_str() + c + 2);
+    const size_t of = l.find(" of ");
+    if (total <= 0 && of != std::string::npos) total = atof(l.c_str() + of + 4) * 1e6;
 }
 
 void finish_download() {
-    if (!g->dl || !g->downloader.done || g->downloader.t1 <= 0) return;
-    const app::CatalogEntry &e = *g->dl;
+    if (!g->dl_on || !g->downloader.done || g->downloader.t1 <= 0) return;
+    const App::DlJob job = g->dl;
     const std::string dir = g->dl_dir;
     std::string why;
     for (auto it = g->downloader.lines.rbegin(); it != g->downloader.lines.rend() && why.empty(); ++it)
         if (it->find("failed") != std::string::npos) why = *it;
     const int st = g->downloader.status;
-    g->dl = nullptr;
+    g->dl_on = false;
     g->downloader = Proc();
     scan_models();
     if (st != 0) {
         if (why.empty()) why = "stopped";
         if (why.rfind("ts5: ", 0) == 0) why = why.substr(5);
-        show_toast(std::string(e.name) + ": " + why + ". Download it again to go on from where it stopped.",
-                   g->th->bad, 8);
+        show_toast(job.name + ": " + why + ". Download it again to go on from where it stopped.", g->th->bad, 8);
         return;
     }
     for (int i = 0; i < (int)g->models.size(); i++)
-        if (g->models[i].name == e.file) g->model_sel = i;
+        if (g->models[i].name == job.file) g->model_sel = i;
     if (unit_active("tokenstation") && dir != service_models_dir())
-        chat_note(g->chat, std::string("Downloaded **") + e.name + "** to `" + dir + "`. The service reads `" +
-                               service_models_dir() + "`; to serve it there:\n\n```\nsudo mv " + dir + "/" + e.file +
+        chat_note(g->chat, "Downloaded **" + job.name + "** to `" + dir + "`. The service reads `" +
+                               service_models_dir() + "`; to serve it there:\n\n```\nsudo mv " + dir + "/" + job.file +
                                " " + service_models_dir() + "/\n```");
-    show_toast(std::string("Downloaded ") + e.name + ": Enter on Models loads it", g->th->good, 6);
+    show_toast("Downloaded " + job.name + ": Enter on Models loads it", g->th->good, 6);
 }
 
 void set_fan(const std::string &mode) {
@@ -734,7 +819,21 @@ void draw_bottom_bar(const std::string &hints) {
     const Theme &t = *g->th;
     const int y = s.h - 1;
     s.fill(0, y, s.w, 1, Style(t.dim, t.panel));
-    // Hints: "Key action|Key action", the keys brighter.
+    // On the right, always: how to leave (and, in ts5's tmux session, how to
+    // leave it running).
+    const char *tm = getenv("TS5_TUI_TMUX");
+    const bool in_tmux = tm && *tm;
+    const int right_w = in_tmux ? 31 : 13;
+    {
+        int rx = s.w - right_w;
+        if (in_tmux) {
+            rx = s.put(rx, y, "Ctrl+A d", Style(t.accent2, t.panel, BOLD));
+            rx = s.put(rx, y, " detach  ", Style(t.dim, t.panel));
+        }
+        rx = s.put(rx, y, "Ctrl+Q", Style(t.accent2, t.panel, BOLD));
+        s.put(rx, y, " quit", Style(t.dim, t.panel));
+    }
+    // Hints: "Key action|Key action", the keys brighter, as many as fit.
     int x = 1;
     std::stringstream ss(hints);
     std::string part;
@@ -743,15 +842,12 @@ void draw_bottom_bar(const std::string &hints) {
         const size_t sp = part.find(' ');
         const std::string key = sp == std::string::npos ? part : part.substr(0, sp);
         const std::string what = sp == std::string::npos ? "" : part.substr(sp);
-        if (x + text_width(key + what) + 3 > s.w - 1) break;
+        if (x + text_width(key + what) + 3 > s.w - right_w - 1) break;
         if (!first) x = s.put(x, y, "  ", Style(t.dim, t.panel));
         x = s.put(x, y, key, Style(t.accent2, t.panel, BOLD));
         x = s.put(x, y, what, Style(t.dim, t.panel));
         first = false;
     }
-    // In ts5's tmux session: its prefix key, for detaching.
-    const char *tm = getenv("TS5_TUI_TMUX");
-    if (tm && *tm && s.w - x > 24) s.put(s.w - 22, y, "Ctrl+A d  detach", Style(t.dim, t.panel));
 }
 
 int body_top() {
@@ -905,7 +1001,7 @@ void draw_status() {
         if (g->gen_hist.empty())
             s.put(ix + 26, y + 2, fit(e.local() ? "every answer the server gives shows up here" : "from this app's chats", iw - 27), S(t.dim, ITALIC));
     }
-    draw_bottom_bar("F fan auto/cool/early/max|Tab next screen|Q quit");
+    draw_bottom_bar("Tab/1-5 pages|F fan auto/cool/early/max");
 }
 
 // ---- Models ----
@@ -971,10 +1067,11 @@ void draw_models() {
                               now_s() - g->load_t0), S(t.accent2, BOLD));
     } else if (g->tuner.running()) {
         s.put(x0 + 25, y, "⚙ " + g->tuner.title + " in the background (T to watch)", S(t.accent2));
-    } else if (g->downloader.running() && g->dl) {
-        double done, mbps;
-        download_progress(done, mbps);
-        s.put(x0 + 25, y, fmt("⇣ %s %.0f%%", g->dl->name, 100.0 * done / std::max(1.0, (double)g->dl->bytes)),
+    } else if (g->downloader.running() && g->dl_on) {
+        double done, total, mbps;
+        download_progress(done, total, mbps);
+        s.put(x0 + 25, y,
+              fit("⇣ " + g->dl.name + (total > 0 ? fmt(" %.0f%%", 100.0 * done / total) : " " + gib(done)), w - 26),
               S(t.accent2));
     }
     y += 2;
@@ -997,9 +1094,11 @@ void draw_models() {
     // The rows on screen: the files here, a divider, then the catalog's (-1: the divider).
     std::vector<int> disp;
     for (int i = 0; i < nl; i++) disp.push_back(i);
-    if (nc) {
+    const bool url_dl = g->dl_on && !g->dl.cat;  // a /download URL, shown under the catalog
+    if (nc || url_dl) {
         disp.push_back(-1);
         for (int i = 0; i < nc; i++) disp.push_back(nl + i);
+        if (url_dl) disp.push_back(-2);
     }
     int sel_row = 0;
     for (int r = 0; r < (int)disp.size(); r++)
@@ -1008,6 +1107,21 @@ void draw_models() {
     int first = std::max(0, std::min(sel_row - rows / 2, nd - rows));
     for (int r = first; r < nd && r < first + rows; r++, y++) {
         const int i = disp[r];
+        if (i == -2) {
+            double done, total, mbps;
+            download_progress(done, total, mbps);
+            s.put(x0 + 1, y, g->downloader.running() ? "⇣" : "·", S(t.accent2, BOLD));
+            s.put(x0 + 3, y, fit(g->dl.name, name_w - 1), S(t.fg));
+            if (total > 0) {
+                s.put(x0 + 3 + name_w, y, fmt("%8s", gib(total).c_str()), S(t.fg));
+                bar(s, x0 + 3 + name_w + 10, y, 18, done / total, {t.accent, t.accent2}, mix(t.dim, t.bg, 0.6));
+                s.put(x0 + 3 + name_w + 30, y, fit(fmt("%.0f%% %.0f MB/s", 100 * done / total, mbps), w - name_w - 34),
+                      S(t.accent2));
+            } else {
+                s.put(x0 + 3 + name_w + 10, y, fit("starting… " + gib(done), w - name_w - 14), S(t.dim));
+            }
+            continue;
+        }
         if (i < 0) {
             s.put(x0 + 1, y, "⇣ Download", S(t.accent, BOLD));
             s.put(x0 + 13, y, fit("from the catalog: pinned on Hugging Face, checked by SHA-256 · to " + download_dir(),
@@ -1021,20 +1135,20 @@ void draw_models() {
             const Style row = on ? Style(t.fg, t.panel2) : Style(t.fg, t.bg);
             s.fill(x0, y, w, 1, row);
             s.put(x0, y, on ? "▌" : " ", Style(t.accent, row.bg));
-            const bool going = g->dl == &e && g->downloader.running();
+            const bool going = downloading(e);
             s.put(x0 + 1, y, going ? "⇣" : "+", Style(going ? t.accent2 : t.dim, row.bg, BOLD));
             s.put(x0 + 3, y, fit(e.name, name_w - 1), Style(t.fg, row.bg));
             s.put(x0 + 3 + name_w, y, fmt("%8s", gib((double)e.bytes).c_str()), Style(t.fg, row.bg));
             if (going) {
-                double done, mbps;
-                download_progress(done, mbps);
+                double done, total, mbps;
+                download_progress(done, total, mbps);
                 const double frac = done / std::max(1.0, (double)e.bytes);
                 bar(s, x0 + 3 + name_w + 10, y, 18, frac, {t.accent, t.accent2}, mix(t.dim, row.bg, 0.6));
                 s.put(x0 + 3 + name_w + 30, y, fit(fmt("%.0f%% %.0f MB/s", frac * 100, mbps), w - name_w - 34),
                       Style(t.accent2, row.bg));
             } else {
                 s.put(x0 + 3 + name_w + 10, y, fit(e.good_for, 19), Style(t.dim, row.bg));
-                const double part = part_bytes(download_dir(), e);
+                const double part = part_bytes(download_dir(), e.file);
                 s.put(x0 + 3 + name_w + 30, y, part > 0 ? fmt("%.0f%% so far", 100 * part / (double)e.bytes) : "↵ download",
                       Style(part > 0 ? t.warn : t.dim, row.bg, ITALIC));
             }
@@ -1073,17 +1187,17 @@ void draw_models() {
         line("From", std::string("huggingface.co/") + e.repo + " @ " + std::string(e.commit).substr(0, 10), t.dim);
         const double fb = free_bytes(dir);
         line("Goes to", dir + (fb >= 0 ? "  (" + gib(fb) + " free)" : ""), fb >= 0 && fb < (double)e.bytes ? t.bad : t.fg);
-        if (g->dl == &e && g->downloader.running()) {
-            double done, mbps;
-            download_progress(done, mbps);
+        if (downloading(e)) {
+            double done, total, mbps;
+            download_progress(done, total, mbps);
             const double left = (double)e.bytes - done;
             line("Downloading", fmt("%s of %s", gib(done).c_str(), gib((double)e.bytes).c_str()) +
                                     (mbps > 0 ? fmt(" · %.0f MB/s · %d min left", mbps, (int)(left / 1e6 / mbps / 60) + 1) : ""),
                  t.accent2);
         } else {
-            line("", "Enter downloads it · X stops it, and it goes on from there later", t.dim);
+            line("", "Enter downloads it · X stops it, and it goes on from there later · any other: /download URL", t.dim);
         }
-        draw_bottom_bar("↑↓ choose|Enter download|X stop download|R rescan|Tab next screen");
+        draw_bottom_bar("↑↓ choose|Enter download|Tab/1-5 pages|X stop download|R rescan");
         return;
     }
     if (nl > 0 && g->model_sel < nl) {
@@ -1117,7 +1231,7 @@ void draw_models() {
         if (api_id(m.name) == sv.model)
             setting("Context", fmt("%d tokens", sv.n_ctx), "what fits now, as loaded");
     }
-    draw_bottom_bar("↑↓ choose|Enter load|T tune|C GPU check|B speed test|R rescan|Tab next screen");
+    draw_bottom_bar("↑↓ choose|Enter load|Tab/1-5 pages|T tune|C GPU check|B speed test|R rescan");
 }
 
 // ---- Settings ----
@@ -1291,7 +1405,7 @@ void draw_settings() {
         s.put(x0 + 2, y, fit("The engine's own switches (16/32-bit prompt math, cache, helper) are per model: Models → T tunes them.",
                              w - 4), S(t.dim));
     }
-    draw_bottom_bar(g->editing ? "Enter save|Esc cancel" : "↑↓ choose|←→ change|Enter edit|Tab next screen");
+    draw_bottom_bar(g->editing ? "Enter save|Esc cancel" : "↑↓ choose|←→ change|Tab/1-5 pages|Enter edit");
 }
 
 // ---- Logs ----
@@ -1328,7 +1442,7 @@ void draw_logs() {
             c = t.accent, a = BOLD;
         s.put(1, y, fit(l, s.w - 2), S(c, a));
     }
-    draw_bottom_bar(g->logs_scroll ? "PgUp/PgDn scroll|End follow|Tab next screen" : "PgUp/PgDn scroll|Tab next screen");
+    draw_bottom_bar(g->logs_scroll ? "Tab/1-5 pages|PgUp/PgDn scroll|End follow" : "Tab/1-5 pages|PgUp/PgDn scroll");
 }
 
 // ---- Chat (drawing in chat.cpp) ----
@@ -1343,7 +1457,7 @@ void draw_chat() {
     v.why = sv.why;
     draw_chat_screen(g->scr, *g->th, g->chat, v);
     draw_bottom_bar(g->chat.busy() ? "Esc stop|PgUp/PgDn scroll|Ctrl+T thoughts"
-                                   : "Enter send|Ctrl+J new line|Ctrl+N new chat|Ctrl+T thoughts|PgUp/PgDn scroll|Tab next screen");
+                                   : "Enter send|Tab next page|Ctrl+J new line|Ctrl+N new chat|Ctrl+T thoughts|PgUp/PgDn scroll");
 }
 
 void draw() {
@@ -1401,8 +1515,10 @@ void run_command(const std::string &line) {
         while (!arg.empty() && arg.back() == ' ') arg.pop_back();
     }
     Chat &c = g->chat;
+    if (cmd == "/fetch") cmd = "/download";
     if (cmd == "/new" || cmd == "/clear") chat_new(c);
     else if (cmd == "/quit" || cmd == "/exit" || cmd == "/q") g->quit = true;
+    else if (cmd == "/chat") go(CHAT);
     else if (cmd == "/models") go(MODELS);
     else if (cmd == "/status") go(STATUS);
     else if (cmd == "/settings") go(SETTINGS);
@@ -1445,6 +1561,19 @@ void run_command(const std::string &line) {
             go(MODELS);
             const int nl = (int)g->models.size();
             if (!catalog_missing().empty()) g->model_sel = nl;
+            return;
+        }
+        if (arg.find("://") != std::string::npos) {
+            App::DlJob j;
+            std::string why;
+            if (!parse_fetch(arg, j, why)) {
+                chat_note(c, "Can't download that: " + why + ".\n\n`/download URL [FILE] [--sha256 HEX]`, or the "
+                             "`ts5 fetch URL FILE --sha256 HEX` line as it is. FILE is a name only; it goes to `" +
+                             download_dir() + "`.");
+                return;
+            }
+            start_fetch(j);
+            go(MODELS);
             return;
         }
         if (const app::CatalogEntry *e = find_catalog(arg)) {
@@ -1510,6 +1639,16 @@ void run_command(const std::string &line) {
         } else {
             show_toast(why, g->th->bad, 6);
         }
+    } else if (cmd == "/usage") {
+        const std::string r = usage_report();
+        chat_note(c, r.empty() ? "No usage log here. The TV app (and the desktop app) keep one, `usage.tsv` in their "
+                                 "data folder; for the API-only service, set `TS5_USAGE_LOG` in its settings."
+                               : r);
+    } else if (cmd == "/keys") {
+        const std::string r = keys_report();
+        chat_note(c, r.empty() ? "No API keys here: they're made on the TV app's Settings page (keys.tsv in its "
+                                 "data folder)."
+                               : r);
     } else if (cmd == "/think") {
         g->cfg.thinking = arg == "on" ? 1 : arg == "off" ? 2 : 0;
         g->cfg.save();
@@ -1574,7 +1713,11 @@ void run_command(const std::string &line) {
         for (auto &k : slash_commands())
             h += std::string("`") + k.name + (*k.args ? std::string(" ") + k.args : "") + "`  " + k.what + "\n";
         h += "\n**Keys**  Enter send · Ctrl+J or Alt+Enter new line · ↑↓ history · Tab completes · Esc stops an answer · "
-             "Ctrl+T thinking · Ctrl+N new chat (this one is kept: `/chats`) · PgUp/PgDn scroll · F1-F5 pages · `/` the prompt from any page · Ctrl+Q quit";
+             "Ctrl+T thinking · Ctrl+N new chat (this one is kept: `/chats`) · PgUp/PgDn scroll · Ctrl+Q, `exit` or `q` quits\n\n"
+             "**Pages**  F1 Chat · F2 Models · F3 Status · F4 Settings · F5 Logs. On a Mac, where macOS keeps the F keys: "
+             "**Tab** and **Shift+Tab** step through the pages, **1** to **5** on any page but Chat, **fn+F1** to **fn+F5**, "
+             "Option+1 to 5 when the terminal sends Option as Meta (Esc+), or `/chat` `/models` `/status` `/settings` `/logs`. "
+             "`/` on any page goes to the prompt.";
         chat_note(c, h);
     } else {
         chat_note(c, "Unknown command **" + cmd + "**. `/help` lists them.");
@@ -2028,9 +2171,9 @@ int main(int argc, char **argv) {
             fputs(t.c_str(), stdout);
         }
     }
-    if (was_downloading && app.dl)
-        printf("ts5-tui: the download of %s stopped; /download %s goes on from where it was.\n", app.dl->name,
-               app.dl->key);
+    if (was_downloading && app.dl_on)
+        printf("ts5-tui: the download of %s stopped; /download %s goes on from where it was.\n", app.dl.name.c_str(),
+               app.dl.cat ? app.dl.cat->key : (app.dl.url + " " + app.dl.file + (app.dl.sha256.empty() ? "" : " --sha256 " + app.dl.sha256)).c_str());
     if (pid_t own = own_server_pid(); own > 0)
         printf("ts5-tui: the model it started keeps serving (pid %d, port %d). Stop it with: kill %d\n", own,
                app.ep.port, own);

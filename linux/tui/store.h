@@ -40,3 +40,16 @@ bool load_chat(Chat &c, const SavedChat &s, std::string &why);
 std::string when_text(int64_t t);
 
 }  // namespace tui
+
+namespace tui {
+
+// The API's use, from usage.tsv (and usage.prev.tsv) in the data folders this
+// user can read (ts5-tui's, the TV service's, $TS5_USAGE_LOG): requests,
+// tokens and speeds over the last day and week, by app and by model, as
+// Markdown for the chat. "" when there is no such file.
+std::string usage_report();
+// The API keys (keys.tsv) as Markdown: names, on or off, made, last used.
+// Never the keys, which aren't kept. "" when there is no such file.
+std::string keys_report();
+
+}  // namespace tui

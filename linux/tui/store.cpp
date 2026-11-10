@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <set>
 
 #include "json.h"
 
@@ -250,6 +251,158 @@ std::string when_text(int64_t t) {
     std::string r = buf;
     while (!r.empty() && r[0] == ' ') r.erase(0, 1);
     return r;
+}
+
+}  // namespace tui
+
+// ---- usage and keys ----
+
+#include <map>
+
+#include "usage.h"
+
+namespace tui {
+
+namespace {
+
+// Folders that may hold the app's files: ts5-tui's data folder, then the TV
+// service's.
+std::vector<std::string> app_dirs() {
+    std::vector<std::string> d = {data_dir(), "/var/lib/tokenstation"};
+    char a[4096], b[4096];
+    if (realpath(d[0].c_str(), a) && realpath(d[1].c_str(), b) && strcmp(a, b) == 0) d.pop_back();
+    return d;
+}
+
+struct Sums {
+    int64_t requests = 0, failed = 0, prompt = 0, gen = 0, gen_ms = 0;
+    void add(const ts5::UsageRecord &r) {
+        requests++;
+        if (r.status >= 400 || !r.why.empty()) failed++;
+        prompt += r.prompt;
+        gen += r.gen;
+        gen_ms += r.gen_ms;
+    }
+};
+
+std::string count(int64_t n) {
+    if (n >= 10000000) return fmt("%.0fM", n / 1e6);
+    if (n >= 1000000) return fmt("%.1fM", n / 1e6);
+    if (n >= 10000) return fmt("%.0fk", n / 1e3);
+    return std::to_string((long long)n);
+}
+
+std::string row(const std::string &name, const Sums &s) {
+    std::string r = "| " + name + " | " + count(s.requests) + (s.failed ? fmt(" (%lld failed)", (long long)s.failed) : "") +
+                    " | " + count(s.prompt) + " | " + count(s.gen) + " | ";
+    r += s.gen_ms > 0 ? fmt("%.1f", s.gen * 1000.0 / s.gen_ms) : std::string("—");
+    return r + " |\n";
+}
+
+void read_usage(const std::string &path, std::vector<ts5::UsageRecord> &out) {
+    FILE *f = fopen(path.c_str(), "r");
+    if (!f) return;
+    ts5::UsageColumns cols = ts5::usage_columns();
+    char *line = nullptr;
+    size_t cap = 0;
+    ssize_t n;
+    while ((n = getline(&line, &cap, f)) > 0) {
+        const std::string l(line, (size_t)n);
+        if (l.rfind("#\t", 0) == 0 || (l.size() > 1 && l[0] == '#' && l.find('\t') != std::string::npos)) {
+            cols = ts5::usage_columns(l);
+            continue;
+        }
+        ts5::UsageRecord r;
+        if (ts5::parse_usage_line(cols, l, r)) out.push_back(r);
+    }
+    free(line);
+    fclose(f);
+}
+
+}  // namespace
+
+std::string usage_report() {
+    std::vector<std::string> files;
+    if (const char *e = getenv("TS5_USAGE_LOG"); e && *e) files.push_back(e);
+    for (auto &d : app_dirs()) {
+        files.push_back(d + "/usage.prev.tsv");
+        files.push_back(d + "/usage.tsv");
+    }
+    std::vector<ts5::UsageRecord> recs;
+    std::vector<std::string> read_from;
+    for (auto &f : files) {
+        if (access(f.c_str(), R_OK) != 0) continue;
+        const size_t before = recs.size();
+        read_usage(f, recs);
+        if (recs.size() > before || f.find(".prev.") == std::string::npos) read_from.push_back(f);
+    }
+    if (read_from.empty()) return "";
+    const int64_t now_ms = (int64_t)time(nullptr) * 1000;
+    Sums day, week;
+    std::map<std::string, Sums> by_app, by_model;
+    std::set<std::string> seen;  // a line in two files (a copy) counts once
+    for (auto &r : recs) {
+        if (!seen.insert(r.id + "\t" + std::to_string(r.time_ms)).second) continue;
+        if (r.time_ms < now_ms - 7 * 86400000LL) continue;
+        week.add(r);
+        const std::string app = !r.key.empty() ? r.key : r.client.empty() ? "(unknown)" : r.client;
+        by_app[app].add(r);
+        by_model[r.model.empty() ? "(no model)" : r.model].add(r);
+        if (r.time_ms >= now_ms - 86400000LL) day.add(r);
+    }
+    std::string m = "**API use**, from " + read_from[0] + (read_from.size() > 1 ? fmt(" and %d more", (int)read_from.size() - 1) : "") + "\n\n";
+    if (week.requests == 0) return m + "No requests in the last 7 days.\n";
+    m += "| | Requests | Prompt tokens | Generated | tok/s |\n| --- | --- | --- | --- | --- |\n";
+    m += row("Last 24 hours", day) + row("Last 7 days", week);
+    auto top = [&](const std::map<std::string, Sums> &by, const char *what) {
+        std::vector<std::pair<std::string, Sums>> v(by.begin(), by.end());
+        std::sort(v.begin(), v.end(), [](auto &a, auto &b) { return a.second.requests > b.second.requests; });
+        std::string t = std::string("\n**By ") + what + "**, last 7 days\n\n| | Requests | Prompt tokens | Generated | tok/s |\n| --- | --- | --- | --- | --- |\n";
+        for (size_t i = 0; i < v.size() && i < 8; i++) t += row(v[i].first, v[i].second);
+        return t;
+    };
+    return m + top(by_app, "app (API key name, else address)") + top(by_model, "model");
+}
+
+std::string keys_report() {
+    for (auto &d : app_dirs()) {
+        const std::string path = d + "/keys.tsv";
+        FILE *f = fopen(path.c_str(), "r");
+        if (!f) {
+            if (access(path.c_str(), F_OK) == 0)
+                return "The API keys are in `" + path + "`, which your user can't read. They're made and turned on or off on the TV app's Settings page.";
+            continue;
+        }
+        std::string m = "**API keys**, from `" + path + "` (only their SHA-256 is kept, so a key shows once, when it's made: on the TV app's Settings page)\n\n| Name | On | Made | Last used |\n| --- | --- | --- | --- |\n";
+        char *line = nullptr;
+        size_t cap = 0;
+        ssize_t n;
+        int keys = 0;
+        while ((n = getline(&line, &cap, f)) > 0) {
+            std::string l(line, (size_t)n);
+            while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+            if (l.empty() || l[0] == '#') continue;
+            std::vector<std::string> c;
+            size_t at = 0;
+            for (;;) {
+                const size_t tab = l.find('\t', at);
+                c.push_back(l.substr(at, tab == std::string::npos ? std::string::npos : tab - at));
+                if (tab == std::string::npos) break;
+                at = tab + 1;
+            }
+            // id, name, sha256, on, created, used
+            if (c.size() < 6) continue;
+            const int64_t made = atoll(c[4].c_str()), used = atoll(c[5].c_str());
+            m += "| " + c[1] + " | " + (c[3] == "1" ? "yes" : "off") + " | " + (made ? when_text(made) : "—") + " | " +
+                 (used ? when_text(used) : "never") + " |\n";
+            keys++;
+        }
+        free(line);
+        fclose(f);
+        if (!keys) return "No API keys yet (`" + path + "`). They're made on the TV app's Settings page.";
+        return m;
+    }
+    return "";
 }
 
 }  // namespace tui

@@ -18,8 +18,8 @@ namespace tui {
 const std::vector<SlashCommand> &slash_commands() {
     static const std::vector<SlashCommand> c = {
         {"/model", "NAME", "load another model (Tab completes the name)"},
-        {"/models", "", "the Models page"},
-        {"/download", "NAME", "download a model from the catalog (Tab completes)"},
+        {"/models", "", "the Models page (/chat /status /settings /logs: the others)"},
+        {"/download", "NAME|URL", "a catalog model (Tab completes), or any URL [FILE] [--sha256 HEX]"},
         {"/new", "", "a new chat (Ctrl+N); every chat is kept"},
         {"/chats", "[TEXT]", "your saved chats (with TEXT: the ones that have it)"},
         {"/open", "N", "open saved chat N from /chats"},
@@ -29,13 +29,16 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/tune", "[NAME]", "ts5-tune this model (or NAME) for this PS5"},
         {"/check", "[NAME]", "the GPU check: the model's answers against the CPU's"},
         {"/bench", "[NAME]", "the speed test: prompt and answer tok/s"},
+        {"/usage", "", "the API's use by app and model (last day and week)"},
+        {"/keys", "", "the API keys: names, on or off, last used"},
         {"/think", "on|off|auto", "thinking before answering"},
         {"/fan", "auto|cool|early|max", "the PS5's fan"},
         {"/theme", "NAME", "colors: Ocean, Neon, Sunset, Forest, Mono"},
         {"/settings", "", "the Settings page"},
+        {"/chat", "", "back to the chat"},
         {"/logs", "", "the engine's log"},
         {"/help", "", "keys and commands"},
-        {"/quit", "", "leave (the server keeps running)"},
+        {"/quit", "", "leave (exit, quit or q too; the server keeps running)"},
     };
     return c;
 }
@@ -943,8 +946,17 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
             return CHAT_NONE;
         case K_ENTER: {
             if (c.input.empty()) return CHAT_NONE;
-            if (c.input[0] == '/') {
-                c.command = c.input;
+            // What people type to leave a shell, and a `ts5 fetch` line pasted
+            // from a page: commands, never messages for the model.
+            std::string word = c.input;
+            while (!word.empty() && isspace((unsigned char)word.back())) word.pop_back();
+            while (!word.empty() && isspace((unsigned char)word[0])) word.erase(0, 1);
+            std::string lw = word;
+            std::transform(lw.begin(), lw.end(), lw.begin(), ::tolower);
+            const bool command = c.input[0] == '/' || lw == "exit" || lw == "quit" || lw == "q" || lw == ":q" ||
+                                 lw == "bye" || lw.rfind("ts5 fetch ", 0) == 0;
+            if (command) {
+                c.command = c.input[0] == '/' ? c.input : lw.rfind("ts5 fetch ", 0) == 0 ? "/download " + word : "/quit";
             } else {
                 if (c.busy()) return CHAT_NONE;  // one answer at a time
             }
@@ -953,7 +965,7 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
             const std::string text = c.input;
             c.input.clear();
             c.cur = 0;
-            if (text[0] == '/') return CHAT_COMMAND;
+            if (command) return CHAT_COMMAND;
             send(c, rq, text);
             return CHAT_NONE;
         }
