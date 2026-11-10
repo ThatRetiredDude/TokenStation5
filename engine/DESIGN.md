@@ -208,7 +208,8 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
 - 9 or more of Q4_K, Q5_K, Q6_K or Q8_0 (K-quant rows are whole 256-value
   groups; Q8_0's any whole number of 32-value blocks),
   where that makes at least 48 blocks, or
-  splitting the columns does for 128 or more tokens (`mmb_*`,
+  splitting the columns does for 128 or more tokens, or (Linux) any
+  chunk of fewer than 128 on the f16 kernel (`mmb_*`,
   `shaders/matmul_big.glsl`): 128 rows x 128 tokens per workgroup, 8 x 8
   outputs per thread, so each value read from shared memory is used 8 times.
   Each thread dequantizes 16 values of one row and loads 16 of one token from
@@ -241,7 +242,14 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   for 256 tokens of Qwen 3 8B, 4 of Qwen 2.5 7B) take mmb this way too, in
   up to 16 slices (`TS5_MMB_SMALL=0`: the 64 x 64 kernel); k, v and q's
   partial sums fit in `split_` together (12M floats), so their splits add
-  no barriers. mmb sums in f32, or in f16 for the qwen2, qwen3 and llama
+  no barriers. On Linux, chunks of 9 to 127 tokens (a short follow-up, a
+  tool result, a long prompt's last chunk) take the f16 kernel however few
+  blocks they make (`TS5_MMB_SHORT=0`: the block count's rule; not the f32
+  models or the roles `TS5_MMB_F16_SKIP` keeps on f32): with compute units
+  idle it still beats the 64 x 64 kernel, and on the PS5 prompts of 9-127
+  tokens read 1.14-1.76 times faster (Qwen3 8B, 100 tokens: 280 -> 160 ms;
+  DeepSeek R1 14B 474 -> 267), the same at 8 and 128, the check passing
+  (0.27% and 0.25% of the largest logit). mmb sums in f32, or in f16 for the qwen2, qwen3 and llama
   architectures (the default there; `TS5_MMB_F16=0|1` decides for
   any model): where the device has
   f16 arithmetic (`mmb16_*`, the same shader with `MMB_F16`), shared memory
@@ -255,7 +263,8 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   one top token in 128 moved). A check of 128 tokens (124 in one batch)
   proves less than it seems, though: under 128 tokens a matrix of fewer
   than 48 blocks (attn_q/k/v/output and ffn_down of a 4096-wide model)
-  takes the f32 64 x 64 kernel, so only the wide matrices ran f16 there;
+  took the f32 64 x 64 kernel (as it still does on the PS5's own build),
+  so only the wide matrices ran f16 there;
   check prompt kernels at 512 tokens. Gemma 3 and 4 fail the check with
   f16 (0.8-0.9% at 128 tokens, from gate and up, whose inputs carry
   Gemma's large activations), and with gate and up in f32 they passed at

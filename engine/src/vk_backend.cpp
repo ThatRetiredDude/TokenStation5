@@ -746,6 +746,21 @@ private:
         if (hp_.arch == "llama" && hp_.n_embd <= 2048) mmb_f16_skip_ = ",ffn_down,attn_output,";
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
         if (const char *e = getenv("TS5_MMB_F16_SKIP")) mmb_f16_skip_ = std::string(",") + e + ",";
+#ifndef TS5_PS5
+        // Chunks of 9 to 127 tokens (a short follow-up, a tool result, a
+        // long prompt's last chunk) on the f16 128 x 128 kernel however few
+        // blocks they make (TS5_MMB_SHORT=0|1, on by default on Linux; not
+        // for the f32 models or the roles TS5_MMB_F16_SKIP keeps on f32).
+        // The block count's rule sent q, o and down to the f32 64 x 64
+        // kernel there; on the PS5 (job CZ, TS5_MMB_MIN=1 for the
+        // same choice) prompts of 9-127 tokens read 1.14-1.76x faster
+        // (Qwen3 8B, 100 tokens: 280 -> 160 ms; DeepSeek 14B 474 -> 267),
+        // the same at 8 and 128, checks passing (0.0027 and 0.0025 of the
+        // largest logit). 128 tokens and more keep the rule, with its
+        // column splits.
+        mmb_short_ = true;
+        if (const char *e = getenv("TS5_MMB_SHORT")) mmb_short_ = atoi(e) != 0;
+#endif
         // The prompt kernel's variants (TS5_MMB_VAR): "q" loads x by quads of
         // tokens and stores them to shared memory as vectors, "d"
         // double-buffers the shared tiles (one barrier a step; f16 only),
@@ -1689,7 +1704,8 @@ private:
         const uint32_t split_big = mmb_small_ && mmb_split_ && ntok >= 128 && big < (uint32_t)mmb_min_
                                        ? big * std::min({(mmb_split_ + big - 1) / big, (uint32_t)w.ne0() / 256, 16u})
                                        : big;
-        if (ntok >= tiled_min_ && mmb_ && split_big >= (uint32_t)mmb_min_ && x_off % 4 == 0 && mmb_type(w)) {
+        if (ntok >= tiled_min_ && mmb_ && (split_big >= (uint32_t)mmb_min_ || (mmb_short_ && ntok < 128 && mmb_f16_for(w))) &&
+            x_off % 4 == 0 && mmb_type(w)) {
             mmb(w, x, y, pc, big, what);
             return;
         }
@@ -1742,11 +1758,14 @@ private:
     // slices, a workgroup per block and slice, which write their sums to
     // split_ for mmb_reduce to add up, so all of the GPU's compute units get
     // some.
+    bool mmb_f16_for(const Weight &w) const {
+        return mmb_f16_ && (mmb_f16_skip_.empty() || mmb_f16_skip_.find("," + role(w) + ",") == std::string::npos);
+    }
     template <class PC>
     void mmb(const Weight &w, const Buf &x, const Buf &y, const PC &pc, uint32_t big, const std::string &what) {
         const uint32_t rows = pc.nrows, ntok = pc.ntok, nunits = pc.ncols / 32;
         const size_t slice = (size_t)rows * ntok;
-        const bool f16 = mmb_f16_ && (mmb_f16_skip_.empty() || mmb_f16_skip_.find("," + role(w) + ",") == std::string::npos);
+        const bool f16 = mmb_f16_for(w);
         // (The f32 kernel has no double buffer: its tiles would fill 64 KiB.)
         const std::string &var = !f16 ? mmb_var32_ : w.type() == GGML_Q8_0 ? mmb_var_q8_ : mmb_var_;
         const std::string name = std::string(f16 ? "mmb16" : "mmb") + var + "_" + qname(w.type());
@@ -2605,6 +2624,7 @@ private:
     const Weight *norm_ = nullptr;  // set: matmul folds this RMSNorm in (one token)
     bool no_barrier_ = false;  // skip the barrier after the next dispatch
     int mmb_min_ = 48;
+    bool mmb_short_ = false;  // chunks under 128 tokens on mmb whatever their block count (TS5_MMB_SHORT)
     // mmb splits matrices of fewer blocks than this (TS5_MMB_SPLIT; 0: never),
     // in about as many workgroups, each one Q4_K or Q6_K block or more wide;
     // TS5_MMB_SLICES=N: every matrix in N.

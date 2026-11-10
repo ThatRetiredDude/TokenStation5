@@ -164,7 +164,7 @@ python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ste
 echo "== 300 tokens (prefill chunking, >128 keys per attention block)"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "$work/qwen2-Q8_0.gguf"
 echo "== 72 tokens per call (the tiled matmul: a full and a partial 64-token tile)"
-python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${models[@]}"
+TS5_MMB_SHORT=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${models[@]}"
 # K-quants as Q4_K_M files have them (Q4_K, with Q6_K for attn_v, ffn_down
 # and output), quantized by make_test_model.py: the 128 x 128 matmul blocks
 # for prompts (TS5_MMB_MIN=1 uses them even for these small matrices; one
@@ -269,9 +269,35 @@ echo "unused: $u256 MiB with 256 rows, $u8 MiB with 8"
 wide="$work/qwen3-kmix-wide.gguf"
 [ -s "$wide" ] || python3 "$here/make_test_model.py" --arch qwen3 --quant Q4_K_M --vocab "$work/ggml-vocab-qwen2.gguf" \
     --embd 1024 --heads 8 --kv-heads 2 "$wide" > /dev/null
-TS5_MMB_F16=1 TS5_MMB_MIN=12 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "$wide"
-TS5_MMB_F16=1 TS5_MMB_MIN=12 TS5_MMB_SMALL=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "$wide"
+TS5_MMB_SHORT=0 TS5_MMB_F16=1 TS5_MMB_MIN=12 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
+    --ntok 300 "$wide"
+TS5_MMB_SHORT=0 TS5_MMB_F16=1 TS5_MMB_MIN=12 TS5_MMB_SMALL=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu \
+    --tol 0.002 --backend vk --ntok 300 "$wide"
 TS5_MMB=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 72 "${kmix[@]}"
+# TS5_MMB_SHORT (Linux, on): chunks of 9 to 127 tokens on the f16 128 x 128
+# kernel whatever their block count, here every matrix of the f16 models but
+# for the narrow Llama's attn_output and ffn_down (TS5_MMB_F16_SKIP), which
+# stay on the 64 x 64 kernel, as the f32 models (the narrow Qwen3, Gemma 4)
+# do; the 44-token tail of 300 on the wide model too. TS5_MMB_SHORT=0: the
+# block count's rule.
+echo "== Short chunks on the 128 x 128 kernel (TS5_MMB_SHORT): 9, 100 and 127 tokens, and a 300-token tail"
+for n in 9 100 127; do
+    python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok $n "${kmix[@]}" \
+        "$work/qwen2-Q8_0.gguf"
+done
+TS5_MMB_F16=1 TS5_MMB_MIN=12 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
+    "$wide"
+for s in 1 0; do
+    TS5_MMB_SHORT=$s TS5_PROFILE=1 "$ts5" bench -m "$work/qwen2-kmix.gguf" --pp 100 --tg 1 > "$work/short-$s.txt" 2>&1
+done
+grep -q "^  mmb16dq_q6_k ffn_down " "$work/short-1.txt" && grep -q "^  mmb16dq_q4_k attn_output " "$work/short-1.txt" &&
+    grep -q "^  mm_q6_k ffn_down " "$work/short-0.txt" && ! grep -q "^  mm_q" "$work/short-1.txt" ||
+    { echo "FAIL: 100 tokens on qwen2-kmix: the kernels"; grep -h "^  mm" "$work"/short-[01].txt; exit 1; }
+TS5_PROFILE=1 "$ts5" bench -m "$work/llama-kmix.gguf" --pp 100 --tg 1 > "$work/short-llama.txt" 2>&1
+grep -q "^  mm_q6_k ffn_down " "$work/short-llama.txt" && grep -q "^  mm_q4_k attn_output " "$work/short-llama.txt" &&
+    grep -q "mmb16dq_q4_k ffn_gate" "$work/short-llama.txt" ||
+    { echo "FAIL: 100 tokens on llama-kmix: the kernels"; grep "^  mm" "$work/short-llama.txt"; exit 1; }
+echo "short chunks: mmb16dq_* for qwen2-kmix (mm_* with TS5_MMB_SHORT=0), the skipped roles on mm_* for llama-kmix"
 # One token per call: a row per workgroup (these matrices are small), 8 rows
 # (TS5_MV_ROWS_MIN=1), 3 (a partial last group), and the older mat-vecs.
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${kmix[@]}"
