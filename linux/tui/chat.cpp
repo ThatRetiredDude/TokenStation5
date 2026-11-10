@@ -19,13 +19,18 @@ const std::vector<SlashCommand> &slash_commands() {
     static const std::vector<SlashCommand> c = {
         {"/model", "NAME", "load another model (Tab completes the name)"},
         {"/models", "", "the Models page"},
-        {"/new", "", "a new chat (Ctrl+N)"},
+        {"/download", "NAME", "download a model from the catalog (Tab completes)"},
+        {"/new", "", "a new chat (Ctrl+N); every chat is kept"},
+        {"/chats", "[TEXT]", "your saved chats (with TEXT: the ones that have it)"},
+        {"/open", "N", "open saved chat N from /chats"},
         {"/save", "[FILE]", "this chat as Markdown"},
         {"/find", "TEXT", "jump to TEXT in this chat"},
         {"/status", "", "the live Status page"},
         {"/tune", "[NAME]", "ts5-tune this model (or NAME) for this PS5"},
+        {"/check", "[NAME]", "the GPU check: the model's answers against the CPU's"},
+        {"/bench", "[NAME]", "the speed test: prompt and answer tok/s"},
         {"/think", "on|off|auto", "thinking before answering"},
-        {"/fan", "auto|cool|max", "the PS5's fan"},
+        {"/fan", "auto|cool|early|max", "the PS5's fan"},
         {"/theme", "NAME", "colors: Ocean, Neon, Sunset, Forest, Mono"},
         {"/settings", "", "the Settings page"},
         {"/logs", "", "the engine's log"},
@@ -389,7 +394,9 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
             } else {
                 const double secs = (m.t_think_end > 0 ? m.t_think_end : m.t_end) - (m.t_first > 0 ? m.t_first : m.t0);
                 Line th;
-                th.add(fmt("  ▸ Thought for %.1f s", std::max(0.0, secs)), Style(t.dim, kDefault, ITALIC));
+                // A saved chat's answers have no times: just that it thought.
+                th.add(m.t0 > 0 ? fmt("  ▸ Thought for %.1f s", std::max(0.0, secs)) : std::string("  ▸ Thought first"),
+                       Style(t.dim, kDefault, ITALIC));
                 th.add("  Ctrl+T shows it", Style(mix(t.dim, t.bg, 0.4)));
                 out.push_back(th);
             }
@@ -725,6 +732,7 @@ void run_answer(Chat *c, ChatRequest rq, std::string body) {
             c->speed_prompt = m.prompt_tps;
         }
     }
+    c->answers++;
     c->running = false;
 }
 
@@ -776,9 +784,10 @@ void complete(Chat &c, const ChatRequest &rq) {
         prefix = c.input.substr(0, sp + 1);
         word = c.input.substr(sp + 1);
         std::vector<std::string> pool;
-        if (cmd == "/model" || cmd == "/tune") pool = rq.model_names;
+        if (cmd == "/model" || cmd == "/tune" || cmd == "/check" || cmd == "/bench") pool = rq.model_names;
+        else if (cmd == "/download") pool = rq.catalog_names;
         else if (cmd == "/think") pool = {"on", "off", "auto"};
-        else if (cmd == "/fan") pool = {"auto", "cool", "max"};
+        else if (cmd == "/fan") pool = {"auto", "cool", "early", "max"};
         else if (cmd == "/theme")
             for (auto &t : themes()) pool.push_back(t.name);
         std::string lw = word;
@@ -855,10 +864,12 @@ void chat_stop(Chat &c) {
 
 void chat_new(Chat &c) {
     chat_stop(c);
+    if (c.before_clear) c.before_clear(c);
     std::lock_guard<std::mutex> l(c.mu);
     c.msgs.clear();
     c.scroll = 0;
     c.ctx_used = 0;
+    c.saved_id.clear();
 }
 
 bool chat_take_speed(Chat &c, double &gen, double &prompt) {

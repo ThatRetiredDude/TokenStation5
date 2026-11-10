@@ -41,6 +41,9 @@ struct Chat {
     std::string command;  // a slash command for the app to run
     std::vector<std::string> cands;  // Tab's candidates
     int cand_i = -1;
+    std::string saved_id;            // its file in chats/ (store.h), once saved
+    std::atomic<int> answers{0};     // answers finished (done, stopped or failed)
+    void (*before_clear)(Chat &) = nullptr;  // chat_new calls it first (to save the chat)
     bool busy() const { return running; }
 };
 
@@ -57,6 +60,7 @@ struct ChatRequest {
     double temp = -1;
     int max_tokens = 0;
     std::vector<std::string> model_names;  // for /model's completion
+    std::vector<std::string> catalog_names;  // for /download's
 };
 
 enum { CHAT_NONE, CHAT_LEAVE, CHAT_COMMAND };
