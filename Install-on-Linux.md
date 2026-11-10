@@ -6,6 +6,27 @@ Linux on a PS5 adds things the console can't do: more memory for models (about 1
 
 > The Linux edition is new. Its packages come from the `linux-latest` pre-release and the `linux-v*` releases; the PS5 title's releases are separate. If something here doesn't match what you see, [open an issue](https://github.com/ThatRetiredDude/TokenStation5/issues).
 
+## Testers wanted
+
+The Linux build is new and needs people to try it on their own machines: a PS5 running Linux, or any Linux PC with a Vulkan GPU. Install it with one command (the details for each system are in [step 2](#2-install-the-package)):
+
+| System | Command |
+| --- | --- |
+| Debian 12/13, Ubuntu | `curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation_latest_amd64.deb && sudo apt install ./tokenstation_latest_amd64.deb` |
+| Fedora | `sudo dnf install https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest.x86_64.rpm` |
+| Arch | `curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-x86_64.pkg.tar.zst && sudo pacman -U tokenstation-latest-x86_64.pkg.tar.zst` |
+| Bazzite, SteamOS, others | `curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz \| tar xz && cd tokenstation-*-linux-amd64 && ./install.sh` (as yourself, not sudo) |
+
+The same commands always fetch the newest build, so run them again to update.
+
+**Tell us how it went**: [open an issue](https://github.com/ThatRetiredDude/TokenStation5/issues/new) titled "Linux test: <your system>", with:
+
+1. Your distribution and version, and the machine (PS5 or the PC's GPU).
+2. The GPU line from `vulkaninfo --summary` (on a PS5 it should say "RADV GFX1013").
+3. Anything the install printed that looked wrong.
+4. One speed line: `ts5 bench -m <model.gguf> --pp 512 --tg 128` with any model you have.
+5. What worked, and what didn't.
+
 ## 1. Linux on the PS5 (skip on a PC)
 
 Linux on the PS5 comes from other projects, and TokenStation5 doesn't boot or unlock anything itself:

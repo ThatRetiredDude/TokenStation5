@@ -9,6 +9,8 @@ There are two editions, built from the same code:
 | **PS5 title** (TokenStation5, `PPSA99555`) | A jailbroken PS5 on firmware 13.60 or lower | [Install on PS5 (Prospero Store)](Install-on-PS5-(Prospero-Store)) |
 | **Linux** | A PS5 running Linux, or any Linux PC with a Vulkan GPU | [Install on Linux](Install-on-Linux) |
 
+> **Linux testers wanted.** One command installs the newest Linux build on Debian, Ubuntu, Fedora, Arch, Bazzite or SteamOS. See [Install on Linux: Testers wanted](Install-on-Linux#testers-wanted), and tell us how it went.
+
 ## Start here
 
 1. Install one edition (links above).
