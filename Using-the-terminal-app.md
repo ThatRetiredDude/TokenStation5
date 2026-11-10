@@ -84,7 +84,7 @@ Type at `ts5>` and press **Enter**. The answer streams in with its formatting: h
 | Ctrl+U / Ctrl+K / Ctrl+W | Delete to the start / to the end / the word before. |
 | Ctrl+Q | Quit. |
 
-The status line over the prompt shows the model and how full the context is (yellow from 75%, red from 90%). When a chat outgrows the context, the server says so and **Ctrl+N** starts fresh.
+The top bar always shows how full the chat is (**chat 7.8k/32k**), and the line over the prompt reads "chat N of M tokens": yellow from 75%, red from 90%. When an answer stops because the chat filled the context, a note under it says so, with the numbers, and that **Ctrl+N** starts a new chat (the full one stays saved). For a model loaded at a fixed context, it adds that Settings → Context → auto gives it more. If the answer hit your **Answer length** cap instead, the note says that.
 
 ### Saved chats
 
@@ -147,7 +147,7 @@ It looks in `/var/lib/tokenstation/models` (or the service's `MODELS_DIR`), `~/.
 | Running | Enter |
 | --- | --- |
 | The API-only service (`tokenstation`) | Switches its model and restarts it, through the package's hardware helper. Your user must be in the `tokenstation` group (`sudo adduser $USER tokenstation`, then log in again). The model must be in the service's models folder. |
-| Nothing | Starts `ts5 serve` with that model on `127.0.0.1`, with the context set in Settings (8,192 by default). It keeps serving after you quit ts5-tui, which then prints its process number; `kill` it to stop it. Its log is `~/.cache/tokenstation/tui-serve.log`. |
+| Nothing | Starts `ts5 serve` with that model on `127.0.0.1`, with the context set in Settings (auto by default: the longest the model fits, up to 32,768 for Qwen3 14B on the PS5). It keeps serving after you quit ts5-tui, which then prints its process number; `kill` it to stop it. Its log is `~/.cache/tokenstation/tui-serve.log`. |
 | The TV app (`tokenstation-tv`) | Nothing: pick the model on the TV's Models page. |
 | Another program on port 8081 | Nothing: switch the model there. |
 
@@ -203,7 +203,7 @@ btop-style bars for this machine: GPU memory (with GiB free), RAM, the die (Tctl
 | Thinking | The model's choice, on, or off. |
 | Temperature | The model's own, or 0.1 to 1.5. Lower is steadier. |
 | Answer length | No limit, or a cap of 512 to 8,192 tokens. Under 1,024 turns thinking off. |
-| Context (own) | The context for a model ts5-tui starts itself: 4,096 to 32,768, or auto (what fits). |
+| Context (own) | The context for a model ts5-tui starts itself: auto (the default: the longest that fits), or 4,096 to 32,768. A setting saved as 8,192 by an older version reads as auto. |
 | Fan (PS5) | auto (quiet), cool (keeps long prompts under the 85 °C limiter), early (ramps from 40 °C, for long prompts back to back), max (loud). |
 | tmux | Its own tmux session from a plain terminal. |
 | Opening title | The title at start. |

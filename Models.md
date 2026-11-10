@@ -1,6 +1,6 @@
 # Models
 
-ts5 runs GGUF files of these architectures: **Llama** (3.x), **Mistral** (and Mistral Nemo), **Qwen 2.5**, **Qwen 3**, **Gemma 3**, and on the Linux edition **Gemma 4** (the dense 12B and 31B). Quant types: F32, F16, Q8_0, Q6_K, Q5_K_M, Q4_K_M, Q5_0, Q5_1, Q4_0, Q4_1. Mixture-of-experts models (Gemma 4 26B A4B, Qwen 3 MoE) and Qwen 3.5 are not supported.
+ts5 runs GGUF files of these architectures: **Llama** (3.x), **Mistral** (and Mistral Nemo), **Qwen 2.5**, **Qwen 3**, **Gemma 3**, and on the Linux edition **Gemma 4** (the dense 12B and 31B) and **Qwen 3.5** (the dense 9B was tested, up to 262k tokens of context). Quant types: F32, F16, Q8_0, Q6_K, Q5_K_M, Q4_K_M, Q5_0, Q5_1, Q4_0, Q4_1 (2-bit types such as Q2_K and IQ2 are not supported yet). Mixture-of-experts models (Gemma 4 26B A4B, Qwen 3 MoE, Qwen 3.5 MoE) are not supported.
 
 ## What fits
 
