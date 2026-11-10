@@ -70,12 +70,8 @@ Then boot Linux again the way you always do (run the Linux loader again).
 ### Step 5: get a model and chat
 
 - **In the app:** go to **Models**, pick **Qwen3 8B**, press the button to download it (about 5 GB). When it's done, go to **Chat** and type.
-- **In the terminal app:** download Qwen3 8B with one command, then pick it on the Models page (**F2**, arrows, **Enter**):
-  ```sh
-  mkdir -p ~/.local/share/tokenstation/models && cd ~/.local/share/tokenstation/models
-  ts5 fetch https://huggingface.co/bartowski/Qwen_Qwen3-8B-GGUF/resolve/0b69f75b7472688e6808490aa2b85efdb81b5ce7/Qwen_Qwen3-8B-Q4_K_M.gguf Qwen_Qwen3-8B-Q4_K_M.gguf --sha256 54fffa050078e984116639c83dfb64b5aa6d4cd474e018b076777c632bbccccd
-  ```
-  Other models, each with its own one-line download: [Models tested on PS5](Models-tested-on-PS5).
+- **In the terminal app:** type `/download qwen3-8b` and press **Enter** (or **F2**, pick **Qwen3 8B** under **⇣ Download**, **Enter**). A bar shows the progress. When it's done, select it on the same page and press **Enter** to load it, then chat on **F1**.
+  Other models, with one-line downloads you can paste at the `ts5>` prompt or in a shell: [Models tested on PS5](Models-tested-on-PS5).
 
 That's it. To update later, run your step 2 line again.
 
