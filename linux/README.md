@@ -50,7 +50,30 @@ unlock anything by itself:
 ## Install
 
 One build runs on Debian 12 and anything newer: Ubuntu, Fedora, Bazzite,
-SteamOS, Arch. It comes two ways.
+SteamOS, Arch. The newest build is always the
+[`linux-latest`](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/linux-latest)
+pre-release, under fixed names, so one command fetches and installs it (run it
+again to update):
+
+```sh
+# Debian 12 or 13, Ubuntu
+curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation_latest_amd64.deb
+sudo apt install ./tokenstation_latest_amd64.deb
+
+# Fedora
+sudo dnf install https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest.x86_64.rpm
+
+# Arch
+curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-x86_64.pkg.tar.zst
+sudo pacman -U ./tokenstation-latest-x86_64.pkg.tar.zst
+
+# Bazzite, SteamOS and others: the portable build (as yourself, not sudo)
+curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz | tar xz
+cd tokenstation-*-linux-amd64
+./install.sh
+```
+
+A `linux-v<version>` release has the same files under versioned names:
 
 **Debian 12 or 13, and Ubuntu**: the `.deb`.
 
