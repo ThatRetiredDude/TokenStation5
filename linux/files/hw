@@ -13,6 +13,8 @@
 #                         0: the kernel's default)
 #   hw cu 36|38|40        compute units at the next boot (tokenstation-cu)
 #   hw cutest SECONDS     tokenstation-cu test, 30 to 600 s
+#   hw model NAME.gguf    the API-only service's model: a file in its MODELS_DIR,
+#                         set as MODEL in /etc/default/tokenstation, service restarted
 set -eu
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # PS5_CONTROL, if ps5_control isn't on the PATH.
@@ -133,8 +135,26 @@ cutest)
     [ "$2" -ge 30 ] && [ "$2" -le 600 ] || { echo "cutest: 30 to 600 seconds" >&2; exit 2; }
     exec tokenstation-cu test "$2"
     ;;
+model)
+    # A plain file name in the service's models folder; nothing else.
+    name=${2:-}
+    case "$name" in
+        '' | .* | */* | *[!A-Za-z0-9._+-]*) echo "model: a .gguf file name from ${MODELS_DIR:-/var/lib/tokenstation/models}" >&2; exit 2 ;;
+        *.gguf | *.GGUF) ;;
+        *) echo "model: a .gguf file" >&2; exit 2 ;;
+    esac
+    dir=${MODELS_DIR:-/var/lib/tokenstation/models}
+    [ -f "$dir/$name" ] || { echo "model: $dir/$name isn't there" >&2; exit 2; }
+    conf=/etc/default/tokenstation
+    if grep -q '^MODEL=' "$conf"; then
+        sed -i "s|^MODEL=.*|MODEL=$dir/$name|" "$conf"
+    else
+        echo "MODEL=$dir/$name" >> "$conf"
+    fi
+    systemctl restart tokenstation
+    ;;
 *)
-    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

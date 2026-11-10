@@ -150,6 +150,51 @@ curl http://localhost:8081/v1/models
 This is the engine alone (`ts5 serve`), with the settings below. It starts on
 every boot on a machine without a desktop.
 
+## In a terminal: ts5-tui
+
+`ts5-tui` is TokenStation5 in a terminal, colorful and driven from the
+keyboard, for when you SSH into the PS5 (or sit at its console):
+
+```sh
+ts5-tui                              # the server on this machine (port 8081)
+ts5-tui --url http://ps5.local:8081  # another one
+```
+
+- **A locked bar at the top**: the model, its helper, the context used, the
+  last speed, GPU memory and RAM, the die temperature (yellow from 78 °C,
+  red from 83 °C, a warning at the 85 °C limiter) and the fan.
+- **The `ts5>` prompt at the bottom**: Enter sends, Ctrl+J (or Alt+Enter)
+  starts a new line, the up arrow brings back what you typed before, Esc
+  stops an answer. Commands start with `/` and Tab completes them, and model
+  names after `/model`: `/model`, `/new`, `/save`, `/find`, `/tune`,
+  `/think on|off`, `/fan auto|cool|max`, `/theme`, `/help`, `/quit`.
+- **In between**: the chat (markdown, highlighted code, the thinking folded
+  away; Ctrl+T shows it), or a page: **F1** Chat, **F2** Models (Enter
+  loads one, T tunes it with `ts5-tune`), **F3** Status (bars for GPU
+  memory, RAM, temperatures, fan, GPU load and speed), **F4** Settings
+  (theme, thinking, temperature, answer length, fan, tmux), **F5** Logs.
+  Tab goes to the next page.
+
+It is a client of the API: it loads nothing itself and takes no GPU memory.
+Loading a model with Enter switches the API-only service's model (through
+the hw helper, so you need to be in the `tokenstation` group); with no
+server running, it starts `ts5 serve` with that model itself, which keeps
+serving after ts5-tui ends. With the TV app running, models are picked on
+the TV.
+
+From a plain terminal (SSH), ts5-tui runs in its own tmux session, `ts5`,
+with its own settings (your `~/.tmux.conf` is left alone): if the connection
+drops, answers, loads and tuning go on, and running `ts5-tui` again takes you
+back. Ctrl+A d leaves it running. In an IDE's terminal (VS Code, Cursor,
+JetBrains) tmux stays off; `--tmux` turns it on there, `--no-tmux` off
+everywhere (or Settings → tmux). When you quit, the chat is printed into
+the terminal, so it stays in its scrollback. An IDE's remote server on the
+PS5 takes memory the models could use (over 6 GB for Cursor), so plain SSH
+leaves the most for them.
+
+Settings are kept in `~/.config/tokenstation/tui.conf`. To try it without a
+GPU, `linux/tui/test/fake-server.py` stands in for `ts5 serve`.
+
 ## Bigger models
 
 ```sh
