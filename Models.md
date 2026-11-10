@@ -24,7 +24,7 @@ Every model below passed the GPU check on a real PS5, and comes with the samplin
 | Gemma 3 12B | Q4_K_M | ~6.8 GiB | a bigger model; sliding-window layers keep its cache small (about 29k context on the title) |
 | Mistral Nemo 12B | Q4_K_M | ~7.0 GiB | a bigger model with its own tool format |
 
-The first four are the ones the Models page offers to download on the console. Also run and checked on Linux on a PS5 (with the memory raised): Qwen 3 14B, Qwen 2.5 Coder 14B, DeepSeek R1 Distill Qwen 14B, Gemma 3 4B, Gemma 4 12B, and Qwen 3 8B at Q6_K and Q8_0. Speeds are in [Benchmarks](Benchmarks).
+The first four are the ones the Models page offers to download on the console. Also run and checked on Linux on a PS5 (with the memory raised): Qwen 3 14B, Qwen 2.5 Coder 14B, DeepSeek R1 Distill Qwen 14B, Gemma 3 4B, Gemma 4 12B, and Qwen 3 8B at Q6_K and Q8_0. Speeds are in [Benchmarks](Benchmarks); each tested model with a one-line terminal install is in [Models tested on PS5](Models-tested-on-PS5).
 
 Model weights are not part of TokenStation5. Each is downloaded from its maker's or a quantizer's Hugging Face repository, under that model's own license (Gemma and Llama have terms of use of their own).
 

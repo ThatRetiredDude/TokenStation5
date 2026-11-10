@@ -117,6 +117,8 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 
 ## Models (F2)
 
+To download the models tested on the PS5 from the terminal, with one command each, see [Models tested on PS5](Models-tested-on-PS5).
+
 ![The Models page](images/terminal-app-models.png)
 
 Every `.gguf` on this machine, biggest first, with its size, the helper `ts5-tune` picked for it, and the date it was tuned. **●** marks the one loaded. Below the list, the selected model's tuned settings, each with what it costs: 16- or 32-bit prompt math, the helper, the cache (f16, or 8-bit for twice the context) and, for the loaded one, its context.

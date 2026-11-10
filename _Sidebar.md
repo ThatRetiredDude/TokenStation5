@@ -8,6 +8,7 @@
 - [Using the TV app](Using-the-TV-app)
 - [Using the terminal app (ts5-tui)](Using-the-terminal-app)
 - [Models](Models)
+- [Models tested on PS5](Models-tested-on-PS5)
 - [Connecting apps](Connecting-apps)
 - [Away from home (Tailscale)](Away-from-home-with-Tailscale)
 - [Web search](Web-search)

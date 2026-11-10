@@ -27,6 +27,7 @@ There are two editions, built from the same code:
 - [Using the TV app](Using-the-TV-app): the five pages and what every button does
 - [Using the terminal app (ts5-tui)](Using-the-terminal-app): chat, models, live temperatures and tuning in a terminal, over SSH (Linux)
 - [Models](Models): what fits, what's checked, adding your own
+- [Models tested on PS5](Models-tested-on-PS5): each tested model with its speed, context and a one-line terminal install
 - [Connecting apps](Connecting-apps): Kilo Code, Continue, Cline, Open WebUI, aider, opencode, your own scripts
 - [Away from home with Tailscale](Away-from-home-with-Tailscale)
 - [Web search](Web-search): a Tavily key and the model looks things up
