@@ -87,6 +87,9 @@ struct App {
         double bytes = 0;                        // the size, when known before (the catalog's)
     } dl;
     bool dl_on = false;  // dl is what downloader fetches
+    // A yes/no question over the page (Enter or y: yes; Esc or n: no).
+    std::string ask_title, ask_text;
+    std::function<void()> ask_yes;
     std::string dl_dir;
     std::vector<SavedChat> chat_list;  // the last /chats
     int answers_saved = 0;
@@ -364,6 +367,33 @@ void load_model(const ModelFile &m) {
     g->poll_fast = true;
     g->logs_checked = 0;  // the log may move
     show_toast("Loading " + m.name + " (" + how + ")…", g->th->accent, 3);
+}
+
+// A helper-size file (a small model that drafts for a big one) as the main
+// model is seldom what's meant: ask first. The helper isn't loaded by hand:
+// it comes with the main model, as its tuned settings say (T on Models).
+void load_or_ask(const ModelFile &m) {
+    if (m.size >= 1.5 * 1024 * 1024 * 1024) {
+        load_model(m);
+        return;
+    }
+    const ServerState sv = server();
+    std::string now;
+    for (auto &x : g->models)
+        if (api_id(x.name) == sv.model) {
+            auto it = x.tune.find("TS5_DRAFT_MODEL");
+            now = it == x.tune.end() ? "" : it->second;
+        }
+    g->ask_title = " Load a helper-size model? ";
+    g->ask_text = api_id(m.name) + " is helper size. Loading it makes it the main model, in place of " +
+                  (sv.model.empty() ? std::string("none") : sv.model) +
+                  ". A helper isn't loaded by hand: it comes along with the big model, as its tuning picked (T on Models "
+                  "tunes it and picks the fastest helper)." +
+                  (sv.model.empty() ? "" : now.empty() ? " " + sv.model + " has no helper yet: press T on it."
+                                                       : " " + sv.model + "'s helper is " + api_id(now) + ".") +
+                  " Load " + api_id(m.name) + " as the main model?";
+    const ModelFile copy = m;
+    g->ask_yes = [copy] { load_model(copy); };
 }
 
 void start_tune(const ModelFile &m) {
@@ -776,8 +806,8 @@ void draw_top_bar() {
         items.push_back(it);
     }
     const std::string h = helper_now();
-    if (!sv.model.empty() && !h.empty())
-        items.push_back({{{"helper ", lab}, {h == "off" ? "off" : fit(h, 18), val}}, 4});
+    if (!sv.model.empty())
+        items.push_back({{{"helper ", lab}, {h.empty() ? "none" : h == "off" ? "off" : fit(h, 18), h.empty() || h == "off" ? lab : val}}, 4});
     if (sv.n_ctx > 0) {
         const int used = g->chat.ctx_used;
         items.push_back({{{"ctx ", lab}, {fmt("%d/%dk", used, sv.n_ctx / 1024), val}}, 3});
@@ -1478,6 +1508,32 @@ void draw() {
         case LOGS: draw_logs(); break;
         default: break;
     }
+    if (g->ask_yes) {
+        const Theme &t = *g->th;
+        const int w = std::min(s.w - 4, 76);
+        std::vector<std::string> lines;
+        {
+            // Wrapped to the box, at spaces.
+            std::istringstream in(g->ask_text);
+            std::string word, line;
+            while (in >> word) {
+                if (!line.empty() && text_width(line + " " + word) > w - 4) {
+                    lines.push_back(line);
+                    line.clear();
+                }
+                line += (line.empty() ? "" : " ") + word;
+            }
+            if (!line.empty()) lines.push_back(line);
+        }
+        const int h = (int)lines.size() + 4;
+        const int x = (s.w - w) / 2, y = std::max(2, (s.h - h) / 2);
+        box(s, x, y, w, h, Style(t.warn, t.panel2), Style(t.fg, t.panel2), g->ask_title, Style(t.warn, t.panel2, BOLD));
+        for (int i = 0; i < (int)lines.size(); i++) s.put(x + 2, y + 1 + i, lines[i], Style(t.fg, t.panel2));
+        int bx = s.put(x + 2, y + h - 2, "Enter/y", Style(t.accent2, t.panel2, BOLD));
+        bx = s.put(bx, y + h - 2, " yes   ", Style(t.dim, t.panel2));
+        bx = s.put(bx, y + h - 2, "Esc/n", Style(t.accent2, t.panel2, BOLD));
+        s.put(bx, y + h - 2, " no", Style(t.dim, t.panel2));
+    }
     if (!g->toast.empty() && now_s() < g->toast_until) {
         const std::string m = " " + fit(g->toast, s.w - 6) + " ";
         const int tw = text_width(m);
@@ -1529,7 +1585,7 @@ void run_command(const std::string &line) {
             go(MODELS);
             return;
         }
-        if (const ModelFile *m = find_model(arg)) load_model(*m);
+        if (const ModelFile *m = find_model(arg)) load_or_ask(*m);
         else chat_note(c, "No model called **" + arg + "** here. `/models` lists them; Tab completes the name.");
     } else if (cmd == "/tune") {
         scan_models();
@@ -1805,7 +1861,7 @@ void key_models(const Event &e) {
     else if (e.key == K_PGDN && n) g->model_sel = std::min(n - 1, g->model_sel + 10);
     else if (e.key == K_HOME) g->model_sel = 0;
     else if (e.key == K_END && n) g->model_sel = n - 1;
-    else if (e.key == K_ENTER && local) load_model(g->models[g->model_sel]);
+    else if (e.key == K_ENTER && local) load_or_ask(g->models[g->model_sel]);
     else if ((e.key == K_ENTER || key_is("d")) && in_cat) start_download(*cat[g->model_sel - nl]);
     else if (key_is("x") && g->downloader.running()) {
         g->downloader.stop();
@@ -1890,6 +1946,18 @@ void key_chat(const Event &e) {
 }
 
 void handle(const Event &e) {
+    if (g->ask_yes) {
+        const bool yes = e.key == K_ENTER || (e.key == K_CHAR && (e.ch == "y" || e.ch == "Y"));
+        const bool no = e.key == K_ESC || (e.key == K_CHAR && (e.ch == "n" || e.ch == "N")) || e.key == K_CTRL;
+        if (yes) {
+            auto f = g->ask_yes;
+            g->ask_yes = nullptr;
+            f();
+        } else if (no) {
+            g->ask_yes = nullptr;
+        }
+        return;
+    }
     if (global_key(e)) return;
     switch (g->cur) {
         case CHAT: key_chat(e); break;
