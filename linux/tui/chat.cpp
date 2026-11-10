@@ -720,9 +720,11 @@ void run_answer(Chat *c, ChatRequest rq, std::string body) {
             ts5::Json j;
             std::string why = r.body;
             if (ts5::Json::parse(r.body, j)) why = j["error"]["message"].str(why);
-            if (j["error"]["code"].str() == "context_length_exceeded")
-                why += " Ctrl+N starts a new chat.";
-            m.error = fmt("%d: ", r.status) + why;
+            if (j["error"]["code"].str() == "context_length_exceeded")  // in plain words
+                m.error = "This chat is full: it no longer fits in the model's memory for a chat (its context). "
+                          "Ctrl+N starts a new chat; this one is kept in /chats.";
+            else
+                m.error = fmt("%d: ", r.status) + why;
         } else if (r.status == 0) {
             m.error = r.err.empty() ? "no answer" : r.err;
         } else if (!finished && m.content.empty() && m.error.empty()) {
