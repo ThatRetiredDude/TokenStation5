@@ -34,6 +34,7 @@ a 14B (on the PS5).
 """
 import argparse
 import glob
+import json
 import os
 import re
 import subprocess
@@ -252,6 +253,21 @@ def helpers(model):
     return [f for _, f in sorted(found)]
 
 
+# TS5_TUNE_PROGRESS=1 (ts5-tui sets it): a line per step for a progress
+# panel, "@ts5-tune " and a JSON object, beside the usual lines:
+#   {"event": "plan", "model": NAME, "steps": [{"label": ..., "answers": N}, ...]}
+#   {"event": "step", "step": I, "state": "run"|"done"|"skip"|"fail", "result": TEXT}
+#   {"event": "answer", "step": I, "n": K, "of": N}   (K answers of N written)
+#   {"event": "detail", "step": I, "text": TEXT}
+#   {"event": "summary", "text": TEXT}
+PROGRESS = os.environ.get("TS5_TUNE_PROGRESS") == "1"
+
+
+def progress(**kw):
+    if PROGRESS:
+        print("@ts5-tune " + json.dumps(kw), flush=True)
+
+
 def mean(v):
     p = 1.0
     for x in v:
@@ -264,14 +280,31 @@ def tune_model(model, n):
     name = os.path.basename(model)
     print("\n== %s (%.1f GiB)" % (name, os.path.getsize(model) / (1 << 30)))
     chosen, notes = {}, []
+    cands = helpers(model)
+    # The steps, for TS5_TUNE_PROGRESS: the check, the answers alone, each
+    # helper at each drafts, saving.
+    steps = [{"label": "Checking the model gives correct answers (a few minutes the first time)", "answers": 0},
+             {"label": "Measuring its speed on its own (%d test answers)" % len(PROMPTS), "answers": len(PROMPTS)}]
+    for h in cands:
+        short = os.path.basename(h)[:-5] if h.lower().endswith(".gguf") else os.path.basename(h)
+        for d in DRAFTS:
+            steps.append({"label": "Trying the helper model %s, guessing %s words ahead"
+                                   % (short, d), "answers": len(PROMPTS)})
+    steps.append({"label": "Saving the best settings", "answers": 0})
+    progress(event="plan", model=name, steps=steps)
+    SAVE = len(steps) - 1
+    progress(event="step", step=0, state="run")
     # 128 tokens: a full block, so every matrix takes the prompt kernel
     # whose math is 16-bit on Qwen, DeepSeek and Llama models.
     # Where that fails, 256 tokens of English decide (see CHECK_TEXT).
     def passes(env, what):
+        if what:
+            progress(event="detail", step=0, text="checking again with exact (32-bit) math for prompts")
         ok, line = check(model, env, 128)
         print("  check%s: %s" % (what, line))
         if ok:
             return True
+        progress(event="detail", step=0, text="checking again on a paragraph of English")
         ok, line = check(model, env, 256, CHECK_TEXT)
         print("  check%s on English text: %s" % (what, line))
         if ok:
@@ -281,24 +314,43 @@ def tune_model(model, n):
     if not passes({}, ""):
         if not passes({"TS5_MMB_F16": "0"}, " with 32-bit prompt math"):
             print("  %s fails the check either way, so it isn't tuned. Please report it, with the lines above." % name)
+            progress(event="step", step=0, state="fail", result="its answers on this GPU aren't right")
+            progress(event="summary", text="It isn't tuned: its answers on this GPU don't match the CPU's, even with "
+                                           "the exact math. It keeps the settings it had. Please report it, with the "
+                                           "lines below.")
             return False
         chosen["TS5_MMB_F16"] = "0"
         notes.append("16-bit prompt math failed the check and 32-bit passed")
+        progress(event="step", step=0, state="done", result="correct, with exact math for prompts")
+    else:
+        progress(event="step", step=0, state="done", result="correct")
     alone = []
+    progress(event="step", step=1, state="run")
     for p in PROMPTS:
         r = write(model, p, dict(chosen, TS5_DRAFT_MODEL="off"), n)
         if not r:
             print("  `ts5 run` failed on this model; is TokenStation5 still open?")
+            progress(event="step", step=1, state="fail", result="it didn't run")
+            progress(event="summary", text="It isn't tuned: the test answers didn't run. If TokenStation5 or its "
+                                           "service still holds the GPU, close or stop it and tune again. It keeps "
+                                           "the settings it had.")
             return False
         alone.append(r)
+        progress(event="answer", step=1, n=len(alone), of=len(PROMPTS))
     base = mean([r[1] for r in alone])
     print("  alone: %s tok/s" % ", ".join("%.1f" % r[1] for r in alone))
+    progress(event="step", step=1, state="done", result="%.1f tok/s" % base)
     best, best_env = base, None
-    cands = helpers(model)
     tried, refusals = 0, []
+    step = 1
     for h in cands:
         refused = None
         for d in DRAFTS:
+            step += 1
+            if refused:
+                progress(event="step", step=step, state="skip", result="can't help: " + refused)
+                continue
+            progress(event="step", step=step, state="run")
             env = dict(chosen, TS5_DRAFT_MODEL=h, TS5_DRAFT=d)
             runs = []
             for p in PROMPTS:
@@ -309,23 +361,29 @@ def tune_model(model, n):
                 if refused:
                     break
                 runs.append(r)
+                progress(event="answer", step=step, n=len(runs), of=len(PROMPTS))
             if refused:
                 print("  %s: not used: %s" % (os.path.basename(h), refused))
                 refusals.append("%s: %s" % (os.path.basename(h), refused))
-                break
+                progress(event="step", step=step, state="skip", result="can't help: " + refused)
+                continue
             if len(runs) < len(PROMPTS):
                 print("  %s, %s drafts: a run failed, skipped" % (os.path.basename(h), d))
+                progress(event="step", step=step, state="fail", result="it didn't run")
                 continue
             if any(r[0] != a[0] for r, a in zip(runs, alone)):
                 # The engine keeps a draft only where the model writes the
                 # same token, so this is a bug, not a slow helper.
                 print("  %s, %s drafts: the answers differ from the model's own, so it isn't used. "
                       "Please report it." % (os.path.basename(h), d))
+                progress(event="step", step=step, state="fail", result="its answers came out different, so it's not used")
                 continue
             tried += 1
             sc = mean([r[1] for r in runs])
             print("  %s, %s drafts: %s tok/s (%+.0f%%)" % (os.path.basename(h), d,
                                                          ", ".join("%.1f" % r[1] for r in runs), (sc / base - 1) * 100))
+            progress(event="step", step=step, state="done", result="%.1f tok/s, %s" % (
+                sc, "%.0f%% faster" % ((sc / base - 1) * 100) if sc >= base else "%.0f%% slower" % ((1 - sc / base) * 100)))
             if sc > best * (1 + NOISE):
                 best, best_env = sc, (h, d)
     if best_env:
@@ -354,6 +412,17 @@ def tune_model(model, n):
             f.write("%s=%s\n" % (k, v))
     print("  -> %s" % (" ".join("%s=%s" % kv for kv in chosen.items()) or "the defaults"))
     print("  saved to %s" % path)
+    progress(event="step", step=SAVE, state="done", result="saved; used from the next time it loads")
+    if best_env:
+        summary = "It writes %.0f%% faster with the helper %s: %.1f tok/s, up from %.1f on its own, with the same answers." % (
+            (best / base - 1) * 100, os.path.basename(best_env[0])[:-5], best, base)
+    elif tried:
+        summary = "No helper made it faster, so it runs on its own: %.1f tok/s." % base
+    else:
+        summary = "%.1f tok/s on its own: %s." % (base, "no helper here could run beside it" if refusals else "there's no smaller helper model beside it to try")
+    if chosen.get("TS5_MMB_F16") == "0":
+        summary += " It reads prompts with exact math, because the faster math wasn't accurate enough for it."
+    progress(event="summary", text=summary)
     return True
 
 

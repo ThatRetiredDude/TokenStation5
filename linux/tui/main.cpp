@@ -97,6 +97,19 @@ struct App {
     double load_t0 = 0;
     bool show_tune = false;
     int tune_scroll = 0;
+    // The job in the pane (tuning, the GPU check, the speed test), as steps.
+    struct JobStep {
+        std::string label, result;
+        int state = 0;  // 0 waiting, 1 running, 2 done, 3 skipped, 4 failed
+        int answers = 0, answered = 0;
+        double t0 = 0, t1 = 0;
+    };
+    std::vector<JobStep> job_steps;
+    std::string job_kind, job_model, job_detail, job_summary;
+    size_t job_parsed = 0;
+    double job_answer_secs = 0, job_last_answer = 0;
+    int job_answers_timed = 0;
+    bool job_reported = false;
 
     int set_sel = 0;
     bool editing = false;
@@ -396,6 +409,147 @@ void load_or_ask(const ModelFile &m) {
     g->ask_yes = [copy] { load_model(copy); };
 }
 
+// A new job in the pane: its kind ("tune", "check", "bench") and the steps
+// known before it starts (ts5-tune sends its own).
+void job_begin(const std::string &kind, const std::string &model, const std::vector<std::string> &steps) {
+    g->job_kind = kind;
+    g->job_model = model;
+    g->job_steps.clear();
+    for (auto &l : steps) {
+        App::JobStep st;
+        st.label = l;
+        g->job_steps.push_back(st);
+    }
+    if (!g->job_steps.empty()) {
+        g->job_steps[0].state = 1;
+        g->job_steps[0].t0 = now_s();
+    }
+    g->job_detail.clear();
+    g->job_summary.clear();
+    g->job_parsed = 0;
+    g->job_answer_secs = 0;
+    g->job_answers_timed = 0;
+    g->job_last_answer = 0;
+    g->job_reported = false;
+}
+
+void job_step(int i, int state, const std::string &result = "") {
+    if (i < 0 || i >= (int)g->job_steps.size()) return;
+    App::JobStep &st = g->job_steps[i];
+    if (state == 1 && st.state != 1) st.t0 = now_s();
+    if (state >= 2) st.t1 = now_s();
+    st.state = state;
+    if (!result.empty()) st.result = result;
+    if (state == 1) g->job_detail.clear();
+}
+
+// The job's output since the last look: ts5-tune's progress lines, or the
+// check's and the speed test's own lines.
+void job_follow() {
+    Proc &p = g->tuner;
+    if (g->job_parsed > p.lines.size()) g->job_parsed = p.lines.size();
+    for (; g->job_parsed < p.lines.size(); g->job_parsed++) {
+        const std::string &l = p.lines[g->job_parsed];
+        if (l.rfind("@ts5-tune ", 0) == 0) {
+            ts5::Json j;
+            if (!ts5::Json::parse(l.substr(10), j)) continue;
+            const std::string ev = j["event"].str();
+            const int i = (int)j["step"].num(-1);
+            if (ev == "plan") {
+                g->job_steps.clear();
+                for (auto &st : j["steps"].a) {
+                    App::JobStep x;
+                    x.label = st["label"].str();
+                    x.answers = (int)st["answers"].num(0);
+                    g->job_steps.push_back(x);
+                }
+            } else if (ev == "step") {
+                const std::string sv = j["state"].str();
+                job_step(i, sv == "run" ? 1 : sv == "done" ? 2 : sv == "skip" ? 3 : 4, j["result"].str());
+                if (sv == "run") g->job_last_answer = now_s();
+            } else if (ev == "answer" && i >= 0 && i < (int)g->job_steps.size()) {
+                g->job_steps[i].answered = (int)j["n"].num(0);
+                const double now = now_s();
+                if (g->job_last_answer > 0) {
+                    g->job_answer_secs += now - g->job_last_answer;
+                    g->job_answers_timed++;
+                }
+                g->job_last_answer = now;
+            } else if (ev == "detail") {
+                g->job_detail = j["text"].str();
+            } else if (ev == "summary") {
+                g->job_summary = j["text"].str();
+            }
+            continue;
+        }
+        if (g->job_kind == "check" || g->job_kind == "bench") {
+            if (l.find(" layers, embd ") != std::string::npos) {
+                job_step(0, 2);
+                job_step(1, 1);
+            } else if (l.find("backend ready") != std::string::npos) {
+                job_step(1, 2);
+                job_step(2, 1);
+            } else if (l.rfind("ts5 check: ", 0) == 0) {
+                // "ts5 check: M, N tokens: …, same top token at A/N, …: PASS"
+                int a = 0, n = 0;
+                const size_t at = l.find("same top token at ");
+                if (at != std::string::npos) sscanf(l.c_str() + at + 18, "%d/%d", &a, &n);
+                const bool pass = l.size() >= 4 && l.compare(l.size() - 4, 4, "PASS") == 0;
+                g->job_summary = pass ? "Its answers on the GPU match the CPU's, so it runs correctly on this machine"
+                                      : "Its answers on the GPU are further from the CPU's than they should be: "
+                                        "please report it, with the lines below";
+                if (n > 0) g->job_summary += fmt(" (the same next word at %d of %d places).", a, n);
+                else g->job_summary += ".";
+            } else if (l.rfind("| ", 0) == 0 && l.find("| --- ") == std::string::npos &&
+                       l.find("tok/s |") == std::string::npos) {
+                // The bench's table row: | model | backend | prompt | writing |
+                std::vector<std::string> cells;
+                size_t a = 1;
+                for (size_t b; (b = l.find('|', a)) != std::string::npos; a = b + 1) cells.push_back(l.substr(a, b - a));
+                if (cells.size() >= 4)
+                    g->job_summary = fmt("It reads prompts at %.0f tokens a second and writes at %.1f tokens a second.",
+                                         atof(cells[2].c_str()), atof(cells[3].c_str()));
+            }
+        }
+    }
+    // The end: what's still running ends with it.
+    if (p.done && p.t1 > 0 && !g->job_reported) {
+        g->job_reported = true;
+        for (int i = 0; i < (int)g->job_steps.size(); i++) {
+            App::JobStep &st = g->job_steps[i];
+            if (st.state == 1) job_step(i, p.status == 0 ? 2 : 4, p.status == 130 ? "stopped" : "");
+            else if (st.state == 0 && p.status == 0 && g->job_kind != "tune") job_step(i, 2);
+        }
+        const std::string what = g->job_kind == "tune" ? "Tuning " : g->job_kind == "check" ? "The GPU check of " : "The speed test of ";
+        if (p.status == 0) {
+            show_toast(what + g->job_model + " is done", g->th->good, 6);
+            chat_note(g->chat, "**" + what + g->job_model + " is done.** " + g->job_summary +
+                                   (g->job_kind == "tune" ? " The new settings are used from the next time it loads." : ""));
+        } else if (p.status != 130) {
+            show_toast(what + g->job_model + " didn't finish: the Models page shows why", g->th->bad, 10);
+            g->show_tune = true;
+        }
+    }
+}
+
+// Seconds left, from the answers still to write and how long one took; -1
+// before there's anything to go by.
+double job_eta() {
+    if (g->job_answers_timed == 0) return -1;
+    const double per = g->job_answer_secs / g->job_answers_timed;
+    int left = 0;
+    for (auto &st : g->job_steps)
+        if (st.state == 0 || st.state == 1) left += std::max(0, st.answers - st.answered);
+    return left * per;
+}
+
+std::string mins(double secs) {
+    const int s = (int)(secs + 0.5);
+    if (s < 60) return fmt("%d s", s);
+    if (s < 3600) return fmt("%d min %02d s", s / 60, s % 60);
+    return fmt("%d h %02d min", s / 3600, s / 60 % 60);
+}
+
 void start_tune(const ModelFile &m) {
     if (g->tuner.running()) {
         g->show_tune = true;
@@ -413,7 +567,9 @@ void start_tune(const ModelFile &m) {
     std::string pre;
     // ts5-tune needs the GPU's memory: a ts5 serve of our own steps aside.
     if (pid_t own = own_server_pid(); own > 0) pre = fmt("kill %d; sleep 1; ", own);
-    g->tuner.start(pre + shell_quote(tune) + " --models " + shell_quote(m.path), "Tuning " + m.name);
+    g->tuner.start(pre + "TS5_TUNE_PROGRESS=1 " + shell_quote(tune) + " --models " + shell_quote(m.path),
+                   "Tuning " + api_id(m.name));
+    job_begin("tune", api_id(m.name), {"Getting ready"});
     if (unit_active("tokenstation") || unit_active("tokenstation-tv"))
         g->tuner.lines.push_back("Note: the TokenStation service holds a model in GPU memory. If the tuning runs "
                                  "out of memory, stop it first: sudo systemctl stop tokenstation");
@@ -436,10 +592,14 @@ void start_gpu_job(const ModelFile &m, bool check) {
     std::string pre;
     if (pid_t own = own_server_pid(); own > 0) pre = fmt("kill %d; sleep 1; ", own);
     const std::string cmd = shell_quote(ts5) + (check ? " check -m " : " bench -m ") + shell_quote(m.path) + " 2>&1";
-    g->tuner.start(pre + cmd, (check ? "GPU check: " : "Speed test: ") + m.name);
-    g->tuner.lines.push_back(check ? "Runs the model on the GPU and on the CPU and compares their answers, token by "
-                                     "token. The CPU side takes a few minutes the first time (it's saved after)."
-                                   : "Reads a 512-token prompt, then writes 128 tokens, and prints both speeds.");
+    g->tuner.start(pre + cmd, (check ? "GPU check of " : "Speed test of ") + api_id(m.name));
+    if (check)
+        job_begin("check", api_id(m.name),
+                  {"Opening the model", "Loading it onto the GPU",
+                   "Comparing the GPU's answers with the CPU's (a few minutes the first time)"});
+    else
+        job_begin("bench", api_id(m.name),
+                  {"Opening the model", "Loading it onto the GPU", "Reading a 512-token test prompt, then writing 128 tokens"});
     if (unit_active("tokenstation") || unit_active("tokenstation-tv"))
         g->tuner.lines.push_back("Note: the TokenStation service holds a model in GPU memory. If this runs out of "
                                  "memory, stop it first: sudo systemctl stop tokenstation");
@@ -795,7 +955,36 @@ void draw_top_bar() {
     std::vector<Item> items;
     const Style lab(t.dim, t.panel2), val(t.fg, t.panel2, BOLD);
     const ServerState sv = server();
-    {
+    // A job (tuning, the GPU check, the speed test) stops our own server, so
+    // while one runs, it's what the bar says instead of "offline".
+    if (g->tuner.running()) {
+        static const char *spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+        const std::string what = g->job_kind == "tune" ? "tuning " : g->job_kind == "check" ? "checking " : "speed test of ";
+        int done = 0;
+        for (auto &st : g->job_steps) done += st.state >= 2;
+        const int secs = (int)(now_s() - g->tuner.t0);
+        std::string more = fmt(" · %d:%02d", secs / 60, secs % 60);
+        if (g->job_steps.size() > 1) more = fmt(" · step %d of %d", std::min(done + 1, (int)g->job_steps.size()), (int)g->job_steps.size()) + more;
+        items.push_back({{{std::string(spin[(int)(now_s() * 10) % 10]) + " ", Style(t.warn, t.panel2, BOLD)},
+                          {what + fit(g->job_model, 30), Style(t.warn, t.panel2, BOLD)},
+                          {more, Style(t.warn, t.panel2)}},
+                         -1});
+    }
+    if (g->downloader.running() && g->dl_on) {
+        double done, total, mbps;
+        download_progress(done, total, mbps);
+        std::string more = total > 0 ? fmt(" %.0f%%", 100 * std::min(done, total) / total) : "";
+        if (mbps > 0 && total > done) {
+            const int left = (int)((total - done) / 1e6 / mbps) + 1;
+            more += fmt(" · %d:%02d left", left / 60, left % 60);
+        } else if (total > 0 && done >= total) {
+            more += " · checking";
+        }
+        items.push_back({{{"⇣ ", Style(t.accent2, t.panel2, BOLD)}, {fit(g->dl.name, 20), Style(t.accent2, t.panel2, BOLD)},
+                          {more, Style(t.accent2, t.panel2)}},
+                         -1});
+    }
+    if (!(g->tuner.running() && sv.polled && !sv.online)) {
         Item it{{}, 0};
         if (!sv.polled) it.parts = {{"● ", Style(t.dim, t.panel2)}, {"connecting…", lab}};
         else if (!sv.online) it.parts = {{"● ", Style(t.bad, t.panel2, BOLD)}, {"offline", Style(t.bad, t.panel2, BOLD)}};
@@ -1054,25 +1243,96 @@ void draw_tune_pane() {
     const int x = (s.w - w) / 2, y = top + 1;
     Proc &p = g->tuner;
     const double secs = (p.done ? p.t1 : now_s()) - p.t0;
-    std::string title = p.title + fmt(" · %d:%02d", (int)secs / 60, (int)secs % 60);
-    if (p.done) title += p.status == 0 ? " · done" : fmt(" · ended (%d)", p.status);
-    box(s, x, y, w, h, S(p.done ? (p.status == 0 ? t.good : t.bad) : t.accent), Style(t.fg, t.panel), title,
-        S(p.done ? (p.status == 0 ? t.good : t.bad) : t.accent, BOLD));
-    std::vector<std::string> lines = p.lines;
-    if (!p.partial.empty()) lines.push_back(p.partial);
-    const int rows = h - 2;
-    const int start = std::max(0, (int)lines.size() - rows - g->tune_scroll);
-    for (int i = 0; i < rows && start + i < (int)lines.size(); i++) {
-        const std::string &l = lines[start + i];
-        uint32_t c = t.fg;
-        if (l.find("FAIL") != std::string::npos || l.find("rror") != std::string::npos) c = t.bad;
-        else if (l.find("tok/s") != std::string::npos) c = t.good;
-        else if (l.rfind("Note:", 0) == 0) c = t.warn;
-        s.put(x + 2, y + 1 + i, fit(l, w - 4), Style(c, t.panel));
+    const bool ok = p.status == 0, stopped = p.status == 130;
+    const uint32_t frame = !p.done ? t.accent : ok ? t.good : stopped ? t.warn : t.bad;
+    std::string title = p.title + " · " + mins(secs);
+    if (p.done) title += ok ? " · done" : stopped ? " · stopped" : " · didn't finish";
+    box(s, x, y, w, h, S(frame), Style(t.fg, t.panel), title, S(frame, BOLD));
+    int yy = y + 1;
+    const int iw = w - 4;
+    // What's going on now, in words.
+    static const char *spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+    int cur = -1, n_done = 0;
+    for (int i = 0; i < (int)g->job_steps.size(); i++) {
+        if (g->job_steps[i].state == 1 && cur < 0) cur = i;
+        if (g->job_steps[i].state >= 2) n_done++;
     }
     if (!p.done) {
-        static const char *spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
-        s.put(x + w - 4, y, spin[(int)(now_s() * 10) % 10], Style(t.accent2, t.panel));
+        int xx = s.put(x + 2, yy, spin[(int)(now_s() * 10) % 10], Style(t.accent2, t.panel, BOLD));
+        std::string now = cur >= 0 ? g->job_steps[cur].label : "Working";
+        if (!g->job_detail.empty()) now += ": " + g->job_detail;
+        s.put(xx + 1, yy++, fit("Working: " + now, iw - 2), Style(t.fg, t.panel, BOLD));
+        std::string when;
+        if (cur >= 0 && g->job_steps[cur].answers > 0)
+            when = fmt("test answer %d of %d · ", std::min(g->job_steps[cur].answered + 1, g->job_steps[cur].answers),
+                       g->job_steps[cur].answers);
+        when += mins(secs) + " so far";
+        if (!g->job_steps.empty()) when += fmt(" · step %d of %d", std::min(n_done + 1, (int)g->job_steps.size()),
+                                               (int)g->job_steps.size());
+        const double eta = job_eta();
+        if (eta >= 0) when += " · about " + mins(eta) + " left";
+        else if (g->job_kind == "tune") when += " · the time left shows after the first test answer";
+        s.put(x + 4, yy++, fit(when, iw - 2), Style(t.dim, t.panel));
+    } else {
+        const std::string head = ok ? "✓ Done in " + mins(secs) : stopped ? "Stopped after " + mins(secs) + ": nothing was changed"
+                                                                       : "✗ It didn't finish (after " + mins(secs) + ")" +
+                                                                         (g->job_summary.empty() ? ": the lines below say why" : "");
+        s.put(x + 2, yy++, fit(head, iw), Style(ok ? t.good : stopped ? t.warn : t.bad, t.panel, BOLD));
+        if (!g->job_summary.empty()) {
+            // The summary, wrapped.
+            std::istringstream in(g->job_summary);
+            std::string word, line;
+            int shown = 0;
+            while (in >> word && shown < 3) {
+                if (!line.empty() && text_width(line + " " + word) > iw - 2) {
+                    s.put(x + 4, yy++, line, Style(t.fg, t.panel));
+                    shown++;
+                    line.clear();
+                }
+                line += (line.empty() ? "" : " ") + word;
+            }
+            if (!line.empty() && shown < 3) s.put(x + 4, yy++, line, Style(t.fg, t.panel));
+        }
+    }
+    yy++;
+    // The checklist.
+    const int raw_min = 4;  // rows kept for the program's own lines
+    const int list_rows = std::max(1, std::min((int)g->job_steps.size(), y + h - 1 - yy - raw_min - 1));
+    int first = 0;
+    if ((int)g->job_steps.size() > list_rows) first = std::max(0, std::min(cur < 0 ? n_done : cur, (int)g->job_steps.size() - list_rows));
+    for (int i = first; i < (int)g->job_steps.size() && i < first + list_rows; i++, yy++) {
+        const App::JobStep &st = g->job_steps[i];
+        const char *mark = st.state == 0 ? "○" : st.state == 1 ? spin[(int)(now_s() * 10) % 10] : st.state == 2 ? "✓" : st.state == 3 ? "–" : "✗";
+        const uint32_t mc = st.state == 0 ? t.dim : st.state == 1 ? t.accent2 : st.state == 2 ? t.good : st.state == 3 ? t.dim : t.bad;
+        s.put(x + 2, yy, mark, Style(mc, t.panel, BOLD));
+        std::string right;
+        if (st.state == 1 && st.answers > 0) right = fmt("%d of %d", st.answered, st.answers);
+        else if (!st.result.empty()) right = st.result;
+        if (st.state >= 2 && st.t1 > st.t0 && st.t0 > 0) right += (right.empty() ? "" : " · ") + mins(st.t1 - st.t0);
+        const int rw = std::min(text_width(right), iw * 2 / 5);
+        const int lw = iw - 3 - (rw ? rw + 2 : 0);
+        s.put(x + 4, yy, fit(st.label, lw), Style(st.state == 0 ? t.dim : t.fg, t.panel, st.state == 1 ? BOLD : 0));
+        if (rw) s.put(x + w - 2 - rw, yy, fit(right, rw), Style(mc, t.panel));
+    }
+    if (first + list_rows < (int)g->job_steps.size())
+        s.put(x + 4, yy++, fmt("… and %d more", (int)g->job_steps.size() - first - list_rows), Style(t.dim, t.panel));
+    yy++;
+    // The program's own lines, last ones, small.
+    const int rows = y + h - 1 - yy - 1;
+    if (rows > 0) {
+        s.put(x + 2, yy++, fit("What it prints (PgUp/PgDn scroll):", iw), Style(t.dim, t.panel, ITALIC));
+        std::vector<std::string> lines;
+        for (auto &l : p.lines)
+            if (l.rfind("@ts5-tune ", 0) != 0) lines.push_back(l);
+        if (!p.partial.empty() && p.partial.rfind("@ts5-tune ", 0) != 0) lines.push_back(p.partial);
+        const int start = std::max(0, (int)lines.size() - rows - g->tune_scroll);
+        for (int i = 0; i < rows && start + i < (int)lines.size(); i++) {
+            const std::string &l = lines[start + i];
+            uint32_t c = mix(t.fg, t.panel, 0.35);
+            if (l.find("FAIL") != std::string::npos || l.find("rror") != std::string::npos) c = t.bad;
+            else if (l.rfind("Note:", 0) == 0) c = t.warn;
+            s.put(x + 2, yy + i, fit(l, iw), Style(c, t.panel));
+        }
     }
 }
 
@@ -1218,12 +1478,31 @@ void draw_models() {
         const double fb = free_bytes(dir);
         line("Goes to", dir + (fb >= 0 ? "  (" + gib(fb) + " free)" : ""), fb >= 0 && fb < (double)e.bytes ? t.bad : t.fg);
         if (downloading(e)) {
+            // What it's doing, in words, and the steps a download goes through.
             double done, total, mbps;
             download_progress(done, total, mbps);
-            const double left = (double)e.bytes - done;
-            line("Downloading", fmt("%s of %s", gib(done).c_str(), gib((double)e.bytes).c_str()) +
-                                    (mbps > 0 ? fmt(" · %.0f MB/s · %d min left", mbps, (int)(left / 1e6 / mbps / 60) + 1) : ""),
-                 t.accent2);
+            total = (double)e.bytes;
+            const double secs = now_s() - g->downloader.t0;
+            const int stage = done <= 0 && mbps <= 0 ? 0 : done < total ? 1 : 2;
+            static const char *spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+            std::string now = stage == 0 ? "Connecting to Hugging Face"
+                              : stage == 1 ? fmt("Downloading: %s of %s", gib(done).c_str(), gib(total).c_str()) +
+                                                 (mbps > 0 ? fmt(" at %.0f MB/s", mbps) : "")
+                                           : "Checking it's the exact file (SHA-256)";
+            now += " · " + mins(secs) + " so far";
+            if (stage == 1 && mbps > 0) now += " · about " + mins((total - done) / 1e6 / mbps) + " left";
+            s.put(x0 + 2, yy, spin[(int)(now_s() * 10) % 10], S(t.accent2, BOLD));
+            s.put(x0 + 4, yy++, fit("Working: " + now, w - 6), S(t.accent2, BOLD));
+            int xx = x0 + 4;
+            const char *names[] = {"connect", "download", "check it's the exact file", "ready to load"};
+            for (int k = 0; k < 4; k++) {
+                const bool d = k < stage, r = k == stage;
+                xx = s.put(xx, yy, d ? "✓ " : r ? "✱ " : "○ ", S(d ? t.good : r ? t.accent2 : t.dim, BOLD));
+                xx = s.put(xx, yy, names[k], S(d ? t.fg : r ? t.accent2 : t.dim, r ? BOLD : 0));
+                if (k < 3) xx = s.put(xx, yy, "   ", S(t.dim));
+                if (xx > x0 + w - 4) break;
+            }
+            yy++;
         } else {
             line("", "Enter downloads it · X stops it, and it goes on from there later · any other: /download URL", t.dim);
         }
@@ -1254,10 +1533,12 @@ void draw_models() {
                                                                    : "drafts tokens; same text, faster on code");
         }
         auto kv = m.tune.find("TS5_KV");
-        setting("Cache", kv == m.tune.end() ? "f16" : kv->second,
-                kv != m.tune.end() && kv->second.find("q8") != std::string::npos
-                    ? "8-bit: twice the context in the same memory"
-                    : "full precision; 8-bit (TS5_KV=q8_0) doubles the context");
+        // The chat's memory (the KV cache), in words.
+        const std::string kvv = kv == m.tune.end() ? "" : kv->second;
+        const bool k8 = kvv.find("q8") != std::string::npos || kvv == "k8v4", k4 = kvv.find("q4") != std::string::npos;
+        setting("Chat memory", kvv.empty() ? "automatic" : kvv == "k8v4" ? "8 and 4-bit" : k8 ? "8-bit" : k4 ? "4-bit" : kvv,
+                kvv.empty() ? "full precision, or 8-bit where that fits a longer chat"
+                            : k8 || k4 ? "smaller, so a longer chat fits in the same memory" : "");
         if (api_id(m.name) == sv.model)
             setting("Context", fmt("%d tokens", sv.n_ctx), "what fits now, as loaded");
     }
@@ -1983,6 +2264,7 @@ void tick() {
     }
     g->loader.pump();
     g->tuner.pump();
+    job_follow();
     g->downloader.pump();
     finish_download();
     g->fanproc.pump();
@@ -2104,7 +2386,7 @@ int run_in_tmux(int argc, char **argv) {
     const std::string done = dir + "/last-chat.txt";
     unlink(done.c_str());
     const char *ct = getenv("COLORTERM");
-    std::string cmd = shell_quote(tmux) + " -L ts5 -f " + shell_quote(conf) + " new-session -A -s ts5 -e TS5_TUI_TMUX=1" +
+    std::string cmd = shell_quote(tmux) + " -u -L ts5 -f " + shell_quote(conf) + " new-session -A -s ts5 -e TS5_TUI_TMUX=1" +
                       (ct && *ct ? " -e COLORTERM=" + shell_quote(ct) : std::string()) + " " + shell_quote(inner);
     const int st = system(cmd.c_str());
     // The chat it left, printed here, where the terminal keeps it.

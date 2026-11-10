@@ -234,7 +234,11 @@ jobs:
           ts5-tune --reset
           test ! -e ~/.config/tokenstation/tune.env
           # Each model's own settings: written, read when that model loads, deleted.
-          ts5-tune --models --tokens 16 /tmp/model/test.gguf
+          # With the progress lines ts5-tui shows: a plan, each step, a summary.
+          TS5_TUNE_PROGRESS=1 ts5-tune --models --tokens 16 /tmp/model/test.gguf | tee /tmp/tune.txt
+          grep -q '^@ts5-tune {"event": "plan"' /tmp/tune.txt
+          grep -q '^@ts5-tune {"event": "step", "step": 1, "state": "done"' /tmp/tune.txt
+          grep -q '^@ts5-tune {"event": "summary"' /tmp/tune.txt
           grep -q "^size=$(stat -c %s /tmp/model/test.gguf)$" ~/.config/tokenstation/tune/test.gguf.env
           ts5 bench -m /tmp/model/test.gguf --pp 16 --tg 4 2>&1 |
             grep -q "settings for test.gguf from $HOME/.config/tokenstation/tune/test.gguf.env"
