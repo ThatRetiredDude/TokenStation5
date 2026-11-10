@@ -359,8 +359,8 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   prompts.
   The zeros aren't needed: a row or token past the end only feeds its own
   sums, which are never stored, and its clamped loads are real, finite
-  values. `TS5_MMB_NOZERO=1` (Linux, off until the PS5 has measured it)
-  takes the default variants' z builds (`mmb16dqz_*`, `mmb16dqlz_*`,
+  values. `TS5_MMB_NOZERO` (Linux: `1`, the default, for the f16 kernel,
+  `2` for the f32 one too, `0` off) takes the default variants' z builds (`mmb16dqz_*`, `mmb16dqlz_*`,
   `mmbz_*`), whose store skips the selects: 3.5-5% fewer instructions in
   RADV's gfx1013 code and 4.5-7% lower estimated latency, and Q4_K's
   `d1 * q - m1` goes from a multiply-add and an f16 conversion to one
@@ -368,7 +368,11 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   That gives the same bits wherever `d1 * q - m1` is exact in f32 (`d1 * q`
   always is: 11 bits of `d`, 6 of the scale, 5 of q); Q6_K, Q8_0 and the f32
   kernel give the same bits always. On lavapipe, which doesn't fuse the
-  conversion, every build gives the default's bytes.
+  conversion, every build gives the zeroing builds' bytes. On the PS5 (job
+  DE) the logits were byte for byte the same on 8 models and the f16
+  kernel's prompts 1.3-2.6% faster (Qwen3 8B 837 to 859 tok/s at 512
+  tokens), but the f32 kernel's made Gemma 4 12B's 2.4% slower, so it takes
+  `2`.
 - 9 or more (`mm_*`, `shaders/matmul_tiled.glsl`): 64 rows x 64 tokens per
   workgroup. Half the threads dequantize a 64 x 64 slice of W into shared
   memory while the other half load the matching slice of X, then each thread

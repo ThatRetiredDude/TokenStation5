@@ -814,7 +814,7 @@ private:
                 mmb_var32_.erase(std::remove(mmb_var32_.begin(), mmb_var32_.end(), c), mmb_var32_.end());
         }
 #ifndef TS5_PS5
-        // TS5_MMB_NOZERO=1 (Linux): the default variants' z builds, whose
+        // TS5_MMB_NOZERO (Linux): the default variants' z builds, whose
         // store() doesn't zero the rows past the matrix and the tokens past
         // the batch. Their loads are clamped to the last row and token, so
         // what they compute is finite and never stored, and only their own
@@ -822,11 +822,16 @@ private:
         // d1 * q - m1 into the f16 conversion (one rounding, not two): the
         // same bits wherever d1 * q - m1 is exact in f32 (Q6_K, Q8_0 and the
         // f32 kernel always are).
-        if (const char *e = getenv("TS5_MMB_NOZERO"); e && atoi(e)) {
+        // On by default for the f16 kernel (=1) since the PS5 measured it
+        // (job DE: the same logits byte for byte on 8 models, prompts 1.3-2.6%
+        // faster); the f32 kernel's z build made Gemma 4's 2.4% slower, so
+        // only =2 takes it too. =0: the zeroing builds.
+        int nozero = 1;
+        if (const char *e = getenv("TS5_MMB_NOZERO")) nozero = atoi(e);
+        if (nozero >= 1)
             for (std::string *v : {&mmb_var_, &mmb_var_q8_})
                 if (*v == "dq" || *v == "dql") *v += "z";
-            if (mmb_var32_.empty()) mmb_var32_ = "z";
-        }
+        if (nozero >= 2 && mmb_var32_.empty()) mmb_var32_ = "z";
 #endif
         bool kv_auto = false;
         kv_ = kv_type_setting(&kv_auto);

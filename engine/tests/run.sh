@@ -222,28 +222,36 @@ TS5_MMB_MIN=1 TS5_MMB_WGS=4 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --
     "${kmix[@]}"
 TS5_MMB_MIN=1 TS5_MMB_VAR=q TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
     --ntok 300 "${kmix[@]}"
-# TS5_MMB_NOZERO=1 (Linux): the default variants' z builds, which don't
-# zero the rows and tokens past the block's edges (never stored). The same
-# bytes as the default here (lavapipe doesn't fuse the dequant into the f16
+# TS5_MMB_NOZERO (Linux; 1, the default, for the f16 kernel, 2 also for the
+# f32 one): the default variants' z builds, which don't zero the rows and
+# tokens past the block's edges (never stored). The same bytes as =0 here (lavapipe doesn't fuse the dequant into the f16
 # conversion; on the PS5's GPU Q4_K and Q5_K keep them wherever d1 q - m1 is
 # exact in f32), f16 and f32, every weight type, 300 tokens (ragged blocks).
-echo "== Prompt kernels without the edge zeroing (TS5_MMB_NOZERO=1): the default's bytes, and the CPU's answers"
-TS5_MMB_MIN=1 TS5_MMB_NOZERO=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
+echo "== Prompt kernels without the edge zeroing (TS5_MMB_NOZERO, f16 by default): the zeroing builds' bytes, the CPU's answers"
+TS5_MMB_MIN=1 TS5_MMB_NOZERO=2 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 \
     "${kmix[@]}"
-TS5_MMB_MIN=1 TS5_MMB_NOZERO=1 TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 \
+TS5_MMB_MIN=1 TS5_MMB_NOZERO=2 TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 \
     --backend vk --ntok 300 "${kmix[@]}"
 [ -s "$work/qwen2-mk-Q5_K_M.gguf" ] || python3 "$here/make_test_model.py" --arch qwen2 --quant Q5_K_M \
     --vocab "$work/ggml-vocab-qwen2.gguf" "$work/qwen2-mk-Q5_K_M.gguf" > /dev/null
 nz_toks=$(seq 5 7 2100 | head -300)
 for m in "$work/qwen3-kmix.gguf" "$work/gemma4-kmix.gguf" "$work/qwen2-mk-Q5_K_M.gguf" "$work/qwen2-Q8_0.gguf"; do
     for f in 1 0; do
-        TS5_MMB_MIN=1 TS5_MMB_F16=$f TS5_LOGITS_ROWS=256 "$ts5" logits -m "$m" -o "$work/nz-0.bin" $nz_toks 2> /dev/null
-        TS5_MMB_MIN=1 TS5_MMB_F16=$f TS5_LOGITS_ROWS=256 TS5_MMB_NOZERO=1 TS5_PROFILE=1 "$ts5" logits -m "$m" \
+        TS5_MMB_MIN=1 TS5_MMB_F16=$f TS5_LOGITS_ROWS=256 TS5_MMB_NOZERO=0 "$ts5" logits -m "$m" -o "$work/nz-0.bin" \
+            $nz_toks 2> /dev/null
+        TS5_MMB_MIN=1 TS5_MMB_F16=$f TS5_LOGITS_ROWS=256 TS5_MMB_NOZERO=2 TS5_PROFILE=1 "$ts5" logits -m "$m" \
             -o "$work/nz-1.bin" $nz_toks 2> "$work/nz-1.err"
         cmp "$work/nz-0.bin" "$work/nz-1.bin"
         grep -qE "mmb(16dqz|16dqlz|z)_" "$work/nz-1.err" || { echo "FAIL: no z prompt kernel ran on $m"; exit 1; }
         ! grep -qE "mmb(16dq|16dql|)_q" "$work/nz-1.err" || { echo "FAIL: a zeroing prompt kernel ran on $m"; exit 1; }
     done
+done
+# The default: z builds for the f16 kernel, the zeroing f32 kernel (z made
+# Gemma 4's prompts 2.4% slower on the PS5).
+for f in 1 0; do
+    TS5_MMB_MIN=1 TS5_MMB_F16=$f TS5_PROFILE=1 "$ts5" bench -m "$work/qwen3-kmix.gguf" --pp 300 --tg 1 > "$work/nz-d.txt" 2>&1
+    if [ $f = 1 ]; then grep -q "mmb16dqz_" "$work/nz-d.txt"; else grep -q "^  mmbq_\|^  mmb_" "$work/nz-d.txt" && ! grep -q "mmbz_" "$work/nz-d.txt"; fi ||
+        { echo "FAIL: TS5_MMB_F16=$f: the default prompt kernels"; grep "^  mmb" "$work/nz-d.txt"; exit 1; }
 done
 rm -f "$work"/nz-*.bin
 echo "== The logits of more positions than the GPU's buffer holds (TS5_LOGITS_ROWS, 8 by default on Linux): a piece"
@@ -300,14 +308,14 @@ TS5_MMB_F16=1 TS5_MMB_MIN=12 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu -
 for s in 1 0; do
     TS5_MMB_SHORT=$s TS5_PROFILE=1 "$ts5" bench -m "$work/qwen2-kmix.gguf" --pp 100 --tg 1 > "$work/short-$s.txt" 2>&1
 done
-grep -q "^  mmb16dq_q6_k ffn_down " "$work/short-1.txt" && grep -q "^  mmb16dq_q4_k attn_output " "$work/short-1.txt" &&
+grep -q "^  mmb16dqz_q6_k ffn_down " "$work/short-1.txt" && grep -q "^  mmb16dqz_q4_k attn_output " "$work/short-1.txt" &&
     grep -q "^  mm_q6_k ffn_down " "$work/short-0.txt" && ! grep -q "^  mm_q" "$work/short-1.txt" ||
     { echo "FAIL: 100 tokens on qwen2-kmix: the kernels"; grep -h "^  mm" "$work"/short-[01].txt; exit 1; }
 TS5_PROFILE=1 "$ts5" bench -m "$work/llama-kmix.gguf" --pp 100 --tg 1 > "$work/short-llama.txt" 2>&1
 grep -q "^  mm_q6_k ffn_down " "$work/short-llama.txt" && grep -q "^  mm_q4_k attn_output " "$work/short-llama.txt" &&
-    grep -q "mmb16dq_q4_k ffn_gate" "$work/short-llama.txt" ||
+    grep -q "mmb16dqz_q4_k ffn_gate" "$work/short-llama.txt" ||
     { echo "FAIL: 100 tokens on llama-kmix: the kernels"; grep "^  mm" "$work/short-llama.txt"; exit 1; }
-echo "short chunks: mmb16dq_* for qwen2-kmix (mm_* with TS5_MMB_SHORT=0), the skipped roles on mm_* for llama-kmix"
+echo "short chunks: mmb16dqz_* for qwen2-kmix (mm_* with TS5_MMB_SHORT=0), the skipped roles on mm_* for llama-kmix"
 # One token per call: a row per workgroup (these matrices are small), 8 rows
 # (TS5_MV_ROWS_MIN=1), 3 (a partial last group), and the older mat-vecs.
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${kmix[@]}"
