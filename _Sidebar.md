@@ -6,6 +6,7 @@
 
 **Use**
 - [Using the TV app](Using-the-TV-app)
+- [Using the terminal app (ts5-tui)](Using-the-terminal-app)
 - [Models](Models)
 - [Connecting apps](Connecting-apps)
 - [Away from home (Tailscale)](Away-from-home-with-Tailscale)

@@ -97,6 +97,8 @@ curl http://localhost:8081/v1/models
 
 The TV service and the API-only service can't both run (both take port 8081).
 
+**In a terminal over SSH**, with any of the three: `ts5-tui` chats, switches and tunes models and shows the GPU memory, temperatures and fan live. See [Using the terminal app](Using-the-terminal-app).
+
 ## Service settings
 
 `/etc/default/tokenstation` (kept on upgrades):
@@ -122,5 +124,6 @@ Install the newer package the same way; your models, keys, chats and usage stay 
 - [Recommended settings](Recommended-settings): what to run on a PS5, and which model
 - [Models](Models): with the memory raised, 14B models fit
 - [PS5 hardware on Linux](PS5-hardware-on-Linux)
+- [Using the terminal app (ts5-tui)](Using-the-terminal-app)
 - [Connecting apps](Connecting-apps)
 - [Troubleshooting](Troubleshooting)

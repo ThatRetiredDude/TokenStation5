@@ -19,12 +19,13 @@ There are two editions, built from the same code:
 
 1. Install one edition (links above).
 2. [Pick a model](Models). The Models page downloads the checked ones straight to the console.
-3. [Connect an app](Connecting-apps), or just chat on the TV.
+3. [Connect an app](Connecting-apps), or just chat on the TV (or, on Linux, [in a terminal over SSH](Using-the-terminal-app)).
 4. Optional: [reach it from anywhere with Tailscale](Away-from-home-with-Tailscale), and [give it web search](Web-search).
 
 ## Pages
 
 - [Using the TV app](Using-the-TV-app): the five pages and what every button does
+- [Using the terminal app (ts5-tui)](Using-the-terminal-app): chat, models, live temperatures and tuning in a terminal, over SSH (Linux)
 - [Models](Models): what fits, what's checked, adding your own
 - [Connecting apps](Connecting-apps): Kilo Code, Continue, Cline, Open WebUI, aider, opencode, your own scripts
 - [Away from home with Tailscale](Away-from-home-with-Tailscale)
