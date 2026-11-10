@@ -18,6 +18,12 @@ mkdir -p "$work"
 cmake -S "$engine" -B "$engine/build" > /dev/null
 cmake --build "$engine/build" -j"$(nproc)" > /dev/null
 ts5="$engine/build/ts5"
+# The trimmed prompt attention (TS5_ATTN_PF_TRIM=1, Linux's default) sums a
+# tile's rows by shuffles, which the PS5's GPU adds in the untrimmed
+# kernels' order (the same logits byte for byte there) and llvmpipe doesn't:
+# the byte-for-byte checks here compare against the untrimmed kernels, and
+# the trim's own section turns each setting on.
+export TS5_ATTN_PF_TRIM=0
 # `! cmd` alone never stops a set -e script, so a negated check ends in
 # `|| unexpected $LINENO`: the command that should have failed succeeded.
 unexpected() { echo "run.sh line $1: succeeded where it should fail"; exit 1; }
@@ -125,9 +131,13 @@ for q in F32 Q4_K_M; do
     q35+=("$out")
 done
 echo "== Qwen3.5: at once, one token per call, and 300 tokens in chunks (the linear layers' state across calls)"
-python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${q35[@]}"
+TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${q35[@]}"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${q35[@]}"
-python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${q35[@]}"
+TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${q35[@]}"
+# Its f16 prompt math (the Linux default): this test model's Q4_K_M lands at
+# 0.21-0.23% of the largest logit, the real 9B at 0.13-0.2% in the PS5's check.
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.003 --backend vk "${q35[@]}"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.003 --backend vk --ntok 300 "${q35[@]}"
 echo "== Qwen3.5: no drafts and no helper (that state only goes forward), the same text as with drafting off"
 p35="the cat sat on the mat. the cat sat on the mat. the cat sat on the mat. the cat sat on the"
 for be in vk cpu; do
@@ -1092,6 +1102,14 @@ moe="$work/llama-experts.gguf"
 { "$ts5" run -m "$moe" -p hi -n 1 2>&1 > /dev/null || true; } |
     grep "mixture-of-experts models are not supported yet (this one has 8 experts)"
 ! "$ts5" run -m "$moe" -p hi -n 1 > /dev/null 2>&1 || unexpected $LINENO
+# The sizing tests below count the memory a load takes to the token, so they
+# run without the two memory savers on by default (token table read from the
+# file, the blocks' unused ends counted), which their own sections turn on.
+echo "== the memory savers are on by default: the token table not in GPU memory, the blocks' ends counted"
+"$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2> "$work/savers.err" > /dev/null
+grep "token table ([0-9]* MiB) not in GPU memory" "$work/savers.err"
+grep "GPU memory taken: " "$work/savers.err"
+export TS5_EMBD_FILE=0 TS5_FIT_TAILS=0
 echo "== -c auto waits while memory just freed is still coming back (TS5_MEMINFO: a scripted /proc/meminfo)"
 # 12 MiB more every quarter second, here for 3 s, then flat. The wait goes on
 # while 4 s add 16 MiB or more.
@@ -1311,6 +1329,7 @@ grep "draft model not used: \(no room for it beside qwen3-F32.gguf\|not enough G
 grep "backend ready in [0-9.]* s, context 4096$" "$work/alone.err"
 TS5_GPU_MEMORY_GIB=3 "$ts5" run -m "$work/qwen3-F32.gguf" -c auto -p hi -n 1 2>&1 > /dev/null |
     grep "backend ready in [0-9.]* s, context 4096$"
+unset TS5_EMBD_FILE TS5_FIT_TAILS
 echo "== a model's own tuned settings (ts5-tune --models): where nothing set them, for that file only"
 tune=$(mktemp -d)
 mkdir -p "$tune/tokenstation/tune"

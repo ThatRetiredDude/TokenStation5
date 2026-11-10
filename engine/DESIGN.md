@@ -250,7 +250,10 @@ Each matmul picks one of four kernels by how many tokens it multiplies:
   tokens read 1.14-1.76 times faster (Qwen3 8B, 100 tokens: 280 -> 160 ms;
   DeepSeek R1 14B 474 -> 267), the same at 8 and 128, the check passing
   (0.27% and 0.25% of the largest logit). mmb sums in f32, or in f16 for the qwen2, qwen3 and llama
-  architectures (the default there; `TS5_MMB_F16=0|1` decides for
+  architectures, and on Linux qwen35 (the default there; Qwen3.5 9B on the
+  PS5: prompts 589 -> 826 tok/s, the check at 0.13-0.2% of the largest
+  logit at 256 to 2,048 tokens, 11 of 11 answers on a 111,468-token
+  document; `TS5_MMB_F16=0|1` decides for
   any model): where the device has
   f16 arithmetic (`mmb16_*`, the same shader with `MMB_F16`), shared memory
   holds f16 and each step's 32 products are summed in packed f16, two per
@@ -482,7 +485,7 @@ Llama 3.1 8B's 32k-token prompt and +15% at 120k, +6-7% on the 14Bs at 30k
 and +3.6% on Qwen3.5 (estimates). The logits change in the last bits (the
 order the slices are added in); the suite checks them against the CPU at
 3,400 tokens on a test model with Qwen3 8B's heads.
-`TS5_ATTN_PF_TRIM=1` (Linux, off until measured on the PS5) runs attn_pf128,
+`TS5_ATTN_PF_TRIM=1` (Linux's default; `=0` the untrimmed kernels) runs attn_pf128,
 attn_pf256s and attn_pf512s with less around the same sums (the `_t` builds,
 `PF_TRIM`). A tile that every row of the workgroup sees in full (all its keys
 at or before the first row's token, and inside the last row's window) skips
@@ -490,11 +493,17 @@ the mask; a row's sum over its 4, 8 or 16 lanes is XOR shuffles (lane pairs,
 then pairs of pairs) in place of `subgroupClusteredAdd`; and a layer with no
 ring gets a pipeline with specialization constant 0 set, which drops the
 `key % ring` from every key loaded. In RADV's gfx1013 code the clustered add is
-built from the same lane pairs, so the logits should stay byte for byte the
-same (to be confirmed on the PS5), and the step over 16 keys is 6 to 7% fewer
+built from the same lane pairs, so the logits stay byte for byte the same
+(the PS5, job DC: Llama 3.1 8B, DeepSeek R1 14B in k8v4, Qwen3.5 9B, Gemma 3
+and 4 12B, every 512th position to 57k tokens), and the step over 16 keys is 6 to 7% fewer
 vector instructions (attn_pf128 and its cache builds; 9% in attn_pf256s, 12%
-in attn_pf512s): about 3 to 5% off the attention deep in a prompt, an
-estimate. llvmpipe adds a cluster in another order, so the suite checks =1
+in attn_pf512s): 32k-token prompts read 6.6% faster on Llama 3.1 8B (338
+to 360 tok/s), 4.2% on Gemma 4 12B and 2.6% on Qwen3.5 9B on the PS5, `=3`
+9.7%, 6.1% and 3.6%, `=4` 19.8% on Llama and 6.2% on Qwen3.5 (with
+`TS5_ATTN_PF_ROUNDS=cu` too, Llama 32% faster), writing the same; `=3` and
+`=4` move DeepSeek's and the Gemmas' logits by 0.9-2.3% of the largest deep
+in a 57k-token prompt, still to be checked against their answers.
+llvmpipe adds a cluster in another order, so the suite (run with `=0`) checks =1
 against the CPU, and =2 (the `_tc` builds: the trim with the clustered add
 kept, slow on llvmpipe) against the default byte for byte. `=3` (the `_te`
 builds, `PF_EXP2`) adds scores in base 2 (log2(e) folded into the query's
@@ -852,8 +861,8 @@ values, 2 bytes each in f16, or 1 byte plus an f16 scale per 32 values
 (1.06 bytes) with `TS5_KV=q8`. Qwen 2.5 Coder 7B Q4_K_M at 32k context: 4.4 +
 1.75 (f16) or 0.93 (q8) + 0.3 GiB.
 
-Two Linux switches, off until measured on the PS5, take memory back from
-that budget. `TS5_EMBD_FILE=1` keeps a token table the output doesn't share
+Two Linux switches, on by default since the PS5 measured them (`=0` turns
+each off), take memory back from that budget. `TS5_EMBD_FILE=1` keeps a token table the output doesn't share
 out of GPU memory (Qwen3 14B and DeepSeek 14B 438 MB, Qwen3 8B 350, Coder 7B
 307, Llama 3.1 8B 296; tied ones, the small models and the Gemmas, stay):
 each call reads its tokens' rows from the file (2.3 to 2.9 KB a token on
@@ -869,7 +878,16 @@ sizing still picks the cache type; past its token count the switch adds
 them, leave the sizing's reserve free. On the PS5's 8B and 14B models the
 ends hold 0.08 to 0.38 GiB, and 0.40 to 0.79 GiB with the token table out
 (modelled from the files' tensor sizes), which a model short of its window
-takes as tokens and one at its window keeps free.
+takes as tokens and one at its window keeps free. Measured on the PS5 (job
+DA, `-c auto`): the token tables out were 282 to 546 MiB, the logits with and
+without byte for byte the same (Qwen3 8B, DeepSeek R1 14B with k8v4, prompts
+and one token a call), prompts 0.2-0.3% slower at 512 tokens and 0.5-1.1%
+at 16k (the rows read from the file), writing the same. Qwen3 14B went from
+29,696 tokens to its whole 32,768 (10 of 11 long-document answers at 26,819
+tokens), and with YaRN to 55,296 (10 of 11 at 44,288), DeepSeek R1 14B with
+YaRN to 46,080 and Gemma 3 12B to 65,536; every full-length run left at
+least 1.71 GiB free, and with 1 GiB more taken by another program the
+sizing came out smaller and left the same.
 
 The logits buffer holds 8 rows on Linux (`TS5_LOGITS_ROWS`, 1 to 256; the
 title keeps 256). Serving never wants more than a verify batch's 8 at once,
@@ -885,8 +903,9 @@ f16 (0.0001 of the logits' range against 0.0007 on two test models; 300
 tokens through 256-row pieces is still a suite check). `forward_in_place` leaves at most that many
 rows at `logits_view()`, so below 8 the engine drafts fewer tokens. The
 memory comes back inside the 1 GiB blocks: the context grows by it with
-`TS5_FIT_TAILS=1`, and without it only where the smaller buffer frees a
-whole block.
+`TS5_FIT_TAILS=1` (the default), and without it only where the smaller
+buffer frees a whole block (Gemma 3 12B on the PS5: 48,128 tokens with 256
+rows, 64,512 with 8).
 
 A request writes K/V only from where it parts from the cached prompt on, so
 a conversation cut by a short request between its turns (a chat app's title

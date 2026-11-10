@@ -643,9 +643,23 @@ private:
 #ifndef TS5_PS5
         if (const char *e = getenv("TS5_ATTN_PF_ROUNDS"))
             pf_rounds_ = !strcmp(e, "cu") ? ctx_->compute_units : (uint32_t)std::max(0, atoi(e));
-        if (const char *e = getenv("TS5_EMBD_FILE"))
-            embd_file_ = atoi(e) != 0 && m_.tok_embd && m_.output.info != m_.tok_embd.info;
+        // The token table out of GPU memory where the output doesn't share it
+        // and the sizing counting the blocks' unused ends, both on by
+        // default since the PS5 measured them (job DA: the same logits byte
+        // for byte; Qwen3 14B 29,696 -> 32,768 tokens, 55,296 with YaRN,
+        // 10 of 11 long-document answers as before, prompts 0.2-1.1%
+        // slower, at least 1.7 GiB left free). TS5_EMBD_FILE=0 and
+        // TS5_FIT_TAILS=0 go back.
+        bool embd_file = true;
+        if (const char *e = getenv("TS5_EMBD_FILE")) embd_file = atoi(e) != 0;
+        embd_file_ = embd_file && m_.tok_embd && m_.output.info != m_.tok_embd.info;
+        fit_tails_ = true;
         if (const char *e = getenv("TS5_FIT_TAILS")) fit_tails_ = atoi(e) != 0;
+        // The trimmed prompt attention's exact build by default (=1: on the
+        // PS5 the logits byte for byte the untrimmed kernels' on five
+        // models at up to 57k tokens, job DC; 32k prompts 2.6-6.6% faster).
+        // =0 the untrimmed kernels; =3 and =4 change the last bits.
+        pf_trim_ = 1;
         if (const char *e = getenv("TS5_ATTN_PF_TRIM")) pf_trim_ = (uint32_t)std::min(4, std::max(0, atoi(e)));
         // f16 p V would overflow on Gemma's large values: 3 there.
         if (pf_trim_ == 4 && (hp_.arch == "gemma3" || hp_.arch == "gemma4")) {
@@ -742,6 +756,13 @@ private:
         const bool gemma = hp_.arch == "gemma3" || hp_.arch == "gemma4";
         mmb_f16_ = ctx_->float16 && (hp_.arch == "qwen2" || hp_.arch == "qwen3" || hp_.arch == "llama");
         if (hp_.arch == "qwen3" && hp_.n_embd <= 1024) mmb_f16_ = false;
+#ifndef TS5_PS5
+        // Qwen3.5 too on Linux (the PS5, job DB: Qwen3.5 9B passes the
+        // check in f16 at 256 tokens of text, 512 and 2,048, within 0.2% of
+        // the largest logit; prompts 589 -> 826 tok/s; 11 of 11 right on a
+        // 111,468-token document).
+        if (hp_.arch == "qwen35") mmb_f16_ = ctx_->float16;
+#endif
         if (gemma) mmb_f16_skip_ = ",ffn_gate,ffn_up,";
         if (hp_.arch == "llama" && hp_.n_embd <= 2048) mmb_f16_skip_ = ",ffn_down,attn_output,";
         if (const char *e = getenv("TS5_MMB_F16")) mmb_f16_ = ctx_->float16 && atoi(e) != 0;
