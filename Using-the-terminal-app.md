@@ -153,6 +153,8 @@ It looks in `/var/lib/tokenstation/models` (or the service's `MODELS_DIR`), `~/.
 
 The top bar shows **loading…** with the seconds until the server reports the new model.
 
+**Helpers** aren't loaded by hand. A helper is a small model that drafts tokens for a big one (same answers, faster, mostly on code), and it comes along with the main model as that model's tuning picked: **T** tunes a model and picks the fastest helper among the files here. The top bar shows the loaded model's helper (**none** until it's tuned), and the Models list shows each model's. Enter on a helper-size file (under 1.5 GiB) asks first, because it would replace the main model.
+
 ### Downloading models
 
 The catalog is the TV app's: the models tested on the PS5, each pinned to a commit on Hugging Face with its size and SHA-256. Choose one under **⇣ Download** and press **Enter** (or `/download NAME` from the prompt). The row shows a bar, the speed and the time left, and the box below where the file goes and how much space is free there.
