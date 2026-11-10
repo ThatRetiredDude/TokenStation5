@@ -126,6 +126,35 @@ Step-by-step setup is in [On the PS5](#on-the-ps5).
 > them back from a computer (Settings > Instructions > Add models from a
 > computer) or download them again.
 
+## Linux: testers wanted
+
+TokenStation5 also runs on Linux: on a PS5 running Linux, or on any Linux PC with
+a Vulkan GPU. The Linux build is new, and we're looking for people to try it.
+One command installs the newest build (run it again to update):
+
+```sh
+# Debian 12/13, Ubuntu
+curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation_latest_amd64.deb && sudo apt install ./tokenstation_latest_amd64.deb
+
+# Fedora
+sudo dnf install https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest.x86_64.rpm
+
+# Arch
+curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-x86_64.pkg.tar.zst && sudo pacman -U tokenstation-latest-x86_64.pkg.tar.zst
+
+# Bazzite, SteamOS and others (installs into your home folder; run as yourself, not sudo)
+curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz | tar xz && cd tokenstation-*-linux-amd64 && ./install.sh
+```
+
+On a PS5 running Linux you also need Mesa 25.3 or newer. The full guide,
+including the PS5 setup, is in the wiki:
+[Install on Linux](https://github.com/ThatRetiredDude/TokenStation5/wiki/Install-on-Linux).
+
+Tried it? [Open an issue](https://github.com/ThatRetiredDude/TokenStation5/issues/new)
+titled "Linux test: <your system>" with your distribution, your GPU (the line
+from `vulkaninfo --summary`), anything the install printed that looked wrong,
+and one speed line from `ts5 bench -m <model.gguf> --pp 512 --tg 128`.
+
 ---
 
 ## Under the hood
