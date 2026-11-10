@@ -174,7 +174,10 @@ ts5-tui --url http://ps5.local:8081  # another one
 - **In between**: the chat (markdown, highlighted code, the thinking folded
   away; Ctrl+T shows it), or a page: **F1** Chat, **F2** Models (Enter
   loads one, T tunes it with `ts5-tune`, C runs the GPU check, B the speed
-  test; below them, the catalog's models to download), **F3** Status (bars
+  test, each in a panel that ticks off its steps in plain words, with the
+  time so far, the time left and what it found at the end, while the top
+  bar says what's running; below them, the catalog's models to download),
+  **F3** Status (bars
   for GPU memory, RAM, temperatures, fan, GPU load and speed), **F4**
   Settings (theme, thinking, temperature, answer length, fan, tmux), **F5**
   Logs. Tab and Shift+Tab step through the pages, and so do 1 to 5 on any
@@ -396,6 +399,9 @@ the app and `ts5` read them whenever they load that model (they log
 on the PS5.
 
 - `ts5-tune --models --reset`: delete them.
+- `TS5_TUNE_PROGRESS=1` adds a line per step, `@ts5-tune` and a JSON
+  object (the plan, each step's start and result, each test answer, the
+  summary), for a progress display: `ts5-tui` sets it.
 - A setting chosen in the app (Helper model: Off, Exact prompt reading:
   On) or set in the shell or `ts5.env` wins over the file.
 - The services read `/etc/tokenstation/tune/`: copy the files there to use
