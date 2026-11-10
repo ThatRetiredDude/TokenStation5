@@ -5,7 +5,7 @@ Maintainer: ThatRetiredDude <128261747+ThatRetiredDude@users.noreply.github.com>
 Section: misc
 Priority: optional
 Depends: libc6, libstdc++6, libvulkan1, mesa-vulkan-drivers, libsdl2-2.0-0, adduser
-Recommends: libnotify-bin, python3
+Recommends: libnotify-bin, python3, tmux
 Homepage: https://github.com/ThatRetiredDude/TokenStation5
 Description: Your PS5's own AI, on Linux: chat, voice and an OpenAI-style API
  TokenStation5 runs GGUF language models on the GPU through Vulkan. The app

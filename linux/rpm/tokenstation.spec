@@ -12,6 +12,7 @@ Requires:       mesa-vulkan-drivers
 Requires:       sudo
 Requires:       shadow-utils
 Recommends:     libnotify
+Recommends:     tmux
 
 # Already built; no debug packages or rebuilding here.
 %global debug_package %{nil}
@@ -45,6 +46,7 @@ if [ -d /run/systemd/system ]; then systemctl daemon-reload || true; fi
 %files
 /usr/bin/tokenstation
 /usr/bin/ts5
+/usr/bin/ts5-tui
 /usr/bin/ts5-tune
 /usr/bin/tokenstation-cu
 /usr/bin/tokenstation-memory
