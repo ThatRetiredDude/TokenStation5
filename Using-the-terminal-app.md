@@ -6,17 +6,7 @@
 
 It is a client of TokenStation's own API (port 8081), like any other app. It loads nothing itself and uses no GPU memory, so it can run beside the TV app or the API-only service.
 
-> **Availability:** ts5-tui is in [pull request #112](https://github.com/ThatRetiredDude/TokenStation5/pull/112) and comes with the Linux packages once that is merged (`/usr/bin/ts5-tui`, or `~/.local/bin/ts5-tui` with the portable build). Until then, build it from the pull request on the PS5. It needs only a C++ compiler (`sudo apt install g++ git`) and takes a few seconds:
->
-> ```sh
-> git clone --depth 1 https://github.com/ThatRetiredDude/TokenStation5 ts5-tui-src
-> cd ts5-tui-src
-> git fetch --depth 1 origin pull/112/head && git checkout FETCH_HEAD
-> c++ -std=c++17 -O2 -I engine/src -I linux/tui linux/tui/*.cpp -o ts5-tui -pthread
-> sudo install -m 755 ts5-tui /usr/local/bin/
-> ```
->
-> Loading a model with Enter through the API-only service also needs that pull request's version of the `hw` helper, which comes with the package.
+> **Availability:** ts5-tui ships in the Linux packages from the [linux-latest](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/linux-latest) build of 2026-11-10 on: `/usr/bin/ts5-tui` with the `.deb`, `.rpm` and Arch packages, and `~/.local/bin/ts5-tui` with the portable build. Already installed an older build? Run the [install command](Install-on-Linux#2-install-the-package) again to update.
 
 ## Start it
 
