@@ -14,7 +14,7 @@ The Linux build is new and needs people to try it on their own machines: a PS5 r
 | --- | --- |
 | Debian 12/13, Ubuntu | `curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation_latest_amd64.deb && sudo apt install ./tokenstation_latest_amd64.deb` |
 | Fedora | `sudo dnf install https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest.x86_64.rpm` |
-| Arch | `curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-x86_64.pkg.tar.zst && sudo pacman -U tokenstation-latest-x86_64.pkg.tar.zst` |
+| Arch | `curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-x86_64.pkg.tar.zst && sudo pacman -U ./tokenstation-latest-x86_64.pkg.tar.zst` |
 | Bazzite, SteamOS, others | `curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz \| tar xz && cd tokenstation-*-linux-amd64 && ./install.sh` (as yourself, not sudo) |
 
 The same commands always fetch the newest build, so run them again to update.
@@ -50,25 +50,25 @@ sudo apt install ./tokenstation_latest_amd64.deb
 **Fedora**
 
 ```sh
-curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest.x86_64.rpm
-sudo dnf install ./tokenstation-latest.x86_64.rpm
+sudo dnf install https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest.x86_64.rpm
 ```
 
 **Arch**
 
 ```sh
 curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-x86_64.pkg.tar.zst
-sudo pacman -U tokenstation-latest-x86_64.pkg.tar.zst
+sudo pacman -U ./tokenstation-latest-x86_64.pkg.tar.zst
 ```
 
 **Bazzite, SteamOS and other immutable systems**: the portable tarball installs into your home folder. Run it as yourself, not with sudo.
 
 ```sh
-curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz
-tar xzf tokenstation-latest-linux-amd64.tar.gz
+curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz | tar xz
 cd tokenstation-*-linux-amd64
 ./install.sh
 ```
+
+Run the same command again to update to the newest build.
 
 It puts the app in `~/.local/opt/tokenstation`, adds it to the app menu (and to Steam for Game Mode, when Steam is running), and asks for your password once to install the PS5 hardware controls. Log out and in once after. `./install.sh --no-hardware` touches nothing outside your home; `./install.sh --uninstall` removes everything except your models and settings. The services below come with the `.deb`, `.rpm` and Arch packages only.
 
