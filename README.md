@@ -126,49 +126,6 @@ Step-by-step setup is in [On the PS5](#on-the-ps5).
 > them back from a computer (Settings > Instructions > Add models from a
 > computer) or download them again.
 
-## Linux edition (testers wanted)
-
-The same app runs on a PS5 running Linux and on any Linux PC with a Vulkan
-GPU. On a PS5, Linux gives models more memory (14B models fit), all 8 CPU
-cores, fan control and all 40 GPU compute units. The newest build is always
-the [`linux-latest`](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/linux-latest)
-pre-release; run the same command again to update.
-
-**Debian 12 or 13, Ubuntu**
-
-```sh
-curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation_latest_amd64.deb
-sudo apt install ./tokenstation_latest_amd64.deb
-```
-
-**Fedora**
-
-```sh
-sudo dnf install https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest.x86_64.rpm
-```
-
-**Arch**
-
-```sh
-curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-x86_64.pkg.tar.zst
-sudo pacman -U ./tokenstation-latest-x86_64.pkg.tar.zst
-```
-
-**Bazzite, SteamOS and others** (installs into your home folder; run it as
-yourself, it asks for your password once for the PS5 hardware controls)
-
-```sh
-curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz | tar xz
-cd tokenstation-*-linux-amd64
-./install.sh
-```
-
-A PS5 needs Linux and a Mesa of 25.3 or newer first. The full guide, with
-how to run it on the TV, is on the wiki:
-[Install on Linux](https://github.com/ThatRetiredDude/TokenStation5/wiki/Install-on-Linux),
-and [linux/README.md](linux/README.md). Found a problem?
-[Open an issue](https://github.com/ThatRetiredDude/TokenStation5/issues).
-
 ---
 
 ## Under the hood
