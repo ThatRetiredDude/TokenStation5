@@ -46,7 +46,7 @@ std::string trim(std::string s) {
 
 struct Paths {
     std::string drm;  // /sys/class/drm/cardN/device with mem_info_gtt_total
-    std::string die, board, edge, fan_pwm, fan_rpm, fan_enable, fan_top;
+    std::string die, board, edge, fan_pwm, fan_rpm, fan_enable, fan_top, fan_low;
     std::chrono::steady_clock::time_point when{};
     bool found = false;
 };
@@ -86,6 +86,7 @@ Paths find_paths() {
             p.fan_pwm = hw + "/pwm1";
             p.fan_enable = hw + "/pwm1_enable";
             p.fan_top = hw + "/pwm1_auto_point4_pwm";
+            p.fan_low = hw + "/pwm1_auto_point1_temp";
             if (!read_file(hw + "/fan1_input").empty()) p.fan_rpm = hw + "/fan1_input";
         } else if (name == "amdgpu") {
             if (!read_file(hw + "/temp1_input").empty()) p.edge = hw + "/temp1_input";
@@ -147,8 +148,11 @@ Sensors read_sensors() {
         } else if (v == 1) {
             s.fan_mode = "manual";
         } else {
-            double top = 0;
-            s.fan_mode = read_num(p.fan_top, top) && top == 255 ? "cool" : "auto";
+            double top = 0, low = 0;
+            if (read_num(p.fan_top, top) && top == 255)
+                s.fan_mode = read_num(p.fan_low, low) && low == 40000 ? "early" : "cool";
+            else
+                s.fan_mode = "auto";
         }
     }
     if (s.die.have || s.board.have) s.any = true;
