@@ -160,7 +160,8 @@ ts5-tui                              # the server on this machine (port 8081)
 ts5-tui --url http://ps5.local:8081  # another one
 ```
 
-- **A locked bar at the top**: the model, its helper, the context used, the
+- **A locked bar at the top**: the model, its helper, how full the chat is
+  (tokens of the context, yellow past 75%, red past 90%), the
   last speed, GPU memory and RAM, the die temperature (yellow from 78 °C,
   red from 83 °C, a warning at the 85 °C limiter) and the fan.
 - **The `ts5>` prompt at the bottom**: Enter sends, Ctrl+J (or Alt+Enter)
@@ -179,7 +180,8 @@ ts5-tui --url http://ps5.local:8081  # another one
   bar says what's running; below them, the catalog's models to download),
   **F3** Status (bars
   for GPU memory, RAM, temperatures, fan, GPU load and speed), **F4**
-  Settings (theme, thinking, temperature, answer length, fan, tmux), **F5**
+  Settings (theme, thinking, temperature, answer length, context, fan,
+  tmux), **F5**
   Logs. Tab and Shift+Tab step through the pages, and so do 1 to 5 on any
   page but Chat. On a Mac, where macOS keeps the F keys, use those, fn+F1
   to fn+F5, or `/chat`, `/models`, `/status`, `/settings`, `/logs`.
@@ -193,12 +195,16 @@ ts5-tui --url http://ps5.local:8081  # another one
   format, in `~/.local/share/tokenstation/chats`. `/chats` lists them (and
   the TV service's, when you may read them), `/chats TEXT` finds one,
   `/open N` opens one to go on with it.
+- **A full chat says so**: when an answer stops because the chat filled the
+  model's context, a note under it says so (and Ctrl+N starts a new chat),
+  instead of a silently cut-off answer.
 
 It is a client of the API: it loads nothing itself and takes no GPU memory.
 Loading a model with Enter switches the API-only service's model (through
 the hw helper, so you need to be in the `tokenstation` group); with no
-server running, it starts `ts5 serve` with that model itself, which keeps
-serving after ts5-tui ends. With the TV app running, models are picked on
+server running, it starts `ts5 serve` with that model itself, at the
+longest context that fits (Settings → Context; up to 32,768 tokens for Qwen3 14B
+on the PS5), which keeps serving after ts5-tui ends. With the TV app running, models are picked on
 the TV.
 
 From a plain terminal (SSH), ts5-tui runs in its own tmux session, `ts5`,

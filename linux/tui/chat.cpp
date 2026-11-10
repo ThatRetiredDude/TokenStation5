@@ -581,7 +581,7 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
         if (v.n_ctx > 0) {
             const double f = (double)c.ctx_used / v.n_ctx;
             const uint32_t col = f > 0.9 ? t.bad : f > 0.75 ? t.warn : t.dim;
-            x = s.put(x + 2, y1, "ctx " + thousands(c.ctx_used) + " / " + thousands(v.n_ctx), Style(col));
+            x = s.put(x + 2, y1, "chat " + thousands(c.ctx_used) + " of " + thousands(v.n_ctx) + " tokens", Style(col));
         }
         if (!c.cands.empty()) {
             std::string list;
@@ -666,6 +666,8 @@ void run_answer(Chat *c, ChatRequest rq, std::string body) {
         }
         if (!j["choices"].a.empty()) {
             const ts5::Json &d = j["choices"].a[0]["delta"];
+            const std::string fr = j["choices"].a[0]["finish_reason"].str();
+            if (!fr.empty()) m.finish = fr;
             const std::string r = d["reasoning_content"].str(), t = d["content"].str();
             const double now = now_s();
             if (!r.empty() || !t.empty()) {
@@ -845,6 +847,8 @@ void complete(Chat &c, const ChatRequest &rq) {
 }
 
 }  // namespace
+
+std::string with_commas(int n) { return thousands(n); }
 
 void chat_note(Chat &c, const std::string &text) {
     std::lock_guard<std::mutex> l(c.mu);

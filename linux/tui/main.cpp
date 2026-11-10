@@ -998,8 +998,13 @@ void draw_top_bar() {
     if (!sv.model.empty())
         items.push_back({{{"helper ", lab}, {h.empty() ? "none" : h == "off" ? "off" : fit(h, 18), h.empty() || h == "off" ? lab : val}}, 4});
     if (sv.n_ctx > 0) {
+        // How full the chat is: yellow past three quarters, red past 90%.
         const int used = g->chat.ctx_used;
-        items.push_back({{{"ctx ", lab}, {fmt("%d/%dk", used, sv.n_ctx / 1024), val}}, 3});
+        const double f = (double)used / sv.n_ctx;
+        auto k = [](int n) { return n < 1000 ? fmt("%d", n) : fmt(n < 10000 ? "%.1fk" : "%.0fk", n / 1000.0); };
+        items.push_back({{{"chat ", lab},
+                          {k(used) + "/" + k(sv.n_ctx), Style(f > 0.9 ? t.bad : f > 0.75 ? t.warn : t.fg, t.panel2, BOLD)}},
+                         0});
     }
     if (g->last_gen_tps > 0) items.push_back({{{fmt("%.1f", g->last_gen_tps), Style(t.good, t.panel2, BOLD)}, {" tok/s", lab}}, 1});
     const Sensors &z = g->sens;
@@ -1634,11 +1639,11 @@ std::vector<SetRow> settings_rows() {
         r.push_back(x);
     }
     {
-        static const int v[] = {4096, 8192, 16384, 32768, 0};
-        SetRow x{"Context (own)", c.serve_ctx ? fmt("%d", c.serve_ctx) : "auto",
-                 "for a model ts5-tui starts itself; longer takes more GPU memory"};
+        static const int v[] = {0, 4096, 8192, 16384, 32768};
+        SetRow x{"Context", c.serve_ctx ? with_commas(c.serve_ctx) + " tokens" : "auto",
+                 "how long a chat can get; auto fits the most in GPU memory (models ts5-tui loads itself)"};
         x.change = [save](int d) {
-            int i = 1;
+            int i = 0;
             for (int k = 0; k < 5; k++)
                 if (v[k] == g->cfg.serve_ctx) i = k;
             g->cfg.serve_ctx = v[(i + d + 5) % 5];
@@ -2306,6 +2311,39 @@ void tick() {
         g->answers_saved = g->chat.answers;
         std::string why;
         if (!save_chat(g->chat, why)) show_toast("Chat not saved: " + why, g->th->bad, 6);
+    }
+    // An answer cut off by the length: say why, in the chat.
+    if (g->chat.answers_seen != g->chat.answers && !g->chat.busy()) {
+        g->chat.answers_seen = g->chat.answers;
+        std::string fin;
+        int total = 0, gen = 0;
+        {
+            std::lock_guard<std::mutex> l(g->chat.mu);
+            if (!g->chat.msgs.empty()) {
+                const Msg &m = g->chat.msgs.back();
+                if (m.role == "assistant" && m.error.empty() && !m.stopped) {
+                    fin = m.finish;
+                    total = m.total_tokens;
+                    gen = m.gen_tokens;
+                }
+            }
+        }
+        if (fin == "length") {
+            const ServerState sv = server();
+            if (g->cfg.max_tokens > 0 && gen >= g->cfg.max_tokens) {
+                chat_note(g->chat, fmt("**The answer stopped at %s tokens**, the answer length set in Settings. "
+                                       "Settings → Answer length → no limit lets answers run to the end.",
+                                       with_commas(g->cfg.max_tokens).c_str()));
+            } else {
+                std::string n = "**The chat is full**";
+                if (sv.n_ctx > 0) n += fmt(" (%s of %s tokens)", with_commas(std::min(total, sv.n_ctx)).c_str(), with_commas(sv.n_ctx).c_str());
+                n += ", so the answer stopped here, and the model can't take in more of this chat. "
+                     "**Ctrl+N** starts a new chat (this one is saved: `/chats` opens it again).";
+                if (own_server_pid() > 0 && g->cfg.serve_ctx > 0)
+                    n += " Or set Settings → Context to auto, the longest this model fits, and load it again.";
+                chat_note(g->chat, n);
+            }
+        }
     }
     // Logs follow the server (every 10 s, or at once after a change).
     if (g->logs_checked == 0 || t - g->logs_checked > 10) pick_logs();
