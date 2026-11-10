@@ -32,7 +32,7 @@ struct Config {
     int thinking = 0;       // 0 the model's choice, 1 on, 2 off
     double temp = -1;       // < 0: the model's own
     int max_tokens = 0;     // 0: no limit
-    int serve_ctx = 8192;   // for a model ts5-tui starts itself; 0 auto
+    int serve_ctx = 0;      // for a model ts5-tui starts itself; 0 auto (the most that fits)
     bool tmux = true;       // its own tmux session from a plain terminal
     std::string path;       // where it is saved
     void load();

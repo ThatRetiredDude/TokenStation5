@@ -10,6 +10,7 @@
 // machine's: run it on the PS5 (or over SSH to it) to see them.
 #include <signal.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -28,8 +29,10 @@
 #include <thread>
 
 #include "app.h"
+#include "catalog.h"  // ps5/catalog.h: the TV app's downloads, pinned and hashed
 #include "chat.h"
 #include "json.h"
+#include "store.h"
 
 #ifndef TS5_VERSION
 #define TS5_VERSION "dev"
@@ -77,11 +80,36 @@ struct App {
 
     std::vector<ModelFile> models;
     int model_sel = 0;
-    Proc loader, tuner, fanproc, logs;
+    Proc loader, tuner, fanproc, logs, downloader;
+    struct DlJob {
+        const app::CatalogEntry *cat = nullptr;  // a catalog model, or none for a URL of the user's
+        std::string name, file, url, sha256;     // name: on screen
+        double bytes = 0;                        // the size, when known before (the catalog's)
+    } dl;
+    bool dl_on = false;  // dl is what downloader fetches
+    // A yes/no question over the page (Enter or y: yes; Esc or n: no).
+    std::string ask_title, ask_text;
+    std::function<void()> ask_yes;
+    std::string dl_dir;
+    std::vector<SavedChat> chat_list;  // the last /chats
+    int answers_saved = 0;
     std::string load_target;  // what's loading, until /v1/models says so
     double load_t0 = 0;
     bool show_tune = false;
     int tune_scroll = 0;
+    // The job in the pane (tuning, the GPU check, the speed test), as steps.
+    struct JobStep {
+        std::string label, result;
+        int state = 0;  // 0 waiting, 1 running, 2 done, 3 skipped, 4 failed
+        int answers = 0, answered = 0;
+        double t0 = 0, t1 = 0;
+    };
+    std::vector<JobStep> job_steps;
+    std::string job_kind, job_model, job_detail, job_summary;
+    size_t job_parsed = 0;
+    double job_answer_secs = 0, job_last_answer = 0;
+    int job_answers_timed = 0;
+    bool job_reported = false;
 
     int set_sel = 0;
     bool editing = false;
@@ -255,8 +283,7 @@ void scan_models() {
     }
     // Biggest first: the models people chat with, then the small helpers.
     std::sort(out.begin(), out.end(), [](const ModelFile &a, const ModelFile &b) { return a.size > b.size; });
-    g->models = out;
-    if (g->model_sel >= (int)g->models.size()) g->model_sel = std::max(0, (int)g->models.size() - 1);
+    g->models = out;  // draw_models() keeps model_sel in range (the catalog's rows come after these)
 }
 
 std::string api_id(const std::string &file) {
@@ -355,6 +382,174 @@ void load_model(const ModelFile &m) {
     show_toast("Loading " + m.name + " (" + how + ")…", g->th->accent, 3);
 }
 
+// A helper-size file (a small model that drafts for a big one) as the main
+// model is seldom what's meant: ask first. The helper isn't loaded by hand:
+// it comes with the main model, as its tuned settings say (T on Models).
+void load_or_ask(const ModelFile &m) {
+    if (m.size >= 1.5 * 1024 * 1024 * 1024) {
+        load_model(m);
+        return;
+    }
+    const ServerState sv = server();
+    std::string now;
+    for (auto &x : g->models)
+        if (api_id(x.name) == sv.model) {
+            auto it = x.tune.find("TS5_DRAFT_MODEL");
+            now = it == x.tune.end() ? "" : it->second;
+        }
+    g->ask_title = " Load a helper-size model? ";
+    g->ask_text = api_id(m.name) + " is helper size. Loading it makes it the main model, in place of " +
+                  (sv.model.empty() ? std::string("none") : sv.model) +
+                  ". A helper isn't loaded by hand: it comes along with the big model, as its tuning picked (T on Models "
+                  "tunes it and picks the fastest helper)." +
+                  (sv.model.empty() ? "" : now.empty() ? " " + sv.model + " has no helper yet: press T on it."
+                                                       : " " + sv.model + "'s helper is " + api_id(now) + ".") +
+                  " Load " + api_id(m.name) + " as the main model?";
+    const ModelFile copy = m;
+    g->ask_yes = [copy] { load_model(copy); };
+}
+
+// A new job in the pane: its kind ("tune", "check", "bench") and the steps
+// known before it starts (ts5-tune sends its own).
+void job_begin(const std::string &kind, const std::string &model, const std::vector<std::string> &steps) {
+    g->job_kind = kind;
+    g->job_model = model;
+    g->job_steps.clear();
+    for (auto &l : steps) {
+        App::JobStep st;
+        st.label = l;
+        g->job_steps.push_back(st);
+    }
+    if (!g->job_steps.empty()) {
+        g->job_steps[0].state = 1;
+        g->job_steps[0].t0 = now_s();
+    }
+    g->job_detail.clear();
+    g->job_summary.clear();
+    g->job_parsed = 0;
+    g->job_answer_secs = 0;
+    g->job_answers_timed = 0;
+    g->job_last_answer = 0;
+    g->job_reported = false;
+}
+
+void job_step(int i, int state, const std::string &result = "") {
+    if (i < 0 || i >= (int)g->job_steps.size()) return;
+    App::JobStep &st = g->job_steps[i];
+    if (state == 1 && st.state != 1) st.t0 = now_s();
+    if (state >= 2) st.t1 = now_s();
+    st.state = state;
+    if (!result.empty()) st.result = result;
+    if (state == 1) g->job_detail.clear();
+}
+
+// The job's output since the last look: ts5-tune's progress lines, or the
+// check's and the speed test's own lines.
+void job_follow() {
+    Proc &p = g->tuner;
+    if (g->job_parsed > p.lines.size()) g->job_parsed = p.lines.size();
+    for (; g->job_parsed < p.lines.size(); g->job_parsed++) {
+        const std::string &l = p.lines[g->job_parsed];
+        if (l.rfind("@ts5-tune ", 0) == 0) {
+            ts5::Json j;
+            if (!ts5::Json::parse(l.substr(10), j)) continue;
+            const std::string ev = j["event"].str();
+            const int i = (int)j["step"].num(-1);
+            if (ev == "plan") {
+                g->job_steps.clear();
+                for (auto &st : j["steps"].a) {
+                    App::JobStep x;
+                    x.label = st["label"].str();
+                    x.answers = (int)st["answers"].num(0);
+                    g->job_steps.push_back(x);
+                }
+            } else if (ev == "step") {
+                const std::string sv = j["state"].str();
+                job_step(i, sv == "run" ? 1 : sv == "done" ? 2 : sv == "skip" ? 3 : 4, j["result"].str());
+                if (sv == "run") g->job_last_answer = now_s();
+            } else if (ev == "answer" && i >= 0 && i < (int)g->job_steps.size()) {
+                g->job_steps[i].answered = (int)j["n"].num(0);
+                const double now = now_s();
+                if (g->job_last_answer > 0) {
+                    g->job_answer_secs += now - g->job_last_answer;
+                    g->job_answers_timed++;
+                }
+                g->job_last_answer = now;
+            } else if (ev == "detail") {
+                g->job_detail = j["text"].str();
+            } else if (ev == "summary") {
+                g->job_summary = j["text"].str();
+            }
+            continue;
+        }
+        if (g->job_kind == "check" || g->job_kind == "bench") {
+            if (l.find(" layers, embd ") != std::string::npos) {
+                job_step(0, 2);
+                job_step(1, 1);
+            } else if (l.find("backend ready") != std::string::npos) {
+                job_step(1, 2);
+                job_step(2, 1);
+            } else if (l.rfind("ts5 check: ", 0) == 0) {
+                // "ts5 check: M, N tokens: …, same top token at A/N, …: PASS"
+                int a = 0, n = 0;
+                const size_t at = l.find("same top token at ");
+                if (at != std::string::npos) sscanf(l.c_str() + at + 18, "%d/%d", &a, &n);
+                const bool pass = l.size() >= 4 && l.compare(l.size() - 4, 4, "PASS") == 0;
+                g->job_summary = pass ? "Its answers on the GPU match the CPU's, so it runs correctly on this machine"
+                                      : "Its answers on the GPU are further from the CPU's than they should be: "
+                                        "please report it, with the lines below";
+                if (n > 0) g->job_summary += fmt(" (the same next word at %d of %d places).", a, n);
+                else g->job_summary += ".";
+            } else if (l.rfind("| ", 0) == 0 && l.find("| --- ") == std::string::npos &&
+                       l.find("tok/s |") == std::string::npos) {
+                // The bench's table row: | model | backend | prompt | writing |
+                std::vector<std::string> cells;
+                size_t a = 1;
+                for (size_t b; (b = l.find('|', a)) != std::string::npos; a = b + 1) cells.push_back(l.substr(a, b - a));
+                if (cells.size() >= 4)
+                    g->job_summary = fmt("It reads prompts at %.0f tokens a second and writes at %.1f tokens a second.",
+                                         atof(cells[2].c_str()), atof(cells[3].c_str()));
+            }
+        }
+    }
+    // The end: what's still running ends with it.
+    if (p.done && p.t1 > 0 && !g->job_reported) {
+        g->job_reported = true;
+        for (int i = 0; i < (int)g->job_steps.size(); i++) {
+            App::JobStep &st = g->job_steps[i];
+            if (st.state == 1) job_step(i, p.status == 0 ? 2 : 4, p.status == 130 ? "stopped" : "");
+            else if (st.state == 0 && p.status == 0 && g->job_kind != "tune") job_step(i, 2);
+        }
+        const std::string what = g->job_kind == "tune" ? "Tuning " : g->job_kind == "check" ? "The GPU check of " : "The speed test of ";
+        if (p.status == 0) {
+            show_toast(what + g->job_model + " is done", g->th->good, 6);
+            chat_note(g->chat, "**" + what + g->job_model + " is done.** " + g->job_summary +
+                                   (g->job_kind == "tune" ? " The new settings are used from the next time it loads." : ""));
+        } else if (p.status != 130) {
+            show_toast(what + g->job_model + " didn't finish: the Models page shows why", g->th->bad, 10);
+            g->show_tune = true;
+        }
+    }
+}
+
+// Seconds left, from the answers still to write and how long one took; -1
+// before there's anything to go by.
+double job_eta() {
+    if (g->job_answers_timed == 0) return -1;
+    const double per = g->job_answer_secs / g->job_answers_timed;
+    int left = 0;
+    for (auto &st : g->job_steps)
+        if (st.state == 0 || st.state == 1) left += std::max(0, st.answers - st.answered);
+    return left * per;
+}
+
+std::string mins(double secs) {
+    const int s = (int)(secs + 0.5);
+    if (s < 60) return fmt("%d s", s);
+    if (s < 3600) return fmt("%d min %02d s", s / 60, s % 60);
+    return fmt("%d h %02d min", s / 3600, s / 60 % 60);
+}
+
 void start_tune(const ModelFile &m) {
     if (g->tuner.running()) {
         g->show_tune = true;
@@ -372,12 +567,245 @@ void start_tune(const ModelFile &m) {
     std::string pre;
     // ts5-tune needs the GPU's memory: a ts5 serve of our own steps aside.
     if (pid_t own = own_server_pid(); own > 0) pre = fmt("kill %d; sleep 1; ", own);
-    g->tuner.start(pre + shell_quote(tune) + " --models " + shell_quote(m.path), "Tuning " + m.name);
+    g->tuner.start(pre + "TS5_TUNE_PROGRESS=1 " + shell_quote(tune) + " --models " + shell_quote(m.path),
+                   "Tuning " + api_id(m.name));
+    job_begin("tune", api_id(m.name), {"Getting ready"});
     if (unit_active("tokenstation") || unit_active("tokenstation-tv"))
         g->tuner.lines.push_back("Note: the TokenStation service holds a model in GPU memory. If the tuning runs "
                                  "out of memory, stop it first: sudo systemctl stop tokenstation");
     g->show_tune = true;
     g->tune_scroll = 0;
+}
+
+// The GPU check or the speed test, in the same pane as the tuning.
+void start_gpu_job(const ModelFile &m, bool check) {
+    if (g->tuner.running()) {
+        g->show_tune = true;
+        show_toast("One job at a time: X stops this one", g->th->warn, 4);
+        return;
+    }
+    const std::string ts5 = which("ts5");
+    if (ts5.empty()) {
+        show_toast("ts5 isn't installed here", g->th->bad);
+        return;
+    }
+    std::string pre;
+    if (pid_t own = own_server_pid(); own > 0) pre = fmt("kill %d; sleep 1; ", own);
+    const std::string cmd = shell_quote(ts5) + (check ? " check -m " : " bench -m ") + shell_quote(m.path) + " 2>&1";
+    g->tuner.start(pre + cmd, (check ? "GPU check of " : "Speed test of ") + api_id(m.name));
+    if (check)
+        job_begin("check", api_id(m.name),
+                  {"Opening the model", "Loading it onto the GPU",
+                   "Comparing the GPU's answers with the CPU's (a few minutes the first time)"});
+    else
+        job_begin("bench", api_id(m.name),
+                  {"Opening the model", "Loading it onto the GPU", "Reading a 512-token test prompt, then writing 128 tokens"});
+    if (unit_active("tokenstation") || unit_active("tokenstation-tv"))
+        g->tuner.lines.push_back("Note: the TokenStation service holds a model in GPU memory. If this runs out of "
+                                 "memory, stop it first: sudo systemctl stop tokenstation");
+    g->show_tune = true;
+    g->tune_scroll = 0;
+}
+
+// ---- downloads from the catalog (ps5/catalog.h) ----
+
+std::string lower(std::string v) {
+    for (auto &ch : v) ch = (char)tolower((unsigned char)ch);
+    return v;
+}
+
+// The catalog's models that no file here is already (matched as the TV app
+// matches them: CatalogEntry::same in the file's name).
+std::vector<const app::CatalogEntry *> catalog_missing() {
+    std::vector<const app::CatalogEntry *> out;
+    for (const app::CatalogEntry &e : app::kCatalog) {
+        if (e.kind != app::CatalogEntry::Model) continue;
+        bool have = false;
+        for (auto &m : g->models) have = have || lower(m.name).find(e.same) != std::string::npos;
+        if (!have || (g->dl_on && g->dl.cat == &e)) out.push_back(&e);
+    }
+    return out;
+}
+
+const app::CatalogEntry *find_catalog(const std::string &q) {
+    const std::string lq = lower(q);
+    const app::CatalogEntry *hit = nullptr;
+    for (const app::CatalogEntry &e : app::kCatalog) {
+        if (e.kind != app::CatalogEntry::Model) continue;
+        if (lower(e.key) == lq || lower(e.name) == lq || lower(e.file) == lq) return &e;
+        if (!hit && !lq.empty() &&
+            (lower(e.key).find(lq) != std::string::npos || lower(e.name).find(lq) != std::string::npos))
+            hit = &e;
+    }
+    return hit;
+}
+
+// Where a download goes: the service's folder when it runs and this user may
+// write there, else the desktop app's (its data folder's models/).
+std::string download_dir() {
+    const std::string svc = service_models_dir();
+    if ((unit_active("tokenstation") || unit_active("tokenstation-tv")) && access(svc.c_str(), W_OK) == 0) return svc;
+    if (const char *e = getenv("TS5_MODELS"); e && *e) return e;
+    return data_dir() + "/models";
+}
+
+double free_bytes(const std::string &dir) {
+    struct statvfs v;
+    if (statvfs(dir.c_str(), &v) != 0) return -1;
+    return (double)v.f_bavail * (double)v.f_frsize;
+}
+
+double part_bytes(const std::string &dir, const std::string &file) {
+    struct stat st;
+    return stat((dir + "/." + file + ".part").c_str(), &st) == 0 ? (double)st.st_size : 0;
+}
+
+bool downloading(const app::CatalogEntry &e) { return g->dl_on && g->dl.cat == &e && g->downloader.running(); }
+
+// Downloads job into download_dir() with ts5 fetch: into .FILE.part, going
+// on from one a stopped download left, kept only once the size (and the
+// SHA-256, when known) match.
+void start_fetch(const App::DlJob &job) {
+    if (g->downloader.running()) {
+        show_toast(g->dl.file == job.file ? "Already downloading it"
+                                          : "One download at a time: " + g->dl.name + " is downloading (X on Models stops it)",
+                   g->th->warn, 5);
+        return;
+    }
+    const std::string ts5 = which("ts5");
+    if (ts5.empty()) {
+        show_toast("ts5 isn't installed here", g->th->bad);
+        return;
+    }
+    const std::string dir = download_dir();
+    if (!make_dirs(dir)) {
+        show_toast("Can't make " + dir, g->th->bad, 6);
+        return;
+    }
+    if (file_exists(dir + "/" + job.file)) {
+        show_toast(job.file + " is already in " + dir, g->th->warn, 5);
+        return;
+    }
+    const double have = free_bytes(dir);
+    if (job.bytes > 0) {
+        const double need = job.bytes - part_bytes(dir, job.file);
+        if (have >= 0 && have < need + 512.0 * 1024 * 1024) {
+            show_toast("Not enough space in " + dir + ": it needs " + gib(need) + ", " + gib(have) + " is free",
+                       g->th->bad, 8);
+            return;
+        }
+    }
+    std::string cmd = shell_quote(ts5) + " fetch " + shell_quote(job.url) + " " + shell_quote(dir + "/" + job.file);
+    if (!job.sha256.empty()) cmd += " --sha256 " + job.sha256;
+    g->downloader.start(cmd + " 2>&1", "Downloading " + job.name);
+    g->dl = job;
+    g->dl_on = true;
+    g->dl_dir = dir;
+    std::string msg = "Downloading " + job.name + (job.bytes > 0 ? " (" + gib(job.bytes) + ")" : "") + " to " + dir;
+    if (job.bytes <= 0 && have >= 0) msg += " (" + gib(have) + " free)";
+    if (job.sha256.empty()) msg += ". No --sha256: only its size is checked";
+    show_toast(msg, job.sha256.empty() ? g->th->warn : g->th->accent, 5);
+}
+
+void start_download(const app::CatalogEntry &e) {
+    App::DlJob j;
+    j.cat = &e;
+    j.name = e.name;
+    j.file = e.file;
+    j.url = std::string("https://huggingface.co/") + e.repo + "/resolve/" + e.commit + "/" + e.path;
+    j.sha256 = e.sha256;
+    j.bytes = (double)e.bytes;
+    start_fetch(j);
+}
+
+// "/download URL [FILE] [--sha256 HEX]", also as `ts5 fetch` takes it (a
+// "ts5 fetch" in front is fine): a model from anywhere, Hugging Face's
+// /blob/ links too. FILE is a name only; it goes where downloads go.
+bool parse_fetch(const std::string &arg, App::DlJob &j, std::string &why) {
+    std::vector<std::string> w;
+    std::istringstream in(arg);
+    for (std::string x; in >> x;) w.push_back(x);
+    size_t i = 0;
+    if (i < w.size() && w[i] == "ts5") i++;
+    if (i < w.size() && w[i] == "fetch") i++;
+    for (; i < w.size(); i++) {
+        if (w[i] == "--sha256" && i + 1 < w.size()) j.sha256 = lower(w[++i]);
+        else if (j.url.empty() && (w[i].rfind("https://", 0) == 0 || w[i].rfind("http://", 0) == 0)) j.url = w[i];
+        else if (j.file.empty() && w[i].rfind("--", 0) != 0) j.file = w[i];
+        else {
+            why = "`" + w[i] + "` isn't something /download takes";
+            return false;
+        }
+    }
+    if (j.url.empty()) {
+        why = "no URL";
+        return false;
+    }
+    // A Hugging Face page link ("blob") as its download link ("resolve").
+    if (j.url.find("huggingface.co/") != std::string::npos) {
+        const size_t b = j.url.find("/blob/");
+        if (b != std::string::npos) j.url.replace(b, 6, "/resolve/");
+    }
+    if (j.file.empty()) {
+        std::string path = j.url.substr(0, j.url.find_first_of("?#"));
+        j.file = path.substr(path.rfind('/') + 1);
+    } else if (j.file.find('/') != std::string::npos) {
+        j.file = j.file.substr(j.file.rfind('/') + 1);
+    }
+    if (j.file.empty() || j.file[0] == '.' || j.file.find_first_not_of(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+-") != std::string::npos) {
+        why = "`" + j.file + "` isn't a plain file name: give one after the URL";
+        return false;
+    }
+    if (j.file.size() < 6 || strcasecmp(j.file.c_str() + j.file.size() - 5, ".gguf") != 0) {
+        why = "`" + j.file + "` isn't a .gguf (the models are .gguf files): give the name after the URL";
+        return false;
+    }
+    if (!j.sha256.empty() && (j.sha256.size() != 64 || j.sha256.find_first_not_of("0123456789abcdef") != std::string::npos)) {
+        why = "--sha256 takes the file's 64 hex digits";
+        return false;
+    }
+    j.name = api_id(j.file);
+    return true;
+}
+
+// The download's progress: bytes so far, the size (0: not known yet) and MB/s,
+// from the .part and ts5 fetch's lines ("ts5: fetch: X of Y MB, Z MB/s").
+void download_progress(double &done, double &total, double &mbps) {
+    done = g->dl_on ? part_bytes(g->dl_dir, g->dl.file) : 0;
+    total = g->dl.bytes;
+    mbps = 0;
+    const std::string l = g->downloader.last_line();
+    const size_t c = l.rfind(", ");
+    if (c != std::string::npos) mbps = atof(l.c_str() + c + 2);
+    const size_t of = l.find(" of ");
+    if (total <= 0 && of != std::string::npos) total = atof(l.c_str() + of + 4) * 1e6;
+}
+
+void finish_download() {
+    if (!g->dl_on || !g->downloader.done || g->downloader.t1 <= 0) return;
+    const App::DlJob job = g->dl;
+    const std::string dir = g->dl_dir;
+    std::string why;
+    for (auto it = g->downloader.lines.rbegin(); it != g->downloader.lines.rend() && why.empty(); ++it)
+        if (it->find("failed") != std::string::npos) why = *it;
+    const int st = g->downloader.status;
+    g->dl_on = false;
+    g->downloader = Proc();
+    scan_models();
+    if (st != 0) {
+        if (why.empty()) why = "stopped";
+        if (why.rfind("ts5: ", 0) == 0) why = why.substr(5);
+        show_toast(job.name + ": " + why + ". Download it again to go on from where it stopped.", g->th->bad, 8);
+        return;
+    }
+    for (int i = 0; i < (int)g->models.size(); i++)
+        if (g->models[i].name == job.file) g->model_sel = i;
+    if (unit_active("tokenstation") && dir != service_models_dir())
+        chat_note(g->chat, "Downloaded **" + job.name + "** to `" + dir + "`. The service reads `" +
+                               service_models_dir() + "`; to serve it there:\n\n```\nsudo mv " + dir + "/" + job.file +
+                               " " + service_models_dir() + "/\n```");
+    show_toast("Downloaded " + job.name + ": Enter on Models loads it", g->th->good, 6);
 }
 
 void set_fan(const std::string &mode) {
@@ -527,7 +955,36 @@ void draw_top_bar() {
     std::vector<Item> items;
     const Style lab(t.dim, t.panel2), val(t.fg, t.panel2, BOLD);
     const ServerState sv = server();
-    {
+    // A job (tuning, the GPU check, the speed test) stops our own server, so
+    // while one runs, it's what the bar says instead of "offline".
+    if (g->tuner.running()) {
+        static const char *spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+        const std::string what = g->job_kind == "tune" ? "tuning " : g->job_kind == "check" ? "checking " : "speed test of ";
+        int done = 0;
+        for (auto &st : g->job_steps) done += st.state >= 2;
+        const int secs = (int)(now_s() - g->tuner.t0);
+        std::string more = fmt(" · %d:%02d", secs / 60, secs % 60);
+        if (g->job_steps.size() > 1) more = fmt(" · step %d of %d", std::min(done + 1, (int)g->job_steps.size()), (int)g->job_steps.size()) + more;
+        items.push_back({{{std::string(spin[(int)(now_s() * 10) % 10]) + " ", Style(t.warn, t.panel2, BOLD)},
+                          {what + fit(g->job_model, 30), Style(t.warn, t.panel2, BOLD)},
+                          {more, Style(t.warn, t.panel2)}},
+                         -1});
+    }
+    if (g->downloader.running() && g->dl_on) {
+        double done, total, mbps;
+        download_progress(done, total, mbps);
+        std::string more = total > 0 ? fmt(" %.0f%%", 100 * std::min(done, total) / total) : "";
+        if (mbps > 0 && total > done) {
+            const int left = (int)((total - done) / 1e6 / mbps) + 1;
+            more += fmt(" · %d:%02d left", left / 60, left % 60);
+        } else if (total > 0 && done >= total) {
+            more += " · checking";
+        }
+        items.push_back({{{"⇣ ", Style(t.accent2, t.panel2, BOLD)}, {fit(g->dl.name, 20), Style(t.accent2, t.panel2, BOLD)},
+                          {more, Style(t.accent2, t.panel2)}},
+                         -1});
+    }
+    if (!(g->tuner.running() && sv.polled && !sv.online)) {
         Item it{{}, 0};
         if (!sv.polled) it.parts = {{"● ", Style(t.dim, t.panel2)}, {"connecting…", lab}};
         else if (!sv.online) it.parts = {{"● ", Style(t.bad, t.panel2, BOLD)}, {"offline", Style(t.bad, t.panel2, BOLD)}};
@@ -538,11 +995,16 @@ void draw_top_bar() {
         items.push_back(it);
     }
     const std::string h = helper_now();
-    if (!sv.model.empty() && !h.empty())
-        items.push_back({{{"helper ", lab}, {h == "off" ? "off" : fit(h, 18), val}}, 4});
+    if (!sv.model.empty())
+        items.push_back({{{"helper ", lab}, {h.empty() ? "none" : h == "off" ? "off" : fit(h, 18), h.empty() || h == "off" ? lab : val}}, 4});
     if (sv.n_ctx > 0) {
+        // How full the chat is: yellow past three quarters, red past 90%.
         const int used = g->chat.ctx_used;
-        items.push_back({{{"ctx ", lab}, {fmt("%d/%dk", used, sv.n_ctx / 1024), val}}, 3});
+        const double f = (double)used / sv.n_ctx;
+        auto k = [](int n) { return n < 1000 ? fmt("%d", n) : fmt(n < 10000 ? "%.1fk" : "%.0fk", n / 1000.0); };
+        items.push_back({{{"chat ", lab},
+                          {k(used) + "/" + k(sv.n_ctx), Style(f > 0.9 ? t.bad : f > 0.75 ? t.warn : t.fg, t.panel2, BOLD)}},
+                         0});
     }
     if (g->last_gen_tps > 0) items.push_back({{{fmt("%.1f", g->last_gen_tps), Style(t.good, t.panel2, BOLD)}, {" tok/s", lab}}, 1});
     const Sensors &z = g->sens;
@@ -581,7 +1043,21 @@ void draw_bottom_bar(const std::string &hints) {
     const Theme &t = *g->th;
     const int y = s.h - 1;
     s.fill(0, y, s.w, 1, Style(t.dim, t.panel));
-    // Hints: "Key action|Key action", the keys brighter.
+    // On the right, always: how to leave (and, in ts5's tmux session, how to
+    // leave it running).
+    const char *tm = getenv("TS5_TUI_TMUX");
+    const bool in_tmux = tm && *tm;
+    const int right_w = in_tmux ? 31 : 13;
+    {
+        int rx = s.w - right_w;
+        if (in_tmux) {
+            rx = s.put(rx, y, "Ctrl+A d", Style(t.accent2, t.panel, BOLD));
+            rx = s.put(rx, y, " detach  ", Style(t.dim, t.panel));
+        }
+        rx = s.put(rx, y, "Ctrl+Q", Style(t.accent2, t.panel, BOLD));
+        s.put(rx, y, " quit", Style(t.dim, t.panel));
+    }
+    // Hints: "Key action|Key action", the keys brighter, as many as fit.
     int x = 1;
     std::stringstream ss(hints);
     std::string part;
@@ -590,15 +1066,12 @@ void draw_bottom_bar(const std::string &hints) {
         const size_t sp = part.find(' ');
         const std::string key = sp == std::string::npos ? part : part.substr(0, sp);
         const std::string what = sp == std::string::npos ? "" : part.substr(sp);
-        if (x + text_width(key + what) + 3 > s.w - 1) break;
+        if (x + text_width(key + what) + 3 > s.w - right_w - 1) break;
         if (!first) x = s.put(x, y, "  ", Style(t.dim, t.panel));
         x = s.put(x, y, key, Style(t.accent2, t.panel, BOLD));
         x = s.put(x, y, what, Style(t.dim, t.panel));
         first = false;
     }
-    // In ts5's tmux session: its prefix key, for detaching.
-    const char *tm = getenv("TS5_TUI_TMUX");
-    if (tm && *tm && s.w - x > 24) s.put(s.w - 22, y, "Ctrl+A d  detach", Style(t.dim, t.panel));
 }
 
 int body_top() {
@@ -752,7 +1225,7 @@ void draw_status() {
         if (g->gen_hist.empty())
             s.put(ix + 26, y + 2, fit(e.local() ? "every answer the server gives shows up here" : "from this app's chats", iw - 27), S(t.dim, ITALIC));
     }
-    draw_bottom_bar("F fan auto/cool/max|Tab next screen|Q quit");
+    draw_bottom_bar("Tab/1-5 pages|F fan auto/cool/early/max");
 }
 
 // ---- Models ----
@@ -775,25 +1248,96 @@ void draw_tune_pane() {
     const int x = (s.w - w) / 2, y = top + 1;
     Proc &p = g->tuner;
     const double secs = (p.done ? p.t1 : now_s()) - p.t0;
-    std::string title = p.title + fmt(" · %d:%02d", (int)secs / 60, (int)secs % 60);
-    if (p.done) title += p.status == 0 ? " · done" : fmt(" · ended (%d)", p.status);
-    box(s, x, y, w, h, S(p.done ? (p.status == 0 ? t.good : t.bad) : t.accent), Style(t.fg, t.panel), title,
-        S(p.done ? (p.status == 0 ? t.good : t.bad) : t.accent, BOLD));
-    std::vector<std::string> lines = p.lines;
-    if (!p.partial.empty()) lines.push_back(p.partial);
-    const int rows = h - 2;
-    const int start = std::max(0, (int)lines.size() - rows - g->tune_scroll);
-    for (int i = 0; i < rows && start + i < (int)lines.size(); i++) {
-        const std::string &l = lines[start + i];
-        uint32_t c = t.fg;
-        if (l.find("FAIL") != std::string::npos || l.find("rror") != std::string::npos) c = t.bad;
-        else if (l.find("tok/s") != std::string::npos) c = t.good;
-        else if (l.rfind("Note:", 0) == 0) c = t.warn;
-        s.put(x + 2, y + 1 + i, fit(l, w - 4), Style(c, t.panel));
+    const bool ok = p.status == 0, stopped = p.status == 130;
+    const uint32_t frame = !p.done ? t.accent : ok ? t.good : stopped ? t.warn : t.bad;
+    std::string title = p.title + " · " + mins(secs);
+    if (p.done) title += ok ? " · done" : stopped ? " · stopped" : " · didn't finish";
+    box(s, x, y, w, h, S(frame), Style(t.fg, t.panel), title, S(frame, BOLD));
+    int yy = y + 1;
+    const int iw = w - 4;
+    // What's going on now, in words.
+    static const char *spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+    int cur = -1, n_done = 0;
+    for (int i = 0; i < (int)g->job_steps.size(); i++) {
+        if (g->job_steps[i].state == 1 && cur < 0) cur = i;
+        if (g->job_steps[i].state >= 2) n_done++;
     }
     if (!p.done) {
-        static const char *spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
-        s.put(x + w - 4, y, spin[(int)(now_s() * 10) % 10], Style(t.accent2, t.panel));
+        int xx = s.put(x + 2, yy, spin[(int)(now_s() * 10) % 10], Style(t.accent2, t.panel, BOLD));
+        std::string now = cur >= 0 ? g->job_steps[cur].label : "Working";
+        if (!g->job_detail.empty()) now += ": " + g->job_detail;
+        s.put(xx + 1, yy++, fit("Working: " + now, iw - 2), Style(t.fg, t.panel, BOLD));
+        std::string when;
+        if (cur >= 0 && g->job_steps[cur].answers > 0)
+            when = fmt("test answer %d of %d · ", std::min(g->job_steps[cur].answered + 1, g->job_steps[cur].answers),
+                       g->job_steps[cur].answers);
+        when += mins(secs) + " so far";
+        if (!g->job_steps.empty()) when += fmt(" · step %d of %d", std::min(n_done + 1, (int)g->job_steps.size()),
+                                               (int)g->job_steps.size());
+        const double eta = job_eta();
+        if (eta >= 0) when += " · about " + mins(eta) + " left";
+        else if (g->job_kind == "tune") when += " · the time left shows after the first test answer";
+        s.put(x + 4, yy++, fit(when, iw - 2), Style(t.dim, t.panel));
+    } else {
+        const std::string head = ok ? "✓ Done in " + mins(secs) : stopped ? "Stopped after " + mins(secs) + ": nothing was changed"
+                                                                       : "✗ It didn't finish (after " + mins(secs) + ")" +
+                                                                         (g->job_summary.empty() ? ": the lines below say why" : "");
+        s.put(x + 2, yy++, fit(head, iw), Style(ok ? t.good : stopped ? t.warn : t.bad, t.panel, BOLD));
+        if (!g->job_summary.empty()) {
+            // The summary, wrapped.
+            std::istringstream in(g->job_summary);
+            std::string word, line;
+            int shown = 0;
+            while (in >> word && shown < 3) {
+                if (!line.empty() && text_width(line + " " + word) > iw - 2) {
+                    s.put(x + 4, yy++, line, Style(t.fg, t.panel));
+                    shown++;
+                    line.clear();
+                }
+                line += (line.empty() ? "" : " ") + word;
+            }
+            if (!line.empty() && shown < 3) s.put(x + 4, yy++, line, Style(t.fg, t.panel));
+        }
+    }
+    yy++;
+    // The checklist.
+    const int raw_min = 4;  // rows kept for the program's own lines
+    const int list_rows = std::max(1, std::min((int)g->job_steps.size(), y + h - 1 - yy - raw_min - 1));
+    int first = 0;
+    if ((int)g->job_steps.size() > list_rows) first = std::max(0, std::min(cur < 0 ? n_done : cur, (int)g->job_steps.size() - list_rows));
+    for (int i = first; i < (int)g->job_steps.size() && i < first + list_rows; i++, yy++) {
+        const App::JobStep &st = g->job_steps[i];
+        const char *mark = st.state == 0 ? "○" : st.state == 1 ? spin[(int)(now_s() * 10) % 10] : st.state == 2 ? "✓" : st.state == 3 ? "–" : "✗";
+        const uint32_t mc = st.state == 0 ? t.dim : st.state == 1 ? t.accent2 : st.state == 2 ? t.good : st.state == 3 ? t.dim : t.bad;
+        s.put(x + 2, yy, mark, Style(mc, t.panel, BOLD));
+        std::string right;
+        if (st.state == 1 && st.answers > 0) right = fmt("%d of %d", st.answered, st.answers);
+        else if (!st.result.empty()) right = st.result;
+        if (st.state >= 2 && st.t1 > st.t0 && st.t0 > 0) right += (right.empty() ? "" : " · ") + mins(st.t1 - st.t0);
+        const int rw = std::min(text_width(right), iw * 2 / 5);
+        const int lw = iw - 3 - (rw ? rw + 2 : 0);
+        s.put(x + 4, yy, fit(st.label, lw), Style(st.state == 0 ? t.dim : t.fg, t.panel, st.state == 1 ? BOLD : 0));
+        if (rw) s.put(x + w - 2 - rw, yy, fit(right, rw), Style(mc, t.panel));
+    }
+    if (first + list_rows < (int)g->job_steps.size())
+        s.put(x + 4, yy++, fmt("… and %d more", (int)g->job_steps.size() - first - list_rows), Style(t.dim, t.panel));
+    yy++;
+    // The program's own lines, last ones, small.
+    const int rows = y + h - 1 - yy - 1;
+    if (rows > 0) {
+        s.put(x + 2, yy++, fit("What it prints (PgUp/PgDn scroll):", iw), Style(t.dim, t.panel, ITALIC));
+        std::vector<std::string> lines;
+        for (auto &l : p.lines)
+            if (l.rfind("@ts5-tune ", 0) != 0) lines.push_back(l);
+        if (!p.partial.empty() && p.partial.rfind("@ts5-tune ", 0) != 0) lines.push_back(p.partial);
+        const int start = std::max(0, (int)lines.size() - rows - g->tune_scroll);
+        for (int i = 0; i < rows && start + i < (int)lines.size(); i++) {
+            const std::string &l = lines[start + i];
+            uint32_t c = mix(t.fg, t.panel, 0.35);
+            if (l.find("FAIL") != std::string::npos || l.find("rror") != std::string::npos) c = t.bad;
+            else if (l.rfind("Note:", 0) == 0) c = t.warn;
+            s.put(x + 2, yy + i, fit(l, iw), Style(c, t.panel));
+        }
     }
 }
 
@@ -803,7 +1347,7 @@ void draw_models() {
     const int top = body_top();
     if (g->show_tune) {
         draw_tune_pane();
-        draw_bottom_bar(g->tuner.running() ? "Esc hide (keeps tuning)|X stop tuning|PgUp/PgDn scroll"
+        draw_bottom_bar(g->tuner.running() ? "Esc hide (it keeps running)|X stop it|PgUp/PgDn scroll"
                                            : "Esc close|PgUp/PgDn scroll");
         return;
     }
@@ -817,7 +1361,13 @@ void draw_models() {
         s.put(x0 + 25, y, fmt("%s loading %s… %.0f s", spin[(int)(now_s() * 6) % 4], g->load_target.c_str(),
                               now_s() - g->load_t0), S(t.accent2, BOLD));
     } else if (g->tuner.running()) {
-        s.put(x0 + 25, y, "⚙ tuning in the background (T to watch)", S(t.accent2));
+        s.put(x0 + 25, y, "⚙ " + g->tuner.title + " in the background (T to watch)", S(t.accent2));
+    } else if (g->downloader.running() && g->dl_on) {
+        double done, total, mbps;
+        download_progress(done, total, mbps);
+        s.put(x0 + 25, y,
+              fit("⇣ " + g->dl.name + (total > 0 ? fmt(" %.0f%%", 100.0 * done / total) : " " + gib(done)), w - 26),
+              S(t.accent2));
     }
     y += 2;
     const int name_w = std::max(20, w - 46);
@@ -826,17 +1376,79 @@ void draw_models() {
     s.put(x0 + 3 + name_w + 10, y, "Helper (tuned)", S(t.dim, BOLD));
     s.put(x0 + 3 + name_w + 30, y, "Tuned", S(t.dim, BOLD));
     y++;
+    const auto cat = catalog_missing();
+    const int nl = (int)g->models.size(), nc = (int)cat.size(), n = nl + nc;
+    if (g->model_sel >= n) g->model_sel = std::max(0, n - 1);
     if (g->models.empty()) {
-        y++;
-        s.put(x0 + 3, y++, "No .gguf files found.", S(t.warn, BOLD));
+        s.put(x0 + 3, y++, "No .gguf files here yet: download one below.", S(t.warn, BOLD));
         for (auto &d : model_dirs()) s.put(x0 + 5, y++, fit("looked in " + d, w - 6), S(t.dim));
-        s.put(x0 + 3, y + 1, "Download models on the TV app's Models page, or copy a .gguf into one of these folders.", S(t.dim));
+        y++;
     }
     const int detail_h = 8;
     const int rows = std::max(1, s.h - 1 - y - detail_h - 1);
-    const int n = (int)g->models.size();
-    int first = std::max(0, std::min(g->model_sel - rows / 2, n - rows));
-    for (int i = first; i < n && i < first + rows; i++, y++) {
+    // The rows on screen: the files here, a divider, then the catalog's (-1: the divider).
+    std::vector<int> disp;
+    for (int i = 0; i < nl; i++) disp.push_back(i);
+    const bool url_dl = g->dl_on && !g->dl.cat;  // a /download URL, shown under the catalog
+    if (nc || url_dl) {
+        disp.push_back(-1);
+        for (int i = 0; i < nc; i++) disp.push_back(nl + i);
+        if (url_dl) disp.push_back(-2);
+    }
+    int sel_row = 0;
+    for (int r = 0; r < (int)disp.size(); r++)
+        if (disp[r] == g->model_sel) sel_row = r;
+    const int nd = (int)disp.size();
+    int first = std::max(0, std::min(sel_row - rows / 2, nd - rows));
+    for (int r = first; r < nd && r < first + rows; r++, y++) {
+        const int i = disp[r];
+        if (i == -2) {
+            double done, total, mbps;
+            download_progress(done, total, mbps);
+            s.put(x0 + 1, y, g->downloader.running() ? "⇣" : "·", S(t.accent2, BOLD));
+            s.put(x0 + 3, y, fit(g->dl.name, name_w - 1), S(t.fg));
+            if (total > 0) {
+                s.put(x0 + 3 + name_w, y, fmt("%8s", gib(total).c_str()), S(t.fg));
+                bar(s, x0 + 3 + name_w + 10, y, 18, done / total, {t.accent, t.accent2}, mix(t.dim, t.bg, 0.6));
+                s.put(x0 + 3 + name_w + 30, y, fit(fmt("%.0f%% %.0f MB/s", 100 * done / total, mbps), w - name_w - 34),
+                      S(t.accent2));
+            } else {
+                s.put(x0 + 3 + name_w + 10, y, fit("starting… " + gib(done), w - name_w - 14), S(t.dim));
+            }
+            continue;
+        }
+        if (i < 0) {
+            s.put(x0 + 1, y, "⇣ Download", S(t.accent, BOLD));
+            s.put(x0 + 13, y, fit("from the catalog: pinned on Hugging Face, checked by SHA-256 · to " + download_dir(),
+                                   w - 14),
+                  S(t.dim));
+            continue;
+        }
+        if (i >= nl) {
+            const app::CatalogEntry &e = *cat[i - nl];
+            const bool on = i == g->model_sel;
+            const Style row = on ? Style(t.fg, t.panel2) : Style(t.fg, t.bg);
+            s.fill(x0, y, w, 1, row);
+            s.put(x0, y, on ? "▌" : " ", Style(t.accent, row.bg));
+            const bool going = downloading(e);
+            s.put(x0 + 1, y, going ? "⇣" : "+", Style(going ? t.accent2 : t.dim, row.bg, BOLD));
+            s.put(x0 + 3, y, fit(e.name, name_w - 1), Style(t.fg, row.bg));
+            s.put(x0 + 3 + name_w, y, fmt("%8s", gib((double)e.bytes).c_str()), Style(t.fg, row.bg));
+            if (going) {
+                double done, total, mbps;
+                download_progress(done, total, mbps);
+                const double frac = done / std::max(1.0, (double)e.bytes);
+                bar(s, x0 + 3 + name_w + 10, y, 18, frac, {t.accent, t.accent2}, mix(t.dim, row.bg, 0.6));
+                s.put(x0 + 3 + name_w + 30, y, fit(fmt("%.0f%% %.0f MB/s", frac * 100, mbps), w - name_w - 34),
+                      Style(t.accent2, row.bg));
+            } else {
+                s.put(x0 + 3 + name_w + 10, y, fit(e.good_for, 19), Style(t.dim, row.bg));
+                const double part = part_bytes(download_dir(), e.file);
+                s.put(x0 + 3 + name_w + 30, y, part > 0 ? fmt("%.0f%% so far", 100 * part / (double)e.bytes) : "↵ download",
+                      Style(part > 0 ? t.warn : t.dim, row.bg, ITALIC));
+            }
+            continue;
+        }
         const ModelFile &m = g->models[i];
         const bool on = i == g->model_sel;
         const bool loaded = api_id(m.name) == sv.model;
@@ -855,7 +1467,54 @@ void draw_models() {
               Style(m.tune.empty() ? t.dim : t.good, row.bg));
     }
     // The chosen one's details.
-    if (n > 0) {
+    if (g->model_sel >= nl && g->model_sel < n) {
+        const app::CatalogEntry &e = *cat[g->model_sel - nl];
+        const int dy = s.h - 1 - detail_h;
+        box(s, x0, dy, w, detail_h, S(mix(t.accent, t.bg, 0.5)), Style(t.fg, t.bg), e.name, S(t.accent, BOLD));
+        int yy = dy + 1;
+        auto line = [&](const std::string &label, const std::string &v, uint32_t c) {
+            s.put(x0 + 2, yy, label, S(t.dim));
+            s.put(x0 + 20, yy++, fit(v, w - 22), S(c));
+        };
+        const std::string dir = download_dir();
+        line("Good for", e.good_for, t.fg);
+        line("File", std::string(e.file) + "  (" + gib((double)e.bytes) + ")", t.fg);
+        line("From", std::string("huggingface.co/") + e.repo + " @ " + std::string(e.commit).substr(0, 10), t.dim);
+        const double fb = free_bytes(dir);
+        line("Goes to", dir + (fb >= 0 ? "  (" + gib(fb) + " free)" : ""), fb >= 0 && fb < (double)e.bytes ? t.bad : t.fg);
+        if (downloading(e)) {
+            // What it's doing, in words, and the steps a download goes through.
+            double done, total, mbps;
+            download_progress(done, total, mbps);
+            total = (double)e.bytes;
+            const double secs = now_s() - g->downloader.t0;
+            const int stage = done <= 0 && mbps <= 0 ? 0 : done < total ? 1 : 2;
+            static const char *spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+            std::string now = stage == 0 ? "Connecting to Hugging Face"
+                              : stage == 1 ? fmt("Downloading: %s of %s", gib(done).c_str(), gib(total).c_str()) +
+                                                 (mbps > 0 ? fmt(" at %.0f MB/s", mbps) : "")
+                                           : "Checking it's the exact file (SHA-256)";
+            now += " · " + mins(secs) + " so far";
+            if (stage == 1 && mbps > 0) now += " · about " + mins((total - done) / 1e6 / mbps) + " left";
+            s.put(x0 + 2, yy, spin[(int)(now_s() * 10) % 10], S(t.accent2, BOLD));
+            s.put(x0 + 4, yy++, fit("Working: " + now, w - 6), S(t.accent2, BOLD));
+            int xx = x0 + 4;
+            const char *names[] = {"connect", "download", "check it's the exact file", "ready to load"};
+            for (int k = 0; k < 4; k++) {
+                const bool d = k < stage, r = k == stage;
+                xx = s.put(xx, yy, d ? "✓ " : r ? "✱ " : "○ ", S(d ? t.good : r ? t.accent2 : t.dim, BOLD));
+                xx = s.put(xx, yy, names[k], S(d ? t.fg : r ? t.accent2 : t.dim, r ? BOLD : 0));
+                if (k < 3) xx = s.put(xx, yy, "   ", S(t.dim));
+                if (xx > x0 + w - 4) break;
+            }
+            yy++;
+        } else {
+            line("", "Enter downloads it · X stops it, and it goes on from there later · any other: /download URL", t.dim);
+        }
+        draw_bottom_bar("↑↓ choose|Enter download|Tab/1-5 pages|X stop download|R rescan");
+        return;
+    }
+    if (nl > 0 && g->model_sel < nl) {
         const ModelFile &m = g->models[g->model_sel];
         const int dy = s.h - 1 - detail_h;
         box(s, x0, dy, w, detail_h, S(mix(t.accent, t.bg, 0.5)), Style(t.fg, t.bg), api_id(m.name), S(t.accent, BOLD));
@@ -879,14 +1538,16 @@ void draw_models() {
                                                                    : "drafts tokens; same text, faster on code");
         }
         auto kv = m.tune.find("TS5_KV");
-        setting("Cache", kv == m.tune.end() ? "f16" : kv->second,
-                kv != m.tune.end() && kv->second.find("q8") != std::string::npos
-                    ? "8-bit: twice the context in the same memory"
-                    : "full precision; 8-bit (TS5_KV=q8_0) doubles the context");
+        // The chat's memory (the KV cache), in words.
+        const std::string kvv = kv == m.tune.end() ? "" : kv->second;
+        const bool k8 = kvv.find("q8") != std::string::npos || kvv == "k8v4", k4 = kvv.find("q4") != std::string::npos;
+        setting("Chat memory", kvv.empty() ? "automatic" : kvv == "k8v4" ? "8 and 4-bit" : k8 ? "8-bit" : k4 ? "4-bit" : kvv,
+                kvv.empty() ? "full precision, or 8-bit where that fits a longer chat"
+                            : k8 || k4 ? "smaller, so a longer chat fits in the same memory" : "");
         if (api_id(m.name) == sv.model)
             setting("Context", fmt("%d tokens", sv.n_ctx), "what fits now, as loaded");
     }
-    draw_bottom_bar("↑↓ choose|Enter load|T tune|R rescan|Tab next screen");
+    draw_bottom_bar("↑↓ choose|Enter load|Tab/1-5 pages|T tune|C GPU check|B speed test|R rescan");
 }
 
 // ---- Settings ----
@@ -978,11 +1639,11 @@ std::vector<SetRow> settings_rows() {
         r.push_back(x);
     }
     {
-        static const int v[] = {4096, 8192, 16384, 32768, 0};
-        SetRow x{"Context (own)", c.serve_ctx ? fmt("%d", c.serve_ctx) : "auto",
-                 "for a model ts5-tui starts itself; longer takes more GPU memory"};
+        static const int v[] = {0, 4096, 8192, 16384, 32768};
+        SetRow x{"Context", c.serve_ctx ? with_commas(c.serve_ctx) + " tokens" : "auto",
+                 "how long a chat can get; auto fits the most in GPU memory (models ts5-tui loads itself)"};
         x.change = [save](int d) {
-            int i = 1;
+            int i = 0;
             for (int k = 0; k < 5; k++)
                 if (v[k] == g->cfg.serve_ctx) i = k;
             g->cfg.serve_ctx = v[(i + d + 5) % 5];
@@ -992,13 +1653,13 @@ std::vector<SetRow> settings_rows() {
     }
     {
         SetRow x{"Fan (PS5)", g->sens.fan_mode.empty() ? "—" : g->sens.fan_mode,
-                 "auto is quiet; cool keeps long prompts under the 85 °C limiter; max is loud"};
+                 "auto is quiet; cool and early keep long prompts under the 85 °C limiter; max is loud"};
         x.change = [](int d) {
-            static const char *m[] = {"auto", "cool", "max"};
+            static const char *m[] = {"auto", "cool", "early", "max"};
             int i = 0;
-            for (int k = 0; k < 3; k++)
+            for (int k = 0; k < 4; k++)
                 if (g->sens.fan_mode == m[k]) i = k;
-            set_fan(m[(i + d + 3) % 3]);
+            set_fan(m[(i + d + 4) % 4]);
         };
         r.push_back(x);
     }
@@ -1060,7 +1721,7 @@ void draw_settings() {
         s.put(x0 + 2, y, fit("The engine's own switches (16/32-bit prompt math, cache, helper) are per model: Models → T tunes them.",
                              w - 4), S(t.dim));
     }
-    draw_bottom_bar(g->editing ? "Enter save|Esc cancel" : "↑↓ choose|←→ change|Enter edit|Tab next screen");
+    draw_bottom_bar(g->editing ? "Enter save|Esc cancel" : "↑↓ choose|←→ change|Tab/1-5 pages|Enter edit");
 }
 
 // ---- Logs ----
@@ -1097,7 +1758,7 @@ void draw_logs() {
             c = t.accent, a = BOLD;
         s.put(1, y, fit(l, s.w - 2), S(c, a));
     }
-    draw_bottom_bar(g->logs_scroll ? "PgUp/PgDn scroll|End follow|Tab next screen" : "PgUp/PgDn scroll|Tab next screen");
+    draw_bottom_bar(g->logs_scroll ? "Tab/1-5 pages|PgUp/PgDn scroll|End follow" : "Tab/1-5 pages|PgUp/PgDn scroll");
 }
 
 // ---- Chat (drawing in chat.cpp) ----
@@ -1112,7 +1773,7 @@ void draw_chat() {
     v.why = sv.why;
     draw_chat_screen(g->scr, *g->th, g->chat, v);
     draw_bottom_bar(g->chat.busy() ? "Esc stop|PgUp/PgDn scroll|Ctrl+T thoughts"
-                                   : "Enter send|Ctrl+J new line|Ctrl+N new chat|Ctrl+T thoughts|PgUp/PgDn scroll|Tab next screen");
+                                   : "Enter send|Tab next page|Ctrl+J new line|Ctrl+N new chat|Ctrl+T thoughts|PgUp/PgDn scroll");
 }
 
 void draw() {
@@ -1132,6 +1793,32 @@ void draw() {
         case SETTINGS: draw_settings(); break;
         case LOGS: draw_logs(); break;
         default: break;
+    }
+    if (g->ask_yes) {
+        const Theme &t = *g->th;
+        const int w = std::min(s.w - 4, 76);
+        std::vector<std::string> lines;
+        {
+            // Wrapped to the box, at spaces.
+            std::istringstream in(g->ask_text);
+            std::string word, line;
+            while (in >> word) {
+                if (!line.empty() && text_width(line + " " + word) > w - 4) {
+                    lines.push_back(line);
+                    line.clear();
+                }
+                line += (line.empty() ? "" : " ") + word;
+            }
+            if (!line.empty()) lines.push_back(line);
+        }
+        const int h = (int)lines.size() + 4;
+        const int x = (s.w - w) / 2, y = std::max(2, (s.h - h) / 2);
+        box(s, x, y, w, h, Style(t.warn, t.panel2), Style(t.fg, t.panel2), g->ask_title, Style(t.warn, t.panel2, BOLD));
+        for (int i = 0; i < (int)lines.size(); i++) s.put(x + 2, y + 1 + i, lines[i], Style(t.fg, t.panel2));
+        int bx = s.put(x + 2, y + h - 2, "Enter/y", Style(t.accent2, t.panel2, BOLD));
+        bx = s.put(bx, y + h - 2, " yes   ", Style(t.dim, t.panel2));
+        bx = s.put(bx, y + h - 2, "Esc/n", Style(t.accent2, t.panel2, BOLD));
+        s.put(bx, y + h - 2, " no", Style(t.dim, t.panel2));
     }
     if (!g->toast.empty() && now_s() < g->toast_until) {
         const std::string m = " " + fit(g->toast, s.w - 6) + " ";
@@ -1170,8 +1857,10 @@ void run_command(const std::string &line) {
         while (!arg.empty() && arg.back() == ' ') arg.pop_back();
     }
     Chat &c = g->chat;
+    if (cmd == "/fetch") cmd = "/download";
     if (cmd == "/new" || cmd == "/clear") chat_new(c);
     else if (cmd == "/quit" || cmd == "/exit" || cmd == "/q") g->quit = true;
+    else if (cmd == "/chat") go(CHAT);
     else if (cmd == "/models") go(MODELS);
     else if (cmd == "/status") go(STATUS);
     else if (cmd == "/settings") go(SETTINGS);
@@ -1182,7 +1871,7 @@ void run_command(const std::string &line) {
             go(MODELS);
             return;
         }
-        if (const ModelFile *m = find_model(arg)) load_model(*m);
+        if (const ModelFile *m = find_model(arg)) load_or_ask(*m);
         else chat_note(c, "No model called **" + arg + "** here. `/models` lists them; Tab completes the name.");
     } else if (cmd == "/tune") {
         scan_models();
@@ -1196,14 +1885,121 @@ void run_command(const std::string &line) {
         for (int i = 0; i < (int)g->models.size(); i++)
             if (&g->models[i] == m) g->model_sel = i;
         start_tune(*m);
+    } else if (cmd == "/check" || cmd == "/bench") {
+        scan_models();
+        const ServerState sv = server();
+        const ModelFile *m = find_model(arg.empty() ? sv.model : arg);
+        if (!m) {
+            chat_note(c, arg.empty() ? "No model loaded: `" + cmd + " NAME`." : "No model called **" + arg + "** here.");
+            return;
+        }
+        go(MODELS);
+        for (int i = 0; i < (int)g->models.size(); i++)
+            if (&g->models[i] == m) g->model_sel = i;
+        start_gpu_job(*m, cmd == "/check");
+    } else if (cmd == "/download") {
+        scan_models();
+        if (arg.empty()) {
+            go(MODELS);
+            const int nl = (int)g->models.size();
+            if (!catalog_missing().empty()) g->model_sel = nl;
+            return;
+        }
+        if (arg.find("://") != std::string::npos) {
+            App::DlJob j;
+            std::string why;
+            if (!parse_fetch(arg, j, why)) {
+                chat_note(c, "Can't download that: " + why + ".\n\n`/download URL [FILE] [--sha256 HEX]`, or the "
+                             "`ts5 fetch URL FILE --sha256 HEX` line as it is. FILE is a name only; it goes to `" +
+                             download_dir() + "`.");
+                return;
+            }
+            start_fetch(j);
+            go(MODELS);
+            return;
+        }
+        if (const app::CatalogEntry *e = find_catalog(arg)) {
+            start_download(*e);
+            go(MODELS);
+            const auto cat = catalog_missing();
+            for (int i = 0; i < (int)cat.size(); i++)
+                if (cat[i] == e) g->model_sel = (int)g->models.size() + i;
+        } else {
+            std::string l = "No **" + arg + "** in the catalog. It has:\n";
+            for (const app::CatalogEntry &x : app::kCatalog)
+                if (x.kind == app::CatalogEntry::Model)
+                    l += std::string("- `") + x.key + "` " + x.name + " (" + gib((double)x.bytes) + ", " + x.good_for + ")\n";
+            chat_note(c, l);
+        }
+    } else if (cmd == "/chats") {
+        g->chat_list = list_chats(arg);
+        if (g->chat_list.empty()) {
+            chat_note(c, arg.empty() ? "No saved chats yet. Every chat is kept from its first answer on."
+                                     : "No saved chat has **" + arg + "**.");
+            return;
+        }
+        std::string l = arg.empty() ? "**Saved chats**, newest first. `/open N` opens one.\n"
+                                    : "**Saved chats with " + arg + "**. `/open N` opens one.\n";
+        const int shown = std::min(20, (int)g->chat_list.size());
+        for (int i = 0; i < shown; i++) {
+            const SavedChat &x = g->chat_list[i];
+            l += fmt("%2d. ", i + 1) + x.title + "  · " + when_text(x.updated) + fmt(" · %d messages", x.messages) +
+                 (x.mine ? "" : " · on the TV") + (x.mine && x.id == c.saved_id ? " · this one" : "") + "\n";
+        }
+        if ((int)g->chat_list.size() > shown)
+            l += fmt("…and %d older. `/chats TEXT` finds one.\n", (int)g->chat_list.size() - shown);
+        chat_note(c, l);
+    } else if (cmd == "/open") {
+        if (arg.empty()) {
+            chat_note(c, "`/open N`: a number from `/chats`, or `/open TEXT` for the newest chat that has TEXT.");
+            return;
+        }
+        const int k = atoi(arg.c_str());
+        SavedChat pick;
+        bool ok = false;
+        if (k > 0 && arg.find_first_not_of("0123456789") == std::string::npos) {
+            if (g->chat_list.empty()) g->chat_list = list_chats();
+            if (k <= (int)g->chat_list.size()) {
+                pick = g->chat_list[k - 1];
+                ok = true;
+            }
+        } else {
+            const auto found = list_chats(arg);
+            if (!found.empty()) {
+                pick = found[0];
+                ok = true;
+            }
+        }
+        if (!ok) {
+            show_toast("No such chat: `/chats` lists them", g->th->warn, 4);
+            return;
+        }
+        std::string why;
+        if (load_chat(c, pick, why)) {
+            g->answers_saved = c.answers;
+            show_toast("Opened: " + pick.title, g->th->good, 3);
+        } else {
+            show_toast(why, g->th->bad, 6);
+        }
+    } else if (cmd == "/usage") {
+        const std::string r = usage_report();
+        chat_note(c, r.empty() ? "No usage log here. The TV app (and the desktop app) keep one, `usage.tsv` in their "
+                                 "data folder; for the API-only service, set `TS5_USAGE_LOG` in its settings."
+                               : r);
+    } else if (cmd == "/keys") {
+        const std::string r = keys_report();
+        chat_note(c, r.empty() ? "No API keys here: they're made on the TV app's Settings page (keys.tsv in its "
+                                 "data folder)."
+                               : r);
     } else if (cmd == "/think") {
         g->cfg.thinking = arg == "on" ? 1 : arg == "off" ? 2 : 0;
         g->cfg.save();
         static const char *v[] = {"the model's choice", "on", "off"};
         show_toast(std::string("Thinking: ") + v[g->cfg.thinking], g->th->accent, 2);
     } else if (cmd == "/fan") {
-        if (arg == "auto" || arg == "cool" || arg == "max") set_fan(arg);
-        else chat_note(c, "`/fan auto`, `/fan cool` or `/fan max`.");
+        if (arg == "auto" || arg == "cool" || arg == "early" || arg == "max") set_fan(arg);
+        else chat_note(c, "`/fan auto` (the stock curve), `/fan cool` (full speed from 65 °C), `/fan early` "
+                          "(ramps from 40 °C, full by 55 °C) or `/fan max`.");
     } else if (cmd == "/theme") {
         bool ok = false;
         for (auto &t : themes())
@@ -1259,7 +2055,11 @@ void run_command(const std::string &line) {
         for (auto &k : slash_commands())
             h += std::string("`") + k.name + (*k.args ? std::string(" ") + k.args : "") + "`  " + k.what + "\n";
         h += "\n**Keys**  Enter send · Ctrl+J or Alt+Enter new line · ↑↓ history · Tab completes · Esc stops an answer · "
-             "Ctrl+T thinking · Ctrl+N new chat · PgUp/PgDn scroll · F1-F5 pages · `/` the prompt from any page · Ctrl+Q quit";
+             "Ctrl+T thinking · Ctrl+N new chat (this one is kept: `/chats`) · PgUp/PgDn scroll · Ctrl+Q, `exit` or `q` quits\n\n"
+             "**Pages**  F1 Chat · F2 Models · F3 Status · F4 Settings · F5 Logs. On a Mac, where macOS keeps the F keys: "
+             "**Tab** and **Shift+Tab** step through the pages, **1** to **5** on any page but Chat, **fn+F1** to **fn+F5**, "
+             "Option+1 to 5 when the terminal sends Option as Meta (Esc+), or `/chat` `/models` `/status` `/settings` `/logs`. "
+             "`/` on any page goes to the prompt.";
         chat_note(c, h);
     } else {
         chat_note(c, "Unknown command **" + cmd + "**. `/help` lists them.");
@@ -1337,14 +2137,26 @@ void key_models(const Event &e) {
         } else if (e.key == K_CHAR && (e.ch == "q" || e.ch == "Q")) g->show_tune = false;
         return;
     }
-    const int n = (int)g->models.size();
+    const auto cat = catalog_missing();
+    const int nl = (int)g->models.size(), n = nl + (int)cat.size();
+    const bool local = g->model_sel < nl, in_cat = g->model_sel >= nl && g->model_sel < n;
+    auto key_is = [&](const char *k) { return e.key == K_CHAR && strcasecmp(e.ch.c_str(), k) == 0; };
     if (e.key == K_UP && n) g->model_sel = (g->model_sel + n - 1) % n;
     else if (e.key == K_DOWN && n) g->model_sel = (g->model_sel + 1) % n;
     else if (e.key == K_PGUP) g->model_sel = std::max(0, g->model_sel - 10);
     else if (e.key == K_PGDN && n) g->model_sel = std::min(n - 1, g->model_sel + 10);
-    else if (e.key == K_ENTER && n) load_model(g->models[g->model_sel]);
-    else if (e.key == K_CHAR && (e.ch == "t" || e.ch == "T") && n) start_tune(g->models[g->model_sel]);
-    else if (e.key == K_CHAR && (e.ch == "r" || e.ch == "R")) {
+    else if (e.key == K_HOME) g->model_sel = 0;
+    else if (e.key == K_END && n) g->model_sel = n - 1;
+    else if (e.key == K_ENTER && local) load_or_ask(g->models[g->model_sel]);
+    else if ((e.key == K_ENTER || key_is("d")) && in_cat) start_download(*cat[g->model_sel - nl]);
+    else if (key_is("x") && g->downloader.running()) {
+        g->downloader.stop();
+        show_toast("Download stopped: what's there is kept for next time", g->th->warn, 4);
+    } else if (key_is("t") && local) start_tune(g->models[g->model_sel]);
+    else if (key_is("c") && local) start_gpu_job(g->models[g->model_sel], true);
+    else if (key_is("b") && local) start_gpu_job(g->models[g->model_sel], false);
+    else if (key_is("t") && g->tuner.lines.size()) g->show_tune = true;
+    else if (key_is("r")) {
         scan_models();
         show_toast(fmt("%d models", (int)g->models.size()), g->th->dim, 1.5);
     } else if (e.key == K_ESC) go(CHAT);
@@ -1353,11 +2165,11 @@ void key_models(const Event &e) {
 
 void key_status(const Event &e) {
     if (e.key == K_CHAR && (e.ch == "f" || e.ch == "F")) {
-        static const char *m[] = {"auto", "cool", "max"};
+        static const char *m[] = {"auto", "cool", "early", "max"};
         int i = 0;
-        for (int k = 0; k < 3; k++)
+        for (int k = 0; k < 4; k++)
             if (g->sens.fan_mode == m[k]) i = k;
-        set_fan(m[(i + 1) % 3]);
+        set_fan(m[(i + 1) % 4]);
     } else if (e.key == K_ESC) go(CHAT);
     else nav_key(e);
 }
@@ -1413,11 +2225,25 @@ void key_chat(const Event &e) {
     rq.temp = g->cfg.temp;
     rq.max_tokens = g->cfg.max_tokens;
     for (auto &m : g->models) rq.model_names.push_back(api_id(m.name));
+    for (const app::CatalogEntry &x : app::kCatalog)
+        if (x.kind == app::CatalogEntry::Model) rq.catalog_names.push_back(x.key);
     const int r = chat_key(g->chat, e, rq, g->scr.h);
     if (r == CHAT_COMMAND) run_command(g->chat.command);
 }
 
 void handle(const Event &e) {
+    if (g->ask_yes) {
+        const bool yes = e.key == K_ENTER || (e.key == K_CHAR && (e.ch == "y" || e.ch == "Y"));
+        const bool no = e.key == K_ESC || (e.key == K_CHAR && (e.ch == "n" || e.ch == "N")) || e.key == K_CTRL;
+        if (yes) {
+            auto f = g->ask_yes;
+            g->ask_yes = nullptr;
+            f();
+        } else if (no) {
+            g->ask_yes = nullptr;
+        }
+        return;
+    }
     if (global_key(e)) return;
     switch (g->cur) {
         case CHAT: key_chat(e); break;
@@ -1443,6 +2269,9 @@ void tick() {
     }
     g->loader.pump();
     g->tuner.pump();
+    job_follow();
+    g->downloader.pump();
+    finish_download();
     g->fanproc.pump();
     g->logs.pump();
     parse_log_speeds();
@@ -1477,6 +2306,45 @@ void tick() {
         }
     }
     if (g->tuner.done && g->tuner.t1 > 0 && t - g->tuner.t1 < 0.2) scan_models();
+    // Every chat is kept (store.h), after each answer.
+    if (g->chat.answers != g->answers_saved && !g->chat.busy()) {
+        g->answers_saved = g->chat.answers;
+        std::string why;
+        if (!save_chat(g->chat, why)) show_toast("Chat not saved: " + why, g->th->bad, 6);
+    }
+    // An answer cut off by the length: say why, in the chat.
+    if (g->chat.answers_seen != g->chat.answers && !g->chat.busy()) {
+        g->chat.answers_seen = g->chat.answers;
+        std::string fin;
+        int total = 0, gen = 0;
+        {
+            std::lock_guard<std::mutex> l(g->chat.mu);
+            if (!g->chat.msgs.empty()) {
+                const Msg &m = g->chat.msgs.back();
+                if (m.role == "assistant" && m.error.empty() && !m.stopped) {
+                    fin = m.finish;
+                    total = m.total_tokens;
+                    gen = m.gen_tokens;
+                }
+            }
+        }
+        if (fin == "length") {
+            const ServerState sv = server();
+            if (g->cfg.max_tokens > 0 && gen >= g->cfg.max_tokens) {
+                chat_note(g->chat, fmt("**The answer stopped at %s tokens**, the answer length set in Settings. "
+                                       "Settings → Answer length → no limit lets answers run to the end.",
+                                       with_commas(g->cfg.max_tokens).c_str()));
+            } else {
+                std::string n = "**The chat is full**";
+                if (sv.n_ctx > 0) n += fmt(" (%s of %s tokens)", with_commas(std::min(total, sv.n_ctx)).c_str(), with_commas(sv.n_ctx).c_str());
+                n += ", so the answer stopped here, and the model can't take in more of this chat. "
+                     "**Ctrl+N** starts a new chat (this one is saved: `/chats` opens it again).";
+                if (own_server_pid() > 0 && g->cfg.serve_ctx > 0)
+                    n += " Or set Settings → Context to auto, the longest this model fits, and load it again.";
+                chat_note(g->chat, n);
+            }
+        }
+    }
     // Logs follow the server (every 10 s, or at once after a change).
     if (g->logs_checked == 0 || t - g->logs_checked > 10) pick_logs();
     // This app's own answers count too (a server elsewhere has no log here).
@@ -1556,7 +2424,7 @@ int run_in_tmux(int argc, char **argv) {
     const std::string done = dir + "/last-chat.txt";
     unlink(done.c_str());
     const char *ct = getenv("COLORTERM");
-    std::string cmd = shell_quote(tmux) + " -L ts5 -f " + shell_quote(conf) + " new-session -A -s ts5 -e TS5_TUI_TMUX=1" +
+    std::string cmd = shell_quote(tmux) + " -u -L ts5 -f " + shell_quote(conf) + " new-session -A -s ts5 -e TS5_TUI_TMUX=1" +
                       (ct && *ct ? " -e COLORTERM=" + shell_quote(ct) : std::string()) + " " + shell_quote(inner);
     const int st = system(cmd.c_str());
     // The chat it left, printed here, where the terminal keeps it.
@@ -1644,6 +2512,11 @@ int main(int argc, char **argv) {
     term_size(w, h);
     app.scr.resize(w, h);
     std::thread poller(poll_loop);
+    app.chat.before_clear = [](Chat &c) {
+        std::string why;
+        save_chat(c, why);
+        g->answers_saved = c.answers;
+    };
     scan_models();
     app.sens = read_sensors();
     if (intro) run_intro();
@@ -1665,8 +2538,14 @@ int main(int argc, char **argv) {
     }
     app.stop_poll = true;
     chat_stop(app.chat);
+    {
+        std::string why;
+        save_chat(app.chat, why);
+    }
     poller.join();
     app.tuner.stop();
+    const bool was_downloading = app.downloader.running();
+    app.downloader.stop();
     app.loader.pump();
     app.logs.stop();
     term_leave();
@@ -1680,6 +2559,9 @@ int main(int argc, char **argv) {
             fputs(t.c_str(), stdout);
         }
     }
+    if (was_downloading && app.dl_on)
+        printf("ts5-tui: the download of %s stopped; /download %s goes on from where it was.\n", app.dl.name.c_str(),
+               app.dl.cat ? app.dl.cat->key : (app.dl.url + " " + app.dl.file + (app.dl.sha256.empty() ? "" : " --sha256 " + app.dl.sha256)).c_str());
     if (pid_t own = own_server_pid(); own > 0)
         printf("ts5-tui: the model it started keeps serving (pid %d, port %d). Stop it with: kill %d\n", own,
                app.ep.port, own);

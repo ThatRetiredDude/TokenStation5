@@ -160,26 +160,51 @@ ts5-tui                              # the server on this machine (port 8081)
 ts5-tui --url http://ps5.local:8081  # another one
 ```
 
-- **A locked bar at the top**: the model, its helper, the context used, the
+- **A locked bar at the top**: the model, its helper, how full the chat is
+  (tokens of the context, yellow past 75%, red past 90%), the
   last speed, GPU memory and RAM, the die temperature (yellow from 78 °C,
   red from 83 °C, a warning at the 85 °C limiter) and the fan.
 - **The `ts5>` prompt at the bottom**: Enter sends, Ctrl+J (or Alt+Enter)
   starts a new line, the up arrow brings back what you typed before, Esc
   stops an answer. Commands start with `/` and Tab completes them, and model
-  names after `/model`: `/model`, `/new`, `/save`, `/find`, `/tune`,
-  `/think on|off`, `/fan auto|cool|max`, `/theme`, `/help`, `/quit`.
+  names after `/model`: `/model`, `/download`, `/new`, `/chats`, `/open`,
+  `/save`, `/find`, `/tune`, `/check`, `/bench`, `/usage`, `/keys`,
+  `/think on|off`, `/fan auto|cool|early|max`, `/theme`, `/help`, `/quit`
+  (`exit`, `quit` or `q` work too). A `ts5 fetch URL FILE --sha256 HEX`
+  line pasted at the prompt downloads that model.
 - **In between**: the chat (markdown, highlighted code, the thinking folded
   away; Ctrl+T shows it), or a page: **F1** Chat, **F2** Models (Enter
-  loads one, T tunes it with `ts5-tune`), **F3** Status (bars for GPU
-  memory, RAM, temperatures, fan, GPU load and speed), **F4** Settings
-  (theme, thinking, temperature, answer length, fan, tmux), **F5** Logs.
-  Tab goes to the next page.
+  loads one, T tunes it with `ts5-tune`, C runs the GPU check, B the speed
+  test, each in a panel that ticks off its steps in plain words, with the
+  time so far, the time left and what it found at the end, while the top
+  bar says what's running; below them, the catalog's models to download),
+  **F3** Status (bars
+  for GPU memory, RAM, temperatures, fan, GPU load and speed), **F4**
+  Settings (theme, thinking, temperature, answer length, context, fan,
+  tmux), **F5**
+  Logs. Tab and Shift+Tab step through the pages, and so do 1 to 5 on any
+  page but Chat. On a Mac, where macOS keeps the F keys, use those, fn+F1
+  to fn+F5, or `/chat`, `/models`, `/status`, `/settings`, `/logs`.
+- **Downloads**: the same catalog as the TV app, each file pinned to a
+  commit on Hugging Face and checked by SHA-256 (`ts5 fetch`), or any other
+  `.gguf` with `/download URL [FILE] [--sha256 HEX]`. They go to
+  the service's models folder when you may write there, else to
+  `~/.local/share/tokenstation/models`. A stopped download goes on from
+  where it was.
+- **Chats are kept**: every chat is saved after each answer, in the TV app's
+  format, in `~/.local/share/tokenstation/chats`. `/chats` lists them (and
+  the TV service's, when you may read them), `/chats TEXT` finds one,
+  `/open N` opens one to go on with it.
+- **A full chat says so**: when an answer stops because the chat filled the
+  model's context, a note under it says so (and Ctrl+N starts a new chat),
+  instead of a silently cut-off answer.
 
 It is a client of the API: it loads nothing itself and takes no GPU memory.
 Loading a model with Enter switches the API-only service's model (through
 the hw helper, so you need to be in the `tokenstation` group); with no
-server running, it starts `ts5 serve` with that model itself, which keeps
-serving after ts5-tui ends. With the TV app running, models are picked on
+server running, it starts `ts5 serve` with that model itself, at the
+longest context that fits (Settings → Context; up to 32,768 tokens for Qwen3 14B
+on the PS5), which keeps serving after ts5-tui ends. With the TV app running, models are picked on
 the TV.
 
 From a plain terminal (SSH), ts5-tui runs in its own tmux session, `ts5`,
@@ -380,6 +405,9 @@ the app and `ts5` read them whenever they load that model (they log
 on the PS5.
 
 - `ts5-tune --models --reset`: delete them.
+- `TS5_TUNE_PROGRESS=1` adds a line per step, `@ts5-tune` and a JSON
+  object (the plan, each step's start and result, each test answer, the
+  summary), for a progress display: `ts5-tui` sets it.
 - A setting chosen in the app (Helper model: Off, Exact prompt reading:
   On) or set in the shell or `ts5.env` wins over the file.
 - The services read `/etc/tokenstation/tune/`: copy the files there to use

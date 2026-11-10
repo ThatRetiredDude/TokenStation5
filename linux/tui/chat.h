@@ -20,6 +20,7 @@ struct Msg {
     int chunks = 0;
     double gen_tps = 0, prompt_tps = 0;
     int prompt_tokens = 0, gen_tokens = 0, total_tokens = 0;
+    std::string finish;  // the server's finish_reason: "stop", "length"…
 };
 
 struct Chat {
@@ -41,6 +42,10 @@ struct Chat {
     std::string command;  // a slash command for the app to run
     std::vector<std::string> cands;  // Tab's candidates
     int cand_i = -1;
+    std::string saved_id;            // its file in chats/ (store.h), once saved
+    std::atomic<int> answers{0};     // answers finished (done, stopped or failed)
+    int answers_seen = 0;            // the app looked at how they ended (main.cpp)
+    void (*before_clear)(Chat &) = nullptr;  // chat_new calls it first (to save the chat)
     bool busy() const { return running; }
 };
 
@@ -57,6 +62,7 @@ struct ChatRequest {
     double temp = -1;
     int max_tokens = 0;
     std::vector<std::string> model_names;  // for /model's completion
+    std::vector<std::string> catalog_names;  // for /download's
 };
 
 enum { CHAT_NONE, CHAT_LEAVE, CHAT_COMMAND };
@@ -69,6 +75,8 @@ const std::vector<SlashCommand> &slash_commands();
 void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v);
 int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h);
 void chat_note(Chat &c, const std::string &text);
+// 12,345
+std::string with_commas(int n);
 void chat_new(Chat &c);
 void chat_stop(Chat &c);
 // The last answer's speeds, once each.

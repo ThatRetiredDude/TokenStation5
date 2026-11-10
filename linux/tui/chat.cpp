@@ -18,19 +18,27 @@ namespace tui {
 const std::vector<SlashCommand> &slash_commands() {
     static const std::vector<SlashCommand> c = {
         {"/model", "NAME", "load another model (Tab completes the name)"},
-        {"/models", "", "the Models page"},
-        {"/new", "", "a new chat (Ctrl+N)"},
+        {"/models", "", "the Models page (/chat /status /settings /logs: the others)"},
+        {"/download", "NAME|URL", "a catalog model (Tab completes), or any URL [FILE] [--sha256 HEX]"},
+        {"/new", "", "a new chat (Ctrl+N); every chat is kept"},
+        {"/chats", "[TEXT]", "your saved chats (with TEXT: the ones that have it)"},
+        {"/open", "N", "open saved chat N from /chats"},
         {"/save", "[FILE]", "this chat as Markdown"},
         {"/find", "TEXT", "jump to TEXT in this chat"},
         {"/status", "", "the live Status page"},
         {"/tune", "[NAME]", "ts5-tune this model (or NAME) for this PS5"},
+        {"/check", "[NAME]", "the GPU check: the model's answers against the CPU's"},
+        {"/bench", "[NAME]", "the speed test: prompt and answer tok/s"},
+        {"/usage", "", "the API's use by app and model (last day and week)"},
+        {"/keys", "", "the API keys: names, on or off, last used"},
         {"/think", "on|off|auto", "thinking before answering"},
-        {"/fan", "auto|cool|max", "the PS5's fan"},
+        {"/fan", "auto|cool|early|max", "the PS5's fan"},
         {"/theme", "NAME", "colors: Ocean, Neon, Sunset, Forest, Mono"},
         {"/settings", "", "the Settings page"},
+        {"/chat", "", "back to the chat"},
         {"/logs", "", "the engine's log"},
         {"/help", "", "keys and commands"},
-        {"/quit", "", "leave (the server keeps running)"},
+        {"/quit", "", "leave (exit, quit or q too; the server keeps running)"},
     };
     return c;
 }
@@ -389,7 +397,9 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
             } else {
                 const double secs = (m.t_think_end > 0 ? m.t_think_end : m.t_end) - (m.t_first > 0 ? m.t_first : m.t0);
                 Line th;
-                th.add(fmt("  ▸ Thought for %.1f s", std::max(0.0, secs)), Style(t.dim, kDefault, ITALIC));
+                // A saved chat's answers have no times: just that it thought.
+                th.add(m.t0 > 0 ? fmt("  ▸ Thought for %.1f s", std::max(0.0, secs)) : std::string("  ▸ Thought first"),
+                       Style(t.dim, kDefault, ITALIC));
                 th.add("  Ctrl+T shows it", Style(mix(t.dim, t.bg, 0.4)));
                 out.push_back(th);
             }
@@ -571,7 +581,7 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
         if (v.n_ctx > 0) {
             const double f = (double)c.ctx_used / v.n_ctx;
             const uint32_t col = f > 0.9 ? t.bad : f > 0.75 ? t.warn : t.dim;
-            x = s.put(x + 2, y1, "ctx " + thousands(c.ctx_used) + " / " + thousands(v.n_ctx), Style(col));
+            x = s.put(x + 2, y1, "chat " + thousands(c.ctx_used) + " of " + thousands(v.n_ctx) + " tokens", Style(col));
         }
         if (!c.cands.empty()) {
             std::string list;
@@ -656,6 +666,8 @@ void run_answer(Chat *c, ChatRequest rq, std::string body) {
         }
         if (!j["choices"].a.empty()) {
             const ts5::Json &d = j["choices"].a[0]["delta"];
+            const std::string fr = j["choices"].a[0]["finish_reason"].str();
+            if (!fr.empty()) m.finish = fr;
             const std::string r = d["reasoning_content"].str(), t = d["content"].str();
             const double now = now_s();
             if (!r.empty() || !t.empty()) {
@@ -725,6 +737,7 @@ void run_answer(Chat *c, ChatRequest rq, std::string body) {
             c->speed_prompt = m.prompt_tps;
         }
     }
+    c->answers++;
     c->running = false;
 }
 
@@ -776,9 +789,10 @@ void complete(Chat &c, const ChatRequest &rq) {
         prefix = c.input.substr(0, sp + 1);
         word = c.input.substr(sp + 1);
         std::vector<std::string> pool;
-        if (cmd == "/model" || cmd == "/tune") pool = rq.model_names;
+        if (cmd == "/model" || cmd == "/tune" || cmd == "/check" || cmd == "/bench") pool = rq.model_names;
+        else if (cmd == "/download") pool = rq.catalog_names;
         else if (cmd == "/think") pool = {"on", "off", "auto"};
-        else if (cmd == "/fan") pool = {"auto", "cool", "max"};
+        else if (cmd == "/fan") pool = {"auto", "cool", "early", "max"};
         else if (cmd == "/theme")
             for (auto &t : themes()) pool.push_back(t.name);
         std::string lw = word;
@@ -834,6 +848,8 @@ void complete(Chat &c, const ChatRequest &rq) {
 
 }  // namespace
 
+std::string with_commas(int n) { return thousands(n); }
+
 void chat_note(Chat &c, const std::string &text) {
     std::lock_guard<std::mutex> l(c.mu);
     Msg m;
@@ -855,10 +871,12 @@ void chat_stop(Chat &c) {
 
 void chat_new(Chat &c) {
     chat_stop(c);
+    if (c.before_clear) c.before_clear(c);
     std::lock_guard<std::mutex> l(c.mu);
     c.msgs.clear();
     c.scroll = 0;
     c.ctx_used = 0;
+    c.saved_id.clear();
 }
 
 bool chat_take_speed(Chat &c, double &gen, double &prompt) {
@@ -932,8 +950,17 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
             return CHAT_NONE;
         case K_ENTER: {
             if (c.input.empty()) return CHAT_NONE;
-            if (c.input[0] == '/') {
-                c.command = c.input;
+            // What people type to leave a shell, and a `ts5 fetch` line pasted
+            // from a page: commands, never messages for the model.
+            std::string word = c.input;
+            while (!word.empty() && isspace((unsigned char)word.back())) word.pop_back();
+            while (!word.empty() && isspace((unsigned char)word[0])) word.erase(0, 1);
+            std::string lw = word;
+            std::transform(lw.begin(), lw.end(), lw.begin(), ::tolower);
+            const bool command = c.input[0] == '/' || lw == "exit" || lw == "quit" || lw == "q" || lw == ":q" ||
+                                 lw == "bye" || lw.rfind("ts5 fetch ", 0) == 0;
+            if (command) {
+                c.command = c.input[0] == '/' ? c.input : lw.rfind("ts5 fetch ", 0) == 0 ? "/download " + word : "/quit";
             } else {
                 if (c.busy()) return CHAT_NONE;  // one answer at a time
             }
@@ -942,7 +969,7 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
             const std::string text = c.input;
             c.input.clear();
             c.cur = 0;
-            if (text[0] == '/') return CHAT_COMMAND;
+            if (command) return CHAT_COMMAND;
             send(c, rq, text);
             return CHAT_NONE;
         }
