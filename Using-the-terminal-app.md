@@ -127,7 +127,7 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 
 ![The Models page](images/terminal-app-models.png)
 
-Every `.gguf` on this machine, biggest first, with its size, the helper `ts5-tune` picked for it, and the date it was tuned. **●** marks the one loaded. Under them, **⇣ Download**: the catalog's models you don't have yet. Below the list, the selected model's tuned settings, each with what it costs: 16- or 32-bit prompt math, the helper, the cache (f16, or 8-bit for twice the context) and, for the loaded one, its context.
+Every `.gguf` on this machine, biggest first, with its size, the helper `ts5-tune` picked for it, and the date it was tuned. **●** marks the one loaded. Under them, **⇣ Download**: the catalog's models you don't have yet. Below the list, the selected model's tuned settings, each with what it costs: 16- or 32-bit prompt math, the helper, the chat memory (automatic: full precision, or 8-bit where that fits a longer chat) and, for the loaded one, its context.
 
 | Key | What it does |
 | --- | --- |
@@ -157,7 +157,7 @@ The top bar shows **loading…** with the seconds until the server reports the n
 
 ### Downloading models
 
-The catalog is the TV app's: the models tested on the PS5, each pinned to a commit on Hugging Face with its size and SHA-256. Choose one under **⇣ Download** and press **Enter** (or `/download NAME` from the prompt). The row shows a bar, the speed and the time left, and the box below where the file goes and how much space is free there.
+The catalog is the TV app's: the models tested on the PS5, each pinned to a commit on Hugging Face with its size and SHA-256. Choose one under **⇣ Download** and press **Enter** (or `/download NAME` from the prompt). The row shows a bar and the speed; the box below shows where the file goes, how much space is free there, what it's doing (connecting, downloading with the time so far and left, checking it's the exact file), and its steps ticked off. The top bar shows the download's percent and time left on every page.
 
 - It downloads with `ts5 fetch` into a `.part` file and keeps the model only when its size and SHA-256 match, so a broken download never shows up as a model.
 - It checks the free space first and won't start when the drive can't hold the file.
@@ -174,7 +174,14 @@ It downloads the same way and shows under the catalog while it runs. FILE is a n
 
 ### Tuning, the GPU check and the speed test
 
-**Tuning** (T), the **GPU check** (C) and the **speed test** (B) open a pane with the output as it runs. **Esc** hides it and the job goes on (T shows it again), **X** stops it, PgUp/PgDn scroll. The GPU check runs the CPU side too, which takes a few minutes the first time for a model and is saved after. They need the GPU's memory: a `ts5 serve` that ts5-tui started is stopped for them. If the service holds a model, stop it first (`sudo systemctl stop tokenstation`). ts5-tune saves the results in your own `~/.config/tokenstation/tune/`. The API-only service runs as its own user and reads `/etc/tokenstation/tune/`, so copy the file there for the service (`sudo mkdir -p /etc/tokenstation/tune && sudo cp ~/.config/tokenstation/tune/<model>.gguf.env /etc/tokenstation/tune/`).
+**Tuning** (T), the **GPU check** (C) and the **speed test** (B) open a progress panel:
+
+- **Working:** what it's doing right now, in plain words, with a spinner, the test answer it's on, the time so far and about how long is left (the estimate shows after the first test answer).
+- A **checklist** of every step it will go through, ticked off as each one finishes, with its result and how long it took: for tuning, checking the model gives correct answers, measuring its speed on its own, trying each helper model, saving the best settings. Skipped steps say why (for example, a helper whose vocabulary doesn't match).
+- At the end, **what it found**: for tuning, the helper it picked and the speed before and after ("It writes 46% faster with the helper …: 58.9 tok/s, up from 40.3 on its own, with the same answers."); for the check, whether the GPU's answers match the CPU's; for the speed test, how fast it reads prompts and writes. The same line goes into the chat.
+- Under it, the tool's own lines, for a bug report.
+
+While a job runs, the top bar says so in yellow (**tuning MODEL · step 3 of 7 · 2:13**) instead of **offline**, on every page. **Esc** hides the panel and the job goes on (T shows it again), **X** stops it (nothing is changed then), PgUp/PgDn scroll. The GPU check runs the CPU side too, which takes a few minutes the first time for a model and is saved after. They need the GPU's memory: a `ts5 serve` that ts5-tui started is stopped for them. If the service holds a model, stop it first (`sudo systemctl stop tokenstation`). ts5-tune saves the results in your own `~/.config/tokenstation/tune/`. The API-only service runs as its own user and reads `/etc/tokenstation/tune/`, so copy the file there for the service (`sudo mkdir -p /etc/tokenstation/tune && sudo cp ~/.config/tokenstation/tune/<model>.gguf.env /etc/tokenstation/tune/`).
 
 ## Status (F3)
 
