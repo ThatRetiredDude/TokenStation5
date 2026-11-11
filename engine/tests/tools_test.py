@@ -489,7 +489,9 @@ Q35_PROMPT = ("<|im_start|>assistant\n<think>\nThe user wants the firmware.\n</t
               "<|im_end|>\n<|im_start|>user\n<tool_response>\n")
 # DeepSeek R1's turn as it wrote it, closed, and the result in a user turn.
 R1_PROMPT = ("<｜Assistant｜><think>\nNeed the web.\n</think>\n\n" + CALL +
-             "<｜end▁of▁sentence｜><｜User｜><tool_response>\n")
+             "<｜end▁of▁sentence｜><｜User｜>Result of web_search:\n")
+# What closes a generic model's results (tools.cpp, generic_results).
+THEN_ANSWER = "\n\nAnswer the request from this result; call a function again only if something is still missing."
 
 
 def test_search_loop(ts5, model, tdir):
@@ -534,13 +536,14 @@ def test_search_loop(ts5, model, tdir):
         ("DeepSeek R1: thinking kept out of the answer, streaming", "tvly-test", ["Codes first.\n</think>\n\nDone."],
          True, 0, "Done.", None, None, R1_OLD, "What is the latest PS5 firmware?", "<｜Assistant｜><think>\n"),
         # Its template has no tool format its files can write: the search is
-        # asked for in words, called as Hermes's, its result back in a user turn.
+        # asked for in words, called as Hermes's, its result back in a user
+        # turn, in words.
         ("DeepSeek R1: answers from a search", "tvly-test",
          ["Need the web.\n</think>\n\n" + CALL, "Found it.\n</think>\n\nDone.", "Final answer."], False, 1, "Done.",
-         None, None, R1_OLD, R1_PROMPT, "\n</tool_response><｜Assistant｜><think>\n"),
+         None, None, R1_OLD, R1_PROMPT, THEN_ANSWER + "<｜Assistant｜><think>\n"),
         ("DeepSeek R1: answers from a search, streaming", "tvly-test",
          ["Need the web.\n</think>\n\n" + CALL, "Found it.\n</think>\n\nDone.", "Final answer."], True, 1, "Done.",
-         None, None, R1_OLD, R1_PROMPT, "\n</tool_response><｜Assistant｜><think>\n"),
+         None, None, R1_OLD, R1_PROMPT, THEN_ANSWER + "<｜Assistant｜><think>\n"),
     ]
     with open(os.path.join(tdir, R1_OLD + ".jinja"), "w") as f:
         f.write(R1_OLD_TEMPLATE)
@@ -569,7 +572,7 @@ def test_search_loop(ts5, model, tdir):
                        "stream": stream, "max_tokens": 100}
                 if tools:
                     req["tools"] = tools
-                if template.endswith(QWEN35 + ".jinja"):
+                if template.endswith((QWEN35 + ".jinja", R1_OLD + ".jinja")):
                     # 100 tokens would turn its thinking off (kThinkRoom).
                     req["chat_template_kwargs"] = {"enable_thinking": True}
                 r = urllib.request.urlopen(urllib.request.Request(
@@ -720,13 +723,13 @@ def test_gemma4_thinking(ts5, model, tdir):
 # the thinking, the Qwen one's has llama.cpp's switch for it as well.
 R1_LLAMA = "deepseek-ai-DeepSeek-R1-Distill-Llama-8B"
 R1_QWEN = "deepseek-ai-DeepSeek-R1-Distill-Qwen-32B"
-# The words ts5 asks a model without a tool format for calls with (tools.cpp, kGemmaTools).
+# The words ts5 asks a model without a tool format for calls with (tools.cpp, kGenericTools).
 TOOL_WORDS = ("You can call functions to help with the request. The functions are listed below as JSON within "
               "<tools></tools> tags. To call one, reply with only a JSON object with the function's name and "
               "arguments within <tool_call></tool_call> tags, one pair of tags per call:\n<tool_call>\n"
               "{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>\nIf the request "
-              "doesn't need any of the functions, answer it directly instead. The results of your calls come back "
-              "within <tool_response></tool_response> tags: use them to answer.")
+              "doesn't need any of the functions, answer it directly instead. The result of each call comes back "
+              "in the next message, under \"Result of <function-name>:\": use it to answer.")
 # Llama 3.0's and the first Mistrals' templates, cut down to their turns: no tool format in either.
 LLAMA30 = "llama-3.0-cut-down"
 LLAMA30_TEMPLATE = ("{% for m in messages %}{{ '<|start_header_id|>' + m['role'] + '<|end_header_id|>\n\n' + "
@@ -787,6 +790,15 @@ def test_every_model_has_tools(ts5, model, tdir):
         if "tool calls: generic" not in err:
             failed += 1
             print(f"FAIL {name}: {err.strip()}")
+    # Thinking off where the template has no switch for it: the turn opens
+    # with an empty thinking block (the Llama distill's template has opened
+    # the block already).
+    for name in (R1_LLAMA, R1_OLD):
+        path = os.path.join(tdir, name + ".jinja")
+        want = render(open(path).read(), chats[0][1], [], bos="")
+        want += "\n</think>\n\n" if want.endswith("<think>\n") else "<think>\n\n</think>\n\n"
+        got, err = prompt_of(ts5, model, path, chats[0][1], enable_thinking=False)
+        failed += compare(f"{name}: {chats[0][0]}, thinking off", got, want)
     r1 = R1_OLD
     block = tools_block([SEARCH])
     call_text = '<tool_call>\n{"name": "web_search", "arguments": {"query": "it"}}\n</tool_call>'
@@ -801,7 +813,8 @@ def test_every_model_has_tools(ts5, model, tdir):
         ("DeepSeek R1: a call and its result", r1, [m for c, m, t in CASES if c == "thinking in the history"][0],
          [SEARCH],
          "<｜User｜>" + block + "\n\nHi<｜Assistant｜>\n\nHello!<｜end▁of▁sentence｜><｜User｜>Search it<｜Assistant｜>\n\n" +
-         call_text + "<｜end▁of▁sentence｜><｜User｜><tool_response>\nnothing\n</tool_response><｜Assistant｜><think>\n"),
+         call_text + "<｜end▁of▁sentence｜><｜User｜>Result of web_search:\nnothing" + THEN_ANSWER +
+         "<｜Assistant｜><think>\n"),
         ("Llama 3.0: tools, system", LLAMA30, [m for c, m, t in CASES if c == "tools, system"][0], [WEATHER, SEARCH],
          "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are terse.\n\n" +
          tools_block([WEATHER, SEARCH]) + "<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nWeather in Oslo?"
@@ -812,8 +825,25 @@ def test_every_model_has_tools(ts5, model, tdir):
          "<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nOslo and Bergen?<|eot_id|>"
          "<|start_header_id|>assistant<|end_header_id|>\n\nChecking.\n<tool_call>\n"
          '{"name": "get_weather", "arguments": {"city": "Oslo", "days": 2}}\n</tool_call><|eot_id|>'
-         "<|start_header_id|>user<|end_header_id|>\n\n<tool_response>\n{\"temp\": 3}\n</tool_response><|eot_id|>"
-         "<|start_header_id|>assistant<|end_header_id|>\n\n"),
+         "<|start_header_id|>user<|end_header_id|>\n\nResult of get_weather:\n{\"temp\": 3}" + THEN_ANSWER +
+         "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"),
+        # Two calls in a turn: each result under its function's name, the second's by its place
+        # (no tool_call_id), the third's by the name the message carries.
+        ("Llama 3.0: three calls and their results", LLAMA30, [
+            {"role": "user", "content": "Oslo and Bergen?"},
+            {"role": "assistant", "content": "", "tool_calls": [call("get_weather", {"city": "Oslo"}),
+                                                                 call("web_search", {"query": "Bergen"})]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "3"},
+            {"role": "tool", "content": "rain"},
+            {"role": "tool", "name": "get_time", "content": "noon"}], [WEATHER],
+         "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n" + tools_block([WEATHER]) +
+         "<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nOslo and Bergen?<|eot_id|>"
+         "<|start_header_id|>assistant<|end_header_id|>\n\n<tool_call>\n"
+         '{"name": "get_weather", "arguments": {"city": "Oslo"}}\n</tool_call>\n<tool_call>\n'
+         '{"name": "web_search", "arguments": {"query": "Bergen"}}\n</tool_call><|eot_id|>'
+         "<|start_header_id|>user<|end_header_id|>\n\nResult of get_weather:\n3\n\nResult of web_search:\nrain\n\n"
+         "Result of get_time:\nnoon\n\nAnswer the request from these results; call a function again only if "
+         "something is still missing.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"),
         ("early Mistral: tools, system", MISTRAL_OLD, [m for c, m, t in CASES if c == "tools, system"][0], [WEATHER],
          "[INST] You are terse.\n\n" + tools_block([WEATHER]) + "\n\nWeather in Oslo?[/INST]"),
     ]
@@ -965,16 +995,18 @@ languages</span></label><div><UL class="menu"><li class="interlanguage-link"><a 
 <ul><li><a href="//fr.example/be">Belgique</a></li></ul></li><li><a href="//sk.example/"><span>Slovenčina</span></a></li>
 <li><a href="//ja.example/"><span>日本語</span></a></li><li><a href="//uk.example/"><span>Українська</span></a></li></UL>
 <div><a href="/edit">Edit links</a></div></div></div><nav><ul><li>Article</li><li>Talk</li><li>Edit</li></ul></nav></header>
-<p>The console was released in November 2020. It has an eight-core processor and sixteen gigabytes of
+<p>The console was released in November 2020<span typeof="mw:Transclusion" data-mw='{"parts":[{"template":{"target":
+{"wt":"sold"},"params":{"1":{"wt":"<b>100 million</b> units > all others"}}}}]}'></span>. It has an eight-core processor and sixteen gigabytes of
 memory, which its graphics chip shares with the system.</p><aside>Not to be confused with a terminal.</aside>
 <h2>Hardware</h2><p>Its solid-state drive reads five and a half gigabytes a second, and the cooling fan is
 a hundred and twenty millimetres across.</p><h2>Models</h2><ul><li><a href="/1">Original</a>: 2020</li><li><a
-href="/2">Digital</a>: 2020</li><li><a href="/3">Slim</a>: 2023</li><li><a href="/4">Pro</a>: 2024</li><li><a
+href="/2">Digital</a>: 2020</li><li><a href="/3">Slim</a>: 2023</li><li><a href="/4" title = "Pro > Slim">Pro</a>: 2024</li><li><a
 href="/5">Portal</a>: 2023, a screen for it</li></ul><ol><li><a href="/a">One</a></li><li><a href="/b">Two</a></li><li><a
 href="/c">Three</a></li></ol></MAIN>
 <footer><nav><ul><li>Privacy policy</li><li>About</li></ul></nav><p>Text is available under a licence.</p></footer>
 </body></html>"""
 # The six languages go (a list of links and nothing else); the list with words and the short list stay.
+# What a tag keeps in a quoted attribute (JSON with "<b>" and ">" in it) is no text of the page.
 ARTICLE_TEXT = ("Console - Encyclopedia\n\nConsole\n\n6 languages\n\nEdit links\n\nThe console was released in "
                 "November 2020. It has an eight-core "
                 "processor and sixteen gigabytes of memory, which its graphics chip shares with the system.\n\nHardware\n\n"

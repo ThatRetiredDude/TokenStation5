@@ -122,10 +122,13 @@ Qwen 3, DeepSeek R1's distills and Gemma 4 think before they answer, and the
 thinking comes back apart from the answer, as `reasoning_content`. A model
 that writes its thinking with other marks at the start of its turn
 (`<thinking>`, `<reasoning>`, `<thought>`, `[THINK]`, `<|begin_of_thought|>`,
-`◁think▷`, `<seed:think>`) is read the same way. DeepSeek R1 always thinks.
-To skip it for a request to Qwen 3 or Gemma 4, send
+`◁think▷`, `<seed:think>`) is read the same way.
+To skip it for a request to Qwen 3, DeepSeek R1 or Gemma 4, send
 `"chat_template_kwargs": {"enable_thinking": false}` (as vLLM and llama.cpp
-take it) or, for Qwen 3, end the message with `/no_think`. `/v1/models` says
+take it) or, for Qwen 3, end the message with `/no_think`. DeepSeek R1 was
+trained to think first: without it the 14B answers at once and is wrong more
+often (on the PS5 a counting question right in 2 of 5 runs, the right tool
+call in 3 of 5). `/v1/models` says
 under `settings.thinking` whether the loaded model thinks when a request
 doesn't say. A reply capped under 1,024
 tokens (`max_tokens`) never thinks, so an app asking for a short title or a
@@ -151,12 +154,15 @@ check, the agent task included, with about 29,700 tokens of context. Once it
 made one call where a question asked for two at a time.
 
 DeepSeek R1's distills get their own chat format (`<｜User｜>`,
-`<｜Assistant｜>`) and take tools the same way as Gemma 3: their template
-names tool marks that their files' vocabularies don't have, so ts5 asks for
-`<tool_call>` JSON in words, in the first user turn (DeepSeek's advice is to
-use R1 without a system message). The same goes for any model whose template
-has no tool format, so every model can be given tools. Not yet run on the
-PS5 with tools.
+`<｜Assistant｜>`) and are asked for calls the same way as Gemma 3: their
+template names tool marks that their files' vocabularies don't have, so ts5
+asks for `<tool_call>` JSON in words, in the first user turn (DeepSeek's
+advice is to use R1 without a system message). A result comes back as a user
+turn in plain words ("Result of get_weather: ..." and a line asking for the
+answer): on the PS5 the 14B answered from it in 10 of 10 runs, and called the
+function a second time in 2 of 10 when the result came in tags. The same
+goes for any model whose template has no tool format, so every model can be
+given tools.
 
 Gemma 4 12B takes tools in its own format, as its template writes it: the
 tools declared in the system turn, a call as

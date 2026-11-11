@@ -186,6 +186,27 @@ bool starts_ci(const std::string &s, size_t at, const char *word) {
     return true;
 }
 
+// The '>' that ends the tag opening at s[i] ('<'), or npos. A quoted
+// attribute value is passed whole: a '>' inside one is its text, not the
+// tag's end (Wikipedia keeps JSON in data-mw='{...}', "<b>" and all). A
+// quote that never closes ends at the first '>' as before.
+size_t tag_end(const std::string &s, size_t i, size_t limit = std::string::npos) {
+    const size_t n = std::min(limit, s.size());
+    size_t from = i;  // past the last value that did close
+    for (size_t k = i + 1; k < n; k++) {
+        if (s[k] == '>') return k;
+        if (s[k] != '=') continue;
+        size_t v = k + 1;
+        while (v < n && isspace((unsigned char)s[v])) v++;
+        if (v >= n || (s[v] != '"' && s[v] != '\'')) continue;
+        const size_t close = s.find(s[v], v + 1);
+        if (close == std::string::npos || close >= n) break;
+        from = k = close;
+    }
+    const size_t plain = s.find('>', from);
+    return plain != std::string::npos && plain < n ? plain : std::string::npos;
+}
+
 // The end of the element that opens at `at` (<script ...>) and holds no
 // markup of its own: just past its closing tag, or the text's end.
 size_t skip_element(const std::string &s, size_t at, const std::string &name) {
@@ -274,15 +295,14 @@ size_t element_end(const std::string &s, size_t at, const std::string &name) {
         if (s[i] != '<') continue;
         const bool closing = i + 1 < s.size() && s[i + 1] == '/';
         const size_t n = i + (closing ? 2 : 1);
-        if (!starts_ci(s, n, name.c_str())) continue;
+        if (n >= s.size() || !isalpha((unsigned char)s[n])) continue;
         const size_t e = n + name.size();
-        if (e < s.size() && isalnum((unsigned char)s[e])) continue;
-        if (!closing) {
-            depth++;
-        } else if (--depth == 0) {
-            const size_t gt = s.find('>', i);
-            return gt == std::string::npos ? s.size() : gt + 1;
-        }
+        const bool same = starts_ci(s, n, name.c_str()) && !(e < s.size() && isalnum((unsigned char)s[e]));
+        const size_t gt = tag_end(s, i);
+        if (same && !closing) depth++;
+        else if (same && --depth == 0) return gt == std::string::npos ? s.size() : gt + 1;
+        if (gt == std::string::npos) break;
+        i = gt;  // what the tag's attributes hold is no markup
     }
     return s.size();
 }
@@ -305,8 +325,8 @@ bool link_list(const std::string &h, size_t a, size_t b) {
             for (char &ch : name) ch = (char)tolower((unsigned char)ch);
             if (name == "li" && !closing) items++;
             if (name == "a") link = !closing;
-            const size_t e = h.find('>', i);
-            i = e == std::string::npos || e >= b ? b : e + 1;
+            const size_t e = tag_end(h, i, b);
+            i = e == std::string::npos ? b : e + 1;
             continue;
         }
         if (h[i] == '&') {  // an entity is one letter
@@ -348,7 +368,7 @@ std::string text_of(const std::string &html, bool menus) {
                 i++;
                 continue;
             }
-            const size_t e = html.find('>', i);
+            const size_t e = tag_end(html, i);
             const size_t after = e == std::string::npos ? html.size() : e + 1;
             bool skip = false;
             for (const char *k : kSkip) skip |= !closing && name == k;

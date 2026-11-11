@@ -52,7 +52,7 @@ ts5 reads the tool format from each model's own chat template when it loads it.
 A model whose template has no tool format its file can write (DeepSeek R1's
 distills, Llama 3.0, an early Mistral) still gets tools and search: ts5 asks
 for a call in words, as `<tool_call>` JSON, in the model's own turns, and
-gives the result back in a user turn. `tool_format` says `generic` for these.
+gives the result back in a user turn, in plain words. `tool_format` says `generic` for these.
 How well such a model calls tools depends on the model.
 
 ## How it behaves

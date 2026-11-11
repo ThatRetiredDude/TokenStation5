@@ -453,18 +453,37 @@ std::string render_mistral(const Tokenizer &t, const std::vector<Message> &all, 
 // ask for Hermes's (<tool_call>, parsed as Qwen's), in the first user turn,
 // as Gemma's template puts the system message there; results come back in a
 // user turn, as Hermes's do.
+#define TS5_TOOL_WORDS                                                                                       \
+    "You can call functions to help with the request. The functions are listed below as JSON within "        \
+    "<tools></tools> tags. To call one, reply with only a JSON object with the function's name and arguments " \
+    "within <tool_call></tool_call> tags, one pair of tags per call:\n<tool_call>\n{\"name\": <function-name>, " \
+    "\"arguments\": <args-json-object>}\n</tool_call>\nIf the request doesn't need any of the functions, answer " \
+    "it directly instead. "
 const char *const kGemmaTools =
-    "You can call functions to help with the request. The functions are listed below as JSON within "
-    "<tools></tools> tags. To call one, reply with only a JSON object with the function's name and arguments "
-    "within <tool_call></tool_call> tags, one pair of tags per call:\n<tool_call>\n{\"name\": <function-name>, "
-    "\"arguments\": <args-json-object>}\n</tool_call>\nIf the request doesn't need any of the functions, answer "
-    "it directly instead. The results of your calls come back within <tool_response></tool_response> tags: use "
-    "them to answer.";
+    TS5_TOOL_WORDS "The results of your calls come back within <tool_response></tool_response> tags: use "
+                   "them to answer.";
+// The other models' (render_generic): their results come back in words.
+const char *const kGenericTools =
+    TS5_TOOL_WORDS "The result of each call comes back in the next message, under \"Result of "
+                   "<function-name>:\": use it to answer.";
 
 std::string gemma_results(const std::vector<std::string> &results) {
     std::string s;
     for (auto &r : results) s += (s.empty() ? "" : "\n") + std::string("<tool_response>\n") + r + "\n</tool_response>";
     return s;
+}
+
+// A generic model's results, in words and without tags. Measured on the PS5
+// with DeepSeek R1 14B (two chats, five runs each): with the result within
+// <tool_response> tags, as Gemma 3 gets it, it called the function a second
+// time in 2 of 10; with these words in none.
+std::string generic_results(const std::vector<std::string> &names, const std::vector<std::string> &results) {
+    std::string s;
+    for (size_t i = 0; i < results.size(); i++)
+        s += "Result of " + (i < names.size() && !names[i].empty() ? names[i] : std::string("the function")) + ":\n" +
+             results[i] + "\n\n";
+    return s + "Answer the request from " + (results.size() == 1 ? "this result" : "these results") +
+           "; call a function again only if something is still missing.";
 }
 
 std::string render_gemma(const std::vector<Message> &all, const std::vector<Json> &tools) {
@@ -506,19 +525,21 @@ std::string render_gemma(const std::vector<Message> &all, const std::vector<Json
 }
 
 // A model whose template has no tool format (DeepSeek R1's distills, Llama
-// 3.0, older Mistral, a plain model): the same words and tags as Gemma 3's,
-// in the model's own turns (Tokenizer::apply_chat). The words go in the
-// system message; DeepSeek R1 is used without one (its makers' advice), so
-// there they open the first user turn. Calls are written into the model's
-// turn, their results come back as a user turn.
+// 3.0, older Mistral, a plain model): the words and the call's tags as
+// Gemma 3's, in the model's own turns (Tokenizer::apply_chat). The words go
+// in the system message; DeepSeek R1 is used without one (its makers'
+// advice), so there they open the first user turn. Calls are written into
+// the model's turn, their results come back as a user turn in words
+// (generic_results).
 std::string render_generic(const Tokenizer &t, const std::vector<Message> &all, const std::vector<Json> &tools) {
     std::string words;
     if (!tools.empty()) {
-        words = std::string(kGemmaTools) + "\n<tools>";
+        words = std::string(kGenericTools) + "\n<tools>";
         for (auto &tool : tools) words += "\n" + tool.dump();
         words += "\n</tools>";
     }
     const bool in_user = t.chat_format() == Tokenizer::DEEPSEEK;
+    std::vector<ToolCall> asked;  // the latest turn's calls: their results name the function
     std::vector<ChatMessage> plain;
     if (!words.empty() && !in_user) {
         // One system message, the client's first: the words after it.
@@ -530,11 +551,21 @@ std::string render_generic(const Tokenizer &t, const std::vector<Message> &all, 
     for (size_t i = 0; i < all.size(); i++) {
         const Message &m = all[i];
         if (m.role == "tool") {
-            std::vector<std::string> results;
-            for (; i < all.size() && all[i].role == "tool"; i++) results.push_back(all[i].content);
+            std::vector<std::string> names, results;
+            for (; i < all.size() && all[i].role == "tool"; i++) {
+                // The function: the message's own name, else its call's by
+                // id, else by its place among the results.
+                std::string name = all[i].name;
+                for (auto &call : asked)
+                    if (name.empty() && !all[i].call_id.empty() && call.id == all[i].call_id) name = call.name;
+                if (name.empty() && results.size() < asked.size()) name = asked[results.size()].name;
+                names.push_back(name);
+                results.push_back(all[i].content);
+            }
             i--;
-            plain.push_back({"user", gemma_results(results)});
+            plain.push_back({"user", generic_results(names, results)});
         } else if (m.role == "assistant") {
+            asked = m.calls;
             // The calls after the turn's text, on a line of their own.
             std::string c = m.content;
             for (auto &call : m.calls)
@@ -827,7 +858,14 @@ bool g4_call_from(const std::string &body, ToolCall &call) {
 
 }  // namespace
 
-bool can_skip_thinking(const Tokenizer &t) { return has(t.chat_template(), "enable_thinking"); }
+namespace {
+// DeepSeek R1's distills: their own turns and a thinking block.
+bool r1_style(const std::string &tmpl) { return has(tmpl, "<｜Assistant｜>") && has(tmpl, "</think>"); }
+}  // namespace
+
+bool can_skip_thinking(const Tokenizer &t) {
+    return has(t.chat_template(), "enable_thinking") || r1_style(t.chat_template());
+}
 
 const char *const kNoThinking = "<think>\n\n</think>\n\n";
 const char *const kThinkingOpen = "<think>\n";
@@ -839,7 +877,7 @@ std::string turn_opening(const Tokenizer &t, bool think, const std::string &prom
         // results, where it goes on in its turn, the thinking opens instead.
         // Calls still waiting for their results get neither.
         // (A template without the switch gets the empty thought always, as before.)
-        think &= can_skip_thinking(t);
+        think &= has(t.chat_template(), "enable_thinking");
         if (ends(prompt, "<|turn>model\n")) return think ? "" : std::string(kG4Thought) + kG4ThoughtEnd;
         return think && !ends(prompt, "<|tool_response>") ? kG4Thought : "";
     }
@@ -847,11 +885,12 @@ std::string turn_opening(const Tokenizer &t, bool think, const std::string &prom
     // DeepSeek R1's distills start thinking without writing the <think>, so
     // their later templates open it ('<｜Assistant｜><think>\n'); with an
     // earlier one the thinking ended in a bare </think> and landed in the
-    // answer. Their turns open it here whichever template the file has. A
-    // template with the switch (llama.cpp's copy) closes it at once when
-    // the thinking is off.
-    if (has(tmpl, "<｜Assistant｜>") && has(tmpl, "</think>"))
-        return think || !can_skip_thinking(t) ? kThinkingOpen : "<think>\n</think>";
+    // answer. Their turns open it here whichever template the file has.
+    // With the thinking off it is closed at once: as a template with the
+    // switch writes it (llama.cpp's copy), else as an empty block like
+    // Qwen3's (on the PS5 the 14B then answers at once, with no thinking
+    // in its text, and is right less often: that is the switch's price).
+    if (r1_style(tmpl)) return think ? kThinkingOpen : has(tmpl, "enable_thinking") ? "<think>\n</think>" : kNoThinking;
     if (!think) return can_skip_thinking(t) ? kNoThinking : "";
     // Qwen3.5's template opens the thinking itself ({{- '<think>\n' }}, the
     // end of its generation prompt), as QwQ's and other reasoning models'
@@ -1058,7 +1097,11 @@ std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, co
 std::string render_results(const Tokenizer &t, ToolFormat f, const std::vector<ToolCall> &calls,
                            const std::vector<std::string> &results) {
     std::string s;
-    if (f == ToolFormat::GENERIC) return after_turn(t, gemma_results(results));
+    if (f == ToolFormat::GENERIC) {
+        std::vector<std::string> names;
+        for (auto &call : calls) names.push_back(call.name);
+        return after_turn(t, generic_results(names, results));
+    }
     if (f == ToolFormat::HERMES) {
         s = "<|im_end|>\n<|im_start|>user";
         for (auto &r : results) s += "\n<tool_response>\n" + r + "\n</tool_response>";
