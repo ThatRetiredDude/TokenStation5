@@ -265,7 +265,8 @@ ts5-tui --url http://ps5.local:8081  # another one
   switch (Settings → Tool: search, pages, terminal, memory; or
   `/tools terminal off`), and `/tools` lists them.
   - **Web pages**: give it a link ("read https://... and sum it up") and
-    it gets the page as text (the first 8,000 characters).
+    it gets the page as text: the article where the page marks one,
+    without the site's menus and sidebars, the first 8,000 characters.
   - **Terminal**: when the model wants to run a command you see it first:
     **Enter** runs it, **Esc** doesn't, and **→** moves the answer to
     "every command in this chat" (no more questions; `/tools ask` brings

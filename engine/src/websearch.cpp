@@ -255,9 +255,19 @@ size_t entity(const std::string &s, size_t at, std::string &out) {
     return 0;
 }
 
-}  // namespace
+// Where the tag <name opens (or </name closes) at or after `from`, or npos.
+size_t find_tag(const std::string &html, const char *name, size_t from, bool closing = false) {
+    const std::string open = std::string(closing ? "</" : "<") + name;
+    for (size_t i = from; i + open.size() <= html.size(); i++) {
+        if (html[i] != '<' || !starts_ci(html, i, open.c_str())) continue;
+        const size_t e = i + open.size();
+        if (e >= html.size() || !isalnum((unsigned char)html[e])) return i;
+    }
+    return std::string::npos;
+}
 
-std::string html_text(const std::string &html) {
+// HTML as text. menus false: without the page's menus and sidebars (<nav>, <aside>).
+std::string text_of(const std::string &html, bool menus) {
     // Tags that start a new line, and the ones whose insides are no text.
     static const char *const kBlock[] = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section",
                                          "article", "header", "footer", "table", "ul", "ol", "pre", "blockquote",
@@ -288,6 +298,7 @@ std::string html_text(const std::string &html) {
             const size_t after = e == std::string::npos ? html.size() : e + 1;
             bool skip = false;
             for (const char *k : kSkip) skip |= !closing && name == k;
+            skip |= !menus && !closing && (name == "nav" || name == "aside");
             if (skip) {
                 i = skip_element(html, after, name);
                 continue;
@@ -335,6 +346,33 @@ std::string html_text(const std::string &html) {
     flush();
     while (!out.empty() && out.back() == '\n') out.pop_back();
     return out;
+}
+
+}  // namespace
+
+std::string html_text(const std::string &html) {
+    // The article alone where the page marks it (<main>), under the page's
+    // title, and without menus and sidebars: on a long page those would
+    // take the model's context before the text starts (Wikipedia: 800
+    // characters of menus first). A page that is little else (a list of
+    // links) is read whole.
+    const std::string whole = text_of(html, true);
+    std::string text;
+    const size_t m = find_tag(html, "main", 0);
+    if (m != std::string::npos) {
+        size_t e = std::string::npos;
+        for (size_t at = find_tag(html, "main", m, true); at != std::string::npos; at = find_tag(html, "main", at + 1, true)) e = at;
+        text = text_of(html.substr(m, e == std::string::npos ? std::string::npos : e - m), false);
+        const size_t t = find_tag(html, "title", 0);
+        if (t != std::string::npos && t < m) {
+            const size_t te = find_tag(html, "title", t, true);
+            const std::string title = text_of(html.substr(t, te == std::string::npos || te > m ? 0 : te - t), true);
+            if (!title.empty() && text.compare(0, title.size(), title) != 0) text = title + "\n\n" + text;
+        }
+    } else {
+        text = text_of(html, false);
+    }
+    return text.size() >= 200 || text.size() * 2 >= whole.size() ? text : whole;
 }
 
 std::string web_page(const std::string &url, size_t max_chars, std::string &log, bool *failed) {

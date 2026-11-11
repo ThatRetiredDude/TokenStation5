@@ -952,13 +952,36 @@ PAGE = """<!doctype html><html><head><title>T &amp; t</title><style>p { color: r
 <h1>Head</h1><p>One two
    three<br>four</p><ul><li>a</li><li>b &lt; c</li></ul><table><tr><td>x</td><td>y</td></tr></table>
 <noscript>turn it on</noscript><p>caf&eacute; &euro; &#53; &#x3c; 6 &Uuml;ber &szlig; &yuml; &nosuch; &trade;</p></body></html>"""
-PAGE_TEXT = "T & t\n\nHome\n\nHead\n\nOne two three\nfour\n\n- a\n- b < c\n\nx | y |\n\ncafé € 5 < 6 Über ß ÿ &nosuch; ™\n"
+PAGE_TEXT = "T & t\n\nHead\n\nOne two three\nfour\n\n- a\n- b < c\n\nx | y |\n\ncafé € 5 < 6 Über ß ÿ &nosuch; ™\n"
+
+
+# A page as sites build them: menus around the article, which <main> marks.
+ARTICLE = """<!DOCTYPE html><html><head><title>Console - Encyclopedia</title></head><body>
+<a href="#content">Jump to content</a><header><nav><ul><li>Main menu</li><li>Contribute</li><li>Search</li></ul></nav>
+<div>Personal tools</div></header><nav id="toc"><ul><li>Contents</li><li>History</li></ul></nav>
+<MAIN id="content"><header><h1>Console</h1><nav><ul><li>Article</li><li>Talk</li><li>Edit</li></ul></nav></header>
+<p>The console was released in November 2020. It has an eight-core processor and sixteen gigabytes of
+memory, which its graphics chip shares with the system.</p><aside>Not to be confused with a terminal.</aside>
+<h2>Hardware</h2><p>Its solid-state drive reads five and a half gigabytes a second, and the cooling fan is
+a hundred and twenty millimetres across.</p></MAIN>
+<footer><nav><ul><li>Privacy policy</li><li>About</li></ul></nav><p>Text is available under a licence.</p></footer>
+</body></html>"""
+ARTICLE_TEXT = ("Console - Encyclopedia\n\nConsole\n\nThe console was released in November 2020. It has an eight-core "
+                "processor and sixteen gigabytes of memory, which its graphics chip shares with the system.\n\nHardware\n\n"
+                "Its solid-state drive reads five and a half gigabytes a second, and the cooling fan is a hundred and "
+                "twenty millimetres across.\n")
+# A page that is little but its menu is read whole.
+LINKS = """<html><head><title>Docs</title></head><body><nav><ul><li>Install on Linux</li><li>Models tested on the
+console</li><li>Connecting apps</li><li>Troubleshooting</li></ul></nav><main><p>Pick a page.</p></main></body></html>"""
+LINKS_TEXT = "Docs\n\n- Install on Linux\n- Models tested on the console\n- Connecting apps\n- Troubleshooting\n\nPick a page.\n"
 
 
 class Pages(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         pages = {"/a.html": ("text/html; charset=utf-8", PAGE.encode()),
                  "/sniffed": ("application/octet-stream", PAGE.encode()),
+                 "/article.html": ("text/html", ARTICLE.encode()),
+                 "/links.html": ("text/html", LINKS.encode()),
                  "/b.txt": ("text/plain", b"plain  text\nstays as it is\n"),
                  "/c.bin": ("application/octet-stream", bytes(range(256)) * 4),
                  "/long.txt": ("text/plain", b"word " * 4000),
@@ -988,6 +1011,8 @@ def test_page_reader(ts5):
         # name, arguments, exit code, what the output is (str) or has (tuple)
         ("an HTML page", [base + "/a.html"], 0, PAGE_TEXT),
         ("HTML without the type", [base + "/sniffed"], 0, PAGE_TEXT),
+        ("the article alone, without the menus around it", [base + "/article.html"], 0, ARTICLE_TEXT),
+        ("a page of links is read whole", [base + "/links.html"], 0, LINKS_TEXT),
         ("plain text", [base + "/b.txt"], 0, "plain  text\nstays as it is\n"),
         ("a long page is cut", [base + "/long.txt", "100"], 0, ("word word", "the page goes on: 19899 more characters")),
         ("no such page", [base + "/none"], 1, ("The page could not be read: there is no such page (404).",)),
