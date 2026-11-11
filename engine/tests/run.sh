@@ -165,11 +165,53 @@ for be in cpu vk; do
     python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --ref-model "$work/qwen35-F32.gguf" --tol 0.002 --backend $be \
         "$work/qwen35-fold-F32.gguf"
 done
+# The token table as the output too (prism.hadamard version 2, the Bonsai 4B
+# and 9B: no output.weight, the rotated table's rows are the output's).
+for q in F32 Q2_0; do
+    out="$work/qwen35-tied-fold-$q.gguf"
+    [ -s "$out" ] || python3 "$here/make_test_model.py" --arch qwen35 --quant $q --layers 8 --heads 2 --kv-heads 1 \
+        --seed 3 --fold 128 --tied --vocab "$work/ggml-vocab-qwen35.gguf" "$out" > /dev/null
+done
+[ -s "$work/qwen35-tied-F32.gguf" ] || python3 "$here/make_test_model.py" --arch qwen35 --quant F32 --layers 8 --heads 2 \
+    --kv-heads 1 --seed 3 --tied --vocab "$work/ggml-vocab-qwen35.gguf" "$work/qwen35-tied-F32.gguf" > /dev/null
+fold+=("$work/qwen35-tied-fold-Q2_0.gguf")
+for be in cpu vk; do
+    python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --ref-model "$work/qwen35-tied-F32.gguf" --tol 0.002 --backend $be \
+        "$work/qwen35-tied-fold-F32.gguf"
+done
 # Two bits a weight with the linear layers' alpha and beta in BF16, as the
 # Bonsai files: Vulkan against the CPU, at once, a token a call, in chunks.
-python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${fold[@]}"
+# (Qwen3.5's prompts are f16 by default, as above: 0.15-0.21% here.)
+TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${fold[@]}"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${fold[@]}"
-python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${fold[@]}"
+TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${fold[@]}"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.003 --backend vk "${fold[@]}"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.003 --backend vk --ntok 300 "${fold[@]}"
+# Q2_0's own kernels: one token from words (mv16_q2_0; TS5_MV_Q2=0 and one
+# row a workgroup too), prompts in 128 x 128 blocks (mmb*_q2_0, forced on
+# these small matrices by TS5_MMB_MIN=1; TS5_MMB_Q2=0: the 64 x 64 kernel),
+# rotated or not.
+echo "== Q2_0: its one-token and prompt kernels, rotated or not"
+q2=("${fold[@]}" "$work/qwen35-Q2_0.gguf")
+TS5_MV_Q2=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${q2[@]}"
+TS5_MV_ROWS=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${q2[@]}"
+TS5_MMB_Q2=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${q2[@]}"
+TS5_MMB_MIN=1 TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${q2[@]}"
+TS5_MMB_MIN=1 TS5_MMB_F16=0 TS5_MMB_VAR=q python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
+    --ntok 300 "${q2[@]}"
+TS5_MMB_MIN=1 TS5_MMB_F16=0 TS5_MMB_NOZERO=2 TS5_MMB_SLICES=5 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu \
+    --tol 0.002 --backend vk --ntok 300 "${q2[@]}"
+TS5_MMB_MIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.003 --backend vk --ntok 300 "${q2[@]}"
+TS5_MMB_MIN=1 TS5_MMB_VAR=dql python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.003 --backend vk --ntok 300 \
+    "${q2[@]}"
+TS5_MMB_MIN=1 TS5_MMB_NOZERO=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.003 --backend vk --ntok 300 \
+    "${q2[@]}"
+TS5_MMB_MIN=1 TS5_PROFILE=1 "$ts5" bench -m "$work/qwen35-fold-Q2_0.gguf" --pp 300 --tg 8 > "$work/q2-prof.txt" 2>&1
+grep -q "^  mmb16dqz_q2_0 " "$work/q2-prof.txt" && grep -q "mv16_q2_0" "$work/q2-prof.txt" &&
+    ! grep -q "^  mm_q2_0 \|^  matmul_q2_0 " "$work/q2-prof.txt" ||
+    { echo "FAIL: Q2_0's kernels in use"; grep "q2_0" "$work/q2-prof.txt"; exit 1; }
+echo "PASS Q2_0: prompts on mmb16dqz_q2_0, one token on mv16_q2_0"
+rm -f "$work/q2-prof.txt"
 echo "== Qwen3.5: no drafts and no helper (that state only goes forward), the same text as with drafting off"
 p35="the cat sat on the mat. the cat sat on the mat. the cat sat on the mat. the cat sat on the"
 for be in vk cpu; do
@@ -1498,7 +1540,8 @@ if [ -n "${LLAMA_CPP:-}" ]; then
         "$work/llama-F32.gguf" "$work/qwen3-Q4_K_M.gguf" "$work/qwen35-F32.gguf"
     echo "== rotated weights vs llama.cpp, which reads prism.hadamard too"
     python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk "$work/qwen3-fold-F32.gguf" \
-        "$work/qwen35-fold-F32.gguf" "$work/qwen3-fold-Q2_0.gguf" "$work/qwen35-fold-Q2_0.gguf"
+        "$work/qwen35-fold-F32.gguf" "$work/qwen3-fold-Q2_0.gguf" "$work/qwen35-fold-Q2_0.gguf" \
+        "$work/qwen35-tied-fold-F32.gguf" "$work/qwen35-tied-fold-Q2_0.gguf"
     echo "== Gemma 3 vs llama.cpp: 600 tokens across the window, with its linear RoPE scale"
     python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk --ntok 600 "$g3"
     echo "== Gemma 3 12B's heads vs llama.cpp: generation after a 1,100-token prompt"

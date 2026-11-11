@@ -205,6 +205,7 @@
 #include "mvt_q6_k.spv.h"
 #include "mvt_q5_k.spv.h"
 #include "mvt_q8_0.spv.h"
+#include "mv16_q2_0.spv.h"
 #include "mv16_q5_0.spv.h"
 #include "mv16n_q5_0.spv.h"
 #include "mv16_glu_q5_0.spv.h"
@@ -264,6 +265,16 @@
 #include "mmbz_q5_k.spv.h"
 #include "mmbz_q6_k.spv.h"
 #include "mmbz_q8_0.spv.h"
+#include "mmb_q2_0.spv.h"
+#include "mmb16_q2_0.spv.h"
+#include "mmb16d_q2_0.spv.h"
+#include "mmb16q_q2_0.spv.h"
+#include "mmb16dq_q2_0.spv.h"
+#include "mmb16dql_q2_0.spv.h"
+#include "mmbq_q2_0.spv.h"
+#include "mmb16dqz_q2_0.spv.h"
+#include "mmb16dqlz_q2_0.spv.h"
+#include "mmbz_q2_0.spv.h"
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "qkv_post_q8t.spv.h"
@@ -401,10 +412,14 @@ static bool fast_type(const Weight &w) {
     if (t == GGML_Q8_0 && w.ne0() % 256 == 0) return true;
     return mv32_on() && (t == GGML_Q8_0 || t == GGML_Q5_0) && w.ne0() % 32 == 0 && w.info->nbytes % 4 == 0;
 }
-// The types with prompt kernels (mmb): K-quants and Q8_0, in 32-value units.
-static bool mmb_type(const Weight &w) { return fast_type(w) && w.type() != GGML_Q5_0; }
+// The types with prompt kernels (mmb): K-quants and Q8_0, in 32-value
+// units, and Q2_0 (the Bonsai files), two units a block.
+static bool mmb_type(const Weight &w) {
+    if (w.type() == GGML_Q2_0) return w.ne0() % 64 == 0;
+    return fast_type(w) && w.type() != GGML_Q5_0;
+}
 // The x-staging verify kernels (mvtx, TS5_MVTX=1): whole 256-value groups.
-static bool mvtx_type(const Weight &w) { return mmb_type(w) && w.ne0() % 256 == 0; }
+static bool mvtx_type(const Weight &w) { return fast_type(w) && mmb_type(w) && w.ne0() % 256 == 0; }
 
 // Rows of logits the GPU's buffer holds, 4 bytes for each word of the
 // vocabulary each (Gemma's 262,144 words: 1 MiB a row). Serving never wants
@@ -743,6 +758,8 @@ private:
         if (const char *e = getenv("TS5_AHEAD_FAIL")) ahead_fail_ = atoi(e);
         if (const char *e = getenv("TS5_TILED_MIN")) tiled_min_ = atoi(e);
         if (const char *e = getenv("TS5_FAST_MATVEC")) fast_matvec_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_MV_Q2")) mv_q2_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_MMB_Q2")) mmb_q2_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV_ROWS")) mv_rows_ = std::min(8, std::max(1, atoi(e)));
         if (const char *e = getenv("TS5_MV_ROWS_MIN")) mv_rows_min_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_ATTN")) attn_fast_ = atoi(e) != 0;
@@ -1191,10 +1208,13 @@ private:
         P(mmb16dq_q4_k, 4) P(mmb16dq_q5_k, 4) P(mmb16dq_q6_k, 4) P(mmb16dq_q8_0, 4)
         P(mmb16dql_q4_k, 4) P(mmb16dql_q5_k, 4) P(mmb16dql_q6_k, 4) P(mmb16dql_q8_0, 4)
         P(mmbq_q4_k, 4) P(mmbq_q5_k, 4) P(mmbq_q6_k, 4) P(mmbq_q8_0, 4)
+        P(mmb_q2_0, 4) P(mmb16_q2_0, 4) P(mmb16d_q2_0, 4) P(mmb16q_q2_0, 4) P(mmb16dq_q2_0, 4) P(mmb16dql_q2_0, 4)
+        P(mmbq_q2_0, 4)
 #ifndef TS5_PS5
         P(mmb16dqz_q4_k, 4) P(mmb16dqz_q5_k, 4) P(mmb16dqz_q6_k, 4) P(mmb16dqz_q8_0, 4)
         P(mmb16dqlz_q4_k, 4) P(mmb16dqlz_q5_k, 4) P(mmb16dqlz_q6_k, 4) P(mmb16dqlz_q8_0, 4)
         P(mmbz_q4_k, 4) P(mmbz_q5_k, 4) P(mmbz_q6_k, 4) P(mmbz_q8_0, 4)
+        P(mmb16dqz_q2_0, 4) P(mmb16dqlz_q2_0, 4) P(mmbz_q2_0, 4)
 #endif
         if (mmb_ && !pipes_.count("mmb16" + mmb_var_ + "_q4_k")) {
             err = "no prompt kernel variant \"" + mmb_var_ + "\" (TS5_MMB_VAR)";
@@ -1211,6 +1231,7 @@ private:
         MV(mv16_q5_k, 3) MV(mv16_q8_0, 3) MV(mv16_glu_q5_k, 4) MV(mv16_glu_q8_0, 4)
         MV(mv16n_q5_k, 4) MV(mv16n_q8_0, 4) MV(mv16n_glu_q5_k, 5) MV(mv16n_glu_q8_0, 5)
         MV(mv16_q5_0, 3) MV(mv16n_q5_0, 4) MV(mv16_glu_q5_0, 4) MV(mv16n_glu_q5_0, 5)
+        MV(mv16_q2_0, 3)
 #undef MV
         // The verify-batch mat-vecs once per batch size (their token loop is
         // compile-time), each twice like the one-token ones: mvt_rows_ rows
@@ -1920,7 +1941,7 @@ private:
                                        ? big * std::min({(mmb_split_ + big - 1) / big, (uint32_t)w.ne0() / 256, 16u})
                                        : big;
         if (ntok >= tiled_min_ && mmb_ && (split_big >= (uint32_t)mmb_min_ || (mmb_short_ && ntok < 128 && mmb_f16_for(w))) &&
-            x_off % 4 == 0 && mmb_type(w)) {
+            x_off % 4 == 0 && mmb_type(w) && (w.type() != GGML_Q2_0 || mmb_q2_)) {
             mmb(w, x, y, pc, big, what);
             return;
         }
@@ -1946,6 +1967,14 @@ private:
                 mat_vec(std::string(mv16_ ? "mv16_" : "matvec_") + qname(w.type()), {&W(w), &x, &y}, pc, rows, what);
                 return;
             }
+        }
+        // One token of Q2_0 (the Bonsai files): its word-load kernel. Only
+        // this one: those files' weights are stored rotated, so the norm
+        // and gate+up never fold in (TS5_MV_Q2=0: the byte-load kernel).
+        if (ntok == 1 && fast_matvec_ && mv16_ && mv_q2_ && !norm_ && w.type() == GGML_Q2_0 && w.ne0() % 64 == 0 &&
+            w.info->nbytes % 4 == 0 && x_off % 4 == 0) {
+            mat_vec("mv16_q2_0", {&W(w), &x, &y}, pc, rows, what);
+            return;
         }
         // A few tokens (speculation's verify batch): the word-load kernels
         // that read each row's words once and dot them with every token, so
@@ -2685,6 +2714,8 @@ private:
     // Rows per workgroup of those kernels (TS5_MV_ROWS, 1 to 8), which share
     // their x loads, for matrices of at least mv_rows_min_ rows
     // (TS5_MV_ROWS_MIN); one for smaller ones.
+    bool mv_q2_ = true;  // mv16_q2_0 for one token of Q2_0 (TS5_MV_Q2)
+    bool mmb_q2_ = true;  // the 128 x 128 prompt kernels for Q2_0 (TS5_MMB_Q2; 0: the 64 x 64 byte-load kernel)
     uint32_t mv_rows_ = 4;
     // 1024 takes in Qwen3 8B and 14B's K and V (8 heads of 128: +1.4% and
     // +0.9% generation on the console); 512-row ones (4 KV heads) stay at one.

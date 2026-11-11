@@ -593,7 +593,23 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
                 out.push_back(th);
             }
         }
-        if (!m.done && content.empty() && reasoning.empty()) {
+        // The searches the server ran for this answer by itself, and what
+        // came of each.
+        for (auto &one : m.searches) {
+            wrap(out, {{"searches the web: " + one.query, Style(t.accent2)}}, w, 2, "⚙ ", Style(t.accent2, kDefault, BOLD),
+                 "  ");
+            Line st;
+            if (one.running && !m.done) {
+                st.add("    ", Style());
+                st.add("●", Style(mix(t.bg, t.accent2, 0.3 + 0.7 * pulse), kDefault, BOLD));
+                st.add(" searching…", Style(t.accent2, kDefault, ITALIC));
+            } else {
+                st.add("    " + (one.running ? std::string("stopped") : one.note.empty() ? std::string("done") : one.note),
+                       Style(one.failed ? t.warn : t.dim));
+            }
+            out.push_back(st);
+        }
+        if (!m.done && content.empty() && reasoning.empty() && (m.searches.empty() || !m.searches.back().running)) {
             // The prompt is being read (after a tool: what it gave back).
             Line wl;
             wl.add("  ", Style());
@@ -1033,6 +1049,24 @@ void stream_answer(Chat *c, const ChatRequest &rq, const std::string &body) {
             m.error = j["error"]["message"].str(j["error"].str("the server sent an error"));
             return;
         }
+        // A search the server runs itself: a line when it starts, filled in
+        // when it ends.
+        const ts5::Json &ws = j["ts5_web_search"];
+        if (!ws.is_null() && m.searches.size() < 64) {
+            const std::string state = ws["state"].str();
+            if (state == "running" || m.searches.empty() || !m.searches.back().running ||
+                m.searches.back().query != ws["query"].str()) {
+                ServerSearch one;
+                one.query = ws["query"].str();
+                m.searches.push_back(one);
+            }
+            if (state != "running") {
+                ServerSearch &one = m.searches.back();
+                one.running = false;
+                one.failed = state == "failed";
+                one.note = ws["note"].str();
+            }
+        }
         if (!j["choices"].a.empty()) {
             const ts5::Json &d = j["choices"].a[0]["delta"];
             const std::string fr = j["choices"].a[0]["finish_reason"].str();
@@ -1365,24 +1399,34 @@ void run_summary(Chat *c, ChatRequest rq, std::string msgs, std::string then, st
     c->running = false;
 }
 
+// A summary is asked for from outside the conversation: the conversation goes
+// in as one text between two lines, and the instructions follow it. (Asked as
+// the conversation's next message, Qwen3.5 9B and Gemma 4 12B write the
+// request into the notes as the last thing asked for, whatever it says about
+// leaving itself out.)
+const char *const kTalkOpen =
+    "Below, between the two lines of dashes, is a conversation between a user and an AI assistant. Read it; what to "
+    "do with it comes after it.\n\n-----\n";
+const char *const kTalkNotes = "[Notes on the conversation's earlier part]\n";
+
 // What the model is asked for. words: about how long it may get.
 std::string summary_ask(int words, const std::string &focus, bool again) {
     std::string a =
-        "Stop here: do not answer the last message. Write a detailed summary of this whole conversation so far. It "
-        "will take the conversation's place in your memory, so anything that is not in it is lost. Include:\n"
-        "- what I am trying to do and what I asked for, in order;\n"
-        "- every decision made and why, and my preferences and corrections;\n"
+        "-----\n\nThe assistant cannot hold all of that any longer, so notes take its place: the assistant goes on "
+        "from the notes alone, and anything that is not in them is lost to it. Write those notes. Include:\n"
+        "- what the user is trying to do and what they asked for, in order;\n"
+        "- every decision made and why, and the user's preferences and corrections;\n"
         "- the facts, names, numbers, dates, links, file names and commands that came up;\n"
-        "- code or text we are still working on, word for word where the exact wording matters;\n"
+        "- code or text still being worked on, word for word where the exact wording matters;\n"
         "- what was tried and how it turned out, including what failed;\n"
-        "- where things stand now, and what was about to happen next.\n"
-        "Write plain notes under short headings, not a reply to me. Add nothing that was not said. Leave this "
-        "request out of the notes: they are about the conversation before this message, and never say that a "
-        "summary was asked for or is being written. ";
-    a += fmt("Use up to about %d words; shorter is fine if nothing is lost.", words);
+        "- where things stand at the conversation's end, and what was about to happen next.\n"
+        "Write plain notes under short headings and nothing else: no opening line, no closing remark. Keep to what "
+        "is between the lines of dashes; add nothing that was not said there, and nothing about these instructions "
+        "or about the notes being written. ";
+    a += fmt("Use up to about %d words; shorter is better where nothing is lost.", words);
     if (again)
-        a += " The conversation began with an earlier summary (the first message): carry over everything in it that "
-             "still matters.";
+        a += " The conversation opens with notes on its earlier part: carry over everything in them that still "
+             "matters.";
     if (!focus.empty()) a += "\nTake special care to keep: " + focus;
     return a;
 }
@@ -1554,8 +1598,8 @@ std::string chat_take_refused(Chat &c, bool &alone) {
 
 namespace {
 
-// The messages of a request for a summary of msgs[0, end): the last summary,
-// the messages since, and the ask. Sets where the chat goes on from
+// The message of a request for a summary of msgs[0, end): the last summary
+// and the messages since as one text, and the ask. Sets where the chat goes on from
 // (*keep_from, an index into msgs) and what is kept there, in tokens,
 // roughly (*kept). used: the server's count for the chat; room: how much of
 // the context the request may take (1.0 at first). Under c.mu.
@@ -1576,7 +1620,8 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
         std::string reasoning;
         split_think(m, text[k], reasoning);
         if (m.role == "tool") text[k] = "[What the tool gave back]\n" + text[k];
-        for (auto &u : m.calls) text[k] += (text[k].empty() ? "" : "\n") + ("[I used a tool: " + tool_call_line(u.name, u.args) + "]");
+        for (auto &u : m.calls)
+            text[k] += (text[k].empty() ? "" : "\n") + ("[The assistant used a tool: " + tool_call_line(u.name, u.args) + "]");
         tok[k] = rough_tokens(text[k]);
         rough += tok[k];
     }
@@ -1603,13 +1648,17 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
             kept = tail;
         }
     }
-    const std::string ask = summary_ask(out_max / 2, focus, sum >= 0);
+    // The notes may get about half as long as what they stand for (a short
+    // chat is not to come back longer than it was), 40 words at least.
+    size_t bytes = sum >= 0 ? c.msgs[sum].content.size() : 0;
+    for (size_t k = 0; k < first_kept; k++) bytes += text[k].size();
+    const std::string ask = summary_ask(std::min(out_max / 2, std::max(40, (int)(bytes / 12))), focus, sum >= 0);
     // The request has to fit the context itself: the longest messages lose
     // their middles until it does.
     if (rq.n_ctx > 0) {
         const double limit = (rq.n_ctx - out_max - 256) * room;
         for (int round = 0; round < 200; round++) {
-            double need = lead + rough_tokens(ask);
+            double need = lead + rough_tokens(ask) + 40;
             size_t big = 0;
             for (size_t k = 0; k < first_kept; k++) {
                 need += rough_tokens(text[k]);
@@ -1623,16 +1672,15 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
             x = x.substr(0, a) + "\n[… a part of this message is left out here …]\n" + x.substr(b);
         }
     }
-    std::string msgs;
-    if (sum >= 0) msgs = role_json("system", kSummaryLead + c.msgs[sum].content);
+    std::string talk = kTalkOpen;
+    if (sum >= 0) talk += kTalkNotes + c.msgs[sum].content + "\n\n";
     for (size_t k = 0; k < first_kept; k++) {
-        if (!msgs.empty()) msgs += ",";
-        msgs += role_json(c.msgs[idx[k]].role == "tool" ? "user" : c.msgs[idx[k]].role, text[k]);
+        const std::string &role = c.msgs[idx[k]].role;
+        talk += (role == "tool" ? "" : role == "assistant" ? "[Assistant]\n" : "[User]\n") + text[k] + "\n\n";
     }
-    msgs += "," + role_json("user", ask);
     *keep_from = first_kept < idx.size() ? (int)idx[first_kept] : (int)end;
     *kept_tokens = (int)kept;
-    return msgs;
+    return role_json("user", talk + ask);
 }
 
 }  // namespace
@@ -1738,6 +1786,8 @@ bool chat_save(Chat &c, const std::string &path, std::string &why) {
             if (!reasoning.empty()) {
                 f << "<details><summary>Thinking</summary>\n\n" << reasoning << "\n\n</details>\n\n";
             }
+            for (auto &one : m.searches)
+                f << "`searches the web: " << one.query << "`" << (one.note.empty() ? "" : " (" + one.note + ")") << "\n\n";
             if (!content.empty()) f << content << "\n";
             for (auto &u : m.calls) f << "\n`" << tool_call_line(u.name, u.args) << "`\n";
             if (m.gen_tps > 0) f << fmt("\n_%.1f tok/s, %d tokens_\n", m.gen_tps, m.gen_tokens);
@@ -1812,6 +1862,8 @@ std::string chat_copy_text(Chat &c, int msg, int block, bool thinking, std::stri
                 while (!reasoning.empty() && reasoning.back() == '\n') reasoning.pop_back();
                 out += "Thinking:\n" + reasoning + "\n\n";
             }
+            for (auto &one : m.searches)
+                out += "`searches the web: " + one.query + "`" + (one.note.empty() ? "" : " (" + one.note + ")") + "\n\n";
             if (!content.empty() || !m.error.empty()) out += content + (m.error.empty() ? "" : m.error) + "\n\n";
             for (auto &u : m.calls) out += "`" + tool_call_line(u.name, u.args) + "`\n\n";
         }

@@ -1720,6 +1720,28 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
                 break;
             }
         }
+        // Words, then a bare call object that ends the reply and names one
+        // of the request's tools, maybe after a stray </think> and the same
+        // object once already (DeepSeek R1 14B on the console: "Let me check
+        // the disk space for you. {call} </think> {call}").
+        if (r.calls.empty() && !names.empty()) {
+            const std::string a = rstrip(text.substr(from));
+            size_t p = a.empty() || a.back() != '}' ? std::string::npos : a.rfind('{');
+            while (p != std::string::npos && object_end(a, p) != a.size()) p = p ? a.rfind('{', p - 1) : std::string::npos;
+            std::vector<ToolCall> got;
+            if (p != std::string::npos && calls_from_objects(a.substr(p), got) && got.size() == 1 &&
+                std::find(names.begin(), names.end(), got[0].name) != names.end()) {
+                const std::string object = a.substr(p);
+                std::string head = rstrip(a.substr(0, p));
+                for (;;) {
+                    if (ends(head, "</think>")) head = rstrip(head.substr(0, head.size() - 8));
+                    else if (ends(head, object)) head = rstrip(head.substr(0, head.size() - object.size()));
+                    else break;
+                }
+                r.calls = got;
+                content = text.substr(0, from) + head;
+            }
+        }
         if (!r.calls.empty()) r.content = without_empty_fence(rstrip(content));
         // A plain answer in a <response> wrapper (Coder, seen on the
         // console): the wrapper goes.
@@ -1826,7 +1848,16 @@ size_t content_prefix(ToolFormat f, const std::string &text) {
         if (i != std::string::npos && (text[i] == '{' || text[i] == '`' || text[i] == '<')) return from;
         // A wrapper of the model's own with an object in it may be a call
         // (parse_turn), and so may a tag the text ends in the middle of.
-        const size_t own = made_up_wrapper(text, from, true);
+        size_t own = made_up_wrapper(text, from, true);
+        // And so may an object that starts a line with "name" (a bare call
+        // after words), or what could become one where the text ends.
+        for (size_t b = text.find('{', from); b != std::string::npos && b < own; b = text.find('{', b + 1)) {
+            if (b > from && text[b - 1] != '\n') continue;
+            static const std::string key = "\"name\"";
+            const size_t k = text.find_first_not_of(kSpace, b + 1);
+            if (k == std::string::npos || key.compare(0, std::min(key.size(), text.size() - k), text, k, key.size()) == 0)
+                own = b;
+        }
         size_t p;
         if (find_hermes_tag(text, from, p) >= 0) return std::min(p, own);
         // Hold back what could be the start of a call tag.

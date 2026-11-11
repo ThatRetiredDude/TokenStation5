@@ -313,6 +313,17 @@ def test_parser(ts5):
         ("generic", 'Like this:\n<command>\n{"name": "other", "arguments": {}}\n</command>',
          'Like this:\n<command>\n{"name": "other", "arguments": {}}\n</command>', [], 11, ["run_command"]),
         ("generic", "I'll run it. <comm", "I'll run it. <comm", [], 13, ["run_command"]),
+        # Words, then the call as a bare object, a stray </think> and the object again (R1 14B, from
+        # the console); an object that is no call stays text.
+        ("generic", 'Let me check the disk space for you.\n\n{"name": "run_command", "arguments": {"command": "df -h"}}\n'
+         '</think>\n\n{"name": "run_command", "arguments": {"command": "df -h"}}',
+         "Let me check the disk space for you.", [("run_command", {"command": "df -h"})], 38, ["run_command"]),
+        ("generic", 'I will run it.\n{ "name": "run_command", "arguments": {"command": "nproc"}}\n',
+         "I will run it.", [("run_command", {"command": "nproc"})], 15, ["run_command"]),
+        ("generic", 'As JSON:\n{"name": "Ada", "arguments": {}}', 'As JSON:\n{"name": "Ada", "arguments": {}}', [], 9,
+         ["run_command"]),
+        ("generic", 'The set is {"a": 1}', 'The set is {"a": 1}', [], 19, ["run_command"]),
+        ("generic", "Two lines.\n{", "Two lines.\n{", [], 11, ["run_command"]),
         ("generic", "I'll run it. <command>\n", "I'll run it. <command>\n", [], 13, ["run_command"]),
         ("generic", "Write <b>bold</b> and a < b here.", "Write <b>bold</b> and a < b here.", [], 33, ["run_command"]),
         # Calls as elements named after the tools (Coder's two calls, from the console).
@@ -591,14 +602,23 @@ def test_search_loop(ts5, model, tdir):
                 r = urllib.request.urlopen(urllib.request.Request(
                     f"http://127.0.0.1:{port}/v1/chat/completions", json.dumps(req).encode(),
                     {"Content-Type": "application/json"}), timeout=60).read().decode()
+                # Each search ts5 ran is told to the client: as it starts and as it ends in a stream
+                # ("ts5_web_search", in chunks with no text), in a list beside the usage otherwise.
                 if stream:
-                    got = "".join(json.loads(line[6:])["choices"][0]["delta"].get("content", "")
-                                  for line in r.splitlines() if line.startswith("data: {"))
+                    chunks = [json.loads(line[6:]) for line in r.splitlines() if line.startswith("data: {")]
+                    got = "".join(c["choices"][0]["delta"].get("content", "") for c in chunks if c["choices"])
+                    told = [c["ts5_web_search"] for c in chunks if "ts5_web_search" in c]
+                    want = ["running", "failed" if key == "tvly-bad" else "done"] * hits
                 else:
                     got = json.loads(r)["choices"][0]["message"]["content"]
+                    told = json.loads(r).get("ts5_web_searches", [])
+                    want = ["failed" if key == "tvly-bad" else "done"] * hits
                 prompts = open(script + ".prompts").read().split("\n====\n")[:-1]
                 last = prompts[-1]
                 problems = []
+                if ([t.get("state") for t in told] != want or any(t.get("query") != "PS5 firmware" for t in told) or
+                        any(not t.get("note") for t in told if t.get("state") != "running")):
+                    problems.append(f"searches told: {told!r}")
                 if got != answer:
                     problems.append(f"answer {got!r}")
                 if len(Tavily.seen) - before != hits:

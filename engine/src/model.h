@@ -199,7 +199,7 @@ private:
     bool read_folds(std::string &err);
     std::map<std::string, int> folds_, inverse_folds_;
     std::map<std::string, bool> fold_bound_;  // the folded names a Weight was made for
-    bool fold_grouped_ = false;
+    bool fold_grouped_ = false, fold_tied_ = false;
     const uint8_t *base_ = nullptr;
 };
 

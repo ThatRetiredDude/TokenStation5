@@ -108,6 +108,13 @@ How well such a model calls tools depends on the model.
   number of results and the time.
 - A request can turn it off with `"web_search": false`, or with
   `"tool_choice": "none"`, and turn it on with `"web_search": true`.
+- A search ts5 runs is told to the client. A streamed answer gets a chunk
+  with no text and a field `"ts5_web_search": {"query": "…", "state":
+  "running"}` when the search starts, and one with `"state": "done"` (or
+  `"failed"`) and a `"note"` such as `5 results (0.5 s, Wikipedia)` when it
+  ends; a client that does not know the field sees two empty chunks. An
+  answer that is not streamed has them as `"ts5_web_searches": [...]` beside
+  `"usage"`. ts5-tui shows a line for each (`⚙ searches the web: …`).
 
 ## Clients with their own tools
 

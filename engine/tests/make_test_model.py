@@ -212,6 +212,9 @@ def main():
                     help="store the weights rotated, as the Bonsai files do (prism.hadamard, blocks of this many "
                          "values): the same model as without it, whose products' inputs are rotated to match. With "
                          "Q1_0 or Q2_0 the linear layers' ssm_alpha and ssm_beta are BF16, as in those files")
+    ap.add_argument("--tied", action="store_true",
+                    help="no output.weight: the token table is the output too (with --fold: prism.hadamard version 2, "
+                         "as Ternary-Bonsai-2 4B)")
     ap.add_argument("out")
     a = ap.parse_args()
 
@@ -436,10 +439,13 @@ def main():
         t(p + "ffn_up.weight", a.ff, a.embd)
         t(p + "ffn_down.weight", a.embd, a.ff)
     norm("output_norm.weight", a.embd)
-    t("output.weight", n_vocab + a.pad_tokens + a.pad_vocab, a.embd, boost_row=a.boost_token)
+    if not a.tied:
+        t("output.weight", n_vocab + a.pad_tokens + a.pad_vocab, a.embd, boost_row=a.boost_token)
 
     if a.fold:
-        w.add_uint32("prism.hadamard.version", 1)
+        w.add_uint32("prism.hadamard.version", 2 if a.tied else 1)
+        if a.tied:
+            w.add_bool("prism.hadamard.tied_output", True)
         w.add_uint32("prism.hadamard.block_size", a.fold)
         w.add_string("prism.hadamard.transform", "normalized-sylvester-walsh-hadamard")
         w.add_string("prism.hadamard.axis", "input-last-dimension")

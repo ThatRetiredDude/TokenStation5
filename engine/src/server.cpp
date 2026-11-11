@@ -647,6 +647,20 @@ void handle(int fd, Server::State &state, Usage &u) {
                    ",\"model\":" + json_escape(model) + ",\"choices\":[{\"index\":0,\"text\":" + json_escape(delta) +
                    ",\"finish_reason\":" + fin + "}]}";
         };
+        // A search ts5 runs itself, told to the client as it starts and as it
+        // ends: a chunk with nothing in it for a client that does not know
+        // the field, and a line on the screen for one that does. state:
+        // "running", "done" or "failed"; note: what came of it.
+        std::string searched;  // the same, for an answer that is not streamed
+        auto search_json = [&](const std::string &query, const char *state_of, const std::string &note) {
+            return "{\"query\":" + json_escape(query) + ",\"state\":\"" + state_of + "\"" +
+                   (note.empty() ? std::string() : ",\"note\":" + json_escape(note)) + "}";
+        };
+        auto search_event = [&](const std::string &query, const char *state_of, const std::string &note) {
+            std::string j = chunk_json("", nullptr);
+            j.insert(j.size() - 1, ",\"ts5_web_search\":" + search_json(query, state_of, note));
+            return "data: " + j + "\n\n";
+        };
         if (stream) {
             send_all(fd, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
                          "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n");
@@ -901,9 +915,21 @@ void handle(int fd, Server::State &state, Usage &u) {
                 } else {
                     bool failed = false;
                     u.rec.searches++;
+                    std::string query;
+                    {
+                        Json a;
+                        if (Json::parse(c.arguments, a)) query = a["query"].str();
+                    }
+                    if (stream && client_ok) client_ok = send_all(fd, search_event(query, "running", ""));
                     results.push_back(web_search(c.arguments, log, &failed));
                     if (failed) search_failed = search_failure(results.back());  // in plain words
                     else found.push_back(results.back());
+                    // What came of it: the log's words after the query, or why it failed.
+                    const std::string lead = "web_search \"" + query + "\": ";
+                    const std::string note =
+                        failed ? search_failed : log.compare(0, lead.size(), lead) == 0 ? log.substr(lead.size()) : log;
+                    if (stream && client_ok) client_ok = send_all(fd, search_event(query, failed ? "failed" : "done", note));
+                    searched += (searched.empty() ? "" : ",") + search_json(query, failed ? "failed" : "done", note);
                 }
                 log_line("ts5: %s %s", id.c_str(), log.c_str());
             }
@@ -949,6 +975,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                 body = "{\"id\":\"" + id + "\",\"object\":\"text_completion\",\"created\":" + std::to_string(created) +
                        ",\"model\":" + json_escape(model) + ",\"choices\":[{\"index\":0,\"text\":" + json_escape(content) +
                        ",\"finish_reason\":\"" + st.finish + "\"}]";
+            if (!searched.empty()) body += ",\"ts5_web_searches\":[" + searched + "]";
             body += ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st) + "}";
             client_ok &= send_all(fd, response(200, body));
         }

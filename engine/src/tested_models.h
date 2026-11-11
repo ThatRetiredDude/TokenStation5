@@ -10,7 +10,8 @@
 //   Qwen3 14B 55.8 / 41.6, DeepSeek R1 14B 54.9 / 41.6, Coder 14B 56.5 / 42.7,
 //   Qwen3 8B 94.4 / 72.8, Coder 7B 99.2 / 80.5, Llama 3.1 8B 100.3 / 76.6,
 //   Llama 3.2 3B 164.8 / 156.2.
-// No helper: Qwen3.5 9B (its linear layers can't take a draft back) and the
+// No helper: Qwen3.5 9B and the Qwen3.8 9B distill (their linear layers
+// can't take a draft back) and the
 // Gemma 12Bs (Gemma 3 1B makes short answers 15 to 32% faster and long
 // prompts 5 to 9% slower, so it's left to tuning).
 #pragma once
@@ -36,6 +37,9 @@ inline const TestedModel kTestedModels[] = {
     {"Llama-3.2-3B-Instruct-Q4_K_M.gguf", 2019377696LL, "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "3", ""},
     {"DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.Q4_K_M.gguf", 5629111264LL, "", "",
      "this kind of model can't use one"},
+    // empero-ai's Qwen3.8 9B distill (Qwen3.5's layers): on the PS5 on
+    // 2026-11-11 it wrote 64.9 tok/s and read a 4,096-token prompt at 628.
+    {"Qwen3.8-9B-Q4_K_M.gguf", 5780090176LL, "", "", "this kind of model can't use one"},
     {"google_gemma-3-12b-it-Q4_K_M.gguf", 7300575264LL, "", "",
      "Gemma 3 1B speeds up short answers and slows long prompts; T measures it here"},
     {"gemma-4-12B-it-Q4_K_M.gguf", 7662533088LL, "", "",

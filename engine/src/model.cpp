@@ -220,17 +220,21 @@ bool Model::read_folds(std::string &err) {
     folds_.clear();
     inverse_folds_.clear();
     fold_signs.clear();
-    fold_grouped_ = false;
+    fold_grouped_ = fold_tied_ = false;
     const std::string p = "prism.hadamard.";
     if (!gguf.has(p + "version")) return true;
     auto no = [&](const std::string &why) {
         err = "this file stores its weights rotated (prism.hadamard) in a way ts5 doesn't read: " + why;
         return false;
     };
-    // Version 2 ties the output to the token table; none of the files seen
-    // so far (Ternary-Bonsai-2 4B, 9B, 27B: version 1) does.
+    // Version 2 ties the output to the token table (Ternary-Bonsai-2 4B):
+    // the file has no output.weight, and the rotated table is the output's
+    // weight as well as the lookup's (bind). Version 1 (the 27B) has both.
     const int64_t version = gguf.get_int(p + "version", 0);
-    if (version != 1 || gguf.get_int(p + "tied_output", 0) != 0) return no("version " + std::to_string(version));
+    fold_tied_ = gguf.get_int(p + "tied_output", 0) != 0;
+    if ((version != 1 && version != 2) || (version == 2) != fold_tied_)
+        return no("version " + std::to_string(version) + (fold_tied_ ? " with a tied output" : ""));
+    if (fold_tied_ && gguf.find("output.weight")) return no("a tied output beside an output.weight");
     const int64_t block = gguf.get_int(p + "block_size", 0);
     if (block < 2 || block > 1024 || (block & (block - 1)) != 0)
         return no("blocks of " + std::to_string(block) + " values (ts5 rotates blocks of up to 1,024)");
@@ -290,6 +294,7 @@ bool Model::read_folds(std::string &err) {
             inverse_folds_[*name] = (int)block;
         }
     fold_grouped_ = gguf.get_int(p + "gdn_v_grouped", 0) != 0;
+    if (fold_tied_ && !inverse_folds_.count("token_embd.weight")) return no("a tied output whose token table isn't rotated");
     return true;
 }
 
@@ -473,7 +478,13 @@ bool Model::bind(std::string &err) {
     tok_embd = weight("token_embd.weight", true, err);
     out_norm = weight("output_norm.weight", true, err);
     output = weight("output.weight", false, err);
-    if (!output) output = tok_embd;  // tied embeddings
+    if (!output) {
+        output = tok_embd;  // tied embeddings
+        // prism.hadamard version 2: the table's rows, stored rotated, are
+        // the output's weight as they are: W D H, whose input is rotated as
+        // any folded weight's.
+        if (fold_tied_) output.fold_inverse = false;
+    }
     rope_freqs = weight("rope_freqs.weight", false, err);
     layers.assign(hp.n_layer, {});
     for (int i = 0; i < hp.n_layer; i++) {
@@ -547,8 +558,9 @@ bool Model::bind(std::string &err) {
         if (err.empty() && !fold_bound_.count(f.first))
             err = "this file stores " + f.first + " rotated (prism.hadamard), and ts5 has no use for that weight in a " +
                   hp.arch + " model";
-    if (err.empty() && output.info == tok_embd.info && tok_embd.fold_block)
-        err = "this file's token table is stored rotated (prism.hadamard) and is its output too: ts5 doesn't read that";
+    if (err.empty() && output.info == tok_embd.info && tok_embd.fold_block && !fold_tied_)
+        err = "this file's token table is stored rotated (prism.hadamard) and is its output too, which its metadata "
+              "doesn't say (version 2, tied_output)";
     if (err.empty() && !read_scalars(err)) return false;
     return err.empty();
 }

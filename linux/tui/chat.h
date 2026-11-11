@@ -18,6 +18,13 @@ struct ToolUse {
     std::string id, name, args;
 };
 
+// A web search the server ran for an answer by itself: what was searched
+// for, what came of it ("" while it runs), and whether it failed.
+struct ServerSearch {
+    std::string query, note;
+    bool failed = false, running = true;
+};
+
 struct Msg {
     // user, assistant, note (ts5-tui's own, never sent), summary: the
     // model's summary of the chat before it, which it goes on from in place
@@ -40,6 +47,8 @@ struct Msg {
     // An assistant turn's tool calls: ts5-tui runs each, adds a tool message
     // with what it gave back, and the model goes on in a new assistant turn.
     std::vector<ToolUse> calls;
+    // The searches the server ran while it wrote this answer.
+    std::vector<ServerSearch> searches;
     // A tool message: its call's id, the tool's name, one line for the
     // screen, and whether it worked. Its content is what the model got back.
     std::string call_id, tool, head;
