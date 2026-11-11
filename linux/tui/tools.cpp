@@ -396,8 +396,12 @@ std::string tool_call_line(const std::string &name, const std::string &args) {
 ToolResult tool_refused() {
     ToolResult t;
     t.ok = false;
+    t.refused = true;
     t.head = "you said no: it didn't run";
-    t.text = "The user refused: the command was not run. Do not try it again; ask what they would like instead.";
+    // "said no", not "refused": Qwen3 8B read "refused" as a permission
+    // problem with the file and told the user so.
+    t.text = "The user said no to this command, so it was not run. Nothing is wrong with the system. Do not run it "
+             "or any other command now: tell the user it was not run and ask what they would like instead.";
     return t;
 }
 

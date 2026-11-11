@@ -1151,12 +1151,17 @@ ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
 }
 
 // So many turns of tool calls in a row for one message; the turn after
-// them gets no tools, so the model answers with what it has.
+// them gets no tools, so the model answers with what it has. So does the
+// turn after a command the user said no to: told only in words not to try
+// again, Qwen3.5 9B asked for twelve more commands in a row on the PS5
+// (rm -f, rm --, ls, echo ...), one question each.
 const int kToolRounds = 12;
 
 // An answer: the model's turn, and for as long as it calls tools, each
 // call run, its result added to the chat, and another turn of the model's.
 void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
+    bool none = false;     // this turn was told to call no tool
+    bool said_no = false;  // the user said no to a command of this message's
     for (int round = 0;; round++) {
         stream_answer(c, rq, body);
         std::vector<ToolUse> calls;
@@ -1167,15 +1172,19 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
                 if (m.calls[k].id.empty()) m.calls[k].id = fmt("call_%zu_%zu", c->msgs.size(), k);
             // Calls in the turn that was told to make none (a server that
             // doesn't keep to "tool_choice") end it here.
-            if (round >= kToolRounds && !m.calls.empty()) {
+            if (none && !m.calls.empty()) {
                 m.calls.clear();
-                if (m.content.empty()) m.error = "the model kept calling tools instead of answering: ask it again";
+                if (m.content.empty())
+                    m.error = said_no ? "the model asked for another tool after your no instead of answering: nothing "
+                                        "more was run"
+                                      : "the model kept calling tools instead of answering: ask it again";
             }
             calls = m.calls;
         }
         if (calls.empty()) break;
         for (const ToolUse &u : calls) {
             const ToolResult r = c->cancel.load() ? tool_stopped() : run_call(c, rq, u);
+            said_no |= r.refused;
             std::lock_guard<std::mutex> l(c->mu);
             Msg t;
             t.role = "tool";
@@ -1196,7 +1205,8 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
             a.t0 = now_s();
             c->msgs.push_back(a);
         }
-        body = body_for(*c, rq, round + 1 >= kToolRounds);
+        none = round + 1 >= kToolRounds || said_no;
+        body = body_for(*c, rq, none);
     }
 }
 
@@ -1293,7 +1303,9 @@ std::string summary_ask(int words, const std::string &focus, bool again) {
         "- code or text we are still working on, word for word where the exact wording matters;\n"
         "- what was tried and how it turned out, including what failed;\n"
         "- where things stand now, and what was about to happen next.\n"
-        "Write plain notes under short headings, not a reply to me. Add nothing that was not said. ";
+        "Write plain notes under short headings, not a reply to me. Add nothing that was not said. Leave this "
+        "request out of the notes: they are about the conversation before this message, and never say that a "
+        "summary was asked for or is being written. ";
     a += fmt("Use up to about %d words; shorter is fine if nothing is lost.", words);
     if (again)
         a += " The conversation began with an earlier summary (the first message): carry over everything in it that "

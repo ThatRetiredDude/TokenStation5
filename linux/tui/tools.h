@@ -36,6 +36,7 @@ struct ToolResult {
     std::string text;  // what the model gets back
     std::string head;  // one line for the screen
     bool ok = true;
+    bool refused = false;  // the user said no to it
 };
 
 // One line for the screen saying what a call does: "$ ls -la", "reads
