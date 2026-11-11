@@ -137,12 +137,17 @@ thinking.
 
 A thinking that doesn't end is ended for the model, which then answers from
 what it has: one that repeats itself word for word, one that has used up the
-reply's room but for a last part (an eighth of it, 32 to 256 tokens), and
+reply's room but for a last part (a quarter of it, up to 1,024 tokens), and
 one past 8,192 tokens (`"thinking_budget": N` in a request, or
 `TS5_THINK_MAX=N` for the server, sets another number; 0 is no limit). The
 thinking then ends with a line in square brackets that says why. Without
 this a small model can think to the end of its context and answer nothing
 (on the PS5, Qwen3.5 9B asked for a haiku: 15,851 tokens and four minutes).
+
+`usage.total_tokens` is what the conversation holds when the reply ends, so
+an app can size its context by it: a thinking the model read again after it
+was ended, or the turns before a web search's results, are counted once, as
+`completion_tokens`, and `prompt_tokens` is the rest.
 
 For agent work (editing files, then running them), use Qwen 3 8B. On the PS5
 it took every step of a write-then-run task; Qwen 2.5 Coder 7B wrote the file

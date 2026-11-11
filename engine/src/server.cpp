@@ -229,6 +229,9 @@ constexpr double kThinkRoom = 1024;
 // for a haiku thought for 15,851 tokens and four minutes, to the end of its
 // context, the last of it one line over and over.
 constexpr int kThinkMax = 8192;
+const char *const kEndedLoop = "it was repeating itself";
+const char *const kEndedRoom = "the reply's room was nearly used up";
+const char *const kEndedLong = "it had grown very long";
 
 // Where a thinking (text from `from`) that goes round in circles is cut:
 // the end of the first copy of what its tail repeats, or npos. A unit of 16
@@ -286,10 +289,10 @@ std::string timings_json(const GenStats &st) {
     return s;
 }
 
-std::string usage_json(const GenStats &st) {
-    return "{\"prompt_tokens\":" + std::to_string(st.prompt_tokens) +
+std::string usage_json(int prompt, const GenStats &st) {
+    return "{\"prompt_tokens\":" + std::to_string(prompt) +
            ",\"completion_tokens\":" + std::to_string(st.gen_tokens) +
-           ",\"total_tokens\":" + std::to_string(st.prompt_tokens + st.gen_tokens) + "}";
+           ",\"total_tokens\":" + std::to_string(prompt + st.gen_tokens) + "}";
 }
 
 int request_counter = 0;
@@ -630,11 +633,15 @@ void handle(int fd, Server::State &state, Usage &u) {
         sp.max_tokens = limit >= 1 ? (int)std::min(limit, (double)n_ctx) : n_ctx;
         sp.seed = (uint64_t)req["seed"].num(0);
         // The most a turn may think (kThinkMax), and what of the reply's room
-        // the thinking leaves for the answer.
+        // the thinking leaves for the answer: a quarter, 1,024 tokens at
+        // most (256 were too few for a worked answer on the PS5). A reply
+        // the app capped under kThinkRoom doesn't think unless it was told
+        // to, and then its thinking is the app's to size: no room is kept.
         const char *think_env = getenv("TS5_THINK_MAX");
         const int think_max = (int)req["thinking_budget"].num(think_env ? atof(think_env) : kThinkMax);
-        const int answer_room =
-            std::min(256, std::max(32, std::min(sp.max_tokens, n_ctx - 1 - (int)first_toks.size()) / 8));
+        const int answer_room = limit >= 1 && limit < kThinkRoom
+                                    ? 0
+                                    : std::min(1024, std::min(sp.max_tokens, n_ctx - 1 - (int)first_toks.size()) / 4);
         const bool stream = req["stream"].boolean(false);
         // stream_options.include_usage: the usage goes in a last chunk of its
         // own with no choices, as OpenAI sends it; otherwise in the final chunk.
@@ -725,6 +732,14 @@ void handle(int fd, Server::State &state, Usage &u) {
         std::vector<std::string> found;  // what the searches found, for a forced answer
         bool answered_without_tools = false;  // after a made-up call
         bool think_closed = false;       // a thinking was ended for the model (kThinkMax): once a request
+        // usage.prompt_tokens: the last turn's prompt without the earlier
+        // turns of this request that it holds (`carried`, already counted as
+        // written), so total_tokens is what the conversation holds at the
+        // reply's end, which is what apps size their context by; never less
+        // than the prompt as it was sent (`fresh`: a loop that was cut back
+        // wrote more than the next prompt keeps). The log and the usage
+        // file add every turn's prompt: the tokens read.
+        int carried = 0, fresh = 0, usage_prompt = 0;
         double first = -1;               // when the first text came
         // A turn of the model's; with web_search, ts5 answers the model's
         // searches and lets it go on, so one request can be several turns.
@@ -782,12 +797,12 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                   n_ctx - 1 - (int)toks.size() - turn.gen_tokens);
                         close_at = text.size();
                         if (const size_t cut = think_loop(text, open); cut != std::string::npos) {
-                            closing = "it was repeating itself";
+                            closing = kEndedLoop;
                             close_at = cut;
-                        } else if (left <= answer_room) {
-                            closing = "the reply's room was nearly used up";
+                        } else if (answer_room > 0 && left <= answer_room) {
+                            closing = kEndedRoom;
                         } else if (think_max > 0 && turn.gen_tokens >= think_max) {
-                            closing = "it had grown very long";
+                            closing = kEndedLong;
                         }
                         if (closing) return false;
                     }
@@ -871,6 +886,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                     if (const char *after = getenv("TS5_TEST_AFTER_THINK")) t = after;
                 const int piece = getenv("TS5_TEST_PIECE") ? atoi(getenv("TS5_TEST_PIECE")) : 0;
                 turn.finish = "stop";
+                turn.prompt_tokens = (int)toks.size();
                 if (piece <= 0) {
                     on_text(t);
                     turn.gen_tokens = 1;
@@ -898,8 +914,11 @@ void handle(int fd, Server::State &state, Usage &u) {
             // are the same in both: it has no marks in it).
             const bool think_cut = closing != nullptr;
             if (think_cut) {
+                // (With little room left the note asks for a short answer:
+                // on the PS5, three of four models started a worked answer
+                // too long for what was left.)
                 const std::string note = std::string("\n\n[ts5 ended the thinking here: ") + closing +
-                                         ". The answer follows.]";
+                                         (closing == kEndedRoom ? ". A short answer follows.]" : ". The answer follows.]");
                 log_line("ts5: %s thinking ended after %d tokens: %s", id.c_str(), turn.gen_tokens, closing);
                 wrote.resize(wrote.size() - std::min(wrote.size(), held + (text.size() - close_at)));
                 wrote += note + (g4 ? std::string(kG4ThoughtEnd) : "\n" + channel.closing() + "\n\n");
@@ -912,6 +931,8 @@ void handle(int fd, Server::State &state, Usage &u) {
             }
             count();  // what on_text didn't see: the test turns, a turn with no text
             st.prompt_tokens += turn.prompt_tokens;
+            if (carried == 0) fresh = turn.prompt_tokens;
+            usage_prompt = std::max(fresh, turn.prompt_tokens - carried);
             st.prompt_evaluated += turn.prompt_evaluated;
             st.prompt_repaired += turn.prompt_repaired;
             st.prompt_shared += turn.prompt_shared;
@@ -938,6 +959,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             if (think_cut && ok && client_ok && st.gen_tokens < max_tokens) {
                 content += text.substr(std::min(answer, text.size()));
                 prompt += wrote;
+                carried += turn.gen_tokens;
                 opening.clear();
                 seed.clear();
                 continue;
@@ -975,6 +997,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                     answered_without_tools = true;
                     log_line("ts5: %s made-up tool %s: answering without tools", id.c_str(), made_up.c_str());
                     prompt = render_chat(e.tok(), msgs, {}, date, think);
+                    carried = 0;
                     open_turn();
                     use_tools = false;
                     continue;
@@ -1016,6 +1039,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                 if (last.empty() || last.back().role != "user") last.push_back({"user", "", {}});
                 last.back().content += (last.back().content.empty() ? "" : "\n\n") + note;
                 prompt = render_chat(e.tok(), last, {}, date, think);
+                carried = 0;
                 open_turn();
                 use_tools = false;
                 continue;
@@ -1049,6 +1073,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                 log_line("ts5: %s %s", id.c_str(), log.c_str());
             }
             prompt += wrote + render_results(e.tok(), tf, searches, results);
+            carried += turn.gen_tokens;
             open_turn();
         }
         {
@@ -1069,12 +1094,12 @@ void handle(int fd, Server::State &state, Usage &u) {
                                  "},\"finish_reason\":null}]}\n\n");
             std::string last = chunk_json("", st.finish.c_str());
             last.insert(last.size() - 1,
-                        (usage_chunk ? std::string() : ",\"usage\":" + usage_json(st)) + ",\"timings\":" + timings_json(st));
+                        (usage_chunk ? std::string() : ",\"usage\":" + usage_json(usage_prompt, st)) + ",\"timings\":" + timings_json(st));
             if (usage_chunk)
                 last += "\n\ndata: {\"id\":\"" + id + "\",\"object\":\"" +
                         (chat ? "chat.completion.chunk" : "text_completion") + "\",\"created\":" +
                         std::to_string(created) + ",\"model\":" + json_escape(model) +
-                        ",\"choices\":[],\"usage\":" + usage_json(st) + "}";
+                        ",\"choices\":[],\"usage\":" + usage_json(usage_prompt, st) + "}";
             client_ok &= send_all(fd, "data: " + last + "\n\ndata: [DONE]\n\n");
         } else {
             std::string body;
@@ -1091,7 +1116,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                        ",\"model\":" + json_escape(model) + ",\"choices\":[{\"index\":0,\"text\":" + json_escape(content) +
                        ",\"finish_reason\":\"" + st.finish + "\"}]";
             if (!searched.empty()) body += ",\"ts5_web_searches\":[" + searched + "]";
-            body += ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st) + "}";
+            body += ",\"usage\":" + usage_json(usage_prompt, st) + ",\"timings\":" + timings_json(st) + "}";
             client_ok &= send_all(fd, response(200, body));
         }
         log_line("ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, %s, sample %.0f ms",

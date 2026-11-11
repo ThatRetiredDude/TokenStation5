@@ -13,6 +13,7 @@ import http.server
 import json
 import socket
 import os
+import re
 import ssl
 import subprocess
 import sys
@@ -609,7 +610,9 @@ def test_search_loop(ts5, model, tdir):
                     got = "".join(c["choices"][0]["delta"].get("content", "") for c in chunks if c["choices"])
                     told = [c["ts5_web_search"] for c in chunks if "ts5_web_search" in c]
                     want = ["running", "failed" if key == "tvly-bad" else "done"] * hits
+                    usage = ([c["usage"] for c in chunks if "usage" in c] or [{}])[-1]
                 else:
+                    usage = json.loads(r).get("usage", {})
                     got = json.loads(r)["choices"][0]["message"]["content"]
                     told = json.loads(r).get("ts5_web_searches", [])
                     want = ["failed" if key == "tvly-bad" else "done"] * hits
@@ -628,9 +631,22 @@ def test_search_loop(ts5, model, tdir):
                 ending = extra[3] if len(extra) > 3 else "<|im_start|>assistant\n<think>\n"
                 if len(extra) > 2 and (extra[2] not in last or not last.endswith(ending)):
                     problems.append("last prompt:\n" + last)
+                wait_for_log(log.name)
             finally:
                 p.terminate()
                 p.wait()
+            # After a search the usage has the answering turn's prompt (the
+            # question, the call, the result), not both turns' prompts added,
+            # which is what the log line has.
+            log.seek(0)
+            both = re.search(r"prompt (\d+) \(", log.read())
+            if key == "tvly-test" and hits == 1 and len(prompts) == 2 and both:
+                both = int(both.group(1))
+                if not both / 2 - 1 <= usage.get("prompt_tokens", 0) < both - 2 or \
+                        usage.get("total_tokens") != usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0):
+                    problems.append(f"usage {usage} with both turns' prompts {both}")
+            elif key == "tvly-test" and hits == 1:
+                problems.append(f"no usage to check: {len(prompts)} prompts")
             if problems:
                 failed += 1
                 log.seek(0)
@@ -911,9 +927,21 @@ def test_every_model_has_tools(ts5, model, tdir):
     return failed
 
 
+def wait_for_log(path, seconds=5.0):
+    """The server's log once it has the request's last line ("... prompt N (M
+    new) ..."): the log has a thread of its own, so the line can come after the
+    reply. Returns the log as it is when the time is up."""
+    end = time.time() + seconds
+    while True:
+        text = open(path, errors="replace").read()
+        if re.search(r"chatcmpl-\d+ prompt \d+ \(", text) or time.time() > end:
+            return text
+        time.sleep(0.02)
+
+
 def serve_turns(ts5, model, template, turns, req, key="tvly-test", url="http://127.0.0.1:9", more_env=None):
     """One request to `ts5 serve` with the model's turns scripted: the reply's
-    message (content, reasoning_content, tool_calls, finish_reason), the prompts, the log."""
+    message (content, reasoning_content, tool_calls, finish_reason, usage), the prompts, the log."""
     with tempfile.TemporaryDirectory() as d:
         script = os.path.join(d, "turns.txt")
         open(script, "w").write("\n----\n".join(turns))
@@ -937,17 +965,20 @@ def serve_turns(ts5, model, template, turns, req, key="tvly-test", url="http://1
                 f"http://127.0.0.1:{port}/v1/chat/completions", json.dumps(req).encode(),
                 {"Content-Type": "application/json"}), timeout=60).read().decode()
             if req.get("stream"):
-                chunks = [json.loads(line[6:])["choices"][0] for line in r.splitlines() if line.startswith("data: {")]
-                msg = {"content": "".join(c["delta"].get("content") or "" for c in chunks),
+                events = [json.loads(line[6:]) for line in r.splitlines() if line.startswith("data: {")]
+                chunks = [e["choices"][0] for e in events if e.get("choices")]
+                msg = {"usage": ([e["usage"] for e in events if "usage" in e] or [{}])[-1],
+                       "content": "".join(c["delta"].get("content") or "" for c in chunks),
                        "reasoning_content": "".join(c["delta"].get("reasoning_content") or "" for c in chunks),
                        "tool_calls": [t for c in chunks for t in c["delta"].get("tool_calls") or []],
                        "finish_reason": [c.get("finish_reason") for c in chunks if c.get("finish_reason")][-1]}
             else:
                 choice = json.loads(r)["choices"][0]
-                msg = dict(choice["message"], finish_reason=choice["finish_reason"])
+                msg = dict(choice["message"], finish_reason=choice["finish_reason"], usage=json.loads(r).get("usage", {}))
                 msg.setdefault("reasoning_content", "")
                 msg.setdefault("tool_calls", [])
             prompts = open(script + ".prompts").read().split("\n====\n")[:-1]
+            wait_for_log(log.name)
         finally:
             p.terminate()
             p.wait()
@@ -1315,7 +1346,8 @@ def test_thinking_guard(ts5, model, tdir):
     words = " ".join(f"w{i}" for i in range(300))  # nothing repeats in it
     long_words = " ".join(f"w{i}" for i in range(1400))
     ruler = "A table:\n" + "-" * 400 + "\n" + "| --- | --- | --- |\n" * 30 + "ha " * 200 + "\nDone."
-    note = lambda why: f"[ts5 ended the thinking here: {why}. The answer follows.]"
+    note = lambda why: (f"[ts5 ended the thinking here: {why}. " +
+                        ("A short answer follows.]" if "room" in why else "The answer follows.]"))
     after = {"TS5_TEST_AFTER_THINK": "Rivers run to sea."}
     pieces = dict(after, TS5_TEST_PIECE="4")
     cases = [
@@ -1332,11 +1364,14 @@ def test_thinking_guard(ts5, model, tdir):
         ("rulers and table lines are no loop", qwen, "<think>\n" + ruler + "\n</think>\n\nFine.", {}, pieces, None),
         ("a repeating answer is left alone", qwen, unit * 12, {}, pieces, None),
     ]
+    counts = []  # of the Qwen template's requests: was it ended, the usage, the log
     for name, template, turn, more, env, why in cases:
         for stream in (False, True):
             req = dict({"messages": ask, "stream": stream, "web_search": False}, **more)
             msg, prompts, log = serve_turns(ts5, model, template, [turn], req, more_env=env)
             label = f"thinking guard: {name}" + (", streaming" if stream else "")
+            if template == qwen:
+                counts.append((label, why is not None, msg["usage"], log))
             thought = msg["reasoning_content"]
             if why is None:
                 want = "Fine." if "</think>" in turn else turn
@@ -1359,6 +1394,31 @@ def test_thinking_guard(ts5, model, tdir):
                 print(f"FAIL {label}: {msg}\n{prompts[1:]}\n{log}")
             else:
                 print(f"ok   {label}")
+    # The reply's token counts are what the conversation holds at its end:
+    # the thinking is counted once, as written, though the model read it again
+    # in its second turn (apps size their context by total_tokens). The log
+    # line has both turns' prompts added, and the thinking's tokens.
+    alone = [u["prompt_tokens"] for _, ended, u, _ in counts if not ended]  # the question's own tokens
+    bad = [] if alone and min(alone) == max(alone) and alone[0] > 0 else [f"the question alone: {alone}"]
+    for label, ended, u, log in counts:
+        if not ended or bad:
+            continue
+        both = int(re.search(r"prompt (\d+) \(", log).group(1))
+        thought = int(re.search(r"thinking ended after (\d+) tokens", log).group(1))
+        second = both - alone[0]  # the second turn's prompt: the question, the thinking, the note
+        if (u["prompt_tokens"] != max(alone[0], second - thought) or u["prompt_tokens"] >= second or
+                u["completion_tokens"] <= thought or u["total_tokens"] != u["prompt_tokens"] + u["completion_tokens"]):
+            bad.append(f"{label}: {u}, the question {alone[0]}, both prompts {both}, thinking {thought}")
+    failed += report(not bad and len(counts) == 14, "thinking guard: the thinking is counted once in the usage", "\n".join(bad))
+    # A reply the app capped under 1,024 tokens and told to think all the
+    # same is left alone: it ends at its cap, in one turn (a second turn
+    # there would also read the prompt again on a model whose state only
+    # goes forward, which resume_test.py caught).
+    req = {"messages": ask, "max_tokens": 100, "web_search": False, "chat_template_kwargs": {"enable_thinking": True}}
+    msg, prompts, log = serve_turns(ts5, model, qwen, ["<think>\n" + words], req, more_env=pieces)
+    failed += report(len(prompts) == 1 and "ts5 ended" not in msg["reasoning_content"] + msg["content"] and
+                     msg["finish_reason"] == "length" and "thinking ended" not in log,
+                     "thinking guard: a short reply that was told to think is left alone", f"{msg}\n{log}")
     # With the thinking kept in the content, its closing mark is there too.
     req = {"messages": ask, "reasoning_format": "none", "web_search": False}
     msg, prompts, log = serve_turns(ts5, model, qwen, ["<think>\n" + loop], req, more_env=after)
