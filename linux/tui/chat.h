@@ -56,6 +56,12 @@ struct Chat {
     double speed_gen = 0, speed_prompt = 0;
     int ctx_used = 0;
     std::string unsent;   // a message a failed summary didn't send: back to the input (under mu)
+    // Messages entered while an answer was coming, in order: each is sent
+    // when the answer before it is done (chat_send_queued, from the app's
+    // tick). queue_held: that answer was stopped or failed, so they wait for
+    // Enter (go on) or Esc (drop them).
+    std::vector<std::string> queued;
+    bool queue_held = false;
     std::string command;  // a slash command for the app to run
     std::vector<std::string> cands;  // Tab's candidates
     int cand_i = -1;
@@ -96,6 +102,9 @@ const std::vector<SlashCommand> &slash_commands();
 void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v);
 int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h);
 void chat_note(Chat &c, const std::string &text);
+// Sends the first of the queued messages, after a summary where the chat is
+// nearly full. False when an answer is still coming or none waits.
+bool chat_send_queued(Chat &c, const ChatRequest &rq);
 // The summary. The model is asked for a detailed summary of the chat so far;
 // from then on it gets that and the last messages (a quarter of its context
 // at most) in place of the whole chat, which stays on screen and saved.

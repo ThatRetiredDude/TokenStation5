@@ -2455,7 +2455,9 @@ void draw_chat() {
     v.online = sv.online;
     v.why = sv.why;
     draw_chat_screen(g->scr, *g->th, g->chat, v);
-    draw_bottom_bar(g->chat.busy() ? "Esc stop|PgUp/PgDn scroll|Ctrl+T thoughts"
+    draw_bottom_bar(g->chat.busy() ? (g->chat.queued.empty() ? "Enter queue a message|Esc stop|PgUp/PgDn scroll|Ctrl+T thoughts"
+                                                             : "Enter queue another|↑ take the last back|Esc stop|PgUp/PgDn scroll")
+                    : !g->chat.queued.empty() ? "Enter send the queued|Esc drop them|↑ take the last back|PgUp/PgDn scroll"
                                    : "Enter send|Tab next page|Ctrl+Y copy|Ctrl+T thoughts|Ctrl+N new chat|Ctrl+J new line|PgUp/PgDn scroll");
 }
 
@@ -2799,7 +2801,8 @@ void run_command(const std::string &line) {
         std::string h = "**Commands**\n";
         for (auto &k : slash_commands())
             h += std::string("`") + k.name + (*k.args ? std::string(" ") + k.args : "") + "`  " + k.what + "\n";
-        h += "\n**Keys**  Enter send · Ctrl+J or Alt+Enter new line · ↑↓ history · Tab completes · Esc stops an answer · "
+        h += "\n**Keys**  Enter send (while an answer is coming: the message waits and is sent after it; ↑ takes the "
+             "last one back) · Ctrl+J or Alt+Enter new line · ↑↓ history · Tab completes · Esc stops an answer · "
              "Ctrl+T thinking · Ctrl+Y copy the last answer · Ctrl+N new chat (this one is kept: `/chats`) · PgUp/PgDn "
              "scroll · Ctrl+Q, `exit` or `q` quits\n\n"
              "**A full chat**  when the model's memory for the chat (its context) is nearly full, the model writes a "
@@ -3501,9 +3504,13 @@ void tick() {
     // filled up is summarized and goes on (Settings → When a chat fills up).
     if (g->chat.answers_seen != g->chat.answers && !g->chat.busy()) {
         g->chat.answers_seen = g->chat.answers;
+        // Messages that wait their turn (entered while the answer was
+        // coming) wait for a key instead where it didn't end well.
+        bool hold = false;
         {
             // A message a summary that failed didn't send: back in the input.
             std::lock_guard<std::mutex> l(g->chat.mu);
+            hold |= !g->chat.unsent.empty();
             if (!g->chat.unsent.empty() && g->chat.input.empty()) {
                 g->chat.input = g->chat.unsent;
                 g->chat.cur = g->chat.input.size();
@@ -3517,6 +3524,7 @@ void tick() {
             const std::string again = chat_take_refused(g->chat, alone);
             std::string err;
             if (!again.empty() && (alone || !chat_summarize(g->chat, chat_request(), again, "", 1, err))) {
+                hold = true;
                 g->chat.input = again;
                 g->chat.cur = again.size();
                 chat_note(g->chat, alone ? "**That message alone is longer than the model's memory for a chat** (its "
@@ -3538,6 +3546,8 @@ void tick() {
                     total = m.total_tokens;
                     gen = m.gen_tokens;
                 }
+                // Stopped (Esc) or failed: an answer, or a summary.
+                hold |= (m.role == "assistant" || m.role == "summary") && (m.stopped || !m.error.empty());
             }
         }
         if (fin == "length") {
@@ -3566,10 +3576,15 @@ void tick() {
                     if (own_server_pid() > 0 && g->cfg.serve_ctx > 0)
                         n += " Or set Settings → Context to auto, the longest this model fits, and load it again.";
                     chat_note(g->chat, n);
+                    hold = true;
                 }
             }
         }
+        if (hold && !g->chat.queued.empty()) g->chat.queue_held = true;
     }
+    // The next of the messages entered while an answer was coming, now that it is done.
+    if (!g->chat.queued.empty() && !g->chat.queue_held && !g->chat.busy() && g->chat.answers_seen == g->chat.answers)
+        chat_send_queued(g->chat, chat_request());
     // Logs follow the server (every 10 s, or at once after a change).
     if (g->logs_checked == 0 || t - g->logs_checked > 10) pick_logs();
     // This app's own answers count too (a server elsewhere has no log here).

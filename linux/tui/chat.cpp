@@ -645,9 +645,13 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
     if (!c.input.empty() && c.input[0] == '/' && c.input.find(' ') == std::string::npos)
         for (auto &k : slash_commands())
             if (strncmp(k.name, c.input.c_str(), c.input.size()) == 0) hints.push_back(&k);
-    // The conversation, between the bars.
+    // The conversation, between the bars, over the messages that wait their
+    // turn (three rows of them at most) and the status line.
     const int y0 = v.top;
-    int y1 = iy - 1;           // the status line
+    const int ys = iy - 1;     // the status line
+    const int qn = (int)c.queued.size();
+    const int qrows = std::max(0, std::min(std::min(qn, 3), ys - y0 - 4));
+    int y1 = ys - qrows;       // the conversation's end
     c.hits.clear();
     c.row_msg.clear();
     if (c.msgs.empty()) {
@@ -681,8 +685,26 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
             s.put(w - text_width(m) - 2, y1 - 1, m, Style(t.bg, t.accent2, BOLD));
         }
     }
+    // Messages entered while an answer was coming: the next ones to go.
+    for (int r = 0; r < qrows; r++) {
+        const int y = y1 + r;
+        s.fill(0, y, w, 1, Style(t.dim, t.bg));
+        if (r == 2 && qn > 3) {
+            s.put(1, y, fmt("and %d more", qn - 2), Style(t.dim, kDefault, ITALIC));
+            break;
+        }
+        std::string one = c.queued[r];
+        for (char &ch : one)
+            if (ch == '\n' || ch == '\t') ch = ' ';
+        int x = s.put(1, y, qn > 1 ? fmt("queued %d", r + 1) : std::string("queued"), Style(t.accent2, kDefault, BOLD));
+        const std::string tip = r == 0 ? (c.queue_held ? "Enter sends · Esc drops" : "↑ takes the last one back") : "";
+        const int tw = tip.empty() || w < 70 ? 0 : text_width(tip) + 2;
+        s.put(x + 2, y, fit(one, w - x - 4 - tw), Style(c.queue_held ? t.dim : t.fg));
+        if (tw) s.put(w - tw, y, tip, Style(c.queue_held ? t.warn : t.dim));
+    }
     // The status line over the prompt: model, context, speed.
     {
+        const int y1 = ys;
         s.fill(0, y1, w, 1, Style(t.dim, t.bg));
         int x = 1;
         if (c.busy()) {
@@ -711,12 +733,17 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
             for (size_t i = 0; i < c.cands.size() && i < 8; i++)
                 list += (i ? "  " : "") + std::string((int)i == c.cand_i ? "›" : "") + c.cands[i];
             s.put(x + 3, y1, fit(list, w - x - 4), Style(t.accent2));
+        } else if (qn > 0 && !c.busy() && c.queue_held) {
+            // The answer before them was stopped or failed: they wait for a key.
+            s.put(x + 3, y1, fit(fmt("%d queued: Enter sends %s, Esc drops %s", qn, qn > 1 ? "them" : "it", qn > 1 ? "them" : "it"),
+                                 w - x - 4),
+                  Style(t.warn));
         }
     }
     if (!hints.empty()) {
-        const int hh = std::min((int)hints.size(), std::max(0, y1 - y0 - 1));
+        const int hh = std::min((int)hints.size(), std::max(0, ys - y0 - 1));
         const int hw = std::min(w - 4, 70);
-        const int hy = y1 - hh;
+        const int hy = ys - hh;
         for (int i = 0; i < hh; i++) {
             s.fill(2, hy + i, hw, 1, Style(t.fg, t.panel2));
             int x = s.put(3, hy + i, hints[i]->name, Style(t.accent2, t.panel2, BOLD));
@@ -728,8 +755,9 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
     box(s, 0, iy, w, ih, Style(c.busy() ? t.dim : t.accent), Style(t.fg, t.panel));
     s.put(2, iy + 1, "ts5>", Style(c.busy() ? t.dim : t.accent2, t.panel, BOLD));
     if (c.input.empty()) {
-        const char *ph = c.busy() ? "answering… Esc stops it" : "Message TokenStation5…   / for commands, ↑ history";
-        s.put(7, iy + 1, ph, Style(mix(t.dim, t.panel, 0.25), t.panel, ITALIC));
+        const char *ph = c.busy() ? "answering… type the next message, Enter queues it · Esc stops"
+                                  : "Message TokenStation5…   / for commands, ↑ history";
+        s.put(7, iy + 1, fit(ph, w - 9), Style(mix(t.dim, t.panel, 0.25), t.panel, ITALIC));
     }
     for (int r = 0; r < shown; r++) {
         int x = 7;
@@ -1300,6 +1328,8 @@ void chat_new(Chat &c) {
     c.ctx_used = 0;
     c.unsent.clear();
     c.saved_id.clear();
+    c.queued.clear();
+    c.queue_held = false;
 }
 
 bool chat_take_speed(Chat &c, double &gen, double &prompt) {
@@ -1442,6 +1472,19 @@ std::string chat_copy_text(Chat &c, int msg, int block, bool thinking, std::stri
     return out;
 }
 
+bool chat_send_queued(Chat &c, const ChatRequest &rq) {
+    if (c.busy() || c.queued.empty()) return false;
+    const std::string text = c.queued.front();
+    c.queued.erase(c.queued.begin());
+    c.queue_held = false;
+    // A chat that is nearly full is summarized first; the message goes once
+    // the summary is written.
+    std::string err;
+    if (chat_nearly_full(c, rq, text) && chat_summarize(c, rq, text, "", 0, err)) return true;
+    send(c, rq, text);
+    return true;
+}
+
 int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
     const int page = std::max(3, screen_h - 12);
     if (e.key != K_TAB) {
@@ -1450,15 +1493,24 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
     }
     switch (e.key) {
         case K_ESC:
-            if (c.busy()) chat_stop(c);
-            else if (!c.input.empty()) {
+            // Stops the answer (what waits after it then waits for a key),
+            // else empties the input, else drops what waits.
+            if (c.busy()) {
+                chat_stop(c);
+                c.queue_held = !c.queued.empty();
+            } else if (!c.input.empty()) {
                 c.input.clear();
                 c.cur = 0;
+            } else if (!c.queued.empty()) {
+                c.queued.clear();
+                c.queue_held = false;
             }
             return CHAT_NONE;
         case K_CTRL:
-            if (e.ch == "c" && c.busy()) chat_stop(c);
-            else if (e.ch == "n") chat_new(c);
+            if (e.ch == "c" && c.busy()) {
+                chat_stop(c);
+                c.queue_held = !c.queued.empty();
+            } else if (e.ch == "n") chat_new(c);
             else if (e.ch == "t") {
                 // All of them, whatever a click set on one.
                 c.show_think = !c.show_think;
@@ -1480,7 +1532,11 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
             }
             return CHAT_NONE;
         case K_ENTER: {
-            if (c.input.empty()) return CHAT_NONE;
+            if (c.input.empty()) {
+                // Messages left waiting by an answer that was stopped or failed: on with them.
+                if (!c.busy() && !c.queued.empty()) chat_send_queued(c, rq);
+                return CHAT_NONE;
+            }
             // What people type to leave a shell, and a `ts5 fetch` line pasted
             // from a page: commands, never messages for the model.
             std::string word = c.input;
@@ -1490,17 +1546,21 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
             std::transform(lw.begin(), lw.end(), lw.begin(), ::tolower);
             const bool command = c.input[0] == '/' || lw == "exit" || lw == "quit" || lw == "q" || lw == ":q" ||
                                  lw.rfind("ts5 fetch ", 0) == 0;
-            if (command) {
+            if (command)
                 c.command = c.input[0] == '/' ? c.input : lw.rfind("ts5 fetch ", 0) == 0 ? "/download " + word : "/quit";
-            } else {
-                if (c.busy()) return CHAT_NONE;  // one answer at a time
-            }
             if (c.history.empty() || c.history.back() != c.input) c.history.push_back(c.input);
             c.hist_pos = -1;
             const std::string text = c.input;
             c.input.clear();
             c.cur = 0;
             if (command) return CHAT_COMMAND;
+            // One answer at a time: a message entered while one is coming
+            // waits its turn, behind any that already wait.
+            if (c.busy() || !c.queued.empty()) {
+                c.queued.push_back(text);
+                if (!c.busy()) chat_send_queued(c, rq);
+                return CHAT_NONE;
+            }
             // A chat that is nearly full is summarized first; the message
             // goes once the summary is written.
             std::string err;
@@ -1552,6 +1612,14 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
             c.cur = c.input.size();
             return CHAT_NONE;
         case K_UP:
+            // The last message that waits comes back to be changed (or dropped: Esc).
+            if (c.input.empty() && c.hist_pos < 0 && !c.queued.empty()) {
+                c.input = c.queued.back();
+                c.cur = c.input.size();
+                c.queued.pop_back();
+                if (c.queued.empty()) c.queue_held = false;
+                return CHAT_NONE;
+            }
             if (c.history.empty()) return CHAT_NONE;
             if (c.hist_pos < 0) {
                 c.hist_saved = c.input;
