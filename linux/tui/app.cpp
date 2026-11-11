@@ -134,6 +134,8 @@ void Config::load() {
         else if (k == "tools") tools = v != "0";
         else if (k == "tool_terminal_ask") terminal_ask = v != "0";
         else if (k == "tool_browser_ask") browser_ask = v != "0";
+        else if (k == "tool_files") tool_files = v == "1";
+        else if (k == "tool_files_ask") files_ask = v != "0";
         else if (k == "browser" && !v.empty()) browser = v;
     }
     saved_url = url;
@@ -158,7 +160,8 @@ void Config::save() const {
              (tool_page ? "1" : "0") + "\ntool_terminal=" + (tool_terminal ? "1" : "0") + "\ntool_memory=" +
              (tool_memory ? "1" : "0") + "\ntool_browser=" + (tool_browser ? "1" : "0") + "\nbrowser=" + browser +
              "\ntools=" + (tools ? "1" : "0") + "\ntool_terminal_ask=" + (terminal_ask ? "1" : "0") +
-             "\ntool_browser_ask=" + (browser_ask ? "1" : "0") + "\n";
+             "\ntool_browser_ask=" + (browser_ask ? "1" : "0") + "\ntool_files=" + (tool_files ? "1" : "0") +
+             "\ntool_files_ask=" + (files_ask ? "1" : "0") + "\n";
         if (write(fd, s.data(), s.size()) != (ssize_t)s.size()) {
             close(fd);
             return;

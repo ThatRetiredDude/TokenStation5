@@ -106,6 +106,13 @@ struct Chat {
     // of this chat" is a choice of its own.
     std::atomic<int> ask_kind{0};
     std::atomic<bool> ask_always_browser{false};
+    // And for the file tools (files.h). ask_kind 2: a change, shown as
+    // ask_preview (the lines out and in), with "every change in this chat".
+    // ask_kind 3: a read, with "every file in FOLDER, this chat" (ask_opt
+    // names it); the folders said yes to are read_dirs. Under mu but the flag.
+    std::atomic<bool> ask_always_files{false};
+    std::string ask_preview, ask_opt, ask_dir;
+    std::vector<std::string> read_dirs;
     std::string command;  // a slash command for the app to run
     std::vector<std::string> cands;  // Tab's candidates
     int cand_i = -1;

@@ -31,6 +31,7 @@
 #include "app.h"
 #include "catalog.h"  // ps5/catalog.h: the TV app's downloads, pinned and hashed
 #include "chat.h"
+#include "files.h"
 #include "json.h"
 #include "store.h"
 #include "tested.h"  // the models tested on a PS5 that the catalog doesn't have
@@ -1231,6 +1232,8 @@ ChatRequest chat_request() {
     rq.tools.browser = tools && g->cfg.tool_browser;
     rq.tools.terminal_ask = g->cfg.terminal_ask;
     rq.tools.browser_ask = g->cfg.browser_ask;
+    rq.tools.files = tools && g->cfg.tool_files;
+    rq.tools.files_ask = g->cfg.files_ask;
     rq.tools.browser_program = g->cfg.browser;
     rq.ts5 = !sv.tool_format.empty();
     return rq;
@@ -2386,6 +2389,19 @@ std::vector<SetRow> settings_rows() {
         r.push_back(x);
     }
     if (tools_shown) {
+        SetRow x{"Tool: files", !c.tool_files ? "off" : c.files_ask ? "on, asks first" : "on, never asks",
+                 !c.tool_files  ? "the model can't read or change files (but for commands, if the terminal is on)"
+                 : c.files_ask  ? "the model reads and changes files; each change is shown first, for your yes or no"
+                                : "the model reads and changes files without asking (/undo takes a change back)"};
+        x.change = [save](int d) {
+            const int at = !g->cfg.tool_files ? 0 : g->cfg.files_ask ? 1 : 2, to = (at + (d < 0 ? 2 : 1)) % 3;
+            g->cfg.tool_files = to != 0;
+            g->cfg.files_ask = to != 2;
+            save();
+        };
+        r.push_back(x);
+    }
+    if (tools_shown) {
         SetRow x{"Tool: browser", !c.tool_browser ? "off" : c.browser_ask ? "on, asks first" : "on, never asks",
                  !c.tool_browser  ? "the model can't click through web pages"
                  : c.browser_ask  ? "the model opens pages and follows links by itself; a button or typing waits for your yes"
@@ -2842,6 +2858,8 @@ void run_command(const std::string &line) {
                        "Wikipedia without one)", &f.tool_web},
             {"pages", "reads a web page you give it a link to", &f.tool_page},
             {"terminal", "runs a command on this machine; you see each one first and say yes or no", &f.tool_terminal},
+            {"files", "reads and lists files, and changes them: you see each change, lines out and lines in, and say "
+                      "yes or no (`/undo` takes the last one back)", &f.tool_files},
             {"memory", "keeps notes when you ask it to remember, and sees them in every chat (`/memory`)", &f.tool_memory},
             {"browser", "opens web pages and clicks through them: links by itself, a button or typing only after your yes "
                         "(`/browser` picks the program)", &f.tool_browser},
@@ -2854,7 +2872,12 @@ void run_command(const std::string &line) {
             // this chat (after "every command"), and as the setting.
             c.ask_always = false;
             c.ask_always_browser = false;
-            f.terminal_ask = f.browser_ask = true;
+            c.ask_always_files = false;
+            {
+                std::lock_guard<std::mutex> l(c.mu);
+                c.read_dirs.clear();
+            }
+            f.terminal_ask = f.browser_ask = f.files_ask = true;
             f.save();
             found = true;
             show_toast("The model asks before each command and each button again", g->th->accent, 3);
@@ -2874,7 +2897,10 @@ void run_command(const std::string &line) {
             if (name != r.name) continue;
             // "ask" and "allow" (the terminal and the browser): on, and
             // whether each command, or button, waits for a yes.
-            bool *ask = r.on == &f.tool_terminal ? &f.terminal_ask : r.on == &f.tool_browser ? &f.browser_ask : nullptr;
+            bool *ask = r.on == &f.tool_terminal  ? &f.terminal_ask
+                        : r.on == &f.tool_browser ? &f.browser_ask
+                        : r.on == &f.tool_files   ? &f.files_ask
+                                                  : nullptr;
             found = true;
             if (to == "on" || to == "off") *r.on = to == "on";
             else if (to.empty()) *r.on = !*r.on;
@@ -2891,12 +2917,16 @@ void run_command(const std::string &line) {
         }
         if (!found) {
             std::string h = "**The model's tools**  (`/tools NAME on` or `off`; `/tools terminal allow` or `ask`, the same for "
-                            "`browser`; `/tools off` takes them all away, `/tools on` gives them back; or Settings)\n";
+                            "`files` and `browser`; `/tools off` takes them all away, `/tools on` gives them back; or "
+                            "Settings)\n";
             if (!f.tools_on())
                 h += f.no_tools ? "**All tools are off for this run** (ts5-tui was started with --no-tools).\n"
                                 : "**All tools are off** (`/tools on`). The switches as they will be then:\n";
             for (const Row &r : rows) {
-                const bool *ask = r.on == &f.tool_terminal ? &f.terminal_ask : r.on == &f.tool_browser ? &f.browser_ask : nullptr;
+                const bool *ask = r.on == &f.tool_terminal  ? &f.terminal_ask
+                                  : r.on == &f.tool_browser ? &f.browser_ask
+                                  : r.on == &f.tool_files   ? &f.files_ask
+                                                            : nullptr;
                 h += std::string("`") + r.name + "`  **" + (!*r.on ? "off" : ask && !*ask ? "on, never asks" : "on") + "**  " +
                      r.what + (*r.on && ask && !*ask ? "  **The question is switched off** (`/tools ask` brings it back)." : "") +
                      "\n";
@@ -2943,6 +2973,9 @@ void run_command(const std::string &line) {
             h += "The model follows links by itself. Before it presses a button or types into a page, you are asked.";
             chat_note(c, h);
         }
+    } else if (cmd == "/undo") {
+        // The last change a file tool made, taken back.
+        chat_note(c, file_undo());
     } else if (cmd == "/memory") {
         // The notes the model keeps (tools.h): list, forget N, clear, or add one by hand.
         std::string why;
@@ -3786,9 +3819,11 @@ void tick() {
     // The model asks to run a command while another page is open: say so there.
     if (g->chat.ask.load() == 1 && g->cur != CHAT && g->ask_told != g->chat.ask_t0.load()) {
         g->ask_told = g->chat.ask_t0.load();
-        show_toast(g->chat.ask_kind.load() == 1
-                       ? "The model wants to do something on a web page: F1 (or /chat) to see it and say yes or no"
-                       : "The model wants to run a command: F1 (or /chat) to see it and say yes or no",
+        const int kind = g->chat.ask_kind.load();
+        show_toast(kind == 3   ? "The model wants to read a file: F1 (or /chat) to see it and say yes or no"
+                   : kind == 2 ? "The model wants to change a file: F1 (or /chat) to see it and say yes or no"
+                   : kind == 1 ? "The model wants to do something on a web page: F1 (or /chat) to see it and say yes or no"
+                               : "The model wants to run a command: F1 (or /chat) to see it and say yes or no",
                    g->th->warn, 8);
     }
     // Every chat is kept (store.h), after each answer.

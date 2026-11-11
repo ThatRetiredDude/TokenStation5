@@ -262,15 +262,16 @@ ts5-tui --url http://ps5.local:8081  # another one
   and restart it.
 - **Tools**: besides the web search, the model can read a web page, use
   a browser, run a command on this machine and keep notes between chats.
-  Each has its own switch (Settings → Tool: search, pages, terminal,
-  browser, memory; or `/tools terminal off`), and `/tools` lists them.
+  It can also read and change files. Each has its own switch (Settings →
+  Tool: search, pages, terminal, files, browser, memory; or
+  `/tools terminal off`), and `/tools` lists them.
   **One switch turns them all off**: Settings → Tools, or `/tools off`
   (`/tools on` brings back the ones you had on), or `ts5-tui --no-tools`
   for one run. With it off the model gets nothing but the chat: no
   search, no pages, no commands, no browser, no notes.
-  The terminal and the browser have three steps: off, on and asking
-  first (the default), on and never asking (`/tools terminal allow`;
-  `/tools ask` brings every question back).
+  The terminal, the files and the browser have three steps: off, on and
+  asking first (the default), on and never asking (`/tools terminal
+  allow`; `/tools ask` brings every question back).
   - **Web pages**: give it a link ("read https://... and sum it up") and
     it gets the page as text: the article where the page marks one,
     without the site's menus and sidebars, the first 8,000 characters.
@@ -333,6 +334,19 @@ ts5-tui --url http://ps5.local:8081  # another one
     view's requests as "TokenStation5". That is all ts5 does about it: a
     site that still tests for a person (a captcha, a "checking your
     browser" page) is left closed, and the model says so.
+  - **Files** (off until you switch it on: Settings → Tool: files, or
+    `/tools files on`): the model reads a file, lists a folder, changes
+    part of a file or writes a whole one. **No change is made unseen**:
+    you get the lines that go out (red, `-`) and the lines that come in
+    (green, `+`) with the lines around them, and say yes or no; "every
+    change in this chat" stops the questions for the chat. `/undo` takes
+    the last change back (a new file is removed again), as long as the
+    file is still as the model left it. Reading is asked too, until you
+    choose "every file in this folder, this chat"; a hidden file (a name
+    that starts with a dot) and a file outside the folder ts5-tui was
+    started in are asked for each time. Paths start at that folder, the
+    one the terminal's commands run in. Text files up to 8 MiB; a long
+    file is read in parts.
   - **Memory**: tell it "remember that I write Rust" and it keeps a note.
     The model reads its notes at the start of every chat. `/memory` lists
     them, `/memory forget N` removes one, `/memory clear` all of them,

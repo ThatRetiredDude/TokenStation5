@@ -11,6 +11,7 @@
 #include <fstream>
 #include <set>
 
+#include "files.h"
 #include "json.h"
 #include "tools.h"
 
@@ -36,9 +37,10 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/usage", "", "the API's use by app and model (last day and week)"},
         {"/keys", "", "the API keys: names, on or off, last used"},
         {"/think", "on|off|auto", "thinking before answering"},
-        {"/tools", "[NAME on|off]", "the model's tools: search, pages, terminal, memory, browser (each has a switch)"},
+        {"/tools", "[on|off|NAME on|off]", "the model's tools: search, pages, terminal, files, memory, browser (each has a switch)"},
         {"/browser", "[auto|obscura|chromium|text|PATH]", "the program the model's browser tool shows pages with"},
         {"/memory", "[forget N|clear|TEXT]", "the notes the model keeps between chats: list, remove, or add one"},
+        {"/undo", "", "take back the last change the model made to a file"},
         {"/fan", "auto|cool|early|max", "the PS5's fan"},
         {"/theme", "NAME", "colors: Ocean, Neon, Sunset, Forest, Mono"},
         {"/settings", "", "the Settings page"},
@@ -362,9 +364,21 @@ void pending_calls(std::vector<Line> &out, const Chat &c, int owner, size_t at, 
     const bool live = c.running && (size_t)owner + done + 1 == c.msgs.size();  // this answer is the one being worked on
     for (size_t k = done; k < a.calls.size(); k++) {
         // (A browser call that waits for a yes shows what it would do in words.)
-        const bool page = live && k == done && c.ask.load() == 1 && c.ask_kind.load() == 1;
-        wrap(out, {{page ? c.ask_cmd : tool_call_line(a.calls[k].name, a.calls[k].args), Style(t.accent2)}}, w, 2, "⚙ ",
+        const int kind = live && k == done && c.ask.load() == 1 ? c.ask_kind.load() : 0;
+        const bool page = kind == 1;
+        wrap(out, {{kind >= 1 ? c.ask_cmd : tool_call_line(a.calls[k].name, a.calls[k].args), Style(t.accent2)}}, w, 2, "⚙ ",
              Style(t.accent2, kDefault, BOLD), "  ");
+        // A change to a file: the lines that go out and the lines that come in.
+        if (kind == 2)
+            for (size_t i = 0; i < c.ask_preview.size();) {
+                const size_t e = std::min(c.ask_preview.find('\n', i), c.ask_preview.size());
+                const std::string l = c.ask_preview.substr(i, e - i);
+                const uint32_t col = l.compare(0, 2, "- ") == 0 ? t.bad : l.compare(0, 2, "+ ") == 0 ? t.good : t.dim;
+                Line pl;
+                pl.add("    " + fit(l, std::max(8, w - 6)), Style(col));
+                out.push_back(pl);
+                i = e + 1;
+            }
         Line st;
         if (!live) {
             st.add("    not run", Style(t.dim, kDefault, ITALIC));
@@ -372,14 +386,17 @@ void pending_calls(std::vector<Line> &out, const Chat &c, int owner, size_t at, 
             st.add("    next", Style(t.dim, kDefault, ITALIC));
         } else if (c.ask.load() == 1) {
             // ‹ Run it ›  Every command in this chat  No
-            static const char *const run[] = {"Run it", "Every command in this chat", "No"};
-            static const char *const act[] = {"Do it", "Everything on pages in this chat", "No"};
-            const char *const *pick = page ? act : run;
+            const std::string run[] = {"Run it", "Every command in this chat", "No"};
+            const std::string act[] = {"Do it", "Everything on pages in this chat", "No"};
+            const std::string change[] = {c.ask_opt, "Every change in this chat", "No"};
+            const std::string read[] = {"Read it", c.ask_opt, "No"};
+            const std::string *pick = kind == 3 ? read : kind == 2 ? change : page ? act : run;
             const int on = c.ask_pick.load();
-            st.add(page ? "    Do it?  " : "    Run it?  ", Style(t.warn, kDefault, BOLD));
+            st.add(kind == 3 ? "    Read it?  " : kind == 2 ? "    " + c.ask_opt + "?  " : page ? "    Do it?  " : "    Run it?  ",
+                   Style(t.warn, kDefault, BOLD));
             for (int p = 0; p < 3; p++) {
-                if (p == on) st.add(std::string("‹ ") + pick[p] + " ›", Style(t.bg, t.warn, BOLD));
-                else st.add(std::string("  ") + pick[p] + "  ", Style(t.fg));
+                if (p == on) st.add("‹ " + pick[p] + " ›", Style(t.bg, t.warn, BOLD));
+                else st.add("  " + pick[p] + "  ", Style(t.fg));
                 st.add(" ", Style());
             }
             st.add("  ←→ choose · Enter · Esc no", Style(t.dim));
@@ -835,8 +852,11 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
             if (c.ask.load() == 1) {
                 // The model wants to run a command: it waits for a word.
                 x = s.put(x, y1, "?", Style(t.warn, kDefault, BOLD));
-                x = s.put(x + 1, y1, c.ask_kind.load() == 1 ? "the model wants to do something on a web page"
-                                                            : "the model wants to run a command",
+                const int kind = c.ask_kind.load();
+                x = s.put(x + 1, y1, kind == 3   ? "the model wants to read a file"
+                                     : kind == 2 ? "the model wants to change a file"
+                                     : kind == 1 ? "the model wants to do something on a web page"
+                                                 : "the model wants to run a command",
                           Style(t.warn, kDefault, BOLD));
                 x = s.put(x, y1, "  ←→ choose · Enter · Esc no", Style(t.dim));
             } else {
@@ -880,7 +900,7 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
     box(s, 0, iy, w, ih, Style(c.busy() ? t.dim : t.accent), Style(t.fg, t.panel));
     s.put(2, iy + 1, "ts5>", Style(c.busy() ? t.dim : t.accent2, t.panel, BOLD));
     if (c.input.empty()) {
-        const char *ph = c.ask.load() == 1 ? (c.ask_kind.load() == 1
+        const char *ph = c.ask.load() == 1 ? (c.ask_kind.load() >= 1
                                                   ? "Do what it says above? ←→ choose, Enter · Esc says no · or type the next message"
                                                   : "Run the command above? ←→ choose, Enter · Esc says no · or type the next message")
                          : c.busy()        ? "answering… type the next message, Enter queues it · Esc stops"
@@ -1178,17 +1198,50 @@ void stream_answer(Chat *c, const ChatRequest &rq, const std::string &body) {
 // A tool call of the model's, run. A command waits for the user's word
 // first (Enter, A for every command of this chat, Esc), which chat_key gives.
 ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
-    std::string cmd = tool_command(u.name, u.args);
+    std::string cmd = tool_command(u.name, u.args), preview, opt, dir;
     const bool command = u.name == "run_command" && rq.tools.terminal && !cmd.empty();
-    // What the browser would do beyond reading: asked the same way.
-    if (!command)
+    int kind = command ? 0 : 1;
+    bool ask = command && !c->ask_always.load() && rq.tools.terminal_ask;
+    if (is_file_tool(u.name) && rq.tools.files) {
+        // A file: a change is shown (the lines out and in) and asked; a
+        // read is asked until its folder was said yes to for this chat, and
+        // a hidden file every time. A call that can't be done says so itself.
+        const FilePlan p = file_plan(u.name, u.args);
+        if (p.ok && rq.tools.files_ask) {
+            cmd = p.line;
+            if (p.change) {
+                kind = 2;
+                preview = p.preview;
+                opt = p.line.compare(0, 5, "write") == 0 ? "Write it" : "Change it";
+                ask = !c->ask_always_files.load();
+            } else {
+                kind = 3;
+                dir = p.folder;
+                const std::string where = path_shown(p.folder);
+                opt = "Every file in " + (where == "." ? std::string("this folder") : where) + ", this chat";
+                std::lock_guard<std::mutex> l(c->mu);
+                ask = p.hidden;
+                if (!ask) {
+                    ask = true;
+                    for (auto &d : c->read_dirs)
+                        if (path_in(p.path, d)) ask = false;
+                }
+            }
+        }
+    } else if (!command) {
+        // What the browser would do beyond reading: asked the same way.
         cmd = c->ask_always_browser.load() || !rq.tools.browser_ask ? "" : browser_question(u.name, u.args, rq.tools, c->cancel);
-    if (command ? !c->ask_always.load() && rq.tools.terminal_ask : !cmd.empty()) {
+        ask = !cmd.empty();
+    }
+    if (ask) {
         {
             std::lock_guard<std::mutex> l(c->mu);
             c->ask_cmd = cmd;
+            c->ask_preview = preview;
+            c->ask_opt = opt;
+            c->ask_dir = dir;
         }
-        c->ask_kind = command ? 0 : 1;
+        c->ask_kind = kind;
         c->ask_t0 = now_s();
         c->ask_pick = 0;
         c->ask = 1;
@@ -1197,11 +1250,16 @@ ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
         if (c->cancel.load()) return tool_stopped();
         if (said != 2) {
             ToolResult t = tool_refused();
-            if (!command) {
+            if (kind == 1) {
                 t.head = "you said no: it wasn't done";
                 t.text = "The user said no to this, so it was not done on the page. Nothing is wrong with the page or "
                          "the browser. Do not try it again or in another way now: tell the user it was not done and "
                          "ask what they would like instead.";
+            } else if (kind >= 2) {
+                t.head = kind == 2 ? "you said no: nothing was changed" : "you said no: it wasn't read";
+                t.text = std::string("The user said no to this, so the file was not ") + (kind == 2 ? "changed" : "read") +
+                         ". Nothing is wrong with the file. Do not try it again or in another way now: tell the user "
+                         "and ask what they would like instead.";
             }
             return t;
         }
@@ -1520,7 +1578,8 @@ void complete(Chat &c, const ChatRequest &rq) {
         else if (cmd == "/tools") pool = {"on", "off", "ask", "search", "pages", "terminal", "browser", "memory", "search on",
                                           "search off", "pages on", "pages off", "terminal on", "terminal off",
                                           "terminal ask", "terminal allow", "browser on", "browser off", "browser ask",
-                                          "browser allow", "memory on", "memory off"};
+                                          "browser allow", "files", "files on", "files off", "files ask", "files allow",
+                                          "memory on", "memory off"};
         else if (cmd == "/memory") pool = {"forget", "clear"};
         else if (cmd == "/browser") pool = {"auto", "obscura", "chromium", "text"};
         else if (cmd == "/fan") pool = {"auto", "cool", "early", "max"};
@@ -1788,6 +1847,8 @@ void chat_new(Chat &c) {
     c.ask = 0;
     c.ask_always = false;
     c.ask_always_browser = false;
+    c.ask_always_files = false;
+    c.read_dirs.clear();
     c.memory.clear();
     c.memory_set = false;
 }
@@ -1985,7 +2046,15 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
             const int pick = c.ask_pick.load();
             // Enter pressed as the question came up was meant for something else: it runs nothing.
             if (pick != 2 && now_s() - c.ask_t0.load() < 0.7) return CHAT_NONE;
-            if (pick == 1) (c.ask_kind.load() == 1 ? c.ask_always_browser : c.ask_always) = true;
+            if (pick == 1) {
+                const int kind = c.ask_kind.load();
+                if (kind == 3) {
+                    std::lock_guard<std::mutex> l(c.mu);
+                    if (!c.ask_dir.empty()) c.read_dirs.push_back(c.ask_dir);
+                } else {
+                    (kind == 2 ? c.ask_always_files : kind == 1 ? c.ask_always_browser : c.ask_always) = true;
+                }
+            }
             c.ask = pick == 2 ? 3 : 2;
             return CHAT_NONE;
         }

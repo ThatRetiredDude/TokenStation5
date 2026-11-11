@@ -197,6 +197,24 @@ class H(BaseHTTPRequestHandler):
             calls = [("read_web_page", {"url": asked[5:].strip()})]
         elif asked.startswith("remember ") and "remember" in tools and not results:
             calls = [("remember", {"note": asked[9:].strip()})]
+        elif asked.startswith("file ") and "read_file" in tools:
+            # "file read PATH [LINE]", "file list [PATH]", "file edit PATH ;; OLD ;; NEW",
+            # "file write PATH ;; CONTENT" ("\n" in OLD, NEW and CONTENT is a line break);
+            # several with "&&&" between them, a turn each.
+            steps = [c.strip() for c in asked[5:].split("&&&")]
+            if len(results) < len(steps):
+                parts = [p.strip().replace("\\n", "\n") for p in steps[len(results)].split(";;")]
+                verb, _, path = parts[0].removeprefix("file ").partition(" ")
+                path = path.strip()
+                if verb == "read":
+                    path, _, line = path.partition(" ")
+                    calls = [("read_file", {"path": path, **({"start_line": int(line)} if line.strip() else {})})]
+                elif verb == "list":
+                    calls = [("list_folder", {"path": path} if path else {})]
+                elif verb == "edit":
+                    calls = [("edit_file", {"path": path, "old_text": parts[1], "new_text": parts[2]})]
+                elif verb == "write":
+                    calls = [("write_file", {"path": path, "content": parts[1]})]
         elif asked.startswith("browse ") and "browser_open" in tools:
             steps = [c.strip() for c in asked[7:].split(";;")]
             if len(results) < len(steps):

@@ -58,6 +58,9 @@ struct Config {
     // Whether a command, and a button or typing on a web page, wait for
     // the user's yes (the default) or go without asking.
     bool terminal_ask = true, browser_ask = true;
+    // The file tools (read, list, change, write; files.h): off until the
+    // user turns them on, and asking first.
+    bool tool_files = false, files_ask = true;
     std::string browser = "auto";    // "auto", "obscura", "chromium", "text", or a browser program's path
     std::string path;       // where it is saved
     void load();

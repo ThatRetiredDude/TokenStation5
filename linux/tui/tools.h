@@ -23,7 +23,10 @@ struct ToolSwitches {
     // A command, and a button or typing on a page, wait for the user's
     // yes; false: they go without asking (the user's choice in Settings).
     bool terminal_ask = true, browser_ask = true;
-    bool any() const { return page || terminal || memory || browser; }  // tools of ts5-tui's own
+    // read_file, list_folder, edit_file, write_file (files.h). files_ask
+    // false: they read and change without asking.
+    bool files = false, files_ask = true;
+    bool any() const { return page || terminal || memory || browser || files; }  // tools of ts5-tui's own
 };
 
 // The request's "tools" for the switches that are on: a JSON array, or "".
