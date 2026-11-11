@@ -48,7 +48,10 @@ jobs:
         id: build
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          if [[ "$GITHUB_REF" == refs/tags/linux-v* ]]; then v=${GITHUB_REF_NAME#linux-v}; else v=0.0.0+$(git rev-parse --short HEAD); fi
+          # A version that only goes up, so "install it again" is an upgrade on
+          # apt, dnf and pacman: 0.1.<run number>+<commit> (0.1 sorts after
+          # the 0.0.0+<commit> builds before it).
+          if [[ "$GITHUB_REF" == refs/tags/linux-v* ]]; then v=${GITHUB_REF_NAME#linux-v}; else v=0.1.${GITHUB_RUN_NUMBER}+$(git rev-parse --short HEAD); fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
           linux/build-deb.sh "$v"
       - name: Check the package
@@ -101,7 +104,15 @@ jobs:
       - name: Install it and check it
         run: |
           apt-get update -qq
-          apt-get install -y -qq sudo python3 ./dist/*.deb
+          apt-get install -y -qq sudo python3 curl ca-certificates
+          # An upgrade from the newest published build, when there is one.
+          if curl -fsSL -o /tmp/old.deb https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation_latest_amd64.deb; then
+            apt-get install -y -qq /tmp/old.deb
+            dpkg-query -W tokenstation
+          fi
+          apt-get install -y -qq ./dist/*.deb
+          dpkg-query -W tokenstation
+          test "$(stat -c %a /var/lib/tokenstation/models)" = 2775
           tokenstation --version
           { ts5 2>&1 || true; } | grep -q "usage: ts5"
           ts5-tune --help | grep -q "fastest GPU settings"
@@ -127,7 +138,14 @@ jobs:
           linux/build-rpm.sh "${{ needs.package.outputs.version }}"
       - name: Install it and check it
         run: |
+          # An upgrade from the newest published build, when there is one.
+          if curl -fsSL -o /tmp/old.rpm https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest.x86_64.rpm; then
+            dnf install -y -q /tmp/old.rpm
+            rpm -q tokenstation
+          fi
           dnf install -y -q ./build/linux/tokenstation-*.rpm
+          rpm -q tokenstation
+          test "$(stat -c %a /var/lib/tokenstation/models)" = 2775
           tokenstation --version
           { ts5 2>&1 || true; } | grep -q "usage: ts5"
           ts5-tune --help | grep -q "fastest GPU settings"
@@ -160,7 +178,14 @@ jobs:
           su builder -c "linux/build-arch.sh '${{ needs.package.outputs.version }}'"
       - name: Install it and check it
         run: |
+          # An upgrade from the newest published build, when there is one.
+          if curl -fsSL -o /tmp/old.pkg.tar.zst https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-x86_64.pkg.tar.zst; then
+            pacman -U --noconfirm /tmp/old.pkg.tar.zst
+            pacman -Q tokenstation
+          fi
           pacman -U --noconfirm build/linux/tokenstation-*.pkg.tar.*
+          pacman -Q tokenstation
+          test "$(stat -c %a /var/lib/tokenstation/models)" = 2775
           tokenstation --version
           { ts5 2>&1 || true; } | grep -q "usage: ts5"
           id tokenstation
@@ -189,7 +214,11 @@ jobs:
           echo "tester ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/tester
           tar -C /home/tester -xzf dist/tokenstation-*-linux-*.tar.gz
           chown -R tester /home/tester
-          su - tester -c 'cd tokenstation-*-linux-* && ./install.sh'
+          su - tester -c 'cd tokenstation-linux-amd64 && ./install.sh'
+          # An update: the same tarball unpacked over it, then install.sh again.
+          tar -C /home/tester -xzf dist/tokenstation-*-linux-*.tar.gz
+          chown -R tester /home/tester
+          su - tester -c 'cd tokenstation-linux-amd64 && ./install.sh --no-start'
           su - tester -c '~/.local/bin/tokenstation --version'
           su - tester -c '~/.local/bin/ts5 2>&1 | grep -q "usage: ts5"'
           test -x /usr/local/lib/tokenstation/hw
@@ -197,7 +226,7 @@ jobs:
           sudo -l -U tester | grep -q /usr/local/lib/tokenstation/hw
           su - tester -c 'sudo -n /usr/local/lib/tokenstation/hw status'
           grep -q "Exec=/home/tester/.local/opt/tokenstation/bin/tokenstation" /home/tester/.local/share/applications/tokenstation.desktop
-          su - tester -c 'cd tokenstation-*-linux-* && ./install.sh --uninstall'
+          su - tester -c 'cd tokenstation-linux-amd64 && ./install.sh --uninstall'
           test ! -e /usr/local/lib/tokenstation
 
   # The .deb on Ubuntu 24.04 running a model end to end.
