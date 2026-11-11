@@ -266,7 +266,61 @@ size_t find_tag(const std::string &html, const char *name, size_t from, bool clo
     return std::string::npos;
 }
 
-// HTML as text. menus false: without the page's menus and sidebars (<nav>, <aside>).
+// Where the element <name ...> whose opening tag ends at `at` is over: after
+// its own closing tag, the ones of the same name inside it counted.
+size_t element_end(const std::string &s, size_t at, const std::string &name) {
+    int depth = 1;
+    for (size_t i = at; i < s.size(); i++) {
+        if (s[i] != '<') continue;
+        const bool closing = i + 1 < s.size() && s[i + 1] == '/';
+        const size_t n = i + (closing ? 2 : 1);
+        if (!starts_ci(s, n, name.c_str())) continue;
+        const size_t e = n + name.size();
+        if (e < s.size() && isalnum((unsigned char)s[e])) continue;
+        if (!closing) {
+            depth++;
+        } else if (--depth == 0) {
+            const size_t gt = s.find('>', i);
+            return gt == std::string::npos ? s.size() : gt + 1;
+        }
+    }
+    return s.size();
+}
+
+// Whether the list between a and b is nothing but links: a menu, a table of
+// contents, the page in other languages. Five items or more, and next to no
+// words outside the links.
+bool link_list(const std::string &h, size_t a, size_t b) {
+    int items = 0;
+    bool link = false;
+    size_t in = 0, out = 0;
+    for (size_t i = a; i < b;) {
+        if (h[i] == '<') {
+            size_t n = i + 1;
+            const bool closing = n < b && h[n] == '/';
+            if (closing) n++;
+            size_t ne = n;
+            while (ne < b && isalnum((unsigned char)h[ne])) ne++;
+            std::string name = h.substr(n, ne - n);
+            for (char &ch : name) ch = (char)tolower((unsigned char)ch);
+            if (name == "li" && !closing) items++;
+            if (name == "a") link = !closing;
+            const size_t e = h.find('>', i);
+            i = e == std::string::npos || e >= b ? b : e + 1;
+            continue;
+        }
+        if (h[i] == '&') {  // an entity is one letter
+            const size_t semi = h.find(';', i);
+            if (semi != std::string::npos && semi < b && semi - i <= 10) i = semi;
+        }
+        if (!isspace((unsigned char)h[i])) (link ? in : out)++;
+        i++;
+    }
+    return items >= 5 && out * 10 <= in;
+}
+
+// HTML as text. menus false: without the page's menus and sidebars (<nav>,
+// <aside>, and the lists that are nothing but links).
 std::string text_of(const std::string &html, bool menus) {
     // Tags that start a new line, and the ones whose insides are no text.
     static const char *const kBlock[] = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section",
@@ -302,6 +356,13 @@ std::string text_of(const std::string &html, bool menus) {
             if (skip) {
                 i = skip_element(html, after, name);
                 continue;
+            }
+            if (!menus && !closing && (name == "ul" || name == "ol")) {
+                const size_t end = element_end(html, after, name);
+                if (link_list(html, after, end)) {
+                    i = end;
+                    continue;
+                }
             }
             for (const char *k : kBlock)
                 if (name == k) {

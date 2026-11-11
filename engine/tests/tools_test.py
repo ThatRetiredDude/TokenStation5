@@ -959,17 +959,28 @@ PAGE_TEXT = "T & t\n\nHead\n\nOne two three\nfour\n\n- a\n- b < c\n\nx | y |\n\n
 ARTICLE = """<!DOCTYPE html><html><head><title>Console - Encyclopedia</title></head><body>
 <a href="#content">Jump to content</a><header><nav><ul><li>Main menu</li><li>Contribute</li><li>Search</li></ul></nav>
 <div>Personal tools</div></header><nav id="toc"><ul><li>Contents</li><li>History</li></ul></nav>
-<MAIN id="content"><header><h1>Console</h1><nav><ul><li>Article</li><li>Talk</li><li>Edit</li></ul></nav></header>
+<MAIN id="content"><header><h1>Console</h1><div id="p-lang-btn"><input type="checkbox"><label><span>6
+languages</span></label><div><UL class="menu"><li class="interlanguage-link"><a href="//an.example/"><span>Aragon&eacute;s</span></a></li>
+<li><a href="//de.example/"><span>Deutsch</span></a></li><li><a href="//fr.example/"><span>Fran&ccedil;ais</span></a>
+<ul><li><a href="//fr.example/be">Belgique</a></li></ul></li><li><a href="//sk.example/"><span>Slovenčina</span></a></li>
+<li><a href="//ja.example/"><span>日本語</span></a></li><li><a href="//uk.example/"><span>Українська</span></a></li></UL>
+<div><a href="/edit">Edit links</a></div></div></div><nav><ul><li>Article</li><li>Talk</li><li>Edit</li></ul></nav></header>
 <p>The console was released in November 2020. It has an eight-core processor and sixteen gigabytes of
 memory, which its graphics chip shares with the system.</p><aside>Not to be confused with a terminal.</aside>
 <h2>Hardware</h2><p>Its solid-state drive reads five and a half gigabytes a second, and the cooling fan is
-a hundred and twenty millimetres across.</p></MAIN>
+a hundred and twenty millimetres across.</p><h2>Models</h2><ul><li><a href="/1">Original</a>: 2020</li><li><a
+href="/2">Digital</a>: 2020</li><li><a href="/3">Slim</a>: 2023</li><li><a href="/4">Pro</a>: 2024</li><li><a
+href="/5">Portal</a>: 2023, a screen for it</li></ul><ol><li><a href="/a">One</a></li><li><a href="/b">Two</a></li><li><a
+href="/c">Three</a></li></ol></MAIN>
 <footer><nav><ul><li>Privacy policy</li><li>About</li></ul></nav><p>Text is available under a licence.</p></footer>
 </body></html>"""
-ARTICLE_TEXT = ("Console - Encyclopedia\n\nConsole\n\nThe console was released in November 2020. It has an eight-core "
+# The six languages go (a list of links and nothing else); the list with words and the short list stay.
+ARTICLE_TEXT = ("Console - Encyclopedia\n\nConsole\n\n6 languages\n\nEdit links\n\nThe console was released in "
+                "November 2020. It has an eight-core "
                 "processor and sixteen gigabytes of memory, which its graphics chip shares with the system.\n\nHardware\n\n"
                 "Its solid-state drive reads five and a half gigabytes a second, and the cooling fan is a hundred and "
-                "twenty millimetres across.\n")
+                "twenty millimetres across.\n\nModels\n\n- Original: 2020\n- Digital: 2020\n- Slim: 2023\n- Pro: 2024\n"
+                "- Portal: 2023, a screen for it\n\n- One\n- Two\n- Three\n")
 # A page that is little but its menu is read whole.
 LINKS = """<html><head><title>Docs</title></head><body><nav><ul><li>Install on Linux</li><li>Models tested on the
 console</li><li>Connecting apps</li><li>Troubleshooting</li></ul></nav><main><p>Pick a page.</p></main></body></html>"""
