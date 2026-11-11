@@ -50,7 +50,14 @@ description tells the model so, and to say when the articles don't hold the
 answer. The model gets the top articles (five, `TS5_SEARCH_RESULTS`), each
 with its title, link and opening text; in ts5-tui it can then read a whole
 article with the web page tool. A query no article matches word for word
-goes once more as any of its words.
+goes once more as any of its words. Wikipedia's search splits and stems
+words, so a name it doesn't know can still bring articles on something else
+("Gated DeltaNet": airlines and a river): when the articles were found by
+any of the words, or none has one of the query's own words in its title or
+opening, the model is told that they are only the closest found. Every
+result ends with a line that says to search once more with only the name of
+the thing when the articles miss the subject. A search takes about half a
+second on the PS5.
 
 `TS5_WIKIPEDIA` picks the language (`en` by default; `sk`, `de` ...) or turns
 it off (`off`). `/v1/models` says `"web_search": false, "web_search_source":

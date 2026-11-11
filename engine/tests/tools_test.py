@@ -303,6 +303,18 @@ def test_parser(ts5):
         ("hermes", 'Sure.\n<function_call>{"name": "a", "arguments": {}}</function_call>', "Sure.", [("a", {})], 6),
         ("hermes", '{"answer": 42}', '{"answer": 42}', [], 0),
         ("hermes", "Use the <tools> menu.", "Use the <tools> menu.", [], 8),
+        # Words, then a call in a tag the model made up (DeepSeek R1 14B, from the console): a call
+        # when it names one of the request's tools, text when it doesn't. While it streams, the
+        # tag is held back from its "<" on.
+        ("generic", 'To find out how much free disk space the machine has, I\'ll run the command "df -h".\n\n'
+         '<command>\n{"name": "run_command", "arguments": {"command": "df -h"}}\n</command>\n',
+         'To find out how much free disk space the machine has, I\'ll run the command "df -h".',
+         [("run_command", {"command": "df -h"})], 85, ["run_command", "read_page"]),
+        ("generic", 'Like this:\n<command>\n{"name": "other", "arguments": {}}\n</command>',
+         'Like this:\n<command>\n{"name": "other", "arguments": {}}\n</command>', [], 11, ["run_command"]),
+        ("generic", "I'll run it. <comm", "I'll run it. <comm", [], 13, ["run_command"]),
+        ("generic", "I'll run it. <command>\n", "I'll run it. <command>\n", [], 13, ["run_command"]),
+        ("generic", "Write <b>bold</b> and a < b here.", "Write <b>bold</b> and a < b here.", [], 33, ["run_command"]),
         # Calls as elements named after the tools (Coder's two calls, from the console).
         ("hermes", '<xml> <get_weather city="Paris" /> <get_time zone="Asia/Tokyo" /> </xml>', "",
          [("get_weather", {"city": "Paris"}), ("get_time", {"zone": "Asia/Tokyo"})], 0, ["get_weather", "get_time"]),
@@ -1140,12 +1152,19 @@ class Wikipedia(http.server.BaseHTTPRequestHandler):
         words = q.get("gsrsearch", [""])[0]
         Wikipedia.seen.append((urllib.parse.urlsplit(self.path).path, q))
         out = {"batchcomplete": True}
-        if "nothing" not in words or " OR " in words:
+        if "DeltaNet" in words:
+            # Its search splits and stems words: "gate", "delta", "net".
+            out["query"] = {"pages": [
+                {"pageid": 7, "ns": 0, "title": "Delta Connection", "index": 1, "extract": "An airline's brand.\n\n\n",
+                 "fullurl": "https://en.wikipedia.org/wiki/Delta_Connection"},
+                {"pageid": 8, "ns": 0, "title": "Po (river)", "index": 2, "extract": "A river with gates and nets.",
+                 "fullurl": "https://en.wikipedia.org/wiki/Po_(river)"}]}
+        elif "nothing" not in words or " OR " in words:
             out["query"] = {"pages": [
                 {"pageid": 2, "ns": 0, "title": "PlayStation 5", "index": 2, "extract": "A console. " + "word " * 600,
                  "fullurl": "https://en.wikipedia.org/wiki/PlayStation_5"},
                 {"pageid": 1, "ns": 0, "title": "PlayStation 5 system software", "index": 1,
-                 "extract": "The system software is the firmware of the PlayStation\u00a05. Version 13.60 \u2014 2026.",
+                 "extract": "The system software is the firmware of the PlayStation\u00a05. Version 13.60 \u2014 2026.\n\n\n",
                  "fullurl": "https://en.wikipedia.org/wiki/PlayStation_5_system_software"},
                 {"pageid": 3, "ns": 0, "title": "Firmware", "index": 3,
                  "fullurl": "https://en.wikipedia.org/wiki/Firmware"}]}
@@ -1180,7 +1199,10 @@ def test_wikipedia(ts5, model, tdir):
                      "The system software is the firmware of the PlayStation\u00a05. Version 13.60 \u2014 2026.")
     ok = (rc == 0 and out.startswith('Wikipedia articles for "PS5 firmware"') and 0 < first < out.find("[2] PlayStation 5\n")
           < out.find("[3] Firmware\nhttps://en.wikipedia.org/wiki/Firmware\n(no opening text)") and " ..." in out and
-          len(out) < 2200 and "searching Wikipedia" in err and "3 results (" in err and len(seen) == 1 and
+          "2026.\n\n[2] PlayStation 5\n" in out and
+          out.rstrip().endswith("search once more with only the name of the thing, or answer from what you know and say "
+                                "that it could not be looked up.") and "a loose match" not in err and
+          len(out) < 2400 and "searching Wikipedia" in err and "3 results (" in err and len(seen) == 1 and
           seen[0][0] == "/w/api.php" and seen[0][1]["gsrsearch"] == ["PS5 firmware"] and
           seen[0][1]["gsrlimit"] == ["5"] and seen[0][1]["generator"] == ["search"] and
           seen[0][1]["prop"] == ["extracts|info"] and seen[0][1]["exintro"] == ["1"])
@@ -1188,8 +1210,17 @@ def test_wikipedia(ts5, model, tdir):
     # No article has every word: once more, as any of the words.
     rc, out, err, seen = search("is there nothing on the PS5?")
     ok = (rc == 0 and "[1] PlayStation 5 system software" in out and len(seen) == 2 and
-          seen[1][1]["gsrsearch"] == ["there OR nothing OR the OR PS5"])
-    failed += report(ok, "Wikipedia search: a whole question goes again as any of its words", f"rc {rc}\n{out}\n{seen}")
+          seen[1][1]["gsrsearch"] == ["there OR nothing OR the OR PS5"] and
+          out.startswith('Wikipedia has no article that clearly matches "is there nothing on the PS5?"') and
+          "The closest it found, which may be about something else:\n\n[1] " in out and "a loose match)" in err)
+    failed += report(ok, "Wikipedia search: a whole question goes again as any of its words, and says so",
+                     f"rc {rc}\n{out}\n{err}\n{seen}")
+    # Articles with none of the search's words in a title or an opening: the model is told.
+    rc, out, err, seen = search("Gated DeltaNet")
+    ok = (rc == 0 and len(seen) == 1 and out.startswith('Wikipedia has no article that clearly matches "Gated DeltaNet"') and
+          "[1] Delta Connection\nhttps://en.wikipedia.org/wiki/Delta_Connection\nAn airline's brand.\n\n[2] Po (river)" in out
+          and "2 results (" in err and "a loose match)" in err)
+    failed += report(ok, "Wikipedia search: articles on something else are called a loose match", f"rc {rc}\n{out}\n{err}")
     rc, out, err, seen = search("nothing")
     ok = 'Wikipedia has no article for "nothing"' in out and len(seen) == 1 and "0 results (" in err
     failed += report(ok, "Wikipedia search: nothing found", f"rc {rc}\n{out}\n{err}\n{seen}")
@@ -1197,7 +1228,8 @@ def test_wikipedia(ts5, model, tdir):
     failed += report(rc == 1 and "The search failed: Wikipedia couldn't be reached" in out, "Wikipedia search: no server",
                      f"rc {rc}\n{out}\n{err}")
     rc, out, err, seen = search("PS5", TS5_WIKIPEDIA="off")
-    failed += report(rc == 1 and "no web search is set up" in out and not seen, "Wikipedia search: switched off",
+    failed += report(rc == 1 and "no web search is set up" in out and not seen and
+                     "TAVILY_API_KEY is not set and TS5_WIKIPEDIA is off" in err, "Wikipedia search: switched off",
                      f"rc {rc}\n{out}\n{err}")
     rc, out, err, seen = search("PS5", TS5_SEARCH_RESULTS="2")
     failed += report(seen and seen[0][1]["gsrlimit"] == ["2"] and seen[0][1]["exlimit"] == ["2"],

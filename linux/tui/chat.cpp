@@ -1232,6 +1232,74 @@ std::string summary_body(const ChatRequest &rq, const std::string &msgs, int out
 }
 
 // The summary's answer, then the message that waited for it.
+// Whether text speaks of a summary (summary, summarize, summarise).
+bool speaks_of_summary(const std::string &text) {
+    std::string l = text;
+    for (char &ch : l) ch = (char)tolower((unsigned char)ch);
+    return l.find("summar") != std::string::npos;
+}
+
+// A summary without its lines about the summary itself, and without a
+// heading such a line leaves empty. Whatever the request says, Qwen3.5 9B and
+// Gemma 4 12B write the request into the notes (on the console: "The user
+// has now requested a summary of the conversation", "Current Task: Compose
+// the summary under specific constraints"), and the next answer then reads
+// that as the last thing asked for. Only for a chat that never spoke of a
+// summary itself; notes that would lose most of their text stay as written.
+std::string without_own_request(const std::string &notes) {
+    std::vector<std::string> lines;
+    size_t at = 0;
+    while (at <= notes.size()) {
+        size_t e = notes.find('\n', at);
+        if (e == std::string::npos) e = notes.size();
+        const std::string line = notes.substr(at, e - at);
+        if (!speaks_of_summary(line)) lines.push_back(line);
+        at = e + 1;
+    }
+    auto blank = [](const std::string &l) { return l.find_first_not_of(" \t\r") == std::string::npos; };
+    // 1 to 6 for "#" headings, 7 for a line that is bold and nothing else, 0
+    // for any other line.
+    auto level = [](const std::string &l) {
+        const size_t a = l.find_first_not_of(" \t");
+        if (a == std::string::npos) return 0;
+        size_t b = l.find_last_not_of(" \t\r:");
+        if (l[a] == '#') {
+            int n = 0;
+            while (a + n < l.size() && l[a + n] == '#') n++;
+            return n <= 6 ? n : 0;
+        }
+        return b >= a + 4 && l.compare(a, 2, "**") == 0 && l.compare(b - 1, 2, "**") == 0 &&
+                       l.find("**", a + 2) == b - 1
+                   ? 7
+                   : 0;
+    };
+    for (bool again = true; again;) {
+        again = false;
+        for (size_t i = 0; i < lines.size(); i++) {
+            const int lv = level(lines[i]);
+            if (!lv) continue;
+            size_t j = i + 1;
+            while (j < lines.size() && blank(lines[j])) j++;
+            const int next = j < lines.size() ? level(lines[j]) : 8;
+            if (j < lines.size() && (next == 0 || next > lv)) continue;
+            lines.erase(lines.begin() + i);
+            again = true;
+            break;
+        }
+    }
+    std::string out;
+    bool gap = false;
+    for (auto &l : lines) {
+        if (blank(l)) {
+            gap = !out.empty();
+            continue;
+        }
+        out += (gap ? "\n\n" : out.empty() ? "" : "\n") + l;
+        gap = false;
+    }
+    return out.size() * 3 < notes.size() ? notes : out;
+}
+
 void run_summary(Chat *c, ChatRequest rq, std::string msgs, std::string then, std::string focus, int out_max) {
     // The chat's size is a guess here (the server counts, this side only
     // estimates): a request the server finds too long goes again with more
@@ -1258,6 +1326,9 @@ void run_summary(Chat *c, ChatRequest rq, std::string msgs, std::string then, st
         while (!content.empty() && isspace((unsigned char)content.back())) content.pop_back();
         ok = m.error.empty() && !m.stopped && !content.empty();
         if (ok) {
+            bool spoken = false;
+            for (size_t i = 0; i + 1 < c->msgs.size(); i++) spoken = spoken || speaks_of_summary(c->msgs[i].content);
+            if (!spoken) content = without_own_request(content);
             // Its notes alone; what the chat holds now, roughly, until the
             // next answer brings the server's count.
             m.content = content;

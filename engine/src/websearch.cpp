@@ -39,7 +39,11 @@ std::string tavily_key() { return env_or("TAVILY_API_KEY", ""); }
 
 std::string search_source() {
     if (!tavily_key().empty()) return "tavily";
+#ifdef TS5_PS5
+    return "none";  // the console title's search is the key's alone
+#else
     return env_or("TS5_WIKIPEDIA", "en") == "off" ? "none" : "wikipedia";
+#endif
 }
 
 bool web_search_always() { return env_or("TS5_WEB_SEARCH", "") == "always"; }
@@ -165,6 +169,29 @@ std::string url_escape(const std::string &s) {
 // best first, each with its opening text. A query that finds nothing (the
 // search wants every word in the article, and a model's query is often a
 // whole question) goes once more as any of its words.
+// The words of a search: letters and digits (and anything past ASCII), in
+// lower case where they are ASCII, those of three letters or more and
+// numbers.
+std::vector<std::string> search_words(const std::string &query) {
+    std::vector<std::string> words;
+    std::string w;
+    for (size_t i = 0; i <= query.size(); i++) {
+        const unsigned char c = i < query.size() ? (unsigned char)query[i] : ' ';
+        if (isalnum(c) || c >= 0x80) {
+            w += (char)c;
+        } else if (!w.empty()) {
+            if (w.size() > 2 || isdigit((unsigned char)w[0])) words.push_back(w);
+            w.clear();
+        }
+    }
+    return words;
+}
+
+std::string lower_ascii(std::string s) {
+    for (char &c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+
 std::string wikipedia_search(const std::string &query, int n, std::string &log, bool *failed) {
     const std::string lang = env_or("TS5_WIKIPEDIA", "en");
     const std::string base = env_or("TS5_WIKIPEDIA_URL", ("https://" + lang + ".wikipedia.org").c_str());
@@ -179,23 +206,18 @@ std::string wikipedia_search(const std::string &query, int n, std::string &log, 
         std::string title, url, text;
     };
     std::vector<Page> pages;
+    const std::vector<std::string> qwords = search_words(query);
     std::string words = query;
+    // The articles are a loose match: found by any of the words, or with none
+    // of the search's own words in a title or an opening.
+    bool loose = false;
     for (int round = 0; round < 2 && pages.empty(); round++) {
         if (round == 1) {
             // Any of the words: "PS5 OR firmware OR version".
-            std::string any, w;
-            int count = 0;
-            for (size_t i = 0; i <= query.size(); i++) {
-                const unsigned char c = i < query.size() ? (unsigned char)query[i] : ' ';
-                if (isalnum(c) || c >= 0x80) {
-                    w += (char)c;
-                } else if (!w.empty()) {
-                    if (w.size() > 2 || isdigit((unsigned char)w[0])) any += (count++ ? " OR " : "") + w;
-                    w.clear();
-                }
-            }
-            if (count < 2) break;
-            words = any;
+            if (qwords.size() < 2) break;
+            words.clear();
+            for (auto &w : qwords) words += (words.empty() ? "" : " OR ") + w;
+            loose = true;
         }
         const std::string url = base + "/w/api.php?action=query&format=json&formatversion=2&generator=search&gsrsearch=" +
                                 url_escape(words) + "&gsrlimit=" + std::to_string(n) +
@@ -213,8 +235,11 @@ std::string wikipedia_search(const std::string &query, int n, std::string &log, 
             return kFailed + std::string(!ok ? "Wikipedia couldn't be reached" : "Wikipedia had a problem") + kTell;
         }
         for (auto &p : r["query"]["pages"].a)
-            if (!p["title"].str().empty())
-                pages.push_back({p["index"].num(1e9), p["title"].str(), p["fullurl"].str(), p["extract"].str()});
+            if (!p["title"].str().empty()) {
+                std::string text = p["extract"].str();
+                while (!text.empty() && isspace((unsigned char)text.back())) text.pop_back();
+                pages.push_back({p["index"].num(1e9), p["title"].str(), p["fullurl"].str(), text});
+            }
     }
     std::stable_sort(pages.begin(), pages.end(), [](const Page &a, const Page &b) { return a.index < b.index; });
     if (pages.empty()) {
@@ -222,13 +247,39 @@ std::string wikipedia_search(const std::string &query, int n, std::string &log, 
         return "Wikipedia has no article for \"" + query + "\". Try a name or fewer words, or answer from what you know "
                "and say that it could not be looked up.";
     }
-    std::string out = "Wikipedia articles for \"" + query +
-                      "\" (the only search set up here: an encyclopedia, no news or live data):";
+    // Wikipedia's search splits and stems words ("Gated DeltaNet" finds
+    // airline and river articles through "gate", "delta" and "net", seen on
+    // the console): where no article has one of the search's own words in
+    // its title or opening, the model is told the match is a loose one.
+    if (!loose) {
+        static const char *const kCommon[] = {"the",  "and",  "for",   "are",   "was",  "were",  "what", "who",  "how",
+                                              "why",  "when", "where", "which", "does", "did",   "has",  "have", "had",
+                                              "with", "from", "that",  "this",  "there", "about", "into", "can",  "you"};
+        std::vector<std::string> own;
+        for (auto &w : qwords) {
+            const std::string l = lower_ascii(w);
+            if (std::none_of(std::begin(kCommon), std::end(kCommon), [&](const char *c) { return l == c; })) own.push_back(l);
+        }
+        bool found = own.empty();
+        for (auto &p : pages) {
+            const std::string hay = lower_ascii(p.title + "\n" + p.text);
+            for (auto &w : own) found = found || hay.find(w) != std::string::npos;
+        }
+        loose = !found;
+    }
+    std::string out = loose ? "Wikipedia has no article that clearly matches \"" + query +
+                                  "\" (the only search set up here: an encyclopedia, no news or live data). The closest "
+                                  "it found, which may be about something else:"
+                            : "Wikipedia articles for \"" + query +
+                                  "\" (the only search set up here: an encyclopedia, no news or live data):";
     int i = 0;
     for (auto &p : pages)
         out += "\n\n[" + std::to_string(++i) + "] " + p.title + "\n" + p.url + "\n" +
                (p.text.empty() ? std::string("(no opening text)") : clip(p.text, 1200));
-    log = "web_search \"" + query + "\": " + std::to_string(i) + " results (" + took() + ", Wikipedia)";
+    out += "\n\nIf none of these is about what was asked, search once more with only the name of the thing, or answer "
+           "from what you know and say that it could not be looked up.";
+    log = "web_search \"" + query + "\": " + std::to_string(i) + " results (" + took() + ", Wikipedia" +
+          (loose ? ", a loose match" : "") + ")";
     return out;
 }
 

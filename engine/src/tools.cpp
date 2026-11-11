@@ -1629,6 +1629,29 @@ void fit_to_schemas(std::vector<ToolCall> &calls, const std::vector<Json> &tools
     }
 }
 
+// The start of a wrapper of any name that holds an object, at or after from:
+// <W>, then {, as in "<command>\n{"name": ...". npos when there is none.
+// partial: a tag still being written where the text ends counts too ("<comm",
+// "<command>\n"), for what is held back while a reply streams.
+size_t made_up_wrapper(const std::string &text, size_t from, bool partial) {
+    for (size_t p = text.find('<', from); p != std::string::npos; p = text.find('<', p + 1)) {
+        size_t e = p + 1;
+        while (e < text.size() && is_name_char(text[e])) e++;
+        if (e == text.size()) {
+            if (partial) return p;
+            continue;
+        }
+        if (e == p + 1 || text[e] != '>') continue;
+        const size_t b = text.find_first_not_of(kSpace, e + 1);
+        if (b == std::string::npos) {
+            if (partial) return p;
+            continue;
+        }
+        if (text[b] == '{') return p;
+    }
+    return std::string::npos;
+}
+
 ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names) {
     if (f == ToolFormat::GEMMA || f == ToolFormat::GENERIC) f = ToolFormat::HERMES;  // their calls are Hermes's
     ParsedTurn r;
@@ -1677,6 +1700,26 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
         if (r.calls.empty() && calls_in_any_wrapper(text.substr(from), r.calls)) content = text.substr(0, from);
         if (r.calls.empty() && !names.empty() && calls_as_tool_elements(text.substr(from), names, r.calls))
             content = text.substr(0, from);
+        // Words, then a call to one of the request's tools in a wrapper the
+        // model made up. DeepSeek R1 14B on the console, asked for a command
+        // with no system prompt: I'll run the command "df -h" ... <command>
+        // {"name": "run_command", "arguments": {"command": "df -h"}} </command>
+        if (r.calls.empty() && !names.empty()) {
+            const std::string a = rstrip(text.substr(from));
+            for (size_t p = made_up_wrapper(a, 0, false); p != std::string::npos; p = made_up_wrapper(a, p + 1, false)) {
+                const size_t gt = a.find('>', p);
+                const std::string close = "</" + a.substr(p + 1, gt - p - 1) + ">";
+                if (!ends(a, close) || a.size() - close.size() <= gt) continue;
+                std::vector<ToolCall> got;
+                if (!calls_from_objects(a.substr(gt + 1, a.size() - close.size() - gt - 1), got)) continue;
+                bool known = true;
+                for (auto &c : got) known = known && std::find(names.begin(), names.end(), c.name) != names.end();
+                if (!known) continue;
+                r.calls = got;
+                content = text.substr(0, from) + a.substr(0, p);
+                break;
+            }
+        }
         if (!r.calls.empty()) r.content = without_empty_fence(rstrip(content));
         // A plain answer in a <response> wrapper (Coder, seen on the
         // console): the wrapper goes.
@@ -1781,10 +1824,13 @@ size_t content_prefix(ToolFormat f, const std::string &text) {
         // wrapped call: hold it all.
         size_t i = text.find_first_not_of(kSpace, from);
         if (i != std::string::npos && (text[i] == '{' || text[i] == '`' || text[i] == '<')) return from;
+        // A wrapper of the model's own with an object in it may be a call
+        // (parse_turn), and so may a tag the text ends in the middle of.
+        const size_t own = made_up_wrapper(text, from, true);
         size_t p;
-        if (find_hermes_tag(text, from, p) >= 0) return p;
+        if (find_hermes_tag(text, from, p) >= 0) return std::min(p, own);
         // Hold back what could be the start of a call tag.
-        size_t hold = text.size();
+        size_t hold = std::min(text.size(), own);
         for (auto &t : kHermesTags) {
             const std::string tag = t[0];
             for (size_t k = std::min(tag.size() - 1, text.size() - from); k > 0; k--)

@@ -9,7 +9,8 @@ a log line per answer as ts5 does, to stderr. FAKE_CTX sets the context
 (32768): each message adds 600 tokens to the prompt (FAKE_COUNT=len: a
 third of its bytes, as a real chat grows; FAKE_DENSE=2: half), and an answer that reaches the
 context or max_tokens stops with finish_reason "length". A request for a
-summary (ts5-tui's, for a chat that filled up) gets one. FAKE_REQUESTS: a
+summary (ts5-tui's, for a chat that filled up) gets one (FAKE_SUMMARY: a
+file with the summary to give instead). FAKE_REQUESTS: a
 file that gets each request's roles and sizes, a line a request.
 FAKE_WEB=1 says the server has a web search key (without it the search is
 Wikipedia's; FAKE_SOURCE=none: no search at all). FAKE_SPEED: words a second
@@ -202,6 +203,8 @@ class H(BaseHTTPRequestHandler):
             elif last.startswith("Stop here: do not answer the last message. Write a detailed summary"):
                 said = [m["content"] for m in msgs[:-1] if m.get("role") == "user"]
                 text = SUMMARY % (len(said), (said[0] if said else "")[:40])
+                if os.environ.get("FAKE_SUMMARY"):  # a file with the summary to give, as a real model wrote one
+                    text = open(os.environ["FAKE_SUMMARY"], encoding="utf-8").read()
             elif "code" in last.lower() or "example" in last.lower():
                 text = ANSWER
             else:
