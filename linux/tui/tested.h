@@ -17,6 +17,16 @@ inline const app::CatalogEntry kTested[] = {
      "DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.Q4_K_M.gguf",
      "DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.Q4_K_M.gguf", "3b6f11e221195ee3650d7ac0ffce6f9fe7275d8f",
      5629111264u, "a692de9520e4c0bb1512deb91e950f38e14854650aff43419112f87e6052c44b"},
+    {app::CatalogEntry::Model, "qwen38-9b", "Qwen3.8 9B (distill)", "Long documents, newer", "qwen3.8-9b",
+     "empero-ai/Qwen3.8-9B-Distill-GGUF", "Qwen3.8-9B-Q4_K_M.gguf", "Qwen3.8-9B-Q4_K_M.gguf",
+     "760121cd70bb4c36b2b5ec58eb765e0df5987efe", 5780090176u,
+     "df13d66021cef676f82be74053220fd75af6bf2a6a7fb77f5222ab9e50744a7a"},
+    // Two bits a weight (Q2_0, stored rotated: prism.hadamard). The 4B wrote
+    // 112 tok/s and read a 4,096-token prompt at 1,296 on the PS5.
+    {app::CatalogEntry::Model, "bonsai2-4b", "Ternary Bonsai 2 4B", "Quick answers, small", "ternary-bonsai-2-4b",
+     "prism-ml/Ternary-Bonsai-2-4B-gguf", "Ternary-Bonsai-2-4B-Q2_0.gguf", "Ternary-Bonsai-2-4B-Q2_0.gguf",
+     "50ebba61be85e5be07e8083db468ace0fc1bac43", 1212103520u,
+     "64a5183b44921bdb5ac4a6f5f92007821d6ebe5c66997d3c147fd214ab9433d4"},
     {app::CatalogEntry::Model, "deepseek-r1-14b", "DeepSeek R1 Distill Qwen 14B", "Math and logic",
      "deepseek-r1-distill-qwen-14b", "mradermacher/DeepSeek-R1-Distill-Qwen-14B-abliterated-v2-GGUF",
      "DeepSeek-R1-Distill-Qwen-14B-abliterated-v2.Q4_K_M.gguf", "DeepSeek-R1-Distill-Qwen-14B-abliterated-v2.Q4_K_M.gguf",

@@ -816,9 +816,10 @@ std::string lower(std::string v) {
 // (tested.h), in the wiki's order (best first, the helpers last).
 const std::vector<const app::CatalogEntry *> &catalog_models() {
     static const std::vector<const app::CatalogEntry *> list = [] {
-        static const char *order[] = {"qwen3-14b", "qwen35-9b", "deepseek-r1-14b", "qwen3-8b", "llama31-8b",
-                                      "qwen25-coder-7b", "qwen25-coder-14b", "gemma3-12b", "gemma4-12b",
-                                      "llama32-3b", "qwen3-0.6b", "llama32-1b", "gemma3-1b"};
+        static const char *order[] = {"qwen3-14b", "qwen35-9b", "qwen38-9b", "deepseek-r1-14b", "qwen3-8b",
+                                      "llama31-8b", "qwen25-coder-7b", "qwen25-coder-14b", "gemma3-12b", "gemma4-12b",
+                                      "bonsai2-27b", "bonsai2-9b", "bonsai2-4b", "llama32-3b", "qwen3-0.6b",
+                                      "llama32-1b", "gemma3-1b"};
         std::vector<const app::CatalogEntry *> all, out;
         for (const app::CatalogEntry &e : app::kCatalog)
             if (e.kind == app::CatalogEntry::Model) all.push_back(&e);
