@@ -781,8 +781,10 @@ std::string turn_opening(const Tokenizer &t, bool think, const std::string &prom
         // with an empty thought when it isn't to think; after a tool's
         // results, where it goes on in its turn, the thinking opens instead.
         // Calls still waiting for their results get neither.
-        if (ends(prompt, "<|turn>model\n")) return think || !can_skip_thinking(t) ? "" : std::string(kG4Thought) + kG4ThoughtEnd;
-        return think && can_skip_thinking(t) && !ends(prompt, "<|tool_response>") ? kG4Thought : "";
+        // (A template without the switch gets the empty thought always, as before.)
+        think &= can_skip_thinking(t);
+        if (ends(prompt, "<|turn>model\n")) return think ? "" : std::string(kG4Thought) + kG4ThoughtEnd;
+        return think && !ends(prompt, "<|tool_response>") ? kG4Thought : "";
     }
     if (!think) return can_skip_thinking(t) ? kNoThinking : "";
     // Qwen3.5's template opens the thinking itself ({{- '<think>\n' }}, the
