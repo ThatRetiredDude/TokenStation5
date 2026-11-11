@@ -3654,10 +3654,20 @@ int main(int argc, char **argv) {
             t += fmt("ts5-tui: %s keeps serving (pid %d, port %d). Stop it with: kill %d\n", name.c_str(), own,
                      app.ep.port, own);
         } else {
+            // Asked first; one that hasn't gone in 5 s is ended outright,
+            // so the line below is true when it prints.
             kill(own, SIGTERM);
             for (int i = 0; i < 50 && kill(own, 0) == 0; i++) usleep(100000);
-            t += fmt("ts5-tui: unloaded %s, its GPU memory is free (Settings → When you quit keeps it loaded).\n",
-                     name.c_str());
+            if (kill(own, 0) == 0) {
+                kill(own, SIGKILL);
+                for (int i = 0; i < 30 && kill(own, 0) == 0; i++) usleep(100000);
+            }
+            if (kill(own, 0) == 0)
+                t += fmt("ts5-tui: %s is still shutting down (pid %d); its GPU memory is free once it has.\n",
+                         name.c_str(), own);
+            else
+                t += fmt("ts5-tui: unloaded %s, its GPU memory is free (Settings → When you quit keeps it loaded).\n",
+                         name.c_str());
         }
     }
     if (getenv("TS5_TUI_TMUX")) {
