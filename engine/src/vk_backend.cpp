@@ -567,42 +567,66 @@ public:
         // those blocks' ends (as an auto-fit context counts them, once the
         // blocks are made). Where the context fits counted that way, the
         // load goes on, and init_buffers looks at the blocks as they came
-        // out before it makes the cache (tails_budget_). The cache is picked
-        // as above, with what a smaller one holds counted this way: f16
-        // only where no smaller one may be taken.
-        if (n_ctx_ > 0 && fit_tails_) {
-            const uint64_t exact = vk_fixed_bytes(hp_, weights, false);
-            auto holds_tails = [&](KvType t) {
-                if (t == KvType::F16) return holds(t);
-                return free > exact ? (int)std::min<uint64_t>((free - exact) / kv_bytes_per_token(hp_, t), 1u << 30) : 0;
-            };
+        // out before it makes the cache (tails_budget_). It fits only this
+        // way because memory is short, so the cache is the smallest this
+        // model may take (the one a little more memory gets by the count
+        // above): the one asked for where none smaller may be.
+        const bool by_tails = n_ctx_ > 0 && fit_tails_ && fixed <= free;
+        const uint64_t exact = by_tails ? vk_fixed_bytes(hp_, weights, false) : fixed;
+        auto tails = [&](KvType t) {
+            return free > exact ? (int)std::min<uint64_t>((free - exact) / kv_bytes_per_token(hp_, t), 1u << 30) : 0;
+        };
+        // The smallest cache a context of n tokens set by number may take
+        // here, where `count` says it holds them; else the one asked for.
+        auto smallest = [&](int n, const std::function<int(KvType)> &count, std::vector<std::string> *why) {
+            for (KvType small : {KvType::K8V4, KvType::Q8}) {
+                if (why) why->clear();
+                auto fit = [&](KvType k) { return k == KvType::F16 ? holds(k) : k == small ? count(k) : 0; };
+                if (set_context_kv_type(hp_, asked, kv_auto_, n, fit, why) == small) return small;
+            }
+            if (why) why->clear();
+            return asked;
+        };
+        if (by_tails) {
             std::vector<std::string> why;
-            const KvType t = set_context_kv_type(hp_, asked, kv_auto_, n_ctx_, holds_tails, &why);
-            // (The blocks themselves have to fit: what the cache can use
-            // of them is their ends, no more.)
-            if (fixed <= free && exact + (uint64_t)n_ctx_ * kv_bytes_per_token(hp_, t) <= free) {
+            const KvType t = smallest(n_ctx_, tails, &why);
+            if (exact + (uint64_t)n_ctx_ * kv_bytes_per_token(hp_, t) <= free) {
                 for (auto &w : why) ts5::log_line("ts5: %s", w.c_str());
                 kv_ = t;
                 tails_budget_ = free;
                 return true;
             }
         }
+        // Refused, with the numbers of the count that came closest: a
+        // context set by number in the smallest cache this model may take
+        // (and, with TS5_FIT_TAILS, beside the weights and buffers as they
+        // are), then the tokens that would fit that way: the next thing to
+        // ask for (-c auto sizes it itself).
         const double gib = 1073741824.0;
-        char b[600];
+        std::string what = "the smallest context", note;
+        uint64_t need = ctx;
+        if (n_ctx_ > 0) {
+            // (Where the weights and buffers alone don't fit, as asked for.)
+            const KvType t = free > fixed ? smallest(n_ctx_, [](KvType) { return 1 << 30; }, nullptr) : asked;
+            what = "a context of " + std::to_string(n_ctx_) + " tokens";
+            need = (uint64_t)n_ctx_ * kv_bytes_per_token(hp_, t);
+            if (t != asked)
+                note = std::string("the context counted in the smallest cache this model takes, ") +
+                       (t == KvType::K8V4 ? "8-bit K and 4-bit V" : "8-bit") + "; ";
+        }
+        char b[700];
         snprintf(b, sizeof b,
                  "not enough memory: the weights and buffers take %.2f GiB and %s %.2f GiB, %.2f GiB is free "
-                 "(%.1f GiB of the system's RAM is kept for the system: TS5_SYSTEM_RESERVE_GIB)",
-                 fixed / gib, n_ctx_ > 0 ? ("a context of " + std::to_string(n_ctx_) + " tokens").c_str()
-                                         : "the smallest context", ctx / gib, free / gib, system_reserve() / gib);
+                 "(%s%.1f GiB of the system's RAM is kept for the system: TS5_SYSTEM_RESERVE_GIB)",
+                 exact / gib, what.c_str(), need / gib, free / gib, note.c_str(), system_reserve() / gib);
         err = b;
-        // What would fit, in the smallest cache this model may take: the
-        // next thing to ask for (-c auto sizes it itself).
         if (n_ctx_ > 0) {
-            int most = holds(asked);
+            auto count = [&](KvType t) { return by_tails ? tails(t) : holds(t); };
+            int most = count(asked);
             for (KvType t : {KvType::Q8, KvType::K8V4}) {
-                std::vector<std::string> none;
-                const int n = holds(t);
-                if (n > most && set_context_kv_type(hp_, asked, kv_auto_, n, holds, &none) == t) most = n;
+                const int n = count(t);
+                auto fit = [&](KvType k) { return k == KvType::F16 ? holds(k) : k == t ? n : 0; };
+                if (n > most && set_context_kv_type(hp_, asked, kv_auto_, n, fit, nullptr) == t) most = n;
             }
             most = most / 1024 * 1024;
             if (most >= 1024) err += "; about " + std::to_string(most) + " tokens fit (-c auto takes what fits)";
@@ -1527,9 +1551,9 @@ private:
                 const double gib = 1073741824.0;
                 char b[600];
                 snprintf(b, sizeof b,
-                         "not enough memory: the weights and buffers take %.2f GiB and a context of %d tokens %.2f GiB "
-                         "more, %.2f GiB is free (%.1f GiB of the system's RAM is kept for the system: "
-                         "TS5_SYSTEM_RESERVE_GIB)",
+                         "not enough memory: the weights and buffers take %.2f GiB and a context of %d tokens %.2f GiB, "
+                         "%.2f GiB is free (the blocks as they came out, the context what it takes past their ends; "
+                         "%.1f GiB of the system's RAM is kept for the system: TS5_SYSTEM_RESERVE_GIB)",
                          allocated_ / gib, n_ctx_, fresh / gib, tails_budget_ / gib, system_reserve() / gib);
                 err = b;
                 if (most >= 1024) err += "; about " + std::to_string(most) + " tokens fit (-c auto takes what fits)";

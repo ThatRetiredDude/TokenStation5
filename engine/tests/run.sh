@@ -1287,7 +1287,10 @@ TS5_GPU_MEMORY_GIB=2.028 "$ts5" run -m "$ql" -c 65536 -p hi -n 1 2>&1 > /dev/nul
 { TS5_KV=f16 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 3072 -p hi -n 1 2>&1 > /dev/null || true; } |
     grep "not enough memory: the weights and buffers take [0-9.]* GiB and a context of 3072 tokens [0-9.]* GiB, [0-9.]* GiB is free (.*); about 2048 tokens fit (-c auto takes what fits)"
 { TS5_KV_TURN_V=0 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 4096 -p hi -n 1 2>&1 > /dev/null || true; } |
-    grep "a context of 4096 tokens .*; about 3072 tokens fit (-c auto takes what fits)"
+    grep "a context of 4096 tokens [0-9.]* GiB, [0-9.]* GiB is free (the context counted in the smallest cache this model takes, 8-bit; .*); about 3072 tokens fit (-c auto takes what fits)"
+# The refusal's numbers are the smallest cache's, the one that came closest.
+{ TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 8192 -p hi -n 1 2>&1 > /dev/null || true; } |
+    grep "the weights and buffers take 1.00 GiB and a context of 8192 tokens [0-9.]* GiB, [0-9.]* GiB is free (the context counted in the smallest cache this model takes, 8-bit K and 4-bit V; .*); about 5120 tokens fit (-c auto takes what fits)"
 for m in "$g3l" "$g4l"; do
     { TS5_GPU_MEMORY_GIB=2.028 "$ts5" run -m "$m" -c 65536 -p hi -n 1 2> "$work/kvsetg.err" > /dev/null || true; }
     grep "not enough memory: .* a context of 65536 tokens .*; about [0-9]* tokens fit (-c auto takes what fits)" "$work/kvsetg.err"
@@ -1314,9 +1317,11 @@ taken_ok "$work/tails2.err"
 # A context set by number counts them too. 2.002 GiB leaves 2,048 tokens of
 # f16 beside the weights' whole block: 3,072 go into that block's end, and
 # nothing more is taken. The cache is picked as before: where the whole
-# blocks hold the 8-bit one it is that, counted as before; past what they
-# hold, the smaller caches' pieces are counted in the blocks' ends, and a
-# Gemma, which keeps f16, gets f16 there.
+# blocks hold the 8-bit one it is that, counted as before. Past what they
+# hold, the context fits only with the cache's pieces in the blocks' ends:
+# memory is short, and the cache is the smallest the model may take (8-bit
+# keys and 4-bit values; 8 bits where the V turn is off). A Gemma, which
+# keeps f16, gets f16 there.
 TS5_FIT_TAILS=1 TS5_KV=f16 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 3072 -p hi -n 1 2> "$work/tails3.err" > /dev/null
 grep "the context of 3072 tokens fits with the cache's pieces in room left in the blocks already made (TS5_FIT_TAILS)" "$work/tails3.err"
 grep "KV cache [0-9.]* GiB (f16, 3072 tokens)" "$work/tails3.err"
@@ -1325,10 +1330,16 @@ TS5_FIT_TAILS=1 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c
 grep "KV cache [0-9.]* GiB (q8, Q, K and V turned, 3072 tokens)" "$work/tails4.err"
 ! grep "in room left in the blocks already made" "$work/tails4.err" || unexpected $LINENO
 TS5_FIT_TAILS=1 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 8192 -p hi -n 1 2> "$work/tails5.err" > /dev/null
-grep "8-bit KV cache: the context of 8192 tokens asked for fits in it, where f16 fits 2048 (TS5_KV=f16 keeps f16)" "$work/tails5.err"
+grep "8-bit K and 4-bit V KV cache: the context of 8192 tokens asked for fits in it, where f16 fits 2048 (TS5_KV=q8 keeps 8 bits, f16 keeps f16)" \
+    "$work/tails5.err"
 grep "the context of 8192 tokens fits with the cache's pieces in room left in the blocks already made" "$work/tails5.err"
-grep "KV cache [0-9.]* GiB (q8, Q, K and V turned, 8192 tokens)" "$work/tails5.err"
+grep "KV cache [0-9.]* GiB (k8v4, Q, K and V turned, 8192 tokens)" "$work/tails5.err"
 grep "GPU memory taken: 1.000 GiB in 1 blocks" "$work/tails5.err"
+! grep "^ts5: 8-bit KV cache:" "$work/tails5.err" || unexpected $LINENO
+TS5_FIT_TAILS=1 TS5_KV_TURN_V=0 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 8192 -p hi -n 1 2> "$work/tails5q.err" > /dev/null
+grep "8-bit KV cache: the context of 8192 tokens asked for fits in it, where f16 fits 2048 (TS5_KV=f16 keeps f16)" "$work/tails5q.err"
+grep "the context of 8192 tokens fits with the cache's pieces in room left in the blocks already made" "$work/tails5q.err"
+grep "KV cache [0-9.]* GiB (q8, Q and K turned, 8192 tokens)" "$work/tails5q.err"
 TS5_FIT_TAILS=1 TS5_GPU_MEMORY_GIB=2.028 "$ts5" run -m "$g3l" -c 65536 -p hi -n 1 2> "$work/tails6.err" > /dev/null
 grep "the context of 65536 tokens fits with the cache's pieces in room left in the blocks already made" "$work/tails6.err"
 grep "KV cache [0-9.]* GiB (f16, 65536 tokens)" "$work/tails6.err"
@@ -1338,6 +1349,13 @@ grep "GPU memory taken: 1.000 GiB in 1 blocks" "$work/tails6.err"
 grep "not enough memory: the weights and buffers take 1.00 GiB and a context of 3072 tokens .*; the weights and buffers alone don't fit" "$work/tails7.err"
 ! grep "weights [0-9.]* GB read" "$work/tails7.err" || unexpected $LINENO
 ! TS5_FIT_TAILS=1 TS5_KV=f16 TS5_GPU_MEMORY_GIB=1.9 "$ts5" run -m "$work/qwen3-F32.gguf" -c 3072 -p hi -n 1 > /dev/null 2>&1 || unexpected $LINENO
+# A context nothing holds, counted this way: the refusal gives the weights
+# and buffers as they are (under their block's 1 GiB) and the context in the
+# smallest cache, with the tokens that fit counted the same way.
+{ TS5_FIT_TAILS=1 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 4000000 -p hi -n 1 2> "$work/tails8.err" > /dev/null || true; }
+grep "not enough memory: the weights and buffers take 0\.[0-9]* GiB and a context of 4000000 tokens [0-9.]* GiB, 1.00 GiB is free (the context counted in the smallest cache this model takes, 8-bit K and 4-bit V; .*); about [0-9]* tokens fit (-c auto takes what fits)" \
+    "$work/tails8.err"
+! grep "weights [0-9.]* GB read" "$work/tails8.err" || unexpected $LINENO
 echo "== TS5_EMBD_FILE=1: an untied token table stays out of GPU memory, each call reading its tokens' rows from"
 echo "   the file; the same logits, prompts and one token a call"
 for m in qwen2-Q4_K_M qwen3-F32 llama-Q8_0; do

@@ -347,10 +347,11 @@ for it, instead of refusing the load: a 14B at 32,768 tokens needs 6.0 GiB
 in 16 bits beside 9.0 GiB of weights, and 2.4 GiB with 8-bit keys and
 4-bit values. Like an auto-fit context, it counts the room left at the ends
 of the 1 GiB blocks the weights took (`TS5_FIT_TAILS`): a context that fits
-only with the cache's pieces there is looked at again once the weights are
-up, against the blocks as they came out. Where no cache holds the number the
-load is refused with how many tokens would fit, and ts5-tui then loads the
-model with the longest context that does.
+only with the cache's pieces there takes the smallest cache the model may
+(memory is short), and is looked at again once the weights are up, against
+the blocks as they came out. Where no cache holds the number the load is
+refused with the smallest cache's numbers and how many tokens would fit,
+and ts5-tui then loads the model with the longest context that does.
 
 ## Settings
 
