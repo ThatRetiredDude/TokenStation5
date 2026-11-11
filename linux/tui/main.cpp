@@ -193,6 +193,17 @@ Endpoint endpoint() {
     return g->ep;
 }
 
+// The web search key, for the ts5 serve that ts5-tui starts: in this
+// process's environment, which its children get (never on a command line).
+// Without one of its own, the environment's as ts5-tui found it.
+void apply_web_key() {
+    static const char *const found = getenv("TAVILY_API_KEY");
+    static const std::string was = found ? found : "";
+    if (!g->cfg.web_key.empty()) setenv("TAVILY_API_KEY", g->cfg.web_key.c_str(), 1);
+    else if (found) setenv("TAVILY_API_KEY", was.c_str(), 1);
+    else unsetenv("TAVILY_API_KEY");
+}
+
 ServerState server() {
     std::lock_guard<std::mutex> l(g->mu);
     return g->srv;
@@ -214,6 +225,7 @@ void poll_once() {
             s.model = m["id"].str();
             s.n_ctx = (int)m["context_length"].num(0);
             s.tool_format = m["capabilities"]["tool_format"].str();
+            s.web_search = m["capabilities"]["web_search"].boolean(false);
             if (m.o.count("helper")) {
                 s.helper_known = true;
                 s.helper = m["helper"]["id"].str();
@@ -1194,6 +1206,21 @@ void set_fan(const std::string &mode) {
     }
     g->fanproc.start("sudo -n " + hw + " fan " + mode, "fan");
     show_toast("Fan: " + mode, g->th->accent, 2);
+}
+
+// What a message for the model is sent with: the server, the loaded model
+// and Settings.
+ChatRequest chat_request() {
+    ChatRequest rq;
+    const ServerState sv = server();
+    rq.ep = endpoint();
+    rq.model = sv.model;
+    rq.thinking = g->cfg.thinking;
+    rq.temp = g->cfg.temp;
+    rq.max_tokens = g->cfg.max_tokens;
+    rq.n_ctx = sv.n_ctx;
+    rq.summarize = g->cfg.summarize;
+    return rq;
 }
 
 // ---- logs ----
@@ -2256,6 +2283,35 @@ std::vector<SetRow> settings_rows() {
         r.push_back(x);
     }
     {
+        SetRow x{"Full chat", c.summarize ? "is summarized, and goes on" : "stops",
+                 c.summarize ? "the model writes a summary and goes on from it; the chat stays here (/compact: now)"
+                             : "the chat ends when the model's memory for it is full (/compact summarizes by hand)"};
+        x.change = [save](int) {
+            g->cfg.summarize = !g->cfg.summarize;
+            save();
+        };
+        r.push_back(x);
+    }
+    {
+        // ts5 serve searches the web for the model when it has a Tavily key
+        // (docs/WEB_SEARCH.md): ts5-tui hands it to the models it loads.
+        const ServerState sv = server();
+        SetRow x{"Web search key", c.web_key.empty() ? (sv.web_search ? "the server's own" : "none")
+                                                     : std::string(std::min<size_t>(c.web_key.size(), 12), '*'),
+                 sv.web_search         ? "on: the loaded model searches the web when a question needs it"
+                 : !c.web_key.empty() ? "load the model again to turn it on (Models, Enter); models that use tools"
+                                      : "a free key from app.tavily.com lets a model ts5-tui loads search the web"};
+        x.text = true;
+        x.text_value = c.web_key;
+        x.set_text = [save](const std::string &v) {
+            g->cfg.web_key = v;
+            save();
+            apply_web_key();
+            if (own_server_pid() > 0) show_toast("Load the model again to apply it: Models, Enter on the loaded model", g->th->accent, 6);
+        };
+        r.push_back(x);
+    }
+    {
         SetRow x{"Fan (PS5)", g->sens.fan_mode.empty() ? "—" : g->sens.fan_mode,
                  "auto is quiet; cool and early keep long prompts under the 85 °C limiter; max is loud"};
         x.change = [](int d) {
@@ -2332,7 +2388,7 @@ void draw_settings() {
         std::string v = rows[i].value;
         if (on && g->editing) {
             v = g->edit_buf + "▌";
-            if (rows[i].label == "API key") v = std::string(g->edit_buf.size(), '*') + "▌";
+            if (rows[i].label == "API key" || rows[i].label == "Web search key") v = std::string(g->edit_buf.size(), '*') + "▌";
             s.put(x0 + 18, y, fit(v, w - 20), Style(t.accent2, row.bg, BOLD));
         } else {
             const std::string shown = rows[i].change ? "‹ " + v + " ›" : v;
@@ -2716,6 +2772,11 @@ void run_command(const std::string &line) {
             return;
         }
         copy_out(text, what);
+    } else if (cmd == "/compact" || cmd == "/summarize") {
+        std::string err;
+        if (!server().online || server().model.empty()) show_toast("No model is loaded to write the summary", g->th->warn, 5);
+        else if (!chat_summarize(c, chat_request(), "", arg, 2, err)) show_toast("No summary: " + err, g->th->warn, 5);
+        else go(CHAT);
     } else if (cmd == "/unload") {
         const pid_t own = own_server_pid();
         const ServerState sv = server();
@@ -2739,6 +2800,9 @@ void run_command(const std::string &line) {
         h += "\n**Keys**  Enter send · Ctrl+J or Alt+Enter new line · ↑↓ history · Tab completes · Esc stops an answer · "
              "Ctrl+T thinking · Ctrl+Y copy the last answer · Ctrl+N new chat (this one is kept: `/chats`) · PgUp/PgDn "
              "scroll · Ctrl+Q, `exit` or `q` quits\n\n"
+             "**A full chat**  when the model's memory for the chat (its context) is nearly full, the model writes a "
+             "summary of it and the chat goes on from that, with room again; everything stays here to read. `/compact` "
+             "does it now. Settings → Full chat turns it off.\n\n"
              "**Mouse**  click a **Thought for** line to read the thinking, **[copy]** under an answer or on a code block "
              "to copy it, a page's name to go there; the wheel scrolls. Dragging over the chat opens it as plain text to "
              "select with the terminal's own selection (Settings → Mouse: off leaves every drag to the terminal).\n\n"
@@ -2992,13 +3056,7 @@ void key_logs(const Event &e) {
 }
 
 void key_chat(const Event &e) {
-    ChatRequest rq;
-    const ServerState sv = server();
-    rq.ep = endpoint();
-    rq.model = sv.model;
-    rq.thinking = g->cfg.thinking;
-    rq.temp = g->cfg.temp;
-    rq.max_tokens = g->cfg.max_tokens;
+    ChatRequest rq = chat_request();
     for (auto &m : g->models) rq.model_names.push_back(api_id(m.name));
     for (const app::CatalogEntry *x : catalog_models()) rq.catalog_names.push_back(x->key);
     if (e.key == K_CTRL && e.ch == "y") {
@@ -3437,9 +3495,36 @@ void tick() {
         std::string why;
         if (!save_chat(g->chat, why)) show_toast("Chat not saved: " + why, g->th->bad, 6);
     }
-    // An answer cut off by the length: say why, in the chat.
+    // An answer cut off by the length: say why, in the chat. A chat that
+    // filled up is summarized and goes on (Settings → When a chat fills up).
     if (g->chat.answers_seen != g->chat.answers && !g->chat.busy()) {
         g->chat.answers_seen = g->chat.answers;
+        {
+            // A message a summary that failed didn't send: back in the input.
+            std::lock_guard<std::mutex> l(g->chat.mu);
+            if (!g->chat.unsent.empty() && g->chat.input.empty()) {
+                g->chat.input = g->chat.unsent;
+                g->chat.cur = g->chat.input.size();
+            }
+            g->chat.unsent.clear();
+        }
+        if (g->cfg.summarize) {
+            // The server refused the message, the chat being full: a summary,
+            // then the message again.
+            bool alone = false;
+            const std::string again = chat_take_refused(g->chat, alone);
+            std::string err;
+            if (!again.empty() && (alone || !chat_summarize(g->chat, chat_request(), again, "", 1, err))) {
+                g->chat.input = again;
+                g->chat.cur = again.size();
+                chat_note(g->chat, alone ? "**That message alone is longer than the model's memory for a chat** (its "
+                                           "context) has room for. It is back in the input: a shorter one, or a model "
+                                           "with a longer context."
+                                         : "**That message doesn't fit in the model's memory for a chat** (its context), "
+                                           "and " + err + ". It is back in the input: a shorter one, or a model with a "
+                                           "longer context.");
+            }
+        }
         std::string fin;
         int total = 0, gen = 0;
         {
@@ -3462,11 +3547,24 @@ void tick() {
             } else {
                 std::string n = "**The chat is full**";
                 if (sv.n_ctx > 0) n += fmt(" (%s of %s tokens)", with_commas(std::min(total, sv.n_ctx)).c_str(), with_commas(sv.n_ctx).c_str());
-                n += ", so the answer stopped here, and the model can't take in more of this chat. "
-                     "**Ctrl+N** starts a new chat (this one is saved: `/chats` opens it again).";
-                if (own_server_pid() > 0 && g->cfg.serve_ctx > 0)
-                    n += " Or set Settings → Context to auto, the longest this model fits, and load it again.";
-                chat_note(g->chat, n);
+                std::string err;
+                if (g->cfg.summarize && chat_summarize(g->chat, chat_request(), "", "", 1, err)) {
+                    // (The note goes above the summary being written.)
+                    std::lock_guard<std::mutex> l(g->chat.mu);
+                    Msg note;
+                    note.role = "note";
+                    note.done = true;
+                    note.content = n + ", so the answer stopped here. The model is summarizing the chat to make room: "
+                                       "then ask it to go on.";
+                    g->chat.msgs.insert(g->chat.msgs.end() - 1, note);
+                } else {
+                    n += ", so the answer stopped here, and the model can't take in more of this chat. "
+                         "**Ctrl+N** starts a new chat (this one is saved: `/chats` opens it again).";
+                    if (!g->cfg.summarize) n += " `/compact` has the model summarize it and go on from the summary.";
+                    if (own_server_pid() > 0 && g->cfg.serve_ctx > 0)
+                        n += " Or set Settings → Context to auto, the longest this model fits, and load it again.";
+                    chat_note(g->chat, n);
+                }
             }
         }
     }
@@ -3499,6 +3597,11 @@ std::string transcript(Chat &c) {
     std::lock_guard<std::mutex> l(c.mu);
     for (auto &m : c.msgs) {
         if (m.role == "note") continue;
+        if (m.role == "summary") {
+            if (!m.content.empty() && m.error.empty() && !m.stopped)
+                out += "\x1b[2mSummary of the chat so far (the model goes on from this)\x1b[0m\n" + m.content + "\n\n";
+            continue;
+        }
         if (m.role == "user") out += "\x1b[1;36mYou\x1b[0m\n" + m.content + "\n\n";
         else {
             std::string content = m.content;
@@ -3638,6 +3741,7 @@ int main(int argc, char **argv) {
     // A plain URL without a scheme or port is fine: "ps5.local" is http://ps5.local:8081.
     apply_theme();
     apply_endpoint();
+    apply_web_key();
     if (!app.ep_err.empty()) {
         fprintf(stderr, "ts5-tui: %s\n", app.ep_err.c_str());
         return 2;

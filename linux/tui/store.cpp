@@ -156,7 +156,22 @@ bool save_chat(Chat &c, std::string &why) {
     int n = 0;
     {
         std::lock_guard<std::mutex> l(c.mu);
-        for (const Msg &m : c.msgs) {
+        for (size_t i = 0; i < c.msgs.size(); i++) {
+            const Msg &m = c.msgs[i];
+            if (m.role == "summary") {
+                // The model's summary of the chat before it ("kept": how
+                // many of the turns before it the model still gets as they
+                // were). The turns themselves stay in the file.
+                if (!m.done || m.stopped || !m.error.empty() || m.content.empty()) continue;
+                int kept = 0;
+                for (size_t k = (size_t)std::max(0, m.keep_from); k < i; k++)
+                    kept += c.msgs[k].role == "user" || (c.msgs[k].role == "assistant" && c.msgs[k].done);
+                body += std::string(n++ ? ",\n" : "\n") + "{\"user\":false,\"summary\":true,\"text\":" + ts5::json_escape(m.content) +
+                        ",\"model\":" + ts5::json_escape(m.model) + ",\"kept\":" + std::to_string(kept) +
+                        ",\"before\":" + std::to_string(m.sum_before) + ",\"after\":" + std::to_string(m.sum_after) +
+                        ",\"why\":" + std::to_string(m.sum_why) + "}";
+                continue;
+            }
             if (m.role != "user" && m.role != "assistant") continue;
             if (m.role == "assistant" && !m.done) continue;
             const bool user = m.role == "user";
@@ -209,29 +224,46 @@ bool load_chat(Chat &c, const SavedChat &s, std::string &why) {
         return false;
     }
     chat_new(c);
-    std::lock_guard<std::mutex> l(c.mu);
-    for (const ts5::Json &t : turns.a) {
-        Msg m;
-        m.done = true;
-        m.content = t["text"].str();
-        if (t["user"].boolean(false)) {
-            m.role = "user";
-            c.history.push_back(m.content);
-        } else {
-            m.role = "assistant";
-            m.model = t["model"].str();
-            m.gen_tps = t["tps"].num(0);
-            m.gen_tokens = (int)t["tokens"].num(0);
-            m.reasoning = t["reasoning"].str();
-            const std::string end = t["end"].str("done");
-            m.stopped = end == "stopped";
-            if (end == "failed") m.error = t["error"].str("it failed");
+    {
+        std::lock_guard<std::mutex> l(c.mu);
+        for (const ts5::Json &t : turns.a) {
+            Msg m;
+            m.done = true;
+            m.content = t["text"].str();
+            if (t["summary"].boolean(false)) {
+                m.role = "summary";
+                m.model = t["model"].str();
+                m.sum_before = (int)t["before"].num(0);
+                m.sum_after = (int)t["after"].num(0);
+                m.sum_why = (int)t["why"].num(0);
+                // The turns kept beside it: that many of the ones before it.
+                int kept = (int)t["kept"].num(0);
+                size_t from = c.msgs.size();
+                while (kept > 0 && from > 0) {
+                    from--;
+                    if (c.msgs[from].role != "summary") kept--;
+                }
+                m.keep_from = (int)from;
+            } else if (t["user"].boolean(false)) {
+                m.role = "user";
+                c.history.push_back(m.content);
+            } else {
+                m.role = "assistant";
+                m.model = t["model"].str();
+                m.gen_tps = t["tps"].num(0);
+                m.gen_tokens = (int)t["tokens"].num(0);
+                m.reasoning = t["reasoning"].str();
+                const std::string end = t["end"].str("done");
+                m.stopped = end == "stopped";
+                if (end == "failed") m.error = t["error"].str("it failed");
+            }
+            c.msgs.push_back(m);
         }
-        c.msgs.push_back(m);
+        // Answers go on in ts5-tui's folder: a TV chat becomes a copy of its own.
+        c.saved_id = s.mine ? s.id : "";
+        c.scroll = 0;
     }
-    // Answers go on in ts5-tui's folder: a TV chat becomes a copy of its own.
-    c.saved_id = s.mine ? s.id : "";
-    c.scroll = 0;
+    chat_count(c);
     return true;
 }
 

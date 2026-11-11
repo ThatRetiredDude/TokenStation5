@@ -6,8 +6,13 @@
 Answers /health, /v1/models and streamed /v1/chat/completions the way ts5
 does (reasoning_content, then content, then usage and timings), and writes
 a log line per answer as ts5 does, to stderr. FAKE_CTX sets the context
-(32768): each message adds 600 tokens to the prompt, and an answer that
-reaches the context or max_tokens stops with finish_reason "length".
+(32768): each message adds 600 tokens to the prompt (FAKE_COUNT=len: a
+third of its bytes, as a real chat grows; FAKE_DENSE=2: half), and an answer that reaches the
+context or max_tokens stops with finish_reason "length". A request for a
+summary (ts5-tui's, for a chat that filled up) gets one. FAKE_REQUESTS: a
+file that gets each request's roles and sizes, a line a request.
+FAKE_WEB=1 says the server has a web search key. FAKE_SPEED: words a second
+(60).
 FAKE_MODEL names the model. FAKE_HELPER names the helper drafting beside it
 (FAKE_HELPER_CTX: its context; "none": no helper), FAKE_HELPER_NOTE says
 why none is; with neither, /v1/models has no "helper" at all, as an older
@@ -24,6 +29,22 @@ N_CTX = int(os.environ.get("FAKE_CTX", "32768"))
 HELPER = os.environ.get("FAKE_HELPER", "")
 HELPER_CTX = int(os.environ.get("FAKE_HELPER_CTX", "8192"))
 HELPER_NOTE = os.environ.get("FAKE_HELPER_NOTE", "")
+COUNT_LEN = os.environ.get("FAKE_COUNT", "") == "len"
+DENSE = int(os.environ.get("FAKE_DENSE", "3"))  # bytes a token, with FAKE_COUNT=len
+# With FAKE_COUNT=len an answer counts as it will when it is read back (FAKE_GEN=word: a word a token,
+# so the chat is longer on the next read than the count said).
+GEN_LEN = COUNT_LEN and os.environ.get("FAKE_GEN", "") != "word"
+REQUESTS = os.environ.get("FAKE_REQUESTS", "")
+WEB = bool(os.environ.get("FAKE_WEB") or os.environ.get("TAVILY_API_KEY"))
+SUMMARY = """## What you are doing
+- Trying the fake TokenStation, one message at a time.
+
+## What was said
+- You sent %d messages; the first began "%s".
+- Each got the fake's stock answer.
+
+## Where things stand
+- Nothing is in progress. Next: your next message."""
 ANSWER = """Here is a tiny **C++** program that counts tokens per second:
 
 ```cpp
@@ -65,7 +86,7 @@ class H(BaseHTTPRequestHandler):
             self.send(200, {"status": "ok"})
         elif self.path in ("/v1/models", "/models"):
             m = {"id": MODEL, "object": "model", "context_length": N_CTX,
-                 "capabilities": {"tools": True, "tool_format": "hermes", "web_search": False},
+                 "capabilities": {"tools": True, "tool_format": "hermes", "web_search": WEB},
                  "settings": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "thinking": True,
                               "known_good": "file"}}
             if HELPER and HELPER != "none":
@@ -81,8 +102,16 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         req = json.loads(self.rfile.read(n) or b"{}")
-        last = req["messages"][-1]["content"] if req.get("messages") else ""
-        prompt = 812 + 600 * (len(req.get("messages", [])) - 1)
+        msgs = req.get("messages", [])
+        last = msgs[-1]["content"] if msgs else ""
+        if COUNT_LEN:
+            prompt = 30 + sum(len(m.get("content") or "") // DENSE + 8 for m in msgs)
+        else:
+            prompt = 812 + 600 * (len(msgs) - 1)
+        if REQUESTS:
+            with open(REQUESTS, "a") as f:
+                f.write("%d tokens, max %s: %s\n" % (prompt, req.get("max_tokens"), " ".join(
+                    "%s(%d)" % (m.get("role"), len(m.get("content") or "")) for m in msgs)))
         if prompt >= N_CTX:
             # As ts5 serve: refused before anything streams, in OpenAI's words and code.
             self.send(400, {"error": {"message": "This model's maximum context length is %d tokens. However, your "
@@ -95,7 +124,7 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         think = req.get("chat_template_kwargs", {}).get("enable_thinking", True)
-        speed = float(req.get("ts5_fake_speed", 60))
+        speed = float(req.get("ts5_fake_speed", os.environ.get("FAKE_SPEED", 60)))
 
         def chunk(field, text):
             d = {"choices": [{"index": 0, "delta": {field: text}, "finish_reason": None}]}
@@ -114,14 +143,20 @@ class H(BaseHTTPRequestHandler):
                     chunk("reasoning_content", w + " ")
                     gen += 1
                     time.sleep(1 / speed)
-            text = ANSWER if "code" in last.lower() or "example" in last.lower() else \
-                "Hello from the fake TokenStation. You said: " + last
+            if last.startswith("Stop here: do not answer the last message. Write a detailed summary"):
+                said = [m["content"] for m in msgs[:-1] if m.get("role") == "user"]
+                text = SUMMARY % (len(said), (said[0] if said else "")[:40])
+            elif "code" in last.lower() or "example" in last.lower():
+                text = ANSWER
+            else:
+                text = "Hello from the fake TokenStation. You said: " + last
             words = text.split(" ")
             for i, w in enumerate(words):
                 if gen >= budget:
                     break
-                chunk("content", w + (" " if i + 1 < len(words) else ""))
-                gen += 1
+                piece = w + (" " if i + 1 < len(words) else "")
+                chunk("content", piece)
+                gen += max(1, len(piece) // DENSE) if GEN_LEN else 1
                 time.sleep(1 / speed)
             secs = time.time() - t0 - 0.4
             last_d = {"choices": [{"index": 0, "delta": {}, "finish_reason": "length" if gen >= budget else "stop"}],

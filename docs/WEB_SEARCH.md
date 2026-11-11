@@ -28,7 +28,9 @@ about tools.
 
    This adds `TAVILY_API_KEY=...` to `ts5.env` in the title's folder and keeps
    the other settings there. On Linux, set `TAVILY_API_KEY` in the
-   environment of `ts5 serve`.
+   environment of `ts5 serve`: ts5-tui's Settings → Web search key does it
+   for a model ts5-tui loads, and a line `TAVILY_API_KEY=tvly-...` in
+   `/etc/default/tokenstation` for the API-only service.
 
 `GET /v1/models` shows what the loaded model can do:
 `"capabilities": {"tools": true, "tool_format": "hermes", "web_search": true}`.

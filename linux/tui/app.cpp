@@ -124,6 +124,8 @@ void Config::load() {
         else if (k == "tmux") tmux = v != "0";
         else if (k == "mouse") mouse = v != "0";
         else if (k == "keep_model") keep_model = v != "0";
+        else if (k == "summarize") summarize = v != "0";
+        else if (k == "web_search_key") web_key = v;
     }
     saved_url = url;
     saved_key = key;
@@ -135,14 +137,15 @@ void Config::save() const {
     mkdir(dir.c_str(), 0755);
     const std::string tmp = path + ".tmp";
     {
-        // The API key is in here: only for this user.
+        // The API key and the web search key are in here: only for this user.
         const int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd < 0) return;
         std::string s = "# ts5-tui's settings (Settings in ts5-tui changes them).\n";
         s += "url=" + (url_given ? saved_url : url) + "\nkey=" + (key_given ? saved_key : key) + "\ntheme=" + theme + "\nintro=" + (intro ? "1" : "0") +
              "\nthinking=" + std::to_string(thinking) + "\ntemperature=" + fmt("%g", temp) +
              "\nmax_tokens=" + std::to_string(max_tokens) + "\ncontext=" + std::to_string(serve_ctx) + "\nhelper_room=" + (helper_room ? "1" : "0") + "\ntmux=" + (tmux ? "1" : "0") +
-             "\nmouse=" + (mouse ? "1" : "0") + "\nkeep_model=" + (keep_model ? "1" : "0") + "\n";
+             "\nmouse=" + (mouse ? "1" : "0") + "\nkeep_model=" + (keep_model ? "1" : "0") + "\nsummarize=" + (summarize ? "1" : "0") +
+             "\nweb_search_key=" + web_key + "\n";
         if (write(fd, s.data(), s.size()) != (ssize_t)s.size()) {
             close(fd);
             return;
