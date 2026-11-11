@@ -1268,6 +1268,32 @@ done
 { TS5_GPU_MEMORY_GIB=1.5 "$ts5" run -m "$ql" -c auto -p hi -n 1 2> "$work/kvnone.err" > /dev/null || true; }
 grep "not enough GPU memory left for a context of 1024 tokens" "$work/kvnone.err"
 ! grep "KV cache:" "$work/kvnone.err" || unexpected $LINENO
+echo "== -c N with TS5_KV unset: where f16 has no memory for N tokens, the smaller cache -c auto may take that holds them;"
+echo "   a load no cache holds is refused, with the tokens that would fit"
+# TS5_GPU_MEMORY_GIB holds a context set by number to what it says, less the
+# 1 GiB an auto-fit one keeps. 2.002 GiB: 2,048 tokens of f16, as above.
+TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 3072 -p hi -n 1 2> "$work/kvset8.err" > /dev/null
+grep "8-bit KV cache: the context of 3072 tokens asked for fits in it, where f16 fits 2048 (TS5_KV=f16 keeps f16)" "$work/kvset8.err"
+grep "KV cache [0-9.]* GiB (q8, Q, K and V turned, 3072 tokens)" "$work/kvset8.err"
+TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 4096 -p hi -n 1 2> "$work/kvset84.err" > /dev/null
+grep "8-bit K and 4-bit V KV cache: the context of 4096 tokens asked for fits in it, where f16 fits 2048 (TS5_KV=q8 keeps 8 bits, f16 keeps f16)" \
+    "$work/kvset84.err"
+grep "KV cache [0-9.]* GiB (k8v4, Q, K and V turned, 4096 tokens)" "$work/kvset84.err"
+# Past 24,576 tokens of f16 too, on qwen3 (the long model at 2.028 GiB).
+TS5_GPU_MEMORY_GIB=2.028 "$ts5" run -m "$ql" -c 65536 -p hi -n 1 2>&1 > /dev/null |
+    grep "KV cache [0-9.]* GiB (k8v4, Q, K and V turned, 65536 tokens)"
+# f16 asked for stays f16, 4-bit V needs the V turn, and a Gemma keeps f16:
+# refused (after a look at whether memory is still coming back), with what fits.
+{ TS5_KV=f16 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 3072 -p hi -n 1 2>&1 > /dev/null || true; } |
+    grep "not enough memory: the weights and buffers take [0-9.]* GiB and a context of 3072 tokens [0-9.]* GiB, [0-9.]* GiB is free (.*); about 2048 tokens fit (-c auto takes what fits)"
+{ TS5_KV_TURN_V=0 TS5_GPU_MEMORY_GIB=2.002 "$ts5" run -m "$work/qwen3-F32.gguf" -c 4096 -p hi -n 1 2>&1 > /dev/null || true; } |
+    grep "a context of 4096 tokens .*; about 3072 tokens fit (-c auto takes what fits)"
+for m in "$g3l" "$g4l"; do
+    { TS5_GPU_MEMORY_GIB=2.028 "$ts5" run -m "$m" -c 65536 -p hi -n 1 2> "$work/kvsetg.err" > /dev/null || true; }
+    grep "not enough memory: .* a context of 65536 tokens .*; about [0-9]* tokens fit (-c auto takes what fits)" "$work/kvsetg.err"
+    ! grep "KV cache:" "$work/kvsetg.err" || unexpected $LINENO
+done
+! TS5_GPU_MEMORY_GIB=2.028 "$ts5" run -m "$g3l" -c 65536 -p hi -n 1 > /dev/null 2>&1 || unexpected $LINENO
 echo "== TS5_FIT_TAILS=1: the sizing counts the cache's pieces that go into room left in the blocks already made;"
 echo "   the cache type is picked as before, and what is taken still leaves fit's 1 GiB"
 # taken_ok FILE: the "GPU memory taken" line's GiB plus 1 at most its memory.

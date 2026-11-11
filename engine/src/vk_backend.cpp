@@ -501,7 +501,17 @@ public:
             if (const int ms = ctx_->settle_memory(); ms > 1500)
                 ts5::log_line("ts5: waited %.2f s for memory just freed to come back; memory for models now %.2f GiB",
                               ms / 1000.0, ctx_->device_memory() / 1073741824.0);
-        if (!memory_fits(err)) return false;
+        if (!memory_fits(err)) {
+            // A context set by number is refused on what is free now: where
+            // that falls short, memory a process just gave back (the model
+            // loaded before this one) may still be coming in.
+            if (n_ctx_ <= 0) return false;
+            const int ms = ctx_->settle_memory();
+            if (!memory_fits(err)) return false;
+            ts5::log_line("ts5: waited %.2f s for memory just freed to come back: the context of %d tokens fits now",
+                          ms / 1000.0, n_ctx_);
+            err.clear();
+        }
         if (!init_pipelines(err)) return false;
         if (!upload_weights(path, err)) return false;
         return init_buffers(err);
@@ -513,12 +523,33 @@ public:
     // Linux keeps system_reserve() of the system's RAM free). Where that
     // can't be told, true.
     bool memory_fits(std::string &err) {
-        const uint64_t free = ctx_->free_memory();
+        uint64_t free = ctx_->free_memory();
         if (free == UINT64_MAX) return true;
+        // TS5_GPU_MEMORY_GIB says what there is for models: a context set by
+        // number is held to it too, less the 1 GiB an auto-fit one keeps
+        // free (fit_context).
+        if (const char *e = getenv("TS5_GPU_MEMORY_GIB"); n_ctx_ > 0 && e && atof(e) > 0) {
+            const uint64_t all = ctx_->device_memory(), keep = 1ull << 30;
+            free = std::min(free, all > keep ? all - keep : 0);
+        }
         uint64_t weights = 0;
         for (const auto &t : m_.gguf.tensors)
             if (!(embd_file_ && &t == m_.tok_embd.info)) weights += t.nbytes;
-        const uint64_t fixed = vk_fixed_bytes(hp_, weights), per = kv_bytes_per_token(hp_, kv_);
+        const uint64_t fixed = vk_fixed_bytes(hp_, weights);
+        // The tokens a cache of type t holds in what is free beside them.
+        auto holds = [&](KvType t) {
+            return free > fixed ? (int)std::min<uint64_t>((free - fixed) / kv_bytes_per_token(hp_, t), 1u << 30) : 0;
+        };
+        // A context set by number that f16 has no memory for: the smaller
+        // cache an auto-fit context would take on this model, where that
+        // holds it (set_context_kv_type).
+        const KvType asked = kv_;
+        if (n_ctx_ > 0) {
+            std::vector<std::string> why;
+            kv_ = set_context_kv_type(hp_, kv_, kv_auto_, n_ctx_, holds, &why);
+            for (auto &w : why) ts5::log_line("ts5: %s", w.c_str());
+        }
+        const uint64_t per = kv_bytes_per_token(hp_, kv_);
         const uint64_t ctx = (uint64_t)(n_ctx_ > 0 ? n_ctx_ : 1024) * per + (n_ctx_ > 0 ? 0 : fit_reserve_);
         // With room kept for a helper, the context's own measure too, before
         // the weights go up: a load that fails after uploading them leaves
@@ -531,13 +562,26 @@ public:
             return false;
         }
         const double gib = 1073741824.0;
-        char b[400];
+        char b[600];
         snprintf(b, sizeof b,
                  "not enough memory: the weights and buffers take %.2f GiB and %s %.2f GiB, %.2f GiB is free "
                  "(%.1f GiB of the system's RAM is kept for the system: TS5_SYSTEM_RESERVE_GIB)",
                  fixed / gib, n_ctx_ > 0 ? ("a context of " + std::to_string(n_ctx_) + " tokens").c_str()
                                          : "the smallest context", ctx / gib, free / gib, system_reserve() / gib);
         err = b;
+        // What would fit, in the smallest cache this model may take: the
+        // next thing to ask for (-c auto sizes it itself).
+        if (n_ctx_ > 0) {
+            int most = holds(asked);
+            for (KvType t : {KvType::Q8, KvType::K8V4}) {
+                std::vector<std::string> none;
+                const int n = holds(t);
+                if (n > most && set_context_kv_type(hp_, asked, kv_auto_, n, holds, &none) == t) most = n;
+            }
+            most = most / 1024 * 1024;
+            if (most >= 1024) err += "; about " + std::to_string(most) + " tokens fit (-c auto takes what fits)";
+            else if (free <= fixed) err += "; the weights and buffers alone don't fit";
+        }
         return false;
     }
 
@@ -2924,6 +2968,36 @@ KvType auto_kv_type(const HParams &hp, KvType kv, bool automatic, int train, con
     if ((kv == KvType::Q4 || kv == KvType::K8V4) && f16_reaches(fit(KvType::Q8), train)) {
         say("8-bit KV cache: the whole " + std::to_string(train) + "-token context fits in 8 bits, the more exact");
         kv = KvType::Q8;
+    }
+    return kv;
+}
+
+KvType set_context_kv_type(const HParams &hp, KvType kv, bool automatic, int n_ctx,
+                           const std::function<int(KvType)> &fit, std::vector<std::string> *log) {
+    if (!automatic || kv != KvType::F16 || n_ctx <= 0) return kv;
+    const int f16 = fit(KvType::F16);
+    if (f16 >= n_ctx) return kv;
+    // auto_kv_type's models: never a Gemma; where f16 holds under kQ8Below
+    // tokens (the 14Bs on the PS5), and past that the architectures whose
+    // every model checked there passed in 8 bits.
+    const bool gemma = hp.arch == "gemma3" || hp.arch == "gemma4";
+    const bool long_ok = hp.arch == "llama" || hp.arch == "qwen3" || hp.arch == "qwen35";
+    if (gemma || !(f16 < kQ8Below || long_ok)) return kv;
+    auto say = [&](const char *name, const char *keep) {
+        if (log)
+            log->push_back(std::string(name) + " KV cache: the context of " + std::to_string(n_ctx) +
+                           " tokens asked for fits in it, where f16 fits " + std::to_string(f16 / 1024 * 1024) +
+                           " (TS5_KV=" + keep + ")");
+    };
+    if (fit(KvType::Q8) >= n_ctx) {
+        say("8-bit", "f16 keeps f16");
+        return KvType::Q8;
+    }
+    auto pow2 = [](int d) { return d > 0 && (d & (d - 1)) == 0; };
+    if (kv_turn_v_setting() && pow2(hp.head_dim) && (!hp.head_dim_swa || pow2(hp.head_dim_swa)) &&
+        fit(KvType::K8V4) >= n_ctx) {
+        say("8-bit K and 4-bit V", "q8 keeps 8 bits, f16 keeps f16");
+        return KvType::K8V4;
     }
     return kv;
 }

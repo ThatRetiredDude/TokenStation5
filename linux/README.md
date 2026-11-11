@@ -315,6 +315,14 @@ and Qwen3.5 9B 8 of 11 at 233,035 tokens in 8 bits (9 of 11 at 160k in
 they fail the accuracy check even in 8 bits. The Models page and its
 search estimate contexts the same way.
 
+A context set by number (`-c 32768`, `CONTEXT=32768`, Context in ts5-tui's
+Settings) takes the same smaller cache where the 16-bit one has no memory
+for it, instead of refusing the load: a 14B at 32,768 tokens needs 6.0 GiB
+in 16 bits beside 9.0 GiB of weights, and 2.4 GiB with 8-bit keys and
+4-bit values. Where no cache holds the number the load is refused with how
+many tokens would fit, and ts5-tui then loads the model with the longest
+context that does.
+
 ## Settings
 
 The app's own settings are on its Settings page, as on the console.
