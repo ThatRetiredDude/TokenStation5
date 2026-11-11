@@ -7,7 +7,7 @@ Give TokenStation5 a [Tavily](https://tavily.com) API key and a chat that looks 
 1. Get a key at [app.tavily.com](https://app.tavily.com) (it starts with `tvly-`).
 2. Settings > **Tavily key**: press cross and type it with the controller or a USB or Bluetooth keyboard. It counts from the next request. Square twice removes it.
 
-From a computer, `scripts/ts5-ps5.sh websearch tvly-YOUR-KEY` does the same (`websearch off` turns it off). On Linux with the API-only service, set `TAVILY_API_KEY` in the environment of `ts5 serve`, or in `ts5.env` for the app.
+From a computer, `scripts/ts5-ps5.sh websearch tvly-YOUR-KEY` does the same (`websearch off` turns it off). On Linux, the terminal app has a field for it: Settings → **Web search key** (see [Using the terminal app](Using-the-terminal-app#settings-f4)); it counts for a model ts5-tui loads after that. For the always-on service, put `TAVILY_API_KEY=tvly-YOUR-KEY` in `/etc/default/tokenstation` and restart it; for `ts5 serve` run by hand, set `TAVILY_API_KEY` in its environment.
 
 `GET /v1/models` shows what the loaded model can do: `"capabilities": {"tools": true, "tool_format": "hermes", "web_search": true}`.
 
@@ -21,6 +21,7 @@ From a computer, `scripts/ts5-ps5.sh websearch tvly-YOUR-KEY` does the same (`we
 | Llama 3.2 3B | yes (Llama JSON format) | simple single searches |
 | Mistral Nemo 12B | yes (Mistral format) | not tried yet |
 | Gemma 3 12B | yes (Hermes format in Gemma turns) | works |
+| Gemma 4 12B (Linux edition) | yes (its own format) | not tried yet |
 
 ts5 reads the tool format from each model's own chat template. A model whose template has no tool format gets no tools and no search.
 

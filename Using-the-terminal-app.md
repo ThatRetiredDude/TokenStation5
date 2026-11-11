@@ -68,14 +68,14 @@ On a narrow window the least needed items drop off first (fan, then RAM). When t
 
 ## Chat (F1)
 
-Type at `ts5>` and press **Enter**. The answer streams in with its formatting: headings, lists, quotes, and code blocks with highlighting. A thinking model's reasoning is folded away: while it thinks you see a pulsing **thinking…** line with its last words, then **▸ Thought for 4.1 s**. **Click that line** to read what it thought, and click it again to fold it; **Ctrl+T** unfolds every answer's thinking at once (and folds it again). Under each answer: its speed, tokens, prompt speed and time, and a **[copy]** mark (see [The mouse, and copying](#the-mouse-and-copying)).
+Type at `ts5>` and press **Enter**. The answer streams in with its formatting: headings, lists, quotes, and code blocks with highlighting. A thinking model's reasoning (Qwen 3, Qwen 3.5, DeepSeek R1, Gemma 4) is folded away: while it thinks you see a pulsing **thinking…** line with its last words, then **▸ Thought for 4.1 s**. **Click that line** to read what it thought, and click it again to fold it; **Ctrl+T** unfolds every answer's thinking at once (and folds it again). Under each answer: its speed, tokens, prompt speed and time, and a **[copy]** mark (see [The mouse, and copying](#the-mouse-and-copying)).
 
 | Key | What it does |
 | --- | --- |
-| Enter | Send. |
+| Enter | Send. While an answer is coming, the message is queued and sent by itself when that answer is done (see [Messages while it answers](#messages-while-it-answers)). |
 | Ctrl+J or Alt+Enter | A new line in the message. Pasting several lines works too. |
-| ↑ / ↓ | The messages and commands you typed before. |
-| Esc | Stops an answer (Ctrl+C too). With no answer running, clears what you typed. |
+| ↑ / ↓ | The messages and commands you typed before. With messages queued and nothing typed, ↑ takes the last queued one back to change it. |
+| Esc | Stops an answer (Ctrl+C too). With no answer running, clears what you typed; pressed again, drops queued messages. |
 | Ctrl+N | A new chat. The one you leave is kept (see [Saved chats](#saved-chats)). |
 | Ctrl+T | Show or hide the thinking, of every answer. A click on one answer's **Thought for** line does it for that one. |
 | Ctrl+Y | Copy the last answer (see [The mouse, and copying](#the-mouse-and-copying)). |
@@ -85,7 +85,26 @@ Type at `ts5>` and press **Enter**. The answer streams in with its formatting: h
 | Ctrl+U / Ctrl+K / Ctrl+W | Delete to the start / to the end / the word before. |
 | Ctrl+Q | Quit (Ctrl+C too, when no answer is running). A model ts5-tui loaded is unloaded and its GPU memory is free again. While a tuning, a check or a download runs, it asks first. |
 
-The top bar always shows how full the chat is (**chat 7.8k/32k**), and the line over the prompt reads "chat N of M tokens": yellow from 75%, red from 90%. When an answer stops because the chat filled the context, a note under it says so, with the numbers, and that **Ctrl+N** starts a new chat (the full one stays saved). For a model loaded at a fixed context, it adds that Settings → Context → auto gives it more. If the answer hit your **Answer length** cap instead, the note says that. A message sent to a chat that's already full gets "This chat is full" in place of an answer, with the same Ctrl+N tip.
+### Messages while it answers
+
+You don't have to wait for an answer to finish. Type the next message while the model is still writing and press **Enter**: it is queued, shown over the prompt as **queued**, and sent by itself the moment the answer before it is done. Queue as many as you like; they go in order, one answer each.
+
+- **↑** with nothing typed takes the last queued message back into the prompt, to change it or (Esc) throw it away.
+- **Esc** stops the answer that is coming. The queue then waits instead of firing: **Enter** sends it on, **Esc** drops it. The same when an answer fails (the server went away).
+- Commands (`/think off`, `/model …`) still run at once. A new chat empties the queue.
+
+### A chat that fills up
+
+The top bar always shows how full the chat is (**chat 7.8k/32k**), and the line over the prompt reads "chat N of M tokens": yellow from 75%, red from 90%.
+
+A chat grows until the model's memory for it (its context) is nearly full. Then, before your next message goes out, the model writes **a detailed summary of the chat so far**, and the chat goes on from that summary and its last messages, with room again. Nothing is lost from the screen or the saved chat: the summary is a folded block in the chat, and a click opens it. An answer that ran into the end of the context gets a note and a summary too; ask the model to go on.
+
+- `/compact` writes the summary now. `/compact keep the file names and the error text` says what must not be lost.
+- **Esc** stops a summary and leaves the chat as it was.
+- Settings → **Full chat**: **stops** turns this off. A full chat then says so under the answer that was cut, with the numbers, and **Ctrl+N** starts a new one (the full one stays saved). For a model loaded at a fixed context, the note adds that Settings → Context → auto gives it more.
+- A single message that is longer than the model's whole context can't be summarized away: it comes back to the prompt with a note.
+
+If an answer hit your **Answer length** cap instead, the note under it says that.
 
 ### The mouse, and copying
 
@@ -133,13 +152,14 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | `/open N` | Opens saved chat N from `/chats` (or `/open TEXT`: the newest with TEXT). |
 | `/save [FILE]` | Saves this chat as Markdown, thinking included. Without a file: `~/tokenstation-chat-YYYYMMDD-HHMM.md`. |
 | `/copy` | Copies the last answer (Ctrl+Y). `/copy code`: its last code block. `/copy think`: its thinking. `/copy all`: the whole chat. See [The mouse, and copying](#the-mouse-and-copying). |
+| `/compact [WHAT TO KEEP]` | Has the model summarize the chat so far and go on from the summary, with room again (see [A chat that fills up](#a-chat-that-fills-up)). `/summarize` too. |
 | `/find TEXT` | Scrolls to the newest message containing TEXT. |
 | `/tune [NAME]` | Runs `ts5-tune` on the loaded model (or NAME), live on the Models page. |
 | `/check [NAME]` | The GPU check on the loaded model (or NAME): `ts5 check`, the GPU's answers against the CPU's. |
 | `/bench [NAME]` | The speed test on the loaded model (or NAME): `ts5 bench`, prompt and answer tok/s. |
 | `/usage` | The API's use over the last day and week, by app (its API key's name, else its address) and by model: requests, prompt and generated tokens, tok/s. From the TV or desktop app's `usage.tsv`. |
 | `/keys` | The API keys: name, on or off, when made, when last used. Keys are made on the TV app's Settings page, and only their SHA-256 is kept, so they can't be shown again. |
-| `/think on`, `off`, `auto` | Thinking before answering, for models that can switch it. `auto` leaves it to the model. |
+| `/think on`, `off`, `auto` | Thinking before answering, for models that can switch it (Qwen 3, Qwen 3.5, Gemma 4). `auto` leaves it to the model. |
 | `/fan auto`, `cool`, `early`, `max` | The PS5's fan (see [PS5 hardware on Linux](PS5-hardware-on-Linux)). `early` ramps from 40 °C and is at full speed by 55 °C. |
 | `/theme NAME` | Colors: Ocean, Neon, Sunset, Forest, Mono. Without a name, the next one. |
 | `/status`, `/settings`, `/logs` | Those pages. |
@@ -249,9 +269,11 @@ btop-style bars for this machine: GPU memory (with GiB free), RAM, the die (Tctl
 | Server | The TokenStation to talk to. An address that can't be right isn't saved, and the reason is shown. One given with `--url` or `TS5_URL` is used for that run only and not saved (the same for `--key` and `TS5_API_KEY`). |
 | API key | Only when the server asks for one. Kept in the settings file, readable by you only. |
 | Theme | Ocean, Neon, Sunset, Forest, Mono. |
-| Thinking | The model's choice, on, or off. |
+| Thinking | The model's choice, on, or off, for models that can switch it (Qwen 3, Qwen 3.5, Gemma 4). Off answers sooner. |
 | Temperature | **default** with its number beside it (0.7 for every model but Mistral Nemo, 0.3), or 0.1 to 1.5. Lower is steadier (code, facts), higher more varied. Past either end it goes back to default. |
 | Answer length | No limit, or a cap of 512 to 8,192 tokens. Under 1,024 turns thinking off. |
+| Full chat | **is summarized, and goes on** (the default): when the chat is nearly full the model writes a summary of it and the chat continues from that. **stops**: a full chat ends, as before (see [A chat that fills up](#a-chat-that-fills-up)). |
+| Web search key | A [Tavily](https://tavily.com) key (free at app.tavily.com). A model ts5-tui loads then searches the web when a question needs it (see [Web search](Web-search)). Kept in the settings file, readable by you only. Load the model again (Models, Enter) for a new key to take hold. For the always-on service, the key goes in `/etc/default/tokenstation` instead. |
 | Context (own) | The context for a model ts5-tui starts itself: auto (the default: the longest that fits), or 4,096 to 32,768. A number that has no memory beside a model doesn't stop the load (see [Models](#models-f2)); auto is the safe choice. A setting saved as 8,192 by an older version reads as auto. |
 | Speed or length | For a model with a helper that ts5-tui starts itself, with Context on auto. **faster** (the default) keeps GPU memory for the helper: the model writes faster, and the chat is somewhat shorter. **longest chat** gives the memory to the chat, and the model runs without its helper when both don't fit. It takes hold the next time the model loads (Enter on it on Models). |
 | Fan (PS5) | auto (quiet), cool (keeps long prompts under the 85 °C limiter), early (ramps from 40 °C, for long prompts back to back), max (loud). |
