@@ -35,7 +35,12 @@ mkdir -p %{buildroot}
 tar -C %{buildroot} -xzf %{SOURCE0}
 
 %post
-/usr/lib/tokenstation/system-setup configure
+# 1: a fresh install; 2 or more: an upgrade.
+if [ "$1" = 1 ]; then
+    /usr/lib/tokenstation/system-setup configure install
+else
+    /usr/lib/tokenstation/system-setup configure upgrade
+fi
 
 %preun
 if [ "$1" = 0 ]; then /usr/lib/tokenstation/system-setup remove; fi

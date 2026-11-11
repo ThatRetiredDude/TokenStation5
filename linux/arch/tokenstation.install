@@ -1,9 +1,9 @@
 post_install() {
-    /usr/lib/tokenstation/system-setup configure
+    /usr/lib/tokenstation/system-setup configure install
 }
 
 post_upgrade() {
-    /usr/lib/tokenstation/system-setup configure
+    /usr/lib/tokenstation/system-setup configure upgrade
 }
 
 pre_remove() {

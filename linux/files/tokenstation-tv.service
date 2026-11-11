@@ -7,6 +7,10 @@ Documentation=file:///usr/share/doc/tokenstation/README.md
 Conflicts=tokenstation.service getty@tty1.service
 After=systemd-user-sessions.service network-online.target sound.target
 Wants=network-online.target
+# A model that fails to load is tried 5 times, then left off (systemctl
+# status says why), instead of restarting every 5 s for good.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple

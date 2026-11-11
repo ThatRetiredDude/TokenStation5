@@ -1,14 +1,35 @@
 #!/bin/sh
-# /usr/lib/tokenstation/system-setup: what the Fedora (.rpm) and Arch
-# packages do on install and removal, the same as the .deb's postinst and
-# prerm, with tools every distribution has (groupadd, useradd, usermod).
+# /usr/lib/tokenstation/system-setup: what the packages do on install,
+# upgrade and removal, the same for the .deb (postinst, prerm), the .rpm and
+# the Arch package, with tools every distribution has (groupadd, useradd,
+# usermod).
 #
-#   system-setup configure    the tokenstation user and group, its folder,
-#                             and the installing user in the group
-#   system-setup remove       stops and disables the services
+#   system-setup configure install   a fresh install: the tokenstation user
+#                                    and group, its folder, the installing
+#                                    user in the group, on a PS5 the GPU
+#                                    memory limit, and the API-only service
+#                                    enabled when the machine boots to text
+#   system-setup configure upgrade   the same, but the memory limit and the
+#                                    services stay as they are; the service
+#                                    that was running is restarted
+#   system-setup configure restart   an upgrade from a .deb older than 0.1,
+#                                    whose prerm stopped both services: the
+#                                    one that is enabled is started again
+#   system-setup remove              stops and disables the services and
+#                                    undoes the GPU memory limit it set
 set -eu
+models=/var/lib/tokenstation/models
+api=tokenstation.service
+tv=tokenstation-tv.service
+
+has_model() {
+    [ -n "$(find "$models" -maxdepth 1 -name '*.gguf' 2>/dev/null | head -n 1)" ]
+}
+
 case "${1:-}" in
 configure)
+    how=${2:-upgrade}
+    case "$how" in install | upgrade | restart) ;; *) echo "system-setup configure install|upgrade|restart" >&2; exit 2 ;; esac
     getent group tokenstation >/dev/null || groupadd -r tokenstation
     if ! getent passwd tokenstation >/dev/null; then
         nologin=$(command -v nologin || echo /sbin/nologin)
@@ -24,32 +45,67 @@ configure)
     if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] && getent passwd "$SUDO_USER" >/dev/null; then
         usermod -a -G tokenstation "$SUDO_USER" || true
     fi
-    # On a PS5: the GPU may use the most memory, unless a limit is set
-    # already (Settings > PS5 HARDWARE can change it).
-    if [ -e /dev/mp1 ] || [ -e /dev/icc ]; then
+    # On a PS5, the first time only: the GPU may use the most memory, unless
+    # a limit is set already. An upgrade keeps what Settings > PS5 HARDWARE
+    # (or "tokenstation-memory unset") chose.
+    if [ "$how" = install ] && { [ -e /dev/mp1 ] || [ -e /dev/icc ]; }; then
         /usr/bin/tokenstation-memory first || true
     fi
-    mkdir -p /var/lib/tokenstation/models
+    mkdir -p "$models"
     chown -R tokenstation:tokenstation /var/lib/tokenstation
+    # Members of the tokenstation group may put models in the service's
+    # folder without sudo (ts5-tui downloads there when the service runs).
+    chmod 2775 "$models"
     chmod 0440 /etc/sudoers.d/tokenstation 2>/dev/null || true
     command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
     if [ -d /run/systemd/system ]; then
         systemctl daemon-reload || true
-        for s in tokenstation.service tokenstation-tv.service; do
-            systemctl is-active --quiet "$s" && systemctl restart "$s" || true
-        done
+        case "$how" in
+        install)
+            # The API service starts on boot, unless this machine boots to a
+            # desktop, where the app (from the app menu) serves the API itself
+            # and would find the port taken. It starts now only with a model
+            # to serve; without one it would only say so and stop.
+            if [ "$(systemctl get-default 2>/dev/null)" != graphical.target ]; then
+                systemctl enable "$api" >/dev/null 2>&1 || true
+                if has_model; then
+                    systemctl start "$api" || true
+                else
+                    echo "tokenstation: the API service starts on boot once a model is in $models (or: sudo systemctl start tokenstation)."
+                fi
+            else
+                echo "tokenstation: a desktop: start TokenStation5 from the app menu. The API-only service is off (sudo systemctl enable --now tokenstation for it)."
+            fi
+            ;;
+        upgrade)
+            # Only the one that was running, with the new programs.
+            systemctl try-restart "$api" "$tv" || true
+            ;;
+        restart)
+            if systemctl is-active --quiet "$api" || systemctl is-active --quiet "$tv"; then
+                systemctl try-restart "$api" "$tv" || true
+            elif systemctl is-enabled --quiet "$tv" 2>/dev/null; then
+                systemctl start "$tv" || true
+            elif systemctl is-enabled --quiet "$api" 2>/dev/null && has_model; then
+                systemctl start "$api" || true
+            fi
+            ;;
+        esac
     fi
     ;;
 remove)
     if [ -d /run/systemd/system ]; then
-        for s in tokenstation.service tokenstation-tv.service; do
+        for s in "$api" "$tv"; do
             systemctl stop "$s" 2>/dev/null || true
             systemctl disable "$s" >/dev/null 2>&1 || true
         done
     fi
+    # The boot setting goes too, if TokenStation made it (Linux then gets the
+    # kernel's default again at the next boot).
+    /usr/bin/tokenstation-memory remove || true
     ;;
 *)
-    echo "system-setup configure|remove" >&2
+    echo "system-setup configure install|upgrade|restart | remove" >&2
     exit 2
     ;;
 esac
