@@ -235,6 +235,31 @@ grep -q "^  mmb16dqz_q2_0 " "$work/q2-prof.txt" && grep -q "mv16_q2_0" "$work/q2
     { echo "FAIL: Q2_0's kernels in use"; grep "q2_0" "$work/q2-prof.txt"; exit 1; }
 echo "PASS Q2_0: prompts on mmb16dqz_q2_0, one token on mv16_q2_0"
 rm -f "$work/q2-prof.txt"
+echo "== hadamard16 (TS5_HAD16=1, the rotation in passes of four stages): the same logits as hadamard, byte for byte"
+# Blocks of 2 and 32 (one pass), 64 and 128 (two), 4,096 (three, the Bonsai
+# 9B's); a prompt at once and one token a call; the token table's rows
+# rotated back (the tied model) and the regrouped value heads (Qwen3.5's).
+h16=("${fold[@]}" "$work/qwen35-wide-fold-Q2_0.gguf")
+for b in 2 32; do
+    out="$work/qwen3-fold$b-Q2_0.gguf"
+    [ -s "$out" ] || python3 "$here/make_test_model.py" --arch qwen3 --quant Q2_0 --fold $b \
+        --vocab "$work/ggml-vocab-qwen2.gguf" "$out" > /dev/null
+    h16+=("$out")
+done
+h16_toks=$(seq 5 11 600)
+for m in "${h16[@]}"; do
+    for step in "" --step; do
+        TS5_HAD16=0 TS5_PROFILE=1 "$ts5" logits -m "$m" -o "$work/h16-0.bin" $step $h16_toks 2> "$work/h16-0.err"
+        TS5_HAD16=1 TS5_PROFILE=1 "$ts5" logits -m "$m" -o "$work/h16-1.bin" $step $h16_toks 2> "$work/h16-1.err"
+        cmp "$work/h16-0.bin" "$work/h16-1.bin"
+        grep -q "^  hadamard " "$work/h16-0.err" && ! grep -q "^  hadamard16 " "$work/h16-0.err" ||
+            { echo "FAIL: hadamard didn't run alone with TS5_HAD16=0"; exit 1; }
+        grep -q "^  hadamard16 " "$work/h16-1.err" && ! grep -q "^  hadamard " "$work/h16-1.err" ||
+            { echo "FAIL: hadamard16 didn't run alone with TS5_HAD16=1"; exit 1; }
+        echo "same logits: $(basename "$m") ${step:-at once}"
+    done
+done
+rm -f "$work/h16-0.bin" "$work/h16-1.bin" "$work/h16-0.err" "$work/h16-1.err"
 echo "== Qwen3.5: no drafts and no helper (that state only goes forward), the same text as with drafting off"
 p35="the cat sat on the mat. the cat sat on the mat. the cat sat on the mat. the cat sat on the"
 for be in vk cpu; do

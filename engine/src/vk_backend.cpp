@@ -167,6 +167,7 @@
 #include "get_rows_q6_k.spv.h"
 #include "get_rows_q8_0.spv.h"
 #include "hadamard.spv.h"
+#include "hadamard16.spv.h"
 #include "matmul_bf16.spv.h"
 #include "matmul_f16.spv.h"
 #include "matmul_f32.spv.h"
@@ -822,6 +823,7 @@ private:
         // fused kernel. TS5_GLU_GELU=1 turns it on.
         if (const char *e = getenv("TS5_GLU_GELU")) glu_gelu_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_NORM_FUSE")) norm_fuse_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_HAD16")) had16_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_NORM_EARLY")) {
             const int v = atoi(e);
             norm_early_ = v != 0;
@@ -1197,7 +1199,7 @@ private:
         return false;
         P(matmul_f32, 3) P(matmul_f16, 3) P(matmul_q4_0, 3) P(matmul_q8_0, 3)
         P(matmul_q4_1, 3) P(matmul_q5_0, 3) P(matmul_q5_1, 3)
-        P(matmul_q1_0, 3) P(matmul_q2_0, 3) P(matmul_bf16, 3) P(hadamard, 3)
+        P(matmul_q1_0, 3) P(matmul_q2_0, 3) P(matmul_bf16, 3) P(hadamard, 3) P(hadamard16, 3)
         P(matmul_q4_k, 3) P(matmul_q5_k, 3) P(matmul_q6_k, 3)
         P(mm_f32, 3) P(mm_f16, 3) P(mm_q4_0, 3) P(mm_q8_0, 3) P(mm_q4_1, 3) P(mm_q5_0, 3) P(mm_q5_1, 3)
         P(mm_q1_0, 3) P(mm_q2_0, 3) P(mm_bf16, 3)
@@ -1895,7 +1897,8 @@ private:
             ncols, (uint32_t)w.fold_block, x_off, (w.fold_signs ? 1u : 0u) | (rep ? 4u : 0u),
             (uint32_t)w.fold_hd, (uint32_t)w.fold_nk, rep};
         const Buf &signs = w.fold_signs ? fold_signs_.at(w.ne0()) : dummy_;
-        dispatch("hadamard", {&x, &signs, &hx_}, pc, ncols / pc.block, (uint32_t)ntok, qpool_ ? role(w) : std::string());
+        dispatch(had16_ ? "hadamard16" : "hadamard", {&x, &signs, &hx_}, pc, ncols / pc.block, (uint32_t)ntok,
+                 qpool_ ? role(w) : std::string());
         hx_of_.src = x.buf;
         hx_of_.x_off = x_off;
         hx_of_.ntok = (uint32_t)ntok;
@@ -2553,7 +2556,7 @@ private:
             if (te.fold_inverse) {
                 struct { uint32_t ncols, block, x_off, flags, hd, nk, rep; } hpc{
                     (uint32_t)E, (uint32_t)te.fold_block, 0, te.fold_signs ? 2u : 0u, 0, 0, 0};
-                dispatch("hadamard", {&hx_, te.fold_signs ? &fold_signs_.at(E) : &dummy_, &x_}, hpc,
+                dispatch(had16_ ? "hadamard16" : "hadamard", {&hx_, te.fold_signs ? &fold_signs_.at(E) : &dummy_, &x_}, hpc,
                          (uint32_t)E / hpc.block, (uint32_t)n, "token_embd");
             }
         }
@@ -2860,6 +2863,12 @@ private:
     // off).
     bool fuse_ = true;
     bool glu_gelu_ = false;  // the fused GLU kernels for Gemma's GELU too (TS5_GLU_GELU=1)
+    // The rotation of a folded weight's input (prism.hadamard) by
+    // hadamard16.comp: the same stages in the same order, so the same output
+    // bit for bit, in passes of four stages with a barrier between passes
+    // where hadamard.comp has one after every stage (a block of 4,096, the
+    // Bonsai 9B's: 2 barriers for 12). Off until it is timed on the PS5.
+    bool had16_ = false;
     // One token: the RMSNorm before q, k, v, gate and up and the output
     // folded into those mat-vecs (mv16n_*), which read the residual and
     // scale their sums, rather than a one-workgroup rmsnorm dispatch and a
