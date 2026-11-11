@@ -341,6 +341,20 @@ private:
     size_t at_ = 0;  // in_ is read from here: frames are taken off without moving the rest each time
 };
 
+// TS5_BROWSER_TRACE=FILE: what goes to the browser and what comes back, a
+// line each with the time, for a browser that hangs or answers oddly (on
+// the PS5 Obscura stopped answering after the first click).
+void trace(const char *way, const std::string &what) {
+    static FILE *f = [] {
+        const char *path = getenv("TS5_BROWSER_TRACE");
+        return path && *path ? fopen(path, "a") : nullptr;
+    }();
+    if (!f) return;
+    static const double t0 = now_s();
+    fprintf(f, "%9.3f %s %s\n", now_s() - t0, way, brief(what, 400).c_str());
+    fflush(f);
+}
+
 class Cdp {
 public:
     // Connects to the browser listening on 127.0.0.1:port and takes its
@@ -428,9 +442,11 @@ public:
               int timeout_ms = 30000, bool page = true) {
         const int id = next_++;
         const std::string session = page && !session_.empty() ? ",\"sessionId\":" + json_escape(session_) : "";
+        trace(">", std::to_string(id) + " " + method + " " + params);
         if (!ws_.send("{\"id\":" + std::to_string(id) + ",\"method\":" + json_escape(method) + ",\"params\":" + params +
                           session + "}",
                       err)) {
+            trace("!", "could not send: " + err);
             gone_ = true;
             return false;
         }
@@ -440,13 +456,16 @@ public:
             std::string msg;
             const int got = left > 0 ? ws_.recv(msg, left, err) : 0;
             if (got < 0) {
+                trace("!", "the connection ended: " + err);
                 gone_ = true;
                 return false;
             }
             if (got == 0) {
                 err = "the browser didn't answer in " + std::to_string(timeout_ms / 1000) + " s";
+                trace("!", std::to_string(id) + " " + method + ": no answer in " + std::to_string(timeout_ms) + " ms");
                 return false;
             }
+            trace("<", msg);
             Json j;
             if (!Json::parse(msg, j)) continue;
             if (j["id"].num(-1) == id) {
@@ -510,7 +529,21 @@ const char *const kMark = R"JS((() => {
   for (const el of doc.querySelectorAll('[data-ts5]')) el.removeAttribute('data-ts5');
   for (const el of doc.querySelectorAll('[data-ts5-hidden]')) el.removeAttribute('data-ts5-hidden');
   if (doc.body) {
+    // What the page's styles hide. Chromium answers getComputedStyle at
+    // once; a browser that works an element's styles out anew on every
+    // asking does not (Obscura on the PS5: 15 s for one Wikipedia article,
+    // and no answer at all from the next, with every later request stuck
+    // behind this script). So the asking gets STYLE_MS milliseconds, and
+    // the rest of the page goes by its attributes alone, which the reader
+    // knows itself (hidden, aria-hidden, an inline display:none).
+    const t0 = Date.now();
+    let n = 0, late = STYLE_MS <= 0;
     const w = doc.createTreeWalker(doc.body, NodeFilter.SHOW_ELEMENT, { acceptNode(el) {
+      if (late) return NodeFilter.FILTER_ACCEPT;
+      if ((++n & 31) === 0 && Date.now() - t0 > STYLE_MS) {
+        late = true;
+        return NodeFilter.FILTER_ACCEPT;
+      }
       const st = getComputedStyle(el);
       if (st.display === 'none' || st.visibility === 'hidden') {
         el.setAttribute('data-ts5-hidden', '');
@@ -518,7 +551,7 @@ const char *const kMark = R"JS((() => {
       }
       return NodeFilter.FILTER_ACCEPT;
     } });
-    while (w.nextNode());
+    while (!late && w.nextNode());
   }
   let k = 0;
   const sel = 'a[href],button,summary,input,textarea,[role=button],[role=link],[role=tab],[role=menuitem],[onclick]';
@@ -535,6 +568,16 @@ const char *const kMark = R"JS((() => {
   const html = doc.documentElement ? doc.documentElement.outerHTML : '';
   return JSON.stringify({ url: location.href, title: doc.title, html: html });
 })())JS";
+
+// kMark with its time for the styles filled in: a second and a half, or
+// TS5_BROWSER_STYLE_MS (0: the styles are never asked for).
+std::string mark_js() {
+    std::string js = kMark;
+    const char *v = getenv("TS5_BROWSER_STYLE_MS");
+    const std::string ms = v && *v && strspn(v, "0123456789") == strlen(v) ? v : "1500";
+    for (size_t at = js.find("STYLE_MS"); at != npos; at = js.find("STYLE_MS", at)) js.replace(at, 8, ms);
+    return js;
+}
 
 // ---- The browser program
 
@@ -1163,11 +1206,15 @@ private:
     // The page as the browser has it now.
     Answer snapshot() {
         std::string v, err;
-        if (!cdp_->eval(kMark, v, err, 30000)) {
-            // (Between two pages there is nothing to run a script in.)
+        const std::string mark = mark_js();
+        if (!cdp_->eval(mark, v, err, 30000)) {
+            // (Between two pages there is nothing to run a script in. A
+            // browser that didn't answer is still at the script: a second
+            // one would only wait behind it.)
+            if (err.find("didn't answer") != npos) return fail("The page could not be read: " + lost(err) + ".");
             sleep_ms(500);
             settle(10);
-            if (!cdp_->eval(kMark, v, err, 30000)) return fail("The page could not be read: " + lost(err) + ".");
+            if (!cdp_->eval(mark, v, err, 30000)) return fail("The page could not be read: " + lost(err) + ".");
         }
         Json j;
         if (!Json::parse(v, j)) return fail("The page could not be read.");

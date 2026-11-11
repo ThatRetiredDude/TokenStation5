@@ -323,7 +323,9 @@ ts5-tui --url http://ps5.local:8081  # another one
     when it stops. It stops with ts5-tui, with a new chat, and after ten
     minutes unused (it starts again by itself). It runs on the processor
     and leaves the GPU's memory to the model. `TS5_BROWSER_FLAGS` adds
-    flags to the browser's command line.
+    flags to the browser's command line; `TS5_BROWSER_TRACE=FILE` writes
+    down what ts5 asks the browser and what comes back, for a browser
+    that hangs or shows a page wrongly.
 
     To a site it is the Chrome it is: a Chromium without a window would
     call itself "HeadlessChrome", which some sites turn away unread, so

@@ -22,7 +22,7 @@ import time
 import urllib.parse
 
 INDEX = """<!doctype html><html><head><title>The  River
- Site</title><style>p { color: red }</style></head><body>
+ Site</title><style>p { color: red } .gone { display: none }</style></head><body>
 <header><a href="/">Home</a>
 <form action="/search" method="get"><input type="search" name="q" placeholder="Search the site">
 <input type="hidden" name="lang" value="en"><button type="submit">Go</button></form>
@@ -39,6 +39,7 @@ are long. See <a href="https://example.org/far">another site</a>, <a href="#top"
 <a href="../up.html"><img src="i.png" alt="An arrow"></a>.</p>
 <div style="display: none">A hidden <a href="/hidden.html">secret link</a>.</div>
 <div hidden>Also <a href="/hidden2.html">hidden</a>.</div>
+<p class="gone">Put away by a <a href="/gone.html">style sheet</a>.</p>
 <ul><li><a href="/l1">First of a list</a></li><li><a href="/l2">Second</a></li><li><a href="/l3">Third</a></li>
 <li><a href="/l4">Fourth</a></li><li><a href="/l5">Fifth</a></li></ul>
 <form action="/order" method="GET"><input type="text" name="name" value="Ann" aria-label="Your name">
@@ -351,6 +352,8 @@ def test_browser(ts5, program, base):
     print(f"     ({time.time() - t0:.1f} s for the common checks through the browser)")
     a = b.ask(do="status")
     check(a["running"] is True, "chromium: the browser is running", a)
+    a = b.ask(do="open", url=base + "/")
+    check(a["ok"] and "Put away by a" not in a["text"] and "Rivers" in a["text"], "chromium: what a style sheet hides is left out", a)
     a = b.ask(do="open", url=base + "/scripted.html")
     t = a["text"]
     check(a["ok"] and "Built by a script" in t and "not pressed" in t and "not shown at all" not in t,
@@ -437,6 +440,17 @@ def test_browser(ts5, program, base):
     a = b.ask(do="open", url=base + "/agent")
     check(a["ok"] and "header: Mozilla/5.0" in a["text"], "chromium: TS5_BROWSER_AGENT=own opens pages too", a)
     print("     own: " + " | ".join(l for l in a["text"].splitlines() if l.startswith(("header:", "hints:"))))
+    b.close()
+
+    # A browser slow to say what its styles hide (Obscura took 15 s a page, then never answered):
+    # the asking has a time limit, here none at all, and the page is read by its attributes.
+    b = Browser(ts5, "--program", program, env=dict(os.environ, TS5_BROWSER_STYLE_MS="0"))
+    a = b.ask(do="open", url=base + "/")
+    t = a["text"]
+    check(a["ok"] and "Put away by a style sheet" in t and "secret link" not in t and "hidden2" not in t,
+          "chromium: out of time for the styles, the page is read by its attributes", a)
+    a = b.ask(do="click", n=number(t, r"Volga\[(\d+)\]"))
+    check(a["ok"] and a["url"] == base + "/volga.html", "chromium: and its links work as ever", a)
     b.close()
 
     # Auto, with two browsers installed and the first one broken: the second
