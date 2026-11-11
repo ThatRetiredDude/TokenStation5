@@ -33,6 +33,7 @@ struct Config {
     double temp = -1;       // < 0: the model's own
     int max_tokens = 0;     // 0: no limit
     int serve_ctx = 0;      // for a model ts5-tui starts itself; 0 auto (the most that fits)
+    bool helper_room = true;  // with auto: keep room for the model's helper (faster, a shorter chat)
     bool tmux = true;       // its own tmux session from a plain terminal
     std::string path;       // where it is saved
     void load();
@@ -45,6 +46,12 @@ struct ServerState {
     std::string model;  // the API id: the file name without .gguf
     int n_ctx = 0;
     std::string tool_format, known_good, checked_model, why;
+    // The helper the engine really loaded beside the model, its context
+    // (drafting stops past it), or why the one asked for isn't used.
+    // helper_known: the server says (an older one doesn't).
+    bool helper_known = false;
+    std::string helper, helper_note;
+    int helper_ctx = 0;
     double temperature = -1;
     int thinking = -1;  // -1: the template can't switch it
 };

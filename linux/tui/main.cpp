@@ -34,6 +34,7 @@
 #include "json.h"
 #include "store.h"
 #include "tested.h"  // the models tested on a PS5 that the catalog doesn't have
+#include "tested_models.h"  // engine/src: the helper tuning found for each of them
 
 #ifndef TS5_VERSION
 #define TS5_VERSION "dev"
@@ -51,8 +52,10 @@ const char *kScreenNames[N_SCREENS] = {"Chat", "Models", "Status", "Settings", "
 struct ModelFile {
     std::string name, path, dir;
     double size = 0;
-    std::map<std::string, std::string> tune;  // the tuned settings ts5-tune wrote
+    std::map<std::string, std::string> tune;  // the tuned settings ts5-tune wrote, else the built-in ones
     std::string tune_file, tuned_on;
+    bool tested = false;       // a model tested on the PS5: its settings are built in (tested_models.h)
+    bool helper_here = false;  // its helper's file is beside it
 };
 
 struct App {
@@ -86,6 +89,7 @@ struct App {
         const app::CatalogEntry *cat = nullptr;  // a catalog model, or none for a URL of the user's
         std::string name, file, url, sha256;     // name: on screen
         double bytes = 0;                        // the size, when known before (the catalog's)
+        std::string dir;                         // where to, when not download_dir() (a helper: beside its model)
     } dl;
     bool dl_on = false;  // dl is what downloader fetches
     // A yes/no question over the page (Enter or y: yes; Esc or n: no).
@@ -96,6 +100,7 @@ struct App {
     int answers_saved = 0;
     std::string load_target;  // what's loading, until /v1/models says so
     double load_t0 = 0;
+    bool load_again = false, load_down = false;  // the loaded model again: wait for the old server to go first
     bool show_tune = false;
     int tune_scroll = 0;
     // The job in the pane (tuning, the GPU check, the speed test), as steps.
@@ -174,6 +179,12 @@ void poll_once() {
             s.model = m["id"].str();
             s.n_ctx = (int)m["context_length"].num(0);
             s.tool_format = m["capabilities"]["tool_format"].str();
+            if (m.o.count("helper")) {
+                s.helper_known = true;
+                s.helper = m["helper"]["id"].str();
+                s.helper_ctx = (int)m["helper"]["context_length"].num(0);
+                s.helper_note = m["helper_note"].str();
+            }
             const ts5::Json &st = m["settings"];
             s.known_good = st["known_good"].str();
             s.checked_model = st["checked_model"].str();
@@ -256,7 +267,21 @@ void read_tune(ModelFile &m) {
             if (line.empty() || line[0] == '#' || eq == std::string::npos) continue;
             m.tune[line.substr(0, eq)] = line.substr(eq + 1);
         }
-        return;
+        break;
+    }
+    // A model tested on the PS5: with no tune file, the helper found for
+    // it there is built in (the engine uses it when its file is here).
+    if (const ts5::TestedModel *t = ts5::tested_model(m.name.c_str(), (long long)m.size)) {
+        m.tested = true;
+        if (m.tune_file.empty() && *t->helper) {
+            m.tune["TS5_DRAFT_MODEL"] = t->helper;
+            m.tune["TS5_DRAFT"] = t->drafts;
+        }
+    }
+    auto h = m.tune.find("TS5_DRAFT_MODEL");
+    if (h != m.tune.end() && h->second != "off" && !h->second.empty()) {
+        const std::string path = h->second.find('/') == std::string::npos ? m.dir + "/" + h->second : h->second;
+        m.helper_here = access(path.c_str(), R_OK) == 0;
     }
 }
 
@@ -327,7 +352,7 @@ std::string service_models_dir() {
 
 // Load a model: the API-only service through the hw helper, else a
 // `ts5 serve` of ts5-tui's own.
-void load_model(const ModelFile &m) {
+void load_model(const ModelFile &m, bool again = false) {
     if (g->loader.running()) {
         show_toast("Still loading the last one…", g->th->warn);
         return;
@@ -338,13 +363,24 @@ void load_model(const ModelFile &m) {
         return;
     }
     const ServerState s = server();
-    if (s.model == api_id(m.name)) {
-        show_toast("That's the model loaded now", g->th->dim);
+    const pid_t own = own_server_pid();
+    if (s.model == api_id(m.name) && !again) {
+        if (own <= 0) {
+            show_toast("That's the model loaded now", g->th->dim);
+            return;
+        }
+        // ts5-tui's own server: loading it again is how a changed setting
+        // (or a helper downloaded since) takes hold.
+        g->ask_title = " Load it again? ";
+        g->ask_text = api_id(m.name) + " is the model loaded now. Loading it again takes a minute and applies what "
+                      "changed since: Settings → Context and Speed or length, a helper downloaded since, new tuning. "
+                      "The chat on screen is kept. Load it again?";
+        const ModelFile copy = m;
+        g->ask_yes = [copy] { load_model(copy, true); };
         return;
     }
     const std::string hw = hw_helper();
     std::string cmd, how;
-    const pid_t own = own_server_pid();
     if (unit_active("tokenstation") && !hw.empty() && m.dir == service_models_dir()) {
         cmd = "sudo -n " + hw + " model " + shell_quote(m.name);
         how = "the service";
@@ -370,7 +406,10 @@ void load_model(const ModelFile &m) {
         cmd.clear();
         if (own > 0) cmd = fmt("kill %d; i=0; while kill -0 %d 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done; ", own, own);
         // Its own session, so it keeps serving after ts5-tui ends.
-        cmd += "cd " + shell_quote(dir) + " && (setsid " + shell_quote(ts5) + " serve -m " + shell_quote(m.path) +
+        // Settings → Speed or length: with an auto context, the engine keeps
+        // room for the model's helper (faster) or takes it all for the chat.
+        const std::string room = g->cfg.serve_ctx == 0 ? fmt("TS5_HELPER_ROOM=%d ", g->cfg.helper_room ? 1 : 0) : "";
+        cmd += "cd " + shell_quote(dir) + " && (" + room + "setsid " + shell_quote(ts5) + " serve -m " + shell_quote(m.path) +
                " --host 127.0.0.1 --port " + std::to_string(e.port) + " -c " + ctx +
                " > tui-serve.log 2>&1 < /dev/null & echo $! > tui-serve.pid)";
         how = "ts5 serve";
@@ -378,6 +417,8 @@ void load_model(const ModelFile &m) {
     g->loader.start(cmd, "load " + m.name);
     g->load_target = api_id(m.name);
     g->load_t0 = now_s();
+    g->load_again = s.model == api_id(m.name);
+    g->load_down = false;
     g->poll_fast = true;
     g->logs_checked = 0;  // the log may move
     show_toast("Loading " + m.name + " (" + how + ")…", g->th->accent, 3);
@@ -401,9 +442,9 @@ void load_or_ask(const ModelFile &m) {
     g->ask_title = " Load a helper-size model? ";
     g->ask_text = api_id(m.name) + " is helper size. Loading it makes it the main model, in place of " +
                   (sv.model.empty() ? std::string("none") : sv.model) +
-                  ". A helper isn't loaded by hand: it comes along with the big model, as its tuning picked (T on Models "
-                  "tunes it and picks the fastest helper)." +
-                  (sv.model.empty() ? "" : now.empty() ? " " + sv.model + " has no helper yet: press T on it."
+                  ". A helper isn't loaded by hand: it comes along with its big model (the tested models bring "
+                  "theirs; for another model, T on Models measures which helper is fastest)." +
+                  (sv.model.empty() ? "" : now.empty() || now == "off" ? " " + sv.model + " has no helper."
                                                        : " " + sv.model + "'s helper is " + api_id(now) + ".") +
                   " Load " + api_id(m.name) + " as the main model?";
     const ModelFile copy = m;
@@ -551,9 +592,19 @@ std::string mins(double secs) {
     return fmt("%d h %02d min", s / 3600, s / 60 % 60);
 }
 
-void start_tune(const ModelFile &m) {
+void start_tune(const ModelFile &m, bool sure = false) {
     if (g->tuner.running()) {
         g->show_tune = true;
+        return;
+    }
+    // A tested model brings its settings: tuning it is a choice, not a need.
+    if (m.tested && m.tune_file.empty() && !sure) {
+        g->ask_title = " Tune a tested model? ";
+        g->ask_text = api_id(m.name) + " was tested on the PS5 and its settings are built in: it needs no tuning. Tuning "
+                      "measures it again on this console (10 to 20 minutes, the model is unloaded meanwhile) and keeps "
+                      "what is fastest here. Tune it anyway?";
+        const ModelFile copy = m;
+        g->ask_yes = [copy] { start_tune(copy, true); };
         return;
     }
     const std::string tune = which("ts5-tune");
@@ -699,7 +750,7 @@ void start_fetch(const App::DlJob &job) {
         show_toast("ts5 isn't installed here", g->th->bad);
         return;
     }
-    const std::string dir = download_dir();
+    const std::string dir = !job.dir.empty() && access(job.dir.c_str(), W_OK) == 0 ? job.dir : download_dir();
     if (!make_dirs(dir)) {
         show_toast("Can't make " + dir, g->th->bad, 6);
         return;
@@ -729,7 +780,7 @@ void start_fetch(const App::DlJob &job) {
     show_toast(msg, job.sha256.empty() ? g->th->warn : g->th->accent, 5);
 }
 
-void start_download(const app::CatalogEntry &e) {
+void start_download(const app::CatalogEntry &e, const std::string &dir = "") {
     App::DlJob j;
     j.cat = &e;
     j.name = e.name;
@@ -737,7 +788,29 @@ void start_download(const app::CatalogEntry &e) {
     j.url = std::string("https://huggingface.co/") + e.repo + "/resolve/" + e.commit + "/" + e.path;
     j.sha256 = e.sha256;
     j.bytes = (double)e.bytes;
+    j.dir = dir;
     start_fetch(j);
+}
+
+// The download for a model's helper (its tune file's, else the built-in
+// one), or null: no helper, or one ts5-tui has no download for.
+const app::CatalogEntry *helper_entry(const ModelFile &m) {
+    auto it = m.tune.find("TS5_DRAFT_MODEL");
+    if (it == m.tune.end() || it->second == "off" || it->second.empty()) return nullptr;
+    const size_t sl = it->second.rfind('/');
+    const std::string file = sl == std::string::npos ? it->second : it->second.substr(sl + 1);
+    for (const app::CatalogEntry *e : catalog_models())
+        if (file == e->file) return e;
+    return nullptr;
+}
+
+// A model's helper, when it isn't beside it yet: downloaded there (the
+// engine looks for it beside the model).
+bool download_helper(const ModelFile &m) {
+    const app::CatalogEntry *h = m.helper_here ? nullptr : helper_entry(m);
+    if (!h || g->downloader.running()) return false;
+    start_download(*h, m.dir);
+    return g->downloader.running();
 }
 
 // "/download URL [FILE] [--sha256 HEX]", also as `ts5 fetch` takes it (a
@@ -821,16 +894,37 @@ void finish_download() {
         show_toast(job.name + ": " + why + ". Download it again to go on from where it stopped.", g->th->bad, 8);
         return;
     }
-    for (int i = 0; i < (int)g->models.size(); i++)
-        if (g->models[i].name == job.file) g->model_sel = i;
+    // The new file is the chosen row; a helper fetched for a model leaves
+    // that model chosen.
+    for (int i = 0; i < (int)g->models.size(); i++) {
+        const ModelFile &m = g->models[i];
+        if (job.dir.empty() ? m.name == job.file : helper_entry(m) && helper_entry(m)->file == job.file && m.dir == dir)
+            g->model_sel = i;
+    }
     if (unit_active("tokenstation") && dir != service_models_dir())
         chat_note(g->chat, "Downloaded **" + job.name + "** to `" + dir + "`. The service reads `" +
                                service_models_dir() + "`; to serve it there:\n\n```\nsudo mv " + dir + "/" + job.file +
                                " " + service_models_dir() + "/\n```");
-    if (job.bytes > 0 && job.bytes < 1.5 * 1024 * 1024 * 1024)  // a helper: tuning the big model picks it
-        show_toast("Downloaded " + job.name + ". It's a helper: T on its big model tunes it in", g->th->good, 8);
-    else
+    // A tested model's helper comes with it: the engine uses it from the
+    // next load, no tuning needed.
+    for (const ModelFile &m : g->models)
+        if (m.name == job.file && download_helper(m)) {
+            show_toast("Downloaded " + job.name + ". Now its helper, " + g->dl.name + " (" + gib(g->dl.bytes) +
+                           "): the model writes faster with it",
+                       g->th->good, 8);
+            return;
+        }
+    if (job.bytes > 0 && job.bytes < 1.5 * 1024 * 1024 * 1024) {  // a helper
+        const ServerState sv = server();
+        bool for_loaded = false;
+        for (const ModelFile &m : g->models)
+            if (api_id(m.name) == sv.model && helper_entry(m) && helper_entry(m)->file == job.file) for_loaded = true;
+        show_toast("Downloaded " + job.name + (for_loaded ? ". Enter on " + sv.model + " loads it again, with its helper"
+                                                          : ". It drafts for its big model from the next time that loads"),
+                   g->th->good, 8);
+    } else {
         show_toast("Downloaded " + job.name + ": Enter on Models loads it", g->th->good, 6);
+    }
 }
 
 void set_fan(const std::string &mode) {
@@ -924,15 +1018,68 @@ uint32_t free_color(double free_bytes) {
     return gb < 1 ? t.bad : gb < 2 ? t.warn : t.fg;
 }
 
-std::string helper_now() {
+// The helper the loaded model's settings name (its tune file's, else the
+// built-in one), as an API id; "" for none.
+std::string helper_wanted() {
     const ServerState sv = server();
     for (auto &m : g->models)
         if (api_id(m.name) == sv.model) {
             auto it = m.tune.find("TS5_DRAFT_MODEL");
-            if (it == m.tune.end()) return "";
-            return it->second == "off" ? "off" : api_id(it->second);
+            if (it == m.tune.end() || it->second == "off") return "";
+            const size_t sl = it->second.rfind('/');
+            return api_id(sl == std::string::npos ? it->second : it->second.substr(sl + 1));
         }
     return "";
+}
+
+std::string short_count(int n) {
+    if (n < 1000) return fmt("%d", n);
+    return n % 1024 == 0 ? fmt("%dk", n / 1024) : fmt(n < 10000 ? "%.1fk" : "%.0fk", n / 1024.0);
+}
+
+// A model's name without its quantization ("Qwen3-0.6B-Q4_K_M": "Qwen3-0.6B"),
+// for the top bar.
+std::string short_model(const std::string &id) {
+    for (size_t i = id.size(); i-- > 1;)
+        if ((id[i - 1] == '-' || id[i - 1] == '.') && (id[i] == 'Q' || id[i] == 'q') && i + 1 < id.size() &&
+            isdigit((unsigned char)id[i + 1]))
+            return id.substr(0, i - 1);
+    return id;
+}
+
+// What the engine says of the helper, in a few words for the top bar: the
+// one drafting ("to 8k": only that far into a chat), or none. An older
+// server doesn't say: then nothing is claimed.
+std::string helper_now(bool &running) {
+    const ServerState sv = server();
+    running = false;
+    if (!sv.helper_known) return "";
+    if (sv.helper.empty()) return "none";
+    running = true;
+    return short_model(sv.helper) + (sv.helper_ctx > 0 && sv.helper_ctx < sv.n_ctx ? " to " + short_count(sv.helper_ctx) : "");
+}
+
+// Why the helper the settings name isn't drafting, in plain words; "" when
+// it is, or none was wanted.
+std::string helper_missing_why() {
+    const ServerState sv = server();
+    if (!sv.helper_known || !sv.helper.empty()) return "";
+    const std::string want = helper_wanted();
+    if (want.empty() && sv.helper_note.empty()) return "";
+    const std::string &n = sv.helper_note;
+    if (n.find("memory") != std::string::npos || n.find("no room") != std::string::npos)
+        return "a " + with_commas(sv.n_ctx) + "-token chat leaves it no GPU memory" +
+               (own_server_pid() <= 0 ? "" : g->cfg.serve_ctx > 0 ? " (Settings → Context: auto)"
+                                        : !g->cfg.helper_room ? " (Settings → Speed or length: faster)" : "");
+    bool here = false;
+    for (auto &m : g->models)
+        if (api_id(m.name) == sv.model) here = m.helper_here;
+    if (n.empty() && here) return want + " came after the model was loaded: Enter on the model loads it again";
+    if (n.find("cannot open") != std::string::npos || n.find("beside") != std::string::npos || n.empty())
+        return (want.empty() ? "its file" : want) + " isn't downloaded";
+    if (n.find("linear layers") != std::string::npos) return "this kind of model can't use one";
+    if (n.find("vocabulary") != std::string::npos) return "it's from another model family";
+    return n;
 }
 
 // Row 0: the name, the pages, the server. Row 1: the live numbers. Both stay
@@ -1019,14 +1166,21 @@ void draw_top_bar() {
             it.parts = {{"● ", Style(t.good, t.panel2, BOLD)}, {fit(sv.model, 34), val}};
         items.push_back(it);
     }
-    const std::string h = helper_now();
-    if (!sv.model.empty())
-        items.push_back({{{"helper ", lab}, {h.empty() ? "none" : h == "off" ? "off" : fit(h, 18), h.empty() || h == "off" ? lab : val}}, 4});
+    bool helper_on = false;
+    const std::string h = helper_now(helper_on);
+    if (!sv.model.empty() && !h.empty()) {
+        // Not running though the model's settings name one: said in yellow
+        // (Models says why).
+        const bool missing = !helper_on && !helper_wanted().empty();
+        items.push_back({{{"helper ", lab},
+                          {missing ? "not running" : fit(h, 28), missing ? Style(t.warn, t.panel2, BOLD) : helper_on ? val : lab}},
+                         4});
+    }
     if (sv.n_ctx > 0) {
         // How full the chat is: yellow past three quarters, red past 90%.
         const int used = g->chat.ctx_used;
         const double f = (double)used / sv.n_ctx;
-        auto k = [](int n) { return n < 1000 ? fmt("%d", n) : fmt(n < 10000 ? "%.1fk" : "%.0fk", n / 1000.0); };
+        auto k = short_count;
         items.push_back({{{"chat ", lab},
                           {k(used) + "/" + k(sv.n_ctx), Style(f > 0.9 ? t.bad : f > 0.75 ? t.warn : t.fg, t.panel2, BOLD)}},
                          0});
@@ -1259,10 +1413,8 @@ std::string helper_of(const ModelFile &m) {
     auto it = m.tune.find("TS5_DRAFT_MODEL");
     if (it == m.tune.end()) return "";
     if (it->second == "off") return "none";
-    std::string d = api_id(it->second);
-    auto dn = m.tune.find("TS5_DRAFT");
-    if (dn != m.tune.end()) d += " ×" + dn->second;
-    return d;
+    const size_t sl = it->second.rfind('/');
+    return api_id(sl == std::string::npos ? it->second : it->second.substr(sl + 1));
 }
 
 void draw_tune_pane() {
@@ -1398,8 +1550,8 @@ void draw_models() {
     const int name_w = std::max(20, w - 46);
     s.put(x0 + 3, y, "Model", S(t.dim, BOLD));
     s.put(x0 + 3 + name_w, y, "    Size", S(t.dim, BOLD));
-    s.put(x0 + 3 + name_w + 10, y, "Helper (tuned)", S(t.dim, BOLD));
-    s.put(x0 + 3 + name_w + 30, y, "Tuned", S(t.dim, BOLD));
+    s.put(x0 + 3 + name_w + 10, y, "Helper", S(t.dim, BOLD));
+    s.put(x0 + 3 + name_w + 30, y, "Settings", S(t.dim, BOLD));
     y++;
     const auto cat = catalog_missing();
     const int nl = (int)g->models.size(), nc = (int)cat.size(), n = nl + nc;
@@ -1485,11 +1637,15 @@ void draw_models() {
         else if (api_id(m.name) == g->load_target) s.put(x0 + 1, y, "◌", Style(t.accent2, row.bg, BOLD));
         s.put(x0 + 3, y, fit(api_id(m.name), name_w - 1), Style(helper_size ? t.dim : t.fg, row.bg, loaded ? BOLD : 0));
         s.put(x0 + 3 + name_w, y, fmt("%8s", gib(m.size).c_str()), Style(t.fg, row.bg));
+        // Its helper (dim: named, but its file isn't here) and where its
+        // settings are from: a tuning's date, or "tested" (built in).
         const std::string h = helper_of(m);
+        const bool has_h = !h.empty() && h != "none";
         s.put(x0 + 3 + name_w + 10, y, fit(h.empty() ? (helper_size ? "(helper size)" : "—") : h, 19),
-              Style(h.empty() ? t.dim : t.accent2, row.bg));
-        s.put(x0 + 3 + name_w + 30, y, m.tuned_on.empty() ? (m.tune.empty() ? "—" : "yes") : m.tuned_on,
-              Style(m.tune.empty() ? t.dim : t.good, row.bg));
+              Style(!has_h ? t.dim : m.helper_here ? t.accent2 : t.warn, row.bg));
+        const bool tuned = !m.tune_file.empty();
+        s.put(x0 + 3 + name_w + 30, y, tuned ? (m.tuned_on.empty() ? "tuned" : m.tuned_on) : m.tested ? "tested" : "—",
+              Style(tuned || m.tested ? t.good : t.dim, row.bg));
     }
     // The chosen one's details.
     if (g->model_sel >= nl && g->model_sel < n) {
@@ -1551,16 +1707,55 @@ void draw_models() {
             s.put(xx + 2, yy, fit(cost, x0 + w - xx - 4), S(t.dim, ITALIC));
             yy++;
         };
-        if (m.tune.empty()) {
-            setting("Settings", "built in", "press T to tune it for this PS5 (10-20 minutes)");
-        } else {
+        const bool is_loaded = api_id(m.name) == sv.model;
+        if (!m.tune_file.empty()) {
+            setting("Settings", "tuned here" + (m.tuned_on.empty() ? "" : " on " + m.tuned_on),
+                    "measured on this PS5; T measures again");
             auto f16 = m.tune.find("TS5_MMB_F16");
-            setting("Prompt reading", f16 != m.tune.end() && f16->second == "0" ? "32-bit" : "16-bit",
-                    f16 != m.tune.end() && f16->second == "0" ? "exact; 16-bit failed this model's check"
-                                                              : "the faster prompt math; passed the check");
+            if (f16 != m.tune.end())
+                setting("Prompt reading", f16->second == "0" ? "32-bit" : "16-bit",
+                        f16->second == "0" ? "exact; 16-bit failed this model's check"
+                                           : "the faster prompt math; passed the check");
+        } else if (m.tested) {
+            setting("Settings", "tested on the PS5", "built in: this model needs no tuning");
+        } else if (m.size < 1.5 * 1024 * 1024 * 1024) {
+            setting("Role", "a helper", "drafts for the big models of its family: it loads along with them, not by hand");
+        } else {
+            setting("Settings", "the defaults", "T tunes it for this PS5 and finds its helper (10-20 minutes)");
+        }
+        // The helper: what the engine really loaded when this is the model
+        // serving, else what its settings name.
+        {
             const std::string h = helper_of(m);
-            setting("Helper", h == "none" ? "off" : h, h == "none" ? "none it could measure was faster"
-                                                                   : "drafts tokens; same text, faster on code");
+            const bool has_h = !h.empty() && h != "none";
+            const ts5::TestedModel *tm = ts5::tested_model(m.name.c_str(), (long long)m.size);
+            if (is_loaded && sv.helper_known && !sv.helper.empty()) {
+                setting("Helper", sv.helper,
+                        sv.helper_ctx > 0 && sv.helper_ctx < sv.n_ctx
+                            ? "drafting now, for a chat's first " + with_commas(sv.helper_ctx) + " tokens; same text, faster"
+                            : "drafting now: same text, faster");
+            } else if (is_loaded && sv.helper_known && has_h) {
+                s.put(x0 + 2, yy, "Helper", S(t.dim));
+                int xx = s.put(x0 + 20, yy, "not running", S(t.warn, BOLD));
+                const std::string why = helper_missing_why();
+                s.put(xx + 2, yy, fit(why + (m.helper_here ? "" : helper_entry(m) ? ": H gets it" : ""), x0 + w - xx - 4),
+                      S(t.warn));
+                yy++;
+            } else if (has_h && !m.helper_here) {
+                s.put(x0 + 2, yy, "Helper", S(t.dim));
+                int xx = s.put(x0 + 20, yy, h, S(t.warn, BOLD));
+                s.put(xx + 2, yy, fit(helper_entry(m) ? "isn't downloaded yet: H gets it (it makes this model faster)"
+                                                      : "its file isn't beside this model",
+                                      x0 + w - xx - 4),
+                      S(t.warn));
+                yy++;
+            } else if (has_h) {
+                setting("Helper", h, "drafts tokens for it: same text, faster");
+            } else if (m.size >= 1.5 * 1024 * 1024 * 1024) {
+                setting("Helper", "none", h == "none" ? "none it could measure was faster"
+                                          : tm && *tm->note ? tm->note
+                                          : "T finds one, if a small model of its family is here");
+            }
         }
         auto kv = m.tune.find("TS5_KV");
         // The chat's memory (the KV cache), in words.
@@ -1569,10 +1764,10 @@ void draw_models() {
         setting("Chat memory", kvv.empty() ? "automatic" : kvv == "k8v4" ? "8 and 4-bit" : k8 ? "8-bit" : k4 ? "4-bit" : kvv,
                 kvv.empty() ? "full precision, or 8-bit where that fits a longer chat"
                             : k8 || k4 ? "smaller, so a longer chat fits in the same memory" : "");
-        if (api_id(m.name) == sv.model)
-            setting("Context", fmt("%d tokens", sv.n_ctx), "what fits now, as loaded");
+        if (is_loaded)
+            setting("Context", with_commas(sv.n_ctx) + " tokens", "how long a chat can get, as loaded");
     }
-    draw_bottom_bar("↑↓ choose|Enter load|Tab/1-5 pages|T tune|C GPU check|B speed test|R rescan");
+    draw_bottom_bar("↑↓ choose|Enter load|Tab/1-5 pages|T tune|H get helper|C GPU check|B speed test|R rescan");
 }
 
 // ---- Settings ----
@@ -1666,12 +1861,25 @@ std::vector<SetRow> settings_rows() {
     {
         static const int v[] = {0, 4096, 8192, 16384, 32768};
         SetRow x{"Context", c.serve_ctx ? with_commas(c.serve_ctx) + " tokens" : "auto",
-                 "how long a chat can get; auto fits the most in GPU memory (models ts5-tui loads itself)"};
+                 "the longest a chat can get; auto fits GPU memory. Load the model again to apply it"};
         x.change = [save](int d) {
             int i = 0;
             for (int k = 0; k < 5; k++)
                 if (v[k] == g->cfg.serve_ctx) i = k;
             g->cfg.serve_ctx = v[(i + d + 5) % 5];
+            save();
+        };
+        r.push_back(x);
+    }
+    {
+        // With Context on auto, a big model and its helper share GPU memory:
+        // room for the helper (faster) or all of it for the chat (longer).
+        SetRow x{"Speed or length", c.helper_room ? "faster" : "longest chat",
+                 c.serve_ctx ? "for Context on auto; with a set Context the helper joins when it fits"
+                 : c.helper_room ? "keeps GPU memory for the model's helper: about a third faster, shorter chats"
+                                 : "all GPU memory for the chat: a big model then runs without its helper"};
+        x.change = [save](int) {
+            g->cfg.helper_room = !g->cfg.helper_room;
             save();
         };
         r.push_back(x);
@@ -1743,7 +1951,7 @@ void draw_settings() {
     }
     y++;
     if (y < s.h - 2) {
-        s.put(x0 + 2, y, fit("The engine's own switches (16/32-bit prompt math, cache, helper) are per model: Models → T tunes them.",
+        s.put(x0 + 2, y, fit("Each model's own settings (its helper, prompt math, chat memory) are on Models: tested models bring theirs.",
                              w - 4), S(t.dim));
     }
     draw_bottom_bar(g->editing ? "Enter save|Esc cancel" : "↑↓ choose|←→ change|Tab/1-5 pages|Enter edit");
@@ -2176,6 +2384,12 @@ void key_models(const Event &e) {
     else if (key_is("x") && g->downloader.running()) {
         g->downloader.stop();
         show_toast("Download stopped: what's there is kept for next time", g->th->warn, 4);
+    } else if (key_is("h") && local) {
+        const ModelFile &m = g->models[g->model_sel];
+        if (helper_of(m).empty() || helper_of(m) == "none") show_toast("This model has no helper to get", g->th->dim, 3);
+        else if (m.helper_here) show_toast("Its helper is already here", g->th->dim, 3);
+        else if (!helper_entry(m)) show_toast("ts5-tui has no download for that helper: /download takes a link", g->th->warn, 5);
+        else download_helper(m);
     } else if (key_is("t") && local) start_tune(g->models[g->model_sel]);
     else if (key_is("c") && local) start_gpu_job(g->models[g->model_sel], true);
     else if (key_is("b") && local) start_gpu_job(g->models[g->model_sel], false);
@@ -2317,8 +2531,19 @@ void tick() {
             show_toast("Load failed: " + why, g->th->bad, 8);
             g->load_target.clear();
             g->poll_fast = false;
+        } else if (g->load_again && !g->load_down) {
+            // The same model again: the old server goes first.
+            if (g->loader.done && !sv.online) g->load_down = true;
+            if (t - g->load_t0 > 240) g->load_again = false;
         } else if (sv.model == g->load_target) {
-            show_toast("Loaded " + sv.model + fmt(" in %.0f s", t - g->load_t0), g->th->good, 4);
+            const std::string why = helper_missing_why();
+            if (!why.empty() && !helper_wanted().empty())
+                show_toast("Loaded " + sv.model + fmt(" in %.0f s", t - g->load_t0) + ", without its helper: " + why,
+                           g->th->warn, 10);
+            else
+                show_toast("Loaded " + sv.model + fmt(" in %.0f s", t - g->load_t0) +
+                               (sv.helper.empty() ? "" : ", with its helper " + sv.helper),
+                           g->th->good, 5);
             g->load_target.clear();
             g->poll_fast = false;
             g->logs_checked = 0;

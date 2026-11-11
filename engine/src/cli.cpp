@@ -70,6 +70,7 @@ struct Args {
     int every = 0;   // logits --every N
     int tail = 0;    // logits --tail K
     std::vector<int32_t> tokens;
+    std::vector<std::string> helpers;  // helpers --helper FILE...
 };
 
 // Prints the usage and returns the exit status for it. Nothing here calls
@@ -79,6 +80,7 @@ int usage() {
             "usage: ts5 serve|run|bench|check|tokenize|logits|prompt -m model.gguf [options]\n"
             "       ts5 search QUERY | ts5 tool-parse hermes|llama3|mistral|gemma|gemma4 [TOOL...] < TEXT | ts5 usage-parse FILE\n"
             "       ts5 fetch URL FILE [--sha256 HEX] | ts5 peak [--device N] [--gib G]\n"
+            "       ts5 helpers -m model.gguf --helper FILE...  (which files could draft for the model)\n"
             "  -c N|auto      context length (default 8192; auto: what fits in GPU memory)\n"
             "  --backend B    vk or cpu\n"
             "  --device N     Vulkan device index\n"
@@ -98,7 +100,7 @@ bool parse(int argc, char **argv, Args &a) {
     a.cmd = argv[1];
     const char *cmds[] = {"serve", "run", "bench", "check", "tokenize", "logits", "prompt",
 #ifndef TS5_PS5
-                          "draft-replay",
+                          "draft-replay", "helpers",
 #endif
     };
     if (std::none_of(std::begin(cmds), std::end(cmds), [&](const char *c) { return a.cmd == c; })) return false;
@@ -131,6 +133,7 @@ bool parse(int argc, char **argv, Args &a) {
         else if (s == "--tail") a.tail = atoi(next().c_str());
         else if (s == "--fresh") a.fresh = true;
         else if (s == "--chat-template") a.chat_template = next();
+        else if (s == "--helper") a.helpers.push_back(next());
         else if (!s.empty() && (isdigit((unsigned char)s[0]))) a.tokens.push_back(atoi(s.c_str()));
         else ok = false;
     }
@@ -455,6 +458,21 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     }
 #ifndef TS5_PS5
     if (a.cmd == "draft-replay") return draft_replay(model, tok, a.temp, a.out);
+    if (a.cmd == "helpers") {
+        // Which of these files could draft for the model: the checks a
+        // load makes (set_drafter), from the files' headers alone, without
+        // the GPU. A line each: "ok" or "no", the file, and why not.
+        for (const std::string &h : a.helpers) {
+            std::string why, note;
+            Model d;
+            if (hp.rec_count() > 0) why = basename_of(a.model) + "'s linear layers keep a state that only goes forward";
+            else if (!d.open(h, why)) {
+            } else if (d.hp.rec_count() > 0) why = "its linear layers keep a state that only goes forward";
+            else tok.drafter_vocab_ok(d.gguf, why, note);
+            printf("%s\t%s%s%s\n", why.empty() ? "ok" : "no", h.c_str(), why.empty() ? "" : "\t", why.c_str());
+        }
+        return 0;
+    }
 #endif
     if (a.cmd == "prompt") {
         Json req;
@@ -528,6 +546,8 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     }
     fprintf(stderr, "ts5: %s backend ready in %.1f s, context %d\n", be->name(), (now_ms() - t0) / 1000, be->n_ctx());
     Engine eng(model, be, tok);
+    if (dp && *dp && strcmp(dp, "off") != 0 && !draft && hp.rec_count() > 0)
+        eng.helper.why = "this model's linear layers keep a state that only goes forward";
     if (draft) {
         Backend *db = nullptr;
         const bool dopen = !no_room && dmodel.open(dp, derr);
@@ -553,11 +573,15 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             else db = make_vk_backend(dmodel, dp, dctx, a.device, derr);
 #endif
         }
-        if (!db || !eng.set_drafter(dmodel, db, derr))
+        if (!db || !eng.set_drafter(dmodel, db, derr)) {
             fprintf(stderr, "ts5: draft model not used: %s\n", derr.c_str());
-        else
+            eng.helper.why = derr;
+        } else {
             fprintf(stderr, "ts5: draft model %s ready, context %d%s\n", basename_of(dp).c_str(), db->n_ctx(),
                     db->n_ctx() < be->n_ctx() ? " (past that, a conversation goes on without it)" : "");
+            eng.helper.name = basename_of(dp);
+            eng.helper.n_ctx = db->n_ctx();
+        }
     }
 
     if (a.cmd == "logits") {

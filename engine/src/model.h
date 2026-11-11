@@ -182,8 +182,10 @@ private:
 // the same name) skips it, and a helper named without a folder is the one
 // beside the model. Whatever the previous call set, and still has the value
 // it set, is taken back first, so a process that loads model after model
-// (the app) doesn't carry one's settings over to the next. Nothing on the
-// PS5's own system.
+// (the app) doesn't carry one's settings over to the next. Where no file
+// is found, a model tested on the PS5 (tested_models.h) gets the helper
+// tuning found for it there, when that helper's file is beside it. Nothing
+// on the PS5's own system.
 void apply_model_tune(const std::string &model_path);
 // Whether `key`'s current value came from apply_model_tune.
 bool from_model_tune(const char *key);

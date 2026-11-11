@@ -385,11 +385,15 @@ std::unique_ptr<Runner::Loaded> Runner::load(const std::string &path, int n_ctx,
                                : 0;
         if (dopen && fits == 0) derr = "not enough GPU memory left for it beside " + l->file;
         if (dopen && fits > 0) db = ts5::make_vk_backend(ctx_, l->dmodel, dp, fits, derr);
-        if (!db || !l->engine->set_drafter(l->dmodel, db, derr))
+        if (!db || !l->engine->set_drafter(l->dmodel, db, derr)) {
             printf("ts5: draft model not used: %s\n", derr.c_str());
-        else
+            l->engine->helper.why = derr;
+        } else {
             printf("ts5: draft model %s ready, context %d%s\n", base(dp).c_str(), db->n_ctx(),
                    db->n_ctx() < l->n_ctx ? " (past that, a conversation goes on without it)" : "");
+            l->engine->helper.name = base(dp);
+            l->engine->helper.n_ctx = db->n_ctx();
+        }
         l->dmodel.gguf.kv.erase("tokenizer.ggml.tokens");
     }
     log_memory("after loading " + l->file);

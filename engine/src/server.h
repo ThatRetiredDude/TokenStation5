@@ -66,6 +66,7 @@ public:
         std::string model, unavailable = "no model";
         std::string tool_format = "none";  // the model's (tools.h), for /v1/models
         int n_ctx = 0;                     // the engine's context, for /v1/models
+        Engine::Helper helper;             // and its helper (Engine::helper), for /v1/models
         // The model's known-good row, and the sampling a request gets for
         // what it doesn't set: the row's, else SampleParams'.
         KnownMatch known;
