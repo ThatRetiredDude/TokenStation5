@@ -1198,7 +1198,8 @@ void set_fan(const std::string &mode) {
 
 // ---- logs ----
 
-// tail says "file truncated" on its own when a new load starts the log again.
+// tail's own lines ("file truncated" when a new load starts the log again)
+// stay out of the page.
 const char *const kQuietTail = " 2> /dev/null";
 
 void pick_logs() {
@@ -1234,7 +1235,9 @@ void pick_logs() {
     if (src == g->logs_src && g->logs.running()) return;
     g->logs.stop();
     g->logs_src = src;
-    if (!cmd.empty()) g->logs.start(cmd + " 2>&1", "logs");
+    // (A later 2>&1 would undo kQuietTail's.)
+    const bool quiet = cmd.size() > strlen(kQuietTail) && cmd.compare(cmd.size() - strlen(kQuietTail), std::string::npos, kQuietTail) == 0;
+    if (!cmd.empty()) g->logs.start(quiet ? cmd : cmd + " 2>&1", "logs");
 }
 
 // A log line's speeds: "ts5: chatcmpl-1 prompt 812 (812 new) 515.0 tok/s, gen 200 65.1 tok/s, ...".
