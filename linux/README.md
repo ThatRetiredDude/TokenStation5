@@ -312,13 +312,13 @@ ts5-tui --url http://ps5.local:8081  # another one
     - **Obscura** ([github.com/h4ckf0r0day/obscura](https://github.com/h4ckf0r0day/obscura)):
       the light one, used only when you choose it (`/browser obscura`).
       It held 23 MiB waiting, about 200 MiB with a Wikipedia article open
-      and up to 430 MiB on heavy pages. It is young: on a PS5 it took 12 s
-      to open an article that Chromium opened in 5 s, some sites show
-      nothing in it (YouTube, in our test), it has no sandbox, and it
-      stopped answering after a click. So in Obscura ts5 opens a link by
-      its address, and starts it again when a button leaves it answering
-      nothing. Put its `obscura` program on your PATH or in
-      `~/.local/bin`.
+      and up to 430 MiB on heavy pages. It is young: on a PS5 it took 12
+      to 14 s to open an article that Chromium opened in 5 s, some sites
+      show nothing in it (YouTube, in our test), it has no sandbox, and
+      it stopped answering after its second article in a row. When that
+      happens ts5 starts a fresh one and opens the page again, so a step
+      can take half a minute. Put its `obscura` program on your PATH or
+      in `~/.local/bin`.
     - **Text view**: ts5's own page reader, nothing to install. No scripts
       run, so a page built by scripts shows little; links and search forms
       work.
