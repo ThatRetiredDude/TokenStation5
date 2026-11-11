@@ -17,6 +17,7 @@
 
 #include "app.h"
 #include "files.h"
+#include "mcp.h"
 #include "json.h"
 #include "store.h"
 
@@ -570,6 +571,10 @@ std::string tools_json(const ToolSwitches &s) {
                       "read. It does not search.",
                       "url", "The page's full address, starting with https:// or http://."));
     if (s.files) add(files_json());
+    if (s.mcp) {
+        const std::string outside = mcp_tools_json();
+        if (!outside.empty()) add(outside);
+    }
     if (s.memory)
         add(tool_json("remember",
                       "Save a short note that you will still see in later chats. Use it only when the user asks "
@@ -677,6 +682,7 @@ std::string tool_call_line(const std::string &name, const std::string &args) {
     if (name == "run_command") return "$ " + one_line(arg_of(args, "command"), 400);
     if (name == "read_web_page") return "reads " + one_line(arg_of(args, "url"), 300);
     if (name == "remember") return "remembers: " + one_line(arg_of(args, "note"), 300);
+    if (is_mcp_tool(name)) return one_line(mcp_call_line(name, args), 400);
     return name + " " + one_line(args, 300);
 }
 
@@ -703,11 +709,13 @@ ToolResult tool_stopped() {
 ToolResult run_tool(const std::string &name, const std::string &args, const ToolSwitches &s,
                     const std::atomic<bool> &cancel) {
     ToolResult t;
-    const bool known = name == "run_command" || name == "read_web_page" || name == "remember" || is_browser_tool(name) ||
-                       is_file_tool(name);
+    const bool own = name == "run_command" || name == "read_web_page" || name == "remember" || is_browser_tool(name) ||
+                     is_file_tool(name);
+    const bool outside = !own && is_mcp_tool(name);  // (a tool of ts5-tui's own keeps its name)
+    const bool known = own || outside;
     const bool on = (name == "run_command" && s.terminal) || (name == "read_web_page" && s.page) ||
                     (name == "remember" && s.memory) || (is_browser_tool(name) && s.browser) ||
-                    (is_file_tool(name) && s.files);
+                    (is_file_tool(name) && s.files) || (outside && s.mcp);
     if (!known || !on) {
         t.ok = false;
         t.head = known ? "this tool is switched off" : "no such tool";
@@ -717,6 +725,7 @@ ToolResult run_tool(const std::string &name, const std::string &args, const Tool
     }
     if (is_browser_tool(name)) return browser_call(name, args, s, cancel);
     if (is_file_tool(name)) return file_call(name, args);
+    if (outside) return mcp_call(name, args, cancel);
     if (name == "run_command") return run_command(arg_of(args, "command"), cancel);
     if (name == "read_web_page") return read_page(arg_of(args, "url"), cancel);
     const std::string note = arg_of(args, "note");

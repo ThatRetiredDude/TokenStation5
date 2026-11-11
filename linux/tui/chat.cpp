@@ -13,6 +13,7 @@
 
 #include "files.h"
 #include "json.h"
+#include "mcp.h"
 #include "tools.h"
 
 namespace tui {
@@ -39,6 +40,8 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/think", "on|off|auto", "thinking before answering"},
         {"/tools", "[on|off|NAME on|off]", "the model's tools: search, pages, terminal, files, memory, browser (each has a switch)"},
         {"/browser", "[auto|obscura|chromium|text|PATH]", "the program the model's browser tool shows pages with"},
+        {"/mcp", "[add NAME PROGRAM…|remove NAME|NAME off|ask|allow|restart|only TOOL…|reload]",
+         "outside tools: programs that speak MCP, whose tools the model can then call"},
         {"/memory", "[forget N|clear|TEXT]", "the notes the model keeps between chats: list, remove, or add one"},
         {"/undo", "", "take back the last change the model made to a file"},
         {"/fan", "auto|cool|early|max", "the PS5's fan"},
@@ -368,12 +371,13 @@ void pending_calls(std::vector<Line> &out, const Chat &c, int owner, size_t at, 
         const bool page = kind == 1;
         wrap(out, {{kind >= 1 ? c.ask_cmd : tool_call_line(a.calls[k].name, a.calls[k].args), Style(t.accent2)}}, w, 2, "⚙ ",
              Style(t.accent2, kDefault, BOLD), "  ");
-        // A change to a file: the lines that go out and the lines that come in.
-        if (kind == 2)
+        // A change to a file: the lines that go out and the lines that come
+        // in. An outside tool's call: what it is called with, a line each.
+        if (kind == 2 || kind == 4)
             for (size_t i = 0; i < c.ask_preview.size();) {
                 const size_t e = std::min(c.ask_preview.find('\n', i), c.ask_preview.size());
                 const std::string l = c.ask_preview.substr(i, e - i);
-                const uint32_t col = l.compare(0, 2, "- ") == 0 ? t.bad : l.compare(0, 2, "+ ") == 0 ? t.good : t.dim;
+                const uint32_t col = kind == 4 ? t.dim : l.compare(0, 2, "- ") == 0 ? t.bad : l.compare(0, 2, "+ ") == 0 ? t.good : t.dim;
                 Line pl;
                 pl.add("    " + fit(l, std::max(8, w - 6)), Style(col));
                 out.push_back(pl);
@@ -390,7 +394,8 @@ void pending_calls(std::vector<Line> &out, const Chat &c, int owner, size_t at, 
             const std::string act[] = {"Do it", "Everything on pages in this chat", "No"};
             const std::string change[] = {c.ask_opt, "Every change in this chat", "No"};
             const std::string read[] = {"Read it", c.ask_opt, "No"};
-            const std::string *pick = kind == 3 ? read : kind == 2 ? change : page ? act : run;
+            const std::string call[] = {"Run it", c.ask_opt, "No"};
+            const std::string *pick = kind == 4 ? call : kind == 3 ? read : kind == 2 ? change : page ? act : run;
             const int on = c.ask_pick.load();
             st.add(kind == 3 ? "    Read it?  " : kind == 2 ? "    " + c.ask_opt + "?  " : page ? "    Do it?  " : "    Run it?  ",
                    Style(t.warn, kDefault, BOLD));
@@ -853,7 +858,8 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
                 // The model wants to run a command: it waits for a word.
                 x = s.put(x, y1, "?", Style(t.warn, kDefault, BOLD));
                 const int kind = c.ask_kind.load();
-                x = s.put(x + 1, y1, kind == 3   ? "the model wants to read a file"
+                x = s.put(x + 1, y1, kind == 4   ? "the model wants to use an outside tool"
+                                     : kind == 3 ? "the model wants to read a file"
                                      : kind == 2 ? "the model wants to change a file"
                                      : kind == 1 ? "the model wants to do something on a web page"
                                                  : "the model wants to run a command",
@@ -1228,6 +1234,19 @@ ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
                 }
             }
         }
+    } else if (!command && rq.tools.mcp && is_mcp_tool(u.name)) {
+        // An outside tool: what it does is the server's business, so every
+        // call is asked, until the user says "every call to this server,
+        // this chat" (or set the server to never ask).
+        const std::string server = mcp_server_of(u.name);
+        const bool asks = mcp_asks(u.name);
+        preview = mcp_call_preview(u.args);  // what it is called with, a line each
+        cmd = mcp_call_line(u.name, preview.empty() ? u.args : std::string());
+        opt = "Every call to " + server + ", this chat";
+        dir = server;
+        kind = 4;
+        std::lock_guard<std::mutex> l(c->mu);
+        ask = asks && std::find(c->mcp_ok.begin(), c->mcp_ok.end(), server) == c->mcp_ok.end();
     } else if (!command) {
         // What the browser would do beyond reading: asked the same way.
         cmd = c->ask_always_browser.load() || !rq.tools.browser_ask ? "" : browser_question(u.name, u.args, rq.tools, c->cancel);
@@ -1255,6 +1274,11 @@ ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
                 t.text = "The user said no to this, so it was not done on the page. Nothing is wrong with the page or "
                          "the browser. Do not try it again or in another way now: tell the user it was not done and "
                          "ask what they would like instead.";
+            } else if (kind == 4) {
+                t.head = "you said no: it wasn't run";
+                t.text = "The user said no to this call, so the tool was not run. Nothing is wrong with the tool. Do not "
+                         "try it again or in another way now: tell the user it was not run and ask what they would like "
+                         "instead.";
             } else if (kind >= 2) {
                 t.head = kind == 2 ? "you said no: nothing was changed" : "you said no: it wasn't read";
                 t.text = std::string("The user said no to this, so the file was not ") + (kind == 2 ? "changed" : "read") +
@@ -1616,6 +1640,10 @@ void complete(Chat &c, const ChatRequest &rq) {
                                           "memory on", "memory off"};
         else if (cmd == "/memory") pool = {"forget", "clear"};
         else if (cmd == "/browser") pool = {"auto", "obscura", "chromium", "text"};
+        else if (cmd == "/mcp") {
+            pool = {"add", "remove", "reload"};
+            for (auto &sv : mcp_servers()) pool.push_back(sv.name);
+        }
         else if (cmd == "/fan") pool = {"auto", "cool", "early", "max"};
         else if (cmd == "/theme")
             for (auto &t : themes()) pool.push_back(t.name);
@@ -1883,6 +1911,7 @@ void chat_new(Chat &c) {
     c.ask_always_browser = false;
     c.ask_always_files = false;
     c.read_dirs.clear();
+    c.mcp_ok.clear();
     c.memory.clear();
     c.memory_set = false;
 }
@@ -2082,9 +2111,9 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
             if (pick != 2 && now_s() - c.ask_t0.load() < 0.7) return CHAT_NONE;
             if (pick == 1) {
                 const int kind = c.ask_kind.load();
-                if (kind == 3) {
+                if (kind == 3 || kind == 4) {
                     std::lock_guard<std::mutex> l(c.mu);
-                    if (!c.ask_dir.empty()) c.read_dirs.push_back(c.ask_dir);
+                    if (!c.ask_dir.empty()) (kind == 3 ? c.read_dirs : c.mcp_ok).push_back(c.ask_dir);
                 } else {
                     (kind == 2 ? c.ask_always_files : kind == 1 ? c.ask_always_browser : c.ask_always) = true;
                 }

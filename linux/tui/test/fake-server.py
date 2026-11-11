@@ -30,6 +30,8 @@ a summary whole.
 click N, type N TEXT (typeonly: without Enter), more, back; in place of N,
 "WORDS" finds the number of the link, box or button with those words on the
 page the call before gave.
+"call NAME ;; JSON" calls the tool of that name, if the request offers it
+(an outside tool's: linux/tui/mcp.h and fake-mcp.py); "&&&" between several.
 FAKE_MODEL names the model. FAKE_HELPER names the helper drafting beside it
 (FAKE_HELPER_CTX: its context; "none": no helper), FAKE_HELPER_NOTE says
 why none is; with neither, /v1/models has no "helper" at all, as an older
@@ -217,6 +219,14 @@ class H(BaseHTTPRequestHandler):
                     calls = [("edit_file", {"path": path, "old_text": parts[1], "new_text": parts[2]})]
                 elif verb == "write":
                     calls = [("write_file", {"path": path, "content": parts[1]})]
+        elif asked.startswith("call "):
+            # "call NAME [;; JSON]": the tool of that name with those arguments, if the request
+            # offers it (an outside tool's, linux/tui/mcp.h); several with "&&&", a turn each.
+            steps = [c.strip() for c in asked[5:].split("&&&")]
+            if len(results) < len(steps):
+                name, _, a = steps[len(results)].partition(";;")
+                if name.strip() in tools:
+                    calls = [(name.strip(), json.loads(a) if a.strip() else {})]
         elif asked.startswith("browse ") and "browser_open" in tools:
             steps = [c.strip() for c in asked[7:].split(";;")]
             if len(results) < len(steps):

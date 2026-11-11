@@ -262,13 +262,15 @@ ts5-tui --url http://ps5.local:8081  # another one
   and restart it.
 - **Tools**: besides the web search, the model can read a web page, use
   a browser, run a command on this machine and keep notes between chats.
-  It can also read and change files. Each has its own switch (Settings →
+  It can also read and change files, and use the tools of outside
+  programs that speak MCP. Each has its own switch (Settings →
   Tool: search, pages, terminal, files, browser, memory; or
   `/tools terminal off`), and `/tools` lists them.
   **One switch turns them all off**: Settings → Tools, or `/tools off`
   (`/tools on` brings back the ones you had on), or `ts5-tui --no-tools`
   for one run. With it off the model gets nothing but the chat: no
-  search, no pages, no commands, no browser, no notes.
+  search, no pages, no commands, no browser, no notes, and no outside
+  program is running.
   The terminal, the files and the browser have three steps: off, on and
   asking first (the default), on and never asking (`/tools terminal
   allow`; `/tools ask` brings every question back).
@@ -349,6 +351,38 @@ ts5-tui --url http://ps5.local:8081  # another one
     started in are asked for each time. Paths start at that folder, the
     one the terminal's commands run in. Text files up to 8 MiB; a long
     file is read in parts.
+  - **Outside tools (MCP)**: a program that speaks MCP, the Model
+    Context Protocol, gives the model tools of its own (a calendar, a
+    database, a code host: whatever the program is for). Add one with the
+    command line its instructions give:
+    `/mcp add NAME PROGRAM [ARGUMENTS]` (often `npx -y …` or `uvx …`;
+    `KEY=VALUE` words before the program are its environment). ts5-tui
+    starts the program, asks what it offers and hands those tools to the
+    model as `NAME_TOOL`. **Every call is shown first**, with what it is
+    called with: Enter runs it, Esc doesn't, and → moves to "every call
+    to NAME, this chat". `/mcp` lists the programs, `/mcp NAME` its
+    tools; `/mcp NAME off`, `ask` or `allow` (never asks) are its three
+    steps, also in Settings; `/mcp NAME only TOOL …` leaves the model
+    just those tools (`all` gives them back), `/mcp NAME restart` starts
+    it again, `/mcp remove NAME` takes it out. The list is
+    `~/.config/tokenstation/mcp.json`, in the layout other MCP clients
+    read (`{"mcpServers": {"NAME": {"command": …, "args": […], "env":
+    {…}}}}`), so a list made for one of them can be pasted in
+    (`/mcp reload` reads it again); ts5-tui's own keys there are
+    `"disabled": true`, `"ask": false` and `"only": […]`.
+    The tools' descriptions are sent with every message, so a program
+    with many tools makes every chat shorter: `/mcp` says how many tokens
+    each one costs, and `only` cuts that down. A program runs as you, for
+    as long as ts5-tui does, and is ended when ts5-tui quits or the tools
+    are switched off; it doesn't get ts5's API key or web search key
+    unless its own `env` gives it one. What it prints for itself is kept
+    in `~/.local/share/tokenstation/mcp-NAME.log`. Only programs on this
+    machine so far: a server reached by a web address (`"url"`) is listed
+    as not spoken to yet. `ts5-tui --mcp` starts the programs, prints
+    what each offers and ends them; `ts5-tui --mcp-call TOOL '{…}'` makes
+    one call without a model. An outside program's results are text from
+    a stranger like a web page is, and the program itself can do whatever
+    you can: add only ones you trust.
   - **Memory**: tell it "remember that I write Rust" and it keeps a note.
     The model reads its notes at the start of every chat. `/memory` lists
     them, `/memory forget N` removes one, `/memory clear` all of them,

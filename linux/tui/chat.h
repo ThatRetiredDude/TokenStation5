@@ -113,6 +113,10 @@ struct Chat {
     std::atomic<bool> ask_always_files{false};
     std::string ask_preview, ask_opt, ask_dir;
     std::vector<std::string> read_dirs;
+    // And for an outside tool (mcp.h). ask_kind 4: the call, its arguments
+    // a line each in ask_preview, with "every call to SERVER, this chat"
+    // (ask_dir names the server); the servers said yes to are mcp_ok. Under mu.
+    std::vector<std::string> mcp_ok;
     std::string command;  // a slash command for the app to run
     std::vector<std::string> cands;  // Tab's candidates
     int cand_i = -1;

@@ -2,7 +2,9 @@
 // the web search (the server's own, with its Tavily key), a web page read
 // as text, a command run in a shell on this machine (asked first), notes
 // that are kept between chats, and a browser the model works by the numbers
-// on the page (links freely, buttons and typing asked first). The model calls them the way any OpenAI
+// on the page (links freely, buttons and typing asked first), files it
+// reads and changes (files.h), and the tools of outside programs that
+// speak MCP (mcp.h). The model calls them the way any OpenAI
 // client's tools are called ("tools" in the request, "tool_calls" back);
 // ts5-tui runs the call and sends the result in a "tool" message.
 #pragma once
@@ -26,7 +28,10 @@ struct ToolSwitches {
     // read_file, list_folder, edit_file, write_file (files.h). files_ask
     // false: they read and change without asking.
     bool files = false, files_ask = true;
-    bool any() const { return page || terminal || memory || browser || files; }  // tools of ts5-tui's own
+    // The outside tools (mcp.h): the programs in mcp.json that are not
+    // switched off there. Each has its own "asks first".
+    bool mcp = false;
+    bool any() const { return page || terminal || memory || browser || files || mcp; }  // tools ts5-tui runs
 };
 
 // The request's "tools" for the switches that are on: a JSON array, or "".
