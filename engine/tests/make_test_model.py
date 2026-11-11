@@ -451,7 +451,8 @@ def main():
         w.add_string("prism.hadamard.axis", "input-last-dimension")
         w.add_string("prism.hadamard.sign_mode", "explicit")
         w.add_array("prism.hadamard.weight_names", fold_names)
-        w.add_array("prism.hadamard.inverse_weight_names", ["token_embd.weight"])
+        if a.embd % a.fold == 0:  # blocks wider than the table's rows: only the wider inputs are rotated
+            w.add_array("prism.hadamard.inverse_weight_names", ["token_embd.weight"])
         widths = sorted(fold_signs)
         w.add_array("prism.hadamard.sign_widths", [int(x) for x in widths])
         w.add_array("prism.hadamard.sign_values", [int(v) for x in widths for v in fold_signs[x]])

@@ -21,9 +21,14 @@ inline const app::CatalogEntry kTested[] = {
      "empero-ai/Qwen3.8-9B-Distill-GGUF", "Qwen3.8-9B-Q4_K_M.gguf", "Qwen3.8-9B-Q4_K_M.gguf",
      "760121cd70bb4c36b2b5ec58eb765e0df5987efe", 5780090176u,
      "df13d66021cef676f82be74053220fd75af6bf2a6a7fb77f5222ab9e50744a7a"},
-    // Two bits a weight (Q2_0, stored rotated: prism.hadamard). The 4B wrote
-    // 112 tok/s and read a 4,096-token prompt at 1,296 on the PS5.
-    {app::CatalogEntry::Model, "bonsai2-4b", "Ternary Bonsai 2 4B", "Quick answers, small", "ternary-bonsai-2-4b",
+    // Two bits a weight (Q2_0, stored rotated: prism.hadamard). On the PS5
+    // the 27B wrote 22.6 tok/s and read a 4,096-token prompt at 174; the 4B
+    // 112 and 1,296.
+    {app::CatalogEntry::Model, "bonsai2-27b", "Ternary Bonsai 2 27B", "Biggest, slower",
+     "ternary-bonsai-2-27b", "prism-ml/Ternary-Bonsai-2-27B-gguf", "Ternary-Bonsai-2-27B-Q2_0.gguf",
+     "Ternary-Bonsai-2-27B-Q2_0.gguf", "839bd57023c1558945afea70a74fa83c054f35f9", 7626008928u,
+     "4f99aed01b8a877e153f9aa6569a4440fe17c59701cc0953e36d7f460549e70e"},
+    {app::CatalogEntry::Model, "bonsai2-4b", "Ternary Bonsai 2 4B", "Quick and small", "ternary-bonsai-2-4b",
      "prism-ml/Ternary-Bonsai-2-4B-gguf", "Ternary-Bonsai-2-4B-Q2_0.gguf", "Ternary-Bonsai-2-4B-Q2_0.gguf",
      "50ebba61be85e5be07e8083db468ace0fc1bac43", 1212103520u,
      "64a5183b44921bdb5ac4a6f5f92007821d6ebe5c66997d3c147fd214ab9433d4"},

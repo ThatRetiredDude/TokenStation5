@@ -2,7 +2,7 @@
 // files' prism.hadamard, see Weight in model.h): for each of ntok vectors of
 // ncols floats in X (from x_off), Y = H (D x), with D the signs in S and H
 // the Sylvester matrix over sqrt(block) on each block of `block` values
-// (a power of two up to 1024). flags 1: the signs before the rotation (a
+// (a power of two up to 4096). flags 1: the signs before the rotation (a
 // product's input); 2: after it (a row looked up in a table stored rotated);
 // 4: the vector's value heads are regrouped first, from [hd, nk, rep] to
 // [hd, rep, nk] (a linear layer's output projection).
@@ -15,7 +15,7 @@ layout(std430, binding = 1) readonly buffer Sbuf { float S[]; };
 layout(std430, binding = 2) writeonly buffer Ybuf { float Y[]; };
 layout(push_constant) uniform PC { uint ncols, block, x_off, flags, hd, nk, rep; } pc;
 
-shared float s[1024];
+shared float s[4096];  // 16 KiB: what every Vulkan device must give a kernel
 
 void main() {
     const uint t = gl_LocalInvocationID.x;

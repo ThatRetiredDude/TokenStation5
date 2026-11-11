@@ -236,8 +236,10 @@ bool Model::read_folds(std::string &err) {
         return no("version " + std::to_string(version) + (fold_tied_ ? " with a tied output" : ""));
     if (fold_tied_ && gguf.find("output.weight")) return no("a tied output beside an output.weight");
     const int64_t block = gguf.get_int(p + "block_size", 0);
-    if (block < 2 || block > 1024 || (block & (block - 1)) != 0)
-        return no("blocks of " + std::to_string(block) + " values (ts5 rotates blocks of up to 1,024)");
+    // 4,096 is the Bonsai 9B's (the 27B's are 1,024, the 4B's 512), and what
+    // hadamard.comp's shared memory holds.
+    if (block < 2 || block > 4096 || (block & (block - 1)) != 0)
+        return no("blocks of " + std::to_string(block) + " values (ts5 rotates blocks of up to 4,096)");
     if (gguf.get_str(p + "transform") != "normalized-sylvester-walsh-hadamard")
         return no("the transform \"" + gguf.get_str(p + "transform") + "\"");
     if (gguf.get_str(p + "axis") != "input-last-dimension") return no("the axis \"" + gguf.get_str(p + "axis") + "\"");

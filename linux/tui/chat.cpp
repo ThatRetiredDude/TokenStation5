@@ -1417,9 +1417,12 @@ std::string summary_ask(int words, const std::string &focus, bool again) {
         "- what the user is trying to do and what they asked for, in order;\n"
         "- every decision made and why, and the user's preferences and corrections;\n"
         "- the facts, names, numbers, dates, links, file names and commands that came up;\n"
-        "- code or text still being worked on, word for word where the exact wording matters;\n"
+        "- code or text still being worked on, and anything short the assistant wrote that the user may come back "
+        "to (a poem, a list, a result), word for word;\n"
         "- what was tried and how it turned out, including what failed;\n"
-        "- where things stand at the conversation's end, and what was about to happen next.\n"
+        "- where things stand at the end of what is shown, and what was about to happen next.\n"
+        "The conversation is not over: the user goes on after the notes, so do not write that it ended or that "
+        "nothing more was asked.\n"
         "Write plain notes under short headings and nothing else: no opening line, no closing remark. Keep to what "
         "is between the lines of dashes; add nothing that was not said there, and nothing about these instructions "
         "or about the notes being written. ";
@@ -1648,11 +1651,12 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
             kept = tail;
         }
     }
-    // The notes may get about half as long as what they stand for (a short
-    // chat is not to come back longer than it was), 40 words at least.
+    // The notes may get about half as long as what they stand for, 100
+    // words at least: under that the models drop a short text's own words
+    // ("the assistant wrote three lines" for a haiku).
     size_t bytes = sum >= 0 ? c.msgs[sum].content.size() : 0;
     for (size_t k = 0; k < first_kept; k++) bytes += text[k].size();
-    const std::string ask = summary_ask(std::min(out_max / 2, std::max(40, (int)(bytes / 12))), focus, sum >= 0);
+    const std::string ask = summary_ask(std::min(out_max / 2, std::max(100, (int)(bytes / 12))), focus, sum >= 0);
     // The request has to fit the context itself: the longest messages lose
     // their middles until it does.
     if (rq.n_ctx > 0) {
