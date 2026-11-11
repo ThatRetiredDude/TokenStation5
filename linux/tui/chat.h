@@ -13,7 +13,10 @@
 namespace tui {
 
 struct Msg {
-    std::string role;  // user, assistant, or note (ts5-tui's own, never sent)
+    // user, assistant, note (ts5-tui's own, never sent), or summary: the
+    // model's summary of the chat before it, which it goes on from in place
+    // of the messages it stands for (chat_summarize).
+    std::string role;
     std::string content, reasoning, error, model;
     bool done = false, stopped = false;
     double t0 = 0, t_first = 0, t_think_end = 0, t_end = 0;
@@ -22,6 +25,11 @@ struct Msg {
     int prompt_tokens = 0, gen_tokens = 0, total_tokens = 0;
     std::string finish;  // the server's finish_reason: "stop", "length"…
     int think_open = -1;  // its thinking: -1 as Chat::show_think says, 0 folded, 1 open (a click)
+    bool full = false;    // the server refused it: the chat no longer fits its context
+    // A summary: the first of the messages before it that the model still
+    // gets as they were, the chat's tokens before it and (roughly) after,
+    // and why it was written (0 nearly full, 1 full, 2 asked for).
+    int keep_from = -1, sum_before = 0, sum_after = 0, sum_why = 0;
 };
 
 // Where a click does something, on the chat as last drawn.
@@ -47,6 +55,13 @@ struct Chat {
     bool speed_new = false;
     double speed_gen = 0, speed_prompt = 0;
     int ctx_used = 0;
+    std::string unsent;   // a message a failed summary didn't send: back to the input (under mu)
+    // Messages entered while an answer was coming, in order: each is sent
+    // when the answer before it is done (chat_send_queued, from the app's
+    // tick). queue_held: that answer was stopped or failed, so they wait for
+    // Enter (go on) or Esc (drop them).
+    std::vector<std::string> queued;
+    bool queue_held = false;
     std::string command;  // a slash command for the app to run
     std::vector<std::string> cands;  // Tab's candidates
     int cand_i = -1;
@@ -71,6 +86,8 @@ struct ChatRequest {
     int thinking = 0;
     double temp = -1;
     int max_tokens = 0;
+    int n_ctx = 0;        // the loaded model's context, 0 unknown
+    bool summarize = true;  // a chat that fills up is summarized and goes on (Settings)
     std::vector<std::string> model_names;  // for /model's completion
     std::vector<std::string> catalog_names;  // for /download's
 };
@@ -85,6 +102,28 @@ const std::vector<SlashCommand> &slash_commands();
 void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v);
 int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h);
 void chat_note(Chat &c, const std::string &text);
+// Sends the first of the queued messages, after a summary where the chat is
+// nearly full. False when an answer is still coming or none waits.
+bool chat_send_queued(Chat &c, const ChatRequest &rq);
+// The summary. The model is asked for a detailed summary of the chat so far;
+// from then on it gets that and the last messages (a quarter of its context
+// at most) in place of the whole chat, which stays on screen and saved.
+// `then`: the user's next message, sent once the summary is written (given
+// back to the input if it isn't). focus: what /compact was told to keep.
+// why: 0 the chat is nearly full, 1 full, 2 asked for. False, with the
+// reason, when there is nothing to summarize or an answer is still coming.
+bool chat_summarize(Chat &c, const ChatRequest &rq, const std::string &then, const std::string &focus, int why,
+                    std::string &err);
+// Sets the chat's fill from its text, roughly (a chat just opened: the
+// server's count comes with the next answer).
+void chat_count(Chat &c);
+// Whether the chat would be too full for `next` and an answer to it.
+bool chat_nearly_full(Chat &c, const ChatRequest &rq, const std::string &next);
+// The last message, when the server refused it because the chat is full:
+// takes it and its empty answer off the chat and returns its text, to send
+// again after a summary. `alone` when a summary was just written for it, so
+// it is the message itself that is too long. "" otherwise.
+std::string chat_take_refused(Chat &c, bool &alone);
 // A click at (x, y): opens or folds a message's thinking itself (true); a
 // copy mark is handed back in *hit (true); else false.
 bool chat_click(Chat &c, int x, int y, ChatHit *hit);

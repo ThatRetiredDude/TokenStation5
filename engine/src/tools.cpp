@@ -9,6 +9,9 @@
 
 namespace ts5 {
 
+const char *const kG4Thought = "<|channel>thought\n";
+const char *const kG4ThoughtEnd = "<channel|>";
+
 namespace {
 
 const char *kQwenDefaultSystem = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.";
@@ -577,18 +580,51 @@ std::string g4_response(const std::string &name, const std::string &result) {
     return "<|tool_response>response:" + name + "{value:" + g4_str(result) + "}<tool_response|>";
 }
 
-std::string render_gemma4(const std::vector<Message> &all, const std::vector<Json> &tools) {
+// An assistant message as Gemma 4's template takes it: its thinking (the
+// <think> block parse_messages writes from reasoning_content, or one a client
+// left in the content) apart from its text, and the text without any thought
+// channel left in it (the template's strip_thinking).
+void g4_split(const std::string &content, std::string &thought, std::string &text) {
+    thought.clear();
+    text = content;
+    const size_t e = content.rfind("</think>");
+    if (e != std::string::npos) {
+        const std::string before = content.substr(0, content.find("</think>"));
+        const size_t b = before.rfind("<think>");
+        thought = strip(b == std::string::npos ? before : before.substr(b + 7));
+        text = content.substr(e + 8);
+    }
+    std::string kept;
+    for (size_t at = 0;;) {
+        const size_t close = text.find(kG4ThoughtEnd, at);
+        const std::string part = text.substr(at, close == std::string::npos ? std::string::npos : close - at);
+        kept += part.substr(0, part.find("<|channel>"));
+        if (close == std::string::npos) break;
+        at = close + strlen(kG4ThoughtEnd);
+    }
+    text = strip(kept);
+}
+
+// think: the request's thinking is on, which the template says at the top of
+// a system turn it opens for it even with no system message.
+std::string render_gemma4(const std::vector<Message> &all, const std::vector<Json> &tools, bool think) {
     std::string system, s;
     std::vector<Message> msgs;
     for (auto &m : all) {
         if (m.role == "system") system += (system.empty() ? "" : "\n\n") + strip(m.content);
         else msgs.push_back(m);
     }
-    if (!system.empty() || !tools.empty()) {
-        s += "<|turn>system\n" + system;
+    if (think || !system.empty() || !tools.empty()) {
+        s += std::string("<|turn>system\n") + (think ? "<|think|>\n" : "") + system;
         for (auto &tool : tools) s += g4_declaration(tool);
         s += "<turn|>\n";
     }
+    // The template keeps a turn's thinking only after the latest user message
+    // (the turns of a tool loop that is still going on).
+    size_t last_user = 0;
+    bool any_user = false;
+    for (size_t i = 0; i < msgs.size(); i++)
+        if (msgs[i].role == "user") last_user = i, any_user = true;
     // An assistant message writes its calls, then the results of the tool
     // messages that follow it, then its own text; with calls, its turn stays
     // open for the next assistant message, and for the model where nothing
@@ -600,6 +636,9 @@ std::string render_gemma4(const std::vector<Message> &all, const std::vector<Jso
         const Message &m = msgs[i];
         if (m.role == "assistant" || m.role == "tool") {
             if (!open) s += "<|turn>model\n", open = true;
+            std::string thought, said;
+            if (m.role == "assistant") g4_split(m.content, thought, said);
+            if (!thought.empty() && (!any_user || i > last_user)) s += kG4Thought + thought + "\n" + kG4ThoughtEnd;
             for (auto &c : m.calls) {
                 names[c.id] = c.name;
                 s += g4_call(c);
@@ -612,7 +651,7 @@ std::string render_gemma4(const std::vector<Message> &all, const std::vector<Jso
                                  msgs[k].content);
             }
             if (m.role == "tool") s += g4_response(!m.name.empty() ? m.name : "unknown", m.content);  // a stray result
-            const std::string text = strip(m.content);
+            const std::string text = m.role == "assistant" ? said : strip(m.content);
             if (m.role == "assistant") s += text;
             i = k - 1;
             const bool calls = !m.calls.empty() || m.role == "tool";
@@ -630,8 +669,9 @@ std::string render_gemma4(const std::vector<Message> &all, const std::vector<Jso
         if (open) s += "<turn|>\n", open = false;
         s += "<|turn>user\n" + strip(m.content) + "<turn|>\n";
     }
-    // Results the model goes on from; otherwise its turn opens, with an empty thought.
-    return ends_open ? s : s + "<|turn>model\n<|channel>thought\n<channel|>";
+    // Results the model goes on from; otherwise its turn opens (turn_opening
+    // writes the empty thought of a turn that doesn't think).
+    return ends_open ? s : s + "<|turn>model\n";
 }
 
 // Gemma 4's argument syntax as JSON: bare keys, strings between <|"|> marks
@@ -730,17 +770,22 @@ bool g4_call_from(const std::string &body, ToolCall &call) {
 
 }  // namespace
 
-// Gemma 4's template has the switch too, but its thinking is off until the
-// engine renders its thought channel: for now its turns open with an empty
-// thought (Tokenizer::apply_chat).
-bool can_skip_thinking(const Tokenizer &t) {
-    return t.chat_format() != Tokenizer::GEMMA4 && has(t.chat_template(), "enable_thinking");
-}
+bool can_skip_thinking(const Tokenizer &t) { return has(t.chat_template(), "enable_thinking"); }
 
 const char *const kNoThinking = "<think>\n\n</think>\n\n";
 const char *const kThinkingOpen = "<think>\n";
 
-std::string turn_opening(const Tokenizer &t, bool think) {
+std::string turn_opening(const Tokenizer &t, bool think, const std::string &prompt) {
+    if (t.chat_format() == Tokenizer::GEMMA4) {
+        // As the end of Gemma 4's template: a new turn of the model's opens
+        // with an empty thought when it isn't to think; after a tool's
+        // results, where it goes on in its turn, the thinking opens instead.
+        // Calls still waiting for their results get neither.
+        // (A template without the switch gets the empty thought always, as before.)
+        think &= can_skip_thinking(t);
+        if (ends(prompt, "<|turn>model\n")) return think ? "" : std::string(kG4Thought) + kG4ThoughtEnd;
+        return think && !ends(prompt, "<|tool_response>") ? kG4Thought : "";
+    }
     if (!think) return can_skip_thinking(t) ? kNoThinking : "";
     // Qwen3.5's template opens the thinking itself ({{- '<think>\n' }}, the
     // end of its generation prompt); Qwen3's leaves it to the model.
@@ -753,6 +798,58 @@ std::string turn_opening(const Tokenizer &t, bool think) {
     // answer. Their turns open it here whichever template the file has.
     if (has(tmpl, "<｜Assistant｜>") && has(tmpl, "</think>")) return kThinkingOpen;
     return "";
+}
+
+std::string ThoughtChannel::map(const std::string &piece) {
+    static const std::string open = "<|channel>", close = kG4ThoughtEnd;
+    const std::string in = held_ + piece;
+    std::string out;
+    held_.clear();
+    for (size_t i = 0; i < in.size();) {
+        if (name_) {
+            // "thought", then the newline the thinking starts after. Anything
+            // longer on that line is no name: it stays.
+            const size_t nl = in.find('\n', i);
+            const size_t len = (nl == std::string::npos ? in.size() : nl) - i;
+            if (len <= 16 && nl == std::string::npos) {
+                held_ = in.substr(i);
+                return out;
+            }
+            name_ = false;
+            if (len <= 16) i = nl;
+            continue;
+        }
+        const size_t lt = in.find('<', i);
+        if (lt == std::string::npos) {
+            out.append(in, i, std::string::npos);
+            break;
+        }
+        out.append(in, i, lt - i);
+        i = lt;
+        const size_t left = in.size() - i;
+        if (in.compare(i, open.size(), open) == 0) {
+            out += "<think>";
+            i += open.size();
+            name_ = true;
+        } else if (in.compare(i, close.size(), close) == 0) {
+            out += "</think>";
+            i += close.size();
+        } else if (left < open.size() && (open.compare(0, left, in, i, left) == 0 || close.compare(0, left, in, i, left) == 0)) {
+            held_ = in.substr(i);  // could be the start of a mark
+            break;
+        } else {
+            out += '<';
+            i++;
+        }
+    }
+    return out;
+}
+
+std::string ThoughtChannel::rest() {
+    std::string r = name_ ? std::string() : held_;
+    held_.clear();
+    name_ = false;
+    return r;
 }
 
 ToolFormat tool_format(const Tokenizer &t) {
@@ -812,8 +909,12 @@ std::vector<Message> parse_messages(const Json &messages) {
 }
 
 std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, const std::vector<Json> &tools,
-                        const std::string &today) {
+                        const std::string &today, bool think) {
     const ToolFormat f = tool_format(t);
+    // Gemma 4's thinking is in its prompt from the top (a system turn), and
+    // its earlier turns' thinking is left out, tools or not.
+    if (t.chat_format() == Tokenizer::GEMMA4)
+        return render_gemma4(msgs, f == ToolFormat::GEMMA4 ? tools : std::vector<Json>(), think && can_skip_thinking(t));
     // Nemo's chat without tools differs from the older Mistral format too
     // ("[INST]" with no space, the system message in the last user message).
     if (f == ToolFormat::MISTRAL) return render_mistral(t, msgs, tools);
@@ -828,7 +929,6 @@ std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, co
         return t.apply_chat(plain);
     }
     if (f == ToolFormat::GEMMA) return render_gemma(msgs, tools);
-    if (f == ToolFormat::GEMMA4) return render_gemma4(msgs, tools);
     return f == ToolFormat::HERMES ? render_hermes(t, msgs, tools) : render_llama3(msgs, tools, today);
 }
 

@@ -115,12 +115,15 @@ TokenStation5 under `provider`:
 
 Then pick `tokenstation5/Qwen2.5-Coder-7B-Instruct-Q4_K_M` as the model.
 Put the model's `context_length` from `/v1/models` in `limit.context`. Leave
-`reasoning` out for the Llama and Qwen 2.5 models (only Qwen 3 thinks).
+`reasoning` out for the Llama and Qwen 2.5 models (only Qwen 3 and Gemma 4
+think).
 
-Qwen 3 thinks before it answers, and the thinking comes back apart from the
-answer, as `reasoning_content`. To skip it for a request, send
+Qwen 3 and Gemma 4 think before they answer, and the thinking comes back
+apart from the answer, as `reasoning_content`. To skip it for a request, send
 `"chat_template_kwargs": {"enable_thinking": false}` (as vLLM and llama.cpp
-take it) or end the message with `/no_think`. A reply capped under 1,024
+take it) or, for Qwen 3, end the message with `/no_think`. `/v1/models` says
+under `settings.thinking` whether the loaded model thinks when a request
+doesn't say. A reply capped under 1,024
 tokens (`max_tokens`) never thinks, so an app asking for a short title or a
 line of code still gets an answer. Stop strings end the answer, never the
 thinking.

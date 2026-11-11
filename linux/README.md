@@ -169,7 +169,12 @@ ts5-tui --url http://ps5.local:8081  # another one
   red from 83 °C, a warning at the 85 °C limiter) and the fan.
 - **The `ts5>` prompt at the bottom**: Enter sends, Ctrl+J (or Alt+Enter)
   starts a new line, the up arrow brings back what you typed before, Esc
-  stops an answer. Commands start with `/` and Tab completes them, and model
+  stops an answer. While an answer is coming you can go on typing: Enter
+  queues the message (and the next, and the next), they show over the
+  prompt, and each is sent by itself when the answer before it is done. The
+  up arrow takes the last queued one back to change it. Stopping an answer
+  (or one that fails) leaves the queue waiting: Enter sends it on, Esc drops
+  it. Commands start with `/` and Tab completes them, and model
   names after `/model`: `/model`, `/download`, `/search`, `/new`, `/chats`, `/open`,
   `/save`, `/copy`, `/find`, `/tune`, `/check`, `/bench`, `/usage`, `/keys`,
   `/think on|off`, `/fan auto|cool|early|max`, `/theme`, `/help`, `/unload`,
@@ -225,7 +230,9 @@ ts5-tui --url http://ps5.local:8081  # another one
   takes, that fit this GPU's memory with room for a chat, the most
   downloaded first, chat models before the rest. Left out: repos the words
   match only by their uploader's name, embedding and reranking models, and
-  side files that aren't the model (image encoders, `mtp-` files). They're listed under the
+  files that aren't the model itself (image encoders, `mtp-` files, and any
+  file too small to hold the whole model, such as a draft head published
+  beside it). They're listed under the
   catalog with their size, who made the file and how long a chat they get
   here; Enter downloads one, checked by the SHA-256 Hugging Face gives for
   it. It's the TV app's search (`tokenstation --hf-search WORDS` prints
@@ -235,9 +242,24 @@ ts5-tui --url http://ps5.local:8081  # another one
   format, in `~/.local/share/tokenstation/chats`. `/chats` lists them (and
   the TV service's, when you may read them), `/chats TEXT` finds one,
   `/open N` opens one to go on with it.
-- **A full chat says so**: when an answer stops because the chat filled the
-  model's context, a note under it says so (and Ctrl+N starts a new chat),
-  instead of a silently cut-off answer.
+- **A full chat goes on**: a chat grows until the model's memory for it (its
+  context) is nearly full. Then, before your next message goes out, the
+  model writes a detailed summary of the chat so far, and the chat goes on
+  from that summary and its last messages, with room again. The whole chat
+  stays on the screen and in the saved file; a click on the summary opens
+  it. `/compact` does it at any time (`/compact keep the file names` says
+  what must not be lost). Settings → Full chat: "stops" turns it off, and
+  a full chat then says so under the answer that was cut (Ctrl+N starts a
+  new one). A summary is the model's own notes, so details it leaves out
+  are gone for it: a longer Context (Settings) is the way to keep more.
+- **Web search**: Settings → Web search key takes a free key from
+  [app.tavily.com](https://app.tavily.com). A model ts5-tui loads itself
+  then searches the web when a question needs it (models that use tools;
+  see [docs/WEB_SEARCH.md](../docs/WEB_SEARCH.md)). The key is kept in
+  ts5-tui's own settings file (yours alone to read) and handed to the
+  engine in its environment, never on a command line. For the API-only
+  service, add `TAVILY_API_KEY=tvly-...` to `/etc/default/tokenstation`
+  and restart it.
 - **Keys that can't surprise**: with something typed at the prompt, Tab
   stays there (it completes a command) instead of changing the page. PgUp
   and PgDn scroll the chat, and so do Shift or Alt with the up and down

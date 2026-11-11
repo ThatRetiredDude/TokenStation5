@@ -50,6 +50,9 @@ inline std::string reason(const std::string &raw) {
         r = "the file is in an old format; download a newer copy";
     } else if (has(raw, "not a GGUF")) {
         r = "this file isn't a model";
+    } else if (has(raw, "not a whole model")) {
+        r = "this file is only a piece of a model (an add-on such as a draft head, or one part of a split file); "
+            "download the model's main file";
     } else if (has(raw, "truncated") || has(raw, "missing hyperparameters") ||
                has(raw, "missing tensor") || has(raw, "no tokenizer.ggml.tokens")) {
         r = "this file isn't a complete model; copy or download it again";

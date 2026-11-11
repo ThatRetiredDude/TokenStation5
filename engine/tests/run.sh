@@ -1110,6 +1110,13 @@ moe="$work/llama-experts.gguf"
 { "$ts5" run -m "$moe" -p hi -n 1 2>&1 > /dev/null || true; } |
     grep "mixture-of-experts models are not supported yet (this one has 8 experts)"
 ! "$ts5" run -m "$moe" -p hi -n 1 > /dev/null 2>&1 || unexpected $LINENO
+echo "== a file with only a part of the model's layers (a draft head, one part of a split file) is refused in plain words"
+part="$work/qwen3-last-layer.gguf"
+[ -s "$part" ] || python3 "$here/make_test_model.py" --arch qwen3 --quant F32 --layers 4 --first-layer 3 \
+    --vocab "$work/ggml-vocab-qwen2.gguf" "$part" > /dev/null
+{ "$ts5" run -m "$part" -p hi -n 1 2>&1 > /dev/null || true; } |
+    grep "this file is not a whole model: it holds 1 of the model's 4 layers"
+! "$ts5" run -m "$part" -p hi -n 1 > /dev/null 2>&1 || unexpected $LINENO
 # The sizing tests below count the memory a load takes to the token, so they
 # run without the two memory savers on by default (token table read from the
 # file, the blocks' unused ends counted), which their own sections turn on.
