@@ -158,6 +158,8 @@
 #include "get_rows_q4_0.spv.h"
 #include "get_rows_q4_1.spv.h"
 #include "get_rows_q5_0.spv.h"
+#include "get_rows_q1_0.spv.h"
+#include "get_rows_q2_0.spv.h"
 #include "get_rows_q5_1.spv.h"
 #include "get_rows_q4_k.spv.h"
 #include "get_rows_q5_k.spv.h"
@@ -168,6 +170,8 @@
 #include "matmul_q4_0.spv.h"
 #include "matmul_q4_1.spv.h"
 #include "matmul_q5_0.spv.h"
+#include "matmul_q1_0.spv.h"
+#include "matmul_q2_0.spv.h"
 #include "matmul_q5_1.spv.h"
 #include "matmul_q4_k.spv.h"
 #include "matmul_q5_k.spv.h"
@@ -209,6 +213,8 @@
 #include "mm_q4_1.spv.h"
 #include "mm_q4_k.spv.h"
 #include "mm_q5_0.spv.h"
+#include "mm_q1_0.spv.h"
+#include "mm_q2_0.spv.h"
 #include "mm_q5_1.spv.h"
 #include "mm_q5_k.spv.h"
 #include "mm_q6_k.spv.h"
@@ -364,6 +370,8 @@ const char *qname(uint32_t t) {
         case GGML_Q4_K: return "q4_k";
         case GGML_Q5_K: return "q5_k";
         case GGML_Q6_K: return "q6_k";
+        case GGML_Q1_0: return "q1_0";
+        case GGML_Q2_0: return "q2_0";
         default: return nullptr;
     }
 }
@@ -1167,8 +1175,10 @@ private:
         return false;
         P(matmul_f32, 3) P(matmul_f16, 3) P(matmul_q4_0, 3) P(matmul_q8_0, 3)
         P(matmul_q4_1, 3) P(matmul_q5_0, 3) P(matmul_q5_1, 3)
+        P(matmul_q1_0, 3) P(matmul_q2_0, 3)
         P(matmul_q4_k, 3) P(matmul_q5_k, 3) P(matmul_q6_k, 3)
         P(mm_f32, 3) P(mm_f16, 3) P(mm_q4_0, 3) P(mm_q8_0, 3) P(mm_q4_1, 3) P(mm_q5_0, 3) P(mm_q5_1, 3)
+        P(mm_q1_0, 3) P(mm_q2_0, 3)
         P(mm_q4_k, 3) P(mm_q5_k, 3) P(mm_q6_k, 3) P(mmb_q4_k, 4) P(mmb_q6_k, 4) P(mmb_reduce, 2)
         P(mmb16_q4_k, 4) P(mmb16_q6_k, 4) P(mmb_q5_k, 4) P(mmb_q8_0, 4) P(mmb16_q5_k, 4) P(mmb16_q8_0, 4)
         P(mmb16d_q4_k, 4) P(mmb16d_q5_k, 4) P(mmb16d_q6_k, 4) P(mmb16d_q8_0, 4)
@@ -1222,6 +1232,7 @@ private:
         }
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
+        P(get_rows_q1_0, 3) P(get_rows_q2_0, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
         P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(qkv_post_q8t, 13) P(qkv_post_q4, 13) P(qkv_post_q4t, 13) P(qkv_post_q8tv, 13) P(qkv_post_q4tv, 13) P(qkv_post_k8v4, 13) P(qkv_post_k8v4t, 13) P(qkv_post_k8v4tv, 13) P(attn_unturn, 1) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_q4, 7) P(attn_k8v4, 7) P(attn_merge, 2) 
         if (const uint32_t npt = norm_npt();

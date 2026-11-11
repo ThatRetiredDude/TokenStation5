@@ -96,6 +96,21 @@ void dequantize_row(uint32_t type, const void *src, float *y, int64_t n) {
                 }
             }
             return;
+        case GGML_Q1_0:
+            // d, then 128 bits, the first value in the lowest bit: +d where set, -d where not.
+            for (int64_t b = 0; b < n / 128; b++, p += 18, y += 128) {
+                const float d = rd16(p);
+                for (int j = 0; j < 128; j++) y[j] = (p[2 + j / 8] >> (j % 8)) & 1 ? d : -d;
+            }
+            return;
+        case GGML_Q2_0:
+            // d, then 64 values of two bits, the first in the lowest: (q - 1) * d,
+            // so -d, 0, +d and +2d.
+            for (int64_t b = 0; b < n / 64; b++, p += 18, y += 64) {
+                const float d = rd16(p);
+                for (int j = 0; j < 64; j++) y[j] = (float)((int)((p[2 + j / 4] >> (j % 4 * 2)) & 3) - 1) * d;
+            }
+            return;
         case GGML_Q4_1:
             for (int64_t b = 0; b < n / 32; b++, p += 20, y += 32) {
                 float d = rd16(p), m = rd16(p + 2);

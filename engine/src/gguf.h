@@ -13,6 +13,9 @@ enum GgmlType : uint32_t {
     GGML_F32 = 0, GGML_F16 = 1, GGML_Q4_0 = 2, GGML_Q4_1 = 3, GGML_Q5_0 = 6, GGML_Q5_1 = 7,
     GGML_Q8_0 = 8, GGML_Q8_1 = 9, GGML_Q2_K = 10, GGML_Q3_K = 11, GGML_Q4_K = 12,
     GGML_Q5_K = 13, GGML_Q6_K = 14, GGML_Q8_K = 15, GGML_BF16 = 30,
+    // One bit a weight (+d or -d) in blocks of 128, and two bits (-d, 0, +d,
+    // +2d) in blocks of 64, an f16 d each: the Bonsai models' files.
+    GGML_Q1_0 = 41, GGML_Q2_0 = 42,
 };
 
 const char *type_name(uint32_t t);

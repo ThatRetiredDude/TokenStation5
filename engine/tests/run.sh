@@ -60,6 +60,10 @@ for q in Q4_1 Q5_0 Q5_1; do
     mk qwen2 qwen2 $q
 done
 mk llama llama-spm Q5_0
+# One bit and two bits a weight (ggml's Q1_0 and Q2_0, 128 and 64 values a
+# block): what the Bonsai files are stored in.
+mk qwen3 qwen2 Q1_0
+mk qwen3 qwen2 Q2_0
 
 g4=()
 for q in F32 Q8_0; do
@@ -124,7 +128,7 @@ rm -f "$work/tail-vk.bin" "$work/tail-cpu.bin" "$work/tail-v4.bin"
 # with every 4th one full attention, gated by a sigmoid, M-RoPE on a quarter
 # of each head; heads of 128 in both.
 q35=()
-for q in F32 Q4_K_M; do
+for q in F32 Q4_K_M Q2_0; do
     out="$work/qwen35-$q.gguf"
     [ -s "$out" ] || python3 "$here/make_test_model.py" --arch qwen35 --quant $q --layers 8 --heads 2 --kv-heads 1 \
         --seed 3 --vocab "$work/ggml-vocab-qwen35.gguf" "$out" > /dev/null

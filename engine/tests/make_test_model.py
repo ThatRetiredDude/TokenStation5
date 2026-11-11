@@ -5,14 +5,15 @@
 
 The tokenizer is copied from a vocab-only GGUF (llama.cpp ships them under
 models/), so llama.cpp can load the file and act as the reference. Weights are
-F32, F16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1 or a Q4_K/Q6_K mix like llama.cpp's
-Q4_K_M (--quant); llama-quantize makes the other K-quant variants. Dimensions are multiples of 256 so K-quants apply to every
+F32, F16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, the Bonsai models' Q1_0 and Q2_0, or a
+Q4_K/Q6_K mix like llama.cpp's Q4_K_M (--quant); llama-quantize makes the other K-quant variants. Dimensions are multiples of 256 so K-quants apply to every
 matrix.
 """
 import argparse
 
 import numpy as np
 from gguf import GGMLQuantizationType, GGUFReader, GGUFValueType, GGUFWriter, quants
+from gguf.constants import GGML_QUANT_SIZES
 
 
 def copy_tokenizer(reader, writer, pad_tokens=0, rename_controls=False, rename_token=-1, rename_to="[RENAMED]",
@@ -125,6 +126,37 @@ def quantize_q6_k(x):
     return out.reshape(x.shape[0], -1)
 
 
+# The Bonsai models' types. Q1_0: 128 values a block, an f16 d and a bit each
+# (+d where set, -d where not). Q2_0: 64 values a block, an f16 d and two bits
+# each, (q - 1) * d. Newer than some gguf packages, so written here, with
+# Q2_0's number and sizes added where the package lacks them.
+Q1_0 = 41
+Q2_0 = 42
+for number, sizes in ((Q1_0, (128, 18)), (Q2_0, (64, 18))):
+    if number not in GGML_QUANT_SIZES:
+        GGML_QUANT_SIZES[number] = sizes
+
+
+def quantize_q1_0(x):
+    rows, cols = x.shape
+    b = x.reshape(rows, cols // 128, 128)
+    d = np.ascontiguousarray(np.abs(b).mean(axis=2).astype(np.float16))
+    bits = np.packbits((b >= 0).astype(np.uint8), axis=2, bitorder="little")
+    return np.concatenate([d.view(np.uint8).reshape(rows, -1, 2), bits], axis=2).reshape(rows, -1)
+
+
+def quantize_q2_0(x):
+    # llama.cpp takes the block's largest magnitude for d, which leaves the
+    # fourth value (+2d) unused; a smaller d here, so files with it are read too.
+    rows, cols = x.shape
+    b = x.reshape(rows, cols // 64, 64)
+    d = np.ascontiguousarray((np.abs(b).max(axis=2) / 1.7).astype(np.float16))
+    df = d.astype(np.float32)
+    q = np.clip(np.rint(b / np.where(df > 0, df, 1.0)[..., None]) + 1, 0, 3).astype(np.uint8).reshape(rows, -1, 16, 4)
+    packed = q[..., 0] | (q[..., 1] << 2) | (q[..., 2] << 4) | (q[..., 3] << 6)
+    return np.concatenate([d.view(np.uint8).reshape(rows, -1, 2), packed], axis=2).reshape(rows, -1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--arch", default="qwen2", choices=["llama", "qwen2", "qwen3", "gemma3", "gemma4", "qwen35"])
@@ -173,7 +205,7 @@ def main():
     ap.add_argument("--pad-type", type=int, default=5, help="the padding tokens' type (5 unused; Gemma 4 types its placeholders 1)")
     ap.add_argument("--boost-token", type=int, default=-1,
                     help="make this output row huge, so greedy sampling soon picks it: for guard tests")
-    ap.add_argument("--quant", default="F32", choices=["F32", "F16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q4_K_M", "Q5_K_M"],
+    ap.add_argument("--quant", default="F32", choices=["F32", "F16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q4_K_M", "Q5_K_M", "Q1_0", "Q2_0"],
                     help="type for the 2-D weights; Q4_K_M: Q4_K, with Q6_K for attn_v, ffn_down and output, "
                          "as llama-quantize's mix; Q5_K_M: the same with Q5_K")
     ap.add_argument("out")
@@ -264,7 +296,8 @@ def main():
                    a.plain_spaces)
 
     kmix = a.quant in ("Q4_K_M", "Q5_K_M")
-    qtype = getattr(GGMLQuantizationType, a.quant[:4]) if kmix else getattr(GGMLQuantizationType, a.quant)
+    bonsai = {"Q1_0": (Q1_0, quantize_q1_0, 128), "Q2_0": (Q2_0, quantize_q2_0, 64)}.get(a.quant)
+    qtype = None if bonsai else getattr(GGMLQuantizationType, a.quant[:4] if kmix else a.quant)
 
     def t(name, *shape, scale=None, boost_row=-1):
         # numpy shape is (ne1, ne0): rows are outputs, columns are inputs.
@@ -272,7 +305,13 @@ def main():
         data = (rng.standard_normal(shape) * s).astype(np.float32)
         if boost_row >= 0:
             data[boost_row, :] = 100.0  # its logit dwarfs the rest whenever sum(h) > 0
-        if kmix:
+        if bonsai:
+            number, quantize, block = bonsai
+            if shape[-1] % block:
+                w.add_tensor(name, data.astype(np.float16))
+            else:
+                w.add_tensor(name, quantize(data), raw_dtype=number)
+        elif kmix:
             if shape[-1] % 256:
                 w.add_tensor(name, quants.quantize(data, GGMLQuantizationType.Q8_0),
                              raw_dtype=GGMLQuantizationType.Q8_0)
