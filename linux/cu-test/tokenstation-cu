@@ -19,7 +19,9 @@
 # partition from another computer and set amdgpu.ps5_cu_unlock=0.
 set -eu
 
-state=/var/lib/tokenstation/cu-test
+# Root's own folder (0700): the service user owns /var/lib/tokenstation, and
+# root writes the logs and baselines here.
+state=/var/lib/tokenstation-cu
 selftest=${GPU_SELFTEST:-/usr/lib/tokenstation/gpu-selftest}
 
 find_cmdline() {
@@ -43,13 +45,46 @@ boot_mode() {
     grep -o 'amdgpu\.ps5_cu_unlock=[0-9]*' "$(find_cmdline)" 2>/dev/null | head -n 1 | cut -d= -f2 || true
 }
 
+# cmdline.txt, rewritten so a power cut leaves the old one or the new one,
+# never half of one: the old one to .bak, the new one to a file beside it,
+# both flushed to the drive, then renamed over it.
+write_cmdline() {  # file line
+    cp "$1" "$1.bak"
+    sync "$1.bak" 2>/dev/null || sync
+    printf '%s\n' "$2" > "$1.new"
+    sync "$1.new" 2>/dev/null || sync
+    mv -f "$1.new" "$1"
+    sync "$(dirname "$1")" 2>/dev/null || sync
+}
+
+# ts5 on a model from the service's folder, as the service's user: the file
+# is that user's, so root doesn't read it.
+as_service() {
+    if [ "$(id -u)" = 0 ] && getent passwd tokenstation >/dev/null; then
+        if command -v runuser >/dev/null; then
+            runuser -u tokenstation -- "$@"
+        else
+            setpriv --reuid=tokenstation --regid=tokenstation --init-groups -- "$@"
+        fi
+    else
+        "$@"
+    fi
+}
+
+# The self-test, shown and saved in $log, with its own exit status (a plain
+# "| tee" would give tee's, and a failed or missing self-test would PASS).
+selftest_logged() {
+    st=0
+    { "$selftest" "$@" 2>&1 || echo "$?" > "$state/selftest.rc"; } | tee "$log"
+    [ -f "$state/selftest.rc" ] && { st=$(cat "$state/selftest.rc"); rm -f "$state/selftest.rc"; }
+    return "$st"
+}
+
 set_mode() {  # mode
     f=$(find_cmdline)
     [ "$(id -u)" = 0 ] || { echo "tokenstation-cu: run with sudo" >&2; exit 2; }
-    cp "$f" "$f.bak"
-    line=$(head -n 1 "$f" | sed 's/[[:space:]]*amdgpu\.ps5_cu_unlock=[0-9]*//g')
-    if [ "$1" = 0 ]; then printf '%s\n' "$line" > "$f"; else printf '%s amdgpu.ps5_cu_unlock=%s\n' "$line" "$1" > "$f"; fi
-    sync
+    line=$(head -n 1 "$f" | tr -d '\r' | sed 's/[[:space:]]*amdgpu\.ps5_cu_unlock=[0-9]*//g')
+    if [ "$1" = 0 ]; then write_cmdline "$f" "$line"; else write_cmdline "$f" "$line amdgpu.ps5_cu_unlock=$1"; fi
     echo "boot setting saved in $f (old one in $f.bak). Reboot and run the loader again for it to take effect."
 }
 
@@ -83,27 +118,32 @@ probe)
     ;;
 test)
     secs=${2:-120}
-    mkdir -p "$state" 2>/dev/null || state=${TMPDIR:-/tmp}/tokenstation-cu
-    mkdir -p "$state"
+    if [ "$(id -u)" = 0 ]; then
+        [ -L "$state" ] && { echo "tokenstation-cu: $state is a symlink; not using it" >&2; exit 2; }
+        install -d -o root -g root -m 700 "$state"
+    else
+        state=$(mktemp -d "${TMPDIR:-/tmp}/tokenstation-cu.XXXXXX")
+    fi
     cus=$(active_cus)
     log=$state/test-$cus-$(date +%Y%m%d-%H%M%S).log
     echo "testing with $cus active compute units for $secs s; log: $log"
     since=$(date '+%Y-%m-%d %H:%M:%S')
     rc=0
+    rm -f "$state/selftest.rc"
     if [ "$cus" = 36 ] || [ ! -f "$state/baseline.txt" ]; then
         [ "$cus" = 36 ] || echo "no baseline from a 36 CU run yet; this run only checks itself"
-        "$selftest" --seconds "$secs" --save "$state/baseline-$cus.txt" | tee "$log" || rc=$?
-        [ "$cus" = 36 ] && [ "$rc" = 0 ] && cp "$state/baseline-$cus.txt" "$state/baseline.txt"
+        selftest_logged --seconds "$secs" --save "$state/baseline-$cus.txt" || rc=$?
+        if [ "$cus" = 36 ] && [ "$rc" = 0 ]; then cp "$state/baseline-$cus.txt" "$state/baseline.txt"; fi
     else
-        "$selftest" --seconds "$secs" --compare "$state/baseline.txt" | tee "$log" || rc=$?
+        selftest_logged --seconds "$secs" --compare "$state/baseline.txt" || rc=$?
     fi
     model=$(find /var/lib/tokenstation/models -maxdepth 1 -name '*.gguf' 2>/dev/null | LC_ALL=C sort | head -n 1)
     if [ -n "$model" ] && command -v ts5 >/dev/null; then
         echo "ts5 check on $(basename "$model") (GPU against a CPU reference)" | tee -a "$log"
-        if ts5 check -m "$model" -n 64 > "$state/check.out" 2>&1; then :; else rc=1; fi
+        if as_service ts5 check -m "$model" -n 64 > "$state/check.out" 2>&1; then :; else rc=1; fi
         cat "$state/check.out" >> "$log"
         tail -n 3 "$state/check.out"
-        ts5 bench -m "$model" --pp 512 --tg 128 2>&1 | tee -a "$log" | tail -n 2 || true
+        as_service ts5 bench -m "$model" --pp 512 --tg 128 2>&1 | tee -a "$log" | tail -n 2 || true
     fi
     gpu_errors=$(journalctl -k --since "$since" 2>/dev/null | grep -Eci 'amdgpu.*\b(timeout|reset|fault|hang)' || true)  # \b: "default" (TMZ ... disabled as experimental (default)) isn't a fault
     echo "GPU errors in the kernel log during the test: ${gpu_errors:-0}" | tee -a "$log"

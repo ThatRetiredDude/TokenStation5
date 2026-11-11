@@ -1,9 +1,8 @@
 #!/bin/sh
 set -e
-if [ -d /run/systemd/system ]; then
-    for s in tokenstation.service tokenstation-tv.service; do
-        systemctl stop "$s" || true
-        [ "$1" = remove ] && systemctl disable "$s" >/dev/null 2>&1 || true
-    done
+# Only on removal: an upgrade keeps the services running, and postinst
+# restarts the one that runs with the new programs.
+if [ "$1" = remove ]; then
+    /usr/lib/tokenstation/system-setup remove || true
 fi
 exit 0

@@ -9,7 +9,9 @@
 #   tokenstation-memory set GIB    the GTT limit at the next boot (e.g. 11)
 #   tokenstation-memory unset      back to the kernel's default
 #   tokenstation-memory first      set max, unless a limit is set already (the
-#                                  packages run this on a PS5)
+#                                  packages run this on a PS5, on first install)
+#   tokenstation-memory remove     unset, if this tool set the limit (the
+#                                  packages run this when they are removed)
 #
 # On an APU like the PS5's, models live in GTT: system memory the GPU maps.
 # The kernel lets the GPU have half of RAM by default (ttm.pages_limit), so
@@ -31,6 +33,18 @@ find_cmdline() {
     for f in /boot/efi/cmdline.txt /efi/cmdline.txt /boot/firmware/cmdline.txt /boot/cmdline.txt; do
         [ -f "$f" ] && { echo "$f"; return; }
     done
+}
+
+# cmdline.txt, rewritten so a power cut leaves the old one or the new one,
+# never half of one: the old one to .bak, the new one to a file beside it,
+# both flushed to the drive, then renamed over it.
+write_cmdline() {  # file line
+    cp "$1" "$1.bak"
+    sync "$1.bak" 2>/dev/null || sync
+    printf '%s\n' "$2" > "$1.new"
+    sync "$1.new" 2>/dev/null || sync
+    mv -f "$1.new" "$1"
+    sync "$(dirname "$1")" 2>/dev/null || sync
 }
 
 gib() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1073741824 }'; }
@@ -79,6 +93,12 @@ first)
     fi
     exec "$0" set max
     ;;
+remove)
+    # Its own modprobe file says this tool set the limit; a limit that was
+    # there before TokenStation ("first" kept it) stays.
+    if [ -f "$conf" ]; then exec "$0" unset; fi
+    echo "tokenstation-memory: no GPU memory limit of TokenStation's to undo"
+    ;;
 set | unset)
     [ "$(id -u)" = 0 ] || { echo "tokenstation-memory: run with sudo" >&2; exit 2; }
     if [ "$1" = set ]; then
@@ -108,10 +128,8 @@ set | unset)
     fi
     f=$(find_cmdline || true)
     if [ -n "$f" ]; then
-        cp "$f" "$f.bak"
-        line=$(head -n 1 "$f" | sed -E 's/[[:space:]]*(ttm\.pages_limit|ttm\.page_pool_size|amdgpu\.gttsize)=[0-9]*//g')
-        if [ -n "$args" ]; then printf '%s %s\n' "$line" "$args" > "$f"; else printf '%s\n' "$line" > "$f"; fi
-        sync
+        line=$(head -n 1 "$f" | tr -d '\r' | sed -E 's/[[:space:]]*(ttm\.pages_limit|ttm\.page_pool_size|amdgpu\.gttsize)=[0-9]*//g')
+        write_cmdline "$f" "$line${args:+ $args}"
         echo "boot setting saved in $f (old one in $f.bak)."
     else
         echo "no cmdline.txt found (set CMDLINE=/path/to/cmdline.txt); add these to the kernel's command line yourself:"
@@ -121,7 +139,7 @@ set | unset)
     echo "Reboot (and run the loader again), then: tokenstation-memory status"
     ;;
 *)
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

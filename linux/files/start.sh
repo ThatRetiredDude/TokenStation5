@@ -7,9 +7,16 @@ model=${MODEL:-}
 if [ -z "$model" ]; then
     model=$(find "$models_dir" -maxdepth 1 -name '*.gguf' 2>/dev/null | LC_ALL=C sort | head -n 1)
 fi
-if [ -z "$model" ] || [ ! -f "$model" ]; then
-    echo "tokenstation: no model. Put a .gguf in $models_dir or set MODEL in /etc/default/tokenstation." >&2
-    exit 1
+# No model yet: say so and stop cleanly (exit 0), so systemd doesn't restart
+# it every few seconds. "hw model NAME.gguf" (Settings) or
+# "sudo systemctl restart tokenstation" starts it once one is there.
+if [ -z "$model" ]; then
+    echo "tokenstation: no model yet. Put a .gguf in $models_dir (or set MODEL in /etc/default/tokenstation), then: sudo systemctl restart tokenstation" >&2
+    exit 0
+fi
+if [ ! -f "$model" ]; then
+    echo "tokenstation: MODEL=$model in /etc/default/tokenstation isn't there; the service stays off until it is (then: sudo systemctl restart tokenstation)" >&2
+    exit 0
 fi
 
 ctx=${CONTEXT:-8192}

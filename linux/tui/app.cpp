@@ -123,6 +123,8 @@ void Config::load() {
         else if (k == "helper_room") helper_room = v != "0";
         else if (k == "tmux") tmux = v != "0";
     }
+    saved_url = url;
+    saved_key = key;
 }
 
 void Config::save() const {
@@ -135,7 +137,7 @@ void Config::save() const {
         const int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd < 0) return;
         std::string s = "# ts5-tui's settings (Settings in ts5-tui changes them).\n";
-        s += "url=" + url + "\nkey=" + key + "\ntheme=" + theme + "\nintro=" + (intro ? "1" : "0") +
+        s += "url=" + (url_given ? saved_url : url) + "\nkey=" + (key_given ? saved_key : key) + "\ntheme=" + theme + "\nintro=" + (intro ? "1" : "0") +
              "\nthinking=" + std::to_string(thinking) + "\ntemperature=" + fmt("%g", temp) +
              "\nmax_tokens=" + std::to_string(max_tokens) + "\ncontext=" + std::to_string(serve_ctx) + "\nhelper_room=" + (helper_room ? "1" : "0") + "\ntmux=" + (tmux ? "1" : "0") + "\n";
         if (write(fd, s.data(), s.size()) != (ssize_t)s.size()) {

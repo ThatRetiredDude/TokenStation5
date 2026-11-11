@@ -90,7 +90,7 @@ enum Key : int {
     K_CTRL,   // Event::ch holds the letter ('a'..'z')
     K_ALT,    // Event::ch holds the character
     K_PASTE,  // Event::ch holds the pasted text
-    K_CTRL_UP,
+    K_CTRL_UP,    // also Shift and Alt with the arrow (a Mac keeps Ctrl+arrows and has no PgUp)
     K_CTRL_DOWN,
     K_CTRL_LEFT,
     K_CTRL_RIGHT,

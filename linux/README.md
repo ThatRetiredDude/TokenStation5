@@ -69,7 +69,7 @@ sudo pacman -U ./tokenstation-latest-x86_64.pkg.tar.zst
 
 # Bazzite, SteamOS and others: the portable build (as yourself, not sudo)
 curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz | tar xz
-cd tokenstation-*-linux-amd64
+cd tokenstation-linux-amd64
 ./install.sh
 ```
 
@@ -95,7 +95,7 @@ Run it as yourself, not with sudo:
 
 ```sh
 tar xzf tokenstation-<version>-linux-amd64.tar.gz
-cd tokenstation-<version>-linux-amd64
+cd tokenstation-linux-amd64
 ./install.sh
 ```
 
@@ -208,6 +208,19 @@ ts5-tui --url http://ps5.local:8081  # another one
 - **A full chat says so**: when an answer stops because the chat filled the
   model's context, a note under it says so (and Ctrl+N starts a new chat),
   instead of a silently cut-off answer.
+- **Keys that can't surprise**: with something typed at the prompt, Tab
+  stays there (it completes a command) instead of changing the page. PgUp
+  and PgDn scroll the chat, and so do Shift or Alt with the up and down
+  arrows, a line at a time (a Mac has no PgUp). A paste is one piece of
+  text however it arrives: its new lines never send the message. Quitting
+  while a tuning, a check or a download runs asks first.
+- **Loads and jobs say what happens**: the top bar says "loading" while a
+  model comes up, and a model that can't load (not enough memory, a file
+  that isn't a model) says why at once, on Models and in the chat. Tuning,
+  the GPU check and the speed test need the GPU's memory: the model
+  ts5-tui loaded steps aside for them and is loaded again when they end.
+  A long prompt may be read for minutes before the first token: ts5-tui
+  waits (Esc stops it).
 
 It is a client of the API: it loads nothing itself and takes no GPU memory.
 Loading a model with Enter switches the API-only service's model (through
@@ -227,7 +240,9 @@ the terminal, so it stays in its scrollback. An IDE's remote server on the
 PS5 takes memory the models could use (over 6 GB for Cursor), so plain SSH
 leaves the most for them.
 
-Settings are kept in `~/.config/tokenstation/tui.conf`. To try it without a
+Settings are kept in `~/.config/tokenstation/tui.conf` (`--url`, `--key`,
+`TS5_URL` and `TS5_API_KEY` are for that run only; a server address that
+doesn't read as one isn't saved). To try it without a
 GPU, `linux/tui/test/fake-server.py` stands in for `ts5 serve`.
 
 ## Bigger models

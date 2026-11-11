@@ -102,6 +102,15 @@ int connect_to(const Endpoint &ep, int timeout_ms, std::string &err) {
             fcntl(fd, F_SETFL, fl);
             const int one = 1;
             setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+            // A server that vanished (power, network) is found in about a
+            // minute, however long the caller is ready to wait for bytes.
+            setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
+#ifdef TCP_KEEPIDLE
+            const int idle = 30, intvl = 10, cnt = 3;
+            setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
+            setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof intvl);
+            setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof cnt);
+#endif
 #ifdef SO_NOSIGPIPE
             setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
 #endif
@@ -189,7 +198,8 @@ Reply http(const Endpoint &ep, const std::string &method, const std::string &pat
     while (!stopped) {
         const int left = (int)(deadline - now_ms());
         if (left <= 0) {
-            r.err = "no answer within " + std::to_string(timeout_ms / 1000) + " s";
+            r.err = timeout_ms >= 120000 ? "no answer within " + std::to_string(timeout_ms / 60000) + " minutes"
+                                         : "no answer within " + std::to_string(timeout_ms / 1000) + " s";
             break;
         }
         pollfd p{fd, POLLIN, 0};
