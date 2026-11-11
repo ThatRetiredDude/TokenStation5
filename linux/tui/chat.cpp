@@ -692,7 +692,10 @@ void run_answer(Chat *c, ChatRequest rq, std::string body) {
             m.prompt_tps = tm["prompt_per_second"].num(m.prompt_tps);
         }
     };
-    Reply r = http(rq.ep, "POST", "/v1/chat/completions", body, 120000,
+    // An hour between bytes: a long prompt is read in silence before the
+    // first token comes (Esc stops it; a server that died closes the line,
+    // and TCP keepalive finds one that vanished).
+    Reply r = http(rq.ep, "POST", "/v1/chat/completions", body, 3600000,
                    [&](const std::string &chunk) {
                        pending += chunk;
                        size_t nl;
@@ -960,7 +963,7 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
             std::string lw = word;
             std::transform(lw.begin(), lw.end(), lw.begin(), ::tolower);
             const bool command = c.input[0] == '/' || lw == "exit" || lw == "quit" || lw == "q" || lw == ":q" ||
-                                 lw == "bye" || lw.rfind("ts5 fetch ", 0) == 0;
+                                 lw.rfind("ts5 fetch ", 0) == 0;
             if (command) {
                 c.command = c.input[0] == '/' ? c.input : lw.rfind("ts5 fetch ", 0) == 0 ? "/download " + word : "/quit";
             } else {
@@ -981,8 +984,12 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
             return CHAT_NONE;
         case K_CHAR:
         case K_PASTE: {
-            std::string t = e.ch;
-            t.erase(std::remove(t.begin(), t.end(), '\r'), t.end());
+            // A paste's line ends come as \r or \r\n: both are a new line.
+            std::string t;
+            for (size_t i = 0; i < e.ch.size(); i++) {
+                if (e.ch[i] != '\r') t += e.ch[i];
+                else if (i + 1 >= e.ch.size() || e.ch[i + 1] != '\n') t += '\n';
+            }
             c.input.insert(c.cur, t);
             c.cur += t.size();
             return CHAT_NONE;

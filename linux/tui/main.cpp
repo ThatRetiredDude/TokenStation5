@@ -101,6 +101,9 @@ struct App {
     std::string load_target;  // what's loading, until /v1/models says so
     double load_t0 = 0;
     bool load_again = false, load_down = false;  // the loaded model again: wait for the old server to go first
+    bool load_own = false;                       // a ts5 serve of ts5-tui's own (its pid and log are watched)
+    std::string load_failed;                     // the last load's failure, shown on Models until the next one
+    std::string job_reload;                      // the model a job unloaded, to load again when it ends
     bool show_tune = false;
     int tune_scroll = 0;
     // The job in the pane (tuning, the GPU check, the speed test), as steps.
@@ -325,9 +328,22 @@ std::string state_dir() {
     return d;
 }
 
+// Whether a systemd unit runs. Asked for on every frame of some pages, so
+// an answer is kept for 3 seconds (systemctl is a process each time).
 bool unit_active(const char *unit) {
+    static std::map<std::string, std::pair<double, bool>> seen;
+    auto it = seen.find(unit);
+    if (it != seen.end() && now_s() - it->second.first < 3) return it->second.second;
     const std::string cmd = std::string("systemctl is-active --quiet ") + unit + " 2>/dev/null";
-    return system(cmd.c_str()) == 0;
+    const bool on = system(cmd.c_str()) == 0;
+    seen[unit] = {now_s(), on};
+    return on;
+}
+
+// Shell: stop a server of ts5-tui's own and wait (5 s at most) until it's
+// gone, so what comes next finds the GPU's memory free.
+std::string stop_cmd(pid_t pid) {
+    return fmt("kill %d; i=0; while kill -0 %d 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done; ", pid, pid);
 }
 
 pid_t own_server_pid() {
@@ -355,6 +371,10 @@ std::string service_models_dir() {
 void load_model(const ModelFile &m, bool again = false) {
     if (g->loader.running()) {
         show_toast("Still loading the last one…", g->th->warn);
+        return;
+    }
+    if (g->tuner.running()) {
+        show_toast(g->tuner.title + " is running and needs the GPU's memory: wait for it, or stop it (T, then X)", g->th->warn, 6);
         return;
     }
     const Endpoint e = endpoint();
@@ -404,7 +424,7 @@ void load_model(const ModelFile &m, bool again = false) {
         const std::string dir = state_dir();
         const std::string ctx = g->cfg.serve_ctx > 0 ? std::to_string(g->cfg.serve_ctx) : "0";
         cmd.clear();
-        if (own > 0) cmd = fmt("kill %d; i=0; while kill -0 %d 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done; ", own, own);
+        if (own > 0) cmd = stop_cmd(own);
         // Its own session, so it keeps serving after ts5-tui ends.
         // Settings → Speed or length: with an auto context, the engine keeps
         // room for the model's helper (faster) or takes it all for the chat.
@@ -419,6 +439,8 @@ void load_model(const ModelFile &m, bool again = false) {
     g->load_t0 = now_s();
     g->load_again = s.model == api_id(m.name);
     g->load_down = false;
+    g->load_own = how == "ts5 serve";
+    g->load_failed.clear();
     g->poll_fast = true;
     g->logs_checked = 0;  // the log may move
     show_toast("Loading " + m.name + " (" + how + ")…", g->th->accent, 3);
@@ -449,6 +471,19 @@ void load_or_ask(const ModelFile &m) {
                   " Load " + api_id(m.name) + " as the main model?";
     const ModelFile copy = m;
     g->ask_yes = [copy] { load_model(copy); };
+}
+
+// A job needs the GPU's memory: a server of ts5-tui's own steps aside for
+// it (the shell prefix this returns), and what it served is remembered, to
+// load again when the job ends.
+std::string job_takes_gpu() {
+    g->job_reload.clear();
+    const pid_t own = own_server_pid();
+    if (own <= 0) return "";
+    const ServerState sv = server();
+    for (auto &m : g->models)
+        if (api_id(m.name) == sv.model) g->job_reload = m.path;
+    return stop_cmd(own);
 }
 
 // A new job in the pane: its kind ("tune", "check", "bench") and the steps
@@ -563,13 +598,33 @@ void job_follow() {
             else if (st.state == 0 && p.status == 0 && g->job_kind != "tune") job_step(i, 2);
         }
         const std::string what = g->job_kind == "tune" ? "Tuning " : g->job_kind == "check" ? "The GPU check of " : "The speed test of ";
+        // The model the job unloaded comes back (with what tuning found).
+        std::string again;
+        if (g->job_kind == "tune") scan_models();
+        for (auto &m : g->models)
+            if (!g->job_reload.empty() && m.path == g->job_reload) {
+                const ModelFile copy = m;
+                load_model(copy, true);
+                if (!g->load_target.empty()) again = " Loading " + api_id(copy.name) + " again.";
+                break;
+            }
+        g->job_reload.clear();
         if (p.status == 0) {
-            show_toast(what + g->job_model + " is done", g->th->good, 6);
-            chat_note(g->chat, "**" + what + g->job_model + " is done.** " + g->job_summary +
-                                   (g->job_kind == "tune" ? " The new settings are used from the next time it loads." : ""));
+            show_toast(what + g->job_model + " is done." + again, g->th->good, 6);
+            std::string more;
+            if (g->job_kind == "tune") {
+                more = " The new settings are used from the next time it loads.";
+                // The services read their settings from /etc.
+                if (unit_active("tokenstation") || unit_active("tokenstation-tv"))
+                    more += " The TokenStation service reads its own copy: `sudo mkdir -p /etc/tokenstation/tune && sudo cp "
+                            "~/.config/tokenstation/tune/*.env /etc/tokenstation/tune/` gives it these.";
+            }
+            chat_note(g->chat, "**" + what + g->job_model + " is done.** " + g->job_summary + more);
         } else if (p.status != 130) {
             show_toast(what + g->job_model + " didn't finish: the Models page shows why", g->th->bad, 10);
             g->show_tune = true;
+        } else if (!again.empty()) {
+            show_toast("Stopped." + again, g->th->warn, 5);
         }
     }
 }
@@ -616,9 +671,8 @@ void start_tune(const ModelFile &m, bool sure = false) {
         show_toast("ts5-tune tunes models of 1.5 GiB and more (this one is a helper size)", g->th->warn, 5);
         return;
     }
-    std::string pre;
     // ts5-tune needs the GPU's memory: a ts5 serve of our own steps aside.
-    if (pid_t own = own_server_pid(); own > 0) pre = fmt("kill %d; sleep 1; ", own);
+    const std::string pre = job_takes_gpu();
     g->tuner.start(pre + "TS5_TUNE_PROGRESS=1 " + shell_quote(tune) + " --models " + shell_quote(m.path),
                    "Tuning " + api_id(m.name));
     job_begin("tune", api_id(m.name), {"Getting ready"});
@@ -641,8 +695,7 @@ void start_gpu_job(const ModelFile &m, bool check) {
         show_toast("ts5 isn't installed here", g->th->bad);
         return;
     }
-    std::string pre;
-    if (pid_t own = own_server_pid(); own > 0) pre = fmt("kill %d; sleep 1; ", own);
+    const std::string pre = job_takes_gpu();
     const std::string cmd = shell_quote(ts5) + (check ? " check -m " : " bench -m ") + shell_quote(m.path) + " 2>&1";
     g->tuner.start(pre + cmd, (check ? "GPU check of " : "Speed test of ") + api_id(m.name));
     if (check)
@@ -1159,6 +1212,9 @@ void draw_top_bar() {
     if (!(g->tuner.running() && sv.polled && !sv.online)) {
         Item it{{}, 0};
         if (!sv.polled) it.parts = {{"● ", Style(t.dim, t.panel2)}, {"connecting…", lab}};
+        else if (!g->load_target.empty() && sv.model != g->load_target)
+            it.parts = {{"◌ ", Style(t.accent2, t.panel2, BOLD)},
+                        {"loading " + fit(g->load_target, 30) + fmt("… %.0f s", now_s() - g->load_t0), Style(t.accent2, t.panel2, BOLD)}};
         else if (!sv.online) it.parts = {{"● ", Style(t.bad, t.panel2, BOLD)}, {"offline", Style(t.bad, t.panel2, BOLD)}};
         else if (sv.model.empty())
             it.parts = {{"● ", Style(t.warn, t.panel2, BOLD)}, {fit(sv.why.empty() ? "no model" : sv.why, 40), Style(t.warn, t.panel2)}};
@@ -1537,6 +1593,8 @@ void draw_models() {
         static const char *spin[] = {"◐", "◓", "◑", "◒"};
         s.put(x0 + 25, y, fmt("%s loading %s… %.0f s", spin[(int)(now_s() * 6) % 4], g->load_target.c_str(),
                               now_s() - g->load_t0), S(t.accent2, BOLD));
+    } else if (!g->load_failed.empty()) {
+        s.put(x0 + 25, y, fit("✗ " + g->load_failed, w - 26), S(t.bad, BOLD));
     } else if (g->tuner.running()) {
         s.put(x0 + 25, y, "⚙ " + g->tuner.title + " in the background (T to watch)", S(t.accent2));
     } else if (g->downloader.running() && g->dl_on) {
@@ -1791,7 +1849,16 @@ std::vector<SetRow> settings_rows() {
         x.text = true;
         x.text_value = c.url;
         x.set_text = [save](const std::string &v) {
+            // Only an address that reads as one is kept: a bad one saved
+            // would be all ts5-tui had at its next start.
+            Endpoint e;
+            std::string why;
+            if (!parse_endpoint(v, e, why)) {
+                show_toast("Not saved: " + why + ". An address looks like http://ps5.local:8081", g->th->bad, 8);
+                return;
+            }
             g->cfg.url = v;
+            g->cfg.url_given = false;
             save();
             apply_endpoint();
             g->logs_checked = 0;
@@ -1805,6 +1872,7 @@ std::vector<SetRow> settings_rows() {
         x.text_value = c.key;
         x.set_text = [save](const std::string &v) {
             g->cfg.key = v;
+            g->cfg.key_given = false;
             save();
             apply_endpoint();
         };
@@ -1860,8 +1928,12 @@ std::vector<SetRow> settings_rows() {
     }
     {
         static const int v[] = {0, 4096, 8192, 16384, 32768};
+        // The services size their own: this is for a model ts5-tui loads.
+        const bool svc = unit_active("tokenstation"), tv = !svc && unit_active("tokenstation-tv");
         SetRow x{"Context", c.serve_ctx ? with_commas(c.serve_ctx) + " tokens" : "auto",
-                 "the longest a chat can get; auto fits GPU memory. Load the model again to apply it"};
+                 svc  ? "for models ts5-tui loads itself; the service's is CONTEXT in /etc/default/tokenstation"
+                 : tv ? "for models ts5-tui loads itself; the TV app's is in its own Settings"
+                      : "the longest a chat can get; auto fits GPU memory. Load the model again to apply it"};
         x.change = [save](int d) {
             int i = 0;
             for (int k = 0; k < 5; k++)
@@ -2081,6 +2153,8 @@ const ModelFile *find_model(const std::string &q) {
     return hit;
 }
 
+void request_quit();
+
 void run_command(const std::string &line) {
     std::string cmd = line, arg;
     const size_t sp = line.find(' ');
@@ -2092,7 +2166,7 @@ void run_command(const std::string &line) {
     Chat &c = g->chat;
     if (cmd == "/fetch") cmd = "/download";
     if (cmd == "/new" || cmd == "/clear") chat_new(c);
-    else if (cmd == "/quit" || cmd == "/exit" || cmd == "/q") g->quit = true;
+    else if (cmd == "/quit" || cmd == "/exit" || cmd == "/q") request_quit();
     else if (cmd == "/chat") go(CHAT);
     else if (cmd == "/models") go(MODELS);
     else if (cmd == "/status") go(STATUS);
@@ -2300,9 +2374,24 @@ void run_command(const std::string &line) {
 
 // ---- keys ----
 
+// Quitting stops a job or a download ts5-tui runs: ask first.
+void request_quit() {
+    const bool job = g->tuner.running(), dl = g->downloader.running() && g->dl_on;
+    if (!job && !dl) {
+        g->quit = true;
+        return;
+    }
+    g->ask_title = " Quit? ";
+    g->ask_text = (job ? g->tuner.title : "The download of " + g->dl.name) + " is still running, and quitting stops it" +
+                  (job ? "." : " (it goes on from where it stopped the next time).") +
+                  (getenv("TMUX") ? " To leave it running and come back later, press Ctrl+A, then D instead." : "") +
+                  " Quit anyway?";
+    g->ask_yes = [] { g->quit = true; };
+}
+
 void go(ScreenId to) {
     if (to == N_SCREENS) {
-        g->quit = true;
+        request_quit();
         return;
     }
     g->cur = to;
@@ -2321,7 +2410,9 @@ bool global_key(const Event &e) {
         go((ScreenId)(e.ch[0] - '1'));
         return true;
     }
-    if (e.key == K_TAB && g->cur == CHAT && !g->chat.input.empty() && g->chat.input[0] == '/') return false;
+    // With something typed at the prompt, Tab stays there (it completes a
+    // command): a page change would send the next letters to that page's keys.
+    if ((e.key == K_TAB || e.key == K_BACKTAB) && g->cur == CHAT && !g->chat.input.empty()) return e.key == K_BACKTAB;
     if (e.key == K_TAB && !g->editing) {
         go((ScreenId)((g->cur + 1) % N_SCREENS));
         return true;
@@ -2331,7 +2422,7 @@ bool global_key(const Event &e) {
         return true;
     }
     if (e.key == K_CTRL && (e.ch == "q" || (e.ch == "c" && !(g->cur == CHAT && g->chat.busy())))) {
-        g->quit = true;
+        request_quit();
         return true;
     }
     return false;
@@ -2352,7 +2443,7 @@ bool nav_key(const Event &e) {
         return true;
     }
     if (c == 'q') {
-        g->quit = true;
+        request_quit();
         return true;
     }
     return false;
@@ -2531,6 +2622,23 @@ void tick() {
             show_toast("Load failed: " + why, g->th->bad, 8);
             g->load_target.clear();
             g->poll_fast = false;
+        } else if (g->load_own && g->loader.done && t - g->loader.t1 > 0.5 && own_server_pid() <= 0) {
+            // Our own ts5 serve ended before it served: its log's last line
+            // says why (not enough memory, a file that isn't a model).
+            std::string why;
+            {
+                std::istringstream in(read_file(state_dir() + "/tui-serve.log"));
+                for (std::string l; std::getline(in, l);)
+                    if (!l.empty()) why = l;
+            }
+            if (why.rfind("ts5: ", 0) == 0) why = why.substr(5);
+            if (why.empty()) why = "ts5 serve ended without a word";
+            g->load_failed = g->load_target + " didn't load: " + why;
+            show_toast(g->load_failed, g->th->bad, 12);
+            chat_note(g->chat, "**" + g->load_target + " didn't load.** " + why + "\n\nThe Logs page (F5) has the rest.");
+            g->load_target.clear();
+            g->poll_fast = false;
+            g->logs_checked = 0;
         } else if (g->load_again && !g->load_down) {
             // The same model again: the old server goes first.
             if (g->loader.done && !sv.online) g->load_down = true;
@@ -2697,7 +2805,7 @@ int usage(FILE *f) {
             "dropping stops nothing: run ts5-tui again to go back to it (Ctrl+A d leaves it).\n"
             "In an IDE's terminal tmux stays off unless --tmux.\n"
             "Settings are kept in ~/.config/tokenstation/tui.conf.\n"
-            "Keys: F1-F6 or Tab for the screens, Enter, arrows, Esc; Ctrl+Q quits.\n",
+            "Keys: F1-F5 or Tab for the pages, Enter, arrows, Esc; Ctrl+Q quits.\n",
             [] {
                 std::string n;
                 for (auto &t : themes()) n += (n.empty() ? "" : "|") + t.name;
@@ -2715,15 +2823,34 @@ int main(int argc, char **argv) {
     App app;
     g = &app;
     app.cfg.load();
-    if (const char *u = getenv("TS5_URL"); u && *u) app.cfg.url = u;
-    if (const char *k = getenv("TS5_API_KEY"); k && *k) app.cfg.key = k;
+    // A saved address that doesn't read as one (an older ts5-tui kept
+    // whatever was typed): the default, and a word about it once it's up.
+    std::string bad_saved;
+    {
+        Endpoint e;
+        std::string why;
+        if (!parse_endpoint(app.cfg.url, e, why)) {
+            bad_saved = app.cfg.url;
+            app.cfg.url = app.cfg.saved_url = Config().url;
+        }
+    }
+    auto given_url = [&](const std::string &u) {
+        app.cfg.url = u;
+        app.cfg.url_given = true;
+    };
+    auto given_key = [&](const std::string &k) {
+        app.cfg.key = k;
+        app.cfg.key_given = true;
+    };
+    if (const char *u = getenv("TS5_URL"); u && *u) given_url(u);
+    if (const char *k = getenv("TS5_API_KEY"); k && *k) given_key(k);
     bool intro = app.cfg.intro;
     int tmux = 0;  // 1 --tmux, -1 --no-tmux
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
-        if (a == "--url") app.cfg.url = next();
-        else if (a == "--key") app.cfg.key = next();
+        if (a == "--url") given_url(next());
+        else if (a == "--key") given_key(next());
         else if (a == "--theme") app.cfg.theme = next();
         else if (a == "--no-intro") intro = false;
         else if (a == "--tmux") tmux = 1;
@@ -2768,6 +2895,9 @@ int main(int argc, char **argv) {
     scan_models();
     app.sens = read_sensors();
     if (intro) run_intro();
+    if (!bad_saved.empty())
+        show_toast("The saved server address \"" + bad_saved + "\" isn't one: using " + app.cfg.url + " (Settings → Server)",
+                   app.th->warn, 12);
     app.full_redraw = true;
     while (!app.quit) {
         if (g_winch) {

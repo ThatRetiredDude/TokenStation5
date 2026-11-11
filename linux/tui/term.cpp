@@ -235,6 +235,7 @@ namespace {
 termios g_orig;
 bool g_raw = false;
 std::string g_pending;  // bytes read but not yet a whole key
+bool g_paste_open = false;  // inside a paste whose end mark hasn't come yet
 
 void on_fatal(int sig) {
     term_leave();
@@ -323,9 +324,11 @@ size_t decode(const std::string &p, Event &ev, bool more_coming) {
             const std::string params = p.substr(2, i - 2);
             const char fin = p[i];
             const bool ctrl = params.find(";5") != std::string::npos;
+            // Shift (;2) or Alt (;3) with up and down scroll too.
+            const bool mod = ctrl || params.find(";2") != std::string::npos || params.find(";3") != std::string::npos;
             switch (fin) {
-                case 'A': ev.key = ctrl ? K_CTRL_UP : K_UP; break;
-                case 'B': ev.key = ctrl ? K_CTRL_DOWN : K_DOWN; break;
+                case 'A': ev.key = mod ? K_CTRL_UP : K_UP; break;
+                case 'B': ev.key = mod ? K_CTRL_DOWN : K_DOWN; break;
                 case 'C': ev.key = ctrl ? K_CTRL_RIGHT : K_RIGHT; break;
                 case 'D': ev.key = ctrl ? K_CTRL_LEFT : K_LEFT; break;
                 case 'H': ev.key = K_HOME; break;
@@ -377,6 +380,9 @@ size_t decode(const std::string &p, Event &ev, bool more_coming) {
             ev.ch = inner.ch;
         } else {
             ev = inner;
+            // Alt+Up and Alt+Down as ESC and the arrow (macOS Terminal).
+            if (ev.key == K_UP) ev.key = K_CTRL_UP;
+            else if (ev.key == K_DOWN) ev.key = K_CTRL_DOWN;
         }
         return used + 1;
     }
@@ -401,7 +407,8 @@ size_t decode(const std::string &p, Event &ev, bool more_coming) {
 std::vector<Event> read_events(int timeout_ms) {
     std::vector<Event> out;
     pollfd pf{STDIN_FILENO, POLLIN, 0};
-    if (g_pending.empty()) {
+    // (Inside a paste, what's pending is only a tail kept for its end mark.)
+    if (g_pending.empty() || g_paste_open) {
         if (poll(&pf, 1, timeout_ms) <= 0) return out;
     }
     char buf[4096];
@@ -413,6 +420,44 @@ std::vector<Event> read_events(int timeout_ms) {
     // An escape with nothing after it yet may be the start of a sequence:
     // wait a moment for the rest (over SSH it can come in a second packet).
     while (!g_pending.empty()) {
+        // A paste is everything up to ESC [ 201 ~, however many reads it
+        // comes in: none of it is keys (a newline in it would send the
+        // message half pasted).
+        static const char kStart[] = "\x1b[200~", kEnd[] = "\x1b[201~";
+        if (g_paste_open || g_pending.compare(0, 6, kStart) == 0) {
+            const size_t from = g_paste_open ? 0 : 6;
+            const size_t end = g_pending.find(kEnd, from);
+            Event pe;
+            pe.key = K_PASTE;
+            if (end != std::string::npos) {
+                pe.ch = g_pending.substr(from, end - from);
+                g_pending.erase(0, end + 6);
+                g_paste_open = false;
+                if (!pe.ch.empty()) out.push_back(pe);
+                continue;
+            }
+            pollfd p2{STDIN_FILENO, POLLIN, 0};
+            if (poll(&p2, 1, g_paste_open ? 0 : 300) > 0) {
+                const ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
+                if (n > 0) {
+                    g_pending.append(buf, n);
+                    continue;
+                }
+            }
+            // Nothing more for now: what's here goes in, and the paste stays
+            // open for the rest. A tail that may be the end mark's start waits.
+            size_t keep = 0;
+            for (size_t k = std::min<size_t>(5, g_pending.size() - from); k > 0; k--)
+                if (g_pending.compare(g_pending.size() - k, k, kEnd, k) == 0) {
+                    keep = k;
+                    break;
+                }
+            pe.ch = g_pending.substr(from, g_pending.size() - from - keep);
+            g_pending.erase(0, g_pending.size() - keep);
+            g_paste_open = true;
+            if (!pe.ch.empty()) out.push_back(pe);
+            break;
+        }
         Event ev;
         size_t used = decode(g_pending, ev, true);
         if (used == 0) {

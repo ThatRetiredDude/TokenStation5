@@ -27,6 +27,10 @@ const std::vector<Theme> &themes();
 struct Config {
     std::string url = "http://127.0.0.1:8081";
     std::string key;
+    // --url, --key, TS5_URL and TS5_API_KEY are for this run: a save keeps
+    // the file's own (until Settings changes them).
+    bool url_given = false, key_given = false;
+    std::string saved_url = url, saved_key;
     std::string theme = "Ocean";
     bool intro = true;
     int thinking = 0;       // 0 the model's choice, 1 on, 2 off
