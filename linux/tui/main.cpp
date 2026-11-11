@@ -1198,6 +1198,10 @@ void set_fan(const std::string &mode) {
 
 // ---- logs ----
 
+// tail's own lines ("file truncated" when a new load starts the log again)
+// stay out of the page.
+const char *const kQuietTail = " 2> /dev/null";
+
 void pick_logs() {
     g->logs_checked = now_s();
     std::string cmd, src;
@@ -1209,7 +1213,7 @@ void pick_logs() {
     }
     if (const char *f = getenv("TS5_TUI_LOG"); f && *f) {
         src = f;
-        cmd = "tail -n 400 -F " + shell_quote(src);
+        cmd = "tail -n 400 -F " + shell_quote(src) + kQuietTail;
     } else if (unit_active("tokenstation-tv")) {
         if (access("/var/lib/tokenstation/ts5.log", R_OK) == 0) {
             src = "/var/lib/tokenstation/ts5.log";
@@ -1223,15 +1227,17 @@ void pick_logs() {
         cmd = "journalctl -u tokenstation -f -n 400 -o cat --no-pager";
     } else if (own_server_pid() > 0 || file_exists(state_dir() + "/tui-serve.log")) {
         src = state_dir() + "/tui-serve.log";
-        cmd = "tail -n 400 -F " + shell_quote(src);
+        cmd = "tail -n 400 -F " + shell_quote(src) + kQuietTail;
     } else if (file_exists(home_dir() + "/.local/share/tokenstation/ts5.log")) {
         src = home_dir() + "/.local/share/tokenstation/ts5.log";
-        cmd = "tail -n 400 -F " + shell_quote(src);
+        cmd = "tail -n 400 -F " + shell_quote(src) + kQuietTail;
     }
     if (src == g->logs_src && g->logs.running()) return;
     g->logs.stop();
     g->logs_src = src;
-    if (!cmd.empty()) g->logs.start(cmd + " 2>&1", "logs");
+    // (A later 2>&1 would undo kQuietTail's.)
+    const bool quiet = cmd.size() > strlen(kQuietTail) && cmd.compare(cmd.size() - strlen(kQuietTail), std::string::npos, kQuietTail) == 0;
+    if (!cmd.empty()) g->logs.start(quiet ? cmd : cmd + " 2>&1", "logs");
 }
 
 // A log line's speeds: "ts5: chatcmpl-1 prompt 812 (812 new) 515.0 tok/s, gen 200 65.1 tok/s, ...".
@@ -3409,8 +3415,8 @@ void tick() {
                                        "always takes the longest that fits.",
                                        sv.model.c_str(), with_commas(sv.n_ctx).c_str(), with_commas(short_of).c_str()));
             } else if (!why.empty() && !helper_wanted().empty())
-                show_toast("Loaded " + sv.model + fmt(" in %.0f s", t - g->load_t0) + ", without its helper: " + why,
-                           g->th->warn, 10);
+                // (The top bar names the model: the toast keeps to its row.)
+                show_toast(fmt("Loaded in %.0f s, without its helper: ", t - g->load_t0) + why, g->th->warn, 10);
             else
                 show_toast("Loaded " + sv.model + fmt(" in %.0f s", t - g->load_t0) +
                                (sv.helper.empty() ? "" : ", with its helper " + sv.helper),

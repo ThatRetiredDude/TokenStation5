@@ -561,22 +561,72 @@ public:
             err = "not enough GPU memory left for a context of 1024 tokens beside the room kept for the helper";
             return false;
         }
+        // TS5_FIT_TAILS, for a context set by number: the count above takes
+        // the weights and buffers as whole 1 GiB blocks and the cache as new
+        // memory, but the cache's pieces go first into the room left at
+        // those blocks' ends (as an auto-fit context counts them, once the
+        // blocks are made). Where the context fits counted that way, the
+        // load goes on, and init_buffers looks at the blocks as they came
+        // out before it makes the cache (tails_budget_). It fits only this
+        // way because memory is short, so the cache is the smallest this
+        // model may take (the one a little more memory gets by the count
+        // above): the one asked for where none smaller may be.
+        const bool by_tails = n_ctx_ > 0 && fit_tails_ && fixed <= free;
+        const uint64_t exact = by_tails ? vk_fixed_bytes(hp_, weights, false) : fixed;
+        auto tails = [&](KvType t) {
+            return free > exact ? (int)std::min<uint64_t>((free - exact) / kv_bytes_per_token(hp_, t), 1u << 30) : 0;
+        };
+        // The smallest cache a context of n tokens set by number may take
+        // here, where `count` says it holds them; else the one asked for.
+        auto smallest = [&](int n, const std::function<int(KvType)> &count, std::vector<std::string> *why) {
+            for (KvType small : {KvType::K8V4, KvType::Q8}) {
+                if (why) why->clear();
+                auto fit = [&](KvType k) { return k == KvType::F16 ? holds(k) : k == small ? count(k) : 0; };
+                if (set_context_kv_type(hp_, asked, kv_auto_, n, fit, why) == small) return small;
+            }
+            if (why) why->clear();
+            return asked;
+        };
+        if (by_tails) {
+            std::vector<std::string> why;
+            const KvType t = smallest(n_ctx_, tails, &why);
+            if (exact + (uint64_t)n_ctx_ * kv_bytes_per_token(hp_, t) <= free) {
+                for (auto &w : why) ts5::log_line("ts5: %s", w.c_str());
+                kv_ = t;
+                tails_budget_ = free;
+                return true;
+            }
+        }
+        // Refused, with the numbers of the count that came closest: a
+        // context set by number in the smallest cache this model may take
+        // (and, with TS5_FIT_TAILS, beside the weights and buffers as they
+        // are), then the tokens that would fit that way: the next thing to
+        // ask for (-c auto sizes it itself).
         const double gib = 1073741824.0;
-        char b[600];
+        std::string what = "the smallest context", note;
+        uint64_t need = ctx;
+        if (n_ctx_ > 0) {
+            // (Where the weights and buffers alone don't fit, as asked for.)
+            const KvType t = free > fixed ? smallest(n_ctx_, [](KvType) { return 1 << 30; }, nullptr) : asked;
+            what = "a context of " + std::to_string(n_ctx_) + " tokens";
+            need = (uint64_t)n_ctx_ * kv_bytes_per_token(hp_, t);
+            if (t != asked)
+                note = std::string("the context counted in the smallest cache this model takes, ") +
+                       (t == KvType::K8V4 ? "8-bit K and 4-bit V" : "8-bit") + "; ";
+        }
+        char b[700];
         snprintf(b, sizeof b,
                  "not enough memory: the weights and buffers take %.2f GiB and %s %.2f GiB, %.2f GiB is free "
-                 "(%.1f GiB of the system's RAM is kept for the system: TS5_SYSTEM_RESERVE_GIB)",
-                 fixed / gib, n_ctx_ > 0 ? ("a context of " + std::to_string(n_ctx_) + " tokens").c_str()
-                                         : "the smallest context", ctx / gib, free / gib, system_reserve() / gib);
+                 "(%s%.1f GiB of the system's RAM is kept for the system: TS5_SYSTEM_RESERVE_GIB)",
+                 exact / gib, what.c_str(), need / gib, free / gib, note.c_str(), system_reserve() / gib);
         err = b;
-        // What would fit, in the smallest cache this model may take: the
-        // next thing to ask for (-c auto sizes it itself).
         if (n_ctx_ > 0) {
-            int most = holds(asked);
+            auto count = [&](KvType t) { return by_tails ? tails(t) : holds(t); };
+            int most = count(asked);
             for (KvType t : {KvType::Q8, KvType::K8V4}) {
-                std::vector<std::string> none;
-                const int n = holds(t);
-                if (n > most && set_context_kv_type(hp_, asked, kv_auto_, n, holds, &none) == t) most = n;
+                const int n = count(t);
+                auto fit = [&](KvType k) { return k == KvType::F16 ? holds(k) : k == t ? n : 0; };
+                if (n > most && set_context_kv_type(hp_, asked, kv_auto_, n, fit, nullptr) == t) most = n;
             }
             most = most / 1024 * 1024;
             if (most >= 1024) err += "; about " + std::to_string(most) + " tokens fit (-c auto takes what fits)";
@@ -1487,6 +1537,31 @@ private:
                     ts5::log_line("ts5: the cache's pieces use room left in the blocks already made: %d tokens, where "
                                   "%d counted them as new blocks (TS5_FIT_TAILS)", n_ctx_, was);
             }
+        }
+        if (tails_budget_) {
+            // The blocks are made: whether the cache's pieces, placed as
+            // create_buf places them, stay inside what memory_fits had.
+            // (A cache no buffer can hold says so where it is made.)
+            uint64_t fresh = 0;
+            const bool made = kv_new_bytes(n_ctx_, kv_, fresh);
+            if (made && allocated_ + fresh > tails_budget_) {
+                int most = n_ctx_ / 1024 * 1024;
+                uint64_t f = 0;
+                while (most >= 1024 && !(kv_new_bytes(most, kv_, f) && allocated_ + f <= tails_budget_)) most -= 1024;
+                const double gib = 1073741824.0;
+                char b[600];
+                snprintf(b, sizeof b,
+                         "not enough memory: the weights and buffers take %.2f GiB and a context of %d tokens %.2f GiB, "
+                         "%.2f GiB is free (the blocks as they came out, the context what it takes past their ends; "
+                         "%.1f GiB of the system's RAM is kept for the system: TS5_SYSTEM_RESERVE_GIB)",
+                         allocated_ / gib, n_ctx_, fresh / gib, tails_budget_ / gib, system_reserve() / gib);
+                err = b;
+                if (most >= 1024) err += "; about " + std::to_string(most) + " tokens fit (-c auto takes what fits)";
+                return false;
+            }
+            if (made)
+                ts5::log_line("ts5: the context of %d tokens fits with the cache's pieces in room left in the blocks "
+                              "already made (TS5_FIT_TAILS)", n_ctx_);
         }
         sized_ = true;
         // RoPE for this context: YaRN past the model's window (use_context).
@@ -2513,6 +2588,10 @@ private:
     std::vector<VkBuffer> all_bufs_;
     VkDeviceSize allocated_ = 0;
     bool sized_ = false;  // init_buffers sized the context and made its caches
+    // A context set by number that fits only with its cache's pieces in the
+    // room left in the blocks (memory_fits): what the blocks and the cache's
+    // new ones may take together. 0: it fits counted as new blocks.
+    uint64_t tails_budget_ = 0;
     uint64_t fit_reserve_ = 0;  // set_fit_reserve
     uint64_t weight_bytes_ = 0;
     int layers_per_submit_ = 0;
@@ -2848,7 +2927,7 @@ uint64_t kv_ring_bytes(const HParams &hp, KvType kv) {
     return kv_bytes((uint64_t)ring_slots(hp) * kv_values(hp, true), kv);
 }
 
-uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
+uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes, bool whole_blocks) {
     const uint64_t T = VkBackend::TMAX, E = hp.n_embd, F = hp.n_ff;
     const uint64_t QD = (uint64_t)hp.max_qd(), KVD = (uint64_t)hp.max_kvd();
     // Qwen3.5: the queries with their gates, the linear layers' projections
@@ -2861,7 +2940,7 @@ uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes) {
         4ull * (1 + (hp.rec_count() ? state_slots_wanted() : 0)) * hp.rec_count() *
             (uint64_t)std::max<int64_t>(0, hp.rec_state_floats());
     const uint64_t gib = 1ull << 30;
-    return (weight_bytes + act + gib - 1) / gib * gib + kv_ring_bytes(hp, KvType::F16);
+    return (whole_blocks ? (weight_bytes + act + gib - 1) / gib * gib : weight_bytes + act) + kv_ring_bytes(hp, KvType::F16);
 }
 
 int draft_context(uint64_t free, const HParams &dhp, uint64_t draft_weight_bytes, int cap) {
