@@ -8,6 +8,10 @@ does (reasoning_content, then content, then usage and timings), and writes
 a log line per answer as ts5 does, to stderr. FAKE_CTX sets the context
 (32768): each message adds 600 tokens to the prompt, and an answer that
 reaches the context or max_tokens stops with finish_reason "length".
+FAKE_MODEL names the model. FAKE_HELPER names the helper drafting beside it
+(FAKE_HELPER_CTX: its context; "none": no helper), FAKE_HELPER_NOTE says
+why none is; with neither, /v1/models has no "helper" at all, as an older
+ts5.
 """
 import json
 import os
@@ -15,8 +19,11 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-MODEL = "Qwen3-8B-Q4_K_M"
+MODEL = os.environ.get("FAKE_MODEL", "Qwen3-8B-Q4_K_M")
 N_CTX = int(os.environ.get("FAKE_CTX", "32768"))
+HELPER = os.environ.get("FAKE_HELPER", "")
+HELPER_CTX = int(os.environ.get("FAKE_HELPER_CTX", "8192"))
+HELPER_NOTE = os.environ.get("FAKE_HELPER_NOTE", "")
 ANSWER = """Here is a tiny **C++** program that counts tokens per second:
 
 ```cpp
@@ -57,11 +64,17 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/health":
             self.send(200, {"status": "ok"})
         elif self.path in ("/v1/models", "/models"):
-            self.send(200, {"object": "list", "data": [{
-                "id": MODEL, "object": "model", "context_length": N_CTX,
-                "capabilities": {"tools": True, "tool_format": "hermes", "web_search": False},
-                "settings": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "thinking": True,
-                             "known_good": "file"}}]})
+            m = {"id": MODEL, "object": "model", "context_length": N_CTX,
+                 "capabilities": {"tools": True, "tool_format": "hermes", "web_search": False},
+                 "settings": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "thinking": True,
+                              "known_good": "file"}}
+            if HELPER and HELPER != "none":
+                m["helper"] = {"id": HELPER, "context_length": HELPER_CTX}
+            elif HELPER or HELPER_NOTE:
+                m["helper"] = None
+                if HELPER_NOTE:
+                    m["helper_note"] = HELPER_NOTE
+            self.send(200, {"object": "list", "data": [m]})
         else:
             self.send(404, {"error": {"message": "not found"}})
 

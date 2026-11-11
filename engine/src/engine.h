@@ -60,6 +60,14 @@ public:
     // become the drafts when prompt lookup finds nothing. Takes ownership of
     // the backend; the model must outlive the engine.
     bool set_drafter(Model &dm, Backend *db, std::string &err);
+    // What whoever loaded the model says of its helper, for /v1/models: the
+    // helper's file and context when one drafts, or why the one asked for
+    // doesn't (both empty: none was asked for).
+    struct Helper {
+        std::string name, why;
+        int n_ctx = 0;
+    };
+    Helper helper;
     Tokenizer &tok() { return t_; }
     const Model &model() const { return m_; }
     Backend &backend() { return *b_; }

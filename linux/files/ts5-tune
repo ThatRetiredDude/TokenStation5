@@ -250,7 +250,49 @@ def helpers(model):
         s = os.path.getsize(f)
         if s * 2 <= size and s >= HELPER_MIN:
             found.append((s, f))
-    return [f for _, f in sorted(found)]
+    return can_draft(model, [f for _, f in sorted(found)])
+
+
+def can_draft(model, files):
+    """The files of `files` the engine would take as this model's helper.
+
+    A helper has to share the model's vocabulary (a Qwen model's helper is
+    a Qwen), which `ts5 helpers` tells from the files' headers in a second,
+    so nothing is loaded and measured that could never help. An older ts5
+    without `helpers` keeps them all, and each is found out at its load."""
+    if not files:
+        return files
+    cmd = [ts5(), "helpers", "-m", model]
+    for f in files:
+        cmd += ["--helper", f]
+    try:
+        out = subprocess.run(cmd, capture_output=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired):
+        return files
+    if out.returncode != 0:
+        return files
+    verdict = {}
+    for line in out.stdout.decode(errors="replace").splitlines():
+        part = line.split("\t")
+        if len(part) >= 2:
+            verdict[part[1]] = (part[0] == "ok", part[2] if len(part) > 2 else "")
+    kept, said = [], set()
+    for f in files:
+        ok, why = verdict.get(f, (True, ""))
+        if ok:
+            kept.append(f)
+            continue
+        # In plain words (ts5-tui shows these lines as they are).
+        if "linear layers" in why and os.path.basename(model) in why:
+            line = "  This kind of model can't use a helper (it can't take a wrong guess back)."
+        elif "vocabulary" in why:
+            line = "  %s is from another model family, so it can't be its helper." % os.path.basename(f)
+        else:
+            line = "  %s can't be its helper: %s" % (os.path.basename(f), why)
+        if line not in said:
+            print(line)
+        said.add(line)
+    return kept
 
 
 # TS5_TUNE_PROGRESS=1 (ts5-tui sets it): a line per step for a progress
@@ -280,7 +322,7 @@ def tune_model(model, n):
     name = os.path.basename(model)
     print("\n== %s (%.1f GiB)" % (name, os.path.getsize(model) / (1 << 30)))
     chosen, notes = {}, []
-    cands = helpers(model)
+    cands = helpers(model)  # only the files that could be its helper
     # The steps, for TS5_TUNE_PROGRESS: the check, the answers alone, each
     # helper at each drafts, saving.
     steps = [{"label": "Checking the model gives correct answers (a few minutes the first time)", "answers": 0},

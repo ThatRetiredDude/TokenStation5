@@ -160,7 +160,10 @@ ts5-tui                              # the server on this machine (port 8081)
 ts5-tui --url http://ps5.local:8081  # another one
 ```
 
-- **A locked bar at the top**: the model, its helper, how full the chat is
+- **A locked bar at the top**: the model, the helper the engine really
+  loaded beside it ("to 8k": it drafts that far into a chat; "not running"
+  in yellow when the model's settings name one that didn't load, and Models
+  says why), how full the chat is
   (tokens of the context, yellow past 75%, red past 90%), the
   last speed, GPU memory and RAM, the die temperature (yellow from 78 °C,
   red from 83 °C, a warning at the 85 °C limiter) and the fan.
@@ -174,14 +177,17 @@ ts5-tui --url http://ps5.local:8081  # another one
   line pasted at the prompt downloads that model.
 - **In between**: the chat (markdown, highlighted code, the thinking folded
   away; Ctrl+T shows it), or a page: **F1** Chat, **F2** Models (Enter
-  loads one, T tunes it with `ts5-tune`, C runs the GPU check, B the speed
+  loads one, and on the loaded one loads it again, which is how a changed
+  setting takes hold; H downloads a model's helper; T tunes it with
+  `ts5-tune`, which a model tested on the PS5 doesn't need: its row says
+  "tested" and its settings are built in; C runs the GPU check, B the speed
   test, each in a panel that ticks off its steps in plain words, with the
   time so far, the time left and what it found at the end, while the top
   bar says what's running; below them, the catalog's models to download),
   **F3** Status (bars
   for GPU memory, RAM, temperatures, fan, GPU load and speed), **F4**
-  Settings (theme, thinking, temperature, answer length, context, fan,
-  tmux), **F5**
+  Settings (theme, thinking, temperature, answer length, context, speed or
+  length, fan, tmux), **F5**
   Logs. Tab and Shift+Tab step through the pages, and so do 1 to 5 on any
   page but Chat. On a Mac, where macOS keeps the F keys, use those, fn+F1
   to fn+F5, or `/chat`, `/models`, `/status`, `/settings`, `/logs`.
@@ -190,7 +196,8 @@ ts5-tui --url http://ps5.local:8081  # another one
   12B, and the helpers Qwen3 0.6B, Llama 3.2 1B and Gemma 3 1B), each file
   pinned to a commit on Hugging Face and checked by SHA-256 (`ts5 fetch`):
   `/download qwen3-14b`, or Enter on its row under Models. Or any other
-  `.gguf` with `/download URL [FILE] [--sha256 HEX]`. They go to
+  `.gguf` with `/download URL [FILE] [--sha256 HEX]`. A tested model's
+  helper downloads right after it, beside it. They go to
   the service's models folder when you may write there, else to
   `~/.local/share/tokenstation/models`. A stopped download goes on from
   where it was.
@@ -337,16 +344,35 @@ On the PS5 (about 13 GiB free) Qwen3 8B keeps all 32,768 tokens and its
 helper gets 2,048 of its own, enough to write 9% faster on an 800-token
 document (past its context, a conversation goes on without it). Llama 3.1
 8B (131,072 tokens) and the 12B and 14B models have no room left for one.
-A fixed Longest context of 4,096 leaves a 14B room for its helper (+32 to
-34% on short answers, as `ts5-tune` measures); at 8,192 there is none.
+A fixed Longest context of 4,096 or 8,192 leaves a 14B room for its helper
+(+32 to 34% on short answers at 4,096, as `ts5-tune` measures; Qwen3 14B at
+8,192 wrote 64.7 tok/s with it on 2026-11-11, against 42.2 alone at
+"As much as fits").
 `TS5_HELPER_ROOM=1` in `ts5.env` keeps the helper's room instead (its
 weights and 4k of its context, about 1.9 GiB for Qwen3 0.6B), at the cost
-of the model's context: Llama 3.1 8B gets about 100,000 tokens beside its
-helper instead of its whole 131,072 alone, in 8-bit keys and 4-bit values
-either way. A model that doesn't fit beside that room loads
-alone, with the context it has without a helper. The helper pays off most
+of the model's context: Qwen3 14B gets 20,480 tokens with its helper
+(57.9 tok/s) instead of 32,768 alone (42.2), and Llama 3.1 8B about
+100,000 tokens beside its helper instead of its whole 131,072 alone, in
+8-bit keys and 4-bit values either way. A model that doesn't fit beside
+that room loads alone, with the context it has without a helper.
+`ts5-tui` sets it for the models it loads itself: Settings > Speed or
+length is "faster" by default, and "longest chat" gives the chat all the
+memory. The helper pays off most
 on short answers: on long documents and code it guesses right less often
 (the Gemma 12Bs at 8,192 wrote 5 to 9% slower with it in 3 of 4 tests).
+
+Tested models: the models tested on the PS5 under Linux need no tuning.
+`engine/src/tested_models.h` names each one (by file name and size) with
+the helper `ts5-tune --models` found fastest for it there, and `ts5` and
+the app use that helper whenever its file is beside the model and no tune
+file (below) says otherwise; they log `settings for ..., as tested on the
+PS5`. Qwen3 0.6B in Q4_K_M drafts for Qwen3 8B and 14B, DeepSeek R1 Distill
+Qwen 14B and Qwen2.5 Coder 7B and 14B; Llama 3.2 1B in Q4_K_M for Llama 3.1
+8B and Llama 3.2 3B. Qwen3.5 9B has none (its linear layers can't take a
+draft back), and the Gemma 12Bs have none built in (Gemma 3 1B makes their
+short answers faster and their long prompts slower: tuning decides).
+`/v1/models` says what really loaded: `"helper": {"id", "context_length"}`,
+or `"helper": null` with a `helper_note` saying why not.
 
 Which file: the helper is read once for every token it guesses, so a
 smaller quantization pays. On the PS5 with Qwen3 8B, Qwen3 0.6B in Q4_K_M
@@ -396,8 +422,11 @@ the CPU, and where that fails, a check on 256 tokens of English text decides
 just over the bar); if 16-bit prompt math fails and 32-bit passes, the model
 keeps 32-bit. Then it writes four answers (two of prose, two of code) at a
 4,096-token context, where a 14B has room for a helper, alone and with each
-possible helper beside it (half its size or less, one the engine accepts;
-the app's own pick takes a quarter), at 3 and at 5 guessed tokens a step,
+possible helper beside it (half its size or less, and of its family:
+`ts5 helpers -m MODEL --helper FILE...` says from the files' headers which
+ones the engine would take, so none of another family is loaded and
+measured; the app's own pick takes a quarter), at 3 and at 5 guessed tokens
+a step,
 and keeps the fastest whose answers are the very text the model writes
 alone; if none it could measure is faster, the helper is off for that model
 (one that is refused, for its vocabulary or for memory, isn't counted). The

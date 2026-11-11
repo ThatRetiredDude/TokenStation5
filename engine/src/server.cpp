@@ -385,11 +385,13 @@ void handle(int fd, Server::State &state, Usage &u) {
         KnownMatch known;
         SampleParams sampling;
         bool think;
+        Engine::Helper helper;
         {
             std::lock_guard<std::mutex> g(state.stats);
             model = state.model;
             tools = state.tool_format;
             n_ctx = state.n_ctx;
+            helper = state.helper;
             known = state.known;
             sampling = state.sampling;
             think = state.think;
@@ -397,6 +399,13 @@ void handle(int fd, Server::State &state, Usage &u) {
         // capabilities: whether the model takes OpenAI tools, and whether ts5
         // runs web searches for it (a Tavily key is set).
         const bool can = tools != "none";
+        // helper: the draft model that is really loaded beside it and its
+        // context (drafting stops past it), else null, with helper_note
+        // saying why the one asked for isn't used.
+        const std::string helper_json =
+            !helper.name.empty() ? "{\"id\":" + json_escape(api_id(helper.name)) + ",\"context_length\":" +
+                                       std::to_string(helper.n_ctx) + "}"
+                                 : std::string("null");
         send_all(fd, response(200, "{\"object\":\"list\",\"data\":[" +
                                        (model.empty() ? std::string()
                                                       : "{\"id\":" + json_escape(api_id(model)) +
@@ -406,6 +415,10 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                             // The context, under the names clients look for.
                                                             ",\"context_length\":" + std::to_string(n_ctx) +
                                                             ",\"max_model_len\":" + std::to_string(n_ctx) +
+                                                            ",\"helper\":" + helper_json +
+                                                            (helper.why.empty() ? std::string()
+                                                                                : ",\"helper_note\":" +
+                                                                                      json_escape(helper.why)) +
                                                             ",\"capabilities\":{\"tools\":" + (can ? "true" : "false") +
                                                             ",\"tool_format\":" + json_escape(tools) +
                                                             ",\"web_search\":" +
@@ -995,6 +1008,7 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
     state_.unavailable = unavailable;
     state_.tool_format = e ? tool_format_name(tool_format(e->tok())) : "none";
     state_.n_ctx = e ? e->backend().n_ctx() : 0;
+    state_.helper = e ? e->helper : Engine::Helper{};
     state_.known = {};
     state_.sampling = SampleParams{};
     state_.think = true;

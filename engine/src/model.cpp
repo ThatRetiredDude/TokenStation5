@@ -1,6 +1,7 @@
 #include "model.h"
 
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <cmath>
 #include <cstdio>
@@ -10,6 +11,7 @@
 #include <utility>
 
 #include "log.h"
+#include "tested_models.h"
 
 namespace ts5 {
 
@@ -477,6 +479,29 @@ void apply_model_tune(const std::string &model_path) {
                  set.empty() ? " (nothing new)" : set.c_str());
         return;
     }
+    // No tune file: a model tested on the PS5 has its helper built in
+    // (tested_models.h), used when the helper's file is beside it.
+    if (getenv("TS5_MODEL_TUNE")) return;
+    struct stat st;
+    if (stat(model_path.c_str(), &st) != 0) return;
+    const TestedModel *t = tested_model(name.c_str(), (long long)st.st_size);
+    if (!t || !*t->helper || getenv("TS5_DRAFT_MODEL")) return;
+    const std::string helper = dir + "/" + t->helper;
+    if (access(helper.c_str(), R_OK) != 0) {
+        log_line("ts5: %s writes faster with its helper %s, which isn't beside it (download it to use it)",
+                 name.c_str(), t->helper);
+        return;
+    }
+    std::string set;
+    auto put = [&](const char *k, const std::string &v) {
+        if (getenv(k)) return;
+        setenv(k, v.c_str(), 1);
+        applied.push_back({k, v});
+        set += std::string(" ") + k + "=" + v;
+    };
+    put("TS5_DRAFT_MODEL", helper);
+    put("TS5_DRAFT", t->drafts);
+    log_line("ts5: settings for %s, as tested on the PS5:%s", name.c_str(), set.c_str());
 #else
     (void)model_path;
 #endif
