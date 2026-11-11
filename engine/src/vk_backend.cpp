@@ -565,10 +565,16 @@ public:
         for (const auto &t : m_.gguf.tensors)
             if (!(embd_file_ && &t == m_.tok_embd.info)) weights += t.nbytes;
         const uint64_t fixed = vk_fixed_bytes(hp_, weights);
-        // The tokens a cache of type t holds in what is free beside them.
-        auto holds = [&](KvType t) {
-            return free > fixed ? (int)std::min<uint64_t>((free - fixed) / kv_bytes_per_token(hp_, t), 1u << 30) : 0;
+        // The tokens a cache of type t holds in `room`. (A model whose every
+        // layer keeps only a window of the past has nothing per token: any
+        // context fits. Only a test model is built so; dividing by its 0
+        // ended `ts5 logits` on it with a signal.)
+        auto tokens_in = [&](uint64_t room, KvType t) {
+            const uint64_t per = kv_bytes_per_token(hp_, t);
+            return (int)std::min<uint64_t>(per ? room / per : UINT64_MAX, 1u << 30);
         };
+        // The tokens a cache of type t holds in what is free beside them.
+        auto holds = [&](KvType t) { return free > fixed ? tokens_in(free - fixed, t) : 0; };
         // A context set by number that f16 has no memory for: the smaller
         // cache an auto-fit context would take on this model, where that
         // holds it (set_context_kv_type).
@@ -602,9 +608,7 @@ public:
         // above): the one asked for where none smaller may be.
         const bool by_tails = n_ctx_ > 0 && fit_tails_ && fixed <= free;
         const uint64_t exact = by_tails ? vk_fixed_bytes(hp_, weights, false) : fixed;
-        auto tails = [&](KvType t) {
-            return free > exact ? (int)std::min<uint64_t>((free - exact) / kv_bytes_per_token(hp_, t), 1u << 30) : 0;
-        };
+        auto tails = [&](KvType t) { return free > exact ? tokens_in(free - exact, t) : 0; };
         // The smallest cache a context of n tokens set by number may take
         // here, where `count` says it holds them; else the one asked for.
         auto smallest = [&](int n, const std::function<int(KvType)> &count, std::vector<std::string> *why) {
