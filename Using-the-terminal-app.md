@@ -68,7 +68,7 @@ On a narrow window the least needed items drop off first (fan, then RAM). When t
 
 ## Chat (F1)
 
-Type at `ts5>` and press **Enter**. The answer streams in with its formatting: headings, lists, quotes, and code blocks with highlighting. A thinking model's reasoning is folded away: while it thinks you see a pulsing **thinking…** line with its last words, then **▸ Thought for 4.1 s**. **Ctrl+T** unfolds every chat's thinking (and folds it again). Under each answer: its speed, tokens, prompt speed and time.
+Type at `ts5>` and press **Enter**. The answer streams in with its formatting: headings, lists, quotes, and code blocks with highlighting. A thinking model's reasoning is folded away: while it thinks you see a pulsing **thinking…** line with its last words, then **▸ Thought for 4.1 s**. **Click that line** to read what it thought, and click it again to fold it; **Ctrl+T** unfolds every answer's thinking at once (and folds it again). Under each answer: its speed, tokens, prompt speed and time, and a **[copy]** mark (see [The mouse, and copying](#the-mouse-and-copying)).
 
 | Key | What it does |
 | --- | --- |
@@ -77,14 +77,35 @@ Type at `ts5>` and press **Enter**. The answer streams in with its formatting: h
 | ↑ / ↓ | The messages and commands you typed before. |
 | Esc | Stops an answer (Ctrl+C too). With no answer running, clears what you typed. |
 | Ctrl+N | A new chat. The one you leave is kept (see [Saved chats](#saved-chats)). |
-| Ctrl+T | Show or hide the thinking. |
+| Ctrl+T | Show or hide the thinking, of every answer. A click on one answer's **Thought for** line does it for that one. |
+| Ctrl+Y | Copy the last answer (see [The mouse, and copying](#the-mouse-and-copying)). |
 | PgUp / PgDn | Scroll the chat a page. Ctrl+↑ / Ctrl+↓ scroll a line, and so does the mouse wheel in tmux. End (with nothing typed) goes back to the bottom. |
 | ← → Home End | Move in what you're typing. Ctrl+← / Ctrl+→ by word. |
 | Home / End | Start / end of the line. Ctrl+E is End too. Ctrl+A is Home outside ts5's tmux session; inside it Ctrl+A is tmux's own key, so press it twice, or use Home. |
 | Ctrl+U / Ctrl+K / Ctrl+W | Delete to the start / to the end / the word before. |
-| Ctrl+Q | Quit. While a tuning, a check or a download runs, it asks first. |
+| Ctrl+Q | Quit (Ctrl+C too, when no answer is running). A model ts5-tui loaded is unloaded and its GPU memory is free again. While a tuning, a check or a download runs, it asks first. |
 
 The top bar always shows how full the chat is (**chat 7.8k/32k**), and the line over the prompt reads "chat N of M tokens": yellow from 75%, red from 90%. When an answer stops because the chat filled the context, a note under it says so, with the numbers, and that **Ctrl+N** starts a new chat (the full one stays saved). For a model loaded at a fixed context, it adds that Settings → Context → auto gives it more. If the answer hit your **Answer length** cap instead, the note says that. A message sent to a chat that's already full gets "This chat is full" in place of an answer, with the same Ctrl+N tip.
+
+### The mouse, and copying
+
+| Do this | And |
+| --- | --- |
+| Click **▸ Thought for …** | That answer's thinking opens. Click **▾ Thinking** to fold it. |
+| Click **[copy]** under an answer | The answer is copied, as the model wrote it. |
+| Click **[copy]** on a code block | That block's code is copied, without the box or the indent. |
+| Press **Ctrl+Y**, or type `/copy` | The last answer is copied. `/copy code` copies its last code block, `/copy think` its thinking, `/copy all` the whole chat. |
+| Drag over the chat | The whole chat opens as plain text, at the message you dragged on, to select from. On Logs, the log does. |
+| Click a page's name in the top bar | Goes to that page. The wheel scrolls. |
+
+**Where a copy goes.** A program in a terminal can't see your computer's clipboard, least of all over SSH, so ts5-tui does everything that can work and then shows you the text:
+
+1. It asks the terminal to put the text on the clipboard. iTerm2 (with *Applications in terminal may access clipboard* on), kitty, WezTerm, Ghostty, Windows Terminal and VS Code do that. Apple's Terminal does not.
+2. On a Linux desktop it also uses `wl-copy`, `xclip` or `xsel`.
+3. It saves the text in `~/.cache/tokenstation/copied.txt`.
+4. It shows the text alone on the screen, plain, and gives the mouse back to the terminal. **Select it with the mouse and copy as you always do** (Cmd+C on a Mac). You get exactly what the model wrote: long lines whole, code without bars or indent. The arrows and PgUp/PgDn move through a long text; **any other key goes back** to the chat.
+
+With **Settings → Mouse: off**, the terminal keeps the mouse all the time: dragging selects what is on the screen, and Ctrl+T and Ctrl+Y do what the clicks did. With the mouse on, holding **Fn** (Apple's Terminal), **Option** (iTerm2) or **Shift** (most others) while dragging also selects what is on the screen.
 
 ### Saved chats
 
@@ -111,6 +132,7 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | `/chats [TEXT]` | Your saved chats, or the ones with TEXT (see [Saved chats](#saved-chats)). |
 | `/open N` | Opens saved chat N from `/chats` (or `/open TEXT`: the newest with TEXT). |
 | `/save [FILE]` | Saves this chat as Markdown, thinking included. Without a file: `~/tokenstation-chat-YYYYMMDD-HHMM.md`. |
+| `/copy` | Copies the last answer (Ctrl+Y). `/copy code`: its last code block. `/copy think`: its thinking. `/copy all`: the whole chat. See [The mouse, and copying](#the-mouse-and-copying). |
 | `/find TEXT` | Scrolls to the newest message containing TEXT. |
 | `/tune [NAME]` | Runs `ts5-tune` on the loaded model (or NAME), live on the Models page. |
 | `/check [NAME]` | The GPU check on the loaded model (or NAME): `ts5 check`, the GPU's answers against the CPU's. |
@@ -122,7 +144,8 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | `/theme NAME` | Colors: Ocean, Neon, Sunset, Forest, Mono. Without a name, the next one. |
 | `/status`, `/settings`, `/logs` | Those pages. |
 | `/help` | Every command and key, in the chat. |
-| `/quit` | Leaves (`/exit` and `/q` too, and plain `exit`, `quit` or `q`). The server keeps running. |
+| `/unload` | Stops the model ts5-tui loaded, so its GPU memory is free, without quitting. |
+| `/quit` | Leaves (`/exit` and `/q` too, and plain `exit`, `quit` or `q`). A model ts5-tui loaded is unloaded (see [When you quit](#when-you-quit)). |
 
 ## Models (F2)
 
@@ -134,12 +157,12 @@ Every `.gguf` on this machine, biggest first, with its size, its helper, and whe
 | --- | --- |
 | ↑ ↓, PgUp PgDn | Choose. |
 | Enter | Load it. On the model that's loaded: load it again, which is how a changed setting or a helper downloaded since takes hold (it asks first). On a catalog row: download it. |
-| T | Tune it with `ts5-tune --models` (10 to 20 minutes). A tested model doesn't need it, and T asks before tuning one. |
+| T | Tune it with `ts5-tune --models` (10 to 20 minutes). A tested model doesn't need it. T asks before it starts. |
 | H | Download this model's helper, when it isn't here yet. |
-| C | The GPU check (`ts5 check`): the model's answers on the GPU against the CPU's. |
-| B | The speed test (`ts5 bench`): a 512-token prompt and 128 tokens of answer. |
+| C | The GPU check (`ts5 check`): the model's answers on the GPU against the CPU's. C asks before it starts. |
+| B | The speed test (`ts5 bench`): a 512-token prompt and 128 tokens of answer. B asks before it starts. |
 | D | On a catalog row or a search result: download it. |
-| S | Search Hugging Face for other models: the words go at the prompt. |
+| S | Search Hugging Face for other models: type the words right there, Enter searches, Esc cancels. |
 | X | Stop the download (it goes on from there next time). |
 | R | Look for model files again. |
 
@@ -150,11 +173,14 @@ It looks in `/var/lib/tokenstation/models` (or the service's `MODELS_DIR`), `~/.
 | Running | Enter |
 | --- | --- |
 | The API-only service (`tokenstation`) | Switches its model and restarts it, through the package's hardware helper. Your user must be in the `tokenstation` group (`sudo adduser $USER tokenstation`, then log in again). The model must be in the service's models folder. |
-| Nothing | Starts `ts5 serve` with that model on `127.0.0.1`, with the context and the **Speed or length** choice from Settings. By default (auto context, **faster**) it keeps GPU memory for the model's helper: Qwen3 14B on the PS5 then gets a 20,480-token chat and writes about 58 tok/s. With **longest chat** it gets 32,768 tokens and no helper, about 42 tok/s. It keeps serving after you quit ts5-tui, which then prints its process number; `kill` it to stop it. Its log is `~/.cache/tokenstation/tui-serve.log`. |
+| Nothing | Starts `ts5 serve` with that model on `127.0.0.1`, with the context and the **Speed or length** choice from Settings. By default (auto context, **faster**) it keeps GPU memory for the model's helper: Qwen3 14B on the PS5 then gets a 20,480-token chat and writes about 58 tok/s. With **longest chat** it gets 32,768 tokens and no helper, about 42 tok/s. Quitting ts5-tui stops it and frees its GPU memory (Settings → **When you quit** keeps it serving instead), and `/unload` stops it without quitting. Its log is `~/.cache/tokenstation/tui-serve.log`. |
 | The TV app (`tokenstation-tv`) | Nothing: pick the model on the TV's Models page. |
 | Another program on port 8081 | Nothing: switch the model there. |
 
-The top bar shows **loading…** with the seconds until the server reports the new model. A model that doesn't load (not enough memory, a file that isn't a model) says why, on the Models page and in the chat.
+The top bar shows **loading…** with the seconds until the server reports the new model. Switching models stops the one that was loaded first, so its memory is free for the new one.
+
+- **A model that doesn't load** (not enough memory, a file that isn't a model) says why in plain words, on the Models page and in the chat, and the model that was loaded before it is loaded again, so a failed switch doesn't leave you with none.
+- **A Context set to a number** (Settings) never stops a load. Where the full-size chat memory for that many tokens doesn't fit beside the model, the engine uses its smaller chat memory instead (8-bit, as Context on auto does): a 14B at 32,768 tokens needs 6.0 GiB the full-size way and 2.4 GiB the smaller way. Where even that doesn't fit, the model comes up with the longest chat that does, and a note says so.
 
 **Helpers** aren't loaded by hand. A helper is a small model that drafts tokens for a big one (the same text, faster), and it loads along with it.
 
@@ -186,6 +212,7 @@ It downloads the same way and shows under the catalog while it runs. FILE is a n
 For a model that isn't on the tested list, press **S** on the Models page and type what to look for, or type `/search mistral 7b` at the prompt. It asks Hugging Face for the most downloaded GGUF repos that match and keeps the files ts5 can run (the Llama, Mistral, Qwen and Gemma families, in the usual 4- to 8-bit file types) that fit this GPU's memory with room for a chat. Chat models come first, two files per repo at most.
 
 - The line after **⇣ Search** says how it's going ("looking at model 3 of 8…"), then how many fit, and how many were left out because they're too big for this GPU or of a kind ts5 can't run.
+- Left out without a count: repos that match your words only by their uploader's name, and files that aren't the model itself (a vision model's image encoder, `mtp-` side files). Embedding and reranking models count as a kind ts5 can't run: they don't chat.
 - The results are listed under it, each with its size and who made the file. The box below shows the repo, the file, how long a chat it gets on this machine and where it goes.
 - **Enter** downloads the selected one the same way as a tested model, pinned to the repo's commit and checked against the SHA-256 Hugging Face lists for it. A file that's already here says so, and Enter goes to it in the list.
 - A model found this way hasn't been tested on the PS5. Once it's here, **C** checks its answers on this GPU and **T** tunes it.
@@ -223,12 +250,14 @@ btop-style bars for this machine: GPU memory (with GiB free), RAM, the die (Tctl
 | API key | Only when the server asks for one. Kept in the settings file, readable by you only. |
 | Theme | Ocean, Neon, Sunset, Forest, Mono. |
 | Thinking | The model's choice, on, or off. |
-| Temperature | The model's own, or 0.1 to 1.5. Lower is steadier. |
+| Temperature | **default** with its number beside it (0.7 for every model but Mistral Nemo, 0.3), or 0.1 to 1.5. Lower is steadier (code, facts), higher more varied. Past either end it goes back to default. |
 | Answer length | No limit, or a cap of 512 to 8,192 tokens. Under 1,024 turns thinking off. |
-| Context (own) | The context for a model ts5-tui starts itself: auto (the default: the longest that fits), or 4,096 to 32,768. A setting saved as 8,192 by an older version reads as auto. |
+| Context (own) | The context for a model ts5-tui starts itself: auto (the default: the longest that fits), or 4,096 to 32,768. A number that has no memory beside a model doesn't stop the load (see [Models](#models-f2)); auto is the safe choice. A setting saved as 8,192 by an older version reads as auto. |
 | Speed or length | For a model with a helper that ts5-tui starts itself, with Context on auto. **faster** (the default) keeps GPU memory for the helper: the model writes faster, and the chat is somewhat shorter. **longest chat** gives the memory to the chat, and the model runs without its helper when both don't fit. It takes hold the next time the model loads (Enter on it on Models). |
 | Fan (PS5) | auto (quiet), cool (keeps long prompts under the 85 °C limiter), early (ramps from 40 °C, for long prompts back to back), max (loud). |
 | tmux | Its own tmux session from a plain terminal. |
+| Mouse | **on** (the default): clicks open the thinking, copy, and change pages; a drag opens the text to select. **off**: the terminal keeps the mouse, and dragging selects what's on the screen. |
+| When you quit | **the model is unloaded** (the default): a model ts5-tui loaded stops with it and its GPU memory is free. **the model stays loaded**: it keeps serving the API after ts5-tui quits (stop it later with `kill`, or `/unload` from ts5-tui). |
 | Opening title | The title at start. |
 
 The engine's own switches (prompt math, cache, helper) are per model: built in for the models tested on the PS5, and set by `ts5-tune` for any other (Models → **T**).
@@ -244,7 +273,7 @@ It follows the API-only service's journal (`journalctl -u tokenstation`; reading
 From a plain terminal (an SSH session from Terminal, iTerm, PuTTY…), ts5-tui starts itself inside its own **tmux** session, called `ts5`, when tmux is installed (the packages recommend it). If the connection drops, nothing stops: the answer finishes, the model keeps loading, tuning goes on. Run `ts5-tui` again and you're back where you were.
 
 - **Ctrl+A** then **D** leaves it running in the background; `ts5-tui` comes back to it. Ctrl+A is this session's command key, so for the start of the line use **Home** (or Ctrl+A twice).
-- The mouse wheel scrolls the chat. To select text with the mouse, hold **Shift** (Option on a Mac in iTerm).
+- The mouse wheel scrolls the chat, and clicks work as everywhere else. To copy text, see [The mouse, and copying](#the-mouse-and-copying).
 - It uses its own tmux server and settings (`~/.cache/tokenstation/tmux.conf`): your `~/.tmux.conf` and your other tmux sessions are left alone, and tmux's own status bar is hidden.
 - Quitting ts5-tui ends the session.
 
@@ -254,7 +283,9 @@ In an **IDE's terminal** (VS Code, Cursor, JetBrains, including their Remote-SSH
 
 ## When you quit
 
-**Ctrl+Q** (always shown at the bottom right), `exit`, `quit` or `q` at the prompt, `/quit`, or **q** on a page other than Chat. While a tuning, a check or a download runs, quitting asks first. In ts5's tmux session, **Ctrl+A d** leaves it running instead. The chat is printed into your terminal, so it stays in its scrollback (also after a tmux session). The server and its model keep running.
+**Ctrl+Q** (always shown at the bottom right), `exit`, `quit` or `q` at the prompt, `/quit`, or **q** on a page other than Chat. While a tuning, a check or a download runs, quitting asks first. The same keys and **Ctrl+C** (when no answer is running; while one is, Ctrl+C stops the answer). The chat is printed into your terminal, so it stays in its scrollback (also after a tmux session).
+
+**Quitting stops the model too.** A model that ts5-tui loaded is unloaded when you quit, and its GPU memory is free for the TV app, a game or the next model; the last line printed says so. Three things are left alone: a model the service or the TV app serves (ts5-tui didn't start it), a session you only left with **Ctrl+A d** (ts5-tui and the model both keep running, and `ts5-tui` takes you back), and the model itself when Settings → **When you quit** is set to keep it loaded.
 
 ## If something's off
 
@@ -267,5 +298,8 @@ In an **IDE's terminal** (VS Code, Cursor, JetBrains, including their Remote-SSH
 | Colors look washed out or wrong | The terminal has no 24-bit color, so ts5-tui uses 256 colors. Terminals that support it set `COLORTERM=truecolor`; try another theme, or `Mono`. |
 | Odd characters instead of boxes | The terminal isn't UTF-8. Set a UTF-8 locale (`export LANG=C.UTF-8`). |
 | tmux opens when you don't want it | `ts5-tui --no-tmux`, or Settings → tmux → off. |
+| A model "didn't load": not enough GPU memory | The message says how much it needs and how much is free. If another program holds the memory (the TV app, a game, a tune or check still running, a model left loaded by an older ts5-tui: `pkill -f "ts5 serve"`), stop that. If the model is simply too big for this GPU, pick a smaller file type (Q4_K_M) or a smaller model. |
+| Copied, but nothing to paste | Your terminal doesn't let programs set the clipboard (Apple's Terminal never does). Select the text in the plain view that opens after every copy, and press Cmd+C. |
+| Clicks do nothing | Settings → Mouse must be on. In Apple's Terminal, View → **Allow Mouse Reporting** must be ticked. |
 
 More in [Troubleshooting](Troubleshooting).
