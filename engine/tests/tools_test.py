@@ -323,6 +323,25 @@ def test_parser(ts5):
          "I will run it.", [("run_command", {"command": "nproc"})], 15, ["run_command"]),
         ("generic", 'As JSON:\n{"name": "Ada", "arguments": {}}', 'As JSON:\n{"name": "Ada", "arguments": {}}', [], 9,
          ["run_command"]),
+        # A result the model writes itself is made up: the reply ends before it, and the call in
+        # front of it is the reply's call (R1 14B on the PS5, asked to search Wikipedia: two calls,
+        # two results and a population, none of it real).
+        ("generic", '{"name": "browser_open", "arguments": {"url": "https://en.wikipedia.org"}}\n'
+         'Result of browser_open: The Wikipedia page is open.\n'
+         '{"name": "browser_type", "arguments": {"number": 4, "text": "Bratislava"}}\n'
+         'Result of browser_type: The page gives the population.\n\nThe population is approximately 430,000.',
+         "", [("browser_open", {"url": "https://en.wikipedia.org"})], 0, ["browser_open", "browser_type"]),
+        ("generic", 'I will open the page.\n{"name": "browser_open", "arguments": {"url": "https://a.example"}}\n\n'
+         '**Result of `browser_open`:** the page is open\nSo the answer is 5.',
+         "I will open the page.", [("browser_open", {"url": "https://a.example"})], 22, ["browser_open"]),
+        ("generic", '<think>\nResult of browser_open: is what I get next.\n</think>\n\nSure.\nResult of the function:\nIt is open.',
+         "<think>\nResult of browser_open: is what I get next.\n</think>\n\nSure.", [], 68, ["browser_open"]),
+        # Held while it may become one; another "Result of" is the answer's own words.
+        ("generic", "Here.\nResult of brow", "Here.\nResult of brow", [], 6, ["browser_open"]),
+        ("generic", "Here.\nRes", "Here.\nRes", [], 6, ["browser_open"]),
+        ("generic", "Result of the vote: 5 to 4.\nResults vary.", "Result of the vote: 5 to 4.\nResults vary.", [], 41,
+         ["browser_open"]),
+        ("hermes", "Result of web_search: nothing.", "Result of web_search: nothing.", [], 30, ["web_search"]),
         ("generic", 'The set is {"a": 1}', 'The set is {"a": 1}', [], 19, ["run_command"]),
         ("generic", "Two lines.\n{", "Two lines.\n{", [], 11, ["run_command"]),
         ("generic", "I'll run it. <command>\n", "I'll run it. <command>\n", [], 13, ["run_command"]),
@@ -1040,6 +1059,25 @@ def test_thinking_marks(ts5, model, tdir):
             print(f"FAIL {label}: {msg}\n{prompts[-1]}\n{log}")
         else:
             print(f"ok   {label}")
+    # A result the model writes itself: the turn ends there and the call before it goes to the
+    # client (R1 14B on the PS5 wrote two calls, their results and an answer, and nothing ran).
+    made_up = ('The weather tool fits.\n</think>\n\n{"name": "get_weather", "arguments": {"city": "Oslo"}}\n'
+               'Result of get_weather: It is sunny in Oslo.\n{"name": "get_weather", "arguments": {"city": "Bergen"}}\n'
+               'Result of get_weather: Rain.\n\nOslo is sunny and Bergen has rain.')
+    words = "No tool needed.\n</think>\n\nSure.\nResult of get_weather: sunny.\nIt is sunny."
+    for name, turn, want_calls, want_text, finish in (
+            ("the call before a made-up result is made", made_up, [("get_weather", {"city": "Oslo"})], "", "tool_calls"),
+            ("a made-up result without a call ends the answer", words, [], "Sure.", "stop")):
+        for stream, env in ((False, None), (True, None), (True, {"TS5_TEST_PIECE": "4"})):
+            req = {"messages": [{"role": "user", "content": "Weather in Oslo?"}], "tools": [WEATHER], "stream": stream}
+            msg, prompts, log = serve_turns(ts5, model, r1, [turn], req, more_env=env)
+            calls = [(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in msg["tool_calls"]]
+            label = f"DeepSeek R1: {name}" + (", streaming" if stream else "") + (" in pieces" if env else "")
+            if calls != want_calls or msg["finish_reason"] != finish or (msg["content"] or "").strip() != want_text:
+                failed += 1
+                print(f"FAIL {label}: {msg}\n{log}")
+            else:
+                print(f"ok   {label}")
     return failed
 
 

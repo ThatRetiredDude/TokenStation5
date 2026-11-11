@@ -1279,6 +1279,7 @@ const int kToolRounds = 12;
 void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
     bool none = false;     // this turn was told to call no tool
     bool said_no = false;  // the user said no to a command of this message's
+    bool again = false;    // a turn that came back empty was asked once more
     for (int round = 0;; round++) {
         stream_answer(c, rq, body);
         std::vector<ToolUse> calls;
@@ -1297,6 +1298,39 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
                                       : "the model kept calling tools instead of answering: ask it again";
             }
             calls = m.calls;
+        }
+        // A turn with no words and no call (on the PS5 Qwen3 8B read the
+        // page it had clicked to, thought for a line and stopped there, and
+        // the chat showed a blank): the turn is asked once more, without
+        // the thinking where that is the model's own choice. Empty again,
+        // the answer says so.
+        bool empty = false;
+        {
+            std::lock_guard<std::mutex> l(c->mu);
+            const Msg &m = c->msgs.back();
+            empty = calls.empty() && m.error.empty() && !m.stopped &&
+                    m.content.find_first_not_of(" \t\r\n") == std::string::npos;
+        }
+        if (empty && !c->cancel.load()) {
+            if (again) {
+                std::lock_guard<std::mutex> l(c->mu);
+                c->msgs.back().error = "the model gave no answer: ask it again";
+            } else {
+                again = true;
+                {
+                    std::lock_guard<std::mutex> l(c->mu);
+                    Msg a;
+                    a.role = "assistant";
+                    a.model = rq.model;
+                    a.t0 = now_s();
+                    c->msgs.back() = a;
+                }
+                ChatRequest quiet = rq;
+                if (quiet.thinking == 0) quiet.thinking = 2;
+                body = body_for(*c, quiet, none);  // (takes the chat's lock itself)
+                round--;
+                continue;
+            }
         }
         if (calls.empty()) break;
         for (const ToolUse &u : calls) {

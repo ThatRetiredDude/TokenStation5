@@ -1656,7 +1656,36 @@ size_t made_up_wrapper(const std::string &text, size_t from, bool partial) {
     return std::string::npos;
 }
 
-ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names) {
+size_t made_up_result(const std::string &text, const std::vector<std::string> &names) {
+    size_t from = 0;
+    if (has(text, "<think>")) {
+        from = text.find("</think>");
+        if (from == std::string::npos) return std::string::npos;  // still thinking
+        from += 8;
+    }
+    static const std::string key = "Result of ";
+    for (size_t at = text.find(key, from); at != std::string::npos; at = text.find(key, at + 1)) {
+        // At a line's start, maybe behind a mark of Markdown's.
+        size_t b = at;
+        while (b > from && strchr(" \t*#>_", text[b - 1])) b--;
+        if (b > from && text[b - 1] != '\n') continue;
+        size_t n = at + key.size();
+        if (n < text.size() && strchr("`\"'*", text[n])) n++;  // `browser_open`
+        bool known = text.compare(n, 12, "the function") == 0;
+        size_t e = n + 12;
+        for (auto &name : names)
+            if (!known && !name.empty() && text.compare(n, name.size(), name) == 0) known = true, e = n + name.size();
+        if (!known) continue;
+        while (e < text.size() && strchr("`\"'*", text[e])) e++;
+        if (e < text.size() && text[e] == ':') return b;
+    }
+    return std::string::npos;
+}
+
+ParsedTurn parse_turn(ToolFormat f, const std::string &whole, const std::vector<std::string> &names) {
+    // A generic model's reply ends before a result it wrote itself.
+    const size_t fake = f == ToolFormat::GENERIC ? made_up_result(whole, names) : std::string::npos;
+    const std::string text = fake == std::string::npos ? whole : rstrip(whole.substr(0, fake));
     if (f == ToolFormat::GEMMA || f == ToolFormat::GENERIC) f = ToolFormat::HERMES;  // their calls are Hermes's
     ParsedTurn r;
     r.content = text;
@@ -1837,7 +1866,29 @@ bool empty_call_block(ToolFormat f, const std::string &content) {
     return false;
 }
 
-size_t content_prefix(ToolFormat f, const std::string &text) {
+// Whether the line at w starts as a made-up result does, as far as the text
+// goes: "Result of ", then a name that is, or may yet become, one of the
+// request's tools (any name where they aren't given).
+static bool result_start(const std::string &text, size_t w, const std::vector<std::string> *names) {
+    static const std::string key = "Result of ";
+    const size_t n = std::min(key.size(), text.size() - w);
+    if (n == 0 || text.compare(w, n, key, 0, n) != 0) return false;
+    if (n < key.size() || !names) return true;
+    size_t at = w + key.size();
+    if (at < text.size() && strchr("`\"'*", text[at])) at++;
+    const size_t left = text.size() - at;
+    auto fits = [&](const std::string &name) {
+        const size_t k = std::min(left, name.size());
+        return !name.empty() && text.compare(at, k, name, 0, k) == 0;
+    };
+    if (fits("the function")) return true;
+    for (auto &name : *names)
+        if (fits(name)) return true;
+    return false;
+}
+
+size_t content_prefix(ToolFormat f, const std::string &text, const std::vector<std::string> *names) {
+    const bool generic = f == ToolFormat::GENERIC;
     if (f == ToolFormat::GEMMA || f == ToolFormat::GENERIC) f = ToolFormat::HERMES;
     if (f == ToolFormat::HERMES) {
         size_t from = 0;
@@ -1846,6 +1897,18 @@ size_t content_prefix(ToolFormat f, const std::string &text) {
             if (from == std::string::npos) return text.size();
             from += 8;
         }
+        // A generic model's line that starts as its results do ("Result of
+        // NAME:", made_up_result) may be one it makes up: held, with what
+        // could become one where the text ends.
+        if (generic)
+            for (size_t b = from; b < text.size();) {
+                const size_t w = text.find_first_not_of(" \t*#>_", b);
+                if (w != std::string::npos && result_start(text, w, names))
+                    return std::min(b, content_prefix(ToolFormat::HERMES, text.substr(0, b)));
+                const size_t nl = text.find('\n', b);
+                if (nl == std::string::npos) break;
+                b = nl + 1;
+            }
         // A reply that opens with {, ``` or < may be a bare, fenced or
         // wrapped call: hold it all.
         size_t i = text.find_first_not_of(kSpace, from);

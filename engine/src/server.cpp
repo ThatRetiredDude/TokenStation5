@@ -626,6 +626,8 @@ void handle(int fd, Server::State &state, Usage &u) {
         std::function<bool()> gone;
         if (stop_gone) gone = [fd] { return peer_gone(fd); };
         bool use_tools = !tools.empty();  // off for a last turn that must answer
+        std::vector<std::string> tool_names;
+        for (const Json &t : tools) tool_names.push_back(t["function"]["name"].str());
         SampleParams sp;
         sp.temperature = (float)req["temperature"].num(state.sampling.temperature);
         sp.top_p = (float)req["top_p"].num(state.sampling.top_p);
@@ -750,6 +752,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             ThoughtChannel channel(g4, !seed.empty());  // the thinking's marks, as <think> and </think>
             size_t sent = 0;  // bytes of this turn's `text` already streamed
             size_t thought = 0;  // and of its thinking, as reasoning_content
+            bool invented = false;  // the turn was ended where the model began a call's result itself
             const char *closing = nullptr;  // why this turn's thinking is being ended, while it is
             size_t close_at = 0;            // where in `text`
             {
@@ -786,6 +789,18 @@ void handle(int fd, Server::State &state, Usage &u) {
                 for (auto &s : stops) {
                     size_t at = s.empty() || from >= text.size() ? std::string::npos : text.find(s, from);
                     if (at != std::string::npos) { text.resize(at); stopped = true; }
+                }
+                // A generic model that writes a call's result itself has
+                // made it up (tools.h): the turn ends there, like at a stop
+                // string, and the call before it is made for real.
+                if (use_tools && tf == ToolFormat::GENERIC && !stopped) {
+                    const size_t fake = made_up_result(text, tool_names);
+                    if (fake != std::string::npos) {
+                        text.resize(fake);
+                        invented = true;
+                        const size_t w = wrote.rfind("Result of ");  // (and in the prompt of a turn after it)
+                        if (w != std::string::npos) wrote.resize(w);
+                    }
                 }
                 // A thinking that doesn't end (kThinkMax): the turn stops
                 // here, and goes on below with the thinking closed.
@@ -836,13 +851,13 @@ void handle(int fd, Server::State &state, Usage &u) {
                         for (size_t k = std::min(s.size() - 1, text.size()); k > 0; k--)
                             if (text.compare(text.size() - k, k, s, 0, k) == 0) { hold = std::max(hold, k); break; }
                     size_t upto = stopped ? text.size() : text.size() - hold;
-                    if (use_tools) upto = std::min(upto, content_prefix(tf, text));
+                    if (use_tools) upto = std::min(upto, content_prefix(tf, text, &tool_names));
                     if (upto > sent) {
                         client_ok = send_all(fd, "data: " + chunk_json(text.substr(sent, upto - sent), nullptr) + "\n\n");
                         sent = upto;
                     }
                 }
-                return client_ok && !stopped;
+                return client_ok && !stopped && !invented;
             };
             auto on_text = [&](const std::string &piece) {
                 if (closing) return false;

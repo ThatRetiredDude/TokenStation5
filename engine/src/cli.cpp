@@ -251,7 +251,7 @@ int no_model_command(int argc, char **argv) {
     // How much of the text streams before the turn ends.
     Json prefix;
     prefix.type = Json::NUM;
-    prefix.s = std::to_string(content_prefix(tf, text));
+    prefix.s = std::to_string(content_prefix(tf, text, names.empty() ? nullptr : &names));
     out.set("content_prefix", prefix);
     printf("%s\n", out.dump().c_str());
     return 0;

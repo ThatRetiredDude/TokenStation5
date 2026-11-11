@@ -74,7 +74,20 @@ bool file_exists(const std::string &p) {
     return stat(p.c_str(), &st) == 0;
 }
 
+// A program that can be run: a file (not a folder, which also has the "x"
+// right) the user may execute.
+static bool runnable(const std::string &p) {
+    struct stat st;
+    return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode) && access(p.c_str(), X_OK) == 0;
+}
+
 std::string which(const std::string &prog) {
+    if (prog.empty()) return "";
+    // A path is the program itself ("~/..." from the home folder).
+    if (prog.find('/') != std::string::npos) {
+        const std::string p = prog.compare(0, 2, "~/") == 0 ? home_dir() + prog.substr(1) : prog;
+        return runnable(p) ? p : "";
+    }
     // Beside ts5-tui first (the portable build keeps them together).
     char self[4096];
     const ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
@@ -82,13 +95,13 @@ std::string which(const std::string &prog) {
         self[n] = 0;
         std::string dir = self;
         dir.resize(dir.rfind('/'));
-        if (access((dir + "/" + prog).c_str(), X_OK) == 0) return dir + "/" + prog;
+        if (runnable(dir + "/" + prog)) return dir + "/" + prog;
     }
     const char *path = getenv("PATH");
     std::stringstream ss(path ? path : "/usr/bin:/bin");
     std::string d;
     while (std::getline(ss, d, ':'))
-        if (!d.empty() && access((d + "/" + prog).c_str(), X_OK) == 0) return d + "/" + prog;
+        if (!d.empty() && runnable(d + "/" + prog)) return d + "/" + prog;
     return "";
 }
 

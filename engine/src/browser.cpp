@@ -699,14 +699,20 @@ bool launch(const std::string &program, bool obscura, Program &b, std::string &e
 
 // Where a program named `name` is: as given with a '/', else on the PATH
 // or in ~/.local/bin; "" when it isn't there.
+// (A folder has the "x" right too: only a file is a program.)
+bool runnable(const std::string &p) {
+    struct stat st;
+    return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode) && access(p.c_str(), X_OK) == 0;
+}
+
 std::string which(const std::string &name) {
-    if (name.find('/') != npos) return access(name.c_str(), X_OK) == 0 ? name : "";
+    if (name.find('/') != npos) return runnable(name) ? name : "";
     std::string path = getenv("PATH") ? getenv("PATH") : "/usr/local/bin:/usr/bin:/bin";
     if (const char *home = getenv("HOME")) path += std::string(":") + home + "/.local/bin";
     for (size_t i = 0; i <= path.size();) {
         const size_t e = std::min(path.find(':', i), path.size());
         const std::string p = path.substr(i, e - i) + "/" + name;
-        if (e > i && access(p.c_str(), X_OK) == 0) return p;
+        if (e > i && runnable(p)) return p;
         i = e + 1;
     }
     return "";

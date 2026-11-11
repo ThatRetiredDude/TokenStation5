@@ -2952,13 +2952,17 @@ void run_command(const std::string &line) {
         Config &f = g->cfg;
         const std::vector<std::string> found = browsers_found();
         if (!arg.empty()) {
-            if (arg != "auto" && arg != "obscura" && arg != "chromium" && arg != "text" && which(arg).empty()) {
+            // A program by its path or its name: kept as the whole path, so
+            // it is the same program wherever ts5-tui is started next.
+            const bool word = arg == "auto" || arg == "obscura" || arg == "chromium" || arg == "text";
+            const std::string at = word ? arg : which(arg);
+            if (at.empty()) {
                 show_toast("There is no program " + arg + " here: auto, obscura, chromium, text, or a browser's path", g->th->warn, 5);
             } else {
-                f.browser = arg;
+                f.browser = at;
                 f.save();
                 browser_stop();
-                show_toast("Browser: " + arg + (f.tool_browser ? "" : "  (the tool is off: /tools browser on)"), g->th->accent, 4);
+                show_toast("Browser: " + at + (f.tool_browser ? "" : "  (the tool is off: /tools browser on)"), g->th->accent, 4);
             }
         } else {
             std::string have;

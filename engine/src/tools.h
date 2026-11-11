@@ -68,6 +68,17 @@ struct ParsedTurn {
 };
 ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names = {});
 
+// Where a reply writes a call's result itself: "Result of NAME:" at the
+// start of a line after the thinking, NAME one of the request's tools (or
+// "the function"), the words a generic model's results come back under; or
+// npos. The results come from the client in the next message, so what the
+// model writes under such a line it has made up (DeepSeek R1 14B on the
+// PS5, asked to search a site: a call, "Result of browser_open: The
+// Wikipedia page is open.", another call, its result, and an answer from
+// them, none of it real). The turn ends before the line: the call in front
+// of it is then made for real.
+size_t made_up_result(const std::string &text, const std::vector<std::string> &names);
+
 // Whether a finished turn's text (after any thinking) is nothing but an empty
 // call tag pair, such as "<tools> </tools>" (Qwen 2.5 Coder 14B, asked for a
 // poem with tools offered, seen on the console): no call and no answer.
@@ -75,7 +86,9 @@ bool empty_call_block(ToolFormat f, const std::string &content);
 
 // While a turn streams: how many bytes of `text` are surely text for the user,
 // never part of a call (the rest is held until the turn ends).
-size_t content_prefix(ToolFormat f, const std::string &text);
+// names: the request's tools, where they are known (a generic model's
+// "Result of NAME:" line is held only for one of them).
+size_t content_prefix(ToolFormat f, const std::string &text, const std::vector<std::string> *names = nullptr);
 
 // Whether the model's template can turn its thinking off (Qwen3's and
 // Gemma 4's enable_thinking): its turn then opens with kNoThinking, an empty

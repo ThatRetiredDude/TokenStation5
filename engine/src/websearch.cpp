@@ -582,6 +582,29 @@ bool link_list(const std::string &h, size_t a, size_t b) {
     return items >= 5 && out * 10 <= in;
 }
 
+// How many of the links in the list between a and b lead to this page in
+// another language (an <a> with hreflang); 0 when the list is something
+// else (fewer than four in five of its items).
+int other_languages(const std::string &h, size_t a, size_t b) {
+    int items = 0, langs = 0;
+    for (size_t i = a; i < b;) {
+        if (h[i] != '<') {
+            i++;
+            continue;
+        }
+        const size_t e = tag_end(h, i, b);
+        if (e == std::string::npos) break;
+        if (starts_ci(h, i, "<li") && (h[i + 3] == '>' || isspace((unsigned char)h[i + 3]))) items++;
+        if (starts_ci(h, i, "<a") && isspace((unsigned char)h[i + 2])) {
+            bool has = false;
+            attr_of(h, i, e, "hreflang", &has);
+            langs += has;
+        }
+        i = e + 1;
+    }
+    return langs * 5 >= items * 4 ? langs : 0;
+}
+
 // HTML as text. menus false: without the page's menus and sidebars (<nav>,
 // <aside>, and the lists that are nothing but links). els (a page view, for
 // a model that acts on the page): each link, text box and button gets a
@@ -803,6 +826,19 @@ std::string text_of(const std::string &html, bool menus, PageElements *els = nul
             if (!menus && !els && !closing && (name == "ul" || name == "ol")) {
                 const size_t end = element_end(html, after, name);
                 if (link_list(html, after, end)) {
+                    i = end;
+                    continue;
+                }
+            }
+            // (A page view.) The page in other languages: Wikipedia's list
+            // of 178 filled the first part of every article, and pushed the
+            // article's own links to numbers a model then picked wrongly
+            // (a browser hides the list behind a button). A line stands for it.
+            if (els && !closing && !cap.on && (name == "ul" || name == "ol")) {
+                const size_t end = element_end(html, after, name);
+                const int langs = other_languages(html, after, end);
+                if (langs >= 10) {
+                    raw += "\n(" + std::to_string(langs) + " links to this page in other languages are left out here.)\n";
                     i = end;
                     continue;
                 }

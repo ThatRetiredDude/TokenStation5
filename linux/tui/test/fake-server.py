@@ -164,6 +164,8 @@ class H(BaseHTTPRequestHandler):
                     f.write("  tools=%s web_search=%s tool_choice=%s\n" % (
                         ",".join(t.get("function", {}).get("name") for t in req.get("tools") or []),
                         json.dumps(req.get("web_search")), req.get("tool_choice")))
+                if req.get("chat_template_kwargs"):
+                    f.write("  kwargs=%s\n" % json.dumps(req["chat_template_kwargs"]))
                 if summary:
                     f.write("  summary asked: %s\n" % json.dumps(last))
                 for m in msgs:
@@ -285,6 +287,12 @@ class H(BaseHTTPRequestHandler):
                     text = open(os.environ["FAKE_SUMMARY"], encoding="utf-8").read()
             elif searching:
                 text = ("The search did not work, so this is from memory: " if failed else "From what the search found: ") + query
+            elif asked.startswith("blank "):
+                # "blank N ...": the first N requests for this message get an answer with no words
+                # (a turn that only thought), the next one a real answer.
+                n = int(asked.split()[1])
+                BLANKS[asked] = BLANKS.get(asked, 0) + 1
+                text = "" if BLANKS[asked] <= n else "An answer at last, on try %d." % BLANKS[asked]
             elif "code" in last.lower() or "example" in last.lower():
                 text = ANSWER
             else:
@@ -312,6 +320,7 @@ class H(BaseHTTPRequestHandler):
             sys.stderr.write("ts5: the client left\n")
 
 
+BLANKS = {}
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 18081
 sys.stderr.write("ts5: listening on 127.0.0.1:%d (fake)\n" % port)
 ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()

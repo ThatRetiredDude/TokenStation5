@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -28,7 +29,10 @@ INDEX = """<!doctype html><html><head><title>The  River
 <form action="/huge"><input name="x">""" + "<span>filler</span>" * 600 + """</form></header>
 <nav><ul><li><a href="/a">One</a></li><li><a href="/b">Two</a></li><li><a href="/c">Three</a></li>
 <li><a href="/d">Four</a></li><li><a href="/e">Five</a></li></ul></nav>
-<main><h1>Rivers</h1>
+<main><ul>""" + "".join(
+    f'<li class="interlanguage-link"><a href="https://{c}.example.org/wiki/Rivers" lang="{c}" hreflang="{c}">'
+    f'<span>Tongue {c}</span></a></li>' for c in "af als am an ar ast az ba be bg bn br".split()) + """</ul>
+<h1>Rivers</h1>
 <p>The <a href="volga.html">Volga</a> and the <a href="/rivers/danube.html?x=1#history">Danube &amp; friends</a>
 are long. See <a href="https://example.org/far">another site</a>, <a href="#top">the top</a>,
 <a href="mailto:someone@example.org">write to us</a>, <a href="javascript:void(0)">a script</a>,
@@ -176,6 +180,8 @@ def test_reader(ts5):
     check(re.search(r"First of a list\[\d+\]", out) is not None and re.search(r"Fifth\[\d+\]", out) is not None,
           "view: a list of links stays", out)
     check("One[" not in out and "About" not in out, "view: the menus and the footer are left out", out)
+    check("(12 links to this page in other languages are left out here.)" in out and "Tongue" not in out and
+          number(out, r"Volga\[(\d+)\]") < 8, "view: the page in other languages is one line, not twelve numbers", out)
     check('text box "Your name" = "Ann"]' in out and 'text box "A note"]' in out, "view: text boxes with their hint and text", out)
     check('empty box "As a gift"]' in out and 'ticked box "Small"]' in out and 'empty box "Large"]' in out,
           "view: tick boxes and choices", out)
@@ -460,6 +466,39 @@ def test_browser(ts5, program, base):
         check(b.close() == 0, "auto: ends when its input closes")
 
 
+def test_programs(ts5, base):
+    """What is taken for a browser, and what it is started with (found on the PS5: a folder named
+    obscura on the PATH was run as the browser; a library path was said not to reach the program)."""
+    tmp = tempfile.mkdtemp()
+    try:
+        for name in ("chromium", "obscura"):
+            os.mkdir(os.path.join(tmp, name))
+        seen = os.path.join(tmp, "seen.txt")
+        prog = os.path.join(tmp, "a-browser")
+        with open(prog, "w") as f:
+            f.write(f"#!/bin/sh\nenv > {seen}\nexit 3\n")
+        os.chmod(prog, 0o755)
+        env = dict(os.environ, PATH=tmp + os.pathsep + "/usr/bin" + os.pathsep + "/bin", HOME=tmp, LD_LIBRARY_PATH="/some/where:/else")
+        env.pop("TS5_BROWSER_FLAGS", None)
+        b = Browser(ts5, "--program", "auto", env=env)
+        a = b.ask(do="open", url=base + "/")
+        b.close()
+        check(a["ok"] and tmp not in a["text"], "programs: a folder named like a browser is not run as one", a)
+        b = Browser(ts5, "--program", os.path.join(tmp, "chromium"), env=env)
+        a = b.ask(do="open", url=base + "/")
+        b.close()
+        check(a["ok"] and a["mode"] == "text", "programs: nor is a folder given by its path", a)
+        b = Browser(ts5, "--program", prog, "--kind", "chromium", env=env)
+        a = b.ask(do="open", url=base + "/")
+        b.close()
+        got = open(seen).read() if os.path.exists(seen) else ""
+        check("LD_LIBRARY_PATH=/some/where:/else\n" in got, "programs: the browser is started with the environment ts5 has", got[:300])
+        check(a["ok"] and a["mode"] == "text" and "simpler text view" in a["text"],
+              "programs: a browser that ends as it starts leaves the text view, with a word about it", a)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     ts5 = sys.argv[1]
     program = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -468,6 +507,7 @@ def main():
     base = f"http://127.0.0.1:{srv.server_port}"
     test_reader(ts5)
     test_text(ts5, base)
+    test_programs(ts5, base)
     if program == "auto":
         program = next((p for p in ("chromium", "chromium-browser", "chromium-headless-shell", "google-chrome", "chrome")
                         if shutil.which(p)), "")
