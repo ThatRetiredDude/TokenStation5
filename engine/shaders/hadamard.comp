@@ -1,0 +1,62 @@
+// The block Walsh-Hadamard rotation of a folded weight's input (the Bonsai
+// files' prism.hadamard, see Weight in model.h): for each of ntok vectors of
+// ncols floats in X (from x_off), Y = H (D x), with D the signs in S and H
+// the Sylvester matrix over sqrt(block) on each block of `block` values
+// (a power of two up to 4096). flags 1: the signs before the rotation (a
+// product's input); 2: after it (a row looked up in a table stored rotated);
+// 4: the vector's value heads are regrouped first, from [hd, nk, rep] to
+// [hd, rep, nk] (a linear layer's output projection).
+// A workgroup per block and token: the block in shared memory, then one
+// butterfly stage per barrier, each pair by one invocation.
+#version 450
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Xbuf { float X[]; };
+layout(std430, binding = 1) readonly buffer Sbuf { float S[]; };
+layout(std430, binding = 2) writeonly buffer Ybuf { float Y[]; };
+layout(push_constant) uniform PC { uint ncols, block, x_off, flags, hd, nk, rep; } pc;
+
+shared float s[4096];  // 16 KiB: what every Vulkan device must give a kernel
+
+void main() {
+    const uint t = gl_LocalInvocationID.x;
+    const uint base = gl_WorkGroupID.x * pc.block;       // the block's first value in its vector
+    const uint row = gl_WorkGroupID.y * pc.ncols;        // the vector's first value
+    const uint each = max(1u, pc.block / 256u);          // values an invocation loads and stores
+    for (uint k = 0; k < each; k++) {
+        const uint i = t * each + k;
+        if (i >= pc.block) break;
+        const uint c = base + i;
+        uint src = c;
+        if ((pc.flags & 4u) != 0u) {
+            const uint h = c % pc.hd, q = c / pc.hd;
+            src = h + pc.hd * (q / pc.rep + pc.nk * (q % pc.rep));
+        }
+        float v = X[pc.x_off + row + src];
+        if ((pc.flags & 1u) != 0u) v *= S[c];
+        s[i] = v;
+    }
+    memoryBarrierShared();
+    barrier();
+    const uint pairs = max(1u, pc.block / 512u);         // pairs an invocation turns per stage
+    for (uint len = 1u; len < pc.block; len <<= 1) {
+        for (uint k = 0; k < pairs; k++) {
+            const uint p = t * pairs + k;
+            if (p >= pc.block / 2u) break;
+            // The pair's lower index: p with a zero bit put in at len.
+            const uint i = ((p & ~(len - 1u)) << 1) | (p & (len - 1u));
+            const float a = s[i], b = s[i + len];
+            s[i] = a + b;
+            s[i + len] = a - b;
+        }
+        memoryBarrierShared();
+        barrier();
+    }
+    const float scale = inversesqrt(float(pc.block));
+    for (uint k = 0; k < each; k++) {
+        const uint i = t * each + k;
+        if (i >= pc.block) break;
+        float v = s[i] * scale;
+        if ((pc.flags & 2u) != 0u) v *= S[base + i];
+        Y[row + base + i] = v;
+    }
+}

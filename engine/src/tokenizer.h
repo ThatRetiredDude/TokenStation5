@@ -47,7 +47,7 @@ public:
     // assistant turn opened.
     std::string apply_chat(const std::vector<ChatMessage> &msgs) const;
 
-    enum Chat { CHATML, LLAMA3, MISTRAL, GEMMA, GEMMA4, PLAIN };
+    enum Chat { CHATML, LLAMA3, MISTRAL, GEMMA, GEMMA4, DEEPSEEK, PLAIN };
     Chat chat_format() const { return chat_; }
     // The model's own chat template (GGUF tokenizer.chat_template), or "".
     const std::string &chat_template() const { return template_; }

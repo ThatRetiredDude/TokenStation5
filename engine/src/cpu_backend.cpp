@@ -36,7 +36,14 @@ void matmul(uint32_t type, const uint8_t *data, int64_t rb, int64_t n_in, int64_
     for (auto &t : th) t.join();
 }
 
+// A folded weight's product: its input signed and rotated first (fold_input).
 void matmul(const Weight &w, const float *X, int n, float *Y) {
+    std::vector<float> folded;
+    if (w.folded()) {
+        folded.resize((size_t)n * w.ne0());
+        fold_input(w, X, n, folded.data());
+        X = folded.data();
+    }
     matmul(w.type(), w.data, w.info->row_bytes(), w.ne0(), w.ne1(), X, n, Y, w.ne1());
 }
 
@@ -228,6 +235,7 @@ public:
             const uint8_t *src = te.data ? te.data + (int64_t)tokens[t] * rb : row.data();
             if (!te.data && !read_at(file_, m_, te, (uint64_t)tokens[t] * rb, rb, row.data())) return read_failed(err);
             dequantize_row(te.type(), src, x.data() + (size_t)t * E, E);
+            if (te.fold_inverse) unfold_row(te, x.data() + (size_t)t * E);
             if (hp_.embd_scale > 0)
                 for (int i = 0; i < E; i++) x[(size_t)t * E + i] *= hp_.embd_scale;
         }
@@ -499,6 +507,12 @@ private:
         const int64_t rb = w.info->row_bytes(), rows = w.ne1();
         const int64_t step = std::max<int64_t>(1, (64ll << 20) / rb);
         if (buf_.size() < (size_t)(step * rb)) buf_.resize(step * rb);
+        std::vector<float> folded;
+        if (w.folded()) {
+            folded.resize((size_t)n * w.ne0());
+            fold_input(w, x, n, folded.data());
+            x = folded.data();
+        }
         for (int64_t r0 = 0; r0 < rows; r0 += step) {
             const int64_t nr = std::min(step, rows - r0);
             if (!read_at(file_, m_, w, r0 * rb, nr * rb, buf_.data())) return read_failed(err);

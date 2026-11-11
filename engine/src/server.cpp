@@ -220,6 +220,47 @@ constexpr int kSearchRounds = 3;
 // A reply capped under this many tokens leaves no room to think first: a
 // thinking model answers it at once, unless the request asks for thinking.
 constexpr double kThinkRoom = 1024;
+// A thinking that doesn't end is ended for the model, which then answers
+// from what it has (once a request): one that repeats itself word for word
+// (think_loop), one that has used up the reply's room but for a last part
+// (an eighth of it, 32 to 256 tokens: thinking to the limit is an empty
+// answer), and one past kThinkMax tokens ("thinking_budget" in a request or
+// TS5_THINK_MAX set another number; 0: no limit). On a PS5, Qwen3.5 9B asked
+// for a haiku thought for 15,851 tokens and four minutes, to the end of its
+// context, the last of it one line over and over.
+constexpr int kThinkMax = 8192;
+const char *const kEndedLoop = "it was repeating itself";
+const char *const kEndedRoom = "the reply's room was nearly used up";
+const char *const kEndedLong = "it had grown very long";
+
+// Where a thinking (text from `from`) that goes round in circles is cut:
+// the end of the first copy of what its tail repeats, or npos. A unit of 16
+// to 2,400 bytes with words in it (eight different bytes, two spaces: not a
+// ruler, a row of dots or a table's lines), four times over and at least
+// 240 bytes (three times for a unit over 600).
+size_t think_loop(const std::string &t, size_t from) {
+    const size_t n = t.size();
+    for (size_t p = 16; p <= 2400 && from + 3 * p <= n; p++) {
+        if (t[n - 1] != t[n - 1 - p]) continue;
+        const size_t need = p > 600 ? 2 * p : std::max(3 * p, (size_t)240);
+        if (from + need + p > n) continue;
+        bool seen[256] = {};
+        int kinds = 0, spaces = 0;
+        for (size_t i = n - p; i < n; i++) {
+            const unsigned char c = (unsigned char)t[i];
+            if (!seen[c]) seen[c] = true, kinds++;
+            spaces += c == ' ' || c == '\n';
+        }
+        if (kinds < 8 || spaces < 2) continue;
+        size_t same = 0;
+        while (same < n - from - p && t[n - 1 - same] == t[n - 1 - same - p]) same++;
+        if (same < need) continue;
+        size_t cut = n - same;  // the repeats start at n - same - p
+        while (cut < n && ((unsigned char)t[cut] & 0xC0) == 0x80) cut++;
+        return cut;
+    }
+    return std::string::npos;
+}
 
 std::string tool_calls_json(const std::vector<ToolCall> &calls, bool with_index) {
     std::string s = "[";
@@ -248,10 +289,10 @@ std::string timings_json(const GenStats &st) {
     return s;
 }
 
-std::string usage_json(const GenStats &st) {
-    return "{\"prompt_tokens\":" + std::to_string(st.prompt_tokens) +
+std::string usage_json(int prompt, const GenStats &st) {
+    return "{\"prompt_tokens\":" + std::to_string(prompt) +
            ",\"completion_tokens\":" + std::to_string(st.gen_tokens) +
-           ",\"total_tokens\":" + std::to_string(st.prompt_tokens + st.gen_tokens) + "}";
+           ",\"total_tokens\":" + std::to_string(prompt + st.gen_tokens) + "}";
 }
 
 int request_counter = 0;
@@ -398,7 +439,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             can_think = state.can_think;
         }
         // capabilities: whether the model takes OpenAI tools, and whether ts5
-        // runs web searches for it (a Tavily key is set).
+        // runs web searches for it by itself (a Tavily key is set).
         const bool can = tools != "none";
         // helper: the draft model that is really loaded beside it and its
         // context (drafting stops past it), else null, with helper_note
@@ -423,7 +464,11 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                             ",\"capabilities\":{\"tools\":" + (can ? "true" : "false") +
                                                             ",\"tool_format\":" + json_escape(tools) +
                                                             ",\"web_search\":" +
-                                                            (can && !tavily_key().empty() ? "true" : "false") + "}" +
+                                                            (can && !tavily_key().empty() ? "true" : "false") +
+                                                            // Where a search goes: "tavily" (the web), "wikipedia"
+                                                            // (no key: for a request that asks), "none".
+                                                            ",\"web_search_source\":" +
+                                                            json_escape(can ? search_source() : "none") + "}" +
                                                             ",\"settings\":" + settings_json(known, sampling, think, can_think) + "}") +
                                        "]}"));
     } else if (completions) {
@@ -491,7 +536,8 @@ void handle(int fd, Server::State &state, Usage &u) {
                     : limit >= 1 && limit < kThinkRoom        ? false
                                                               : state.think;
         }
-        // Gemma 4's thought channel reads as the others' <think> block.
+        // Gemma 4's thought channel reads as the others' <think> block (as
+        // do the thinking marks of other models, ThoughtChannel).
         const bool g4 = chat && e.tok().chat_format() == Tokenizer::GEMMA4;
         std::string opening;  // what opens the model's turn
         // A turn that opens in its thinking (Qwen3.5, Gemma 4 after a tool's
@@ -515,10 +561,20 @@ void handle(int fd, Server::State &state, Usage &u) {
                 std::string last_user;
                 for (auto &m : msgs)
                     if (m.role == "user") last_user = m.content;
+                // "auto": a client with tools of its own that wants the
+                // search offered the way a plain chat gets it (ts5-tui).
                 const Json &ws = req["web_search"];
-                web = !named && !tavily_key().empty() &&
+                // Without a Tavily key the search is Wikipedia's, and only
+                // for a request that asks for a search (true or "auto") or
+                // with TS5_WEB_SEARCH=always: a plain request stays as it
+                // was without a key, no search.
+                const std::string source = search_source();
+                const bool wiki = source == "wikipedia";
+                const bool asked = ws.type == Json::BOOL ? ws.boolean(false) : ws.str() == "auto";
+                web = !named && (source == "tavily" || (wiki && (asked || web_search_always()))) &&
                       (ws.type == Json::BOOL ? ws.boolean(false)
-                                             : web_search_always() || (tools.empty() && needs_web(last_user)));
+                                             : web_search_always() ||
+                                                   ((tools.empty() || ws.str() == "auto") && needs_web(last_user, wiki)));
                 if (web) tools.push_back(web_search_tool(date));
             }
             prompt = render_chat(e.tok(), msgs, tools, date, think);
@@ -576,6 +632,16 @@ void handle(int fd, Server::State &state, Usage &u) {
         sp.top_k = (int)req["top_k"].num(state.sampling.top_k);
         sp.max_tokens = limit >= 1 ? (int)std::min(limit, (double)n_ctx) : n_ctx;
         sp.seed = (uint64_t)req["seed"].num(0);
+        // The most a turn may think (kThinkMax), and what of the reply's room
+        // the thinking leaves for the answer: a quarter, 1,024 tokens at
+        // most (256 were too few for a worked answer on the PS5). A reply
+        // the app capped under kThinkRoom doesn't think unless it was told
+        // to, and then its thinking is the app's to size: no room is kept.
+        const char *think_env = getenv("TS5_THINK_MAX");
+        const int think_max = (int)req["thinking_budget"].num(think_env ? atof(think_env) : kThinkMax);
+        const int answer_room = limit >= 1 && limit < kThinkRoom
+                                    ? 0
+                                    : std::min(1024, std::min(sp.max_tokens, n_ctx - 1 - (int)first_toks.size()) / 4);
         const bool stream = req["stream"].boolean(false);
         // stream_options.include_usage: the usage goes in a last chunk of its
         // own with no choices, as OpenAI sends it; otherwise in the final chunk.
@@ -632,6 +698,20 @@ void handle(int fd, Server::State &state, Usage &u) {
                    ",\"model\":" + json_escape(model) + ",\"choices\":[{\"index\":0,\"text\":" + json_escape(delta) +
                    ",\"finish_reason\":" + fin + "}]}";
         };
+        // A search ts5 runs itself, told to the client as it starts and as it
+        // ends: a chunk with nothing in it for a client that does not know
+        // the field, and a line on the screen for one that does. state:
+        // "running", "done" or "failed"; note: what came of it.
+        std::string searched;  // the same, for an answer that is not streamed
+        auto search_json = [&](const std::string &query, const char *state_of, const std::string &note) {
+            return "{\"query\":" + json_escape(query) + ",\"state\":\"" + state_of + "\"" +
+                   (note.empty() ? std::string() : ",\"note\":" + json_escape(note)) + "}";
+        };
+        auto search_event = [&](const std::string &query, const char *state_of, const std::string &note) {
+            std::string j = chunk_json("", nullptr);
+            j.insert(j.size() - 1, ",\"ts5_web_search\":" + search_json(query, state_of, note));
+            return "data: " + j + "\n\n";
+        };
         if (stream) {
             send_all(fd, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n"
                          "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n");
@@ -651,6 +731,15 @@ void handle(int fd, Server::State &state, Usage &u) {
         std::string search_failed;      // why the first failed search failed
         std::vector<std::string> found;  // what the searches found, for a forced answer
         bool answered_without_tools = false;  // after a made-up call
+        bool think_closed = false;       // a thinking was ended for the model (kThinkMax): once a request
+        // usage.prompt_tokens: the last turn's prompt without the earlier
+        // turns of this request that it holds (`carried`, already counted as
+        // written), so total_tokens is what the conversation holds at the
+        // reply's end, which is what apps size their context by; never less
+        // than the prompt as it was sent (`fresh`: a loop that was cut back
+        // wrote more than the next prompt keeps). The log and the usage
+        // file add every turn's prompt: the tokens read.
+        int carried = 0, fresh = 0, usage_prompt = 0;
         double first = -1;               // when the first text came
         // A turn of the model's; with web_search, ts5 answers the model's
         // searches and lets it go on, so one request can be several turns.
@@ -658,9 +747,11 @@ void handle(int fd, Server::State &state, Usage &u) {
             const std::vector<int32_t> toks = round == 0 ? std::move(first_toks) : encode();
             std::string text = seed;
             std::string wrote;       // the turn as the model wrote it, for the prompt of a turn after it
-            ThoughtChannel channel;  // Gemma 4's
+            ThoughtChannel channel(g4, !seed.empty());  // the thinking's marks, as <think> and </think>
             size_t sent = 0;  // bytes of this turn's `text` already streamed
             size_t thought = 0;  // and of its thinking, as reasoning_content
+            const char *closing = nullptr;  // why this turn's thinking is being ended, while it is
+            size_t close_at = 0;            // where in `text`
             {
                 std::lock_guard<std::mutex> g(state.stats);
                 state.activity.prompt = (int)toks.size();
@@ -684,6 +775,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             };
             // The turn's text so far, with `piece` at its end, to the client.
             auto on_piece = [&](const std::string &piece) {
+                if (closing) return false;  // what the engine still had to hand over
                 if (first < 0) first = now_ms();
                 count();
                 text += piece;
@@ -694,6 +786,26 @@ void handle(int fd, Server::State &state, Usage &u) {
                 for (auto &s : stops) {
                     size_t at = s.empty() || from >= text.size() ? std::string::npos : text.find(s, from);
                     if (at != std::string::npos) { text.resize(at); stopped = true; }
+                }
+                // A thinking that doesn't end (kThinkMax): the turn stops
+                // here, and goes on below with the thinking closed.
+                if (chat && !think_closed && !stopped) {
+                    size_t open;
+                    thinking_end(text, open);
+                    if (open != std::string::npos && text.find("</think>", open) == std::string::npos) {
+                        const int left = std::min(max_tokens - st.gen_tokens - turn.gen_tokens,
+                                                  n_ctx - 1 - (int)toks.size() - turn.gen_tokens);
+                        close_at = text.size();
+                        if (const size_t cut = think_loop(text, open); cut != std::string::npos) {
+                            closing = kEndedLoop;
+                            close_at = cut;
+                        } else if (answer_room > 0 && left <= answer_room) {
+                            closing = kEndedRoom;
+                        } else if (think_max > 0 && turn.gen_tokens >= think_max) {
+                            closing = kEndedLong;
+                        }
+                        if (closing) return false;
+                    }
                 }
                 if (stream) {
                     size_t open;
@@ -733,8 +845,9 @@ void handle(int fd, Server::State &state, Usage &u) {
                 return client_ok && !stopped;
             };
             auto on_text = [&](const std::string &piece) {
+                if (closing) return false;
                 wrote += piece;
-                return on_piece(g4 ? channel.map(piece) : piece);
+                return on_piece(chat ? channel.map(piece) : piece);
             };
             sp.max_tokens = max_tokens - st.gen_tokens;
             if (const char *f = getenv("TS5_TEST_TURNS")) {
@@ -760,19 +873,66 @@ void handle(int fd, Server::State &state, Usage &u) {
                     fprintf(out, "%s\n====\n", prompt.c_str());
                     fclose(out);
                 }
+                // (A request that carries earlier calls and their results
+                // starts that many turns in: a client's own tool loop.)
+                size_t before = 0;
+                for (auto &m : msgs) before += !m.calls.empty();
                 const size_t with_tools = turns.size() > 1 ? turns.size() - 2 : 0;
-                on_text(use_tools ? turns[std::min((size_t)round, with_tools)] : turns.back());
-                turn.gen_tokens = 1;
+                std::string t = use_tools ? turns[std::min((size_t)round + before, with_tools)] : turns.back();
+                // TS5_TEST_AFTER_THINK: the turn after a thinking that was
+                // ended for the model. TS5_TEST_PIECE=N: a turn comes N bytes
+                // at a time, each a token (the limits count them).
+                if (think_closed)
+                    if (const char *after = getenv("TS5_TEST_AFTER_THINK")) t = after;
+                const int piece = getenv("TS5_TEST_PIECE") ? atoi(getenv("TS5_TEST_PIECE")) : 0;
                 turn.finish = "stop";
+                turn.prompt_tokens = (int)toks.size();
+                if (piece <= 0) {
+                    on_text(t);
+                    turn.gen_tokens = 1;
+                } else {
+                    for (size_t at = 0; at < t.size(); at += (size_t)piece) {
+                        turn.gen_tokens++;
+                        if (!on_text(t.substr(at, (size_t)piece))) break;
+                        if (turn.gen_tokens >= sp.max_tokens) {
+                            turn.finish = "length";
+                            break;
+                        }
+                    }
+                }
             } else {
                 ok = e.generate(toks, sp, on_text, turn, err, gone);
                 if (ok && turn.finish == "left") client_ok = false;
                 if (!ok) u.rec.why = (int)toks.size() + 1 > e.backend().n_ctx() ? "too_long" : "gpu_error";
             }
             // What the channel's reader held back at the turn's end (an answer that ends in a "<").
+            const size_t held = channel.held();
             if (const std::string rest = channel.rest(); !rest.empty()) on_piece(rest);
+            // The thinking ended for the model (kThinkMax): a note in it says
+            // so, to the reader and to the model, then its closing mark. The
+            // model's own text gets the same end (the thinking's last bytes
+            // are the same in both: it has no marks in it).
+            const bool think_cut = closing != nullptr;
+            if (think_cut) {
+                // (With little room left the note asks for a short answer:
+                // on the PS5, three of four models started a worked answer
+                // too long for what was left.)
+                const std::string note = std::string("\n\n[ts5 ended the thinking here: ") + closing +
+                                         (closing == kEndedRoom ? ". A short answer follows.]" : ". The answer follows.]");
+                log_line("ts5: %s thinking ended after %d tokens: %s", id.c_str(), turn.gen_tokens, closing);
+                wrote.resize(wrote.size() - std::min(wrote.size(), held + (text.size() - close_at)));
+                wrote += note + (g4 ? std::string(kG4ThoughtEnd) : "\n" + channel.closing() + "\n\n");
+                text.resize(close_at);
+                thought = std::min(thought, text.size());
+                sent = std::min(sent, text.size());
+                closing = nullptr;
+                think_closed = true;
+                on_piece(note + "\n</think>\n\n");
+            }
             count();  // what on_text didn't see: the test turns, a turn with no text
             st.prompt_tokens += turn.prompt_tokens;
+            if (carried == 0) fresh = turn.prompt_tokens;
+            usage_prompt = std::max(fresh, turn.prompt_tokens - carried);
             st.prompt_evaluated += turn.prompt_evaluated;
             st.prompt_repaired += turn.prompt_repaired;
             st.prompt_shared += turn.prompt_shared;
@@ -793,6 +953,16 @@ void handle(int fd, Server::State &state, Usage &u) {
             if (open != std::string::npos) {
                 const size_t close = text.find("</think>", open);
                 reasoning += text.substr(open, (close == std::string::npos ? text.size() : close) - open);
+            }
+            // After a thinking ended for the model: its answer, in a turn
+            // that starts where this one stopped.
+            if (think_cut && ok && client_ok && st.gen_tokens < max_tokens) {
+                content += text.substr(std::min(answer, text.size()));
+                prompt += wrote;
+                carried += turn.gen_tokens;
+                opening.clear();
+                seed.clear();
+                continue;
             }
             if (!ok || !use_tools) {
                 content += text.substr(std::min(answer, text.size()));
@@ -827,6 +997,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                     answered_without_tools = true;
                     log_line("ts5: %s made-up tool %s: answering without tools", id.c_str(), made_up.c_str());
                     prompt = render_chat(e.tok(), msgs, {}, date, think);
+                    carried = 0;
                     open_turn();
                     use_tools = false;
                     continue;
@@ -868,6 +1039,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                 if (last.empty() || last.back().role != "user") last.push_back({"user", "", {}});
                 last.back().content += (last.back().content.empty() ? "" : "\n\n") + note;
                 prompt = render_chat(e.tok(), last, {}, date, think);
+                carried = 0;
                 open_turn();
                 use_tools = false;
                 continue;
@@ -882,13 +1054,26 @@ void handle(int fd, Server::State &state, Usage &u) {
                 } else {
                     bool failed = false;
                     u.rec.searches++;
+                    std::string query;
+                    {
+                        Json a;
+                        if (Json::parse(c.arguments, a)) query = a["query"].str();
+                    }
+                    if (stream && client_ok) client_ok = send_all(fd, search_event(query, "running", ""));
                     results.push_back(web_search(c.arguments, log, &failed));
                     if (failed) search_failed = search_failure(results.back());  // in plain words
                     else found.push_back(results.back());
+                    // What came of it: the log's words after the query, or why it failed.
+                    const std::string lead = "web_search \"" + query + "\": ";
+                    const std::string note =
+                        failed ? search_failed : log.compare(0, lead.size(), lead) == 0 ? log.substr(lead.size()) : log;
+                    if (stream && client_ok) client_ok = send_all(fd, search_event(query, failed ? "failed" : "done", note));
+                    searched += (searched.empty() ? "" : ",") + search_json(query, failed ? "failed" : "done", note);
                 }
                 log_line("ts5: %s %s", id.c_str(), log.c_str());
             }
-            prompt += wrote + render_results(tf, searches, results);
+            prompt += wrote + render_results(e.tok(), tf, searches, results);
+            carried += turn.gen_tokens;
             open_turn();
         }
         {
@@ -909,12 +1094,12 @@ void handle(int fd, Server::State &state, Usage &u) {
                                  "},\"finish_reason\":null}]}\n\n");
             std::string last = chunk_json("", st.finish.c_str());
             last.insert(last.size() - 1,
-                        (usage_chunk ? std::string() : ",\"usage\":" + usage_json(st)) + ",\"timings\":" + timings_json(st));
+                        (usage_chunk ? std::string() : ",\"usage\":" + usage_json(usage_prompt, st)) + ",\"timings\":" + timings_json(st));
             if (usage_chunk)
                 last += "\n\ndata: {\"id\":\"" + id + "\",\"object\":\"" +
                         (chat ? "chat.completion.chunk" : "text_completion") + "\",\"created\":" +
                         std::to_string(created) + ",\"model\":" + json_escape(model) +
-                        ",\"choices\":[],\"usage\":" + usage_json(st) + "}";
+                        ",\"choices\":[],\"usage\":" + usage_json(usage_prompt, st) + "}";
             client_ok &= send_all(fd, "data: " + last + "\n\ndata: [DONE]\n\n");
         } else {
             std::string body;
@@ -930,7 +1115,8 @@ void handle(int fd, Server::State &state, Usage &u) {
                 body = "{\"id\":\"" + id + "\",\"object\":\"text_completion\",\"created\":" + std::to_string(created) +
                        ",\"model\":" + json_escape(model) + ",\"choices\":[{\"index\":0,\"text\":" + json_escape(content) +
                        ",\"finish_reason\":\"" + st.finish + "\"}]";
-            body += ",\"usage\":" + usage_json(st) + ",\"timings\":" + timings_json(st) + "}";
+            if (!searched.empty()) body += ",\"ts5_web_searches\":[" + searched + "]";
+            body += ",\"usage\":" + usage_json(usage_prompt, st) + ",\"timings\":" + timings_json(st) + "}";
             client_ok &= send_all(fd, response(200, body));
         }
         log_line("ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, %s, sample %.0f ms",
@@ -1049,10 +1235,12 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
     }
     if (e)
         log_line("ts5: tool calls: %s; web search: %s", state_.tool_format.c_str(),
-                state_.tool_format == "none" ? "off (no tool calls)"
-                : tavily_key().empty()       ? "off (no TAVILY_API_KEY)"
-                : web_search_always()        ? "on (Tavily), offered on every chat"
-                                             : "on (Tavily), offered when a chat looks like it needs the web");
+                search_source() == "none" ? "off (no TAVILY_API_KEY, TS5_WIKIPEDIA=off)"
+                : tavily_key().empty()
+                    ? (web_search_always() ? "Wikipedia only (no TAVILY_API_KEY), offered on every chat"
+                                           : "Wikipedia only (no TAVILY_API_KEY), for a request that asks for a search")
+                : web_search_always() ? "on (Tavily), offered on every chat"
+                                      : "on (Tavily), offered when a chat looks like it needs the web");
 }
 
 Server::Activity Server::activity() {

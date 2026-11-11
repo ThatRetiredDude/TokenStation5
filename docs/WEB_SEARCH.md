@@ -33,7 +33,35 @@ about tools.
    `/etc/default/tokenstation` for the API-only service.
 
 `GET /v1/models` shows what the loaded model can do:
-`"capabilities": {"tools": true, "tool_format": "hermes", "web_search": true}`.
+`"capabilities": {"tools": true, "tool_format": "hermes", "web_search": true,
+"web_search_source": "tavily"}`.
+
+## Without a key: Wikipedia
+
+With no Tavily key the search is Wikipedia's own (its public API, no key, no
+account), and only for a request that asks for a search: `"web_search":
+true`, or `"web_search": "auto"` on a chat that looks like it needs the web,
+names Wikipedia or asks to search. ts5-tui asks that way while its search
+tool is switched on, so a model in ts5-tui can look things up out of the box.
+A plain request that says nothing gets no search, as before.
+
+It is an encyclopedia: no news, prices, weather or anything live. The tool's
+description tells the model so, and to say when the articles don't hold the
+answer. The model gets the top articles (five, `TS5_SEARCH_RESULTS`), each
+with its title, link and opening text; in ts5-tui it can then read a whole
+article with the web page tool. A query no article matches word for word
+goes once more as any of its words. Wikipedia's search splits and stems
+words, so a name it doesn't know can still bring articles on something else
+("Gated DeltaNet": airlines and a river): when the articles were found by
+any of the words, or none has one of the query's own words in its title or
+opening, the model is told that they are only the closest found. Every
+result ends with a line that says to search once more with only the name of
+the thing when the articles miss the subject. A search takes about half a
+second on the PS5.
+
+`TS5_WIKIPEDIA` picks the language (`en` by default; `sk`, `de` ...) or turns
+it off (`off`). `/v1/models` says `"web_search": false, "web_search_source":
+"wikipedia"` then: `web_search` stays "the whole web, by itself".
 
 ## Which models
 
@@ -47,9 +75,13 @@ ts5 reads the tool format from each model's own chat template when it loads it.
 | Llama 3.2 3B | yes (Llama JSON format) | simple single searches |
 | Mistral Nemo 12B | yes (Mistral format) | not tried yet |
 | Gemma 4 12B | yes (Gemma 4 format) | not tried yet |
+| DeepSeek R1 distills | yes (asked for in words) | not tried yet |
 
-A model whose template has no tool format gets no tools and no search;
-everything else works as before.
+A model whose template has no tool format its file can write (DeepSeek R1's
+distills, Llama 3.0, an early Mistral) still gets tools and search: ts5 asks
+for a call in words, as `<tool_call>` JSON, in the model's own turns, and
+gives the result back in a user turn, in plain words. `tool_format` says `generic` for these.
+How well such a model calls tools depends on the model.
 
 ## How it behaves
 
@@ -76,6 +108,13 @@ everything else works as before.
   number of results and the time.
 - A request can turn it off with `"web_search": false`, or with
   `"tool_choice": "none"`, and turn it on with `"web_search": true`.
+- A search ts5 runs is told to the client. A streamed answer gets a chunk
+  with no text and a field `"ts5_web_search": {"query": "…", "state":
+  "running"}` when the search starts, and one with `"state": "done"` (or
+  `"failed"`) and a `"note"` such as `5 results (0.5 s, Wikipedia)` when it
+  ends; a client that does not know the field sees two empty chunks. An
+  answer that is not streamed has them as `"ts5_web_searches": [...]` beside
+  `"usage"`. ts5-tui shows a line for each (`⚙ searches the web: …`).
 
 ## Clients with their own tools
 
@@ -84,7 +123,9 @@ request, `tool_calls` in the answer, `role: "tool"` messages back), streaming
 included, so opencode, Continue, Open WebUI's native function calling and
 similar clients can use their tools with the console's models. A request
 with tools of its own gets ts5's `web_search` only when it says
-`"web_search": true` (or with `TS5_WEB_SEARCH=always`): a coding agent's
+`"web_search": true` (or `"web_search": "auto"`, which offers it when the
+chat looks like it needs the web, as for a plain chat; or with
+`TS5_WEB_SEARCH=always`): a coding agent's
 messages are full of URLs, dates and file text that would pass the "needs the
 web" check on every turn, and each search costs a credit. With it, ts5
 answers `web_search` calls itself and hands every other call back to the

@@ -60,6 +60,10 @@ for q in Q4_1 Q5_0 Q5_1; do
     mk qwen2 qwen2 $q
 done
 mk llama llama-spm Q5_0
+# One bit and two bits a weight (ggml's Q1_0 and Q2_0, 128 and 64 values a
+# block): what the Bonsai files are stored in.
+mk qwen3 qwen2 Q1_0
+mk qwen3 qwen2 Q2_0
 
 g4=()
 for q in F32 Q8_0; do
@@ -124,7 +128,7 @@ rm -f "$work/tail-vk.bin" "$work/tail-cpu.bin" "$work/tail-v4.bin"
 # with every 4th one full attention, gated by a sigmoid, M-RoPE on a quarter
 # of each head; heads of 128 in both.
 q35=()
-for q in F32 Q4_K_M; do
+for q in F32 Q4_K_M Q2_0; do
     out="$work/qwen35-$q.gguf"
     [ -s "$out" ] || python3 "$here/make_test_model.py" --arch qwen35 --quant $q --layers 8 --heads 2 --kv-heads 1 \
         --seed 3 --vocab "$work/ggml-vocab-qwen35.gguf" "$out" > /dev/null
@@ -138,6 +142,99 @@ TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --ba
 # 0.21-0.23% of the largest logit, the real 9B at 0.13-0.2% in the PS5's check.
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.003 --backend vk "${q35[@]}"
 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.003 --backend vk --ntok 300 "${q35[@]}"
+# Weights stored rotated, as the Bonsai files have them (prism.hadamard: each
+# product's input goes through signs and a block Hadamard rotation first, a
+# linear layer's output projection with its value heads regrouped, and the
+# token table's rows are turned back after the lookup). The maker writes the
+# plain models' weights rotated, so the answers must be the plain models'.
+echo "== rotated weights (prism.hadamard): the plain model's logits, on the CPU and on Vulkan"
+fold=()
+for q in F32 Q2_0; do
+    out="$work/qwen3-fold-$q.gguf"
+    [ -s "$out" ] || python3 "$here/make_test_model.py" --arch qwen3 --quant $q --fold 64 \
+        --vocab "$work/ggml-vocab-qwen2.gguf" "$out" > /dev/null
+    fold+=("$out")
+    out="$work/qwen35-fold-$q.gguf"
+    [ -s "$out" ] || python3 "$here/make_test_model.py" --arch qwen35 --quant $q --layers 8 --heads 2 --kv-heads 1 \
+        --seed 3 --fold 128 --vocab "$work/ggml-vocab-qwen35.gguf" "$out" > /dev/null
+    fold+=("$out")
+done
+for be in cpu vk; do
+    python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --ref-model "$work/qwen3-F32.gguf" --tol 0.002 --backend $be \
+        "$work/qwen3-fold-F32.gguf"
+    python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --ref-model "$work/qwen35-F32.gguf" --tol 0.002 --backend $be \
+        "$work/qwen35-fold-F32.gguf"
+done
+# The token table as the output too (prism.hadamard version 2, the Bonsai
+# 4B: no output.weight, the rotated table's rows are the output's).
+for q in F32 Q2_0; do
+    out="$work/qwen35-tied-fold-$q.gguf"
+    [ -s "$out" ] || python3 "$here/make_test_model.py" --arch qwen35 --quant $q --layers 8 --heads 2 --kv-heads 1 \
+        --seed 3 --fold 128 --tied --vocab "$work/ggml-vocab-qwen35.gguf" "$out" > /dev/null
+done
+[ -s "$work/qwen35-tied-F32.gguf" ] || python3 "$here/make_test_model.py" --arch qwen35 --quant F32 --layers 8 --heads 2 \
+    --kv-heads 1 --seed 3 --tied --vocab "$work/ggml-vocab-qwen35.gguf" "$work/qwen35-tied-F32.gguf" > /dev/null
+fold+=("$work/qwen35-tied-fold-Q2_0.gguf")
+for be in cpu vk; do
+    python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --ref-model "$work/qwen35-tied-F32.gguf" --tol 0.002 --backend $be \
+        "$work/qwen35-tied-fold-F32.gguf"
+done
+# Two bits a weight with the linear layers' alpha and beta in BF16, as the
+# Bonsai files: Vulkan against the CPU, at once, a token a call, in chunks.
+# (Qwen3.5's prompts are f16 by default, as above: 0.15-0.21% here.)
+TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "${fold[@]}"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${fold[@]}"
+TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${fold[@]}"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.003 --backend vk "${fold[@]}"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.003 --backend vk --ntok 300 "${fold[@]}"
+# Blocks of 4,096 values (the Bonsai 9B's; the 27B's are 1,024, the 4B's
+# 512): a model whose wide inputs alone are rotated (ffn_down's, and a linear
+# layer's regrouped ssm_out; the token table's rows are narrower than a
+# block), so its files stay small. The plain twin's logits on the CPU and on
+# Vulkan, and two bits a weight on Vulkan against the CPU.
+wide=(--arch qwen35 --layers 8 --heads 2 --kv-heads 1 --seed 3 --ssm-k-heads 16 --ssm-v-heads 64 --ff 8192
+      --vocab "$work/ggml-vocab-qwen35.gguf")
+[ -s "$work/qwen35-wide-F32.gguf" ] ||
+    python3 "$here/make_test_model.py" "${wide[@]}" --quant F32 "$work/qwen35-wide-F32.gguf" > /dev/null
+for q in F32 Q2_0; do
+    [ -s "$work/qwen35-wide-fold-$q.gguf" ] || python3 "$here/make_test_model.py" "${wide[@]}" --quant $q --fold 4096 \
+        "$work/qwen35-wide-fold-$q.gguf" > /dev/null
+done
+for be in cpu vk; do
+    python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --ref-model "$work/qwen35-wide-F32.gguf" --tol 0.002 --backend $be \
+        "$work/qwen35-wide-fold-F32.gguf"
+done
+TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk "$work/qwen35-wide-fold-Q2_0.gguf"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "$work/qwen35-wide-fold-Q2_0.gguf"
+python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.003 --backend vk --ntok 300 "$work/qwen35-wide-fold-Q2_0.gguf"
+# Q2_0's own kernels: one token from words (mv16_q2_0; TS5_MV_Q2=0 and one
+# row a workgroup too), prompts in 128 x 128 blocks (mmb*_q2_0, forced on
+# these small matrices by TS5_MMB_MIN=1; TS5_MMB_Q2=0: the 64 x 64 kernel),
+# rotated or not.
+echo "== Q2_0: its one-token and prompt kernels, rotated or not"
+q2=("${fold[@]}" "$work/qwen35-Q2_0.gguf")
+TS5_MV_Q2=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${q2[@]}"
+TS5_MV_ROWS=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 24 --step "${q2[@]}"
+TS5_MMB_Q2=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${q2[@]}"
+TS5_MMB_MIN=1 TS5_MMB_F16=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk --ntok 300 "${q2[@]}"
+TS5_MMB_MIN=1 TS5_MMB_F16=0 TS5_MMB_VAR=q python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.002 --backend vk \
+    --ntok 300 "${q2[@]}"
+TS5_MMB_MIN=1 TS5_MMB_F16=0 TS5_MMB_NOZERO=2 TS5_MMB_SLICES=5 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu \
+    --tol 0.002 --backend vk --ntok 300 "${q2[@]}"
+# In f16, as Qwen3.5's prompts are by default: 300 tokens through the
+# 128 x 128 blocks come to 0.20-0.33% on these models (the plain two-bit one
+# the most; qwen35-Q4_K_M's own kernels to 0.26% the same way).
+TS5_MMB_MIN=1 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.004 --backend vk --ntok 300 "${q2[@]}"
+TS5_MMB_MIN=1 TS5_MMB_VAR=dql python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.004 --backend vk --ntok 300 \
+    "${q2[@]}"
+TS5_MMB_MIN=1 TS5_MMB_NOZERO=0 python3 "$here/compare.py" --ts5 "$ts5" --ref cpu --tol 0.004 --backend vk --ntok 300 \
+    "${q2[@]}"
+TS5_MMB_MIN=1 TS5_PROFILE=1 "$ts5" bench -m "$work/qwen35-fold-Q2_0.gguf" --pp 300 --tg 8 > "$work/q2-prof.txt" 2>&1
+grep -q "^  mmb16dqz_q2_0 " "$work/q2-prof.txt" && grep -q "mv16_q2_0" "$work/q2-prof.txt" &&
+    ! grep -q "^  mm_q2_0 \|^  matmul_q2_0 " "$work/q2-prof.txt" ||
+    { echo "FAIL: Q2_0's kernels in use"; grep "q2_0" "$work/q2-prof.txt"; exit 1; }
+echo "PASS Q2_0: prompts on mmb16dqz_q2_0, one token on mv16_q2_0"
+rm -f "$work/q2-prof.txt"
 echo "== Qwen3.5: no drafts and no helper (that state only goes forward), the same text as with drafting off"
 p35="the cat sat on the mat. the cat sat on the mat. the cat sat on the mat. the cat sat on the"
 for be in vk cpu; do
@@ -1432,7 +1529,8 @@ XDG_CONFIG_HOME="$tune" "$ts5" run -m "$work/qwen3-Q4_0.gguf" -p hi -n 1 2>&1 > 
     grep "qwen3-Q4_0.gguf.env is for another qwen3-Q4_0.gguf (not this size), so it isn't used"
 rm -rf "$tune"
 echo "== tool calls: prompts against the models' own templates, the parser, web_search over HTTP(S)"
-for t in Qwen-Qwen2.5-7B-Instruct Qwen-Qwen3-0.6B meta-llama-Llama-3.1-8B-Instruct meta-llama-Llama-3.2-3B-Instruct; do
+for t in Qwen-Qwen2.5-7B-Instruct Qwen-Qwen3-0.6B meta-llama-Llama-3.1-8B-Instruct meta-llama-Llama-3.2-3B-Instruct \
+    deepseek-ai-DeepSeek-R1-Distill-Llama-8B deepseek-ai-DeepSeek-R1-Distill-Qwen-32B; do
     f="$work/$t.jinja"
     [ -s "$f" ] || curl -fsSL -o "$f" "https://raw.githubusercontent.com/ggml-org/llama.cpp/$rev/models/templates/$t.jinja"
 done
@@ -1463,6 +1561,11 @@ if [ -n "${LLAMA_CPP:-}" ]; then
     echo "== vs llama.cpp (llama.cpp quantizes activations, so quantized models differ a little)"
     python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk "$work/qwen2-F32.gguf" "$work/qwen3-F32.gguf" \
         "$work/llama-F32.gguf" "$work/qwen3-Q4_K_M.gguf" "$work/qwen35-F32.gguf"
+    echo "== rotated weights vs llama.cpp, which reads prism.hadamard too"
+    python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk "$work/qwen3-fold-F32.gguf" \
+        "$work/qwen35-fold-F32.gguf" "$work/qwen3-fold-Q2_0.gguf" "$work/qwen35-fold-Q2_0.gguf" \
+        "$work/qwen35-tied-fold-F32.gguf" "$work/qwen35-tied-fold-Q2_0.gguf" "$work/qwen35-wide-fold-F32.gguf" \
+        "$work/qwen35-wide-fold-Q2_0.gguf"
     echo "== Gemma 3 vs llama.cpp: 600 tokens across the window, with its linear RoPE scale"
     python3 "$here/compare.py" --ts5 "$ts5" --ref "$ref" --backend vk --ntok 600 "$g3"
     echo "== Gemma 3 12B's heads vs llama.cpp: generation after a 1,100-token prompt"

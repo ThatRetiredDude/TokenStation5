@@ -5,14 +5,15 @@
 
 The tokenizer is copied from a vocab-only GGUF (llama.cpp ships them under
 models/), so llama.cpp can load the file and act as the reference. Weights are
-F32, F16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1 or a Q4_K/Q6_K mix like llama.cpp's
-Q4_K_M (--quant); llama-quantize makes the other K-quant variants. Dimensions are multiples of 256 so K-quants apply to every
+F32, F16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, the Bonsai models' Q1_0 and Q2_0, or a
+Q4_K/Q6_K mix like llama.cpp's Q4_K_M (--quant); llama-quantize makes the other K-quant variants. Dimensions are multiples of 256 so K-quants apply to every
 matrix.
 """
 import argparse
 
 import numpy as np
 from gguf import GGMLQuantizationType, GGUFReader, GGUFValueType, GGUFWriter, quants
+from gguf.constants import GGML_QUANT_SIZES
 
 
 def copy_tokenizer(reader, writer, pad_tokens=0, rename_controls=False, rename_token=-1, rename_to="[RENAMED]",
@@ -125,6 +126,37 @@ def quantize_q6_k(x):
     return out.reshape(x.shape[0], -1)
 
 
+# The Bonsai models' types. Q1_0: 128 values a block, an f16 d and a bit each
+# (+d where set, -d where not). Q2_0: 64 values a block, an f16 d and two bits
+# each, (q - 1) * d. Newer than some gguf packages, so written here, with
+# Q2_0's number and sizes added where the package lacks them.
+Q1_0 = 41
+Q2_0 = 42
+for number, sizes in ((Q1_0, (128, 18)), (Q2_0, (64, 18))):
+    if number not in GGML_QUANT_SIZES:
+        GGML_QUANT_SIZES[number] = sizes
+
+
+def quantize_q1_0(x):
+    rows, cols = x.shape
+    b = x.reshape(rows, cols // 128, 128)
+    d = np.ascontiguousarray(np.abs(b).mean(axis=2).astype(np.float16))
+    bits = np.packbits((b >= 0).astype(np.uint8), axis=2, bitorder="little")
+    return np.concatenate([d.view(np.uint8).reshape(rows, -1, 2), bits], axis=2).reshape(rows, -1)
+
+
+def quantize_q2_0(x):
+    # llama.cpp takes the block's largest magnitude for d, which leaves the
+    # fourth value (+2d) unused; a smaller d here, so files with it are read too.
+    rows, cols = x.shape
+    b = x.reshape(rows, cols // 64, 64)
+    d = np.ascontiguousarray((np.abs(b).max(axis=2) / 1.7).astype(np.float16))
+    df = d.astype(np.float32)
+    q = np.clip(np.rint(b / np.where(df > 0, df, 1.0)[..., None]) + 1, 0, 3).astype(np.uint8).reshape(rows, -1, 16, 4)
+    packed = q[..., 0] | (q[..., 1] << 2) | (q[..., 2] << 4) | (q[..., 3] << 6)
+    return np.concatenate([d.view(np.uint8).reshape(rows, -1, 2), packed], axis=2).reshape(rows, -1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--arch", default="qwen2", choices=["llama", "qwen2", "qwen3", "gemma3", "gemma4", "qwen35"])
@@ -173,9 +205,16 @@ def main():
     ap.add_argument("--pad-type", type=int, default=5, help="the padding tokens' type (5 unused; Gemma 4 types its placeholders 1)")
     ap.add_argument("--boost-token", type=int, default=-1,
                     help="make this output row huge, so greedy sampling soon picks it: for guard tests")
-    ap.add_argument("--quant", default="F32", choices=["F32", "F16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q4_K_M", "Q5_K_M"],
+    ap.add_argument("--quant", default="F32", choices=["F32", "F16", "Q8_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q4_K_M", "Q5_K_M", "Q1_0", "Q2_0"],
                     help="type for the 2-D weights; Q4_K_M: Q4_K, with Q6_K for attn_v, ffn_down and output, "
                          "as llama-quantize's mix; Q5_K_M: the same with Q5_K")
+    ap.add_argument("--fold", type=int, default=0,
+                    help="store the weights rotated, as the Bonsai files do (prism.hadamard, blocks of this many "
+                         "values): the same model as without it, whose products' inputs are rotated to match. With "
+                         "Q1_0 or Q2_0 the linear layers' ssm_alpha and ssm_beta are BF16, as in those files")
+    ap.add_argument("--tied", action="store_true",
+                    help="no output.weight: the token table is the output too (with --fold: prism.hadamard version 2, "
+                         "as Ternary-Bonsai-2 4B)")
     ap.add_argument("out")
     a = ap.parse_args()
 
@@ -264,7 +303,34 @@ def main():
                    a.plain_spaces)
 
     kmix = a.quant in ("Q4_K_M", "Q5_K_M")
-    qtype = getattr(GGMLQuantizationType, a.quant[:4]) if kmix else getattr(GGMLQuantizationType, a.quant)
+    bonsai = {"Q1_0": (Q1_0, quantize_q1_0, 128), "Q2_0": (Q2_0, quantize_q2_0, 64)}.get(a.quant)
+    qtype = None if bonsai else getattr(GGMLQuantizationType, a.quant[:4] if kmix else a.quant)
+
+    # --fold: W D H in place of W (D: a sign a column, H: the block Hadamard
+    # matrix over sqrt(block)), for the weights llama.cpp rotates the input
+    # of. A linear layer's ssm_out has its columns in grouped order first
+    # (value heads [hd, rep, nk] instead of [hd, nk, rep]); the token table's
+    # rows are stored the same way and turned back after the lookup.
+    fold_names, fold_signs = [], {}
+    fold_kinds = ("attn_q", "attn_k", "attn_v", "attn_qkv", "attn_gate", "attn_output", "ffn_gate", "ffn_up", "ffn_down",
+                  "ssm_out")
+
+    def folded(name, data):
+        cols = data.shape[-1]
+        if cols not in fold_signs:  # a generator of their own: the weights stay those of the plain model
+            fold_signs[cols] = np.where(np.random.default_rng(1000 + cols).random(cols) < 0.5, -1, 1).astype(np.int32)
+        if name.endswith("ssm_out.weight"):
+            g = np.arange(cols)
+            h, q, rep = g % hd, g // hd, nv // nk
+            data = data[:, h + hd * (q // rep + nk * (q % rep))]
+        y = (data * fold_signs[cols][None, :]).astype(np.float64).reshape(data.shape[0], -1, a.fold)
+        n = 1
+        while n < a.fold:
+            y = y.reshape(y.shape[0], y.shape[1], a.fold // (2 * n), 2, n)
+            y = np.stack([y[..., 0, :] + y[..., 1, :], y[..., 0, :] - y[..., 1, :]], axis=-2)
+            y = y.reshape(y.shape[0], y.shape[1], a.fold)
+            n *= 2
+        return (y / np.sqrt(a.fold)).reshape(data.shape).astype(np.float32)
 
     def t(name, *shape, scale=None, boost_row=-1):
         # numpy shape is (ne1, ne0): rows are outputs, columns are inputs.
@@ -272,7 +338,21 @@ def main():
         data = (rng.standard_normal(shape) * s).astype(np.float32)
         if boost_row >= 0:
             data[boost_row, :] = 100.0  # its logit dwarfs the rest whenever sum(h) > 0
-        if kmix:
+        if a.fold and shape[-1] % a.fold == 0 and (
+                name in ("token_embd.weight", "output.weight") or name.split(".")[-2] in fold_kinds):
+            data = folded(name, data)
+            if name != "token_embd.weight":
+                fold_names.append(name)
+        if a.fold and bonsai and name.split(".")[-2] in ("ssm_alpha", "ssm_beta"):
+            bits = np.ascontiguousarray((data.view(np.uint32) >> 16).astype(np.uint16))
+            w.add_tensor(name, bits.view(np.uint8).reshape(shape[0], -1), raw_dtype=GGMLQuantizationType.BF16)
+        elif bonsai:
+            number, quantize, block = bonsai
+            if shape[-1] % block:
+                w.add_tensor(name, data.astype(np.float16))
+            else:
+                w.add_tensor(name, quantize(data), raw_dtype=number)
+        elif kmix:
             if shape[-1] % 256:
                 w.add_tensor(name, quants.quantize(data, GGMLQuantizationType.Q8_0),
                              raw_dtype=GGMLQuantizationType.Q8_0)
@@ -359,8 +439,25 @@ def main():
         t(p + "ffn_up.weight", a.ff, a.embd)
         t(p + "ffn_down.weight", a.embd, a.ff)
     norm("output_norm.weight", a.embd)
-    t("output.weight", n_vocab + a.pad_tokens + a.pad_vocab, a.embd, boost_row=a.boost_token)
+    if not a.tied:
+        t("output.weight", n_vocab + a.pad_tokens + a.pad_vocab, a.embd, boost_row=a.boost_token)
 
+    if a.fold:
+        w.add_uint32("prism.hadamard.version", 2 if a.tied else 1)
+        if a.tied:
+            w.add_bool("prism.hadamard.tied_output", True)
+        w.add_uint32("prism.hadamard.block_size", a.fold)
+        w.add_string("prism.hadamard.transform", "normalized-sylvester-walsh-hadamard")
+        w.add_string("prism.hadamard.axis", "input-last-dimension")
+        w.add_string("prism.hadamard.sign_mode", "explicit")
+        w.add_array("prism.hadamard.weight_names", fold_names)
+        if a.embd % a.fold == 0:  # blocks wider than the table's rows: only the wider inputs are rotated
+            w.add_array("prism.hadamard.inverse_weight_names", ["token_embd.weight"])
+        widths = sorted(fold_signs)
+        w.add_array("prism.hadamard.sign_widths", [int(x) for x in widths])
+        w.add_array("prism.hadamard.sign_values", [int(v) for x in widths for v in fold_signs[x]])
+        if q35:
+            w.add_bool("prism.hadamard.gdn_v_grouped", True)
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()

@@ -153,21 +153,28 @@
 #include "attn_pf512s_q8_tp.spv.h"
 #include "attn_pf512s_q4_tp.spv.h"
 #include "attn_pf512s_k8v4_tp.spv.h"
+#include "get_rows_bf16.spv.h"
 #include "get_rows_f16.spv.h"
 #include "get_rows_f32.spv.h"
 #include "get_rows_q4_0.spv.h"
 #include "get_rows_q4_1.spv.h"
 #include "get_rows_q5_0.spv.h"
+#include "get_rows_q1_0.spv.h"
+#include "get_rows_q2_0.spv.h"
 #include "get_rows_q5_1.spv.h"
 #include "get_rows_q4_k.spv.h"
 #include "get_rows_q5_k.spv.h"
 #include "get_rows_q6_k.spv.h"
 #include "get_rows_q8_0.spv.h"
+#include "hadamard.spv.h"
+#include "matmul_bf16.spv.h"
 #include "matmul_f16.spv.h"
 #include "matmul_f32.spv.h"
 #include "matmul_q4_0.spv.h"
 #include "matmul_q4_1.spv.h"
 #include "matmul_q5_0.spv.h"
+#include "matmul_q1_0.spv.h"
+#include "matmul_q2_0.spv.h"
 #include "matmul_q5_1.spv.h"
 #include "matmul_q4_k.spv.h"
 #include "matmul_q5_k.spv.h"
@@ -198,6 +205,7 @@
 #include "mvt_q6_k.spv.h"
 #include "mvt_q5_k.spv.h"
 #include "mvt_q8_0.spv.h"
+#include "mv16_q2_0.spv.h"
 #include "mv16_q5_0.spv.h"
 #include "mv16n_q5_0.spv.h"
 #include "mv16_glu_q5_0.spv.h"
@@ -209,6 +217,9 @@
 #include "mm_q4_1.spv.h"
 #include "mm_q4_k.spv.h"
 #include "mm_q5_0.spv.h"
+#include "mm_q1_0.spv.h"
+#include "mm_bf16.spv.h"
+#include "mm_q2_0.spv.h"
 #include "mm_q5_1.spv.h"
 #include "mm_q5_k.spv.h"
 #include "mm_q6_k.spv.h"
@@ -254,6 +265,16 @@
 #include "mmbz_q5_k.spv.h"
 #include "mmbz_q6_k.spv.h"
 #include "mmbz_q8_0.spv.h"
+#include "mmb_q2_0.spv.h"
+#include "mmb16_q2_0.spv.h"
+#include "mmb16d_q2_0.spv.h"
+#include "mmb16q_q2_0.spv.h"
+#include "mmb16dq_q2_0.spv.h"
+#include "mmb16dql_q2_0.spv.h"
+#include "mmbq_q2_0.spv.h"
+#include "mmb16dqz_q2_0.spv.h"
+#include "mmb16dqlz_q2_0.spv.h"
+#include "mmbz_q2_0.spv.h"
 #include "qkv_post.spv.h"
 #include "qkv_post_q8.spv.h"
 #include "qkv_post_q8t.spv.h"
@@ -364,6 +385,9 @@ const char *qname(uint32_t t) {
         case GGML_Q4_K: return "q4_k";
         case GGML_Q5_K: return "q5_k";
         case GGML_Q6_K: return "q6_k";
+        case GGML_Q1_0: return "q1_0";
+        case GGML_Q2_0: return "q2_0";
+        case GGML_BF16: return "bf16";
         default: return nullptr;
     }
 }
@@ -388,10 +412,14 @@ static bool fast_type(const Weight &w) {
     if (t == GGML_Q8_0 && w.ne0() % 256 == 0) return true;
     return mv32_on() && (t == GGML_Q8_0 || t == GGML_Q5_0) && w.ne0() % 32 == 0 && w.info->nbytes % 4 == 0;
 }
-// The types with prompt kernels (mmb): K-quants and Q8_0, in 32-value units.
-static bool mmb_type(const Weight &w) { return fast_type(w) && w.type() != GGML_Q5_0; }
+// The types with prompt kernels (mmb): K-quants and Q8_0, in 32-value
+// units, and Q2_0 (the Bonsai files), two units a block.
+static bool mmb_type(const Weight &w) {
+    if (w.type() == GGML_Q2_0) return w.ne0() % 64 == 0;
+    return fast_type(w) && w.type() != GGML_Q5_0;
+}
 // The x-staging verify kernels (mvtx, TS5_MVTX=1): whole 256-value groups.
-static bool mvtx_type(const Weight &w) { return mmb_type(w) && w.ne0() % 256 == 0; }
+static bool mvtx_type(const Weight &w) { return fast_type(w) && mmb_type(w) && w.ne0() % 256 == 0; }
 
 // Rows of logits the GPU's buffer holds, 4 bytes for each word of the
 // vocabulary each (Gemma's 262,144 words: 1 MiB a row). Serving never wants
@@ -730,6 +758,8 @@ private:
         if (const char *e = getenv("TS5_AHEAD_FAIL")) ahead_fail_ = atoi(e);
         if (const char *e = getenv("TS5_TILED_MIN")) tiled_min_ = atoi(e);
         if (const char *e = getenv("TS5_FAST_MATVEC")) fast_matvec_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_MV_Q2")) mv_q2_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_MMB_Q2")) mmb_q2_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_MV_ROWS")) mv_rows_ = std::min(8, std::max(1, atoi(e)));
         if (const char *e = getenv("TS5_MV_ROWS_MIN")) mv_rows_min_ = std::max(0, atoi(e));
         if (const char *e = getenv("TS5_ATTN")) attn_fast_ = atoi(e) != 0;
@@ -1167,8 +1197,10 @@ private:
         return false;
         P(matmul_f32, 3) P(matmul_f16, 3) P(matmul_q4_0, 3) P(matmul_q8_0, 3)
         P(matmul_q4_1, 3) P(matmul_q5_0, 3) P(matmul_q5_1, 3)
+        P(matmul_q1_0, 3) P(matmul_q2_0, 3) P(matmul_bf16, 3) P(hadamard, 3)
         P(matmul_q4_k, 3) P(matmul_q5_k, 3) P(matmul_q6_k, 3)
         P(mm_f32, 3) P(mm_f16, 3) P(mm_q4_0, 3) P(mm_q8_0, 3) P(mm_q4_1, 3) P(mm_q5_0, 3) P(mm_q5_1, 3)
+        P(mm_q1_0, 3) P(mm_q2_0, 3) P(mm_bf16, 3)
         P(mm_q4_k, 3) P(mm_q5_k, 3) P(mm_q6_k, 3) P(mmb_q4_k, 4) P(mmb_q6_k, 4) P(mmb_reduce, 2)
         P(mmb16_q4_k, 4) P(mmb16_q6_k, 4) P(mmb_q5_k, 4) P(mmb_q8_0, 4) P(mmb16_q5_k, 4) P(mmb16_q8_0, 4)
         P(mmb16d_q4_k, 4) P(mmb16d_q5_k, 4) P(mmb16d_q6_k, 4) P(mmb16d_q8_0, 4)
@@ -1176,10 +1208,13 @@ private:
         P(mmb16dq_q4_k, 4) P(mmb16dq_q5_k, 4) P(mmb16dq_q6_k, 4) P(mmb16dq_q8_0, 4)
         P(mmb16dql_q4_k, 4) P(mmb16dql_q5_k, 4) P(mmb16dql_q6_k, 4) P(mmb16dql_q8_0, 4)
         P(mmbq_q4_k, 4) P(mmbq_q5_k, 4) P(mmbq_q6_k, 4) P(mmbq_q8_0, 4)
+        P(mmb_q2_0, 4) P(mmb16_q2_0, 4) P(mmb16d_q2_0, 4) P(mmb16q_q2_0, 4) P(mmb16dq_q2_0, 4) P(mmb16dql_q2_0, 4)
+        P(mmbq_q2_0, 4)
 #ifndef TS5_PS5
         P(mmb16dqz_q4_k, 4) P(mmb16dqz_q5_k, 4) P(mmb16dqz_q6_k, 4) P(mmb16dqz_q8_0, 4)
         P(mmb16dqlz_q4_k, 4) P(mmb16dqlz_q5_k, 4) P(mmb16dqlz_q6_k, 4) P(mmb16dqlz_q8_0, 4)
         P(mmbz_q4_k, 4) P(mmbz_q5_k, 4) P(mmbz_q6_k, 4) P(mmbz_q8_0, 4)
+        P(mmb16dqz_q2_0, 4) P(mmb16dqlz_q2_0, 4) P(mmbz_q2_0, 4)
 #endif
         if (mmb_ && !pipes_.count("mmb16" + mmb_var_ + "_q4_k")) {
             err = "no prompt kernel variant \"" + mmb_var_ + "\" (TS5_MMB_VAR)";
@@ -1196,6 +1231,7 @@ private:
         MV(mv16_q5_k, 3) MV(mv16_q8_0, 3) MV(mv16_glu_q5_k, 4) MV(mv16_glu_q8_0, 4)
         MV(mv16n_q5_k, 4) MV(mv16n_q8_0, 4) MV(mv16n_glu_q5_k, 5) MV(mv16n_glu_q8_0, 5)
         MV(mv16_q5_0, 3) MV(mv16n_q5_0, 4) MV(mv16_glu_q5_0, 4) MV(mv16n_glu_q5_0, 5)
+        MV(mv16_q2_0, 3)
 #undef MV
         // The verify-batch mat-vecs once per batch size (their token loop is
         // compile-time), each twice like the one-token ones: mvt_rows_ rows
@@ -1222,6 +1258,7 @@ private:
         }
         P(get_rows_f32, 3) P(get_rows_f16, 3) P(get_rows_q4_0, 3) P(get_rows_q8_0, 3)
         P(get_rows_q4_1, 3) P(get_rows_q5_0, 3) P(get_rows_q5_1, 3)
+        P(get_rows_q1_0, 3) P(get_rows_q2_0, 3) P(get_rows_bf16, 3)
         P(get_rows_q4_k, 3) P(get_rows_q5_k, 3) P(get_rows_q6_k, 3)
         P(rmsnorm, 3) P(rmsnorm2, 5) P(qkv_post, 11) P(qkv_post_q8, 13) P(qkv_post_q8t, 13) P(qkv_post_q4, 13) P(qkv_post_q4t, 13) P(qkv_post_q8tv, 13) P(qkv_post_q4tv, 13) P(qkv_post_k8v4, 13) P(qkv_post_k8v4t, 13) P(qkv_post_k8v4tv, 13) P(attn_unturn, 1) P(attention, 4) P(attn, 5) P(attn_q8, 7) P(attn_q4, 7) P(attn_k8v4, 7) P(attn_merge, 2) 
         if (const uint32_t npt = norm_npt();
@@ -1489,6 +1526,16 @@ private:
             saved_pos_.assign(saved_.size(), -1);
             for (Buf &b : saved_)
                 if (!mk(b, state, false, true)) return false;
+        }
+        // Folded weights (prism.hadamard): their rotated input, and the signs
+        // by width.
+        if (hp_.fold_width > 0) {
+            if (!mk(hx_, 4ull * TMAX * hp_.fold_width)) return false;
+            for (auto &sv : m_.fold_signs) {
+                Buf &b = fold_signs_[sv.first];
+                if (!mk(b, 4ull * sv.second.size(), true)) return false;
+                memcpy(b.map, sv.second.data(), 4ull * sv.second.size());
+            }
         }
         // RoPE's turns, made here and filled once the context is known: made
         // after the sizing, they would take a fresh 1 GiB block it never
@@ -1785,6 +1832,7 @@ private:
     void dispatch(const std::string &name, std::initializer_list<const Buf *> bufs, const PC &pc, uint32_t gx,
                   uint32_t gy = 1, const std::string &what = {}, uint32_t gz = 1) {
         const Pipe &p = pipes_.at(name);
+        if (!in_matmul_) hx_of_.valid = false;  // any other kernel may write what hx_ was made from
         vk.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, p.pipe);
         std::vector<VkDescriptorBufferInfo> bi;
         for (const Buf *b : bufs) bi.push_back({b->buf, 0, VK_WHOLE_SIZE});
@@ -1833,8 +1881,51 @@ private:
 
     const Buf &W(const Weight &w) { return weights_.at(w.info->name); }
 
+    // A folded weight's input, rotated into hx_ (Weight in model.h): the
+    // value heads regrouped where the weight asks, the signs, the block
+    // Hadamard rotation. Weights that read the same input the same way one
+    // after another (a layer's q, k and v; gate and up) share one rotation.
+    void rotate(const Weight &w, const Buf &x, int ntok, uint32_t x_off) {
+        const uint32_t ncols = (uint32_t)w.ne0(), rep = w.fold_rep > 1 ? (uint32_t)w.fold_rep : 0;
+        if (hx_of_.valid && hx_of_.src == x.buf && hx_of_.x_off == x_off && hx_of_.ntok == (uint32_t)ntok &&
+            hx_of_.ncols == ncols && hx_of_.block == (uint32_t)w.fold_block && hx_of_.rep == rep &&
+            hx_of_.signs == w.fold_signs)
+            return;
+        struct { uint32_t ncols, block, x_off, flags, hd, nk, rep; } pc{
+            ncols, (uint32_t)w.fold_block, x_off, (w.fold_signs ? 1u : 0u) | (rep ? 4u : 0u),
+            (uint32_t)w.fold_hd, (uint32_t)w.fold_nk, rep};
+        const Buf &signs = w.fold_signs ? fold_signs_.at(w.ne0()) : dummy_;
+        dispatch("hadamard", {&x, &signs, &hx_}, pc, ncols / pc.block, (uint32_t)ntok, qpool_ ? role(w) : std::string());
+        hx_of_.src = x.buf;
+        hx_of_.x_off = x_off;
+        hx_of_.ntok = (uint32_t)ntok;
+        hx_of_.ncols = ncols;
+        hx_of_.block = pc.block;
+        hx_of_.rep = rep;
+        hx_of_.signs = w.fold_signs;
+        hx_of_.valid = true;
+    }
+
     // Y (+)= W X for ntok tokens; X rows start at x_off floats.
     void matmul(const Weight &w, const Buf &x, const Buf &y, int ntok, bool accumulate, uint32_t x_off = 0) {
+        if (!w.folded()) {
+            in_matmul_ = true;
+            matmul_plain(w, x, y, ntok, accumulate, x_off);
+            in_matmul_ = false;
+            if (y.buf == hx_of_.src) hx_of_.valid = false;
+            return;
+        }
+        // Every kernel here ends with a barrier, whatever the caller asked
+        // for: the product reads hx_, and the next rotation writes it.
+        no_barrier_ = false;
+        rotate(w, x, ntok, x_off);
+        in_matmul_ = true;
+        matmul_plain(w, hx_, y, ntok, accumulate, 0);
+        in_matmul_ = false;
+        if (y.buf == hx_of_.src) hx_of_.valid = false;
+    }
+
+    void matmul_plain(const Weight &w, const Buf &x, const Buf &y, int ntok, bool accumulate, uint32_t x_off) {
         struct { uint32_t ncols, nrows, ntok, row_bytes, x_stride, y_stride, accumulate, x_off; } pc{
             (uint32_t)w.ne0(), (uint32_t)w.ne1(), (uint32_t)ntok, (uint32_t)w.info->row_bytes(),
             (uint32_t)w.ne0(), (uint32_t)w.ne1(), accumulate ? 1u : 0u, x_off};
@@ -1850,7 +1941,7 @@ private:
                                        ? big * std::min({(mmb_split_ + big - 1) / big, (uint32_t)w.ne0() / 256, 16u})
                                        : big;
         if (ntok >= tiled_min_ && mmb_ && (split_big >= (uint32_t)mmb_min_ || (mmb_short_ && ntok < 128 && mmb_f16_for(w))) &&
-            x_off % 4 == 0 && mmb_type(w)) {
+            x_off % 4 == 0 && mmb_type(w) && (w.type() != GGML_Q2_0 || mmb_q2_)) {
             mmb(w, x, y, pc, big, what);
             return;
         }
@@ -1876,6 +1967,14 @@ private:
                 mat_vec(std::string(mv16_ ? "mv16_" : "matvec_") + qname(w.type()), {&W(w), &x, &y}, pc, rows, what);
                 return;
             }
+        }
+        // One token of Q2_0 (the Bonsai files): its word-load kernel. Only
+        // this one: those files' weights are stored rotated, so the norm
+        // and gate+up never fold in (TS5_MV_Q2=0: the byte-load kernel).
+        if (ntok == 1 && fast_matvec_ && mv16_ && mv_q2_ && !norm_ && w.type() == GGML_Q2_0 && w.ne0() % 64 == 0 &&
+            w.info->nbytes % 4 == 0 && x_off % 4 == 0) {
+            mat_vec("mv16_q2_0", {&W(w), &x, &y}, pc, rows, what);
+            return;
         }
         // A few tokens (speculation's verify batch): the word-load kernels
         // that read each row's words once and dot them with every token, so
@@ -2200,7 +2299,7 @@ private:
     // a verify batch of Q4_K through mvt_glu_q4_k, which loads each token's
     // x once for both matrices. False where that doesn't apply.
     bool glu_applies(const Layer &L, int n) const {
-        if (hp_.gelu && !glu_gelu_) return false;
+        if ((hp_.gelu && !glu_gelu_) || L.w_gate.folded() || L.w_up.folded()) return false;
         const bool batch = n >= 2 && n <= 8 && mvt_ && mvt_glu_ && L.w_gate.type() == GGML_Q4_K;
         const bool one = n == 1 && mv16_ && fast_type(L.w_gate) && L.w_gate.type() != GGML_Q6_K;
         return !(!(n == 1 ? one : batch) || !fuse_ || !fast_matvec_ || L.w_gate.type() != L.w_up.type() ||
@@ -2211,8 +2310,9 @@ private:
     // mv16n kernels: a fast type's rows, mv16 on).
     bool fold_norm(int n, std::initializer_list<const Weight *> ws) const {
         if (n != 1 || !norm_fuse_ || !fast_matvec_ || !mv16_) return false;
+        // (A folded weight reads its input rotated: the norm comes first.)
         for (const Weight *w : ws)
-            if (!fast_type(*w) || w->ne0() != hp_.n_embd) return false;
+            if (!fast_type(*w) || w->ne0() != hp_.n_embd || w->folded()) return false;
         return true;
     }
 
@@ -2442,11 +2542,20 @@ private:
         {
             struct { uint32_t ncols, row_bytes; float scale; } pc{(uint32_t)E, (uint32_t)m_.tok_embd.info->row_bytes(),
                                                                   hp_.embd_scale > 0 ? hp_.embd_scale : 1.0f};
+            // A table stored rotated (prism.hadamard): its rows go through
+            // the rotation, then the signs, on their way to x_.
+            const Weight &te = m_.tok_embd;
+            const Buf &rows = te.fold_inverse ? hx_ : x_;
             if (embd_file_)  // TS5_EMBD_FILE: the call's rows, in order
-                dispatch(std::string("get_rows_") + qname(m_.tok_embd.type()), {&emb_, &seq_, &x_}, pc, (uint32_t)n);
+                dispatch(std::string("get_rows_") + qname(te.type()), {&emb_, &seq_, &rows}, pc, (uint32_t)n);
             else
-                dispatch(std::string("get_rows_") + qname(m_.tok_embd.type()), {&W(m_.tok_embd), &ids_, &x_}, pc,
-                         (uint32_t)n);
+                dispatch(std::string("get_rows_") + qname(te.type()), {&W(te), &ids_, &rows}, pc, (uint32_t)n);
+            if (te.fold_inverse) {
+                struct { uint32_t ncols, block, x_off, flags, hd, nk, rep; } hpc{
+                    (uint32_t)E, (uint32_t)te.fold_block, 0, te.fold_signs ? 2u : 0u, 0, 0, 0};
+                dispatch("hadamard", {&hx_, te.fold_signs ? &fold_signs_.at(E) : &dummy_, &x_}, hpc,
+                         (uint32_t)E / hpc.block, (uint32_t)n, "token_embd");
+            }
         }
         if (rec_layers_ && pos0 == 0) {
             const uint64_t nf = (uint64_t)rec_layers_ * hp_.rec_state_floats();
@@ -2605,6 +2714,8 @@ private:
     // Rows per workgroup of those kernels (TS5_MV_ROWS, 1 to 8), which share
     // their x loads, for matrices of at least mv_rows_min_ rows
     // (TS5_MV_ROWS_MIN); one for smaller ones.
+    bool mv_q2_ = true;  // mv16_q2_0 for one token of Q2_0 (TS5_MV_Q2)
+    bool mmb_q2_ = true;  // the 128 x 128 prompt kernels for Q2_0 (TS5_MMB_Q2; 0: the 64 x 64 byte-load kernel)
     uint32_t mv_rows_ = 4;
     // 1024 takes in Qwen3 8B and 14B's K and V (8 heads of 128: +1.4% and
     // +0.9% generation on the console); 512-row ones (4 KV heads) stay at one.
@@ -2830,6 +2941,17 @@ private:
     std::map<std::string, Pipe> pipes_;
     std::map<std::string, Buf> weights_;
     Buf x_, h_, q_, k_, v_, att_, g_, u_, dummy_, part_, split_, ids_, logits_, rope_turn_[2];
+    // Folded weights: the rotated input of the last one (rotate), what it
+    // was made from, and the signs by width.
+    Buf hx_;
+    std::map<int64_t, Buf> fold_signs_;
+    struct {
+        VkBuffer src = VK_NULL_HANDLE;
+        uint32_t x_off = 0, ntok = 0, ncols = 0, block = 0, rep = 0;
+        const float *signs = nullptr;
+        bool valid = false;
+    } hx_of_;
+    bool in_matmul_ = false;  // a dispatch of matmul's own: hx_ stays good
     // Rows logits_ holds (logits_rows), and where a call's pieces go: the
     // caller's array, and the first row the buffer still holds after it.
     const int out_rows_ = logits_rows();
@@ -2934,7 +3056,7 @@ uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes, bool whole_blo
     // and output, and their state with save_state's copies.
     const uint64_t rec = hp.rec_count() ? (uint64_t)hp.ssm_conv_dim() + 2ull * hp.ssm_inner() + 2ull * hp.ssm_v_heads : 0;
     const uint64_t act =
-        4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + (hp.attn_gate ? 2 * QD : 0) + rec) +
+        4 * T * (2 * E + 2 * QD + 2 * KVD + 2 * F + 1 + (hp.attn_gate ? 2 * QD : 0) + rec + (uint64_t)hp.fold_width) +
         4ull * logits_rows() * hp.n_vocab +
         4 * (VkBackend::PART + VkBackend::SPLIT) +
         4ull * (1 + (hp.rec_count() ? state_slots_wanted() : 0)) * hp.rec_count() *

@@ -174,7 +174,7 @@ bool Tokenizer::load(const Gguf &g, std::string &err) {
         if (!specials_[i].first.empty()) by_byte_[(unsigned char)specials_[i].first[0]].push_back((int)i);
     if (eos_ >= 0) eog_.push_back(eos_);
     for (const char *s : {"<|im_end|>", "<|eot_id|>", "<|eom_id|>", "<|endoftext|>", "<|end|>", "</s>", "<end_of_turn>",
-                          "<turn|>", "<|tool_response>"}) {
+                          "<turn|>", "<|tool_response>", "<｜User｜>"}) {
         auto it = id_.find(s);
         if (it != id_.end() && std::find(eog_.begin(), eog_.end(), it->second) == eog_.end()) eog_.push_back(it->second);
     }
@@ -196,6 +196,13 @@ void Tokenizer::set_chat_template(const std::string &tmpl) {
     else if (tmpl.find("[INST]") != std::string::npos) chat_ = MISTRAL;
     else if (tmpl.find("<start_of_turn>") != std::string::npos) chat_ = GEMMA;
     else if (tmpl.find("<|turn>") != std::string::npos) chat_ = GEMMA4;
+    // DeepSeek R1's distills: their Qwen files have no <|im_start|> at all
+    // (its id is <｜User｜> there), so ChatML is not theirs. Their template
+    // starts with the BOS whatever the file says about adding one.
+    else if (tmpl.find("<｜User｜>") != std::string::npos) {
+        chat_ = DEEPSEEK;
+        if (bos_ >= 0 && tmpl.find("bos_token") != std::string::npos) add_bos_ = true;
+    }
     else if (id_.count("<|im_start|>")) chat_ = CHATML;
     else chat_ = PLAIN;
 }
@@ -401,9 +408,15 @@ std::string Tokenizer::decode(int32_t tok) const {
     if (tok < 0 || tok >= (int32_t)tokens_.size()) return {};
     const std::string &s = tokens_[tok];
     int type = tok < (int32_t)types_.size() ? types_[tok] : 1;
-    // Control tokens print nothing, but [TOOL_CALLS], which opens Mistral
-    // Nemo's tool calls, prints so the parser (tools.cpp) sees them.
-    if (type == 3) return s == "[TOOL_CALLS]" ? s : std::string();
+    // Control tokens print nothing, but the marks around a turn's thinking
+    // and its tool calls, which some files keep as control tokens: they
+    // print so the readers (tools.cpp, the server) see them.
+    if (type == 3) {
+        for (const char *mark : {"[TOOL_CALLS]", "<think>", "</think>", "[THINK]", "[/THINK]", "<tool_call>",
+                                 "</tool_call>", "<|channel>", "<channel|>", "<|tool_call>", "<tool_call|>", "<|\"|>"})
+            if (s == mark) return s;
+        return {};
+    }
     if (kind_ == SPM || kind_ == SPM_BPE) {
         if (type == 6 && s.size() == 6) return std::string(1, (char)std::stoi(s.substr(3, 2), nullptr, 16));
         std::string r;
@@ -494,6 +507,27 @@ std::string Tokenizer::apply_chat(const std::vector<ChatMessage> &msgs) const {
                      "<turn|>\n";
             }
             s += "<|turn>model\n";
+            break;
+        }
+        case DEEPSEEK: {
+            // As DeepSeek R1's template: the system message bare at the top
+            // (the last one, where there are several), <｜User｜> and
+            // <｜Assistant｜> before the turns with nothing between, and the
+            // model's earlier turns without their thinking, each closed.
+            std::string sys;
+            for (auto &m : msgs)
+                if (m.role == "system") sys = m.content;
+            s += sys;
+            for (auto &m : msgs) {
+                if (m.role == "user") {
+                    s += "<｜User｜>" + m.content;
+                } else if (m.role == "assistant") {
+                    const size_t e = m.content.rfind("</think>");
+                    s += "<｜Assistant｜>" + (e == std::string::npos ? m.content : m.content.substr(e + 8)) +
+                         "<｜end▁of▁sentence｜>";
+                }
+            }
+            s += "<｜Assistant｜>";
             break;
         }
         case PLAIN:

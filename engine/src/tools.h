@@ -2,8 +2,10 @@
 // trained on: the Hermes style of Qwen 2.5 and Qwen3, the JSON style of
 // Llama 3.1 and 3.2, Mistral Nemo's [TOOL_CALLS] and Gemma 4's
 // <|tool_call>call:NAME{...}. Each is written the way the model's own chat
-// template writes it, so the model sees what it saw in training. Gemma 3,
-// which has no tool format of its own, gets the Hermes one in its own turns.
+// template writes it, so the model sees what it saw in training. A model
+// with no tool format of its own (Gemma 3, DeepSeek R1's distills, an older
+// Llama or Mistral, a plain model) gets the Hermes one in its own turns, so
+// every model can call tools.
 #pragma once
 #include <string>
 #include <vector>
@@ -14,14 +16,16 @@
 namespace ts5 {
 
 enum class ToolFormat {
-    NONE,    // the model's template has no tool calls
+    NONE,    // not a chat (a completion)
     HERMES,  // Qwen: <tool_call>{"name": ..., "arguments": {...}}</tool_call>
     LLAMA3,  // Llama 3.1/3.2: {"name": ..., "parameters": {...}}, results in the ipython role
     MISTRAL, // Mistral Nemo: [TOOL_CALLS][{"name": ..., "arguments": {...}, "id": ...}], results in [TOOL_RESULTS]
     GEMMA,   // Gemma 3 (no tool format of its own): HERMES's calls and results, in Gemma's turns
     GEMMA4,  // Gemma 4: <|tool_call>call:NAME{key:value}<tool_call|>, results in the model's own turn
+    GENERIC, // any other chat with no tool format of its own (DeepSeek R1's distills, Llama 3.0, older Mistral,
+             // a plain model): HERMES's calls and results, asked for in words, in the model's own turns
 };
-// Read from the model's chat template.
+// Read from the model's chat template: never NONE, so every model has one.
 ToolFormat tool_format(const Tokenizer &t);
 const char *tool_format_name(ToolFormat f);
 
@@ -52,7 +56,8 @@ std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, co
 // After a turn of the model's that ended in tool calls: the text that closes
 // the turn, gives each call's result back in order, and opens the model's
 // next turn.
-std::string render_results(ToolFormat f, const std::vector<ToolCall> &calls, const std::vector<std::string> &results);
+std::string render_results(const Tokenizer &t, ToolFormat f, const std::vector<ToolCall> &calls,
+                           const std::vector<std::string> &results);
 
 // A finished turn: its text without the calls, and the calls. A call whose JSON
 // does not parse stays in the text. names: the request's tools, for calls
@@ -91,16 +96,31 @@ extern const char *const kG4ThoughtEnd;  // "<channel|>"
 // thought after a tool's results (its template, read from `prompt`'s end).
 std::string turn_opening(const Tokenizer &t, bool think, const std::string &prompt);
 
-// A turn of Gemma 4's as it is written, piece by piece, with its thought
-// channel's marks as <think> and </think> and the channel's name left out.
+// A turn as the model writes it, piece by piece, with its thinking's marks
+// as <think> and </think>: Gemma 4's thought channel anywhere (the channel's
+// name left out), and the marks other models open a turn's thinking with
+// (<thinking>, <reasoning>, <thought>, [THINK], <|begin_of_thought|>,
+// ◁think▷, <seed:think>) where the turn starts with one, up to its own
+// closing mark. Past the start of a turn such a tag is text, as written.
 struct ThoughtChannel {
+    // gemma4: the model is one. opened: the turn was opened in its thinking
+    // already (turn_opening), so no mark of the model's opens it.
+    explicit ThoughtChannel(bool gemma4 = false, bool opened = false) : started_(opened), gemma4_(gemma4) {}
     std::string map(const std::string &piece);
     // What map held back at the turn's end (the start of what could have been a mark).
     std::string rest();
+    // The mark that ends the thinking the turn is in, as the model writes it.
+    std::string closing() const;
+    // How many bytes map is holding back.
+    size_t held() const { return held_.size(); }
 
 private:
     std::string held_;
-    bool name_ = false;  // just past <|channel>: its name, to the end of the line
+    bool name_ = false;     // just past <|channel>: its name, to the end of the line
+    bool started_ = false;  // the turn has text: a thinking mark can no longer open it
+    int style_ = -1;        // the mark that opened the thinking (kThinkMarks), until its closing mark
+    bool solution_ = false; // past <|end_of_thought|>: the marks around the answer are left out
+    bool gemma4_ = false;
 };
 
 // Calls whose arguments came as <parameter=KEY> text (Qwen3.5): each value

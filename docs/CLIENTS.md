@@ -115,18 +115,39 @@ TokenStation5 under `provider`:
 
 Then pick `tokenstation5/Qwen2.5-Coder-7B-Instruct-Q4_K_M` as the model.
 Put the model's `context_length` from `/v1/models` in `limit.context`. Leave
-`reasoning` out for the Llama and Qwen 2.5 models (only Qwen 3 and Gemma 4
-think).
+`reasoning` out for the Llama and Qwen 2.5 models (only Qwen 3, DeepSeek R1
+and Gemma 4 think).
 
-Qwen 3 and Gemma 4 think before they answer, and the thinking comes back
-apart from the answer, as `reasoning_content`. To skip it for a request, send
+Qwen 3, DeepSeek R1's distills and Gemma 4 think before they answer, and the
+thinking comes back apart from the answer, as `reasoning_content`. A model
+that writes its thinking with other marks at the start of its turn
+(`<thinking>`, `<reasoning>`, `<thought>`, `[THINK]`, `<|begin_of_thought|>`,
+`◁think▷`, `<seed:think>`) is read the same way.
+To skip it for a request to Qwen 3, DeepSeek R1 or Gemma 4, send
 `"chat_template_kwargs": {"enable_thinking": false}` (as vLLM and llama.cpp
-take it) or, for Qwen 3, end the message with `/no_think`. `/v1/models` says
+take it) or, for Qwen 3, end the message with `/no_think`. DeepSeek R1 was
+trained to think first: without it the 14B answers at once and is wrong more
+often (on the PS5 a counting question right in 2 of 8 runs, once only the
+question repeated; the right tool call in 3 of 5). `/v1/models` says
 under `settings.thinking` whether the loaded model thinks when a request
 doesn't say. A reply capped under 1,024
 tokens (`max_tokens`) never thinks, so an app asking for a short title or a
 line of code still gets an answer. Stop strings end the answer, never the
 thinking.
+
+A thinking that doesn't end is ended for the model, which then answers from
+what it has: one that repeats itself word for word, one that has used up the
+reply's room but for a last part (a quarter of it, up to 1,024 tokens), and
+one past 8,192 tokens (`"thinking_budget": N` in a request, or
+`TS5_THINK_MAX=N` for the server, sets another number; 0 is no limit). The
+thinking then ends with a line in square brackets that says why. Without
+this a small model can think to the end of its context and answer nothing
+(on the PS5, Qwen3.5 9B asked for a haiku: 15,851 tokens and four minutes).
+
+`usage.total_tokens` is what the conversation holds when the reply ends, so
+an app can size its context by it: a thinking the model read again after it
+was ended, or the turns before a web search's results, are counted once, as
+`completion_tokens`, and `prompt_tokens` is the rest.
 
 For agent work (editing files, then running them), use Qwen 3 8B. On the PS5
 it took every step of a write-then-run task; Qwen 2.5 Coder 7B wrote the file
@@ -145,6 +166,19 @@ Gemma 3 12B takes tools as Qwen 3 does (`<tool_call>` JSON), inside Gemma's
 own turns. On the PS5 it passed 59 of 60 checks over three runs of the model
 check, the agent task included, with about 29,700 tokens of context. Once it
 made one call where a question asked for two at a time.
+
+DeepSeek R1's distills get their own chat format (`<｜User｜>`,
+`<｜Assistant｜>`) and are asked for calls the same way as Gemma 3: their
+template names tool marks that their files' vocabularies don't have, so ts5
+asks for `<tool_call>` JSON in words, in the first user turn (DeepSeek's
+advice is to use R1 without a system message). A result comes back as a user
+turn in plain words ("Result of get_weather: ..." and a line asking for the
+answer): on the PS5 the 14B answered from it in 10 of 10 runs, and called the
+function a second time in 2 of 10 when the result came in tags. The same
+goes for any model whose template has no tool format, so every model can be
+given tools. A call the model wraps in a tag of its own after some words
+(the 14B once wrote `<command>{"name": "run_command", ...}</command>`) is
+read as a call when it names one of the request's tools.
 
 Gemma 4 12B takes tools in its own format, as its template writes it: the
 tools declared in the system turn, a call as

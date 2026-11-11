@@ -9,10 +9,23 @@ a log line per answer as ts5 does, to stderr. FAKE_CTX sets the context
 (32768): each message adds 600 tokens to the prompt (FAKE_COUNT=len: a
 third of its bytes, as a real chat grows; FAKE_DENSE=2: half), and an answer that reaches the
 context or max_tokens stops with finish_reason "length". A request for a
-summary (ts5-tui's, for a chat that filled up) gets one. FAKE_REQUESTS: a
+summary (ts5-tui's, for a chat that filled up) gets one (FAKE_SUMMARY: a
+file with the summary to give instead). FAKE_REQUESTS: a
 file that gets each request's roles and sizes, a line a request.
-FAKE_WEB=1 says the server has a web search key. FAKE_SPEED: words a second
+FAKE_WEB=1 says the server has a web search key (without it the search is
+Wikipedia's; FAKE_SOURCE=none: no search at all). FAKE_SPEED: words a second
 (60).
+Tools: when the request offers them, a message "run CMD" has the fake call
+run_command (CMD ";;" CMD2: one after the other, a turn each; CMD "&&&" CMD2:
+both in one turn), "read URL" read_web_page, "remember TEXT" remember, and
+"loop" a command every turn for as long as it is given tools. After the
+results it answers with what came back. A message "search WORDS", in a
+request that lets the server search ("web_search" true or "auto"), has the
+fake say that it searches, as ts5 does while it runs a search itself
+("ts5_web_search" in the stream: running, then done; "search fail WORDS":
+failed), and then answer. FAKE_REQUESTS also gets the tools'
+names, "web_search", "tool_choice", the system message and a request for
+a summary whole.
 FAKE_MODEL names the model. FAKE_HELPER names the helper drafting beside it
 (FAKE_HELPER_CTX: its context; "none": no helper), FAKE_HELPER_NOTE says
 why none is; with neither, /v1/models has no "helper" at all, as an older
@@ -20,6 +33,7 @@ ts5.
 """
 import json
 import os
+import re
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -86,7 +100,8 @@ class H(BaseHTTPRequestHandler):
             self.send(200, {"status": "ok"})
         elif self.path in ("/v1/models", "/models"):
             m = {"id": MODEL, "object": "model", "context_length": N_CTX,
-                 "capabilities": {"tools": True, "tool_format": "hermes", "web_search": WEB},
+                 "capabilities": {"tools": True, "tool_format": "hermes", "web_search": WEB,
+                                  "web_search_source": "tavily" if WEB else os.environ.get("FAKE_SOURCE", "wikipedia")},
                  "settings": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "thinking": True,
                               "known_good": "file"}}
             if HELPER and HELPER != "none":
@@ -104,14 +119,59 @@ class H(BaseHTTPRequestHandler):
         req = json.loads(self.rfile.read(n) or b"{}")
         msgs = req.get("messages", [])
         last = msgs[-1]["content"] if msgs else ""
+        # ts5-tui's request for a summary: the conversation as one text, its messages under [User] and
+        # [Assistant] (and what a tool gave back), then what to write.
+        summary = last.startswith("Below, between the two lines of dashes, is a conversation between a user and an AI")
+        parts = re.findall(r"^\[(?:User|Assistant|What the tool gave back|Notes on the conversation's earlier part)\]$",
+                           last, re.M) if summary else []
         if COUNT_LEN:
-            prompt = 30 + sum(len(m.get("content") or "") // DENSE + 8 for m in msgs)
+            prompt = 30 + sum(len(m.get("content") or "") // DENSE + 8 for m in msgs) + 8 * len(parts)
         else:
-            prompt = 812 + 600 * (len(msgs) - 1)
+            prompt = 812 + 600 * (len(msgs) - 1 + len(parts))
+        tools = [t.get("function", {}).get("name") for t in req.get("tools") or []]
+        if req.get("tool_choice") == "none":
+            tools = []
         if REQUESTS:
             with open(REQUESTS, "a") as f:
                 f.write("%d tokens, max %s: %s\n" % (prompt, req.get("max_tokens"), " ".join(
                     "%s(%d)" % (m.get("role"), len(m.get("content") or "")) for m in msgs)))
+                if "tools" in req or "web_search" in req:
+                    f.write("  tools=%s web_search=%s tool_choice=%s\n" % (
+                        ",".join(t.get("function", {}).get("name") for t in req.get("tools") or []),
+                        json.dumps(req.get("web_search")), req.get("tool_choice")))
+                if summary:
+                    f.write("  summary asked: %s\n" % json.dumps(last))
+                for m in msgs:
+                    if m.get("role") == "system":
+                        f.write("  system: %s\n" % json.dumps(m.get("content")))
+                    if m.get("role") == "tool":
+                        f.write("  tool %s %s: %s\n" % (m.get("name"), m.get("tool_call_id"),
+                                                        json.dumps((m.get("content") or "")[:200])))
+                    if m.get("tool_calls"):
+                        f.write("  calls: %s\n" % json.dumps(m["tool_calls"]))
+        # The tool calls this turn makes (see the top of the file).
+        asked = ""
+        results = []
+        for m in msgs:
+            if m.get("role") == "user":
+                asked, results = m.get("content") or "", []
+            elif m.get("role") == "tool":
+                results.append(m.get("content") or "")
+        calls = []
+        if asked.startswith("run ") and "run_command" in tools:
+            if "&&&" in asked:
+                if not results:
+                    calls = [("run_command", {"command": c.strip()}) for c in asked[4:].split("&&&")]
+            else:
+                steps = [c.strip() for c in asked[4:].split(";;")]
+                if len(results) < len(steps):
+                    calls = [("run_command", {"command": steps[len(results)]})]
+        elif asked.startswith("loop") and "run_command" in tools:
+            calls = [("run_command", {"command": "echo round %d" % (len(results) + 1)})]
+        elif asked.startswith("read ") and "read_web_page" in tools and not results:
+            calls = [("read_web_page", {"url": asked[5:].strip()})]
+        elif asked.startswith("remember ") and "remember" in tools and not results:
+            calls = [("remember", {"note": asked[9:].strip()})]
         if prompt >= N_CTX:
             # As ts5 serve: refused before anything streams, in OpenAI's words and code.
             self.send(400, {"error": {"message": "This model's maximum context length is %d tokens. However, your "
@@ -143,14 +203,45 @@ class H(BaseHTTPRequestHandler):
                     chunk("reasoning_content", w + " ")
                     gen += 1
                     time.sleep(1 / speed)
-            if last.startswith("Stop here: do not answer the last message. Write a detailed summary"):
-                said = [m["content"] for m in msgs[:-1] if m.get("role") == "user"]
+            searching = asked.startswith("search ") and req.get("web_search") in (True, "auto")
+            if searching:
+                query = asked[7:].strip()
+                failed = query.startswith("fail ")
+
+                def told(state, note=None):
+                    d = {"choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": None}],
+                         "ts5_web_search": dict({"query": query, "state": state}, **({"note": note} if note else {}))}
+                    self.wfile.write(b"data: " + json.dumps(d).encode() + b"\n\n")
+                    self.wfile.flush()
+
+                told("running")
+                time.sleep(float(os.environ.get("FAKE_SEARCH_SECS", "0.6")))
+                if failed:
+                    told("failed", "the PS5 couldn't reach Wikipedia")
+                else:
+                    told("done", "5 results (0.5 s, %s)" % ("Tavily" if WEB else "Wikipedia"))
+            if calls:
+                tc = [{"index": i, "id": "call_fake_%d_%d" % (len(results), i), "type": "function",
+                       "function": {"name": name, "arguments": json.dumps(args)}} for i, (name, args) in enumerate(calls)]
+                d = {"choices": [{"index": 0, "delta": {"tool_calls": tc}, "finish_reason": None}]}
+                self.wfile.write(b"data: " + json.dumps(d).encode() + b"\n\n")
+                self.wfile.flush()
+                gen += 12 * len(calls)
+                text = ""
+            elif results:
+                text = "The tool gave me this: " + " | ".join(r.strip()[:300] for r in results)
+            elif summary:
+                said = re.findall(r"^\[User\]\n(.*)$", last, re.M)
                 text = SUMMARY % (len(said), (said[0] if said else "")[:40])
+                if os.environ.get("FAKE_SUMMARY"):  # a file with the summary to give, as a real model wrote one
+                    text = open(os.environ["FAKE_SUMMARY"], encoding="utf-8").read()
+            elif searching:
+                text = ("The search did not work, so this is from memory: " if failed else "From what the search found: ") + query
             elif "code" in last.lower() or "example" in last.lower():
                 text = ANSWER
             else:
                 text = "Hello from the fake TokenStation. You said: " + last
-            words = text.split(" ")
+            words = text.split(" ") if text else []
             for i, w in enumerate(words):
                 if gen >= budget:
                     break
@@ -159,7 +250,8 @@ class H(BaseHTTPRequestHandler):
                 gen += max(1, len(piece) // DENSE) if GEN_LEN else 1
                 time.sleep(1 / speed)
             secs = time.time() - t0 - 0.4
-            last_d = {"choices": [{"index": 0, "delta": {}, "finish_reason": "length" if gen >= budget else "stop"}],
+            last_d = {"choices": [{"index": 0, "delta": {},
+                                   "finish_reason": "length" if gen >= budget else "tool_calls" if calls else "stop"}],
                       "usage": {"prompt_tokens": prompt, "completion_tokens": gen, "total_tokens": prompt + gen},
                       "timings": {"prompt_n": prompt, "prompt_ms": 400, "prompt_per_second": 2030.0,
                                   "predicted_n": gen, "predicted_ms": secs * 1000,

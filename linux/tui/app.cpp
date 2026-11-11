@@ -126,6 +126,10 @@ void Config::load() {
         else if (k == "keep_model") keep_model = v != "0";
         else if (k == "summarize") summarize = v != "0";
         else if (k == "web_search_key") web_key = v;
+        else if (k == "tool_web_search") tool_web = v != "0";
+        else if (k == "tool_web_page") tool_page = v != "0";
+        else if (k == "tool_terminal") tool_terminal = v != "0";
+        else if (k == "tool_memory") tool_memory = v != "0";
     }
     saved_url = url;
     saved_key = key;
@@ -145,7 +149,9 @@ void Config::save() const {
              "\nthinking=" + std::to_string(thinking) + "\ntemperature=" + fmt("%g", temp) +
              "\nmax_tokens=" + std::to_string(max_tokens) + "\ncontext=" + std::to_string(serve_ctx) + "\nhelper_room=" + (helper_room ? "1" : "0") + "\ntmux=" + (tmux ? "1" : "0") +
              "\nmouse=" + (mouse ? "1" : "0") + "\nkeep_model=" + (keep_model ? "1" : "0") + "\nsummarize=" + (summarize ? "1" : "0") +
-             "\nweb_search_key=" + web_key + "\n";
+             "\nweb_search_key=" + web_key + "\ntool_web_search=" + (tool_web ? "1" : "0") + "\ntool_web_page=" +
+             (tool_page ? "1" : "0") + "\ntool_terminal=" + (tool_terminal ? "1" : "0") + "\ntool_memory=" +
+             (tool_memory ? "1" : "0") + "\n";
         if (write(fd, s.data(), s.size()) != (ssize_t)s.size()) {
             close(fd);
             return;

@@ -45,6 +45,10 @@ struct Config {
     // A Tavily key (app.tavily.com): a model ts5-tui loads can then search
     // the web (TAVILY_API_KEY for its ts5 serve; docs/WEB_SEARCH.md).
     std::string web_key;
+    // The tools the model is given in a chat, each with its own switch:
+    // the server's web search, reading a web page, running a command here
+    // (asked first), and notes kept between chats (tools.h).
+    bool tool_web = true, tool_page = true, tool_terminal = true, tool_memory = true;
     std::string path;       // where it is saved
     void load();
     void save() const;
@@ -57,6 +61,7 @@ struct ServerState {
     int n_ctx = 0;
     std::string tool_format, known_good, checked_model, why;
     bool web_search = false;  // the server searches the web for the model (it has a key)
+    bool wikipedia = false;   // without a key it searches Wikipedia, for a request that asks
     // The helper the engine really loaded beside the model, its context
     // (drafting stops past it), or why the one asked for isn't used.
     // helper_known: the server says (an older one doesn't).

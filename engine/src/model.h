@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -18,6 +19,7 @@ struct HParams {
     int n_vocab = 0, n_embd = 0, n_layer = 0, n_ff = 0;
     int n_head = 0, n_head_kv = 0, head_dim = 0;
     int n_ctx_train = 0;
+    int fold_width = 0;  // the widest input of a folded weight (prism.hadamard), 0 with none
     float rms_eps = 1e-6f;
     float rope_base = 10000.f;
     int rope_dims = 0;
@@ -108,6 +110,25 @@ struct HParams {
 struct Weight {
     const GgufTensor *info = nullptr;
     const uint8_t *data = nullptr;
+    // A folded weight (the Bonsai files' prism.hadamard): what the file holds
+    // is W D H, the weight with fixed signs D and a block Hadamard rotation
+    // H worked into its columns, which spreads each weight over its block
+    // so two bits a value lose less. H H = I and D D = I, so
+    // W x = (W D H) (H (D x)): the input goes through the signs and the
+    // rotation first (fold_input), then the product as for any weight.
+    // fold_block: the rotation's block size (ne0 is whole blocks of it), 0
+    // for a weight that isn't folded. fold_signs: ne0 signs, +1 or -1 (the
+    // Model's), or null where the file has none. fold_rep > 1 (a linear
+    // layer's ssm_out): the input's value heads are regrouped first, from
+    // the order the layer writes them, [fold_hd, fold_nk, fold_rep], to
+    // [fold_hd, fold_rep, fold_nk]. fold_inverse: a table read by row (the
+    // token embeddings), whose rows are stored rotated: a looked-up row is
+    // rotated, then signed (unfold_row).
+    int fold_block = 0;
+    const float *fold_signs = nullptr;
+    int fold_hd = 0, fold_nk = 0, fold_rep = 0;
+    bool fold_inverse = false;
+    bool folded() const { return fold_block > 0 && !fold_inverse; }
     uint32_t type() const { return info->type; }
     int64_t ne0() const { return info->ne[0]; }
     int64_t ne1() const { return info->ne.size() > 1 ? info->ne[1] : 1; }
@@ -164,12 +185,34 @@ struct Model {
     int context_cap() const;
     int rope_dims(bool swa) const { return swa && hp.rope_dims_swa ? hp.rope_dims_swa : hp.rope_dims; }
 
+    // prism.hadamard's sign vectors by width (Weight::fold_signs points here).
+    std::map<int64_t, std::vector<float>> fold_signs;
+    bool has_folds() const { return !folds_.empty() || !inverse_folds_.empty(); }
+
 private:
     Weight weight(const std::string &name, bool required, std::string &err);
     bool bind(std::string &err);
     bool read_scalars(std::string &err);
+    // Reads prism.hadamard's metadata: which weights are folded (folds_,
+    // name to block size), which tables are read by row (inverse_folds_),
+    // the signs. False, with why in plain words, for a kind ts5 doesn't read.
+    bool read_folds(std::string &err);
+    std::map<std::string, int> folds_, inverse_folds_;
+    std::map<std::string, bool> fold_bound_;  // the folded names a Weight was made for
+    bool fold_grouped_ = false, fold_tied_ = false;
     const uint8_t *base_ = nullptr;
 };
+
+// The block Walsh-Hadamard rotation of v's n values, in place: each block of
+// `block` values (a power of two) times the Sylvester matrix over
+// sqrt(block), which is its own inverse.
+void hadamard_blocks(float *v, int64_t n, int block);
+// A folded weight's input (Weight::folded()): n vectors of w.ne0() values
+// from x, regrouped, signed and rotated, into out (not x).
+void fold_input(const Weight &w, const float *x, int n, float *out);
+// A row looked up in a folded table (Weight::fold_inverse), in place:
+// rotated, then signed.
+void unfold_row(const Weight &w, float *row);
 
 // The settings `ts5-tune --models` found best for one model file (its
 // helper model, drafts per step, prompt math): KEY=VALUE lines in

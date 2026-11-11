@@ -5,7 +5,7 @@
 // along the row 32 values (one K-quant sub-block) at a time; each thread
 // dequantizes 16 values of one row and loads 16 of one token, from 16-byte
 // words, for the next step while the block computes the current one.
-// Q4_K, Q5_K, Q6_K and Q8_0; X rows 16-byte aligned.
+// Q4_K, Q5_K, Q6_K, Q8_0 and Q2_0; X rows 16-byte aligned.
 // With n_split > 1, workgroup z takes `units` of the row's 32-value units
 // and writes its sums to P (from p_off: [slice][token][row]) for mmb_reduce
 // to add up: a matrix with few blocks then still keeps the GPU busy.
@@ -45,6 +45,7 @@
 #define T_Q4_K 12
 #define T_Q5_K 13
 #define T_Q6_K 14
+#define T_Q2_0 42
 
 #define BM 128
 #define BN 128
@@ -163,6 +164,24 @@ void dequant(Raw w, uint u, out float v[16]) {
         const int q = int(run_word(w.q, k, w.odd));
         for (uint l = 0; l < 4; l++) v[4 * k + l] = d * float(bitfieldExtract(q, int(8 * l), 8));
     }
+}
+#elif QTYPE == T_Q2_0
+// Q2_0: an 18-byte block (d as f16, then 16 bytes, two bits a value: q - 1
+// times d) per 64 values. A unit is half a block, and a thread's 16 values
+// are 4 of its bytes: two 16-bit words, kept unshifted like the runs.
+struct Raw { uint lo, hi, d; };
+Raw load_w(uint row, uint u, uint half_) {
+    const uint b = row * pc.row_bytes + (u >> 1) * 18, o = b + 2 + 8 * (u & 1u) + 4 * half_;
+    Raw w;
+    w.lo = uint(w16[o / 2]);
+    w.hi = uint(w16[o / 2 + 1]);
+    w.d = uint(w16[b / 2]);
+    return w;
+}
+void dequant(Raw w, uint u, out float v[16]) {
+    const float d = unpackHalf2x16(w.d).x;
+    const uint q = w.lo | (w.hi << 16);
+    for (uint l = 0; l < 16; l++) v[l] = d * (float((q >> (2u * l)) & 3u) - 1.0);
 }
 #else
 // Q6_K: 210-byte blocks. Sub-block j (h = j / 4, k = j % 4) takes value l's

@@ -165,11 +165,20 @@ bool save_chat(Chat &c, std::string &why) {
                 if (!m.done || m.stopped || !m.error.empty() || m.content.empty()) continue;
                 int kept = 0;
                 for (size_t k = (size_t)std::max(0, m.keep_from); k < i; k++)
-                    kept += c.msgs[k].role == "user" || (c.msgs[k].role == "assistant" && c.msgs[k].done);
+                    kept += c.msgs[k].role == "user" || c.msgs[k].role == "tool" ||
+                            (c.msgs[k].role == "assistant" && c.msgs[k].done);
                 body += std::string(n++ ? ",\n" : "\n") + "{\"user\":false,\"summary\":true,\"text\":" + ts5::json_escape(m.content) +
                         ",\"model\":" + ts5::json_escape(m.model) + ",\"kept\":" + std::to_string(kept) +
                         ",\"before\":" + std::to_string(m.sum_before) + ",\"after\":" + std::to_string(m.sum_after) +
                         ",\"why\":" + std::to_string(m.sum_why) + "}";
+                continue;
+            }
+            if (m.role == "tool") {
+                // What a tool call gave back (ts5-tui's own fields; the TV
+                // app reads it as a reply's text).
+                body += std::string(n++ ? ",\n" : "\n") + "{\"user\":false,\"tool\":" + ts5::json_escape(m.tool) +
+                        ",\"call\":" + ts5::json_escape(m.call_id) + ",\"head\":" + ts5::json_escape(m.head) +
+                        ",\"ok\":" + (m.tool_ok ? "true" : "false") + ",\"text\":" + ts5::json_escape(m.content) + "}";
                 continue;
             }
             if (m.role != "user" && m.role != "assistant") continue;
@@ -178,6 +187,13 @@ bool save_chat(Chat &c, std::string &why) {
             if (user && first.empty()) first = m.content;
             body += std::string(n++ ? ",\n" : "\n") + "{\"user\":" + (user ? "true" : "false") +
                     ",\"text\":" + ts5::json_escape(m.content);
+            if (!user && !m.calls.empty()) {
+                body += ",\"calls\":[";
+                for (size_t k = 0; k < m.calls.size(); k++)
+                    body += std::string(k ? "," : "") + "{\"id\":" + ts5::json_escape(m.calls[k].id) + ",\"name\":" +
+                            ts5::json_escape(m.calls[k].name) + ",\"args\":" + ts5::json_escape(m.calls[k].args) + "}";
+                body += "]";
+            }
             if (!user) {
                 const char *end = !m.error.empty() ? "failed" : m.stopped ? "stopped" : "done";
                 body += ",\"model\":" + ts5::json_escape(m.model) + fmt(",\"tps\":%.2f", m.gen_tps) +
@@ -247,8 +263,15 @@ bool load_chat(Chat &c, const SavedChat &s, std::string &why) {
             } else if (t["user"].boolean(false)) {
                 m.role = "user";
                 c.history.push_back(m.content);
+            } else if (!t["tool"].str().empty()) {
+                m.role = "tool";
+                m.tool = t["tool"].str();
+                m.call_id = t["call"].str();
+                m.head = t["head"].str();
+                m.tool_ok = t["ok"].boolean(true);
             } else {
                 m.role = "assistant";
+                for (const ts5::Json &u : t["calls"].a) m.calls.push_back({u["id"].str(), u["name"].str(), u["args"].str()});
                 m.model = t["model"].str();
                 m.gen_tps = t["tps"].num(0);
                 m.gen_tokens = (int)t["tokens"].num(0);

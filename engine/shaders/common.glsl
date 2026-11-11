@@ -1,7 +1,7 @@
 // Shared helpers: extensions, byte access and the per-type "unit" dequantizer.
-// A unit is 32 consecutive values of a row: one block for F32/F16 and the
+// A unit is 32 consecutive values of a row: one block for F32/F16/BF16 and the
 // 32-value quants (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0), one eighth of a 256-value
-// block for the K-quants.
+// block for the K-quants, half of Q2_0's 64 and a quarter of Q1_0's 128.
 #extension GL_EXT_shader_8bit_storage : require
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : enable
@@ -16,6 +16,9 @@
 #define T_Q4_K 12
 #define T_Q5_K 13
 #define T_Q6_K 14
+#define T_BF16 30
+#define T_Q1_0 41
+#define T_Q2_0 42
 
 #ifdef QTYPE
 layout(std430, binding = 0) readonly buffer Wbuf { uint8_t wb[]; };
@@ -32,6 +35,10 @@ void load_unit(uint rb, uint u, out float v[32]) {
 #elif QTYPE == T_F16
     uint o = rb + u * 64;
     for (uint l = 0; l < 32; l++) v[l] = h16(o + 2 * l);
+#elif QTYPE == T_BF16
+    // The upper half of an f32.
+    uint o = rb + u * 64;
+    for (uint l = 0; l < 32; l++) v[l] = uintBitsToFloat((b8(o + 2 * l) | (b8(o + 2 * l + 1) << 8)) << 16);
 #elif QTYPE == T_Q4_0
     uint o = rb + u * 18;
     float d = h16(o);
@@ -39,6 +46,25 @@ void load_unit(uint rb, uint u, out float v[32]) {
         uint q = b8(o + 2 + l);
         v[l] = (float(q & 15u) - 8.0) * d;
         v[l + 16] = (float(q >> 4) - 8.0) * d;
+    }
+#elif QTYPE == T_Q1_0
+    // A quarter of a 128-value block: d, then a bit a value, +d where set.
+    uint o = rb + (u >> 2) * 18;
+    float d = h16(o);
+    uint q = o + 2 + (u & 3u) * 4;
+    uint bits = b8(q) | (b8(q + 1) << 8) | (b8(q + 2) << 16) | (b8(q + 3) << 24);
+    for (uint l = 0; l < 32; l++) v[l] = ((bits >> l) & 1u) != 0u ? d : -d;
+#elif QTYPE == T_Q2_0
+    // Half of a 64-value block: d, then two bits a value, (q - 1) * d.
+    uint o = rb + (u >> 1) * 18;
+    float d = h16(o);
+    uint q = o + 2 + (u & 1u) * 8;
+    for (uint l = 0; l < 8; l++) {
+        uint b = b8(q + l);
+        v[4 * l] = (float(b & 3u) - 1.0) * d;
+        v[4 * l + 1] = (float((b >> 2) & 3u) - 1.0) * d;
+        v[4 * l + 2] = (float((b >> 4) & 3u) - 1.0) * d;
+        v[4 * l + 3] = (float(b >> 6) - 1.0) * d;
     }
 #elif QTYPE == T_Q4_1
     uint o = rb + u * 20;

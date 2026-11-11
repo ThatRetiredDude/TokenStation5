@@ -14,6 +14,7 @@
 //                                        a model's turn as content and tool calls (for tests)
 //   ts5 search "query"                   one web_search, as the model would get it
 //   ts5 usage-parse FILE                 a usage.tsv's requests, written again as v1 (for tests)
+//   ts5 page URL [MAX_CHARS]             a web page as text (ts5-tui's web page tool)
 //   ts5 fetch URL FILE [--sha256 HEX]    download URL to FILE, going on from a stopped one
 //   ts5 peak [--device N] [--gib G]      the GPU's read bandwidth and FMA rates (speed ceilings)
 //   ts5 draft-replay -m model.gguf [--temp T] [-o IDS] < PROMPT, a NUL byte, ANSWER
@@ -79,7 +80,8 @@ struct Args {
 int usage() {
     fprintf(stderr,
             "usage: ts5 serve|run|bench|check|tokenize|logits|prompt -m model.gguf [options]\n"
-            "       ts5 search QUERY | ts5 tool-parse hermes|llama3|mistral|gemma|gemma4 [TOOL...] < TEXT | ts5 usage-parse FILE\n"
+            "       ts5 search QUERY | ts5 page URL [MAX_CHARS] | ts5 usage-parse FILE\n"
+            "       ts5 tool-parse hermes|llama3|mistral|gemma|gemma4|generic [TOOL...] < TEXT\n"
             "       ts5 fetch URL FILE [--sha256 HEX] | ts5 peak [--device N] [--gib G]\n"
             "       ts5 helpers -m model.gguf --helper FILE...  (which files could draft for the model)\n"
             "  -c N|auto      context length (default 8192; auto: what fits in GPU memory)\n"
@@ -171,11 +173,26 @@ int no_model_command(int argc, char **argv) {
     }
     if (cmd == "search") {
         if (argc != 3) return usage();
-        if (tavily_key().empty()) fprintf(stderr, "ts5: TAVILY_API_KEY is not set\n");
+        if (tavily_key().empty())
+            fprintf(stderr, "ts5: TAVILY_API_KEY is not set%s\n",
+                    search_source() == "wikipedia" ? ": searching Wikipedia" : " and TS5_WIKIPEDIA is off");
         std::string log;
         printf("%s\n", web_search(Json::object().set("query", Json::string(argv[2])).dump(), log).c_str());
         fprintf(stderr, "ts5: %s\n", log.c_str());
         return log.find(" results (") != std::string::npos ? 0 : 1;
+    }
+    if (cmd == "page") {
+        // A web page as text (ts5-tui's web page tool): ts5 page URL [MAX_CHARS].
+        if (argc != 3 && argc != 4) return usage();
+        std::string log;
+        bool failed = false;
+        printf("%s\n", web_page(argv[2], argc == 4 ? (size_t)atol(argv[3]) : 8000, log, &failed).c_str());
+        fprintf(stderr, "ts5: %s\n", log.c_str());
+        return failed ? 1 : 0;
+    }
+    if (cmd == "html-text") {  // tests: the page reader alone, stdin to stdout
+        printf("%s\n", html_text(read_all(stdin)).c_str());
+        return 0;
     }
     if (argc < 3) return usage();
     std::string f = argv[2];
@@ -184,6 +201,7 @@ int no_model_command(int argc, char **argv) {
                     : f == "mistral" ? ToolFormat::MISTRAL
                     : f == "gemma"   ? ToolFormat::GEMMA
                     : f == "gemma4"  ? ToolFormat::GEMMA4
+                    : f == "generic" ? ToolFormat::GENERIC
                                      : ToolFormat::NONE;
     std::string text = read_all(stdin);
     // The request's tools: names, or OpenAI tool objects (their schemas type
@@ -434,7 +452,8 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
 #endif
     }
     if (argc >= 2 && (std::string(argv[1]) == "search" || std::string(argv[1]) == "tool-parse" ||
-                      std::string(argv[1]) == "usage-parse"))
+                      std::string(argv[1]) == "usage-parse" || std::string(argv[1]) == "page" ||
+                      std::string(argv[1]) == "html-text"))
         return no_model_command(argc, argv);
     Args a;
     if (!parse(argc, argv, a)) return usage();
