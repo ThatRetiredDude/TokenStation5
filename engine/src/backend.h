@@ -108,9 +108,10 @@ int ring_slots(const HParams &hp);
 // Bytes of K and V in all sliding layers' rings, beside the context.
 uint64_t kv_ring_bytes(const HParams &hp, KvType kv);
 // GPU memory a Vulkan backend takes before its KV cache: the weights and its
-// activations, in the 1 GiB blocks it allocates, and sliding layers' rings in
-// f16.
-uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes);
+// activations, in the 1 GiB blocks it allocates (whole_blocks; false: as
+// many bytes as they are, the last block's end not counted), and sliding
+// layers' rings in f16.
+uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes, bool whole_blocks = true);
 // How many copies of a state that only goes forward a backend keeps
 // (Backend::state_slots): TS5_STATE_SLOTS, 1 to 8; by default 4 on Linux
 // (the start of the prompt's last two turns, and 512 and 2,048 tokens before
