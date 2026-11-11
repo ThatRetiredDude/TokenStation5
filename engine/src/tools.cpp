@@ -505,6 +505,63 @@ std::string render_gemma(const std::vector<Message> &all, const std::vector<Json
     return s + "<start_of_turn>model\n";
 }
 
+// A model whose template has no tool format (DeepSeek R1's distills, Llama
+// 3.0, older Mistral, a plain model): the same words and tags as Gemma 3's,
+// in the model's own turns (Tokenizer::apply_chat). The words go in the
+// system message; DeepSeek R1 is used without one (its makers' advice), so
+// there they open the first user turn. Calls are written into the model's
+// turn, their results come back as a user turn.
+std::string render_generic(const Tokenizer &t, const std::vector<Message> &all, const std::vector<Json> &tools) {
+    std::string words;
+    if (!tools.empty()) {
+        words = std::string(kGemmaTools) + "\n<tools>";
+        for (auto &tool : tools) words += "\n" + tool.dump();
+        words += "\n</tools>";
+    }
+    const bool in_user = t.chat_format() == Tokenizer::DEEPSEEK;
+    std::vector<ChatMessage> plain;
+    if (!words.empty() && !in_user) {
+        // One system message, the client's first: the words after it.
+        std::string system;
+        for (auto &m : all)
+            if (m.role == "system") system += (system.empty() ? "" : "\n\n") + m.content;
+        plain.push_back({"system", system.empty() ? words : system + "\n\n" + words});
+    }
+    for (size_t i = 0; i < all.size(); i++) {
+        const Message &m = all[i];
+        if (m.role == "tool") {
+            std::vector<std::string> results;
+            for (; i < all.size() && all[i].role == "tool"; i++) results.push_back(all[i].content);
+            i--;
+            plain.push_back({"user", gemma_results(results)});
+        } else if (m.role == "assistant") {
+            // The calls after the turn's text, on a line of their own.
+            std::string c = m.content;
+            for (auto &call : m.calls)
+                c += (c.empty() || c.back() == '\n' ? "" : "\n") + std::string("<tool_call>\n{\"name\": \"") +
+                     call.name + "\", \"arguments\": " + arguments_json(call.arguments) + "}\n</tool_call>";
+            plain.push_back({"assistant", c});
+        } else if (m.role == "system") {
+            if (words.empty() || in_user) plain.push_back({m.role, m.content});
+        } else {
+            std::string c = m.content;
+            if (in_user && !words.empty()) c = words + "\n\n" + c, words.clear();
+            plain.push_back({m.role, c});
+        }
+    }
+    if (in_user && !words.empty()) plain.push_back({"user", words});
+    return t.apply_chat(plain);
+}
+
+// What follows a turn of the model's that a user turn answers, in the
+// model's own turns: the turn closed, the user's, the model's opened.
+std::string after_turn(const Tokenizer &t, const std::string &user) {
+    const std::string mark = "\x01";
+    const std::string s = t.apply_chat({{"assistant", mark}, {"user", user}});
+    const size_t at = s.find(mark);
+    return at == std::string::npos ? s : s.substr(at + mark.size());
+}
+
 // Gemma 4's own format, as its template writes it: the tools declared in the
 // system turn, <|tool>declaration:NAME{description:...,parameters:{...}}<tool|>
 // each; a call <|tool_call>call:NAME{key:value,...}<tool_call|>; its result
@@ -786,22 +843,44 @@ std::string turn_opening(const Tokenizer &t, bool think, const std::string &prom
         if (ends(prompt, "<|turn>model\n")) return think ? "" : std::string(kG4Thought) + kG4ThoughtEnd;
         return think && !ends(prompt, "<|tool_response>") ? kG4Thought : "";
     }
-    if (!think) return can_skip_thinking(t) ? kNoThinking : "";
-    // Qwen3.5's template opens the thinking itself ({{- '<think>\n' }}, the
-    // end of its generation prompt); Qwen3's leaves it to the model.
     const std::string &tmpl = t.chat_template();
-    if (t.chat_format() == Tokenizer::CHATML && (has(tmpl, "<think>\\n' }}") || has(tmpl, "<think>\\n\" }}")))
-        return kThinkingOpen;
     // DeepSeek R1's distills start thinking without writing the <think>, so
     // their later templates open it ('<｜Assistant｜><think>\n'); with an
     // earlier one the thinking ended in a bare </think> and landed in the
-    // answer. Their turns open it here whichever template the file has.
-    if (has(tmpl, "<｜Assistant｜>") && has(tmpl, "</think>")) return kThinkingOpen;
+    // answer. Their turns open it here whichever template the file has. A
+    // template with the switch (llama.cpp's copy) closes it at once when
+    // the thinking is off.
+    if (has(tmpl, "<｜Assistant｜>") && has(tmpl, "</think>"))
+        return think || !can_skip_thinking(t) ? kThinkingOpen : "<think>\n</think>";
+    if (!think) return can_skip_thinking(t) ? kNoThinking : "";
+    // Qwen3.5's template opens the thinking itself ({{- '<think>\n' }}, the
+    // end of its generation prompt), as QwQ's and other reasoning models'
+    // do; Qwen3's leaves it to the model.
+    for (const char *open : {"<think>\\n' }}", "<think>\\n\" }}", "<think>\\n'}}", "<think>\\n\"}}"})
+        if (has(tmpl, open)) return kThinkingOpen;
     return "";
 }
 
+namespace {
+// What models other than Qwen, DeepSeek and Gemma 4 open and close a turn's
+// thinking with (fine-tunes of the families ts5 runs, Mistral's Magistral,
+// Sky-T1, Kimi, Seed-OSS, Exaone Deep).
+const char *const kThinkMarks[][2] = {
+    {"<thinking>", "</thinking>"},
+    {"<reasoning>", "</reasoning>"},
+    {"<thought>", "</thought>"},
+    {"[THINK]", "[/THINK]"},
+    {"<|begin_of_thought|>", "<|end_of_thought|>"},
+    {"\xE2\x97\x81think\xE2\x96\xB7", "\xE2\x97\x81/think\xE2\x96\xB7"},  // ◁think▷
+    {"<seed:think>", "</seed:think>"},
+};
+const int kThinkStyles = sizeof kThinkMarks / sizeof kThinkMarks[0];
+// <|begin_of_thought|>'s answer comes within these, which are left out.
+const int kSolutionStyle = 4;
+const char *const kSolutionMarks[] = {"<|begin_of_solution|>", "<|end_of_solution|>"};
+}  // namespace
+
 std::string ThoughtChannel::map(const std::string &piece) {
-    static const std::string open = "<|channel>", close = kG4ThoughtEnd;
     const std::string in = held_ + piece;
     std::string out;
     held_.clear();
@@ -819,27 +898,59 @@ std::string ThoughtChannel::map(const std::string &piece) {
             if (len <= 16) i = nl;
             continue;
         }
-        const size_t lt = in.find('<', i);
-        if (lt == std::string::npos) {
-            out.append(in, i, std::string::npos);
-            break;
-        }
-        out.append(in, i, lt - i);
-        i = lt;
-        const size_t left = in.size() - i;
-        if (in.compare(i, open.size(), open) == 0) {
-            out += "<think>";
-            i += open.size();
-            name_ = true;
-        } else if (in.compare(i, close.size(), close) == 0) {
-            out += "</think>";
-            i += close.size();
-        } else if (left < open.size() && (open.compare(0, left, in, i, left) == 0 || close.compare(0, left, in, i, left) == 0)) {
-            held_ = in.substr(i);  // could be the start of a mark
-            break;
-        } else {
-            out += '<';
+        const char c = in[i];
+        if (c != '<' && c != '[' && c != '\xE2') {
+            started_ |= !std::isspace((unsigned char)c);
+            out += c;
             i++;
+            continue;
+        }
+        // The marks that count here, and what each is read as.
+        enum { G4_OPEN, G4_CLOSE, OPEN, CLOSE, DROP };
+        struct Mark { const char *text; int what, style; };
+        Mark marks[kThinkStyles + 5];
+        int n = 0;
+        if (gemma4_) {
+            marks[n++] = {"<|channel>", G4_OPEN, -1};
+            marks[n++] = {kG4ThoughtEnd, G4_CLOSE, -1};
+        }
+        if (!started_)
+            for (int k = 0; k < kThinkStyles; k++) marks[n++] = {kThinkMarks[k][0], OPEN, k};
+        if (style_ >= 0) marks[n++] = {kThinkMarks[style_][1], CLOSE, style_};
+        if (solution_)
+            for (const char *m : kSolutionMarks) marks[n++] = {m, DROP, -1};
+        const size_t left = in.size() - i;
+        const Mark *hit = nullptr;
+        bool partial = false;
+        for (int k = 0; k < n && !hit; k++) {
+            const size_t len = strlen(marks[k].text);
+            if (left >= len) {
+                if (in.compare(i, len, marks[k].text) == 0) hit = &marks[k];
+            } else if (in.compare(i, left, marks[k].text, left) == 0) {
+                partial = true;
+            }
+        }
+        if (!hit) {
+            if (partial) {
+                held_ = in.substr(i);  // could be the start of a mark
+                break;
+            }
+            started_ = true;
+            out += c;
+            i++;
+            continue;
+        }
+        i += strlen(hit->text);
+        switch (hit->what) {
+            case G4_OPEN: out += "<think>", name_ = true, started_ = true; break;
+            case G4_CLOSE: out += "</think>"; break;
+            case OPEN: out += "<think>", style_ = hit->style, started_ = true; break;
+            case CLOSE:
+                out += "</think>";
+                solution_ = style_ == kSolutionStyle;
+                style_ = -1;
+                break;
+            default: break;
         }
     }
     return out;
@@ -854,13 +965,23 @@ std::string ThoughtChannel::rest() {
 
 ToolFormat tool_format(const Tokenizer &t) {
     const std::string &tmpl = t.chat_template();
-    if (t.chat_format() == Tokenizer::CHATML && has(tmpl, "<tool_call>")) return ToolFormat::HERMES;
-    if (t.chat_format() == Tokenizer::LLAMA3 && has(tmpl, "ipython")) return ToolFormat::LLAMA3;
-    if (t.chat_format() == Tokenizer::MISTRAL && has(tmpl, "[TOOL_CALLS]") && has(tmpl, "[AVAILABLE_TOOLS]"))
-        return ToolFormat::MISTRAL;
-    if (t.chat_format() == Tokenizer::GEMMA) return ToolFormat::GEMMA;
-    if (t.chat_format() == Tokenizer::GEMMA4 && has(tmpl, "<|tool_call>")) return ToolFormat::GEMMA4;
-    return ToolFormat::NONE;
+    switch (t.chat_format()) {
+        // Hermes's is ChatML's own: a ChatML model whose template leaves
+        // the tools out (an older fine-tune) gets it too.
+        case Tokenizer::CHATML: return ToolFormat::HERMES;
+        case Tokenizer::LLAMA3:
+            if (has(tmpl, "ipython")) return ToolFormat::LLAMA3;
+            break;
+        case Tokenizer::MISTRAL:
+            if (has(tmpl, "[TOOL_CALLS]") && has(tmpl, "[AVAILABLE_TOOLS]")) return ToolFormat::MISTRAL;
+            break;
+        case Tokenizer::GEMMA: return ToolFormat::GEMMA;
+        case Tokenizer::GEMMA4: return ToolFormat::GEMMA4;
+        default: break;
+    }
+    // No format of its own (DeepSeek R1's template names tool marks its
+    // distills' vocabularies don't have): the words and tags every model reads.
+    return ToolFormat::GENERIC;
 }
 
 const char *tool_format_name(ToolFormat f) {
@@ -870,6 +991,7 @@ const char *tool_format_name(ToolFormat f) {
         case ToolFormat::MISTRAL: return "mistral";
         case ToolFormat::GEMMA: return "gemma";
         case ToolFormat::GEMMA4: return "gemma4";
+        case ToolFormat::GENERIC: return "generic";
         default: return "none";
     }
 }
@@ -929,11 +1051,14 @@ std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, co
         return t.apply_chat(plain);
     }
     if (f == ToolFormat::GEMMA) return render_gemma(msgs, tools);
+    if (f == ToolFormat::GENERIC) return render_generic(t, msgs, tools);
     return f == ToolFormat::HERMES ? render_hermes(t, msgs, tools) : render_llama3(msgs, tools, today);
 }
 
-std::string render_results(ToolFormat f, const std::vector<ToolCall> &calls, const std::vector<std::string> &results) {
+std::string render_results(const Tokenizer &t, ToolFormat f, const std::vector<ToolCall> &calls,
+                           const std::vector<std::string> &results) {
     std::string s;
+    if (f == ToolFormat::GENERIC) return after_turn(t, gemma_results(results));
     if (f == ToolFormat::HERMES) {
         s = "<|im_end|>\n<|im_start|>user";
         for (auto &r : results) s += "\n<tool_response>\n" + r + "\n</tool_response>";
@@ -1462,7 +1587,7 @@ void fit_to_schemas(std::vector<ToolCall> &calls, const std::vector<Json> &tools
 }
 
 ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names) {
-    if (f == ToolFormat::GEMMA) f = ToolFormat::HERMES;  // its calls are Hermes's
+    if (f == ToolFormat::GEMMA || f == ToolFormat::GENERIC) f = ToolFormat::HERMES;  // their calls are Hermes's
     ParsedTurn r;
     r.content = text;
     if (f == ToolFormat::HERMES) {
@@ -1583,7 +1708,7 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
 }
 
 bool empty_call_block(ToolFormat f, const std::string &content) {
-    if (f != ToolFormat::HERMES && f != ToolFormat::GEMMA) return false;
+    if (f != ToolFormat::HERMES && f != ToolFormat::GEMMA && f != ToolFormat::GENERIC) return false;
     size_t from = 0;
     if (has(content, "<think>")) {
         from = content.find("</think>");
@@ -1601,7 +1726,7 @@ bool empty_call_block(ToolFormat f, const std::string &content) {
 }
 
 size_t content_prefix(ToolFormat f, const std::string &text) {
-    if (f == ToolFormat::GEMMA) f = ToolFormat::HERMES;
+    if (f == ToolFormat::GEMMA || f == ToolFormat::GENERIC) f = ToolFormat::HERMES;
     if (f == ToolFormat::HERMES) {
         size_t from = 0;
         if (has(text, "<think>")) {

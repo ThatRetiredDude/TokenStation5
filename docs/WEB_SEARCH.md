@@ -47,9 +47,13 @@ ts5 reads the tool format from each model's own chat template when it loads it.
 | Llama 3.2 3B | yes (Llama JSON format) | simple single searches |
 | Mistral Nemo 12B | yes (Mistral format) | not tried yet |
 | Gemma 4 12B | yes (Gemma 4 format) | not tried yet |
+| DeepSeek R1 distills | yes (asked for in words) | not tried yet |
 
-A model whose template has no tool format gets no tools and no search;
-everything else works as before.
+A model whose template has no tool format its file can write (DeepSeek R1's
+distills, Llama 3.0, an early Mistral) still gets tools and search: ts5 asks
+for a call in words, as `<tool_call>` JSON, in the model's own turns, and
+gives the result back in a user turn. `tool_format` says `generic` for these.
+How well such a model calls tools depends on the model.
 
 ## How it behaves
 

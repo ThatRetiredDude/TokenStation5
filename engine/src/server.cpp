@@ -491,7 +491,8 @@ void handle(int fd, Server::State &state, Usage &u) {
                     : limit >= 1 && limit < kThinkRoom        ? false
                                                               : state.think;
         }
-        // Gemma 4's thought channel reads as the others' <think> block.
+        // Gemma 4's thought channel reads as the others' <think> block (as
+        // do the thinking marks of other models, ThoughtChannel).
         const bool g4 = chat && e.tok().chat_format() == Tokenizer::GEMMA4;
         std::string opening;  // what opens the model's turn
         // A turn that opens in its thinking (Qwen3.5, Gemma 4 after a tool's
@@ -658,7 +659,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             const std::vector<int32_t> toks = round == 0 ? std::move(first_toks) : encode();
             std::string text = seed;
             std::string wrote;       // the turn as the model wrote it, for the prompt of a turn after it
-            ThoughtChannel channel;  // Gemma 4's
+            ThoughtChannel channel(g4, !seed.empty());  // the thinking's marks, as <think> and </think>
             size_t sent = 0;  // bytes of this turn's `text` already streamed
             size_t thought = 0;  // and of its thinking, as reasoning_content
             {
@@ -734,7 +735,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             };
             auto on_text = [&](const std::string &piece) {
                 wrote += piece;
-                return on_piece(g4 ? channel.map(piece) : piece);
+                return on_piece(chat ? channel.map(piece) : piece);
             };
             sp.max_tokens = max_tokens - st.gen_tokens;
             if (const char *f = getenv("TS5_TEST_TURNS")) {
@@ -888,7 +889,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                 }
                 log_line("ts5: %s %s", id.c_str(), log.c_str());
             }
-            prompt += wrote + render_results(tf, searches, results);
+            prompt += wrote + render_results(e.tok(), tf, searches, results);
             open_turn();
         }
         {
@@ -1049,10 +1050,9 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
     }
     if (e)
         log_line("ts5: tool calls: %s; web search: %s", state_.tool_format.c_str(),
-                state_.tool_format == "none" ? "off (no tool calls)"
-                : tavily_key().empty()       ? "off (no TAVILY_API_KEY)"
-                : web_search_always()        ? "on (Tavily), offered on every chat"
-                                             : "on (Tavily), offered when a chat looks like it needs the web");
+                tavily_key().empty()  ? "off (no TAVILY_API_KEY)"
+                : web_search_always() ? "on (Tavily), offered on every chat"
+                                      : "on (Tavily), offered when a chat looks like it needs the web");
 }
 
 Server::Activity Server::activity() {

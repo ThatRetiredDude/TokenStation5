@@ -30,9 +30,13 @@ QWEN35 = "Qwen3.5-4B"
 NEMO = "mistralai-Mistral-Nemo-Instruct-2407"
 # DeepSeek R1 distills' earlier template (as in DeepSeek-R1-Distill-Qwen-14B
 # files): the generation prompt doesn't open the thinking, which the model
-# starts without a <think> and ends with </think>. Cut down to its turns.
+# starts without a <think> and ends with </think>. Cut down to its turns
+# and its system message (the last one, bare at the top).
 R1_OLD = "deepseek-r1-distill-old"
-R1_OLD_TEMPLATE = ("{% for message in messages %}{% if message['role'] == 'user' %}"
+R1_OLD_TEMPLATE = ("{% set ns = namespace(system_prompt='') %}{% for message in messages %}"
+                   "{% if message['role'] == 'system' %}{% set ns.system_prompt = message['content'] %}{% endif %}"
+                   "{% endfor %}{{ bos_token }}{{ ns.system_prompt }}"
+                   "{% for message in messages %}{% if message['role'] == 'user' %}"
                    "{{'<｜User｜>' + message['content']}}{% elif message['role'] == 'assistant' %}"
                    "{% set content = message['content'] %}{% if '</think>' in content %}"
                    "{% set content = content.split('</think>')[-1] %}{% endif %}"
@@ -483,6 +487,9 @@ Q35_CALL = ("The user wants the firmware.\n</think>\n\n<tool_call>\n<function=we
 Q35_PROMPT = ("<|im_start|>assistant\n<think>\nThe user wants the firmware.\n</think>\n\n<tool_call>\n"
               "<function=web_search>\n<parameter=query>\nPS5 firmware\n</parameter>\n</function>\n</tool_call>"
               "<|im_end|>\n<|im_start|>user\n<tool_response>\n")
+# DeepSeek R1's turn as it wrote it, closed, and the result in a user turn.
+R1_PROMPT = ("<｜Assistant｜><think>\nNeed the web.\n</think>\n\n" + CALL +
+             "<｜end▁of▁sentence｜><｜User｜><tool_response>\n")
 
 
 def test_search_loop(ts5, model, tdir):
@@ -523,9 +530,17 @@ def test_search_loop(ts5, model, tdir):
         # DeepSeek R1 with its earlier template: the turn opens the thinking,
         # so the answer comes without it or a stray </think>.
         ("DeepSeek R1: thinking kept out of the answer", "tvly-test", ["Codes first.\n</think>\n\nDone."], False, 0,
-         "Done.", None, None, R1_OLD, "<|im_start|>assistant\n<think>\n"),
+         "Done.", None, None, R1_OLD, "What is the latest PS5 firmware?", "<｜Assistant｜><think>\n"),
         ("DeepSeek R1: thinking kept out of the answer, streaming", "tvly-test", ["Codes first.\n</think>\n\nDone."],
-         True, 0, "Done.", None, None, R1_OLD, "<|im_start|>assistant\n<think>\n"),
+         True, 0, "Done.", None, None, R1_OLD, "What is the latest PS5 firmware?", "<｜Assistant｜><think>\n"),
+        # Its template has no tool format its files can write: the search is
+        # asked for in words, called as Hermes's, its result back in a user turn.
+        ("DeepSeek R1: answers from a search", "tvly-test",
+         ["Need the web.\n</think>\n\n" + CALL, "Found it.\n</think>\n\nDone.", "Final answer."], False, 1, "Done.",
+         None, None, R1_OLD, R1_PROMPT, "\n</tool_response><｜Assistant｜><think>\n"),
+        ("DeepSeek R1: answers from a search, streaming", "tvly-test",
+         ["Need the web.\n</think>\n\n" + CALL, "Found it.\n</think>\n\nDone.", "Final answer."], True, 1, "Done.",
+         None, None, R1_OLD, R1_PROMPT, "\n</tool_response><｜Assistant｜><think>\n"),
     ]
     with open(os.path.join(tdir, R1_OLD + ".jinja"), "w") as f:
         f.write(R1_OLD_TEMPLATE)
@@ -574,7 +589,8 @@ def test_search_loop(ts5, model, tdir):
                     problems.append(f"{len(Tavily.seen) - before} requests to Tavily")
                 if note and (note not in last or "<tools>" in last):
                     problems.append("last prompt:\n" + last)
-                if len(extra) > 2 and (extra[2] not in last or not last.endswith("<|im_start|>assistant\n<think>\n")):
+                ending = extra[3] if len(extra) > 3 else "<|im_start|>assistant\n<think>\n"
+                if len(extra) > 2 and (extra[2] not in last or not last.endswith(ending)):
                     problems.append("last prompt:\n" + last)
             finally:
                 p.terminate()
@@ -700,10 +716,242 @@ def test_gemma4_thinking(ts5, model, tdir):
     return failed
 
 
+# DeepSeek R1's templates as llama.cpp keeps them: the Llama distill's opens
+# the thinking, the Qwen one's has llama.cpp's switch for it as well.
+R1_LLAMA = "deepseek-ai-DeepSeek-R1-Distill-Llama-8B"
+R1_QWEN = "deepseek-ai-DeepSeek-R1-Distill-Qwen-32B"
+# The words ts5 asks a model without a tool format for calls with (tools.cpp, kGemmaTools).
+TOOL_WORDS = ("You can call functions to help with the request. The functions are listed below as JSON within "
+              "<tools></tools> tags. To call one, reply with only a JSON object with the function's name and "
+              "arguments within <tool_call></tool_call> tags, one pair of tags per call:\n<tool_call>\n"
+              "{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>\nIf the request "
+              "doesn't need any of the functions, answer it directly instead. The results of your calls come back "
+              "within <tool_response></tool_response> tags: use them to answer.")
+# Llama 3.0's and the first Mistrals' templates, cut down to their turns: no tool format in either.
+LLAMA30 = "llama-3.0-cut-down"
+LLAMA30_TEMPLATE = ("{% for m in messages %}{{ '<|start_header_id|>' + m['role'] + '<|end_header_id|>\n\n' + "
+                    "m['content'] + '<|eot_id|>' }}{% endfor %}"
+                    "{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}")
+MISTRAL_OLD = "mistral-v0.1-cut-down"
+MISTRAL_OLD_TEMPLATE = ("{% for m in messages %}{% if m['role'] == 'user' %}{{ '[INST] ' + m['content'] + ' [/INST]' }}"
+                        "{% else %}{{ m['content'] + '</s>' }}{% endif %}{% endfor %}")
+
+
+def tools_block(tools):
+    return TOOL_WORDS + "\n<tools>" + "".join("\n" + json.dumps(t, ensure_ascii=False) for t in tools) + "\n</tools>"
+
+
+def prompt_of(ts5, model, template, messages, tools=(), **more):
+    req = json.dumps(dict({"messages": for_ts5(messages), "tools": list(tools)}, **more))
+    r = subprocess.run([ts5, "prompt", "-m", model, "--chat-template", template], input=req, text=True,
+                       capture_output=True, env=dict(os.environ, TS5_TODAY="26 Jul 2024"))
+    return r.stdout, r.stderr
+
+
+def compare(name, got, want):
+    if got == want:
+        print(f"ok   {name}")
+        return 0
+    for i, (a, b) in enumerate(zip(got, want)):
+        if a != b:
+            break
+    else:
+        i = min(len(got), len(want))
+    print(f"FAIL {name}\n  first difference at {i}:\n  ts5:  {got[max(0, i - 60):i + 60]!r}\n"
+          f"  want: {want[max(0, i - 60):i + 60]!r}")
+    return 1
+
+
+def test_every_model_has_tools(ts5, model, tdir):
+    """A model whose template has no tool format gets one in its own turns:
+    DeepSeek R1's chats as its own template writes them, and the calls and
+    results ts5 adds to it, to Llama 3.0 and to an early Mistral."""
+    failed = 0
+    chats = [(c, m) for c, m, t in CASES if c in ("a chat", "a chat, system")]
+    chats.append(("a chat, two system messages", [{"role": "system", "content": "One."},
+                                                  {"role": "user", "content": "Hi"},
+                                                  {"role": "system", "content": "Two."},
+                                                  {"role": "user", "content": "Again"}]))
+    for name in (R1_LLAMA, R1_QWEN, R1_OLD):
+        path = os.path.join(tdir, name + ".jinja")
+        template = open(path).read()
+        for case, messages in chats:
+            for think in ([True, False] if name == R1_QWEN else [None]):
+                more = {} if think is None else {"enable_thinking": think}
+                want = render(template, messages, [], bos="", **more)
+                if name == R1_OLD:
+                    want += "<think>\n"  # ts5 opens the thinking the earlier template leaves to the model
+                got, err = prompt_of(ts5, model, path, messages, **more)
+                failed += compare(f"{name}: {case}" + ("" if think is None else f", thinking {'on' if think else 'off'}"),
+                                  got, want)
+        if "tool calls: generic" not in err:
+            failed += 1
+            print(f"FAIL {name}: {err.strip()}")
+    r1 = R1_OLD
+    block = tools_block([SEARCH])
+    call_text = '<tool_call>\n{"name": "web_search", "arguments": {"query": "it"}}\n</tool_call>'
+    cases = [
+        # DeepSeek R1 is used without a system message: the words open the first user turn.
+        ("DeepSeek R1: tools", r1, [{"role": "user", "content": "Latest PS5 firmware?"}], [SEARCH],
+         "<｜User｜>" + block + "\n\nLatest PS5 firmware?<｜Assistant｜><think>\n"),
+        ("DeepSeek R1: tools, system", r1, [{"role": "system", "content": "You are terse."},
+                                            {"role": "user", "content": "Latest PS5 firmware?"}], [SEARCH],
+         "You are terse.<｜User｜>" + block + "\n\nLatest PS5 firmware?<｜Assistant｜><think>\n"),
+        # Earlier turns without their thinking, the call as the model wrote it, its result in a user turn.
+        ("DeepSeek R1: a call and its result", r1, [m for c, m, t in CASES if c == "thinking in the history"][0],
+         [SEARCH],
+         "<｜User｜>" + block + "\n\nHi<｜Assistant｜>\n\nHello!<｜end▁of▁sentence｜><｜User｜>Search it<｜Assistant｜>\n\n" +
+         call_text + "<｜end▁of▁sentence｜><｜User｜><tool_response>\nnothing\n</tool_response><｜Assistant｜><think>\n"),
+        ("Llama 3.0: tools, system", LLAMA30, [m for c, m, t in CASES if c == "tools, system"][0], [WEATHER, SEARCH],
+         "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are terse.\n\n" +
+         tools_block([WEATHER, SEARCH]) + "<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nWeather in Oslo?"
+         "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"),
+        ("Llama 3.0: a call and its result", LLAMA30, [m for c, m, t in CASES if c == "text before a call"][0][:3],
+         [WEATHER],
+         "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n" + tools_block([WEATHER]) +
+         "<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nOslo and Bergen?<|eot_id|>"
+         "<|start_header_id|>assistant<|end_header_id|>\n\nChecking.\n<tool_call>\n"
+         '{"name": "get_weather", "arguments": {"city": "Oslo", "days": 2}}\n</tool_call><|eot_id|>'
+         "<|start_header_id|>user<|end_header_id|>\n\n<tool_response>\n{\"temp\": 3}\n</tool_response><|eot_id|>"
+         "<|start_header_id|>assistant<|end_header_id|>\n\n"),
+        ("early Mistral: tools, system", MISTRAL_OLD, [m for c, m, t in CASES if c == "tools, system"][0], [WEATHER],
+         "[INST] You are terse.\n\n" + tools_block([WEATHER]) + "\n\nWeather in Oslo?[/INST]"),
+    ]
+    for name, text in ((LLAMA30, LLAMA30_TEMPLATE), (MISTRAL_OLD, MISTRAL_OLD_TEMPLATE)):
+        with open(os.path.join(tdir, name + ".jinja"), "w") as f:
+            f.write(text)
+    for name, template, messages, tools, want in cases:
+        got, err = prompt_of(ts5, model, os.path.join(tdir, template + ".jinja"), messages, tools)
+        failed += compare(name, got, want)
+        if "tool calls: generic" not in err:
+            failed += 1
+            print(f"FAIL {name}: {err.strip()}")
+    # A ChatML model whose template leaves the tools out gets Hermes's.
+    chatml = os.path.join(tdir, "chatml-no-tools.jinja")
+    with open(chatml, "w") as f:
+        f.write("{% for m in messages %}{{ '<|im_start|>' + m['role'] + '\n' + m['content'] + '<|im_end|>\n' }}"
+                "{% endfor %}{{ '<|im_start|>assistant\n' }}")
+    got, err = prompt_of(ts5, model, chatml, [{"role": "user", "content": "Hi"}], [SEARCH])
+    if "tool calls: hermes" not in err or "<tools>\n" + json.dumps(SEARCH) + "\n</tools>" not in got:
+        failed += 1
+        print(f"FAIL ChatML without tools in its template: {err.strip()}\n{got}")
+    else:
+        print("ok   ChatML without tools in its template: Hermes's")
+    # The calls are read as Hermes's.
+    got = parse(ts5, "generic", "Checking.\n" + call_text)
+    calls = [(c["name"], json.loads(c["arguments"])) for c in got["calls"]]
+    if got["content"] != "Checking." or calls != [("web_search", {"query": "it"})]:
+        failed += 1
+        print(f"FAIL generic parse: {got}")
+    else:
+        print("ok   generic parse")
+    return failed
+
+
+def serve_turns(ts5, model, template, turns, req, key="tvly-test", url="http://127.0.0.1:9"):
+    """One request to `ts5 serve` with the model's turns scripted: the reply's
+    message (content, reasoning_content, tool_calls, finish_reason), the prompts, the log."""
+    with tempfile.TemporaryDirectory() as d:
+        script = os.path.join(d, "turns.txt")
+        open(script, "w").write("\n----\n".join(turns))
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        env = dict(os.environ, TS5_TEST_TURNS=script, TS5_TAVILY_URL=url, TAVILY_API_KEY=key)
+        log = open(os.path.join(d, "log"), "w+")
+        p = subprocess.Popen([ts5, "serve", "-m", model, "--chat-template", template, "--host", "127.0.0.1",
+                              "--port", str(port), "--backend", "cpu"], env=env, stdout=log, stderr=log)
+        try:
+            for _ in range(300):
+                try:
+                    urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            r = urllib.request.urlopen(urllib.request.Request(
+                f"http://127.0.0.1:{port}/v1/chat/completions", json.dumps(req).encode(),
+                {"Content-Type": "application/json"}), timeout=60).read().decode()
+            if req.get("stream"):
+                chunks = [json.loads(line[6:])["choices"][0] for line in r.splitlines() if line.startswith("data: {")]
+                msg = {"content": "".join(c["delta"].get("content") or "" for c in chunks),
+                       "reasoning_content": "".join(c["delta"].get("reasoning_content") or "" for c in chunks),
+                       "tool_calls": [t for c in chunks for t in c["delta"].get("tool_calls") or []],
+                       "finish_reason": [c.get("finish_reason") for c in chunks if c.get("finish_reason")][-1]}
+            else:
+                choice = json.loads(r)["choices"][0]
+                msg = dict(choice["message"], finish_reason=choice["finish_reason"])
+                msg.setdefault("reasoning_content", "")
+                msg.setdefault("tool_calls", [])
+            prompts = open(script + ".prompts").read().split("\n====\n")[:-1]
+        finally:
+            p.terminate()
+            p.wait()
+        log.seek(0)
+        return msg, prompts, log.read()[-2000:]
+
+
+def test_thinking_marks(ts5, model, tdir):
+    """Thinking written with other marks than <think> comes apart from the
+    answer as well, where a turn starts with it; a client's own tools reach a
+    model without a tool format (DeepSeek R1), thinking first."""
+    failed = 0
+    qwen = os.path.join(tdir, "Qwen-Qwen2.5-7B-Instruct.jinja")
+    r1 = os.path.join(tdir, R1_OLD + ".jinja")
+    ask = [{"role": "user", "content": "Say hello."}]
+    cases = [
+        # name, template, the turn, the request's extras, answer, thinking
+        ("<thinking>", qwen, "<thinking>\nGreet warmly.\n</thinking>\n\nHello!", {}, "Hello!", "Greet warmly."),
+        ("<reasoning>", qwen, "<reasoning>Greet warmly.</reasoning>Hello!", {}, "Hello!", "Greet warmly."),
+        ("<thought>", qwen, "\n<thought>\nGreet warmly.\n</thought>\nHello!", {}, "Hello!", "Greet warmly."),
+        ("[THINK]", qwen, "[THINK]Greet warmly.[/THINK]Hello!", {}, "Hello!", "Greet warmly."),
+        ("◁think▷", qwen, "◁think▷Greet warmly.◁/think▷Hello!", {}, "Hello!", "Greet warmly."),
+        ("<seed:think>", qwen, "<seed:think>Greet warmly.</seed:think>Hello!", {}, "Hello!", "Greet warmly."),
+        ("<|begin_of_thought|>", qwen, "<|begin_of_thought|>\nGreet warmly.\n<|end_of_thought|>\n\n"
+         "<|begin_of_solution|>\nHello!<|end_of_solution|>", {}, "Hello!", "Greet warmly."),
+        # Past the start of a turn such a tag is the answer's own text.
+        ("a tag in the answer stays", qwen, "Wrap it in <thinking> and </thinking> tags, or [THINK].", {},
+         "Wrap it in <thinking> and </thinking> tags, or [THINK].", ""),
+        ("another style's closing mark stays", qwen, "<thinking>Greet.</reasoning> More.</thinking>Hello!", {},
+         "Hello!", "Greet.</reasoning> More."),
+        ("kept in the content when asked", qwen, "<thinking>Greet.</thinking>Hello!", {"reasoning_format": "none"},
+         "<think>Greet.</think>Hello!", ""),
+        # A turn ts5 opened in its thinking: the model's own text is the thinking already.
+        ("DeepSeek R1: a tag in the thinking stays", r1, "Use <thinking> here.\n</think>\n\nHello!", {}, "Hello!",
+         "Use <thinking> here."),
+    ]
+    for name, template, turn, more, answer, thought in cases:
+        for stream in (False, True):
+            req = dict({"messages": ask, "stream": stream, "web_search": False}, **more)
+            msg, prompts, log = serve_turns(ts5, model, template, [turn], req)
+            label = f"thinking marks {name}" + (", streaming" if stream else "")
+            if msg["content"] != answer or msg["reasoning_content"].strip() != thought:
+                failed += 1
+                print(f"FAIL {label}: answer {msg['content']!r}, thinking {msg['reasoning_content']!r}\n{log}")
+            else:
+                print(f"ok   {label}")
+    # The client's own tool, called by a model without a tool format.
+    turn = ('The weather tool fits.\n</think>\n\n<tool_call>\n{"name": "get_weather", "arguments": '
+            '{"city": "Oslo"}}\n</tool_call>')
+    for stream in (False, True):
+        req = {"messages": [{"role": "user", "content": "Weather in Oslo?"}], "tools": [WEATHER], "stream": stream}
+        msg, prompts, log = serve_turns(ts5, model, r1, [turn], req)
+        calls = [(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in msg["tool_calls"]]
+        label = "DeepSeek R1: the client's tool is called" + (", streaming" if stream else "")
+        want_prompt = "<｜User｜>" + tools_block([WEATHER]) + "\n\nWeather in Oslo?<｜Assistant｜><think>\n"
+        if (calls != [("get_weather", {"city": "Oslo"})] or msg["finish_reason"] != "tool_calls" or msg["content"] or
+                msg["reasoning_content"].strip() != "The weather tool fits." or prompts[-1] != want_prompt):
+            failed += 1
+            print(f"FAIL {label}: {msg}\n{prompts[-1]}\n{log}")
+        else:
+            print(f"ok   {label}")
+    return failed
+
+
 def main():
     ts5, model, tdir = sys.argv[1:4]
     failed = (test_prompts(ts5, model, tdir) + test_parser(ts5) + test_search(ts5) + test_search_loop(ts5, model, tdir) +
-              test_gemma4_thinking(ts5, model, tdir))
+              test_gemma4_thinking(ts5, model, tdir) + test_every_model_has_tools(ts5, model, tdir) +
+              test_thinking_marks(ts5, model, tdir))
     if failed:
         sys.exit(f"tools_test: {failed} failed")
     print("tools_test: all passed")

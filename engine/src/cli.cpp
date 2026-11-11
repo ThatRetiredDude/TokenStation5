@@ -184,6 +184,7 @@ int no_model_command(int argc, char **argv) {
                     : f == "mistral" ? ToolFormat::MISTRAL
                     : f == "gemma"   ? ToolFormat::GEMMA
                     : f == "gemma4"  ? ToolFormat::GEMMA4
+                    : f == "generic" ? ToolFormat::GENERIC
                                      : ToolFormat::NONE;
     std::string text = read_all(stdin);
     // The request's tools: names, or OpenAI tool objects (their schemas type

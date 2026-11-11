@@ -1432,7 +1432,8 @@ XDG_CONFIG_HOME="$tune" "$ts5" run -m "$work/qwen3-Q4_0.gguf" -p hi -n 1 2>&1 > 
     grep "qwen3-Q4_0.gguf.env is for another qwen3-Q4_0.gguf (not this size), so it isn't used"
 rm -rf "$tune"
 echo "== tool calls: prompts against the models' own templates, the parser, web_search over HTTP(S)"
-for t in Qwen-Qwen2.5-7B-Instruct Qwen-Qwen3-0.6B meta-llama-Llama-3.1-8B-Instruct meta-llama-Llama-3.2-3B-Instruct; do
+for t in Qwen-Qwen2.5-7B-Instruct Qwen-Qwen3-0.6B meta-llama-Llama-3.1-8B-Instruct meta-llama-Llama-3.2-3B-Instruct \
+    deepseek-ai-DeepSeek-R1-Distill-Llama-8B deepseek-ai-DeepSeek-R1-Distill-Qwen-32B; do
     f="$work/$t.jinja"
     [ -s "$f" ] || curl -fsSL -o "$f" "https://raw.githubusercontent.com/ggml-org/llama.cpp/$rev/models/templates/$t.jinja"
 done
