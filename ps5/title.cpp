@@ -88,6 +88,7 @@
 #include "display.h"
 #include "downloads.h"
 #include "hf_search.h"
+#include "json.h"
 #include "keys.h"
 #include "library.h"
 #include "log.h"
@@ -601,7 +602,59 @@ std::string network_url() {
 
 }  // namespace
 
+#ifdef TS5_LINUX
+// `tokenstation --hf-search WORDS [--gpu-memory BYTES]`: the Models page's
+// search (hf_search.h) and nothing else, for ts5-tui. On stdout, a JSON
+// object a line: {"checked", "of"} as repos are looked at, then one per
+// file found, in the order the page lists them, then {"done": true, ...};
+// or {"error": "..."}.
+int hf_search_cli(const char *words) {
+    const char *m = getenv("TS5_HF_MEMORY");
+    uint64_t memory = m ? strtoull(m, nullptr, 10) : 0;
+    if (memory == 0) memory = 12ull << 30;  // about what a PS5 gives its models
+    auto str = [](const std::string &v) { return ts5::Json::string(v).dump(); };
+    app::HfSearch hf;
+    hf.start(words, memory);
+    int said = -1;
+    for (;;) {
+        const app::HfState st = hf.state();
+        if (st.phase == app::HfState::Failed) {
+            printf("{\"error\": %s}\n", str(st.problem).c_str());
+            return 1;
+        }
+        if (st.checked != said && st.to_check > 0) {
+            said = st.checked;
+            printf("{\"checked\": %d, \"of\": %d}\n", st.checked, st.to_check);
+            fflush(stdout);
+        }
+        if (st.phase == app::HfState::Done) {
+            for (size_t i : st.results) {
+                const app::CatalogEntry &e = app::catalog_at(i);
+                // context: how long a chat it gets in that much GPU memory.
+                printf("{\"name\": %s, \"note\": %s, \"repo\": %s, \"path\": %s, \"file\": %s, \"commit\": %s, "
+                       "\"sha256\": %s, \"bytes\": %llu, \"arch\": %s, \"context\": %d}\n",
+                       str(e.name).c_str(), str(e.good_for).c_str(), str(e.repo).c_str(), str(e.path).c_str(),
+                       str(e.file).c_str(), str(e.commit).c_str(), str(e.sha256).c_str(), (unsigned long long)e.bytes,
+                       str(e.arch).c_str(), app::estimate(e).serve_ctx(0, memory).n);
+            }
+            printf("{\"done\": true, \"found\": %zu, \"too_big\": %d, \"cant_run\": %d}\n", st.results.size(), st.too_big,
+                   st.cant_run);
+            fflush(stdout);
+            return 0;
+        }
+        usleep(100000);
+    }
+}
+#endif
+
 int main(int, char **) {
+#ifdef TS5_LINUX
+    if (const char *words = getenv("TS5_HF_SEARCH")) {
+        const int rc = hf_search_cli(words);
+        fflush(stdout);
+        _exit(rc);  // the search's thread may still be closing a connection
+    }
+#endif
     mkdir(kModels, 0777);
     rename(kLog, kPrevLog);
     // Both in append mode, so neither writes over the other's lines.

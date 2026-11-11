@@ -20,6 +20,7 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/model", "NAME", "load another model (Tab completes the name)"},
         {"/models", "", "the Models page (/chat /status /settings /logs: the others)"},
         {"/download", "NAME|URL", "a catalog model (Tab completes), or any URL [FILE] [--sha256 HEX]"},
+        {"/search", "WORDS", "Hugging Face, for other models that fit this GPU (listed on Models)"},
         {"/new", "", "a new chat (Ctrl+N); every chat is kept"},
         {"/chats", "[TEXT]", "your saved chats (with TEXT: the ones that have it)"},
         {"/open", "N", "open saved chat N from /chats"},

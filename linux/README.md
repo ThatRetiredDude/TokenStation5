@@ -170,7 +170,7 @@ ts5-tui --url http://ps5.local:8081  # another one
 - **The `ts5>` prompt at the bottom**: Enter sends, Ctrl+J (or Alt+Enter)
   starts a new line, the up arrow brings back what you typed before, Esc
   stops an answer. Commands start with `/` and Tab completes them, and model
-  names after `/model`: `/model`, `/download`, `/new`, `/chats`, `/open`,
+  names after `/model`: `/model`, `/download`, `/search`, `/new`, `/chats`, `/open`,
   `/save`, `/find`, `/tune`, `/check`, `/bench`, `/usage`, `/keys`,
   `/think on|off`, `/fan auto|cool|early|max`, `/theme`, `/help`, `/quit`
   (`exit`, `quit` or `q` work too). A `ts5 fetch URL FILE --sha256 HEX`
@@ -183,7 +183,8 @@ ts5-tui --url http://ps5.local:8081  # another one
   "tested" and its settings are built in; C runs the GPU check, B the speed
   test, each in a panel that ticks off its steps in plain words, with the
   time so far, the time left and what it found at the end, while the top
-  bar says what's running; below them, the catalog's models to download),
+  bar says what's running; below them, the catalog's models to download,
+  and under those what a Hugging Face search found: S searches),
   **F3** Status (bars
   for GPU memory, RAM, temperatures, fan, GPU load and speed), **F4**
   Settings (theme, thinking, temperature, answer length, context, speed or
@@ -201,6 +202,15 @@ ts5-tui --url http://ps5.local:8081  # another one
   the service's models folder when you may write there, else to
   `~/.local/share/tokenstation/models`. A stopped download goes on from
   where it was.
+- **Hugging Face search**: S on Models, or `/search mistral 7b`, looks on
+  Hugging Face for other models: the ones ts5 runs, in the file types it
+  takes, that fit this GPU's memory with room for a chat, the most
+  downloaded first, chat models before the rest. They're listed under the
+  catalog with their size, who made the file and how long a chat they get
+  here; Enter downloads one, checked by the SHA-256 Hugging Face gives for
+  it. It's the TV app's search (`tokenstation --hf-search WORDS` prints
+  what it finds, a JSON object a line). A model found this way isn't a
+  tested one: C checks its answers on this GPU and T tunes it.
 - **Chats are kept**: every chat is saved after each answer, in the TV app's
   format, in `~/.local/share/tokenstation/chats`. `/chats` lists them (and
   the TV service's, when you may read them), `/chats TEXT` finds one,

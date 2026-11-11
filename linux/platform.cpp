@@ -79,12 +79,16 @@ bool make_dirs(const std::string &path) {
 
 void usage() {
     printf("TokenStation5 %s for Linux\n\n"
-           "  tokenstation [--data DIR] [--windowed] [--headless]\n\n"
+           "  tokenstation [--data DIR] [--windowed] [--headless]\n"
+           "  tokenstation --hf-search WORDS [--gpu-memory BYTES]\n\n"
            "  --data DIR   where models, settings, keys, chats and the log live\n"
            "               (default: $TS5_DATA_DIR, else ~/.local/share/tokenstation)\n"
            "  --windowed   a window, not the whole screen (TS5_WINDOWED=1); F11 switches\n"
            "  --headless   no picture: the API, downloads and the rest without a screen\n"
-           "               (TS5_HEADLESS=1), as the systemd service runs it\n\n"
+           "               (TS5_HEADLESS=1), as the systemd service runs it\n"
+           "  --hf-search WORDS   the Models page's Hugging Face search without the app,\n"
+           "               for ts5-tui: a JSON line as it goes, then one per model\n"
+           "               that fits in BYTES of GPU memory, then {\"done\": ...}\n\n"
            "The API listens on port 8081. Everything the title prints goes to\n"
            "DIR/ts5.log. /usr/share/doc/tokenstation/README.md has the rest.\n",
            TS5_VERSION);
@@ -110,6 +114,8 @@ __attribute__((constructor(101))) void start(int argc, char **argv, char **) {
         if ((a == "--data" || a == "-d") && i + 1 < argc) dir = argv[++i];
         else if (a == "--windowed") setenv("TS5_WINDOWED", "1", 1);
         else if (a == "--headless") setenv("TS5_HEADLESS", "1", 1);
+        else if (a == "--hf-search" && i + 1 < argc) setenv("TS5_HF_SEARCH", argv[++i], 1);
+        else if (a == "--gpu-memory" && i + 1 < argc) setenv("TS5_HF_MEMORY", argv[++i], 1);
         else if (a == "--version") {
             printf("tokenstation %s\n", TS5_VERSION);
             fflush(stdout);
@@ -125,6 +131,9 @@ __attribute__((constructor(101))) void start(int argc, char **argv, char **) {
             _exit(2);
         }
     }
+    // A search and nothing else (title.cpp's main prints it and leaves):
+    // no data folder, no log, no signals of the app's.
+    if (getenv("TS5_HF_SEARCH")) return;
     if (dir.empty() || dir[0] != '/') {
         char cwd[4096];
         if (getcwd(cwd, sizeof cwd)) dir = std::string(cwd) + "/" + dir;

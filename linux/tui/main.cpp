@@ -92,6 +92,20 @@ struct App {
         std::string dir;                         // where to, when not download_dir() (a helper: beside its model)
     } dl;
     bool dl_on = false;  // dl is what downloader fetches
+    // The Hugging Face search (`tokenstation --hf-search`): what it found,
+    // listed under the catalog on Models.
+    struct HfHit {
+        std::string name, note, repo, path, file, commit, sha256;
+        double bytes = 0;
+        int context = 0;  // how long a chat it gets in this GPU's memory
+    };
+    Proc searcher;
+    std::string hf_query, hf_problem;
+    std::vector<HfHit> hf_hits;
+    int hf_checked = 0, hf_of = 0, hf_too_big = 0, hf_cant = 0;
+    bool hf_done = false;
+    bool hf_jump = false;  // choose the first one found, unless the arrows moved since
+    size_t hf_parsed = 0;
     // A yes/no question over the page (Enter or y: yes; Esc or n: no).
     std::string ask_title, ask_text;
     std::function<void()> ask_yes;
@@ -967,7 +981,7 @@ void finish_download() {
                        g->th->good, 8);
             return;
         }
-    if (job.bytes > 0 && job.bytes < 1.5 * 1024 * 1024 * 1024) {  // a helper
+    if (job.cat && job.bytes > 0 && job.bytes < 1.5 * 1024 * 1024 * 1024) {  // a helper
         const ServerState sv = server();
         bool for_loaded = false;
         for (const ModelFile &m : g->models)
@@ -978,6 +992,133 @@ void finish_download() {
     } else {
         show_toast("Downloaded " + job.name + ": Enter on Models loads it", g->th->good, 6);
     }
+}
+
+// ---- the Hugging Face search ----
+
+// A repo's file path in a URL.
+std::string url_path(const std::string &p) {
+    std::string r;
+    for (unsigned char ch : p) {
+        if (isalnum(ch) || strchr("-._~/", ch)) r += (char)ch;
+        else r += fmt("%%%02X", ch);
+    }
+    return r;
+}
+
+// A found file's name as a plain one (what /download takes too).
+std::string plain_file(std::string f) {
+    for (char &ch : f)
+        if (!isalnum((unsigned char)ch) && !strchr("._+-", ch)) ch = '_';
+    if (!f.empty() && f[0] == '.') f[0] = '_';
+    return f;
+}
+
+bool hit_downloading(const App::HfHit &h) {
+    return g->dl_on && !g->dl.cat && g->dl.file == h.file && g->dl.sha256 == h.sha256 && g->downloader.running();
+}
+
+// The row of the file on this machine that a found one is, or -1.
+int hit_here(const App::HfHit &h) {
+    for (int i = 0; i < (int)g->models.size(); i++)
+        if (g->models[i].name == h.file) return i;
+    return -1;
+}
+
+void download_hit(const App::HfHit &h) {
+    App::DlJob j;
+    j.name = h.name;
+    j.file = h.file;
+    j.url = "https://huggingface.co/" + url_path(h.repo) + "/resolve/" + h.commit + "/" + url_path(h.path);
+    j.sha256 = h.sha256;
+    j.bytes = h.bytes;
+    start_fetch(j);
+}
+
+// Looks on Hugging Face for words, with the desktop app's search
+// (`tokenstation --hf-search`: the models ts5 runs that fit this GPU's
+// memory, the most downloaded first). search_follow reads what it prints.
+void start_search(const std::string &words) {
+    const std::string app = which("tokenstation");
+    if (app.empty()) {
+        show_toast("The search is the tokenstation app's, and it isn't installed here. /download takes a link",
+                   g->th->bad, 7);
+        return;
+    }
+    g->hf_query = words;
+    g->hf_hits.clear();
+    g->hf_problem.clear();
+    g->hf_checked = g->hf_of = g->hf_too_big = g->hf_cant = 0;
+    g->hf_done = false;
+    g->hf_parsed = 0;
+    g->hf_jump = true;
+    std::string cmd = shell_quote(app) + " --hf-search " + shell_quote(words);
+    const double memory = g->sens.gtt_total + g->sens.vram_total;
+    if (memory > 0) cmd += fmt(" --gpu-memory %.0f", memory);
+    if (!g->searcher.start(cmd + " 2>/dev/null", "Searching Hugging Face"))
+        g->hf_problem = "The search couldn't start.";
+}
+
+void search_follow() {
+    g->searcher.pump();
+    for (; g->hf_parsed < g->searcher.lines.size(); g->hf_parsed++) {
+        ts5::Json j;
+        if (!ts5::Json::parse(g->searcher.lines[g->hf_parsed], j)) continue;
+        if (!j["error"].is_null()) {
+            g->hf_problem = j["error"].str("The search failed.");
+        } else if (j["done"].boolean(false)) {
+            g->hf_done = true;
+            g->hf_too_big = (int)j["too_big"].num(0);
+            g->hf_cant = (int)j["cant_run"].num(0);
+        } else if (!j["file"].str().empty()) {
+            App::HfHit h;
+            h.name = j["name"].str();
+            h.note = j["note"].str();
+            h.repo = j["repo"].str();
+            h.path = j["path"].str();
+            h.file = plain_file(j["file"].str());
+            h.commit = j["commit"].str();
+            h.sha256 = j["sha256"].str();
+            if (h.sha256.size() != 64 || h.sha256.find_first_not_of("0123456789abcdef") != std::string::npos)
+                h.sha256.clear();
+            h.bytes = j["bytes"].num(0);
+            h.context = (int)j["context"].num(0);
+            if (!h.repo.empty() && !h.path.empty() && !h.commit.empty()) g->hf_hits.push_back(h);
+        } else if (j["of"].num(0) > 0) {
+            g->hf_checked = (int)j["checked"].num(0);
+            g->hf_of = (int)j["of"].num(0);
+        }
+    }
+    if (g->hf_query.empty() || !g->searcher.done || g->searcher.t1 <= 0) return;
+    if (!g->hf_done && g->hf_problem.empty()) g->hf_problem = "The search ended without an answer.";
+    if (g->hf_jump && g->hf_done && !g->hf_hits.empty() && g->cur == MODELS)
+        g->model_sel = (int)g->models.size() + (int)catalog_missing().size();
+    g->hf_jump = false;
+}
+
+// The search's line on Models: how to search, how it's going, what came of it.
+std::string search_line(uint32_t &color) {
+    const Theme &t = *g->th;
+    color = t.dim;
+    if (g->hf_query.empty()) return "Hugging Face, for other models that fit here: S, then the words (or /search WORDS)";
+    const std::string q = "\"" + g->hf_query + "\" on Hugging Face: ";
+    if (!g->hf_problem.empty()) {
+        color = t.bad;
+        return q + g->hf_problem;
+    }
+    if (!g->hf_done) {
+        color = t.accent2;
+        return q + (g->hf_of > 0 ? fmt("looking at model %d of %d…", std::min(g->hf_checked + 1, g->hf_of), g->hf_of)
+                                 : std::string("asking…"));
+    }
+    std::string left;
+    if (g->hf_too_big) left += fmt(" · %d too big for this GPU", g->hf_too_big);
+    if (g->hf_cant) left += fmt(" · %d of a kind ts5 can't run", g->hf_cant);
+    if (g->hf_hits.empty()) {
+        color = t.warn;
+        return q + "nothing to download" + left;
+    }
+    return q + fmt("%d fit here", (int)g->hf_hits.size()) + left;
 }
 
 void set_fan(const std::string &mode) {
@@ -1603,6 +1744,11 @@ void draw_models() {
         s.put(x0 + 25, y,
               fit("⇣ " + g->dl.name + (total > 0 ? fmt(" %.0f%%", 100.0 * done / total) : " " + gib(done)), w - 26),
               S(t.accent2));
+    } else if (g->searcher.running()) {
+        static const char *spin[] = {"◐", "◓", "◑", "◒"};
+        s.put(x0 + 25, y, fit(std::string(spin[(int)(now_s() * 6) % 4]) + " searching Hugging Face for \"" + g->hf_query + "\"…",
+                              w - 26),
+              S(t.accent2));
     }
     y += 2;
     const int name_w = std::max(20, w - 46);
@@ -1612,7 +1758,7 @@ void draw_models() {
     s.put(x0 + 3 + name_w + 30, y, "Settings", S(t.dim, BOLD));
     y++;
     const auto cat = catalog_missing();
-    const int nl = (int)g->models.size(), nc = (int)cat.size(), n = nl + nc;
+    const int nl = (int)g->models.size(), nc = (int)cat.size(), nh = (int)g->hf_hits.size(), n = nl + nc + nh;
     if (g->model_sel >= n) g->model_sel = std::max(0, n - 1);
     if (g->models.empty()) {
         s.put(x0 + 3, y++, "No .gguf files here yet: download one below.", S(t.warn, BOLD));
@@ -1624,12 +1770,17 @@ void draw_models() {
     // The rows on screen: the files here, a divider, then the catalog's (-1: the divider).
     std::vector<int> disp;
     for (int i = 0; i < nl; i++) disp.push_back(i);
-    const bool url_dl = g->dl_on && !g->dl.cat;  // a /download URL, shown under the catalog
+    // A /download URL, shown under the catalog (one the search found has its own row).
+    bool url_dl = g->dl_on && !g->dl.cat;
+    for (const App::HfHit &h : g->hf_hits) url_dl = url_dl && !(g->dl.file == h.file && g->dl.sha256 == h.sha256);
     if (nc || url_dl) {
         disp.push_back(-1);
         for (int i = 0; i < nc; i++) disp.push_back(nl + i);
         if (url_dl) disp.push_back(-2);
     }
+    // The search (-3: its line), and what it found.
+    disp.push_back(-3);
+    for (int i = 0; i < nh; i++) disp.push_back(nl + nc + i);
     int sel_row = 0;
     for (int r = 0; r < (int)disp.size(); r++)
         if (disp[r] == g->model_sel) sel_row = r;
@@ -1649,6 +1800,39 @@ void draw_models() {
                       S(t.accent2));
             } else {
                 s.put(x0 + 3 + name_w + 10, y, fit("starting… " + gib(done), w - name_w - 14), S(t.dim));
+            }
+            continue;
+        }
+        if (i == -3) {
+            uint32_t c;
+            const std::string l = search_line(c);
+            s.put(x0 + 1, y, "⇣ Search", S(t.accent, BOLD));
+            s.put(x0 + 13, y, fit(l, w - 14), S(c));
+            continue;
+        }
+        if (i >= nl + nc) {
+            const App::HfHit &h = g->hf_hits[i - nl - nc];
+            const bool on = i == g->model_sel;
+            const Style row = on ? Style(t.fg, t.panel2) : Style(t.fg, t.bg);
+            s.fill(x0, y, w, 1, row);
+            s.put(x0, y, on ? "▌" : " ", Style(t.accent, row.bg));
+            const bool going = hit_downloading(h), here = hit_here(h) >= 0;
+            s.put(x0 + 1, y, going ? "⇣" : here ? "✓" : "+", Style(going ? t.accent2 : here ? t.good : t.dim, row.bg, BOLD));
+            s.put(x0 + 3, y, fit(h.name, name_w - 1), Style(t.fg, row.bg));
+            s.put(x0 + 3 + name_w, y, fmt("%8s", gib(h.bytes).c_str()), Style(t.fg, row.bg));
+            if (going) {
+                double done, total, mbps;
+                download_progress(done, total, mbps);
+                const double frac = done / std::max(1.0, h.bytes);
+                bar(s, x0 + 3 + name_w + 10, y, 18, frac, {t.accent, t.accent2}, mix(t.dim, row.bg, 0.6));
+                s.put(x0 + 3 + name_w + 30, y, fit(fmt("%.0f%% %.0f MB/s", frac * 100, mbps), w - name_w - 34),
+                      Style(t.accent2, row.bg));
+            } else {
+                s.put(x0 + 3 + name_w + 10, y, fit(h.note, 19), Style(t.dim, row.bg));
+                const double part = here ? 0 : part_bytes(download_dir(), h.file);
+                s.put(x0 + 3 + name_w + 30, y,
+                      here ? "here" : part > 0 ? fmt("%.0f%% so far", 100 * part / std::max(1.0, h.bytes)) : "↵ download",
+                      Style(here ? t.good : part > 0 ? t.warn : t.dim, row.bg, ITALIC));
             }
             continue;
         }
@@ -1705,7 +1889,62 @@ void draw_models() {
         s.put(x0 + 3 + name_w + 30, y, tuned ? (m.tuned_on.empty() ? "tuned" : m.tuned_on) : m.tested ? "tested" : "—",
               Style(tuned || m.tested ? t.good : t.dim, row.bg));
     }
+    // A download's two lines: what it's doing, in words, and the steps it goes through.
+    auto working = [&](int &yy, double total) {
+        double done, t2, mbps;
+        download_progress(done, t2, mbps);
+        const double secs = now_s() - g->downloader.t0;
+        const int stage = done <= 0 && mbps <= 0 ? 0 : done < total ? 1 : 2;
+        static const char *spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+        std::string now = stage == 0 ? "Connecting to Hugging Face"
+                          : stage == 1 ? fmt("Downloading: %s of %s", gib(done).c_str(), gib(total).c_str()) +
+                                             (mbps > 0 ? fmt(" at %.0f MB/s", mbps) : "")
+                                       : "Checking it's the exact file (SHA-256)";
+        now += " · " + mins(secs) + " so far";
+        if (stage == 1 && mbps > 0) now += " · about " + mins((total - done) / 1e6 / mbps) + " left";
+        s.put(x0 + 2, yy, spin[(int)(now_s() * 10) % 10], S(t.accent2, BOLD));
+        s.put(x0 + 4, yy++, fit("Working: " + now, w - 6), S(t.accent2, BOLD));
+        int xx = x0 + 4;
+        const char *names[] = {"connect", "download", "check it's the exact file", "ready to load"};
+        for (int k = 0; k < 4; k++) {
+            const bool d = k < stage, r = k == stage;
+            xx = s.put(xx, yy, d ? "✓ " : r ? "✱ " : "○ ", S(d ? t.good : r ? t.accent2 : t.dim, BOLD));
+            xx = s.put(xx, yy, names[k], S(d ? t.fg : r ? t.accent2 : t.dim, r ? BOLD : 0));
+            if (k < 3) xx = s.put(xx, yy, "   ", S(t.dim));
+            if (xx > x0 + w - 4) break;
+        }
+        yy++;
+    };
     // The chosen one's details.
+    if (g->model_sel >= nl + nc && g->model_sel < n) {
+        const App::HfHit &h = g->hf_hits[g->model_sel - nl - nc];
+        const int dy = s.h - 1 - detail_h;
+        box(s, x0, dy, w, detail_h, S(mix(t.accent, t.bg, 0.5)), Style(t.fg, t.bg), h.name, S(t.accent, BOLD));
+        int yy = dy + 1;
+        auto line = [&](const std::string &label, const std::string &v, uint32_t c) {
+            s.put(x0 + 2, yy, label, S(t.dim));
+            s.put(x0 + 20, yy++, fit(v, w - 22), S(c));
+        };
+        const std::string dir = download_dir();
+        const bool maybe = h.note.find("May not chat well") != std::string::npos;
+        line("From", "huggingface.co/" + h.repo + " @ " + h.commit.substr(0, 10), t.dim);
+        line("File", h.file + "  (" + gib(h.bytes) + ")", t.fg);
+        line("Chat length", (h.context > 0 ? "about " + with_commas(h.context) + " tokens in this GPU's memory" : "fits") +
+                                std::string(maybe ? " · its name doesn't say it's made for chat" : ""),
+             maybe ? t.warn : t.fg);
+        const double fb = free_bytes(dir);
+        line("Goes to", dir + (fb >= 0 ? "  (" + gib(fb) + " free)" : ""), fb >= 0 && fb < h.bytes ? t.bad : t.fg);
+        if (hit_downloading(h)) {
+            working(yy, h.bytes);
+        } else if (hit_here(h) >= 0) {
+            line("", "It's here already: Enter goes to it in the list above", t.good);
+        } else {
+            line("Tested", "no, the search found it: once it's here, C checks its answers on this GPU and T tunes it", t.warn);
+            line("", "Enter downloads it, checked by SHA-256 · X stops it, and it goes on from there later", t.dim);
+        }
+        draw_bottom_bar("↑↓ choose|Enter download|S search|Tab/1-5 pages|X stop download|R rescan");
+        return;
+    }
     if (g->model_sel >= nl && g->model_sel < n) {
         const app::CatalogEntry &e = *cat[g->model_sel - nl];
         const int dy = s.h - 1 - detail_h;
@@ -1721,36 +1960,9 @@ void draw_models() {
         line("From", std::string("huggingface.co/") + e.repo + " @ " + std::string(e.commit).substr(0, 10), t.dim);
         const double fb = free_bytes(dir);
         line("Goes to", dir + (fb >= 0 ? "  (" + gib(fb) + " free)" : ""), fb >= 0 && fb < (double)e.bytes ? t.bad : t.fg);
-        if (downloading(e)) {
-            // What it's doing, in words, and the steps a download goes through.
-            double done, total, mbps;
-            download_progress(done, total, mbps);
-            total = (double)e.bytes;
-            const double secs = now_s() - g->downloader.t0;
-            const int stage = done <= 0 && mbps <= 0 ? 0 : done < total ? 1 : 2;
-            static const char *spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
-            std::string now = stage == 0 ? "Connecting to Hugging Face"
-                              : stage == 1 ? fmt("Downloading: %s of %s", gib(done).c_str(), gib(total).c_str()) +
-                                                 (mbps > 0 ? fmt(" at %.0f MB/s", mbps) : "")
-                                           : "Checking it's the exact file (SHA-256)";
-            now += " · " + mins(secs) + " so far";
-            if (stage == 1 && mbps > 0) now += " · about " + mins((total - done) / 1e6 / mbps) + " left";
-            s.put(x0 + 2, yy, spin[(int)(now_s() * 10) % 10], S(t.accent2, BOLD));
-            s.put(x0 + 4, yy++, fit("Working: " + now, w - 6), S(t.accent2, BOLD));
-            int xx = x0 + 4;
-            const char *names[] = {"connect", "download", "check it's the exact file", "ready to load"};
-            for (int k = 0; k < 4; k++) {
-                const bool d = k < stage, r = k == stage;
-                xx = s.put(xx, yy, d ? "✓ " : r ? "✱ " : "○ ", S(d ? t.good : r ? t.accent2 : t.dim, BOLD));
-                xx = s.put(xx, yy, names[k], S(d ? t.fg : r ? t.accent2 : t.dim, r ? BOLD : 0));
-                if (k < 3) xx = s.put(xx, yy, "   ", S(t.dim));
-                if (xx > x0 + w - 4) break;
-            }
-            yy++;
-        } else {
-            line("", "Enter downloads it · X stops it, and it goes on from there later · any other: /download URL", t.dim);
-        }
-        draw_bottom_bar("↑↓ choose|Enter download|Tab/1-5 pages|X stop download|R rescan");
+        if (downloading(e)) working(yy, (double)e.bytes);
+        else line("", "Enter downloads it · X stops it, and it goes on from there later · any other: S searches", t.dim);
+        draw_bottom_bar("↑↓ choose|Enter download|S search|Tab/1-5 pages|X stop download|R rescan");
         return;
     }
     if (nl > 0 && g->model_sel < nl) {
@@ -1825,7 +2037,7 @@ void draw_models() {
         if (is_loaded)
             setting("Context", with_commas(sv.n_ctx) + " tokens", "how long a chat can get, as loaded");
     }
-    draw_bottom_bar("↑↓ choose|Enter load|Tab/1-5 pages|T tune|H get helper|C GPU check|B speed test|R rescan");
+    draw_bottom_bar("↑↓ choose|Enter load|Tab/1-5 pages|T tune|H get helper|S search|C GPU check|B speed test|R rescan");
 }
 
 // ---- Settings ----
@@ -2237,6 +2449,20 @@ void run_command(const std::string &line) {
                 l += std::string("- `") + x->key + "` " + x->name + " (" + gib((double)x->bytes) + ", " + x->good_for + ")\n";
             chat_note(c, l);
         }
+    } else if (cmd == "/search") {
+        if (arg.empty()) {
+            chat_note(c, "`/search WORDS` looks on Hugging Face for models ts5 runs that fit this GPU's memory, the "
+                         "most downloaded first: `/search mistral 7b`, `/search qwen3 coder`. What it finds is listed "
+                         "on the Models page, under the catalog; Enter downloads one.");
+            return;
+        }
+        scan_models();
+        start_search(arg);
+        if (g->searcher.running()) {
+            // Models, at the end of its list, where the search's line is.
+            go(MODELS);
+            g->model_sel = std::max(0, (int)g->models.size() + (int)catalog_missing().size() - 1);
+        }
     } else if (cmd == "/chats") {
         g->chat_list = list_chats(arg);
         if (g->chat_list.empty()) {
@@ -2461,9 +2687,12 @@ void key_models(const Event &e) {
         return;
     }
     const auto cat = catalog_missing();
-    const int nl = (int)g->models.size(), n = nl + (int)cat.size();
-    const bool local = g->model_sel < nl, in_cat = g->model_sel >= nl && g->model_sel < n;
+    const int nl = (int)g->models.size(), nc = (int)cat.size(), n = nl + nc + (int)g->hf_hits.size();
+    const bool local = g->model_sel < nl, in_cat = g->model_sel >= nl && g->model_sel < nl + nc;
+    const bool in_hf = g->model_sel >= nl + nc && g->model_sel < n;
     auto key_is = [&](const char *k) { return e.key == K_CHAR && strcasecmp(e.ch.c_str(), k) == 0; };
+    if (e.key == K_UP || e.key == K_DOWN || e.key == K_PGUP || e.key == K_PGDN || e.key == K_HOME || e.key == K_END)
+        g->hf_jump = false;
     if (e.key == K_UP && n) g->model_sel = (g->model_sel + n - 1) % n;
     else if (e.key == K_DOWN && n) g->model_sel = (g->model_sel + 1) % n;
     else if (e.key == K_PGUP) g->model_sel = std::max(0, g->model_sel - 10);
@@ -2472,6 +2701,19 @@ void key_models(const Event &e) {
     else if (e.key == K_END && n) g->model_sel = n - 1;
     else if (e.key == K_ENTER && local) load_or_ask(g->models[g->model_sel]);
     else if ((e.key == K_ENTER || key_is("d")) && in_cat) start_download(*cat[g->model_sel - nl]);
+    else if ((e.key == K_ENTER || key_is("d")) && in_hf) {
+        const App::HfHit h = g->hf_hits[g->model_sel - nl - nc];
+        if (const int at = hit_here(h); at >= 0) {
+            g->model_sel = at;
+            show_toast(h.file + " is here: Enter loads it", g->th->dim, 4);
+        } else {
+            download_hit(h);
+        }
+    } else if (key_is("s")) {  // the search: its words go at the prompt
+        go(CHAT);
+        g->chat.input = "/search ";
+        g->chat.cur = g->chat.input.size();
+    }
     else if (key_is("x") && g->downloader.running()) {
         g->downloader.stop();
         show_toast("Download stopped: what's there is kept for next time", g->th->warn, 4);
@@ -2600,6 +2842,7 @@ void tick() {
     job_follow();
     g->downloader.pump();
     finish_download();
+    search_follow();
     g->fanproc.pump();
     g->logs.pump();
     parse_log_speeds();
@@ -2924,6 +3167,7 @@ int main(int argc, char **argv) {
     app.tuner.stop();
     const bool was_downloading = app.downloader.running();
     app.downloader.stop();
+    app.searcher.stop();
     app.loader.pump();
     app.logs.stop();
     term_leave();
