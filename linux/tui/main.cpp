@@ -2114,8 +2114,11 @@ std::vector<SetRow> settings_rows() {
         r.push_back(x);
     }
     {
-        SetRow x{"Temperature", c.temp < 0 ? "the model's own" : fmt("%.1f", c.temp),
-                 "lower is steadier, higher more varied"};
+        // The default is the server's own for the loaded model (0.7, or what
+        // ts5 checked for that model), which /v1/models reports.
+        const double own = server().temperature;
+        SetRow x{"Temperature", c.temp >= 0 ? fmt("%.1f", c.temp) : own >= 0 ? fmt("default (%.1f)", own) : "default",
+                 "how much chance picks each word: lower is steadier (code, facts), higher more varied"};
         x.change = [save](int d) {
             double &t = g->cfg.temp;
             if (t < 0) t = d > 0 ? 0.1 : 1.5;
