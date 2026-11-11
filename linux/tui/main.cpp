@@ -441,8 +441,15 @@ void load_model(const ModelFile &m, bool again = false, int ctx_now = -1) {
         show_toast("The model is chosen on the machine that serves it: run ts5-tui there (over SSH)", g->th->warn, 6);
         return;
     }
-    const ServerState s = server();
+    ServerState s = server();
     const pid_t own = own_server_pid();
+    // What was last seen may be a server of ts5-tui's own that has ended
+    // since (a load that failed, /unload): look again before taking the
+    // port for another program's.
+    if (s.online && own < 0) {
+        poll_once();
+        s = server();
+    }
     if (s.model == api_id(m.name) && !again) {
         if (own <= 0) {
             show_toast("That's the model loaded now", g->th->dim);
@@ -1443,7 +1450,9 @@ void draw_top_bar() {
                           {k(used) + "/" + k(sv.n_ctx), Style(f > 0.9 ? t.bad : f > 0.75 ? t.warn : t.fg, t.panel2, BOLD)}},
                          0});
     }
-    if (g->last_gen_tps > 0) items.push_back({{{fmt("%.1f", g->last_gen_tps), Style(t.good, t.panel2, BOLD)}, {" tok/s", lab}}, 1});
+    // The last answer's speed, while there is a model it can be about.
+    if (g->last_gen_tps > 0 && sv.online && !sv.model.empty())
+        items.push_back({{{fmt("%.1f", g->last_gen_tps), Style(t.good, t.panel2, BOLD)}, {" tok/s", lab}}, 1});
     const Sensors &z = g->sens;
     if (z.gtt_total > 0) {
         const double used = z.gtt_used + z.vram_used, total = z.gtt_total + z.vram_total;
@@ -2215,7 +2224,7 @@ std::vector<SetRow> settings_rows() {
         // The services size their own: this is for a model ts5-tui loads.
         const bool svc = unit_active("tokenstation"), tv = !svc && unit_active("tokenstation-tv");
         SetRow x{"Context", c.serve_ctx ? with_commas(c.serve_ctx) + " tokens" : "auto",
-                 svc  ? "for models ts5-tui loads itself; the service's is CONTEXT in /etc/default/tokenstation"
+                 svc  ? "for models ts5-tui loads; the service's is CONTEXT in /etc/default/tokenstation"
                  : tv ? "for models ts5-tui loads itself; the TV app's is in its own Settings"
                       : "the longest a chat can get; auto fits GPU memory. Load the model again to apply it"};
         x.change = [save](int d) {
@@ -2254,7 +2263,7 @@ std::vector<SetRow> settings_rows() {
     }
     {
         SetRow x{"tmux", c.tmux ? "on" : "off",
-                 "from a plain terminal (ssh), its own session that outlives a dropped connection; never in an IDE"};
+                 "over ssh: its own session, which outlives a dropped connection; never in an IDE"};
         x.change = [save](int) {
             g->cfg.tmux = !g->cfg.tmux;
             save();
@@ -2263,8 +2272,8 @@ std::vector<SetRow> settings_rows() {
     }
     {
         SetRow x{"Mouse", c.mouse ? "on" : "off",
-                 c.mouse ? "click a Thought line to read it, [copy] to copy, a page's name to go there; a drag opens the text to select"
-                         : "the terminal keeps the mouse: drag to select what's on screen; Ctrl+T and Ctrl+Y do the rest"};
+                 c.mouse ? "click a Thought line to read it, [copy] to copy, a page's name; drag to select text"
+                         : "the terminal keeps the mouse: a drag selects what's on screen; Ctrl+T, Ctrl+Y work"};
         x.change = [save](int) {
             g->cfg.mouse = !g->cfg.mouse;
             set_mouse(g->cfg.mouse);
@@ -2274,8 +2283,8 @@ std::vector<SetRow> settings_rows() {
     }
     {
         SetRow x{"When you quit", c.keep_model ? "the model stays loaded" : "the model is unloaded",
-                 c.keep_model ? "a model ts5-tui loaded keeps serving the API, and keeps its GPU memory, after ts5-tui quits"
-                              : "a model ts5-tui loaded stops with it, and its GPU memory is free (Ctrl+A d leaves both running)"};
+                 c.keep_model ? "a model ts5-tui loaded keeps serving the API, and keeps its GPU memory"
+                              : "a model ts5-tui loaded stops too and its GPU memory is free (Ctrl+A d leaves both)"};
         x.change = [save](int) {
             g->cfg.keep_model = !g->cfg.keep_model;
             save();
@@ -2328,7 +2337,7 @@ void draw_settings() {
     }
     y++;
     if (y < s.h - 2) {
-        s.put(x0 + 2, y, fit("Each model's own settings (its helper, prompt math, chat memory) are on Models: tested models bring theirs.",
+        s.put(x0 + 2, y, fit("A model's own settings (helper, prompt math, chat memory) are on Models: tested models bring theirs.",
                              w - 4), S(t.dim));
     }
     draw_bottom_bar(g->editing ? "Enter save|Esc cancel" : "↑↓ choose|←→ change|Tab/1-5 pages|Enter edit");
@@ -2706,10 +2715,11 @@ void run_command(const std::string &line) {
         const ServerState sv = server();
         if (own > 0) {
             kill(own, SIGTERM);
+            for (int i = 0; i < 30 && kill(own, 0) == 0; i++) usleep(100000);
             g->load_target.clear();
             show_toast((sv.model.empty() ? std::string("The model") : sv.model) + " is unloaded: its GPU memory is free",
                        g->th->good, 5);
-            g->poll_fast = true;
+            g->poll_now = true;
         } else if (sv.online) {
             show_toast("ts5-tui didn't start this server (the service, the TV app or another ts5 serve): stop it there",
                        g->th->warn, 6);
@@ -2814,6 +2824,39 @@ bool nav_key(const Event &e) {
     return false;
 }
 
+// T, C and B on Models start a job that takes the GPU for minutes: they ask
+// first, so a letter typed on the wrong page starts nothing. (/tune, /check
+// and /bench are typed on purpose and don't ask.)
+void ask_job(const ModelFile &m, char which) {
+    // A job that runs is shown; a tested model's tuning and a helper-size
+    // file have their own words.
+    if (g->tuner.running() || (which == 't' && ((m.tested && m.tune_file.empty()) || m.size < 1.5 * 1024 * 1024 * 1024))) {
+        if (which == 't') start_tune(m);
+        else start_gpu_job(m, which == 'c');
+        return;
+    }
+    const std::string id = api_id(m.name);
+    const std::string aside =
+        own_server_pid() > 0 ? " The model loaded now steps aside for it and is loaded again after." : "";
+    const ModelFile copy = m;
+    if (which == 't') {
+        g->ask_title = " Tune this model? ";
+        g->ask_text = "Tuning measures " + id + " on this GPU and keeps its fastest settings: 10 to 20 minutes." + aside +
+                      " Start?";
+        g->ask_yes = [copy] { start_tune(copy, true); };
+    } else if (which == 'c') {
+        g->ask_title = " Check this model? ";
+        g->ask_text = "A GPU check compares " + id + "'s answers on the GPU with the CPU's: a few minutes the first "
+                      "time, seconds after." + aside + " Start?";
+        g->ask_yes = [copy] { start_gpu_job(copy, true); };
+    } else {
+        g->ask_title = " Speed test? ";
+        g->ask_text = "A speed test loads " + id + ", reads a 512-token prompt and writes 128 tokens: about a minute." +
+                      aside + " Start?";
+        g->ask_yes = [copy] { start_gpu_job(copy, false); };
+    }
+}
+
 void key_models(const Event &e) {
     if (g->show_tune) {
         if (e.key == K_ESC) g->show_tune = false;
@@ -2868,7 +2911,7 @@ void key_models(const Event &e) {
         }
     } else if (key_is("s")) {  // the search: its words are typed here
         g->hf_typing = g->editing = true;
-        g->hf_input = g->hf_query;
+        g->hf_input.clear();  // new words: the last search's stay listed until Enter
     }
     else if (key_is("x") && g->downloader.running()) {
         g->downloader.stop();
@@ -2879,9 +2922,8 @@ void key_models(const Event &e) {
         else if (m.helper_here) show_toast("Its helper is already here", g->th->dim, 3);
         else if (!helper_entry(m)) show_toast("ts5-tui has no download for that helper: /download takes a link", g->th->warn, 5);
         else download_helper(m);
-    } else if (key_is("t") && local) start_tune(g->models[g->model_sel]);
-    else if (key_is("c") && local) start_gpu_job(g->models[g->model_sel], true);
-    else if (key_is("b") && local) start_gpu_job(g->models[g->model_sel], false);
+    } else if ((key_is("t") || key_is("c") || key_is("b")) && local)
+        ask_job(g->models[g->model_sel], (char)tolower(e.ch[0]));
     else if (key_is("t") && g->tuner.lines.size()) g->show_tune = true;
     else if (key_is("r")) {
         scan_models();
@@ -3219,6 +3261,10 @@ void handle(const Event &e) {
             f();
         } else if (no) {
             g->ask_yes = nullptr;
+        } else if (e.key >= K_F1 && e.key <= K_F5) {
+            // Another page: that is a no.
+            g->ask_yes = nullptr;
+            global_key(e);
         }
         return;
     }
@@ -3278,11 +3324,18 @@ void tick() {
         } else if (g->load_own && g->loader.done && t - g->loader.t1 > 0.5 && own_server_pid() <= 0) {
             // Our own ts5 serve ended before it served: its log's last line
             // says why (not enough memory, a file that isn't a model).
+            // (The engine's log lines are written by a thread of their own:
+            // some can land after the refusal, which is then not the last.)
             std::string why;
             {
                 std::istringstream in(read_file(state_dir() + "/tui-serve.log"));
-                for (std::string l; std::getline(in, l);)
-                    if (!l.empty()) why = l;
+                std::string refused;
+                for (std::string l; std::getline(in, l);) {
+                    if (l.empty()) continue;
+                    why = l;
+                    if (l.rfind("ts5: not enough", 0) == 0) refused = l;
+                }
+                if (!refused.empty()) why = refused;
             }
             if (why.rfind("ts5: ", 0) == 0) why = why.substr(5);
             if (why.empty()) why = "ts5 serve ended without a word";
@@ -3290,19 +3343,28 @@ void tick() {
             const ModelFile *file = nullptr;
             for (auto &x : g->models)
                 if (api_id(x.name) == g->load_target) file = &x;
+            bool again = false;
             if (memory && g->load_ctx > 0 && file) {
                 // The Context set in Settings has no memory beside this
                 // model: the model with the longest chat that fits, said so.
                 const int asked = g->load_ctx;
                 const ModelFile copy = *file;
+                const std::string target = g->load_target;
                 g->load_target.clear();
                 g->load_short_of = asked;
                 load_model(copy, true, 0);
-                if (!g->load_target.empty())
-                    show_toast(fmt("A %s-token chat doesn't fit beside %s: loading it with the longest chat that does…",
-                                   with_commas(asked).c_str(), g->load_target.c_str()),
+                if (!g->load_target.empty()) {
+                    again = true;
+                    show_toast(fmt("A %s-token chat doesn't fit beside it: loading it with the longest chat that does…",
+                                   with_commas(asked).c_str()),
                                g->th->warn, 8);
-            } else {
+                } else {
+                    // It didn't start: the failure is said below.
+                    g->load_target = target;
+                    g->load_short_of = 0;
+                }
+            }
+            if (!again) {
                 if (memory) why = memory_words(why);
                 const std::string failed = g->load_target + " didn't load: " + why;
                 // The model that was loaded before it comes back, so a
@@ -3334,14 +3396,18 @@ void tick() {
             if (t - g->load_t0 > 240) g->load_again = false;
         } else if (sv.model == g->load_target) {
             const std::string why = helper_missing_why();
-            if (g->load_short_of > 0 && g->load_own) {
-                const std::string said = fmt("Loaded %s with a %s-token chat, the longest that fits", sv.model.c_str(),
-                                             with_commas(sv.n_ctx).c_str());
-                show_toast(said + fmt(" (Context asks for %s)", with_commas(g->load_short_of).c_str()), g->th->warn, 12);
-                chat_note(g->chat, said + fmt(": the %s tokens set in Settings → Context have no GPU memory beside this "
-                                              "model. Context on auto always takes the longest that fits.",
-                                              with_commas(g->load_short_of).c_str()));
-                g->load_short_of = 0;
+            // After a set Context that had no memory: what it got instead
+            // (the second try may fit all of it: nothing to say then).
+            const int short_of = g->load_own && sv.n_ctx < g->load_short_of ? g->load_short_of : 0;
+            g->load_short_of = 0;
+            if (short_of > 0) {
+                show_toast(fmt("Loaded with a %s-token chat, the longest that fits (Context asks for %s)",
+                               with_commas(sv.n_ctx).c_str(), with_commas(short_of).c_str()),
+                           g->th->warn, 12);
+                chat_note(g->chat, fmt("Loaded %s with a %s-token chat, the longest that fits: the %s tokens set in "
+                                       "Settings → Context have no GPU memory beside this model. Context on auto "
+                                       "always takes the longest that fits.",
+                                       sv.model.c_str(), with_commas(sv.n_ctx).c_str(), with_commas(short_of).c_str()));
             } else if (!why.empty() && !helper_wanted().empty())
                 show_toast("Loaded " + sv.model + fmt(" in %.0f s", t - g->load_t0) + ", without its helper: " + why,
                            g->th->warn, 10);

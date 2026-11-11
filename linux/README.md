@@ -182,7 +182,8 @@ ts5-tui --url http://ps5.local:8081  # another one
   setting takes hold; H downloads a model's helper; T tunes it with
   `ts5-tune`, which a model tested on the PS5 doesn't need: its row says
   "tested" and its settings are built in; C runs the GPU check, B the speed
-  test, each in a panel that ticks off its steps in plain words, with the
+  test; T, C and B ask before they start, so a letter typed on the wrong
+  page starts nothing; each runs in a panel that ticks off its steps in plain words, with the
   time so far, the time left and what it found at the end, while the top
   bar says what's running; below them, the catalog's models to download,
   and under those what a Hugging Face search found: S searches),

@@ -316,7 +316,9 @@ void render_md(std::vector<Line> &out, const std::string &text, int w, const The
             wrap(out, inline_md(trimmed.substr(d + 2), base, t), w, 2, trimmed.substr(0, d + 2), Style(t.accent2, kDefault, BOLD),
                  std::string(d + 2, ' '));
         } else {
-            wrap(out, inline_md(trimmed, base, t), w, 2);
+            // A plain line keeps its indent: code written without a fence
+            // reads as it was written.
+            wrap(out, inline_md(trimmed, base, t), w, 2 + (int)std::min<size_t>(lead, 24));
         }
         if (pos > text.size()) break;
     }
