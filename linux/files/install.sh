@@ -8,7 +8,8 @@
 #   ./install.sh --no-hardware    the app only; nothing outside your home
 #   ./install.sh --no-start       don't offer to start it when done
 #   ./install.sh --no-steam       don't add it to Steam (Game Mode)
-#   ./install.sh --uninstall      removes both (your models and chats stay)
+#   ./install.sh --uninstall      removes both, and the GPU memory limit it
+#                                 set (your models and chats stay)
 #
 # The app goes in ~/.local/opt/tokenstation, with tokenstation and ts5 in
 # ~/.local/bin and an entry in the app menu. Its data (models, settings,
@@ -52,8 +53,14 @@ case "$uninstall" in
         rm -rf "$opt"
         rm -f "$bin/tokenstation" "$bin/ts5" "$bin/ts5-tui" "$bin/ts5-tune" "$apps/tokenstation.desktop" "$icons/tokenstation.png"
         if [ -e "$sys" ] || [ -e "$sudoers" ]; then
-            echo "Removing the hardware controls (sudo):"
-            sudo rm -rf "$sys" "$sudoers" /usr/local/bin/tokenstation-memory /usr/local/bin/tokenstation-cu
+            echo "Removing the hardware controls and the GPU memory limit they set (sudo):"
+            if ! sudo sh -c '
+                [ -x /usr/local/bin/tokenstation-memory ] && /usr/local/bin/tokenstation-memory remove
+                rm -rf "$1" "$2" /usr/local/bin/tokenstation-memory /usr/local/bin/tokenstation-cu
+            ' sh "$sys" "$sudoers"; then
+                echo "sudo didn't run, so these stay: $sys, $sudoers, /usr/local/bin/tokenstation-memory and tokenstation-cu." >&2
+                echo "Run ./install.sh --uninstall again to remove them." >&2
+            fi
         fi
         echo "TokenStation5 removed. Your models and settings are still in ~/.local/share/tokenstation."
         echo "If you added it to Steam, remove it there too (Library, TokenStation5, Manage)."
@@ -85,15 +92,20 @@ sed "s#^Exec=.*#Exec=$opt/bin/tokenstation#" "$opt/share/tokenstation.desktop" >
 command -v update-desktop-database >/dev/null && update-desktop-database "$apps" 2>/dev/null || true
 
 if [ "$hardware" = 1 ]; then
+    # The GPU memory limit is set the first time only: an update keeps what
+    # Settings (or "tokenstation-memory unset") chose.
+    fresh=1
+    [ -e "$sys/hw" ] && fresh=0
     echo "Installing the PS5 hardware controls (sudo asks for your password):"
-    sudo sh -eu -c '
+    if ! sudo sh -eu -c '
         install -d -o root -g root -m 755 "$1"
         for f in hw gpu-selftest; do install -o root -g root -m 755 "$2/lib/$f" "$1/$f"; done
         for f in tokenstation-memory tokenstation-cu; do install -o root -g root -m 755 "$2/bin/$f" "/usr/local/bin/$f"; done
         getent group tokenstation >/dev/null || groupadd -r tokenstation
         usermod -a -G tokenstation "$3"
-        # On a PS5: the GPU may use the most memory (Settings can change it).
-        if [ -e /dev/mp1 ] || [ -e /dev/icc ]; then
+        # On a PS5, the first time: the GPU may use the most memory
+        # (Settings can change it).
+        if [ "$5" = 1 ] && { [ -e /dev/mp1 ] || [ -e /dev/icc ]; }; then
             /usr/local/bin/tokenstation-memory first || true
         fi
         tmp=$(mktemp)
@@ -106,7 +118,11 @@ if [ "$hardware" = 1 ]; then
             echo "The sudo rule did not check out; the hardware controls will ask for a password." >&2
         fi
         rm -f "$tmp"
-    ' sh "$sys" "$opt" "$(id -un)" "$sudoers"
+    ' sh "$sys" "$opt" "$(id -un)" "$sudoers" "$fresh"; then
+        hardware=0
+        echo "The PS5 hardware controls were skipped: sudo didn't run (no password set, or a wrong one)." >&2
+        echo "The app itself is installed. For the controls, set a password (passwd) and run ./install.sh again." >&2
+    fi
 fi
 
 # Bazzite and SteamOS: offer it to Steam, for Game Mode.

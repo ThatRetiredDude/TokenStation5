@@ -71,8 +71,11 @@ tar --owner=0 --group=0 -C "$rootdir" -czf "$out/tokenstation-root.tar.gz" usr e
 
 # The portable build, for systems without apt or with a read-only /usr
 # (Bazzite, SteamOS): the same programs, and install.sh to put them in
-# ~/.local.
-port=$out/tokenstation-${version}-linux-${arch}
+# ~/.local. Its folder has no version in it, so the same one-line command
+# (curl ... | tar xz && cd tokenstation-linux-amd64 && ./install.sh)
+# updates it; the file's name has the version.
+port=$out/tokenstation-linux-${arch}
+portar=$out/tokenstation-${version}-linux-${arch}.tar.gz
 rm -rf "$port"
 install -Dm755 "$out/tokenstation" "$port/bin/tokenstation"
 install -Dm755 "$out/ts5" "$port/bin/ts5"
@@ -86,5 +89,5 @@ install -Dm644 "$root/linux/files/tokenstation.desktop" "$port/share/tokenstatio
 install -Dm644 "$root/ps5/sce_sys/icon0.png" "$port/share/tokenstation.png"
 install -Dm755 "$root/linux/files/install.sh" "$port/install.sh"
 cp -r "$doc" "$port/doc"
-tar -C "$out" -czf "$port.tar.gz" "$(basename "$port")"
-echo "built $pkg.deb and $port.tar.gz"
+tar -C "$out" -czf "$portar" "$(basename "$port")"
+echo "built $pkg.deb and $portar"
