@@ -94,11 +94,16 @@ enum Key : int {
     K_CTRL_DOWN,
     K_CTRL_LEFT,
     K_CTRL_RIGHT,
+    K_MOUSE,  // Event::mouse says what, x and y where (cells from 0)
 };
+
+enum Mouse : int { M_NONE = 0, M_DOWN, M_UP, M_DRAG, M_WHEEL_UP, M_WHEEL_DOWN };
 
 struct Event {
     Key key = K_NONE;
     std::string ch;
+    Mouse mouse = M_NONE;
+    int x = 0, y = 0, button = 0;  // button: 0 left, 1 middle, 2 right
 };
 
 // Raw mode, the alternate screen, bracketed paste. leave() puts it all back
@@ -110,5 +115,12 @@ bool term_truecolor();
 // Waits up to timeout_ms for input and decodes what came.
 std::vector<Event> read_events(int timeout_ms);
 void term_write(const std::string &s);
+// Mouse reports (clicks, drags, the wheel) on or off. Off, the terminal's own
+// selection works with a plain drag; leave() turns them off.
+void term_mouse(bool on);
+bool term_mouse_on();
+// A process to end (SIGTERM) when the terminal goes away under ts5-tui
+// (SIGHUP, SIGTERM): the model it loaded. -1: none.
+void term_end_with(int pid);
 
 }  // namespace tui

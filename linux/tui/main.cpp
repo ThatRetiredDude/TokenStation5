@@ -92,6 +92,22 @@ struct App {
         std::string dir;                         // where to, when not download_dir() (a helper: beside its model)
     } dl;
     bool dl_on = false;  // dl is what downloader fetches
+    // The Hugging Face search (`tokenstation --hf-search`): what it found,
+    // listed under the catalog on Models.
+    struct HfHit {
+        std::string name, note, repo, path, file, commit, sha256;
+        double bytes = 0;
+        int context = 0;  // how long a chat it gets in this GPU's memory
+    };
+    Proc searcher;
+    std::string hf_query, hf_problem;
+    std::vector<HfHit> hf_hits;
+    int hf_checked = 0, hf_of = 0, hf_too_big = 0, hf_cant = 0;
+    bool hf_done = false;
+    bool hf_jump = false;  // choose the first one found, unless the arrows moved since
+    bool hf_typing = false;  // the search's words are being typed on the Models page (S)
+    std::string hf_input;
+    size_t hf_parsed = 0;
     // A yes/no question over the page (Enter or y: yes; Esc or n: no).
     std::string ask_title, ask_text;
     std::function<void()> ask_yes;
@@ -102,6 +118,20 @@ struct App {
     double load_t0 = 0;
     bool load_again = false, load_down = false;  // the loaded model again: wait for the old server to go first
     bool load_own = false;                       // a ts5 serve of ts5-tui's own (its pid and log are watched)
+    // The mouse: where the left button went down, and whether it moved
+    // since (a drag); the top bar's pages, as drawn, for a click.
+    int down_x = -1, down_y = -1;
+    bool dragged = false;
+    std::vector<std::pair<int, int>> tab_x;
+    // The plain view: text alone on the screen, the mouse left to the
+    // terminal, so its own selection copies it (view_open).
+    bool view_on = false, view_dirty = false, view_sent = false;
+    std::string view_text, view_title;
+    int view_top = 0;
+    size_t view_at = 0;  // the byte of view_text to show first, once
+    int load_ctx = 0;                            // the context it was started with (0: auto)
+    int load_short_of = 0;                       // the Context that had no memory, when this load is the one on auto after it
+    std::string load_prev;                       // the model this load took the place of (its file), to go back to if it fails
     std::string load_failed;                     // the last load's failure, shown on Models until the next one
     std::string job_reload;                      // the model a job unloaded, to load again when it ends
     bool show_tune = false;
@@ -129,6 +159,8 @@ struct App {
 };
 
 App *g;
+
+void set_mouse(bool on);
 
 void show_toast(const std::string &msg, uint32_t color = 0, double secs = 4) {
     g->toast = msg;
@@ -368,7 +400,34 @@ std::string service_models_dir() {
 
 // Load a model: the API-only service through the hw helper, else a
 // `ts5 serve` of ts5-tui's own.
-void load_model(const ModelFile &m, bool again = false) {
+// The engine's "not enough memory" line in plain words: what the model
+// needs, what is free, and where the rest went when the GPU has it.
+std::string memory_words(const std::string &why) {
+    double fixed = 0, ctx = 0, free = 0;
+    int n = 0;
+    const double total = (g->sens.gtt_total + g->sens.vram_total) / 1073741824.0;
+    const double used = (g->sens.gtt_used + g->sens.vram_used) / 1073741824.0;
+    std::string out;
+    if (sscanf(why.c_str(),
+               "not enough memory: the weights and buffers take %lf GiB and a context of %d tokens %lf GiB, %lf GiB is free",
+               &fixed, &n, &ctx, &free) == 4)
+        out = fmt("it takes %.1f GiB of GPU memory and a %s-token chat %.1f GiB more, and %.1f GiB is free", fixed,
+                  with_commas(n).c_str(), ctx, free);
+    else if (sscanf(why.c_str(),
+                    "not enough memory: the weights and buffers take %lf GiB and the smallest context %lf GiB, %lf GiB is free",
+                    &fixed, &ctx, &free) == 3)
+        out = fmt("it needs %.1f GiB of GPU memory and %.1f GiB is free", fixed + ctx, free);
+    else
+        return "not enough GPU memory is free for it (" + why + ")";
+    if (total > 0 && fixed + ctx > total)
+        out += fmt(": it is too big for this GPU's %.1f GiB", total);
+    else if (used > 1.0)
+        out += fmt(". Another program holds %.1f GiB of it: a tune or check still running, the TV app, a game", used);
+    return out;
+}
+
+// ctx: the context for a server of its own; -1: Settings → Context.
+void load_model(const ModelFile &m, bool again = false, int ctx_now = -1) {
     if (g->loader.running()) {
         show_toast("Still loading the last one…", g->th->warn);
         return;
@@ -382,8 +441,15 @@ void load_model(const ModelFile &m, bool again = false) {
         show_toast("The model is chosen on the machine that serves it: run ts5-tui there (over SSH)", g->th->warn, 6);
         return;
     }
-    const ServerState s = server();
+    ServerState s = server();
     const pid_t own = own_server_pid();
+    // What was last seen may be a server of ts5-tui's own that has ended
+    // since (a load that failed, /unload): look again before taking the
+    // port for another program's.
+    if (s.online && own < 0) {
+        poll_once();
+        s = server();
+    }
     if (s.model == api_id(m.name) && !again) {
         if (own <= 0) {
             show_toast("That's the model loaded now", g->th->dim);
@@ -422,13 +488,26 @@ void load_model(const ModelFile &m, bool again = false) {
             return;
         }
         const std::string dir = state_dir();
-        const std::string ctx = g->cfg.serve_ctx > 0 ? std::to_string(g->cfg.serve_ctx) : "0";
+        const int n_ctx = ctx_now >= 0 ? ctx_now : std::max(0, g->cfg.serve_ctx);
+        const std::string ctx = std::to_string(n_ctx);
+        g->load_ctx = n_ctx;
+        if (ctx_now < 0) {
+            g->load_short_of = 0;
+            g->load_prev.clear();
+        }
         cmd.clear();
-        if (own > 0) cmd = stop_cmd(own);
+        if (own > 0) {
+            cmd = stop_cmd(own);
+            // The model it takes the place of comes back if this one fails.
+            for (auto &x : g->models)
+                if (api_id(x.name) == s.model && x.path != m.path) g->load_prev = x.path;
+        }
         // Its own session, so it keeps serving after ts5-tui ends.
         // Settings → Speed or length: with an auto context, the engine keeps
         // room for the model's helper (faster) or takes it all for the chat.
-        const std::string room = g->cfg.serve_ctx == 0 ? fmt("TS5_HELPER_ROOM=%d ", g->cfg.helper_room ? 1 : 0) : "";
+        // After a set Context that had no memory, all of it for the chat.
+        const std::string room =
+            n_ctx == 0 ? fmt("TS5_HELPER_ROOM=%d ", g->cfg.helper_room && g->load_short_of == 0 ? 1 : 0) : "";
         cmd += "cd " + shell_quote(dir) + " && (" + room + "setsid " + shell_quote(ts5) + " serve -m " + shell_quote(m.path) +
                " --host 127.0.0.1 --port " + std::to_string(e.port) + " -c " + ctx +
                " > tui-serve.log 2>&1 < /dev/null & echo $! > tui-serve.pid)";
@@ -967,7 +1046,7 @@ void finish_download() {
                        g->th->good, 8);
             return;
         }
-    if (job.bytes > 0 && job.bytes < 1.5 * 1024 * 1024 * 1024) {  // a helper
+    if (job.cat && job.bytes > 0 && job.bytes < 1.5 * 1024 * 1024 * 1024) {  // a helper
         const ServerState sv = server();
         bool for_loaded = false;
         for (const ModelFile &m : g->models)
@@ -978,6 +1057,133 @@ void finish_download() {
     } else {
         show_toast("Downloaded " + job.name + ": Enter on Models loads it", g->th->good, 6);
     }
+}
+
+// ---- the Hugging Face search ----
+
+// A repo's file path in a URL.
+std::string url_path(const std::string &p) {
+    std::string r;
+    for (unsigned char ch : p) {
+        if (isalnum(ch) || strchr("-._~/", ch)) r += (char)ch;
+        else r += fmt("%%%02X", ch);
+    }
+    return r;
+}
+
+// A found file's name as a plain one (what /download takes too).
+std::string plain_file(std::string f) {
+    for (char &ch : f)
+        if (!isalnum((unsigned char)ch) && !strchr("._+-", ch)) ch = '_';
+    if (!f.empty() && f[0] == '.') f[0] = '_';
+    return f;
+}
+
+bool hit_downloading(const App::HfHit &h) {
+    return g->dl_on && !g->dl.cat && g->dl.file == h.file && g->dl.sha256 == h.sha256 && g->downloader.running();
+}
+
+// The row of the file on this machine that a found one is, or -1.
+int hit_here(const App::HfHit &h) {
+    for (int i = 0; i < (int)g->models.size(); i++)
+        if (g->models[i].name == h.file) return i;
+    return -1;
+}
+
+void download_hit(const App::HfHit &h) {
+    App::DlJob j;
+    j.name = h.name;
+    j.file = h.file;
+    j.url = "https://huggingface.co/" + url_path(h.repo) + "/resolve/" + h.commit + "/" + url_path(h.path);
+    j.sha256 = h.sha256;
+    j.bytes = h.bytes;
+    start_fetch(j);
+}
+
+// Looks on Hugging Face for words, with the desktop app's search
+// (`tokenstation --hf-search`: the models ts5 runs that fit this GPU's
+// memory, the most downloaded first). search_follow reads what it prints.
+void start_search(const std::string &words) {
+    const std::string app = which("tokenstation");
+    if (app.empty()) {
+        show_toast("The search is the tokenstation app's, and it isn't installed here. /download takes a link",
+                   g->th->bad, 7);
+        return;
+    }
+    g->hf_query = words;
+    g->hf_hits.clear();
+    g->hf_problem.clear();
+    g->hf_checked = g->hf_of = g->hf_too_big = g->hf_cant = 0;
+    g->hf_done = false;
+    g->hf_parsed = 0;
+    g->hf_jump = true;
+    std::string cmd = shell_quote(app) + " --hf-search " + shell_quote(words);
+    const double memory = g->sens.gtt_total + g->sens.vram_total;
+    if (memory > 0) cmd += fmt(" --gpu-memory %.0f", memory);
+    if (!g->searcher.start(cmd + " 2>/dev/null", "Searching Hugging Face"))
+        g->hf_problem = "The search couldn't start.";
+}
+
+void search_follow() {
+    g->searcher.pump();
+    for (; g->hf_parsed < g->searcher.lines.size(); g->hf_parsed++) {
+        ts5::Json j;
+        if (!ts5::Json::parse(g->searcher.lines[g->hf_parsed], j)) continue;
+        if (!j["error"].is_null()) {
+            g->hf_problem = j["error"].str("The search failed.");
+        } else if (j["done"].boolean(false)) {
+            g->hf_done = true;
+            g->hf_too_big = (int)j["too_big"].num(0);
+            g->hf_cant = (int)j["cant_run"].num(0);
+        } else if (!j["file"].str().empty()) {
+            App::HfHit h;
+            h.name = j["name"].str();
+            h.note = j["note"].str();
+            h.repo = j["repo"].str();
+            h.path = j["path"].str();
+            h.file = plain_file(j["file"].str());
+            h.commit = j["commit"].str();
+            h.sha256 = j["sha256"].str();
+            if (h.sha256.size() != 64 || h.sha256.find_first_not_of("0123456789abcdef") != std::string::npos)
+                h.sha256.clear();
+            h.bytes = j["bytes"].num(0);
+            h.context = (int)j["context"].num(0);
+            if (!h.repo.empty() && !h.path.empty() && !h.commit.empty()) g->hf_hits.push_back(h);
+        } else if (j["of"].num(0) > 0) {
+            g->hf_checked = (int)j["checked"].num(0);
+            g->hf_of = (int)j["of"].num(0);
+        }
+    }
+    if (g->hf_query.empty() || !g->searcher.done || g->searcher.t1 <= 0) return;
+    if (!g->hf_done && g->hf_problem.empty()) g->hf_problem = "The search ended without an answer.";
+    if (g->hf_jump && g->hf_done && !g->hf_hits.empty() && g->cur == MODELS)
+        g->model_sel = (int)g->models.size() + (int)catalog_missing().size();
+    g->hf_jump = false;
+}
+
+// The search's line on Models: how to search, how it's going, what came of it.
+std::string search_line(uint32_t &color) {
+    const Theme &t = *g->th;
+    color = t.dim;
+    if (g->hf_query.empty()) return "Hugging Face, for other models that fit here: press S and type the words";
+    const std::string q = "\"" + g->hf_query + "\" on Hugging Face: ";
+    if (!g->hf_problem.empty()) {
+        color = t.bad;
+        return q + g->hf_problem;
+    }
+    if (!g->hf_done) {
+        color = t.accent2;
+        return q + (g->hf_of > 0 ? fmt("looking at model %d of %d…", std::min(g->hf_checked + 1, g->hf_of), g->hf_of)
+                                 : std::string("asking…"));
+    }
+    std::string left;
+    if (g->hf_too_big) left += fmt(" · %d too big for this GPU", g->hf_too_big);
+    if (g->hf_cant) left += fmt(" · %d of a kind ts5 can't run", g->hf_cant);
+    if (g->hf_hits.empty()) {
+        color = t.warn;
+        return q + (left.empty() ? "no models match" : "none that fit here") + left;
+    }
+    return q + fmt("%d fit here", (int)g->hf_hits.size()) + left;
 }
 
 void set_fan(const std::string &mode) {
@@ -1152,16 +1358,19 @@ void draw_top_bar() {
         }
     }
     x += 1;
+    g->tab_x.clear();
     for (int i = 0; i < N_SCREENS; i++) {
         const bool on = i == g->cur;
         const std::string label = fmt(" F%d %s ", i + 1, kScreenNames[i]);
         if (x + text_width(label) > s.w - 2) break;
+        const int x0 = x;
         if (on)
             x = s.put(x, 0, label, Style(t.bg, t.accent, BOLD));
         else {
             s.put(x, 0, fmt(" F%d", i + 1), Style(t.dim, t.panel));
             x = s.put(x + 3 + (i + 1 >= 10), 0, fmt(" %s ", kScreenNames[i]), Style(t.fg, t.panel));
         }
+        g->tab_x.push_back({x0, x});
     }
     // Clock, right.
     {
@@ -1241,7 +1450,9 @@ void draw_top_bar() {
                           {k(used) + "/" + k(sv.n_ctx), Style(f > 0.9 ? t.bad : f > 0.75 ? t.warn : t.fg, t.panel2, BOLD)}},
                          0});
     }
-    if (g->last_gen_tps > 0) items.push_back({{{fmt("%.1f", g->last_gen_tps), Style(t.good, t.panel2, BOLD)}, {" tok/s", lab}}, 1});
+    // The last answer's speed, while there is a model it can be about.
+    if (g->last_gen_tps > 0 && sv.online && !sv.model.empty())
+        items.push_back({{{fmt("%.1f", g->last_gen_tps), Style(t.good, t.panel2, BOLD)}, {" tok/s", lab}}, 1});
     const Sensors &z = g->sens;
     if (z.gtt_total > 0) {
         const double used = z.gtt_used + z.vram_used, total = z.gtt_total + z.vram_total;
@@ -1603,6 +1814,19 @@ void draw_models() {
         s.put(x0 + 25, y,
               fit("⇣ " + g->dl.name + (total > 0 ? fmt(" %.0f%%", 100.0 * done / total) : " " + gib(done)), w - 26),
               S(t.accent2));
+    } else if (g->searcher.running()) {
+        static const char *spin[] = {"◐", "◓", "◑", "◒"};
+        s.put(x0 + 25, y, fit(std::string(spin[(int)(now_s() * 6) % 4]) + " searching Hugging Face for \"" + g->hf_query + "\"…",
+                              w - 26),
+              S(t.accent2));
+    }
+    if (g->hf_typing) {
+        // The search's words, typed here (S): over whatever the line said.
+        s.fill(x0 + 24, y, w - 24, 1, S(t.fg));
+        int x = s.put(x0 + 25, y, "Search Hugging Face for: ", S(t.accent, BOLD));
+        x = s.put(x, y, fit(g->hf_input, std::max(4, w - 70), false), S(t.fg, BOLD));
+        x = s.put(x, y, fmod(now_s(), 1.0) < 0.6 ? "▌" : " ", S(t.accent2));
+        s.put(x + 2, y, fit("Enter searches · Esc cancels", std::max(0, x0 + w - x - 3)), S(t.dim));
     }
     y += 2;
     const int name_w = std::max(20, w - 46);
@@ -1612,7 +1836,7 @@ void draw_models() {
     s.put(x0 + 3 + name_w + 30, y, "Settings", S(t.dim, BOLD));
     y++;
     const auto cat = catalog_missing();
-    const int nl = (int)g->models.size(), nc = (int)cat.size(), n = nl + nc;
+    const int nl = (int)g->models.size(), nc = (int)cat.size(), nh = (int)g->hf_hits.size(), n = nl + nc + nh;
     if (g->model_sel >= n) g->model_sel = std::max(0, n - 1);
     if (g->models.empty()) {
         s.put(x0 + 3, y++, "No .gguf files here yet: download one below.", S(t.warn, BOLD));
@@ -1624,12 +1848,17 @@ void draw_models() {
     // The rows on screen: the files here, a divider, then the catalog's (-1: the divider).
     std::vector<int> disp;
     for (int i = 0; i < nl; i++) disp.push_back(i);
-    const bool url_dl = g->dl_on && !g->dl.cat;  // a /download URL, shown under the catalog
+    // A /download URL, shown under the catalog (one the search found has its own row).
+    bool url_dl = g->dl_on && !g->dl.cat;
+    for (const App::HfHit &h : g->hf_hits) url_dl = url_dl && !(g->dl.file == h.file && g->dl.sha256 == h.sha256);
     if (nc || url_dl) {
         disp.push_back(-1);
         for (int i = 0; i < nc; i++) disp.push_back(nl + i);
         if (url_dl) disp.push_back(-2);
     }
+    // The search (-3: its line), and what it found.
+    disp.push_back(-3);
+    for (int i = 0; i < nh; i++) disp.push_back(nl + nc + i);
     int sel_row = 0;
     for (int r = 0; r < (int)disp.size(); r++)
         if (disp[r] == g->model_sel) sel_row = r;
@@ -1649,6 +1878,39 @@ void draw_models() {
                       S(t.accent2));
             } else {
                 s.put(x0 + 3 + name_w + 10, y, fit("starting… " + gib(done), w - name_w - 14), S(t.dim));
+            }
+            continue;
+        }
+        if (i == -3) {
+            uint32_t c;
+            const std::string l = search_line(c);
+            s.put(x0 + 1, y, "⇣ Search", S(t.accent, BOLD));
+            s.put(x0 + 13, y, fit(l, w - 14), S(c));
+            continue;
+        }
+        if (i >= nl + nc) {
+            const App::HfHit &h = g->hf_hits[i - nl - nc];
+            const bool on = i == g->model_sel;
+            const Style row = on ? Style(t.fg, t.panel2) : Style(t.fg, t.bg);
+            s.fill(x0, y, w, 1, row);
+            s.put(x0, y, on ? "▌" : " ", Style(t.accent, row.bg));
+            const bool going = hit_downloading(h), here = hit_here(h) >= 0;
+            s.put(x0 + 1, y, going ? "⇣" : here ? "✓" : "+", Style(going ? t.accent2 : here ? t.good : t.dim, row.bg, BOLD));
+            s.put(x0 + 3, y, fit(h.name, name_w - 1), Style(t.fg, row.bg));
+            s.put(x0 + 3 + name_w, y, fmt("%8s", gib(h.bytes).c_str()), Style(t.fg, row.bg));
+            if (going) {
+                double done, total, mbps;
+                download_progress(done, total, mbps);
+                const double frac = done / std::max(1.0, h.bytes);
+                bar(s, x0 + 3 + name_w + 10, y, 18, frac, {t.accent, t.accent2}, mix(t.dim, row.bg, 0.6));
+                s.put(x0 + 3 + name_w + 30, y, fit(fmt("%.0f%% %.0f MB/s", frac * 100, mbps), w - name_w - 34),
+                      Style(t.accent2, row.bg));
+            } else {
+                s.put(x0 + 3 + name_w + 10, y, fit(h.note, 19), Style(t.dim, row.bg));
+                const double part = here ? 0 : part_bytes(download_dir(), h.file);
+                s.put(x0 + 3 + name_w + 30, y,
+                      here ? "here" : part > 0 ? fmt("%.0f%% so far", 100 * part / std::max(1.0, h.bytes)) : "↵ download",
+                      Style(here ? t.good : part > 0 ? t.warn : t.dim, row.bg, ITALIC));
             }
             continue;
         }
@@ -1705,7 +1967,62 @@ void draw_models() {
         s.put(x0 + 3 + name_w + 30, y, tuned ? (m.tuned_on.empty() ? "tuned" : m.tuned_on) : m.tested ? "tested" : "—",
               Style(tuned || m.tested ? t.good : t.dim, row.bg));
     }
+    // A download's two lines: what it's doing, in words, and the steps it goes through.
+    auto working = [&](int &yy, double total) {
+        double done, t2, mbps;
+        download_progress(done, t2, mbps);
+        const double secs = now_s() - g->downloader.t0;
+        const int stage = done <= 0 && mbps <= 0 ? 0 : done < total ? 1 : 2;
+        static const char *spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+        std::string now = stage == 0 ? "Connecting to Hugging Face"
+                          : stage == 1 ? fmt("Downloading: %s of %s", gib(done).c_str(), gib(total).c_str()) +
+                                             (mbps > 0 ? fmt(" at %.0f MB/s", mbps) : "")
+                                       : "Checking it's the exact file (SHA-256)";
+        now += " · " + mins(secs) + " so far";
+        if (stage == 1 && mbps > 0) now += " · about " + mins((total - done) / 1e6 / mbps) + " left";
+        s.put(x0 + 2, yy, spin[(int)(now_s() * 10) % 10], S(t.accent2, BOLD));
+        s.put(x0 + 4, yy++, fit("Working: " + now, w - 6), S(t.accent2, BOLD));
+        int xx = x0 + 4;
+        const char *names[] = {"connect", "download", "check it's the exact file", "ready to load"};
+        for (int k = 0; k < 4; k++) {
+            const bool d = k < stage, r = k == stage;
+            xx = s.put(xx, yy, d ? "✓ " : r ? "✱ " : "○ ", S(d ? t.good : r ? t.accent2 : t.dim, BOLD));
+            xx = s.put(xx, yy, names[k], S(d ? t.fg : r ? t.accent2 : t.dim, r ? BOLD : 0));
+            if (k < 3) xx = s.put(xx, yy, "   ", S(t.dim));
+            if (xx > x0 + w - 4) break;
+        }
+        yy++;
+    };
     // The chosen one's details.
+    if (g->model_sel >= nl + nc && g->model_sel < n) {
+        const App::HfHit &h = g->hf_hits[g->model_sel - nl - nc];
+        const int dy = s.h - 1 - detail_h;
+        box(s, x0, dy, w, detail_h, S(mix(t.accent, t.bg, 0.5)), Style(t.fg, t.bg), h.name, S(t.accent, BOLD));
+        int yy = dy + 1;
+        auto line = [&](const std::string &label, const std::string &v, uint32_t c) {
+            s.put(x0 + 2, yy, label, S(t.dim));
+            s.put(x0 + 20, yy++, fit(v, w - 22), S(c));
+        };
+        const std::string dir = download_dir();
+        const bool maybe = h.note.find("May not chat well") != std::string::npos;
+        line("From", "huggingface.co/" + h.repo + " @ " + h.commit.substr(0, 10), t.dim);
+        line("File", h.file + "  (" + gib(h.bytes) + ")", t.fg);
+        line("Chat length", (h.context > 0 ? "about " + with_commas(h.context) + " tokens in this GPU's memory" : "fits") +
+                                std::string(maybe ? " · its name doesn't say it's made for chat" : ""),
+             maybe ? t.warn : t.fg);
+        const double fb = free_bytes(dir);
+        line("Goes to", dir + (fb >= 0 ? "  (" + gib(fb) + " free)" : ""), fb >= 0 && fb < h.bytes ? t.bad : t.fg);
+        if (hit_downloading(h)) {
+            working(yy, h.bytes);
+        } else if (hit_here(h) >= 0) {
+            line("", "It's here already: Enter goes to it in the list above", t.good);
+        } else {
+            line("Tested", "no, the search found it: once it's here, C checks its answers on this GPU and T tunes it", t.warn);
+            line("", "Enter downloads it, checked by SHA-256 · X stops it, and it goes on from there later", t.dim);
+        }
+        draw_bottom_bar("↑↓ choose|Enter download|S search|Tab/1-5 pages|X stop download|R rescan");
+        return;
+    }
     if (g->model_sel >= nl && g->model_sel < n) {
         const app::CatalogEntry &e = *cat[g->model_sel - nl];
         const int dy = s.h - 1 - detail_h;
@@ -1721,36 +2038,9 @@ void draw_models() {
         line("From", std::string("huggingface.co/") + e.repo + " @ " + std::string(e.commit).substr(0, 10), t.dim);
         const double fb = free_bytes(dir);
         line("Goes to", dir + (fb >= 0 ? "  (" + gib(fb) + " free)" : ""), fb >= 0 && fb < (double)e.bytes ? t.bad : t.fg);
-        if (downloading(e)) {
-            // What it's doing, in words, and the steps a download goes through.
-            double done, total, mbps;
-            download_progress(done, total, mbps);
-            total = (double)e.bytes;
-            const double secs = now_s() - g->downloader.t0;
-            const int stage = done <= 0 && mbps <= 0 ? 0 : done < total ? 1 : 2;
-            static const char *spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
-            std::string now = stage == 0 ? "Connecting to Hugging Face"
-                              : stage == 1 ? fmt("Downloading: %s of %s", gib(done).c_str(), gib(total).c_str()) +
-                                                 (mbps > 0 ? fmt(" at %.0f MB/s", mbps) : "")
-                                           : "Checking it's the exact file (SHA-256)";
-            now += " · " + mins(secs) + " so far";
-            if (stage == 1 && mbps > 0) now += " · about " + mins((total - done) / 1e6 / mbps) + " left";
-            s.put(x0 + 2, yy, spin[(int)(now_s() * 10) % 10], S(t.accent2, BOLD));
-            s.put(x0 + 4, yy++, fit("Working: " + now, w - 6), S(t.accent2, BOLD));
-            int xx = x0 + 4;
-            const char *names[] = {"connect", "download", "check it's the exact file", "ready to load"};
-            for (int k = 0; k < 4; k++) {
-                const bool d = k < stage, r = k == stage;
-                xx = s.put(xx, yy, d ? "✓ " : r ? "✱ " : "○ ", S(d ? t.good : r ? t.accent2 : t.dim, BOLD));
-                xx = s.put(xx, yy, names[k], S(d ? t.fg : r ? t.accent2 : t.dim, r ? BOLD : 0));
-                if (k < 3) xx = s.put(xx, yy, "   ", S(t.dim));
-                if (xx > x0 + w - 4) break;
-            }
-            yy++;
-        } else {
-            line("", "Enter downloads it · X stops it, and it goes on from there later · any other: /download URL", t.dim);
-        }
-        draw_bottom_bar("↑↓ choose|Enter download|Tab/1-5 pages|X stop download|R rescan");
+        if (downloading(e)) working(yy, (double)e.bytes);
+        else line("", "Enter downloads it · X stops it, and it goes on from there later · any other: S searches", t.dim);
+        draw_bottom_bar("↑↓ choose|Enter download|S search|Tab/1-5 pages|X stop download|R rescan");
         return;
     }
     if (nl > 0 && g->model_sel < nl) {
@@ -1825,7 +2115,7 @@ void draw_models() {
         if (is_loaded)
             setting("Context", with_commas(sv.n_ctx) + " tokens", "how long a chat can get, as loaded");
     }
-    draw_bottom_bar("↑↓ choose|Enter load|Tab/1-5 pages|T tune|H get helper|C GPU check|B speed test|R rescan");
+    draw_bottom_bar("↑↓ choose|Enter load|Tab/1-5 pages|T tune|H get helper|S search|C GPU check|B speed test|R rescan");
 }
 
 // ---- Settings ----
@@ -1902,8 +2192,11 @@ std::vector<SetRow> settings_rows() {
         r.push_back(x);
     }
     {
-        SetRow x{"Temperature", c.temp < 0 ? "the model's own" : fmt("%.1f", c.temp),
-                 "lower is steadier, higher more varied"};
+        // The default is the server's own for the loaded model (0.7, or what
+        // ts5 checked for that model), which /v1/models reports.
+        const double own = server().temperature;
+        SetRow x{"Temperature", c.temp >= 0 ? fmt("%.1f", c.temp) : own >= 0 ? fmt("default (%.1f)", own) : "default",
+                 "how much chance picks each word: lower is steadier (code, facts), higher more varied"};
         x.change = [save](int d) {
             double &t = g->cfg.temp;
             if (t < 0) t = d > 0 ? 0.1 : 1.5;
@@ -1931,7 +2224,7 @@ std::vector<SetRow> settings_rows() {
         // The services size their own: this is for a model ts5-tui loads.
         const bool svc = unit_active("tokenstation"), tv = !svc && unit_active("tokenstation-tv");
         SetRow x{"Context", c.serve_ctx ? with_commas(c.serve_ctx) + " tokens" : "auto",
-                 svc  ? "for models ts5-tui loads itself; the service's is CONTEXT in /etc/default/tokenstation"
+                 svc  ? "for models ts5-tui loads; the service's is CONTEXT in /etc/default/tokenstation"
                  : tv ? "for models ts5-tui loads itself; the TV app's is in its own Settings"
                       : "the longest a chat can get; auto fits GPU memory. Load the model again to apply it"};
         x.change = [save](int d) {
@@ -1970,9 +2263,30 @@ std::vector<SetRow> settings_rows() {
     }
     {
         SetRow x{"tmux", c.tmux ? "on" : "off",
-                 "from a plain terminal (ssh), its own session that outlives a dropped connection; never in an IDE"};
+                 "over ssh: its own session, which outlives a dropped connection; never in an IDE"};
         x.change = [save](int) {
             g->cfg.tmux = !g->cfg.tmux;
+            save();
+        };
+        r.push_back(x);
+    }
+    {
+        SetRow x{"Mouse", c.mouse ? "on" : "off",
+                 c.mouse ? "click a Thought line to read it, [copy] to copy, a page's name; drag to select text"
+                         : "the terminal keeps the mouse: a drag selects what's on screen; Ctrl+T, Ctrl+Y work"};
+        x.change = [save](int) {
+            g->cfg.mouse = !g->cfg.mouse;
+            set_mouse(g->cfg.mouse);
+            save();
+        };
+        r.push_back(x);
+    }
+    {
+        SetRow x{"When you quit", c.keep_model ? "the model stays loaded" : "the model is unloaded",
+                 c.keep_model ? "a model ts5-tui loaded keeps serving the API, and keeps its GPU memory"
+                              : "a model ts5-tui loaded stops too and its GPU memory is free (Ctrl+A d leaves both)"};
+        x.change = [save](int) {
+            g->cfg.keep_model = !g->cfg.keep_model;
             save();
         };
         r.push_back(x);
@@ -2023,7 +2337,7 @@ void draw_settings() {
     }
     y++;
     if (y < s.h - 2) {
-        s.put(x0 + 2, y, fit("Each model's own settings (its helper, prompt math, chat memory) are on Models: tested models bring theirs.",
+        s.put(x0 + 2, y, fit("A model's own settings (helper, prompt math, chat memory) are on Models: tested models bring theirs.",
                              w - 4), S(t.dim));
     }
     draw_bottom_bar(g->editing ? "Enter save|Esc cancel" : "↑↓ choose|←→ change|Tab/1-5 pages|Enter edit");
@@ -2078,7 +2392,7 @@ void draw_chat() {
     v.why = sv.why;
     draw_chat_screen(g->scr, *g->th, g->chat, v);
     draw_bottom_bar(g->chat.busy() ? "Esc stop|PgUp/PgDn scroll|Ctrl+T thoughts"
-                                   : "Enter send|Tab next page|Ctrl+J new line|Ctrl+N new chat|Ctrl+T thoughts|PgUp/PgDn scroll");
+                                   : "Enter send|Tab next page|Ctrl+Y copy|Ctrl+T thoughts|Ctrl+N new chat|Ctrl+J new line|PgUp/PgDn scroll");
 }
 
 void draw() {
@@ -2154,6 +2468,7 @@ const ModelFile *find_model(const std::string &q) {
 }
 
 void request_quit();
+void copy_out(const std::string &text, const std::string &what);
 
 void run_command(const std::string &line) {
     std::string cmd = line, arg;
@@ -2236,6 +2551,20 @@ void run_command(const std::string &line) {
             for (const app::CatalogEntry *x : catalog_models())
                 l += std::string("- `") + x->key + "` " + x->name + " (" + gib((double)x->bytes) + ", " + x->good_for + ")\n";
             chat_note(c, l);
+        }
+    } else if (cmd == "/search") {
+        if (arg.empty()) {
+            chat_note(c, "`/search WORDS` looks on Hugging Face for models ts5 runs that fit this GPU's memory, the "
+                         "most downloaded first: `/search mistral 7b`, `/search qwen3 coder`. What it finds is listed "
+                         "on the Models page, under the catalog; Enter downloads one.");
+            return;
+        }
+        scan_models();
+        start_search(arg);
+        if (g->searcher.running()) {
+            // Models, at the end of its list, where the search's line is.
+            go(MODELS);
+            g->model_sel = std::max(0, (int)g->models.size() + (int)catalog_missing().size() - 1);
         }
     } else if (cmd == "/chats") {
         g->chat_list = list_chats(arg);
@@ -2356,12 +2685,57 @@ void run_command(const std::string &line) {
         }
         if (found) c.scroll = std::max(0, from_end - 2);
         else show_toast("Not in this chat: " + arg, g->th->warn, 3);
+    } else if (cmd == "/copy") {
+        // The last answer; code: its last code block; think: what it
+        // thought; all: the whole chat.
+        const int last = chat_last_answer(c);
+        std::string what, text;
+        if (arg == "all") text = chat_copy_text(c, -1, -1, false, &what);
+        else if (last < 0) text.clear();
+        else if (arg == "think" || arg == "thinking") text = chat_copy_text(c, last, -1, true, &what);
+        else if (arg == "code") {
+            for (int b = 0;; b++) {
+                const std::string one = chat_copy_text(c, last, b, false, &what);
+                if (one.empty()) break;
+                text = one;
+            }
+            if (text.empty()) {
+                show_toast("The last answer has no code block", g->th->warn, 3);
+                return;
+            }
+        } else if (arg.empty()) text = chat_copy_text(c, last, -1, false, &what);
+        else {
+            chat_note(c, "`/copy` takes nothing (the last answer), `code` (its last code block), `think` (what it "
+                         "thought) or `all` (the whole chat).");
+            return;
+        }
+        copy_out(text, what);
+    } else if (cmd == "/unload") {
+        const pid_t own = own_server_pid();
+        const ServerState sv = server();
+        if (own > 0) {
+            kill(own, SIGTERM);
+            for (int i = 0; i < 30 && kill(own, 0) == 0; i++) usleep(100000);
+            g->load_target.clear();
+            show_toast((sv.model.empty() ? std::string("The model") : sv.model) + " is unloaded: its GPU memory is free",
+                       g->th->good, 5);
+            g->poll_now = true;
+        } else if (sv.online) {
+            show_toast("ts5-tui didn't start this server (the service, the TV app or another ts5 serve): stop it there",
+                       g->th->warn, 6);
+        } else {
+            show_toast("No model is loaded", g->th->dim, 3);
+        }
     } else if (cmd == "/help") {
         std::string h = "**Commands**\n";
         for (auto &k : slash_commands())
             h += std::string("`") + k.name + (*k.args ? std::string(" ") + k.args : "") + "`  " + k.what + "\n";
         h += "\n**Keys**  Enter send · Ctrl+J or Alt+Enter new line · ↑↓ history · Tab completes · Esc stops an answer · "
-             "Ctrl+T thinking · Ctrl+N new chat (this one is kept: `/chats`) · PgUp/PgDn scroll · Ctrl+Q, `exit` or `q` quits\n\n"
+             "Ctrl+T thinking · Ctrl+Y copy the last answer · Ctrl+N new chat (this one is kept: `/chats`) · PgUp/PgDn "
+             "scroll · Ctrl+Q, `exit` or `q` quits\n\n"
+             "**Mouse**  click a **Thought for** line to read the thinking, **[copy]** under an answer or on a code block "
+             "to copy it, a page's name to go there; the wheel scrolls. Dragging over the chat opens it as plain text to "
+             "select with the terminal's own selection (Settings → Mouse: off leaves every drag to the terminal).\n\n"
              "**Pages**  F1 Chat · F2 Models · F3 Status · F4 Settings · F5 Logs. On a Mac, where macOS keeps the F keys: "
              "**Tab** and **Shift+Tab** step through the pages, **1** to **5** on any page but Chat, **fn+F1** to **fn+F5**, "
              "Option+1 to 5 when the terminal sends Option as Meta (Esc+), or `/chat` `/models` `/status` `/settings` `/logs`. "
@@ -2396,6 +2770,7 @@ void go(ScreenId to) {
     }
     g->cur = to;
     g->editing = false;
+    g->hf_typing = false;
     if (to == MODELS) scan_models();
     if (to == LOGS) pick_logs();
 }
@@ -2449,6 +2824,39 @@ bool nav_key(const Event &e) {
     return false;
 }
 
+// T, C and B on Models start a job that takes the GPU for minutes: they ask
+// first, so a letter typed on the wrong page starts nothing. (/tune, /check
+// and /bench are typed on purpose and don't ask.)
+void ask_job(const ModelFile &m, char which) {
+    // A job that runs is shown; a tested model's tuning and a helper-size
+    // file have their own words.
+    if (g->tuner.running() || (which == 't' && ((m.tested && m.tune_file.empty()) || m.size < 1.5 * 1024 * 1024 * 1024))) {
+        if (which == 't') start_tune(m);
+        else start_gpu_job(m, which == 'c');
+        return;
+    }
+    const std::string id = api_id(m.name);
+    const std::string aside =
+        own_server_pid() > 0 ? " The model loaded now steps aside for it and is loaded again after." : "";
+    const ModelFile copy = m;
+    if (which == 't') {
+        g->ask_title = " Tune this model? ";
+        g->ask_text = "Tuning measures " + id + " on this GPU and keeps its fastest settings: 10 to 20 minutes." + aside +
+                      " Start?";
+        g->ask_yes = [copy] { start_tune(copy, true); };
+    } else if (which == 'c') {
+        g->ask_title = " Check this model? ";
+        g->ask_text = "A GPU check compares " + id + "'s answers on the GPU with the CPU's: a few minutes the first "
+                      "time, seconds after." + aside + " Start?";
+        g->ask_yes = [copy] { start_gpu_job(copy, true); };
+    } else {
+        g->ask_title = " Speed test? ";
+        g->ask_text = "A speed test loads " + id + ", reads a 512-token prompt and writes 128 tokens: about a minute." +
+                      aside + " Start?";
+        g->ask_yes = [copy] { start_gpu_job(copy, false); };
+    }
+}
+
 void key_models(const Event &e) {
     if (g->show_tune) {
         if (e.key == K_ESC) g->show_tune = false;
@@ -2460,10 +2868,31 @@ void key_models(const Event &e) {
         } else if (e.key == K_CHAR && (e.ch == "q" || e.ch == "Q")) g->show_tune = false;
         return;
     }
+    if (g->hf_typing) {
+        // The search's words, typed on this page.
+        std::string &in = g->hf_input;
+        if (e.key == K_CHAR || e.key == K_PASTE) {
+            for (char ch : e.ch)
+                if ((unsigned char)ch >= 0x20) in += ch;
+        } else if (e.key == K_BACKSPACE) {
+            while (!in.empty() && ((unsigned char)in.back() & 0xC0) == 0x80) in.pop_back();
+            if (!in.empty()) in.pop_back();
+        } else if (e.key == K_CTRL && e.ch == "u") {
+            in.clear();
+        } else if (e.key == K_ENTER || e.key == K_ESC) {
+            g->hf_typing = g->editing = false;
+            while (!in.empty() && in.back() == ' ') in.pop_back();
+            if (e.key == K_ENTER && !in.empty()) start_search(in);
+        }
+        return;
+    }
     const auto cat = catalog_missing();
-    const int nl = (int)g->models.size(), n = nl + (int)cat.size();
-    const bool local = g->model_sel < nl, in_cat = g->model_sel >= nl && g->model_sel < n;
+    const int nl = (int)g->models.size(), nc = (int)cat.size(), n = nl + nc + (int)g->hf_hits.size();
+    const bool local = g->model_sel < nl, in_cat = g->model_sel >= nl && g->model_sel < nl + nc;
+    const bool in_hf = g->model_sel >= nl + nc && g->model_sel < n;
     auto key_is = [&](const char *k) { return e.key == K_CHAR && strcasecmp(e.ch.c_str(), k) == 0; };
+    if (e.key == K_UP || e.key == K_DOWN || e.key == K_PGUP || e.key == K_PGDN || e.key == K_HOME || e.key == K_END)
+        g->hf_jump = false;
     if (e.key == K_UP && n) g->model_sel = (g->model_sel + n - 1) % n;
     else if (e.key == K_DOWN && n) g->model_sel = (g->model_sel + 1) % n;
     else if (e.key == K_PGUP) g->model_sel = std::max(0, g->model_sel - 10);
@@ -2472,6 +2901,18 @@ void key_models(const Event &e) {
     else if (e.key == K_END && n) g->model_sel = n - 1;
     else if (e.key == K_ENTER && local) load_or_ask(g->models[g->model_sel]);
     else if ((e.key == K_ENTER || key_is("d")) && in_cat) start_download(*cat[g->model_sel - nl]);
+    else if ((e.key == K_ENTER || key_is("d")) && in_hf) {
+        const App::HfHit h = g->hf_hits[g->model_sel - nl - nc];
+        if (const int at = hit_here(h); at >= 0) {
+            g->model_sel = at;
+            show_toast(h.file + " is here: Enter loads it", g->th->dim, 4);
+        } else {
+            download_hit(h);
+        }
+    } else if (key_is("s")) {  // the search: its words are typed here
+        g->hf_typing = g->editing = true;
+        g->hf_input.clear();  // new words: the last search's stay listed until Enter
+    }
     else if (key_is("x") && g->downloader.running()) {
         g->downloader.stop();
         show_toast("Download stopped: what's there is kept for next time", g->th->warn, 4);
@@ -2481,9 +2922,8 @@ void key_models(const Event &e) {
         else if (m.helper_here) show_toast("Its helper is already here", g->th->dim, 3);
         else if (!helper_entry(m)) show_toast("ts5-tui has no download for that helper: /download takes a link", g->th->warn, 5);
         else download_helper(m);
-    } else if (key_is("t") && local) start_tune(g->models[g->model_sel]);
-    else if (key_is("c") && local) start_gpu_job(g->models[g->model_sel], true);
-    else if (key_is("b") && local) start_gpu_job(g->models[g->model_sel], false);
+    } else if ((key_is("t") || key_is("c") || key_is("b")) && local)
+        ask_job(g->models[g->model_sel], (char)tolower(e.ch[0]));
     else if (key_is("t") && g->tuner.lines.size()) g->show_tune = true;
     else if (key_is("r")) {
         scan_models();
@@ -2555,11 +2995,263 @@ void key_chat(const Event &e) {
     rq.max_tokens = g->cfg.max_tokens;
     for (auto &m : g->models) rq.model_names.push_back(api_id(m.name));
     for (const app::CatalogEntry *x : catalog_models()) rq.catalog_names.push_back(x->key);
+    if (e.key == K_CTRL && e.ch == "y") {
+        run_command("/copy");
+        return;
+    }
     const int r = chat_key(g->chat, e, rq, g->scr.h);
     if (r == CHAT_COMMAND) run_command(g->chat.command);
 }
 
+// ---- the mouse, and copying ----
+
+// Clicks come to ts5-tui, or the terminal keeps the mouse for its own
+// selection. In ts5's own tmux session tmux has the mouse first, and hands
+// clicks on only while its own mouse option is on.
+void set_mouse(bool on) {
+    term_mouse(on);
+    if (!getenv("TS5_TUI_TMUX")) return;
+    const std::string tmux = which("tmux");
+    if (tmux.empty()) return;
+    const std::string cmd = shell_quote(tmux) + " set -g mouse " + (on ? "on" : "off") + " > /dev/null 2>&1";
+    if (system(cmd.c_str()) != 0) return;
+}
+
+std::string base64(const std::string &in) {
+    static const char *k = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    for (size_t i = 0; i < in.size(); i += 3) {
+        const uint32_t n = ((unsigned char)in[i] << 16) | (i + 1 < in.size() ? (unsigned char)in[i + 1] << 8 : 0) |
+                           (i + 2 < in.size() ? (unsigned char)in[i + 2] : 0);
+        out += k[n >> 18];
+        out += k[(n >> 12) & 63];
+        out += i + 1 < in.size() ? k[(n >> 6) & 63] : '=';
+        out += i + 2 < in.size() ? k[n & 63] : '=';
+    }
+    return out;
+}
+
+// A row of the plain view. cont: it goes on from the row before, which the
+// terminal wrapped itself, so its own selection copies the two as one line.
+struct ViewRow {
+    std::string s;
+    bool cont = false;
+    size_t at = 0;  // where its line starts in the text
+};
+
+std::vector<ViewRow> view_rows(const std::string &text, int w) {
+    std::vector<ViewRow> rows;
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        size_t e = text.find('\n', pos);
+        if (e == std::string::npos) e = text.size();
+        // Tabs to the next eighth column, as the terminal would show them;
+        // no other control characters (an escape in an answer stays text).
+        std::string line;
+        int col = 0;
+        for (auto &gl : glyphs(text.substr(pos, e - pos))) {
+            if (gl.s == "\t") {
+                const int n = 8 - col % 8;
+                line += std::string(n, ' ');
+                col += n;
+            } else if (gl.s.size() == 1 && ((unsigned char)gl.s[0] < 0x20 || gl.s[0] == 0x7f)) {
+                continue;
+            } else {
+                line += gl.s;
+                col += gl.w;
+            }
+        }
+        ViewRow r;
+        r.at = pos;
+        int width = 0;
+        for (auto &gl : glyphs(line)) {
+            if (width + gl.w > w && width > 0) {
+                rows.push_back(r);
+                r = ViewRow();
+                r.cont = true;
+                r.at = pos;
+                width = 0;
+            }
+            r.s += gl.s;
+            width += gl.w;
+        }
+        rows.push_back(r);
+        pos = e + 1;
+    }
+    return rows;
+}
+
+void view_draw() {
+    int w = 80, h = 24;
+    term_size(w, h);
+    const std::vector<ViewRow> rows = view_rows(g->view_text, w);
+    const int body = std::max(1, h - 2), n = (int)rows.size();
+    if (g->view_at != std::string::npos) {
+        // Once: the row where that byte's line starts, at the top.
+        for (int i = 0; i < n; i++)
+            if (rows[i].at <= g->view_at && !rows[i].cont) g->view_top = i;
+        g->view_at = std::string::npos;
+    }
+    g->view_top = std::max(0, std::min(g->view_top, n - body));
+    // Line wrap on: a long line is written whole and the terminal wraps it.
+    std::string out = "\x1b[0m\x1b[?7h\x1b[2J\x1b[1;1H\x1b[7m";
+    std::string head = " Select with the mouse, then copy: Cmd+C on a Mac, Ctrl+Shift+C elsewhere · Esc goes back ";
+    head = fit(head, w);
+    out += head + std::string(std::max(0, w - text_width(head)), ' ') + "\x1b[0m";
+    for (int i = 0; i < body && g->view_top + i < n; i++) {
+        const ViewRow &r = rows[g->view_top + i];
+        if (i == 0 || !r.cont) out += fmt("\x1b[%d;1H", i + 2);
+        out += r.s;
+    }
+    const int last = std::min(n, g->view_top + body);
+    std::string foot = fmt(" %s · lines %d to %d of %d", g->view_title.c_str(), g->view_top + 1, last, n);
+    if (n > body) foot += " · ↑ ↓ PgUp PgDn move";
+    if (g->view_sent) foot += " · also on the clipboard, if the terminal allows it";
+    out += fmt("\x1b[%d;1H\x1b[2m", h) + fit(foot, w - 1) + "\x1b[0m";
+    term_write(out);
+    g->view_dirty = false;
+}
+
+// Shows text alone and plain, with the mouse left to the terminal: its own
+// selection then copies exactly what the model wrote, with no bars, no
+// indent and long lines whole. at: the byte to start at.
+void view_open(const std::string &text, const std::string &title, size_t at = 0, bool sent = false) {
+    g->view_text = text;
+    g->view_title = title;
+    g->view_top = 0;
+    g->view_at = at;
+    g->view_sent = sent;
+    g->view_on = g->view_dirty = true;
+    set_mouse(false);
+}
+
+void view_close() {
+    g->view_on = false;
+    term_write("\x1b[?7l");
+    set_mouse(g->cfg.mouse);
+    g->full_redraw = true;
+}
+
+void view_key(const Event &e) {
+    int h = 24, w = 80;
+    term_size(w, h);
+    const int page = std::max(1, h - 3);
+    switch (e.key) {
+        case K_UP: case K_CTRL_UP: g->view_top -= 1; break;
+        case K_DOWN: case K_CTRL_DOWN: g->view_top += 1; break;
+        case K_PGUP: g->view_top -= page; break;
+        case K_PGDN: g->view_top += page; break;
+        case K_HOME: g->view_top = 0; break;
+        case K_END: g->view_top = 1 << 30; break;
+        case K_MOUSE: case K_NONE: return;
+        default: view_close(); return;
+    }
+    g->view_dirty = true;
+}
+
+// Text to the clipboard, every way there is from here: the terminal's own
+// (OSC 52: iTerm2 with its setting on, kitty, WezTerm, Ghostty, Windows
+// Terminal, VS Code; through ts5's tmux session too), this machine's where
+// ts5-tui runs on a desktop (wl-copy, xclip, xsel, pbcopy), and a file. No
+// terminal says whether it took it, and Apple's Terminal never does, so the
+// text is then shown plain to select by hand (view_open).
+void copy_out(const std::string &text, const std::string &what) {
+    if (text.empty()) {
+        show_toast("Nothing to copy there yet", g->th->warn, 3);
+        return;
+    }
+    {
+        std::ofstream f(state_dir() + "/copied.txt");
+        f << text << "\n";
+    }
+    std::string tool;
+    if (getenv("WAYLAND_DISPLAY") && !which("wl-copy").empty()) tool = "wl-copy";
+    else if (getenv("DISPLAY") && !which("xclip").empty()) tool = "xclip -selection clipboard";
+    else if (getenv("DISPLAY") && !which("xsel").empty()) tool = "xsel --clipboard --input";
+    else if (!which("pbcopy").empty()) tool = "pbcopy";
+    if (!tool.empty())
+        if (FILE *p = popen((tool + " > /dev/null 2>&1").c_str(), "w")) {
+            fwrite(text.data(), 1, text.size(), p);
+            pclose(p);
+        }
+    // Terminals cap the sequence (xterm at about 100,000 bytes).
+    const bool sent = text.size() <= 70000;
+    if (sent) term_write("\x1b]52;c;" + base64(text) + "\x07");
+    view_open(text, what, 0, sent || !tool.empty());
+}
+
+void handle(const Event &e);
+
+void mouse(const Event &e) {
+    if (e.mouse == M_WHEEL_UP || e.mouse == M_WHEEL_DOWN) {
+        const bool up = e.mouse == M_WHEEL_UP;
+        if (g->cur == CHAT) {
+            g->chat.scroll = std::max(0, g->chat.scroll + (up ? 3 : -3));
+        } else {
+            Event k;
+            k.key = up ? K_UP : K_DOWN;
+            handle(k);
+        }
+        return;
+    }
+    if (e.button != 0) return;
+    if (e.mouse == M_DOWN) {
+        g->down_x = e.x;
+        g->down_y = e.y;
+        g->dragged = false;
+        return;
+    }
+    if (e.mouse == M_DRAG) {
+        if (g->down_y < 0 || g->dragged || (abs(e.x - g->down_x) < 2 && e.y == g->down_y)) return;
+        g->dragged = true;
+        // A drag is someone selecting text, which the terminal can't do
+        // while the clicks come here: the chat, plain, to select from.
+        if (g->cur == CHAT && !g->ask_yes) {
+            size_t at = 0;
+            const int msg = chat_msg_at(g->chat, g->down_y);
+            const std::string text = chat_copy_text(g->chat, -1, -1, false, nullptr, &at, msg);
+            if (!text.empty()) {
+                view_open(text, "the whole chat", at);
+                return;
+            }
+        } else if (g->cur == LOGS && !g->logs.lines.empty()) {
+            std::string text;
+            for (auto &l : g->logs.lines) text += l + "\n";
+            text.pop_back();
+            view_open(text, "the log", text.size());
+            return;
+        }
+        show_toast("To select text here, hold Fn (Apple's Terminal), Option (iTerm2) or Shift (most others) while you "
+                   "drag. Settings → Mouse: off leaves every drag to the terminal.",
+                   g->th->accent, 8);
+        return;
+    }
+    if (e.mouse != M_UP) return;
+    const bool click = g->down_y == e.y && abs(e.x - g->down_x) <= 1 && !g->dragged;
+    g->down_y = -1;
+    if (!click || g->ask_yes) return;
+    if (e.y == 0) {
+        for (size_t i = 0; i < g->tab_x.size(); i++)
+            if (e.x >= g->tab_x[i].first && e.x < g->tab_x[i].second) go((ScreenId)i);
+        return;
+    }
+    if (g->cur != CHAT) return;
+    ChatHit hit;
+    if (!chat_click(g->chat, e.x, e.y, &hit) || !hit.kind) return;
+    std::string what;
+    const std::string text = chat_copy_text(g->chat, hit.msg, hit.kind == HIT_COPY_CODE ? hit.block : -1, false, &what);
+    copy_out(text, what);
+}
+
 void handle(const Event &e) {
+    if (g->view_on) {
+        view_key(e);
+        return;
+    }
+    if (e.key == K_MOUSE) {
+        mouse(e);
+        return;
+    }
     if (g->ask_yes) {
         const bool yes = e.key == K_ENTER || (e.key == K_CHAR && (e.ch == "y" || e.ch == "Y"));
         const bool no = e.key == K_ESC || (e.key == K_CHAR && (e.ch == "n" || e.ch == "N")) || e.key == K_CTRL;
@@ -2569,6 +3261,10 @@ void handle(const Event &e) {
             f();
         } else if (no) {
             g->ask_yes = nullptr;
+        } else if (e.key >= K_F1 && e.key <= K_F5) {
+            // Another page: that is a no.
+            g->ask_yes = nullptr;
+            global_key(e);
         }
         return;
     }
@@ -2590,6 +3286,8 @@ void tick() {
     if (t - g->sens_at >= 1.0) {
         g->sens = read_sensors();
         g->sens_at = t;
+        // A terminal closed under ts5-tui ends the model it loaded too.
+        term_end_with(g->cfg.keep_model ? -1 : (int)own_server_pid());
         if (g->sens.die.have) {
             g->die_hist.push_back(g->sens.die.value);
             if (g->die_hist.size() > 600) g->die_hist.erase(g->die_hist.begin(), g->die_hist.begin() + 100);
@@ -2600,6 +3298,7 @@ void tick() {
     job_follow();
     g->downloader.pump();
     finish_download();
+    search_follow();
     g->fanproc.pump();
     g->logs.pump();
     parse_log_speeds();
@@ -2625,27 +3324,91 @@ void tick() {
         } else if (g->load_own && g->loader.done && t - g->loader.t1 > 0.5 && own_server_pid() <= 0) {
             // Our own ts5 serve ended before it served: its log's last line
             // says why (not enough memory, a file that isn't a model).
+            // (The engine's log lines are written by a thread of their own:
+            // some can land after the refusal, which is then not the last.)
             std::string why;
             {
                 std::istringstream in(read_file(state_dir() + "/tui-serve.log"));
-                for (std::string l; std::getline(in, l);)
-                    if (!l.empty()) why = l;
+                std::string refused;
+                for (std::string l; std::getline(in, l);) {
+                    if (l.empty()) continue;
+                    why = l;
+                    if (l.rfind("ts5: not enough", 0) == 0) refused = l;
+                }
+                if (!refused.empty()) why = refused;
             }
             if (why.rfind("ts5: ", 0) == 0) why = why.substr(5);
             if (why.empty()) why = "ts5 serve ended without a word";
-            g->load_failed = g->load_target + " didn't load: " + why;
-            show_toast(g->load_failed, g->th->bad, 12);
-            chat_note(g->chat, "**" + g->load_target + " didn't load.** " + why + "\n\nThe Logs page (F5) has the rest.");
-            g->load_target.clear();
-            g->poll_fast = false;
-            g->logs_checked = 0;
+            const bool memory = why.rfind("not enough", 0) == 0;
+            const ModelFile *file = nullptr;
+            for (auto &x : g->models)
+                if (api_id(x.name) == g->load_target) file = &x;
+            bool again = false;
+            if (memory && g->load_ctx > 0 && file) {
+                // The Context set in Settings has no memory beside this
+                // model: the model with the longest chat that fits, said so.
+                const int asked = g->load_ctx;
+                const ModelFile copy = *file;
+                const std::string target = g->load_target;
+                g->load_target.clear();
+                g->load_short_of = asked;
+                load_model(copy, true, 0);
+                if (!g->load_target.empty()) {
+                    again = true;
+                    show_toast(fmt("A %s-token chat doesn't fit beside it: loading it with the longest chat that does…",
+                                   with_commas(asked).c_str()),
+                               g->th->warn, 8);
+                } else {
+                    // It didn't start: the failure is said below.
+                    g->load_target = target;
+                    g->load_short_of = 0;
+                }
+            }
+            if (!again) {
+                if (memory) why = memory_words(why);
+                const std::string failed = g->load_target + " didn't load: " + why;
+                // The model that was loaded before it comes back, so a
+                // failed change doesn't leave the chat with none.
+                const ModelFile *prev = nullptr;
+                for (auto &x : g->models)
+                    if (!g->load_prev.empty() && x.path == g->load_prev) prev = &x;
+                chat_note(g->chat, "**" + g->load_target + " didn't load.** " + why +
+                                       (prev ? "\n\nLoading **" + api_id(prev->name) + "** again, the model from before." : "") +
+                                       "\n\nThe Logs page (F5) has the rest.");
+                g->load_target.clear();
+                g->load_short_of = 0;
+                g->poll_fast = false;
+                g->logs_checked = 0;
+                if (prev) {
+                    const ModelFile copy = *prev;
+                    g->load_prev.clear();
+                    load_model(copy, true);
+                    g->load_prev.clear();
+                    show_toast(failed + ". Loading " + api_id(copy.name) + " again", g->th->bad, 12);
+                } else {
+                    show_toast(failed, g->th->bad, 12);
+                }
+                g->load_failed = failed;
+            }
         } else if (g->load_again && !g->load_down) {
             // The same model again: the old server goes first.
             if (g->loader.done && !sv.online) g->load_down = true;
             if (t - g->load_t0 > 240) g->load_again = false;
         } else if (sv.model == g->load_target) {
             const std::string why = helper_missing_why();
-            if (!why.empty() && !helper_wanted().empty())
+            // After a set Context that had no memory: what it got instead
+            // (the second try may fit all of it: nothing to say then).
+            const int short_of = g->load_own && sv.n_ctx < g->load_short_of ? g->load_short_of : 0;
+            g->load_short_of = 0;
+            if (short_of > 0) {
+                show_toast(fmt("Loaded with a %s-token chat, the longest that fits (Context asks for %s)",
+                               with_commas(sv.n_ctx).c_str(), with_commas(short_of).c_str()),
+                           g->th->warn, 12);
+                chat_note(g->chat, fmt("Loaded %s with a %s-token chat, the longest that fits: the %s tokens set in "
+                                       "Settings → Context have no GPU memory beside this model. Context on auto "
+                                       "always takes the longest that fits.",
+                                       sv.model.c_str(), with_commas(sv.n_ctx).c_str(), with_commas(short_of).c_str()));
+            } else if (!why.empty() && !helper_wanted().empty())
                 show_toast("Loaded " + sv.model + fmt(" in %.0f s", t - g->load_t0) + ", without its helper: " + why,
                            g->th->warn, 10);
             else
@@ -2767,6 +3530,8 @@ int run_in_tmux(int argc, char **argv) {
              "set -g status off\nset -g mouse on\nset -sg escape-time 10\nset -g history-limit 2000\n"
              "set -g default-terminal tmux-256color\nset -ga terminal-overrides \",*:Tc\"\n"
              "set -g set-titles on\nset -g set-titles-string TokenStation5\n"
+             "# A copy in ts5-tui reaches the terminal's clipboard, where the terminal takes one (OSC 52).\n"
+             "set -g set-clipboard on\nset -ga terminal-overrides \",*:Ms=\\\\E]52;%p1%s;%p2%s\\\\007\"\n"
              "# The wheel scrolls the chat (ts5-tui reads Ctrl+Up/Down as a line).\n"
              "bind -n WheelUpPane send-keys -N 3 C-Up\nbind -n WheelDownPane send-keys -N 3 C-Down\n";
     }
@@ -2883,6 +3648,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     app.truecolor = term_truecolor();
+    set_mouse(app.cfg.mouse);
     int w = 80, h = 24;
     term_size(w, h);
     app.scr.resize(w, h);
@@ -2905,6 +3671,18 @@ int main(int argc, char **argv) {
             app.full_redraw = true;
         }
         tick();
+        // The plain view stays as drawn: anything written would drop the
+        // terminal's selection.
+        if (app.view_on) {
+            if (app.view_dirty || app.full_redraw) view_draw();
+            app.full_redraw = false;
+            for (auto &e : read_events(200)) {
+                handle(e);
+                if (!app.view_on) break;
+            }
+            if (!app.view_on) app.full_redraw = true;
+            continue;
+        }
         draw();
         // Faster while something moves (an answer, a load, the shimmer).
         const bool moving = app.chat.busy() || !app.load_target.empty() || (app.cur == CHAT && app.chat.msgs.empty()) || body_top() == 3 ||
@@ -2924,24 +3702,46 @@ int main(int argc, char **argv) {
     app.tuner.stop();
     const bool was_downloading = app.downloader.running();
     app.downloader.stop();
+    app.searcher.stop();
     app.loader.pump();
     app.logs.stop();
+    if (app.view_on) term_write("\x1b[?7l");
+    set_mouse(true);  // tmux's own, back as its config has it
     term_leave();
-    {
-        const std::string t = transcript(app.chat);
-        if (getenv("TS5_TUI_TMUX")) {
-            // The tmux pane closes now: the ts5-tui outside prints it.
-            std::ofstream f(state_dir() + "/last-chat.txt");
-            f << t;
+    std::string t = transcript(app.chat);
+    if (was_downloading && app.dl_on)
+        t += fmt("ts5-tui: the download of %s stopped; /download %s goes on from where it was.\n", app.dl.name.c_str(),
+                 app.dl.cat ? app.dl.cat->key : (app.dl.url + " " + app.dl.file + (app.dl.sha256.empty() ? "" : " --sha256 " + app.dl.sha256)).c_str());
+    // A model ts5-tui loaded goes with it, and its GPU memory is free again,
+    // unless Settings → When you quit keeps it serving.
+    if (pid_t own = own_server_pid(); own > 0) {
+        const std::string name = server().model.empty() ? std::string("the model") : server().model;
+        if (app.cfg.keep_model) {
+            t += fmt("ts5-tui: %s keeps serving (pid %d, port %d). Stop it with: kill %d\n", name.c_str(), own,
+                     app.ep.port, own);
         } else {
-            fputs(t.c_str(), stdout);
+            // Asked first; one that hasn't gone in 5 s is ended outright,
+            // so the line below is true when it prints.
+            kill(own, SIGTERM);
+            for (int i = 0; i < 50 && kill(own, 0) == 0; i++) usleep(100000);
+            if (kill(own, 0) == 0) {
+                kill(own, SIGKILL);
+                for (int i = 0; i < 30 && kill(own, 0) == 0; i++) usleep(100000);
+            }
+            if (kill(own, 0) == 0)
+                t += fmt("ts5-tui: %s is still shutting down (pid %d); its GPU memory is free once it has.\n",
+                         name.c_str(), own);
+            else
+                t += fmt("ts5-tui: unloaded %s, its GPU memory is free (Settings → When you quit keeps it loaded).\n",
+                         name.c_str());
         }
     }
-    if (was_downloading && app.dl_on)
-        printf("ts5-tui: the download of %s stopped; /download %s goes on from where it was.\n", app.dl.name.c_str(),
-               app.dl.cat ? app.dl.cat->key : (app.dl.url + " " + app.dl.file + (app.dl.sha256.empty() ? "" : " --sha256 " + app.dl.sha256)).c_str());
-    if (pid_t own = own_server_pid(); own > 0)
-        printf("ts5-tui: the model it started keeps serving (pid %d, port %d). Stop it with: kill %d\n", own,
-               app.ep.port, own);
+    if (getenv("TS5_TUI_TMUX")) {
+        // The tmux pane closes now: the ts5-tui outside prints it.
+        std::ofstream f(state_dir() + "/last-chat.txt");
+        f << t;
+    } else {
+        fputs(t.c_str(), stdout);
+    }
     return 0;
 }

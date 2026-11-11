@@ -164,6 +164,16 @@ bool f16_reaches(int f16_ctx, int train);
 // log: each change gets its reason.
 KvType auto_kv_type(const HParams &hp, KvType kv, bool automatic, int train, const std::function<int(KvType)> &fit,
                     std::vector<std::string> *log = nullptr);
+// The cache a context set by number (-c N) takes: kv, and where that is an
+// automatic f16 with no memory for n_ctx tokens, the smaller cache
+// auto_kv_type may take on this model (never a Gemma; f16 under kQ8Below
+// tokens, or llama, qwen3 and qwen35), the first that holds them: 8 bits,
+// then 8-bit K and 4-bit V where V is turned. fit(t): the tokens a cache of
+// type t fits. kv where neither holds them: the load is then refused, as it
+// was. On the PS5: a 14B at its whole 32,768 tokens, 6.00 GiB in f16 beside
+// 9.00 GiB of weights and 11.50 GiB free, 2.44 GiB in 8-bit K and 4-bit V.
+KvType set_context_kv_type(const HParams &hp, KvType kv, bool automatic, int n_ctx,
+                           const std::function<int(KvType)> &fit, std::vector<std::string> *log = nullptr);
 
 // On Vulkan device `device`, with a device of its own. n_ctx 0: the context
 // that fits (fit_context), at most the model's training context, in an f16

@@ -42,6 +42,7 @@
 #include "checks.h"
 #include "cli.h"
 #include "engine.h"
+#include "log.h"
 #include "net.h"
 #include "server.h"
 #include "tokenizer.h"
@@ -542,7 +543,13 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
 #else
         err = "built without Vulkan";
 #endif
-        if (!be) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
+        if (!be) {
+            // The reason is the log's last line (ts5-tui shows it): the
+            // lines the log's own thread still holds go out first.
+            log_drain();
+            fprintf(stderr, "ts5: %s\n", err.c_str());
+            return 1;
+        }
     }
     fprintf(stderr, "ts5: %s backend ready in %.1f s, context %d\n", be->name(), (now_ms() - t0) / 1000, be->n_ctx());
     Engine eng(model, be, tok);

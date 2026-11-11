@@ -20,10 +20,12 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/model", "NAME", "load another model (Tab completes the name)"},
         {"/models", "", "the Models page (/chat /status /settings /logs: the others)"},
         {"/download", "NAME|URL", "a catalog model (Tab completes), or any URL [FILE] [--sha256 HEX]"},
+        {"/search", "WORDS", "Hugging Face, for other models that fit this GPU (listed on Models)"},
         {"/new", "", "a new chat (Ctrl+N); every chat is kept"},
         {"/chats", "[TEXT]", "your saved chats (with TEXT: the ones that have it)"},
         {"/open", "N", "open saved chat N from /chats"},
         {"/save", "[FILE]", "this chat as Markdown"},
+        {"/copy", "[code|think|all]", "copy the last answer (Ctrl+Y), its code, its thinking, or the whole chat"},
         {"/find", "TEXT", "jump to TEXT in this chat"},
         {"/status", "", "the live Status page"},
         {"/tune", "[NAME]", "ts5-tune this model (or NAME) for this PS5"},
@@ -38,7 +40,8 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/chat", "", "back to the chat"},
         {"/logs", "", "the engine's log"},
         {"/help", "", "keys and commands"},
-        {"/quit", "", "leave (exit, quit or q too; the server keeps running)"},
+        {"/unload", "", "stop the model ts5-tui loaded: its GPU memory is free"},
+        {"/quit", "", "leave (exit, quit or q too): a model ts5-tui loaded is unloaded"},
     };
     return c;
 }
@@ -51,6 +54,20 @@ struct Line {
     std::vector<std::pair<std::string, Style>> g;  // characters
     uint32_t bg = kDefault;                        // the whole row's (code blocks)
     int width = 0;
+    // A place to click (HIT_*): columns [hit_x0, hit_x1) of the line, the
+    // message it belongs to and, for a code block's mark, which block.
+    int hit = 0, hit_x0 = 0, hit_x1 = 0, msg = -1, block = -1;
+    // Adds a mark to click at the line's right end (column w), after padding.
+    void add_mark(const std::string &label, Style st, Style pad, int w, int kind, int blk = -1) {
+        const int lw = text_width(label);
+        if (width + 1 + lw > w) return;
+        add(std::string(w - lw - width, ' '), pad);
+        hit = kind;
+        block = blk;
+        hit_x0 = width;
+        add(label, st);
+        hit_x1 = width;
+    }
     void add(const std::string &s, Style st) {
         for (auto &x : glyphs(s)) {
             g.push_back({x.s, st});
@@ -222,8 +239,9 @@ void wrap(std::vector<Line> &out, const std::vector<std::pair<std::string, Style
 }
 
 // Markdown, as answers come: headings, lists, quotes, code blocks.
-void render_md(std::vector<Line> &out, const std::string &text, int w, const Theme &t) {
+void render_md(std::vector<Line> &out, const std::string &text, int w, const Theme &t, bool marks = false) {
     bool code = false;
+    int blocks = 0;
     std::string lang;
     size_t pos = 0;
     const Style base(t.fg);
@@ -244,6 +262,8 @@ void render_md(std::vector<Line> &out, const std::string &text, int w, const The
                 l.bg = t.code_bg;
                 l.add("  ", Style());
                 l.add(" " + (lang.empty() ? std::string("code") : lang) + " ", Style(t.bg, t.dim, BOLD));
+                if (marks) l.add_mark("[copy]", Style(t.accent2, t.code_bg), Style(t.dim, t.code_bg), w - 1, HIT_COPY_CODE, blocks);
+                blocks++;
                 out.push_back(l);
             } else {
                 code = false;
@@ -296,7 +316,9 @@ void render_md(std::vector<Line> &out, const std::string &text, int w, const The
             wrap(out, inline_md(trimmed.substr(d + 2), base, t), w, 2, trimmed.substr(0, d + 2), Style(t.accent2, kDefault, BOLD),
                  std::string(d + 2, ' '));
         } else {
-            wrap(out, inline_md(trimmed, base, t), w, 2);
+            // A plain line keeps its indent: code written without a fence
+            // reads as it was written.
+            wrap(out, inline_md(trimmed, base, t), w, 2 + (int)std::min<size_t>(lead, 24));
         }
         if (pos > text.size()) break;
     }
@@ -324,7 +346,10 @@ std::string thousands(int n) {
 void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
     const double now = now_s();
     std::lock_guard<std::mutex> l(c.mu);
+    size_t from = 0;
     for (size_t i = 0; i < c.msgs.size(); i++) {
+        // Each line knows its message (a click, a drag).
+        for (; from < out.size(); from++) out[from].msg = (int)i - 1;
         const Msg &m = c.msgs[i];
         out.push_back(Line());
         if (m.role == "note") {
@@ -363,10 +388,17 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
         const bool thinking_now = !m.done && content.empty() && !reasoning.empty();
         const double pulse = 0.5 + 0.5 * sin(now * 5);
         if (!reasoning.empty()) {
-            if (c.show_think) {
+            // Folded or open: this message's own (a click on its line), else
+            // what Ctrl+T set for them all.
+            const bool open = m.think_open >= 0 ? m.think_open == 1 : c.show_think;
+            const Style how(mix(t.dim, t.bg, 0.4));
+            if (open) {
                 const double secs = (m.t_think_end > 0 ? m.t_think_end : now) - (m.t_first > 0 ? m.t_first : m.t0);
                 Line th;
-                th.add(fmt("  ▾ Thinking · %.1f s", secs), Style(t.dim, kDefault, BOLD));
+                th.add(m.t0 > 0 ? fmt("  ▾ Thinking · %.1f s", secs) : std::string("  ▾ Thinking"), Style(t.dim, kDefault, BOLD));
+                th.add("  click to fold", how);
+                th.hit = HIT_THINK;
+                th.hit_x1 = th.width;
                 out.push_back(th);
                 size_t p = 0;
                 while (p <= reasoning.size()) {
@@ -382,7 +414,9 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
                 th.add("●", Style(mix(t.bg, t.accent2, 0.3 + 0.7 * pulse), kDefault, BOLD));
                 const int dots = (int)(now * 3) % 4;
                 th.add(" thinking" + std::string(dots, '.') + std::string(3 - dots, ' '), Style(t.accent2, kDefault, ITALIC));
-                th.add(fmt("  %.0f s · Ctrl+T shows it", now - (m.t_first > 0 ? m.t_first : m.t0)), Style(t.dim));
+                th.add(fmt("  %.0f s · click to read it", now - (m.t_first > 0 ? m.t_first : m.t0)), Style(t.dim));
+                th.hit = HIT_THINK;
+                th.hit_x1 = th.width;
                 out.push_back(th);
                 // The last words it thought, faint.
                 std::string tail = reasoning;
@@ -400,7 +434,9 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
                 // A saved chat's answers have no times: just that it thought.
                 th.add(m.t0 > 0 ? fmt("  ▸ Thought for %.1f s", std::max(0.0, secs)) : std::string("  ▸ Thought first"),
                        Style(t.dim, kDefault, ITALIC));
-                th.add("  Ctrl+T shows it", Style(mix(t.dim, t.bg, 0.4)));
+                th.add("  click to read it", how);
+                th.hit = HIT_THINK;
+                th.hit_x1 = th.width;
                 out.push_back(th);
             }
         }
@@ -414,7 +450,7 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
         }
         if (!content.empty()) {
             out.push_back(Line());
-            render_md(out, content, w, t);
+            render_md(out, content, w, t, m.done);
             if (!m.done) {  // the cursor where the next words come
                 if (!out.empty() && out.back().width < w) out.back().add("▌", Style(mix(t.bg, t.accent, pulse)));
             }
@@ -429,15 +465,25 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
             if (m.prompt_tps > 0) f += fmt(" · prompt %.0f tok/s", m.prompt_tps);
             if (m.t_end > m.t0) f += fmt(" · %.1f s", m.t_end - m.t0);
             if (m.stopped) f += (f.empty() ? "" : " · ") + std::string("stopped");
-            if (!f.empty()) {
+            // The answer's numbers, and its copy mark, at the right.
+            const std::string mark = content.empty() ? "" : "[copy]";
+            if (!f.empty() || !mark.empty()) {
                 Line fl;
-                const int pad = std::max(2, w - text_width(f) - 1);
+                const int pad = std::max(2, w - text_width(f) - (mark.empty() ? 0 : 3 + text_width(mark)) - 1);
                 fl.add(std::string(pad, ' '), Style());
                 fl.add(f, Style(mix(t.dim, t.bg, 0.15)));
+                if (!mark.empty()) {
+                    fl.add(f.empty() ? "" : " · ", Style(mix(t.dim, t.bg, 0.15)));
+                    fl.hit = HIT_COPY_MSG;
+                    fl.hit_x0 = fl.width;
+                    fl.add(mark, Style(t.accent2));
+                    fl.hit_x1 = fl.width;
+                }
                 out.push_back(fl);
             }
         }
     }
+    for (; from < out.size(); from++) out[from].msg = (int)c.msgs.size() - 1;
 }
 
 // ---- the title, for an empty chat ----
@@ -530,6 +576,8 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
     // The conversation, between the bars.
     const int y0 = v.top;
     int y1 = iy - 1;           // the status line
+    c.hits.clear();
+    c.row_msg.clear();
     if (c.msgs.empty()) {
         draw_empty(s, t, y0, y1, v);
     } else {
@@ -543,8 +591,11 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
         const int end = total - c.scroll;
         const int start = std::max(0, end - rows_avail);
         int y = y0 + std::max(0, rows_avail - (end - start));
+        c.row_msg.assign(s.h, -1);
         for (int i = start; i < end; i++, y++) {
             const Line &l = lines[i];
+            if (y >= 0 && y < s.h) c.row_msg[y] = l.msg;
+            if (l.hit) c.hits.push_back({y, 1 + l.hit_x0, 1 + l.hit_x1, l.hit, l.msg, l.block});
             if (l.bg != kDefault) s.fill(1, y, w - 2, 1, Style(t.fg, l.bg));
             int x = 1;
             for (auto &g : l.g) {
@@ -921,6 +972,100 @@ bool chat_save(Chat &c, const std::string &path, std::string &why) {
     return true;
 }
 
+bool chat_click(Chat &c, int x, int y, ChatHit *hit) {
+    for (const ChatHit &h : c.hits) {
+        if (h.y != y || x < h.x0 || x >= h.x1) continue;
+        if (h.kind == HIT_THINK) {
+            std::lock_guard<std::mutex> l(c.mu);
+            if (h.msg < 0 || h.msg >= (int)c.msgs.size()) return false;
+            Msg &m = c.msgs[h.msg];
+            const bool open = m.think_open >= 0 ? m.think_open == 1 : c.show_think;
+            m.think_open = open ? 0 : 1;
+            return true;
+        }
+        if (hit) *hit = h;
+        return true;
+    }
+    return false;
+}
+
+int chat_msg_at(const Chat &c, int y) { return y >= 0 && y < (int)c.row_msg.size() ? c.row_msg[y] : -1; }
+
+int chat_last_answer(Chat &c) {
+    std::lock_guard<std::mutex> l(c.mu);
+    for (int i = (int)c.msgs.size() - 1; i >= 0; i--) {
+        if (c.msgs[i].role != "assistant") continue;
+        std::string content, reasoning;
+        split_think(c.msgs[i], content, reasoning);
+        if (!content.empty()) return i;
+    }
+    return -1;
+}
+
+std::string chat_copy_text(Chat &c, int msg, int block, bool thinking, std::string *what, size_t *at, int at_msg) {
+    std::lock_guard<std::mutex> l(c.mu);
+    auto say = [&](const std::string &w) {
+        if (what) *what = w;
+    };
+    if (msg < 0) {
+        // The whole chat, as /save writes it.
+        std::string out;
+        for (size_t i = 0; i < c.msgs.size(); i++) {
+            const Msg &m = c.msgs[i];
+            if (at && (int)i <= at_msg) *at = out.size();
+            if (m.role == "note") continue;
+            std::string content, reasoning;
+            split_think(m, content, reasoning);
+            if (m.role == "user") {
+                out += "## You\n\n" + content + "\n\n";
+                continue;
+            }
+            out += "## TokenStation5" + (m.model.empty() ? "" : " (" + m.model + ")") + "\n\n";
+            if (!reasoning.empty() && (m.think_open >= 0 ? m.think_open == 1 : c.show_think)) {
+                while (!reasoning.empty() && reasoning.back() == '\n') reasoning.pop_back();
+                out += "Thinking:\n" + reasoning + "\n\n";
+            }
+            out += content + (m.error.empty() ? "" : m.error) + "\n\n";
+        }
+        while (!out.empty() && out.back() == '\n') out.pop_back();
+        say("the whole chat");
+        return out;
+    }
+    if (msg >= (int)c.msgs.size()) return "";
+    const Msg &m = c.msgs[msg];
+    std::string content, reasoning;
+    split_think(m, content, reasoning);
+    if (thinking) {
+        say("the thinking");
+        return reasoning;
+    }
+    if (block < 0) {
+        say(m.role == "user" ? "your message" : m.role == "note" ? "the note" : "the answer");
+        return content;
+    }
+    // The block'th code block's lines, without its fences.
+    std::string out;
+    bool code = false;
+    int n = -1;
+    size_t pos = 0;
+    while (pos <= content.size()) {
+        size_t e = content.find('\n', pos);
+        if (e == std::string::npos) e = content.size();
+        const std::string line = content.substr(pos, e - pos);
+        pos = e + 1;
+        const size_t lead = line.find_first_not_of(' ');
+        if (lead != std::string::npos && line.compare(lead, 3, "```") == 0) {
+            code = !code;
+            if (code) n++;
+            continue;
+        }
+        if (code && n == block) out += line + "\n";
+    }
+    if (!out.empty()) out.pop_back();
+    say("the code");
+    return out;
+}
+
 int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
     const int page = std::max(3, screen_h - 12);
     if (e.key != K_TAB) {
@@ -938,7 +1083,12 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
         case K_CTRL:
             if (e.ch == "c" && c.busy()) chat_stop(c);
             else if (e.ch == "n") chat_new(c);
-            else if (e.ch == "t") c.show_think = !c.show_think;
+            else if (e.ch == "t") {
+                // All of them, whatever a click set on one.
+                c.show_think = !c.show_think;
+                std::lock_guard<std::mutex> l(c.mu);
+                for (auto &m : c.msgs) m.think_open = -1;
+            }
             else if (e.ch == "a") c.cur = 0;
             else if (e.ch == "e") c.cur = c.input.size();
             else if (e.ch == "u") {

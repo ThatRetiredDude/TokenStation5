@@ -170,25 +170,28 @@ ts5-tui --url http://ps5.local:8081  # another one
 - **The `ts5>` prompt at the bottom**: Enter sends, Ctrl+J (or Alt+Enter)
   starts a new line, the up arrow brings back what you typed before, Esc
   stops an answer. Commands start with `/` and Tab completes them, and model
-  names after `/model`: `/model`, `/download`, `/new`, `/chats`, `/open`,
-  `/save`, `/find`, `/tune`, `/check`, `/bench`, `/usage`, `/keys`,
-  `/think on|off`, `/fan auto|cool|early|max`, `/theme`, `/help`, `/quit`
-  (`exit`, `quit` or `q` work too). A `ts5 fetch URL FILE --sha256 HEX`
+  names after `/model`: `/model`, `/download`, `/search`, `/new`, `/chats`, `/open`,
+  `/save`, `/copy`, `/find`, `/tune`, `/check`, `/bench`, `/usage`, `/keys`,
+  `/think on|off`, `/fan auto|cool|early|max`, `/theme`, `/help`, `/unload`,
+  `/quit` (`exit`, `quit` or `q` work too). A `ts5 fetch URL FILE --sha256 HEX`
   line pasted at the prompt downloads that model.
 - **In between**: the chat (markdown, highlighted code, the thinking folded
-  away; Ctrl+T shows it), or a page: **F1** Chat, **F2** Models (Enter
+  away: a click on its "Thought for" line opens that one, Ctrl+T all of
+  them), or a page: **F1** Chat, **F2** Models (Enter
   loads one, and on the loaded one loads it again, which is how a changed
   setting takes hold; H downloads a model's helper; T tunes it with
   `ts5-tune`, which a model tested on the PS5 doesn't need: its row says
   "tested" and its settings are built in; C runs the GPU check, B the speed
-  test, each in a panel that ticks off its steps in plain words, with the
+  test; T, C and B ask before they start, so a letter typed on the wrong
+  page starts nothing; each runs in a panel that ticks off its steps in plain words, with the
   time so far, the time left and what it found at the end, while the top
-  bar says what's running; below them, the catalog's models to download),
+  bar says what's running; below them, the catalog's models to download,
+  and under those what a Hugging Face search found: S searches),
   **F3** Status (bars
   for GPU memory, RAM, temperatures, fan, GPU load and speed), **F4**
   Settings (theme, thinking, temperature, answer length, context, speed or
-  length, fan, tmux), **F5**
-  Logs. Tab and Shift+Tab step through the pages, and so do 1 to 5 on any
+  length, fan, tmux, mouse, when you quit), **F5**
+  Logs. A click on a page's name in the top bar goes there. Tab and Shift+Tab step through the pages, and so do 1 to 5 on any
   page but Chat. On a Mac, where macOS keeps the F keys, use those, fn+F1
   to fn+F5, or `/chat`, `/models`, `/status`, `/settings`, `/logs`.
 - **Downloads**: every model tested on the PS5 (the TV app's catalog plus
@@ -201,6 +204,33 @@ ts5-tui --url http://ps5.local:8081  # another one
   the service's models folder when you may write there, else to
   `~/.local/share/tokenstation/models`. A stopped download goes on from
   where it was.
+- **The mouse, and copying**: a click opens or folds an answer's thinking,
+  and `[copy]` under an answer or on a code block copies it (Ctrl+Y and
+  `/copy` copy the last answer; `/copy code`, `/copy think` and `/copy all`
+  its last code block, its thinking, the whole chat). A copy goes to the
+  clipboard where the terminal lets a program set it (OSC 52: iTerm2 with
+  its setting on, kitty, WezTerm, Ghostty, Windows Terminal, VS Code), to
+  the desktop's own where ts5-tui runs on one (wl-copy, xclip, xsel), and
+  to `~/.cache/tokenstation/copied.txt`. Apple's Terminal takes no
+  clipboard from a program, and none says whether it did, so the text is
+  then shown alone and plain, with the mouse left to the terminal: select
+  it there and copy as usual (Cmd+C), exactly as the model wrote it, long
+  lines whole and code without the indent; any key goes back. Dragging over
+  the chat opens the whole chat that way, at the message under the pointer
+  (and the log, on Logs). Settings → Mouse: off leaves the mouse to the
+  terminal always.
+- **Hugging Face search**: S on Models and the words (or `/search mistral
+  7b`) looks on
+  Hugging Face for other models: the ones ts5 runs, in the file types it
+  takes, that fit this GPU's memory with room for a chat, the most
+  downloaded first, chat models before the rest. Left out: repos the words
+  match only by their uploader's name, embedding and reranking models, and
+  side files that aren't the model (image encoders, `mtp-` files). They're listed under the
+  catalog with their size, who made the file and how long a chat they get
+  here; Enter downloads one, checked by the SHA-256 Hugging Face gives for
+  it. It's the TV app's search (`tokenstation --hf-search WORDS` prints
+  what it finds, a JSON object a line). A model found this way isn't a
+  tested one: C checks its answers on this GPU and T tunes it.
 - **Chats are kept**: every chat is saved after each answer, in the TV app's
   format, in `~/.local/share/tokenstation/chats`. `/chats` lists them (and
   the TV service's, when you may read them), `/chats TEXT` finds one,
@@ -216,7 +246,10 @@ ts5-tui --url http://ps5.local:8081  # another one
   while a tuning, a check or a download runs asks first.
 - **Loads and jobs say what happens**: the top bar says "loading" while a
   model comes up, and a model that can't load (not enough memory, a file
-  that isn't a model) says why at once, on Models and in the chat. Tuning,
+  that isn't a model) says why at once, on Models and in the chat, and the
+  model that was loaded before it is loaded again. A Context set in
+  Settings that has no memory beside a model doesn't stop the load: the
+  model comes up with the longest chat that fits, and says so. Tuning,
   the GPU check and the speed test need the GPU's memory: the model
   ts5-tui loaded steps aside for them and is loaded again when they end.
   A long prompt may be read for minutes before the first token: ts5-tui
@@ -227,7 +260,10 @@ Loading a model with Enter switches the API-only service's model (through
 the hw helper, so you need to be in the `tokenstation` group); with no
 server running, it starts `ts5 serve` with that model itself, at the
 longest context that fits (Settings → Context; up to 32,768 tokens for Qwen3 14B
-on the PS5), which keeps serving after ts5-tui ends. With the TV app running, models are picked on
+on the PS5). Quitting ts5-tui (Ctrl+Q, Ctrl+C, `/quit`) stops that model too
+and frees its GPU memory; `/unload` does it without quitting, and Settings →
+When you quit keeps it serving the API instead. Ctrl+A d leaves ts5-tui and
+the model running. With the TV app running, models are picked on
 the TV.
 
 From a plain terminal (SSH), ts5-tui runs in its own tmux session, `ts5`,
@@ -304,6 +340,14 @@ and Qwen3.5 9B 8 of 11 at 233,035 tokens in 8 bits (9 of 11 at 160k in
 16-bit); reading that document took 21 minutes. The Gemmas keep 16 bits:
 they fail the accuracy check even in 8 bits. The Models page and its
 search estimate contexts the same way.
+
+A context set by number (`-c 32768`, `CONTEXT=32768`, Context in ts5-tui's
+Settings) takes the same smaller cache where the 16-bit one has no memory
+for it, instead of refusing the load: a 14B at 32,768 tokens needs 6.0 GiB
+in 16 bits beside 9.0 GiB of weights, and 2.4 GiB with 8-bit keys and
+4-bit values. Where no cache holds the number the load is refused with how
+many tokens would fit, and ts5-tui then loads the model with the longest
+context that does.
 
 ## Settings
 

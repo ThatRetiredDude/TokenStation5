@@ -233,11 +233,14 @@ std::string Screen::flush(bool truecolor, bool full) {
 namespace {
 
 termios g_orig;
-bool g_raw = false;
+bool g_raw = false, g_mouse = false;
 std::string g_pending;  // bytes read but not yet a whole key
 bool g_paste_open = false;  // inside a paste whose end mark hasn't come yet
 
+volatile sig_atomic_t g_end_with = -1;
+
 void on_fatal(int sig) {
+    if ((sig == SIGHUP || sig == SIGTERM) && g_end_with > 0) kill((pid_t)g_end_with, SIGTERM);
     term_leave();
     signal(sig, SIG_DFL);
     raise(sig);
@@ -276,8 +279,20 @@ bool term_enter() {
     return true;
 }
 
+void term_mouse(bool on) {
+    if (!g_raw || on == g_mouse) return;
+    g_mouse = on;
+    // Presses and releases, drags, in the SGR form (columns past 223).
+    term_write(on ? "\x1b[?1000h\x1b[?1002h\x1b[?1006h" : "\x1b[?1006l\x1b[?1002l\x1b[?1000l");
+}
+
+bool term_mouse_on() { return g_mouse; }
+
+void term_end_with(int pid) { g_end_with = pid; }
+
 void term_leave() {
     if (!g_raw) return;
+    term_mouse(false);
     g_raw = false;
     term_write("\x1b[0m\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[?1049l");
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_orig);
@@ -323,6 +338,32 @@ size_t decode(const std::string &p, Event &ev, bool more_coming) {
             if (i >= p.size()) return more_coming ? 0 : p.size();
             const std::string params = p.substr(2, i - 2);
             const char fin = p[i];
+            // The mouse: SGR (ESC [ < b ; x ; y M, or m for a release), or
+            // the old form (ESC [ M and three bytes, each 32 more).
+            if ((fin == 'M' || fin == 'm') && n == '[' && (params.empty() || params[0] == '<')) {
+                int b = 0, x = 0, y = 0;
+                size_t used = i + 1;
+                bool up = fin == 'm';
+                if (params.empty()) {
+                    if (fin == 'm') return i + 1;
+                    if (p.size() < i + 4) return more_coming ? 0 : p.size();
+                    b = (unsigned char)p[i + 1] - 32;
+                    x = (unsigned char)p[i + 2] - 32;
+                    y = (unsigned char)p[i + 3] - 32;
+                    used = i + 4;
+                    up = (b & 3) == 3;
+                } else if (sscanf(params.c_str(), "<%d;%d;%d", &b, &x, &y) != 3) {
+                    return i + 1;
+                }
+                ev.key = K_MOUSE;
+                ev.x = x - 1;
+                ev.y = y - 1;
+                ev.button = b & 3;
+                if (b & 64) ev.mouse = (b & 1) ? M_WHEEL_DOWN : M_WHEEL_UP;
+                else if (b & 32) ev.mouse = M_DRAG;
+                else ev.mouse = up ? M_UP : M_DOWN;
+                return used;
+            }
             const bool ctrl = params.find(";5") != std::string::npos;
             // Shift (;2) or Alt (;3) with up and down scroll too.
             const bool mod = ctrl || params.find(";2") != std::string::npos || params.find(";3") != std::string::npos;
