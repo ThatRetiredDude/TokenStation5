@@ -106,6 +106,7 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | `/models` | The Models page. `/chat`, `/status`, `/settings` and `/logs` go to the others. |
 | `/download NAME` | Downloads one of the models tested on the PS5 (see [Downloading models](#downloading-models)): `qwen3-14b`, `qwen35-9b`, `deepseek-r1-14b`, `qwen3-8b`, `llama31-8b`, `qwen25-coder-7b`, `qwen25-coder-14b`, `gemma3-12b`, `gemma4-12b`, `llama32-3b`, and the helpers `qwen3-0.6b`, `llama32-1b`, `gemma3-1b`. Tab completes the name. `/download` alone opens the list on the Models page. |
 | `/download URL [FILE] [--sha256 HEX]` | Downloads any other `.gguf`. A `ts5 fetch URL FILE --sha256 HEX` line, as on [Models tested on PS5](Models-tested-on-PS5), works pasted at the prompt as it is. |
+| `/search WORDS` | Looks on Hugging Face for other models that fit this GPU: `/search mistral 7b` (see [Searching Hugging Face](#searching-hugging-face)). |
 | `/new` | A new chat (`/clear` too). The one you leave is kept. |
 | `/chats [TEXT]` | Your saved chats, or the ones with TEXT (see [Saved chats](#saved-chats)). |
 | `/open N` | Opens saved chat N from `/chats` (or `/open TEXT`: the newest with TEXT). |
@@ -127,7 +128,7 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 
 ![The Models page](images/terminal-app-models.png)
 
-Every `.gguf` on this machine, biggest first, with its size, its helper, and where its settings come from: **tested** (a model tested on the PS5: its settings are built in, and it needs no tuning), a date (tuned on this machine with `ts5-tune`), or **—** (the defaults). **●** marks the one loaded. Under them, **⇣ Download**: the tested models you don't have yet. Below the list, the selected model's settings, each with what it costs: 16- or 32-bit prompt math, the helper, the chat memory (automatic: full precision, or 8-bit where that fits a longer chat) and, for the loaded one, its context.
+Every `.gguf` on this machine, biggest first, with its size, its helper, and where its settings come from: **tested** (a model tested on the PS5: its settings are built in, and it needs no tuning), a date (tuned on this machine with `ts5-tune`), or **—** (the defaults). **●** marks the one loaded. Under them, **⇣ Download**: the tested models you don't have yet, and **⇣ Search**: what a Hugging Face search found. Below the list, the selected model's settings, each with what it costs: 16- or 32-bit prompt math, the helper, the chat memory (automatic: full precision, or 8-bit where that fits a longer chat) and, for the loaded one, its context.
 
 | Key | What it does |
 | --- | --- |
@@ -137,7 +138,8 @@ Every `.gguf` on this machine, biggest first, with its size, its helper, and whe
 | H | Download this model's helper, when it isn't here yet. |
 | C | The GPU check (`ts5 check`): the model's answers on the GPU against the CPU's. |
 | B | The speed test (`ts5 bench`): a 512-token prompt and 128 tokens of answer. |
-| D | On a catalog row: download it. |
+| D | On a catalog row or a search result: download it. |
+| S | Search Hugging Face for other models: the words go at the prompt. |
 | X | Stop the download (it goes on from there next time). |
 | R | Look for model files again. |
 
@@ -178,6 +180,17 @@ ts5> ts5 fetch https://huggingface.co/…/resolve/…/Model.Q4_K_M.gguf Model.Q4
 ```
 
 It downloads the same way and shows under the catalog while it runs. FILE is a name only (it goes where downloads go); without it, the name at the end of the URL. Hugging Face page links (`/blob/`) work too. Without `--sha256` only the size is checked.
+
+### Searching Hugging Face
+
+For a model that isn't on the tested list, press **S** on the Models page and type what to look for, or type `/search mistral 7b` at the prompt. It asks Hugging Face for the most downloaded GGUF repos that match and keeps the files ts5 can run (the Llama, Mistral, Qwen and Gemma families, in the usual 4- to 8-bit file types) that fit this GPU's memory with room for a chat. Chat models come first, two files per repo at most.
+
+- The line after **⇣ Search** says how it's going ("looking at model 3 of 8…"), then how many fit, and how many were left out because they're too big for this GPU or of a kind ts5 can't run.
+- The results are listed under it, each with its size and who made the file. The box below shows the repo, the file, how long a chat it gets on this machine and where it goes.
+- **Enter** downloads the selected one the same way as a tested model, pinned to the repo's commit and checked against the SHA-256 Hugging Face lists for it. A file that's already here says so, and Enter goes to it in the list.
+- A model found this way hasn't been tested on the PS5. Once it's here, **C** checks its answers on this GPU and **T** tunes it.
+
+It's the same search as the TV app's Models page, so it needs the `tokenstation` app from the same package (`tokenstation --hf-search WORDS` prints what it finds), and the internet.
 
 ### Tuning, the GPU check and the speed test
 
