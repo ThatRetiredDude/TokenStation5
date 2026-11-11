@@ -5,11 +5,11 @@ if [ "$1" = configure ]; then
         adduser --system --group --home /var/lib/tokenstation --no-create-home tokenstation
     fi
     # The rest is what the .rpm and Arch packages do too (system-setup):
-    # a fresh install, an upgrade, or an upgrade from a .deb older than 0.1,
-    # whose prerm stopped both services.
+    # a fresh install, an upgrade, or an upgrade from one of the 0.0.0+<commit>
+    # builds, whose prerm stopped both services.
     if [ -z "${2:-}" ]; then
         how=install
-    elif dpkg --compare-versions "$2" lt 0.1~; then
+    elif dpkg --compare-versions "$2" lt 0.0.1~; then
         how=restart
     else
         how=upgrade

@@ -49,9 +49,16 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           # A version that only goes up, so "install it again" is an upgrade on
-          # apt, dnf and pacman: 0.1.<run number>+<commit> (0.1 sorts after
-          # the 0.0.0+<commit> builds before it).
-          if [[ "$GITHUB_REF" == refs/tags/linux-v* ]]; then v=${GITHUB_REF_NAME#linux-v}; else v=0.1.${GITHUB_RUN_NUMBER}+$(git rev-parse --short HEAD); fi
+          # apt, dnf and pacman: <the newest linux-v tag>.<run number>+<commit>,
+          # which sorts after that release and before the next one. Before the
+          # first tag it is 0.0.1.<run number>+<commit>: after the
+          # 0.0.0+<commit> builds before it, and before a linux-v0.1.0.
+          if [[ "$GITHUB_REF" == refs/tags/linux-v* ]]; then
+            v=${GITHUB_REF_NAME#linux-v}
+          else
+            base=$(git ls-remote --tags --refs origin 'linux-v*' 2>/dev/null | sed 's#.*refs/tags/linux-v##' | sort -V | tail -n 1 || true)
+            v=${base:-0.0.1}.${GITHUB_RUN_NUMBER}+$(git rev-parse --short HEAD)
+          fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
           linux/build-deb.sh "$v"
       - name: Check the package

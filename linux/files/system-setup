@@ -12,7 +12,7 @@
 #   system-setup configure upgrade   the same, but the memory limit and the
 #                                    services stay as they are; the service
 #                                    that was running is restarted
-#   system-setup configure restart   an upgrade from a .deb older than 0.1,
+#   system-setup configure restart   an upgrade from a 0.0.0+<commit> .deb,
 #                                    whose prerm stopped both services: the
 #                                    one that is enabled is started again
 #   system-setup remove              stops and disables the services and
