@@ -2299,8 +2299,10 @@ std::vector<SetRow> settings_rows() {
         SetRow x{"Web search key", c.web_key.empty() ? (sv.web_search ? "the server's own" : "none")
                                                      : std::string(std::min<size_t>(c.web_key.size(), 12), '*'),
                  sv.web_search         ? "on: the loaded model searches the web when a question needs it"
-                 : !c.web_key.empty() ? "load the model again to turn it on (Models, Enter); models that use tools"
-                                      : "a free key from app.tavily.com lets a model ts5-tui loads search the web"};
+                 : c.web_key.empty()   ? "a free key from app.tavily.com lets a model ts5-tui loads search the web"
+                 : sv.online && own_server_pid() <= 0
+                     ? "this server isn't ts5-tui's own: its key goes in /etc/default/tokenstation"
+                     : "load the model again to turn it on (Models, Enter); models that use tools"};
         x.text = true;
         x.text_value = c.web_key;
         x.set_text = [save](const std::string &v) {
