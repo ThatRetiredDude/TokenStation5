@@ -30,6 +30,7 @@ def main():
     ap.add_argument("--ntok", type=int, default=len(TOKENS), help="sequence length (exercises >256-token chunking)")
     ap.add_argument("--step", action="store_true", help="ts5 evaluates one token per call")
     ap.add_argument("--tol", type=float, default=0.02, help="max |diff| / logit range")
+    ap.add_argument("--ref-model", help="with --ref cpu: the reference runs this model (a rotated model's plain twin)")
     ap.add_argument("models", nargs="+")
     a = ap.parse_args()
     bad = 0
@@ -39,7 +40,7 @@ def main():
             toks = [str(t) for t in seq]
             rf, tf = os.path.join(d, "ref.bin"), os.path.join(d, "ts5.bin")
             if a.ref == "cpu":  # ts5's own CPU reference (exact dequantization)
-                subprocess.run([a.ts5, "logits", "-m", m, "--backend", "cpu", "-o", rf] + toks, check=True,
+                subprocess.run([a.ts5, "logits", "-m", a.ref_model or m, "--backend", "cpu", "-o", rf] + toks, check=True,
                                stderr=subprocess.DEVNULL)
             else:
                 subprocess.run([a.ref, m, rf] + toks, check=True)

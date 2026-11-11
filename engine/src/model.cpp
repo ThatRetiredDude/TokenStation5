@@ -3,6 +3,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -210,8 +211,128 @@ bool Model::open(const std::string &path, std::string &err) {
             }
     }
     if (auto *t = gguf.find("token_embd.weight")) hp.n_vocab = (int)t->ne[1];
+    if (!read_folds(err)) return false;
     // Bind tensor descriptors now (data pointers are filled by load()).
     return bind(err);
+}
+
+bool Model::read_folds(std::string &err) {
+    folds_.clear();
+    inverse_folds_.clear();
+    fold_signs.clear();
+    fold_grouped_ = false;
+    const std::string p = "prism.hadamard.";
+    if (!gguf.has(p + "version")) return true;
+    auto no = [&](const std::string &why) {
+        err = "this file stores its weights rotated (prism.hadamard) in a way ts5 doesn't read: " + why;
+        return false;
+    };
+    // Version 2 ties the output to the token table; none of the files seen
+    // so far (Ternary-Bonsai-2 4B, 9B, 27B: version 1) does.
+    const int64_t version = gguf.get_int(p + "version", 0);
+    if (version != 1 || gguf.get_int(p + "tied_output", 0) != 0) return no("version " + std::to_string(version));
+    const int64_t block = gguf.get_int(p + "block_size", 0);
+    if (block < 2 || block > 1024 || (block & (block - 1)) != 0)
+        return no("blocks of " + std::to_string(block) + " values (ts5 rotates blocks of up to 1,024)");
+    if (gguf.get_str(p + "transform") != "normalized-sylvester-walsh-hadamard")
+        return no("the transform \"" + gguf.get_str(p + "transform") + "\"");
+    if (gguf.get_str(p + "axis") != "input-last-dimension") return no("the axis \"" + gguf.get_str(p + "axis") + "\"");
+    const std::string mode = gguf.get_str(p + "sign_mode");
+    if (mode != "identity" && mode != "explicit") return no("the sign mode \"" + mode + "\"");
+    if (mode == "explicit") {
+        const GgufArray *widths = gguf.get_arr(p + "sign_widths"), *values = gguf.get_arr(p + "sign_values");
+        if (!widths || widths->empty() || !values) return no("no signs where the file says it has them");
+        size_t at = 0;
+        for (auto &wv : *widths) {
+            const int64_t *width = std::get_if<int64_t>(&wv);
+            if (!width || *width <= 0 || *width % block != 0 || at + (size_t)*width > values->size() ||
+                fold_signs.count(*width))
+                return no("its sign widths");
+            std::vector<float> &v = fold_signs[*width];
+            v.resize((size_t)*width);
+            for (int64_t i = 0; i < *width; i++) {
+                const int64_t *sign = std::get_if<int64_t>(&(*values)[at + (size_t)i]);
+                if (!sign || (*sign != 1 && *sign != -1)) return no("a sign that is neither +1 nor -1");
+                v[(size_t)i] = (float)*sign;
+            }
+            at += (size_t)*width;
+        }
+        if (at != values->size()) return no("more signs than its widths add up to");
+    }
+    // Only the weights whose products both backends rotate the input of
+    // (every product of these goes through their matmul).
+    auto foldable = [](const std::string &name) {
+        if (name == "output.weight") return true;
+        if (name.compare(0, 4, "blk.") != 0) return false;
+        size_t at = 4;
+        while (at < name.size() && isdigit((unsigned char)name[at])) at++;
+        if (at == 4 || at >= name.size() || name[at] != '.') return false;
+        const std::string kind = name.substr(at + 1);
+        for (const char *k : {"attn_q", "attn_k", "attn_v", "attn_qkv", "attn_gate", "attn_output", "ffn_gate", "ffn_up",
+                              "ffn_down", "ssm_out"})
+            if (kind == std::string(k) + ".weight") return true;
+        return false;
+    };
+    const GgufArray *names = gguf.get_arr(p + "weight_names");
+    if (!names || names->empty()) return no("no list of the rotated weights");
+    for (auto &nv : *names) {
+        const std::string *name = std::get_if<std::string>(&nv);
+        if (!name || !foldable(*name) || !gguf.find(*name) || folds_.count(*name))
+            return no("the rotated weight " + (name ? *name : std::string("(not a name)")));
+        folds_[*name] = (int)block;
+    }
+    if (const GgufArray *inverse = gguf.get_arr(p + "inverse_weight_names"))
+        for (auto &nv : *inverse) {
+            const std::string *name = std::get_if<std::string>(&nv);
+            // Only the token table's rows are turned back after the lookup.
+            if (!name || *name != "token_embd.weight" || inverse_folds_.count(*name))
+                return no("the rotated table " + (name ? *name : std::string("(not a name)")));
+            inverse_folds_[*name] = (int)block;
+        }
+    fold_grouped_ = gguf.get_int(p + "gdn_v_grouped", 0) != 0;
+    return true;
+}
+
+void hadamard_blocks(float *v, int64_t n, int block) {
+    const float scale = 1.0f / std::sqrt((float)block);
+    for (int64_t b = 0; b + block <= n; b += block) {
+        float *x = v + b;
+        for (int len = 1; len < block; len *= 2)
+            for (int i = 0; i < block; i += 2 * len)
+                for (int j = i; j < i + len; j++) {
+                    const float a = x[j], c = x[j + len];
+                    x[j] = a + c;
+                    x[j + len] = a - c;
+                }
+        for (int i = 0; i < block; i++) x[i] *= scale;
+    }
+}
+
+void fold_input(const Weight &w, const float *x, int n, float *out) {
+    const int64_t E = w.ne0();
+    for (int t = 0; t < n; t++) {
+        const float *src = x + (size_t)t * E;
+        float *dst = out + (size_t)t * E;
+        if (w.fold_rep > 1) {
+            // [hd, nk, rep] to [hd, rep, nk]: value head k + nk * r goes to r + rep * k.
+            const int64_t hd = w.fold_hd, nk = w.fold_nk, rep = w.fold_rep;
+            for (int64_t k = 0; k < nk; k++)
+                for (int64_t r = 0; r < rep; r++)
+                    memcpy(dst + hd * (r + rep * k), src + hd * (k + nk * r), (size_t)hd * sizeof(float));
+        } else {
+            memcpy(dst, src, (size_t)E * sizeof(float));
+        }
+        if (w.fold_signs)
+            for (int64_t i = 0; i < E; i++) dst[i] *= w.fold_signs[i];
+        hadamard_blocks(dst, E, w.fold_block);
+    }
+}
+
+void unfold_row(const Weight &w, float *row) {
+    const int64_t E = w.ne0();
+    hadamard_blocks(row, E, w.fold_block);
+    if (w.fold_signs)
+        for (int64_t i = 0; i < E; i++) row[i] *= w.fold_signs[i];
 }
 
 uint64_t Model::rope_turn(bool swa, int i) const {
@@ -285,11 +406,47 @@ Weight Model::weight(const std::string &name, bool required, std::string &err) {
     if (block_values(t->type) == 0 && err.empty()) err = name + ": unsupported type " + std::to_string(t->type);
     w.info = t;
     w.data = base_ ? base_ + t->offset : nullptr;
+    // prism.hadamard: a folded weight, or a table whose rows are stored rotated.
+    const int *block = nullptr;
+    bool inverse = false;
+    if (auto f = folds_.find(name); f != folds_.end()) {
+        block = &f->second;
+    } else if (auto i = inverse_folds_.find(name); i != inverse_folds_.end()) {
+        block = &i->second;
+        inverse = true;
+    }
+    if (!block) return w;
+    fold_bound_[name] = true;
+    const int64_t width = t->ne[0];
+    hp.fold_width = std::max<int64_t>(hp.fold_width, width);
+    w.fold_block = *block;
+    w.fold_inverse = inverse;
+    if (width % w.fold_block != 0 && err.empty())
+        err = name + ": its " + std::to_string(width) + " columns are not whole blocks of " +
+              std::to_string(w.fold_block) + " (prism.hadamard)";
+    if (!fold_signs.empty()) {
+        auto signs = fold_signs.find(width);
+        if (signs != fold_signs.end()) w.fold_signs = signs->second.data();
+        else if (err.empty()) err = name + ": the file has no signs for a width of " + std::to_string(width) + " (prism.hadamard)";
+    }
+    // A linear layer's output projection: the fold took the value heads
+    // grouped by key head, the layer writes them tiled (HParams::rec_layers).
+    if (fold_grouped_ && !inverse && name.find(".ssm_out.") != std::string::npos) {
+        const int64_t nv = hp.ssm_v_heads, nk = hp.ssm_k_heads;
+        if (nk <= 0 || nv <= 0 || nv % nk != 0 || width % nv != 0) {
+            if (err.empty()) err = name + ": its value heads don't divide as prism.hadamard's grouping needs";
+        } else {
+            w.fold_hd = (int)(width / nv);
+            w.fold_nk = (int)nk;
+            w.fold_rep = (int)(nv / nk);
+        }
+    }
     return w;
 }
 
 bool Model::bind(std::string &err) {
     err.clear();
+    fold_bound_.clear();
     // A file with only some of the layers is not a model. A multi-token-
     // prediction ("draft") head comes as a GGUF of its own, with the last
     // layer and the embeddings alone (Qwen3.8 27B's "-draft-" files,
@@ -384,6 +541,14 @@ bool Model::bind(std::string &err) {
                 err = "layer " + std::to_string(i) + ": attention shapes don't match the hyperparameters";
         }
     }
+    // Every weight the file lists as folded has to be one whose products
+    // rotate their input: one left out would be used as if it were plain.
+    for (auto &f : folds_)
+        if (err.empty() && !fold_bound_.count(f.first))
+            err = "this file stores " + f.first + " rotated (prism.hadamard), and ts5 has no use for that weight in a " +
+                  hp.arch + " model";
+    if (err.empty() && output.info == tok_embd.info && tok_embd.fold_block)
+        err = "this file's token table is stored rotated (prism.hadamard) and is its output too: ts5 doesn't read that";
     if (err.empty() && !read_scalars(err)) return false;
     return err.empty();
 }
