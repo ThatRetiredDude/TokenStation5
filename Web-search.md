@@ -11,6 +11,18 @@ From a computer, `scripts/ts5-ps5.sh websearch tvly-YOUR-KEY` does the same (`we
 
 `GET /v1/models` shows what the loaded model can do: `"capabilities": {"tools": true, "tool_format": "hermes", "web_search": true}`.
 
+## Without a key: Wikipedia (Linux edition)
+
+With no Tavily key the Linux edition searches Wikipedia instead, through its public API: no key and no account. It does so only for a request that asks for a search. The terminal app asks while its search tool is on; over the API a request says `"web_search": true`, or `"web_search": "auto"` to leave it to the message.
+
+- The model gets the top articles: title, link and opening text.
+- It is told that this is an encyclopedia, with no news and no live data, and it is told when the articles are only a loose match for the question, so it says that it could not look the thing up instead of answering from the wrong article.
+- A search takes about half a second on the PS5.
+- `TS5_WIKIPEDIA=sk` (or any language code) picks another Wikipedia; `TS5_WIKIPEDIA=off` turns it off.
+- `/v1/models` says `"web_search_source": "wikipedia"` (`"tavily"` with a key).
+
+The Prospero Store title searches only with a key.
+
 ## Which models
 
 | Model | Tool calls | Web search |
@@ -32,6 +44,7 @@ ts5 reads the tool format from each model's own chat template. On the Prospero S
 - Only a chat whose last message looks like it needs the web is offered the tool. `"web_search": true` in a request offers it anyway; `TS5_WEB_SEARCH=always` in `ts5.env` offers it on every chat. A request turns it off with `"web_search": false` or `"tool_choice": "none"`.
 - At most three rounds of searches per answer; after that the model answers from what it found.
 - A failed search (no network, a refused key, Tavily's limit) goes back to the model as text saying why, so it tells you instead of stalling.
+- On the Linux edition a search ts5 runs is told to the client. A streamed answer gets a chunk with no text and `"ts5_web_search": {"query": "…", "state": "running"}` when the search starts, and one with `"state": "done"` (or `"failed"`) and a `"note"` such as `5 results (0.5 s, Wikipedia)` when it ends. A client that doesn't know the field sees two empty chunks. The terminal app shows a line for each.
 
 ## Clients with their own tools
 
