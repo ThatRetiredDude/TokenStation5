@@ -185,8 +185,11 @@ ts5-tui --url http://ps5.local:8081  # another one
   Logs. Tab and Shift+Tab step through the pages, and so do 1 to 5 on any
   page but Chat. On a Mac, where macOS keeps the F keys, use those, fn+F1
   to fn+F5, or `/chat`, `/models`, `/status`, `/settings`, `/logs`.
-- **Downloads**: the same catalog as the TV app, each file pinned to a
-  commit on Hugging Face and checked by SHA-256 (`ts5 fetch`), or any other
+- **Downloads**: every model tested on the PS5 (the TV app's catalog plus
+  Qwen3 14B, Qwen3.5 9B, DeepSeek R1 14B, Qwen2.5 Coder 14B, Gemma 3 and 4
+  12B, and the helpers Qwen3 0.6B, Llama 3.2 1B and Gemma 3 1B), each file
+  pinned to a commit on Hugging Face and checked by SHA-256 (`ts5 fetch`):
+  `/download qwen3-14b`, or Enter on its row under Models. Or any other
   `.gguf` with `/download URL [FILE] [--sha256 HEX]`. They go to
   the service's models folder when you may write there, else to
   `~/.local/share/tokenstation/models`. A stopped download goes on from

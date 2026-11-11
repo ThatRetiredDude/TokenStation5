@@ -33,6 +33,7 @@
 #include "chat.h"
 #include "json.h"
 #include "store.h"
+#include "tested.h"  // the models tested on a PS5 that the catalog doesn't have
 
 #ifndef TS5_VERSION
 #define TS5_VERSION "dev"
@@ -607,19 +608,40 @@ void start_gpu_job(const ModelFile &m, bool check) {
     g->tune_scroll = 0;
 }
 
-// ---- downloads from the catalog (ps5/catalog.h) ----
+// ---- downloads from the catalog (ps5/catalog.h) and the tested models (tested.h) ----
 
 std::string lower(std::string v) {
     for (auto &ch : v) ch = (char)tolower((unsigned char)ch);
     return v;
 }
 
-// The catalog's models that no file here is already (matched as the TV app
-// matches them: CatalogEntry::same in the file's name).
+// The models ts5-tui downloads: the catalog's and the tested ones
+// (tested.h), in the wiki's order (best first, the helpers last).
+const std::vector<const app::CatalogEntry *> &catalog_models() {
+    static const std::vector<const app::CatalogEntry *> list = [] {
+        static const char *order[] = {"qwen3-14b", "qwen35-9b", "deepseek-r1-14b", "qwen3-8b", "llama31-8b",
+                                      "qwen25-coder-7b", "qwen25-coder-14b", "gemma3-12b", "gemma4-12b",
+                                      "llama32-3b", "qwen3-0.6b", "llama32-1b", "gemma3-1b"};
+        std::vector<const app::CatalogEntry *> all, out;
+        for (const app::CatalogEntry &e : app::kCatalog)
+            if (e.kind == app::CatalogEntry::Model) all.push_back(&e);
+        for (const app::CatalogEntry &e : tui::kTested) all.push_back(&e);
+        for (const char *k : order)
+            for (const app::CatalogEntry *e : all)
+                if (strcmp(e->key, k) == 0) out.push_back(e);
+        for (const app::CatalogEntry *e : all)  // one the order doesn't name: last
+            if (std::find(out.begin(), out.end(), e) == out.end()) out.push_back(e);
+        return out;
+    }();
+    return list;
+}
+
+// The models to download that no file here is already (matched as the TV
+// app matches them: CatalogEntry::same in the file's name).
 std::vector<const app::CatalogEntry *> catalog_missing() {
     std::vector<const app::CatalogEntry *> out;
-    for (const app::CatalogEntry &e : app::kCatalog) {
-        if (e.kind != app::CatalogEntry::Model) continue;
+    for (const app::CatalogEntry *ep : catalog_models()) {
+        const app::CatalogEntry &e = *ep;
         bool have = false;
         for (auto &m : g->models) have = have || lower(m.name).find(e.same) != std::string::npos;
         if (!have || (g->dl_on && g->dl.cat == &e)) out.push_back(&e);
@@ -630,8 +652,8 @@ std::vector<const app::CatalogEntry *> catalog_missing() {
 const app::CatalogEntry *find_catalog(const std::string &q) {
     const std::string lq = lower(q);
     const app::CatalogEntry *hit = nullptr;
-    for (const app::CatalogEntry &e : app::kCatalog) {
-        if (e.kind != app::CatalogEntry::Model) continue;
+    for (const app::CatalogEntry *ep : catalog_models()) {
+        const app::CatalogEntry &e = *ep;
         if (lower(e.key) == lq || lower(e.name) == lq || lower(e.file) == lq) return &e;
         if (!hit && !lq.empty() &&
             (lower(e.key).find(lq) != std::string::npos || lower(e.name).find(lq) != std::string::npos))
@@ -805,7 +827,10 @@ void finish_download() {
         chat_note(g->chat, "Downloaded **" + job.name + "** to `" + dir + "`. The service reads `" +
                                service_models_dir() + "`; to serve it there:\n\n```\nsudo mv " + dir + "/" + job.file +
                                " " + service_models_dir() + "/\n```");
-    show_toast("Downloaded " + job.name + ": Enter on Models loads it", g->th->good, 6);
+    if (job.bytes > 0 && job.bytes < 1.5 * 1024 * 1024 * 1024)  // a helper: tuning the big model picks it
+        show_toast("Downloaded " + job.name + ". It's a helper: T on its big model tunes it in", g->th->good, 8);
+    else
+        show_toast("Downloaded " + job.name + ": Enter on Models loads it", g->th->good, 6);
 }
 
 void set_fan(const std::string &mode) {
@@ -1926,9 +1951,8 @@ void run_command(const std::string &line) {
                 if (cat[i] == e) g->model_sel = (int)g->models.size() + i;
         } else {
             std::string l = "No **" + arg + "** in the catalog. It has:\n";
-            for (const app::CatalogEntry &x : app::kCatalog)
-                if (x.kind == app::CatalogEntry::Model)
-                    l += std::string("- `") + x.key + "` " + x.name + " (" + gib((double)x.bytes) + ", " + x.good_for + ")\n";
+            for (const app::CatalogEntry *x : catalog_models())
+                l += std::string("- `") + x->key + "` " + x->name + " (" + gib((double)x->bytes) + ", " + x->good_for + ")\n";
             chat_note(c, l);
         }
     } else if (cmd == "/chats") {
@@ -2225,8 +2249,7 @@ void key_chat(const Event &e) {
     rq.temp = g->cfg.temp;
     rq.max_tokens = g->cfg.max_tokens;
     for (auto &m : g->models) rq.model_names.push_back(api_id(m.name));
-    for (const app::CatalogEntry &x : app::kCatalog)
-        if (x.kind == app::CatalogEntry::Model) rq.catalog_names.push_back(x.key);
+    for (const app::CatalogEntry *x : catalog_models()) rq.catalog_names.push_back(x->key);
     const int r = chat_key(g->chat, e, rq, g->scr.h);
     if (r == CHAT_COMMAND) run_command(g->chat.command);
 }

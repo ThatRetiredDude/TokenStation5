@@ -69,6 +69,14 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         req = json.loads(self.rfile.read(n) or b"{}")
         last = req["messages"][-1]["content"] if req.get("messages") else ""
+        prompt = 812 + 600 * (len(req.get("messages", [])) - 1)
+        if prompt >= N_CTX:
+            # As ts5 serve: refused before anything streams, in OpenAI's words and code.
+            self.send(400, {"error": {"message": "This model's maximum context length is %d tokens. However, your "
+                                                 "messages resulted in %d tokens. Please reduce the length of the "
+                                                 "messages." % (N_CTX, prompt),
+                                      "code": "context_length_exceeded"}})
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Connection", "close")
@@ -81,11 +89,6 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(b"data: " + json.dumps(d).encode() + b"\n\n")
             self.wfile.flush()
 
-        prompt = 812 + 600 * (len(req.get("messages", [])) - 1)
-        if prompt >= N_CTX:
-            self.wfile.write(b'data: {"error": {"message": "the prompt is longer than the context", '
-                             b'"code": "context_length_exceeded"}}\n\ndata: [DONE]\n\n')
-            return
         budget = min(N_CTX - prompt, req.get("max_tokens") or N_CTX)
         t0 = time.time()
         time.sleep(0.4)  # the prompt
