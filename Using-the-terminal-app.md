@@ -106,11 +106,42 @@ A chat grows until the model's memory for it (its context) is nearly full. Then,
 
 If an answer hit your **Answer length** cap instead, the note under it says that.
 
+### Tools: web pages, a terminal, memory
+
+The model in a chat has tools it can reach for by itself: the **web search** (with a key, see Settings), **reading a web page**, **running a command** on the machine ts5-tui runs on, and **notes it keeps between chats**. Each one has its own switch, so you decide what it may do: Settings → **Tool: search**, **Tool: pages**, **Tool: terminal**, **Tool: memory**, or `/tools terminal off`. `/tools` lists them with what is on.
+
+In the chat a tool call is a line of its own (**⚙ $ ls -la**, **⚙ reads https://…**, **⚙ remembers: …**) with a line under it saying how it went (**▸ exit 0 · 12 lines · 0.3 s**). Click that line to see exactly what the model got back.
+
+**Web pages.** Give it a link: "read https://example.com/post and sum it up". It gets the page as plain text: the article where the page marks one, without the site's menus and sidebars, the first 8,000 characters. Pages that only show something in a browser (built by scripts), files, images and PDFs can't be read, and the model is told why.
+
+**Terminal.** When the model wants to run a command, nothing runs yet. You see the command and a question:
+
+`Run it?  ‹ Run it ›  Every command in this chat  No`
+
+- **Enter** runs it. **Esc** says no, and the model is told you refused.
+- **→** moves the answer to **Every command in this chat** (no more questions until a new chat; `/tools ask` brings them back) or **No**, then Enter.
+- Letters never answer the question. You can keep typing your next message while it shows; it waits in the queue as always.
+- A command runs as you, in the folder ts5-tui was started in, with no keyboard to read from (a program that waits for typing gets nothing), for 2 minutes at most. **Esc** stops one that is running.
+- The model gets the output and the exit code. Of long output it gets the start and the end.
+
+**Memory.** Say "remember that I write Rust and like short answers" and the model saves a note. It reads its notes at the start of every chat.
+
+- `/memory` lists the notes, `/memory forget 2` removes one, `/memory clear` removes all, `/memory TEXT` adds one yourself.
+- They are plain lines in `~/.local/share/tokenstation/memory.md`; edit the file if you like.
+
+Good to know:
+
+- Every model can call tools. Qwen 3 is the most reliable at it; small models (1B to 4B) call tools less surely, and DeepSeek R1 is asked in words because its file has no tool format of its own.
+- A web page is text from a stranger and can try to talk the model into something. With the question on, the worst case is a command you say no to. With **Every command in this chat** chosen, leave pages you don't trust alone.
+- A model that keeps calling tools gets twelve rounds for one message, then has to answer with what it has.
+- The tools are ts5-tui's own. Other apps bring theirs (see [Connecting apps](Connecting-apps)).
+
 ### The mouse, and copying
 
 | Do this | And |
 | --- | --- |
 | Click **▸ Thought for …** | That answer's thinking opens. Click **▾ Thinking** to fold it. |
+| Click the line under a tool call (**▸ exit 0 · …**) | What the model got back from the tool opens. Click again to fold it. |
 | Click **[copy]** under an answer | The answer is copied, as the model wrote it. |
 | Click **[copy]** on a code block | That block's code is copied, without the box or the indent. |
 | Press **Ctrl+Y**, or type `/copy` | The last answer is copied. `/copy code` copies its last code block, `/copy think` its thinking, `/copy all` the whole chat. |
@@ -153,6 +184,8 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | `/save [FILE]` | Saves this chat as Markdown, thinking included. Without a file: `~/tokenstation-chat-YYYYMMDD-HHMM.md`. |
 | `/copy` | Copies the last answer (Ctrl+Y). `/copy code`: its last code block. `/copy think`: its thinking. `/copy all`: the whole chat. See [The mouse, and copying](#the-mouse-and-copying). |
 | `/compact [WHAT TO KEEP]` | Has the model summarize the chat so far and go on from the summary, with room again (see [A chat that fills up](#a-chat-that-fills-up)). `/summarize` too. |
+| `/tools` | Lists the model's tools and which are on. `/tools search`, `pages`, `terminal` or `memory` followed by `on` or `off` sets one (see [Tools](#tools-web-pages-a-terminal-memory)). `/tools ask` has the terminal ask before each command again. |
+| `/memory` | The notes the model keeps between chats. `/memory forget N` removes one, `/memory clear` all, `/memory TEXT` adds one. |
 | `/find TEXT` | Scrolls to the newest message containing TEXT. |
 | `/tune [NAME]` | Runs `ts5-tune` on the loaded model (or NAME), live on the Models page. |
 | `/check [NAME]` | The GPU check on the loaded model (or NAME): `ts5 check`, the GPU's answers against the CPU's. |
@@ -274,6 +307,10 @@ btop-style bars for this machine: GPU memory (with GiB free), RAM, the die (Tctl
 | Answer length | No limit, or a cap of 512 to 8,192 tokens. Under 1,024 turns thinking off. |
 | Full chat | **is summarized, and goes on** (the default): when the chat is nearly full the model writes a summary of it and the chat continues from that. **stops**: a full chat ends, as before (see [A chat that fills up](#a-chat-that-fills-up)). |
 | Web search key | A [Tavily](https://tavily.com) key (free at app.tavily.com). A model ts5-tui loads then searches the web when a question needs it (see [Web search](Web-search)). Kept in the settings file, readable by you only. Load the model again (Models, Enter) for a new key to take hold. For the always-on service, the key goes in `/etc/default/tokenstation` instead. |
+| Tool: search | **on**: the model searches the web when a question needs it (it needs the key above). **off**: it never searches. |
+| Tool: pages | **on**: the model can read a web page you give it a link to. **off**: it can't open links. |
+| Tool: terminal | **on, asks first**: the model can run a command on this machine, and you see each one and say yes or no. **off**: it can't run commands. |
+| Tool: memory | **on**: the model keeps notes when you ask it to remember, and reads them at the start of every chat (`/memory`). **off**: it keeps none and doesn't see the saved ones. |
 | Context (own) | The context for a model ts5-tui starts itself: auto (the default: the longest that fits), or 4,096 to 32,768. A number that has no memory beside a model doesn't stop the load (see [Models](#models-f2)); auto is the safe choice. A setting saved as 8,192 by an older version reads as auto. |
 | Speed or length | For a model with a helper that ts5-tui starts itself, with Context on auto. **faster** (the default) keeps GPU memory for the helper: the model writes faster, and the chat is somewhat shorter. **longest chat** gives the memory to the chat, and the model runs without its helper when both don't fit. It takes hold the next time the model loads (Enter on it on Models). |
 | Fan (PS5) | auto (quiet), cool (keeps long prompts under the 85 °C limiter), early (ramps from 40 °C, for long prompts back to back), max (loud). |

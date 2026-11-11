@@ -22,8 +22,9 @@ From a computer, `scripts/ts5-ps5.sh websearch tvly-YOUR-KEY` does the same (`we
 | Mistral Nemo 12B | yes (Mistral format) | not tried yet |
 | Gemma 3 12B | yes (Hermes format in Gemma turns) | works |
 | Gemma 4 12B (Linux edition) | yes (its own format) | not tried yet |
+| DeepSeek R1 Distill 14B (Linux edition) | yes (asked for in words) | not tried yet |
 
-ts5 reads the tool format from each model's own chat template. A model whose template has no tool format gets no tools and no search.
+ts5 reads the tool format from each model's own chat template. On the Prospero Store title a model whose template has no tool format gets no tools and no search. On the Linux edition such a model (DeepSeek R1, an early Llama 3 or Mistral) is asked in words to write its calls in Qwen 3's tags, and `/v1/models` says `"tool_format": "generic"`; how well it keeps to that depends on the model.
 
 ## How it behaves
 
