@@ -264,6 +264,13 @@ ts5-tui --url http://ps5.local:8081  # another one
   a browser, run a command on this machine and keep notes between chats.
   Each has its own switch (Settings → Tool: search, pages, terminal,
   browser, memory; or `/tools terminal off`), and `/tools` lists them.
+  **One switch turns them all off**: Settings → Tools, or `/tools off`
+  (`/tools on` brings back the ones you had on), or `ts5-tui --no-tools`
+  for one run. With it off the model gets nothing but the chat: no
+  search, no pages, no commands, no browser, no notes.
+  The terminal and the browser have three steps: off, on and asking
+  first (the default), on and never asking (`/tools terminal allow`;
+  `/tools ask` brings every question back).
   - **Web pages**: give it a link ("read https://... and sum it up") and
     it gets the page as text: the article where the page marks one,
     without the site's menus and sidebars, the first 8,000 characters.

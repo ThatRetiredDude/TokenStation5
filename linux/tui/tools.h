@@ -20,6 +20,9 @@ struct ToolSwitches {
     bool browser = false;  // browser_open and the rest (`ts5 browser`, engine/src/browser.h)
     // Settings -> Browser: "auto", "text", "obscura", "chromium", or a program's path.
     std::string browser_program = "auto";
+    // A command, and a button or typing on a page, wait for the user's
+    // yes; false: they go without asking (the user's choice in Settings).
+    bool terminal_ask = true, browser_ask = true;
     bool any() const { return page || terminal || memory || browser; }  // tools of ts5-tui's own
 };
 

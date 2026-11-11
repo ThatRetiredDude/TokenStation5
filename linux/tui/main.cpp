@@ -1223,11 +1223,14 @@ ChatRequest chat_request() {
     rq.max_tokens = g->cfg.max_tokens;
     rq.n_ctx = sv.n_ctx;
     rq.summarize = g->cfg.summarize;
-    rq.tools.web = g->cfg.tool_web;
-    rq.tools.page = g->cfg.tool_page;
-    rq.tools.terminal = g->cfg.tool_terminal;
-    rq.tools.memory = g->cfg.tool_memory;
-    rq.tools.browser = g->cfg.tool_browser;
+    const bool tools = g->cfg.tools_on();  // the one switch over them all
+    rq.tools.web = tools && g->cfg.tool_web;
+    rq.tools.page = tools && g->cfg.tool_page;
+    rq.tools.terminal = tools && g->cfg.tool_terminal;
+    rq.tools.memory = tools && g->cfg.tool_memory;
+    rq.tools.browser = tools && g->cfg.tool_browser;
+    rq.tools.terminal_ask = g->cfg.terminal_ask;
+    rq.tools.browser_ask = g->cfg.browser_ask;
     rq.tools.browser_program = g->cfg.browser;
     rq.ts5 = !sv.tool_format.empty();
     return rq;
@@ -2325,8 +2328,26 @@ std::vector<SetRow> settings_rows() {
         };
         r.push_back(x);
     }
-    // The tools the model can use in a chat, a switch each.
+    // The tools the model can use in a chat: one switch over them all, then
+    // a switch each (shown while the first is on).
     {
+        SetRow x{"Tools", c.no_tools ? "off for this run" : c.tools ? "on" : "off",
+                 c.no_tools  ? "started with --no-tools: the model gets no tools until ts5-tui is started without it"
+                 : c.tools   ? "the model may use the tools switched on below; off takes them all away at once"
+                             : "the model gets no tools at all; on brings back the ones you had on"};
+        x.change = [save](int) {
+            if (g->cfg.no_tools) {
+                show_toast("Started with --no-tools: the tools stay off for this run", g->th->warn, 4);
+                return;
+            }
+            g->cfg.tools = !g->cfg.tools;
+            if (!g->cfg.tools) browser_stop();
+            save();
+        };
+        r.push_back(x);
+    }
+    const bool tools_shown = c.tools_on();
+    if (tools_shown) {
         const ServerState sv = server();
         SetRow x{"Tool: search",
                  !c.tool_web ? "off" : sv.web_search ? "on" : sv.wikipedia ? "on, Wikipedia only" : "on, needs the key",
@@ -2340,7 +2361,7 @@ std::vector<SetRow> settings_rows() {
         };
         r.push_back(x);
     }
-    {
+    if (tools_shown) {
         SetRow x{"Tool: pages", c.tool_page ? "on" : "off",
                  c.tool_page ? "the model can read a page you give it a link to" : "the model can't open links"};
         x.change = [save](int) {
@@ -2349,28 +2370,36 @@ std::vector<SetRow> settings_rows() {
         };
         r.push_back(x);
     }
-    {
-        SetRow x{"Tool: terminal", c.tool_terminal ? "on, asks first" : "off",
-                 c.tool_terminal ? "the model can run a command on this machine; you see each one and say yes or no"
-                                 : "the model can't run commands"};
-        x.change = [save](int) {
-            g->cfg.tool_terminal = !g->cfg.tool_terminal;
+    // Three steps each: off, on and asking first, on and never asking.
+    if (tools_shown) {
+        SetRow x{"Tool: terminal", !c.tool_terminal ? "off" : c.terminal_ask ? "on, asks first" : "on, never asks",
+                 !c.tool_terminal  ? "the model can't run commands"
+                 : c.terminal_ask  ? "the model can run a command on this machine; you see each one and say yes or no"
+                                   : "the model runs commands on this machine without showing you first: for a model you trust, "
+                                     "and no pages from strangers"};
+        x.change = [save](int d) {
+            const int at = !g->cfg.tool_terminal ? 0 : g->cfg.terminal_ask ? 1 : 2, to = (at + (d < 0 ? 2 : 1)) % 3;
+            g->cfg.tool_terminal = to != 0;
+            g->cfg.terminal_ask = to != 2;
             save();
         };
         r.push_back(x);
     }
-    {
-        SetRow x{"Tool: browser", c.tool_browser ? "on, asks first" : "off",
-                 c.tool_browser ? "the model opens pages and follows links by itself; a button or typing waits for your yes"
-                                : "the model can't click through web pages"};
-        x.change = [save](int) {
-            g->cfg.tool_browser = !g->cfg.tool_browser;
+    if (tools_shown) {
+        SetRow x{"Tool: browser", !c.tool_browser ? "off" : c.browser_ask ? "on, asks first" : "on, never asks",
+                 !c.tool_browser  ? "the model can't click through web pages"
+                 : c.browser_ask  ? "the model opens pages and follows links by itself; a button or typing waits for your yes"
+                                  : "the model presses buttons and types into pages without asking you"};
+        x.change = [save](int d) {
+            const int at = !g->cfg.tool_browser ? 0 : g->cfg.browser_ask ? 1 : 2, to = (at + (d < 0 ? 2 : 1)) % 3;
+            g->cfg.tool_browser = to != 0;
+            g->cfg.browser_ask = to != 2;
             if (!g->cfg.tool_browser) browser_stop();
             save();
         };
         r.push_back(x);
     }
-    {
+    if (tools_shown) {
         // Which program shows the pages. A path set with /browser stays
         // until it is changed here.
         static const char *const ids[] = {"auto", "obscura", "chromium", "text"};
@@ -2400,7 +2429,7 @@ std::vector<SetRow> settings_rows() {
         };
         r.push_back(x);
     }
-    {
+    if (tools_shown) {
         const size_t notes = memory_notes().size();
         SetRow x{"Tool: memory", !c.tool_memory ? "off" : notes ? fmt("on, %zu note%s", notes, notes == 1 ? "" : "s") : "on",
                  c.tool_memory ? "notes the model keeps when you say remember; it sees them in every chat (/memory)"
@@ -2821,26 +2850,57 @@ void run_command(const std::string &line) {
         const std::string name = arg.substr(0, sp), to = sp == std::string::npos ? "" : unpad(arg.substr(sp + 1));
         bool found = false;
         if (name == "ask") {
-            // Back to a question before each command (after A).
+            // Back to a question before each command and each button: in
+            // this chat (after "every command"), and as the setting.
             c.ask_always = false;
             c.ask_always_browser = false;
+            f.terminal_ask = f.browser_ask = true;
+            f.save();
             found = true;
             show_toast("The model asks before each command and each button again", g->th->accent, 3);
+        } else if ((name == "on" || name == "off") && to.empty()) {
+            // The one switch over them all.
+            found = true;
+            if (f.no_tools) {
+                show_toast("Started with --no-tools: the tools stay off for this run", g->th->warn, 4);
+            } else {
+                f.tools = name == "on";
+                if (!f.tools) browser_stop();
+                f.save();
+                show_toast(f.tools ? "Tools: on (the ones switched on in Settings)" : "Tools: all off", g->th->accent, 3);
+            }
         }
         for (const Row &r : rows) {
             if (name != r.name) continue;
+            // "ask" and "allow" (the terminal and the browser): on, and
+            // whether each command, or button, waits for a yes.
+            bool *ask = r.on == &f.tool_terminal ? &f.terminal_ask : r.on == &f.tool_browser ? &f.browser_ask : nullptr;
             found = true;
             if (to == "on" || to == "off") *r.on = to == "on";
             else if (to.empty()) *r.on = !*r.on;
+            else if (ask && (to == "ask" || to == "allow")) *r.on = true, *ask = to == "ask";
             else found = false;
             if (found) {
+                if (!f.tool_browser) browser_stop();
                 f.save();
-                show_toast(std::string("Tool ") + r.name + ": " + (*r.on ? "on" : "off"), g->th->accent, 3);
+                show_toast(std::string("Tool ") + r.name + ": " +
+                               (!*r.on ? "off" : !ask ? "on" : *ask ? "on, asks first" : "on, never asks") +
+                               (*r.on && !f.tools_on() ? "  (all tools are off: /tools on)" : ""),
+                           g->th->accent, 3);
             }
         }
         if (!found) {
-            std::string h = "**The model's tools**  (`/tools NAME on` or `off`, or Settings)\n";
-            for (const Row &r : rows) h += std::string("`") + r.name + "`  **" + (*r.on ? "on" : "off") + "**  " + r.what + "\n";
+            std::string h = "**The model's tools**  (`/tools NAME on` or `off`; `/tools terminal allow` or `ask`, the same for "
+                            "`browser`; `/tools off` takes them all away, `/tools on` gives them back; or Settings)\n";
+            if (!f.tools_on())
+                h += f.no_tools ? "**All tools are off for this run** (ts5-tui was started with --no-tools).\n"
+                                : "**All tools are off** (`/tools on`). The switches as they will be then:\n";
+            for (const Row &r : rows) {
+                const bool *ask = r.on == &f.tool_terminal ? &f.terminal_ask : r.on == &f.tool_browser ? &f.browser_ask : nullptr;
+                h += std::string("`") + r.name + "`  **" + (!*r.on ? "off" : ask && !*ask ? "on, never asks" : "on") + "**  " +
+                     r.what + (*r.on && ask && !*ask ? "  **The question is switched off** (`/tools ask` brings it back)." : "") +
+                     "\n";
+            }
             if (f.tool_terminal && c.ask_always.load())
                 h += "\nCommands run **without asking** in this chat (you chose that). `/tools ask` brings the question back.";
             if (f.tool_browser && c.ask_always_browser.load())
@@ -3928,12 +3988,14 @@ void on_winch(int) { g_winch = 1; }
 int usage(FILE *f) {
     fprintf(f,
             "ts5-tui: TokenStation5 in a terminal.\n\n"
-            "  ts5-tui [--url http://HOST:8081] [--key KEY] [--theme %s] [--no-intro] [--tmux|--no-tmux]\n\n"
+            "  ts5-tui [--url http://HOST:8081] [--key KEY] [--theme %s] [--no-intro] [--no-tools] [--tmux|--no-tmux]\n\n"
             "It talks to a running TokenStation (the tokenstation service, the TV app, or\n"
             "`ts5 serve`; Models can start one), so it uses no GPU memory itself and works\n"
             "over SSH. From a plain terminal it runs in its own tmux session (\"ts5\"), so SSH\n"
             "dropping stops nothing: run ts5-tui again to go back to it (Ctrl+A d leaves it).\n"
             "In an IDE's terminal tmux stays off unless --tmux.\n"
+            "--no-tools: the model gets no tools in this run (no search, pages, commands,\n"
+            "browser or notes), whatever Settings says.\n"
             "Settings are kept in ~/.config/tokenstation/tui.conf.\n"
             "Keys: F1-F5 or Tab for the pages, Enter, arrows, Esc; Ctrl+Q quits.\n",
             [] {
@@ -3983,6 +4045,7 @@ int main(int argc, char **argv) {
         else if (a == "--key") given_key(next());
         else if (a == "--theme") app.cfg.theme = next();
         else if (a == "--no-intro") intro = false;
+        else if (a == "--no-tools") app.cfg.no_tools = true;
         else if (a == "--tmux") tmux = 1;
         else if (a == "--no-tmux") tmux = -1;
         else if (a == "-h" || a == "--help") return usage(stdout);

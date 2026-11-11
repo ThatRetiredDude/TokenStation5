@@ -1181,8 +1181,9 @@ ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
     std::string cmd = tool_command(u.name, u.args);
     const bool command = u.name == "run_command" && rq.tools.terminal && !cmd.empty();
     // What the browser would do beyond reading: asked the same way.
-    if (!command) cmd = c->ask_always_browser.load() ? "" : browser_question(u.name, u.args, rq.tools, c->cancel);
-    if (command ? !c->ask_always.load() : !cmd.empty()) {
+    if (!command)
+        cmd = c->ask_always_browser.load() || !rq.tools.browser_ask ? "" : browser_question(u.name, u.args, rq.tools, c->cancel);
+    if (command ? !c->ask_always.load() && rq.tools.terminal_ask : !cmd.empty()) {
         {
             std::lock_guard<std::mutex> l(c->mu);
             c->ask_cmd = cmd;
@@ -1516,8 +1517,10 @@ void complete(Chat &c, const ChatRequest &rq) {
         if (cmd == "/model" || cmd == "/tune" || cmd == "/check" || cmd == "/bench") pool = rq.model_names;
         else if (cmd == "/download") pool = rq.catalog_names;
         else if (cmd == "/think") pool = {"on", "off", "auto"};
-        else if (cmd == "/tools") pool = {"search", "pages", "terminal", "memory", "search on", "search off", "pages on",
-                                          "pages off", "terminal on", "terminal off", "memory on", "memory off", "ask"};
+        else if (cmd == "/tools") pool = {"on", "off", "ask", "search", "pages", "terminal", "browser", "memory", "search on",
+                                          "search off", "pages on", "pages off", "terminal on", "terminal off",
+                                          "terminal ask", "terminal allow", "browser on", "browser off", "browser ask",
+                                          "browser allow", "memory on", "memory off"};
         else if (cmd == "/memory") pool = {"forget", "clear"};
         else if (cmd == "/browser") pool = {"auto", "obscura", "chromium", "text"};
         else if (cmd == "/fan") pool = {"auto", "cool", "early", "max"};

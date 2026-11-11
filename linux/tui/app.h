@@ -50,6 +50,14 @@ struct Config {
     // (asked first), and notes kept between chats (tools.h).
     bool tool_web = true, tool_page = true, tool_terminal = true, tool_memory = true;
     bool tool_browser = false;       // the browser the model works: off until the user turns it on
+    // One switch over them all: off, the model gets no tool, whatever the
+    // switches above say. --no-tools turns it off for one run.
+    bool tools = true;
+    bool no_tools = false;  // not saved
+    bool tools_on() const { return tools && !no_tools; }
+    // Whether a command, and a button or typing on a web page, wait for
+    // the user's yes (the default) or go without asking.
+    bool terminal_ask = true, browser_ask = true;
     std::string browser = "auto";    // "auto", "obscura", "chromium", "text", or a browser program's path
     std::string path;       // where it is saved
     void load();
