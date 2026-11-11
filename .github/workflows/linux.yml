@@ -26,6 +26,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   # Built on Debian 12, the oldest system it supports, so the same programs
@@ -94,9 +95,42 @@ jobs:
           path: build/linux/tokenstation-root.tar.gz
           retention-days: 3
 
+  # The newest published build, for the upgrade tests below. It comes from the
+  # run that published it and not from the release page: a file fetched from
+  # the release counts as a download, and the tests would bury the real ones.
+  published:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch it from the run that published it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p old
+          sha=$(gh release view linux-latest --repo "$GITHUB_REPOSITORY" --json targetCommitish --jq .targetCommitish 2>/dev/null || true)
+          if [ -z "$sha" ]; then
+            echo "Nothing is published yet: the upgrade tests are left out."
+            exit 0
+          fi
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow linux.yml --event workflow_dispatch \
+                  --commit "$sha" --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty' || true)
+          if [ -n "$run" ]; then
+            gh run download "$run" --repo "$GITHUB_REPOSITORY" --dir old \
+              -n tokenstation-debian-ubuntu -n tokenstation-fedora -n tokenstation-arch || true
+          fi
+          find old -type f | sort
+          if [ -z "$(find old -type f | head -1)" ]; then
+            echo "::warning::The published build ($sha) could not be fetched from the run that made it: the upgrade tests are left out."
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: published
+          path: old
+          if-no-files-found: ignore
+          retention-days: 1
+
   # The .deb, installed with apt on each Debian and Ubuntu.
   deb:
-    needs: package
+    needs: [package, published]
     strategy:
       fail-fast: false
       matrix:
@@ -108,13 +142,19 @@ jobs:
         with:
           name: tokenstation-debian-ubuntu
           path: dist
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: published
+          path: old
       - name: Install it and check it
         run: |
           apt-get update -qq
           apt-get install -y -qq sudo python3 curl ca-certificates
           # An upgrade from the newest published build, when there is one.
-          if curl -fsSL -o /tmp/old.deb https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation_latest_amd64.deb; then
-            apt-get install -y -qq /tmp/old.deb
+          old=$(find "$PWD/old" -name 'tokenstation_*_amd64.deb' 2>/dev/null | head -1)
+          if [ -n "$old" ]; then
+            apt-get install -y -qq "$old"
             dpkg-query -W tokenstation
           fi
           apt-get install -y -qq ./dist/*.deb
@@ -130,7 +170,7 @@ jobs:
 
   # The same build, made into an .rpm on Fedora, then installed with dnf.
   fedora:
-    needs: package
+    needs: [package, published]
     runs-on: ubuntu-24.04
     container: fedora:44
     steps:
@@ -143,11 +183,17 @@ jobs:
         run: |
           dnf install -y -q rpm-build
           linux/build-rpm.sh "${{ needs.package.outputs.version }}"
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: published
+          path: old
       - name: Install it and check it
         run: |
           # An upgrade from the newest published build, when there is one.
-          if curl -fsSL -o /tmp/old.rpm https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest.x86_64.rpm; then
-            dnf install -y -q /tmp/old.rpm
+          old=$(find "$PWD/old" -name 'tokenstation-*.x86_64.rpm' 2>/dev/null | head -1)
+          if [ -n "$old" ]; then
+            dnf install -y -q "$old"
             rpm -q tokenstation
           fi
           dnf install -y -q ./build/linux/tokenstation-*.rpm
@@ -167,7 +213,7 @@ jobs:
 
   # And into an Arch package, installed with pacman.
   arch:
-    needs: package
+    needs: [package, published]
     runs-on: ubuntu-24.04
     container: archlinux:latest
     steps:
@@ -183,11 +229,17 @@ jobs:
           useradd -m builder
           chown -R builder build/linux
           su builder -c "linux/build-arch.sh '${{ needs.package.outputs.version }}'"
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: published
+          path: old
       - name: Install it and check it
         run: |
           # An upgrade from the newest published build, when there is one.
-          if curl -fsSL -o /tmp/old.pkg.tar.zst https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-x86_64.pkg.tar.zst; then
-            pacman -U --noconfirm /tmp/old.pkg.tar.zst
+          old=$(find "$PWD/old" -name 'tokenstation-*.pkg.tar.*' 2>/dev/null | head -1)
+          if [ -n "$old" ]; then
+            pacman -U --noconfirm "$old"
             pacman -Q tokenstation
           fi
           pacman -U --noconfirm build/linux/tokenstation-*.pkg.tar.*
@@ -310,6 +362,44 @@ jobs:
           pattern: tokenstation-*
           path: dist
           merge-multiple: true
+      # A release's download counts go when it is replaced. The counts of the
+      # build this run replaces are added to a list that each publishing run
+      # hands to the next one (the artifact "download-counts"): one line a
+      # file, with the time read, the build, when it was published, the file
+      # and its count.
+      - name: Keep the download counts of the build this one replaces
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p counts
+          gh release view linux-latest --repo "$GITHUB_REPOSITORY" \
+            --json name,publishedAt,targetCommitish,assets > old.json || exit 0
+          sha=$(jq -r .targetCommitish old.json)
+          run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow linux.yml --event workflow_dispatch \
+                  --commit "$sha" --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty' || true)
+          if [ -n "$run" ]; then
+            gh run download "$run" --repo "$GITHUB_REPOSITORY" --dir counts -n download-counts || true
+          fi
+          jq -r --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '. as $r | .assets[] | [$now, $r.name, $r.publishedAt, .name, .downloadCount] | @tsv' \
+            old.json | tee -a counts/downloads.tsv
+          {
+            echo "Download counts of the build this run replaces:"
+            echo
+            echo "| File | Downloads |"
+            echo "|---|---|"
+            jq -r '.assets[] | "| \(.name) | \(.downloadCount) |"' old.json
+            echo
+            echo "$(wc -l < counts/downloads.tsv) lines in download-counts so far."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: download-counts
+          path: counts/downloads.tsv
+          if-no-files-found: ignore
+          retention-days: 90
       - name: Replace the linux-latest pre-release
         env:
           GH_TOKEN: ${{ github.token }}
