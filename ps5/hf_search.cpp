@@ -35,7 +35,11 @@ const char *const kArchs[] = {"llama", "mistral", "qwen2", "qwen3", "gemma3",
 #endif
 };
 const char *const kQuants[] = {"Q4_K_M", "Q4_K_S", "Q5_K_M", "Q5_K_S", "Q6_K", "Q8_0",
-                               "Q4_0",   "Q5_0",   "Q4_1",   "Q5_1",   "F16"};
+                               "Q4_0",   "Q5_0",   "Q4_1",   "Q5_1",   "F16",
+#ifdef TS5_LINUX
+                               "Q2_0",  // two bits a weight (the Bonsai files, which are qwen35)
+#endif
+};
 
 std::string upper(std::string s) {
     for (auto &c : s) c = (char)toupper((unsigned char)c);
