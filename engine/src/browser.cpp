@@ -1099,8 +1099,20 @@ private:
                                                                               : "the site couldn't be reached") +
                                 " (" + net + ").");
                 const std::string left = url_;
-                settle(20);
-                const Answer a = snapshot();
+                const char *silent = "The page could not be read: the browser didn't answer.";
+                Answer a = settle(20) ? snapshot() : fail(silent);
+                if (!a.ok && obscura_ && cdp_ && !cdp_->gone() && a.text.find("didn't answer") != npos) {
+                    // Obscura that answers nothing once a page has loaded (on
+                    // the PS5 the second article in a row, a link followed or
+                    // an address opened alike, while a fresh one showed that
+                    // page and ten more): a fresh one, and the page once more.
+                    quit();
+                    std::string again;
+                    if (!awake(again, false)) return fail(again);
+                    if (!cdp_->call("Page.navigate", "{\"url\":" + json_escape(url) + "}", r, err, 40000))
+                        return fail("The page could not be opened: " + lost(err) + ".");
+                    a = settle(20) ? snapshot() : fail(silent);
+                }
                 if (obscura_ && a.ok && remember && !left.empty() && left != url_) {
                     back_.push_back(left);
                     if (back_.size() > 50) back_.erase(back_.begin());

@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <random>
@@ -467,13 +466,6 @@ const char *const kGemmaTools =
 const char *const kGenericTools =
     TS5_TOOL_WORDS "The result of each call comes back in the next message, under \"Result of "
                    "<function-name>:\": use it to answer.";
-// And, unless TS5_GENERIC_FIRM=0: DeepSeek R1 14B on the PS5 answered from
-// memory where it was asked to open a page (3 of 3), and wrote what a page
-// "said" without opening it.
-const char *const kGenericFirm =
-    " You cannot look anything up, open a page, read a file or run anything yourself: only a function can. "
-    "When the request asks for something a function does, call the function and wait for its result. Never "
-    "write a result yourself.";
 
 std::string gemma_results(const std::vector<std::string> &results) {
     std::string s;
@@ -542,8 +534,7 @@ std::string render_gemma(const std::vector<Message> &all, const std::vector<Json
 std::string render_generic(const Tokenizer &t, const std::vector<Message> &all, const std::vector<Json> &tools) {
     std::string words;
     if (!tools.empty()) {
-        const char *firm = getenv("TS5_GENERIC_FIRM");
-        words = std::string(kGenericTools) + (firm && atoi(firm) == 0 ? "" : kGenericFirm) + "\n<tools>";
+        words = std::string(kGenericTools) + "\n<tools>";
         for (auto &tool : tools) words += "\n" + tool.dump();
         words += "\n</tools>";
     }
@@ -1220,6 +1211,10 @@ bool named_call(const std::string &text, size_t p, int tag, ToolCall &call, size
         if (close == std::string::npos) return false;
         name = strip(text.substr(p + 10, gt - p - 10));
         args = strip(text.substr(gt + 1, close - gt - 1));
+        // (A closing tag with nothing to close, where the call has no
+        // parameters: Qwen3.5 9B on the PS5, "<function=list_folder>\n
+        // </parameter>\n</function>", and nothing ran.)
+        while (starts(args, "</parameter>")) args = strip(args.substr(12));
         next = close + 11;
     } else {
         // The tag ends at the first > past the arguments' closing quote (the

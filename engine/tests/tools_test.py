@@ -295,6 +295,9 @@ def test_parser(ts5):
         # Qwen 2.5 Coder's other ways of writing a call (the first is from the console).
         ("hermes", '<tools>\n  {"name": "web_search", "arguments": {"query": "linux kernel"}}\n</tools>',
          "", [("web_search", {"query": "linux kernel"})], 0),
+        # A call without parameters and a closing tag with nothing to close (Qwen3.5 9B on the PS5,
+        # byte for byte; nothing ran).
+        ("hermes", "<tool_call>\n<function=list_folder>\n</parameter>\n</function>\n</tool_call>", "", [("list_folder", {})], 0),
         ("hermes", '{"name": "web_search", "arguments": {"query": "a"}}', "", [("web_search", {"query": "a"})], 0),
         ("hermes", '```json\n{"name": "a", "arguments": {}}\n```', "", [("a", {})], 0),
         ("hermes", '```json\n{\n  "name": "a",\n  "arguments": {}\n}\n```\n```json\n{"name": "b", "arguments": {"n": 2}}\n```',
@@ -822,16 +825,13 @@ def test_gemma4_thinking(ts5, model, tdir):
 # the thinking, the Qwen one's has llama.cpp's switch for it as well.
 R1_LLAMA = "deepseek-ai-DeepSeek-R1-Distill-Llama-8B"
 R1_QWEN = "deepseek-ai-DeepSeek-R1-Distill-Qwen-32B"
-# The words ts5 asks a model without a tool format for calls with (tools.cpp, kGenericTools and kGenericFirm).
+# The words ts5 asks a model without a tool format for calls with (tools.cpp, kGenericTools).
 TOOL_WORDS = ("You can call functions to help with the request. The functions are listed below as JSON within "
               "<tools></tools> tags. To call one, reply with only a JSON object with the function's name and "
               "arguments within <tool_call></tool_call> tags, one pair of tags per call:\n<tool_call>\n"
               "{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>\nIf the request "
               "doesn't need any of the functions, answer it directly instead. The result of each call comes back "
-              "in the next message, under \"Result of <function-name>:\": use it to answer. You cannot look "
-              "anything up, open a page, read a file or run anything yourself: only a function can. When the "
-              "request asks for something a function does, call the function and wait for its result. Never "
-              "write a result yourself.")
+              "in the next message, under \"Result of <function-name>:\": use it to answer.")
 # Llama 3.0's and the first Mistrals' templates, cut down to their turns: no tool format in either.
 LLAMA30 = "llama-3.0-cut-down"
 LLAMA30_TEMPLATE = ("{% for m in messages %}{{ '<|start_header_id|>' + m['role'] + '<|end_header_id|>\n\n' + "
@@ -1109,6 +1109,11 @@ def test_thinking_marks(ts5, model, tdir):
     fenced = ('I know it.\n</think>\n\nIt is sunny in Oslo.\n\n**Answer:** sunny.\n\n```json\n'
               '{"name": "weather", "arguments": {"city": "Oslo"}}\n```')
     colon = 'The tool.\n</think>\n\n{"name": "get_weather", "arguments": {"city": "Oslo"}}\n:\n\n'
+    # Calls ahead of any result, the last to a tool the request doesn't have (R1 14B on the PS5:
+    # five of them, and nothing ran): the first is made.
+    plan = ('One by one.\n</think>\n\n{"name": "get_weather", "arguments": {"city": "Oslo"}}\n \n '
+            '{"name": "get_weather", "arguments": {"city": "Bergen"}}\n\n '
+            '{"name": "answer", "arguments": {"result": "The weather is..."}}')
     for name, turn, want_calls, want_text, finish in (
             ("the call before a made-up result is made", made_up, [("get_weather", {"city": "Oslo"})], "", "tool_calls"),
             ("a made-up result without a call ends the answer", words, [], "Sure.", "stop"),
@@ -1117,7 +1122,9 @@ def test_thinking_marks(ts5, model, tdir):
              "To get Oslo's weather, I'll use the get_weather function.", "tool_calls"),
             ("a call in a fence after the answer, by the end of the tool's name", fenced,
              [("get_weather", {"city": "Oslo"})], "It is sunny in Oslo.\n\n**Answer:** sunny.", "tool_calls"),
-            ("a bare call with a stray colon under it", colon, [("get_weather", {"city": "Oslo"})], "", "tool_calls")):
+            ("a bare call with a stray colon under it", colon, [("get_weather", {"city": "Oslo"})], "", "tool_calls"),
+            ("of calls that end in a made-up tool the first is made", plan, [("get_weather", {"city": "Oslo"})], "",
+             "tool_calls")):
         for stream, env in ((False, None), (True, None), (True, {"TS5_TEST_PIECE": "4"})):
             req = {"messages": [{"role": "user", "content": "Weather in Oslo?"}], "tools": [WEATHER], "stream": stream}
             msg, prompts, log = serve_turns(ts5, model, r1, [turn], req, more_env=env)

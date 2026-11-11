@@ -994,13 +994,23 @@ void handle(int fd, Server::State &state, Usage &u) {
             // and nothing of the answer has gone out yet. Past that, the turn
             // stays text.
             std::string made_up;
-            for (const ToolCall &c : pt.calls) {
+            size_t made_up_at = 0;
+            for (size_t i = 0; i < pt.calls.size() && made_up.empty(); i++) {
                 bool known = false;
-                for (const Json &t : tools) known |= t["function"]["name"].str() == c.name;
+                for (const Json &t : tools) known |= t["function"]["name"].str() == pt.calls[i].name;
                 if (!known) {
-                    made_up = c.name;
-                    break;
+                    made_up = pt.calls[i].name;
+                    made_up_at = i;
                 }
+            }
+            // Calls to the request's tools and then one to a tool it doesn't
+            // have: a plan written ahead of any result (DeepSeek R1 14B on
+            // the PS5: browser_open, browser_type, web_search, remember and
+            // "answer", and nothing ran). The first is a sound step and is
+            // made; the model goes on from what it gets back.
+            if (!made_up.empty() && made_up_at > 0) {
+                pt.calls.resize(1);
+                made_up.clear();
             }
             // A turn that is only an empty call block ("<tools> </tools>",
             // Qwen 2.5 Coder 14B asked for a poem, seen on the console) has

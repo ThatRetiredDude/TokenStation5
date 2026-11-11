@@ -235,7 +235,7 @@ grep -q "^  mmb16dqz_q2_0 " "$work/q2-prof.txt" && grep -q "mv16_q2_0" "$work/q2
     { echo "FAIL: Q2_0's kernels in use"; grep "q2_0" "$work/q2-prof.txt"; exit 1; }
 echo "PASS Q2_0: prompts on mmb16dqz_q2_0, one token on mv16_q2_0"
 rm -f "$work/q2-prof.txt"
-echo "== hadamard16 (TS5_HAD16=1, the rotation in passes of four stages): the same logits as hadamard, byte for byte"
+echo "== hadamard16 (the rotation in passes of four stages; TS5_HAD16=1 everywhere, 0 nowhere): the same logits as hadamard, byte for byte"
 # Blocks of 2 and 32 (one pass), 64 and 128 (two), 4,096 (three, the Bonsai
 # 9B's); a prompt at once and one token a call; the token table's rows
 # rotated back (the tied model) and the regrouped value heads (Qwen3.5's).
@@ -259,6 +259,20 @@ for m in "${h16[@]}"; do
         echo "same logits: $(basename "$m") ${step:-at once}"
     done
 done
+# Left to itself (TS5_HAD16 unset) it runs where the PS5 found it faster: for
+# blocks of 4,096 in a pass over many tokens (the wide model's prompt), not
+# for one token a call, and not for smaller blocks.
+h16w="$work/qwen35-wide-fold-Q2_0.gguf"
+TS5_HAD16=0 "$ts5" logits -m "$h16w" -o "$work/h16-0.bin" $h16_toks 2> /dev/null
+TS5_PROFILE=1 "$ts5" logits -m "$h16w" -o "$work/h16-1.bin" $h16_toks 2> "$work/h16-1.err"
+cmp "$work/h16-0.bin" "$work/h16-1.bin"
+grep -q "^  hadamard16 " "$work/h16-1.err" || { echo "FAIL: hadamard16 not taken for blocks of 4,096 in a prompt"; exit 1; }
+TS5_PROFILE=1 "$ts5" logits -m "$h16w" -o "$work/h16-1.bin" --step $h16_toks 2> "$work/h16-1.err"
+! grep -q "^  hadamard16 " "$work/h16-1.err" || { echo "FAIL: hadamard16 taken for one token a call"; exit 1; }
+TS5_PROFILE=1 "$ts5" logits -m "$work/qwen35-fold-Q2_0.gguf" -o "$work/h16-1.bin" $h16_toks 2> "$work/h16-1.err"
+grep -q "^  hadamard " "$work/h16-1.err" && ! grep -q "^  hadamard16 " "$work/h16-1.err" ||
+    { echo "FAIL: hadamard16 taken for small blocks"; exit 1; }
+echo "left to itself: hadamard16 for blocks of 4,096 in a prompt, hadamard for one token and for smaller blocks"
 rm -f "$work/h16-0.bin" "$work/h16-1.bin" "$work/h16-0.err" "$work/h16-1.err"
 echo "== Qwen3.5: no drafts and no helper (that state only goes forward), the same text as with drafting off"
 p35="the cat sat on the mat. the cat sat on the mat. the cat sat on the mat. the cat sat on the"
