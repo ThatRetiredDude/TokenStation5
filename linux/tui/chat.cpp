@@ -954,7 +954,10 @@ void run_summary(Chat *c, ChatRequest rq, std::string msgs, std::string then, st
             // next answer brings the server's count.
             m.content = content;
             m.reasoning.clear();
-            m.sum_after += rough_tokens(content) + 60;
+            // (The server's count for the summary where it is the smaller: a
+            // model that thinks anyway counts its thinking too.)
+            const int rough = rough_tokens(content);
+            m.sum_after += (m.gen_tokens > 0 ? std::min(m.gen_tokens, rough) : rough) + 60;
             c->ctx_used = m.sum_after;
         } else {
             if (m.full) m.error = "the chat is too long for the model to read once more";

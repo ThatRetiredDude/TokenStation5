@@ -130,6 +130,8 @@ def main():
     ap.add_argument("--arch", default="qwen2", choices=["llama", "qwen2", "qwen3", "gemma3", "gemma4", "qwen35"])
     ap.add_argument("--vocab", required=True)
     ap.add_argument("--layers", type=int, default=2)
+    ap.add_argument("--first-layer", type=int, default=0,
+                    help="leave out the layers before this one: a file that holds only a part of a model")
     ap.add_argument("--embd", type=int, default=256)
     ap.add_argument("--ff", type=int, default=512)
     ap.add_argument("--heads", type=int, default=4)
@@ -301,7 +303,7 @@ def main():
         else:
             f = (1.0 + rng.random(ghd // 2)).astype(np.float32)
         w.add_tensor("rope_freqs.weight", f)
-    for i in range(a.layers):
+    for i in range(a.first_layer, a.layers):
         p = f"blk.{i}."
         lhd, lkv = (hd, a.kv_heads) if not g4 or swa[i] else (ghd, 1)
         norm(p + "attn_norm.weight", a.embd)

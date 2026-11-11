@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 
@@ -278,9 +279,10 @@ bool not_for_chat(const std::string &repo) {
     return n.rfind("e5-", 0) == 0;
 }
 
-// A file that isn't the model itself: a vision model's image encoder
-// (Qwen3.5 and Gemma repos carry one), a multi-token-prediction side file
-// ("mtp-Name-Q8_0.gguf": a draft head for another program).
+// A file that isn't the model itself, by its name: a vision model's image
+// encoder (Qwen3.5 and Gemma repos carry one), a multi-token-prediction
+// side file ("mtp-Name-Q8_0.gguf": a draft head for another program). One
+// whose name doesn't say so is caught by its size (whole_model).
 bool side_file(const std::string &path) {
     const std::string p = lower(path);
     if (p.find("mmproj") != std::string::npos) return true;
@@ -290,6 +292,20 @@ bool side_file(const std::string &path) {
         if (before && after) return true;
     }
     return false;
+}
+
+// Whether a file of `bytes` can hold the whole model its repo's header
+// describes, in the type its name says. A file far smaller than the layers'
+// weights take holds a part of the model only: a draft or MTP head that
+// its name doesn't give away ("Qwen3.8-27B-...-draft-Q8_0.gguf", 3.2 GB of
+// a 27B, was offered and downloaded, 2026-11-11). Half the layers' size is
+// asked for, so that an estimate that is off never hides a real model.
+bool whole_model(const Fields &f, uint64_t bytes, int quant) {
+    const double hd = f.key_length ? (double)f.key_length : f.n_head ? (double)f.n_embd / f.n_head : 0;
+    const double attn = 2.0 * f.n_embd * (f.n_head * hd) + 2.0 * f.n_embd * (f.n_head_kv * hd);
+    const double layers = (double)f.n_layer * (attn + 3.0 * f.n_embd * f.n_ff);
+    const double bits = atof(kQuants[quant] + 1);  // Q4_K_M: 4, Q8_0: 8, F16: 16
+    return bytes * 8.0 >= 0.5 * layers * bits;
 }
 
 // The Hub's answer to url as JSON; false with a reason in plain words.
@@ -410,6 +426,11 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
                 }
                 for (const File &f : files) {
                     if (!have || (int)found.size() >= kPerRepo) break;
+                    if (!whole_model(hp, f.bytes, f.quant)) {
+                        ts5::log_line("ts5-title: search: %s: %s is %.2f GB, too small to be the whole model: left out",
+                                      repo.c_str(), f.path.c_str(), f.bytes / 1e9);
+                        continue;
+                    }
                     CatalogEntry e{CatalogEntry::Model, "", "", "", "", "", "", "", "", f.bytes, ""};
                     e.n_vocab = (int)hp.n_vocab;
                     e.n_embd = (int)hp.n_embd;

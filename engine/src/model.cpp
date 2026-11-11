@@ -290,6 +290,29 @@ Weight Model::weight(const std::string &name, bool required, std::string &err) {
 
 bool Model::bind(std::string &err) {
     err.clear();
+    // A file with only some of the layers is not a model. A multi-token-
+    // prediction ("draft") head comes as a GGUF of its own, with the last
+    // layer and the embeddings alone (Qwen3.8 27B's "-draft-" files,
+    // 2026-11-11), and so does each part of a split file.
+    if (hp.n_layer > 0) {
+        std::vector<char> has(hp.n_layer, 0);
+        int present = 0;
+        for (auto &t : gguf.tensors) {
+            if (t.name.compare(0, 4, "blk.") != 0) continue;
+            const int i = atoi(t.name.c_str() + 4);
+            if (i >= 0 && i < hp.n_layer && !has[i]) {
+                has[i] = 1;
+                present++;
+            }
+        }
+        if (present < hp.n_layer) {
+            err = "this file is not a whole model: it holds " + (present ? std::to_string(present) : std::string("none")) +
+                  " of the model's " + std::to_string(hp.n_layer) +
+                  " layers. It is a piece for another program (a draft or MTP head, or one part of a split file): "
+                  "the model's main file is the one to download";
+            return false;
+        }
+    }
     tok_embd = weight("token_embd.weight", true, err);
     out_norm = weight("output_norm.weight", true, err);
     output = weight("output.weight", false, err);

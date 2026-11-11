@@ -225,7 +225,9 @@ ts5-tui --url http://ps5.local:8081  # another one
   takes, that fit this GPU's memory with room for a chat, the most
   downloaded first, chat models before the rest. Left out: repos the words
   match only by their uploader's name, embedding and reranking models, and
-  side files that aren't the model (image encoders, `mtp-` files). They're listed under the
+  files that aren't the model itself (image encoders, `mtp-` files, and any
+  file too small to hold the whole model, such as a draft head published
+  beside it). They're listed under the
   catalog with their size, who made the file and how long a chat they get
   here; Enter downloads one, checked by the SHA-256 Hugging Face gives for
   it. It's the TV app's search (`tokenstation --hf-search WORDS` prints
