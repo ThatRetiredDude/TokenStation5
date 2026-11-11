@@ -199,12 +199,12 @@ std::string settings_source(const KnownMatch &k) {
 // set, and where that comes from: known_good says whose checks they are
 // ("file": this file's, "model": this model's in another file, "family": a
 // model of its family's), with that check's day and count.
-std::string settings_json(const KnownMatch &k, const SampleParams &sp, bool think) {
+std::string settings_json(const KnownMatch &k, const SampleParams &sp, bool think, bool can_think) {
     char b[96];
     snprintf(b, sizeof b, "{\"temperature\":%.3g,\"top_p\":%.3g,\"top_k\":%d", sp.temperature, sp.top_p, sp.top_k);
     std::string j = b;
     // Only for a model whose template can skip its thinking.
-    if (k && k.row->thinking >= 0) j += std::string(",\"thinking\":") + (think ? "true" : "false");
+    if (can_think || (k && k.row->thinking >= 0)) j += std::string(",\"thinking\":") + (think ? "true" : "false");
     j += ",\"known_good\":";
     j += !k ? "\"none\"" : k.how == KnownMatch::File ? "\"file\"" : k.how == KnownMatch::Model ? "\"model\"" : "\"family\"";
     if (k)
@@ -384,7 +384,7 @@ void handle(int fd, Server::State &state, Usage &u) {
         int n_ctx;
         KnownMatch known;
         SampleParams sampling;
-        bool think;
+        bool think, can_think;
         Engine::Helper helper;
         {
             std::lock_guard<std::mutex> g(state.stats);
@@ -395,6 +395,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             known = state.known;
             sampling = state.sampling;
             think = state.think;
+            can_think = state.can_think;
         }
         // capabilities: whether the model takes OpenAI tools, and whether ts5
         // runs web searches for it (a Tavily key is set).
@@ -423,7 +424,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                             ",\"tool_format\":" + json_escape(tools) +
                                                             ",\"web_search\":" +
                                                             (can && !tavily_key().empty() ? "true" : "false") + "}" +
-                                                            ",\"settings\":" + settings_json(known, sampling, think) + "}") +
+                                                            ",\"settings\":" + settings_json(known, sampling, think, can_think) + "}") +
                                        "]}"));
     } else if (completions) {
         const bool chat = r.path.find("chat") != std::string::npos;
@@ -481,22 +482,28 @@ void handle(int fd, Server::State &state, Usage &u) {
         // finishing a line), where the thinking would use up the limit and
         // leave the answer empty. A request that says nothing gets the
         // model's known-good choice (known-good.tsv's thinking).
-        std::string opening;  // what opens the model's turn
-        if (chat) {
-            bool think = true;
-            if (can_skip_thinking(e.tok())) {
-                const Json &kw = req["chat_template_kwargs"]["enable_thinking"];
-                const Json &asked = kw.type == Json::BOOL ? kw : req["enable_thinking"];
-                think = asked.type == Json::BOOL                    ? asked.boolean(true)
-                        : req["reasoning_effort"].str() == "none" ? false
-                        : limit >= 1 && limit < kThinkRoom        ? false
-                                                                  : state.think;
-            }
-            opening = turn_opening(e.tok(), think);
+        bool think = true;
+        if (chat && can_skip_thinking(e.tok())) {
+            const Json &kw = req["chat_template_kwargs"]["enable_thinking"];
+            const Json &asked = kw.type == Json::BOOL ? kw : req["enable_thinking"];
+            think = asked.type == Json::BOOL                    ? asked.boolean(true)
+                    : req["reasoning_effort"].str() == "none" ? false
+                    : limit >= 1 && limit < kThinkRoom        ? false
+                                                              : state.think;
         }
-        // A turn that opens in its thinking (Qwen3.5) reads as if the model
-        // had written the <think> itself: its text starts with it.
-        const std::string seed = opening == kThinkingOpen ? opening : std::string();
+        // Gemma 4's thought channel reads as the others' <think> block.
+        const bool g4 = chat && e.tok().chat_format() == Tokenizer::GEMMA4;
+        std::string opening;  // what opens the model's turn
+        // A turn that opens in its thinking (Qwen3.5, Gemma 4 after a tool's
+        // results) reads as if the model had written the <think> itself:
+        // its text starts with it.
+        std::string seed;
+        // The model's turn opened at the end of `prompt`.
+        auto open_turn = [&] {
+            opening = turn_opening(e.tok(), think, prompt);
+            prompt += opening;
+            seed = opening == kThinkingOpen || opening == kG4Thought ? kThinkingOpen : "";
+        };
         if (chat) {
             msgs = parse_messages(req["messages"]);
             if (tf != ToolFormat::NONE && req["tool_choice"].str() != "none") {
@@ -514,7 +521,8 @@ void handle(int fd, Server::State &state, Usage &u) {
                                              : web_search_always() || (tools.empty() && needs_web(last_user)));
                 if (web) tools.push_back(web_search_tool(date));
             }
-            prompt = render_chat(e.tok(), msgs, tools, date) + opening;
+            prompt = render_chat(e.tok(), msgs, tools, date, think);
+            open_turn();
         } else {
             prompt = req["prompt"].str();
         }
@@ -649,6 +657,8 @@ void handle(int fd, Server::State &state, Usage &u) {
         for (int round = 0;; round++) {
             const std::vector<int32_t> toks = round == 0 ? std::move(first_toks) : encode();
             std::string text = seed;
+            std::string wrote;       // the turn as the model wrote it, for the prompt of a turn after it
+            ThoughtChannel channel;  // Gemma 4's
             size_t sent = 0;  // bytes of this turn's `text` already streamed
             size_t thought = 0;  // and of its thinking, as reasoning_content
             {
@@ -672,7 +682,8 @@ void handle(int fd, Server::State &state, Usage &u) {
                     state.phase.store(2, std::memory_order_relaxed);
                 }
             };
-            auto on_text = [&](const std::string &piece) {
+            // The turn's text so far, with `piece` at its end, to the client.
+            auto on_piece = [&](const std::string &piece) {
                 if (first < 0) first = now_ms();
                 count();
                 text += piece;
@@ -721,6 +732,10 @@ void handle(int fd, Server::State &state, Usage &u) {
                 }
                 return client_ok && !stopped;
             };
+            auto on_text = [&](const std::string &piece) {
+                wrote += piece;
+                return on_piece(g4 ? channel.map(piece) : piece);
+            };
             sp.max_tokens = max_tokens - st.gen_tokens;
             if (const char *f = getenv("TS5_TEST_TURNS")) {
                 // Tests: the model's turns from a file ("\n----\n" between
@@ -754,6 +769,8 @@ void handle(int fd, Server::State &state, Usage &u) {
                 if (ok && turn.finish == "left") client_ok = false;
                 if (!ok) u.rec.why = (int)toks.size() + 1 > e.backend().n_ctx() ? "too_long" : "gpu_error";
             }
+            // What the channel's reader held back at the turn's end (an answer that ends in a "<").
+            if (const std::string rest = channel.rest(); !rest.empty()) on_piece(rest);
             count();  // what on_text didn't see: the test turns, a turn with no text
             st.prompt_tokens += turn.prompt_tokens;
             st.prompt_evaluated += turn.prompt_evaluated;
@@ -809,7 +826,8 @@ void handle(int fd, Server::State &state, Usage &u) {
                     st.gen_tokens < max_tokens) {
                     answered_without_tools = true;
                     log_line("ts5: %s made-up tool %s: answering without tools", id.c_str(), made_up.c_str());
-                    prompt = render_chat(e.tok(), msgs, {}, date) + opening;
+                    prompt = render_chat(e.tok(), msgs, {}, date, think);
+                    open_turn();
                     use_tools = false;
                     continue;
                 }
@@ -849,7 +867,8 @@ void handle(int fd, Server::State &state, Usage &u) {
                 std::vector<Message> last = msgs;
                 if (last.empty() || last.back().role != "user") last.push_back({"user", "", {}});
                 last.back().content += (last.back().content.empty() ? "" : "\n\n") + note;
-                prompt = render_chat(e.tok(), last, {}, date) + opening;
+                prompt = render_chat(e.tok(), last, {}, date, think);
+                open_turn();
                 use_tools = false;
                 continue;
             }
@@ -869,7 +888,8 @@ void handle(int fd, Server::State &state, Usage &u) {
                 }
                 log_line("ts5: %s %s", id.c_str(), log.c_str());
             }
-            prompt += text.substr(seed.size()) + render_results(tf, searches, results) + opening;
+            prompt += wrote + render_results(tf, searches, results);
+            open_turn();
         }
         {
             std::lock_guard<std::mutex> g(state.stats);
@@ -1012,6 +1032,7 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
     state_.known = {};
     state_.sampling = SampleParams{};
     state_.think = true;
+    state_.can_think = e && can_skip_thinking(e->tok());
     if (e) {
         const Gguf &g = e->model().gguf;
         struct stat st {};

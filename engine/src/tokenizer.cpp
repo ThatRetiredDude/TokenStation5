@@ -477,7 +477,9 @@ std::string Tokenizer::apply_chat(const std::vector<ChatMessage> &msgs) const {
         case GEMMA4: {
             // As Gemma 4's template with thinking off: a system turn where
             // there is a system message, the assistant is "model", contents
-            // trimmed, and the model's turn opens with an empty thought.
+            // trimmed. The model's turn then opens with an empty thought,
+            // which turn_opening adds (tools.cpp, where render_chat writes
+            // the same with tools and with thinking on).
             auto trim = [](const std::string &x) {
                 const size_t b = x.find_first_not_of(" \t\r\n"), e = x.find_last_not_of(" \t\r\n");
                 return b == std::string::npos ? std::string() : x.substr(b, e - b + 1);
@@ -491,7 +493,7 @@ std::string Tokenizer::apply_chat(const std::vector<ChatMessage> &msgs) const {
                 s += "<|turn>" + std::string(m.role == "assistant" ? "model" : "user") + "\n" + trim(m.content) +
                      "<turn|>\n";
             }
-            s += "<|turn>model\n<|channel>thought\n<channel|>";
+            s += "<|turn>model\n";
             break;
         }
         case PLAIN:

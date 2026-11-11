@@ -72,6 +72,7 @@ public:
         KnownMatch known;
         SampleParams sampling;
         bool think = true;  // a model that can skip its thinking: whether it thinks when a request doesn't say
+        bool can_think = false;  // whether its template has that switch
         std::mutex stats;
         Activity activity;
         // Activity's live counters, kept without a lock: the generating

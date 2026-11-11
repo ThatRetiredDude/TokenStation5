@@ -480,9 +480,10 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         if (!Json::parse(read_all(stdin), req)) { fprintf(stderr, "ts5: invalid JSON\n"); return 1; }
         std::vector<Json> tools(req["tools"].a.begin(), req["tools"].a.end());
         const char *date = getenv("TS5_TODAY");
-        printf("%s", (render_chat(tok, parse_messages(req["messages"]), tools, date ? date : "26 Jul 2024") +
-                      turn_opening(tok, !req["enable_thinking"].is_null() ? req["enable_thinking"].boolean(true) : true))
-                         .c_str());
+        const bool think = !req["enable_thinking"].is_null() ? req["enable_thinking"].boolean(true) : true;
+        std::string p = render_chat(tok, parse_messages(req["messages"]), tools, date ? date : "26 Jul 2024", think);
+        p += turn_opening(tok, think, p);
+        printf("%s", p.c_str());
         fprintf(stderr, "ts5: tool calls: %s\n", tool_format_name(tool_format(tok)));
         return 0;
     }
@@ -697,7 +698,13 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         return 0;
     }
     if (a.cmd == "run") {
-        std::string prompt = a.chat ? tok.apply_chat({{"user", a.prompt}}) + turn_opening(tok, true) : a.prompt;
+        std::string prompt = a.prompt;
+        if (a.chat) {
+            // Gemma 4 answers at once here: its thinking is asked for in a
+            // system turn, which only render_chat writes.
+            prompt = tok.apply_chat({{"user", a.prompt}});
+            prompt += turn_opening(tok, tok.chat_format() != Tokenizer::GEMMA4, prompt);
+        }
         SampleParams sp;
         sp.temperature = a.temp;
         sp.max_tokens = a.n_predict;

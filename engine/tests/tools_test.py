@@ -93,11 +93,26 @@ CASES = [
         {"role": "assistant", "content": "", "tool_calls": [call("web_search", {"query": "q"})]},
         {"role": "tool", "tool_call_id": "call_1", "content": "r"},
     ], []),
+    ("a chat", [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "<think>\nGreet.\n</think>\n\nHello!"},
+        {"role": "user", "content": " How are you? "},
+    ], []),
+    ("a chat, system", [
+        {"role": "system", "content": " You are terse. "},
+        {"role": "user", "content": "Hi"},
+    ], []),
 ]
 # Qwen 2.5's template writes every assistant turn without thinking; Llama's
 # takes one call per turn. Both as the templates have them.
 SKIP = {("meta-llama-Llama-3.1-8B-Instruct", "tool messages, no tools"),
         ("meta-llama-Llama-3.2-3B-Instruct", "tool messages, no tools")}
+# A chat with no tools is Tokenizer::apply_chat's for these: the format alone,
+# without Qwen 2.5's default system message or Llama's date header, and with
+# the thinking a client left in an earlier turn (Qwen3's template drops it).
+SKIP |= {("Qwen-Qwen2.5-7B-Instruct", "a chat"), ("Qwen-Qwen3-0.6B", "a chat")}
+SKIP |= {(t, c) for t in ("meta-llama-Llama-3.1-8B-Instruct", "meta-llama-Llama-3.2-3B-Instruct")
+         for c in ("a chat", "a chat, system")}
 
 
 # What ts5 writes differently from Llama 3's template, on purpose (tools.cpp,
@@ -139,7 +154,7 @@ def as_ts5_writes_it(name, template):
     return template
 
 
-def render(template, messages, tools, bos="<|begin_of_text|>"):
+def render(template, messages, tools, bos="<|begin_of_text|>", **more):
     env = jinja2.sandbox.ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True,
                                                        extensions=[jinja2.ext.loopcontrols])
 
@@ -155,7 +170,22 @@ def render(template, messages, tools, bos="<|begin_of_text|>"):
           "ts5_tools": LLAMA3_TOOLS}
     if tools:
         kw["tools"] = tools
-    return env.from_string(template).render(**kw)
+    return env.from_string(template).render(**kw, **more)
+
+
+def with_reasoning(messages):
+    """The messages as a client that got the thinking apart sends them back:
+    an assistant's <think> block as reasoning_content (Gemma 4's template
+    takes it there, and writes it as its thought channel)."""
+    out = []
+    for m in messages:
+        m = dict(m)
+        c = m.get("content") or ""
+        if m["role"] == "assistant" and "</think>" in c:
+            m["reasoning_content"] = c[c.index("<think>") + 7:c.index("</think>")].strip()
+            m["content"] = c[c.index("</think>") + 8:].lstrip("\n")
+        out.append(m)
+    return out
 
 
 def for_ts5(messages):
@@ -203,14 +233,22 @@ def test_prompts(ts5, model, tdir):
     for name in TEMPLATES + [n for n in OPTIONAL if os.path.exists(os.path.join(tdir, n + ".jinja"))]:
         path = os.path.join(tdir, name + ".jinja")
         template = as_ts5_writes_it(name, open(path).read())
-        for case, messages, tools in CASES:
+        # Gemma 4's thinking is a switch that changes the prompt from its top: both ways.
+        for case, messages, tools, think in [(c, m, t, think) for c, m, t in CASES
+                                             for think in ([False, True] if name == GEMMA4 else [None])]:
             if (name, case) in SKIP:
                 continue
+            if name == GEMMA4:
+                messages = with_reasoning(messages)
+                case += ", thinking on" if think else ", thinking off"
             # ts5's tokenizer adds Mistral's and Gemma's BOS; Llama's is in the prompt.
             want = (render(template, with_mistral_ids(messages), tools, bos="") if name == NEMO
-                    else render(template, messages, tools, bos="") if name == GEMMA4
+                    else render(template, messages, tools, bos="", enable_thinking=think) if name == GEMMA4
                     else render(template, messages, tools))
-            req = json.dumps({"messages": for_ts5(messages), "tools": tools})
+            req = {"messages": for_ts5(messages), "tools": tools}
+            if think is not None:
+                req["enable_thinking"] = think
+            req = json.dumps(req)
             got = subprocess.run([ts5, "prompt", "-m", model, "--chat-template", path], input=req, text=True,
                                  capture_output=True, env=dict(os.environ, TS5_TODAY="26 Jul 2024")).stdout
             if got != want:
@@ -551,9 +589,121 @@ def test_search_loop(ts5, model, tdir):
     return failed
 
 
+# Gemma 4's template cut down to what ts5 reads from it: its turns, the
+# thinking switch and the call mark (the prompts themselves are ts5's own,
+# compared with the whole template above where TEMPLATES_DIR has it).
+G4_MIN = "gemma-4-cut-down"
+G4_MIN_TEMPLATE = ("{{ bos_token }}{% if enable_thinking %}{{ '<|turn>system\n<|think|>\n<turn|>\n' }}{% endif %}"
+                   "{% for m in messages %}{{ '<|turn>' + m['role'] + '\n' + m['content'] + '<turn|>\n' }}"
+                   "{% endfor %}{{ '<|turn>model\n' }}{# calls: <|tool_call>call:NAME{...}<tool_call|> #}")
+G4_CALL = ('<|channel>thought\nNeed a search.\n<channel|><|tool_call>call:web_search{query:<|"|>PS5 firmware<|"|>}'
+           '<tool_call|>')
+
+
+def test_gemma4_thinking(ts5, model, tdir):
+    """Gemma 4's thought channel: asked for in the prompt, and sent apart from
+    the answer as the other models' thinking is (the model's turns scripted)."""
+    failed = 0
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Tavily)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    template = os.path.join(tdir, G4_MIN + ".jinja")
+    with open(template, "w") as f:
+        f.write(G4_MIN_TEMPLATE)
+    on, off = {"enable_thinking": True}, {"enable_thinking": False}
+    q = "<|turn>user\nWhat is the latest PS5 firmware?<turn|>\n<|turn>model\n"
+    cases = [
+        # name, turns, the request's extras, stream, answer, thinking, the last prompt's start and end
+        ("thinks, apart from the answer", ["<|channel>thought\nGreet warmly.\n<channel|>Hello!"],
+         {"chat_template_kwargs": on}, False, "Hello!", "Greet warmly.", "<|turn>system\n<|think|>\n<turn|>\n" + q, q),
+        ("thinks, streaming", ["<|channel>thought\nGreet warmly.\n<channel|>Hello <b>you</b> <"],
+         {"chat_template_kwargs": on}, True, "Hello <b>you</b> <", "Greet warmly.", "<|turn>system\n<|think|>\n", q),
+        ("thinks when the request doesn't say", ["<|channel>thought\nGreet warmly.\n<channel|>Hello!"],
+         {}, False, "Hello!", "Greet warmly.", "<|turn>system\n<|think|>\n<turn|>\n" + q, q),
+        ("thinking off: an empty thought opens the turn", ["Hello!"], {"chat_template_kwargs": off}, False, "Hello!",
+         "", q, q + "<|channel>thought\n<channel|>"),
+        ("a short reply doesn't think", ["Hello!"], {"max_tokens": 50}, True, "Hello!", "", q,
+         q + "<|channel>thought\n<channel|>"),
+        ("thinking kept in the content when asked", ["<|channel>thought\nGreet.\n<channel|>Hello!"],
+         {"chat_template_kwargs": on, "reasoning_format": "none"}, False, "<think>\nGreet.\n</think>Hello!", "",
+         "<|turn>system\n<|think|>\n", q),
+        # A search: the turn as the model wrote it, the result, and the thinking opened again.
+        ("thinks, searches, thinks again", [G4_CALL, "Found it.\n<channel|>Done.", "Final answer."],
+         {"chat_template_kwargs": on, "web_search": True}, False, "Done.", "Need a search.\n\nFound it.",
+         "<|turn>system\n<|think|>\n<|tool>declaration:web_search{",
+         G4_CALL + '<|tool_response>response:web_search{value:<|"|>%s<|"|>}<tool_response|><|channel>thought\n'),
+        ("thinks, searches, thinks again, streaming", [G4_CALL, "Found it.\n<channel|>Done.", "Final answer."],
+         {"chat_template_kwargs": on, "web_search": True}, True, "Done.", "Need a search.\n\nFound it.",
+         "<|turn>system\n<|think|>\n<|tool>declaration:web_search{",
+         G4_CALL + '<|tool_response>response:web_search{value:<|"|>%s<|"|>}<tool_response|><|channel>thought\n'),
+    ]
+    for name, turns, more, stream, answer, thought, start, end in cases:
+        with tempfile.TemporaryDirectory() as d:
+            script = os.path.join(d, "turns.txt")
+            open(script, "w").write("\n----\n".join(turns))
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", 0))
+                port = s.getsockname()[1]
+            env = dict(os.environ, TS5_TEST_TURNS=script, TS5_TAVILY_URL=f"http://127.0.0.1:{srv.server_port}",
+                       TAVILY_API_KEY="tvly-test")
+            log = open(os.path.join(d, "log"), "w+")
+            p = subprocess.Popen([ts5, "serve", "-m", model, "--chat-template", template, "--host", "127.0.0.1",
+                                  "--port", str(port), "--backend", "cpu"], env=env, stdout=log, stderr=log)
+            problems = []
+            try:
+                for _ in range(300):
+                    try:
+                        urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
+                        break
+                    except OSError:
+                        time.sleep(0.1)
+                models = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=5).read())
+                if models["data"][0]["settings"].get("thinking") is not True:
+                    problems.append(f"/v1/models settings {models['data'][0]['settings']}")
+                req = dict({"messages": [{"role": "user", "content": "What is the latest PS5 firmware?"}],
+                            "stream": stream, "web_search": False}, **more)
+                r = urllib.request.urlopen(urllib.request.Request(
+                    f"http://127.0.0.1:{port}/v1/chat/completions", json.dumps(req).encode(),
+                    {"Content-Type": "application/json"}), timeout=60).read().decode()
+                if stream:
+                    deltas = [json.loads(line[6:])["choices"][0]["delta"] for line in r.splitlines()
+                              if line.startswith("data: {")]
+                    got = "".join(x.get("content") or "" for x in deltas)
+                    think = "".join(x.get("reasoning_content") or "" for x in deltas)
+                else:
+                    msg = json.loads(r)["choices"][0]["message"]
+                    got, think = msg["content"], msg.get("reasoning_content", "")
+                last = open(script + ".prompts").read().split("\n====\n")[:-1][-1]
+                if "%s" in end:
+                    # The result is the search's text between Gemma 4's quote marks.
+                    head, tail = end.split("%s")
+                    if head not in last or not last.endswith(tail):
+                        problems.append("last prompt:\n" + last)
+                elif not last.endswith(end):
+                    problems.append("last prompt:\n" + last)
+                if not last.startswith(start):
+                    problems.append("last prompt:\n" + last)
+                if got != answer:
+                    problems.append(f"answer {got!r}")
+                # Each turn's thinking as it came, between its marks; the spaces around it are the reader's to trim.
+                if "\n\n".join(t.strip() for t in think.split("\n\n") if t.strip()) != thought:
+                    problems.append(f"thinking {think!r}")
+            finally:
+                p.terminate()
+                p.wait()
+            if problems:
+                failed += 1
+                log.seek(0)
+                print(f"FAIL Gemma 4 {name}: " + "; ".join(problems) + "\n" + log.read()[-2000:])
+            else:
+                print(f"ok   Gemma 4 {name}")
+    srv.shutdown()
+    return failed
+
+
 def main():
     ts5, model, tdir = sys.argv[1:4]
-    failed = test_prompts(ts5, model, tdir) + test_parser(ts5) + test_search(ts5) + test_search_loop(ts5, model, tdir)
+    failed = (test_prompts(ts5, model, tdir) + test_parser(ts5) + test_search(ts5) + test_search_loop(ts5, model, tdir) +
+              test_gemma4_thinking(ts5, model, tdir))
     if failed:
         sys.exit(f"tools_test: {failed} failed")
     print("tools_test: all passed")

@@ -44,8 +44,10 @@ std::vector<Message> parse_messages(const Json &messages);
 // the model, ending with the assistant turn opened. today: "14 Oct 2026", for
 // the Llama system prompt. Without tools or tool messages, this is
 // Tokenizer::apply_chat.
+// think: the request's thinking (Gemma 4's is in its prompt from the top;
+// the others' only in what opens the model's turn, turn_opening).
 std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, const std::vector<Json> &tools,
-                        const std::string &today);
+                        const std::string &today, bool think);
 
 // After a turn of the model's that ended in tool calls: the text that closes
 // the turn, gives each call's result back in order, and opens the model's
@@ -70,16 +72,36 @@ bool empty_call_block(ToolFormat f, const std::string &content);
 // never part of a call (the rest is held until the turn ends).
 size_t content_prefix(ToolFormat f, const std::string &text);
 
-// Whether the model's template can turn its thinking off (Qwen3's
-// enable_thinking): its turn then opens with kNoThinking, an empty
-// <think></think>, as the template writes it, and the model answers at once.
+// Whether the model's template can turn its thinking off (Qwen3's and
+// Gemma 4's enable_thinking): its turn then opens with kNoThinking, an empty
+// <think></think>, as the template writes it (Gemma 4's with an empty
+// thought channel), and the model answers at once.
 bool can_skip_thinking(const Tokenizer &t);
 extern const char *const kNoThinking;
 extern const char *const kThinkingOpen;  // "<think>\n"
-// What opens the model's turn after render_chat: kNoThinking with thinking
-// off (where the template can skip it), "<think>\n" with it on where the
-// template opens the thinking itself (Qwen3.5), else nothing.
-std::string turn_opening(const Tokenizer &t, bool think);
+// Gemma 4 writes its thinking as a thought channel, <|channel>thought\n ...
+// <channel|>: a turn's text has it as the others' <think>\n ... </think>
+// (ThoughtChannel), so one reader serves them all.
+extern const char *const kG4Thought;     // "<|channel>thought\n"
+extern const char *const kG4ThoughtEnd;  // "<channel|>"
+// What opens the model's turn after render_chat's `prompt`: kNoThinking with
+// thinking off (where the template can skip it), "<think>\n" with it on
+// where the template opens the thinking itself (Qwen3.5), else nothing.
+// Gemma 4's: an empty thought with thinking off, and with it on the open
+// thought after a tool's results (its template, read from `prompt`'s end).
+std::string turn_opening(const Tokenizer &t, bool think, const std::string &prompt);
+
+// A turn of Gemma 4's as it is written, piece by piece, with its thought
+// channel's marks as <think> and </think> and the channel's name left out.
+struct ThoughtChannel {
+    std::string map(const std::string &piece);
+    // What map held back at the turn's end (the start of what could have been a mark).
+    std::string rest();
+
+private:
+    std::string held_;
+    bool name_ = false;  // just past <|channel>: its name, to the end of the line
+};
 
 // Calls whose arguments came as <parameter=KEY> text (Qwen3.5): each value
 // as the tool's schema types it, as vLLM's Qwen3-Coder parser does: a string
