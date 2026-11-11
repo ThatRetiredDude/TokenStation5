@@ -68,7 +68,7 @@ On a narrow window the least needed items drop off first (fan, then RAM). When t
 
 ## Chat (F1)
 
-Type at `ts5>` and press **Enter**. The answer streams in with its formatting: headings, lists, quotes, and code blocks with highlighting. A thinking model's reasoning (Qwen 3, Qwen 3.5, DeepSeek R1, Gemma 4) is folded away: while it thinks you see a pulsing **thinking…** line with its last words, then **▸ Thought for 4.1 s**. **Click that line** to read what it thought, and click it again to fold it; **Ctrl+T** unfolds every answer's thinking at once (and folds it again). Under each answer: its speed, tokens, prompt speed and time, and a **[copy]** mark (see [The mouse, and copying](#the-mouse-and-copying)).
+Type at `ts5>` and press **Enter**. The answer streams in with its formatting: headings, lists, quotes, and code blocks with highlighting. A thinking model's reasoning (Qwen 3, Qwen 3.5, DeepSeek R1, Gemma 4) is folded away: while it thinks you see a pulsing **thinking…** line with its last words, then **▸ Thought for 4.1 s**. **Click that line** to read what it thought, and click it again to fold it; **Ctrl+T** unfolds every answer's thinking at once (and folds it again). A thinking that doesn't end is ended for the model, which then answers from what it has: one that goes round in circles, one that would leave no room for the answer, and one past 8,192 tokens. Its last line then says so in square brackets. Under each answer: its speed, tokens, prompt speed and time, and a **[copy]** mark (see [The mouse, and copying](#the-mouse-and-copying)).
 
 | Key | What it does |
 | --- | --- |
@@ -177,7 +177,7 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | --- | --- |
 | `/model NAME` | Loads another model (see [Models](#models-f2)). Part of the name is enough. `/model` alone opens the Models page. |
 | `/models` | The Models page. `/chat`, `/status`, `/settings` and `/logs` go to the others. |
-| `/download NAME` | Downloads one of the models tested on the PS5 (see [Downloading models](#downloading-models)): `qwen3-14b`, `qwen35-9b`, `deepseek-r1-14b`, `qwen3-8b`, `llama31-8b`, `qwen25-coder-7b`, `qwen25-coder-14b`, `gemma3-12b`, `gemma4-12b`, `llama32-3b`, and the helpers `qwen3-0.6b`, `llama32-1b`, `gemma3-1b`. Tab completes the name. `/download` alone opens the list on the Models page. |
+| `/download NAME` | Downloads one of the models tested on the PS5 (see [Downloading models](#downloading-models)): `qwen3-14b`, `qwen35-9b`, `qwen38-9b`, `deepseek-r1-14b`, `qwen3-8b`, `llama31-8b`, `qwen25-coder-7b`, `qwen25-coder-14b`, `gemma3-12b`, `gemma4-12b`, `bonsai2-27b`, `bonsai2-9b`, `bonsai2-4b`, `llama32-3b`, and the helpers `qwen3-0.6b`, `llama32-1b`, `gemma3-1b`. Tab completes the name. `/download` alone opens the list on the Models page. |
 | `/download URL [FILE] [--sha256 HEX]` | Downloads any other `.gguf`. A `ts5 fetch URL FILE --sha256 HEX` line, as on [Models tested on PS5](Models-tested-on-PS5), works pasted at the prompt as it is. |
 | `/search WORDS` | Looks on Hugging Face for other models that fit this GPU: `/search mistral 7b` (see [Searching Hugging Face](#searching-hugging-face)). |
 | `/new` | A new chat (`/clear` too). The one you leave is kept. |
@@ -239,7 +239,7 @@ The top bar shows **loading…** with the seconds until the server reports the n
 
 **Helpers** aren't loaded by hand. A helper is a small model that drafts tokens for a big one (the same text, faster), and it loads along with it.
 
-- **The models tested on the PS5 know their helper**: Qwen3 0.6B for the Qwen3, DeepSeek R1 and Qwen2.5 Coder models, Llama 3.2 1B for the Llama ones. It downloads right after the model, into the same folder, and **H** fetches it for a model that's already here. Qwen3.5 9B can't use a helper, and the Gemma 12B models run without one (Gemma 3 1B speeds up short answers and slows long prompts; T measures it on your machine).
+- **The models tested on the PS5 know their helper**: Qwen3 0.6B for the Qwen3, DeepSeek R1 and Qwen2.5 Coder models, Llama 3.2 1B for the Llama ones. It downloads right after the model, into the same folder, and **H** fetches it for a model that's already here. Qwen3.5 9B, Qwen3.8 9B and the Bonsai models can't use a helper, and the Gemma 12B models run without one (Gemma 3 1B speeds up short answers and slows long prompts; T measures it on your machine).
 - **For any other model**, **T** tunes it and picks the fastest helper among the small files of its own family here. Files from another family are left out, with the reason.
 - **The top bar shows what is really running**, as the server reports it: **helper NAME to 8k**, **helper none**, or **helper not running** in yellow. The selected model's details say why it isn't running: not downloaded yet (H gets it), no GPU memory left for it at this context, or downloaded after the model was loaded (Enter loads the model again).
 
@@ -270,6 +270,7 @@ For a model that isn't on the tested list, press **S** on the Models page and ty
 - Left out without a count: repos that match your words only by their uploader's name, and files that aren't the model itself (a vision model's image encoder, `mtp-` side files). Embedding and reranking models count as a kind ts5 can't run: they don't chat.
 - The results are listed under it, each with its size and who made the file. The box below shows the repo, the file, how long a chat it gets on this machine and where it goes.
 - **Enter** downloads the selected one the same way as a tested model, pinned to the repo's commit and checked against the SHA-256 Hugging Face lists for it. A file that's already here says so, and Enter goes to it in the list.
+- Two-bit files (Q2_0, the Bonsai models) are found too. Their other packings (PQ2_0, PTQ1_0) are left out: ts5 doesn't read those.
 - A model found this way hasn't been tested on the PS5. Once it's here, **C** checks its answers on this GPU and **T** tunes it.
 
 It's the same search as the TV app's Models page, so it needs the `tokenstation` app from the same package (`tokenstation --hf-search WORDS` prints what it finds), and the internet.

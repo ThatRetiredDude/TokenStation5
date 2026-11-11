@@ -50,7 +50,7 @@ Choose the "OpenAI compatible" provider (or "OpenAI" with a custom base URL) and
 ## Which model for what
 
 - **Agent work** (editing files, then running them): Qwen 3 8B. On the PS5 it took every step of a write-then-run task; Qwen 2.5 Coder 7B wrote the file and stopped in 4 of 4 runs.
-- **Qwen 3** thinks before it answers; the thinking comes back apart from the answer as `reasoning_content`. Skip it with `"chat_template_kwargs": {"enable_thinking": false}` or `/no_think` at the end of the message. A reply capped under 1,024 tokens never thinks, so a request for a short title still gets an answer.
+- **Qwen 3** thinks before it answers; the thinking comes back apart from the answer as `reasoning_content`. Skip it with `"chat_template_kwargs": {"enable_thinking": false}` or `/no_think` at the end of the message. A reply capped under 1,024 tokens never thinks, so a request for a short title still gets an answer. A thinking that doesn't end (it repeats itself, it would leave no room for the answer, or it passes 8,192 tokens) is ended for the model, which then answers; `"thinking_budget": N` in a request sets another limit, 0 none.
 - **Llama 3.1 8B and 3.2 3B** sometimes call a tool the question doesn't need (asked for a poem about rain with only a weather tool, Llama 3.1 8B asks for the weather). For plain chat with a Llama, leave the tools out, or use a Qwen model.
 - **Mistral Nemo 12B** takes tools in its own format and passed every tool check on the PS5, with about 15k of context beside its weights.
 - **Gemma 3 12B** takes tools in Qwen 3's format inside Gemma's own turns; 59 of 60 checks passed over three runs on the PS5, with about 29,700 tokens of context.

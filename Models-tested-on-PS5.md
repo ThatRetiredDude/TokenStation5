@@ -10,6 +10,7 @@ The [terminal app](Using-the-terminal-app) downloads every model on this page fo
 | --- | --- | ---: | ---: | ---: | --- | --- |
 | Qwen3 14B | Best all-rounder: writing, explaining, reasoning; can think first | 9.0 GB | ~490 | 41 | 32k | Qwen3 0.6B |
 | Qwen3.5 9B (DeepSeek-V4-Pro heretic) | Very long documents (found 10/10 facts at 225k tokens); fast follow-ups on the same document. Community fine-tune, uncensored | 5.6 GB | ~826 | 67 | 256k | none |
+| Qwen3.8 9B (distill) | Long documents on newer training; thinks, calls tools. A community distill of Qwen3.8 into a 9B | 5.8 GB | ~651 | 67 | 256k | none |
 | DeepSeek R1 Distill Qwen 14B (abliterated v2) | Math, logic, puzzles; thinks out loud before answering. Refusals removed | 9.0 GB | ~490 | 38-41 | 32k | Qwen3 0.6B |
 | Qwen3 8B | Fast general chat, thinking, tools | 5.0 GB | ~850 | 72 | 32k | Qwen3 0.6B |
 | Llama 3.1 8B Instruct | Fast general chat with a long memory (10/10 facts at 111k) | 4.9 GB | ~850 | 74 | 128k | Llama 3.2 1B |
@@ -17,8 +18,13 @@ The [terminal app](Using-the-terminal-app) downloads every model on this page fo
 | Qwen 2.5 Coder 14B Instruct | Coding, stronger | 9.0 GB | not measured | ~28-30 (long prompts) | 32k | Qwen3 0.6B |
 | Gemma 3 12B | General chat; weak on long documents past ~8k (4/10 at 53k). One known near-tie in its check | 7.3 GB | ~406 | 45 | 64k | Gemma 3 1B |
 | Gemma 4 12B | General chat; 6/10 facts at 112k. Its English-text check is over the bar (being looked into) | 7.7 GB | ~394 | 43 | 128k | Gemma 3 1B |
+| Ternary Bonsai 2 27B (Q2_0) | The biggest model that fits: a 27B at two bits a weight. Slower; thinks, calls tools | 7.6 GB | ~229 | 23 | 150k | none |
+| Ternary Bonsai 2 9B (Q2_0) | Small file, long memory; thinks, calls tools | 2.6 GB | ~740 | 59 | 256k | none |
+| Ternary Bonsai 2 4B (Q2_0) | The fastest here and the smallest download; thinks, calls tools | 1.2 GB | ~1,380 | 119 | 256k | none |
 
-Which one: **Qwen3 14B** for the best answers, **Qwen3.5 9B** for very long documents, **Llama 3.1 8B** or **Qwen3 8B** when speed matters most, **Qwen 2.5 Coder** for code. Long-document scores count 10 facts hidden in a document. More numbers are in [Benchmarks](Benchmarks) and [Test results on PS5 Linux](Test-results-on-PS5-Linux).
+Which one: **Qwen3 14B** for the best answers, **Qwen3.5 9B** for very long documents, **Llama 3.1 8B** or **Qwen3 8B** when speed matters most, **Qwen 2.5 Coder** for code, a **Bonsai** when the download or the memory has to stay small. Long-document scores count 10 facts hidden in a document. More numbers are in [Benchmarks](Benchmarks) and [Test results on PS5 Linux](Test-results-on-PS5-Linux).
+
+**The Bonsai models** ([prism-ml](https://huggingface.co/prism-ml)'s Ternary-Bonsai-2, built on Qwen3.8) keep every weight as −1, 0 or +1, two bits each, so a 27B is a 7.6 GB file and a 4B is 1.2 GB. ts5 reads their files as they are, and all three pass the check against the CPU reference. They think before they answer and call tools like the Qwen models. Use the **Q2_0** file of a repo; the other packings there (PQ2_0, PTQ1_0) need the makers' own program.
 
 **Helpers** are small models of the same family that draft a few words ahead for the big one, which then checks them. That makes writing faster with exactly the same text. The helper in the column is the one tuning picked on the test PS5. It's built into ts5 for these models: each uses it without any tuning once the helper's file is in the same folder (the terminal app downloads it right after the model).
 
@@ -68,6 +74,12 @@ ts5 fetch https://huggingface.co/bartowski/Qwen_Qwen3-14B-GGUF/resolve/bd080f768
 ts5 fetch https://huggingface.co/mradermacher/DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic-GGUF/resolve/3b6f11e221195ee3650d7ac0ffce6f9fe7275d8f/DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.Q4_K_M.gguf DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.Q4_K_M.gguf --sha256 a692de9520e4c0bb1512deb91e950f38e14854650aff43419112f87e6052c44b
 ```
 
+**Qwen3.8 9B (distill)** (5.8 GB, [empero-ai/Qwen3.8-9B-Distill-GGUF](https://huggingface.co/empero-ai/Qwen3.8-9B-Distill-GGUF))
+
+```sh
+ts5 fetch https://huggingface.co/empero-ai/Qwen3.8-9B-Distill-GGUF/resolve/760121cd70bb4c36b2b5ec58eb765e0df5987efe/Qwen3.8-9B-Q4_K_M.gguf Qwen3.8-9B-Q4_K_M.gguf --sha256 df13d66021cef676f82be74053220fd75af6bf2a6a7fb77f5222ab9e50744a7a
+```
+
 **DeepSeek R1 Distill Qwen 14B (abliterated v2)** (9.0 GB, [mradermacher/DeepSeek-R1-Distill-Qwen-14B-abliterated-v2-GGUF](https://huggingface.co/mradermacher/DeepSeek-R1-Distill-Qwen-14B-abliterated-v2-GGUF))
 
 ```sh
@@ -108,6 +120,24 @@ ts5 fetch https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF/resolve/64
 
 ```sh
 ts5 fetch https://huggingface.co/bartowski/gemma-4-12B-it-GGUF/resolve/2ae7d41be21ca62de00a2d320ee9cec50daa3aa6/gemma-4-12B-it-Q4_K_M.gguf gemma-4-12B-it-Q4_K_M.gguf --sha256 3962624dcd25b947d889dc9ae1bf275b61db6cd4dbe694057f34fffef1671509
+```
+
+**Ternary Bonsai 2 27B** (7.6 GB, [prism-ml/Ternary-Bonsai-2-27B-gguf](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf))
+
+```sh
+ts5 fetch https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/resolve/839bd57023c1558945afea70a74fa83c054f35f9/Ternary-Bonsai-2-27B-Q2_0.gguf Ternary-Bonsai-2-27B-Q2_0.gguf --sha256 4f99aed01b8a877e153f9aa6569a4440fe17c59701cc0953e36d7f460549e70e
+```
+
+**Ternary Bonsai 2 9B** (2.6 GB, [prism-ml/Ternary-Bonsai-2-9B-gguf](https://huggingface.co/prism-ml/Ternary-Bonsai-2-9B-gguf))
+
+```sh
+ts5 fetch https://huggingface.co/prism-ml/Ternary-Bonsai-2-9B-gguf/resolve/82265ccc78ddaac4700286a35e9badcc32376dd9/Ternary-Bonsai-2-9B-Q2_0.gguf Ternary-Bonsai-2-9B-Q2_0.gguf --sha256 1f884aa56aacd2bbbb2e4b7abaead2b1102b74a9c75a23fc33dab916813a384d
+```
+
+**Ternary Bonsai 2 4B** (1.2 GB, [prism-ml/Ternary-Bonsai-2-4B-gguf](https://huggingface.co/prism-ml/Ternary-Bonsai-2-4B-gguf))
+
+```sh
+ts5 fetch https://huggingface.co/prism-ml/Ternary-Bonsai-2-4B-gguf/resolve/50ebba61be85e5be07e8083db468ace0fc1bac43/Ternary-Bonsai-2-4B-Q2_0.gguf Ternary-Bonsai-2-4B-Q2_0.gguf --sha256 64a5183b44921bdb5ac4a6f5f92007821d6ebe5c66997d3c147fd214ab9433d4
 ```
 
 ### Helpers
