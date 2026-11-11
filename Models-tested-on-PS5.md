@@ -20,7 +20,7 @@ The [terminal app](Using-the-terminal-app) downloads every model on this page fo
 
 Which one: **Qwen3 14B** for the best answers, **Qwen3.5 9B** for very long documents, **Llama 3.1 8B** or **Qwen3 8B** when speed matters most, **Qwen 2.5 Coder** for code. Long-document scores count 10 facts hidden in a document. More numbers are in [Benchmarks](Benchmarks) and [Test results on PS5 Linux](Test-results-on-PS5-Linux).
 
-**Helpers** are small models of the same family that draft a few words ahead for the big one, which then checks them. That makes writing faster with exactly the same text. `ts5-tune` picks the helper for each model; the column shows what it picked on the test PS5.
+**Helpers** are small models of the same family that draft a few words ahead for the big one, which then checks them. That makes writing faster with exactly the same text. The helper in the column is the one tuning picked on the test PS5. It's built into ts5 for these models: each uses it without any tuning once the helper's file is in the same folder (the terminal app downloads it right after the model).
 
 | Helper | Used for | File size |
 | --- | --- | ---: |
@@ -139,5 +139,5 @@ ts5 fetch https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/116
 ## After downloading
 
 - The app and the terminal app list a new model within a few seconds. The API-only service uses `MODEL` in `/etc/default/tokenstation` (or the first file in its folder); restart it after a change.
-- Run `ts5-tune --models` once (or **T** on the terminal app's Models page): it picks the helper and the fastest settings for each model, and checks the result.
+- These models need no tuning: their settings are built in, and each uses its helper when the helper's file is in the same folder. `ts5-tune --models` (or **T** on the terminal app's Models page) is for other models, or to measure again on your own machine.
 - Each model is under its own license: Llama and Gemma have terms of use of their own. The model files are not part of TokenStation5.

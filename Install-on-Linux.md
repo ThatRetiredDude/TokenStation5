@@ -43,10 +43,10 @@ curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linu
 
 **Bazzite, SteamOS, or anything else** (no sudo; it asks for your password when it needs it)
 ```sh
-curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz | tar xz && cd tokenstation-*-linux-amd64 && ./install.sh
+curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz | tar xz && cd tokenstation-linux-amd64 && ./install.sh
 ```
 
-It asks for your password once. When it finishes, it's installed.
+It asks for your password once. When it finishes, it's installed. It also adds you to the `tokenstation` group, which lets the terminal app switch the service's model and set the fan; that takes hold the next time you log in (on a PS5, the restart in step 3 does it).
 
 ### Step 3: restart (PS5 only)
 
@@ -70,10 +70,10 @@ Then boot Linux again the way you always do (run the Linux loader again).
 ### Step 5: get a model and chat
 
 - **In the app:** go to **Models**, pick **Qwen3 8B**, press the button to download it (about 5 GB). When it's done, go to **Chat** and type.
-- **In the terminal app:** type `/download qwen3-8b` and press **Enter** (or **F2**, pick **Qwen3 8B** under **⇣ Download**, **Enter**). A bar shows the progress. When it's done, select it on the same page and press **Enter** to load it, then chat on **F1**.
+- **In the terminal app:** type `/download qwen3-8b` and press **Enter** (or **F2**, pick **Qwen3 8B** under **⇣ Download**, **Enter**). A bar shows the progress, and its helper (a small model that makes it write faster) downloads right after it, by itself. When it's done, select it on the same page and press **Enter** to load it, then chat on **F1**. The tested models need no tuning: their PS5 settings are built in.
   Every other tested model is on the same list (`/download qwen3-14b` for the best answers, about 9 GB). Which one to pick: [Models tested on PS5](Models-tested-on-PS5).
 
-That's it. To update later, run your step 2 line again.
+That's it. To update later, run your step 2 line again: an update keeps your models, chats and settings, and restarts the service only if it was running.
 
 ### If something goes wrong
 
@@ -96,7 +96,7 @@ The Linux build is new and needs people to try it on their own machines: a PS5 r
 | Debian 12/13, Ubuntu | `curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation_latest_amd64.deb && sudo apt install ./tokenstation_latest_amd64.deb` |
 | Fedora | `sudo dnf install https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest.x86_64.rpm` |
 | Arch | `curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-x86_64.pkg.tar.zst && sudo pacman -U ./tokenstation-latest-x86_64.pkg.tar.zst` |
-| Bazzite, SteamOS, others | `curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz \| tar xz && cd tokenstation-*-linux-amd64 && ./install.sh` (as yourself, not sudo) |
+| Bazzite, SteamOS, others | `curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz \| tar xz && cd tokenstation-linux-amd64 && ./install.sh` (as yourself, not sudo) |
 
 The same commands always fetch the newest build, so run them again to update.
 
@@ -145,7 +145,7 @@ sudo pacman -U ./tokenstation-latest-x86_64.pkg.tar.zst
 
 ```sh
 curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz | tar xz
-cd tokenstation-*-linux-amd64
+cd tokenstation-linux-amd64
 ./install.sh
 ```
 

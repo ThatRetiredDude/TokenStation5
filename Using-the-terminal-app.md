@@ -36,11 +36,11 @@ Run it **on the PS5** (over SSH) for the whole experience. Pointed at a PS5 from
 
 ```
  ◆ TokenStation5   F1 Chat  F2 Models  F3 Status  F4 Settings  F5 Logs        09:52   ← pages
- ● Qwen3-8B-Q4_K_M · helper Qwen3-0.6B · ctx 909/32k · 58.9 tok/s · GPU 5.7/13.6 GiB · die 80°C   ← live bar
+ ● Qwen3-8B-Q4_K_M · helper Qwen3-0.6B to 8k · chat 909/20k · 94.4 tok/s · GPU 5.7/13.6 GiB · die 80°C   ← live bar
 
    (chat, or the page you picked)
 
- Qwen3-8B-Q4_K_M  ctx 909 / 32,768
+ Qwen3-8B-Q4_K_M  chat 909 of 20,480 tokens
 ╭────────────────────────────────────────────────────────────────────────╮
 │ ts5> your message                                                      │   ← the prompt
 ╰────────────────────────────────────────────────────────────────────────╯
@@ -52,8 +52,8 @@ Run it **on the PS5** (over SSH) for the whole experience. Pointed at a PS5 from
 | Item | Meaning | Colors |
 | --- | --- | --- |
 | ● model | What the server has loaded. | Green: ready. Yellow: no model yet. Red: the server is offline. |
-| helper | The helper (draft) model `ts5-tune` chose for it, or `off`. | |
-| ctx | Context used by this chat, of the model's total. | |
+| helper | The helper model that is drafting for it right now, as the server reports it, and how far into a chat it helps (**to 8k**: the chat's first 8,192 tokens). **helper none**: this model has none. **helper not running**: it has one, but it isn't loaded; the model's details on the Models page say why. | Yellow: not running. |
+| chat | Tokens this chat uses, of the most it can hold (the model's context as loaded). | Yellow from 75%, red from 90%. |
 | tok/s | The last answer's speed: any app's when ts5-tui can read the server's log, else its own chats'. | |
 | GPU | GPU memory used / total, in GiB. | Yellow under 2 GiB free, red under 1 GiB (the engine keeps 1 GiB back). |
 | RAM | System memory used / total. | Same as GPU. |
@@ -80,9 +80,9 @@ Type at `ts5>` and press **Enter**. The answer streams in with its formatting: h
 | Ctrl+T | Show or hide the thinking. |
 | PgUp / PgDn | Scroll the chat a page. Ctrl+↑ / Ctrl+↓ scroll a line, and so does the mouse wheel in tmux. End (with nothing typed) goes back to the bottom. |
 | ← → Home End | Move in what you're typing. Ctrl+← / Ctrl+→ by word. |
-| Ctrl+A / Ctrl+E | Start / end of the line. |
+| Home / End | Start / end of the line. Ctrl+E is End too. Ctrl+A is Home outside ts5's tmux session; inside it Ctrl+A is tmux's own key, so press it twice, or use Home. |
 | Ctrl+U / Ctrl+K / Ctrl+W | Delete to the start / to the end / the word before. |
-| Ctrl+Q | Quit. |
+| Ctrl+Q | Quit. While a tuning, a check or a download runs, it asks first. |
 
 The top bar always shows how full the chat is (**chat 7.8k/32k**), and the line over the prompt reads "chat N of M tokens": yellow from 75%, red from 90%. When an answer stops because the chat filled the context, a note under it says so, with the numbers, and that **Ctrl+N** starts a new chat (the full one stays saved). For a model loaded at a fixed context, it adds that Settings → Context → auto gives it more. If the answer hit your **Answer length** cap instead, the note says that. A message sent to a chat that's already full gets "This chat is full" in place of an answer, with the same Ctrl+N tip.
 
@@ -127,13 +127,14 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 
 ![The Models page](images/terminal-app-models.png)
 
-Every `.gguf` on this machine, biggest first, with its size, the helper `ts5-tune` picked for it, and the date it was tuned. **●** marks the one loaded. Under them, **⇣ Download**: the tested models you don't have yet. Below the list, the selected model's tuned settings, each with what it costs: 16- or 32-bit prompt math, the helper, the chat memory (automatic: full precision, or 8-bit where that fits a longer chat) and, for the loaded one, its context.
+Every `.gguf` on this machine, biggest first, with its size, its helper, and where its settings come from: **tested** (a model tested on the PS5: its settings are built in, and it needs no tuning), a date (tuned on this machine with `ts5-tune`), or **—** (the defaults). **●** marks the one loaded. Under them, **⇣ Download**: the tested models you don't have yet. Below the list, the selected model's settings, each with what it costs: 16- or 32-bit prompt math, the helper, the chat memory (automatic: full precision, or 8-bit where that fits a longer chat) and, for the loaded one, its context.
 
 | Key | What it does |
 | --- | --- |
 | ↑ ↓, PgUp PgDn | Choose. |
-| Enter | Load it. On a catalog row: download it. |
-| T | Tune it with `ts5-tune --models` (10 to 20 minutes). |
+| Enter | Load it. On the model that's loaded: load it again, which is how a changed setting or a helper downloaded since takes hold (it asks first). On a catalog row: download it. |
+| T | Tune it with `ts5-tune --models` (10 to 20 minutes). A tested model doesn't need it, and T asks before tuning one. |
+| H | Download this model's helper, when it isn't here yet. |
 | C | The GPU check (`ts5 check`): the model's answers on the GPU against the CPU's. |
 | B | The speed test (`ts5 bench`): a 512-token prompt and 128 tokens of answer. |
 | D | On a catalog row: download it. |
@@ -147,17 +148,23 @@ It looks in `/var/lib/tokenstation/models` (or the service's `MODELS_DIR`), `~/.
 | Running | Enter |
 | --- | --- |
 | The API-only service (`tokenstation`) | Switches its model and restarts it, through the package's hardware helper. Your user must be in the `tokenstation` group (`sudo adduser $USER tokenstation`, then log in again). The model must be in the service's models folder. |
-| Nothing | Starts `ts5 serve` with that model on `127.0.0.1`, with the context set in Settings (auto by default: the longest the model fits, up to 32,768 for Qwen3 14B on the PS5). It keeps serving after you quit ts5-tui, which then prints its process number; `kill` it to stop it. Its log is `~/.cache/tokenstation/tui-serve.log`. |
+| Nothing | Starts `ts5 serve` with that model on `127.0.0.1`, with the context and the **Speed or length** choice from Settings. By default (auto context, **faster**) it keeps GPU memory for the model's helper: Qwen3 14B on the PS5 then gets a 20,480-token chat and writes about 58 tok/s. With **longest chat** it gets 32,768 tokens and no helper, about 42 tok/s. It keeps serving after you quit ts5-tui, which then prints its process number; `kill` it to stop it. Its log is `~/.cache/tokenstation/tui-serve.log`. |
 | The TV app (`tokenstation-tv`) | Nothing: pick the model on the TV's Models page. |
 | Another program on port 8081 | Nothing: switch the model there. |
 
-The top bar shows **loading…** with the seconds until the server reports the new model.
+The top bar shows **loading…** with the seconds until the server reports the new model. A model that doesn't load (not enough memory, a file that isn't a model) says why, on the Models page and in the chat.
 
-**Helpers** aren't loaded by hand. A helper is a small model that drafts tokens for a big one (same answers, faster, mostly on code), and it comes along with the main model as that model's tuning picked: **T** tunes a model and picks the fastest helper among the files here. The top bar shows the loaded model's helper (**none** until it's tuned), and the Models list shows each model's. Enter on a helper-size file (under 1.5 GiB) asks first, because it would replace the main model.
+**Helpers** aren't loaded by hand. A helper is a small model that drafts tokens for a big one (the same text, faster), and it loads along with it.
+
+- **The models tested on the PS5 know their helper**: Qwen3 0.6B for the Qwen3, DeepSeek R1 and Qwen2.5 Coder models, Llama 3.2 1B for the Llama ones. It downloads right after the model, into the same folder, and **H** fetches it for a model that's already here. Qwen3.5 9B can't use a helper, and the Gemma 12B models run without one (Gemma 3 1B speeds up short answers and slows long prompts; T measures it on your machine).
+- **For any other model**, **T** tunes it and picks the fastest helper among the small files of its own family here. Files from another family are left out, with the reason.
+- **The top bar shows what is really running**, as the server reports it: **helper NAME to 8k**, **helper none**, or **helper not running** in yellow. The selected model's details say why it isn't running: not downloaded yet (H gets it), no GPU memory left for it at this context, or downloaded after the model was loaded (Enter loads the model again).
+
+Enter on a helper-size file (under 1.5 GiB) asks first, because it would replace the main model.
 
 ### Downloading models
 
-The list under **⇣ Download** is every model on [Models tested on PS5](Models-tested-on-PS5), best first, with the helpers last. Each is pinned to the exact upload that was tested, with its size and SHA-256. Models already on this machine aren't listed. Choose one and press **Enter** (or `/download NAME` from the prompt). After a helper downloads, press **T** on its big model: tuning picks the helper up. The row shows a bar and the speed; the box below shows where the file goes, how much space is free there, what it's doing (connecting, downloading with the time so far and left, checking it's the exact file), and its steps ticked off. The top bar shows the download's percent and time left on every page.
+The list under **⇣ Download** is every model on [Models tested on PS5](Models-tested-on-PS5), best first, with the helpers last. Each is pinned to the exact upload that was tested, with its size and SHA-256. Models already on this machine aren't listed. Choose one and press **Enter** (or `/download NAME` from the prompt). A tested model's helper downloads right after it, by itself. The row shows a bar and the speed; the box below shows where the file goes, how much space is free there, what it's doing (connecting, downloading with the time so far and left, checking it's the exact file), and its steps ticked off. The top bar shows the download's percent and time left on every page.
 
 - It downloads with `ts5 fetch` into a `.part` file and keeps the model only when its size and SHA-256 match, so a broken download never shows up as a model.
 - It checks the free space first and won't start when the drive can't hold the file.
@@ -174,14 +181,16 @@ It downloads the same way and shows under the catalog while it runs. FILE is a n
 
 ### Tuning, the GPU check and the speed test
 
+**The models tested on the PS5 need no tuning.** Their settings (the helper, and how far ahead it drafts) were measured on a PS5 and are built in: their row says **tested**. Tuning is for other models: one from a `/download URL`, or a new model of a family ts5 runs.
+
 **Tuning** (T), the **GPU check** (C) and the **speed test** (B) open a progress panel:
 
 - **Working:** what it's doing right now, in plain words, with a spinner, the test answer it's on, the time so far and about how long is left (the estimate shows after the first test answer).
-- A **checklist** of every step it will go through, ticked off as each one finishes, with its result and how long it took: for tuning, checking the model gives correct answers, measuring its speed on its own, trying each helper model, saving the best settings. Skipped steps say why (for example, a helper whose vocabulary doesn't match).
+- A **checklist** of every step it will go through, ticked off as each one finishes, with its result and how long it took: for tuning, checking the model gives correct answers, measuring its speed on its own, trying each helper model of its own family, saving the best settings. Skipped steps say why (for example, a helper whose vocabulary doesn't match).
 - At the end, **what it found**: for tuning, the helper it picked and the speed before and after ("It writes 46% faster with the helper …: 58.9 tok/s, up from 40.3 on its own, with the same answers."); for the check, whether the GPU's answers match the CPU's; for the speed test, how fast it reads prompts and writes. The same line goes into the chat.
 - Under it, the tool's own lines, for a bug report.
 
-While a job runs, the top bar says so in yellow (**tuning MODEL · step 3 of 7 · 2:13**) instead of **offline**, on every page. **Esc** hides the panel and the job goes on (T shows it again), **X** stops it (nothing is changed then), PgUp/PgDn scroll. The GPU check runs the CPU side too, which takes a few minutes the first time for a model and is saved after. They need the GPU's memory: a `ts5 serve` that ts5-tui started is stopped for them. If the service holds a model, stop it first (`sudo systemctl stop tokenstation`). ts5-tune saves the results in your own `~/.config/tokenstation/tune/`. The API-only service runs as its own user and reads `/etc/tokenstation/tune/`, so copy the file there for the service (`sudo mkdir -p /etc/tokenstation/tune && sudo cp ~/.config/tokenstation/tune/<model>.gguf.env /etc/tokenstation/tune/`).
+While a job runs, the top bar says so in yellow (**tuning MODEL · step 3 of 7 · 2:13**) instead of **offline**, on every page. **Esc** hides the panel and the job goes on (T shows it again), **X** stops it (nothing is changed then), PgUp/PgDn scroll. The GPU check runs the CPU side too, which takes a few minutes the first time for a model and is saved after. They need the GPU's memory: a `ts5 serve` that ts5-tui started is stopped for them, and its model is loaded again when the job ends. A model can't be loaded while one runs. If the service holds a model, stop it first (`sudo systemctl stop tokenstation`). ts5-tune saves the results in your own `~/.config/tokenstation/tune/`. The API-only service runs as its own user and reads `/etc/tokenstation/tune/`, so copy the file there for the service (`sudo mkdir -p /etc/tokenstation/tune && sudo cp ~/.config/tokenstation/tune/<model>.gguf.env /etc/tokenstation/tune/`).
 
 ## Status (F3)
 
@@ -197,18 +206,19 @@ btop-style bars for this machine: GPU memory (with GiB free), RAM, the die (Tctl
 
 | Setting | What it does |
 | --- | --- |
-| Server | The TokenStation to talk to. |
+| Server | The TokenStation to talk to. An address that can't be right isn't saved, and the reason is shown. One given with `--url` or `TS5_URL` is used for that run only and not saved (the same for `--key` and `TS5_API_KEY`). |
 | API key | Only when the server asks for one. Kept in the settings file, readable by you only. |
 | Theme | Ocean, Neon, Sunset, Forest, Mono. |
 | Thinking | The model's choice, on, or off. |
 | Temperature | The model's own, or 0.1 to 1.5. Lower is steadier. |
 | Answer length | No limit, or a cap of 512 to 8,192 tokens. Under 1,024 turns thinking off. |
 | Context (own) | The context for a model ts5-tui starts itself: auto (the default: the longest that fits), or 4,096 to 32,768. A setting saved as 8,192 by an older version reads as auto. |
+| Speed or length | For a model with a helper that ts5-tui starts itself, with Context on auto. **faster** (the default) keeps GPU memory for the helper: the model writes faster, and the chat is somewhat shorter. **longest chat** gives the memory to the chat, and the model runs without its helper when both don't fit. It takes hold the next time the model loads (Enter on it on Models). |
 | Fan (PS5) | auto (quiet), cool (keeps long prompts under the 85 °C limiter), early (ramps from 40 °C, for long prompts back to back), max (loud). |
 | tmux | Its own tmux session from a plain terminal. |
 | Opening title | The title at start. |
 
-The engine's own switches (prompt math, cache, helper) are per model, and `ts5-tune` sets them: Models → **T**.
+The engine's own switches (prompt math, cache, helper) are per model: built in for the models tested on the PS5, and set by `ts5-tune` for any other (Models → **T**).
 
 ## Logs (F5)
 
@@ -220,7 +230,7 @@ It follows the API-only service's journal (`journalctl -u tokenstation`; reading
 
 From a plain terminal (an SSH session from Terminal, iTerm, PuTTY…), ts5-tui starts itself inside its own **tmux** session, called `ts5`, when tmux is installed (the packages recommend it). If the connection drops, nothing stops: the answer finishes, the model keeps loading, tuning goes on. Run `ts5-tui` again and you're back where you were.
 
-- **Ctrl+A** then **D** leaves it running in the background; `ts5-tui` comes back to it.
+- **Ctrl+A** then **D** leaves it running in the background; `ts5-tui` comes back to it. Ctrl+A is this session's command key, so for the start of the line use **Home** (or Ctrl+A twice).
 - The mouse wheel scrolls the chat. To select text with the mouse, hold **Shift** (Option on a Mac in iTerm).
 - It uses its own tmux server and settings (`~/.cache/tokenstation/tmux.conf`): your `~/.tmux.conf` and your other tmux sessions are left alone, and tmux's own status bar is hidden.
 - Quitting ts5-tui ends the session.
@@ -231,7 +241,7 @@ In an **IDE's terminal** (VS Code, Cursor, JetBrains, including their Remote-SSH
 
 ## When you quit
 
-**Ctrl+Q** (always shown at the bottom right), `exit`, `quit` or `q` at the prompt, `/quit`, or **q** on a page other than Chat. In ts5's tmux session, **Ctrl+A d** leaves it running instead. The chat is printed into your terminal, so it stays in its scrollback (also after a tmux session). The server and its model keep running.
+**Ctrl+Q** (always shown at the bottom right), `exit`, `quit` or `q` at the prompt, `/quit`, or **q** on a page other than Chat. While a tuning, a check or a download runs, quitting asks first. In ts5's tmux session, **Ctrl+A d** leaves it running instead. The chat is printed into your terminal, so it stays in its scrollback (also after a tmux session). The server and its model keep running.
 
 ## If something's off
 
