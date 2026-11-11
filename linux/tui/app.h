@@ -61,6 +61,7 @@ struct ServerState {
     int n_ctx = 0;
     std::string tool_format, known_good, checked_model, why;
     bool web_search = false;  // the server searches the web for the model (it has a key)
+    bool wikipedia = false;   // without a key it searches Wikipedia, for a request that asks
     // The helper the engine really loaded beside the model, its context
     // (drafting stops past it), or why the one asked for isn't used.
     // helper_known: the server says (an older one doesn't).

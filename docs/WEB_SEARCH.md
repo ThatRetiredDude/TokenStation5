@@ -33,7 +33,28 @@ about tools.
    `/etc/default/tokenstation` for the API-only service.
 
 `GET /v1/models` shows what the loaded model can do:
-`"capabilities": {"tools": true, "tool_format": "hermes", "web_search": true}`.
+`"capabilities": {"tools": true, "tool_format": "hermes", "web_search": true,
+"web_search_source": "tavily"}`.
+
+## Without a key: Wikipedia
+
+With no Tavily key the search is Wikipedia's own (its public API, no key, no
+account), and only for a request that asks for a search: `"web_search":
+true`, or `"web_search": "auto"` on a chat that looks like it needs the web,
+names Wikipedia or asks to search. ts5-tui asks that way while its search
+tool is switched on, so a model in ts5-tui can look things up out of the box.
+A plain request that says nothing gets no search, as before.
+
+It is an encyclopedia: no news, prices, weather or anything live. The tool's
+description tells the model so, and to say when the articles don't hold the
+answer. The model gets the top articles (five, `TS5_SEARCH_RESULTS`), each
+with its title, link and opening text; in ts5-tui it can then read a whole
+article with the web page tool. A query no article matches word for word
+goes once more as any of its words.
+
+`TS5_WIKIPEDIA` picks the language (`en` by default; `sk`, `de` ...) or turns
+it off (`off`). `/v1/models` says `"web_search": false, "web_search_source":
+"wikipedia"` then: `web_search` stays "the whole web, by itself".
 
 ## Which models
 

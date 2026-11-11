@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 import jinja2.ext
@@ -878,7 +879,7 @@ def test_every_model_has_tools(ts5, model, tdir):
     return failed
 
 
-def serve_turns(ts5, model, template, turns, req, key="tvly-test", url="http://127.0.0.1:9"):
+def serve_turns(ts5, model, template, turns, req, key="tvly-test", url="http://127.0.0.1:9", more_env=None):
     """One request to `ts5 serve` with the model's turns scripted: the reply's
     message (content, reasoning_content, tool_calls, finish_reason), the prompts, the log."""
     with tempfile.TemporaryDirectory() as d:
@@ -887,7 +888,7 @@ def serve_turns(ts5, model, template, turns, req, key="tvly-test", url="http://1
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        env = dict(os.environ, TS5_TEST_TURNS=script, TS5_TAVILY_URL=url, TAVILY_API_KEY=key)
+        env = dict(os.environ, TS5_TEST_TURNS=script, TS5_TAVILY_URL=url, TAVILY_API_KEY=key, **(more_env or {}))
         log = open(os.path.join(d, "log"), "w+")
         p = subprocess.Popen([ts5, "serve", "-m", model, "--chat-template", template, "--host", "127.0.0.1",
                               "--port", str(port), "--backend", "cpu"], env=env, stdout=log, stderr=log)
@@ -898,6 +899,8 @@ def serve_turns(ts5, model, template, turns, req, key="tvly-test", url="http://1
                     break
                 except OSError:
                     time.sleep(0.1)
+            if req is None:  # what /v1/models says, instead of a chat
+                return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=10).read()), [], ""
             r = urllib.request.urlopen(urllib.request.Request(
                 f"http://127.0.0.1:{port}/v1/chat/completions", json.dumps(req).encode(),
                 {"Content-Type": "application/json"}), timeout=60).read().decode()
@@ -1126,12 +1129,136 @@ def test_client_tools_and_search(ts5, model, tdir):
     return failed
 
 
+class Wikipedia(http.server.BaseHTTPRequestHandler):
+    """MediaWiki's API as Wikipedia answers a search (formatversion 2): the
+    pages in no order, each with its place in the results; nothing at all,
+    not even "query", when no article has every word."""
+    seen = []
+
+    def do_GET(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        words = q.get("gsrsearch", [""])[0]
+        Wikipedia.seen.append((urllib.parse.urlsplit(self.path).path, q))
+        out = {"batchcomplete": True}
+        if "nothing" not in words or " OR " in words:
+            out["query"] = {"pages": [
+                {"pageid": 2, "ns": 0, "title": "PlayStation 5", "index": 2, "extract": "A console. " + "word " * 600,
+                 "fullurl": "https://en.wikipedia.org/wiki/PlayStation_5"},
+                {"pageid": 1, "ns": 0, "title": "PlayStation 5 system software", "index": 1,
+                 "extract": "The system software is the firmware of the PlayStation\u00a05. Version 13.60 \u2014 2026.",
+                 "fullurl": "https://en.wikipedia.org/wiki/PlayStation_5_system_software"},
+                {"pageid": 3, "ns": 0, "title": "Firmware", "index": 3,
+                 "fullurl": "https://en.wikipedia.org/wiki/Firmware"}]}
+        body = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+def test_wikipedia(ts5, model, tdir):
+    """Without a Tavily key the search is Wikipedia's: `ts5 search`, and in
+    the server for a request that asks for a search."""
+    failed = 0
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Wikipedia)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_port}"
+    env = {k: v for k, v in os.environ.items() if k != "TAVILY_API_KEY"}
+
+    def search(query, **more):
+        before = len(Wikipedia.seen)
+        r = subprocess.run([ts5, "search", query], capture_output=True, text=True, timeout=60,
+                           env=dict(env, **dict({"TS5_WIKIPEDIA_URL": url}, **more)))
+        return r.returncode, r.stdout, r.stderr, Wikipedia.seen[before:]
+
+    rc, out, err, seen = search("PS5 firmware")
+    first = out.find("[1] PlayStation 5 system software\nhttps://en.wikipedia.org/wiki/PlayStation_5_system_software\n"
+                     "The system software is the firmware of the PlayStation\u00a05. Version 13.60 \u2014 2026.")
+    ok = (rc == 0 and out.startswith('Wikipedia articles for "PS5 firmware"') and 0 < first < out.find("[2] PlayStation 5\n")
+          < out.find("[3] Firmware\nhttps://en.wikipedia.org/wiki/Firmware\n(no opening text)") and " ..." in out and
+          len(out) < 2200 and "searching Wikipedia" in err and "3 results (" in err and len(seen) == 1 and
+          seen[0][0] == "/w/api.php" and seen[0][1]["gsrsearch"] == ["PS5 firmware"] and
+          seen[0][1]["gsrlimit"] == ["5"] and seen[0][1]["generator"] == ["search"] and
+          seen[0][1]["prop"] == ["extracts|info"] and seen[0][1]["exintro"] == ["1"])
+    failed += report(ok, "Wikipedia search: the articles, best first, long ones cut", f"rc {rc}\n{out}\n{err}\n{seen}")
+    # No article has every word: once more, as any of the words.
+    rc, out, err, seen = search("is there nothing on the PS5?")
+    ok = (rc == 0 and "[1] PlayStation 5 system software" in out and len(seen) == 2 and
+          seen[1][1]["gsrsearch"] == ["there OR nothing OR the OR PS5"])
+    failed += report(ok, "Wikipedia search: a whole question goes again as any of its words", f"rc {rc}\n{out}\n{seen}")
+    rc, out, err, seen = search("nothing")
+    ok = 'Wikipedia has no article for "nothing"' in out and len(seen) == 1 and "0 results (" in err
+    failed += report(ok, "Wikipedia search: nothing found", f"rc {rc}\n{out}\n{err}\n{seen}")
+    rc, out, err, seen = search("PS5", TS5_WIKIPEDIA_URL="http://127.0.0.1:9")
+    failed += report(rc == 1 and "The search failed: Wikipedia couldn't be reached" in out, "Wikipedia search: no server",
+                     f"rc {rc}\n{out}\n{err}")
+    rc, out, err, seen = search("PS5", TS5_WIKIPEDIA="off")
+    failed += report(rc == 1 and "no web search is set up" in out and not seen, "Wikipedia search: switched off",
+                     f"rc {rc}\n{out}\n{err}")
+    rc, out, err, seen = search("PS5", TS5_SEARCH_RESULTS="2")
+    failed += report(seen and seen[0][1]["gsrlimit"] == ["2"] and seen[0][1]["exlimit"] == ["2"],
+                     "Wikipedia search: TS5_SEARCH_RESULTS", f"{seen}")
+
+    # The server: offered only to a request that asks for a search.
+    qwen = os.path.join(tdir, "Qwen-Qwen2.5-7B-Instruct.jinja")
+    wiki = {"TS5_WIKIPEDIA_URL": url}
+    cases = [
+        # name, the user's message, "web_search", tools of the client's, more environment, offered
+        ("asked for, a question for the web", "What is the latest PS5 firmware?", "auto", [WEATHER], {}, True),
+        ("asked for, names Wikipedia", "What does Wikipedia say about the Danube?", "auto", [WEATHER], {}, True),
+        ("asked for, a question that needs none", "Write a haiku about rain.", "auto", [WEATHER], {}, False),
+        ("asked for, no tools of the client's", "Look up the Danube.", "auto", [], {}, True),
+        ("on", "Write a haiku about rain.", True, [], {}, True),
+        ("not asked for", "What is the latest PS5 firmware?", None, [], {}, False),
+        ("not asked for, TS5_WEB_SEARCH=always", "Write a haiku about rain.", None, [], {"TS5_WEB_SEARCH": "always"}, True),
+        ("off", "What is the latest PS5 firmware?", False, [], {}, False),
+        ("TS5_WIKIPEDIA=off", "What is the latest PS5 firmware?", True, [], {"TS5_WIKIPEDIA": "off"}, False),
+    ]
+    for name, text, ws, tools, more, offered in cases:
+        req = {"messages": [{"role": "user", "content": text}]}
+        if tools:
+            req["tools"] = tools
+        if ws is not None:
+            req["web_search"] = ws
+        msg, prompts, log = serve_turns(ts5, model, qwen, ["Hello."], req, key="", more_env=dict(wiki, **more))
+        has = '"name": "web_search"' in prompts[-1]
+        words = "Search Wikipedia. Returns the top articles" in prompts[-1]
+        failed += report(has == offered and words == offered and msg["content"] == "Hello.",
+                         f"Wikipedia search in the server, {name}", f"offered {has}\n{prompts[-1][:900]}\n{log}")
+    # A search and the answer from it.
+    before = len(Wikipedia.seen)
+    msg, prompts, log = serve_turns(ts5, model, qwen, [CALL, "Done.", "Final answer."],
+                                    {"messages": [{"role": "user", "content": "Look up the PS5 firmware."}],
+                                     "web_search": True}, key="", more_env=wiki)
+    ok = (msg["content"] == "Done." and len(Wikipedia.seen) - before == 1 and
+          'Wikipedia articles for "PS5 firmware"' in prompts[-1] and "[1] PlayStation 5 system software" in prompts[-1])
+    failed += report(ok, "Wikipedia search in the server: the answer from a search", f"{msg}\n{prompts[-1][-1500:]}\n{log}")
+    # /v1/models: where a search goes.
+    for name, key, more, want in [("no key", "", {}, (False, "wikipedia")), ("a key", "tvly-test", {}, (True, "tavily")),
+                                  ("no key, Wikipedia off", "", {"TS5_WIKIPEDIA": "off"}, (False, "none"))]:
+        models, _, _ = serve_turns(ts5, model, qwen, ["Hello."], None, key=key, more_env=dict(wiki, **more))
+        caps = models["data"][0]["capabilities"]
+        failed += report((caps["web_search"], caps["web_search_source"]) == want, f"/v1/models says where a search goes, {name}",
+                         f"{caps}")
+    srv.shutdown()
+    return failed
+
+
+def report(ok, name, detail):
+    print(("ok   " if ok else "FAIL ") + name + ("" if ok else "\n" + detail))
+    return 0 if ok else 1
+
+
 def main():
     ts5, model, tdir = sys.argv[1:4]
     failed = (test_prompts(ts5, model, tdir) + test_parser(ts5) + test_search(ts5) + test_search_loop(ts5, model, tdir) +
               test_gemma4_thinking(ts5, model, tdir) + test_every_model_has_tools(ts5, model, tdir) +
               test_thinking_marks(ts5, model, tdir) + test_page_reader(ts5) +
-              test_client_tools_and_search(ts5, model, tdir))
+              test_client_tools_and_search(ts5, model, tdir) + test_wikipedia(ts5, model, tdir))
     if failed:
         sys.exit(f"tools_test: {failed} failed")
     print("tools_test: all passed")

@@ -398,7 +398,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             can_think = state.can_think;
         }
         // capabilities: whether the model takes OpenAI tools, and whether ts5
-        // runs web searches for it (a Tavily key is set).
+        // runs web searches for it by itself (a Tavily key is set).
         const bool can = tools != "none";
         // helper: the draft model that is really loaded beside it and its
         // context (drafting stops past it), else null, with helper_note
@@ -423,7 +423,11 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                             ",\"capabilities\":{\"tools\":" + (can ? "true" : "false") +
                                                             ",\"tool_format\":" + json_escape(tools) +
                                                             ",\"web_search\":" +
-                                                            (can && !tavily_key().empty() ? "true" : "false") + "}" +
+                                                            (can && !tavily_key().empty() ? "true" : "false") +
+                                                            // Where a search goes: "tavily" (the web), "wikipedia"
+                                                            // (no key: for a request that asks), "none".
+                                                            ",\"web_search_source\":" +
+                                                            json_escape(can ? search_source() : "none") + "}" +
                                                             ",\"settings\":" + settings_json(known, sampling, think, can_think) + "}") +
                                        "]}"));
     } else if (completions) {
@@ -519,10 +523,17 @@ void handle(int fd, Server::State &state, Usage &u) {
                 // "auto": a client with tools of its own that wants the
                 // search offered the way a plain chat gets it (ts5-tui).
                 const Json &ws = req["web_search"];
-                web = !named && !tavily_key().empty() &&
+                // Without a Tavily key the search is Wikipedia's, and only
+                // for a request that asks for a search (true or "auto") or
+                // with TS5_WEB_SEARCH=always: a plain request stays as it
+                // was without a key, no search.
+                const std::string source = search_source();
+                const bool wiki = source == "wikipedia";
+                const bool asked = ws.type == Json::BOOL ? ws.boolean(false) : ws.str() == "auto";
+                web = !named && (source == "tavily" || (wiki && (asked || web_search_always()))) &&
                       (ws.type == Json::BOOL ? ws.boolean(false)
                                              : web_search_always() ||
-                                                   ((tools.empty() || ws.str() == "auto") && needs_web(last_user)));
+                                                   ((tools.empty() || ws.str() == "auto") && needs_web(last_user, wiki)));
                 if (web) tools.push_back(web_search_tool(date));
             }
             prompt = render_chat(e.tok(), msgs, tools, date, think);
@@ -1057,7 +1068,10 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
     }
     if (e)
         log_line("ts5: tool calls: %s; web search: %s", state_.tool_format.c_str(),
-                tavily_key().empty()  ? "off (no TAVILY_API_KEY)"
+                search_source() == "none" ? "off (no TAVILY_API_KEY, TS5_WIKIPEDIA=off)"
+                : tavily_key().empty()
+                    ? (web_search_always() ? "Wikipedia only (no TAVILY_API_KEY), offered on every chat"
+                                           : "Wikipedia only (no TAVILY_API_KEY), for a request that asks for a search")
                 : web_search_always() ? "on (Tavily), offered on every chat"
                                       : "on (Tavily), offered when a chat looks like it needs the web");
 }

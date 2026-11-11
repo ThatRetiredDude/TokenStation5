@@ -227,6 +227,7 @@ void poll_once() {
             s.n_ctx = (int)m["context_length"].num(0);
             s.tool_format = m["capabilities"]["tool_format"].str();
             s.web_search = m["capabilities"]["web_search"].boolean(false);
+            s.wikipedia = m["capabilities"]["web_search_source"].str() == "wikipedia";
             if (m.o.count("helper")) {
                 s.helper_known = true;
                 s.helper = m["helper"]["id"].str();
@@ -2305,7 +2306,9 @@ std::vector<SetRow> settings_rows() {
         SetRow x{"Web search key", c.web_key.empty() ? (sv.web_search ? "the server's own" : "none")
                                                      : std::string(std::min<size_t>(c.web_key.size(), 12), '*'),
                  sv.web_search         ? "on: the loaded model searches the web when a question needs it"
-                 : c.web_key.empty()   ? "a free key from app.tavily.com lets a model ts5-tui loads search the web"
+                 : c.web_key.empty()   ? (sv.wikipedia ? "without a key: Wikipedia only; a free one from app.tavily.com adds the web"
+                                                       : "a free key from app.tavily.com lets a model ts5-tui loads "
+                                                         "search the web")
                  : sv.online && own_server_pid() <= 0
                      ? "this server isn't ts5-tui's own: its key goes in /etc/default/tokenstation"
                      : "load the model again to turn it on (Models, Enter); models that use tools"};
@@ -2322,9 +2325,11 @@ std::vector<SetRow> settings_rows() {
     // The tools the model can use in a chat, a switch each.
     {
         const ServerState sv = server();
-        SetRow x{"Tool: search", !c.tool_web ? "off" : sv.web_search ? "on" : "on, needs the key",
+        SetRow x{"Tool: search",
+                 !c.tool_web ? "off" : sv.web_search ? "on" : sv.wikipedia ? "on, Wikipedia only" : "on, needs the key",
                  !c.tool_web       ? "the model never searches the web"
                  : sv.web_search   ? "the model searches the web when a question needs it"
+                 : sv.wikipedia    ? "looks things up on Wikipedia only; a web search key gives it the web"
                                    : "it searches once a web search key is set and the model is loaded again"};
         x.change = [save](int) {
             g->cfg.tool_web = !g->cfg.tool_web;
@@ -2760,7 +2765,8 @@ void run_command(const std::string &line) {
         };
         Config &f = g->cfg;
         const Row rows[] = {
-            {"search", "searches the web when a question needs it (the server does it; it needs a web search key)", &f.tool_web},
+            {"search", "searches when a question needs it (the server does it: the whole web with a web search key, "
+                       "Wikipedia without one)", &f.tool_web},
             {"pages", "reads a web page you give it a link to", &f.tool_page},
             {"terminal", "runs a command on this machine; you see each one first and say yes or no", &f.tool_terminal},
             {"memory", "keeps notes when you ask it to remember, and sees them in every chat (`/memory`)", &f.tool_memory},
@@ -2791,7 +2797,10 @@ void run_command(const std::string &line) {
             if (f.tool_terminal && c.ask_always.load())
                 h += "\nCommands run **without asking** in this chat (you chose that). `/tools ask` brings the question back.";
             const ServerState sv = server();
-            if (f.tool_web && !sv.web_search)
+            if (f.tool_web && !sv.web_search && sv.wikipedia)
+                h += "\nWithout a web search key the search is **Wikipedia only** (no news, prices or weather). For the "
+                     "whole web: Settings → Web search key (a free one from app.tavily.com), then load the model again.";
+            else if (f.tool_web && !sv.web_search)
                 h += "\nThe web search waits for a key: Settings → Web search key (a free one from app.tavily.com), "
                      "then load the model again.";
             if (sv.online && !sv.model.empty() && sv.tool_format.empty())

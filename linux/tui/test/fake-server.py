@@ -11,7 +11,8 @@ third of its bytes, as a real chat grows; FAKE_DENSE=2: half), and an answer tha
 context or max_tokens stops with finish_reason "length". A request for a
 summary (ts5-tui's, for a chat that filled up) gets one. FAKE_REQUESTS: a
 file that gets each request's roles and sizes, a line a request.
-FAKE_WEB=1 says the server has a web search key. FAKE_SPEED: words a second
+FAKE_WEB=1 says the server has a web search key (without it the search is
+Wikipedia's; FAKE_SOURCE=none: no search at all). FAKE_SPEED: words a second
 (60).
 Tools: when the request offers them, a message "run CMD" has the fake call
 run_command (CMD ";;" CMD2: one after the other, a turn each; CMD "&&&" CMD2:
@@ -92,7 +93,8 @@ class H(BaseHTTPRequestHandler):
             self.send(200, {"status": "ok"})
         elif self.path in ("/v1/models", "/models"):
             m = {"id": MODEL, "object": "model", "context_length": N_CTX,
-                 "capabilities": {"tools": True, "tool_format": "hermes", "web_search": WEB},
+                 "capabilities": {"tools": True, "tool_format": "hermes", "web_search": WEB,
+                                  "web_search_source": "tavily" if WEB else os.environ.get("FAKE_SOURCE", "wikipedia")},
                  "settings": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "thinking": True,
                               "known_good": "file"}}
             if HELPER and HELPER != "none":

@@ -37,13 +37,21 @@ const char *const kTell = ". Tell the user, and answer from what you know if you
 
 std::string tavily_key() { return env_or("TAVILY_API_KEY", ""); }
 
+std::string search_source() {
+    if (!tavily_key().empty()) return "tavily";
+    return env_or("TS5_WIKIPEDIA", "en") == "off" ? "none" : "wikipedia";
+}
+
 bool web_search_always() { return env_or("TS5_WEB_SEARCH", "") == "always"; }
 
-bool needs_web(const std::string &user_text) {
+bool needs_web(const std::string &user_text, bool wikipedia) {
     // Lower-case words, letters and digits only; a website (a word with
     // ".com" and the like, or "http") counts by itself.
     std::string text;
     for (char c : user_text) text += (char)tolower((unsigned char)c);
+    if (wikipedia)
+        for (const char *word : {"wikipedia", "wiki ", "search", "encyclopedia", "encyclopaedia"})
+            if (text.find(word) != std::string::npos) return true;
     for (const char *site : {"http://", "https://", "www.", ".com", ".org", ".net", ".io", ".gov", ".edu"})
         if (text.find(site) != std::string::npos) return true;
     std::vector<std::string> words;
@@ -94,7 +102,28 @@ bool needs_web(const std::string &user_text) {
     return false;
 }
 
-Json web_search_tool(const std::string &today) {
+Json web_search_tool(const std::string &today) { return web_search_tool(today, search_source() != "tavily"); }
+
+Json web_search_tool(const std::string &today, bool wikipedia) {
+    if (wikipedia) {
+        // An encyclopedia and nothing else: the model has to know, or it
+        // answers "today's weather" from an article on the climate.
+        const std::string tool =
+            "{\"type\": \"function\", \"function\": {\"name\": \"web_search\", \"description\": \"Search "
+            "Wikipedia. Returns the top articles, each with its title, URL and opening text. It is the only search "
+            "set up here: an encyclopedia, with no news, prices, weather or other live data. Use it when the user "
+            "asks you to look something up, or when the answer depends on a fact you are not sure of. Do not "
+            "search for explanations, writing or code: answer those yourself. When you do search, answer from "
+            "the results and cite the URLs you used; if the results do not hold the answer, say so instead of "
+            "guessing. Today is " +
+            today +
+            ".\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", "
+            "\"description\": \"What to look up: a name or a few key words, not a whole question.\"}}, "
+            "\"required\": [\"query\"]}}}";
+        Json j;
+        Json::parse(tool, j);
+        return j;
+    }
     std::string tool =
         "{\"type\": \"function\", \"function\": {\"name\": \"web_search\", \"description\": \"Search the web. "
         "Returns the top results, each with a title, URL and text from the page. Use it only when the answer "
@@ -116,6 +145,95 @@ std::string search_failure(const std::string &result) {
     return result.substr(strlen(kFailed), result.rfind(kTell) - strlen(kFailed));
 }
 
+namespace {
+
+std::string url_escape(const std::string &s) {
+    std::string out;
+    char hex[4];
+    for (unsigned char c : s) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out += (char)c;
+        } else {
+            snprintf(hex, sizeof hex, "%%%02X", c);
+            out += hex;
+        }
+    }
+    return out;
+}
+
+// A search of Wikipedia through MediaWiki's API: the articles that match,
+// best first, each with its opening text. A query that finds nothing (the
+// search wants every word in the article, and a model's query is often a
+// whole question) goes once more as any of its words.
+std::string wikipedia_search(const std::string &query, int n, std::string &log, bool *failed) {
+    const std::string lang = env_or("TS5_WIKIPEDIA", "en");
+    const std::string base = env_or("TS5_WIKIPEDIA_URL", ("https://" + lang + ".wikipedia.org").c_str());
+    const auto t0 = std::chrono::steady_clock::now();
+    auto took = [&] {
+        char b[32];
+        snprintf(b, sizeof b, "%.1f s", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        return std::string(b);
+    };
+    struct Page {
+        double index;
+        std::string title, url, text;
+    };
+    std::vector<Page> pages;
+    std::string words = query;
+    for (int round = 0; round < 2 && pages.empty(); round++) {
+        if (round == 1) {
+            // Any of the words: "PS5 OR firmware OR version".
+            std::string any, w;
+            int count = 0;
+            for (size_t i = 0; i <= query.size(); i++) {
+                const unsigned char c = i < query.size() ? (unsigned char)query[i] : ' ';
+                if (isalnum(c) || c >= 0x80) {
+                    w += (char)c;
+                } else if (!w.empty()) {
+                    if (w.size() > 2 || isdigit((unsigned char)w[0])) any += (count++ ? " OR " : "") + w;
+                    w.clear();
+                }
+            }
+            if (count < 2) break;
+            words = any;
+        }
+        const std::string url = base + "/w/api.php?action=query&format=json&formatversion=2&generator=search&gsrsearch=" +
+                                url_escape(words) + "&gsrlimit=" + std::to_string(n) +
+                                "&gsrnamespace=0&prop=extracts%7Cinfo&exintro=1&explaintext=1&exlimit=" +
+                                std::to_string(n) + "&inprop=url&redirects=1";
+        HttpResponse resp;
+        std::string err;
+        const bool ok = http_get(url, {"Accept: application/json"}, resp, err, 2u << 20, 20);
+        Json r;
+        if (!ok || resp.status != 200 || !Json::parse(resp.body, r)) {
+            if (failed) *failed = true;
+            log = "web_search \"" + query + "\": Wikipedia " +
+                  (!ok ? err : resp.status != 200 ? "answered HTTP " + std::to_string(resp.status) : "sent no JSON") + " (" +
+                  took() + ")";
+            return kFailed + std::string(!ok ? "Wikipedia couldn't be reached" : "Wikipedia had a problem") + kTell;
+        }
+        for (auto &p : r["query"]["pages"].a)
+            if (!p["title"].str().empty())
+                pages.push_back({p["index"].num(1e9), p["title"].str(), p["fullurl"].str(), p["extract"].str()});
+    }
+    std::stable_sort(pages.begin(), pages.end(), [](const Page &a, const Page &b) { return a.index < b.index; });
+    if (pages.empty()) {
+        log = "web_search \"" + query + "\": 0 results (" + took() + ", Wikipedia)";
+        return "Wikipedia has no article for \"" + query + "\". Try a name or fewer words, or answer from what you know "
+               "and say that it could not be looked up.";
+    }
+    std::string out = "Wikipedia articles for \"" + query +
+                      "\" (the only search set up here: an encyclopedia, no news or live data):";
+    int i = 0;
+    for (auto &p : pages)
+        out += "\n\n[" + std::to_string(++i) + "] " + p.title + "\n" + p.url + "\n" +
+               (p.text.empty() ? std::string("(no opening text)") : clip(p.text, 1200));
+    log = "web_search \"" + query + "\": " + std::to_string(i) + " results (" + took() + ", Wikipedia)";
+    return out;
+}
+
+}  // namespace
+
 std::string web_search(const std::string &arguments, std::string &log, bool *failed) {
     Json args;
     std::string query;
@@ -128,6 +246,14 @@ std::string web_search(const std::string &arguments, std::string &log, bool *fai
     int n = atoi(env_or("TS5_SEARCH_RESULTS", "5").c_str());
     if (n < 1) n = 1;
     if (n > 20) n = 20;
+    if (key.empty()) {
+        if (search_source() == "none") {
+            if (failed) *failed = true;
+            log = "web_search \"" + query + "\": no search is set up";
+            return kFailed + std::string("no web search is set up on this machine") + kTell;
+        }
+        return wikipedia_search(query, n, log, failed);
+    }
     Json body = Json::object();
     body.set("query", Json::string(query));
     Json num;

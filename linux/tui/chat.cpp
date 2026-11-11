@@ -1009,8 +1009,10 @@ std::string body_for(Chat &c, const ChatRequest &rq, bool no_tools = false) {
     const std::string tools = tools_json(rq.tools);
     if (!tools.empty()) b += ",\"tools\":" + tools;
     if (no_tools && !tools.empty()) b += ",\"tool_choice\":\"none\"";
+    // "auto" also with no tools of its own: without a web search key the
+    // server searches Wikipedia only for a request that asks.
     if (rq.ts5 && (no_tools || !rq.tools.web)) b += ",\"web_search\":false";
-    else if (rq.ts5 && !tools.empty()) b += ",\"web_search\":\"auto\"";
+    else if (rq.ts5) b += ",\"web_search\":\"auto\"";
     return b + "}";
 }
 
