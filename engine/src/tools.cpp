@@ -1002,6 +1002,10 @@ std::string ThoughtChannel::rest() {
     return r;
 }
 
+std::string ThoughtChannel::closing() const {
+    return gemma4_ ? kG4ThoughtEnd : style_ >= 0 ? kThinkMarks[style_][1] : "</think>";
+}
+
 ToolFormat tool_format(const Tokenizer &t) {
     const std::string &tmpl = t.chat_template();
     switch (t.chat_format()) {

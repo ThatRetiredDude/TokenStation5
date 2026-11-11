@@ -950,9 +950,9 @@ std::vector<size_t> sent_msgs(const Chat &c, size_t end, int *sum) {
 
 // What the model reads before a summary.
 const char *const kSummaryLead =
-    "This conversation has been going on for a while. Its earlier part was replaced by the summary below, which you "
-    "wrote: treat it as what was said. The latest messages follow it as they were.\n\n# Summary of the conversation "
-    "so far\n\n";
+    "This conversation has been going on for a while. Its beginning was replaced by the summary below, which you "
+    "wrote: treat it as what was said. What the summary tells came first; the messages after it are the "
+    "conversation's latest ones, as they were.\n\n# Summary of the conversation so far\n\n";
 
 std::string role_json(const std::string &role, const std::string &content) {
     return "{\"role\":\"" + role + "\",\"content\":" + ts5::json_escape(content) + "}";
@@ -1252,7 +1252,7 @@ void run_answer(Chat *c, ChatRequest rq, std::string body) {
     c->running = false;
 }
 
-std::string summary_ask(int words, const std::string &focus, bool again);
+std::string summary_ask(int words, const std::string &focus, bool again, bool more);
 std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::string &then, const std::string &focus,
                          int why, int used, int out_max, double room, int *keep_from, int *kept);
 
@@ -1409,8 +1409,9 @@ const char *const kTalkOpen =
     "do with it comes after it.\n\n-----\n";
 const char *const kTalkNotes = "[Notes on the conversation's earlier part]\n";
 
-// What the model is asked for. words: about how long it may get.
-std::string summary_ask(int words, const std::string &focus, bool again) {
+// What the model is asked for. words: about how long it may get. more: the
+// chat's latest messages stay as they are, after what is summarized.
+std::string summary_ask(int words, const std::string &focus, bool again, bool more) {
     std::string a =
         "-----\n\nThe assistant cannot hold all of that any longer, so notes take its place: the assistant goes on "
         "from the notes alone, and anything that is not in them is lost to it. Write those notes. Include:\n"
@@ -1421,11 +1422,18 @@ std::string summary_ask(int words, const std::string &focus, bool again) {
         "to (a poem, a list, a result), word for word;\n"
         "- what was tried and how it turned out, including what failed;\n"
         "- where things stand at the end of what is shown, and what was about to happen next.\n"
-        "The conversation is not over: the user goes on after the notes, so do not write that it ended or that "
-        "nothing more was asked.\n"
+        "%s\n"
         "Write plain notes under short headings and nothing else: no opening line, no closing remark. Keep to what "
         "is between the lines of dashes; add nothing that was not said there, and nothing about these instructions "
         "or about the notes being written. ";
+    // (Qwen3.8 9B closed its notes with "No new requests followed", and
+    // then took the first of the kept messages for the first request.)
+    const size_t at = a.find("%s");
+    a.replace(at, 2,
+              more ? "What is shown is only the conversation's first part: later messages follow it and are kept as "
+                     "they are. Write nothing about what did or did not come after it."
+                   : "The conversation is not over: the user goes on after the notes. Write nothing about it having "
+                     "ended, or about nothing more having been asked.");
     a += fmt("Use up to about %d words; shorter is better where nothing is lost.", words);
     if (again)
         a += " The conversation opens with notes on its earlier part: carry over everything in them that still "
@@ -1656,7 +1664,8 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
     // ("the assistant wrote three lines" for a haiku).
     size_t bytes = sum >= 0 ? c.msgs[sum].content.size() : 0;
     for (size_t k = 0; k < first_kept; k++) bytes += text[k].size();
-    const std::string ask = summary_ask(std::min(out_max / 2, std::max(100, (int)(bytes / 12))), focus, sum >= 0);
+    const std::string ask = summary_ask(std::min(out_max / 2, std::max(100, (int)(bytes / 12))), focus, sum >= 0,
+                                        first_kept < idx.size());
     // The request has to fit the context itself: the longest messages lose
     // their middles until it does.
     if (rq.n_ctx > 0) {
@@ -1681,6 +1690,11 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
     for (size_t k = 0; k < first_kept; k++) {
         const std::string &role = c.msgs[idx[k]].role;
         talk += (role == "tool" ? "" : role == "assistant" ? "[Assistant]\n" : "[User]\n") + text[k] + "\n\n";
+        // A message that got no answer (it failed, was stopped, or filled
+        // the chat with its thinking; such turns aren't sent): said so, or
+        // the notes make one up (Qwen3.5 9B wrote a haiku of its own there).
+        if (role == "user" && (k + 1 == idx.size() || c.msgs[idx[k + 1]].role == "user"))
+            talk += "[Assistant]\n(No answer came to this: the assistant ran out of room or was stopped.)\n\n";
     }
     *keep_from = first_kept < idx.size() ? (int)idx[first_kept] : (int)end;
     *kept_tokens = (int)kept;

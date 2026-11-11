@@ -42,6 +42,7 @@ inline const TestedModel kTestedModels[] = {
     {"Qwen3.8-9B-Q4_K_M.gguf", 5780090176LL, "", "", "this kind of model can't use one"},
     // prism-ml's Ternary-Bonsai-2 (Qwen3.5's layers, two bits a weight).
     {"Ternary-Bonsai-2-27B-Q2_0.gguf", 7626008928LL, "", "", "this kind of model can't use one"},
+    {"Ternary-Bonsai-2-9B-Q2_0.gguf", 2556640128LL, "", "", "this kind of model can't use one"},
     {"Ternary-Bonsai-2-4B-Q2_0.gguf", 1212103520LL, "", "", "this kind of model can't use one"},
     {"google_gemma-3-12b-it-Q4_K_M.gguf", 7300575264LL, "", "",
      "Gemma 3 1B speeds up short answers and slows long prompts; T measures it here"},

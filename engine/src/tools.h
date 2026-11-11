@@ -109,6 +109,10 @@ struct ThoughtChannel {
     std::string map(const std::string &piece);
     // What map held back at the turn's end (the start of what could have been a mark).
     std::string rest();
+    // The mark that ends the thinking the turn is in, as the model writes it.
+    std::string closing() const;
+    // How many bytes map is holding back.
+    size_t held() const { return held_.size(); }
 
 private:
     std::string held_;

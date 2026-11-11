@@ -135,6 +135,15 @@ tokens (`max_tokens`) never thinks, so an app asking for a short title or a
 line of code still gets an answer. Stop strings end the answer, never the
 thinking.
 
+A thinking that doesn't end is ended for the model, which then answers from
+what it has: one that repeats itself word for word, one that has used up the
+reply's room but for a last part (an eighth of it, 32 to 256 tokens), and
+one past 8,192 tokens (`"thinking_budget": N` in a request, or
+`TS5_THINK_MAX=N` for the server, sets another number; 0 is no limit). The
+thinking then ends with a line in square brackets that says why. Without
+this a small model can think to the end of its context and answer nothing
+(on the PS5, Qwen3.5 9B asked for a haiku: 15,851 tokens and four minutes).
+
 For agent work (editing files, then running them), use Qwen 3 8B. On the PS5
 it took every step of a write-then-run task; Qwen 2.5 Coder 7B wrote the file
 and then stopped in 4 of 4 runs, without running it.

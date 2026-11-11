@@ -1300,6 +1300,81 @@ def test_wikipedia(ts5, model, tdir):
     return failed
 
 
+def test_thinking_guard(ts5, model, tdir):
+    """A thinking that doesn't end is ended for the model, which then answers:
+    one that repeats itself, one that leaves no room for the answer, one over
+    its budget. The model's turns are scripted; TS5_TEST_PIECE hands them
+    over a few bytes at a time, each a token."""
+    failed = 0
+    qwen = os.path.join(tdir, "Qwen-Qwen2.5-7B-Instruct.jinja")
+    r1 = os.path.join(tdir, R1_OLD + ".jinja")
+    g4 = os.path.join(tdir, G4_MIN + ".jinja")
+    ask = [{"role": "user", "content": "Write a haiku about rivers."}]
+    unit = 'I\'ll do "Carrying life and time" is 6. '
+    loop = "Let me count the syllables.\n" + unit * 12
+    words = " ".join(f"w{i}" for i in range(300))  # nothing repeats in it
+    long_words = " ".join(f"w{i}" for i in range(1400))
+    ruler = "A table:\n" + "-" * 400 + "\n" + "| --- | --- | --- |\n" * 30 + "ha " * 200 + "\nDone."
+    note = lambda why: f"[ts5 ended the thinking here: {why}. The answer follows.]"
+    after = {"TS5_TEST_AFTER_THINK": "Rivers run to sea."}
+    pieces = dict(after, TS5_TEST_PIECE="4")
+    cases = [
+        # name, template, the turn, the request's extras, the environment, why it ended (None: it didn't)
+        ("a loop", qwen, "<think>\n" + loop, {}, after, "it was repeating itself"),
+        ("a loop, a piece at a time", qwen, "<think>\n" + loop, {}, pieces, "it was repeating itself"),
+        ("a loop in a turn ts5 opened (DeepSeek R1)", r1, loop, {}, after, "it was repeating itself"),
+        ("a loop in Gemma 4's thought", g4, "<|channel>thought\n" + loop, {}, after, "it was repeating itself"),
+        ("no room left for the answer", qwen, "<think>\n" + long_words, {"max_tokens": 1200}, pieces,
+         "the reply's room was nearly used up"),
+        ("over its budget", qwen, "<think>\n" + words, {"thinking_budget": 50}, pieces, "it had grown very long"),
+        ("no budget: thinks to its end", qwen, "<think>\n" + words + "\n</think>\n\nFine.", {"thinking_budget": 0},
+         pieces, None),
+        ("rulers and table lines are no loop", qwen, "<think>\n" + ruler + "\n</think>\n\nFine.", {}, pieces, None),
+        ("a repeating answer is left alone", qwen, unit * 12, {}, pieces, None),
+    ]
+    for name, template, turn, more, env, why in cases:
+        for stream in (False, True):
+            req = dict({"messages": ask, "stream": stream, "web_search": False}, **more)
+            msg, prompts, log = serve_turns(ts5, model, template, [turn], req, more_env=env)
+            label = f"thinking guard: {name}" + (", streaming" if stream else "")
+            thought = msg["reasoning_content"]
+            if why is None:
+                want = "Fine." if "</think>" in turn else turn
+                ok = msg["content"] == want and "ts5 ended" not in thought and len(prompts) == 1
+            else:
+                # The answer came, the thinking says why it ended, and the
+                # model went on from its own thinking, closed with its mark.
+                close = "<channel|>" if template == g4 else "\n</think>\n\n"
+                ok = (msg["content"] == "Rivers run to sea." and thought.rstrip().endswith(note(why)) and
+                      len(prompts) == 2 and prompts[1].endswith(note(why) + close) and
+                      prompts[1].startswith(prompts[0]) and f"thinking ended after" in log)
+                if "loop" in name:
+                    # One copy of what it repeated is kept (the stream had sent more by then).
+                    kept = prompts[1][len(prompts[0]):]
+                    ok = ok and kept.count(unit.strip()) == 1 and "Let me count the syllables." in kept
+                    if not stream:
+                        ok = ok and thought.count(unit.strip()) == 1
+            if not ok:
+                failed += 1
+                print(f"FAIL {label}: {msg}\n{prompts[1:]}\n{log}")
+            else:
+                print(f"ok   {label}")
+    # With the thinking kept in the content, its closing mark is there too.
+    req = {"messages": ask, "reasoning_format": "none", "web_search": False}
+    msg, prompts, log = serve_turns(ts5, model, qwen, ["<think>\n" + loop], req, more_env=after)
+    want_end = note("it was repeating itself") + "\n</think>\n\nRivers run to sea."
+    failed += report(msg["content"].startswith("<think>\nLet me count") and msg["content"].endswith(want_end),
+                     "thinking guard: the closing mark in the content when the thinking is kept there", str(msg))
+    # The client's tool is still called after it.
+    call = '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Oslo"}}\n</tool_call>'
+    req = {"messages": [{"role": "user", "content": "Weather in Oslo?"}], "tools": [WEATHER]}
+    msg, prompts, log = serve_turns(ts5, model, qwen, ["<think>\n" + loop, call, "unused"], req)
+    calls = [(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in msg["tool_calls"]]
+    failed += report(calls == [("get_weather", {"city": "Oslo"})] and msg["finish_reason"] == "tool_calls",
+                     "thinking guard: a tool call after the thinking was ended", f"{msg}\n{log}")
+    return failed
+
+
 def report(ok, name, detail):
     print(("ok   " if ok else "FAIL ") + name + ("" if ok else "\n" + detail))
     return 0 if ok else 1
@@ -1310,7 +1385,8 @@ def main():
     failed = (test_prompts(ts5, model, tdir) + test_parser(ts5) + test_search(ts5) + test_search_loop(ts5, model, tdir) +
               test_gemma4_thinking(ts5, model, tdir) + test_every_model_has_tools(ts5, model, tdir) +
               test_thinking_marks(ts5, model, tdir) + test_page_reader(ts5) +
-              test_client_tools_and_search(ts5, model, tdir) + test_wikipedia(ts5, model, tdir))
+              test_client_tools_and_search(ts5, model, tdir) + test_wikipedia(ts5, model, tdir) +
+              test_thinking_guard(ts5, model, tdir))
     if failed:
         sys.exit(f"tools_test: {failed} failed")
     print("tools_test: all passed")
