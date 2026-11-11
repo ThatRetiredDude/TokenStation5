@@ -39,6 +39,8 @@ struct Config {
     int serve_ctx = 0;      // for a model ts5-tui starts itself; 0 auto (the most that fits)
     bool helper_room = true;  // with auto: keep room for the model's helper (faster, a shorter chat)
     bool tmux = true;       // its own tmux session from a plain terminal
+    bool mouse = true;      // clicks come to ts5-tui; off, the terminal keeps the mouse (its own selection)
+    bool keep_model = false;  // a model ts5-tui loaded keeps serving after it quits
     std::string path;       // where it is saved
     void load();
     void save() const;

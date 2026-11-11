@@ -21,6 +21,14 @@ struct Msg {
     double gen_tps = 0, prompt_tps = 0;
     int prompt_tokens = 0, gen_tokens = 0, total_tokens = 0;
     std::string finish;  // the server's finish_reason: "stop", "length"…
+    int think_open = -1;  // its thinking: -1 as Chat::show_think says, 0 folded, 1 open (a click)
+};
+
+// Where a click does something, on the chat as last drawn.
+enum { HIT_THINK = 1, HIT_COPY_MSG, HIT_COPY_CODE };
+struct ChatHit {
+    int y = 0, x0 = 0, x1 = 0;  // the row, and its columns [x0, x1)
+    int kind = 0, msg = -1, block = -1;
 };
 
 struct Chat {
@@ -46,6 +54,8 @@ struct Chat {
     std::atomic<int> answers{0};     // answers finished (done, stopped or failed)
     int answers_seen = 0;            // the app looked at how they ended (main.cpp)
     void (*before_clear)(Chat &) = nullptr;  // chat_new calls it first (to save the chat)
+    std::vector<ChatHit> hits;       // the last drawing's
+    std::vector<int> row_msg;        // the message drawn on each screen row then, or -1
     bool busy() const { return running; }
 };
 
@@ -75,6 +85,20 @@ const std::vector<SlashCommand> &slash_commands();
 void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v);
 int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h);
 void chat_note(Chat &c, const std::string &text);
+// A click at (x, y): opens or folds a message's thinking itself (true); a
+// copy mark is handed back in *hit (true); else false.
+bool chat_click(Chat &c, int x, int y, ChatHit *hit);
+// The message drawn at row y, or -1.
+int chat_msg_at(const Chat &c, int y);
+// What to copy: message msg's answer as the model wrote it (block >= 0: that
+// code block's lines alone; thinking: what it thought), or with msg < 0 the
+// whole chat as Markdown (thinking where it is open on screen), *at then the
+// byte where message at_msg starts. *what: a few words naming it. "" when
+// there is none.
+std::string chat_copy_text(Chat &c, int msg, int block, bool thinking, std::string *what = nullptr,
+                           size_t *at = nullptr, int at_msg = -1);
+// The last answer's index (one with text), or -1.
+int chat_last_answer(Chat &c);
 // 12,345
 std::string with_commas(int n);
 void chat_new(Chat &c);

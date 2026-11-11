@@ -245,6 +245,53 @@ bool chat_tuned(const std::string &repo) {
     return false;
 }
 
+// Whether the Hub matched the search in the repo's own name. It searches the
+// whole id, so "phi 4" also finds everything philbert440 uploaded (seen
+// 2026-11-11: a Qwen 27B's side files, first in the list). A repo with none
+// of the search's words in its name was matched by its owner alone.
+bool name_matches(const std::string &repo, const std::string &query) {
+    const std::string n = lower(repo.substr(repo.find('/') + 1));
+    std::vector<std::string> words;
+    std::string w;
+    for (char c : lower(query) + " ") {
+        if (c != ' ') {
+            w += c;
+            continue;
+        }
+        if (!w.empty()) words.push_back(w);
+        w.clear();
+    }
+    bool any_long = false;
+    for (auto &x : words) any_long = any_long || x.size() >= 2;
+    for (auto &x : words)
+        if ((x.size() >= 2 || !any_long) && n.find(x) != std::string::npos) return true;
+    return words.empty();
+}
+
+// Models that answer with numbers, not words: embedding and reranking
+// models come in the same file format and architectures as chat models
+// ("qwen3 0.6b" offered Qwen3 Embedding and Qwen3 Reranker, 2026-11-11).
+bool not_for_chat(const std::string &repo) {
+    const std::string n = lower(repo.substr(repo.find('/') + 1));
+    for (const char *k : {"embed", "rerank", "bge-", "gte-", "colbert", "-e5-"})
+        if (n.find(k) != std::string::npos) return true;
+    return n.rfind("e5-", 0) == 0;
+}
+
+// A file that isn't the model itself: a vision model's image encoder
+// (Qwen3.5 and Gemma repos carry one), a multi-token-prediction side file
+// ("mtp-Name-Q8_0.gguf": a draft head for another program).
+bool side_file(const std::string &path) {
+    const std::string p = lower(path);
+    if (p.find("mmproj") != std::string::npos) return true;
+    for (size_t at = p.find("mtp"); at != std::string::npos; at = p.find("mtp", at + 1)) {
+        const bool before = at == 0 || !isalnum((unsigned char)p[at - 1]);
+        const bool after = at + 3 >= p.size() || !isalnum((unsigned char)p[at + 3]);
+        if (before && after) return true;
+    }
+    return false;
+}
+
 // The Hub's answer to url as JSON; false with a reason in plain words.
 bool hub_json(const std::string &url, Json &out, std::string &problem) {
     ts5::HttpResponse resp;
@@ -300,7 +347,9 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
         std::vector<const Json *> repos;
         int cant = 0;
         for (const Json &m : list.a) {
-            if (!supported_arch(m["gguf"]["architecture"].str())) {
+            const std::string id = m["id"].str();
+            if (!name_matches(id, query)) continue;
+            if (!supported_arch(m["gguf"]["architecture"].str()) || not_for_chat(id)) {
                 cant++;
                 continue;
             }
@@ -340,8 +389,7 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
                     const double bytes = f["lfs"]["size"].num(f["size"].num(0));
                     if (f["type"].str() != "file" || q < 0 || oid.size() != 64 || bytes <= 0) continue;
                     if (path.find('/') != std::string::npos) continue;  // in a folder: the PS5 keeps one level
-                    // A vision model's image encoder (Qwen3.5 and Gemma repos carry one) isn't a model to chat with.
-                    if (lower(path).find("mmproj") != std::string::npos) continue;
+                    if (side_file(path)) continue;
                     files.push_back({path, oid, (uint64_t)bytes, q});
                 }
                 std::stable_sort(files.begin(), files.end(), [](const File &a, const File &b) { return a.quant < b.quant; });
@@ -382,6 +430,13 @@ void HfSearch::start(const std::string &query, uint64_t gpu_memory) {
                     CatalogText t;
                     t.key = "hf:" + repo + "/" + f.path;
                     t.name = repo_name(repo) + " (" + kQuants[f.quant] + ")";
+                    // Two files of one type in a repo (a second cut of the
+                    // model): the later ones go by their file's name.
+                    for (size_t k : found)
+                        if (catalog_at(k).name == t.name) {
+                            t.name = f.path.substr(0, f.path.size() > 5 ? f.path.size() - 5 : f.path.size());
+                            break;
+                        }
                     // Under HUGGING FACE already, so only who made the file.
                     t.good_for = std::string(chat_tuned(repo) ? "" : "May not chat well \xC2\xB7 ") + "From " +
                                  repo.substr(0, repo.find('/'));
