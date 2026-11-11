@@ -484,6 +484,72 @@ size_t element_end(const std::string &s, size_t at, const std::string &name) {
     return s.size();
 }
 
+// The value of the attribute `name` in the tag that opens at s[i] ('<') and
+// ends at s[e] ('>'), its entities read; "" without it. *has: it is there.
+std::string attr_of(const std::string &s, size_t i, size_t e, const char *name, bool *has = nullptr) {
+    if (has) *has = false;
+    size_t k = i + 1;
+    while (k < e && !isspace((unsigned char)s[k])) k++;  // the tag's name
+    while (k < e) {
+        while (k < e && (isspace((unsigned char)s[k]) || s[k] == '/')) k++;
+        const size_t n0 = k;
+        while (k < e && !isspace((unsigned char)s[k]) && s[k] != '=' && s[k] != '/') k++;
+        const size_t n1 = k;
+        if (n1 == n0) break;
+        while (k < e && isspace((unsigned char)s[k])) k++;
+        std::string value;
+        if (k < e && s[k] == '=') {
+            k++;
+            while (k < e && isspace((unsigned char)s[k])) k++;
+            size_t v0 = k, v1;
+            if (k < e && (s[k] == '"' || s[k] == '\'')) {
+                const char q = s[k];
+                v0 = ++k;
+                while (k < e && s[k] != q) k++;
+                v1 = k;
+                if (k < e) k++;
+            } else {
+                while (k < e && !isspace((unsigned char)s[k])) k++;
+                v1 = k;
+            }
+            for (size_t j = v0; j < v1;) {
+                if (s[j] == '&')
+                    if (const size_t len = entity(s, j, value)) {
+                        j += len;
+                        continue;
+                    }
+                value += s[j++];
+            }
+        }
+        bool same = n1 - n0 == strlen(name);
+        for (size_t j = 0; same && j < n1 - n0; j++) same = tolower((unsigned char)s[n0 + j]) == name[j];
+        if (same) {
+            if (has) *has = true;
+            return value;
+        }
+    }
+    return "";
+}
+
+// A label: one line, its blank runs closed up, 80 bytes at most.
+std::string label_of(const std::string &text) {
+    std::string out;
+    for (size_t i = 0; i < text.size(); i++) {
+        const unsigned char c = (unsigned char)text[i];
+        if (isspace(c) || (c == 0xC2 && i + 1 < text.size() && (unsigned char)text[i + 1] == 0xA0 && ++i)) {
+            if (!out.empty() && out.back() != ' ') out += ' ';
+        } else out += (char)c;
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    if (out.size() > 80) {
+        size_t cut = 77;
+        while (cut > 0 && ((unsigned char)out[cut] & 0xC0) == 0x80) cut--;
+        out.resize(cut);
+        out += "...";
+    }
+    return out;
+}
+
 // Whether the list between a and b is nothing but links: a menu, a table of
 // contents, the page in other languages. Five items or more, and next to no
 // words outside the links.
@@ -517,14 +583,55 @@ bool link_list(const std::string &h, size_t a, size_t b) {
 }
 
 // HTML as text. menus false: without the page's menus and sidebars (<nav>,
-// <aside>, and the lists that are nothing but links).
-std::string text_of(const std::string &html, bool menus) {
+// <aside>, and the lists that are nothing but links). els (a page view, for
+// a model that acts on the page): each link, text box and button gets a
+// number in the text, "[3]" after a link's words, "[4: text box "Search"]",
+// "[5: button "Go"]", and is listed in els under it; the lists of links
+// stay (they are what there is to click), what the page hides doesn't.
+std::string text_of(const std::string &html, bool menus, PageElements *els = nullptr) {
     // Tags that start a new line, and the ones whose insides are no text.
     static const char *const kBlock[] = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section",
                                          "article", "header", "footer", "table", "ul", "ol", "pre", "blockquote",
                                          "title", "dt", "dd", "hr", "form", "nav", "main", "aside", "figure"};
     static const char *const kSkip[] = {"script", "style", "noscript", "svg", "template", "iframe", "select"};
     std::string raw;
+    // The link or button being read: its words become its label when it closes.
+    struct {
+        bool on = false;
+        std::string tag;  // its tag's name, and how many of them are open inside it
+        int depth = 0;
+        size_t from = 0;  // where its words start in raw
+        PageElement el;
+    } cap;
+    int form = -1;  // the form the tags are inside of
+    // A number for el, and its mark in the text.
+    auto number = [&](PageElement el) {
+        if (els->items.size() >= 400) return std::string();
+        el.form = form;
+        els->items.push_back(el);
+        const std::string n = std::to_string(els->items.size());
+        const std::string &l = els->items.back().label;
+        if (el.kind == "link") return "[" + n + "]";
+        if (el.kind == "button") return "[" + n + ": button" + (l.empty() ? "" : " \"" + l + "\"") + "]";
+        if (el.kind == "check")
+            return "[" + n + ": " + (el.checked ? "ticked" : "empty") + " box" + (l.empty() ? "" : " \"" + l + "\"") + "]";
+        return "[" + n + ": text box" + (l.empty() ? "" : " \"" + l + "\"") +
+               (el.value.empty() ? "" : " = \"" + label_of(el.value) + "\"") + "]";
+    };
+    auto close_cap = [&] {
+        std::string words = label_of(raw.substr(std::min(cap.from, raw.size())));
+        if (words.empty()) words = cap.el.label;  // its aria-label or title
+        cap.on = false;
+        if (words.empty()) return;
+        cap.el.label = words;
+        if (cap.el.kind == "link") {
+            while (raw.size() > cap.from && raw.back() == ' ') raw.pop_back();
+            raw += number(cap.el);
+        } else {
+            raw.resize(std::min(cap.from, raw.size()));
+            raw += number(cap.el);
+        }
+    };
     for (size_t i = 0; i < html.size();) {
         const char c = html[i];
         if (c == '<') {
@@ -551,10 +658,149 @@ std::string text_of(const std::string &html, bool menus) {
             for (const char *k : kSkip) skip |= !closing && name == k;
             skip |= !menus && !closing && (name == "nav" || name == "aside");
             if (skip) {
+                // (A <select>'s choice still goes with its form.)
+                if (els && name == "select" && form >= 0 && e != std::string::npos) {
+                    const std::string field = attr_of(html, i, e, "name");
+                    const size_t end = skip_element(html, after, name);
+                    std::string value;
+                    bool first = true;
+                    for (size_t o = find_tag(html, "option", after); o != std::string::npos && o < end;
+                         o = find_tag(html, "option", o + 1)) {
+                        const size_t oe = tag_end(html, o);
+                        if (oe == std::string::npos) break;
+                        bool chosen = false, has = false;
+                        attr_of(html, o, oe, "selected", &chosen);
+                        std::string v = attr_of(html, o, oe, "value", &has);
+                        if (!has) {
+                            const size_t stop = std::min(html.find('<', oe + 1), end);
+                            v = label_of(html.substr(oe + 1, stop - oe - 1));
+                        }
+                        if (first || chosen) value = v;
+                        first = false;
+                    }
+                    if (!field.empty()) els->forms[(size_t)form].fields.push_back({field, value, -1});
+                }
                 i = skip_element(html, after, name);
                 continue;
             }
-            if (!menus && !closing && (name == "ul" || name == "ol")) {
+            if (els && !closing && e != std::string::npos) {
+                // What the page hides (a closed menu, a dialog not open).
+                bool hidden = false, flag = false;
+                attr_of(html, i, e, "hidden", &hidden);
+                attr_of(html, i, e, "data-ts5-hidden", &flag);
+                hidden |= flag || attr_of(html, i, e, "aria-hidden") == "true";
+                if (!hidden) {
+                    std::string style = attr_of(html, i, e, "style");
+                    style.erase(std::remove_if(style.begin(), style.end(), [](unsigned char ch) { return isspace(ch); }),
+                                style.end());
+                    hidden = style.find("display:none") != std::string::npos ||
+                             style.find("visibility:hidden") != std::string::npos;
+                }
+                static const char *const kVoid[] = {"input", "img", "br", "hr", "meta", "link", "area", "base", "col",
+                                                    "embed", "source", "track", "wbr"};
+                bool is_void = html[e - 1] == '/';
+                for (const char *k : kVoid) is_void |= name == k;
+                if (hidden && name != "html" && name != "body") {
+                    i = is_void ? after : element_end(html, after, name);
+                    continue;
+                }
+                const std::string mark = attr_of(html, i, e, "data-ts5");
+                const std::string role = attr_of(html, i, e, "role");
+                if (cap.on) {
+                    if (name == cap.tag && !is_void) cap.depth++;
+                    if (name == "img") raw += " " + attr_of(html, i, e, "alt") + " ";
+                } else if (name == "form") {
+                    form = (int)els->forms.size();
+                    PageForm f;
+                    f.action = attr_of(html, i, e, "action");
+                    f.method = attr_of(html, i, e, "method");
+                    for (char &ch : f.method) ch = (char)tolower((unsigned char)ch);
+                    els->forms.push_back(f);
+                } else if (name == "a" ||
+                           // A button with no browser behind it does something only as its form's.
+                           (name == "button" && (!mark.empty() || form >= 0)) ||
+                           // Whatever else a browser marked as taking a click.
+                           (!mark.empty() && !is_void && name != "textarea" && name != "select" && name != "form")) {
+                    PageElement el;
+                    el.mark = mark;
+                    el.kind = name == "a" || role == "link" ? "link" : "button";
+                    el.href = name == "a" ? attr_of(html, i, e, "href") : "";
+                    el.name = attr_of(html, i, e, "name");
+                    el.value = attr_of(html, i, e, "value");
+                    el.type = attr_of(html, i, e, "type");
+                    for (char &ch : el.type) ch = (char)tolower((unsigned char)ch);
+                    el.label = label_of(attr_of(html, i, e, "aria-label"));
+                    if (el.label.empty()) el.label = label_of(attr_of(html, i, e, "title"));
+                    // A link that goes nowhere a request can follow is one
+                    // only for a browser, which runs what the page does on a click.
+                    const bool dead = el.href.empty() || el.href[0] == '#' || starts_ci(el.href, 0, "javascript:") ||
+                                      starts_ci(el.href, 0, "mailto:") || starts_ci(el.href, 0, "tel:");
+                    const bool inert = name == "button" && mark.empty() && (el.type == "button" || el.type == "reset");
+                    if ((name != "a" || !dead || !mark.empty()) && !inert) {
+                        cap.on = true;
+                        cap.tag = name;
+                        cap.depth = 1;
+                        cap.from = raw.size();
+                        cap.el = el;
+                    }
+                } else if (name == "input" || name == "textarea") {
+                    PageElement el;
+                    el.mark = mark;
+                    el.name = attr_of(html, i, e, "name");
+                    el.type = name == "textarea" ? "textarea" : attr_of(html, i, e, "type");
+                    for (char &ch : el.type) ch = (char)tolower((unsigned char)ch);
+                    if (el.type.empty()) el.type = "text";
+                    bool live = false;
+                    el.value = attr_of(html, i, e, "data-ts5-value", &live);  // what a browser has in it now
+                    if (!live) el.value = attr_of(html, i, e, "value");
+                    size_t next = after;
+                    if (name == "textarea") {
+                        next = skip_element(html, after, name);
+                        if (!live) {
+                            const size_t stop = html.rfind("</", next);
+                            el.value = stop != std::string::npos && stop >= after ? html.substr(after, stop - after) : "";
+                        }
+                    }
+                    el.label = label_of(attr_of(html, i, e, "placeholder"));
+                    if (el.label.empty()) el.label = label_of(attr_of(html, i, e, "aria-label"));
+                    if (el.label.empty()) el.label = label_of(attr_of(html, i, e, "title"));
+                    if (el.label.empty()) el.label = label_of(el.name);
+                    attr_of(html, i, e, "checked", &el.checked);
+                    const std::string &t = el.type;
+                    const int f = form;
+                    if (t == "hidden") {
+                        if (f >= 0 && !el.name.empty()) els->forms[(size_t)f].fields.push_back({el.name, el.value, -1});
+                    } else if (t == "password") {
+                        raw += "[password box: only the user can fill this in]";
+                        // (Sent empty, as a browser sends a box nothing was typed in.)
+                        if (f >= 0 && !el.name.empty()) els->forms[(size_t)f].fields.push_back({el.name, "", -1});
+                    } else if (t == "file") {
+                        if (f >= 0 && !el.name.empty()) els->forms[(size_t)f].fields.push_back({el.name, "", -1});
+                    } else if (t == "submit" || t == "button" || t == "image" || t == "reset") {
+                        el.kind = "button";
+                        el.label = label_of(el.value.empty() ? (t == "submit" ? "Submit" : el.label) : el.value);
+                        if (t != "reset") raw += number(el);
+                    } else if (t == "checkbox" || t == "radio") {
+                        el.kind = "check";
+                        if (el.value.empty()) el.value = "on";
+                        raw += number(el);
+                        if (f >= 0 && !el.name.empty())
+                            els->forms[(size_t)f].fields.push_back({el.name, el.value, (int)els->items.size() - 1});
+                    } else {
+                        el.kind = "input";
+                        raw += number(el);
+                        if (f >= 0 && !el.name.empty())
+                            els->forms[(size_t)f].fields.push_back({el.name, el.value, (int)els->items.size() - 1});
+                    }
+                    i = next;
+                    continue;
+                }
+            }
+            if (els && closing) {
+                if (cap.on && name == cap.tag && --cap.depth == 0) close_cap();
+                else if (!cap.on && name == "form") form = -1;
+            }
+            if (!menus && !els && !closing && (name == "ul" || name == "ol")) {
                 const size_t end = element_end(html, after, name);
                 if (link_list(html, after, end)) {
                     i = end;
@@ -608,6 +854,48 @@ std::string text_of(const std::string &html, bool menus) {
 
 }  // namespace
 
+std::string html_view(const std::string &html, PageElements &els) {
+    // As html_text: the article alone where the page marks one, under its
+    // title; a page that is little else is read whole.
+    PageElements all;
+    const std::string whole = text_of(html, true, &all);
+    PageElements part;
+    std::string text;
+    const size_t m = find_tag(html, "main", 0);
+    if (m != std::string::npos) {
+        size_t e = std::string::npos;
+        for (size_t at = find_tag(html, "main", m, true); at != std::string::npos; at = find_tag(html, "main", at + 1, true)) e = at;
+        // The forms above the article go first (a site's search box is in
+        // its header): two at most, and none that is a page of its own.
+        std::string lead;
+        int forms = 0;
+        for (size_t f = find_tag(html, "form", 0); f != std::string::npos && f < m && forms < 2;
+             f = find_tag(html, "form", f + 1)) {
+            const size_t open = tag_end(html, f);
+            if (open == std::string::npos) break;
+            const size_t fe = element_end(html, open + 1, "form");
+            if (fe > m || fe - f > 6000) continue;
+            const std::string form = html.substr(f, fe - f);
+            if (find_tag(form, "input", 0) == std::string::npos) continue;
+            lead += "<div>" + form + "</div>";
+            forms++;
+        }
+        text = text_of(lead + html.substr(m, e == std::string::npos ? std::string::npos : e - m), false, &part);
+    } else {
+        text = text_of(html, false, &part);
+    }
+    const bool use_part = text.size() >= 200 || text.size() * 2 >= whole.size();
+    els = use_part ? part : all;
+    return use_part ? text : whole;
+}
+
+std::string html_title(const std::string &html) {
+    const size_t t = find_tag(html, "title", 0);
+    if (t == std::string::npos) return "";
+    const size_t te = find_tag(html, "title", t, true);
+    return label_of(text_of(html.substr(t, te == std::string::npos ? 300 : te - t), true));
+}
+
 std::string html_text(const std::string &html) {
     // The article alone where the page marks it (<main>), under the page's
     // title, and without menus and sidebars: on a long page those would
@@ -633,6 +921,18 @@ std::string html_text(const std::string &html) {
     return text.size() >= 200 || text.size() * 2 >= whole.size() ? text : whole;
 }
 
+std::vector<std::string> page_headers() {
+    const char *as = getenv("TS5_BROWSER_AGENT");
+    if (as && std::string(as) == "own") return {"Accept: text/html,text/plain;q=0.9,*/*;q=0.5"};
+    // Chrome's on Linux (its version numbers after the first are zeros for
+    // every Chrome). Raise the number with the years.
+    return {"User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 "
+            "Safari/537.36",
+            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language: en-US,en;q=0.9",
+            "Upgrade-Insecure-Requests: 1"};
+}
+
 std::string web_page(const std::string &url, size_t max_chars, std::string &log, bool *failed) {
     auto fail = [&](const std::string &why, const std::string &detail) {
         if (failed) *failed = true;
@@ -644,9 +944,7 @@ std::string web_page(const std::string &url, size_t max_chars, std::string &log,
     const auto t0 = std::chrono::steady_clock::now();
     HttpResponse resp;
     std::string err;
-    const bool ok = http_get(url, {"User-Agent: Mozilla/5.0 (X11; Linux x86_64) TokenStation",
-                                   "Accept: text/html,text/plain;q=0.9,*/*;q=0.5"},
-                             resp, err, 2u << 20, 20);
+    const bool ok = http_get(url, page_headers(), resp, err, 2u << 20, 20);
     char took[32];
     snprintf(took, sizeof took, "%.1f s",
              std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());

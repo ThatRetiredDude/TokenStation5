@@ -26,6 +26,10 @@ fake say that it searches, as ts5 does while it runs a search itself
 failed), and then answer. FAKE_REQUESTS also gets the tools'
 names, "web_search", "tool_choice", the system message and a request for
 a summary whole.
+"browse STEP ;; STEP ..." works the browser tool, a call a turn: open URL,
+click N, type N TEXT (typeonly: without Enter), more, back; in place of N,
+"WORDS" finds the number of the link, box or button with those words on the
+page the call before gave.
 FAKE_MODEL names the model. FAKE_HELPER names the helper drafting beside it
 (FAKE_HELPER_CTX: its context; "none": no helper), FAKE_HELPER_NOTE says
 why none is; with neither, /v1/models has no "helper" at all, as an older
@@ -37,6 +41,27 @@ import re
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+def browser_call(step, page):
+    """A step of a "browse" message as a call of the browser tool."""
+    def number(tok):
+        if tok.isdigit():
+            return int(tok)
+        m = (re.search(r'\[(\d+): [^\]]*"%s"' % re.escape(tok), page) or
+             re.search(r'%s\[(\d+)\]' % re.escape(tok), page))
+        return int(m.group(1)) if m else 0
+    m = re.match(r'(\w+)\s*(?:"([^"]*)"|(\S+))?\s*(.*)$', step, re.S)
+    act, tok, rest = m.group(1), m.group(2) or m.group(3) or "", m.group(4)
+    if act == "open":
+        return ("browser_open", {"url": tok})
+    if act == "click":
+        return ("browser_click", {"number": number(tok)})
+    if act == "type":
+        return ("browser_type", {"number": number(tok), "text": rest})
+    if act == "typeonly":
+        return ("browser_type", {"number": number(tok), "text": rest, "enter": False})
+    return ("browser_" + act, {})
 
 MODEL = os.environ.get("FAKE_MODEL", "Qwen3-8B-Q4_K_M")
 N_CTX = int(os.environ.get("FAKE_CTX", "32768"))
@@ -172,6 +197,11 @@ class H(BaseHTTPRequestHandler):
             calls = [("read_web_page", {"url": asked[5:].strip()})]
         elif asked.startswith("remember ") and "remember" in tools and not results:
             calls = [("remember", {"note": asked[9:].strip()})]
+        elif asked.startswith("browse ") and "browser_open" in tools:
+            steps = [c.strip() for c in asked[7:].split(";;")]
+            if len(results) < len(steps):
+                page = next((r for r in reversed(results) if r.startswith("Page: ")), "")
+                calls = [browser_call(steps[len(results)], page)]
         if prompt >= N_CTX:
             # As ts5 serve: refused before anything streams, in OpenAI's words and code.
             self.send(400, {"error": {"message": "This model's maximum context length is %d tokens. However, your "

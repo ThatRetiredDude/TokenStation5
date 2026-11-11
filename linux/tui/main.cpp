@@ -1227,6 +1227,8 @@ ChatRequest chat_request() {
     rq.tools.page = g->cfg.tool_page;
     rq.tools.terminal = g->cfg.tool_terminal;
     rq.tools.memory = g->cfg.tool_memory;
+    rq.tools.browser = g->cfg.tool_browser;
+    rq.tools.browser_program = g->cfg.browser;
     rq.ts5 = !sv.tool_format.empty();
     return rq;
 }
@@ -2358,6 +2360,47 @@ std::vector<SetRow> settings_rows() {
         r.push_back(x);
     }
     {
+        SetRow x{"Tool: browser", c.tool_browser ? "on, asks first" : "off",
+                 c.tool_browser ? "the model opens pages and follows links by itself; a button or typing waits for your yes"
+                                : "the model can't click through web pages"};
+        x.change = [save](int) {
+            g->cfg.tool_browser = !g->cfg.tool_browser;
+            if (!g->cfg.tool_browser) browser_stop();
+            save();
+        };
+        r.push_back(x);
+    }
+    {
+        // Which program shows the pages. A path set with /browser stays
+        // until it is changed here.
+        static const char *const ids[] = {"auto", "obscura", "chromium", "text"};
+        static const char *const names[] = {"Auto", "Obscura", "Chromium", "Text view"};
+        int at = -1;
+        for (int i = 0; i < 4; i++)
+            if (c.browser == ids[i]) at = i;
+        const std::vector<std::string> found = browsers_found();
+        std::string have;
+        for (auto &f : found) have += (have.empty() ? "" : " and ") + f;
+        const std::string none = "no browser is installed, so pages are read as plain text without their scripts";
+        // "Chromium" stands for whichever of its family is here (Chrome, Brave, Edge).
+        const bool has = at == 1   ? std::find(found.begin(), found.end(), "Obscura") != found.end()
+                         : at == 2 ? !found.empty() && found[0] != "Obscura"
+                                   : false;
+        SetRow x{"Browser", at < 0 ? c.browser : names[at],
+                 at == 0   ? (found.empty() ? "Auto: " + none : "Auto: " + found[0] + " (installed: " + have + ")")
+                 : at == 3 ? "ts5's own page reader: light and quick, but a page built by scripts shows little"
+                 : at < 0  ? "a browser program you named with /browser"
+                 : has ? (at == 1 ? std::string("Obscura: light on memory while it waits, but some sites show nothing in it")
+                                  : found[0] + ": the full browser, each page shut in its sandbox")
+                       : std::string(names[at]) + " is not installed: pages are read as plain text until it is"};
+        x.change = [save, at](int d) {
+            g->cfg.browser = ids[((at < 0 ? 0 : at) + d + 4) % 4];
+            browser_stop();
+            save();
+        };
+        r.push_back(x);
+    }
+    {
         const size_t notes = memory_notes().size();
         SetRow x{"Tool: memory", !c.tool_memory ? "off" : notes ? fmt("on, %zu note%s", notes, notes == 1 ? "" : "s") : "on",
                  c.tool_memory ? "notes the model keeps when you say remember; it sees them in every chat (/memory)"
@@ -2771,6 +2814,8 @@ void run_command(const std::string &line) {
             {"pages", "reads a web page you give it a link to", &f.tool_page},
             {"terminal", "runs a command on this machine; you see each one first and say yes or no", &f.tool_terminal},
             {"memory", "keeps notes when you ask it to remember, and sees them in every chat (`/memory`)", &f.tool_memory},
+            {"browser", "opens web pages and clicks through them: links by itself, a button or typing only after your yes "
+                        "(`/browser` picks the program)", &f.tool_browser},
         };
         const size_t sp = arg.find(' ');
         const std::string name = arg.substr(0, sp), to = sp == std::string::npos ? "" : unpad(arg.substr(sp + 1));
@@ -2778,8 +2823,9 @@ void run_command(const std::string &line) {
         if (name == "ask") {
             // Back to a question before each command (after A).
             c.ask_always = false;
+            c.ask_always_browser = false;
             found = true;
-            show_toast("The model asks before each command again", g->th->accent, 3);
+            show_toast("The model asks before each command and each button again", g->th->accent, 3);
         }
         for (const Row &r : rows) {
             if (name != r.name) continue;
@@ -2797,6 +2843,9 @@ void run_command(const std::string &line) {
             for (const Row &r : rows) h += std::string("`") + r.name + "`  **" + (*r.on ? "on" : "off") + "**  " + r.what + "\n";
             if (f.tool_terminal && c.ask_always.load())
                 h += "\nCommands run **without asking** in this chat (you chose that). `/tools ask` brings the question back.";
+            if (f.tool_browser && c.ask_always_browser.load())
+                h += "\nButtons and typing on web pages go **without asking** in this chat (you chose that). `/tools ask` "
+                     "brings the question back.";
             const ServerState sv = server();
             if (f.tool_web && !sv.web_search && sv.wikipedia)
                 h += "\nWithout a web search key the search is **Wikipedia only** (no news, prices or weather). For the "
@@ -2806,6 +2855,32 @@ void run_command(const std::string &line) {
                      "then load the model again.";
             if (sv.online && !sv.model.empty() && sv.tool_format.empty())
                 h += "\nThis server isn't ts5's own: whether its model can call tools is up to it.";
+            chat_note(c, h);
+        }
+    } else if (cmd == "/browser") {
+        // "/browser": which program shows the pages; "/browser chromium" or a path picks one.
+        Config &f = g->cfg;
+        const std::vector<std::string> found = browsers_found();
+        if (!arg.empty()) {
+            if (arg != "auto" && arg != "obscura" && arg != "chromium" && arg != "text" && which(arg).empty()) {
+                show_toast("There is no program " + arg + " here: auto, obscura, chromium, text, or a browser's path", g->th->warn, 5);
+            } else {
+                f.browser = arg;
+                f.save();
+                browser_stop();
+                show_toast("Browser: " + arg + (f.tool_browser ? "" : "  (the tool is off: /tools browser on)"), g->th->accent, 4);
+            }
+        } else {
+            std::string have;
+            for (auto &x : found) have += (have.empty() ? "" : " and ") + x;
+            std::string h = "**The model's browser**  (`/tools browser on` or `off`; `/browser auto`, `obscura`, `chromium`, "
+                            "`text` or a program's path)\n";
+            h += std::string("The tool is **") + (f.tool_browser ? "on" : "off") + "**. Pages are shown with: **" + f.browser + "**.\n";
+            h += found.empty() ? "No browser is installed here, so pages are read as plain text: their scripts don't run, and "
+                                 "only links and simple forms work. Installing Chromium (`sudo apt install chromium`) or "
+                                 "Obscura gives the model the page as you would see it.\n"
+                               : "Installed here: " + have + ". Auto takes " + found[0] + ".\n";
+            h += "The model follows links by itself. Before it presses a button or types into a page, you are asked.";
             chat_note(c, h);
         }
     } else if (cmd == "/memory") {
@@ -3651,7 +3726,10 @@ void tick() {
     // The model asks to run a command while another page is open: say so there.
     if (g->chat.ask.load() == 1 && g->cur != CHAT && g->ask_told != g->chat.ask_t0.load()) {
         g->ask_told = g->chat.ask_t0.load();
-        show_toast("The model wants to run a command: F1 (or /chat) to see it and say yes or no", g->th->warn, 8);
+        show_toast(g->chat.ask_kind.load() == 1
+                       ? "The model wants to do something on a web page: F1 (or /chat) to see it and say yes or no"
+                       : "The model wants to run a command: F1 (or /chat) to see it and say yes or no",
+                   g->th->warn, 8);
     }
     // Every chat is kept (store.h), after each answer.
     if (g->chat.answers != g->answers_saved && !g->chat.busy()) {

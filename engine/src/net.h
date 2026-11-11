@@ -15,6 +15,8 @@ namespace ts5 {
 struct HttpResponse {
     int status = 0;
     std::string body;
+    std::string url;   // http_get: the address the answer came from, after the redirects
+    std::string type;  // http_get: its Content-Type, as sent
 };
 
 // n random bytes from the system (kern.arandom on the PS5, /dev/urandom

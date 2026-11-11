@@ -19,6 +19,7 @@
 //                        https://LANGUAGE.wikipedia.org)
 #pragma once
 #include <string>
+#include <vector>
 
 #include "json.h"
 
@@ -64,6 +65,41 @@ std::string web_search(const std::string &arguments, std::string &log, bool *fai
 std::string web_page(const std::string &url, size_t max_chars, std::string &log, bool *failed = nullptr);
 // The text of an HTML page (web_page's reader).
 std::string html_text(const std::string &html);
+// What a page offers to act on, as a page view numbers it in its text.
+struct PageElement {
+    std::string kind;   // "link", "input" (a text box), "button", "check" (a tick box or one of a choice)
+    std::string label;  // the link's or button's words, a box's hint
+    std::string href;   // a link's address as the page has it
+    std::string name, value, type;  // as a form sends it
+    std::string mark;   // its data-ts5 attribute: how a browser finds it again
+    bool checked = false;
+    int form = -1;      // the form it is in (PageElements::forms), or -1
+};
+struct PageForm {
+    std::string action, method;  // as the page has them ("" and "get" by default)
+    struct Field {
+        std::string name, value;
+        int item;  // the element it is (its index in items), -1 for a hidden field or a list's choice
+    };
+    std::vector<Field> fields;  // in the page's order
+};
+struct PageElements {
+    std::vector<PageElement> items;  // items[n - 1] is the text's [n]
+    std::vector<PageForm> forms;
+};
+// An HTML page as text for a model that acts on it (ts5's browser): as
+// html_text, with every link, text box and button numbered in place ("the
+// Volga[2]", "[4: text box "Search"]", "[5: button "Go"]") and listed in
+// els; the lists of links stay, what the page hides is left out.
+std::string html_view(const std::string &html, PageElements &els);
+// The page's <title>, on one line.
+// The headers a web page is asked for with, by the page reader and the
+// browser's text view: what a person's browser sends (a site is shown the
+// same whoever reads it for them), unless TS5_BROWSER_AGENT=own, when the
+// request goes out under ts5's own name.
+std::vector<std::string> page_headers();
+
+std::string html_title(const std::string &html);
 
 // Why a search failed, in the plain words web_search gave the model ("the
 // Tavily key was refused"); the log line has the raw reason.

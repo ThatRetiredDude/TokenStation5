@@ -130,6 +130,8 @@ void Config::load() {
         else if (k == "tool_web_page") tool_page = v != "0";
         else if (k == "tool_terminal") tool_terminal = v != "0";
         else if (k == "tool_memory") tool_memory = v != "0";
+        else if (k == "tool_browser") tool_browser = v == "1";
+        else if (k == "browser" && !v.empty()) browser = v;
     }
     saved_url = url;
     saved_key = key;
@@ -151,7 +153,7 @@ void Config::save() const {
              "\nmouse=" + (mouse ? "1" : "0") + "\nkeep_model=" + (keep_model ? "1" : "0") + "\nsummarize=" + (summarize ? "1" : "0") +
              "\nweb_search_key=" + web_key + "\ntool_web_search=" + (tool_web ? "1" : "0") + "\ntool_web_page=" +
              (tool_page ? "1" : "0") + "\ntool_terminal=" + (tool_terminal ? "1" : "0") + "\ntool_memory=" +
-             (tool_memory ? "1" : "0") + "\n";
+             (tool_memory ? "1" : "0") + "\ntool_browser=" + (tool_browser ? "1" : "0") + "\nbrowser=" + browser + "\n";
         if (write(fd, s.data(), s.size()) != (ssize_t)s.size()) {
             close(fd);
             return;

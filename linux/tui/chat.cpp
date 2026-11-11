@@ -36,7 +36,8 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/usage", "", "the API's use by app and model (last day and week)"},
         {"/keys", "", "the API keys: names, on or off, last used"},
         {"/think", "on|off|auto", "thinking before answering"},
-        {"/tools", "[NAME on|off]", "the model's tools: search, pages, terminal, memory (each has a switch)"},
+        {"/tools", "[NAME on|off]", "the model's tools: search, pages, terminal, memory, browser (each has a switch)"},
+        {"/browser", "[auto|obscura|chromium|text|PATH]", "the program the model's browser tool shows pages with"},
         {"/memory", "[forget N|clear|TEXT]", "the notes the model keeps between chats: list, remove, or add one"},
         {"/fan", "auto|cool|early|max", "the PS5's fan"},
         {"/theme", "NAME", "colors: Ocean, Neon, Sunset, Forest, Mono"},
@@ -360,7 +361,9 @@ void pending_calls(std::vector<Line> &out, const Chat &c, int owner, size_t at, 
     if (at != owner + done || done >= a.calls.size()) return;
     const bool live = c.running && (size_t)owner + done + 1 == c.msgs.size();  // this answer is the one being worked on
     for (size_t k = done; k < a.calls.size(); k++) {
-        wrap(out, {{tool_call_line(a.calls[k].name, a.calls[k].args), Style(t.accent2)}}, w, 2, "⚙ ",
+        // (A browser call that waits for a yes shows what it would do in words.)
+        const bool page = live && k == done && c.ask.load() == 1 && c.ask_kind.load() == 1;
+        wrap(out, {{page ? c.ask_cmd : tool_call_line(a.calls[k].name, a.calls[k].args), Style(t.accent2)}}, w, 2, "⚙ ",
              Style(t.accent2, kDefault, BOLD), "  ");
         Line st;
         if (!live) {
@@ -369,9 +372,11 @@ void pending_calls(std::vector<Line> &out, const Chat &c, int owner, size_t at, 
             st.add("    next", Style(t.dim, kDefault, ITALIC));
         } else if (c.ask.load() == 1) {
             // ‹ Run it ›  Every command in this chat  No
-            static const char *const pick[] = {"Run it", "Every command in this chat", "No"};
+            static const char *const run[] = {"Run it", "Every command in this chat", "No"};
+            static const char *const act[] = {"Do it", "Everything on pages in this chat", "No"};
+            const char *const *pick = page ? act : run;
             const int on = c.ask_pick.load();
-            st.add("    Run it?  ", Style(t.warn, kDefault, BOLD));
+            st.add(page ? "    Do it?  " : "    Run it?  ", Style(t.warn, kDefault, BOLD));
             for (int p = 0; p < 3; p++) {
                 if (p == on) st.add(std::string("‹ ") + pick[p] + " ›", Style(t.bg, t.warn, BOLD));
                 else st.add(std::string("  ") + pick[p] + "  ", Style(t.fg));
@@ -830,7 +835,9 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
             if (c.ask.load() == 1) {
                 // The model wants to run a command: it waits for a word.
                 x = s.put(x, y1, "?", Style(t.warn, kDefault, BOLD));
-                x = s.put(x + 1, y1, "the model wants to run a command", Style(t.warn, kDefault, BOLD));
+                x = s.put(x + 1, y1, c.ask_kind.load() == 1 ? "the model wants to do something on a web page"
+                                                            : "the model wants to run a command",
+                          Style(t.warn, kDefault, BOLD));
                 x = s.put(x, y1, "  ←→ choose · Enter · Esc no", Style(t.dim));
             } else {
                 x = s.put(x, y1, spin[(int)(now_s() * 12) % 10], Style(t.accent2, kDefault, BOLD));
@@ -873,7 +880,9 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
     box(s, 0, iy, w, ih, Style(c.busy() ? t.dim : t.accent), Style(t.fg, t.panel));
     s.put(2, iy + 1, "ts5>", Style(c.busy() ? t.dim : t.accent2, t.panel, BOLD));
     if (c.input.empty()) {
-        const char *ph = c.ask.load() == 1 ? "Run the command above? ←→ choose, Enter · Esc says no · or type the next message"
+        const char *ph = c.ask.load() == 1 ? (c.ask_kind.load() == 1
+                                                  ? "Do what it says above? ←→ choose, Enter · Esc says no · or type the next message"
+                                                  : "Run the command above? ←→ choose, Enter · Esc says no · or type the next message")
                          : c.busy()        ? "answering… type the next message, Enter queues it · Esc stops"
                                            : "Message TokenStation5…   / for commands, ↑ history";
         s.put(7, iy + 1, fit(ph, w - 9), Style(mix(t.dim, t.panel, 0.25), t.panel, ITALIC));
@@ -1169,19 +1178,32 @@ void stream_answer(Chat *c, const ChatRequest &rq, const std::string &body) {
 // A tool call of the model's, run. A command waits for the user's word
 // first (Enter, A for every command of this chat, Esc), which chat_key gives.
 ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
-    const std::string cmd = tool_command(u.name, u.args);
-    if (u.name == "run_command" && rq.tools.terminal && !cmd.empty() && !c->ask_always.load()) {
+    std::string cmd = tool_command(u.name, u.args);
+    const bool command = u.name == "run_command" && rq.tools.terminal && !cmd.empty();
+    // What the browser would do beyond reading: asked the same way.
+    if (!command) cmd = c->ask_always_browser.load() ? "" : browser_question(u.name, u.args, rq.tools, c->cancel);
+    if (command ? !c->ask_always.load() : !cmd.empty()) {
         {
             std::lock_guard<std::mutex> l(c->mu);
             c->ask_cmd = cmd;
         }
+        c->ask_kind = command ? 0 : 1;
         c->ask_t0 = now_s();
         c->ask_pick = 0;
         c->ask = 1;
         while (c->ask.load() == 1 && !c->cancel.load()) usleep(30000);
         const int said = c->ask.exchange(0);
         if (c->cancel.load()) return tool_stopped();
-        if (said != 2) return tool_refused();
+        if (said != 2) {
+            ToolResult t = tool_refused();
+            if (!command) {
+                t.head = "you said no: it wasn't done";
+                t.text = "The user said no to this, so it was not done on the page. Nothing is wrong with the page or "
+                         "the browser. Do not try it again or in another way now: tell the user it was not done and "
+                         "ask what they would like instead.";
+            }
+            return t;
+        }
     }
     return run_tool(u.name, u.args, rq.tools, c->cancel);
 }
@@ -1497,6 +1519,7 @@ void complete(Chat &c, const ChatRequest &rq) {
         else if (cmd == "/tools") pool = {"search", "pages", "terminal", "memory", "search on", "search off", "pages on",
                                           "pages off", "terminal on", "terminal off", "memory on", "memory off", "ask"};
         else if (cmd == "/memory") pool = {"forget", "clear"};
+        else if (cmd == "/browser") pool = {"auto", "obscura", "chromium", "text"};
         else if (cmd == "/fan") pool = {"auto", "cool", "early", "max"};
         else if (cmd == "/theme")
             for (auto &t : themes()) pool.push_back(t.name);
@@ -1749,6 +1772,7 @@ void chat_stop(Chat &c) {
 
 void chat_new(Chat &c) {
     chat_stop(c);
+    browser_stop();  // the page the old chat had open goes with it
     if (c.before_clear) c.before_clear(c);
     std::lock_guard<std::mutex> l(c.mu);
     c.msgs.clear();
@@ -1760,6 +1784,7 @@ void chat_new(Chat &c) {
     c.queue_held = false;
     c.ask = 0;
     c.ask_always = false;
+    c.ask_always_browser = false;
     c.memory.clear();
     c.memory_set = false;
 }
@@ -1957,7 +1982,7 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
             const int pick = c.ask_pick.load();
             // Enter pressed as the question came up was meant for something else: it runs nothing.
             if (pick != 2 && now_s() - c.ask_t0.load() < 0.7) return CHAT_NONE;
-            if (pick == 1) c.ask_always = true;
+            if (pick == 1) (c.ask_kind.load() == 1 ? c.ask_always_browser : c.ask_always) = true;
             c.ask = pick == 2 ? 3 : 2;
             return CHAT_NONE;
         }

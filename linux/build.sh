@@ -155,7 +155,7 @@ for src in "$root"/linux/tui/*.cpp; do
     o="$out/obj/own/tui_$(basename "$src" .cpp).o"
     run "$CXX" "${cxxflags[@]}" -I "$root/linux/tui" -c "$src" -o "$o"
 done
-for src in "$root"/engine/src/{main,cli}.cpp; do
+for src in "$root"/engine/src/{main,cli,browser}.cpp; do
     o="$out/obj/own/cli_$(basename "$src" .cpp).o"
     run "$CXX" "${cxxflags[@]}" -c "$src" -o "$o"
 done
@@ -180,7 +180,7 @@ ar_if_stale "$out/obj/libts5wg.a" "${wgobjects[@]}"
     "$out/obj/own/font_data.o" "$out/obj/own/lexicon_data.o" \
     "$out/obj/libts5wg.a" "$out/obj/libts5speech.a" "$out/obj/libts5mbedtls.a" \
     $(pkg-config --libs sdl2) -ldl
-"$CXX" "${opt[@]}" -o "$out/ts5" "$out/obj/own/cli_main.o" "$out/obj/own/cli_cli.o" "${engine_objects[@]}" \
+"$CXX" "${opt[@]}" -o "$out/ts5" "$out/obj/own/cli_main.o" "$out/obj/own/cli_cli.o" "$out/obj/own/cli_browser.o" "${engine_objects[@]}" \
     "$out/obj/libts5mbedtls.a" -ldl
 "$CXX" "${opt[@]}" -o "$out/ts5-tui" "$out"/obj/own/tui_*.o
 echo "build: $out/tokenstation, $out/ts5 and $out/ts5-tui ($version, tuned for $march)"

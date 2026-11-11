@@ -1535,6 +1535,8 @@ for t in Qwen-Qwen2.5-7B-Instruct Qwen-Qwen3-0.6B meta-llama-Llama-3.1-8B-Instru
     [ -s "$f" ] || curl -fsSL -o "$f" "https://raw.githubusercontent.com/ggml-org/llama.cpp/$rev/models/templates/$t.jinja"
 done
 python3 "$here/tools_test.py" "$ts5" "$work/qwen2-Q8_0.gguf" "$work"
+echo "== ts5 browser: a page as text with its links, boxes and buttons numbered, in the text view and through a Chromium that is installed"
+python3 "$here/browser_test.py" "$ts5" "${TS5_TEST_BROWSER:-auto}"
 echo "== the PS5 title's main on this machine (ps5/host-test.sh)"
 "$engine/../ps5/host-test.sh" "$work/qwen2-Q4_0.gguf"
 

@@ -260,10 +260,10 @@ ts5-tui --url http://ps5.local:8081  # another one
   engine in its environment, never on a command line. For the API-only
   service, add `TAVILY_API_KEY=tvly-...` to `/etc/default/tokenstation`
   and restart it.
-- **Tools**: besides the web search, the model can read a web page, run a
-  command on this machine and keep notes between chats. Each has its own
-  switch (Settings → Tool: search, pages, terminal, memory; or
-  `/tools terminal off`), and `/tools` lists them.
+- **Tools**: besides the web search, the model can read a web page, use
+  a browser, run a command on this machine and keep notes between chats.
+  Each has its own switch (Settings → Tool: search, pages, terminal,
+  browser, memory; or `/tools terminal off`), and `/tools` lists them.
   - **Web pages**: give it a link ("read https://... and sum it up") and
     it gets the page as text: the article where the page marks one,
     without the site's menus and sidebars, the first 8,000 characters.
@@ -277,6 +277,55 @@ ts5-tui --url http://ps5.local:8081  # another one
     most; Esc stops one that is running. The model gets its output and
     exit code (long output: the start and the end). Under each call a
     line says how it went; a click opens what the model got.
+  - **Browser** (off until you switch it on: Settings → Tool: browser, or
+    `/tools browser on`): the model opens a page and gets it as text with
+    every link, text box and button numbered (`the Volga[3]`,
+    `[4: text box "Search"]`, `[5: button "Go"]`), and acts on the
+    numbers: it follows a link, types into a box, presses a button, reads
+    on down a long page, goes back. Links it follows by itself. Before it
+    presses a button or types into a page you see what it is about to do,
+    as with a command: **Enter** does it, **Esc** doesn't, **→** moves to
+    "everything on pages in this chat" or "no". The same question comes
+    before it opens an address on this machine or your home network.
+    Password boxes are never offered to it. While the browser is on it
+    stands in for the plain page reader.
+
+    Settings → Browser (or `/browser`) says what shows the pages:
+    - **Auto**: Chromium (or Chrome, Brave, Edge) if one is installed,
+      else Obscura, else the text view. `sudo apt install chromium`
+      installs one; on Debian 13 `chromium-headless-shell` is the smaller
+      package and is enough.
+    - **Chromium**: the full browser, without a window, each page shut in
+      its sandbox. On a PS5 beside a loaded 14B model it took 155 MiB
+      waiting and up to 494 MiB on the heaviest page, gave the memory back
+      between pages, and the model wrote as fast as without it.
+    - **Obscura** ([github.com/h4ckf0r0day/obscura](https://github.com/h4ckf0r0day/obscura)):
+      the light one, 23 MiB waiting and up to 430 MiB on heavy pages. It
+      is young: some sites show nothing in it (YouTube, in our test), and
+      it has no sandbox. Put its `obscura` program on your PATH or in
+      `~/.local/bin`.
+    - **Text view**: ts5's own page reader, nothing to install. No scripts
+      run, so a page built by scripts shows little; links and search forms
+      work.
+    - `/browser PATH` names any other program that speaks Chrome's
+      debugging protocol.
+
+    The browser is the model's own: a fresh profile under
+    `~/.cache/tokenstation` with none of your logins or history, removed
+    when it stops. It stops with ts5-tui, with a new chat, and after ten
+    minutes unused (it starts again by itself). It runs on the processor
+    and leaves the GPU's memory to the model. `TS5_BROWSER_FLAGS` adds
+    flags to the browser's command line.
+
+    To a site it is the Chrome it is: a Chromium without a window would
+    call itself "HeadlessChrome", which some sites turn away unread, so
+    ts5 has it send what the same Chrome sends with a window, and the
+    text view and the page reader ask for a page with a browser's headers
+    too. Nothing names ts5 or a model. `TS5_BROWSER_AGENT=own` in ts5-tui's
+    environment leaves the browser its own words and sends the text
+    view's requests as "TokenStation5". That is all ts5 does about it: a
+    site that still tests for a person (a captcha, a "checking your
+    browser" page) is left closed, and the model says so.
   - **Memory**: tell it "remember that I write Rust" and it keeps a note.
     The model reads its notes at the start of every chat. `/memory` lists
     them, `/memory forget N` removes one, `/memory clear` all of them,

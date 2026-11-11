@@ -101,6 +101,11 @@ struct Chat {
     std::atomic<int> ask_pick{0};   // the answer ←→ is on: 0 run it, 1 every command of this chat, 2 no
     std::string ask_cmd;
     std::atomic<bool> ask_always{false};
+    // The same question for something the model wants to do on a web page
+    // (press a button, type): ask_kind 1, ask_cmd says what, and "every one
+    // of this chat" is a choice of its own.
+    std::atomic<int> ask_kind{0};
+    std::atomic<bool> ask_always_browser{false};
     std::string command;  // a slash command for the app to run
     std::vector<std::string> cands;  // Tab's candidates
     int cand_i = -1;

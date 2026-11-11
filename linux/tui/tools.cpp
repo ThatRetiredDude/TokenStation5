@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 
 #include "app.h"
 #include "json.h"
@@ -28,6 +29,23 @@ std::string tool_json(const char *name, const char *what, const char *arg, const
     return std::string("{\"type\":\"function\",\"function\":{\"name\":\"") + name + "\",\"description\":" +
            ts5::json_escape(what) + ",\"parameters\":{\"type\":\"object\",\"properties\":{\"" + arg +
            "\":{\"type\":\"string\",\"description\":" + ts5::json_escape(arg_what) + "}},\"required\":[\"" + arg + "\"]}}}";
+}
+
+// A tool with several arguments, or none: each {name, type, what it is}; a
+// name that ends with '?' may be left out of a call.
+std::string tool_json_n(const char *name, const char *what, const std::vector<std::vector<std::string>> &params) {
+    std::string props, required;
+    for (auto &p : params) {
+        std::string n = p[0];
+        const bool optional = !n.empty() && n.back() == '?';
+        if (optional) n.pop_back();
+        props += (props.empty() ? "" : ",") + ts5::json_escape(n) + ":{\"type\":" + ts5::json_escape(p[1]) +
+                 ",\"description\":" + ts5::json_escape(p[2]) + "}";
+        if (!optional) required += (required.empty() ? "" : ",") + ts5::json_escape(n);
+    }
+    return std::string("{\"type\":\"function\",\"function\":{\"name\":\"") + name + "\",\"description\":" +
+           ts5::json_escape(what) + ",\"parameters\":{\"type\":\"object\",\"properties\":{" + props +
+           "},\"required\":[" + required + "]}}}";
 }
 
 // Text a model can read: no escape sequences (colors, cursor moves), no
@@ -264,6 +282,210 @@ ToolResult read_page(const std::string &url, const std::atomic<bool> &cancel) {
     return t;
 }
 
+std::string one_line(std::string s, size_t max);
+std::string arg_of(const std::string &args, const char *name);
+
+// ---- The browser: `ts5 browser` (engine/src/browser.h), kept running
+// between calls, since it holds the page that is open. One request a line
+// goes to it and one answer a line comes back.
+
+struct BrowserProc {
+    std::mutex mu;
+    pid_t pid = -1;
+    int to = -1, from = -1;
+    std::string program;  // the Settings choice it was started with
+    std::string buf;      // what it wrote after its last whole line
+} g_browser;
+
+// (Under g_browser.mu.) Its input closed, it ends, and its browser with it.
+void browser_end(BrowserProc &b) {
+    if (b.to >= 0) close(b.to);
+    if (b.from >= 0) close(b.from);
+    b.to = b.from = -1;
+    if (b.pid > 0) {
+        const double until = now_s() + 3;
+        int st;
+        while (waitpid(b.pid, &st, WNOHANG) == 0) {
+            if (now_s() > until) {
+                kill(b.pid, SIGKILL);
+                waitpid(b.pid, &st, 0);
+                break;
+            }
+            usleep(20000);
+        }
+    }
+    b.pid = -1;
+    b.buf.clear();
+}
+
+bool browser_begin(BrowserProc &b, const std::string &choice, std::string &why) {
+    const std::string ts5 = which("ts5");
+    if (ts5.empty()) {
+        why = "the ts5 program is not installed on this computer";
+        return false;
+    }
+    std::vector<std::string> args = {ts5, "browser", "--program"};
+    if (choice == "obscura" || choice == "chromium") args.insert(args.end(), {"auto", "--kind", choice});
+    else args.push_back(choice.empty() ? "auto" : choice);
+    int in[2], out[2];
+    if (pipe(in) != 0) return why = "no pipe", false;
+    if (pipe(out) != 0) {
+        close(in[0]), close(in[1]);
+        return why = "no pipe", false;
+    }
+    const pid_t pid = fork();
+    if (pid < 0) {
+        for (int fd : {in[0], in[1], out[0], out[1]}) close(fd);
+        return why = "no new process", false;
+    }
+    if (pid == 0) {
+        // (It ends when its input closes, which ts5-tui's end does however
+        // it comes. Not a parent-death signal: that goes by the thread that
+        // started it, and an answer's thread ends with the answer.)
+        setsid();
+        dup2(in[0], 0);
+        dup2(out[1], 1);
+        const int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) dup2(devnull, 2);
+        for (int fd : {in[0], in[1], out[0], out[1]}) close(fd);
+        signal(SIGPIPE, SIG_DFL);
+        std::vector<char *> argv;
+        for (auto &a : args) argv.push_back(&a[0]);
+        argv.push_back(nullptr);
+        execv(argv[0], argv.data());
+        _exit(127);
+    }
+    close(in[0]);
+    close(out[1]);
+    fcntl(in[1], F_SETFD, FD_CLOEXEC);
+    fcntl(out[0], F_SETFD, FD_CLOEXEC);
+    b.pid = pid;
+    b.to = in[1];
+    b.from = out[0];
+    b.program = choice;
+    b.buf.clear();
+    return true;
+}
+
+// One request and its answer. false: there is none (why), and the browser
+// is ended: stopped by the user, too slow, or gone.
+bool browser_ask(const ToolSwitches &s, const std::string &request, ts5::Json &answer, std::string &why,
+                 const std::atomic<bool> &cancel, double limit) {
+    BrowserProc &b = g_browser;
+    std::lock_guard<std::mutex> l(b.mu);
+    if (b.pid > 0 && b.program != s.browser_program) browser_end(b);
+    if (b.pid <= 0 && !browser_begin(b, s.browser_program, why)) return false;
+    const std::string line = request + "\n";
+    if (write(b.to, line.data(), line.size()) != (ssize_t)line.size()) {
+        browser_end(b);
+        why = "the browser's program stopped";
+        return false;
+    }
+    const double t0 = now_s();
+    for (;;) {
+        const size_t nl = b.buf.find('\n');
+        if (nl != std::string::npos) {
+            const std::string got = b.buf.substr(0, nl);
+            b.buf.erase(0, nl + 1);
+            if (ts5::Json::parse(got, answer)) return true;
+            continue;
+        }
+        if (cancel.load()) {
+            browser_end(b);
+            why = "stopped";
+            return false;
+        }
+        if (now_s() - t0 > limit) {
+            browser_end(b);
+            why = fmt("the browser took more than %.0f s", limit);
+            return false;
+        }
+        pollfd p{b.from, POLLIN, 0};
+        if (poll(&p, 1, 100) <= 0) continue;
+        char chunk[65536];
+        const ssize_t n = read(b.from, chunk, sizeof chunk);
+        if (n <= 0) {
+            browser_end(b);
+            why = "the browser's program stopped";
+            return false;
+        }
+        b.buf.append(chunk, (size_t)n);
+    }
+}
+
+// The number a call names: {"number": 5}, or "5", "[5]", and under the
+// names a model may pick for it.
+int number_of(const ts5::Json &j) {
+    auto read = [](const ts5::Json &v) {
+        if (v.type == ts5::Json::NUM) return (int)v.n;
+        if (v.type != ts5::Json::STR) return 0;
+        size_t i = 0;
+        while (i < v.s.size() && !isdigit((unsigned char)v.s[i])) i++;
+        return i < v.s.size() ? atoi(v.s.c_str() + i) : 0;
+    };
+    for (const char *k : {"number", "n", "id", "index", "link", "button", "box"})
+        if (const int n = read(j[k])) return n;
+    for (auto &kv : j.o)
+        if (kv.second.type == ts5::Json::NUM) return (int)kv.second.n;
+    return 0;
+}
+
+bool enter_of(const ts5::Json &j) {
+    const ts5::Json &v = j["enter"];
+    if (v.type == ts5::Json::BOOL) return v.b;
+    if (v.type == ts5::Json::STR) return v.s != "false" && v.s != "no" && v.s != "0";
+    return true;
+}
+
+bool is_browser_tool(const std::string &name) {
+    return name == "browser_open" || name == "browser_click" || name == "browser_type" || name == "browser_more" ||
+           name == "browser_back";
+}
+
+// A call as a request to `ts5 browser`; what: the question about it instead.
+std::string browser_request(const std::string &name, const std::string &args, bool what) {
+    ts5::Json j;
+    ts5::Json::parse(args, j);
+    const std::string act = name.substr(strlen("browser_"));
+    std::string r = what ? "{\"do\":\"what\",\"act\":" + ts5::json_escape(act) : "{\"do\":" + ts5::json_escape(act);
+    if (act == "open") r += ",\"url\":" + ts5::json_escape(arg_of(args, "url"));
+    if (act == "click" || act == "type") r += ",\"n\":" + std::to_string(number_of(j));
+    if (act == "type") r += ",\"text\":" + ts5::json_escape(j["text"].str()) + ",\"enter\":" + (enter_of(j) ? "true" : "false");
+    return r + "}";
+}
+
+ToolResult browser_call(const std::string &name, const std::string &args, const ToolSwitches &s,
+                        const std::atomic<bool> &cancel) {
+    ToolResult t;
+    const double t0 = now_s();
+    ts5::Json a;
+    std::string why;
+    // A browser's first page waits for the program to start, and a slow
+    // site for its scripts.
+    if (!browser_ask(s, browser_request(name, args, false), a, why, cancel, 150)) {
+        if (why == "stopped") return tool_stopped();
+        t.ok = false;
+        t.head = why;
+        t.text = "The browser didn't answer: " + why + ". The page that was open is closed; open it again with "
+                 "browser_open if it is still needed.";
+        return t;
+    }
+    t.ok = a["ok"].boolean(false);
+    t.text = clean(a["text"].str());
+    if (!t.ok) {
+        t.head = one_line(t.text.substr(0, t.text.find('\n')), 90);
+    } else if (name == "browser_open" || name == "browser_click" || name == "browser_back" ||
+               t.text.compare(0, 6, "Page: ") == 0) {
+        const std::string title = one_line(a["title"].str(), 50), mode = a["mode"].str();
+        t.head = (title.empty() ? one_line(a["url"].str(), 50) : title) +
+                 fmt(" · %s characters · %.1f s", with_commas((int)t.text.size()).c_str(), now_s() - t0) +
+                 (mode == "text" ? " · text view" : "");
+    } else {
+        t.head = one_line(t.text, 90);
+    }
+    return t;
+}
+
 std::string one_line(std::string s, size_t max) {
     for (char &c : s)
         if (c == '\n' || c == '\r' || c == '\t') c = ' ';
@@ -318,7 +540,30 @@ std::string tools_json(const ToolSwitches &s) {
                       "is asked before it runs. Use it when the user asks you to look at files, run a program or "
                       "check the system. One command per call; no programs that wait for typing.",
                       "command", "The command line, as typed into a shell."));
-    if (s.page)
+    if (s.browser) {
+        add(tool_json("browser_open",
+                      "Open a web page in the browser. You get the page as text with its links, text boxes and "
+                      "buttons numbered, like Volga[3], [4: text box \"Search\"] and [5: button \"Go\"]. Use it to "
+                      "read a page the user names, to look something up on a site, or to do something on a site.",
+                      "url", "The page's full address, starting with https:// or http://."));
+        add(tool_json_n("browser_click",
+                        "On the page that is open in the browser, follow the link or press the button with this "
+                        "number. You get the page that results.",
+                        {{"number", "integer", "The number in the square brackets, such as 3 for Volga[3]."}}));
+        add(tool_json_n("browser_type",
+                        "On the page that is open in the browser, write text into the text box with this number "
+                        "and press Enter, which sends a search box or a form. You get the page that results.",
+                        {{"number", "integer", "The text box's number, such as 4 for [4: text box \"Search\"]."},
+                         {"text", "string", "The text to write into the box."},
+                         {"enter?", "boolean",
+                          "false to only write the text, when the form has more boxes to fill before it is sent."}}));
+        add(tool_json_n("browser_more", "Show the next part of the page that is open in the browser, when it says "
+                                        "the page goes on.", {}));
+        add(tool_json_n("browser_back", "Go back to the page that was open in the browser before this one.", {}));
+    }
+    // (With the browser on, it is the one way to read a page: two would be
+    // one too many for a small model to choose between.)
+    if (s.page && !s.browser)
         add(tool_json("read_web_page",
                       "Read a web page and get its text. Use it when the user gives a link or names a page to "
                       "read. It does not search.",
@@ -386,7 +631,46 @@ std::string tool_command(const std::string &name, const std::string &args) {
     return name == "run_command" ? arg_of(args, "command") : "";
 }
 
+std::string browser_question(const std::string &name, const std::string &args, const ToolSwitches &s,
+                             const std::atomic<bool> &cancel) {
+    if (!s.browser || !is_browser_tool(name) || name == "browser_more" || name == "browser_back") return "";
+    ts5::Json a;
+    std::string why;
+    if (!browser_ask(s, browser_request(name, args, true), a, why, cancel, 20)) return "";
+    return a["asks"].boolean(false) ? one_line(a["line"].str(), 400) : "";
+}
+
+void browser_stop() {
+    std::lock_guard<std::mutex> l(g_browser.mu);
+    browser_end(g_browser);
+}
+
+std::vector<std::string> browsers_found() {
+    // In the order `ts5 browser` takes them (engine/src/browser.cpp).
+    std::vector<std::string> out;
+    for (const char *name : {"chromium", "chromium-browser", "chromium-headless-shell", "chrome-headless-shell",
+                             "headless_shell", "google-chrome", "google-chrome-stable", "chrome", "brave-browser",
+                             "microsoft-edge"})
+        if (!which(name).empty()) {
+            out.push_back(name == std::string("brave-browser") ? "Brave" : name == std::string("microsoft-edge") ? "Edge"
+                          : std::string(name).find("google") != std::string::npos ? "Chrome" : "Chromium");
+            break;
+        }
+    if (!which("obscura").empty()) out.push_back("Obscura");
+    return out;
+}
+
 std::string tool_call_line(const std::string &name, const std::string &args) {
+    if (is_browser_tool(name)) {
+        ts5::Json j;
+        ts5::Json::parse(args, j);
+        const std::string n = "[" + std::to_string(number_of(j)) + "]";
+        if (name == "browser_open") return "opens " + one_line(arg_of(args, "url"), 300);
+        if (name == "browser_click") return "clicks " + n + " on the page";
+        if (name == "browser_type")
+            return "types \"" + one_line(j["text"].str(), 200) + "\" into " + n + (enter_of(j) ? " and presses Enter" : "");
+        return name == "browser_more" ? "reads on down the page" : "goes back a page";
+    }
     if (name == "run_command") return "$ " + one_line(arg_of(args, "command"), 400);
     if (name == "read_web_page") return "reads " + one_line(arg_of(args, "url"), 300);
     if (name == "remember") return "remembers: " + one_line(arg_of(args, "note"), 300);
@@ -416,9 +700,9 @@ ToolResult tool_stopped() {
 ToolResult run_tool(const std::string &name, const std::string &args, const ToolSwitches &s,
                     const std::atomic<bool> &cancel) {
     ToolResult t;
-    const bool known = name == "run_command" || name == "read_web_page" || name == "remember";
+    const bool known = name == "run_command" || name == "read_web_page" || name == "remember" || is_browser_tool(name);
     const bool on = (name == "run_command" && s.terminal) || (name == "read_web_page" && s.page) ||
-                    (name == "remember" && s.memory);
+                    (name == "remember" && s.memory) || (is_browser_tool(name) && s.browser);
     if (!known || !on) {
         t.ok = false;
         t.head = known ? "this tool is switched off" : "no such tool";
@@ -426,6 +710,7 @@ ToolResult run_tool(const std::string &name, const std::string &args, const Tool
                        : "There is no tool named " + name + " here. Answer without it.";
         return t;
     }
+    if (is_browser_tool(name)) return browser_call(name, args, s, cancel);
     if (name == "run_command") return run_command(arg_of(args, "command"), cancel);
     if (name == "read_web_page") return read_page(arg_of(args, "url"), cancel);
     const std::string note = arg_of(args, "note");
