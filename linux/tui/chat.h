@@ -9,13 +9,20 @@
 #include <vector>
 
 #include "app.h"
+#include "tools.h"
 
 namespace tui {
 
+// A tool call of the model's: its id, the tool's name, the arguments as JSON text.
+struct ToolUse {
+    std::string id, name, args;
+};
+
 struct Msg {
-    // user, assistant, note (ts5-tui's own, never sent), or summary: the
+    // user, assistant, note (ts5-tui's own, never sent), summary: the
     // model's summary of the chat before it, which it goes on from in place
-    // of the messages it stands for (chat_summarize).
+    // of the messages it stands for (chat_summarize), or tool: what a tool
+    // call of the assistant message before it gave back.
     std::string role;
     std::string content, reasoning, error, model;
     bool done = false, stopped = false;
@@ -30,6 +37,13 @@ struct Msg {
     // gets as they were, the chat's tokens before it and (roughly) after,
     // and why it was written (0 nearly full, 1 full, 2 asked for).
     int keep_from = -1, sum_before = 0, sum_after = 0, sum_why = 0;
+    // An assistant turn's tool calls: ts5-tui runs each, adds a tool message
+    // with what it gave back, and the model goes on in a new assistant turn.
+    std::vector<ToolUse> calls;
+    // A tool message: its call's id, the tool's name, one line for the
+    // screen, and whether it worked. Its content is what the model got back.
+    std::string call_id, tool, head;
+    bool tool_ok = true;
 };
 
 // Where a click does something, on the chat as last drawn.
@@ -62,6 +76,22 @@ struct Chat {
     // Enter (go on) or Esc (drop them).
     std::vector<std::string> queued;
     bool queue_held = false;
+    // A command the model wants to run (run_command) waits for the user's
+    // answer: ask 1 waiting, 2 run it, 3 refused; ask_always: every command
+    // of this chat runs without asking again. ask_cmd under mu. The answer
+    // is picked with ←→ and Enter (Esc: no), never with a letter: a message
+    // typed while the question shows must not answer it.
+    // The notes the model reads at the top of this chat, as they were when
+    // the chat began (or when /memory last changed them): a note the model
+    // saves while chatting isn't put there, or the whole chat would be read
+    // again for it. Under mu.
+    std::string memory;
+    bool memory_set = false;
+    std::atomic<int> ask{0};
+    std::atomic<double> ask_t0{0};  // when it was asked: a key just then isn't an answer
+    std::atomic<int> ask_pick{0};   // the answer ←→ is on: 0 run it, 1 every command of this chat, 2 no
+    std::string ask_cmd;
+    std::atomic<bool> ask_always{false};
     std::string command;  // a slash command for the app to run
     std::vector<std::string> cands;  // Tab's candidates
     int cand_i = -1;
@@ -88,6 +118,8 @@ struct ChatRequest {
     int max_tokens = 0;
     int n_ctx = 0;        // the loaded model's context, 0 unknown
     bool summarize = true;  // a chat that fills up is summarized and goes on (Settings)
+    ToolSwitches tools;     // the tools the model is given (Settings)
+    bool ts5 = false;       // the server is ts5: it takes "web_search"
     std::vector<std::string> model_names;  // for /model's completion
     std::vector<std::string> catalog_names;  // for /download's
 };

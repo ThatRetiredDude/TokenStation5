@@ -114,6 +114,7 @@ struct App {
     std::string dl_dir;
     std::vector<SavedChat> chat_list;  // the last /chats
     int answers_saved = 0;
+    double ask_told = 0;  // the run-it question a toast on another page was shown for
     std::string load_target;  // what's loading, until /v1/models says so
     double load_t0 = 0;
     bool load_again = false, load_down = false;  // the loaded model again: wait for the old server to go first
@@ -1220,6 +1221,11 @@ ChatRequest chat_request() {
     rq.max_tokens = g->cfg.max_tokens;
     rq.n_ctx = sv.n_ctx;
     rq.summarize = g->cfg.summarize;
+    rq.tools.web = g->cfg.tool_web;
+    rq.tools.page = g->cfg.tool_page;
+    rq.tools.terminal = g->cfg.tool_terminal;
+    rq.tools.memory = g->cfg.tool_memory;
+    rq.ts5 = !sv.tool_format.empty();
     return rq;
 }
 
@@ -2313,6 +2319,49 @@ std::vector<SetRow> settings_rows() {
         };
         r.push_back(x);
     }
+    // The tools the model can use in a chat, a switch each.
+    {
+        const ServerState sv = server();
+        SetRow x{"Tool: search", !c.tool_web ? "off" : sv.web_search ? "on" : "on, needs the key",
+                 !c.tool_web       ? "the model never searches the web"
+                 : sv.web_search   ? "the model searches the web when a question needs it"
+                                   : "it searches once a web search key is set and the model is loaded again"};
+        x.change = [save](int) {
+            g->cfg.tool_web = !g->cfg.tool_web;
+            save();
+        };
+        r.push_back(x);
+    }
+    {
+        SetRow x{"Tool: pages", c.tool_page ? "on" : "off",
+                 c.tool_page ? "the model can read a page you give it a link to" : "the model can't open links"};
+        x.change = [save](int) {
+            g->cfg.tool_page = !g->cfg.tool_page;
+            save();
+        };
+        r.push_back(x);
+    }
+    {
+        SetRow x{"Tool: terminal", c.tool_terminal ? "on, asks first" : "off",
+                 c.tool_terminal ? "the model can run a command on this machine; you see each one and say yes or no"
+                                 : "the model can't run commands"};
+        x.change = [save](int) {
+            g->cfg.tool_terminal = !g->cfg.tool_terminal;
+            save();
+        };
+        r.push_back(x);
+    }
+    {
+        const size_t notes = memory_notes().size();
+        SetRow x{"Tool: memory", !c.tool_memory ? "off" : notes ? fmt("on, %zu note%s", notes, notes == 1 ? "" : "s") : "on",
+                 c.tool_memory ? "notes the model keeps when you say remember; it sees them in every chat (/memory)"
+                               : "the model keeps no notes and doesn't see the saved ones"};
+        x.change = [save](int) {
+            g->cfg.tool_memory = !g->cfg.tool_memory;
+            save();
+        };
+        r.push_back(x);
+    }
     {
         SetRow x{"Fan (PS5)", g->sens.fan_mode.empty() ? "—" : g->sens.fan_mode,
                  "auto is quiet; cool and early keep long prompts under the 85 °C limiter; max is loud"};
@@ -2455,7 +2504,9 @@ void draw_chat() {
     v.online = sv.online;
     v.why = sv.why;
     draw_chat_screen(g->scr, *g->th, g->chat, v);
-    draw_bottom_bar(g->chat.busy() ? (g->chat.queued.empty() ? "Enter queue a message|Esc stop|PgUp/PgDn scroll|Ctrl+T thoughts"
+    draw_bottom_bar(g->chat.ask.load() == 1 && g->chat.input.empty()
+                        ? "←→ choose|Enter give the answer|Esc no|PgUp/PgDn scroll"
+                    : g->chat.busy() ? (g->chat.queued.empty() ? "Enter queue a message|Esc stop|PgUp/PgDn scroll|Ctrl+T thoughts"
                                                              : "Enter queue another|↑ take the last back|Esc stop|PgUp/PgDn scroll")
                     : !g->chat.queued.empty() ? "Enter send the queued|Esc drop them|↑ take the last back|PgUp/PgDn scroll"
                                    : "Enter send|Tab next page|Ctrl+Y copy|Ctrl+T thoughts|Ctrl+N new chat|Ctrl+J new line|PgUp/PgDn scroll");
@@ -2545,6 +2596,10 @@ void run_command(const std::string &line) {
         while (!arg.empty() && arg.back() == ' ') arg.pop_back();
     }
     Chat &c = g->chat;
+    const auto unpad = [](std::string s) {
+        s.erase(0, s.find_first_not_of(' '));
+        return s;
+    };
     if (cmd == "/fetch") cmd = "/download";
     if (cmd == "/new" || cmd == "/clear") chat_new(c);
     else if (cmd == "/quit" || cmd == "/exit" || cmd == "/q") request_quit();
@@ -2697,6 +2752,91 @@ void run_command(const std::string &line) {
         g->cfg.save();
         static const char *v[] = {"the model's choice", "on", "off"};
         show_toast(std::string("Thinking: ") + v[g->cfg.thinking], g->th->accent, 2);
+    } else if (cmd == "/tools") {
+        // "/tools": what the model can use; "/tools terminal off": a switch.
+        struct Row {
+            const char *name, *what;
+            bool *on;
+        };
+        Config &f = g->cfg;
+        const Row rows[] = {
+            {"search", "searches the web when a question needs it (the server does it; it needs a web search key)", &f.tool_web},
+            {"pages", "reads a web page you give it a link to", &f.tool_page},
+            {"terminal", "runs a command on this machine; you see each one first and say yes or no", &f.tool_terminal},
+            {"memory", "keeps notes when you ask it to remember, and sees them in every chat (`/memory`)", &f.tool_memory},
+        };
+        const size_t sp = arg.find(' ');
+        const std::string name = arg.substr(0, sp), to = sp == std::string::npos ? "" : unpad(arg.substr(sp + 1));
+        bool found = false;
+        if (name == "ask") {
+            // Back to a question before each command (after A).
+            c.ask_always = false;
+            found = true;
+            show_toast("The model asks before each command again", g->th->accent, 3);
+        }
+        for (const Row &r : rows) {
+            if (name != r.name) continue;
+            found = true;
+            if (to == "on" || to == "off") *r.on = to == "on";
+            else if (to.empty()) *r.on = !*r.on;
+            else found = false;
+            if (found) {
+                f.save();
+                show_toast(std::string("Tool ") + r.name + ": " + (*r.on ? "on" : "off"), g->th->accent, 3);
+            }
+        }
+        if (!found) {
+            std::string h = "**The model's tools**  (`/tools NAME on` or `off`, or Settings)\n";
+            for (const Row &r : rows) h += std::string("`") + r.name + "`  **" + (*r.on ? "on" : "off") + "**  " + r.what + "\n";
+            if (f.tool_terminal && c.ask_always.load())
+                h += "\nCommands run **without asking** in this chat (you chose that). `/tools ask` brings the question back.";
+            const ServerState sv = server();
+            if (f.tool_web && !sv.web_search)
+                h += "\nThe web search waits for a key: Settings → Web search key (a free one from app.tavily.com), "
+                     "then load the model again.";
+            if (sv.online && !sv.model.empty() && sv.tool_format.empty())
+                h += "\nThis server isn't ts5's own: whether its model can call tools is up to it.";
+            chat_note(c, h);
+        }
+    } else if (cmd == "/memory") {
+        // The notes the model keeps (tools.h): list, forget N, clear, or add one by hand.
+        std::string why;
+        const size_t sp = arg.find(' ');
+        const std::string verb = arg.substr(0, sp), rest = sp == std::string::npos ? "" : unpad(arg.substr(sp + 1));
+        if (arg.empty()) {
+            const std::vector<std::string> notes = memory_notes();
+            std::string h;
+            if (notes.empty()) {
+                h = "**No notes yet.** Ask the model to remember something (\"remember that I write Rust\"), or add one "
+                    "yourself: `/memory TEXT`. The model sees the notes at the start of every chat.";
+            } else {
+                h = fmt("**The model's notes** (%zu; it sees them in every chat)\n", notes.size());
+                for (size_t i = 0; i < notes.size(); i++) h += fmt("%zu. ", i + 1) + notes[i] + "\n";
+                std::string where = memory_path();
+                const char *home = getenv("HOME");
+                if (home && *home && where.rfind(std::string(home) + "/", 0) == 0) where = "~" + where.substr(strlen(home));
+                h += "\n`/memory forget N` removes one, `/memory clear` all of them. They are in " + where + ".";
+            }
+            if (!g->cfg.tool_memory) h += "\n\n**Memory is off** (Settings → Tool: memory): the model doesn't see them now.";
+            chat_note(c, h);
+        } else if (verb == "forget" || verb == "remove" || verb == "delete") {
+            const int n = atoi(rest.c_str());
+            if (n < 1) chat_note(c, "`/memory forget N`: the note's number, as `/memory` lists them.");
+            else if (!memory_forget((size_t)n, why)) show_toast("Not removed: " + why, g->th->warn, 5);
+            else show_toast(fmt("Note %d removed", n), g->th->good, 3);
+        } else if (arg == "clear") {
+            if (!memory_clear(why)) show_toast("Not cleared: " + why, g->th->warn, 5);
+            else show_toast("The notes are gone", g->th->good, 3);
+        } else if (!memory_add(verb == "add" && !rest.empty() ? rest : arg, why)) {
+            show_toast("Not saved: " + why, g->th->warn, 5);
+        } else {
+            show_toast("Noted: the model sees it from the next message on", g->th->good, 4);
+        }
+        // A change made here reaches this chat too (the model reads the chat again once).
+        if (!arg.empty()) {
+            std::lock_guard<std::mutex> l(c.mu);
+            c.memory_set = false;
+        }
     } else if (cmd == "/fan") {
         if (arg == "auto" || arg == "cool" || arg == "early" || arg == "max") set_fan(arg);
         else chat_note(c, "`/fan auto` (the stock curve), `/fan cool` (full speed from 65 °C), `/fan early` "
@@ -2808,6 +2948,10 @@ void run_command(const std::string &line) {
              "**A full chat**  when the model's memory for the chat (its context) is nearly full, the model writes a "
              "summary of it and the chat goes on from that, with room again; everything stays here to read. `/compact` "
              "does it now. Settings → Full chat turns it off.\n\n"
+             "**Tools**  the model can search the web, read a web page, run a command on this machine and keep notes "
+             "between chats. Before a command runs you see it: **Enter** runs it, **→** moves to \"every command in "
+             "this chat\" (no more questions) or \"no\", **Esc** refuses. Each tool has a switch: `/tools`, or Settings. "
+             "`/memory` lists the notes.\n\n"
              "**Mouse**  click a **Thought for** line to read the thinking, **[copy]** under an answer or on a code block "
              "to copy it, a page's name to go there; the wheel scrolls. Dragging over the chat opens it as plain text to "
              "select with the terminal's own selection (Settings → Mouse: off leaves every drag to the terminal).\n\n"
@@ -3494,6 +3638,11 @@ void tick() {
         }
     }
     if (g->tuner.done && g->tuner.t1 > 0 && t - g->tuner.t1 < 0.2) scan_models();
+    // The model asks to run a command while another page is open: say so there.
+    if (g->chat.ask.load() == 1 && g->cur != CHAT && g->ask_told != g->chat.ask_t0.load()) {
+        g->ask_told = g->chat.ask_t0.load();
+        show_toast("The model wants to run a command: F1 (or /chat) to see it and say yes or no", g->th->warn, 8);
+    }
     // Every chat is kept (store.h), after each answer.
     if (g->chat.answers != g->answers_saved && !g->chat.busy()) {
         g->answers_saved = g->chat.answers;
@@ -3546,8 +3695,10 @@ void tick() {
                     total = m.total_tokens;
                     gen = m.gen_tokens;
                 }
-                // Stopped (Esc) or failed: an answer, or a summary.
+                // Stopped (Esc) or failed: an answer, or a summary. A chat
+                // that ends in a tool's result was stopped among its calls.
                 hold |= (m.role == "assistant" || m.role == "summary") && (m.stopped || !m.error.empty());
+                hold |= m.role == "tool";
             }
         }
         if (fin == "length") {

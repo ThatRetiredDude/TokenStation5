@@ -12,6 +12,7 @@
 #include <set>
 
 #include "json.h"
+#include "tools.h"
 
 namespace tui {
 
@@ -35,6 +36,8 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/usage", "", "the API's use by app and model (last day and week)"},
         {"/keys", "", "the API keys: names, on or off, last used"},
         {"/think", "on|off|auto", "thinking before answering"},
+        {"/tools", "[NAME on|off]", "the model's tools: search, pages, terminal, memory (each has a switch)"},
+        {"/memory", "[forget N|clear|TEXT]", "the notes the model keeps between chats: list, remove, or add one"},
         {"/fan", "auto|cool|early|max", "the PS5's fan"},
         {"/theme", "NAME", "colors: Ocean, Neon, Sunset, Forest, Mono"},
         {"/settings", "", "the Settings page"},
@@ -344,6 +347,46 @@ std::string thousands(int n) {
     return s;
 }
 
+int tool_owner(const Chat &c, size_t i);
+size_t calls_done(const Chat &c, size_t i);
+
+// After message `at`, the last one of assistant turn `owner` and its tools'
+// results so far: the calls of that turn that are still to come, the first
+// one waiting for the user's word or running. Under c.mu.
+void pending_calls(std::vector<Line> &out, const Chat &c, int owner, size_t at, const Theme &t, int w, double now) {
+    if (owner < 0) return;
+    const Msg &a = c.msgs[owner];
+    const size_t done = calls_done(c, owner);
+    if (at != owner + done || done >= a.calls.size()) return;
+    const bool live = c.running && (size_t)owner + done + 1 == c.msgs.size();  // this answer is the one being worked on
+    for (size_t k = done; k < a.calls.size(); k++) {
+        wrap(out, {{tool_call_line(a.calls[k].name, a.calls[k].args), Style(t.accent2)}}, w, 2, "⚙ ",
+             Style(t.accent2, kDefault, BOLD), "  ");
+        Line st;
+        if (!live) {
+            st.add("    not run", Style(t.dim, kDefault, ITALIC));
+        } else if (k > done) {
+            st.add("    next", Style(t.dim, kDefault, ITALIC));
+        } else if (c.ask.load() == 1) {
+            // ‹ Run it ›  Every command in this chat  No
+            static const char *const pick[] = {"Run it", "Every command in this chat", "No"};
+            const int on = c.ask_pick.load();
+            st.add("    Run it?  ", Style(t.warn, kDefault, BOLD));
+            for (int p = 0; p < 3; p++) {
+                if (p == on) st.add(std::string("‹ ") + pick[p] + " ›", Style(t.bg, t.warn, BOLD));
+                else st.add(std::string("  ") + pick[p] + "  ", Style(t.fg));
+                st.add(" ", Style());
+            }
+            st.add("  ←→ choose · Enter · Esc no", Style(t.dim));
+        } else {
+            st.add("    ", Style());
+            st.add("●", Style(mix(t.bg, t.accent2, 0.3 + 0.7 * (0.5 + 0.5 * sin(now * 5))), kDefault, BOLD));
+            st.add(" working…", Style(t.accent2, kDefault, ITALIC));
+        }
+        out.push_back(st);
+    }
+}
+
 void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
     const double now = now_s();
     std::lock_guard<std::mutex> l(c.mu);
@@ -352,7 +395,43 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
         // Each line knows its message (a click, a drag).
         for (; from < out.size(); from++) out[from].msg = (int)i - 1;
         const Msg &m = c.msgs[i];
-        out.push_back(Line());
+        // An answer's tool calls, their results and the turns after them
+        // read as one answer: no gap and no second heading between them.
+        const bool goes_on = m.role == "tool" || (m.role == "assistant" && i > 0 && c.msgs[i - 1].role == "tool");
+        if (!goes_on) out.push_back(Line());
+        if (m.role == "tool") {
+            // The call (what was run, read or noted), then what came of it;
+            // a click opens what the model got back.
+            const int owner = tool_owner(c, i);
+            const size_t k = owner >= 0 ? i - owner - 1 : 0;
+            const std::string what = owner >= 0 && k < c.msgs[owner].calls.size()
+                                         ? tool_call_line(c.msgs[owner].calls[k].name, c.msgs[owner].calls[k].args)
+                                         : m.tool;
+            wrap(out, {{what, Style(t.accent2)}}, w, 2, "⚙ ", Style(t.accent2, kDefault, BOLD), "  ");
+            const bool open = m.think_open == 1;
+            Line hl;
+            hl.add(open ? "    ▾ " : "    ▸ ", Style(t.dim));
+            hl.add(m.head.empty() ? std::string("done") : m.head, Style(m.tool_ok ? t.dim : t.warn));
+            hl.add(open ? "  click to fold" : "  click to see what the model got", Style(mix(t.dim, t.bg, 0.4)));
+            hl.hit = HIT_THINK;
+            hl.hit_x1 = hl.width;
+            out.push_back(hl);
+            if (open) {
+                size_t p = 0;
+                int shown = 0;
+                while (p <= m.content.size() && shown < 400) {
+                    size_t e = m.content.find('\n', p);
+                    if (e == std::string::npos) e = m.content.size();
+                    const std::string ln = m.content.substr(p, e - p);
+                    if (!ln.empty()) wrap(out, {{ln, Style(t.dim)}}, w, 4, "│ ", Style(t.dim), "│ ");
+                    p = e + 1;
+                    shown++;
+                }
+                if (p <= m.content.size()) wrap(out, {{"… (the rest is not shown here)", Style(t.dim, kDefault, ITALIC)}}, w, 4);
+            }
+            pending_calls(out, c, tool_owner(c, i), i, t, w, now);
+            continue;
+        }
         if (m.role == "note") {
             for (auto &x : std::vector<std::string>{m.content}) {
                 size_t p = 0;
@@ -450,11 +529,13 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
             }
             continue;
         }
-        Line h;
-        h.add("▌ ", Style(t.accent, kDefault, BOLD));
-        h.add("TokenStation5", Style(t.accent, kDefault, BOLD));
-        if (!m.model.empty()) h.add(" · " + m.model, Style(t.dim));
-        out.push_back(h);
+        if (!goes_on) {
+            Line h;
+            h.add("▌ ", Style(t.accent, kDefault, BOLD));
+            h.add("TokenStation5", Style(t.accent, kDefault, BOLD));
+            if (!m.model.empty()) h.add(" · " + m.model, Style(t.dim));
+            out.push_back(h);
+        }
         std::string content, reasoning;
         split_think(m, content, reasoning);
         const bool thinking_now = !m.done && content.empty() && !reasoning.empty();
@@ -513,11 +594,12 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
             }
         }
         if (!m.done && content.empty() && reasoning.empty()) {
-            // The prompt is being read.
+            // The prompt is being read (after a tool: what it gave back).
             Line wl;
             wl.add("  ", Style());
             wl.add("●", Style(mix(t.bg, t.accent, 0.3 + 0.7 * pulse), kDefault, BOLD));
-            wl.add(fmt(" reading the prompt… %.0f s", now - m.t0), Style(t.dim, kDefault, ITALIC));
+            wl.add(fmt(goes_on ? " reading what came back… %.0f s" : " reading the prompt… %.0f s", now - m.t0),
+                   Style(t.dim, kDefault, ITALIC));
             out.push_back(wl);
         }
         if (!content.empty()) {
@@ -530,7 +612,9 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
         if (!m.error.empty()) {
             wrap(out, {{m.error, Style(t.bad)}}, w, 2, "✖ ", Style(t.bad, kDefault, BOLD), "  ");
         }
-        if (m.done && m.error.empty()) {
+        // Its tool calls that have no result yet: waiting for a word, or running.
+        if (m.done && !m.calls.empty()) pending_calls(out, c, (int)i, i, t, w, now);
+        if (m.done && m.error.empty() && (m.calls.empty() || !content.empty())) {
             std::string f;
             if (m.gen_tps > 0) f += fmt("%.1f tok/s", m.gen_tps);
             if (m.gen_tokens > 0) f += (f.empty() ? "" : " · ") + thousands(m.gen_tokens) + " tokens";
@@ -709,17 +793,35 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
         int x = 1;
         if (c.busy()) {
             double live = 0;
+            std::string tool;  // a tool's call is running: which
             {
                 std::lock_guard<std::mutex> l(c.mu);
                 if (!c.msgs.empty()) {
                     const Msg &m = c.msgs.back();
                     if (m.t_first > 0 && now_s() - m.t_first > 0.3) live = m.chunks / (now_s() - m.t_first);
+                    // The turn made its calls and their results aren't all in.
+                    size_t j = c.msgs.size() - 1;
+                    while (j > 0 && c.msgs[j].role == "tool") j--;
+                    const Msg &a = c.msgs[j];
+                    const size_t done = c.msgs.size() - 1 - j;
+                    if (a.role == "assistant" && a.done && done < a.calls.size())
+                        tool = a.calls[done].name == "run_command"     ? "running the command"
+                               : a.calls[done].name == "read_web_page" ? "reading the page"
+                                                                       : "using a tool";
                 }
             }
             static const char *spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
-            x = s.put(x, y1, spin[(int)(now_s() * 12) % 10], Style(t.accent2, kDefault, BOLD));
-            x = s.put(x + 1, y1, live > 0 ? fmt("%.1f tok/s", live) : "answering", Style(t.accent2, kDefault, BOLD));
-            x = s.put(x, y1, "  Esc stops", Style(t.dim));
+            if (c.ask.load() == 1) {
+                // The model wants to run a command: it waits for a word.
+                x = s.put(x, y1, "?", Style(t.warn, kDefault, BOLD));
+                x = s.put(x + 1, y1, "the model wants to run a command", Style(t.warn, kDefault, BOLD));
+                x = s.put(x, y1, "  ←→ choose · Enter · Esc no", Style(t.dim));
+            } else {
+                x = s.put(x, y1, spin[(int)(now_s() * 12) % 10], Style(t.accent2, kDefault, BOLD));
+                x = s.put(x + 1, y1, !tool.empty() ? tool : live > 0 ? fmt("%.1f tok/s", live) : "answering",
+                          Style(t.accent2, kDefault, BOLD));
+                x = s.put(x, y1, tool.empty() ? "  Esc stops" : "  Esc stops it", Style(t.dim));
+            }
         } else {
             x = s.put(x, y1, v.model.empty() ? "no model" : v.model, Style(t.fg, kDefault, BOLD));
         }
@@ -755,8 +857,9 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
     box(s, 0, iy, w, ih, Style(c.busy() ? t.dim : t.accent), Style(t.fg, t.panel));
     s.put(2, iy + 1, "ts5>", Style(c.busy() ? t.dim : t.accent2, t.panel, BOLD));
     if (c.input.empty()) {
-        const char *ph = c.busy() ? "answering… type the next message, Enter queues it · Esc stops"
-                                  : "Message TokenStation5…   / for commands, ↑ history";
+        const char *ph = c.ask.load() == 1 ? "Run the command above? ←→ choose, Enter · Esc says no · or type the next message"
+                         : c.busy()        ? "answering… type the next message, Enter queues it · Esc stops"
+                                           : "Message TokenStation5…   / for commands, ↑ history";
         s.put(7, iy + 1, fit(ph, w - 9), Style(mix(t.dim, t.panel, 0.25), t.panel, ITALIC));
     }
     for (int r = 0; r < shown; r++) {
@@ -776,6 +879,33 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
 
 namespace {
 
+// The assistant turn whose call a tool message answers, or -1. Under c.mu.
+int tool_owner(const Chat &c, size_t i) {
+    size_t j = i;
+    while (j > 0 && c.msgs[j].role == "tool") j--;
+    const Msg &m = c.msgs[j];
+    return m.role == "assistant" && i - j <= m.calls.size() ? (int)j : -1;
+}
+
+// Whether assistant turn i made tool calls and every one has its result
+// after it, before `end`: only then are the calls sent back to the model
+// (a call without its result breaks the model's turns). Under c.mu.
+bool calls_answered(const Chat &c, int i, size_t end) {
+    if (i < 0 || c.msgs[i].role != "assistant" || c.msgs[i].calls.empty() || !c.msgs[i].error.empty()) return false;
+    const size_t n = c.msgs[i].calls.size();
+    if ((size_t)i + n >= end) return false;
+    for (size_t k = 1; k <= n; k++)
+        if (c.msgs[i + k].role != "tool") return false;
+    return true;
+}
+
+// How many of assistant turn i's calls have their result yet. Under c.mu.
+size_t calls_done(const Chat &c, size_t i) {
+    size_t n = 0;
+    while (i + 1 + n < c.msgs.size() && n < c.msgs[i].calls.size() && c.msgs[i + 1 + n].role == "tool") n++;
+    return n;
+}
+
 // The messages of msgs[0, end) the model is sent, in order: all of them, or,
 // since the last summary (*sum; -1 without one), the ones it kept and the
 // ones after it. Notes, failed and empty answers and the summaries
@@ -790,8 +920,13 @@ std::vector<size_t> sent_msgs(const Chat &c, size_t end, int *sum) {
     std::vector<size_t> out;
     for (size_t i = s >= 0 ? (size_t)std::max(0, c.msgs[s].keep_from) : 0; i < end; i++) {
         const Msg &m = c.msgs[i];
+        if (m.role == "tool") {
+            // Only with the turn that called it.
+            if (calls_answered(c, tool_owner(c, i), end)) out.push_back(i);
+            continue;
+        }
         if (m.role != "user" && m.role != "assistant") continue;
-        if (m.role == "assistant" && (!m.error.empty() || m.content.empty())) continue;
+        if (m.role == "assistant" && (!m.error.empty() || (m.content.empty() && !calls_answered(c, (int)i, end)))) continue;
         out.push_back(i);
     }
     return out;
@@ -811,18 +946,54 @@ std::string role_json(const std::string &role, const std::string &content) {
 // turn's marks). The server's own count comes with each answer.
 int rough_tokens(const std::string &s) { return (int)(s.size() / 3) + 8; }
 
-std::string body_for(Chat &c, const ChatRequest &rq) {
+// Message i as the request carries it. An assistant turn's tool calls go
+// with it when their results follow (with_calls), and its thinking too when
+// it belongs to the answer still being worked on (thinking): the server
+// then writes the turn as the model wrote it, and reads on from there.
+std::string msg_json(const Chat &c, size_t i, bool with_calls, bool thinking) {
+    const Msg &m = c.msgs[i];
+    if (m.role == "tool")
+        return "{\"role\":\"tool\",\"tool_call_id\":" + ts5::json_escape(m.call_id) + ",\"name\":" +
+               ts5::json_escape(m.tool) + ",\"content\":" + ts5::json_escape(m.content) + "}";
+    std::string content, reasoning;
+    split_think(m, content, reasoning);
+    if (m.role != "assistant" || !with_calls) return role_json(m.role, content);
+    std::string j = "{\"role\":\"assistant\",\"content\":" + ts5::json_escape(content);
+    if (thinking && !reasoning.empty()) j += ",\"reasoning_content\":" + ts5::json_escape(reasoning);
+    j += ",\"tool_calls\":[";
+    for (size_t k = 0; k < m.calls.size(); k++)
+        j += std::string(k ? "," : "") + "{\"id\":" + ts5::json_escape(m.calls[k].id) +
+             ",\"type\":\"function\",\"function\":{\"name\":" + ts5::json_escape(m.calls[k].name) +
+             ",\"arguments\":" + ts5::json_escape(m.calls[k].args.empty() ? "{}" : m.calls[k].args) + "}}";
+    return j + "]}";
+}
+
+// The request for the chat's next answer. no_tools: the model has called
+// tools many times in a row, so this turn it can only answer.
+std::string body_for(Chat &c, const ChatRequest &rq, bool no_tools = false) {
     std::string msgs;
+    // What the model reads before the chat: its notes from earlier chats
+    // (Settings → Memory), then the summary this chat goes on from. One
+    // system message: some templates take only one.
+    std::string system;
     {
         std::lock_guard<std::mutex> l(c.mu);
+        if (rq.tools.memory) {
+            if (!c.memory_set) c.memory = memory_prompt();
+            c.memory_set = true;
+            system = c.memory;
+        }
         int sum = -1;
-        const std::vector<size_t> idx = sent_msgs(c, c.msgs.empty() ? 0 : c.msgs.size() - 1, &sum);
-        if (sum >= 0) msgs = role_json("system", kSummaryLead + c.msgs[sum].content);
+        const size_t end = c.msgs.empty() ? 0 : c.msgs.size() - 1;
+        const std::vector<size_t> idx = sent_msgs(c, end, &sum);
+        if (sum >= 0) system += (system.empty() ? "" : "\n\n") + (kSummaryLead + c.msgs[sum].content);
+        if (!system.empty()) msgs = role_json("system", system);
+        size_t last_user = 0;
+        for (size_t i : idx)
+            if (c.msgs[i].role == "user") last_user = i;
         for (size_t i : idx) {
-            std::string content, reasoning;
-            split_think(c.msgs[i], content, reasoning);
             if (!msgs.empty()) msgs += ",";
-            msgs += role_json(c.msgs[i].role, content);
+            msgs += msg_json(c, i, calls_answered(c, (int)i, end), i > last_user);
         }
     }
     std::string b = "{\"model\":" + ts5::json_escape(rq.model.empty() ? "tokenstation5" : rq.model) +
@@ -831,6 +1002,15 @@ std::string body_for(Chat &c, const ChatRequest &rq) {
     if (rq.max_tokens > 0) b += fmt(",\"max_tokens\":%d", rq.max_tokens);
     if (rq.thinking == 1) b += ",\"chat_template_kwargs\":{\"enable_thinking\":true}";
     if (rq.thinking == 2) b += ",\"chat_template_kwargs\":{\"enable_thinking\":false}";
+    // The tools that are switched on (Settings). The web search is the
+    // server's own: with other tools in the request it has to be asked for.
+    // no_tools: the tools still go along (OpenAI's API takes "tool_choice"
+    // only with them), with the word that none is to be called.
+    const std::string tools = tools_json(rq.tools);
+    if (!tools.empty()) b += ",\"tools\":" + tools;
+    if (no_tools && !tools.empty()) b += ",\"tool_choice\":\"none\"";
+    if (rq.ts5 && (no_tools || !rq.tools.web)) b += ",\"web_search\":false";
+    else if (rq.ts5 && !tools.empty()) b += ",\"web_search\":\"auto\"";
     return b + "}";
 }
 
@@ -865,6 +1045,20 @@ void stream_answer(Chat *c, const ChatRequest &rq, const std::string &body) {
             if (!t.empty()) {
                 if (m.t_think_end == 0 && !m.reasoning.empty()) m.t_think_end = now;
                 m.content += t;
+            }
+            // Tool calls: whole (ts5 sends each at once) or in pieces by index.
+            const ts5::Json &tcs = d["tool_calls"];
+            for (size_t k = 0; k < tcs.a.size(); k++) {
+                const ts5::Json &tc = tcs.a[k];
+                const size_t at = tc["index"].type == ts5::Json::NUM ? (size_t)tc["index"].num(0) : k;
+                if (at >= 32) continue;
+                if (m.calls.size() <= at) m.calls.resize(at + 1);
+                ToolUse &u = m.calls[at];
+                if (!tc["id"].str().empty()) u.id = tc["id"].str();
+                u.name += tc["function"]["name"].str();
+                const ts5::Json &a = tc["function"]["arguments"];
+                u.args += a.type == ts5::Json::STR ? a.s : a.is_null() ? std::string() : a.dump();
+                if (m.t_think_end == 0 && !m.reasoning.empty()) m.t_think_end = now;
             }
         }
         const ts5::Json &u = j["usage"];
@@ -918,9 +1112,13 @@ void stream_answer(Chat *c, const ChatRequest &rq, const std::string &body) {
                 m.error = fmt("%d: ", r.status) + why;
         } else if (r.status == 0) {
             m.error = r.err.empty() ? "no answer" : r.err;
-        } else if (!finished && m.content.empty() && m.error.empty()) {
+        } else if (!finished && m.content.empty() && m.calls.empty() && m.error.empty()) {
             m.error = "the answer ended early" + (r.err.empty() ? std::string() : ": " + r.err);
         }
+        // Calls without a name are no calls.
+        m.calls.erase(std::remove_if(m.calls.begin(), m.calls.end(), [](const ToolUse &u) { return u.name.empty(); }),
+                      m.calls.end());
+        if (m.stopped || !m.error.empty()) m.calls.clear();
         if (m.gen_tps == 0 && m.t_first > 0 && m.t_end - m.t_first > 0.2) m.gen_tps = m.chunks / (m.t_end - m.t_first);
         if (m.gen_tokens == 0) m.gen_tokens = m.chunks;
         if (m.total_tokens > 0) c->ctx_used = m.total_tokens;
@@ -932,8 +1130,78 @@ void stream_answer(Chat *c, const ChatRequest &rq, const std::string &body) {
     }
 }
 
+// A tool call of the model's, run. A command waits for the user's word
+// first (Enter, A for every command of this chat, Esc), which chat_key gives.
+ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
+    const std::string cmd = tool_command(u.name, u.args);
+    if (u.name == "run_command" && rq.tools.terminal && !cmd.empty() && !c->ask_always.load()) {
+        {
+            std::lock_guard<std::mutex> l(c->mu);
+            c->ask_cmd = cmd;
+        }
+        c->ask_t0 = now_s();
+        c->ask_pick = 0;
+        c->ask = 1;
+        while (c->ask.load() == 1 && !c->cancel.load()) usleep(30000);
+        const int said = c->ask.exchange(0);
+        if (c->cancel.load()) return tool_stopped();
+        if (said != 2) return tool_refused();
+    }
+    return run_tool(u.name, u.args, rq.tools, c->cancel);
+}
+
+// So many turns of tool calls in a row for one message; the turn after
+// them gets no tools, so the model answers with what it has.
+const int kToolRounds = 12;
+
+// An answer: the model's turn, and for as long as it calls tools, each
+// call run, its result added to the chat, and another turn of the model's.
+void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
+    for (int round = 0;; round++) {
+        stream_answer(c, rq, body);
+        std::vector<ToolUse> calls;
+        {
+            std::lock_guard<std::mutex> l(c->mu);
+            Msg &m = c->msgs.back();
+            for (size_t k = 0; k < m.calls.size(); k++)
+                if (m.calls[k].id.empty()) m.calls[k].id = fmt("call_%zu_%zu", c->msgs.size(), k);
+            // Calls in the turn that was told to make none (a server that
+            // doesn't keep to "tool_choice") end it here.
+            if (round >= kToolRounds && !m.calls.empty()) {
+                m.calls.clear();
+                if (m.content.empty()) m.error = "the model kept calling tools instead of answering: ask it again";
+            }
+            calls = m.calls;
+        }
+        if (calls.empty()) break;
+        for (const ToolUse &u : calls) {
+            const ToolResult r = c->cancel.load() ? tool_stopped() : run_call(c, rq, u);
+            std::lock_guard<std::mutex> l(c->mu);
+            Msg t;
+            t.role = "tool";
+            t.content = r.text;
+            t.call_id = u.id;
+            t.tool = u.name;
+            t.head = r.head;
+            t.tool_ok = r.ok;
+            t.done = true;
+            c->msgs.push_back(t);
+        }
+        if (c->cancel.load()) break;
+        {
+            std::lock_guard<std::mutex> l(c->mu);
+            Msg a;
+            a.role = "assistant";
+            a.model = rq.model;
+            a.t0 = now_s();
+            c->msgs.push_back(a);
+        }
+        body = body_for(*c, rq, round + 1 >= kToolRounds);
+    }
+}
+
 void run_answer(Chat *c, ChatRequest rq, std::string body) {
-    stream_answer(c, rq, body);
+    answer_loop(c, rq, body);
     c->answers++;
     c->running = false;
 }
@@ -1008,7 +1276,7 @@ void run_summary(Chat *c, ChatRequest rq, std::string msgs, std::string then, st
             a.t0 = now_s();
             c->msgs.push_back(a);
         }
-        stream_answer(c, rq, body_for(*c, rq));
+        answer_loop(c, rq, body_for(*c, rq));
     }
     c->answers++;
     c->running = false;
@@ -1086,6 +1354,9 @@ void complete(Chat &c, const ChatRequest &rq) {
         if (cmd == "/model" || cmd == "/tune" || cmd == "/check" || cmd == "/bench") pool = rq.model_names;
         else if (cmd == "/download") pool = rq.catalog_names;
         else if (cmd == "/think") pool = {"on", "off", "auto"};
+        else if (cmd == "/tools") pool = {"search", "pages", "terminal", "memory", "search on", "search off", "pages on",
+                                          "pages off", "terminal on", "terminal off", "memory on", "memory off", "ask"};
+        else if (cmd == "/memory") pool = {"forget", "clear"};
         else if (cmd == "/fan") pool = {"auto", "cool", "early", "max"};
         else if (cmd == "/theme")
             for (auto &t : themes()) pool.push_back(t.name);
@@ -1161,6 +1432,7 @@ void chat_count(Chat &c) {
         std::string content, reasoning;
         split_think(c.msgs[i], content, reasoning);
         n += rough_tokens(content);
+        for (auto &u : c.msgs[i].calls) n += rough_tokens(u.args) + 12;
     }
     if (sum >= 0) n += rough_tokens(c.msgs[sum].content) + 60;
     c.ctx_used = n;
@@ -1213,8 +1485,13 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
     const int lead = sum >= 0 ? rough_tokens(c.msgs[sum].content) + 60 : 0;
     double rough = lead;
     for (size_t k = 0; k < idx.size(); k++) {
+        // A summary is asked for without tools: the calls and what they
+        // gave back go in as plain words.
+        const Msg &m = c.msgs[idx[k]];
         std::string reasoning;
-        split_think(c.msgs[idx[k]], text[k], reasoning);
+        split_think(m, text[k], reasoning);
+        if (m.role == "tool") text[k] = "[What the tool gave back]\n" + text[k];
+        for (auto &u : m.calls) text[k] += (text[k].empty() ? "" : "\n") + ("[I used a tool: " + tool_call_line(u.name, u.args) + "]");
         tok[k] = rough_tokens(text[k]);
         rough += tok[k];
     }
@@ -1265,7 +1542,7 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
     if (sum >= 0) msgs = role_json("system", kSummaryLead + c.msgs[sum].content);
     for (size_t k = 0; k < first_kept; k++) {
         if (!msgs.empty()) msgs += ",";
-        msgs += role_json(c.msgs[idx[k]].role, text[k]);
+        msgs += role_json(c.msgs[idx[k]].role == "tool" ? "user" : c.msgs[idx[k]].role, text[k]);
     }
     msgs += "," + role_json("user", ask);
     *keep_from = first_kept < idx.size() ? (int)idx[first_kept] : (int)end;
@@ -1330,6 +1607,10 @@ void chat_new(Chat &c) {
     c.saved_id.clear();
     c.queued.clear();
     c.queue_held = false;
+    c.ask = 0;
+    c.ask_always = false;
+    c.memory.clear();
+    c.memory_set = false;
 }
 
 bool chat_take_speed(Chat &c, double &gen, double &prompt) {
@@ -1352,20 +1633,28 @@ bool chat_save(Chat &c, const std::string &path, std::string &why) {
     strftime(date, sizeof date, "%Y-%m-%d %H:%M", localtime(&now));
     f << "# TokenStation5 chat, " << date << "\n";
     std::lock_guard<std::mutex> l(c.mu);
+    bool after_tool = false;  // the model's turn goes on after a tool's result: no heading again
     for (auto &m : c.msgs) {
         if (m.role == "note") continue;
         std::string content, reasoning;
         split_think(m, content, reasoning);
+        const bool goes_on = after_tool && m.role == "assistant";
+        after_tool = m.role == "tool";
         if (m.role == "summary") {
             if (!content.empty() && m.error.empty() && !m.stopped)
                 f << "\n## Summary of the chat so far (the model goes on from this)\n\n" << content << "\n";
         } else if (m.role == "user") f << "\n## You\n\n" << content << "\n";
-        else {
-            f << "\n## TokenStation5" << (m.model.empty() ? "" : " (" + m.model + ")") << "\n\n";
+        else if (m.role == "tool") {
+            f << "\n<details><summary>" << (m.head.empty() ? m.tool : m.tool + ": " + m.head) << "</summary>\n\n```\n"
+              << content << "\n```\n\n</details>\n";
+        } else {
+            if (goes_on) f << "\n";
+            else f << "\n## TokenStation5" << (m.model.empty() ? "" : " (" + m.model + ")") << "\n\n";
             if (!reasoning.empty()) {
                 f << "<details><summary>Thinking</summary>\n\n" << reasoning << "\n\n</details>\n\n";
             }
-            f << content << "\n";
+            if (!content.empty()) f << content << "\n";
+            for (auto &u : m.calls) f << "\n`" << tool_call_line(u.name, u.args) << "`\n";
             if (m.gen_tps > 0) f << fmt("\n_%.1f tok/s, %d tokens_\n", m.gen_tps, m.gen_tokens);
         }
     }
@@ -1426,12 +1715,20 @@ std::string chat_copy_text(Chat &c, int msg, int block, bool thinking, std::stri
                 out += "## You\n\n" + content + "\n\n";
                 continue;
             }
-            out += "## TokenStation5" + (m.model.empty() ? "" : " (" + m.model + ")") + "\n\n";
+            if (m.role == "tool") {
+                // What it came to, and all of it where it is open on screen.
+                out += "(" + (m.head.empty() ? m.tool : m.head) + ")\n\n";
+                if (m.think_open == 1) out += "```\n" + content + "\n```\n\n";
+                continue;
+            }
+            if (!(i > 0 && c.msgs[i - 1].role == "tool"))
+                out += "## TokenStation5" + (m.model.empty() ? "" : " (" + m.model + ")") + "\n\n";
             if (!reasoning.empty() && (m.think_open >= 0 ? m.think_open == 1 : c.show_think)) {
                 while (!reasoning.empty() && reasoning.back() == '\n') reasoning.pop_back();
                 out += "Thinking:\n" + reasoning + "\n\n";
             }
-            out += content + (m.error.empty() ? "" : m.error) + "\n\n";
+            if (!content.empty() || !m.error.empty()) out += content + (m.error.empty() ? "" : m.error) + "\n\n";
+            for (auto &u : m.calls) out += "`" + tool_call_line(u.name, u.args) + "`\n\n";
         }
         while (!out.empty() && out.back() == '\n') out.pop_back();
         say("the whole chat");
@@ -1446,7 +1743,8 @@ std::string chat_copy_text(Chat &c, int msg, int block, bool thinking, std::stri
         return reasoning;
     }
     if (block < 0) {
-        say(m.role == "user" ? "your message" : m.role == "note" ? "the note" : m.role == "summary" ? "the summary" : "the answer");
+        say(m.role == "user" ? "your message" : m.role == "note" ? "the note" : m.role == "summary" ? "the summary"
+            : m.role == "tool" ? "what the tool gave back" : "the answer");
         return content;
     }
     // The block'th code block's lines, without its fences.
@@ -1490,6 +1788,28 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
     if (e.key != K_TAB) {
         c.cands.clear();
         c.cand_i = -1;
+    }
+    // The model wants to run a command and waits for a word (run_call):
+    // ←→ pick the answer (run it, every command of this chat, no), Enter
+    // gives it, Esc says no. With nothing typed, and never a letter: a
+    // message typed while the question shows goes to the queue as always.
+    if (c.ask.load() == 1 && c.input.empty()) {
+        if (e.key == K_LEFT || e.key == K_RIGHT) {
+            c.ask_pick = (c.ask_pick.load() + (e.key == K_RIGHT ? 1 : 2)) % 3;
+            return CHAT_NONE;
+        }
+        if (e.key == K_ENTER) {
+            const int pick = c.ask_pick.load();
+            // Enter pressed as the question came up was meant for something else: it runs nothing.
+            if (pick != 2 && now_s() - c.ask_t0.load() < 0.7) return CHAT_NONE;
+            if (pick == 1) c.ask_always = true;
+            c.ask = pick == 2 ? 3 : 2;
+            return CHAT_NONE;
+        }
+        if (e.key == K_ESC) {
+            c.ask = 3;
+            return CHAT_NONE;
+        }
     }
     switch (e.key) {
         case K_ESC:

@@ -947,11 +947,123 @@ def test_thinking_marks(ts5, model, tdir):
     return failed
 
 
+PAGE = """<!doctype html><html><head><title>T &amp; t</title><style>p { color: red }</style>
+<script>var hidden = "<p>not text</p>";</script></head><body><!-- a comment --><nav><a href="/">Home</a></nav>
+<h1>Head</h1><p>One two
+   three<br>four</p><ul><li>a</li><li>b &lt; c</li></ul><table><tr><td>x</td><td>y</td></tr></table>
+<noscript>turn it on</noscript><p>caf&eacute; &euro; &#53; &#x3c; 6 &Uuml;ber &szlig; &yuml; &nosuch; &trade;</p></body></html>"""
+PAGE_TEXT = "T & t\n\nHome\n\nHead\n\nOne two three\nfour\n\n- a\n- b < c\n\nx | y |\n\ncafé € 5 < 6 Über ß ÿ &nosuch; ™\n"
+
+
+class Pages(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        pages = {"/a.html": ("text/html; charset=utf-8", PAGE.encode()),
+                 "/sniffed": ("application/octet-stream", PAGE.encode()),
+                 "/b.txt": ("text/plain", b"plain  text\nstays as it is\n"),
+                 "/c.bin": ("application/octet-stream", bytes(range(256)) * 4),
+                 "/long.txt": ("text/plain", b"word " * 4000),
+                 "/empty.html": ("text/html", b"<html><body><script>x()</script></body></html>")}
+        if self.path not in pages:
+            self.send_response(404)
+            self.end_headers()
+            return
+        kind, body = pages[self.path]
+        self.send_response(200)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+def test_page_reader(ts5):
+    """`ts5 page URL`: a web page as the text a model reads (ts5-tui's read_web_page tool)."""
+    failed = 0
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Pages)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_port}"
+    cases = [
+        # name, arguments, exit code, what the output is (str) or has (tuple)
+        ("an HTML page", [base + "/a.html"], 0, PAGE_TEXT),
+        ("HTML without the type", [base + "/sniffed"], 0, PAGE_TEXT),
+        ("plain text", [base + "/b.txt"], 0, "plain  text\nstays as it is\n"),
+        ("a long page is cut", [base + "/long.txt", "100"], 0, ("word word", "the page goes on: 19899 more characters")),
+        ("no such page", [base + "/none"], 1, ("The page could not be read: there is no such page (404).",)),
+        ("not text", [base + "/c.bin"], 1, ("The page could not be read: it is not text",)),
+        ("a page with no text", [base + "/empty.html"], 1, ("The page could not be read",)),
+        ("no server", ["http://127.0.0.1:9/x"], 1, ("The page could not be read",)),
+        ("not a web address", ["file:///etc/passwd"], 1, ("The page could not be read",)),
+        ("a file's path", ["/etc/passwd"], 1, ("The page could not be read",)),
+    ]
+    for name, args, rc, want in cases:
+        r = subprocess.run([ts5, "page"] + args, capture_output=True, text=True, timeout=60)
+        ok = r.returncode == rc and (r.stdout == want if isinstance(want, str) else all(w in r.stdout for w in want))
+        if ok and "root:" in r.stdout:
+            ok = False
+        if not ok:
+            failed += 1
+            print(f"FAIL page {name}: rc {r.returncode}\n{r.stdout!r}\n{r.stderr}")
+        else:
+            print(f"ok   page {name}")
+    r = subprocess.run([ts5, "html-text"], input=PAGE, capture_output=True, text=True, timeout=60)
+    if r.returncode != 0 or r.stdout.strip() != PAGE_TEXT.strip():
+        failed += 1
+        print(f"FAIL html-text: rc {r.returncode}\n{r.stdout!r}")
+    else:
+        print("ok   html-text")
+    return failed
+
+
+def test_client_tools_and_search(ts5, model, tdir):
+    """A client with tools of its own (ts5-tui) gets the server's web search
+    beside them only when it asks ("web_search": "auto"), and then as a plain
+    chat does: when the message calls for it."""
+    failed = 0
+    qwen = os.path.join(tdir, "Qwen-Qwen2.5-7B-Instruct.jinja")
+    cases = [
+        # name, the user's message, the request's "web_search", whether the search is offered
+        ("auto, a question for the web", "What is the latest PS5 firmware?", "auto", True),
+        ("auto, a question that needs none", "Write a haiku about rain.", "auto", False),
+        ("not asked for", "What is the latest PS5 firmware?", None, False),
+        ("off", "What is the latest PS5 firmware?", False, False),
+        ("on", "Write a haiku about rain.", True, True),
+    ]
+    for name, text, ws, offered in cases:
+        req = {"messages": [{"role": "user", "content": text}], "tools": [WEATHER]}
+        if ws is not None:
+            req["web_search"] = ws
+        msg, prompts, log = serve_turns(ts5, model, qwen, ["Hello."], req)
+        has = '"name": "web_search"' in prompts[-1]
+        if has != offered or '"name": "get_weather"' not in prompts[-1] or msg["content"] != "Hello.":
+            failed += 1
+            print(f"FAIL the client's tools and the search, {name}: offered {has}\n{prompts[-1][:600]}\n{log}")
+        else:
+            print(f"ok   the client's tools and the search, {name}")
+    # The model's turn after a client's tool ran: its call and the result in the prompt.
+    req = {"messages": [{"role": "user", "content": "Weather in Oslo?"},
+                        {"role": "assistant", "content": "", "tool_calls": [call("get_weather", '{"city": "Oslo"}')]},
+                        {"role": "tool", "tool_call_id": "call_1", "name": "get_weather", "content": "4 °C, rain"}],
+           "tools": [WEATHER]}
+    for name, more, answer in [("with tools", {}, "Second."), ("told to call none", {"tool_choice": "none"}, "Last.")]:
+        msg, prompts, log = serve_turns(ts5, model, qwen, ["First.", "Second.", "Last."], dict(req, **more))
+        want = ('<tool_call>\n{"name": "get_weather", "arguments": {"city": "Oslo"}}\n</tool_call><|im_end|>\n'
+                "<|im_start|>user\n<tool_response>\n4 °C, rain\n</tool_response><|im_end|>\n<|im_start|>assistant\n")
+        if msg["content"] != answer or not prompts[-1].endswith(want):
+            failed += 1
+            print(f"FAIL after a client's tool ran, {name}: {msg}\n{prompts[-1][-400:]}\n{log}")
+        else:
+            print(f"ok   after a client's tool ran, {name}")
+    return failed
+
+
 def main():
     ts5, model, tdir = sys.argv[1:4]
     failed = (test_prompts(ts5, model, tdir) + test_parser(ts5) + test_search(ts5) + test_search_loop(ts5, model, tdir) +
               test_gemma4_thinking(ts5, model, tdir) + test_every_model_has_tools(ts5, model, tdir) +
-              test_thinking_marks(ts5, model, tdir))
+              test_thinking_marks(ts5, model, tdir) + test_page_reader(ts5) +
+              test_client_tools_and_search(ts5, model, tdir))
     if failed:
         sys.exit(f"tools_test: {failed} failed")
     print("tools_test: all passed")

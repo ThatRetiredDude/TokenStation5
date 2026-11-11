@@ -516,10 +516,13 @@ void handle(int fd, Server::State &state, Usage &u) {
                 std::string last_user;
                 for (auto &m : msgs)
                     if (m.role == "user") last_user = m.content;
+                // "auto": a client with tools of its own that wants the
+                // search offered the way a plain chat gets it (ts5-tui).
                 const Json &ws = req["web_search"];
                 web = !named && !tavily_key().empty() &&
                       (ws.type == Json::BOOL ? ws.boolean(false)
-                                             : web_search_always() || (tools.empty() && needs_web(last_user)));
+                                             : web_search_always() ||
+                                                   ((tools.empty() || ws.str() == "auto") && needs_web(last_user)));
                 if (web) tools.push_back(web_search_tool(date));
             }
             prompt = render_chat(e.tok(), msgs, tools, date, think);
@@ -761,8 +764,12 @@ void handle(int fd, Server::State &state, Usage &u) {
                     fprintf(out, "%s\n====\n", prompt.c_str());
                     fclose(out);
                 }
+                // (A request that carries earlier calls and their results
+                // starts that many turns in: a client's own tool loop.)
+                size_t before = 0;
+                for (auto &m : msgs) before += !m.calls.empty();
                 const size_t with_tools = turns.size() > 1 ? turns.size() - 2 : 0;
-                on_text(use_tools ? turns[std::min((size_t)round, with_tools)] : turns.back());
+                on_text(use_tools ? turns[std::min((size_t)round + before, with_tools)] : turns.back());
                 turn.gen_tokens = 1;
                 turn.finish = "stop";
             } else {

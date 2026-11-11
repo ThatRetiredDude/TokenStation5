@@ -41,6 +41,15 @@ Json web_search_tool(const std::string &today);
 // not work (network, a refused key, a used-up plan), not that it found nothing.
 std::string web_search(const std::string &arguments, std::string &log, bool *failed = nullptr);
 
+// A web page as text, for a model to read (`ts5 page URL`, which ts5-tui's
+// web page tool runs): url over http or https, 2 MiB of it at most; HTML
+// without its scripts, styles and tags, the entities read and blank runs
+// closed up; other text as it is. Cut to max_chars, saying how much is left
+// out. log: one line for the log; *failed: the page could not be read.
+std::string web_page(const std::string &url, size_t max_chars, std::string &log, bool *failed = nullptr);
+// The text of an HTML page (web_page's reader).
+std::string html_text(const std::string &html);
+
 // Why a search failed, in the plain words web_search gave the model ("the
 // Tavily key was refused"); the log line has the raw reason.
 std::string search_failure(const std::string &result);

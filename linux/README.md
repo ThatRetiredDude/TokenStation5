@@ -260,6 +260,35 @@ ts5-tui --url http://ps5.local:8081  # another one
   engine in its environment, never on a command line. For the API-only
   service, add `TAVILY_API_KEY=tvly-...` to `/etc/default/tokenstation`
   and restart it.
+- **Tools**: besides the web search, the model can read a web page, run a
+  command on this machine and keep notes between chats. Each has its own
+  switch (Settings → Tool: search, pages, terminal, memory; or
+  `/tools terminal off`), and `/tools` lists them.
+  - **Web pages**: give it a link ("read https://... and sum it up") and
+    it gets the page as text (the first 8,000 characters).
+  - **Terminal**: when the model wants to run a command you see it first:
+    **Enter** runs it, **Esc** doesn't, and **→** moves the answer to
+    "every command in this chat" (no more questions; `/tools ask` brings
+    them back, and a new chat asks again) or "no". Letters never answer,
+    so a message typed while the question shows just waits its turn. A
+    command runs as you, in
+    the folder ts5-tui was started in, with no keyboard, for 2 minutes at
+    most; Esc stops one that is running. The model gets its output and
+    exit code (long output: the start and the end). Under each call a
+    line says how it went; a click opens what the model got.
+  - **Memory**: tell it "remember that I write Rust" and it keeps a note.
+    The model reads its notes at the start of every chat. `/memory` lists
+    them, `/memory forget N` removes one, `/memory clear` all of them,
+    `/memory TEXT` adds one yourself. They are plain lines in
+    `~/.local/share/tokenstation/memory.md`.
+
+  Every model ts5 serves can call tools: the ones whose file has no tool
+  format of its own (DeepSeek R1) are asked in words. Small models call
+  tools less reliably than large ones. A web page is text from a stranger:
+  with "every command" chosen, a page the model reads could talk it into a
+  command, so leave the question on when it reads pages you don't trust. A model that
+  keeps calling tools gets twelve rounds for one message, then has to
+  answer.
 - **Keys that can't surprise**: with something typed at the prompt, Tab
   stays there (it completes a command) instead of changing the page. PgUp
   and PgDn scroll the chat, and so do Shift or Alt with the up and down

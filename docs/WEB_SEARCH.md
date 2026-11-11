@@ -88,7 +88,9 @@ request, `tool_calls` in the answer, `role: "tool"` messages back), streaming
 included, so opencode, Continue, Open WebUI's native function calling and
 similar clients can use their tools with the console's models. A request
 with tools of its own gets ts5's `web_search` only when it says
-`"web_search": true` (or with `TS5_WEB_SEARCH=always`): a coding agent's
+`"web_search": true` (or `"web_search": "auto"`, which offers it when the
+chat looks like it needs the web, as for a plain chat; or with
+`TS5_WEB_SEARCH=always`): a coding agent's
 messages are full of URLs, dates and file text that would pass the "needs the
 web" check on every turn, and each search costs a credit. With it, ts5
 answers `web_search` calls itself and hands every other call back to the
