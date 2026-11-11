@@ -9,8 +9,9 @@
 #   hw status             key=value lines: memory, compute units, boot settings
 #   hw fan auto|cool|early|max  the fan: the kernel's curve (ps5_fan hwmon), steeper, aggressive from idle, or full speed
 #   hw boost on|off       CPU 3.5 GHz and GPU 2.23 GHz (ps5_control), or stock
-#   hw memory max|0|8..14 GiB the GPU may map at the next boot (max: all but 1 GiB;
-#                         0: the kernel's default)
+#   hw memory max|0|8..N  GiB the GPU may map at the next boot (max: all but 1 GiB;
+#                         0: the kernel's default; N: RAM less 2 GiB, as
+#                         "hw status" says in memory_max_gib, at most 14)
 #   hw cu 36|38|40        compute units at the next boot (tokenstation-cu)
 #   hw cutest SECONDS     tokenstation-cu test, 30 to 600 s
 #   hw model NAME.gguf    the API-only service's model: a file in its MODELS_DIR,
@@ -28,6 +29,14 @@ need_ctl() {
     [ -n "$ctl" ] && [ -x "$ctl" ] || { echo "ps5_control isn't installed (ps5-linux-tools)" >&2; exit 3; }
 }
 
+# The most whole GiB "tokenstation-memory set" takes on this machine: RAM
+# less 2 GiB for Linux, and at most 14 (12 on a PS5's 14.1 GiB).
+memory_max_gib() {
+    m=$(awk '/^MemTotal:/ { printf "%d", $2 / 1048576 - 2 }' /proc/meminfo)
+    [ "$m" -gt 14 ] && m=14
+    echo "$m"
+}
+
 find_cmdline() {
     for f in /boot/efi/cmdline.txt /efi/cmdline.txt /boot/firmware/cmdline.txt /boot/cmdline.txt; do
         [ -f "$f" ] && { echo "$f"; return; }
@@ -43,6 +52,7 @@ status)
         break
     done
     echo "ram_total=$(awk '/^MemTotal:/ { printf "%.0f", $2 * 1024 }' /proc/meminfo)"
+    echo "memory_max_gib=$(memory_max_gib)"
     # dmesg's ring buffer rotates the boot messages out after hours of
     # uptime; the journal of this boot keeps them.
     n=$(dmesg 2>/dev/null | grep -o 'active_cu_number[^0-9]*[0-9]*' | tail -n 1 | grep -o '[0-9]*$' || true)
@@ -145,8 +155,15 @@ memory)
     case "${2:-}" in
         0) exec tokenstation-memory unset ;;
         max) exec tokenstation-memory set max ;;
-        8 | 9 | 10 | 11 | 12 | 13 | 14) exec tokenstation-memory set "$2" ;;
-        *) echo "memory max|0|8..14" >&2; exit 2 ;;
+        8 | 9 | 10 | 11 | 12 | 13 | 14)
+            m=$(memory_max_gib)
+            if [ "$2" -gt "$m" ]; then
+                [ "$m" -ge 8 ] && echo "memory: $2 GiB would leave Linux less than 2 GiB here; max, 0 or 8..$m" >&2 ||
+                    echo "memory: $2 GiB would leave Linux less than 2 GiB here; max or 0" >&2
+                exit 2
+            fi
+            exec tokenstation-memory set "$2" ;;
+        *) echo "memory max|0|8..14 (at most $(memory_max_gib) here)" >&2; exit 2 ;;
     esac
     ;;
 cu)
@@ -173,6 +190,8 @@ model)
     else
         echo "MODEL=$dir/$name" >> "$conf"
     fi
+    # A service left off after failed starts (StartLimitBurst) starts again.
+    systemctl reset-failed tokenstation 2>/dev/null || true
     systemctl restart tokenstation
     ;;
 *)
