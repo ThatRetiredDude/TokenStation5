@@ -95,6 +95,7 @@ struct Ran {
     std::string out;
     int code = -1;
     bool timed_out = false, stopped = false, started = true;
+    bool left_running = false;  // the shell ended and something it started still holds its output
     double secs = 0;
 };
 
@@ -135,8 +136,9 @@ Ran run_shell(const std::string &cmd, double limit, const std::atomic<bool> &can
     close(p[1]);
     fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL, 0) | O_NONBLOCK);
     const size_t keep = 1u << 20;  // of the output: the rest of a flood is dropped as it comes
-    bool open = true;
-    double killed = 0;
+    bool open = true, reaped = false;
+    double killed = 0, exited = 0;
+    int st = 0;
     while (open) {
         pollfd f{p[0], POLLIN, 0};
         poll(&f, 1, 100);
@@ -154,6 +156,10 @@ Ran run_shell(const std::string &cmd, double limit, const std::atomic<bool> &can
             }
         }
         const double now = now_s();
+        if (!reaped && open && waitpid(pid, &st, WNOHANG) == pid) {
+            reaped = true;
+            exited = now;
+        }
         if (!killed && (cancel.load() || now - t0 > limit)) {
             r.stopped = cancel.load();
             r.timed_out = !r.stopped;
@@ -162,16 +168,25 @@ Ran run_shell(const std::string &cmd, double limit, const std::atomic<bool> &can
         } else if (killed && now - killed > 2) {
             kill(-pid, SIGKILL);
             break;  // whatever still holds the pipe open
+        } else if (reaped && !killed && open && now - exited > 0.5) {
+            // The command is done and a program it left running (a server
+            // started with &) holds the output open: that one goes on by itself.
+            r.left_running = true;
+            break;
         }
     }
     close(p[0]);
-    int st = 0;
-    if (killed) {
-        // A moment to end by itself, then the hard way.
-        for (int i = 0; i < 20 && waitpid(pid, &st, WNOHANG) == 0; i++) usleep(50000);
-        kill(-pid, SIGKILL);
-    }
-    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
+    if (!reaped) {
+        if (killed) {
+            // A moment to end by itself, then the hard way.
+            for (int i = 0; i < 20 && !reaped; i++) {
+                reaped = waitpid(pid, &st, WNOHANG) == pid;
+                if (!reaped) usleep(50000);
+            }
+            kill(-pid, SIGKILL);
+        }
+        while (!reaped && waitpid(pid, &st, 0) < 0 && errno == EINTR) {
+        }
     }
     r.code = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
     r.secs = now_s() - t0;
@@ -210,7 +225,8 @@ ToolResult run_command(const std::string &cmd, const std::atomic<bool> &cancel) 
     t.ok = !r.stopped && !r.timed_out && r.code == 0;
     t.head = (r.stopped ? std::string("stopped") : r.timed_out ? fmt("stopped after %.0f s", limit) : fmt("exit %d", r.code)) +
              (lines ? fmt(" · %d line%s", lines, lines == 1 ? "" : "s") : std::string(" · no output")) +
-             fmt(" · %.1f s", r.secs);
+             fmt(" · %.1f s", r.secs) + (r.left_running ? " · something it started still runs" : "");
+    if (r.left_running) how += " (a program it started is still running in the background)";
     t.text = how + "\n" + (out.empty() ? "(no output)" : middle_out(out, 3000, 5000));
     return t;
 }
