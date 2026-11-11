@@ -302,17 +302,22 @@ ts5-tui --url http://ps5.local:8081  # another one
 
     Settings → Browser (or `/browser`) says what shows the pages:
     - **Auto**: Chromium (or Chrome, Brave, Edge) if one is installed,
-      else Obscura, else the text view. `sudo apt install chromium`
-      installs one; on Debian 13 `chromium-headless-shell` is the smaller
-      package and is enough.
+      else the text view. `sudo apt install chromium` installs one; on
+      Debian 13 `chromium-headless-shell` is the smaller package and is
+      enough.
     - **Chromium**: the full browser, without a window, each page shut in
       its sandbox. On a PS5 beside a loaded 14B model it took 155 MiB
       waiting and up to 494 MiB on the heaviest page, gave the memory back
       between pages, and the model wrote as fast as without it.
     - **Obscura** ([github.com/h4ckf0r0day/obscura](https://github.com/h4ckf0r0day/obscura)):
-      the light one, 23 MiB waiting and up to 430 MiB on heavy pages. It
-      is young: some sites show nothing in it (YouTube, in our test), and
-      it has no sandbox. Put its `obscura` program on your PATH or in
+      the light one, used only when you choose it (`/browser obscura`).
+      It held 23 MiB waiting, about 200 MiB with a Wikipedia article open
+      and up to 430 MiB on heavy pages. It is young: on a PS5 it took 12 s
+      to open an article that Chromium opened in 5 s, some sites show
+      nothing in it (YouTube, in our test), it has no sandbox, and it
+      stopped answering after a click. So in Obscura ts5 opens a link by
+      its address, and starts it again when a button leaves it answering
+      nothing. Put its `obscura` program on your PATH or in
       `~/.local/bin`.
     - **Text view**: ts5's own page reader, nothing to install. No scripts
       run, so a page built by scripts shows little; links and search forms

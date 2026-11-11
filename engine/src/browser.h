@@ -31,7 +31,11 @@
 //               the Chrome DevTools Protocol on 127.0.0.1: the page's
 //               scripts run and any button works. Nothing else is needed:
 //               ts5 speaks the protocol itself.
-//   auto        the first of those that is installed, else text.
+//   auto        a Chromium if one is installed, else text. Obscura only
+//               when it is named (--kind obscura, or its path): in it a
+//               link is opened by its address and the way back is ts5's
+//               own list, as a page that moves on by itself leaves it
+//               answering nothing; stuck after a button, it is started again.
 // Only http:// and https:// pages are opened. A password box is never
 // numbered: only the user fills those in. The browser gets a profile folder
 // of its own under ~/.cache/tokenstation, removed when the program ends,

@@ -387,17 +387,18 @@ void pending_calls(std::vector<Line> &out, const Chat &c, int owner, size_t at, 
         if (!live) {
             st.add("    not run", Style(t.dim, kDefault, ITALIC));
         } else if (k > done) {
-            st.add("    next", Style(t.dim, kDefault, ITALIC));
+            st.add("    after that", Style(t.dim, kDefault, ITALIC));
         } else if (c.ask.load() == 1) {
             // ‹ Run it ›  Every command in this chat  No
             const std::string run[] = {"Run it", "Every command in this chat", "No"};
             const std::string act[] = {"Do it", "Everything on pages in this chat", "No"};
             const std::string change[] = {c.ask_opt, "Every change in this chat", "No"};
-            const std::string read[] = {"Read it", c.ask_opt, "No"};
+            const bool list = kind == 3 && c.ask_cmd.compare(0, 5, "list ") == 0;  // a folder's listing
+            const std::string read[] = {list ? "List it" : "Read it", c.ask_opt, "No"};
             const std::string call[] = {"Run it", c.ask_opt, "No"};
             const std::string *pick = kind == 4 ? call : kind == 3 ? read : kind == 2 ? change : page ? act : run;
             const int on = c.ask_pick.load();
-            st.add(kind == 3 ? "    Read it?  " : kind == 2 ? "    " + c.ask_opt + "?  " : page ? "    Do it?  " : "    Run it?  ",
+            st.add(kind == 3 ? (list ? "    List it?  " : "    Read it?  ") : kind == 2 ? "    " + c.ask_opt + "?  " : page ? "    Do it?  " : "    Run it?  ",
                    Style(t.warn, kDefault, BOLD));
             for (int p = 0; p < 3; p++) {
                 if (p == on) st.add("‹ " + pick[p] + " ›", Style(t.bg, t.warn, BOLD));
@@ -859,7 +860,7 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
                 x = s.put(x, y1, "?", Style(t.warn, kDefault, BOLD));
                 const int kind = c.ask_kind.load();
                 x = s.put(x + 1, y1, kind == 4   ? "the model wants to use an outside tool"
-                                     : kind == 3 ? "the model wants to read a file"
+                                     : kind == 3 ? "the model wants to read a file or list a folder"
                                      : kind == 2 ? "the model wants to change a file"
                                      : kind == 1 ? "the model wants to do something on a web page"
                                                  : "the model wants to run a command",
@@ -1241,7 +1242,10 @@ ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
         const std::string server = mcp_server_of(u.name);
         const bool asks = mcp_asks(u.name);
         preview = mcp_call_preview(u.args);  // what it is called with, a line each
-        cmd = mcp_call_line(u.name, preview.empty() ? u.args : std::string());
+        // "notes: add  (outside tool: Adds a note.)": whose it is and what it says it does.
+        const std::string what = mcp_tool_what(u.name);
+        cmd = mcp_call_line(u.name, preview.empty() ? u.args : std::string()) +
+              (what.empty() ? "  (outside tool)" : "  (outside tool: " + what + ")");
         opt = "Every call to " + server + ", this chat";
         dir = server;
         kind = 4;

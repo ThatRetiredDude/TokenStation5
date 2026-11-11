@@ -254,6 +254,12 @@ def common(b, base, mode):
     check(w["asks"] is False and w["line"] == f'follow the link "Volga" to {base}/volga.html', f"{mode}: a link is not asked about", w)
     w = b.ask(do="what", act="open", url="https://example.org/x")
     check(w["asks"] is False, f"{mode}: nor is opening a site", w)
+    # (What will be refused is not asked about first: R1 14B on the PS5 typed into a link, and
+    # the user was asked to approve it before the tool said no.)
+    w = b.ask(do="what", act="type", n=number(t, r"Volga\[(\d+)\]"), text="x")
+    check(w["asks"] is False, f"{mode}: nor typing into what is not a text box, which is refused", w)
+    w = b.ask(do="what", act="click", n=box)
+    check(w["asks"] is False, f"{mode}: nor a click on a text box", w)
     for local in ("http://192.168.1.1/", "http://localhost:8080/admin", "http://router/", "http://10.0.0.5/x",
                   "http://nas.local/", "http://ps5.tail1234.ts.net/"):
         w = b.ask(do="what", act="open", url=local)
@@ -453,9 +459,9 @@ def test_browser(ts5, program, base):
     check(a["ok"] and a["url"] == base + "/volga.html", "chromium: and its links work as ever", a)
     b.close()
 
-    # Auto, with two browsers installed and the first one broken: the second
-    # is taken, and the page says why. The second stands in for Obscura: its
-    # command line, the real browser behind it.
+    # Auto, with a Chromium that is broken and an Obscura beside it: the text view, and the page
+    # says why. Obscura is not Auto's (on the PS5 it stopped answering after a click, twice).
+    # The stand-in for Obscura takes its command line and has the real browser behind it.
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         with open(os.path.join(tmp, "chromium"), "w") as f:
@@ -471,13 +477,34 @@ def test_browser(ts5, program, base):
         env = dict(os.environ, PATH=tmp + os.pathsep + "/usr/bin" + os.pathsep + "/bin", HOME=tmp)
         env.pop("TS5_BROWSER_FLAGS", None)
         b = Browser(ts5, "--program", "auto", env=env)
-        a = b.ask(do="open", url=base + "/scripted.html")
-        check(a["ok"] and a["mode"] == "obscura" and "chromium) could not be started" in a["text"] and
-              "this one is broken" in a["text"] and "Built by a script" in a["text"],
-              "auto: the first browser is broken, the second shows the page and says so", a)
         a = b.ask(do="open", url=base + "/")
-        check(a["ok"] and "could not be started" not in a["text"] and "Rivers" in a["text"], "auto: ... said once", a)
+        check(a["ok"] and a["mode"] == "text" and "chromium) could not be started" in a["text"] and
+              "this one is broken" in a["text"] and "Rivers" in a["text"],
+              "auto: the Chromium is broken, the text view shows the page and says so (Obscura is not taken)", a)
+        a = b.ask(do="open", url=base + "/volga.html")
+        check(a["ok"] and "could not be started" not in a["text"], "auto: ... said once", a)
         check(b.close() == 0, "auto: ends when its input closes")
+
+        # Obscura, asked for by name: a link is opened by its address (a page that moves on by
+        # itself leaves Obscura answering nothing), and the way back is ts5's own list.
+        trace = os.path.join(tmp, "trace.txt")
+        b = Browser(ts5, "--program", "auto", "--kind", "obscura", env=dict(env, TS5_BROWSER_TRACE=trace))
+        a = b.ask(do="open", url=base + "/scripted.html")
+        check(a["ok"] and a["mode"] == "obscura" and "Built by a script" in a["text"], "obscura: asked for by name, it shows the page", a)
+        a = b.ask(do="open", url=base + "/")
+        t = a["text"]
+        a = b.ask(do="click", n=number(t, r"Volga\[(\d+)\]"))
+        log = open(trace).read()
+        check(a["ok"] and a["url"] == base + "/volga.html" and log.count("Page.navigate ") == 3 and "el.click()" not in log,
+              "obscura: a link is opened by its address", (a, log[-600:]))
+        a = b.ask(do="back")
+        check(a["ok"] and a["url"] == base + "/" and "Page.navigateToHistoryEntry" not in open(trace).read() and
+              "history.back" not in open(trace).read(), "obscura: back is the page before, by ts5's own list", a)
+        a = b.ask(do="back")
+        check(a["ok"] and a["url"] == base + "/scripted.html", "obscura: and the one before that", a)
+        a = b.ask(do="back")
+        check(not a["ok"] and "no page to go back to" in a["text"], "obscura: then there is none", a)
+        check(b.close() == 0, "obscura: ends when its input closes")
 
 
 def test_programs(ts5, base):

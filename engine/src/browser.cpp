@@ -766,10 +766,12 @@ bool is_obscura(const std::string &program) {
     return lower(program.substr(slash == npos ? 0 : slash + 1)).find("obscura") != npos;
 }
 
-// The browsers that are installed, the one to use first: a Chromium (it
-// shows more sites as they are, gives memory back between pages and runs
-// each page in a sandbox), then Obscura (the light one: a sixth of the
-// memory while idle). kind narrows it to one of them.
+// The browser that is installed, for Auto: a Chromium (it shows more sites
+// as they are, gives memory back between pages and runs each page in a
+// sandbox). Obscura (the light one) only when it is asked for by kind: on
+// the PS5 it took 12 s for a page Chromium showed in 5, and stopped
+// answering after a click (2026-11-11, twice), so Auto goes from Chromium
+// to the text view.
 std::vector<std::string> find_browsers(const std::string &kind) {
     std::vector<std::string> out;
     if (kind != "obscura")
@@ -782,7 +784,7 @@ std::vector<std::string> find_browsers(const std::string &kind) {
                 break;
             }
         }
-    if (kind != "chromium") {
+    if (kind == "obscura") {
         const std::string p = which("obscura");
         if (!p.empty()) out.push_back(p);
     }
@@ -831,6 +833,12 @@ public:
         if (el.kind == "link" && !el.href.empty() && el.href[0] != '#' && lower(el.href).compare(0, 11, "javascript:") != 0 &&
             resolve_url(url_, el.href).empty())
             return fail("That link doesn't lead to a web page (" + brief(el.href, 60) + ").");
+        // Obscura stops answering once a page has moved on by itself (on
+        // the PS5 every command after a click on a link timed out, while
+        // its events still came): there a link is opened by its address.
+        if (obscura_ && !program_.empty() && el.kind == "link" && !el.href.empty() && el.href[0] != '#' &&
+            lower(el.href).compare(0, 11, "javascript:") != 0)
+            return go(resolve_url(url_, el.href), true);
         if (!program_.empty()) return act("(() => { const el = document.querySelector('[data-ts5=\"" + el.mark +
                                               "\"]'); if (!el) return 'gone'; el.scrollIntoView({block: 'center'}); "
                                               "el.click(); return 'ok'; })()",
@@ -906,7 +914,9 @@ public:
     }
 
     Answer back() {
-        if (!program_.empty()) {
+        // (Obscura goes back by ts5's own list, each page opened by its
+        // address: its own history is a move of the page's, see click.)
+        if (!program_.empty() && !obscura_) {
             if (url_.empty()) return fail("There is no page to go back to.");
             std::string why;
             if (!awake(why)) return fail(why);
@@ -948,6 +958,10 @@ public:
             if (url.find("://") == npos) url = "https://" + url;
             asks = local_host(host_of(url));
             line = "open " + brief(url, 200) + (asks ? " (on this machine or your own network)" : "");
+        } else if (act == "click" && el && el->kind == "input") {
+            line = "click a text box";  // refused (click): nothing to ask
+        } else if (act == "type" && el && el->kind != "input") {
+            line = "type into what is not a text box";  // refused (type)
         } else if (act == "click" && el) {
             const std::string name = el->label.empty() ? "" : " \"" + el->label + "\"";
             if (el->kind == "link") {
@@ -1066,8 +1080,15 @@ private:
             } else {
                 Json r;
                 std::string err;
-                if (!cdp_->call("Page.navigate", "{\"url\":" + json_escape(url) + "}", r, err, 40000))
-                    return fail("The page could not be opened: " + lost(err) + ".");
+                bool ok = cdp_->call("Page.navigate", "{\"url\":" + json_escape(url) + "}", r, err, 40000);
+                if (!ok && obscura_ && !cdp_->gone() && err.find("didn't answer") != npos) {
+                    // (An Obscura that is stuck, see act: once more, with a fresh one.)
+                    quit();
+                    std::string again;
+                    if (!awake(again, false)) return fail(again);
+                    ok = cdp_->call("Page.navigate", "{\"url\":" + json_escape(url) + "}", r, err, 40000);
+                }
+                if (!ok) return fail("The page could not be opened: " + lost(err) + ".");
                 const std::string net = r["errorText"].str();
                 if (!net.empty())
                     return fail("The page could not be opened: " +
@@ -1077,8 +1098,14 @@ private:
                                                 : net.find("ABORTED") != npos ? "it is a file to download, not a page"
                                                                               : "the site couldn't be reached") +
                                 " (" + net + ").");
+                const std::string left = url_;
                 settle(20);
-                return snapshot();
+                const Answer a = snapshot();
+                if (obscura_ && a.ok && remember && !left.empty() && left != url_) {
+                    back_.push_back(left);
+                    if (back_.size() > 50) back_.erase(back_.begin());
+                }
+                return a;
             }
         }
         HttpResponse resp;
@@ -1179,21 +1206,24 @@ private:
     // Waits for the page to be loaded and still: complete, and its size the
     // same on two looks, or three seconds past complete (a page that never
     // stops moving); max_s at most.
-    void settle(double max_s) {
+    // False when the browser gave no answer twice running (it is stuck).
+    bool settle(double max_s) {
         const double t0 = now_s();
         double complete = 0;
         std::string last;
-        int same = 0;
+        int same = 0, silent = 0;
         while (now_s() - t0 < max_s) {
             std::string v, err;
             const bool ok = cdp_->eval("document.readyState + ' ' + (document.documentElement ? "
                                        "document.documentElement.outerHTML.length : 0)",
                                        v, err, 5000);
-            if (cdp_->gone()) return;
+            if (cdp_->gone()) return true;
+            silent = !ok && err.find("didn't answer") != npos ? silent + 1 : 0;
+            if (silent >= 2) return false;
             if (ok && v.compare(0, 9, "complete ") == 0) {
                 if (complete == 0) complete = now_s();
                 same = v == last ? same + 1 : 0;
-                if (same >= 2 || now_s() - complete > 3) return;
+                if (same >= 2 || now_s() - complete > 3) return true;
             } else {
                 complete = 0;
                 same = 0;
@@ -1201,6 +1231,7 @@ private:
             last = ok ? v : "";
             sleep_ms(200);
         }
+        return true;
     }
 
     // The page as the browser has it now.
@@ -1260,8 +1291,18 @@ private:
             return a;
         }
         sleep_ms(300);
-        settle(15);
-        return snapshot();
+        const bool answers = settle(15);
+        Answer a = answers ? snapshot() : fail("The page could not be read: the browser didn't answer.");
+        if (!a.ok && obscura_ && cdp_ && !cdp_->gone() && a.text.find("didn't answer") != npos) {
+            // Obscura after a button or Enter that moved the page on (see
+            // click): it answers nothing more. Stopped, it comes back with
+            // the next request, on the page it was on before.
+            rest();
+            a.text = "Obscura stopped answering after that, as it does when a button or Enter moves a page on. It was "
+                     "stopped; the next request starts it again on the page before (" + brief(url_, 120) +
+                     "). What was done may or may not have been sent. A Chromium does this properly.";
+        }
+        return a;
     }
 
     std::string program_;  // "" for the text view

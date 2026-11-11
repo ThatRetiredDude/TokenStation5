@@ -444,7 +444,8 @@ FilePlan file_plan(const std::string &name, const std::string &args) {
     // "Every file in this folder": the start folder for a path in it,
     // else the file's own folder (a folder's own self, when it is listed).
     p.folder = inside ? start : name == "list_folder" ? p.path : folder_of(p.path);
-    p.line = std::string(name == "list_folder" ? "list the folder " : "read ") + path_shown(p.path) +
+    const std::string shown_path = path_shown(p.path);
+    p.line = (name != "list_folder" ? "read " + shown_path : shown_path == "." ? "list this folder" : "list the folder " + shown_path) +
              (p.hidden ? "  (hidden)" : inside ? "" : "  (outside the folder ts5-tui was started in)");
     return p;
 }
@@ -458,7 +459,7 @@ std::string file_call_line(const std::string &name, const std::string &args) {
         const int from = (int)j["start_line"].num(1);
         return "reads " + shown + (from > 1 ? fmt(" from line %d", from) : "");
     }
-    if (name == "list_folder") return "lists the folder " + shown;
+    if (name == "list_folder") return shown == "." ? "lists this folder" : "lists the folder " + shown;
     return (name == "edit_file" ? "changes " : "writes ") + shown;
 }
 

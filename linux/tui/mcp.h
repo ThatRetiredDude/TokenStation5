@@ -74,10 +74,12 @@ bool is_mcp_tool(const std::string &shown);
 // The server a tool is of, and whether its calls are asked first.
 std::string mcp_server_of(const std::string &shown);
 bool mcp_asks(const std::string &shown);
-// One line for the screen ("notes: search {"query": "tax"}"), and the
-// arguments a line each, for the question.
+// One line for the screen ("notes: search  query: tax"), the arguments a
+// line each, for the question, and the first sentence of what the tool
+// says it does.
 std::string mcp_call_line(const std::string &shown, const std::string &args);
 std::string mcp_call_preview(const std::string &args);
+std::string mcp_tool_what(const std::string &shown);
 ToolResult mcp_call(const std::string &shown, const std::string &args, const std::atomic<bool> &cancel);
 
 // `ts5-tui --mcp`: starts the servers, says what each one offers, and ends

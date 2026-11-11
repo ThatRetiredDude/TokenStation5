@@ -840,7 +840,9 @@ bool mcp_add(const std::string &name, const std::string &line, std::string &why)
         e.set("command", Json::string(w[0]));
         Json args;
         args.type = Json::ARR;
-        for (size_t i = 1; i < w.size(); i++) args.a.push_back(Json::string(w[i]));
+        // (A "~/" is the home folder, as a shell would have made it: the
+        // program gets its arguments as they are written here.)
+        for (size_t i = 1; i < w.size(); i++) args.a.push_back(Json::string(home_path(w[i])));
         e.set("args", args);
         if (!env.keys.empty()) e.set("env", env);
         servers.set(name, e);
@@ -983,9 +985,30 @@ std::string mcp_call_line(const std::string &shown, const std::string &args) {
         size_t at;
         if (const auto s = find_tool(shown, at)) server = s->name, tool = s->tools[at].name;
     }
+    // "notes: add  text: milk, when: today" (what it is called with as the
+    // question's lines have it, on one line).
     Json j;
-    const bool none = !Json::parse(args, j) || j.type != Json::OBJ || j.keys.empty();
-    return (server.empty() ? "" : server + ": ") + one_line(tool, 80) + (none ? "" : " " + one_line(j.dump(), 300));
+    std::string with;
+    if (Json::parse(args, j) && j.type == Json::OBJ)
+        for (const std::string &k : j.keys) with += (with.empty() ? "" : ", ") + k + ": " + one_line(text_of(j[k]), 80);
+    return (server.empty() ? "" : server + ": ") + one_line(tool, 80) + (with.empty() ? "" : "  " + one_line(with, 300));
+}
+
+std::string mcp_tool_what(const std::string &shown) {
+    std::string what;
+    {
+        std::lock_guard<std::mutex> l(g_mu);
+        size_t at;
+        if (const auto s = find_tool(shown, at)) what = s->tools[at].what;
+    }
+    // Its first sentence, on one line.
+    what = one_line(what, 400);
+    for (size_t i = 0; i + 1 < what.size(); i++)
+        if ((what[i] == '.' || what[i] == '!' || what[i] == '?') && what[i + 1] == ' ') {
+            what.resize(i + 1);
+            break;
+        }
+    return one_line(what, 100);
 }
 
 std::string mcp_call_preview(const std::string &args) {

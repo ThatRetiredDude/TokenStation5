@@ -2434,11 +2434,17 @@ std::vector<SetRow> settings_rows() {
         const bool has = at == 1   ? std::find(found.begin(), found.end(), "Obscura") != found.end()
                          : at == 2 ? !found.empty() && found[0] != "Obscura"
                                    : false;
+        // (Auto is a Chromium or the text view: Obscura only when it is chosen.)
+        const bool only_obscura = !found.empty() && found[0] == "Obscura";
         SetRow x{"Browser", at < 0 ? c.browser : names[at],
-                 at == 0   ? (found.empty() ? "Auto: " + none : "Auto: " + found[0] + " (installed: " + have + ")")
+                 at == 0   ? (found.empty() ? "Auto: " + none
+                              : only_obscura ? "Auto: no Chromium is installed, so pages are read as plain text (Obscura is "
+                                               "used only when you choose it)"
+                                             : "Auto: " + found[0] + " (installed: " + have + ")")
                  : at == 3 ? "ts5's own page reader: light and quick, but a page built by scripts shows little"
                  : at < 0  ? "a browser program you named with /browser"
-                 : has ? (at == 1 ? std::string("Obscura: light on memory while it waits, but some sites show nothing in it")
+                 : has ? (at == 1 ? std::string("Obscura: light on memory, but young: slow to open a page, some sites show "
+                                                "nothing in it, and it can stop answering after a button")
                                   : found[0] + ": the full browser, each page shut in its sandbox")
                        : std::string(names[at]) + " is not installed: pages are read as plain text until it is"};
         x.change = [save, at](int d) {
@@ -3026,7 +3032,11 @@ void run_command(const std::string &line) {
             h += found.empty() ? "No browser is installed here, so pages are read as plain text: their scripts don't run, and "
                                  "only links and simple forms work. Installing Chromium (`sudo apt install chromium`) or "
                                  "Obscura gives the model the page as you would see it.\n"
-                               : "Installed here: " + have + ". Auto takes " + found[0] + ".\n";
+                               : "Installed here: " + have + ". Auto takes " +
+                                     (found[0] == "Obscura" ? std::string("the text view: Obscura is young (slow to open a page, "
+                                                                          "and it can stop answering after a button), so it is "
+                                                                          "used only when you choose it with `/browser obscura`")
+                                                            : found[0]) + ".\n";
             h += "The model follows links by itself. Before it presses a button or types into a page, you are asked.";
             chat_note(c, h);
         }
@@ -3133,7 +3143,11 @@ void run_command(const std::string &line) {
                 h += "None are set up. Such a program gives the model its tools (a calendar, a database, a code host, "
                      "whatever it is for): `/mcp add NAME PROGRAM [ARGUMENTS]`, with the command line the program's own "
                      "instructions give (often `npx -y …` or `uvx …`).\n";
-            h += "\nThe list is kept in `" + path_shown(mcp_path()) + "`, in the layout other MCP clients read, so a list made for one "
+            // (With ~ for the home folder, wherever ts5-tui was started.)
+            std::string kept = mcp_path();
+            if (const std::string hd = getenv("HOME") ? getenv("HOME") : ""; !hd.empty() && hd != "/" && kept.compare(0, hd.size() + 1, hd + "/") == 0)
+                kept = "~" + kept.substr(hd.size());
+            h += "\nThe list is kept in `" + kept + "`, in the layout other MCP clients read, so a list made for one "
                  "of them can be pasted in. The model's every call to such a tool is shown to you first, with what it is "
                  "called with, until you say otherwise for that program. A program runs with your rights on this machine: "
                  "add only ones you trust.";
@@ -4008,7 +4022,7 @@ void tick() {
         g->ask_told = g->chat.ask_t0.load();
         const int kind = g->chat.ask_kind.load();
         show_toast(kind == 4   ? "The model wants to use an outside tool: F1 (or /chat) to see it and say yes or no"
-                   : kind == 3 ? "The model wants to read a file: F1 (or /chat) to see it and say yes or no"
+                   : kind == 3 ? "The model wants to read a file or list a folder: F1 (or /chat) to see it and say yes or no"
                    : kind == 2 ? "The model wants to change a file: F1 (or /chat) to see it and say yes or no"
                    : kind == 1 ? "The model wants to do something on a web page: F1 (or /chat) to see it and say yes or no"
                                : "The model wants to run a command: F1 (or /chat) to see it and say yes or no",

@@ -61,12 +61,20 @@ std::string render_results(const Tokenizer &t, ToolFormat f, const std::vector<T
 
 // A finished turn: its text without the calls, and the calls. A call whose JSON
 // does not parse stays in the text. names: the request's tools, for calls
-// written as elements named after them.
+// written as elements named after them, for a generic model's calls written
+// as bare objects on lines of their own, and for a call by a name that is
+// all but one of them (tool_named).
 struct ParsedTurn {
     std::string content;
     std::vector<ToolCall> calls;
 };
 ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names = {});
+
+// The one of `names` a call's name means: itself; the same but for case and
+// the marks between words; or the one it is the end of, or that ends it, at
+// such a mark ("env" for "fake_env", "functions.read_file" for "read_file").
+// "" when none or several fit.
+std::string tool_named(const std::string &name, const std::vector<std::string> &names);
 
 // Where a reply writes a call's result itself: "Result of NAME:" at the
 // start of a line after the thinking, NAME one of the request's tools (or
