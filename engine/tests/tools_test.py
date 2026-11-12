@@ -1358,6 +1358,12 @@ class Wikipedia(http.server.BaseHTTPRequestHandler):
         words = q.get("gsrsearch", [""])[0]
         Wikipedia.seen.append((urllib.parse.urlsplit(self.path).path, q))
         out = {"batchcomplete": True}
+        if "toomany" in words:
+            # What Wikipedia sends an address it has had too many requests from.
+            self.send_response(429)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if "DeltaNet" in words:
             # Its search splits and stems words: "gate", "delta", "net".
             out["query"] = {"pages": [
@@ -1413,6 +1419,11 @@ def test_wikipedia(ts5, model, tdir):
           seen[0][1]["gsrlimit"] == ["5"] and seen[0][1]["generator"] == ["search"] and
           seen[0][1]["prop"] == ["extracts|info"] and seen[0][1]["exintro"] == ["1"])
     failed += report(ok, "Wikipedia search: the articles, best first, long ones cut", f"rc {rc}\n{out}\n{err}\n{seen}")
+    # Too many searches from this address (on the PS5 after two hours of tests): said as that.
+    rc, out, err, seen = search("toomany searches")
+    failed += report(rc == 1 and "Wikipedia has had too many searches from this address and asks to wait a while (HTTP 429)" in out
+                     and "answered HTTP 429" in err and len(seen) == 1,
+                     "Wikipedia search: too many searches (429) is said as that", f"rc {rc}\n{out}\n{err}")
     # No article has every word: once more, as any of the words.
     rc, out, err, seen = search("is there nothing on the PS5?")
     ok = (rc == 0 and "[1] PlayStation 5 system software" in out and len(seen) == 2 and

@@ -276,7 +276,13 @@ std::string wikipedia_search(const std::string &query, int n, std::string &log, 
             log = "web_search \"" + query + "\": Wikipedia " +
                   (!ok ? err : resp.status != 200 ? "answered HTTP " + std::to_string(resp.status) : "sent no JSON") + " (" +
                   took() + ")";
-            return kFailed + std::string(!ok ? "Wikipedia couldn't be reached" : "Wikipedia had a problem") + kTell;
+            // (429: on the PS5, after some hundreds of searches and pages in two hours of tests.)
+            return kFailed +
+                   std::string(!ok ? "Wikipedia couldn't be reached"
+                               : resp.status == 429 ? "Wikipedia has had too many searches from this address and asks to wait a "
+                                                      "while (HTTP 429)"
+                                                    : "Wikipedia had a problem") +
+                   kTell;
         }
         for (auto &p : r["query"]["pages"].a)
             if (!p["title"].str().empty()) {
