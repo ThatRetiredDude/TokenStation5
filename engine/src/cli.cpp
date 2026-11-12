@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "backend.h"
+#include "access.h"
 #include "browser.h"
 #include "checks.h"
 #include "cli.h"
@@ -86,6 +87,7 @@ int usage() {
             "usage: ts5 serve|run|bench|check|tokenize|logits|prompt -m model.gguf [options]\n"
             "       ts5 search QUERY | ts5 page URL [MAX_CHARS] | ts5 usage-parse FILE\n"
             "       ts5 browser [--program auto|text|PATH] [--kind chromium|obscura] [--chars N] [--idle SECONDS]\n"
+            "       ts5 keys [--file FILE] list | new NAME | on KEY | off KEY | remove KEY | require on|off\n"
             "       ts5 tool-parse hermes|llama3|mistral|gemma|gemma4|generic [TOOL...] < TEXT\n"
             "       ts5 fetch URL FILE [--sha256 HEX] | ts5 peak [--device N] [--gib G]\n"
             "       ts5 helpers -m model.gguf --helper FILE...  (which files could draft for the model)\n"
@@ -216,6 +218,7 @@ int no_model_command(int argc, char **argv) {
         return 0;
     }
     if (cmd == "browser") return browser_main(argc, argv);
+    if (cmd == "keys") return keys_main(argc, argv);
     if (argc < 3) return usage();
     std::string f = argv[2];
     ToolFormat tf = f == "hermes"    ? ToolFormat::HERMES
@@ -476,7 +479,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     if (argc >= 2 && (std::string(argv[1]) == "search" || std::string(argv[1]) == "tool-parse" ||
                       std::string(argv[1]) == "usage-parse" || std::string(argv[1]) == "page" ||
                       std::string(argv[1]) == "html-text" || std::string(argv[1]) == "html-view" ||
-                      std::string(argv[1]) == "browser"))
+                      std::string(argv[1]) == "browser" || std::string(argv[1]) == "keys"))
         return no_model_command(argc, argv);
     Args a;
     if (!parse(argc, argv, a)) return usage();
@@ -785,8 +788,31 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
                 log.flush();
             };
         }
+        // TS5_KEYS=FILE: the API keys other machines get in with, made by
+        // "ts5 keys" (access.h). TS5_API_KEY is then one more key.
+        static KeyFile *keys = nullptr;  // as long as the server
+        Server::Authorize authorize;
+        if (const char *kf = getenv("TS5_KEYS"); kf && *kf) {
+            keys = new KeyFile(kf);
+            std::string err;
+            if (!keys->load(err)) fprintf(stderr, "ts5: %s\n", err.c_str());
+            size_t on = 0;
+            for (auto &k : keys->keys()) on += k.on;
+            fprintf(stderr, "ts5: API keys in %s: %zu on; other machines %s\n", kf, on,
+                    keys->required() ? "need one" : "get in without one (ts5 keys require on)");
+            const char *one = getenv("TS5_API_KEY");
+            authorize = [one = std::string(one ? one : "")](const std::string &got, const std::string &client,
+                                                            std::string &name) {
+                if (!one.empty() && got == one) {
+                    name = "TS5_API_KEY";
+                    return true;
+                }
+                return keys->authorize(got, client, name);
+            };
+        }
         return serve(eng, basename_of(a.model), a.host, a.port,
-                     [&](int port) { if (on_serving) on_serving(basename_of(a.model), port); }, on_usage);
+                     [&](int port) { if (on_serving) on_serving(basename_of(a.model), port); }, on_usage, authorize,
+                     authorize ? "ts5-tui on that machine, on its Access page (F6), or with \"ts5 keys new NAME\"." : "");
     }
     return usage();
 }

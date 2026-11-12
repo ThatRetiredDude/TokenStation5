@@ -319,6 +319,8 @@ jobs:
           browser=$(command -v google-chrome chromium chromium-browser | head -1 || true)
           echo "browser: ${browser:-none, so the text view only}"
           python3 engine/tests/browser_test.py "$(command -v ts5)" $browser
+      - name: API keys (ts5 keys, and ts5 serve letting another machine in by them)
+        run: python3 engine/tests/access_test.py "$(command -v ts5)" /tmp/model/test.gguf vk
       - name: Outside tools (ts5-tui --mcp against an MCP server served here, no model)
         run: python3 linux/tui/test/mcp_test.py "$(command -v ts5-tui)"
       - name: Tune it (ts5-tune, then the engine reads tune.env; --models, then the per-model file)

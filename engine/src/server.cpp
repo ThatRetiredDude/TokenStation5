@@ -389,10 +389,10 @@ void handle(int fd, Server::State &state, Usage &u) {
     if (r.path != "/health" && state.authorize && !state.authorize(r.key, u.rec.client, u.rec.key)) {
         log_line("ts5: %s %s %s: %s", u.rec.client.c_str(), r.method.c_str(), r.path.c_str(),
                 r.key.empty() ? "no API key, refused" : "an API key that isn't one of this PS5's, refused");
-        send_all(fd, response(401, error_body(r.key.empty() ? "This TokenStation5 needs an API key. Make one in "
-                                                              "Settings on the PS5, under Apps."
+        const std::string where = state.key_hint.empty() ? "Settings on the PS5, under Apps." : state.key_hint;
+        send_all(fd, response(401, error_body(r.key.empty() ? "This TokenStation5 needs an API key. Make one in " + where
                                                             : "Incorrect API key provided. Keys are made and "
-                                                              "turned on in Settings on the PS5, under Apps.",
+                                                              "turned on in " + where,
                                               "invalid_api_key")));
         if (completions) {
             {
@@ -1370,11 +1370,14 @@ void Server::accept_loop() {
 }
 
 int serve(Engine &e, const std::string &model_name, const std::string &host, int port,
-          const std::function<void(int)> &on_listening, const std::function<void(const UsageRecord &)> &on_usage) {
+          const std::function<void(int)> &on_listening, const std::function<void(const UsageRecord &)> &on_usage,
+          const Server::Authorize &authorize, const std::string &key_hint) {
     static Server server;
     server.set_on_usage(on_usage);
-    // TS5_API_KEY=KEY: requests must send that key.
-    if (const char *k = getenv("TS5_API_KEY"); k && *k)
+    if (!key_hint.empty()) server.set_key_hint(key_hint);
+    // The caller's rule, or TS5_API_KEY=KEY: requests must send that key.
+    if (authorize) server.set_authorize(authorize);
+    else if (const char *k = getenv("TS5_API_KEY"); k && *k)
         server.set_authorize([key = std::string(k)](const std::string &got, const std::string &, std::string &name) {
             name = got == key ? "TS5_API_KEY" : "";
             return got == key;
