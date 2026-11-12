@@ -113,6 +113,7 @@ elif [ "$what" = obscura ]; then
         rm -rf "$part"
         exit 3
     fi
+    say "Checked: its SHA-256 is the one ts5 expects ($sum)."
     if ! tar -xzf "$part/obscura.tar.gz" -C "$part"; then
         say "The download could not be unpacked: nothing was installed."
         rm -rf "$part"

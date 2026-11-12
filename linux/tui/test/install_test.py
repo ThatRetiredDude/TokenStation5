@@ -70,6 +70,8 @@ def main():
               "obscura: a download that fails installs nothing", (code, out))
 
         code, out = run(tui, home, "obscura", TS5_TEST_OBSCURA_URL=url, TS5_TEST_OBSCURA_SHA256=sha)
+        check("Checked: its SHA-256 is the one ts5 expects (" + sha + ")." in out,
+              "obscura: it says that the download was checked, and against what", (code, out))
         check(code == 0 and "is installed" in out and os.path.realpath(link) == os.path.join(where, "obscura") and
               os.access(link, os.X_OK) and os.path.realpath(link + "-worker") == os.path.join(where, "obscura-worker"),
               "obscura: unpacked into the data folder, with ~/.local/bin/obscura leading to it", (code, out, os.listdir(d)))

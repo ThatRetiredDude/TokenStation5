@@ -318,29 +318,80 @@ std::string wikipedia_search(const std::string &query, int n, std::string &log, 
 #ifndef TS5_PS5
 // ---- Grokipedia (grokipedia.com, xAI's encyclopedia): the site's own search.
 
-// Markdown as plain words: a link is its words, a source mark ("[](https://...)")
-// is nothing, and the marks for bold and headings go.
-std::string markdown_plain(const std::string &md) {
+// Where the target of a Markdown link or picture ends: the ")" that closes
+// the "(" at `open`, past "\)" and pairs of brackets inside it (Grokipedia's
+// picture files are named "..._\(28493220635\)"). npos when the line or the
+// text ends first: a passage cut in the middle of one.
+size_t target_end(const std::string &md, size_t open) {
+    int depth = 0;
+    for (size_t i = open; i < md.size() && i - open < 2000; i++) {
+        const char c = md[i];
+        if (c == '\\') {
+            i++;
+        } else if (c == '\n') {
+            break;
+        } else if (c == '(') {
+            depth++;
+        } else if (c == ')' && --depth == 0) {
+            return i;
+        }
+    }
+    return std::string::npos;
+}
+
+// Markdown as plain words on one line: a link is its words, a picture and
+// a source mark ("[](https://...)") are nothing, a heading's line goes
+// (after `lead` characters of text the first heading ends it: an article's
+// opening, not its next section), and so do the marks for bold and code. A
+// link or picture that the text is cut in the middle of goes too.
+std::string markdown_plain(const std::string &md, size_t lead = std::string::npos) {
     std::string out;
+    bool line_start = true;
     for (size_t i = 0; i < md.size(); i++) {
         const char c = md[i];
-        if (c == '[') {
-            const size_t close = md.find(']', i);
-            if (close != std::string::npos && close + 1 < md.size() && md[close + 1] == '(' && close - i < 300) {
-                const size_t end = md.find(')', close);
-                if (end != std::string::npos && end - close < 2000) {
-                    out += md.substr(i + 1, close - i - 1);
-                    i = end;
-                    continue;
-                }
-            }
-        }
-        if (c == '*' || c == '`') continue;
-        if (c == '#' && (i == 0 || md[i - 1] == '\n' || md[i - 1] == '#')) continue;
-        if (c == '\n' || c == '\r' || c == '\t') {
-            if (!out.empty() && out.back() != ' ') out += ' ';
+        if (line_start && (c == ' ' || c == '\t')) continue;
+        if (line_start && c == '#') {
+            if (out.size() >= lead) break;
+            const size_t nl = md.find('\n', i);
+            if (nl == std::string::npos) break;
+            i = nl;
             continue;
         }
+        const bool picture = c == '!' && i + 1 < md.size() && md[i + 1] == '[';
+        if (c == '[' || picture) {
+            const size_t open = i + (picture ? 1 : 0);
+            size_t close = open + 1;
+            while (close < md.size() && md[close] != ']' && md[close] != '\n' && close - open < 300) close++;
+            const bool closed = close < md.size() && md[close] == ']';
+            if (closed && close + 1 < md.size() && md[close + 1] == '(') {
+                if (!picture) out += md.substr(open + 1, close - open - 1);
+                const size_t end = target_end(md, close + 1);
+                if (end == std::string::npos) {
+                    // Cut in its target: to the end of the line, or of the text.
+                    const size_t nl = md.find('\n', close);
+                    if (nl == std::string::npos) break;
+                    i = nl - 1;
+                } else {
+                    i = end;
+                }
+                line_start = false;
+                continue;
+            }
+            // "[](" at the very end, or a picture's name the text is cut in.
+            if ((!closed && close >= md.size()) || (closed && close + 1 >= md.size() && (picture || close == open + 1))) break;
+        }
+        if (c == '\\' && i + 1 < md.size() && strchr("()[]_*#`!.-", md[i + 1])) {
+            out += md[++i];
+            line_start = false;
+            continue;
+        }
+        if (c == '*' || c == '`') continue;
+        if (c == '\n' || c == '\r' || c == '\t') {
+            if (!out.empty() && out.back() != ' ') out += ' ';
+            if (c == '\n') line_start = true;
+            continue;
+        }
+        line_start = false;
         if (c == ' ' && (out.empty() || out.back() == ' ')) continue;
         out += c;
     }
@@ -444,10 +495,8 @@ std::string grokipedia_search(const std::string &query, int n, std::string &log,
         for (auto &x : r["results"].a) {
             const std::string slug = x["slug"].str(), title = x["title"].str();
             if (slug.empty() || title.empty()) continue;
-            std::string text = x["snippet"].str();
-            for (char &c : text)
-                if (c == '\n' || c == '\r' || c == '\t') c = ' ';
-            while (!text.empty() && text.back() == ' ') text.pop_back();
+            // (A passage is cut from the article's Markdown, source marks and all.)
+            const std::string text = markdown_plain(x["snippet"].str());
             found.push_back({title, base + "/page/" + path_escape(slug), text});
             if ((int)found.size() >= n) break;
         }
@@ -459,8 +508,10 @@ std::string grokipedia_search(const std::string &query, int n, std::string &log,
             if (http_get(base + "/api/page-preview?slug=" + url_escape(slug) + "&content=1", {"Accept: application/json"}, page,
                          e2, 64u << 10, 20) &&
                 page.status == 200) {
-                std::string text = markdown_plain(content_start(page.body, 8000));
-                // (The text starts with the article's name, as a heading.)
+                // The opening: what stands before the first section, or more
+                // where that is only a line or two. (The article's name, a
+                // heading at the start, goes with the other headings.)
+                std::string text = markdown_plain(content_start(page.body, 8000), 400);
                 if (text.compare(0, found[0].title.size(), found[0].title) == 0) text.erase(0, found[0].title.size());
                 while (!text.empty() && text[0] == ' ') text.erase(0, 1);
                 if (text.size() > found[0].text.size()) found[0].text = text;

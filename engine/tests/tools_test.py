@@ -1487,10 +1487,11 @@ def test_wikipedia(ts5, model, tdir):
 
 
 class Grokipedia(http.server.BaseHTTPRequestHandler):
-    """grokipedia.com as it answered on 2026-11-12: its search (results with slug, title and a plain
-    snippet), an article's text (Markdown, links to /page/..., sources as empty links, up to a megabyte)
-    and the article as a web page. mode: "ok", "refused" (a robot check on the search, pages still
-    served), "down" (500)."""
+    """grokipedia.com as it answered on 2026-11-12: its search (results with slug, title and a snippet
+    cut from the article, sometimes in the middle of a source mark), an article's text (Markdown: the
+    name as a heading, a picture, the opening, then sections; links to /page/..., sources as empty
+    links, up to a megabyte) and the article as a web page. mode: "ok", "refused" (a robot check on
+    the search, pages still served), "down" (500)."""
     seen = []
     mode = "ok"
 
@@ -1516,6 +1517,17 @@ class Grokipedia(http.server.BaseHTTPRequestHandler):
                          "snippet": "The Black Sea Fleet is the fleet of the\nRussian Navy in the Black Sea..."},
                         {"slug": "Krasnodar_Krai_(region)", "title": "Krasnodar Krai", "relevanceScore": 2000, "snippet": ""},
                     ][:int(q.get("limit", ["5"])[0])]
+                if "danube" in words.lower():
+                    results = [
+                        {"slug": "Danube", "title": "Danube", "relevanceScore": 1000000,
+                         "snippet": "The Danube is a major river in Central and Southeastern Europe, measuring 2,778 kilometres"},
+                        {"slug": "Length", "title": "Length", "relevanceScore": 152.84009,
+                         "snippet": "Length is a fundamental physical quantity that measures the distance between two points or "
+                                    "the extent of an object along a single dimension.[]("},
+                        {"slug": "danube_(song)", "title": "Danube (song)", "snippet": "A song about [the river](/page/Dan"}]
+                if "eiffel" in words.lower():
+                    results = [{"slug": "Eiffel_Tower", "title": "Eiffel Tower", "snippet": "The Eiffel Tower is a tower."},
+                               {"slug": "eiffel_tower_(book)", "title": "Eiffel Tower (book)", "snippet": "A book. ![cov"}]
                 if "DeltaNet" in words:
                     results = [{"slug": "River_delta", "title": "River delta", "snippet": "Where a river meets the sea."}]
                 if "PS5" in words:
@@ -1525,16 +1537,36 @@ class Grokipedia(http.server.BaseHTTPRequestHandler):
                 body = json.dumps({"results": results, "totalCount": 10000, "searchTimeMs": 191.0, "facets": []}).encode()
         elif u.path == "/api/page-preview":
             slug = q.get("slug", [""])[0]
-            if slug != "Black_Sea":
+            # (Each as the site sent it: a picture under the name, with a plain file name, one with
+            # "\(...\)" and one with brackets as they are; paragraphs a line apart; sections.)
+            content = {
+                "Black_Sea": "# Black Sea\n\n![location map](./_assets_/Black_Sea_map.png)\nThe **Black Sea** is a large inland "
+                             "body of water between [southeastern Europe](/page/Southeastern_Europe) and [Anatolia](/page/Anatolia), "
+                             "covering about 436,000 km\u00b2.[](https://example.org/source-1)[](https://example.org/source-2) "
+                             "The [Danube](/page/Danube), the Dnieper and the Don flow into it. It is \"brackish\" \u2014 "
+                             "less salty than the oceans.\n## Geography\n\n" + "More about its shores. " * 60000,
+                "Danube": "# Danube\n\n![View of the Danube from Gell\u00e9rt Hill, Budapest](./_assets_/View_from_Gell%C3%A9rt_"
+                          "Hill_to_the_Danube%252C_Hungary_-_Budapest_\\(28493220635\\))\nThe Danube is a major river in Central "
+                          "and Southeastern Europe, measuring 2,778 kilometres in length from its source at the confluence of the "
+                          "Brigach and Breg streams in Germany's [Black Forest](/page/Black_Forest) to the [Danube Delta]"
+                          "(/page/Danube_Delta) where it discharges into the [Black Sea](/page/Black_Sea).[](https://example.org/"
+                          "danube_network.html)[](https://example.org/germany)\nOriginating near Donaueschingen, it flows "
+                          "generally eastward, traversing or bordering ten countries\u2014[Germany](/page/Germany), [Austria]"
+                          "(/page/Austria), and eight more\u2014before forming a vast delta primarily in Romania.[](https://"
+                          "example.org/a)\nIts drainage basin spans 817,000 square kilometres across nineteen countries, despite "
+                          "challenges from pollution and infrastructure development.[](https://example.org/b)\n## Etymology\n\n"
+                          "### Name origins and linguistic roots\n\nThe name *Danube* derives from the Latin *Danubius*. This "
+                          "Latin form traces to Proto-Celtic *\\*D\u0101nowyos*.[](https://example.org/c) [](https://example.org/d)"
+                          "\n\n" + "Linguistically, the river has many names. " * 30000,
+                "Eiffel_Tower": "# Eiffel Tower\n\n![Eiffel Tower](./_assets_/Tour_Eiffel_Wikimedia_Commons_(cropped))\nThe "
+                                "Eiffel Tower is a 330-meter-tall (with antennas) wrought-iron [lattice tower](/page/Lattice_tower) "
+                                "in [Paris](/page/Paris).[](https://example.org/e)\n## History\n\nBuilt from 1887 to 1889.",
+            }.get(slug)
+            if content is None:
                 body = b'{"found":false}'
             else:
-                content = ("# Black Sea\n\nThe **Black Sea** is a large inland body of water between "
-                           "[southeastern Europe](/page/Southeastern_Europe) and [Anatolia](/page/Anatolia), "
-                           "covering about 436,000 km\u00b2.[](https://example.org/source-1)[](https://example.org/source-2) "
-                           "The [Danube](/page/Danube), the Dnieper and the Don flow into it. It is \"brackish\" \u2014 "
-                           "less salty than the oceans.\n\n## Geography\n\n" + "More about its shores. " * 60000)
-                body = json.dumps({"found": True, "page": {"slug": slug, "title": "Black Sea", "content": content,
-                                                           "description": "A sea.", "citations": []}}).encode()
+                body = json.dumps({"found": True, "page": {"slug": slug, "title": slug.replace("_", " "), "content": content,
+                                                           "description": "An article.", "citations": []}}).encode()
         elif u.path == "/page/Black_Sea":
             ctype = "text/html; charset=utf-8"
             body = ("<html><head><title>Black Sea</title></head><body><nav>Menu Home Search</nav><article class=\"article-enter\">"
@@ -1578,16 +1610,39 @@ def test_grokipedia(ts5, model, tdir):
     rc, out, err, g, w = search("black sea", **grok)
     opening = ("The Black Sea is a large inland body of water between southeastern Europe and Anatolia, covering about "
                "436,000 km\u00b2. The Danube, the Dnieper and the Don flow into it. It is \"brackish\" \u2014 less salty than "
-               "the oceans. Geography More about its shores.")
+               "the oceans. More about its shores. More about its shores.")
     ok = (rc == 0 and out.startswith('Grokipedia articles for "black sea" (the only search set up here: xAI\'s encyclopedia, '
                                      'written by its AI; no news or live data):\n\n[1] Black Sea\n' + gurl + "/page/Black_Sea\n" + opening)
           and "[2] Black Sea Fleet\n" + gurl + "/page/Black_Sea_Fleet\nThe Black Sea Fleet is the fleet of the Russian Navy in the "
           "Black Sea...\n\n[3] Krasnodar Krai\n" + gurl + "/page/Krasnodar_Krai_(region)\n(no text)\n\nIf none of these" in out and
-          "example.org" not in out and "](" not in out and "**" not in out and len(out) < 2400 and
+          "example.org" not in out and "](" not in out and "**" not in out and "location map" not in out and
+          "Geography" not in out and len(out) < 2400 and
           "searching Grokipedia" in err and "3 results (" in err and ", Grokipedia)" in err and not w and
           [x[0] for x in g] == ["/api/full-text-search", "/api/page-preview"] and g[0][1]["query"] == ["black sea"] and
           g[0][1]["limit"] == ["5"] and g[1][1]["slug"] == ["Black_Sea"] and g[1][1]["content"] == ["1"])
     failed += report(ok, "Grokipedia search: the articles, the first with its opening as plain words", f"rc {rc}\n{out}\n{err}\n{g}")
+    # The article's text as the site sends it: a picture under the name (its file named with "\(...\)"),
+    # an opening of three paragraphs, then sections. And passages that are cut in a source mark, a link, a picture.
+    rc, out, err, g2, w = search("Danube river length", **grok)
+    first = out.split("\n\n[2]")[0]
+    ok = (rc == 0 and "[1] Danube\n" + gurl + "/page/Danube\nThe Danube is a major river in Central and Southeastern Europe, "
+          "measuring 2,778 kilometres in length" in out and
+          first.endswith("to the Danube Delta where it discharges into the Black Sea. Originating near Donaueschingen, it flows "
+                         "generally eastward, traversing or bordering ten countries\u2014Germany, Austria, and eight more\u2014before "
+                         "forming a vast delta primarily in Romania. Its drainage basin spans 817,000 square kilometres across "
+                         "nineteen countries, despite challenges from pollution and infrastructure development.") and
+          "[2] Length\n" + gurl + "/page/Length\nLength is a fundamental physical quantity that measures the distance between two "
+          "points or the extent of an object along a single dimension.\n\n[3] Danube (song)\n" + gurl + "/page/danube_(song)\n"
+          "A song about the river\n\nIf none" in out and
+          not any(x in out for x in ("Etymology", "Name origins", "Gell", "28493220635", "_assets_", "example.org", "[]", "](", "!")))
+    failed += report(ok, "Grokipedia search: a picture, sections and cut passages leave only the opening's words",
+                     f"rc {rc}\n{out}\n{err}\n{g2}")
+    rc, out, err, g2, w = search("who designed the Eiffel Tower", **grok)
+    ok = (rc == 0 and "[1] Eiffel Tower\n" + gurl + "/page/Eiffel_Tower\nThe Eiffel Tower is a 330-meter-tall (with antennas) "
+          "wrought-iron lattice tower in Paris. Built from 1887 to 1889.\n\n[2] Eiffel Tower (book)\n" + gurl +
+          "/page/eiffel_tower_(book)\nA book.\n\nIf none" in out and "cropped" not in out and "History" not in out)
+    failed += report(ok, "Grokipedia search: a picture's file with brackets in its name, a short opening goes on into the next "
+                     "section, a link is the slug as sent", f"rc {rc}\n{out}\n{err}\n{g2}")
     agents = {x[2] for x in g}
     failed += report(len(agents) == 1 and "Mozilla" not in next(iter(agents)) and all(x[3] == "application/json" for x in g),
                      "Grokipedia search: asked under ts5's own name, as Wikipedia's API is", f"{g}")
