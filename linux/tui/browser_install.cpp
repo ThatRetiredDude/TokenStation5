@@ -90,7 +90,7 @@ elif [ "$what" = obscura ]; then
     fi
     dir=${TS5_BROWSERS_DIR:-$HOME/.local/share/tokenstation/browsers}/obscura-$ver
     part=$dir.part
-    say "Downloading Obscura $ver (72 MB) from its makers' GitHub release, into $dir:"
+    say "Downloading Obscura $ver (72 MB, 150 MB once unpacked) from its makers' GitHub release, into $dir:"
     say "  $url"
     [ -n "${TS5_DRY:-}" ] && exit 0
     rm -rf "$part"

@@ -249,7 +249,7 @@ void browser_offer() {
     g->pick = {
         {"Chromium", "the full browser, from this system's packages (sudo password)",
          [] { browser_install("chromium"); }},
-        {"Obscura", "light on memory, but young. 72 MB into your home folder, no password", [] { browser_install("obscura"); }},
+        {"Obscura", "light on memory, but young. 150 MB in your home folder, no password", [] { browser_install("obscura"); }},
         {"Neither", "pages stay plain text. /browser install asks again", [] {}},
     };
     g->pick_sel = 0;

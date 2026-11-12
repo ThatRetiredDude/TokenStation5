@@ -370,8 +370,9 @@ ts5-tui --url http://ps5.local:8081  # another one
       Enter): **Chromium** from your system's packages (`apt-get`, `dnf`,
       `pacman` or `zypper`; sudo asks for your password; on Debian 13 it
       is the small `chromium-headless-shell`), **Obscura** into your home
-      folder (72 MB from its makers' GitHub release, checked against a
-      SHA-256 built into ts5, no password), or **Neither**. ts5-tui
+      folder (a 72 MB download from its makers' GitHub release, 150 MB
+      once unpacked, checked against a SHA-256 built into ts5, no
+      password), or **Neither**. ts5-tui
       steps aside while the install runs and comes back when you press
       Enter. `/browser install` asks again, and
       `ts5-tui --install-browser chromium|obscura` does it without the
