@@ -615,7 +615,7 @@ const char *const kMark = R"JS((() => {
   for (const f of doc.querySelectorAll('form[target]')) f.removeAttribute('target');
   window.open = (u) => { if (u) location.href = u; return window; };
   const html = doc.documentElement ? doc.documentElement.outerHTML : '';
-  return JSON.stringify({ url: location.href, title: doc.title, html: html });
+  return JSON.stringify({ url: location.href, title: doc.title, state: doc.readyState, html: html });
 })())JS";
 
 // kMark with its time for the styles filled in: a second and a half, or
@@ -700,14 +700,19 @@ static int start_s() {
 }
 
 // How long a browser that is running may give no answer before it is taken
-// for stuck. Obscura: 45 s. It runs a page's scripts and answers ts5 on the
+// for stuck. Obscura: 20 s. It runs a page's scripts and answers ts5 on the
 // one thread, so it says nothing while a heavy page's scripts are at work
-// (on the PS5 one Wikipedia article's answer came after 6 s, and another's
-// not in 11). Others: 10 s. TS5_BROWSER_PATIENCE_S sets it for both.
-static double patience_s(bool obscura) {
+// (on the PS5 the longest such silence that ended was 6.5 s, on a Wikipedia
+// article; on another article it had not ended after ten minutes). Others:
+// 10 s. TS5_BROWSER_PATIENCE_S sets it for both (0: it is not set).
+static int patience_set() {
     const char *v = getenv("TS5_BROWSER_PATIENCE_S");
     const int n = v && *v ? atoi(v) : 0;
-    return n >= 1 ? std::min(n, 600) : obscura ? 45 : 10;
+    return n >= 1 ? std::min(n, 600) : 0;
+}
+static double patience_s(bool obscura) {
+    const int n = patience_set();
+    return n ? n : obscura ? 20 : 10;
 }
 
 // Starts the browser without a window, its debugging port on 127.0.0.1,
@@ -912,10 +917,13 @@ public:
         if (obscura_ && !program_.empty() && el.kind == "link" && !el.href.empty() && el.href[0] != '#' &&
             lower(el.href).compare(0, 11, "javascript:") != 0)
             return go(resolve_url(url_, el.href), true);
-        if (!program_.empty() && !as_text_)
-            return act("(() => { const el = document.querySelector('[data-ts5=\"" + el.mark +
-                           "\"]'); if (!el) return 'gone'; el.scrollIntoView({block: 'center'}); el.click(); return 'ok'; })()",
-                       true, "");
+        if (!program_.empty() && !as_text_) {
+            const Answer a =
+                act("(() => { const el = document.querySelector('[data-ts5=\"" + el.mark +
+                        "\"]'); if (!el) return 'gone'; el.scrollIntoView({block: 'center'}); el.click(); return 'ok'; })()",
+                    true, "");
+            if (!stuck_) return a;
+        }
         if (el.kind == "link") return go(resolve_url(url_, el.href), true);
         if (el.kind == "check") {
             if (el.type == "radio") {
@@ -963,7 +971,8 @@ public:
                       "if (went && el.form && el.tagName !== 'TEXTAREA') { if (el.form.requestSubmit) el.form.requestSubmit(); "
                       "else el.form.submit(); } el.dispatchEvent(new KeyboardEvent('keyup', key)); ";
             js += "return 'ok'; })()";
-            return act(js, enter, done);
+            const Answer a = act(js, enter, done);
+            if (!stuck_) return a;
         }
         typed_[i] = text;
         if (!enter) {
@@ -1073,6 +1082,7 @@ public:
             cdp_ = nullptr;
         }
         stop(proc_);
+        read_at_ = 0;
     }
 
 private:
@@ -1198,10 +1208,10 @@ private:
         unread_ = false;
         Json r;
         std::string err;
-        if (obscura_ && !answers_now()) {
-            // Obscura is still at the scripts of the page that is being
-            // left, and would open this one only after them: a fresh one
-            // opens it now.
+        if (obscura_ && !answers_soon()) {
+            // Obscura is stuck at the scripts of the page that is being
+            // left, and would open this one only after them, if ever: a
+            // fresh one opens it now.
             quit();
             std::string again;
             if (!awake(again, false)) return fail(again);
@@ -1228,19 +1238,8 @@ private:
                                                                       : "the site couldn't be reached") +
                         " (" + net + ").");
         const std::string left = url_;
-        // Obscura's page is read as soon as it is complete, before the
-        // scripts that a page starts once it has loaded take the thread
-        // (on the PS5 Wikipedia's article on the Black Sea was complete,
-        // all 1.2 million characters of it, 0.03 s after it was opened,
-        // and Obscura then said nothing for the next 11 s). A page with
-        // next to nothing on it yet is one its scripts build: those are
-        // waited for, as with any browser.
-        const std::string note = note_;
-        Answer a = settle(20, obscura_) ? snapshot() : fail("The page could not be read: the browser didn't answer.");
-        if (a.ok && obscura_ && view_.size() < 200 && settle(20)) {
-            note_ = note;
-            if (const Answer later = snapshot(); later.ok) a = later;
-        }
+        Answer a = obscura_ ? first_read()
+                   : settle(20) ? snapshot() : fail("The page could not be read: the browser didn't answer.");
         // A page Obscura gave no answer on for as long as patience_s says
         // comes in the text view (go).
         unread_ = !a.ok && obscura_ && cdp_ && !cdp_->gone() && a.text.find("didn't answer") != npos;
@@ -1323,7 +1322,11 @@ private:
         if (again && !url_.empty()) {
             Json r;
             std::string e;
-            if (cdp_->call("Page.navigate", "{\"url\":" + json_escape(url_) + "}", r, e, 40000)) settle(20);
+            // (Obscura's page is read by the first script it is sent: first_read.)
+            if (cdp_->call("Page.navigate", "{\"url\":" + json_escape(url_) + "}", r, e,
+                           obscura_ ? (int)(patience_s(true) * 1000) : 40000) &&
+                !obscura_)
+                settle(20);
             woke_ = true;
         }
         return true;
@@ -1335,11 +1338,11 @@ private:
 
     // Waits for the page to be loaded and still: complete, and its size the
     // same on two looks, or three seconds past complete (a page that never
-    // stops moving); max_s at most. at_once: complete is enough.
+    // stops moving); max_s at most.
     // A look that gets no answer is not sent again: its answer is waited
     // for (Cdp::eval), as long as patience_s allows. False when the browser
     // gave no answer for that long (it is stuck).
-    bool settle(double max_s, bool at_once = false) {
+    bool settle(double max_s) {
         const double t0 = now_s(), patience = patience_s(obscura_);
         double complete = 0, quiet = 0;
         std::string last;
@@ -1358,7 +1361,6 @@ private:
             }
             quiet = 0;
             if (ok && v.compare(0, 9, "complete ") == 0) {
-                if (at_once) return true;
                 if (complete == 0) complete = now_s();
                 same = v == last ? same + 1 : 0;
                 if (same >= 2 || now_s() - complete > 3) return true;
@@ -1372,17 +1374,63 @@ private:
         return true;
     }
 
-    // Whether the browser answers now (a second and a half for it).
-    bool answers_now() {
+    // Whether the browser answers. It has a second and a half for that.
+    // Obscura, once a page is read, runs the scripts the page starts after
+    // loading and says nothing meanwhile (the PS5: up to 6.5 s on a
+    // Wikipedia article), so it has until ten seconds after the read, or
+    // patience_s where that is less: busy is not stuck, and a fresh Obscura
+    // has none of the cookies of the one before. One still silent then is
+    // stuck (the PS5: Wikipedia's article on the Black Sea, no answer in
+    // ten minutes).
+    bool answers_soon() {
+        const double wait = std::max(1.5, read_at_ + std::min(10.0, patience_s(obscura_)) - now_s());
         std::string v, err;
-        return cdp_->eval("'1'", v, err, 1500) || err.find("didn't answer") == npos;
+        return cdp_->eval("'1'", v, err, (int)(wait * 1000)) || err.find("didn't answer") == npos;
     }
 
-    // The page as the browser has it now.
-    Answer snapshot() {
+    // Obscura's page, read by the first script it is sent once the page has
+    // opened. (Obscura answers that one and then runs what the page starts
+    // after loading, silent until that is done: on the PS5, asked first
+    // whether Wikipedia's article on the Black Sea had loaded, it said yes
+    // after 0.05 s, and the script that reads the page, sent next, had no
+    // answer after ten minutes.) A page that had not loaded yet is read
+    // again; one whose words were all there (its pictures and the like
+    // still to come) is the answer if Obscura then says nothing more. A
+    // page with next to nothing on it yet is one its scripts build: those
+    // are waited for, as with any browser.
+    Answer first_read() {
+        const std::string note = note_;
+        const double t0 = now_s();
+        Answer a, parsed;
+        parsed.ok = false;
+        for (;;) {
+            std::string state;
+            note_ = note;
+            a = snapshot(&state);
+            if (!a.ok && parsed.ok) {
+                a = parsed;
+                note_.clear();
+            }
+            if (!a.ok || (state != "loading" && state != "interactive") || now_s() - t0 >= 20) break;
+            if (state == "interactive") parsed = a;
+            sleep_ms(200);
+        }
+        if (a.ok && view_.size() < 200 && settle(20)) {
+            note_ = note;
+            if (const Answer later = snapshot(); later.ok) a = later;
+            note_.clear();
+        }
+        return a;
+    }
+
+    // The page as the browser has it now. state: how far it had loaded
+    // (loading, interactive: its words are all there, complete).
+    Answer snapshot(std::string *state = nullptr) {
         std::string v, err;
         const std::string mark = mark_js();
-        const int wait_ms = (int)(std::max(30.0, patience_s(obscura_)) * 1000);
+        // (Chromium has half a minute for a long page. Obscura has what
+        // patience_s says, as has any browser when that is set.)
+        const int wait_ms = (int)((obscura_ || patience_set() ? patience_s(obscura_) : 30.0) * 1000);
         if (!cdp_->eval(mark, v, err, wait_ms)) {
             // (Between two pages there is nothing to run a script in. A
             // browser that didn't answer is still at the script: a second
@@ -1398,6 +1446,8 @@ private:
         if (url.compare(0, 15, "chrome-error://") == 0) return fail("The page could not be opened: the site couldn't be reached.");
         const std::string title = j["title"].str();
         set_page(url, j["html"].str(), &title);
+        read_at_ = now_s();
+        if (state) *state = j["state"].str();
         return show();
     }
 
@@ -1407,18 +1457,32 @@ private:
     Answer act(const std::string &js, bool moved, const std::string &done) {
         std::string why;
         const std::string before = view_;
+        stuck_ = false;
         if (!awake(why)) return fail(why);
         if (woke_) {
             // The numbers are the page's as it was shown: they hold only if
             // the page opened again is that same page.
-            const Answer a = snapshot();
+            const Answer a = obscura_ ? first_read() : snapshot();
             if (!a.ok) return a;
             if (view_ != before)
                 return fail("The browser had stopped, so the page was opened again, and it is not as it was. "
                             "Nothing was done. Here it is now:\n\n" + a.text);
         }
         std::string v, err;
-        if (!cdp_->eval(js, v, err, 30000)) {
+        if (!cdp_->eval(js, v, err, obscura_ ? (int)(patience_s(true) * 1000) : 30000)) {
+            if (obscura_ && !cdp_->gone() && err.find("didn't answer") != npos) {
+                // Obscura read this page and has said nothing since: it is
+                // stuck at the page's own scripts (first_read), and this
+                // script waits behind them. The page as it was read has
+                // its boxes and forms, so the text view does what was
+                // asked (click, type), and the next page is Obscura's
+                // again.
+                quit();
+                as_text_ = stuck_ = true;
+                note_ += "(Obscura stopped answering on the page before, so what was typed or pressed there went through the "
+                         "simpler text view, which runs no scripts.)";
+                return fail("That didn't work: the browser didn't answer.");
+            }
             // A click that leaves the page takes the script's answer with it.
             const bool left = err.find("navigated") != npos || err.find("context") != npos || err.find("closed") != npos;
             if (!left || cdp_->gone()) return fail("That didn't work: " + lost(err) + ".");
@@ -1459,6 +1523,8 @@ private:
     bool asleep_ = false, fell_back_ = false, woke_ = false;
     bool as_text_ = false;  // the page that is open was read by the text view, though there is a browser (go)
     bool unread_ = false;   // browse: Obscura gave no answer on the page, with a fresh one too
+    bool stuck_ = false;    // act: Obscura gave no answer on the page it had read; the text view has the page now
+    double read_at_ = 0;    // when the browser that is running last had a page read (snapshot)
     std::vector<std::string> spares_;
 
     std::string url_, title_, view_, note_;

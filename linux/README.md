@@ -389,12 +389,17 @@ ts5-tui --url http://ps5.local:8081  # another one
       and up to 430 MiB on heavy pages. It is young: some sites show
       nothing in it (YouTube, in our test) and it has no sandbox. It runs
       a page's scripts and answers ts5 on one thread, so it says nothing
-      while a heavy page's scripts are at work. ts5 therefore reads a
-      page as soon as it has loaded, opens the next page in a fresh
-      Obscura when the last one is still busy, and waits up to 45 s
-      (`TS5_BROWSER_PATIENCE_S`) for a page that is busy before it has
-      loaded. A page that isn't read by then comes in the text view, with
-      a line that says so. ts5-tui installs it for you (above), or put
+      while a heavy page's scripts are at work (on a PS5 up to 6.5 s on
+      a Wikipedia article, and on one article for good). ts5 therefore
+      reads a page with the first thing it asks Obscura, which Obscura
+      answers before those scripts start. Before the next page it waits
+      for a busy Obscura, so its cookies stay; one that is still silent
+      ten seconds after the page was read is replaced by a fresh one.
+      A page that is busy before it has loaded gets 20 s
+      (`TS5_BROWSER_PATIENCE_S`), then comes in the text view, with a
+      line that says so. What the model types or presses on a page that
+      left Obscura stuck goes through the text view too. ts5-tui
+      installs it for you (above), or put
       its `obscura` program on your PATH or in `~/.local/bin`. Obscura
       does not open addresses on this machine or your home network.
     - **Text view**: ts5's own page reader, nothing to install. No scripts

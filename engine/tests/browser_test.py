@@ -108,15 +108,17 @@ class Pages(http.server.BaseHTTPRequestHandler):
             self.send("<html><head><title>Busy</title></head><body><p>Words that are there without a script, "
                       'and <a href="/volga.html">the Volga</a>.</p><script>while (true) {}</script></body></html>')
         elif u.path == "/late":
-            # Complete at once, and then its script keeps the page's thread for s seconds (what
-            # Wikipedia's scripts did to Obscura on the PS5): a browser asked then says nothing.
+            # Complete at once, and at milliseconds later its script keeps the page's thread for s
+            # seconds (what Wikipedia's scripts did to Obscura on the PS5): a browser asked then says
+            # nothing.
             self.send("<html><head><title>Late</title></head><body><p>Words that are there at once, with enough of "
                       "them that the page is not taken for one that its scripts have yet to build: the Danube rises "
                       "in the Black Forest and flows through ten countries to the Black Sea, past Vienna, Bratislava, "
-                      'Budapest and Belgrade, and <a href="/volga.html">the Volga</a> is longer still.</p><script>'
+                      'Budapest and Belgrade, and <a href="/volga.html">the Volga</a> is longer still.</p>'
+                      '<form action="/search"><input name="q" placeholder="Find a river"><button>Find</button></form><script>'
                       "setTimeout(() => { const t = Date.now(); while (Date.now() - t < %d) {} "
-                      "document.body.insertAdjacentHTML('beforeend', '<p>Added late by a script.</p>'); }, 150);"
-                      "</script></body></html>" % (1000 * int(dict(q).get("s", "6"))))
+                      "document.body.insertAdjacentHTML('beforeend', '<p>Added late by a script.</p>'); }, %d);"
+                      "</script></body></html>" % (1000 * int(dict(q).get("s", "6")), int(dict(q).get("at", "150"))))
         elif u.path == "/slowstart":
             # Busy for s seconds before it is complete.
             self.send("<html><head><title>Slow start</title></head><body><p>Words that are there without a script.</p>"
@@ -540,22 +542,38 @@ def test_browser(ts5, program, base):
         a = b.ask(do="back")
         check(not a["ok"] and "no page to go back to" in a["text"], "obscura: then there is none", a)
         # A page whose scripts keep Obscura busy once it has loaded (on the PS5 Wikipedia's article
-        # on the Black Sea: complete after 0.03 s, then no answer for 11 s, and ts5 gave up after
-        # two waits of 5 s). It is read as soon as it is complete.
+        # on the Danube: 6 s). It is read by the first script sent, before those scripts start ...
         t0 = time.time()
-        a = b.ask(do="open", url=base + "/late?s=12")
+        a = b.ask(do="open", url=base + "/late?s=4")
         took = time.time() - t0
         check(a["ok"] and a["mode"] == "obscura" and "Words that are there at once" in a["text"] and
-              "text view" not in a["text"] and took < 6,
-              f"obscura: a page whose scripts keep it busy after loading is read at once ({took:.1f} s)", (a, open(trace).read()[-800:]))
-        # ... and the next page is not kept waiting behind those scripts: a fresh Obscura opens it.
-        time.sleep(1)
+              "text view" not in a["text"] and took < 3 and "data-ts5" in first_script(trace, "/late?s=4"),
+              f"obscura: a page whose scripts keep it busy after loading is read by the first script sent ({took:.1f} s)",
+              (a, open(trace).read()[-800:]))
+        # ... and the next page waits for them in the same Obscura: busy is not stuck, and a fresh
+        # one would have none of its cookies.
+        time.sleep(2)  # (a Chromium behind the stand-in runs a hidden page's timers up to a second late)
         t0, closed = time.time(), open(trace).read().count("Browser.close")
         a = b.ask(do="open", url=base + "/volga.html")
         took = time.time() - t0
-        check(a["ok"] and a["mode"] == "obscura" and a["url"] == base + "/volga.html" and took < 9 and
+        check(a["ok"] and a["mode"] == "obscura" and a["url"] == base + "/volga.html" and 1.5 < took < 7 and
+              open(trace).read().count("Browser.close") == closed,
+              f"obscura: the page after it waits for those scripts, in the same Obscura ({took:.1f} s)", (a, open(trace).read()[-800:]))
+        # One that says nothing for ten seconds after the page was read is stuck (on the PS5
+        # Wikipedia's article on the Black Sea: no answer in ten minutes): a fresh one opens the
+        # next page.
+        t0 = time.time()
+        a = b.ask(do="open", url=base + "/late?s=40")
+        took = time.time() - t0
+        check(a["ok"] and a["mode"] == "obscura" and "Words that are there at once" in a["text"] and took < 3,
+              f"obscura: a page that leaves it stuck is read all the same ({took:.1f} s)", (a, open(trace).read()[-800:]))
+        time.sleep(2)  # (a Chromium behind the stand-in runs a hidden page's timers up to a second late)
+        t0, closed = time.time(), open(trace).read().count("Browser.close")
+        a = b.ask(do="open", url=base + "/volga.html")
+        took = time.time() - t0
+        check(a["ok"] and a["mode"] == "obscura" and a["url"] == base + "/volga.html" and 7 < took < 16 and
               open(trace).read().count("Browser.close") == closed + 1,
-              f"obscura: the page after it is opened by a fresh one, not after the scripts ({took:.1f} s)", (a, open(trace).read()[-800:]))
+              f"obscura: ten seconds after that read a fresh one opens the next page ({took:.1f} s)", (a, open(trace).read()[-800:]))
         # A page that is busy before it is complete is waited for (two waits of 5 s were the limit).
         t0, before = time.time(), open(trace).read().count("Page.navigate ")
         a = b.ask(do="open", url=base + "/slowstart?s=12")
@@ -589,6 +607,28 @@ def test_browser(ts5, program, base):
         a = b.ask(do="back")
         check(a["ok"] and a["mode"] == "text" and a["url"] == base + "/busy" and "did not get this page read" in a["text"],
               "obscura: back to it is the text view again", a)
+        # A page Obscura read and is stuck on since: what is typed there goes through the text
+        # view, which has the page's boxes and forms, and the page that comes is Obscura's again.
+        a = b.ask(do="open", url=base + "/late?s=40")
+        time.sleep(3)  # (a Chromium behind the stand-in runs a hidden page's timers up to a second late)
+        t0 = time.time()
+        a = b.ask(do="type", n=number(a["text"], r'\[(\d+): text box "Find a river"'), text="the Volga", enter=True)
+        took = time.time() - t0
+        check(a["ok"] and a["mode"] == "obscura" and a["url"] == base + "/search?q=the+Volga" and "q = the Volga" in a["text"] and
+              "Obscura stopped answering on the page before" in a["text"] and 6 < took < 16,
+              f"obscura: what is typed on a page it is stuck on goes through the text view ({took:.0f} s)",
+              (a, open(trace).read()[-800:]))
+        a = b.ask(do="open", url=base + "/volga.html")
+        check(a["ok"] and a["mode"] == "obscura" and "stopped answering" not in a["text"], "obscura: ... said once", a)
+        # ... and a button there the same.
+        a = b.ask(do="open", url=base + "/late?s=40")
+        t = a["text"]
+        time.sleep(3)
+        a = b.ask(do="type", n=number(t, r'\[(\d+): text box "Find a river"'), text="the Don", enter=False)
+        check(a["ok"] and a["mode"] == "text" and "Typed into" in a["text"], "obscura: typed without Enter there, it is kept", a)
+        a = b.ask(do="click", n=number(t, r'\[(\d+): button "Find"\]'))
+        check(a["ok"] and a["mode"] == "obscura" and a["url"] == base + "/search?q=the+Don",
+              "obscura: and the form's button sends it", a)
         check(not piled(trace), "obscura: no script is sent while another is unanswered, there either", piled(trace))
         check(b.close() == 0, "obscura: ends when its input closes")
 
@@ -610,17 +650,19 @@ def test_obscura(ts5, obscura, base):
         check(a["ok"] and a["mode"] == "obscura" and a["url"] == base + "/volga.html", "real obscura: a link is followed", a)
         a = b.ask(do="back")
         check(a["ok"] and a["url"] == base + "/", "real obscura: and back", a)
+        # (Obscura 0.2.6 runs a timer set for 0 ms as soon as it has answered the first script, and
+        # stops a script of a timer that runs longer than about 6 s.)
         t0 = time.time()
-        a = b.ask(do="open", url=base + "/late?s=12")
+        a = b.ask(do="open", url=base + "/late?s=4&at=0")
         took = time.time() - t0
-        check(a["ok"] and a["mode"] == "obscura" and "Words that are there at once" in a["text"] and took < 6,
-              f"real obscura: a page whose scripts keep it busy after loading is read at once ({took:.1f} s)", a)
-        time.sleep(1)
-        t0 = time.time()
+        check(a["ok"] and a["mode"] == "obscura" and "Words that are there at once" in a["text"] and took < 3,
+              f"real obscura: a page whose scripts keep it busy after loading is read by the first script sent ({took:.1f} s)", a)
+        t0, closed = time.time(), open(trace).read().count("Browser.close")
         a = b.ask(do="open", url=base + "/volga.html")
         took = time.time() - t0
-        check(a["ok"] and a["mode"] == "obscura" and a["url"] == base + "/volga.html" and took < 9,
-              f"real obscura: the page after it is not kept waiting behind those scripts ({took:.1f} s)", a)
+        check(a["ok"] and a["mode"] == "obscura" and a["url"] == base + "/volga.html" and 2 < took < 8 and
+              open(trace).read().count("Browser.close") == closed,
+              f"real obscura: the page after it waits for those scripts, in the same Obscura ({took:.1f} s)", a)
         t0 = time.time()
         a = b.ask(do="open", url=base + "/slowstart?s=12")
         took = time.time() - t0
@@ -632,26 +674,42 @@ def test_obscura(ts5, obscura, base):
         check(not piled(trace), "real obscura: no script is sent while another is unanswered", piled(trace))
         check(b.close() == 0, "real obscura: ends when its input closes")
 
-        # A script that never ends: Obscura stops it itself after half a minute, and ts5 waits that long.
+        # A script in the page that never ends: Obscura stops it itself after half a minute. ts5
+        # waits 20 s, and the page comes in the text view; the next is Obscura's again.
         b = Browser(ts5, "--program", "auto", "--kind", "obscura", env=dict(env, TS5_BROWSER_TRACE=trace))
-        t0 = time.time()
-        a = b.ask(do="open", url=base + "/busy")
-        took = time.time() - t0
-        check(a["ok"] and a["mode"] == "obscura" and "Words that are there without a script" in a["text"] and took < 44,
-              f"real obscura: a page whose script never ends is read when Obscura stops the script ({took:.0f} s)", a)
-        check(b.close() == 0, "real obscura: ends when its input closes")
-        # ... and with less time than that, the page comes in the text view, and the next is Obscura's again.
-        b = Browser(ts5, "--program", "auto", "--kind", "obscura", env=dict(env, TS5_BROWSER_TRACE=trace, TS5_BROWSER_PATIENCE_S="7"))
         t0 = time.time()
         a = b.ask(do="open", url=base + "/busy")
         t = a["text"]
         took = time.time() - t0
         check(a["ok"] and a["mode"] == "text" and "Obscura did not get this page read in time" in t and
-              "Words that are there without a script" in t and 6 < took < 16,
-              f"real obscura: with 7 s to wait, that page is shown in the text view ({took:.0f} s)", a)
+              "Words that are there without a script" in t and 19 < took < 28,
+              f"real obscura: a page whose script never ends is shown in the text view after 20 s ({took:.0f} s)", a)
         a = b.ask(do="click", n=number(t, r"the Volga\[(\d+)\]"))
         check(a["ok"] and a["mode"] == "obscura" and a["url"] == base + "/volga.html", "real obscura: and a link on it opens in Obscura again", a)
         check(b.close() == 0, "real obscura: ends when its input closes")
+        # TS5_BROWSER_PATIENCE_S is that time: with 40 s Obscura's own stop comes first, and it reads the page ...
+        b = Browser(ts5, "--program", "auto", "--kind", "obscura", env=dict(env, TS5_BROWSER_TRACE=trace, TS5_BROWSER_PATIENCE_S="40"))
+        t0 = time.time()
+        a = b.ask(do="open", url=base + "/busy")
+        took = time.time() - t0
+        check(a["ok"] and a["mode"] == "obscura" and "Words that are there without a script" in a["text"] and 25 < took < 39,
+              f"real obscura: with 40 s to wait, it is read when Obscura stops the script ({took:.0f} s)", a)
+        check(b.close() == 0, "real obscura: ends when its input closes")
+        # ... and with 3 s the text view comes after 3 (on the PS5 it came after 34: a wait of 30 s was built in).
+        b = Browser(ts5, "--program", "auto", "--kind", "obscura", env=dict(env, TS5_BROWSER_TRACE=trace, TS5_BROWSER_PATIENCE_S="3"))
+        t0 = time.time()
+        a = b.ask(do="open", url=base + "/busy")
+        took = time.time() - t0
+        check(a["ok"] and a["mode"] == "text" and "Obscura did not get this page read in time" in a["text"] and 2.5 < took < 9,
+              f"real obscura: with 3 s to wait, the text view comes after 3 ({took:.0f} s)", a)
+        check(b.close() == 0, "real obscura: ends when its input closes")
+
+
+def first_script(trace, url):
+    """The first script a TS5_BROWSER_TRACE file has after url was last opened."""
+    lines = open(trace, errors="replace").read().split("\n")
+    at = max((i for i, line in enumerate(lines) if " Page.navigate " in line and url in line), default=len(lines))
+    return next((line for line in lines[at:] if re.match(r"\s*[\d.]+ > \d+ Runtime\.evaluate ", line)), "")
 
 
 def piled(trace):
