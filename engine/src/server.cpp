@@ -640,6 +640,25 @@ void handle(int fd, Server::State &state, Usage &u) {
         sp.top_k = (int)req["top_k"].num(state.sampling.top_k);
         sp.max_tokens = limit >= 1 ? (int)std::min(limit, (double)n_ctx) : n_ctx;
         sp.seed = (uint64_t)req["seed"].num(0);
+        // Tool calls and code are written at the model's own steady
+        // temperature, whatever the request asks: a command or a file has one
+        // right spelling (at 1.5 a model on the PS5 wrote made-up curl flags
+        // and an impossible address). The thinking and the rest of the answer
+        // go at the request's. "tool_call_temperature" in a request, or
+        // TS5_CALL_TEMPERATURE, sets that cap; "off" leaves calls alone.
+        std::atomic<bool> steady{false};
+        int steady_pieces = 0;
+        {
+            float cap = state.sampling.temperature;
+            if (const char *ce = getenv("TS5_CALL_TEMPERATURE"); ce && *ce) cap = strcmp(ce, "off") == 0 ? -1.0f : (float)atof(ce);
+            const Json &rc = req["tool_call_temperature"];
+            if (rc.type == Json::NUM) cap = (float)rc.n;
+            else if (rc.type == Json::STR && rc.s == "off") cap = -1.0f;
+            if (cap >= 0 && cap < sp.temperature) {
+                sp.steady = &steady;
+                sp.steady_temperature = cap;
+            }
+        }
         // The most a turn may think (kThinkMax), and what of the reply's room
         // the thinking leaves for the answer: a quarter, 1,024 tokens at
         // most (256 were too few for a worked answer on the PS5). A reply
@@ -838,6 +857,22 @@ void handle(int fd, Server::State &state, Usage &u) {
                         }
                         if (closing) return false;
                     }
+                }
+                // A call (what content_prefix holds back as one) or an open
+                // code fence in the answer: the next token at the steady
+                // temperature.
+                if (sp.steady) {
+                    size_t open;
+                    const size_t answer = thinking_end(text, open);
+                    bool on = false;
+                    if (answer < text.size()) {
+                        const std::string a = text.substr(answer);
+                        size_t fences = 0;
+                        for (size_t at = a.find("```"); at != std::string::npos; at = a.find("```", at + 3)) fences++;
+                        on = fences % 2 == 1 || (use_tools && content_prefix(tf, a, &tool_names) < a.size());
+                    }
+                    steady.store(on, std::memory_order_relaxed);
+                    if (on) steady_pieces++;
                 }
                 if (stream) {
                     size_t open;
@@ -1196,10 +1231,15 @@ void handle(int fd, Server::State &state, Usage &u) {
             body += ",\"usage\":" + usage_json(usage_prompt, st) + ",\"timings\":" + timings_json(st) + "}";
             client_ok &= send_all(fd, response(200, body));
         }
-        log_line("ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, %s, sample %.0f ms",
+        char steadied[96] = "";
+        if (steady_pieces)
+            snprintf(steadied, sizeof steadied, ", calls and code at temperature %.2g of %.2g (%d pieces)",
+                     sp.steady_temperature, sp.temperature, steady_pieces);
+        log_line("ts5: %s prompt %d (%d new) %.1f tok/s, gen %d %.1f tok/s, %s, sample %.0f ms%s",
                 id.c_str(), st.prompt_tokens, st.prompt_evaluated,
                 st.prompt_ms > 0 ? st.prompt_evaluated * 1000.0 / st.prompt_ms : 0.0, st.gen_tokens,
-                st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0, draft_summary(st).c_str(), st.sample_ms);
+                st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0, draft_summary(st).c_str(), st.sample_ms,
+                steadied);
         // With TS5_PROFILE set (take_profile is empty otherwise): the CPU's
         // time per call and, with TS5_PROFILE=1, the per-kernel GPU table for
         // this request, in serve mode as everywhere else.

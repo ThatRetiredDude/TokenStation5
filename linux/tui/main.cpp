@@ -40,6 +40,7 @@
 #include "files.h"
 #include "json.h"
 #include "mcp.h"
+#include "sandbox.h"
 #include "store.h"
 #include "tested.h"  // the models tested on a PS5 that the catalog doesn't have
 #include "tested_models.h"  // engine/src: the helper tuning found for each of them
@@ -1477,6 +1478,8 @@ ChatRequest chat_request() {
     rq.tools.memory = tools && g->cfg.tool_memory;
     rq.tools.browser = tools && g->cfg.tool_browser;
     rq.tools.terminal_ask = g->cfg.terminal_ask;
+    rq.tools.sandbox = g->cfg.sandbox && sandbox_ready();
+    rq.tools.sandbox_net = g->cfg.sandbox_net;
     rq.tools.browser_ask = g->cfg.browser_ask;
     rq.tools.files = tools && g->cfg.tool_files;
     rq.tools.files_ask = g->cfg.files_ask;
@@ -2430,6 +2433,46 @@ struct SetRow {
     std::string text_value;
 };
 
+// A path with the home folder as ~.
+std::string tilde_path(const std::string &p) {
+    const std::string h = home_dir();
+    return p.size() > h.size() && p.compare(0, h.size(), h) == 0 && p[h.size()] == '/' ? "~" + p.substr(h.size()) : p;
+}
+
+// Moves the sandbox's toolbox to DIR/tokenstation-sandbox ("default", or
+// nothing: back to ts5's data folder) and saves the place. What happened,
+// in words; ok: it is there now.
+std::string move_sandbox_folder(std::string dir, bool &ok) {
+    ok = false;
+    if (g->chat.busy()) return "Not while the model answers";
+    while (!dir.empty() && (dir.back() == ' ' || dir.back() == '\t')) dir.pop_back();
+    while (!dir.empty() && (dir[0] == ' ' || dir[0] == '\t')) dir.erase(0, 1);
+    if (dir.size() >= 2 && (dir[0] == '"' || dir[0] == '\'') && dir.back() == dir[0]) dir = dir.substr(1, dir.size() - 2);
+    if (dir == "~" || dir.rfind("~/", 0) == 0) dir = home_dir() + dir.substr(1);
+    const bool back = dir.empty() || dir == "default";
+    std::string why, to;
+    if (back) {
+        to = data_dir() + "/sandbox/home";
+        make_dirs(to);
+        chmod(to.c_str(), 0700);
+    } else if ((to = sandbox_dir_check(dir, why)).empty()) {
+        return "The toolbox can't go there: " + why;
+    }
+    const std::string from = sandbox_home();
+    const unsigned long long size = sandbox_size();
+    const int r = sandbox_move(from, to, why);
+    if (r == 0) return "The toolbox stays where it was: " + why;
+    const std::string tail = "/tokenstation-sandbox";
+    g->cfg.sandbox_dir = back ? "" : to.size() > tail.size() ? to.substr(0, to.size() - tail.size()) : "/";
+    sandbox_set_dir(g->cfg.sandbox_dir);
+    g->cfg.save();
+    ok = true;
+    std::string msg = "The toolbox is now " + tilde_path(to) + fmt(", %.1f GiB free there", sandbox_free() / 1073741824.0);
+    if (r == 2) msg += ". " + why;
+    else if (size && from != to) msg += fmt(" (%.1f MiB moved)", size / 1048576.0);
+    return msg;
+}
+
 std::vector<SetRow> settings_rows() {
     std::vector<SetRow> r;
     Config &c = g->cfg;
@@ -2498,7 +2541,9 @@ std::vector<SetRow> settings_rows() {
         // ts5 checked for that model), which /v1/models reports.
         const double own = server().temperature;
         SetRow x{"Temperature", c.temp >= 0 ? fmt("%.1f", c.temp) : own >= 0 ? fmt("default (%.1f)", own) : "default",
-                 "how much chance picks each word: lower is steadier (code, facts), higher more varied"};
+                 c.temp > 1.0 && c.tools_on()
+                     ? "high: varied prose, looser thinking; ts5 still writes commands, tool calls and code at the model's steady default"
+                     : "how much chance picks each word: lower is steadier (code, facts), higher more varied"};
         x.change = [save](int d) {
             double &t = g->cfg.temp;
             if (t < 0) t = d > 0 ? 0.1 : 1.5;
@@ -2658,6 +2703,42 @@ std::vector<SetRow> settings_rows() {
             g->cfg.tool_terminal = to != 0;
             g->cfg.terminal_ask = to != 2;
             save();
+        };
+        r.push_back(x);
+    }
+    if (tools_shown && c.tool_terminal) {
+        // Where the commands run: three steps, and why it can't be, if it can't.
+        std::string why;
+        const bool ready = sandbox_ready(&why);
+        SetRow x{"Sandbox",
+                 !c.sandbox ? "off" : !ready ? "unavailable" : c.sandbox_net ? "on, with network" : "on, no network",
+                 !c.sandbox ? "commands run as you, with all your files"
+                 : !ready   ? why + "; until then commands run as you"
+                            : std::string("read-only system, home hidden; changes only the start folder and its toolbox") +
+                                  (c.sandbox_net ? "" : "; no network")};
+        x.change = [save](int d) {
+            const int at = !g->cfg.sandbox ? 2 : g->cfg.sandbox_net ? 0 : 1, to = (at + (d < 0 ? 2 : 1)) % 3;
+            g->cfg.sandbox = to != 2;
+            g->cfg.sandbox_net = to != 1;
+            if (g->cfg.sandbox) sandbox_ready(nullptr, true);
+            save();
+        };
+        r.push_back(x);
+    }
+    if (tools_shown && c.tool_terminal && c.sandbox && sandbox_ready()) {
+        // Where the toolbox is: a folder on any drive with Unix permissions.
+        std::string why;
+        const bool there = sandbox_toolbox_ok(why);
+        SetRow x{"Sandbox folder", tilde_path(sandbox_home()),
+                 !there ? "missing: is its drive mounted? Enter: another folder, or default"
+                        : fmt("%.1f MiB of tools, %.1f GiB free there; Enter: another folder, or default",
+                              sandbox_size() / 1048576.0, sandbox_free() / 1073741824.0)};
+        x.text = true;
+        x.text_value = c.sandbox_dir;
+        x.set_text = [](const std::string &v) {
+            bool ok;
+            const std::string msg = move_sandbox_folder(v, ok);
+            show_toast(msg, ok ? g->th->accent : g->th->warn, 7);
         };
         r.push_back(x);
     }
@@ -3430,6 +3511,64 @@ void run_command(const std::string &line) {
                      "then load the model again.";
             if (sv.online && !sv.model.empty() && sv.tool_format.empty())
                 h += "\nThis server isn't ts5's own: whether its model can call tools is up to it.";
+            chat_note(c, h);
+        }
+    } else if (cmd == "/sandbox") {
+        auto tilde = tilde_path;
+        // "/sandbox": where the commands run; "/sandbox off", "no-network",
+        // "reset", "folder DIR".
+        Config &f = g->cfg;
+        std::string why;
+        if (arg == "on" || arg == "off" || arg == "network" || arg == "no-network") {
+            f.sandbox = arg != "off";
+            if (arg == "network" || arg == "no-network") f.sandbox_net = arg == "network";
+            f.save();
+            const bool ready = sandbox_ready(&why, true);
+            show_toast(!f.sandbox ? "Sandbox: off. The model's commands run as you, with all your files"
+                       : !ready   ? "Sandbox: unavailable, " + why
+                                  : std::string("Sandbox: on, ") + (f.sandbox_net ? "with network" : "no network"),
+                       !f.sandbox || !ready ? g->th->warn : g->th->accent, 5);
+        } else if (arg == "reset") {
+            chat_note(c, fmt("The toolbox holds %s (`%s`): what the model installed and wrote in its home folder. "
+                             "`/sandbox reset now` empties it.",
+                             fmt("%.1f MiB", sandbox_size() / 1048576.0).c_str(), tilde(sandbox_home()).c_str()));
+        } else if (arg == "folder") {
+            std::string h = fmt("The toolbox is `%s` (%.1f MiB, %.1f GiB free on its drive). ", tilde(sandbox_home()).c_str(),
+                                sandbox_size() / 1048576.0, sandbox_free() / 1073741824.0);
+            if (!sandbox_toolbox_ok(why)) h = "**Missing:** " + why + ". ";
+            h += "`/sandbox folder DIR` moves it to DIR/tokenstation-sandbox, on a faster or roomier drive say (one with "
+                 "Unix permissions: ext4, btrfs or xfs, not exFAT or NTFS); `/sandbox folder default` brings it back to "
+                 "ts5's own folder.";
+            chat_note(c, h);
+        } else if (arg.rfind("folder ", 0) == 0) {
+            bool ok;
+            const std::string msg = move_sandbox_folder(arg.substr(7), ok);
+            show_toast(msg, ok ? g->th->accent : g->th->warn, 7);
+        } else if (arg == "reset now") {
+            if (c.busy()) show_toast("Not while the model answers", g->th->warn, 3);
+            else if (sandbox_reset(why)) show_toast("The toolbox is empty", g->th->accent, 3);
+            else show_toast("The toolbox: " + why, g->th->bad, 6);
+        } else {
+            const bool ready = sandbox_ready(&why, true);
+            std::string h = "**Where the model's commands run**  (`/sandbox on`, `off`, `network`, `no-network`; or Settings)\n";
+            if (!f.sandbox) h += "**Off.** Commands run as you, with all your files and the network.\n";
+            else if (!ready) h += "**Unavailable:** " + why + ". Until then commands run as you, with all your files.\n";
+            else {
+                h += std::string("**In the sandbox, ") + (f.sandbox_net ? "with network" : "no network") +
+                     ".** A command sees the system read-only and none of your home folder (keys, SSH, browsers, ts5's "
+                     "own files), and none of your environment variables. Whatever it starts ends with it.\n";
+                h += sandbox_starts_home()
+                         ? "It starts in its own home folder: you started ts5-tui in your home folder, which it can't see. "
+                           "Start ts5-tui in a project's folder to let it work on that one.\n"
+                         : "It starts in `" + tilde(sandbox_work()) + "` (where you started ts5-tui), the one folder of "
+                           "yours it can change.\n";
+                if (!sandbox_toolbox_ok(why)) h += "**Its toolbox is missing:** " + why + ". No command runs until then.\n";
+                else
+                    h += fmt("Its home folder is the toolbox, `%s` (%s), kept between chats: pip, npm and programs in ~/bin "
+                             "go there. `/sandbox reset` empties it, `/sandbox folder` moves it to another drive.\n",
+                             tilde(sandbox_home()).c_str(), fmt("%.1f MiB", sandbox_size() / 1048576.0).c_str());
+            }
+            if (!f.tool_terminal || !f.tools_on()) h += "(The terminal tool is off: `/tools terminal on`.)\n";
             chat_note(c, h);
         }
     } else if (cmd == "/browser") {
@@ -4821,7 +4960,9 @@ int usage(FILE *f) {
             "ts5-tui: TokenStation5 in a terminal.\n\n"
             "  ts5-tui [--url http://HOST:8081] [--key KEY] [--theme %s] [--no-intro] [--no-tools] [--tmux|--no-tmux]\n"
             "  ts5-tui --mcp | --mcp-tools | --mcp-call TOOL ['{\"ARGUMENT\": ...}']\n"
-            "  ts5-tui --install-browser chromium|obscura [--dry-run]\n\n"
+            "  ts5-tui --install-browser chromium|obscura [--dry-run]\n"
+            "  ts5-tui --run-command 'COMMAND' [--sandbox on|off|no-network]\n"
+            "  ts5-tui --sandbox-folder DIR|default\n\n"
             "It talks to a running TokenStation (the tokenstation service, the TV app, or\n"
             "`ts5 serve`; Models can start one), so it uses no GPU memory itself and works\n"
             "over SSH. From a plain terminal it runs in its own tmux session (\"ts5\"), so SSH\n"
@@ -4835,6 +4976,11 @@ int usage(FILE *f) {
             "--install-browser: a browser for the model's browser tool. chromium: from this\n"
             "system's packages (sudo asks for the password). obscura: its makers' release,\n"
             "checked by SHA-256, into the home folder. --dry-run only says what would be done.\n"
+            "--run-command: runs one command the way the model's terminal tool does (in the\n"
+            "sandbox, unless it is off; /sandbox in the app) and prints what the model would\n"
+            "get back. --sandbox: on, off or no-network for that command.\n"
+            "--sandbox-folder: moves the sandbox's toolbox (what the model installs) to\n"
+            "DIR/tokenstation-sandbox, or back to ts5's own folder (/sandbox folder in the app).\n"
             "Settings are kept in ~/.config/tokenstation/tui.conf.\n"
             "Keys: F1-F6 or Tab for the pages, Enter, arrows, Esc; Ctrl+Q quits.\n",
             [] {
@@ -4854,6 +5000,7 @@ int main(int argc, char **argv) {
     App app;
     g = &app;
     app.cfg.load();
+    sandbox_set_dir(app.cfg.sandbox_dir);
     // A saved address that doesn't read as one (an older ts5-tui kept
     // whatever was typed): the default, and a word about it once it's up.
     std::string bad_saved;
@@ -4881,6 +5028,9 @@ int main(int argc, char **argv) {
     std::string install;  // --install-browser chromium|obscura
     bool dry = false;
     std::vector<std::pair<std::string, std::string>> mcp_calls;
+    bool run_mode = false;  // --run-command
+    std::string run_cmd, sandbox_arg, sandbox_folder;
+    bool folder_mode = false;
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -4900,6 +5050,9 @@ int main(int argc, char **argv) {
         }
         else if (a == "--install-browser") install = next();
         else if (a == "--dry-run") dry = true;
+        else if (a == "--run-command") run_mode = true, run_cmd = next();
+        else if (a == "--sandbox") sandbox_arg = next();
+        else if (a == "--sandbox-folder") folder_mode = true, sandbox_folder = next();
         else if (a == "-h" || a == "--help") return usage(stdout);
         else if (a == "--version") {
             printf("ts5-tui %s\n", TS5_VERSION);
@@ -4908,6 +5061,29 @@ int main(int argc, char **argv) {
             fprintf(stderr, "ts5-tui: unknown option %s\n\n", a.c_str());
             return usage(stderr);
         }
+    }
+    if (folder_mode) {
+        if (sandbox_folder.empty()) return usage(stderr);
+        bool ok;
+        const std::string msg = move_sandbox_folder(sandbox_folder, ok);
+        fprintf(ok ? stdout : stderr, "%s\n", msg.c_str());
+        return ok ? 0 : 1;
+    }
+    if (run_mode) {
+        // One command as the terminal tool runs it, and what the model gets back.
+        if (!sandbox_arg.empty() && sandbox_arg != "on" && sandbox_arg != "off" && sandbox_arg != "no-network") return usage(stderr);
+        ToolSwitches t;
+        t.terminal = true;
+        const bool want = sandbox_arg.empty() ? app.cfg.sandbox : sandbox_arg != "off";
+        std::string why;
+        t.sandbox = want && sandbox_ready(&why);
+        t.sandbox_net = sandbox_arg.empty() ? app.cfg.sandbox_net : sandbox_arg != "no-network";
+        if (want && !t.sandbox) fprintf(stderr, "ts5-tui: the sandbox is unavailable: %s. The command runs as you.\n", why.c_str());
+        signal(SIGPIPE, SIG_IGN);
+        std::atomic<bool> cancel{false};
+        const ToolResult r = run_tool("run_command", "{\"command\":" + ts5::json_escape(run_cmd) + "}", t, cancel);
+        printf("%s\n%s\n", r.head.c_str(), r.text.c_str());
+        return r.ok ? 0 : 1;
     }
     if (!install.empty()) {
         // A browser for the model's browser tool, without the screen (what the offer in the app runs).
