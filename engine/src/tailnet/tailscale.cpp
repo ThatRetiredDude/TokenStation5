@@ -804,6 +804,9 @@ void Client::control_loop() {
                 why = "the control server refused the sign-in (HTTP " + std::to_string(status) + "): " + body.substr(0, 200);
                 break;
             }
+            TRACE("trace: sign-in answer: MachineAuthorized %s, a sign-in page %s, NodeKeyExpired %s, error %s",
+                  rr["MachineAuthorized"].boolean(false) ? "yes" : "no", rr["AuthURL"].str().empty() ? "no" : "yes",
+                  rr["NodeKeyExpired"].boolean(false) ? "yes" : "no", rr["Error"].str().empty() ? "none" : rr["Error"].str().c_str());
             if (!rr["Error"].str().empty()) {
                 why = rr["Error"].str();
                 login_url.clear();  // the page may be no good any more
@@ -985,6 +988,22 @@ void Client::control_loop() {
                     continue;
                 }
                 if (m["KeepAlive"].boolean(false)) continue;
+                if (net_trace()) {
+                    // What the message holds: its fields, a list's length.
+                    std::string what;
+                    for (const auto &[k, v] : m.o) {
+                        what += (what.empty() ? "" : ", ") + k;
+                        if (v.type == Json::ARR) what += " " + std::to_string(v.a.size());
+                        else if (v.type == Json::NUL) what += " null";
+                    }
+                    const Json &n = m["Node"];
+                    if (n.type == Json::OBJ)
+                        what += "; Node: " + std::to_string(n["Addresses"].a.size()) + " addresses, MachineAuthorized " +
+                                (n["MachineAuthorized"].boolean(false) ? "yes" : "no") + ", Expired " +
+                                (n["Expired"].boolean(false) ? "yes" : "no") + ", Online " +
+                                (n["Online"].type == Json::BOOL ? (n["Online"].b ? "yes" : "no") : "unsaid");
+                    TRACE("trace: map message, %zu bytes: %s", len, what.c_str());
+                }
                 auto take_node = [](const Json &n, Node &out) {
                     out.key = n["Key"].str();
                     std::string name = n["Name"].str();
@@ -1075,6 +1094,17 @@ void Client::control_loop() {
                         for (const Json &e : p["Endpoints"].a) it->second.endpoints.push_back(e.str());
                     }
                     changed_map = true;
+                }
+            }
+            if (net_trace() && mr->body.size() >= 4) {
+                // A message part way here: say so now and then, to tell a
+                // stall from a quiet server.
+                static double said = 0;
+                const uint8_t *b = (const uint8_t *)mr->body.data();
+                const size_t len = (size_t)b[0] | ((size_t)b[1] << 8) | ((size_t)b[2] << 16) | ((size_t)b[3] << 24);
+                if (now_s() - said >= 10) {
+                    said = now_s();
+                    TRACE("trace: a map message of %zu bytes on its way, %zu here", len, mr->body.size() - 4);
                 }
             }
             if (changed_map) {
