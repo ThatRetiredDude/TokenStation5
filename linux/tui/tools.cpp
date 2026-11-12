@@ -132,6 +132,8 @@ Ran run_shell(const std::string &cmd, double limit, const std::atomic<bool> &can
         r.started = false;
         return r;
     }
+    // (Found before the fork: the child calls only what is safe after one.)
+    const std::string sh = command_shell(), sh_name = sh.substr(sh.rfind('/') + 1);
     const double t0 = now_s();
     const pid_t pid = fork();
     if (pid < 0) {
@@ -175,7 +177,7 @@ Ran run_shell(const std::string &cmd, double limit, const std::atomic<bool> &can
         setenv("PAGER", "cat", 1);
         setenv("GIT_PAGER", "cat", 1);
         setenv("NO_COLOR", "1", 1);
-        execl("/bin/sh", "sh", "-c", cmd.c_str(), (char *)nullptr);
+        execl(sh.c_str(), sh_name.c_str(), "-c", cmd.c_str(), (char *)nullptr);
         _exit(127);
     }
     close(p[1]);
@@ -591,7 +593,9 @@ std::string tools_json(const ToolSwitches &s) {
         std::string what =
             "Run a shell command on the user's Linux computer and get its output and exit code. The user "
             "is asked before it runs. Use it when the user asks you to look at files, run a program or "
-            "check the system. One command per call; no programs that wait for typing.";
+            "check the system. One command per call; no programs that wait for typing. ";
+        what += command_shell() == "/bin/sh" ? "It runs in sh (no bash here: no arrays, [[ ]] or other bash syntax)."
+                                             : "It runs in bash.";
         if (s.sandbox) {
             // (A setting's words, the same in every message of a chat.)
             const std::string work = sandbox_work();

@@ -68,6 +68,14 @@ def main():
 
         out, _, _ = run("pwd")
         check(out.split("\n")[2] == proj, "it starts in the folder ts5-tui started in", out)
+        if os.access("/bin/bash", os.X_OK) or os.access("/usr/bin/bash", os.X_OK):
+            # Models write bash (on Debian /bin/sh is dash, which knows none of this).
+            bash = "h=(a 'b c' d); echo n=${#h[@]}; [[ x == x ]] && echo double; time true"
+            out, _, _ = run(bash)
+            check("n=3" in out and "double" in out and "unexpected" not in out and "not found" not in out,
+                  "commands run in bash: arrays, [[ ]], time", out)
+            out, _, _ = run(bash, extra=("--sandbox", "off"))
+            check("n=3" in out and "double" in out and "unexpected" not in out, "(also outside the sandbox)", out)
         out, _, _ = run("cat ~/.secret; cat ~/.ssh/id_test; ls -A ~")
         check("in-the-home-folder" not in out and "A-KEY" not in out and "No such file" in out,
               "the home folder's files can't be read", out)

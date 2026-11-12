@@ -108,6 +108,15 @@ bool empty_dir(const std::string &p, std::string &why) {
 
 }  // namespace
 
+std::string command_shell() {
+    static const std::string sh = [] {
+        for (const char *b : {"/bin/bash", "/usr/bin/bash"})
+            if (access(b, X_OK) == 0) return std::string(b);
+        return std::string("/bin/sh");
+    }();
+    return sh;
+}
+
 std::string sandbox_home() {
     std::lock_guard<std::mutex> l(g_dir_mu);
     return g_dir.empty() ? data_dir() + "/sandbox/home" : (g_dir == "/" ? "" : g_dir) + "/tokenstation-sandbox";
@@ -332,7 +341,7 @@ std::vector<std::string> sandbox_argv(const std::string &cmd, bool net) {
     if (!at_or_above("/home", home) && home != "/") a.insert(a.end(), {"--tmpfs", home});
     a.insert(a.end(), {"--bind", toolbox, home});
     if (work != home) a.insert(a.end(), {"--bind", work, work});
-    a.insert(a.end(), {"--chdir", work, "--cap-drop", "ALL", "/bin/sh", "-c", cmd});
+    a.insert(a.end(), {"--chdir", work, "--cap-drop", "ALL", command_shell(), "-c", cmd});
     return a;
 }
 
@@ -342,7 +351,7 @@ std::vector<std::string> sandbox_env(bool net) {
         "HOME=" + home,
         "PATH=" + home + "/.local/bin:" + home + "/bin:" + home + "/.npm-global/bin:" + home +
             "/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        "SHELL=/bin/sh", "TMPDIR=/tmp", "TERM=dumb", "PAGER=cat", "GIT_PAGER=cat", "NO_COLOR=1",
+        "SHELL=" + command_shell(), "TMPDIR=/tmp", "TERM=dumb", "PAGER=cat", "GIT_PAGER=cat", "NO_COLOR=1",
         // pip and npm put what they install in the toolbox: the system is
         // read-only in here, so nothing of it can be broken.
         "PIP_BREAK_SYSTEM_PACKAGES=1", "npm_config_prefix=" + home + "/.npm-global", "TS5_SANDBOX=1"};

@@ -17,6 +17,9 @@
 
 namespace tui {
 
+// The shell the model's commands run in: bash where the system has it
+// (models write bash: arrays, [[ ]], `time`), else /bin/sh.
+std::string command_shell();
 // Whether bwrap is here and runs. The first call tries it (a second at
 // most) and remembers; again=true tries again. why: what stops it, in words.
 bool sandbox_ready(std::string *why = nullptr, bool again = false);
