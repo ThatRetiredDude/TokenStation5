@@ -257,6 +257,13 @@ ToolResult run_command(const std::string &cmd, const ToolSwitches &s, const std:
     const double limit = command_limit();
     std::vector<std::string> argv, env;
     if (s.sandbox) {
+        std::string why;
+        if (!sandbox_toolbox_ok(why)) {
+            t.ok = false;
+            t.head = "the sandbox's toolbox is missing";
+            t.text = "Nothing ran: " + why + ". The user has to fix that first.";
+            return t;
+        }
         argv = sandbox_argv(cmd, s.sandbox_net);
         env = sandbox_env(s.sandbox_net);
     }

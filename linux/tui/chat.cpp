@@ -40,7 +40,7 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/think", "on|off|auto", "thinking before answering"},
         {"/tools", "[on|off|NAME on|off]", "the model's tools: search, pages, terminal, files, memory, browser (each has a switch)"},
         {"/browser", "[auto|obscura|chromium|text|PATH]", "the program the model's browser tool shows pages with"},
-        {"/sandbox", "[on|off|network|no-network|reset]", "where the model's commands run: the sandbox, its network, its toolbox"},
+        {"/sandbox", "[on|off|network|no-network|reset|folder DIR]", "where the model's commands run: the sandbox, its network, its toolbox"},
         {"/mcp", "[add NAME PROGRAM…|remove NAME|NAME off|ask|allow|restart|only TOOL…|reload]",
          "outside tools: programs that speak MCP, whose tools the model can then call"},
         {"/memory", "[forget N|clear|TEXT]", "the notes the model keeps between chats: list, remove, or add one"},

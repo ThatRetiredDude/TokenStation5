@@ -366,7 +366,12 @@ ts5-tui --url http://ps5.local:8081  # another one
       (`~/.local/share/tokenstation/sandbox/home`), kept between chats:
       that is where `pip install`, `npm install -g` and a program put in
       `~/bin` go, so the model can fetch the tools it needs once and use
-      them again;
+      them again. `/sandbox folder DIR` (or Settings → Sandbox folder, or
+      `ts5-tui --sandbox-folder DIR`) moves it to `DIR/tokenstation-sandbox`,
+      on a faster or roomier drive say: one with Unix permissions (ext4,
+      btrfs, xfs; not exFAT or NTFS, and not mounted `noexec`).
+      `/sandbox folder default` brings it back. While that drive isn't
+      mounted, no command runs;
     - has the network (`/sandbox no-network` takes it away);
     - sees only its own processes, and whatever it starts ends with it;
     - is the first thing the kernel ends when memory runs out, before the

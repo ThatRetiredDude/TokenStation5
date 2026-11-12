@@ -154,6 +154,7 @@ void Config::load() {
         else if (k == "tool_files_ask") files_ask = v != "0";
         else if (k == "sandbox") sandbox = v != "0";
         else if (k == "sandbox_network") sandbox_net = v != "0";
+        else if (k == "sandbox_folder") sandbox_dir = v;
         else if (k == "browser" && !v.empty()) browser = v;
     }
     saved_url = url;
@@ -180,7 +181,7 @@ void Config::save() const {
              "\ntools=" + (tools ? "1" : "0") + "\ntool_terminal_ask=" + (terminal_ask ? "1" : "0") +
              "\ntool_browser_ask=" + (browser_ask ? "1" : "0") + "\nbrowser_offered=" + (browser_offered ? "1" : "0") + "\nsearch_source=" + search_source + "\ntool_files=" + (tool_files ? "1" : "0") +
              "\ntool_files_ask=" + (files_ask ? "1" : "0") + "\nsandbox=" + (sandbox ? "1" : "0") +
-             "\nsandbox_network=" + (sandbox_net ? "1" : "0") + "\n";
+             "\nsandbox_network=" + (sandbox_net ? "1" : "0") + "\nsandbox_folder=" + sandbox_dir + "\n";
         if (write(fd, s.data(), s.size()) != (ssize_t)s.size()) {
             close(fd);
             return;

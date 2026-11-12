@@ -155,6 +155,77 @@ def main():
         out, _, _ = run(fetch)
         check("status 200" in out, "(and the page opens again with it)", out)
         srv.shutdown()
+
+        # The toolbox in a folder of the user's choosing (another drive, say).
+        conf = os.path.join(home, ".config", "tokenstation", "tui.conf")
+
+        def folder(where):
+            e = dict(env)
+            p = subprocess.run([tui, "--sandbox-folder", where], cwd=proj, env=e, capture_output=True, text=True, timeout=60)
+            return p.stdout + p.stderr, p.returncode
+
+        def saved():
+            return [l for l in open(conf).read().split("\n") if l.startswith("sandbox_folder=")]
+
+        drive = os.path.realpath(os.path.join(top, "drive"))
+        os.makedirs(drive)
+        moved = os.path.join(drive, "tokenstation-sandbox")
+        with open(conf, "w") as f:
+            f.write("sandbox=1\nsandbox_folder=" + drive + "\n")
+        out, _, code = run("touch ran-anyway")
+        check("Nothing ran" in out and "isn't there" in out and code != 0 and not os.path.exists(os.path.join(proj, "ran-anyway"))
+              and not os.path.exists(moved), "a chosen toolbox that isn't there (its drive not mounted): nothing runs, nothing is made", out)
+        with open(conf, "w") as f:
+            f.write("sandbox=1\n")
+        out, code = folder(os.path.join(top, "no-such"))
+        check(code != 0 and "no folder" in out, "--sandbox-folder: a folder that isn't there is refused", out)
+        out, code = folder("relative/path")
+        check(code != 0 and "whole path" in out, "(and a path that isn't whole)", out)
+        # What a toolbox holds: a runnable program, a link, a folder made read-only (as Go's cache is).
+        run("mkdir -p ~/bin ~/ro && printf '#!/bin/sh\\necho tool-runs\\n' > ~/bin/t && chmod 755 ~/bin/t && "
+            "ln -sf tool.txt ~/link && echo x > ~/ro/f && chmod 555 ~/ro")
+        out, code = folder(drive)
+        check(code == 0 and "The toolbox is now" in out and os.path.exists(os.path.join(moved, "tool.txt"))
+              and not os.path.exists(os.path.join(box, "tool.txt")), "--sandbox-folder DIR: the toolbox moves to DIR/tokenstation-sandbox", out)
+        check(saved() == ["sandbox_folder=" + drive], "(and the place is kept in tui.conf)", saved())
+        check(oct(os.stat(moved).st_mode & 0o777) == "0o700", "(only its owner can open it)", oct(os.stat(moved).st_mode))
+        out, _, _ = run("cat ~/tool.txt; t; cat ~/link; ls -A ~")
+        check("kept" in out and "tool-runs" in out and ".secret" not in out, "commands use it there", out)
+        out, code = folder("default")
+        check(code == 0 and os.path.exists(os.path.join(box, "tool.txt")) and not os.path.exists(moved),
+              "--sandbox-folder default: back to ts5's own folder", out)
+        check(saved() == ["sandbox_folder="], "(and tui.conf says so)", saved())
+        other = os.path.join(top, "drive2", "tokenstation-sandbox")
+        os.makedirs(other)
+        open(os.path.join(other, "other.txt"), "w").write("the other one\n")
+        out, code = folder(os.path.dirname(other))
+        check(code == 0 and "already holds" in out and os.path.exists(os.path.join(box, "tool.txt")),
+              "a place that already holds a toolbox: that one is used, the old one kept", out)
+        out, _, _ = run("cat ~/other.txt")
+        check("the other one" in out, "(commands see that one)", out)
+        out, code = folder("default")
+        check(code == 0 and "already holds" in out and os.path.exists(os.path.join(other, "other.txt")), "(and going back keeps both)", out)
+        # Another drive: copied, then removed (or refused where it can't run programs).
+        shm = None
+        if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK):
+            shm = tempfile.mkdtemp(dir="/dev/shm")
+        if shm and os.stat(shm).st_dev != os.stat(top).st_dev:
+            if os.statvfs(shm).f_flag & os.ST_NOEXEC:
+                out, code = folder(shm)
+                check(code != 0 and "noexec" in out and os.path.exists(os.path.join(box, "tool.txt")),
+                      "a drive mounted noexec is refused (/dev/shm here)", out)
+            else:
+                out, code = folder(shm)
+                there = os.path.join(shm, "tokenstation-sandbox")
+                check(code == 0 and os.path.exists(os.path.join(there, "tool.txt")) and not os.path.exists(os.path.join(box, "tool.txt")),
+                      "to another drive (/dev/shm here): copied, then removed", out)
+                out, _, _ = run("t; cat ~/link; test -L ~/link && echo is-a-link; cat ~/ro/f")
+                check("tool-runs" in out and "is-a-link" in out and "\nx\n" in out, "(programs still run, links stay links)", out)
+                out, code = folder("default")
+                check(code == 0 and os.path.exists(os.path.join(box, "bin", "t")) and not os.path.exists(there), "(and back)", out)
+        if shm:
+            subprocess.run(["chmod", "-R", "u+rwX", shm])
+            shutil.rmtree(shm, ignore_errors=True)
     finally:
         subprocess.run(["chmod", "-R", "u+rwX", top])
         shutil.rmtree(top, ignore_errors=True)
