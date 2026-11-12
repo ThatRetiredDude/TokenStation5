@@ -500,8 +500,11 @@ def test_browser(ts5, program, base):
     a = b.ask(do="open", url=base + "/agent")
     t = a["text"]
     own = int(re.search(r"Chrome/(\d+)", t).group(1)) if re.search(r"Chrome/(\d+)", t) else 0
-    check(a["ok"] and "header: Mozilla/5.0" in t and "hints: " + chrome_brands(own, google=False) + "\n" in t,
-          "chromium: TS5_BROWSER_AGENT=own opens pages too, with the brands Chromium makes (as the test makes them)", a)
+    # (Google's own Chrome names itself too: on GitHub's runners Chrome 156 sent
+    # "Not:A-Brand";v="8", "Chromium";v="156", "Google Chrome";v="156".)
+    google = '"Google Chrome"' in t
+    check(a["ok"] and "header: Mozilla/5.0" in t and "hints: " + chrome_brands(own, google=google) + "\n" in t,
+          "chromium: TS5_BROWSER_AGENT=own opens pages too, with the brands it makes itself (as the test makes them)", a)
     print("     own: " + " | ".join(l for l in t.splitlines() if l.startswith(("header:", "hints:"))))
     b.close()
     # TS5_BROWSER_AGENT=linux: Chrome on Linux, its own version, without "Headless".
