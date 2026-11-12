@@ -1,4 +1,4 @@
-// lwIP's platform header for the tunnel (ps5/wg): the C library's types,
+// lwIP's platform header for the tunnel (engine/src/tailnet): the C library's types,
 // little-endian x86-64, and its diagnostics into the title's log.
 #pragma once
 #include <stdint.h>

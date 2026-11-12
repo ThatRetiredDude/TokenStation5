@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copies what the title's WireGuard tunnel (ps5/wg) is built from into
+# Copies what the WireGuard tunnel under Tailscale (engine/src/tailnet) is built from into
 # third_party, at pinned commits, with their licenses:
 #
 #   third_party/lwip/            lwIP 2.2.1, the TCP/IP stack inside the tunnel
@@ -54,10 +54,12 @@ cat > "$dest/VENDOR.md" << EOF
 BSD-3-Clause: [COPYING](COPYING), "Copyright (c) 2001, 2002 Swedish Institute of
 Computer Science". NOTICE.md at the top of this repo lists it.
 
-It is the TCP/IP stack inside the title's WireGuard tunnel (\`ps5/wg\`): the
-PS5 gives a title no network interface of its own to make, so the tunnel's
-packets are taken apart here, in the title. \`ps5/wg/lwipopts.h\` and
-\`ps5/wg/arch/cc.h\` configure it (no OS: one thread drives it). Unchanged;
+It is the TCP/IP stack inside the WireGuard tunnel that Tailscale runs over
+(\`engine/src/tailnet\`), in the PS5 title and in the Linux \`ts5\`: neither
+makes a network interface of its own (the PS5 gives a title none, and on
+Linux ts5 runs without root), so the tunnel's packets are taken apart here.
+\`engine/src/tailnet/lwipopts.h\` and \`engine/src/tailnet/arch/cc.h\` configure
+it (no OS: one thread drives it). Unchanged;
 \`scripts/vendor-wireguard.sh\` copies it.
 
 Kept: \`src/core\` and \`src/core/ipv4\` (IPv4, TCP, the buffers), the headers
@@ -86,11 +88,11 @@ X25519 from Mike Hamburg's STROBE (MIT, "Copyright (c) 2015-2016 Cryptography
 Research, Inc.", \`src/crypto/refc/x25519-license.txt\`). NOTICE.md at the top
 of this repo lists it.
 
-WireGuard for the title's tunnel (\`ps5/wg\`), as an lwIP network interface.
+WireGuard for the tunnel (\`engine/src/tailnet\`), as an lwIP network interface.
 \`scripts/vendor-wireguard.sh\` copies it, with one change of ours: up to
 $max_peers peers, not 1 (\`src/wireguard-platform.h\`, marked "ts5"), so each
-device has its own key. Its UDP goes through the PS5's own socket:
-\`ps5/wg/wg_udp.c\` stands in for the lwIP UDP calls \`wireguardif.c\` makes.
+device has its own key. Its UDP goes through the program's own socket:
+\`engine/src/tailnet/wg_udp.c\` stands in for the lwIP UDP calls \`wireguardif.c\` makes.
 
 Kept: \`src/\` (the protocol, the interface, the crypto glue) and
 \`src/crypto/refc\`. Left out: the Cortex-M assembly, the examples.

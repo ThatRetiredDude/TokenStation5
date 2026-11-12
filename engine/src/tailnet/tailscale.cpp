@@ -1,9 +1,11 @@
 #include "tailscale.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -50,7 +52,7 @@ void log(const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(line, sizeof line, fmt, ap);
     va_end(ap);
-    ts5::log_line("ts5-title: tailscale: %s", line);
+    ts5::log_line(TS5_LOG_NAME ": tailscale: %s", line);
 }
 
 double now_s() {
@@ -231,8 +233,21 @@ bool load_keys(const std::string &path, Keys &k) {
 
 bool save_keys(const std::string &path, const Keys &k) {
     const std::string tmp = path + ".new";
+#ifdef TS5_PS5
     FILE *f = fopen(tmp.c_str(), "w");
     if (!f) return false;
+#else
+    // The keys are this device's on the tailnet: for its owner's eyes only
+    // (Linux; on the PS5 the title's folder is the jailbreak's FTP's anyway).
+    const int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) return false;
+    fchmod(fd, 0600);
+    FILE *f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+        return false;
+    }
+#endif
     fprintf(f, "# ts5 tailscale v1\nserver\t%s\nmachine\t%s\nnode\t%s\ndisco\t%s\nlog_id\t%s\naccount\t%s\n",
             k.server.c_str(), hex(k.machine, 32).c_str(), hex(k.node, 32).c_str(), hex(k.disco, 32).c_str(),
             k.log_id.c_str(), k.account.c_str());

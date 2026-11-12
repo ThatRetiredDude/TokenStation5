@@ -280,6 +280,7 @@ jobs:
           su - tester -c 'cd tokenstation-linux-amd64 && ./install.sh --no-start'
           su - tester -c '~/.local/bin/tokenstation --version'
           su - tester -c '~/.local/bin/ts5 2>&1 | grep -q "usage: ts5"'
+          su - tester -c '~/.local/bin/ts5 --version' | grep -q '^ts5 linux-'
           test -x /usr/local/lib/tokenstation/hw
           id -nG tester | grep -q tokenstation
           sudo -l -U tester | grep -q /usr/local/lib/tokenstation/hw

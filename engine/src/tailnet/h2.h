@@ -1,5 +1,5 @@
 // The HTTP/2 that Tailscale's control server speaks inside the Noise
-// connection (ps5/ts/noise.h): a client of just what the PS5 needs. Requests
+// connection (tailnet/noise.h): a client of just what the PS5 needs. Requests
 // with small bodies, responses read as they come (the map is one long
 // response), PINGs answered, the receive windows opened as data arrives.
 // HPACK: headers sent as plain literals; received ones decoded in full

@@ -8,11 +8,11 @@ X25519 from Mike Hamburg's STROBE (MIT, "Copyright (c) 2015-2016 Cryptography
 Research, Inc.", `src/crypto/refc/x25519-license.txt`). NOTICE.md at the top
 of this repo lists it.
 
-WireGuard for the title's tunnel (`ps5/wg`), as an lwIP network interface.
+WireGuard for the tunnel (`engine/src/tailnet`), as an lwIP network interface.
 `scripts/vendor-wireguard.sh` copies it, with one change of ours: up to
 16 peers, not 1 (`src/wireguard-platform.h`, marked "ts5"), so each
-device has its own key. Its UDP goes through the PS5's own socket:
-`ps5/wg/wg_udp.c` stands in for the lwIP UDP calls `wireguardif.c` makes.
+device has its own key. Its UDP goes through the program's own socket:
+`engine/src/tailnet/wg_udp.c` stands in for the lwIP UDP calls `wireguardif.c` makes.
 
 Kept: `src/` (the protocol, the interface, the crypto glue) and
 `src/crypto/refc`. Left out: the Cortex-M assembly, the examples.

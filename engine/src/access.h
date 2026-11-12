@@ -11,6 +11,8 @@
 //   a key that is on      let in, under the key's name (usage log)
 //   this machine          let in (127.0.0.1: ts5-tui, a program beside it)
 //   another machine       let in without a key unless "required" is set
+//   a device on a tailnet only with a key (100.64.0.0/10: Tailscale, such
+//                         as ts5's own, tailnet_serve.h)
 // The file is read again when it changes, so a key made or turned off
 // holds from the next request, with the model still loaded. When a key
 // was last used goes to FILE.used ("id<TAB>seconds", at most once a minute
@@ -75,6 +77,10 @@ private:
 // TV app keeps its keys in memory and writes the whole file, so a key
 // made beside it would be lost.
 std::string default_keys_path();
+
+// Whether a peer's address is on a tailnet (100.64.0.0/10, the range
+// Tailscale gives its devices).
+bool on_tailnet(const std::string &client);
 
 // ts5 keys [--file FILE] [--json] list | new NAME | on KEY | off KEY | remove KEY | require on|off
 int keys_main(int argc, char **argv);

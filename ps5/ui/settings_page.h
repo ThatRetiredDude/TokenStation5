@@ -42,7 +42,7 @@ struct TsDeviceInfo {
     bool direct = false;        // its packets go straight, not through the relay
 };
 
-// The PS5 on a tailnet (ts/tailscale.h), as the page shows it.
+// The PS5 on a tailnet (tailnet/tailscale.h), as the page shows it.
 struct TsInfo {
     // ts::Status::State: 0 off, 1 starting, 2 needs sign-in, 3 connecting,
     // 4 connected, 5 a problem.

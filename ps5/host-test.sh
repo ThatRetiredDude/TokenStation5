@@ -77,15 +77,15 @@ if [ ${#pids[@]} -gt 0 ] || [ ! -f "$wobj/libts5speech.a" ]; then
     echo "== libts5speech.a: ${#pids[@]} files compiled in $(($(date +%s) - t0)) s"
 fi
 
-# WireGuard (ps5/wg, lwIP and wireguard-lwip), as ps5/build.sh builds it.
+# WireGuard and Tailscale (engine/src/tailnet, lwIP and wireguard-lwip), as ps5/build.sh builds it.
 lw="$root/third_party/lwip/src"
 wgl="$root/third_party/wireguard-lwip/src"
-wgflags=(-O2 -I "$root/ps5/wg" -I "$lw/include" -I "$wgl")
+wgflags=(-O2 -I "$root/engine/src/tailnet" -I "$lw/include" -I "$wgl")
 mkdir -p "$work/wg"
 wgobjects=()
 pids=()
-for src in "$lw"/core/*.c "$lw"/core/ipv4/*.c "$wgl"/*.c "$wgl"/crypto/refc/*.c "$root"/ps5/wg/wg_udp.c "$root"/ps5/wg/wg.cpp \
-        "$root"/ps5/ts/*.cpp; do
+for src in "$lw"/core/*.c "$lw"/core/ipv4/*.c "$wgl"/*.c "$wgl"/crypto/refc/*.c "$root"/engine/src/tailnet/wg_udp.c "$root"/engine/src/tailnet/wg.cpp \
+        "$root"/engine/src/tailnet/{tailscale,noise,h2,nacl}.cpp; do
     [ "$src" = "$lw/core/udp.c" ] && continue
     rel=${src#"$root"/}
     o="$work/wg/${rel//\//_}.o"

@@ -121,10 +121,10 @@ for src in "$w"/src/whisper.cpp "$w"/src/aneforge/whisper-aneforge.cpp \
     esac
 done
 
-wgflags=("${opt[@]}" -I "$root/ps5/wg" -I "$lw/include" -I "$wgl")
+wgflags=("${opt[@]}" -I "$root/engine/src/tailnet" -I "$lw/include" -I "$wgl")
 st=$(stamp wg "$CC" "${wgflags[@]}")
 wgobjects=()
-for src in "$lw"/core/*.c "$lw"/core/ipv4/*.c "$wgl"/*.c "$wgl"/crypto/refc/*.c "$root"/ps5/wg/wg_udp.c; do
+for src in "$lw"/core/*.c "$lw"/core/ipv4/*.c "$wgl"/*.c "$wgl"/crypto/refc/*.c "$root"/engine/src/tailnet/wg_udp.c; do
     [ "$src" = "$lw/core/udp.c" ] && continue
     rel=${src#"$root"/}
     o="$out/obj/wg/${rel//\//_}.o"
@@ -143,21 +143,28 @@ for src in "$root"/engine/src/{gguf,quants,model,cpu_backend,vk_context,vk_backe
     run "$CXX" "${cxxflags[@]}" -c "$src" -o "$o"
 done
 for src in "$root"/ps5/{title,library,runner,audio_probe,chat,chat_store,stt,voice,settings,speak,text_input,usage_store,downloads,keys,hf_search,backup,local_time,keep_models}.cpp \
-        "$root"/ps5/wg/wg.cpp "$root"/ps5/ts/*.cpp "$root"/third_party/qrcodegen/qrcodegen.cpp \
+        "$root"/engine/src/tailnet/wg.cpp "$root"/engine/src/tailnet/{tailscale,noise,h2,nacl}.cpp "$root"/third_party/qrcodegen/qrcodegen.cpp \
         "$root"/ps5/ui/{canvas,pad,dashboard,chat_page,settings_page,home_page,logs_page}.cpp \
         "$root"/ps5/tts/{g2p,text,numbers,spelling,synth}.cpp "$root"/linux/{platform,display,hardware}.cpp; do
     rel=${src#"$root"/}
     o="$out/obj/own/${rel//\//_}.o"
     title_objects+=("$o")
-    run "$CXX" "${cxxflags[@]}" -I "$root/ps5/wg" -I "$lw/include" -I "$wgl" -c "$src" -o "$o"
+    run "$CXX" "${cxxflags[@]}" -I "$root/engine/src/tailnet" -I "$lw/include" -I "$wgl" -c "$src" -o "$o"
 done
 for src in "$root"/linux/tui/*.cpp; do
     o="$out/obj/own/tui_$(basename "$src" .cpp).o"
     run "$CXX" "${cxxflags[@]}" -I "$root/linux/tui" -c "$src" -o "$o"
 done
-for src in "$root"/engine/src/{main,cli,browser,access}.cpp; do
+for src in "$root"/engine/src/{main,cli,browser,access,tailnet_serve}.cpp; do
     o="$out/obj/own/cli_$(basename "$src" .cpp).o"
-    run "$CXX" "${cxxflags[@]}" -c "$src" -o "$o"
+    run "$CXX" "${cxxflags[@]}" -DTS5_TAILNET=1 -c "$src" -o "$o"
+done
+# ts5's own copy of the Tailscale client and its tunnel (tailnet_serve.h),
+# its log lines starting "ts5:".
+for src in "$root"/engine/src/tailnet/{wg,tailscale,noise,h2,nacl}.cpp; do
+    o="$out/obj/own/ts5net_$(basename "$src" .cpp).o"
+    run "$CXX" "${cxxflags[@]}" "-DTS5_LOG_NAME=\"ts5\"" -I "$root/engine/src/tailnet" -I "$lw/include" -I "$wgl" \
+        -c "$src" -o "$o"
 done
 run "$CC" -x assembler-with-cpp -Wa,-I"$root/ps5/ui" -c "$root/ps5/ui/font_data.S" -o "$out/obj/own/font_data.o"
 run "$CC" -x assembler-with-cpp -Wa,-I"$root/ps5/tts" -c "$root/ps5/tts/lexicon_data.S" -o "$out/obj/own/lexicon_data.o"
@@ -181,7 +188,7 @@ ar_if_stale "$out/obj/libts5wg.a" "${wgobjects[@]}"
     "$out/obj/libts5wg.a" "$out/obj/libts5speech.a" "$out/obj/libts5mbedtls.a" \
     $(pkg-config --libs sdl2) -ldl
 "$CXX" "${opt[@]}" -o "$out/ts5" "$out/obj/own/cli_main.o" "$out/obj/own/cli_cli.o" "$out/obj/own/cli_browser.o" \
-    "$out/obj/own/cli_access.o" "${engine_objects[@]}" \
-    "$out/obj/libts5mbedtls.a" -ldl
-"$CXX" "${opt[@]}" -o "$out/ts5-tui" "$out"/obj/own/tui_*.o
+    "$out/obj/own/cli_access.o" "$out/obj/own/cli_tailnet_serve.o" "$out"/obj/own/ts5net_*.o "${engine_objects[@]}" \
+    "$out/obj/libts5wg.a" "$out/obj/libts5mbedtls.a" -ldl
+"$CXX" "${opt[@]}" -o "$out/ts5-tui" "$out"/obj/own/tui_*.o "$out/obj/own/third_party_qrcodegen_qrcodegen.cpp.o"
 echo "build: $out/tokenstation, $out/ts5 and $out/ts5-tui ($version, tuned for $march)"

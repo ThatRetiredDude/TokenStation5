@@ -181,6 +181,30 @@ The rules, the same for all three:
 In the app on the other machine, the server is `http://THIS-MACHINE:8081/v1`
 and the API key is the key.
 
+### Tailscale (reach it from anywhere)
+
+`ts5 serve` (a model ts5-tui loads, and the background service) joins your
+[Tailscale](https://tailscale.com) network as a device of its own, so your
+phone and laptop reach the API at home or away, with nothing forwarded on
+the router and nothing installed: no `tailscale` package, no root, no
+network interface. Only the API's port can be reached through it, and a
+device on the tailnet always needs an API key that is on, whether or not
+"require" is.
+
+ts5-tui's **Access** page (F6) sets it up: turn **Tailscale** on, scan the
+QR code with your phone and sign in. The machine shows up in your tailnet as
+`tokenstation5`. Then **Connect an app** makes a key and shows the address on
+your tailnet and the key as two QR codes, for the app on your phone.
+Tailscale off leaves it signed in (on again needs no QR code); **D** on that
+row signs out.
+
+Its files sit beside the keys: `tailscale.conf` (on or off, the name, the
+control server) and `tailscale.tsv` (the device's own keys), both readable
+by their owner only. `TS5_TS_NAME` names the device, `TS5_TS_SERVER` points
+it at a Headscale server, and `TS5_TS_AUTH_KEY` signs in with an auth key
+instead of the QR code (in `/etc/default/tokenstation` for the service). The
+TV app has its own Tailscale, on its Settings page.
+
 ## In a terminal: ts5-tui
 
 `ts5-tui` is TokenStation5 in a terminal, colorful and driven from the
@@ -232,7 +256,7 @@ ts5-tui --url http://ps5.local:8081  # another one
   page but Chat. On a Mac, where macOS keeps the F keys, use those, fn+F1
   to fn+F6, or `/chat`, `/models`, `/status`, `/settings`, `/logs`, `/access`.
 - **Access (F6)**: who can use this TokenStation5 from another machine,
-  and with which key. Two switches and the list of keys:
+  and with which key. Three switches, Connect an app, and the list of keys:
   - **Other devices**: whether a model ts5-tui loads can be reached from
     other machines at all. Off by default (only this machine). Switched
     on, the page shows the address to give an app, such as
@@ -240,11 +264,19 @@ ts5-tui --url http://ps5.local:8081  # another one
     which is when it takes hold.
   - **They need a key**: on, another machine gets in only with a key that
     is on. Switching Other devices on turns this on too.
+  - **Tailscale**: on, the server joins your tailnet ([Tailscale](#tailscale-reach-it-from-anywhere)).
+    The first time, a QR code of the sign-in link opens: scan it with your
+    phone and sign in, and it closes once the machine is connected. The row
+    then shows its name, its 100.x address and how many other devices
+    the tailnet has; **D** signs out.
+  - **Connect an app**: makes a key (name it after the app) and shows two
+    QR codes, the address (the tailnet's when Tailscale is connected, else
+    this network's) and the key, to scan into the app on a phone.
   - **Keys**: **N** makes one (name it after the app or the machine).
-    The key is shown once, by itself on a plain screen to select, with the
-    address beside it; ts5 keeps only its SHA-256. **Enter** turns a key
-    off or on, **D** removes it after asking. Each row says when the key
-    was made and last used.
+    The key is shown once, with the address, as the same QR codes; **V**
+    shows them as plain text to select. ts5 keeps only its SHA-256.
+    **Enter** turns a key off or on, **D** removes it after asking. Each
+    row says when the key was made and last used.
 
   The page works on the keys of the server in use: a model ts5-tui
   loaded, or the background service's (then Other devices is the

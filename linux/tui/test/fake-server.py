@@ -34,6 +34,9 @@ page the call before gave. "&&" between steps makes them calls of one turn.
 (an outside tool's: linux/tui/mcp.h and fake-mcp.py); "&&&" between several.
 FAKE_TEXT_CALL: what the turn that gets no tools (after twelve rounds of
 them, or a no) answers with, a call written as text ("\\n" a line break).
+FAKE_TAILNET=1 answers /ts5/tailnet as a ts5 serve with Tailscale does (off;
+on gives a sign-in link a second later, and FAKE_TAILNET_SIGNIN seconds
+after that, 6 by default, it is connected; sign_out turns it off).
 FAKE_MODEL names the model. FAKE_HELPER names the helper drafting beside it
 (FAKE_HELPER_CTX: its context; "none": no helper), FAKE_HELPER_NOTE says
 why none is; with neither, /v1/models has no "helper" at all, as an older
@@ -79,6 +82,30 @@ DENSE = int(os.environ.get("FAKE_DENSE", "3"))  # bytes a token, with FAKE_COUNT
 GEN_LEN = COUNT_LEN and os.environ.get("FAKE_GEN", "") != "word"
 REQUESTS = os.environ.get("FAKE_REQUESTS", "")
 WEB = bool(os.environ.get("FAKE_WEB") or os.environ.get("TAVILY_API_KEY"))
+TAILNET = os.environ.get("FAKE_TAILNET") == "1"
+TAILNET_SIGNIN = float(os.environ.get("FAKE_TAILNET_SIGNIN", "6"))
+tailnet = {"on": False, "since": 0.0, "signed_in": False, "name": "tokenstation5"}
+
+
+def tailnet_status():
+    """What GET /ts5/tailnet gives: off, starting, sign_in (with a link), connected."""
+    t = tailnet
+    out = {"on": t["on"], "hostname": t["name"], "server": "https://controlplane.tailscale.com", "devices": 0,
+           "port": int(sys.argv[1]) if len(sys.argv) > 1 else 18081, "peers": []}
+    age = time.time() - t["since"]
+    if not t["on"]:
+        out["state"] = "off"
+    elif not t["signed_in"] and age < 1:
+        out["state"] = "starting"
+    elif not t["signed_in"] and age < 1 + TAILNET_SIGNIN:
+        out["state"] = "sign_in"
+        out["sign_in_url"] = "https://login.tailscale.com/a/f4ke51gn1n"
+    else:
+        t["signed_in"] = True
+        name = t["name"] + ".tail1234ab.ts.net."
+        out.update(state="connected", name=name, address="100.101.102.103", account="you@example.com", devices=2,
+                   url="http://%s:%d/v1" % (name.rstrip("."), out["port"]))
+    return out
 SUMMARY = """## What you are doing
 - Trying the fake TokenStation, one message at a time.
 
@@ -127,6 +154,8 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self.send(200, {"status": "ok"})
+        elif self.path == "/ts5/tailnet" and TAILNET:
+            self.send(200, tailnet_status())
         elif self.path in ("/v1/models", "/models"):
             m = {"id": MODEL, "object": "model", "context_length": N_CTX,
                  "capabilities": {"tools": True, "tool_format": "hermes", "web_search": WEB,
@@ -148,6 +177,17 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         req = json.loads(self.rfile.read(n) or b"{}")
+        if self.path == "/ts5/tailnet" and TAILNET:
+            if req.get("sign_out"):
+                tailnet.update(on=False, signed_in=False)
+            elif "on" in req:
+                if req["on"] and not tailnet["on"]:
+                    tailnet["since"] = time.time()
+                tailnet["on"] = bool(req["on"])
+            if req.get("name"):
+                tailnet["name"] = req["name"].lower()
+            self.send(200, tailnet_status())
+            return
         msgs = req.get("messages", [])
         last = msgs[-1]["content"] if msgs else ""
         # ts5-tui's request for a summary: the conversation as one text, its messages under [User] and

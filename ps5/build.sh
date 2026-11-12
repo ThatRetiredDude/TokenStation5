@@ -110,16 +110,16 @@ for src in "$w"/src/whisper.cpp "$w"/src/aneforge/whisper-aneforge.cpp \
     esac
     pids+=($!)
 done
-# The tunnel Tailscale runs on (ps5/wg/wg.h): wireguard-lwip and lwIP
-# (third_party/, scripts/vendor-wireguard.sh) with ps5/wg's settings, on the
-# title's own UDP socket (ps5/wg/wg_udp.c stands in for lwIP's udp.c).
+# The tunnel Tailscale runs on (tailnet/wg.h): wireguard-lwip and lwIP
+# (third_party/, scripts/vendor-wireguard.sh) with engine/src/tailnet's settings, on the
+# title's own UDP socket (engine/src/tailnet/wg_udp.c stands in for lwIP's udp.c).
 lw="$root/third_party/lwip/src"
 wgl="$root/third_party/wireguard-lwip/src"
-wgflags=(-O2 -ffunction-sections -fdata-sections -I "$root/ps5/wg" -I "$lw/include" -I "$wgl")
+wgflags=(-O2 -ffunction-sections -fdata-sections -I "$root/engine/src/tailnet" -I "$lw/include" -I "$wgl")
 mkdir -p "$out/obj/wg"
 wgobjects=()
-for src in "$lw"/core/*.c "$lw"/core/ipv4/*.c "$wgl"/*.c "$wgl"/crypto/refc/*.c "$root"/ps5/wg/wg_udp.c "$root"/ps5/wg/wg.cpp \
-        "$root"/ps5/ts/*.cpp; do
+for src in "$lw"/core/*.c "$lw"/core/ipv4/*.c "$wgl"/*.c "$wgl"/crypto/refc/*.c "$root"/engine/src/tailnet/wg_udp.c "$root"/engine/src/tailnet/wg.cpp \
+        "$root"/engine/src/tailnet/{tailscale,noise,h2,nacl}.cpp; do
     [ "$src" = "$lw/core/udp.c" ] && continue
     rel=${src#"$root"/}
     o="$out/obj/wg/${rel//\//_}.o"

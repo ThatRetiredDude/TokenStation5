@@ -8,7 +8,7 @@
 // One thread runs it all. Settings, keys and peers come from the title
 // (Settings, WireGuard); a peer is one device, with its own key and address.
 //
-// The same thread runs the PS5's device on a tailnet (ps5/ts/tailscale.h):
+// The same thread runs the PS5's device on a tailnet (tailnet/tailscale.h):
 // a second WireGuard device and network interface, whose packets come and
 // go through Tailscale's relay rather than the UDP socket, and whose
 // connections to the API's port are passed on the same way.

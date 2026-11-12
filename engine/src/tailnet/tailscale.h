@@ -15,10 +15,16 @@
 //            disco pings and then send there instead. One thread.
 //
 // The packets are WireGuard's, as Tailscale's apps send them; WireGuard and
-// the TCP/IP inside it run in the tunnel's thread (ps5/wg/wg.h) beside the
+// the TCP/IP inside it run in the tunnel's thread (tailnet/wg.h) beside the
 // PS5's own WireGuard server, which takes them from here and gives its
 // answers back.
 #pragma once
+
+// The program's name at the start of these files' log lines: the title's,
+// unless a build names another (the Linux ts5 binary: -DTS5_LOG_NAME='"ts5"').
+#ifndef TS5_LOG_NAME
+#define TS5_LOG_NAME "ts5-title"
+#endif
 #include <atomic>
 #include <cstdint>
 #include <deque>

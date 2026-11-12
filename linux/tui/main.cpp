@@ -40,6 +40,7 @@
 #include "files.h"
 #include "json.h"
 #include "mcp.h"
+#include "qrcodegen.hpp"  // third_party/qrcodegen: the QR codes on the Access page
 #include "sandbox.h"
 #include "store.h"
 #include "tested.h"  // the models tested on a PS5 that the catalog doesn't have
@@ -185,6 +186,25 @@ struct App {
     bool acc_required = false, acc_writable = true, acc_typing = false;
     std::string acc_file, acc_err, acc_name;
     double acc_at = 0;
+    // The server's Tailscale (GET /ts5/tailnet), as last read. tn_have is
+    // false when it has none (not running, an older ts5, the TV app): tn_why.
+    bool tn_have = false, tn_on = false;
+    bool tn_want_qr = false;  // turned on here: the sign-in QR opens once there is a link
+    std::string tn_state, tn_host, tn_name, tn_address, tn_url, tn_sign_in, tn_problem, tn_account, tn_why;
+    int tn_devices = 0;
+    double tn_at = 0;
+    // QR codes over the page: the sign-in link (closed once connected), or
+    // an app's address and new key. Side by side when they fit, else one at
+    // a time (←→). qr_plain: the same as text, for V (to copy by hand).
+    struct Qr {
+        std::string label, data;
+    };
+    std::vector<Qr> qr;
+    std::string qr_title, qr_plain, qr_plain_title;
+    std::vector<std::string> qr_notes;
+    std::string qr_short;  // the notes in a line, for a short terminal
+    int qr_sel = 0;
+    bool qr_sign_in = false;
     std::string logs_src;
     double logs_checked = 0;
 };
@@ -559,6 +579,10 @@ std::string encyclopedia_name() {
 // another machine's.
 enum AccessKind { ACC_OWN, ACC_SERVICE, ACC_TV, ACC_REMOTE };
 
+// The page's rows before the keys: other devices, need a key, Tailscale,
+// connect an app.
+constexpr int kAccRows = 4;
+
 AccessKind access_kind() {
     if (!endpoint().local()) return ACC_REMOTE;
     if (own_server_pid() > 0) return ACC_OWN;
@@ -658,13 +682,16 @@ bool keys_cmd(const std::string &file, const std::string &args, ts5::Json &out, 
     return true;
 }
 
-// The page's keys, read again.
+void tailnet_read();
+
+// The page's keys, read again, and the server's Tailscale.
 void access_read() {
     const AccessKind k = access_kind();
     g->acc_kind = k;
     g->acc_file = access_file(k);
     g->acc_at = now_s();
     g->acc_err.clear();
+    tailnet_read();
     if (k == ACC_REMOTE) {
         g->acc_keys.clear();
         return;
@@ -682,7 +709,107 @@ void access_read() {
     for (const ts5::Json &x : j["keys"].a)
         g->acc_keys.push_back({x["id"].str(), x["name"].str(), x["on"].boolean(true), (int64_t)x["created"].num(0),
                                (int64_t)x["used"].num(0)});
-    g->acc_sel = std::max(0, std::min(g->acc_sel, 1 + (int)g->acc_keys.size()));
+    g->acc_sel = std::max(0, std::min(g->acc_sel, kAccRows - 1 + (int)g->acc_keys.size()));
+}
+
+// The server's Tailscale from its JSON (GET or POST /ts5/tailnet).
+void tailnet_take(const ts5::Json &j) {
+    g->tn_have = true;
+    g->tn_why.clear();
+    g->tn_on = j["on"].boolean(false);
+    g->tn_state = j["state"].str();
+    g->tn_host = j["hostname"].str();
+    g->tn_name = j["name"].str();
+    while (!g->tn_name.empty() && g->tn_name.back() == '.') g->tn_name.pop_back();
+    g->tn_address = j["address"].str();
+    g->tn_url = j["url"].str();
+    g->tn_sign_in = j["sign_in_url"].str();
+    g->tn_problem = j["problem"].str();
+    g->tn_account = j["account"].str();
+    g->tn_devices = (int)j["devices"].num(0);
+}
+
+// The sign-in link as a QR code, to scan with the phone that is signed in
+// to Tailscale (or any phone: it signs in there).
+void qr_sign_in_open() {
+    g->toast.clear();  // (it would sit on the code's last rows)
+    g->qr = {{"", g->tn_sign_in}};
+    g->qr_sel = 0;
+    g->qr_sign_in = true;
+    g->qr_title = " Sign in to Tailscale ";
+    g->qr_notes = {"Scan it with your phone's camera and sign in: this machine joins your tailnet as " +
+                       (g->tn_host.empty() ? std::string("tokenstation5") : g->tn_host) + ".",
+                   "Or open the link on any device: " + g->tn_sign_in};
+    g->qr_short = "Scan it to sign in, or open " + g->tn_sign_in;
+    g->qr_plain = "Sign in to Tailscale with this link, on any device:\n\n" + g->tn_sign_in +
+                  "\n\nThis machine then joins your tailnet. The link works once.\n";
+    g->qr_plain_title = "the Tailscale sign-in link";
+}
+
+void qr_close() {
+    g->qr.clear();
+    g->qr_notes.clear();
+    g->qr_plain.clear();  // (an app's: it holds the key)
+    g->qr_sign_in = false;
+}
+
+// The server's Tailscale read again: only a server on this machine (from
+// here is the only place it can be changed).
+void tailnet_read() {
+    g->tn_at = now_s();
+    g->tn_have = false;
+    const AccessKind k = (AccessKind)g->acc_kind;
+    if (k == ACC_TV) {
+        g->tn_why = "the TV app's own: its Settings page, under Tailscale";
+        return;
+    }
+    if (k == ACC_REMOTE) return;
+    const Reply r = http(endpoint(), "GET", "/ts5/tailnet", "", 1500);
+    ts5::Json j;
+    if (r.status == 0)
+        g->tn_why = k == ACC_SERVICE ? "the background service isn't answering now"
+                                     : "it runs in the server ts5-tui starts: load a model first (Models, F2)";
+    else if (r.status == 404)
+        g->tn_why = "this server has none: a ts5 older than this ts5-tui, or one run by hand without TS5_KEYS";
+    else if (r.status != 200 || !ts5::Json::parse(r.body, j) || j.type != ts5::Json::OBJ)
+        g->tn_why = "the server's answer was not understood (" + std::to_string(r.status) + ")";
+    else
+        tailnet_take(j);
+    if (!g->tn_have) return;
+    const bool linked = g->tn_state == "sign_in" && !g->tn_sign_in.empty();
+    if (g->tn_want_qr && linked) {
+        g->tn_want_qr = false;
+        if (g->qr.empty()) qr_sign_in_open();
+    }
+    if (g->qr_sign_in) {
+        if (g->tn_state == "connected") {
+            qr_close();
+            const std::string who = g->tn_name.empty() ? g->tn_host : g->tn_name;
+            show_toast("Tailscale: connected as " + who.substr(0, who.find('.')) +
+                           ". Connect an app, on Access, gives a phone what to scan",
+                       g->th->good, 9);
+        } else if (linked && g->qr[0].data != g->tn_sign_in) {
+            qr_sign_in_open();  // a new link (the last one ran out)
+        } else if (!g->tn_on) {
+            qr_close();
+        }
+    }
+    if (g->tn_state != "sign_in" && g->tn_state != "starting" && g->tn_state != "connecting") g->tn_want_qr = false;
+}
+
+// POST /ts5/tailnet with body; the answer taken. False with a toast.
+bool tailnet_post(const std::string &body) {
+    const Reply r = http(endpoint(), "POST", "/ts5/tailnet", body, 4000);
+    ts5::Json j;
+    if (r.status == 200 && ts5::Json::parse(r.body, j) && j.type == ts5::Json::OBJ) {
+        tailnet_take(j);
+        g->tn_at = now_s();
+        return true;
+    }
+    std::string why = r.status == 0 ? r.err : "the server said " + std::to_string(r.status);
+    if (r.status && ts5::Json::parse(r.body, j) && j.type == ts5::Json::OBJ && j.o.count("error")) why = j["error"].str();
+    show_toast("Tailscale: not done: " + why, g->th->bad, 8);
+    return false;
 }
 
 // ctx: the context for a server of its own; -1: Settings → Context.
@@ -3013,16 +3140,50 @@ void draw_access() {
         else if (own > 0 && own_server_lan(own) != reach)
             r.note = std::string(reach ? "yes" : "no") + " once the model is loaded again (Enter here loads it again)", r.warn = true;
         else
-            r.note = reach ? where + " · the address to give an app on another machine"
-                           : "only this machine can use the model ts5-tui loads";
+            r.note = reach      ? where + " · the address to give an app on another machine"
+                     : g->tn_on ? "not from this network; from your tailnet, with a key (Tailscale, below)"
+                                : "only this machine can use the model ts5-tui loads";
         rows.push_back(r);
     }
     {
         Row r{"They need a key", k == ACC_TV ? "the TV's setting" : g->acc_required ? "yes" : "no", "", k != ACC_TV, false};
         if (k == ACC_TV) r.note = "Require a key is on the TV app's Settings page, under Apps, and its keys are made there";
         else if (g->acc_required) r.note = "another machine gets in only with a key that is on. This machine never needs one";
+        else if (reach && g->tn_on) r.note = "on this network any machine gets in, key or not (from the tailnet: only with one)", r.warn = true;
         else if (reach) r.note = "any machine that reaches the port can use the model, key or not", r.warn = true;
+        else if (g->tn_on) r.note = "from your tailnet only with a key that is on; no other machine gets in";
         else r.note = "no machine but this one gets in anyway";
+        rows.push_back(r);
+    }
+    {
+        // Tailscale, run by the server itself: no system package, no root.
+        Row r{"Tailscale", "", "", k != ACC_TV && g->tn_have, false};
+        const std::string st = g->tn_state;
+        const std::string who = g->tn_name.empty() ? g->tn_host : g->tn_name;
+        if (k == ACC_TV) r.value = "the TV app's", r.note = "it signs in with a QR code on the TV app's Settings page, under Tailscale";
+        else if (!g->tn_have) r.value = "—", r.note = g->tn_why;
+        else if (!g->tn_on)
+            r.value = "off", r.note = "on: your phones and computers on Tailscale reach it at home or away, with a key";
+        else if (st == "connected")
+            r.value = "on", r.note = "connected as " + who.substr(0, who.find('.')) +
+                                     (g->tn_address.empty() ? "" : " · " + g->tn_address) +
+                                     (g->tn_devices > 0 ? fmt(" · %d other devices", g->tn_devices) : "") + " · D signs out";
+        else if (st == "sign_in")
+            r.value = "on", r.warn = true,
+            r.note = g->tn_sign_in.empty() ? "asking Tailscale for a sign-in link…" : "to sign in: Enter shows the QR code";
+        else if (st == "problem")
+            r.value = "on", r.warn = true, r.note = g->tn_problem.empty() ? "a problem: see Logs (F5)" : g->tn_problem;
+        else
+            r.value = "on", r.note = "connecting to Tailscale…";
+        rows.push_back(r);
+    }
+    {
+        Row r{"Connect an app", "a new key, as QR codes", "", false, false};
+        const bool tailnet = g->tn_have && g->tn_state == "connected";
+        if (k == ACC_TV) r.value = "on the TV", r.note = "the TV app makes its keys: its Settings page, under Apps";
+        else if (tailnet) r.note = "Enter: your tailnet's address and a new key, as QR codes for a phone";
+        else if (reach) r.note = "Enter: this network's address and a new key, as QR codes for a phone";
+        else r.note = "other machines can't reach it yet: Other devices, or Tailscale, above";
         rows.push_back(r);
     }
     if (k == ACC_OWN && own <= 0 && server().status == 200) {
@@ -3030,7 +3191,7 @@ void draw_access() {
         s.put(x0 + 2, y + 1, fit("What is set here holds for a model ts5-tui loads.", w - 4), S(t.warn));
         y += 3;
     }
-    for (int i = 0; i < 2 && y < s.h - 4; i++) {
+    for (int i = 0; i < kAccRows && y < s.h - 4; i++) {
         const bool on = g->acc_sel == i && !g->acc_typing;
         const Style row = on ? Style(t.fg, t.panel2) : Style(t.fg, t.bg);
         s.fill(x0, y, w, 2, row);
@@ -3063,7 +3224,7 @@ void draw_access() {
     }
     const int name_w = std::max(12, std::min(40, w - 60));
     const int room = std::max(1, s.h - 3 - y - (g->acc_typing ? 1 : 0));
-    const int chosen = g->acc_sel - 2;
+    const int chosen = g->acc_sel - kAccRows;
     const int first = std::max(0, std::min(chosen - room + 1, (int)g->acc_keys.size() - room));
     for (int i = std::max(0, first); i < (int)g->acc_keys.size() && y < s.h - 3 - (g->acc_typing ? 1 : 0); i++, y++) {
         const App::AccessKey &key = g->acc_keys[(size_t)i];
@@ -3093,9 +3254,135 @@ void draw_access() {
                                    : "Your user can't change that file.",
                   w - 4),
               S(t.warn));
-    draw_bottom_bar(g->acc_typing ? "Enter make the key|Esc cancel"
-                    : g->acc_sel >= 2 ? "↑↓ choose|Enter on or off|D remove|N new key|Tab/1-6 pages"
-                                      : "↑↓ choose|←→ change|N new key|Tab/1-6 pages");
+    draw_bottom_bar(g->acc_typing                ? "Enter make the key|Esc cancel"
+                    : g->acc_sel >= kAccRows     ? "↑↓ choose|Enter on or off|D remove|N new key|Tab/1-6 pages"
+                    : g->acc_sel == 2 && g->tn_on && g->tn_state == "sign_in"
+                        ? "↑↓ choose|Enter the QR code|←→ on or off|D sign out|N new key|Tab/1-6 pages"
+                    : g->acc_sel == 2 && g->tn_on ? "↑↓ choose|←→ on or off|D sign out|N new key|Tab/1-6 pages"
+                    : g->acc_sel == 3             ? "↑↓ choose|Enter a key and its QR codes|N new key|Tab/1-6 pages"
+                                                  : "↑↓ choose|←→ change|N new key|Tab/1-6 pages");
+}
+
+// ---- QR codes (the Access page's) ----
+
+// A QR code's modules, or empty when the text is too long for one.
+std::vector<std::vector<bool>> qr_modules(const std::string &text) {
+    std::vector<std::vector<bool>> m;
+    try {
+        const qrcodegen::QrCode q = qrcodegen::QrCode::encodeText(text.c_str(), qrcodegen::QrCode::Ecc::LOW);
+        const int n = q.getSize();
+        m.assign((size_t)n, std::vector<bool>((size_t)n));
+        for (int y = 0; y < n; y++)
+            for (int x = 0; x < n; x++) m[(size_t)y][(size_t)x] = q.getModule(x, y);
+    } catch (...) {
+        m.clear();
+    }
+    return m;
+}
+
+// Its width on screen with a quiet zone of `quiet` modules each side: a
+// column per module and two modules a row (half blocks), so it is square.
+int qr_cols(const std::vector<std::vector<bool>> &m, int quiet) { return (int)m.size() + 2 * quiet; }
+int qr_rows(const std::vector<std::vector<bool>> &m, int quiet) { return (qr_cols(m, quiet) + 1) / 2; }
+
+// Black on white whatever the theme (a phone's camera wants dark modules on
+// a light ground, quiet zone included).
+void qr_draw(Screen &s, int x, int y, const std::vector<std::vector<bool>> &m, int quiet) {
+    const int n = (int)m.size(), side = qr_cols(m, quiet);
+    const auto dark = [&](int mx, int my) {
+        mx -= quiet, my -= quiet;
+        return mx >= 0 && my >= 0 && mx < n && my < n && m[(size_t)my][(size_t)mx];
+    };
+    for (int r = 0; r < qr_rows(m, quiet); r++)
+        for (int c = 0; c < side; c++) {
+            const uint32_t top = dark(c, 2 * r) ? 0x000000 : 0xFFFFFF, bottom = dark(c, 2 * r + 1) ? 0x000000 : 0xFFFFFF;
+            s.put(x + c, y + r, "▀", Style(top, bottom));
+        }
+}
+
+void draw_qr_overlay() {
+    Screen &s = g->scr;
+    const Theme &t = *g->th;
+    std::vector<std::vector<std::vector<bool>>> codes;
+    bool labels = false;
+    for (const App::Qr &q : g->qr) {
+        codes.push_back(qr_modules(q.data));
+        labels = labels || !q.label.empty();
+    }
+    const auto wrap = [](const std::vector<std::string> &notes, int w) {
+        std::vector<std::string> lines;
+        for (const std::string &note : notes) {
+            std::istringstream in(note);
+            std::string word, line;
+            while (in >> word) {
+                if (!line.empty() && text_width(line + " " + word) > w) {
+                    lines.push_back(line);
+                    line.clear();
+                }
+                line += (line.empty() ? "" : " ") + word;
+            }
+            if (!line.empty()) lines.push_back(line);
+        }
+        return lines;
+    };
+    // The roomiest way that fits: a quiet zone of 2 modules, then 1, then
+    // the short note alone and no blank rows (an 80x24 terminal), then the
+    // text without the code.
+    int quiet = 2, tallest = 0, all_w = 0, widest = 0, box_w = 0, box_h = 0;
+    bool compact = false, fits = false;
+    std::vector<std::string> lines;
+    for (int step = 0; step < 3 && !fits; step++) {
+        quiet = step == 0 ? 2 : 1;
+        compact = step == 2;
+        tallest = all_w = widest = 0;
+        for (const auto &m : codes) {
+            tallest = std::max(tallest, qr_rows(m, quiet));
+            widest = std::max(widest, qr_cols(m, quiet));
+            all_w += qr_cols(m, quiet) + 4;
+        }
+        const bool side_by_side = all_w + 2 <= s.w - 4;
+        box_w = std::min(s.w - 2, std::max(side_by_side ? all_w + 2 : widest + 6, 72));
+        lines = wrap(compact ? std::vector<std::string>{g->qr_short} : g->qr_notes, box_w - 4);
+        box_h = 2 + (labels ? 1 : 0) + tallest + (int)lines.size() + 1 + (compact ? 0 : 2);
+        fits = box_h <= s.h - 1;
+    }
+    if (!fits) {
+        lines = wrap(g->qr_notes, box_w - 4);
+        box_h = std::min(s.h - 1, 2 + 2 + (int)lines.size() + 2);
+    }
+    const bool side_by_side = all_w + 2 <= s.w - 4;
+    const int x = (s.w - box_w) / 2, y = std::max(0, (s.h - box_h) / 2);
+    box(s, x, y, box_w, box_h, Style(t.accent, t.panel2), Style(t.fg, t.panel2), g->qr_title, Style(t.accent, t.panel2, BOLD));
+    int ty = y + 1;
+    if (!fits) {
+        s.put(x + 2, ty, fit("Make the window taller to see the QR code (V shows it as text).", box_w - 4), Style(t.warn, t.panel2));
+        ty += 2;
+    } else {
+        std::vector<int> shown;
+        if (side_by_side)
+            for (int i = 0; i < (int)codes.size(); i++) shown.push_back(i);
+        else
+            shown.push_back(std::min(g->qr_sel, (int)codes.size() - 1));
+        int used = 0;
+        for (int i : shown) used += qr_cols(codes[(size_t)i], quiet) + (used ? 4 : 0);
+        int cx = x + (box_w - used) / 2;
+        for (int i : shown) {
+            const auto &m = codes[(size_t)i];
+            const std::string label = g->qr[(size_t)i].label +
+                                      (!side_by_side && codes.size() > 1 ? fmt("  (%d of %d, ←→)", i + 1, (int)codes.size()) : "");
+            if (labels)
+                s.put(cx + std::max(0, (qr_cols(m, quiet) - text_width(label)) / 2), ty, label, Style(t.fg, t.panel2, BOLD));
+            if (m.empty()) s.put(cx, ty + (labels ? 1 : 0), "too long for a QR code", Style(t.bad, t.panel2));
+            else qr_draw(s, cx, ty + (labels ? 1 : 0), m, quiet);
+            cx += qr_cols(m, quiet) + 4;
+        }
+        ty += (labels ? 1 : 0) + tallest + (compact ? 0 : 1);
+    }
+    for (const std::string &l : lines) s.put(x + 2, ty++, fit(l, box_w - 4), Style(t.dim, t.panel2));
+    int bx = s.put(x + 2, y + box_h - 2, "Esc", Style(t.accent2, t.panel2, BOLD));
+    bx = s.put(bx, y + box_h - 2, " close   ", Style(t.dim, t.panel2));
+    bx = s.put(bx, y + box_h - 2, "V", Style(t.accent2, t.panel2, BOLD));
+    s.put(bx, y + box_h - 2, g->qr_sign_in ? " the link as text, to copy" : " as text, to copy", Style(t.dim, t.panel2));
 }
 
 // ---- Chat (drawing in chat.cpp) ----
@@ -3136,6 +3423,7 @@ void draw() {
         case ACCESS: draw_access(); break;
         default: break;
     }
+    if (!g->qr.empty()) draw_qr_overlay();
     if (g->ask_yes || !g->pick.empty()) {
         const Theme &t = *g->th;
         const int w = std::min(s.w - 4, 76);
@@ -4167,22 +4455,52 @@ void access_new(const std::string &name) {
     }
     access_read();
     for (size_t i = 0; i < g->acc_keys.size(); i++)
-        if (g->acc_keys[i].id == j["id"].str()) g->acc_sel = 2 + (int)i;
+        if (g->acc_keys[i].id == j["id"].str()) g->acc_sel = kAccRows + (int)i;
     const std::string key = j["key"].str(), at = access_addresses();
     const AccessKind k = (AccessKind)g->acc_kind;
     const bool reach = k == ACC_OWN ? g->cfg.lan : true;
+    // The address an app is given: the tailnet's when it is connected (at
+    // home and away), else this network's.
+    const bool tailnet = g->tn_have && g->tn_state == "connected" && !g->tn_url.empty();
+    const std::vector<std::string> lan = lan_addresses();
+    const std::string lan_url = reach && !lan.empty() ? fmt("http://%s:%d/v1", lan[0].c_str(), endpoint().port) : "";
+    const std::string url = tailnet ? g->tn_url : lan_url;
     std::string text = "The API key for \"" + j["name"].str() + "\":\n\n" + key + "\n\n"
                        "This is the only time it is shown: ts5 keeps its SHA-256, not the key. If it gets lost, remove "
                        "it on the Access page and make another.\n\n";
-    if (!reach)
-        text += "Other machines can't reach the model yet: Access (F6), Other devices.\n";
-    else if (at.empty())
+    if (tailnet) {
+        text += "In the app, as an OpenAI-compatible server, on a device on your tailnet (Tailscale on):\n  address  " +
+                g->tn_url + "\n  API key  the key above\n";
+        if (!g->tn_address.empty()) text += fmt("  (or http://%s:%d/v1)\n", g->tn_address.c_str(), endpoint().port);
+        if (reach && !at.empty()) text += "\nOn this network, without Tailscale: " + at + "\n";
+    } else if (!reach) {
+        text += "Other machines can't reach the model yet: Access (F6), Other devices or Tailscale.\n";
+    } else if (at.empty()) {
         text += "This machine has no network address now, so there is no address to give the app yet.\n";
-    else
+    } else {
         text += "In the app, as an OpenAI-compatible server:\n  address  " + at + "\n  API key  the key above\n";
+    }
     const bool sent = to_clipboard(key);
-    view_open(text, sent ? "the new key (the key alone is also on the clipboard, if the terminal allows it)" : "the new key", 0,
-              false);
+    g->toast.clear();
+    g->qr.clear();
+    if (!url.empty()) g->qr.push_back({"Address", url});
+    g->qr.push_back({"API key", key});
+    g->qr_sel = 0;
+    g->qr_sign_in = false;
+    g->qr_title = " Connect an app: " + j["name"].str() + " ";
+    g->qr_notes.clear();
+    if (!url.empty())
+        g->qr_notes.push_back("In the app, as an OpenAI-compatible server: scan the address, then the key. " +
+                              std::string(tailnet ? "The device needs Tailscale on, signed in to your tailnet."
+                                                  : "It works on this network only (Tailscale, above, reaches it from anywhere)."));
+    else
+        g->qr_notes.push_back("Other machines can't reach the model yet (Other devices or Tailscale, above): the key is "
+                              "ready for when they can.");
+    g->qr_notes.push_back(std::string("Shown this once: ts5 keeps only its SHA-256.") +
+                          (sent ? " The key alone is on the clipboard too, if the terminal allows it." : ""));
+    g->qr_short = url.empty() ? "Shown this once: the key" : "In the app (OpenAI-compatible): the address, then the key. Shown once";
+    g->qr_plain = text;
+    g->qr_plain_title = "the new key";
 }
 
 void key_access(const Event &e) {
@@ -4207,7 +4525,7 @@ void key_access(const Event &e) {
         return;
     }
     const AccessKind k = (AccessKind)g->acc_kind;
-    const int n = k == ACC_REMOTE ? 1 : 2 + (int)g->acc_keys.size();
+    const int n = k == ACC_REMOTE ? 1 : kAccRows + (int)g->acc_keys.size();
     const auto letter = [&](char c) { return e.key == K_CHAR && e.ch.size() == 1 && tolower(e.ch[0]) == c; };
     const bool flip = e.key == K_ENTER || e.key == K_LEFT || e.key == K_RIGHT || letter(' ');
     if (e.key == K_ESC) {
@@ -4220,7 +4538,7 @@ void key_access(const Event &e) {
         g->acc_sel = (g->acc_sel + 1) % n;
     } else if (letter('r')) {
         access_read();
-    } else if (letter('n')) {
+    } else if (letter('n') || (e.key == K_ENTER && g->acc_sel == 3)) {
         if (k == ACC_TV) show_toast("The TV app makes its keys: its Settings page, under Apps", g->th->warn, 6);
         else if (!g->acc_err.empty()) show_toast(g->acc_err, g->th->bad, 6);
         else {
@@ -4258,12 +4576,44 @@ void key_access(const Event &e) {
     } else if (flip && g->acc_sel == 1) {
         if (k == ACC_TV) show_toast("That is on the TV app's Settings page, under Apps: Require a key", g->th->warn, 6);
         else access_do(g->acc_required ? "require off" : "require on", "");
-    } else if (flip && g->acc_sel >= 2 && g->acc_sel - 2 < (int)g->acc_keys.size()) {
-        const App::AccessKey &key = g->acc_keys[(size_t)g->acc_sel - 2];
+    } else if (flip && g->acc_sel == 2) {
+        if (k == ACC_TV) {
+            show_toast("The TV app has its own Tailscale: its Settings page, under Tailscale", g->th->warn, 6);
+        } else if (!g->tn_have) {
+            show_toast("Tailscale: " + g->tn_why, g->th->warn, 8);
+        } else if (e.key == K_ENTER && g->tn_on && g->tn_state == "sign_in") {
+            if (g->tn_sign_in.empty()) {
+                g->tn_want_qr = true;  // opens when the link comes
+                show_toast("Tailscale is still giving the sign-in link: the QR code opens when it comes", g->th->dim, 5);
+            } else {
+                qr_sign_in_open();
+            }
+        } else if (tailnet_post(g->tn_on ? "{\"on\":false}" : "{\"on\":true}")) {
+            g->tn_want_qr = g->tn_on;
+            show_toast(g->tn_on ? "Tailscale: on. The sign-in QR code opens when Tailscale gives the link (the first time)"
+                                : "Tailscale: off. It stays signed in: on again needs no QR code",
+                       g->tn_on ? g->th->good : g->th->dim, 6);
+            tailnet_read();
+        }
+    } else if (letter('d') && g->acc_sel == 2) {
+        if (k == ACC_TV || !g->tn_have) return;
+        if (!g->tn_on && g->tn_state != "connected") {
+            show_toast("Tailscale is off already. Sign out takes this machine off your tailnet: turn it on first", g->th->dim, 6);
+            return;
+        }
+        g->ask_title = " Sign out of Tailscale? ";
+        g->ask_text = "This machine leaves your tailnet and Tailscale turns off here. Phones and computers stop reaching it "
+                      "that way. On again shows a new QR code to sign in. Sign out?";
+        g->ask_yes = [] {
+            if (tailnet_post("{\"sign_out\":true}")) show_toast("Tailscale: signed out, and off", g->th->good, 5);
+        };
+    } else if (flip && g->acc_sel >= kAccRows && g->acc_sel - kAccRows < (int)g->acc_keys.size()) {
+        const App::AccessKey &key = g->acc_keys[(size_t)g->acc_sel - kAccRows];
         if (k == ACC_TV) show_toast("The TV app turns its keys on and off: its Settings page, under Apps", g->th->warn, 6);
         else access_do(std::string(key.on ? "off " : "on ") + key.id, key.name + (key.on ? ": off" : ": on"));
-    } else if ((letter('d') || e.key == K_DELETE) && g->acc_sel >= 2 && g->acc_sel - 2 < (int)g->acc_keys.size()) {
-        const App::AccessKey key = g->acc_keys[(size_t)g->acc_sel - 2];
+    } else if ((letter('d') || e.key == K_DELETE) && g->acc_sel >= kAccRows &&
+               g->acc_sel - kAccRows < (int)g->acc_keys.size()) {
+        const App::AccessKey key = g->acc_keys[(size_t)g->acc_sel - kAccRows];
         if (k == ACC_TV) {
             show_toast("The TV app removes its keys: its Settings page, under Apps", g->th->warn, 6);
             return;
@@ -4538,6 +4888,22 @@ void handle(const Event &e) {
         view_key(e);
         return;
     }
+    if (!g->qr.empty() && g->pick.empty() && !g->ask_yes) {
+        if (e.key == K_ESC || e.key == K_ENTER || (e.key == K_CHAR && (e.ch == "q" || e.ch == "Q"))) {
+            qr_close();
+        } else if (e.key == K_LEFT || e.key == K_RIGHT || e.key == K_TAB) {
+            const int n = (int)g->qr.size();
+            g->qr_sel = (g->qr_sel + (e.key == K_LEFT ? n - 1 : 1)) % n;
+        } else if (e.key == K_CHAR && (e.ch == "v" || e.ch == "V")) {
+            const std::string text = g->qr_plain, title = g->qr_plain_title;
+            qr_close();
+            view_open(text, title, 0, false);
+        } else if (e.key >= K_F1 && e.key <= K_F6) {
+            qr_close();
+            global_key(e);
+        }
+        return;
+    }
     if (e.key == K_MOUSE) {
         mouse(e);
         return;
@@ -4597,6 +4963,8 @@ void tick() {
         }
     }
     if (g->cur == ACCESS && !g->acc_typing && !g->ask_yes && g->pick.empty() && t - g->acc_at >= 5) access_read();
+    // Waiting for the sign-in link, or for the phone to sign in: every second.
+    else if ((g->qr_sign_in || g->tn_want_qr) && t - g->tn_at >= 1) tailnet_read();
     g->loader.pump();
     g->tuner.pump();
     job_follow();

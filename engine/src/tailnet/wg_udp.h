@@ -1,4 +1,4 @@
-// Between ps5/wg/wg.cpp and wg_udp.c, lwIP's UDP on the PS5's socket.
+// Between engine/src/tailnet/wg.cpp and wg_udp.c, lwIP's UDP on the PS5's socket.
 #pragma once
 #include <stddef.h>
 #include <stdbool.h>

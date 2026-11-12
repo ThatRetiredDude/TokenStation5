@@ -333,7 +333,14 @@ bool KeyFile::authorize(const std::string &key, const std::string &client, std::
             }
     }
     const bool here = client == "::1" || client.compare(0, 4, "127.") == 0 || client == "::ffff:127.0.0.1";
-    return here || !required_;
+    // A device on a tailnet reaches this machine from anywhere: it always
+    // needs a key, as on the TV app.
+    return !on_tailnet(client) && (here || !required_);
+}
+
+bool on_tailnet(const std::string &client) {
+    int a = 0, b = 0;
+    return sscanf(client.c_str(), "%d.%d.", &a, &b) == 2 && a == 100 && b >= 64 && b < 128;
 }
 
 int keys_main(int argc, char **argv) {

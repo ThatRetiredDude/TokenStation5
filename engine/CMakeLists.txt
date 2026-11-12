@@ -72,4 +72,20 @@ if(TS5_HTTPS)
   target_compile_definitions(ts5 PRIVATE TS5_HTTPS=1)
   target_include_directories(ts5 PRIVATE src)
   target_link_libraries(ts5 PRIVATE ts5mbedtls)
+
+  # Tailscale (tailnet_serve.h): the TV app's client and its WireGuard
+  # tunnel (src/tailnet) over lwIP and wireguard-lwip (third_party/, BSD-3),
+  # in user space.
+  set(TS5_THIRD ${CMAKE_CURRENT_SOURCE_DIR}/../third_party)
+  file(GLOB TS5_LWIP ${TS5_THIRD}/lwip/src/core/*.c ${TS5_THIRD}/lwip/src/core/ipv4/*.c)
+  list(REMOVE_ITEM TS5_LWIP ${TS5_THIRD}/lwip/src/core/udp.c)  # src/tailnet/wg_udp.c stands in
+  file(GLOB TS5_WGL ${TS5_THIRD}/wireguard-lwip/src/*.c ${TS5_THIRD}/wireguard-lwip/src/crypto/refc/*.c)
+  add_library(ts5tunnel STATIC ${TS5_LWIP} ${TS5_WGL} src/tailnet/wg_udp.c)
+  set_target_properties(ts5tunnel PROPERTIES C_STANDARD 11 C_EXTENSIONS ON)
+  target_compile_options(ts5tunnel PRIVATE -w)  # vendored, unchanged
+  target_include_directories(ts5tunnel PUBLIC src/tailnet ${TS5_THIRD}/lwip/src/include ${TS5_THIRD}/wireguard-lwip/src)
+  target_sources(ts5 PRIVATE src/tailnet_serve.cpp src/tailnet/wg.cpp src/tailnet/tailscale.cpp
+    src/tailnet/noise.cpp src/tailnet/h2.cpp src/tailnet/nacl.cpp)
+  target_compile_definitions(ts5 PRIVATE TS5_TAILNET=1 TS5_LOG_NAME="ts5")
+  target_link_libraries(ts5 PRIVATE ts5tunnel)
 endif()
