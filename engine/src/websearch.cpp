@@ -536,8 +536,11 @@ std::string grokipedia_search(const std::string &query, int n, std::string &log,
         for (auto &x : r["results"].a) {
             const std::string slug = x["slug"].str(), title = x["title"].str();
             if (slug.empty() || title.empty()) continue;
-            // (A passage is cut from the article's Markdown, source marks and all.)
-            const std::string text = markdown_plain(x["snippet"].str());
+            // (A passage is cut from the article's Markdown, source marks and
+            // all. One that is a word or two, such as "! Operations", says
+            // nothing about the article: none is better.)
+            std::string text = markdown_plain(x["snippet"].str());
+            if (text.size() < 20) text.clear();
             found.push_back({title, base + "/page/" + path_escape(slug), text});
             if ((int)found.size() >= n) break;
         }

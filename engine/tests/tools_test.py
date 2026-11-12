@@ -1533,7 +1533,9 @@ class Grokipedia(http.server.BaseHTTPRequestHandler):
                     results = [{"slug": "Vienna", "title": "Vienna", "snippet": "Vienna is the capital"}]
                 if "eiffel" in words.lower():
                     results = [{"slug": "Eiffel_Tower", "title": "Eiffel Tower", "snippet": "The Eiffel Tower is a tower."},
-                               {"slug": "eiffel_tower_(book)", "title": "Eiffel Tower (book)", "snippet": "A book. ![cov"}]
+                               {"slug": "eiffel_tower_(book)", "title": "Eiffel Tower (book)",
+                                "snippet": "A book about the tower. ![cov"},
+                               {"slug": "Eiffel_Forums", "title": "Eiffel Forums", "snippet": "! Operations"}]
                 if "DeltaNet" in words:
                     results = [{"slug": "River_delta", "title": "River delta", "snippet": "Where a river meets the sea."}]
                 if "PS5" in words:
@@ -1671,9 +1673,10 @@ def test_grokipedia(ts5, model, tdir):
     rc, out, err, g2, w = search("who designed the Eiffel Tower", **grok)
     ok = (rc == 0 and "[1] Eiffel Tower\n" + gurl + "/page/Eiffel_Tower\nThe Eiffel Tower is a 330-meter-tall (with antennas) "
           "wrought-iron lattice tower in Paris. Built from 1887 to 1889.\n\n[2] Eiffel Tower (book)\n" + gurl +
-          "/page/eiffel_tower_(book)\nA book.\n\nIf none" in out and "cropped" not in out and "History" not in out)
+          "/page/eiffel_tower_(book)\nA book about the tower.\n\n[3] Eiffel Forums\n" + gurl + "/page/Eiffel_Forums\n(no text)"
+          "\n\nIf none" in out and "cropped" not in out and "History" not in out and "Operations" not in out)
     failed += report(ok, "Grokipedia search: a picture's file with brackets in its name, a short opening goes on into the next "
-                     "section, a link is the slug as sent", f"rc {rc}\n{out}\n{err}\n{g2}")
+                     "section, a link is the slug as sent, a passage of a word or two is left out", f"rc {rc}\n{out}\n{err}\n{g2}")
     rc, out, err, g2, w = search("Linux", **grok)
     failed += report(rc == 0 and "[1] Linux\n" + gurl + "/page/Linux\nLinux is a free and open-source Unix-like operating system "
                      "kernel originally authored by Linus Torvalds in 1991. Free here means freedom. It runs on servers and "
