@@ -47,7 +47,7 @@ public:
 private:
     bool route(const std::string &method, const std::string &path, const std::string &body, const std::string &client,
                int &code, std::string &reply);
-    void apply_locked();
+    void apply_locked(bool client);
     bool save_locked(std::string &err);
 
     struct Impl;

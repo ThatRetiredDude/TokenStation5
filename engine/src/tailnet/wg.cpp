@@ -253,9 +253,34 @@ struct Loop {
     int ts_unknown = 0, ts_traced = 0;           // log lines so far: packets from unlisted devices, TS5_NET_LOG's
     std::map<uint32_t, std::string> ts_standin;  // stand-in address: node key
     uint32_t ts_next = 1;
+    std::map<uint32_t, double> ssh_refused;  // by device: when the log last said its SSH was refused
 };
 
 Loop *g_loop = nullptr;  // for ts5_ts_send, which lwIP calls on the tunnel's thread
+
+// The tailnet's packets in. A device that knocks on port 22 while SSH is
+// off gets a reset from lwIP ("connection refused" on its end); the log
+// says why, once a minute per device.
+err_t ts_input(pbuf *p, netif *inp) {
+    Loop *L = g_loop;
+    if (L && !L->ssh_listener && p && p->len >= 20) {
+        const uint8_t *b = (const uint8_t *)p->payload;
+        const unsigned ihl = (b[0] & 0x0fu) * 4u;
+        if ((b[0] >> 4) == 4 && b[9] == 6 && ihl >= 20 && p->len >= ihl + 14 &&
+            ((b[ihl + 2] << 8) | b[ihl + 3]) == 22 && (b[ihl + 13] & 0x12) == 0x02) {
+            uint32_t src;
+            memcpy(&src, b + 12, 4);
+            const double now = now_s();
+            double &last = L->ssh_refused[src];
+            if (last == 0 || now - last >= 60) {
+                last = now;
+                ts5::log_line(TS5_LOG_NAME ": tailscale: %s tries SSH, refused: SSH is off (the Access page turns it on)",
+                              ip_text(src).c_str());
+            }
+        }
+    }
+    return ip_input(p, inp);
+}
 
 void drop_client(Loop &L, Conn *c) {
     if (!c->local_port) return;
@@ -685,7 +710,7 @@ void ts_sync(Loop &L) {
         L.ts_init.listen_port = 1;  // no socket: its packets go through the relay
         L.ts_init.bind_netif = nullptr;
         ts5_udp_making(TS5_UDP_TAILSCALE);
-        const bool made = netif_add(&L.ts_nif, &addr, &mask, &gw, &L.ts_init, wireguardif_init, ip_input) != nullptr;
+        const bool made = netif_add(&L.ts_nif, &addr, &mask, &gw, &L.ts_init, wireguardif_init, ts_input) != nullptr;
         ts5_udp_making(TS5_UDP_WIREGUARD);
         if (!made) {
             ts5::log_line(TS5_LOG_NAME ": tailscale: the tailnet's interface didn't start");

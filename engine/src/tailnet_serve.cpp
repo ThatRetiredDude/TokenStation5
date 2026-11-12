@@ -128,18 +128,22 @@ void Tailnet::start(const std::string &dir, int api_port) {
         fclose(f);
     }
     if (on_) log_line("ts5: tailscale: on, as %s%s", name_.c_str(), ssh_ ? ", with SSH" : "");
-    apply_locked();
+    apply_locked(true);
 }
 
-void Tailnet::apply_locked() {
-    ts::Config tc;
-    tc.on = on_;
-    tc.control_url = server_;
-    tc.hostname = name_;
-    tc.auth_key = env_or("TS5_TS_AUTH_KEY", "");
-    tc.state_file = dir_ + "/tailscale.tsv";
-    tc.version = TS5_VERSION;
-    d_->client.apply(tc);
+void Tailnet::apply_locked(bool client) {
+    // The client only when its settings changed: applying it starts its
+    // connections over, which an SSH switch has no need of.
+    if (client) {
+        ts::Config tc;
+        tc.on = on_;
+        tc.control_url = server_;
+        tc.hostname = name_;
+        tc.auth_key = env_or("TS5_TS_AUTH_KEY", "");
+        tc.state_file = dir_ + "/tailscale.tsv";
+        tc.version = TS5_VERSION;
+        d_->client.apply(tc);
+    }
     wg::Config wc;  // WireGuard's own server stays off: the tunnel carries the tailnet only
     wc.api_port = api_port_;
     wc.tailscale = on_;
@@ -274,6 +278,8 @@ bool Tailnet::route(const std::string &method, const std::string &path, const st
             reply = tailnet_error("this ts5 serve has no keys file (TS5_KEYS), so it keeps no tailnet");
             return true;
         }
+        const bool was_on = on_;
+        const std::string was_name = name_, was_server = server_;
         if (const Json &n = j["name"]; n.type == Json::STR) {
             std::string v = n.s;
             for (char &c : v)
@@ -290,11 +296,17 @@ bool Tailnet::route(const std::string &method, const std::string &path, const st
         if (sign_out) on_ = false;
         else if (j["on"].type == Json::BOOL) on_ = j["on"].b;
         if (j["ssh"].type == Json::BOOL) ssh_ = j["ssh"].b;
+        // Asked to be on again while on: a fresh try (after a problem, say).
+        const bool client = sign_out || on_ != was_on || name_ != was_name || server_ != was_server ||
+                            (on_ && j["on"].type == Json::BOOL);
         std::string err;
         if (!save_locked(err)) log_line("ts5: tailscale: %s", err.c_str());
-        log_line("ts5: tailscale: %s%s, as %s%s", sign_out ? "signing out, " : "", on_ ? "on" : "off", name_.c_str(),
-                 on_ && ssh_ ? ", with SSH" : "");
-        apply_locked();
+        if (client)
+            log_line("ts5: tailscale: %s%s, as %s%s", sign_out ? "signing out, " : "", on_ ? "on" : "off",
+                     name_.c_str(), on_ && ssh_ ? ", with SSH" : "");
+        else if (!on_ && j["ssh"].type == Json::BOOL)
+            log_line("ts5: tailscale: SSH %s for when Tailscale is on", ssh_ ? "on" : "off");
+        apply_locked(client);
         if (sign_out) d_->client.sign_out();
     }
     code = 200;
