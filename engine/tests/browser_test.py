@@ -136,9 +136,17 @@ class Pages(http.server.BaseHTTPRequestHandler):
             self.send("<html><head><title>Agent</title></head><body>"
                       f"<p>header: {' AND '.join(self.headers.get_all('User-Agent', []))}</p>"
                       f"<p>hints: {hints.replace('<', '')}</p><p>language: {self.headers.get('Accept-Language', '')}</p>"
-                      "<p id=s></p><script>document.getElementById('s').textContent = 'script: ' + navigator.userAgent + "
-                      "' brands: ' + (navigator.userAgentData ? navigator.userAgentData.brands.map(b => b.brand).join(', ') : '')"
-                      "</script></body></html>")
+                      f"<p>system: {self.headers.get('Sec-CH-UA-Platform', '')}</p>"
+                      f"<p>fetch: {self.headers.get('Sec-Fetch-Mode', '')} {self.headers.get('Sec-Fetch-Dest', '')}</p>"
+                      "<p id=s></p><p id=p></p><script>document.getElementById('s').textContent = 'script: ' + navigator.userAgent + "
+                      "' brands: ' + (navigator.userAgentData ? navigator.userAgentData.brands.map(b => b.brand + ' ' + b.version).join(', ') : '');"
+                      "document.getElementById('p').textContent = 'platform: ' + navigator.platform + ' / ' + "
+                      "(navigator.userAgentData ? navigator.userAgentData.platform : '');"
+                      "if (navigator.userAgentData) navigator.userAgentData.getHighEntropyValues(['platformVersion', "
+                      "'architecture', 'bitness', 'fullVersionList']).then(h => { document.getElementById('h').textContent = "
+                      "'more: ' + h.platformVersion + ' ' + h.architecture + ' ' + h.bitness + ' ' + "
+                      "(h.fullVersionList || []).map(b => b.brand + ' ' + b.version).join(', '); });"
+                      "</script><p id=h></p></body></html>")
         elif u.path == "/count":
             Pages.count += 1
             self.send(f"<html><head><title>Count</title></head><body><p>Seen {Pages.count} times.</p>"
@@ -355,13 +363,19 @@ def test_text(ts5, base):
     check(a["ok"] and "built by scripts" in a["text"], "text: a page built by scripts says so", a)
     a = b.ask(do="open", url="127.0.0.1:%s/echo?bare=1" % base.rsplit(":", 1)[1])
     check(a["ok"] is False or "bare = 1" in a["text"], "text: an address without http:// (https is tried)", a)
-    # The text view asks for a page as a person's browser does, under one name.
+    # The text view asks for a page as Chrome on a Mac does, now (November 2026), under one name.
     a = b.ask(do="open", url=base + "/agent")
     t = a["text"]
-    check(a["ok"] and re.search(r"header: Mozilla/5\.0 \(X11; Linux x86_64\) AppleWebKit/[\d.]+ \(KHTML, like Gecko\) "
-                                r"Chrome/\d+\.0\.0\.0 Safari/[\d.]+\n", t) and " AND " not in t and "TokenStation" not in t
-          and "language: en-US,en;q=0.9" in t, "text: a page is asked for as a browser asks", a)
+    check(a["ok"] and "header: " + MAC_AGENT % CHROME + "\n" in t and "hints: " + chrome_brands(CHROME) + "\n" in t and
+          'system: "macOS"' in t and "fetch: navigate document" in t and " AND " not in t and "TokenStation" not in t
+          and "language: en-US,en;q=0.9" in t, "text: a page is asked for as Chrome on a Mac asks", a)
     check(b.close() == 0, "text: ends when its input closes")
+    b = Browser(ts5, "--program", "text", env=dict(os.environ, TS5_BROWSER_AGENT="linux"))
+    a = b.ask(do="open", url=base + "/agent")
+    check(a["ok"] and "header: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%d.0.0.0 "
+          "Safari/537.36\n" % CHROME in a["text"] and 'system: "Linux"' in a["text"],
+          "text: TS5_BROWSER_AGENT=linux asks as Chrome on Linux", a)
+    b.close()
     b = Browser(ts5, "--program", "text", env=dict(os.environ, TS5_BROWSER_AGENT="own"))
     a = b.ask(do="open", url=base + "/agent")
     check(a["ok"] and "header: TokenStation5\n" in a["text"], "text: TS5_BROWSER_AGENT=own asks under ts5's own name", a)
@@ -432,15 +446,17 @@ def test_browser(ts5, program, base):
     check(a["ok"] is False and ("no such site" in a["text"] or "couldn't be reached" in a["text"]), "chromium: no such site", a)
     a = b.ask(do="status")
     check(a["ok"] and a["running"] is True, "chromium: still running after the failures", a)
-    # It says it is the Chrome it is, with or without a window: to the
-    # site, and to the page's scripts.
+    # It says it is Chrome now on a Mac: to the site, and to the page's
+    # scripts (its own version where that is newer).
     a = b.ask(do="open", url=base + "/agent")
     t = a["text"]
-    print("     " + " | ".join(l for l in t.splitlines() if l.startswith(("header:", "hints:", "script:"))))
-    check(a["ok"] and re.search(r"header: Mozilla/5\.0 .*Chrome/\d+", t) and re.search(r"script: Mozilla/5\.0 .*Chrome/\d+", t)
-          and "headless" not in t.lower(), "chromium: it calls itself Chrome, as one with a window does", a)
-    check(re.search(r"brands: .*Chrom", t) and re.search(r"hints: .*Chrom", t) and " AND " not in t,
-          "chromium: ... with its names for scripts and in its other headers as they are", a)
+    print("     " + " | ".join(l for l in t.splitlines() if l.startswith(("header:", "hints:", "script:", "platform:", "more:"))))
+    v = max(CHROME, int(re.search(r"Chrome/(\d+)", t).group(1)) if re.search(r"Chrome/(\d+)", t) else 0)
+    check(a["ok"] and "header: " + MAC_AGENT % v + "\n" in t and "script: " + MAC_AGENT % v + " brands:" in t
+          and "headless" not in t.lower() and " AND " not in t, "chromium: it says it is Chrome on a Mac, to sites and scripts", a)
+    check("hints: " + chrome_brands(v) + "\n" in t and 'system: "macOS"' in t and "platform: MacIntel / macOS" in t and
+          re.search(r"more: 27\.2\.1 arm 64 Chromium %d\.\d+\.\d+\.\d+, " % v, t) and "language: en-US,en;q=0.9\n" in t,
+          "chromium: ... with Chrome's names, the Mac's system and version, in its headers and to scripts", a)
     kids = children(b.p.pid)
     check(len(kids) >= 1, "chromium: it is this program's child", kids)
     pid = int(kids[0].split()[0]) if kids else 0
@@ -478,11 +494,22 @@ def test_browser(ts5, program, base):
     check(a["ok"] and "after = rest" in a["text"], "chromium: opening another page after a rest", a)
     check(b.close() == 0, "chromium: the rested one ends too")
 
-    # TS5_BROWSER_AGENT=own: the browser's own words.
+    # TS5_BROWSER_AGENT=own: the browser's own words. (Its brands are the
+    # check on chrome_brands: Chromium made them itself.)
     b = Browser(ts5, "--program", program, env=dict(os.environ, TS5_BROWSER_AGENT="own"))
     a = b.ask(do="open", url=base + "/agent")
-    check(a["ok"] and "header: Mozilla/5.0" in a["text"], "chromium: TS5_BROWSER_AGENT=own opens pages too", a)
-    print("     own: " + " | ".join(l for l in a["text"].splitlines() if l.startswith(("header:", "hints:"))))
+    t = a["text"]
+    own = int(re.search(r"Chrome/(\d+)", t).group(1)) if re.search(r"Chrome/(\d+)", t) else 0
+    check(a["ok"] and "header: Mozilla/5.0" in t and "hints: " + chrome_brands(own, google=False) + "\n" in t,
+          "chromium: TS5_BROWSER_AGENT=own opens pages too, with the brands Chromium makes (as the test makes them)", a)
+    print("     own: " + " | ".join(l for l in t.splitlines() if l.startswith(("header:", "hints:"))))
+    b.close()
+    # TS5_BROWSER_AGENT=linux: Chrome on Linux, its own version, without "Headless".
+    b = Browser(ts5, "--program", program, env=dict(os.environ, TS5_BROWSER_AGENT="linux"))
+    a = b.ask(do="open", url=base + "/agent")
+    t = a["text"]
+    check(a["ok"] and "header: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%d.0.0.0" % own in t
+          and "headless" not in t.lower() and "platform: Linux" in t, "chromium: TS5_BROWSER_AGENT=linux is Chrome on Linux", a)
     b.close()
 
     # A browser slow to say what its styles hide (Obscura took 15 s a page, then never answered):
@@ -671,6 +698,13 @@ def test_obscura(ts5, obscura, base):
         a = b.ask(do="open", url=base + "/built")
         check(a["ok"] and a["mode"] == "obscura" and "These words came a moment after" in a["text"],
               "real obscura: a page built after it is complete is read once it is built", a)
+        # It says it is Chrome now on a Mac, in its headers and to scripts (Obscura answers a
+        # script that asks for the platform with Windows, whatever it is told).
+        a = b.ask(do="open", url=base + "/agent")
+        t = a["text"]
+        check(a["ok"] and "header: " + MAC_AGENT % CHROME + "\n" in t and "hints: " + chrome_brands(CHROME) + "\n" in t and
+              'system: "macOS"' in t and "script: " + MAC_AGENT % CHROME + " brands:" in t,
+              "real obscura: it says it is Chrome on a Mac, in its headers and to scripts", a)
         check(not piled(trace), "real obscura: no script is sent while another is unanswered", piled(trace))
         check(b.close() == 0, "real obscura: ends when its input closes")
 
@@ -703,6 +737,26 @@ def test_obscura(ts5, obscura, base):
         check(a["ok"] and a["mode"] == "text" and "Obscura did not get this page read in time" in a["text"] and 2.5 < took < 9,
               f"real obscura: with 3 s to wait, the text view comes after 3 ({took:.0f} s)", a)
         check(b.close() == 0, "real obscura: ends when its input closes")
+
+
+CHROME = 158  # engine/src/websearch.h kChromeMajor
+MAC_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%d.0.0.0 "
+             "Safari/537.36")
+
+
+def chrome_brands(major, google=True):
+    """Chrome's Sec-CH-UA value for a major version, as Chromium makes it
+    (components/embedder_support/user_agent_utils.cc): a made-up brand that
+    changes with the version, "Chromium", "Google Chrome", in an order that
+    changes with it too."""
+    marks = [" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"]
+    grease = ("Not" + marks[major % 11] + "A" + marks[(major + 1) % 11] + "Brand", ["8", "99", "24"][major % 3])
+    names = [grease, ("Chromium", str(major))] + ([("Google Chrome", str(major))] if google else [])
+    order = ([[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]][major % 6] if google else [[0, 1], [1, 0]][major % 2])
+    out = [None] * len(names)
+    for i, at in enumerate(order):
+        out[at] = names[i]
+    return ", ".join('"%s";v="%s"' % b for b in out)
 
 
 def first_script(trace, url):

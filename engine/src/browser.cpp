@@ -359,7 +359,8 @@ class Cdp {
 public:
     // Connects to the browser listening on 127.0.0.1:port and takes its
     // page (the one it opened with, or a new one).
-    bool attach(int port, std::string &err) {
+    bool attach(int port, std::string &err, bool obscura = false) {
+        obscura_ = obscura;
         HttpResponse resp;
         if (!http_get("http://127.0.0.1:" + std::to_string(port) + "/json/version", {}, resp, err, 1u << 20, 5)) return false;
         Json v;
@@ -389,21 +390,52 @@ public:
         }
         std::string e;
         call("Page.enable", "{}", r, e, 10000);  // for a page's alert(): it is answered, or it would hold everything
-        plain_agent(v["User-Agent"].str(), port);
+        plain_agent(v["User-Agent"].str(), v["Browser"].str(), port);
         return true;
     }
-    // A Chromium without a window calls itself "HeadlessChrome" where one
-    // with a window says "Chrome", and some sites turn that word away
-    // unread. This one browses for the person at the keyboard, a page at a
-    // time, so it says what their own Chrome would: the same engine,
-    // version and system, in its User-Agent header and in what it tells a
-    // page's scripts (and its Sec-CH-UA headers), which are its own less
-    // that one name. Nothing else about it is dressed up, and
-    // TS5_BROWSER_AGENT=own leaves it its own words.
-    void plain_agent(const std::string &own, int port) {
-        const char *as = getenv("TS5_BROWSER_AGENT");
+    // What the browser says it is (browser_look), to sites in its
+    // User-Agent and Sec-CH-UA headers and to a page's scripts
+    // (navigator.userAgent, .platform, .userAgentData). What a page can find
+    // out in other ways (its fonts, its graphics, how it connects) is the
+    // machine's own.
+    // "mac", the default: Chrome as it is now on a MacBook (kChromeMajor,
+    // or the browser's own version where that is newer).
+    // "linux": a Chromium without a window calls itself "HeadlessChrome"
+    // where one with a window says "Chrome", and some sites turn that word
+    // away unread, so it says what a Chrome with a window would: its own
+    // words less that name.
+    // "own": its own words.
+    void plain_agent(const std::string &own, const std::string &browser, int port) {
+        const std::string look = browser_look();
+        if (look == "own") return;
+        if (look == "mac") {
+            const size_t slash = browser.find('/');
+            const std::string mine = slash == npos ? "" : browser.substr(slash + 1);
+            const int major = std::max(atoi(mine.c_str()), kChromeMajor);
+            const std::string full = atoi(mine.c_str()) > kChromeMajor ? mine : kChromeFull;
+            const auto list = [&](const std::string &version) {
+                std::string out;
+                for (auto &b : chrome_brands(major, version, true))
+                    out += std::string(out.empty() ? "" : ",") + "{\"brand\":" + json_escape(b.first) +
+                           ",\"version\":" + json_escape(b.second) + "}";
+                return "[" + out + "]";
+            };
+            // (Obscura takes the languages as its header, Chromium as a
+            // list it adds the weights to; Obscura says Win32 to scripts
+            // that ask for the platform whatever it is told.)
+            Json r;
+            std::string e;
+            call("Emulation.setUserAgentOverride",
+                 "{\"userAgent\":" + json_escape(chrome_agent("mac", major)) +
+                     (obscura_ ? "" : ",\"acceptLanguage\":\"en-US,en\"") + ",\"platform\":\"MacIntel\",\"userAgentMetadata\":{\"brands\":" +
+                     list(std::to_string(major)) + ",\"fullVersionList\":" + list(full) +
+                     ",\"platform\":\"macOS\",\"platformVersion\":" + json_escape(kMacOS) +
+                     ",\"architecture\":\"arm\",\"model\":\"\",\"mobile\":false,\"bitness\":\"64\",\"wow64\":false}}",
+                 r, e, 10000);
+            return;
+        }
         const size_t at = own.find("HeadlessChrome/");
-        if ((as && std::string(as) == "own") || at == npos) return;
+        if (at == npos) return;
         std::string agent = own;
         agent.erase(at, 8);  // "Headless"
         // The names are asked of the browser itself, on a page of its own
@@ -563,6 +595,7 @@ private:
     int next_ = 1;
     std::string session_;
     bool gone_ = false;
+    bool obscura_ = false;  // the browser is Obscura (plain_agent)
     int asked_ = 0;         // the script sent last, while its answer has not come
     std::string asked_js_;  // that script
 };
@@ -734,6 +767,12 @@ bool launch(const std::string &program, bool obscura, Program &b, std::string &e
     std::vector<std::string> args;
     if (obscura) {
         args = {program, "--storage-dir", dir, "serve", "--port", std::to_string(b.port)};
+        // (Obscura's own words: Chrome 143 on Windows. Its pages' scripts
+        // are told the look by Cdp::plain_agent where Obscura allows.)
+        if (browser_look() != "own") {
+            args.push_back("--user-agent");
+            args.push_back(chrome_agent(browser_look(), kChromeMajor));
+        }
     } else {
         args = {program,
                 "--headless",
@@ -1179,7 +1218,7 @@ private:
         }
         HttpResponse resp;
         std::string err;
-        if (!http_get(url, page_headers(), resp, err, 4u << 20, 20))
+        if (!http_get(url, page_headers(secure_url(url)), resp, err, 4u << 20, 20))
             return fail("The page could not be opened: " +
                         std::string(err.find("certificate") != npos || err.find("TLS") != npos
                                         ? "the site's identity couldn't be checked"
@@ -1292,7 +1331,7 @@ private:
             std::string err;
             bool slow;
             cdp_ = new Cdp;
-            if (launch(program_, obscura_, proc_, err, slow) && cdp_->attach(proc_.port, err)) break;
+            if (launch(program_, obscura_, proc_, err, slow) && cdp_->attach(proc_.port, err, obscura_)) break;
             quit();
             // A start that hung is tried once more: on a CI machine a Chrome
             // that had not opened its port in 30 s came up at once the

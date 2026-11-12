@@ -105,11 +105,33 @@ struct PageElements {
 // els; the lists of links stay, what the page hides is left out.
 std::string html_view(const std::string &html, PageElements &els);
 // The page's <title>, on one line.
+// Which browser ts5 says it is to websites, from TS5_BROWSER_AGENT: "mac"
+// (the default: Chrome as it is now on a MacBook, kChrome below), "linux"
+// (Chrome on Linux) or "own" (the page reader under ts5's own name, a
+// browser in its own words).
+std::string browser_look();
+// Chrome now, on a Mac: its version (a release of November 2026; raise it
+// with Chrome's releases) and the macOS it runs on.
+constexpr int kChromeMajor = 158;
+constexpr const char *kChromeFull = "158.0.8127.18";
+constexpr const char *kMacOS = "27.2.1";
+// Chrome's User-Agent header for that look and a Chrome major version.
+std::string chrome_agent(const std::string &look, int major);
+// The brands Chrome names in its Sec-CH-UA header and to a page's scripts:
+// "Chromium", "Google Chrome" when google, and a made-up third that
+// changes with the version, in an order that changes with it too (as
+// Chromium makes them, components/embedder_support/user_agent_utils.cc).
+// version: the major version, or the full one for the full list.
+std::vector<std::pair<std::string, std::string>> chrome_brands(int major, const std::string &version, bool google);
 // The headers a web page is asked for with, by the page reader and the
-// browser's text view: what a person's browser sends (a site is shown the
-// same whoever reads it for them), unless TS5_BROWSER_AGENT=own, when the
-// request goes out under ts5's own name.
-std::vector<std::string> page_headers();
+// browser's text view: what that browser sends when a person opens a page
+// by its address (a site is shown the same whoever reads it for them), or
+// under ts5's own name with TS5_BROWSER_AGENT=own. secure: an https page
+// (or one on this machine), the only ones Chrome tells its version and
+// system in other headers too.
+std::vector<std::string> page_headers(bool secure = true);
+// An https address, or one on this machine: where Chrome sends those headers.
+bool secure_url(const std::string &url);
 
 std::string html_title(const std::string &html);
 

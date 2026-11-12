@@ -419,13 +419,20 @@ ts5-tui --url http://ps5.local:8081  # another one
     asks the browser and what comes back, for a browser that hangs or
     shows a page wrongly.
 
-    To a site it is the Chrome it is: a Chromium without a window would
-    call itself "HeadlessChrome", which some sites turn away unread, so
-    ts5 has it send what the same Chrome sends with a window, and the
-    text view and the page reader ask for a page with a browser's headers
-    too. Nothing names ts5 or a model. `TS5_BROWSER_AGENT=own` in ts5-tui's
-    environment leaves the browser its own words and sends the text
-    view's requests as "TokenStation5". That is all ts5 does about it: a
+    To a site it is Chrome as it is now on a MacBook (Chrome 158 on
+    macOS 27.2.1, November 2026): the browser, the text view and the page
+    reader all send that Chrome's User-Agent and its other headers
+    (Sec-CH-UA with its brands, "macOS", the Sec-Fetch ones), and
+    Chromium tells a page's scripts the same (Obscura tells them
+    Windows when they ask for the platform, whatever it is told). An
+    installed Chromium newer than 158 gives its own version. Nothing
+    names ts5 or a model. What a page can find out in other ways (the
+    fonts, the graphics, how the connection is made) is the machine's
+    own. `TS5_BROWSER_AGENT=linux` in ts5-tui's environment makes it
+    Chrome on Linux instead; `TS5_BROWSER_AGENT=own` leaves the browser
+    its own words and sends the text view's requests as "TokenStation5".
+    The searches (Wikipedia's and Grokipedia's APIs, Tavily) name ts5,
+    as services made for programs ask. That is all ts5 does about it: a
     site that still tests for a person (a captcha, a "checking your
     browser" page) is left closed, and the model says so.
   - **Files** (off until you switch it on: Settings → Tool: files, or

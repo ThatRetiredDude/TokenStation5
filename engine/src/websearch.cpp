@@ -579,7 +579,7 @@ std::string grokipedia_search(const std::string &query, int n, std::string &log,
         HttpResponse page;
         std::string e2;
         if (!refused || search_words(query).size() > 5 || slug.empty() ||
-            !http_get(base + "/page/" + path_escape(slug), page_headers(), page, e2, 2u << 20, 20) || page.status != 200 ||
+            !http_get(base + "/page/" + path_escape(slug), page_headers(secure_url(base)), page, e2, 2u << 20, 20) || page.status != 200 ||
             page.body.find("<article") == std::string::npos)
             return fail(refused ? "Grokipedia refused the search" : "Grokipedia had a problem", detail);
         std::string name = slug;
@@ -1362,16 +1362,63 @@ std::string html_text(const std::string &html) {
     return text.size() >= 200 || text.size() * 2 >= whole.size() ? text : whole;
 }
 
-std::vector<std::string> page_headers() {
-    const char *as = getenv("TS5_BROWSER_AGENT");
-    if (as && std::string(as) == "own") return {"Accept: text/html,text/plain;q=0.9,*/*;q=0.5"};
-    // Chrome's on Linux (its version numbers after the first are zeros for
-    // every Chrome). Raise the number with the years.
-    return {"User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 "
-            "Safari/537.36",
-            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language: en-US,en;q=0.9",
-            "Upgrade-Insecure-Requests: 1"};
+std::string browser_look() {
+    const char *v = getenv("TS5_BROWSER_AGENT");
+    const std::string look = v ? v : "";
+    return look == "own" || look == "linux" ? look : "mac";
+}
+
+std::string chrome_agent(const std::string &look, int major) {
+    // (Chrome writes the version as MAJOR.0.0.0, and on every Mac, Apple's
+    // chips too, "Intel Mac OS X 10_15_7": those parts no longer change.)
+    return std::string("Mozilla/5.0 (") + (look == "linux" ? "X11; Linux x86_64" : "Macintosh; Intel Mac OS X 10_15_7") +
+           ") AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + std::to_string(major) + ".0.0.0 Safari/537.36";
+}
+
+std::vector<std::pair<std::string, std::string>> chrome_brands(int major, const std::string &version, bool google) {
+    static const char *const marks[] = {" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"};
+    static const char *const greased[] = {"8", "99", "24"};
+    const bool full = version.find('.') != std::string::npos;
+    std::vector<std::pair<std::string, std::string>> in = {
+        {std::string("Not") + marks[major % 11] + "A" + marks[(major + 1) % 11] + "Brand",
+         std::string(greased[major % 3]) + (full ? ".0.0.0" : "")},
+        {"Chromium", version}};
+    if (google) in.push_back({"Google Chrome", version});
+    static const int three[6][3] = {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+    static const int two[2][2] = {{0, 1}, {1, 0}};
+    std::vector<std::pair<std::string, std::string>> out(in.size());
+    for (size_t i = 0; i < in.size(); i++) out[(size_t)(in.size() == 3 ? three[major % 6][i] : two[major % 2][i])] = in[i];
+    return out;
+}
+
+bool secure_url(const std::string &url) {
+    if (url.compare(0, 8, "https://") == 0) return true;
+    if (url.compare(0, 7, "http://") != 0) return false;
+    const std::string host = url.substr(7, url.find_first_of(":/?#", 7) - 7);
+    return host == "localhost" || host == "127.0.0.1" || host.compare(0, 4, "[::1") == 0;
+}
+
+std::vector<std::string> page_headers(bool secure) {
+    const std::string look = browser_look();
+    if (look == "own") return {"Accept: text/html,text/plain;q=0.9,*/*;q=0.5"};
+    // As Chrome asks for a page typed into its address bar, in its order.
+    std::vector<std::string> h;
+    if (secure) {
+        std::string brands;
+        for (auto &b : chrome_brands(kChromeMajor, std::to_string(kChromeMajor), true))
+            brands += (brands.empty() ? "" : ", ") + std::string("\"") + b.first + "\";v=\"" + b.second + "\"";
+        h = {"sec-ch-ua: " + brands, "sec-ch-ua-mobile: ?0",
+             std::string("sec-ch-ua-platform: \"") + (look == "linux" ? "Linux" : "macOS") + "\""};
+    }
+    h.push_back("Upgrade-Insecure-Requests: 1");
+    h.push_back("User-Agent: " + chrome_agent(look, kChromeMajor));
+    h.push_back("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,"
+                "application/signed-exchange;v=b3;q=0.7");
+    if (secure)
+        for (const char *f : {"Sec-Fetch-Site: none", "Sec-Fetch-Mode: navigate", "Sec-Fetch-User: ?1", "Sec-Fetch-Dest: document"})
+            h.push_back(f);
+    h.push_back("Accept-Language: en-US,en;q=0.9");
+    return h;
 }
 
 std::string web_page(const std::string &url, size_t max_chars, std::string &log, bool *failed) {
@@ -1385,7 +1432,7 @@ std::string web_page(const std::string &url, size_t max_chars, std::string &log,
     const auto t0 = std::chrono::steady_clock::now();
     HttpResponse resp;
     std::string err;
-    const bool ok = http_get(url, page_headers(), resp, err, 2u << 20, 20);
+    const bool ok = http_get(url, page_headers(secure_url(url)), resp, err, 2u << 20, 20);
     char took[32];
     snprintf(took, sizeof took, "%.1f s",
              std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
