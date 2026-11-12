@@ -11,15 +11,25 @@ From a computer, `scripts/ts5-ps5.sh websearch tvly-YOUR-KEY` does the same (`we
 
 `GET /v1/models` shows what the loaded model can do: `"capabilities": {"tools": true, "tool_format": "hermes", "web_search": true}`.
 
-## Without a key: Wikipedia (Linux edition)
+## Without a key: an encyclopedia (Linux edition)
 
-With no Tavily key the Linux edition searches Wikipedia instead, through its public API: no key and no account. It does so only for a request that asks for a search. The terminal app asks while its search tool is on; over the API a request says `"web_search": true`, or `"web_search": "auto"` to leave it to the message.
+With no Tavily key the Linux edition searches an encyclopedia instead: Wikipedia unless you choose another, through its public API, with no key and no account. It does so only for a request that asks for a search. The terminal app asks while its search tool is on; over the API a request says `"web_search": true`, or `"web_search": "auto"` to leave it to the message.
 
 - The model gets the top articles: title, link and opening text.
 - It is told that this is an encyclopedia, with no news and no live data, and it is told when the articles are only a loose match for the question, so it says that it could not look the thing up instead of answering from the wrong article.
 - A search takes about half a second on the PS5.
 - `TS5_WIKIPEDIA=sk` (or any language code) picks another Wikipedia; `TS5_WIKIPEDIA=off` turns it off.
+- Wikipedia refuses searches for a while from an address that has sent it very many (it did after some hundreds of searches and pages in two hours of our tests). ts5 then says that Wikipedia has had too many searches from this address, and the model tells you so. It lifts by itself.
 - `/v1/models` says `"web_search_source": "wikipedia"` (`"tavily"` with a key).
+
+**Grokipedia** (xAI's encyclopedia, written by its AI) can be searched instead of Wikipedia, or beside it:
+
+- In the terminal app: Settings → **Search source**, or `/tools search wikipedia`, `grokipedia` or `both`. For the always-on service: `TS5_ENCYCLOPEDIA=grokipedia` (or `both`) in `/etc/default/tokenstation`. Over the API a request can say `"web_search_source": "grokipedia"`, `"both"` or `"wikipedia"`.
+- The model gets the top articles as with Wikipedia: title, link, a line from each, and the opening of the first. It is told which encyclopedia it searched and that Grokipedia's articles are written by an AI.
+- **Both** gives half the results from each, and the result says that two encyclopedias were searched and which results are whose.
+- When Grokipedia doesn't answer (it is down, or it turns the request away), the search goes to Wikipedia and the result's first line says so. With `TS5_WIKIPEDIA=off` it fails instead, and the model is told why.
+- Grokipedia's `robots.txt` asks programs to stay away from its search address. ts5 asks under its own name, one search at a time, only when a person's chat calls for it.
+- `/v1/models` lists `"encyclopedias": ["wikipedia", "grokipedia", "both"]` under `capabilities` on a build that has the choice.
 
 The Prospero Store title searches only with a key.
 

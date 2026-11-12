@@ -26,7 +26,7 @@ Start with the **Logs** page on the TV (or `ts5.log` in the app's folder): every
 ## Apps and the API
 
 - **The app can't connect.** It must use `http://`, not `https://`, with `/v1` at the end, and the PS5's current address. A request that never shows in Logs never reached the PS5.
-- **401 invalid_api_key.** Require a key is on and the app sent none, or sent one that's off. Make a new key in Settings > Apps.
+- **401 invalid_api_key.** Require a key is on and the app sent none, or sent one that's off. Make a new key in Settings > Apps (in the terminal app: the Access page, F6).
 - **"maximum context length".** The conversation is longer than the model's context. Tell the app the `context_length` from `/v1/models`, or start a new task.
 - **Away from home nothing connects.** The PS5 needs to be on your tailnet and an API key is always required over Tailscale. Check Settings shows the device, and your tailnet's access rules allow port 8081.
 - **Web search never happens.** The key must start with `tvly-` and the console's clock must be right (HTTPS fails otherwise). Only chats that look like they need the web get the tool; `"web_search": true` in the request forces it.

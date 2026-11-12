@@ -23,11 +23,12 @@ The TokenStation title sweeps in for about a second (any key skips it), and you 
 | --- | --- |
 | `ts5-tui` | Talks to the server on this machine (`http://127.0.0.1:8081`). |
 | `ts5-tui --url http://ps5.local:8081` | Talks to another TokenStation (`ps5.local` alone works too: http and port 8081 are assumed). |
-| `ts5-tui --key KEY` | An API key, when the server asks for one (the TV app's **Require a key**). |
+| `ts5-tui --key KEY` | The key ts5-tui itself sends, when the server it talks to is on another machine and asks for one. On the machine it runs on, no key is needed. |
 | `ts5-tui --theme Neon` | Colors: `Ocean` (default), `Neon`, `Sunset`, `Forest`, `Mono`. |
 | `ts5-tui --no-intro` | Skips the opening title. |
 | `ts5-tui --no-tools` | The model gets no tools at all in this run, whatever Settings says (see [Tools](#tools)). |
 | `ts5-tui --mcp` | Starts your outside tools' programs, prints what each one offers, and ends them (see [Outside tools](#outside-tools-mcp)). |
+| `ts5-tui --install-browser chromium` | Installs a browser for the model's browser tool without opening the app: `chromium` from your system's packages, or `obscura` into your home folder (see [Browser](#browser)). With `--dry-run` it only says what it would run. |
 | `ts5-tui --tmux` / `--no-tmux` | Forces its own tmux session on or off (see [tmux](#tmux-ssh-that-can-drop)). |
 
 `TS5_URL` and `TS5_API_KEY` in the environment do the same as `--url` and `--key`.
@@ -37,7 +38,7 @@ Run it **on the PS5** (over SSH) for the whole experience. Pointed at a PS5 from
 ## The screen
 
 ```
- ◆ TokenStation5   F1 Chat  F2 Models  F3 Status  F4 Settings  F5 Logs        09:52   ← pages
+ ◆ TokenStation5   F1 Chat  F2 Models  F3 Status  F4 Settings  F5 Logs  F6 Access   09:52   ← pages
  ● Qwen3-8B-Q4_K_M · helper Qwen3-0.6B to 8k · chat 909/20k · 94.4 tok/s · GPU 5.7/13.6 GiB · die 80°C   ← live bar
 
    (chat, or the page you picked)
@@ -64,9 +65,9 @@ Run it **on the PS5** (over SSH) for the whole experience. Pointed at a PS5 from
 
 On a narrow window the least needed items drop off first (fan, then RAM). When the die reaches **85 °C**, where the PS5 starts slowing its GPU, a red warning line flashes under the bar: `/fan max` helps.
 
-**Five pages** fill the middle. Switch with **F1** to **F5**, **Tab** (next) and **Shift+Tab** (previous), or **Alt+1** to **Alt+5**. On every page but Chat, **1** to **5** switch too, **q** quits, and **/** jumps to the prompt with a command started. From the prompt, `/chat`, `/models`, `/status`, `/settings` and `/logs` go to a page.
+**Six pages** fill the middle. Switch with **F1** to **F6**, **Tab** (next) and **Shift+Tab** (previous), or **Alt+1** to **Alt+6**. On every page but Chat, **1** to **6** switch too, **q** quits, and **/** jumps to the prompt with a command started. From the prompt, `/chat`, `/models`, `/status`, `/settings`, `/logs` and `/access` go to a page. In a window narrower than 84 columns the name in the corner shortens to TS5, and under 74 the pages are listed without their F keys, so all six stay in view.
 
-> **On a Mac**, macOS keeps the F keys for itself (F3 is Mission Control). Use **Tab** / **Shift+Tab**, **1** to **5** on the pages, the commands above, or **fn+F1** to **fn+F5**. **Option+1** to **Option+5** work when the terminal sends Option as Meta: in Terminal, Settings → Profiles → Keyboard → *Use Option as Meta key*; in iTerm2, Profiles → Keys → *Left Option key: Esc+*.
+> **On a Mac**, macOS keeps the F keys for itself (F3 is Mission Control). Use **Tab** / **Shift+Tab**, **1** to **6** on the pages, the commands above, or **fn+F1** to **fn+F6**. **Option+1** to **Option+6** work when the terminal sends Option as Meta: in Terminal, Settings → Profiles → Keyboard → *Use Option as Meta key*; in iTerm2, Profiles → Keys → *Left Option key: Esc+*.
 
 ## Chat (F1)
 
@@ -114,7 +115,7 @@ The model in a chat has tools it can reach for by itself:
 
 | Tool | What the model can do with it | When you get ts5-tui |
 | --- | --- | --- |
-| **search** | Search the web (the whole web with a key, Wikipedia without one). | on |
+| **search** | Search the web (the whole web with a key; without one an encyclopedia: Wikipedia, Grokipedia or both). | on |
 | **pages** | Read a web page you give it a link to. | on |
 | **terminal** | Run a command on the machine ts5-tui runs on. | on, asks first |
 | **memory** | Keep notes between chats. | on |
@@ -138,7 +139,7 @@ In the chat a tool call is a line of its own (**⚙ $ ls -la**, **⚙ reads http
 - **→** moves the answer to the middle one (no more questions of that kind until a new chat; `/tools ask` brings them back) or to **No**, then Enter.
 - Letters never answer the question. You can keep typing your next message while it shows; it waits in the queue as always.
 
-**Web search.** Ask for something to be looked up: "look up on Wikipedia which river Bratislava lies on". With no key the model searches Wikipedia: it gets the top articles' titles, links and opening text, and it is told that this is an encyclopedia, with no news and no live data, and when the articles it got are only a loose match. With a [Tavily](https://tavily.com) key (Settings → **Web search key**) it searches the whole web. Each search is a line in the chat, **⚙ searches the web: Bratislava river**, with what came of it under it (**5 results (0.5 s, Wikipedia)**).
+**Web search.** Ask for something to be looked up: "look up on Wikipedia which river Bratislava lies on". With no key the model searches Wikipedia: it gets the top articles' titles, links and opening text, and it is told that this is an encyclopedia, with no news and no live data, and when the articles it got are only a loose match. Settings → **Search source** (or `/tools search wikipedia`, `grokipedia`, `both`) picks the encyclopedia: **Wikipedia** (the default), **Grokipedia** (xAI's encyclopedia, written by its AI), or **Both**, which gives the model half its results from each and tells it that two were searched. When Grokipedia can't be searched, that search goes to Wikipedia and the result says so. With a [Tavily](https://tavily.com) key (Settings → **Web search key**) it searches the whole web. Each search is a line in the chat, **⚙ searches the web: Bratislava river**, with what came of it under it (**5 results (0.5 s, Wikipedia)**).
 
 **Web pages.** Give it a link: "read https://example.com/post and sum it up". It gets the page as plain text: the article where the page marks one, without the site's menus and sidebars, the first 8,000 characters. Pages that only show something in a browser (built by scripts), files, images and PDFs can't be read, and the model is told why. (With the browser tool on, the browser reads pages instead.)
 
@@ -169,7 +170,10 @@ Off until you switch it on: Settings → **Tool: browser**, or `/tools browser o
 
 - The model gets the page as text with every link, text box and button numbered (`Danube[3]`, `[4: text box "Search"]`, `[5: button "Go"]`) and works by the numbers. A long page comes in parts.
 - **Reading a page and following a link need no question. Pressing a button, typing into a page, and opening an address on this machine or your home network are asked first** (**Do it?**, with **Everything on pages in this chat** in the middle). Password boxes are never offered to the model.
-- **What shows the pages.** If Chromium (or Chrome, Brave, Edge) is installed, ts5 starts one without a window, with a fresh profile that is deleted afterwards, so the model never sees your own browser's logins. With no browser installed, ts5 reads pages itself: quick and light, but a page built by scripts shows little and only simple forms work. `sudo apt install chromium` gets the full browser. Settings → **Browser**, or `/browser auto`, `chromium`, `obscura`, `text` or a program's path, chooses; `/browser` alone says what is installed and in use. [Obscura](https://github.com/h4ckf0r0day/obscura) is a lighter browser that is used only when you choose it: it is young, slow to open a page on the PS5 (13 s where Chromium takes 5), and some pages never answer in it. Such a page is then shown in ts5's own text view after about half a minute, with a line that says so, and the next page is Obscura's again.
+- **What shows the pages.** If Chromium (or Chrome, Brave, Edge) is installed, ts5 starts one without a window, with a fresh profile that is deleted afterwards, so the model never sees your own browser's logins. With no browser installed, ts5 reads pages itself: quick and light, but a page built by scripts shows little and only simple forms work. Settings → **Browser**, or `/browser auto`, `chromium`, `obscura`, `text` or a program's path, chooses; `/browser` alone says what is installed and in use.
+- **What sites see.** Chrome as it is now on a MacBook (Chrome 158 on macOS 27.2.1, November 2026), from the browser and from ts5's own page reader alike: that Chrome's User-Agent and its other headers, and Chromium tells a page's scripts the same (Obscura tells them Windows when they ask for the platform). Nothing names ts5 or a model. The fonts, the graphics and the connection are the machine's own. `TS5_BROWSER_AGENT=linux` makes it Chrome on Linux, `TS5_BROWSER_AGENT=own` leaves each its own words. The searches name ts5, as services made for programs ask. A site that tests for a person (a captcha, a "checking your browser" page) stays closed, and the model says so.
+- **No browser installed?** The first time you switch the browser tool on without one (none found on this machine, and none named with `/browser` and its path), ts5-tui asks which to install (arrows and Enter; the choice starts on **Neither**, so an Enter meant for something else installs nothing): **Chromium** from your system's packages (`apt-get`, `dnf`, `pacman` or `zypper`; sudo asks for your password; on Debian 13 it is the small `chromium-headless-shell`), **Obscura** into your home folder (a 72 MB download from its makers' GitHub release, 150 MB once unpacked, checked against a SHA-256 built into ts5, no password), or **Neither**. ts5-tui steps aside while the install runs and comes back when you press Enter. It asks once; `/browser install` asks again, and `ts5-tui --install-browser chromium` or `obscura` does it without the app.
+- **Obscura** ([its page](https://github.com/h4ckf0r0day/obscura)) is a lighter browser, used only when you choose it (or install it from the question above). It is young. It runs a page's scripts on the thread that answers ts5, so it says nothing while a heavy page's scripts are at work. ts5 reads a page before those scripts start, and waits for a busy Obscura before it opens the next page. On a PS5, 12 of the 13 pages we tried opened in Obscura in 2 to 10 seconds (Chromium: 1 to 5); one, Wikipedia's article on the Black Sea, leaves Obscura 0.2.6 without an answer for good. A page that keeps Obscura silent for 20 seconds (`TS5_BROWSER_PATIENCE_S` sets the seconds) is shown in ts5's own text view, with a line that says so, and the next page is Obscura's again. What the model types or presses on a page that left Obscura stuck goes through the text view too. It does not open addresses on this machine or your home network.
 - On the PS5, Chromium took 330 to 400 MiB of RAM beside a loaded model (650 MiB on the heaviest page we tried), and no GPU memory.
 - While the browser is on it stands in for the **pages** tool.
 - A site that tests for a person (a captcha, a "checking your browser" page) stays closed, and the model says so.
@@ -251,7 +255,7 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | Command | What it does |
 | --- | --- |
 | `/model NAME` | Loads another model (see [Models](#models-f2)). Part of the name is enough. `/model` alone opens the Models page. |
-| `/models` | The Models page. `/chat`, `/status`, `/settings` and `/logs` go to the others. |
+| `/models` | The Models page. `/chat`, `/status`, `/settings`, `/logs` and `/access` go to the others. |
 | `/download NAME` | Downloads one of the models tested on the PS5 (see [Downloading models](#downloading-models)): `qwen3-14b`, `qwen35-9b`, `qwen38-9b`, `deepseek-r1-14b`, `qwen3-8b`, `llama31-8b`, `qwen25-coder-7b`, `qwen25-coder-14b`, `gemma3-12b`, `gemma4-12b`, `bonsai2-27b`, `bonsai2-9b`, `bonsai2-4b`, `llama32-3b`, and the helpers `qwen3-0.6b`, `llama32-1b`, `gemma3-1b`. Tab completes the name. `/download` alone opens the list on the Models page. |
 | `/download URL [FILE] [--sha256 HEX]` | Downloads any other `.gguf`. A `ts5 fetch URL FILE --sha256 HEX` line, as on [Models tested on PS5](Models-tested-on-PS5), works pasted at the prompt as it is. |
 | `/search WORDS` | Looks on Hugging Face for other models that fit this GPU: `/search mistral 7b` (see [Searching Hugging Face](#searching-hugging-face)). |
@@ -261,8 +265,8 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | `/save [FILE]` | Saves this chat as Markdown, thinking included. Without a file: `~/tokenstation-chat-YYYYMMDD-HHMM.md`. |
 | `/copy` | Copies the last answer (Ctrl+Y). `/copy code`: its last code block. `/copy think`: its thinking. `/copy all`: the whole chat. See [The mouse, and copying](#the-mouse-and-copying). |
 | `/compact [WHAT TO KEEP]` | Has the model summarize the chat so far and go on from the summary, with room again (see [A chat that fills up](#a-chat-that-fills-up)). `/summarize` too. |
-| `/tools` | Lists the model's tools and which are on (see [Tools](#tools)). `/tools search`, `pages`, `terminal`, `files`, `browser` or `memory` followed by `on` or `off` sets one. `/tools off` takes them all away, `/tools on` gives them back. `/tools terminal allow` stops the questions for that tool (`files` and `browser` too); `/tools ask` brings every question back. |
-| `/browser` | Says which program shows web pages to the model. `/browser auto`, `chromium`, `obscura`, `text` or a program's path chooses one. |
+| `/tools` | Lists the model's tools and which are on (see [Tools](#tools)). `/tools search`, `pages`, `terminal`, `files`, `browser` or `memory` followed by `on` or `off` sets one. `/tools off` takes them all away, `/tools on` gives them back. `/tools terminal allow` stops the questions for that tool (`files` and `browser` too); `/tools ask` brings every question back. `/tools search wikipedia`, `grokipedia` or `both` picks the encyclopedia searched without a web search key. |
+| `/browser` | Says which program shows web pages to the model. `/browser auto`, `chromium`, `obscura`, `text` or a program's path chooses one. `/browser install` offers to install Chromium or Obscura. |
 | `/undo` | Takes back the last change the model made to a file. |
 | `/mcp` | Your outside tools' programs (see [Outside tools](#outside-tools-mcp)). `/mcp add NAME PROGRAM …` adds one, `/mcp remove NAME` takes one out, `/mcp NAME` lists its tools, `/mcp NAME off`, `ask`, `allow`, `restart`, `only TOOL …`, `all`; `/mcp reload` reads the list again. |
 | `/memory` | The notes the model keeps between chats. `/memory forget N` removes one, `/memory clear` all, `/memory TEXT` adds one. |
@@ -271,11 +275,11 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | `/check [NAME]` | The GPU check on the loaded model (or NAME): `ts5 check`, the GPU's answers against the CPU's. |
 | `/bench [NAME]` | The speed test on the loaded model (or NAME): `ts5 bench`, prompt and answer tok/s. |
 | `/usage` | The API's use over the last day and week, by app (its API key's name, else its address) and by model: requests, prompt and generated tokens, tok/s. From the TV or desktop app's `usage.tsv`. |
-| `/keys` | The API keys: name, on or off, when made, when last used. Keys are made on the TV app's Settings page, and only their SHA-256 is kept, so they can't be shown again. |
+| `/access` | The [Access](#access-f6) page: who can use this TokenStation5 from another machine, and the API keys (`/keys` goes there too). |
 | `/think on`, `off`, `auto` | Thinking before answering, for models that can switch it (Qwen 3, Qwen 3.5, Gemma 4). `auto` leaves it to the model. |
 | `/fan auto`, `cool`, `early`, `max` | The PS5's fan (see [PS5 hardware on Linux](PS5-hardware-on-Linux)). `early` ramps from 40 °C and is at full speed by 55 °C. |
 | `/theme NAME` | Colors: Ocean, Neon, Sunset, Forest, Mono. Without a name, the next one. |
-| `/status`, `/settings`, `/logs` | Those pages. |
+| `/status`, `/settings`, `/logs`, `/access` | Those pages. |
 | `/help` | Every command and key, in the chat. |
 | `/unload` | Stops the model ts5-tui loaded, so its GPU memory is free, without quitting. |
 | `/quit` | Leaves (`/exit` and `/q` too, and plain `exit`, `quit` or `q`). A model ts5-tui loaded is unloaded (see [When you quit](#when-you-quit)). |
@@ -381,19 +385,20 @@ btop-style bars for this machine: GPU memory (with GiB free), RAM, the die (Tctl
 | Setting | What it does |
 | --- | --- |
 | Server | The TokenStation to talk to. An address that can't be right isn't saved, and the reason is shown. One given with `--url` or `TS5_URL` is used for that run only and not saved (the same for `--key` and `TS5_API_KEY`). |
-| API key | Only when the server asks for one. Kept in the settings file, readable by you only. |
+| Server's key | The key ts5-tui itself sends, for a server on another machine that asks for one. Kept in the settings file, readable by you only. The keys other machines use to reach this one are made on the [Access](#access-f6) page. |
 | Theme | Ocean, Neon, Sunset, Forest, Mono. |
 | Thinking | The model's choice, on, or off, for models that can switch it (Qwen 3, Qwen 3.5, Gemma 4). Off answers sooner. |
 | Temperature | **default** with its number beside it (0.7 for every model but Mistral Nemo, 0.3), or 0.1 to 1.5. Lower is steadier (code, facts), higher more varied. Past either end it goes back to default. |
 | Answer length | No limit, or a cap of 512 to 8,192 tokens. Under 1,024 turns thinking off. |
 | Full chat | **is summarized, and goes on** (the default): when the chat is nearly full the model writes a summary of it and the chat continues from that. **stops**: a full chat ends, as before (see [A chat that fills up](#a-chat-that-fills-up)). |
-| Web search key | A [Tavily](https://tavily.com) key (free at app.tavily.com). A model ts5-tui loads then searches the whole web when a question needs it (see [Web search](Web-search)); with no key its searches go to Wikipedia. Kept in the settings file, readable by you only. Load the model again (Models, Enter) for a new key to take hold. For the always-on service, the key goes in `/etc/default/tokenstation` instead. |
+| Web search key | A [Tavily](https://tavily.com) key (free at app.tavily.com). A model ts5-tui loads then searches the whole web when a question needs it (see [Web search](Web-search)); with no key its searches go to the encyclopedia chosen under **Search source**. Kept in the settings file, readable by you only. Load the model again (Models, Enter) for a new key to take hold. For the always-on service, the key goes in `/etc/default/tokenstation` instead. |
 | Tools | **on**: the model may use the tools switched on below. **off**: it gets no tools at all, and the rows below are hidden until it is on again. |
-| Tool: search | **on**: the model searches when a question needs it: the whole web with the key above, Wikipedia without one. **off**: it never searches. |
+| Tool: search | **on**: the model searches when a question needs it: the whole web with the key above, an encyclopedia without one. **off**: it never searches. |
+| Search source | Which encyclopedia is searched when there is no web search key: **Wikipedia** (the default), **Grokipedia** (xAI's encyclopedia, written by its AI; when it can't be searched, Wikipedia is), or **Both**. It counts from the next message. With a server from an older build the row says Wikipedia and can't be changed. |
 | Tool: pages | **on**: the model can read a web page you give it a link to. **off**: it can't open links. |
 | Tool: terminal | **on, asks first**: the model can run a command on this machine, and you see each one and say yes or no. **on, never asks**: commands run without showing you first, for a model you trust and no pages from strangers. **off**: it can't run commands. |
 | Tool: files | **off** (the default): the model can't read or change files. **on, asks first**: it reads and changes files; each change is shown first, lines out and lines in, for your yes or no. **on, never asks**: without asking (`/undo` still takes a change back). |
-| Tool: browser | **off** (the default): the model can't click through web pages. **on, asks first**: it opens pages and follows links by itself; a button or typing waits for your yes. **on, never asks**: it presses buttons and types without asking. |
+| Tool: browser | **off** (the default): the model can't click through web pages. **on, asks first**: it opens pages and follows links by itself; a button or typing waits for your yes. **on, never asks**: it presses buttons and types without asking. Switched on with no browser installed, it asks once whether to install one (see [Browser](#browser)). |
 | Browser | Which program shows the pages: **Auto** (Chromium if one is installed, else ts5's own page reader), **Chromium**, **Obscura**, **Text view**. The line under it says what is installed. |
 | Outside tools | One row for each program you added with `/mcp add`: **off**, **on, asks first**, **on, never asks**. The line under it says how many tools it has and what they cost in every message, or why it isn't running. |
 | Tool: memory | **on**: the model keeps notes when you ask it to remember, and reads them at the start of every chat (`/memory`). **off**: it keeps none and doesn't see the saved ones. |
@@ -412,6 +417,38 @@ The engine's own switches (prompt math, cache, helper) are per model: built in f
 What the engine writes, colored: errors red, warnings yellow, speed lines green. **PgUp/PgDn** and **↑ ↓** scroll, **End** follows the newest again, **Home** goes to the start.
 
 It follows the API-only service's journal (`journalctl -u tokenstation`; reading it may need the `systemd-journal` or `adm` group), the TV app's `/var/lib/tokenstation/ts5.log`, or the log of the `ts5 serve` it started, whichever is running. `TS5_TUI_LOG=/path/to/file ts5-tui` follows a file of your choice.
+
+## Access (F6)
+
+Who can use this TokenStation5 from another machine, and with which key.
+
+```
+    Access  who can reach this TokenStation5, and with which key
+
+     Other devices     ‹ yes ›
+                       http://192.168.1.20:8081/v1 · the address to give an app on another machine
+     They need a key   ‹ yes ›
+                       another machine gets in only with a key that is on. This machine never needs one
+
+     Keys  shown once, when made · kept as SHA-256 in ~/.local/share/tokenstation/access/keys.tsv
+   ▌ Open WebUI on the tower                  on   made 2 days ago   last used 5 minutes ago
+     laptop                                   off  made 2 days ago   last used never
+```
+
+**↑ ↓** choose a row, **← →** or **Enter** change it, **N** makes a key, **D** removes the chosen key (it asks first), **R** reads the keys again, **Esc** goes back to the chat.
+
+| Row | What it does |
+| --- | --- |
+| Other devices | Whether a model ts5-tui loads can be reached from other machines at all. **no** (the default): only this machine. **yes**: the page shows the address to give an app, and offers to load the model again, which is when it takes hold. |
+| They need a key | **yes**: another machine gets in only with a key that is on; without one it gets HTTP 401 and a line that says where keys are made. **no**: any machine that can reach the port gets in. Switching Other devices on turns this on too. |
+| Keys | **N** makes one: name it after the app or the machine. The key (such as `ts5-k7qp2-wx9md-3hf8r-tz6na`) is shown once, by itself on a plain screen to select, and copied when your terminal allows it; ts5 keeps only its SHA-256. **Enter** turns a key off or on. Each row says when the key was made and when it was last used. |
+
+- **This machine never needs a key**: ts5-tui, or a program beside it that talks to `127.0.0.1`.
+- A key made, turned off or removed holds from the next request. The model stays loaded.
+- In the app on the other machine, the server is the address the page shows and the API key is the key (see [Connecting apps](Connecting-apps)).
+- The page works on the keys of the server in use. For a model ts5-tui loaded they are in `~/.local/share/tokenstation/access/keys.tsv`. For the background service they are in `/var/lib/tokenstation/access/keys.tsv` (your user has to be in the `tokenstation` group), and Other devices is the service's `HOST` setting in `/etc/default/tokenstation`, shown here but not changed. The TV app's keys are listed, and made on its own Settings page.
+- In a script, `ts5 keys` does the same: `ts5 keys new "laptop"`, `ts5 keys`, `ts5 keys off laptop`, `ts5 keys remove laptop`, `ts5 keys require on`. Add `--file /var/lib/tokenstation/access/keys.tsv` for the background service's keys.
+- Away from home, use [Tailscale](Away-from-home-with-Tailscale) and a key. Don't forward port 8081 on your router: the API is plain HTTP.
 
 ## tmux: SSH that can drop
 
@@ -437,7 +474,7 @@ In an **IDE's terminal** (VS Code, Cursor, JetBrains, including their Remote-SSH
 | What you see | Why, and what to do |
 | --- | --- |
 | **● offline** in the top bar | Nothing answers at the address. Start the service (`sudo systemctl start tokenstation`) or the TV app, or load a model on the Models page, which starts `ts5 serve`. Check the address in Settings. |
-| **needs an API key** | The server has **Require a key** on: put a key in Settings → API key, or start with `--key`. |
+| **needs an API key** | The server is on another machine and asks for a key: make one there (its Access page, or the TV app's Settings), and put it in Settings → Server's key, or start with `--key`. |
 | No temperatures, fan or GPU memory | ts5-tui isn't running on the PS5 (a Mac, or `--url` to another machine), or the PS5 kernel's sensors are missing. Run it over SSH on the PS5. |
 | Load or fan: "needs the tokenstation group" | `sudo adduser $USER tokenstation`, then log out and in. |
 | Colors look washed out or wrong | The terminal has no 24-bit color, so ts5-tui uses 256 colors. Terminals that support it set `COLORTERM=truecolor`; try another theme, or `Mono`. |
@@ -445,7 +482,7 @@ In an **IDE's terminal** (VS Code, Cursor, JetBrains, including their Remote-SSH
 | tmux opens when you don't want it | `ts5-tui --no-tmux`, or Settings → tmux → off. |
 | A model "didn't load": not enough GPU memory | The message says how much it needs and how much is free. If another program holds the memory (the TV app, a game, a tune or check still running, a model left loaded by an older ts5-tui: `pkill -f "ts5 serve"`), stop that. If the model is simply too big for this GPU, pick a smaller file type (Q4_K_M) or a smaller model. |
 | Copied, but nothing to paste | Your terminal doesn't let programs set the clipboard (Apple's Terminal never does). Select the text in the plain view that opens after every copy, and press Cmd+C. |
-| A web page comes back as "a simpler text view" | No browser is installed, or the one chosen didn't start (the page says why, once). `sudo apt install chromium`, then `/browser auto`. |
+| A web page comes back as "a simpler text view" | No browser is installed, or the one chosen didn't start (the page says why, once). `/browser install` offers Chromium or Obscura; after that, `/browser auto`. |
 | An outside tool's program is "not running" | `/mcp` says why (the program isn't installed, it ended as it started, it said nothing for two minutes). Its own words are in `~/.local/share/tokenstation/mcp-NAME.log`. Fix it, then `/mcp NAME restart`. `ts5-tui --mcp` shows the same without a chat. |
 | Clicks do nothing | Settings → Mouse must be on. In Apple's Terminal, View → **Allow Mouse Reporting** must be ticked. |
 

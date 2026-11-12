@@ -6,7 +6,7 @@ TokenStation5 speaks the OpenAI API on port 8081, over plain HTTP. Any app with 
 | --- | --- |
 | Base URL | `http://<the PS5's address>:8081/v1` (http, not https, ending in `/v1`) |
 | Model | the id that `http://<the PS5's address>:8081/v1/models` shows, such as `Qwen2.5-Coder-7B-Instruct-Q4_K_M` (the server answers with the model it has loaded whatever id is sent) |
-| API key | one of your keys (Settings > Apps > New key). With "Require a key" off any text works, and a real key still shows the app by name on Home |
+| API key | one of your keys (Settings > Apps > New key; in the terminal app, the Access page, F6). With "Require a key" off any text works, and a real key still shows the app by name on Home |
 
 Settings > Apps > Instructions > "Set up an app" shows these on the TV, filled in. A DHCP reservation in your router keeps the address from changing.
 
@@ -17,6 +17,8 @@ Endpoints: `/v1/chat/completions` (streaming, tool calling), `/v1/completions`, 
 ## API keys
 
 Settings > Apps > **New key**: name it after the app, and the key shows once on its row, like `ts5-k7qp2-wx9md-3hf8r-tz6na` (no i, l, o or u, so it reads off the TV without mix-ups). Type it into the app then; the PS5 keeps only its SHA-256. Cross turns a key off and on, square twice removes it. With **Require a key** on, a request without a key that's on gets HTTP 401; the Chat page on the TV never needs one. `ts5 serve` on a computer takes one key from `TS5_API_KEY`.
+
+**On Linux without the TV app** (the terminal app, or the always-on service) keys are made on the terminal app's [Access page](Using-the-terminal-app#access-f6) (F6), or with `ts5 keys new "NAME"`. They look the same and work the same way, with two differences: the machine itself never needs a key, and other machines get in without one until **They need a key** is switched on (`ts5 keys require on`).
 
 ## Kilo Code
 
