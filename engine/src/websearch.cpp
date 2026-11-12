@@ -664,7 +664,13 @@ std::string web_search(const std::string &arguments, std::string &log, bool *fai
                 if (failed) *failed = true;
                 return kFailed + std::string("neither Wikipedia nor Grokipedia could be searched") + kTell;
             }
-            std::string out = "Two encyclopedias were searched (the only search set up here: no news or live data).\n\n";
+            std::string out = "Two encyclopedias were searched (the only search set up here: no news or live data).";
+            // (On the PS5 two models said a figure was in both when only Wikipedia's passage had it.)
+            if (wn > 0 && gn > 0)
+                out += " [1] to [" + std::to_string(wn) + "] are Wikipedia's and [" + std::to_string(wn + 1) + "] to [" +
+                       std::to_string(wn + gn) + "] are Grokipedia's. A fact is from the one whose passage says it: "
+                       "name that one, and say both only when both passages say it.";
+            out += "\n\n";
             out += wbad ? "(Wikipedia could not be searched: " + search_failure(w) + ".)" : w;
             out += "\n\n";
             out += gbad ? "(Grokipedia could not be searched: " + search_failure(g) + ".)" : g;

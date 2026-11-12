@@ -1742,7 +1742,9 @@ def test_grokipedia(ts5, model, tdir):
     # Both: half the results from each, Wikipedia's first, numbered on.
     both = {"TS5_ENCYCLOPEDIA": "both"}
     rc, out, err, g, w = search("PS5 firmware", **both)
-    ok = (rc == 0 and out.startswith("Two encyclopedias were searched (the only search set up here: no news or live data).\n\n"
+    ok = (rc == 0 and out.startswith("Two encyclopedias were searched (the only search set up here: no news or live data). "
+                                     "[1] to [3] are Wikipedia's and [4] to [5] are Grokipedia's. A fact is from the one "
+                                     "whose passage says it: name that one, and say both only when both passages say it.\n\n"
                                      'Wikipedia articles for "PS5 firmware":\n\n[1] PlayStation 5 system software') and
           '[3] Firmware\nhttps://en.wikipedia.org/wiki/Firmware\n(no opening text)\n\nGrokipedia articles for "PS5 firmware" '
           "(xAI's encyclopedia, written by its AI):\n\n[4] PlayStation 5\n" + gurl + "/page/PlayStation_5\nThe PS5 is a home "
@@ -1752,7 +1754,7 @@ def test_grokipedia(ts5, model, tdir):
           ", Grokipedia)" in err and "searching Wikipedia and Grokipedia" in err)
     failed += report(ok, "both: Wikipedia's articles, then Grokipedia's, numbered on", f"rc {rc}\n{out}\n{err}\n{g}\n{w}")
     rc, out, err, g, w = search("PS5 firmware", mode="down", **both)
-    failed += report(rc == 0 and "[1] PlayStation 5 system software" in out and
+    failed += report(rc == 0 and "[1] PlayStation 5 system software" in out and "are Grokipedia's" not in out and
                      "(Grokipedia could not be searched: Grokipedia had a problem.)" in out,
                      "both, Grokipedia down: Wikipedia's articles and a line about it", f"rc {rc}\n{out}\n{err}")
     rc, out, err, g, w = search("PS5 firmware", mode="down", TS5_WIKIPEDIA_URL="http://127.0.0.1:9", **both)
