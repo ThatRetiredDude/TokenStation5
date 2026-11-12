@@ -199,11 +199,27 @@ Tailscale off leaves it signed in (on again needs no QR code); **D** on that
 row signs out.
 
 Its files sit beside the keys: `tailscale.conf` (on or off, the name, the
-control server) and `tailscale.tsv` (the device's own keys), both readable
+control server, SSH) and `tailscale.tsv` (the device's own keys), both readable
 by their owner only. `TS5_TS_NAME` names the device, `TS5_TS_SERVER` points
 it at a Headscale server, and `TS5_TS_AUTH_KEY` signs in with an auth key
 instead of the QR code (in `/etc/default/tokenstation` for the service). The
 TV app has its own Tailscale, on its Settings page.
+
+**SSH via Tailscale** (the row below it) passes the tailnet's port 22 to this
+machine's own SSH server, so `ssh you@tokenstation5` and an editor's remote
+SSH (VS Code Remote-SSH, Zed, JetBrains Gateway) work from away too. It is
+off by default; SSH's own login applies (your keys or password), the
+tailnet's access rules still decide which devices get through, and nothing
+else on the machine is opened. It needs an SSH server (`openssh-server`).
+sshd sees these logins as coming from 127.0.0.2 (`who`, auth.log), so they
+stand apart from ones made on the machine itself; ts5's log names the device
+and the port to match them by. To allow only keys from the tailnet, for
+example, add to `/etc/ssh/sshd_config`:
+
+```
+Match Address 127.0.0.2
+    PasswordAuthentication no
+```
 
 `tailscale.tsv` belongs to one machine. Copied to another, Tailscale refuses
 it as copied state; ts5 then starts over as a new device and asks for a new
@@ -260,7 +276,7 @@ ts5-tui --url http://ps5.local:8081  # another one
   page but Chat. On a Mac, where macOS keeps the F keys, use those, fn+F1
   to fn+F6, or `/chat`, `/models`, `/status`, `/settings`, `/logs`, `/access`.
 - **Access (F6)**: who can use this TokenStation5 from another machine,
-  and with which key. Three switches, Connect an app, and the list of keys:
+  and with which key. Four switches, Connect an app, and the list of keys:
   - **Other devices**: whether a model ts5-tui loads can be reached from
     other machines at all. Off by default (only this machine). Switched
     on, the page shows the address to give an app, such as
@@ -270,12 +286,18 @@ ts5-tui --url http://ps5.local:8081  # another one
     is on. Switching Other devices on turns this on too.
   - **Tailscale**: on, the server joins your tailnet ([Tailscale](#tailscale-reach-it-from-anywhere)).
     The first time, a QR code of the sign-in link opens: scan it with your
-    phone and sign in, and it closes once the machine is connected. The row
+    phone and sign in, and it closes once the machine is connected. A click
+    on the link under it (or **C**) copies the link instead. The row
     then shows its name, its 100.x address and how many other devices
     the tailnet has; **D** signs out.
+  - **SSH via Tailscale**: on, the tailnet's port 22 reaches this machine's
+    own SSH server, and the row shows the command (`ssh you@tokenstation5`).
+    Off by default; it says so when no SSH server is installed.
   - **Connect an app**: makes a key (name it after the app) and shows two
-    QR codes, the address (the tailnet's when Tailscale is connected, else
-    this network's) and the key, to scan into the app on a phone.
+    QR codes, one at a time (**←→**): the address (the tailnet's when
+    Tailscale is connected, else this network's) and the key, to scan into
+    the app on a phone. A taller window draws the codes bigger, which suits
+    a phone's camera best.
   - **Keys**: **N** makes one (name it after the app or the machine).
     The key is shown once, with the address, as the same QR codes; **V**
     shows them as plain text to select. ts5 keeps only its SHA-256.

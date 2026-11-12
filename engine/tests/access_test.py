@@ -154,7 +154,7 @@ def post(url, obj):
         return e.code, json.loads(e.read().decode() or "{}")
 
 
-def test_tailnet(here, there, folder):
+def test_tailnet(here, there, folder, log_path):
     """Tailscale beside the keys (tailnet_serve.h), without reaching Tailscale:
     the control server named here is a closed port on this machine."""
     if get(here + "/ts5/tailnet")[0] == 404:
@@ -192,6 +192,15 @@ def test_tailnet(here, there, folder):
     tsv = os.path.join(folder, "tailscale.tsv")
     check(os.path.exists(tsv) and stat.S_IMODE(os.stat(tsv).st_mode) == 0o600,
           "tailnet: its keys are made, readable by their owner only")
+    check(st.get("ssh") is False and isinstance(st.get("ssh_server"), bool), "tailnet: SSH off at first", st)
+    starts = open(log_path).read().count("tailscale: on, as")
+    code, st = post(here + "/ts5/tailnet", {"ssh": True})
+    check(code == 200 and st.get("ssh") is True and "ssh=1" in open(conf).read(),
+          "tailnet: SSH through it turned on, and kept", st)
+    code, st = post(here + "/ts5/tailnet", {"ssh": False})
+    check(code == 200 and st.get("ssh") is False and "ssh=0" in open(conf).read(), "tailnet: and off again", st)
+    check(open(log_path).read().count("tailscale: on, as") == starts,
+          "tailnet: the SSH switch leaves Tailscale's connections alone (no new start in the log)")
     code, st = post(here + "/ts5/tailnet", {"sign_out": True})
     check(code == 200 and st.get("on") is False and st.get("state") == "off", "tailnet: signing out turns it off", st)
     check("on=0" in open(conf).read(), "tailnet: and tailscale.conf says so")
@@ -228,7 +237,7 @@ def test_server(ts5, model, backend, d, path, key):
 
         check(get(here + "/v1/models")[0] == 200, "this machine gets in without a key")
         check(get(there + "/v1/models")[0] == 200, "another machine too, while no key is required")
-        test_tailnet(here, there, os.path.dirname(path))
+        test_tailnet(here, there, os.path.dirname(path), os.path.join(d, "serve.log"))
         keys(ts5, path, "require", "on")
         settle()
         code, body = get(there + "/v1/models")
