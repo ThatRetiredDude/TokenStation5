@@ -187,10 +187,13 @@ std::string Tailnet::status_json() {
     j.set("devices", jnum(st.devices));
     j.set("port", jnum(port));
     if (st.state == ts::Status::Connected) {
+        // The address by number: a name needs the tailnet's MagicDNS (and
+        // the phone's "Use Tailscale DNS"), which not every tailnet has.
         std::string host = st.name;
         while (!host.empty() && host.back() == '.') host.pop_back();
-        if (host.empty()) host = st.address;
-        j.set("url", Json::string("http://" + host + ":" + std::to_string(port) + "/v1"));
+        const std::string p = ":" + std::to_string(port) + "/v1";
+        j.set("url", Json::string("http://" + (st.address.empty() ? host : st.address) + p));
+        if (!host.empty() && !st.address.empty()) j.set("name_url", Json::string("http://" + host + p));
     }
     Json peers;
     peers.type = Json::ARR;

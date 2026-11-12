@@ -190,7 +190,7 @@ struct App {
     // false when it has none (not running, an older ts5, the TV app): tn_why.
     bool tn_have = false, tn_on = false;
     bool tn_want_qr = false;  // turned on here: the sign-in QR opens once there is a link
-    std::string tn_state, tn_host, tn_name, tn_address, tn_url, tn_sign_in, tn_problem, tn_account, tn_why;
+    std::string tn_state, tn_host, tn_name, tn_address, tn_url, tn_name_url, tn_sign_in, tn_problem, tn_account, tn_why;
     int tn_devices = 0;
     double tn_at = 0;
     // QR codes over the page: the sign-in link (closed once connected), or
@@ -722,7 +722,8 @@ void tailnet_take(const ts5::Json &j) {
     g->tn_name = j["name"].str();
     while (!g->tn_name.empty() && g->tn_name.back() == '.') g->tn_name.pop_back();
     g->tn_address = j["address"].str();
-    g->tn_url = j["url"].str();
+    g->tn_url = j["url"].str();  // by its 100.x address: no MagicDNS needed
+    g->tn_name_url = j["name_url"].str();
     g->tn_sign_in = j["sign_in_url"].str();
     g->tn_problem = j["problem"].str();
     g->tn_account = j["account"].str();
@@ -4471,7 +4472,7 @@ void access_new(const std::string &name) {
     if (tailnet) {
         text += "In the app, as an OpenAI-compatible server, on a device on your tailnet (Tailscale on):\n  address  " +
                 g->tn_url + "\n  API key  the key above\n";
-        if (!g->tn_address.empty()) text += fmt("  (or http://%s:%d/v1)\n", g->tn_address.c_str(), endpoint().port);
+        if (!g->tn_name_url.empty()) text += "  (or by name, where your tailnet has MagicDNS: " + g->tn_name_url + ")\n";
         if (reach && !at.empty()) text += "\nOn this network, without Tailscale: " + at + "\n";
     } else if (!reach) {
         text += "Other machines can't reach the model yet: Access (F6), Other devices or Tailscale.\n";

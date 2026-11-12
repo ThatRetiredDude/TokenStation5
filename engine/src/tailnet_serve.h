@@ -17,7 +17,9 @@
 // This machine controls it through the server (from 127.0.0.1 only; ts5-tui's
 // Access page does):
 //   GET  /ts5/tailnet   what it is doing, as JSON (status_json; "peers" are
-//                       the devices that reached it lately, "devices" all of them)
+//                       the devices that reached it lately, "devices" all of them;
+//                       "url" by its 100.x address, "name_url" by its name, which
+//                       needs the tailnet's MagicDNS)
 //   POST /ts5/tailnet   {"on": true|false}, {"name": "NAME"}, {"sign_out": true}
 #pragma once
 #include <memory>

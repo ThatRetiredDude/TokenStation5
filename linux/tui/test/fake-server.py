@@ -104,7 +104,8 @@ def tailnet_status():
         t["signed_in"] = True
         name = t["name"] + ".tail1234ab.ts.net."
         out.update(state="connected", name=name, address="100.101.102.103", account="you@example.com", devices=2,
-                   url="http://%s:%d/v1" % (name.rstrip("."), out["port"]))
+                   url="http://100.101.102.103:%d/v1" % out["port"],
+                   name_url="http://%s:%d/v1" % (name.rstrip("."), out["port"]))
     return out
 SUMMARY = """## What you are doing
 - Trying the fake TokenStation, one message at a time.

@@ -810,7 +810,8 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             size_t on = 0;
             for (auto &k : keys->keys()) on += k.on;
             fprintf(stderr, "ts5: API keys in %s: %zu on; other machines %s\n", kf, on,
-                    keys->required() ? "need one" : "get in without one (ts5 keys require on)");
+                    keys->required() ? "need one" : "on this network get in without one (ts5 keys require on); "
+                                                    "from the tailnet always with one");
             const char *one = getenv("TS5_API_KEY");
             authorize = [one = std::string(one ? one : "")](const std::string &got, const std::string &client,
                                                             std::string &name) {
