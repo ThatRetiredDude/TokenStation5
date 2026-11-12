@@ -12,6 +12,8 @@ Settings > Apps > Instructions > "Set up an app" shows these on the TV, filled i
 
 `/v1/models` also gives the loaded model's `context_length`: tell your app that number as the context window, so it trims the conversation before the PS5 has to refuse it. Coding tools send a long first prompt (10,000 to 15,000 tokens of instructions and tool descriptions), so serve with as much context as fits (the default). It lists the model's sampling settings under `settings` too: the `temperature`, `top_p` and `top_k` a request gets when it sends none, which for a checked model are the ones that did best on the PS5. Leave them out of your app's config to get them.
 
+On the Linux edition a high temperature changes the thinking and the prose only: while an answer is inside a tool call or a ``` code block, the server writes it at the model's own temperature (its checked one, else 0.7), or at the request's if that is lower. `"tool_call_temperature": 0.3` in a request sets another cap for that request, `"off"` none; `TS5_CALL_TEMPERATURE` does the same for the whole server.
+
 Endpoints: `/v1/chat/completions` (streaming, tool calling), `/v1/completions`, `/v1/models`.
 
 ## API keys

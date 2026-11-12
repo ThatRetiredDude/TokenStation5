@@ -145,8 +145,23 @@ In the chat a tool call is a line of its own (**⚙ $ ls -la**, **⚙ reads http
 
 **Terminal.** When the model wants to run a command you see the command first, with the question above.
 
-- A command runs as you, in the folder ts5-tui was started in, with no keyboard to read from (a program that waits for typing gets nothing), for 2 minutes at most. **Esc** stops one that is running.
-- The model gets the output and the exit code. Of long output it gets the start and the end.
+- A command runs in bash (in sh only where the system has no bash), in the sandbox (below), in the folder ts5-tui was started in, with no keyboard to read from (a program that waits for typing gets nothing), for 2 minutes at most. **Esc** stops one that is running.
+- The model gets the output and the exit code. Of long output it gets the start and the end. When a command with `grep` in it ends with code 1 and prints nothing, the model is also told that grep found no match, so it doesn't take that for a broken command before it. When `curl` piped into grep, awk or sed prints nothing, it is told that HTTP/2 header names come in lower case (`grep -i` matches either).
+- Commands, tool calls and code are written at the model's own steady temperature, however high **Settings → Temperature** is (see [Settings](#settings-f4)).
+
+**The sandbox.** The model's commands run in [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`, your system's own package; the TokenStation packages recommend it). It is on by default: **Settings → Sandbox**, or `/sandbox`. In there a command:
+
+- sees the system **read-only**, so nothing in it can be installed or broken, and `sudo` can't work;
+- sees **none of your home folder** (SSH keys, browsers, ts5's keys, models and chats), no other home folder, no mounted drive, none of the sockets in `/run` (your SSH and desktop agents), and none of your environment variables;
+- can change **one folder of yours**: the one ts5-tui was started in. So start ts5-tui in the project you want the model to work on. Started in your home folder itself it gets none, and works in its own home;
+- has a **home folder of its own, the toolbox** (`~/.local/share/tokenstation/sandbox/home`), kept between chats. `pip install`, `npm install -g` and a program put in `~/bin` go there, so the model fetches a tool once and uses it again. `/sandbox folder DIR` (or **Settings → Sandbox folder**) moves it to `DIR/tokenstation-sandbox`, on a faster or roomier drive say: one with Unix permissions (ext4, btrfs, xfs; not exFAT or NTFS). `/sandbox folder default` brings it back. While that drive isn't mounted, no command runs;
+- has the network, unless you say `/sandbox no-network`;
+- sees only its own processes, and whatever it starts ends with it;
+- is the first thing the kernel ends when memory runs out, before the model's server (this one also with the sandbox off).
+
+The question before a command says which it is: "the model wants to run a command **in the sandbox**" or "… **as you (no sandbox)**". The sandbox uses no memory of its own and starts in milliseconds. It shares the kernel with everything else, so it is a strong fence, not a second machine.
+
+`/sandbox` says where commands run and how big the toolbox is. `/sandbox reset` empties the toolbox, and `/sandbox off` runs commands as you again, with all your files. Without bubblewrap (`sudo apt install bubblewrap`), or where the system doesn't let it run, Settings says why and commands run as you. Ubuntu 24.04 and later stop it with AppArmor; the [Linux README](https://github.com/ThatRetiredDude/TokenStation5/blob/linux-package/linux/README.md) has the four-line profile that lets bubblewrap in. Debian (the PS5) and Fedora need nothing.
 
 **Memory.** Say "remember that I write Rust and like short answers" and the model saves a note. It reads its notes at the start of every chat.
 
@@ -268,6 +283,7 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | `/tools` | Lists the model's tools and which are on (see [Tools](#tools)). `/tools search`, `pages`, `terminal`, `files`, `browser` or `memory` followed by `on` or `off` sets one. `/tools off` takes them all away, `/tools on` gives them back. `/tools terminal allow` stops the questions for that tool (`files` and `browser` too); `/tools ask` brings every question back. `/tools search wikipedia`, `grokipedia` or `both` picks the encyclopedia searched without a web search key. |
 | `/browser` | Says which program shows web pages to the model. `/browser auto`, `chromium`, `obscura`, `text` or a program's path chooses one. `/browser install` offers to install Chromium or Obscura. |
 | `/undo` | Takes back the last change the model made to a file. |
+| `/sandbox` | Says where the model's commands run (see [Tools](#tools)). `/sandbox on`, `off`, `network`, `no-network` set it; `/sandbox reset` empties the toolbox; `/sandbox folder DIR` moves the toolbox to another folder or drive (`default` brings it back). |
 | `/mcp` | Your outside tools' programs (see [Outside tools](#outside-tools-mcp)). `/mcp add NAME PROGRAM …` adds one, `/mcp remove NAME` takes one out, `/mcp NAME` lists its tools, `/mcp NAME off`, `ask`, `allow`, `restart`, `only TOOL …`, `all`; `/mcp reload` reads the list again. |
 | `/memory` | The notes the model keeps between chats. `/memory forget N` removes one, `/memory clear` all, `/memory TEXT` adds one. |
 | `/find TEXT` | Scrolls to the newest message containing TEXT. |
@@ -388,7 +404,7 @@ btop-style bars for this machine: GPU memory (with GiB free), RAM, the die (Tctl
 | Server's key | The key ts5-tui itself sends, for a server on another machine that asks for one. Kept in the settings file, readable by you only. The keys other machines use to reach this one are made on the [Access](#access-f6) page. |
 | Theme | Ocean, Neon, Sunset, Forest, Mono. |
 | Thinking | The model's choice, on, or off, for models that can switch it (Qwen 3, Qwen 3.5, Gemma 4). Off answers sooner. |
-| Temperature | **default** with its number beside it (0.7 for every model but Mistral Nemo, 0.3), or 0.1 to 1.5. Lower is steadier (code, facts), higher more varied. Past either end it goes back to default. |
+| Temperature | **default** with its number beside it (0.7 for every model but Mistral Nemo, 0.3), or 0.1 to 1.5. Lower is steadier (code, facts), higher more varied. Past either end it goes back to default. Set above the default, it changes the thinking and the prose only: while the model writes a tool call or code, it writes at its default. |
 | Answer length | No limit, or a cap of 512 to 8,192 tokens. Under 1,024 turns thinking off. |
 | Full chat | **is summarized, and goes on** (the default): when the chat is nearly full the model writes a summary of it and the chat continues from that. **stops**: a full chat ends, as before (see [A chat that fills up](#a-chat-that-fills-up)). |
 | Web search key | A [Tavily](https://tavily.com) key (free at app.tavily.com). A model ts5-tui loads then searches the whole web when a question needs it (see [Web search](Web-search)); with no key its searches go to the encyclopedia chosen under **Search source**. Kept in the settings file, readable by you only. Load the model again (Models, Enter) for a new key to take hold. For the always-on service, the key goes in `/etc/default/tokenstation` instead. |
@@ -397,6 +413,8 @@ btop-style bars for this machine: GPU memory (with GiB free), RAM, the die (Tctl
 | Search source | Which encyclopedia is searched when there is no web search key: **Wikipedia** (the default), **Grokipedia** (xAI's encyclopedia, written by its AI; when it can't be searched, Wikipedia is), or **Both**. It counts from the next message. With a server from an older build the row says Wikipedia and can't be changed. |
 | Tool: pages | **on**: the model can read a web page you give it a link to. **off**: it can't open links. |
 | Tool: terminal | **on, asks first**: the model can run a command on this machine, and you see each one and say yes or no. **on, never asks**: commands run without showing you first, for a model you trust and no pages from strangers. **off**: it can't run commands. |
+| Sandbox | **on, with network** (the default): the model's commands see the system read-only and none of your home folder, and change only the folder ts5-tui started in and their own toolbox. **on, no network**: the same, offline. **off**: commands run as you, with all your files. Shows **unavailable** and why when bubblewrap can't run here. |
+| Sandbox folder | Where the toolbox is (what the model installs), with its size and the free space on that drive. **Enter** and type another folder to move it there, or `default`. |
 | Tool: files | **off** (the default): the model can't read or change files. **on, asks first**: it reads and changes files; each change is shown first, lines out and lines in, for your yes or no. **on, never asks**: without asking (`/undo` still takes a change back). |
 | Tool: browser | **off** (the default): the model can't click through web pages. **on, asks first**: it opens pages and follows links by itself; a button or typing waits for your yes. **on, never asks**: it presses buttons and types without asking. Switched on with no browser installed, it asks once whether to install one (see [Browser](#browser)). |
 | Browser | Which program shows the pages: **Auto** (Chromium if one is installed, else ts5's own page reader), **Chromium**, **Obscura**, **Text view**. The line under it says what is installed. |
