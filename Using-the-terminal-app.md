@@ -38,7 +38,7 @@ Run it **on the PS5** (over SSH) for the whole experience. Pointed at a PS5 from
 ## The screen
 
 ```
- ◆ TokenStation5   F1 Chat  F2 Models  F3 Status  F4 Settings  F5 Logs  F6 Access   09:52   ← pages
+ ◆ TokenStation5   F1 Chat  F2 Models  F3 Status  F4 Settings  F5 Logs  F6 Access  F7 Connectors   09:52   ← pages
  ● Qwen3-8B-Q4_K_M · helper Qwen3-0.6B to 8k · chat 909/20k · 94.4 tok/s · GPU 5.7/13.6 GiB · die 80°C   ← live bar
 
    (chat, or the page you picked)
@@ -65,9 +65,9 @@ Run it **on the PS5** (over SSH) for the whole experience. Pointed at a PS5 from
 
 On a narrow window the least needed items drop off first (fan, then RAM). When the die reaches **85 °C**, where the PS5 starts slowing its GPU, a red warning line flashes under the bar: `/fan max` helps.
 
-**Six pages** fill the middle. Switch with **F1** to **F6**, **Tab** (next) and **Shift+Tab** (previous), or **Alt+1** to **Alt+6**. On every page but Chat, **1** to **6** switch too, **q** quits, and **/** jumps to the prompt with a command started. From the prompt, `/chat`, `/models`, `/status`, `/settings`, `/logs` and `/access` go to a page. In a window narrower than 84 columns the name in the corner shortens to TS5, and under 74 the pages are listed without their F keys, so all six stay in view.
+**Seven pages** fill the middle. Switch with **F1** to **F7**, **Tab** (next) and **Shift+Tab** (previous), or **Alt+1** to **Alt+7**. On every page but Chat, **1** to **7** switch too, **q** quits, and **/** jumps to the prompt with a command started. From the prompt, `/chat`, `/models`, `/status`, `/settings`, `/logs`, `/access` and `/connectors` go to a page. In a window narrower than 99 columns the name in the corner shortens to TS5, and under 89 the pages are listed without their F keys, so all seven stay in view.
 
-> **On a Mac**, macOS keeps the F keys for itself (F3 is Mission Control). Use **Tab** / **Shift+Tab**, **1** to **6** on the pages, the commands above, or **fn+F1** to **fn+F6**. **Option+1** to **Option+6** work when the terminal sends Option as Meta: in Terminal, Settings → Profiles → Keyboard → *Use Option as Meta key*; in iTerm2, Profiles → Keys → *Left Option key: Esc+*.
+> **On a Mac**, macOS keeps the F keys for itself (F3 is Mission Control). Use **Tab** / **Shift+Tab**, **1** to **7** on the pages, the commands above, or **fn+F1** to **fn+F7**. **Option+1** to **Option+7** work when the terminal sends Option as Meta: in Terminal, Settings → Profiles → Keyboard → *Use Option as Meta key*; in iTerm2, Profiles → Keys → *Left Option key: Esc+*.
 
 ## Chat (F1)
 
@@ -75,7 +75,8 @@ Type at `ts5>` and press **Enter**. The answer streams in with its formatting: h
 
 | Key | What it does |
 | --- | --- |
-| Enter | Send. While an answer is coming, the message is queued and sent by itself when that answer is done (see [Messages while it answers](#messages-while-it-answers)). |
+| Enter | Send. While an answer is coming, Enter **steers** it: the model reads your note as soon as it can and goes on from there (see [Messages while it answers](#messages-while-it-answers)). |
+| Tab | While an answer is coming: **queues** the message instead, sent by itself when that answer is done. |
 | Ctrl+J or Alt+Enter | A new line in the message. Pasting several lines works too. |
 | ↑ / ↓ | The messages and commands you typed before. With messages queued and nothing typed, ↑ takes the last queued one back to change it. |
 | Esc | Stops an answer (Ctrl+C too). With no answer running, clears what you typed; pressed again, drops queued messages. |
@@ -90,11 +91,14 @@ Type at `ts5>` and press **Enter**. The answer streams in with its formatting: h
 
 ### Messages while it answers
 
-You don't have to wait for an answer to finish. Type the next message while the model is still writing and press **Enter**: it is queued, shown over the prompt as **queued**, and sent by itself the moment the answer before it is done. Queue as many as you like; they go in order, one answer each.
+You don't have to wait for an answer to finish. Type while the model is still at work, then choose:
 
+- **Enter steers it.** The model reads your note as soon as it can and goes on from there: "make it shorter", "use Python instead", "stop, the file is in src/". While it writes, it stops where it is: what it wrote stays, marked **your note came in here**, and it goes on from your note. While a tool it called runs (a command, a page), the note waits over the prompt as **your note** and goes in once that step is done, so the model sees the tool's result and your note together. Your note shows in the chat with **while it worked** beside it.
+- **Tab queues it** instead: shown over the prompt as **queued**, and sent by itself the moment the answer before it is done. Queue as many as you like; they go in order, one answer each.
 - **↑** with nothing typed takes the last queued message back into the prompt, to change it or (Esc) throw it away.
-- **Esc** stops the answer that is coming. The queue then waits instead of firing: **Enter** sends it on, **Esc** drops it. The same when an answer fails (the server went away).
+- **Esc** stops the answer that is coming. A note that hadn't gone in yet moves to the front of the queue. The queue then waits instead of firing: **Enter** sends it on, **Esc** drops it. The same when an answer fails (the server went away).
 - Commands (`/think off`, `/model …`) still run at once. A new chat empties the queue.
+- Steering works with every model: the note is simply your next message, put where the model will read it next. Saved chats keep the notes where they came in.
 
 ### A chat that fills up
 
@@ -121,13 +125,14 @@ The model in a chat has tools it can reach for by itself:
 | **memory** | Keep notes between chats. | on |
 | **files** | Read files and folders, and change files. | off |
 | **browser** | Open web pages and click through them. | off |
+| **GitHub** | Read and change your repositories: files, branches, pull requests, issues, CI runs. | on once you connect GitHub ([Connectors](#connectors-f7)), changes ask first |
 | **outside tools** | Use the tools of other programs you add (MCP). | none added |
 
 You decide what it may do:
 
 - **Each tool has its own switch**: Settings → **Tool: search**, **Tool: pages** and so on, or `/tools terminal off`. `/tools` lists them with what is on.
 - **One switch turns them all off**: Settings → **Tools**, or `/tools off`. The model then gets nothing but the chat. `/tools on` brings back the ones you had on. `ts5-tui --no-tools` does the same for one run.
-- **The terminal, the files, the browser and each outside program have three steps**: **off**, **on, asks first** (you see what the model wants to do and say yes or no) and **on, never asks**. Change them in Settings, or with `/tools terminal allow` and `/tools terminal ask`. `/tools ask` brings every question back at once.
+- **The terminal, the files, the browser, GitHub and each outside program have three steps**: **off**, **on, asks first** (you see what the model wants to do and say yes or no) and **on, never asks**. Change them in Settings, or with `/tools terminal allow` and `/tools terminal ask`. `/tools ask` brings every question back at once.
 
 In the chat a tool call is a line of its own (**⚙ $ ls -la**, **⚙ reads https://…**, **⚙ remembers: …**, **⚙ searches the web: …**) with a line under it saying how it went (**▸ exit 0 · 12 lines · 0.3 s**). Click that line to see exactly what the model got back.
 
@@ -192,6 +197,15 @@ Off until you switch it on: Settings → **Tool: browser**, or `/tools browser o
 - On the PS5, Chromium took 330 to 400 MiB of RAM beside a loaded model (650 MiB on the heaviest page we tried), and no GPU memory.
 - While the browser is on it stands in for the **pages** tool.
 - A site that tests for a person (a captcha, a "checking your browser" page) stays closed, and the model says so.
+
+#### GitHub
+
+Once GitHub is connected on the [Connectors](#connectors-f7) page, the model can work in the repositories you picked there: "read the README of my website repo and open an issue for the broken link", "why did the last CI run fail?", "make a branch, fix the typo in index.html and open a pull request".
+
+- It calls GitHub's API as you, through the TokenStation5 app, so it reaches only those repositories, and only what the app may do: code, pull requests and issues (read and write), and CI results (read). It can't change workflow files or a repository's settings.
+- **A read goes at once** (a file comes as its text, a list of pull requests, a CI run's jobs). **A change waits for your yes**: making a branch, writing a file, opening a pull request or an issue, a comment. You see what it would send, a file's new text a line at a time, and **Do it**, **Every GitHub change, this chat** or **No**.
+- The chat shows each call as a line (**⚙ GitHub: GET /repos/you/website/readme**).
+- Settings → **Tool: GitHub**, or `/tools github off`, `ask`, `allow`. The model never sees the sign-in itself.
 
 #### Outside tools (MCP)
 
@@ -280,7 +294,7 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | `/save [FILE]` | Saves this chat as Markdown, thinking included. Without a file: `~/tokenstation-chat-YYYYMMDD-HHMM.md`. |
 | `/copy` | Copies the last answer (Ctrl+Y). `/copy code`: its last code block. `/copy think`: its thinking. `/copy all`: the whole chat. See [The mouse, and copying](#the-mouse-and-copying). |
 | `/compact [WHAT TO KEEP]` | Has the model summarize the chat so far and go on from the summary, with room again (see [A chat that fills up](#a-chat-that-fills-up)). `/summarize` too. |
-| `/tools` | Lists the model's tools and which are on (see [Tools](#tools)). `/tools search`, `pages`, `terminal`, `files`, `browser` or `memory` followed by `on` or `off` sets one. `/tools off` takes them all away, `/tools on` gives them back. `/tools terminal allow` stops the questions for that tool (`files` and `browser` too); `/tools ask` brings every question back. `/tools search wikipedia`, `grokipedia` or `both` picks the encyclopedia searched without a web search key. |
+| `/tools` | Lists the model's tools and which are on (see [Tools](#tools)). `/tools search`, `pages`, `terminal`, `files`, `browser`, `github` or `memory` followed by `on` or `off` sets one. `/tools off` takes them all away, `/tools on` gives them back. `/tools terminal allow` stops the questions for that tool (`files`, `browser` and `github` too); `/tools ask` brings every question back. `/tools search wikipedia`, `grokipedia` or `both` picks the encyclopedia searched without a web search key. |
 | `/browser` | Says which program shows web pages to the model. `/browser auto`, `chromium`, `obscura`, `text` or a program's path chooses one. `/browser install` offers to install Chromium or Obscura. |
 | `/undo` | Takes back the last change the model made to a file. |
 | `/sandbox` | Says where the model's commands run (see [Tools](#tools)). `/sandbox on`, `off`, `network`, `no-network` set it; `/sandbox reset` empties the toolbox; `/sandbox folder DIR` moves the toolbox to another folder or drive (`default` brings it back). |
@@ -292,6 +306,7 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | `/bench [NAME]` | The speed test on the loaded model (or NAME): `ts5 bench`, prompt and answer tok/s. |
 | `/usage` | The API's use over the last day and week, by app (its API key's name, else its address) and by model: requests, prompt and generated tokens, tok/s. From the TV or desktop app's `usage.tsv`. |
 | `/access` | The [Access](#access-f6) page: who can use this TokenStation5 from another machine, and the API keys (`/keys` goes there too). |
+| `/connectors` | The [Connectors](#connectors-f7) page: GitHub (`/github` goes there too). |
 | `/think on`, `off`, `auto` | Thinking before answering, for models that can switch it (Qwen 3, Qwen 3.5, Gemma 4). `auto` leaves it to the model. |
 | `/fan auto`, `cool`, `early`, `max` | The PS5's fan (see [PS5 hardware on Linux](PS5-hardware-on-Linux)). `early` ramps from 40 °C and is at full speed by 55 °C. |
 | `/theme NAME` | Colors: Ocean, Neon, Sunset, Forest, Mono. Without a name, the next one. |
@@ -449,6 +464,10 @@ Who can use this TokenStation5 from another machine, and with which key.
                        another machine gets in only with a key that is on. This machine never needs one
      Tailscale         ‹ on ›
                        connected as tokenstation5 · 100.101.102.103 · 4 other devices · D signs out
+     SSH via Tailscale ‹ on ›
+                       ssh you@100.101.102.103, from your tailnet
+     Browser terminal  ‹ on ›
+                       http://100.101.102.103:8081/ts5/terminal · Enter: as a QR code
      Connect an app    a new key, as QR codes
                        Enter: your tailnet's address and a new key, as QR codes for a phone
 
@@ -464,6 +483,8 @@ Who can use this TokenStation5 from another machine, and with which key.
 | Other devices | Whether a model ts5-tui loads can be reached from other machines at all. **no** (the default): only this machine. **yes**: the page shows the address to give an app, and offers to load the model again, which is when it takes hold. |
 | They need a key | **yes**: another machine gets in only with a key that is on; without one it gets HTTP 401 and a line that says where keys are made. **no**: any machine that can reach the port gets in. Switching Other devices on turns this on too. |
 | Tailscale | **on**: the server joins your tailnet, so your phones and computers reach it at home or away ([Tailscale](Away-from-home-with-Tailscale)). The first time, the sign-in link opens as a QR code to scan with your phone. A device on the tailnet always needs a key. **D** signs out. |
+| SSH via Tailscale | **on**: the tailnet's port 22 reaches this machine's own SSH server, so `ssh` and an editor's remote SSH (VS Code Remote-SSH, Zed, JetBrains Gateway) work from away too. Off by default. SSH's own login applies (your keys or password), not the API's keys. It needs an SSH server (`sudo apt install openssh-server`); the row says so when there is none. See [Tailscale](Away-from-home-with-Tailscale#ssh-from-away). |
+| Browser terminal | **on**: your tailnet's devices open ts5-tui in a web browser, with a key. Off by default. **Enter** shows its address as a QR code. See [Tailscale](Away-from-home-with-Tailscale#in-a-browser-the-chat-page-and-the-terminal). |
 | Connect an app | Makes a key and shows the address (the tailnet's when Tailscale is connected, else this network's) and the key as two QR codes, for the app on a phone. **V** shows them as plain text. |
 | Keys | **N** makes one: name it after the app or the machine. The key (such as `ts5-k7qp2-wx9md-3hf8r-tz6na`) is shown once, with the address, as QR codes (**V**: as plain text to select), and copied when your terminal allows it; ts5 keeps only its SHA-256. **Enter** turns a key off or on. Each row says when the key was made and when it was last used. |
 
@@ -473,6 +494,43 @@ Who can use this TokenStation5 from another machine, and with which key.
 - The page works on the keys of the server in use. For a model ts5-tui loaded they are in `~/.local/share/tokenstation/access/keys.tsv`. For the background service they are in `/var/lib/tokenstation/access/keys.tsv` (your user has to be in the `tokenstation` group), and Other devices is the service's `HOST` setting in `/etc/default/tokenstation`, shown here but not changed. The TV app's keys are listed, and made on its own Settings page.
 - In a script, `ts5 keys` does the same: `ts5 keys new "laptop"`, `ts5 keys`, `ts5 keys off laptop`, `ts5 keys remove laptop`, `ts5 keys require on`. Add `--file /var/lib/tokenstation/access/keys.tsv` for the background service's keys.
 - Away from home, use the Tailscale row and a key ([Tailscale](Away-from-home-with-Tailscale)). Don't forward port 8081 on your router: the API is plain HTTP.
+
+## Connectors (F7)
+
+Other services the model can work with, each signed in with a QR code. The first is **GitHub**.
+
+```
+   Connectors  other services the model can work with, signed in with a QR code
+
+   GitHub
+  ▌ Account           connected
+  ▌                   as your-name · D disconnects
+    Repositories      2
+                      Enter: change them on GitHub (a QR code)
+    Model's tool      ‹ on, asks first ›
+                      reads freely; a change (a branch, a file, a pull request, an issue) waits…
+
+    your-name:        website  notes
+```
+
+**Connect GitHub:**
+
+1. **Enter** on Account. A QR code of GitHub's sign-in page opens, with a short code under it (such as `WDJB-MJHT`; **C** copies it).
+2. Scan it with a phone that is signed in to GitHub (or open the page on any device), enter the code, and press **Authorize TokenStation5**.
+3. GitHub's page for the TokenStation5 app then opens as a QR code too: pick your account, then **All repositories** or only the ones the model may use, and **Install**. The QR code closes by itself once GitHub lists them.
+
+| Row | What it does |
+| --- | --- |
+| Account | Who is connected. **Enter** connects (or shows the QR code again), **X** stops a sign-in that is waiting, **D** disconnects after asking. |
+| Repositories | How many the app may use, listed by account below. **Enter** opens GitHub's page for the app as a QR code, to add or take away repositories. **R** asks GitHub again. |
+| Model's tool | **off**, **on, asks first** (the default: reads freely, a change waits for your yes) or **on, never asks**. See [GitHub](#github) under Tools. |
+
+- **Nothing to register and no token to paste.** ts5 signs in as the TokenStation5 GitHub app with GitHub's device flow, the same way `gh auth login` does.
+- The sign-in is kept in `~/.local/share/tokenstation/connectors/github.json`, readable by you only. It lasts 8 hours and ts5 renews it when it is used; left unused for 6 months, it needs a new sign-in. The model never sees it, and it stays out of the sandbox.
+- **D** forgets it here. To take the app's access away on GitHub's side too: GitHub → Settings → Applications → Authorized GitHub Apps → TokenStation5.
+- In a script: `ts5 github sign-in`, `ts5 github status --repos`, `ts5 github sign-out`, and `ts5 github api GET /user/repos`.
+
+GitHub is a trademark of GitHub, Inc.; TokenStation5 is not affiliated with or endorsed by GitHub.
 
 ## tmux: SSH that can drop
 

@@ -32,6 +32,37 @@ The Linux packages have the same client, built into `ts5 serve`: no `tailscale` 
 - The background service has no screen for the QR code: `curl -d '{"on":true}' http://127.0.0.1:8081/ts5/tailnet`, then `curl -s http://127.0.0.1:8081/ts5/tailnet` shows `sign_in_url` to open on your phone. `TS5_TS_NAME`, `TS5_TS_SERVER` and `TS5_TS_AUTH_KEY` go in `/etc/default/tokenstation`.
 - Its files sit beside the keys (`~/.local/share/tokenstation/access/`, or `/var/lib/tokenstation/access/` for the service): `tailscale.conf` and `tailscale.tsv`, readable by their owner only. `tailscale.tsv` belongs to that machine. Copied to another one, Tailscale refuses it as copied keys: ts5 then starts over as a new device and shows a new sign-in QR code (remove the old one in the admin console).
 
+### SSH from away
+
+**SSH via Tailscale**, the row under Tailscale on the Access page, passes the tailnet's port 22 to the machine's own SSH server. Then `ssh you@100.101.102.103` and an editor's remote SSH (VS Code Remote-SSH, Zed, JetBrains Gateway) work from anywhere, the same as at home.
+
+- Off by default. It needs an SSH server on the machine (`sudo apt install openssh-server`); the row says so when there is none.
+- SSH's own login applies (your SSH keys or password), not the API's keys, and your tailnet's access rules still decide which devices get through. Nothing else on the machine is opened.
+- The SSH server sees these logins as coming from `127.0.0.2` (in `who` and its log), so they stand apart from logins on the machine itself; ts5's log names the device each came from. To allow only SSH keys from the tailnet, add to `/etc/ssh/sshd_config`:
+
+```
+Match Address 127.0.0.2
+    PasswordAuthentication no
+```
+
+## In a browser: the chat page and the terminal
+
+`ts5 serve` answers a web browser too, at the address apps use, without `/v1`.
+
+**The chat page.** Open `http://100.101.102.103:8081/` on your phone (or `http://192.168.1.20:8081/` at home with Other devices on) and chat with the loaded model, its answers streamed, with its thinking when the model thinks. It asks once for one of your keys and keeps it, and your chats, in that browser only. Nothing to install on the phone.
+
+**The browser terminal.** ts5-tui itself in a web page, for a laptop or tablet with no SSH client, or a computer that isn't yours.
+
+1. On the Access page turn **Browser terminal** on. Once Tailscale is connected the row shows the address, such as `http://100.101.102.103:8081/ts5/terminal`, and **Enter** shows it as a QR code.
+2. Open it on a device on your tailnet and give it one of your keys. ts5-tui opens, the same as in a terminal.
+
+- Off by default. It opens only for your tailnet's devices and the machine itself, each time with a key that is on, never for the rest of the home network, and for at most four at once.
+- It runs ts5-tui in tmux, so a closed tab or a lost signal leaves an answer running, and the page connects again by itself.
+- A bar of keys under it gives a phone what its keyboard lacks: Esc, Tab, the arrows, F1 to F7.
+- ts5's log names each device that opens one and how long it stayed. Turning it off closes the ones that are open.
+
+The pages themselves need no key; everything they ask of the model does. The terminal is drawn by [xterm.js](https://xtermjs.org) (MIT), built into `ts5`.
+
 ## How it works
 
 The PS5 can't run Tailscale's own app, so TokenStation5 has a small client of its own (on Linux too, so that it needs no root). It signs in to Tailscale's control server and finds a direct path to each device where it can (on the home network, over UDP port 9031); otherwise it goes through Tailscale's relay servers (DERP), which work on any network. Settings shows which devices are connected directly.
