@@ -36,7 +36,7 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/check", "[NAME]", "the GPU check: the model's answers against the CPU's"},
         {"/bench", "[NAME]", "the speed test: prompt and answer tok/s"},
         {"/usage", "", "the API's use by app and model (last day and week)"},
-        {"/keys", "", "the API keys: names, on or off, last used"},
+        {"/access", "", "the Access page: who can reach this TokenStation5, and its API keys (/keys too)"},
         {"/think", "on|off|auto", "thinking before answering"},
         {"/tools", "[on|off|NAME on|off]", "the model's tools: search, pages, terminal, files, memory, browser (each has a switch)"},
         {"/browser", "[auto|obscura|chromium|text|PATH]", "the program the model's browser tool shows pages with"},

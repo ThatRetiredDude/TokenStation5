@@ -113,10 +113,10 @@ std::string when(int64_t t) {
 
 std::string default_keys_path() {
     if (const char *k = getenv("TS5_KEYS"); k && *k) return k;
-    if (const char *d = getenv("TS5_DATA_DIR"); d && *d) return std::string(d) + "/keys.tsv";
-    if (const char *x = getenv("XDG_DATA_HOME"); x && *x == '/') return std::string(x) + "/tokenstation/keys.tsv";
+    if (const char *d = getenv("TS5_DATA_DIR"); d && *d) return std::string(d) + "/access/keys.tsv";
+    if (const char *x = getenv("XDG_DATA_HOME"); x && *x == '/') return std::string(x) + "/tokenstation/access/keys.tsv";
     const char *h = getenv("HOME");
-    return std::string(h && *h ? h : ".") + "/.local/share/tokenstation/keys.tsv";
+    return std::string(h && *h ? h : ".") + "/.local/share/tokenstation/access/keys.tsv";
 }
 
 bool KeyFile::load(std::string &err) {

@@ -69,9 +69,11 @@ private:
     double looked_ = 0;
 };
 
-// Where the keys are without TS5_KEYS: keys.tsv in the apps' data folder
-// (TS5_DATA_DIR, else $XDG_DATA_HOME/tokenstation, else
-// ~/.local/share/tokenstation), which the desktop TV app shares.
+// Where the keys are without TS5_KEYS: access/keys.tsv in the apps' data
+// folder (TS5_DATA_DIR, else $XDG_DATA_HOME/tokenstation, else
+// ~/.local/share/tokenstation). Not the TV app's own keys.tsv there: the
+// TV app keeps its keys in memory and writes the whole file, so a key
+// made beside it would be lost.
 std::string default_keys_path();
 
 // ts5 keys [--file FILE] [--json] list | new NAME | on KEY | off KEY | remove KEY | require on|off

@@ -421,45 +421,4 @@ std::string usage_report() {
     return m + top(by_app, "app (API key name, else address)") + top(by_model, "model");
 }
 
-std::string keys_report() {
-    for (auto &d : app_dirs()) {
-        const std::string path = d + "/keys.tsv";
-        FILE *f = fopen(path.c_str(), "r");
-        if (!f) {
-            if (access(path.c_str(), F_OK) == 0)
-                return "The API keys are in `" + path + "`, which your user can't read. They're made and turned on or off on the TV app's Settings page.";
-            continue;
-        }
-        std::string m = "**API keys**, from `" + path + "` (only their SHA-256 is kept, so a key shows once, when it's made: on the TV app's Settings page)\n\n| Name | On | Made | Last used |\n| --- | --- | --- | --- |\n";
-        char *line = nullptr;
-        size_t cap = 0;
-        ssize_t n;
-        int keys = 0;
-        while ((n = getline(&line, &cap, f)) > 0) {
-            std::string l(line, (size_t)n);
-            while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
-            if (l.empty() || l[0] == '#') continue;
-            std::vector<std::string> c;
-            size_t at = 0;
-            for (;;) {
-                const size_t tab = l.find('\t', at);
-                c.push_back(l.substr(at, tab == std::string::npos ? std::string::npos : tab - at));
-                if (tab == std::string::npos) break;
-                at = tab + 1;
-            }
-            // id, name, sha256, on, created, used
-            if (c.size() < 6) continue;
-            const int64_t made = atoll(c[4].c_str()), used = atoll(c[5].c_str());
-            m += "| " + c[1] + " | " + (c[3] == "1" ? "yes" : "off") + " | " + (made ? when_text(made) : "—") + " | " +
-                 (used ? when_text(used) : "never") + " |\n";
-            keys++;
-        }
-        free(line);
-        fclose(f);
-        if (!keys) return "No API keys yet (`" + path + "`). They're made on the TV app's Settings page.";
-        return m;
-    }
-    return "";
-}
-
 }  // namespace tui

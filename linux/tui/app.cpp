@@ -137,6 +137,7 @@ void Config::load() {
         else if (k == "tmux") tmux = v != "0";
         else if (k == "mouse") mouse = v != "0";
         else if (k == "keep_model") keep_model = v != "0";
+        else if (k == "other_devices") lan = v == "1";
         else if (k == "summarize") summarize = v != "0";
         else if (k == "web_search_key") web_key = v;
         else if (k == "tool_web_search") tool_web = v != "0";
@@ -168,7 +169,7 @@ void Config::save() const {
         s += "url=" + (url_given ? saved_url : url) + "\nkey=" + (key_given ? saved_key : key) + "\ntheme=" + theme + "\nintro=" + (intro ? "1" : "0") +
              "\nthinking=" + std::to_string(thinking) + "\ntemperature=" + fmt("%g", temp) +
              "\nmax_tokens=" + std::to_string(max_tokens) + "\ncontext=" + std::to_string(serve_ctx) + "\nhelper_room=" + (helper_room ? "1" : "0") + "\ntmux=" + (tmux ? "1" : "0") +
-             "\nmouse=" + (mouse ? "1" : "0") + "\nkeep_model=" + (keep_model ? "1" : "0") + "\nsummarize=" + (summarize ? "1" : "0") +
+             "\nmouse=" + (mouse ? "1" : "0") + "\nkeep_model=" + (keep_model ? "1" : "0") + "\nother_devices=" + (lan ? "1" : "0") + "\nsummarize=" + (summarize ? "1" : "0") +
              "\nweb_search_key=" + web_key + "\ntool_web_search=" + (tool_web ? "1" : "0") + "\ntool_web_page=" +
              (tool_page ? "1" : "0") + "\ntool_terminal=" + (tool_terminal ? "1" : "0") + "\ntool_memory=" +
              (tool_memory ? "1" : "0") + "\ntool_browser=" + (tool_browser ? "1" : "0") + "\nbrowser=" + browser +

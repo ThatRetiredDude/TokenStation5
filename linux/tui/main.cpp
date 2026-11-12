@@ -8,6 +8,10 @@
 // It never loads a model of its own into the process, so it costs no GPU
 // memory, and it works the same over SSH. Sensors, models and logs are this
 // machine's: run it on the PS5 (or over SSH to it) to see them.
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -48,8 +52,8 @@ namespace {
 
 // ---- the program's state ----
 
-enum ScreenId { CHAT, MODELS, STATUS, SETTINGS, LOGS, N_SCREENS };
-const char *kScreenNames[N_SCREENS] = {"Chat", "Models", "Status", "Settings", "Logs"};
+enum ScreenId { CHAT, MODELS, STATUS, SETTINGS, LOGS, ACCESS, N_SCREENS };
+const char *kScreenNames[N_SCREENS] = {"Chat", "Models", "Status", "Settings", "Logs", "Access"};
 
 struct ModelFile {
     std::string name, path, dir;
@@ -157,6 +161,19 @@ struct App {
     bool editing = false;
     std::string edit_buf;
     int logs_scroll = 0;  // lines up from the end
+    // The Access page: the keys of the server in use, as "ts5 keys" last
+    // listed them, the row chosen (0 other devices, 1 need a key, then the
+    // keys), and a new key's name while it is typed.
+    struct AccessKey {
+        std::string id, name;
+        bool on;
+        int64_t created, used;
+    };
+    std::vector<AccessKey> acc_keys;
+    int acc_kind = 0, acc_sel = 0;
+    bool acc_required = false, acc_writable = true, acc_typing = false;
+    std::string acc_file, acc_err, acc_name;
+    double acc_at = 0;
     std::string logs_src;
     double logs_checked = 0;
 };
@@ -442,6 +459,139 @@ std::string memory_words(const std::string &why) {
     return out;
 }
 
+// ---- Access: who can reach this TokenStation5, and with which key ----
+
+// Whose server the keys are for: one ts5-tui starts itself, the background
+// service, the TV app (its keys are made on its own Settings page), or
+// another machine's.
+enum AccessKind { ACC_OWN, ACC_SERVICE, ACC_TV, ACC_REMOTE };
+
+AccessKind access_kind() {
+    if (!endpoint().local()) return ACC_REMOTE;
+    if (own_server_pid() > 0) return ACC_OWN;
+    if (unit_active("tokenstation-tv")) return ACC_TV;
+    if (unit_active("tokenstation")) return ACC_SERVICE;
+    return ACC_OWN;
+}
+
+// A line NAME=value of the background service's settings, or def.
+std::string service_setting(const std::string &name, const std::string &def) {
+    std::ifstream f("/etc/default/tokenstation");
+    std::string line, v = def;
+    while (std::getline(f, line))
+        if (line.rfind(name + "=", 0) == 0 && line.size() > name.size() + 1) v = line.substr(name.size() + 1);
+    return v;
+}
+
+// The keys of a server ts5-tui starts (TS5_KEYS for its ts5 serve), where
+// "ts5 keys" has them too. (Not the TV app's own keys.tsv: that one is the
+// TV app's to write.)
+std::string own_keys_file() { return data_dir() + "/access/keys.tsv"; }
+
+std::string access_file(AccessKind k) {
+    if (k == ACC_SERVICE) return service_setting("KEYS", "/var/lib/tokenstation/access/keys.tsv");
+    if (k == ACC_TV) return "/var/lib/tokenstation/keys.tsv";
+    return own_keys_file();
+}
+
+// Whether the server ts5-tui started listens to other machines.
+bool own_server_lan(pid_t pid) {
+    std::string cmd = read_file("/proc/" + std::to_string(pid) + "/cmdline");
+    for (char &c : cmd)
+        if (c == '\0') c = ' ';
+    return cmd.find("--host 0.0.0.0") != std::string::npos;
+}
+
+// This machine's addresses on its networks (IPv4), Tailscale's last.
+std::vector<std::string> lan_addresses() {
+    std::vector<std::string> lan, tail;
+    struct ifaddrs *all = nullptr;
+    if (getifaddrs(&all) != 0) return lan;
+    for (struct ifaddrs *i = all; i; i = i->ifa_next) {
+        if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !(i->ifa_flags & IFF_UP) || (i->ifa_flags & IFF_LOOPBACK))
+            continue;
+        // (This machine's own bridges are no way in from outside.)
+        const std::string name = i->ifa_name;
+        if (name.rfind("docker", 0) == 0 || name.rfind("br-", 0) == 0 || name.rfind("veth", 0) == 0 ||
+            name.rfind("virbr", 0) == 0)
+            continue;
+        const struct sockaddr_in *a = (const struct sockaddr_in *)i->ifa_addr;
+        char b[INET_ADDRSTRLEN];
+        if (!inet_ntop(AF_INET, &a->sin_addr, b, sizeof b)) continue;
+        const uint32_t ip = ntohl(a->sin_addr.s_addr);
+        ((ip & 0xFFC00000u) == 0x64400000u ? tail : lan).push_back(b);  // 100.64.0.0/10: Tailscale
+    }
+    freeifaddrs(all);
+    lan.insert(lan.end(), tail.begin(), tail.end());
+    return lan;
+}
+
+// What an app on another machine is given as the address: this machine's,
+// two at most.
+std::string access_addresses() {
+    const std::vector<std::string> a = lan_addresses();
+    const int port = endpoint().port;
+    std::string out;
+    for (size_t i = 0; i < a.size() && i < 2; i++) out += (i ? " or " : "") + fmt("http://%s:%d/v1", a[i].c_str(), port);
+    return out;
+}
+
+// Runs "ts5 keys" on file: its JSON answer. False with why.
+bool keys_cmd(const std::string &file, const std::string &args, ts5::Json &out, std::string &why) {
+    const std::string ts5 = which("ts5");
+    if (ts5.empty()) {
+        why = "ts5 isn't installed here";
+        return false;
+    }
+    const std::string cmd = shell_quote(ts5) + " keys --file " + shell_quote(file) + " --json " + args + " 2>/dev/null";
+    FILE *p = popen(cmd.c_str(), "r");
+    if (!p) {
+        why = "ts5 keys could not be run";
+        return false;
+    }
+    std::string text;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, p)) > 0) text.append(buf, n);
+    pclose(p);
+    if (!ts5::Json::parse(text, out) || out.type != ts5::Json::OBJ) {
+        why = "ts5 keys gave no answer: the ts5 here is older than this ts5-tui";
+        return false;
+    }
+    if (out.o.count("error")) {
+        why = out["error"].str();
+        return false;
+    }
+    return true;
+}
+
+// The page's keys, read again.
+void access_read() {
+    const AccessKind k = access_kind();
+    g->acc_kind = k;
+    g->acc_file = access_file(k);
+    g->acc_at = now_s();
+    g->acc_err.clear();
+    if (k == ACC_REMOTE) {
+        g->acc_keys.clear();
+        return;
+    }
+    ts5::Json j;
+    std::string why;
+    if (!keys_cmd(g->acc_file, "list", j, why)) {
+        g->acc_keys.clear();
+        g->acc_err = why;
+        return;
+    }
+    g->acc_required = j["required"].boolean(false);
+    g->acc_writable = j["writable"].boolean(true) && k != ACC_TV;
+    g->acc_keys.clear();
+    for (const ts5::Json &x : j["keys"].a)
+        g->acc_keys.push_back({x["id"].str(), x["name"].str(), x["on"].boolean(true), (int64_t)x["created"].num(0),
+                               (int64_t)x["used"].num(0)});
+    g->acc_sel = std::max(0, std::min(g->acc_sel, 1 + (int)g->acc_keys.size()));
+}
+
 // ctx: the context for a server of its own; -1: Settings → Context.
 void load_model(const ModelFile &m, bool again = false, int ctx_now = -1) {
     if (g->loader.running()) {
@@ -524,8 +674,10 @@ void load_model(const ModelFile &m, bool again = false, int ctx_now = -1) {
         // After a set Context that had no memory, all of it for the chat.
         const std::string room =
             n_ctx == 0 ? fmt("TS5_HELPER_ROOM=%d ", g->cfg.helper_room && g->load_short_of == 0 ? 1 : 0) : "";
-        cmd += "cd " + shell_quote(dir) + " && (" + room + "setsid " + shell_quote(ts5) + " serve -m " + shell_quote(m.path) +
-               " --host 127.0.0.1 --port " + std::to_string(e.port) + " -c " + ctx +
+        // The Access page: other machines reach it or not, and its keys.
+        cmd += "cd " + shell_quote(dir) + " && (" + room + "TS5_KEYS=" + shell_quote(own_keys_file()) + " setsid " +
+               shell_quote(ts5) + " serve -m " + shell_quote(m.path) + " --host " + (g->cfg.lan ? "0.0.0.0" : "127.0.0.1") +
+               " --port " + std::to_string(e.port) + " -c " + ctx +
                " > tui-serve.log 2>&1 < /dev/null & echo $! > tui-serve.pid)";
         how = "ts5 serve";
     }
@@ -1398,7 +1550,13 @@ void draw_top_bar() {
     Screen &s = g->scr;
     const Theme &t = *g->th;
     s.fill(0, 0, s.w, 2, Style(t.fg, t.panel));
-    const std::string name = " ◆ TokenStation5 ";
+    // Six pages on a narrow terminal (80 columns): the short name, then
+    // the pages without their F keys, so that none falls off the end.
+    int tabs = 0;
+    for (int i = 0; i < N_SCREENS; i++) tabs += text_width(fmt(" F%d %s ", i + 1, kScreenNames[i]));
+    const bool wide = 18 + tabs <= s.w - 2;
+    const bool keys = wide || 8 + tabs <= s.w - 2;
+    const std::string name = wide ? " ◆ TokenStation5 " : " ◆ TS5 ";
     int x = 0;
     {
         auto gl = glyphs(name);
@@ -1412,11 +1570,11 @@ void draw_top_bar() {
     g->tab_x.clear();
     for (int i = 0; i < N_SCREENS; i++) {
         const bool on = i == g->cur;
-        const std::string label = fmt(" F%d %s ", i + 1, kScreenNames[i]);
+        const std::string label = keys ? fmt(" F%d %s ", i + 1, kScreenNames[i]) : fmt(" %s ", kScreenNames[i]);
         if (x + text_width(label) > s.w - 2) break;
         const int x0 = x;
-        if (on)
-            x = s.put(x, 0, label, Style(t.bg, t.accent, BOLD));
+        if (on || !keys)
+            x = s.put(x, 0, label, on ? Style(t.bg, t.accent, BOLD) : Style(t.fg, t.panel));
         else {
             s.put(x, 0, fmt(" F%d", i + 1), Style(t.dim, t.panel));
             x = s.put(x + 3 + (i + 1 >= 10), 0, fmt(" %s ", kScreenNames[i]), Style(t.fg, t.panel));
@@ -1722,7 +1880,7 @@ void draw_status() {
         if (g->gen_hist.empty())
             s.put(ix + 26, y + 2, fit(e.local() ? "every answer the server gives shows up here" : "from this app's chats", iw - 27), S(t.dim, ITALIC));
     }
-    draw_bottom_bar("Tab/1-5 pages|F fan auto/cool/early/max");
+    draw_bottom_bar("Tab/1-6 pages|F fan auto/cool/early/max");
 }
 
 // ---- Models ----
@@ -2071,7 +2229,7 @@ void draw_models() {
             line("Tested", "no, the search found it: once it's here, C checks its answers on this GPU and T tunes it", t.warn);
             line("", "Enter downloads it, checked by SHA-256 · X stops it, and it goes on from there later", t.dim);
         }
-        draw_bottom_bar("↑↓ choose|Enter download|S search|Tab/1-5 pages|X stop download|R rescan");
+        draw_bottom_bar("↑↓ choose|Enter download|S search|Tab/1-6 pages|X stop download|R rescan");
         return;
     }
     if (g->model_sel >= nl && g->model_sel < n) {
@@ -2091,7 +2249,7 @@ void draw_models() {
         line("Goes to", dir + (fb >= 0 ? "  (" + gib(fb) + " free)" : ""), fb >= 0 && fb < (double)e.bytes ? t.bad : t.fg);
         if (downloading(e)) working(yy, (double)e.bytes);
         else line("", "Enter downloads it · X stops it, and it goes on from there later · any other: S searches", t.dim);
-        draw_bottom_bar("↑↓ choose|Enter download|S search|Tab/1-5 pages|X stop download|R rescan");
+        draw_bottom_bar("↑↓ choose|Enter download|S search|Tab/1-6 pages|X stop download|R rescan");
         return;
     }
     if (nl > 0 && g->model_sel < nl) {
@@ -2166,7 +2324,7 @@ void draw_models() {
         if (is_loaded)
             setting("Context", with_commas(sv.n_ctx) + " tokens", "how long a chat can get, as loaded");
     }
-    draw_bottom_bar("↑↓ choose|Enter load|Tab/1-5 pages|T tune|H get helper|S search|C GPU check|B speed test|R rescan");
+    draw_bottom_bar("↑↓ choose|Enter load|Tab/1-6 pages|T tune|H get helper|S search|C GPU check|B speed test|R rescan");
 }
 
 // ---- Settings ----
@@ -2207,8 +2365,8 @@ std::vector<SetRow> settings_rows() {
         r.push_back(x);
     }
     {
-        SetRow x{"API key", c.key.empty() ? "none" : std::string(std::min<size_t>(c.key.size(), 12), '*'),
-                 "only when the server asks for one (the TV app's Apps keys)"};
+        SetRow x{"Server's key", c.key.empty() ? "none" : std::string(std::min<size_t>(c.key.size(), 12), '*'),
+                 "for a server that asks for one; this machine's own keys are made on Access (F6)"};
         x.text = true;
         x.text_value = c.key;
         x.set_text = [save](const std::string &v) {
@@ -2570,7 +2728,7 @@ void draw_settings() {
         std::string v = rows[i].value;
         if (on && g->editing) {
             v = g->edit_buf + "▌";
-            if (rows[i].label == "API key" || rows[i].label == "Web search key") v = std::string(g->edit_buf.size(), '*') + "▌";
+            if (rows[i].label == "Server's key" || rows[i].label == "Web search key") v = std::string(g->edit_buf.size(), '*') + "▌";
             s.put(x0 + 18, y, fit(v, w - 20), Style(t.accent2, row.bg, BOLD));
         } else {
             const std::string shown = rows[i].change ? "‹ " + v + " ›" : v;
@@ -2584,7 +2742,7 @@ void draw_settings() {
         s.put(x0 + 2, y, fit("A model's own settings (helper, prompt math, chat memory) are on Models: tested models bring theirs.",
                              w - 4), S(t.dim));
     }
-    draw_bottom_bar(g->editing ? "Enter save|Esc cancel" : "↑↓ choose|←→ change|Tab/1-5 pages|Enter edit");
+    draw_bottom_bar(g->editing ? "Enter save|Esc cancel" : "↑↓ choose|←→ change|Tab/1-6 pages|Enter edit");
 }
 
 // ---- Logs ----
@@ -2621,7 +2779,129 @@ void draw_logs() {
             c = t.accent, a = BOLD;
         s.put(1, y, fit(l, s.w - 2), S(c, a));
     }
-    draw_bottom_bar(g->logs_scroll ? "Tab/1-5 pages|PgUp/PgDn scroll|End follow" : "Tab/1-5 pages|PgUp/PgDn scroll");
+    draw_bottom_bar(g->logs_scroll ? "Tab/1-6 pages|PgUp/PgDn scroll|End follow" : "Tab/1-6 pages|PgUp/PgDn scroll");
+}
+
+// ---- Access ----
+
+void draw_access() {
+    Screen &s = g->scr;
+    const Theme &t = *g->th;
+    const int w = std::min(s.w - 4, 104);
+    const int x0 = (s.w - w) / 2;
+    int y = body_top() + 1;
+    s.put(x0 + 1, y, "Access", S(t.accent, BOLD));
+    s.put(x0 + 9, y, fit("who can reach this TokenStation5, and with which key", w - 10), S(t.dim));
+    y += 2;
+    const AccessKind k = (AccessKind)g->acc_kind;
+    if (k == ACC_REMOTE) {
+        s.put(x0 + 2, y, fit("ts5-tui is talking to another machine's TokenStation5 (" + g->cfg.url + ").", w - 4), S(t.fg));
+        s.put(x0 + 2, y + 1, fit("Its keys are made on that machine: in ts5-tui there, or on the TV app's Settings page.", w - 4), S(t.dim));
+        s.put(x0 + 2, y + 3, fit("The key ts5-tui itself sends there is in Settings (F4): Server's key.", w - 4), S(t.dim));
+        draw_bottom_bar("Tab/1-6 pages");
+        return;
+    }
+    const std::string at = access_addresses();
+    const pid_t own = k == ACC_OWN ? own_server_pid() : -1;
+    const bool reach = k == ACC_OWN ? g->cfg.lan : k == ACC_SERVICE ? service_setting("HOST", "0.0.0.0") != "127.0.0.1" : true;
+    struct Row {
+        std::string label, value, note;
+        bool change, warn;
+    };
+    std::vector<Row> rows;
+    {
+        Row r{"Other devices", reach ? "yes" : "no", "", k == ACC_OWN, false};
+        const std::string where = at.empty() ? "this machine has no network address now" : at;
+        if (k == ACC_SERVICE)
+            r.note = (reach ? where + " · " : std::string()) + "set by HOST in /etc/default/tokenstation";
+        else if (k == ACC_TV)
+            r.note = where + " · the TV app serves your network";
+        else if (own > 0 && own_server_lan(own) != reach)
+            r.note = std::string(reach ? "yes" : "no") + " once the model is loaded again (Enter here loads it again)", r.warn = true;
+        else
+            r.note = reach ? where + " · the address to give an app on another machine"
+                           : "only this machine can use the model ts5-tui loads";
+        rows.push_back(r);
+    }
+    {
+        Row r{"They need a key", k == ACC_TV ? "the TV's setting" : g->acc_required ? "yes" : "no", "", k != ACC_TV, false};
+        if (k == ACC_TV) r.note = "Require a key is on the TV app's Settings page, under Apps, and its keys are made there";
+        else if (g->acc_required) r.note = "another machine gets in only with a key that is on. This machine never needs one";
+        else if (reach) r.note = "any machine that reaches the port can use the model, key or not", r.warn = true;
+        else r.note = "no machine but this one gets in anyway";
+        rows.push_back(r);
+    }
+    if (k == ACC_OWN && own <= 0 && server().status == 200) {
+        s.put(x0 + 2, y, fit("This port's server is not ts5-tui's own (ts5 serve by hand, the TV app).", w - 4), S(t.warn));
+        s.put(x0 + 2, y + 1, fit("What is set here holds for a model ts5-tui loads.", w - 4), S(t.warn));
+        y += 3;
+    }
+    for (int i = 0; i < 2 && y < s.h - 4; i++) {
+        const bool on = g->acc_sel == i && !g->acc_typing;
+        const Style row = on ? Style(t.fg, t.panel2) : Style(t.fg, t.bg);
+        s.fill(x0, y, w, 2, row);
+        s.put(x0, y, on ? "▌" : " ", Style(t.accent, row.bg));
+        s.put(x0, y + 1, on ? "▌" : " ", Style(t.accent, row.bg));
+        s.put(x0 + 2, y, rows[i].label, Style(t.fg, row.bg, BOLD));
+        s.put(x0 + 20, y, fit(rows[i].change ? "‹ " + rows[i].value + " ›" : rows[i].value, w - 22),
+              Style(on ? t.accent2 : t.accent, row.bg, BOLD));
+        s.put(x0 + 20, y + 1, fit(rows[i].note, w - 22), Style(rows[i].warn ? t.warn : t.dim, row.bg, ITALIC));
+        y += 2;
+    }
+    y++;
+    if (y >= s.h - 3) {
+        draw_bottom_bar("↑↓ choose|←→ change|N new key|Tab/1-6 pages");
+        return;
+    }
+    s.put(x0 + 2, y, "Keys", S(t.fg, BOLD));
+    {
+        std::string file = g->acc_file;
+        const char *home = getenv("HOME");
+        if (home && *home && file.rfind(std::string(home) + "/", 0) == 0) file = "~" + file.substr(strlen(home));
+        s.put(x0 + 8, y, fit("shown once, when made · kept as SHA-256 in " + file, w - 10), S(t.dim));
+    }
+    y++;
+    if (!g->acc_err.empty()) {
+        s.put(x0 + 2, y++, fit(g->acc_err, w - 4), S(t.bad));
+    } else if (g->acc_keys.empty() && !g->acc_typing) {
+        s.put(x0 + 2, y++, fit(k == ACC_TV ? "None yet." : "None yet. N makes one: name it after the app or the machine it is for.", w - 4),
+              S(t.dim));
+    }
+    const int name_w = std::max(12, std::min(40, w - 60));
+    const int room = std::max(1, s.h - 3 - y - (g->acc_typing ? 1 : 0));
+    const int chosen = g->acc_sel - 2;
+    const int first = std::max(0, std::min(chosen - room + 1, (int)g->acc_keys.size() - room));
+    for (int i = std::max(0, first); i < (int)g->acc_keys.size() && y < s.h - 3 - (g->acc_typing ? 1 : 0); i++, y++) {
+        const App::AccessKey &key = g->acc_keys[(size_t)i];
+        const bool on = chosen == i && !g->acc_typing;
+        const Style row = on ? Style(t.fg, t.panel2) : Style(t.fg, t.bg);
+        s.fill(x0, y, w, 1, row);
+        s.put(x0, y, on ? "▌" : " ", Style(t.accent, row.bg));
+        s.put(x0 + 2, y, fit(key.name, name_w), Style(key.on ? t.fg : t.dim, row.bg, BOLD));
+        s.put(x0 + 3 + name_w, y, key.on ? "on " : "off", Style(key.on ? t.good : t.warn, row.bg, BOLD));
+        s.put(x0 + 8 + name_w, y,
+              fit("made " + (key.created ? when_text(key.created) : std::string("—")) + "   last used " +
+                      (key.used ? when_text(key.used) : std::string("never")),
+                  w - 10 - name_w),
+              Style(t.dim, row.bg));
+    }
+    if (g->acc_typing) {
+        s.fill(x0, y, w, 1, Style(t.fg, t.panel2));
+        s.put(x0, y, "▌", Style(t.accent, t.panel2));
+        const int x = s.put(x0 + 2, y, "A new key for: ", Style(t.fg, t.panel2, BOLD));
+        s.put(x, y, fit(g->acc_name + "▌", w - (x - x0) - 2), Style(t.accent2, t.panel2, BOLD));
+        y++;
+    }
+    if (!g->acc_writable && k != ACC_TV && y < s.h - 2)
+        s.put(x0 + 2, y + 1,
+              fit(k == ACC_SERVICE ? "These are the background service's keys, for its group to change: sudo adduser $USER "
+                                     "tokenstation, then log in again."
+                                   : "Your user can't change that file.",
+                  w - 4),
+              S(t.warn));
+    draw_bottom_bar(g->acc_typing ? "Enter make the key|Esc cancel"
+                    : g->acc_sel >= 2 ? "↑↓ choose|Enter on or off|D remove|N new key|Tab/1-6 pages"
+                                      : "↑↓ choose|←→ change|N new key|Tab/1-6 pages");
 }
 
 // ---- Chat (drawing in chat.cpp) ----
@@ -2659,6 +2939,7 @@ void draw() {
         case STATUS: draw_status(); break;
         case SETTINGS: draw_settings(); break;
         case LOGS: draw_logs(); break;
+        case ACCESS: draw_access(); break;
         default: break;
     }
     if (g->ask_yes) {
@@ -2717,6 +2998,8 @@ const ModelFile *find_model(const std::string &q) {
 
 void request_quit();
 void copy_out(const std::string &text, const std::string &what);
+bool to_clipboard(const std::string &text);
+void view_open(const std::string &text, const std::string &title, size_t at, bool sent);
 
 void run_command(const std::string &line) {
     std::string cmd = line, arg;
@@ -2739,6 +3022,7 @@ void run_command(const std::string &line) {
     else if (cmd == "/status") go(STATUS);
     else if (cmd == "/settings") go(SETTINGS);
     else if (cmd == "/logs") go(LOGS);
+    else if (cmd == "/access" || cmd == "/keys") go(ACCESS);
     else if (cmd == "/model") {
         scan_models();
         if (arg.empty()) {
@@ -2872,11 +3156,6 @@ void run_command(const std::string &line) {
         const std::string r = usage_report();
         chat_note(c, r.empty() ? "No usage log here. The TV app (and the desktop app) keep one, `usage.tsv` in their "
                                  "data folder; for the API-only service, set `TS5_USAGE_LOG` in its settings."
-                               : r);
-    } else if (cmd == "/keys") {
-        const std::string r = keys_report();
-        chat_note(c, r.empty() ? "No API keys here: they're made on the TV app's Settings page (keys.tsv in its "
-                                 "data folder)."
                                : r);
     } else if (cmd == "/think") {
         g->cfg.thinking = arg == "on" ? 1 : arg == "off" ? 2 : 0;
@@ -3314,9 +3593,11 @@ void run_command(const std::string &line) {
              "**Mouse**  click a **Thought for** line to read the thinking, **[copy]** under an answer or on a code block "
              "to copy it, a page's name to go there; the wheel scrolls. Dragging over the chat opens it as plain text to "
              "select with the terminal's own selection (Settings → Mouse: off leaves every drag to the terminal).\n\n"
-             "**Pages**  F1 Chat · F2 Models · F3 Status · F4 Settings · F5 Logs. On a Mac, where macOS keeps the F keys: "
-             "**Tab** and **Shift+Tab** step through the pages, **1** to **5** on any page but Chat, **fn+F1** to **fn+F5**, "
-             "Option+1 to 5 when the terminal sends Option as Meta (Esc+), or `/chat` `/models` `/status` `/settings` `/logs`. "
+             "**Pages**  F1 Chat · F2 Models · F3 Status · F4 Settings · F5 Logs · F6 Access (who can reach this "
+             "TokenStation5: its API keys are made there). On a Mac, where macOS keeps the F keys: "
+             "**Tab** and **Shift+Tab** step through the pages, **1** to **6** on any page but Chat, **fn+F1** to **fn+F6**, "
+             "Option+1 to 6 when the terminal sends Option as Meta (Esc+), or `/chat` `/models` `/status` `/settings` `/logs` "
+             "`/access`. "
              "`/` on any page goes to the prompt.";
         chat_note(c, h);
     } else {
@@ -3351,15 +3632,20 @@ void go(ScreenId to) {
     g->hf_typing = false;
     if (to == MODELS) scan_models();
     if (to == LOGS) pick_logs();
+    if (to == ACCESS) {
+        g->acc_typing = false;
+        g->acc_sel = 0;
+        access_read();
+    }
 }
 
 bool global_key(const Event &e) {
     // Keys every screen has.
-    if (e.key >= K_F1 && e.key <= K_F5) {
+    if (e.key >= K_F1 && e.key <= K_F6) {
         go((ScreenId)(e.key - K_F1));
         return true;
     }
-    if (e.key == K_ALT && e.ch.size() == 1 && e.ch[0] >= '1' && e.ch[0] <= '5') {
+    if (e.key == K_ALT && e.ch.size() == 1 && e.ch[0] >= '1' && e.ch[0] <= '6') {
         go((ScreenId)(e.ch[0] - '1'));
         return true;
     }
@@ -3391,7 +3677,7 @@ bool nav_key(const Event &e) {
         g->chat.cur = 1;
         return true;
     }
-    if (c >= '1' && c <= '5') {
+    if (c >= '1' && c <= '6') {
         go((ScreenId)(c - '1'));
         return true;
     }
@@ -3563,6 +3849,145 @@ void key_logs(const Event &e) {
     else nav_key(e);
 }
 
+// Runs "ts5 keys ARGS" on the page's file and reads the keys again.
+bool access_do(const std::string &args, const std::string &done) {
+    ts5::Json j;
+    std::string why;
+    const bool ok = keys_cmd(g->acc_file, args, j, why);
+    if (!ok)
+        show_toast(why.find("Permission denied") != std::string::npos && g->acc_kind == ACC_SERVICE
+                       ? "Those are the background service's keys, for its group to change: sudo adduser $USER tokenstation, "
+                         "then log in again"
+                       : "Not done: " + why,
+                   g->th->bad, 9);
+    else if (!done.empty()) show_toast(done, g->th->good, 4);
+    access_read();
+    return ok;
+}
+
+// A new key: made, and shown the one time it can be, plain, to select by
+// hand; the key alone goes to the clipboard where the terminal takes one.
+// (Not to copied.txt, where copies otherwise go: a key is kept nowhere.)
+void access_new(const std::string &name) {
+    ts5::Json j;
+    std::string why;
+    if (!keys_cmd(g->acc_file, "new " + shell_quote(name), j, why)) {
+        show_toast("No key was made: " + why, g->th->bad, 9);
+        access_read();
+        return;
+    }
+    access_read();
+    for (size_t i = 0; i < g->acc_keys.size(); i++)
+        if (g->acc_keys[i].id == j["id"].str()) g->acc_sel = 2 + (int)i;
+    const std::string key = j["key"].str(), at = access_addresses();
+    const AccessKind k = (AccessKind)g->acc_kind;
+    const bool reach = k == ACC_OWN ? g->cfg.lan : true;
+    std::string text = "The API key for \"" + j["name"].str() + "\":\n\n" + key + "\n\n"
+                       "This is the only time it is shown: ts5 keeps its SHA-256, not the key. If it gets lost, remove "
+                       "it on the Access page and make another.\n\n";
+    if (!reach)
+        text += "Other machines can't reach the model yet: Access (F6), Other devices.\n";
+    else if (at.empty())
+        text += "This machine has no network address now, so there is no address to give the app yet.\n";
+    else
+        text += "In the app, as an OpenAI-compatible server:\n  address  " + at + "\n  API key  the key above\n";
+    const bool sent = to_clipboard(key);
+    view_open(text, sent ? "the new key (the key alone is also on the clipboard, if the terminal allows it)" : "the new key", 0,
+              false);
+}
+
+void key_access(const Event &e) {
+    if (g->acc_typing) {
+        if (e.key == K_ESC) {
+            g->acc_typing = g->editing = false;
+        } else if (e.key == K_ENTER) {
+            g->acc_typing = g->editing = false;
+            std::string name = g->acc_name;
+            while (!name.empty() && name.back() == ' ') name.pop_back();
+            if (name.empty()) show_toast("A key needs a name: the app or the machine it is for", g->th->warn, 5);
+            else access_new(name);
+        } else if (e.key == K_BACKSPACE) {
+            auto gl = glyphs(g->acc_name);
+            if (!gl.empty()) g->acc_name.resize(g->acc_name.size() - gl.back().s.size());
+        } else if (e.key == K_CHAR || e.key == K_PASTE) {
+            for (char c : e.ch)
+                if (c != '\n' && c != '\r' && c != '\t' && g->acc_name.size() < 60) g->acc_name += c;
+        } else if (e.key == K_CTRL && e.ch == "u") {
+            g->acc_name.clear();
+        }
+        return;
+    }
+    const AccessKind k = (AccessKind)g->acc_kind;
+    const int n = k == ACC_REMOTE ? 1 : 2 + (int)g->acc_keys.size();
+    const auto letter = [&](char c) { return e.key == K_CHAR && e.ch.size() == 1 && tolower(e.ch[0]) == c; };
+    const bool flip = e.key == K_ENTER || e.key == K_LEFT || e.key == K_RIGHT || letter(' ');
+    if (e.key == K_ESC) {
+        go(CHAT);
+    } else if (k == ACC_REMOTE) {
+        nav_key(e);
+    } else if (e.key == K_UP) {
+        g->acc_sel = (g->acc_sel + n - 1) % n;
+    } else if (e.key == K_DOWN) {
+        g->acc_sel = (g->acc_sel + 1) % n;
+    } else if (letter('r')) {
+        access_read();
+    } else if (letter('n')) {
+        if (k == ACC_TV) show_toast("The TV app makes its keys: its Settings page, under Apps", g->th->warn, 6);
+        else if (!g->acc_err.empty()) show_toast(g->acc_err, g->th->bad, 6);
+        else {
+            g->acc_typing = g->editing = true;  // (Tab and the page keys stay with the name)
+            g->acc_name.clear();
+        }
+    } else if (flip && g->acc_sel == 0) {
+        if (k != ACC_OWN) {
+            show_toast(k == ACC_TV ? "The TV app serves your network: that is not a setting here"
+                                   : "That is the background service's setting: HOST in /etc/default/tokenstation, then sudo "
+                                     "systemctl restart tokenstation",
+                       g->th->warn, 8);
+            return;
+        }
+        const pid_t own = own_server_pid();
+        const bool want = e.key == K_ENTER && own > 0 && own_server_lan(own) != g->cfg.lan ? g->cfg.lan : !g->cfg.lan;
+        g->cfg.lan = want;
+        g->cfg.save();
+        // Opened to other machines, it asks them for a key (the row below turns that off).
+        if (want && !g->acc_required) access_do("require on", "");
+        if (own > 0 && own_server_lan(own) != want) {
+            if (g->models.empty()) scan_models();
+            const std::string id = server().model;
+            for (const ModelFile &m : g->models)
+                if (api_id(m.name) == id) {
+                    g->ask_title = " Load the model again? ";
+                    g->ask_text = std::string(want ? "Other machines can reach " : "Other machines stop reaching ") + id +
+                                  " once it is loaded again, which takes a minute. The chat on screen is kept. Load it "
+                                  "again now?";
+                    const ModelFile copy = m;
+                    g->ask_yes = [copy] { load_model(copy, true); };
+                    break;
+                }
+        }
+    } else if (flip && g->acc_sel == 1) {
+        if (k == ACC_TV) show_toast("That is on the TV app's Settings page, under Apps: Require a key", g->th->warn, 6);
+        else access_do(g->acc_required ? "require off" : "require on", "");
+    } else if (flip && g->acc_sel >= 2 && g->acc_sel - 2 < (int)g->acc_keys.size()) {
+        const App::AccessKey &key = g->acc_keys[(size_t)g->acc_sel - 2];
+        if (k == ACC_TV) show_toast("The TV app turns its keys on and off: its Settings page, under Apps", g->th->warn, 6);
+        else access_do(std::string(key.on ? "off " : "on ") + key.id, key.name + (key.on ? ": off" : ": on"));
+    } else if ((letter('d') || e.key == K_DELETE) && g->acc_sel >= 2 && g->acc_sel - 2 < (int)g->acc_keys.size()) {
+        const App::AccessKey key = g->acc_keys[(size_t)g->acc_sel - 2];
+        if (k == ACC_TV) {
+            show_toast("The TV app removes its keys: its Settings page, under Apps", g->th->warn, 6);
+            return;
+        }
+        g->ask_title = " Remove this key? ";
+        g->ask_text = "The app that uses \"" + key.name + "\" can't get in after that, and the key can't be brought back. "
+                      "To stop it for a while, turn it off instead (Enter). Remove it?";
+        g->ask_yes = [key] { access_do("remove " + key.id, key.name + ": removed"); };
+    } else {
+        nav_key(e);
+    }
+}
+
 void key_chat(const Event &e) {
     ChatRequest rq = chat_request();
     for (auto &m : g->models) rq.model_names.push_back(api_id(m.name));
@@ -3727,15 +4152,7 @@ void view_key(const Event &e) {
 // ts5-tui runs on a desktop (wl-copy, xclip, xsel, pbcopy), and a file. No
 // terminal says whether it took it, and Apple's Terminal never does, so the
 // text is then shown plain to select by hand (view_open).
-void copy_out(const std::string &text, const std::string &what) {
-    if (text.empty()) {
-        show_toast("Nothing to copy there yet", g->th->warn, 3);
-        return;
-    }
-    {
-        std::ofstream f(state_dir() + "/copied.txt");
-        f << text << "\n";
-    }
+bool to_clipboard(const std::string &text) {
     std::string tool;
     if (getenv("WAYLAND_DISPLAY") && !which("wl-copy").empty()) tool = "wl-copy";
     else if (getenv("DISPLAY") && !which("xclip").empty()) tool = "xclip -selection clipboard";
@@ -3749,7 +4166,19 @@ void copy_out(const std::string &text, const std::string &what) {
     // Terminals cap the sequence (xterm at about 100,000 bytes).
     const bool sent = text.size() <= 70000;
     if (sent) term_write("\x1b]52;c;" + base64(text) + "\x07");
-    view_open(text, what, 0, sent || !tool.empty());
+    return sent || !tool.empty();
+}
+
+void copy_out(const std::string &text, const std::string &what) {
+    if (text.empty()) {
+        show_toast("Nothing to copy there yet", g->th->warn, 3);
+        return;
+    }
+    {
+        std::ofstream f(state_dir() + "/copied.txt");
+        f << text << "\n";
+    }
+    view_open(text, what, 0, to_clipboard(text));
 }
 
 void handle(const Event &e);
@@ -3833,7 +4262,7 @@ void handle(const Event &e) {
             f();
         } else if (no) {
             g->ask_yes = nullptr;
-        } else if (e.key >= K_F1 && e.key <= K_F5) {
+        } else if (e.key >= K_F1 && e.key <= K_F6) {
             // Another page: that is a no.
             g->ask_yes = nullptr;
             global_key(e);
@@ -3847,6 +4276,7 @@ void handle(const Event &e) {
         case STATUS: key_status(e); break;
         case SETTINGS: key_settings(e); break;
         case LOGS: key_logs(e); break;
+        case ACCESS: key_access(e); break;
         default: break;
     }
 }
@@ -3865,6 +4295,7 @@ void tick() {
             if (g->die_hist.size() > 600) g->die_hist.erase(g->die_hist.begin(), g->die_hist.begin() + 100);
         }
     }
+    if (g->cur == ACCESS && !g->acc_typing && !g->ask_yes && t - g->acc_at >= 5) access_read();
     g->loader.pump();
     g->tuner.pump();
     job_follow();
@@ -4239,7 +4670,7 @@ int usage(FILE *f) {
             "each one offers, and ends them (--mcp-tools: as the model is given them);\n"
             "--mcp-call makes one call and prints its result.\n"
             "Settings are kept in ~/.config/tokenstation/tui.conf.\n"
-            "Keys: F1-F5 or Tab for the pages, Enter, arrows, Esc; Ctrl+Q quits.\n",
+            "Keys: F1-F6 or Tab for the pages, Enter, arrows, Esc; Ctrl+Q quits.\n",
             [] {
                 std::string n;
                 for (auto &t : themes()) n += (n.empty() ? "" : "|") + t.name;

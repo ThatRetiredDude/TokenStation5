@@ -38,6 +38,18 @@ def keys(ts5, path, *args, js=False):
 
 
 def test_keys(ts5, d):
+    # Without --file: the data folder's access/keys.tsv, apart from the TV app's own keys.tsv there.
+    home = os.path.join(d, "home")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("TS5_") and not k.startswith("XDG_")}
+    p = subprocess.run([ts5, "keys", "--json", "list"], capture_output=True, text=True, env=dict(env, HOME=home))
+    where = json.loads(p.stdout).get("file") if p.stdout.strip() else None
+    check(where == os.path.join(home, ".local", "share", "tokenstation", "access", "keys.tsv"),
+          "without --file the keys are in the data folder's access/keys.tsv", (p.stdout, p.stderr))
+    p = subprocess.run([ts5, "keys", "--json", "list"], capture_output=True, text=True,
+                       env=dict(env, HOME=home, TS5_DATA_DIR=os.path.join(d, "data")))
+    check(json.loads(p.stdout or "{}").get("file") == os.path.join(d, "data", "access", "keys.tsv"),
+          "TS5_DATA_DIR moves them with the data folder", (p.stdout, p.stderr))
+
     path = os.path.join(d, "made", "here", "keys.tsv")
     code, out, err = keys(ts5, path)
     check(code == 0 and "No keys yet" in out and not os.path.exists(path), "list: no file is no keys, and none is made", (code, out, err))

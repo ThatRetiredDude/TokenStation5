@@ -41,6 +41,7 @@ struct Config {
     bool tmux = true;       // its own tmux session from a plain terminal
     bool mouse = true;      // clicks come to ts5-tui; off, the terminal keeps the mouse (its own selection)
     bool keep_model = false;  // a model ts5-tui loaded keeps serving after it quits
+    bool lan = false;         // a model ts5-tui loads can be reached from other machines (the Access page)
     bool summarize = true;    // a chat that fills up is summarized by the model and goes on
     // A Tavily key (app.tavily.com): a model ts5-tui loads can then search
     // the web (TAVILY_API_KEY for its ts5 serve; docs/WEB_SEARCH.md).
