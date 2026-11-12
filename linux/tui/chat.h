@@ -53,6 +53,9 @@ struct Msg {
     // screen, and whether it worked. Its content is what the model got back.
     std::string call_id, tool, head;
     bool tool_ok = true;
+    // A tool message the model now gets only the start of: a long result
+    // that gave way when a run of tool calls filled the chat (make_room).
+    bool left_out = false;
 };
 
 // Where a click does something, on the chat as last drawn.

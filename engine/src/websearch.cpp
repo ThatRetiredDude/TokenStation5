@@ -643,6 +643,26 @@ std::string text_of(const std::string &html, bool menus, PageElements *els = nul
     };
     auto close_cap = [&] {
         std::string words = label_of(raw.substr(std::min(cap.from, raw.size())));
+        // A link to a place on this very page.
+        const bool jump = cap.el.kind == "link" && cap.el.href.size() > 1 && cap.el.href[0] == '#';
+        if (jump) {
+            // A footnote's mark ("[9]", "[a]", "[note 2]") or its way back
+            // ("^"): left out whole. Beside a link's own number it reads as
+            // a second number (Wikipedia: "the Black Sea[113].[9][125]"),
+            // and on the PS5 two models then could not tell which of them
+            // browser_click takes.
+            const bool mark = (words.size() >= 3 && words.size() <= 22 && words.front() == '[' && words.back() == ']' &&
+                               words.find('[', 1) == std::string::npos) ||
+                              words == "^" || words == "\xE2\x86\x91" || starts_ci(cap.el.href, 0, "#cite_");
+            cap.on = false;
+            if (mark) {
+                raw.resize(std::min(cap.from, raw.size()));
+                return;
+            }
+            // Any other is numbered only for a browser, which shows what
+            // the page does on a click; its words stay either way.
+            if (cap.el.mark.empty()) return;
+        }
         if (words.empty()) words = cap.el.label;  // its aria-label or title
         cap.on = false;
         if (words.empty()) return;
@@ -759,7 +779,10 @@ std::string text_of(const std::string &html, bool menus, PageElements *els = nul
                     const bool dead = el.href.empty() || el.href[0] == '#' || starts_ci(el.href, 0, "javascript:") ||
                                       starts_ci(el.href, 0, "mailto:") || starts_ci(el.href, 0, "tel:");
                     const bool inert = name == "button" && mark.empty() && (el.type == "button" || el.type == "reset");
-                    if ((name != "a" || !dead || !mark.empty()) && !inert) {
+                    // (A link to a place on this page is looked at once its
+                    // words are known: close_cap.)
+                    const bool jump = name == "a" && el.href.size() > 1 && el.href[0] == '#';
+                    if ((name != "a" || !dead || !mark.empty() || jump) && !inert) {
                         cap.on = true;
                         cap.tag = name;
                         cap.depth = 1;

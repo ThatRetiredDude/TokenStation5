@@ -817,7 +817,7 @@ public:
         : program_(program), obscura_(obscura), chars_(std::max<size_t>(chars, 500)), spares_(std::move(spares)) {}
     ~Session() { quit(); }
 
-    std::string mode() const { return program_.empty() ? "text" : obscura_ ? "obscura" : "chromium"; }
+    std::string mode() const { return program_.empty() || as_text_ ? "text" : obscura_ ? "obscura" : "chromium"; }
     bool running() const { return proc_.pid > 0; }
     const std::string &url() const { return url_; }
     const std::string &title() const { return title_; }
@@ -850,10 +850,10 @@ public:
         if (obscura_ && !program_.empty() && el.kind == "link" && !el.href.empty() && el.href[0] != '#' &&
             lower(el.href).compare(0, 11, "javascript:") != 0)
             return go(resolve_url(url_, el.href), true);
-        if (!program_.empty()) return act("(() => { const el = document.querySelector('[data-ts5=\"" + el.mark +
-                                              "\"]'); if (!el) return 'gone'; el.scrollIntoView({block: 'center'}); "
-                                              "el.click(); return 'ok'; })()",
-                                          true, "");
+        if (!program_.empty() && !as_text_)
+            return act("(() => { const el = document.querySelector('[data-ts5=\"" + el.mark +
+                           "\"]'); if (!el) return 'gone'; el.scrollIntoView({block: 'center'}); el.click(); return 'ok'; })()",
+                       true, "");
         if (el.kind == "link") return go(resolve_url(url_, el.href), true);
         if (el.kind == "check") {
             if (el.type == "radio") {
@@ -883,7 +883,7 @@ public:
                         (el.kind == "check" ? "tick box" : el.kind) + "). Text boxes look like [4: text box \"Search\"].");
         const std::string done = "Typed into [" + std::to_string(n) + "]. Nothing is sent yet: press the form's button "
                                  "with browser_click, or call browser_type with \"enter\": true.";
-        if (!program_.empty()) {
+        if (!program_.empty() && !as_text_) {
             // The value is set the way a page's own scripts (React and the
             // like) notice, then Enter as a key: a page's handler sees it,
             // and where none takes it the form is sent as a browser would.
@@ -1038,10 +1038,16 @@ private:
         std::string body = view_.substr(from, to - from);
         while (!body.empty() && body.back() == '\n') body.pop_back();
         if (view_.empty())
-            body = program_.empty() ? "(This page shows no text here: it is built by scripts, which the text view doesn't run.)"
+            body = program_.empty() || as_text_
+                       ? "(This page shows no text here: it is built by scripts, which the text view doesn't run.)"
                                     : "(This page shows no text.)";
         a.text += "\n" + body;
-        if (part_ + 1 < parts) a.text += "\n\n[The page goes on. browser_more shows its next part.]";
+        // (What a number is for is said where the model decides what to do
+        // next: on the PS5 two models took "Black Sea[113]" for a footnote
+        // and read on, part after part, looking for the link.)
+        if (part_ + 1 < parts)
+            a.text += "\n\n[The page goes on: browser_more shows its next part. A number in brackets right after "
+                      "words is that link's number, for browser_click.]";
         return a;
     }
 
@@ -1088,47 +1094,16 @@ private:
             std::string why;
             if (!awake(why, false)) {
                 if (!fell_back_) return fail(why);
-            } else {
-                Json r;
-                std::string err;
-                bool ok = cdp_->call("Page.navigate", "{\"url\":" + json_escape(url) + "}", r, err, 40000);
-                if (!ok && obscura_ && !cdp_->gone() && err.find("didn't answer") != npos) {
-                    // (An Obscura that is stuck, see act: once more, with a fresh one.)
-                    quit();
-                    std::string again;
-                    if (!awake(again, false)) return fail(again);
-                    ok = cdp_->call("Page.navigate", "{\"url\":" + json_escape(url) + "}", r, err, 40000);
-                }
-                if (!ok) return fail("The page could not be opened: " + lost(err) + ".");
-                const std::string net = r["errorText"].str();
-                if (!net.empty())
-                    return fail("The page could not be opened: " +
-                                std::string(net.find("NAME_NOT_RESOLVED") != npos ? "there is no such site"
-                                            : net.find("CERT") != npos || net.find("SSL") != npos
-                                                ? "the site's identity couldn't be checked"
-                                                : net.find("ABORTED") != npos ? "it is a file to download, not a page"
-                                                                              : "the site couldn't be reached") +
-                                " (" + net + ").");
-                const std::string left = url_;
-                const char *silent = "The page could not be read: the browser didn't answer.";
-                Answer a = settle(20) ? snapshot() : fail(silent);
-                if (!a.ok && obscura_ && cdp_ && !cdp_->gone() && a.text.find("didn't answer") != npos) {
-                    // Obscura that answers nothing once a page has loaded (on
-                    // the PS5 the second article in a row, a link followed or
-                    // an address opened alike, while a fresh one showed that
-                    // page and ten more): a fresh one, and the page once more.
-                    quit();
-                    std::string again;
-                    if (!awake(again, false)) return fail(again);
-                    if (!cdp_->call("Page.navigate", "{\"url\":" + json_escape(url) + "}", r, err, 40000))
-                        return fail("The page could not be opened: " + lost(err) + ".");
-                    a = settle(20) ? snapshot() : fail(silent);
-                }
-                if (obscura_ && a.ok && remember && !left.empty() && left != url_) {
-                    back_.push_back(left);
-                    if (back_.size() > 50) back_.erase(back_.begin());
-                }
+            } else if (const Answer a = browse(url, remember); a.ok || !unread_) {
                 return a;
+            } else {
+                // Obscura gave no answer on this page, a fresh one neither
+                // (on the PS5 Wikipedia's article on the Black Sea, every
+                // time, and the one on Vienna two times in three): this
+                // page is read without it, and the next is Obscura's again.
+                quit();
+                note_ += "(Obscura gave no answer on this page, twice, so it is shown in the simpler text view, which runs "
+                         "no scripts.)";
             }
         }
         HttpResponse resp;
@@ -1152,7 +1127,59 @@ private:
             if (back_.size() > 50) back_.erase(back_.begin());
         }
         set_page(resp.url.empty() ? url : resp.url, resp.body, nullptr);
+        as_text_ = !program_.empty();
         return show();
+    }
+
+    // url in the browser, which is awake. unread_: the answer is that
+    // Obscura gave none, with a fresh one too.
+    Answer browse(const std::string &url, bool remember) {
+        unread_ = false;
+        Json r;
+        std::string err;
+        bool ok = cdp_->call("Page.navigate", "{\"url\":" + json_escape(url) + "}", r, err, 40000);
+        if (!ok && obscura_ && !cdp_->gone() && err.find("didn't answer") != npos) {
+            // (An Obscura that is stuck, see act: once more, with a fresh one.)
+            quit();
+            std::string again;
+            if (!awake(again, false)) return fail(again);
+            ok = cdp_->call("Page.navigate", "{\"url\":" + json_escape(url) + "}", r, err, 40000);
+            unread_ = !ok && cdp_ && !cdp_->gone() && err.find("didn't answer") != npos;
+        }
+        if (!ok) return fail("The page could not be opened: " + lost(err) + ".");
+        const std::string net = r["errorText"].str();
+        if (!net.empty())
+            return fail("The page could not be opened: " +
+                        std::string(net.find("NAME_NOT_RESOLVED") != npos ? "there is no such site"
+                                    : net.find("CERT") != npos || net.find("SSL") != npos
+                                        ? "the site's identity couldn't be checked"
+                                        : net.find("ABORTED") != npos ? "it is a file to download, not a page"
+                                                                      : "the site couldn't be reached") +
+                        " (" + net + ").");
+        const std::string left = url_;
+        const char *silent = "The page could not be read: the browser didn't answer.";
+        Answer a = settle(20) ? snapshot() : fail(silent);
+        if (!a.ok && obscura_ && cdp_ && !cdp_->gone() && a.text.find("didn't answer") != npos) {
+            // Obscura that answers nothing once a page has loaded (on
+            // the PS5 the second article in a row, a link followed or
+            // an address opened alike, while a fresh one showed that
+            // page and ten more): a fresh one, and the page once more.
+            quit();
+            std::string again;
+            if (!awake(again, false)) return fail(again);
+            if (!cdp_->call("Page.navigate", "{\"url\":" + json_escape(url) + "}", r, err, 40000)) {
+                unread_ = cdp_ && !cdp_->gone() && err.find("didn't answer") != npos;
+                return fail("The page could not be opened: " + lost(err) + ".");
+            }
+            a = settle(20) ? snapshot() : fail(silent);
+            unread_ = !a.ok && cdp_ && !cdp_->gone() && a.text.find("didn't answer") != npos;
+        }
+        if (a.ok) as_text_ = false;
+        if (obscura_ && a.ok && remember && !left.empty() && left != url_) {
+            back_.push_back(left);
+            if (back_.size() > 50) back_.erase(back_.begin());
+        }
+        return a;
     }
 
     // The text view's form f, sent: by its button `via` (an item), or by
@@ -1344,6 +1371,8 @@ private:
     Program proc_;
     Cdp *cdp_ = nullptr;
     bool asleep_ = false, fell_back_ = false, woke_ = false;
+    bool as_text_ = false;  // the page that is open was read by the text view, though there is a browser (go)
+    bool unread_ = false;   // browse: Obscura gave no answer on the page, with a fresh one too
     std::vector<std::string> spares_;
 
     std::string url_, title_, view_, note_;

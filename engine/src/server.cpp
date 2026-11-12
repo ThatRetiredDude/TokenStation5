@@ -733,6 +733,8 @@ void handle(int fd, Server::State &state, Usage &u) {
         std::string search_failed;      // why the first failed search failed
         std::vector<std::string> found;  // what the searches found, for a forced answer
         bool answered_without_tools = false;  // after a made-up call
+        bool told_no_tool = false;            // ... or told that there is no such tool
+        std::string no_tool;                  // the made-up tool this round tells of
         bool think_closed = false;       // a thinking was ended for the model (kThinkMax): once a request
         // usage.prompt_tokens: the last turn's prompt without the earlier
         // turns of this request that it holds (`carried`, already counted as
@@ -793,12 +795,16 @@ void handle(int fd, Server::State &state, Usage &u) {
                 // A generic model that writes a call's result itself has
                 // made it up (tools.h): the turn ends there, like at a stop
                 // string, and the call before it is made for real.
-                if (use_tools && tf == ToolFormat::GENERIC && !stopped) {
-                    const size_t fake = made_up_result(text, tool_names);
+                // (So has a Hermes or Gemma 3 model that writes the
+                // <tool_response> its results come in.)
+                const bool tags = tf == ToolFormat::HERMES || tf == ToolFormat::GEMMA;
+                if (use_tools && (tf == ToolFormat::GENERIC || tags) && !stopped) {
+                    const size_t fake = made_up_result(text, tool_names, tags);
                     if (fake != std::string::npos) {
                         text.resize(fake);
                         invented = true;
-                        const size_t w = wrote.rfind("Result of ");  // (and in the prompt of a turn after it)
+                        // (and in the prompt of a turn after it)
+                        const size_t w = wrote.rfind(tags ? "<tool_response>" : "Result of ");
                         if (w != std::string::npos) wrote.resize(w);
                     }
                 }
@@ -841,7 +847,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                             thought = upto;
                         }
                     }
-                    if (answer >= text.size() && !stopped) return client_ok;
+                    if (answer >= text.size() && !stopped) return client_ok && !invented;
                     sent = std::max(sent, answer);
                     // Hold back text that could be the start of a stop string,
                     // or of a tool call.
@@ -1027,8 +1033,22 @@ void handle(int fd, Server::State &state, Usage &u) {
                     use_tools = false;
                     continue;
                 }
-                pt.calls.clear();
-                pt.content = text;
+                // Words are out already, or it thought first: the model is
+                // told, once, that there is no such tool and which there
+                // are, and goes on (Gemma 3 4B on the PS5, the terminal
+                // switched off, wrote "I need to run a command" and a call
+                // to run_command; the call was left in the chat as text).
+                if (!told_no_tool && !pt.calls.empty() && made_up_at < pt.calls.size() && !stopped &&
+                    st.gen_tokens < max_tokens) {
+                    told_no_tool = true;
+                    no_tool = made_up;
+                    const ToolCall it = pt.calls[made_up_at];
+                    pt.calls.assign(1, it);
+                    log_line("ts5: %s made-up tool %s: told that there is none", id.c_str(), made_up.c_str());
+                } else {
+                    pt.calls.clear();
+                    pt.content = text;
+                }
             }
             // pt.content is the turn's text, calls taken out after the thinking.
             const size_t from = std::min(answer, pt.content.size());
@@ -1039,13 +1059,13 @@ void handle(int fd, Server::State &state, Usage &u) {
             if (pt.calls.empty() || stopped || !client_ok) break;
             // The client's own calls go back to it; web_search is ts5's.
             std::vector<ToolCall> searches;
-            for (auto &c : pt.calls) (web && c.name == "web_search" ? searches : calls).push_back(c);
+            for (auto &c : pt.calls) ((web && c.name == "web_search") || !no_tool.empty() ? searches : calls).push_back(c);
             if (!calls.empty()) {
                 st.finish = "tool_calls";
                 break;
             }
             if (st.gen_tokens >= max_tokens) break;
-            if (round >= kSearchRounds || !search_failed.empty()) {
+            if (no_tool.empty() && (round >= kSearchRounds || !search_failed.empty())) {
                 // Out of rounds, or searching again after a search failed
                 // (models retry a refused key until the limit): one last
                 // turn without tools, from the original messages and a note,
@@ -1072,7 +1092,21 @@ void handle(int fd, Server::State &state, Usage &u) {
             std::vector<std::string> results;
             for (auto &c : searches) {
                 std::string log;
-                if (!search_failed.empty()) {
+                if (!no_tool.empty()) {
+                    std::string list;
+                    for (auto &n : names) list += (list.empty() ? "" : ", ") + n;
+                    results.push_back("There is no function named " + no_tool + " here. The functions are: " + list +
+                                      ". Call one of those, or answer without one.");
+                    log = "no such tool: " + no_tool;
+                    no_tool.clear();
+                    // (What it goes on to say starts a paragraph of its own.)
+                    if (!content.empty() && content.back() != '\n') {
+                        content += "\n\n";
+                        // (Unless the space after its words went out with them.)
+                        if (stream && client_ok && sent <= pt.content.size())
+                            client_ok = send_all(fd, "data: " + chunk_json("\n\n", nullptr) + "\n\n");
+                    }
+                } else if (!search_failed.empty()) {
                     results.push_back("Searching is not working right now (" + search_failed +
                                       "). Do not search again: answer from what you know.");
                     log = "web_search: skipped after a failed search";

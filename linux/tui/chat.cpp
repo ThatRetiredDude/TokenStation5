@@ -998,6 +998,48 @@ std::string role_json(const std::string &role, const std::string &content) {
 // turn's marks). The server's own count comes with each answer.
 int rough_tokens(const std::string &s) { return (int)(s.size() / 3) + 8; }
 
+// What the model keeps of a tool's result that gave way (make_room): its
+// first lines (a page's name and address), and that the rest is gone.
+std::string result_start(const std::string &content) {
+    size_t cut = std::min<size_t>(content.size(), 300);
+    while (cut > 0 && cut < content.size() && ((unsigned char)content[cut] & 0xC0) == 0x80) cut--;
+    const size_t nl = content.rfind('\n', cut);
+    if (cut < content.size() && nl != std::string::npos && nl >= 60) cut = nl;
+    return content.substr(0, cut) +
+           "\n[The rest of this result was left out later, to make room in the chat. Ask for it again if it is needed.]";
+}
+
+// A run of tool calls that fills the chat (a model reading a long page part
+// after part: on the PS5 two runs ended in "This chat is full" at 16,384
+// tokens, after four and seven parts). Before the request that would no
+// longer fit, the long results of earlier calls give way, all of them at
+// once (each time one goes, the server reads the chat again from there):
+// the model keeps their first lines and the newest results whole. Returns
+// how many gave way.
+int make_room(Chat &c, const ChatRequest &rq) {
+    if (rq.n_ctx <= 0) return 0;
+    std::lock_guard<std::mutex> l(c.mu);
+    if (c.ctx_used <= 0) return 0;
+    // The newest results: the tool messages the chat ends with.
+    size_t newest = c.msgs.size();
+    int fresh = 0;
+    while (newest > 0 && c.msgs[newest - 1].role == "tool") fresh += rough_tokens(c.msgs[--newest].content);
+    // (The count the last answer came with, and what was added since; room
+    // for the answer as chat_nearly_full keeps it.)
+    if (c.ctx_used + fresh + std::max(rq.n_ctx / 8, 1024) <= rq.n_ctx) return 0;
+    int n = 0, freed = 0;
+    for (size_t i : sent_msgs(c, newest, nullptr)) {
+        Msg &m = c.msgs[i];
+        if (m.role != "tool" || m.left_out || m.content.size() < 1200) continue;
+        m.left_out = true;
+        m.head += " \xC2\xB7 left out later, for room";
+        freed += (int)(m.content.size() - result_start(m.content).size()) / 4;
+        n++;
+    }
+    c.ctx_used = std::max(0, c.ctx_used - freed);
+    return n;
+}
+
 // Message i as the request carries it. An assistant turn's tool calls go
 // with it when their results follow (with_calls), and its thinking too when
 // it belongs to the answer still being worked on (thinking): the server
@@ -1006,7 +1048,8 @@ std::string msg_json(const Chat &c, size_t i, bool with_calls, bool thinking) {
     const Msg &m = c.msgs[i];
     if (m.role == "tool")
         return "{\"role\":\"tool\",\"tool_call_id\":" + ts5::json_escape(m.call_id) + ",\"name\":" +
-               ts5::json_escape(m.tool) + ",\"content\":" + ts5::json_escape(m.content) + "}";
+               ts5::json_escape(m.tool) + ",\"content\":" + ts5::json_escape(m.left_out ? result_start(m.content) : m.content) +
+               "}";
     std::string content, reasoning;
     split_think(m, content, reasoning);
     if (m.role != "assistant" || !with_calls) return role_json(m.role, content);
@@ -1376,6 +1419,7 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
             c->msgs.push_back(t);
         }
         if (c->cancel.load()) break;
+        make_room(*c, rq);
         {
             std::lock_guard<std::mutex> l(c->mu);
             Msg a;

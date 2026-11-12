@@ -252,6 +252,11 @@ ts5-tui --url http://ps5.local:8081  # another one
   a full chat then says so under the answer that was cut (Ctrl+N starts a
   new one). A summary is the model's own notes, so details it leaves out
   are gone for it: a longer Context (Settings) is the way to keep more.
+  A run of tool calls can fill a chat before your next message (a model
+  reading a long page part after part). Then the long results of its
+  earlier calls give way: the model keeps their first lines and the newest
+  results whole, and the chat marks each "left out later, for room". You
+  still see them in full.
 - **Web search**: Settings → Web search key takes a free key from
   [app.tavily.com](https://app.tavily.com). A model ts5-tui loads itself
   then searches the web when a question needs it (models that use tools;
@@ -315,10 +320,12 @@ ts5-tui --url http://ps5.local:8081  # another one
       and up to 430 MiB on heavy pages. It is young: on a PS5 it took 12
       to 14 s to open an article that Chromium opened in 5 s, some sites
       show nothing in it (YouTube, in our test), it has no sandbox, and
-      it stopped answering after its second article in a row. When that
-      happens ts5 starts a fresh one and opens the page again, so a step
-      can take half a minute. Put its `obscura` program on your PATH or
-      in `~/.local/bin`.
+      on some pages it gives no answer at all (Wikipedia's article on the
+      Black Sea, every time we tried). When that happens ts5 starts a
+      fresh one and opens the page again, and if that one is silent too
+      the page comes in the text view, with a line that says so. Such a
+      step takes about half a minute. Put its `obscura` program on your
+      PATH or in `~/.local/bin`.
     - **Text view**: ts5's own page reader, nothing to install. No scripts
       run, so a page built by scripts shows little; links and search forms
       work.

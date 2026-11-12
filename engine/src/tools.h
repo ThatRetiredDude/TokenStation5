@@ -61,9 +61,10 @@ std::string render_results(const Tokenizer &t, ToolFormat f, const std::vector<T
 
 // A finished turn: its text without the calls, and the calls. A call whose JSON
 // does not parse stays in the text. names: the request's tools, for calls
-// written as elements named after them, for a generic model's calls written
-// as bare objects on lines of their own, and for a call by a name that is
-// all but one of them (tool_named).
+// written as elements named after them, for calls written as bare objects on
+// lines of their own or in a fence (a generic model's, and what Gemma 3,
+// Llama 3 and Qwen 2.5 Coder wrote on the PS5 instead of their own format),
+// and for a call by a name that is all but one of them (tool_named).
 struct ParsedTurn {
     std::string content;
     std::vector<ToolCall> calls;
@@ -85,7 +86,11 @@ std::string tool_named(const std::string &name, const std::vector<std::string> &
 // Wikipedia page is open.", another call, its result, and an answer from
 // them, none of it real). The turn ends before the line: the call in front
 // of it is then made for real.
-size_t made_up_result(const std::string &text, const std::vector<std::string> &names);
+// tags: for a model whose results come within <tool_response> tags (Hermes's,
+// Gemma 3's): that tag at the start of a line instead (Qwen 2.5 Coder 7B on
+// the PS5 answered with a "<tool_response>" of 2,443 tokens, the page it had
+// been given under a new part number).
+size_t made_up_result(const std::string &text, const std::vector<std::string> &names, bool tags = false);
 
 // Whether a finished turn's text (after any thinking) is nothing but an empty
 // call tag pair, such as "<tools> </tools>" (Qwen 2.5 Coder 14B, asked for a
@@ -95,7 +100,8 @@ bool empty_call_block(ToolFormat f, const std::string &content);
 // While a turn streams: how many bytes of `text` are surely text for the user,
 // never part of a call (the rest is held until the turn ends).
 // names: the request's tools, where they are known (a generic model's
-// "Result of NAME:" line is held only for one of them).
+// "Result of NAME:" line is held only for one of them; with them, a fence
+// that may hold a call is held too).
 size_t content_prefix(ToolFormat f, const std::string &text, const std::vector<std::string> *names = nullptr);
 
 // Whether the model's template can turn its thinking off (Qwen3's and
@@ -149,6 +155,9 @@ private:
 // stays text, a number, boolean, object or list is read as JSON (text if it
 // isn't), a "null" is null where the schema allows it; a key the schema
 // doesn't name stays text.
+// And in a call written as JSON, a number or true/false sent in quotes where
+// the tool takes no text (Llama 3.1 8B on the PS5: {"a": "48213.5", "b":
+// "9917.25"} to a tool that adds two numbers, which then joined two texts).
 void fit_to_schemas(std::vector<ToolCall> &calls, const std::vector<Json> &tools);
 
 // "call_" and 24 random letters and digits, as OpenAI's ids look.

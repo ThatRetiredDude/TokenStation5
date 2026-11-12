@@ -34,7 +34,8 @@ INDEX = """<!doctype html><html><head><title>The  River
     f'<span>Tongue {c}</span></a></li>' for c in "af als am an ar ast az ba be bg bn br".split()) + """</ul>
 <h1>Rivers</h1>
 <p>The <a href="volga.html">Volga</a> and the <a href="/rivers/danube.html?x=1#history">Danube &amp; friends</a>
-are long. See <a href="https://example.org/far">another site</a>, <a href="#top">the top</a>,
+are long<sup id="cite_ref-1"><a href="#cite_note-1"><span>[</span>1<span>]</span></a></sup><sup><a href="#fn2">[note 2]</a></sup>.
+See <a href="https://example.org/far">another site</a>, <a href="#top">the top</a>,
 <a href="mailto:someone@example.org">write to us</a>, <a href="javascript:void(0)">a script</a>,
 <a href="../up.html"><img src="i.png" alt="An arrow"></a>.</p>
 <div style="display: none">A hidden <a href="/hidden.html">secret link</a>.</div>
@@ -51,6 +52,7 @@ are long. See <a href="https://example.org/far">another site</a>, <a href="#top"
 <input type="submit" name="how" value="Order now"><button type="button">Does nothing</button></form>
 <form action="/login" method="post"><input name="user" placeholder="User"><button>Sign in</button></form>
 <button id="plain">A lone button</button>
+<ol><li id="cite_note-1"><a href="#cite_ref-1">^</a> A source for it.</li></ol>
 </main><footer><a href="/about">About</a></footer></body></html>"""
 
 SCRIPTED = """<!doctype html><html><head><title>Scripted</title></head><body><div id="app"></div>
@@ -99,6 +101,10 @@ class Pages(http.server.BaseHTTPRequestHandler):
             rows = "".join(f"<li>{k} = {v}</li>" for k, v in q)
             self.send(f"<html><head><title>Echo {u.path}</title></head><body><h1>Asked for {u.path}</h1>"
                       f"<ul>{rows}</ul><a href='/'>home</a></body></html>")
+        elif u.path == "/busy":
+            # A page whose script never ends: a browser asked about it gives no answer.
+            self.send("<html><head><title>Busy</title></head><body><p>Words that are there without a script, "
+                      'and <a href="/volga.html">the Volga</a>.</p><script>while (true) {}</script></body></html>')
         elif u.path == "/agent":
             hints = self.headers.get("Sec-CH-UA", "")
             self.send("<html><head><title>Agent</title></head><body>"
@@ -177,6 +183,9 @@ def test_reader(ts5):
     check("secret link" not in out and "hidden2" not in out and "not shown" not in out, "view: what the page hides is left out", out)
     check("the top" in out and not re.search(r"the top\[\d+\]", out) and not re.search(r"write to us\[\d+\]", out) and
           not re.search(r"a script\[\d+\]", out), "view: links that lead to no page get no number", out)
+    view = out.split("#1 ")[0]
+    check("are long. See" in view and "note 2" not in view and "^" not in view and "A source for it." in view,
+          "view: a footnote's mark and its way back are left out, so every number in brackets is one to click", view)
     check(re.search(r"An arrow\[\d+\]", out) is not None, "view: a picture link is named by its picture", out)
     check(re.search(r"First of a list\[\d+\]", out) is not None and re.search(r"Fifth\[\d+\]", out) is not None,
           "view: a list of links stays", out)
@@ -197,7 +206,8 @@ def test_reader(ts5):
           "pw=(-1)" in form[0], "view: the form's fields, a list's chosen value among them, a password box empty", out)
     check(out.splitlines()[0].startswith("[1: text box"), "view: numbers start at 1 at the top", out)
     plain = subprocess.run([ts5, "html-text"], input=INDEX, capture_output=True, text=True, timeout=60).stdout
-    check("[" not in plain and "Volga and the Danube & friends" in plain, "the plain reader is as it was", plain)
+    check("[" not in plain.replace("long[1][note 2]", "") and "Volga and the Danube & friends" in plain,
+          "the plain reader is as it was", plain)
 
 
 def common(b, base, mode):
@@ -207,6 +217,7 @@ def common(b, base, mode):
     check(a["ok"] and a["mode"] == mode and a["title"] == "The River Site" and a["url"] == base + "/" and
           t.startswith("Page: The River Site\nAddress: " + base + "/\n"), f"{mode}: a page opens under its name and address", a)
     check('text box "Search the site"]' in t and re.search(r"Volga\[\d+\]", t) is not None, f"{mode}: with its numbers", t)
+    check("are long. See" in t and "^" not in t, f"{mode}: without the footnotes' marks", t)
     a = b.ask(do="back")
     check(a["ok"] is False and a["text"] == "There is no page to go back to." and b.ask(do="status")["url"] == base + "/",
           f"{mode}: no going back from the first page", a)
@@ -504,6 +515,19 @@ def test_browser(ts5, program, base):
         check(a["ok"] and a["url"] == base + "/scripted.html", "obscura: and the one before that", a)
         a = b.ask(do="back")
         check(not a["ok"] and "no page to go back to" in a["text"], "obscura: then there is none", a)
+        # A page Obscura gives no answer on, a fresh one neither (on the PS5 one Wikipedia article
+        # every time): that page comes in the text view, and the next is Obscura's again.
+        t0, before = time.time(), open(trace).read().count("Page.navigate ")
+        a = b.ask(do="open", url=base + "/busy")
+        t = a["text"]
+        check(a["ok"] and a["mode"] == "text" and "Obscura gave no answer on this page, twice" in t and
+              "Words that are there without a script" in t and open(trace).read().count("Page.navigate ") == before + 2,
+              f"obscura: a page it gives no answer on is shown in the text view ({time.time() - t0:.0f} s)", (a, open(trace).read()[-800:]))
+        a = b.ask(do="click", n=number(t, r"the Volga\[(\d+)\]"))
+        check(a["ok"] and a["mode"] == "obscura" and a["url"] == base + "/volga.html", "obscura: and a link on it opens in Obscura again", a)
+        a = b.ask(do="back")
+        check(a["ok"] and a["mode"] == "text" and a["url"] == base + "/busy" and "twice" in a["text"],
+              "obscura: back to it is the text view again", a)
         check(b.close() == 0, "obscura: ends when its input closes")
 
 
