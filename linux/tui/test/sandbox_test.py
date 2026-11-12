@@ -92,11 +92,20 @@ def main():
         out, _, _ = run("echo '/usr/bin/python3: No module named pip'; exit 1")
         check("get-pip.py | python3 - --user" in out, "a Python without pip: the model is told how to put pip in ~", out)
 
-        # (This test's home folder is in /tmp: only the way to it is there.)
+        # (This test's home folder is in /tmp: only the way to it is there.
+        # Where /etc/resolv.conf is a link into /run (systemd-resolved, as on
+        # Ubuntu), the way to the file it leads to is there too.)
         out, _, _ = run("ls -A /run; echo ---; ls -A /tmp; echo ---; ls -A /home")
         parts = out.split("exit code 0\n", 1)[-1].split("---\n")
-        check(parts[0].strip() == "" and parts[1].strip() == os.path.basename(top) and parts[2].strip() == "",
-              "no sockets in /run, nothing of /tmp, no other home folders", out)
+        dns = os.path.realpath("/etc/resolv.conf")
+        in_run = {dns.split("/")[2]} if dns.startswith("/run/") else set()
+        check(set(parts[0].split()) <= in_run and parts[1].strip() == os.path.basename(top) and parts[2].strip() == "",
+              "no sockets in /run (but the way to the name servers' file), nothing of /tmp, no other home folders", out)
+        if in_run:
+            out, _, _ = run("find /run -mindepth 1 | sort; cat /etc/resolv.conf > /dev/null && echo dns-ok")
+            bits = dns.split("/")
+            want = sorted("/".join(bits[:k]) for k in range(3, len(bits) + 1)) + ["dns-ok"]
+            check(out.split("exit code 0\n", 1)[-1].split() == want, "  (in /run only " + dns + ", and it can be read)", out)
         out, _, _ = run("cat /proc/self/oom_score_adj; ps -e | wc -l")
         lines = out.split("\n")
         check(lines[2] == "1000", "when memory runs out the kernel ends it first", out)
