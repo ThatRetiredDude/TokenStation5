@@ -352,9 +352,18 @@ bool utf8_text(const std::string &s) {
     return true;
 }
 
-void lean(Json &j) {
+// A repository inside something else (a pull request's head and base):
+// its name alone, as GitHub's own pages show it.
+bool repo_like(Json &j) {
+    return j.type == Json::OBJ && j["full_name"].type == Json::STR && !j["owner"].is_null() && !j["name"].is_null();
+}
+
+// Lean: what a model reads. top: the answer itself, or an item of a list
+// that is the answer. A list's long texts (a pull request's or an issue's
+// body) are cut short: the item alone has them whole.
+void lean(Json &j, bool top, bool listed) {
     if (j.type == Json::ARR) {
-        for (Json &e : j.a) lean(e);
+        for (Json &e : j.a) lean(e, top, top);
         return;
     }
     if (j.type != Json::OBJ) return;
@@ -362,6 +371,17 @@ void lean(Json &j) {
     if (j["login"].type == Json::STR && !j["avatar_url"].is_null() && !j["type"].is_null()) {
         const std::string login = j["login"].str();
         j = Json::string(login);
+        return;
+    }
+    if (!top && repo_like(j)) {
+        const std::string name = j["full_name"].str();
+        j = Json::string(name);
+        return;
+    }
+    // A license: its short name.
+    if (j["spdx_id"].type == Json::STR && !j["key"].is_null()) {
+        const std::string id = j["spdx_id"].str();
+        j = Json::string(id);
         return;
     }
     // A file: its text.
@@ -379,16 +399,36 @@ void lean(Json &j) {
             }
         }
     }
+    // What GitHub's answers carry that a reader has no use for: the API's
+    // addresses, ids for GraphQL, nulls, a repository's feature switches
+    // and the counts it gives twice.
+    static const char *const kDrop[] = {"node_id", "_links", "gravatar_id", "temp_clone_token", "security_and_analysis",
+                                        "web_commit_signoff_required", "allow_forking", "is_template", "watchers",
+                                        "forks", "open_issues", "author_association", "performed_via_github_app",
+                                        "reactions", "active_lock_reason", "locked"};
     std::vector<std::string> keep;
     for (const std::string &k : j.keys) {
         const bool url = k == "url" || (k.size() > 4 && k.compare(k.size() - 4, 4, "_url") == 0 && k != "html_url");
-        if (url || k == "node_id" || k == "_links" || k == "gravatar_id")
+        bool drop = url || j.o[k].is_null() || k.compare(0, 4, "has_") == 0;
+        for (const char *d : kDrop) drop = drop || k == d;
+        if (drop)
             j.o.erase(k);
         else
             keep.push_back(k);
     }
     j.keys = keep;
-    for (const std::string &k : keep) lean(j.o[k]);
+    for (const std::string &k : keep) lean(j.o[k], false, false);
+    // A list's item: a long body cut short (in characters, not bytes).
+    const size_t kBody = 600;
+    if (listed && j["body"].type == Json::STR) {
+        const std::string &b = j["body"].str();
+        size_t chars = 0, cut = b.size();
+        for (size_t i = 0; i < b.size(); i++)
+            if (((unsigned char)b[i] & 0xC0) != 0x80 && chars++ == kBody) cut = i;
+        if (chars > kBody + 100)
+            j.o["body"] = Json::string(b.substr(0, cut) + " … (" + std::to_string(chars) +
+                                       " characters in all: GET this one alone for the rest)");
+    }
 }
 
 // ---- The commands ----
@@ -601,7 +641,7 @@ std::string github_file() {
 std::string github_lean(const std::string &body) {
     Json j;
     if (!Json::parse(body, j)) return body;
-    lean(j);
+    lean(j, true, false);
     return j.dump();
 }
 

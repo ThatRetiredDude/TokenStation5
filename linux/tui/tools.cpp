@@ -693,7 +693,9 @@ ToolResult github_call(const std::string &args, const std::atomic<bool> &cancel)
                   "GitHub's page for the TokenStation5 app, from ts5-tui's Connectors page.)";
     else if (status == 403 && rest.find("Resource not accessible") != std::string::npos)
         t.text += "\n(The TokenStation5 app has no permission for this: it reads and writes code, pull requests and "
-                  "issues, and reads CI results, but can't change workflow files or settings.)";
+                  "issues, and reads CI results, but can't create repositories or change workflow files or settings. "
+                  "For a new repository: the user makes it on github.com, then gives it to TokenStation5 from ts5-tui's "
+                  "Connectors page.)";
     return t;
 }
 
@@ -801,7 +803,8 @@ std::string tools_json(const ToolSwitches &s) {
             "/repos/OWNER/REPO/git/refs (make a branch: {\"ref\": \"refs/heads/NAME\", \"sha\": ...}), PUT "
             "/repos/OWNER/REPO/contents/PATH (write a file: {\"message\", \"text\", \"branch\", and the old "
             "file's \"sha\" when it exists}), /repos/OWNER/REPO/pulls, /repos/OWNER/REPO/issues, "
-            "/repos/OWNER/REPO/actions/runs. A list says when it has more pages: add page=2.",
+            "/repos/OWNER/REPO/actions/runs. A list says when it has more pages: add page=2. It can't create "
+            "repositories.",
             {{"method", "string", "GET, POST, PATCH, PUT or DELETE."},
              {"path", "string", "The API path, starting with /, with any ?query."},
              {"body?", "object", "The JSON body, for POST, PATCH and PUT."}}));

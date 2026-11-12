@@ -174,6 +174,17 @@ class Handler(BaseHTTPRequestHandler):
                                    "url": "https://api.github.com/repos/octo/hello/contents/README.md",
                                    "html_url": "https://github.com/octo/hello/blob/main/README.md",
                                    "download_url": "https://raw/octo/hello/README.md", "_links": {"self": "x"}})
+        if self.path.startswith("/repos/octo/hello/pulls"):
+            repo = {"id": 9, "name": "hello", "full_name": "octo/hello", "owner": user, "private": False,
+                    "has_issues": True, "has_wiki": False, "watchers": 3, "watchers_count": 3, "allow_forking": True,
+                    "license": {"key": "mit", "name": "MIT License", "spdx_id": "MIT", "node_id": "L"},
+                    "url": "https://api.github.com/repos/octo/hello"}
+            pr = {"number": 5, "title": "Add notes", "state": "open", "user": user, "body": "é" * 1000 + "the end",
+                  "closed_at": None, "milestone": None, "draft": False, "node_id": "PR_x", "locked": False,
+                  "author_association": "OWNER", "_links": {"self": "x"},
+                  "head": {"ref": "notes", "sha": "h1", "user": user, "repo": repo},
+                  "base": {"ref": "main", "sha": "b1", "user": user, "repo": repo}}
+            return self.send(200, pr if self.path.endswith("/5") else [pr])
         if self.path.startswith("/user/repos"):
             port = self.server.server_address[1]
             link = ('<http://127.0.0.1:%d/user/repos?page=2>; rel="next", '
@@ -256,6 +267,17 @@ def main():
     p = run("api", "GET", "/user/repos?per_page=1", "--lean")
     check(p.stdout.split("\n")[:2] == ["status 200", "next /user/repos?page=2"] and '"owner": "octo"' in p.stdout,
           "api: the next page's path, and a user as its login (%r)" % p.stdout[:120])
+    p = run("api", "GET", "/repos/octo/hello/pulls", "--lean")
+    j = json.loads(p.stdout.split("\n", 1)[1] or "[]")[0]
+    check(j["head"]["repo"] == "octo/hello" and j["base"]["repo"] == "octo/hello" and j["user"] == "octo"
+          and "closed_at" not in j and "milestone" not in j and "node_id" not in j and "locked" not in j
+          and "author_association" not in j and j["draft"] is False and j["body"].startswith("é" * 600)
+          and "1007 characters in all" in j["body"] and "the end" not in j["body"],
+          "api --lean: a list of pull requests, their repositories by name, no nulls, bodies cut short (%s)" % p.stdout[:300])
+    p = run("api", "GET", "/repos/octo/hello/pulls/5", "--lean")
+    j = json.loads(p.stdout.split("\n", 1)[1] or "{}")
+    check(j.get("body", "").endswith("the end") and j["head"]["repo"] == "octo/hello",
+          "api --lean: one pull request keeps its whole body (%s)" % p.stdout[:200])
     p = run("api", "POST", "/repos/octo/hello/issues", '{"title": "Fix the README"}')
     check(p.returncode == 0 and p.stdout.startswith("status 201\n") and '"Fix the README"' in p.stdout and gh.requests[-1]["body"],
           "api: a POST with a body")
