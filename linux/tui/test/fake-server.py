@@ -130,7 +130,9 @@ class H(BaseHTTPRequestHandler):
         elif self.path in ("/v1/models", "/models"):
             m = {"id": MODEL, "object": "model", "context_length": N_CTX,
                  "capabilities": {"tools": True, "tool_format": "hermes", "web_search": WEB,
-                                  "web_search_source": "tavily" if WEB else os.environ.get("FAKE_SOURCE", "wikipedia")},
+                                  "web_search_source": "tavily" if WEB else os.environ.get("FAKE_SOURCE", "wikipedia"),
+                                  # (FAKE_OLD: a ts5 from before a request could pick its encyclopedia.)
+                                  **({} if os.environ.get("FAKE_OLD") else {"encyclopedias": ["wikipedia", "grokipedia", "both"]})},
                  "settings": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "thinking": True,
                               "known_good": "file"}}
             if HELPER and HELPER != "none":
@@ -165,9 +167,10 @@ class H(BaseHTTPRequestHandler):
                 f.write("%d tokens, max %s: %s\n" % (prompt, req.get("max_tokens"), " ".join(
                     "%s(%d)" % (m.get("role"), len(m.get("content") or "")) for m in msgs)))
                 if "tools" in req or "web_search" in req:
-                    f.write("  tools=%s web_search=%s tool_choice=%s\n" % (
+                    f.write("  tools=%s web_search=%s tool_choice=%s%s\n" % (
                         ",".join(t.get("function", {}).get("name") for t in req.get("tools") or []),
-                        json.dumps(req.get("web_search")), req.get("tool_choice")))
+                        json.dumps(req.get("web_search")), req.get("tool_choice"),
+                        " source=%s" % req["web_search_source"] if "web_search_source" in req else ""))
                 if req.get("chat_template_kwargs"):
                     f.write("  kwargs=%s\n" % json.dumps(req["chat_template_kwargs"]))
                 if summary:

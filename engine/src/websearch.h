@@ -17,6 +17,13 @@
 //                        ("en" by default, "sk", "de" ...), or "off" for none
 //   TS5_WIKIPEDIA_URL    another endpoint with MediaWiki's API (default
 //                        https://LANGUAGE.wikipedia.org)
+//   TS5_ENCYCLOPEDIA     the encyclopedia searched without a key: "wikipedia"
+//                        (the default), "grokipedia" (grokipedia.com, xAI's,
+//                        through the site's own search; when that can't be
+//                        searched, Wikipedia is) or "both". A request picks
+//                        one with "web_search_source". Not on the console.
+//   TS5_GROKIPEDIA_URL   another address with Grokipedia's search (default
+//                        https://grokipedia.com)
 #pragma once
 #include <string>
 #include <vector>
@@ -28,9 +35,13 @@ namespace ts5 {
 // TAVILY_API_KEY, or "".
 std::string tavily_key();
 
-// Where a search goes: "tavily" with a key, else "wikipedia", or "none"
-// with TS5_WIKIPEDIA=off.
-std::string search_source();
+// Where a search goes: "tavily" with a key, else an encyclopedia:
+// "wikipedia", "grokipedia" or "both" (asked: a request's
+// "web_search_source", else TS5_ENCYCLOPEDIA, else Wikipedia), or "none"
+// (TS5_WIKIPEDIA=off and no Grokipedia).
+std::string search_source(const std::string &asked = "");
+// "wikipedia", "grokipedia" or "both": a search of encyclopedias alone.
+bool is_encyclopedia(const std::string &source);
 
 // Whether a chat's last user message looks like it needs the web: it asks to
 // look something up or names a website, or it asks about what changes (news,
@@ -46,16 +57,17 @@ bool needs_web(const std::string &user_text, bool wikipedia = false);
 bool web_search_always();
 
 // The tool as offered to the model. today: "14 Oct 2026", so the model can
-// search for what is recent. wikipedia: the words for a search of Wikipedia
-// alone (search_source() by default).
+// search for what is recent. source: where the search goes (search_source()
+// by default); an encyclopedia's words say that it is one.
 Json web_search_tool(const std::string &today);
-Json web_search_tool(const std::string &today, bool wikipedia);
+Json web_search_tool(const std::string &today, const std::string &source);
 
 // Runs a web_search call (its arguments, as JSON text). Returns what the
 // model gets back: the results, or why there are none. log: one line for the log.
 // The text for the model; *failed (when given) says the search itself did
 // not work (network, a refused key, a used-up plan), not that it found nothing.
-std::string web_search(const std::string &arguments, std::string &log, bool *failed = nullptr);
+// asked: the request's "web_search_source" ("": this machine's).
+std::string web_search(const std::string &arguments, std::string &log, bool *failed = nullptr, const std::string &asked = "");
 
 // A web page as text, for a model to read (`ts5 page URL`, which ts5-tui's
 // web page tool runs): url over http or https, 2 MiB of it at most; HTML

@@ -37,14 +37,22 @@ const char *const kTell = ". Tell the user, and answer from what you know if you
 
 std::string tavily_key() { return env_or("TAVILY_API_KEY", ""); }
 
-std::string search_source() {
+std::string search_source(const std::string &asked) {
     if (!tavily_key().empty()) return "tavily";
 #ifdef TS5_PS5
+    (void)asked;
     return "none";  // the console title's search is the key's alone
 #else
-    return env_or("TS5_WIKIPEDIA", "en") == "off" ? "none" : "wikipedia";
+    // The request's choice of encyclopedia, else this machine's.
+    std::string want = asked == "wikipedia" || asked == "grokipedia" || asked == "both" ? asked : env_or("TS5_ENCYCLOPEDIA", "wikipedia");
+    if (want != "grokipedia" && want != "both") want = "wikipedia";
+    const bool wiki = env_or("TS5_WIKIPEDIA", "en") != "off";
+    if (want == "wikipedia") return wiki ? "wikipedia" : "none";
+    return want == "both" && wiki ? "both" : "grokipedia";
 #endif
 }
+
+bool is_encyclopedia(const std::string &source) { return source == "wikipedia" || source == "grokipedia" || source == "both"; }
 
 bool web_search_always() { return env_or("TS5_WEB_SEARCH", "") == "always"; }
 
@@ -54,7 +62,7 @@ bool needs_web(const std::string &user_text, bool wikipedia) {
     std::string text;
     for (char c : user_text) text += (char)tolower((unsigned char)c);
     if (wikipedia)
-        for (const char *word : {"wikipedia", "wiki ", "search", "encyclopedia", "encyclopaedia"})
+        for (const char *word : {"wikipedia", "wiki ", "grokipedia", "search", "encyclopedia", "encyclopaedia"})
             if (text.find(word) != std::string::npos) return true;
     for (const char *site : {"http://", "https://", "www.", ".com", ".org", ".net", ".io", ".gov", ".edu"})
         if (text.find(site) != std::string::npos) return true;
@@ -106,16 +114,23 @@ bool needs_web(const std::string &user_text, bool wikipedia) {
     return false;
 }
 
-Json web_search_tool(const std::string &today) { return web_search_tool(today, search_source() != "tavily"); }
+Json web_search_tool(const std::string &today) { return web_search_tool(today, search_source()); }
 
-Json web_search_tool(const std::string &today, bool wikipedia) {
-    if (wikipedia) {
+Json web_search_tool(const std::string &today, const std::string &source) {
+    if (source != "tavily") {
         // An encyclopedia and nothing else: the model has to know, or it
         // answers "today's weather" from an article on the climate.
+        const std::string what =
+            source == "grokipedia" ? "Grokipedia (xAI's encyclopedia, written by its AI). Returns the top articles, each with "
+                                     "its title, URL and text from it. It is the only search set up here: an encyclopedia, "
+            : source == "both"     ? "Wikipedia and Grokipedia (xAI's encyclopedia, written by its AI). Returns the top "
+                                     "articles of each, with title, URL and text. They are the only search set up here: "
+                                     "encyclopedias, "
+                                   : "Wikipedia. Returns the top articles, each with its title, URL and opening text. It is "
+                                     "the only search set up here: an encyclopedia, ";
         const std::string tool =
-            "{\"type\": \"function\", \"function\": {\"name\": \"web_search\", \"description\": \"Search "
-            "Wikipedia. Returns the top articles, each with its title, URL and opening text. It is the only search "
-            "set up here: an encyclopedia, with no news, prices, weather or other live data. Use it when the user "
+            "{\"type\": \"function\", \"function\": {\"name\": \"web_search\", \"description\": \"Search " +
+            what + "with no news, prices, weather or other live data. Use it when the user "
             "asks you to look something up, or when the answer depends on a fact you are not sure of. Do not "
             "search for explanations, writing or code: answer those yourself. When you do search, answer from "
             "the results and cite the URLs you used; if the results do not hold the answer, say so instead of "
@@ -192,7 +207,36 @@ std::string lower_ascii(std::string s) {
     return s;
 }
 
-std::string wikipedia_search(const std::string &query, int n, std::string &log, bool *failed) {
+// Whether one of a search's own words (not "the", "what" ...) is in what was found.
+struct Article {
+    std::string title, url, text;
+};
+bool has_own_word(const std::vector<std::string> &qwords, const std::vector<Article> &found) {
+    static const char *const kCommon[] = {"the",  "and",  "for",   "are",   "was",  "were",  "what", "who",  "how",
+                                          "why",  "when", "where", "which", "does", "did",   "has",  "have", "had",
+                                          "with", "from", "that",  "this",  "there", "about", "into", "can",  "you"};
+    std::vector<std::string> own;
+    for (auto &w : qwords) {
+        const std::string l = lower_ascii(w);
+        if (std::none_of(std::begin(kCommon), std::end(kCommon), [&](const char *c) { return l == c; })) own.push_back(l);
+    }
+    bool has = own.empty();
+    for (auto &p : found) {
+        const std::string hay = lower_ascii(p.title + "\n" + p.text);
+        for (auto &w : own) has = has || hay.find(w) != std::string::npos;
+    }
+    return has;
+}
+
+// The line that ends a list of articles.
+const char *const kNone = "\n\nIf none of these is about what was asked, search once more with only the name of the thing, or "
+                          "answer from what you know and say that it could not be looked up.";
+
+// first: the number of its first article; alone: Wikipedia is the one
+// source of this search (the words say so, and the list ends with kNone).
+// *count: how many articles it gave.
+std::string wikipedia_search(const std::string &query, int n, std::string &log, bool *failed, int first = 1, bool alone = true,
+                             int *count = nullptr) {
     const std::string lang = env_or("TS5_WIKIPEDIA", "en");
     const std::string base = env_or("TS5_WIKIPEDIA_URL", ("https://" + lang + ".wikipedia.org").c_str());
     const auto t0 = std::chrono::steady_clock::now();
@@ -252,40 +296,229 @@ std::string wikipedia_search(const std::string &query, int n, std::string &log, 
     // the console): where no article has one of the search's own words in
     // its title or opening, the model is told the match is a loose one.
     if (!loose) {
-        static const char *const kCommon[] = {"the",  "and",  "for",   "are",   "was",  "were",  "what", "who",  "how",
-                                              "why",  "when", "where", "which", "does", "did",   "has",  "have", "had",
-                                              "with", "from", "that",  "this",  "there", "about", "into", "can",  "you"};
-        std::vector<std::string> own;
-        for (auto &w : qwords) {
-            const std::string l = lower_ascii(w);
-            if (std::none_of(std::begin(kCommon), std::end(kCommon), [&](const char *c) { return l == c; })) own.push_back(l);
-        }
-        bool found = own.empty();
-        for (auto &p : pages) {
-            const std::string hay = lower_ascii(p.title + "\n" + p.text);
-            for (auto &w : own) found = found || hay.find(w) != std::string::npos;
-        }
-        loose = !found;
+        std::vector<Article> found;
+        for (auto &p : pages) found.push_back({p.title, p.url, p.text});
+        loose = !has_own_word(qwords, found);
     }
-    std::string out = loose ? "Wikipedia has no article that clearly matches \"" + query +
-                                  "\" (the only search set up here: an encyclopedia, no news or live data). The closest "
-                                  "it found, which may be about something else:"
-                            : "Wikipedia articles for \"" + query +
-                                  "\" (the only search set up here: an encyclopedia, no news or live data):";
+    const std::string only = alone ? " (the only search set up here: an encyclopedia, no news or live data)" : "";
+    std::string out = loose ? "Wikipedia has no article that clearly matches \"" + query + "\"" + only +
+                                  ". The closest it found, which may be about something else:"
+                            : "Wikipedia articles for \"" + query + "\"" + only + ":";
     int i = 0;
     for (auto &p : pages)
-        out += "\n\n[" + std::to_string(++i) + "] " + p.title + "\n" + p.url + "\n" +
+        out += "\n\n[" + std::to_string(first + i++) + "] " + p.title + "\n" + p.url + "\n" +
                (p.text.empty() ? std::string("(no opening text)") : clip(p.text, 1200));
-    out += "\n\nIf none of these is about what was asked, search once more with only the name of the thing, or answer "
-           "from what you know and say that it could not be looked up.";
+    if (alone) out += kNone;
+    if (count) *count = i;
     log = "web_search \"" + query + "\": " + std::to_string(i) + " results (" + took() + ", Wikipedia" +
           (loose ? ", a loose match" : "") + ")";
     return out;
 }
 
+#ifndef TS5_PS5
+// ---- Grokipedia (grokipedia.com, xAI's encyclopedia): the site's own search.
+
+// Markdown as plain words: a link is its words, a source mark ("[](https://...)")
+// is nothing, and the marks for bold and headings go.
+std::string markdown_plain(const std::string &md) {
+    std::string out;
+    for (size_t i = 0; i < md.size(); i++) {
+        const char c = md[i];
+        if (c == '[') {
+            const size_t close = md.find(']', i);
+            if (close != std::string::npos && close + 1 < md.size() && md[close + 1] == '(' && close - i < 300) {
+                const size_t end = md.find(')', close);
+                if (end != std::string::npos && end - close < 2000) {
+                    out += md.substr(i + 1, close - i - 1);
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        if (c == '*' || c == '`') continue;
+        if (c == '#' && (i == 0 || md[i - 1] == '\n' || md[i - 1] == '#')) continue;
+        if (c == '\n' || c == '\r' || c == '\t') {
+            if (!out.empty() && out.back() != ' ') out += ' ';
+            continue;
+        }
+        if (c == ' ' && (out.empty() || out.back() == ' ')) continue;
+        out += c;
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
+// The start of an article's text: the first `bytes` of the JSON string
+// "content" in an answer that may be cut off after them (an article is up
+// to a megabyte, and only its opening is wanted).
+std::string content_start(const std::string &body, size_t bytes) {
+    size_t from = body.find("\"content\"");
+    if (from == std::string::npos) return "";
+    from += 9;
+    while (from < body.size() && (body[from] == ' ' || body[from] == ':')) from++;
+    if (from >= body.size() || body[from] != '"') return "";
+    from++;
+    size_t i = from, good = from;
+    while (i < body.size() && i - from < bytes && body[i] != '"') {
+        if (body[i] == '\\') {
+            const size_t len = i + 1 < body.size() && body[i + 1] == 'u' ? 6 : 2;
+            if (i + len > body.size()) break;
+            i += len;
+        } else {
+            i++;
+        }
+        good = i;
+    }
+    Json j;
+    if (!Json::parse("\"" + body.substr(from, good - from) + "\"", j)) return "";
+    return j.str();
+}
+
+// What a name's article is called in an address: "black sea" is Black_Sea
+// (the site answers 404 to another case).
+std::string title_slug(const std::string &query) {
+    static const char *const kSmall[] = {"of", "the", "and", "in", "on", "for", "to", "a", "an", "de", "von", "van", "la"};
+    std::string out, w;
+    bool first = true;
+    for (size_t i = 0; i <= query.size(); i++) {
+        const char c = i < query.size() ? query[i] : ' ';
+        if (c != ' ' && c != '_') {
+            w += c;
+            continue;
+        }
+        if (w.empty()) continue;
+        const bool small = !first && std::any_of(std::begin(kSmall), std::end(kSmall), [&](const char *s) { return w == s; });
+        if (!small) w[0] = (char)toupper((unsigned char)w[0]);
+        out += (out.empty() ? "" : "_") + w;
+        w.clear();
+        first = false;
+    }
+    return out;
+}
+
+// Characters of an address's path: a slug as it is but for what would end it.
+std::string path_escape(const std::string &s) {
+    std::string out;
+    char hex[4];
+    for (unsigned char c : s) {
+        if (isalnum(c) || strchr("-_.~()',:!*", c)) {
+            out += (char)c;
+        } else {
+            snprintf(hex, sizeof hex, "%%%02X", c);
+            out += hex;
+        }
+    }
+    return out;
+}
+
+// A search of Grokipedia through the site's own search: the articles that
+// match, best first; the first with the opening of its text (one more
+// request), the others with the passage the search gives. ts5 asks under
+// its own name, as it asks Wikipedia's API. A site that refuses (a check
+// for robots, too many requests) is not asked again in another way but for
+// the article by its name, as a page: *refused says so, and the caller
+// goes to Wikipedia.
+std::string grokipedia_search(const std::string &query, int n, std::string &log, bool *failed, int first = 1, bool alone = true,
+                              int *count = nullptr) {
+    const std::string base = env_or("TS5_GROKIPEDIA_URL", "https://grokipedia.com");
+    const auto t0 = std::chrono::steady_clock::now();
+    auto took = [&] {
+        char b[32];
+        snprintf(b, sizeof b, "%.1f s", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        return std::string(b);
+    };
+    const auto fail = [&](const std::string &why, const std::string &detail) {
+        if (failed) *failed = true;
+        log = "web_search \"" + query + "\": Grokipedia " + detail + " (" + took() + ")";
+        return kFailed + why + kTell;
+    };
+    std::vector<Article> found;
+    HttpResponse resp;
+    std::string err;
+    const bool ok = http_get(base + "/api/full-text-search?query=" + url_escape(query) + "&limit=" + std::to_string(n) + "&offset=0",
+                             {"Accept: application/json"}, resp, err, 2u << 20, 20);
+    if (!ok) return fail("Grokipedia couldn't be reached", err);
+    Json r;
+    const bool json = resp.status == 200 && Json::parse(resp.body, r) && r.type == Json::OBJ;
+    if (json) {
+        for (auto &x : r["results"].a) {
+            const std::string slug = x["slug"].str(), title = x["title"].str();
+            if (slug.empty() || title.empty()) continue;
+            std::string text = x["snippet"].str();
+            for (char &c : text)
+                if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+            while (!text.empty() && text.back() == ' ') text.pop_back();
+            found.push_back({title, base + "/page/" + path_escape(slug), text});
+            if ((int)found.size() >= n) break;
+        }
+        // The first article's opening, in place of the search's one line.
+        if (!found.empty()) {
+            HttpResponse page;
+            std::string e2;
+            const std::string slug = r["results"].a[0]["slug"].str();
+            if (http_get(base + "/api/page-preview?slug=" + url_escape(slug) + "&content=1", {"Accept: application/json"}, page,
+                         e2, 64u << 10, 20) &&
+                page.status == 200) {
+                std::string text = markdown_plain(content_start(page.body, 8000));
+                // (The text starts with the article's name, as a heading.)
+                if (text.compare(0, found[0].title.size(), found[0].title) == 0) text.erase(0, found[0].title.size());
+                while (!text.empty() && text[0] == ' ') text.erase(0, 1);
+                if (text.size() > found[0].text.size()) found[0].text = text;
+            }
+        }
+    } else {
+        // Refused, or an answer that is no search result (a page that
+        // checks for robots): the article of that name, as a web page,
+        // when the search is a name (a few words).
+        const bool refused = resp.status == 403 || resp.status == 429 || resp.status == 503 ||
+                             (resp.status == 200 && resp.body.find('<') != std::string::npos);
+        const std::string detail = refused ? "refused the search (HTTP " + std::to_string(resp.status) + ")"
+                                   : resp.status != 200 ? "answered HTTP " + std::to_string(resp.status) : "sent no JSON";
+        const std::string slug = title_slug(query);
+        HttpResponse page;
+        std::string e2;
+        if (!refused || search_words(query).size() > 5 || slug.empty() ||
+            !http_get(base + "/page/" + path_escape(slug), page_headers(), page, e2, 2u << 20, 20) || page.status != 200 ||
+            page.body.find("<article") == std::string::npos)
+            return fail(refused ? "Grokipedia refused the search" : "Grokipedia had a problem", detail);
+        std::string name = slug;
+        for (char &c : name)
+            if (c == '_') c = ' ';
+        // (markdown_plain: on one line, the spaces closed up.)
+        std::string text = markdown_plain(html_text(page.body.substr(page.body.find("<article"))));
+        if (text.compare(0, name.size(), name) == 0) text.erase(0, name.size());
+        while (!text.empty() && text[0] == ' ') text.erase(0, 1);
+        found.push_back({name, base + "/page/" + path_escape(slug), text});
+        log = "web_search \"" + query + "\": 1 results (" + took() + ", Grokipedia, the article by its name: the search was refused)";
+    }
+    if (found.empty()) {
+        log = "web_search \"" + query + "\": 0 results (" + took() + ", Grokipedia)";
+        if (count) *count = 0;
+        return "Grokipedia has no article for \"" + query + "\"." +
+               (alone ? " Try a name or fewer words, or answer from what you know and say that it could not be looked up." : "");
+    }
+    const bool loose = !has_own_word(search_words(query), found);
+    const std::string only = alone ? " (the only search set up here: xAI's encyclopedia, written by its AI; no news or live data)"
+                                   : " (xAI's encyclopedia, written by its AI)";
+    std::string out = loose ? "Grokipedia has no article that clearly matches \"" + query + "\"" + only +
+                                  ". The closest it found, which may be about something else:"
+                            : "Grokipedia articles for \"" + query + "\"" + only + ":";
+    int i = 0;
+    for (auto &p : found)
+        out += "\n\n[" + std::to_string(first + i++) + "] " + p.title + "\n" + p.url + "\n" +
+               (p.text.empty() ? std::string("(no text)") : clip(p.text, 1200));
+    if (alone) out += kNone;
+    if (count) *count = i;
+    if (json)
+        log = "web_search \"" + query + "\": " + std::to_string(i) + " results (" + took() + ", Grokipedia" +
+              (loose ? ", a loose match" : "") + ")";
+    return out;
+}
+#endif
+
 }  // namespace
 
-std::string web_search(const std::string &arguments, std::string &log, bool *failed) {
+std::string web_search(const std::string &arguments, std::string &log, bool *failed, const std::string &asked) {
     Json args;
     std::string query;
     if (Json::parse(arguments, args)) query = args["query"].str();
@@ -298,11 +531,50 @@ std::string web_search(const std::string &arguments, std::string &log, bool *fai
     if (n < 1) n = 1;
     if (n > 20) n = 20;
     if (key.empty()) {
-        if (search_source() == "none") {
+        const std::string source = search_source(asked);
+        if (source == "none") {
             if (failed) *failed = true;
             log = "web_search \"" + query + "\": no search is set up";
             return kFailed + std::string("no web search is set up on this machine") + kTell;
         }
+#ifndef TS5_PS5
+        if (source == "grokipedia") {
+            bool bad = false;
+            std::string out = grokipedia_search(query, n, log, &bad);
+            if (!bad) return out;
+            // Grokipedia can't be searched now: Wikipedia, unless it is off, and the model is told.
+            if (env_or("TS5_WIKIPEDIA", "en") == "off") {
+                if (failed) *failed = true;
+                return out;
+            }
+            const std::string why = search_failure(out), glog = log;
+            out = wikipedia_search(query, n, log, failed);
+            log += "; before it: " + glog.substr(glog.find("\": ") == std::string::npos ? 0 : glog.find("\": ") + 3);
+            return failed && *failed ? out : "(" + why + ", so this search went to Wikipedia.)\n\n" + out;
+        }
+        if (source == "both") {
+            // Half the results from each, Wikipedia's first.
+            const int each = (n + 1) / 2;
+            bool wbad = false, gbad = false;
+            int wn = 0, gn = 0;
+            std::string wlog, glog;
+            const std::string w = wikipedia_search(query, each, wlog, &wbad, 1, false, &wn);
+            const std::string g = grokipedia_search(query, each, glog, &gbad, 1 + wn, false, &gn);
+            const auto tail = [&](const std::string &l) { return l.substr(l.find("\": ") == std::string::npos ? 0 : l.find("\": ") + 3); };
+            log = "web_search \"" + query + "\": " + tail(wlog) + "; " + tail(glog);
+            if (wbad && gbad) {
+                if (failed) *failed = true;
+                return kFailed + std::string("neither Wikipedia nor Grokipedia could be searched") + kTell;
+            }
+            std::string out = "Two encyclopedias were searched (the only search set up here: no news or live data).\n\n";
+            out += wbad ? "(Wikipedia could not be searched: " + search_failure(w) + ".)" : w;
+            out += "\n\n";
+            out += gbad ? "(Grokipedia could not be searched: " + search_failure(g) + ".)" : g;
+            if (wn + gn > 0) out += kNone;
+            else out += "\n\nTry a name or fewer words, or answer from what you know and say that it could not be looked up.";
+            return out;
+        }
+#endif
         return wikipedia_search(query, n, log, failed);
     }
     Json body = Json::object();

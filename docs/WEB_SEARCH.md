@@ -63,6 +63,38 @@ second on the PS5.
 it off (`off`). `/v1/models` says `"web_search": false, "web_search_source":
 "wikipedia"` then: `web_search` stays "the whole web, by itself".
 
+### Grokipedia (Linux)
+
+On Linux the encyclopedia can also be [Grokipedia](https://grokipedia.com)
+(xAI's, written by its AI), alone or together with Wikipedia:
+
+- In ts5-tui: Settings → Search source, or `/tools search grokipedia`
+  (`wikipedia`, `both`).
+- For `ts5 serve` and the service: `TS5_ENCYCLOPEDIA=grokipedia` or `both`
+  (in `/etc/default/tokenstation` for the service).
+- In a request: `"web_search_source": "grokipedia"` (or `"wikipedia"`,
+  `"both"`) beside `"web_search"`. `/v1/models` lists what can be picked
+  under `capabilities.encyclopedias`.
+
+ts5 uses the site's own search (`/api/full-text-search`), under ts5's own
+name, as with Wikipedia's API. The model gets the top articles with title,
+link and text: the first with the opening of the article (one more
+request, of which only the first 64 KiB are read), the others with the line
+the search gives. The tool's description tells the model that this is
+xAI's encyclopedia, written by an AI, so it can weigh it. **Both** asks the
+two and gives half the results from each, Wikipedia's first, numbered on.
+
+When Grokipedia can't be searched (the site is down, or answers with a
+check for robots), ts5 does not try to get around it. If the search was a
+name of a few words it opens the article of that name as an ordinary web
+page, once. Failing that, the search goes to Wikipedia and the model is
+told so in the first line of the results. With `TS5_WIKIPEDIA=off` it is a
+failed search instead. `TS5_GROKIPEDIA_URL` points at another address with
+the same API (the tests use it).
+
+Note that the site's `robots.txt` asks robots to stay out of `/api/`. ts5
+asks it only when a person's model searches, a request or two per search.
+
 ## Which models
 
 ts5 reads the tool format from each model's own chat template when it loads it.

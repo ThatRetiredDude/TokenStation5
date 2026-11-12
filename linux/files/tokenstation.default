@@ -9,6 +9,16 @@ MODELS_DIR=/var/lib/tokenstation/models
 HOST=0.0.0.0
 PORT=8081
 
+# The API keys other machines get in with. Make them on ts5-tui's Access
+# page (F6) or with: ts5 keys --file /var/lib/tokenstation/access/keys.tsv new NAME
+# Until "require" is on (the Access page, or: ts5 keys --file ... require on)
+# every machine that reaches the port gets in without one.
+KEYS=/var/lib/tokenstation/access/keys.tsv
+
+# The encyclopedia a search goes to when there is no web search key
+# (TAVILY_API_KEY): wikipedia, grokipedia or both.
+#TS5_ENCYCLOPEDIA=wikipedia
+
 # Context length in tokens, or "auto" for what fits in GPU memory.
 CONTEXT=8192
 

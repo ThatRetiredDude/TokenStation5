@@ -150,6 +150,37 @@ curl http://localhost:8081/v1/models
 This is the engine alone (`ts5 serve`), with the settings below. It starts on
 every boot on a machine without a desktop.
 
+### API keys (who can use it from another machine)
+
+Keys are made on this machine, shown once, and kept only as their SHA-256.
+ts5-tui's **Access** page (F6) does it with a few keys; in a script it is
+`ts5 keys`:
+
+```sh
+ts5 keys new "Open WebUI on the tower"   # prints the key, such as ts5-k7qp2-wx9md-3hf8r-tz6na
+ts5 keys                                 # the keys: name, on or off, made, last used
+ts5 keys off laptop                      # by name or id; on, remove
+ts5 keys require on                      # other machines now need a key that is on
+```
+
+Which keys: `ts5 keys` alone works on the keys of a model ts5-tui loads
+(`~/.local/share/tokenstation/access/keys.tsv`). For the background
+service add `--file /var/lib/tokenstation/access/keys.tsv` (your user has
+to be in the `tokenstation` group: `sudo adduser $USER tokenstation`, then
+log in again). The TV app has its own keys, on its Settings page.
+
+The rules, the same for all three:
+- **This machine never needs a key** (127.0.0.1: ts5-tui, a program beside it).
+- **Another machine gets in without one until "require" is on.** So an
+  upgrade changes nobody's access, and you choose when keys start to count.
+- With "require" on, a request from another machine without a key that is
+  on gets HTTP 401 with a line that says where keys are made.
+- A key made, turned off or removed holds from the next request: the model
+  stays loaded.
+
+In the app on the other machine, the server is `http://THIS-MACHINE:8081/v1`
+and the API key is the key.
+
 ## In a terminal: ts5-tui
 
 `ts5-tui` is TokenStation5 in a terminal, colorful and driven from the
@@ -176,7 +207,7 @@ ts5-tui --url http://ps5.local:8081  # another one
   (or one that fails) leaves the queue waiting: Enter sends it on, Esc drops
   it. Commands start with `/` and Tab completes them, and model
   names after `/model`: `/model`, `/download`, `/search`, `/new`, `/chats`, `/open`,
-  `/save`, `/copy`, `/find`, `/tune`, `/check`, `/bench`, `/usage`, `/keys`,
+  `/save`, `/copy`, `/find`, `/tune`, `/check`, `/bench`, `/usage`, `/access`,
   `/think on|off`, `/fan auto|cool|early|max`, `/theme`, `/help`, `/unload`,
   `/quit` (`exit`, `quit` or `q` work too). A `ts5 fetch URL FILE --sha256 HEX`
   line pasted at the prompt downloads that model.
@@ -196,9 +227,31 @@ ts5-tui --url http://ps5.local:8081  # another one
   for GPU memory, RAM, temperatures, fan, GPU load and speed), **F4**
   Settings (theme, thinking, temperature, answer length, context, speed or
   length, fan, tmux, mouse, when you quit), **F5**
-  Logs. A click on a page's name in the top bar goes there. Tab and Shift+Tab step through the pages, and so do 1 to 5 on any
+  Logs, **F6** Access (who can reach this TokenStation5, and its API keys:
+  below). A click on a page's name in the top bar goes there. Tab and Shift+Tab step through the pages, and so do 1 to 6 on any
   page but Chat. On a Mac, where macOS keeps the F keys, use those, fn+F1
-  to fn+F5, or `/chat`, `/models`, `/status`, `/settings`, `/logs`.
+  to fn+F6, or `/chat`, `/models`, `/status`, `/settings`, `/logs`, `/access`.
+- **Access (F6)**: who can use this TokenStation5 from another machine,
+  and with which key. Two switches and the list of keys:
+  - **Other devices**: whether a model ts5-tui loads can be reached from
+    other machines at all. Off by default (only this machine). Switched
+    on, the page shows the address to give an app, such as
+    `http://192.168.1.20:8081/v1`, and offers to load the model again,
+    which is when it takes hold.
+  - **They need a key**: on, another machine gets in only with a key that
+    is on. Switching Other devices on turns this on too.
+  - **Keys**: **N** makes one (name it after the app or the machine).
+    The key is shown once, by itself on a plain screen to select, with the
+    address beside it; ts5 keeps only its SHA-256. **Enter** turns a key
+    off or on, **D** removes it after asking. Each row says when the key
+    was made and last used.
+
+  The page works on the keys of the server in use: a model ts5-tui
+  loaded, or the background service's (then Other devices is the
+  service's `HOST` setting and is shown, not changed here). The TV
+  app's keys are listed but made on its own Settings page. Settings →
+  Server's key is the other direction: the key ts5-tui itself sends when
+  it talks to another machine's TokenStation5.
 - **Downloads**: every model tested on the PS5 (the TV app's catalog plus
   Qwen3 14B, Qwen3.5 9B, DeepSeek R1 14B, Qwen2.5 Coder 14B, Gemma 3 and 4
   12B, and the helpers Qwen3 0.6B, Llama 3.2 1B and Gemma 3 1B), each file
@@ -260,7 +313,11 @@ ts5-tui --url http://ps5.local:8081  # another one
 - **Web search**: Settings → Web search key takes a free key from
   [app.tavily.com](https://app.tavily.com). A model ts5-tui loads itself
   then searches the web when a question needs it (models that use tools;
-  see [docs/WEB_SEARCH.md](../docs/WEB_SEARCH.md)). The key is kept in
+  see [docs/WEB_SEARCH.md](../docs/WEB_SEARCH.md)). Without a key the
+  search is an encyclopedia's: Settings → Search source (or
+  `/tools search wikipedia`, `grokipedia`, `both`) picks **Wikipedia**
+  (the default), **Grokipedia** (xAI's encyclopedia, written by its AI;
+  when it can't be searched, Wikipedia is) or **Both**. The key is kept in
   ts5-tui's own settings file (yours alone to read) and handed to the
   engine in its environment, never on a command line. For the API-only
   service, add `TAVILY_API_KEY=tvly-...` to `/etc/default/tokenstation`
@@ -307,9 +364,19 @@ ts5-tui --url http://ps5.local:8081  # another one
 
     Settings → Browser (or `/browser`) says what shows the pages:
     - **Auto**: Chromium (or Chrome, Brave, Edge) if one is installed,
-      else the text view. `sudo apt install chromium` installs one; on
-      Debian 13 `chromium-headless-shell` is the smaller package and is
-      enough.
+      else the text view.
+    - **No browser installed?** The first time you switch the browser
+      tool on without one, ts5-tui asks which to install (arrows and
+      Enter): **Chromium** from your system's packages (`apt-get`, `dnf`,
+      `pacman` or `zypper`; sudo asks for your password; on Debian 13 it
+      is the small `chromium-headless-shell`), **Obscura** into your home
+      folder (a 72 MB download from its makers' GitHub release, 150 MB
+      once unpacked, checked against a SHA-256 built into ts5, no
+      password), or **Neither**. ts5-tui
+      steps aside while the install runs and comes back when you press
+      Enter. `/browser install` asks again, and
+      `ts5-tui --install-browser chromium|obscura` does it without the
+      app (`--dry-run` only says what it would run).
     - **Chromium**: the full browser, without a window, each page shut in
       its sandbox. On a PS5 beside a loaded 14B model it took 155 MiB
       waiting and up to 494 MiB on the heaviest page, gave the memory back
@@ -317,15 +384,17 @@ ts5-tui --url http://ps5.local:8081  # another one
     - **Obscura** ([github.com/h4ckf0r0day/obscura](https://github.com/h4ckf0r0day/obscura)):
       the light one, used only when you choose it (`/browser obscura`).
       It held 23 MiB waiting, about 200 MiB with a Wikipedia article open
-      and up to 430 MiB on heavy pages. It is young: on a PS5 it took 12
-      to 14 s to open an article that Chromium opened in 5 s, some sites
-      show nothing in it (YouTube, in our test), it has no sandbox, and
-      on some pages it gives no answer at all (Wikipedia's article on the
-      Black Sea, every time we tried). When that happens ts5 starts a
-      fresh one and opens the page again, and if that one is silent too
-      the page comes in the text view, with a line that says so. Such a
-      step takes about half a minute. Put its `obscura` program on your
-      PATH or in `~/.local/bin`.
+      and up to 430 MiB on heavy pages. It is young: some sites show
+      nothing in it (YouTube, in our test) and it has no sandbox. It runs
+      a page's scripts and answers ts5 on one thread, so it says nothing
+      while a heavy page's scripts are at work. ts5 therefore reads a
+      page as soon as it has loaded, opens the next page in a fresh
+      Obscura when the last one is still busy, and waits up to 45 s
+      (`TS5_BROWSER_PATIENCE_S`) for a page that is busy before it has
+      loaded. A page that isn't read by then comes in the text view, with
+      a line that says so. ts5-tui installs it for you (above), or put
+      its `obscura` program on your PATH or in `~/.local/bin`. Obscura
+      does not open addresses on this machine or your home network.
     - **Text view**: ts5's own page reader, nothing to install. No scripts
       run, so a page built by scripts shows little; links and search forms
       work.
@@ -547,6 +616,8 @@ The app's own settings are on its Settings page, as on the console.
 | `MODEL` | empty | API-only: the model file. Empty: the first `.gguf` in `MODELS_DIR`. |
 | `MODELS_DIR` | `/var/lib/tokenstation/models` | API-only: where models live. |
 | `HOST`, `PORT` | `0.0.0.0`, `8081` | API-only: where the API listens. |
+| `KEYS` | `/var/lib/tokenstation/access/keys.tsv` | API-only: the API keys other machines get in with (see API keys above). |
+| `TS5_ENCYCLOPEDIA` | `wikipedia` | The encyclopedia searched without a web search key: `wikipedia`, `grokipedia` or `both`. Add the line to use another. |
 | `CONTEXT` | `8192` | API-only: context length, or `auto` for what fits. |
 | `PS5_BOOST` | `0` | PS5: the clock boost off (`0`, faster for models: see below) or on (`1`). Skipped if `ps5_control` is missing. |
 | `PS5_CONTROL` | empty | Path to `ps5_control` if it isn't on the PATH. |

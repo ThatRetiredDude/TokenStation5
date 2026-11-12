@@ -37,6 +37,9 @@ public:
     // Without one, everyone gets in. /health never asks. Set before start().
     using Authorize = std::function<bool(const std::string &key, const std::string &client, std::string &name)>;
     void set_authorize(Authorize f) { state_.authorize = std::move(f); }
+    // Where this server's keys are made, for the 401's last words (after
+    // "Make one in "); without one, the PS5's Settings page. Set before start().
+    void set_key_hint(std::string where) { state_.key_hint = std::move(where); }
     // Names the peer of each connection, from its address and port, for
     // Authorize and usage.tsv; without one, the address. The title's
     // Tailscale tunnel reaches the API from 127.0.0.1 and names each of its
@@ -81,6 +84,7 @@ public:
         std::atomic<int> phase{0}, waiting{0};
         std::function<void(const UsageRecord &)> on_usage;
         Authorize authorize;
+        std::string key_hint;
     };
 
 private:
@@ -94,8 +98,11 @@ private:
 // The command line's server: start, answer with e, and block until the
 // process ends. Returns only when it cannot listen; on_listening runs once
 // the socket is up.
+// authorize: who gets in (Server::set_authorize), in place of TS5_API_KEY;
+// key_hint: Server::set_key_hint.
 int serve(Engine &e, const std::string &model_name, const std::string &host, int port,
           const std::function<void(int port)> &on_listening = nullptr,
-          const std::function<void(const UsageRecord &)> &on_usage = nullptr);
+          const std::function<void(const UsageRecord &)> &on_usage = nullptr,
+          const Server::Authorize &authorize = nullptr, const std::string &key_hint = "");
 
 }  // namespace ts5

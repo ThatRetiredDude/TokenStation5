@@ -22,6 +22,11 @@ fi
 ctx=${CONTEXT:-8192}
 [ "$ctx" = auto ] && ctx=0
 
+# The API keys other machines get in with ("ts5 keys", or ts5-tui's Access
+# page). Whether they need one is in the file itself; without a file, and
+# until "require" is turned on, everyone on the network gets in as before.
+export TS5_KEYS="${KEYS:-/var/lib/tokenstation/access/keys.tsv}"
+
 # EXTRA_ARGS is split on spaces on purpose.
 # shellcheck disable=SC2086
 exec /usr/bin/ts5 serve -m "$model" --host "${HOST:-0.0.0.0}" --port "${PORT:-8081}" -c "$ctx" ${EXTRA_ARGS:-}

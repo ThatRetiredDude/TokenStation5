@@ -36,8 +36,13 @@ and the key shows once on its row, such as `ts5-k7qp2-wx9md-3hf8r-tz6na`
 app then; the PS5 keeps only its SHA-256 (in `keys.tsv` in the title's
 folder). Cross turns a key off and on, square twice removes it. With
 "Require a key" on, a request without a key that's on gets HTTP 401
-(`invalid_api_key`); the Chat page on the PS5 never needs one. `ts5 serve`
-on a computer takes one key from `TS5_API_KEY`.
+(`invalid_api_key`); the Chat page on the PS5 never needs one.
+
+On Linux, `ts5 serve` and the background service have keys of the same
+kind, made on that machine: ts5-tui's Access page (F6), or `ts5 keys new
+NAME` (see "API keys" in [linux/README.md](../linux/README.md)). This
+machine itself never needs one, and other machines need one once "require"
+is on. `ts5 serve` also still takes one key from `TS5_API_KEY`.
 
 ## Away from home
 

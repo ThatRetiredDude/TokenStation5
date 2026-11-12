@@ -51,11 +51,14 @@ configure)
     if [ "$how" = install ] && { [ -e /dev/mp1 ] || [ -e /dev/icc ]; }; then
         /usr/bin/tokenstation-memory first || true
     fi
-    mkdir -p "$models"
+    mkdir -p "$models" /var/lib/tokenstation/access
     chown -R tokenstation:tokenstation /var/lib/tokenstation
     # Members of the tokenstation group may put models in the service's
     # folder without sudo (ts5-tui downloads there when the service runs).
     chmod 2775 "$models"
+    # The service's API keys (ts5 keys, ts5-tui's Access page): the service
+    # and the members of its group, nobody else.
+    chmod 2770 /var/lib/tokenstation/access
     chmod 0440 /etc/sudoers.d/tokenstation 2>/dev/null || true
     command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
     if [ -d /run/systemd/system ]; then

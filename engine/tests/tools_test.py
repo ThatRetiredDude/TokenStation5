@@ -1486,6 +1486,217 @@ def test_wikipedia(ts5, model, tdir):
     return failed
 
 
+class Grokipedia(http.server.BaseHTTPRequestHandler):
+    """grokipedia.com as it answered on 2026-11-12: its search (results with slug, title and a plain
+    snippet), an article's text (Markdown, links to /page/..., sources as empty links, up to a megabyte)
+    and the article as a web page. mode: "ok", "refused" (a robot check on the search, pages still
+    served), "down" (500)."""
+    seen = []
+    mode = "ok"
+
+    def do_GET(self):
+        u = urllib.parse.urlsplit(self.path)
+        q = urllib.parse.parse_qs(u.query)
+        Grokipedia.seen.append((u.path, q, self.headers.get("User-Agent", ""), self.headers.get("Accept", "")))
+        status, ctype = 200, "application/json"
+        if Grokipedia.mode == "down":
+            status, body = 500, b"{}"
+        elif u.path == "/api/full-text-search":
+            if Grokipedia.mode == "refused":
+                status, ctype, body = 403, "text/html", b"<html><title>Just a moment...</title><body>Checking your browser</body></html>"
+            else:
+                words = q.get("query", [""])[0]
+                results = []
+                if "nothing" not in words:
+                    results = [
+                        {"slug": "Black_Sea", "title": "Black Sea", "relevanceScore": 1000000, "viewCount": "0",
+                         "snippet": "Black Sea is a large inland body of water situated between southeastern Europe and the "
+                                    "Anatolian peninsula of Asia Minor, covering", "titleHighlights": [], "snippetHighlights": []},
+                        {"slug": "Black_Sea_Fleet", "title": "Black Sea Fleet", "relevanceScore": 2118.5, "viewCount": "0",
+                         "snippet": "The Black Sea Fleet is the fleet of the\nRussian Navy in the Black Sea..."},
+                        {"slug": "Krasnodar_Krai_(region)", "title": "Krasnodar Krai", "relevanceScore": 2000, "snippet": ""},
+                    ][:int(q.get("limit", ["5"])[0])]
+                if "DeltaNet" in words:
+                    results = [{"slug": "River_delta", "title": "River delta", "snippet": "Where a river meets the sea."}]
+                if "PS5" in words:
+                    results = [{"slug": "PlayStation_5", "title": "PlayStation 5",
+                                "snippet": "The PS5 is a home video game console; its firmware is updated over the network."},
+                               {"slug": "Firmware", "title": "Firmware", "snippet": "Firmware is software for a device's hardware."}]
+                body = json.dumps({"results": results, "totalCount": 10000, "searchTimeMs": 191.0, "facets": []}).encode()
+        elif u.path == "/api/page-preview":
+            slug = q.get("slug", [""])[0]
+            if slug != "Black_Sea":
+                body = b'{"found":false}'
+            else:
+                content = ("# Black Sea\n\nThe **Black Sea** is a large inland body of water between "
+                           "[southeastern Europe](/page/Southeastern_Europe) and [Anatolia](/page/Anatolia), "
+                           "covering about 436,000 km\u00b2.[](https://example.org/source-1)[](https://example.org/source-2) "
+                           "The [Danube](/page/Danube), the Dnieper and the Don flow into it. It is \"brackish\" \u2014 "
+                           "less salty than the oceans.\n\n## Geography\n\n" + "More about its shores. " * 60000)
+                body = json.dumps({"found": True, "page": {"slug": slug, "title": "Black Sea", "content": content,
+                                                           "description": "A sea.", "citations": []}}).encode()
+        elif u.path == "/page/Black_Sea":
+            ctype = "text/html; charset=utf-8"
+            body = ("<html><head><title>Black Sea</title></head><body><nav>Menu Home Search</nav><article class=\"article-enter\">"
+                    "<h1>Black Sea</h1><p>The Black Sea, read from the page itself, lies between Europe and Asia.</p>"
+                    "</article></body></html>").encode()
+        else:
+            status, ctype, body = 404, "text/html", b"<html><body>Not found</body></html>"
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except OSError:
+            pass  # (ts5 reads only the start of a long article)
+
+    def log_message(self, *a):
+        pass
+
+
+def test_grokipedia(ts5, model, tdir):
+    """Grokipedia as the encyclopedia searched without a key (TS5_ENCYCLOPEDIA, or a request's
+    "web_search_source"): alone, with Wikipedia, and what happens when it can't be searched."""
+    failed = 0
+    gsrv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Grokipedia)
+    wsrv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Wikipedia)
+    for srv in (gsrv, wsrv):
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    gurl, wurl = f"http://127.0.0.1:{gsrv.server_port}", f"http://127.0.0.1:{wsrv.server_port}"
+    env = {k: v for k, v in os.environ.items() if k not in ("TAVILY_API_KEY", "TS5_ENCYCLOPEDIA", "TS5_WIKIPEDIA")}
+    urls = {"TS5_GROKIPEDIA_URL": gurl, "TS5_WIKIPEDIA_URL": wurl}
+
+    def search(query, mode="ok", **more):
+        Grokipedia.mode = mode
+        g0, w0 = len(Grokipedia.seen), len(Wikipedia.seen)
+        r = subprocess.run([ts5, "search", query], capture_output=True, text=True, timeout=60,
+                           env=dict(env, **dict(urls, **more)))
+        return r.returncode, r.stdout, r.stderr, Grokipedia.seen[g0:], Wikipedia.seen[w0:]
+
+    grok = {"TS5_ENCYCLOPEDIA": "grokipedia"}
+    rc, out, err, g, w = search("black sea", **grok)
+    opening = ("The Black Sea is a large inland body of water between southeastern Europe and Anatolia, covering about "
+               "436,000 km\u00b2. The Danube, the Dnieper and the Don flow into it. It is \"brackish\" \u2014 less salty than "
+               "the oceans. Geography More about its shores.")
+    ok = (rc == 0 and out.startswith('Grokipedia articles for "black sea" (the only search set up here: xAI\'s encyclopedia, '
+                                     'written by its AI; no news or live data):\n\n[1] Black Sea\n' + gurl + "/page/Black_Sea\n" + opening)
+          and "[2] Black Sea Fleet\n" + gurl + "/page/Black_Sea_Fleet\nThe Black Sea Fleet is the fleet of the Russian Navy in the "
+          "Black Sea...\n\n[3] Krasnodar Krai\n" + gurl + "/page/Krasnodar_Krai_(region)\n(no text)\n\nIf none of these" in out and
+          "example.org" not in out and "](" not in out and "**" not in out and len(out) < 2400 and
+          "searching Grokipedia" in err and "3 results (" in err and ", Grokipedia)" in err and not w and
+          [x[0] for x in g] == ["/api/full-text-search", "/api/page-preview"] and g[0][1]["query"] == ["black sea"] and
+          g[0][1]["limit"] == ["5"] and g[1][1]["slug"] == ["Black_Sea"] and g[1][1]["content"] == ["1"])
+    failed += report(ok, "Grokipedia search: the articles, the first with its opening as plain words", f"rc {rc}\n{out}\n{err}\n{g}")
+    agents = {x[2] for x in g}
+    failed += report(len(agents) == 1 and "Mozilla" not in next(iter(agents)) and all(x[3] == "application/json" for x in g),
+                     "Grokipedia search: asked under ts5's own name, as Wikipedia's API is", f"{g}")
+    rc, out, err, g, w = search("nothing at all", **grok)
+    failed += report('Grokipedia has no article for "nothing at all". Try a name or fewer words' in out and
+                     len(g) == 1 and not w and "0 results (" in err, "Grokipedia search: nothing found", f"rc {rc}\n{out}\n{err}\n{g}")
+    rc, out, err, g, w = search("Gated DeltaNet", **grok)
+    failed += report(rc == 0 and out.startswith('Grokipedia has no article that clearly matches "Gated DeltaNet"') and
+                     "a loose match)" in err, "Grokipedia search: articles on something else are called a loose match",
+                     f"rc {rc}\n{out}\n{err}")
+    rc, out, err, g, w = search("black sea", TS5_SEARCH_RESULTS="2", **grok)
+    failed += report(g[0][1]["limit"] == ["2"] and "[2] Black Sea Fleet" in out and "[3]" not in out,
+                     "Grokipedia search: TS5_SEARCH_RESULTS", f"{out}\n{g}")
+
+    # Refused (a check for robots): the article by its name, as a page, once; no other way is tried.
+    rc, out, err, g, w = search("black sea", mode="refused", **grok)
+    ok = (rc == 0 and "[1] Black Sea\n" + gurl + "/page/Black_Sea\nThe Black Sea, read from the page itself, lies between Europe "
+          "and Asia.\n\nIf none" in out and
+          "Menu Home" not in out and [x[0] for x in g] == ["/api/full-text-search", "/page/Black_Sea"] and
+          "Mozilla" in g[1][2] and not w and "the search was refused" in err)
+    failed += report(ok, "Grokipedia refuses the search: the article of that name is read as a page", f"rc {rc}\n{out}\n{err}\n{g}")
+    # ... and with no article of that name, Wikipedia, and the model is told.
+    rc, out, err, g, w = search("PS5 firmware", mode="refused", **grok)
+    ok = (rc == 0 and out.startswith("(Grokipedia refused the search, so this search went to Wikipedia.)\n\nWikipedia articles "
+                                     'for "PS5 firmware"') and "[1] PlayStation 5 system software" in out and
+          [x[0] for x in g] == ["/api/full-text-search", "/page/PS5_Firmware"] and len(w) == 1 and
+          "Wikipedia" in err and "refused the search (HTTP 403)" in err)
+    failed += report(ok, "Grokipedia refuses, no article of that name: Wikipedia, and the model is told", f"rc {rc}\n{out}\n{err}\n{g}")
+    rc, out, err, g, w = search("what is the latest firmware of the PS5 console", mode="refused", **grok)
+    failed += report(rc == 0 and len(g) == 1 and len(w) >= 1 and "so this search went to Wikipedia" in out,
+                     "Grokipedia refuses a whole question: no page is guessed, Wikipedia", f"rc {rc}\n{out}\n{err}\n{g}")
+    rc, out, err, g, w = search("black sea", mode="down", **grok)
+    failed += report(rc == 0 and out.startswith("(Grokipedia had a problem, so this search went to Wikipedia.)") and len(g) == 1,
+                     "Grokipedia is down: Wikipedia", f"rc {rc}\n{out}\n{err}\n{g}")
+    rc, out, err, g, w = search("black sea", mode="down", TS5_WIKIPEDIA="off", **grok)
+    failed += report(rc == 1 and out.startswith("The search failed: Grokipedia had a problem") and not w,
+                     "Grokipedia is down and Wikipedia is off: the search failed", f"rc {rc}\n{out}\n{err}")
+    rc, out, err, g, w = search("black sea", TS5_GROKIPEDIA_URL="http://127.0.0.1:9", TS5_WIKIPEDIA="off", **grok)
+    failed += report(rc == 1 and "The search failed: Grokipedia couldn't be reached" in out, "Grokipedia search: no server",
+                     f"rc {rc}\n{out}\n{err}")
+
+    # Both: half the results from each, Wikipedia's first, numbered on.
+    both = {"TS5_ENCYCLOPEDIA": "both"}
+    rc, out, err, g, w = search("PS5 firmware", **both)
+    ok = (rc == 0 and out.startswith("Two encyclopedias were searched (the only search set up here: no news or live data).\n\n"
+                                     'Wikipedia articles for "PS5 firmware":\n\n[1] PlayStation 5 system software') and
+          '[3] Firmware\nhttps://en.wikipedia.org/wiki/Firmware\n(no opening text)\n\nGrokipedia articles for "PS5 firmware" '
+          "(xAI's encyclopedia, written by its AI):\n\n[4] PlayStation 5\n" + gurl + "/page/PlayStation_5\nThe PS5 is a home "
+          "video game console" in out and "[5] Firmware\n" + gurl + "/page/Firmware\n" in out and
+          out.count("If none of these is about what was asked") == 1 and out.rstrip().endswith("could not be looked up.") and
+          w[0][1]["gsrlimit"] == ["3"] and g[0][1]["limit"] == ["3"] and ", Wikipedia); 2 results (" in err and
+          ", Grokipedia)" in err and "searching Wikipedia and Grokipedia" in err)
+    failed += report(ok, "both: Wikipedia's articles, then Grokipedia's, numbered on", f"rc {rc}\n{out}\n{err}\n{g}\n{w}")
+    rc, out, err, g, w = search("PS5 firmware", mode="down", **both)
+    failed += report(rc == 0 and "[1] PlayStation 5 system software" in out and
+                     "(Grokipedia could not be searched: Grokipedia had a problem.)" in out,
+                     "both, Grokipedia down: Wikipedia's articles and a line about it", f"rc {rc}\n{out}\n{err}")
+    rc, out, err, g, w = search("PS5 firmware", mode="down", TS5_WIKIPEDIA_URL="http://127.0.0.1:9", **both)
+    failed += report(rc == 1 and "The search failed: neither Wikipedia nor Grokipedia could be searched" in out,
+                     "both, and neither answers: the search failed", f"rc {rc}\n{out}\n{err}")
+    rc, out, err, g, w = search("PS5 firmware", TS5_WIKIPEDIA="off", **both)
+    failed += report(rc == 0 and out.startswith('Grokipedia articles for "PS5 firmware" (the only search set up here') and not w,
+                     "both with TS5_WIKIPEDIA=off is Grokipedia alone", f"rc {rc}\n{out}\n{err}")
+    rc, out, err, g, w = search("PS5 firmware", TS5_ENCYCLOPEDIA="britannica")
+    failed += report(rc == 0 and out.startswith('Wikipedia articles for "PS5 firmware" (the only search set up here') and not g,
+                     "an encyclopedia ts5 doesn't know is Wikipedia", f"rc {rc}\n{out}\n{err}")
+
+    # The server: the request picks the encyclopedia; the tool's words name it.
+    Grokipedia.mode = "ok"
+    qwen = os.path.join(tdir, "Qwen-Qwen2.5-7B-Instruct.jinja")
+    for name, src, more, words, lists in [
+            ("the request asks for Grokipedia", "grokipedia", {}, "Search Grokipedia (xAI's encyclopedia, written by its AI). Returns",
+             ["Grokipedia articles for"]),
+            ("the request asks for both", "both", {}, "Search Wikipedia and Grokipedia (xAI's encyclopedia",
+             ["Wikipedia articles for", "Grokipedia articles for"]),
+            ("this machine's is Grokipedia", None, grok, "Search Grokipedia (xAI's", ["Grokipedia articles for"]),
+            ("the request asks for Wikipedia on a machine set to Grokipedia", "wikipedia", grok,
+             "Search Wikipedia. Returns the top articles", ["Wikipedia articles for"]),
+            ("a source ts5 doesn't know is this machine's", "bing", {}, "Search Wikipedia. Returns the top articles",
+             ["Wikipedia articles for"])]:
+        req = {"messages": [{"role": "user", "content": "Look up the PS5 firmware."}], "web_search": True}
+        if src:
+            req["web_search_source"] = src
+        msg, prompts, log = serve_turns(ts5, model, qwen, [CALL, "Done.", "Final answer."], req, key="",
+                                        more_env=dict(urls, **more))
+        other = [h for h in ("Wikipedia articles for", "Grokipedia articles for") if h not in lists]
+        ok = (msg["content"] == "Done." and words in prompts[0] and all(h in prompts[-1] for h in lists) and
+              not any(h in prompts[-1] for h in other))
+        failed += report(ok, f"encyclopedias in the server, {name}", f"{msg}\n{prompts[0][:700]}\n...\n{prompts[-1][-1200:]}\n{log}")
+    msg, prompts, log = serve_turns(ts5, model, qwen, ["Hello."],
+                                    {"messages": [{"role": "user", "content": "What does Grokipedia say about the Danube?"}],
+                                     "web_search": "auto", "web_search_source": "grokipedia", "tools": [WEATHER]}, key="", more_env=urls)
+    failed += report('"name": "web_search"' in prompts[-1], "a question that names Grokipedia is offered the search", prompts[-1][:600])
+    msg, prompts, log = serve_turns(ts5, model, qwen, [CALL, "Done.", "Final answer."],
+                                    {"messages": [{"role": "user", "content": "Look up the PS5 firmware."}], "web_search": True,
+                                     "web_search_source": "grokipedia"}, key="tvly-test", more_env=urls)
+    failed += report("Search the web. Returns the top results" in prompts[0] and "Grokipedia" not in prompts[0],
+                     "with a web search key the search is the web's, whatever the request picks", prompts[0][:600])
+    for name, key, more, want in [("no key", "", {}, "wikipedia"), ("no key, Grokipedia", "", grok, "grokipedia"),
+                                  ("no key, both", "", both, "both"), ("a key", "tvly-test", grok, "tavily")]:
+        models, _, _ = serve_turns(ts5, model, qwen, ["Hello."], None, key=key, more_env=dict(urls, **more))
+        caps = models["data"][0]["capabilities"]
+        failed += report(caps["web_search_source"] == want and caps.get("encyclopedias") == ["wikipedia", "grokipedia", "both"],
+                         f"/v1/models says the encyclopedia and which can be picked, {name}", f"{caps}")
+    gsrv.shutdown()
+    wsrv.shutdown()
+    return failed
+
+
 def test_thinking_guard(ts5, model, tdir):
     """A thinking that doesn't end is ended for the model, which then answers:
     one that repeats itself, one that leaves no room for the answer, one over
@@ -1673,7 +1884,7 @@ def main():
     failed = (test_prompts(ts5, model, tdir) + test_parser(ts5) + test_search(ts5) + test_search_loop(ts5, model, tdir) +
               test_gemma4_thinking(ts5, model, tdir) + test_every_model_has_tools(ts5, model, tdir) +
               test_thinking_marks(ts5, model, tdir) + test_page_reader(ts5) +
-              test_client_tools_and_search(ts5, model, tdir) + test_wikipedia(ts5, model, tdir) +
+              test_client_tools_and_search(ts5, model, tdir) + test_wikipedia(ts5, model, tdir) + test_grokipedia(ts5, model, tdir) +
               test_thinking_guard(ts5, model, tdir) + test_text_calls(ts5, model, tdir) +
               test_stop_words(ts5, model, tdir))
     if failed:

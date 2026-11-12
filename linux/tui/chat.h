@@ -148,6 +148,7 @@ struct ChatRequest {
     bool summarize = true;  // a chat that fills up is summarized and goes on (Settings)
     ToolSwitches tools;     // the tools the model is given (Settings)
     bool ts5 = false;       // the server is ts5: it takes "web_search"
+    std::string search_source;  // the encyclopedia a search without a key goes to ("": the server's own)
     std::vector<std::string> model_names;  // for /model's completion
     std::vector<std::string> catalog_names;  // for /download's
 };

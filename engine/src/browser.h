@@ -34,8 +34,10 @@
 //   auto        a Chromium if one is installed, else text. Obscura only
 //               when it is named (--kind obscura, or its path): in it a
 //               link is opened by its address and the way back is ts5's
-//               own list, as a page that moves on by itself leaves it
-//               answering nothing; stuck after a button, it is started again.
+//               own list, as it answers nothing while a page's scripts
+//               are at work (one thread for both); a page is read as soon
+//               as it has loaded, and silent for too long after a button,
+//               it is started again.
 // Only http:// and https:// pages are opened. A password box is never
 // numbered: only the user fills those in. The browser gets a profile folder
 // of its own under ~/.cache/tokenstation, removed when the program ends,

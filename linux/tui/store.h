@@ -48,8 +48,5 @@ namespace tui {
 // tokens and speeds over the last day and week, by app and by model, as
 // Markdown for the chat. "" when there is no such file.
 std::string usage_report();
-// The API keys (keys.tsv) as Markdown: names, on or off, made, last used.
-// Never the keys, which aren't kept. "" when there is no such file.
-std::string keys_report();
 
 }  // namespace tui

@@ -36,7 +36,7 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/check", "[NAME]", "the GPU check: the model's answers against the CPU's"},
         {"/bench", "[NAME]", "the speed test: prompt and answer tok/s"},
         {"/usage", "", "the API's use by app and model (last day and week)"},
-        {"/keys", "", "the API keys: names, on or off, last used"},
+        {"/access", "", "the Access page: who can reach this TokenStation5, and its API keys (/keys too)"},
         {"/think", "on|off|auto", "thinking before answering"},
         {"/tools", "[on|off|NAME on|off]", "the model's tools: search, pages, terminal, files, memory, browser (each has a switch)"},
         {"/browser", "[auto|obscura|chromium|text|PATH]", "the program the model's browser tool shows pages with"},
@@ -1132,7 +1132,7 @@ std::string body_for(Chat &c, const ChatRequest &rq, bool no_tools = false) {
     // "auto" also with no tools of its own: without a web search key the
     // server searches Wikipedia only for a request that asks.
     if (rq.ts5 && (no_tools || !rq.tools.web)) b += ",\"web_search\":false";
-    else if (rq.ts5) b += ",\"web_search\":\"auto\"";
+    else if (rq.ts5) b += ",\"web_search\":\"auto\"" + (rq.search_source.empty() ? "" : ",\"web_search_source\":\"" + rq.search_source + "\"");
     return b + "}";
 }
 
@@ -1783,7 +1783,7 @@ void complete(Chat &c, const ChatRequest &rq) {
         else if (cmd == "/download") pool = rq.catalog_names;
         else if (cmd == "/think") pool = {"on", "off", "auto"};
         else if (cmd == "/tools") pool = {"on", "off", "ask", "search", "pages", "terminal", "browser", "memory", "search on",
-                                          "search off", "pages on", "pages off", "terminal on", "terminal off",
+                                          "search off", "search wikipedia", "search grokipedia", "search both", "pages on", "pages off", "terminal on", "terminal off",
                                           "terminal ask", "terminal allow", "browser on", "browser off", "browser ask",
                                           "browser allow", "files", "files on", "files off", "files ask", "files allow",
                                           "memory on", "memory off"};
