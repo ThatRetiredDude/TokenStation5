@@ -33,6 +33,7 @@
 #include <thread>
 
 #include "app.h"
+#include "browser_install.h"
 #include "catalog.h"  // ps5/catalog.h: the TV app's downloads, pinned and hashed
 #include "chat.h"
 #include "files.h"
@@ -117,6 +118,14 @@ struct App {
     // A yes/no question over the page (Enter or y: yes; Esc or n: no).
     std::string ask_title, ask_text;
     std::function<void()> ask_yes;
+    // A question with more answers than yes and no: ask_title and ask_text
+    // above it, then a row an answer (arrows and Enter; Esc is the last).
+    struct Pick {
+        std::string label, note;
+        std::function<void()> run;
+    };
+    std::vector<Pick> pick;
+    int pick_sel = 0;
     std::string dl_dir;
     std::vector<SavedChat> chat_list;  // the last /chats
     int answers_saved = 0;
@@ -186,6 +195,69 @@ void show_toast(const std::string &msg, uint32_t color = 0, double secs = 4) {
     g->toast = msg;
     g->toast_until = now_s() + secs;
     g->toast_color = color ? color : g->th->accent;
+}
+
+// Leaves ts5-tui's screen for a command that talks to the person in the
+// terminal (sudo's password, a download's progress), waits for Enter and
+// comes back. The command's exit code.
+int run_in_terminal(const std::string &cmd, const std::string &title) {
+    const bool mouse = term_mouse_on();
+    term_leave();
+    printf("\n%s\n\n", title.c_str());
+    fflush(stdout);
+    const int st = system(cmd.c_str());
+    const int rc = st == -1 ? 127 : WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+    printf("\nEnter goes back to ts5-tui. ");
+    fflush(stdout);
+    for (int c; (c = getchar()) != EOF && c != '\n';) {}
+    clearerr(stdin);
+    term_enter();
+    set_mouse(mouse);
+    g->full_redraw = true;
+    return rc;
+}
+
+// The offer to install a browser for the model's browser tool: Chromium
+// from this system's packages, Obscura into the home folder, or neither
+// (pages are then read as plain text). Made once when the tool is switched
+// on with no browser here, and whenever /browser install asks for it.
+void browser_install(const std::string &what) {
+    const int rc = run_in_terminal(browser_install_cmd(what, false),
+                                   "ts5-tui: installing " + std::string(what == "obscura" ? "Obscura" : "Chromium") +
+                                       " for the model's browser");
+    browser_stop();
+    if (rc != 0) {
+        show_toast(std::string(what == "obscura" ? "Obscura" : "Chromium") +
+                       " was not installed: pages are read as plain text (/browser install asks again)",
+                   g->th->warn, 9);
+        return;
+    }
+    // Auto takes a Chromium, and Obscura only when it is chosen: installing it is choosing it.
+    if (what == "obscura") g->cfg.browser = "obscura";
+    else if (g->cfg.browser == "text" || g->cfg.browser == "obscura") g->cfg.browser = "auto";
+    g->cfg.save();
+    show_toast(what == "obscura" ? "Obscura is installed, and the model's browser uses it" : "Chromium is installed, and the model's browser uses it",
+               g->th->good, 6);
+}
+
+void browser_offer() {
+    g->cfg.browser_offered = true;
+    g->cfg.save();
+    g->ask_title = " A browser for the model? ";
+    g->ask_text = "No browser is installed here, so the model reads pages as plain text: their scripts don't run, and only "
+                  "links and simple forms work. A browser shows it the page as you would see it.";
+    g->pick = {
+        {"Chromium", "the full browser, from this system's packages (sudo password)",
+         [] { browser_install("chromium"); }},
+        {"Obscura", "light on memory, but young. 72 MB into your home folder, no password", [] { browser_install("obscura"); }},
+        {"Neither", "pages stay plain text. /browser install asks again", [] {}},
+    };
+    g->pick_sel = 0;
+}
+
+// The browser tool was just switched on: the offer, the first time no browser is found.
+void browser_tool_on() {
+    if (!g->cfg.browser_offered && g->cfg.browser != "text" && browsers_found().empty()) browser_offer();
 }
 
 void apply_theme() {
@@ -2573,6 +2645,7 @@ std::vector<SetRow> settings_rows() {
             g->cfg.browser_ask = to != 2;
             if (!g->cfg.tool_browser) browser_stop();
             save();
+            if (at == 0 && to != 0) browser_tool_on();
         };
         r.push_back(x);
     }
@@ -2587,7 +2660,7 @@ std::vector<SetRow> settings_rows() {
         const std::vector<std::string> found = browsers_found();
         std::string have;
         for (auto &f : found) have += (have.empty() ? "" : " and ") + f;
-        const std::string none = "no browser is installed, so pages are read as plain text without their scripts";
+        const std::string none = "no browser is installed, so pages are read as plain text (/browser install)";
         // "Chromium" stands for whichever of its family is here (Chrome, Brave, Edge).
         const bool has = at == 1   ? std::find(found.begin(), found.end(), "Obscura") != found.end()
                          : at == 2 ? !found.empty() && found[0] != "Obscura"
@@ -2604,7 +2677,7 @@ std::vector<SetRow> settings_rows() {
                  : has ? (at == 1 ? std::string("Obscura: light on memory, but young: slower than Chromium on heavy pages, and "
                                                 "some sites show nothing in it")
                                   : found[0] + ": the full browser, each page shut in its sandbox")
-                       : std::string(names[at]) + " is not installed: pages are read as plain text until it is"};
+                       : std::string(names[at]) + " is not installed: pages are read as plain text until it is (/browser install)"};
         x.change = [save, at](int d) {
             g->cfg.browser = ids[((at < 0 ? 0 : at) + d + 4) % 4];
             browser_stop();
@@ -2942,7 +3015,7 @@ void draw() {
         case ACCESS: draw_access(); break;
         default: break;
     }
-    if (g->ask_yes) {
+    if (g->ask_yes || !g->pick.empty()) {
         const Theme &t = *g->th;
         const int w = std::min(s.w - 4, 76);
         std::vector<std::string> lines;
@@ -2959,14 +3032,33 @@ void draw() {
             }
             if (!line.empty()) lines.push_back(line);
         }
-        const int h = (int)lines.size() + 4;
+        const int np = (int)g->pick.size();
+        const int h = (int)lines.size() + 4 + (np ? 2 * np + 1 : 0);
         const int x = (s.w - w) / 2, y = std::max(2, (s.h - h) / 2);
         box(s, x, y, w, h, Style(t.warn, t.panel2), Style(t.fg, t.panel2), g->ask_title, Style(t.warn, t.panel2, BOLD));
         for (int i = 0; i < (int)lines.size(); i++) s.put(x + 2, y + 1 + i, lines[i], Style(t.fg, t.panel2));
-        int bx = s.put(x + 2, y + h - 2, "Enter/y", Style(t.accent2, t.panel2, BOLD));
-        bx = s.put(bx, y + h - 2, " yes   ", Style(t.dim, t.panel2));
-        bx = s.put(bx, y + h - 2, "Esc/n", Style(t.accent2, t.panel2, BOLD));
-        s.put(bx, y + h - 2, " no", Style(t.dim, t.panel2));
+        if (np) {
+            for (int i = 0; i < np; i++) {
+                const bool on = i == g->pick_sel;
+                const int py = y + 2 + (int)lines.size() + 2 * i;
+                const Style row = on ? Style(t.bg, t.accent, BOLD) : Style(t.fg, t.panel2, BOLD);
+                s.put(x + 2, py, on ? "▸ " : "  ", Style(t.accent, t.panel2, BOLD));
+                s.put(x + 4, py, " " + g->pick[(size_t)i].label + " ", row);
+                s.put(x + 5, py + 1, fit(g->pick[(size_t)i].note, w - 8), Style(t.dim, t.panel2));
+            }
+            int bx = s.put(x + 2, y + h - 2, "↑↓", Style(t.accent2, t.panel2, BOLD));
+            bx = s.put(bx, y + h - 2, " choose   ", Style(t.dim, t.panel2));
+            bx = s.put(bx, y + h - 2, "Enter", Style(t.accent2, t.panel2, BOLD));
+            bx = s.put(bx, y + h - 2, " take it   ", Style(t.dim, t.panel2));
+            bx = s.put(bx, y + h - 2, "Esc", Style(t.accent2, t.panel2, BOLD));
+            s.put(bx, y + h - 2, " " + g->pick.back().label, Style(t.dim, t.panel2));
+        }
+        if (!np) {
+            int bx = s.put(x + 2, y + h - 2, "Enter/y", Style(t.accent2, t.panel2, BOLD));
+            bx = s.put(bx, y + h - 2, " yes   ", Style(t.dim, t.panel2));
+            bx = s.put(bx, y + h - 2, "Esc/n", Style(t.accent2, t.panel2, BOLD));
+            s.put(bx, y + h - 2, " no", Style(t.dim, t.panel2));
+        }
     }
     if (!g->toast.empty() && now_s() < g->toast_until) {
         const std::string m = " " + fit(g->toast, s.w - 6) + " ";
@@ -3224,6 +3316,7 @@ void run_command(const std::string &line) {
                         : r.on == &f.tool_files   ? &f.files_ask
                                                   : nullptr;
             found = true;
+            const bool browser_was = f.tool_browser;
             if (to == "on" || to == "off") *r.on = to == "on";
             else if (to.empty()) *r.on = !*r.on;
             else if (ask && (to == "ask" || to == "allow")) *r.on = true, *ask = to == "ask";
@@ -3235,6 +3328,7 @@ void run_command(const std::string &line) {
                                (!*r.on ? "off" : !ask ? "on" : *ask ? "on, asks first" : "on, never asks") +
                                (*r.on && !f.tools_on() ? "  (all tools are off: /tools on)" : ""),
                            g->th->accent, 3);
+                if (f.tool_browser && !browser_was) browser_tool_on();
             }
         }
         if (!found) {
@@ -3289,7 +3383,10 @@ void run_command(const std::string &line) {
         // "/browser": which program shows the pages; "/browser chromium" or a path picks one.
         Config &f = g->cfg;
         const std::vector<std::string> found = browsers_found();
-        if (!arg.empty()) {
+        if (arg == "install") {
+            if (found.empty() || (found.size() == 1 && found[0] == "Obscura")) browser_offer();
+            else show_toast("A browser is installed here already: " + found[0], g->th->accent, 5);
+        } else if (!arg.empty()) {
             // A program by its path or its name: kept as the whole path, so
             // it is the same program wherever ts5-tui is started next.
             const bool word = arg == "auto" || arg == "obscura" || arg == "chromium" || arg == "text";
@@ -3306,11 +3403,11 @@ void run_command(const std::string &line) {
             std::string have;
             for (auto &x : found) have += (have.empty() ? "" : " and ") + x;
             std::string h = "**The model's browser**  (`/tools browser on` or `off`; `/browser auto`, `obscura`, `chromium`, "
-                            "`text` or a program's path)\n";
+                            "`text` or a program's path; `/browser install` installs one)\n";
             h += std::string("The tool is **") + (f.tool_browser ? "on" : "off") + "**. Pages are shown with: **" + f.browser + "**.\n";
             h += found.empty() ? "No browser is installed here, so pages are read as plain text: their scripts don't run, and "
-                                 "only links and simple forms work. Installing Chromium (`sudo apt install chromium`) or "
-                                 "Obscura gives the model the page as you would see it.\n"
+                                 "only links and simple forms work. `/browser install` installs Chromium or Obscura, "
+                                 "which give the model the page as you would see it.\n"
                                : "Installed here: " + have + ". Auto takes " +
                                      (found[0] == "Obscura" ? std::string("the text view: Obscura is young (slower than Chromium "
                                                                           "on heavy pages, and some sites show nothing in it), "
@@ -4207,7 +4304,7 @@ void mouse(const Event &e) {
         g->dragged = true;
         // A drag is someone selecting text, which the terminal can't do
         // while the clicks come here: the chat, plain, to select from.
-        if (g->cur == CHAT && !g->ask_yes) {
+        if (g->cur == CHAT && !g->ask_yes && g->pick.empty()) {
             size_t at = 0;
             const int msg = chat_msg_at(g->chat, g->down_y);
             const std::string text = chat_copy_text(g->chat, -1, -1, false, nullptr, &at, msg);
@@ -4230,7 +4327,7 @@ void mouse(const Event &e) {
     if (e.mouse != M_UP) return;
     const bool click = g->down_y == e.y && abs(e.x - g->down_x) <= 1 && !g->dragged;
     g->down_y = -1;
-    if (!click || g->ask_yes) return;
+    if (!click || g->ask_yes || !g->pick.empty()) return;
     if (e.y == 0) {
         for (size_t i = 0; i < g->tab_x.size(); i++)
             if (e.x >= g->tab_x[i].first && e.x < g->tab_x[i].second) go((ScreenId)i);
@@ -4251,6 +4348,18 @@ void handle(const Event &e) {
     }
     if (e.key == K_MOUSE) {
         mouse(e);
+        return;
+    }
+    if (!g->pick.empty()) {
+        // Arrows and Enter, never a letter: a word typed on can't answer it.
+        const int n = (int)g->pick.size();
+        if (e.key == K_UP) g->pick_sel = (g->pick_sel + n - 1) % n;
+        else if (e.key == K_DOWN || e.key == K_TAB) g->pick_sel = (g->pick_sel + 1) % n;
+        else if (e.key == K_ENTER || e.key == K_ESC) {
+            const auto run = g->pick[(size_t)(e.key == K_ESC ? n - 1 : g->pick_sel)].run;
+            g->pick.clear();
+            if (run) run();
+        }
         return;
     }
     if (g->ask_yes) {
@@ -4295,7 +4404,7 @@ void tick() {
             if (g->die_hist.size() > 600) g->die_hist.erase(g->die_hist.begin(), g->die_hist.begin() + 100);
         }
     }
-    if (g->cur == ACCESS && !g->acc_typing && !g->ask_yes && t - g->acc_at >= 5) access_read();
+    if (g->cur == ACCESS && !g->acc_typing && !g->ask_yes && g->pick.empty() && t - g->acc_at >= 5) access_read();
     g->loader.pump();
     g->tuner.pump();
     job_follow();
@@ -4658,7 +4767,8 @@ int usage(FILE *f) {
     fprintf(f,
             "ts5-tui: TokenStation5 in a terminal.\n\n"
             "  ts5-tui [--url http://HOST:8081] [--key KEY] [--theme %s] [--no-intro] [--no-tools] [--tmux|--no-tmux]\n"
-            "  ts5-tui --mcp | --mcp-tools | --mcp-call TOOL ['{\"ARGUMENT\": ...}']\n\n"
+            "  ts5-tui --mcp | --mcp-tools | --mcp-call TOOL ['{\"ARGUMENT\": ...}']\n"
+            "  ts5-tui --install-browser chromium|obscura [--dry-run]\n\n"
             "It talks to a running TokenStation (the tokenstation service, the TV app, or\n"
             "`ts5 serve`; Models can start one), so it uses no GPU memory itself and works\n"
             "over SSH. From a plain terminal it runs in its own tmux session (\"ts5\"), so SSH\n"
@@ -4669,6 +4779,9 @@ int usage(FILE *f) {
             "--mcp: starts the outside tools' programs (mcp.json, beside tui.conf), says what\n"
             "each one offers, and ends them (--mcp-tools: as the model is given them);\n"
             "--mcp-call makes one call and prints its result.\n"
+            "--install-browser: a browser for the model's browser tool. chromium: from this\n"
+            "system's packages (sudo asks for the password). obscura: its makers' release,\n"
+            "checked by SHA-256, into the home folder. --dry-run only says what would be done.\n"
             "Settings are kept in ~/.config/tokenstation/tui.conf.\n"
             "Keys: F1-F6 or Tab for the pages, Enter, arrows, Esc; Ctrl+Q quits.\n",
             [] {
@@ -4712,6 +4825,8 @@ int main(int argc, char **argv) {
     bool intro = app.cfg.intro;
     int tmux = 0;  // 1 --tmux, -1 --no-tmux
     int mcp_mode = 0;  // 1 --mcp, 2 --mcp-call, 3 --mcp-tools
+    std::string install;  // --install-browser chromium|obscura
+    bool dry = false;
     std::vector<std::pair<std::string, std::string>> mcp_calls;
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
@@ -4730,6 +4845,8 @@ int main(int argc, char **argv) {
             const std::string tool = next();
             mcp_calls.push_back({tool, i + 1 < argc && argv[i + 1][0] != '-' ? next() : std::string()});
         }
+        else if (a == "--install-browser") install = next();
+        else if (a == "--dry-run") dry = true;
         else if (a == "-h" || a == "--help") return usage(stdout);
         else if (a == "--version") {
             printf("ts5-tui %s\n", TS5_VERSION);
@@ -4738,6 +4855,11 @@ int main(int argc, char **argv) {
             fprintf(stderr, "ts5-tui: unknown option %s\n\n", a.c_str());
             return usage(stderr);
         }
+    }
+    if (!install.empty()) {
+        // A browser for the model's browser tool, without the screen (what the offer in the app runs).
+        const int st = system(browser_install_cmd(install, dry).c_str());
+        return st == -1 ? 127 : WIFEXITED(st) ? WEXITSTATUS(st) : 1;
     }
     // A plain URL without a scheme or port is fine: "ps5.local" is http://ps5.local:8081.
     apply_theme();

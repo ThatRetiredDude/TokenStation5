@@ -655,15 +655,19 @@ void browser_stop() {
 std::vector<std::string> browsers_found() {
     // In the order `ts5 browser` takes them (engine/src/browser.cpp).
     std::vector<std::string> out;
+    // (ts5 browser looks in ~/.local/bin too, on the PATH or not: an Obscura ts5-tui installed is there.)
+    const auto here = [](const std::string &name) {
+        return !which(name).empty() || !which(home_dir() + "/.local/bin/" + name).empty();
+    };
     for (const char *name : {"chromium", "chromium-browser", "chromium-headless-shell", "chrome-headless-shell",
                              "headless_shell", "google-chrome", "google-chrome-stable", "chrome", "brave-browser",
                              "microsoft-edge"})
-        if (!which(name).empty()) {
+        if (here(name)) {
             out.push_back(name == std::string("brave-browser") ? "Brave" : name == std::string("microsoft-edge") ? "Edge"
                           : std::string(name).find("google") != std::string::npos ? "Chrome" : "Chromium");
             break;
         }
-    if (!which("obscura").empty()) out.push_back("Obscura");
+    if (here("obscura")) out.push_back("Obscura");
     return out;
 }
 

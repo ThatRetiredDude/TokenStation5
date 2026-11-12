@@ -1206,14 +1206,16 @@ private:
             std::string again;
             if (!awake(again, false)) return fail(again);
         }
-        bool ok = cdp_->call("Page.navigate", "{\"url\":" + json_escape(url) + "}", r, err, 40000);
+        // Obscura runs the scripts a page has in it while it opens the page,
+        // and answers when they are done (a script that never ends: after
+        // 31 s, when Obscura 0.2.6 stops it itself). It has patience_s for
+        // that. A fresh Obscura would only start on the same scripts, so a
+        // page not opened by then comes in the text view (go).
+        const bool ok =
+            cdp_->call("Page.navigate", "{\"url\":" + json_escape(url) + "}", r, err, obscura_ ? (int)(patience_s(true) * 1000) : 40000);
         if (!ok && obscura_ && !cdp_->gone() && err.find("didn't answer") != npos) {
-            // (An Obscura that is stuck: once more, with a fresh one.)
-            quit();
-            std::string again;
-            if (!awake(again, false)) return fail(again);
-            ok = cdp_->call("Page.navigate", "{\"url\":" + json_escape(url) + "}", r, err, 40000);
-            unread_ = !ok && cdp_ && !cdp_->gone() && err.find("didn't answer") != npos;
+            unread_ = true;
+            return fail("The page could not be opened: the browser didn't answer.");
         }
         if (!ok) return fail("The page could not be opened: " + lost(err) + ".");
         const std::string net = r["errorText"].str();

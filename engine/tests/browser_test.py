@@ -2,12 +2,14 @@
 """ts5's browser for a model (`ts5 browser`): a page as text with its links,
 boxes and buttons numbered, and the numbers acted on.
 
-    browser_test.py TS5 [BROWSER]
+    browser_test.py TS5 [BROWSER [OBSCURA]]
 
 Runs against pages served from this machine. Without BROWSER only the text
 view is tested (ts5's own fetch and page reader). BROWSER is a Chromium or
 Chrome program (or "auto" for the first one installed): the same pages are
-then driven through it over its debugging port, scripts and all.
+then driven through it over its debugging port, scripts and all. OBSCURA is
+the real Obscura program (ts5-tui --install-browser obscura puts it in
+~/.local/bin): how ts5 waits for it is then checked with it too.
 """
 import http.server
 import json
@@ -591,6 +593,67 @@ def test_browser(ts5, program, base):
         check(b.close() == 0, "obscura: ends when its input closes")
 
 
+def test_obscura(ts5, obscura, base):
+    """The real Obscura (browser_test.py TS5 CHROMIUM OBSCURA): how ts5 waits for it. Obscura runs a
+    page's scripts on the thread that answers ts5, so it is silent while they run."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        os.symlink(os.path.abspath(obscura), os.path.join(tmp, "obscura"))
+        # (The pages are on this machine, which Obscura opens only when told it may.)
+        env = dict(os.environ, PATH=tmp + os.pathsep + "/usr/bin" + os.pathsep + "/bin", HOME=tmp, OBSCURA_ALLOW_PRIVATE_NETWORK="1")
+        trace = os.path.join(tmp, "trace.txt")
+        b = Browser(ts5, "--program", "auto", "--kind", "obscura", env=dict(env, TS5_BROWSER_TRACE=trace))
+        a = b.ask(do="open", url=base + "/scripted.html")
+        check(a["ok"] and a["mode"] == "obscura" and "Built by a script" in a["text"], "real obscura: it shows a page a script built", a)
+        a = b.ask(do="open", url=base + "/")
+        a = b.ask(do="click", n=number(a["text"], r"Volga\[(\d+)\]"))
+        check(a["ok"] and a["mode"] == "obscura" and a["url"] == base + "/volga.html", "real obscura: a link is followed", a)
+        a = b.ask(do="back")
+        check(a["ok"] and a["url"] == base + "/", "real obscura: and back", a)
+        t0 = time.time()
+        a = b.ask(do="open", url=base + "/late?s=12")
+        took = time.time() - t0
+        check(a["ok"] and a["mode"] == "obscura" and "Words that are there at once" in a["text"] and took < 6,
+              f"real obscura: a page whose scripts keep it busy after loading is read at once ({took:.1f} s)", a)
+        time.sleep(1)
+        t0 = time.time()
+        a = b.ask(do="open", url=base + "/volga.html")
+        took = time.time() - t0
+        check(a["ok"] and a["mode"] == "obscura" and a["url"] == base + "/volga.html" and took < 9,
+              f"real obscura: the page after it is not kept waiting behind those scripts ({took:.1f} s)", a)
+        t0 = time.time()
+        a = b.ask(do="open", url=base + "/slowstart?s=12")
+        took = time.time() - t0
+        check(a["ok"] and a["mode"] == "obscura" and "Made by the slow script" in a["text"] and 11 < took < 20,
+              f"real obscura: a page busy for 12 s before it is complete is waited for ({took:.1f} s)", a)
+        a = b.ask(do="open", url=base + "/built")
+        check(a["ok"] and a["mode"] == "obscura" and "These words came a moment after" in a["text"],
+              "real obscura: a page built after it is complete is read once it is built", a)
+        check(not piled(trace), "real obscura: no script is sent while another is unanswered", piled(trace))
+        check(b.close() == 0, "real obscura: ends when its input closes")
+
+        # A script that never ends: Obscura stops it itself after half a minute, and ts5 waits that long.
+        b = Browser(ts5, "--program", "auto", "--kind", "obscura", env=dict(env, TS5_BROWSER_TRACE=trace))
+        t0 = time.time()
+        a = b.ask(do="open", url=base + "/busy")
+        took = time.time() - t0
+        check(a["ok"] and a["mode"] == "obscura" and "Words that are there without a script" in a["text"] and took < 44,
+              f"real obscura: a page whose script never ends is read when Obscura stops the script ({took:.0f} s)", a)
+        check(b.close() == 0, "real obscura: ends when its input closes")
+        # ... and with less time than that, the page comes in the text view, and the next is Obscura's again.
+        b = Browser(ts5, "--program", "auto", "--kind", "obscura", env=dict(env, TS5_BROWSER_TRACE=trace, TS5_BROWSER_PATIENCE_S="7"))
+        t0 = time.time()
+        a = b.ask(do="open", url=base + "/busy")
+        t = a["text"]
+        took = time.time() - t0
+        check(a["ok"] and a["mode"] == "text" and "Obscura did not get this page read in time" in t and
+              "Words that are there without a script" in t and 6 < took < 16,
+              f"real obscura: with 7 s to wait, that page is shown in the text view ({took:.0f} s)", a)
+        a = b.ask(do="click", n=number(t, r"the Volga\[(\d+)\]"))
+        check(a["ok"] and a["mode"] == "obscura" and a["url"] == base + "/volga.html", "real obscura: and a link on it opens in Obscura again", a)
+        check(b.close() == 0, "real obscura: ends when its input closes")
+
+
 def piled(trace):
     """The scripts in a TS5_BROWSER_TRACE file that were sent while an earlier one had no answer yet."""
     asked, out = set(), []
@@ -685,6 +748,8 @@ def main():
             print("     (no Chromium installed: the browser checks are left out)")
     if program:
         test_browser(ts5, program, base)
+    if len(sys.argv) > 3:
+        test_obscura(ts5, sys.argv[3], base)
     if failed:
         sys.exit(f"browser_test: {failed} failed")
     print("browser_test: all passed")

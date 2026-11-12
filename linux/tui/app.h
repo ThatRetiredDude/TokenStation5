@@ -63,6 +63,7 @@ struct Config {
     // user turns them on, and asking first.
     bool tool_files = false, files_ask = true;
     std::string browser = "auto";    // "auto", "obscura", "chromium", "text", or a browser program's path
+    bool browser_offered = false;    // the offer to install one was answered (it is made once; /browser install after)
     std::string path;       // where it is saved
     void load();
     void save() const;
