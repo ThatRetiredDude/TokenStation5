@@ -188,6 +188,7 @@ bool save_chat(Chat &c, std::string &why) {
             if (user && first.empty()) first = m.content;
             body += std::string(n++ ? ",\n" : "\n") + "{\"user\":" + (user ? "true" : "false") +
                     ",\"text\":" + ts5::json_escape(m.content);
+            if (user && m.steer) body += ",\"steer\":true";
             if (!user && !m.calls.empty()) {
                 body += ",\"calls\":[";
                 for (size_t k = 0; k < m.calls.size(); k++)
@@ -196,7 +197,7 @@ bool save_chat(Chat &c, std::string &why) {
                 body += "]";
             }
             if (!user) {
-                const char *end = !m.error.empty() ? "failed" : m.stopped ? "stopped" : "done";
+                const char *end = !m.error.empty() ? "failed" : m.stopped ? "stopped" : m.steered ? "steered" : "done";
                 body += ",\"model\":" + ts5::json_escape(m.model) + fmt(",\"tps\":%.2f", m.gen_tps) +
                         ",\"tokens\":" + std::to_string(m.gen_tokens) + ",\"end\":\"" + end + "\"";
                 if (!m.error.empty()) body += ",\"error\":" + ts5::json_escape(m.error);
@@ -263,6 +264,7 @@ bool load_chat(Chat &c, const SavedChat &s, std::string &why) {
                 m.keep_from = (int)from;
             } else if (t["user"].boolean(false)) {
                 m.role = "user";
+                m.steer = t["steer"].boolean(false);
                 c.history.push_back(m.content);
             } else if (!t["tool"].str().empty()) {
                 m.role = "tool";
@@ -280,6 +282,7 @@ bool load_chat(Chat &c, const SavedChat &s, std::string &why) {
                 m.reasoning = t["reasoning"].str();
                 const std::string end = t["end"].str("done");
                 m.stopped = end == "stopped";
+                m.steered = end == "steered";
                 if (end == "failed") m.error = t["error"].str("it failed");
             }
             c.msgs.push_back(m);

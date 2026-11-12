@@ -2040,6 +2040,49 @@ def report(ok, name, detail):
     return 0 if ok else 1
 
 
+def test_steer_notes(ts5, model, tdir):
+    """A note the user sends while the answer is coming (ts5-tui's steering)
+    is a user message after the tools' results, or right after the user's
+    own message where the model's cut turn had no words. Formats whose turns
+    alternate get it in the same user turn; ChatML's template writes two."""
+    failed = 0
+    g3 = os.path.join(tdir, "gemma-3-cut-down.jinja")
+    with open(g3, "w") as f:
+        f.write("{% for m in messages %}<start_of_turn>{{ m['role'] }}\n{{ m['content'] }}<end_of_turn>\n"
+                "{% endfor %}<start_of_turn>model\n")
+    q = {"role": "user", "content": "Run ls"}
+    a = {"role": "assistant", "content": "", "tool_calls": [call("web_search", {"query": "it"})]}
+    r = {"role": "tool", "tool_call_id": "call_1", "content": "nothing"}
+    n = {"role": "user", "content": "Use Python instead"}
+    got, err = prompt_of(ts5, model, g3, [q, a, r, n], [SEARCH])
+    failed += compare("Gemma 3: a note after the results, in their turn", got[got.find("<start_of_turn>user\n<tool_response>"):],
+                      "<start_of_turn>user\n<tool_response>\nnothing\n</tool_response>\n\nUse Python instead"
+                      "<end_of_turn>\n<start_of_turn>model\n")
+    got, err = prompt_of(ts5, model, g3, [q, n])
+    failed += compare("Gemma 3: two user messages, one turn", got,
+                      "<start_of_turn>user\nRun ls\n\nUse Python instead<end_of_turn>\n<start_of_turn>model\n")
+    got, err = prompt_of(ts5, model, g3, [q, n], [SEARCH])
+    failed += compare("Gemma 3 with tools: two user messages, one turn", got[got.find("\n\nRun ls"):],
+                      "\n\nRun ls\n\nUse Python instead<end_of_turn>\n<start_of_turn>model\n")
+    g4 = os.path.join(tdir, G4_MIN + ".jinja")
+    got, err = prompt_of(ts5, model, g4, [q, n], enable_thinking=False)
+    if got.count("<|turn>user") != 1 or "Run ls\n\nUse Python instead<turn|>" not in got:
+        failed += 1
+        print(f"FAIL Gemma 4: two user messages, one turn\n{got!r}")
+    else:
+        print("ok   Gemma 4: two user messages, one turn")
+    got, err = prompt_of(ts5, model, os.path.join(tdir, R1_OLD + ".jinja"), [q, a, r, n], [SEARCH])
+    failed += compare("DeepSeek R1: a note after the results, in their turn", got[got.find("<｜User｜>Result of"):],
+                      "<｜User｜>Result of web_search:\nnothing" + THEN_ANSWER + "\n\nUse Python instead<｜Assistant｜><think>\n")
+    # ChatML (Qwen): two turns, as its own template writes them.
+    path = os.path.join(tdir, "Qwen-Qwen3-0.6B.jinja")
+    for case, msgs, tools in (("a note after the results", [q, a, r, n], [SEARCH]), ("two user messages", [q, n], [])):
+        want = render(open(path).read(), msgs, tools, bos="", enable_thinking=True)
+        got, err = prompt_of(ts5, model, path, msgs, tools)
+        failed += compare(f"Qwen3: {case}, as its template", got, want)
+    return failed
+
+
 def main():
     ts5, model, tdir = sys.argv[1:4]
     failed = (test_prompts(ts5, model, tdir) + test_parser(ts5) + test_search(ts5) + test_search_loop(ts5, model, tdir) +
@@ -2047,7 +2090,8 @@ def main():
               test_thinking_marks(ts5, model, tdir) + test_page_reader(ts5) +
               test_client_tools_and_search(ts5, model, tdir) + test_wikipedia(ts5, model, tdir) + test_grokipedia(ts5, model, tdir) +
               test_thinking_guard(ts5, model, tdir) + test_text_calls(ts5, model, tdir) +
-              test_stop_words(ts5, model, tdir) + test_steady_calls(ts5, model, tdir))
+              test_stop_words(ts5, model, tdir) + test_steady_calls(ts5, model, tdir) +
+              test_steer_notes(ts5, model, tdir))
     if failed:
         sys.exit(f"tools_test: {failed} failed")
     print("tools_test: all passed")

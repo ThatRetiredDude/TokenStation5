@@ -33,6 +33,10 @@ struct Msg {
     std::string role;
     std::string content, reasoning, error, model;
     bool done = false, stopped = false;
+    // steered: an answer cut short where a note of the user's came in (what
+    // it wrote up to there stays, and the model goes on after the note).
+    // steer: a user message that is such a note, sent while the answer came.
+    bool steered = false, steer = false;
     double t0 = 0, t_first = 0, t_think_end = 0, t_end = 0;
     int chunks = 0;
     double gen_tps = 0, prompt_tps = 0;
@@ -88,6 +92,16 @@ struct Chat {
     // Enter (go on) or Esc (drop them).
     std::vector<std::string> queued;
     bool queue_held = false;
+    // Notes typed while an answer is coming (Enter; Tab queues instead):
+    // each goes into the conversation as the user's own message at the first
+    // point the model can read it. While the model writes, at once: its turn
+    // stops there, what it wrote stays, and it goes on after the note. While
+    // a tool it called runs, when that is done, before the model's next turn.
+    // Under mu. steer_cut: one waits, so the turn being written stops;
+    // streaming: the answer's worker is in a request (under mu).
+    std::vector<std::string> steer;
+    std::atomic<bool> steer_cut{false};
+    bool streaming = false;
     // A command the model wants to run (run_command) waits for the user's
     // answer: ask 1 waiting, 2 run it, 3 refused; ask_always: every command
     // of this chat runs without asking again. ask_cmd under mu. The answer
@@ -167,6 +181,10 @@ void chat_note(Chat &c, const std::string &text);
 // Sends the first of the queued messages, after a summary where the chat is
 // nearly full. False when an answer is still coming or none waits.
 bool chat_send_queued(Chat &c, const ChatRequest &rq);
+// Notes for the answer (Chat::steer) that came as it ended, too late for
+// it: they wait first in the queue, to go as the next messages. With the
+// answer done; true when there were some.
+bool chat_steer_to_queue(Chat &c);
 // The summary. The model is asked for a detailed summary of the chat so far;
 // from then on it gets that and the last messages (a quarter of its context
 // at most) in place of the whole chat, which stays on screen and saved.

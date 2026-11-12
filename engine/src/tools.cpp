@@ -502,8 +502,18 @@ std::string render_gemma(const std::vector<Message> &all, const std::vector<Json
         for (auto &tool : tools) system += "\n" + tool.dump();
         system += "\n</tools>";
     }
+    std::string last;  // the role of the turn written last
     auto turn = [&](const std::string &role, const std::string &content) {
-        s += "<start_of_turn>" + role + "\n" + content + "<end_of_turn>\n";
+        static const std::string end = "<end_of_turn>\n";
+        // A user's message after the tools' results (a note sent while the
+        // answer was coming) goes on in their turn: Gemma's turns alternate.
+        if (role == "user" && last == "user" && s.size() >= end.size()) {
+            s.resize(s.size() - end.size());
+            s += "\n\n" + content + end;
+            return;
+        }
+        s += "<start_of_turn>" + role + "\n" + content + end;
+        last = role;
     };
     for (size_t i = 0; i < msgs.size(); i++) {
         const Message &m = msgs[i];
@@ -581,7 +591,10 @@ std::string render_generic(const Tokenizer &t, const std::vector<Message> &all, 
         } else {
             std::string c = m.content;
             if (in_user && !words.empty()) c = words + "\n\n" + c, words.clear();
-            plain.push_back({m.role, c});
+            // A user's message after the results (a note sent while the
+            // answer was coming): the same turn, as the results are a user's.
+            if (m.role == "user" && !plain.empty() && plain.back().role == "user") plain.back().content += "\n\n" + c;
+            else plain.push_back({m.role, c});
         }
     }
     if (in_user && !words.empty()) plain.push_back({"user", words});
@@ -1077,8 +1090,23 @@ std::vector<Message> parse_messages(const Json &messages) {
     return out;
 }
 
-std::string render_chat(const Tokenizer &t, const std::vector<Message> &msgs, const std::vector<Json> &tools,
+// Two user messages in a row, one after the other with "\n\n" between.
+static std::vector<Message> joined_users(const std::vector<Message> &msgs) {
+    std::vector<Message> out;
+    for (auto &m : msgs) {
+        if (m.role == "user" && !out.empty() && out.back().role == "user") out.back().content += "\n\n" + m.content;
+        else out.push_back(m);
+    }
+    return out;
+}
+
+std::string render_chat(const Tokenizer &t, const std::vector<Message> &given, const std::vector<Json> &tools,
                         const std::string &today, bool think) {
+    // Two user messages in a row (ts5-tui: a note sent while the answer was
+    // coming, after a turn it cut before the model wrote a word) are one turn
+    // where the format's turns alternate: Gemma's, Mistral's, DeepSeek's.
+    const Tokenizer::Chat cf = t.chat_format();
+    const std::vector<Message> msgs = cf == Tokenizer::CHATML || cf == Tokenizer::LLAMA3 ? given : joined_users(given);
     const ToolFormat f = tool_format(t);
     // Gemma 4's thinking is in its prompt from the top (a system turn), and
     // its earlier turns' thinking is left out, tools or not.
