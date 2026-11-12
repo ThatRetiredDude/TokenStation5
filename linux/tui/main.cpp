@@ -206,6 +206,7 @@ struct App {
     std::string qr_short;  // the notes in a line, for a short terminal
     int qr_sel = 0;
     bool qr_sign_in = false;
+    int qr_link_y = -1;  // the sign-in link's row, as last drawn
     std::string logs_src;
     double logs_checked = 0;
 };
@@ -742,8 +743,8 @@ void qr_sign_in_open() {
     g->qr_sign_in = true;
     g->qr_title = " Sign in to Tailscale ";
     g->qr_notes = {"Scan it with your phone's camera and sign in: this machine joins your tailnet as " +
-                       (g->tn_host.empty() ? std::string("tokenstation5") : g->tn_host) + ".",
-                   "Or open the link on any device: " + g->tn_sign_in};
+                       (g->tn_host.empty() ? std::string("tokenstation5") : g->tn_host) + ". Or open this link on any device:",
+                   g->tn_sign_in};
     g->qr_short = "Scan it to sign in, or open " + g->tn_sign_in;
     g->qr_plain = "Sign in to Tailscale with this link, on any device:\n\n" + g->tn_sign_in +
                   "\n\nThis machine then joins your tailnet. The link works once.\n";
@@ -3296,7 +3297,9 @@ void draw_access() {
 std::vector<std::vector<bool>> qr_modules(const std::string &text) {
     std::vector<std::vector<bool>> m;
     try {
-        const qrcodegen::QrCode q = qrcodegen::QrCode::encodeText(text.c_str(), qrcodegen::QrCode::Ecc::LOW);
+        // Medium error correction at least (more where the same size holds
+        // it): a terminal's drawing loses some (gaps between rows).
+        const qrcodegen::QrCode q = qrcodegen::QrCode::encodeText(text.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
         const int n = q.getSize();
         m.assign((size_t)n, std::vector<bool>((size_t)n));
         for (int y = 0; y < n; y++)
@@ -3307,23 +3310,37 @@ std::vector<std::vector<bool>> qr_modules(const std::string &text) {
     return m;
 }
 
-// Its width on screen with a quiet zone of `quiet` modules each side: a
-// column per module and two modules a row (half blocks), so it is square.
-int qr_cols(const std::vector<std::vector<bool>> &m, int quiet) { return (int)m.size() + 2 * quiet; }
-int qr_rows(const std::vector<std::vector<bool>> &m, int quiet) { return (qr_cols(m, quiet) + 1) / 2; }
+// Its size on screen with a quiet zone of `quiet` modules each side. big:
+// two columns and a row a module, drawn as background alone, so neither the
+// font nor the line spacing can leave gaps in it (on the iPhone's camera a
+// half-block code failed in Apple's Terminal); else a column a module and
+// two modules a row (half blocks). Square either way.
+int qr_cols(const std::vector<std::vector<bool>> &m, int quiet, bool big) {
+    return ((int)m.size() + 2 * quiet) * (big ? 2 : 1);
+}
+int qr_rows(const std::vector<std::vector<bool>> &m, int quiet, bool big) {
+    const int side = (int)m.size() + 2 * quiet;
+    return big ? side : (side + 1) / 2;
+}
 
 // Black on white whatever the theme (a phone's camera wants dark modules on
-// a light ground, quiet zone included).
-void qr_draw(Screen &s, int x, int y, const std::vector<std::vector<bool>> &m, int quiet) {
-    const int n = (int)m.size(), side = qr_cols(m, quiet);
+// a light ground, quiet zone included). Two modules of one color in a cell
+// are its background, with no glyph to fall short of the cell's edges.
+void qr_draw(Screen &s, int x, int y, const std::vector<std::vector<bool>> &m, int quiet, bool big) {
+    const int n = (int)m.size(), side = n + 2 * quiet;
     const auto dark = [&](int mx, int my) {
         mx -= quiet, my -= quiet;
         return mx >= 0 && my >= 0 && mx < n && my < n && m[(size_t)my][(size_t)mx];
     };
-    for (int r = 0; r < qr_rows(m, quiet); r++)
+    const auto ink = [](bool d) { return d ? 0x000000u : 0xFFFFFFu; };
+    for (int r = 0; r < qr_rows(m, quiet, big); r++)
         for (int c = 0; c < side; c++) {
-            const uint32_t top = dark(c, 2 * r) ? 0x000000 : 0xFFFFFF, bottom = dark(c, 2 * r + 1) ? 0x000000 : 0xFFFFFF;
-            s.put(x + c, y + r, "▀", Style(top, bottom));
+            if (big) {
+                s.put(x + 2 * c, y + r, "  ", Style(ink(dark(c, r)), ink(dark(c, r))));
+                continue;
+            }
+            const bool top = dark(c, 2 * r), bottom = dark(c, 2 * r + 1);
+            s.put(x + c, y + r, top == bottom ? " " : "▀", Style(ink(top), ink(bottom)));
         }
 }
 
@@ -3352,32 +3369,36 @@ void draw_qr_overlay() {
         }
         return lines;
     };
-    // The roomiest way that fits: a quiet zone of 2 modules, then 1, then
-    // the short note alone and no blank rows (an 80x24 terminal), then the
-    // text without the code.
-    int quiet = 2, tallest = 0, all_w = 0, widest = 0, box_w = 0, box_h = 0;
-    bool compact = false, fits = false;
+    // One code at a time (←→ for the next): two side by side, the camera
+    // took neither. The roomiest way that fits: full cells with the quiet
+    // zone the standard asks for (4 modules), then half blocks with 4, 2
+    // and 1, then the short note alone and no blank rows (an 80x24
+    // terminal), then the text without the code.
+    static const struct {
+        int quiet;
+        bool big, compact;
+    } kWays[] = {{4, true, false}, {4, false, false}, {2, false, false}, {1, false, false}, {1, false, true}};
+    int quiet = 4, tallest = 0, widest = 0, box_w = 0, box_h = 0;
+    bool big = false, compact = false, fits = false;
     std::vector<std::string> lines;
-    for (int step = 0; step < 3 && !fits; step++) {
-        quiet = step == 0 ? 2 : 1;
-        compact = step == 2;
-        tallest = all_w = widest = 0;
+    for (const auto &way : kWays) {
+        quiet = way.quiet, big = way.big, compact = way.compact;
+        tallest = widest = 0;
         for (const auto &m : codes) {
-            tallest = std::max(tallest, qr_rows(m, quiet));
-            widest = std::max(widest, qr_cols(m, quiet));
-            all_w += qr_cols(m, quiet) + 4;
+            tallest = std::max(tallest, qr_rows(m, quiet, big));
+            widest = std::max(widest, qr_cols(m, quiet, big));
         }
-        const bool side_by_side = all_w + 2 <= s.w - 4;
-        box_w = std::min(s.w - 2, std::max(side_by_side ? all_w + 2 : widest + 6, 72));
+        box_w = std::min(s.w - 2, std::max(widest + 6, 72));
         lines = wrap(compact ? std::vector<std::string>{g->qr_short} : g->qr_notes, box_w - 4);
         box_h = 2 + (labels ? 1 : 0) + tallest + (int)lines.size() + 1 + (compact ? 0 : 2);
-        fits = box_h <= s.h - 1;
+        fits = box_h <= s.h - 1 && widest + 4 <= box_w;
+        if (fits) break;
     }
     if (!fits) {
         lines = wrap(g->qr_notes, box_w - 4);
         box_h = std::min(s.h - 1, 2 + 2 + (int)lines.size() + 2);
     }
-    const bool side_by_side = all_w + 2 <= s.w - 4;
+    const bool side_by_side = false;
     const int x = (s.w - box_w) / 2, y = std::max(0, (s.h - box_h) / 2);
     box(s, x, y, box_w, box_h, Style(t.accent, t.panel2), Style(t.fg, t.panel2), g->qr_title, Style(t.accent, t.panel2, BOLD));
     int ty = y + 1;
@@ -3391,25 +3412,44 @@ void draw_qr_overlay() {
         else
             shown.push_back(std::min(g->qr_sel, (int)codes.size() - 1));
         int used = 0;
-        for (int i : shown) used += qr_cols(codes[(size_t)i], quiet) + (used ? 4 : 0);
+        for (int i : shown) used += qr_cols(codes[(size_t)i], quiet, big) + (used ? 4 : 0);
         int cx = x + (box_w - used) / 2;
         for (int i : shown) {
             const auto &m = codes[(size_t)i];
             const std::string label = g->qr[(size_t)i].label +
                                       (!side_by_side && codes.size() > 1 ? fmt("  (%d of %d, ←→)", i + 1, (int)codes.size()) : "");
             if (labels)
-                s.put(cx + std::max(0, (qr_cols(m, quiet) - text_width(label)) / 2), ty, label, Style(t.fg, t.panel2, BOLD));
+                s.put(cx + std::max(0, (qr_cols(m, quiet, big) - text_width(label)) / 2), ty, label, Style(t.fg, t.panel2, BOLD));
             if (m.empty()) s.put(cx, ty + (labels ? 1 : 0), "too long for a QR code", Style(t.bad, t.panel2));
-            else qr_draw(s, cx, ty + (labels ? 1 : 0), m, quiet);
-            cx += qr_cols(m, quiet) + 4;
+            else qr_draw(s, cx, ty + (labels ? 1 : 0), m, quiet, big);
+            cx += qr_cols(m, quiet, big) + 4;
         }
         ty += (labels ? 1 : 0) + tallest + (compact ? 0 : 1);
     }
-    for (const std::string &l : lines) s.put(x + 2, ty++, fit(l, box_w - 4), Style(t.dim, t.panel2));
+    // The sign-in link on a line of its own, whole (a terminal opens a
+    // link it sees: Cmd+click in Apple's Terminal), and a click copies it.
+    g->qr_link_y = -1;
+    for (const std::string &l : lines) {
+        const size_t at = g->qr_sign_in && !g->tn_sign_in.empty() ? l.find(g->tn_sign_in) : std::string::npos;
+        if (at == std::string::npos) {
+            s.put(x + 2, ty++, fit(l, box_w - 4), Style(t.dim, t.panel2));
+            continue;
+        }
+        g->qr_link_y = ty;
+        const int lx = s.put(x + 2, ty, l.substr(0, at), Style(t.dim, t.panel2));
+        s.put(lx, ty++, g->tn_sign_in, Style(t.accent2, t.panel2, UNDER));
+    }
     int bx = s.put(x + 2, y + box_h - 2, "Esc", Style(t.accent2, t.panel2, BOLD));
     bx = s.put(bx, y + box_h - 2, " close   ", Style(t.dim, t.panel2));
+    if (g->qr_sign_in) {
+        bx = s.put(bx, y + box_h - 2, "C", Style(t.accent2, t.panel2, BOLD));
+        bx = s.put(bx, y + box_h - 2, " or a click on the link copies it   ", Style(t.dim, t.panel2));
+    } else if (g->qr.size() > 1) {
+        bx = s.put(bx, y + box_h - 2, "←→", Style(t.accent2, t.panel2, BOLD));
+        bx = s.put(bx, y + box_h - 2, " the next code   ", Style(t.dim, t.panel2));
+    }
     bx = s.put(bx, y + box_h - 2, "V", Style(t.accent2, t.panel2, BOLD));
-    s.put(bx, y + box_h - 2, g->qr_sign_in ? " the link as text, to copy" : " as text, to copy", Style(t.dim, t.panel2));
+    s.put(bx, y + box_h - 2, g->qr_sign_in ? " as text" : " as text, to copy", Style(t.dim, t.panel2));
 }
 
 // ---- Chat (drawing in chat.cpp) ----
@@ -4937,6 +4977,13 @@ void handle(const Event &e) {
             const std::string text = g->qr_plain, title = g->qr_plain_title;
             qr_close();
             view_open(text, title, 0, false);
+        } else if (g->qr_sign_in && ((e.key == K_CHAR && (e.ch == "c" || e.ch == "C")) ||
+                                     (e.key == K_MOUSE && e.mouse == M_DOWN && e.button == 0 && e.y == g->qr_link_y))) {
+            // To the clipboard where the terminal takes it, and shown alone
+            // to open or select where it doesn't (Apple's Terminal).
+            const std::string link = g->tn_sign_in;
+            qr_close();
+            copy_out(link, "the Tailscale sign-in link");
         } else if (e.key >= K_F1 && e.key <= K_F6) {
             qr_close();
             global_key(e);

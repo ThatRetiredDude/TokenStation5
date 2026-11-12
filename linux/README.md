@@ -286,15 +286,18 @@ ts5-tui --url http://ps5.local:8081  # another one
     is on. Switching Other devices on turns this on too.
   - **Tailscale**: on, the server joins your tailnet ([Tailscale](#tailscale-reach-it-from-anywhere)).
     The first time, a QR code of the sign-in link opens: scan it with your
-    phone and sign in, and it closes once the machine is connected. The row
+    phone and sign in, and it closes once the machine is connected. A click
+    on the link under it (or **C**) copies the link instead. The row
     then shows its name, its 100.x address and how many other devices
     the tailnet has; **D** signs out.
   - **SSH via Tailscale**: on, the tailnet's port 22 reaches this machine's
     own SSH server, and the row shows the command (`ssh you@tokenstation5`).
     Off by default; it says so when no SSH server is installed.
   - **Connect an app**: makes a key (name it after the app) and shows two
-    QR codes, the address (the tailnet's when Tailscale is connected, else
-    this network's) and the key, to scan into the app on a phone.
+    QR codes, one at a time (**←→**): the address (the tailnet's when
+    Tailscale is connected, else this network's) and the key, to scan into
+    the app on a phone. A taller window draws the codes bigger, which suits
+    a phone's camera best.
   - **Keys**: **N** makes one (name it after the app or the machine).
     The key is shown once, with the address, as the same QR codes; **V**
     shows them as plain text to select. ts5 keeps only its SHA-256.
