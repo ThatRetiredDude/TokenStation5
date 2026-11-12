@@ -928,7 +928,7 @@ void Client::control_loop() {
         std::map<std::string, std::vector<Filter::Rule>> filters;
         bool have_filter = false;
         std::string self_name, self_address, control_says;
-        bool said_no_address = false;
+        bool said_no_address = false, start_over = false;
         int update_id = 0;
         bool ok = true;
         while (ok && !changed()) {
@@ -1051,6 +1051,15 @@ void Client::control_loop() {
                         log("the control server gave " TS5_DEVICE_NAME " no tailnet address%s%s",
                             control_says.empty() ? "" : ": ", control_says.c_str());
                     }
+                    // Keys that came from somewhere else (a copied folder, or
+                    // a build that named another OS): Tailscale won't take
+                    // them back, so start over as a new device.
+                    if (me.address.empty() && (control_says.find("OS changed") != std::string::npos ||
+                                               control_says.find("copied between devices") != std::string::npos)) {
+                        start_over = true;
+                        ok = false;
+                        break;
+                    }
                 }
                 const Json &dm = m["DERPMap"];
                 if (dm.type == Json::OBJ) {
@@ -1131,7 +1140,7 @@ void Client::control_loop() {
                     TRACE("trace: a map message of %zu bytes on its way, %zu here", len, mr->body.size() - 4);
                 }
             }
-            if (changed_map) {
+            if (changed_map && !start_over) {
                 std::vector<Peer> peers;
                 for (const auto &[id, n] : nodes) {
                     Peer p;
@@ -1195,6 +1204,23 @@ void Client::control_loop() {
             }
         }
         c.close();
+        if (start_over && !changed()) {
+            log("Tailscale takes these keys for ones copied from another device; " TS5_DEVICE_NAME
+                " starts over as a new device, which needs a new sign-in");
+            Keys fresh;
+            if (!new_keys(fresh, cfg.control_url) || !save_keys(cfg.state_file, fresh)) {
+                fail("can't make or keep " TS5_DEVICE_NAME "'s keys");
+                continue;
+            }
+            std::lock_guard<std::mutex> lk(mu_);
+            status_ = Status();
+            status_.state = Status::Starting;
+            map_.address.clear();
+            map_.peers.clear();
+            map_.filter = Filter();
+            map_.version++;
+            continue;
+        }
         if (!changed()) fail(why.empty() ? "the control server connection ended" : why);
     }
 }

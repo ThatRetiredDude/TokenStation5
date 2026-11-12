@@ -205,6 +205,10 @@ it at a Headscale server, and `TS5_TS_AUTH_KEY` signs in with an auth key
 instead of the QR code (in `/etc/default/tokenstation` for the service). The
 TV app has its own Tailscale, on its Settings page.
 
+`tailscale.tsv` belongs to one machine. Copied to another, Tailscale refuses
+it as copied state; ts5 then starts over as a new device and asks for a new
+sign-in (remove the old one in Tailscale's admin console).
+
 ## In a terminal: ts5-tui
 
 `ts5-tui` is TokenStation5 in a terminal, colorful and driven from the
