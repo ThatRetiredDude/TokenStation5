@@ -211,6 +211,15 @@ SSH (VS Code Remote-SSH, Zed, JetBrains Gateway) work from away too. It is
 off by default; SSH's own login applies (your keys or password), the
 tailnet's access rules still decide which devices get through, and nothing
 else on the machine is opened. It needs an SSH server (`openssh-server`).
+sshd sees these logins as coming from 127.0.0.2 (`who`, auth.log), so they
+stand apart from ones made on the machine itself; ts5's log names the device
+and the port to match them by. To allow only keys from the tailnet, for
+example, add to `/etc/ssh/sshd_config`:
+
+```
+Match Address 127.0.0.2
+    PasswordAuthentication no
+```
 
 `tailscale.tsv` belongs to one machine. Copied to another, Tailscale refuses
 it as copied state; ts5 then starts over as a new device and asks for a new

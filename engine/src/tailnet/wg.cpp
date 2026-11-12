@@ -353,13 +353,23 @@ err_t accept_to(Loop &L, tcp_pcb *pcb, bool ssh) {
         }
     }
     // A socket from 127.0.0.1 to the API, its port noted first, so the API
-    // knows the request came through the tunnel the moment it accepts.
+    // knows the request came through the tunnel the moment it accepts. SSH's
+    // comes from 127.0.0.2: sshd's log (auth.log, `who`) and its rules
+    // ("Match Address 127.0.0.2") can tell a login from the tailnet from one
+    // made on this machine. (Linux answers on all of 127.0.0.0/8; where
+    // 127.0.0.2 can't be had, 127.0.0.1.)
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    bool bound = false;
+    if (fd >= 0 && ssh) {
+        sockaddr_in two = a;
+        two.sin_addr.s_addr = htonl(INADDR_LOOPBACK + 1);
+        bound = bind(fd, (sockaddr *)&two, sizeof two) == 0;
+    }
     socklen_t len = sizeof a;
-    if (fd < 0 || bind(fd, (sockaddr *)&a, sizeof a) != 0 || getsockname(fd, (sockaddr *)&a, &len) != 0) {
+    if (fd < 0 || (!bound && bind(fd, (sockaddr *)&a, sizeof a) != 0) || getsockname(fd, (sockaddr *)&a, &len) != 0) {
         ts5::log_line(TS5_LOG_NAME ": wireguard: no socket for %s's connection (errno %d)", from.c_str(), errno);
         if (fd >= 0) close(fd);
         tcp_abort(pcb);
@@ -400,7 +410,9 @@ err_t accept_to(Loop &L, tcp_pcb *pcb, bool ssh) {
     tcp_err(pcb, on_err);
     tcp_nagle_disable(pcb);  // streamed tokens go out as they come
     L.conns.push_back(c);
-    if (ssh) ts5::log_line(TS5_LOG_NAME ": tailscale: %s connects to SSH", from.c_str());
+    if (ssh)
+        ts5::log_line(TS5_LOG_NAME ": tailscale: %s connects to SSH (sshd sees it from %s port %u)", from.c_str(),
+                      ip_text(a.sin_addr.s_addr).c_str(), ntohs(a.sin_port));
     else if (detail())
         ts5::log_line(TS5_LOG_NAME ": wireguard: tcp: %s connects, API socket from port %u%s", from.c_str(), c->local_port,
                       c->connecting ? ", connecting" : ", connected");
