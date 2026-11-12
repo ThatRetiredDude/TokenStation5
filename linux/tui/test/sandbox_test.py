@@ -71,6 +71,11 @@ def main():
         out, _, code = run("printf 'server: nginx\\n' | grep '^Server:'")
         check(code != 0 and "grep found no matching lines" in out and "grep -i" in out,
               "grep that matched nothing: the model is told exit 1 means no match", out)
+        out, _, code = run("echo curl -sI >/dev/null; printf 'server: nginx\\n' | awk '/^Server:/'")
+        check(code == 0 and "lower case" in out and "tolower" in out,
+              "awk on headers that matched nothing: the model is told about lower-case header names", out)
+        out, _, _ = run("printf 'a\\n' | awk '/b/'")
+        check("lower case" not in out, "awk that matched nothing without curl: no header hint", out)
         if os.access("/bin/bash", os.X_OK) or os.access("/usr/bin/bash", os.X_OK):
             # Models write bash (on Debian /bin/sh is dash, which knows none of this).
             bash = "h=(a 'b c' d); echo n=${#h[@]}; [[ x == x ]] && echo double; time true"

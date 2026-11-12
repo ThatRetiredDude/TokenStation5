@@ -291,9 +291,15 @@ ToolResult run_command(const std::string &cmd, const ToolSwitches &s, const std:
     // three models took that for a broken curl (one tried apt, then built
     // curl from source; one made the answer up). HTTP/2 headers come in lower
     // case, so grep '^Server:' finds none.
-    if (r.code == 1 && out.empty() && cmd.find("grep") != std::string::npos)
+    // awk and sed say nothing at all when nothing matched: the same trap with
+    // exit code 0 (Qwen3 14B on the PS5 answered "no Content-Type" that way).
+    auto has = [&](const char *w) { return cmd.find(w) != std::string::npos; };
+    if (r.code == 1 && out.empty() && has("grep"))
         t.text += "\n(grep found no matching lines: its exit code 1 means no match, not that a command before it "
                   "failed. grep is case-sensitive, and HTTP/2 header names come in lower case: grep -i matches either.)";
+    else if (r.code == 0 && out.empty() && has("curl") && (has("grep") || has("awk") || has("sed")))
+        t.text += "\n(Nothing matched. If this looked for HTTP header names: HTTP/2 sends them in lower case "
+                  "(server:, content-type:), so match them regardless of case: grep -i, or tolower($0) in awk.)";
     if (s.sandbox) {
         t.head += " · sandbox";
         // What the sandbox stopped, said so the model doesn't try it again.
