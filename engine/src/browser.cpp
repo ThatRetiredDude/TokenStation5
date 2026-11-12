@@ -642,9 +642,18 @@ void stop(Program &b) {
     b.dir.clear();
 }
 
+// How long a browser has to open its debugging port: 30 s, or
+// TS5_BROWSER_START_S.
+static int start_s() {
+    const char *v = getenv("TS5_BROWSER_START_S");
+    const int n = v && *v ? atoi(v) : 30;
+    return n < 1 ? 30 : std::min(n, 600);
+}
+
 // Starts the browser without a window, its debugging port on 127.0.0.1,
-// and waits until the port answers.
-bool launch(const std::string &program, bool obscura, Program &b, std::string &err) {
+// and waits until the port answers. slow: it ran, and the port never came.
+bool launch(const std::string &program, bool obscura, Program &b, std::string &err, bool &slow) {
+    slow = false;
     const char *cache = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
     // Under the user's cache, not /tmp: that is memory on many systems.
     std::string dir = (cache && *cache ? std::string(cache) : std::string(home && *home ? home : "/tmp") + "/.cache") +
@@ -718,7 +727,8 @@ bool launch(const std::string &program, bool obscura, Program &b, std::string &e
     }
     setpgid(pid, pid);
     b.pid = pid;
-    const double until = now_s() + 30;
+    const int limit = start_s();
+    const double until = now_s() + limit;
     while (now_s() < until) {
         int st;
         if (waitpid(pid, &st, WNOHANG) == pid) {
@@ -735,7 +745,8 @@ bool launch(const std::string &program, bool obscura, Program &b, std::string &e
             return true;
         sleep_ms(150);
     }
-    err = "the browser program didn't open its debugging port in 30 s";
+    err = "the browser program didn't open its debugging port in " + std::to_string(limit) + " s";
+    slow = true;
     stop(b);
     return false;
 }
@@ -1181,11 +1192,21 @@ private:
         if (cdp_ && !cdp_->gone()) return true;
         const bool again = (cdp_ || asleep_) && reopen;
         quit();
-        for (;;) {
+        for (bool second = false;;) {
             std::string err;
+            bool slow;
             cdp_ = new Cdp;
-            if (launch(program_, obscura_, proc_, err) && cdp_->attach(proc_.port, err)) break;
+            if (launch(program_, obscura_, proc_, err, slow) && cdp_->attach(proc_.port, err)) break;
             quit();
+            // A start that hung is tried once more: on a CI machine a Chrome
+            // that had not opened its port in 30 s came up at once the
+            // second time, and the text view would have been the whole
+            // chat's.
+            if (slow && !second) {
+                second = true;
+                continue;
+            }
+            second = false;
             why = "The browser (" + program_ + ") could not be started: " + err + ".";
             if (!spares_.empty()) {
                 // Another browser is installed: that one, then.

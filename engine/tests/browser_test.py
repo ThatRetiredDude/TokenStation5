@@ -536,6 +536,28 @@ def test_programs(ts5, base):
         check("LD_LIBRARY_PATH=/some/where:/else\n" in got, "programs: the browser is started with the environment ts5 has", got[:300])
         check(a["ok"] and a["mode"] == "text" and "simpler text view" in a["text"],
               "programs: a browser that ends as it starts leaves the text view, with a word about it", a)
+        # A start that hangs (on a CI machine Chrome once had not opened its port in 30 s, and came
+        # up at once the next time): stopped at the time limit and started once more, not a third time.
+        calls = os.path.join(tmp, "calls.txt")
+        for second, name, word in (("echo 'second start' >&2; exit 3", "slow-then-gone", "ended as it started (second start)"),
+                                   ("exec sleep 86399", "never-up", "didn't open its debugging port in 2 s")):
+            if os.path.exists(calls):
+                os.remove(calls)
+            prog = os.path.join(tmp, name)
+            with open(prog, "w") as f:
+                f.write(f"#!/bin/sh\necho $$ >> {calls}\n[ $(wc -l < {calls}) = 1 ] && exec sleep 86399\n{second}\n")
+            os.chmod(prog, 0o755)
+            b = Browser(ts5, "--program", prog, "--kind", "chromium", env=dict(env, TS5_BROWSER_START_S="2"))
+            t0 = time.time()
+            a = b.ask(do="open", url=base + "/")
+            took = time.time() - t0
+            b.close()
+            pids = [int(x) for x in open(calls).read().split()] if os.path.exists(calls) else []
+            n = len(pids)
+            check(a["ok"] and a["mode"] == "text" and n == 2 and word in a["text"] and "Rivers" in a["text"] and took < 12,
+                  f"programs: a start that hangs is tried once more ({name}: {n} starts, {took:.1f} s)", a)
+            left = [x for x in pids if os.path.exists(f"/proc/{x}")]
+            check(not left, "programs: ... and nothing of it is left running", left)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
