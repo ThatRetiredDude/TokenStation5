@@ -287,6 +287,13 @@ ToolResult run_command(const std::string &cmd, const ToolSwitches &s, const std:
              fmt(" · %.1f s", r.secs) + (r.left_running ? " · something it started still runs" : "");
     if (r.left_running) how += " (a program it started is still running in the background)";
     t.text = how + "\n" + (out.empty() ? "(no output)" : middle_out(out, 3000, 5000));
+    // grep that matched nothing ends with 1 and says nothing: on the PS5
+    // three models took that for a broken curl (one tried apt, then built
+    // curl from source; one made the answer up). HTTP/2 headers come in lower
+    // case, so grep '^Server:' finds none.
+    if (r.code == 1 && out.empty() && cmd.find("grep") != std::string::npos)
+        t.text += "\n(grep found no matching lines: its exit code 1 means no match, not that a command before it "
+                  "failed. grep is case-sensitive, and HTTP/2 header names come in lower case: grep -i matches either.)";
     if (s.sandbox) {
         t.head += " · sandbox";
         // What the sandbox stopped, said so the model doesn't try it again.
