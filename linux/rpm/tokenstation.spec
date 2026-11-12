@@ -13,6 +13,7 @@ Requires:       sudo
 Requires:       shadow-utils
 Recommends:     libnotify
 Recommends:     tmux
+Recommends:     bubblewrap
 
 # Already built; no debug packages or rebuilding here.
 %global debug_package %{nil}

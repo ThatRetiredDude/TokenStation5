@@ -18,6 +18,9 @@ struct ToolSwitches {
     bool web = true;       // the server's web search (it needs a Tavily key)
     bool page = true;      // read_web_page
     bool terminal = true;  // run_command, asked first
+    // run_command's commands go through the sandbox (sandbox.h): it was
+    // chosen and it runs here. sandbox_net: with the network.
+    bool sandbox = false, sandbox_net = true;
     bool memory = true;    // remember, and the notes at the top of every chat
     bool browser = false;  // browser_open and the rest (`ts5 browser`, engine/src/browser.h)
     // Settings -> Browser: "auto", "text", "obscura", "chromium", or a program's path.

@@ -62,6 +62,9 @@ struct Config {
     // The file tools (read, list, change, write; files.h): off until the
     // user turns them on, and asking first.
     bool tool_files = false, files_ask = true;
+    // The terminal's commands run in the sandbox (sandbox.h), with or
+    // without the network. no_sandbox: --sandbox off for this run.
+    bool sandbox = true, sandbox_net = true;
     std::string browser = "auto";    // "auto", "obscura", "chromium", "text", or a browser program's path
     bool browser_offered = false;    // the offer to install one was answered (it is made once; /browser install after)
     // The encyclopedia a search without a web search key goes to:

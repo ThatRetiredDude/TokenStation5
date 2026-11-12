@@ -344,11 +344,54 @@ ts5-tui --url http://ps5.local:8081  # another one
     "every command in this chat" (no more questions; `/tools ask` brings
     them back, and a new chat asks again) or "no". Letters never answer,
     so a message typed while the question shows just waits its turn. A
-    command runs as you, in
+    command runs in the sandbox (below), in
     the folder ts5-tui was started in, with no keyboard, for 2 minutes at
     most; Esc stops one that is running. The model gets its output and
     exit code (long output: the start and the end). Under each call a
     line says how it went; a click opens what the model got.
+  - **The sandbox** (on by default: Settings → Sandbox, or `/sandbox`):
+    the model's commands run in [bubblewrap](https://github.com/containers/bubblewrap)
+    (`bwrap`, your system's own package; ts5 recommends it, and installs
+    nothing of it itself). In there a command:
+    - sees the system read-only, so nothing in it can be installed or
+      broken, and `sudo` can't work;
+    - sees none of your home folder (SSH keys, browsers, ts5's keys,
+      models and chats), none of the other home folders or mounted drives,
+      none of the sockets in `/run` (your SSH and desktop agents), and
+      none of your environment variables (keys kept in them stay out);
+    - can change one folder of yours: the one ts5-tui was started in.
+      Started in your home folder itself, it gets none, and works in its
+      own home;
+    - has a home folder of its own, the toolbox
+      (`~/.local/share/tokenstation/sandbox/home`), kept between chats:
+      that is where `pip install`, `npm install -g` and a program put in
+      `~/bin` go, so the model can fetch the tools it needs once and use
+      them again;
+    - has the network (`/sandbox no-network` takes it away);
+    - sees only its own processes, and whatever it starts ends with it;
+    - is the first thing the kernel ends when memory runs out, before the
+      model's server (also with the sandbox off).
+
+    It costs no memory of its own and starts in milliseconds. It shares
+    the kernel with everything else, so it is a strong fence, not a second
+    machine. `/sandbox` says where commands run and how big the toolbox
+    is; `/sandbox reset` empties the toolbox; `/sandbox off` runs commands
+    as you again, with all your files. The question before a command says
+    which: "in the sandbox" or "as you (no sandbox)".
+    Without bubblewrap (`sudo apt install bubblewrap`), or where the system
+    doesn't let it make its namespaces, Settings says why and commands run
+    as you. Ubuntu 24.04 and later stop it with AppArmor; to allow
+    bubblewrap only, as a file `/etc/apparmor.d/bwrap`:
+    ```
+    abi <abi/4.0>,
+    include <tunables/global>
+    profile bwrap /usr/bin/bwrap flags=(unconfined) {
+      userns,
+    }
+    ```
+    then `sudo apparmor_parser -r /etc/apparmor.d/bwrap`. Debian and Fedora
+    need nothing. `ts5-tui --run-command 'ls ~'` runs one command the way
+    the model's do and prints what the model would get back.
   - **Browser** (off until you switch it on: Settings → Tool: browser, or
     `/tools browser on`): the model opens a page and gets it as text with
     every link, text box and button numbered (`the Volga[3]`,

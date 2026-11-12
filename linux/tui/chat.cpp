@@ -40,6 +40,7 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/think", "on|off|auto", "thinking before answering"},
         {"/tools", "[on|off|NAME on|off]", "the model's tools: search, pages, terminal, files, memory, browser (each has a switch)"},
         {"/browser", "[auto|obscura|chromium|text|PATH]", "the program the model's browser tool shows pages with"},
+        {"/sandbox", "[on|off|network|no-network|reset]", "where the model's commands run: the sandbox, its network, its toolbox"},
         {"/mcp", "[add NAME PROGRAM…|remove NAME|NAME off|ask|allow|restart|only TOOL…|reload]",
          "outside tools: programs that speak MCP, whose tools the model can then call"},
         {"/memory", "[forget N|clear|TEXT]", "the notes the model keeps between chats: list, remove, or add one"},
@@ -863,7 +864,8 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
                                      : kind == 3 ? "the model wants to read a file or list a folder"
                                      : kind == 2 ? "the model wants to change a file"
                                      : kind == 1 ? "the model wants to do something on a web page"
-                                                 : "the model wants to run a command",
+                                     : c.ask_boxed.load() ? "the model wants to run a command in the sandbox"
+                                                 : "the model wants to run a command as you (no sandbox)",
                           Style(t.warn, kDefault, BOLD));
                 x = s.put(x, y1, "  ←→ choose · Enter · Esc no", Style(t.dim));
             } else {
@@ -1333,6 +1335,7 @@ ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
             c->ask_dir = dir;
         }
         c->ask_kind = kind;
+        c->ask_boxed = command && rq.tools.sandbox;
         c->ask_t0 = now_s();
         c->ask_pick = 0;
         c->ask = 1;

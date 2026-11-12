@@ -19,6 +19,7 @@
 #include "files.h"
 #include "mcp.h"
 #include "json.h"
+#include "sandbox.h"
 #include "store.h"
 
 namespace tui {
@@ -120,8 +121,11 @@ struct Ran {
 };
 
 // Runs cmd in a shell of its own session (no terminal to read from), its
-// output and errors together, for `limit` seconds at most.
-Ran run_shell(const std::string &cmd, double limit, const std::atomic<bool> &cancel) {
+// output and errors together, for `limit` seconds at most. argv and env: a
+// program to run instead of the shell (the sandbox's, which runs the shell),
+// with only that environment.
+Ran run_shell(const std::string &cmd, double limit, const std::atomic<bool> &cancel,
+              const std::vector<std::string> *argv = nullptr, const std::vector<std::string> *env = nullptr) {
     Ran r;
     int p[2];
     if (pipe(p) != 0) {
@@ -145,6 +149,27 @@ Ran run_shell(const std::string &cmd, double limit, const std::atomic<bool> &can
         close(p[0]);
         close(p[1]);
         signal(SIGPIPE, SIG_DFL);
+        // When memory runs out, the kernel ends a command (and what it
+        // started) before the model's server or this app.
+        if (const int fd = open("/proc/self/oom_score_adj", O_WRONLY); fd >= 0) {
+            if (write(fd, "1000", 4) != 4) {
+            }
+            close(fd);
+        }
+        if (argv && !argv->empty()) {
+            if (env) {
+                clearenv();
+                for (const std::string &kv : *env) {
+                    const size_t eq = kv.find('=');
+                    if (eq != std::string::npos) setenv(kv.substr(0, eq).c_str(), kv.substr(eq + 1).c_str(), 1);
+                }
+            }
+            std::vector<char *> v;
+            for (const std::string &x : *argv) v.push_back(const_cast<char *>(x.c_str()));
+            v.push_back(nullptr);
+            execv(v[0], v.data());
+            _exit(127);
+        }
         // Plain output: no colors, no pager waiting for a key.
         setenv("TERM", "dumb", 1);
         setenv("PAGER", "cat", 1);
@@ -221,7 +246,7 @@ double command_limit() {
     return 120;
 }
 
-ToolResult run_command(const std::string &cmd, const std::atomic<bool> &cancel) {
+ToolResult run_command(const std::string &cmd, const ToolSwitches &s, const std::atomic<bool> &cancel) {
     ToolResult t;
     if (cmd.find_first_not_of(" \t\n") == std::string::npos) {
         t.ok = false;
@@ -230,7 +255,12 @@ ToolResult run_command(const std::string &cmd, const std::atomic<bool> &cancel) 
         return t;
     }
     const double limit = command_limit();
-    const Ran r = run_shell(cmd, limit, cancel);
+    std::vector<std::string> argv, env;
+    if (s.sandbox) {
+        argv = sandbox_argv(cmd, s.sandbox_net);
+        env = sandbox_env(s.sandbox_net);
+    }
+    const Ran r = run_shell(cmd, limit, cancel, s.sandbox ? &argv : nullptr, s.sandbox ? &env : nullptr);
     if (!r.started) {
         t.ok = false;
         t.head = "could not start";
@@ -248,6 +278,15 @@ ToolResult run_command(const std::string &cmd, const std::atomic<bool> &cancel) 
              fmt(" · %.1f s", r.secs) + (r.left_running ? " · something it started still runs" : "");
     if (r.left_running) how += " (a program it started is still running in the background)";
     t.text = how + "\n" + (out.empty() ? "(no output)" : middle_out(out, 3000, 5000));
+    if (s.sandbox) {
+        t.head += " · sandbox";
+        // What the sandbox stopped, said so the model doesn't try it again.
+        if (r.code != 0 && (out.find("Read-only file system") != std::string::npos ||
+                            out.find("no new privileges") != std::string::npos || out.find("sudo:") != std::string::npos))
+            t.text += "\n(This ran in the sandbox: only " + sandbox_work() +
+                      " and the home folder ~ (the sandbox's own) can be changed, and sudo and apt can't work. Install "
+                      "tools in ~ instead, such as pip install NAME, npm install -g NAME, or a program into ~/bin.)";
+    }
     return t;
 }
 
@@ -536,12 +575,26 @@ bool is_browser_tool(const std::string &name) {
 std::string tools_json(const ToolSwitches &s) {
     std::string a;
     auto add = [&](const std::string &t) { a += (a.empty() ? "" : ",") + t; };
-    if (s.terminal)
-        add(tool_json("run_command",
-                      "Run a shell command on the user's Linux computer and get its output and exit code. The user "
-                      "is asked before it runs. Use it when the user asks you to look at files, run a program or "
-                      "check the system. One command per call; no programs that wait for typing.",
-                      "command", "The command line, as typed into a shell."));
+    if (s.terminal) {
+        std::string what =
+            "Run a shell command on the user's Linux computer and get its output and exit code. The user "
+            "is asked before it runs. Use it when the user asks you to look at files, run a program or "
+            "check the system. One command per call; no programs that wait for typing.";
+        if (s.sandbox) {
+            // (A setting's words, the same in every message of a chat.)
+            const std::string work = sandbox_work();
+            const bool in_home = sandbox_starts_home();
+            what += " It runs in a sandbox: the system is read-only and the user's home folder is hidden. ";
+            what += in_home ? "Commands start in the home folder ~, which is the sandbox's own"
+                            : "Commands start in " + work + ", the only folder of the user's they can change. The home "
+                              "folder ~ is the sandbox's own";
+            what += ", kept between chats: install the tools you need there (pip install NAME, npm install -g NAME, a "
+                    "program into ~/bin), not with sudo or apt, which can't work here. ";
+            what += s.sandbox_net ? "The network can be used." : "There is no network.";
+            what += " A program a command starts ends with the command.";
+        }
+        add(tool_json("run_command", what.c_str(), "command", "The command line, as typed into a shell."));
+    }
     if (s.browser) {
         add(tool_json("browser_open",
                       "Open a web page in the browser. You get the page as text with its links, text boxes and "
@@ -730,7 +783,7 @@ ToolResult run_tool(const std::string &name, const std::string &args, const Tool
     if (is_browser_tool(name)) return browser_call(name, args, s, cancel);
     if (is_file_tool(name)) return file_call(name, args);
     if (outside) return mcp_call(name, args, cancel);
-    if (name == "run_command") return run_command(arg_of(args, "command"), cancel);
+    if (name == "run_command") return run_command(arg_of(args, "command"), s, cancel);
     if (name == "read_web_page") return read_page(arg_of(args, "url"), cancel);
     const std::string note = arg_of(args, "note");
     std::string why;

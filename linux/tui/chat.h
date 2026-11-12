@@ -108,6 +108,7 @@ struct Chat {
     // (press a button, type): ask_kind 1, ask_cmd says what, and "every one
     // of this chat" is a choice of its own.
     std::atomic<int> ask_kind{0};
+    std::atomic<bool> ask_boxed{false};  // a command asked about runs in the sandbox
     std::atomic<bool> ask_always_browser{false};
     // And for the file tools (files.h). ask_kind 2: a change, shown as
     // ask_preview (the lines out and in), with "every change in this chat".
