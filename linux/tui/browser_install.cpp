@@ -51,6 +51,9 @@ if [ "$what" = chromium ]; then
     say "Installing Chromium from this system's packages:"
     say "  $cmd"
     [ -n "${TS5_DRY:-}" ] && exit 0
+    case "$cmd" in
+        sudo*) say "sudo asks for your password next. Ctrl-C leaves, with nothing installed." ;;
+    esac
     sh -c "$cmd"
     rc=$?
     if [ $rc != 0 ]; then
@@ -113,6 +116,7 @@ elif [ "$what" = obscura ]; then
         rm -rf "$part"
         exit 3
     fi
+    say "Checked: its SHA-256 is the one ts5 expects ($sum)."
     if ! tar -xzf "$part/obscura.tar.gz" -C "$part"; then
         say "The download could not be unpacked: nothing was installed."
         rm -rf "$part"

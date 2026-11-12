@@ -276,7 +276,13 @@ std::string wikipedia_search(const std::string &query, int n, std::string &log, 
             log = "web_search \"" + query + "\": Wikipedia " +
                   (!ok ? err : resp.status != 200 ? "answered HTTP " + std::to_string(resp.status) : "sent no JSON") + " (" +
                   took() + ")";
-            return kFailed + std::string(!ok ? "Wikipedia couldn't be reached" : "Wikipedia had a problem") + kTell;
+            // (429: on the PS5, after some hundreds of searches and pages in two hours of tests.)
+            return kFailed +
+                   std::string(!ok ? "Wikipedia couldn't be reached"
+                               : resp.status == 429 ? "Wikipedia has had too many searches from this address and asks to wait a "
+                                                      "while (HTTP 429)"
+                                                    : "Wikipedia had a problem") +
+                   kTell;
         }
         for (auto &p : r["query"]["pages"].a)
             if (!p["title"].str().empty()) {
@@ -318,29 +324,121 @@ std::string wikipedia_search(const std::string &query, int n, std::string &log, 
 #ifndef TS5_PS5
 // ---- Grokipedia (grokipedia.com, xAI's encyclopedia): the site's own search.
 
-// Markdown as plain words: a link is its words, a source mark ("[](https://...)")
-// is nothing, and the marks for bold and headings go.
-std::string markdown_plain(const std::string &md) {
+// Where the target of a Markdown link or picture ends: the ")" that closes
+// the "(" at `open`, past "\)" and pairs of brackets inside it (Grokipedia's
+// picture files are named "..._\(28493220635\)"). npos when the line or the
+// text ends first: a passage cut in the middle of one.
+size_t target_end(const std::string &md, size_t open) {
+    int depth = 0;
+    for (size_t i = open; i < md.size() && i - open < 2000; i++) {
+        const char c = md[i];
+        if (c == '\\') {
+            i++;
+        } else if (c == '\n') {
+            break;
+        } else if (c == '(') {
+            depth++;
+        } else if (c == ')' && --depth == 0) {
+            return i;
+        }
+    }
+    return std::string::npos;
+}
+
+// Markdown as plain words on one line: a link is its words, a picture and
+// a source mark ("[](https://...)") are nothing, a heading's line goes
+// (after `lead` characters of text the first heading ends it: an article's
+// opening, not its next section), and so do the marks for bold and code. A
+// link or picture that the text is cut in the middle of goes too. So does
+// what Grokipedia puts between an article's name and its first sentence: a
+// box of facts ("<!--Infobox Start ...-->", lines of "| name = value",
+// "<!--Infobox End-->"), any other comment or table row, and the line
+// under a picture that says what it shows ("*Tux, the mascot of Linux*").
+std::string markdown_plain(const std::string &md, size_t lead = std::string::npos) {
     std::string out;
+    bool line_start = true, caption = false;
     for (size_t i = 0; i < md.size(); i++) {
         const char c = md[i];
-        if (c == '[') {
-            const size_t close = md.find(']', i);
-            if (close != std::string::npos && close + 1 < md.size() && md[close + 1] == '(' && close - i < 300) {
-                const size_t end = md.find(')', close);
-                if (end != std::string::npos && end - close < 2000) {
-                    out += md.substr(i + 1, close - i - 1);
-                    i = end;
-                    continue;
-                }
+        if (line_start && (c == ' ' || c == '\t')) continue;
+        if (md.compare(i, 4, "<!--") == 0) {
+            size_t end = md.find("-->", i);
+            if (end != std::string::npos && md.substr(i, end - i).find("Infobox Start") != std::string::npos) {
+                const size_t box = md.find("Infobox End", end);
+                end = box == std::string::npos ? box : md.find("-->", box);
             }
-        }
-        if (c == '*' || c == '`') continue;
-        if (c == '#' && (i == 0 || md[i - 1] == '\n' || md[i - 1] == '#')) continue;
-        if (c == '\n' || c == '\r' || c == '\t') {
-            if (!out.empty() && out.back() != ' ') out += ' ';
+            if (end == std::string::npos) break;
+            i = end + 2;
             continue;
         }
+        if (line_start && c != '\n' && c != '\r') {
+            const size_t nl = md.find('\n', i);
+            size_t last = (nl == std::string::npos ? md.size() : nl) - 1;
+            while (last > i && (md[last] == ' ' || md[last] == '\r')) last--;
+            const bool said = caption && c == '*' && md[i + 1] != '*' && last > i + 1 && md[last] == '*' && md[last - 1] != '*';
+            caption = false;
+            if (c == '#' && out.size() >= lead) break;
+            if (c == '#' || c == '|' || said) {
+                if (nl == std::string::npos) break;
+                i = nl;
+                continue;
+            }
+        }
+        // "[[Himalayas]]", "[[Nepal|Nepal's]]": a link written the wiki way.
+        if (c == '[' && i + 1 < md.size() && md[i + 1] == '[') {
+            const size_t end = md.find("]]", i + 2);
+            if (end != std::string::npos && end - i < 200 && md.find('\n', i) > end) {
+                std::string words = md.substr(i + 2, end - i - 2);
+                const size_t bar = words.rfind('|');
+                if (bar != std::string::npos) words.erase(0, bar + 1);
+                out += words;
+                i = end + 1;
+                line_start = false;
+                continue;
+            }
+        }
+        const bool picture = c == '!' && i + 1 < md.size() && md[i + 1] == '[';
+        if (c == '[' || picture) {
+            const bool own_line = line_start;
+            const size_t open = i + (picture ? 1 : 0);
+            // (What a picture shows can be a paragraph, with \" and \( in it.)
+            const size_t most = picture ? 1500 : 300;
+            size_t close = open + 1;
+            while (close < md.size() && md[close] != ']' && md[close] != '\n' && close - open < most)
+                close += md[close] == '\\' ? 2 : 1;
+            const bool closed = close < md.size() && md[close] == ']';
+            if (closed && close + 1 < md.size() && md[close + 1] == '(') {
+                if (!picture) out += md.substr(open + 1, close - open - 1);
+                const size_t end = target_end(md, close + 1);
+                if (end == std::string::npos) {
+                    // Cut in its target: to the end of the line, or of the text.
+                    const size_t nl = md.find('\n', close);
+                    if (nl == std::string::npos) break;
+                    i = nl - 1;
+                } else {
+                    i = end;
+                }
+                // (A picture alone on its line: the next line may say what it shows.)
+                size_t after = i + 1;
+                while (after < md.size() && (md[after] == ' ' || md[after] == '\r')) after++;
+                caption = picture && own_line && (after >= md.size() || md[after] == '\n');
+                line_start = false;
+                continue;
+            }
+            // "[](" at the very end, or a picture's name the text is cut in.
+            if ((!closed && close >= md.size()) || (closed && close + 1 >= md.size() && (picture || close == open + 1))) break;
+        }
+        if (c == '\\' && i + 1 < md.size() && strchr("()[]_*#`!.-", md[i + 1])) {
+            out += md[++i];
+            line_start = false;
+            continue;
+        }
+        if (c == '*' || c == '`') continue;
+        if (c == '\n' || c == '\r' || c == '\t') {
+            if (!out.empty() && out.back() != ' ') out += ' ';
+            if (c == '\n') line_start = true;
+            continue;
+        }
+        line_start = false;
         if (c == ' ' && (out.empty() || out.back() == ' ')) continue;
         out += c;
     }
@@ -444,10 +542,11 @@ std::string grokipedia_search(const std::string &query, int n, std::string &log,
         for (auto &x : r["results"].a) {
             const std::string slug = x["slug"].str(), title = x["title"].str();
             if (slug.empty() || title.empty()) continue;
-            std::string text = x["snippet"].str();
-            for (char &c : text)
-                if (c == '\n' || c == '\r' || c == '\t') c = ' ';
-            while (!text.empty() && text.back() == ' ') text.pop_back();
+            // (A passage is cut from the article's Markdown, source marks and
+            // all. One that is a word or two, such as "! Operations", says
+            // nothing about the article: none is better.)
+            std::string text = markdown_plain(x["snippet"].str());
+            if (text.size() < 20) text.clear();
             found.push_back({title, base + "/page/" + path_escape(slug), text});
             if ((int)found.size() >= n) break;
         }
@@ -459,10 +558,12 @@ std::string grokipedia_search(const std::string &query, int n, std::string &log,
             if (http_get(base + "/api/page-preview?slug=" + url_escape(slug) + "&content=1", {"Accept: application/json"}, page,
                          e2, 64u << 10, 20) &&
                 page.status == 200) {
-                std::string text = markdown_plain(content_start(page.body, 8000));
-                // (The text starts with the article's name, as a heading.)
-                if (text.compare(0, found[0].title.size(), found[0].title) == 0) text.erase(0, found[0].title.size());
-                while (!text.empty() && text[0] == ' ') text.erase(0, 1);
+                // The opening: what stands before the first section, or more
+                // where that is only a line or two. (The article's name, a
+                // heading at the start, goes with the other headings; the
+                // name that the first sentence starts with stays: "Vienna
+                // is the capital...".)
+                const std::string text = markdown_plain(content_start(page.body, 8000), 400);
                 if (text.size() > found[0].text.size()) found[0].text = text;
             }
         }
@@ -478,16 +579,19 @@ std::string grokipedia_search(const std::string &query, int n, std::string &log,
         HttpResponse page;
         std::string e2;
         if (!refused || search_words(query).size() > 5 || slug.empty() ||
-            !http_get(base + "/page/" + path_escape(slug), page_headers(), page, e2, 2u << 20, 20) || page.status != 200 ||
+            !http_get(base + "/page/" + path_escape(slug), page_headers(secure_url(base)), page, e2, 2u << 20, 20) || page.status != 200 ||
             page.body.find("<article") == std::string::npos)
             return fail(refused ? "Grokipedia refused the search" : "Grokipedia had a problem", detail);
         std::string name = slug;
         for (char &c : name)
             if (c == '_') c = ' ';
+        // The article's name is the page's first line, a heading: it goes
+        // (not a first sentence that starts with the name).
+        std::string words = html_text(page.body.substr(page.body.find("<article")));
+        words.erase(0, words.find_first_not_of(" \n"));
+        if (words.compare(0, name.size() + 1, name + "\n") == 0) words.erase(0, name.size());
         // (markdown_plain: on one line, the spaces closed up.)
-        std::string text = markdown_plain(html_text(page.body.substr(page.body.find("<article"))));
-        if (text.compare(0, name.size(), name) == 0) text.erase(0, name.size());
-        while (!text.empty() && text[0] == ' ') text.erase(0, 1);
+        const std::string text = markdown_plain(words);
         found.push_back({name, base + "/page/" + path_escape(slug), text});
         log = "web_search \"" + query + "\": 1 results (" + took() + ", Grokipedia, the article by its name: the search was refused)";
     }
@@ -566,7 +670,13 @@ std::string web_search(const std::string &arguments, std::string &log, bool *fai
                 if (failed) *failed = true;
                 return kFailed + std::string("neither Wikipedia nor Grokipedia could be searched") + kTell;
             }
-            std::string out = "Two encyclopedias were searched (the only search set up here: no news or live data).\n\n";
+            std::string out = "Two encyclopedias were searched (the only search set up here: no news or live data).";
+            // (On the PS5 two models said a figure was in both when only Wikipedia's passage had it.)
+            if (wn > 0 && gn > 0)
+                out += " [1] to [" + std::to_string(wn) + "] are Wikipedia's and [" + std::to_string(wn + 1) + "] to [" +
+                       std::to_string(wn + gn) + "] are Grokipedia's. A fact is from the one whose passage says it: "
+                       "name that one, and say both only when both passages say it.";
+            out += "\n\n";
             out += wbad ? "(Wikipedia could not be searched: " + search_failure(w) + ".)" : w;
             out += "\n\n";
             out += gbad ? "(Grokipedia could not be searched: " + search_failure(g) + ".)" : g;
@@ -1252,16 +1362,63 @@ std::string html_text(const std::string &html) {
     return text.size() >= 200 || text.size() * 2 >= whole.size() ? text : whole;
 }
 
-std::vector<std::string> page_headers() {
-    const char *as = getenv("TS5_BROWSER_AGENT");
-    if (as && std::string(as) == "own") return {"Accept: text/html,text/plain;q=0.9,*/*;q=0.5"};
-    // Chrome's on Linux (its version numbers after the first are zeros for
-    // every Chrome). Raise the number with the years.
-    return {"User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 "
-            "Safari/537.36",
-            "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language: en-US,en;q=0.9",
-            "Upgrade-Insecure-Requests: 1"};
+std::string browser_look() {
+    const char *v = getenv("TS5_BROWSER_AGENT");
+    const std::string look = v ? v : "";
+    return look == "own" || look == "linux" ? look : "mac";
+}
+
+std::string chrome_agent(const std::string &look, int major) {
+    // (Chrome writes the version as MAJOR.0.0.0, and on every Mac, Apple's
+    // chips too, "Intel Mac OS X 10_15_7": those parts no longer change.)
+    return std::string("Mozilla/5.0 (") + (look == "linux" ? "X11; Linux x86_64" : "Macintosh; Intel Mac OS X 10_15_7") +
+           ") AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + std::to_string(major) + ".0.0.0 Safari/537.36";
+}
+
+std::vector<std::pair<std::string, std::string>> chrome_brands(int major, const std::string &version, bool google) {
+    static const char *const marks[] = {" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_"};
+    static const char *const greased[] = {"8", "99", "24"};
+    const bool full = version.find('.') != std::string::npos;
+    std::vector<std::pair<std::string, std::string>> in = {
+        {std::string("Not") + marks[major % 11] + "A" + marks[(major + 1) % 11] + "Brand",
+         std::string(greased[major % 3]) + (full ? ".0.0.0" : "")},
+        {"Chromium", version}};
+    if (google) in.push_back({"Google Chrome", version});
+    static const int three[6][3] = {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+    static const int two[2][2] = {{0, 1}, {1, 0}};
+    std::vector<std::pair<std::string, std::string>> out(in.size());
+    for (size_t i = 0; i < in.size(); i++) out[(size_t)(in.size() == 3 ? three[major % 6][i] : two[major % 2][i])] = in[i];
+    return out;
+}
+
+bool secure_url(const std::string &url) {
+    if (url.compare(0, 8, "https://") == 0) return true;
+    if (url.compare(0, 7, "http://") != 0) return false;
+    const std::string host = url.substr(7, url.find_first_of(":/?#", 7) - 7);
+    return host == "localhost" || host == "127.0.0.1" || host.compare(0, 4, "[::1") == 0;
+}
+
+std::vector<std::string> page_headers(bool secure) {
+    const std::string look = browser_look();
+    if (look == "own") return {"Accept: text/html,text/plain;q=0.9,*/*;q=0.5"};
+    // As Chrome asks for a page typed into its address bar, in its order.
+    std::vector<std::string> h;
+    if (secure) {
+        std::string brands;
+        for (auto &b : chrome_brands(kChromeMajor, std::to_string(kChromeMajor), true))
+            brands += (brands.empty() ? "" : ", ") + std::string("\"") + b.first + "\";v=\"" + b.second + "\"";
+        h = {"sec-ch-ua: " + brands, "sec-ch-ua-mobile: ?0",
+             std::string("sec-ch-ua-platform: \"") + (look == "linux" ? "Linux" : "macOS") + "\""};
+    }
+    h.push_back("Upgrade-Insecure-Requests: 1");
+    h.push_back("User-Agent: " + chrome_agent(look, kChromeMajor));
+    h.push_back("Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,"
+                "application/signed-exchange;v=b3;q=0.7");
+    if (secure)
+        for (const char *f : {"Sec-Fetch-Site: none", "Sec-Fetch-Mode: navigate", "Sec-Fetch-User: ?1", "Sec-Fetch-Dest: document"})
+            h.push_back(f);
+    h.push_back("Accept-Language: en-US,en;q=0.9");
+    return h;
 }
 
 std::string web_page(const std::string &url, size_t max_chars, std::string &log, bool *failed) {
@@ -1275,7 +1432,7 @@ std::string web_page(const std::string &url, size_t max_chars, std::string &log,
     const auto t0 = std::chrono::steady_clock::now();
     HttpResponse resp;
     std::string err;
-    const bool ok = http_get(url, page_headers(), resp, err, 2u << 20, 20);
+    const bool ok = http_get(url, page_headers(secure_url(url)), resp, err, 2u << 20, 20);
     char took[32];
     snprintf(took, sizeof took, "%.1f s",
              std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());

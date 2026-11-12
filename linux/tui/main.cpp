@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -199,12 +200,15 @@ void show_toast(const std::string &msg, uint32_t color = 0, double secs = 4) {
 
 // Leaves ts5-tui's screen for a command that talks to the person in the
 // terminal (sudo's password, a download's progress), waits for Enter and
-// comes back. The command's exit code.
+// comes back. The command's exit code. What was typed before the command
+// started is dropped: it was meant for ts5-tui, not for the command (on the
+// PS5 a line typed ahead went into sudo's password question).
 int run_in_terminal(const std::string &cmd, const std::string &title) {
     const bool mouse = term_mouse_on();
     term_leave();
     printf("\n%s\n\n", title.c_str());
     fflush(stdout);
+    tcflush(STDIN_FILENO, TCIFLUSH);
     const int st = system(cmd.c_str());
     const int rc = st == -1 ? 127 : WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
     printf("\nEnter goes back to ts5-tui. ");
@@ -247,17 +251,22 @@ void browser_offer() {
     g->ask_text = "No browser is installed here, so the model reads pages as plain text: their scripts don't run, and only "
                   "links and simple forms work. A browser shows it the page as you would see it.";
     g->pick = {
-        {"Chromium", "the full browser, from this system's packages (sudo password)",
+        {"Chromium", "the full browser, from this system's packages (your sudo password)",
          [] { browser_install("chromium"); }},
         {"Obscura", "light on memory, but young. 150 MB in your home folder, no password", [] { browser_install("obscura"); }},
         {"Neither", "pages stay plain text. /browser install asks again", [] {}},
     };
-    g->pick_sel = 0;
+    // (Neither is where it starts: an Enter that was meant for something else installs nothing.)
+    g->pick_sel = 2;
 }
 
-// The browser tool was just switched on: the offer, the first time no browser is found.
+// The browser tool was just switched on: the offer, the first time there is
+// no browser here, neither one that is found nor one named by its path
+// (/browser PATH).
 void browser_tool_on() {
-    if (!g->cfg.browser_offered && g->cfg.browser != "text" && browsers_found().empty()) browser_offer();
+    const std::string &b = g->cfg.browser;
+    const bool word = b == "auto" || b == "obscura" || b == "chromium" || b == "text";
+    if (!g->cfg.browser_offered && b != "text" && browsers_found().empty() && (word || which(b).empty())) browser_offer();
 }
 
 void apply_theme() {

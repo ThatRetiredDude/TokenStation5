@@ -1358,6 +1358,12 @@ class Wikipedia(http.server.BaseHTTPRequestHandler):
         words = q.get("gsrsearch", [""])[0]
         Wikipedia.seen.append((urllib.parse.urlsplit(self.path).path, q))
         out = {"batchcomplete": True}
+        if "toomany" in words:
+            # What Wikipedia sends an address it has had too many requests from.
+            self.send_response(429)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if "DeltaNet" in words:
             # Its search splits and stems words: "gate", "delta", "net".
             out["query"] = {"pages": [
@@ -1413,6 +1419,11 @@ def test_wikipedia(ts5, model, tdir):
           seen[0][1]["gsrlimit"] == ["5"] and seen[0][1]["generator"] == ["search"] and
           seen[0][1]["prop"] == ["extracts|info"] and seen[0][1]["exintro"] == ["1"])
     failed += report(ok, "Wikipedia search: the articles, best first, long ones cut", f"rc {rc}\n{out}\n{err}\n{seen}")
+    # Too many searches from this address (on the PS5 after two hours of tests): said as that.
+    rc, out, err, seen = search("toomany searches")
+    failed += report(rc == 1 and "Wikipedia has had too many searches from this address and asks to wait a while (HTTP 429)" in out
+                     and "answered HTTP 429" in err and len(seen) == 1,
+                     "Wikipedia search: too many searches (429) is said as that", f"rc {rc}\n{out}\n{err}")
     # No article has every word: once more, as any of the words.
     rc, out, err, seen = search("is there nothing on the PS5?")
     ok = (rc == 0 and "[1] PlayStation 5 system software" in out and len(seen) == 2 and
@@ -1487,10 +1498,11 @@ def test_wikipedia(ts5, model, tdir):
 
 
 class Grokipedia(http.server.BaseHTTPRequestHandler):
-    """grokipedia.com as it answered on 2026-11-12: its search (results with slug, title and a plain
-    snippet), an article's text (Markdown, links to /page/..., sources as empty links, up to a megabyte)
-    and the article as a web page. mode: "ok", "refused" (a robot check on the search, pages still
-    served), "down" (500)."""
+    """grokipedia.com as it answered on 2026-11-12: its search (results with slug, title and a snippet
+    cut from the article, sometimes in the middle of a source mark), an article's text (Markdown: the
+    name as a heading, a picture, the opening, then sections; links to /page/..., sources as empty
+    links, up to a megabyte) and the article as a web page. mode: "ok", "refused" (a robot check on
+    the search, pages still served), "down" (500)."""
     seen = []
     mode = "ok"
 
@@ -1516,6 +1528,25 @@ class Grokipedia(http.server.BaseHTTPRequestHandler):
                          "snippet": "The Black Sea Fleet is the fleet of the\nRussian Navy in the Black Sea..."},
                         {"slug": "Krasnodar_Krai_(region)", "title": "Krasnodar Krai", "relevanceScore": 2000, "snippet": ""},
                     ][:int(q.get("limit", ["5"])[0])]
+                if "danube" in words.lower():
+                    results = [
+                        {"slug": "Danube", "title": "Danube", "relevanceScore": 1000000,
+                         "snippet": "The Danube is a major river in Central and Southeastern Europe, measuring 2,778 kilometres"},
+                        {"slug": "Length", "title": "Length", "relevanceScore": 152.84009,
+                         "snippet": "Length is a fundamental physical quantity that measures the distance between two points or "
+                                    "the extent of an object along a single dimension.[]("},
+                        {"slug": "danube_(song)", "title": "Danube (song)", "snippet": "A song about [the river](/page/Dan"}]
+                if "everest" in words.lower():
+                    results = [{"slug": "Mount_Everest", "title": "Mount Everest", "snippet": "the border between [[Nepal]] and"}]
+                if "linux" in words.lower():
+                    results = [{"slug": "Linux", "title": "Linux", "snippet": "| name = Linux\n| logo = Tux.svg"}]
+                if "vienna" in words.lower():
+                    results = [{"slug": "Vienna", "title": "Vienna", "snippet": "Vienna is the capital"}]
+                if "eiffel" in words.lower():
+                    results = [{"slug": "Eiffel_Tower", "title": "Eiffel Tower", "snippet": "The Eiffel Tower is a tower."},
+                               {"slug": "eiffel_tower_(book)", "title": "Eiffel Tower (book)",
+                                "snippet": "A book about the tower. ![cov"},
+                               {"slug": "Eiffel_Forums", "title": "Eiffel Forums", "snippet": "! Operations"}]
                 if "DeltaNet" in words:
                     results = [{"slug": "River_delta", "title": "River delta", "snippet": "Where a river meets the sea."}]
                 if "PS5" in words:
@@ -1525,16 +1556,61 @@ class Grokipedia(http.server.BaseHTTPRequestHandler):
                 body = json.dumps({"results": results, "totalCount": 10000, "searchTimeMs": 191.0, "facets": []}).encode()
         elif u.path == "/api/page-preview":
             slug = q.get("slug", [""])[0]
-            if slug != "Black_Sea":
+            # (Each as the site sent it: a picture under the name, with a plain file name, one with
+            # "\(...\)" and one with brackets as they are; paragraphs a line apart; sections.)
+            content = {
+                "Black_Sea": "# Black Sea\n\n![location map](./_assets_/Black_Sea_map.png)\nThe **Black Sea** is a large inland "
+                             "body of water between [southeastern Europe](/page/Southeastern_Europe) and [Anatolia](/page/Anatolia), "
+                             "covering about 436,000 km\u00b2.[](https://example.org/source-1)[](https://example.org/source-2) "
+                             "The [Danube](/page/Danube), the Dnieper and the Don flow into it. It is \"brackish\" \u2014 "
+                             "less salty than the oceans.\n## Geography\n\n" + "More about its shores. " * 60000,
+                "Danube": "# Danube\n\n![View of the Danube from Gell\u00e9rt Hill, Budapest](./_assets_/View_from_Gell%C3%A9rt_"
+                          "Hill_to_the_Danube%252C_Hungary_-_Budapest_\\(28493220635\\))\nThe Danube is a major river in Central "
+                          "and Southeastern Europe, measuring 2,778 kilometres in length from its source at the confluence of the "
+                          "Brigach and Breg streams in Germany's [Black Forest](/page/Black_Forest) to the [Danube Delta]"
+                          "(/page/Danube_Delta) where it discharges into the [Black Sea](/page/Black_Sea).[](https://example.org/"
+                          "danube_network.html)[](https://example.org/germany)\nOriginating near Donaueschingen, it flows "
+                          "generally eastward, traversing or bordering ten countries\u2014[Germany](/page/Germany), [Austria]"
+                          "(/page/Austria), and eight more\u2014before forming a vast delta primarily in Romania.[](https://"
+                          "example.org/a)\nIts drainage basin spans 817,000 square kilometres across nineteen countries, despite "
+                          "challenges from pollution and infrastructure development.[](https://example.org/b)\n## Etymology\n\n"
+                          "### Name origins and linguistic roots\n\nThe name *Danube* derives from the Latin *Danubius*. This "
+                          "Latin form traces to Proto-Celtic *\\*D\u0101nowyos*.[](https://example.org/c) [](https://example.org/d)"
+                          "\n\n" + "Linguistically, the river has many names. " * 30000,
+                "Linux": "# Linux\n<!--Infobox Start [Operating Systems]-->\n| name = Linux\n| logo = Tux.svg\n| developer = "
+                         "Linus Torvalds and thousands of contributors worldwide\n| programming_languages = C | Rust\n"
+                         "| related_projects = Android | GNU Project\n<!--Infobox End-->\n\n\n\n![Tux the penguin, mascot of "
+                         "Linux](https://assets.example.org/wiki/images/73ce3e67fe9c.png?v=5441ada4 \"source:https://example.org/"
+                         "Linux-Logo.png\")\n*Tux, the official mascot of Linux*\nLinux is a free and open-source Unix-like "
+                         "operating system kernel originally authored by [Linus Torvalds](/page/Linus_Torvalds) in 1991.<!-- a "
+                         "note -->[](https://example.org/l) *Free* here means freedom.\n\n| Year | Version |\n| --- | --- |\n"
+                         "| 1991 | 0.01 |\n\nIt runs on servers and phones.\n## History\n\nOld.",
+                # (Everything seen in 21 articles' openings at once: the box, two pictures (one with a "title" and
+                # a line under it, one named with \" and \( and a file with brackets, then a line break of two
+                # spaces), links the wiki way, a formula in \( \), a source whose address has brackets.)
+                "Mount_Everest": "# Mount Everest\n<!--Infobox Start [Mountains]-->\n| name = Mount Everest\n| elevation = "
+                                 "8,848.86 m\n<!--Infobox End-->\n\n\n\n![Mount Everest](https://assets.example.org/e.jpg "
+                                 "\"source:https://example.org/everest_(1).jpg?a=1&b=2\")\n*Mount Everest from the air*\n"
+                                 "![Each letter of \"Everest\" is colored \\(from left to right\\) in blue.](._assets_/"
+                                 "Everest_(logo))  \n**Mount Everest** is Earth's highest mountain, in the [[Himalayas]] on "
+                                 "the border of [[Nepal|Nepal's]] north and [Tibet](https://grokipedia.com/page/Tibet_(region)), "
+                                 "where \\(a^2 + b^2 = c^2\\) holds.[](https://example.org/libre_(Hughes)/07_(Part_B)/x) Known "
+                                 "as **Sagarmatha**, *the* peak.\n## Geology\n\nRock.",
+                "Vienna": "# Vienna\n\n![](./_assets_/Vienna_Austria_Skyline_Aerial%252C_October_2024.jpg)\nVienna is the "
+                          "capital and largest city of [Austria](/page/Austria).[](https://example.org/v)\n## History\n\nOld.",
+                "Eiffel_Tower": "# Eiffel Tower\n\n![Eiffel Tower](./_assets_/Tour_Eiffel_Wikimedia_Commons_(cropped))\nThe "
+                                "Eiffel Tower is a 330-meter-tall (with antennas) wrought-iron [lattice tower](/page/Lattice_tower) "
+                                "in [Paris](/page/Paris).[](https://example.org/e)\n## History\n\nBuilt from 1887 to 1889.",
+            }.get(slug)
+            if content is None:
                 body = b'{"found":false}'
             else:
-                content = ("# Black Sea\n\nThe **Black Sea** is a large inland body of water between "
-                           "[southeastern Europe](/page/Southeastern_Europe) and [Anatolia](/page/Anatolia), "
-                           "covering about 436,000 km\u00b2.[](https://example.org/source-1)[](https://example.org/source-2) "
-                           "The [Danube](/page/Danube), the Dnieper and the Don flow into it. It is \"brackish\" \u2014 "
-                           "less salty than the oceans.\n\n## Geography\n\n" + "More about its shores. " * 60000)
-                body = json.dumps({"found": True, "page": {"slug": slug, "title": "Black Sea", "content": content,
-                                                           "description": "A sea.", "citations": []}}).encode()
+                body = json.dumps({"found": True, "page": {"slug": slug, "title": slug.replace("_", " "), "content": content,
+                                                           "description": "An article.", "citations": []}}).encode()
+        elif u.path == "/page/Vienna":
+            ctype = "text/html; charset=utf-8"
+            body = ("<html><head><title>Vienna</title></head><body><article class=\"article-enter\"><h1>Vienna</h1>"
+                    "<p>Vienna is the capital of Austria, as the page has it.</p></article></body></html>").encode()
         elif u.path == "/page/Black_Sea":
             ctype = "text/html; charset=utf-8"
             body = ("<html><head><title>Black Sea</title></head><body><nav>Menu Home Search</nav><article class=\"article-enter\">"
@@ -1578,16 +1654,61 @@ def test_grokipedia(ts5, model, tdir):
     rc, out, err, g, w = search("black sea", **grok)
     opening = ("The Black Sea is a large inland body of water between southeastern Europe and Anatolia, covering about "
                "436,000 km\u00b2. The Danube, the Dnieper and the Don flow into it. It is \"brackish\" \u2014 less salty than "
-               "the oceans. Geography More about its shores.")
+               "the oceans. More about its shores. More about its shores.")
     ok = (rc == 0 and out.startswith('Grokipedia articles for "black sea" (the only search set up here: xAI\'s encyclopedia, '
                                      'written by its AI; no news or live data):\n\n[1] Black Sea\n' + gurl + "/page/Black_Sea\n" + opening)
           and "[2] Black Sea Fleet\n" + gurl + "/page/Black_Sea_Fleet\nThe Black Sea Fleet is the fleet of the Russian Navy in the "
           "Black Sea...\n\n[3] Krasnodar Krai\n" + gurl + "/page/Krasnodar_Krai_(region)\n(no text)\n\nIf none of these" in out and
-          "example.org" not in out and "](" not in out and "**" not in out and len(out) < 2400 and
+          "example.org" not in out and "](" not in out and "**" not in out and "location map" not in out and
+          "Geography" not in out and len(out) < 2400 and
           "searching Grokipedia" in err and "3 results (" in err and ", Grokipedia)" in err and not w and
           [x[0] for x in g] == ["/api/full-text-search", "/api/page-preview"] and g[0][1]["query"] == ["black sea"] and
           g[0][1]["limit"] == ["5"] and g[1][1]["slug"] == ["Black_Sea"] and g[1][1]["content"] == ["1"])
     failed += report(ok, "Grokipedia search: the articles, the first with its opening as plain words", f"rc {rc}\n{out}\n{err}\n{g}")
+    # The article's text as the site sends it: a picture under the name (its file named with "\(...\)"),
+    # an opening of three paragraphs, then sections. And passages that are cut in a source mark, a link, a picture.
+    rc, out, err, g2, w = search("Danube river length", **grok)
+    first = out.split("\n\n[2]")[0]
+    ok = (rc == 0 and "[1] Danube\n" + gurl + "/page/Danube\nThe Danube is a major river in Central and Southeastern Europe, "
+          "measuring 2,778 kilometres in length" in out and
+          first.endswith("to the Danube Delta where it discharges into the Black Sea. Originating near Donaueschingen, it flows "
+                         "generally eastward, traversing or bordering ten countries\u2014Germany, Austria, and eight more\u2014before "
+                         "forming a vast delta primarily in Romania. Its drainage basin spans 817,000 square kilometres across "
+                         "nineteen countries, despite challenges from pollution and infrastructure development.") and
+          "[2] Length\n" + gurl + "/page/Length\nLength is a fundamental physical quantity that measures the distance between two "
+          "points or the extent of an object along a single dimension.\n\n[3] Danube (song)\n" + gurl + "/page/danube_(song)\n"
+          "A song about the river\n\nIf none" in out and
+          not any(x in out for x in ("Etymology", "Name origins", "Gell", "28493220635", "_assets_", "example.org", "[]", "](", "!")))
+    failed += report(ok, "Grokipedia search: a picture, sections and cut passages leave only the opening's words",
+                     f"rc {rc}\n{out}\n{err}\n{g2}")
+    rc, out, err, g2, w = search("who designed the Eiffel Tower", **grok)
+    ok = (rc == 0 and "[1] Eiffel Tower\n" + gurl + "/page/Eiffel_Tower\nThe Eiffel Tower is a 330-meter-tall (with antennas) "
+          "wrought-iron lattice tower in Paris. Built from 1887 to 1889.\n\n[2] Eiffel Tower (book)\n" + gurl +
+          "/page/eiffel_tower_(book)\nA book about the tower.\n\n[3] Eiffel Forums\n" + gurl + "/page/Eiffel_Forums\n(no text)"
+          "\n\nIf none" in out and "cropped" not in out and "History" not in out and "Operations" not in out)
+    failed += report(ok, "Grokipedia search: a picture's file with brackets in its name, a short opening goes on into the next "
+                     "section, a link is the slug as sent, a passage of a word or two is left out", f"rc {rc}\n{out}\n{err}\n{g2}")
+    rc, out, err, g2, w = search("Linux", **grok)
+    failed += report(rc == 0 and "[1] Linux\n" + gurl + "/page/Linux\nLinux is a free and open-source Unix-like operating system "
+                     "kernel originally authored by Linus Torvalds in 1991. Free here means freedom. It runs on servers and "
+                     "phones. Old.\n\nIf none" in out,
+                     "Grokipedia search: a box of facts, a comment, a table and the line under a picture are not the opening",
+                     f"rc {rc}\n{out}\n{err}")
+    rc, out, err, g2, w = search("Mount Everest", **grok)
+    failed += report(rc == 0 and "[1] Mount Everest\n" + gurl + "/page/Mount_Everest\nMount Everest is Earth's highest mountain, in "
+                     "the Himalayas on the border of Nepal's north and Tibet, where (a^2 + b^2 = c^2) holds. Known as "
+                     "Sagarmatha, the peak. Rock.\n\nIf none" in out,
+                     "Grokipedia search: two pictures, the wiki way of linking, a formula, an address with brackets",
+                     f"rc {rc}\n{out}\n{err}")
+    rc, out, err, g2, w = search("Vienna", **grok)
+    failed += report(rc == 0 and "[1] Vienna\n" + gurl + "/page/Vienna\nVienna is the capital and largest city of Austria. Old."
+                     "\n\nIf none" in out,
+                     "Grokipedia search: an opening that starts with the article's name keeps it (a picture without a name before it)",
+                     f"rc {rc}\n{out}\n{err}")
+    rc, out, err, g2, w = search("vienna", mode="refused", **grok)
+    failed += report(rc == 0 and "[1] Vienna\n" + gurl + "/page/Vienna\nVienna is the capital of Austria, as the page has it."
+                     "\n\nIf none" in out,
+                     "Grokipedia refuses the search: the page's first sentence keeps the name it starts with", f"rc {rc}\n{out}\n{err}")
     agents = {x[2] for x in g}
     failed += report(len(agents) == 1 and "Mozilla" not in next(iter(agents)) and all(x[3] == "application/json" for x in g),
                      "Grokipedia search: asked under ts5's own name, as Wikipedia's API is", f"{g}")
@@ -1632,7 +1753,9 @@ def test_grokipedia(ts5, model, tdir):
     # Both: half the results from each, Wikipedia's first, numbered on.
     both = {"TS5_ENCYCLOPEDIA": "both"}
     rc, out, err, g, w = search("PS5 firmware", **both)
-    ok = (rc == 0 and out.startswith("Two encyclopedias were searched (the only search set up here: no news or live data).\n\n"
+    ok = (rc == 0 and out.startswith("Two encyclopedias were searched (the only search set up here: no news or live data). "
+                                     "[1] to [3] are Wikipedia's and [4] to [5] are Grokipedia's. A fact is from the one "
+                                     "whose passage says it: name that one, and say both only when both passages say it.\n\n"
                                      'Wikipedia articles for "PS5 firmware":\n\n[1] PlayStation 5 system software') and
           '[3] Firmware\nhttps://en.wikipedia.org/wiki/Firmware\n(no opening text)\n\nGrokipedia articles for "PS5 firmware" '
           "(xAI's encyclopedia, written by its AI):\n\n[4] PlayStation 5\n" + gurl + "/page/PlayStation_5\nThe PS5 is a home "
@@ -1642,7 +1765,7 @@ def test_grokipedia(ts5, model, tdir):
           ", Grokipedia)" in err and "searching Wikipedia and Grokipedia" in err)
     failed += report(ok, "both: Wikipedia's articles, then Grokipedia's, numbered on", f"rc {rc}\n{out}\n{err}\n{g}\n{w}")
     rc, out, err, g, w = search("PS5 firmware", mode="down", **both)
-    failed += report(rc == 0 and "[1] PlayStation 5 system software" in out and
+    failed += report(rc == 0 and "[1] PlayStation 5 system software" in out and "are Grokipedia's" not in out and
                      "(Grokipedia could not be searched: Grokipedia had a problem.)" in out,
                      "both, Grokipedia down: Wikipedia's articles and a line about it", f"rc {rc}\n{out}\n{err}")
     rc, out, err, g, w = search("PS5 firmware", mode="down", TS5_WIKIPEDIA_URL="http://127.0.0.1:9", **both)
