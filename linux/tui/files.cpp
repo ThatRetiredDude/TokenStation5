@@ -258,7 +258,7 @@ Change change_of(const std::string &name, const ts5::Json &j) {
     if (c.whole) {
         c.after = arg(j, "content");
         if (c.existed && !read_whole(c.path, c.shown, c.before, c.error)) return c;
-        if (c.existed && c.before == c.after) c.error = c.shown + " already has exactly this content. Nothing to change.";
+        if (c.existed && c.before == c.after) c.error = c.shown + " already has exactly this content.";
         if (!c.existed) {
             const std::string dir = folder_of(c.path);
             struct stat ds;
@@ -286,12 +286,23 @@ Change change_of(const std::string &name, const ts5::Json &j) {
             const std::string meant = as_written(old_text);
             size_t where;
             if (times_in(c.before, meant, where) == 1) {
+                // What old_text ended in and new_text does not: the same
+                // model leaves it off the new text ("Helo, wrold!" and a
+                // line break for "Hello, user!", Gemma 3 4B again), and
+                // the file's \n would go with the old words. It stays.
+                const size_t ends = old_text.find_last_not_of("\n\t");
+                const std::string tail = as_written(old_text.substr(ends == std::string::npos ? 0 : ends + 1));
+                const bool kept = !tail.empty() && !new_text.empty() && new_text.find_last_of("\n\t") != new_text.size() - 1;
                 old_text = meant;
-                new_text = as_written(new_text);
+                new_text = as_written(new_text) + (kept ? tail : "");
                 at = where;
                 n = 1;
                 c.note = " (old_text had a line break or a tab where " + c.shown + " has it written out, as \\n or "
-                         "\\t. It was read that way, and new_text too.)";
+                         "\\t. It was read that way, and new_text too." +
+                         (kept ? " new_text did not end in one as old_text did, so the " + tail + " at the end stays in "
+                                 "the file."
+                               : "") +
+                         ")";
             }
         }
         if (n == 0) {
@@ -314,7 +325,7 @@ Change change_of(const std::string &name, const ts5::Json &j) {
             return c;
         }
         if (old_text == new_text) {
-            c.error = "old_text and new_text are the same. Nothing to change.";
+            c.error = "old_text and new_text are the same.";
             return c;
         }
         c.after = c.before.substr(0, at) + new_text + c.before.substr(at + old_text.size());
@@ -561,7 +572,9 @@ ToolResult file_call(const std::string &name, const std::string &args) {
     if (name == "read_file") return read_file(j);
     if (name == "list_folder") return list_folder(j);
     const Change c = change_of(name, j);
-    if (!c.error.empty()) return failed("not changed", c.error);
+    // (Said first: a model that reads only the start of a result took a
+    // refused edit for a made one, DeepSeek R1 14B on the PS5.)
+    if (!c.error.empty()) return failed("not changed", "Nothing was changed. " + c.error);
     std::string why;
     if (!write_whole(c.path, c.after, why))
         return failed("not changed: " + why, c.shown + " could not be written: " + why + ". Nothing was changed.");
