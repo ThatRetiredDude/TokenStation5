@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""ts5 serve's own pages (engine/src/web_serve.h): the chat page, the files it
+and the browser terminal load, and the terminal's WebSocket, run here with a
+stand-in program instead of ts5-tui (TS5_TERMINAL_COMMAND).
+
+    web_test.py TS5 MODEL.gguf BACKEND
+"""
+import base64
+import hashlib
+import json
+import os
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+failed = 0
+
+
+def check(ok, what, detail=None):
+    global failed
+    print(("ok   " if ok else "FAIL ") + what)
+    if not ok:
+        failed += 1
+        if detail is not None:
+            print("     " + str(detail)[:1500])
+
+
+def get(url, key=None):
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + key} if key else {})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, r.read(), dict(r.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), dict(e.headers)
+
+
+def post(url, body):
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
+def lan_address():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("192.0.2.1", 9))
+            ip = s.getsockname()[0]
+        except OSError:
+            return None
+    return None if ip.startswith("127.") else ip
+
+
+class Ws:
+    """A WebSocket client, enough for the test: it masks what it sends."""
+
+    def __init__(self, host, port, path, origin, bind=None):
+        self.s = socket.create_connection((host, port), timeout=10, source_address=(bind, 0) if bind else None)
+        self.key = base64.b64encode(os.urandom(16)).decode()
+        req = (f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+               f"Sec-WebSocket-Key: {self.key}\r\nSec-WebSocket-Version: 13\r\n")
+        if origin:
+            req += f"Origin: {origin}\r\n"
+        self.s.sendall((req + "\r\n").encode())
+        self.buf = b""
+        while b"\r\n\r\n" not in self.buf:
+            d = self.s.recv(4096)
+            if not d:
+                break
+            self.buf += d
+        head, _, self.buf = self.buf.partition(b"\r\n\r\n")
+        self.head = head.decode(errors="replace")
+        self.status = int(self.head.split(" ")[1]) if " " in self.head else 0
+        if self.status != 101:  # an error page: its body
+            want = 0
+            for line in self.head.split("\r\n"):
+                if line.lower().startswith("content-length:"):
+                    want = int(line.split(":")[1])
+            while len(self.buf) < want:
+                d = self.s.recv(4096)
+                if not d:
+                    break
+                self.buf += d
+            self.body = self.buf.decode(errors="replace")
+
+    def accept_ok(self):
+        want = base64.b64encode(hashlib.sha1((self.key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest())
+        return ("sec-websocket-accept: " + want.decode()).lower() in self.head.lower()
+
+    def send(self, op, data):
+        if isinstance(data, str):
+            data = data.encode()
+        mask = os.urandom(4)
+        h = bytes([0x80 | op])
+        n = len(data)
+        if n < 126:
+            h += bytes([0x80 | n])
+        elif n < 65536:
+            h += bytes([0x80 | 126]) + struct.pack(">H", n)
+        else:
+            h += bytes([0x80 | 127]) + struct.pack(">Q", n)
+        self.s.sendall(h + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+
+    def frame(self):
+        """A whole frame from what was read (the server never masks), or None."""
+        if len(self.buf) < 2:
+            return None
+        n, at = self.buf[1] & 0x7F, 2
+        if n == 126:
+            if len(self.buf) < 4:
+                return None
+            n, at = struct.unpack(">H", self.buf[2:4])[0], 4
+        elif n == 127:
+            if len(self.buf) < 10:
+                return None
+            n, at = struct.unpack(">Q", self.buf[2:10])[0], 10
+        if len(self.buf) < at + n:
+            return None
+        op, p = self.buf[0] & 0x0F, self.buf[at:at + n]
+        self.buf = self.buf[at + n:]
+        return op, p
+
+    def recv(self, timeout=10):
+        """(op, payload) of the next frame, or (None, b"") when nothing came."""
+        self.s.settimeout(timeout)
+        try:
+            while True:
+                frame = self.frame()
+                if frame:
+                    return frame
+                d = self.s.recv(65536)
+                if not d:
+                    return None, b""
+                self.buf += d
+        except socket.timeout:
+            return None, b""
+
+    def read_until(self, text, timeout=10):
+        """The terminal's output until text shows, or the time is up."""
+        out, end = b"", time.time() + timeout
+        while time.time() < end and text.encode() not in out:
+            op, p = self.recv(max(0.1, end - time.time()))
+            if op is None:
+                break
+            if op == 2:
+                out += p
+            if op == 8:
+                out += b"[closed " + str(struct.unpack(">H", p[:2])[0] if len(p) >= 2 else 0).encode() + b"]"
+                break
+        return out.decode(errors="replace")
+
+
+def main():
+    if len(sys.argv) < 4:
+        sys.exit(__doc__)
+    ts5, model, backend = sys.argv[1:4]
+    d = tempfile.mkdtemp(prefix="ts5-web-")
+    path = os.path.join(d, "access", "keys.tsv")
+    os.makedirs(os.path.dirname(path))
+    with socket.socket() as s:
+        s.bind(("0.0.0.0", 0))
+        port = s.getsockname()[1]
+    log_path = os.path.join(d, "serve.log")
+    log = open(log_path, "w+")
+    # The stand-in: says its size and what it's sent, then its size again.
+    stand_in = "stty size; echo ready; read x; echo got:$x; stty size; read y; echo bye"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("TS5_")}
+    env.update(TS5_KEYS=path, TS5_TERMINAL_COMMAND=stand_in, TS5_API_KEY="the-one-in-the-environment")
+    p = subprocess.Popen([ts5, "serve", "-m", model, "-c", "2048", "--host", "0.0.0.0", "--port", str(port),
+                          "--backend", backend], stdout=log, stderr=log, env=env)
+    here = f"http://127.0.0.1:{port}"
+    lan = lan_address()
+    try:
+        for _ in range(900):
+            try:
+                urllib.request.urlopen(here + "/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            sys.exit("web_test: the server didn't start")
+        subprocess.run([ts5, "keys", "--file", path, "require", "on"], capture_output=True)
+        time.sleep(1.3)
+
+        code, body, h = get(here + "/")
+        check(code == 200 and h.get("Content-Type", "").startswith("text/html") and b"TokenStation5" in body and
+              b"/v1/chat/completions" in body, "/ is the chat page, with no key", (code, body[:200], h))
+        csp = h.get("Content-Security-Policy", "")
+        check("connect-src 'self'" in csp and "frame-ancestors 'none'" in csp and h.get("X-Frame-Options") == "DENY",
+              "the page keeps to its own server and out of other sites' frames", h)
+        if lan:
+            code, body, _ = get(f"http://{lan}:{port}/")
+            check(code == 200 and b"TokenStation5" in body, "another machine gets the page too (the API still asks for a key)")
+            code, body, _ = get(f"http://{lan}:{port}/v1/models")
+            check(code == 401, "while /v1 asks it for a key", (code, body))
+        req = urllib.request.Request(here + "/v1", headers={"Accept": "text/html,application/xhtml+xml"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            check(r.status == 200 and r.url.rstrip("/") == here and b"TokenStation5" in r.read(),
+                  "the apps' address (/v1) in a browser goes to the chat page", r.url)
+        code, body, _ = get(here + "/v1")
+        check(code in (401, 404), "while an app asking /v1 gets an answer for an app", code)
+        code, body, h = get(here + "/ts5/web/xterm.js")
+        check(code == 200 and h.get("Content-Type", "").startswith("text/javascript") and len(body) > 200000 and
+              b"xterm.js" in body, "xterm.js is built in", (code, len(body), h))
+        code, body, _ = get(here + "/ts5/web/xterm-LICENSE")
+        check(code == 200 and b"Permission is hereby granted" in body, "with its license")
+        code, body, _ = get(here + "/ts5/web/chat.html")
+        check(code == 404, "the pages only at their own addresses", code)
+        code, body, h = get(here + "/ts5/terminal")
+        check(code == 200 and b"/ts5/terminal/socket" in body and b"/ts5/web/xterm.js" in body,
+              "/ts5/terminal is the terminal page", (code, body[:200]))
+        origin = f"http://127.0.0.1:{port}"
+
+        w = Ws("127.0.0.1", port, "/ts5/terminal/socket", origin)
+        check(w.status == 403 and "is off" in w.body and "Access page" in w.body,
+              "terminal: off at first, and says where it's turned on", (w.status, getattr(w, "body", "")))
+        code, st = post(here + "/ts5/tailnet", {"terminal": True})
+        check(code == 200 and st.get("terminal") is True, "terminal: turned on", (code, st))
+        conf = os.path.join(d, "access", "tailscale.conf")
+        check(os.path.exists(conf) and "terminal=1" in open(conf).read(), "terminal: kept in tailscale.conf")
+        if lan:
+            w = Ws(lan, port, "/ts5/terminal/socket", f"http://{lan}:{port}")
+            check(w.status == 403 and "tailnet" in w.body, "terminal: never for the rest of the network",
+                  (w.status, getattr(w, "body", "")))
+        code, body, _ = get(here + "/ts5/terminal/socket")
+        check(code == 200 and json.loads(body).get("terminal") == "on", "terminal: the page may ask first, plainly", (code, body))
+        w = Ws("127.0.0.1", port, "/ts5/terminal/socket", "http://evil.example")
+        check(w.status == 403 and "own page" in w.body, "terminal: not from another site's page", (w.status, getattr(w, "body", "")))
+        w = Ws("127.0.0.1", port, "/ts5/terminal/socket", None)
+        check(w.status == 403, "terminal: nor without an Origin", w.status)
+
+        w = Ws("127.0.0.1", port, "/ts5/terminal/socket", origin)
+        check(w.status == 101 and w.accept_ok(), "terminal: the WebSocket opens, with the right accept", w.head)
+        w.send(1, json.dumps({"key": "", "cols": 100, "rows": 30}))
+        op, first = w.recv()
+        check(op == 1 and json.loads(first or b"{}").get("ready") is True, "terminal: ready after the key", (op, first))
+        out = w.read_until("ready")
+        check("30 100" in out and "ready" in out, "terminal: the program runs in a terminal of the size asked", out)
+        w.send(1, json.dumps({"cols": 120, "rows": 40}))
+        time.sleep(0.3)
+        w.send(2, "hi there\r")
+        out = w.read_until("40 120")
+        check("got:hi there" in out and "40 120" in out, "terminal: keystrokes reach it, and a new size", out)
+        w.send(2, "\r")
+        out = w.read_until("[closed")
+        check("bye" in out and "[closed 1000]" in out, "terminal: when the program ends, the socket closes", out)
+
+        w = Ws("127.0.0.1", port, "/ts5/terminal/socket", origin)
+        w.send(1, json.dumps({"key": "", "cols": 80, "rows": 24}))
+        w.recv()
+        w.read_until("ready")
+        code, st = post(here + "/ts5/tailnet", {"terminal": False})
+        out = w.read_until("[closed", timeout=5)
+        check("[closed 1001]" in out, "terminal: turned off, an open one closes", out)
+        w = Ws("127.0.0.1", port, "/ts5/terminal/socket", origin)
+        w.send(1, "not json")
+        check(w.status == 403, "terminal: and none opens", w.status)
+
+        for _ in range(50):  # the session's last line comes once its program has gone
+            text = open(log_path).read()
+            if "its switch turned off" in text:
+                break
+            time.sleep(0.1)
+        check("terminal: 127.0.0.1 opened one" in text and "session ended after" in text and "its switch turned off" in text,
+              "the log says who opened one and when it closed", text[-1500:])
+        check("the-one-in-the-environment" not in text, "and never a key")
+    finally:
+        p.terminate()
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+    print("web_test: " + ("all passed" if not failed else f"{failed} failed"))
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()

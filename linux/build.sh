@@ -155,7 +155,7 @@ for src in "$root"/linux/tui/*.cpp; do
     o="$out/obj/own/tui_$(basename "$src" .cpp).o"
     run "$CXX" "${cxxflags[@]}" -I "$root/linux/tui" -c "$src" -o "$o"
 done
-for src in "$root"/engine/src/{main,cli,browser,access,tailnet_serve}.cpp; do
+for src in "$root"/engine/src/{main,cli,browser,access,tailnet_serve,web_serve}.cpp; do
     o="$out/obj/own/cli_$(basename "$src" .cpp).o"
     run "$CXX" "${cxxflags[@]}" -DTS5_TAILNET=1 -c "$src" -o "$o"
 done
@@ -168,6 +168,8 @@ for src in "$root"/engine/src/tailnet/{wg,tailscale,noise,h2,nacl}.cpp; do
 done
 run "$CC" -x assembler-with-cpp -Wa,-I"$root/ps5/ui" -c "$root/ps5/ui/font_data.S" -o "$out/obj/own/font_data.o"
 run "$CC" -x assembler-with-cpp -Wa,-I"$root/ps5/tts" -c "$root/ps5/tts/lexicon_data.S" -o "$out/obj/own/lexicon_data.o"
+run "$CC" -x assembler-with-cpp -Wa,-I"$root/engine/web" -Wa,-I"$root/third_party/xterm" -c "$root/engine/web/web_assets.S" \
+    -o "$out/obj/own/web_assets.o"
 wait_all
 echo "== compiled in $(($(date +%s) - t0)) s"
 
@@ -188,7 +190,7 @@ ar_if_stale "$out/obj/libts5wg.a" "${wgobjects[@]}"
     "$out/obj/libts5wg.a" "$out/obj/libts5speech.a" "$out/obj/libts5mbedtls.a" \
     $(pkg-config --libs sdl2) -ldl
 "$CXX" "${opt[@]}" -o "$out/ts5" "$out/obj/own/cli_main.o" "$out/obj/own/cli_cli.o" "$out/obj/own/cli_browser.o" \
-    "$out/obj/own/cli_access.o" "$out/obj/own/cli_tailnet_serve.o" "$out"/obj/own/ts5net_*.o "${engine_objects[@]}" \
-    "$out/obj/libts5wg.a" "$out/obj/libts5mbedtls.a" -ldl
+    "$out/obj/own/cli_access.o" "$out/obj/own/cli_tailnet_serve.o" "$out/obj/own/cli_web_serve.o" "$out/obj/own/web_assets.o" \
+    "$out"/obj/own/ts5net_*.o "${engine_objects[@]}" "$out/obj/libts5wg.a" "$out/obj/libts5mbedtls.a" -lutil -ldl
 "$CXX" "${opt[@]}" -o "$out/ts5-tui" "$out"/obj/own/tui_*.o "$out/obj/own/third_party_qrcodegen_qrcodegen.cpp.o"
 echo "build: $out/tokenstation, $out/ts5 and $out/ts5-tui ($version, tuned for $march)"

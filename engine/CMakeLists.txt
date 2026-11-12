@@ -88,4 +88,14 @@ if(TS5_HTTPS)
     src/tailnet/noise.cpp src/tailnet/h2.cpp src/tailnet/nacl.cpp)
   target_compile_definitions(ts5 PRIVATE TS5_TAILNET=1 TS5_LOG_NAME="ts5")
   target_link_libraries(ts5 PRIVATE ts5tunnel)
+
+  # The pages ts5 serve shows a browser (web_serve.h): the chat page, the
+  # browser terminal, and xterm.js (third_party/xterm, MIT), built in.
+  enable_language(ASM)
+  file(GLOB TS5_WEB_FILES ${CMAKE_CURRENT_SOURCE_DIR}/web/*.html ${TS5_THIRD}/xterm/*)
+  set_source_files_properties(web/web_assets.S PROPERTIES
+    COMPILE_OPTIONS "-Wa,-I${CMAKE_CURRENT_SOURCE_DIR}/web;-Wa,-I${TS5_THIRD}/xterm"
+    OBJECT_DEPENDS "${TS5_WEB_FILES}")
+  target_sources(ts5 PRIVATE src/web_serve.cpp web/web_assets.S)
+  target_link_libraries(ts5 PRIVATE util)  # forkpty
 endif()

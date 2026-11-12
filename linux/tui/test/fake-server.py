@@ -38,7 +38,8 @@ FAKE_TAILNET=1 answers /ts5/tailnet as a ts5 serve with Tailscale does (off;
 on gives a sign-in link a second later, and FAKE_TAILNET_SIGNIN seconds
 after that, 6 by default, it is connected; sign_out turns it off; "ssh"
 switches SSH through it, and FAKE_TAILNET_SSHD=0 says this machine has no
-SSH server).
+SSH server; "terminal" the browser terminal; FAKE_TAILNET_LINK sets the
+sign-in link).
 FAKE_MODEL names the model. FAKE_HELPER names the helper drafting beside it
 (FAKE_HELPER_CTX: its context; "none": no helper), FAKE_HELPER_NOTE says
 why none is; with neither, /v1/models has no "helper" at all, as an older
@@ -87,14 +88,14 @@ WEB = bool(os.environ.get("FAKE_WEB") or os.environ.get("TAVILY_API_KEY"))
 TAILNET = os.environ.get("FAKE_TAILNET") == "1"
 TAILNET_SIGNIN = float(os.environ.get("FAKE_TAILNET_SIGNIN", "6"))
 TAILNET_SSHD = os.environ.get("FAKE_TAILNET_SSHD", "1") == "1"
-tailnet = {"on": False, "since": 0.0, "signed_in": False, "name": "tokenstation5", "ssh": False}
+tailnet = {"on": False, "since": 0.0, "signed_in": False, "name": "tokenstation5", "ssh": False, "terminal": False}
 
 
 def tailnet_status():
     """What GET /ts5/tailnet gives: off, starting, sign_in (with a link), connected."""
     t = tailnet
     out = {"on": t["on"], "hostname": t["name"], "server": "https://controlplane.tailscale.com", "devices": 0,
-           "port": int(sys.argv[1]) if len(sys.argv) > 1 else 18081, "peers": [], "ssh": t["ssh"],
+           "port": int(sys.argv[1]) if len(sys.argv) > 1 else 18081, "peers": [], "ssh": t["ssh"], "terminal": t["terminal"],
            "ssh_server": TAILNET_SSHD}
     age = time.time() - t["since"]
     if not t["on"]:
@@ -193,6 +194,8 @@ class H(BaseHTTPRequestHandler):
                 tailnet["name"] = req["name"].lower()
             if "ssh" in req:
                 tailnet["ssh"] = bool(req["ssh"])
+            if "terminal" in req:
+                tailnet["terminal"] = bool(req["terminal"])
             self.send(200, tailnet_status())
             return
         msgs = req.get("messages", [])

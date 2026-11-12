@@ -19,6 +19,7 @@
 #include <exception>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include "json.h"
 #include "log.h"
@@ -30,9 +31,10 @@ namespace ts5 {
 namespace {
 
 struct Request {
-    std::string method, path, body;
+    std::string method, path, query, body;
     bool tls = false;  // the client spoke TLS (an https:// address) to this plain-HTTP port
     std::string key;   // the API key it sent, if any
+    std::vector<std::pair<std::string, std::string>> headers;  // names in lower case
 };
 
 // A header's value without the spaces around it.
@@ -90,12 +92,20 @@ bool read_request(int fd, Request &r) {
     r.method = head.substr(0, sp1);
     r.path = head.substr(sp1 + 1, sp2 - sp1 - 1);
     size_t q = r.path.find('?');
-    if (q != std::string::npos) r.path.resize(q);
+    if (q != std::string::npos) {
+        r.query = r.path.substr(q + 1);
+        r.path.resize(q);
+    }
     size_t clen = 0;
     bool chunked = false;
     for (size_t p = head.find("\r\n"); p != std::string::npos; p = head.find("\r\n", p + 2)) {
         size_t e = head.find("\r\n", p + 2);
         std::string line = head.substr(p + 2, e == std::string::npos ? std::string::npos : e - p - 2);
+        if (const size_t colon = line.find(':'); colon != std::string::npos && r.headers.size() < 100) {
+            std::string name = line.substr(0, colon);
+            for (char &c : name) c = (char)tolower((unsigned char)c);
+            r.headers.emplace_back(name, header_value(line, colon + 1));
+        }
         if (strncasecmp(line.c_str(), "content-length:", 15) == 0) clen = strtoul(line.c_str() + 15, nullptr, 10);
         if (strncasecmp(line.c_str(), "authorization:", 14) == 0) {
             const std::string v = header_value(line, 14);
@@ -364,6 +374,23 @@ void handle(int fd, Server::State &state, Usage &u) {
                          kPreflightAge + "\r\nConnection: close\r\n\r\n");
         close(fd);
         return;
+    }
+    // The program's own pages (set_pages), before the key check: a browser
+    // opening a page has no way to send one.
+    if (state.pages) {
+        Server::Page p;
+        p.method = r.method;
+        p.path = r.path;
+        p.query = r.query;
+        p.body = r.body;
+        p.client = u.rec.client;
+        p.key = r.key;
+        p.headers = r.headers;
+        if (state.pages(p, fd)) {
+            close(fd);
+            u.closed = true;
+            return;
+        }
     }
     // The engine of the moment; generations hold `gen` throughout, so it
     // stays for the whole request.

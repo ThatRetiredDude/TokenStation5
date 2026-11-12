@@ -19,7 +19,7 @@ never relicenses someone else's work.
 
 | Part | License | Why |
 | --- | --- | --- |
-| `engine/` (ts5: source, shaders, tests, design doc, the Tailscale client and tunnel glue `engine/src/tailnet`) | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code. Contains no GPL code. The Tailscale client was `ps5/ts` and `ps5/wg` (GPL-3.0-or-later) until 2026-11-12, when it moved here to serve Linux too; copies taken from there keep the GPL they came with. |
+| `engine/` (ts5: source, shaders, tests, design doc, the Tailscale client and tunnel glue `engine/src/tailnet`, the browser pages `engine/web`) | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code. Contains no GPL code. The Tailscale client was `ps5/ts` and `ps5/wg` (GPL-3.0-or-later) until 2026-11-12, when it moved here to serve Linux too; copies taken from there keep the GPL they came with. |
 | `scripts/`, `docs/`, `models.tsv`, `known-good.tsv`, `README.md`, `.github/` | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code and docs. The scripts download and talk to GPL programs (PS5LM) but contain none of their code. |
 | `linux/` (Linux package scripts, service, release notes) | [PolyForm Small Business 1.0.0](LICENSE.md) | Our own code. Contains no GPL code. |
 | `linux/cu-test/` (GPU self-test `gpu-selftest` and the `tokenstation-cu` compute unit tool) | [MIT](linux/cu-test/LICENSE) | Standalone and permissive so other PS5 Linux projects can use it. |
@@ -28,6 +28,7 @@ never relicenses someone else's work.
 | `third_party/kokoro.cpp/` (Kokoro-82M's model code, for spoken replies) | [MIT](third_party/kokoro.cpp/LICENSE), as vendored | Third-party code, copied by `scripts/vendor-kokoro.sh` with our patch (espeak-ng and Highway out). Linked into the PS5 title, not into the Linux `ts5` binary. |
 | `third_party/lwip/`, `third_party/wireguard-lwip/` (network stack and tunnel under the Tailscale client) | [BSD-3-Clause](third_party/lwip/COPYING), [BSD-3-Clause](third_party/wireguard-lwip/LICENSE) with MIT and public-domain crypto files, as vendored | Third-party code, copied by `scripts/vendor-wireguard.sh`. Linked into the PS5 title and the Linux `ts5` binary (its Tailscale). |
 | `third_party/qrcodegen/` (the sign-in QR codes) | MIT, as vendored | Third-party code. Linked into the PS5 title and the Linux `ts5-tui` (its Access page). |
+| `third_party/xterm/` (xterm.js and its fit addon, for the browser terminal) | [MIT](third_party/xterm/LICENSE), [MIT](third_party/xterm/LICENSE-addon-fit), as vendored | Third-party code, copied unchanged by `scripts/vendor-xterm.sh`. Built into the Linux `ts5` binary as files it serves to a browser. |
 | Any other file under `third_party/` | Its own license, in its folder | Third-party code is never under PolyForm. |
 | `ps5/ui/font.bin` (dashboard glyphs) | SIL OFL 1.1 (Inter) and the Bitstream Vera license (DejaVu Sans Mono) | Rendered from those fonts by `ps5/ui/make_font.py`; see NOTICE.md. |
 | `ps5/tts/lexicon.bin` (word pronunciations) | Apache-2.0 (misaki) and BSD-style (CMUdict) data, in our format | Built by `scripts/pack-g2p-lexicon.py`; see NOTICE.md. |

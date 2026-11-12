@@ -4,6 +4,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "engine.h"
 #include "known_good.h"
@@ -53,6 +55,25 @@ public:
     using Routes = std::function<bool(const std::string &method, const std::string &path, const std::string &body,
                                       const std::string &client, int &code, std::string &reply)>;
     void set_routes(Routes f) { state_.routes = std::move(f); }
+    // The program's own pages, such as ts5's chat page: asked about every
+    // request first, before the key check (a browser can't send a key when
+    // it opens a page), with the request, its peer as set_client_name named
+    // it, and the connection. True when it answered on fd, which it may
+    // keep for as long as it needs (a WebSocket); the server closes fd after.
+    // Who may have what is the page's to decide. Set before start().
+    struct Page {
+        std::string method, path, query, body, client;
+        std::string key;  // the API key the request sent, if any
+        std::vector<std::pair<std::string, std::string>> headers;  // names in lower case
+        // A header's value ("" without it); name in lower case.
+        std::string header(const std::string &name) const {
+            for (const auto &h : headers)
+                if (h.first == name) return h.second;
+            return std::string();
+        }
+    };
+    using Pages = std::function<bool(const Page &, int fd)>;
+    void set_pages(Pages f) { state_.pages = std::move(f); }
 
     // For a status display.
     struct Activity {
@@ -93,6 +114,7 @@ public:
         Authorize authorize;
         std::string key_hint;
         Routes routes;
+        Pages pages;
     };
 
 private:

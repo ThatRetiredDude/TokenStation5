@@ -190,6 +190,7 @@ struct App {
     // false when it has none (not running, an older ts5, the TV app): tn_why.
     bool tn_have = false, tn_on = false;
     bool tn_ssh = false, tn_ssh_server = false;  // SSH through it; whether this machine has an SSH server
+    bool tn_terminal = false;                    // the browser terminal (ts5 serve's /ts5/terminal)
     bool tn_want_qr = false;  // turned on here: the sign-in QR opens once there is a link
     std::string tn_state, tn_host, tn_name, tn_address, tn_url, tn_name_url, tn_sign_in, tn_problem, tn_account, tn_why;
     int tn_devices = 0;
@@ -582,8 +583,9 @@ std::string encyclopedia_name() {
 enum AccessKind { ACC_OWN, ACC_SERVICE, ACC_TV, ACC_REMOTE };
 
 // The page's rows before the keys: other devices, need a key, Tailscale,
-// connect an app.
-constexpr int kAccRows = 5;
+// SSH via Tailscale, the browser terminal, connect an app.
+constexpr int kAccRows = 6;
+constexpr int kAccTerminal = 4, kAccConnect = 5;
 
 AccessKind access_kind() {
     if (!endpoint().local()) return ACC_REMOTE;
@@ -732,6 +734,33 @@ void tailnet_take(const ts5::Json &j) {
     g->tn_devices = (int)j["devices"].num(0);
     g->tn_ssh = j["ssh"].boolean(false);
     g->tn_ssh_server = j["ssh_server"].boolean(false);
+    g->tn_terminal = j["terminal"].boolean(false);
+}
+
+// The browser terminal's address on the tailnet: the API's, at /ts5/terminal.
+std::string terminal_url() {
+    std::string u = g->tn_url;
+    if (u.size() > 3 && u.compare(u.size() - 3, 3, "/v1") == 0) u.resize(u.size() - 3);
+    return u.empty() ? u : u + "/ts5/terminal";
+}
+
+// That address as a QR code, for a phone or tablet on the tailnet.
+void qr_terminal_open() {
+    const std::string url = terminal_url();
+    g->toast.clear();
+    g->qr.clear();
+    g->qr.push_back({"", url});
+    g->qr_sel = 0;
+    g->qr_sign_in = false;
+    g->qr_title = " The browser terminal ";
+    g->qr_notes = {"Open it on a device on your tailnet (Tailscale on): ts5-tui in the browser, in its tmux session. "
+                   "It asks for one of the keys below once (N makes one).",
+                   url};
+    g->qr_short = "The browser terminal: scan it on your tailnet";
+    g->qr_plain = "The browser terminal, on a device on your tailnet (Tailscale on):\n\n" + url +
+                  "\n\nIt asks for one of this machine's API keys once (the Access page makes them). The chat page is "
+                  "at the same address without /ts5/terminal.\n";
+    g->qr_plain_title = "the browser terminal's address";
 }
 
 // The sign-in link as a QR code, to scan with the phone that is signed in
@@ -3206,6 +3235,22 @@ void draw_access() {
         rows.push_back(r);
     }
     {
+        // ts5-tui in a web page (ts5 serve's /ts5/terminal), for the
+        // tailnet's devices with a key: from a tablet or a borrowed computer.
+        Row r{"Browser terminal", "", "", k != ACC_TV && g->tn_have, false};
+        if (k == ACC_TV) r.value = "—", r.note = "not from the TV app";
+        else if (!g->tn_have) r.value = "—", r.note = g->tn_why;
+        else if (!g->tn_terminal)
+            r.value = "off", r.note = "on: ts5-tui in a web browser, from your tailnet, with a key";
+        else if (!g->tn_on)
+            r.value = "on", r.note = "once Tailscale is on (above)";
+        else if (g->tn_state == "connected" && !terminal_url().empty())
+            r.value = "on", r.note = terminal_url() + " · Enter: as a QR code";
+        else
+            r.value = "on", r.note = "once Tailscale is connected";
+        rows.push_back(r);
+    }
+    {
         Row r{"Connect an app", "a new key, as QR codes", "", false, false};
         const bool tailnet = g->tn_have && g->tn_state == "connected";
         if (k == ACC_TV) r.value = "on the TV", r.note = "the TV app makes its keys: its Settings page, under Apps";
@@ -3287,7 +3332,9 @@ void draw_access() {
                     : g->acc_sel == 2 && g->tn_on && g->tn_state == "sign_in"
                         ? "↑↓ choose|Enter the QR code|←→ on or off|D sign out|N new key|Tab/1-6 pages"
                     : g->acc_sel == 2 && g->tn_on ? "↑↓ choose|←→ on or off|D sign out|N new key|Tab/1-6 pages"
-                    : g->acc_sel == 4             ? "↑↓ choose|Enter a key and its QR codes|N new key|Tab/1-6 pages"
+                    : g->acc_sel == kAccTerminal && g->tn_terminal && g->tn_state == "connected"
+                        ? "↑↓ choose|Enter the QR code|←→ on or off|N new key|Tab/1-6 pages"
+                    : g->acc_sel == kAccConnect   ? "↑↓ choose|Enter a key and its QR codes|N new key|Tab/1-6 pages"
                                                   : "↑↓ choose|←→ change|N new key|Tab/1-6 pages");
 }
 
@@ -4610,7 +4657,7 @@ void key_access(const Event &e) {
         g->acc_sel = (g->acc_sel + 1) % n;
     } else if (letter('r')) {
         access_read();
-    } else if (letter('n') || (e.key == K_ENTER && g->acc_sel == 4)) {
+    } else if (letter('n') || (e.key == K_ENTER && g->acc_sel == kAccConnect)) {
         if (k == ACC_TV) show_toast("The TV app makes its keys: its Settings page, under Apps", g->th->warn, 6);
         else if (!g->acc_err.empty()) show_toast(g->acc_err, g->th->bad, 6);
         else {
@@ -4678,6 +4725,20 @@ void key_access(const Event &e) {
                        : !g->tn_on          ? "SSH via Tailscale: on, once Tailscale is on (the row above)"
                                             : "SSH via Tailscale: on. Your tailnet's devices reach this machine's SSH",
                        g->tn_ssh && g->tn_ssh_server ? g->th->good : g->tn_ssh ? g->th->warn : g->th->dim, 7);
+        }
+    } else if (flip && g->acc_sel == kAccTerminal) {
+        if (k == ACC_TV) {
+            show_toast("The TV app has no browser terminal", g->th->warn, 5);
+        } else if (!g->tn_have) {
+            show_toast("Tailscale: " + g->tn_why, g->th->warn, 8);
+        } else if (e.key == K_ENTER && g->tn_terminal && g->tn_state == "connected" && !terminal_url().empty()) {
+            qr_terminal_open();
+        } else if (tailnet_post(g->tn_terminal ? "{\"terminal\":false}" : "{\"terminal\":true}")) {
+            show_toast(!g->tn_terminal                 ? "Browser terminal: off. Any open in a browser have closed"
+                       : g->tn_state != "connected"    ? "Browser terminal: on, once Tailscale is connected"
+                       : g->acc_keys.empty()           ? "Browser terminal: on. It asks for a key: N makes one"
+                                                       : "Browser terminal: on. Enter shows its address as a QR code",
+                       g->tn_terminal ? g->th->good : g->th->dim, 7);
         }
     } else if (letter('d') && g->acc_sel == 2) {
         if (k == ACC_TV || !g->tn_have) return;

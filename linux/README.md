@@ -225,6 +225,31 @@ Match Address 127.0.0.2
 it as copied state; ts5 then starts over as a new device and asks for a new
 sign-in (remove the old one in Tailscale's admin console).
 
+### In a browser: the chat page and the terminal
+
+`ts5 serve` answers a web browser too, at the same address apps use, without
+`/v1`:
+
+- **The chat page** (`http://100.101.102.103:8081/` from your tailnet, or
+  `http://192.168.1.20:8081/` at home with Other devices on): a plain chat
+  with the loaded model, streamed, with its thinking when the model thinks.
+  It asks once for one of your keys and keeps it, and your chats, in that
+  browser only. Nothing to install on the phone.
+- **The browser terminal** (`/ts5/terminal`): ts5-tui itself in a web page,
+  for a laptop or tablet away from home with no SSH client. Off by default:
+  the **Browser terminal** row on the Access page turns it on, and **Enter**
+  there shows its address as a QR code. It opens only for your tailnet's
+  devices and this machine, each time with a key that is on, never for the
+  rest of the home network, and at most four at once. It runs ts5-tui in
+  tmux, so a closed tab or a lost signal leaves an answer running and the
+  page connects again. A bar of keys under it gives a phone what its
+  keyboard lacks (Esc, Tab, the arrows, F1 to F6). ts5's log names each
+  device that opens one and how long it stayed. Turning it off closes the
+  ones that are open.
+
+The pages themselves need no key; everything they ask of the model does.
+xterm.js draws the terminal; it is built into `ts5` (NOTICE.md).
+
 ## In a terminal: ts5-tui
 
 `ts5-tui` is TokenStation5 in a terminal, colorful and driven from the
@@ -280,7 +305,7 @@ ts5-tui --url http://ps5.local:8081  # another one
   page but Chat. On a Mac, where macOS keeps the F keys, use those, fn+F1
   to fn+F6, or `/chat`, `/models`, `/status`, `/settings`, `/logs`, `/access`.
 - **Access (F6)**: who can use this TokenStation5 from another machine,
-  and with which key. Four switches, Connect an app, and the list of keys:
+  and with which key. Five switches, Connect an app, and the list of keys:
   - **Other devices**: whether a model ts5-tui loads can be reached from
     other machines at all. Off by default (only this machine). Switched
     on, the page shows the address to give an app, such as
@@ -297,6 +322,10 @@ ts5-tui --url http://ps5.local:8081  # another one
   - **SSH via Tailscale**: on, the tailnet's port 22 reaches this machine's
     own SSH server, and the row shows the command (`ssh you@tokenstation5`).
     Off by default; it says so when no SSH server is installed.
+  - **Browser terminal**: on, your tailnet's devices open ts5-tui in a web
+    browser at `/ts5/terminal`, with a key ([In a browser](#in-a-browser-the-chat-page-and-the-terminal)).
+    Off by default. Once Tailscale is connected the row shows the address,
+    and **Enter** shows it as a QR code.
   - **Connect an app**: makes a key (name it after the app) and shows two
     QR codes, one at a time (**←→**): the address (the tailnet's when
     Tailscale is connected, else this network's) and the key, to scan into

@@ -283,6 +283,38 @@ subject to the following conditions:
   Software.
 ```
 
+### xterm.js and its fit addon (MIT)
+
+`third_party/xterm` is [xterm.js](https://github.com/xtermjs/xterm.js) 5.5.0
+and its fit addon 0.10.0, unchanged. The Linux `ts5` builds them in and
+serves them to a browser for its browser terminal (`/ts5/terminal`), which
+shows ts5-tui in a web page. The fit addon carries the same license, with
+the line `Copyright (c) 2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)`.
+
+```
+Copyright (c) 2017-2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
+Copyright (c) 2014-2016, SourceLair Private Company (https://www.sourcelair.com)
+Copyright (c) 2012-2013, Christopher Jeffrey (https://github.com/chjj/)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ### Fonts for the dashboard (`ps5/ui/font.bin`)
 
 `ps5/ui/make_font.py` renders glyphs from two fonts into `ps5/ui/font.bin`,
@@ -528,7 +560,8 @@ it was built from, plus the pinned revisions of the projects above.
 
 The Linux `ts5` binary is built from `engine/` (no whisper.cpp), with lwIP
 and wireguard-lwip (above) for its Tailscale and the libraries under "In the
-binaries". `ts5-tui` is built from `linux/tui` with qrcodegen (above). They
+binaries". `ts5-tui` is built from `linux/tui` with qrcodegen (above). `ts5` also
+builds in xterm.js (above) as files for its browser terminal page. They
 link only the system's Vulkan loader (Apache-2.0) and the C++ runtime (libstdc++, GPL-3.0 WITH GCC-exception-3.1, which places no
 terms on the program), both dynamically. Its shaders run on whatever Vulkan
 driver the system has, such as Mesa (MIT) in CI.

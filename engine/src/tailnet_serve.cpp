@@ -124,6 +124,7 @@ void Tailnet::start(const std::string &dir, int api_port) {
             else if (k == "name" && good_name(v)) name_ = v;
             else if (k == "server" && !v.empty()) server_ = v;
             else if (k == "ssh") ssh_ = v == "1";
+            else if (k == "terminal") terminal_ = v == "1";
         }
         fclose(f);
     }
@@ -162,7 +163,8 @@ bool Tailnet::save_locked(std::string &err) {
     }
     const std::string text = "# ts5 tailscale settings (ts5-tui's Access page writes them)\non=" +
                              std::string(on_ ? "1" : "0") + "\nname=" + name_ + "\nserver=" + server_ +
-                             "\nssh=" + std::string(ssh_ ? "1" : "0") + "\n";
+                             "\nssh=" + std::string(ssh_ ? "1" : "0") + "\nterminal=" + std::string(terminal_ ? "1" : "0") +
+                             "\n";
     const bool ok = write(fd, text.data(), text.size()) == (ssize_t)text.size() && fsync(fd) == 0;
     close(fd);
     if (!ok || rename(tmp.c_str(), path.c_str()) != 0) {
@@ -191,13 +193,14 @@ void Tailnet::attach(Server &s) {
 }
 
 std::string Tailnet::status_json() {
-    bool on, ssh;
+    bool on, ssh, terminal;
     std::string name, server;
     int port;
     {
         std::lock_guard<std::mutex> lk(mu_);
         on = on_;
         ssh = ssh_;
+        terminal = terminal_;
         name = name_;
         server = server_;
         port = api_port_;
@@ -221,6 +224,9 @@ std::string Tailnet::status_json() {
     // server for it to reach.
     j.set("ssh", jbool(ssh));
     j.set("ssh_server", jbool(ssh_listening()));
+    // The browser terminal (web_serve.h): ts5-tui in a web page, for the
+    // tailnet's devices with a key.
+    j.set("terminal", jbool(terminal));
     if (st.state == ts::Status::Connected) {
         // The address by number: a name needs the tailnet's MagicDNS (and
         // the phone's "Use Tailscale DNS"), which not every tailnet has.
@@ -298,6 +304,10 @@ bool Tailnet::route(const std::string &method, const std::string &path, const st
         if (sign_out) on_ = false;
         else if (j["on"].type == Json::BOOL) on_ = j["on"].b;
         if (j["ssh"].type == Json::BOOL) ssh_ = j["ssh"].b;
+        if (j["terminal"].type == Json::BOOL && j["terminal"].b != terminal_) {
+            terminal_ = j["terminal"].b;
+            log_line("ts5: tailscale: the browser terminal %s", terminal_ ? "on" : "off");
+        }
         // Asked to be on again while on: a fresh try (after a problem, say).
         const bool client = sign_out || on_ != was_on || name_ != was_name || server_ != was_server ||
                             (on_ && j["on"].type == Json::BOOL);

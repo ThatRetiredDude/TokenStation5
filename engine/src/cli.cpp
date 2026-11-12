@@ -53,6 +53,7 @@
 #include "server.h"
 #ifdef TS5_TAILNET
 #include "tailnet_serve.h"
+#include "web_serve.h"
 #endif
 #include "tokenizer.h"
 #include "tools.h"
@@ -835,8 +836,16 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             dir = slash == std::string::npos ? "." : slash == 0 ? "/" : dir.substr(0, slash);
             tailnet = new Tailnet;
             tailnet->start(dir, a.port);
-            setup = [](Server &s) { tailnet->attach(s); };
         }
+        // The chat page and, once Access turns it on, the browser terminal
+        // (web_serve.h).
+        setup = [authorize](Server &s) {
+            if (tailnet) tailnet->attach(s);
+            WebOptions w;
+            w.authorize = authorize;
+            if (tailnet) w.terminal = [] { return tailnet->terminal(); };
+            attach_web(s, w);
+        };
 #endif
         return serve(eng, basename_of(a.model), a.host, a.port,
                      [&](int port) { if (on_serving) on_serving(basename_of(a.model), port); }, on_usage, authorize,

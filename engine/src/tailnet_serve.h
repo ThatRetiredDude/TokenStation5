@@ -43,6 +43,12 @@ public:
     // /ts5/tailnet. Before Server::start.
     void attach(Server &s);
     std::string status_json();
+    // The browser terminal's switch (POST /ts5/tailnet {"terminal":true}),
+    // kept in tailscale.conf: off until turned on.
+    bool terminal() {
+        std::lock_guard<std::mutex> lk(mu_);
+        return terminal_;
+    }
 
 private:
     bool route(const std::string &method, const std::string &path, const std::string &body, const std::string &client,
@@ -55,7 +61,7 @@ private:
     std::mutex mu_;
     std::string dir_;
     int api_port_ = 8081;
-    bool on_ = false, ssh_ = false;
+    bool on_ = false, ssh_ = false, terminal_ = false;
     std::string name_, server_;
 };
 
