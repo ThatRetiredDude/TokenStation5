@@ -244,12 +244,16 @@ ts5-tui --url http://ps5.local:8081  # another one
   red from 83 °C, a warning at the 85 °C limiter) and the fan.
 - **The `ts5>` prompt at the bottom**: Enter sends, Ctrl+J (or Alt+Enter)
   starts a new line, the up arrow brings back what you typed before, Esc
-  stops an answer. While an answer is coming you can go on typing: Enter
-  queues the message (and the next, and the next), they show over the
-  prompt, and each is sent by itself when the answer before it is done. The
-  up arrow takes the last queued one back to change it. Stopping an answer
-  (or one that fails) leaves the queue waiting: Enter sends it on, Esc drops
-  it. Commands start with `/` and Tab completes them, and model
+  stops an answer. While an answer is coming you can go on typing. **Enter
+  steers it**: the model reads your note as soon as it can and goes on from
+  there. While it writes, it stops where it is (what it wrote stays, marked
+  "your note came in here"); while a tool it called runs (a command, a
+  page), the note waits over the prompt and goes in once that step is done.
+  **Tab queues** the message instead (and the next, and the next): they
+  show over the prompt, and each is sent by itself when the answer before
+  it is done. The up arrow takes the last queued one back to change it.
+  Stopping an answer (or one that fails) leaves the queue waiting: Enter
+  sends it on, Esc drops it. Commands start with `/` and Tab completes them, and model
   names after `/model`: `/model`, `/download`, `/search`, `/new`, `/chats`, `/open`,
   `/save`, `/copy`, `/find`, `/tune`, `/check`, `/bench`, `/usage`, `/access`,
   `/think on|off`, `/fan auto|cool|early|max`, `/theme`, `/help`, `/unload`,

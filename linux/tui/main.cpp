@@ -3470,8 +3470,8 @@ void draw_chat() {
     draw_chat_screen(g->scr, *g->th, g->chat, v);
     draw_bottom_bar(g->chat.ask.load() == 1 && g->chat.input.empty()
                         ? "←→ choose|Enter give the answer|Esc no|PgUp/PgDn scroll"
-                    : g->chat.busy() ? (g->chat.queued.empty() ? "Enter queue a message|Esc stop|PgUp/PgDn scroll|Ctrl+T thoughts"
-                                                             : "Enter queue another|↑ take the last back|Esc stop|PgUp/PgDn scroll")
+                    : g->chat.busy() ? (g->chat.queued.empty() ? "Enter steer it|Tab queue a message|Esc stop|PgUp/PgDn scroll|Ctrl+T thoughts"
+                                                             : "Enter steer it|Tab queue another|↑ take the last back|Esc stop|PgUp/PgDn scroll")
                     : !g->chat.queued.empty() ? "Enter send the queued|Esc drop them|↑ take the last back|PgUp/PgDn scroll"
                                    : "Enter send|Tab next page|Ctrl+Y copy|Ctrl+T thoughts|Ctrl+N new chat|Ctrl+J new line|PgUp/PgDn scroll");
 }
@@ -5230,6 +5230,8 @@ void tick() {
     // filled up is summarized and goes on (Settings → When a chat fills up).
     if (g->chat.answers_seen != g->chat.answers && !g->chat.busy()) {
         g->chat.answers_seen = g->chat.answers;
+        // Notes for the answer that came as it ended: the next to go.
+        chat_steer_to_queue(g->chat);
         // Messages that wait their turn (entered while the answer was
         // coming) wait for a key instead where it didn't end well.
         bool hold = false;

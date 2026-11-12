@@ -548,6 +548,7 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
             Line h;
             h.add("▌ ", Style(t.accent2, kDefault, BOLD));
             h.add("You", Style(t.accent2, kDefault, BOLD));
+            if (m.steer) h.add(" · while it worked", Style(t.dim));
             out.push_back(h);
             size_t p = 0;
             while (p <= m.content.size()) {
@@ -666,6 +667,7 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
             if (m.prompt_tps > 0) f += fmt(" · prompt %.0f tok/s", m.prompt_tps);
             if (m.t_end > m.t0) f += fmt(" · %.1f s", m.t_end - m.t0);
             if (m.stopped) f += (f.empty() ? "" : " · ") + std::string("stopped");
+            if (m.steered) f += (f.empty() ? "" : " · ") + std::string("your note came in here");
             // The answer's numbers, and its copy mark, at the right.
             const std::string mark = content.empty() ? "" : "[copy]";
             if (!f.empty() || !mark.empty()) {
@@ -779,7 +781,13 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
     const int y0 = v.top;
     const int ys = iy - 1;     // the status line
     const int qn = (int)c.queued.size();
-    const int qrows = std::max(0, std::min(std::min(qn, 3), ys - y0 - 4));
+    std::vector<std::string> notes;  // for the answer, when its tool is done
+    {
+        std::lock_guard<std::mutex> l(c.mu);
+        notes = c.steer;
+    }
+    const int sn = std::min((int)notes.size(), 2);
+    const int qrows = std::max(0, std::min(std::min(qn + sn, 3), ys - y0 - 4));
     int y1 = ys - qrows;       // the conversation's end
     c.hits.clear();
     c.row_msg.clear();
@@ -814,19 +822,32 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
             s.put(w - text_width(m) - 2, y1 - 1, m, Style(t.bg, t.accent2, BOLD));
         }
     }
-    // Messages entered while an answer was coming: the next ones to go.
+    // Notes for the answer that is coming, waiting for its tool (steer_in),
+    // then the messages entered to go after it: the next ones to go.
     for (int r = 0; r < qrows; r++) {
         const int y = y1 + r;
         s.fill(0, y, w, 1, Style(t.dim, t.bg));
-        if (r == 2 && qn > 3) {
-            s.put(1, y, fmt("and %d more", qn - 2), Style(t.dim, kDefault, ITALIC));
+        if (r < sn) {
+            std::string one = notes[r];
+            for (char &ch : one)
+                if (ch == '\n' || ch == '\t') ch = ' ';
+            int x = s.put(1, y, "your note", Style(t.accent, kDefault, BOLD));
+            const std::string tip = r == 0 ? "the model reads it when this step is done" : "";
+            const int tw = tip.empty() || w < 80 ? 0 : text_width(tip) + 2;
+            s.put(x + 2, y, fit(one, w - x - 4 - tw), Style(t.fg));
+            if (tw) s.put(w - tw, y, tip, Style(t.dim));
+            continue;
+        }
+        const int q = r - sn;
+        if (r == 2 && qn - q > 1) {
+            s.put(1, y, fmt("and %d more queued", qn - q), Style(t.dim, kDefault, ITALIC));
             break;
         }
-        std::string one = c.queued[r];
+        std::string one = c.queued[q];
         for (char &ch : one)
             if (ch == '\n' || ch == '\t') ch = ' ';
-        int x = s.put(1, y, qn > 1 ? fmt("queued %d", r + 1) : std::string("queued"), Style(t.accent2, kDefault, BOLD));
-        const std::string tip = r == 0 ? (c.queue_held ? "Enter sends · Esc drops" : "↑ takes the last one back") : "";
+        int x = s.put(1, y, qn > 1 ? fmt("queued %d", q + 1) : std::string("queued"), Style(t.accent2, kDefault, BOLD));
+        const std::string tip = q == 0 ? (c.queue_held ? "Enter sends · Esc drops" : "↑ takes the last one back") : "";
         const int tw = tip.empty() || w < 70 ? 0 : text_width(tip) + 2;
         s.put(x + 2, y, fit(one, w - x - 4 - tw), Style(c.queue_held ? t.dim : t.fg));
         if (tw) s.put(w - tw, y, tip, Style(c.queue_held ? t.warn : t.dim));
@@ -912,7 +933,7 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
         const char *ph = c.ask.load() == 1 ? (c.ask_kind.load() >= 1
                                                   ? "Do what it says above? ←→ choose, Enter · Esc says no · or type the next message"
                                                   : "Run the command above? ←→ choose, Enter · Esc says no · or type the next message")
-                         : c.busy()        ? "answering… type the next message, Enter queues it · Esc stops"
+                         : c.busy()        ? "answering… Enter: a note it reads now · Tab: a message for after · Esc stops"
                                            : "Message TokenStation5…   / for commands, ↑ history";
         s.put(7, iy + 1, fit(ph, w - 9), Style(mix(t.dim, t.panel, 0.25), t.panel, ITALIC));
     }
@@ -1138,7 +1159,10 @@ std::string body_for(Chat &c, const ChatRequest &rq, bool no_tools = false) {
     return b + "}";
 }
 
-// Streams one answer into the chat's last message.
+bool cut_text_call(std::string &content);
+
+// Streams one answer into the chat's last message. A note of the user's
+// (Chat::steer_cut) stops it where it is, as Esc does, but the chat goes on.
 void stream_answer(Chat *c, const ChatRequest &rq, const std::string &body) {
     std::string pending;
     bool finished = false;
@@ -1232,7 +1256,7 @@ void stream_answer(Chat *c, const ChatRequest &rq, const std::string &body) {
                                on_event(line);
                            }
                        }
-                       return !c->cancel.load();
+                       return !c->cancel.load() && !c->steer_cut.load();
                    },
                    &c->fd);
     {
@@ -1242,6 +1266,11 @@ void stream_answer(Chat *c, const ChatRequest &rq, const std::string &body) {
         m.t_end = now_s();
         if (c->cancel) {
             m.stopped = true;
+        } else if (c->steer_cut.load() && !finished) {
+            // Cut for a note: what it wrote stays, without a call it was
+            // still writing out as text.
+            m.steered = true;
+            cut_text_call(m.content);
         } else if (r.status >= 400) {
             ts5::Json j;
             std::string why = r.body;
@@ -1260,7 +1289,7 @@ void stream_answer(Chat *c, const ChatRequest &rq, const std::string &body) {
         // Calls without a name are no calls.
         m.calls.erase(std::remove_if(m.calls.begin(), m.calls.end(), [](const ToolUse &u) { return u.name.empty(); }),
                       m.calls.end());
-        if (m.stopped || !m.error.empty()) m.calls.clear();
+        if (m.stopped || m.steered || !m.error.empty()) m.calls.clear();
         if (m.gen_tps == 0 && m.t_first > 0 && m.t_end - m.t_first > 0.2) m.gen_tps = m.chunks / (m.t_end - m.t_first);
         if (m.gen_tokens == 0) m.gen_tokens = m.chunks;
         if (m.total_tokens > 0) c->ctx_used = m.total_tokens;
@@ -1433,15 +1462,68 @@ bool reads_on(const std::string &args) {
     return ts5::Json::parse(args, j) && j["start_line"].num(1) > 1;
 }
 
+// The notes the user sent while the answer came (Chat::steer), into the
+// chat before the model's next turn, as one message of the user's: before
+// that turn where it hasn't begun yet (after a tool's results), else after
+// the turn they cut short, with a new one for the model. Then the turn
+// streams (Chat::streaming), which a note that comes now stops. True when
+// there were notes.
+bool steer_in(Chat *c, const ChatRequest &rq) {
+    std::lock_guard<std::mutex> l(c->mu);
+    c->streaming = true;
+    if (c->steer.empty()) return false;
+    Msg u;
+    u.role = "user";
+    u.steer = true;
+    u.done = true;
+    for (auto &n : c->steer) u.content += (u.content.empty() ? "" : "\n\n") + n;
+    c->steer.clear();
+    c->steer_cut = false;
+    Msg &last = c->msgs.back();
+    const bool fresh = last.role == "assistant" && !last.done && last.t_first == 0 && last.content.empty() &&
+                       last.reasoning.empty() && last.calls.empty();
+    // (A turn cut before it wrote or thought anything is no turn.)
+    const bool nothing = last.role == "assistant" && last.steered && last.content.empty() && last.reasoning.empty();
+    if (fresh) {
+        c->msgs.insert(c->msgs.end() - 1, u);
+        c->msgs.back().t0 = now_s();
+        return true;
+    }
+    if (nothing) c->msgs.pop_back();
+    c->msgs.push_back(u);
+    Msg a;
+    a.role = "assistant";
+    a.model = rq.model;
+    a.t0 = now_s();
+    c->msgs.push_back(a);
+    return true;
+}
+
 // An answer: the model's turn, and for as long as it calls tools, each
 // call run, its result added to the chat, and another turn of the model's.
+// A note the user sends meanwhile (steer_in) goes in before the next turn,
+// and the answer goes on from it as from a new message.
 void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
     bool none = false;     // this turn was told to call no tool
     bool said_no = false;  // the user said no to a command of this message's
     bool again = false;    // a turn that came back empty was asked once more
     int turns = 0;         // all of them, the free ones too
     for (int round = 0;; round++, turns++) {
+        if (c->cancel.load()) break;
+        if (steer_in(c, rq)) {
+            round = turns = 0;
+            none = said_no = again = false;
+            body = body_for(*c, rq);  // (takes the chat's lock itself)
+        }
         stream_answer(c, rq, body);
+        bool steered = false;
+        {
+            std::lock_guard<std::mutex> l(c->mu);
+            c->streaming = false;
+            steered = c->msgs.back().steered;
+        }
+        // Cut short for a note: it goes in, and the model goes on.
+        if (steered) continue;
         std::vector<ToolUse> calls;
         {
             std::lock_guard<std::mutex> l(c->mu);
@@ -1495,7 +1577,14 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
                 continue;
             }
         }
-        if (calls.empty()) break;
+        if (calls.empty()) {
+            // A note that came as the answer ended: the chat goes on with it.
+            // (Where the answer failed, it waits in the queue instead.)
+            std::lock_guard<std::mutex> l(c->mu);
+            const Msg &m = c->msgs.back();
+            if (!c->steer.empty() && m.error.empty() && !m.full && !c->cancel.load()) continue;
+            break;
+        }
         bool reading = true;  // every call read on, and got its next part
         bool viewed = false;  // a browser call of this turn brought a page, or another part of one
         for (const ToolUse &u : calls) {
@@ -1750,6 +1839,7 @@ void send(Chat &c, const ChatRequest &rq, const std::string &text) {
     }
     c.scroll = 0;
     c.cancel = false;
+    c.steer_cut = false;
     c.running = true;
     const std::string body = body_for(c, rq);
     c.worker = std::thread(run_answer, &c, rq, body);
@@ -1992,7 +2082,8 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
         // A message that got no answer (it failed, was stopped, or filled
         // the chat with its thinking; such turns aren't sent): said so, or
         // the notes make one up (Qwen3.5 9B wrote a haiku of its own there).
-        if (role == "user" && (k + 1 == idx.size() || c.msgs[idx[k + 1]].role == "user"))
+        if (role == "user" &&
+            (k + 1 == idx.size() || (c.msgs[idx[k + 1]].role == "user" && !c.msgs[idx[k + 1]].steer)))
             talk += "[Assistant]\n(No answer came to this: the assistant ran out of room or was stopped.)\n\n";
     }
     *keep_from = first_kept < idx.size() ? (int)idx[first_kept] : (int)end;
@@ -2044,6 +2135,17 @@ void chat_stop(Chat &c) {
         if (fd >= 0) shutdown(fd, SHUT_RDWR);
     }
     if (c.worker.joinable()) c.worker.join();
+    chat_steer_to_queue(c);
+}
+
+bool chat_steer_to_queue(Chat &c) {
+    if (c.busy()) return false;
+    std::lock_guard<std::mutex> l(c.mu);
+    c.steer_cut = false;
+    if (c.steer.empty()) return false;
+    c.queued.insert(c.queued.begin(), c.steer.begin(), c.steer.end());
+    c.steer.clear();
+    return true;
 }
 
 void chat_new(Chat &c) {
@@ -2058,6 +2160,7 @@ void chat_new(Chat &c) {
     c.saved_id.clear();
     c.queued.clear();
     c.queue_held = false;
+    c.steer.clear();
     c.ask = 0;
     c.ask_always = false;
     c.ask_always_browser = false;
@@ -2229,6 +2332,24 @@ std::string chat_copy_text(Chat &c, int msg, int block, bool thinking, std::stri
     return out;
 }
 
+// A message for the answer that is coming (Chat::steer). False where there
+// is none to steer: nothing running, or a summary being written.
+static bool steer_with(Chat &c, const std::string &text) {
+    int fd = -1;
+    {
+        std::lock_guard<std::mutex> l(c.mu);
+        if (!c.running || c.msgs.empty() || c.msgs.back().role == "summary") return false;
+        c.steer.push_back(text);
+        if (c.streaming) {
+            c.steer_cut = true;
+            fd = c.fd.load();
+        }
+    }
+    // (A prompt being read sends nothing the stream could stop at.)
+    if (fd >= 0) shutdown(fd, SHUT_RDWR);
+    return true;
+}
+
 bool chat_send_queued(Chat &c, const ChatRequest &rq) {
     if (c.busy() || c.queued.empty()) return false;
     const std::string text = c.queued.front();
@@ -2251,7 +2372,8 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
     // The model wants to run a command and waits for a word (run_call):
     // ←→ pick the answer (run it, every command of this chat, no), Enter
     // gives it, Esc says no. With nothing typed, and never a letter: a
-    // message typed while the question shows goes to the queue as always.
+    // message typed while the question shows is a note for the answer, read
+    // once the question is answered (Tab: the queue), as always.
     if (c.ask.load() == 1 && c.input.empty()) {
         if (e.key == K_LEFT || e.key == K_RIGHT) {
             c.ask_pick = (c.ask_pick.load() + (e.key == K_RIGHT ? 1 : 2)) % 3;
@@ -2318,7 +2440,17 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
                 c.cur = i;
             }
             return CHAT_NONE;
+        case K_TAB:
+            // A message (not a command): it waits its turn, after the answer
+            // that is coming and the ones queued before it. Nothing coming,
+            // it goes now.
+            if (c.input.empty() || c.input[0] == '/') {
+                complete(c, rq);
+                return CHAT_NONE;
+            }
+            [[fallthrough]];
         case K_ENTER: {
+            const bool queue = e.key == K_TAB;
             if (c.input.empty()) {
                 // Messages left waiting by an answer that was stopped or failed: on with them.
                 if (!c.busy() && !c.queued.empty()) chat_send_queued(c, rq);
@@ -2341,6 +2473,9 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
             c.input.clear();
             c.cur = 0;
             if (command) return CHAT_COMMAND;
+            // Enter while an answer is coming: the model reads the message
+            // as soon as it can, and goes on from it (steer_with).
+            if (!queue && steer_with(c, text)) return CHAT_NONE;
             // One answer at a time: a message entered while one is coming
             // waits its turn, behind any that already wait.
             if (c.busy() || !c.queued.empty()) {
@@ -2431,7 +2566,6 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
         case K_PGDN: c.scroll = std::max(0, c.scroll - page); return CHAT_NONE;
         case K_CTRL_UP: c.scroll += 1; return CHAT_NONE;
         case K_CTRL_DOWN: c.scroll = std::max(0, c.scroll - 1); return CHAT_NONE;
-        case K_TAB: complete(c, rq); return CHAT_NONE;
         default: return CHAT_NONE;
     }
 }
