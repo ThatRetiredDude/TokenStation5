@@ -164,6 +164,7 @@ std::string count(size_t n, const char *one) { return std::to_string(n) + " " + 
 // A change worked out: the file before and after.
 struct Change {
     std::string path, shown, before, after, error;
+    std::string note;                     // what was read into the call, told with its result
     bool existed = false, whole = false;  // whole: write_file
     size_t first = 0, out = 0, in = 0;    // the lines that differ: from line `first` (counted from 0), so many out and in
 };
@@ -177,6 +178,67 @@ void measure(Change &c) {
     c.first = p;
     c.out = a.size() - p - s;
     c.in = b.size() - p - s;
+}
+
+// How often `part` is in `all`, and where the first is.
+size_t times_in(const std::string &all, const std::string &part, size_t &at) {
+    size_t n = 0;
+    at = all.find(part);
+    for (size_t i = at; i != std::string::npos; i = all.find(part, i + part.size())) n++;
+    return n;
+}
+
+// A text's line breaks and tabs the way a string in code writes them.
+std::string as_written(const std::string &t) {
+    std::string out;
+    for (char ch : t) {
+        if (ch == '\n') out += "\\n";
+        else if (ch == '\t') out += "\\t";
+        else out += ch;
+    }
+    return out;
+}
+
+// The pairs of neighbouring characters of a line, sorted: two lines are
+// alike by how many they share.
+std::vector<unsigned> pairs_of(const std::string &l) {
+    std::vector<unsigned> p;
+    for (size_t i = 0; i + 1 < l.size(); i++) p.push_back((unsigned char)l[i] << 8 | (unsigned char)l[i + 1]);
+    std::sort(p.begin(), p.end());
+    return p;
+}
+
+std::string trimmed(const std::string &l) {
+    const size_t a = l.find_first_not_of(" \t\r"), b = l.find_last_not_of(" \t\r");
+    return a == std::string::npos ? "" : l.substr(a, b - a + 1);
+}
+
+// The line of the file most like old_text's first line with anything on
+// it, when one is much like it (six pairs in ten shared): its number from
+// 0, or npos. For the model that sent an edit which matches nothing: it
+// gets the line as the file has it.
+size_t closest_line(const std::vector<std::string> &lines, const std::string &old_text) {
+    std::string want;
+    for (const std::string &l : lines_of(old_text))
+        if (!(want = trimmed(l)).empty()) break;
+    if (want.size() < 4 || want.size() > kLineChars || lines.size() > 20000) return std::string::npos;
+    const std::vector<unsigned> w = pairs_of(want);
+    size_t best = std::string::npos;
+    double best_score = 0.6;
+    for (size_t k = 0; k < lines.size(); k++) {
+        const std::string l = trimmed(lines[k]);
+        if (l.size() < 4 || l.size() > kLineChars) continue;
+        const std::vector<unsigned> p = pairs_of(l);
+        size_t same = 0;
+        for (size_t i = 0, j = 0; i < w.size() && j < p.size();) {
+            if (w[i] == p[j]) same++, i++, j++;
+            else if (w[i] < p[j]) i++;
+            else j++;
+        }
+        const double score = 2.0 * same / (w.size() + p.size());
+        if (score > best_score) best_score = score, best = k;
+    }
+    return best;
 }
 
 Change change_of(const std::string &name, const ts5::Json &j) {
@@ -202,18 +264,45 @@ Change change_of(const std::string &name, const ts5::Json &j) {
         }
         if (c.after.size() > kMaxFile) c.error = "That is too much for one file (8 MiB at most).";
     } else {
-        const std::string old_text = arg(j, "old_text"), new_text = arg(j, "new_text");
+        std::string old_text = arg(j, "old_text"), new_text = arg(j, "new_text");
         if (!read_whole(c.path, c.shown, c.before, c.error)) return c;
         if (old_text.empty()) {
             c.error = "old_text is empty. Give the exact text to replace, copied from the file (read_file shows it). To "
                       "write a whole file use write_file.";
             return c;
         }
-        size_t at = c.before.find(old_text), n = 0;
-        for (size_t i = at; i != std::string::npos; i = c.before.find(old_text, i + old_text.size())) n++;
+        size_t at, n = times_in(c.before, old_text, at);
+        // Not there as given, and there once with its line breaks written
+        // out: a call is JSON, where the backslash of a "\n" in the file's
+        // code has to be doubled, and a small model sends it single, a
+        // line break (Gemma 3 4B on the PS5, the same edit six times over:
+        // old_text "Helo, wrold!" and a line break, for a C string). It is
+        // taken the way it was meant, new_text with it, and the result
+        // says so. The user sees the lines that change, as for any edit.
+        if (n == 0 && old_text.find_first_of("\n\t") != std::string::npos) {
+            const std::string meant = as_written(old_text);
+            size_t where;
+            if (times_in(c.before, meant, where) == 1) {
+                old_text = meant;
+                new_text = as_written(new_text);
+                at = where;
+                n = 1;
+                c.note = " (old_text had a line break or a tab where " + c.shown + " has it written out, as \\n or "
+                         "\\t. It was read that way, and new_text too.)";
+            }
+        }
         if (n == 0) {
             c.error = "old_text is not in " + c.shown + ". It has to match the file exactly, spaces and line breaks "
                       "too. Read the file with read_file and copy the text from it.";
+            // The line it comes closest to, as the file has it.
+            const std::vector<std::string> lines = lines_of(c.before);
+            const size_t k = closest_line(lines, old_text);
+            if (k != std::string::npos) {
+                c.error += " The line of the file most like it is line " + std::to_string(k + 1) + ":\n" + lines[k] + "\n";
+                if (lines[k].find('\\') != std::string::npos)
+                    c.error += "(That line has a backslash in it. In a call's arguments a backslash of the file is "
+                               "written twice.)";
+            }
             return c;
         }
         if (n > 1) {
@@ -483,7 +572,7 @@ ToolResult file_call(const std::string &name, const std::string &args) {
     t.head = !c.existed ? "written: " + count(b.size(), "line") : "changed: " + count(c.out, "line") + " out, " + std::to_string(c.in) + " in";
     t.text = (!c.existed ? "Written: " + c.shown + ", " + count(b.size(), "line") + "."
                          : "Changed " + c.shown + " (" + count(c.out, "line") + " out, " + std::to_string(c.in) + " in). It has " +
-                               count(b.size(), "line") + " now.");
+                               count(b.size(), "line") + " now.") + c.note;
     if (c.existed && c.in > 0) {
         // The place as it reads now, for the model to check its work.
         t.text += fmt(" From line %zu it reads:\n", (c.first >= 2 ? c.first - 2 : 0) + 1);

@@ -364,7 +364,10 @@ ts5-tui --url http://ps5.local:8081  # another one
     that starts with a dot) and a file outside the folder ts5-tui was
     started in are asked for each time. Paths start at that folder, the
     one the terminal's commands run in. Text files up to 8 MiB; a long
-    file is read in parts.
+    file is read in parts. A change has to name the text it replaces
+    exactly: one that matches nothing tells the model the line of the
+    file that comes closest, and a line break sent where the file's code
+    has `\n` written out (a small model's usual slip) is read as that.
   - **Outside tools (MCP)**: a program that speaks MCP, the Model
     Context Protocol, gives the model tools of its own (a calendar, a
     database, a code host: whatever the program is for). Add one with the
@@ -404,12 +407,21 @@ ts5-tui --url http://ps5.local:8081  # another one
     `~/.local/share/tokenstation/memory.md`.
 
   Every model ts5 serves can call tools: the ones whose file has no tool
-  format of its own (DeepSeek R1) are asked in words. Small models call
-  tools less reliably than large ones. A web page is text from a stranger:
-  with "every command" chosen, a page the model reads could talk it into a
-  command, so leave the question on when it reads pages you don't trust. A model that
-  keeps calling tools gets twelve rounds for one message, then has to
-  answer.
+  format of its own (DeepSeek R1) are asked in words. How well it uses
+  them is the model's own doing. On a PS5, given the browser, the files
+  and an outside tool, the Qwen3, Qwen3.5 and Qwen3.8 models, the three
+  Bonsai models, Gemma 4 12B, Gemma 3 12B and Qwen2.5 Coder 14B did what
+  was asked. Llama 3.1 8B did with files and outside tools, and clicked
+  wrong links on a web page. DeepSeek R1 14B was right about two times in
+  three. Gemma 3 4B, Llama 3.2 3B and Qwen2.5 Coder 7B mostly were not,
+  and one of them emptied the file it was to fix with a command of its
+  own: with a small model, keep the questions on. A web page is text from
+  a stranger: with "every command" chosen, a page the model reads could
+  talk it into a command, so leave the question on when it reads pages you
+  don't trust. A model that keeps calling tools gets twelve rounds for one
+  message, then has to answer; reading on down a page or a file is not
+  counted (up to 48 turns in all). If it asks for more after that, the
+  chat says so, and "go on" gives it twelve more.
 - **Keys that can't surprise**: with something typed at the prompt, Tab
   stays there (it completes a command) instead of changing the page. PgUp
   and PgDn scroll the chat, and so do Shift or Alt with the up and down

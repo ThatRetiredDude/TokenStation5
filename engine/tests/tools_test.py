@@ -466,6 +466,12 @@ def test_parser(ts5):
         ("llama3", '{"name": "write_file", "parameters": {"path": "f.py", "content": "if x:\\n    print("Fizz")"}}',
          "", [("write_file", {"path": "f.py", "content": 'if x:\n    print("Fizz")'})], 0),
         ("llama3", '{"type": "function", "function": {"name": "a", "parameters": {"x": 1}}}', "", [("a", {"x": 1})], 0),
+        # The name in "function" itself (Llama 3.2 3B on the PS5, 2026-11-12, byte for byte); a
+        # plain object with a "function" that is no call stays text.
+        ("llama3", '{\n    "type": "function",\n    "function": "browser_open",\n    "parameters": {\n        "url": '
+         '"https://en.wikipedia.org/wiki/Danube"\n    }\n}', "",
+         [("browser_open", {"url": "https://en.wikipedia.org/wiki/Danube"})], 0, ["browser_open", "browser_click"]),
+        ("llama3", '{"function": 3, "parameters": {}}', '{"function": 3, "parameters": {}}', [], 0),
         ("llama3", "Hello {there}", "Hello {there}", [], 13),
         # A call one brace short (Llama 3.2 3B, from the console); cut inside a
         # string, or plain JSON cut short, stays text.

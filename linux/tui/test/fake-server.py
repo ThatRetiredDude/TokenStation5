@@ -32,6 +32,8 @@ click N, type N TEXT (typeonly: without Enter), more, back; in place of N,
 page the call before gave.
 "call NAME ;; JSON" calls the tool of that name, if the request offers it
 (an outside tool's: linux/tui/mcp.h and fake-mcp.py); "&&&" between several.
+FAKE_TEXT_CALL: what the turn that gets no tools (after twelve rounds of
+them, or a no) answers with, a call written as text ("\\n" a line break).
 FAKE_MODEL names the model. FAKE_HELPER names the helper drafting beside it
 (FAKE_HELPER_CTX: its context; "none": no helper), FAKE_HELPER_NOTE says
 why none is; with neither, /v1/models has no "helper" at all, as an older
@@ -174,8 +176,9 @@ class H(BaseHTTPRequestHandler):
                     if m.get("role") == "system":
                         f.write("  system: %s\n" % json.dumps(m.get("content")))
                     if m.get("role") == "tool":
-                        f.write("  tool %s %s: %s\n" % (m.get("name"), m.get("tool_call_id"),
-                                                        json.dumps((m.get("content") or "")[:200])))
+                        c = m.get("content") or ""
+                        f.write("  tool %s %s: %s\n" % (m.get("name"), m.get("tool_call_id"), json.dumps(
+                            c if len(c) <= 480 else c[:200] + " [...] " + c[-240:])))
                     if m.get("tool_calls"):
                         f.write("  calls: %s\n" % json.dumps(m["tool_calls"]))
         # The tool calls this turn makes (see the top of the file).
@@ -288,6 +291,10 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 gen += 12 * len(calls)
                 text = ""
+            elif results and req.get("tool_choice") == "none" and os.environ.get("FAKE_TEXT_CALL"):
+                # The turn that may call no tool, answered with a call written out as text, as real
+                # models did on the PS5 after their twelfth round.
+                text = os.environ["FAKE_TEXT_CALL"].replace("\\n", "\n")
             elif results:
                 text = "The tool gave me this: " + " | ".join(r.strip()[:300] for r in results)
             elif summary:

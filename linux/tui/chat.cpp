@@ -1044,12 +1044,17 @@ int make_room(Chat &c, const ChatRequest &rq) {
 // with it when their results follow (with_calls), and its thinking too when
 // it belongs to the answer still being worked on (thinking): the server
 // then writes the turn as the model wrote it, and reads on from there.
-std::string msg_json(const Chat &c, size_t i, bool with_calls, bool thinking) {
+std::string msg_json(const Chat &c, size_t i, bool with_calls, bool thinking, const char *last_word = "") {
     const Msg &m = c.msgs[i];
-    if (m.role == "tool")
+    if (m.role == "tool") {
+        std::string result = m.left_out ? result_start(m.content) : m.content;
+        if (*last_word) {
+            while (!result.empty() && strchr(" \t\r\n", result.back())) result.pop_back();
+            result += last_word;
+        }
         return "{\"role\":\"tool\",\"tool_call_id\":" + ts5::json_escape(m.call_id) + ",\"name\":" +
-               ts5::json_escape(m.tool) + ",\"content\":" + ts5::json_escape(m.left_out ? result_start(m.content) : m.content) +
-               "}";
+               ts5::json_escape(m.tool) + ",\"content\":" + ts5::json_escape(result) + "}";
+    }
     std::string content, reasoning;
     split_think(m, content, reasoning);
     if (m.role != "assistant" || !with_calls) return role_json(m.role, content);
@@ -1062,6 +1067,12 @@ std::string msg_json(const Chat &c, size_t i, bool with_calls, bool thinking) {
              ",\"arguments\":" + ts5::json_escape(m.calls[k].args.empty() ? "{}" : m.calls[k].args) + "}}";
     return j + "]}";
 }
+
+// What the newest tool result ends with in the turn that gets no tools.
+// Without it the model sees its calls answered one after another and
+// writes the next one, as text now (Qwen3.5 9B and Qwen 2.5 Coder 7B on
+// the PS5, after their twelfth round).
+const char *const kLastCall = "\n\n[That was the last tool call for this message. Answer now, from what you have.]";
 
 // The request for the chat's next answer. no_tools: the model has called
 // tools many times in a row, so this turn it can only answer.
@@ -1083,12 +1094,14 @@ std::string body_for(Chat &c, const ChatRequest &rq, bool no_tools = false) {
         const std::vector<size_t> idx = sent_msgs(c, end, &sum);
         if (sum >= 0) system += (system.empty() ? "" : "\n\n") + (kSummaryLead + c.msgs[sum].content);
         if (!system.empty()) msgs = role_json("system", system);
-        size_t last_user = 0;
-        for (size_t i : idx)
+        size_t last_user = 0, last_tool = (size_t)-1;
+        for (size_t i : idx) {
             if (c.msgs[i].role == "user") last_user = i;
+            if (c.msgs[i].role == "tool") last_tool = i;
+        }
         for (size_t i : idx) {
             if (!msgs.empty()) msgs += ",";
-            msgs += msg_json(c, i, calls_answered(c, (int)i, end), i > last_user);
+            msgs += msg_json(c, i, calls_answered(c, (int)i, end), i > last_user, no_tools && i == last_tool ? kLastCall : "");
         }
     }
     std::string b = "{\"model\":" + ts5::json_escape(rq.model.empty() ? "tokenstation5" : rq.model) +
@@ -1344,6 +1357,54 @@ ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
 // again, Qwen3.5 9B asked for twelve more commands in a row on the PS5
 // (rm -f, rm --, ls, echo ...), one question each.
 const int kToolRounds = 12;
+// Reading on is not one of them: a turn whose calls only ask for the next
+// part of the page or of the file that is open, and get it, is free, up to
+// so many turns in all. A Wikipedia article is 13 parts, and Qwen3.5 9B,
+// asked for what the last part of one says, was stopped at the twelfth
+// on the PS5.
+const int kMostRounds = 48;
+
+// A call the model wrote out as text, cut from the end of a turn that got
+// no tools (the server reads no calls in such a turn): from the mark that
+// opens one, or from a line that is a call's JSON, with the fence it is
+// in. true when something was cut.
+bool cut_text_call(std::string &content) {
+    const size_t from = content.rfind("</think>") == std::string::npos ? 0 : content.rfind("</think>") + 8;
+    size_t cut = std::string::npos;
+    for (const char *mark : {"<tool_call>", "<function=", "<|tool_call>", "<|python_tag|>", "[TOOL_CALLS]", "```tool_call",
+                             "```tool_code"})
+        cut = std::min(cut, content.find(mark, from));
+    for (size_t at = from; at < content.size();) {
+        const size_t end = std::min(content.find('\n', at), content.size());
+        const size_t b = content.find_first_not_of(" \t", at);
+        if (b < end && content[b] == '{') {
+            const std::string rest = content.substr(b);
+            if ((rest.find("\"name\"") != std::string::npos || rest.find("\"function\"") != std::string::npos) &&
+                (rest.find("\"arguments\"") != std::string::npos || rest.find("\"parameters\"") != std::string::npos)) {
+                size_t line = at;
+                // (The fence that opens on the line before it.)
+                size_t prev = line;
+                while (prev > from && (content[prev - 1] == '\n' || content[prev - 1] == '\r')) prev--;
+                const size_t open = content.rfind('\n', prev == 0 ? 0 : prev - 1);
+                const size_t fence = open == std::string::npos || open < from ? from : open + 1;
+                if (prev > fence && content.compare(fence, 3, "```") == 0) line = fence;
+                cut = std::min(cut, line);
+                break;
+            }
+        }
+        at = end + 1;
+    }
+    if (cut == std::string::npos) return false;
+    content.erase(cut);
+    while (content.size() > from && strchr(" \t\r\n", content.back())) content.pop_back();
+    return true;
+}
+
+// A read_file call for a later part of a file (start_line past 1).
+bool reads_on(const std::string &args) {
+    ts5::Json j;
+    return ts5::Json::parse(args, j) && j["start_line"].num(1) > 1;
+}
 
 // An answer: the model's turn, and for as long as it calls tools, each
 // call run, its result added to the chat, and another turn of the model's.
@@ -1351,7 +1412,8 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
     bool none = false;     // this turn was told to call no tool
     bool said_no = false;  // the user said no to a command of this message's
     bool again = false;    // a turn that came back empty was asked once more
-    for (int round = 0;; round++) {
+    int turns = 0;         // all of them, the free ones too
+    for (int round = 0;; round++, turns++) {
         stream_answer(c, rq, body);
         std::vector<ToolUse> calls;
         {
@@ -1359,14 +1421,17 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
             Msg &m = c->msgs.back();
             for (size_t k = 0; k < m.calls.size(); k++)
                 if (m.calls[k].id.empty()) m.calls[k].id = fmt("call_%zu_%zu", c->msgs.size(), k);
-            // Calls in the turn that was told to make none (a server that
-            // doesn't keep to "tool_choice") end it here.
-            if (none && !m.calls.empty()) {
+            // Calls in the turn that was told to make none end it here: from
+            // a server that doesn't keep to "tool_choice", or written out as
+            // text, which is cut from the answer. What the model said before
+            // one stays, and the line under it says what happened.
+            if (none && (cut_text_call(m.content) || !m.calls.empty())) {
                 m.calls.clear();
-                if (m.content.empty())
-                    m.error = said_no ? "the model asked for another tool after your no instead of answering: nothing "
-                                        "more was run"
-                                      : "the model kept calling tools instead of answering: ask it again";
+                if (m.content.find_first_not_of(" \t\r\n") == std::string::npos) m.content.clear();
+                m.error = said_no ? "the model asked for another tool after your no instead of answering: nothing more "
+                                    "was run"
+                                  : "the model used all the rounds of tools one message gets and asked for more: tell "
+                                    "it to go on, or ask another way";
             }
             calls = m.calls;
         }
@@ -1404,9 +1469,12 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
             }
         }
         if (calls.empty()) break;
+        bool reading = true;  // every call read on, and got its next part
         for (const ToolUse &u : calls) {
             const ToolResult r = c->cancel.load() ? tool_stopped() : run_call(c, rq, u);
             said_no |= r.refused;
+            reading &= r.ok && ((u.name == "browser_more" && r.text.compare(0, 6, "Page: ") == 0) ||
+                                (u.name == "read_file" && reads_on(u.args)));
             std::lock_guard<std::mutex> l(c->mu);
             Msg t;
             t.role = "tool";
@@ -1428,7 +1496,8 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
             a.t0 = now_s();
             c->msgs.push_back(a);
         }
-        none = round + 1 >= kToolRounds || said_no;
+        if (reading) round--;
+        none = round + 1 >= kToolRounds || turns + 1 >= kMostRounds || said_no;
         body = body_for(*c, rq, none);
     }
 }

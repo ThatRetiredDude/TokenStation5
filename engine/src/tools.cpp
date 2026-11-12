@@ -146,10 +146,14 @@ bool call_from_json(const std::string &text, ToolCall &call) {
     // {"type": "function", "function": {"name": ...}}, as OpenAI sends calls
     // (Llama 3.2 3B, seen on the console).
     if (j["name"].type != Json::STR && j["function"].type == Json::OBJ) j = Json(j["function"]);
-    if (j["name"].type != Json::STR) return false;
+    // The same with the name where that object would be: {"type": "function",
+    // "function": "browser_open", "parameters": {...}} (Llama 3.2 3B on the
+    // PS5).
+    const Json &name = j["name"].type == Json::STR ? j["name"] : j["function"];
+    if (name.type != Json::STR || name.s.empty()) return false;
     const Json &args = !j["arguments"].is_null() ? j["arguments"] : j["parameters"];
     call.id = new_call_id();
-    call.name = j["name"].s;
+    call.name = name.s;
     if (args.type == Json::STR) call.arguments = args.s;  // already text
     else if (args.type == Json::OBJ) call.arguments = args.dump();
     else if (args.is_null()) call.arguments = "{}";
