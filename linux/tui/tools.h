@@ -34,7 +34,11 @@ struct ToolSwitches {
     // The outside tools (mcp.h): the programs in mcp.json that are not
     // switched off there. Each has its own "asks first".
     bool mcp = false;
-    bool any() const { return page || terminal || memory || browser || files || mcp; }  // tools ts5-tui runs
+    // GitHub's REST API as the user signed in on the Connectors page
+    // (`ts5 github`, engine/src/github.h). github_ask: a change (anything
+    // but GET) waits for the user's yes.
+    bool github = false, github_ask = true;
+    bool any() const { return page || terminal || memory || browser || files || mcp || github; }  // tools ts5-tui runs
 };
 
 // The request's "tools" for the switches that are on: a JSON array, or "".
@@ -83,5 +87,15 @@ ToolResult tool_refused();
 ToolResult tool_stopped();
 // One of the browser's tools (browser_open, browser_click, ...).
 bool is_browser_tool(const std::string &name);
+
+// The GitHub connector's token file (`ts5 github` keeps it; this only looks):
+// TS5_GITHUB_FILE, else connectors/github.json in the data folder.
+std::string github_file();
+bool github_signed_in();
+// A github call's method, in capitals ("GET" when it names none), and
+// whether it changes something on GitHub (anything but GET).
+std::string github_method(const std::string &args);
+// What a github call would send, a line each: its body, laid out.
+std::string github_preview(const std::string &args);
 
 }  // namespace tui

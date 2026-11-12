@@ -37,6 +37,7 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/bench", "[NAME]", "the speed test: prompt and answer tok/s"},
         {"/usage", "", "the API's use by app and model (last day and week)"},
         {"/access", "", "the Access page: who can reach this TokenStation5, and its API keys (/keys too)"},
+        {"/connectors", "", "the Connectors page: GitHub, connected with a QR code (/github too)"},
         {"/think", "on|off|auto", "thinking before answering"},
         {"/tools", "[on|off|NAME on|off]", "the model's tools: search, pages, terminal, files, memory, browser (each has a switch)"},
         {"/browser", "[auto|obscura|chromium|text|PATH]", "the program the model's browser tool shows pages with"},
@@ -374,7 +375,7 @@ void pending_calls(std::vector<Line> &out, const Chat &c, int owner, size_t at, 
              Style(t.accent2, kDefault, BOLD), "  ");
         // A change to a file: the lines that go out and the lines that come
         // in. An outside tool's call: what it is called with, a line each.
-        if (kind == 2 || kind == 4)
+        if (kind == 2 || kind == 4 || kind == 5)
             for (size_t i = 0; i < c.ask_preview.size();) {
                 const size_t e = std::min(c.ask_preview.find('\n', i), c.ask_preview.size());
                 const std::string l = c.ask_preview.substr(i, e - i);
@@ -397,9 +398,10 @@ void pending_calls(std::vector<Line> &out, const Chat &c, int owner, size_t at, 
             const bool list = kind == 3 && c.ask_cmd.compare(0, 5, "list ") == 0;  // a folder's listing
             const std::string read[] = {list ? "List it" : "Read it", c.ask_opt, "No"};
             const std::string call[] = {"Run it", c.ask_opt, "No"};
-            const std::string *pick = kind == 4 ? call : kind == 3 ? read : kind == 2 ? change : page ? act : run;
+            const std::string github[] = {"Do it", c.ask_opt, "No"};
+            const std::string *pick = kind == 5 ? github : kind == 4 ? call : kind == 3 ? read : kind == 2 ? change : page ? act : run;
             const int on = c.ask_pick.load();
-            st.add(kind == 3 ? (list ? "    List it?  " : "    Read it?  ") : kind == 2 ? "    " + c.ask_opt + "?  " : page ? "    Do it?  " : "    Run it?  ",
+            st.add(kind == 3 ? (list ? "    List it?  " : "    Read it?  ") : kind == 2 ? "    " + c.ask_opt + "?  " : page || kind == 5 ? "    Do it?  " : "    Run it?  ",
                    Style(t.warn, kDefault, BOLD));
             for (int p = 0; p < 3; p++) {
                 if (p == on) st.add("‹ " + pick[p] + " ›", Style(t.bg, t.warn, BOLD));
@@ -881,7 +883,8 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
                 // The model wants to run a command: it waits for a word.
                 x = s.put(x, y1, "?", Style(t.warn, kDefault, BOLD));
                 const int kind = c.ask_kind.load();
-                x = s.put(x + 1, y1, kind == 4   ? "the model wants to use an outside tool"
+                x = s.put(x + 1, y1, kind == 5   ? "the model wants to change something on GitHub"
+                                     : kind == 4 ? "the model wants to use an outside tool"
                                      : kind == 3 ? "the model wants to read a file or list a folder"
                                      : kind == 2 ? "the model wants to change a file"
                                      : kind == 1 ? "the model wants to do something on a web page"
@@ -1350,6 +1353,15 @@ ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
         kind = 4;
         std::lock_guard<std::mutex> l(c->mu);
         ask = asks && std::find(c->mcp_ok.begin(), c->mcp_ok.end(), server) == c->mcp_ok.end();
+    } else if (!command && u.name == "github" && rq.tools.github) {
+        // GitHub: a read goes at once; a change (anything but GET) is shown
+        // first, with what it sends.
+        const std::string method = github_method(u.args);
+        ask = method != "GET" && rq.tools.github_ask && !c->ask_always_github.load();
+        cmd = tool_call_line(u.name, u.args);
+        preview = github_preview(u.args);
+        opt = "Every GitHub change, this chat";
+        kind = 5;
     } else if (!command) {
         // What the browser would do beyond reading: asked the same way.
         cmd = c->ask_always_browser.load() || !rq.tools.browser_ask ? "" : browser_question(u.name, u.args, rq.tools, c->cancel);
@@ -1377,6 +1389,11 @@ ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
                 t.head = "you said no: it wasn't done";
                 t.text = "The user said no to this, so it was not done on the page. Nothing is wrong with the page or "
                          "the browser. Do not try it again or in another way now: tell the user it was not done and "
+                         "ask what they would like instead.";
+            } else if (kind == 5) {
+                t.head = "you said no: nothing was changed on GitHub";
+                t.text = "The user said no to this, so nothing was changed on GitHub. Nothing is wrong with GitHub or "
+                         "the connection. Do not try it again or in another way now: tell the user it was not done and "
                          "ask what they would like instead.";
             } else if (kind == 4) {
                 t.head = "you said no: it wasn't run";
@@ -2165,6 +2182,7 @@ void chat_new(Chat &c) {
     c.ask_always = false;
     c.ask_always_browser = false;
     c.ask_always_files = false;
+    c.ask_always_github = false;
     c.read_dirs.clear();
     c.mcp_ok.clear();
     c.memory.clear();
@@ -2389,7 +2407,10 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
                     std::lock_guard<std::mutex> l(c.mu);
                     if (!c.ask_dir.empty()) (kind == 3 ? c.read_dirs : c.mcp_ok).push_back(c.ask_dir);
                 } else {
-                    (kind == 2 ? c.ask_always_files : kind == 1 ? c.ask_always_browser : c.ask_always) = true;
+                    (kind == 5   ? c.ask_always_github
+                     : kind == 2 ? c.ask_always_files
+                     : kind == 1 ? c.ask_always_browser
+                                 : c.ask_always) = true;
                 }
             }
             c.ask = pick == 2 ? 3 : 2;

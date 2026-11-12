@@ -324,6 +324,8 @@ jobs:
         run: python3 engine/tests/access_test.py "$(command -v ts5)" /tmp/model/test.gguf vk
       - name: The chat page and the browser terminal (ts5 serve's own pages; a WebSocket to a program in a terminal)
         run: python3 engine/tests/web_test.py "$(command -v ts5)" /tmp/model/test.gguf vk
+      - name: GitHub's sign-in and API calls (ts5 github against a GitHub served here)
+        run: python3 engine/tests/github_test.py "$(command -v ts5)"
       - name: Outside tools (ts5-tui --mcp against an MCP server served here, no model)
         run: python3 linux/tui/test/mcp_test.py "$(command -v ts5-tui)"
       - name: A browser on demand (ts5-tui --install-browser, from a release file made here, no network)

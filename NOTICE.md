@@ -616,6 +616,9 @@ Qwen); a model card on Hugging Face is the final word on each model's terms.
 These are reached only when the user turns them on and signs in or enters
 their own key, under that service's terms: [Tavily](https://tavily.com)
 (web search), [Hugging Face](https://huggingface.co) (model search and
-downloads) and [Tailscale](https://tailscale.com) (remote access). No code
-or data of theirs is in this repo beyond what is needed to call their
-public APIs.
+downloads), [Tailscale](https://tailscale.com) (remote access) and
+[GitHub](https://github.com) (the Connectors page: the model's work on the
+repositories the user picks, as the TokenStation5 GitHub App). No code or
+data of theirs is in this repo beyond what is needed to call their public
+APIs. "GitHub" is a trademark of GitHub, Inc.; this project is not
+affiliated with or endorsed by it.

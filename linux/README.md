@@ -243,7 +243,7 @@ sign-in (remove the old one in Tailscale's admin console).
   rest of the home network, and at most four at once. It runs ts5-tui in
   tmux, so a closed tab or a lost signal leaves an answer running and the
   page connects again. A bar of keys under it gives a phone what its
-  keyboard lacks (Esc, Tab, the arrows, F1 to F6). ts5's log names each
+  keyboard lacks (Esc, Tab, the arrows, F1 to F7). ts5's log names each
   device that opens one and how long it stayed. Turning it off closes the
   ones that are open.
 
@@ -280,7 +280,7 @@ ts5-tui --url http://ps5.local:8081  # another one
   Stopping an answer (or one that fails) leaves the queue waiting: Enter
   sends it on, Esc drops it. Commands start with `/` and Tab completes them, and model
   names after `/model`: `/model`, `/download`, `/search`, `/new`, `/chats`, `/open`,
-  `/save`, `/copy`, `/find`, `/tune`, `/check`, `/bench`, `/usage`, `/access`,
+  `/save`, `/copy`, `/find`, `/tune`, `/check`, `/bench`, `/usage`, `/access`, `/connectors`,
   `/think on|off`, `/fan auto|cool|early|max`, `/theme`, `/help`, `/unload`,
   `/quit` (`exit`, `quit` or `q` work too). A `ts5 fetch URL FILE --sha256 HEX`
   line pasted at the prompt downloads that model.
@@ -301,9 +301,9 @@ ts5-tui --url http://ps5.local:8081  # another one
   Settings (theme, thinking, temperature, answer length, context, speed or
   length, fan, tmux, mouse, when you quit), **F5**
   Logs, **F6** Access (who can reach this TokenStation5, and its API keys:
-  below). A click on a page's name in the top bar goes there. Tab and Shift+Tab step through the pages, and so do 1 to 6 on any
+  below), **F7** Connectors (GitHub: below). A click on a page's name in the top bar goes there. Tab and Shift+Tab step through the pages, and so do 1 to 7 on any
   page but Chat. On a Mac, where macOS keeps the F keys, use those, fn+F1
-  to fn+F6, or `/chat`, `/models`, `/status`, `/settings`, `/logs`, `/access`.
+  to fn+F7, or `/chat`, `/models`, `/status`, `/settings`, `/logs`, `/access`, `/connectors`.
 - **Access (F6)**: who can use this TokenStation5 from another machine,
   and with which key. Five switches, Connect an app, and the list of keys:
   - **Other devices**: whether a model ts5-tui loads can be reached from
@@ -343,6 +343,22 @@ ts5-tui --url http://ps5.local:8081  # another one
   app's keys are listed but made on its own Settings page. Settings →
   Server's key is the other direction: the key ts5-tui itself sends when
   it talks to another machine's TokenStation5.
+- **Connectors (F7)**: other services the model can work with. **GitHub**:
+  Enter on Account shows a QR code of GitHub's sign-in page and a code
+  (`WDJB-MJHT`, say): scan it with a phone signed in to GitHub, enter the
+  code and authorize TokenStation5. Then GitHub's page for the
+  TokenStation5 app opens as a QR code too, to pick the repositories the
+  model may use (all, or some; Enter on Repositories changes them later).
+  The model's GitHub tool (Model's tool, or Settings → Tool: GitHub)
+  then reads those repositories freely and asks before each change
+  (below). The app may read and write code, pull requests and issues,
+  and read CI results; it can't change workflow files or a repository's
+  settings. Nothing to register and no token to paste: ts5 signs in as
+  the TokenStation5 app with GitHub's device flow, keeps the token in
+  `~/.local/share/tokenstation/connectors/github.json` (yours alone to
+  read, renewed by itself; the model never sees it), and **D** forgets
+  it. `ts5 github sign-in`, `status`, `sign-out` and
+  `api METHOD PATH [BODY]` do the same in a script.
 - **Downloads**: every model tested on the PS5 (the TV app's catalog plus
   Qwen3 14B, Qwen3.5 9B, DeepSeek R1 14B, Qwen2.5 Coder 14B, Gemma 3 and 4
   12B, and the helpers Qwen3 0.6B, Llama 3.2 1B and Gemma 3 1B), each file
@@ -415,17 +431,17 @@ ts5-tui --url http://ps5.local:8081  # another one
   and restart it.
 - **Tools**: besides the web search, the model can read a web page, use
   a browser, run a command on this machine and keep notes between chats.
-  It can also read and change files, and use the tools of outside
-  programs that speak MCP. Each has its own switch (Settings →
-  Tool: search, pages, terminal, files, browser, memory; or
+  It can also read and change files, work on GitHub, and use the tools
+  of outside programs that speak MCP. Each has its own switch (Settings →
+  Tool: search, pages, terminal, files, GitHub, browser, memory; or
   `/tools terminal off`), and `/tools` lists them.
   **One switch turns them all off**: Settings → Tools, or `/tools off`
   (`/tools on` brings back the ones you had on), or `ts5-tui --no-tools`
   for one run. With it off the model gets nothing but the chat: no
   search, no pages, no commands, no browser, no notes, and no outside
   program is running.
-  The terminal, the files and the browser have three steps: off, on and
-  asking first (the default), on and never asking (`/tools terminal
+  The terminal, the files, GitHub and the browser have three steps: off,
+  on and asking first (the default), on and never asking (`/tools terminal
   allow`; `/tools ask` brings every question back).
   - **Web pages**: give it a link ("read https://... and sum it up") and
     it gets the page as text: the article where the page marks one,
@@ -590,6 +606,13 @@ ts5-tui --url http://ps5.local:8081  # another one
     exactly: one that matches nothing tells the model the line of the
     file that comes closest, and a line break sent where the file's code
     has `\n` written out (a small model's usual slip) is read as that.
+  - **GitHub** (once it is connected on the Connectors page): the model
+    calls GitHub's REST API as you, in the repositories you picked. A
+    read (a file, which comes as its text, a list of pull requests, a CI
+    run) goes at once; **a change waits for your yes**, shown with what
+    it sends (a file's new text a line at a time): making a branch,
+    writing a file, opening a pull request or an issue, a comment.
+    "Every GitHub change, this chat" stops the questions for the chat.
   - **Outside tools (MCP)**: a program that speaks MCP, the Model
     Context Protocol, gives the model tools of its own (a calendar, a
     database, a code host: whatever the program is for). Add one with the

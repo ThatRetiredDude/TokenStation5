@@ -45,6 +45,7 @@
 #include "backend.h"
 #include "access.h"
 #include "browser.h"
+#include "github.h"
 #include "checks.h"
 #include "cli.h"
 #include "engine.h"
@@ -93,6 +94,7 @@ int usage() {
             "       ts5 search QUERY | ts5 page URL [MAX_CHARS] | ts5 usage-parse FILE\n"
             "       ts5 browser [--program auto|text|PATH] [--kind chromium|obscura] [--chars N] [--idle SECONDS]\n"
             "       ts5 keys [--file FILE] list | new NAME | on KEY | off KEY | remove KEY | require on|off\n"
+            "       ts5 github sign-in | status [--repos] | sign-out | api METHOD PATH [BODY|-] [--lean]\n"
             "       ts5 tool-parse hermes|llama3|mistral|gemma|gemma4|generic [TOOL...] < TEXT\n"
             "       ts5 fetch URL FILE [--sha256 HEX] | ts5 peak [--device N] [--gib G]\n"
             "       ts5 helpers -m model.gguf --helper FILE...  (which files could draft for the model)\n"
@@ -227,6 +229,7 @@ int no_model_command(int argc, char **argv) {
     }
     if (cmd == "browser") return browser_main(argc, argv);
     if (cmd == "keys") return keys_main(argc, argv);
+    if (cmd == "github") return github_main(argc, argv);
     if (argc < 3) return usage();
     std::string f = argv[2];
     ToolFormat tf = f == "hermes"    ? ToolFormat::HERMES
@@ -491,7 +494,8 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     if (argc >= 2 && (std::string(argv[1]) == "search" || std::string(argv[1]) == "tool-parse" ||
                       std::string(argv[1]) == "usage-parse" || std::string(argv[1]) == "page" ||
                       std::string(argv[1]) == "html-text" || std::string(argv[1]) == "html-view" ||
-                      std::string(argv[1]) == "browser" || std::string(argv[1]) == "keys"))
+                      std::string(argv[1]) == "browser" || std::string(argv[1]) == "keys" ||
+                      std::string(argv[1]) == "github"))
         return no_model_command(argc, argv);
     Args a;
     if (!parse(argc, argv, a)) return usage();

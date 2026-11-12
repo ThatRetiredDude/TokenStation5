@@ -62,6 +62,9 @@ struct Config {
     // The file tools (read, list, change, write; files.h): off until the
     // user turns them on, and asking first.
     bool tool_files = false, files_ask = true;
+    // The GitHub tool (tools.h), offered once GitHub is connected (the
+    // Connectors page): on, and a change waits for the user's yes.
+    bool tool_github = true, github_ask = true;
     // The terminal's commands run in the sandbox (sandbox.h), with or
     // without the network. sandbox_dir: the folder its toolbox is in, ""
     // for ts5's data folder (/sandbox folder).

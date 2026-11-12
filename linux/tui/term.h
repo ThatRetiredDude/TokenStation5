@@ -87,6 +87,7 @@ enum Key : int {
     K_F4,
     K_F5,
     K_F6,
+    K_F7,
     K_CTRL,   // Event::ch holds the letter ('a'..'z')
     K_ALT,    // Event::ch holds the character
     K_PASTE,  // Event::ch holds the pasted text

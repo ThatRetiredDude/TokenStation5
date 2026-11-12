@@ -17,6 +17,7 @@ struct HttpResponse {
     std::string body;
     std::string url;   // http_get: the address the answer came from, after the redirects
     std::string type;  // http_get: its Content-Type, as sent
+    std::string head;  // http_post, http_request: the status line and the headers, as sent
 };
 
 // n random bytes from the system (kern.arandom on the PS5, /dev/urandom
@@ -29,6 +30,11 @@ std::string sha256_hex(const std::string &data);
 // url: http://host[:port]/path or https://host[:port]/path. headers: "Name: value".
 bool http_post(const std::string &url, const std::vector<std::string> &headers, const std::string &body,
                HttpResponse &resp, std::string &err, int timeout_s = 30);
+
+// Any method (GET, PATCH, PUT, DELETE, ...), as http_post: no redirects
+// followed. A GET or DELETE without a body sends no Content-Length.
+bool http_request(const std::string &method, const std::string &url, const std::vector<std::string> &headers,
+                  const std::string &body, HttpResponse &resp, std::string &err, int timeout_s = 30);
 
 // GET url into resp, at most max_bytes of its body (the rest is left
 // unread), following up to 5 redirects; headers go to every hop.
