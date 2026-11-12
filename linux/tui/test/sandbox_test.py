@@ -89,6 +89,8 @@ def main():
         check(not os.path.exists(target), "a file outside the working folder isn't made in the home folder", out)
         check("Read-only file system" in out and code != 0, "the system is read-only", out)
         check("This ran in the sandbox" in out and "pip install" in out, "and the model is told what to do instead", out)
+        out, _, _ = run("echo '/usr/bin/python3: No module named pip'; exit 1")
+        check("get-pip.py | python3 - --user" in out, "a Python without pip: the model is told how to put pip in ~", out)
 
         # (This test's home folder is in /tmp: only the way to it is there.)
         out, _, _ = run("ls -A /run; echo ---; ls -A /tmp; echo ---; ls -A /home")

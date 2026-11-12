@@ -282,10 +282,15 @@ ToolResult run_command(const std::string &cmd, const ToolSwitches &s, const std:
         t.head += " · sandbox";
         // What the sandbox stopped, said so the model doesn't try it again.
         if (r.code != 0 && (out.find("Read-only file system") != std::string::npos ||
-                            out.find("no new privileges") != std::string::npos || out.find("sudo:") != std::string::npos))
+                            out.find("no new privileges") != std::string::npos || out.find("sudo:") != std::string::npos ||
+                            out.find("are you root?") != std::string::npos))
             t.text += "\n(This ran in the sandbox: only " + sandbox_work() +
                       " and the home folder ~ (the sandbox's own) can be changed, and sudo and apt can't work. Install "
                       "tools in ~ instead, such as pip install NAME, npm install -g NAME, or a program into ~/bin.)";
+        if (out.find("No module named pip") != std::string::npos || out.find("ensurepip is not available") != std::string::npos ||
+            out.find("pip: not found") != std::string::npos || out.find("pip3: not found") != std::string::npos)
+            t.text += "\n(This Python has no pip. In the sandbox it can be put in ~ without sudo: curl -sS "
+                      "https://bootstrap.pypa.io/get-pip.py | python3 - --user, then python3 -m pip install NAME.)";
     }
     return t;
 }
@@ -589,7 +594,8 @@ std::string tools_json(const ToolSwitches &s) {
                             : "Commands start in " + work + ", the only folder of the user's they can change. The home "
                               "folder ~ is the sandbox's own";
             what += ", kept between chats: install the tools you need there (pip install NAME, npm install -g NAME, a "
-                    "program into ~/bin), not with sudo or apt, which can't work here. ";
+                    "program into ~/bin), not with sudo or apt, which can't work here. Where Python has no pip, "
+                    "curl -sS https://bootstrap.pypa.io/get-pip.py | python3 - --user puts pip in ~ first. ";
             what += s.sandbox_net ? "The network can be used." : "There is no network.";
             what += " A program a command starts ends with the command.";
         }
