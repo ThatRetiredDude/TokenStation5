@@ -510,10 +510,10 @@ std::string grokipedia_search(const std::string &query, int n, std::string &log,
                 page.status == 200) {
                 // The opening: what stands before the first section, or more
                 // where that is only a line or two. (The article's name, a
-                // heading at the start, goes with the other headings.)
-                std::string text = markdown_plain(content_start(page.body, 8000), 400);
-                if (text.compare(0, found[0].title.size(), found[0].title) == 0) text.erase(0, found[0].title.size());
-                while (!text.empty() && text[0] == ' ') text.erase(0, 1);
+                // heading at the start, goes with the other headings; the
+                // name that the first sentence starts with stays: "Vienna
+                // is the capital...".)
+                const std::string text = markdown_plain(content_start(page.body, 8000), 400);
                 if (text.size() > found[0].text.size()) found[0].text = text;
             }
         }
@@ -535,10 +535,13 @@ std::string grokipedia_search(const std::string &query, int n, std::string &log,
         std::string name = slug;
         for (char &c : name)
             if (c == '_') c = ' ';
+        // The article's name is the page's first line, a heading: it goes
+        // (not a first sentence that starts with the name).
+        std::string words = html_text(page.body.substr(page.body.find("<article")));
+        words.erase(0, words.find_first_not_of(" \n"));
+        if (words.compare(0, name.size() + 1, name + "\n") == 0) words.erase(0, name.size());
         // (markdown_plain: on one line, the spaces closed up.)
-        std::string text = markdown_plain(html_text(page.body.substr(page.body.find("<article"))));
-        if (text.compare(0, name.size(), name) == 0) text.erase(0, name.size());
-        while (!text.empty() && text[0] == ' ') text.erase(0, 1);
+        const std::string text = markdown_plain(words);
         found.push_back({name, base + "/page/" + path_escape(slug), text});
         log = "web_search \"" + query + "\": 1 results (" + took() + ", Grokipedia, the article by its name: the search was refused)";
     }

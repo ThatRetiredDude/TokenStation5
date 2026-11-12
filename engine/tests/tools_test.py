@@ -1525,6 +1525,8 @@ class Grokipedia(http.server.BaseHTTPRequestHandler):
                          "snippet": "Length is a fundamental physical quantity that measures the distance between two points or "
                                     "the extent of an object along a single dimension.[]("},
                         {"slug": "danube_(song)", "title": "Danube (song)", "snippet": "A song about [the river](/page/Dan"}]
+                if "vienna" in words.lower():
+                    results = [{"slug": "Vienna", "title": "Vienna", "snippet": "Vienna is the capital"}]
                 if "eiffel" in words.lower():
                     results = [{"slug": "Eiffel_Tower", "title": "Eiffel Tower", "snippet": "The Eiffel Tower is a tower."},
                                {"slug": "eiffel_tower_(book)", "title": "Eiffel Tower (book)", "snippet": "A book. ![cov"}]
@@ -1558,6 +1560,8 @@ class Grokipedia(http.server.BaseHTTPRequestHandler):
                           "### Name origins and linguistic roots\n\nThe name *Danube* derives from the Latin *Danubius*. This "
                           "Latin form traces to Proto-Celtic *\\*D\u0101nowyos*.[](https://example.org/c) [](https://example.org/d)"
                           "\n\n" + "Linguistically, the river has many names. " * 30000,
+                "Vienna": "# Vienna\n\n![](./_assets_/Vienna_Austria_Skyline_Aerial%252C_October_2024.jpg)\nVienna is the "
+                          "capital and largest city of [Austria](/page/Austria).[](https://example.org/v)\n## History\n\nOld.",
                 "Eiffel_Tower": "# Eiffel Tower\n\n![Eiffel Tower](./_assets_/Tour_Eiffel_Wikimedia_Commons_(cropped))\nThe "
                                 "Eiffel Tower is a 330-meter-tall (with antennas) wrought-iron [lattice tower](/page/Lattice_tower) "
                                 "in [Paris](/page/Paris).[](https://example.org/e)\n## History\n\nBuilt from 1887 to 1889.",
@@ -1567,6 +1571,10 @@ class Grokipedia(http.server.BaseHTTPRequestHandler):
             else:
                 body = json.dumps({"found": True, "page": {"slug": slug, "title": slug.replace("_", " "), "content": content,
                                                            "description": "An article.", "citations": []}}).encode()
+        elif u.path == "/page/Vienna":
+            ctype = "text/html; charset=utf-8"
+            body = ("<html><head><title>Vienna</title></head><body><article class=\"article-enter\"><h1>Vienna</h1>"
+                    "<p>Vienna is the capital of Austria, as the page has it.</p></article></body></html>").encode()
         elif u.path == "/page/Black_Sea":
             ctype = "text/html; charset=utf-8"
             body = ("<html><head><title>Black Sea</title></head><body><nav>Menu Home Search</nav><article class=\"article-enter\">"
@@ -1643,6 +1651,15 @@ def test_grokipedia(ts5, model, tdir):
           "/page/eiffel_tower_(book)\nA book.\n\nIf none" in out and "cropped" not in out and "History" not in out)
     failed += report(ok, "Grokipedia search: a picture's file with brackets in its name, a short opening goes on into the next "
                      "section, a link is the slug as sent", f"rc {rc}\n{out}\n{err}\n{g2}")
+    rc, out, err, g2, w = search("Vienna", **grok)
+    failed += report(rc == 0 and "[1] Vienna\n" + gurl + "/page/Vienna\nVienna is the capital and largest city of Austria. Old."
+                     "\n\nIf none" in out,
+                     "Grokipedia search: an opening that starts with the article's name keeps it (a picture without a name before it)",
+                     f"rc {rc}\n{out}\n{err}")
+    rc, out, err, g2, w = search("vienna", mode="refused", **grok)
+    failed += report(rc == 0 and "[1] Vienna\n" + gurl + "/page/Vienna\nVienna is the capital of Austria, as the page has it."
+                     "\n\nIf none" in out,
+                     "Grokipedia refuses the search: the page's first sentence keeps the name it starts with", f"rc {rc}\n{out}\n{err}")
     agents = {x[2] for x in g}
     failed += report(len(agents) == 1 and "Mozilla" not in next(iter(agents)) and all(x[3] == "application/json" for x in g),
                      "Grokipedia search: asked under ts5's own name, as Wikipedia's API is", f"{g}")
