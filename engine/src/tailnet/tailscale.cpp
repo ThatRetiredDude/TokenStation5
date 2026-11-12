@@ -936,6 +936,7 @@ void Client::control_loop() {
                 H2::Response *ur = c.h2().response(update_id);
                 if (ur && ur->done) {
                     if (ur->status != 200) log("telling the control server the relay failed (HTTP %d)", ur->status);
+                    else TRACE("trace: the control server took it");
                     c.h2().forget(update_id);
                     update_id = 0;
                 }
@@ -954,6 +955,8 @@ void Client::control_loop() {
                     ok = false;
                     break;
                 }
+                TRACE("trace: told the control server: home relay %d, direct addresses #%llu", home,
+                      (unsigned long long)eps);
                 reported_home = home;
                 reported_endpoints = eps;
             }
