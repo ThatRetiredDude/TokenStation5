@@ -78,5 +78,7 @@ ToolResult run_tool(const std::string &name, const std::string &args, const Tool
 // that didn't run because the answer was stopped.
 ToolResult tool_refused();
 ToolResult tool_stopped();
+// One of the browser's tools (browser_open, browser_click, ...).
+bool is_browser_tool(const std::string &name);
 
 }  // namespace tui

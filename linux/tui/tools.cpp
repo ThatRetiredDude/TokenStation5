@@ -439,11 +439,6 @@ bool enter_of(const ts5::Json &j) {
     return true;
 }
 
-bool is_browser_tool(const std::string &name) {
-    return name == "browser_open" || name == "browser_click" || name == "browser_type" || name == "browser_more" ||
-           name == "browser_back";
-}
-
 // A call as a request to `ts5 browser`; what: the question about it instead.
 std::string browser_request(const std::string &name, const std::string &args, bool what) {
     ts5::Json j;
@@ -532,6 +527,11 @@ bool write_notes(const std::vector<std::string> &notes, std::string &why) {
 }
 
 }  // namespace
+
+bool is_browser_tool(const std::string &name) {
+    return name == "browser_open" || name == "browser_click" || name == "browser_type" || name == "browser_more" ||
+           name == "browser_back";
+}
 
 std::string tools_json(const ToolSwitches &s) {
     std::string a;

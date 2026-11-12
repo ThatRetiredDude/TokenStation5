@@ -29,7 +29,7 @@ a summary whole.
 "browse STEP ;; STEP ..." works the browser tool, a call a turn: open URL,
 click N, type N TEXT (typeonly: without Enter), more, back; in place of N,
 "WORDS" finds the number of the link, box or button with those words on the
-page the call before gave.
+page the call before gave. "&&" between steps makes them calls of one turn.
 "call NAME ;; JSON" calls the tool of that name, if the request offers it
 (an outside tool's: linux/tui/mcp.h and fake-mcp.py); "&&&" between several.
 FAKE_TEXT_CALL: what the turn that gets no tools (after twelve rounds of
@@ -184,11 +184,14 @@ class H(BaseHTTPRequestHandler):
         # The tool calls this turn makes (see the top of the file).
         asked = ""
         results = []
+        turns = 0  # the turns with calls since the user's message
         for m in msgs:
             if m.get("role") == "user":
-                asked, results = m.get("content") or "", []
+                asked, results, turns = m.get("content") or "", [], 0
             elif m.get("role") == "tool":
                 results.append(m.get("content") or "")
+            elif m.get("tool_calls"):
+                turns += 1
         calls = []
         if asked.startswith("run ") and "run_command" in tools:
             if "&&&" in asked:
@@ -232,9 +235,9 @@ class H(BaseHTTPRequestHandler):
                     calls = [(name.strip(), json.loads(a) if a.strip() else {})]
         elif asked.startswith("browse ") and "browser_open" in tools:
             steps = [c.strip() for c in asked[7:].split(";;")]
-            if len(results) < len(steps):
+            if turns < len(steps):
                 page = next((r for r in reversed(results) if r.startswith("Page: ")), "")
-                calls = [browser_call(steps[len(results)], page)]
+                calls = [browser_call(c.strip(), page) for c in steps[turns].split("&&")]
         if prompt >= N_CTX:
             # As ts5 serve: refused before anything streams, in OpenAI's words and code.
             self.send(400, {"error": {"message": "This model's maximum context length is %d tokens. However, your "

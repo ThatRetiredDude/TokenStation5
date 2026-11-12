@@ -214,9 +214,10 @@ std::string trimmed(const std::string &l) {
 }
 
 // The line of the file most like old_text's first line with anything on
-// it, when one is much like it (six pairs in ten shared): its number from
-// 0, or npos. For the model that sent an edit which matches nothing: it
-// gets the line as the file has it.
+// it, when one is much like it (six in ten of that line's pairs are in
+// it: "Hello" finds the line with "Helo, wrold!"): its number from 0, or
+// npos. For the model that sent an edit which matches nothing: it gets
+// the line as the file has it.
 size_t closest_line(const std::vector<std::string> &lines, const std::string &old_text) {
     std::string want;
     for (const std::string &l : lines_of(old_text))
@@ -224,7 +225,7 @@ size_t closest_line(const std::vector<std::string> &lines, const std::string &ol
     if (want.size() < 4 || want.size() > kLineChars || lines.size() > 20000) return std::string::npos;
     const std::vector<unsigned> w = pairs_of(want);
     size_t best = std::string::npos;
-    double best_score = 0.6;
+    double best_score = 0.6, best_whole = 0;
     for (size_t k = 0; k < lines.size(); k++) {
         const std::string l = trimmed(lines[k]);
         if (l.size() < 4 || l.size() > kLineChars) continue;
@@ -235,8 +236,10 @@ size_t closest_line(const std::vector<std::string> &lines, const std::string &ol
             else if (w[i] < p[j]) i++;
             else j++;
         }
-        const double score = 2.0 * same / (w.size() + p.size());
-        if (score > best_score) best_score = score, best = k;
+        // (Among lines that hold as much of it, the one with the least else.)
+        const double score = (double)same / w.size(), whole = 2.0 * same / (w.size() + p.size());
+        if (score > best_score || (best != std::string::npos && score == best_score && whole > best_whole))
+            best_score = score, best_whole = whole, best = k;
     }
     return best;
 }

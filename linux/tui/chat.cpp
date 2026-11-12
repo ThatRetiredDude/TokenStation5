@@ -1037,6 +1037,18 @@ int make_room(Chat &c, const ChatRequest &rq) {
         n++;
     }
     c.ctx_used = std::max(0, c.ctx_used - freed);
+    // The newest results too much by themselves (one turn with many calls:
+    // Llama 3.2 3B read eight pages in one message on the PS5, and the chat
+    // was full before it could answer): the turn's earlier ones give way
+    // too, and its last one stays whole.
+    for (size_t i = newest; i + 1 < c.msgs.size() && c.ctx_used + fresh + std::max(rq.n_ctx / 8, 1024) > rq.n_ctx; i++) {
+        Msg &m = c.msgs[i];
+        if (m.left_out || m.content.size() < 1200) continue;
+        m.left_out = true;
+        m.head += " \xC2\xB7 left out later, for room";
+        fresh -= rough_tokens(m.content) - rough_tokens(result_start(m.content));
+        n++;
+    }
     return n;
 }
 
@@ -1400,6 +1412,18 @@ bool cut_text_call(std::string &content) {
     return true;
 }
 
+// The answer to a browser call that came in one turn with the call that
+// brought the page it is for.
+ToolResult browser_too_early() {
+    ToolResult t;
+    t.ok = false;
+    t.head = "not made: it was written before the page was seen";
+    t.text = "Not made: this call came together with the one that brought the page, so it was written before the "
+             "page could be seen. The browser does one step at a time. Read the page you have now, then make the "
+             "next call.";
+    return t;
+}
+
 // A read_file call for a later part of a file (start_line past 1).
 bool reads_on(const std::string &args) {
     ts5::Json j;
@@ -1470,8 +1494,16 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
         }
         if (calls.empty()) break;
         bool reading = true;  // every call read on, and got its next part
+        bool viewed = false;  // a browser call of this turn brought a page, or another part of one
         for (const ToolUse &u : calls) {
-            const ToolResult r = c->cancel.load() ? tool_stopped() : run_call(c, rq, u);
+            // A browser call after that was written before its page was
+            // seen: a click by a number the model can't know yet. It is not
+            // made (Llama 3.2 3B wrote 15 in one message on the PS5: open,
+            // click 0, more, open, click 0, more ...).
+            const ToolResult r = c->cancel.load() ? tool_stopped()
+                                 : viewed && is_browser_tool(u.name) ? browser_too_early()
+                                 : run_call(c, rq, u);
+            viewed |= is_browser_tool(u.name) && r.ok && r.text.compare(0, 6, "Page: ") == 0;
             said_no |= r.refused;
             reading &= r.ok && ((u.name == "browser_more" && r.text.compare(0, 6, "Page: ") == 0) ||
                                 (u.name == "read_file" && reads_on(u.args)));

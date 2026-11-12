@@ -1642,6 +1642,27 @@ def test_text_calls(ts5, model, tdir):
     return failed
 
 
+def test_stop_words(ts5, model, tdir):
+    """A stop string that ends inside a piece: the answer ends before it, and the piece's own
+    start is not there twice (the engine hands the piece that ended a turn over once more:
+    through the real engine "ser" + "ge Bri" came out as "ser Brighton" before 2026-11-12)."""
+    failed = 0
+    qwen = os.path.join(tdir, "Qwen-Qwen2.5-7B-Instruct.jinja")
+    text = "one two three four five six"
+    for stop, want in (("four", "one two three "), ("ee fo", "one two thr"), ("six", "one two three four five "),
+                       ("seven", text)):
+        for stream, piece in ((False, "0"), (True, "0"), (False, "5"), (True, "5"), (True, "1"), (True, "9")):
+            req = {"messages": [{"role": "user", "content": "Count."}], "stream": stream, "stop": [stop]}
+            msg, _, log = serve_turns(ts5, model, qwen, [text], req, more_env={"TS5_TEST_PIECE": piece})
+            label = f"stop words: {stop!r}" + (", streaming" if stream else "") + (f", {piece} bytes at a time" if piece != "0" else "")
+            if (msg["content"] or "") != want or msg["finish_reason"] != "stop":
+                failed += 1
+                print(f"FAIL {label}: {msg}\n{log}")
+            else:
+                print(f"ok   {label}")
+    return failed
+
+
 def report(ok, name, detail):
     print(("ok   " if ok else "FAIL ") + name + ("" if ok else "\n" + detail))
     return 0 if ok else 1
@@ -1653,7 +1674,8 @@ def main():
               test_gemma4_thinking(ts5, model, tdir) + test_every_model_has_tools(ts5, model, tdir) +
               test_thinking_marks(ts5, model, tdir) + test_page_reader(ts5) +
               test_client_tools_and_search(ts5, model, tdir) + test_wikipedia(ts5, model, tdir) +
-              test_thinking_guard(ts5, model, tdir) + test_text_calls(ts5, model, tdir))
+              test_thinking_guard(ts5, model, tdir) + test_text_calls(ts5, model, tdir) +
+              test_stop_words(ts5, model, tdir))
     if failed:
         sys.exit(f"tools_test: {failed} failed")
     print("tools_test: all passed")

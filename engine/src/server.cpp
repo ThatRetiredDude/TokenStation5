@@ -780,7 +780,12 @@ void handle(int fd, Server::State &state, Usage &u) {
             };
             // The turn's text so far, with `piece` at its end, to the client.
             auto on_piece = [&](const std::string &piece) {
-                if (closing) return false;  // what the engine still had to hand over
+                // What the engine still had to hand over: after a no it
+                // gives the same piece once more (and bytes it held), which
+                // would stand after the place the turn was cut at. On the
+                // PS5 a made-up <tool_response> cut from a reply left ">"
+                // and the words after it as the answer.
+                if (closing || stopped || invented) return false;
                 if (first < 0) first = now_ms();
                 count();
                 text += piece;
@@ -866,7 +871,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                 return client_ok && !stopped && !invented;
             };
             auto on_text = [&](const std::string &piece) {
-                if (closing) return false;
+                if (closing || stopped || invented) return false;
                 wrote += piece;
                 return on_piece(chat ? channel.map(piece) : piece);
             };
@@ -908,13 +913,20 @@ void handle(int fd, Server::State &state, Usage &u) {
                 const int piece = getenv("TS5_TEST_PIECE") ? atoi(getenv("TS5_TEST_PIECE")) : 0;
                 turn.finish = "stop";
                 turn.prompt_tokens = (int)toks.size();
+                // (As the engine does, the piece that ended a turn is handed
+                // over once more: Engine::generate keeps what its callback
+                // said no to, and hands over what it holds when it ends.)
                 if (piece <= 0) {
-                    on_text(t);
+                    if (!on_text(t)) on_text(t);
                     turn.gen_tokens = 1;
                 } else {
                     for (size_t at = 0; at < t.size(); at += (size_t)piece) {
                         turn.gen_tokens++;
-                        if (!on_text(t.substr(at, (size_t)piece))) break;
+                        const std::string part = t.substr(at, (size_t)piece);
+                        if (!on_text(part)) {
+                            on_text(part);
+                            break;
+                        }
                         if (turn.gen_tokens >= sp.max_tokens) {
                             turn.finish = "length";
                             break;
