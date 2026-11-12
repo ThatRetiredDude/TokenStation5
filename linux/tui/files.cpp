@@ -256,6 +256,11 @@ Change change_of(const std::string &name, const ts5::Json &j) {
     struct stat st;
     c.existed = stat(c.path.c_str(), &st) == 0;
     if (c.whole) {
+        // A call that leaves the content out would write an empty file.
+        if (j["content"].type != ts5::Json::STR) {
+            c.error = "The call gave no content. Give the whole text of the file as content.";
+            return c;
+        }
         c.after = arg(j, "content");
         if (c.existed && !read_whole(c.path, c.shown, c.before, c.error)) return c;
         if (c.existed && c.before == c.after) c.error = c.shown + " already has exactly this content.";
@@ -272,6 +277,13 @@ Change change_of(const std::string &name, const ts5::Json &j) {
         if (old_text.empty()) {
             c.error = "old_text is empty. Give the exact text to replace, copied from the file (read_file shows it). To "
                       "write a whole file use write_file.";
+            return c;
+        }
+        // A call that leaves new_text out would take old_text out of the
+        // file (DeepSeek R1 14B on the PS5 sent only a path and old_text).
+        if (j["new_text"].type != ts5::Json::STR) {
+            c.error = "The call gave no new_text. Give the text that goes in old_text's place (an empty new_text takes "
+                      "old_text out).";
             return c;
         }
         size_t at, n = times_in(c.before, old_text, at);
