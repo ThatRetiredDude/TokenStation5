@@ -1,5 +1,6 @@
 // Generation on top of a backend: prompt reuse, sampling, stop handling.
 #pragma once
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <random>
@@ -20,6 +21,11 @@ struct SampleParams {
     int max_tokens = 512;
     uint64_t seed = 0;  // 0: random
     int draft = -1;     // tokens drafted per step by prompt lookup; -1: TS5_DRAFT or 5; 0: off
+    // While *steady is true (the model is writing a tool call or code), the
+    // temperature is at most steady_temperature: a command has one right
+    // spelling. Whoever generates sets it between tokens.
+    const std::atomic<bool> *steady = nullptr;
+    float steady_temperature = 0.7f;
 };
 
 struct GenStats {

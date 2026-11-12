@@ -1997,6 +1997,44 @@ def test_stop_words(ts5, model, tdir):
     return failed
 
 
+def test_steady_calls(ts5, model, tdir):
+    """Tool calls and code are written at the model's own steady temperature
+    whatever the request asks (at 1.5 a model on the PS5 wrote made-up curl
+    flags and an impossible address); prose and thinking at the request's."""
+    failed = 0
+    qwen = os.path.join(tdir, "Qwen-Qwen2.5-7B-Instruct.jinja")
+    code = "Run this:\n```bash\nls -la /tmp | head\n```\nThat lists it."
+    tool_call = '<tool_call>\n{"name": "get_weather", "arguments": {"city": "Oslo"}}\n</tool_call>'
+    thought = "<think>\nMaybe ```ls``` would do.\n</think>\n\nNo code in the answer."
+    cases = [
+        # name, the turn, tools, the request's extras, more env, what the log says (None: nothing)
+        ("code at 1.5", code, False, {"temperature": 1.5}, {}, "at temperature 0.7 of 1.5"),
+        ("a tool call at 1.5", tool_call, True, {"temperature": 1.5}, {}, "at temperature 0.7 of 1.5"),
+        ("prose at 1.5", "Hello there, how are you today?", False, {"temperature": 1.5}, {}, None),
+        ("code in the thinking only", thought, False, {"temperature": 1.5}, {}, None),
+        ("code at 0.5 (under the cap)", code, False, {"temperature": 0.5}, {}, None),
+        ("tool_call_temperature 0.2", code, False, {"temperature": 1.0, "tool_call_temperature": 0.2}, {}, "at temperature 0.2 of 1"),
+        ("tool_call_temperature off", code, False, {"temperature": 1.5, "tool_call_temperature": "off"}, {}, None),
+        ("TS5_CALL_TEMPERATURE=off", code, False, {"temperature": 1.5}, {"TS5_CALL_TEMPERATURE": "off"}, None),
+        ("TS5_CALL_TEMPERATURE=0.3", tool_call, True, {"temperature": 1.5}, {"TS5_CALL_TEMPERATURE": "0.3"}, "at temperature 0.3 of 1.5"),
+    ]
+    for name, turn, tools, extra, env, want in cases:
+        for stream in (False, True):
+            req = dict({"messages": [{"role": "user", "content": "Go."}], "stream": stream}, **extra)
+            if tools:
+                req["tools"] = [WEATHER]
+            msg, _, log = serve_turns(ts5, model, qwen, [turn, turn], req, more_env=dict(env, TS5_TEST_PIECE="4"))
+            m = re.search(r"calls and code (at temperature [\d.]+ of [\d.]+) \((\d+) pieces\)", log)
+            got = m.group(1) if m else None
+            label = f"steady calls and code: {name}" + (", streaming" if stream else "")
+            if got != want or (m and int(m.group(2)) < 3):
+                failed += 1
+                print(f"FAIL {label}: log says {got!r}, want {want!r}\n{log}")
+            else:
+                print(f"ok   {label}")
+    return failed
+
+
 def report(ok, name, detail):
     print(("ok   " if ok else "FAIL ") + name + ("" if ok else "\n" + detail))
     return 0 if ok else 1
@@ -2009,7 +2047,7 @@ def main():
               test_thinking_marks(ts5, model, tdir) + test_page_reader(ts5) +
               test_client_tools_and_search(ts5, model, tdir) + test_wikipedia(ts5, model, tdir) + test_grokipedia(ts5, model, tdir) +
               test_thinking_guard(ts5, model, tdir) + test_text_calls(ts5, model, tdir) +
-              test_stop_words(ts5, model, tdir))
+              test_stop_words(ts5, model, tdir) + test_steady_calls(ts5, model, tdir))
     if failed:
         sys.exit(f"tools_test: {failed} failed")
     print("tools_test: all passed")

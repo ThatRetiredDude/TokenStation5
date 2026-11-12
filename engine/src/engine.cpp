@@ -16,7 +16,9 @@ static double now_ms() {
 }
 
 int32_t Engine::sample(const float *lg, int n, const SampleParams &p) {
-    if (p.temperature <= 0) return (int32_t)(std::max_element(lg, lg + n) - lg);
+    const float temp = p.steady && p.steady->load(std::memory_order_relaxed) ? std::min(p.temperature, p.steady_temperature)
+                                                                             : p.temperature;
+    if (temp <= 0) return (int32_t)(std::max_element(lg, lg + n) - lg);
     // The top k in one pass with a small min-heap, rather than sorting an
     // index of the whole vocabulary: sample() runs per generated token (and
     // per examined position of a verify batch), so its cost is on the clock.
@@ -36,7 +38,7 @@ int32_t Engine::sample(const float *lg, int n, const SampleParams &p) {
     std::sort_heap(idx_.begin(), idx_.end(), less);  // descending logit
     std::vector<double> pr(k);
     double mx = lg[idx_[0]], sum = 0;
-    for (int i = 0; i < k; i++) sum += pr[i] = std::exp((lg[idx_[i]] - mx) / p.temperature);
+    for (int i = 0; i < k; i++) sum += pr[i] = std::exp((lg[idx_[i]] - mx) / temp);
     double cum = 0;
     int keep = k;
     for (int i = 0; i < k; i++) {

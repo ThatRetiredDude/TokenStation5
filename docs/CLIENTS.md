@@ -149,6 +149,16 @@ thinking then ends with a line in square brackets that says why. Without
 this a small model can think to the end of its context and answer nothing
 (on the PS5, Qwen3.5 9B asked for a haiku: 15,851 tokens and four minutes).
 
+Tool calls and code are written at the model's own steady temperature (its
+checked setting, else 0.7), whatever `temperature` a request asks: while the
+answer is inside a call, or inside a ``` code fence, the cap holds; the rest
+of the answer and the thinking go at the request's. A command or a file has
+one right spelling: at 1.5 a model on the PS5 wrote made-up curl flags, an
+impossible address and its owner's domain misspelled. `"tool_call_temperature":
+N` in a request, or `TS5_CALL_TEMPERATURE=N` for the server, sets the cap;
+`"off"` leaves calls and code at the request's temperature. The server's log
+says when it applied (`calls and code at temperature 0.7 of 1.5`).
+
 `usage.total_tokens` is what the conversation holds when the reply ends, so
 an app can size its context by it: a thinking the model read again after it
 was ended, or the turns before a web search's results, are counted once, as

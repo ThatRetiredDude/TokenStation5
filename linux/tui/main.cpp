@@ -2542,7 +2542,7 @@ std::vector<SetRow> settings_rows() {
         const double own = server().temperature;
         SetRow x{"Temperature", c.temp >= 0 ? fmt("%.1f", c.temp) : own >= 0 ? fmt("default (%.1f)", own) : "default",
                  c.temp > 1.0 && c.tools_on()
-                     ? "high: fine for stories, but the model's commands and tool calls come out garbled (0.6 to 0.8 for those)"
+                     ? "high: varied prose, looser thinking; ts5 still writes commands, tool calls and code at the model's steady default"
                      : "how much chance picks each word: lower is steadier (code, facts), higher more varied"};
         x.change = [save](int d) {
             double &t = g->cfg.temp;
