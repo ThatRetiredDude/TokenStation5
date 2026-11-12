@@ -77,7 +77,7 @@ bool http_get_file(const std::string &url, const std::string &path, uint64_t off
                    Sha256Resume *sha = nullptr);
 
 // A connection held open both ways, plain or TLS, for protocols that send and
-// receive as they go (Tailscale's control server and relays, ps5/ts). One
+// receive as they go (Tailscale's control server and relays, tailnet/). One
 // thread at a time.
 class Stream {
 public:

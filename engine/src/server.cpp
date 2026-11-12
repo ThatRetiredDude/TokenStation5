@@ -146,6 +146,7 @@ std::string response(int code, const std::string &body, const char *type = "appl
                       : code == 404 ? "Not Found"
                       : code == 400 ? "Bad Request"
                       : code == 401 ? "Unauthorized"
+                      : code == 403 ? "Forbidden"
                       : code == 503 ? "Service Unavailable"
                                     : "Error";
     char h[256];
@@ -1265,16 +1266,22 @@ void handle(int fd, Server::State &state, Usage &u) {
         done();
         return;
     } else {
-        // Where the API is, for someone trying addresses by hand.
+        int code = 0;
+        std::string reply;
+        if (state.routes && state.routes(r.method, r.path, r.body, u.rec.client, code, reply)) {
+            send_all(fd, response(code, reply));  // the program's own route
+        } else {
+            // Where the API is, for someone trying addresses by hand.
 #ifdef TS5_PS5
-        send_all(fd, response(404, error_body("not found: " + r.path +
-                                              " (the API is under /v1: GET /v1/models on the console's address "
-                                              "lists what's loaded)")));
+            send_all(fd, response(404, error_body("not found: " + r.path +
+                                                  " (the API is under /v1: GET /v1/models on the console's address "
+                                                  "lists what's loaded)")));
 #else
-        send_all(fd, response(404, error_body("not found: " + r.path +
-                                              " (the API is under /v1: GET /v1/models lists what's loaded "
-                                              "on this computer)")));
+            send_all(fd, response(404, error_body("not found: " + r.path +
+                                                  " (the API is under /v1: GET /v1/models lists what's loaded "
+                                                  "on this computer)")));
 #endif
+        }
     }
     close(fd);
     u.closed = true;
@@ -1417,9 +1424,11 @@ void Server::accept_loop() {
 
 int serve(Engine &e, const std::string &model_name, const std::string &host, int port,
           const std::function<void(int)> &on_listening, const std::function<void(const UsageRecord &)> &on_usage,
-          const Server::Authorize &authorize, const std::string &key_hint) {
+          const Server::Authorize &authorize, const std::string &key_hint,
+          const std::function<void(Server &)> &setup) {
     static Server server;
     server.set_on_usage(on_usage);
+    if (setup) setup(server);
     if (!key_hint.empty()) server.set_key_hint(key_hint);
     // The caller's rule, or TS5_API_KEY=KEY: requests must send that key.
     if (authorize) server.set_authorize(authorize);

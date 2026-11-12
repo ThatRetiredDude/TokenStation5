@@ -1,13 +1,13 @@
 // lwIP's UDP, as wireguardif.c uses it, on the PS5's own socket. lwIP's
 // udp.c isn't built: WireGuard's encrypted packets come and go through a
-// socket the title opens (ps5/wg/wg.cpp), and nothing inside the tunnel
+// socket the title opens (engine/src/tailnet/wg.cpp), and nothing inside the tunnel
 // speaks UDP. So this file has the calls wireguardif.c makes and the ones
 // lwIP's core makes, which drop what they're given.
 //
 // Two WireGuard devices make calls here, each with its pcb: the PS5's own
 // server (TS5_UDP_WIREGUARD), on the socket, and its device on a tailnet
 // (TS5_UDP_TAILSCALE), whose packets go through Tailscale's relay instead
-// (ps5/ts/tailscale.h): wg.cpp says which is being made before it adds the
+// (tailnet/tailscale.h): wg.cpp says which is being made before it adds the
 // device, and passes on the second's packets with ts5_ts_send.
 //
 // Also the platform functions wireguard-lwip asks for, and lwIP's clock.

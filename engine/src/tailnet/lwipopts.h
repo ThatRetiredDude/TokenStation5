@@ -1,4 +1,4 @@
-// lwIP's settings for the WireGuard tunnel (ps5/wg/wg.cpp): one thread runs
+// lwIP's settings for the WireGuard tunnel (engine/src/tailnet/wg.cpp): one thread runs
 // the whole stack (no OS layer, no locks), IPv4 and TCP only, memory from
 // malloc. The tunnel carries API requests and their streamed replies, so the
 // windows are sized for a phone on a mobile network rather than a LAN.
@@ -15,7 +15,7 @@
 #define LWIP_ETHERNET 0
 #define LWIP_ICMP 1  // ping 10.55.0.1 through the tunnel
 #define LWIP_RAW 0
-#define LWIP_UDP 1   // wireguardif.c's calls; ps5/wg/wg_udp.c stands in for them
+#define LWIP_UDP 1   // wireguardif.c's calls; engine/src/tailnet/wg_udp.c stands in for them
 #define LWIP_TCP 1
 #define LWIP_DNS 0
 #define LWIP_IGMP 0

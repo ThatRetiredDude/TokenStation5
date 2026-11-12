@@ -51,6 +51,9 @@
 #include "log.h"
 #include "net.h"
 #include "server.h"
+#ifdef TS5_TAILNET
+#include "tailnet_serve.h"
+#endif
 #include "tokenizer.h"
 #include "tools.h"
 #include "usage.h"
@@ -85,6 +88,7 @@ struct Args {
 int usage() {
     fprintf(stderr,
             "usage: ts5 serve|run|bench|check|tokenize|logits|prompt -m model.gguf [options]\n"
+            "       ts5 --version\n"
             "       ts5 search QUERY | ts5 page URL [MAX_CHARS] | ts5 usage-parse FILE\n"
             "       ts5 browser [--program auto|text|PATH] [--kind chromium|obscura] [--chars N] [--idle SECONDS]\n"
             "       ts5 keys [--file FILE] list | new NAME | on KEY | off KEY | remove KEY | require on|off\n"
@@ -463,6 +467,10 @@ int draft_replay(Model &model, Tokenizer &tok, float temp, const std::string &ou
 }  // namespace
 
 int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
+    if (argc == 2 && (std::string(argv[1]) == "--version" || std::string(argv[1]) == "version")) {
+        printf("ts5 %s\n", TS5_VERSION);
+        return 0;
+    }
     if (argc >= 2 && std::string(argv[1]) == "fetch") return fetch_command(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "peak") {
 #ifdef TS5_VULKAN
@@ -802,7 +810,8 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             size_t on = 0;
             for (auto &k : keys->keys()) on += k.on;
             fprintf(stderr, "ts5: API keys in %s: %zu on; other machines %s\n", kf, on,
-                    keys->required() ? "need one" : "get in without one (ts5 keys require on)");
+                    keys->required() ? "need one" : "on this network get in without one (ts5 keys require on); "
+                                                    "from the tailnet always with one");
             const char *one = getenv("TS5_API_KEY");
             authorize = [one = std::string(one ? one : "")](const std::string &got, const std::string &client,
                                                             std::string &name) {
@@ -813,9 +822,24 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
                 return keys->authorize(got, client, name);
             };
         }
+        // Tailscale (tailnet_serve.h), beside the keys: off until ts5-tui's
+        // Access page turns it on.
+        std::function<void(Server &)> setup;
+#ifdef TS5_TAILNET
+        static Tailnet *tailnet = nullptr;  // as long as the server
+        if (keys) {
+            std::string dir = keys->path();
+            const size_t slash = dir.rfind('/');
+            dir = slash == std::string::npos ? "." : slash == 0 ? "/" : dir.substr(0, slash);
+            tailnet = new Tailnet;
+            tailnet->start(dir, a.port);
+            setup = [](Server &s) { tailnet->attach(s); };
+        }
+#endif
         return serve(eng, basename_of(a.model), a.host, a.port,
                      [&](int port) { if (on_serving) on_serving(basename_of(a.model), port); }, on_usage, authorize,
-                     authorize ? "ts5-tui on that machine, on its Access page (F6), or with \"ts5 keys new NAME\"." : "");
+                     authorize ? "ts5-tui on that machine, on its Access page (F6), or with \"ts5 keys new NAME\"." : "",
+                     setup);
     }
     return usage();
 }

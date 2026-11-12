@@ -138,12 +138,13 @@ SOFTWARE.
 `third_party/lwip` is [lwIP](https://github.com/lwip-tcpip/lwip) 2.2.1, and
 `third_party/wireguard-lwip` is
 [wireguard-lwip](https://github.com/smartalock/wireguard-lwip) at commit
-`c54f20d`: the network stack and WireGuard tunnel (`ps5/wg`) that the
-title's Tailscale client (`ps5/ts`, below) runs over, so devices away from
-home can reach the API. `scripts/vendor-wireguard.sh` copies them; lwIP is
-unchanged, and wireguard-lwip takes 16 peers instead of 1
-(`third_party/*/VENDOR.md`). The Linux build of the title that
-`ps5/host-test.sh` runs links them too; the Linux `ts5` binary doesn't.
+`c54f20d`: the network stack and WireGuard tunnel (`engine/src/tailnet/wg.cpp`)
+that the Tailscale client (`engine/src/tailnet`, below) runs over, so devices
+away from home can reach the API. `scripts/vendor-wireguard.sh` copies them;
+lwIP is unchanged, and wireguard-lwip takes 16 peers instead of 1
+(`third_party/*/VENDOR.md`). The PS5 title, the Linux build of the title that
+`ps5/host-test.sh` runs, and the Linux `ts5` binary (`ts5 serve`'s Tailscale)
+link them.
 
 lwIP's license, in `third_party/lwip/COPYING`:
 
@@ -235,12 +236,16 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### Tailscale client (`ps5/ts`)
+### Tailscale client (`engine/src/tailnet`)
 
-`ps5/ts` (`tailscale.cpp`, `noise.cpp`, `h2.cpp`, `nacl.cpp`) is this
-project's own code, GPL-3.0-or-later with the rest of `ps5/`. It speaks the
+`engine/src/tailnet` (`tailscale.cpp`, `noise.cpp`, `h2.cpp`, `nacl.cpp`, and
+the tunnel glue `wg.cpp` and `wg_udp.c`) is this project's own code, under
+PolyForm Small Business 1.0.0 with the rest of `engine/` (and GPL-3.0-or-later
+inside the PS5 title, as LICENSING.md explains). It was `ps5/ts` and `ps5/wg`
+until 2026-11-12; copies taken from there keep the GPL-3.0-or-later they came
+with. The PS5 title and the Linux `ts5 serve` use it. It speaks the
 protocol of [Tailscale](https://github.com/tailscale/tailscale)'s
-coordination and DERP relay servers so the PS5 can join a tailnet, but it
+coordination and DERP relay servers so the machine can join a tailnet, but it
 contains no code from Tailscale's client (BSD-3-Clause). Its crypto uses
 wireguard-lwip's X25519 and poly1305-donna (above) and Mbed TLS (below).
 Signing in connects to Tailscale's servers (or a Headscale server the user
@@ -252,7 +257,8 @@ endorsed by it.
 
 `third_party/qrcodegen` is Project Nayuki's
 [QR Code generator library](https://github.com/nayuki/QR-Code-generator) (C++).
-The title draws the WireGuard join page's address with it, as a QR code on the TV.
+The title draws its sign-in and join QR codes with it on the TV, and ts5-tui
+the ones on its Access page (Tailscale's sign-in link, an app's address and key).
 
 ```
 QR Code generator library (C++)
@@ -487,8 +493,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 `engine/deps.sh` fetches these at pinned, hash-checked versions for both the
 Linux `ts5` and the PS5 title, which build them in for HTTPS: web search,
-model downloads and Hugging Face search, and, in the title, Tailscale's
-servers. Neither is stored in this repo.
+model downloads and Hugging Face search, and Tailscale's servers. Neither is stored in this repo.
 
 | Project | What ts5 uses | License |
 | --- | --- | --- |
@@ -521,8 +526,10 @@ it was built from, plus the pinned revisions of the projects above.
 
 ## Linux build
 
-The Linux `ts5` binary is built from `engine/` alone (no whisper.cpp). It
-links only the system's Vulkan loader (Apache-2.0) and the C++ runtime (libstdc++, GPL-3.0 WITH GCC-exception-3.1, which places no
+The Linux `ts5` binary is built from `engine/` (no whisper.cpp), with lwIP
+and wireguard-lwip (above) for its Tailscale and the libraries under "In the
+binaries". `ts5-tui` is built from `linux/tui` with qrcodegen (above). They
+link only the system's Vulkan loader (Apache-2.0) and the C++ runtime (libstdc++, GPL-3.0 WITH GCC-exception-3.1, which places no
 terms on the program), both dynamically. Its shaders run on whatever Vulkan
 driver the system has, such as Mesa (MIT) in CI.
 

@@ -145,6 +145,61 @@ def lan_address():
     return None
 
 
+def post(url, obj):
+    rq = urllib.request.Request(url, data=json.dumps(obj).encode(), method="POST")
+    try:
+        with urllib.request.urlopen(rq, timeout=10) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode() or "{}")
+
+
+def test_tailnet(here, there, folder):
+    """Tailscale beside the keys (tailnet_serve.h), without reaching Tailscale:
+    the control server named here is a closed port on this machine."""
+    if get(here + "/ts5/tailnet")[0] == 404:
+        print("skip Tailscale: this ts5 is built without it")
+        return
+    code, body = get(here + "/ts5/tailnet")
+    st = json.loads(body) if code == 200 else {}
+    check(code == 200 and st.get("on") is False and st.get("state") == "off" and st.get("hostname") == "tokenstation5",
+          "tailnet: off at first, named tokenstation5", (code, body))
+    code, body = get(there + "/ts5/tailnet")
+    check(code == 403 and "only ts5 on this machine" in body, "tailnet: another machine can't see or change it",
+          (code, body))
+    code, st = post(there + "/ts5/tailnet", {"on": True})
+    check(code == 403, "tailnet: nor turn it on", (code, st))
+    code, st = post(here + "/ts5/tailnet", {"name": "my box"})
+    check(code == 400 and "letters, digits" in st.get("error", ""), "tailnet: a name with a space is refused", st)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        closed = s.getsockname()[1]
+    code, st = post(here + "/ts5/tailnet", {"on": True, "name": "TS5-Check", "server": f"http://127.0.0.1:{closed}"})
+    check(code == 200 and st.get("on") is True and st.get("hostname") == "ts5-check" and
+          st.get("state") in ("starting", "connecting", "problem"),
+          "tailnet: turned on, the name in lower case", st)
+    conf = os.path.join(folder, "tailscale.conf")
+    text = open(conf).read() if os.path.exists(conf) else ""
+    check("on=1" in text and "name=ts5-check" in text and stat.S_IMODE(os.stat(conf).st_mode) == 0o600,
+          "tailnet: kept in tailscale.conf beside the keys, readable by its owner only", text)
+    for _ in range(50):
+        st = json.loads(get(here + "/ts5/tailnet")[1])
+        if st.get("state") == "problem":
+            break
+        time.sleep(0.2)
+    check(st.get("state") == "problem" and "control server" in st.get("problem", ""),
+          "tailnet: a control server it can't reach is said so", st)
+    tsv = os.path.join(folder, "tailscale.tsv")
+    check(os.path.exists(tsv) and stat.S_IMODE(os.stat(tsv).st_mode) == 0o600,
+          "tailnet: its keys are made, readable by their owner only")
+    code, st = post(here + "/ts5/tailnet", {"sign_out": True})
+    check(code == 200 and st.get("on") is False and st.get("state") == "off", "tailnet: signing out turns it off", st)
+    check("on=0" in open(conf).read(), "tailnet: and tailscale.conf says so")
+    code, st = post(here + "/ts5/tailnet", {"server": ""})
+    check(code == 200 and st.get("server") == "https://controlplane.tailscale.com",
+          "tailnet: an empty server is Tailscale's own again", st)
+
+
 def test_server(ts5, model, backend, d, path, key):
     lan = lan_address()
     if not lan:
@@ -173,6 +228,7 @@ def test_server(ts5, model, backend, d, path, key):
 
         check(get(here + "/v1/models")[0] == 200, "this machine gets in without a key")
         check(get(there + "/v1/models")[0] == 200, "another machine too, while no key is required")
+        test_tailnet(here, there, os.path.dirname(path))
         keys(ts5, path, "require", "on")
         settle()
         code, body = get(there + "/v1/models")

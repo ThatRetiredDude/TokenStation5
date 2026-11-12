@@ -18,7 +18,7 @@
 
 #include "log.h"
 #include "net.h"
-#include "../ts/tailscale.h"
+#include "tailscale.h"
 
 // The system's TCP_MSS (netinet/tcp.h) isn't the tunnel's (lwipopts.h).
 #undef TCP_MSS
@@ -36,7 +36,7 @@ extern "C" {
 extern "C" void ts5_wg_random(void *out, size_t n) {
     if (!ts5::random_bytes((unsigned char *)out, n)) {
         // No random numbers means no safe keys: stop rather than go on.
-        ts5::log_line("ts5-title: wireguard: the system gave no random numbers");
+        ts5::log_line(TS5_LOG_NAME ": wireguard: the system gave no random numbers");
         abort();
     }
 }
@@ -55,11 +55,11 @@ extern "C" void ts5_wg_diag(const char *fmt, ...) {
     va_end(ap);
     size_t n = strlen(line);
     while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = 0;
-    ts5::log_line("ts5-title: wireguard: lwip: %s", line);
+    ts5::log_line(TS5_LOG_NAME ": wireguard: lwip: %s", line);
 }
 
 extern "C" void ts5_wg_assert(const char *what, const char *file, int line) {
-    ts5::log_line("ts5-title: wireguard: lwip assertion failed: %s (%s:%d)", what, file, line);
+    ts5::log_line(TS5_LOG_NAME ": wireguard: lwip assertion failed: %s (%s:%d)", what, file, line);
     abort();
 }
 
@@ -166,7 +166,7 @@ bool Tunnel::apply(const Config &c, std::string &why) {
         return true;
     }
     if (c.address != want_.address)
-        ts5::log_line("ts5-title: wireguard: a new tunnel address takes effect at the next start");
+        ts5::log_line(TS5_LOG_NAME ": wireguard: a new tunnel address takes effect at the next start");
     if (c.on && public_key_of(c.private_key).empty()) {
         why = "no private key";
         return false;
@@ -248,6 +248,7 @@ struct Loop {
         bool was_up = false;
     };
     std::map<std::string, TsPeer> ts_peers;     // by node key
+    int ts_unknown = 0, ts_traced = 0;           // log lines so far: packets from unlisted devices, TS5_NET_LOG's
     std::map<uint32_t, std::string> ts_standin;  // stand-in address: node key
     uint32_t ts_next = 1;
 };
@@ -333,7 +334,7 @@ err_t on_accept(void *arg, tcp_pcb *pcb, err_t err) {
             double &last = L.ts_refused[src];
             if (now - last > 60) {
                 last = now;
-                ts5::log_line("ts5-title: tailscale: %s refused: %s", from.c_str(),
+                ts5::log_line(TS5_LOG_NAME ": tailscale: %s refused: %s", from.c_str(),
                               L.ts_filter.known ? "the tailnet's access rules don't let it reach the API"
                                                 : "no access rules from the control server yet");
             }
@@ -350,7 +351,7 @@ err_t on_accept(void *arg, tcp_pcb *pcb, err_t err) {
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     socklen_t len = sizeof a;
     if (fd < 0 || bind(fd, (sockaddr *)&a, sizeof a) != 0 || getsockname(fd, (sockaddr *)&a, &len) != 0) {
-        ts5::log_line("ts5-title: wireguard: no socket for %s's connection (errno %d)", from.c_str(), errno);
+        ts5::log_line(TS5_LOG_NAME ": wireguard: no socket for %s's connection (errno %d)", from.c_str(), errno);
         if (fd >= 0) close(fd);
         tcp_abort(pcb);
         return ERR_ABRT;
@@ -375,7 +376,7 @@ err_t on_accept(void *arg, tcp_pcb *pcb, err_t err) {
         c->reached_api = true;
     }
     else if (errno != EINPROGRESS) {
-        ts5::log_line("ts5-title: wireguard: can't reach the API for %s (errno %d)", from.c_str(), errno);
+        ts5::log_line(TS5_LOG_NAME ": wireguard: can't reach the API for %s (errno %d)", from.c_str(), errno);
         drop_client(L, c);
         close(fd);
         delete c;
@@ -388,7 +389,7 @@ err_t on_accept(void *arg, tcp_pcb *pcb, err_t err) {
     tcp_nagle_disable(pcb);  // streamed tokens go out as they come
     L.conns.push_back(c);
     if (detail())
-        ts5::log_line("ts5-title: wireguard: tcp: %s connects, API socket from port %u%s", from.c_str(), c->local_port,
+        ts5::log_line(TS5_LOG_NAME ": wireguard: tcp: %s connects, API socket from port %u%s", from.c_str(), c->local_port,
                       c->connecting ? ", connecting" : ", connected");
     return ERR_OK;
 }
@@ -414,7 +415,7 @@ std::string open_udp(Loop &L, int port) {
         const int e = errno;
         close(fd);
         return e == EADDRINUSE ? "port " + std::to_string(port) + " is in use"
-               : e == EACCES   ? "port " + std::to_string(port) + " is refused by the PS5"
+               : e == EACCES   ? "port " + std::to_string(port) + " is refused by " TS5_DEVICE_NAME
                                : "can't use port " + std::to_string(port) + " (errno " + std::to_string(e) + ")";
     }
     nonblocking(fd);
@@ -447,7 +448,7 @@ void sync_peers(Loop &L, const std::vector<Peer> &want) {
         if (L.peers.count(key)) continue;
         uint32_t ip;
         if (!parse_ip(p.address, ip)) {
-            ts5::log_line("ts5-title: wireguard: %s's address %s isn't an IPv4 address", p.name.c_str(), p.address.c_str());
+            ts5::log_line(TS5_LOG_NAME ": wireguard: %s's address %s isn't an IPv4 address", p.name.c_str(), p.address.c_str());
             continue;
         }
         wireguardif_peer peer;
@@ -467,7 +468,7 @@ void sync_peers(Loop &L, const std::vector<Peer> &want) {
         }
         uint8_t index = WIREGUARDIF_INVALID_INDEX;
         if (wireguardif_add_peer(&L.nif, &peer, &index) != ERR_OK || index == WIREGUARDIF_INVALID_INDEX) {
-            ts5::log_line("ts5-title: wireguard: can't add %s (bad key, or more than %d devices)", p.name.c_str(),
+            ts5::log_line(TS5_LOG_NAME ": wireguard: can't add %s (bad key, or more than %d devices)", p.name.c_str(),
                           WIREGUARD_MAX_PEERS);
             continue;
         }
@@ -503,14 +504,14 @@ bool pump(Loop &L, Conn *c, short revents) {
         sockaddr_in peer{};
         socklen_t plen = sizeof peer;
         if (e != 0) {
-            ts5::log_line("ts5-title: wireguard: can't reach the API (errno %d)", e);
+            ts5::log_line(TS5_LOG_NAME ": wireguard: can't reach the API (errno %d)", e);
             c->api_eof = true;
             c->to_api.clear();
             c->connecting = false;
         } else if (getpeername(c->fd, (sockaddr *)&peer, &plen) == 0) {
             c->connecting = false;
             c->reached_api = true;
-            if (detail()) ts5::log_line("ts5-title: wireguard: tcp: API socket from port %u connected", c->local_port);
+            if (detail()) ts5::log_line(TS5_LOG_NAME ": wireguard: tcp: API socket from port %u connected", c->local_port);
         }
     }
     if (c->connecting) return true;
@@ -581,7 +582,7 @@ void ts_sync(Loop &L) {
             ts_drop_peers(L);
             netif_set_down(&L.ts_nif);
             L.ts_up = false;
-            ts5::log_line("ts5-title: tailscale: off the tailnet");
+            ts5::log_line(TS5_LOG_NAME ": tailscale: off the tailnet");
         }
         L.ts_version = ~0ull;
         return;
@@ -616,7 +617,7 @@ void ts_sync(Loop &L) {
         const bool made = netif_add(&L.ts_nif, &addr, &mask, &gw, &L.ts_init, wireguardif_init, ip_input) != nullptr;
         ts5_udp_making(TS5_UDP_WIREGUARD);
         if (!made) {
-            ts5::log_line("ts5-title: tailscale: the tailnet's interface didn't start");
+            ts5::log_line(TS5_LOG_NAME ": tailscale: the tailnet's interface didn't start");
             return;
         }
         L.ts_made = true;
@@ -638,7 +639,7 @@ void ts_sync(Loop &L) {
         netif_set_up(&L.ts_nif);
         netif_set_link_up(&L.ts_nif);
         L.ts_up = true;
-        ts5::log_line("ts5-title: tailscale: the PS5 is %s on the tailnet", m.address.c_str());
+        ts5::log_line(TS5_LOG_NAME ": tailscale: " TS5_DEVICE_NAME " is %s on the tailnet", m.address.c_str());
     }
     // Devices gone from the tailnet, or moved to another address.
     for (auto it = L.ts_peers.begin(); it != L.ts_peers.end();) {
@@ -664,7 +665,7 @@ std::map<std::string, Loop::TsPeer>::iterator ts_add_peer(Loop &L, const std::st
         auto quiet = L.ts_peers.begin();
         for (auto it = L.ts_peers.begin(); it != L.ts_peers.end(); ++it)
             if (it->second.last < quiet->second.last) quiet = it;
-        ts5::log_line("ts5-title: tailscale: %s makes room for %s", quiet->second.name.c_str(), known->second.name.c_str());
+        ts5::log_line(TS5_LOG_NAME ": tailscale: %s makes room for %s", quiet->second.name.c_str(), known->second.name.c_str());
         wireguardif_remove_peer(&L.ts_nif, quiet->second.index);
         L.ts_standin.erase(quiet->second.standin);
         L.ts_peers.erase(quiet);
@@ -685,7 +686,7 @@ std::map<std::string, Loop::TsPeer>::iterator ts_add_peer(Loop &L, const std::st
     ip_addr_set_ip4_u32_val(peer.endpoint_ip, p.standin);
     peer.endport_port = 1;
     if (wireguardif_add_peer(&L.ts_nif, &peer, &p.index) != ERR_OK || p.index == WIREGUARDIF_INVALID_INDEX) {
-        ts5::log_line("ts5-title: tailscale: can't add %s", p.name.c_str());
+        ts5::log_line(TS5_LOG_NAME ": tailscale: can't add %s", p.name.c_str());
         return L.ts_peers.end();
     }
     L.ts_standin[p.standin] = key;
@@ -704,7 +705,20 @@ void ts_receive(Loop &L) {
         if (d.size() < 4 || d[0] < 1 || d[0] > 4 || d[1] || d[2] || d[3]) continue;
         const std::string key((const char *)from, 32);
         auto it = L.ts_peers.find(key);
-        if (it == L.ts_peers.end() && (it = ts_add_peer(L, key)) == L.ts_peers.end()) continue;
+        const bool added = it == L.ts_peers.end();
+        if (added && (it = ts_add_peer(L, key)) == L.ts_peers.end()) {
+            // (Its first few: a device the map doesn't list, or no room.)
+            if (L.ts_unknown++ < 5)
+                ts5::log_line(TS5_LOG_NAME ": tailscale: a packet from %02x%02x%02x%02x, which the tailnet's map doesn't list "
+                              "(%zu devices in it)",
+                              from[0], from[1], from[2], from[3], L.ts_known.size());
+            continue;
+        }
+        if (detail() && L.ts_traced < 300) {
+            L.ts_traced++;
+            ts5::log_line(TS5_LOG_NAME ": tailscale: trace: wireguard type %d, %zu bytes, from %s%s", d[0], d.size(),
+                          it->second.name.c_str(), added ? " (now a peer)" : "");
+        }
         it->second.last = now_s();
         ts5_udp_input(TS5_UDP_TAILSCALE, d.data(), d.size(), it->second.standin, 1);
         // Data for a session the PS5 doesn't have (it restarted since): a
@@ -753,7 +767,7 @@ void Tunnel::loop() {
     if (!netif_add(&L.nif, &addr, &mask, &gw, &L.init, wireguardif_init, ip_input)) {
         std::lock_guard<std::mutex> lk(mu_);
         problem_ = "WireGuard couldn't start";
-        ts5::log_line("ts5-title: wireguard: the interface didn't start (a bad private key?)");
+        ts5::log_line(TS5_LOG_NAME ": wireguard: the interface didn't start (a bad private key?)");
         return;
     }
     netif_set_default(&L.nif);
@@ -763,14 +777,17 @@ void Tunnel::loop() {
     if (!pcb || tcp_bind(pcb, IP_ADDR_ANY, (u16_t)cfg.api_port) != ERR_OK || !(L.listener = tcp_listen(pcb))) {
         std::lock_guard<std::mutex> lk(mu_);
         problem_ = "WireGuard couldn't start";
-        ts5::log_line("ts5-title: wireguard: no listener on port %d in the tunnel", cfg.api_port);
+        ts5::log_line(TS5_LOG_NAME ": wireguard: no listener on port %d in the tunnel", cfg.api_port);
         return;
     }
     tcp_arg(L.listener, &L);
     tcp_accept(L.listener, on_accept);
     L.api_port = cfg.api_port;
-    ts5::log_line("ts5-title: wireguard: the PS5 is %s in the tunnel, key %s", cfg.address.c_str(),
-                  public_key_of(cfg.private_key).c_str());
+    if (cfg.on)
+        ts5::log_line(TS5_LOG_NAME ": wireguard: " TS5_DEVICE_NAME " is %s in the tunnel, key %s", cfg.address.c_str(),
+                      public_key_of(L.private_key).c_str());
+    else  // (its own server off: the key made above is used by nothing)
+        ts5::log_line(TS5_LOG_NAME ": wireguard: the tunnel is up, for the tailnet alone");
 
     double last_states = 0, pass_at = 0;
     std::vector<pollfd> fds;
@@ -785,13 +802,13 @@ void Tunnel::loop() {
         if (changed) {
             std::string why;
             if (!cfg.on) {
-                if (L.udp >= 0) ts5::log_line("ts5-title: wireguard: off");
+                if (L.udp >= 0) ts5::log_line(TS5_LOG_NAME ": wireguard: off");
                 close_udp(L);
                 drop_conns(L);
             } else if (L.udp < 0 || L.udp_port != cfg.port) {
                 why = open_udp(L, cfg.port);
-                if (why.empty()) ts5::log_line("ts5-title: wireguard: on, UDP port %d", cfg.port);
-                else ts5::log_line("ts5-title: wireguard: %s", why.c_str());
+                if (why.empty()) ts5::log_line(TS5_LOG_NAME ": wireguard: on, UDP port %d", cfg.port);
+                else ts5::log_line(TS5_LOG_NAME ": wireguard: %s", why.c_str());
             }
             if (cfg.private_key != L.private_key) {
                 // A new key pair: every session ends, and each peer's keys are
@@ -803,7 +820,7 @@ void Tunnel::loop() {
                     wireguard_device_init((wireguard_device *)L.nif.state, key);
                     crypto_zero(key, sizeof key);
                     L.private_key = cfg.private_key;
-                    ts5::log_line("ts5-title: wireguard: new key pair, public key %s",
+                    ts5::log_line(TS5_LOG_NAME ": wireguard: new key pair, public key %s",
                                   public_key_of(cfg.private_key).c_str());
                 }
             }
@@ -834,7 +851,7 @@ void Tunnel::loop() {
         else if (poll(fds.data(), (nfds_t)fds.size(), (int)sleep_ms) < 0) {
             // Then every socket is tried: they're all non-blocking.
             if (errno != EINTR && !L.poll_failed) {
-                ts5::log_line("ts5-title: wireguard: poll failed (errno %d); trying every socket each time", errno);
+                ts5::log_line(TS5_LOG_NAME ": wireguard: poll failed (errno %d); trying every socket each time", errno);
                 L.poll_failed = true;
             }
             for (pollfd &f : fds) f.revents = f.events;
@@ -855,7 +872,7 @@ void Tunnel::loop() {
                 char ip[INET_ADDRSTRLEN] = "?";
                 inet_ntop(AF_INET, &from.sin_addr, ip, sizeof ip);
                 if (++L.received == 1)
-                    ts5::log_line("ts5-title: wireguard: the first packet came in, from %s:%u", ip, ntohs(from.sin_port));
+                    ts5::log_line(TS5_LOG_NAME ": wireguard: the first packet came in, from %s:%u", ip, ntohs(from.sin_port));
                 // Detailed log: each packet (the first 200 since the port
                 // opened), its WireGuard type (1 a handshake, 4 data) and
                 // whether the PS5 answered it.
@@ -865,7 +882,7 @@ void Tunnel::loop() {
                                              : ts5_wg_send_failed > failed
                                                  ? "the answer couldn't be sent (errno " + std::to_string(ts5_wg_send_errno) + ")"
                                                  : "no answer";
-                    ts5::log_line("ts5-title: wireguard: udp: %zd bytes from %s:%u, type %u: %s", n, ip,
+                    ts5::log_line(TS5_LOG_NAME ": wireguard: udp: %zd bytes from %s:%u, type %u: %s", n, ip,
                                   ntohs(from.sin_port), (unsigned)buf[0], what.c_str());
                 }
             }
@@ -887,7 +904,7 @@ void Tunnel::loop() {
         const double t = now_s();
         // A pass that took long: something held the thread.
         if (pass_at > 0 && t - pass_at > 1)
-            ts5::log_line("ts5-title: wireguard: one pass of the tunnel took %.1f s", t - pass_at);
+            ts5::log_line(TS5_LOG_NAME ": wireguard: one pass of the tunnel took %.1f s", t - pass_at);
         pass_at = t;
         if (t - last_states >= 0.5) {
             last_states = t;
@@ -907,7 +924,7 @@ void Tunnel::loop() {
                     s.seen_s = (double)(uint32_t)(now_ms - dev->peers[index].last_rx) / 1000.0;
                 bool &was = L.up[key];
                 if (s.up != was)
-                    ts5::log_line(s.up ? "ts5-title: wireguard: %s connected, from %s" : "ts5-title: wireguard: %s's session ended%s",
+                    ts5::log_line(s.up ? TS5_LOG_NAME ": wireguard: %s connected, from %s" : TS5_LOG_NAME ": wireguard: %s's session ended%s",
                                   p.name.c_str(), s.up ? s.from.c_str() : "");
                 was = s.up;
                 states.push_back(s);
@@ -926,7 +943,7 @@ void Tunnel::loop() {
                     if (tdev && p.index < WIREGUARD_MAX_PEERS && tdev->peers[p.index].last_rx)
                         st.seen_s = (double)(uint32_t)(now_ms - tdev->peers[p.index].last_rx) / 1000.0;
                     if (st.up != p.was_up)
-                        ts5::log_line(st.up ? "ts5-title: tailscale: %s (%s) connected" : "ts5-title: tailscale: %s (%s)'s session ended",
+                        ts5::log_line(st.up ? TS5_LOG_NAME ": tailscale: %s (%s) connected" : TS5_LOG_NAME ": tailscale: %s (%s)'s session ended",
                                       p.name.c_str(), p.address.c_str());
                     p.was_up = st.up;
                     ts_states.push_back(st);

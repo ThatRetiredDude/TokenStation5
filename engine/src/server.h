@@ -46,6 +46,13 @@ public:
     // connections by the device behind it. Set before start().
     using ClientName = std::function<std::string(const std::string &ip, int port)>;
     void set_client_name(ClientName f) { client_name_ = std::move(f); }
+    // The program's own routes beside the API, such as ts5's /ts5/tailnet:
+    // asked about a path nothing else answers, after the key check, with the
+    // request and its peer as set_client_name named it. True when it
+    // answered, with code and a JSON body to send. Set before start().
+    using Routes = std::function<bool(const std::string &method, const std::string &path, const std::string &body,
+                                      const std::string &client, int &code, std::string &reply)>;
+    void set_routes(Routes f) { state_.routes = std::move(f); }
 
     // For a status display.
     struct Activity {
@@ -85,6 +92,7 @@ public:
         std::function<void(const UsageRecord &)> on_usage;
         Authorize authorize;
         std::string key_hint;
+        Routes routes;
     };
 
 private:
@@ -99,10 +107,12 @@ private:
 // process ends. Returns only when it cannot listen; on_listening runs once
 // the socket is up.
 // authorize: who gets in (Server::set_authorize), in place of TS5_API_KEY;
-// key_hint: Server::set_key_hint.
+// key_hint: Server::set_key_hint. setup: anything more, on the server
+// before it starts (set_client_name, set_routes).
 int serve(Engine &e, const std::string &model_name, const std::string &host, int port,
           const std::function<void(int port)> &on_listening = nullptr,
           const std::function<void(const UsageRecord &)> &on_usage = nullptr,
-          const Server::Authorize &authorize = nullptr, const std::string &key_hint = "");
+          const Server::Authorize &authorize = nullptr, const std::string &key_hint = "",
+          const std::function<void(Server &)> &setup = nullptr);
 
 }  // namespace ts5

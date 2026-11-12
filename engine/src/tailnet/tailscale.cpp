@@ -1,15 +1,18 @@
 #include "tailscale.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <atomic>
 #include <cstring>
 #include <map>
 
@@ -50,12 +53,28 @@ void log(const char *fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(line, sizeof line, fmt, ap);
     va_end(ap);
-    ts5::log_line("ts5-title: tailscale: %s", line);
+    ts5::log_line(TS5_LOG_NAME ": tailscale: %s", line);
 }
 
 double now_s() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+
+// TS5_NET_LOG=1: the tailnet's traffic in the log, its first 600 lines (to
+// find why a device gets no answer). Keys are shown by their first 4 bytes.
+bool net_trace() {
+    static const bool on = [] {
+        const char *v = getenv("TS5_NET_LOG");
+        return v && strcmp(v, "1") == 0;
+    }();
+    return on;
+}
+std::atomic<int> g_traced{0};
+#define TRACE(...)                                          \
+    do {                                                    \
+        if (net_trace() && g_traced++ < 600) log(__VA_ARGS__); \
+    } while (0)
+
 
 void wipe(void *p, size_t n) {
     volatile uint8_t *b = (volatile uint8_t *)p;
@@ -103,6 +122,18 @@ struct Url {
 
 bool is_disco(const std::string &p) {
     return p.size() >= kDiscoHeader + 24 + 16 + 2 && memcmp(p.data(), kDiscoMagic, kDiscoMagicLen) == 0;
+}
+
+const char *packet_kind(const std::string &p) {
+    if (is_disco(p)) return "disco";
+    if (p.size() >= 4 && !p[1] && !p[2] && !p[3])
+        switch (p[0]) {
+            case 1: return "wireguard handshake";
+            case 2: return "wireguard handshake reply";
+            case 3: return "wireguard cookie";
+            case 4: return "wireguard data";
+        }
+    return "something else";
 }
 
 // An IPv4 address and port as one number (address in the high bits).
@@ -231,8 +262,21 @@ bool load_keys(const std::string &path, Keys &k) {
 
 bool save_keys(const std::string &path, const Keys &k) {
     const std::string tmp = path + ".new";
+#ifdef TS5_PS5
     FILE *f = fopen(tmp.c_str(), "w");
     if (!f) return false;
+#else
+    // The keys are this device's on the tailnet: for its owner's eyes only
+    // (Linux; on the PS5 the title's folder is the jailbreak's FTP's anyway).
+    const int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) return false;
+    fchmod(fd, 0600);
+    FILE *f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+        return false;
+    }
+#endif
     fprintf(f, "# ts5 tailscale v1\nserver\t%s\nmachine\t%s\nnode\t%s\ndisco\t%s\nlog_id\t%s\naccount\t%s\n",
             k.server.c_str(), hex(k.machine, 32).c_str(), hex(k.node, 32).c_str(), hex(k.disco, 32).c_str(),
             k.log_id.c_str(), k.account.c_str());
@@ -551,9 +595,17 @@ void Client::send(const uint8_t to[32], const void *data, size_t len) {
         pa.wanted = now;
         if (udp_ >= 0 && pa.best && now - pa.best_at < kTrustDirect) {
             const sockaddr_in a = addr_of(pa.best);
-            if (sendto(udp_, data, len, MSG_DONTWAIT, (const sockaddr *)&a, sizeof a) == (ssize_t)len) return;
+            if (sendto(udp_, data, len, MSG_DONTWAIT, (const sockaddr *)&a, sizeof a) == (ssize_t)len) {
+                TRACE("trace: out %zu bytes to %s, direct (%s)", len, hex(to, 4).c_str(),
+                      packet_kind(std::string((const char *)data, len)));
+                return;
+            }
         }
+    } else {
+        TRACE("trace: out to %s, a device the map doesn't list", hex(to, 4).c_str());
     }
+    TRACE("trace: out %zu bytes to %s, by the relay (%s)", len, hex(to, 4).c_str(),
+          packet_kind(std::string((const char *)data, len)));
     if (outbox_.size() > 1024) outbox_.pop_front();  // the relay is gone: keep the newest
     outbox_.emplace_back(std::string((const char *)to, 32), std::string((const char *)data, len));
 }
@@ -613,7 +665,7 @@ void Client::control_loop() {
                 continue;
             }
             if (!new_keys(keys, cfg.control_url) || !save_keys(cfg.state_file, keys)) {
-                set_state(Status::Problem, "can't make or keep the PS5's keys");
+                set_state(Status::Problem, "can't make or keep " TS5_DEVICE_NAME "'s keys");
                 for (int i = 0; i < 100 && !changed(); i++) usleep(50 * 1000);
                 continue;
             }
@@ -672,9 +724,13 @@ void Client::control_loop() {
             Json h = Json::object();
             h.set("IPNVersion", str("1.86.5-ts5-" + cfg.version));
             h.set("BackendLogID", str(keys.log_id));
+#ifdef TS5_PS5
             h.set("OS", str("freebsd"));
             h.set("OSVersion", str("PlayStation 5"));
             h.set("DeviceModel", str("PlayStation 5"));
+#else
+            h.set("OS", str("linux"));
+#endif
             h.set("App", str("TokenStation5"));
             h.set("Hostname", str(cfg.hostname));
             int home;
@@ -748,6 +804,9 @@ void Client::control_loop() {
                 why = "the control server refused the sign-in (HTTP " + std::to_string(status) + "): " + body.substr(0, 200);
                 break;
             }
+            TRACE("trace: sign-in answer: MachineAuthorized %s, a sign-in page %s, NodeKeyExpired %s, error %s",
+                  rr["MachineAuthorized"].boolean(false) ? "yes" : "no", rr["AuthURL"].str().empty() ? "no" : "yes",
+                  rr["NodeKeyExpired"].boolean(false) ? "yes" : "no", rr["Error"].str().empty() ? "none" : rr["Error"].str().c_str());
             if (!rr["Error"].str().empty()) {
                 why = rr["Error"].str();
                 login_url.clear();  // the page may be no good any more
@@ -770,10 +829,10 @@ void Client::control_loop() {
             }
             if (rr["NodeKeyExpired"].boolean(false)) {
                 // A new device key, and the sign-in again.
-                log("the PS5's key expired; making a new one");
+                log(TS5_DEVICE_NAME "'s key expired; making a new one");
                 new_private_key(keys.node);
                 save_keys(cfg.state_file, keys);
-                why = "the PS5's key expired";
+                why = TS5_DEVICE_NAME "'s key expired";
                 break;
             }
             const std::string login = rr["Login"]["LoginName"].str();
@@ -800,7 +859,7 @@ void Client::control_loop() {
                 // Signed in, but an admin has to approve the device.
                 std::lock_guard<std::mutex> lk(mu_);
                 status_.state = Status::NeedsSignIn;
-                status_.problem = "waiting for the tailnet's admin to approve the PS5";
+                status_.problem = "waiting for the tailnet's admin to approve " TS5_DEVICE_NAME;
                 followup = "";
                 usleep(5 * 1000 * 1000);
             }
@@ -847,6 +906,11 @@ void Client::control_loop() {
             return m.dump();
         };
         int map_id = 0;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            TRACE("trace: map request: stream, version %d, home relay %d, %zu direct addresses, disco key %s",
+                  kCapVersion, home_region_, endpoints_.size(), disco_key.size() > 9 ? "set" : "missing");
+        }
         if (!c.post("/machine/map", map_request(true), node_key, map_id, why)) {
             fail("the map request failed: " + why);
             continue;
@@ -863,7 +927,8 @@ void Client::control_loop() {
         // for PacketFilter's); none until it sends some.
         std::map<std::string, std::vector<Filter::Rule>> filters;
         bool have_filter = false;
-        std::string self_name, self_address;
+        std::string self_name, self_address, control_says;
+        bool said_no_address = false, start_over = false;
         int update_id = 0;
         bool ok = true;
         while (ok && !changed()) {
@@ -880,6 +945,7 @@ void Client::control_loop() {
                 H2::Response *ur = c.h2().response(update_id);
                 if (ur && ur->done) {
                     if (ur->status != 200) log("telling the control server the relay failed (HTTP %d)", ur->status);
+                    else TRACE("trace: the control server took it");
                     c.h2().forget(update_id);
                     update_id = 0;
                 }
@@ -898,6 +964,8 @@ void Client::control_loop() {
                     ok = false;
                     break;
                 }
+                TRACE("trace: told the control server: home relay %d, direct addresses #%llu", home,
+                      (unsigned long long)eps);
                 reported_home = home;
                 reported_endpoints = eps;
             }
@@ -926,6 +994,22 @@ void Client::control_loop() {
                     continue;
                 }
                 if (m["KeepAlive"].boolean(false)) continue;
+                if (net_trace()) {
+                    // What the message holds: its fields, a list's length.
+                    std::string what;
+                    for (const auto &[k, v] : m.o) {
+                        what += (what.empty() ? "" : ", ") + k;
+                        if (v.type == Json::ARR) what += " " + std::to_string(v.a.size());
+                        else if (v.type == Json::NUL) what += " null";
+                    }
+                    const Json &n = m["Node"];
+                    if (n.type == Json::OBJ)
+                        what += "; Node: " + std::to_string(n["Addresses"].a.size()) + " addresses, MachineAuthorized " +
+                                (n["MachineAuthorized"].boolean(false) ? "yes" : "no") + ", Expired " +
+                                (n["Expired"].boolean(false) ? "yes" : "no") + ", Online " +
+                                (n["Online"].type == Json::BOOL ? (n["Online"].b ? "yes" : "no") : "unsaid");
+                    TRACE("trace: map message, %zu bytes: %s", len, what.c_str());
+                }
                 auto take_node = [](const Json &n, Node &out) {
                     out.key = n["Key"].str();
                     std::string name = n["Name"].str();
@@ -941,6 +1025,19 @@ void Client::control_loop() {
                     out.endpoints.clear();
                     for (const Json &e : n["Endpoints"].a) out.endpoints.push_back(e.str());
                 };
+                // The control server's own warnings about this device: none
+                // (null) leaves them, an empty list clears them.
+                const Json &health = m["Health"];
+                if (health.type == Json::ARR) {
+                    std::string h;
+                    for (const Json &x : health.a)
+                        if (!x.str().empty()) h += (h.empty() ? "" : "; ") + x.str();
+                    if (h != control_says) {
+                        if (!h.empty()) log("the control server says: %s", h.c_str());
+                        else log("the control server's warnings are gone");
+                        control_says = h;
+                    }
+                }
                 const Json &self = m["Node"];
                 if (self.type == Json::OBJ) {
                     Node me;
@@ -949,6 +1046,20 @@ void Client::control_loop() {
                     while (!self_name.empty() && self_name.back() == '.') self_name.pop_back();
                     self_address = me.address;
                     changed_map = true;
+                    if (me.address.empty() && !said_no_address) {
+                        said_no_address = true;
+                        log("the control server gave " TS5_DEVICE_NAME " no tailnet address%s%s",
+                            control_says.empty() ? "" : ": ", control_says.c_str());
+                    }
+                    // Keys that came from somewhere else (a copied folder, or
+                    // a build that named another OS): Tailscale won't take
+                    // them back, so start over as a new device.
+                    if (me.address.empty() && (control_says.find("OS changed") != std::string::npos ||
+                                               control_says.find("copied between devices") != std::string::npos)) {
+                        start_over = true;
+                        ok = false;
+                        break;
+                    }
                 }
                 const Json &dm = m["DERPMap"];
                 if (dm.type == Json::OBJ) {
@@ -1018,7 +1129,18 @@ void Client::control_loop() {
                     changed_map = true;
                 }
             }
-            if (changed_map) {
+            if (net_trace() && mr->body.size() >= 4) {
+                // A message part way here: say so now and then, to tell a
+                // stall from a quiet server.
+                static double said = 0;
+                const uint8_t *b = (const uint8_t *)mr->body.data();
+                const size_t len = (size_t)b[0] | ((size_t)b[1] << 8) | ((size_t)b[2] << 16) | ((size_t)b[3] << 24);
+                if (now_s() - said >= 10) {
+                    said = now_s();
+                    TRACE("trace: a map message of %zu bytes on its way, %zu here", len, mr->body.size() - 4);
+                }
+            }
+            if (changed_map && !start_over) {
                 std::vector<Peer> peers;
                 for (const auto &[id, n] : nodes) {
                     Peer p;
@@ -1057,6 +1179,14 @@ void Client::control_loop() {
                 paths_.swap(paths);
                 for (auto it = by_addr_.begin(); it != by_addr_.end();)
                     it = paths_.count(it->second) ? std::next(it) : by_addr_.erase(it);
+                if (self_address.empty()) {
+                    status_.state = Status::Problem;
+                    status_.problem = "Tailscale gave " TS5_DEVICE_NAME " no address" +
+                                      (control_says.empty() ? std::string() : ": " + control_says);
+                } else if (status_.state == Status::Problem && status_.problem.rfind("Tailscale gave ", 0) == 0) {
+                    status_.state = Status::Connecting;
+                    status_.problem.clear();
+                }
                 map_.address = self_address;
                 map_.peers = peers;
                 map_.filter = filter;
@@ -1064,9 +1194,33 @@ void Client::control_loop() {
                 status_.name = self_name;
                 status_.address = self_address;
                 status_.devices = (int)peers.size();
+                size_t with_disco = 0, with_eps = 0;
+                for (const auto &[k, pa] : paths_) {
+                    with_disco += pa.disco.size() == 32 && pa.disco != std::string(32, '\0');
+                    with_eps += !pa.endpoints.empty();
+                }
+                TRACE("trace: the map: %zu devices, %zu with a disco key, %zu with direct addresses, filter %s",
+                      peers.size(), with_disco, with_eps, filter.known ? "known" : "not sent");
             }
         }
         c.close();
+        if (start_over && !changed()) {
+            log("Tailscale takes these keys for ones copied from another device; " TS5_DEVICE_NAME
+                " starts over as a new device, which needs a new sign-in");
+            Keys fresh;
+            if (!new_keys(fresh, cfg.control_url) || !save_keys(cfg.state_file, fresh)) {
+                fail("can't make or keep " TS5_DEVICE_NAME "'s keys");
+                continue;
+            }
+            std::lock_guard<std::mutex> lk(mu_);
+            status_ = Status();
+            status_.state = Status::Starting;
+            map_.address.clear();
+            map_.peers.clear();
+            map_.filter = Filter();
+            map_.version++;
+            continue;
+        }
         if (!changed()) fail(why.empty() ? "the control server connection ended" : why);
     }
 }
@@ -1189,6 +1343,8 @@ void Client::relay_loop() {
                 std::lock_guard<std::mutex> lk(mu_);
                 while (hello && !outbox_.empty() && out.size() < (256u << 10)) {
                     out += frame(0x04, outbox_.front().first + outbox_.front().second);  // SendPacket
+                    TRACE("trace: relay out %zu bytes to %s", outbox_.front().second.size(),
+                          hex((const uint8_t *)outbox_.front().first.data(), 4).c_str());
                     outbox_.pop_front();
                 }
             }
@@ -1247,6 +1403,9 @@ void Client::relay_loop() {
                         if (p.size() > 32) {
                             std::lock_guard<std::mutex> lk(mu_);
                             const std::string from = p.substr(0, 32), packet = p.substr(32);
+                            TRACE("trace: relay in %zu bytes from %s (%s)%s", packet.size(),
+                                  hex((const uint8_t *)from.data(), 4).c_str(), packet_kind(packet),
+                                  paths_.count(from) ? "" : ", a device the map doesn't list");
                             if (is_disco(packet)) {
                                 disco_in(packet, &from, 0);
                                 break;
@@ -1266,6 +1425,7 @@ void Client::relay_loop() {
                         ok = false;
                         break;
                     default:  // ServerInfo, KeepAlive, PeerGone, PeerPresent...
+                        TRACE("trace: relay frame 0x%02x, %zu bytes", type, p.size());
                         break;
                 }
                 if (!ok) break;
@@ -1338,10 +1498,19 @@ void Client::disco_in(const std::string &packet, const std::string *relay_from, 
             node = k;
             break;
         }
-    if (node.empty() || (relay_from && *relay_from != node)) return;
-    std::string plain;
-    if (!box_open(disco_priv_, (const uint8_t *)sender.data(), packet.substr(kDiscoHeader), plain) || plain.size() < 2)
+    if (node.empty() || (relay_from && *relay_from != node)) {
+        TRACE("trace: disco %s dropped: %s", relay_from ? "by the relay" : addr_text(src).c_str(),
+              node.empty() ? "its disco key is no device's in the map" : "the relay's sender isn't that device");
         return;
+    }
+    std::string plain;
+    if (!box_open(disco_priv_, (const uint8_t *)sender.data(), packet.substr(kDiscoHeader), plain) || plain.size() < 2) {
+        TRACE("trace: disco from %s doesn't open", hex((const uint8_t *)node.data(), 4).c_str());
+        return;
+    }
+    TRACE("trace: disco %s from %s, %s", (uint8_t)plain[0] == kDiscoPing ? "ping" : (uint8_t)plain[0] == kDiscoPong ? "pong"
+                                         : (uint8_t)plain[0] == kDiscoCallMeMaybe ? "call-me-maybe" : "of another kind",
+          hex((const uint8_t *)node.data(), 4).c_str(), relay_from ? "by the relay" : addr_text(src).c_str());
     Path &pa = paths_[node];
     const double now = now_s();
     switch ((uint8_t)plain[0]) {
@@ -1503,6 +1672,8 @@ void Client::direct_loop() {
             const std::string packet(buf, (size_t)n);
             const uint64_t src = addr_key(from);
             std::lock_guard<std::mutex> lk(mu_);
+            TRACE("trace: udp in %zu bytes from %s (%s)%s", packet.size(), addr_text(src).c_str(), packet_kind(packet),
+                  is_disco(packet) || by_addr_.count(src) ? "" : ", from no address the PS5 knows");
             if (is_disco(packet)) {
                 disco_in(packet, nullptr, src);
                 continue;

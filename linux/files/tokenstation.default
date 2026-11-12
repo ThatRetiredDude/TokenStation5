@@ -15,6 +15,16 @@ PORT=8081
 # every machine that reaches the port gets in without one.
 KEYS=/var/lib/tokenstation/access/keys.tsv
 
+# Tailscale, to reach it from anywhere: turned on and signed in on ts5-tui's
+# Access page (F6), with a QR code. It keeps its settings beside KEYS
+# (tailscale.conf, tailscale.tsv). Without ts5-tui:
+#   curl -d '{"on":true}' http://127.0.0.1:8081/ts5/tailnet   (then sign_in_url in
+#   curl http://127.0.0.1:8081/ts5/tailnet). These set the device's name, a
+# Headscale server, an auth key that signs in without the link:
+#TS5_TS_NAME=tokenstation5
+#TS5_TS_SERVER=https://headscale.example.com
+#TS5_TS_AUTH_KEY=
+
 # The encyclopedia a search goes to when there is no web search key
 # (TAVILY_API_KEY): wikipedia, grokipedia or both.
 #TS5_ENCYCLOPEDIA=wikipedia

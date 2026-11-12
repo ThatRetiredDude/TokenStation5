@@ -105,8 +105,8 @@
 #include "usage_store.h"
 #include "vk_context.h"
 #include "voice.h"
-#include "wg/wg.h"
-#include "ts/tailscale.h"
+#include "tailnet/wg.h"
+#include "tailnet/tailscale.h"
 #ifdef TS5_LINUX
 #include "hardware.h"
 #endif
@@ -176,7 +176,7 @@ constexpr const char *kRestart = TS5_HOME "/restart";
 constexpr const char *kUsage = TS5_HOME "/usage.tsv";
 constexpr const char *kUsageHours = TS5_HOME "/usage-hours.tsv";
 constexpr const char *kKeys = TS5_HOME "/keys.tsv";
-constexpr const char *kTsFile = TS5_HOME "/tailscale.tsv";  // the PS5's keys on its tailnet (ts/tailscale.h)
+constexpr const char *kTsFile = TS5_HOME "/tailscale.tsv";  // the PS5's keys on its tailnet (tailnet/tailscale.h)
 constexpr const char *kChats = TS5_HOME "/chats";  // the Chat page's saved chats (chat_store.h)
 // The version that last started, in the title's own space (keep_models.h).
 constexpr const char *kVersionMark = TS5_STORE "/ts5/version";
@@ -806,8 +806,8 @@ int main(int, char **) {
     app::KeyStore keys;
     keys.load(kKeys);
     keys.set_required(app::setting(kRequireKey, "0") == "1");
-    // Tailscale (ts/tailscale.h): this PS5 on a tailnet, its packets through
-    // the tunnel's thread (wg/wg.h). Its connections come from 127.0.0.1, so
+    // Tailscale (tailnet/tailscale.h): this PS5 on a tailnet, its packets through
+    // the tunnel's thread (tailnet/wg.h). Its connections come from 127.0.0.1, so
     // each is named by the device behind it (100.64.0.0/10), which always
     // needs a key.
     ts::Client tailnet;
