@@ -447,6 +447,10 @@ Who can use this TokenStation5 from another machine, and with which key.
                        http://192.168.1.20:8081/v1 · the address to give an app on another machine
      They need a key   ‹ yes ›
                        another machine gets in only with a key that is on. This machine never needs one
+     Tailscale         ‹ on ›
+                       connected as tokenstation5 · 100.101.102.103 · 4 other devices · D signs out
+     Connect an app    a new key, as QR codes
+                       Enter: your tailnet's address and a new key, as QR codes for a phone
 
      Keys  shown once, when made · kept as SHA-256 in ~/.local/share/tokenstation/access/keys.tsv
    ▌ Open WebUI on the tower                  on   made 2 days ago   last used 5 minutes ago
@@ -459,14 +463,16 @@ Who can use this TokenStation5 from another machine, and with which key.
 | --- | --- |
 | Other devices | Whether a model ts5-tui loads can be reached from other machines at all. **no** (the default): only this machine. **yes**: the page shows the address to give an app, and offers to load the model again, which is when it takes hold. |
 | They need a key | **yes**: another machine gets in only with a key that is on; without one it gets HTTP 401 and a line that says where keys are made. **no**: any machine that can reach the port gets in. Switching Other devices on turns this on too. |
-| Keys | **N** makes one: name it after the app or the machine. The key (such as `ts5-k7qp2-wx9md-3hf8r-tz6na`) is shown once, by itself on a plain screen to select, and copied when your terminal allows it; ts5 keeps only its SHA-256. **Enter** turns a key off or on. Each row says when the key was made and when it was last used. |
+| Tailscale | **on**: the server joins your tailnet, so your phones and computers reach it at home or away ([Tailscale](Away-from-home-with-Tailscale)). The first time, the sign-in link opens as a QR code to scan with your phone. A device on the tailnet always needs a key. **D** signs out. |
+| Connect an app | Makes a key and shows the address (the tailnet's when Tailscale is connected, else this network's) and the key as two QR codes, for the app on a phone. **V** shows them as plain text. |
+| Keys | **N** makes one: name it after the app or the machine. The key (such as `ts5-k7qp2-wx9md-3hf8r-tz6na`) is shown once, with the address, as QR codes (**V**: as plain text to select), and copied when your terminal allows it; ts5 keeps only its SHA-256. **Enter** turns a key off or on. Each row says when the key was made and when it was last used. |
 
 - **This machine never needs a key**: ts5-tui, or a program beside it that talks to `127.0.0.1`.
 - A key made, turned off or removed holds from the next request. The model stays loaded.
 - In the app on the other machine, the server is the address the page shows and the API key is the key (see [Connecting apps](Connecting-apps)).
 - The page works on the keys of the server in use. For a model ts5-tui loaded they are in `~/.local/share/tokenstation/access/keys.tsv`. For the background service they are in `/var/lib/tokenstation/access/keys.tsv` (your user has to be in the `tokenstation` group), and Other devices is the service's `HOST` setting in `/etc/default/tokenstation`, shown here but not changed. The TV app's keys are listed, and made on its own Settings page.
 - In a script, `ts5 keys` does the same: `ts5 keys new "laptop"`, `ts5 keys`, `ts5 keys off laptop`, `ts5 keys remove laptop`, `ts5 keys require on`. Add `--file /var/lib/tokenstation/access/keys.tsv` for the background service's keys.
-- Away from home, use [Tailscale](Away-from-home-with-Tailscale) and a key. Don't forward port 8081 on your router: the API is plain HTTP.
+- Away from home, use the Tailscale row and a key ([Tailscale](Away-from-home-with-Tailscale)). Don't forward port 8081 on your router: the API is plain HTTP.
 
 ## tmux: SSH that can drop
 
