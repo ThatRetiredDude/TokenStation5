@@ -906,6 +906,11 @@ void Client::control_loop() {
             return m.dump();
         };
         int map_id = 0;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            TRACE("trace: map request: stream, version %d, home relay %d, %zu direct addresses, disco key %s",
+                  kCapVersion, home_region_, endpoints_.size(), disco_key.size() > 9 ? "set" : "missing");
+        }
         if (!c.post("/machine/map", map_request(true), node_key, map_id, why)) {
             fail("the map request failed: " + why);
             continue;
@@ -922,7 +927,8 @@ void Client::control_loop() {
         // for PacketFilter's); none until it sends some.
         std::map<std::string, std::vector<Filter::Rule>> filters;
         bool have_filter = false;
-        std::string self_name, self_address;
+        std::string self_name, self_address, control_says;
+        bool said_no_address = false;
         int update_id = 0;
         bool ok = true;
         while (ok && !changed()) {
@@ -1019,6 +1025,19 @@ void Client::control_loop() {
                     out.endpoints.clear();
                     for (const Json &e : n["Endpoints"].a) out.endpoints.push_back(e.str());
                 };
+                // The control server's own warnings about this device: none
+                // (null) leaves them, an empty list clears them.
+                const Json &health = m["Health"];
+                if (health.type == Json::ARR) {
+                    std::string h;
+                    for (const Json &x : health.a)
+                        if (!x.str().empty()) h += (h.empty() ? "" : "; ") + x.str();
+                    if (h != control_says) {
+                        if (!h.empty()) log("the control server says: %s", h.c_str());
+                        else log("the control server's warnings are gone");
+                        control_says = h;
+                    }
+                }
                 const Json &self = m["Node"];
                 if (self.type == Json::OBJ) {
                     Node me;
@@ -1027,6 +1046,11 @@ void Client::control_loop() {
                     while (!self_name.empty() && self_name.back() == '.') self_name.pop_back();
                     self_address = me.address;
                     changed_map = true;
+                    if (me.address.empty() && !said_no_address) {
+                        said_no_address = true;
+                        log("the control server gave " TS5_DEVICE_NAME " no tailnet address%s%s",
+                            control_says.empty() ? "" : ": ", control_says.c_str());
+                    }
                 }
                 const Json &dm = m["DERPMap"];
                 if (dm.type == Json::OBJ) {
@@ -1146,6 +1170,14 @@ void Client::control_loop() {
                 paths_.swap(paths);
                 for (auto it = by_addr_.begin(); it != by_addr_.end();)
                     it = paths_.count(it->second) ? std::next(it) : by_addr_.erase(it);
+                if (self_address.empty()) {
+                    status_.state = Status::Problem;
+                    status_.problem = "Tailscale gave " TS5_DEVICE_NAME " no address" +
+                                      (control_says.empty() ? std::string() : ": " + control_says);
+                } else if (status_.state == Status::Problem && status_.problem.rfind("Tailscale gave ", 0) == 0) {
+                    status_.state = Status::Connecting;
+                    status_.problem.clear();
+                }
                 map_.address = self_address;
                 map_.peers = peers;
                 map_.filter = filter;
