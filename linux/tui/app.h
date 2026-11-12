@@ -64,6 +64,9 @@ struct Config {
     bool tool_files = false, files_ask = true;
     std::string browser = "auto";    // "auto", "obscura", "chromium", "text", or a browser program's path
     bool browser_offered = false;    // the offer to install one was answered (it is made once; /browser install after)
+    // The encyclopedia a search without a web search key goes to:
+    // "wikipedia", "grokipedia" (xAI's) or "both".
+    std::string search_source = "wikipedia";
     std::string path;       // where it is saved
     void load();
     void save() const;
@@ -76,7 +79,8 @@ struct ServerState {
     int n_ctx = 0;
     std::string tool_format, known_good, checked_model, why;
     bool web_search = false;  // the server searches the web for the model (it has a key)
-    bool wikipedia = false;   // without a key it searches Wikipedia, for a request that asks
+    bool wikipedia = false;   // without a key it searches an encyclopedia, for a request that asks
+    bool encyclopedias = false;  // it takes the request's choice of one ("web_search_source")
     // The helper the engine really loaded beside the model, its context
     // (drafting stops past it), or why the one asked for isn't used.
     // helper_known: the server says (an older one doesn't).

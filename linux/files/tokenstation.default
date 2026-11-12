@@ -15,6 +15,10 @@ PORT=8081
 # every machine that reaches the port gets in without one.
 KEYS=/var/lib/tokenstation/access/keys.tsv
 
+# The encyclopedia a search goes to when there is no web search key
+# (TAVILY_API_KEY): wikipedia, grokipedia or both.
+#TS5_ENCYCLOPEDIA=wikipedia
+
 # Context length in tokens, or "auto" for what fits in GPU memory.
 CONTEXT=8192
 

@@ -318,7 +318,11 @@ void poll_once() {
             s.n_ctx = (int)m["context_length"].num(0);
             s.tool_format = m["capabilities"]["tool_format"].str();
             s.web_search = m["capabilities"]["web_search"].boolean(false);
-            s.wikipedia = m["capabilities"]["web_search_source"].str() == "wikipedia";
+            {
+                const std::string src = m["capabilities"]["web_search_source"].str();
+                s.wikipedia = src == "wikipedia" || src == "grokipedia" || src == "both";
+                s.encyclopedias = !m["capabilities"]["encyclopedias"].a.empty();
+            }
             if (m.o.count("helper")) {
                 s.helper_known = true;
                 s.helper = m["helper"]["id"].str();
@@ -529,6 +533,13 @@ std::string memory_words(const std::string &why) {
     else if (used > 1.0)
         out += fmt(". Another program holds %.1f GiB of it: a tune or check still running, the TV app, a game", used);
     return out;
+}
+
+// What a search without a web search key goes to, by name: the setting, on
+// a server that takes it.
+std::string encyclopedia_name() {
+    if (!server().encyclopedias) return "Wikipedia";
+    return g->cfg.search_source == "grokipedia" ? "Grokipedia" : g->cfg.search_source == "both" ? "Wikipedia and Grokipedia" : "Wikipedia";
 }
 
 // ---- Access: who can reach this TokenStation5, and with which key ----
@@ -1451,6 +1462,7 @@ ChatRequest chat_request() {
     rq.summarize = g->cfg.summarize;
     const bool tools = g->cfg.tools_on();  // the one switch over them all
     rq.tools.web = tools && g->cfg.tool_web;
+    if (sv.encyclopedias) rq.search_source = g->cfg.search_source;
     rq.tools.page = tools && g->cfg.tool_page;
     rq.tools.terminal = tools && g->cfg.tool_terminal;
     rq.tools.memory = tools && g->cfg.tool_memory;
@@ -2547,9 +2559,9 @@ std::vector<SetRow> settings_rows() {
         SetRow x{"Web search key", c.web_key.empty() ? (sv.web_search ? "the server's own" : "none")
                                                      : std::string(std::min<size_t>(c.web_key.size(), 12), '*'),
                  sv.web_search         ? "on: the loaded model searches the web when a question needs it"
-                 : c.web_key.empty()   ? (sv.wikipedia ? "without a key: Wikipedia only; a free one from app.tavily.com adds the web"
-                                                       : "a free key from app.tavily.com lets a model ts5-tui loads "
-                                                         "search the web")
+                 : c.web_key.empty()   ? (sv.wikipedia ? "without a key: " + encyclopedia_name() + " only; a free one from app.tavily.com adds the web"
+                                                       : std::string("a free key from app.tavily.com lets a model ts5-tui loads "
+                                                                     "search the web"))
                  : sv.online && own_server_pid() <= 0
                      ? "this server isn't ts5-tui's own: its key goes in /etc/default/tokenstation"
                      : "load the model again to turn it on (Models, Enter); models that use tools"};
@@ -2586,16 +2598,35 @@ std::vector<SetRow> settings_rows() {
     if (tools_shown) {
         const ServerState sv = server();
         SetRow x{"Tool: search",
-                 !c.tool_web ? "off" : sv.web_search ? "on" : sv.wikipedia ? "on, Wikipedia only" : "on, needs the key",
+                 !c.tool_web ? "off" : sv.web_search ? "on" : sv.wikipedia ? "on, " + encyclopedia_name() + " only" : "on, needs the key",
                  !c.tool_web       ? "the model never searches the web"
                  : sv.web_search   ? "the model searches the web when a question needs it"
-                 : sv.wikipedia    ? "looks things up on Wikipedia only; a web search key gives it the web"
+                 : sv.wikipedia    ? "looks things up on " + encyclopedia_name() + " only; a web search key gives it the web"
                                    : "it searches once a web search key is set and the model is loaded again"};
         x.change = [save](int) {
             g->cfg.tool_web = !g->cfg.tool_web;
             save();
         };
         r.push_back(x);
+        // Which encyclopedia, while there is no key for the web.
+        if (c.tool_web && !sv.web_search && sv.wikipedia) {
+            static const char *const ids[] = {"wikipedia", "grokipedia", "both"};
+            static const char *const names[] = {"Wikipedia", "Grokipedia", "Both"};
+            int at = 0;
+            for (int i = 0; i < 3; i++)
+                if (c.search_source == ids[i]) at = i;
+            SetRow y{"Search source", sv.encyclopedias ? names[at] : "Wikipedia",
+                     !sv.encyclopedias ? "this server searches Wikipedia only (a ts5 before Grokipedia)"
+                     : at == 0         ? "Wikipedia, the encyclopedia people write"
+                     : at == 1         ? "Grokipedia, xAI's encyclopedia, written by its AI; if it can't be searched, Wikipedia is"
+                                       : "each search asks Wikipedia and Grokipedia, and the model gets both lists"};
+            if (sv.encyclopedias)
+                y.change = [save, at](int d) {
+                    g->cfg.search_source = ids[(at + d + 3) % 3];
+                    save();
+                };
+            r.push_back(y);
+        }
     }
     if (tools_shown) {
         SetRow x{"Tool: pages", c.tool_page ? "on" : "off",
@@ -3262,8 +3293,8 @@ void run_command(const std::string &line) {
         };
         Config &f = g->cfg;
         const Row rows[] = {
-            {"search", "searches when a question needs it (the server does it: the whole web with a web search key, "
-                       "Wikipedia without one)", &f.tool_web},
+            {"search", "searches when a question needs it (the server does it: the whole web with a web search key; "
+                       "without one an encyclopedia: `/tools search wikipedia`, `grokipedia` or `both`)", &f.tool_web},
             {"pages", "reads a web page you give it a link to", &f.tool_page},
             {"terminal", "runs a command on this machine; you see each one first and say yes or no", &f.tool_terminal},
             {"files", "reads and lists files, and changes them: you see each change, lines out and lines in, and say "
@@ -3317,6 +3348,18 @@ void run_command(const std::string &line) {
                                                   : nullptr;
             found = true;
             const bool browser_was = f.tool_browser;
+            if (r.on == &f.tool_web && (to == "wikipedia" || to == "grokipedia" || to == "both")) {
+                // The encyclopedia searched without a web search key.
+                f.search_source = to;
+                f.tool_web = true;
+                f.save();
+                const ServerState sv = server();
+                show_toast(sv.web_search ? "Search source: " + to + " (used when there is no web search key; now the web is searched)"
+                           : sv.online && !sv.encyclopedias ? "This server searches Wikipedia only (a ts5 before Grokipedia)"
+                                                            : "Search: " + encyclopedia_name(),
+                           g->th->accent, 5);
+                continue;
+            }
             if (to == "on" || to == "off") *r.on = to == "on";
             else if (to.empty()) *r.on = !*r.on;
             else if (ask && (to == "ask" || to == "allow")) *r.on = true, *ask = to == "ask";
@@ -3370,7 +3413,8 @@ void run_command(const std::string &line) {
                      "brings the question back.";
             const ServerState sv = server();
             if (f.tool_web && !sv.web_search && sv.wikipedia)
-                h += "\nWithout a web search key the search is **Wikipedia only** (no news, prices or weather). For the "
+                h += "\nWithout a web search key the search is **" + encyclopedia_name() + " only** (no news, prices or weather; "
+                     "`/tools search wikipedia`, `grokipedia` or `both` picks the encyclopedia). For the "
                      "whole web: Settings → Web search key (a free one from app.tavily.com), then load the model again.";
             else if (f.tool_web && !sv.web_search)
                 h += "\nThe web search waits for a key: Settings → Web search key (a free one from app.tavily.com), "

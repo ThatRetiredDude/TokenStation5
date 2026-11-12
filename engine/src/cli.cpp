@@ -182,7 +182,10 @@ int no_model_command(int argc, char **argv) {
         if (argc != 3) return usage();
         if (tavily_key().empty())
             fprintf(stderr, "ts5: TAVILY_API_KEY is not set%s\n",
-                    search_source() == "wikipedia" ? ": searching Wikipedia" : " and TS5_WIKIPEDIA is off");
+                    search_source() == "wikipedia"    ? ": searching Wikipedia"
+                    : search_source() == "grokipedia" ? ": searching Grokipedia"
+                    : search_source() == "both"       ? ": searching Wikipedia and Grokipedia"
+                                                      : " and TS5_WIKIPEDIA is off");
         std::string log;
         printf("%s\n", web_search(Json::object().set("query", Json::string(argv[2])).dump(), log).c_str());
         fprintf(stderr, "ts5: %s\n", log.c_str());

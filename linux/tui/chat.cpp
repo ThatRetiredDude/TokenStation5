@@ -1132,7 +1132,7 @@ std::string body_for(Chat &c, const ChatRequest &rq, bool no_tools = false) {
     // "auto" also with no tools of its own: without a web search key the
     // server searches Wikipedia only for a request that asks.
     if (rq.ts5 && (no_tools || !rq.tools.web)) b += ",\"web_search\":false";
-    else if (rq.ts5) b += ",\"web_search\":\"auto\"";
+    else if (rq.ts5) b += ",\"web_search\":\"auto\"" + (rq.search_source.empty() ? "" : ",\"web_search_source\":\"" + rq.search_source + "\"");
     return b + "}";
 }
 
@@ -1783,7 +1783,7 @@ void complete(Chat &c, const ChatRequest &rq) {
         else if (cmd == "/download") pool = rq.catalog_names;
         else if (cmd == "/think") pool = {"on", "off", "auto"};
         else if (cmd == "/tools") pool = {"on", "off", "ask", "search", "pages", "terminal", "browser", "memory", "search on",
-                                          "search off", "pages on", "pages off", "terminal on", "terminal off",
+                                          "search off", "search wikipedia", "search grokipedia", "search both", "pages on", "pages off", "terminal on", "terminal off",
                                           "terminal ask", "terminal allow", "browser on", "browser off", "browser ask",
                                           "browser allow", "files", "files on", "files off", "files ask", "files allow",
                                           "memory on", "memory off"};

@@ -465,10 +465,16 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                             ",\"tool_format\":" + json_escape(tools) +
                                                             ",\"web_search\":" +
                                                             (can && !tavily_key().empty() ? "true" : "false") +
-                                                            // Where a search goes: "tavily" (the web), "wikipedia"
-                                                            // (no key: for a request that asks), "none".
+                                                            // Where a search goes: "tavily" (the web), an
+                                                            // encyclopedia ("wikipedia", "grokipedia", "both":
+                                                            // no key, for a request that asks), "none".
                                                             ",\"web_search_source\":" +
-                                                            json_escape(can ? search_source() : "none") + "}" +
+                                                            json_escape(can ? search_source() : "none") +
+#ifndef TS5_PS5
+                                                            // What a request's "web_search_source" can pick.
+                                                            ",\"encyclopedias\":[\"wikipedia\",\"grokipedia\",\"both\"]" +
+#endif
+                                                            "}" +
                                                             ",\"settings\":" + settings_json(known, sampling, think, can_think) + "}") +
                                        "]}"));
     } else if (completions) {
@@ -568,14 +574,14 @@ void handle(int fd, Server::State &state, Usage &u) {
                 // for a request that asks for a search (true or "auto") or
                 // with TS5_WEB_SEARCH=always: a plain request stays as it
                 // was without a key, no search.
-                const std::string source = search_source();
-                const bool wiki = source == "wikipedia";
+                const std::string source = search_source(req["web_search_source"].str());
+                const bool wiki = is_encyclopedia(source);
                 const bool asked = ws.type == Json::BOOL ? ws.boolean(false) : ws.str() == "auto";
                 web = !named && (source == "tavily" || (wiki && (asked || web_search_always()))) &&
                       (ws.type == Json::BOOL ? ws.boolean(false)
                                              : web_search_always() ||
                                                    ((tools.empty() || ws.str() == "auto") && needs_web(last_user, wiki)));
-                if (web) tools.push_back(web_search_tool(date));
+                if (web) tools.push_back(web_search_tool(date, source));
             }
             prompt = render_chat(e.tok(), msgs, tools, date, think);
             open_turn();
@@ -1131,7 +1137,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                         if (Json::parse(c.arguments, a)) query = a["query"].str();
                     }
                     if (stream && client_ok) client_ok = send_all(fd, search_event(query, "running", ""));
-                    results.push_back(web_search(c.arguments, log, &failed));
+                    results.push_back(web_search(c.arguments, log, &failed, req["web_search_source"].str()));
                     if (failed) search_failed = search_failure(results.back());  // in plain words
                     else found.push_back(results.back());
                     // What came of it: the log's words after the query, or why it failed.
@@ -1308,8 +1314,8 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
         log_line("ts5: tool calls: %s; web search: %s", state_.tool_format.c_str(),
                 search_source() == "none" ? "off (no TAVILY_API_KEY, TS5_WIKIPEDIA=off)"
                 : tavily_key().empty()
-                    ? (web_search_always() ? "Wikipedia only (no TAVILY_API_KEY), offered on every chat"
-                                           : "Wikipedia only (no TAVILY_API_KEY), for a request that asks for a search")
+                    ? (std::string(search_source() == "grokipedia" ? "Grokipedia" : search_source() == "both" ? "Wikipedia and Grokipedia" : "Wikipedia") +
+                       " only (no TAVILY_API_KEY), " + (web_search_always() ? "offered on every chat" : "for a request that asks for a search")).c_str()
                 : web_search_always() ? "on (Tavily), offered on every chat"
                                       : "on (Tavily), offered when a chat looks like it needs the web");
 }
