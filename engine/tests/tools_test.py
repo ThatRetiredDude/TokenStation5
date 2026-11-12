@@ -527,6 +527,17 @@ def test_parser(ts5):
         ("hermes", "<tool_call>\n<function=a>\n<parameter=x>\n1\n<parameter=y>\n2\n</function>\n</tool_call>", "",
          [("a", {"x": "1", "y": "2"})], 0),
         ("hermes", "<function=a>\nnot a call\n</function>", "<function=a>\nnot a call\n</function>", [], 0),
+        # A fence named after the call tag in place of the tag (Gemma 3 12B on the PS5): nothing of it stays,
+        # and while it streams the fence is held from its opening line.
+        ("gemma", '```tool_call>\n{"name": "run_command", "arguments": {"command": "sleep 10; echo first-done"}}\n'
+                  '</tool_call>\n```', "", [("run_command", {"command": "sleep 10; echo first-done"})], 0,
+         ["run_command", "read_web_page", "remember"]),
+        ("gemma", 'Running it now.\n```tool_call>\n{"name": "run_command", "arguments": {"command": "date"}}\n'
+                  '</tool_call>\n```', "Running it now.", [("run_command", {"command": "date"})], 16, ["run_command"]),
+        ("gemma", '```tool_call>\n<tool_call>\n{"name": "run_command", "arguments": {"command": "date"}}\n</tool_call>\n```',
+         "", [("run_command", {"command": "date"})], 0, ["run_command"]),
+        ("gemma", "Here is html:\n```html\n<p>hi</p>\n```\nDone.", "Here is html:\n```html\n<p>hi</p>\n```\nDone.", [], 41,
+         ["run_command"]),
     ]
     failed = 0
     for fmt, text, content, calls, prefix, *names in cases:
