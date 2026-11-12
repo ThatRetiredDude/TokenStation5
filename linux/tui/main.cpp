@@ -189,6 +189,7 @@ struct App {
     // The server's Tailscale (GET /ts5/tailnet), as last read. tn_have is
     // false when it has none (not running, an older ts5, the TV app): tn_why.
     bool tn_have = false, tn_on = false;
+    bool tn_ssh = false, tn_ssh_server = false;  // SSH through it; whether this machine has an SSH server
     bool tn_want_qr = false;  // turned on here: the sign-in QR opens once there is a link
     std::string tn_state, tn_host, tn_name, tn_address, tn_url, tn_name_url, tn_sign_in, tn_problem, tn_account, tn_why;
     int tn_devices = 0;
@@ -581,7 +582,7 @@ enum AccessKind { ACC_OWN, ACC_SERVICE, ACC_TV, ACC_REMOTE };
 
 // The page's rows before the keys: other devices, need a key, Tailscale,
 // connect an app.
-constexpr int kAccRows = 4;
+constexpr int kAccRows = 5;
 
 AccessKind access_kind() {
     if (!endpoint().local()) return ACC_REMOTE;
@@ -728,6 +729,8 @@ void tailnet_take(const ts5::Json &j) {
     g->tn_problem = j["problem"].str();
     g->tn_account = j["account"].str();
     g->tn_devices = (int)j["devices"].num(0);
+    g->tn_ssh = j["ssh"].boolean(false);
+    g->tn_ssh_server = j["ssh_server"].boolean(false);
 }
 
 // The sign-in link as a QR code, to scan with the phone that is signed in
@@ -3179,6 +3182,29 @@ void draw_access() {
         rows.push_back(r);
     }
     {
+        // SSH through the tailnet: this machine's own SSH server, for ssh and
+        // editors' remote SSH from away. Its own sign-in, not the API's keys.
+        Row r{"SSH via Tailscale", "", "", k != ACC_TV && g->tn_have, false};
+        const char *user = getenv("USER");
+        // By the 100.x address once there is one: a name needs the tailnet's MagicDNS.
+        const std::string who = g->tn_name.empty() ? g->tn_host : g->tn_name;
+        const std::string cmd = "ssh " + std::string(user && *user ? user : "you") + "@" +
+                                (g->tn_address.empty() ? who.substr(0, who.find('.')) : g->tn_address);
+        if (k == ACC_TV) r.value = "—", r.note = "not from the TV app";
+        else if (!g->tn_have) r.value = "—", r.note = g->tn_why;
+        else if (!g->tn_ssh)
+            r.value = "off", r.note = "on: ssh and editors' remote SSH, from your tailnet";
+        else if (!g->tn_ssh_server)
+            r.value = "on", r.warn = true, r.note = "no SSH server here: sudo apt install openssh-server";
+        else if (!g->tn_on)
+            r.value = "on", r.note = "once Tailscale is on: " + cmd;
+        else if (g->tn_state == "connected")
+            r.value = "on", r.note = cmd + ", from your tailnet";
+        else
+            r.value = "on", r.note = "once Tailscale is connected: " + cmd;
+        rows.push_back(r);
+    }
+    {
         Row r{"Connect an app", "a new key, as QR codes", "", false, false};
         const bool tailnet = g->tn_have && g->tn_state == "connected";
         if (k == ACC_TV) r.value = "on the TV", r.note = "the TV app makes its keys: its Settings page, under Apps";
@@ -3260,7 +3286,7 @@ void draw_access() {
                     : g->acc_sel == 2 && g->tn_on && g->tn_state == "sign_in"
                         ? "↑↓ choose|Enter the QR code|←→ on or off|D sign out|N new key|Tab/1-6 pages"
                     : g->acc_sel == 2 && g->tn_on ? "↑↓ choose|←→ on or off|D sign out|N new key|Tab/1-6 pages"
-                    : g->acc_sel == 3             ? "↑↓ choose|Enter a key and its QR codes|N new key|Tab/1-6 pages"
+                    : g->acc_sel == 4             ? "↑↓ choose|Enter a key and its QR codes|N new key|Tab/1-6 pages"
                                                   : "↑↓ choose|←→ change|N new key|Tab/1-6 pages");
 }
 
@@ -4539,7 +4565,7 @@ void key_access(const Event &e) {
         g->acc_sel = (g->acc_sel + 1) % n;
     } else if (letter('r')) {
         access_read();
-    } else if (letter('n') || (e.key == K_ENTER && g->acc_sel == 3)) {
+    } else if (letter('n') || (e.key == K_ENTER && g->acc_sel == 4)) {
         if (k == ACC_TV) show_toast("The TV app makes its keys: its Settings page, under Apps", g->th->warn, 6);
         else if (!g->acc_err.empty()) show_toast(g->acc_err, g->th->bad, 6);
         else {
@@ -4595,6 +4621,18 @@ void key_access(const Event &e) {
                                 : "Tailscale: off. It stays signed in: on again needs no QR code",
                        g->tn_on ? g->th->good : g->th->dim, 6);
             tailnet_read();
+        }
+    } else if (flip && g->acc_sel == 3) {
+        if (k == ACC_TV) {
+            show_toast("The TV app has no SSH", g->th->warn, 5);
+        } else if (!g->tn_have) {
+            show_toast("Tailscale: " + g->tn_why, g->th->warn, 8);
+        } else if (tailnet_post(g->tn_ssh ? "{\"ssh\":false}" : "{\"ssh\":true}")) {
+            show_toast(!g->tn_ssh             ? "SSH via Tailscale: off. Sessions through it ended"
+                       : !g->tn_ssh_server  ? "SSH via Tailscale: on, but nothing answers SSH here: sudo apt install openssh-server"
+                       : !g->tn_on          ? "SSH via Tailscale: on, once Tailscale is on (the row above)"
+                                            : "SSH via Tailscale: on. Your tailnet's devices reach this machine's SSH",
+                       g->tn_ssh && g->tn_ssh_server ? g->th->good : g->tn_ssh ? g->th->warn : g->th->dim, 7);
         }
     } else if (letter('d') && g->acc_sel == 2) {
         if (k == ACC_TV || !g->tn_have) return;

@@ -192,6 +192,12 @@ def test_tailnet(here, there, folder):
     tsv = os.path.join(folder, "tailscale.tsv")
     check(os.path.exists(tsv) and stat.S_IMODE(os.stat(tsv).st_mode) == 0o600,
           "tailnet: its keys are made, readable by their owner only")
+    check(st.get("ssh") is False and isinstance(st.get("ssh_server"), bool), "tailnet: SSH off at first", st)
+    code, st = post(here + "/ts5/tailnet", {"ssh": True})
+    check(code == 200 and st.get("ssh") is True and "ssh=1" in open(conf).read(),
+          "tailnet: SSH through it turned on, and kept", st)
+    code, st = post(here + "/ts5/tailnet", {"ssh": False})
+    check(code == 200 and st.get("ssh") is False and "ssh=0" in open(conf).read(), "tailnet: and off again", st)
     code, st = post(here + "/ts5/tailnet", {"sign_out": True})
     check(code == 200 and st.get("on") is False and st.get("state") == "off", "tailnet: signing out turns it off", st)
     check("on=0" in open(conf).read(), "tailnet: and tailscale.conf says so")

@@ -111,6 +111,7 @@ struct Conn {
     bool tunnel_eof = false;  // the device sent everything
     bool api_eof = false;     // the API sent everything
     bool shut_wr = false;
+    bool ssh = false;         // to this machine's SSH rather than the API
     std::string to_api;       // from the device, not written to the API yet
 };
 
@@ -213,6 +214,7 @@ struct Loop {
     wireguardif_init_data init{};
     std::string private_key;
     tcp_pcb *listener = nullptr;
+    tcp_pcb *ssh_listener = nullptr;  // the tailnet's port 22, while Config::ssh is on
     int udp = -1, udp_port = 0;
     unsigned long received = 0, traced = 0;  // packets in since the port opened; how many the detailed log showed
     bool poll_failed = false;
@@ -321,22 +323,29 @@ bool detail() {
     return on && strcmp(on, "1") == 0;
 }
 
-err_t on_accept(void *arg, tcp_pcb *pcb, err_t err) {
-    Loop &L = *(Loop *)arg;
-    if (err != ERR_OK || !pcb) return ERR_VAL;
+// A connection from a device in the tunnel, passed to port on this machine:
+// the API's, or (ssh) port 22, this machine's own SSH, for the tailnet only.
+err_t accept_to(Loop &L, tcp_pcb *pcb, bool ssh) {
     const std::string from = ip_text(ip4_addr_get_u32(ip_2_ip4(&pcb->remote_ip)));
+    const bool tailnet = L.ts_up && L.ts_ip && ip4_addr_get_u32(ip_2_ip4(&pcb->local_ip)) == L.ts_ip;
+    if (ssh && !tailnet) {
+        tcp_abort(pcb);
+        return ERR_ABRT;
+    }
+    const int port = ssh ? 22 : L.api_port;
     // From the tailnet: only devices its access rules (ACLs) let reach the
-    // API's port, as Tailscale's own apps check them.
-    if (L.ts_up && L.ts_ip && ip4_addr_get_u32(ip_2_ip4(&pcb->local_ip)) == L.ts_ip) {
+    // port, as Tailscale's own apps check them.
+    if (tailnet) {
         const uint32_t src = ip4_addr_get_u32(ip_2_ip4(&pcb->remote_ip));
-        if (!L.ts_filter.allows_tcp(ntohl(src), ntohl(L.ts_ip), (uint16_t)L.api_port)) {
+        if (!L.ts_filter.allows_tcp(ntohl(src), ntohl(L.ts_ip), (uint16_t)port)) {
             const double now = now_s();
             double &last = L.ts_refused[src];
             if (now - last > 60) {
                 last = now;
                 ts5::log_line(TS5_LOG_NAME ": tailscale: %s refused: %s", from.c_str(),
-                              L.ts_filter.known ? "the tailnet's access rules don't let it reach the API"
-                                                : "no access rules from the control server yet");
+                              !L.ts_filter.known ? "no access rules from the control server yet"
+                              : ssh             ? "the tailnet's access rules don't let it reach port 22"
+                                                : "the tailnet's access rules don't let it reach the API");
             }
             if (L.ts_refused.size() > 256) L.ts_refused.clear();
             tcp_abort(pcb);
@@ -362,21 +371,24 @@ err_t on_accept(void *arg, tcp_pcb *pcb, err_t err) {
     Conn *c = new Conn;
     c->pcb = pcb;
     c->fd = fd;
-    c->local_port = ntohs(a.sin_port);
-    {
+    c->ssh = ssh;
+    if (!ssh) {
+        // (SSH has its own sign-in: the API's names aren't needed there.)
+        c->local_port = ntohs(a.sin_port);
         std::lock_guard<std::mutex> lk(*L.mu);
         (*L.clients)[c->local_port] = {from, 0.0};
     }
     sockaddr_in api{};
     api.sin_family = AF_INET;
     api.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    api.sin_port = htons((uint16_t)L.api_port);
+    api.sin_port = htons((uint16_t)port);
     if (connect(fd, (sockaddr *)&api, sizeof api) == 0) {
         c->connecting = false;
         c->reached_api = true;
     }
     else if (errno != EINPROGRESS) {
-        ts5::log_line(TS5_LOG_NAME ": wireguard: can't reach the API for %s (errno %d)", from.c_str(), errno);
+        if (ssh) ts5::log_line(TS5_LOG_NAME ": tailscale: nothing answers SSH on this machine's port 22 for %s (errno %d)", from.c_str(), errno);
+        else ts5::log_line(TS5_LOG_NAME ": wireguard: can't reach the API for %s (errno %d)", from.c_str(), errno);
         drop_client(L, c);
         close(fd);
         delete c;
@@ -388,10 +400,56 @@ err_t on_accept(void *arg, tcp_pcb *pcb, err_t err) {
     tcp_err(pcb, on_err);
     tcp_nagle_disable(pcb);  // streamed tokens go out as they come
     L.conns.push_back(c);
-    if (detail())
+    if (ssh) ts5::log_line(TS5_LOG_NAME ": tailscale: %s connects to SSH", from.c_str());
+    else if (detail())
         ts5::log_line(TS5_LOG_NAME ": wireguard: tcp: %s connects, API socket from port %u%s", from.c_str(), c->local_port,
                       c->connecting ? ", connecting" : ", connected");
     return ERR_OK;
+}
+
+err_t on_accept(void *arg, tcp_pcb *pcb, err_t err) {
+    if (err != ERR_OK || !pcb) return ERR_VAL;
+    return accept_to(*(Loop *)arg, pcb, false);
+}
+
+err_t on_accept_ssh(void *arg, tcp_pcb *pcb, err_t err) {
+    if (err != ERR_OK || !pcb) return ERR_VAL;
+    return accept_to(*(Loop *)arg, pcb, true);
+}
+
+// The tailnet's port 22 open or closed, as Config::ssh says; closed, the
+// SSH sessions through it end.
+void ssh_sync(Loop &L, bool on) {
+    if (on && !L.ssh_listener) {
+        tcp_pcb *pcb = tcp_new();
+        if (!pcb || tcp_bind(pcb, IP_ADDR_ANY, 22) != ERR_OK || !(L.ssh_listener = tcp_listen(pcb))) {
+            if (pcb) tcp_close(pcb);
+            ts5::log_line(TS5_LOG_NAME ": tailscale: no listener on port 22 in the tunnel");
+            return;
+        }
+        tcp_arg(L.ssh_listener, &L);
+        tcp_accept(L.ssh_listener, on_accept_ssh);
+        ts5::log_line(TS5_LOG_NAME ": tailscale: SSH on: the tailnet's port 22 goes to this machine's SSH");
+    } else if (!on && L.ssh_listener) {
+        tcp_close(L.ssh_listener);
+        L.ssh_listener = nullptr;
+        for (auto it = L.conns.begin(); it != L.conns.end();) {
+            Conn *c = *it;
+            if (!c->ssh) {
+                ++it;
+                continue;
+            }
+            if (c->pcb) {
+                tcp_pcb *pcb = c->pcb;
+                forget_pcb(c);
+                tcp_abort(pcb);
+            }
+            close(c->fd);
+            delete c;
+            it = L.conns.erase(it);
+        }
+        ts5::log_line(TS5_LOG_NAME ": tailscale: SSH off");
+    }
 }
 
 void close_udp(Loop &L) {
@@ -504,7 +562,8 @@ bool pump(Loop &L, Conn *c, short revents) {
         sockaddr_in peer{};
         socklen_t plen = sizeof peer;
         if (e != 0) {
-            ts5::log_line(TS5_LOG_NAME ": wireguard: can't reach the API (errno %d)", e);
+            if (c->ssh) ts5::log_line(TS5_LOG_NAME ": tailscale: nothing answers SSH on this machine's port 22 (errno %d)", e);
+            else ts5::log_line(TS5_LOG_NAME ": wireguard: can't reach the API (errno %d)", e);
             c->api_eof = true;
             c->to_api.clear();
             c->connecting = false;
@@ -826,6 +885,7 @@ void Tunnel::loop() {
             }
             sync_peers(L, cfg.peers);
             L.ts_on = cfg.tailscale && L.ts;
+            ssh_sync(L, cfg.ssh && L.ts_on);
             std::lock_guard<std::mutex> lk(mu_);
             problem_ = why;
         }

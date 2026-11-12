@@ -57,6 +57,9 @@ struct Config {
     int api_port = 8081;              // passed to the API on this PS5
     std::vector<Peer> peers;
     bool tailscale = false;           // the PS5 on a tailnet (use_tailscale's client)
+    // The tailnet's port 22 passed to this machine's own SSH (127.0.0.1:22),
+    // for ssh and editors' remote SSH from away; its own sign-in applies.
+    bool ssh = false;
 };
 
 struct PeerState {

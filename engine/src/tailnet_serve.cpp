@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #include "json.h"
@@ -65,6 +66,28 @@ Json jnum(int v) {
     return j;
 }
 
+// Whether something listens on TCP port 22 here (this machine's SSH), from
+// /proc/net/tcp and tcp6: no connection made, so nothing in sshd's log.
+bool ssh_listening() {
+    for (const char *path : {"/proc/net/tcp", "/proc/net/tcp6"}) {
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        char line[512];
+        bool found = false;
+        while (!found && fgets(line, sizeof line, f)) {
+            // "  0: 00000000:0016 00000000:0000 0A ...": local address:port, remote, state (0A = listening).
+            char local[128], remote[128];
+            unsigned st = 0;
+            if (sscanf(line, " %*d: %127s %127s %x", local, remote, &st) != 3) continue;
+            const char *colon = strrchr(local, ':');
+            found = st == 0x0A && colon && strtoul(colon + 1, nullptr, 16) == 22;
+        }
+        fclose(f);
+        if (found) return true;
+    }
+    return false;
+}
+
 bool from_here(const std::string &client) {
     return client == "127.0.0.1" || client == "::1" || client == "::ffff:127.0.0.1";
 }
@@ -100,10 +123,11 @@ void Tailnet::start(const std::string &dir, int api_port) {
             if (k == "on") on_ = v == "1";
             else if (k == "name" && good_name(v)) name_ = v;
             else if (k == "server" && !v.empty()) server_ = v;
+            else if (k == "ssh") ssh_ = v == "1";
         }
         fclose(f);
     }
-    if (on_) log_line("ts5: tailscale: on, as %s", name_.c_str());
+    if (on_) log_line("ts5: tailscale: on, as %s%s", name_.c_str(), ssh_ ? ", with SSH" : "");
     apply_locked();
 }
 
@@ -119,6 +143,7 @@ void Tailnet::apply_locked() {
     wg::Config wc;  // WireGuard's own server stays off: the tunnel carries the tailnet only
     wc.api_port = api_port_;
     wc.tailscale = on_;
+    wc.ssh = on_ && ssh_;
     std::string err;
     if (!d_->tunnel.apply(wc, err)) log_line("ts5: tailscale: %s", err.c_str());
 }
@@ -132,7 +157,8 @@ bool Tailnet::save_locked(std::string &err) {
         return false;
     }
     const std::string text = "# ts5 tailscale settings (ts5-tui's Access page writes them)\non=" +
-                             std::string(on_ ? "1" : "0") + "\nname=" + name_ + "\nserver=" + server_ + "\n";
+                             std::string(on_ ? "1" : "0") + "\nname=" + name_ + "\nserver=" + server_ +
+                             "\nssh=" + std::string(ssh_ ? "1" : "0") + "\n";
     const bool ok = write(fd, text.data(), text.size()) == (ssize_t)text.size() && fsync(fd) == 0;
     close(fd);
     if (!ok || rename(tmp.c_str(), path.c_str()) != 0) {
@@ -161,12 +187,13 @@ void Tailnet::attach(Server &s) {
 }
 
 std::string Tailnet::status_json() {
-    bool on;
+    bool on, ssh;
     std::string name, server;
     int port;
     {
         std::lock_guard<std::mutex> lk(mu_);
         on = on_;
+        ssh = ssh_;
         name = name_;
         server = server_;
         port = api_port_;
@@ -186,6 +213,10 @@ std::string Tailnet::status_json() {
     if (!st.relay.empty()) j.set("relay", Json::string(st.relay));
     j.set("devices", jnum(st.devices));
     j.set("port", jnum(port));
+    // SSH through the tailnet: on, and whether this machine has an SSH
+    // server for it to reach.
+    j.set("ssh", jbool(ssh));
+    j.set("ssh_server", jbool(ssh_listening()));
     if (st.state == ts::Status::Connected) {
         // The address by number: a name needs the tailnet's MagicDNS (and
         // the phone's "Use Tailscale DNS"), which not every tailnet has.
@@ -232,7 +263,8 @@ bool Tailnet::route(const std::string &method, const std::string &path, const st
     Json j;
     if (!Json::parse(body, j) || j.type != Json::OBJ) {
         code = 400;
-        reply = tailnet_error("the body is a JSON object: {\"on\": true}, {\"name\": \"NAME\"} or {\"sign_out\": true}");
+        reply = tailnet_error(
+            "the body is a JSON object: {\"on\": true}, {\"name\": \"NAME\"}, {\"ssh\": true} or {\"sign_out\": true}");
         return true;
     }
     {
@@ -257,9 +289,11 @@ bool Tailnet::route(const std::string &method, const std::string &path, const st
         const bool sign_out = j["sign_out"].boolean(false);
         if (sign_out) on_ = false;
         else if (j["on"].type == Json::BOOL) on_ = j["on"].b;
+        if (j["ssh"].type == Json::BOOL) ssh_ = j["ssh"].b;
         std::string err;
         if (!save_locked(err)) log_line("ts5: tailscale: %s", err.c_str());
-        log_line("ts5: tailscale: %s%s, as %s", sign_out ? "signing out, " : "", on_ ? "on" : "off", name_.c_str());
+        log_line("ts5: tailscale: %s%s, as %s%s", sign_out ? "signing out, " : "", on_ ? "on" : "off", name_.c_str(),
+                 on_ && ssh_ ? ", with SSH" : "");
         apply_locked();
         if (sign_out) d_->client.sign_out();
     }
