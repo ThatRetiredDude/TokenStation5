@@ -203,7 +203,7 @@ struct App {
     std::vector<Qr> qr;
     std::string qr_title, qr_plain, qr_plain_title;
     std::vector<std::string> qr_notes;
-    std::string qr_short;  // the notes in a line, for a short terminal
+    std::string qr_short;  // the notes in a few words: the title when only the code fits
     int qr_sel = 0;
     bool qr_sign_in = false;
     int qr_link_y = -1;  // the sign-in link's row, as last drawn
@@ -745,7 +745,7 @@ void qr_sign_in_open() {
     g->qr_notes = {"Scan it with your phone's camera and sign in: this machine joins your tailnet as " +
                        (g->tn_host.empty() ? std::string("tokenstation5") : g->tn_host) + ". Or open this link on any device:",
                    g->tn_sign_in};
-    g->qr_short = "Scan it to sign in, or open " + g->tn_sign_in;
+    g->qr_short = "Sign in to Tailscale: scan it with your phone";
     g->qr_plain = "Sign in to Tailscale with this link, on any device:\n\n" + g->tn_sign_in +
                   "\n\nThis machine then joins your tailnet. The link works once.\n";
     g->qr_plain_title = "the Tailscale sign-in link";
@@ -3371,27 +3371,28 @@ void draw_qr_overlay() {
     };
     // One code at a time (←→ for the next): two side by side, the camera
     // took neither. The roomiest way that fits: full cells with the quiet
-    // zone the standard asks for (4 modules), then half blocks with 4, 2
-    // and 1, then the short note alone and no blank rows (an 80x24
-    // terminal), then the text without the code.
+    // zone the standard asks for (4 modules), then half blocks with 4,
+    // then the code alone with the keys under it, over the bottom bar (an
+    // 80x24 terminal), then the same with a border of 2. Less than 2 and
+    // a phone's camera may not find it: the window is asked to be taller.
     static const struct {
         int quiet;
-        bool big, compact;
-    } kWays[] = {{4, true, false}, {4, false, false}, {2, false, false}, {1, false, false}, {1, false, true}};
+        bool big, bare;
+    } kWays[] = {{4, true, false}, {4, false, false}, {4, false, true}, {2, false, false}, {2, false, true}};
     int quiet = 4, tallest = 0, widest = 0, box_w = 0, box_h = 0;
-    bool big = false, compact = false, fits = false;
+    bool big = false, bare = false, fits = false;
     std::vector<std::string> lines;
     for (const auto &way : kWays) {
-        quiet = way.quiet, big = way.big, compact = way.compact;
+        quiet = way.quiet, big = way.big, bare = way.bare;
         tallest = widest = 0;
         for (const auto &m : codes) {
             tallest = std::max(tallest, qr_rows(m, quiet, big));
             widest = std::max(widest, qr_cols(m, quiet, big));
         }
         box_w = std::min(s.w - 2, std::max(widest + 6, 72));
-        lines = wrap(compact ? std::vector<std::string>{g->qr_short} : g->qr_notes, box_w - 4);
-        box_h = 2 + (labels ? 1 : 0) + tallest + (int)lines.size() + 1 + (compact ? 0 : 2);
-        fits = box_h <= s.h - 1 && widest + 4 <= box_w;
+        lines = bare ? std::vector<std::string>{} : wrap(g->qr_notes, box_w - 4);
+        box_h = 2 + (labels ? 1 : 0) + tallest + (int)lines.size() + 1 + (bare ? 0 : 2);
+        fits = box_h <= (bare ? s.h : s.h - 1) && widest + 4 <= box_w;
         if (fits) break;
     }
     if (!fits) {
@@ -3400,7 +3401,10 @@ void draw_qr_overlay() {
     }
     const bool side_by_side = false;
     const int x = (s.w - box_w) / 2, y = std::max(0, (s.h - box_h) / 2);
-    box(s, x, y, box_w, box_h, Style(t.accent, t.panel2), Style(t.fg, t.panel2), g->qr_title, Style(t.accent, t.panel2, BOLD));
+    if (y + box_h > s.h - 1)  // over the bottom bar: its keys aren't this box's
+        for (int c = 0; c < s.w; c++) s.put(c, s.h - 1, " ", Style(t.fg, t.bg));
+    const std::string title = fits && bare && !g->qr_short.empty() ? " " + g->qr_short + " " : g->qr_title;
+    box(s, x, y, box_w, box_h, Style(t.accent, t.panel2), Style(t.fg, t.panel2), title, Style(t.accent, t.panel2, BOLD));
     int ty = y + 1;
     if (!fits) {
         s.put(x + 2, ty, fit("Make the window taller to see the QR code (V shows it as text).", box_w - 4), Style(t.warn, t.panel2));
@@ -3424,7 +3428,7 @@ void draw_qr_overlay() {
             else qr_draw(s, cx, ty + (labels ? 1 : 0), m, quiet, big);
             cx += qr_cols(m, quiet, big) + 4;
         }
-        ty += (labels ? 1 : 0) + tallest + (compact ? 0 : 1);
+        ty += (labels ? 1 : 0) + tallest + (bare ? 0 : 1);
     }
     // The sign-in link on a line of its own, whole (a terminal opens a
     // link it sees: Cmd+click in Apple's Terminal), and a click copies it.
@@ -3443,7 +3447,8 @@ void draw_qr_overlay() {
     bx = s.put(bx, y + box_h - 2, " close   ", Style(t.dim, t.panel2));
     if (g->qr_sign_in) {
         bx = s.put(bx, y + box_h - 2, "C", Style(t.accent2, t.panel2, BOLD));
-        bx = s.put(bx, y + box_h - 2, " or a click on the link copies it   ", Style(t.dim, t.panel2));
+        bx = s.put(bx, y + box_h - 2, fits && bare ? " copies the link   " : " or a click on the link copies it   ",
+                   Style(t.dim, t.panel2));
     } else if (g->qr.size() > 1) {
         bx = s.put(bx, y + box_h - 2, "←→", Style(t.accent2, t.panel2, BOLD));
         bx = s.put(bx, y + box_h - 2, " the next code   ", Style(t.dim, t.panel2));
@@ -4565,7 +4570,7 @@ void access_new(const std::string &name) {
                               "ready for when they can.");
     g->qr_notes.push_back(std::string("Shown this once: ts5 keeps only its SHA-256.") +
                           (sent ? " The key alone is on the clipboard too, if the terminal allows it." : ""));
-    g->qr_short = url.empty() ? "Shown this once: the key" : "In the app (OpenAI-compatible): the address, then the key. Shown once";
+    g->qr_short = url.empty() ? "The new key, shown this once" : "The address, then the key: shown this once";
     g->qr_plain = text;
     g->qr_plain_title = "the new key";
 }

@@ -103,7 +103,7 @@ def tailnet_status():
         out["state"] = "starting"
     elif not t["signed_in"] and age < 1 + TAILNET_SIGNIN:
         out["state"] = "sign_in"
-        out["sign_in_url"] = "https://login.tailscale.com/a/f4ke51gn1n"
+        out["sign_in_url"] = os.environ.get("FAKE_TAILNET_LINK", "https://login.tailscale.com/a/f4ke51gn1n")
     else:
         t["signed_in"] = True
         name = t["name"] + ".tail1234ab.ts.net."
