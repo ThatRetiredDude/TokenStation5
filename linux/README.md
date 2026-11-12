@@ -366,8 +366,10 @@ ts5-tui --url http://ps5.local:8081  # another one
     - **Auto**: Chromium (or Chrome, Brave, Edge) if one is installed,
       else the text view.
     - **No browser installed?** The first time you switch the browser
-      tool on without one, ts5-tui asks which to install (arrows and
-      Enter): **Chromium** from your system's packages (`apt-get`, `dnf`,
+      tool on without one (none found, and none named with
+      `/browser PATH`), ts5-tui asks which to install (arrows and
+      Enter; it starts on Neither, so an Enter meant for something else
+      installs nothing): **Chromium** from your system's packages (`apt-get`, `dnf`,
       `pacman` or `zypper`; sudo asks for your password; on Debian 13 it
       is the small `chromium-headless-shell`), **Obscura** into your home
       folder (a 72 MB download from its makers' GitHub release, 150 MB

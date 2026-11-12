@@ -51,6 +51,9 @@ if [ "$what" = chromium ]; then
     say "Installing Chromium from this system's packages:"
     say "  $cmd"
     [ -n "${TS5_DRY:-}" ] && exit 0
+    case "$cmd" in
+        sudo*) say "sudo asks for your password next. Ctrl-C leaves, with nothing installed." ;;
+    esac
     sh -c "$cmd"
     rc=$?
     if [ $rc != 0 ]; then
