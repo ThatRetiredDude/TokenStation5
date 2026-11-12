@@ -13,7 +13,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <mutex>
+#include <sstream>
 
 #include "app.h"
 #include "files.h"
@@ -601,12 +603,73 @@ std::string github_file() {
 
 bool github_signed_in() { return file_exists(github_file()); }
 
-std::string github_method(const std::string &args) {
-    ts5::Json j;
-    ts5::Json::parse(args, j);
+namespace {
+
+std::string url_decode(const std::string &v) {
+    std::string out;
+    for (size_t i = 0; i < v.size(); i++) {
+        if (v[i] == '%' && i + 2 < v.size() && isxdigit((unsigned char)v[i + 1]) && isxdigit((unsigned char)v[i + 2])) {
+            out += (char)strtol(v.substr(i + 1, 2).c_str(), nullptr, 16);
+            i += 2;
+        } else {
+            out += v[i] == '+' ? ' ' : v[i];
+        }
+    }
+    return out;
+}
+
+std::string upper_method(const ts5::Json &j) {
     std::string m = j["method"].str("GET");
     for (auto &c : m) c = (char)toupper((unsigned char)c);
     return m.empty() ? "GET" : m;
+}
+
+// What a model gets wrong in a GitHub call, set right before the call is
+// shown or made (Qwen3 8B on the PS5 went round in circles on both): a
+// file written with POST, where GitHub takes PUT only, and the file's
+// branch in the address, where GitHub reads it from the body.
+std::string github_fixed(const std::string &args) {
+    ts5::Json j;
+    if (!ts5::Json::parse(args, j) || j.type != ts5::Json::OBJ) return args;
+    std::string path = j["path"].str(j["endpoint"].str(j["url"].str()));
+    if (path.find("/contents/") == std::string::npos) return args;
+    std::string method = upper_method(j);
+    if (method == "POST") method = "PUT";
+    if (method != "PUT") return args;
+    ts5::Json body;
+    const ts5::Json &b = j["body"];
+    if (b.type == ts5::Json::OBJ) body = b;
+    else if (b.type != ts5::Json::STR || !ts5::Json::parse(b.str(), body) || body.type != ts5::Json::OBJ)
+        body = ts5::Json::object();
+    const size_t q = path.find('?');
+    if (q != std::string::npos) {
+        std::string rest;
+        std::istringstream in(path.substr(q + 1));
+        std::string kv;
+        while (std::getline(in, kv, '&')) {
+            const size_t eq = kv.find('=');
+            const std::string k = kv.substr(0, eq), v = eq == std::string::npos ? "" : url_decode(kv.substr(eq + 1));
+            if ((k == "branch" || k == "ref") && !v.empty()) {
+                if (body["branch"].is_null()) body.set("branch", ts5::Json::string(v));
+            } else {
+                rest += (rest.empty() ? "" : "&") + kv;
+            }
+        }
+        path = path.substr(0, q) + (rest.empty() ? "" : "?" + rest);
+    }
+    ts5::Json out = ts5::Json::object();
+    out.set("method", ts5::Json::string(method));
+    out.set("path", ts5::Json::string(path));
+    if (!body.keys.empty()) out.set("body", body);
+    return out.dump();
+}
+
+}  // namespace
+
+std::string github_method(const std::string &args) {
+    ts5::Json j;
+    ts5::Json::parse(github_fixed(args), j);
+    return upper_method(j);
 }
 
 namespace {
@@ -627,8 +690,37 @@ std::string github_path(const ts5::Json &j) {
     return p;
 }
 
-ToolResult github_call(const std::string &args, const std::atomic<bool> &cancel) {
+// The repositories the user gave TokenStation5, from its installations:
+// GET /user/repos lists every repository the user can see (each public
+// one too), and one page of it can miss the ones they picked.
+bool github_given_repos(const std::string &ts5, const std::atomic<bool> &cancel, ToolResult &t) {
+    const Ran r = run_shell(shell_quote(ts5) + " github status --repos 2>/dev/null", 60, cancel);
+    ts5::Json st;
+    if (r.stopped || !ts5::Json::parse(clean(r.out), st) || st["installations"].type != ts5::Json::ARR) return false;
+    ts5::Json list;
+    list.type = ts5::Json::ARR;
+    for (const ts5::Json &i : st["installations"].a)
+        for (const ts5::Json &repo : i["repos"].a) {
+            ts5::Json o = ts5::Json::object();
+            o.set("full_name", ts5::Json::string(repo["name"].str()));
+            o.set("private", repo["private"]);
+            list.a.push_back(o);
+        }
+    ts5::Json out = ts5::Json::object();
+    out.set("repositories", list);
+    out.set("note", ts5::Json::string(
+                        "These are the repositories the user gave TokenStation5 (on ts5-tui's Connectors page), the "
+                        "ones you can change. GET /repos/OWNER/REPO tells more about one; public repositories of "
+                        "others can be read too."));
+    t.ok = true;
+    t.head = fmt("200 · %d repositories given to TokenStation5 · %.1f s", (int)list.a.size(), r.secs);
+    t.text = "HTTP 200\n" + out.dump();
+    return true;
+}
+
+ToolResult github_call(const std::string &raw_args, const std::atomic<bool> &cancel) {
     ToolResult t;
+    const std::string args = github_fixed(raw_args);
     ts5::Json j;
     ts5::Json::parse(args, j);
     const std::string method = github_method(args), path = github_path(j), body = github_body(j);
@@ -645,6 +737,10 @@ ToolResult github_call(const std::string &args, const std::atomic<bool> &cancel)
         t.text = "GitHub can't be reached from here: the ts5 program is not installed on this computer.";
         return t;
     }
+    if (method == "GET" && (path == "/user/repos" || path.compare(0, 12, "/user/repos?") == 0) &&
+        github_given_repos(ts5, cancel, t))
+        return t;
+    if (cancel) return tool_stopped();
     // The body through a file of its own (a file's text can be longer than
     // a command line takes), readable by the user only.
     std::string tmp;
@@ -688,9 +784,18 @@ ToolResult github_call(const std::string &args, const std::atomic<bool> &cancel)
     t.head = fmt("%d", status) + (status == 404 ? " not found (or not a repository you gave TokenStation5)" : "") +
              fmt(" · %s characters · %.1f s", with_commas((int)rest.size()).c_str(), r.secs);
     t.text = "HTTP " + std::to_string(status) + "\n" + middle_out(rest, 9000, 6000);
-    if (status == 404)
+    if (status == 404 && method != "GET")
+        t.text += "\n(GitHub says 404 for a wrong method or path too. Writing a file: PUT "
+                  "/repos/OWNER/REPO/contents/PATH with {\"message\", \"text\", \"branch\"} in the body. A branch: POST "
+                  "/repos/OWNER/REPO/git/refs with {\"ref\": \"refs/heads/NAME\", \"sha\"}. A pull request: POST "
+                  "/repos/OWNER/REPO/pulls with {\"title\", \"head\", \"base\"}. Or the repository isn't one the user "
+                  "gave TokenStation5: GET /user/repos lists those.)";
+    else if (status == 404)
         t.text += "\n(GitHub says 404 for a repository this connection may not see, too: the user picks those on "
                   "GitHub's page for the TokenStation5 app, from ts5-tui's Connectors page.)";
+    else if (status == 422 && method == "POST" && path.find("/pulls") != std::string::npos)
+        t.text += "\n(A pull request needs a branch with at least one commit that its base doesn't have: write a "
+                  "file on the branch first, with PUT /repos/OWNER/REPO/contents/PATH and \"branch\" in the body.)";
     else if (status == 403 && rest.find("Resource not accessible") != std::string::npos)
         t.text += "\n(The TokenStation5 app has no permission for this: it reads and writes code, pull requests and "
                   "issues, and reads CI results, but can't create repositories or change workflow files or settings. "
@@ -701,7 +806,63 @@ ToolResult github_call(const std::string &args, const std::atomic<bool> &cancel)
 
 }  // namespace
 
-std::string github_preview(const std::string &args) {
+std::string github_change_note(const std::string &raw_args, const std::atomic<bool> &cancel) {
+    const std::string args = github_fixed(raw_args);
+    ts5::Json j;
+    ts5::Json::parse(args, j);
+    std::string path = github_path(j);
+    if (github_method(args) != "PUT" || path.find("/contents/") == std::string::npos) return "";
+    ts5::Json b;
+    if (!ts5::Json::parse(github_body(j), b) || b["text"].type != ts5::Json::STR) return "";
+    const std::string ts5 = which("ts5");
+    if (ts5.empty()) return "";
+    path = path.substr(0, path.find('?'));
+    const std::string file = path.substr(path.find("/contents/") + 10), branch = b["branch"].str();
+    std::string get = path;
+    if (!branch.empty()) {
+        get += "?ref=";
+        for (unsigned char ch : branch) get += isalnum(ch) || ch == '-' || ch == '_' || ch == '.' ? std::string(1, (char)ch) : fmt("%%%02X", ch);
+    }
+    const Ran r = run_shell(shell_quote(ts5) + " github api GET " + shell_quote(get) + " --lean 2>/dev/null", 30, cancel);
+    const std::string out = clean(r.out);
+    const size_t nl = out.find('\n');
+    const int status = out.compare(0, 7, "status ") == 0 ? atoi(out.c_str() + 7) : 0;
+    const auto lines_of = [](const std::string &t) {
+        std::vector<std::string> v;
+        size_t i = 0;
+        while (i < t.size()) {
+            const size_t e = std::min(t.find('\n', i), t.size());
+            v.push_back(t.substr(i, e - i));
+            i = e + 1;
+        }
+        return v;
+    };
+    const std::vector<std::string> now_lines = lines_of(b["text"].str());
+    const std::string where = file + (branch.empty() ? "" : " on " + branch);
+    const auto lines = [](int k) { return fmt("%d line%s", k, k == 1 ? "" : "s"); };
+    if (status == 404) return "A new file, " + where + ": " + lines((int)now_lines.size()) + ".";
+    ts5::Json old;
+    if (status != 200 || nl == std::string::npos || !ts5::Json::parse(out.substr(nl + 1), old) ||
+        old["content"].type != ts5::Json::STR || old["encoding"].str() != "text")
+        return "";
+    const std::vector<std::string> was = lines_of(old["content"].str());
+    // Lines that go and lines that come, as a count of each line's copies.
+    std::map<std::string, int> n;
+    for (const std::string &l : was) n[l]++;
+    int added = 0;
+    for (const std::string &l : now_lines)
+        if (n[l] > 0) n[l]--;
+        else added++;
+    int gone = 0;
+    for (const auto &kv : n) gone += kv.second;
+    const bool most = !was.empty() && gone * 2 > (int)was.size();
+    return std::string(most ? "⚠ " : "") + "Replaces " + where + ": " + fmt("%d of its ", gone) + lines((int)was.size()) +
+           (gone == 1 ? " goes, " : " go, ") + fmt("%d ", added) + (added == 1 ? "comes in" : "come in") + " (" +
+           lines((int)now_lines.size()) + " after).";
+}
+
+std::string github_preview(const std::string &raw_args) {
+    const std::string args = github_fixed(raw_args);
     ts5::Json j;
     ts5::Json::parse(args, j);
     const std::string body = github_body(j);
@@ -801,10 +962,10 @@ std::string tools_json(const ToolSwitches &s) {
             "reads; POST, PATCH, PUT and DELETE change things and are shown to the user first. Paths: /user/repos "
             "(the repositories you can use), /repos/OWNER/REPO/contents/PATH?ref=BRANCH (a file, as text), "
             "/repos/OWNER/REPO/git/refs (make a branch: {\"ref\": \"refs/heads/NAME\", \"sha\": ...}), PUT "
-            "/repos/OWNER/REPO/contents/PATH (write a file: {\"message\", \"text\", \"branch\", and the old "
-            "file's \"sha\" when it exists}), /repos/OWNER/REPO/pulls, /repos/OWNER/REPO/issues, "
-            "/repos/OWNER/REPO/actions/runs. A list says when it has more pages: add page=2. It can't create "
-            "repositories.",
+            "/repos/OWNER/REPO/contents/PATH (write a file: {\"message\", \"text\", \"branch\"}; always PUT), "
+            "/repos/OWNER/REPO/pulls, /repos/OWNER/REPO/issues, /repos/OWNER/REPO/actions/runs. A pull request: "
+            "make a branch, write a file on it, then POST /repos/OWNER/REPO/pulls with {\"title\", \"head\": "
+            "BRANCH, \"base\"}. A list says when it has more pages: add page=2. It can't create repositories.",
             {{"method", "string", "GET, POST, PATCH, PUT or DELETE."},
              {"path", "string", "The API path, starting with /, with any ?query."},
              {"body?", "object", "The JSON body, for POST, PATCH and PUT."}}));
@@ -921,7 +1082,7 @@ std::string tool_call_line(const std::string &name, const std::string &args) {
     if (name == "remember") return "remembers: " + one_line(arg_of(args, "note"), 300);
     if (name == "github") {
         ts5::Json j;
-        ts5::Json::parse(args, j);
+        ts5::Json::parse(github_fixed(args), j);
         return "GitHub: " + github_method(args) + " " + one_line(github_path(j), 300);
     }
     if (is_mcp_tool(name)) return one_line(mcp_call_line(name, args), 400);

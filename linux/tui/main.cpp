@@ -5880,6 +5880,7 @@ int usage(FILE *f) {
             "  ts5-tui --mcp | --mcp-tools | --mcp-call TOOL ['{\"ARGUMENT\": ...}']\n"
             "  ts5-tui --install-browser chromium|obscura [--dry-run]\n"
             "  ts5-tui --run-command 'COMMAND' [--sandbox on|off|no-network]\n"
+            "  ts5-tui --github-call '{\"method\": \"GET\", \"path\": \"/user/repos\"}' [--dry-run]\n"
             "  ts5-tui --sandbox-folder DIR|default\n\n"
             "It talks to a running TokenStation (the tokenstation service, the TV app, or\n"
             "`ts5 serve`; Models can start one), so it uses no GPU memory itself and works\n"
@@ -5897,6 +5898,9 @@ int usage(FILE *f) {
             "--run-command: runs one command the way the model's terminal tool does (in the\n"
             "sandbox, unless it is off; /sandbox in the app) and prints what the model would\n"
             "get back. --sandbox: on, off or no-network for that command.\n"
+            "--github-call: one call of the model's GitHub tool, as it would be made (after the\n"
+            "fixes it gets), with what the question before a change would show; --dry-run\n"
+            "shows that alone.\n"
             "--sandbox-folder: moves the sandbox's toolbox (what the model installs) to\n"
             "DIR/tokenstation-sandbox, or back to ts5's own folder (/sandbox folder in the app).\n"
             "Settings are kept in ~/.config/tokenstation/tui.conf.\n"
@@ -5948,6 +5952,8 @@ int main(int argc, char **argv) {
     std::vector<std::pair<std::string, std::string>> mcp_calls;
     bool run_mode = false;  // --run-command
     std::string run_cmd, sandbox_arg, sandbox_folder;
+    bool gh_mode = false;  // --github-call
+    std::string gh_args;
     bool folder_mode = false;
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
@@ -5969,6 +5975,7 @@ int main(int argc, char **argv) {
         else if (a == "--install-browser") install = next();
         else if (a == "--dry-run") dry = true;
         else if (a == "--run-command") run_mode = true, run_cmd = next();
+        else if (a == "--github-call") gh_mode = true, gh_args = next();
         else if (a == "--sandbox") sandbox_arg = next();
         else if (a == "--sandbox-folder") folder_mode = true, sandbox_folder = next();
         else if (a == "-h" || a == "--help") return usage(stdout);
@@ -6000,6 +6007,23 @@ int main(int argc, char **argv) {
         signal(SIGPIPE, SIG_IGN);
         std::atomic<bool> cancel{false};
         const ToolResult r = run_tool("run_command", "{\"command\":" + ts5::json_escape(run_cmd) + "}", t, cancel);
+        printf("%s\n%s\n", r.head.c_str(), r.text.c_str());
+        return r.ok ? 0 : 1;
+    }
+    if (gh_mode) {
+        // One GitHub tool call: what the user would see first, then what the model gets back.
+        signal(SIGPIPE, SIG_IGN);
+        std::atomic<bool> cancel{false};
+        printf("%s\n", tool_call_line("github", gh_args).c_str());
+        if (github_method(gh_args) != "GET") {
+            const std::string note = github_change_note(gh_args, cancel), preview = github_preview(gh_args);
+            if (!note.empty()) printf("%s\n", note.c_str());
+            if (!preview.empty()) printf("%s\n", preview.c_str());
+        }
+        if (dry) return 0;
+        ToolSwitches t;
+        t.github = true;
+        const ToolResult r = run_tool("github", gh_args, t, cancel);
         printf("%s\n%s\n", r.head.c_str(), r.text.c_str());
         return r.ok ? 0 : 1;
     }

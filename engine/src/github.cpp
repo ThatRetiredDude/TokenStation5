@@ -610,6 +610,30 @@ int call(const std::string &method, const std::string &path, std::string body, b
             b.keys = keys;
             body = b.dump();
         }
+        // A file written over without its "sha" (GitHub refuses that with a
+        // 422, and a model seldom has it): the file's own, as it is now on
+        // that branch. A new file has none and goes as it is.
+        if (want_lean && method == "PUT" && b.type == Json::OBJ && path.find("/contents/") != std::string::npos &&
+            path.find('?') == std::string::npos && b["sha"].is_null()) {
+            std::string get = path;
+            const std::string branch = b["branch"].str();
+            if (!branch.empty()) {
+                get += "?ref=";
+                for (unsigned char ch : branch) {
+                    char hex[4];
+                    snprintf(hex, sizeof hex, "%%%02X", ch);
+                    get += isalnum(ch) || ch == '-' || ch == '_' || ch == '.' ? std::string(1, (char)ch) : std::string(hex);
+                }
+            }
+            HttpResponse cur;
+            std::string err;
+            Json cj;
+            if (api("GET", get, "", cur, err) && cur.status == 200 && Json::parse(cur.body, cj) &&
+                cj.type == Json::OBJ && cj["sha"].type == Json::STR) {
+                b.set("sha", Json::string(cj["sha"].str()));
+                body = b.dump();
+            }
+        }
     }
     HttpResponse r;
     std::string err;

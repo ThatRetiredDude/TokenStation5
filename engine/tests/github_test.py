@@ -168,7 +168,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/user/installations"):
             return self.send(200, {"total_count": 1, "installations": [
                 {"id": 77, "account": user, "repository_selection": "selected"}]})
-        if self.path == "/repos/octo/hello/contents/README.md":
+        if self.path.split("?")[0] == "/repos/octo/hello/contents/README.md" and "ref=gone" not in self.path:
             return self.send(200, {"name": "README.md", "path": "README.md", "sha": "abc", "encoding": "base64",
                                    "content": base64.encodebytes(b"# Hello\nworld\n").decode(),
                                    "url": "https://api.github.com/repos/octo/hello/contents/README.md",
@@ -288,6 +288,18 @@ def main():
     sent = json.loads(gh.requests[-1]["body"])
     check(p.returncode == 0 and "text" not in sent and base64.b64decode(sent.get("content", "")) == "héllo\n".encode(),
           "api --lean: a file written with its text goes to GitHub as base64 (%s)" % sent)
+    p = run("api", "PUT", "/repos/octo/hello/contents/README.md", '{"message": "New README", "text": "hi\\n"}', "--lean")
+    sent = json.loads(gh.requests[-1]["body"])
+    check(p.returncode == 0 and sent.get("sha") == "abc" and gh.requests[-2]["path"] == "/repos/octo/hello/contents/README.md",
+          "api --lean: a file written over gets its sha from GitHub first (%s)" % sent)
+    p = run("api", "PUT", "/repos/octo/hello/contents/README.md",
+            '{"message": "New README", "text": "hi\\n", "branch": "feature/x"}', "--lean")
+    sent = json.loads(gh.requests[-1]["body"])
+    check(sent.get("sha") == "abc" and gh.requests[-2]["path"] == "/repos/octo/hello/contents/README.md?ref=feature%2Fx",
+          "api --lean: ... looked up on its branch (%s)" % gh.requests[-2]["path"])
+    p = run("api", "PUT", "/repos/octo/hello/contents/README.md",
+            '{"message": "New README", "text": "hi\\n", "branch": "gone"}', "--lean")
+    check("sha" not in json.loads(gh.requests[-1]["body"]), "api --lean: ... and none when the file isn't there")
     p = run("api", "GET", "/nothing/here")
     check(p.returncode == 1 and p.stdout.startswith("status 404\n"), "api: GitHub's no, with its status")
     n = len(gh.requests)

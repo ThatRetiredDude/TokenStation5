@@ -1375,6 +1375,10 @@ ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
         ask = method != "GET" && rq.tools.github_ask && !c->ask_always_github.load();
         cmd = tool_call_line(u.name, u.args);
         preview = github_preview(u.args);
+        if (ask) {
+            const std::string note = github_change_note(u.args, c->cancel);
+            if (!note.empty()) preview = note + (preview.empty() ? "" : "\n" + preview);
+        }
         opt = "Every GitHub change, this chat";
         kind = 5;
     } else if (!command) {

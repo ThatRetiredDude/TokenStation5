@@ -97,5 +97,8 @@ bool github_signed_in();
 std::string github_method(const std::string &args);
 // What a github call would send, a line each: its body, laid out.
 std::string github_preview(const std::string &args);
+// A file written on GitHub: how much of it changes ("Replaces README.md on main: 60 of its 61 lines go,
+// 1 comes in"), from the file as it is now. Empty for any other call.
+std::string github_change_note(const std::string &args, const std::atomic<bool> &cancel);
 
 }  // namespace tui
