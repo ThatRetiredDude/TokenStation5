@@ -2443,8 +2443,8 @@ std::vector<SetRow> settings_rows() {
                                              : "Auto: " + found[0] + " (installed: " + have + ")")
                  : at == 3 ? "ts5's own page reader: light and quick, but a page built by scripts shows little"
                  : at < 0  ? "a browser program you named with /browser"
-                 : has ? (at == 1 ? std::string("Obscura: light on memory, but young: slow to open a page, some sites show "
-                                                "nothing in it, and it can stop answering after a button")
+                 : has ? (at == 1 ? std::string("Obscura: light on memory, but young: slower than Chromium on heavy pages, and "
+                                                "some sites show nothing in it")
                                   : found[0] + ": the full browser, each page shut in its sandbox")
                        : std::string(names[at]) + " is not installed: pages are read as plain text until it is"};
         x.change = [save, at](int d) {
@@ -3033,9 +3033,10 @@ void run_command(const std::string &line) {
                                  "only links and simple forms work. Installing Chromium (`sudo apt install chromium`) or "
                                  "Obscura gives the model the page as you would see it.\n"
                                : "Installed here: " + have + ". Auto takes " +
-                                     (found[0] == "Obscura" ? std::string("the text view: Obscura is young (slow to open a page, "
-                                                                          "and it can stop answering after a button), so it is "
-                                                                          "used only when you choose it with `/browser obscura`")
+                                     (found[0] == "Obscura" ? std::string("the text view: Obscura is young (slower than Chromium "
+                                                                          "on heavy pages, and some sites show nothing in it), "
+                                                                          "so it is used only when you choose it with "
+                                                                          "`/browser obscura`")
                                                             : found[0]) + ".\n";
             h += "The model follows links by itself. Before it presses a button or types into a page, you are asked.";
             chat_note(c, h);
