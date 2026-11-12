@@ -1525,6 +1525,10 @@ class Grokipedia(http.server.BaseHTTPRequestHandler):
                          "snippet": "Length is a fundamental physical quantity that measures the distance between two points or "
                                     "the extent of an object along a single dimension.[]("},
                         {"slug": "danube_(song)", "title": "Danube (song)", "snippet": "A song about [the river](/page/Dan"}]
+                if "everest" in words.lower():
+                    results = [{"slug": "Mount_Everest", "title": "Mount Everest", "snippet": "the border between [[Nepal]] and"}]
+                if "linux" in words.lower():
+                    results = [{"slug": "Linux", "title": "Linux", "snippet": "| name = Linux\n| logo = Tux.svg"}]
                 if "vienna" in words.lower():
                     results = [{"slug": "Vienna", "title": "Vienna", "snippet": "Vienna is the capital"}]
                 if "eiffel" in words.lower():
@@ -1560,6 +1564,25 @@ class Grokipedia(http.server.BaseHTTPRequestHandler):
                           "### Name origins and linguistic roots\n\nThe name *Danube* derives from the Latin *Danubius*. This "
                           "Latin form traces to Proto-Celtic *\\*D\u0101nowyos*.[](https://example.org/c) [](https://example.org/d)"
                           "\n\n" + "Linguistically, the river has many names. " * 30000,
+                "Linux": "# Linux\n<!--Infobox Start [Operating Systems]-->\n| name = Linux\n| logo = Tux.svg\n| developer = "
+                         "Linus Torvalds and thousands of contributors worldwide\n| programming_languages = C | Rust\n"
+                         "| related_projects = Android | GNU Project\n<!--Infobox End-->\n\n\n\n![Tux the penguin, mascot of "
+                         "Linux](https://assets.example.org/wiki/images/73ce3e67fe9c.png?v=5441ada4 \"source:https://example.org/"
+                         "Linux-Logo.png\")\n*Tux, the official mascot of Linux*\nLinux is a free and open-source Unix-like "
+                         "operating system kernel originally authored by [Linus Torvalds](/page/Linus_Torvalds) in 1991.<!-- a "
+                         "note -->[](https://example.org/l) *Free* here means freedom.\n\n| Year | Version |\n| --- | --- |\n"
+                         "| 1991 | 0.01 |\n\nIt runs on servers and phones.\n## History\n\nOld.",
+                # (Everything seen in 21 articles' openings at once: the box, two pictures (one with a "title" and
+                # a line under it, one named with \" and \( and a file with brackets, then a line break of two
+                # spaces), links the wiki way, a formula in \( \), a source whose address has brackets.)
+                "Mount_Everest": "# Mount Everest\n<!--Infobox Start [Mountains]-->\n| name = Mount Everest\n| elevation = "
+                                 "8,848.86 m\n<!--Infobox End-->\n\n\n\n![Mount Everest](https://assets.example.org/e.jpg "
+                                 "\"source:https://example.org/everest_(1).jpg?a=1&b=2\")\n*Mount Everest from the air*\n"
+                                 "![Each letter of \"Everest\" is colored \\(from left to right\\) in blue.](._assets_/"
+                                 "Everest_(logo))  \n**Mount Everest** is Earth's highest mountain, in the [[Himalayas]] on "
+                                 "the border of [[Nepal|Nepal's]] north and [Tibet](https://grokipedia.com/page/Tibet_(region)), "
+                                 "where \\(a^2 + b^2 = c^2\\) holds.[](https://example.org/libre_(Hughes)/07_(Part_B)/x) Known "
+                                 "as **Sagarmatha**, *the* peak.\n## Geology\n\nRock.",
                 "Vienna": "# Vienna\n\n![](./_assets_/Vienna_Austria_Skyline_Aerial%252C_October_2024.jpg)\nVienna is the "
                           "capital and largest city of [Austria](/page/Austria).[](https://example.org/v)\n## History\n\nOld.",
                 "Eiffel_Tower": "# Eiffel Tower\n\n![Eiffel Tower](./_assets_/Tour_Eiffel_Wikimedia_Commons_(cropped))\nThe "
@@ -1651,6 +1674,18 @@ def test_grokipedia(ts5, model, tdir):
           "/page/eiffel_tower_(book)\nA book.\n\nIf none" in out and "cropped" not in out and "History" not in out)
     failed += report(ok, "Grokipedia search: a picture's file with brackets in its name, a short opening goes on into the next "
                      "section, a link is the slug as sent", f"rc {rc}\n{out}\n{err}\n{g2}")
+    rc, out, err, g2, w = search("Linux", **grok)
+    failed += report(rc == 0 and "[1] Linux\n" + gurl + "/page/Linux\nLinux is a free and open-source Unix-like operating system "
+                     "kernel originally authored by Linus Torvalds in 1991. Free here means freedom. It runs on servers and "
+                     "phones. Old.\n\nIf none" in out,
+                     "Grokipedia search: a box of facts, a comment, a table and the line under a picture are not the opening",
+                     f"rc {rc}\n{out}\n{err}")
+    rc, out, err, g2, w = search("Mount Everest", **grok)
+    failed += report(rc == 0 and "[1] Mount Everest\n" + gurl + "/page/Mount_Everest\nMount Everest is Earth's highest mountain, in "
+                     "the Himalayas on the border of Nepal's north and Tibet, where (a^2 + b^2 = c^2) holds. Known as "
+                     "Sagarmatha, the peak. Rock.\n\nIf none" in out,
+                     "Grokipedia search: two pictures, the wiki way of linking, a formula, an address with brackets",
+                     f"rc {rc}\n{out}\n{err}")
     rc, out, err, g2, w = search("Vienna", **grok)
     failed += report(rc == 0 and "[1] Vienna\n" + gurl + "/page/Vienna\nVienna is the capital and largest city of Austria. Old."
                      "\n\nIf none" in out,

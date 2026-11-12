@@ -343,25 +343,62 @@ size_t target_end(const std::string &md, size_t open) {
 // a source mark ("[](https://...)") are nothing, a heading's line goes
 // (after `lead` characters of text the first heading ends it: an article's
 // opening, not its next section), and so do the marks for bold and code. A
-// link or picture that the text is cut in the middle of goes too.
+// link or picture that the text is cut in the middle of goes too. So does
+// what Grokipedia puts between an article's name and its first sentence: a
+// box of facts ("<!--Infobox Start ...-->", lines of "| name = value",
+// "<!--Infobox End-->"), any other comment or table row, and the line
+// under a picture that says what it shows ("*Tux, the mascot of Linux*").
 std::string markdown_plain(const std::string &md, size_t lead = std::string::npos) {
     std::string out;
-    bool line_start = true;
+    bool line_start = true, caption = false;
     for (size_t i = 0; i < md.size(); i++) {
         const char c = md[i];
         if (line_start && (c == ' ' || c == '\t')) continue;
-        if (line_start && c == '#') {
-            if (out.size() >= lead) break;
-            const size_t nl = md.find('\n', i);
-            if (nl == std::string::npos) break;
-            i = nl;
+        if (md.compare(i, 4, "<!--") == 0) {
+            size_t end = md.find("-->", i);
+            if (end != std::string::npos && md.substr(i, end - i).find("Infobox Start") != std::string::npos) {
+                const size_t box = md.find("Infobox End", end);
+                end = box == std::string::npos ? box : md.find("-->", box);
+            }
+            if (end == std::string::npos) break;
+            i = end + 2;
             continue;
+        }
+        if (line_start && c != '\n' && c != '\r') {
+            const size_t nl = md.find('\n', i);
+            size_t last = (nl == std::string::npos ? md.size() : nl) - 1;
+            while (last > i && (md[last] == ' ' || md[last] == '\r')) last--;
+            const bool said = caption && c == '*' && md[i + 1] != '*' && last > i + 1 && md[last] == '*' && md[last - 1] != '*';
+            caption = false;
+            if (c == '#' && out.size() >= lead) break;
+            if (c == '#' || c == '|' || said) {
+                if (nl == std::string::npos) break;
+                i = nl;
+                continue;
+            }
+        }
+        // "[[Himalayas]]", "[[Nepal|Nepal's]]": a link written the wiki way.
+        if (c == '[' && i + 1 < md.size() && md[i + 1] == '[') {
+            const size_t end = md.find("]]", i + 2);
+            if (end != std::string::npos && end - i < 200 && md.find('\n', i) > end) {
+                std::string words = md.substr(i + 2, end - i - 2);
+                const size_t bar = words.rfind('|');
+                if (bar != std::string::npos) words.erase(0, bar + 1);
+                out += words;
+                i = end + 1;
+                line_start = false;
+                continue;
+            }
         }
         const bool picture = c == '!' && i + 1 < md.size() && md[i + 1] == '[';
         if (c == '[' || picture) {
+            const bool own_line = line_start;
             const size_t open = i + (picture ? 1 : 0);
+            // (What a picture shows can be a paragraph, with \" and \( in it.)
+            const size_t most = picture ? 1500 : 300;
             size_t close = open + 1;
-            while (close < md.size() && md[close] != ']' && md[close] != '\n' && close - open < 300) close++;
+            while (close < md.size() && md[close] != ']' && md[close] != '\n' && close - open < most)
+                close += md[close] == '\\' ? 2 : 1;
             const bool closed = close < md.size() && md[close] == ']';
             if (closed && close + 1 < md.size() && md[close + 1] == '(') {
                 if (!picture) out += md.substr(open + 1, close - open - 1);
@@ -374,6 +411,10 @@ std::string markdown_plain(const std::string &md, size_t lead = std::string::npo
                 } else {
                     i = end;
                 }
+                // (A picture alone on its line: the next line may say what it shows.)
+                size_t after = i + 1;
+                while (after < md.size() && (md[after] == ' ' || md[after] == '\r')) after++;
+                caption = picture && own_line && (after >= md.size() || md[after] == '\n');
                 line_start = false;
                 continue;
             }
