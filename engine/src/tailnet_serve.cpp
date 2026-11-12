@@ -232,7 +232,9 @@ std::string Tailnet::status_json() {
     }
     Json peers;
     peers.type = Json::ARR;
-    for (const wg::PeerState &ps : d_->tunnel.tailnet_peers()) {
+    // Off (just signed out, say): the tunnel may not have let its devices
+    // go yet, and they aren't this machine's any more.
+    for (const wg::PeerState &ps : on ? d_->tunnel.tailnet_peers() : std::vector<wg::PeerState>{}) {
         Json o = Json::object();
         o.set("name", Json::string(ps.name));
         o.set("address", Json::string(ps.address));

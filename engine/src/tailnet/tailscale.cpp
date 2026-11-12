@@ -793,7 +793,7 @@ void Client::control_loop() {
             if (status == 410 && !followup.empty() && gone++ < 3) {
                 // The sign-in page asked about is gone (used up or old): ask
                 // again without it, for the device as it stands or a new page.
-                log("the sign-in page %s is gone; asking again", followup.c_str());
+                log("the sign-in page %s is closed (used, or too old); asking the control server again", followup.c_str());
                 followup.clear();
                 login_url.clear();
                 reg.o.erase("Followup");
