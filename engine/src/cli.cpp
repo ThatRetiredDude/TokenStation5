@@ -15,6 +15,9 @@
 //   ts5 search "query"                   one web_search, as the model would get it
 //   ts5 usage-parse FILE                 a usage.tsv's requests, written again as v1 (for tests)
 //   ts5 page URL [MAX_CHARS]             a web page as text (ts5-tui's web page tool)
+//   ts5 browser [--program auto|text|PATH]  a browser for a model: a page as text with its links,
+//                                        boxes and buttons numbered, acted on by number; one JSON
+//                                        request a line on stdin (browser.h; ts5-tui's browser tool)
 //   ts5 fetch URL FILE [--sha256 HEX]    download URL to FILE, going on from a stopped one
 //   ts5 peak [--device N] [--gib G]      the GPU's read bandwidth and FMA rates (speed ceilings)
 //   ts5 draft-replay -m model.gguf [--temp T] [-o IDS] < PROMPT, a NUL byte, ANSWER
@@ -40,6 +43,7 @@
 #include <vector>
 
 #include "backend.h"
+#include "browser.h"
 #include "checks.h"
 #include "cli.h"
 #include "engine.h"
@@ -81,6 +85,7 @@ int usage() {
     fprintf(stderr,
             "usage: ts5 serve|run|bench|check|tokenize|logits|prompt -m model.gguf [options]\n"
             "       ts5 search QUERY | ts5 page URL [MAX_CHARS] | ts5 usage-parse FILE\n"
+            "       ts5 browser [--program auto|text|PATH] [--kind chromium|obscura] [--chars N] [--idle SECONDS]\n"
             "       ts5 tool-parse hermes|llama3|mistral|gemma|gemma4|generic [TOOL...] < TEXT\n"
             "       ts5 fetch URL FILE [--sha256 HEX] | ts5 peak [--device N] [--gib G]\n"
             "       ts5 helpers -m model.gguf --helper FILE...  (which files could draft for the model)\n"
@@ -194,6 +199,23 @@ int no_model_command(int argc, char **argv) {
         printf("%s\n", html_text(read_all(stdin)).c_str());
         return 0;
     }
+    if (cmd == "html-view") {  // tests: the browser's page reader alone; the numbered items follow the text
+        PageElements els;
+        printf("%s\n", html_view(read_all(stdin), els).c_str());
+        for (size_t i = 0; i < els.items.size(); i++) {
+            const PageElement &e = els.items[i];
+            printf("#%zu %s label=%s href=%s name=%s value=%s type=%s form=%d mark=%s%s\n", i + 1, e.kind.c_str(),
+                   e.label.c_str(), e.href.c_str(), e.name.c_str(), e.value.c_str(), e.type.c_str(), e.form,
+                   e.mark.c_str(), e.checked ? " checked" : "");
+        }
+        for (size_t f = 0; f < els.forms.size(); f++) {
+            printf("form %zu %s %s:", f, els.forms[f].method.c_str(), els.forms[f].action.c_str());
+            for (auto &fd : els.forms[f].fields) printf(" %s=%s(%d)", fd.name.c_str(), fd.value.c_str(), fd.item);
+            printf("\n");
+        }
+        return 0;
+    }
+    if (cmd == "browser") return browser_main(argc, argv);
     if (argc < 3) return usage();
     std::string f = argv[2];
     ToolFormat tf = f == "hermes"    ? ToolFormat::HERMES
@@ -229,7 +251,7 @@ int no_model_command(int argc, char **argv) {
     // How much of the text streams before the turn ends.
     Json prefix;
     prefix.type = Json::NUM;
-    prefix.s = std::to_string(content_prefix(tf, text));
+    prefix.s = std::to_string(content_prefix(tf, text, names.empty() ? nullptr : &names));
     out.set("content_prefix", prefix);
     printf("%s\n", out.dump().c_str());
     return 0;
@@ -453,7 +475,8 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     }
     if (argc >= 2 && (std::string(argv[1]) == "search" || std::string(argv[1]) == "tool-parse" ||
                       std::string(argv[1]) == "usage-parse" || std::string(argv[1]) == "page" ||
-                      std::string(argv[1]) == "html-text"))
+                      std::string(argv[1]) == "html-text" || std::string(argv[1]) == "html-view" ||
+                      std::string(argv[1]) == "browser"))
         return no_model_command(argc, argv);
     Args a;
     if (!parse(argc, argv, a)) return usage();

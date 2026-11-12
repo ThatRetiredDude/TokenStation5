@@ -146,10 +146,14 @@ bool call_from_json(const std::string &text, ToolCall &call) {
     // {"type": "function", "function": {"name": ...}}, as OpenAI sends calls
     // (Llama 3.2 3B, seen on the console).
     if (j["name"].type != Json::STR && j["function"].type == Json::OBJ) j = Json(j["function"]);
-    if (j["name"].type != Json::STR) return false;
+    // The same with the name where that object would be: {"type": "function",
+    // "function": "browser_open", "parameters": {...}} (Llama 3.2 3B on the
+    // PS5).
+    const Json &name = j["name"].type == Json::STR ? j["name"] : j["function"];
+    if (name.type != Json::STR || name.s.empty()) return false;
     const Json &args = !j["arguments"].is_null() ? j["arguments"] : j["parameters"];
     call.id = new_call_id();
-    call.name = j["name"].s;
+    call.name = name.s;
     if (args.type == Json::STR) call.arguments = args.s;  // already text
     else if (args.type == Json::OBJ) call.arguments = args.dump();
     else if (args.is_null()) call.arguments = "{}";
@@ -1211,6 +1215,10 @@ bool named_call(const std::string &text, size_t p, int tag, ToolCall &call, size
         if (close == std::string::npos) return false;
         name = strip(text.substr(p + 10, gt - p - 10));
         args = strip(text.substr(gt + 1, close - gt - 1));
+        // (A closing tag with nothing to close, where the call has no
+        // parameters: Qwen3.5 9B on the PS5, "<function=list_folder>\n
+        // </parameter>\n</function>", and nothing ran.)
+        while (starts(args, "</parameter>")) args = strip(args.substr(12));
         next = close + 11;
     } else {
         // The tag ends at the first > past the arguments' closing quote (the
@@ -1593,9 +1601,9 @@ bool mistral_calls(const std::string &text, std::vector<ToolCall> &calls) {
 
 void fit_to_schemas(std::vector<ToolCall> &calls, const std::vector<Json> &tools) {
     for (ToolCall &c : calls) {
-        if (!c.xml) continue;
         Json args;
         if (!Json::parse(c.arguments, args) || args.type != Json::OBJ) continue;
+        bool changed = false;
         const Json *props = nullptr;
         for (const Json &t : tools)
             if (t["function"]["name"].str() == c.name) props = &t["function"]["parameters"]["properties"];
@@ -1611,7 +1619,7 @@ void fit_to_schemas(std::vector<ToolCall> &calls, const std::vector<Json> &tools
             auto allows = [&](const char *t) { return std::find(types.begin(), types.end(), t) != types.end(); };
             std::string low = strip(v.s);
             for (char &ch : low) ch = (char)tolower((unsigned char)ch);
-            if (allows("null") && low == "null") {
+            if (c.xml && allows("null") && low == "null") {
                 v = Json();
                 continue;
             }
@@ -1621,14 +1629,20 @@ void fit_to_schemas(std::vector<ToolCall> &calls, const std::vector<Json> &tools
                 v = Json();
                 v.type = Json::BOOL;
                 v.b = low == "true";
+                changed = true;
             } else if (Json::parse(strip(v.s), parsed) && parsed.type != Json::STR &&
-                       (types.empty() || (parsed.type == Json::NUM && (allows("integer") || allows("number"))) ||
-                        (parsed.type == Json::OBJ && allows("object")) || (parsed.type == Json::ARR && allows("array")) ||
-                        (parsed.type == Json::BOOL && allows("boolean")))) {
+                       (c.xml ? types.empty() || (parsed.type == Json::NUM && (allows("integer") || allows("number"))) ||
+                                    (parsed.type == Json::OBJ && allows("object")) ||
+                                    (parsed.type == Json::ARR && allows("array")) ||
+                                    (parsed.type == Json::BOOL && allows("boolean"))
+                              // A call written as JSON chose its quotes: a number is
+                              // taken out of them only where the tool takes no text.
+                              : parsed.type == Json::NUM && (allows("integer") || allows("number")))) {
                 v = parsed;
+                changed = true;
             }
         }
-        c.arguments = args.dump();
+        if (changed || c.xml) c.arguments = args.dump();
         c.xml = false;
     }
 }
@@ -1656,7 +1670,149 @@ size_t made_up_wrapper(const std::string &text, size_t from, bool partial) {
     return std::string::npos;
 }
 
-ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<std::string> &names) {
+size_t made_up_result(const std::string &text, const std::vector<std::string> &names, bool tags) {
+    size_t from = 0;
+    if (has(text, "<think>")) {
+        from = text.find("</think>");
+        if (from == std::string::npos) return std::string::npos;  // still thinking
+        from += 8;
+    }
+    if (tags) {
+        // <tool_response> at a line's start: results come to the model in
+        // that tag, and it never has one to write.
+        static const std::string tag = "<tool_response>";
+        for (size_t at = text.find(tag, from); at != std::string::npos; at = text.find(tag, at + 1)) {
+            size_t b = at;
+            while (b > from && (text[b - 1] == ' ' || text[b - 1] == '\t')) b--;
+            if (b == from || text[b - 1] == '\n') return b;
+        }
+        return std::string::npos;
+    }
+    static const std::string key = "Result of ";
+    for (size_t at = text.find(key, from); at != std::string::npos; at = text.find(key, at + 1)) {
+        // At a line's start, maybe behind a mark of Markdown's.
+        size_t b = at;
+        while (b > from && strchr(" \t*#>_", text[b - 1])) b--;
+        if (b > from && text[b - 1] != '\n') continue;
+        size_t n = at + key.size();
+        if (n < text.size() && strchr("`\"'*", text[n])) n++;  // `browser_open`
+        bool known = text.compare(n, 12, "the function") == 0;
+        size_t e = n + 12;
+        for (auto &name : names)
+            if (!known && !name.empty() && text.compare(n, name.size(), name) == 0) known = true, e = n + name.size();
+        if (!known) continue;
+        while (e < text.size() && strchr("`\"'*", text[e])) e++;
+        if (e < text.size() && text[e] == ':') return b;
+    }
+    return std::string::npos;
+}
+
+// The request's tool a call's name means: that name; else the one tool that
+// is it but for case and the marks between its words (web-search,
+// Web_Search); else the one tool it is the end of, or that is the end of it,
+// at such a mark (DeepSeek R1 14B on the PS5 called "env" for an outside
+// tool named "fake_env"; others write "functions.read_file"). "" when none,
+// or more than one, fits.
+std::string tool_named(const std::string &name, const std::vector<std::string> &names) {
+    if (name.empty()) return "";
+    for (auto &n : names)
+        if (n == name) return n;
+    auto plain = [](const std::string &s) {
+        std::string r;
+        for (char c : s) r += isalnum((unsigned char)c) ? (char)tolower((unsigned char)c) : '_';
+        return r;
+    };
+    const std::string want = plain(name);
+    std::string found;
+    int same = 0, part = 0;
+    for (auto &n : names) {
+        if (n.empty()) continue;
+        const std::string have = plain(n);
+        if (have == want) {
+            if (same++ == 0) found = n;
+        } else if (same == 0 &&
+                   ((have.size() > want.size() + 1 && ends(have, "_" + want)) ||
+                    (want.size() > have.size() + 1 && ends(want, "_" + have)))) {
+            if (part++ == 0) found = n;
+        }
+    }
+    return same == 1 || (same == 0 && part == 1) ? found : "";
+}
+
+// A generic model's calls as objects on lines of their own, among its words
+// or in fences, each naming one of the request's tools. DeepSeek R1 14B on
+// the PS5 (2026-11-11) wrote them every way but in the tags it was asked
+// for: the object and a stray ":" under it; the same object twice, the
+// second time in a ```json fence; two calls with a sentence before each and
+// their results, made up, after them; its whole answer and then the call in
+// a fence. The calls are made, once each; the words before the first stay,
+// and what follows it goes: it is about results the model hasn't got.
+// first: where the first call's line (or its fence's) starts.
+bool calls_on_lines(const std::string &a, const std::vector<std::string> &names, std::vector<ToolCall> &calls,
+                    size_t &first) {
+    first = std::string::npos;
+    size_t fence = std::string::npos;  // the start of the line before this one, when it opens a fence
+    for (size_t b = 0; b < a.size();) {
+        size_t nl = a.find('\n', b);
+        if (nl == std::string::npos) nl = a.size();
+        const size_t w = a.find_first_not_of(" \t", b);
+        size_t next = nl + 1, opens = std::string::npos;
+        if (w != std::string::npos && w < nl && a[w] == '{') {
+            const size_t e = object_end(a, w);
+            ToolCall call;
+            if (e != std::string::npos && call_from_json(a.substr(w, e - w), call) &&
+                !(call.name = tool_named(call.name, names)).empty()) {
+                if (first == std::string::npos) first = fence != std::string::npos ? fence : b;
+                bool had = false;
+                for (auto &c : calls) had = had || (c.name == call.name && c.arguments == call.arguments);
+                if (!had) calls.push_back(call);
+                next = a.find('\n', e);
+                next = next == std::string::npos ? a.size() : next + 1;
+            }
+        } else if (w != std::string::npos && w < nl && a.compare(w, 3, "```") == 0) {
+            // ``` or ```json, and nothing else on the line.
+            size_t e = w + 3;
+            while (e < nl && is_name_char(a[e])) e++;
+            if (a.find_first_not_of(" \t\r", e) >= nl) opens = b;
+        } else if (w == std::string::npos || w >= nl) {
+            opens = fence;  // an empty line between a fence's opening and its object
+        }
+        fence = opens;
+        b = next;
+    }
+    return !calls.empty();
+}
+
+// Words, then one bare call object that ends the reply and names one of the
+// request's tools: the call, and the words before it (head).
+static bool call_at_end(const std::string &text, const std::vector<std::string> &names, std::vector<ToolCall> &calls,
+                        std::string &head) {
+    const std::string a = rstrip(text);
+    size_t p = a.empty() || a.back() != '}' ? std::string::npos : a.rfind('{');
+    while (p != std::string::npos && object_end(a, p) != a.size()) p = p ? a.rfind('{', p - 1) : std::string::npos;
+    std::vector<ToolCall> got;
+    if (p == std::string::npos || !calls_from_objects(a.substr(p), got) || got.size() != 1 ||
+        std::find(names.begin(), names.end(), got[0].name) == names.end())
+        return false;
+    const std::string object = a.substr(p);
+    head = rstrip(a.substr(0, p));
+    for (;;) {
+        if (ends(head, "</think>")) head = rstrip(head.substr(0, head.size() - 8));
+        else if (ends(head, object)) head = rstrip(head.substr(0, head.size() - object.size()));
+        else break;
+    }
+    calls = got;
+    return true;
+}
+
+ParsedTurn parse_turn(ToolFormat f, const std::string &whole, const std::vector<std::string> &names) {
+    // A generic model's reply ends before a result it wrote itself.
+    const bool generic = f == ToolFormat::GENERIC;
+    const size_t fake = generic ? made_up_result(whole, names)
+                        : (f == ToolFormat::HERMES || f == ToolFormat::GEMMA) && !names.empty()
+                              ? made_up_result(whole, names, true)
+                              : std::string::npos;
+    const std::string text = fake == std::string::npos ? whole : rstrip(whole.substr(0, fake));
     if (f == ToolFormat::GEMMA || f == ToolFormat::GENERIC) f = ToolFormat::HERMES;  // their calls are Hermes's
     ParsedTurn r;
     r.content = text;
@@ -1691,7 +1847,11 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
             size_t body_end = q == std::string::npos ? text.size() : q;
             size_t next = q == std::string::npos ? text.size() : q + close.size();
             content += text.substr(pos, p - pos);
-            if (!calls_in_body(text.substr(p + open.size(), body_end - p - open.size()), r.calls))
+            const std::string body = text.substr(p + open.size(), body_end - p - open.size());
+            // (Or the call a brace or two short of whole: Gemma 3 4B on the
+            // PS5 closed the arguments and not the call.)
+            const std::string whole_body = starts(strip(body), "{") ? closed_json(strip(body)) : "";
+            if (!calls_in_body(body, r.calls) && !(!whole_body.empty() && calls_from_objects(whole_body, r.calls)))
                 content += text.substr(p, next - p);
             pos = next;
         }
@@ -1729,22 +1889,14 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
         // object once already (DeepSeek R1 14B on the console: "Let me check
         // the disk space for you. {call} </think> {call}").
         if (r.calls.empty() && !names.empty()) {
-            const std::string a = rstrip(text.substr(from));
-            size_t p = a.empty() || a.back() != '}' ? std::string::npos : a.rfind('{');
-            while (p != std::string::npos && object_end(a, p) != a.size()) p = p ? a.rfind('{', p - 1) : std::string::npos;
-            std::vector<ToolCall> got;
-            if (p != std::string::npos && calls_from_objects(a.substr(p), got) && got.size() == 1 &&
-                std::find(names.begin(), names.end(), got[0].name) != names.end()) {
-                const std::string object = a.substr(p);
-                std::string head = rstrip(a.substr(0, p));
-                for (;;) {
-                    if (ends(head, "</think>")) head = rstrip(head.substr(0, head.size() - 8));
-                    else if (ends(head, object)) head = rstrip(head.substr(0, head.size() - object.size()));
-                    else break;
-                }
-                r.calls = got;
-                content = text.substr(0, from) + head;
-            }
+            std::string head;
+            if (call_at_end(text.substr(from), names, r.calls, head)) content = text.substr(0, from) + head;
+        }
+        // Calls on lines of their own, bare or in a fence (calls_on_lines).
+        if (r.calls.empty() && !names.empty()) {
+            const std::string a = text.substr(from);
+            size_t first;
+            if (calls_on_lines(a, names, r.calls, first)) content = text.substr(0, from) + a.substr(0, first);
         }
         if (!r.calls.empty()) r.content = without_empty_fence(rstrip(content));
         // A plain answer in a <response> wrapper (Coder, seen on the
@@ -1782,6 +1934,20 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
         if (ok) {
             r.calls = calls;
             r.content.clear();
+        } else if (!names.empty()) {
+            // Words and then the call, where the reply ends or on lines of
+            // its own (Llama 3.2 3B on the PS5: "The Danube flows into the
+            // Black Sea. {"name": "browser_click", "parameters": {...}}").
+            std::string head;
+            size_t first;
+            calls.clear();
+            if (call_at_end(text, names, calls, head)) {
+                r.calls = calls;
+                r.content = head;
+            } else if (calls_on_lines(text, names, calls, first)) {
+                r.calls = calls;
+                r.content = without_empty_fence(rstrip(text.substr(0, first)));
+            }
         }
     } else if (f == ToolFormat::GEMMA4) {
         // Each <|tool_call>...<tool_call|> (the last maybe cut short) that
@@ -1816,6 +1982,10 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &text, const std::vector<s
             r.content = p == std::string::npos ? "" : rstrip(text.substr(0, p));
         }
     }
+    // A call by a name that is all but one of the request's tools means it.
+    if (!names.empty())
+        for (ToolCall &c : r.calls)
+            if (const std::string n = tool_named(c.name, names); !n.empty()) c.name = n;
     return r;
 }
 
@@ -1837,7 +2007,65 @@ bool empty_call_block(ToolFormat f, const std::string &content) {
     return false;
 }
 
-size_t content_prefix(ToolFormat f, const std::string &text) {
+// Whether the line at w starts as a made-up result does, as far as the text
+// goes: "Result of ", then a name that is, or may yet become, one of the
+// request's tools (any name where they aren't given).
+static bool result_start(const std::string &text, size_t w, const std::vector<std::string> *names) {
+    static const std::string key = "Result of ";
+    const size_t n = std::min(key.size(), text.size() - w);
+    if (n == 0 || text.compare(w, n, key, 0, n) != 0) return false;
+    if (n < key.size() || !names) return true;
+    size_t at = w + key.size();
+    if (at < text.size() && strchr("`\"'*", text[at])) at++;
+    const size_t left = text.size() - at;
+    auto fits = [&](const std::string &name) {
+        const size_t k = std::min(left, name.size());
+        return !name.empty() && text.compare(at, k, name, 0, k) == 0;
+    };
+    if (fits("the function")) return true;
+    for (auto &name : *names)
+        if (fits(name)) return true;
+    return false;
+}
+
+// Where the fence that opens just before `at` starts: the line of ``` or
+// ```json, with only empty lines between it and `at`. `at` when there is none.
+static size_t fence_before(const std::string &text, size_t from, size_t at) {
+    size_t e = at;  // the end of the line looked at, going up
+    while (e > from) {
+        size_t b = e;
+        if (b > from && text[b - 1] == '\n') b--;
+        const size_t end = b;
+        while (b > from && text[b - 1] != '\n') b--;
+        const size_t w = text.find_first_not_of(" \t\r", b);
+        if (w == std::string::npos || w >= end) {  // an empty line: on, up
+            if (b == e) break;
+            e = b;
+            continue;
+        }
+        size_t k = w;
+        while (k < end && k < w + 3 && text[k] == '`') k++;
+        // (` or `` where the text ends may become one.)
+        if (k == w || (k < w + 3 && k < text.size())) return at;
+        while (k < end && is_name_char(text[k])) k++;
+        if (text.find_first_not_of(" \t\r", k) < end) return at;
+        // (One that closes a fence opened before it opens nothing.)
+        int before = 0;
+        for (size_t l = from; l < b;) {
+            const size_t lw = text.find_first_not_of(" \t", l);
+            before += lw != std::string::npos && lw < b && text.compare(lw, 3, "```") == 0;
+            l = text.find('\n', l);
+            l = l == std::string::npos ? b : l + 1;
+        }
+        return before % 2 == 0 ? b : at;
+    }
+    return at;
+}
+
+size_t content_prefix(ToolFormat f, const std::string &text, const std::vector<std::string> *names) {
+    const bool generic = f == ToolFormat::GENERIC;
+    // (With the request's tools known, a call may come in a fence.)
+    const bool fenced = generic || (names && !names->empty());
     if (f == ToolFormat::GEMMA || f == ToolFormat::GENERIC) f = ToolFormat::HERMES;
     if (f == ToolFormat::HERMES) {
         size_t from = 0;
@@ -1846,6 +2074,18 @@ size_t content_prefix(ToolFormat f, const std::string &text) {
             if (from == std::string::npos) return text.size();
             from += 8;
         }
+        // A generic model's line that starts as its results do ("Result of
+        // NAME:", made_up_result) may be one it makes up: held, with what
+        // could become one where the text ends.
+        if (generic)
+            for (size_t b = from; b < text.size();) {
+                const size_t w = text.find_first_not_of(" \t*#>_", b);
+                if (w != std::string::npos && result_start(text, w, names))
+                    return std::min(b, content_prefix(ToolFormat::HERMES, text.substr(0, b)));
+                const size_t nl = text.find('\n', b);
+                if (nl == std::string::npos) break;
+                b = nl + 1;
+            }
         // A reply that opens with {, ``` or < may be a bare, fenced or
         // wrapped call: hold it all.
         size_t i = text.find_first_not_of(kSpace, from);
@@ -1856,24 +2096,32 @@ size_t content_prefix(ToolFormat f, const std::string &text) {
         // And so may an object that starts a line with "name" (a bare call
         // after words), or what could become one where the text ends.
         for (size_t b = text.find('{', from); b != std::string::npos && b < own; b = text.find('{', b + 1)) {
-            if (b > from && text[b - 1] != '\n') continue;
+            size_t line = b;
+            while (line > from && (text[line - 1] == ' ' || text[line - 1] == '\t')) line--;
+            if (line > from && text[line - 1] != '\n') continue;
             static const std::string key = "\"name\"";
             const size_t k = text.find_first_not_of(kSpace, b + 1);
             if (k == std::string::npos || key.compare(0, std::min(key.size(), text.size() - k), text, k, key.size()) == 0)
-                own = b;
+                own = std::min(own, fenced ? fence_before(text, from, line) : b);
         }
+        // And a fence the text ends at the opening of: a call may come in
+        // it (calls_on_lines).
+        if (fenced) own = std::min(own, fence_before(text, from, text.size()));
+        // A result the model writes itself (made_up_result).
+        if (fenced && !generic) own = std::min(own, made_up_result(text, *names, true));
         size_t p;
         if (find_hermes_tag(text, from, p) >= 0) return std::min(p, own);
         // Hold back what could be the start of a call tag.
         size_t hold = std::min(text.size(), own);
-        for (auto &t : kHermesTags) {
-            const std::string tag = t[0];
+        auto partial = [&](const std::string &tag) {
             for (size_t k = std::min(tag.size() - 1, text.size() - from); k > 0; k--)
                 if (text.compare(text.size() - k, k, tag, 0, k) == 0) {
                     hold = std::min(hold, text.size() - k);
                     break;
                 }
-        }
+        };
+        for (auto &t : kHermesTags) partial(t[0]);
+        if (fenced && !generic) partial("<tool_response>");
         return hold;
     }
     if (f == ToolFormat::LLAMA3) {
@@ -1881,7 +2129,21 @@ size_t content_prefix(ToolFormat f, const std::string &text) {
         if (i == std::string::npos) return 0;
         const std::string tag = "<|python_tag|>";
         if (text[i] == '{' || tag.compare(0, std::min(tag.size(), text.size() - i), text, i, tag.size()) == 0) return 0;
-        return text.size();
+        if (!names || names->empty()) return text.size();
+        // Words and then a call (parse_turn): an object that begins with
+        // "name", or may yet, is held with the fence it is in; and so is a
+        // fence the text ends at the opening of.
+        size_t own = fence_before(text, 0, text.size());
+        for (size_t b = text.find('{'); b != std::string::npos && b < own; b = text.find('{', b + 1)) {
+            static const std::string key = "\"name\"";
+            const size_t k = text.find_first_not_of(kSpace, b + 1);
+            if (k != std::string::npos && key.compare(0, std::min(key.size(), text.size() - k), text, k, key.size()) != 0)
+                continue;
+            size_t line = b;
+            while (line > 0 && (text[line - 1] == ' ' || text[line - 1] == '\t')) line--;
+            own = std::min(own, line == 0 || text[line - 1] == '\n' ? fence_before(text, 0, line) : b);
+        }
+        return own;
     }
     if (f == ToolFormat::GEMMA4) return std::min(text.size(), text.find("<|tool_call>"));  // one token: comes whole
     if (f == ToolFormat::MISTRAL) {

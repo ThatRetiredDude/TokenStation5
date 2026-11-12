@@ -74,7 +74,20 @@ bool file_exists(const std::string &p) {
     return stat(p.c_str(), &st) == 0;
 }
 
+// A program that can be run: a file (not a folder, which also has the "x"
+// right) the user may execute.
+static bool runnable(const std::string &p) {
+    struct stat st;
+    return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode) && access(p.c_str(), X_OK) == 0;
+}
+
 std::string which(const std::string &prog) {
+    if (prog.empty()) return "";
+    // A path is the program itself ("~/..." from the home folder).
+    if (prog.find('/') != std::string::npos) {
+        const std::string p = prog.compare(0, 2, "~/") == 0 ? home_dir() + prog.substr(1) : prog;
+        return runnable(p) ? p : "";
+    }
     // Beside ts5-tui first (the portable build keeps them together).
     char self[4096];
     const ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
@@ -82,13 +95,13 @@ std::string which(const std::string &prog) {
         self[n] = 0;
         std::string dir = self;
         dir.resize(dir.rfind('/'));
-        if (access((dir + "/" + prog).c_str(), X_OK) == 0) return dir + "/" + prog;
+        if (runnable(dir + "/" + prog)) return dir + "/" + prog;
     }
     const char *path = getenv("PATH");
     std::stringstream ss(path ? path : "/usr/bin:/bin");
     std::string d;
     while (std::getline(ss, d, ':'))
-        if (!d.empty() && access((d + "/" + prog).c_str(), X_OK) == 0) return d + "/" + prog;
+        if (!d.empty() && runnable(d + "/" + prog)) return d + "/" + prog;
     return "";
 }
 
@@ -130,6 +143,13 @@ void Config::load() {
         else if (k == "tool_web_page") tool_page = v != "0";
         else if (k == "tool_terminal") tool_terminal = v != "0";
         else if (k == "tool_memory") tool_memory = v != "0";
+        else if (k == "tool_browser") tool_browser = v == "1";
+        else if (k == "tools") tools = v != "0";
+        else if (k == "tool_terminal_ask") terminal_ask = v != "0";
+        else if (k == "tool_browser_ask") browser_ask = v != "0";
+        else if (k == "tool_files") tool_files = v == "1";
+        else if (k == "tool_files_ask") files_ask = v != "0";
+        else if (k == "browser" && !v.empty()) browser = v;
     }
     saved_url = url;
     saved_key = key;
@@ -151,7 +171,10 @@ void Config::save() const {
              "\nmouse=" + (mouse ? "1" : "0") + "\nkeep_model=" + (keep_model ? "1" : "0") + "\nsummarize=" + (summarize ? "1" : "0") +
              "\nweb_search_key=" + web_key + "\ntool_web_search=" + (tool_web ? "1" : "0") + "\ntool_web_page=" +
              (tool_page ? "1" : "0") + "\ntool_terminal=" + (tool_terminal ? "1" : "0") + "\ntool_memory=" +
-             (tool_memory ? "1" : "0") + "\n";
+             (tool_memory ? "1" : "0") + "\ntool_browser=" + (tool_browser ? "1" : "0") + "\nbrowser=" + browser +
+             "\ntools=" + (tools ? "1" : "0") + "\ntool_terminal_ask=" + (terminal_ask ? "1" : "0") +
+             "\ntool_browser_ask=" + (browser_ask ? "1" : "0") + "\ntool_files=" + (tool_files ? "1" : "0") +
+             "\ntool_files_ask=" + (files_ask ? "1" : "0") + "\n";
         if (write(fd, s.data(), s.size()) != (ssize_t)s.size()) {
             close(fd);
             return;

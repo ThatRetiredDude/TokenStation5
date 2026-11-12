@@ -1,0 +1,84 @@
+// hadamard.comp with its butterfly stages in passes of four (TS5_HAD16=1).
+//
+// A weight stored rotated (prism.hadamard, model.h): the vector that meets
+// it goes through the width's signs and a blockwise normalized Hadamard
+// transform first. flags 1: the signs before the transform (a folded
+// product's input); 2: after it (a row looked up in a table stored rotated);
+// 4: the vector's value heads are regrouped first, from [hd, nk, rep] to
+// [hd, rep, nk] (a linear layer's output projection).
+// A workgroup per block and token. The transform is one butterfly stage for
+// each bit of a value's place in its block; the stages go in passes of up
+// to four (a group of 16 values that differ only in those four bits is one
+// thread's, turned in its registers), the first pass reading X, the last
+// writing Y, and only what is between them in shared memory: a block of
+// 4,096 (the Bonsai 9B) takes three passes and two barriers where a stage a
+// barrier took twelve. The stages come in the same order with the same
+// pairs, so the sums are the same to the bit.
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Xbuf { float X[]; };
+layout(std430, binding = 1) readonly buffer Sbuf { float S[]; };
+layout(std430, binding = 2) writeonly buffer Ybuf { float Y[]; };
+layout(push_constant) uniform PC { uint ncols, block, x_off, flags, hd, nk, rep; } pc;
+
+shared float s[4096];  // 16 KiB: what every Vulkan device must give a kernel
+
+// Value i of the block as the transform takes it: regrouped and signed.
+float load_x(uint base, uint row, uint i) {
+    const uint c = base + i;
+    uint src = c;
+    if ((pc.flags & 4u) != 0u) {
+        const uint h = c % pc.hd, q = c / pc.hd;
+        src = h + pc.hd * (q / pc.rep + pc.nk * (q % pc.rep));
+    }
+    float v = X[pc.x_off + row + src];
+    if ((pc.flags & 1u) != 0u) v *= S[c];
+    return v;
+}
+
+void store_y(uint base, uint row, uint i, float v) {
+    if ((pc.flags & 2u) != 0u) v *= S[base + i];
+    Y[row + base + i] = v;
+}
+
+// One pass over groups of M values `stride` apart (M a constant: the loops
+// unroll and v stays in registers).
+#define PASS(M)                                                                          \
+    for (uint g = t; g < pc.block / M; g += 256u) {                                      \
+        const uint at = (g / stride) * M * stride + g % stride;                          \
+        float v[M];                                                                      \
+        [[unroll]] for (uint j = 0; j < M; j++)                                          \
+            v[j] = first ? load_x(base, row, at + j * stride) : s[at + j * stride];      \
+        [[unroll]] for (uint len = 1u; len < M; len <<= 1)                               \
+            [[unroll]] for (uint j = 0; j < M; j += 2u * len)                            \
+                [[unroll]] for (uint k = j; k < j + len; k++) {                          \
+                    const float a = v[k], b = v[k + len];                                \
+                    v[k] = a + b;                                                        \
+                    v[k + len] = a - b;                                                  \
+                }                                                                        \
+        [[unroll]] for (uint j = 0; j < M; j++) {                                        \
+            if (last) store_y(base, row, at + j * stride, v[j] * scale);                 \
+            else s[at + j * stride] = v[j];                                              \
+        }                                                                                \
+    }
+
+void main() {
+    const uint t = gl_LocalInvocationID.x;
+    const uint base = gl_WorkGroupID.x * pc.block;       // the block's first value in its vector
+    const uint row = gl_WorkGroupID.y * pc.ncols;        // the vector's first value
+    const float scale = inversesqrt(float(pc.block));
+    for (uint stride = 1u; stride < pc.block;) {
+        const uint m = min(16u, pc.block / stride);      // values a group, this pass
+        const bool first = stride == 1u, last = stride * m == pc.block;
+        if (m == 16u) { PASS(16) }
+        else if (m == 8u) { PASS(8) }
+        else if (m == 4u) { PASS(4) }
+        else { PASS(2) }
+        stride *= m;
+        if (!last) {
+            memoryBarrierShared();
+            barrier();
+        }
+    }
+}

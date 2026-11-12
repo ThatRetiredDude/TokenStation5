@@ -96,6 +96,11 @@ def main():
         if len(us) != 3:
             sys.exit(f"FAIL {name} ({tag}): {len(us)} usage lines\n{log}")
     (a, b, c), t, log = on
+    # Which of the two that left is written down first is a matter of timing
+    # (the one that waited can be noticed before the other's chunk ends): the
+    # one with the document asked again is A.
+    if a["prompt"] != c["prompt"] and b["prompt"] == c["prompt"]:
+        a, b = b, a
     full = int(a["prompt"])
     if a["finish"] != "left" or not 0 < int(a["prompt_new"]) <= full // 2 or int(a["gen"]):
         sys.exit(f"FAIL {name}: the request whose client left read {a['prompt_new']} of {full} prompt tokens, "
@@ -105,6 +110,8 @@ def main():
     if t["cache_n"] != int(a["prompt_new"]) or c["finish"] == "left":
         sys.exit(f"FAIL {name}: asked again, the prompt kept {t['cache_n']} tokens, not the {a['prompt_new']} read")
     (a0, b0, c0), t0, log0 = off
+    if a0["prompt"] != c0["prompt"] and b0["prompt"] == c0["prompt"]:
+        a0, b0 = b0, a0
     if int(a0["prompt_new"]) != full or int(b0["gen"]) == 0:
         sys.exit(f"FAIL {name}: without TS5_STOP_GONE: {a0['prompt_new']} of {full} read, {b0['gen']} generated "
                  f"for the queued request")

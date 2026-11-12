@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <strings.h>
 #include <ctime>
 #include <mutex>
 #include <thread>
@@ -1108,8 +1109,11 @@ bool get(const std::string &url0, const std::vector<std::string> &headers, HttpR
 #ifdef TS5_HTTPS
         if (u.https && !start_tls(c, u.host, err)) return false;
 #endif
-        std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + u.hostport +
-                          "\r\nConnection: close\r\nUser-Agent: TokenStation5\r\nAccept-Encoding: identity\r\n";
+        // The caller's User-Agent stands in for ours: a request has one.
+        bool named = false;
+        for (auto &h : headers) named = named || strncasecmp(h.c_str(), "User-Agent:", 11) == 0;
+        std::string req = "GET " + u.path + " HTTP/1.1\r\nHost: " + u.hostport + "\r\nConnection: close\r\n" +
+                          (named ? "" : "User-Agent: TokenStation5\r\n") + "Accept-Encoding: identity\r\n";
         for (auto &h : headers) req += h + "\r\n";
         req += "\r\n";
         if (!c.write_all(req, err)) return false;
@@ -1146,6 +1150,8 @@ bool get(const std::string &url0, const std::vector<std::string> &headers, HttpR
             continue;
         }
         resp.status = status;
+        resp.url = url;
+        resp.type = header(head, "content-type");
         std::string te = header(head, "transfer-encoding");
         for (auto &ch : te) ch = (char)tolower((unsigned char)ch);
         const std::string cl = header(head, "content-length");

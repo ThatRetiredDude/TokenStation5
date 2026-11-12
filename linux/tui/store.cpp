@@ -178,7 +178,8 @@ bool save_chat(Chat &c, std::string &why) {
                 // app reads it as a reply's text).
                 body += std::string(n++ ? ",\n" : "\n") + "{\"user\":false,\"tool\":" + ts5::json_escape(m.tool) +
                         ",\"call\":" + ts5::json_escape(m.call_id) + ",\"head\":" + ts5::json_escape(m.head) +
-                        ",\"ok\":" + (m.tool_ok ? "true" : "false") + ",\"text\":" + ts5::json_escape(m.content) + "}";
+                        ",\"ok\":" + (m.tool_ok ? "true" : "false") + (m.left_out ? ",\"left_out\":true" : "") +
+                        ",\"text\":" + ts5::json_escape(m.content) + "}";
                 continue;
             }
             if (m.role != "user" && m.role != "assistant") continue;
@@ -269,6 +270,7 @@ bool load_chat(Chat &c, const SavedChat &s, std::string &why) {
                 m.call_id = t["call"].str();
                 m.head = t["head"].str();
                 m.tool_ok = t["ok"].boolean(true);
+                m.left_out = t["left_out"].boolean(false);
             } else {
                 m.role = "assistant";
                 for (const ts5::Json &u : t["calls"].a) m.calls.push_back({u["id"].str(), u["name"].str(), u["args"].str()});

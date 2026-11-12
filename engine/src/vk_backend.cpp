@@ -167,6 +167,7 @@
 #include "get_rows_q6_k.spv.h"
 #include "get_rows_q8_0.spv.h"
 #include "hadamard.spv.h"
+#include "hadamard16.spv.h"
 #include "matmul_bf16.spv.h"
 #include "matmul_f16.spv.h"
 #include "matmul_f32.spv.h"
@@ -564,10 +565,16 @@ public:
         for (const auto &t : m_.gguf.tensors)
             if (!(embd_file_ && &t == m_.tok_embd.info)) weights += t.nbytes;
         const uint64_t fixed = vk_fixed_bytes(hp_, weights);
-        // The tokens a cache of type t holds in what is free beside them.
-        auto holds = [&](KvType t) {
-            return free > fixed ? (int)std::min<uint64_t>((free - fixed) / kv_bytes_per_token(hp_, t), 1u << 30) : 0;
+        // The tokens a cache of type t holds in `room`. (A model whose every
+        // layer keeps only a window of the past has nothing per token: any
+        // context fits. Only a test model is built so; dividing by its 0
+        // ended `ts5 logits` on it with a signal.)
+        auto tokens_in = [&](uint64_t room, KvType t) {
+            const uint64_t per = kv_bytes_per_token(hp_, t);
+            return (int)std::min<uint64_t>(per ? room / per : UINT64_MAX, 1u << 30);
         };
+        // The tokens a cache of type t holds in what is free beside them.
+        auto holds = [&](KvType t) { return free > fixed ? tokens_in(free - fixed, t) : 0; };
         // A context set by number that f16 has no memory for: the smaller
         // cache an auto-fit context would take on this model, where that
         // holds it (set_context_kv_type).
@@ -601,9 +608,7 @@ public:
         // above): the one asked for where none smaller may be.
         const bool by_tails = n_ctx_ > 0 && fit_tails_ && fixed <= free;
         const uint64_t exact = by_tails ? vk_fixed_bytes(hp_, weights, false) : fixed;
-        auto tails = [&](KvType t) {
-            return free > exact ? (int)std::min<uint64_t>((free - exact) / kv_bytes_per_token(hp_, t), 1u << 30) : 0;
-        };
+        auto tails = [&](KvType t) { return free > exact ? tokens_in(free - exact, t) : 0; };
         // The smallest cache a context of n tokens set by number may take
         // here, where `count` says it holds them; else the one asked for.
         auto smallest = [&](int n, const std::function<int(KvType)> &count, std::vector<std::string> *why) {
@@ -822,6 +827,7 @@ private:
         // fused kernel. TS5_GLU_GELU=1 turns it on.
         if (const char *e = getenv("TS5_GLU_GELU")) glu_gelu_ = atoi(e) != 0;
         if (const char *e = getenv("TS5_NORM_FUSE")) norm_fuse_ = atoi(e) != 0;
+        if (const char *e = getenv("TS5_HAD16")) had16_ = atoi(e) != 0 ? 1 : 0;
         if (const char *e = getenv("TS5_NORM_EARLY")) {
             const int v = atoi(e);
             norm_early_ = v != 0;
@@ -1197,7 +1203,7 @@ private:
         return false;
         P(matmul_f32, 3) P(matmul_f16, 3) P(matmul_q4_0, 3) P(matmul_q8_0, 3)
         P(matmul_q4_1, 3) P(matmul_q5_0, 3) P(matmul_q5_1, 3)
-        P(matmul_q1_0, 3) P(matmul_q2_0, 3) P(matmul_bf16, 3) P(hadamard, 3)
+        P(matmul_q1_0, 3) P(matmul_q2_0, 3) P(matmul_bf16, 3) P(hadamard, 3) P(hadamard16, 3)
         P(matmul_q4_k, 3) P(matmul_q5_k, 3) P(matmul_q6_k, 3)
         P(mm_f32, 3) P(mm_f16, 3) P(mm_q4_0, 3) P(mm_q8_0, 3) P(mm_q4_1, 3) P(mm_q5_0, 3) P(mm_q5_1, 3)
         P(mm_q1_0, 3) P(mm_q2_0, 3) P(mm_bf16, 3)
@@ -1895,7 +1901,8 @@ private:
             ncols, (uint32_t)w.fold_block, x_off, (w.fold_signs ? 1u : 0u) | (rep ? 4u : 0u),
             (uint32_t)w.fold_hd, (uint32_t)w.fold_nk, rep};
         const Buf &signs = w.fold_signs ? fold_signs_.at(w.ne0()) : dummy_;
-        dispatch("hadamard", {&x, &signs, &hx_}, pc, ncols / pc.block, (uint32_t)ntok, qpool_ ? role(w) : std::string());
+        dispatch(had16(pc.block, (uint32_t)ntok) ? "hadamard16" : "hadamard", {&x, &signs, &hx_}, pc, ncols / pc.block,
+                 (uint32_t)ntok, qpool_ ? role(w) : std::string());
         hx_of_.src = x.buf;
         hx_of_.x_off = x_off;
         hx_of_.ntok = (uint32_t)ntok;
@@ -2553,7 +2560,8 @@ private:
             if (te.fold_inverse) {
                 struct { uint32_t ncols, block, x_off, flags, hd, nk, rep; } hpc{
                     (uint32_t)E, (uint32_t)te.fold_block, 0, te.fold_signs ? 2u : 0u, 0, 0, 0};
-                dispatch("hadamard", {&hx_, te.fold_signs ? &fold_signs_.at(E) : &dummy_, &x_}, hpc,
+                dispatch(had16(hpc.block, (uint32_t)n) ? "hadamard16" : "hadamard",
+                         {&hx_, te.fold_signs ? &fold_signs_.at(E) : &dummy_, &x_}, hpc,
                          (uint32_t)E / hpc.block, (uint32_t)n, "token_embd");
             }
         }
@@ -2860,6 +2868,27 @@ private:
     // off).
     bool fuse_ = true;
     bool glu_gelu_ = false;  // the fused GLU kernels for Gemma's GELU too (TS5_GLU_GELU=1)
+    // The rotation of a folded weight's input (prism.hadamard) by
+    // hadamard16.comp: the same stages in the same order, so the same output
+    // bit for bit, in passes of four stages with a barrier between passes
+    // where hadamard.comp has one after every stage (a block of 4,096, the
+    // Bonsai 9B's: 2 barriers for 12). Timed on the PS5 (2026-11-12, every
+    // rotation through it against none): the 9B's prompt 713 -> 731 tok/s at
+    // 4,096 tokens and 738 -> 754 at 512, its generation 57.6 -> 57.2; the
+    // 4B and the 27B, whose blocks are smaller, lost 10% and 2.5% of the
+    // prompt and 16% and 7% of generation. So it runs for blocks of 4,096
+    // in a pass over many tokens, and nowhere else. TS5_HAD16=1 and 0 put
+    // every rotation through it, or none. The store title keeps hadamard.
+    int had16_ = -1;  // TS5_HAD16, -1 when it isn't set
+    bool had16(uint32_t block, uint32_t ntok) const {
+        if (had16_ >= 0) return had16_ != 0;
+#ifdef TS5_PS5
+        (void)block, (void)ntok;
+        return false;
+#else
+        return block >= 4096 && ntok >= 32;
+#endif
+    }
     // One token: the RMSNorm before q, k, v, gate and up and the output
     // folded into those mat-vecs (mv16n_*), which read the residual and
     // scale their sums, rather than a one-workgroup rmsnorm dispatch and a

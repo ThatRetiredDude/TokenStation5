@@ -53,6 +53,9 @@ struct Msg {
     // screen, and whether it worked. Its content is what the model got back.
     std::string call_id, tool, head;
     bool tool_ok = true;
+    // A tool message the model now gets only the start of: a long result
+    // that gave way when a run of tool calls filled the chat (make_room).
+    bool left_out = false;
 };
 
 // Where a click does something, on the chat as last drawn.
@@ -101,6 +104,22 @@ struct Chat {
     std::atomic<int> ask_pick{0};   // the answer ←→ is on: 0 run it, 1 every command of this chat, 2 no
     std::string ask_cmd;
     std::atomic<bool> ask_always{false};
+    // The same question for something the model wants to do on a web page
+    // (press a button, type): ask_kind 1, ask_cmd says what, and "every one
+    // of this chat" is a choice of its own.
+    std::atomic<int> ask_kind{0};
+    std::atomic<bool> ask_always_browser{false};
+    // And for the file tools (files.h). ask_kind 2: a change, shown as
+    // ask_preview (the lines out and in), with "every change in this chat".
+    // ask_kind 3: a read, with "every file in FOLDER, this chat" (ask_opt
+    // names it); the folders said yes to are read_dirs. Under mu but the flag.
+    std::atomic<bool> ask_always_files{false};
+    std::string ask_preview, ask_opt, ask_dir;
+    std::vector<std::string> read_dirs;
+    // And for an outside tool (mcp.h). ask_kind 4: the call, its arguments
+    // a line each in ask_preview, with "every call to SERVER, this chat"
+    // (ask_dir names the server); the servers said yes to are mcp_ok. Under mu.
+    std::vector<std::string> mcp_ok;
     std::string command;  // a slash command for the app to run
     std::vector<std::string> cands;  // Tab's candidates
     int cand_i = -1;

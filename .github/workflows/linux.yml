@@ -311,6 +311,16 @@ jobs:
           curl -fsSL -o /tmp/model/vocab.gguf https://raw.githubusercontent.com/ggml-org/llama.cpp/master/models/ggml-vocab-qwen2.gguf
           python3 engine/tests/make_test_model.py --arch qwen2 --vocab /tmp/model/vocab.gguf --quant Q4_K_M /tmp/model/test.gguf
           linux/smoke-test.sh /tmp/model/test.gguf /usr/bin/tokenstation
+      - name: The model's browser (ts5 browser, pages served here; the text view, then the runner's Chrome)
+        env:
+          # The runner's Chrome is not ours to set up: its sandbox is left out here.
+          TS5_BROWSER_NO_SANDBOX: "1"
+        run: |
+          browser=$(command -v google-chrome chromium chromium-browser | head -1 || true)
+          echo "browser: ${browser:-none, so the text view only}"
+          python3 engine/tests/browser_test.py "$(command -v ts5)" $browser
+      - name: Outside tools (ts5-tui --mcp against an MCP server served here, no model)
+        run: python3 linux/tui/test/mcp_test.py "$(command -v ts5-tui)"
       - name: Tune it (ts5-tune, then the engine reads tune.env; --models, then the per-model file)
         run: |
           ts5-tune --quick --pp 64 --tg 16 /tmp/model/test.gguf

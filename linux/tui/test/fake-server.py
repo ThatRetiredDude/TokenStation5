@@ -26,6 +26,14 @@ fake say that it searches, as ts5 does while it runs a search itself
 failed), and then answer. FAKE_REQUESTS also gets the tools'
 names, "web_search", "tool_choice", the system message and a request for
 a summary whole.
+"browse STEP ;; STEP ..." works the browser tool, a call a turn: open URL,
+click N, type N TEXT (typeonly: without Enter), more, back; in place of N,
+"WORDS" finds the number of the link, box or button with those words on the
+page the call before gave. "&&" between steps makes them calls of one turn.
+"call NAME ;; JSON" calls the tool of that name, if the request offers it
+(an outside tool's: linux/tui/mcp.h and fake-mcp.py); "&&&" between several.
+FAKE_TEXT_CALL: what the turn that gets no tools (after twelve rounds of
+them, or a no) answers with, a call written as text ("\\n" a line break).
 FAKE_MODEL names the model. FAKE_HELPER names the helper drafting beside it
 (FAKE_HELPER_CTX: its context; "none": no helper), FAKE_HELPER_NOTE says
 why none is; with neither, /v1/models has no "helper" at all, as an older
@@ -37,6 +45,27 @@ import re
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+def browser_call(step, page):
+    """A step of a "browse" message as a call of the browser tool."""
+    def number(tok):
+        if tok.isdigit():
+            return int(tok)
+        m = (re.search(r'\[(\d+): [^\]]*"%s"' % re.escape(tok), page) or
+             re.search(r'%s\[(\d+)\]' % re.escape(tok), page))
+        return int(m.group(1)) if m else 0
+    m = re.match(r'(\w+)\s*(?:"([^"]*)"|(\S+))?\s*(.*)$', step, re.S)
+    act, tok, rest = m.group(1), m.group(2) or m.group(3) or "", m.group(4)
+    if act == "open":
+        return ("browser_open", {"url": tok})
+    if act == "click":
+        return ("browser_click", {"number": number(tok)})
+    if act == "type":
+        return ("browser_type", {"number": number(tok), "text": rest})
+    if act == "typeonly":
+        return ("browser_type", {"number": number(tok), "text": rest, "enter": False})
+    return ("browser_" + act, {})
 
 MODEL = os.environ.get("FAKE_MODEL", "Qwen3-8B-Q4_K_M")
 N_CTX = int(os.environ.get("FAKE_CTX", "32768"))
@@ -139,24 +168,30 @@ class H(BaseHTTPRequestHandler):
                     f.write("  tools=%s web_search=%s tool_choice=%s\n" % (
                         ",".join(t.get("function", {}).get("name") for t in req.get("tools") or []),
                         json.dumps(req.get("web_search")), req.get("tool_choice")))
+                if req.get("chat_template_kwargs"):
+                    f.write("  kwargs=%s\n" % json.dumps(req["chat_template_kwargs"]))
                 if summary:
                     f.write("  summary asked: %s\n" % json.dumps(last))
                 for m in msgs:
                     if m.get("role") == "system":
                         f.write("  system: %s\n" % json.dumps(m.get("content")))
                     if m.get("role") == "tool":
-                        f.write("  tool %s %s: %s\n" % (m.get("name"), m.get("tool_call_id"),
-                                                        json.dumps((m.get("content") or "")[:200])))
+                        c = m.get("content") or ""
+                        f.write("  tool %s %s: %s\n" % (m.get("name"), m.get("tool_call_id"), json.dumps(
+                            c if len(c) <= 480 else c[:200] + " [...] " + c[-240:])))
                     if m.get("tool_calls"):
                         f.write("  calls: %s\n" % json.dumps(m["tool_calls"]))
         # The tool calls this turn makes (see the top of the file).
         asked = ""
         results = []
+        turns = 0  # the turns with calls since the user's message
         for m in msgs:
             if m.get("role") == "user":
-                asked, results = m.get("content") or "", []
+                asked, results, turns = m.get("content") or "", [], 0
             elif m.get("role") == "tool":
                 results.append(m.get("content") or "")
+            elif m.get("tool_calls"):
+                turns += 1
         calls = []
         if asked.startswith("run ") and "run_command" in tools:
             if "&&&" in asked:
@@ -172,6 +207,37 @@ class H(BaseHTTPRequestHandler):
             calls = [("read_web_page", {"url": asked[5:].strip()})]
         elif asked.startswith("remember ") and "remember" in tools and not results:
             calls = [("remember", {"note": asked[9:].strip()})]
+        elif asked.startswith("file ") and "read_file" in tools:
+            # "file read PATH [LINE]", "file list [PATH]", "file edit PATH ;; OLD ;; NEW",
+            # "file write PATH ;; CONTENT" ("\n" in OLD, NEW and CONTENT is a line break);
+            # several with "&&&" between them, a turn each.
+            steps = [c.strip() for c in asked[5:].split("&&&")]
+            if len(results) < len(steps):
+                parts = [p.strip().replace("\\n", "\n") for p in steps[len(results)].split(";;")]
+                verb, _, path = parts[0].removeprefix("file ").partition(" ")
+                path = path.strip()
+                if verb == "read":
+                    path, _, line = path.partition(" ")
+                    calls = [("read_file", {"path": path, **({"start_line": int(line)} if line.strip() else {})})]
+                elif verb == "list":
+                    calls = [("list_folder", {"path": path} if path else {})]
+                elif verb == "edit":
+                    calls = [("edit_file", {"path": path, "old_text": parts[1], "new_text": parts[2]})]
+                elif verb == "write":
+                    calls = [("write_file", {"path": path, "content": parts[1]})]
+        elif asked.startswith("call "):
+            # "call NAME [;; JSON]": the tool of that name with those arguments, if the request
+            # offers it (an outside tool's, linux/tui/mcp.h); several with "&&&", a turn each.
+            steps = [c.strip() for c in asked[5:].split("&&&")]
+            if len(results) < len(steps):
+                name, _, a = steps[len(results)].partition(";;")
+                if name.strip() in tools:
+                    calls = [(name.strip(), json.loads(a) if a.strip() else {})]
+        elif asked.startswith("browse ") and "browser_open" in tools:
+            steps = [c.strip() for c in asked[7:].split(";;")]
+            if turns < len(steps):
+                page = next((r for r in reversed(results) if r.startswith("Page: ")), "")
+                calls = [browser_call(c.strip(), page) for c in steps[turns].split("&&")]
         if prompt >= N_CTX:
             # As ts5 serve: refused before anything streams, in OpenAI's words and code.
             self.send(400, {"error": {"message": "This model's maximum context length is %d tokens. However, your "
@@ -228,6 +294,10 @@ class H(BaseHTTPRequestHandler):
                 self.wfile.flush()
                 gen += 12 * len(calls)
                 text = ""
+            elif results and req.get("tool_choice") == "none" and os.environ.get("FAKE_TEXT_CALL"):
+                # The turn that may call no tool, answered with a call written out as text, as real
+                # models did on the PS5 after their twelfth round.
+                text = os.environ["FAKE_TEXT_CALL"].replace("\\n", "\n")
             elif results:
                 text = "The tool gave me this: " + " | ".join(r.strip()[:300] for r in results)
             elif summary:
@@ -237,6 +307,12 @@ class H(BaseHTTPRequestHandler):
                     text = open(os.environ["FAKE_SUMMARY"], encoding="utf-8").read()
             elif searching:
                 text = ("The search did not work, so this is from memory: " if failed else "From what the search found: ") + query
+            elif asked.startswith("blank "):
+                # "blank N ...": the first N requests for this message get an answer with no words
+                # (a turn that only thought), the next one a real answer.
+                n = int(asked.split()[1])
+                BLANKS[asked] = BLANKS.get(asked, 0) + 1
+                text = "" if BLANKS[asked] <= n else "An answer at last, on try %d." % BLANKS[asked]
             elif "code" in last.lower() or "example" in last.lower():
                 text = ANSWER
             else:
@@ -264,6 +340,7 @@ class H(BaseHTTPRequestHandler):
             sys.stderr.write("ts5: the client left\n")
 
 
+BLANKS = {}
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 18081
 sys.stderr.write("ts5: listening on 127.0.0.1:%d (fake)\n" % port)
 ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()

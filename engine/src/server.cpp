@@ -626,6 +626,8 @@ void handle(int fd, Server::State &state, Usage &u) {
         std::function<bool()> gone;
         if (stop_gone) gone = [fd] { return peer_gone(fd); };
         bool use_tools = !tools.empty();  // off for a last turn that must answer
+        std::vector<std::string> tool_names;
+        for (const Json &t : tools) tool_names.push_back(t["function"]["name"].str());
         SampleParams sp;
         sp.temperature = (float)req["temperature"].num(state.sampling.temperature);
         sp.top_p = (float)req["top_p"].num(state.sampling.top_p);
@@ -731,6 +733,8 @@ void handle(int fd, Server::State &state, Usage &u) {
         std::string search_failed;      // why the first failed search failed
         std::vector<std::string> found;  // what the searches found, for a forced answer
         bool answered_without_tools = false;  // after a made-up call
+        bool told_no_tool = false;            // ... or told that there is no such tool
+        std::string no_tool;                  // the made-up tool this round tells of
         bool think_closed = false;       // a thinking was ended for the model (kThinkMax): once a request
         // usage.prompt_tokens: the last turn's prompt without the earlier
         // turns of this request that it holds (`carried`, already counted as
@@ -750,6 +754,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             ThoughtChannel channel(g4, !seed.empty());  // the thinking's marks, as <think> and </think>
             size_t sent = 0;  // bytes of this turn's `text` already streamed
             size_t thought = 0;  // and of its thinking, as reasoning_content
+            bool invented = false;  // the turn was ended where the model began a call's result itself
             const char *closing = nullptr;  // why this turn's thinking is being ended, while it is
             size_t close_at = 0;            // where in `text`
             {
@@ -775,7 +780,12 @@ void handle(int fd, Server::State &state, Usage &u) {
             };
             // The turn's text so far, with `piece` at its end, to the client.
             auto on_piece = [&](const std::string &piece) {
-                if (closing) return false;  // what the engine still had to hand over
+                // What the engine still had to hand over: after a no it
+                // gives the same piece once more (and bytes it held), which
+                // would stand after the place the turn was cut at. On the
+                // PS5 a made-up <tool_response> cut from a reply left ">"
+                // and the words after it as the answer.
+                if (closing || stopped || invented) return false;
                 if (first < 0) first = now_ms();
                 count();
                 text += piece;
@@ -786,6 +796,22 @@ void handle(int fd, Server::State &state, Usage &u) {
                 for (auto &s : stops) {
                     size_t at = s.empty() || from >= text.size() ? std::string::npos : text.find(s, from);
                     if (at != std::string::npos) { text.resize(at); stopped = true; }
+                }
+                // A generic model that writes a call's result itself has
+                // made it up (tools.h): the turn ends there, like at a stop
+                // string, and the call before it is made for real.
+                // (So has a Hermes or Gemma 3 model that writes the
+                // <tool_response> its results come in.)
+                const bool tags = tf == ToolFormat::HERMES || tf == ToolFormat::GEMMA;
+                if (use_tools && (tf == ToolFormat::GENERIC || tags) && !stopped) {
+                    const size_t fake = made_up_result(text, tool_names, tags);
+                    if (fake != std::string::npos) {
+                        text.resize(fake);
+                        invented = true;
+                        // (and in the prompt of a turn after it)
+                        const size_t w = wrote.rfind(tags ? "<tool_response>" : "Result of ");
+                        if (w != std::string::npos) wrote.resize(w);
+                    }
                 }
                 // A thinking that doesn't end (kThinkMax): the turn stops
                 // here, and goes on below with the thinking closed.
@@ -826,7 +852,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                             thought = upto;
                         }
                     }
-                    if (answer >= text.size() && !stopped) return client_ok;
+                    if (answer >= text.size() && !stopped) return client_ok && !invented;
                     sent = std::max(sent, answer);
                     // Hold back text that could be the start of a stop string,
                     // or of a tool call.
@@ -836,16 +862,16 @@ void handle(int fd, Server::State &state, Usage &u) {
                         for (size_t k = std::min(s.size() - 1, text.size()); k > 0; k--)
                             if (text.compare(text.size() - k, k, s, 0, k) == 0) { hold = std::max(hold, k); break; }
                     size_t upto = stopped ? text.size() : text.size() - hold;
-                    if (use_tools) upto = std::min(upto, content_prefix(tf, text));
+                    if (use_tools) upto = std::min(upto, content_prefix(tf, text, &tool_names));
                     if (upto > sent) {
                         client_ok = send_all(fd, "data: " + chunk_json(text.substr(sent, upto - sent), nullptr) + "\n\n");
                         sent = upto;
                     }
                 }
-                return client_ok && !stopped;
+                return client_ok && !stopped && !invented;
             };
             auto on_text = [&](const std::string &piece) {
-                if (closing) return false;
+                if (closing || stopped || invented) return false;
                 wrote += piece;
                 return on_piece(chat ? channel.map(piece) : piece);
             };
@@ -887,13 +913,20 @@ void handle(int fd, Server::State &state, Usage &u) {
                 const int piece = getenv("TS5_TEST_PIECE") ? atoi(getenv("TS5_TEST_PIECE")) : 0;
                 turn.finish = "stop";
                 turn.prompt_tokens = (int)toks.size();
+                // (As the engine does, the piece that ended a turn is handed
+                // over once more: Engine::generate keeps what its callback
+                // said no to, and hands over what it holds when it ends.)
                 if (piece <= 0) {
-                    on_text(t);
+                    if (!on_text(t)) on_text(t);
                     turn.gen_tokens = 1;
                 } else {
                     for (size_t at = 0; at < t.size(); at += (size_t)piece) {
                         turn.gen_tokens++;
-                        if (!on_text(t.substr(at, (size_t)piece))) break;
+                        const std::string part = t.substr(at, (size_t)piece);
+                        if (!on_text(part)) {
+                            on_text(part);
+                            break;
+                        }
                         if (turn.gen_tokens >= sp.max_tokens) {
                             turn.finish = "length";
                             break;
@@ -979,13 +1012,23 @@ void handle(int fd, Server::State &state, Usage &u) {
             // and nothing of the answer has gone out yet. Past that, the turn
             // stays text.
             std::string made_up;
-            for (const ToolCall &c : pt.calls) {
+            size_t made_up_at = 0;
+            for (size_t i = 0; i < pt.calls.size() && made_up.empty(); i++) {
                 bool known = false;
-                for (const Json &t : tools) known |= t["function"]["name"].str() == c.name;
+                for (const Json &t : tools) known |= t["function"]["name"].str() == pt.calls[i].name;
                 if (!known) {
-                    made_up = c.name;
-                    break;
+                    made_up = pt.calls[i].name;
+                    made_up_at = i;
                 }
+            }
+            // Calls to the request's tools and then one to a tool it doesn't
+            // have: a plan written ahead of any result (DeepSeek R1 14B on
+            // the PS5: browser_open, browser_type, web_search, remember and
+            // "answer", and nothing ran). The first is a sound step and is
+            // made; the model goes on from what it gets back.
+            if (!made_up.empty() && made_up_at > 0) {
+                pt.calls.resize(1);
+                made_up.clear();
             }
             // A turn that is only an empty call block ("<tools> </tools>",
             // Qwen 2.5 Coder 14B asked for a poem, seen on the console) has
@@ -1002,8 +1045,22 @@ void handle(int fd, Server::State &state, Usage &u) {
                     use_tools = false;
                     continue;
                 }
-                pt.calls.clear();
-                pt.content = text;
+                // Words are out already, or it thought first: the model is
+                // told, once, that there is no such tool and which there
+                // are, and goes on (Gemma 3 4B on the PS5, the terminal
+                // switched off, wrote "I need to run a command" and a call
+                // to run_command; the call was left in the chat as text).
+                if (!told_no_tool && !pt.calls.empty() && made_up_at < pt.calls.size() && !stopped &&
+                    st.gen_tokens < max_tokens) {
+                    told_no_tool = true;
+                    no_tool = made_up;
+                    const ToolCall it = pt.calls[made_up_at];
+                    pt.calls.assign(1, it);
+                    log_line("ts5: %s made-up tool %s: told that there is none", id.c_str(), made_up.c_str());
+                } else {
+                    pt.calls.clear();
+                    pt.content = text;
+                }
             }
             // pt.content is the turn's text, calls taken out after the thinking.
             const size_t from = std::min(answer, pt.content.size());
@@ -1014,13 +1071,13 @@ void handle(int fd, Server::State &state, Usage &u) {
             if (pt.calls.empty() || stopped || !client_ok) break;
             // The client's own calls go back to it; web_search is ts5's.
             std::vector<ToolCall> searches;
-            for (auto &c : pt.calls) (web && c.name == "web_search" ? searches : calls).push_back(c);
+            for (auto &c : pt.calls) ((web && c.name == "web_search") || !no_tool.empty() ? searches : calls).push_back(c);
             if (!calls.empty()) {
                 st.finish = "tool_calls";
                 break;
             }
             if (st.gen_tokens >= max_tokens) break;
-            if (round >= kSearchRounds || !search_failed.empty()) {
+            if (no_tool.empty() && (round >= kSearchRounds || !search_failed.empty())) {
                 // Out of rounds, or searching again after a search failed
                 // (models retry a refused key until the limit): one last
                 // turn without tools, from the original messages and a note,
@@ -1047,7 +1104,21 @@ void handle(int fd, Server::State &state, Usage &u) {
             std::vector<std::string> results;
             for (auto &c : searches) {
                 std::string log;
-                if (!search_failed.empty()) {
+                if (!no_tool.empty()) {
+                    std::string list;
+                    for (auto &n : names) list += (list.empty() ? "" : ", ") + n;
+                    results.push_back("There is no function named " + no_tool + " here. The functions are: " + list +
+                                      ". Call one of those, or answer without one.");
+                    log = "no such tool: " + no_tool;
+                    no_tool.clear();
+                    // (What it goes on to say starts a paragraph of its own.)
+                    if (!content.empty() && content.back() != '\n') {
+                        content += "\n\n";
+                        // (Unless the space after its words went out with them.)
+                        if (stream && client_ok && sent <= pt.content.size())
+                            client_ok = send_all(fd, "data: " + chunk_json("\n\n", nullptr) + "\n\n");
+                    }
+                } else if (!search_failed.empty()) {
                     results.push_back("Searching is not working right now (" + search_failed +
                                       "). Do not search again: answer from what you know.");
                     log = "web_search: skipped after a failed search";

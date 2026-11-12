@@ -252,6 +252,11 @@ ts5-tui --url http://ps5.local:8081  # another one
   a full chat then says so under the answer that was cut (Ctrl+N starts a
   new one). A summary is the model's own notes, so details it leaves out
   are gone for it: a longer Context (Settings) is the way to keep more.
+  A run of tool calls can fill a chat before your next message (a model
+  reading a long page part after part). Then the long results of its
+  earlier calls give way: the model keeps their first lines and the newest
+  results whole, and the chat marks each "left out later, for room". You
+  still see them in full.
 - **Web search**: Settings → Web search key takes a free key from
   [app.tavily.com](https://app.tavily.com). A model ts5-tui loads itself
   then searches the web when a question needs it (models that use tools;
@@ -260,10 +265,20 @@ ts5-tui --url http://ps5.local:8081  # another one
   engine in its environment, never on a command line. For the API-only
   service, add `TAVILY_API_KEY=tvly-...` to `/etc/default/tokenstation`
   and restart it.
-- **Tools**: besides the web search, the model can read a web page, run a
-  command on this machine and keep notes between chats. Each has its own
-  switch (Settings → Tool: search, pages, terminal, memory; or
+- **Tools**: besides the web search, the model can read a web page, use
+  a browser, run a command on this machine and keep notes between chats.
+  It can also read and change files, and use the tools of outside
+  programs that speak MCP. Each has its own switch (Settings →
+  Tool: search, pages, terminal, files, browser, memory; or
   `/tools terminal off`), and `/tools` lists them.
+  **One switch turns them all off**: Settings → Tools, or `/tools off`
+  (`/tools on` brings back the ones you had on), or `ts5-tui --no-tools`
+  for one run. With it off the model gets nothing but the chat: no
+  search, no pages, no commands, no browser, no notes, and no outside
+  program is running.
+  The terminal, the files and the browser have three steps: off, on and
+  asking first (the default), on and never asking (`/tools terminal
+  allow`; `/tools ask` brings every question back).
   - **Web pages**: give it a link ("read https://... and sum it up") and
     it gets the page as text: the article where the page marks one,
     without the site's menus and sidebars, the first 8,000 characters.
@@ -277,6 +292,114 @@ ts5-tui --url http://ps5.local:8081  # another one
     most; Esc stops one that is running. The model gets its output and
     exit code (long output: the start and the end). Under each call a
     line says how it went; a click opens what the model got.
+  - **Browser** (off until you switch it on: Settings → Tool: browser, or
+    `/tools browser on`): the model opens a page and gets it as text with
+    every link, text box and button numbered (`the Volga[3]`,
+    `[4: text box "Search"]`, `[5: button "Go"]`), and acts on the
+    numbers: it follows a link, types into a box, presses a button, reads
+    on down a long page, goes back. Links it follows by itself. Before it
+    presses a button or types into a page you see what it is about to do,
+    as with a command: **Enter** does it, **Esc** doesn't, **→** moves to
+    "everything on pages in this chat" or "no". The same question comes
+    before it opens an address on this machine or your home network.
+    Password boxes are never offered to it. While the browser is on it
+    stands in for the plain page reader.
+
+    Settings → Browser (or `/browser`) says what shows the pages:
+    - **Auto**: Chromium (or Chrome, Brave, Edge) if one is installed,
+      else the text view. `sudo apt install chromium` installs one; on
+      Debian 13 `chromium-headless-shell` is the smaller package and is
+      enough.
+    - **Chromium**: the full browser, without a window, each page shut in
+      its sandbox. On a PS5 beside a loaded 14B model it took 155 MiB
+      waiting and up to 494 MiB on the heaviest page, gave the memory back
+      between pages, and the model wrote as fast as without it.
+    - **Obscura** ([github.com/h4ckf0r0day/obscura](https://github.com/h4ckf0r0day/obscura)):
+      the light one, used only when you choose it (`/browser obscura`).
+      It held 23 MiB waiting, about 200 MiB with a Wikipedia article open
+      and up to 430 MiB on heavy pages. It is young: on a PS5 it took 12
+      to 14 s to open an article that Chromium opened in 5 s, some sites
+      show nothing in it (YouTube, in our test), it has no sandbox, and
+      on some pages it gives no answer at all (Wikipedia's article on the
+      Black Sea, every time we tried). When that happens ts5 starts a
+      fresh one and opens the page again, and if that one is silent too
+      the page comes in the text view, with a line that says so. Such a
+      step takes about half a minute. Put its `obscura` program on your
+      PATH or in `~/.local/bin`.
+    - **Text view**: ts5's own page reader, nothing to install. No scripts
+      run, so a page built by scripts shows little; links and search forms
+      work.
+    - `/browser PATH` names any other program that speaks Chrome's
+      debugging protocol.
+
+    The browser is the model's own: a fresh profile under
+    `~/.cache/tokenstation` with none of your logins or history, removed
+    when it stops. It stops with ts5-tui, with a new chat, and after ten
+    minutes unused (it starts again by itself). It runs on the processor
+    and leaves the GPU's memory to the model. A browser that isn't up in
+    30 s (`TS5_BROWSER_START_S`) is stopped and started once more before
+    the text view takes over. `TS5_BROWSER_FLAGS` adds flags to the
+    browser's command line; `TS5_BROWSER_TRACE=FILE` writes down what ts5
+    asks the browser and what comes back, for a browser that hangs or
+    shows a page wrongly.
+
+    To a site it is the Chrome it is: a Chromium without a window would
+    call itself "HeadlessChrome", which some sites turn away unread, so
+    ts5 has it send what the same Chrome sends with a window, and the
+    text view and the page reader ask for a page with a browser's headers
+    too. Nothing names ts5 or a model. `TS5_BROWSER_AGENT=own` in ts5-tui's
+    environment leaves the browser its own words and sends the text
+    view's requests as "TokenStation5". That is all ts5 does about it: a
+    site that still tests for a person (a captcha, a "checking your
+    browser" page) is left closed, and the model says so.
+  - **Files** (off until you switch it on: Settings → Tool: files, or
+    `/tools files on`): the model reads a file, lists a folder, changes
+    part of a file or writes a whole one. **No change is made unseen**:
+    you get the lines that go out (red, `-`) and the lines that come in
+    (green, `+`) with the lines around them, and say yes or no; "every
+    change in this chat" stops the questions for the chat. `/undo` takes
+    the last change back (a new file is removed again), as long as the
+    file is still as the model left it. Reading is asked too, until you
+    choose "every file in this folder, this chat"; a hidden file (a name
+    that starts with a dot) and a file outside the folder ts5-tui was
+    started in are asked for each time. Paths start at that folder, the
+    one the terminal's commands run in. Text files up to 8 MiB; a long
+    file is read in parts. A change has to name the text it replaces
+    exactly: one that matches nothing tells the model the line of the
+    file that comes closest, and a line break sent where the file's code
+    has `\n` written out (a small model's usual slip) is read as that.
+  - **Outside tools (MCP)**: a program that speaks MCP, the Model
+    Context Protocol, gives the model tools of its own (a calendar, a
+    database, a code host: whatever the program is for). Add one with the
+    command line its instructions give:
+    `/mcp add NAME PROGRAM [ARGUMENTS]` (often `npx -y …` or `uvx …`;
+    `KEY=VALUE` words before the program are its environment). ts5-tui
+    starts the program, asks what it offers and hands those tools to the
+    model as `NAME_TOOL`. **Every call is shown first**, with what it is
+    called with: Enter runs it, Esc doesn't, and → moves to "every call
+    to NAME, this chat". `/mcp` lists the programs, `/mcp NAME` its
+    tools; `/mcp NAME off`, `ask` or `allow` (never asks) are its three
+    steps, also in Settings; `/mcp NAME only TOOL …` leaves the model
+    just those tools (`all` gives them back), `/mcp NAME restart` starts
+    it again, `/mcp remove NAME` takes it out. The list is
+    `~/.config/tokenstation/mcp.json`, in the layout other MCP clients
+    read (`{"mcpServers": {"NAME": {"command": …, "args": […], "env":
+    {…}}}}`), so a list made for one of them can be pasted in
+    (`/mcp reload` reads it again); ts5-tui's own keys there are
+    `"disabled": true`, `"ask": false` and `"only": […]`.
+    The tools' descriptions are sent with every message, so a program
+    with many tools makes every chat shorter: `/mcp` says how many tokens
+    each one costs, and `only` cuts that down. A program runs as you, for
+    as long as ts5-tui does, and is ended when ts5-tui quits or the tools
+    are switched off; it doesn't get ts5's API key or web search key
+    unless its own `env` gives it one. What it prints for itself is kept
+    in `~/.local/share/tokenstation/mcp-NAME.log`. Only programs on this
+    machine so far: a server reached by a web address (`"url"`) is listed
+    as not spoken to yet. `ts5-tui --mcp` starts the programs, prints
+    what each offers and ends them; `ts5-tui --mcp-call TOOL '{…}'` makes
+    one call without a model. An outside program's results are text from
+    a stranger like a web page is, and the program itself can do whatever
+    you can: add only ones you trust.
   - **Memory**: tell it "remember that I write Rust" and it keeps a note.
     The model reads its notes at the start of every chat. `/memory` lists
     them, `/memory forget N` removes one, `/memory clear` all of them,
@@ -284,12 +407,21 @@ ts5-tui --url http://ps5.local:8081  # another one
     `~/.local/share/tokenstation/memory.md`.
 
   Every model ts5 serves can call tools: the ones whose file has no tool
-  format of its own (DeepSeek R1) are asked in words. Small models call
-  tools less reliably than large ones. A web page is text from a stranger:
-  with "every command" chosen, a page the model reads could talk it into a
-  command, so leave the question on when it reads pages you don't trust. A model that
-  keeps calling tools gets twelve rounds for one message, then has to
-  answer.
+  format of its own (DeepSeek R1) are asked in words. How well it uses
+  them is the model's own doing. On a PS5, given the browser, the files
+  and an outside tool, the Qwen3, Qwen3.5 and Qwen3.8 models, the three
+  Bonsai models, Gemma 4 12B, Gemma 3 12B and Qwen2.5 Coder 14B did what
+  was asked. Llama 3.1 8B did with files and outside tools, and clicked
+  wrong links on a web page. DeepSeek R1 14B was right about two times in
+  three. Gemma 3 4B, Llama 3.2 3B and Qwen2.5 Coder 7B mostly were not,
+  and one of them emptied the file it was to fix with a command of its
+  own: with a small model, keep the questions on. A web page is text from
+  a stranger: with "every command" chosen, a page the model reads could
+  talk it into a command, so leave the question on when it reads pages you
+  don't trust. A model that keeps calling tools gets twelve rounds for one
+  message, then has to answer; reading on down a page or a file is not
+  counted (up to 48 turns in all). If it asks for more after that, the
+  chat says so, and "go on" gives it twelve more.
 - **Keys that can't surprise**: with something typed at the prompt, Tab
   stays there (it completes a command) instead of changing the page. PgUp
   and PgDn scroll the chat, and so do Shift or Alt with the up and down

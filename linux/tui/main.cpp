@@ -31,7 +31,9 @@
 #include "app.h"
 #include "catalog.h"  // ps5/catalog.h: the TV app's downloads, pinned and hashed
 #include "chat.h"
+#include "files.h"
 #include "json.h"
+#include "mcp.h"
 #include "store.h"
 #include "tested.h"  // the models tested on a PS5 that the catalog doesn't have
 #include "tested_models.h"  // engine/src: the helper tuning found for each of them
@@ -1223,10 +1225,18 @@ ChatRequest chat_request() {
     rq.max_tokens = g->cfg.max_tokens;
     rq.n_ctx = sv.n_ctx;
     rq.summarize = g->cfg.summarize;
-    rq.tools.web = g->cfg.tool_web;
-    rq.tools.page = g->cfg.tool_page;
-    rq.tools.terminal = g->cfg.tool_terminal;
-    rq.tools.memory = g->cfg.tool_memory;
+    const bool tools = g->cfg.tools_on();  // the one switch over them all
+    rq.tools.web = tools && g->cfg.tool_web;
+    rq.tools.page = tools && g->cfg.tool_page;
+    rq.tools.terminal = tools && g->cfg.tool_terminal;
+    rq.tools.memory = tools && g->cfg.tool_memory;
+    rq.tools.browser = tools && g->cfg.tool_browser;
+    rq.tools.terminal_ask = g->cfg.terminal_ask;
+    rq.tools.browser_ask = g->cfg.browser_ask;
+    rq.tools.files = tools && g->cfg.tool_files;
+    rq.tools.files_ask = g->cfg.files_ask;
+    rq.tools.mcp = tools;  // (each server has its own off in mcp.json)
+    rq.tools.browser_program = g->cfg.browser;
     rq.ts5 = !sv.tool_format.empty();
     return rq;
 }
@@ -2323,8 +2333,27 @@ std::vector<SetRow> settings_rows() {
         };
         r.push_back(x);
     }
-    // The tools the model can use in a chat, a switch each.
+    // The tools the model can use in a chat: one switch over them all, then
+    // a switch each (shown while the first is on).
     {
+        SetRow x{"Tools", c.no_tools ? "off for this run" : c.tools ? "on" : "off",
+                 c.no_tools  ? "started with --no-tools: the model gets no tools until ts5-tui is started without it"
+                 : c.tools   ? "the model may use the tools switched on below; off takes them all away at once"
+                             : "the model gets no tools at all; on brings back the ones you had on"};
+        x.change = [save](int) {
+            if (g->cfg.no_tools) {
+                show_toast("Started with --no-tools: the tools stay off for this run", g->th->warn, 4);
+                return;
+            }
+            g->cfg.tools = !g->cfg.tools;
+            if (!g->cfg.tools) browser_stop();
+            save();
+            mcp_load(g->cfg.tools_on());  // the outside programs end with the tools, and start with them
+        };
+        r.push_back(x);
+    }
+    const bool tools_shown = c.tools_on();
+    if (tools_shown) {
         const ServerState sv = server();
         SetRow x{"Tool: search",
                  !c.tool_web ? "off" : sv.web_search ? "on" : sv.wikipedia ? "on, Wikipedia only" : "on, needs the key",
@@ -2338,7 +2367,7 @@ std::vector<SetRow> settings_rows() {
         };
         r.push_back(x);
     }
-    {
+    if (tools_shown) {
         SetRow x{"Tool: pages", c.tool_page ? "on" : "off",
                  c.tool_page ? "the model can read a page you give it a link to" : "the model can't open links"};
         x.change = [save](int) {
@@ -2347,17 +2376,113 @@ std::vector<SetRow> settings_rows() {
         };
         r.push_back(x);
     }
-    {
-        SetRow x{"Tool: terminal", c.tool_terminal ? "on, asks first" : "off",
-                 c.tool_terminal ? "the model can run a command on this machine; you see each one and say yes or no"
-                                 : "the model can't run commands"};
-        x.change = [save](int) {
-            g->cfg.tool_terminal = !g->cfg.tool_terminal;
+    // Three steps each: off, on and asking first, on and never asking.
+    if (tools_shown) {
+        SetRow x{"Tool: terminal", !c.tool_terminal ? "off" : c.terminal_ask ? "on, asks first" : "on, never asks",
+                 !c.tool_terminal  ? "the model can't run commands"
+                 : c.terminal_ask  ? "the model can run a command on this machine; you see each one and say yes or no"
+                                   : "the model runs commands on this machine without showing you first: for a model you trust, "
+                                     "and no pages from strangers"};
+        x.change = [save](int d) {
+            const int at = !g->cfg.tool_terminal ? 0 : g->cfg.terminal_ask ? 1 : 2, to = (at + (d < 0 ? 2 : 1)) % 3;
+            g->cfg.tool_terminal = to != 0;
+            g->cfg.terminal_ask = to != 2;
             save();
         };
         r.push_back(x);
     }
-    {
+    if (tools_shown) {
+        SetRow x{"Tool: files", !c.tool_files ? "off" : c.files_ask ? "on, asks first" : "on, never asks",
+                 !c.tool_files  ? "the model can't read or change files (but for commands, if the terminal is on)"
+                 : c.files_ask  ? "the model reads and changes files; each change is shown first, for your yes or no"
+                                : "the model reads and changes files without asking (/undo takes a change back)"};
+        x.change = [save](int d) {
+            const int at = !g->cfg.tool_files ? 0 : g->cfg.files_ask ? 1 : 2, to = (at + (d < 0 ? 2 : 1)) % 3;
+            g->cfg.tool_files = to != 0;
+            g->cfg.files_ask = to != 2;
+            save();
+        };
+        r.push_back(x);
+    }
+    if (tools_shown) {
+        SetRow x{"Tool: browser", !c.tool_browser ? "off" : c.browser_ask ? "on, asks first" : "on, never asks",
+                 !c.tool_browser  ? "the model can't click through web pages"
+                 : c.browser_ask  ? "the model opens pages and follows links by itself; a button or typing waits for your yes"
+                                  : "the model presses buttons and types into pages without asking you"};
+        x.change = [save](int d) {
+            const int at = !g->cfg.tool_browser ? 0 : g->cfg.browser_ask ? 1 : 2, to = (at + (d < 0 ? 2 : 1)) % 3;
+            g->cfg.tool_browser = to != 0;
+            g->cfg.browser_ask = to != 2;
+            if (!g->cfg.tool_browser) browser_stop();
+            save();
+        };
+        r.push_back(x);
+    }
+    if (tools_shown) {
+        // Which program shows the pages. A path set with /browser stays
+        // until it is changed here.
+        static const char *const ids[] = {"auto", "obscura", "chromium", "text"};
+        static const char *const names[] = {"Auto", "Obscura", "Chromium", "Text view"};
+        int at = -1;
+        for (int i = 0; i < 4; i++)
+            if (c.browser == ids[i]) at = i;
+        const std::vector<std::string> found = browsers_found();
+        std::string have;
+        for (auto &f : found) have += (have.empty() ? "" : " and ") + f;
+        const std::string none = "no browser is installed, so pages are read as plain text without their scripts";
+        // "Chromium" stands for whichever of its family is here (Chrome, Brave, Edge).
+        const bool has = at == 1   ? std::find(found.begin(), found.end(), "Obscura") != found.end()
+                         : at == 2 ? !found.empty() && found[0] != "Obscura"
+                                   : false;
+        // (Auto is a Chromium or the text view: Obscura only when it is chosen.)
+        const bool only_obscura = !found.empty() && found[0] == "Obscura";
+        SetRow x{"Browser", at < 0 ? c.browser : names[at],
+                 at == 0   ? (found.empty() ? "Auto: " + none
+                              : only_obscura ? "Auto: no Chromium is installed, so pages are read as plain text (Obscura is "
+                                               "used only when you choose it)"
+                                             : "Auto: " + found[0] + " (installed: " + have + ")")
+                 : at == 3 ? "ts5's own page reader: light and quick, but a page built by scripts shows little"
+                 : at < 0  ? "a browser program you named with /browser"
+                 : has ? (at == 1 ? std::string("Obscura: light on memory, but young: slow to open a page, some sites show "
+                                                "nothing in it, and it can stop answering after a button")
+                                  : found[0] + ": the full browser, each page shut in its sandbox")
+                       : std::string(names[at]) + " is not installed: pages are read as plain text until it is"};
+        x.change = [save, at](int d) {
+            g->cfg.browser = ids[((at < 0 ? 0 : at) + d + 4) % 4];
+            browser_stop();
+            save();
+        };
+        r.push_back(x);
+    }
+    // The outside tools (mcp.h): a row a server, the same three steps.
+    if (tools_shown) {
+        const std::vector<McpServer> servers = mcp_servers();
+        if (servers.empty()) {
+            SetRow x{"Outside tools", "none",
+                     "a program that speaks MCP gives the model its tools: /mcp add NAME PROGRAM in the chat (or mcp.json)"};
+            r.push_back(x);
+        }
+        for (auto &sv : servers) {
+            size_t on = 0;
+            for (auto &t : sv.tools) on += t.on;
+            SetRow x{"Outside tools", sv.name + ": " + (sv.level == 0 ? "off" : sv.level == 1 ? "on, asks first" : "on, never asks"),
+                     sv.level == 0   ? "the model doesn't get this program's tools, and it isn't running"
+                     : sv.state == 1 ? "starting…"
+                     : sv.state == 3 ? "not running: " + sv.why
+                     : sv.state == 0 ? "not started"
+                                     : fmt("%zu tool%s, about %zu tokens in every message%s", on, on == 1 ? "" : "s",
+                                           (sv.chars + 2) / 3,
+                                           sv.level == 2 ? "; its calls go without asking" : "; each call is shown to you first")};
+            const std::string name = sv.name;
+            const int at = sv.level;
+            x.change = [name, at](int d) {
+                std::string why;
+                if (!mcp_set_level(name, (at + (d < 0 ? 2 : 1)) % 3, why)) show_toast(why, g->th->warn, 6);
+            };
+            r.push_back(x);
+        }
+    }
+    if (tools_shown) {
         const size_t notes = memory_notes().size();
         SetRow x{"Tool: memory", !c.tool_memory ? "off" : notes ? fmt("on, %zu note%s", notes, notes == 1 ? "" : "s") : "on",
                  c.tool_memory ? "notes the model keeps when you say remember; it sees them in every chat (/memory)"
@@ -2770,33 +2895,106 @@ void run_command(const std::string &line) {
                        "Wikipedia without one)", &f.tool_web},
             {"pages", "reads a web page you give it a link to", &f.tool_page},
             {"terminal", "runs a command on this machine; you see each one first and say yes or no", &f.tool_terminal},
+            {"files", "reads and lists files, and changes them: you see each change, lines out and lines in, and say "
+                      "yes or no (`/undo` takes the last one back)", &f.tool_files},
             {"memory", "keeps notes when you ask it to remember, and sees them in every chat (`/memory`)", &f.tool_memory},
+            {"browser", "opens web pages and clicks through them: links by itself, a button or typing only after your yes "
+                        "(`/browser` picks the program)", &f.tool_browser},
         };
         const size_t sp = arg.find(' ');
         const std::string name = arg.substr(0, sp), to = sp == std::string::npos ? "" : unpad(arg.substr(sp + 1));
         bool found = false;
         if (name == "ask") {
-            // Back to a question before each command (after A).
+            // Back to a question before each command and each button: in
+            // this chat (after "every command"), and as the setting.
             c.ask_always = false;
+            c.ask_always_browser = false;
+            c.ask_always_files = false;
+            {
+                std::lock_guard<std::mutex> l(c.mu);
+                c.read_dirs.clear();
+                c.mcp_ok.clear();
+            }
+            f.terminal_ask = f.browser_ask = f.files_ask = true;
+            f.save();
+            for (auto &sv : mcp_servers()) {
+                std::string why;
+                if (sv.level == 2) mcp_set_level(sv.name, 1, why);
+            }
             found = true;
-            show_toast("The model asks before each command again", g->th->accent, 3);
+            show_toast("The model asks before each command, each button and each outside tool again", g->th->accent, 3);
+        } else if ((name == "on" || name == "off") && to.empty()) {
+            // The one switch over them all.
+            found = true;
+            if (f.no_tools) {
+                show_toast("Started with --no-tools: the tools stay off for this run", g->th->warn, 4);
+            } else {
+                f.tools = name == "on";
+                if (!f.tools) browser_stop();
+                f.save();
+                mcp_load(f.tools_on());
+                show_toast(f.tools ? "Tools: on (the ones switched on in Settings)" : "Tools: all off", g->th->accent, 3);
+            }
         }
         for (const Row &r : rows) {
             if (name != r.name) continue;
+            // "ask" and "allow" (the terminal and the browser): on, and
+            // whether each command, or button, waits for a yes.
+            bool *ask = r.on == &f.tool_terminal  ? &f.terminal_ask
+                        : r.on == &f.tool_browser ? &f.browser_ask
+                        : r.on == &f.tool_files   ? &f.files_ask
+                                                  : nullptr;
             found = true;
             if (to == "on" || to == "off") *r.on = to == "on";
             else if (to.empty()) *r.on = !*r.on;
+            else if (ask && (to == "ask" || to == "allow")) *r.on = true, *ask = to == "ask";
             else found = false;
             if (found) {
+                if (!f.tool_browser) browser_stop();
                 f.save();
-                show_toast(std::string("Tool ") + r.name + ": " + (*r.on ? "on" : "off"), g->th->accent, 3);
+                show_toast(std::string("Tool ") + r.name + ": " +
+                               (!*r.on ? "off" : !ask ? "on" : *ask ? "on, asks first" : "on, never asks") +
+                               (*r.on && !f.tools_on() ? "  (all tools are off: /tools on)" : ""),
+                           g->th->accent, 3);
             }
         }
         if (!found) {
-            std::string h = "**The model's tools**  (`/tools NAME on` or `off`, or Settings)\n";
-            for (const Row &r : rows) h += std::string("`") + r.name + "`  **" + (*r.on ? "on" : "off") + "**  " + r.what + "\n";
+            std::string h = "**The model's tools**  (`/tools NAME on` or `off`; `/tools terminal allow` or `ask`, the same for "
+                            "`files` and `browser`; `/tools off` takes them all away, `/tools on` gives them back; or "
+                            "Settings)\n";
+            if (!f.tools_on())
+                h += f.no_tools ? "**All tools are off for this run** (ts5-tui was started with --no-tools).\n"
+                                : "**All tools are off** (`/tools on`). The switches as they will be then:\n";
+            for (const Row &r : rows) {
+                const bool *ask = r.on == &f.tool_terminal  ? &f.terminal_ask
+                                  : r.on == &f.tool_browser ? &f.browser_ask
+                                  : r.on == &f.tool_files   ? &f.files_ask
+                                                            : nullptr;
+                h += std::string("`") + r.name + "`  **" + (!*r.on ? "off" : ask && !*ask ? "on, never asks" : "on") + "**  " +
+                     r.what + (*r.on && ask && !*ask ? "  **The question is switched off** (`/tools ask` brings it back)." : "") +
+                     "\n";
+            }
+            {
+                // The outside tools have their own list.
+                const std::vector<McpServer> servers = mcp_servers();
+                size_t on = 0, up = 0;
+                for (auto &sv : servers) {
+                    if (sv.level == 0 || sv.state != 2) continue;
+                    up++;
+                    for (auto &t : sv.tools) on += t.on;
+                }
+                h += "`mcp`  **" +
+                     (servers.empty() ? std::string("none")
+                                      : fmt("%zu tool%s from %zu of %zu program%s", on, on == 1 ? "" : "s", up, servers.size(),
+                                            servers.size() == 1 ? "" : "s")) +
+                     "**  outside tools, from programs that speak MCP: each call is shown first, for your yes or no "
+                     "(`/mcp` lists and adds them)\n";
+            }
             if (f.tool_terminal && c.ask_always.load())
                 h += "\nCommands run **without asking** in this chat (you chose that). `/tools ask` brings the question back.";
+            if (f.tool_browser && c.ask_always_browser.load())
+                h += "\nButtons and typing on web pages go **without asking** in this chat (you chose that). `/tools ask` "
+                     "brings the question back.";
             const ServerState sv = server();
             if (f.tool_web && !sv.web_search && sv.wikipedia)
                 h += "\nWithout a web search key the search is **Wikipedia only** (no news, prices or weather). For the "
@@ -2808,6 +3006,156 @@ void run_command(const std::string &line) {
                 h += "\nThis server isn't ts5's own: whether its model can call tools is up to it.";
             chat_note(c, h);
         }
+    } else if (cmd == "/browser") {
+        // "/browser": which program shows the pages; "/browser chromium" or a path picks one.
+        Config &f = g->cfg;
+        const std::vector<std::string> found = browsers_found();
+        if (!arg.empty()) {
+            // A program by its path or its name: kept as the whole path, so
+            // it is the same program wherever ts5-tui is started next.
+            const bool word = arg == "auto" || arg == "obscura" || arg == "chromium" || arg == "text";
+            const std::string at = word ? arg : which(arg);
+            if (at.empty()) {
+                show_toast("There is no program " + arg + " here: auto, obscura, chromium, text, or a browser's path", g->th->warn, 5);
+            } else {
+                f.browser = at;
+                f.save();
+                browser_stop();
+                show_toast("Browser: " + at + (f.tool_browser ? "" : "  (the tool is off: /tools browser on)"), g->th->accent, 4);
+            }
+        } else {
+            std::string have;
+            for (auto &x : found) have += (have.empty() ? "" : " and ") + x;
+            std::string h = "**The model's browser**  (`/tools browser on` or `off`; `/browser auto`, `obscura`, `chromium`, "
+                            "`text` or a program's path)\n";
+            h += std::string("The tool is **") + (f.tool_browser ? "on" : "off") + "**. Pages are shown with: **" + f.browser + "**.\n";
+            h += found.empty() ? "No browser is installed here, so pages are read as plain text: their scripts don't run, and "
+                                 "only links and simple forms work. Installing Chromium (`sudo apt install chromium`) or "
+                                 "Obscura gives the model the page as you would see it.\n"
+                               : "Installed here: " + have + ". Auto takes " +
+                                     (found[0] == "Obscura" ? std::string("the text view: Obscura is young (slow to open a page, "
+                                                                          "and it can stop answering after a button), so it is "
+                                                                          "used only when you choose it with `/browser obscura`")
+                                                            : found[0]) + ".\n";
+            h += "The model follows links by itself. Before it presses a button or types into a page, you are asked.";
+            chat_note(c, h);
+        }
+    } else if (cmd == "/mcp") {
+        // Outside tools (mcp.h). "/mcp": the programs and what they offer;
+        // "/mcp add NAME PROGRAM ARGS", "/mcp remove NAME", "/mcp reload",
+        // "/mcp NAME [off|on|ask|allow|restart|only TOOL...|all]".
+        const size_t sp = arg.find(' ');
+        const std::string first = arg.substr(0, sp), rest = sp == std::string::npos ? "" : unpad(arg.substr(sp + 1));
+        const size_t sp2 = rest.find(' ');
+        const std::string second = rest.substr(0, sp2), tail = sp2 == std::string::npos ? "" : unpad(rest.substr(sp2 + 1));
+        const bool run = g->cfg.tools_on();
+        const std::string off_note = run ? "" : "  (all tools are off: /tools on)";
+        std::string why;
+        auto level_words = [](int level) { return level == 0 ? "off" : level == 1 ? "on, asks first" : "on, never asks"; };
+        auto state_words = [](const McpServer &sv) {
+            size_t on = 0;
+            for (auto &t : sv.tools) on += t.on;
+            return sv.level == 0   ? std::string("")
+                   : sv.state == 1 ? std::string("starting…")
+                   : sv.state == 3 ? "**not running**: " + sv.why
+                   : sv.state == 0 ? std::string("not started")
+                                   : fmt("%zu tool%s, about %zu tokens in every message", on, on == 1 ? "" : "s",
+                                         (sv.chars + 2) / 3);
+        };
+        const std::vector<McpServer> servers = mcp_servers();
+        const McpServer *one = nullptr;
+        for (auto &sv : servers)
+            if (sv.name == first) one = &sv;
+        if (first == "add") {
+            if (second.empty() || tail.empty())
+                show_toast("/mcp add NAME PROGRAM [ARGUMENTS]: a name of your choosing, then the program as its "
+                           "instructions give it", g->th->warn, 6);
+            else if (!mcp_add(second, tail, why)) show_toast(why, g->th->warn, 8);
+            else show_toast("Outside tools: " + second + " added" + (run ? ", starting it…" : "") + off_note, g->th->accent, 4);
+        } else if (first == "remove" || first == "rm") {
+            if (!mcp_remove(second, why)) show_toast(second.empty() ? "/mcp remove NAME" : why, g->th->warn, 6);
+            else show_toast("Outside tools: " + second + " removed", g->th->accent, 3);
+        } else if (first == "reload") {
+            // mcp.json read again; a program that didn't start gets another try.
+            why = mcp_load(run);
+            for (auto &sv : mcp_servers()) {
+                std::string w;
+                if (sv.state == 3) mcp_restart(sv.name, w);
+            }
+            show_toast(why.empty() ? "Outside tools: mcp.json read again" + off_note : why, why.empty() ? g->th->accent : g->th->warn,
+                       why.empty() ? 3 : 10);
+        } else if (one && !second.empty()) {
+            const int to = second == "off" ? 0 : second == "ask" ? 1 : second == "allow" ? 2 : second == "on" ? std::max(1, one->level) : -1;
+            bool ok = true;
+            std::string said;
+            if (to >= 0) {
+                ok = mcp_set_level(first, to, why);
+                said = level_words(to);
+            } else if (second == "restart") {
+                ok = mcp_restart(first, why);
+                said = "starting it again…";
+            } else if (second == "only" && !tail.empty()) {
+                std::vector<std::string> names;
+                std::istringstream in(tail);
+                for (std::string t; in >> t;) names.push_back(t);
+                ok = mcp_set_only(first, names, why);
+                said = fmt("the model gets %zu of its tools", names.size());
+            } else if (second == "all") {
+                ok = mcp_set_only(first, {}, why);
+                said = "the model gets all of its tools";
+            } else {
+                ok = false;
+                why = "/mcp " + first + " off, on, ask, allow, restart, only TOOL…, or all";
+            }
+            show_toast(ok ? "Outside tools: " + first + ": " + said + off_note : why, ok ? g->th->accent : g->th->warn, ok ? 3 : 6);
+        } else if (one) {
+            // One program: every tool it has, and whether the model gets it.
+            std::string h = "**" + one->name + "**  **" + level_words(one->level) + "**  " + state_words(*one) + "\n`" +
+                            one->command + "`\n";
+            for (auto &t : one->tools) {
+                std::string what = t.what.substr(0, t.what.find('\n'));
+                if (what.size() > 140) {
+                    size_t n = 140;
+                    while (n > 0 && ((unsigned char)what[n] & 0xC0) == 0x80) n--;
+                    what = what.substr(0, n) + "…";
+                }
+                h += "`" + t.shown + "`  " + (!t.left.empty() ? "**left out** (" + t.left + ")  " : !t.on ? "**left out** (`only`)  " : "") +
+                     what + "\n";
+            }
+            h += "\n`/mcp " + one->name + " off`, `ask` (each call is shown first), `allow` (never asks), `restart`, `only TOOL …` "
+                 "(the model gets just these), `all`. What the program says for itself is kept in `" +
+                 path_shown(data_dir() + "/mcp-" + one->name + ".log") + "`.";
+            chat_note(c, h);
+        } else if (!first.empty()) {
+            show_toast("No outside program called " + first + ": /mcp lists them, /mcp add NAME PROGRAM adds one", g->th->warn, 5);
+        } else {
+            std::string h = "**Outside tools**  (programs that speak MCP, the Model Context Protocol; `/mcp add NAME PROGRAM "
+                            "[ARGUMENTS]`, `/mcp remove NAME`, `/mcp NAME` for its tools, `/mcp NAME off`, `ask` or `allow`, "
+                            "`/mcp reload`; or Settings)\n";
+            if (!run)
+                h += g->cfg.no_tools ? "**All tools are off for this run** (ts5-tui was started with --no-tools), so no program is running.\n"
+                                     : "**All tools are off** (`/tools on`), so no program is running.\n";
+            for (auto &sv : servers) {
+                const std::string st = state_words(sv);
+                h += "`" + sv.name + "`  **" + level_words(sv.level) + "**  " + st + (st.empty() ? "" : "  ·  ") + "`" + sv.command + "`\n";
+            }
+            if (servers.empty())
+                h += "None are set up. Such a program gives the model its tools (a calendar, a database, a code host, "
+                     "whatever it is for): `/mcp add NAME PROGRAM [ARGUMENTS]`, with the command line the program's own "
+                     "instructions give (often `npx -y …` or `uvx …`).\n";
+            // (With ~ for the home folder, wherever ts5-tui was started.)
+            std::string kept = mcp_path();
+            if (const std::string hd = getenv("HOME") ? getenv("HOME") : ""; !hd.empty() && hd != "/" && kept.compare(0, hd.size() + 1, hd + "/") == 0)
+                kept = "~" + kept.substr(hd.size());
+            h += "\nThe list is kept in `" + kept + "`, in the layout other MCP clients read, so a list made for one "
+                 "of them can be pasted in. The model's every call to such a tool is shown to you first, with what it is "
+                 "called with, until you say otherwise for that program. A program runs with your rights on this machine: "
+                 "add only ones you trust.";
+            chat_note(c, h);
+        }
+    } else if (cmd == "/undo") {
+        // The last change a file tool made, taken back.
+        chat_note(c, file_undo());
     } else if (cmd == "/memory") {
         // The notes the model keeps (tools.h): list, forget N, clear, or add one by hand.
         std::string why;
@@ -3648,10 +3996,37 @@ void tick() {
         }
     }
     if (g->tuner.done && g->tuner.t1 > 0 && t - g->tuner.t1 < 0.2) scan_models();
+    // An outside program (mcp.h) that came up after a wait, or didn't: said once.
+    {
+        static std::map<std::string, int> seen;
+        static double checked = 0, t_first = 0;
+        if (t_first == 0) t_first = t;
+        if (t - checked > 0.5) {
+            checked = t;
+            for (auto &sv : mcp_servers()) {
+                int &was = seen[sv.name];
+                if (was == sv.state) continue;
+                size_t on = 0;
+                for (auto &tl : sv.tools) on += tl.on;
+                // (The ones that are up as ts5-tui opens need no word.)
+                if (was == 1 && sv.state == 2 && t - t_first > 3)
+                    show_toast(fmt("Outside tools: %s is ready, %zu tool%s", sv.name.c_str(), on, on == 1 ? "" : "s"), g->th->accent, 4);
+                else if (sv.state == 3 && sv.level != 0)
+                    show_toast("Outside tools: " + sv.name + " is not running: " + sv.why + "  (/mcp)", g->th->warn, 10);
+                was = sv.state;
+            }
+        }
+    }
     // The model asks to run a command while another page is open: say so there.
     if (g->chat.ask.load() == 1 && g->cur != CHAT && g->ask_told != g->chat.ask_t0.load()) {
         g->ask_told = g->chat.ask_t0.load();
-        show_toast("The model wants to run a command: F1 (or /chat) to see it and say yes or no", g->th->warn, 8);
+        const int kind = g->chat.ask_kind.load();
+        show_toast(kind == 4   ? "The model wants to use an outside tool: F1 (or /chat) to see it and say yes or no"
+                   : kind == 3 ? "The model wants to read a file or list a folder: F1 (or /chat) to see it and say yes or no"
+                   : kind == 2 ? "The model wants to change a file: F1 (or /chat) to see it and say yes or no"
+                   : kind == 1 ? "The model wants to do something on a web page: F1 (or /chat) to see it and say yes or no"
+                               : "The model wants to run a command: F1 (or /chat) to see it and say yes or no",
+                   g->th->warn, 8);
     }
     // Every chat is kept (store.h), after each answer.
     if (g->chat.answers != g->answers_saved && !g->chat.busy()) {
@@ -3850,12 +4225,18 @@ void on_winch(int) { g_winch = 1; }
 int usage(FILE *f) {
     fprintf(f,
             "ts5-tui: TokenStation5 in a terminal.\n\n"
-            "  ts5-tui [--url http://HOST:8081] [--key KEY] [--theme %s] [--no-intro] [--tmux|--no-tmux]\n\n"
+            "  ts5-tui [--url http://HOST:8081] [--key KEY] [--theme %s] [--no-intro] [--no-tools] [--tmux|--no-tmux]\n"
+            "  ts5-tui --mcp | --mcp-tools | --mcp-call TOOL ['{\"ARGUMENT\": ...}']\n\n"
             "It talks to a running TokenStation (the tokenstation service, the TV app, or\n"
             "`ts5 serve`; Models can start one), so it uses no GPU memory itself and works\n"
             "over SSH. From a plain terminal it runs in its own tmux session (\"ts5\"), so SSH\n"
             "dropping stops nothing: run ts5-tui again to go back to it (Ctrl+A d leaves it).\n"
             "In an IDE's terminal tmux stays off unless --tmux.\n"
+            "--no-tools: the model gets no tools in this run (no search, pages, commands,\n"
+            "browser, files, notes or outside programs), whatever Settings says.\n"
+            "--mcp: starts the outside tools' programs (mcp.json, beside tui.conf), says what\n"
+            "each one offers, and ends them (--mcp-tools: as the model is given them);\n"
+            "--mcp-call makes one call and prints its result.\n"
             "Settings are kept in ~/.config/tokenstation/tui.conf.\n"
             "Keys: F1-F5 or Tab for the pages, Enter, arrows, Esc; Ctrl+Q quits.\n",
             [] {
@@ -3898,6 +4279,8 @@ int main(int argc, char **argv) {
     if (const char *k = getenv("TS5_API_KEY"); k && *k) given_key(k);
     bool intro = app.cfg.intro;
     int tmux = 0;  // 1 --tmux, -1 --no-tmux
+    int mcp_mode = 0;  // 1 --mcp, 2 --mcp-call, 3 --mcp-tools
+    std::vector<std::pair<std::string, std::string>> mcp_calls;
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -3905,8 +4288,16 @@ int main(int argc, char **argv) {
         else if (a == "--key") given_key(next());
         else if (a == "--theme") app.cfg.theme = next();
         else if (a == "--no-intro") intro = false;
+        else if (a == "--no-tools") app.cfg.no_tools = true;
         else if (a == "--tmux") tmux = 1;
         else if (a == "--no-tmux") tmux = -1;
+        else if (a == "--mcp") mcp_mode = 1;
+        else if (a == "--mcp-tools") mcp_mode = 3;
+        else if (a == "--mcp-call") {
+            mcp_mode = 2;
+            const std::string tool = next();
+            mcp_calls.push_back({tool, i + 1 < argc && argv[i + 1][0] != '-' ? next() : std::string()});
+        }
         else if (a == "-h" || a == "--help") return usage(stdout);
         else if (a == "--version") {
             printf("ts5-tui %s\n", TS5_VERSION);
@@ -3925,6 +4316,11 @@ int main(int argc, char **argv) {
         return 2;
     }
     signal(SIGPIPE, SIG_IGN);
+    if (mcp_mode == 1 || mcp_mode == 3) return mcp_check_main(mcp_mode == 3);
+    if (mcp_mode == 2) {
+        if (mcp_calls[0].first.empty()) return usage(stderr);
+        return mcp_call_main(mcp_calls);
+    }
     // tmux by default from a plain terminal (ssh), not in an IDE's.
     if (tmux >= 0 && !getenv("TMUX") && isatty(0) && isatty(1) && (tmux == 1 || (app.cfg.tmux && !ide_terminal()))) {
         const int st = run_in_tmux(argc, argv);
@@ -3948,7 +4344,10 @@ int main(int argc, char **argv) {
     };
     scan_models();
     app.sens = read_sensors();
+    // The outside tools' programs start now, in the background.
+    const std::string bad_mcp = mcp_load(app.cfg.tools_on());
     if (intro) run_intro();
+    if (!bad_mcp.empty()) show_toast(bad_mcp + ": no outside tools until it is put right (/mcp reload)", app.th->warn, 12);
     if (!bad_saved.empty())
         show_toast("The saved server address \"" + bad_saved + "\" isn't one: using " + app.cfg.url + " (Settings → Server)",
                    app.th->warn, 12);
@@ -3982,6 +4381,7 @@ int main(int argc, char **argv) {
     }
     app.stop_poll = true;
     chat_stop(app.chat);
+    mcp_stop_all();
     {
         std::string why;
         save_chat(app.chat, why);
