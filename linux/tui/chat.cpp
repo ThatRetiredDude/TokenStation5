@@ -1078,6 +1078,11 @@ int make_room(Chat &c, const ChatRequest &rq) {
     return n;
 }
 
+// What a note that cut an answer short ends with, for the model.
+const char *const kNoteCut =
+    "\n\n[This note came in while you were writing your answer above, which stopped there. Go on from where it "
+    "stopped, as the note asks. Don't write again what is already above.]";
+
 // Message i as the request carries it. An assistant turn's tool calls go
 // with it when their results follow (with_calls), and its thinking too when
 // it belongs to the answer still being worked on (thinking): the server
@@ -1095,6 +1100,16 @@ std::string msg_json(const Chat &c, size_t i, bool with_calls, bool thinking, co
     }
     std::string content, reasoning;
     split_think(m, content, reasoning);
+    // A note that cut an answer short (steer_in): the model is told to go
+    // on from where that answer stopped. Without it Gemma 3 12B and
+    // DeepSeek R1 14B wrote the cut answer out again, word for word, before
+    // they went on (on the PS5); Qwen3 and Llama 3.1 went on by themselves.
+    if (m.role == "user" && m.steer && i > 0) {
+        const Msg &before = c.msgs[i - 1];
+        std::string said, thought;
+        if (before.role == "assistant" && before.steered) split_think(before, said, thought);
+        if (!said.empty()) content += kNoteCut;
+    }
     if (m.role != "assistant" || !with_calls) return role_json(m.role, content);
     std::string j = "{\"role\":\"assistant\",\"content\":" + ts5::json_escape(content);
     if (thinking && !reasoning.empty()) j += ",\"reasoning_content\":" + ts5::json_escape(reasoning);
