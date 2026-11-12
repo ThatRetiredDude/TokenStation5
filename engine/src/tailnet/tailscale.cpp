@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
+#include <atomic>
 #include <cstring>
 #include <map>
 
@@ -59,6 +60,22 @@ double now_s() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+// TS5_NET_LOG=1: the tailnet's traffic in the log, its first 600 lines (to
+// find why a device gets no answer). Keys are shown by their first 4 bytes.
+bool net_trace() {
+    static const bool on = [] {
+        const char *v = getenv("TS5_NET_LOG");
+        return v && strcmp(v, "1") == 0;
+    }();
+    return on;
+}
+std::atomic<int> g_traced{0};
+#define TRACE(...)                                          \
+    do {                                                    \
+        if (net_trace() && g_traced++ < 600) log(__VA_ARGS__); \
+    } while (0)
+
+
 void wipe(void *p, size_t n) {
     volatile uint8_t *b = (volatile uint8_t *)p;
     while (n--) *b++ = 0;
@@ -105,6 +122,18 @@ struct Url {
 
 bool is_disco(const std::string &p) {
     return p.size() >= kDiscoHeader + 24 + 16 + 2 && memcmp(p.data(), kDiscoMagic, kDiscoMagicLen) == 0;
+}
+
+const char *packet_kind(const std::string &p) {
+    if (is_disco(p)) return "disco";
+    if (p.size() >= 4 && !p[1] && !p[2] && !p[3])
+        switch (p[0]) {
+            case 1: return "wireguard handshake";
+            case 2: return "wireguard handshake reply";
+            case 3: return "wireguard cookie";
+            case 4: return "wireguard data";
+        }
+    return "something else";
 }
 
 // An IPv4 address and port as one number (address in the high bits).
@@ -566,9 +595,17 @@ void Client::send(const uint8_t to[32], const void *data, size_t len) {
         pa.wanted = now;
         if (udp_ >= 0 && pa.best && now - pa.best_at < kTrustDirect) {
             const sockaddr_in a = addr_of(pa.best);
-            if (sendto(udp_, data, len, MSG_DONTWAIT, (const sockaddr *)&a, sizeof a) == (ssize_t)len) return;
+            if (sendto(udp_, data, len, MSG_DONTWAIT, (const sockaddr *)&a, sizeof a) == (ssize_t)len) {
+                TRACE("trace: out %zu bytes to %s, direct (%s)", len, hex(to, 4).c_str(),
+                      packet_kind(std::string((const char *)data, len)));
+                return;
+            }
         }
+    } else {
+        TRACE("trace: out to %s, a device the map doesn't list", hex(to, 4).c_str());
     }
+    TRACE("trace: out %zu bytes to %s, by the relay (%s)", len, hex(to, 4).c_str(),
+          packet_kind(std::string((const char *)data, len)));
     if (outbox_.size() > 1024) outbox_.pop_front();  // the relay is gone: keep the newest
     outbox_.emplace_back(std::string((const char *)to, 32), std::string((const char *)data, len));
 }
@@ -628,7 +665,7 @@ void Client::control_loop() {
                 continue;
             }
             if (!new_keys(keys, cfg.control_url) || !save_keys(cfg.state_file, keys)) {
-                set_state(Status::Problem, "can't make or keep the PS5's keys");
+                set_state(Status::Problem, "can't make or keep " TS5_DEVICE_NAME "'s keys");
                 for (int i = 0; i < 100 && !changed(); i++) usleep(50 * 1000);
                 continue;
             }
@@ -687,9 +724,13 @@ void Client::control_loop() {
             Json h = Json::object();
             h.set("IPNVersion", str("1.86.5-ts5-" + cfg.version));
             h.set("BackendLogID", str(keys.log_id));
+#ifdef TS5_PS5
             h.set("OS", str("freebsd"));
             h.set("OSVersion", str("PlayStation 5"));
             h.set("DeviceModel", str("PlayStation 5"));
+#else
+            h.set("OS", str("linux"));
+#endif
             h.set("App", str("TokenStation5"));
             h.set("Hostname", str(cfg.hostname));
             int home;
@@ -785,10 +826,10 @@ void Client::control_loop() {
             }
             if (rr["NodeKeyExpired"].boolean(false)) {
                 // A new device key, and the sign-in again.
-                log("the PS5's key expired; making a new one");
+                log(TS5_DEVICE_NAME "'s key expired; making a new one");
                 new_private_key(keys.node);
                 save_keys(cfg.state_file, keys);
-                why = "the PS5's key expired";
+                why = TS5_DEVICE_NAME "'s key expired";
                 break;
             }
             const std::string login = rr["Login"]["LoginName"].str();
@@ -815,7 +856,7 @@ void Client::control_loop() {
                 // Signed in, but an admin has to approve the device.
                 std::lock_guard<std::mutex> lk(mu_);
                 status_.state = Status::NeedsSignIn;
-                status_.problem = "waiting for the tailnet's admin to approve the PS5";
+                status_.problem = "waiting for the tailnet's admin to approve " TS5_DEVICE_NAME;
                 followup = "";
                 usleep(5 * 1000 * 1000);
             }
@@ -1079,6 +1120,13 @@ void Client::control_loop() {
                 status_.name = self_name;
                 status_.address = self_address;
                 status_.devices = (int)peers.size();
+                size_t with_disco = 0, with_eps = 0;
+                for (const auto &[k, pa] : paths_) {
+                    with_disco += pa.disco.size() == 32 && pa.disco != std::string(32, '\0');
+                    with_eps += !pa.endpoints.empty();
+                }
+                TRACE("trace: the map: %zu devices, %zu with a disco key, %zu with direct addresses, filter %s",
+                      peers.size(), with_disco, with_eps, filter.known ? "known" : "not sent");
             }
         }
         c.close();
@@ -1204,6 +1252,8 @@ void Client::relay_loop() {
                 std::lock_guard<std::mutex> lk(mu_);
                 while (hello && !outbox_.empty() && out.size() < (256u << 10)) {
                     out += frame(0x04, outbox_.front().first + outbox_.front().second);  // SendPacket
+                    TRACE("trace: relay out %zu bytes to %s", outbox_.front().second.size(),
+                          hex((const uint8_t *)outbox_.front().first.data(), 4).c_str());
                     outbox_.pop_front();
                 }
             }
@@ -1262,6 +1312,9 @@ void Client::relay_loop() {
                         if (p.size() > 32) {
                             std::lock_guard<std::mutex> lk(mu_);
                             const std::string from = p.substr(0, 32), packet = p.substr(32);
+                            TRACE("trace: relay in %zu bytes from %s (%s)%s", packet.size(),
+                                  hex((const uint8_t *)from.data(), 4).c_str(), packet_kind(packet),
+                                  paths_.count(from) ? "" : ", a device the map doesn't list");
                             if (is_disco(packet)) {
                                 disco_in(packet, &from, 0);
                                 break;
@@ -1281,6 +1334,7 @@ void Client::relay_loop() {
                         ok = false;
                         break;
                     default:  // ServerInfo, KeepAlive, PeerGone, PeerPresent...
+                        TRACE("trace: relay frame 0x%02x, %zu bytes", type, p.size());
                         break;
                 }
                 if (!ok) break;
@@ -1353,10 +1407,19 @@ void Client::disco_in(const std::string &packet, const std::string *relay_from, 
             node = k;
             break;
         }
-    if (node.empty() || (relay_from && *relay_from != node)) return;
-    std::string plain;
-    if (!box_open(disco_priv_, (const uint8_t *)sender.data(), packet.substr(kDiscoHeader), plain) || plain.size() < 2)
+    if (node.empty() || (relay_from && *relay_from != node)) {
+        TRACE("trace: disco %s dropped: %s", relay_from ? "by the relay" : addr_text(src).c_str(),
+              node.empty() ? "its disco key is no device's in the map" : "the relay's sender isn't that device");
         return;
+    }
+    std::string plain;
+    if (!box_open(disco_priv_, (const uint8_t *)sender.data(), packet.substr(kDiscoHeader), plain) || plain.size() < 2) {
+        TRACE("trace: disco from %s doesn't open", hex((const uint8_t *)node.data(), 4).c_str());
+        return;
+    }
+    TRACE("trace: disco %s from %s, %s", (uint8_t)plain[0] == kDiscoPing ? "ping" : (uint8_t)plain[0] == kDiscoPong ? "pong"
+                                         : (uint8_t)plain[0] == kDiscoCallMeMaybe ? "call-me-maybe" : "of another kind",
+          hex((const uint8_t *)node.data(), 4).c_str(), relay_from ? "by the relay" : addr_text(src).c_str());
     Path &pa = paths_[node];
     const double now = now_s();
     switch ((uint8_t)plain[0]) {
@@ -1518,6 +1581,8 @@ void Client::direct_loop() {
             const std::string packet(buf, (size_t)n);
             const uint64_t src = addr_key(from);
             std::lock_guard<std::mutex> lk(mu_);
+            TRACE("trace: udp in %zu bytes from %s (%s)%s", packet.size(), addr_text(src).c_str(), packet_kind(packet),
+                  is_disco(packet) || by_addr_.count(src) ? "" : ", from no address the PS5 knows");
             if (is_disco(packet)) {
                 disco_in(packet, nullptr, src);
                 continue;

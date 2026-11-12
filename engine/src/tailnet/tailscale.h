@@ -25,6 +25,14 @@
 #ifndef TS5_LOG_NAME
 #define TS5_LOG_NAME "ts5-title"
 #endif
+// What its messages call the machine it runs on.
+#ifndef TS5_DEVICE_NAME
+#ifdef TS5_PS5
+#define TS5_DEVICE_NAME "the PS5"
+#else
+#define TS5_DEVICE_NAME "this machine"
+#endif
+#endif
 #include <atomic>
 #include <cstdint>
 #include <deque>

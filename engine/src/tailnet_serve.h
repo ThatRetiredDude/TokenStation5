@@ -11,10 +11,13 @@
 //   tailscale.conf  on=0|1, name=NAME, server=URL, written here
 // TS5_TS_NAME and TS5_TS_SERVER give the name and control server when
 // tailscale.conf doesn't, TS5_TS_AUTH_KEY signs in without the QR code.
+// TS5_NET_LOG=1 puts the tailnet's traffic in the log (its first lines), to
+// find why a device gets no answer.
 //
 // This machine controls it through the server (from 127.0.0.1 only; ts5-tui's
 // Access page does):
-//   GET  /ts5/tailnet   what it is doing, as JSON (status_json)
+//   GET  /ts5/tailnet   what it is doing, as JSON (status_json; "peers" are
+//                       the devices that reached it lately, "devices" all of them)
 //   POST /ts5/tailnet   {"on": true|false}, {"name": "NAME"}, {"sign_out": true}
 #pragma once
 #include <memory>

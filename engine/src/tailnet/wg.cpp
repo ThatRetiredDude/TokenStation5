@@ -248,6 +248,7 @@ struct Loop {
         bool was_up = false;
     };
     std::map<std::string, TsPeer> ts_peers;     // by node key
+    int ts_unknown = 0, ts_traced = 0;           // log lines so far: packets from unlisted devices, TS5_NET_LOG's
     std::map<uint32_t, std::string> ts_standin;  // stand-in address: node key
     uint32_t ts_next = 1;
 };
@@ -414,7 +415,7 @@ std::string open_udp(Loop &L, int port) {
         const int e = errno;
         close(fd);
         return e == EADDRINUSE ? "port " + std::to_string(port) + " is in use"
-               : e == EACCES   ? "port " + std::to_string(port) + " is refused by the PS5"
+               : e == EACCES   ? "port " + std::to_string(port) + " is refused by " TS5_DEVICE_NAME
                                : "can't use port " + std::to_string(port) + " (errno " + std::to_string(e) + ")";
     }
     nonblocking(fd);
@@ -638,7 +639,7 @@ void ts_sync(Loop &L) {
         netif_set_up(&L.ts_nif);
         netif_set_link_up(&L.ts_nif);
         L.ts_up = true;
-        ts5::log_line(TS5_LOG_NAME ": tailscale: the PS5 is %s on the tailnet", m.address.c_str());
+        ts5::log_line(TS5_LOG_NAME ": tailscale: " TS5_DEVICE_NAME " is %s on the tailnet", m.address.c_str());
     }
     // Devices gone from the tailnet, or moved to another address.
     for (auto it = L.ts_peers.begin(); it != L.ts_peers.end();) {
@@ -704,7 +705,20 @@ void ts_receive(Loop &L) {
         if (d.size() < 4 || d[0] < 1 || d[0] > 4 || d[1] || d[2] || d[3]) continue;
         const std::string key((const char *)from, 32);
         auto it = L.ts_peers.find(key);
-        if (it == L.ts_peers.end() && (it = ts_add_peer(L, key)) == L.ts_peers.end()) continue;
+        const bool added = it == L.ts_peers.end();
+        if (added && (it = ts_add_peer(L, key)) == L.ts_peers.end()) {
+            // (Its first few: a device the map doesn't list, or no room.)
+            if (L.ts_unknown++ < 5)
+                ts5::log_line(TS5_LOG_NAME ": tailscale: a packet from %02x%02x%02x%02x, which the tailnet's map doesn't list "
+                              "(%zu devices in it)",
+                              from[0], from[1], from[2], from[3], L.ts_known.size());
+            continue;
+        }
+        if (detail() && L.ts_traced < 300) {
+            L.ts_traced++;
+            ts5::log_line(TS5_LOG_NAME ": tailscale: trace: wireguard type %d, %zu bytes, from %s%s", d[0], d.size(),
+                          it->second.name.c_str(), added ? " (now a peer)" : "");
+        }
         it->second.last = now_s();
         ts5_udp_input(TS5_UDP_TAILSCALE, d.data(), d.size(), it->second.standin, 1);
         // Data for a session the PS5 doesn't have (it restarted since): a
@@ -769,8 +783,11 @@ void Tunnel::loop() {
     tcp_arg(L.listener, &L);
     tcp_accept(L.listener, on_accept);
     L.api_port = cfg.api_port;
-    ts5::log_line(TS5_LOG_NAME ": wireguard: the PS5 is %s in the tunnel, key %s", cfg.address.c_str(),
-                  public_key_of(cfg.private_key).c_str());
+    if (cfg.on)
+        ts5::log_line(TS5_LOG_NAME ": wireguard: " TS5_DEVICE_NAME " is %s in the tunnel, key %s", cfg.address.c_str(),
+                      public_key_of(L.private_key).c_str());
+    else  // (its own server off: the key made above is used by nothing)
+        ts5::log_line(TS5_LOG_NAME ": wireguard: the tunnel is up, for the tailnet alone");
 
     double last_states = 0, pass_at = 0;
     std::vector<pollfd> fds;
