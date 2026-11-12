@@ -3725,14 +3725,19 @@ void draw_qr_overlay() {
     };
     // One code at a time (←→ for the next): two side by side, the camera
     // took neither. The roomiest way that fits: full cells with the quiet
-    // zone the standard asks for (4 modules), then half blocks with 4,
-    // then the code alone with the keys under it, over the bottom bar (an
-    // 80x24 terminal), then the same with a border of 2. Less than 2 and
-    // a phone's camera may not find it: the window is asked to be taller.
+    // zone the standard asks for (4 modules), then the code alone with the
+    // keys under it, over the bottom bar, then the same with a border of 2.
+    // Only then half blocks (an 80x24 terminal), in the same order: Apple's
+    // Terminal draws a half block as a thin line, and its code can't be
+    // read (an iPhone failed on both), so a line in red above and under
+    // such a code says how to get full cells. Less than 2 and a phone's
+    // camera may not find it: the window is asked to be taller.
     static const struct {
         int quiet;
         bool big, bare;
-    } kWays[] = {{4, true, false}, {4, false, false}, {4, false, true}, {2, false, false}, {2, false, true}};
+    } kWays[] = {{4, true, false},  {4, true, true},  {2, true, false},  {2, true, true},
+                 {4, false, false}, {4, false, true}, {2, false, false}, {2, false, true}};
+    const std::string kFull = "Can't scan it? Make this window full screen (or Cmd+minus).";
     int quiet = 4, tallest = 0, widest = 0, box_w = 0, box_h = 0;
     bool big = false, bare = false, fits = false;
     std::vector<std::string> lines;
@@ -3745,7 +3750,7 @@ void draw_qr_overlay() {
         }
         box_w = std::min(s.w - 2, std::max(widest + 6, 72));
         lines = bare ? std::vector<std::string>{} : wrap(g->qr_notes, box_w - 4);
-        box_h = 2 + (labels ? 1 : 0) + tallest + (int)lines.size() + 1 + (bare ? 0 : 2);
+        box_h = 2 + (labels ? 1 : 0) + tallest + (int)lines.size() + 1 + (bare ? 0 : 2) + (big ? 0 : 2);
         fits = box_h <= (bare ? s.h : s.h - 1) && widest + 4 <= box_w;
         if (fits) break;
     }
@@ -3761,9 +3766,14 @@ void draw_qr_overlay() {
     box(s, x, y, box_w, box_h, Style(t.accent, t.panel2), Style(t.fg, t.panel2), title, Style(t.accent, t.panel2, BOLD));
     int ty = y + 1;
     if (!fits) {
-        s.put(x + 2, ty, fit("Make the window taller to see the QR code (V shows it as text).", box_w - 4), Style(t.warn, t.panel2));
+        s.put(x + 2, ty, fit("Make the window taller to see the QR code (on a Mac: full screen, or Cmd+minus). V shows it as text.", box_w - 4), Style(t.warn, t.panel2));
         ty += 2;
     } else {
+        const auto full_warning = [&] {
+            const std::string w = fit(kFull, box_w - 4);
+            s.put(x + std::max(2, (box_w - text_width(w)) / 2), ty++, w, Style(t.bad, t.panel2, BOLD));
+        };
+        if (!big) full_warning();
         std::vector<int> shown;
         if (side_by_side)
             for (int i = 0; i < (int)codes.size(); i++) shown.push_back(i);
@@ -3782,7 +3792,9 @@ void draw_qr_overlay() {
             else qr_draw(s, cx, ty + (labels ? 1 : 0), m, quiet, big);
             cx += qr_cols(m, quiet, big) + 4;
         }
-        ty += (labels ? 1 : 0) + tallest + (bare ? 0 : 1);
+        ty += (labels ? 1 : 0) + tallest;
+        if (!big) full_warning();
+        ty += bare ? 0 : 1;
     }
     // The sign-in link on a line of its own, whole (a terminal opens a
     // link it sees: Cmd+click in Apple's Terminal), and a click copies it.
