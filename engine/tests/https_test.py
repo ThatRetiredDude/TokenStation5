@@ -418,6 +418,30 @@ def main():
         code, _, err = curl(fport, "/v1/models", key=k)
         check(code == 200, "a silent connection doesn't hold the others up", (code, err))
         s.close()
+        # The API's own port answers https:// too (Safari tries https:// first
+        # for an http:// address), as the front, the device named the same.
+        code, body, err = curl(port, "/")
+        check(code == 200 and "TokenStation5" in body, "https:// on the API's port: the chat page", (code, err))
+        code, body, err = curl(port, "/v1/models")
+        check(code == 401, "https:// on the API's port asks a tailnet device for a key", (code, body, err))
+        code, body, err = curl(port, "/v1/models", key=k)
+        check(code == 200 and '"data"' in body, "and answers with one", (code, body[:200], err))
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=10) as r:
+            check(r.status == 200, "http:// on the API's port as before")
+        # Only the certificate's name gets an answer: an address (no name
+        # asked for) or another name is ended before the certificate goes
+        # out, even for a client that would take any certificate.
+        for pt in (fport, port):
+            p = subprocess.run(["curl", "-sS", "-k", "--noproxy", "*", "--max-time", "10", f"https://127.0.0.1:{pt}/"],
+                               capture_output=True, text=True)
+            check(p.returncode != 0 and "TokenStation5" not in p.stdout,
+                  f"https://ADDRESS:{'front' if pt == fport else 'API port'} gets no certificate", (p.returncode, p.stderr))
+            p = subprocess.run(["curl", "-sS", "-k", "--noproxy", "*", "--max-time", "10", "--resolve",
+                                f"other.example:{pt}:127.0.0.1", f"https://other.example:{pt}/"],
+                               capture_output=True, text=True)
+            check(p.returncode != 0 and "TokenStation5" not in p.stdout, "nor does another name", (p.returncode, p.stderr))
+        code, _, err = curl(fport, "/v1/models", key=k)
+        check(code == 200, "and the front goes on", (code, err))
         log.flush()
         text = open(log_path).read()
         check(k not in text and "BEGIN" not in text, "no key in the log", text[-500:])

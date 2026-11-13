@@ -14,7 +14,9 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <vector>
 
+#include <mbedtls/asn1.h>
 #include <mbedtls/error.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/ssl.h>
@@ -51,6 +53,7 @@ struct Creds {
     mbedtls_x509_crt chain;
     mbedtls_pk_context key;
     mbedtls_ssl_config conf;
+    std::vector<std::string> names;  // the certificate's DNS names, in lower case
     Creds() {
         mbedtls_x509_crt_init(&chain);
         mbedtls_pk_init(&key);
@@ -64,6 +67,27 @@ struct Creds {
     Creds(const Creds &) = delete;
     Creds &operator=(const Creds &) = delete;
 };
+
+std::string lower(std::string s) {
+    for (char &c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+
+// Only a connection that asks for one of the certificate's names gets it. One
+// that asks for none (https://100.x.y.z:PORT/, an address: Safari's try at
+// HTTPS for an http:// address) or for another name is ended before the
+// certificate goes out, as when nothing answered HTTPS there, so Safari
+// goes on with http:// instead of warning about a certificate.
+int check_name(mbedtls_ssl_context *ssl) {
+    size_t len = 0;
+    const unsigned char *sni = mbedtls_ssl_get_hs_sni(ssl, &len);
+    const auto *cr = (const Creds *)mbedtls_ssl_get_user_data_p(ssl);
+    if (!sni || !len || !cr) return MBEDTLS_ERR_SSL_UNRECOGNIZED_NAME;
+    const std::string want = lower(std::string((const char *)sni, len));
+    for (const auto &n : cr->names)
+        if (n == want) return 0;
+    return MBEDTLS_ERR_SSL_UNRECOGNIZED_NAME;
+}
 
 int fd_send(void *ctx, const unsigned char *buf, size_t len) {
     const ssize_t n = ::send(*(int *)ctx, buf, len, MSG_NOSIGNAL);
@@ -129,7 +153,10 @@ void note_handshake(const std::string &device, int rc) {
         last = now;
     }
     log_line("ts5: https: a connection from %s ended before its TLS was done: %s",
-             device.empty() ? "this machine" : device.c_str(), rc ? tls_error(rc).c_str() : "timed out");
+             device.empty() ? "this machine" : device.c_str(),
+             rc == MBEDTLS_ERR_SSL_UNRECOGNIZED_NAME ? "it didn't ask for the certificate's name (an address?)"
+             : rc                                    ? tls_error(rc).c_str()
+                                                     : "timed out");
 }
 
 // One connection: TLS, then both ways to the API until either side ends.
@@ -140,6 +167,7 @@ void serve(std::shared_ptr<Creds> cr, int fd, std::string device, int api_port, 
     int api = -1;
     int rc = mbedtls_ssl_setup(&ssl, &cr->conf);
     mbedtls_ssl_set_bio(&ssl, &fd, fd_send, fd_recv, nullptr);
+    mbedtls_ssl_set_user_data_p(&ssl, cr.get());  // for check_name
     const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kHandshakeMs);
     while (rc == 0 && (rc = mbedtls_ssl_handshake(&ssl)) != 0) {
         if (rc != MBEDTLS_ERR_SSL_WANT_READ && rc != MBEDTLS_ERR_SSL_WANT_WRITE) break;
@@ -319,6 +347,13 @@ bool HttpsFront::set_certificate(const std::string &cert_pem, const std::string 
         why = "the certificate's key can't be read: " + tls_error(rc);
         return false;
     }
+    for (const mbedtls_x509_sequence *n = &cr->chain.subject_alt_names; n && n->buf.p; n = n->next)
+        if (n->buf.tag == (MBEDTLS_ASN1_CONTEXT_SPECIFIC | MBEDTLS_X509_SAN_DNS_NAME))
+            cr->names.push_back(lower(std::string((const char *)n->buf.p, n->buf.len)));
+    if (cr->names.empty()) {
+        why = "the certificate names no DNS name";
+        return false;
+    }
     rc = mbedtls_ssl_config_defaults(&cr->conf, MBEDTLS_SSL_IS_SERVER, MBEDTLS_SSL_TRANSPORT_STREAM,
                                      MBEDTLS_SSL_PRESET_DEFAULT);
     if (rc == 0) {
@@ -327,12 +362,27 @@ bool HttpsFront::set_certificate(const std::string &cert_pem, const std::string 
         rc = mbedtls_ssl_conf_alpn_protocols(&cr->conf, kAlpn);
     }
     if (rc == 0) rc = mbedtls_ssl_conf_own_cert(&cr->conf, &cr->chain, &cr->key);
+    mbedtls_ssl_conf_cert_cb(&cr->conf, check_name);
     if (rc != 0) {
         why = "TLS setup failed: " + tls_error(rc);
         return false;
     }
     std::lock_guard<std::mutex> lk(d_->mu);
     d_->creds = cr;
+    return true;
+}
+
+bool HttpsFront::adopt(int fd, const std::string &device) {
+    std::shared_ptr<Creds> cr;
+    {
+        std::lock_guard<std::mutex> lk(d_->mu);
+        cr = d_->creds;
+    }
+    if (!cr || !d_->api_port || d_->active.load() >= kMaxConns) return false;
+    const int fl = fcntl(fd, F_GETFL);
+    if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) != 0) return false;
+    d_->active.fetch_add(1);
+    std::thread(serve, cr, fd, device, d_->api_port, d_->note, &d_->active).detach();
     return true;
 }
 

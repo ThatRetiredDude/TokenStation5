@@ -236,7 +236,10 @@ then open the pages there, so the phone's browser treats them as secure
 pages: no warning, and its passwords offer the saved key above the
 keyboard. It renews the certificate 30 days before it ends. Until the admin
 console has HTTPS Certificates on, the Connect a phone row says so and the
-codes use the http address. The phone needs Tailscale's DNS (on by default
+codes use the http address. The API's own port answers HTTPS on the name
+too (`https://tokenstation5.YOUR-TAILNET.ts.net:18137/`), so a browser set
+to try HTTPS first still opens an old `http://…:18137` link by name, and an
+app can be given either address. The phone needs Tailscale's DNS (on by default
 in its app) to find the name. A certificate's name is public: it goes into
 the certificate transparency logs, with your tailnet's name, as with any
 Tailscale HTTPS certificate. The certificate and its key sit beside the

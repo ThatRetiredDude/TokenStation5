@@ -13,7 +13,9 @@
 // cert` does (acme.h, the DNS record through the control server), renews it
 // 30 days before it ends, and answers with it through a TLS front
 // (https_front.h) that passes each connection on to the API. Phones' browsers
-// then treat the pages as secure (their passwords fill the key in).
+// then treat the pages as secure (their passwords fill the key in). The
+// API's own port answers HTTPS too (https://NAME.TAILNET.ts.net:PORT/), so
+// a browser that tries https:// first for a saved http:// address gets in.
 // TS5_TS_HTTPS=0 leaves it off; TS5_ACME_DIRECTORY names another ACME server
 // (Let's Encrypt's staging, say).
 //

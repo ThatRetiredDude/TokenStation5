@@ -9,6 +9,10 @@
 //
 // A connection that didn't come through the tunnel (a program on this
 // machine) gets no name, as if it had reached the API directly.
+//
+// It answers only a connection that asks for one of the certificate's names
+// (SNI): https://100.x.y.z/ asks for none and is ended before the
+// certificate goes out, as if nothing answered HTTPS there.
 #pragma once
 #include <cstdint>
 #include <functional>
@@ -36,6 +40,12 @@ public:
     // with why when they can't be used, and the earlier pair stays.
     bool set_certificate(const std::string &cert_pem, const std::string &key_pem, std::string &why);
     bool has_certificate();
+    // Takes a connection that began TLS on another port (the API's, for an
+    // address that starts https:// with the API's port), its handshake not
+    // read yet, from device: served as one of the front's own, and closed
+    // when done. False, with fd untouched, when there's no certificate or
+    // too many connections.
+    bool adopt(int fd, const std::string &device);
 
 private:
     struct Impl;

@@ -145,6 +145,7 @@ struct Tailnet::Impl {
     // has a certificate (the tunnel's 443 opens then), and what to show.
     HttpsFront front;
     int front_port = 0;
+    std::string test_device;  // TS5_HTTPS_TEST's DEVICE
     bool https_live = false;
     std::string https_state = "off", https_name, https_problem;
     long long https_until = 0;
@@ -212,6 +213,7 @@ void Tailnet::start(const std::string &dir, int api_port) {
             d_->front.set_certificate(read_file(f[0]), read_file(f[1]), why)) {
             d_->https_live = true;
             d_->https_state = "on";
+            d_->test_device = device;
             log_line("ts5: https: test front on 127.0.0.1:%d", d_->front_port);
         } else {
             log_line("ts5: https: TS5_HTTPS_TEST: %s", why.empty() ? "CERT:KEY:PORT:DEVICE" : why.c_str());
@@ -453,6 +455,15 @@ void Tailnet::attach(Server &s) {
             if (!device.empty()) return device;
         }
         return ip;
+    });
+    // https:// with the API's port (Safari's try at HTTPS for an http://
+    // address it was given, or an app told https://NAME:PORT/v1): the
+    // front's TLS, for a device on the tailnet. Anything else ends as
+    // before. (TS5_HTTPS_TEST: this machine's own, as DEVICE.)
+    s.set_tls([this](int fd, const std::string &ip, const std::string &client) {
+        if (ip != "127.0.0.1" || !d_->front_port) return false;
+        const std::string device = client != ip ? client : d_->test_device;
+        return !device.empty() && d_->front.adopt(fd, device);
     });
     s.set_routes([this](const std::string &method, const std::string &path, const std::string &body,
                         const std::string &client, int &code, std::string &reply) {

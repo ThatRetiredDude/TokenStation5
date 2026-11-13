@@ -74,6 +74,13 @@ public:
     };
     using Pages = std::function<bool(const Page &, int fd)>;
     void set_pages(Pages f) { state_.pages = std::move(f); }
+    // A connection whose first byte starts a TLS handshake (an address
+    // that starts https:// with this port): asked with the connection, its
+    // peer's address and its name as set_client_name gave it, before
+    // anything is read from it. True when it took fd (it closes it); false
+    // ends it, as without one. Set before start().
+    using Tls = std::function<bool(int fd, const std::string &ip, const std::string &client)>;
+    void set_tls(Tls f) { state_.tls = std::move(f); }
 
     // For a status display.
     struct Activity {
@@ -115,6 +122,7 @@ public:
         std::string key_hint;
         Routes routes;
         Pages pages;
+        Tls tls;
     };
 
 private:

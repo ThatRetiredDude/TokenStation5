@@ -320,6 +320,7 @@ double now_ms() {
 // before the request was read.
 struct Usage {
     UsageRecord rec;
+    std::string ip;       // the peer's address
     double t0 = 0;        // when the request was read
     bool pending = true;  // a completions request (or one not read yet) whose record isn't written
     bool closed = false;  // its connection is closed
@@ -344,6 +345,18 @@ const char *unavailable_why(const std::string &s) {
 }
 
 void handle(int fd, Server::State &state, Usage &u) {
+    if (state.tls) {
+        // A TLS handshake starts 0x16, which no HTTP request does.
+        unsigned char first = 0;
+        ssize_t n;
+        while ((n = recv(fd, &first, 1, MSG_PEEK)) < 0 && errno == EINTR) {
+        }
+        if (n == 1 && first == 0x16 && state.tls(fd, u.ip, u.rec.client)) {
+            u.pending = false;
+            u.closed = true;
+            return;
+        }
+    }
     Request r;
     if (!read_request(fd, r)) {
         if (r.tls)
@@ -1427,9 +1440,10 @@ void Server::accept_loop() {
         if (peer.sin_family != AF_INET || !inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof ip)) ip[0] = 0;
         std::string client = ip;
         if (client_name_) client = client_name_(client, ntohs(peer.sin_port));
-        std::thread([this, c, client] {
+        std::thread([this, c, client, peer_ip = std::string(ip)] {
             Usage u;
             u.rec.client = client;
+            u.ip = peer_ip;
             u.t0 = now_ms();
             // A request that fails (out of memory, say) ends its connection,
             // not the server; a completions request still gets its record.
