@@ -78,8 +78,11 @@ def main():
         ct.check(t.ask("hello there"), "a chat to send with it")
         t.type("/feedback")
         t.keys("Enter")
-        ct.check(t.wait("Say what went wrong", 5), "/feedback alone says what to write", t.screen())
-        t.type("/feedback the helper stopped, write me at me@example.cz")
+        ct.check(t.wait("with your email if you'd like a reply", 5), "/feedback alone says what to write", t.screen())
+        ct.check("/feedback " in t.screen().split("ts5>")[-1] if "ts5>" in t.screen() else "/feedback" in t.screen(),
+                 "and leaves /feedback in the prompt", t.screen())
+        ct.check("YOUR EMAIL FOR A REPLY" in flat(t.screen()), "the hint stays while typing", t.screen())
+        t.type("the helper stopped, write me at me@example.cz")
         t.keys("Enter")
         ct.check(t.wait("Read what /feedback would send", 15), "the report opens to read", t.screen())
         time.sleep(0.5)

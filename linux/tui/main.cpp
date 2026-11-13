@@ -5645,7 +5645,11 @@ void feedback_start(const std::string &summary) {
     while (!w.empty() && isspace((unsigned char)w.back())) w.pop_back();
     while (!w.empty() && isspace((unsigned char)w.front())) w.erase(0, 1);
     if (w.empty()) {
-        show_toast("Say what went wrong after it: /feedback the helper stopped after I changed models", g->th->warn, 8);
+        // Back in the prompt, ready for the words.
+        g->chat.input = "/feedback ";
+        g->chat.cur = g->chat.input.size();
+        go(CHAT);
+        show_toast("Write what went wrong, with your email if you'd like a reply, then press Enter", g->th->accent, 12);
         return;
     }
     g->fb_summary = w;

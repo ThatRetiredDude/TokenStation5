@@ -38,7 +38,7 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/usage", "", "the API's use by app and model (last day and week)"},
         {"/access", "", "the Access page: who can reach this TokenStation5, and its API keys (/keys too)"},
         {"/connectors", "", "the Connectors page: GitHub, connected with a QR code (/github too)"},
-        {"/feedback", "WHAT WENT WRONG", "tell TokenStation's developers: you read the report (cleaned of keys, addresses and names) before it goes; never public"},
+        {"/feedback", "WHAT WENT WRONG + YOUR EMAIL FOR A REPLY", "then Enter: you read the report first; never public"},
         {"/think", "on|off|auto", "thinking before answering"},
         {"/tools", "[on|off|NAME on|off]", "the model's tools: search, pages, terminal, files, memory, browser (each has a switch)"},
         {"/browser", "[auto|obscura|chromium|text|PATH]", "the program the model's browser tool shows pages with"},
@@ -779,6 +779,10 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
     if (!c.input.empty() && c.input[0] == '/' && c.input.find(' ') == std::string::npos)
         for (auto &k : slash_commands())
             if (strncmp(k.name, c.input.c_str(), c.input.size()) == 0) hints.push_back(&k);
+    // While a report is typed after /feedback, what to write stays in view.
+    if (c.input.rfind("/feedback ", 0) == 0 || c.input.rfind("/bug ", 0) == 0)
+        for (auto &k : slash_commands())
+            if (!strcmp(k.name, "/feedback")) hints.push_back(&k);
     // The conversation, between the bars, over the messages that wait their
     // turn (three rows of them at most) and the status line.
     const int y0 = v.top;
