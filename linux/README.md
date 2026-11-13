@@ -237,8 +237,9 @@ sign-in (remove the old one in Tailscale's admin console).
   with the loaded model, streamed, with its thinking when the model thinks.
   Opened from a QR code of Connect a phone it is signed in already (the key
   rides after `#`, which no browser sends anywhere); opened by hand it asks
-  once for one of your keys. The first time a key works, the page asks how
-  that device should keep it: **in the page's link** too (a home-screen
+  once for one of your keys. Each time a key comes from a scan (and the
+  first time a typed one works), the page asks how that device should keep
+  it: **in the page's link** too (a home-screen
   icon saved from it then opens signed in; the key sits in the link and the
   history on that device), or **in my passwords** only (iCloud Keychain:
   the page offers it to them, and Face ID fills it in when a page asks).
@@ -266,7 +267,10 @@ sign-in (remove the old one in Tailscale's admin console).
   ones that are open.
 
 The pages themselves need no key; everything they ask of the model does.
-xterm.js draws the terminal; it is built into `ts5` (NOTICE.md).
+xterm.js draws the terminal; it is built into `ts5` (NOTICE.md). Working on
+the pages: `TS5_WEB_DIR=FOLDER ts5 serve ...` serves any of them found in
+FOLDER (by the same name as in `engine/web/`) instead of its own, read at
+each request, so a changed page needs no new build.
 
 ## In a terminal: ts5-tui
 

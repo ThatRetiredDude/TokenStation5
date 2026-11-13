@@ -167,16 +167,35 @@ std::string etag_of(const unsigned char *d, const unsigned char *end) {
     return b;
 }
 
+// For working on the pages: TS5_WEB_DIR=FOLDER serves a file of the same
+// name from FOLDER instead of the built-in one, read at each request, so a
+// changed page is live without a new build. Only the built-in names.
+bool from_web_dir(const std::string &name, std::string &out) {
+    const char *dir = getenv("TS5_WEB_DIR");
+    if (!dir || !*dir) return false;
+    FILE *f = fopen((std::string(dir) + "/" + name).c_str(), "rb");
+    if (!f) return false;
+    out.clear();
+    char b[65536];
+    size_t n;
+    while ((n = fread(b, 1, sizeof b, f)) > 0) out.append(b, n);
+    fclose(f);
+    return true;
+}
+
 bool serve_asset(int fd, const Server::Page &p, const std::string &name, bool page) {
     const WebAsset *a = asset(name);
     if (!a) return false;
-    const std::string etag = etag_of(a->data, a->end);
+    std::string body;
+    if (!from_web_dir(name, body)) body.assign((const char *)a->data, (size_t)(a->end - a->data));
+    const std::string etag =
+        etag_of((const unsigned char *)body.data(), (const unsigned char *)body.data() + body.size());
     if (p.header("if-none-match") == etag) {
         send_text(fd, "HTTP/1.1 304 Not Modified\r\nETag: " + etag +
                           "\r\nCache-Control: no-cache\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         return true;
     }
-    send_file(fd, 200, type_of(name), std::string((const char *)a->data, (size_t)(a->end - a->data)), page, etag);
+    send_file(fd, 200, type_of(name), body, page, etag);
     return true;
 }
 
