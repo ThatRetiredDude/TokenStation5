@@ -4,8 +4,11 @@
 // The key may come in the page's own address, after # (#key=…, from
 // ts5-tui's QR code for a phone). What follows # never reaches a server, so
 // it is in no request and no log. The browser remembers the key in its own
-// storage either way, and asks its person once how else to keep it
-// (ts5.keep, changed on the chat page's Settings):
+// storage either way, and asks its person how else to keep it (ts5.keep,
+// changed on the chat page's Settings). It asks each time a key comes in the
+// address (a scan) in a browser tab: a new key is in no password and no
+// icon yet, whatever was answered before. Until then the key stays in the
+// address, so a home-screen icon added meanwhile opens signed in.
 //   "link":      the key stays in the page's address too, so a home-screen
 //                icon saved from it opens signed in (iOS gives such an icon
 //                its own storage, without the browser's). It sits in the link
@@ -23,14 +26,21 @@ const TS5Keep = (() => {
   // Opened from a home-screen icon: a window with storage of its own.
   const standalone = () => navigator.standalone === true || matchMedia("(display-mode: standalone)").matches;
 
-  // At load: the key from the address, kept, and the address as chosen.
+  // A key that came in this page's address (a scan), not yet asked about.
+  let arrived = "";
+
+  // At load: the key from the address, kept, and the address as chosen (or
+  // with the key still in it, for a scanned key not yet asked about).
   function start() {
     const m = /(?:^#|&)key=([^&]+)/.exec(location.hash);
-    if (m) set("ts5.key", decodeURIComponent(m[1]));
+    if (m) {
+      arrived = standalone() ? "" : decodeURIComponent(m[1]);
+      set("ts5.key", decodeURIComponent(m[1]));
+    }
     const u = document.getElementById("keyuser");
     if (u) u.value = account();
     const k = get("ts5.key");
-    link(k && get("ts5.keep") === "link" ? k : "");
+    link(k && (get("ts5.keep") === "link" || (arrived && arrived === k)) ? k : "");
     return k;
   }
 
@@ -76,9 +86,11 @@ const TS5Keep = (() => {
     };
   }
 
-  // The first time a key works on this device: ask how to keep it.
+  // A scanned key that works, or the first key on this device: ask how to
+  // keep it. The earlier answer, if any, is the blue button.
   function choose(k) {
     if (document.getElementById("keepdlg")) return;
+    const was = get("ts5.keep");
     const shade = document.createElement("div");
     shade.className = "shade";
     shade.id = "keepdlg";
@@ -90,8 +102,10 @@ const TS5Keep = (() => {
       "link on this device and in its history. It is never sent anywhere, and it works only on your tailnet.</p>" +
       "<p><b>In my passwords</b>: nothing in the link. Your passwords (iCloud Keychain) keep it, and Face ID " +
       "fills it in when a page asks.</p>" +
-      '<div class="row"><button type="button" id="keeppw">In my passwords</button>' +
-      '<button type="button" class="go" id="keeplink">In this page\'s link</button></div></div>';
+      '<div class="row"><button type="button" id="keeppw"' + (was === "passwords" ? ' class="go"' : "") +
+      ">In my passwords</button>" +
+      '<button type="button" id="keeplink"' + (was === "passwords" ? "" : ' class="go"') +
+      ">In this page's link</button></div></div>";
     document.body.appendChild(shade);
     shade.querySelector("#keeplink").onclick = () => {
       change("link", k);
@@ -103,11 +117,18 @@ const TS5Keep = (() => {
     };
   }
 
-  // A key that worked: kept as chosen, or the question, once. A home-screen
-  // icon isn't asked: it keeps the key in its own storage and opens signed
-  // in from then on, and its link was fixed when it was added.
+  // A key that worked: the question for a scanned one or the first one,
+  // else kept as chosen. A home-screen icon isn't asked: it keeps the key in
+  // its own storage and opens signed in from then on, and its link was fixed
+  // when it was added.
   function settled(k) {
     if (!k) return;
+    if (arrived && arrived === k) {
+      arrived = "";
+      choose(k);
+      return;
+    }
+    arrived = "";
     const how = get("ts5.keep") || (standalone() ? "passwords" : "");
     if (how) {
       set("ts5.keep", how);

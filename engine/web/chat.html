@@ -165,6 +165,7 @@
     <label><input type="checkbox" id="think"> Let a thinking model think first</label>
     <label><input type="checkbox" id="showthink"> Show its thinking</label>
     <label>Keep the key <select id="keep"><option value="link">in this page's link too (a home-screen icon opens signed in)</option><option value="passwords">in my passwords only (Face ID fills it in)</option><option value="">ask me again</option></select></label>
+    <div class="row" style="justify-content:flex-start;margin-bottom:12px"><button type="button" id="savepw">Save the key to my passwords</button></div>
     <p>The key and the chats are kept in this browser only (and the key as chosen above: nothing after # in a link is ever sent anywhere). <a href="/ts5/terminal">Full controls</a> opens ts5-tui itself here (models, settings, fans, keys), with this key, when the browser terminal is on (Access page, F6).</p>
     <div class="row"><button type="button" id="forget">Forget the key</button><button type="button" id="clear">Delete all chats</button><button class="go" type="button" id="setdone">Done</button></div>
   </div>
@@ -555,6 +556,11 @@ $("setdone").onclick = () => {
   store.set("ts5.showthink", prefs.showThink ? "1" : "0");
   $("setdlg").hidden = true;
   draw();
+};
+$("savepw").onclick = () => {
+  if (!key()) return;
+  $("setdlg").hidden = true;
+  TS5Keep.save(key());
 };
 $("forget").onclick = () => { TS5Keep.forget(); $("setdlg").hidden = true; models(); };
 $("keep").onchange = () => {
