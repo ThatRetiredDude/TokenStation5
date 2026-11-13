@@ -36,6 +36,9 @@ std::vector<SavedChat> list_chats(const std::string &query = "");
 bool save_chat(Chat &c, std::string &why);
 // Replaces c's messages with a saved chat's.
 bool load_chat(Chat &c, const SavedChat &s, std::string &why);
+// Deletes one of ts5-tui's saved chats (its file). False, with why, for the
+// TV app's (read only here) or a file that won't go.
+bool delete_chat(const SavedChat &s, std::string &why);
 // "2 min ago", "yesterday 14:05", "3 Nov".
 std::string when_text(int64_t t);
 

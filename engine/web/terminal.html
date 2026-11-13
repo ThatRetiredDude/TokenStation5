@@ -55,6 +55,7 @@
   <button data-k="f1">F1</button><button data-k="f2">F2</button><button data-k="f3">F3</button>
   <button data-k="f4">F4</button><button data-k="f5">F5</button><button data-k="f6">F6</button><button data-k="f7">F7</button>
   <span class="sep"></span>
+  <button data-k="ctrl-o" title="Your chats (Ctrl+O)">Chats</button><button data-k="ctrl-n" title="A new chat (Ctrl+N)">New chat</button>
   <button data-k="ctrl-t">Ctrl+T</button><button data-k="ctrl-y">Ctrl+Y</button>
   <span class="sep"></span>
   <button id="smaller" title="Smaller text">A−</button><button id="bigger" title="Bigger text">A+</button>
@@ -91,7 +92,7 @@ TS5Keep.start();
 const keys = {
   esc: "\x1b", tab: "\t", up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D", enter: "\r",
   pgup: "\x1b[5~", pgdn: "\x1b[6~", f1: "\x1bOP", f2: "\x1bOQ", f3: "\x1bOR", f4: "\x1bOS", f5: "\x1b[15~",
-  f6: "\x1b[17~", f7: "\x1b[18~", "ctrl-t": "\x14", "ctrl-y": "\x19",
+  f6: "\x1b[17~", f7: "\x1b[18~", "ctrl-t": "\x14", "ctrl-y": "\x19", "ctrl-o": "\x0f", "ctrl-n": "\x0e",
 };
 let size = parseInt(store.get("ts5.term.size"), 10) || (matchMedia("(max-width: 600px)").matches ? 11 : 14);
 const term = new Terminal({

@@ -132,6 +132,15 @@ struct App {
     int pick_sel = 0;
     std::string dl_dir;
     std::vector<SavedChat> chat_list;  // the last /chats
+    // The chats (Ctrl+O, /chats): chat_list over the chat, to open one,
+    // delete one or start a new one. Row 0 is "New chat", row i chat_list[i-1].
+    bool chats_on = false;
+    int chats_sel = 0, chats_top = 0;
+    std::string chats_query;
+    struct ChatsHit {
+        int y, x0, x1, del_x, row;  // del_x: where its ✕ starts (0: none)
+    };
+    std::vector<ChatsHit> chats_hits;
     int answers_saved = 0;
     double ask_told = 0;  // the run-it question a toast on another page was shown for
     std::string load_target;  // what's loading, until /v1/models says so
@@ -3857,7 +3866,175 @@ void draw_chat() {
                     : g->chat.busy() ? (g->chat.queued.empty() ? "Enter steer it|Tab queue a message|Esc stop|PgUp/PgDn scroll|Ctrl+T thoughts"
                                                              : "Enter steer it|Tab queue another|↑ take the last back|Esc stop|PgUp/PgDn scroll")
                     : !g->chat.queued.empty() ? "Enter send the queued|Esc drop them|↑ take the last back|PgUp/PgDn scroll"
-                                   : "Enter send|Tab next page|Ctrl+Y copy|Ctrl+T thoughts|Ctrl+N new chat|Ctrl+J new line|PgUp/PgDn scroll");
+                                   : "Enter send|Ctrl+O chats|Ctrl+N new chat|Tab next page|Ctrl+Y copy|Ctrl+T thoughts|Ctrl+J new line|PgUp/PgDn scroll");
+}
+
+// ---- the chats ----
+
+bool global_key(const Event &e);
+
+void chats_open(const std::string &query) {
+    g->chat_list = list_chats(query);
+    g->chats_query = query;
+    g->chats_on = true;
+    g->chats_sel = 0;
+    g->chats_top = 0;
+    // The open one chosen, so Enter alone changes nothing.
+    for (size_t i = 0; i < g->chat_list.size(); i++)
+        if (g->chat_list[i].mine && g->chat_list[i].id == g->chat.saved_id) g->chats_sel = (int)i + 1;
+}
+
+// Opens row: 0 a new chat, else that saved chat. The chat that was open is
+// saved first (chat_new), and the model gets only the opened chat's
+// messages from then on: every request carries the chat it is for, whole.
+void chats_take(int row) {
+    g->chats_on = false;
+    Chat &c = g->chat;
+    if (row <= 0 || row > (int)g->chat_list.size()) {
+        chat_new(c);
+        g->answers_saved = c.answers;
+        show_toast("A new chat: the model gets nothing from the others", g->th->good, 3);
+        return;
+    }
+    const SavedChat s = g->chat_list[(size_t)row - 1];
+    if (s.mine && s.id == c.saved_id) return;  // open already
+    std::string why;
+    if (load_chat(c, s, why)) {
+        g->answers_saved = c.answers;
+        show_toast("Opened: " + s.title, g->th->good, 3);
+    } else {
+        show_toast(why, g->th->bad, 6);
+    }
+}
+
+void chats_delete(int row) {
+    if (row <= 0 || row > (int)g->chat_list.size()) return;
+    const SavedChat s = g->chat_list[(size_t)row - 1];
+    if (!s.mine) {
+        show_toast("That one is the TV app's chat: delete it on the TV", g->th->warn, 5);
+        return;
+    }
+    const bool open = s.id == g->chat.saved_id;
+    g->ask_title = " Delete this chat? ";
+    g->ask_text = "\"" + s.title + "\" (" + std::to_string(s.messages) + (s.messages == 1 ? " message, " : " messages, ") +
+                  when_text(s.updated) + ") goes for good." +
+                  (open ? " It is the chat open now: an empty one takes its place." : "");
+    g->ask_yes = [s, open] {
+        if (open) {
+            // Emptied first, so leaving it saves nothing again.
+            Chat &c = g->chat;
+            chat_stop(c);
+            {
+                std::lock_guard<std::mutex> l(c.mu);
+                c.msgs.clear();
+                c.saved_id.clear();
+            }
+            chat_new(c);
+            g->answers_saved = c.answers;
+        }
+        std::string why;
+        if (delete_chat(s, why)) show_toast("Deleted: " + s.title, g->th->dim, 3);
+        else show_toast(why, g->th->bad, 6);
+        g->chat_list = list_chats(g->chats_query);
+        g->chats_sel = std::min(g->chats_sel, (int)g->chat_list.size());
+    };
+}
+
+void chats_key(const Event &e) {
+    const int n = (int)g->chat_list.size() + 1;
+    const bool letter = e.key == K_CHAR && e.ch.size() == 1;
+    const char ch = letter ? (char)tolower(e.ch[0]) : 0;
+    int &sel = g->chats_sel;
+    if (e.key == K_ESC || (e.key == K_CTRL && e.ch == "o")) g->chats_on = false;
+    else if (e.key == K_UP) sel = (sel + n - 1) % n;
+    else if (e.key == K_DOWN) sel = (sel + 1) % n;
+    else if (e.key == K_PGUP) sel = std::max(0, sel - 10);
+    else if (e.key == K_PGDN) sel = std::min(n - 1, sel + 10);
+    else if (e.key == K_HOME) sel = 0;
+    else if (e.key == K_END) sel = n - 1;
+    else if (e.key == K_ENTER) chats_take(sel);
+    else if (ch == 'n' || (e.key == K_CTRL && e.ch == "n")) chats_take(0);
+    else if (ch == 'd' || e.key == K_DELETE) chats_delete(sel);
+    else if ((e.key >= K_F1 && e.key <= K_F7) || e.key == K_ALT || (e.key == K_CTRL && (e.ch == "q" || e.ch == "c"))) {
+        g->chats_on = false;
+        global_key(e);
+    }
+}
+
+// A click: a row opens it, its ✕ deletes it (asked first), outside closes.
+void chats_click(int x, int y) {
+    for (const auto &h : g->chats_hits) {
+        if (y != h.y || x < h.x0 || x >= h.x1) continue;
+        g->chats_sel = h.row;
+        if (h.del_x && x >= h.del_x - 1) chats_delete(h.row);
+        else chats_take(h.row);
+        return;
+    }
+    if (g->chats_hits.empty()) return;
+    const int x0 = g->chats_hits[0].x0 - 2, x1 = g->chats_hits[0].x1 + 2;
+    if (x < x0 || x >= x1) g->chats_on = false;
+}
+
+void draw_chats_overlay() {
+    Screen &s = g->scr;
+    const Theme &t = *g->th;
+    const int w = std::min(s.w - 2, 100), x = (s.w - w) / 2, y = body_top();
+    const int h = std::max(8, s.h - 1 - y);
+    const std::string title =
+        g->chats_query.empty() ? " Chats " : " Chats with \"" + fit(g->chats_query, std::max(4, w / 3)) + "\" ";
+    box(s, x, y, w, h, Style(t.accent, t.panel2), Style(t.fg, t.panel2), title, Style(t.accent, t.panel2, BOLD));
+    s.put(x + 2, y + 1,
+          fit("Each chat is its own conversation: the model gets the open chat's messages, and nothing from the others.",
+              w - 4),
+          Style(t.dim, t.panel2));
+    const int top = y + 3, vis = std::max(1, h - 6), n = (int)g->chat_list.size() + 1;
+    int &sel = g->chats_sel, &first = g->chats_top;
+    sel = std::max(0, std::min(sel, n - 1));
+    if (sel < first) first = sel;
+    if (sel >= first + vis) first = sel - vis + 1;
+    first = std::max(0, std::min(first, std::max(0, n - vis)));
+    g->chats_hits.clear();
+    for (int r = first; r < n && r < first + vis; r++) {
+        const int ry = top + r - first;
+        const bool on = r == sel;
+        const Style row = on ? Style(t.bg, t.accent, BOLD) : Style(t.fg, t.panel2);
+        const Style dim = on ? Style(t.bg, t.accent) : Style(t.dim, t.panel2);
+        s.fill(x + 2, ry, w - 4, 1, on ? Style(t.bg, t.accent) : Style(t.fg, t.panel2));
+        s.put(x + 2, ry, on ? "▸" : " ", Style(on ? t.bg : t.accent, on ? t.accent : t.panel2, BOLD));
+        if (r == 0) {
+            s.put(x + 4, ry, "+ New chat", on ? row : Style(t.accent2, t.panel2, BOLD));
+            g->chats_hits.push_back({ry, x + 2, x + w - 2, 0, 0});
+            continue;
+        }
+        const SavedChat &c = g->chat_list[(size_t)r - 1];
+        const bool open = c.mine && c.id == g->chat.saved_id;
+        const std::string right = when_text(c.updated) + fmt(" · %d", c.messages) +
+                                  (c.messages == 1 ? " message" : " messages") + (open ? " · open" : "") +
+                                  (c.mine ? "" : " · on the TV");
+        const int del_x = c.mine ? x + w - 5 : 0;
+        const int rw = text_width(right);
+        const int right_x = x + w - 4 - (c.mine ? 3 : 0) - rw;
+        const int title_w = std::max(8, right_x - (x + 4) - 2);
+        s.put(x + 4, ry, fit(c.title, title_w), open && !on ? Style(t.accent2, t.panel2, BOLD) : row);
+        if (right_x > x + 4 + 10) s.put(right_x, ry, right, dim);
+        if (c.mine) s.put(del_x, ry, "✕", on ? Style(t.bg, t.accent, BOLD) : Style(t.bad, t.panel2, BOLD));
+        g->chats_hits.push_back({ry, x + 2, x + w - 2, del_x, r});
+    }
+    if (n == 1)
+        s.put(x + 4, top + 2, fit("No saved chats yet: each one is kept from its first answer on.", w - 8),
+              Style(t.dim, t.panel2));
+    if (n > vis) {
+        const std::string more = fmt("%d-%d of %d", first + 1, std::min(n, first + vis), n);
+        s.put(x + w - 3 - text_width(more), y + h - 3, more, Style(t.dim, t.panel2));
+    }
+    int bx = x + 2;
+    const int by = y + h - 2;
+    for (auto &k : std::vector<std::pair<std::string, std::string>>{
+             {"↑↓", " choose   "}, {"Enter", " open   "}, {"D", " delete   "}, {"N", " new chat   "}, {"Esc", " close"}}) {
+        if (bx + text_width(k.first + k.second) > x + w - 2) break;
+        bx = s.put(bx, by, k.first, Style(t.accent2, t.panel2, BOLD));
+        bx = s.put(bx, by, k.second, Style(t.dim, t.panel2));
+    }
 }
 
 void draw() {
@@ -3880,6 +4057,7 @@ void draw() {
         case CONNECTORS: draw_connectors(); break;
         default: break;
     }
+    if (g->chats_on && g->cur == CHAT) draw_chats_overlay();
     if (!g->qr.empty()) draw_qr_overlay();
     if (g->ask_yes || !g->pick.empty()) {
         const Theme &t = *g->th;
@@ -4062,26 +4240,15 @@ void run_command(const std::string &line) {
             g->model_sel = std::max(0, (int)g->models.size() + (int)catalog_missing().size() - 1);
         }
     } else if (cmd == "/chats") {
-        g->chat_list = list_chats(arg);
-        if (g->chat_list.empty()) {
-            chat_note(c, arg.empty() ? "No saved chats yet. Every chat is kept from its first answer on."
-                                     : "No saved chat has **" + arg + "**.");
+        // The list over the chat (Ctrl+O): open, delete, new.
+        if (!arg.empty() && list_chats(arg).empty()) {
+            show_toast("No saved chat has \"" + arg + "\"", g->th->warn, 4);
             return;
         }
-        std::string l = arg.empty() ? "**Saved chats**, newest first. `/open N` opens one.\n"
-                                    : "**Saved chats with " + arg + "**. `/open N` opens one.\n";
-        const int shown = std::min(20, (int)g->chat_list.size());
-        for (int i = 0; i < shown; i++) {
-            const SavedChat &x = g->chat_list[i];
-            l += fmt("%2d. ", i + 1) + x.title + "  · " + when_text(x.updated) + fmt(" · %d messages", x.messages) +
-                 (x.mine ? "" : " · on the TV") + (x.mine && x.id == c.saved_id ? " · this one" : "") + "\n";
-        }
-        if ((int)g->chat_list.size() > shown)
-            l += fmt("…and %d older. `/chats TEXT` finds one.\n", (int)g->chat_list.size() - shown);
-        chat_note(c, l);
+        chats_open(arg);
     } else if (cmd == "/open") {
         if (arg.empty()) {
-            chat_note(c, "`/open N`: a number from `/chats`, or `/open TEXT` for the newest chat that has TEXT.");
+            chat_note(c, "`/open TEXT` opens the newest saved chat that has TEXT (`/open N`: the Nth newest). Ctrl+O lists them all.");
             return;
         }
         const int k = atoi(arg.c_str());
@@ -4101,7 +4268,7 @@ void run_command(const std::string &line) {
             }
         }
         if (!ok) {
-            show_toast("No such chat: `/chats` lists them", g->th->warn, 4);
+            show_toast("No such chat: Ctrl+O lists them", g->th->warn, 4);
             return;
         }
         std::string why;
@@ -4621,7 +4788,8 @@ void run_command(const std::string &line) {
             h += std::string("`") + k.name + (*k.args ? std::string(" ") + k.args : "") + "`  " + k.what + "\n";
         h += "\n**Keys**  Enter send (while an answer is coming: the message waits and is sent after it; ↑ takes the "
              "last one back) · Ctrl+J or Alt+Enter new line · ↑↓ history · Tab completes · Esc stops an answer · "
-             "Ctrl+T thinking · Ctrl+Y copy the last answer · Ctrl+N new chat (this one is kept: `/chats`) · PgUp/PgDn "
+             "Ctrl+T thinking · Ctrl+Y copy the last answer · Ctrl+N new chat (this one is kept) · Ctrl+O your chats, "
+             "to open, delete or start one (each is its own conversation: the model gets the open chat alone) · PgUp/PgDn "
              "scroll · Ctrl+Q, `exit` or `q` quits\n\n"
              "**A full chat**  when the model's memory for the chat (its context) is nearly full, the model writes a "
              "summary of it and the chat goes on from that, with room again; everything stays here to read. `/compact` "
@@ -4706,6 +4874,11 @@ bool global_key(const Event &e) {
     }
     if (e.key == K_CTRL && (e.ch == "q" || (e.ch == "c" && !(g->cur == CHAT && g->chat.busy())))) {
         request_quit();
+        return true;
+    }
+    if (e.key == K_CTRL && e.ch == "o") {  // the chats, from any page
+        go(CHAT);
+        chats_open("");
         return true;
     }
     return false;
@@ -5373,7 +5546,9 @@ void handle(const Event &e);
 void mouse(const Event &e) {
     if (e.mouse == M_WHEEL_UP || e.mouse == M_WHEEL_DOWN) {
         const bool up = e.mouse == M_WHEEL_UP;
-        if (g->cur == CHAT) {
+        if (g->chats_on && g->cur == CHAT && !g->ask_yes) {
+            g->chats_sel = std::max(0, std::min((int)g->chat_list.size(), g->chats_sel + (up ? -1 : 1)));
+        } else if (g->cur == CHAT) {
             g->chat.scroll = std::max(0, g->chat.scroll + (up ? 3 : -3));
         } else {
             Event k;
@@ -5394,7 +5569,7 @@ void mouse(const Event &e) {
         g->dragged = true;
         // A drag is someone selecting text, which the terminal can't do
         // while the clicks come here: the chat, plain, to select from.
-        if (g->cur == CHAT && !g->ask_yes && g->pick.empty()) {
+        if (g->cur == CHAT && !g->ask_yes && g->pick.empty() && !g->chats_on) {
             size_t at = 0;
             const int msg = chat_msg_at(g->chat, g->down_y);
             const std::string text = chat_copy_text(g->chat, -1, -1, false, nullptr, &at, msg);
@@ -5418,6 +5593,10 @@ void mouse(const Event &e) {
     const bool click = g->down_y == e.y && abs(e.x - g->down_x) <= 1 && !g->dragged;
     g->down_y = -1;
     if (!click || g->ask_yes || !g->pick.empty()) return;
+    if (g->chats_on && g->cur == CHAT) {
+        chats_click(e.x, e.y);
+        return;
+    }
     if (e.y == 0) {
         for (size_t i = 0; i < g->tab_x.size(); i++)
             if (e.x >= g->tab_x[i].first && e.x < g->tab_x[i].second) go((ScreenId)i);
@@ -5551,6 +5730,11 @@ void handle(const Event &e) {
         }
         return;
     }
+    if (g->chats_on && g->cur == CHAT) {
+        chats_key(e);
+        return;
+    }
+    g->chats_on = false;
     if (global_key(e)) return;
     switch (g->cur) {
         case CHAT: key_chat(e); break;
@@ -5833,7 +6017,7 @@ void tick() {
                     g->chat.msgs.insert(g->chat.msgs.end() - 1, note);
                 } else {
                     n += ", so the answer stopped here, and the model can't take in more of this chat. "
-                         "**Ctrl+N** starts a new chat (this one is saved: `/chats` opens it again).";
+                         "**Ctrl+N** starts a new chat (this one is saved: **Ctrl+O** opens it again).";
                     if (!g->cfg.summarize) n += " `/compact` has the model summarize it and go on from the summary.";
                     if (own_server_pid() > 0 && g->cfg.serve_ctx > 0)
                         n += " Or set Settings → Context to auto, the longest this model fits, and load it again.";

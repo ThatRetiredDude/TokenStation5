@@ -242,9 +242,14 @@ sign-in (remove the old one in Tailscale's admin console).
   icon saved from it then opens signed in; the key sits in the link and the
   history on that device), or **in my passwords** only (iCloud Keychain:
   the page offers it to them, and Face ID fills it in when a page asks).
-  Settings on the chat page changes it. The key, and your chats, stay in
-  that browser. Add it to the home screen and it opens as an app, with the
-  TokenStation5 logo. Nothing to install on the phone.
+  Settings on the chat page changes it. **Chats** (top left) lists your
+  chats, newest first: tap one to go on with it, ✕ to delete it (it asks
+  first), New chat for an empty one. Each chat is its own conversation: the
+  model gets the open chat's messages and nothing from the others, and a
+  chat opened again gives it all of its own back. The key, and your chats
+  (the newest 50), stay in that browser; ts5-tui keeps its own. Add it to
+  the home screen and it opens as an app, with the TokenStation5 logo.
+  Nothing to install on the phone.
 - **The browser terminal** (`/ts5/terminal`): ts5-tui itself in a web page,
   for a laptop or tablet away from home with no SSH client. Off by default:
   the **Browser terminal** row on the Access page turns it on, and **Enter**
@@ -417,9 +422,17 @@ ts5-tui --url http://ps5.local:8081  # another one
   what it finds, a JSON object a line). A model found this way isn't a
   tested one: C checks its answers on this GPU and T tunes it.
 - **Chats are kept**: every chat is saved after each answer, in the TV app's
-  format, in `~/.local/share/tokenstation/chats`. `/chats` lists them (and
-  the TV service's, when you may read them), `/chats TEXT` finds one,
-  `/open N` opens one to go on with it.
+  format, in `~/.local/share/tokenstation/chats`. **Ctrl+O** (or `/chats`,
+  or Chats on the browser terminal's key bar) lists them over the chat,
+  newest first, with the TV service's when you may read them: Enter or a
+  click opens one to go on with it, D or a click on its ✕ deletes it
+  (asked first; the TV app's are deleted on the TV), N starts a new one.
+  `/chats TEXT` lists the ones that have TEXT, `/open TEXT` opens the
+  newest of them. Each chat is its own conversation: the model gets the
+  open chat's messages and nothing from the others (every request carries
+  its chat whole), and a chat opened again gives the model all of its own
+  back. A long chat opened again takes a moment before its first answer,
+  while the model reads it in.
 - **A full chat goes on**: a chat grows until the model's memory for it (its
   context) is nearly full. Then, before your next message goes out, the
   model writes a detailed summary of the chat so far, and the chat goes on

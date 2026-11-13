@@ -11,7 +11,8 @@ third of its bytes, as a real chat grows; FAKE_DENSE=2: half), and an answer tha
 context or max_tokens stops with finish_reason "length". A request for a
 summary (ts5-tui's, for a chat that filled up) gets one (FAKE_SUMMARY: a
 file with the summary to give instead). FAKE_REQUESTS: a
-file that gets each request's roles and sizes, a line a request.
+file that gets each request's roles and sizes, a line a request, and its
+user messages (the first 80 characters of each).
 FAKE_WEB=1 says the server has a web search key (without it the search is
 Wikipedia's; FAKE_SOURCE=none: no search at all). FAKE_SPEED: words a second
 (60).
@@ -221,6 +222,7 @@ class H(BaseHTTPRequestHandler):
                         ",".join(t.get("function", {}).get("name") for t in req.get("tools") or []),
                         json.dumps(req.get("web_search")), req.get("tool_choice"),
                         " source=%s" % req["web_search_source"] if "web_search_source" in req else ""))
+                f.write("  users: %s\n" % json.dumps([(m.get("content") or "")[:80] for m in msgs if m.get("role") == "user"]))
                 if req.get("chat_template_kwargs"):
                     f.write("  kwargs=%s\n" % json.dumps(req["chat_template_kwargs"]))
                 if summary:

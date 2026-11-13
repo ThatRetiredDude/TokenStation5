@@ -26,8 +26,8 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/search", "WORDS", "Hugging Face, for other models that fit this GPU (listed on Models)"},
         {"/new", "", "a new chat (Ctrl+N); every chat is kept"},
         {"/compact", "[WHAT TO KEEP]", "summarize this chat now: the model goes on from the summary, with room again"},
-        {"/chats", "[TEXT]", "your saved chats (with TEXT: the ones that have it)"},
-        {"/open", "N", "open saved chat N from /chats"},
+        {"/chats", "[TEXT]", "your saved chats, to open, delete or start one: Ctrl+O (with TEXT: the ones that have it)"},
+        {"/open", "TEXT", "open the newest saved chat that has TEXT (N: the Nth newest)"},
         {"/save", "[FILE]", "this chat as Markdown"},
         {"/copy", "[code|think|all]", "copy the last answer (Ctrl+Y), its code, its thinking, or the whole chat"},
         {"/find", "TEXT", "jump to TEXT in this chat"},
@@ -1296,7 +1296,7 @@ void stream_answer(Chat *c, const ChatRequest &rq, const std::string &body) {
             if (j["error"]["code"].str() == "context_length_exceeded") {  // in plain words
                 m.full = true;
                 m.error = "This chat is full: it no longer fits in the model's memory for a chat (its context). "
-                          "Ctrl+N starts a new chat; this one is kept in /chats.";
+                          "Ctrl+N starts a new chat; this one is kept (Ctrl+O lists them).";
             } else
                 m.error = fmt("%d: ", r.status) + why;
         } else if (r.status == 0) {

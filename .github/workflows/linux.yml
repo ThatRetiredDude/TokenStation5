@@ -328,6 +328,10 @@ jobs:
         run: python3 engine/tests/github_test.py "$(command -v ts5)"
       - name: The model's GitHub tool (ts5-tui --github-call against the same stand-in GitHub)
         run: python3 linux/tui/test/github_tool_test.py "$(command -v ts5-tui)" "$(command -v ts5)"
+      - name: Chats (ts5-tui in tmux against a stand-in server; each chat sends its own messages, Ctrl+O opens and deletes)
+        run: |
+          command -v tmux || sudo apt-get install -y -qq tmux
+          python3 linux/tui/test/chats_test.py "$(command -v ts5-tui)"
       - name: Outside tools (ts5-tui --mcp against an MCP server served here, no model)
         run: python3 linux/tui/test/mcp_test.py "$(command -v ts5-tui)"
       - name: A browser on demand (ts5-tui --install-browser, from a release file made here, no network)
