@@ -32,7 +32,7 @@ namespace {
 
 // Where reports go: TokenStation's own feedback Worker. It only takes
 // reports in; nobody can read them back through it.
-const char *kFeedbackUrl = "https://ts5-feedback.tokenstation.workers.dev/v1/report";
+const char *kFeedbackUrl = "https://ts5-feedback.phrdgjz6zd.workers.dev/v1/report";
 const size_t kMaxReport = 200u << 10;  // the Worker takes up to 256 KiB
 const int kLogLines = 300;
 const int kChatMessages = 40;
