@@ -74,6 +74,15 @@ const store = {
   get(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } },
   set(k, v) { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch (e) {} },
 };
+// A key in the address (#key=…, from ts5-tui's QR code for a phone): kept
+// as if typed, then taken out of the address bar. What follows # never
+// reaches the server, so it is in no log.
+(() => {
+  const m = /(?:^#|&)key=([^&]+)/.exec(location.hash);
+  if (!m) return;
+  store.set("ts5.key", decodeURIComponent(m[1]));
+  window.history.replaceState(null, "", location.pathname + location.search);
+})();
 const keys = {
   esc: "\x1b", tab: "\t", up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D", enter: "\r",
   pgup: "\x1b[5~", pgdn: "\x1b[6~", f1: "\x1bOP", f2: "\x1bOQ", f3: "\x1bOR", f4: "\x1bOS", f5: "\x1b[15~",

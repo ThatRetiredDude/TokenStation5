@@ -186,6 +186,7 @@ struct App {
     int acc_kind = 0, acc_sel = 0;
     bool acc_required = false, acc_writable = true, acc_typing = false;
     std::string acc_file, acc_err, acc_name;
+    bool acc_for_terminal = false;  // the key being named is for the browser terminal: its code first
     double acc_at = 0;
     // The server's Tailscale (GET /ts5/tailnet), as last read. tn_have is
     // false when it has none (not running, an older ts5, the TV app): tn_why.
@@ -767,26 +768,6 @@ std::string terminal_url() {
     return u.empty() ? u : u + "/ts5/terminal";
 }
 
-// That address as a QR code, for a phone or tablet on the tailnet.
-void qr_terminal_open() {
-    const std::string url = terminal_url();
-    g->toast.clear();
-    g->qr.clear();
-    g->qr.push_back({"", url});
-    g->qr_sel = 0;
-    g->qr_sign_in = g->qr_github = g->qr_install = false;
-    g->qr_copy = true;
-    g->qr_title = " The browser terminal ";
-    g->qr_notes = {"Open it on a device on your tailnet (Tailscale on): ts5-tui in the browser, in its tmux session. "
-                   "It asks for one of the keys below once (N makes one).",
-                   url};
-    g->qr_short = "The browser terminal: scan it on your tailnet";
-    g->qr_plain = "The browser terminal, on a device on your tailnet (Tailscale on):\n\n" + url +
-                  "\n\nIt asks for one of this machine's API keys once (the Access page makes them). The chat page is "
-                  "at the same address without /ts5/terminal.\n";
-    g->qr_plain_title = "the browser terminal's address";
-}
-
 // The sign-in link as a QR code, to scan with the phone that is signed in
 // to Tailscale (or any phone: it signs in there).
 void qr_sign_in_open() {
@@ -1009,7 +990,7 @@ void tailnet_read() {
             qr_close();
             const std::string who = g->tn_name.empty() ? g->tn_host : g->tn_name;
             show_toast("Tailscale: connected as " + who.substr(0, who.find('.')) +
-                           ". Connect an app, on Access, gives a phone what to scan",
+                           ". Connect a phone, on Access, gives it a code to scan",
                        g->th->good, 9);
         } else if (linked && g->qr[0].data != g->tn_sign_in) {
             qr_sign_in_open();  // a new link (the last one ran out)
@@ -3451,17 +3432,17 @@ void draw_access() {
         else if (!g->tn_on)
             r.value = "on", r.note = "once Tailscale is on (above)";
         else if (g->tn_state == "connected" && !terminal_url().empty())
-            r.value = "on", r.note = terminal_url() + " · Enter: as a QR code";
+            r.value = "on", r.note = terminal_url() + " · Enter: a QR code with a key, for a phone";
         else
             r.value = "on", r.note = "once Tailscale is connected";
         rows.push_back(r);
     }
     {
-        Row r{"Connect an app", "a new key, as QR codes", "", false, false};
+        Row r{"Connect a phone", "a new key, as QR codes", "", false, false};
         const bool tailnet = g->tn_have && g->tn_state == "connected";
         if (k == ACC_TV) r.value = "on the TV", r.note = "the TV app makes its keys: its Settings page, under Apps";
-        else if (tailnet) r.note = "Enter: your tailnet's address and a new key, as QR codes for a phone";
-        else if (reach) r.note = "Enter: this network's address and a new key, as QR codes for a phone";
+        else if (tailnet) r.note = "Enter: a new key in a QR code: the phone opens the chat page signed in (or an app's address)";
+        else if (reach) r.note = "Enter: a new key in a QR code: the phone opens the chat page signed in (this network)";
         else r.note = "other machines can't reach it yet: Other devices, or Tailscale, above";
         rows.push_back(r);
     }
@@ -3523,7 +3504,10 @@ void draw_access() {
         s.fill(x0, y, w, 1, Style(t.fg, t.panel2));
         s.put(x0, y, "▌", Style(t.accent, t.panel2));
         const int x = s.put(x0 + 2, y, "A new key for: ", Style(t.fg, t.panel2, BOLD));
-        s.put(x, y, fit(g->acc_name + "▌", w - (x - x0) - 2), Style(t.accent2, t.panel2, BOLD));
+        const int hx = s.put(x, y, fit(g->acc_name + "▌", w - (x - x0) - 2), Style(t.accent2, t.panel2, BOLD));
+        if (g->acc_name.empty())
+            s.put(hx + 1, y, fit("the phone or app it is for (Enter alone: phone)", std::max(0, w - (hx + 1 - x0) - 2)),
+                  Style(t.dim, t.panel2));
         y++;
     }
     if (!g->acc_writable && k != ACC_TV && y < s.h - 2)
@@ -4964,26 +4948,49 @@ void access_new(const std::string &name) {
         text += "In the app, as an OpenAI-compatible server:\n  address  " + at + "\n  API key  the key above\n";
     }
     const bool sent = to_clipboard(key);
+    // Codes that carry the key (after #, which no server is sent): the
+    // phone's camera opens the chat page, or the browser terminal, signed
+    // in, with nothing to type. Then the address and the key, for an app.
+    std::string base = url;
+    if (base.size() > 3 && base.compare(base.size() - 3, 3, "/v1") == 0) base.resize(base.size() - 3);
+    const bool term = tailnet && g->tn_terminal && k != ACC_TV;
     g->toast.clear();
     g->qr.clear();
-    if (!url.empty()) g->qr.push_back({"Address", url});
+    if (!base.empty()) {
+        g->qr.push_back({"Chat page", base + "/#key=" + key});
+        if (term) {
+            App::Qr t{"Browser terminal", base + "/ts5/terminal#key=" + key};
+            if (g->acc_for_terminal) g->qr.insert(g->qr.begin(), t);
+            else g->qr.push_back(t);
+        }
+        g->qr.push_back({"Address, for an app", url});
+    }
     g->qr.push_back({"API key", key});
+    g->acc_for_terminal = false;
     g->qr_sel = 0;
     g->qr_sign_in = g->qr_github = g->qr_install = false;
     g->qr_copy = true;
-    g->qr_title = " Connect an app: " + j["name"].str() + " ";
+    g->qr_title = " Connect " + j["name"].str() + " ";
     g->qr_notes.clear();
-    if (!url.empty())
-        g->qr_notes.push_back("In the app, as an OpenAI-compatible server: scan the address, then the key. " +
-                              std::string(tailnet ? "The device needs Tailscale on, signed in to your tailnet."
-                                                  : "It works on this network only (Tailscale, above, reaches it from anywhere)."));
-    else
+    if (!base.empty()) {
+        const std::string first = g->qr[0].label == "Chat page" ? "the chat page" : "the browser terminal";
+        const std::string other = g->qr.size() > 3 ? (first == "the chat page" ? "the browser terminal, " : "the chat page, ") : "";
+        g->qr_notes.push_back("Scan it with the phone's camera: " + first + " opens, signed in with this key. " +
+                              (tailnet ? "The phone needs Tailscale on." : "On this network only (Tailscale, above, reaches it from anywhere).") +
+                              " ←→ for " + other + "the address and the key, for an app (OpenAI-compatible).");
+    } else {
         g->qr_notes.push_back("Other machines can't reach the model yet (Other devices or Tailscale, above): the key is "
                               "ready for when they can.");
+    }
     g->qr_notes.push_back(std::string("Shown this once: ts5 keeps only its SHA-256.") +
                           (sent ? " The key alone is on the clipboard too, if the terminal allows it." : "") +
                           " A tap on the text under a code copies it.");
-    g->qr_short = url.empty() ? "The new key, shown this once" : "The address, then the key: shown this once";
+    g->qr_short = base.empty() ? "The new key, shown this once" : "Scan it: " + g->qr[0].label + ", signed in";
+    if (!base.empty()) {
+        text += "\nOn a phone or tablet" + std::string(tailnet ? " with Tailscale on" : "") + ", these open signed in:\n  chat page  " +
+                base + "/#key=" + key + "\n";
+        if (term) text += "  terminal   " + base + "/ts5/terminal#key=" + key + "\n";
+    }
     g->qr_plain = text;
     g->qr_plain_title = "the new key";
 }
@@ -4992,12 +4999,12 @@ void key_access(const Event &e) {
     if (g->acc_typing) {
         if (e.key == K_ESC) {
             g->acc_typing = g->editing = false;
+            g->acc_for_terminal = false;
         } else if (e.key == K_ENTER) {
             g->acc_typing = g->editing = false;
             std::string name = g->acc_name;
             while (!name.empty() && name.back() == ' ') name.pop_back();
-            if (name.empty()) show_toast("A key needs a name: the app or the machine it is for", g->th->warn, 5);
-            else access_new(name);
+            access_new(name.empty() ? "phone" : name);
         } else if (e.key == K_BACKSPACE) {
             auto gl = glyphs(g->acc_name);
             if (!gl.empty()) g->acc_name.resize(g->acc_name.size() - gl.back().s.size());
@@ -5029,6 +5036,7 @@ void key_access(const Event &e) {
         else {
             g->acc_typing = g->editing = true;  // (Tab and the page keys stay with the name)
             g->acc_name.clear();
+            g->acc_for_terminal = false;
         }
     } else if (flip && g->acc_sel == 0) {
         if (k != ACC_OWN) {
@@ -5098,12 +5106,18 @@ void key_access(const Event &e) {
         } else if (!g->tn_have) {
             show_toast("Tailscale: " + g->tn_why, g->th->warn, 8);
         } else if (e.key == K_ENTER && g->tn_terminal && g->tn_state == "connected" && !terminal_url().empty()) {
-            qr_terminal_open();
+            // A key comes with it, inside the code: the phone opens it signed in.
+            if (!g->acc_err.empty()) {
+                show_toast(g->acc_err, g->th->bad, 6);
+            } else {
+                g->acc_typing = g->editing = true;
+                g->acc_name.clear();
+                g->acc_for_terminal = true;
+            }
         } else if (tailnet_post(g->tn_terminal ? "{\"terminal\":false}" : "{\"terminal\":true}")) {
             show_toast(!g->tn_terminal                 ? "Browser terminal: off. Any open in a browser have closed"
                        : g->tn_state != "connected"    ? "Browser terminal: on, once Tailscale is connected"
-                       : g->acc_keys.empty()           ? "Browser terminal: on. It asks for a key: N makes one"
-                                                       : "Browser terminal: on. Enter shows its address as a QR code",
+                                                       : "Browser terminal: on. Enter: a QR code for your phone, with a key in it",
                        g->tn_terminal ? g->th->good : g->th->dim, 7);
         }
     } else if (letter('d') && g->acc_sel == 2) {
@@ -5155,13 +5169,22 @@ void key_chat(const Event &e) {
 // Clicks come to ts5-tui, or the terminal keeps the mouse for its own
 // selection. In ts5's own tmux session tmux has the mouse first, and hands
 // clicks on only while its own mouse option is on.
+// Inside tmux, its mouse goes too: with it on, a drag is tmux's own
+// selection, which it drops the moment the button comes up (copied where
+// the terminal takes OSC 52, lost where not: Apple's Terminal). ts5's own
+// tmux has it off and on for all; anyone else's, for this session only
+// while off, then back to what it was.
 void set_mouse(bool on) {
     term_mouse(on);
-    if (!getenv("TS5_TUI_TMUX")) return;
+    const char *pane = getenv("TMUX_PANE");
+    if (!getenv("TS5_TUI_TMUX") && !(getenv("TMUX") && pane && *pane)) return;
     const std::string tmux = which("tmux");
     if (tmux.empty()) return;
-    const std::string cmd = shell_quote(tmux) + " set -g mouse " + (on ? "on" : "off") + " > /dev/null 2>&1";
-    if (system(cmd.c_str()) != 0) return;
+    const std::string cmd =
+        getenv("TS5_TUI_TMUX") ? shell_quote(tmux) + " set -g mouse " + (on ? "on" : "off")
+        : on                   ? shell_quote(tmux) + " set -u -t " + shell_quote(pane) + " mouse"
+                               : shell_quote(tmux) + " set -t " + shell_quote(pane) + " mouse off";
+    if (system((cmd + " > /dev/null 2>&1").c_str()) != 0) return;
 }
 
 std::string base64(const std::string &in) {

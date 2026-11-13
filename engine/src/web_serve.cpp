@@ -433,6 +433,12 @@ void attach_web(Server &s, const WebOptions &o) {
             send_text(fd, "HTTP/1.1 302 Found\r\nLocation: /\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             return true;
         }
+        // Icons a browser asks for by itself (Safari's home-screen ones too):
+        // none, without the key check that would log each as refused.
+        if (p.method == "GET" && (p.path == "/favicon.ico" || p.path.rfind("/apple-touch-icon", 0) == 0)) {
+            send_text(fd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return true;
+        }
         const bool web = p.path == "/" || p.path == "/chat" || p.path.rfind("/ts5/web/", 0) == 0 ||
                          p.path == "/ts5/terminal" || p.path == "/ts5/terminal/socket";
         if (!web) return false;

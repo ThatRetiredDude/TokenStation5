@@ -206,6 +206,14 @@ def main():
                   "the apps' address (/v1) in a browser goes to the chat page", r.url)
         code, body, _ = get(here + "/v1")
         check(code in (401, 404), "while an app asking /v1 gets an answer for an app", code)
+        code, body, _ = get(here + "/")
+        check(b'location.hash' in body and b'replaceState' in body,
+              "the chat page takes a key from #key= (a QR code of Connect a phone) and clears the address bar")
+        code, body, _ = get(here + "/ts5/terminal")
+        check(b'location.hash' in body and b'replaceState' in body, "the terminal page too")
+        for icon in ("/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
+            code, body, _ = get(here + icon)
+            check(code == 404 and not body, f"{icon}: none, and no key asked", code)
         code, body, h = get(here + "/ts5/web/xterm.js")
         check(code == 200 and h.get("Content-Type", "").startswith("text/javascript") and len(body) > 200000 and
               b"xterm.js" in body, "xterm.js is built in", (code, len(body), h))
@@ -271,6 +279,7 @@ def main():
         check("terminal: 127.0.0.1 opened one" in text and "session ended after" in text and "its switch turned off" in text,
               "the log says who opened one and when it closed", text[-1500:])
         check("the-one-in-the-environment" not in text, "and never a key")
+        check("favicon" not in text and "apple-touch-icon" not in text, "a browser's own icon requests aren't logged as refused")
     finally:
         p.terminate()
         try:

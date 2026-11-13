@@ -193,8 +193,10 @@ device on the tailnet always needs an API key that is on, whether or not
 
 ts5-tui's **Access** page (F6) sets it up: turn **Tailscale** on, scan the
 QR code with your phone and sign in. The machine shows up in your tailnet as
-`tokenstation5`. Then **Connect an app** makes a key and shows the address on
-your tailnet and the key as two QR codes, for the app on your phone.
+`tokenstation5`. Then **Connect a phone** makes a key and puts it in a QR
+code: the phone's camera opens the chat page, signed in, with nothing to
+type. **←→** shows the browser terminal's code (when it is on), then the
+address on your tailnet and the key, for an app on the phone.
 Tailscale off leaves it signed in (on again needs no QR code); **D** on that
 row signs out.
 
@@ -233,12 +235,15 @@ sign-in (remove the old one in Tailscale's admin console).
 - **The chat page** (`http://100.101.102.103:8081/` from your tailnet, or
   `http://192.168.1.20:8081/` at home with Other devices on): a plain chat
   with the loaded model, streamed, with its thinking when the model thinks.
-  It asks once for one of your keys and keeps it, and your chats, in that
-  browser only. Nothing to install on the phone.
+  Opened from a QR code of Connect a phone it is signed in already (the key
+  rides after `#`, which no server is sent, and leaves the address bar at
+  once); opened by hand it asks once for one of your keys. It keeps the
+  key, and your chats, in that browser only. Nothing to install on the phone.
 - **The browser terminal** (`/ts5/terminal`): ts5-tui itself in a web page,
   for a laptop or tablet away from home with no SSH client. Off by default:
   the **Browser terminal** row on the Access page turns it on, and **Enter**
-  there shows its address as a QR code. It opens only for your tailnet's
+  there makes a key and shows the terminal's address with the key in it as
+  a QR code, to open it signed in. It opens only for your tailnet's
   devices and this machine, each time with a key that is on, never for the
   rest of the home network, and at most four at once. It runs ts5-tui in
   tmux, so a closed tab or a lost signal leaves an answer running and the
@@ -305,7 +310,7 @@ ts5-tui --url http://ps5.local:8081  # another one
   page but Chat. On a Mac, where macOS keeps the F keys, use those, fn+F1
   to fn+F7, or `/chat`, `/models`, `/status`, `/settings`, `/logs`, `/access`, `/connectors`.
 - **Access (F6)**: who can use this TokenStation5 from another machine,
-  and with which key. Five switches, Connect an app, and the list of keys:
+  and with which key. Five switches, Connect a phone, and the list of keys:
   - **Other devices**: whether a model ts5-tui loads can be reached from
     other machines at all. Off by default (only this machine). Switched
     on, the page shows the address to give an app, such as
@@ -325,15 +330,20 @@ ts5-tui --url http://ps5.local:8081  # another one
   - **Browser terminal**: on, your tailnet's devices open ts5-tui in a web
     browser at `/ts5/terminal`, with a key ([In a browser](#in-a-browser-the-chat-page-and-the-terminal)).
     Off by default. Once Tailscale is connected the row shows the address,
-    and **Enter** shows it as a QR code.
-  - **Connect an app**: makes a key (name it after the app) and shows two
-    QR codes, one at a time (**←→**): the address (the tailnet's when
-    Tailscale is connected, else this network's) and the key, to scan into
-    the app on a phone. A taller window draws the codes bigger, which suits
-    a phone's camera best.
-  - **Keys**: **N** makes one (name it after the app or the machine).
-    The key is shown once, with the address, as the same QR codes; **V**
-    shows them as plain text to select. ts5 keeps only its SHA-256.
+    and **Enter** makes a key for a phone, its terminal code first (as
+    Connect a phone does).
+  - **Connect a phone**: makes a key (name it after the phone or the app;
+    Enter alone names it "phone") and shows it in QR codes, one at a time
+    (**←→**): the chat page with the key in it (scanned, it opens signed
+    in), the browser terminal the same way when it is on, then the address
+    (the tailnet's when Tailscale is connected, else this network's) and
+    the key, for an app on the phone. Under each code its text: a click or
+    tap on it (or **C**) copies it, and shows it alone to select where the
+    terminal takes no copy from a program. A taller window draws the codes
+    bigger, which suits a phone's camera best.
+  - **Keys**: **N** makes one, as Connect a phone does. The key is shown
+    once; **V** shows it all as plain text to select. ts5 keeps only its
+    SHA-256.
     **Enter** turns a key off or on, **D** removes it after asking. Each
     row says when the key was made and last used.
 
@@ -378,8 +388,9 @@ ts5-tui --url http://ps5.local:8081  # another one
   the desktop's own where ts5-tui runs on one (wl-copy, xclip, xsel), and
   to `~/.cache/tokenstation/copied.txt`. Apple's Terminal takes no
   clipboard from a program, and none says whether it did, so the text is
-  then shown alone and plain, with the mouse left to the terminal: select
-  it there and copy as usual (Cmd+C), exactly as the model wrote it, long
+  then shown alone and plain, with the mouse left to the terminal (tmux's
+  too, so a drag stays selected): select it there and copy as usual
+  (Cmd+C), exactly as the model wrote it, long
   lines whole and code without the indent; any key goes back. Dragging over
   the chat opens the whole chat that way, at the message under the pointer
   (and the log, on Logs). Settings → Mouse: off leaves the mouse to the
