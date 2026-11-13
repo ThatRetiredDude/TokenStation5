@@ -44,8 +44,18 @@ const TS5Keep = (() => {
       "<h1>Save it to your passwords</h1>" +
       "<p>Tap Save, then Save Password when the device asks. Next time a page (or its home-screen icon) asks for " +
       "the key, tap the key field and Face ID (or the like) fills it in.</p>" +
-      '<input name="username" type="text" autocomplete="username" tabindex="-1" aria-hidden="true" ' +
-      'style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none">' +
+      // iOS may offer no save inside a home-screen icon's own window.
+      (navigator.standalone || matchMedia("(display-mode: standalone)").matches
+        ? "<p>If the phone doesn't ask, open this page in Safari itself and save it there: a home-screen icon " +
+          "may not offer to.</p>"
+        : "") +
+      // Both shown, as on any sign-in page: the device pairs a password
+      // with the account name it can see.
+      '<p style="margin:0 0 4px">Saved as</p>' +
+      '<input name="username" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" ' +
+      'style="width:100%;box-sizing:border-box;padding:9px 10px;border-radius:8px;border:1px solid var(--line);' +
+      'background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif;margin-bottom:8px">' +
+      '<p style="margin:0 0 4px">Key</p>' +
       '<input name="password" type="password" autocomplete="current-password">' +
       '<div class="row"><button type="button" id="keepskip">Not now</button>' +
       '<button type="submit" class="go">Save</button></div></form>';
