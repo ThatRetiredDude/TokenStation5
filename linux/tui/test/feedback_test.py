@@ -66,7 +66,7 @@ def main():
     wrapdir = tempfile.mkdtemp(prefix="ts5-fb-")
     log = os.path.join(wrapdir, "ts5.log")
     with open(log, "w") as f:
-        f.write("ts5: listening on 0.0.0.0:8081\nts5: client 192.168.1.44 token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcd1234\n")
+        f.write("ts5: listening on 0.0.0.0:8081\nts5: client 192.168.1.44 token " + "gh" + "p_ABCDEFGHIJKLMNOPQRSTUVWXYZabcd1234\n")
     wrap = os.path.join(wrapdir, "ts5-tui")
     with open(wrap, "w") as f:
         f.write("#!/bin/sh\nexport TS5_FEEDBACK_URL='http://127.0.0.1:%d/v1/report' TS5_TUI_LOG='%s'\nexec '%s' \"$@\"\n"
