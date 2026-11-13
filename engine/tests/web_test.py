@@ -223,7 +223,7 @@ def main():
         check(code in (401, 404), "while an app asking /v1 gets an answer for an app", code)
         for page in ("/", "/ts5/terminal"):
             code, body, _ = get(here + page)
-            check(b'<script src="/ts5/web/keep.js?v=2"></script>' in body and b"TS5Keep.start()" in body,
+            check(b'<script src="/ts5/web/keep.js?v=3"></script>' in body and b"TS5Keep.start()" in body,
                   f"{page} keeps its key with keep.js (a key from #key=, a QR code of Connect a phone)")
         code, body, h = get(here + "/ts5/web/keep.js")
         check(code == 200 and h.get("Content-Type", "").startswith("text/javascript") and b"location.hash" in body and

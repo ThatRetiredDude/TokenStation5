@@ -18,8 +18,23 @@
 //                fills it in when a page asks for it.
 "use strict";
 const TS5Keep = (() => {
-  const get = (k) => { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } };
-  const set = (k, v) => { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch (e) {} };
+  // The pages' storage (TS5Keep.store): the browser's, and this page's
+  // memory as well, for a browser that keeps nothing (a private window that
+  // refuses storage): the key just given still goes with the next request.
+  const mem = Object.create(null);
+  const store = {
+    get(k, d) {
+      try { const v = localStorage.getItem(k); if (v !== null) return v; } catch (e) {}
+      return k in mem ? mem[k] : d;
+    },
+    set(k, v) {
+      if (v === null || v === undefined) delete mem[k];
+      else mem[k] = v;
+      try { v === null || v === undefined ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {}
+    },
+  };
+  const get = (k) => store.get(k, "") || "";
+  const set = (k, v) => store.set(k, v ? v : null);
   const link = (k) =>
     window.history.replaceState(null, "", location.pathname + location.search + (k ? "#key=" + encodeURIComponent(k) : ""));
   const account = () => "TokenStation5 " + location.hostname;
@@ -28,6 +43,34 @@ const TS5Keep = (() => {
 
   // A key that came in this page's address (a scan), not yet asked about.
   let arrived = "";
+  // A key the device's passwords filled into the key box (Face ID): it is
+  // kept there already, so nothing is asked about it.
+  let filled = "";
+
+  // Watches a key box; the answer is whether its key was filled in by the
+  // device's passwords, not typed or pasted: AutoFill marks the box, and a
+  // key typed by hand takes a key press per character.
+  function watch(input) {
+    let presses = 0, pasted = false;
+    input.addEventListener("keydown", () => presses++);
+    input.addEventListener("paste", () => { pasted = true; });
+    return () => {
+      const v = input.value.trim();
+      let auto = false;
+      for (const sel of [":autofill", ":-webkit-autofill"]) {
+        try { if (input.matches(sel)) auto = true; } catch (e) {}
+      }
+      const r = !!v && (auto || (!pasted && v.length >= 8 && presses < v.length / 2));
+      presses = 0;
+      pasted = false;
+      return r;
+    };
+  }
+
+  // The key box's key, sent: from the passwords (byPasswords) or not.
+  function entered(k, byPasswords) {
+    filled = byPasswords ? k : "";
+  }
 
   // At load: the key from the address, kept, and the address as chosen (or
   // with the key still in it, for a scanned key not yet asked about).
@@ -120,7 +163,8 @@ const TS5Keep = (() => {
   // A key that worked: the question for a scanned one or the first one,
   // else kept as chosen. A home-screen icon isn't asked: it keeps the key in
   // its own storage and opens signed in from then on, and its link was fixed
-  // when it was added.
+  // when it was added. Nor is a key the passwords filled in (a private
+  // window, a new browser): it is in the passwords already.
   function settled(k) {
     if (!k) return;
     if (arrived && arrived === k) {
@@ -129,7 +173,9 @@ const TS5Keep = (() => {
       return;
     }
     arrived = "";
-    const how = get("ts5.keep") || (standalone() ? "passwords" : "");
+    const fromPasswords = !!filled && filled === k;
+    filled = "";
+    const how = get("ts5.keep") || (standalone() || fromPasswords ? "passwords" : "");
     if (how) {
       set("ts5.keep", how);
       link(how === "link" ? k : "");
@@ -156,5 +202,5 @@ const TS5Keep = (() => {
     link("");
   }
 
-  return { start, settled, change, save, forget, how: () => get("ts5.keep") };
+  return { start, settled, change, save, forget, watch, entered, store, how: () => get("ts5.keep") };
 })();

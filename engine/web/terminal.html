@@ -100,14 +100,11 @@
 </div>
 <script src="/ts5/web/xterm.js"></script>
 <script src="/ts5/web/addon-fit.js"></script>
-<script src="/ts5/web/keep.js?v=2"></script>
+<script src="/ts5/web/keep.js?v=3"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const store = {
-  get(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } },
-  set(k, v) { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch (e) {} },
-};
+const store = { get: (k) => TS5Keep.store.get(k, "") || "", set: (k, v) => TS5Keep.store.set(k, v ? v : null) };
 // The key: from the page's address (a QR code of ts5-tui's), else the one
 // this browser kept (keep.js). The key form is a sign-in form the device's
 // passwords can keep a typed key from and fill in again.
@@ -251,10 +248,12 @@ function resize(by) {
 }
 $("smaller").onclick = () => resize(-1);
 $("bigger").onclick = () => resize(1);
+const keyFilled = TS5Keep.watch($("key"));
 $("keyform").onsubmit = (e) => {
   e.preventDefault();
   const k = $("key").value.trim();
   if (!k) return;
+  TS5Keep.entered(k, keyFilled());
   store.set("ts5.key", k);
   $("keydlg").hidden = true;
   tries = 0;
