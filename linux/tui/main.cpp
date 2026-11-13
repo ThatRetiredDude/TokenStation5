@@ -204,6 +204,10 @@ struct App {
     bool tn_terminal = false;                    // the browser terminal (ts5 serve's /ts5/terminal)
     bool tn_want_qr = false;  // turned on here: the sign-in QR opens once there is a link
     std::string tn_state, tn_host, tn_name, tn_address, tn_url, tn_name_url, tn_sign_in, tn_problem, tn_account, tn_why;
+    // HTTPS on the tailnet name (ts5 serve's "https"): its address once it
+    // answers ("https://NAME/"), its state (off, waiting, admin, getting, on,
+    // problem) and why it has none.
+    std::string tn_https_url, tn_https_state, tn_https_problem;
     int tn_devices = 0;
     double tn_at = 0;
     // QR codes over the page: the sign-in link (closed once connected), or
@@ -768,12 +772,25 @@ void tailnet_take(const ts5::Json &j) {
     g->tn_ssh = j["ssh"].boolean(false);
     g->tn_ssh_server = j["ssh_server"].boolean(false);
     g->tn_terminal = j["terminal"].boolean(false);
+    g->tn_https_url = j["https_url"].str();
+    while (!g->tn_https_url.empty() && g->tn_https_url.back() == '/') g->tn_https_url.pop_back();
+    g->tn_https_state = j["https"]["state"].str();
+    g->tn_https_problem = j["https"]["problem"].str();
+}
+
+// Where a phone opens the pages: by the tailnet name over HTTPS once ts5
+// serve has its certificate (a secure page: the phone's passwords fill the
+// key in), else the API's own address (http, 100.x).
+std::string pages_base() {
+    if (!g->tn_https_url.empty()) return g->tn_https_url;
+    std::string u = g->tn_url;
+    if (u.size() > 3 && u.compare(u.size() - 3, 3, "/v1") == 0) u.resize(u.size() - 3);
+    return u;
 }
 
 // The browser terminal's address on the tailnet: the API's, at /ts5/terminal.
 std::string terminal_url() {
-    std::string u = g->tn_url;
-    if (u.size() > 3 && u.compare(u.size() - 3, 3, "/v1") == 0) u.resize(u.size() - 3);
+    const std::string u = pages_base();
     return u.empty() ? u : u + "/ts5/terminal";
 }
 
@@ -3450,6 +3467,15 @@ void draw_access() {
         Row r{"Connect a phone", "a new key, as QR codes", "", false, false};
         const bool tailnet = g->tn_have && g->tn_state == "connected";
         if (k == ACC_TV) r.value = "on the TV", r.note = "the TV app makes its keys: its Settings page, under Apps";
+        else if (tailnet && !g->tn_https_url.empty())
+            r.note = "Enter: a key as a QR code; the phone opens the chat page signed in, by HTTPS";
+        else if (tailnet && g->tn_https_state == "admin")
+            r.warn = true, r.note = "Enter: QR code with a key · HTTPS: Tailscale's DNS page, HTTPS Certificates on";
+        else if (tailnet && g->tn_https_state == "getting")
+            r.note = "Enter: a key as a QR code · getting the HTTPS certificate (a minute or two)…";
+        else if (tailnet && g->tn_https_state == "problem")
+            r.warn = true, r.note = "Enter: a key as a QR code (http) · no HTTPS: " +
+                                    (g->tn_https_problem.empty() ? std::string("see Logs (F5)") : g->tn_https_problem);
         else if (tailnet) r.note = "Enter: a new key in a QR code: the phone opens the chat page signed in (or an app's address)";
         else if (reach) r.note = "Enter: a new key in a QR code: the phone opens the chat page signed in (this network)";
         else r.note = "other machines can't reach it yet: Other devices, or Tailscale, above";
@@ -5111,7 +5137,8 @@ void access_new(const std::string &name) {
     if (tailnet) {
         text += "In the app, as an OpenAI-compatible server, on a device on your tailnet (Tailscale on):\n  address  " +
                 g->tn_url + "\n  API key  the key above\n";
-        if (!g->tn_name_url.empty()) text += "  (or by name, where your tailnet has MagicDNS: " + g->tn_name_url + ")\n";
+        if (!g->tn_https_url.empty()) text += "  (or by name, over HTTPS: " + g->tn_https_url + "/v1)\n";
+        else if (!g->tn_name_url.empty()) text += "  (or by name, where your tailnet has MagicDNS: " + g->tn_name_url + ")\n";
         if (reach && !at.empty()) text += "\nOn this network, without Tailscale: " + at + "\n";
     } else if (!reach) {
         text += "Other machines can't reach the model yet: Access (F6), Other devices or Tailscale.\n";
@@ -5126,6 +5153,7 @@ void access_new(const std::string &name) {
     // in, with nothing to type. Then the address and the key, for an app.
     std::string base = url;
     if (base.size() > 3 && base.compare(base.size() - 3, 3, "/v1") == 0) base.resize(base.size() - 3);
+    if (tailnet) base = pages_base();
     const bool term = tailnet && g->tn_terminal && k != ACC_TV;
     g->toast.clear();
     g->qr.clear();

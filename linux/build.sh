@@ -155,7 +155,7 @@ for src in "$root"/linux/tui/*.cpp; do
     o="$out/obj/own/tui_$(basename "$src" .cpp).o"
     run "$CXX" "${cxxflags[@]}" -I "$root/linux/tui" -c "$src" -o "$o"
 done
-for src in "$root"/engine/src/{main,cli,browser,access,github,tailnet_serve,web_serve}.cpp; do
+for src in "$root"/engine/src/{main,cli,browser,access,github,tailnet_serve,web_serve,acme,https_front}.cpp; do
     o="$out/obj/own/cli_$(basename "$src" .cpp).o"
     run "$CXX" "${cxxflags[@]}" -DTS5_TAILNET=1 -c "$src" -o "$o"
 done
@@ -191,6 +191,7 @@ ar_if_stale "$out/obj/libts5wg.a" "${wgobjects[@]}"
     $(pkg-config --libs sdl2) -ldl
 "$CXX" "${opt[@]}" -o "$out/ts5" "$out/obj/own/cli_main.o" "$out/obj/own/cli_cli.o" "$out/obj/own/cli_browser.o" \
     "$out/obj/own/cli_access.o" "$out/obj/own/cli_github.o" "$out/obj/own/cli_tailnet_serve.o" "$out/obj/own/cli_web_serve.o" "$out/obj/own/web_assets.o" \
-    "$out"/obj/own/ts5net_*.o "${engine_objects[@]}" "$out/obj/libts5wg.a" "$out/obj/libts5mbedtls.a" -lutil -ldl
+    "$out/obj/own/cli_acme.o" "$out/obj/own/cli_https_front.o" \
+    "$out"/obj/own/ts5net_*.o "${engine_objects[@]}" "$out/obj/libts5wg.a" "$out/obj/libts5mbedtls.a" -lutil -lresolv -ldl
 "$CXX" "${opt[@]}" -o "$out/ts5-tui" "$out"/obj/own/tui_*.o "$out/obj/own/third_party_qrcodegen_qrcodegen.cpp.o"
 echo "build: $out/tokenstation, $out/ts5 and $out/ts5-tui ($version, tuned for $march)"

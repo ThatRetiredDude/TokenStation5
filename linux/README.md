@@ -227,12 +227,31 @@ Match Address 127.0.0.2
 it as copied state; ts5 then starts over as a new device and asks for a new
 sign-in (remove the old one in Tailscale's admin console).
 
+**HTTPS.** Once your tailnet has **MagicDNS** and **HTTPS Certificates** on
+(Tailscale's admin console, DNS page), ts5 serve gets a certificate for its
+tailnet name from Let's Encrypt by itself, as `tailscale cert` does, and
+answers HTTPS on it: `https://tokenstation5.YOUR-TAILNET.ts.net/` (port 443,
+the API at `/v1`). The QR codes of Connect a phone and the browser terminal
+then open the pages there, so the phone's browser treats them as secure
+pages: no warning, and its passwords offer the saved key above the
+keyboard. It renews the certificate 30 days before it ends. Until the admin
+console has HTTPS Certificates on, the Connect a phone row says so and the
+codes use the http address. The phone needs Tailscale's DNS (on by default
+in its app) to find the name. A certificate's name is public: it goes into
+the certificate transparency logs, with your tailnet's name, as with any
+Tailscale HTTPS certificate. The certificate and its key sit beside the
+keys too (`tailscale-https.crt`, `tailscale-https.key`, with the Let's
+Encrypt account's key in `tailscale-acme.key`), readable by their owner only.
+`TS5_TS_HTTPS=0` leaves HTTPS off.
+
 ### In a browser: the chat page and the terminal
 
 `ts5 serve` answers a web browser too, at the same address apps use, without
 `/v1`:
 
-- **The chat page** (`http://100.101.102.103:8081/` from your tailnet, or
+- **The chat page** (`https://tokenstation5.YOUR-TAILNET.ts.net/` from your
+  tailnet with [HTTPS](#tailscale-reach-it-from-anywhere) on, else
+  `http://100.101.102.103:8081/`, or
   `http://192.168.1.20:8081/` at home with Other devices on): a plain chat
   with the loaded model, streamed, with its thinking when the model thinks.
   Opened from a QR code of Connect a phone it is signed in already (the key

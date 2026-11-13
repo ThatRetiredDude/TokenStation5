@@ -326,6 +326,10 @@ jobs:
         run: python3 engine/tests/web_test.py "$(command -v ts5)" /tmp/model/test.gguf vk
       - name: GitHub's sign-in and API calls (ts5 github against a GitHub served here)
         run: python3 engine/tests/github_test.py "$(command -v ts5)"
+      - name: HTTPS on the tailnet name (the certificate from an ACME authority served here; the TLS front before ts5 serve)
+        run: |
+          python3 -c "import cryptography" 2>/dev/null || python3 -m pip install --user --break-system-packages -q cryptography
+          python3 engine/tests/https_test.py "$(command -v ts5)" /tmp/model/test.gguf vk
       - name: The model's GitHub tool (ts5-tui --github-call against the same stand-in GitHub)
         run: python3 linux/tui/test/github_tool_test.py "$(command -v ts5-tui)" "$(command -v ts5)"
       - name: Chats (ts5-tui in tmux against a stand-in server; each chat sends its own messages, Ctrl+O opens and deletes)

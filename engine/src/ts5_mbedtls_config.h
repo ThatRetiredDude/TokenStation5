@@ -14,3 +14,11 @@
 #undef MBEDTLS_TIMING_C
 #undef MBEDTLS_PSA_CRYPTO_STORAGE_C
 #undef MBEDTLS_PSA_ITS_FILE_C
+
+// On Linux, connections from several threads at once: downloads, web
+// searches and ts5 serve's HTTPS (https_front.h) all use the PSA key store,
+// which is only safe across threads with Mbed TLS's own locks.
+#if defined(__linux__)
+#define MBEDTLS_THREADING_C
+#define MBEDTLS_THREADING_PTHREAD
+#endif

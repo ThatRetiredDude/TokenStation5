@@ -86,9 +86,9 @@ if(TS5_HTTPS)
   target_compile_options(ts5tunnel PRIVATE -w)  # vendored, unchanged
   target_include_directories(ts5tunnel PUBLIC src/tailnet ${TS5_THIRD}/lwip/src/include ${TS5_THIRD}/wireguard-lwip/src)
   target_sources(ts5 PRIVATE src/tailnet_serve.cpp src/tailnet/wg.cpp src/tailnet/tailscale.cpp
-    src/tailnet/noise.cpp src/tailnet/h2.cpp src/tailnet/nacl.cpp)
+    src/tailnet/noise.cpp src/tailnet/h2.cpp src/tailnet/nacl.cpp src/acme.cpp src/https_front.cpp)
   target_compile_definitions(ts5 PRIVATE TS5_TAILNET=1 TS5_LOG_NAME="ts5")
-  target_link_libraries(ts5 PRIVATE ts5tunnel)
+  target_link_libraries(ts5 PRIVATE ts5tunnel resolv)  # resolv: the DNS check before a certificate (acme.cpp)
 
   # The pages ts5 serve shows a browser (web_serve.h): the chat page, the
   # browser terminal, and xterm.js (third_party/xterm, MIT), built in.

@@ -249,7 +249,11 @@ coordination and DERP relay servers so the machine can join a tailnet, but it
 contains no code from Tailscale's client (BSD-3-Clause). Its crypto uses
 wireguard-lwip's X25519 and poly1305-donna (above) and Mbed TLS (below).
 Signing in connects to Tailscale's servers (or a Headscale server the user
-names) under the user's own account and that service's terms. "Tailscale"
+names) under the user's own account and that service's terms. With HTTPS
+Certificates on in the tailnet, `ts5 serve` gets its name's certificate from
+Let's Encrypt (`engine/src/acme.cpp`, ACME as RFC 8555 describes it, the
+DNS record put up through Tailscale's servers), under Let's Encrypt's
+subscriber agreement. "Tailscale"
 is a trademark of Tailscale Inc.; this project is not affiliated with or
 endorsed by it.
 

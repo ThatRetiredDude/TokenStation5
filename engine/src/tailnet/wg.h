@@ -60,6 +60,9 @@ struct Config {
     // The tailnet's port 22 passed to this machine's own SSH (127.0.0.1:22),
     // for ssh and editors' remote SSH from away; its own sign-in applies.
     bool ssh = false;
+    // The tailnet's port 443 passed to 127.0.0.1:https_port (ts5's HTTPS
+    // front, which has the tailnet name's certificate); 0: closed.
+    int https_port = 0;
 };
 
 struct PeerState {
@@ -90,6 +93,10 @@ public:
     // tunnel made to the API from local_port on this PS5, "" if it isn't one.
     // The API names requests by it, and asks it for a key when keys are on.
     std::string client_for(uint16_t local_port);
+    // Names a connection to the API from local_port on this machine by a
+    // device, as the tunnel's own are: the HTTPS front's, which it opens for
+    // a device the tunnel passed to it (client_for its own port).
+    void note_client(uint16_t local_port, const std::string &name);
 
 private:
     void loop();

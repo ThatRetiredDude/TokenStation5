@@ -112,6 +112,7 @@ struct Conn {
     bool api_eof = false;     // the API sent everything
     bool shut_wr = false;
     bool ssh = false;         // to this machine's SSH rather than the API
+    bool https = false;       // to ts5's HTTPS front (Config::https_port), which passes it on to the API
     std::string to_api;       // from the device, not written to the API yet
 };
 
@@ -194,6 +195,12 @@ std::vector<PeerState> Tunnel::tailnet_peers() {
     return ts_states_;
 }
 
+void Tunnel::note_client(uint16_t local_port, const std::string &name) {
+    std::lock_guard<std::mutex> lk(mu_);
+    // Taken by client_for when the API accepts it; else gone in a minute.
+    clients_[local_port] = {name, std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count() + 60};
+}
+
 std::string Tunnel::client_for(uint16_t local_port) {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = clients_.find(local_port);
@@ -215,6 +222,8 @@ struct Loop {
     std::string private_key;
     tcp_pcb *listener = nullptr;
     tcp_pcb *ssh_listener = nullptr;  // the tailnet's port 22, while Config::ssh is on
+    tcp_pcb *https_listener = nullptr;  // the tailnet's port 443, while Config::https_port is set
+    int https_port = 0;
     int udp = -1, udp_port = 0;
     unsigned long received = 0, traced = 0;  // packets in since the port opened; how many the detailed log showed
     bool poll_failed = false;
@@ -349,20 +358,21 @@ bool detail() {
 }
 
 // A connection from a device in the tunnel, passed to port on this machine:
-// the API's, or (ssh) port 22, this machine's own SSH, for the tailnet only.
-err_t accept_to(Loop &L, tcp_pcb *pcb, bool ssh) {
+// the API's, or (ssh) port 22, this machine's own SSH, or (https) ts5's
+// HTTPS front, the last two for the tailnet only.
+err_t accept_to(Loop &L, tcp_pcb *pcb, bool ssh, bool https = false) {
     const std::string from = ip_text(ip4_addr_get_u32(ip_2_ip4(&pcb->remote_ip)));
     const bool tailnet = L.ts_up && L.ts_ip && ip4_addr_get_u32(ip_2_ip4(&pcb->local_ip)) == L.ts_ip;
-    if (ssh && !tailnet) {
+    if ((ssh || https) && (!tailnet || (https && !L.https_port))) {
         tcp_abort(pcb);
         return ERR_ABRT;
     }
-    const int port = ssh ? 22 : L.api_port;
+    const int port = ssh ? 22 : https ? L.https_port : L.api_port;
     // From the tailnet: only devices its access rules (ACLs) let reach the
-    // port, as Tailscale's own apps check them.
+    // port they asked for, as Tailscale's own apps check them.
     if (tailnet) {
         const uint32_t src = ip4_addr_get_u32(ip_2_ip4(&pcb->remote_ip));
-        if (!L.ts_filter.allows_tcp(ntohl(src), ntohl(L.ts_ip), (uint16_t)port)) {
+        if (!L.ts_filter.allows_tcp(ntohl(src), ntohl(L.ts_ip), https ? (uint16_t)443 : (uint16_t)port)) {
             const double now = now_s();
             double &last = L.ts_refused[src];
             if (now - last > 60) {
@@ -370,6 +380,7 @@ err_t accept_to(Loop &L, tcp_pcb *pcb, bool ssh) {
                 ts5::log_line(TS5_LOG_NAME ": tailscale: %s refused: %s", from.c_str(),
                               !L.ts_filter.known ? "no access rules from the control server yet"
                               : ssh             ? "the tailnet's access rules don't let it reach port 22"
+                              : https           ? "the tailnet's access rules don't let it reach port 443"
                                                 : "the tailnet's access rules don't let it reach the API");
             }
             if (L.ts_refused.size() > 256) L.ts_refused.clear();
@@ -407,6 +418,7 @@ err_t accept_to(Loop &L, tcp_pcb *pcb, bool ssh) {
     c->pcb = pcb;
     c->fd = fd;
     c->ssh = ssh;
+    c->https = https;
     if (!ssh) {
         // (SSH has its own sign-in: the API's names aren't needed there.)
         c->local_port = ntohs(a.sin_port);
@@ -452,6 +464,46 @@ err_t on_accept(void *arg, tcp_pcb *pcb, err_t err) {
 err_t on_accept_ssh(void *arg, tcp_pcb *pcb, err_t err) {
     if (err != ERR_OK || !pcb) return ERR_VAL;
     return accept_to(*(Loop *)arg, pcb, true);
+}
+
+err_t on_accept_https(void *arg, tcp_pcb *pcb, err_t err) {
+    if (err != ERR_OK || !pcb) return ERR_VAL;
+    return accept_to(*(Loop *)arg, pcb, false, true);
+}
+
+// The tailnet's port 443 open while port (ts5's HTTPS front, on this
+// machine) is set; 0 closes it and ends the connections through it.
+void https_sync(Loop &L, int port) {
+    L.https_port = port;
+    if (port && !L.https_listener) {
+        tcp_pcb *pcb = tcp_new();
+        if (!pcb || tcp_bind(pcb, IP_ADDR_ANY, 443) != ERR_OK || !(L.https_listener = tcp_listen(pcb))) {
+            if (pcb) tcp_close(pcb);
+            ts5::log_line(TS5_LOG_NAME ": tailscale: no listener on port 443 in the tunnel");
+            return;
+        }
+        tcp_arg(L.https_listener, &L);
+        tcp_accept(L.https_listener, on_accept_https);
+    } else if (!port && L.https_listener) {
+        tcp_close(L.https_listener);
+        L.https_listener = nullptr;
+        for (auto it = L.conns.begin(); it != L.conns.end();) {
+            Conn *c = *it;
+            if (!c->https) {
+                ++it;
+                continue;
+            }
+            if (c->pcb) {
+                tcp_pcb *pcb = c->pcb;
+                forget_pcb(c);
+                tcp_abort(pcb);
+            }
+            drop_client(L, c);
+            close(c->fd);
+            delete c;
+            it = L.conns.erase(it);
+        }
+    }
 }
 
 // The tailnet's port 22 open or closed, as Config::ssh says; closed, the
@@ -923,6 +975,7 @@ void Tunnel::loop() {
             sync_peers(L, cfg.peers);
             L.ts_on = cfg.tailscale && L.ts;
             ssh_sync(L, cfg.ssh && L.ts_on);
+            https_sync(L, L.ts_on ? cfg.https_port : 0);
             std::lock_guard<std::mutex> lk(mu_);
             problem_ = why;
         }

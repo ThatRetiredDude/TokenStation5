@@ -89,6 +89,9 @@ WEB = bool(os.environ.get("FAKE_WEB") or os.environ.get("TAVILY_API_KEY"))
 TAILNET = os.environ.get("FAKE_TAILNET") == "1"
 TAILNET_SIGNIN = float(os.environ.get("FAKE_TAILNET_SIGNIN", "6"))
 TAILNET_SSHD = os.environ.get("FAKE_TAILNET_SSHD", "1") == "1"
+# HTTPS on the tailnet name: "on" (a certificate), "admin" (HTTPS Certificates
+# off in the tailnet's admin console), "" (off).
+TAILNET_HTTPS = os.environ.get("FAKE_TAILNET_HTTPS", "")
 tailnet = {"on": False, "since": 0.0, "signed_in": False, "name": "tokenstation5", "ssh": False, "terminal": False}
 
 
@@ -112,6 +115,11 @@ def tailnet_status():
         out.update(state="connected", name=name, address="100.101.102.103", account="you@example.com", devices=2,
                    url="http://100.101.102.103:%d/v1" % out["port"],
                    name_url="http://%s:%d/v1" % (name.rstrip("."), out["port"]))
+        if TAILNET_HTTPS == "on":
+            out["https"] = {"state": "on", "name": name.rstrip("."), "until": int(time.time()) + 80 * 86400}
+            out["https_url"] = "https://%s/" % name.rstrip(".")
+        elif TAILNET_HTTPS:
+            out["https"] = {"state": TAILNET_HTTPS, "name": name.rstrip(".")}
     return out
 SUMMARY = """## What you are doing
 - Trying the fake TokenStation, one message at a time.
