@@ -20,6 +20,8 @@ const TS5Keep = (() => {
   const link = (k) =>
     window.history.replaceState(null, "", location.pathname + location.search + (k ? "#key=" + encodeURIComponent(k) : ""));
   const account = () => "TokenStation5 " + location.hostname;
+  // Opened from a home-screen icon: a window with storage of its own.
+  const standalone = () => navigator.standalone === true || matchMedia("(display-mode: standalone)").matches;
 
   // At load: the key from the address, kept, and the address as chosen.
   function start() {
@@ -45,7 +47,7 @@ const TS5Keep = (() => {
       "<p>Tap Save, then Save Password when the device asks. Next time a page (or its home-screen icon) asks for " +
       "the key, tap the key field and Face ID (or the like) fills it in.</p>" +
       // iOS may offer no save inside a home-screen icon's own window.
-      (navigator.standalone || matchMedia("(display-mode: standalone)").matches
+      (standalone()
         ? "<p>If the phone doesn't ask, open this page in Safari itself and save it there: a home-screen icon " +
           "may not offer to.</p>"
         : "") +
@@ -101,12 +103,16 @@ const TS5Keep = (() => {
     };
   }
 
-  // A key that worked: kept as chosen, or the question, once.
+  // A key that worked: kept as chosen, or the question, once. A home-screen
+  // icon isn't asked: it keeps the key in its own storage and opens signed
+  // in from then on, and its link was fixed when it was added.
   function settled(k) {
     if (!k) return;
-    const how = get("ts5.keep");
-    if (how) link(how === "link" ? k : "");
-    else choose(k);
+    const how = get("ts5.keep") || (standalone() ? "passwords" : "");
+    if (how) {
+      set("ts5.keep", how);
+      link(how === "link" ? k : "");
+    } else choose(k);
   }
 
   function change(how, k) {
