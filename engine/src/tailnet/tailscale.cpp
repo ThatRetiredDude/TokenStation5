@@ -710,7 +710,17 @@ void Client::control_loop() {
 
         auto fail = [&](const std::string &why) {
             log("%s", why.c_str());
-            set_state(Status::Problem, why);
+            {
+                // The control server's connection ends now and then (it
+                // closes long ones itself): the tunnel goes on through the
+                // relay meanwhile, so a connected machine stays connected.
+                std::lock_guard<std::mutex> lk(mu_);
+                if (!(status_.state == Status::Connected && relay_up_ && !map_.address.empty())) {
+                    status_.state = Status::Problem;
+                    status_.problem = why;
+                    status_.sign_in_url.clear();
+                }
+            }
             const double until = now_s() + backoff;
             backoff = backoff * 2 > 60 ? 60 : backoff * 2;
             while (now_s() < until && !changed()) usleep(100 * 1000);
@@ -895,7 +905,10 @@ void Client::control_loop() {
         {
             std::lock_guard<std::mutex> lk(mu_);
             status_.account = keys.account;
-            if (status_.state != Status::Connected) status_.state = Status::Connecting;
+            // Signed in again with the relay still open: connected now, as
+            // the relay's hello (which made it so the first time) won't come
+            // again on that connection.
+            if (status_.state != Status::Connected) status_.state = relay_up_ ? Status::Connected : Status::Connecting;
             status_.problem.clear();
             status_.sign_in_url.clear();
         }
@@ -1479,6 +1492,7 @@ void Client::relay_loop() {
                         log("on relay %s (%s)", rg->name.c_str(), host.c_str());
                         {
                             std::lock_guard<std::mutex> lk(mu_);
+                            relay_up_ = true;
                             if (status_.state == Status::Connecting || status_.state == Status::Problem) {
                                 status_.state = Status::Connected;
                                 status_.problem.clear();
@@ -1536,6 +1550,10 @@ void Client::relay_loop() {
             in.append(buf, (size_t)n);
         }
         s.close();
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            relay_up_ = false;
+        }
         if (!ok && !changed()) fail(why);
     }
 }

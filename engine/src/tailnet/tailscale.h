@@ -160,6 +160,9 @@ private:
     uint64_t cfg_gen_ = 0;  // grows with each apply()
     bool sign_out_ = false;
     Status status_;
+    // The relay connection is open and said hello: the tunnel works through
+    // it, whatever the control server's connection is doing.
+    bool relay_up_ = false;
     Netmap map_;
     // The relays (region ID: its servers' host:port), from the control server.
     struct Region {
