@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
+<!-- An opaque bar over the iPhone's clock in a home-screen icon, in the page's
+     colours: nothing of the page shows blurred through it. -->
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f6f8fa">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#161b22">
 <title>TokenStation5</title>
 <link rel="icon" type="image/png" href="/ts5/web/icon.png">
 <link rel="apple-touch-icon" href="/ts5/web/icon.png">
@@ -35,15 +40,17 @@
   body { display: flex; flex-direction: column; height: 100dvh; }
   header { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--line);
     background: var(--panel); flex: none; }
+  /* Under the clock (if the phone puts the page there): the bar's own colour. */
+  header { padding-top: calc(10px + env(safe-area-inset-top)); }
   header b { font-size: 16px; }
-  @media (max-width: 480px) { header b, header .wide { display: none; } header { gap: 6px; padding: 8px 10px; } }
+  @media (max-width: 480px) { header b, header .wide { display: none; } header { gap: 6px; padding: 8px 10px; padding-top: calc(8px + env(safe-area-inset-top)); } }
   #model { color: var(--dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
   header button, header a { background: none; border: 1px solid var(--line); color: var(--fg); border-radius: 6px;
     padding: 5px 10px; font: inherit; font-size: 13px; text-decoration: none; white-space: nowrap; cursor: pointer; }
   /* The chats: a drawer from the left. */
   .shade.side { justify-content: flex-start; align-items: stretch; padding: 0; }
   .drawer { background: var(--bg); border-right: 1px solid var(--line); width: min(380px, 88vw); height: 100%;
-    display: flex; flex-direction: column; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+    display: flex; flex-direction: column; padding-bottom: env(safe-area-inset-bottom); }
   .drawer .top { display: flex; align-items: center; gap: 8px; padding: 12px 16px 6px; }
   .drawer h1 { font-size: 18px; margin: 0; flex: 1; }
   .drawer .top button { border: 1px solid var(--line); background: var(--panel); color: var(--fg); border-radius: 8px;
