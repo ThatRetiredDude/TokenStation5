@@ -4958,11 +4958,9 @@ void access_new(const std::string &name) {
     g->qr.clear();
     if (!base.empty()) {
         g->qr.push_back({"Chat page", base + "/#key=" + key});
-        if (term) {
-            App::Qr t{"Browser terminal", base + "/ts5/terminal#key=" + key};
-            if (g->acc_for_terminal) g->qr.insert(g->qr.begin(), t);
-            else g->qr.push_back(t);
-        }
+        // The browser terminal first when it is on: all of ts5-tui (models,
+        // settings, fans, keys); the chat page is a chat only.
+        if (term) g->qr.insert(g->qr.begin(), App::Qr{"Browser terminal: all of ts5-tui", base + "/ts5/terminal#key=" + key});
         g->qr.push_back({"Address, for an app", url});
     }
     g->qr.push_back({"API key", key});
@@ -4973,8 +4971,9 @@ void access_new(const std::string &name) {
     g->qr_title = " Connect " + j["name"].str() + " ";
     g->qr_notes.clear();
     if (!base.empty()) {
-        const std::string first = g->qr[0].label == "Chat page" ? "the chat page" : "the browser terminal";
-        const std::string other = g->qr.size() > 3 ? (first == "the chat page" ? "the browser terminal, " : "the chat page, ") : "";
+        const std::string first = term ? "the browser terminal (all of ts5-tui: models, settings, fans, keys)"
+                                       : "the chat page";
+        const std::string other = term ? "the chat page (a chat only, light on a phone), " : "";
         g->qr_notes.push_back("Scan it with the phone's camera: " + first + " opens, signed in with this key. " +
                               (tailnet ? "The phone needs Tailscale on." : "On this network only (Tailscale, above, reaches it from anywhere).") +
                               " ←→ for " + other + "the address and the key, for an app (OpenAI-compatible).");
@@ -4985,7 +4984,8 @@ void access_new(const std::string &name) {
     g->qr_notes.push_back(std::string("Shown this once: ts5 keeps only its SHA-256.") +
                           (sent ? " The key alone is on the clipboard too, if the terminal allows it." : "") +
                           " A tap on the text under a code copies it.");
-    g->qr_short = base.empty() ? "The new key, shown this once" : "Scan it: " + g->qr[0].label + ", signed in";
+    g->qr_short = base.empty() ? "The new key, shown this once"
+                                : std::string("Scan it: ") + (term ? "the browser terminal" : "the chat page") + ", signed in";
     if (!base.empty()) {
         text += "\nOn a phone or tablet" + std::string(tailnet ? " with Tailscale on" : "") + ", these open signed in:\n  chat page  " +
                 base + "/#key=" + key + "\n";

@@ -19,6 +19,7 @@
   header { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--line);
     background: var(--panel); flex: none; }
   header b { font-size: 16px; }
+  @media (max-width: 480px) { header b { display: none; } header { gap: 6px; padding: 8px 10px; } }
   #model { color: var(--dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
   header button, header a { background: none; border: 1px solid var(--line); color: var(--fg); border-radius: 6px;
     padding: 5px 10px; font: inherit; font-size: 13px; text-decoration: none; white-space: nowrap; cursor: pointer; }
@@ -84,6 +85,7 @@
   <b>TokenStation5</b>
   <span id="model">…</span>
   <button id="new" type="button">New chat</button>
+  <a id="full" href="/ts5/terminal" title="All of ts5-tui here: models, settings, fans, keys">Full controls</a>
   <button id="settings" type="button">Settings</button>
 </header>
 <nav id="chats"></nav>
@@ -106,7 +108,7 @@
     <h1>Settings</h1>
     <label><input type="checkbox" id="think"> Let a thinking model think first</label>
     <label><input type="checkbox" id="showthink"> Show its thinking</label>
-    <p>The key and the chats are kept in this browser only. <a href="/ts5/terminal">The terminal</a> opens ts5-tui here, when it is turned on (Access page, F6).</p>
+    <p>The key and the chats are kept in this browser only. <a href="/ts5/terminal">Full controls</a> opens ts5-tui itself here (models, settings, fans, keys), with this key, when the browser terminal is on (Access page, F6).</p>
     <div class="row"><button type="button" id="forget">Forget the key</button><button type="button" id="clear">Delete all chats</button><button class="go" type="button" id="setdone">Done</button></div>
   </div>
 </div>

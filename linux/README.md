@@ -194,9 +194,9 @@ device on the tailnet always needs an API key that is on, whether or not
 ts5-tui's **Access** page (F6) sets it up: turn **Tailscale** on, scan the
 QR code with your phone and sign in. The machine shows up in your tailnet as
 `tokenstation5`. Then **Connect a phone** makes a key and puts it in a QR
-code: the phone's camera opens the chat page, signed in, with nothing to
-type. **←→** shows the browser terminal's code (when it is on), then the
-address on your tailnet and the key, for an app on the phone.
+code: the phone's camera opens the browser terminal (when it is on) or the
+chat page, signed in, with nothing to type. **←→** shows the other one,
+then the address on your tailnet and the key, for an app on the phone.
 Tailscale off leaves it signed in (on again needs no QR code); **D** on that
 row signs out.
 
@@ -330,12 +330,13 @@ ts5-tui --url http://ps5.local:8081  # another one
   - **Browser terminal**: on, your tailnet's devices open ts5-tui in a web
     browser at `/ts5/terminal`, with a key ([In a browser](#in-a-browser-the-chat-page-and-the-terminal)).
     Off by default. Once Tailscale is connected the row shows the address,
-    and **Enter** makes a key for a phone, its terminal code first (as
-    Connect a phone does).
+    and **Enter** makes a key for a phone, as Connect a phone does.
   - **Connect a phone**: makes a key (name it after the phone or the app;
     Enter alone names it "phone") and shows it in QR codes, one at a time
-    (**←→**): the chat page with the key in it (scanned, it opens signed
-    in), the browser terminal the same way when it is on, then the address
+    (**←→**): the browser terminal with the key in it when it is on (all
+    of ts5-tui: models, settings, fans, keys; scanned, it opens signed in),
+    the chat page the same way (a chat only, light on a phone, with a Full
+    controls button to the terminal), then the address
     (the tailnet's when Tailscale is connected, else this network's) and
     the key, for an app on the phone. Under each code its text: a click or
     tap on it (or **C**) copies it, and shows it alone to select where the
