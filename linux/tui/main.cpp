@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -210,6 +211,10 @@ struct App {
     int qr_link_y = -1;  // the sign-in link's row, as last drawn
     bool qr_github = false;   // GitHub's sign-in: C copies the code
     bool qr_install = false;  // GitHub's page for picking the repositories
+    // An app's address and key, the browser terminal's address: each shown
+    // as text under its code too, and a tap on it (or C) copies it.
+    bool qr_copy = false;
+    std::vector<std::pair<int, int>> qr_value_rows;  // (row, code) as last drawn
     // The Connectors page: GitHub (`ts5 github`, engine/src/github.h). The
     // sign-in runs as gh_signin (its lines: the code, then whose it is);
     // the repositories the app may use are asked of GitHub by gh_status.
@@ -769,7 +774,8 @@ void qr_terminal_open() {
     g->qr.clear();
     g->qr.push_back({"", url});
     g->qr_sel = 0;
-    g->qr_sign_in = false;
+    g->qr_sign_in = g->qr_github = g->qr_install = false;
+    g->qr_copy = true;
     g->qr_title = " The browser terminal ";
     g->qr_notes = {"Open it on a device on your tailnet (Tailscale on): ts5-tui in the browser, in its tmux session. "
                    "It asks for one of the keys below once (N makes one).",
@@ -788,6 +794,7 @@ void qr_sign_in_open() {
     g->qr = {{"", g->tn_sign_in}};
     g->qr_sel = 0;
     g->qr_sign_in = true;
+    g->qr_copy = false;
     g->qr_title = " Sign in to Tailscale ";
     g->qr_notes = {"Scan it with your phone's camera and sign in: this machine joins your tailnet as " +
                        (g->tn_host.empty() ? std::string("tokenstation5") : g->tn_host) + ". Or open this link on any device:",
@@ -805,6 +812,8 @@ void qr_close() {
     g->qr_sign_in = false;
     g->qr_github = false;
     g->qr_install = false;
+    g->qr_copy = false;
+    g->qr_value_rows.clear();
 }
 
 // ---- GitHub (the Connectors page) ----
@@ -821,7 +830,7 @@ void qr_github_open() {
     g->toast.clear();
     g->qr = {{"Code: " + g->gh_code, g->gh_url}};
     g->qr_sel = 0;
-    g->qr_sign_in = g->qr_install = false;
+    g->qr_sign_in = g->qr_install = g->qr_copy = false;
     g->qr_github = true;
     g->qr_title = " Connect GitHub ";
     g->qr_notes = {"Scan it with your phone (signed in to GitHub there), enter the code " + g->gh_code +
@@ -838,7 +847,7 @@ void qr_install_open() {
     g->toast.clear();
     g->qr = {{"", g->gh_install}};
     g->qr_sel = 0;
-    g->qr_sign_in = g->qr_github = false;
+    g->qr_sign_in = g->qr_github = g->qr_copy = false;
     g->qr_install = true;
     g->qr_title = " Choose the repositories ";
     g->qr_notes = {"GitHub's page for the TokenStation5 app: pick your account, then All repositories or only the ones "
@@ -3750,13 +3759,14 @@ void draw_qr_overlay() {
         }
         box_w = std::min(s.w - 2, std::max(widest + 6, 72));
         lines = bare ? std::vector<std::string>{} : wrap(g->qr_notes, box_w - 4);
-        box_h = 2 + (labels ? 1 : 0) + tallest + (int)lines.size() + 1 + (bare ? 0 : 2) + (big ? 0 : 2);
+        box_h = 2 + (labels ? 1 : 0) + tallest + (g->qr_copy ? 1 : 0) + (int)lines.size() + 1 + (bare ? 0 : 2) +
+                (big ? 0 : 2);
         fits = box_h <= (bare ? s.h : s.h - 1) && widest + 4 <= box_w;
         if (fits) break;
     }
     if (!fits) {
         lines = wrap(g->qr_notes, box_w - 4);
-        box_h = std::min(s.h - 1, 2 + 2 + (int)lines.size() + 2);
+        box_h = std::min(s.h - 1, 2 + 2 + (g->qr_copy ? (int)g->qr.size() + 1 : 0) + (int)lines.size() + 2);
     }
     const bool side_by_side = false;
     const int x = (s.w - box_w) / 2, y = std::max(0, (s.h - box_h) / 2);
@@ -3765,9 +3775,27 @@ void draw_qr_overlay() {
     const std::string title = fits && bare && !g->qr_short.empty() ? " " + g->qr_short + " " : g->qr_title;
     box(s, x, y, box_w, box_h, Style(t.accent, t.panel2), Style(t.fg, t.panel2), title, Style(t.accent, t.panel2, BOLD));
     int ty = y + 1;
+    // A value under its code (or, with no room for a code, each one): the
+    // whole of it where it fits, and a tap on the row copies it all.
+    g->qr_value_rows.clear();
+    const auto value_line = [&](int i, bool named) {
+        const App::Qr &q = g->qr[(size_t)i];
+        std::string v = named && !q.label.empty() ? q.label + "  " : "";
+        const int room = box_w - 4, vw = text_width(v) + text_width(q.data);
+        const std::string tap = vw + 14 <= room ? "  tap to copy" : "";
+        int lx = x + 2 + std::max(0, (room - vw - text_width(tap)) / 2);
+        if (!v.empty()) lx = s.put(lx, ty, v, Style(t.fg, t.panel2, BOLD));
+        lx = s.put(lx, ty, fit(q.data, std::max(1, x + box_w - 2 - lx)), Style(t.accent2, t.panel2, UNDER));
+        if (!tap.empty()) s.put(lx, ty, tap, Style(t.dim, t.panel2));
+        g->qr_value_rows.push_back({ty++, i});
+    };
     if (!fits) {
         s.put(x + 2, ty, fit("Make the window taller to see the QR code (on a Mac: full screen, or Cmd+minus). V shows it as text.", box_w - 4), Style(t.warn, t.panel2));
         ty += 2;
+        if (g->qr_copy) {
+            for (int i = 0; i < (int)g->qr.size(); i++) value_line(i, true);
+            ty++;
+        }
     } else {
         const auto full_warning = [&] {
             const std::string w = fit(kFull, box_w - 4);
@@ -3793,6 +3821,7 @@ void draw_qr_overlay() {
             cx += qr_cols(m, quiet, big) + 4;
         }
         ty += (labels ? 1 : 0) + tallest;
+        if (g->qr_copy) value_line(shown[0], false);
         if (!big) full_warning();
         ty += bare ? 0 : 1;
     }
@@ -3809,21 +3838,23 @@ void draw_qr_overlay() {
         const int lx = s.put(x + 2, ty, l.substr(0, at), Style(t.dim, t.panel2));
         s.put(lx, ty++, g->tn_sign_in, Style(t.accent2, t.panel2, UNDER));
     }
-    int bx = s.put(x + 2, y + box_h - 2, "Esc", Style(t.accent2, t.panel2, BOLD));
-    bx = s.put(bx, y + box_h - 2, " close   ", Style(t.dim, t.panel2));
-    if (g->qr_sign_in) {
-        bx = s.put(bx, y + box_h - 2, "C", Style(t.accent2, t.panel2, BOLD));
-        bx = s.put(bx, y + box_h - 2, fits && bare ? " copies the link   " : " or a click on the link copies it   ",
-                   Style(t.dim, t.panel2));
-    } else if (g->qr_github) {
-        bx = s.put(bx, y + box_h - 2, "C", Style(t.accent2, t.panel2, BOLD));
-        bx = s.put(bx, y + box_h - 2, " copies the code   ", Style(t.dim, t.panel2));
-    } else if (g->qr.size() > 1) {
-        bx = s.put(bx, y + box_h - 2, "←→", Style(t.accent2, t.panel2, BOLD));
-        bx = s.put(bx, y + box_h - 2, " the next code   ", Style(t.dim, t.panel2));
+    // The keys, in words where they fit the box, in a few where not (a phone).
+    std::vector<std::array<std::string, 3>> keys = {{"Esc", " close", " close"}};
+    if (g->qr_sign_in) keys.push_back({"C", fits && bare ? " copies the link" : " or a click on the link copies it", " copy"});
+    else if (g->qr_github) keys.push_back({"C", " copies the code", " copy"});
+    else {
+        if (g->qr.size() > 1) keys.push_back({"←→", " the next code", " next"});
+        if (g->qr_copy) keys.push_back({"C", " or a tap copies it", " copy"});
     }
-    bx = s.put(bx, y + box_h - 2, "V", Style(t.accent2, t.panel2, BOLD));
-    s.put(bx, y + box_h - 2, g->qr_sign_in ? " as text" : " as text, to copy", Style(t.dim, t.panel2));
+    keys.push_back({"V", g->qr_sign_in || g->qr_copy ? " as text" : " as text, to copy", " text"});
+    int long_w = 0;
+    for (const auto &k : keys) long_w += text_width(k[0]) + text_width(k[1]) + 3;
+    const bool few = long_w - 3 > box_w - 4;
+    int bx = x + 2;
+    for (const auto &k : keys) {
+        bx = s.put(bx, y + box_h - 2, k[0], Style(t.accent2, t.panel2, BOLD));
+        bx = s.put(bx, y + box_h - 2, (few ? k[2] : k[1]) + (few ? "  " : "   "), Style(t.dim, t.panel2));
+    }
 }
 
 // ---- Chat (drawing in chat.cpp) ----
@@ -4938,7 +4969,8 @@ void access_new(const std::string &name) {
     if (!url.empty()) g->qr.push_back({"Address", url});
     g->qr.push_back({"API key", key});
     g->qr_sel = 0;
-    g->qr_sign_in = false;
+    g->qr_sign_in = g->qr_github = g->qr_install = false;
+    g->qr_copy = true;
     g->qr_title = " Connect an app: " + j["name"].str() + " ";
     g->qr_notes.clear();
     if (!url.empty())
@@ -4949,7 +4981,8 @@ void access_new(const std::string &name) {
         g->qr_notes.push_back("Other machines can't reach the model yet (Other devices or Tailscale, above): the key is "
                               "ready for when they can.");
     g->qr_notes.push_back(std::string("Shown this once: ts5 keeps only its SHA-256.") +
-                          (sent ? " The key alone is on the clipboard too, if the terminal allows it." : ""));
+                          (sent ? " The key alone is on the clipboard too, if the terminal allows it." : "") +
+                          " A tap on the text under a code copies it.");
     g->qr_short = url.empty() ? "The new key, shown this once" : "The address, then the key: shown this once";
     g->qr_plain = text;
     g->qr_plain_title = "the new key";
@@ -5298,6 +5331,20 @@ void copy_out(const std::string &text, const std::string &what) {
     view_open(text, what, 0, to_clipboard(text));
 }
 
+// A value from the codes over the page (an app's key, an address): to the
+// clipboard where the terminal takes it (OSC 52; Blink on an iPhone does),
+// and shown alone, over the codes, to select where it doesn't (Apple's
+// Terminal; press and hold on a phone). Any key goes back to the codes, for
+// the next one. Not to copied.txt: a key is kept nowhere.
+void qr_copy_value(int i) {
+    if (i < 0 || i >= (int)g->qr.size()) return;
+    const App::Qr q = g->qr[(size_t)i];
+    std::string what = q.label.empty() ? g->qr_plain_title : q.label;
+    if (!q.label.empty() && q.label != "API key") what[0] = (char)tolower((unsigned char)what[0]);
+    if (!q.label.empty()) what = "the " + what;
+    view_open(q.data, what, 0, to_clipboard(q.data));
+}
+
 void handle(const Event &e);
 
 void mouse(const Event &e) {
@@ -5438,6 +5485,11 @@ void handle(const Event &e) {
             const std::string code = g->gh_code;
             qr_close();
             copy_out(code, "GitHub's code: enter it at " + g->gh_url);
+        } else if (g->qr_copy && e.key == K_CHAR && (e.ch == "c" || e.ch == "C")) {
+            qr_copy_value(std::min(g->qr_sel, (int)g->qr.size() - 1));
+        } else if (g->qr_copy && e.key == K_MOUSE && e.mouse == M_DOWN && e.button == 0) {
+            for (const auto &r : g->qr_value_rows)
+                if (r.first == e.y) qr_copy_value(r.second);
         } else if (e.key >= K_F1 && e.key <= K_F7) {
             qr_close();
             global_key(e);
