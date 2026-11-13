@@ -10,6 +10,7 @@ import http.client
 import hashlib
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -47,6 +48,19 @@ def post(url, body):
             return r.status, json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read() or b"{}")
+
+
+def jpeg_size(b):
+    """A JPEG's (width, height), from its frame header."""
+    i = 2
+    while i + 9 < len(b):
+        if b[i] != 0xFF:
+            return None
+        m, n = b[i + 1], int.from_bytes(b[i + 2:i + 4], "big")
+        if m in (0xC0, 0xC1, 0xC2):
+            return int.from_bytes(b[i + 7:i + 9], "big"), int.from_bytes(b[i + 5:i + 7], "big")
+        i += 2 + n
+    return None
 
 
 def lan_address():
@@ -235,6 +249,20 @@ def main():
         code, body, _ = get(here + "/")
         check(b'rel="apple-touch-icon" href="/ts5/web/icon.png"' in body and b'autocomplete="current-password"' in body,
               "the page names its home-screen icon, and its key form is one the phone's passwords can fill")
+        # The launch images: one per iPhone screen, each the size its media
+        # query names (iOS shows one only when it is the screen exactly).
+        for page in ("/", "/ts5/terminal"):
+            code, body, _ = get(here + page)
+            links = re.findall(rb'<link rel="apple-touch-startup-image" media="\(device-width: (\d+)px\) and '
+                               rb'\(device-height: (\d+)px\) and \(-webkit-device-pixel-ratio: (\d)\) and '
+                               rb'\(orientation: portrait\)" href="([^"]+)">', body)
+            bad = []
+            for w, hh, r, href in links:
+                code, img, hd = get(here + href.decode())
+                size = jpeg_size(img) if code == 200 else None
+                if hd.get("Content-Type") != "image/jpeg" or size != (int(w) * int(r), int(hh) * int(r)):
+                    bad.append((href, code, hd.get("Content-Type"), size))
+            check(len(links) == 11 and not bad, f"{page}: 11 launch images, each the size of its screen", (len(links), bad))
         code, body, h = get(here + "/ts5/web/xterm.js")
         check(code == 200 and h.get("Content-Type", "").startswith("text/javascript") and len(body) > 200000 and
               b"xterm.js" in body, "xterm.js is built in", (code, len(body), h))

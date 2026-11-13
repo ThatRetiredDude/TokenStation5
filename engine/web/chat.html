@@ -7,6 +7,18 @@
 <title>TokenStation5</title>
 <link rel="icon" type="image/png" href="/ts5/web/icon.png">
 <link rel="apple-touch-icon" href="/ts5/web/icon.png">
+<!-- What an iPhone shows while a home-screen icon of this page opens (make_splash.py). -->
+<link rel="apple-touch-startup-image" media="(device-width: 440px) and (device-height: 956px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/ts5/web/splash-1320x2868.jpg">
+<link rel="apple-touch-startup-image" media="(device-width: 402px) and (device-height: 874px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/ts5/web/splash-1206x2622.jpg">
+<link rel="apple-touch-startup-image" media="(device-width: 420px) and (device-height: 912px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/ts5/web/splash-1260x2736.jpg">
+<link rel="apple-touch-startup-image" media="(device-width: 430px) and (device-height: 932px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/ts5/web/splash-1290x2796.jpg">
+<link rel="apple-touch-startup-image" media="(device-width: 393px) and (device-height: 852px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/ts5/web/splash-1179x2556.jpg">
+<link rel="apple-touch-startup-image" media="(device-width: 428px) and (device-height: 926px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/ts5/web/splash-1284x2778.jpg">
+<link rel="apple-touch-startup-image" media="(device-width: 390px) and (device-height: 844px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/ts5/web/splash-1170x2532.jpg">
+<link rel="apple-touch-startup-image" media="(device-width: 375px) and (device-height: 812px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/ts5/web/splash-1125x2436.jpg">
+<link rel="apple-touch-startup-image" media="(device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 3) and (orientation: portrait)" href="/ts5/web/splash-1242x2688.jpg">
+<link rel="apple-touch-startup-image" media="(device-width: 414px) and (device-height: 896px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="/ts5/web/splash-828x1792.jpg">
+<link rel="apple-touch-startup-image" media="(device-width: 375px) and (device-height: 667px) and (-webkit-device-pixel-ratio: 2) and (orientation: portrait)" href="/ts5/web/splash-750x1334.jpg">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="TokenStation5">
@@ -103,9 +115,17 @@
     font: inherit; font-size: 14px; cursor: pointer; }
   .dlg button.go { background: var(--accent); border-color: var(--accent); color: #fff; }
   [hidden] { display: none !important; }
+  /* Opened from a home-screen icon: the launch image stays until the model
+     answers, so the page doesn't show half-ready. */
+  #boot { display: none; position: fixed; inset: 0; z-index: 20;
+    background: #000 url(/ts5/web/splash-1290x2796.jpg) center / contain no-repeat; }
+  @media (display-mode: standalone) { #boot { display: block; } }
+  #boot.on { display: block; }
+  #boot.gone { display: none !important; }
 </style>
 </head>
 <body>
+<div id="boot" aria-hidden="true"></div>
 <header>
   <button id="list" type="button" title="Your chats: open one, delete one, start a new one">Chats</button>
   <b>TokenStation5</b>
@@ -161,6 +181,9 @@ const store = {
 // this browser kept (keep.js). The key form is a sign-in form the device's
 // passwords can keep a typed key from and fill in again.
 TS5Keep.start();
+if (navigator.standalone) $("boot").classList.add("on");
+const booted = () => $("boot").classList.add("gone");
+setTimeout(booted, 10000);
 // The chats, newest first, in this browser. Each request sends the open
 // chat's own messages and nothing else (the API keeps nothing between
 // requests): a chat opened again gives the model all of its own back.
@@ -388,6 +411,7 @@ function redrawLast() {
 async function models() {
   try {
     const r = await fetch("/v1/models", { headers: headers() });
+    booted();
     if (r.status === 401) {
       const j = await r.json().catch(() => ({}));
       $("model").textContent = "needs an API key";
@@ -402,6 +426,7 @@ async function models() {
   } catch (e) {
     $("model").textContent = "TokenStation5 doesn't answer";
   }
+  booted();
   draw();
 }
 

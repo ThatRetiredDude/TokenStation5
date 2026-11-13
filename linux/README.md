@@ -248,7 +248,9 @@ sign-in (remove the old one in Tailscale's admin console).
   model gets the open chat's messages and nothing from the others, and a
   chat opened again gives it all of its own back. The key, and your chats
   (the newest 50), stay in that browser; ts5-tui keeps its own. Add it to
-  the home screen and it opens as an app, with the TokenStation5 logo.
+  the home screen and it opens as an app, with the TokenStation5 logo, and
+  on an iPhone with the logo on black ("Connecting…") until the model
+  answers, in place of a white screen.
   Nothing to install on the phone.
 - **The browser terminal** (`/ts5/terminal`): ts5-tui itself in a web page,
   for a laptop or tablet away from home with no SSH client. Off by default:

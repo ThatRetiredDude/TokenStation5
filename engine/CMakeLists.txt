@@ -93,7 +93,7 @@ if(TS5_HTTPS)
   # The pages ts5 serve shows a browser (web_serve.h): the chat page, the
   # browser terminal, and xterm.js (third_party/xterm, MIT), built in.
   enable_language(ASM)
-  file(GLOB TS5_WEB_FILES ${CMAKE_CURRENT_SOURCE_DIR}/web/*.html ${CMAKE_CURRENT_SOURCE_DIR}/web/*.png ${CMAKE_CURRENT_SOURCE_DIR}/web/*.js ${TS5_THIRD}/xterm/*)
+  file(GLOB TS5_WEB_FILES ${CMAKE_CURRENT_SOURCE_DIR}/web/*.html ${CMAKE_CURRENT_SOURCE_DIR}/web/*.png ${CMAKE_CURRENT_SOURCE_DIR}/web/*.jpg ${CMAKE_CURRENT_SOURCE_DIR}/web/*.js ${TS5_THIRD}/xterm/*)
   set_source_files_properties(web/web_assets.S PROPERTIES
     COMPILE_OPTIONS "-Wa,-I${CMAKE_CURRENT_SOURCE_DIR}/web;-Wa,-I${TS5_THIRD}/xterm"
     OBJECT_DEPENDS "${TS5_WEB_FILES}")

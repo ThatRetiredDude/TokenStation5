@@ -36,6 +36,17 @@ TS5_WEB_FILE(ts5_web_xterm_license)
 TS5_WEB_FILE(ts5_web_addon_fit_license)
 TS5_WEB_FILE(ts5_web_icon_png)
 TS5_WEB_FILE(ts5_web_keep_js)
+TS5_WEB_FILE(ts5_web_splash_1320x2868)
+TS5_WEB_FILE(ts5_web_splash_1206x2622)
+TS5_WEB_FILE(ts5_web_splash_1260x2736)
+TS5_WEB_FILE(ts5_web_splash_1290x2796)
+TS5_WEB_FILE(ts5_web_splash_1179x2556)
+TS5_WEB_FILE(ts5_web_splash_1284x2778)
+TS5_WEB_FILE(ts5_web_splash_1170x2532)
+TS5_WEB_FILE(ts5_web_splash_1125x2436)
+TS5_WEB_FILE(ts5_web_splash_1242x2688)
+TS5_WEB_FILE(ts5_web_splash_828x1792)
+TS5_WEB_FILE(ts5_web_splash_750x1334)
 #undef TS5_WEB_FILE
 
 namespace ts5 {
@@ -66,6 +77,17 @@ const WebAsset kWebAssets[] = {
     {"addon-fit-LICENSE", ts5_web_addon_fit_license, ts5_web_addon_fit_license_end},
     {"icon.png", ts5_web_icon_png, ts5_web_icon_png_end},
     {"keep.js", ts5_web_keep_js, ts5_web_keep_js_end},
+    {"splash-1320x2868.jpg", ts5_web_splash_1320x2868, ts5_web_splash_1320x2868_end},
+    {"splash-1206x2622.jpg", ts5_web_splash_1206x2622, ts5_web_splash_1206x2622_end},
+    {"splash-1260x2736.jpg", ts5_web_splash_1260x2736, ts5_web_splash_1260x2736_end},
+    {"splash-1290x2796.jpg", ts5_web_splash_1290x2796, ts5_web_splash_1290x2796_end},
+    {"splash-1179x2556.jpg", ts5_web_splash_1179x2556, ts5_web_splash_1179x2556_end},
+    {"splash-1284x2778.jpg", ts5_web_splash_1284x2778, ts5_web_splash_1284x2778_end},
+    {"splash-1170x2532.jpg", ts5_web_splash_1170x2532, ts5_web_splash_1170x2532_end},
+    {"splash-1125x2436.jpg", ts5_web_splash_1125x2436, ts5_web_splash_1125x2436_end},
+    {"splash-1242x2688.jpg", ts5_web_splash_1242x2688, ts5_web_splash_1242x2688_end},
+    {"splash-828x1792.jpg", ts5_web_splash_828x1792, ts5_web_splash_828x1792_end},
+    {"splash-750x1334.jpg", ts5_web_splash_750x1334, ts5_web_splash_750x1334_end},
 };
 
 const WebAsset *asset(const std::string &name) {
@@ -128,6 +150,7 @@ std::string type_of(const std::string &name) {
     if (ext == "js") return "text/javascript; charset=utf-8";
     if (ext == "css") return "text/css; charset=utf-8";
     if (ext == "png") return "image/png";
+    if (ext == "jpg") return "image/jpeg";
     return "text/plain; charset=utf-8";
 }
 
