@@ -45,7 +45,8 @@
   .dlg h1 { font-size: 17px; margin: 0 0 8px; }
   .dlg p { color: var(--dim); margin: 0 0 12px; }
   .dlg input { width: 100%; box-sizing: border-box; padding: 9px 10px; border-radius: 6px; border: 1px solid var(--line);
-    background: var(--bg); color: var(--fg); font: 14px ui-monospace, Menlo, Consolas, monospace; margin-bottom: 10px; }
+    background: var(--bg); color: var(--fg); font: 16px ui-monospace, Menlo, Consolas, monospace; margin-bottom: 10px; }
+  .dlg p.lbl { margin: 0 0 4px; color: var(--fg); }
   .dlg .err { color: var(--bad); }
   .dlg .row { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
   .dlg b { color: var(--fg); }
@@ -78,9 +79,14 @@
   <form class="dlg" id="keyform">
     <h1>TokenStation5 terminal</h1>
     <p id="keywhy">This opens ts5-tui on your TokenStation5. It needs one of its API keys: ts5-tui's Access page (F6) makes them.</p>
-    <p>Saved it to your passwords? Tap the box below and pick it above the keyboard.</p>
-    <input id="keyuser" name="username" type="text" autocomplete="username" readonly tabindex="-1" aria-hidden="true"
-      style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none" value="TokenStation5">
+    <p>Saved it to your passwords? Tap the Key box and pick TokenStation5 above the keyboard. Nothing there? Hold the Key box, then AutoFill, then Passwords.</p>
+    <!-- A sign-in form as any site has one, both boxes shown: the device's
+         passwords offer the saved key above the keyboard only for such a
+         form (a hidden or read-only account box made iOS offer nothing). -->
+    <p class="lbl">Saved as</p>
+    <input id="keyuser" name="username" type="text" autocomplete="username" autocapitalize="off" autocorrect="off"
+      spellcheck="false" value="TokenStation5">
+    <p class="lbl">Key</p>
     <input id="key" name="password" type="password" autocomplete="current-password" autocapitalize="off" spellcheck="false" placeholder="ts5-…">
     <button class="go" type="submit">Open</button>
   </form>
