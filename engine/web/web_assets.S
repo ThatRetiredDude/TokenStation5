@@ -11,4 +11,8 @@ FILE(ts5_web_xterm_css, "xterm.css")
 FILE(ts5_web_addon_fit_js, "addon-fit.js")
 FILE(ts5_web_xterm_license, "LICENSE")
 FILE(ts5_web_addon_fit_license, "LICENSE-addon-fit")
+// The logo for a phone's home screen and the tab: ps5/sce_sys/icon0.png at
+// 192x192 (Pillow, LANCZOS). A brand asset, not licensed (LICENSING.md).
+FILE(ts5_web_icon_png, "icon.png")
+FILE(ts5_web_keep_js, "keep.js")
     .section .note.GNU-stack, "", %progbits

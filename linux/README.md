@@ -236,9 +236,15 @@ sign-in (remove the old one in Tailscale's admin console).
   `http://192.168.1.20:8081/` at home with Other devices on): a plain chat
   with the loaded model, streamed, with its thinking when the model thinks.
   Opened from a QR code of Connect a phone it is signed in already (the key
-  rides after `#`, which no server is sent, and leaves the address bar at
-  once); opened by hand it asks once for one of your keys. It keeps the
-  key, and your chats, in that browser only. Nothing to install on the phone.
+  rides after `#`, which no browser sends anywhere); opened by hand it asks
+  once for one of your keys. The first time a key works, the page asks how
+  that device should keep it: **in the page's link** too (a home-screen
+  icon saved from it then opens signed in; the key sits in the link and the
+  history on that device), or **in my passwords** only (iCloud Keychain:
+  the page offers it to them, and Face ID fills it in when a page asks).
+  Settings on the chat page changes it. The key, and your chats, stay in
+  that browser. Add it to the home screen and it opens as an app, with the
+  TokenStation5 logo. Nothing to install on the phone.
 - **The browser terminal** (`/ts5/terminal`): ts5-tui itself in a web page,
   for a laptop or tablet away from home with no SSH client. Off by default:
   the **Browser terminal** row on the Access page turns it on, and **Enter**

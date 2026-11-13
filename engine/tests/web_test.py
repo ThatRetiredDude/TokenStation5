@@ -206,14 +206,21 @@ def main():
                   "the apps' address (/v1) in a browser goes to the chat page", r.url)
         code, body, _ = get(here + "/v1")
         check(code in (401, 404), "while an app asking /v1 gets an answer for an app", code)
+        for page in ("/", "/ts5/terminal"):
+            code, body, _ = get(here + page)
+            check(b'<script src="/ts5/web/keep.js"></script>' in body and b"TS5Keep.start()" in body,
+                  f"{page} keeps its key with keep.js (a key from #key=, a QR code of Connect a phone)")
+        code, body, h = get(here + "/ts5/web/keep.js")
+        check(code == 200 and h.get("Content-Type", "").startswith("text/javascript") and b"location.hash" in body and
+              b"Stay signed in on this device?" in body and b'autocomplete="new-password"' in body,
+              "keep.js: the key from the address, the question once (link or passwords), the save form", code)
+        for icon in ("/ts5/web/icon.png", "/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
+            code, body, h = get(here + icon)
+            check(code == 200 and h.get("Content-Type") == "image/png" and body[:8] == b"\x89PNG\r\n\x1a\n",
+                  f"{icon}: the logo, with no key", (code, h.get("Content-Type")))
         code, body, _ = get(here + "/")
-        check(b'location.hash' in body and b'replaceState' in body,
-              "the chat page takes a key from #key= (a QR code of Connect a phone) and clears the address bar")
-        code, body, _ = get(here + "/ts5/terminal")
-        check(b'location.hash' in body and b'replaceState' in body, "the terminal page too")
-        for icon in ("/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
-            code, body, _ = get(here + icon)
-            check(code == 404 and not body, f"{icon}: none, and no key asked", code)
+        check(b'rel="apple-touch-icon" href="/ts5/web/icon.png"' in body and b'autocomplete="current-password"' in body,
+              "the page names its home-screen icon, and its key form is one the phone's passwords can fill")
         code, body, h = get(here + "/ts5/web/xterm.js")
         check(code == 200 and h.get("Content-Type", "").startswith("text/javascript") and len(body) > 200000 and
               b"xterm.js" in body, "xterm.js is built in", (code, len(body), h))

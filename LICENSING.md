@@ -36,7 +36,7 @@ never relicenses someone else's work.
 | `payloads/` (small diagnostic payloads for the jailbreak's ELF loader) | GPL-3.0-or-later | Built with the PS5 payload SDK, which is GPL-3.0-or-later. |
 | The built PS5 title (`eboot.bin`, `sce_module/libc.prx`) | GPL-3.0-or-later, as a whole | See below. |
 | The Linux `ts5` binary | PolyForm Small Business 1.0.0 | Built from `engine/` plus Mbed TLS (Apache-2.0), the Mozilla CA bundle (MPL-2.0, unmodified data), and lwIP and wireguard-lwip (BSD-3-Clause) for its Tailscale, see [NOTICE.md](NOTICE.md). Links only the system Vulkan loader. `ts5-tui` likewise: `linux/tui` plus qrcodegen (MIT). |
-| The TokenStation5 name and logo, `ps5/sce_sys/icon0.png` | Not licensed | Brand assets. Neither license grants trademark rights. |
+| The TokenStation5 name and logo, `ps5/sce_sys/icon0.png` (and `engine/web/icon.png`, the same at 192x192) | Not licensed | Brand assets. Neither license grants trademark rights. |
 | Model weights (GGUF and whisper/Kokoro files) | Each model's own license | Not part of this repo or any build; downloaded by the user. NOTICE.md lists the terms of the models in `models.tsv` (Gemma 3 and Llama have use restrictions of their own). |
 | Online services (Tavily, Hugging Face, Tailscale) | Their own terms | Used with the user's own account or key; no code of theirs is here. |
 | Everything else in this repository | [PolyForm Small Business 1.0.0](LICENSE.md) | The default, for anything no row or file header covers. |

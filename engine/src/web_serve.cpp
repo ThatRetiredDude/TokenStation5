@@ -34,6 +34,8 @@ TS5_WEB_FILE(ts5_web_xterm_css)
 TS5_WEB_FILE(ts5_web_addon_fit_js)
 TS5_WEB_FILE(ts5_web_xterm_license)
 TS5_WEB_FILE(ts5_web_addon_fit_license)
+TS5_WEB_FILE(ts5_web_icon_png)
+TS5_WEB_FILE(ts5_web_keep_js)
 #undef TS5_WEB_FILE
 
 namespace ts5 {
@@ -62,6 +64,8 @@ const WebAsset kWebAssets[] = {
     {"addon-fit.js", ts5_web_addon_fit_js, ts5_web_addon_fit_js_end},
     {"xterm-LICENSE", ts5_web_xterm_license, ts5_web_xterm_license_end},
     {"addon-fit-LICENSE", ts5_web_addon_fit_license, ts5_web_addon_fit_license_end},
+    {"icon.png", ts5_web_icon_png, ts5_web_icon_png_end},
+    {"keep.js", ts5_web_keep_js, ts5_web_keep_js_end},
 };
 
 const WebAsset *asset(const std::string &name) {
@@ -123,6 +127,7 @@ std::string type_of(const std::string &name) {
     if (ext == "html") return "text/html; charset=utf-8";
     if (ext == "js") return "text/javascript; charset=utf-8";
     if (ext == "css") return "text/css; charset=utf-8";
+    if (ext == "png") return "image/png";
     return "text/plain; charset=utf-8";
 }
 
@@ -434,11 +439,10 @@ void attach_web(Server &s, const WebOptions &o) {
             return true;
         }
         // Icons a browser asks for by itself (Safari's home-screen ones too):
-        // none, without the key check that would log each as refused.
-        if (p.method == "GET" && (p.path == "/favicon.ico" || p.path.rfind("/apple-touch-icon", 0) == 0)) {
-            send_text(fd, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        // the logo, with no key, as the pages' own links give it.
+        if (p.method == "GET" && (p.path == "/favicon.ico" || p.path.rfind("/apple-touch-icon", 0) == 0) &&
+            serve_asset(fd, "icon.png", false))
             return true;
-        }
         const bool web = p.path == "/" || p.path == "/chat" || p.path.rfind("/ts5/web/", 0) == 0 ||
                          p.path == "/ts5/terminal" || p.path == "/ts5/terminal/socket";
         if (!web) return false;

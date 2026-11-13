@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <title>TokenStation5 terminal</title>
+<link rel="icon" type="image/png" href="/ts5/web/icon.png">
+<link rel="apple-touch-icon" href="/ts5/web/icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="TS5 terminal">
 <link rel="stylesheet" href="/ts5/web/xterm.css">
 <style>
   :root { --bg: #0d1117; --panel: #161b22; --line: #30363d; --fg: #e6edf3; --dim: #8b949e; --accent: #58a6ff; --bad: #f85149; }
@@ -30,6 +35,8 @@
   .dlg input { width: 100%; box-sizing: border-box; padding: 9px 10px; border-radius: 6px; border: 1px solid var(--line);
     background: var(--bg); color: var(--fg); font: 14px ui-monospace, Menlo, Consolas, monospace; margin-bottom: 10px; }
   .dlg .err { color: var(--bad); }
+  .dlg .row { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+  .dlg b { color: var(--fg); }
   .dlg button.go { background: #1f6feb; border-color: #1f6feb; }
   #copied { position: fixed; left: 50%; top: 12px; transform: translateX(-50%); background: var(--panel); border: 1px solid var(--line);
     border-radius: 8px; padding: 8px 10px; display: none; gap: 8px; align-items: center; z-index: 5; }
@@ -58,7 +65,9 @@
   <form class="dlg" id="keyform">
     <h1>TokenStation5 terminal</h1>
     <p id="keywhy">This opens ts5-tui on your TokenStation5. It needs one of its API keys: ts5-tui's Access page (F6) makes them.</p>
-    <input id="key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="ts5-…">
+    <input id="keyuser" name="username" type="text" autocomplete="username" readonly tabindex="-1" aria-hidden="true"
+      style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none" value="TokenStation5">
+    <input id="key" name="password" type="password" autocomplete="current-password" autocapitalize="off" spellcheck="false" placeholder="ts5-…">
     <button class="go" type="submit">Open</button>
   </form>
 </div>
@@ -67,6 +76,7 @@
 </div>
 <script src="/ts5/web/xterm.js"></script>
 <script src="/ts5/web/addon-fit.js"></script>
+<script src="/ts5/web/keep.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -74,15 +84,10 @@ const store = {
   get(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } },
   set(k, v) { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch (e) {} },
 };
-// A key in the address (#key=…, from ts5-tui's QR code for a phone): kept
-// as if typed, then taken out of the address bar. What follows # never
-// reaches the server, so it is in no log.
-(() => {
-  const m = /(?:^#|&)key=([^&]+)/.exec(location.hash);
-  if (!m) return;
-  store.set("ts5.key", decodeURIComponent(m[1]));
-  window.history.replaceState(null, "", location.pathname + location.search);
-})();
+// The key: from the page's address (a QR code of ts5-tui's), else the one
+// this browser kept (keep.js). The key form is a sign-in form the device's
+// passwords can keep a typed key from and fill in again.
+TS5Keep.start();
 const keys = {
   esc: "\x1b", tab: "\t", up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D", enter: "\r",
   pgup: "\x1b[5~", pgdn: "\x1b[6~", f1: "\x1bOP", f2: "\x1bOQ", f3: "\x1bOR", f4: "\x1bOS", f5: "\x1b[15~",
@@ -136,10 +141,10 @@ function openSocket() {
     if (typeof ev.data !== "string") { term.write(new Uint8Array(ev.data)); return; }
     let m = {};
     try { m = JSON.parse(ev.data); } catch (e) { return; }
-    if (m.ready) { ready = true; tries = 0; setState("connected"); term.focus(); sendSize(); }
+    if (m.ready) { ready = true; tries = 0; setState("connected"); term.focus(); sendSize(); TS5Keep.settled(gaveKey); }
     if (m.error) {
       ready = false;
-      if (/key/i.test(m.error)) { store.set("ts5.key", ""); askKey(m.error); }
+      if (/key/i.test(m.error)) { TS5Keep.forget(); askKey(m.error); }
       else showMsg("Can't open the terminal", m.error);
       ws.onclose = null;
     }

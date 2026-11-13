@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <title>TokenStation5</title>
+<link rel="icon" type="image/png" href="/ts5/web/icon.png">
+<link rel="apple-touch-icon" href="/ts5/web/icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="TokenStation5">
 <style>
   :root { --bg: #ffffff; --panel: #f6f8fa; --line: #d0d7de; --fg: #1f2328; --dim: #656d76; --accent: #0969da;
     --you: #ddf4ff; --bad: #cf222e; --code: #f6f8fa; }
@@ -73,6 +78,9 @@
   .dlg input[type=password] { width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--line);
     background: var(--bg); color: var(--fg); font: 14px ui-monospace, Menlo, Consolas, monospace; margin-bottom: 12px; }
   .dlg label { display: flex; gap: 8px; align-items: center; font-size: 14px; margin-bottom: 12px; }
+  .dlg select { flex: 1; min-width: 0; font: inherit; font-size: 14px; padding: 6px 8px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--fg); }
+  .dlg b { color: var(--fg); }
   .dlg .row { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
   .dlg button { border: 1px solid var(--line); background: var(--panel); color: var(--fg); border-radius: 8px; padding: 7px 14px;
     font: inherit; font-size: 14px; cursor: pointer; }
@@ -99,7 +107,9 @@
   <form class="dlg" id="keyform">
     <h1>API key</h1>
     <p id="keywhy">This TokenStation5 needs one of its API keys. ts5-tui's Access page (F6) makes them. It stays in this browser only.</p>
-    <input id="key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="ts5-…">
+    <input id="keyuser" name="username" type="text" autocomplete="username" readonly tabindex="-1" aria-hidden="true"
+      style="position:absolute;width:1px;height:1px;opacity:0;pointer-events:none" value="TokenStation5">
+    <input id="key" name="password" type="password" autocomplete="current-password" autocapitalize="off" spellcheck="false" placeholder="ts5-…">
     <div class="row"><button type="button" id="keycancel">Cancel</button><button class="go" type="submit">Use it</button></div>
   </form>
 </div>
@@ -108,11 +118,13 @@
     <h1>Settings</h1>
     <label><input type="checkbox" id="think"> Let a thinking model think first</label>
     <label><input type="checkbox" id="showthink"> Show its thinking</label>
-    <p>The key and the chats are kept in this browser only. <a href="/ts5/terminal">Full controls</a> opens ts5-tui itself here (models, settings, fans, keys), with this key, when the browser terminal is on (Access page, F6).</p>
+    <label>Keep the key <select id="keep"><option value="link">in this page's link too (a home-screen icon opens signed in)</option><option value="passwords">in my passwords only (Face ID fills it in)</option><option value="">ask me again</option></select></label>
+    <p>The key and the chats are kept in this browser only (and the key as chosen above: nothing after # in a link is ever sent anywhere). <a href="/ts5/terminal">Full controls</a> opens ts5-tui itself here (models, settings, fans, keys), with this key, when the browser terminal is on (Access page, F6).</p>
     <div class="row"><button type="button" id="forget">Forget the key</button><button type="button" id="clear">Delete all chats</button><button class="go" type="button" id="setdone">Done</button></div>
   </div>
 </div>
 
+<script src="/ts5/web/keep.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -120,15 +132,10 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
   set(k, v) { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} },
 };
-// A key in the address (#key=…, from ts5-tui's QR code for a phone): kept
-// as if typed, then taken out of the address bar. What follows # never
-// reaches the server, so it is in no log.
-(() => {
-  const m = /(?:^#|&)key=([^&]+)/.exec(location.hash);
-  if (!m) return;
-  store.set("ts5.key", decodeURIComponent(m[1]));
-  window.history.replaceState(null, "", location.pathname + location.search);
-})();
+// The key: from the page's address (a QR code of ts5-tui's), else the one
+// this browser kept (keep.js). The key form is a sign-in form the device's
+// passwords can keep a typed key from and fill in again.
+TS5Keep.start();
 let chats = [];
 try { chats = JSON.parse(store.get("ts5.chats", "[]")) || []; } catch (e) { chats = []; }
 let cur = chats.length ? chats[0].id : null;
@@ -283,6 +290,7 @@ async function models() {
       return;
     }
     const j = await r.json();
+    TS5Keep.settled(key());
     const m = (j.data || [])[0];
     model = m ? m.id : "";
     $("model").textContent = model || "no model loaded: load one in ts5-tui (Models)";
@@ -397,6 +405,7 @@ $("new").onclick = () => { if (busy) return; cur = null; draw(); $("input").focu
 $("settings").onclick = () => {
   $("think").checked = prefs.think;
   $("showthink").checked = prefs.showThink;
+  $("keep").value = TS5Keep.how();
   $("setdlg").hidden = false;
 };
 $("setdone").onclick = () => {
@@ -407,7 +416,8 @@ $("setdone").onclick = () => {
   $("setdlg").hidden = true;
   draw();
 };
-$("forget").onclick = () => { store.set("ts5.key", null); $("setdlg").hidden = true; models(); };
+$("forget").onclick = () => { TS5Keep.forget(); $("setdlg").hidden = true; models(); };
+$("keep").onchange = () => TS5Keep.change($("keep").value, key());
 $("clear").onclick = () => { if (busy) return; chats = []; cur = null; save(); $("setdlg").hidden = true; draw(); };
 draw();
 models();
