@@ -14,12 +14,13 @@ everyone to 400 a day, and refuses anything over 256 KiB.
 ## Set it up
 
 1. The database: `ts5-feedback` in D1, made from `schema.sql`.
-2. The Worker: Workers & Pages → Create → Worker, named `ts5-feedback`;
-   Edit code, paste `worker.js`, Deploy. Or `npx wrangler deploy` here
-   (`wrangler.toml` names the database).
-3. Settings → Bindings → add a D1 database binding: variable `DB`,
+2. The Worker: Workers & Pages → Create application → Start with Hello World!
+   → Get started, named `ts5-feedback` → Deploy; then Edit code, paste
+   `worker.js`, Deploy. Or `npx wrangler deploy` here (`wrangler.toml`
+   names the database).
+3. The Worker's Bindings tab → Add binding → D1 database: variable `DB`,
    database `ts5-feedback`.
-4. Optional: Settings → Variables → a secret `RATE_SALT` (any random text).
+4. Optional: Settings → Variables and Secrets → a secret `RATE_SALT` (any random text).
 5. The Worker's address (`https://ts5-feedback.SUBDOMAIN.workers.dev`) goes
    into `kFeedbackUrl` in `engine/src/feedback.cpp`, with `/v1/report`.
 
