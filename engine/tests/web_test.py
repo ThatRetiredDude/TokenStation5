@@ -6,6 +6,7 @@ stand-in program instead of ts5-tui (TS5_TERMINAL_COMMAND).
     web_test.py TS5 MODEL.gguf BACKEND
 """
 import base64
+import http.client
 import hashlib
 import json
 import os
@@ -212,8 +213,21 @@ def main():
                   f"{page} keeps its key with keep.js (a key from #key=, a QR code of Connect a phone)")
         code, body, h = get(here + "/ts5/web/keep.js")
         check(code == 200 and h.get("Content-Type", "").startswith("text/javascript") and b"location.hash" in body and
-              b"Stay signed in on this device?" in body and b'autocomplete="new-password"' in body,
+              b"Stay signed in on this device?" in body and b'action="/ts5/keep?back=' in body,
               "keep.js: the key from the address, the question once (link or passwords), the save form", code)
+        # The save form, sent for real: straight back to the page, its body
+        # (the key) neither kept nor logged.
+        for back, to in (("chat", "/"), ("terminal", "/ts5/terminal")):
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            c.request("POST", "/ts5/keep?back=" + back, body="username=TokenStation5+x&password=ts5-keep-secret-123",
+                      headers={"Content-Type": "application/x-www-form-urlencoded"})
+            r = c.getresponse()
+            r.read()
+            c.close()
+            check(r.status == 303 and r.getheader("Location") == to, f"the save form (back={back}): 303 to {to}",
+                  (r.status, r.getheader("Location")))
+        code, _, _ = get(here + "/ts5/keep")
+        check(code == 405, "GET /ts5/keep: refused", code)
         for icon in ("/ts5/web/icon.png", "/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
             code, body, h = get(here + icon)
             check(code == 200 and h.get("Content-Type") == "image/png" and body[:8] == b"\x89PNG\r\n\x1a\n",
@@ -287,6 +301,7 @@ def main():
               "the log says who opened one and when it closed", text[-1500:])
         check("the-one-in-the-environment" not in text, "and never a key")
         check("favicon" not in text and "apple-touch-icon" not in text, "a browser's own icon requests aren't logged as refused")
+        check("ts5-keep-secret-123" not in text, "the save form's key is in no log line")
     finally:
         p.terminate()
         try:

@@ -443,6 +443,20 @@ void attach_web(Server &s, const WebOptions &o) {
         if (p.method == "GET" && (p.path == "/favicon.ico" || p.path.rfind("/apple-touch-icon", 0) == 0) &&
             serve_asset(fd, "icon.png", false))
             return true;
+        // A page's "save the key to my passwords" form, sent for real: Safari
+        // (iCloud Keychain) offers to save a password only when a form with
+        // it is sent and the page moves on. Its body (the key) is not read,
+        // kept or logged; the browser goes back to the page it came from.
+        if (p.path == "/ts5/keep") {
+            if (p.method != "POST") {
+                send_error(fd, 405, "POST only");
+                return true;
+            }
+            const char *to = p.query.find("back=terminal") != std::string::npos ? "/ts5/terminal" : "/";
+            send_text(fd, std::string("HTTP/1.1 303 See Other\r\nLocation: ") + to +
+                              "\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return true;
+        }
         const bool web = p.path == "/" || p.path == "/chat" || p.path.rfind("/ts5/web/", 0) == 0 ||
                          p.path == "/ts5/terminal" || p.path == "/ts5/terminal/socket";
         if (!web) return false;

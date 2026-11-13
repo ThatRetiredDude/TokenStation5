@@ -531,7 +531,10 @@ $("setdone").onclick = () => {
   draw();
 };
 $("forget").onclick = () => { TS5Keep.forget(); $("setdlg").hidden = true; models(); };
-$("keep").onchange = () => TS5Keep.change($("keep").value, key());
+$("keep").onchange = () => {
+  TS5Keep.change($("keep").value, key());
+  if ($("keep").value === "passwords") { $("setdlg").hidden = true; TS5Keep.save(key()); }
+};
 // Twice: the first tap asks.
 $("clear").onclick = () => {
   const b = $("clear");
