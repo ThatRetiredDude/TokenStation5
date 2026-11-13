@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -122,17 +124,19 @@ const char *status_text(int code) {
 }
 
 // A page or file: no key needed, kept out of other sites' frames, and the
-// pages' scripts and connections only from here.
-void send_file(int fd, int code, const std::string &type, const std::string &body, bool page) {
+// pages' scripts and connections only from here. A browser asks again each
+// time (no-cache) and gets 304 while the file is the same (its ETag): a
+// cached script from an older ts5 never runs with a newer page.
+void send_file(int fd, int code, const std::string &type, const std::string &body, bool page,
+               const std::string &etag = "") {
     std::string h = "HTTP/1.1 " + std::to_string(code) + " " + status_text(code) + "\r\nContent-Type: " + type +
                     "\r\nContent-Length: " + std::to_string(body.size()) +
-                    "\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n";
+                    "\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCache-Control: no-cache\r\n";
+    if (!etag.empty()) h += "ETag: " + etag + "\r\n";
     if (page)
-        h += "Cache-Control: no-cache\r\nX-Frame-Options: DENY\r\n"
+        h += "X-Frame-Options: DENY\r\n"
              "Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; "
              "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'\r\n";
-    else
-        h += "Cache-Control: max-age=3600\r\n";
     h += "Connection: close\r\n\r\n";
     send_text(fd, h + body);
 }
@@ -154,10 +158,25 @@ std::string type_of(const std::string &name) {
     return "text/plain; charset=utf-8";
 }
 
-bool serve_asset(int fd, const std::string &name, bool page) {
+// A file's ETag: FNV-1a of its bytes.
+std::string etag_of(const unsigned char *d, const unsigned char *end) {
+    uint64_t h = 1469598103934665603ull;
+    for (; d < end; d++) h = (h ^ *d) * 1099511628211ull;
+    char b[24];
+    snprintf(b, sizeof b, "\"%016llx\"", (unsigned long long)h);
+    return b;
+}
+
+bool serve_asset(int fd, const Server::Page &p, const std::string &name, bool page) {
     const WebAsset *a = asset(name);
     if (!a) return false;
-    send_file(fd, 200, type_of(name), std::string((const char *)a->data, (size_t)(a->end - a->data)), page);
+    const std::string etag = etag_of(a->data, a->end);
+    if (p.header("if-none-match") == etag) {
+        send_text(fd, "HTTP/1.1 304 Not Modified\r\nETag: " + etag +
+                          "\r\nCache-Control: no-cache\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return true;
+    }
+    send_file(fd, 200, type_of(name), std::string((const char *)a->data, (size_t)(a->end - a->data)), page, etag);
     return true;
 }
 
@@ -464,7 +483,7 @@ void attach_web(Server &s, const WebOptions &o) {
         // Icons a browser asks for by itself (Safari's home-screen ones too):
         // the logo, with no key, as the pages' own links give it.
         if (p.method == "GET" && (p.path == "/favicon.ico" || p.path.rfind("/apple-touch-icon", 0) == 0) &&
-            serve_asset(fd, "icon.png", false))
+            serve_asset(fd, p, "icon.png", false))
             return true;
         // A page's "save the key to my passwords" form, sent for real: Safari
         // (iCloud Keychain) offers to save a password only when a form with
@@ -492,11 +511,11 @@ void attach_web(Server &s, const WebOptions &o) {
             return true;
         }
         bool ok;
-        if (p.path == "/" || p.path == "/chat") ok = serve_asset(fd, "chat.html", true);
-        else if (p.path == "/ts5/terminal") ok = serve_asset(fd, "terminal.html", true);
+        if (p.path == "/" || p.path == "/chat") ok = serve_asset(fd, p, "chat.html", true);
+        else if (p.path == "/ts5/terminal") ok = serve_asset(fd, p, "terminal.html", true);
         else {
             const std::string name = p.path.substr(9);
-            ok = name != "chat.html" && name != "terminal.html" && serve_asset(fd, name, false);
+            ok = name != "chat.html" && name != "terminal.html" && serve_asset(fd, p, name, false);
         }
         if (!ok) send_error(fd, 404, "not found: " + p.path);
         return true;
