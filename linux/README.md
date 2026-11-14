@@ -222,15 +222,7 @@ Each user's chats from the chat page are kept on this machine
 one of their keys. Chats a browser kept from before users go to the owner's
 key only, so a browser two people share never shows them to another user.
 The log says that another user searched the web, not what for (unless that
-user lets the owner read its chats).
-
-From away, a user reaches it over Tailscale. On their Access page, "Share
-by Tailscale" makes an invite as a QR code, one of two ways: "Only this PS5"
-(Tailscale's machine sharing: their own Tailscale account, this machine and
-nothing else of yours) or "Join my tailnet" (a member of your tailnet, able
-to reach all of it). It needs a Tailscale access token once (admin console,
-Settings, Keys), kept beside the keys (`tailscale-api.key`, 0600); from a
-script, `ts5 share`. Removing the user takes their share back. Adding a user turns "require" on: without a key, another
+user lets the owner read its chats). Adding a user turns "require" on: without a key, another
 machine would be the owner.
 
 ### Tailscale (reach it from anywhere)
