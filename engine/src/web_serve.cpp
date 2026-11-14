@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 
 #include "json.h"
 #include "log.h"
@@ -158,6 +159,32 @@ std::string type_of(const std::string &name) {
     return "text/plain; charset=utf-8";
 }
 
+// TS5_WEB_LOG=1: a line for each page, file and icon asked for (who, what,
+// the answer, its size, the browser), with the time: what a phone fetches
+// when a home-screen icon is added. Off unless set: the pages are many
+// requests.
+bool web_log_on() {
+    static const bool on = [] {
+        const char *v = getenv("TS5_WEB_LOG");
+        return v && *v && strcmp(v, "0") != 0;
+    }();
+    return on;
+}
+
+void web_log(const Server::Page &p, int code, size_t bytes) {
+    if (!web_log_on()) return;
+    char t[16];
+    const time_t now = time(nullptr);
+    struct tm tm {};
+    localtime_r(&now, &tm);
+    strftime(t, sizeof t, "%H:%M:%S", &tm);
+    std::string ua = p.header("user-agent");
+    if (ua.size() > 160) ua.resize(160);
+    log_line("ts5: web: %s %s %s %s%s -> %d, %zu bytes%s (%s)", t, p.client.c_str(), p.method.c_str(), p.path.c_str(),
+             p.header("if-none-match").empty() ? "" : " (if changed)", code, bytes,
+             p.header("cookie").find("ts5key=") != std::string::npos ? ", with the key's cookie" : "", ua.c_str());
+}
+
 // A file's ETag: FNV-1a of its bytes.
 std::string etag_of(const unsigned char *d, const unsigned char *end) {
     uint64_t h = 1469598103934665603ull;
@@ -191,11 +218,15 @@ bool serve_asset(int fd, const Server::Page &p, const std::string &name, bool pa
     const std::string etag =
         etag_of((const unsigned char *)body.data(), (const unsigned char *)body.data() + body.size());
     if (p.header("if-none-match") == etag) {
+        // No Content-Length: a 304 may give only the 200's own (RFC 9110,
+        // 15.4.5), and a cache that took a 0 from it would keep an empty file.
         send_text(fd, "HTTP/1.1 304 Not Modified\r\nETag: " + etag +
-                          "\r\nCache-Control: no-cache\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                          "\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n");
+        web_log(p, 304, 0);
         return true;
     }
     send_file(fd, 200, type_of(name), body, page, etag);
+    web_log(p, 200, body.size());
     return true;
 }
 
@@ -514,6 +545,7 @@ void attach_web(Server &s, const WebOptions &o) {
                 return true;
             }
             const char *to = p.query.find("back=terminal") != std::string::npos ? "/ts5/terminal" : "/";
+            web_log(p, 303, 0);
             send_text(fd, std::string("HTTP/1.1 303 See Other\r\nLocation: ") + to +
                               "\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             return true;
@@ -536,7 +568,10 @@ void attach_web(Server &s, const WebOptions &o) {
             const std::string name = p.path.substr(9);
             ok = name != "chat.html" && name != "terminal.html" && serve_asset(fd, p, name, false);
         }
-        if (!ok) send_error(fd, 404, "not found: " + p.path);
+        if (!ok) {
+            send_error(fd, 404, "not found: " + p.path);
+            web_log(p, 404, 0);
+        }
         return true;
     });
 }

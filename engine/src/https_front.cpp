@@ -11,7 +11,9 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -159,6 +161,25 @@ void note_handshake(const std::string &device, int rc) {
                                                      : "timed out");
 }
 
+// TS5_WEB_LOG=1 (web_serve.cpp): each connection's start and end too, with
+// the time and the bytes each way.
+bool conn_log_on() {
+    static const bool on = [] {
+        const char *v = getenv("TS5_WEB_LOG");
+        return v && *v && strcmp(v, "0") != 0;
+    }();
+    return on;
+}
+
+std::string clock_now() {
+    char t[16];
+    const time_t now = time(nullptr);
+    struct tm tm {};
+    localtime_r(&now, &tm);
+    strftime(t, sizeof t, "%H:%M:%S", &tm);
+    return t;
+}
+
 // One connection: TLS, then both ways to the API until either side ends.
 void serve(std::shared_ptr<Creds> cr, int fd, std::string device, int api_port, HttpsFront::Note note,
            std::atomic<int> *active) {
@@ -180,7 +201,14 @@ void serve(std::shared_ptr<Creds> cr, int fd, std::string device, int api_port, 
     }
     if (rc != 0) {
         note_handshake(device, rc == 1 ? 0 : rc);
+        if (conn_log_on())
+            log_line("ts5: https: %s %s: no TLS (%s)", clock_now().c_str(), device.empty() ? "this machine" : device.c_str(),
+                     rc == MBEDTLS_ERR_SSL_UNRECOGNIZED_NAME ? "not for the certificate's name"
+                     : rc == 1                              ? "timed out"
+                                                            : tls_error(rc).c_str());
     } else {
+        size_t got = 0, sent = 0;
+        const char *how = "";
         // The API, from a port of our own that the tunnel names first.
         api = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
         sockaddr_in a{};
@@ -213,8 +241,10 @@ void serve(std::shared_ptr<Creds> cr, int fd, std::string device, int api_port, 
                     while (true) {
                         const int n = mbedtls_ssl_read(&ssl, buf, sizeof buf);
                         if (n > 0) {
+                            got += (size_t)n;
                             if (!send_all(api, buf, (size_t)n)) {
                                 end = true;
+                                how = "the API stopped reading";
                                 break;
                             }
                             continue;
@@ -224,7 +254,10 @@ void serve(std::shared_ptr<Creds> cr, int fd, std::string device, int api_port, 
                         // still answers what it has.
                         client_open = false;
                         shutdown(api, SHUT_WR);
-                        if (n != 0 && n != MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) end = true;
+                        if (n != 0 && n != MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
+                            end = true;
+                            how = "the device broke it off";
+                        }
                         break;
                     }
                 }
@@ -234,12 +267,20 @@ void serve(std::shared_ptr<Creds> cr, int fd, std::string device, int api_port, 
                     if (n < 0 && errno == EINTR) continue;
                     if (n <= 0) {
                         mbedtls_ssl_close_notify(&ssl);
+                        how = "answered";
                         break;
                     }
-                    if (!tls_write_all(ssl, fd, (const char *)buf, (size_t)n)) break;
+                    if (!tls_write_all(ssl, fd, (const char *)buf, (size_t)n)) {
+                        how = "the device stopped reading";
+                        break;
+                    }
+                    sent += (size_t)n;
                 }
             }
         }
+        if (conn_log_on())
+            log_line("ts5: https: %s %s: %s, %zu bytes in, %zu out", clock_now().c_str(),
+                     device.empty() ? "this machine" : device.c_str(), *how ? how : "ended", got, sent);
     }
     if (api >= 0) close(api);
     mbedtls_ssl_free(&ssl);
