@@ -34,9 +34,11 @@
 #endif
 #endif
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -62,6 +64,9 @@ struct Status {
     std::string account;      // who signed it in
     std::string relay;        // the relay it uses, by name
     int devices = 0;          // the other devices on the tailnet
+    // The names it may get a certificate for (Tailscale's HTTPS
+    // Certificates): its own name, once the tailnet's admin turns them on.
+    std::vector<std::string> cert_domains;
 };
 
 // A device on the tailnet, as the tunnel needs it.
@@ -123,6 +128,12 @@ public:
     bool receive(uint8_t from[32], std::string &data);
     // Whether packets to a device go straight now, not through the relay.
     bool direct(const uint8_t key[32]);
+    // A DNS record for this device's name on the tailnet's DNS, through the
+    // control server (/machine/set-dns): the TXT record a certificate
+    // authority looks up for ACME's dns-01, "_acme-challenge.NAME". Waits
+    // for the control server's answer, at most timeout_s; false with why.
+    bool set_dns(const std::string &name, const std::string &type, const std::string &value, std::string &why,
+                 int timeout_s = 60);
 
 private:
     void control_loop();
@@ -137,10 +148,21 @@ private:
     void set_state(Status::State s, const std::string &problem = "");
 
     std::mutex mu_;
+    // set_dns's requests: waiting, and the one sent (answered in the control loop).
+    struct DnsAsk {
+        std::string name, type, value, why;
+        bool done = false, ok = false;
+    };
+    std::deque<std::shared_ptr<DnsAsk>> dns_queue_;
+    std::shared_ptr<DnsAsk> dns_ask_;
+    std::condition_variable dns_cv_;
     Config cfg_;
     uint64_t cfg_gen_ = 0;  // grows with each apply()
     bool sign_out_ = false;
     Status status_;
+    // The relay connection is open and said hello: the tunnel works through
+    // it, whatever the control server's connection is doing.
+    bool relay_up_ = false;
     Netmap map_;
     // The relays (region ID: its servers' host:port), from the control server.
     struct Region {

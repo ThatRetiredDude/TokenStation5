@@ -50,7 +50,8 @@ if(TS5_VULKAN)
 endif()
 
 add_executable(ts5 src/main.cpp src/cli.cpp src/checks.cpp src/tokenizer.cpp src/server.cpp src/engine.cpp
-  src/tools.cpp src/known_good.cpp src/net.cpp src/websearch.cpp src/log.cpp src/browser.cpp src/access.cpp)
+  src/tools.cpp src/known_good.cpp src/net.cpp src/websearch.cpp src/log.cpp src/browser.cpp src/access.cpp
+  src/github.cpp src/feedback.cpp)
 target_link_libraries(ts5 PRIVATE ts5core)
 
 if(TS5_HTTPS)
@@ -85,7 +86,17 @@ if(TS5_HTTPS)
   target_compile_options(ts5tunnel PRIVATE -w)  # vendored, unchanged
   target_include_directories(ts5tunnel PUBLIC src/tailnet ${TS5_THIRD}/lwip/src/include ${TS5_THIRD}/wireguard-lwip/src)
   target_sources(ts5 PRIVATE src/tailnet_serve.cpp src/tailnet/wg.cpp src/tailnet/tailscale.cpp
-    src/tailnet/noise.cpp src/tailnet/h2.cpp src/tailnet/nacl.cpp)
+    src/tailnet/noise.cpp src/tailnet/h2.cpp src/tailnet/nacl.cpp src/acme.cpp src/https_front.cpp)
   target_compile_definitions(ts5 PRIVATE TS5_TAILNET=1 TS5_LOG_NAME="ts5")
-  target_link_libraries(ts5 PRIVATE ts5tunnel)
+  target_link_libraries(ts5 PRIVATE ts5tunnel resolv)  # resolv: the DNS check before a certificate (acme.cpp)
+
+  # The pages ts5 serve shows a browser (web_serve.h): the chat page, the
+  # browser terminal, and xterm.js (third_party/xterm, MIT), built in.
+  enable_language(ASM)
+  file(GLOB TS5_WEB_FILES ${CMAKE_CURRENT_SOURCE_DIR}/web/*.html ${CMAKE_CURRENT_SOURCE_DIR}/web/*.png ${CMAKE_CURRENT_SOURCE_DIR}/web/*.jpg ${CMAKE_CURRENT_SOURCE_DIR}/web/*.js ${TS5_THIRD}/xterm/*)
+  set_source_files_properties(web/web_assets.S PROPERTIES
+    COMPILE_OPTIONS "-Wa,-I${CMAKE_CURRENT_SOURCE_DIR}/web;-Wa,-I${TS5_THIRD}/xterm"
+    OBJECT_DEPENDS "${TS5_WEB_FILES}")
+  target_sources(ts5 PRIVATE src/web_serve.cpp web/web_assets.S)
+  target_link_libraries(ts5 PRIVATE util)  # forkpty
 endif()

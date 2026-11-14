@@ -393,6 +393,7 @@ size_t decode(const std::string &p, Event &ev, bool more_coming) {
                         case 14: ev.key = K_F4; break;
                         case 15: ev.key = K_F5; break;
                         case 17: ev.key = K_F6; break;
+                        case 18: ev.key = K_F7; break;
                         case 200: {  // a paste, up to ESC [ 201 ~
                             const size_t end = p.find("\x1b[201~", i + 1);
                             if (end == std::string::npos) return more_coming ? 0 : p.size();

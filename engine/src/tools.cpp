@@ -1598,6 +1598,36 @@ std::string without_empty_fence(const std::string &text) {
     return rstrip(c.substr(0, open));
 }
 
+// A turn's text once its calls are out: lines that are nothing but a call
+// tag's leftovers go, and then the fence they leave empty. Gemma 3 12B on
+// the PS5 fenced its call and gave the fence the tag's name in place of the
+// opening tag ("```tool_call>", the call, "</tool_call>", "```"): the call
+// was read from its line, and "```tool_call>" (and once "</tool_call>")
+// stayed on the screen above the command.
+std::string without_call_marks(const std::string &text) {
+    static const char *const kMarks[] = {"tool_call>", "tool_call", "<tool_call>", "</tool_call>", "tool_code",
+                                         "<tool_code>", "</tool_code>", "tool_calls", "function_call"};
+    std::string out;
+    size_t i = 0;
+    while (i <= text.size()) {
+        size_t nl = text.find('\n', i);
+        if (nl == std::string::npos) nl = text.size();
+        const std::string line = text.substr(i, nl - i);
+        std::string t = strip(line);
+        const bool fenced = starts(t, "```");
+        if (fenced) t = strip(t.substr(3));
+        bool mark = false;
+        for (const char *m : kMarks) mark = mark || t == m;
+        if (!mark) out += line + (nl < text.size() ? "\n" : "");
+        i = nl + 1;
+    }
+    out = without_empty_fence(rstrip(out));
+    // A fence's closing line left by itself ("```" once its opening went).
+    if (strip(out) == "```") out.clear();
+    if (ends(rstrip(out), "\n```") && std::count(out.begin(), out.end(), '`') == 3) out = rstrip(rstrip(out).substr(0, rstrip(out).size() - 3));
+    return out;
+}
+
 // Mistral's calls: a JSON array of call objects, or the objects alone, and
 // nothing else. A call keeps the id the model wrote, when it has Mistral's
 // form, so its result can name it.
@@ -2014,6 +2044,7 @@ ParsedTurn parse_turn(ToolFormat f, const std::string &whole, const std::vector<
     if (!names.empty())
         for (ToolCall &c : r.calls)
             if (const std::string n = tool_named(c.name, names); !n.empty()) c.name = n;
+    if (!r.calls.empty()) r.content = without_call_marks(r.content);
     return r;
 }
 
@@ -2075,7 +2106,9 @@ static size_t fence_before(const std::string &text, size_t from, size_t at) {
         while (k < end && k < w + 3 && text[k] == '`') k++;
         // (` or `` where the text ends may become one.)
         if (k == w || (k < w + 3 && k < text.size())) return at;
-        while (k < end && is_name_char(text[k])) k++;
+        // (Its language may be a call tag's name: "```tool_call>", Gemma 3
+        // 12B on the PS5.)
+        while (k < end && (is_name_char(text[k]) || text[k] == '<' || text[k] == '>' || text[k] == '/')) k++;
         if (text.find_first_not_of(" \t\r", k) < end) return at;
         // (One that closes a fence opened before it opens nothing.)
         int before = 0;

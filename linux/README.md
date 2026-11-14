@@ -193,8 +193,10 @@ device on the tailnet always needs an API key that is on, whether or not
 
 ts5-tui's **Access** page (F6) sets it up: turn **Tailscale** on, scan the
 QR code with your phone and sign in. The machine shows up in your tailnet as
-`tokenstation5`. Then **Connect an app** makes a key and shows the address on
-your tailnet and the key as two QR codes, for the app on your phone.
+`tokenstation5`. Then **Connect a phone** makes a key and puts it in a QR
+code: the phone's camera opens the browser terminal (when it is on) or the
+chat page, signed in, with nothing to type. **←→** shows the other one,
+then the address on your tailnet and the key, for an app on the phone.
 Tailscale off leaves it signed in (on again needs no QR code); **D** on that
 row signs out.
 
@@ -224,6 +226,73 @@ Match Address 127.0.0.2
 `tailscale.tsv` belongs to one machine. Copied to another, Tailscale refuses
 it as copied state; ts5 then starts over as a new device and asks for a new
 sign-in (remove the old one in Tailscale's admin console).
+
+**HTTPS.** Once your tailnet has **MagicDNS** and **HTTPS Certificates** on
+(Tailscale's admin console, DNS page), ts5 serve gets a certificate for its
+tailnet name from Let's Encrypt by itself, as `tailscale cert` does, and
+answers HTTPS on it: `https://tokenstation5.YOUR-TAILNET.ts.net/` (port 443,
+the API at `/v1`). The QR codes of Connect a phone and the browser terminal
+then open the pages there, so the phone's browser treats them as secure
+pages: no warning, and its passwords offer the saved key above the
+keyboard. It renews the certificate 30 days before it ends. Until the admin
+console has HTTPS Certificates on, the Connect a phone row says so and the
+codes use the http address. The API's own port answers HTTPS on the name
+too (`https://tokenstation5.YOUR-TAILNET.ts.net:18137/`), so a browser set
+to try HTTPS first still opens an old `http://…:18137` link by name, and an
+app can be given either address. The phone needs Tailscale's DNS (on by default
+in its app) to find the name. A certificate's name is public: it goes into
+the certificate transparency logs, with your tailnet's name, as with any
+Tailscale HTTPS certificate. The certificate and its key sit beside the
+keys too (`tailscale-https.crt`, `tailscale-https.key`, with the Let's
+Encrypt account's key in `tailscale-acme.key`), readable by their owner only.
+`TS5_TS_HTTPS=0` leaves HTTPS off.
+
+### In a browser: the chat page and the terminal
+
+`ts5 serve` answers a web browser too, at the same address apps use, without
+`/v1`:
+
+- **The chat page** (`https://tokenstation5.YOUR-TAILNET.ts.net/` from your
+  tailnet with [HTTPS](#tailscale-reach-it-from-anywhere) on, else
+  `http://100.101.102.103:8081/`, or
+  `http://192.168.1.20:8081/` at home with Other devices on): a plain chat
+  with the loaded model, streamed, with its thinking when the model thinks.
+  Opened from a QR code of Connect a phone it is signed in already (the key
+  rides after `#`, which no browser sends anywhere); opened by hand it asks
+  once for one of your keys. Each time a key comes from a scan (and the
+  first time a typed one works), the page asks how that device should keep
+  it: **in the page's link** too (a home-screen
+  icon saved from it then opens signed in; the key sits in the link and the
+  history on that device), or **in my passwords** only (iCloud Keychain:
+  the page offers it to them, and Face ID fills it in when a page asks).
+  Settings on the chat page changes it. **Chats** (top left) lists your
+  chats, newest first: tap one to go on with it, ✕ to delete it (it asks
+  first), New chat for an empty one. Each chat is its own conversation: the
+  model gets the open chat's messages and nothing from the others, and a
+  chat opened again gives it all of its own back. The key, and your chats
+  (the newest 50), stay in that browser; ts5-tui keeps its own. Add it to
+  the home screen and it opens as an app, with the TokenStation5 logo, and
+  on an iPhone with the logo on black ("Connecting…") until the model
+  answers, in place of a white screen.
+  Nothing to install on the phone.
+- **The browser terminal** (`/ts5/terminal`): ts5-tui itself in a web page,
+  for a laptop or tablet away from home with no SSH client. Off by default:
+  the **Browser terminal** row on the Access page turns it on, and **Enter**
+  there makes a key and shows the terminal's address with the key in it as
+  a QR code, to open it signed in. It opens only for your tailnet's
+  devices and this machine, each time with a key that is on, never for the
+  rest of the home network, and at most four at once. It runs ts5-tui in
+  tmux, so a closed tab or a lost signal leaves an answer running and the
+  page connects again. A bar of keys under it gives a phone what its
+  keyboard lacks (Esc, Tab, the arrows, F1 to F7). ts5's log names each
+  device that opens one and how long it stayed. Turning it off closes the
+  ones that are open.
+
+The pages themselves need no key; everything they ask of the model does.
+xterm.js draws the terminal; it is built into `ts5` (NOTICE.md). Working on
+the pages: `TS5_WEB_DIR=FOLDER ts5 serve ...` serves any of them found in
+FOLDER (by the same name as in `engine/web/`) instead of its own, read at
+each request, so a changed page needs no new build.
 
 ## In a terminal: ts5-tui
 
@@ -255,7 +324,7 @@ ts5-tui --url http://ps5.local:8081  # another one
   Stopping an answer (or one that fails) leaves the queue waiting: Enter
   sends it on, Esc drops it. Commands start with `/` and Tab completes them, and model
   names after `/model`: `/model`, `/download`, `/search`, `/new`, `/chats`, `/open`,
-  `/save`, `/copy`, `/find`, `/tune`, `/check`, `/bench`, `/usage`, `/access`,
+  `/save`, `/copy`, `/find`, `/tune`, `/check`, `/bench`, `/usage`, `/access`, `/connectors`,
   `/think on|off`, `/fan auto|cool|early|max`, `/theme`, `/help`, `/unload`,
   `/quit` (`exit`, `quit` or `q` work too). A `ts5 fetch URL FILE --sha256 HEX`
   line pasted at the prompt downloads that model.
@@ -276,11 +345,11 @@ ts5-tui --url http://ps5.local:8081  # another one
   Settings (theme, thinking, temperature, answer length, context, speed or
   length, fan, tmux, mouse, when you quit), **F5**
   Logs, **F6** Access (who can reach this TokenStation5, and its API keys:
-  below). A click on a page's name in the top bar goes there. Tab and Shift+Tab step through the pages, and so do 1 to 6 on any
+  below), **F7** Connectors (GitHub: below). A click on a page's name in the top bar goes there. Tab and Shift+Tab step through the pages, and so do 1 to 7 on any
   page but Chat. On a Mac, where macOS keeps the F keys, use those, fn+F1
-  to fn+F6, or `/chat`, `/models`, `/status`, `/settings`, `/logs`, `/access`.
+  to fn+F7, or `/chat`, `/models`, `/status`, `/settings`, `/logs`, `/access`, `/connectors`.
 - **Access (F6)**: who can use this TokenStation5 from another machine,
-  and with which key. Four switches, Connect an app, and the list of keys:
+  and with which key. Five switches, Connect a phone, and the list of keys:
   - **Other devices**: whether a model ts5-tui loads can be reached from
     other machines at all. Off by default (only this machine). Switched
     on, the page shows the address to give an app, such as
@@ -297,14 +366,24 @@ ts5-tui --url http://ps5.local:8081  # another one
   - **SSH via Tailscale**: on, the tailnet's port 22 reaches this machine's
     own SSH server, and the row shows the command (`ssh you@tokenstation5`).
     Off by default; it says so when no SSH server is installed.
-  - **Connect an app**: makes a key (name it after the app) and shows two
-    QR codes, one at a time (**←→**): the address (the tailnet's when
-    Tailscale is connected, else this network's) and the key, to scan into
-    the app on a phone. A taller window draws the codes bigger, which suits
-    a phone's camera best.
-  - **Keys**: **N** makes one (name it after the app or the machine).
-    The key is shown once, with the address, as the same QR codes; **V**
-    shows them as plain text to select. ts5 keeps only its SHA-256.
+  - **Browser terminal**: on, your tailnet's devices open ts5-tui in a web
+    browser at `/ts5/terminal`, with a key ([In a browser](#in-a-browser-the-chat-page-and-the-terminal)).
+    Off by default. Once Tailscale is connected the row shows the address,
+    and **Enter** makes a key for a phone, as Connect a phone does.
+  - **Connect a phone**: makes a key (name it after the phone or the app;
+    Enter alone names it "phone") and shows it in QR codes, one at a time
+    (**←→**): the browser terminal with the key in it when it is on (all
+    of ts5-tui: models, settings, fans, keys; scanned, it opens signed in),
+    the chat page the same way (a chat only, light on a phone, with a Full
+    controls button to the terminal), then the address
+    (the tailnet's when Tailscale is connected, else this network's) and
+    the key, for an app on the phone. Under each code its text: a click or
+    tap on it (or **C**) copies it, and shows it alone to select where the
+    terminal takes no copy from a program. A taller window draws the codes
+    bigger, which suits a phone's camera best.
+  - **Keys**: **N** makes one, as Connect a phone does. The key is shown
+    once; **V** shows it all as plain text to select. ts5 keeps only its
+    SHA-256.
     **Enter** turns a key off or on, **D** removes it after asking. Each
     row says when the key was made and last used.
 
@@ -314,6 +393,22 @@ ts5-tui --url http://ps5.local:8081  # another one
   app's keys are listed but made on its own Settings page. Settings →
   Server's key is the other direction: the key ts5-tui itself sends when
   it talks to another machine's TokenStation5.
+- **Connectors (F7)**: other services the model can work with. **GitHub**:
+  Enter on Account shows a QR code of GitHub's sign-in page and a code
+  (`WDJB-MJHT`, say): scan it with a phone signed in to GitHub, enter the
+  code and authorize TokenStation5. Then GitHub's page for the
+  TokenStation5 app opens as a QR code too, to pick the repositories the
+  model may use (all, or some; Enter on Repositories changes them later).
+  The model's GitHub tool (Model's tool, or Settings → Tool: GitHub)
+  then reads those repositories freely and asks before each change
+  (below). The app may read and write code, pull requests and issues,
+  and read CI results; it can't change workflow files or a repository's
+  settings. Nothing to register and no token to paste: ts5 signs in as
+  the TokenStation5 app with GitHub's device flow, keeps the token in
+  `~/.local/share/tokenstation/connectors/github.json` (yours alone to
+  read, renewed by itself; the model never sees it), and **D** forgets
+  it. `ts5 github sign-in`, `status`, `sign-out` and
+  `api METHOD PATH [BODY]` do the same in a script.
 - **Downloads**: every model tested on the PS5 (the TV app's catalog plus
   Qwen3 14B, Qwen3.5 9B, DeepSeek R1 14B, Qwen2.5 Coder 14B, Gemma 3 and 4
   12B, and the helpers Qwen3 0.6B, Llama 3.2 1B and Gemma 3 1B), each file
@@ -333,8 +428,9 @@ ts5-tui --url http://ps5.local:8081  # another one
   the desktop's own where ts5-tui runs on one (wl-copy, xclip, xsel), and
   to `~/.cache/tokenstation/copied.txt`. Apple's Terminal takes no
   clipboard from a program, and none says whether it did, so the text is
-  then shown alone and plain, with the mouse left to the terminal: select
-  it there and copy as usual (Cmd+C), exactly as the model wrote it, long
+  then shown alone and plain, with the mouse left to the terminal (tmux's
+  too, so a drag stays selected): select it there and copy as usual
+  (Cmd+C), exactly as the model wrote it, long
   lines whole and code without the indent; any key goes back. Dragging over
   the chat opens the whole chat that way, at the message under the pointer
   (and the log, on Logs). Settings → Mouse: off leaves the mouse to the
@@ -354,9 +450,17 @@ ts5-tui --url http://ps5.local:8081  # another one
   what it finds, a JSON object a line). A model found this way isn't a
   tested one: C checks its answers on this GPU and T tunes it.
 - **Chats are kept**: every chat is saved after each answer, in the TV app's
-  format, in `~/.local/share/tokenstation/chats`. `/chats` lists them (and
-  the TV service's, when you may read them), `/chats TEXT` finds one,
-  `/open N` opens one to go on with it.
+  format, in `~/.local/share/tokenstation/chats`. **Ctrl+O** (or `/chats`,
+  or Chats on the browser terminal's key bar) lists them over the chat,
+  newest first, with the TV service's when you may read them: Enter or a
+  click opens one to go on with it, D or a click on its ✕ deletes it
+  (asked first; the TV app's are deleted on the TV), N starts a new one.
+  `/chats TEXT` lists the ones that have TEXT, `/open TEXT` opens the
+  newest of them. Each chat is its own conversation: the model gets the
+  open chat's messages and nothing from the others (every request carries
+  its chat whole), and a chat opened again gives the model all of its own
+  back. A long chat opened again takes a moment before its first answer,
+  while the model reads it in.
 - **A full chat goes on**: a chat grows until the model's memory for it (its
   context) is nearly full. Then, before your next message goes out, the
   model writes a detailed summary of the chat so far, and the chat goes on
@@ -386,17 +490,17 @@ ts5-tui --url http://ps5.local:8081  # another one
   and restart it.
 - **Tools**: besides the web search, the model can read a web page, use
   a browser, run a command on this machine and keep notes between chats.
-  It can also read and change files, and use the tools of outside
-  programs that speak MCP. Each has its own switch (Settings →
-  Tool: search, pages, terminal, files, browser, memory; or
+  It can also read and change files, work on GitHub, and use the tools
+  of outside programs that speak MCP. Each has its own switch (Settings →
+  Tool: search, pages, terminal, files, GitHub, browser, memory; or
   `/tools terminal off`), and `/tools` lists them.
   **One switch turns them all off**: Settings → Tools, or `/tools off`
   (`/tools on` brings back the ones you had on), or `ts5-tui --no-tools`
   for one run. With it off the model gets nothing but the chat: no
   search, no pages, no commands, no browser, no notes, and no outside
   program is running.
-  The terminal, the files and the browser have three steps: off, on and
-  asking first (the default), on and never asking (`/tools terminal
+  The terminal, the files, GitHub and the browser have three steps: off,
+  on and asking first (the default), on and never asking (`/tools terminal
   allow`; `/tools ask` brings every question back).
   - **Web pages**: give it a link ("read https://... and sum it up") and
     it gets the page as text: the article where the page marks one,
@@ -561,6 +665,13 @@ ts5-tui --url http://ps5.local:8081  # another one
     exactly: one that matches nothing tells the model the line of the
     file that comes closest, and a line break sent where the file's code
     has `\n` written out (a small model's usual slip) is read as that.
+  - **GitHub** (once it is connected on the Connectors page): the model
+    calls GitHub's REST API as you, in the repositories you picked. A
+    read (a file, which comes as its text, a list of pull requests, a CI
+    run) goes at once; **a change waits for your yes**, shown with what
+    it sends (a file's new text a line at a time): making a branch,
+    writing a file, opening a pull request or an issue, a comment.
+    "Every GitHub change, this chat" stops the questions for the chat.
   - **Outside tools (MCP)**: a program that speaks MCP, the Model
     Context Protocol, gives the model tools of its own (a calendar, a
     database, a code host: whatever the program is for). Add one with the
@@ -951,8 +1062,15 @@ unchanged. `TS5_MARCH=znver2` builds for the PS5's Zen 2 alone (the default,
 
 ## Releases
 
-Linux releases use their own tags, `linux-v<version>` (for example
-`linux-v0.2.0`). `.github/workflows/linux.yml` builds them and attaches the
+Linux releases use their own tags, `linux-v<version>`, and their own
+semantic versions, apart from the PS5 title's: MAJOR.MINOR.PATCH, starting at
+`linux-v1.0.0`. MAJOR goes up when something stops working the old way
+(settings, files, the API), MINOR for new features, PATCH for fixes alone.
+Builds between releases, such as `linux-latest`, are named
+`<the newest release>+<run>.<commit>` (for example `1.0.0+330.83ba0e2`), and
+install over that release; the next release installs over them. What each
+release brings is in `linux/release-notes/<version>.md`.
+`.github/workflows/linux.yml` builds them and attaches the
 `.deb`, `.rpm`, Arch package and portable `.tar.gz`, after installing each on
 Debian 12 and 13, Ubuntu 24.04 and 26.04, Fedora 44 and Arch. They are never marked as the repo's latest release, so
 the PS5 store side (`release.yml`, tags like `01.004.001`) is unaffected.

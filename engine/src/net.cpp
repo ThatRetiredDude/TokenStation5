@@ -1288,8 +1288,8 @@ std::string sha256_hex(const std::string &data) {
 #endif
 }
 
-bool post(const std::string &url, const std::vector<std::string> &headers, const std::string &body,
-          HttpResponse &resp, std::string &err, int timeout_s) {
+bool request(const std::string &method, const std::string &url, const std::vector<std::string> &headers,
+             const std::string &body, HttpResponse &resp, std::string &err, int timeout_s) {
     // scheme://host[:port]/path
     size_t s = url.find("://");
     if (s == std::string::npos) {
@@ -1325,8 +1325,11 @@ bool post(const std::string &url, const std::vector<std::string> &headers, const
 #ifdef TS5_HTTPS
     if (https && !start_tls(c, host, err)) return false;
 #endif
-    std::string req = "POST " + path + " HTTP/1.1\r\nHost: " + hostport + "\r\nConnection: close\r\n" +
-                      "Content-Length: " + std::to_string(body.size()) + "\r\nUser-Agent: TokenStation5\r\n";
+    std::string req = method + " " + path + " HTTP/1.1\r\nHost: " + hostport + "\r\nConnection: close\r\n" +
+                      (body.empty() && (method == "GET" || method == "DELETE")
+                           ? std::string()
+                           : "Content-Length: " + std::to_string(body.size()) + "\r\n") +
+                      "User-Agent: TokenStation5\r\n";
     for (auto &h : headers) req += h + "\r\n";
     req += "\r\n" + body;
     std::string raw;
@@ -1343,6 +1346,7 @@ bool post(const std::string &url, const std::vector<std::string> &headers, const
     const std::string head = raw.substr(0, he);
     size_t sp = head.find(' ');
     resp.status = sp == std::string::npos ? 0 : atoi(head.c_str() + sp + 1);
+    resp.head = head;
     std::string lower = head;
     for (auto &ch : lower) ch = (char)tolower((unsigned char)ch);
     resp.body.clear();
@@ -1362,7 +1366,13 @@ bool post(const std::string &url, const std::vector<std::string> &headers, const
 // thread of its own with 1 MiB.
 bool http_post(const std::string &url, const std::vector<std::string> &headers, const std::string &body,
                HttpResponse &resp, std::string &err, int timeout_s) {
+    return http_request("POST", url, headers, body, resp, err, timeout_s);
+}
+
+bool http_request(const std::string &method, const std::string &url, const std::vector<std::string> &headers,
+                  const std::string &body, HttpResponse &resp, std::string &err, int timeout_s) {
     struct Job {
+        const std::string &method;
         const std::string &url;
         const std::vector<std::string> &headers;
         const std::string &body;
@@ -1370,19 +1380,19 @@ bool http_post(const std::string &url, const std::vector<std::string> &headers, 
         std::string &err;
         int timeout_s;
         bool ok;
-    } job{url, headers, body, resp, err, timeout_s, false};
+    } job{method, url, headers, body, resp, err, timeout_s, false};
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 1 << 20);
     pthread_t th;
     auto run = [](void *p) -> void * {
         Job &j = *(Job *)p;
-        j.ok = post(j.url, j.headers, j.body, j.resp, j.err, j.timeout_s);
+        j.ok = request(j.method, j.url, j.headers, j.body, j.resp, j.err, j.timeout_s);
         return nullptr;
     };
     int rc = pthread_create(&th, &attr, run, &job);
     pthread_attr_destroy(&attr);
-    if (rc != 0) return post(url, headers, body, resp, err, timeout_s);  // no thread: try on this one
+    if (rc != 0) return request(method, url, headers, body, resp, err, timeout_s);  // no thread: try on this one
     pthread_join(th, nullptr);
     return job.ok;
 }

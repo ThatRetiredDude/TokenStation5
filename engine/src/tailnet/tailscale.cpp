@@ -571,6 +571,28 @@ void Client::sign_out() {
     cfg_gen_++;
 }
 
+bool Client::set_dns(const std::string &name, const std::string &type, const std::string &value, std::string &why,
+                     int timeout_s) {
+    auto ask = std::make_shared<DnsAsk>();
+    ask->name = name;
+    ask->type = type;
+    ask->value = value;
+    std::unique_lock<std::mutex> lk(mu_);
+    if (status_.state != Status::Connected && status_.state != Status::Connecting) {
+        why = "not connected to the tailnet";
+        return false;
+    }
+    dns_queue_.push_back(ask);
+    if (!dns_cv_.wait_for(lk, std::chrono::seconds(timeout_s), [&] { return ask->done; })) {
+        dns_queue_.erase(std::remove(dns_queue_.begin(), dns_queue_.end(), ask), dns_queue_.end());
+        if (dns_ask_ == ask) dns_ask_.reset();
+        why = "the control server didn't answer in " + std::to_string(timeout_s) + " s";
+        return false;
+    }
+    why = ask->why;
+    return ask->ok;
+}
+
 Status Client::status() {
     std::lock_guard<std::mutex> lk(mu_);
     return status_;
@@ -688,7 +710,17 @@ void Client::control_loop() {
 
         auto fail = [&](const std::string &why) {
             log("%s", why.c_str());
-            set_state(Status::Problem, why);
+            {
+                // The control server's connection ends now and then (it
+                // closes long ones itself): the tunnel goes on through the
+                // relay meanwhile, so a connected machine stays connected.
+                std::lock_guard<std::mutex> lk(mu_);
+                if (!(status_.state == Status::Connected && relay_up_ && !map_.address.empty())) {
+                    status_.state = Status::Problem;
+                    status_.problem = why;
+                    status_.sign_in_url.clear();
+                }
+            }
             const double until = now_s() + backoff;
             backoff = backoff * 2 > 60 ? 60 : backoff * 2;
             while (now_s() < until && !changed()) usleep(100 * 1000);
@@ -873,7 +905,10 @@ void Client::control_loop() {
         {
             std::lock_guard<std::mutex> lk(mu_);
             status_.account = keys.account;
-            if (status_.state != Status::Connected) status_.state = Status::Connecting;
+            // Signed in again with the relay still open: connected now, as
+            // the relay's hello (which made it so the first time) won't come
+            // again on that connection.
+            if (status_.state != Status::Connected) status_.state = relay_up_ ? Status::Connected : Status::Connecting;
             status_.problem.clear();
             status_.sign_in_url.clear();
         }
@@ -929,7 +964,7 @@ void Client::control_loop() {
         bool have_filter = false;
         std::string self_name, self_address, control_says;
         bool said_no_address = false, start_over = false;
-        int update_id = 0;
+        int update_id = 0, dns_id = 0;
         bool ok = true;
         while (ok && !changed()) {
             if (!c.pump(1000, why)) {
@@ -940,6 +975,47 @@ void Client::control_loop() {
                 why = "the control server went quiet";
                 ok = false;
                 break;
+            }
+            // A DNS record asked for (set_dns): sent, and its answer handed back.
+            if (dns_id) {
+                H2::Response *dr = c.h2().response(dns_id);
+                if (dr && dr->done) {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    if (dns_ask_) {
+                        dns_ask_->ok = dr->status == 200;
+                        if (!dns_ask_->ok)
+                            dns_ask_->why = "the control server refused the DNS record (HTTP " + std::to_string(dr->status) +
+                                            "): " + dr->body.substr(0, 300);
+                        dns_ask_->done = true;
+                        dns_ask_.reset();
+                        dns_cv_.notify_all();
+                    }
+                    c.h2().forget(dns_id);
+                    dns_id = 0;
+                }
+            } else if (!c.h2().going_away()) {
+                std::shared_ptr<DnsAsk> ask;
+                {
+                    std::lock_guard<std::mutex> lk(mu_);
+                    if (!dns_queue_.empty()) {
+                        ask = dns_queue_.front();
+                        dns_queue_.pop_front();
+                        dns_ask_ = ask;
+                    }
+                }
+                if (ask) {
+                    Json r = Json::object();
+                    r.set("Version", num(kCapVersion));
+                    r.set("NodeKey", str(node_key));
+                    r.set("Name", str(ask->name));
+                    r.set("Type", str(ask->type));
+                    r.set("Value", str(ask->value));
+                    if (!c.post("/machine/set-dns", r.dump(), node_key, dns_id, why)) {
+                        ok = false;
+                        break;
+                    }
+                    log("asked the control server for a %s record on %s", ask->type.c_str(), ask->name.c_str());
+                }
             }
             if (update_id) {
                 H2::Response *ur = c.h2().response(update_id);
@@ -1060,6 +1136,20 @@ void Client::control_loop() {
                         ok = false;
                         break;
                     }
+                }
+                // The names this device may have a certificate for: the
+                // tailnet's HTTPS Certificates (admin console, DNS page) on.
+                const Json &dns = m["DNSConfig"];
+                if (dns.type == Json::OBJ) {
+                    std::vector<std::string> cd;
+                    for (const Json &d : dns["CertDomains"].a)
+                        if (!d.str().empty()) cd.push_back(d.str());
+                    std::lock_guard<std::mutex> lk(mu_);
+                    if (cd != status_.cert_domains) {
+                        if (cd.empty()) log("the tailnet gives no certificate names (HTTPS Certificates off in its admin console)");
+                        else log("the tailnet's certificate name: %s", cd[0].c_str());
+                    }
+                    status_.cert_domains = cd;
                 }
                 const Json &dm = m["DERPMap"];
                 if (dm.type == Json::OBJ) {
@@ -1204,6 +1294,16 @@ void Client::control_loop() {
             }
         }
         c.close();
+        {
+            // A DNS record in flight goes with the connection: its asker tries again.
+            std::lock_guard<std::mutex> lk(mu_);
+            if (dns_ask_) {
+                dns_ask_->why = "the connection to the control server ended (" + why + ")";
+                dns_ask_->done = true;
+                dns_ask_.reset();
+                dns_cv_.notify_all();
+            }
+        }
         if (start_over && !changed()) {
             log("Tailscale takes these keys for ones copied from another device; " TS5_DEVICE_NAME
                 " starts over as a new device, which needs a new sign-in");
@@ -1392,6 +1492,7 @@ void Client::relay_loop() {
                         log("on relay %s (%s)", rg->name.c_str(), host.c_str());
                         {
                             std::lock_guard<std::mutex> lk(mu_);
+                            relay_up_ = true;
                             if (status_.state == Status::Connecting || status_.state == Status::Problem) {
                                 status_.state = Status::Connected;
                                 status_.problem.clear();
@@ -1449,6 +1550,10 @@ void Client::relay_loop() {
             in.append(buf, (size_t)n);
         }
         s.close();
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            relay_up_ = false;
+        }
         if (!ok && !changed()) fail(why);
     }
 }

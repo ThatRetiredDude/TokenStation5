@@ -11,7 +11,8 @@ third of its bytes, as a real chat grows; FAKE_DENSE=2: half), and an answer tha
 context or max_tokens stops with finish_reason "length". A request for a
 summary (ts5-tui's, for a chat that filled up) gets one (FAKE_SUMMARY: a
 file with the summary to give instead). FAKE_REQUESTS: a
-file that gets each request's roles and sizes, a line a request.
+file that gets each request's roles and sizes, a line a request, and its
+user messages (the first 80 characters of each).
 FAKE_WEB=1 says the server has a web search key (without it the search is
 Wikipedia's; FAKE_SOURCE=none: no search at all). FAKE_SPEED: words a second
 (60).
@@ -38,7 +39,8 @@ FAKE_TAILNET=1 answers /ts5/tailnet as a ts5 serve with Tailscale does (off;
 on gives a sign-in link a second later, and FAKE_TAILNET_SIGNIN seconds
 after that, 6 by default, it is connected; sign_out turns it off; "ssh"
 switches SSH through it, and FAKE_TAILNET_SSHD=0 says this machine has no
-SSH server).
+SSH server; "terminal" the browser terminal; FAKE_TAILNET_LINK sets the
+sign-in link).
 FAKE_MODEL names the model. FAKE_HELPER names the helper drafting beside it
 (FAKE_HELPER_CTX: its context; "none": no helper), FAKE_HELPER_NOTE says
 why none is; with neither, /v1/models has no "helper" at all, as an older
@@ -87,14 +89,17 @@ WEB = bool(os.environ.get("FAKE_WEB") or os.environ.get("TAVILY_API_KEY"))
 TAILNET = os.environ.get("FAKE_TAILNET") == "1"
 TAILNET_SIGNIN = float(os.environ.get("FAKE_TAILNET_SIGNIN", "6"))
 TAILNET_SSHD = os.environ.get("FAKE_TAILNET_SSHD", "1") == "1"
-tailnet = {"on": False, "since": 0.0, "signed_in": False, "name": "tokenstation5", "ssh": False}
+# HTTPS on the tailnet name: "on" (a certificate), "admin" (HTTPS Certificates
+# off in the tailnet's admin console), "" (off).
+TAILNET_HTTPS = os.environ.get("FAKE_TAILNET_HTTPS", "")
+tailnet = {"on": False, "since": 0.0, "signed_in": False, "name": "tokenstation5", "ssh": False, "terminal": False}
 
 
 def tailnet_status():
     """What GET /ts5/tailnet gives: off, starting, sign_in (with a link), connected."""
     t = tailnet
     out = {"on": t["on"], "hostname": t["name"], "server": "https://controlplane.tailscale.com", "devices": 0,
-           "port": int(sys.argv[1]) if len(sys.argv) > 1 else 18081, "peers": [], "ssh": t["ssh"],
+           "port": int(sys.argv[1]) if len(sys.argv) > 1 else 18081, "peers": [], "ssh": t["ssh"], "terminal": t["terminal"],
            "ssh_server": TAILNET_SSHD}
     age = time.time() - t["since"]
     if not t["on"]:
@@ -110,6 +115,11 @@ def tailnet_status():
         out.update(state="connected", name=name, address="100.101.102.103", account="you@example.com", devices=2,
                    url="http://100.101.102.103:%d/v1" % out["port"],
                    name_url="http://%s:%d/v1" % (name.rstrip("."), out["port"]))
+        if TAILNET_HTTPS == "on":
+            out["https"] = {"state": "on", "name": name.rstrip("."), "until": int(time.time()) + 80 * 86400}
+            out["https_url"] = "https://%s/" % name.rstrip(".")
+        elif TAILNET_HTTPS:
+            out["https"] = {"state": TAILNET_HTTPS, "name": name.rstrip(".")}
     return out
 SUMMARY = """## What you are doing
 - Trying the fake TokenStation, one message at a time.
@@ -193,6 +203,8 @@ class H(BaseHTTPRequestHandler):
                 tailnet["name"] = req["name"].lower()
             if "ssh" in req:
                 tailnet["ssh"] = bool(req["ssh"])
+            if "terminal" in req:
+                tailnet["terminal"] = bool(req["terminal"])
             self.send(200, tailnet_status())
             return
         msgs = req.get("messages", [])
@@ -218,6 +230,7 @@ class H(BaseHTTPRequestHandler):
                         ",".join(t.get("function", {}).get("name") for t in req.get("tools") or []),
                         json.dumps(req.get("web_search")), req.get("tool_choice"),
                         " source=%s" % req["web_search_source"] if "web_search_source" in req else ""))
+                f.write("  users: %s\n" % json.dumps([(m.get("content") or "")[:80] for m in msgs if m.get("role") == "user"]))
                 if req.get("chat_template_kwargs"):
                     f.write("  kwargs=%s\n" % json.dumps(req["chat_template_kwargs"]))
                 if summary:

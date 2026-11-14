@@ -1,0 +1,9 @@
+name = "ts5-feedback"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ts5-feedback"
+database_id = "fe488ff9-ca69-4a39-88a9-0702a9e56cd8"

@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -56,8 +57,8 @@ namespace {
 
 // ---- the program's state ----
 
-enum ScreenId { CHAT, MODELS, STATUS, SETTINGS, LOGS, ACCESS, N_SCREENS };
-const char *kScreenNames[N_SCREENS] = {"Chat", "Models", "Status", "Settings", "Logs", "Access"};
+enum ScreenId { CHAT, MODELS, STATUS, SETTINGS, LOGS, ACCESS, CONNECTORS, N_SCREENS };
+const char *kScreenNames[N_SCREENS] = {"Chat", "Models", "Status", "Settings", "Logs", "Access", "Connectors"};
 
 struct ModelFile {
     std::string name, path, dir;
@@ -131,6 +132,15 @@ struct App {
     int pick_sel = 0;
     std::string dl_dir;
     std::vector<SavedChat> chat_list;  // the last /chats
+    // The chats (Ctrl+O, /chats): chat_list over the chat, to open one,
+    // delete one or start a new one. Row 0 is "New chat", row i chat_list[i-1].
+    bool chats_on = false;
+    int chats_sel = 0, chats_top = 0;
+    std::string chats_query;
+    struct ChatsHit {
+        int y, x0, x1, del_x, row;  // del_x: where its ✕ starts (0: none)
+    };
+    std::vector<ChatsHit> chats_hits;
     int answers_saved = 0;
     double ask_told = 0;  // the run-it question a toast on another page was shown for
     std::string load_target;  // what's loading, until /v1/models says so
@@ -145,7 +155,7 @@ struct App {
     // The plain view: text alone on the screen, the mouse left to the
     // terminal, so its own selection copies it (view_open).
     bool view_on = false, view_dirty = false, view_sent = false;
-    std::string view_text, view_title;
+    std::string view_text, view_title, view_head;  // view_head: the top line, when not the copy hint
     int view_top = 0;
     size_t view_at = 0;  // the byte of view_text to show first, once
     int load_ctx = 0;                            // the context it was started with (0: auto)
@@ -185,13 +195,19 @@ struct App {
     int acc_kind = 0, acc_sel = 0;
     bool acc_required = false, acc_writable = true, acc_typing = false;
     std::string acc_file, acc_err, acc_name;
+    bool acc_for_terminal = false;  // the key being named is for the browser terminal: its code first
     double acc_at = 0;
     // The server's Tailscale (GET /ts5/tailnet), as last read. tn_have is
     // false when it has none (not running, an older ts5, the TV app): tn_why.
     bool tn_have = false, tn_on = false;
     bool tn_ssh = false, tn_ssh_server = false;  // SSH through it; whether this machine has an SSH server
+    bool tn_terminal = false;                    // the browser terminal (ts5 serve's /ts5/terminal)
     bool tn_want_qr = false;  // turned on here: the sign-in QR opens once there is a link
     std::string tn_state, tn_host, tn_name, tn_address, tn_url, tn_name_url, tn_sign_in, tn_problem, tn_account, tn_why;
+    // HTTPS on the tailnet name (ts5 serve's "https"): its address once it
+    // answers ("https://NAME/"), its state (off, waiting, admin, getting, on,
+    // problem) and why it has none.
+    std::string tn_https_url, tn_https_state, tn_https_problem;
     int tn_devices = 0;
     double tn_at = 0;
     // QR codes over the page: the sign-in link (closed once connected), or
@@ -207,6 +223,35 @@ struct App {
     int qr_sel = 0;
     bool qr_sign_in = false;
     int qr_link_y = -1;  // the sign-in link's row, as last drawn
+    bool qr_github = false;   // GitHub's sign-in: C copies the code
+    bool qr_install = false;  // GitHub's page for picking the repositories
+    // An app's address and key, the browser terminal's address: each shown
+    // as text under its code too, and a tap on it (or C) copies it.
+    bool qr_copy = false;
+    std::vector<std::pair<int, int>> qr_value_rows;  // (row, code) as last drawn
+    // The Connectors page: GitHub (`ts5 github`, engine/src/github.h). The
+    // sign-in runs as gh_signin (its lines: the code, then whose it is);
+    // the repositories the app may use are asked of GitHub by gh_status.
+    Proc gh_signin, gh_status;
+    // /feedback: what the user wrote, the report as `ts5 feedback prepare`
+    // cleaned it (exactly what would be sent), whether the chat and the log
+    // go in, and the send while it runs. fb_review: the report is open to
+    // read, and the choices come when it closes.
+    std::string fb_summary, fb_text;
+    bool fb_chat = false, fb_logs = true, fb_review = false, fb_sending = false;
+    Proc fb_send;
+    size_t gh_parsed = 0;
+    bool gh_signed = false, gh_known = false;  // gh_known: the repositories asked since it was signed in
+    std::string gh_login, gh_install, gh_code, gh_url, gh_problem, gh_file;
+    struct GhPlace {
+        std::string account;
+        bool all = false;
+        int count = 0;
+        std::vector<std::string> repos;
+    };
+    std::vector<GhPlace> gh_places;
+    double gh_at = 0;
+    int con_sel = 0;
     std::string logs_src;
     double logs_checked = 0;
 };
@@ -582,8 +627,9 @@ std::string encyclopedia_name() {
 enum AccessKind { ACC_OWN, ACC_SERVICE, ACC_TV, ACC_REMOTE };
 
 // The page's rows before the keys: other devices, need a key, Tailscale,
-// connect an app.
-constexpr int kAccRows = 5;
+// SSH via Tailscale, the browser terminal, connect an app.
+constexpr int kAccRows = 6;
+constexpr int kAccTerminal = 4, kAccConnect = 5;
 
 AccessKind access_kind() {
     if (!endpoint().local()) return ACC_REMOTE;
@@ -732,6 +778,27 @@ void tailnet_take(const ts5::Json &j) {
     g->tn_devices = (int)j["devices"].num(0);
     g->tn_ssh = j["ssh"].boolean(false);
     g->tn_ssh_server = j["ssh_server"].boolean(false);
+    g->tn_terminal = j["terminal"].boolean(false);
+    g->tn_https_url = j["https_url"].str();
+    while (!g->tn_https_url.empty() && g->tn_https_url.back() == '/') g->tn_https_url.pop_back();
+    g->tn_https_state = j["https"]["state"].str();
+    g->tn_https_problem = j["https"]["problem"].str();
+}
+
+// Where a phone opens the pages: by the tailnet name over HTTPS once ts5
+// serve has its certificate (a secure page: the phone's passwords fill the
+// key in), else the API's own address (http, 100.x).
+std::string pages_base() {
+    if (!g->tn_https_url.empty()) return g->tn_https_url;
+    std::string u = g->tn_url;
+    if (u.size() > 3 && u.compare(u.size() - 3, 3, "/v1") == 0) u.resize(u.size() - 3);
+    return u;
+}
+
+// The browser terminal's address on the tailnet: the API's, at /ts5/terminal.
+std::string terminal_url() {
+    const std::string u = pages_base();
+    return u.empty() ? u : u + "/ts5/terminal";
 }
 
 // The sign-in link as a QR code, to scan with the phone that is signed in
@@ -741,6 +808,7 @@ void qr_sign_in_open() {
     g->qr = {{"", g->tn_sign_in}};
     g->qr_sel = 0;
     g->qr_sign_in = true;
+    g->qr_copy = false;
     g->qr_title = " Sign in to Tailscale ";
     g->qr_notes = {"Scan it with your phone's camera and sign in: this machine joins your tailnet as " +
                        (g->tn_host.empty() ? std::string("tokenstation5") : g->tn_host) + ". Or open this link on any device:",
@@ -756,6 +824,170 @@ void qr_close() {
     g->qr_notes.clear();
     g->qr_plain.clear();  // (an app's: it holds the key)
     g->qr_sign_in = false;
+    g->qr_github = false;
+    g->qr_install = false;
+    g->qr_copy = false;
+    g->qr_value_rows.clear();
+}
+
+// ---- GitHub (the Connectors page) ----
+
+int github_repo_count() {
+    int n = 0;
+    for (const auto &p : g->gh_places) n += p.count;
+    return n;
+}
+
+// GitHub's device sign-in as a QR code of its page, with the code to enter
+// there over it.
+void qr_github_open() {
+    g->toast.clear();
+    g->qr = {{"Code: " + g->gh_code, g->gh_url}};
+    g->qr_sel = 0;
+    g->qr_sign_in = g->qr_install = g->qr_copy = false;
+    g->qr_github = true;
+    g->qr_title = " Connect GitHub ";
+    g->qr_notes = {"Scan it with your phone (signed in to GitHub there), enter the code " + g->gh_code +
+                       ", then Authorize TokenStation5. Or open this on any device:",
+                   g->gh_url};
+    g->qr_short = "GitHub: scan it, then enter " + g->gh_code;
+    g->qr_plain = "Connect GitHub: open\n\n" + g->gh_url + "\n\non any device signed in to GitHub, enter the code\n\n" +
+                  g->gh_code + "\n\nand Authorize TokenStation5. The code works for 15 minutes.\n";
+    g->qr_plain_title = "GitHub's sign-in";
+}
+
+// GitHub's page where the user picks the repositories the app may use.
+void qr_install_open() {
+    g->toast.clear();
+    g->qr = {{"", g->gh_install}};
+    g->qr_sel = 0;
+    g->qr_sign_in = g->qr_github = g->qr_copy = false;
+    g->qr_install = true;
+    g->qr_title = " Choose the repositories ";
+    g->qr_notes = {"GitHub's page for the TokenStation5 app: pick your account, then All repositories or only the ones "
+                   "the model may use, and Install (Save, when it is installed already). Or open this on any device:",
+                   g->gh_install};
+    g->qr_short = "Pick the repositories on GitHub: scan it";
+    g->qr_plain = "The repositories TokenStation5 may use are picked on GitHub's page for its app:\n\n" + g->gh_install +
+                  "\n\nAll repositories, or only some; change it there any time.\n";
+    g->qr_plain_title = "GitHub's page for the app";
+}
+
+// `ts5 github status` (what this machine keeps: no network), and with
+// repos, GitHub asked which repositories the app may use, in the
+// background (gh_status).
+void github_read(bool repos) {
+    const std::string ts5 = which("ts5");
+    if (ts5.empty()) {
+        g->gh_problem = "ts5 isn't installed here";
+        return;
+    }
+    FILE *p = popen((shell_quote(ts5) + " github status 2>/dev/null").c_str(), "r");
+    std::string text;
+    if (p) {
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof buf, p)) > 0) text.append(buf, n);
+        pclose(p);
+    }
+    ts5::Json j;
+    if (!ts5::Json::parse(text, j) || j.type != ts5::Json::OBJ) {
+        g->gh_problem = "ts5 github gave no answer: the ts5 here is older than this ts5-tui";
+        return;
+    }
+    const bool was = g->gh_signed;
+    g->gh_signed = j["signed_in"].boolean(false);
+    g->gh_login = j["login"].str();
+    g->gh_install = j["install_url"].str();
+    g->gh_file = j["file"].str();
+    if (!j["error"].str().empty()) g->gh_problem = j["error"].str();
+    if (!g->gh_signed || !was) {
+        g->gh_known = false;
+        g->gh_places.clear();
+    }
+    if (repos && g->gh_signed && !g->gh_status.running()) {
+        g->gh_at = now_s();
+        g->gh_status.start(shell_quote(ts5) + " github status --repos 2>/dev/null", "GitHub");
+    }
+}
+
+void github_status_follow() {
+    g->gh_status.pump();
+    if (!g->gh_status.done || g->gh_status.lines.empty()) return;
+    const std::string line = g->gh_status.lines.back();
+    g->gh_status.lines.clear();
+    ts5::Json j;
+    if (!ts5::Json::parse(line, j) || j.type != ts5::Json::OBJ || !j["signed_in"].boolean(false)) return;
+    if (!j["error"].str().empty()) {
+        g->gh_problem = j["error"].str();
+        return;
+    }
+    g->gh_problem.clear();
+    const int before = g->gh_known ? github_repo_count() : -1;
+    g->gh_places.clear();
+    for (const ts5::Json &i : j["installations"].a) {
+        App::GhPlace pl;
+        pl.account = i["account"].str();
+        pl.all = i["all"].boolean(false);
+        for (const ts5::Json &r : i["repos"].a) pl.repos.push_back(r["name"].str());
+        pl.count = (int)i["count"].num((double)pl.repos.size());
+        g->gh_places.push_back(pl);
+    }
+    g->gh_known = true;
+    const int now = github_repo_count();
+    // Picked on GitHub while its page was up: it closes.
+    if (g->qr_install && now > 0 && before <= 0) {
+        qr_close();
+        show_toast(fmt("GitHub: %d %s ready for the model", now, now == 1 ? "repository" : "repositories"), g->th->good, 7);
+    }
+}
+
+void github_sign_in_start() {
+    const std::string ts5 = which("ts5");
+    if (ts5.empty()) {
+        show_toast("ts5 isn't installed here: it does the GitHub sign-in", g->th->bad, 6);
+        return;
+    }
+    g->gh_parsed = 0;
+    g->gh_code.clear();
+    g->gh_url.clear();
+    g->gh_problem.clear();
+    if (!g->gh_signin.start(shell_quote(ts5) + " github sign-in 2>&1", "GitHub sign-in")) {
+        show_toast("The GitHub sign-in couldn't start", g->th->bad, 6);
+        return;
+    }
+    show_toast("Asking GitHub for a code…", g->th->dim, 4);
+}
+
+void github_sign_in_follow() {
+    g->gh_signin.pump();
+    for (; g->gh_parsed < g->gh_signin.lines.size(); g->gh_parsed++) {
+        const std::string l = g->gh_signin.lines[g->gh_parsed];
+        const size_t sp = l.find(' ');
+        const std::string what = l.substr(0, sp), rest = sp == std::string::npos ? "" : l.substr(sp + 1);
+        if (what == "code") {
+            g->gh_code = rest;
+        } else if (what == "url") {
+            g->gh_url = rest;
+            if (!g->gh_code.empty() && (g->qr.empty() || g->qr_github)) qr_github_open();
+        } else if (what == "signed-in") {
+            if (g->qr_github) qr_close();
+            g->gh_code.clear();
+            github_read(true);
+            show_toast("GitHub: connected as " + rest + ". The model's GitHub tool can use the repositories you pick",
+                       g->th->good, 8);
+        } else if (what == "installations") {
+            // Not installed anywhere yet: the page where the repositories are picked.
+            if (atoi(rest.c_str()) == 0 && g->qr.empty() && !g->gh_install.empty()) qr_install_open();
+        } else if (what == "denied" || what == "expired" || what == "error") {
+            if (g->qr_github) qr_close();
+            g->gh_code.clear();
+            g->gh_problem = what == "denied"    ? "GitHub's page was answered with Cancel: nothing was connected"
+                            : what == "expired" ? "the code ran out (15 minutes): Enter gives a new one"
+                                                : rest;
+            show_toast("GitHub: " + g->gh_problem, g->th->warn, 8);
+        }
+    }
 }
 
 // The server's Tailscale read again: only a server on this machine (from
@@ -791,7 +1023,7 @@ void tailnet_read() {
             qr_close();
             const std::string who = g->tn_name.empty() ? g->tn_host : g->tn_name;
             show_toast("Tailscale: connected as " + who.substr(0, who.find('.')) +
-                           ". Connect an app, on Access, gives a phone what to scan",
+                           ". Connect a phone, on Access, gives it a code to scan",
                        g->th->good, 9);
         } else if (linked && g->qr[0].data != g->tn_sign_in) {
             qr_sign_in_open();  // a new link (the last one ran out)
@@ -1616,6 +1848,8 @@ ChatRequest chat_request() {
     rq.tools.files = tools && g->cfg.tool_files;
     rq.tools.files_ask = g->cfg.files_ask;
     rq.tools.mcp = tools;  // (each server has its own off in mcp.json)
+    rq.tools.github = tools && g->cfg.tool_github && github_signed_in();
+    rq.tools.github_ask = g->cfg.github_ask;
     rq.tools.browser_program = g->cfg.browser;
     rq.ts5 = !sv.tool_format.empty();
     return rq;
@@ -2108,7 +2342,7 @@ void draw_status() {
         if (g->gen_hist.empty())
             s.put(ix + 26, y + 2, fit(e.local() ? "every answer the server gives shows up here" : "from this app's chats", iw - 27), S(t.dim, ITALIC));
     }
-    draw_bottom_bar("Tab/1-6 pages|F fan auto/cool/early/max");
+    draw_bottom_bar("Tab/1-7 pages|F fan auto/cool/early/max");
 }
 
 // ---- Models ----
@@ -2457,7 +2691,7 @@ void draw_models() {
             line("Tested", "no, the search found it: once it's here, C checks its answers on this GPU and T tunes it", t.warn);
             line("", "Enter downloads it, checked by SHA-256 · X stops it, and it goes on from there later", t.dim);
         }
-        draw_bottom_bar("↑↓ choose|Enter download|S search|Tab/1-6 pages|X stop download|R rescan");
+        draw_bottom_bar("↑↓ choose|Enter download|S search|Tab/1-7 pages|X stop download|R rescan");
         return;
     }
     if (g->model_sel >= nl && g->model_sel < n) {
@@ -2477,7 +2711,7 @@ void draw_models() {
         line("Goes to", dir + (fb >= 0 ? "  (" + gib(fb) + " free)" : ""), fb >= 0 && fb < (double)e.bytes ? t.bad : t.fg);
         if (downloading(e)) working(yy, (double)e.bytes);
         else line("", "Enter downloads it · X stops it, and it goes on from there later · any other: S searches", t.dim);
-        draw_bottom_bar("↑↓ choose|Enter download|S search|Tab/1-6 pages|X stop download|R rescan");
+        draw_bottom_bar("↑↓ choose|Enter download|S search|Tab/1-7 pages|X stop download|R rescan");
         return;
     }
     if (nl > 0 && g->model_sel < nl) {
@@ -2552,7 +2786,7 @@ void draw_models() {
         if (is_loaded)
             setting("Context", with_commas(sv.n_ctx) + " tokens", "how long a chat can get, as loaded");
     }
-    draw_bottom_bar("↑↓ choose|Enter load|Tab/1-6 pages|T tune|H get helper|S search|C GPU check|B speed test|R rescan");
+    draw_bottom_bar("↑↓ choose|Enter load|Tab/1-7 pages|T tune|H get helper|S search|C GPU check|B speed test|R rescan");
 }
 
 // ---- Settings ----
@@ -2888,6 +3122,21 @@ std::vector<SetRow> settings_rows() {
         r.push_back(x);
     }
     if (tools_shown) {
+        const bool connected = github_signed_in();
+        SetRow x{"Tool: GitHub", !c.tool_github ? "off" : c.github_ask ? "on, asks first" : "on, never asks",
+                 !c.tool_github  ? "the model can't use GitHub"
+                 : !connected    ? "once GitHub is connected (the Connectors page, F7)"
+                 : c.github_ask  ? "the model reads your chosen repositories; a change (a branch, a file, a pull request) waits for your yes"
+                                 : "the model changes your chosen repositories without asking you"};
+        x.change = [save](int d) {
+            const int at = !g->cfg.tool_github ? 0 : g->cfg.github_ask ? 1 : 2, to = (at + (d < 0 ? 2 : 1)) % 3;
+            g->cfg.tool_github = to != 0;
+            g->cfg.github_ask = to != 2;
+            save();
+        };
+        r.push_back(x);
+    }
+    if (tools_shown) {
         SetRow x{"Tool: browser", !c.tool_browser ? "off" : c.browser_ask ? "on, asks first" : "on, never asks",
                  !c.tool_browser  ? "the model can't click through web pages"
                  : c.browser_ask  ? "the model opens pages and follows links by itself; a button or typing waits for your yes"
@@ -3068,7 +3317,7 @@ void draw_settings() {
         s.put(x0 + 2, y, fit("A model's own settings (helper, prompt math, chat memory) are on Models: tested models bring theirs.",
                              w - 4), S(t.dim));
     }
-    draw_bottom_bar(g->editing ? "Enter save|Esc cancel" : "↑↓ choose|←→ change|Tab/1-6 pages|Enter edit");
+    draw_bottom_bar(g->editing ? "Enter save|Esc cancel" : "↑↓ choose|←→ change|Tab/1-7 pages|Enter edit");
 }
 
 // ---- Logs ----
@@ -3105,7 +3354,7 @@ void draw_logs() {
             c = t.accent, a = BOLD;
         s.put(1, y, fit(l, s.w - 2), S(c, a));
     }
-    draw_bottom_bar(g->logs_scroll ? "Tab/1-6 pages|PgUp/PgDn scroll|End follow" : "Tab/1-6 pages|PgUp/PgDn scroll");
+    draw_bottom_bar(g->logs_scroll ? "Tab/1-7 pages|PgUp/PgDn scroll|End follow" : "Tab/1-7 pages|PgUp/PgDn scroll");
 }
 
 // ---- Access ----
@@ -3124,7 +3373,7 @@ void draw_access() {
         s.put(x0 + 2, y, fit("ts5-tui is talking to another machine's TokenStation5 (" + g->cfg.url + ").", w - 4), S(t.fg));
         s.put(x0 + 2, y + 1, fit("Its keys are made on that machine: in ts5-tui there, or on the TV app's Settings page.", w - 4), S(t.dim));
         s.put(x0 + 2, y + 3, fit("The key ts5-tui itself sends there is in Settings (F4): Server's key.", w - 4), S(t.dim));
-        draw_bottom_bar("Tab/1-6 pages");
+        draw_bottom_bar("Tab/1-7 pages");
         return;
     }
     const std::string at = access_addresses();
@@ -3206,11 +3455,36 @@ void draw_access() {
         rows.push_back(r);
     }
     {
-        Row r{"Connect an app", "a new key, as QR codes", "", false, false};
+        // ts5-tui in a web page (ts5 serve's /ts5/terminal), for the
+        // tailnet's devices with a key: from a tablet or a borrowed computer.
+        Row r{"Browser terminal", "", "", k != ACC_TV && g->tn_have, false};
+        if (k == ACC_TV) r.value = "—", r.note = "not from the TV app";
+        else if (!g->tn_have) r.value = "—", r.note = g->tn_why;
+        else if (!g->tn_terminal)
+            r.value = "off", r.note = "on: ts5-tui in a web browser, from your tailnet, with a key";
+        else if (!g->tn_on)
+            r.value = "on", r.note = "once Tailscale is on (above)";
+        else if (g->tn_state == "connected" && !terminal_url().empty())
+            r.value = "on", r.note = terminal_url() + " · Enter: a QR code with a key, for a phone";
+        else
+            r.value = "on", r.note = "once Tailscale is connected";
+        rows.push_back(r);
+    }
+    {
+        Row r{"Connect a phone", "a new key, as QR codes", "", false, false};
         const bool tailnet = g->tn_have && g->tn_state == "connected";
         if (k == ACC_TV) r.value = "on the TV", r.note = "the TV app makes its keys: its Settings page, under Apps";
-        else if (tailnet) r.note = "Enter: your tailnet's address and a new key, as QR codes for a phone";
-        else if (reach) r.note = "Enter: this network's address and a new key, as QR codes for a phone";
+        else if (tailnet && !g->tn_https_url.empty())
+            r.note = "Enter: a key as a QR code; the phone opens the chat page signed in, by HTTPS";
+        else if (tailnet && g->tn_https_state == "admin")
+            r.warn = true, r.note = "Enter: QR code with a key · HTTPS: Tailscale's DNS page, HTTPS Certificates on";
+        else if (tailnet && g->tn_https_state == "getting")
+            r.note = "Enter: a key as a QR code · getting the HTTPS certificate (a minute or two)…";
+        else if (tailnet && g->tn_https_state == "problem")
+            r.warn = true, r.note = "Enter: a key as a QR code (http) · no HTTPS: " +
+                                    (g->tn_https_problem.empty() ? std::string("see Logs (F5)") : g->tn_https_problem);
+        else if (tailnet) r.note = "Enter: a new key in a QR code: the phone opens the chat page signed in (or an app's address)";
+        else if (reach) r.note = "Enter: a new key in a QR code: the phone opens the chat page signed in (this network)";
         else r.note = "other machines can't reach it yet: Other devices, or Tailscale, above";
         rows.push_back(r);
     }
@@ -3233,7 +3507,7 @@ void draw_access() {
     }
     y++;
     if (y >= s.h - 3) {
-        draw_bottom_bar("↑↓ choose|←→ change|N new key|Tab/1-6 pages");
+        draw_bottom_bar("↑↓ choose|←→ change|N new key|Tab/1-7 pages");
         return;
     }
     s.put(x0 + 2, y, "Keys", S(t.fg, BOLD));
@@ -3272,7 +3546,10 @@ void draw_access() {
         s.fill(x0, y, w, 1, Style(t.fg, t.panel2));
         s.put(x0, y, "▌", Style(t.accent, t.panel2));
         const int x = s.put(x0 + 2, y, "A new key for: ", Style(t.fg, t.panel2, BOLD));
-        s.put(x, y, fit(g->acc_name + "▌", w - (x - x0) - 2), Style(t.accent2, t.panel2, BOLD));
+        const int hx = s.put(x, y, fit(g->acc_name + "▌", w - (x - x0) - 2), Style(t.accent2, t.panel2, BOLD));
+        if (g->acc_name.empty())
+            s.put(hx + 1, y, fit("the phone or app it is for (Enter alone: phone)", std::max(0, w - (hx + 1 - x0) - 2)),
+                  Style(t.dim, t.panel2));
         y++;
     }
     if (!g->acc_writable && k != ACC_TV && y < s.h - 2)
@@ -3283,12 +3560,124 @@ void draw_access() {
                   w - 4),
               S(t.warn));
     draw_bottom_bar(g->acc_typing                ? "Enter make the key|Esc cancel"
-                    : g->acc_sel >= kAccRows     ? "↑↓ choose|Enter on or off|D remove|N new key|Tab/1-6 pages"
+                    : g->acc_sel >= kAccRows     ? "↑↓ choose|Enter on or off|D remove|N new key|Tab/1-7 pages"
                     : g->acc_sel == 2 && g->tn_on && g->tn_state == "sign_in"
-                        ? "↑↓ choose|Enter the QR code|←→ on or off|D sign out|N new key|Tab/1-6 pages"
-                    : g->acc_sel == 2 && g->tn_on ? "↑↓ choose|←→ on or off|D sign out|N new key|Tab/1-6 pages"
-                    : g->acc_sel == 4             ? "↑↓ choose|Enter a key and its QR codes|N new key|Tab/1-6 pages"
-                                                  : "↑↓ choose|←→ change|N new key|Tab/1-6 pages");
+                        ? "↑↓ choose|Enter the QR code|←→ on or off|D sign out|N new key|Tab/1-7 pages"
+                    : g->acc_sel == 2 && g->tn_on ? "↑↓ choose|←→ on or off|D sign out|N new key|Tab/1-7 pages"
+                    : g->acc_sel == kAccTerminal && g->tn_terminal && g->tn_state == "connected"
+                        ? "↑↓ choose|Enter the QR code|←→ on or off|N new key|Tab/1-7 pages"
+                    : g->acc_sel == kAccConnect   ? "↑↓ choose|Enter a key and its QR codes|N new key|Tab/1-7 pages"
+                                                  : "↑↓ choose|←→ change|N new key|Tab/1-7 pages");
+}
+
+// ---- Connectors ----
+
+constexpr int kConRows = 3;  // GitHub, its repositories, the model's tool
+
+void draw_connectors() {
+    Screen &s = g->scr;
+    const Theme &t = *g->th;
+    const int w = std::min(s.w - 4, 104);
+    const int x0 = (s.w - w) / 2;
+    int y = body_top() + 1;
+    s.put(x0 + 1, y, "Connectors", S(t.accent, BOLD));
+    s.put(x0 + 13, y, fit("other services the model can work with, signed in with a QR code", w - 14), S(t.dim));
+    y += 2;
+    s.put(x0 + 1, y, "GitHub", S(t.fg, BOLD));
+    y += 1;
+    struct Row {
+        std::string label, value, note;
+        bool change, warn;
+    };
+    std::vector<Row> rows;
+    const bool signing = g->gh_signin.running();
+    {
+        Row r{"Account", "", "", false, false};
+        if (signing && !g->gh_code.empty())
+            r.value = "waiting", r.note = "enter " + g->gh_code + " at " + g->gh_url + " · Enter: the QR code again · X stops";
+        else if (signing)
+            r.value = "asking…", r.note = "GitHub is giving a code";
+        else if (g->gh_signed)
+            r.value = "connected", r.note = "as " + (g->gh_login.empty() ? std::string("?") : g->gh_login) +
+                                            " · D disconnects";
+        else
+            r.value = "not connected", r.note = "Enter: connect with your phone (a QR code and a code to enter)";
+        if (!signing && !g->gh_problem.empty()) r.note = g->gh_problem + " · " + r.note, r.warn = true;
+        rows.push_back(r);
+    }
+    {
+        Row r{"Repositories", "", "", false, false};
+        const int n = github_repo_count();
+        if (!g->gh_signed) r.value = "—", r.note = "once connected: you pick them on GitHub";
+        else if (!g->gh_known) r.value = "…", r.note = "asking GitHub which ones the app may use";
+        else if (n == 0)
+            r.value = "none yet", r.warn = true, r.note = "Enter: pick them on GitHub (a QR code), then come back";
+        else {
+            bool all = false;
+            for (const auto &p : g->gh_places) all = all || p.all;
+            r.value = fmt("%d", n) + (all ? " (all)" : "");
+            r.note = "Enter: change them on GitHub (a QR code)";
+        }
+        rows.push_back(r);
+    }
+    {
+        const Config &c = g->cfg;
+        Row r{"Model's tool", !c.tool_github ? "off" : c.github_ask ? "on, asks first" : "on, never asks", "", true, false};
+        r.note = !c.tool_github  ? "the model can't use GitHub"
+                 : !c.tools_on() ? "all tools are off (/tools on)"
+                 : c.github_ask  ? "reads freely; a change (a branch, a file, a pull request, an issue) waits for your yes"
+                                 : "changes your repositories without asking you";
+        r.warn = c.tool_github && !c.github_ask;
+        rows.push_back(r);
+    }
+    for (int i = 0; i < kConRows && y < s.h - 4; i++) {
+        const bool on = g->con_sel == i;
+        const Style row = on ? Style(t.fg, t.panel2) : Style(t.fg, t.bg);
+        s.fill(x0, y, w, 2, row);
+        s.put(x0, y, on ? "▌" : " ", Style(t.accent, row.bg));
+        s.put(x0, y + 1, on ? "▌" : " ", Style(t.accent, row.bg));
+        s.put(x0 + 2, y, rows[i].label, Style(t.fg, row.bg, BOLD));
+        s.put(x0 + 20, y, fit(rows[i].change ? "‹ " + rows[i].value + " ›" : rows[i].value, w - 22),
+              Style(on ? t.accent2 : t.accent, row.bg, BOLD));
+        s.put(x0 + 20, y + 1, fit(rows[i].note, w - 22), Style(rows[i].warn ? t.warn : t.dim, row.bg, ITALIC));
+        y += 2;
+    }
+    y += 1;
+    // The repositories, by account.
+    if (g->gh_signed && g->gh_known)
+        for (const auto &p : g->gh_places) {
+            if (y >= s.h - 5) break;
+            std::string names;
+            for (const auto &r : p.repos) names += (names.empty() ? "" : "  ") + r.substr(r.find('/') + 1);
+            if ((int)p.repos.size() < p.count) names += fmt("  … %d more", p.count - (int)p.repos.size());
+            s.put(x0 + 2, y, fit(p.account + ":", 18), S(t.fg));
+            s.put(x0 + 20, y++, fit(names.empty() ? "none" : names, w - 22), S(t.dim));
+        }
+    y += 1;
+    std::string about =
+        "The model works on GitHub through the TokenStation5 app, as you: only in the repositories you pick, reading "
+        "code, issues and CI results, and making branches, files, pull requests and issues. It can't change workflow "
+        "files or a repository's settings.";
+    if (!g->gh_file.empty())
+        about += " The sign-in is kept in " + tilde_path(g->gh_file) + ", for you only; the model never sees it.";
+    {
+        std::istringstream in(about);
+        std::string word, line;
+        const auto put = [&] {
+            if (y < s.h - 3) s.put(x0 + 2, y++, line, S(t.dim));
+            line.clear();
+        };
+        while (in >> word) {
+            if (!line.empty() && text_width(line + " " + word) > w - 4) put();
+            line += (line.empty() ? "" : " ") + word;
+        }
+        if (!line.empty()) put();
+    }
+    draw_bottom_bar(g->con_sel == 0 && signing   ? "↑↓ choose|Enter the QR code|X stop|Tab/1-7 pages"
+                    : g->con_sel == 0 && g->gh_signed ? "↑↓ choose|D disconnect|R ask GitHub again|Tab/1-7 pages"
+                    : g->con_sel == 0           ? "↑↓ choose|Enter connect|Tab/1-7 pages"
+                    : g->con_sel == 1           ? "↑↓ choose|Enter pick them on GitHub|R ask GitHub again|Tab/1-7 pages"
+                                                : "↑↓ choose|←→ change|Tab/1-7 pages");
 }
 
 // ---- QR codes (the Access page's) ----
@@ -3371,14 +3760,19 @@ void draw_qr_overlay() {
     };
     // One code at a time (←→ for the next): two side by side, the camera
     // took neither. The roomiest way that fits: full cells with the quiet
-    // zone the standard asks for (4 modules), then half blocks with 4,
-    // then the code alone with the keys under it, over the bottom bar (an
-    // 80x24 terminal), then the same with a border of 2. Less than 2 and
-    // a phone's camera may not find it: the window is asked to be taller.
+    // zone the standard asks for (4 modules), then the code alone with the
+    // keys under it, over the bottom bar, then the same with a border of 2.
+    // Only then half blocks (an 80x24 terminal), in the same order: Apple's
+    // Terminal draws a half block as a thin line, and its code can't be
+    // read (an iPhone failed on both), so a line in red above and under
+    // such a code says how to get full cells. Less than 2 and a phone's
+    // camera may not find it: the window is asked to be taller.
     static const struct {
         int quiet;
         bool big, bare;
-    } kWays[] = {{4, true, false}, {4, false, false}, {4, false, true}, {2, false, false}, {2, false, true}};
+    } kWays[] = {{4, true, false},  {4, true, true},  {2, true, false},  {2, true, true},
+                 {4, false, false}, {4, false, true}, {2, false, false}, {2, false, true}};
+    const std::string kFull = "Can't scan it? Make this window full screen (or Cmd+minus).";
     int quiet = 4, tallest = 0, widest = 0, box_w = 0, box_h = 0;
     bool big = false, bare = false, fits = false;
     std::vector<std::string> lines;
@@ -3391,13 +3785,14 @@ void draw_qr_overlay() {
         }
         box_w = std::min(s.w - 2, std::max(widest + 6, 72));
         lines = bare ? std::vector<std::string>{} : wrap(g->qr_notes, box_w - 4);
-        box_h = 2 + (labels ? 1 : 0) + tallest + (int)lines.size() + 1 + (bare ? 0 : 2);
+        box_h = 2 + (labels ? 1 : 0) + tallest + (g->qr_copy ? 1 : 0) + (int)lines.size() + 1 + (bare ? 0 : 2) +
+                (big ? 0 : 2);
         fits = box_h <= (bare ? s.h : s.h - 1) && widest + 4 <= box_w;
         if (fits) break;
     }
     if (!fits) {
         lines = wrap(g->qr_notes, box_w - 4);
-        box_h = std::min(s.h - 1, 2 + 2 + (int)lines.size() + 2);
+        box_h = std::min(s.h - 1, 2 + 2 + (g->qr_copy ? (int)g->qr.size() + 1 : 0) + (int)lines.size() + 2);
     }
     const bool side_by_side = false;
     const int x = (s.w - box_w) / 2, y = std::max(0, (s.h - box_h) / 2);
@@ -3406,10 +3801,33 @@ void draw_qr_overlay() {
     const std::string title = fits && bare && !g->qr_short.empty() ? " " + g->qr_short + " " : g->qr_title;
     box(s, x, y, box_w, box_h, Style(t.accent, t.panel2), Style(t.fg, t.panel2), title, Style(t.accent, t.panel2, BOLD));
     int ty = y + 1;
+    // A value under its code (or, with no room for a code, each one): the
+    // whole of it where it fits, and a tap on the row copies it all.
+    g->qr_value_rows.clear();
+    const auto value_line = [&](int i, bool named) {
+        const App::Qr &q = g->qr[(size_t)i];
+        std::string v = named && !q.label.empty() ? q.label + "  " : "";
+        const int room = box_w - 4, vw = text_width(v) + text_width(q.data);
+        const std::string tap = vw + 14 <= room ? "  tap to copy" : "";
+        int lx = x + 2 + std::max(0, (room - vw - text_width(tap)) / 2);
+        if (!v.empty()) lx = s.put(lx, ty, v, Style(t.fg, t.panel2, BOLD));
+        lx = s.put(lx, ty, fit(q.data, std::max(1, x + box_w - 2 - lx)), Style(t.accent2, t.panel2, UNDER));
+        if (!tap.empty()) s.put(lx, ty, tap, Style(t.dim, t.panel2));
+        g->qr_value_rows.push_back({ty++, i});
+    };
     if (!fits) {
-        s.put(x + 2, ty, fit("Make the window taller to see the QR code (V shows it as text).", box_w - 4), Style(t.warn, t.panel2));
+        s.put(x + 2, ty, fit("Make the window taller to see the QR code (on a Mac: full screen, or Cmd+minus). V shows it as text.", box_w - 4), Style(t.warn, t.panel2));
         ty += 2;
+        if (g->qr_copy) {
+            for (int i = 0; i < (int)g->qr.size(); i++) value_line(i, true);
+            ty++;
+        }
     } else {
+        const auto full_warning = [&] {
+            const std::string w = fit(kFull, box_w - 4);
+            s.put(x + std::max(2, (box_w - text_width(w)) / 2), ty++, w, Style(t.bad, t.panel2, BOLD));
+        };
+        if (!big) full_warning();
         std::vector<int> shown;
         if (side_by_side)
             for (int i = 0; i < (int)codes.size(); i++) shown.push_back(i);
@@ -3428,7 +3846,10 @@ void draw_qr_overlay() {
             else qr_draw(s, cx, ty + (labels ? 1 : 0), m, quiet, big);
             cx += qr_cols(m, quiet, big) + 4;
         }
-        ty += (labels ? 1 : 0) + tallest + (bare ? 0 : 1);
+        ty += (labels ? 1 : 0) + tallest;
+        if (g->qr_copy) value_line(shown[0], false);
+        if (!big) full_warning();
+        ty += bare ? 0 : 1;
     }
     // The sign-in link on a line of its own, whole (a terminal opens a
     // link it sees: Cmd+click in Apple's Terminal), and a click copies it.
@@ -3443,18 +3864,23 @@ void draw_qr_overlay() {
         const int lx = s.put(x + 2, ty, l.substr(0, at), Style(t.dim, t.panel2));
         s.put(lx, ty++, g->tn_sign_in, Style(t.accent2, t.panel2, UNDER));
     }
-    int bx = s.put(x + 2, y + box_h - 2, "Esc", Style(t.accent2, t.panel2, BOLD));
-    bx = s.put(bx, y + box_h - 2, " close   ", Style(t.dim, t.panel2));
-    if (g->qr_sign_in) {
-        bx = s.put(bx, y + box_h - 2, "C", Style(t.accent2, t.panel2, BOLD));
-        bx = s.put(bx, y + box_h - 2, fits && bare ? " copies the link   " : " or a click on the link copies it   ",
-                   Style(t.dim, t.panel2));
-    } else if (g->qr.size() > 1) {
-        bx = s.put(bx, y + box_h - 2, "←→", Style(t.accent2, t.panel2, BOLD));
-        bx = s.put(bx, y + box_h - 2, " the next code   ", Style(t.dim, t.panel2));
+    // The keys, in words where they fit the box, in a few where not (a phone).
+    std::vector<std::array<std::string, 3>> keys = {{"Esc", " close", " close"}};
+    if (g->qr_sign_in) keys.push_back({"C", fits && bare ? " copies the link" : " or a click on the link copies it", " copy"});
+    else if (g->qr_github) keys.push_back({"C", " copies the code", " copy"});
+    else {
+        if (g->qr.size() > 1) keys.push_back({"←→", " the next code", " next"});
+        if (g->qr_copy) keys.push_back({"C", " or a tap copies it", " copy"});
     }
-    bx = s.put(bx, y + box_h - 2, "V", Style(t.accent2, t.panel2, BOLD));
-    s.put(bx, y + box_h - 2, g->qr_sign_in ? " as text" : " as text, to copy", Style(t.dim, t.panel2));
+    keys.push_back({"V", g->qr_sign_in || g->qr_copy ? " as text" : " as text, to copy", " text"});
+    int long_w = 0;
+    for (const auto &k : keys) long_w += text_width(k[0]) + text_width(k[1]) + 3;
+    const bool few = long_w - 3 > box_w - 4;
+    int bx = x + 2;
+    for (const auto &k : keys) {
+        bx = s.put(bx, y + box_h - 2, k[0], Style(t.accent2, t.panel2, BOLD));
+        bx = s.put(bx, y + box_h - 2, (few ? k[2] : k[1]) + (few ? "  " : "   "), Style(t.dim, t.panel2));
+    }
 }
 
 // ---- Chat (drawing in chat.cpp) ----
@@ -3473,7 +3899,175 @@ void draw_chat() {
                     : g->chat.busy() ? (g->chat.queued.empty() ? "Enter steer it|Tab queue a message|Esc stop|PgUp/PgDn scroll|Ctrl+T thoughts"
                                                              : "Enter steer it|Tab queue another|↑ take the last back|Esc stop|PgUp/PgDn scroll")
                     : !g->chat.queued.empty() ? "Enter send the queued|Esc drop them|↑ take the last back|PgUp/PgDn scroll"
-                                   : "Enter send|Tab next page|Ctrl+Y copy|Ctrl+T thoughts|Ctrl+N new chat|Ctrl+J new line|PgUp/PgDn scroll");
+                                   : "Enter send|Ctrl+O chats|Ctrl+N new chat|Tab next page|Ctrl+Y copy|Ctrl+T thoughts|Ctrl+J new line|PgUp/PgDn scroll");
+}
+
+// ---- the chats ----
+
+bool global_key(const Event &e);
+
+void chats_open(const std::string &query) {
+    g->chat_list = list_chats(query);
+    g->chats_query = query;
+    g->chats_on = true;
+    g->chats_sel = 0;
+    g->chats_top = 0;
+    // The open one chosen, so Enter alone changes nothing.
+    for (size_t i = 0; i < g->chat_list.size(); i++)
+        if (g->chat_list[i].mine && g->chat_list[i].id == g->chat.saved_id) g->chats_sel = (int)i + 1;
+}
+
+// Opens row: 0 a new chat, else that saved chat. The chat that was open is
+// saved first (chat_new), and the model gets only the opened chat's
+// messages from then on: every request carries the chat it is for, whole.
+void chats_take(int row) {
+    g->chats_on = false;
+    Chat &c = g->chat;
+    if (row <= 0 || row > (int)g->chat_list.size()) {
+        chat_new(c);
+        g->answers_saved = c.answers;
+        show_toast("A new chat: the model gets nothing from the others", g->th->good, 3);
+        return;
+    }
+    const SavedChat s = g->chat_list[(size_t)row - 1];
+    if (s.mine && s.id == c.saved_id) return;  // open already
+    std::string why;
+    if (load_chat(c, s, why)) {
+        g->answers_saved = c.answers;
+        show_toast("Opened: " + s.title, g->th->good, 3);
+    } else {
+        show_toast(why, g->th->bad, 6);
+    }
+}
+
+void chats_delete(int row) {
+    if (row <= 0 || row > (int)g->chat_list.size()) return;
+    const SavedChat s = g->chat_list[(size_t)row - 1];
+    if (!s.mine) {
+        show_toast("That one is the TV app's chat: delete it on the TV", g->th->warn, 5);
+        return;
+    }
+    const bool open = s.id == g->chat.saved_id;
+    g->ask_title = " Delete this chat? ";
+    g->ask_text = "\"" + s.title + "\" (" + std::to_string(s.messages) + (s.messages == 1 ? " message, " : " messages, ") +
+                  when_text(s.updated) + ") goes for good." +
+                  (open ? " It is the chat open now: an empty one takes its place." : "");
+    g->ask_yes = [s, open] {
+        if (open) {
+            // Emptied first, so leaving it saves nothing again.
+            Chat &c = g->chat;
+            chat_stop(c);
+            {
+                std::lock_guard<std::mutex> l(c.mu);
+                c.msgs.clear();
+                c.saved_id.clear();
+            }
+            chat_new(c);
+            g->answers_saved = c.answers;
+        }
+        std::string why;
+        if (delete_chat(s, why)) show_toast("Deleted: " + s.title, g->th->dim, 3);
+        else show_toast(why, g->th->bad, 6);
+        g->chat_list = list_chats(g->chats_query);
+        g->chats_sel = std::min(g->chats_sel, (int)g->chat_list.size());
+    };
+}
+
+void chats_key(const Event &e) {
+    const int n = (int)g->chat_list.size() + 1;
+    const bool letter = e.key == K_CHAR && e.ch.size() == 1;
+    const char ch = letter ? (char)tolower(e.ch[0]) : 0;
+    int &sel = g->chats_sel;
+    if (e.key == K_ESC || (e.key == K_CTRL && e.ch == "o")) g->chats_on = false;
+    else if (e.key == K_UP) sel = (sel + n - 1) % n;
+    else if (e.key == K_DOWN) sel = (sel + 1) % n;
+    else if (e.key == K_PGUP) sel = std::max(0, sel - 10);
+    else if (e.key == K_PGDN) sel = std::min(n - 1, sel + 10);
+    else if (e.key == K_HOME) sel = 0;
+    else if (e.key == K_END) sel = n - 1;
+    else if (e.key == K_ENTER) chats_take(sel);
+    else if (ch == 'n' || (e.key == K_CTRL && e.ch == "n")) chats_take(0);
+    else if (ch == 'd' || e.key == K_DELETE) chats_delete(sel);
+    else if ((e.key >= K_F1 && e.key <= K_F7) || e.key == K_ALT || (e.key == K_CTRL && (e.ch == "q" || e.ch == "c"))) {
+        g->chats_on = false;
+        global_key(e);
+    }
+}
+
+// A click: a row opens it, its ✕ deletes it (asked first), outside closes.
+void chats_click(int x, int y) {
+    for (const auto &h : g->chats_hits) {
+        if (y != h.y || x < h.x0 || x >= h.x1) continue;
+        g->chats_sel = h.row;
+        if (h.del_x && x >= h.del_x - 1) chats_delete(h.row);
+        else chats_take(h.row);
+        return;
+    }
+    if (g->chats_hits.empty()) return;
+    const int x0 = g->chats_hits[0].x0 - 2, x1 = g->chats_hits[0].x1 + 2;
+    if (x < x0 || x >= x1) g->chats_on = false;
+}
+
+void draw_chats_overlay() {
+    Screen &s = g->scr;
+    const Theme &t = *g->th;
+    const int w = std::min(s.w - 2, 100), x = (s.w - w) / 2, y = body_top();
+    const int h = std::max(8, s.h - 1 - y);
+    const std::string title =
+        g->chats_query.empty() ? " Chats " : " Chats with \"" + fit(g->chats_query, std::max(4, w / 3)) + "\" ";
+    box(s, x, y, w, h, Style(t.accent, t.panel2), Style(t.fg, t.panel2), title, Style(t.accent, t.panel2, BOLD));
+    s.put(x + 2, y + 1,
+          fit("Each chat is its own conversation: the model gets the open chat's messages, and nothing from the others.",
+              w - 4),
+          Style(t.dim, t.panel2));
+    const int top = y + 3, vis = std::max(1, h - 6), n = (int)g->chat_list.size() + 1;
+    int &sel = g->chats_sel, &first = g->chats_top;
+    sel = std::max(0, std::min(sel, n - 1));
+    if (sel < first) first = sel;
+    if (sel >= first + vis) first = sel - vis + 1;
+    first = std::max(0, std::min(first, std::max(0, n - vis)));
+    g->chats_hits.clear();
+    for (int r = first; r < n && r < first + vis; r++) {
+        const int ry = top + r - first;
+        const bool on = r == sel;
+        const Style row = on ? Style(t.bg, t.accent, BOLD) : Style(t.fg, t.panel2);
+        const Style dim = on ? Style(t.bg, t.accent) : Style(t.dim, t.panel2);
+        s.fill(x + 2, ry, w - 4, 1, on ? Style(t.bg, t.accent) : Style(t.fg, t.panel2));
+        s.put(x + 2, ry, on ? "▸" : " ", Style(on ? t.bg : t.accent, on ? t.accent : t.panel2, BOLD));
+        if (r == 0) {
+            s.put(x + 4, ry, "+ New chat", on ? row : Style(t.accent2, t.panel2, BOLD));
+            g->chats_hits.push_back({ry, x + 2, x + w - 2, 0, 0});
+            continue;
+        }
+        const SavedChat &c = g->chat_list[(size_t)r - 1];
+        const bool open = c.mine && c.id == g->chat.saved_id;
+        const std::string right = when_text(c.updated) + fmt(" · %d", c.messages) +
+                                  (c.messages == 1 ? " message" : " messages") + (open ? " · open" : "") +
+                                  (c.mine ? "" : " · on the TV");
+        const int del_x = c.mine ? x + w - 5 : 0;
+        const int rw = text_width(right);
+        const int right_x = x + w - 4 - (c.mine ? 3 : 0) - rw;
+        const int title_w = std::max(8, right_x - (x + 4) - 2);
+        s.put(x + 4, ry, fit(c.title, title_w), open && !on ? Style(t.accent2, t.panel2, BOLD) : row);
+        if (right_x > x + 4 + 10) s.put(right_x, ry, right, dim);
+        if (c.mine) s.put(del_x, ry, "✕", on ? Style(t.bg, t.accent, BOLD) : Style(t.bad, t.panel2, BOLD));
+        g->chats_hits.push_back({ry, x + 2, x + w - 2, del_x, r});
+    }
+    if (n == 1)
+        s.put(x + 4, top + 2, fit("No saved chats yet: each one is kept from its first answer on.", w - 8),
+              Style(t.dim, t.panel2));
+    if (n > vis) {
+        const std::string more = fmt("%d-%d of %d", first + 1, std::min(n, first + vis), n);
+        s.put(x + w - 3 - text_width(more), y + h - 3, more, Style(t.dim, t.panel2));
+    }
+    int bx = x + 2;
+    const int by = y + h - 2;
+    for (auto &k : std::vector<std::pair<std::string, std::string>>{
+             {"↑↓", " choose   "}, {"Enter", " open   "}, {"D", " delete   "}, {"N", " new chat   "}, {"Esc", " close"}}) {
+        if (bx + text_width(k.first + k.second) > x + w - 2) break;
+        bx = s.put(bx, by, k.first, Style(t.accent2, t.panel2, BOLD));
+        bx = s.put(bx, by, k.second, Style(t.dim, t.panel2));
+    }
 }
 
 void draw() {
@@ -3493,8 +4087,10 @@ void draw() {
         case SETTINGS: draw_settings(); break;
         case LOGS: draw_logs(); break;
         case ACCESS: draw_access(); break;
+        case CONNECTORS: draw_connectors(); break;
         default: break;
     }
+    if (g->chats_on && g->cur == CHAT) draw_chats_overlay();
     if (!g->qr.empty()) draw_qr_overlay();
     if (g->ask_yes || !g->pick.empty()) {
         const Theme &t = *g->th;
@@ -3570,6 +4166,8 @@ const ModelFile *find_model(const std::string &q) {
 }
 
 void request_quit();
+void feedback_start(const std::string &summary);
+void feedback_follow();
 void copy_out(const std::string &text, const std::string &what);
 bool to_clipboard(const std::string &text);
 void view_open(const std::string &text, const std::string &title, size_t at, bool sent);
@@ -3596,6 +4194,8 @@ void run_command(const std::string &line) {
     else if (cmd == "/settings") go(SETTINGS);
     else if (cmd == "/logs") go(LOGS);
     else if (cmd == "/access" || cmd == "/keys") go(ACCESS);
+    else if (cmd == "/connectors" || cmd == "/github") go(CONNECTORS);
+    else if (cmd == "/feedback" || cmd == "/bug") feedback_start(arg);
     else if (cmd == "/model") {
         scan_models();
         if (arg.empty()) {
@@ -3676,26 +4276,15 @@ void run_command(const std::string &line) {
             g->model_sel = std::max(0, (int)g->models.size() + (int)catalog_missing().size() - 1);
         }
     } else if (cmd == "/chats") {
-        g->chat_list = list_chats(arg);
-        if (g->chat_list.empty()) {
-            chat_note(c, arg.empty() ? "No saved chats yet. Every chat is kept from its first answer on."
-                                     : "No saved chat has **" + arg + "**.");
+        // The list over the chat (Ctrl+O): open, delete, new.
+        if (!arg.empty() && list_chats(arg).empty()) {
+            show_toast("No saved chat has \"" + arg + "\"", g->th->warn, 4);
             return;
         }
-        std::string l = arg.empty() ? "**Saved chats**, newest first. `/open N` opens one.\n"
-                                    : "**Saved chats with " + arg + "**. `/open N` opens one.\n";
-        const int shown = std::min(20, (int)g->chat_list.size());
-        for (int i = 0; i < shown; i++) {
-            const SavedChat &x = g->chat_list[i];
-            l += fmt("%2d. ", i + 1) + x.title + "  · " + when_text(x.updated) + fmt(" · %d messages", x.messages) +
-                 (x.mine ? "" : " · on the TV") + (x.mine && x.id == c.saved_id ? " · this one" : "") + "\n";
-        }
-        if ((int)g->chat_list.size() > shown)
-            l += fmt("…and %d older. `/chats TEXT` finds one.\n", (int)g->chat_list.size() - shown);
-        chat_note(c, l);
+        chats_open(arg);
     } else if (cmd == "/open") {
         if (arg.empty()) {
-            chat_note(c, "`/open N`: a number from `/chats`, or `/open TEXT` for the newest chat that has TEXT.");
+            chat_note(c, "`/open TEXT` opens the newest saved chat that has TEXT (`/open N`: the Nth newest). Ctrl+O lists them all.");
             return;
         }
         const int k = atoi(arg.c_str());
@@ -3715,7 +4304,7 @@ void run_command(const std::string &line) {
             }
         }
         if (!ok) {
-            show_toast("No such chat: `/chats` lists them", g->th->warn, 4);
+            show_toast("No such chat: Ctrl+O lists them", g->th->warn, 4);
             return;
         }
         std::string why;
@@ -3752,6 +4341,8 @@ void run_command(const std::string &line) {
             {"memory", "keeps notes when you ask it to remember, and sees them in every chat (`/memory`)", &f.tool_memory},
             {"browser", "opens web pages and clicks through them: links by itself, a button or typing only after your yes "
                         "(`/browser` picks the program)", &f.tool_browser},
+            {"github", "reads the GitHub repositories you chose and, after your yes, makes branches, writes files and "
+                       "opens pull requests and issues (once GitHub is connected: `/connectors`)", &f.tool_github},
         };
         const size_t sp = arg.find(' ');
         const std::string name = arg.substr(0, sp), to = sp == std::string::npos ? "" : unpad(arg.substr(sp + 1));
@@ -3762,12 +4353,13 @@ void run_command(const std::string &line) {
             c.ask_always = false;
             c.ask_always_browser = false;
             c.ask_always_files = false;
+            c.ask_always_github = false;
             {
                 std::lock_guard<std::mutex> l(c.mu);
                 c.read_dirs.clear();
                 c.mcp_ok.clear();
             }
-            f.terminal_ask = f.browser_ask = f.files_ask = true;
+            f.terminal_ask = f.browser_ask = f.files_ask = f.github_ask = true;
             f.save();
             for (auto &sv : mcp_servers()) {
                 std::string why;
@@ -3795,6 +4387,7 @@ void run_command(const std::string &line) {
             bool *ask = r.on == &f.tool_terminal  ? &f.terminal_ask
                         : r.on == &f.tool_browser ? &f.browser_ask
                         : r.on == &f.tool_files   ? &f.files_ask
+                        : r.on == &f.tool_github  ? &f.github_ask
                                                   : nullptr;
             found = true;
             const bool browser_was = f.tool_browser;
@@ -3826,7 +4419,7 @@ void run_command(const std::string &line) {
         }
         if (!found) {
             std::string h = "**The model's tools**  (`/tools NAME on` or `off`; `/tools terminal allow` or `ask`, the same for "
-                            "`files` and `browser`; `/tools off` takes them all away, `/tools on` gives them back; or "
+                            "`files`, `browser` and `github`; `/tools off` takes them all away, `/tools on` gives them back; or "
                             "Settings)\n";
             if (!f.tools_on())
                 h += f.no_tools ? "**All tools are off for this run** (ts5-tui was started with --no-tools).\n"
@@ -3835,6 +4428,7 @@ void run_command(const std::string &line) {
                 const bool *ask = r.on == &f.tool_terminal  ? &f.terminal_ask
                                   : r.on == &f.tool_browser ? &f.browser_ask
                                   : r.on == &f.tool_files   ? &f.files_ask
+                                  : r.on == &f.tool_github  ? &f.github_ask
                                                             : nullptr;
                 h += std::string("`") + r.name + "`  **" + (!*r.on ? "off" : ask && !*ask ? "on, never asks" : "on") + "**  " +
                      r.what + (*r.on && ask && !*ask ? "  **The question is switched off** (`/tools ask` brings it back)." : "") +
@@ -4230,7 +4824,8 @@ void run_command(const std::string &line) {
             h += std::string("`") + k.name + (*k.args ? std::string(" ") + k.args : "") + "`  " + k.what + "\n";
         h += "\n**Keys**  Enter send (while an answer is coming: the message waits and is sent after it; ↑ takes the "
              "last one back) · Ctrl+J or Alt+Enter new line · ↑↓ history · Tab completes · Esc stops an answer · "
-             "Ctrl+T thinking · Ctrl+Y copy the last answer · Ctrl+N new chat (this one is kept: `/chats`) · PgUp/PgDn "
+             "Ctrl+T thinking · Ctrl+Y copy the last answer · Ctrl+N new chat (this one is kept) · Ctrl+O your chats, "
+             "to open, delete or start one (each is its own conversation: the model gets the open chat alone) · PgUp/PgDn "
              "scroll · Ctrl+Q, `exit` or `q` quits\n\n"
              "**A full chat**  when the model's memory for the chat (its context) is nearly full, the model writes a "
              "summary of it and the chat goes on from that, with room again; everything stays here to read. `/compact` "
@@ -4286,15 +4881,19 @@ void go(ScreenId to) {
         g->acc_sel = 0;
         access_read();
     }
+    if (to == CONNECTORS) {
+        g->con_sel = 0;
+        github_read(true);
+    }
 }
 
 bool global_key(const Event &e) {
     // Keys every screen has.
-    if (e.key >= K_F1 && e.key <= K_F6) {
+    if (e.key >= K_F1 && e.key <= K_F7) {
         go((ScreenId)(e.key - K_F1));
         return true;
     }
-    if (e.key == K_ALT && e.ch.size() == 1 && e.ch[0] >= '1' && e.ch[0] <= '6') {
+    if (e.key == K_ALT && e.ch.size() == 1 && e.ch[0] >= '1' && e.ch[0] <= '7') {
         go((ScreenId)(e.ch[0] - '1'));
         return true;
     }
@@ -4313,6 +4912,11 @@ bool global_key(const Event &e) {
         request_quit();
         return true;
     }
+    if (e.key == K_CTRL && e.ch == "o") {  // the chats, from any page
+        go(CHAT);
+        chats_open("");
+        return true;
+    }
     return false;
 }
 
@@ -4326,7 +4930,7 @@ bool nav_key(const Event &e) {
         g->chat.cur = 1;
         return true;
     }
-    if (c >= '1' && c <= '6') {
+    if (c >= '1' && c <= '7') {
         go((ScreenId)(c - '1'));
         return true;
     }
@@ -4543,7 +5147,8 @@ void access_new(const std::string &name) {
     if (tailnet) {
         text += "In the app, as an OpenAI-compatible server, on a device on your tailnet (Tailscale on):\n  address  " +
                 g->tn_url + "\n  API key  the key above\n";
-        if (!g->tn_name_url.empty()) text += "  (or by name, where your tailnet has MagicDNS: " + g->tn_name_url + ")\n";
+        if (!g->tn_https_url.empty()) text += "  (or by name, over HTTPS: " + g->tn_https_url + "/v1)\n";
+        else if (!g->tn_name_url.empty()) text += "  (or by name, where your tailnet has MagicDNS: " + g->tn_name_url + ")\n";
         if (reach && !at.empty()) text += "\nOn this network, without Tailscale: " + at + "\n";
     } else if (!reach) {
         text += "Other machines can't reach the model yet: Access (F6), Other devices or Tailscale.\n";
@@ -4553,24 +5158,50 @@ void access_new(const std::string &name) {
         text += "In the app, as an OpenAI-compatible server:\n  address  " + at + "\n  API key  the key above\n";
     }
     const bool sent = to_clipboard(key);
+    // Codes that carry the key (after #, which no server is sent): the
+    // phone's camera opens the chat page, or the browser terminal, signed
+    // in, with nothing to type. Then the address and the key, for an app.
+    std::string base = url;
+    if (base.size() > 3 && base.compare(base.size() - 3, 3, "/v1") == 0) base.resize(base.size() - 3);
+    if (tailnet) base = pages_base();
+    const bool term = tailnet && g->tn_terminal && k != ACC_TV;
     g->toast.clear();
     g->qr.clear();
-    if (!url.empty()) g->qr.push_back({"Address", url});
+    if (!base.empty()) {
+        g->qr.push_back({"Chat page", base + "/#key=" + key});
+        // The browser terminal first when it is on: all of ts5-tui (models,
+        // settings, fans, keys); the chat page is a chat only.
+        if (term) g->qr.insert(g->qr.begin(), App::Qr{"Browser terminal: all of ts5-tui", base + "/ts5/terminal#key=" + key});
+        g->qr.push_back({"Address, for an app", url});
+    }
     g->qr.push_back({"API key", key});
+    g->acc_for_terminal = false;
     g->qr_sel = 0;
-    g->qr_sign_in = false;
-    g->qr_title = " Connect an app: " + j["name"].str() + " ";
+    g->qr_sign_in = g->qr_github = g->qr_install = false;
+    g->qr_copy = true;
+    g->qr_title = " Connect " + j["name"].str() + " ";
     g->qr_notes.clear();
-    if (!url.empty())
-        g->qr_notes.push_back("In the app, as an OpenAI-compatible server: scan the address, then the key. " +
-                              std::string(tailnet ? "The device needs Tailscale on, signed in to your tailnet."
-                                                  : "It works on this network only (Tailscale, above, reaches it from anywhere)."));
-    else
+    if (!base.empty()) {
+        const std::string first = term ? "the browser terminal (all of ts5-tui: models, settings, fans, keys)"
+                                       : "the chat page";
+        const std::string other = term ? "the chat page (a chat only, light on a phone), " : "";
+        g->qr_notes.push_back("Scan it with the phone's camera: " + first + " opens, signed in with this key. " +
+                              (tailnet ? "The phone needs Tailscale on." : "On this network only (Tailscale, above, reaches it from anywhere).") +
+                              " ←→ for " + other + "the address and the key, for an app (OpenAI-compatible).");
+    } else {
         g->qr_notes.push_back("Other machines can't reach the model yet (Other devices or Tailscale, above): the key is "
                               "ready for when they can.");
+    }
     g->qr_notes.push_back(std::string("Shown this once: ts5 keeps only its SHA-256.") +
-                          (sent ? " The key alone is on the clipboard too, if the terminal allows it." : ""));
-    g->qr_short = url.empty() ? "The new key, shown this once" : "The address, then the key: shown this once";
+                          (sent ? " The key alone is on the clipboard too, if the terminal allows it." : "") +
+                          " A tap on the text under a code copies it.");
+    g->qr_short = base.empty() ? "The new key, shown this once"
+                                : std::string("Scan it: ") + (term ? "the browser terminal" : "the chat page") + ", signed in";
+    if (!base.empty()) {
+        text += "\nOn a phone or tablet" + std::string(tailnet ? " with Tailscale on" : "") + ", these open signed in:\n  chat page  " +
+                base + "/#key=" + key + "\n";
+        if (term) text += "  terminal   " + base + "/ts5/terminal#key=" + key + "\n";
+    }
     g->qr_plain = text;
     g->qr_plain_title = "the new key";
 }
@@ -4579,12 +5210,12 @@ void key_access(const Event &e) {
     if (g->acc_typing) {
         if (e.key == K_ESC) {
             g->acc_typing = g->editing = false;
+            g->acc_for_terminal = false;
         } else if (e.key == K_ENTER) {
             g->acc_typing = g->editing = false;
             std::string name = g->acc_name;
             while (!name.empty() && name.back() == ' ') name.pop_back();
-            if (name.empty()) show_toast("A key needs a name: the app or the machine it is for", g->th->warn, 5);
-            else access_new(name);
+            access_new(name.empty() ? "phone" : name);
         } else if (e.key == K_BACKSPACE) {
             auto gl = glyphs(g->acc_name);
             if (!gl.empty()) g->acc_name.resize(g->acc_name.size() - gl.back().s.size());
@@ -4610,12 +5241,13 @@ void key_access(const Event &e) {
         g->acc_sel = (g->acc_sel + 1) % n;
     } else if (letter('r')) {
         access_read();
-    } else if (letter('n') || (e.key == K_ENTER && g->acc_sel == 4)) {
+    } else if (letter('n') || (e.key == K_ENTER && g->acc_sel == kAccConnect)) {
         if (k == ACC_TV) show_toast("The TV app makes its keys: its Settings page, under Apps", g->th->warn, 6);
         else if (!g->acc_err.empty()) show_toast(g->acc_err, g->th->bad, 6);
         else {
             g->acc_typing = g->editing = true;  // (Tab and the page keys stay with the name)
             g->acc_name.clear();
+            g->acc_for_terminal = false;
         }
     } else if (flip && g->acc_sel == 0) {
         if (k != ACC_OWN) {
@@ -4679,6 +5311,26 @@ void key_access(const Event &e) {
                                             : "SSH via Tailscale: on. Your tailnet's devices reach this machine's SSH",
                        g->tn_ssh && g->tn_ssh_server ? g->th->good : g->tn_ssh ? g->th->warn : g->th->dim, 7);
         }
+    } else if (flip && g->acc_sel == kAccTerminal) {
+        if (k == ACC_TV) {
+            show_toast("The TV app has no browser terminal", g->th->warn, 5);
+        } else if (!g->tn_have) {
+            show_toast("Tailscale: " + g->tn_why, g->th->warn, 8);
+        } else if (e.key == K_ENTER && g->tn_terminal && g->tn_state == "connected" && !terminal_url().empty()) {
+            // A key comes with it, inside the code: the phone opens it signed in.
+            if (!g->acc_err.empty()) {
+                show_toast(g->acc_err, g->th->bad, 6);
+            } else {
+                g->acc_typing = g->editing = true;
+                g->acc_name.clear();
+                g->acc_for_terminal = true;
+            }
+        } else if (tailnet_post(g->tn_terminal ? "{\"terminal\":false}" : "{\"terminal\":true}")) {
+            show_toast(!g->tn_terminal                 ? "Browser terminal: off. Any open in a browser have closed"
+                       : g->tn_state != "connected"    ? "Browser terminal: on, once Tailscale is connected"
+                                                       : "Browser terminal: on. Enter: a QR code for your phone, with a key in it",
+                       g->tn_terminal ? g->th->good : g->th->dim, 7);
+        }
     } else if (letter('d') && g->acc_sel == 2) {
         if (k == ACC_TV || !g->tn_have) return;
         if (!g->tn_on && g->tn_state != "connected") {
@@ -4728,13 +5380,22 @@ void key_chat(const Event &e) {
 // Clicks come to ts5-tui, or the terminal keeps the mouse for its own
 // selection. In ts5's own tmux session tmux has the mouse first, and hands
 // clicks on only while its own mouse option is on.
+// Inside tmux, its mouse goes too: with it on, a drag is tmux's own
+// selection, which it drops the moment the button comes up (copied where
+// the terminal takes OSC 52, lost where not: Apple's Terminal). ts5's own
+// tmux has it off and on for all; anyone else's, for this session only
+// while off, then back to what it was.
 void set_mouse(bool on) {
     term_mouse(on);
-    if (!getenv("TS5_TUI_TMUX")) return;
+    const char *pane = getenv("TMUX_PANE");
+    if (!getenv("TS5_TUI_TMUX") && !(getenv("TMUX") && pane && *pane)) return;
     const std::string tmux = which("tmux");
     if (tmux.empty()) return;
-    const std::string cmd = shell_quote(tmux) + " set -g mouse " + (on ? "on" : "off") + " > /dev/null 2>&1";
-    if (system(cmd.c_str()) != 0) return;
+    const std::string cmd =
+        getenv("TS5_TUI_TMUX") ? shell_quote(tmux) + " set -g mouse " + (on ? "on" : "off")
+        : on                   ? shell_quote(tmux) + " set -u -t " + shell_quote(pane) + " mouse"
+                               : shell_quote(tmux) + " set -t " + shell_quote(pane) + " mouse off";
+    if (system((cmd + " > /dev/null 2>&1").c_str()) != 0) return;
 }
 
 std::string base64(const std::string &in) {
@@ -4815,7 +5476,8 @@ void view_draw() {
     g->view_top = std::max(0, std::min(g->view_top, n - body));
     // Line wrap on: a long line is written whole and the terminal wraps it.
     std::string out = "\x1b[0m\x1b[?7h\x1b[2J\x1b[1;1H\x1b[7m";
-    std::string head = " Select with the mouse, then copy: Cmd+C on a Mac, Ctrl+Shift+C elsewhere · Esc goes back ";
+    std::string head = !g->view_head.empty() ? g->view_head
+                       : " Select with the mouse, then copy: Cmd+C on a Mac, Ctrl+Shift+C elsewhere · Esc goes back ";
     head = fit(head, w);
     out += head + std::string(std::max(0, w - text_width(head)), ' ') + "\x1b[0m";
     for (int i = 0; i < body && g->view_top + i < n; i++) {
@@ -4841,15 +5503,22 @@ void view_open(const std::string &text, const std::string &title, size_t at = 0,
     g->view_top = 0;
     g->view_at = at;
     g->view_sent = sent;
+    g->view_head.clear();
     g->view_on = g->view_dirty = true;
     set_mouse(false);
 }
+
+void feedback_choices();
 
 void view_close() {
     g->view_on = false;
     term_write("\x1b[?7l");
     set_mouse(g->cfg.mouse);
     g->full_redraw = true;
+    if (g->fb_review) {
+        g->fb_review = false;
+        feedback_choices();
+    }
 }
 
 void view_key(const Event &e) {
@@ -4904,12 +5573,207 @@ void copy_out(const std::string &text, const std::string &what) {
     view_open(text, what, 0, to_clipboard(text));
 }
 
+// A value from the codes over the page (an app's key, an address): to the
+// clipboard where the terminal takes it (OSC 52; Blink on an iPhone does),
+// and shown alone, over the codes, to select where it doesn't (Apple's
+// Terminal; press and hold on a phone). Any key goes back to the codes, for
+// the next one. Not to copied.txt: a key is kept nowhere.
+void qr_copy_value(int i) {
+    if (i < 0 || i >= (int)g->qr.size()) return;
+    const App::Qr q = g->qr[(size_t)i];
+    std::string what = q.label.empty() ? g->qr_plain_title : q.label;
+    if (!q.label.empty() && q.label != "API key") what[0] = (char)tolower((unsigned char)what[0]);
+    if (!q.label.empty()) what = "the " + what;
+    view_open(q.data, what, 0, to_clipboard(q.data));
+}
+
+// ---- /feedback ----
+//
+// What went wrong, in the user's words, with the facts that help fix it,
+// cleaned on this machine by `ts5 feedback` (engine/src/feedback.h). The
+// user reads exactly what would be sent, then sends it, changes what goes
+// in, saves it to a file, or drops it. Reports go only to TokenStation's
+// feedback service, never anywhere public.
+
+// The chat as the saved chats keep it ({"messages": [{role, content}]}),
+// for `ts5 feedback prepare --chat`.
+std::string feedback_chat_file() {
+    ts5::Json msgs;
+    msgs.type = ts5::Json::ARR;
+    {
+        std::lock_guard<std::mutex> lk(g->chat.mu);
+        for (const Msg &m : g->chat.msgs) {
+            if (m.role != "user" && m.role != "assistant") continue;
+            ts5::Json o = ts5::Json::object();
+            o.set("role", ts5::Json::string(m.role));
+            o.set("content", ts5::Json::string(m.content));
+            msgs.a.push_back(o);
+        }
+    }
+    if (msgs.a.empty()) return "";
+    ts5::Json j = ts5::Json::object();
+    j.set("messages", msgs);
+    const std::string path = state_dir() + "/feedback-chat.json";
+    std::ofstream f(path);
+    f << j.dump() << "\n";
+    chmod(path.c_str(), 0600);
+    return path;
+}
+
+bool chat_has_messages() {
+    std::lock_guard<std::mutex> lk(g->chat.mu);
+    for (const Msg &m : g->chat.msgs)
+        if (m.role == "user" || m.role == "assistant") return true;
+    return false;
+}
+
+// The report, as `ts5 feedback prepare` makes it; false with a toast.
+bool feedback_prepare() {
+    const std::string ts5 = which("ts5");
+    if (ts5.empty()) {
+        show_toast("ts5 isn't installed here: it makes the report", g->th->bad, 6);
+        return false;
+    }
+    std::string cmd = shell_quote(ts5) + " feedback prepare --summary " + shell_quote(g->fb_summary);
+    if (!g->fb_logs) cmd += " --no-logs";
+    else if (g->logs_src.rfind("journal: ", 0) == 0) cmd += " --journal " + shell_quote(g->logs_src.substr(9));
+    else if (!g->logs_src.empty() && g->logs_src[0] == '/') cmd += " --log " + shell_quote(g->logs_src);
+    if (!g->cfg.path.empty() && file_exists(g->cfg.path)) cmd += " --settings " + shell_quote(g->cfg.path);
+    std::string chat;
+    if (g->fb_chat && !(chat = feedback_chat_file()).empty()) cmd += " --chat " + shell_quote(chat);
+    std::string text;
+    if (FILE *p = popen((cmd + " 2>/dev/null").c_str(), "r")) {
+        char buf[8192];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof buf, p)) > 0) text.append(buf, n);
+        pclose(p);
+    }
+    if (!chat.empty()) unlink(chat.c_str());
+    if (text.find("## What happened") == std::string::npos) {
+        show_toast("ts5 couldn't make the report: the ts5 here is older than this ts5-tui", g->th->bad, 7);
+        return false;
+    }
+    g->fb_text = text;
+    return true;
+}
+
+void feedback_review() {
+    view_open(g->fb_text, "the report, exactly as it would be sent");
+    g->view_head = " Read what /feedback would send: keys, addresses, names and paths are already taken out · any key: "
+                   "your choices ";
+    g->fb_review = true;
+}
+
+void feedback_start(const std::string &summary) {
+    if (g->fb_sending) {
+        show_toast("The last report is still being sent", g->th->warn, 4);
+        return;
+    }
+    std::string w = summary;
+    while (!w.empty() && isspace((unsigned char)w.back())) w.pop_back();
+    while (!w.empty() && isspace((unsigned char)w.front())) w.erase(0, 1);
+    if (w.empty()) {
+        // Back in the prompt, ready for the words.
+        g->chat.input = "/feedback ";
+        g->chat.cur = g->chat.input.size();
+        go(CHAT);
+        show_toast("Write what went wrong, with your email if you'd like a reply, then press Enter", g->th->accent, 12);
+        return;
+    }
+    g->fb_summary = w;
+    g->fb_chat = false;
+    g->fb_logs = true;
+    if (g->logs_src.empty()) pick_logs();
+    if (feedback_prepare()) feedback_review();
+}
+
+void feedback_save() {
+    const std::string dir = data_dir() + "/feedback";
+    make_dirs(dir);
+    char name[64];
+    const time_t t = time(nullptr);
+    strftime(name, sizeof name, "/report-%Y%m%d-%H%M%S.md", localtime(&t));
+    const std::string path = dir + name;
+    std::ofstream f(path);
+    f << g->fb_text;
+    f.close();
+    chmod(path.c_str(), 0600);
+    show_toast(f ? "Saved to " + path : "Couldn't write " + path, f ? g->th->good : g->th->bad, 9);
+}
+
+void feedback_send() {
+    const std::string ts5 = which("ts5");
+    const std::string path = state_dir() + "/feedback-send.md";
+    {
+        std::ofstream f(path);
+        f << g->fb_text;
+    }
+    chmod(path.c_str(), 0600);
+    if (ts5.empty() || !g->fb_send.start(shell_quote(ts5) + " feedback send " + shell_quote(path) + " 2>/dev/null", "feedback")) {
+        show_toast("The report couldn't be sent: Save to a file keeps it", g->th->bad, 7);
+        return;
+    }
+    g->fb_sending = true;
+    show_toast("Sending the report…", g->th->dim, 30);
+}
+
+void feedback_follow() {
+    if (!g->fb_sending) return;
+    g->fb_send.pump();
+    if (!g->fb_send.done) return;
+    g->fb_sending = false;
+    std::string line = g->fb_send.last_line();
+    g->fb_send.lines.clear();
+    g->fb_send.partial.clear();
+    unlink((state_dir() + "/feedback-send.md").c_str());
+    ts5::Json j;
+    if (ts5::Json::parse(line, j) && j["ok"].boolean(false)) {
+        show_toast("Sent, thank you. Report " + j["id"].str() + ": only TokenStation's developers can read it", g->th->good, 10);
+        chat_note(g->chat, "Feedback sent (report **" + j["id"].str() + "**). Only TokenStation's developers can read it; "
+                           "it is never posted anywhere public.");
+        return;
+    }
+    const std::string why = j["error"].str().empty() ? "no answer" : j["error"].str();
+    show_toast("Not sent: " + why + ". /feedback again, or Save to a file", g->th->bad, 10);
+}
+
+void feedback_choices() {
+    g->ask_title = " Send this report? ";
+    g->ask_text = "It goes only to TokenStation's developers, never anywhere public. " +
+                  std::string(g->fb_chat ? "This chat is in it. " : "Your chat is not in it. ") +
+                  (g->fb_logs ? "The log's last lines are in it." : "The log is left out.");
+    g->pick.clear();
+    g->pick.push_back({"Read it again", "the whole report, as it would be sent", [] { feedback_review(); }});
+    g->pick.push_back({"Send it", "to TokenStation's developers. Your name isn't on it unless you wrote it (an email lets them answer)",
+                       [] { feedback_send(); }});
+    if (chat_has_messages() || g->fb_chat)
+        g->pick.push_back({g->fb_chat ? "Leave the chat out" : "Add this chat",
+                           g->fb_chat ? "the report without what you and the model wrote"
+                                      : "what you and the model wrote (its last 40 messages), cleaned the same way; you read it first",
+                           [] {
+                               g->fb_chat = !g->fb_chat;
+                               if (feedback_prepare()) feedback_review();
+                           }});
+    g->pick.push_back({g->fb_logs ? "Leave the log out" : "Put the log back",
+                       g->fb_logs ? "only your words, the versions and the settings" : "the log's last 300 lines, cleaned",
+                       [] {
+                           g->fb_logs = !g->fb_logs;
+                           if (feedback_prepare()) feedback_review();
+                       }});
+    g->pick.push_back({"Save to a file", "kept on this machine; nothing is sent", [] { feedback_save(); }});
+    g->pick.push_back({"Cancel", "nothing is sent or kept", [] {}});
+    // (An Enter meant for something else only shows the report again.)
+    g->pick_sel = 0;
+}
+
 void handle(const Event &e);
 
 void mouse(const Event &e) {
     if (e.mouse == M_WHEEL_UP || e.mouse == M_WHEEL_DOWN) {
         const bool up = e.mouse == M_WHEEL_UP;
-        if (g->cur == CHAT) {
+        if (g->chats_on && g->cur == CHAT && !g->ask_yes) {
+            g->chats_sel = std::max(0, std::min((int)g->chat_list.size(), g->chats_sel + (up ? -1 : 1)));
+        } else if (g->cur == CHAT) {
             g->chat.scroll = std::max(0, g->chat.scroll + (up ? 3 : -3));
         } else {
             Event k;
@@ -4930,7 +5794,7 @@ void mouse(const Event &e) {
         g->dragged = true;
         // A drag is someone selecting text, which the terminal can't do
         // while the clicks come here: the chat, plain, to select from.
-        if (g->cur == CHAT && !g->ask_yes && g->pick.empty()) {
+        if (g->cur == CHAT && !g->ask_yes && g->pick.empty() && !g->chats_on) {
             size_t at = 0;
             const int msg = chat_msg_at(g->chat, g->down_y);
             const std::string text = chat_copy_text(g->chat, -1, -1, false, nullptr, &at, msg);
@@ -4954,6 +5818,10 @@ void mouse(const Event &e) {
     const bool click = g->down_y == e.y && abs(e.x - g->down_x) <= 1 && !g->dragged;
     g->down_y = -1;
     if (!click || g->ask_yes || !g->pick.empty()) return;
+    if (g->chats_on && g->cur == CHAT) {
+        chats_click(e.x, e.y);
+        return;
+    }
     if (e.y == 0) {
         for (size_t i = 0; i < g->tab_x.size(); i++)
             if (e.x >= g->tab_x[i].first && e.x < g->tab_x[i].second) go((ScreenId)i);
@@ -4965,6 +5833,57 @@ void mouse(const Event &e) {
     std::string what;
     const std::string text = chat_copy_text(g->chat, hit.msg, hit.kind == HIT_COPY_CODE ? hit.block : -1, false, &what);
     copy_out(text, what);
+}
+
+void key_connectors(const Event &e) {
+    const auto letter = [&](char c) { return e.key == K_CHAR && e.ch.size() == 1 && tolower(e.ch[0]) == c; };
+    if (e.key == K_ESC) {
+        go(CHAT);
+    } else if (e.key == K_UP) {
+        g->con_sel = (g->con_sel + kConRows - 1) % kConRows;
+    } else if (e.key == K_DOWN) {
+        g->con_sel = (g->con_sel + 1) % kConRows;
+    } else if (g->con_sel == 0 && e.key == K_ENTER) {
+        if (g->gh_signin.running()) {
+            if (!g->gh_code.empty() && !g->gh_url.empty()) qr_github_open();
+        } else if (g->gh_signed) {
+            show_toast("GitHub: connected as " + g->gh_login + ". D disconnects", g->th->dim, 5);
+        } else {
+            github_sign_in_start();
+        }
+    } else if (g->con_sel == 0 && letter('x') && g->gh_signin.running()) {
+        g->gh_signin.stop();
+        g->gh_code.clear();
+        if (g->qr_github) qr_close();
+        show_toast("GitHub: the sign-in stopped", g->th->dim, 4);
+    } else if (g->con_sel == 0 && (letter('d') || e.key == K_DELETE) && g->gh_signed) {
+        g->ask_title = " Disconnect GitHub? ";
+        g->ask_text = "This machine forgets its GitHub sign-in, and the model can't use GitHub until you connect again. "
+                      "The app stays installed on GitHub with the repositories you picked (github.com, Settings, "
+                      "Applications, to remove it there). Disconnect?";
+        g->ask_yes = [] {
+            const std::string ts5 = which("ts5");
+            const int rc = ts5.empty() ? 1 : system((shell_quote(ts5) + " github sign-out > /dev/null 2>&1").c_str());
+            github_read(false);
+            show_toast(rc == 0 && !g->gh_signed ? "GitHub: disconnected" : "GitHub: couldn't disconnect",
+                       rc == 0 ? g->th->good : g->th->bad, 5);
+        };
+    } else if (g->con_sel == 1 && e.key == K_ENTER) {
+        if (!g->gh_signed) show_toast("Connect GitHub first (the row above)", g->th->warn, 4);
+        else if (g->gh_install.empty()) show_toast("ts5 didn't say where the app's page is", g->th->warn, 4);
+        else qr_install_open();
+    } else if (letter('r') && g->gh_signed) {
+        github_read(true);
+        show_toast("Asking GitHub which repositories the app may use…", g->th->dim, 3);
+    } else if (g->con_sel == 2 && (e.key == K_ENTER || e.key == K_LEFT || e.key == K_RIGHT || letter(' '))) {
+        Config &c = g->cfg;
+        const int at = !c.tool_github ? 0 : c.github_ask ? 1 : 2, to = (at + (e.key == K_LEFT ? 2 : 1)) % 3;
+        c.tool_github = to != 0;
+        c.github_ask = to != 2;
+        c.save();
+    } else {
+        nav_key(e);
+    }
 }
 
 void handle(const Event &e) {
@@ -4989,7 +5908,16 @@ void handle(const Event &e) {
             const std::string link = g->tn_sign_in;
             qr_close();
             copy_out(link, "the Tailscale sign-in link");
-        } else if (e.key >= K_F1 && e.key <= K_F6) {
+        } else if (g->qr_github && e.key == K_CHAR && (e.ch == "c" || e.ch == "C")) {
+            const std::string code = g->gh_code;
+            qr_close();
+            copy_out(code, "GitHub's code: enter it at " + g->gh_url);
+        } else if (g->qr_copy && e.key == K_CHAR && (e.ch == "c" || e.ch == "C")) {
+            qr_copy_value(std::min(g->qr_sel, (int)g->qr.size() - 1));
+        } else if (g->qr_copy && e.key == K_MOUSE && e.mouse == M_DOWN && e.button == 0) {
+            for (const auto &r : g->qr_value_rows)
+                if (r.first == e.y) qr_copy_value(r.second);
+        } else if (e.key >= K_F1 && e.key <= K_F7) {
             qr_close();
             global_key(e);
         }
@@ -5020,13 +5948,18 @@ void handle(const Event &e) {
             f();
         } else if (no) {
             g->ask_yes = nullptr;
-        } else if (e.key >= K_F1 && e.key <= K_F6) {
+        } else if (e.key >= K_F1 && e.key <= K_F7) {
             // Another page: that is a no.
             g->ask_yes = nullptr;
             global_key(e);
         }
         return;
     }
+    if (g->chats_on && g->cur == CHAT) {
+        chats_key(e);
+        return;
+    }
+    g->chats_on = false;
     if (global_key(e)) return;
     switch (g->cur) {
         case CHAT: key_chat(e); break;
@@ -5035,6 +5968,7 @@ void handle(const Event &e) {
         case SETTINGS: key_settings(e); break;
         case LOGS: key_logs(e); break;
         case ACCESS: key_access(e); break;
+        case CONNECTORS: key_connectors(e); break;
         default: break;
     }
 }
@@ -5062,6 +5996,13 @@ void tick() {
     g->downloader.pump();
     finish_download();
     search_follow();
+    github_sign_in_follow();
+    github_status_follow();
+    feedback_follow();
+    // On Connectors, GitHub is asked again now and then: repositories picked
+    // on its page show up (every 10 s while that page's QR code is up).
+    if (g->cur == CONNECTORS && g->gh_signed && !g->gh_status.running() && t - g->gh_at >= (g->qr_install ? 10 : 60))
+        github_read(true);
     g->fanproc.pump();
     g->logs.pump();
     parse_log_speeds();
@@ -5213,7 +6154,8 @@ void tick() {
     if (g->chat.ask.load() == 1 && g->cur != CHAT && g->ask_told != g->chat.ask_t0.load()) {
         g->ask_told = g->chat.ask_t0.load();
         const int kind = g->chat.ask_kind.load();
-        show_toast(kind == 4   ? "The model wants to use an outside tool: F1 (or /chat) to see it and say yes or no"
+        show_toast(kind == 5   ? "The model wants to change something on GitHub: F1 (or /chat) to see it and say yes or no"
+                   : kind == 4 ? "The model wants to use an outside tool: F1 (or /chat) to see it and say yes or no"
                    : kind == 3 ? "The model wants to read a file or list a folder: F1 (or /chat) to see it and say yes or no"
                    : kind == 2 ? "The model wants to change a file: F1 (or /chat) to see it and say yes or no"
                    : kind == 1 ? "The model wants to do something on a web page: F1 (or /chat) to see it and say yes or no"
@@ -5301,7 +6243,7 @@ void tick() {
                     g->chat.msgs.insert(g->chat.msgs.end() - 1, note);
                 } else {
                     n += ", so the answer stopped here, and the model can't take in more of this chat. "
-                         "**Ctrl+N** starts a new chat (this one is saved: `/chats` opens it again).";
+                         "**Ctrl+N** starts a new chat (this one is saved: **Ctrl+O** opens it again).";
                     if (!g->cfg.summarize) n += " `/compact` has the model summarize it and go on from the summary.";
                     if (own_server_pid() > 0 && g->cfg.serve_ctx > 0)
                         n += " Or set Settings → Context to auto, the longest this model fits, and load it again.";
@@ -5423,6 +6365,7 @@ int usage(FILE *f) {
             "  ts5-tui --mcp | --mcp-tools | --mcp-call TOOL ['{\"ARGUMENT\": ...}']\n"
             "  ts5-tui --install-browser chromium|obscura [--dry-run]\n"
             "  ts5-tui --run-command 'COMMAND' [--sandbox on|off|no-network]\n"
+            "  ts5-tui --github-call '{\"method\": \"GET\", \"path\": \"/user/repos\"}' [--dry-run]\n"
             "  ts5-tui --sandbox-folder DIR|default\n\n"
             "It talks to a running TokenStation (the tokenstation service, the TV app, or\n"
             "`ts5 serve`; Models can start one), so it uses no GPU memory itself and works\n"
@@ -5440,6 +6383,9 @@ int usage(FILE *f) {
             "--run-command: runs one command the way the model's terminal tool does (in the\n"
             "sandbox, unless it is off; /sandbox in the app) and prints what the model would\n"
             "get back. --sandbox: on, off or no-network for that command.\n"
+            "--github-call: one call of the model's GitHub tool, as it would be made (after the\n"
+            "fixes it gets), with what the question before a change would show; --dry-run\n"
+            "shows that alone.\n"
             "--sandbox-folder: moves the sandbox's toolbox (what the model installs) to\n"
             "DIR/tokenstation-sandbox, or back to ts5's own folder (/sandbox folder in the app).\n"
             "Settings are kept in ~/.config/tokenstation/tui.conf.\n"
@@ -5491,6 +6437,8 @@ int main(int argc, char **argv) {
     std::vector<std::pair<std::string, std::string>> mcp_calls;
     bool run_mode = false;  // --run-command
     std::string run_cmd, sandbox_arg, sandbox_folder;
+    bool gh_mode = false;  // --github-call
+    std::string gh_args;
     bool folder_mode = false;
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
@@ -5512,6 +6460,7 @@ int main(int argc, char **argv) {
         else if (a == "--install-browser") install = next();
         else if (a == "--dry-run") dry = true;
         else if (a == "--run-command") run_mode = true, run_cmd = next();
+        else if (a == "--github-call") gh_mode = true, gh_args = next();
         else if (a == "--sandbox") sandbox_arg = next();
         else if (a == "--sandbox-folder") folder_mode = true, sandbox_folder = next();
         else if (a == "-h" || a == "--help") return usage(stdout);
@@ -5543,6 +6492,23 @@ int main(int argc, char **argv) {
         signal(SIGPIPE, SIG_IGN);
         std::atomic<bool> cancel{false};
         const ToolResult r = run_tool("run_command", "{\"command\":" + ts5::json_escape(run_cmd) + "}", t, cancel);
+        printf("%s\n%s\n", r.head.c_str(), r.text.c_str());
+        return r.ok ? 0 : 1;
+    }
+    if (gh_mode) {
+        // One GitHub tool call: what the user would see first, then what the model gets back.
+        signal(SIGPIPE, SIG_IGN);
+        std::atomic<bool> cancel{false};
+        printf("%s\n", tool_call_line("github", gh_args).c_str());
+        if (github_method(gh_args) != "GET") {
+            const std::string note = github_change_note(gh_args, cancel), preview = github_preview(gh_args);
+            if (!note.empty()) printf("%s\n", note.c_str());
+            if (!preview.empty()) printf("%s\n", preview.c_str());
+        }
+        if (dry) return 0;
+        ToolSwitches t;
+        t.github = true;
+        const ToolResult r = run_tool("github", gh_args, t, cancel);
         printf("%s\n%s\n", r.head.c_str(), r.text.c_str());
         return r.ok ? 0 : 1;
     }
@@ -5635,6 +6601,8 @@ int main(int argc, char **argv) {
     const bool was_downloading = app.downloader.running();
     app.downloader.stop();
     app.searcher.stop();
+    app.gh_signin.stop();
+    app.gh_status.stop();
     app.loader.pump();
     app.logs.stop();
     if (app.view_on) term_write("\x1b[?7l");

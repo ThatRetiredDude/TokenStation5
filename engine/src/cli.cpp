@@ -45,6 +45,8 @@
 #include "backend.h"
 #include "access.h"
 #include "browser.h"
+#include "github.h"
+#include "feedback.h"
 #include "checks.h"
 #include "cli.h"
 #include "engine.h"
@@ -53,6 +55,7 @@
 #include "server.h"
 #ifdef TS5_TAILNET
 #include "tailnet_serve.h"
+#include "web_serve.h"
 #endif
 #include "tokenizer.h"
 #include "tools.h"
@@ -92,6 +95,8 @@ int usage() {
             "       ts5 search QUERY | ts5 page URL [MAX_CHARS] | ts5 usage-parse FILE\n"
             "       ts5 browser [--program auto|text|PATH] [--kind chromium|obscura] [--chars N] [--idle SECONDS]\n"
             "       ts5 keys [--file FILE] list | new NAME | on KEY | off KEY | remove KEY | require on|off\n"
+            "       ts5 github sign-in | status [--repos] | sign-out | api METHOD PATH [BODY|-] [--lean]\n"
+            "       ts5 feedback prepare [--summary TEXT] [--log FILE | --journal UNIT] [--settings FILE] [--chat FILE] [--no-logs] | scrub | send FILE\n"
             "       ts5 tool-parse hermes|llama3|mistral|gemma|gemma4|generic [TOOL...] < TEXT\n"
             "       ts5 fetch URL FILE [--sha256 HEX] | ts5 peak [--device N] [--gib G]\n"
             "       ts5 helpers -m model.gguf --helper FILE...  (which files could draft for the model)\n"
@@ -226,6 +231,11 @@ int no_model_command(int argc, char **argv) {
     }
     if (cmd == "browser") return browser_main(argc, argv);
     if (cmd == "keys") return keys_main(argc, argv);
+    if (cmd == "github") return github_main(argc, argv);
+    if (cmd == "feedback") return feedback_main(argc, argv);
+#ifdef TS5_TAILNET
+    if (cmd == "https-test") return https_test_main(argc, argv);
+#endif
     if (argc < 3) return usage();
     std::string f = argv[2];
     ToolFormat tf = f == "hermes"    ? ToolFormat::HERMES
@@ -490,7 +500,9 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     if (argc >= 2 && (std::string(argv[1]) == "search" || std::string(argv[1]) == "tool-parse" ||
                       std::string(argv[1]) == "usage-parse" || std::string(argv[1]) == "page" ||
                       std::string(argv[1]) == "html-text" || std::string(argv[1]) == "html-view" ||
-                      std::string(argv[1]) == "browser" || std::string(argv[1]) == "keys"))
+                      std::string(argv[1]) == "browser" || std::string(argv[1]) == "keys" ||
+                      std::string(argv[1]) == "github" || std::string(argv[1]) == "feedback" ||
+                      std::string(argv[1]) == "https-test"))
         return no_model_command(argc, argv);
     Args a;
     if (!parse(argc, argv, a)) return usage();
@@ -835,8 +847,16 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
             dir = slash == std::string::npos ? "." : slash == 0 ? "/" : dir.substr(0, slash);
             tailnet = new Tailnet;
             tailnet->start(dir, a.port);
-            setup = [](Server &s) { tailnet->attach(s); };
         }
+        // The chat page and, once Access turns it on, the browser terminal
+        // (web_serve.h).
+        setup = [authorize](Server &s) {
+            if (tailnet) tailnet->attach(s);
+            WebOptions w;
+            w.authorize = authorize;
+            if (tailnet) w.terminal = [] { return tailnet->terminal(); };
+            attach_web(s, w);
+        };
 #endif
         return serve(eng, basename_of(a.model), a.host, a.port,
                      [&](int port) { if (on_serving) on_serving(basename_of(a.model), port); }, on_usage, authorize,

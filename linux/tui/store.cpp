@@ -214,15 +214,20 @@ bool save_chat(Chat &c, std::string &why) {
     }
     const int64_t now = (int64_t)time(nullptr);
     int64_t created = now;
+    SavedChat old;
+    bool had = false;
     if (c.saved_id.empty()) c.saved_id = new_id();
-    else {
-        SavedChat old;
-        if (read_chat(dir, c.saved_id, old, nullptr, nullptr)) created = old.created;
-    }
-    const std::string text = "{\"v\":1,\"title\":" + ts5::json_escape(title_of(first)) +
-                             ",\"created\":" + std::to_string(created) + ",\"updated\":" + std::to_string(now) +
-                             ",\"turns\":[" + body + "\n]}\n";
+    else if ((had = read_chat(dir, c.saved_id, old, nullptr, nullptr))) created = old.created;
+    const auto text_at = [&](int64_t updated) {
+        return "{\"v\":1,\"title\":" + ts5::json_escape(title_of(first)) + ",\"created\":" + std::to_string(created) +
+               ",\"updated\":" + std::to_string(updated) + ",\"turns\":[" + body + "\n]}\n";
+    };
     const std::string path = dir + "/" + c.saved_id + ".json", tmp = path + ".tmp";
+    // Nothing new in it (a chat only looked at, then left): its time stays,
+    // so the list stays in the order the chats were used.
+    std::string was;
+    if (had && slurp(path, was) && was == text_at(old.updated)) return true;
+    const std::string text = text_at(now);
     FILE *f = fopen(tmp.c_str(), "wb");
     bool ok = f && fwrite(text.data(), 1, text.size(), f) == text.size();
     if (f) ok = fclose(f) == 0 && ok;
@@ -292,6 +297,23 @@ bool load_chat(Chat &c, const SavedChat &s, std::string &why) {
         c.scroll = 0;
     }
     chat_count(c);
+    return true;
+}
+
+bool delete_chat(const SavedChat &s, std::string &why) {
+    if (!s.mine) {
+        why = "That chat is the TV app's: delete it on the TV";
+        return false;
+    }
+    if (s.id.empty() || s.id.find('/') != std::string::npos) {
+        why = "no such chat";
+        return false;
+    }
+    const std::string path = s.dir + "/" + s.id + ".json";
+    if (unlink(path.c_str()) != 0 && errno != ENOENT) {
+        why = "can't delete " + path + ": " + strerror(errno);
+        return false;
+    }
     return true;
 }
 
