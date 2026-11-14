@@ -223,12 +223,13 @@ def main():
         check(code in (401, 404), "while an app asking /v1 gets an answer for an app", code)
         for page in ("/", "/ts5/terminal"):
             code, body, _ = get(here + page)
-            check(b'<script src="/ts5/web/keep.js?v=3"></script>' in body and b"TS5Keep.start()" in body,
+            check(b'<script src="/ts5/web/keep.js?v=4"></script>' in body and b"TS5Keep.start()" in body,
                   f"{page} keeps its key with keep.js (a key from #key=, a QR code of Connect a phone)")
         code, body, h = get(here + "/ts5/web/keep.js")
         check(code == 200 and h.get("Content-Type", "").startswith("text/javascript") and b"location.hash" in body and
-              b"Stay signed in on this device?" in body and b'action="/ts5/keep?back=' in body,
-              "keep.js: the key from the address, the question once (link or passwords), the save form", code)
+              b"Save the key to your passwords?" in body and b'action="/ts5/keep?back=' in body and
+              b"ts5key=" in body,
+              "keep.js: the key from the address, the save question, the save form, the cookie for an icon", code)
         # Asked again each time, 304 while the same: a script kept from an
         # older ts5 never runs with a newer page.
         for f in ("/", "/ts5/terminal", "/ts5/web/keep.js", "/ts5/web/xterm.js", "/ts5/web/icon.png"):
@@ -242,6 +243,9 @@ def main():
             rb = r.read()
             c.close()
             check(r.status == 304 and rb == b"" and r.getheader("ETag") == tag, f"{f}: 304 when it is the same", r.status)
+            # Only the 200's own length may go in a 304 (RFC 9110 15.4.5); none is sent.
+            check(r.getheader("Content-Length") is None, f"{f}: its 304 says no Content-Length",
+                  r.getheader("Content-Length"))
         # The save form, sent for real: straight back to the page, its body
         # (the key) neither kept nor logged.
         for back, to in (("chat", "/"), ("terminal", "/ts5/terminal")):
