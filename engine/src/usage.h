@@ -33,6 +33,7 @@ struct UsageRecord {
     std::string name;     // general.name (the title), or the file without .gguf (ts5 serve)
     std::string client;   // the peer's IPv4
     std::string key;      // the API key's name ("" for none), never the key
+    std::string user;     // whose request it was (Server::Grant::user; not a column)
     int64_t status = 0;   // the HTTP status sent
     std::string finish;   // stop, length, tool_calls, error, left (the client went) or refused
     int64_t stream = 0;

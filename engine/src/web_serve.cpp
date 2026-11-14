@@ -7,7 +7,9 @@
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
+#include <dirent.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -120,6 +122,8 @@ const char *status_text(int code) {
         case 403: return "Forbidden";
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
+        case 401: return "Unauthorized";
+        case 500: return "Internal Server Error";
         default: return "Error";
     }
 }
@@ -409,7 +413,21 @@ void terminal(const WebOptions &o, const Server::Page &p, int fd) {
     }
     std::string name;
     const std::string sent = hello["key"].str();
-    if (!o.authorize || !o.authorize(sent, p.client, name)) {
+    Server::Grant grant;
+    const bool in = o.admit ? o.admit(sent, p.client, grant) : o.authorize && o.authorize(sent, p.client, name);
+    if (o.admit) name = grant.key;
+    if (in && !grant.owner) {
+        // Another user's key: the chat page and the API, never all of ts5-tui.
+        log_line("ts5: terminal: %s: the key %s is %s's, not the owner's: refused", p.client.c_str(), name.c_str(),
+                 grant.user_name.c_str());
+        Json e = Json::object();
+        e.set("error", Json::string("This key is " + grant.user_name +
+                                    "'s: the browser terminal is the owner's alone. The chat page is at /."));
+        ws_send(fd, 0x1, e.dump());
+        ws_close(fd, 1008, "owner only");
+        return;
+    }
+    if (!in) {
         log_line("ts5: terminal: %s: %s, refused", p.client.c_str(),
                  sent.empty() ? "no API key" : "an API key that isn't one of this machine's");
         Json e = Json::object();
@@ -531,6 +549,218 @@ void terminal(const WebOptions &o, const Server::Page &p, int fd) {
     log_line("ts5: terminal: %s's session ended after %.0f s (%s)", p.client.c_str(), now_s() - t0, why.c_str());
 }
 
+// ---- each user's own chats (/ts5/me, /ts5/chats) ----
+
+constexpr size_t kChatMax = 4u << 20;  // a chat's JSON
+constexpr int kChatsMax = 1000;         // a user's chats
+
+bool good_chat_id(const std::string &id) {
+    if (id.empty() || id.size() > 64) return false;
+    for (char c : id)
+        if (!isalnum((unsigned char)c) && c != '-' && c != '_') return false;
+    return true;
+}
+
+void make_dirs(const std::string &path) {
+    for (size_t i = 1; i <= path.size(); i++)
+        if (i == path.size() || path[i] == '/') mkdir(path.substr(0, i).c_str(), 0700);
+}
+
+std::string read_whole(const std::string &path) {
+    std::string out;
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f) return out;
+    char b[65536];
+    size_t n;
+    while ((n = fread(b, 1, sizeof b, f)) > 0) out.append(b, n);
+    fclose(f);
+    return out;
+}
+
+bool write_whole(const std::string &path, const std::string &text) {
+    const std::string tmp = path + ".new";
+    FILE *f = fopen(tmp.c_str(), "wb");
+    if (!f) return false;
+    bool ok = fwrite(text.data(), 1, text.size(), f) == text.size();
+    ok = fclose(f) == 0 && ok;
+    if (ok && rename(tmp.c_str(), path.c_str()) == 0) return true;
+    unlink(tmp.c_str());
+    return false;
+}
+
+std::vector<std::string> chat_files(const std::string &dir) {
+    std::vector<std::string> out;
+    if (DIR *d = opendir(dir.c_str())) {
+        while (dirent *e = readdir(d)) {
+            const std::string n = e->d_name;
+            if (n.size() > 5 && n.compare(n.size() - 5, 5, ".json") == 0 && good_chat_id(n.substr(0, n.size() - 5)))
+                out.push_back(n);
+        }
+        closedir(d);
+    }
+    return out;
+}
+
+bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
+    const bool me = p.path == "/ts5/me";
+    const bool chats = p.path == "/ts5/chats" || p.path.rfind("/ts5/chats/", 0) == 0;
+    const bool users = p.path == "/ts5/users" || p.path.rfind("/ts5/users/", 0) == 0;
+    if (!me && !chats && !users) return false;
+    if (!o.admit) {
+        send_error(fd, 404, "this server keeps no users");
+        return true;
+    }
+    Server::Grant g;
+    if (!o.admit(p.key, p.client, g)) {
+        send_error(fd, 401, p.key.empty() ? "This needs an API key." : "That API key isn't one of this machine's, or it is off.");
+        return true;
+    }
+    // Chats on the machine only for a request with a key: without one
+    // (this machine, or a network that lets any machine in) nobody can tell
+    // whose they would be.
+    const bool kept = !p.key.empty() && !g.key.empty() && o.user_dir;
+    if (me) {
+        if (p.method != "GET") {
+            send_error(fd, 405, "GET only");
+            return true;
+        }
+        Json j = Json::object();
+        j.set("user", Json::string(g.user));
+        j.set("name", Json::string(g.user_name));
+        Json b;
+        b.type = Json::BOOL;
+        b.b = g.owner;
+        j.set("owner", b);
+        b.b = g.owner;
+        j.set("terminal", b);
+        b.b = g.web_search;
+        j.set("web_search", b);
+        b.b = g.app_tools;
+        j.set("app_tools", b);
+        Json n;
+        n.type = Json::NUM;
+        n.n = (double)g.max_reply;
+        n.s = std::to_string(g.max_reply);
+        j.set("max_reply", n);
+        b.b = kept;
+        j.set("chats_kept", b);
+        b.b = g.owner_reads;
+        j.set("owner_reads", b);
+        n.n = (double)g.tokens_day;
+        n.s = std::to_string(g.tokens_day);
+        j.set("tokens_day", n);
+        send_file(fd, 200, "application/json", j.dump(), false);
+        return true;
+    }
+    if (users) {
+        // The owner reading a user's chats: only a user who has that set,
+        // which the user sees in its own settings.
+        if (!kept || !g.owner || !o.readable_users) {
+            send_error(fd, 403, "Only the owner's key reads other users' chats, and only theirs who allow it.");
+            return true;
+        }
+        if (p.method != "GET") {
+            send_error(fd, 405, "GET only");
+            return true;
+        }
+        const auto readable = o.readable_users();
+        if (p.path == "/ts5/users" || p.path == "/ts5/users/") {
+            Json list = Json::object();
+            Json arr;
+            arr.type = Json::ARR;
+            for (const auto &u : readable) {
+                Json x = Json::object();
+                x.set("id", Json::string(u.first));
+                x.set("name", Json::string(u.second));
+                arr.a.push_back(x);
+            }
+            list.set("users", arr);
+            send_file(fd, 200, "application/json", list.dump(), false);
+            return true;
+        }
+        const std::string rest = p.path.substr(11);
+        const size_t slash = rest.find('/');
+        const std::string uid = rest.substr(0, slash);
+        bool may = false;
+        for (const auto &u : readable) may |= u.first == uid;
+        if (slash == std::string::npos || rest.substr(slash) != "/chats" || !may) {
+            send_error(fd, 404, "no such user, or its chats are its own");
+            return true;
+        }
+        const std::string dir = o.user_dir(uid) + "/chats";
+        std::string out = "{\"chats\":[";
+        bool first = true;
+        for (const std::string &n : chat_files(dir)) {
+            const std::string text = read_whole(dir + "/" + n);
+            Json c;
+            if (!Json::parse(text, c) || c.type != Json::OBJ) continue;
+            out += (first ? "" : ",") + text;
+            first = false;
+        }
+        log_line("ts5: the owner read %s's chats (%s)", uid.c_str(), p.client.c_str());
+        send_file(fd, 200, "application/json", out + "]}", false);
+        return true;
+    }
+    if (!kept) {
+        send_error(fd, 403, "Chats are kept on the machine for a key's user; without a key they stay in the browser.");
+        return true;
+    }
+    const std::string dir = o.user_dir(g.user) + "/chats";
+    const std::string id = p.path.size() > 11 ? p.path.substr(11) : "";
+    if (p.path == "/ts5/chats" || p.path == "/ts5/chats/") {
+        if (p.method == "GET") {
+            std::string out = "{\"chats\":[";
+            bool first = true;
+            for (const std::string &n : chat_files(dir)) {
+                const std::string text = read_whole(dir + "/" + n);
+                Json c;
+                if (!Json::parse(text, c) || c.type != Json::OBJ) continue;
+                out += (first ? "" : ",") + text;
+                first = false;
+            }
+            send_file(fd, 200, "application/json", out + "]}", false);
+        } else if (p.method == "DELETE") {
+            for (const std::string &n : chat_files(dir)) unlink((dir + "/" + n).c_str());
+            send_file(fd, 200, "application/json", "{\"deleted\":true}", false);
+        } else {
+            send_error(fd, 405, "GET or DELETE");
+        }
+        return true;
+    }
+    if (!good_chat_id(id)) {
+        send_error(fd, 400, "a chat's id is 1 to 64 letters, digits, - and _");
+        return true;
+    }
+    const std::string file = dir + "/" + id + ".json";
+    if (p.method == "PUT") {
+        Json c;
+        if (p.body.size() > kChatMax || !Json::parse(p.body, c) || c.type != Json::OBJ || c["id"].str() != id) {
+            send_error(fd, 400, "a chat is a JSON object with its id, at most 4 MB");
+            return true;
+        }
+        if (access(file.c_str(), F_OK) != 0 && (int)chat_files(dir).size() >= kChatsMax) {
+            send_error(fd, 400, "a user keeps at most 1000 chats: delete some first");
+            return true;
+        }
+        make_dirs(dir);
+        if (!write_whole(file, p.body)) {
+            send_error(fd, 500, "the chat could not be written on the machine");
+            return true;
+        }
+        send_file(fd, 200, "application/json", "{\"saved\":true}", false);
+    } else if (p.method == "DELETE") {
+        unlink(file.c_str());
+        send_file(fd, 200, "application/json", "{\"deleted\":true}", false);
+    } else if (p.method == "GET") {
+        const std::string text = read_whole(file);
+        if (text.empty()) send_error(fd, 404, "no such chat");
+        else send_file(fd, 200, "application/json", text, false);
+    } else {
+        send_error(fd, 405, "GET, PUT or DELETE");
+    }
+    return true;
+}
+
 }  // namespace
 
 void attach_web(Server &s, const WebOptions &o) {
@@ -561,6 +791,7 @@ void attach_web(Server &s, const WebOptions &o) {
                               "\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             return true;
         }
+        if (me_and_chats(o, p, fd)) return true;
         const bool web = p.path == "/" || p.path == "/chat" || p.path.rfind("/ts5/web/", 0) == 0 ||
                          p.path == "/ts5/terminal" || p.path == "/ts5/terminal/socket";
         if (!web) return false;

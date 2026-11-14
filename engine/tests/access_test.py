@@ -110,7 +110,8 @@ def test_keys(ts5, d):
                 "not a key line\n")
     code, listed, err = keys(ts5, tv, "list", js=True)
     check(code == 0 and listed["keys"] == [{"id": "0a0b0c0d", "name": "Kilo Code", "on": False, "created": 1700000000,
-                                            "used": 1700000500}], "the TV app's file is read", (listed, err))
+                                            "used": 1700000500, "user": "owner"}],
+          "the TV app's file is read (its keys are the owner's)", (listed, err))
 
     # A file this user can't read.
     if os.geteuid() != 0:

@@ -157,6 +157,7 @@ std::string response(int code, const std::string &body, const char *type = "appl
                       : code == 400 ? "Bad Request"
                       : code == 401 ? "Unauthorized"
                       : code == 403 ? "Forbidden"
+                      : code == 429 ? "Too Many Requests"
                       : code == 503 ? "Service Unavailable"
                                     : "Error";
     char h[256];
@@ -426,8 +427,21 @@ void handle(int fd, Server::State &state, Usage &u) {
         u.closed = true;
         report(state, u);
     };
-    // Everything but /health needs a key the title lets in (set_authorize).
-    if (r.path != "/health" && state.authorize && !state.authorize(r.key, u.rec.client, u.rec.key)) {
+    // Everything but /health needs a key the title lets in (set_authorize),
+    // or on Linux a key of a user (set_admit), whose permissions it then has.
+    Server::Grant grant;
+    grant.user = "owner";
+    bool let_in = true;
+    if (r.path != "/health") {
+        if (state.admit) {
+            let_in = state.admit(r.key, u.rec.client, grant);
+            u.rec.key = grant.key;
+        } else if (state.authorize) {
+            let_in = state.authorize(r.key, u.rec.client, u.rec.key);
+        }
+    }
+    u.rec.user = grant.user;
+    if (!let_in) {
         log_line("ts5: %s %s %s: %s", u.rec.client.c_str(), r.method.c_str(), r.path.c_str(),
                 r.key.empty() ? "no API key, refused" : "an API key that isn't one of this PS5's, refused");
         const std::string where = state.key_hint.empty() ? "Settings on the PS5, under Apps." : state.key_hint;
@@ -481,7 +495,7 @@ void handle(int fd, Server::State &state, Usage &u) {
         }
         // capabilities: whether the model takes OpenAI tools, and whether ts5
         // runs web searches for it by itself (a Tavily key is set).
-        const bool can = tools != "none";
+        const bool can = tools != "none" && grant.app_tools;
         // helper: the draft model that is really loaded beside it and its
         // context (drafting stops past it), else null, with helper_note
         // saying why the one asked for isn't used.
@@ -505,12 +519,12 @@ void handle(int fd, Server::State &state, Usage &u) {
                                                             ",\"capabilities\":{\"tools\":" + (can ? "true" : "false") +
                                                             ",\"tool_format\":" + json_escape(tools) +
                                                             ",\"web_search\":" +
-                                                            (can && !tavily_key().empty() ? "true" : "false") +
+                                                            (can && grant.web_search && !tavily_key().empty() ? "true" : "false") +
                                                             // Where a search goes: "tavily" (the web), an
                                                             // encyclopedia ("wikipedia", "grokipedia", "both":
                                                             // no key, for a request that asks), "none".
                                                             ",\"web_search_source\":" +
-                                                            json_escape(can ? search_source() : "none") +
+                                                            json_escape(can && grant.web_search ? search_source() : "none") +
 #ifndef TS5_PS5
                                                             // What a request's "web_search_source" can pick.
                                                             ",\"encyclopedias\":[\"wikipedia\",\"grokipedia\",\"both\"]" +
@@ -521,6 +535,21 @@ void handle(int fd, Server::State &state, Usage &u) {
     } else if (completions) {
         const bool chat = r.path.find("chat") != std::string::npos;
         u.rec.kind = chat ? "chat" : "completion";
+        // A user whose tokens for today are used up (Grant::over): told so,
+        // as OpenAI tells a client over its limit, before any wait.
+        if (!grant.over.empty()) {
+            log_line("ts5: %s %s: %s", u.rec.client.c_str(), grant.user_name.c_str(), grant.over.c_str());
+            send_all(fd, response(429, error_body(grant.over, "rate_limit_exceeded")));
+            {
+                std::lock_guard<std::mutex> g(state.stats);
+                u.rec.model = state.model;
+            }
+            u.rec.status = 429;
+            u.rec.finish = "refused";
+            u.rec.why = "day_limit";
+            done();
+            return;
+        }
         Json req;
         if (!Json::parse(r.body, req)) {
             send_all(fd, response(400, error_body("invalid JSON")));
@@ -566,7 +595,9 @@ void handle(int fd, Server::State &state, Usage &u) {
         std::vector<Message> msgs;
         // No max_tokens (or 0, or -1, as some clients send for "no limit"):
         // until the model stops or the context is full, as OpenAI does.
-        const double limit = req["max_tokens"].num(req["max_completion_tokens"].num(0));
+        double limit = req["max_tokens"].num(req["max_completion_tokens"].num(0));
+        // The user's longest reply (Grant::max_reply) holds whatever the app asks.
+        if (grant.max_reply > 0 && (limit < 1 || limit > (double)grant.max_reply)) limit = (double)grant.max_reply;
         // Thinking off, for a model whose template can do it: Qwen3's switch
         // as vLLM and llama.cpp take it ("chat_template_kwargs":
         // {"enable_thinking": false}, or at the top level), "reasoning_effort":
@@ -601,7 +632,10 @@ void handle(int fd, Server::State &state, Usage &u) {
             msgs = parse_messages(req["messages"]);
             if (tf != ToolFormat::NONE && req["tool_choice"].str() != "none") {
                 bool named = false;
-                for (auto &t : req["tools"].a) {
+                // A user without the app's tools: the model never sees them,
+                // and answers in words.
+                static const Json kNoTools;
+                for (auto &t : (grant.app_tools ? req["tools"] : kNoTools).a) {
                     tools.push_back(t);
                     named |= t["function"]["name"].str() == "web_search";
                 }
@@ -618,7 +652,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                 const std::string source = search_source(req["web_search_source"].str());
                 const bool wiki = is_encyclopedia(source);
                 const bool asked = ws.type == Json::BOOL ? ws.boolean(false) : ws.str() == "auto";
-                web = !named && (source == "tavily" || (wiki && (asked || web_search_always()))) &&
+                web = grant.web_search && !named && (source == "tavily" || (wiki && (asked || web_search_always()))) &&
                       (ws.type == Json::BOOL ? ws.boolean(false)
                                              : web_search_always() ||
                                                    ((tools.empty() || ws.str() == "auto") && needs_web(last_user, wiki)));
