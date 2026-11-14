@@ -51,6 +51,50 @@ The first time a browser signs in with **your** key, any chats it kept in the br
 
 What a user searches the web for is theirs too: your Logs say that a search was made for them, not what it was for (unless **You read the chats** is on for them).
 
+## Reaching it from away: share by Tailscale
+
+*From 1.1.1.*
+
+At home, a user's phone reaches the TokenStation on your network. From anywhere else it needs [Tailscale](Away-from-home-with-Tailscale), and there are two ways to let them in. Pick one per person:
+
+| | **Only this PS5** (recommended) | **Join my tailnet** |
+| --- | --- | --- |
+| What it is | Tailscale's *machine sharing*: the PS5 is shared into their own Tailscale account | A plain invite: they become a member of your tailnet |
+| What they reach | This PS5 only | Every device on your tailnet: your computers, NAS, cameras, unless you write rules in Tailscale yourself |
+| Their account | Their own Tailscale account (free) | They sign in to yours as a member |
+| Your devices see theirs | No | Yes |
+| Choose it for | Family and friends who chat or connect an editor | Someone you'd trust with every device, such as your own second account or a partner who shares your machines |
+
+When unsure, choose **Only this PS5**. You can always invite them to the tailnet later.
+
+### With the terminal app
+
+1. **Once:** make a Tailscale access token. Sign in at [login.tailscale.com](https://login.tailscale.com), go to **Settings**, **Keys**, **Generate access token**. You must be an Owner or Admin of the tailnet. Tokens last up to 90 days; when one runs out, the next invite asks for a new one.
+2. Turn **Tailscale** on on the Access page and sign in, if it isn't already.
+3. Open the user's page (Enter on them). On **Share by Tailscale**, choose the way with ←→. The hint under it says what each one means.
+4. Press **Enter**. The first time, paste the token; it is kept on the PS5 (beside the keys, readable by your user only) and never shown again.
+5. A QR code of the invite appears. Sam scans it, installs Tailscale if needed, signs in and accepts.
+6. Then the last row, **A key for Sam**, makes their key. Its QR code opens the chat page, signed in.
+
+Removing the user (**D**) takes back their machine share and any invite not yet accepted. Someone who already joined your tailnet stays on it: remove them in Tailscale's admin console, **Users**. The terminal app says so when it happens.
+
+From a script, the same:
+
+```sh
+ts5 share token set < token.txt             # once: the token on stdin, never on the command line
+ts5 share new Sam ps5 NODE_ID               # only this PS5 (NODE_ID: the machine's id, in GET /ts5/tailnet as node_id)
+ts5 share new Sam tailnet                   # join the whole tailnet
+ts5 share list Sam
+ts5 share revoke Sam                        # also done by ts5 users remove
+```
+
+### By hand, without giving ts5 a token
+
+- **Only this PS5:** in Tailscale's admin console, **Machines**, the PS5's **⋯** menu, **Share…**, then copy the invite link and send it. They open it, sign in with their own account and accept. To end it later: the same menu, **Share…**, remove them.
+- **Join my tailnet:** admin console, **Users**, **Invite users**, copy the link and send it. To end it: **Users**, their entry, **Remove user**.
+
+Either way, make their key on the Access page as above and send them the chat page's QR code or link.
+
 ## Editors and other apps
 
 A user connects an app as in [Connecting apps](Connecting-apps), with their own key. Their permissions hold there too: no web search unless allowed, the longest reply, tokens a day, and the app's own tools only if **Apps' own tools** is on.
@@ -64,7 +108,7 @@ ts5 keys new "Sam's phone" --user Sam      # a key of Sam's
 ts5 users set Sam tokens_day=50000 max_reply=2000 web_search=on
 ts5 users set Sam on=off                   # paused
 ts5 users                                  # the users, their permissions, tokens today, their keys
-ts5 users remove Sam --forget              # Sam, Sam's keys and Sam's chats
+ts5 users remove Sam --forget              # Sam, Sam's keys and Sam's chats (from 1.1.1, first Sam's Tailscale shares)
 ```
 
 For the always-on service add `--file /var/lib/tokenstation/access/keys.tsv`, as with `ts5 keys`.
