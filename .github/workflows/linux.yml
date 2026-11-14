@@ -54,7 +54,8 @@ jobs:
           # very commit that tag names. Any other build is <the newest
           # release>+<run number>.<commit>, which apt, dnf and pacman put after
           # that release and before the next one, so "install it again" is an
-          # upgrade. (Before linux-v1.0.0 builds were 0.0.1.<run>+<commit>.)
+          # upgrade. Until the first release they stay 0.0.1.<run>+<commit>, as
+          # the test builds before it were, so each still installs over the last.
           if [[ "$GITHUB_REF" == refs/tags/linux-v* ]]; then
             v=${GITHUB_REF_NAME#linux-v}
           else
@@ -62,7 +63,9 @@ jobs:
             head=$(git rev-parse HEAD)
             exact=$(awk -v h="$head" '$1 == h {print $2}' <<< "$tags" | sed 's#refs/tags/linux-v##; s#\^{}$##' | sort -V | tail -n 1)
             base=$(awk '{print $2}' <<< "$tags" | grep -v '\^{}$' | sed 's#refs/tags/linux-v##' | sort -V | tail -n 1 || true)
-            if [ -n "$exact" ]; then v=$exact; else v=${base:-0.0.1}+${GITHUB_RUN_NUMBER}.$(git rev-parse --short HEAD); fi
+            if [ -n "$exact" ]; then v=$exact
+            elif [ -n "$base" ]; then v=$base+${GITHUB_RUN_NUMBER}.$(git rev-parse --short HEAD)
+            else v=0.0.1.${GITHUB_RUN_NUMBER}+$(git rev-parse --short HEAD); fi
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
           linux/build-deb.sh "$v"
