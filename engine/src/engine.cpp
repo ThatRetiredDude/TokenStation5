@@ -16,10 +16,39 @@ static double now_ms() {
     return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
 }
 
-int32_t Engine::sample(const float *lg, int n, const SampleParams &p) {
+bool Engine::fits(const std::string &open, int32_t tok) const {
+    if (t_.is_eog(tok)) return open.empty();  // no ending in the middle of a character
+    const std::string piece = t_.decode(tok);
+    // In the middle of a character, a token that prints nothing (a control
+    // token, a padded id past the vocabulary) doesn't finish it either.
+    if (!open.empty() && piece.empty()) return false;
+    size_t o;
+    return utf8_prefix_ok(open + piece, &o);
+}
+
+int32_t Engine::sample(const float *lg, int n, const SampleParams &p, const std::string *open) {
     const float temp = p.steady && p.steady->load(std::memory_order_relaxed) ? std::min(p.temperature, p.steady_temperature)
                                                                              : p.temperature;
-    if (temp <= 0) return (int32_t)(std::max_element(lg, lg + n) - lg);
+    // A model's tokens are bytes, and a pick can be bytes that are no
+    // character (a lead byte the next token doesn't finish, a lone
+    // continuation byte): a small model does it, a large one rarely, at a
+    // rare character. Such a pick is taken again among the tokens that keep
+    // the text valid, the model's own next choice: one check of the picked
+    // token's bytes a step, the rest only when it fails.
+    // The best token in the whole vocabulary that fits (-1: none does).
+    auto best_fitting = [&]() {
+        int32_t alt = -1;
+        for (int32_t i = 0; i < n; i++)
+            if ((alt < 0 || lg[i] > lg[alt]) && fits(*open, i)) alt = i;
+        return alt;
+    };
+    if (temp <= 0) {
+        const int32_t best = (int32_t)(std::max_element(lg, lg + n) - lg);
+        if (!open || fits(*open, best)) return best;
+        repicked_++;
+        const int32_t alt = best_fitting();
+        return alt >= 0 ? alt : best;
+    }
     // The top k in one pass with a small min-heap, rather than sorting an
     // index of the whole vocabulary: sample() runs per generated token (and
     // per examined position of a verify batch), so its cost is on the clock.
@@ -37,17 +66,30 @@ int32_t Engine::sample(const float *lg, int n, const SampleParams &p) {
         }
     }
     std::sort_heap(idx_.begin(), idx_.end(), less);  // descending logit
-    std::vector<double> pr(k);
-    double mx = lg[idx_[0]], sum = 0;
-    for (int i = 0; i < k; i++) sum += pr[i] = std::exp((lg[idx_[i]] - mx) / temp);
-    double cum = 0;
-    int keep = k;
-    for (int i = 0; i < k; i++) {
-        cum += pr[i] / sum;
-        if (cum >= p.top_p) { keep = i + 1; break; }
-    }
-    std::discrete_distribution<int> d(pr.begin(), pr.begin() + keep);
-    return idx_[d(rng_)];
+    // A draw from idx_ (descending logit), cut at top_p.
+    auto draw = [&]() {
+        const int m = (int)idx_.size();
+        std::vector<double> pr(m);
+        double mx = lg[idx_[0]], sum = 0;
+        for (int i = 0; i < m; i++) sum += pr[i] = std::exp((lg[idx_[i]] - mx) / temp);
+        double cum = 0;
+        int keep = m;
+        for (int i = 0; i < m; i++) {
+            cum += pr[i] / sum;
+            if (cum >= p.top_p) { keep = i + 1; break; }
+        }
+        std::discrete_distribution<int> d(pr.begin(), pr.begin() + keep);
+        return idx_[d(rng_)];
+    };
+    const int32_t pick = draw();
+    if (!open || fits(*open, pick)) return pick;
+    // Drawn again among the candidates that fit; none of the top k does
+    // (a random model's): the best that does.
+    repicked_++;
+    idx_.erase(std::remove_if(idx_.begin(), idx_.end(), [&](int32_t t) { return !fits(*open, t); }), idx_.end());
+    if (!idx_.empty()) return draw();
+    const int32_t alt = best_fitting();
+    return alt >= 0 ? alt : pick;
 }
 
 bool kv_repair_wanted() {
@@ -587,13 +629,23 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     std::vector<int32_t> batch;
     std::vector<float> lgb;  // one row of logits per batch position
     double ts = now_ms();
-    int32_t tok = sample(in_place ? b_->logits_view() : logits.data(), nv, p);
+    repicked_ = 0;
+    int32_t tok = sample(in_place ? b_->logits_view() : logits.data(), nv, p, &u8.open());
     st.sample_ms += now_ms() - ts;
+    // At the token limit in the middle of a character, up to 3 more tokens
+    // finish it (each one that fits adds at least a byte of it).
+    auto at_limit = [&]() {
+        return st.gen_tokens >= p.max_tokens && (u8.open().empty() || st.gen_tokens >= p.max_tokens + 3);
+    };
     while (true) {
         if (t_.is_eog(tok)) { st.finish = "stop"; break; }
         emit(tok);
-        if (st.gen_tokens >= p.max_tokens) { st.finish = "length"; break; }
-        if ((int)cached_.size() + 1 >= b_->n_ctx()) { st.finish = "length"; break; }
+        if (at_limit()) { st.finish = "length"; break; }
+        if ((int)cached_.size() + 1 >= b_->n_ctx()) {
+            u8.drop_open();  // no room to finish it: left out, not sent broken
+            st.finish = "length";
+            break;
+        }
         if (gone && step % 32 == 31 && gone()) { st.finish = "left"; break; }
         batch.assign(1, tok);
         const int want = dmax;  // with adapt, the cost model below picks how many
@@ -682,9 +734,18 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         int accepted = 0;
         int32_t next = -1;
         ts = now_ms();
+        // Each position's pick fits the text before it: the turn's text so
+        // far and the drafts kept ahead of that position.
+        std::string open = u8.open();
         for (int i = 0; i < nb; i++) {
-            next = sample(lg + (size_t)i * nv, nv, p);
-            if (i + 1 < nb && next == batch[i + 1] && !t_.is_eog(next)) { accepted++; continue; }
+            next = sample(lg + (size_t)i * nv, nv, p, &open);
+            if (i + 1 < nb && next == batch[i + 1] && !t_.is_eog(next)) {
+                accepted++;
+                open += t_.decode(next);
+                size_t o = 0;
+                open = utf8_prefix_ok(open, &o) ? open.substr(open.size() - o) : std::string();
+                continue;
+            }
             break;
         }
         st.sample_ms += now_ms() - ts;
@@ -712,7 +773,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         // one short (a re-fed token is idempotent: positions are absolute).
         if (by_model && batch.size() > 1) dcached_ = cached_.size() - (accepted == nb - 1 ? 1 : 0);
         for (int i = 1; i <= accepted; i++) emit(batch[i]);
-        if (st.gen_tokens >= p.max_tokens) {
+        if (at_limit()) {
 #ifndef TS5_PS5
             // The answer ends on a kept draft, which this pass entered into
             // the cache. Without drafting the last token is never forwarded:
@@ -735,6 +796,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     pending += u8.finish();
     if (!pending.empty()) on_text(pending);
     st.gen_ms = now_ms() - t0;
+    st.repicked = repicked_;
     // What the cost model saw (TS5_DRAFT_LOG=1): the helper's measured costs
     // and the verify batches' times, to tell a wrong estimate from a wrong rule.
     if (db_ && getenv("TS5_DRAFT_LOG"))

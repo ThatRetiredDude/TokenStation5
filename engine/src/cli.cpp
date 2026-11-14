@@ -782,9 +782,11 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
                                st, err);
         printf("\n");
         if (!ok) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
-        fprintf(stderr, "ts5: prompt %d tok %.1f tok/s, gen %d tok %.1f tok/s, %s, sample %.0f ms\n",
+        fprintf(stderr, "ts5: prompt %d tok %.1f tok/s, gen %d tok %.1f tok/s, %s, sample %.0f ms",
                 st.prompt_evaluated, st.prompt_evaluated * 1000.0 / st.prompt_ms, st.gen_tokens,
                 st.gen_tokens * 1000.0 / st.gen_ms, draft_summary(st).c_str(), st.sample_ms);
+        if (st.repicked) fprintf(stderr, ", %d picks taken again to keep the text valid UTF-8", st.repicked);
+        fprintf(stderr, "\n");
         // With TS5_PROFILE set, the CPU time per forward call, and with
         // TS5_PROFILE=1 the per-kernel GPU table for the whole run (prompt
         // and generation together, as the server prints per request).

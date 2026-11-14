@@ -13,6 +13,38 @@
 
 namespace ts5 {
 
+// Whether s is valid UTF-8 but for a character it may end in the middle of;
+// *open gets the number of that character's bytes so far (0: ends whole).
+inline bool utf8_prefix_ok(std::string_view s, size_t *open) {
+    const size_t n = s.size();
+    size_t i = 0;
+    while (i < n) {
+        const unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+        int need = 0;
+        unsigned char lo = 0x80, hi = 0xBF;
+        if (c >= 0xC2 && c <= 0xDF) need = 2;
+        else if (c >= 0xE0 && c <= 0xEF) need = 3, lo = c == 0xE0 ? 0xA0 : 0x80, hi = c == 0xED ? 0x9F : 0xBF;
+        else if (c >= 0xF0 && c <= 0xF4) need = 4, lo = c == 0xF0 ? 0x90 : 0x80, hi = c == 0xF4 ? 0x8F : 0xBF;
+        if (need == 0) return false;
+        size_t k = 1;
+        for (; k < (size_t)need && i + k < n; k++) {
+            const unsigned char d = (unsigned char)s[i + k];
+            if (k == 1 ? (d < lo || d > hi) : (d & 0xC0) != 0x80) return false;
+        }
+        if (k < (size_t)need) {
+            *open = n - i;
+            return true;
+        }
+        i += (size_t)need;
+    }
+    *open = 0;
+    return true;
+}
+
 class Utf8Out {
 public:
     // Adds the bytes and returns what is ready to send: whole characters,
@@ -24,6 +56,12 @@ public:
     }
     // At the end of a turn: what is held back, a cut-off character as U+FFFD.
     std::string finish() { return drain(true); }
+    // The bytes of a character still waiting for the rest (after take(),
+    // never anything else: what can't become a character went out as U+FFFD).
+    const std::string &open() const { return held_; }
+    // Leaves a character that can't be finished out of the text, rather
+    // than ending it with U+FFFD.
+    void drop_open() { held_.clear(); }
 
 private:
     std::string held_;
