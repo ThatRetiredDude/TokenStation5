@@ -181,6 +181,43 @@ The rules, the same for all three:
 In the app on the other machine, the server is `http://THIS-MACHINE:8081/v1`
 and the API key is the key.
 
+### Users (someone else, with only what you allow)
+
+Every key belongs to a user. You are the **Owner**: everything, and every
+key made before users is yours. Another user (a family member, a friend)
+gets the chat page and the API with their own keys, never ts5-tui or the
+browser terminal, and only what you allow. On the Access page, **U** adds a
+user and opens what they may do; **N** on a user makes a key of theirs (with
+QR codes for a phone); **Enter** on a user changes their permissions, **P**
+pauses them, **D** removes them and their chats. In a script it is
+`ts5 users`:
+
+```sh
+ts5 users new Sam                         # chat only: the chat page and apps, no web search
+ts5 users new Ann --preset chat-web --owner-reads
+ts5 keys new "Sam's phone" --user Sam     # a key of Sam's
+ts5 users set Sam tokens_day=50000 max_reply=2000 web_search=on
+ts5 users set Sam on=off                  # paused: none of Sam's keys gets in
+ts5 users                                 # the users, what each may do, tokens today, their keys
+ts5 users remove Sam --forget             # Sam, Sam's keys, and Sam's chats
+```
+
+What a user may do, checked on every request and changed from the next one:
+- **Web search**: ts5's own search when a chat needs it.
+- **Apps' own tools**: the tools an app sends (an editor's, which the app
+  runs on its own machine). On by default, so an editor or any
+  OpenAI-compatible app pointed at the address with the user's key works.
+- **Tokens a day** (prompts read and replies): over it, apps get HTTP 429
+  until tomorrow. **Longest reply**: whatever the app asks for.
+- **The owner reads their chats**: chosen when the user is made; the user
+  sees it in Settings on the chat page. Otherwise a user's chats are theirs
+  alone.
+
+Each user's chats from the chat page are kept on this machine
+(`~/.local/share/tokenstation/users/ID/chats`), the same on every device with
+one of their keys. Adding a user turns "require" on: without a key, another
+machine would be the owner.
+
 ### Tailscale (reach it from anywhere)
 
 `ts5 serve` (a model ts5-tui loads, and the background service) joins your
