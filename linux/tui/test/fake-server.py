@@ -112,7 +112,7 @@ def tailnet_status():
     else:
         t["signed_in"] = True
         name = t["name"] + ".tail1234ab.ts.net."
-        out.update(state="connected", name=name, address="100.101.102.103", account="you@example.com", devices=2,
+        out.update(state="connected", name=name, address="100.101.102.103", node_id="nFAKE1CNTRL", account="you@example.com", devices=2,
                    url="http://100.101.102.103:%d/v1" % out["port"],
                    name_url="http://%s:%d/v1" % (name.rstrip("."), out["port"]))
         if TAILNET_HTTPS == "on":

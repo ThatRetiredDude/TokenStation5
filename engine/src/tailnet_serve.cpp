@@ -501,6 +501,9 @@ std::string Tailnet::status_json() {
     if (!st.problem.empty()) j.set("problem", Json::string(st.problem));
     if (!st.name.empty()) j.set("name", Json::string(st.name));
     if (!st.address.empty()) j.set("address", Json::string(st.address));
+    // Tailscale's id for this machine: what `ts5 share new USER ps5`
+    // shares (tsshare.h).
+    if (!st.node_id.empty()) j.set("node_id", Json::string(st.node_id));
     if (!st.account.empty()) j.set("account", Json::string(st.account));
     if (!st.relay.empty()) j.set("relay", Json::string(st.relay));
     j.set("devices", jnum(st.devices));

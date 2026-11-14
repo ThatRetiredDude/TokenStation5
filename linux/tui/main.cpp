@@ -207,6 +207,8 @@ struct App {
     std::vector<std::pair<int, int>> acc_list;
     std::string acc_for_user = "owner";  // whose the key being named is
     bool acc_new_user = false;           // the name being typed is a new user's
+    bool acc_token = false;              // ...is the Tailscale access token (ts5 share)
+    int acc_share_way = 0;               // Share by Tailscale: 0 this machine only, 1 the whole tailnet
     std::string acc_edit;                // the user whose permissions are open ("": none)
     int acc_edit_sel = 0;
     int acc_kind = 0, acc_sel = 0;
@@ -225,6 +227,7 @@ struct App {
     // answers ("https://NAME/"), its state (off, waiting, admin, getting, on,
     // problem) and why it has none.
     std::string tn_https_url, tn_https_state, tn_https_problem;
+    std::string tn_node_id;  // Tailscale's id for this machine (ts5 share)
     int tn_devices = 0;
     double tn_at = 0;
     // QR codes over the page: the sign-in link (closed once connected), or
@@ -849,6 +852,7 @@ void tailnet_take(const ts5::Json &j) {
     g->tn_name = j["name"].str();
     while (!g->tn_name.empty() && g->tn_name.back() == '.') g->tn_name.pop_back();
     g->tn_address = j["address"].str();
+    g->tn_node_id = j["node_id"].str();
     g->tn_url = j["url"].str();  // by its 100.x address: no MagicDNS needed
     g->tn_name_url = j["name_url"].str();
     g->tn_sign_in = j["sign_in_url"].str();
@@ -3702,7 +3706,8 @@ void draw_access() {
 
 // ---- Access: one user's permissions ----
 
-constexpr int kEdRows = 8;  // preset, web search, app tools, owner reads, tokens a day, longest reply, paused, a key
+constexpr int kEdRows = 9;  // preset, web search, app tools, owner reads, tokens a day, longest reply, paused, share, a key
+constexpr int kEdShare = 7;
 const int64_t kTokensDay[] = {0, 10000, 25000, 50000, 100000, 250000, 1000000};
 const int64_t kMaxReply[] = {0, 500, 1000, 2000, 4000, 8000};
 
@@ -3739,6 +3744,13 @@ void draw_access_user() {
         {"Paused", u.on ? "no" : "yes",
          u.on ? "paused, none of " + u.name + "'s keys gets in; the chats stay" : "none of " + u.name + "'s keys gets in now",
          !u.on},
+        // Tailscale (ts5 share, engine/src/tsshare.h): the way, and when
+        // to choose it, before Enter makes the invite.
+        {"Share by Tailscale", g->acc_share_way == 0 ? "Only this PS5" : "Join my tailnet",
+         g->acc_share_way == 0
+             ? "family, friends: own Tailscale account, reach this PS5 only, nothing else of yours"
+             : "someone you trust with all your devices: they join your tailnet and reach all of it",
+         g->acc_share_way == 1},
         {"A key for " + u.name, "Enter", "a new key, as QR codes: the phone opens the chat page signed in", false},
     };
     for (int i = 0; i < kEdRows && y < s.h - 4; i++) {
@@ -3760,7 +3772,18 @@ void draw_access_user() {
             if (k.user == u.id) keys += (keys.empty() ? "" : ", ") + k.name + (k.on ? "" : " (off)");
         s.put(x0 + 2, y++, fit("Keys: " + (keys.empty() ? std::string("none yet (the last row makes one)") : keys), w - 4), S(t.dim));
     }
-    if (g->acc_typing) {
+    if (g->acc_typing && g->acc_token) {
+        // The token never shows: as many dots as it has characters.
+        s.fill(x0, y, w, 1, Style(t.fg, t.panel2));
+        s.put(x0, y, "▌", Style(t.accent, t.panel2));
+        const int lx = s.put(x0 + 2, y, "Tailscale access token: ", Style(t.fg, t.panel2, BOLD));
+        const int hx = s.put(lx, y, fit(std::string(std::min<size_t>(g->acc_name.size(), 40), '*') + "▌", w - (lx - x0) - 2),
+                             Style(t.accent2, t.panel2, BOLD));
+        if (g->acc_name.empty())
+            s.put(hx + 1, y, fit("paste it: login.tailscale.com, Settings, Keys, Generate access token (once; kept on this machine)",
+                                 std::max(0, w - (hx + 1 - x0) - 2)),
+                  Style(t.dim, t.panel2));
+    } else if (g->acc_typing) {
         s.fill(x0, y, w, 1, Style(t.fg, t.panel2));
         s.put(x0, y, "▌", Style(t.accent, t.panel2));
         const int lx = s.put(x0 + 2, y, "A new key of " + u.name + "'s, for: ", Style(t.fg, t.panel2, BOLD));
@@ -3769,7 +3792,9 @@ void draw_access_user() {
             s.put(hx + 1, y, fit("the phone or app it is for (Enter alone: phone)", std::max(0, w - (hx + 1 - x0) - 2)),
                   Style(t.dim, t.panel2));
     }
-    draw_bottom_bar(g->acc_typing ? "Enter make the key|Esc cancel"
+    draw_bottom_bar(g->acc_typing && g->acc_token ? "Enter keep it and make the invite|Esc cancel"
+                    : g->acc_typing ? "Enter make the key|Esc cancel"
+                    : g->acc_edit_sel == kEdShare ? "↑↓ choose|←→ which way|Enter the invite's QR|Esc back to Access"
                     : g->acc_edit_sel == kEdRows - 1 ? "↑↓ choose|Enter a key and its QR codes|Esc back to Access"
                                                      : "↑↓ choose|←→ change|Esc back to Access");
 }
@@ -5489,6 +5514,73 @@ int64_t step_in(const int64_t *list, size_t n, int64_t now, int dir) {
     return list[(at + n + (size_t)(dir > 0 ? 1 : n - 1)) % n];
 }
 
+// Share by Tailscale (ts5 share, engine/src/tsshare.h): an invite for a
+// user, as a QR code, the way chosen on their page. token: one just typed,
+// kept first; "" asks for it when none is kept yet.
+void share_invite(const App::AccessUser &u, const std::string &token) {
+    ts5::Json j;
+    std::string why;
+    if (!keys_cmd(g->acc_file, "status", j, why, "share")) {
+        show_toast("Sharing by Tailscale: " + why, g->th->bad, 8);
+        return;
+    }
+    if (!token.empty()) {
+        // To ts5 on its stdin from a file only this user reads: never in a
+        // command line, which other programs here can see.
+        char path[] = "/tmp/ts5-token-XXXXXX";
+        const int fd = mkstemp(path);
+        if (fd < 0) {
+            show_toast("The token could not be handed to ts5 (no room in /tmp)", g->th->bad, 8);
+            return;
+        }
+        fchmod(fd, 0600);
+        const std::string line = token + "\n";
+        const bool wrote = write(fd, line.data(), line.size()) == (ssize_t)line.size();
+        close(fd);
+        const bool kept = wrote && keys_cmd(g->acc_file, "token set < " + shell_quote(path), j, why, "share");
+        unlink(path);
+        if (!kept) {
+            show_toast("The token was not kept: " + (why.empty() ? std::string("it could not be written") : why), g->th->bad, 10);
+            return;
+        }
+    } else if (!j["token"].boolean(false)) {
+        g->acc_typing = g->editing = g->acc_token = true;
+        g->acc_name.clear();
+        show_toast("Once: a Tailscale access token, so ts5 can make invites. login.tailscale.com, Settings, Keys, "
+                   "Generate access token; paste it here",
+                   g->th->accent, 12);
+        return;
+    }
+    const bool only_ps5 = g->acc_share_way == 0;
+    if (g->tn_state != "connected" || (only_ps5 && g->tn_node_id.empty())) {
+        show_toast("This machine isn't on Tailscale yet: the Tailscale row on Access turns it on and signs in", g->th->warn, 8);
+        return;
+    }
+    const std::string args = "new " + shell_quote(u.id) + (only_ps5 ? " ps5 " + shell_quote(g->tn_node_id) : " tailnet");
+    if (!keys_cmd(g->acc_file, args, j, why, "share")) {
+        show_toast("No invite was made: " + why, g->th->bad, 10);
+        return;
+    }
+    const std::string url = j["url"].str();
+    g->toast.clear();
+    g->qr = {{only_ps5 ? "Only this PS5" : "Join my tailnet", url}};
+    g->qr_sel = 0;
+    g->qr_sign_in = g->qr_github = g->qr_install = false;
+    g->qr_copy = false;
+    g->qr_title = " Share with " + u.name + " by Tailscale ";
+    g->qr_notes = {
+        only_ps5 ? u.name + " scans it, signs in to Tailscale with their own account (free) and accepts: they reach this "
+                            "PS5 only, nothing else of yours."
+                 : u.name + " scans it and signs in to Tailscale: they join your tailnet and can reach every device on it.",
+        "Then the last row on " + u.name + "'s page makes their key: its QR opens the chat page, signed in. Removing " +
+            u.name + " ends the share. Or open this link on any device:",
+        url};
+    g->qr_short = "Share with " + u.name + ": scan it on their phone";
+    g->qr_plain = "Share with " + u.name + " by Tailscale (" + (only_ps5 ? "this PS5 only" : "your whole tailnet") +
+                  "): open this link on " + u.name + "'s device and accept:\n\n" + url + "\n";
+    g->qr_plain_title = " Tailscale invite ";
+}
+
 void key_access_user(const Event &e) {
     const App::AccessUser u = *acc_user(g->acc_edit);
     const auto letter = [&](char c) { return e.key == K_CHAR && e.ch.size() == 1 && tolower(e.ch[0]) == c; };
@@ -5513,6 +5605,8 @@ void key_access_user(const Event &e) {
     else if (g->acc_edit_sel == 5)
         access_do_users("set " + id + " max_reply=" + std::to_string(step_in(kMaxReply, 6, u.max_reply, dir)), "");
     else if (g->acc_edit_sel == 6) access_do_users("set " + id + (u.on ? " on=off" : " on=on"), "");
+    else if (g->acc_edit_sel == kEdShare && e.key != K_ENTER) g->acc_share_way = 1 - g->acc_share_way;
+    else if (g->acc_edit_sel == kEdShare) share_invite(u, "");
     else if (e.key == K_ENTER) {
         g->acc_typing = g->editing = true;
         g->acc_name.clear();
@@ -5528,6 +5622,14 @@ void key_access(const Event &e) {
             g->acc_typing = g->editing = false;
             g->acc_for_terminal = false;
             g->acc_new_user = false;
+            g->acc_token = false;
+            g->acc_name.clear();
+        } else if (e.key == K_ENTER && g->acc_token) {
+            g->acc_typing = g->editing = g->acc_token = false;
+            std::string token = g->acc_name;
+            g->acc_name.assign(g->acc_name.size(), ' ');
+            g->acc_name.clear();
+            if (const App::AccessUser *u = acc_user(g->acc_edit)) share_invite(*u, token);
         } else if (e.key == K_ENTER) {
             g->acc_typing = g->editing = false;
             std::string name = g->acc_name;
@@ -5556,7 +5658,9 @@ void key_access(const Event &e) {
             if (!gl.empty()) g->acc_name.resize(g->acc_name.size() - gl.back().s.size());
         } else if (e.key == K_CHAR || e.key == K_PASTE) {
             for (char c : e.ch)
-                if (c != '\n' && c != '\r' && c != '\t' && g->acc_name.size() < 60) g->acc_name += c;
+                if (c != '\n' && c != '\r' && c != '\t' && (!g->acc_token || c != ' ') &&
+                    g->acc_name.size() < (g->acc_token ? 300u : 60u))
+                    g->acc_name += c;
         } else if (e.key == K_CTRL && e.ch == "u") {
             g->acc_name.clear();
         }
@@ -5617,9 +5721,23 @@ void key_access(const Event &e) {
         } else {
             g->ask_title = " Remove " + u.name + "? ";
             g->ask_text = u.name + "'s " + std::to_string(u.keys) + (u.keys == 1 ? " key stops" : " keys stop") +
-                          " working, and " + u.name + "'s chats on this machine are deleted. To stop " + u.name +
+                          " working, any Tailscale share made for " + u.name + " ends, and " + u.name +
+                          "'s chats on this machine are deleted. To stop " + u.name +
                           " for a while, pause instead (P). Remove " + u.name + "?";
-            g->ask_yes = [u] { access_do_users("remove " + shell_quote(u.id) + " --forget", u.name + ": removed"); };
+            g->ask_yes = [u] {
+                // Their Tailscale invites first (ts5 share revoke): what is
+                // left for you (someone who joined the tailnet) is said.
+                ts5::Json j;
+                std::string why;
+                if (!keys_cmd(g->acc_file, "revoke " + shell_quote(u.id), j, why, "share") &&
+                    why.find("gave no answer") == std::string::npos) {
+                    show_toast(u.name + " was kept: " + why, g->th->bad, 9);
+                    return;
+                }
+                const std::string note = j["note"].str();
+                access_do_users("remove " + shell_quote(u.id) + " --forget",
+                                u.name + ": removed" + (note.empty() ? "" : ". " + note));
+            };
         }
     } else if (flip && g->acc_sel == 0) {
         if (k != ACC_OWN) {
