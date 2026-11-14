@@ -579,8 +579,13 @@ std::string read_whole(const std::string &path) {
 
 bool write_whole(const std::string &path, const std::string &text) {
     const std::string tmp = path + ".new";
-    FILE *f = fopen(tmp.c_str(), "wb");
-    if (!f) return false;
+    // The user's own: private even if a folder above it were opened up.
+    const int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    FILE *f = fd < 0 ? nullptr : fdopen(fd, "wb");
+    if (!f) {
+        if (fd >= 0) close(fd);
+        return false;
+    }
     bool ok = fwrite(text.data(), 1, text.size(), f) == text.size();
     ok = fclose(f) == 0 && ok;
     if (ok && rename(tmp.c_str(), path.c_str()) == 0) return true;

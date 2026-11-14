@@ -186,7 +186,8 @@ def test_server(ts5, model, backend, d):
         check(code == 200 and [c["id"] for c in got.get("chats", [])] == ["lzx1"],
               "the user's other key (another device) sees the same chats", got)
         on_disk = os.path.join(d, "srv", "users", sam, "chats", "lzx1.json")
-        check(os.path.exists(on_disk) and os.stat(os.path.dirname(on_disk)).st_mode & 0o077 == 0,
+        check(os.path.exists(on_disk) and os.stat(os.path.dirname(on_disk)).st_mode & 0o077 == 0 and
+              os.stat(on_disk).st_mode & 0o077 == 0,
               "kept in users/ID/chats beside access/, for the server's user only", on_disk)
         code, got = call(there + "/ts5/chats", owner)
         check(code == 200 and got.get("chats") == [], "the owner's own chats are apart: Sam's aren't among them", got)
