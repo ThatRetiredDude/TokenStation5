@@ -39,6 +39,26 @@ public:
     // Without one, everyone gets in. /health never asks. Set before start().
     using Authorize = std::function<bool(const std::string &key, const std::string &client, std::string &name)>;
     void set_authorize(Authorize f) { state_.authorize = std::move(f); }
+    // What a request may do, as Admit (below) gives it: whose it is and
+    // that user's permissions. Without Admit, everyone who gets in is the
+    // owner, with everything.
+    struct Grant {
+        std::string key;        // the key's name ("" for none), for usage.tsv
+        std::string user;       // the user's id: "owner", or another user's
+        std::string user_name;  // what the owner called that user
+        bool owner = true;      // the owner: everything, the browser terminal too
+        bool web_search = true; // ts5's own web search in this user's chats
+        bool app_tools = true;  // tools an app sends (an editor's, which the app runs) reach the model
+        int64_t max_reply = 0;  // the longest reply in tokens; 0: no limit
+        int64_t tokens_day = 0; // tokens a day; 0: no limit
+        bool owner_reads = false;  // the owner may read this user's chats
+        // Not "": the user's tokens for today are used up, and why (429).
+        std::string over;
+    };
+    // In place of Authorize: who gets in, as whom. True lets the request in
+    // with g filled; false answers 401. Set before start().
+    using Admit = std::function<bool(const std::string &key, const std::string &client, Grant &g)>;
+    void set_admit(Admit f) { state_.admit = std::move(f); }
     // Where this server's keys are made, for the 401's last words (after
     // "Make one in "); without one, the PS5's Settings page. Set before start().
     void set_key_hint(std::string where) { state_.key_hint = std::move(where); }
@@ -119,6 +139,7 @@ public:
         std::atomic<int> phase{0}, waiting{0};
         std::function<void(const UsageRecord &)> on_usage;
         Authorize authorize;
+        Admit admit;
         std::string key_hint;
         Routes routes;
         Pages pages;

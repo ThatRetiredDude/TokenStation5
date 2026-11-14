@@ -94,7 +94,8 @@ int usage() {
             "       ts5 --version\n"
             "       ts5 search QUERY | ts5 page URL [MAX_CHARS] | ts5 usage-parse FILE\n"
             "       ts5 browser [--program auto|text|PATH] [--kind chromium|obscura] [--chars N] [--idle SECONDS]\n"
-            "       ts5 keys [--file FILE] list | new NAME | on KEY | off KEY | remove KEY | require on|off\n"
+            "       ts5 keys [--file FILE] list | new NAME [--user USER] | on KEY | off KEY | remove KEY | require on|off\n"
+            "       ts5 users [--file FILE] list | new NAME [--preset chat|chat-web] | set USER CHANGE... | remove USER\n"
             "       ts5 github sign-in | status [--repos] | sign-out | api METHOD PATH [BODY|-] [--lean]\n"
             "       ts5 feedback prepare [--summary TEXT] [--log FILE | --journal UNIT] [--settings FILE] [--chat FILE] [--no-logs] | scrub | send FILE\n"
             "       ts5 tool-parse hermes|llama3|mistral|gemma|gemma4|generic [TOOL...] < TEXT\n"
@@ -231,6 +232,7 @@ int no_model_command(int argc, char **argv) {
     }
     if (cmd == "browser") return browser_main(argc, argv);
     if (cmd == "keys") return keys_main(argc, argv);
+    if (cmd == "users") return users_main(argc, argv);
     if (cmd == "github") return github_main(argc, argv);
     if (cmd == "feedback") return feedback_main(argc, argv);
 #ifdef TS5_TAILNET
@@ -500,7 +502,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
     if (argc >= 2 && (std::string(argv[1]) == "search" || std::string(argv[1]) == "tool-parse" ||
                       std::string(argv[1]) == "usage-parse" || std::string(argv[1]) == "page" ||
                       std::string(argv[1]) == "html-text" || std::string(argv[1]) == "html-view" ||
-                      std::string(argv[1]) == "browser" || std::string(argv[1]) == "keys" ||
+                      std::string(argv[1]) == "browser" || std::string(argv[1]) == "keys" || std::string(argv[1]) == "users" ||
                       std::string(argv[1]) == "github" || std::string(argv[1]) == "feedback" ||
                       std::string(argv[1]) == "https-test"))
         return no_model_command(argc, argv);
@@ -815,6 +817,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         // "ts5 keys" (access.h). TS5_API_KEY is then one more key.
         static KeyFile *keys = nullptr;  // as long as the server
         Server::Authorize authorize;
+        Server::Admit admit;
         if (const char *kf = getenv("TS5_KEYS"); kf && *kf) {
             keys = new KeyFile(kf);
             std::string err;
@@ -827,18 +830,34 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
                                                     "from the tailnet only with one",
                     on ? "" : ", and none is on yet (ts5 keys new)");
             const char *one = getenv("TS5_API_KEY");
-            authorize = [one = std::string(one ? one : "")](const std::string &got, const std::string &client,
-                                                            std::string &name) {
+            admit = [one = std::string(one ? one : "")](const std::string &got, const std::string &client,
+                                                        Server::Grant &g) {
                 if (!one.empty() && got == one) {
-                    name = "TS5_API_KEY";
+                    g = Server::Grant();
+                    g.user = "owner";
+                    g.user_name = "Owner";
+                    g.key = "TS5_API_KEY";
                     return true;
                 }
-                return keys->authorize(got, client, name);
+                return keys->admit(got, client, g);
+            };
+            authorize = [admit](const std::string &got, const std::string &client, std::string &name) {
+                Server::Grant g;
+                const bool ok = admit(got, client, g);
+                name = g.key;
+                return ok;
+            };
+            // Each request's tokens (the prompt read anew and the reply) to its user's day.
+            on_usage = [log_on = on_usage](const UsageRecord &r) {
+                if (log_on) log_on(r);
+                keys->count(r.user, r.prompt_new + r.gen);
             };
         }
         // Tailscale (tailnet_serve.h), beside the keys: off until ts5-tui's
         // Access page turns it on.
-        std::function<void(Server &)> setup;
+        std::function<void(Server &)> setup = [admit](Server &s) {
+            if (admit) s.set_admit(admit);
+        };
 #ifdef TS5_TAILNET
         static Tailnet *tailnet = nullptr;  // as long as the server
         if (keys) {
@@ -850,10 +869,21 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         }
         // The chat page and, once Access turns it on, the browser terminal
         // (web_serve.h).
-        setup = [authorize](Server &s) {
+        setup = [authorize, admit](Server &s) {
+            if (admit) s.set_admit(admit);
             if (tailnet) tailnet->attach(s);
             WebOptions w;
             w.authorize = authorize;
+            w.admit = admit;
+            if (keys) {
+                w.user_dir = [](const std::string &user) { return keys->user_dir(user); };
+                w.readable_users = [] {
+                    std::vector<std::pair<std::string, std::string>> out;
+                    for (const AccessUser &u : keys->users())
+                        if (!u.owner() && u.owner_reads) out.emplace_back(u.id, u.name);
+                    return out;
+                };
+            }
             if (tailnet) w.terminal = [] { return tailnet->terminal(); };
             attach_web(s, w);
         };

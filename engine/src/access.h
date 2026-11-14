@@ -17,12 +17,32 @@
 // holds from the next request, with the model still loaded. When a key
 // was last used goes to FILE.used ("id<TAB>seconds", at most once a minute
 // a key), so the file itself has one writer.
+//
+// Users (users.tsv beside the keys): every key belongs to a user, and the
+// user holds the permissions, so a lost phone's key is turned off without
+// touching the rest, and a user's permissions change on all of its keys at
+// once, from the next request. The owner is a user that is always there
+// ("owner", never in the file): everything, the browser terminal too. A key
+// without a user (every key made before users) is the owner's. Another user
+// has the chat page and the API (an editor pointed at the address with its
+// own key), never the browser terminal, and:
+//   web_search  ts5's own web search in its chats
+//   app_tools   the tools an app sends (an editor's, which the app runs)
+//   tokens_day  tokens a day (the prompt read anew and the reply), 0 none
+//   max_reply   the longest reply in tokens, 0 none
+//   owner_reads the owner may read its chats (chosen when it is made; the
+//               user sees it in its own settings on the chat page)
+// Its chats from the chat page are its own (users/ID/chats beside access/).
+// How many tokens each user had today goes to users.today (the server
+// writes it; "ts5 users list" reads it).
 #pragma once
 #include <cstdint>
 #include <map>
 #include <mutex>
 #include <string>
 #include <vector>
+
+#include "server.h"
 
 namespace ts5 {
 
@@ -32,7 +52,26 @@ struct AccessKey {
     std::string sha256;
     bool on = true;
     int64_t created = 0, used = 0;  // Unix seconds; used 0: never
+    std::string user = "owner";     // whose key it is
 };
+
+struct AccessUser {
+    std::string id;    // "owner", or 8 hex digits
+    std::string name;  // what the owner called them, such as "Sam"
+    bool on = true;    // off: none of its keys gets in
+    bool web_search = true, app_tools = true;
+    bool owner_reads = false;
+    int64_t tokens_day = 0, max_reply = 0;
+    int64_t created = 0;
+    int64_t today = 0;  // tokens so far today (users.today)
+    bool owner() const { return id == "owner"; }
+};
+
+// The presets a user is made with: "chat" (chat only, no web search) and
+// "chat-web" (with ts5's web search). The owner's own is "owner".
+bool apply_preset(AccessUser &u, const std::string &preset);
+// Which preset the user's switches are, or "custom".
+std::string preset_of(const AccessUser &u);
 
 class KeyFile {
 public:
@@ -46,8 +85,9 @@ public:
     bool required() const;
 
     // A new key, turned on and saved: its text, such as
-    // "ts5-k7qp2-wx9md-3hf8r-tz6na" (100 random bits). "" with err.
-    std::string create(const std::string &name, std::string &id, std::string &err);
+    // "ts5-k7qp2-wx9md-3hf8r-tz6na" (100 random bits). "" with err. user:
+    // whose (a user's id or name; "" the owner).
+    std::string create(const std::string &name, std::string &id, std::string &err, const std::string &user = "");
     // which: a key's id, or its name when one key has it.
     bool set_on(const std::string &which, bool on, std::string &err);
     bool remove(const std::string &which, std::string &err);
@@ -55,8 +95,32 @@ public:
 
     // Server::Authorize (server.h), on any thread.
     bool authorize(const std::string &key, const std::string &client, std::string &name);
+    // Server::Admit: the same, with whose request it is and what it may do.
+    bool admit(const std::string &key, const std::string &client, Server::Grant &g);
+
+    // Users: the owner first, then the file's.
+    std::vector<AccessUser> users() const;
+    // A new user from a preset, saved; its id, or "" with err.
+    std::string add_user(const std::string &name, const std::string &preset, std::string &err);
+    // Changes a user (its id or name): "name=NAME", "preset=P", "on=0|1",
+    // "web_search=0|1", "app_tools=0|1", "owner_reads=0|1", "tokens_day=N",
+    // "max_reply=N".
+    bool set_user(const std::string &which, const std::vector<std::string> &changes, std::string &err);
+    // A user and its keys; its chats stay unless forget is set.
+    bool remove_user(const std::string &which, bool forget, std::string &err);
+    // Counts a request's tokens to its user for today (the server, after it).
+    void count(const std::string &user, int64_t tokens);
+    // Where a user's own things are (its chats): users/ID beside the
+    // keys' folder.
+    std::string user_dir(const std::string &user) const;
 
 private:
+    int find_user_locked(const std::string &which, std::string &err) const;
+    bool save_users_locked(std::string &err);
+    void load_today_locked();
+    const AccessUser *user_locked(const std::string &id) const;
+    bool fresh_locked();
+
     bool load_locked(std::string &err);
     bool save_locked(std::string &err);
     int find_locked(const std::string &which, std::string &err) const;
@@ -65,7 +129,11 @@ private:
     std::string path_;
     mutable std::mutex mu_;
     std::vector<AccessKey> keys_;
+    std::vector<AccessUser> users_;  // not the owner
+    std::map<std::string, int64_t> today_;  // tokens today by user
+    std::string today_date_;                // "2026-11-14", local
     bool required_ = false;
+    int64_t users_mtime_ns_ = -1, users_size_ = -1;
     // What the file was when it was read (authorize looks again a second later at the earliest).
     int64_t seen_mtime_ns_ = -1, seen_size_ = -1;
     double looked_ = 0;
@@ -82,7 +150,9 @@ std::string default_keys_path();
 // Tailscale gives its devices).
 bool on_tailnet(const std::string &client);
 
-// ts5 keys [--file FILE] [--json] list | new NAME | on KEY | off KEY | remove KEY | require on|off
+// ts5 keys [--file FILE] [--json] list | new NAME [--user USER] | on KEY | off KEY | remove KEY | require on|off
 int keys_main(int argc, char **argv);
+// ts5 users [--file FILE] [--json] list | new NAME [--preset P] | set USER CHANGE... | remove USER [--forget]
+int users_main(int argc, char **argv);
 
 }  // namespace ts5

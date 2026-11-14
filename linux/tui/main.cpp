@@ -190,8 +190,24 @@ struct App {
         std::string id, name;
         bool on;
         int64_t created, used;
+        std::string user;  // whose: "owner" or a user's id
     };
     std::vector<AccessKey> acc_keys;
+    // The users ("ts5 users"): the owner first. Each holds its keys and its
+    // permissions; the list under the rows is a user, then its keys
+    // (acc_list: the user's index, and the key's, -1 on the user's own row).
+    struct AccessUser {
+        std::string id, name;
+        bool owner = false, on = true, web_search = false, app_tools = true, owner_reads = false;
+        int64_t tokens_day = 0, max_reply = 0, today = 0;
+        int keys = 0;
+    };
+    std::vector<AccessUser> acc_users;
+    std::vector<std::pair<int, int>> acc_list;
+    std::string acc_for_user = "owner";  // whose the key being named is
+    bool acc_new_user = false;           // the name being typed is a new user's
+    std::string acc_edit;                // the user whose permissions are open ("": none)
+    int acc_edit_sel = 0;
     int acc_kind = 0, acc_sel = 0;
     bool acc_required = false, acc_writable = true, acc_typing = false;
     std::string acc_file, acc_err, acc_name;
@@ -702,13 +718,16 @@ std::string access_addresses() {
 }
 
 // Runs "ts5 keys" on file: its JSON answer. False with why.
-bool keys_cmd(const std::string &file, const std::string &args, ts5::Json &out, std::string &why) {
+// what: "keys", or "users" for the users and their keys.
+bool keys_cmd(const std::string &file, const std::string &args, ts5::Json &out, std::string &why,
+              const char *what = "keys") {
     const std::string ts5 = which("ts5");
     if (ts5.empty()) {
         why = "ts5 isn't installed here";
         return false;
     }
-    const std::string cmd = shell_quote(ts5) + " keys --file " + shell_quote(file) + " --json " + args + " 2>/dev/null";
+    const std::string cmd =
+        shell_quote(ts5) + " " + what + " --file " + shell_quote(file) + " --json " + args + " 2>/dev/null";
     FILE *p = popen(cmd.c_str(), "r");
     if (!p) {
         why = "ts5 keys could not be run";
@@ -720,7 +739,7 @@ bool keys_cmd(const std::string &file, const std::string &args, ts5::Json &out, 
     while ((n = fread(buf, 1, sizeof buf, p)) > 0) text.append(buf, n);
     pclose(p);
     if (!ts5::Json::parse(text, out) || out.type != ts5::Json::OBJ) {
-        why = "ts5 keys gave no answer: the ts5 here is older than this ts5-tui";
+        why = std::string("ts5 ") + what + " gave no answer: the ts5 here is older than this ts5-tui";
         return false;
     }
     if (out.o.count("error")) {
@@ -740,24 +759,83 @@ void access_read() {
     g->acc_at = now_s();
     g->acc_err.clear();
     tailnet_read();
-    if (k == ACC_REMOTE) {
-        g->acc_keys.clear();
-        return;
-    }
+    g->acc_keys.clear();
+    g->acc_users.clear();
+    g->acc_list.clear();
+    if (k == ACC_REMOTE) return;
     ts5::Json j;
     std::string why;
-    if (!keys_cmd(g->acc_file, "list", j, why)) {
-        g->acc_keys.clear();
+    if (!keys_cmd(g->acc_file, "list", j, why, "users")) {
         g->acc_err = why;
+        g->acc_edit.clear();
         return;
     }
     g->acc_required = j["required"].boolean(false);
     g->acc_writable = j["writable"].boolean(true) && k != ACC_TV;
-    g->acc_keys.clear();
-    for (const ts5::Json &x : j["keys"].a)
-        g->acc_keys.push_back({x["id"].str(), x["name"].str(), x["on"].boolean(true), (int64_t)x["created"].num(0),
-                               (int64_t)x["used"].num(0)});
-    g->acc_sel = std::max(0, std::min(g->acc_sel, kAccRows - 1 + (int)g->acc_keys.size()));
+    for (const ts5::Json &u : j["users"].a) {
+        App::AccessUser au;
+        au.id = u["id"].str();
+        au.name = u["name"].str();
+        au.owner = u["owner"].boolean(false);
+        au.on = u["on"].boolean(true);
+        au.web_search = u["web_search"].boolean(false);
+        au.app_tools = u["app_tools"].boolean(true);
+        au.owner_reads = u["owner_reads"].boolean(false);
+        au.tokens_day = (int64_t)u["tokens_day"].num(0);
+        au.max_reply = (int64_t)u["max_reply"].num(0);
+        au.today = (int64_t)u["today"].num(0);
+        au.keys = (int)u["keys"].a.size();
+        // The TV app's keys are its own: no users there.
+        if (k == ACC_TV && !au.owner) continue;
+        g->acc_list.push_back({(int)g->acc_users.size(), -1});
+        for (const ts5::Json &x : u["keys"].a) {
+            g->acc_list.push_back({(int)g->acc_users.size(), (int)g->acc_keys.size()});
+            g->acc_keys.push_back({x["id"].str(), x["name"].str(), x["on"].boolean(true), (int64_t)x["created"].num(0),
+                                   (int64_t)x["used"].num(0), au.id});
+        }
+        g->acc_users.push_back(au);
+    }
+    bool still = false;
+    for (const App::AccessUser &u : g->acc_users) still |= u.id == g->acc_edit;
+    if (!still) g->acc_edit.clear();
+    g->acc_sel = std::max(0, std::min(g->acc_sel, kAccRows - 1 + (int)g->acc_list.size()));
+}
+
+// The user of the list's row sel (its own row or one of its keys), or null.
+const App::AccessUser *acc_user_at(int sel) {
+    const int i = sel - kAccRows;
+    if (i < 0 || i >= (int)g->acc_list.size()) return nullptr;
+    return &g->acc_users[(size_t)g->acc_list[(size_t)i].first];
+}
+// The key on the list's row sel, or null (a user's own row, the rows above).
+const App::AccessKey *acc_key_at(int sel) {
+    const int i = sel - kAccRows;
+    if (i < 0 || i >= (int)g->acc_list.size() || g->acc_list[(size_t)i].second < 0) return nullptr;
+    return &g->acc_keys[(size_t)g->acc_list[(size_t)i].second];
+}
+const App::AccessUser *acc_user(const std::string &id) {
+    for (const App::AccessUser &u : g->acc_users)
+        if (u.id == id) return &u;
+    return nullptr;
+}
+std::string grouped(int64_t n) {
+    std::string d = std::to_string(n), out;
+    for (size_t i = 0; i < d.size(); i++) {
+        if (i && (d.size() - i) % 3 == 0) out += ',';
+        out += d[i];
+    }
+    return out;
+}
+// What a user may do, in a few words.
+std::string acc_user_summary(const App::AccessUser &u) {
+    if (u.owner) return "you: everything, ts5-tui and the browser terminal too";
+    std::string out = u.web_search ? "chat + web search" : "chat only";
+    if (!u.app_tools) out += " · no app tools";
+    if (u.tokens_day > 0) out += " · " + grouped(u.today) + " of " + grouped(u.tokens_day) + " tokens today";
+    else if (u.today > 0) out += " · " + grouped(u.today) + " tokens today";
+    if (u.max_reply > 0) out += " · replies up to " + grouped(u.max_reply);
+    if (u.owner_reads) out += " · you may read its chats";
+    return out;
 }
 
 // The server's Tailscale from its JSON (GET or POST /ts5/tailnet).
@@ -3359,7 +3437,13 @@ void draw_logs() {
 
 // ---- Access ----
 
+void draw_access_user();
+
 void draw_access() {
+    if (!g->acc_edit.empty() && acc_user(g->acc_edit)) {
+        draw_access_user();
+        return;
+    }
     Screen &s = g->scr;
     const Theme &t = *g->th;
     const int w = std::min(s.w - 4, 104);
@@ -3510,31 +3594,50 @@ void draw_access() {
         draw_bottom_bar("↑↓ choose|←→ change|N new key|Tab/1-7 pages");
         return;
     }
-    s.put(x0 + 2, y, "Keys", S(t.fg, BOLD));
+    s.put(x0 + 2, y, "Users", S(t.fg, BOLD));
     {
         std::string file = g->acc_file;
         const char *home = getenv("HOME");
         if (home && *home && file.rfind(std::string(home) + "/", 0) == 0) file = "~" + file.substr(strlen(home));
-        s.put(x0 + 8, y, fit("shown once, when made · kept as SHA-256 in " + file, w - 10), S(t.dim));
+        s.put(x0 + 9, y,
+              fit(k == ACC_TV ? "the TV app's keys · kept as SHA-256 in " + file
+                              : "each with its own keys, chats and permissions · keys shown once, kept as SHA-256 in " + file,
+                  w - 11),
+              S(t.dim));
     }
     y++;
     if (!g->acc_err.empty()) {
         s.put(x0 + 2, y++, fit(g->acc_err, w - 4), S(t.bad));
-    } else if (g->acc_keys.empty() && !g->acc_typing) {
-        s.put(x0 + 2, y++, fit(k == ACC_TV ? "None yet." : "None yet. N makes one: name it after the app or the machine it is for.", w - 4),
+    } else if (g->acc_keys.empty() && g->acc_users.size() <= 1 && !g->acc_typing) {
+        s.put(x0 + 2, y++,
+              fit(k == ACC_TV ? "No keys yet."
+                              : "No keys yet. N makes one for you; U adds a user (someone else, with only the chat page).",
+                  w - 4),
               S(t.dim));
     }
     const int name_w = std::max(12, std::min(40, w - 60));
     const int room = std::max(1, s.h - 3 - y - (g->acc_typing ? 1 : 0));
     const int chosen = g->acc_sel - kAccRows;
-    const int first = std::max(0, std::min(chosen - room + 1, (int)g->acc_keys.size() - room));
-    for (int i = std::max(0, first); i < (int)g->acc_keys.size() && y < s.h - 3 - (g->acc_typing ? 1 : 0); i++, y++) {
-        const App::AccessKey &key = g->acc_keys[(size_t)i];
+    const int first = std::max(0, std::min(chosen - room + 1, (int)g->acc_list.size() - room));
+    int user_w = 8;  // the users' names' column
+    for (const App::AccessUser &u : g->acc_users) user_w = std::max(user_w, std::min(name_w, text_width(u.name) + 3));
+    for (int i = std::max(0, first); i < (int)g->acc_list.size() && y < s.h - 3 - (g->acc_typing ? 1 : 0); i++, y++) {
+        const App::AccessUser &u = g->acc_users[(size_t)g->acc_list[(size_t)i].first];
+        const int ki = g->acc_list[(size_t)i].second;
         const bool on = chosen == i && !g->acc_typing;
         const Style row = on ? Style(t.fg, t.panel2) : Style(t.fg, t.bg);
         s.fill(x0, y, w, 1, row);
         s.put(x0, y, on ? "▌" : " ", Style(t.accent, row.bg));
-        s.put(x0 + 2, y, fit(key.name, name_w), Style(key.on ? t.fg : t.dim, row.bg, BOLD));
+        if (ki < 0) {
+            s.put(x0 + 2, y, fit(u.name, user_w - 1), Style(u.on ? t.accent : t.dim, row.bg, BOLD));
+            std::string what = acc_user_summary(u);
+            if (!u.on) what = "paused · " + what;
+            what += fmt(" · %d %s", u.keys, u.keys == 1 ? "key" : "keys");
+            s.put(x0 + 2 + user_w, y, fit(what, w - user_w - 4), Style(u.on ? t.fg : t.warn, row.bg, u.on ? 0 : ITALIC));
+            continue;
+        }
+        const App::AccessKey &key = g->acc_keys[(size_t)ki];
+        s.put(x0 + 4, y, fit(key.name, name_w - 2), Style(key.on ? t.fg : t.dim, row.bg));
         s.put(x0 + 3 + name_w, y, key.on ? "on " : "off", Style(key.on ? t.good : t.warn, row.bg, BOLD));
         s.put(x0 + 8 + name_w, y,
               fit("made " + (key.created ? when_text(key.created) : std::string("—")) + "   last used " +
@@ -3545,10 +3648,17 @@ void draw_access() {
     if (g->acc_typing) {
         s.fill(x0, y, w, 1, Style(t.fg, t.panel2));
         s.put(x0, y, "▌", Style(t.accent, t.panel2));
-        const int x = s.put(x0 + 2, y, "A new key for: ", Style(t.fg, t.panel2, BOLD));
+        const App::AccessUser *for_user = acc_user(g->acc_for_user);
+        const std::string label = g->acc_new_user ? "A new user: "
+                                  : for_user && !for_user->owner ? "A new key of " + for_user->name + "'s, for: "
+                                                                 : "A new key for: ";
+        const int x = s.put(x0 + 2, y, label, Style(t.fg, t.panel2, BOLD));
         const int hx = s.put(x, y, fit(g->acc_name + "▌", w - (x - x0) - 2), Style(t.accent2, t.panel2, BOLD));
         if (g->acc_name.empty())
-            s.put(hx + 1, y, fit("the phone or app it is for (Enter alone: phone)", std::max(0, w - (hx + 1 - x0) - 2)),
+            s.put(hx + 1, y,
+                  fit(g->acc_new_user ? "their name, such as Sam (chat page only; you choose the rest next)"
+                                      : "the phone or app it is for (Enter alone: phone)",
+                      std::max(0, w - (hx + 1 - x0) - 2)),
                   Style(t.dim, t.panel2));
         y++;
     }
@@ -3559,8 +3669,13 @@ void draw_access() {
                                    : "Your user can't change that file.",
                   w - 4),
               S(t.warn));
-    draw_bottom_bar(g->acc_typing                ? "Enter make the key|Esc cancel"
-                    : g->acc_sel >= kAccRows     ? "↑↓ choose|Enter on or off|D remove|N new key|Tab/1-7 pages"
+    const App::AccessUser *su = acc_user_at(g->acc_sel);
+    draw_bottom_bar(g->acc_typing                ? (g->acc_new_user ? "Enter add the user|Esc cancel" : "Enter make the key|Esc cancel")
+                    : su && !acc_key_at(g->acc_sel) && su->owner
+                        ? "↑↓ choose|N new key for you|U new user|Tab/1-7 pages"
+                    : su && !acc_key_at(g->acc_sel)
+                        ? "↑↓ choose|Enter permissions|P pause|D remove|N new key for them|U new user|Tab/1-7 pages"
+                    : g->acc_sel >= kAccRows     ? "↑↓ choose|Enter on or off|D remove|N new key|U new user|Tab/1-7 pages"
                     : g->acc_sel == 2 && g->tn_on && g->tn_state == "sign_in"
                         ? "↑↓ choose|Enter the QR code|←→ on or off|D sign out|N new key|Tab/1-7 pages"
                     : g->acc_sel == 2 && g->tn_on ? "↑↓ choose|←→ on or off|D sign out|N new key|Tab/1-7 pages"
@@ -3568,6 +3683,80 @@ void draw_access() {
                         ? "↑↓ choose|Enter the QR code|←→ on or off|N new key|Tab/1-7 pages"
                     : g->acc_sel == kAccConnect   ? "↑↓ choose|Enter a key and its QR codes|N new key|Tab/1-7 pages"
                                                   : "↑↓ choose|←→ change|N new key|Tab/1-7 pages");
+}
+
+// ---- Access: one user's permissions ----
+
+constexpr int kEdRows = 8;  // preset, web search, app tools, owner reads, tokens a day, longest reply, paused, a key
+const int64_t kTokensDay[] = {0, 10000, 25000, 50000, 100000, 250000, 1000000};
+const int64_t kMaxReply[] = {0, 500, 1000, 2000, 4000, 8000};
+
+void draw_access_user() {
+    Screen &s = g->scr;
+    const Theme &t = *g->th;
+    const App::AccessUser &u = *acc_user(g->acc_edit);
+    const int w = std::min(s.w - 4, 104);
+    const int x0 = (s.w - w) / 2;
+    int y = body_top() + 1;
+    int x = s.put(x0 + 1, y, "Access › ", S(t.dim, BOLD));
+    x = s.put(x, y, u.name, S(t.accent, BOLD));
+    s.put(x + 2, y, fit("what " + u.name + " may do · from the next request, on all " + u.name + "'s keys", w - (x + 2 - x0)),
+          S(t.dim));
+    y += 2;
+    struct Row {
+        std::string label, value, note;
+        bool warn;
+    };
+    const auto limit = [](int64_t n, const char *unit) { return n > 0 ? grouped(n) + " " + unit : std::string("no limit"); };
+    std::vector<Row> rows = {
+        {"Preset", u.web_search ? "Chat + web search" : "Chat only",
+         "the chat page and apps with " + u.name + "'s key; never ts5-tui or the browser terminal", false},
+        {"Web search", u.web_search ? "on" : "off", "ts5's own web search when a chat needs it", false},
+        {"Apps' own tools", u.app_tools ? "on" : "off",
+         "an editor's tools (files, commands), which the editor runs on " + u.name + "'s own machine", false},
+        {"You read the chats", u.owner_reads ? "yes" : "no",
+         u.owner_reads ? "under Chats on your chat page. " + u.name + " sees this in Settings there"
+                       : "no: " + u.name + "'s chats are " + u.name + "'s alone (shown in Settings on the chat page)",
+         false},
+        {"Tokens a day", limit(u.tokens_day, "tokens"),
+         grouped(u.today) + " today (prompts read and replies); over it, apps are told to wait until tomorrow", false},
+        {"Longest reply", limit(u.max_reply, "tokens"), "whatever the app asks for", false},
+        {"Paused", u.on ? "no" : "yes",
+         u.on ? "paused, none of " + u.name + "'s keys gets in; the chats stay" : "none of " + u.name + "'s keys gets in now",
+         !u.on},
+        {"A key for " + u.name, "Enter", "a new key, as QR codes: the phone opens the chat page signed in", false},
+    };
+    for (int i = 0; i < kEdRows && y < s.h - 4; i++) {
+        const bool on = g->acc_edit_sel == i && !g->acc_typing;
+        const Style row = on ? Style(t.fg, t.panel2) : Style(t.fg, t.bg);
+        s.fill(x0, y, w, 2, row);
+        s.put(x0, y, on ? "▌" : " ", Style(t.accent, row.bg));
+        s.put(x0, y + 1, on ? "▌" : " ", Style(t.accent, row.bg));
+        s.put(x0 + 2, y, fit(rows[i].label, 21), Style(t.fg, row.bg, BOLD));
+        s.put(x0 + 24, y, fit(i == kEdRows - 1 ? rows[i].value : "‹ " + rows[i].value + " ›", w - 26),
+              Style(on ? t.accent2 : t.accent, row.bg, BOLD));
+        s.put(x0 + 24, y + 1, fit(rows[i].note, w - 26), Style(rows[i].warn ? t.warn : t.dim, row.bg, ITALIC));
+        y += 2;
+    }
+    y++;
+    if (y < s.h - 3) {
+        std::string keys;
+        for (const App::AccessKey &k : g->acc_keys)
+            if (k.user == u.id) keys += (keys.empty() ? "" : ", ") + k.name + (k.on ? "" : " (off)");
+        s.put(x0 + 2, y++, fit("Keys: " + (keys.empty() ? std::string("none yet (the last row makes one)") : keys), w - 4), S(t.dim));
+    }
+    if (g->acc_typing) {
+        s.fill(x0, y, w, 1, Style(t.fg, t.panel2));
+        s.put(x0, y, "▌", Style(t.accent, t.panel2));
+        const int lx = s.put(x0 + 2, y, "A new key of " + u.name + "'s, for: ", Style(t.fg, t.panel2, BOLD));
+        const int hx = s.put(lx, y, fit(g->acc_name + "▌", w - (lx - x0) - 2), Style(t.accent2, t.panel2, BOLD));
+        if (g->acc_name.empty())
+            s.put(hx + 1, y, fit("the phone or app it is for (Enter alone: phone)", std::max(0, w - (hx + 1 - x0) - 2)),
+                  Style(t.dim, t.panel2));
+    }
+    draw_bottom_bar(g->acc_typing ? "Enter make the key|Esc cancel"
+                    : g->acc_edit_sel == kEdRows - 1 ? "↑↓ choose|Enter a key and its QR codes|Esc back to Access"
+                                                     : "↑↓ choose|←→ change|Esc back to Access");
 }
 
 // ---- Connectors ----
@@ -4879,6 +5068,7 @@ void go(ScreenId to) {
     if (to == ACCESS) {
         g->acc_typing = false;
         g->acc_sel = 0;
+        g->acc_edit.clear();
         access_read();
     }
     if (to == CONNECTORS) {
@@ -5124,14 +5314,19 @@ bool access_do(const std::string &args, const std::string &done) {
 void access_new(const std::string &name) {
     ts5::Json j;
     std::string why;
-    if (!keys_cmd(g->acc_file, "new " + shell_quote(name), j, why)) {
+    const std::string uid = g->acc_for_user.empty() ? "owner" : g->acc_for_user;
+    const App::AccessUser *who = acc_user(uid);
+    const bool owner = !who || who->owner;
+    const std::string uname = who ? who->name : "Owner";
+    if (!keys_cmd(g->acc_file, "new " + shell_quote(name) + (owner ? "" : " --user " + shell_quote(uid)), j, why)) {
         show_toast("No key was made: " + why, g->th->bad, 9);
         access_read();
         return;
     }
     access_read();
-    for (size_t i = 0; i < g->acc_keys.size(); i++)
-        if (g->acc_keys[i].id == j["id"].str()) g->acc_sel = kAccRows + (int)i;
+    for (size_t i = 0; i < g->acc_list.size(); i++)
+        if (g->acc_list[i].second >= 0 && g->acc_keys[(size_t)g->acc_list[i].second].id == j["id"].str())
+            g->acc_sel = kAccRows + (int)i;
     const std::string key = j["key"].str(), at = access_addresses();
     const AccessKind k = (AccessKind)g->acc_kind;
     const bool reach = k == ACC_OWN ? g->cfg.lan : true;
@@ -5141,7 +5336,8 @@ void access_new(const std::string &name) {
     const std::vector<std::string> lan = lan_addresses();
     const std::string lan_url = reach && !lan.empty() ? fmt("http://%s:%d/v1", lan[0].c_str(), endpoint().port) : "";
     const std::string url = tailnet ? g->tn_url : lan_url;
-    std::string text = "The API key for \"" + j["name"].str() + "\":\n\n" + key + "\n\n"
+    std::string text = "The API key for \"" + j["name"].str() + "\"" + (owner ? "" : ", one of " + uname + "'s") + ":\n\n" +
+                       key + "\n\n"
                        "This is the only time it is shown: ts5 keeps its SHA-256, not the key. If it gets lost, remove "
                        "it on the Access page and make another.\n\n";
     if (tailnet) {
@@ -5164,7 +5360,8 @@ void access_new(const std::string &name) {
     std::string base = url;
     if (base.size() > 3 && base.compare(base.size() - 3, 3, "/v1") == 0) base.resize(base.size() - 3);
     if (tailnet) base = pages_base();
-    const bool term = tailnet && g->tn_terminal && k != ACC_TV;
+    // Another user's key: the chat page and apps, never the browser terminal.
+    const bool term = tailnet && g->tn_terminal && k != ACC_TV && owner;
     g->toast.clear();
     g->qr.clear();
     if (!base.empty()) {
@@ -5179,7 +5376,7 @@ void access_new(const std::string &name) {
     g->qr_sel = 0;
     g->qr_sign_in = g->qr_github = g->qr_install = false;
     g->qr_copy = true;
-    g->qr_title = " Connect " + j["name"].str() + " ";
+    g->qr_title = " Connect " + j["name"].str() + (owner ? "" : " (" + uname + ")") + " ";
     g->qr_notes.clear();
     if (!base.empty()) {
         const std::string first = term ? "the browser terminal (all of ts5-tui: models, settings, fans, keys)"
@@ -5192,6 +5389,9 @@ void access_new(const std::string &name) {
         g->qr_notes.push_back("Other machines can't reach the model yet (Other devices or Tailscale, above): the key is "
                               "ready for when they can.");
     }
+    if (!owner)
+        g->qr_notes.push_back(uname + "'s key: the chat page and apps (an editor too), with " + uname +
+                              "'s permissions and chats. Never ts5-tui or the browser terminal.");
     g->qr_notes.push_back(std::string("Shown this once: ts5 keeps only its SHA-256.") +
                           (sent ? " The key alone is on the clipboard too, if the terminal allows it." : "") +
                           " A tap on the text under a code copies it.");
@@ -5206,15 +5406,86 @@ void access_new(const std::string &name) {
     g->qr_plain_title = "the new key";
 }
 
+// Runs "ts5 users ARGS" on the page's file and reads the users again.
+bool access_do_users(const std::string &args, const std::string &done) {
+    ts5::Json j;
+    std::string why;
+    const bool ok = keys_cmd(g->acc_file, args, j, why, "users");
+    if (!ok) show_toast("Not done: " + why, g->th->bad, 9);
+    else if (!done.empty()) show_toast(done, g->th->good, 5);
+    access_read();
+    return ok;
+}
+
+// The next value of a list's (dir +1 or -1), from the one now.
+int64_t step_in(const int64_t *list, size_t n, int64_t now, int dir) {
+    size_t at = 0;
+    for (size_t i = 0; i < n; i++)
+        if (list[i] <= now) at = i;
+    return list[(at + n + (size_t)(dir > 0 ? 1 : n - 1)) % n];
+}
+
+void key_access_user(const Event &e) {
+    const App::AccessUser u = *acc_user(g->acc_edit);
+    const auto letter = [&](char c) { return e.key == K_CHAR && e.ch.size() == 1 && tolower(e.ch[0]) == c; };
+    const int dir = e.key == K_LEFT ? -1 : 1;
+    const bool flip = e.key == K_ENTER || e.key == K_LEFT || e.key == K_RIGHT || letter(' ');
+    const std::string id = shell_quote(u.id);
+    if (e.key == K_ESC) {
+        g->acc_edit.clear();
+        return;
+    }
+    if (e.key == K_UP) g->acc_edit_sel = (g->acc_edit_sel + kEdRows - 1) % kEdRows;
+    else if (e.key == K_DOWN) g->acc_edit_sel = (g->acc_edit_sel + 1) % kEdRows;
+    else if (!flip) nav_key(e);
+    else if (g->acc_edit_sel == 0) access_do_users("set " + id + (u.web_search ? " preset=chat" : " preset=chat-web"), "");
+    else if (g->acc_edit_sel == 1) access_do_users("set " + id + (u.web_search ? " web_search=off" : " web_search=on"), "");
+    else if (g->acc_edit_sel == 2) access_do_users("set " + id + (u.app_tools ? " app_tools=off" : " app_tools=on"), "");
+    else if (g->acc_edit_sel == 3)
+        access_do_users("set " + id + (u.owner_reads ? " owner_reads=off" : " owner_reads=on"),
+                        u.owner_reads ? u.name + "'s chats: " + u.name + "'s alone" : "You may read " + u.name + "'s chats (" + u.name + " sees so in Settings)");
+    else if (g->acc_edit_sel == 4)
+        access_do_users("set " + id + " tokens_day=" + std::to_string(step_in(kTokensDay, 7, u.tokens_day, dir)), "");
+    else if (g->acc_edit_sel == 5)
+        access_do_users("set " + id + " max_reply=" + std::to_string(step_in(kMaxReply, 6, u.max_reply, dir)), "");
+    else if (g->acc_edit_sel == 6) access_do_users("set " + id + (u.on ? " on=off" : " on=on"), "");
+    else if (e.key == K_ENTER) {
+        g->acc_typing = g->editing = true;
+        g->acc_name.clear();
+        g->acc_for_terminal = false;
+        g->acc_new_user = false;
+        g->acc_for_user = u.id;
+    }
+}
+
 void key_access(const Event &e) {
     if (g->acc_typing) {
         if (e.key == K_ESC) {
             g->acc_typing = g->editing = false;
             g->acc_for_terminal = false;
+            g->acc_new_user = false;
         } else if (e.key == K_ENTER) {
             g->acc_typing = g->editing = false;
             std::string name = g->acc_name;
             while (!name.empty() && name.back() == ' ') name.pop_back();
+            if (g->acc_new_user) {
+                g->acc_new_user = false;
+                if (name.empty()) return;
+                ts5::Json j;
+                std::string why;
+                if (!keys_cmd(g->acc_file, "new " + shell_quote(name) + " --preset chat", j, why, "users")) {
+                    show_toast("No user was added: " + why, g->th->bad, 9);
+                    return;
+                }
+                access_read();
+                // Straight to what they may do, the key last.
+                g->acc_edit = j["made"].str();
+                g->acc_edit_sel = 0;
+                show_toast(name + ": added, chat only. Choose what " + name + " may do, then the last row makes " + name +
+                               "'s key. Other machines now need a key.",
+                           g->th->good, 9);
+                return;
+            }
             access_new(name.empty() ? "phone" : name);
         } else if (e.key == K_BACKSPACE) {
             auto gl = glyphs(g->acc_name);
@@ -5228,7 +5499,11 @@ void key_access(const Event &e) {
         return;
     }
     const AccessKind k = (AccessKind)g->acc_kind;
-    const int n = k == ACC_REMOTE ? 1 : kAccRows + (int)g->acc_keys.size();
+    if (!g->acc_edit.empty() && acc_user(g->acc_edit)) {
+        key_access_user(e);
+        return;
+    }
+    const int n = k == ACC_REMOTE ? 1 : kAccRows + (int)g->acc_list.size();
     const auto letter = [&](char c) { return e.key == K_CHAR && e.ch.size() == 1 && tolower(e.ch[0]) == c; };
     const bool flip = e.key == K_ENTER || e.key == K_LEFT || e.key == K_RIGHT || letter(' ');
     if (e.key == K_ESC) {
@@ -5248,6 +5523,39 @@ void key_access(const Event &e) {
             g->acc_typing = g->editing = true;  // (Tab and the page keys stay with the name)
             g->acc_name.clear();
             g->acc_for_terminal = false;
+            g->acc_new_user = false;
+            // On a user's row or one of its keys: a key of theirs; else yours.
+            const App::AccessUser *u = letter('n') ? acc_user_at(g->acc_sel) : nullptr;
+            g->acc_for_user = u ? u->id : "owner";
+        }
+    } else if (letter('u')) {
+        if (k == ACC_TV) show_toast("The TV app has no users: its keys are made on its Settings page", g->th->warn, 6);
+        else if (!g->acc_err.empty()) show_toast(g->acc_err, g->th->bad, 6);
+        else {
+            g->acc_typing = g->editing = true;
+            g->acc_name.clear();
+            g->acc_for_terminal = false;
+            g->acc_new_user = true;
+        }
+    } else if (acc_user_at(g->acc_sel) && !acc_key_at(g->acc_sel) &&
+               (e.key == K_ENTER || letter('p') || letter('d') || e.key == K_DELETE)) {
+        const App::AccessUser u = *acc_user_at(g->acc_sel);
+        if (u.owner) {
+            show_toast(e.key == K_ENTER ? "You have everything: N makes a key for you, U adds someone else"
+                                        : "The owner is always there, with everything",
+                       g->th->dim, 6);
+        } else if (e.key == K_ENTER) {
+            g->acc_edit = u.id;
+            g->acc_edit_sel = 0;
+        } else if (letter('p')) {
+            access_do_users("set " + shell_quote(u.id) + (u.on ? " on=off" : " on=on"),
+                           u.name + (u.on ? ": paused. None of the keys gets in; the chats stay" : ": on again"));
+        } else {
+            g->ask_title = " Remove " + u.name + "? ";
+            g->ask_text = u.name + "'s " + std::to_string(u.keys) + (u.keys == 1 ? " key stops" : " keys stop") +
+                          " working, and " + u.name + "'s chats on this machine are deleted. To stop " + u.name +
+                          " for a while, pause instead (P). Remove " + u.name + "?";
+            g->ask_yes = [u] { access_do_users("remove " + shell_quote(u.id) + " --forget", u.name + ": removed"); };
         }
     } else if (flip && g->acc_sel == 0) {
         if (k != ACC_OWN) {
@@ -5324,6 +5632,8 @@ void key_access(const Event &e) {
                 g->acc_typing = g->editing = true;
                 g->acc_name.clear();
                 g->acc_for_terminal = true;
+                g->acc_new_user = false;
+                g->acc_for_user = "owner";
             }
         } else if (tailnet_post(g->tn_terminal ? "{\"terminal\":false}" : "{\"terminal\":true}")) {
             show_toast(!g->tn_terminal                 ? "Browser terminal: off. Any open in a browser have closed"
@@ -5343,13 +5653,12 @@ void key_access(const Event &e) {
         g->ask_yes = [] {
             if (tailnet_post("{\"sign_out\":true}")) show_toast("Tailscale: signed out, and off", g->th->good, 5);
         };
-    } else if (flip && g->acc_sel >= kAccRows && g->acc_sel - kAccRows < (int)g->acc_keys.size()) {
-        const App::AccessKey &key = g->acc_keys[(size_t)g->acc_sel - kAccRows];
+    } else if (flip && acc_key_at(g->acc_sel)) {
+        const App::AccessKey &key = *acc_key_at(g->acc_sel);
         if (k == ACC_TV) show_toast("The TV app turns its keys on and off: its Settings page, under Apps", g->th->warn, 6);
         else access_do(std::string(key.on ? "off " : "on ") + key.id, key.name + (key.on ? ": off" : ": on"));
-    } else if ((letter('d') || e.key == K_DELETE) && g->acc_sel >= kAccRows &&
-               g->acc_sel - kAccRows < (int)g->acc_keys.size()) {
-        const App::AccessKey key = g->acc_keys[(size_t)g->acc_sel - kAccRows];
+    } else if ((letter('d') || e.key == K_DELETE) && acc_key_at(g->acc_sel)) {
+        const App::AccessKey key = *acc_key_at(g->acc_sel);
         if (k == ACC_TV) {
             show_toast("The TV app removes its keys: its Settings page, under Apps", g->th->warn, 6);
             return;
