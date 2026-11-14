@@ -61,6 +61,7 @@ struct Status {
     std::string problem;      // what went wrong last, "" if nothing
     std::string name;         // the PS5 on the tailnet: tokenstation5.tailXXXX.ts.net
     std::string address;      // its 100.x.y.z
+    std::string node_id;      // Tailscale's id for it (StableID: the API's nodeId)
     std::string account;      // who signed it in
     std::string relay;        // the relay it uses, by name
     int devices = 0;          // the other devices on the tailnet

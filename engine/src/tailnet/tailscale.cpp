@@ -962,7 +962,7 @@ void Client::control_loop() {
         // for PacketFilter's); none until it sends some.
         std::map<std::string, std::vector<Filter::Rule>> filters;
         bool have_filter = false;
-        std::string self_name, self_address, control_says;
+        std::string self_name, self_address, self_id, control_says;
         bool said_no_address = false, start_over = false;
         int update_id = 0, dns_id = 0;
         bool ok = true;
@@ -1119,6 +1119,7 @@ void Client::control_loop() {
                     Node me;
                     take_node(self, me);
                     self_name = self["Name"].str();
+                    self_id = self["StableID"].str();
                     while (!self_name.empty() && self_name.back() == '.') self_name.pop_back();
                     self_address = me.address;
                     changed_map = true;
@@ -1283,6 +1284,7 @@ void Client::control_loop() {
                 map_.version++;
                 status_.name = self_name;
                 status_.address = self_address;
+                status_.node_id = self_id;
                 status_.devices = (int)peers.size();
                 size_t with_disco = 0, with_eps = 0;
                 for (const auto &[k, pa] : paths_) {
