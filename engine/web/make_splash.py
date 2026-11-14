@@ -3,7 +3,9 @@
 (or the browser terminal) opens: the logo on black, the name, "Connecting…".
 iOS shows one only when its size is the phone's screen exactly, so there is
 one per iPhone screen (portrait), named splash-WxH.jpg, and the pages list
-them with a media query each (SPLASH below; chat.html and terminal.html).
+them with a media query each (SPLASH below; chat.html and terminal.html), by
+device-width and pixel ratio only: iOS 27 takes the window's height for
+device-height (WebKit bug 326500), so no launch image matched there.
 
     python3 engine/web/make_splash.py ps5/sce_sys/logo.jpg FONT.otf engine/web   (needs Pillow)
 

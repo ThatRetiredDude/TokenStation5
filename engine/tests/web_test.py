@@ -232,7 +232,7 @@ def main():
               "keep.js: the key from the address, the save question, the save form, the cookie for an icon", code)
         # Asked again each time, 304 while the same: a script kept from an
         # older ts5 never runs with a newer page.
-        for f in ("/", "/ts5/terminal", "/ts5/web/keep.js", "/ts5/web/xterm.js", "/ts5/web/icon.png"):
+        for f in ("/", "/ts5/terminal", "/ts5/web/keep.js", "/ts5/web/xterm.js"):
             code, body, h = get(here + f)
             tag = h.get("ETag", "")
             check(code == 200 and h.get("Cache-Control") == "no-cache" and tag.startswith('"') and len(tag) == 18,
@@ -246,6 +246,12 @@ def main():
             # Only the 200's own length may go in a 304 (RFC 9110 15.4.5); none is sent.
             check(r.getheader("Content-Length") is None, f"{f}: its 304 says no Content-Length",
                   r.getheader("Content-Length"))
+        # Pictures (the logo, the launch images) are kept an hour, as when the
+        # iPhone's home-screen icon showed the logo.
+        for f in ("/ts5/web/icon.png", "/apple-touch-icon.png", "/favicon.ico", "/ts5/web/splash-1179x2556.jpg"):
+            code, body, h = get(here + f)
+            check(code == 200 and h.get("Cache-Control") == "max-age=3600" and "ETag" not in h,
+                  f"{f}: kept an hour, no ETag", (code, h.get("Cache-Control"), h.get("ETag")))
         # The save form, sent for real: straight back to the page, its body
         # (the key) neither kept nor logged.
         for back, to in (("chat", "/"), ("terminal", "/ts5/terminal")):
@@ -266,20 +272,22 @@ def main():
         code, body, _ = get(here + "/")
         check(b'rel="apple-touch-icon" href="/ts5/web/icon.png"' in body and b'autocomplete="current-password"' in body,
               "the page names its home-screen icon, and its key form is one the phone's passwords can fill")
-        # The launch images: one per iPhone screen, each the size its media
-        # query names (iOS shows one only when it is the screen exactly).
+        # The launch images: one per iPhone screen, by width and pixel ratio
+        # only (iOS 27 gets device-height wrong, WebKit bug 326500), each as
+        # wide as its query says and no two queries the same.
         for page in ("/", "/ts5/terminal"):
             code, body, _ = get(here + page)
             links = re.findall(rb'<link rel="apple-touch-startup-image" media="\(device-width: (\d+)px\) and '
-                               rb'\(device-height: (\d+)px\) and \(-webkit-device-pixel-ratio: (\d)\) and '
+                               rb'\(-webkit-device-pixel-ratio: (\d)\) and '
                                rb'\(orientation: portrait\)" href="([^"]+)">', body)
             bad = []
-            for w, hh, r, href in links:
+            for w, r, href in links:
                 code, img, hd = get(here + href.decode())
                 size = jpeg_size(img) if code == 200 else None
-                if hd.get("Content-Type") != "image/jpeg" or size != (int(w) * int(r), int(hh) * int(r)):
+                if hd.get("Content-Type") != "image/jpeg" or not size or size[0] != int(w) * int(r) or size[1] <= size[0]:
                     bad.append((href, code, hd.get("Content-Type"), size))
-            check(len(links) == 11 and not bad, f"{page}: 11 launch images, each the size of its screen", (len(links), bad))
+            check(len(links) == 11 and not bad and len({(w, r) for w, r, _ in links}) == 11 and b"(device-height" not in body,
+                  f"{page}: 11 launch images by width and pixel ratio, each its screen's width", (len(links), bad))
         code, body, h = get(here + "/ts5/web/xterm.js")
         check(code == 200 and h.get("Content-Type", "").startswith("text/javascript") and len(body) > 200000 and
               b"xterm.js" in body, "xterm.js is built in", (code, len(body), h))

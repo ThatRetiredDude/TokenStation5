@@ -125,14 +125,20 @@ const char *status_text(int code) {
 }
 
 // A page or file: no key needed, kept out of other sites' frames, and the
-// pages' scripts and connections only from here. A browser asks again each
-// time (no-cache) and gets 304 while the file is the same (its ETag): a
-// cached script from an older ts5 never runs with a newer page.
+// pages' scripts and connections only from here. A page, script or style: a
+// browser asks again each time (no-cache) and gets 304 while the file is the
+// same (its ETag), so a cached script from an older ts5 never runs with a
+// newer page. A picture (the logo, the launch images): kept an hour
+// (max-age=3600), as when the iPhone's home-screen icon showed the logo; with
+// no-cache it drew a letter tile though it had fetched the logo whole (iOS
+// 27.2, 2026-11-13 and 11-14).
 void send_file(int fd, int code, const std::string &type, const std::string &body, bool page,
                const std::string &etag = "") {
+    const bool picture = type.rfind("image/", 0) == 0;
     std::string h = "HTTP/1.1 " + std::to_string(code) + " " + status_text(code) + "\r\nContent-Type: " + type +
                     "\r\nContent-Length: " + std::to_string(body.size()) +
-                    "\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCache-Control: no-cache\r\n";
+                    "\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCache-Control: " +
+                    (picture ? "max-age=3600" : "no-cache") + "\r\n";
     if (!etag.empty()) h += "ETag: " + etag + "\r\n";
     if (page)
         h += "X-Frame-Options: DENY\r\n"
@@ -215,6 +221,11 @@ bool serve_asset(int fd, const Server::Page &p, const std::string &name, bool pa
     if (!a) return false;
     std::string body;
     if (!from_web_dir(name, body)) body.assign((const char *)a->data, (size_t)(a->end - a->data));
+    if (type_of(name).rfind("image/", 0) == 0) {
+        send_file(fd, 200, type_of(name), body, page);
+        web_log(p, 200, body.size());
+        return true;
+    }
     const std::string etag =
         etag_of((const unsigned char *)body.data(), (const unsigned char *)body.data() + body.size());
     if (p.header("if-none-match") == etag) {
