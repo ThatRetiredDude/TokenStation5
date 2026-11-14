@@ -155,7 +155,7 @@ struct App {
     // The plain view: text alone on the screen, the mouse left to the
     // terminal, so its own selection copies it (view_open).
     bool view_on = false, view_dirty = false, view_sent = false;
-    std::string view_text, view_title;
+    std::string view_text, view_title, view_head;  // view_head: the top line, when not the copy hint
     int view_top = 0;
     size_t view_at = 0;  // the byte of view_text to show first, once
     int load_ctx = 0;                            // the context it was started with (0: auto)
@@ -233,6 +233,13 @@ struct App {
     // sign-in runs as gh_signin (its lines: the code, then whose it is);
     // the repositories the app may use are asked of GitHub by gh_status.
     Proc gh_signin, gh_status;
+    // /feedback: what the user wrote, the report as `ts5 feedback prepare`
+    // cleaned it (exactly what would be sent), whether the chat and the log
+    // go in, and the send while it runs. fb_review: the report is open to
+    // read, and the choices come when it closes.
+    std::string fb_summary, fb_text;
+    bool fb_chat = false, fb_logs = true, fb_review = false, fb_sending = false;
+    Proc fb_send;
     size_t gh_parsed = 0;
     bool gh_signed = false, gh_known = false;  // gh_known: the repositories asked since it was signed in
     std::string gh_login, gh_install, gh_code, gh_url, gh_problem, gh_file;
@@ -4159,6 +4166,8 @@ const ModelFile *find_model(const std::string &q) {
 }
 
 void request_quit();
+void feedback_start(const std::string &summary);
+void feedback_follow();
 void copy_out(const std::string &text, const std::string &what);
 bool to_clipboard(const std::string &text);
 void view_open(const std::string &text, const std::string &title, size_t at, bool sent);
@@ -4186,6 +4195,7 @@ void run_command(const std::string &line) {
     else if (cmd == "/logs") go(LOGS);
     else if (cmd == "/access" || cmd == "/keys") go(ACCESS);
     else if (cmd == "/connectors" || cmd == "/github") go(CONNECTORS);
+    else if (cmd == "/feedback" || cmd == "/bug") feedback_start(arg);
     else if (cmd == "/model") {
         scan_models();
         if (arg.empty()) {
@@ -5466,7 +5476,8 @@ void view_draw() {
     g->view_top = std::max(0, std::min(g->view_top, n - body));
     // Line wrap on: a long line is written whole and the terminal wraps it.
     std::string out = "\x1b[0m\x1b[?7h\x1b[2J\x1b[1;1H\x1b[7m";
-    std::string head = " Select with the mouse, then copy: Cmd+C on a Mac, Ctrl+Shift+C elsewhere · Esc goes back ";
+    std::string head = !g->view_head.empty() ? g->view_head
+                       : " Select with the mouse, then copy: Cmd+C on a Mac, Ctrl+Shift+C elsewhere · Esc goes back ";
     head = fit(head, w);
     out += head + std::string(std::max(0, w - text_width(head)), ' ') + "\x1b[0m";
     for (int i = 0; i < body && g->view_top + i < n; i++) {
@@ -5492,15 +5503,22 @@ void view_open(const std::string &text, const std::string &title, size_t at = 0,
     g->view_top = 0;
     g->view_at = at;
     g->view_sent = sent;
+    g->view_head.clear();
     g->view_on = g->view_dirty = true;
     set_mouse(false);
 }
+
+void feedback_choices();
 
 void view_close() {
     g->view_on = false;
     term_write("\x1b[?7l");
     set_mouse(g->cfg.mouse);
     g->full_redraw = true;
+    if (g->fb_review) {
+        g->fb_review = false;
+        feedback_choices();
+    }
 }
 
 void view_key(const Event &e) {
@@ -5567,6 +5585,185 @@ void qr_copy_value(int i) {
     if (!q.label.empty() && q.label != "API key") what[0] = (char)tolower((unsigned char)what[0]);
     if (!q.label.empty()) what = "the " + what;
     view_open(q.data, what, 0, to_clipboard(q.data));
+}
+
+// ---- /feedback ----
+//
+// What went wrong, in the user's words, with the facts that help fix it,
+// cleaned on this machine by `ts5 feedback` (engine/src/feedback.h). The
+// user reads exactly what would be sent, then sends it, changes what goes
+// in, saves it to a file, or drops it. Reports go only to TokenStation's
+// feedback service, never anywhere public.
+
+// The chat as the saved chats keep it ({"messages": [{role, content}]}),
+// for `ts5 feedback prepare --chat`.
+std::string feedback_chat_file() {
+    ts5::Json msgs;
+    msgs.type = ts5::Json::ARR;
+    {
+        std::lock_guard<std::mutex> lk(g->chat.mu);
+        for (const Msg &m : g->chat.msgs) {
+            if (m.role != "user" && m.role != "assistant") continue;
+            ts5::Json o = ts5::Json::object();
+            o.set("role", ts5::Json::string(m.role));
+            o.set("content", ts5::Json::string(m.content));
+            msgs.a.push_back(o);
+        }
+    }
+    if (msgs.a.empty()) return "";
+    ts5::Json j = ts5::Json::object();
+    j.set("messages", msgs);
+    const std::string path = state_dir() + "/feedback-chat.json";
+    std::ofstream f(path);
+    f << j.dump() << "\n";
+    chmod(path.c_str(), 0600);
+    return path;
+}
+
+bool chat_has_messages() {
+    std::lock_guard<std::mutex> lk(g->chat.mu);
+    for (const Msg &m : g->chat.msgs)
+        if (m.role == "user" || m.role == "assistant") return true;
+    return false;
+}
+
+// The report, as `ts5 feedback prepare` makes it; false with a toast.
+bool feedback_prepare() {
+    const std::string ts5 = which("ts5");
+    if (ts5.empty()) {
+        show_toast("ts5 isn't installed here: it makes the report", g->th->bad, 6);
+        return false;
+    }
+    std::string cmd = shell_quote(ts5) + " feedback prepare --summary " + shell_quote(g->fb_summary);
+    if (!g->fb_logs) cmd += " --no-logs";
+    else if (g->logs_src.rfind("journal: ", 0) == 0) cmd += " --journal " + shell_quote(g->logs_src.substr(9));
+    else if (!g->logs_src.empty() && g->logs_src[0] == '/') cmd += " --log " + shell_quote(g->logs_src);
+    if (!g->cfg.path.empty() && file_exists(g->cfg.path)) cmd += " --settings " + shell_quote(g->cfg.path);
+    std::string chat;
+    if (g->fb_chat && !(chat = feedback_chat_file()).empty()) cmd += " --chat " + shell_quote(chat);
+    std::string text;
+    if (FILE *p = popen((cmd + " 2>/dev/null").c_str(), "r")) {
+        char buf[8192];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof buf, p)) > 0) text.append(buf, n);
+        pclose(p);
+    }
+    if (!chat.empty()) unlink(chat.c_str());
+    if (text.find("## What happened") == std::string::npos) {
+        show_toast("ts5 couldn't make the report: the ts5 here is older than this ts5-tui", g->th->bad, 7);
+        return false;
+    }
+    g->fb_text = text;
+    return true;
+}
+
+void feedback_review() {
+    view_open(g->fb_text, "the report, exactly as it would be sent");
+    g->view_head = " Read what /feedback would send: keys, addresses, names and paths are already taken out · any key: "
+                   "your choices ";
+    g->fb_review = true;
+}
+
+void feedback_start(const std::string &summary) {
+    if (g->fb_sending) {
+        show_toast("The last report is still being sent", g->th->warn, 4);
+        return;
+    }
+    std::string w = summary;
+    while (!w.empty() && isspace((unsigned char)w.back())) w.pop_back();
+    while (!w.empty() && isspace((unsigned char)w.front())) w.erase(0, 1);
+    if (w.empty()) {
+        // Back in the prompt, ready for the words.
+        g->chat.input = "/feedback ";
+        g->chat.cur = g->chat.input.size();
+        go(CHAT);
+        show_toast("Write what went wrong, with your email if you'd like a reply, then press Enter", g->th->accent, 12);
+        return;
+    }
+    g->fb_summary = w;
+    g->fb_chat = false;
+    g->fb_logs = true;
+    if (g->logs_src.empty()) pick_logs();
+    if (feedback_prepare()) feedback_review();
+}
+
+void feedback_save() {
+    const std::string dir = data_dir() + "/feedback";
+    make_dirs(dir);
+    char name[64];
+    const time_t t = time(nullptr);
+    strftime(name, sizeof name, "/report-%Y%m%d-%H%M%S.md", localtime(&t));
+    const std::string path = dir + name;
+    std::ofstream f(path);
+    f << g->fb_text;
+    f.close();
+    chmod(path.c_str(), 0600);
+    show_toast(f ? "Saved to " + path : "Couldn't write " + path, f ? g->th->good : g->th->bad, 9);
+}
+
+void feedback_send() {
+    const std::string ts5 = which("ts5");
+    const std::string path = state_dir() + "/feedback-send.md";
+    {
+        std::ofstream f(path);
+        f << g->fb_text;
+    }
+    chmod(path.c_str(), 0600);
+    if (ts5.empty() || !g->fb_send.start(shell_quote(ts5) + " feedback send " + shell_quote(path) + " 2>/dev/null", "feedback")) {
+        show_toast("The report couldn't be sent: Save to a file keeps it", g->th->bad, 7);
+        return;
+    }
+    g->fb_sending = true;
+    show_toast("Sending the report…", g->th->dim, 30);
+}
+
+void feedback_follow() {
+    if (!g->fb_sending) return;
+    g->fb_send.pump();
+    if (!g->fb_send.done) return;
+    g->fb_sending = false;
+    std::string line = g->fb_send.last_line();
+    g->fb_send.lines.clear();
+    g->fb_send.partial.clear();
+    unlink((state_dir() + "/feedback-send.md").c_str());
+    ts5::Json j;
+    if (ts5::Json::parse(line, j) && j["ok"].boolean(false)) {
+        show_toast("Sent, thank you. Report " + j["id"].str() + ": only TokenStation's developers can read it", g->th->good, 10);
+        chat_note(g->chat, "Feedback sent (report **" + j["id"].str() + "**). Only TokenStation's developers can read it; "
+                           "it is never posted anywhere public.");
+        return;
+    }
+    const std::string why = j["error"].str().empty() ? "no answer" : j["error"].str();
+    show_toast("Not sent: " + why + ". /feedback again, or Save to a file", g->th->bad, 10);
+}
+
+void feedback_choices() {
+    g->ask_title = " Send this report? ";
+    g->ask_text = "It goes only to TokenStation's developers, never anywhere public. " +
+                  std::string(g->fb_chat ? "This chat is in it. " : "Your chat is not in it. ") +
+                  (g->fb_logs ? "The log's last lines are in it." : "The log is left out.");
+    g->pick.clear();
+    g->pick.push_back({"Read it again", "the whole report, as it would be sent", [] { feedback_review(); }});
+    g->pick.push_back({"Send it", "to TokenStation's developers. Your name isn't on it unless you wrote it (an email lets them answer)",
+                       [] { feedback_send(); }});
+    if (chat_has_messages() || g->fb_chat)
+        g->pick.push_back({g->fb_chat ? "Leave the chat out" : "Add this chat",
+                           g->fb_chat ? "the report without what you and the model wrote"
+                                      : "what you and the model wrote (its last 40 messages), cleaned the same way; you read it first",
+                           [] {
+                               g->fb_chat = !g->fb_chat;
+                               if (feedback_prepare()) feedback_review();
+                           }});
+    g->pick.push_back({g->fb_logs ? "Leave the log out" : "Put the log back",
+                       g->fb_logs ? "only your words, the versions and the settings" : "the log's last 300 lines, cleaned",
+                       [] {
+                           g->fb_logs = !g->fb_logs;
+                           if (feedback_prepare()) feedback_review();
+                       }});
+    g->pick.push_back({"Save to a file", "kept on this machine; nothing is sent", [] { feedback_save(); }});
+    g->pick.push_back({"Cancel", "nothing is sent or kept", [] {}});
+    // (An Enter meant for something else only shows the report again.)
+    g->pick_sel = 0;
 }
 
 void handle(const Event &e);
@@ -5801,6 +5998,7 @@ void tick() {
     search_follow();
     github_sign_in_follow();
     github_status_follow();
+    feedback_follow();
     // On Connectors, GitHub is asked again now and then: repositories picked
     // on its page show up (every 10 s while that page's QR code is up).
     if (g->cur == CONNECTORS && g->gh_signed && !g->gh_status.running() && t - g->gh_at >= (g->qr_install ? 10 : 60))

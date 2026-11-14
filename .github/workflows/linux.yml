@@ -19,9 +19,9 @@ on:
   push:
     branches: [main]
     tags: ["linux-v*"]
-    paths: ["engine/**", "ps5/**", "linux/**", "third_party/**", ".github/workflows/linux.yml"]
+    paths: ["engine/**", "ps5/**", "linux/**", "third_party/**", "services/feedback/**", ".github/workflows/linux.yml"]
   pull_request:
-    paths: ["engine/**", "ps5/**", "linux/**", "third_party/**", ".github/workflows/linux.yml"]
+    paths: ["engine/**", "ps5/**", "linux/**", "third_party/**", "services/feedback/**", ".github/workflows/linux.yml"]
   workflow_dispatch:
 
 permissions:
@@ -332,6 +332,14 @@ jobs:
           python3 engine/tests/https_test.py "$(command -v ts5)" /tmp/model/test.gguf vk
       - name: The model's GitHub tool (ts5-tui --github-call against the same stand-in GitHub)
         run: python3 linux/tui/test/github_tool_test.py "$(command -v ts5-tui)" "$(command -v ts5)"
+      - name: Feedback reports (ts5 feedback cleaning and sending, against a service served here)
+        run: python3 engine/tests/feedback_test.py "$(command -v ts5)"
+      - name: /feedback in ts5-tui (in tmux; read first, nothing sent before Send)
+        run: |
+          command -v tmux || sudo apt-get install -y -qq tmux
+          python3 linux/tui/test/feedback_test.py "$(command -v ts5-tui)" "$(command -v ts5)"
+      - name: The feedback Worker (cleaning again, limits, no way to read reports back)
+        run: node services/feedback/test.mjs
       - name: Chats (ts5-tui in tmux against a stand-in server; each chat sends its own messages, Ctrl+O opens and deletes)
         run: |
           command -v tmux || sudo apt-get install -y -qq tmux

@@ -51,7 +51,7 @@ endif()
 
 add_executable(ts5 src/main.cpp src/cli.cpp src/checks.cpp src/tokenizer.cpp src/server.cpp src/engine.cpp
   src/tools.cpp src/known_good.cpp src/net.cpp src/websearch.cpp src/log.cpp src/browser.cpp src/access.cpp
-  src/github.cpp)
+  src/github.cpp src/feedback.cpp)
 target_link_libraries(ts5 PRIVATE ts5core)
 
 if(TS5_HTTPS)
