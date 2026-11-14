@@ -580,6 +580,14 @@ void handle(int fd, Server::State &state, Usage &u) {
             return;
         }
         Engine &e = *ep;
+        // Users are kept apart: a request of another user's starts from an
+        // empty cache, so how much of a prompt was cached (its speed, the
+        // usage and timings it reports) never tells one user what another
+        // sent. The same user's next request still finds its own.
+        if (state.cache_user != grant.user) {
+            if (!state.cache_user.empty()) e.forget_cache();
+            state.cache_user = grant.user;
+        }
         u.rec.model = state.model;
         const std::string model = api_id(state.model);  // for the replies
         const std::string date = today();

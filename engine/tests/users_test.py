@@ -212,6 +212,27 @@ def test_server(ts5, model, backend, d):
         code, got = call(there + f"/ts5/users/{ann}/chats", skey)
         check(code == 403, "a user can't read anybody else's", (code, got))
 
+        # Users are kept apart: no chat of another's by its id, and no hint
+        # from the cache of what another user sent.
+        code, got = call(there + "/ts5/chats/lzx1", akey)
+        check(code == 404, "another user can't fetch a chat by its id: each user has its own folder", (code, got))
+        code, got = call(there + "/ts5/chats/lzx1", akey, None, "DELETE")
+        check(code == 200 and os.path.exists(on_disk), "nor delete it: a DELETE goes to the caller's own folder", (code, got))
+        code, got = call(there + "/ts5/chats/lzx1", skey)
+        check(code == 200 and got.get("title") == "hi", "its owner still has it", (code, got))
+        secret = {"model": "x", "messages": [{"role": "user", "content": "My secret plan is " + "very long " * 40}],
+                  "max_tokens": 1, "temperature": 0}
+        call(there + "/v1/chat/completions", skey, secret)
+        code, r = call(there + "/v1/chat/completions", skey, secret)
+        again = r.get("timings", {}).get("prompt_n") if code == 200 else None
+        code, r = call(there + "/v1/chat/completions", akey, secret)
+        other = r.get("timings", {}).get("prompt_n") if code == 200 else None
+        full = r.get("usage", {}).get("prompt_tokens") if code == 200 else None
+        check(again is not None and full and again < full // 2,
+              "the same user's next request finds its own prompt in the cache", (again, full))
+        check(other is not None and full and other >= full - 1,
+              "another user's identical prompt is read in full: nothing cached tells whether someone sent it", (other, full))
+
         # The browser terminal: the owner's alone.
         call(here + "/ts5/tailnet", None, {"terminal": True}, "POST")
         w = Ws("127.0.0.1", port, "/ts5/terminal/socket", f"http://127.0.0.1:{port}")

@@ -213,6 +213,10 @@ What a user may do, checked on every request and changed from the next one:
   sees it in Settings on the chat page. Otherwise a user's chats are theirs
   alone.
 
+Users are kept apart from each other: each has only its own chats, and a
+request of another user's starts from an empty prompt cache, so nothing
+about speed or the usage an app is told shows what someone else sent (the
+cost: the first request after another user's reads its whole prompt again).
 Each user's chats from the chat page are kept on this machine
 (`~/.local/share/tokenstation/users/ID/chats`), the same on every device with
 one of their keys. Adding a user turns "require" on: without a key, another

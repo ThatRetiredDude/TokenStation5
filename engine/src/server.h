@@ -121,6 +121,7 @@ public:
     struct State {
         std::mutex gen;  // held for a whole generation, and to change the engine
         Engine *engine = nullptr;
+        std::string cache_user;  // whose request the engine's cache holds (gen held)
         std::string model, unavailable = "no model";
         std::string tool_format = "none";  // the model's (tools.h), for /v1/models
         int n_ctx = 0;                     // the engine's context, for /v1/models
