@@ -37,6 +37,9 @@ struct GenStats {
     int probes = 0;       // steps that tried the draft model only to see whether it keeps up
     double prompt_ms = 0, gen_ms = 0;
     double sample_ms = 0;  // CPU time in sample(), its logits reads included
+    // Picks the model made that would have written bytes that are no
+    // character, taken again among the tokens that keep the text valid UTF-8
+    int repicked = 0;
     // TS5_KV_REPAIR: positions forwarded again (in prompt_ms) to put back
     // what a shorter request wrote over, so the cached prefix held
     int prompt_repaired = 0;
@@ -89,7 +92,12 @@ public:
     }
 
 private:
-    int32_t sample(const float *logits, int n, const SampleParams &p);
+    // open: the bytes of a character the text so far ends in the middle of;
+    // given, the pick is the model's choice among the tokens that keep the
+    // text valid UTF-8 (fits()).
+    int32_t sample(const float *logits, int n, const SampleParams &p, const std::string *open = nullptr);
+    bool fits(const std::string &open, int32_t tok) const;
+    int repicked_ = 0;  // sample() picks that would have broken the text, this turn
     void index_grams(size_t from);
     // Returns how many tokens before the gram matched (lookup_ > 0), else 0.
     int draft_lookup(int32_t tok, int k, std::vector<int32_t> &out);
