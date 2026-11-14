@@ -78,6 +78,7 @@
   #chatlist .who { color: var(--dim); font-size: 13px; padding: 12px 16px 4px; border-bottom: 1px solid var(--line); }
   #chatlist .who button { margin: 0 6px 8px 0; border: 1px solid var(--line); background: var(--panel); color: var(--fg);
     border-radius: 8px; padding: 5px 10px; font: inherit; font-size: 13px; cursor: pointer; }
+  #savebar { flex: none; background: var(--you); color: var(--fg); font-size: 14px; padding: 8px 16px; text-align: center; }
   #peekbar { flex: none; background: var(--you); color: var(--fg); font-size: 14px; padding: 8px 16px; text-align: center; }
   #peekbar button { margin-left: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); border-radius: 8px;
     padding: 3px 10px; font: inherit; font-size: 13px; cursor: pointer; }
@@ -155,6 +156,7 @@
   <button id="settings" type="button">Settings</button>
 </header>
 <div id="peekbar" hidden></div>
+<div id="savebar" role="status" hidden></div>
 <main id="log"><div class="wrap" id="msgs"></div></main>
 <form id="ask"><div class="wrap">
   <textarea id="input" rows="1" placeholder="Message TokenStation5" enterkeyhint="send"></textarea>
@@ -230,7 +232,12 @@ const prefs = { think: store.get("ts5.think", "1") === "1", showThink: store.get
 
 // c: the chat that changed (on the machine, only it is sent).
 function save(c) {
-  if (remote) { if (c) putChat(c); return; }
+  if (remote) {
+    // Not kept (the user's room on the machine is full, or it can't be
+    // reached): said, so nothing is lost without a word.
+    if (c) putChat(c).then((ok) => { $("savebar").hidden = ok; });
+    return;
+  }
   chats = chats.slice(0, KEEP);
   // This browser's own list is the owner's (or a machine without users):
   // never written before the server has said whose key it is.
@@ -239,10 +246,15 @@ function save(c) {
 }
 function api(path, opt) { return fetch(path, Object.assign({ headers: headers() }, opt || {})); }
 async function putChat(c) {
+  let why = "the TokenStation5 can't be reached";
   try {
     const r = await api("/ts5/chats/" + encodeURIComponent(c.id), { method: "PUT", body: JSON.stringify(c) });
-    return r.ok;
-  } catch (e) { return false; }
+    if (r.ok) return true;
+    const j = await r.json().catch(() => ({}));
+    why = (typeof j.error === "string" ? j.error : j.error && j.error.message) || "the server said " + r.status;
+  } catch (e) {}
+  $("savebar").textContent = "This chat isn't saved on the TokenStation5: " + why + ".";
+  return false;
 }
 function limit(n) { return n > 0 ? n.toLocaleString() + " tokens" : "no limit"; }
 // Whose key this is, and that user's own chats from the machine (the ones
