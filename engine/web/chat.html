@@ -153,7 +153,7 @@
   <form class="dlg" id="keyform">
     <h1>API key</h1>
     <p id="keywhy">This TokenStation5 needs one of its API keys. ts5-tui's Access page (F6) makes them. It stays in this browser only.</p>
-    <p>Saved it to your passwords? Tap the Key box and pick TokenStation5 above the keyboard. Nothing there? Hold the Key box, then AutoFill, then Passwords.</p>
+    <p id="keyhow">Saved it to your passwords? Tap the Key box and pick TokenStation5 above the keyboard. Nothing there? Hold the Key box, then AutoFill, then Passwords.</p>
     <!-- A sign-in form as any site has one, both boxes shown: the device's
          passwords offer the saved key above the keyboard only for such a
          form (a hidden or read-only account box made iOS offer nothing). -->
@@ -178,14 +178,14 @@
     <h1>Settings</h1>
     <label><input type="checkbox" id="think"> Let a thinking model think first</label>
     <label><input type="checkbox" id="showthink"> Show its thinking</label>
-    <label>Keep the key <select id="keep"><option value="link">in this page's link too (a home-screen icon opens signed in)</option><option value="passwords">in my passwords only (Face ID fills it in)</option><option value="">ask me again</option></select></label>
+    <label>The key in this page's link <select id="keep"><option value="passwords">no (a home-screen icon gets it anyway)</option><option value="link">yes, too (for a browser whose icons don't)</option></select></label>
     <div class="row" style="justify-content:flex-start;margin-bottom:12px"><button type="button" id="savepw">Save the key to my passwords</button></div>
-    <p>The key and the chats are kept in this browser only (and the key as chosen above: nothing after # in a link is ever sent anywhere). <a href="/ts5/terminal">Full controls</a> opens ts5-tui itself here (models, settings, fans, keys), with this key, when the browser terminal is on (Access page, F6).</p>
+    <p>The key and the chats are kept in this browser only. The key is also in a cookie of this address, which only this TokenStation5 gets, for a home-screen icon added from here (nothing after # in a link is ever sent anywhere). <a href="/ts5/terminal">Full controls</a> opens ts5-tui itself here (models, settings, fans, keys), with this key, when the browser terminal is on (Access page, F6).</p>
     <div class="row"><button type="button" id="forget">Forget the key</button><button type="button" id="clear">Delete all chats</button><button class="go" type="button" id="setdone">Done</button></div>
   </div>
 </div>
 
-<script src="/ts5/web/keep.js?v=3"></script>
+<script src="/ts5/web/keep.js?v=4"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -559,7 +559,7 @@ addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("listdlg").hid
 $("settings").onclick = () => {
   $("think").checked = prefs.think;
   $("showthink").checked = prefs.showThink;
-  $("keep").value = TS5Keep.how();
+  $("keep").value = TS5Keep.how() === "link" ? "link" : "passwords";
   $("setdlg").hidden = false;
 };
 $("setdone").onclick = () => {
@@ -576,10 +576,7 @@ $("savepw").onclick = () => {
   TS5Keep.save(key());
 };
 $("forget").onclick = () => { TS5Keep.forget(); $("setdlg").hidden = true; models(); };
-$("keep").onchange = () => {
-  TS5Keep.change($("keep").value, key());
-  if ($("keep").value === "passwords") { $("setdlg").hidden = true; TS5Keep.save(key()); }
-};
+$("keep").onchange = () => TS5Keep.change($("keep").value, key());
 // Twice: the first tap asks.
 $("clear").onclick = () => {
   const b = $("clear");
