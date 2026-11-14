@@ -330,12 +330,17 @@ ts5-tui --url http://ps5.local:8081  # another one
   line pasted at the prompt downloads that model.
 - **In between**: the chat (markdown, highlighted code, the thinking folded
   away: a click on its "Thought for" line opens that one, Ctrl+T all of
-  them), or a page: **F1** Chat, **F2** Models (Enter
-  loads one, and on the loaded one loads it again, which is how a changed
+  them), or a page: **F1** Chat, **F2** Models (the models downloaded
+  here, kept on the drive until you delete one, with each one's size,
+  their size in all and what's free; Enter
+  loads one, no download again, and on the loaded one loads it again, which is how a changed
   setting takes hold; H downloads a model's helper; T tunes it with
   `ts5-tune`, which a model tested on the PS5 doesn't need: its row says
   "tested" and its settings are built in; C runs the GPU check, B the speed
-  test; T, C and B ask before they start, so a letter typed on the wrong
+  test; D or Delete deletes one's file, asked first (never the model
+  loaded, loading or in a job; its tuned settings stay, so a download of
+  it again is ready at once; a file in the service's folder that isn't
+  yours says the `sudo rm` that removes it); T, C and B ask before they start, so a letter typed on the wrong
   page starts nothing; each runs in a panel that ticks off its steps in plain words, with the
   time so far, the time left and what it found at the end, while the top
   bar says what's running; below them, the catalog's models to download,

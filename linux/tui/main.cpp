@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cerrno>
 #include <cstring>
 #include <ctime>
 #include <dirent.h>
@@ -2470,7 +2471,7 @@ void draw_models() {
     const int w = std::min(s.w - 2, 120);
     const int x0 = (s.w - w) / 2;
     int y = top + 1;
-    s.put(x0 + 1, y, "Models on this machine", S(t.accent, BOLD));
+    s.put(x0 + 1, y, "Downloaded models", S(t.accent, BOLD));
     if (!g->load_target.empty()) {
         static const char *spin[] = {"◐", "◓", "◑", "◒"};
         s.put(x0 + 25, y, fmt("%s loading %s… %.0f s", spin[(int)(now_s() * 6) % 4], g->load_target.c_str(),
@@ -2498,6 +2499,20 @@ void draw_models() {
         x = s.put(x, y, fit(g->hf_input, std::max(4, w - 70), false), S(t.fg, BOLD));
         x = s.put(x, y, fmod(now_s(), 1.0) < 0.6 ? "▌" : " ", S(t.accent2));
         s.put(x + 2, y, fit("Enter searches · Esc cancels", std::max(0, x0 + w - x - 3)), S(t.dim));
+    }
+    y++;
+    {
+        // What's kept here: they stay on the drive until D deletes one.
+        double total = 0;
+        for (const ModelFile &m : g->models) total += m.size;
+        const double fb = free_bytes(download_dir());
+        s.put(x0 + 1, y,
+              fit(g->models.empty() ? "Downloads stay on this drive: Enter on one loads it, no download again"
+                                    : fmt("%d kept on this drive, %s", (int)g->models.size(), gib(total).c_str()) +
+                                          (fb >= 0 ? " · " + gib(fb) + " free" : "") +
+                                          " · Enter loads one, no download again · D deletes one",
+                  w - 2),
+              S(t.dim));
     }
     y += 2;
     const int name_w = std::max(20, w - 46);
@@ -2786,7 +2801,7 @@ void draw_models() {
         if (is_loaded)
             setting("Context", with_commas(sv.n_ctx) + " tokens", "how long a chat can get, as loaded");
     }
-    draw_bottom_bar("↑↓ choose|Enter load|Tab/1-7 pages|T tune|H get helper|S search|C GPU check|B speed test|R rescan");
+    draw_bottom_bar("↑↓ choose|Enter load|D delete|Tab/1-7 pages|T tune|H get helper|S search|C GPU check|B speed test|R rescan");
 }
 
 // ---- Settings ----
@@ -4974,6 +4989,54 @@ void ask_job(const ModelFile &m, char which) {
     }
 }
 
+// D (or Delete) on a model that's here: asks, then removes its .gguf so the
+// space comes back. Its tuned settings (the tune .env) and saved check
+// answers (.ts5ref) stay: a download of it again picks them up. Never the
+// one serving, loading, being downloaded or in a job; a file of the
+// service's folder that this user can't write is left to sudo.
+void delete_model(const ModelFile &m) {
+    const ServerState sv = server();
+    const std::string id = api_id(m.name);
+    if (id == sv.model) {
+        show_toast(id + " is the model loaded now: load another first, then delete this one", g->th->warn, 6);
+        return;
+    }
+    if (id == g->load_target) {
+        show_toast(id + " is loading: delete it once that's done or stopped", g->th->warn, 5);
+        return;
+    }
+    if (g->tuner.running() && g->job_model == id) {
+        show_toast("A " + g->job_kind + " of " + id + " is running: X on its pane stops it (T shows it)", g->th->warn, 6);
+        return;
+    }
+    if (g->downloader.running() && g->dl_on && g->dl.file == m.name) {
+        show_toast(id + " is downloading: X stops it first", g->th->warn, 5);
+        return;
+    }
+    if (access(m.dir.c_str(), W_OK) != 0) {
+        show_toast("That folder is the service's, not this user's: sudo rm '" + m.path + "' removes it", g->th->warn, 10);
+        return;
+    }
+    // A big model here that uses this one as its helper.
+    std::string helps;
+    for (const ModelFile &o : g->models)
+        if (&o != &m && o.dir == m.dir && helper_of(o) == id) helps = api_id(o.name);
+    g->ask_title = " Delete this model? ";
+    g->ask_text = id + " (" + gib(m.size) + ") goes from " + m.dir + ". Its settings stay, so a download of it again is "
+                  "ready at once." +
+                  (helps.empty() ? "" : " It is " + helps + "'s helper: that model gets slower without it (H gets it back).");
+    const std::string path = m.path, name = id;
+    const double size = m.size;
+    g->ask_yes = [path, name, size] {
+        if (unlink(path.c_str()) != 0) {
+            show_toast("Not deleted: " + std::string(strerror(errno)), g->th->bad, 6);
+            return;
+        }
+        scan_models();
+        show_toast("Deleted " + name + ": " + gib(size) + " free again", g->th->good, 4);
+    };
+}
+
 void key_models(const Event &e) {
     if (g->show_tune) {
         if (e.key == K_ESC) g->show_tune = false;
@@ -5042,6 +5105,7 @@ void key_models(const Event &e) {
     } else if ((key_is("t") || key_is("c") || key_is("b")) && local)
         ask_job(g->models[g->model_sel], (char)tolower(e.ch[0]));
     else if (key_is("t") && g->tuner.lines.size()) g->show_tune = true;
+    else if ((key_is("d") || e.key == K_DELETE) && local) delete_model(g->models[g->model_sel]);
     else if (key_is("r")) {
         scan_models();
         show_toast(fmt("%d models", (int)g->models.size()), g->th->dim, 1.5);
