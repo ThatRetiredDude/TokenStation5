@@ -219,9 +219,12 @@ setTimeout(booted, 10000);
 // sees in Settings).
 const KEEP = 50;
 function localChats() { try { return JSON.parse(store.get("ts5.chats", "[]")) || []; } catch (e) { return []; } }
-let chats = localChats();
+// Filled by account() once the server says whose key this is, so a shared
+// browser never shows what it kept to another user's key, not even briefly.
+let chats = [];
 let cur = chats.length ? chats[0].id : null;
 let model = "", busy = null, busyId = null;
+let decided = false;  // account() has said whose key this is
 let me = null, remote = false, others = [], peek = null, viewing = null;
 const prefs = { think: store.get("ts5.think", "1") === "1", showThink: store.get("ts5.showthink", "0") === "1" };
 
@@ -229,6 +232,9 @@ const prefs = { think: store.get("ts5.think", "1") === "1", showThink: store.get
 function save(c) {
   if (remote) { if (c) putChat(c); return; }
   chats = chats.slice(0, KEEP);
+  // This browser's own list is the owner's (or a machine without users):
+  // never written before the server has said whose key it is.
+  if (!decided || (me && !me.owner)) return;
   store.set("ts5.chats", JSON.stringify(chats));
 }
 function api(path, opt) { return fetch(path, Object.assign({ headers: headers() }, opt || {})); }
@@ -242,24 +248,32 @@ function limit(n) { return n > 0 ? n.toLocaleString() + " tokens" : "no limit"; 
 // Whose key this is, and that user's own chats from the machine (the ones
 // this browser kept before go there, once).
 async function account() {
-  me = null; remote = false; others = []; peek = null; viewing = null;
+  me = null; remote = false; others = []; peek = null; viewing = null; decided = false;
   try { const r = await api("/ts5/me"); if (r.ok) me = await r.json(); } catch (e) {}
   if (me && me.chats_kept) {
     try {
       const r = await api("/ts5/chats");
       if (r.ok) {
         const there = (await r.json()).chats || [];
-        let moved = true;
-        for (const c of localChats())
-          if (!there.find((x) => x.id === c.id)) { if (await putChat(c)) there.push(c); else moved = false; }
-        if (moved) store.set("ts5.chats", "[]");
+        // Chats this browser kept before users go to the owner's account
+        // only: on a browser two people share, another user's key never
+        // takes (or shows) what is kept here.
+        if (me.owner) {
+          let moved = true;
+          for (const c of localChats())
+            if (!there.find((x) => x.id === c.id)) { if (await putChat(c)) there.push(c); else moved = false; }
+          if (moved) store.set("ts5.chats", "[]");
+        }
+        // Chats begun before the server answered are this key's own.
+        if (!decided) for (const c of chats) if (!there.find((x) => x.id === c.id) && (await putChat(c))) there.push(c);
         remote = true;
         chats = there.sort((a, b) => at(b) - at(a));
       }
     } catch (e) {}
     if (me.owner) { try { const r = await api("/ts5/users"); if (r.ok) others = (await r.json()).users || []; } catch (e) {} }
   }
-  if (!remote) chats = localChats();
+  if (!remote) chats = me && !me.owner ? [] : localChats();
+  decided = true;
   if (!chats.find((c) => c.id === cur)) cur = chats.length ? chats[0].id : null;
   $("full").hidden = !!me && !me.owner;
   $("fullnote").hidden = !!me && !me.owner;

@@ -1280,6 +1280,12 @@ void handle(int fd, Server::State &state, Usage &u) {
                         failed ? search_failed : log.compare(0, lead.size(), lead) == 0 ? log.substr(lead.size()) : log;
                     if (stream && client_ok) client_ok = send_all(fd, search_event(query, failed ? "failed" : "done", note));
                     searched += (searched.empty() ? "" : ",") + search_json(query, failed ? "failed" : "done", note);
+                    // Another user's searches stay theirs: the owner's log
+                    // (Logs, /feedback reports) gets that one was made, not
+                    // what for, unless the user lets the owner read its chats.
+                    if (!grant.owner && !grant.owner_reads)
+                        log = "web_search for " + grant.user_name + " (what for is theirs): " +
+                              (failed ? search_failed : std::string("done"));
                 }
                 log_line("ts5: %s %s", id.c_str(), log.c_str());
             }

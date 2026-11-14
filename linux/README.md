@@ -219,7 +219,10 @@ about speed or the usage an app is told shows what someone else sent (the
 cost: the first request after another user's reads its whole prompt again).
 Each user's chats from the chat page are kept on this machine
 (`~/.local/share/tokenstation/users/ID/chats`), the same on every device with
-one of their keys. Adding a user turns "require" on: without a key, another
+one of their keys. Chats a browser kept from before users go to the owner's
+key only, so a browser two people share never shows them to another user.
+The log says that another user searched the web, not what for (unless that
+user lets the owner read its chats). Adding a user turns "require" on: without a key, another
 machine would be the owner.
 
 ### Tailscale (reach it from anywhere)
