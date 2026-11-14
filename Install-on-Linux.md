@@ -4,7 +4,7 @@ The Linux edition is the PS5 app on Linux: the same TV dashboard, Chat, voice, M
 
 Linux on a PS5 adds things the console can't do: more memory for models (about 12 to 13 GiB instead of the title's 11.4 GiB, which fits 14B models), all 8 CPU cores, fan and clock control, and 36, 38 or 40 GPU compute units. See [PS5 hardware on Linux](PS5-hardware-on-Linux).
 
-> The Linux edition is new. Its packages come from the `linux-latest` pre-release and the `linux-v*` releases; the PS5 title's releases are separate. If something here doesn't match what you see, [open an issue](https://github.com/ThatRetiredDude/TokenStation5/issues).
+> The Linux edition is new. Its packages come from the `linux-v*` releases (1.0.0 and up: semantic versions, MAJOR.MINOR.PATCH, apart from the PS5 title's) and the `linux-latest` pre-release, the newest build between them (named like `1.0.0+330.83ba0e2`, it installs over 1.0.0, and 1.0.1 installs over it). If something here doesn't match what you see, [open an issue](https://github.com/ThatRetiredDude/TokenStation5/issues).
 
 ## Quick start
 

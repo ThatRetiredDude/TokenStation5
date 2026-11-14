@@ -34,7 +34,7 @@ linux/smoke-test.sh small.gguf # the app on a scratch folder: serve, API, chat, 
 
 `linux/build.sh` builds the title's code (`ps5/`) with `linux/platform.cpp` in place of the console's functions. Build on Debian 12, as CI does, for a package that runs everywhere; one built on a newer system won't run on Debian 12. `TS5_MARCH=znver2` builds for the PS5's Zen 2 alone.
 
-Linux releases are tagged `linux-v<version>`; `.github/workflows/linux.yml` builds the four packages, installs each on Debian 12 and 13, Ubuntu 24.04 and 26.04, Fedora and Arch, and attaches them to a release that is never marked latest. Run by hand, the same workflow replaces the `linux-latest` pre-release.
+Linux releases are tagged `linux-v<version>` with semantic versions starting at `linux-v1.0.0` (MAJOR when something stops working the old way, MINOR for features, PATCH for fixes), apart from the PS5 title's `01.004.001`-style versions. What each release brings is in `linux/release-notes/<version>.md`. `.github/workflows/linux.yml` builds the four packages, installs each on Debian 12 and 13, Ubuntu 24.04 and 26.04, Fedora and Arch, and attaches them to a release that is never marked latest. Run by hand, the same workflow replaces the `linux-latest` pre-release.
 
 ## The PS5 title (on Ubuntu 24.04)
 

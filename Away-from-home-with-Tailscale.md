@@ -54,7 +54,7 @@ A minute or two after the admin console's switch, the Connect a phone row says "
 2. In Safari, tap **Share**, then **Add to Home Screen**. The icon is the TokenStation5 logo, it opens on the logo on black while it starts, and it is signed in: the phone copies the page's cookies, which hold the key, into the icon when it is added (iOS 17.2 and later). Nothing is in its link.
 
 - Inside a home-screen icon the iPhone fills in no saved password and offers to save none (an iPhone limit; Safari itself does both). So the icon gets its key when it is added. If an icon ever asks for the key, copy it from the Passwords app and paste it, or delete the icon, open the page in Safari, and add it again.
-- The phone saves the logo and the start-up picture only when the icon is added: after an update, delete the icon and add it again to get new ones.
+- The phone keeps the icon's picture from when it was added, so if a new version changes the logo, delete the icon and add it again. The logo on black while it starts is the page's own and needs nothing (iOS 27 shows no start-up pictures of its own). The browser terminal (`/ts5/terminal`) works the same way as an app.
 - The page's Settings can also keep the key in the page's link, for a browser whose home-screen icons don't get its cookies. **Forget the key** removes it from the page and the cookie.
 
 ### SSH from away

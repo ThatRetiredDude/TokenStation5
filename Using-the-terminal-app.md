@@ -307,6 +307,7 @@ Type `/` and the matching commands show above the prompt. **Tab** completes the 
 | `/usage` | The API's use over the last day and week, by app (its API key's name, else its address) and by model: requests, prompt and generated tokens, tok/s. From the TV or desktop app's `usage.tsv`. |
 | `/access` | The [Access](#access-f6) page: who can use this TokenStation5 from another machine, and the API keys (`/keys` goes there too). |
 | `/connectors` | The [Connectors](#connectors-f7) page: GitHub (`/github` goes there too). |
+| `/feedback WHAT WENT WRONG` | Sends a report to TokenStation's private feedback service (never public). Add an email in your words if you'd like a reply. You read the whole report first: ts5-tui cleans it on this machine (keys, tokens, addresses, names, home folders) and shows it; then **Send it**, **Add this chat**, **Leave the log out**, **Save to a file** or **Cancel**. Nothing is sent before Send. `/bug` too. |
 | `/think on`, `off`, `auto` | Thinking before answering, for models that can switch it (Qwen 3, Qwen 3.5, Gemma 4). `auto` leaves it to the model. |
 | `/fan auto`, `cool`, `early`, `max` | The PS5's fan (see [PS5 hardware on Linux](PS5-hardware-on-Linux)). `early` ramps from 40 °C and is at full speed by 55 °C. |
 | `/theme NAME` | Colors: Ocean, Neon, Sunset, Forest, Mono. Without a name, the next one. |
