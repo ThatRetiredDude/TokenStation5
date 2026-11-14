@@ -468,8 +468,8 @@ Who can use this TokenStation5 from another machine, and with which key.
                        ssh you@100.101.102.103, from your tailnet
      Browser terminal  ‹ on ›
                        http://100.101.102.103:8081/ts5/terminal · Enter: as a QR code
-     Connect an app    a new key, as QR codes
-                       Enter: your tailnet's address and a new key, as QR codes for a phone
+     Connect a phone   a new key, as QR codes
+                       Enter: a key as a QR code; the phone opens the chat page signed in, by HTTPS
 
      Keys  shown once, when made · kept as SHA-256 in ~/.local/share/tokenstation/access/keys.tsv
    ▌ Open WebUI on the tower                  on   made 2 days ago   last used 5 minutes ago
@@ -485,7 +485,7 @@ Who can use this TokenStation5 from another machine, and with which key.
 | Tailscale | **on**: the server joins your tailnet, so your phones and computers reach it at home or away ([Tailscale](Away-from-home-with-Tailscale)). The first time, the sign-in link opens as a QR code to scan with your phone. A device on the tailnet always needs a key. **D** signs out. |
 | SSH via Tailscale | **on**: the tailnet's port 22 reaches this machine's own SSH server, so `ssh` and an editor's remote SSH (VS Code Remote-SSH, Zed, JetBrains Gateway) work from away too. Off by default. SSH's own login applies (your keys or password), not the API's keys. It needs an SSH server (`sudo apt install openssh-server`); the row says so when there is none. See [Tailscale](Away-from-home-with-Tailscale#ssh-from-away). |
 | Browser terminal | **on**: your tailnet's devices open ts5-tui in a web browser, with a key. Off by default. **Enter** shows its address as a QR code. See [Tailscale](Away-from-home-with-Tailscale#in-a-browser-the-chat-page-and-the-terminal). |
-| Connect an app | Makes a key and shows the address (the tailnet's when Tailscale is connected, else this network's) and the key as two QR codes, for the app on a phone. **V** shows them as plain text. |
+| Connect a phone | Makes a key and puts it inside a QR code: the phone's camera opens the chat page signed in (by HTTPS on the tailnet name once it has its certificate, see [HTTPS](Away-from-home-with-Tailscale#https-secure-pages-on-the-phone)). Then the browser terminal's code when it is on, and the address and the key for an app. **← →** goes between the codes; a tap on the text under one, or **C**, copies it. Enter alone names the key "phone". |
 | Keys | **N** makes one: name it after the app or the machine. The key (such as `ts5-k7qp2-wx9md-3hf8r-tz6na`) is shown once, with the address, as QR codes (**V**: as plain text to select), and copied when your terminal allows it; ts5 keeps only its SHA-256. **Enter** turns a key off or on. Each row says when the key was made and when it was last used. |
 
 - **This machine never needs a key**: ts5-tui, or a program beside it that talks to `127.0.0.1`.

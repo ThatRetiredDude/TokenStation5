@@ -17,13 +17,13 @@ The Linux packages have the same client, built into `ts5 serve`: no `tailscale` 
 
 1. Install Tailscale on your phone, tablet or computer and sign in.
 2. In the terminal app, open **Access** (F6) and turn **Tailscale** on. A QR code of the sign-in link opens: scan it with your phone, sign in to the same Tailscale account, and it closes by itself once the machine is connected. The row then shows its name, its 100.x address and how many other devices your tailnet has.
-3. **Connect an app** (the row below) makes a key and shows two QR codes: the address, such as `http://100.101.102.103:8081/v1`, and the key. Scan them into the app on your phone.
+3. **Connect a phone** (a row further down) makes a new key and puts it inside a QR code. Scan it with the phone's camera: the chat page opens, signed in, with nothing to type. The codes after it give the browser terminal (when it is on) and the address and key for an app, such as `http://100.101.102.103:8081/v1`.
 
 ```
      Tailscale         ‹ on ›
                        connected as tokenstation5 · 100.101.102.103 · 4 other devices · D signs out
-     Connect an app    a new key, as QR codes
-                       Enter: your tailnet's address and a new key, as QR codes for a phone
+     Connect a phone   a new key, as QR codes
+                       Enter: a key as a QR code; the phone opens the chat page signed in, by HTTPS
 ```
 
 - From the tailnet a key is **always** needed, even with "They need a key" off. Only the API's port is reachable through it.
@@ -31,6 +31,22 @@ The Linux packages have the same client, built into `ts5 serve`: no `tailscale` 
 - **D** on the row signs out. Off leaves it signed in, so on again needs no QR code.
 - The background service has no screen for the QR code: `curl -d '{"on":true}' http://127.0.0.1:8081/ts5/tailnet`, then `curl -s http://127.0.0.1:8081/ts5/tailnet` shows `sign_in_url` to open on your phone. `TS5_TS_NAME`, `TS5_TS_SERVER` and `TS5_TS_AUTH_KEY` go in `/etc/default/tokenstation`.
 - Its files sit beside the keys (`~/.local/share/tokenstation/access/`, or `/var/lib/tokenstation/access/` for the service): `tailscale.conf` and `tailscale.tsv`, readable by their owner only. `tailscale.tsv` belongs to that machine. Copied to another one, Tailscale refuses it as copied keys: ts5 then starts over as a new device and shows a new sign-in QR code (remove the old one in the admin console).
+
+### HTTPS: secure pages on the phone
+
+With HTTPS the phone treats the chat page and the browser terminal as secure pages: no "not secure" warning, and the phone's passwords (iCloud Keychain, Google Password Manager) can keep the key and fill it in. TokenStation5 gets the certificate by itself, for its own name on your tailnet, from Let's Encrypt, the same way Tailscale's own `tailscale cert` does. Each machine gets its own; nothing is shared or shipped in the package. It needs three switches, all on your side:
+
+1. **Tailscale on** in the terminal app (Access, F6), connected.
+2. **MagicDNS** and **HTTPS Certificates** on in your Tailscale admin console, on its **DNS** page.
+3. **Use Tailscale DNS** on in the phone's Tailscale app (on by default), so the phone can find the name.
+
+A minute or two after the admin console's switch, the Connect a phone row says "by HTTPS" and its codes open `https://tokenstation5.YOUR-TAILNET.ts.net/`. Until then the row says which switch is missing and the codes use the http address.
+
+- It answers HTTPS on the name at port 443, and on the API's own port too (`https://tokenstation5.YOUR-TAILNET.ts.net:8081/v1`), so an app can be given either, and a browser set to try HTTPS first still opens an old `http://…:8081` link by name.
+- The certificate lasts 90 days and is renewed by itself 30 days before it ends. It and its key sit beside the keys (`tailscale-https.crt`, `tailscale-https.key`, and the Let's Encrypt account's key in `tailscale-acme.key`), readable by their owner only.
+- **A certificate's name is public.** Every certificate goes into the public certificate transparency logs, with its name: the machine's name and your tailnet's name (`tokenstation5.tail1234.ts.net`). Nothing else: no address, no port, no key. If you'd rather the machine's name say nothing, rename it **before** you turn HTTPS Certificates on: admin console, Machines, the machine's menu, Edit machine name (switch "Auto-generate from OS hostname" off first). TokenStation5 gets a certificate for the new name by itself.
+- An address by number (`https://100.101.102.103:8081/`) gets no certificate: a certificate is for a name. A browser trying HTTPS there goes on with http.
+- `TS5_TS_HTTPS=0` leaves HTTPS off (in the terminal app's `ts5.env`, or `/etc/default/tokenstation` for the background service).
 
 ### SSH from away
 
@@ -49,7 +65,7 @@ Match Address 127.0.0.2
 
 `ts5 serve` answers a web browser too, at the address apps use, without `/v1`.
 
-**The chat page.** Open `http://100.101.102.103:8081/` on your phone (or `http://192.168.1.20:8081/` at home with Other devices on) and chat with the loaded model, its answers streamed, with its thinking when the model thinks. It asks once for one of your keys and keeps it, and your chats, in that browser only. Nothing to install on the phone.
+**The chat page.** Scan Connect a phone's code, or open `https://tokenstation5.YOUR-TAILNET.ts.net/` (with HTTPS on) or `http://100.101.102.103:8081/` on your phone (or `http://192.168.1.20:8081/` at home with Other devices on) and chat with the loaded model, its answers streamed, with its thinking when the model thinks. It asks once for one of your keys and keeps it, and your chats, in that browser only. Nothing to install on the phone.
 
 **The browser terminal.** ts5-tui itself in a web page, for a laptop or tablet with no SSH client, or a computer that isn't yours.
 
@@ -75,6 +91,7 @@ Only devices on your tailnet can reach it, and your tailnet's access rules apply
 | --- | --- |
 | `TS5_TS_SERVER` | another control server, such as a [Headscale](https://headscale.net) |
 | `TS5_TS_NAME` | the PS5's name on the tailnet (`tokenstation5` by default) |
+| `TS5_TS_HTTPS` | `0` leaves HTTPS off (Linux) |
 | `TS5_TS_AUTH_KEY` | an auth key from the admin console, which signs in without the QR code. Make it a one-off key: the PS5 removes it from `ts5.env` once signed in |
 
 ## Keep in mind
