@@ -553,6 +553,12 @@ void terminal(const WebOptions &o, const Server::Page &p, int fd) {
 
 constexpr size_t kChatMax = 4u << 20;  // a chat's JSON
 constexpr int kChatsMax = 1000;         // a user's chats
+// All of a user's chats together: a user can't fill the machine's drive.
+// (TS5_CHATS_MAX_BYTES for tests.)
+size_t chats_max_bytes() {
+    const char *e = getenv("TS5_CHATS_MAX_BYTES");
+    return e && *e ? (size_t)strtoull(e, nullptr, 10) : (size_t)256 << 20;
+}
 
 bool good_chat_id(const std::string &id) {
     if (id.empty() || id.size() > 64) return false;
@@ -745,6 +751,16 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
         }
         if (access(file.c_str(), F_OK) != 0 && (int)chat_files(dir).size() >= kChatsMax) {
             send_error(fd, 400, "a user keeps at most 1000 chats: delete some first");
+            return true;
+        }
+        size_t total = p.body.size();
+        for (const std::string &n : chat_files(dir)) {
+            struct stat st {};
+            if (n != id + ".json" && stat((dir + "/" + n).c_str(), &st) == 0) total += (size_t)st.st_size;
+        }
+        if (total > chats_max_bytes()) {
+            send_error(fd, 400, "a user's chats take at most " + std::to_string(chats_max_bytes() >> 20) +
+                                    " MB on the machine: delete some first");
             return true;
         }
         make_dirs(dir);

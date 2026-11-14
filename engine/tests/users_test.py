@@ -86,6 +86,9 @@ def test_cli(ts5, d):
 
     code, out, err = run(ts5, path, "users", "new", "Sam")
     sam = out.get("made") if isinstance(out, dict) else None
+    code2, out2, _ = run(ts5, path, "keys", "require", "off")
+    check(code2 == 1 and "while there are users" in out2.get("error", ""),
+          "require off is refused while there are users (another machine would be the owner)", out2)
     by = {u["name"]: u for u in out.get("users", [])} if isinstance(out, dict) else {}
     check(code == 0 and sam and by.get("Sam", {}).get("preset") == "chat" and by["Sam"]["web_search"] is False and
           by["Sam"]["app_tools"] is True and by["Sam"]["owner_reads"] is False and by["Sam"]["terminal"] is False,
@@ -147,7 +150,7 @@ def test_server(ts5, model, backend, d):
     log_path = os.path.join(d, "serve.log")
     log = open(log_path, "w+")
     env = {k: v for k, v in os.environ.items() if not k.startswith("TS5_")}
-    env.update(TS5_KEYS=path, TS5_TERMINAL_COMMAND="echo ready; read x", TAVILY_API_KEY="")
+    env.update(TS5_KEYS=path, TS5_TERMINAL_COMMAND="echo ready; read x", TAVILY_API_KEY="", TS5_CHATS_MAX_BYTES="300000")
     p = subprocess.Popen([ts5, "serve", "-m", model, "-c", "2048", "--host", "0.0.0.0", "--port", str(port),
                           "--backend", backend], stdout=log, stderr=subprocess.STDOUT, env=env)
     there, here = f"http://{lan}:{port}", f"http://127.0.0.1:{port}"
@@ -201,6 +204,24 @@ def test_server(ts5, model, backend, d):
             check(code == 400, "PUT refuses " + str(bad)[:30], (code, got))
         code, got = call(there + "/ts5/chats/..%2fx", skey, {"id": "..%2fx"}, "PUT")
         check(code == 400, "a chat id is letters, digits, - and _ only", (code, got))
+        # All of a user's chats together have a cap: a user can't fill the drive.
+        big = lambda i: {"id": i, "title": "big", "messages": [{"role": "user", "content": "x" * 160000}]}
+        c1 = call(there + "/ts5/chats/big1", skey, big("big1"), "PUT")[0]
+        c2, got = call(there + "/ts5/chats/big2", skey, big("big2"), "PUT")
+        c3 = call(there + "/ts5/chats/big1", skey, big("big1"), "PUT")[0]
+        check(c1 == 200 and c2 == 400 and "delete some first" in json.dumps(got) and c3 == 200,
+              "a user's chats together are capped (TS5_CHATS_MAX_BYTES); a chat saved again counts once", (c1, c2, got, c3))
+        call(there + "/ts5/chats/big1", skey, None, "DELETE")
+        # A keys file that says no key is needed (edited by hand) still needs
+        # one while there are users: no key, or a removed user's, is never the owner.
+        text = open(path).read()
+        with open(path, "w") as f:
+            f.write(text.replace("# required=1\n", ""))
+        time.sleep(1.2)
+        check(call(there + "/v1/models")[0] == 401, "a hand-edited 'no key needed' still needs one while there are users")
+        with open(path, "w") as f:
+            f.write(text)
+        time.sleep(1.2)
 
         # The owner reads a user's chats only where that user allows it.
         code, got = call(there + "/ts5/users", owner)

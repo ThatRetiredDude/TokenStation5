@@ -328,7 +328,9 @@ std::vector<AccessKey> KeyFile::keys() const {
 
 bool KeyFile::required() const {
     std::lock_guard<std::mutex> lk(mu_);
-    return required_;
+    // While there are users, always: without a key another machine would
+    // be the owner.
+    return required_ || !users_.empty();
 }
 
 int KeyFile::find_locked(const std::string &which, std::string &err) const {
@@ -421,6 +423,11 @@ bool KeyFile::remove(const std::string &which, std::string &err) {
 
 bool KeyFile::set_required(bool required, std::string &err) {
     std::lock_guard<std::mutex> lk(mu_);
+    if (!required && !users_.empty()) {
+        err = "other machines need a key while there are users: without one a machine on the network would be "
+              "the owner (remove the users first)";
+        return false;
+    }
     const bool was = required_;
     required_ = required;
     if (save_locked(err)) return true;
@@ -509,7 +516,9 @@ bool KeyFile::admit(const std::string &key, const std::string &client, Server::G
     const bool here = client == "::1" || client.compare(0, 4, "127.") == 0 || client == "::ffff:127.0.0.1";
     // A device on a tailnet reaches this machine from anywhere: it always
     // needs a key, as on the TV app.
-    return !on_tailnet(client) && (here || !required_);
+    // While there are users a key is always needed (required()), even if
+    // the file says otherwise: a removed user's key, or none, is never the owner.
+    return !on_tailnet(client) && (here || (!required_ && users_.empty()));
 }
 
 std::vector<AccessUser> KeyFile::users() const {
