@@ -1062,8 +1062,15 @@ unchanged. `TS5_MARCH=znver2` builds for the PS5's Zen 2 alone (the default,
 
 ## Releases
 
-Linux releases use their own tags, `linux-v<version>` (for example
-`linux-v0.2.0`). `.github/workflows/linux.yml` builds them and attaches the
+Linux releases use their own tags, `linux-v<version>`, and their own
+semantic versions, apart from the PS5 title's: MAJOR.MINOR.PATCH, starting at
+`linux-v1.0.0`. MAJOR goes up when something stops working the old way
+(settings, files, the API), MINOR for new features, PATCH for fixes alone.
+Builds between releases, such as `linux-latest`, are named
+`<the newest release>+<run>.<commit>` (for example `1.0.0+330.83ba0e2`), and
+install over that release; the next release installs over them. What each
+release brings is in `linux/release-notes/<version>.md`.
+`.github/workflows/linux.yml` builds them and attaches the
 `.deb`, `.rpm`, Arch package and portable `.tar.gz`, after installing each on
 Debian 12 and 13, Ubuntu 24.04 and 26.04, Fedora 44 and Arch. They are never marked as the repo's latest release, so
 the PS5 store side (`release.yml`, tags like `01.004.001`) is unaffected.
