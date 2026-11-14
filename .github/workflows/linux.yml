@@ -337,6 +337,8 @@ jobs:
         run: |
           python3 -c "import cryptography" 2>/dev/null || python3 -m pip install --user --break-system-packages -q cryptography
           python3 engine/tests/https_test.py "$(command -v ts5)" /tmp/model/test.gguf vk
+      - name: The server's text is always valid UTF-8 (a model's broken bytes arrive as U+FFFD)
+        run: python3 engine/tests/utf8_test.py "$(command -v ts5)" /tmp/model/test.gguf vk
       - name: The model's GitHub tool (ts5-tui --github-call against the same stand-in GitHub)
         run: python3 linux/tui/test/github_tool_test.py "$(command -v ts5-tui)" "$(command -v ts5)"
       - name: Feedback reports (ts5 feedback cleaning and sending, against a service served here)

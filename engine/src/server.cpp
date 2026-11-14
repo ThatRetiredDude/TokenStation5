@@ -24,6 +24,7 @@
 #include "json.h"
 #include "log.h"
 #include "tools.h"
+#include "utf8_out.h"
 #include "websearch.h"
 
 namespace ts5 {
@@ -998,21 +999,35 @@ void handle(int fd, Server::State &state, Usage &u) {
                 // (As the engine does, the piece that ended a turn is handed
                 // over once more: Engine::generate keeps what its callback
                 // said no to, and hands over what it holds when it ends.)
+                // The bytes go through the same Utf8Out as the engine's.
+                Utf8Out u8;
                 if (piece <= 0) {
-                    if (!on_text(t)) on_text(t);
+                    std::string all8 = u8.take(t);
+                    all8 += u8.finish();  // (after take: the two in one expression may run in either order)
+                    if (!on_text(all8)) on_text(all8);
                     turn.gen_tokens = 1;
                 } else {
+                    std::string part;
+                    bool said_no = false;
                     for (size_t at = 0; at < t.size(); at += (size_t)piece) {
                         turn.gen_tokens++;
-                        const std::string part = t.substr(at, (size_t)piece);
-                        if (!on_text(part)) {
-                            on_text(part);
-                            break;
+                        part += u8.take(std::string_view(t).substr(at, (size_t)piece));
+                        if (!part.empty()) {
+                            if (!on_text(part)) {
+                                said_no = true;
+                                break;
+                            }
+                            part.clear();
                         }
                         if (turn.gen_tokens >= sp.max_tokens) {
                             turn.finish = "length";
                             break;
                         }
+                    }
+                    part += u8.finish();
+                    if (!part.empty()) {
+                        if (said_no) on_text(part);
+                        else if (!on_text(part)) on_text(part);
                     }
                 }
             } else {

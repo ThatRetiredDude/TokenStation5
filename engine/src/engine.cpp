@@ -2,6 +2,7 @@
 
 #include <mutex>
 #include "log.h"
+#include "utf8_out.h"
 
 #include <algorithm>
 #include <chrono>
@@ -506,24 +507,20 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     }
     st.prompt_ms = now_ms() - t0 + repair_ms;
     t0 = now_ms();
-    std::string pending;  // decoded but unsent bytes (one send per step)
+    // The tokens' bytes as valid UTF-8 (a split character waits for its
+    // last bytes; bytes that are no character go out as U+FFFD).
+    Utf8Out u8;
+    std::string pending;  // ready but unsent text (one send per step)
     auto emit = [&](int32_t t) {
         st.gen_tokens++;
-        pending += t_.decode(t);
+        pending += u8.take(t_.decode(t));
     };
-    // Send what is complete UTF-8; false: the caller asked to stop.
+    // Send what is ready; false: the caller asked to stop (the text stays,
+    // and is handed over again at the end).
     auto flush = [&]() -> bool {
-        size_t cut = pending.size();
-        for (size_t back = 1; back <= 3 && back <= pending.size(); back++) {
-            unsigned char c = (unsigned char)pending[pending.size() - back];
-            if ((c & 0xC0) == 0x80) continue;
-            int need = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
-            if ((int)back < need) cut = pending.size() - back;
-            break;
-        }
-        if (cut > 0) {
-            if (!on_text(pending.substr(0, cut))) return false;
-            pending.erase(0, cut);
+        if (!pending.empty()) {
+            if (!on_text(pending)) return false;
+            pending.clear();
         }
         return true;
     };
@@ -735,6 +732,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         if (!flush()) { st.finish = "stop"; break; }
         tok = next;
     }
+    pending += u8.finish();
     if (!pending.empty()) on_text(pending);
     st.gen_ms = now_ms() - t0;
     // What the cost model saw (TS5_DRAFT_LOG=1): the helper's measured costs
