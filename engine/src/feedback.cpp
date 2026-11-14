@@ -253,6 +253,16 @@ std::string feedback_scrub(const std::string &text, const ScrubWords &w, bool ke
 
     static const std::regex tsnet(R"([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.ts\.net)", std::regex::icase);
     s = std::regex_replace(s, tsnet, "<tailnet-name>");
+    // Names in ts5's own log lines: this machine's on the tailnet ("tailscale:
+    // on, as NAME", not its Linux host name), another device's ("tailscale:
+    // NAME (100.x) connected"), and a key's ("opened one with the key NAME"):
+    // people name keys and devices after themselves.
+    static const std::regex ts_self(R"((tailscale: on, as )[A-Za-z0-9._-]+)");
+    s = std::regex_replace(s, ts_self, "$1<tailnet-name>");
+    static const std::regex ts_peer(R"((tailscale: )[A-Za-z0-9._-]+( \([^()\s]*\)(?: connected|'s session ended)))");
+    s = std::regex_replace(s, ts_peer, "$1<device>$2");
+    static const std::regex key_name(R"((with the key )[^\s,;()]+)");
+    s = std::regex_replace(s, key_name, "$1<key-name>");
 
     static const std::regex mac(R"(\b[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}\b)");
     s = std::regex_replace(s, mac, "<mac>");

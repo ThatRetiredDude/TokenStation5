@@ -57,6 +57,9 @@ SECRETS = {
     "login name": "zuzkauser",
     "machine name": "zuzka-ps5",
     "private key body": "b3BlbnNzaC1rZXktdjEAAAAABG5vbmU",
+    "tailnet machine name": "zx81tsnode",
+    "tailnet device name": "zuzkas-iphone-15",
+    "key name": "zuzkaphone",
 }
 
 LOG = f"""ts5 0.0.1.285+7391b41 listening on 0.0.0.0:8081 and 127.0.0.1 at 10:05:23
@@ -69,13 +72,21 @@ fetch https://bob:{SECRETS['address password']}@example.com/x from {SECRETS['pub
 name {SECRETS['MagicDNS name']} mac {SECRETS['MAC address']} mail {SECRETS['log email']}
 model /home/zuzkauser/models/Qwen3-8B.gguf sha 9f86d081884c7d659a2feaeb0c71df2b0f9b8b8c8e8b5b1d35c6a7b6f5b6a1c2
 user {SECRETS['login name']} on {SECRETS['machine name']} random {SECRETS['random secret']}
+ts5: tailscale: on, as {SECRETS['tailnet machine name']}, with SSH
+ts5: tailscale: {SECRETS['tailnet device name']} ({SECRETS['tailnet address']}) connected
+ts5: tailscale: {SECRETS['tailnet device name']} ({SECRETS['tailnet address']})'s session ended
+ts5: terminal: {SECRETS['tailnet address']} opened one with the key {SECRETS['key name']}
+ts5: web: 11:41:49 {SECRETS['tailnet address']} GET /ts5/terminal -> 200, 15003 bytes, with the key's cookie (Safari)
 -----BEGIN OPENSSH PRIVATE KEY-----
 {SECRETS['private key body']}
 -----END OPENSSH PRIVATE KEY-----
 """
 KEEP = ["0.0.1.285+7391b41", "127.0.0.1", "10:05:23", "Qwen3-8B.gguf",
         "9f86d081884c7d659a2feaeb0c71df2b0f9b8b8c8e8b5b1d35c6a7b6f5b6a1c2", "<ts5-key>", "<github-token>",
-        "<tailscale-key>", "<lan-ip>", "<tailnet-ip>", "<tailnet-name>", "<mac>", "<private key removed>"]
+        "<tailscale-key>", "<lan-ip>", "<tailnet-ip>", "<tailnet-name>", "<mac>", "<private key removed>",
+        "tailscale: on, as <tailnet-name>, with SSH", "tailscale: <device> (<tailnet-ip>) connected",
+        "tailscale: <device> (<tailnet-ip>)'s session ended", "opened one with the key <key-name>",
+        "with the key's cookie"]
 
 
 class Service:
