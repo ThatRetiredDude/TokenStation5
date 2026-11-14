@@ -34,7 +34,7 @@ The Linux packages have the same client, built into `ts5 serve`: no `tailscale` 
 
 ### HTTPS: secure pages on the phone
 
-With HTTPS the phone treats the chat page and the browser terminal as secure pages: no "not secure" warning, and the phone's passwords (iCloud Keychain, Google Password Manager) can keep the key and fill it in. TokenStation5 gets the certificate by itself, for its own name on your tailnet, from Let's Encrypt, the same way Tailscale's own `tailscale cert` does. Each machine gets its own; nothing is shared or shipped in the package. It needs three switches, all on your side:
+With HTTPS the phone treats the chat page and the browser terminal as secure pages: no "not secure" warning, and the phone's passwords (iCloud Keychain, Google Password Manager) can keep the key and fill it in the browser. TokenStation5 gets the certificate by itself, for its own name on your tailnet, from Let's Encrypt, the same way Tailscale's own `tailscale cert` does. Each machine gets its own; nothing is shared or shipped in the package. It needs three switches, all on your side:
 
 1. **Tailscale on** in the terminal app (Access, F6), connected.
 2. **MagicDNS** and **HTTPS Certificates** on in your Tailscale admin console, on its **DNS** page.
@@ -47,6 +47,15 @@ A minute or two after the admin console's switch, the Connect a phone row says "
 - **A certificate's name is public.** Every certificate goes into the public certificate transparency logs, with its name: the machine's name and your tailnet's name (`tokenstation5.tail1234.ts.net`). Nothing else: no address, no port, no key. If you'd rather the machine's name say nothing, rename it **before** you turn HTTPS Certificates on: admin console, Machines, the machine's menu, Edit machine name (switch "Auto-generate from OS hostname" off first). TokenStation5 gets a certificate for the new name by itself.
 - An address by number (`https://100.101.102.103:8081/`) gets no certificate: a certificate is for a name. A browser trying HTTPS there goes on with http.
 - `TS5_TS_HTTPS=0` leaves HTTPS off (in the terminal app's `ts5.env`, or `/etc/default/tokenstation` for the background service).
+
+### The chat page as an app on the phone
+
+1. Scan **Connect a phone** with the phone's camera. The chat page opens signed in and asks **Save the key to your passwords?** Tap **Save**, then **Save Password** when the phone asks. The phone's passwords now keep it, for its other browsers and your other devices.
+2. In Safari, tap **Share**, then **Add to Home Screen**. The icon is the TokenStation5 logo, it opens on the logo on black while it starts, and it is signed in: the phone copies the page's cookies, which hold the key, into the icon when it is added (iOS 17.2 and later). Nothing is in its link.
+
+- Inside a home-screen icon the iPhone fills in no saved password and offers to save none (an iPhone limit; Safari itself does both). So the icon gets its key when it is added. If an icon ever asks for the key, copy it from the Passwords app and paste it, or delete the icon, open the page in Safari, and add it again.
+- The phone saves the logo and the start-up picture only when the icon is added: after an update, delete the icon and add it again to get new ones.
+- The page's Settings can also keep the key in the page's link, for a browser whose home-screen icons don't get its cookies. **Forget the key** removes it from the page and the cookie.
 
 ### SSH from away
 
