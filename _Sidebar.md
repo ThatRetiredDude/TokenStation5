@@ -7,6 +7,7 @@
 **Use**
 - [Using the TV app](Using-the-TV-app)
 - [Using the terminal app (ts5-tui)](Using-the-terminal-app)
+- [Users (Linux)](Users)
 - [Models](Models)
 - [Models tested on PS5](Models-tested-on-PS5)
 - [Connecting apps](Connecting-apps)

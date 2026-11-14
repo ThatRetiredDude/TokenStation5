@@ -472,21 +472,25 @@ Who can use this TokenStation5 from another machine, and with which key.
      Connect a phone   a new key, as QR codes
                        Enter: a key as a QR code; the phone opens the chat page signed in, by HTTPS
 
-     Keys  shown once, when made · kept as SHA-256 in ~/.local/share/tokenstation/access/keys.tsv
-   ▌ Open WebUI on the tower                  on   made 2 days ago   last used 5 minutes ago
-     laptop                                   off  made 2 days ago   last used never
+     Users  each with its own keys, chats and permissions · keys shown once, kept as SHA-256 in ~/.local/…
+     Owner   you: everything, ts5-tui and the browser terminal too · 2 keys
+   ▌   Open WebUI on the tower                on   made 2 days ago   last used 5 minutes ago
+       laptop                                 off  made 2 days ago   last used never
+     Sam     chat only · 1 key
+       Sam's phone                            on   made today        last used 1 hour ago
 ```
 
-**↑ ↓** choose a row, **← →** or **Enter** change it, **N** makes a key, **D** removes the chosen key (it asks first), **R** reads the keys again, **Esc** goes back to the chat.
+**↑ ↓** choose a row, **← →** or **Enter** change it, **N** makes a key (on a user's row, a key of theirs), **U** adds a user, **P** pauses a user, **D** removes the chosen key or user (it asks first), **R** reads the keys again, **Esc** goes back to the chat. **Enter** on a user opens what they may do: see [Users](Users).
 
 | Row | What it does |
 | --- | --- |
 | Other devices | Whether a model ts5-tui loads can be reached from other machines at all. **no** (the default): only this machine. **yes**: the page shows the address to give an app, and offers to load the model again, which is when it takes hold. |
-| They need a key | **yes**: another machine gets in only with a key that is on; without one it gets HTTP 401 and a line that says where keys are made. **no**: any machine that can reach the port gets in. Switching Other devices on turns this on too. |
+| They need a key | **yes**: another machine gets in only with a key that is on; without one it gets HTTP 401 and a line that says where keys are made. **no**: any machine that can reach the port gets in. Switching Other devices on turns this on too, and so does adding a user; while there are users it stays on. |
 | Tailscale | **on**: the server joins your tailnet, so your phones and computers reach it at home or away ([Tailscale](Away-from-home-with-Tailscale)). The first time, the sign-in link opens as a QR code to scan with your phone. A device on the tailnet always needs a key. **D** signs out. |
 | SSH via Tailscale | **on**: the tailnet's port 22 reaches this machine's own SSH server, so `ssh` and an editor's remote SSH (VS Code Remote-SSH, Zed, JetBrains Gateway) work from away too. Off by default. SSH's own login applies (your keys or password), not the API's keys. It needs an SSH server (`sudo apt install openssh-server`); the row says so when there is none. See [Tailscale](Away-from-home-with-Tailscale#ssh-from-away). |
 | Browser terminal | **on**: your tailnet's devices open ts5-tui in a web browser, with a key. Off by default. **Enter** shows its address as a QR code. See [Tailscale](Away-from-home-with-Tailscale#in-a-browser-the-chat-page-and-the-terminal). |
 | Connect a phone | Makes a key and puts it inside a QR code: the phone's camera opens the chat page signed in (by HTTPS on the tailnet name once it has its certificate, see [HTTPS](Away-from-home-with-Tailscale#https-secure-pages-on-the-phone)). Then the browser terminal's code when it is on, and the address and the key for an app. **← →** goes between the codes; a tap on the text under one, or **C**, copies it. Enter alone names the key "phone". |
+| Users | From 1.1.0: you (**Owner**) and the people you added with **U**, each with their keys under them. Another user gets the chat page and the API with their own keys and only what you allow, never ts5-tui or the browser terminal. See [Users](Users). |
 | Keys | **N** makes one: name it after the app or the machine. The key (such as `ts5-k7qp2-wx9md-3hf8r-tz6na`) is shown once, with the address, as QR codes (**V**: as plain text to select), and copied when your terminal allows it; ts5 keeps only its SHA-256. **Enter** turns a key off or on. Each row says when the key was made and when it was last used. |
 
 - **This machine never needs a key**: ts5-tui, or a program beside it that talks to `127.0.0.1`.
