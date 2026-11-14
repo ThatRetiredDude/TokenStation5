@@ -270,8 +270,26 @@ def main():
             check(code == 200 and h.get("Content-Type") == "image/png" and body[:8] == b"\x89PNG\r\n\x1a\n",
                   f"{icon}: the logo, with no key", (code, h.get("Content-Type")))
         code, body, _ = get(here + "/")
-        check(b'rel="apple-touch-icon" href="/ts5/web/icon.png"' in body and b'autocomplete="current-password"' in body,
-              "the page names its home-screen icon, and its key form is one the phone's passwords can fill")
+        check(b'autocomplete="current-password"' in body, "the key form is one the phone's passwords can fill")
+        # The home-screen icon is in each page as a data: address (make_icon.py):
+        # iOS 27's Add to Home Screen sheet draws a letter tile for a fetched one.
+        icons = []
+        for page in ("/", "/ts5/terminal"):
+            code, body, _ = get(here + page)
+            m = re.findall(rb'<link rel="apple-touch-icon" sizes="180x180" href="data:image/png;base64,([A-Za-z0-9+/=]+)">',
+                           body)
+            png = base64.b64decode(m[0]) if len(m) == 1 and body.count(b'rel="apple-touch-icon"') == 1 else b""
+            ok = png[:8] == b"\x89PNG\r\n\x1a\n" and png[12:16] == b"IHDR" and struct.unpack(">II", png[16:24]) == (180, 180)
+            icons.append(png)
+            check(ok and 5000 < len(png) < 40000, f"{page}: its home-screen icon is in the page, a 180x180 PNG",
+                  (len(m), len(png)))
+        check(icons[0] == icons[1], "both pages have the same icon")
+        # iOS 27 shows no launch image, so each page covers itself with the
+        # logo on black while a home-screen icon opens, until it can be used.
+        for page in ("/", "/ts5/terminal"):
+            code, body, _ = get(here + page)
+            check(b'<div id="boot"' in body and b"@media (display-mode: standalone) { #boot { display: block; } }" in body
+                  and b"booted()" in body, f"{page}: a loading screen in a home-screen icon")
         # The launch images: one per iPhone screen, by width and pixel ratio
         # only (iOS 27 gets device-height wrong, WebKit bug 326500), each as
         # wide as its query says and no two queries the same.
