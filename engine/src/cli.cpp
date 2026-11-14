@@ -46,6 +46,7 @@
 #include "access.h"
 #include "browser.h"
 #include "github.h"
+#include "tsshare.h"
 #include "feedback.h"
 #include "checks.h"
 #include "cli.h"
@@ -234,6 +235,7 @@ int no_model_command(int argc, char **argv) {
     if (cmd == "keys") return keys_main(argc, argv);
     if (cmd == "users") return users_main(argc, argv);
     if (cmd == "github") return github_main(argc, argv);
+    if (cmd == "share") return share_main(argc, argv);
     if (cmd == "feedback") return feedback_main(argc, argv);
 #ifdef TS5_TAILNET
     if (cmd == "https-test") return https_test_main(argc, argv);
@@ -503,7 +505,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
                       std::string(argv[1]) == "usage-parse" || std::string(argv[1]) == "page" ||
                       std::string(argv[1]) == "html-text" || std::string(argv[1]) == "html-view" ||
                       std::string(argv[1]) == "browser" || std::string(argv[1]) == "keys" || std::string(argv[1]) == "users" ||
-                      std::string(argv[1]) == "github" || std::string(argv[1]) == "feedback" ||
+                      std::string(argv[1]) == "github" || std::string(argv[1]) == "feedback" || std::string(argv[1]) == "share" ||
                       std::string(argv[1]) == "https-test"))
         return no_model_command(argc, argv);
     Args a;

@@ -331,6 +331,8 @@ jobs:
         run: python3 engine/tests/access_test.py "$(command -v ts5)" /tmp/model/test.gguf vk
       - name: Users (ts5 users; each request held to its user's permissions, each user's own chats, the terminal the owner's alone)
         run: python3 engine/tests/users_test.py "$(command -v ts5)" /tmp/model/test.gguf vk
+      - name: Sharing this machine with a user over Tailscale (ts5 share against a Tailscale API served here)
+        run: python3 engine/tests/share_test.py "$(command -v ts5)"
       - name: The chat page and the browser terminal (ts5 serve's own pages; a WebSocket to a program in a terminal)
         run: python3 engine/tests/web_test.py "$(command -v ts5)" /tmp/model/test.gguf vk
       - name: GitHub's sign-in and API calls (ts5 github against a GitHub served here)

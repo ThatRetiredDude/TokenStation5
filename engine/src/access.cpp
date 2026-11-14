@@ -15,6 +15,7 @@
 
 #include "json.h"
 #include "net.h"
+#include "tsshare.h"
 
 namespace ts5 {
 
@@ -846,6 +847,14 @@ int users_main(int argc, char **argv) {
         if (!f.set_user(a[1], std::vector<std::string>(a.begin() + 2, a.end()), err)) return fail(err);
     } else if (cmd == "remove") {
         if (a.size() != 2) return usage();
+        // Their Tailscale invites (tsshare.h) go first: a machine share
+        // must not outlive the user.
+        std::string id;
+        for (const AccessUser &u : f.users())
+            if (!u.owner() && (u.id == a[1] || u.name == a[1])) id = u.id;
+        std::string note;
+        if (!id.empty() && !share_revoke(path, id, note, err)) return fail(err + " (the user is kept)");
+        if (!note.empty()) fprintf(stderr, "%s\n", note.c_str());
         if (!f.remove_user(a[1], forget, err)) return fail(err);
     } else if (cmd != "list" || a.size() > 1) {
         return usage();
