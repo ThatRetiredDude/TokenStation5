@@ -25,10 +25,19 @@ Adding a user switches **They need a key** on, and it stays on while there are u
 | Preset | **Chat only**, or **Chat + web search** |
 | Web search | TokenStation's own web search, when a chat needs it |
 | Apps' own tools | The tools an app sends, such as an editor's file and command tools, which the app runs on the user's own machine. On by default, so an editor or any OpenAI-compatible app works with the user's key |
-| You read the chats | Whether you can read their chats. Choose it when you make the user. The user sees it in **Settings** on the chat page, so it is never a secret |
+| Models | From 1.2.0: the models they may use. **All** by default. Enter picks some. With another model loaded, their chat is refused and told which models are theirs |
+| May switch model | From 1.2.0: whether they may load one of their models themselves: the model's name on their chat page becomes a menu. Everyone's chats then use it |
+| You read the chats | Whether you can read their chats. Choose it when you make the user. The user sees it under **Controls** on the chat page, so it is never a secret |
 | Tokens a day | Prompts read plus replies, counted per day. Once it is used up, apps get HTTP 429 until tomorrow (a request already running finishes) |
 | Longest reply | A cap on every reply, whatever the app asks for |
+| Last day | From 1.2.0: after this date none of their keys gets in; their chats stay. ←→ moves it a week at a time |
 | Paused | None of their keys gets in |
+
+## When a key is refused
+
+When a switched-off key, a paused user's key, or a key of someone past their last day tries to get in, your log says which key and whose, once a minute per key. For example: `ts5: access: 192.168.1.20: the key Sam's phone is Sam's, whose last day was 2026-12-01: refused`.
+
+Everything on a user's page can also be set from your phone: see [Phone controls](Phone-controls).
 
 ## Kept apart
 
@@ -107,6 +116,9 @@ ts5 users new Ann --preset chat-web --owner-reads
 ts5 keys new "Sam's phone" --user Sam      # a key of Sam's
 ts5 users set Sam tokens_day=50000 max_reply=2000 web_search=on
 ts5 users set Sam on=off                   # paused
+ts5 users set Sam models=Qwen3-8B,Llama-3.1-8B   # only these (models=* for all), from 1.2.0
+ts5 users set Sam may_switch=yes
+ts5 users set Sam until=2026-12-01         # until=none for no last day
 ts5 users                                  # the users, their permissions, tokens today, their keys
 ts5 users remove Sam --forget              # Sam, Sam's keys and Sam's chats (from 1.1.1, first Sam's Tailscale shares)
 ```

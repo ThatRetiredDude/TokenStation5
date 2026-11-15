@@ -55,7 +55,8 @@ A minute or two after the admin console's switch, the Connect a phone row says "
 
 - Inside a home-screen icon the iPhone fills in no saved password and offers to save none (an iPhone limit; Safari itself does both). So the icon gets its key when it is added. If an icon ever asks for the key, copy it from the Passwords app and paste it, or delete the icon, open the page in Safari, and add it again.
 - The phone keeps the icon's picture from when it was added, so if a new version changes the logo, delete the icon and add it again. The logo on black while it starts is the page's own and needs nothing (iOS 27 shows no start-up pictures of its own). The browser terminal (`/ts5/terminal`) works the same way as an app.
-- The page's Settings can also keep the key in the page's link, for a browser whose home-screen icons don't get its cookies. **Forget the key** removes it from the page and the cookie.
+- From 1.2.0 the app opens on its home screen (the model, New chat, Controls, TUI and your latest chats), and can tell you when an answer finishes, even with the app closed: **Controls**, **Settings**, **Notifications**, **Turn on**. See [Phone controls](Phone-controls#notifications). Added from any of its pages, the icon is the logo.
+- The page's Settings (**Controls**, **Settings** from 1.2.0) can also keep the key in the page's link, for a browser whose home-screen icons don't get its cookies. **Forget the key** removes it from the page and the cookie.
 
 ### SSH from away
 
