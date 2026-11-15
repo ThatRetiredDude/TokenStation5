@@ -1,0 +1,9 @@
+{
+  "name": "TS5 terminal",
+  "short_name": "TS5 terminal",
+  "start_url": "/ts5/terminal",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117"
+}

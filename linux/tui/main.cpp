@@ -7191,6 +7191,47 @@ void chat_follow_file() {
     }
 }
 
+// An answer of the chat ended (done, or failed; not stopped here): the
+// server tells it to the user's phone when their browser terminal is away (in
+// the background, or closed), and does nothing otherwise
+// (engine/src/web_serve.cpp, POST /ts5/push {"tell"}; another server
+// answers 404, and that's all).
+void tell_answer_end() {
+    const Endpoint ep = endpoint();
+    if (!ep.local()) return;  // the chat's words go only to this machine's own TokenStation
+    std::string title, body;
+    static double told = 0;  // the answer told last (its start): told once
+    {
+        std::lock_guard<std::mutex> l(g->chat.mu);
+        // The answer: the last of the chat but ts5-tui's notes after it (the
+        // answer length reached, the chat full and being summarized).
+        int i = (int)g->chat.msgs.size() - 1;
+        while (i >= 0 && (g->chat.msgs[i].role == "note" || g->chat.msgs[i].role == "summary")) i--;
+        if (i < 0) return;
+        const Msg &m = g->chat.msgs[i];
+        if (m.role != "assistant" || m.stopped || m.t0 == told) return;
+        told = m.t0;
+        body = m.error.empty() ? m.content : "It stopped: " + m.error;
+        for (const Msg &x : g->chat.msgs)
+            if (x.role == "user" && !x.steer) {
+                title = x.content;
+                break;
+            }
+    }
+    const auto cut = [](std::string t, size_t n) {
+        for (char &c : t)
+            if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+        if (t.size() <= n) return t;
+        while (n > 0 && ((unsigned char)t[n] & 0xC0) == 0x80) n--;
+        return t.substr(0, n);
+    };
+    ts5::Json tell = ts5::Json::object(), j = ts5::Json::object();
+    tell.set("title", ts5::Json::string(cut(title, 120)));
+    tell.set("body", ts5::Json::string(cut(body, 400)));
+    j.set("tell", tell);
+    std::thread([ep, req = j.dump()] { http(ep, "POST", "/ts5/push", req, 3000); }).detach();
+}
+
 void tick() {
     const double t = now_s();
     if (t - g->sens_at >= 1.0) {
@@ -7484,6 +7525,8 @@ void tick() {
             }
         }
         if (hold && !g->chat.queued.empty()) g->chat.queue_held = true;
+        // Told to the phone where it's away; not where the next message goes at once.
+        if (g->chat.queued.empty() || g->chat.queue_held) tell_answer_end();
     }
     // The next of the messages entered while an answer was coming, now that it is done.
     if (!g->chat.queued.empty() && !g->chat.queue_held && !g->chat.busy() && g->chat.answers_seen == g->chat.answers)

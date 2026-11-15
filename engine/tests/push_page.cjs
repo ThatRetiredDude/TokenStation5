@@ -55,8 +55,11 @@ async function until(page, fn, arg, ms) {
       "/#chat=c1 (a notification's tap): the page opens at that chat", await page.locator("#msgs").innerText());
     const sw = await until(page, () => navigator.serviceWorker.getRegistration("/").then((r) => !!r && r.scope.endsWith("/")), null, 10000);
     check(sw, "the service worker is registered for the whole site");
-    await page.click("#settings");
-    check(await page.locator("#notif").isVisible(), "Settings: a Notifications row for a key's user",
+    check(await page.locator("#settings").count() === 0, "one Controls button: no Settings button beside it");
+    await page.click("#full");
+    check(!(await page.locator("#setdlg").isHidden()) && /Controls/.test(await page.locator("#setdlg h1").innerText()) &&
+      new URL(page.url()).pathname === "/", "Controls, for a user who isn't the owner: their own (this page's dialog)");
+    check(await page.locator("#notif").isVisible(), "a Notifications row for a key's user",
       await page.locator("#setdlg").innerText());
     const note = await page.locator("#notifnote").innerText();
     check(/answer finishes/.test(note), "it says what they are for", note);

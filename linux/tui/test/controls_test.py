@@ -125,6 +125,22 @@ class Feedback(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+push_got = []
+
+
+class PushService(BaseHTTPRequestHandler):
+    """A push service stood in for: what the machine posts (encrypted), kept."""
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        push_got.append((self.path, self.headers.get("Content-Encoding", ""), body))
+        self.send_response(201)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
 def main():
     if len(sys.argv) < 4:
         sys.exit(__doc__)
@@ -149,7 +165,8 @@ def main():
     conf = os.path.join(home, ".config", "tokenstation")
     os.makedirs(conf)
     with open(os.path.join(conf, "tui.conf"), "w") as f:
-        f.write("url=http://127.0.0.1:%d\nkey=%s\nsandbox=0\nintro=0\ntheme=dark\n" % (port, owner))
+        # (Answers of 200 tokens at most: the test model writes on to the context's end.)
+        f.write("url=http://127.0.0.1:%d\nkey=%s\nsandbox=0\nintro=0\ntheme=dark\nmax_tokens=200\n" % (port, owner))
     bin_dir = os.path.join(home, "bin")
     os.makedirs(bin_dir)
     for prog, path in (("ts5", ts5), ("ts5-tui", tui)):
@@ -160,6 +177,8 @@ def main():
            if not k.startswith("TS5_") and not k.startswith("XDG_") and k not in ("INVOCATION_ID", "TMUX")}
     fbsrv = ThreadingHTTPServer(("127.0.0.1", 0), Feedback)
     threading.Thread(target=fbsrv.serve_forever, daemon=True).start()
+    pushsrv = ThreadingHTTPServer(("127.0.0.1", 0), PushService)
+    threading.Thread(target=pushsrv.serve_forever, daemon=True).start()
     # ts5-tui's log, as /feedback reads it: an address and a token to be
     # taken out.
     tui_log = os.path.join(home, "tui-log.txt")
@@ -167,7 +186,8 @@ def main():
         f.write("ts5: listening on 0.0.0.0:8081\nts5: client 192.168.1.44 token " + "gh" + "p_ABCDEFGHIJKLMNOPQRSTUVWXYZabcd1234\n")
     env.update(HOME=home, PATH=bin_dir + ":" + env.get("PATH", "/usr/bin:/bin"), TMUX_TMPDIR=tmux_dir, LANG="C.UTF-8",
                TS5_RUN_DIR=os.path.join(home, "run"), TS5_TUI_LOG=tui_log,
-               TS5_FEEDBACK_URL="http://127.0.0.1:%d/v1/report" % fbsrv.server_address[1])
+               TS5_FEEDBACK_URL="http://127.0.0.1:%d/v1/report" % fbsrv.server_address[1],
+               TS5_PUSH_HOSTS="127.0.0.1:%d" % pushsrv.server_address[1])
     sockp = os.path.join(data, "control.sock")
     logs = []
     try:
@@ -405,6 +425,44 @@ def main():
               tui_screen())
         check([t["text"] for t in json.load(open(f))["turns"]][-3:] == ["the answer came", "one more from the phone", "and its answer"],
               "the file: each message once, in order", [t["text"] for t in json.load(open(f))["turns"]])
+
+        # ---- an answer of ts5-tui's while the browser terminal is away: told
+        # to the phone (the keys are RFC 8291's example browser's) ----
+        psub = {"endpoint": "http://127.0.0.1:%d/push/owner-phone" % pushsrv.server_address[1],
+                "keys": {"p256dh": "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+                         "auth": "BTBZMqHH6r4Tts7J_aSIgg"}}
+        code, _ = call(here + "/ts5/push", owner, {"subscription": psub, "name": "iPhone"})
+        check(code == 200, "the owner's phone takes notifications")
+        del push_got[:]
+        call(here + "/ts5/away", owner, {"terminal": True, "away": True})
+        tui("C-n")
+        tui_type("Say hi to the phone")
+        wait(lambda: "Say hi to the phone" in tui_screen(), 10)  # (a note over the input goes in a few seconds)
+        s1 = tui_screen()
+        if check("Say hi to the phone" in s1, "ts5-tui: a message typed (read before Enter)", s1[-400:]):
+            tui("Enter")
+        told = wait(lambda: any(g[0] == "/push/owner-phone" for g in push_got), 240)
+        check(told and all(g[1] == "aes128gcm" and len(g[2]) > 86 for g in push_got),
+              "its answer done, the browser terminal away: told to the phone (encrypted)",
+              ([(g[0], g[1], len(g[2])) for g in push_got], [l for l in open(os.path.join(home, ".cache", "tokenstation", "tui-serve.log"),
+               errors="replace").read().splitlines() if "notif" in l or "push" in l][-8:], tui_screen()[-1200:]))
+        call(here + "/ts5/away", owner, {"terminal": True, "away": False})
+        n = len(push_got)
+        tui_type("And again")
+        wait(lambda: "And again" in tui_screen(), 10)  # (a note over the input goes in a few seconds)
+        s1 = tui_screen()
+        if check("And again" in s1, "ts5-tui: another typed (read before Enter)", s1[-400:]):
+            tui("Enter")
+        def newest_turns():
+            fs = sorted((os.path.join(tchats, x) for x in os.listdir(tchats) if x.endswith(".json")), key=os.path.getmtime)
+            try:
+                return json.load(open(fs[-1])).get("turns", []) if fs else []
+            except ValueError:
+                return []
+        done2 = wait(lambda: len(newest_turns()) >= 4 and newest_turns()[-1].get("end"), 240)
+        time.sleep(1.5)
+        check(done2 and len(push_got) == n, "the terminal back in view: its next answer isn't told",
+              (done2, len(push_got) - n, newest_turns()[-2:]))
 
         # ts5-tui's own turns (a tool's result, a summary) stay, where the
         # page doesn't show them.

@@ -20,6 +20,10 @@ FILE(ts5_web_keep_js, "keep.js")
 // and its manifest.
 FILE(ts5_web_sw_js, "sw.js")
 FILE(ts5_web_manifest, "manifest.webmanifest")
+// The browser terminal's own (a Home Screen icon of it opens ts5-tui), and the
+// notifications code the pages share.
+FILE(ts5_web_terminal_manifest, "terminal.webmanifest")
+FILE(ts5_web_push_js, "push.js")
 // The launch images a phone shows while a home-screen icon opens (make_splash.py).
 FILE(ts5_web_splash_1320x2868, "splash-1320x2868.jpg")
 FILE(ts5_web_splash_1206x2622, "splash-1206x2622.jpg")

@@ -78,6 +78,17 @@ async function until(page, fn, arg, ms) {
     check(after !== before, "Settings: Theme › moves it on (" + before + " -> " + after + ")");
     const rows = await page.locator(".row").count();
     check(rows > 20, "Settings: every row of ts5-tui's (" + rows + ")");
+    // This device's own, above ts5-tui's: notifications, the chat page's thinking, the key.
+    const pg = await text();
+    check(/Notifications/.test(pg) && /A thinking model thinks first/.test(pg) && /Show its thinking/.test(pg) &&
+      /The key in the chat page's link/.test(pg), "Settings: this device's own rows (notifications, thinking, the key)", pg.slice(0, 700));
+    check(await until(page, () => [...document.querySelectorAll(".row")].some((r) => /Notifications/.test(r.textContent) &&
+      r.querySelector('button[data-notif="on"]')), null, 10000), "Notifications: a Turn on button (this browser can have them)");
+    const thinkRow = () => page.locator(".row", { hasText: "A thinking model thinks first" }).first();
+    await thinkRow().locator("button[data-mine]").click();
+    check(await page.evaluate(() => localStorage.getItem("ts5.think")) === "0", "thinking first: off, kept for the chat page");
+    await thinkRow().locator("button[data-mine]").click();
+    check(await page.evaluate(() => localStorage.getItem("ts5.think")) === "1", "and on again");
 
     // A row with words: the web search key, typed in and kept hidden.
     const secret = "tvly-page-test-9876543210";
@@ -210,6 +221,12 @@ async function until(page, fn, arg, ms) {
       await page.locator("#status").innerText());
 
     // The chat page's model menu (the owner may switch): Test-A back.
+    await page.goto(base + "/");
+    check(await page.locator("#settings").count() === 0, "chat page: one Controls button, no Settings beside it");
+    await until(page, () => !!document.getElementById("full"), null, 5000);
+    await page.waitForTimeout(1500);
+    await Promise.all([page.waitForURL("**/ts5/controls", { timeout: 10000 }).catch(() => {}), page.click("#full")]);
+    check(new URL(page.url()).pathname === "/ts5/controls", "the owner's Controls button opens the controls", page.url());
     await page.goto(base + "/");
     await until(page, () => document.getElementById("model").classList.contains("pick"), null, 30000);
     check(await page.locator("#model.pick").count() === 1, "chat page: the model's name is a menu for a key that may switch");

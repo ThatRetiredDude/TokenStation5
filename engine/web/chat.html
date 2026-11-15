@@ -159,8 +159,7 @@
   <b>TokenStation5</b>
   <span id="model">…</span>
   <button id="new" type="button">New<span class="wide"> chat</span></button>
-  <a id="full" href="/ts5/controls" title="ts5-tui's controls: models, the fan, temperatures, memory, settings">Controls</a>
-  <button id="settings" type="button">Settings</button>
+  <a id="full" href="/ts5/controls" title="Models, the fan, temperatures, memory, settings, notifications">Controls</a>
 </header>
 <div id="peekbar" hidden></div>
 <div id="savebar" role="status" hidden></div>
@@ -205,7 +204,7 @@
 </div>
 <div class="shade" id="setdlg" hidden>
   <div class="dlg">
-    <h1>Settings</h1>
+    <h1>Controls</h1>
     <label><input type="checkbox" id="think"> Let a thinking model think first</label>
     <label><input type="checkbox" id="showthink"> Show its thinking</label>
     <label>The key in this page's link <select id="keep"><option value="passwords">no (a home-screen icon gets it anyway)</option><option value="link">yes, too (for a browser whose icons don't)</option></select></label>
@@ -222,6 +221,7 @@
 </div>
 
 <script src="/ts5/web/keep.js?v=4"></script>
+<script src="/ts5/web/push.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -313,7 +313,7 @@ async function account() {
   if (openAtStart && chats.find((c) => c.id === openAtStart)) cur = openAtStart;
   openAtStart = "";
   if (!chats.find((c) => c.id === cur)) cur = chats.length ? chats[0].id : null;
-  $("full").hidden = !!me && !me.owner;
+  $("full").title = me && me.owner ? "Models, the fan, temperatures, memory, settings, notifications" : "Your settings and notifications";
   $("fullnote").hidden = !!me && !me.owner;
   const a = $("acct");
   a.hidden = !me;
@@ -778,98 +778,36 @@ setInterval(refreshChats, 15000);
 // A Home Screen app on an iPhone (iOS 16.4 and later) has them; Safari in a
 // tab doesn't. The page says when it goes (with an answer coming) and when
 // it comes back.
-const pushable = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window && isSecureContext;
-let swReg = null, pushKey = "";
-if ("serviceWorker" in navigator && isSecureContext) {
-  navigator.serviceWorker.register("/sw.js").then((r) => { swReg = r; }).catch(() => {});
-  // A notification tapped while the app is open: that chat.
-  navigator.serviceWorker.addEventListener("message", (e) => {
-    const id = e.data && e.data.chat;
-    if (!id) return;
-    refreshChats().then(() => { if (chats.find((x) => x.id === id)) { cur = id; draw(); } });
-  });
-}
-function b64u(t) {
-  t = t.replace(/-/g, "+").replace(/_/g, "/");
-  const b = atob(t + "===".slice((t.length + 3) % 4));
-  return Uint8Array.from(b, (ch) => ch.charCodeAt(0));
-}
-function deviceName() {
-  const ua = navigator.userAgent;
-  return /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android"
-    : /Macintosh/.test(ua) ? "Mac" : /Windows/.test(ua) ? "Windows" : "a browser";
-}
-async function subscription() {
-  if (!pushable) return null;
-  const reg = swReg || (await navigator.serviceWorker.getRegistration("/").catch(() => null));
-  return reg ? await reg.pushManager.getSubscription().catch(() => null) : null;
-}
+// (push.js: TS5Push.) A notification tapped while the app is open: that chat.
+TS5Push.opened((d) => {
+  const id = d.chat;
+  if (!id) return;
+  refreshChats().then(() => { if (chats.find((x) => x.id === id)) { cur = id; draw(); } });
+});
+// For a key's user (the machine keeps their devices): shown in the dialog.
+const pushUser = () => !!me && !!me.chats_kept;
 async function notifDraw() {
-  $("notif").hidden = !remote;
-  if (!remote) return;
-  const note = $("notifnote");
-  if (!pushable) {
-    $("notifon").hidden = $("notifoff").hidden = true;
-    note.textContent = /iPhone|iPad/.test(navigator.userAgent) && !navigator.standalone
-      ? "To get one when an answer finishes, add this page to your Home Screen (Share, then Add to Home Screen) and open it from there."
-      : "This browser can't show notifications from this page.";
-    return;
-  }
-  const sub = Notification.permission === "granted" ? await subscription() : null;
-  $("notifon").hidden = !!sub || Notification.permission === "denied";
-  $("notifoff").hidden = !sub;
-  note.textContent = Notification.permission === "denied"
-    ? "Notifications are off for this app in the device's settings (on an iPhone: Settings, Notifications, TokenStation5)."
-    : sub ? "On for this device: a notification and a count on the icon when an answer finishes while you're away."
-    : "A notification and a count on the icon when an answer finishes while you're away.";
-  // The machine's key, ready for the tap (the subscription is asked for in
-  // the tap itself: iOS allows it only there).
-  if (!sub && !pushKey) {
-    try { const r = await api("/ts5/push"); if (r.ok) pushKey = (await r.json()).key || ""; } catch (e) {}
-  }
+  $("notif").hidden = !pushUser();
+  if (!pushUser()) return;
+  const st = await TS5Push.state(headers);
+  $("notifon").hidden = !st.can;
+  $("notifoff").hidden = !st.on;
+  $("notifnote").textContent = st.note;
 }
 // The machine keeps this device's subscription (handed again at each start,
 // in case it was forgotten: a device gone, or a new key).
-async function notifSync() {
-  if (!remote || !pushable || Notification.permission !== "granted") return;
-  const sub = await subscription();
-  if (sub) api("/ts5/push", { method: "POST", body: JSON.stringify({ subscription: sub.toJSON(), name: deviceName() }) }).catch(() => {});
-}
+function notifSync() { if (pushUser()) TS5Push.sync(headers); }
 $("notifon").onclick = async () => {
-  const note = $("notifnote");
-  try {
-    if (!pushKey) throw new Error("This TokenStation5 didn't give its key for notifications: try again in a moment.");
-    const reg = swReg || (await navigator.serviceWorker.ready);
-    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(pushKey) });
-    note.textContent = "Turning on…";
-    const r = await api("/ts5/push", { method: "POST", body: JSON.stringify({ subscription: sub.toJSON(), name: deviceName() }) });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.error || "The machine said " + r.status);
-    const t = await api("/ts5/push", { method: "POST", body: JSON.stringify({ test: true }) });
-    const tj = await t.json().catch(() => ({}));
-    await notifDraw();
-    note.textContent = t.ok && !tj.error ? "On: a test notification is on its way."
-      : "On, but the test didn't go out: " + (tj.error || "the machine said " + t.status) + ".";
-  } catch (e) {
-    await notifDraw();
-    note.textContent = Notification.permission === "denied"
-      ? "Not allowed. Settings, Notifications, TokenStation5 turns them on."
-      : String((e && e.message) || e);
-  }
+  const said = await TS5Push.on(headers);
+  await notifDraw();
+  $("notifnote").textContent = said;
 };
-$("notifoff").onclick = async () => {
-  const sub = await subscription();
-  if (sub) {
-    api("/ts5/push", { method: "DELETE", body: JSON.stringify({ endpoint: sub.endpoint }) }).catch(() => {});
-    await sub.unsubscribe().catch(() => {});
-  }
-  notifDraw();
-};
+$("notifoff").onclick = async () => { await TS5Push.off(headers); notifDraw(); };
 // Going: the machine goes on with an answer coming without this page.
 // Back: the icon's count starts again.
 document.addEventListener("visibilitychange", () => {
   if (!remote) return;
-  if (!document.hidden && navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {});
+  if (!document.hidden) TS5Push.seen();
   if (!busyId && document.hidden) return;
   const body = JSON.stringify(busyId ? { chat: busyId, away: document.hidden } : { away: false });
   fetch("/ts5/away", { method: "POST", keepalive: true, headers: headers(), body }).catch(() => {});
@@ -985,7 +923,9 @@ $("listnew").onclick = newChat;
 $("listclose").onclick = () => { $("listdlg").hidden = true; };
 $("listdlg").onclick = (e) => { if (e.target === $("listdlg")) $("listdlg").hidden = true; };
 addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("listdlg").hidden) $("listdlg").hidden = true; });
-$("settings").onclick = () => {
+$("full").onclick = (e) => {
+  if (me && me.owner && (me.chats_kept || location.hostname === "127.0.0.1" || location.hostname === "localhost")) return;
+  e.preventDefault();
   $("think").checked = prefs.think;
   $("showthink").checked = prefs.showThink;
   $("keep").value = TS5Keep.how() === "link" ? "link" : "passwords";

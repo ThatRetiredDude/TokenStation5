@@ -136,6 +136,7 @@
 <div class="shade" id="keydlg" hidden><div class="dlg" id="keyshow"></div></div>
 <div class="shade" id="fbdlg" hidden><div class="dlg" id="fbshow"></div></div>
 <script src="/ts5/web/keep.js?v=4"></script>
+<script src="/ts5/web/push.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -346,8 +347,44 @@ function machinePage() {
   return h;
 }
 
+// This device's own settings: its notifications, the chat page's (kept in
+// this browser), and the key it keeps.
+let notif = null;  // TS5Push.state(): {on, can, note}
+let notifSaid = "";
+let forgetArmed = false;
+function headers() {
+  const h = { "Content-Type": "application/json" };
+  const k = store.get("ts5.key");
+  if (k) h.Authorization = "Bearer " + k;
+  return h;
+}
+async function notifRefresh() { notif = await TS5Push.state(headers); draw(); }
+function deviceName() { return /iPhone/.test(navigator.userAgent) ? "This iPhone" : /iPad/.test(navigator.userAgent) ? "This iPad" : "This device"; }
+function onOff(id, label, note, on) {
+  return '<div class="row"><div class="what"><b>' + esc(label) + ' <span class="val">' + (on ? "on" : "off") + "</span></b>" +
+    (note ? "<span>" + esc(note) + "</span>" : "") + '</div><div class="btns"><button class="b" data-mine="' + id + '">' +
+    (on ? "Turn off" : "Turn on") + "</button></div></div>";
+}
+function devicePage() {
+  let h = "<h2>" + esc(deviceName()) + '</h2><div class="card">';
+  const nt = notif || { note: "…" };
+  h += '<div class="row"><div class="what"><b>Notifications' + (nt.on ? ' <span class="val">on</span>' : "") + "</b><span>" +
+    esc(notifSaid || nt.note) + '</span></div><div class="btns">' +
+    (nt.can ? '<button class="b go" data-notif="on">Turn on</button>' : "") +
+    (nt.on ? '<button class="b" data-notif="off">Turn off</button>' : "") + "</div></div>";
+  h += onOff("think", "A thinking model thinks first", "On the chat page.", store.get("ts5.think") !== "0");
+  h += onOff("showthink", "Show its thinking", "On the chat page.", store.get("ts5.showthink") === "1");
+  const link = TS5Keep.how() === "link";
+  h += '<div class="row"><div class="what"><b>The key in the chat page\'s link <span class="val">' + (link ? "yes, too" : "no") +
+    "</span></b><span>" + (link ? "For a browser whose Home Screen icons don't get it." : "A Home Screen icon gets it anyway.") +
+    '</span></div><div class="btns"><button class="b" data-mine="link">' + (link ? "No" : "Yes, too") + "</button></div></div>";
+  h += '<div class="row"><div class="what"><b>The key</b><span>Kept in this browser only.</span></div><div class="btns">' +
+    '<button class="b" data-mine="savepw">Save to passwords</button><button class="b bad" data-mine="forget">' +
+    (forgetArmed ? "Tap again: forget it" : "Forget it") + "</button></div></div>";
+  return h + "</div>";
+}
 function settingsPage() {
-  let h = "<h2>ts5-tui's Settings</h2><div class=\"card\">";
+  let h = devicePage() + "<h2>ts5-tui's Settings</h2><div class=\"card\">";
   for (const r of st.settings || []) h += settingRow(r);
   h += "</div><p class=\"note\">The same rows as ts5-tui's Settings page: ‹ and › are its arrows. A change here is ts5-tui's, as if made there.</p>";
   return h + feedbackCard();
@@ -508,6 +545,7 @@ document.addEventListener("click", (e) => {
   if (t.dataset.tab) {
     tab = t.dataset.tab; store.set("ts5.controls.tab", tab); editing = null; userOpen = null; keyFor = null; draw();
     if (tab === "users") act({ do: "users" });
+    if (tab === "settings") notifRefresh();
     return;
   }
   if (t.dataset.user !== undefined) { userOpen = t.dataset.user || null; keyFor = null; draw(); window.scrollTo(0, 0); return; }
@@ -528,6 +566,24 @@ document.addEventListener("click", (e) => {
   if (t.dataset.keyrm !== undefined) { act({ do: "key_remove", id: t.dataset.keyrm }); return; }
   if (t.dataset.code !== undefined) { madeSel = +t.dataset.code; drawKey(); return; }
   if (t.dataset.keydone !== undefined) { madeKey = null; drawKey(); return; }
+  if (t.dataset.notif !== undefined) {
+    if (t.dataset.notif === "on") TS5Push.on(headers).then((said) => { notifSaid = said; notifRefresh(); });
+    else TS5Push.off(headers).then(() => { notifSaid = ""; notifRefresh(); });
+    return;
+  }
+  if (t.dataset.mine !== undefined) {
+    const m = t.dataset.mine;
+    if (m === "think") store.set("ts5.think", store.get("ts5.think") === "0" ? "1" : "0");
+    if (m === "showthink") store.set("ts5.showthink", store.get("ts5.showthink") === "1" ? "0" : "1");
+    if (m === "link") TS5Keep.change(TS5Keep.how() === "link" ? "passwords" : "link", store.get("ts5.key"));
+    if (m === "savepw" && store.get("ts5.key")) TS5Keep.save(store.get("ts5.key"));
+    if (m === "forget") {
+      if (!forgetArmed) { forgetArmed = true; setTimeout(() => { forgetArmed = false; draw(); }, 4000); }
+      else { forgetArmed = false; TS5Keep.forget(); location.href = "/"; return; }
+    }
+    draw();
+    return;
+  }
   if (t.dataset.fbprep !== undefined) {
     if (!fb.text.trim()) { toast("Write what went wrong first"); return; }
     act({ do: "feedback_prepare", summary: fb.text, logs: fb.logs, chat: fb.chat });
@@ -609,13 +665,21 @@ async function poll() {
   const quick = loadAsked || (st && (st.loading || st.download || (st.job && st.job.running)));
   setTimeout(poll, quick ? 1000 : 2000);
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden && !busy) queue({ do: "state" }); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  if (!busy) queue({ do: "state" });
+  TS5Push.seen();
+  fetch("/ts5/away", { method: "POST", headers: headers(), body: JSON.stringify({ away: false }) }).catch(() => {});
+});
 if (!store.get("ts5.key") && location.hostname !== "127.0.0.1" && location.hostname !== "localhost") {
   problem = "No key in this browser yet: open the chat page and sign in with your key, then come back.";
 }
 if (!["models", "machine", "settings", "users"].includes(tab)) tab = "models";
 draw();
 poll();
+notifRefresh();
+TS5Push.sync(headers);
+TS5Push.opened((d) => { location.href = d.url || "/" + (d.chat ? "#chat=" + encodeURIComponent(d.chat) : ""); });
 </script>
 </body>
 </html>

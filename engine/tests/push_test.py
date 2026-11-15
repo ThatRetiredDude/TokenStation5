@@ -121,6 +121,34 @@ def run(ts5, path, *args):
     return json.loads(p.stdout) if p.stdout.strip() else {}
 
 
+def ws_open(port, key):
+    """The browser terminal's WebSocket, as its page opens it: ready, or None."""
+    s = socket.create_connection(("127.0.0.1", port), timeout=10)
+    k = base64.b64encode(os.urandom(16)).decode()
+    s.sendall((f"GET /ts5/terminal/socket HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\n"
+               f"Connection: Upgrade\r\nSec-WebSocket-Key: {k}\r\nSec-WebSocket-Version: 13\r\n"
+               f"Origin: http://127.0.0.1:{port}\r\n\r\n").encode())
+    got = b""
+    while b"\r\n\r\n" not in got:
+        c = s.recv(4096)
+        if not c:
+            return None
+        got += c
+    if b" 101 " not in got.split(b"\r\n")[0]:
+        return None
+    payload = json.dumps({"key": key, "cols": 80, "rows": 24}).encode()
+    mask = os.urandom(4)
+    s.sendall(bytes([0x81, 0x80 | len(payload)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+    got = got.split(b"\r\n\r\n", 1)[1]
+    end = time.time() + 15
+    while b'"ready":true' not in got and time.time() < end:
+        c = s.recv(4096)
+        if not c:
+            break
+        got += c
+    return s if b'"ready":true' in got else None
+
+
 def wait(pred, secs, step=0.25):
     end = time.time() + secs
     while time.time() < end:
@@ -210,7 +238,8 @@ def main():
     env = {k: v for k, v in os.environ.items() if not k.startswith("TS5_") and not k.startswith("XDG_")}
     # TS5_DATA_DIR: the keys' folder is ts5-tui's own, so the owner's chats
     # are ts5-tui's (its format), as with the server ts5-tui starts.
-    env.update(TS5_KEYS=path, TS5_DATA_DIR=base, TS5_PUSH_HOSTS=f"127.0.0.1:{pport}", TAVILY_API_KEY="")
+    env.update(TS5_KEYS=path, TS5_DATA_DIR=base, TS5_PUSH_HOSTS=f"127.0.0.1:{pport}", TAVILY_API_KEY="",
+               TS5_TERMINAL_COMMAND="echo ready; read x; echo got:$x; sleep 600")
     # A short context: the chat page asks for no limit, so its answer runs
     # to the context's end.
     p = subprocess.Popen([ts5, "serve", "-m", model, "-c", "768", "--host", "127.0.0.1", "--port", str(port),
@@ -365,10 +394,66 @@ def main():
         t = json.load(open(tfile)) if os.path.exists(tfile) else {}
         check(len(t.get("turns", [])) == 2, "the page's own copy, sent when it comes back, adds nothing", t)
 
+        # ---- ts5-tui's answers: told while the browser terminal is away ----
+        def tell(key, title="A long story", body="Once upon a time"):
+            return call(here + "/ts5/push", key, {"tell": {"title": title, "body": body}})[1]
+
+        def owner_got(n):
+            return [g for g in Push.got[n:] if g[0] == "/push/owner-phone"]
+        call(here + "/ts5/away", owner, {"away": False})  # the owner's chat answer above: seen
+        n0 = len(Push.got)
+        check(tell(owner).get("told") is False, "ts5-tui's answer with no browser terminal away: nothing told")
+        code, _, _ = call(here + "/ts5/away", owner, {"terminal": True, "away": True})
+        check(code == 200, "the terminal's page says it went to the background")
+        j = tell(owner, "Fix the fan", "\n  The fan curve now starts at 60 C.")
+        wait(lambda: owner_got(n0), 20)
+        got = owner_got(n0)
+        msg = json.loads(decrypt(got[0][2], oua, oauth)) if got else {}
+        check(j.get("told") is True and msg.get("url") == "/ts5/terminal" and msg.get("title") == "Fix the fan" and
+              msg.get("body") == "The fan curve now starts at 60 C." and msg.get("badge") == 1,
+              "away: ts5-tui's answer told to the owner's phone (the chat's title, the answer's start, opens ts5-tui, 1 on the icon)",
+              (j, msg))
+        check(tell(skey).get("told") is False and not [g for g in Push.got[n0:] if g[0] == "/push/sam-phone"],
+              "never to Sam (no terminal of theirs)")
+        call(here + "/ts5/away", owner, {"terminal": True, "away": False})
+        check(tell(owner).get("told") is False, "back in view: nothing told")
+        check(call(here + "/ts5/tailnet", None, {"terminal": True})[0] == 200, "the browser terminal turned on")
+        w = ws_open(port, owner)
+        check(w is not None, "the browser terminal opens with the owner's key")
+        check(tell(None).get("told") is False, "while it is open: nothing told")
+        if w:
+            w.close()
+        time.sleep(1.5)
+        n1 = len(Push.got)
+        j = tell(None, "", "Done.")
+        wait(lambda: owner_got(n1), 20)
+        got = owner_got(n1)
+        msg = json.loads(decrypt(got[0][2], oua, oauth)) if got else {}
+        check(j.get("told") is True and msg.get("title") == "ts5-tui" and msg.get("badge") == 1,
+              "the terminal closed (the app gone): told, ts5-tui on this machine asking without a key", (j, msg))
+        j = tell(None)
+        wait(lambda: len(owner_got(n1)) > 1, 20)
+        got = owner_got(n1)
+        msg = json.loads(decrypt(got[1][2], oua, oauth)) if len(got) > 1 else {}
+        check(msg.get("badge") == 2, "the next: 2 on the icon", msg)
+        w = ws_open(port, owner)
+        check(w is not None and tell(None).get("told") is False, "open again: nothing told")
+        if w:
+            w.close()
+        call(here + "/ts5/away", owner, {"terminal": True, "away": False})
+
         # ---- the page in a browser (TS5_PAGE_TEST=1: if Playwright is
         # there; require: it must be) ----
         page_test = os.environ.get("TS5_PAGE_TEST", "")
         if page_test:
+            r = subprocess.run(["node", os.path.join(os.path.dirname(os.path.abspath(__file__)), "terminal_page.cjs"), here, owner],
+                               capture_output=True, text=True, timeout=600)
+            out = r.stdout + r.stderr
+            if "Cannot find module" in out and page_test != "require":
+                print("--   the terminal page in a browser: skipped (no Playwright here)")
+            else:
+                print(out.rstrip())
+                check(r.returncode == 0, "the terminal page in a browser: buttons without the keyboard, away and back")
             r = subprocess.run(["node", os.path.join(os.path.dirname(os.path.abspath(__file__)), "push_page.cjs"), here, skey],
                                capture_output=True, text=True, timeout=600)
             out = r.stdout + r.stderr

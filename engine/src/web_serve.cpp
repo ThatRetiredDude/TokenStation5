@@ -52,6 +52,8 @@ TS5_WEB_FILE(ts5_web_icon_png)
 TS5_WEB_FILE(ts5_web_keep_js)
 TS5_WEB_FILE(ts5_web_sw_js)
 TS5_WEB_FILE(ts5_web_manifest)
+TS5_WEB_FILE(ts5_web_terminal_manifest)
+TS5_WEB_FILE(ts5_web_push_js)
 TS5_WEB_FILE(ts5_web_splash_1320x2868)
 TS5_WEB_FILE(ts5_web_splash_1206x2622)
 TS5_WEB_FILE(ts5_web_splash_1260x2736)
@@ -96,6 +98,8 @@ const WebAsset kWebAssets[] = {
     {"keep.js", ts5_web_keep_js, ts5_web_keep_js_end},
     {"sw.js", ts5_web_sw_js, ts5_web_sw_js_end},
     {"manifest.webmanifest", ts5_web_manifest, ts5_web_manifest_end},
+    {"terminal.webmanifest", ts5_web_terminal_manifest, ts5_web_terminal_manifest_end},
+    {"push.js", ts5_web_push_js, ts5_web_push_js_end},
     {"splash-1320x2868.jpg", ts5_web_splash_1320x2868, ts5_web_splash_1320x2868_end},
     {"splash-1206x2622.jpg", ts5_web_splash_1206x2622, ts5_web_splash_1206x2622_end},
     {"splash-1260x2736.jpg", ts5_web_splash_1260x2736, ts5_web_splash_1260x2736_end},
@@ -375,6 +379,10 @@ bool ws_read(Ws &w, int ms) {
 }
 
 std::atomic<int> g_open{0};  // terminals open now
+
+// A user's browser terminal opened (open) or closed: notifications for
+// ts5-tui's answers go out while none is open (the push section, below).
+void push_terminal(const std::string &user, bool open);
 constexpr int kMaxOpen = 4;
 
 std::string tui_command() {
@@ -463,6 +471,15 @@ void terminal(const WebOptions &o, const Server::Page &p, int fd) {
     struct Done {
         ~Done() { g_open.fetch_sub(1); }
     } done;
+    // Its user's: while it is open, an answer that ends in ts5-tui is seen here.
+    struct Seen {
+        std::string user;
+        ~Seen() { if (!user.empty()) push_terminal(user, false); }
+    } seen;
+    if (o.admit && !grant.user.empty()) {
+        seen.user = grant.user;
+        push_terminal(grant.user, true);
+    }
     winsize ws{};
     ws.ws_col = (unsigned short)std::max(20.0, std::min(500.0, hello["cols"].num(80)));
     ws.ws_row = (unsigned short)std::max(8.0, std::min(300.0, hello["rows"].num(24)));
@@ -1004,9 +1021,27 @@ struct PushUser {
     std::set<std::string> away;     // chats whose page went away while their answer came
     std::set<std::string> working;  // chats with an answer coming
     int unseen = 0;
+    // The browser terminal: how many are open, and whether it went away (its
+    // page in the background, or the last one closed). ts5-tui's answers that
+    // end then are told (POST /ts5/push {"tell"}).
+    int term_open = 0;
+    bool term_away = false;
 };
 std::mutex push_mu;
 std::map<std::string, PushUser> push_users;  // by user id
+
+void push_terminal(const std::string &user, bool open) {
+    std::lock_guard<std::mutex> l(push_mu);
+    PushUser &u = push_users[user];
+    if (open) {
+        u.term_open++;
+        u.term_away = false;
+        u.unseen = 0;
+    } else if (--u.term_open <= 0) {
+        u.term_open = 0;
+        u.term_away = true;
+    }
+}
 
 constexpr size_t kPushDevices = 10;  // a user's subscriptions kept, the newest
 
@@ -1212,13 +1247,47 @@ bool push_pages(const WebOptions &o, const Server::Page &p, int fd) {
         send_error(fd, 401, p.key.empty() ? "This needs an API key." : "That API key isn't one of this machine's, or it is off.");
         return true;
     }
-    if (p.key.empty() || g.key.empty()) {
-        send_error(fd, 403, "Notifications are for a key's user: open the chat page with your key.");
-        return true;
-    }
     Json req;
     if (p.method != "GET" && !p.body.empty() && (!Json::parse(p.body, req) || req.type != Json::OBJ)) {
         send_error(fd, 400, "a JSON object, please");
+        return true;
+    }
+    // ts5-tui's answer has ended: told to the user's devices while their
+    // browser terminal is away (ts5-tui on this machine asks without a key,
+    // as the owner).
+    if (push && p.method == "POST" && req["tell"].type == Json::OBJ && (g.owner || !g.key.empty())) {
+        int badge = 0;
+        {
+            std::lock_guard<std::mutex> l(push_mu);
+            PushUser &u = push_users[g.user];
+            if (u.term_away) badge = ++u.unseen;
+        }
+        if (badge > 0) {
+            Json j = Json::object();
+            const std::string title = req["tell"]["title"].str();
+            std::string body = req["tell"]["body"].str();
+            for (char &c : body)
+                if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+            const size_t from = body.find_first_not_of(' ');
+            body = from == std::string::npos ? "The answer is ready." : body.substr(from);
+            j.set("title", Json::string(cut_text(title.empty() ? std::string("ts5-tui") : title, 80)));
+            j.set("body", Json::string(cut_text(body, 160)));
+            j.set("url", Json::string("/ts5/terminal"));
+            j.set("badge", jnum(badge));
+            std::thread([o, user = g.user, payload = j.dump()] {
+                int sent = 0, devices = 0;
+                std::string why;
+                push_send_all(o, user, payload, sent, devices, why);
+            }).detach();
+        }
+        Json out = Json::object();
+        out.set("told", jbool(badge > 0));
+        send_file(fd, 200, "application/json", out.dump(), false);
+        return true;
+    }
+    // (The browser terminal's page on this machine has the owner's say without a key.)
+    if ((p.key.empty() || g.key.empty()) && !(away && g.owner && req["terminal"].boolean(false))) {
+        send_error(fd, 403, "Notifications are for a key's user: open the chat page with your key.");
         return true;
     }
     if (away) {
@@ -1227,7 +1296,11 @@ bool push_pages(const WebOptions &o, const Server::Page &p, int fd) {
         {
             std::lock_guard<std::mutex> l(push_mu);
             PushUser &u = push_users[g.user];
-            if (p.method == "POST") {
+            if (p.method == "POST" && req["terminal"].boolean(false)) {
+                // The browser terminal's page went to the background, or came back.
+                u.term_away = req["away"].boolean(false);
+                if (!u.term_away) u.unseen = 0;
+            } else if (p.method == "POST") {
                 const std::string chat = req["chat"].str();
                 const bool going = req["away"].boolean(false);
                 if (going && good_chat_id(chat) && u.working.count(chat)) u.away.insert(chat);

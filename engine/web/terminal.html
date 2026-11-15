@@ -30,12 +30,17 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="TS5 terminal">
+<!-- As a Home Screen app (for notifications): it opens here, at ts5-tui. -->
+<link rel="manifest" href="/ts5/web/terminal.webmanifest">
 <link rel="stylesheet" href="/ts5/web/xterm.css">
 <style>
   :root { --bg: #0d1117; --panel: #161b22; --line: #30363d; --fg: #e6edf3; --dim: #8b949e; --accent: #58a6ff; --bad: #f85149; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
     font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
-  body { display: flex; flex-direction: column; height: 100dvh; }
+  /* The page is the part of the screen the keyboard leaves (visualViewport,
+     below): the button bar stays above an iPhone's keyboard, not under it. */
+  body { display: flex; flex-direction: column; height: 100dvh; position: fixed; left: 0; right: 0; top: 0; }
+  body.kb #bar { padding-bottom: 6px; }
   #term { flex: 1; min-height: 0; padding: 4px 0 0 4px; }
   #bar { display: flex; gap: 6px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom)); background: var(--panel);
     border-top: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; flex: none; align-items: center; }
@@ -77,6 +82,7 @@
 <div id="bar">
   <span id="state">connecting…</span>
   <span class="sep"></span>
+  <button id="kbd" title="Show or hide the keyboard">⌨</button>
   <button data-k="esc">Esc</button><button data-k="tab">Tab</button>
   <button data-k="up">↑</button><button data-k="down">↓</button><button data-k="left">←</button><button data-k="right">→</button>
   <button data-k="enter">Enter</button><button data-k="pgup">PgUp</button><button data-k="pgdn">PgDn</button>
@@ -88,7 +94,7 @@
   <button data-k="ctrl-t">Ctrl+T</button><button data-k="ctrl-y">Ctrl+Y</button>
   <span class="sep"></span>
   <button id="smaller" title="Smaller text">A−</button><button id="bigger" title="Bigger text">A+</button>
-  <a href="/">Chat page</a>
+  <a href="/ts5/controls">Controls</a><a href="/">Chat page</a>
 </div>
 <div id="copied"><span>ts5-tui copied some text.</span><button id="copy">Copy it</button><button id="nocopy">✕</button></div>
 <div class="shade" id="keydlg" hidden>
@@ -113,6 +119,7 @@
 <script src="/ts5/web/xterm.js"></script>
 <script src="/ts5/web/addon-fit.js"></script>
 <script src="/ts5/web/keep.js?v=4"></script>
+<script src="/ts5/web/push.js"></script>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
@@ -139,6 +146,8 @@ const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
 term.open($("term"));
 const enc = new TextEncoder();
+// A phone: the keyboard comes up only when the terminal is tapped (or ⌨).
+const touch = matchMedia("(pointer: coarse)").matches;
 let ws = null, ready = false, tries = 0, timer = 0, gaveKey = "";
 
 function setState(t) { $("state").textContent = t; }
@@ -179,7 +188,7 @@ function openSocket() {
     if (typeof ev.data !== "string") { term.write(new Uint8Array(ev.data)); return; }
     let m = {};
     try { m = JSON.parse(ev.data); } catch (e) { return; }
-    if (m.ready) { ready = true; tries = 0; booted(); setState("connected"); term.focus(); sendSize(); TS5Keep.settled(gaveKey); }
+    if (m.ready) { ready = true; tries = 0; booted(); setState("connected"); if (!touch) term.focus(); sendSize(); TS5Keep.settled(gaveKey); }
     if (m.error) {
       ready = false;
       if (/key/i.test(m.error)) { TS5Keep.forget(); askKey(m.error); }
@@ -250,21 +259,42 @@ term.parser.registerOscHandler(52, (data) => {
   else $("copied").style.display = "flex";
   return true;
 });
-$("copy").onclick = () => { copyNow(pending).then((ok) => { setState(ok ? "copied" : "couldn't copy"); }); $("copied").style.display = "none"; term.focus(); };
-$("nocopy").onclick = () => { $("copied").style.display = "none"; term.focus(); };
-
+// A tap on a button never brings the keyboard up: on a phone it would cover
+// the very buttons. Each keeps the focus where it was (the keyboard up stays
+// up, down stays down); ⌨ shows or hides it. A mouse's click gives the
+// terminal the keys again (no keyboard comes up on a computer).
+let pointer = "mouse";
+addEventListener("pointerdown", (e) => { pointer = e.pointerType || "mouse"; }, true);
+const typing = () => document.activeElement === term.textarea;
+function refocus() { if (pointer === "mouse") term.focus(); }
+$("copy").onclick = () => { copyNow(pending).then((ok) => { setState(ok ? "copied" : "couldn't copy"); }); $("copied").style.display = "none"; refocus(); };
+$("nocopy").onclick = () => { $("copied").style.display = "none"; refocus(); };
+document.querySelectorAll("#bar button").forEach((b) => b.addEventListener("pointerdown", (e) => e.preventDefault()));
 document.querySelectorAll("#bar button[data-k]").forEach((b) => {
-  b.addEventListener("pointerdown", (e) => e.preventDefault());  // the keyboard stays up on a phone
-  b.addEventListener("click", () => { send(keys[b.dataset.k]); term.focus(); });
+  b.addEventListener("click", () => { send(keys[b.dataset.k]); refocus(); });
 });
+$("kbd").onclick = () => { if (typing()) term.blur(); else term.focus(); };
+// The page's height is what the keyboard leaves of the screen.
+function viewport() {
+  const v = window.visualViewport;
+  if (!v) return;
+  document.body.style.height = v.height + "px";
+  document.body.style.top = v.offsetTop + "px";
+  document.body.classList.toggle("kb", v.height < innerHeight - 80);
+}
+if (window.visualViewport) {
+  visualViewport.addEventListener("resize", viewport);
+  visualViewport.addEventListener("scroll", viewport);
+  viewport();
+}
 function resize(by) {
   size = Math.max(8, Math.min(28, size + by));
   term.options.fontSize = size;
   store.set("ts5.term.size", String(size));
   refit();
 }
-$("smaller").onclick = () => resize(-1);
-$("bigger").onclick = () => resize(1);
+$("smaller").onclick = () => { resize(-1); refocus(); };
+$("bigger").onclick = () => { resize(1); refocus(); };
 const keyFilled = TS5Keep.watch($("key"));
 $("keyform").onsubmit = (e) => {
   e.preventDefault();
@@ -277,6 +307,15 @@ $("keyform").onsubmit = (e) => {
   connect();
 };
 $("again").onclick = () => { tries = 0; connect(); };
+// Going to the background: an answer ts5-tui finishes meanwhile is told as a
+// notification (Controls, Settings: Notifications). Back: the icon's count
+// starts again.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) TS5Push.seen();
+  const h = { "Content-Type": "application/json" }, k = store.get("ts5.key");
+  if (k) h.Authorization = "Bearer " + k;
+  fetch("/ts5/away", { method: "POST", keepalive: true, headers: h, body: JSON.stringify({ terminal: true, away: document.hidden }) }).catch(() => {});
+});
 refit();
 connect();
 </script>
