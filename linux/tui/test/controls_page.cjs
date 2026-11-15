@@ -20,6 +20,28 @@ function check(ok, what, got) {
   }
 }
 
+
+// Waits until fn(arg) is true in the page, asking every 250 ms (plain
+// evaluate calls: a server restarting or a browser newer than this
+// Playwright can't cut it short). Says why if it never is.
+async function until(page, fn, arg, ms) {
+  const end = Date.now() + ms;
+  let err = null;
+  for (;;) {
+    try {
+      if (await page.evaluate(fn, arg)) return true;
+      err = null;
+    } catch (e) {
+      err = e;
+    }
+    if (Date.now() > end) {
+      if (err) console.log("      (" + String(err).split("\n")[0] + ")");
+      return false;
+    }
+    await page.waitForTimeout(250);
+  }
+}
+
 (async () => {
   const opts = { args: ["--no-sandbox"] };
   if (process.env.CHROME) opts.executablePath = process.env.CHROME;
@@ -34,8 +56,8 @@ function check(ok, what, got) {
       try { localStorage.setItem("ts5.key", k); localStorage.setItem("ts5.keep", "passwords"); } catch (e) {}
     }, key);
     await page.goto(base + "/ts5/controls");
-    await page.waitForFunction(() => /Test-A/.test(document.getElementById("status").textContent), null, { timeout: 30000 });
-    check(true, "the page: signed in by the kept key, the loaded model in its status line");
+    check(await until(page, () => /Test-A/.test(document.getElementById("status").textContent), null, 30000),
+      "the page: signed in by the kept key, the loaded model in its status line", await page.locator("#status").innerText());
     const text = async () => page.locator("#page").innerText();
     let t = await text();
     check(/Loaded[\s\S]*Test-A/i.test(t) && /Downloaded \(\d+\)/i.test(t) && /Test-C/.test(t) && /Test-D/.test(t),
@@ -48,10 +70,10 @@ function check(ok, what, got) {
     const themeRow = page.locator(".row", { hasText: "Theme" }).first();
     const before = await themeRow.locator(".val").innerText();
     await themeRow.locator('button[data-dir="1"]').click();
-    await page.waitForFunction((b) => {
+    await until(page, (b) => {
       const r = [...document.querySelectorAll(".row")].find((x) => /Theme/.test(x.textContent));
       return r && r.querySelector(".val").textContent !== b;
-    }, before, { timeout: 10000 }).catch(() => {});
+    }, before, 10000);
     const after = await themeRow.locator(".val").innerText();
     check(after !== before, "Settings: Theme › moves it on (" + before + " -> " + after + ")");
     const rows = await page.locator(".row").count();
@@ -93,8 +115,8 @@ function check(ok, what, got) {
     await del().click();
     await page.waitForSelector("#askdlg:not([hidden])", { timeout: 10000 });
     await page.click('#ask button[data-yes="1"]');
-    await page.waitForFunction(() => !/Test-C/.test(document.getElementById("page").textContent), null, { timeout: 10000 }).catch(() => {});
-    check(!/Test-C/.test(await text()), "Yes: it's deleted and off the list");
+    await until(page, () => !/Test-C/.test(document.getElementById("page").textContent), null, 20000);
+    check(!/Test-C/.test(await text()), "Yes: it's deleted and off the list", (await text()).slice(0, 600));
 
     // Load another: the server starts again with it, and the page follows.
     await page.locator(".row", { hasText: "Test-D" }).locator('button[data-do="load"]').click();
@@ -103,27 +125,23 @@ function check(ok, what, got) {
       const pick = await page.locator("#ask button[data-pick]").count();
       await page.click(pick ? '#ask button[data-pick="0"]' : '#ask button[data-yes="1"]');
     }
-    const loaded = await page.waitForFunction(() => {
+    const loaded = await until(page, () => {
       const s = document.getElementById("status").textContent;
       return /Test-D/.test(s) && !/Loading/.test(s);
-    }, null, { timeout: 240000 }).then(() => true).catch(() => false);
+    }, null, 240000);
     check(loaded, "Load: Test-D serves, and the page shows it after the server's restart",
       await page.locator("#status").innerText());
 
     // The chat page's model menu (the owner may switch): Test-A back.
     await page.goto(base + "/");
-    await page.waitForFunction(() => document.getElementById("model").classList.contains("pick"), null, { timeout: 30000 })
-      .catch(() => {});
+    await until(page, () => document.getElementById("model").classList.contains("pick"), null, 30000);
     check(await page.locator("#model.pick").count() === 1, "chat page: the model's name is a menu for a key that may switch");
     await page.click("#model");
     await page.waitForSelector("#swlist button", { timeout: 30000 });
     const listed = await page.locator("#swlist").innerText();
     check(/Test-A/.test(listed) && /Test-D\s*loaded/.test(listed), "the menu: the models here, the loaded one marked", listed);
     await page.locator("#swlist button", { hasText: "Test-A" }).click();
-    const back = await page.waitForFunction(() => {
-      const t = document.getElementById("model").textContent;
-      return t === "Test-A";
-    }, null, { timeout: 240000 }).then(() => true).catch(() => false);
+    const back = await until(page, () => document.getElementById("model").textContent === "Test-A", null, 240000);
     check(back, "chosen: Test-A loads, and the page shows it once it serves", await page.locator("#model").innerText());
 
     const wide = await page.evaluate(() => document.scrollingElement.scrollWidth - window.innerWidth);

@@ -260,6 +260,10 @@ def main():
             else:
                 print(out.rstrip())
                 check(p.returncode == 0, "the page in a browser: every kind of control")
+                if p.returncode != 0:
+                    print("---- ts5-tui's screen ----")
+                    print(subprocess.run(["tmux", "-L", "ts5", "capture-pane", "-p", "-t", "ts5"], env=env,
+                                         capture_output=True, text=True).stdout)
 
         # ---- a user who may switch the model, to one of theirs ----
         kid = run("users", "new", "Kid")["made"]
