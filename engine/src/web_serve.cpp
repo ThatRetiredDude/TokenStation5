@@ -978,7 +978,17 @@ void control(const WebOptions &o, const Server::Page &p, int fd) {
     const std::string what = req["do"].str("state");
     if (what != "state") {
         // What was done, never the words a setting was given (a key, say).
-        std::string on = req["model"].str(req["label"].str(req["mode"].str(req["key"].str())));
+        // (A user's or key's: its id, and the name a new one gets.)
+        std::string on = req["model"].str(req["mode"].str(req["key"].str()));
+        for (const char *f : {"id", "user", "name", "label"})
+            if (!req[f].str().empty()) on += (on.empty() ? "" : " ") + req[f].str();
+        for (char &c : on)
+            if ((unsigned char)c < 0x20 || c == 0x7f) c = ' ';  // one line in the log, whatever was sent
+        if (on.size() > 120) {  // (at a character's start)
+            on.resize(120);
+            while (!on.empty() && ((unsigned char)on.back() & 0xC0) == 0x80) on.pop_back();
+            if (!on.empty() && (unsigned char)on.back() >= 0xC0) on.pop_back();
+        }
         log_line("ts5: controls: %s: %s%s%s", p.client.c_str(), what.c_str(), on.empty() ? "" : " ", on.c_str());
     }
     std::string out, why;

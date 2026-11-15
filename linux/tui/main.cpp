@@ -3734,24 +3734,15 @@ constexpr int kEdModels = 3, kEdSwitch = 4, kEdReads = 5, kEdTokens = 6, kEdRepl
 const int64_t kTokensDay[] = {0, 10000, 25000, 50000, 100000, 250000, 1000000};
 const int64_t kMaxReply[] = {0, 500, 1000, 2000, 4000, 8000};
 
-void draw_access_user() {
-    Screen &s = g->scr;
-    const Theme &t = *g->th;
-    const App::AccessUser &u = *acc_user(g->acc_edit);
-    const int w = std::min(s.w - 4, 104);
-    const int x0 = (s.w - w) / 2;
-    int y = body_top() + 1;
-    int x = s.put(x0 + 1, y, "Access › ", S(t.dim, BOLD));
-    x = s.put(x, y, u.name, S(t.accent, BOLD));
-    s.put(x + 2, y, fit("what " + u.name + " may do · from the next request, on all " + u.name + "'s keys", w - (x + 2 - x0)),
-          S(t.dim));
-    y += 2;
-    struct Row {
-        std::string label, value, note;
-        bool warn;
-    };
+// A user's page, row by row (what ts5-tui draws, and the phone's
+// controls show).
+struct UserRow {
+    std::string label, value, note;
+    bool warn;
+};
+std::vector<UserRow> user_rows(const App::AccessUser &u) {
     const auto limit = [](int64_t n, const char *unit) { return n > 0 ? grouped(n) + " " + unit : std::string("no limit"); };
-    std::vector<Row> rows = {
+    return {
         {"Preset", u.web_search ? "Chat + web search" : "Chat only",
          "the chat page and apps with " + u.name + "'s key; never ts5-tui or the browser terminal", false},
         {"Web search", u.web_search ? "on" : "off", "ts5's own web search when a chat needs it", false},
@@ -3788,6 +3779,21 @@ void draw_access_user() {
          g->acc_share_way == 1},
         {"A key for " + u.name, "Enter", "a new key, as QR codes: the phone opens the chat page signed in", false},
     };
+}
+
+void draw_access_user() {
+    Screen &s = g->scr;
+    const Theme &t = *g->th;
+    const App::AccessUser &u = *acc_user(g->acc_edit);
+    const int w = std::min(s.w - 4, 104);
+    const int x0 = (s.w - w) / 2;
+    int y = body_top() + 1;
+    int x = s.put(x0 + 1, y, "Access › ", S(t.dim, BOLD));
+    x = s.put(x, y, u.name, S(t.accent, BOLD));
+    s.put(x + 2, y, fit("what " + u.name + " may do · from the next request, on all " + u.name + "'s keys", w - (x + 2 - x0)),
+          S(t.dim));
+    y += 2;
+    const std::vector<UserRow> rows = user_rows(u);
     // Rows of two lines; on a short screen they scroll to the one chosen.
     const int fit_rows = std::max(1, (s.h - 5 - y) / 2);
     const int first = std::max(0, std::min(g->acc_edit_sel - fit_rows + 1, kEdRows - fit_rows));
@@ -5438,7 +5444,7 @@ bool access_do(const std::string &args, const std::string &done) {
 // A new key: made, and shown the one time it can be, plain, to select by
 // hand; the key alone goes to the clipboard where the terminal takes one.
 // (Not to copied.txt, where copies otherwise go: a key is kept nowhere.)
-void access_new(const std::string &name) {
+void access_new(const std::string &name, bool here = true) {
     ts5::Json j;
     std::string why;
     const std::string uid = g->acc_for_user.empty() ? "owner" : g->acc_for_user;
@@ -5480,7 +5486,7 @@ void access_new(const std::string &name) {
     } else {
         text += "In the app, as an OpenAI-compatible server:\n  address  " + at + "\n  API key  the key above\n";
     }
-    const bool sent = to_clipboard(key);
+    const bool sent = here && to_clipboard(key);
     // Codes that carry the key (after #, which no server is sent): the
     // phone's camera opens the chat page, or the browser terminal, signed
     // in, with nothing to type. Then the address and the key, for an app.
@@ -5533,6 +5539,38 @@ void access_new(const std::string &name) {
     g->qr_plain_title = "the new key";
 }
 
+bool access_do_users(const std::string &args, const std::string &done);
+
+// Asks before a user goes: their keys, any Tailscale share, their chats.
+void ask_remove_user(const App::AccessUser &u) {
+    g->ask_title = " Remove " + u.name + "? ";
+    g->ask_text = u.name + "'s " + std::to_string(u.keys) + (u.keys == 1 ? " key stops" : " keys stop") +
+                  " working, any Tailscale share made for " + u.name + " ends, and " + u.name +
+                  "'s chats on this machine are deleted. To stop " + u.name +
+                  " for a while, pause instead (P). Remove " + u.name + "?";
+    g->ask_yes = [u] {
+        // Their Tailscale invites first (ts5 share revoke): what is
+        // left for you (someone who joined the tailnet) is said.
+        ts5::Json j;
+        std::string why;
+        if (!keys_cmd(g->acc_file, "revoke " + shell_quote(u.id), j, why, "share") &&
+            why.find("gave no answer") == std::string::npos) {
+            show_toast(u.name + " was kept: " + why, g->th->bad, 9);
+            return;
+        }
+        const std::string note = j["note"].str();
+        access_do_users("remove " + shell_quote(u.id) + " --forget", u.name + ": removed" + (note.empty() ? "" : ". " + note));
+    };
+}
+
+// Asks before a key goes for good.
+void ask_remove_key(const App::AccessKey &key) {
+    g->ask_title = " Remove this key? ";
+    g->ask_text = "The app that uses \"" + key.name + "\" can't get in after that, and the key can't be brought back. "
+                  "To stop it for a while, turn it off instead (Enter). Remove it?";
+    g->ask_yes = [key] { access_do("remove " + key.id, key.name + ": removed"); };
+}
+
 // Runs "ts5 users ARGS" on the page's file and reads the users again.
 bool access_do_users(const std::string &args, const std::string &done) {
     ts5::Json j;
@@ -5561,11 +5599,13 @@ std::string step_day(const std::string &until, int days) {
     }
     if (until.empty() && days < 0) return "none";
     at += (time_t)days * 86400;
-    if (days < 0 && at < now) return "none";
-    struct tm tm {};
+    struct tm tm {}, today {};
     localtime_r(&at, &tm);
-    char b[16];
+    localtime_r(&now, &today);
+    char b[16], t[16];
     strftime(b, sizeof b, "%Y-%m-%d", &tm);
+    strftime(t, sizeof t, "%Y-%m-%d", &today);
+    if (days < 0 && strcmp(b, t) <= 0) return "none";
     return b;
 }
 
@@ -5683,12 +5723,35 @@ void share_invite(const App::AccessUser &u, const std::string &token) {
     g->qr_plain_title = " Tailscale invite ";
 }
 
+// A row of a user's page changed: dir -1 (←) or +1 (→, Enter, space);
+// enter for Enter itself. False for the last row (a key: its name typed
+// first) and rows out of range. ts5-tui's keys and the phone's controls.
+bool user_row_do(const App::AccessUser &u, int row, int dir, bool enter) {
+    const std::string id = shell_quote(u.id);
+    if (row == 0) access_do_users("set " + id + (u.web_search ? " preset=chat" : " preset=chat-web"), "");
+    else if (row == 1) access_do_users("set " + id + (u.web_search ? " web_search=off" : " web_search=on"), "");
+    else if (row == 2) access_do_users("set " + id + (u.app_tools ? " app_tools=off" : " app_tools=on"), "");
+    else if (row == kEdModels) pick_user_models(u.id, 0);
+    else if (row == kEdSwitch) access_do_users("set " + id + (u.may_switch ? " may_switch=off" : " may_switch=on"), "");
+    else if (row == kEdReads)
+        access_do_users("set " + id + (u.owner_reads ? " owner_reads=off" : " owner_reads=on"),
+                        u.owner_reads ? u.name + "'s chats: " + u.name + "'s alone" : "You may read " + u.name + "'s chats (" + u.name + " sees so in Settings)");
+    else if (row == kEdTokens)
+        access_do_users("set " + id + " tokens_day=" + std::to_string(step_in(kTokensDay, 7, u.tokens_day, dir)), "");
+    else if (row == kEdReply)
+        access_do_users("set " + id + " max_reply=" + std::to_string(step_in(kMaxReply, 6, u.max_reply, dir)), "");
+    else if (row == kEdUntil) access_do_users("set " + id + " until=" + step_day(u.until, dir < 0 ? -7 : 7), "");
+    else if (row == kEdPaused) access_do_users("set " + id + (u.on ? " on=off" : " on=on"), "");
+    else if (row == kEdShare && !enter) g->acc_share_way = 1 - g->acc_share_way;
+    else if (row == kEdShare) share_invite(u, "");
+    else return false;
+    return true;
+}
+
 void key_access_user(const Event &e) {
     const App::AccessUser u = *acc_user(g->acc_edit);
     const auto letter = [&](char c) { return e.key == K_CHAR && e.ch.size() == 1 && tolower(e.ch[0]) == c; };
-    const int dir = e.key == K_LEFT ? -1 : 1;
     const bool flip = e.key == K_ENTER || e.key == K_LEFT || e.key == K_RIGHT || letter(' ');
-    const std::string id = shell_quote(u.id);
     if (e.key == K_ESC) {
         g->acc_edit.clear();
         return;
@@ -5696,23 +5759,8 @@ void key_access_user(const Event &e) {
     if (e.key == K_UP) g->acc_edit_sel = (g->acc_edit_sel + kEdRows - 1) % kEdRows;
     else if (e.key == K_DOWN) g->acc_edit_sel = (g->acc_edit_sel + 1) % kEdRows;
     else if (!flip) nav_key(e);
-    else if (g->acc_edit_sel == 0) access_do_users("set " + id + (u.web_search ? " preset=chat" : " preset=chat-web"), "");
-    else if (g->acc_edit_sel == 1) access_do_users("set " + id + (u.web_search ? " web_search=off" : " web_search=on"), "");
-    else if (g->acc_edit_sel == 2) access_do_users("set " + id + (u.app_tools ? " app_tools=off" : " app_tools=on"), "");
-    else if (g->acc_edit_sel == kEdModels) pick_user_models(u.id, 0);
-    else if (g->acc_edit_sel == kEdSwitch) access_do_users("set " + id + (u.may_switch ? " may_switch=off" : " may_switch=on"), "");
-    else if (g->acc_edit_sel == kEdReads)
-        access_do_users("set " + id + (u.owner_reads ? " owner_reads=off" : " owner_reads=on"),
-                        u.owner_reads ? u.name + "'s chats: " + u.name + "'s alone" : "You may read " + u.name + "'s chats (" + u.name + " sees so in Settings)");
-    else if (g->acc_edit_sel == kEdTokens)
-        access_do_users("set " + id + " tokens_day=" + std::to_string(step_in(kTokensDay, 7, u.tokens_day, dir)), "");
-    else if (g->acc_edit_sel == kEdReply)
-        access_do_users("set " + id + " max_reply=" + std::to_string(step_in(kMaxReply, 6, u.max_reply, dir)), "");
-    else if (g->acc_edit_sel == kEdUntil) access_do_users("set " + id + " until=" + step_day(u.until, e.key == K_LEFT ? -7 : 7), "");
-    else if (g->acc_edit_sel == kEdPaused) access_do_users("set " + id + (u.on ? " on=off" : " on=on"), "");
-    else if (g->acc_edit_sel == kEdShare && e.key != K_ENTER) g->acc_share_way = 1 - g->acc_share_way;
-    else if (g->acc_edit_sel == kEdShare) share_invite(u, "");
-    else if (e.key == K_ENTER) {
+    else if (user_row_do(u, g->acc_edit_sel, e.key == K_LEFT ? -1 : 1, e.key == K_ENTER)) {
+    } else if (e.key == K_ENTER) {
         g->acc_typing = g->editing = true;
         g->acc_name.clear();
         g->acc_for_terminal = false;
@@ -5824,25 +5872,7 @@ void key_access(const Event &e) {
             access_do_users("set " + shell_quote(u.id) + (u.on ? " on=off" : " on=on"),
                            u.name + (u.on ? ": paused. None of the keys gets in; the chats stay" : ": on again"));
         } else {
-            g->ask_title = " Remove " + u.name + "? ";
-            g->ask_text = u.name + "'s " + std::to_string(u.keys) + (u.keys == 1 ? " key stops" : " keys stop") +
-                          " working, any Tailscale share made for " + u.name + " ends, and " + u.name +
-                          "'s chats on this machine are deleted. To stop " + u.name +
-                          " for a while, pause instead (P). Remove " + u.name + "?";
-            g->ask_yes = [u] {
-                // Their Tailscale invites first (ts5 share revoke): what is
-                // left for you (someone who joined the tailnet) is said.
-                ts5::Json j;
-                std::string why;
-                if (!keys_cmd(g->acc_file, "revoke " + shell_quote(u.id), j, why, "share") &&
-                    why.find("gave no answer") == std::string::npos) {
-                    show_toast(u.name + " was kept: " + why, g->th->bad, 9);
-                    return;
-                }
-                const std::string note = j["note"].str();
-                access_do_users("remove " + shell_quote(u.id) + " --forget",
-                                u.name + ": removed" + (note.empty() ? "" : ". " + note));
-            };
+            ask_remove_user(u);
         }
     } else if (flip && g->acc_sel == 0) {
         if (k != ACC_OWN) {
@@ -5950,10 +5980,7 @@ void key_access(const Event &e) {
             show_toast("The TV app removes its keys: its Settings page, under Apps", g->th->warn, 6);
             return;
         }
-        g->ask_title = " Remove this key? ";
-        g->ask_text = "The app that uses \"" + key.name + "\" can't get in after that, and the key can't be brought back. "
-                      "To stop it for a while, turn it off instead (Enter). Remove it?";
-        g->ask_yes = [key] { access_do("remove " + key.id, key.name + ": removed"); };
+        ask_remove_key(key);
     } else {
         nav_key(e);
     }
@@ -6745,9 +6772,203 @@ ts5::Json control_state() {
 }
 
 // One request from the phone: {"do": ...}, then the state as it is after.
+// ---- Users and their keys, from the phone (the Controls page's Users) ----
+
+std::string replace_all(std::string s, const std::string &from, const std::string &to) {
+    for (size_t at = s.find(from); at != std::string::npos; at = s.find(from, at + to.size())) s.replace(at, from.size(), to);
+    return s;
+}
+
+const char *access_kind_name(int k) {
+    return k == ACC_SERVICE ? "service" : k == ACC_TV ? "tv" : k == ACC_REMOTE ? "remote" : "own";
+}
+
+// The users and their keys as the Access page has them: no key's words
+// (ts5 keeps only their SHA-256 anyway). Each user's page as its rows,
+// but for Share by Tailscale and the key row (the phone has its own).
+ts5::Json control_access() {
+    using ts5::Json;
+    Json a = Json::object();
+    a.set("kind", Json::string(access_kind_name(g->acc_kind)));
+    if (!g->acc_err.empty()) a.set("error", Json::string(g->acc_err));
+    a.set("required", cj_bool(g->acc_required));
+    a.set("writable", cj_bool(g->acc_writable));
+    Json users = cj_arr();
+    for (const App::AccessUser &u : g->acc_users) {
+        Json j = Json::object();
+        j.set("id", Json::string(u.id));
+        j.set("name", Json::string(u.name));
+        j.set("owner", cj_bool(u.owner));
+        j.set("on", cj_bool(u.on));
+        j.set("ended", cj_bool(u.ended));
+        j.set("until", Json::string(u.until));
+        j.set("summary", Json::string(acc_user_summary(u)));
+        Json keys = cj_arr();
+        for (const App::AccessKey &k : g->acc_keys) {
+            if (k.user != u.id) continue;
+            Json kj = Json::object();
+            kj.set("id", Json::string(k.id));
+            kj.set("name", Json::string(k.name));
+            kj.set("on", cj_bool(k.on));
+            kj.set("created", cj_num((double)k.created));
+            kj.set("used", cj_num((double)k.used));
+            keys.a.push_back(kj);
+        }
+        j.set("keys", keys);
+        if (!u.owner) {
+            Json rows = cj_arr();
+            const std::vector<UserRow> r = user_rows(u);
+            for (int i = 0; i < kEdRows - 1; i++) {
+                if (i == kEdShare) continue;  // on hold, and ts5-tui's alone
+                Json rj = Json::object();
+                rj.set("row", cj_num(i));
+                rj.set("label", Json::string(r[(size_t)i].label));
+                rj.set("value", Json::string(r[(size_t)i].value));
+                // (ts5-tui's keys, as the phone's buttons)
+                std::string note = replace_all(r[(size_t)i].note, "Enter picks some", "Choose picks some");
+                note = replace_all(note, "←→ sets one", "› sets one");
+                rj.set("note", Json::string(note));
+                if (r[(size_t)i].warn) rj.set("warn", cj_bool(true));
+                if (i == kEdModels) rj.set("pick", cj_bool(true));
+                rows.a.push_back(rj);
+            }
+            j.set("rows", rows);
+        }
+        users.a.push_back(j);
+    }
+    a.set("users", users);
+    return a;
+}
+
+// A user's or key's action from the phone. False with why to refuse.
+// extra: what the answer carries besides the state (a new user's id, a
+// new key's QR codes).
+bool control_users(const std::string &what, const ts5::Json &req, ts5::Json &extra, std::string &why) {
+    using ts5::Json;
+    access_read();
+    const AccessKind k = (AccessKind)g->acc_kind;
+    if (what == "users") return true;
+    if (k == ACC_REMOTE) {
+        why = "this ts5-tui works with a server on another machine: its users are that machine's";
+        return false;
+    }
+    if (k == ACC_TV) {
+        why = "the TV app's keys are made on its own Settings page";
+        return false;
+    }
+    if (!g->acc_err.empty()) {
+        why = g->acc_err;
+        return false;
+    }
+    const auto clean = [](std::string t) {
+        std::string out;
+        for (char c : t)
+            if ((unsigned char)c >= 0x20 && c != 0x7f) out += c;
+        while (!out.empty() && out.back() == ' ') out.pop_back();
+        while (!out.empty() && out.front() == ' ') out.erase(out.begin());
+        return out.size() > 60 ? out.substr(0, 60) : out;
+    };
+    const App::AccessUser *u = nullptr;
+    if (what.rfind("user_", 0) == 0) {
+        if (what != "user_new") {
+            u = acc_user(req["id"].str());
+            if (!u) {
+                why = "no such user here (removed already?)";
+                return false;
+            }
+            if (u->owner) {
+                why = "the owner always has everything";
+                return false;
+            }
+        }
+    }
+    if (what == "user_new") {
+        const std::string name = clean(req["name"].str());
+        if (name.empty()) {
+            why = "a new user needs a name";
+            return false;
+        }
+        Json j;
+        if (!keys_cmd(g->acc_file, "new " + shell_quote(name) + " --preset chat", j, why, "users")) return false;
+        access_read();
+        extra.set("made", Json::string(j["made"].str()));
+        show_toast(name + ": added from the phone, chat only", g->th->good, 6);
+    } else if (what == "user_row") {
+        const int row = (int)req["row"].num(-1);
+        if (row < 0 || row >= kEdRows - 1 || row == kEdShare || user_rows(*u)[(size_t)row].label != req["label"].str()) {
+            why = "no such row on " + u->name + "'s page";
+            return false;
+        }
+        const App::AccessUser copy = *u;
+        user_row_do(copy, row, req["dir"].num(1) < 0 ? -1 : 1, false);
+    } else if (what == "user_remove") {
+        ask_remove_user(*u);
+    } else if (what == "key_new") {
+        const std::string uid = req["user"].str("owner");
+        const App::AccessUser *who = acc_user(uid);
+        if (uid != "owner" && !who) {
+            why = "no such user here (removed already?)";
+            return false;
+        }
+        const std::string name = clean(req["name"].str());
+        g->acc_for_user = uid;
+        g->qr.clear();
+        access_new(name.empty() ? "phone" : name, false);
+        g->acc_for_user = "owner";
+        if (g->qr.empty() || !g->qr_copy) return true;  // not made: the toast says why
+        // The codes go to the phone alone: never left on this screen.
+        Json made = Json::object();
+        made.set("title", Json::string(g->qr_title));
+        Json notes = cj_arr();
+        for (std::string n : g->qr_notes) {
+            n = replace_all(n, "(Other devices or Tailscale, above)", "(ts5-tui's Access: Other devices, or Tailscale)");
+            n = replace_all(n, "(Tailscale, above, reaches it from anywhere)", "(Tailscale reaches it from anywhere)");
+            n = replace_all(n, " ←→ for ", " The buttons above: ");
+            notes.a.push_back(Json::string(n));
+        }
+        made.set("notes", notes);
+        Json codes = cj_arr();
+        for (const App::Qr &q : g->qr) {
+            Json c = Json::object();
+            c.set("label", Json::string(q.label));
+            c.set("text", Json::string(q.data));
+            Json rows = cj_arr();
+            for (const std::vector<bool> &r : qr_modules(q.data)) {
+                std::string line;
+                for (bool b : r) line += b ? '1' : '0';
+                rows.a.push_back(Json::string(line));
+            }
+            c.set("modules", rows);
+            codes.a.push_back(c);
+        }
+        made.set("codes", codes);
+        extra.set("made_key", made);
+        const std::string whose = who && !who->owner ? who->name + "'s" : "Your";
+        qr_close();
+        show_toast(whose + " new key \"" + (name.empty() ? std::string("phone") : name) +
+                       "\": made from the phone, its QR codes shown on the phone only",
+                   g->th->good, 8);
+    } else if (what == "key_on" || what == "key_remove") {
+        const App::AccessKey *key = nullptr;
+        for (const App::AccessKey &x : g->acc_keys)
+            if (x.id == req["id"].str()) key = &x;
+        if (!key) {
+            why = "no such key here (removed already?)";
+            return false;
+        }
+        const App::AccessKey copy = *key;
+        if (what == "key_remove") ask_remove_key(copy);
+        else if (req["on"].boolean(true) != copy.on) access_do(std::string(copy.on ? "off " : "on ") + copy.id, copy.name + (copy.on ? ": off" : ": on"));
+    } else {
+        why = "unknown: " + what;
+        return false;
+    }
+    return true;
+}
+
 std::string control_answer(const std::string &text) {
     using ts5::Json;
-    Json req, out;
+    Json req, out, extra = Json::object();
     auto refuse = [&](const std::string &why) {
         Json e = Json::object();
         e.set("error", Json::string(why));
@@ -6848,10 +7069,21 @@ std::string control_answer(const std::string &text) {
         }
     } else if (what == "rescan") {
         scan_models();
+    } else if (what == "users" || what.rfind("user_", 0) == 0 || what.rfind("key_", 0) == 0) {
+        std::string why;
+        if (!control_users(what, req, extra, why)) return refuse(why);
     } else {
         return refuse("unknown: " + what);
     }
     out = control_state();
+    for (auto &kv : extra.o) out.set(kv.first, kv.second);
+    // The users with the state when asked for (the Users tab), read again
+    // every 2 s at most; with every users' action.
+    const bool users = req["users"].boolean(false) || what == "users" || what.rfind("user_", 0) == 0 || what.rfind("key_", 0) == 0;
+    if (users) {
+        if (now_s() - g->acc_at > 2) access_read();
+        out.set("access", control_access());
+    }
     // What the action itself said (a toast it showed), if anything new.
     if (g->toast != toast_before || g->toast_until != toast_until_before) out.set("said", Json::string(g->toast));
     g->full_redraw = true;

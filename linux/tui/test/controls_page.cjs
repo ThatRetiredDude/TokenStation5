@@ -118,6 +118,63 @@ async function until(page, fn, arg, ms) {
     await until(page, () => !/Test-C/.test(document.getElementById("page").textContent), null, 20000);
     check(!/Test-C/.test(await text()), "Yes: it's deleted and off the list", (await text()).slice(0, 600));
 
+    // Users: add one, set a row, pick a model, a key with its QR codes, remove.
+    await page.click('nav button[data-tab="users"]');
+    check(await until(page, () => /Sam/.test(document.getElementById("page").textContent), null, 15000),
+      "Users: the users, as ts5-tui's Access has them", (await text()).slice(0, 400));
+    await page.locator("#adduser input").fill("Kim");
+    await page.locator("#adduser button").click();
+    check(await until(page, () => /‹ Users/.test(document.getElementById("page").textContent) &&
+      /Kim/.test(document.querySelector("#page h2").textContent), null, 15000),
+      "add a user: Kim, and Kim's page opens", (await text()).slice(0, 400));
+    const urow = (label) => page.locator(".row", { has: page.locator("b", { hasText: new RegExp("^" + label) }) }).first();
+    if (shot) await page.screenshot({ path: shot.replace(/\.png$/, "") + "-user.png", fullPage: true });
+    const lastBefore = await urow("Last day").locator(".val").innerText();
+    await urow("Last day").locator('button[data-dir="1"]').click();
+    await until(page, (b) => {
+      const r = [...document.querySelectorAll(".row")].find((x) => /^Last day/.test(x.querySelector("b").textContent));
+      return r && r.querySelector(".val").textContent !== b;
+    }, lastBefore, 10000);
+    const lastAfter = await urow("Last day").locator(".val").innerText();
+    check(/^\d{4}-\d\d-\d\d$/.test(lastAfter), "a row's ›: Kim's last day (" + lastBefore + " -> " + lastAfter + ")");
+    await urow("Models").locator("button[data-urow]").click();
+    await page.waitForSelector("#askdlg:not([hidden]) button[data-pick]", { timeout: 10000 });
+    await page.locator("#ask button[data-pick]", { hasText: "Test-A" }).click();
+    check(await until(page, () => /✓\s*Test-A/.test(document.getElementById("ask").textContent), null, 10000),
+      "Models: ts5-tui's pick on the phone, Test-A ticked", await page.locator("#ask").innerText());
+    await page.locator("#ask button[data-pick]", { hasText: "Done" }).click();
+    await page.waitForSelector("#askdlg[hidden]", { state: "attached", timeout: 10000 });
+    check(/Test-A/.test(await urow("Models").locator(".val").innerText()), "Kim's models: Test-A");
+    await page.locator('button[data-newkey]').first().click();
+    await page.locator("form.add[data-keyfor] input").fill("Kim's phone");
+    await page.locator("form.add[data-keyfor] button").click();
+    await page.waitForSelector("#keydlg:not([hidden]) svg", { timeout: 15000 });
+    if (shot) await page.screenshot({ path: shot.replace(/\.png$/, "") + "-key.png" });
+    // With an address for other machines (Other devices, or Tailscale)
+    // the chat page's code comes first; without, the key's alone.
+    const labels = await page.locator("#keyshow .seg button").allInnerTexts();
+    const firstCode = await page.locator("#keyshow .qrtext").innerText();
+    const dark = await page.evaluate(() => (document.querySelector("#keyshow svg path").getAttribute("d").match(/M/g) || []).length);
+    check((labels.length ? /#key=ts5-/.test(firstCode) : /^ts5-/.test(firstCode)) && dark > 100,
+      "a new key: its QR code (" + (labels.length ? labels.join(", ") : "the key alone: no address for other machines here") + "; " +
+      dark + " dark modules)", firstCode);
+    if (labels.length) await page.locator("#keyshow .seg button", { hasText: "API key" }).click();
+    const keyText = await page.locator("#keyshow .qrtext").innerText();
+    check(/^ts5-/.test(keyText), "the API key, under its code", keyText.slice(0, 8));
+    await page.click("#keyshow button[data-keydone]");
+    check(await page.locator("#keydlg").isHidden(), "Done: the codes close");
+    check(!(await page.content()).includes(keyText), "the key's words: nowhere on the page after");
+    check(/Kim's phone/.test(await text()), "the key on Kim's page, by its name");
+    await page.locator("button[data-userrm]").click();
+    await page.waitForSelector("#askdlg:not([hidden])", { timeout: 10000 });
+    check(/Kim/.test(await page.locator("#ask").innerText()), "remove Kim: ts5-tui's question", await page.locator("#ask").innerText());
+    await page.click('#ask button[data-yes="1"]');
+    check(await until(page, () => !/Kim/.test(document.getElementById("page").textContent), null, 10000),
+      "Yes: Kim is gone, and the list shows again", (await text()).slice(0, 400));
+    const wideUsers = await page.evaluate(() => document.scrollingElement.scrollWidth - window.innerWidth);
+    check(wideUsers <= 0, "Users at a phone's width: nothing runs off the side", wideUsers);
+    await page.click('nav button[data-tab="models"]');
+
     // Load another: the server starts again with it, and the page follows.
     await page.locator(".row", { hasText: "Test-D" }).locator('button[data-do="load"]').click();
     const asked = await page.waitForSelector("#askdlg:not([hidden])", { timeout: 5000 }).catch(() => null);

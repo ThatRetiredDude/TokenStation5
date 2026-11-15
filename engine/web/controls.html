@@ -97,6 +97,18 @@
   .steps { padding: 6px 12px 10px; font-size: 14px; }
   .steps div { display: flex; gap: 8px; }
   .steps div span:last-child { color: var(--dim); margin-left: auto; text-align: right; }
+  .row.key { padding-left: 28px; }
+  .row.key .what b { font-weight: 400; }
+  .tag.bad { border-color: var(--bad); color: var(--bad); }
+  .tag.warn { border-color: var(--warn); color: var(--warn); }
+  .warn { color: var(--warn); }
+  form.add { display: flex; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--line); }
+  .back { background: none; border: none; color: var(--accent); font: inherit; font-size: 15px; padding: 4px 0; cursor: pointer; }
+  .qr { background: #fff; border-radius: 10px; padding: 8px; width: min(300px, 100%); margin: 6px auto 10px; }
+  .qr svg { display: block; width: 100%; height: auto; }
+  .qrtext { font: 13px ui-monospace, Menlo, Consolas, monospace; overflow-wrap: anywhere; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; cursor: pointer; user-select: all; }
+  .dlg .seg { margin-bottom: 8px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -108,11 +120,13 @@
     <button data-tab="models" class="on">Models</button>
     <button data-tab="machine">Machine</button>
     <button data-tab="settings">Settings</button>
+    <button data-tab="users">Users</button>
   </nav>
 </header>
 <main id="page"></main>
 <div id="toast" role="status" hidden></div>
 <div class="shade" id="askdlg" hidden><div class="dlg" id="ask"></div></div>
+<div class="shade" id="keydlg" hidden><div class="dlg" id="keyshow"></div></div>
 <script src="/ts5/web/keep.js?v=4"></script>
 <script>
 "use strict";
@@ -125,6 +139,10 @@ let busy = false;       // a tap's request on its way (polls wait their turn)
 let editing = null;     // the Settings row whose words are being typed (its index)
 let problem = "";       // why the controls can't reach ts5-tui, if they can't
 let loadAsked = null;   // {model, t}: a load asked for here (its server starts again)
+let userOpen = null;    // the user whose page is open on Users (their id)
+let keyFor = null;      // the user a new key's name is being typed for ("owner" for yours)
+let madeKey = null;     // a new key's QR codes, shown this once (kept in this page alone, never stored)
+let madeSel = 0;        // which of its codes shows
 
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function gib(b) {
@@ -135,6 +153,7 @@ function gib(b) {
 function n(v, d) { return v === null || v === undefined ? "–" : (d ? Number(v).toFixed(d) : Math.round(v)); }
 
 async function send(req) {
+  if (tab === "users" && req.users === undefined) req.users = true;
   const h = { "Content-Type": "application/json" };
   const k = store.get("ts5.key");
   if (k) h.Authorization = "Bearer " + k;
@@ -161,6 +180,11 @@ async function send(req) {
   }
   problem = "";
   if (k) TS5Keep.settled(k);
+  // A new key's codes: shown, never kept in the state (or anywhere).
+  if (j.made_key) { madeKey = j.made_key; madeSel = 0; delete j.made_key; }
+  if (j.made) { userOpen = j.made; delete j.made; }
+  // The users stay as last read while a request without them is answered.
+  if (!j.access && st && st.access && tab === "users") j.access = st.access;
   st = j;
   if (loadAsked && j.server && j.server.online && j.server.model === loadAsked.model && !j.loading) loadAsked = null;
   draw();
@@ -314,6 +338,98 @@ function settingsPage() {
   return h;
 }
 
+
+function ago(t) {
+  if (!t) return "";
+  const s = Math.max(0, Date.now() / 1000 - t);
+  if (s < 90) return "just now";
+  if (s < 5400) return Math.round(s / 60) + " min ago";
+  if (s < 129600) return Math.round(s / 3600) + " h ago";
+  return Math.round(s / 86400) + " days ago";
+}
+function keyRow(k) {
+  return '<div class="row key"><div class="what"><b>' + esc(k.name) + (k.on ? "" : '<span class="tag bad">off</span>') + "</b><span>" +
+    (k.used ? "used " + ago(k.used) : "not used yet") + (k.created ? " · made " + ago(k.created) : "") + '</span></div><div class="btns">' +
+    '<button class="b" data-keyon="' + esc(k.id) + '" data-on="' + (k.on ? "0" : "1") + '">' + (k.on ? "Off" : "On") + "</button>" +
+    '<button class="b bad" data-keyrm="' + esc(k.id) + '" aria-label="Remove the key">✕</button></div></div>';
+}
+function newKeyForm(uid, name) {
+  if (keyFor !== uid)
+    return '<div class="row"><div class="what"><span>A new key opens the chat page on ' + (uid === "owner" ? "your" : esc(name) + "'s") +
+      " phone, signed in, by a QR code.</span></div><button class=\"b go\" data-newkey=\"" + esc(uid) + '">New key</button></div>';
+  return '<form class="add" data-keyfor="' + esc(uid) + '"><input class="t" name="v" placeholder="what it is for (phone)" maxlength="60" ' +
+    'autocapitalize="off" autocorrect="off" spellcheck="false"><button class="b go">Make it</button></form>';
+}
+function usersPage() {
+  const a = st.access;
+  if (!a) return '<p class="note">Asking ts5-tui for the users…</p>';
+  if (a.kind === "remote") return '<p class="note">This ts5-tui works with a server on another machine: its users are made there.</p>';
+  if (a.kind === "tv") return '<p class="note">The TV app makes its keys on its own Settings page, under Apps.</p>';
+  if (a.error) return '<p class="note err">' + esc(a.error) + "</p>";
+  const users = a.users || [];
+  const open = users.find((u) => u.id === userOpen && !u.owner);
+  if (open) return userPage(open);
+  let h = "<h2>Users (" + users.length + ')</h2><div class="card">';
+  for (const u of users) {
+    const uid = u.owner ? "owner" : u.id;
+    h += '<div class="row"><div class="what"><b>' + esc(u.owner ? u.name + " (you)" : u.name) +
+      (!u.on ? '<span class="tag bad">paused</span>' : "") + (u.ended ? '<span class="tag bad">ended ' + esc(u.until) + "</span>" : "") +
+      "</b><span>" + esc(u.summary) + "</span></div>" +
+      (u.owner ? "" : '<button class="b" data-user="' + esc(u.id) + '">Edit</button>') + "</div>";
+    for (const k of u.keys || []) h += keyRow(k);
+    if (u.owner || keyFor === uid) h += newKeyForm(uid, u.name);
+  }
+  h += '<form class="add" id="adduser"><input class="t" name="v" placeholder="add someone: their name" maxlength="60" ' +
+    'autocapitalize="words" autocorrect="off" spellcheck="false"><button class="b go">Add</button></form></div>';
+  h += '<p class="note">A user gets the chat page and apps with their own key: never ts5-tui or the browser terminal. ' +
+    (a.required ? "" : "Other machines don't need a key yet: Access in ts5-tui turns that on. ") +
+    "A new key's QR codes show once; ts5 keeps only each key's SHA-256.</p>";
+  return h;
+}
+function userPage(u) {
+  let h = '<button class="back" data-user="">‹ Users</button><h2>' + esc(u.name) +
+    (!u.on ? '<span class="tag bad">paused</span>' : "") + (u.ended ? '<span class="tag bad">ended</span>' : "") +
+    '</h2><div class="card">';
+  for (const r of u.rows || []) {
+    h += '<div class="row"><div class="what"><b>' + esc(r.label) + ' <span class="val">' + esc(r.value) + "</span></b>" +
+      (r.note ? '<span class="' + (r.warn ? "warn" : "") + '">' + esc(r.note) + "</span>" : "") + '</div><div class="btns">' +
+      (r.pick ? '<button class="b" data-urow="' + r.row + '" data-dir="1">Choose</button>'
+              : '<button class="b" data-urow="' + r.row + '" data-dir="-1" aria-label="Back">‹</button>' +
+                '<button class="b" data-urow="' + r.row + '" data-dir="1" aria-label="Next">›</button>') + "</div></div>";
+  }
+  h += "</div><h2>" + esc(u.name) + "'s keys</h2><div class=\"card\">";
+  for (const k of u.keys || []) h += keyRow(k);
+  h += newKeyForm(u.id, u.name) + "</div>";
+  h += '<p class="note">From the next request, on all ' + esc(u.name) + "'s keys. The same rows as " + esc(u.name) +
+    "'s page on ts5-tui's Access.</p>" +
+    '<div class="btns" style="justify-content:flex-end"><button class="b bad" data-userrm="' + esc(u.id) + '">Remove ' + esc(u.name) + "</button></div>";
+  return h;
+}
+
+// A QR code from its modules ("0"/"1" rows), with its quiet zone.
+function qrSvg(rows) {
+  const n = rows.length, q = 4;
+  let d = "";
+  rows.forEach((r, y) => { for (let x = 0; x < r.length; x++) if (r[x] === "1") d += "M" + (x + q) + " " + (y + q) + "h1v1h-1z"; });
+  return '<svg viewBox="0 0 ' + (n + 2 * q) + " " + (n + 2 * q) + '" shape-rendering="crispEdges" role="img" aria-label="QR code">' +
+    '<rect width="100%" height="100%" fill="#fff"/><path fill="#000" d="' + d + '"/></svg>';
+}
+function drawKey() {
+  $("keydlg").hidden = !madeKey;
+  if (!madeKey) { $("keyshow").innerHTML = ""; return; }
+  const codes = madeKey.codes || [];
+  const c = codes[Math.min(madeSel, codes.length - 1)] || {};
+  let h = "<h1>" + esc((madeKey.title || "A new key").trim()) + "</h1>";
+  if (codes.length > 1)
+    h += '<div class="seg">' + codes.map((x, i) => '<button data-code="' + i + '" class="' + (i === madeSel ? "on" : "") + '">' +
+      esc(x.label.split(":")[0]) + "</button>").join("") + "</div>";
+  if (c.modules && c.modules.length) h += '<div class="qr">' + qrSvg(c.modules) + "</div>";
+  h += '<div class="qrtext" data-copy="1" title="Tap to copy">' + esc(c.text || "") + "</div>";
+  for (const t of madeKey.notes || []) h += "<p>" + esc(t) + "</p>";
+  h += '<div class="btns"><button class="b go" data-keydone="1">Done</button></div>';
+  $("keyshow").innerHTML = h;
+}
+
 function draw() {
   $("status").innerHTML = statusLine();
   for (const b of document.querySelectorAll("#tabs button")) b.classList.toggle("on", b.dataset.tab === tab);
@@ -322,9 +438,10 @@ function draw() {
   if (!st) {
     $("page").innerHTML = problem ? '<p class="note err">' + esc(problem) + "</p>" : '<p class="note">Asking ts5-tui…</p>';
   } else {
-    $("page").innerHTML = tab === "machine" ? machinePage() : tab === "settings" ? settingsPage() : modelsPage();
+    $("page").innerHTML = tab === "machine" ? machinePage() : tab === "settings" ? settingsPage() : tab === "users" ? usersPage() : modelsPage();
   }
   drawAsk();
+  drawKey();
 }
 
 // A question ts5-tui asks (delete this model? load with less context?):
@@ -347,7 +464,29 @@ function drawAsk() {
 document.addEventListener("click", (e) => {
   const t = e.target.closest("button");
   if (!t) return;
-  if (t.dataset.tab) { tab = t.dataset.tab; store.set("ts5.controls.tab", tab); editing = null; draw(); return; }
+  if (t.dataset.tab) {
+    tab = t.dataset.tab; store.set("ts5.controls.tab", tab); editing = null; userOpen = null; keyFor = null; draw();
+    if (tab === "users") act({ do: "users" });
+    return;
+  }
+  if (t.dataset.user !== undefined) { userOpen = t.dataset.user || null; keyFor = null; draw(); window.scrollTo(0, 0); return; }
+  if (t.dataset.newkey !== undefined) {
+    keyFor = t.dataset.newkey; draw();
+    const box = document.querySelector("form.add[data-keyfor] input");
+    if (box) box.focus();
+    return;
+  }
+  if (t.dataset.urow !== undefined) {
+    const u = ((st.access || {}).users || []).find((x) => x.id === userOpen);
+    const r = u && (u.rows || []).find((x) => x.row === +t.dataset.urow);
+    if (r) act({ do: "user_row", id: u.id, row: r.row, label: r.label, dir: +t.dataset.dir });
+    return;
+  }
+  if (t.dataset.userrm !== undefined) { act({ do: "user_remove", id: t.dataset.userrm }); return; }
+  if (t.dataset.keyon !== undefined) { act({ do: "key_on", id: t.dataset.keyon, on: t.dataset.on === "1" }); return; }
+  if (t.dataset.keyrm !== undefined) { act({ do: "key_remove", id: t.dataset.keyrm }); return; }
+  if (t.dataset.code !== undefined) { madeSel = +t.dataset.code; drawKey(); return; }
+  if (t.dataset.keydone !== undefined) { madeKey = null; drawKey(); return; }
   if (t.dataset.do) {
     const req = { do: t.dataset.do };
     if (t.dataset.model) req.model = t.dataset.model;
@@ -371,6 +510,14 @@ document.addEventListener("click", (e) => {
   }
 });
 document.addEventListener("submit", (e) => {
+  if (e.target.id === "adduser" || e.target.dataset.keyfor !== undefined) {
+    e.preventDefault();
+    const f = e.target, v = f.elements.v.value.trim();
+    document.activeElement.blur();
+    if (f.id === "adduser") { if (v) act({ do: "user_new", name: v }); }
+    else { keyFor = null; act({ do: "key_new", user: f.dataset.keyfor, name: v || "phone" }); }
+    return;
+  }
   const f = e.target.closest("form.edit");
   if (!f) return;
   e.preventDefault();
@@ -379,6 +526,17 @@ document.addEventListener("submit", (e) => {
   editing = null;
   document.activeElement.blur();
   act({ do: "setting", index: r.index, label: r.label, text: v });
+});
+
+// A tap on a new key's text copies it (or selects it, where the browser
+// won't copy: a page on http).
+document.addEventListener("click", (e) => {
+  const el = e.target.closest(".qrtext");
+  if (!el) return;
+  const pick = () => { const r = document.createRange(); r.selectNodeContents(el); const s = getSelection(); s.removeAllRanges(); s.addRange(r); };
+  if (navigator.clipboard && window.isSecureContext)
+    navigator.clipboard.writeText(el.textContent).then(() => toast("Copied"), () => { pick(); toast("Selected: copy it"); });
+  else { pick(); toast("Selected: copy it"); }
 });
 
 // The state again every 2 s while the page is in view (each second while a
@@ -392,6 +550,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden && !b
 if (!store.get("ts5.key") && location.hostname !== "127.0.0.1" && location.hostname !== "localhost") {
   problem = "No key in this browser yet: open the chat page and sign in with your key, then come back.";
 }
+if (!["models", "machine", "settings", "users"].includes(tab)) tab = "models";
 draw();
 poll();
 </script>

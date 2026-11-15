@@ -234,6 +234,96 @@ def main():
         code, j = call(here + "/ts5/control", owner, {"do": "explode"})
         check(code == 200 and "unknown" in j.get("error", ""), "an action that isn't one: refused", j)
 
+        # ---- users and their keys, from the phone ----
+        def ctl(req):
+            code, j = call(here + "/ts5/control", owner, req)
+            return j if code == 200 and isinstance(j, dict) else {"error": "HTTP %s: %s" % (code, j)}
+
+        def listed():
+            return {u["name"]: u for u in run("users", "list").get("users", [])}
+
+        j = ctl({"do": "users"})
+        acc = j.get("access") or {}
+        us = {u["name"]: u for u in acc.get("users", [])}
+        sam_rows = [r["label"] for r in us.get("Sam", {}).get("rows", [])]
+        check(acc.get("kind") == "own" and "Sam" in us and any(u.get("owner") for u in us.values()),
+              "users: the owner and Sam, as ts5-tui's Access has them", acc)
+        check("Models" in sam_rows and "Last day" in sam_rows and "Paused" in sam_rows and "Share by Tailscale" not in sam_rows,
+              "a user's page: ts5-tui's rows (not Share by Tailscale, on hold)", sam_rows)
+        check([k["name"] for k in us.get("Sam", {}).get("keys", [])] == ["Sam's phone"] and skey not in json.dumps(j) and owner not in json.dumps(j),
+              "their keys by name, never a key's words", us.get("Sam", {}).get("keys"))
+        j = ctl({"do": "state"})
+        check("access" not in j, "the state alone: no users (read only when the Users tab asks)", list(j.keys()))
+
+        j = ctl({"do": "user_new", "name": "Robin\n"})
+        robin = j.get("made", "")
+        check(robin and "Robin" in listed() and listed()["Robin"].get("web_search") is False,
+              "add a user: Robin, chat only, and the page goes to Robin's", (j.get("made"), j.get("error")))
+        j = ctl({"do": "user_new", "name": "   "})
+        check("name" in j.get("error", ""), "add a user with no name: refused", j.get("error"))
+        rows = {r["label"]: r for u in (j.get("access") or ctl({"do": "users"})["access"])["users"] if u["id"] == robin for r in u["rows"]}
+        j = ctl({"do": "user_row", "id": robin, "row": rows["Last day"]["row"], "label": "Last day", "dir": 1})
+        until = listed()["Robin"].get("until", "")
+        check(len(until) == 10 and until > time.strftime("%Y-%m-%d"), "a row's ›: Last day a week on (%s)" % until, j.get("error"))
+        j = ctl({"do": "user_row", "id": robin, "row": rows["Last day"]["row"], "label": "Last day", "dir": -1})
+        check(listed()["Robin"].get("until", "") in ("", "-"), "and ‹ back: no last day", listed()["Robin"].get("until"))
+        j = ctl({"do": "user_row", "id": robin, "row": rows["Last day"]["row"], "label": "Paused", "dir": 1})
+        check("no such row" in j.get("error", ""), "a row by the wrong label: refused (ts5-tui newer or older than the page)", j.get("error"))
+        j = ctl({"do": "user_row", "id": robin, "row": rows["Models"]["row"], "label": "Models", "dir": 1})
+        picks = [p["label"].strip() for p in (j.get("ask") or {}).get("picks", [])]
+        check("✓ All models" in picks and "Test-A" in picks and "Done" in picks, "Models: ts5-tui's pick comes to the phone", j.get("ask"))
+        if "Test-A" in picks:
+            j = ctl({"do": "answer", "pick": picks.index("Test-A")})
+            picks2 = [p["label"].strip() for p in (j.get("ask") or {}).get("picks", [])]
+            check(listed()["Robin"].get("models") == ["Test-A"] and "✓ Test-A" in picks2,
+                  "a model picked: Robin's, and the pick stays open with it ticked", (listed()["Robin"].get("models"), picks2))
+            j = ctl({"do": "answer", "pick": len(picks2) - 1})
+            check(not j.get("ask"), "Done: the pick closes", j.get("ask"))
+        ownerid = next(u["id"] for u in ctl({"do": "users"})["access"]["users"] if u["owner"])
+        j = ctl({"do": "user_row", "id": ownerid, "row": 0, "label": "Preset", "dir": 1})
+        check("owner" in j.get("error", ""), "the owner's own row: refused (the owner always has everything)", j.get("error"))
+
+        # A key: its QR codes in the answer alone, then never again.
+        j = ctl({"do": "key_new", "user": robin, "name": "Robin's phone"})
+        made = j.get("made_key") or {}
+        codes = {c["label"]: c for c in made.get("codes", [])}
+        rkey = codes.get("API key", {}).get("text", "")
+        check(rkey.startswith("ts5-") and all(c.get("modules") and len(c["modules"]) == len(c["modules"][0]) for c in codes.values()),
+              "a new key for Robin: its QR codes (%s), each a square of modules" % ", ".join(codes), list(codes))
+        check("Browser terminal: all of ts5-tui" not in codes, "a user's key: no browser terminal code", list(codes))
+        check(call(here + "/ts5/me", rkey)[0] == 200, "the key gets in, as Robin's", call(here + "/ts5/me", rkey))
+        screen = subprocess.run(["tmux", "-L", "ts5", "capture-pane", "-p", "-t", "ts5"], env=env, capture_output=True, text=True).stdout
+        later = json.dumps(ctl({"do": "users"}))
+        check(rkey and rkey not in screen and rkey not in later, "the key's words: not on ts5-tui's screen, not in the next answer",
+              screen[-600:])
+        rk = next((k for u in ctl({"do": "users"})["access"]["users"] if u["id"] == robin for k in u["keys"]), {})
+        j = ctl({"do": "key_on", "id": rk.get("id", ""), "on": False})
+        check(wait(lambda: call(here + "/ts5/me", rkey)[0] in (401, 403), 5), "the key turned off: it doesn't get in",
+              call(here + "/ts5/me", rkey)[0])
+        ctl({"do": "key_on", "id": rk.get("id", ""), "on": True})
+        check(wait(lambda: call(here + "/ts5/me", rkey)[0] == 200, 5), "and on again: it does", call(here + "/ts5/me", rkey)[0])
+        j = ctl({"do": "user_row", "id": robin, "row": rows["Paused"]["row"], "label": "Paused", "dir": 1})
+        check(listed()["Robin"].get("on") is False and wait(lambda: call(here + "/ts5/me", rkey)[0] in (401, 403), 5),
+              "Paused ›: Robin is paused, the key stays out", listed()["Robin"].get("on"))
+        j = ctl({"do": "key_remove", "id": rk.get("id", "")})
+        check((j.get("ask") or {}).get("title", "").strip() == "Remove this key?", "remove a key: ts5-tui asks first", j.get("ask"))
+        j = ctl({"do": "answer", "yes": True, "users": True})
+        check(not any(k["id"] == rk.get("id") for u in j["access"]["users"] for k in u["keys"]), "answered yes: the key is gone",
+              j.get("access"))
+        j = ctl({"do": "key_new", "user": "owner", "name": "Owner's tablet"})
+        ocodes = [c["label"] for c in (j.get("made_key") or {}).get("codes", [])]
+        check("API key" in ocodes, "a new key of the owner's: its codes too", ocodes)
+        j = ctl({"do": "key_new", "user": "nobody", "name": "x"})
+        check("no such user" in j.get("error", ""), "a key for a user who isn't: refused", j.get("error"))
+        j = ctl({"do": "user_remove", "id": robin})
+        check("Robin" in (j.get("ask") or {}).get("title", ""), "remove Robin: ts5-tui asks first", j.get("ask"))
+        j = ctl({"do": "answer", "yes": True, "users": True})
+        check("Robin" not in listed() and "Robin" not in [u["name"] for u in j.get("access", {}).get("users", [])],
+              "answered yes: Robin is gone", list(listed()))
+        log = open(os.path.join(home, ".cache", "tokenstation", "tui-serve.log"), errors="replace").read()
+        check("ts5: controls: 127.0.0.1: user_new Robin" in log and "key_new " + robin + " Robin's phone" in log and rkey not in log,
+              "the log: what was done to whom, never a key's words", [l for l in log.splitlines() if "user_" in l or "key_" in l])
+
         # ---- the page ----
         code, body = call(here + "/ts5/controls")
         check(code == 200 and b"/ts5/control" in body and b"keep.js" in body, "/ts5/controls is the controls page", code)
