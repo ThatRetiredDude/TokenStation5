@@ -65,8 +65,15 @@ async function until(page, fn, arg, ms) {
     check(/answer finishes/.test(note), "it says what they are for", note);
     await page.click("#setdone");
 
-    // A new chat, a message, and the app sent to the background mid-answer.
+    // A new chat: the home screen, as a user has it (no TUI: the browser
+    // terminal is the owner's alone).
     await page.click("#new");
+    check(await page.locator("#home").isVisible() && await page.locator("#hcontrols").isVisible() &&
+      (await page.locator("#htui").count()) === 0 && await page.locator("#tui").isHidden(),
+      "a user's home screen: Controls, and no TUI", await page.locator("#msgs").innerText());
+    check(/Tell me a long story|A long story/.test(await page.locator("#home .recent").innerText().catch(() => "")),
+      "and their latest chats", await page.locator("#msgs").innerText());
+    // A message, and the app sent to the background mid-answer.
     let cut = 0;
     await page.route("**/v1/chat/completions", async (route) => {
       const body = route.request().postData() || "";

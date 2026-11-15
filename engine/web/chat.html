@@ -115,7 +115,24 @@
   .msg .body h1, .msg .body h2, .msg .body h3 { font-size: 1.05em; margin: 12px 0 6px; }
   .msg .body ul, .msg .body ol { margin: 0 0 10px; padding-left: 22px; }
   .msg .body a { color: var(--accent); }
-  #empty { color: var(--dim); text-align: center; margin-top: 18vh; }
+  /* The home screen: what the app opens on, and a new chat until its first message. */
+  #home { max-width: 560px; margin: 0 auto; padding: 5vh 0 8px; text-align: center; }
+  #home img { width: 84px; height: 84px; border-radius: 19px; display: block; margin: 0 auto 10px; }
+  #home h2 { font-size: 20px; margin: 0 0 2px; }
+  #home .hmodel { color: var(--dim); font-size: 14px; margin: 0 0 14px; overflow-wrap: anywhere; }
+  #home .hmodel.pick { color: var(--fg); cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+  #home .hbtns { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin: 0 0 18px; }
+  #home .hbtns a, #home .hbtns button { border: 1px solid var(--line); border-radius: 10px; padding: 9px 16px;
+    background: var(--panel); color: var(--fg); font: inherit; text-decoration: none; cursor: pointer; }
+  #home .hbtns .hmain { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  #home h3 { font-size: 13px; font-weight: 600; color: var(--dim); text-align: left; margin: 0 0 6px; }
+  #home .recent { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  #home .recent button { display: block; width: 100%; text-align: left; background: none; border: 0;
+    border-top: 1px solid var(--line); padding: 9px 12px; color: var(--fg); font: inherit; cursor: pointer; }
+  #home .recent button:first-child { border-top: 0; }
+  #home .recent b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #home .recent span { color: var(--dim); font-size: 13px; }
+  #home .hint { color: var(--dim); font-size: 14px; margin: 14px 0 0; }
   form#ask { flex: none; border-top: 1px solid var(--line); padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
     background: var(--panel); }
   form#ask .wrap { display: flex; gap: 8px; align-items: flex-end; }
@@ -160,6 +177,7 @@
   <span id="model">…</span>
   <button id="new" type="button">New<span class="wide"> chat</span></button>
   <a id="full" href="/ts5/controls" title="Models, the fan, temperatures, memory, settings, notifications">Controls</a>
+  <a id="tui" href="/ts5/terminal" title="ts5-tui, in the browser terminal" hidden>TUI</a>
 </header>
 <div id="peekbar" hidden></div>
 <div id="savebar" role="status" hidden></div>
@@ -312,9 +330,11 @@ async function account() {
   decided = true;
   if (openAtStart && chats.find((c) => c.id === openAtStart)) cur = openAtStart;
   openAtStart = "";
-  if (!chats.find((c) => c.id === cur)) cur = chats.length ? chats[0].id : null;
+  // The app opens on the home screen (a notification's tap: on its chat).
+  if (!chats.find((c) => c.id === cur)) cur = null;
   $("full").title = me && me.owner ? "Models, the fan, temperatures, memory, settings, notifications" : "Your settings and notifications";
   $("fullnote").hidden = !!me && !me.owner;
+  $("tui").hidden = !me || !me.owner;  // the browser terminal is the owner's alone
   const a = $("acct");
   a.hidden = !me;
   if (me) {
@@ -568,6 +588,74 @@ function msgNode(m, i) {
   d.querySelectorAll("pre button.cp").forEach((b) => { b.onclick = () => copyText(b.nextSibling.textContent, b); });
   return d;
 }
+// The home screen: what the app opens on (a notification's tap opens its
+// chat instead), and a new chat until its first message is sent. The logo,
+// the model (a menu for a key that may switch it), Controls and, for the
+// owner, ts5-tui in the browser terminal, and the latest chats.
+function homeNode() {
+  const h = document.createElement("div");
+  h.id = "home";
+  const img = document.createElement("img");
+  img.src = "/ts5/web/icon.png";
+  img.alt = "";
+  const t = document.createElement("h2");
+  t.textContent = "TokenStation5";
+  const m = document.createElement("p");
+  m.className = "hmodel";
+  m.textContent = model || $("model").textContent;
+  if (me && me.may_switch && model) { m.classList.add("pick"); m.title = "Switch the model"; m.onclick = openSwitch; }
+  h.append(img, t, m);
+  const b = document.createElement("div");
+  b.className = "hbtns";
+  const nw = document.createElement("button");
+  nw.type = "button"; nw.className = "hmain"; nw.id = "hnew"; nw.textContent = "New chat";
+  nw.onclick = () => $("input").focus();
+  b.appendChild(nw);
+  if (me) {
+    const ctl = document.createElement("a");
+    ctl.href = "/ts5/controls"; ctl.id = "hcontrols"; ctl.textContent = "Controls";
+    ctl.onclick = (e) => { e.preventDefault(); $("full").click(); };
+    b.appendChild(ctl);
+  }
+  if (me && me.owner) {
+    const tui = document.createElement("a");
+    tui.href = "/ts5/terminal"; tui.id = "htui"; tui.textContent = "TUI";
+    b.appendChild(tui);
+  }
+  h.appendChild(b);
+  if (chats.length) {
+    const head = document.createElement("h3");
+    head.textContent = "Your latest chats";
+    const r = document.createElement("div");
+    r.className = "recent";
+    for (const c of chats.slice(0, 5)) {
+      const o = document.createElement("button");
+      o.type = "button";
+      const tt = document.createElement("b");
+      tt.textContent = c.title || "A chat";
+      const n = c.messages.length;
+      const sp = document.createElement("span");
+      sp.textContent = when(at(c)) + " · " + n + (n === 1 ? " message" : " messages");
+      o.append(tt, sp);
+      o.onclick = () => openChat(c.id);
+      r.appendChild(o);
+    }
+    if (chats.length > 5) {
+      const all = document.createElement("button");
+      all.type = "button"; all.id = "hall";
+      all.textContent = "All " + chats.length + " chats";
+      all.onclick = () => $("list").click();
+      r.appendChild(all);
+    }
+    h.append(head, r);
+  }
+  const hint = document.createElement("p");
+  hint.className = "hint";
+  hint.textContent = chats.length ? "Type below for a new chat: the model gets nothing from your other chats."
+    : "Type below to start a chat.";
+  h.appendChild(hint);
+  return h;
+}
 function draw() {
   const box = $("msgs");
   box.textContent = "";
@@ -585,18 +673,7 @@ function draw() {
   }
   const c = chat();
   if (!c || !c.messages.length) {
-    const e = document.createElement("div");
-    e.id = "empty";
-    e.textContent = model ? "Ask " + model + " anything." : "TokenStation5";
-    if (chats.length) {
-      const more = document.createElement("div");
-      more.style.fontSize = "14px";
-      more.style.marginTop = "8px";
-      more.textContent = "A new chat: the model gets nothing from the others. " + chats.length +
-        (chats.length === 1 ? " saved chat is" : " saved chats are") + " under Chats.";
-      e.appendChild(more);
-    }
-    box.appendChild(e);
+    box.appendChild(homeNode());
     return;
   }
   c.messages.forEach((m, i) => box.appendChild(msgNode(m, i)));
@@ -762,11 +839,12 @@ async function refreshChats() {
     const r = await api("/ts5/chats");
     if (!r.ok || busy) return;
     const there = (await r.json()).chats || [];
-    const was = sig(chat()), n = chats.length;
+    const top = () => chats.slice(0, 5).map((c) => c.id + ":" + sig(c) + ":" + (c.title || "")).join("|");
+    const was = sig(chat()), n = chats.length, home = chat() ? "" : top();
     const mine = chat();
     if (mine && !there.find((x) => x.id === mine.id)) there.push(mine);
     chats = there.sort((a, b) => at(b) - at(a));
-    if (sig(chat()) !== was || chats.length !== n) { draw(); if (!$("listdlg").hidden) drawList(); }
+    if (sig(chat()) !== was || chats.length !== n || (!chat() && top() !== home)) { draw(); if (!$("listdlg").hidden) drawList(); }
   } catch (e) {}
 }
 document.addEventListener("visibilitychange", refreshChats);

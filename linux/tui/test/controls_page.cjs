@@ -220,8 +220,26 @@ async function until(page, fn, arg, ms) {
     check(loaded, "Load: Test-D serves, and the page shows it after the server's restart",
       await page.locator("#status").innerText());
 
-    // The chat page's model menu (the owner may switch): Test-A back.
+    // The chat page opens on its home screen: the owner's latest chats
+    // (ts5-tui's), Controls, and ts5-tui in the browser terminal.
     await page.goto(base + "/");
+    check(await until(page, () => !!document.getElementById("htui") && document.querySelectorAll("#home .recent button").length > 0,
+      null, 20000), "chat page: it opens on its home screen, with the latest chats", await page.locator("#msgs").innerText());
+    const home = await page.locator("#home").innerText();
+    const latest = await page.evaluate(async (k) => {
+      const r = await fetch("/ts5/chats", { headers: { Authorization: "Bearer " + k } });
+      return ((await r.json()).chats || []).map((c) => c.title || "A chat");
+    }, key);
+    const first = await page.locator("#home .recent b").first().innerText();
+    check(/TokenStation5/.test(home) && /New chat/.test(home) && /Controls/.test(home) && /TUI/.test(home) &&
+      latest.includes(first), "the home screen: the logo's name, New chat, Controls, TUI and ts5-tui's chats", [home, latest]);
+    check(await page.locator("#tui").isVisible() && (await page.locator("#tui").getAttribute("href")) === "/ts5/terminal",
+      "a TUI button beside Controls, for the owner: the browser terminal");
+    await page.locator("#home .recent button").first().click();
+    check(await until(page, () => !document.getElementById("home") && document.getElementById("msgs").children.length > 0, null, 5000),
+      "a chat on the home screen opens", await page.locator("#msgs").innerText());
+    await page.click("#new");
+    check(await page.locator("#home").isVisible(), "New: the home screen again, for a new chat");
     check(await page.locator("#settings").count() === 0, "chat page: one Controls button, no Settings beside it");
     await until(page, () => !!document.getElementById("full"), null, 5000);
     await page.waitForTimeout(1500);
