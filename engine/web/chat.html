@@ -49,6 +49,10 @@
   header b { font-size: 16px; }
   @media (max-width: 480px) { header b, header .wide { display: none; } header { gap: 6px; padding: 8px 10px; padding-top: calc(8px + env(safe-area-inset-top)); } }
   #model { color: var(--dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+  /* The model's name as a menu, for a key that may switch it. */
+  #model.pick { cursor: pointer; color: var(--fg); text-decoration: underline dotted; text-underline-offset: 3px; }
+  #swlist button { display: block; width: 100%; text-align: left; margin-bottom: 8px; }
+  #swlist button span { color: var(--dim); font-size: 12px; margin-left: 6px; }
   header button, header a { background: none; border: 1px solid var(--line); color: var(--fg); border-radius: 6px;
     padding: 5px 10px; font: inherit; font-size: 13px; text-decoration: none; white-space: nowrap; cursor: pointer; }
   /* The chats: a drawer from the left. */
@@ -187,6 +191,15 @@
     <p class="note" id="listfoot"></p>
   </div>
 </div>
+<div class="shade" id="swdlg" hidden>
+  <div class="dlg" role="dialog" aria-label="Switch the model">
+    <h1>Switch the model</h1>
+    <p id="swnote">Everyone's chats use the model loaded now. Loading another takes a moment.</p>
+    <div id="swlist"></div>
+    <p class="err" id="swerr" hidden></p>
+    <div class="row"><button type="button" id="swclose">Close</button></div>
+  </div>
+</div>
 <div class="shade" id="setdlg" hidden>
   <div class="dlg">
     <h1>Settings</h1>
@@ -296,8 +309,13 @@ async function account() {
       ? "Signed in as the owner: everything here, the browser terminal too."
       : "Signed in as " + me.name + ". Web search: " + (me.web_search ? "on" : "off") +
         ". Your apps' own tools: " + (me.app_tools ? "on" : "off") + ". Longest reply: " + limit(me.max_reply) +
-        ". Tokens a day: " + limit(me.tokens_day) + ". The owner can read your chats: " + (me.owner_reads ? "yes" : "no") + ".";
+        ". Tokens a day: " + limit(me.tokens_day) + ". The owner can read your chats: " + (me.owner_reads ? "yes" : "no") +
+        ". Your models: " + ((me.models || []).length ? me.models.join(", ") : "any") +
+        ". You may switch the model: " + (me.may_switch ? "yes" : "no") + ". Last day: " + (me.until || "none") + ".";
   }
+  // The model's name opens the menu for a key that may switch it.
+  $("model").classList.toggle("pick", !!me && !!me.may_switch);
+  $("model").title = me && me.may_switch ? "Switch the model" : "";
   $("keptnote").textContent = remote
     ? "Your chats are kept on this TokenStation5 under your user, on every device with your key; the key stays in this browser."
     : "The key and the chats are kept in this browser only.";
@@ -719,6 +737,70 @@ $("input").addEventListener("keydown", (e) => {
 function grow() { const t = $("input"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, innerHeight * 0.4) + "px"; }
 $("input").addEventListener("input", grow);
 $("new").onclick = newChat;
+// ---- switching the model (the owner, and a user who may) ----
+let switching = "";
+async function openSwitch() {
+  if (!me || !me.may_switch) return;
+  $("swerr").hidden = true;
+  $("swlist").innerHTML = '<p class="note">Asking…</p>';
+  $("swdlg").hidden = false;
+  try {
+    const r = await api("/ts5/switch");
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || "no answer");
+    const box = $("swlist");
+    box.innerHTML = "";
+    if (!(j.models || []).length) box.innerHTML = '<p class="note">None of your models is on this TokenStation5.</p>';
+    for (const m of j.models || []) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = m.name;
+      if (m.loaded || m.name === j.loading) {
+        const t = document.createElement("span");
+        t.textContent = m.loaded ? "loaded" : "loading…";
+        b.appendChild(t);
+        b.disabled = true;
+      }
+      b.onclick = () => switchTo(m.name);
+      box.appendChild(b);
+    }
+  } catch (e) {
+    $("swlist").innerHTML = "";
+    $("swerr").textContent = String(e.message || e);
+    $("swerr").hidden = false;
+  }
+}
+async function switchTo(name) {
+  $("swerr").hidden = true;
+  try {
+    const r = await api("/ts5/switch", { method: "POST", body: JSON.stringify({ model: name }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || "no answer");
+  } catch (e) {
+    $("swerr").textContent = String(e.message || e);
+    $("swerr").hidden = false;
+    return;
+  }
+  $("swdlg").hidden = true;
+  switching = name;
+  $("model").textContent = "Loading " + name + "…";
+  // Its server starts again with it: asked until it answers with that one.
+  const until = Date.now() + 300000;
+  while (switching === name && Date.now() < until) {
+    await new Promise((ok) => setTimeout(ok, 2000));
+    try {
+      const r = await fetch("/v1/models", { headers: headers() });
+      const j = await r.json();
+      const m = (j.data || [])[0];
+      if (m && m.id === name) break;
+    } catch (e) {}
+  }
+  switching = "";
+  models();
+}
+$("model").onclick = openSwitch;
+$("swclose").onclick = () => { $("swdlg").hidden = true; };
+$("swdlg").onclick = (e) => { if (e.target === $("swdlg")) $("swdlg").hidden = true; };
 $("list").onclick = () => { drawList(); $("listdlg").hidden = false; };
 $("listnew").onclick = newChat;
 $("listclose").onclick = () => { $("listdlg").hidden = true; };

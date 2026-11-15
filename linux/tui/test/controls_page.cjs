@@ -110,6 +110,22 @@ function check(ok, what, got) {
     check(loaded, "Load: Test-D serves, and the page shows it after the server's restart",
       await page.locator("#status").innerText());
 
+    // The chat page's model menu (the owner may switch): Test-A back.
+    await page.goto(base + "/");
+    await page.waitForFunction(() => document.getElementById("model").classList.contains("pick"), null, { timeout: 30000 })
+      .catch(() => {});
+    check(await page.locator("#model.pick").count() === 1, "chat page: the model's name is a menu for a key that may switch");
+    await page.click("#model");
+    await page.waitForSelector("#swlist button", { timeout: 30000 });
+    const listed = await page.locator("#swlist").innerText();
+    check(/Test-A/.test(listed) && /Test-D\s*loaded/.test(listed), "the menu: the models here, the loaded one marked", listed);
+    await page.locator("#swlist button", { hasText: "Test-A" }).click();
+    const back = await page.waitForFunction(() => {
+      const t = document.getElementById("model").textContent;
+      return t === "Test-A";
+    }, null, { timeout: 240000 }).then(() => true).catch(() => false);
+    check(back, "chosen: Test-A loads, and the page shows it once it serves", await page.locator("#model").innerText());
+
     const wide = await page.evaluate(() => document.scrollingElement.scrollWidth - window.innerWidth);
     check(wide <= 0, "at a phone's width (390 px) nothing runs off the side", wide);
     if (shot) await page.screenshot({ path: shot, fullPage: true });

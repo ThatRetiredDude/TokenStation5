@@ -261,6 +261,40 @@ def main():
                 print(out.rstrip())
                 check(p.returncode == 0, "the page in a browser: every kind of control")
 
+        # ---- a user who may switch the model, to one of theirs ----
+        kid = run("users", "new", "Kid")["made"]
+        kkey = run("keys", "new", "Kid's phone", "--user", kid)["key"]
+        wait(lambda: call(here + "/health")[0] == 200, 120)
+        code, m = call(here + "/v1/models", owner)
+        loaded_now = m["data"][0]["id"] if code == 200 and m.get("data") else ""
+        mine = "Test-A" if loaded_now != "Test-A" else "Test-D"
+        run("users", "set", kid, "models=" + mine)
+        time.sleep(1.2)
+        code, r = call(here + "/ts5/switch", kkey)
+        check(code == 403, "/ts5/switch: a user who may not switch is refused", (code, r))
+        code, r = call(here + "/v1/chat/completions", kkey, {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4})
+        check(code == 403 and mine in json.dumps(r) and "owner can load" in json.dumps(r),
+              "with another model loaded, the user is told which is theirs", (code, r))
+        run("users", "set", kid, "may_switch=on")
+        time.sleep(1.2)
+        code, r = call(here + "/ts5/switch", kkey)
+        check(code == 200 and [m["name"] for m in r.get("models", [])] == [mine],
+              "/ts5/switch: only the user's own models are offered", r)
+        code, r = call(here + "/v1/chat/completions", kkey, {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4})
+        check(code == 403 and "model menu" in json.dumps(r), "a user who may switch is told to use the model menu", (code, r))
+        code, r = call(here + "/ts5/switch", kkey, {"model": loaded_now})
+        check(code == 400, "/ts5/switch: a model not theirs is refused", (code, r))
+        code, r = call(here + "/ts5/switch", kkey, {"model": mine}, timeout=30)
+        check(code in (200, 0), "/ts5/switch: the user loads theirs (no question: the owner listed it)", (code, r))
+        st = wait(lambda: (lambda s: s if s["server"]["online"] and s["server"]["model"] == mine else None)(
+            sock_ask(sockp, {"do": "state"})), 240, 1)
+        check(st is not None, "it serves, through the owner's ts5-tui", sock_ask(sockp, {"do": "state"}).get("server"))
+        here_ok = wait(lambda: call(here + "/health")[0] == 200, 60)
+        code, r = call(here + "/v1/chat/completions", kkey, {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4})
+        check(code == 200, "and the user's chat goes through", (code, r))
+        lp = os.path.join(home, ".cache", "tokenstation", "tui-serve.log")
+        logs.append(open(lp, errors="replace").read())
+
         # ---- unload, through the controls (the server goes with it) ----
         try:
             call(here + "/ts5/control", owner, {"do": "unload"}, timeout=15)

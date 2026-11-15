@@ -665,6 +665,13 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
         n.n = (double)g.tokens_day;
         n.s = std::to_string(g.tokens_day);
         j.set("tokens_day", n);
+        Json ms;
+        ms.type = Json::ARR;
+        for (const std::string &m : g.models) ms.a.push_back(Json::string(m));
+        j.set("models", ms);
+        b.b = g.owner || g.may_switch;
+        j.set("may_switch", b);
+        j.set("until", Json::string(g.until));
         send_file(fd, 200, "application/json", j.dump(), false);
         return true;
     }
@@ -901,6 +908,32 @@ bool start_tui(std::string &why) {
     return true;
 }
 
+// One request to the running ts5-tui (a JSON line) and its answer; with
+// none running, one is started for it (not by the service). False with why.
+bool control_call(const std::string &line, std::string &out, std::string &why) {
+    for (const std::string &path : control_sockets())
+        if (control_ask(path, line, out)) return true;
+    if (as_service()) {
+        why = "ts5-tui isn't running on the machine: start it there (it can stay open in its tmux session), then "
+              "the controls reach it.";
+        return false;
+    }
+    if (!start_tui(why)) {
+        why = "ts5-tui couldn't be started: " + why + ".";
+        return false;
+    }
+    const std::string own = control_sockets()[0];
+    for (int i = 0; i < 50; i++) {
+        usleep(200000);
+        if (control_ask(own, line, out)) {
+            log_line("ts5: controls: started ts5-tui for them (tmux session \"ts5\")");
+            return true;
+        }
+    }
+    why = "ts5-tui was started but doesn't answer yet: try again in a moment.";
+    return false;
+}
+
 // /ts5/control: POST {"do": ...} (GET: {"do": "state"}), the owner's key
 // only (always a key, on this machine too), from this machine or the tailnet: handed to ts5-tui, its answer
 // handed back. ts5-tui not running: started for it, unless this is the
@@ -948,32 +981,84 @@ void control(const WebOptions &o, const Server::Page &p, int fd) {
         std::string on = req["model"].str(req["label"].str(req["mode"].str(req["key"].str())));
         log_line("ts5: controls: %s: %s%s%s", p.client.c_str(), what.c_str(), on.empty() ? "" : " ", on.c_str());
     }
-    const std::string line = req.dump();
-    std::string out;
-    for (const std::string &path : control_sockets())
-        if (control_ask(path, line, out)) {
-            send_file(fd, 200, "application/json", out, false);
+    std::string out, why;
+    if (control_call(req.dump(), out, why)) send_file(fd, 200, "application/json", out, false);
+    else send_error(fd, 503, why);
+}
+
+// The owner and a user who may switch (Server::Grant::may_switch): which
+// of its models are here, and the one loaded.
+//   GET /ts5/switch                 {"models": [{"name", "loaded"}], "loading"}
+//   POST /ts5/switch {"model": M}   ts5-tui loads M (it asks nothing: a
+//                                   model it would ask the owner about is
+//                                   refused); then as GET.
+// Through the owner's ts5-tui, as the controls.
+void switch_model(const WebOptions &o, const Server::Page &p, int fd) {
+    if (!o.admit) {
+        send_error(fd, 404, "this server keeps no users");
+        return;
+    }
+    Server::Grant g;
+    if (!o.admit(p.key, p.client, g) || g.key.empty()) {
+        send_error(fd, 401, p.key.empty() ? "This needs your key." : "That API key isn't one of this machine's, or it is off.");
+        return;
+    }
+    if (!g.owner && !g.may_switch) {
+        send_error(fd, 403, "Only the owner switches the model here: " + g.user_name + " may not.");
+        return;
+    }
+    if (p.method != "GET" && p.method != "POST") {
+        send_error(fd, 405, "GET or POST");
+        return;
+    }
+    std::string out, why;
+    Json st;
+    if (!control_call("{\"do\":\"state\"}", out, why) || !Json::parse(out, st)) {
+        send_error(fd, 503, why.empty() ? "ts5-tui's answer wasn't one" : why);
+        return;
+    }
+    if (p.method == "POST") {
+        Json req;
+        const std::string want = Json::parse(p.body, req) ? req["model"].str() : "";
+        bool here = false;
+        for (const Json &m : st["models"].a) here |= m["name"].str() == want;
+        if (want.empty() || !here || !model_allowed(g.models, want)) {
+            send_error(fd, 400, want.empty() ? "which model? {\"model\": NAME}"
+                                             : want + " isn't one of the models " + (g.owner ? "here" : g.user_name + " may use here"));
             return;
         }
-    std::string why;
-    if (as_service()) {
-        why = "ts5-tui isn't running on the machine: start it there (it can stay open in its tmux session), then "
-              "the controls reach it.";
-    } else if (start_tui(why)) {
-        const std::string own = control_sockets()[0];
-        for (int i = 0; i < 50; i++) {
-            usleep(200000);
-            if (control_ask(own, line, out)) {
-                log_line("ts5: controls: started ts5-tui for them (tmux session \"ts5\")");
-                send_file(fd, 200, "application/json", out, false);
-                return;
-            }
+        Json ask = Json::object();
+        ask.set("do", Json::string("load"));
+        ask.set("model", Json::string(want));
+        ask.set("quiet", Json::string("1"));
+        ask.set("by", Json::string(g.owner ? "" : g.user_name));
+        // On the user's own list (or the owner's pick): chosen by the owner.
+        if (g.owner || !g.models.empty()) ask.set("listed", Json::string("1"));
+        if (!control_call(ask.dump(), out, why) || !Json::parse(out, st)) {
+            send_error(fd, 503, why.empty() ? "ts5-tui's answer wasn't one" : why);
+            return;
         }
-        why = "ts5-tui was started but doesn't answer yet: try again in a moment.";
-    } else {
-        why = "ts5-tui couldn't be started: " + why + ".";
+        if (st["error"].type == Json::STR) {
+            send_error(fd, 409, st["error"].str());
+            return;
+        }
+        log_line("ts5: switch: %s: %s loads %s", p.client.c_str(), g.owner ? "the owner" : g.user_name.c_str(), want.c_str());
     }
-    send_error(fd, 503, why);
+    Json list = Json::object(), arr;
+    arr.type = Json::ARR;
+    for (const Json &m : st["models"].a) {
+        if (!model_allowed(g.models, m["name"].str())) continue;
+        Json x = Json::object();
+        x.set("name", Json::string(m["name"].str()));
+        Json b;
+        b.type = Json::BOOL;
+        b.b = m["loaded"].boolean(false);
+        x.set("loaded", b);
+        arr.a.push_back(x);
+    }
+    list.set("models", arr);
+    list.set("loading", Json::string(st["loading"]["model"].str()));
+    send_file(fd, 200, "application/json", list.dump(), false);
 }
 
 }  // namespace
@@ -1009,6 +1094,10 @@ void attach_web(Server &s, const WebOptions &o) {
         if (me_and_chats(o, p, fd)) return true;
         if (p.path == "/ts5/control") {
             control(o, p, fd);
+            return true;
+        }
+        if (p.path == "/ts5/switch") {
+            switch_model(o, p, fd);
             return true;
         }
         const bool web = p.path == "/" || p.path == "/chat" || p.path.rfind("/ts5/web/", 0) == 0 ||

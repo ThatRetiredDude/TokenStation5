@@ -203,6 +203,9 @@ struct App {
         bool owner = false, on = true, web_search = false, app_tools = true, owner_reads = false;
         int64_t tokens_day = 0, max_reply = 0, today = 0;
         int keys = 0;
+        std::vector<std::string> models;  // none: any
+        bool may_switch = false, ended = false;
+        std::string until;  // its last day, "" none
     };
     std::vector<AccessUser> acc_users;
     std::vector<std::pair<int, int>> acc_list;
@@ -790,6 +793,10 @@ void access_read() {
         au.max_reply = (int64_t)u["max_reply"].num(0);
         au.today = (int64_t)u["today"].num(0);
         au.keys = (int)u["keys"].a.size();
+        for (const ts5::Json &m : u["models"].a) au.models.push_back(m.str());
+        au.may_switch = u["may_switch"].boolean(false);
+        au.until = u["until"].str();
+        au.ended = u["ended"].boolean(false);
         // The TV app's keys are its own: no users there.
         if (k == ACC_TV && !au.owner) continue;
         g->acc_list.push_back({(int)g->acc_users.size(), -1});
@@ -832,6 +839,14 @@ std::string grouped(int64_t n) {
     return out;
 }
 // What a user may do, in a few words.
+// A user's models in a row: the first two, and how many more.
+std::string models_text(const std::vector<std::string> &m) {
+    std::string out;
+    for (size_t i = 0; i < m.size() && i < 2; i++) out += (i ? ", " : "") + m[i];
+    if (m.size() > 2) out += fmt(" and %zu more", m.size() - 2);
+    return out;
+}
+
 std::string acc_user_summary(const App::AccessUser &u) {
     if (u.owner) return "you: everything, ts5-tui and the browser terminal too";
     std::string out = u.web_search ? "chat + web search" : "chat only";
@@ -840,6 +855,9 @@ std::string acc_user_summary(const App::AccessUser &u) {
     else if (u.today > 0) out += " · " + grouped(u.today) + " tokens today";
     if (u.max_reply > 0) out += " · replies up to " + grouped(u.max_reply);
     if (u.owner_reads) out += " · you may read its chats";
+    if (!u.models.empty()) out += fmt(" · %zu %s", u.models.size(), u.models.size() == 1 ? "model" : "models");
+    if (u.may_switch) out += " · may switch the model";
+    if (!u.until.empty() && !u.ended) out += " · until " + u.until;
     return out;
 }
 
@@ -3652,8 +3670,10 @@ void draw_access() {
             s.put(x0 + 2, y, fit(u.name, user_w - 1), Style(u.on ? t.accent : t.dim, row.bg, BOLD));
             std::string what = acc_user_summary(u);
             if (!u.on) what = "paused · " + what;
+            else if (u.ended) what = "ended " + u.until + " · " + what;
             what += fmt(" · %d %s", u.keys, u.keys == 1 ? "key" : "keys");
-            s.put(x0 + 2 + user_w, y, fit(what, w - user_w - 4), Style(u.on ? t.fg : t.warn, row.bg, u.on ? 0 : ITALIC));
+            const bool in = u.on && !u.ended;
+            s.put(x0 + 2 + user_w, y, fit(what, w - user_w - 4), Style(in ? t.fg : t.warn, row.bg, in ? 0 : ITALIC));
             continue;
         }
         const App::AccessKey &key = g->acc_keys[(size_t)ki];
@@ -3707,8 +3727,10 @@ void draw_access() {
 
 // ---- Access: one user's permissions ----
 
-constexpr int kEdRows = 9;  // preset, web search, app tools, owner reads, tokens a day, longest reply, paused, share, a key
-constexpr int kEdShare = 7;
+// preset, web search, app tools, models, may switch, owner reads, tokens a
+// day, longest reply, last day, paused, share, a key
+constexpr int kEdRows = 12;
+constexpr int kEdModels = 3, kEdSwitch = 4, kEdReads = 5, kEdTokens = 6, kEdReply = 7, kEdUntil = 8, kEdPaused = 9, kEdShare = 10;
 const int64_t kTokensDay[] = {0, 10000, 25000, 50000, 100000, 250000, 1000000};
 const int64_t kMaxReply[] = {0, 500, 1000, 2000, 4000, 8000};
 
@@ -3735,6 +3757,13 @@ void draw_access_user() {
         {"Web search", u.web_search ? "on" : "off", "ts5's own web search when a chat needs it", false},
         {"Apps' own tools", u.app_tools ? "on" : "off",
          "an editor's tools (files, commands), which the editor runs on " + u.name + "'s own machine", false},
+        {"Models", u.models.empty() ? "all" : models_text(u.models),
+         u.models.empty() ? "any model loaded; Enter picks some" : "other models loaded: " + u.name + " is told which are theirs",
+         false},
+        {"May switch model", u.may_switch ? "yes" : "no",
+         u.may_switch ? u.name + " loads one of their models from the chat page (everyone's chats then use it)"
+                      : "no: " + u.name + " uses the model you load",
+         false},
         {"You read the chats", u.owner_reads ? "yes" : "no",
          u.owner_reads ? "under Chats on your chat page. " + u.name + " sees this in Settings there"
                        : "no: " + u.name + "'s chats are " + u.name + "'s alone (shown in Settings on the chat page)",
@@ -3742,6 +3771,11 @@ void draw_access_user() {
         {"Tokens a day", limit(u.tokens_day, "tokens"),
          grouped(u.today) + " today (prompts read and replies); over it, apps are told to wait until tomorrow", false},
         {"Longest reply", limit(u.max_reply, "tokens"), "whatever the app asks for", false},
+        {"Last day", u.until.empty() ? "none" : u.until,
+         u.until.empty() ? "no end; ←→ sets one, a week at a time"
+         : u.ended       ? "ended: none of " + u.name + "'s keys gets in (the chats stay)"
+                         : "after it none of " + u.name + "'s keys gets in (the chats stay)",
+         u.ended},
         {"Paused", u.on ? "no" : "yes",
          u.on ? "paused, none of " + u.name + "'s keys gets in; the chats stay" : "none of " + u.name + "'s keys gets in now",
          !u.on},
@@ -3754,7 +3788,10 @@ void draw_access_user() {
          g->acc_share_way == 1},
         {"A key for " + u.name, "Enter", "a new key, as QR codes: the phone opens the chat page signed in", false},
     };
-    for (int i = 0; i < kEdRows && y < s.h - 4; i++) {
+    // Rows of two lines; on a short screen they scroll to the one chosen.
+    const int fit_rows = std::max(1, (s.h - 5 - y) / 2);
+    const int first = std::max(0, std::min(g->acc_edit_sel - fit_rows + 1, kEdRows - fit_rows));
+    for (int i = first; i < kEdRows && y < s.h - 4; i++) {
         const bool on = g->acc_edit_sel == i && !g->acc_typing;
         const Style row = on ? Style(t.fg, t.panel2) : Style(t.fg, t.bg);
         s.fill(x0, y, w, 2, row);
@@ -5507,6 +5544,70 @@ bool access_do_users(const std::string &args, const std::string &done) {
     return ok;
 }
 
+// A user's last day moved by days (from none: today, then days on); one
+// at or before today going back is none again.
+std::string step_day(const std::string &until, int days) {
+    const time_t now = time(nullptr);
+    time_t at = now;
+    if (!until.empty()) {
+        struct tm tm {};
+        if (sscanf(until.c_str(), "%d-%d-%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday) == 3) {
+            tm.tm_year -= 1900;
+            tm.tm_mon -= 1;
+            tm.tm_hour = 12;
+            tm.tm_isdst = -1;
+            at = mktime(&tm);
+        }
+    }
+    if (until.empty() && days < 0) return "none";
+    at += (time_t)days * 86400;
+    if (days < 0 && at < now) return "none";
+    struct tm tm {};
+    localtime_r(&at, &tm);
+    char b[16];
+    strftime(b, sizeof b, "%Y-%m-%d", &tm);
+    return b;
+}
+
+// Which models a user may use: a pick of the models here, Enter on one
+// adds or takes it away (the pick comes back), All lets any in.
+void pick_user_models(const std::string &id, int sel) {
+    const App::AccessUser *u = acc_user(id);
+    if (!u) return;
+    scan_models();
+    std::vector<std::string> names;
+    for (const ModelFile &m : g->models)
+        if (std::find(names.begin(), names.end(), api_id(m.name)) == names.end()) names.push_back(api_id(m.name));
+    for (const std::string &m : u->models)  // one not here (any more) can still be taken away
+        if (std::find(names.begin(), names.end(), m) == names.end()) names.push_back(m);
+    const std::vector<std::string> now = u->models;
+    const std::string who = u->name;
+    g->ask_title = " Models " + who + " may use ";
+    g->ask_text = "Enter on a model adds it or takes it away. With another model loaded, " + who +
+                  " is told which are theirs" + (u->may_switch ? " and may load one." : ".");
+    g->pick.clear();
+    g->pick.push_back({std::string(now.empty() ? "✓ " : "  ") + "All models", "any model, those downloaded later too", [id] {
+                           access_do_users("set " + shell_quote(id) + " models=*", "");
+                           pick_user_models(id, 0);
+                       }});
+    for (size_t i = 0; i < names.size(); i++) {
+        const std::string n = names[i];
+        const bool in = std::find(now.begin(), now.end(), n) != now.end();
+        g->pick.push_back({(in ? "✓ " : "  ") + n, in ? "theirs: Enter takes it away" : "", [id, n, now, in, i] {
+                               std::vector<std::string> next = now;
+                               if (in) next.erase(std::find(next.begin(), next.end(), n));
+                               else next.push_back(n);
+                               std::string list;
+                               for (const std::string &m : next) list += (list.empty() ? "" : ",") + m;
+                               access_do_users("set " + shell_quote(id) + " " + shell_quote("models=" + (list.empty() ? "*" : list)),
+                                               next.empty() ? "None left: any model again" : "");
+                               pick_user_models(id, (int)i + 1);
+                           }});
+    }
+    g->pick.push_back({"Done", "", nullptr});
+    g->pick_sel = std::min(sel, (int)g->pick.size() - 1);
+}
+
 // The next value of a list's (dir +1 or -1), from the one now.
 int64_t step_in(const int64_t *list, size_t n, int64_t now, int dir) {
     size_t at = 0;
@@ -5598,14 +5699,17 @@ void key_access_user(const Event &e) {
     else if (g->acc_edit_sel == 0) access_do_users("set " + id + (u.web_search ? " preset=chat" : " preset=chat-web"), "");
     else if (g->acc_edit_sel == 1) access_do_users("set " + id + (u.web_search ? " web_search=off" : " web_search=on"), "");
     else if (g->acc_edit_sel == 2) access_do_users("set " + id + (u.app_tools ? " app_tools=off" : " app_tools=on"), "");
-    else if (g->acc_edit_sel == 3)
+    else if (g->acc_edit_sel == kEdModels) pick_user_models(u.id, 0);
+    else if (g->acc_edit_sel == kEdSwitch) access_do_users("set " + id + (u.may_switch ? " may_switch=off" : " may_switch=on"), "");
+    else if (g->acc_edit_sel == kEdReads)
         access_do_users("set " + id + (u.owner_reads ? " owner_reads=off" : " owner_reads=on"),
                         u.owner_reads ? u.name + "'s chats: " + u.name + "'s alone" : "You may read " + u.name + "'s chats (" + u.name + " sees so in Settings)");
-    else if (g->acc_edit_sel == 4)
+    else if (g->acc_edit_sel == kEdTokens)
         access_do_users("set " + id + " tokens_day=" + std::to_string(step_in(kTokensDay, 7, u.tokens_day, dir)), "");
-    else if (g->acc_edit_sel == 5)
+    else if (g->acc_edit_sel == kEdReply)
         access_do_users("set " + id + " max_reply=" + std::to_string(step_in(kMaxReply, 6, u.max_reply, dir)), "");
-    else if (g->acc_edit_sel == 6) access_do_users("set " + id + (u.on ? " on=off" : " on=on"), "");
+    else if (g->acc_edit_sel == kEdUntil) access_do_users("set " + id + " until=" + step_day(u.until, e.key == K_LEFT ? -7 : 7), "");
+    else if (g->acc_edit_sel == kEdPaused) access_do_users("set " + id + (u.on ? " on=off" : " on=on"), "");
     else if (g->acc_edit_sel == kEdShare && e.key != K_ENTER) g->acc_share_way = 1 - g->acc_share_way;
     else if (g->acc_edit_sel == kEdShare) share_invite(u, "");
     else if (e.key == K_ENTER) {
@@ -6663,7 +6767,24 @@ std::string control_answer(const std::string &text) {
             if (api_id(x.name) == name) m = &x;
         if (!m) return refuse("no model called " + name + " here");
         const ModelFile copy = *m;
-        if (what == "load") load_or_ask(copy);
+        // quiet (a user's switch, /ts5/switch): ts5-tui asks nobody; a
+        // model it would ask the owner about is refused, and a question
+        // the owner hasn't answered yet stays theirs.
+        const bool quiet = !req["quiet"].str().empty();
+        const bool asking = g->ask_yes || !g->pick.empty();
+        if (what == "load" && quiet && asking) return refuse("ts5-tui is waiting for the owner's answer to something else");
+        // listed: the owner chose this model for the one switching (on the
+        // user's list, or the owner's own pick): no "helper-size?" question.
+        if (what == "load" && quiet && !req["listed"].str().empty()) load_model(copy);
+        else if (what == "load") load_or_ask(copy);
+        if (what == "load" && quiet && (g->ask_yes || !g->pick.empty())) {
+            const std::string q = g->ask_title;
+            g->ask_yes = nullptr;
+            g->pick.clear();
+            return refuse("ts5-tui asks the owner first about that one (" + q + ")");
+        }
+        if (what == "load" && !req["by"].str().empty() && g->load_target == name)
+            show_toast(req["by"].str() + " switched the model to " + name, g->th->accent, 8);
         else if (what == "delete") delete_model(copy);
         else if (helper_of(copy).empty() || helper_of(copy) == "none") show_toast("This model has no helper to get", g->th->dim, 3);
         else if (copy.helper_here) show_toast("Its helper is already here", g->th->dim, 3);

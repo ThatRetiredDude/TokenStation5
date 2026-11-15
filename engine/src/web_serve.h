@@ -35,6 +35,10 @@ namespace ts5 {
 //                      this machine), this machine and the tailnet only. ts5-tui not running:
 //                      started in its tmux session (not by the service,
 //                      which can't start the owner's: 503 says so).
+//   /ts5/switch        GET: the models here the key's user may use, and
+//                      the one loaded; POST {"model": M}: the owner's
+//                      ts5-tui loads it. The owner, and a user who may
+//                      switch (AccessUser::may_switch), only.
 //   /ts5/users         GET, the owner's key only: the users whose chats the
 //                      owner may read (each chose so when made, and sees it);
 //                      /ts5/users/ID/chats: that user's chats, to read.

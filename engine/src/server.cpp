@@ -551,6 +551,34 @@ void handle(int fd, Server::State &state, Usage &u) {
             done();
             return;
         }
+        // A user held to some models (Grant::models), with another loaded:
+        // told which are theirs, and how to get one.
+        if (!grant.models.empty()) {
+            std::string loaded;
+            {
+                std::lock_guard<std::mutex> g(state.stats);
+                loaded = state.model;
+            }
+            if (!loaded.empty() && !model_allowed(grant.models, loaded)) {
+                std::string list;
+                for (const std::string &m : grant.models) list += (list.empty() ? "" : ", ") + m;
+                std::string shown = loaded;
+                if (shown.size() > 5 && shown.compare(shown.size() - 5, 5, ".gguf") == 0) shown.resize(shown.size() - 5);
+                const std::string why = grant.user_name + "'s models are " + list + "; this TokenStation5 has " + shown +
+                                        " loaded now. " +
+                                        (grant.may_switch ? "Switch to one of yours in the chat page's model menu."
+                                                          : "The owner can load one of yours.");
+                log_line("ts5: %s %s: %s isn't one of theirs, refused", u.rec.client.c_str(), grant.user_name.c_str(),
+                         shown.c_str());
+                send_all(fd, response(403, error_body(why, "model_not_allowed")));
+                u.rec.model = loaded;
+                u.rec.status = 403;
+                u.rec.finish = "refused";
+                u.rec.why = "model";
+                done();
+                return;
+            }
+        }
         Json req;
         if (!Json::parse(r.body, req)) {
             send_all(fd, response(400, error_body("invalid JSON")));

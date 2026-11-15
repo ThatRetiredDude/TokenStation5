@@ -311,10 +311,61 @@ def test_server(ts5, model, backend, d):
         code, r = call(there + "/v1/chat/completions", akey, body)
         check(code == 200, "another user's day is its own", (code, r))
 
+        # Models, a last day, a switched-off key (1.2.0).
+        body["max_tokens"] = 4
+        code, m = call(there + "/v1/models", owner)
+        loaded = m["data"][0]["id"]
+        run(ts5, path, "users", "set", ann, "models=Some-Other-Model")
+        time.sleep(1.2)
+        code, r = call(there + "/v1/chat/completions", akey, body)
+        check(code == 403 and "Some-Other-Model" in json.dumps(r) and r.get("error", {}).get("code") == "model_not_allowed"
+              and "owner can load" in json.dumps(r),
+              "models: a user held to other models is refused (403), told which are theirs", (code, r))
+        run(ts5, path, "users", "set", ann, "models=Other, " + loaded.upper() + ".gguf")
+        time.sleep(1.2)
+        code, r = call(there + "/v1/chat/completions", akey, body)
+        check(code == 200, "models: the loaded one among them (any case, with .gguf): let in", (code, r))
+        code, me = call(there + "/ts5/me", akey)
+        check(me.get("models") == ["Other", loaded.upper() + ".gguf"] and me.get("may_switch") is False and me.get("until") == "",
+              "/ts5/me: the user's models, no switching, no last day", me)
+        code, me = call(there + "/ts5/me", owner)
+        check(me.get("models") == [] and me.get("may_switch") is True, "/ts5/me: the owner, any model, may switch", me)
+        code, r = call(there + "/ts5/switch", akey)
+        check(code == 403, "/ts5/switch: a user who may not switch is refused", (code, r))
+        run(ts5, path, "users", "set", ann, "models=*", "may_switch=on", "until=2000-01-01")
+        time.sleep(1.2)
+        check(call(there + "/v1/models", akey)[0] == 401, "a user past its last day is refused")
+        run(ts5, path, "users", "set", ann, "until=2999-12-31")
+        time.sleep(1.2)
+        code, me = call(there + "/ts5/me", akey)
+        check(code == 200 and me.get("until") == "2999-12-31" and me.get("may_switch") is True,
+              "a last day to come: back in, and /ts5/me says so", me)
+        code, out, _ = run(ts5, path, "users", "set", ann, "until=2026-02-30")
+        check(code == 1 and "YYYY-MM-DD" in json.dumps(out), "a last day that isn't a day is refused", out)
+        run(ts5, path, "users", "set", ann, "until=none")
+        _, out, _ = run(ts5, path, "users", "list")
+        a = {u["name"]: u for u in out["users"]}.get("Ann", {})
+        check(a.get("until") == "" and a.get("may_switch") is True and a.get("models") == [] and a.get("ended") is False,
+              "users list: models, may_switch, until, ended", a)
+        _, kk, _ = run(ts5, path, "keys", "new", "Ann's old phone", "--user", ann)
+        run(ts5, path, "keys", "off", "Ann's old phone")
+        time.sleep(1.2)
+        check(call(there + "/v1/models", kk["key"])[0] == 401, "a switched-off key is refused")
+        call(there + "/v1/models", kk["key"])  # again within the minute: no second line
+        log.flush()
+        text = open(log_path, errors="replace").read()
+        lines = [l for l in text.splitlines() if "ts5: access:" in l]
+        check(sum("Ann's old phone is switched off: refused" in l for l in lines) == 1 and lan in "".join(lines),
+              "the log: a switched-off key, once a minute at most, with where it came from", lines)
+        check(any("is Ann's, whose last day was 2000-01-01: refused" in l for l in lines), "the log: a user past its last day", lines)
+        check(any("isn't one of theirs, refused" in l for l in text.splitlines()), "the log: a model not the user's")
+
         # Paused, removed.
         run(ts5, path, "users", "set", sam, "on=off")
         time.sleep(1.2)
         check(call(there + "/v1/models", skey)[0] == 401, "a paused user's keys get 401 from the next request")
+        log.flush()
+        check("is Sam's, who is paused: refused" in open(log_path, errors="replace").read(), "the log: a paused user's key")
         run(ts5, path, "users", "set", sam, "on=on", "tokens_day=0")
         time.sleep(1.2)
         check(call(there + "/v1/models", skey)[0] == 200, "on again: back in")
