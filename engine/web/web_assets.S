@@ -16,6 +16,10 @@ FILE(ts5_web_addon_fit_license, "LICENSE-addon-fit")
 // 192x192 (Pillow, LANCZOS). A brand asset, not licensed (LICENSING.md).
 FILE(ts5_web_icon_png, "icon.png")
 FILE(ts5_web_keep_js, "keep.js")
+// The chat page as a Home Screen app: its service worker (notifications only)
+// and its manifest.
+FILE(ts5_web_sw_js, "sw.js")
+FILE(ts5_web_manifest, "manifest.webmanifest")
 // The launch images a phone shows while a home-screen icon opens (make_splash.py).
 FILE(ts5_web_splash_1320x2868, "splash-1320x2868.jpg")
 FILE(ts5_web_splash_1206x2622, "splash-1206x2622.jpg")

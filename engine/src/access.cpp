@@ -751,6 +751,7 @@ bool KeyFile::remove_user(const std::string &which, bool forget, std::string &er
             closedir(d);
         }
         rmdir(dir.c_str());
+        unlink((user_dir(gone.id) + "/push.json").c_str());  // its devices' notifications
         rmdir(user_dir(gone.id).c_str());
     }
     return true;

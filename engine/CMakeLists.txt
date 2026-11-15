@@ -86,14 +86,15 @@ if(TS5_HTTPS)
   target_compile_options(ts5tunnel PRIVATE -w)  # vendored, unchanged
   target_include_directories(ts5tunnel PUBLIC src/tailnet ${TS5_THIRD}/lwip/src/include ${TS5_THIRD}/wireguard-lwip/src)
   target_sources(ts5 PRIVATE src/tailnet_serve.cpp src/tailnet/wg.cpp src/tailnet/tailscale.cpp
-    src/tailnet/noise.cpp src/tailnet/h2.cpp src/tailnet/nacl.cpp src/acme.cpp src/https_front.cpp)
+    src/tailnet/noise.cpp src/tailnet/h2.cpp src/tailnet/nacl.cpp src/acme.cpp src/https_front.cpp
+    src/webpush.cpp)
   target_compile_definitions(ts5 PRIVATE TS5_TAILNET=1 TS5_LOG_NAME="ts5")
   target_link_libraries(ts5 PRIVATE ts5tunnel resolv)  # resolv: the DNS check before a certificate (acme.cpp)
 
   # The pages ts5 serve shows a browser (web_serve.h): the chat page, the
   # browser terminal, and xterm.js (third_party/xterm, MIT), built in.
   enable_language(ASM)
-  file(GLOB TS5_WEB_FILES ${CMAKE_CURRENT_SOURCE_DIR}/web/*.html ${CMAKE_CURRENT_SOURCE_DIR}/web/*.png ${CMAKE_CURRENT_SOURCE_DIR}/web/*.jpg ${CMAKE_CURRENT_SOURCE_DIR}/web/*.js ${TS5_THIRD}/xterm/*)
+  file(GLOB TS5_WEB_FILES ${CMAKE_CURRENT_SOURCE_DIR}/web/*.html ${CMAKE_CURRENT_SOURCE_DIR}/web/*.png ${CMAKE_CURRENT_SOURCE_DIR}/web/*.jpg ${CMAKE_CURRENT_SOURCE_DIR}/web/*.js ${CMAKE_CURRENT_SOURCE_DIR}/web/*.webmanifest ${TS5_THIRD}/xterm/*)
   set_source_files_properties(web/web_assets.S PROPERTIES
     COMPILE_OPTIONS "-Wa,-I${CMAKE_CURRENT_SOURCE_DIR}/web;-Wa,-I${TS5_THIRD}/xterm"
     OBJECT_DEPENDS "${TS5_WEB_FILES}")

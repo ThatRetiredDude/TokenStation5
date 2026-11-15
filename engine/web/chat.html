@@ -31,6 +31,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="TokenStation5">
+<!-- The Home Screen app's manifest (standalone, for notifications); no icons in
+     it: the one above, in the page, is the icon. -->
+<link rel="manifest" href="/manifest.webmanifest">
 <style>
   :root { --bg: #ffffff; --panel: #f6f8fa; --line: #d0d7de; --fg: #1f2328; --dim: #656d76; --accent: #0969da;
     --you: #ddf4ff; --bad: #cf222e; --code: #f6f8fa; }
@@ -207,6 +210,11 @@
     <label><input type="checkbox" id="showthink"> Show its thinking</label>
     <label>The key in this page's link <select id="keep"><option value="passwords">no (a home-screen icon gets it anyway)</option><option value="link">yes, too (for a browser whose icons don't)</option></select></label>
     <div class="row" style="justify-content:flex-start;margin-bottom:12px"><button type="button" id="savepw">Save the key to my passwords</button></div>
+    <div id="notif" hidden>
+      <p class="lbl">Notifications</p>
+      <p id="notifnote"></p>
+      <div class="row" style="justify-content:flex-start;margin-bottom:12px"><button type="button" class="go" id="notifon">Turn on</button><button type="button" id="notifoff" hidden>Turn off</button></div>
+    </div>
     <p id="acct" hidden></p>
     <p><span id="keptnote">The key and the chats are kept in this browser only.</span> The key is also in a cookie of this address, which only this TokenStation5 gets, for a home-screen icon added from here (nothing after # in a link is ever sent anywhere).<span id="fullnote"> <a href="/ts5/controls">Controls</a> sets what ts5-tui sets (models, the fan, settings) from here, with this key; <a href="/ts5/terminal">the browser terminal</a> opens ts5-tui itself when it is on (Access page, F6).</span></p>
     <div class="row"><button type="button" id="forget">Forget the key</button><button type="button" id="clear">Delete all chats</button><button class="go" type="button" id="setdone">Done</button></div>
@@ -218,6 +226,9 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 const store = TS5Keep.store;
+// A notification's tap opens the app at its chat (/#chat=ID): read before
+// keep.js puts the address as it wants it.
+let openAtStart = (/(?:^#|&)chat=([\w-]+)/.exec(location.hash) || [])[1] || "";
 // The key: from the page's address (a QR code of ts5-tui's), else the one
 // this browser kept (keep.js). The key form is a sign-in form the device's
 // passwords can keep a typed key from and fill in again.
@@ -299,6 +310,8 @@ async function account() {
   }
   if (!remote) chats = me && !me.owner ? [] : localChats();
   decided = true;
+  if (openAtStart && chats.find((c) => c.id === openAtStart)) cur = openAtStart;
+  openAtStart = "";
   if (!chats.find((c) => c.id === cur)) cur = chats.length ? chats[0].id : null;
   $("full").hidden = !!me && !me.owner;
   $("fullnote").hidden = !!me && !me.owner;
@@ -320,6 +333,7 @@ async function account() {
     ? "Your chats are kept on this TokenStation5 under your user, on every device with your key; the key stays in this browser."
     : "The key and the chats are kept in this browser only.";
   draw();
+  notifSync();
 }
 function chat() { return chats.find((c) => c.id === cur); }
 function key() { return store.get("ts5.key", ""); }
@@ -625,6 +639,7 @@ async function models() {
 }
 
 async function send(text) {
+  let kept = false;  // the machine's copy was taken (recover): nothing to send back
   let c = chat();
   if (!c) {
     c = { id: Date.now().toString(36), title: "", messages: [] };
@@ -649,8 +664,11 @@ async function send(text) {
     const history = c.messages.slice(0, -1).filter((m) => !m.error || m.content).map((m) => ({ role: m.role, content: m.content }));
     const r = await fetch("/v1/chat/completions", {
       method: "POST", headers: headers(), signal: busy.signal,
+      // ts5_chat: the chat on the machine, where it keeps the answer if this
+      // page goes away before it ends (a phone's app sent to the background).
       body: JSON.stringify({ model: model || "ts5", messages: history, stream: true,
-        stream_options: { include_usage: true }, chat_template_kwargs: { enable_thinking: prefs.think } }),
+        stream_options: { include_usage: true }, chat_template_kwargs: { enable_thinking: prefs.think },
+        ts5_chat: remote ? c.id : undefined }),
     });
     if (r.status === 401) { a.error = "This needs an API key."; askKey(); throw null; }
     if (r.status === 429) {
@@ -691,6 +709,7 @@ async function send(text) {
     else a.stats = ((performance.now() - t0) / 1000).toFixed(1) + " s";
   } catch (e) {
     if (e && e.name === "AbortError") a.stats = "stopped";
+    else if (e && !a.error && remote && (await recover(c, a))) kept = true;
     else if (e) a.error = a.error || "TokenStation5 stopped answering.";
   }
   a.done = true;
@@ -698,8 +717,37 @@ async function send(text) {
   busyId = null;
   $("send").textContent = "Send";
   $("send").className = "";
-  save(c);
-  if (here()) redrawLast();
+  if (!kept) save(c);
+  if (here()) draw();
+}
+
+// The connection went while the answer came (the app was in the
+// background): the machine goes on with it and keeps it in the chat. The
+// page waits for that and takes the machine's copy; false when the machine
+// isn't on it.
+async function recover(c, a) {
+  a.stats = "still answering on the TokenStation5…";
+  if (cur === c.id) redrawLast();
+  for (let i = 0; i < 900; i++) {
+    let working = null;
+    try { const r = await api("/ts5/away"); if (r.ok) working = (await r.json()).working || []; } catch (e) {}
+    try {
+      const r = await api("/ts5/chats/" + encodeURIComponent(c.id));
+      if (r.ok) {
+        const there = await r.json();
+        const ms = there.messages || [];
+        const last = ms[ms.length - 1];
+        if (last && last.role === "assistant" && last.done !== false && (last.content || last.error)) {
+          c.messages = ms;
+          if (there.title) c.title = there.title;
+          return true;
+        }
+      }
+    } catch (e) {}
+    if (!working || !working.includes(c.id)) return false;
+    await new Promise((ok) => setTimeout(ok, 2000));
+  }
+  return false;
 }
 
 // The chats again from the machine when the page comes back into view and
@@ -723,6 +771,109 @@ async function refreshChats() {
 }
 document.addEventListener("visibilitychange", refreshChats);
 setInterval(refreshChats, 15000);
+
+// ---- notifications: an answer that finishes while the app is away ----
+// The machine keeps it in the chat and tells this device (Web Push, through
+// the push service the browser uses), with the count on the icon's badge.
+// A Home Screen app on an iPhone (iOS 16.4 and later) has them; Safari in a
+// tab doesn't. The page says when it goes (with an answer coming) and when
+// it comes back.
+const pushable = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window && isSecureContext;
+let swReg = null, pushKey = "";
+if ("serviceWorker" in navigator && isSecureContext) {
+  navigator.serviceWorker.register("/sw.js").then((r) => { swReg = r; }).catch(() => {});
+  // A notification tapped while the app is open: that chat.
+  navigator.serviceWorker.addEventListener("message", (e) => {
+    const id = e.data && e.data.chat;
+    if (!id) return;
+    refreshChats().then(() => { if (chats.find((x) => x.id === id)) { cur = id; draw(); } });
+  });
+}
+function b64u(t) {
+  t = t.replace(/-/g, "+").replace(/_/g, "/");
+  const b = atob(t + "===".slice((t.length + 3) % 4));
+  return Uint8Array.from(b, (ch) => ch.charCodeAt(0));
+}
+function deviceName() {
+  const ua = navigator.userAgent;
+  return /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android"
+    : /Macintosh/.test(ua) ? "Mac" : /Windows/.test(ua) ? "Windows" : "a browser";
+}
+async function subscription() {
+  if (!pushable) return null;
+  const reg = swReg || (await navigator.serviceWorker.getRegistration("/").catch(() => null));
+  return reg ? await reg.pushManager.getSubscription().catch(() => null) : null;
+}
+async function notifDraw() {
+  $("notif").hidden = !remote;
+  if (!remote) return;
+  const note = $("notifnote");
+  if (!pushable) {
+    $("notifon").hidden = $("notifoff").hidden = true;
+    note.textContent = /iPhone|iPad/.test(navigator.userAgent) && !navigator.standalone
+      ? "To get one when an answer finishes, add this page to your Home Screen (Share, then Add to Home Screen) and open it from there."
+      : "This browser can't show notifications from this page.";
+    return;
+  }
+  const sub = Notification.permission === "granted" ? await subscription() : null;
+  $("notifon").hidden = !!sub || Notification.permission === "denied";
+  $("notifoff").hidden = !sub;
+  note.textContent = Notification.permission === "denied"
+    ? "Notifications are off for this app in the device's settings (on an iPhone: Settings, Notifications, TokenStation5)."
+    : sub ? "On for this device: a notification and a count on the icon when an answer finishes while you're away."
+    : "A notification and a count on the icon when an answer finishes while you're away.";
+  // The machine's key, ready for the tap (the subscription is asked for in
+  // the tap itself: iOS allows it only there).
+  if (!sub && !pushKey) {
+    try { const r = await api("/ts5/push"); if (r.ok) pushKey = (await r.json()).key || ""; } catch (e) {}
+  }
+}
+// The machine keeps this device's subscription (handed again at each start,
+// in case it was forgotten: a device gone, or a new key).
+async function notifSync() {
+  if (!remote || !pushable || Notification.permission !== "granted") return;
+  const sub = await subscription();
+  if (sub) api("/ts5/push", { method: "POST", body: JSON.stringify({ subscription: sub.toJSON(), name: deviceName() }) }).catch(() => {});
+}
+$("notifon").onclick = async () => {
+  const note = $("notifnote");
+  try {
+    if (!pushKey) throw new Error("This TokenStation5 didn't give its key for notifications: try again in a moment.");
+    const reg = swReg || (await navigator.serviceWorker.ready);
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(pushKey) });
+    note.textContent = "Turning on…";
+    const r = await api("/ts5/push", { method: "POST", body: JSON.stringify({ subscription: sub.toJSON(), name: deviceName() }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || "The machine said " + r.status);
+    const t = await api("/ts5/push", { method: "POST", body: JSON.stringify({ test: true }) });
+    const tj = await t.json().catch(() => ({}));
+    await notifDraw();
+    note.textContent = t.ok && !tj.error ? "On: a test notification is on its way."
+      : "On, but the test didn't go out: " + (tj.error || "the machine said " + t.status) + ".";
+  } catch (e) {
+    await notifDraw();
+    note.textContent = Notification.permission === "denied"
+      ? "Not allowed. Settings, Notifications, TokenStation5 turns them on."
+      : String((e && e.message) || e);
+  }
+};
+$("notifoff").onclick = async () => {
+  const sub = await subscription();
+  if (sub) {
+    api("/ts5/push", { method: "DELETE", body: JSON.stringify({ endpoint: sub.endpoint }) }).catch(() => {});
+    await sub.unsubscribe().catch(() => {});
+  }
+  notifDraw();
+};
+// Going: the machine goes on with an answer coming without this page.
+// Back: the icon's count starts again.
+document.addEventListener("visibilitychange", () => {
+  if (!remote) return;
+  if (!document.hidden && navigator.clearAppBadge) navigator.clearAppBadge().catch(() => {});
+  if (!busyId && document.hidden) return;
+  const body = JSON.stringify(busyId ? { chat: busyId, away: document.hidden } : { away: false });
+  fetch("/ts5/away", { method: "POST", keepalive: true, headers: headers(), body }).catch(() => {});
+});
 
 // ---- the page ----
 function askKey(why) {
@@ -839,6 +990,7 @@ $("settings").onclick = () => {
   $("showthink").checked = prefs.showThink;
   $("keep").value = TS5Keep.how() === "link" ? "link" : "passwords";
   $("setdlg").hidden = false;
+  notifDraw();
 };
 $("setdone").onclick = () => {
   prefs.think = $("think").checked;

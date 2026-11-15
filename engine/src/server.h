@@ -121,6 +121,24 @@ public:
     // ends it, as without one. Set before start().
     using Tls = std::function<bool(int fd, const std::string &ip, const std::string &client)>;
     void set_tls(Tls f) { state_.tls = std::move(f); }
+    // A chat page's answer: a request with a key that names the page's chat
+    // ("ts5_chat": its id, as kept on the machine). A phone's app sent to the
+    // background (the page "away") ends the connection: the answer goes on
+    // without it, to be kept in the chat and told to the user's devices.
+    struct AnswerEnd {
+        std::string chat, model, content, reasoning, error, finish;
+        bool left = false;     // the client went before the end
+        bool went_on = false;  // ... and it went on without it (the page was away)
+        int64_t tokens = 0;
+        double tps = 0;
+    };
+    struct PageAnswers {
+        // The page that asked is away: an answer whose client has gone goes on.
+        std::function<bool(const Grant &, const std::string &chat)> away;
+        std::function<void(const Grant &, const std::string &chat)> start;
+        std::function<void(const Grant &, const AnswerEnd &)> end;
+    };
+    void set_page_answers(PageAnswers f) { state_.page_answers = std::move(f); }
 
     // For a status display.
     struct Activity {
@@ -165,6 +183,7 @@ public:
         Routes routes;
         Pages pages;
         Tls tls;
+        PageAnswers page_answers;
     };
 
 private:

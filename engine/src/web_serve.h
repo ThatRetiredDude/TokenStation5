@@ -39,6 +39,19 @@ namespace ts5 {
 //                      the one loaded; POST {"model": M}: the owner's
 //                      ts5-tui loads it. The owner, and a user who may
 //                      switch (AccessUser::may_switch), only.
+//   /ts5/push          notifications (Web Push, webpush.h) for a key's user:
+//                      GET the machine's key to subscribe with; POST
+//                      {"subscription", "name"} turns them on for a device,
+//                      {"test": true} sends one; DELETE {"endpoint"} turns
+//                      one off. Kept in user_dir(USER)/push.json.
+//   /ts5/away          POST {"chat", "away"}: the chat page going to the
+//                      background with an answer coming, and back; GET: the
+//                      chats with an answer coming. An answer whose page is
+//                      away goes on without its connection (Server::
+//                      PageAnswers), is kept in its chat, and is told to
+//                      the user's devices with the icon's count.
+//   /sw.js, /manifest.webmanifest  the chat page as a Home Screen app: its
+//                      service worker (notifications only) and manifest.
 //   /ts5/users         GET, the owner's key only: the users whose chats the
 //                      owner may read (each chose so when made, and sees it);
 //                      /ts5/users/ID/chats: that user's chats, to read.

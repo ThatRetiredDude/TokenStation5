@@ -22,11 +22,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <map>
 #include <mutex>
+#include <set>
+#include <thread>
 #include <vector>
 
 #include "json.h"
 #include "log.h"
+#include "webpush.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/sha1.h"
 
@@ -46,6 +50,8 @@ TS5_WEB_FILE(ts5_web_xterm_license)
 TS5_WEB_FILE(ts5_web_addon_fit_license)
 TS5_WEB_FILE(ts5_web_icon_png)
 TS5_WEB_FILE(ts5_web_keep_js)
+TS5_WEB_FILE(ts5_web_sw_js)
+TS5_WEB_FILE(ts5_web_manifest)
 TS5_WEB_FILE(ts5_web_splash_1320x2868)
 TS5_WEB_FILE(ts5_web_splash_1206x2622)
 TS5_WEB_FILE(ts5_web_splash_1260x2736)
@@ -88,6 +94,8 @@ const WebAsset kWebAssets[] = {
     {"addon-fit-LICENSE", ts5_web_addon_fit_license, ts5_web_addon_fit_license_end},
     {"icon.png", ts5_web_icon_png, ts5_web_icon_png_end},
     {"keep.js", ts5_web_keep_js, ts5_web_keep_js_end},
+    {"sw.js", ts5_web_sw_js, ts5_web_sw_js_end},
+    {"manifest.webmanifest", ts5_web_manifest, ts5_web_manifest_end},
     {"splash-1320x2868.jpg", ts5_web_splash_1320x2868, ts5_web_splash_1320x2868_end},
     {"splash-1206x2622.jpg", ts5_web_splash_1206x2622, ts5_web_splash_1206x2622_end},
     {"splash-1260x2736.jpg", ts5_web_splash_1260x2736, ts5_web_splash_1260x2736_end},
@@ -172,6 +180,7 @@ std::string type_of(const std::string &name) {
     if (ext == "css") return "text/css; charset=utf-8";
     if (ext == "png") return "image/png";
     if (ext == "jpg") return "image/jpeg";
+    if (ext == "webmanifest") return "application/manifest+json";
     return "text/plain; charset=utf-8";
 }
 
@@ -768,6 +777,9 @@ std::string tui_chat(const Json &page, const Json *old, const std::string &model
     return c.dump() + "\n";
 }
 
+// A chat's file: the page's PUT, and an answer kept here (keep_answer).
+std::mutex chats_mu;
+
 bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
     const bool me = p.path == "/ts5/me";
     const bool chats = p.path == "/ts5/chats" || p.path.rfind("/ts5/chats/", 0) == 0;
@@ -927,6 +939,7 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
     // Where it is written: ts5-tui's folder for the owner (else the user's).
     const std::string wdir = tui.empty() ? dir : tui, wfile = tui.empty() ? file : tfile;
     if (p.method == "PUT") {
+        std::lock_guard<std::mutex> lk(chats_mu);
         Json c;
         if (p.body.size() > kChatMax || !Json::parse(p.body, c) || c.type != Json::OBJ || c["id"].str() != id) {
             send_error(fd, 400, "a chat is a JSON object with its id, at most 4 MB");
@@ -975,6 +988,336 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
     } else {
         send_error(fd, 405, "GET, PUT or DELETE");
     }
+    return true;
+}
+
+// ---- notifications: Web Push to a user's devices (webpush.h) ----
+//
+// A device turns them on in the chat page's Settings: the page subscribes
+// with this machine's key (GET /ts5/push) and hands its subscription here
+// (POST), kept in user_dir(USER)/push.json. An answer that ends while its
+// page is away (a phone's app sent to the background: POST /ts5/away) is
+// kept in its chat here, and told to every device of that user, with the
+// count for the icon's badge (answers told since the page was last seen).
+
+struct PushUser {
+    std::set<std::string> away;     // chats whose page went away while their answer came
+    std::set<std::string> working;  // chats with an answer coming
+    int unseen = 0;
+};
+std::mutex push_mu;
+std::map<std::string, PushUser> push_users;  // by user id
+
+constexpr size_t kPushDevices = 10;  // a user's subscriptions kept, the newest
+
+// Where this machine's notifications key is: beside users/ (the keys' data).
+std::string push_key_path(const WebOptions &o) {
+    const std::string ud = o.user_dir("owner");
+    const size_t at = ud.rfind("/users/");
+    const std::string base = at == std::string::npos ? ud : ud.substr(0, at);
+    make_dirs(base);
+    return base + "/push-key.pem";
+}
+
+std::vector<PushSubscription> push_subs(const WebOptions &o, const std::string &user, std::vector<std::string> *names = nullptr) {
+    std::vector<PushSubscription> out;
+    Json j;
+    if (!Json::parse(read_whole(o.user_dir(user) + "/push.json"), j) || j.type != Json::OBJ) return out;
+    for (const Json &x : j["devices"].a) {
+        PushSubscription s;
+        s.endpoint = x["endpoint"].str();
+        s.p256dh = x["p256dh"].str();
+        s.auth = x["auth"].str();
+        if (s.endpoint.empty()) continue;
+        out.push_back(s);
+        if (names) names->push_back(x["name"].str());
+    }
+    return out;
+}
+
+void push_keep(const WebOptions &o, const std::string &user, const std::vector<PushSubscription> &subs,
+               const std::vector<std::string> &names) {
+    Json j = Json::object(), arr;
+    arr.type = Json::ARR;
+    for (size_t i = 0; i < subs.size(); i++) {
+        Json x = Json::object();
+        x.set("endpoint", Json::string(subs[i].endpoint));
+        x.set("p256dh", Json::string(subs[i].p256dh));
+        x.set("auth", Json::string(subs[i].auth));
+        x.set("name", Json::string(i < names.size() ? names[i] : ""));
+        arr.a.push_back(x);
+    }
+    j.set("devices", arr);
+    make_dirs(o.user_dir(user));
+    write_whole(o.user_dir(user) + "/push.json", j.dump() + "\n");
+}
+
+// Sends payload to every device of user's; one gone (404, 410) is forgotten.
+// sent: how many took it; why: the first failure.
+void push_send_all(const WebOptions &o, const std::string &user, const std::string &payload, int &sent, int &devices,
+                   std::string &why) {
+    sent = 0;
+    std::vector<std::string> names;
+    std::vector<PushSubscription> subs;
+    {
+        std::lock_guard<std::mutex> l(push_mu);
+        subs = push_subs(o, user, &names);
+    }
+    devices = (int)subs.size();
+    std::vector<std::string> gone;
+    const std::string key = push_key_path(o);
+    for (const PushSubscription &s : subs) {
+        int status = 0;
+        std::string w;
+        if (webpush_send(key, s, payload, status, w)) sent++;
+        else {
+            if (status == 404 || status == 410) gone.push_back(s.endpoint);
+            if (why.empty()) why = w;
+        }
+    }
+    if (!gone.empty()) {
+        std::lock_guard<std::mutex> l(push_mu);
+        names.clear();
+        std::vector<PushSubscription> keep, now = push_subs(o, user, &names);
+        std::vector<std::string> kept_names;
+        for (size_t i = 0; i < now.size(); i++)
+            if (std::find(gone.begin(), gone.end(), now[i].endpoint) == gone.end()) {
+                keep.push_back(now[i]);
+                kept_names.push_back(names[i]);
+            }
+        push_keep(o, user, keep, kept_names);
+    }
+    log_line("ts5: notifications: %d of %d device%s of %s's took it%s%s%s", sent, devices, devices == 1 ? "" : "s",
+             user.c_str(), gone.empty() ? "" : " (", gone.empty() ? "" : (std::to_string(gone.size()) + " gone, forgotten").c_str(),
+             gone.empty() ? (why.empty() ? "" : (": " + why).c_str()) : ")");
+}
+
+// s cut to at most n bytes, on a character's start, with "…" when cut.
+std::string cut_text(const std::string &s, size_t n) {
+    if (s.size() <= n) return s;
+    size_t e = n;
+    while (e > 0 && ((unsigned char)s[e] & 0xC0) == 0x80) e--;
+    return s.substr(0, e) + "…";
+}
+
+// The answer kept in its chat on the machine (the page went away before it
+// came); the chat's title, "" when there is no such chat.
+std::string keep_answer(const WebOptions &o, const Server::Grant &g, const Server::AnswerEnd &a) {
+    std::lock_guard<std::mutex> l(chats_mu);
+    Json m = Json::object();
+    m.set("role", Json::string("assistant"));
+    m.set("content", Json::string(a.content));
+    if (!a.reasoning.empty()) m.set("thinking", Json::string(a.reasoning));
+    m.set("done", jbool(true));
+    m.set("model", Json::string(a.model));
+    if (a.tokens > 0) {
+        char b[64];
+        snprintf(b, sizeof b, "%lld tokens · %.1f tok/s", (long long)a.tokens, a.tps);
+        m.set("stats", Json::string(b));
+    }
+    if (!a.error.empty()) m.set("error", Json::string(a.error));
+    // What the chat holds now, the page's way: an answer to fill in or add.
+    auto with_answer = [&](Json &page) {
+        auto at = page.o.find("messages");
+        if (at == page.o.end() || at->second.type != Json::ARR || at->second.a.empty()) return false;
+        std::vector<Json> &ms = at->second.a;
+        Json &last = ms.back();
+        if (last["role"].str() == "user") ms.push_back(m);
+        else if (last["role"].str() == "assistant" && !last["done"].boolean(false)) last = m;
+        else return false;  // answered already (the page kept it)
+        return true;
+    };
+    const std::string tui = tui_chats_dir(o, g);
+    if (!tui.empty()) {
+        const std::string tfile = tui + "/" + a.chat + ".json";
+        Json old;
+        if (Json::parse(read_whole(tfile), old) && old.type == Json::OBJ && old["turns"].type == Json::ARR) {
+            Json page = page_chat(a.chat, old);
+            if (with_answer(page)) write_whole(tfile, tui_chat(page, &old, o.model));
+            return old["title"].str("A chat");
+        }
+    }
+    const std::string file = o.user_dir(g.user) + "/chats/" + a.chat + ".json";
+    Json page;
+    if (!Json::parse(read_whole(file), page) || page.type != Json::OBJ) return "";
+    if (with_answer(page)) write_whole(file, page.dump());
+    return page["title"].str("A chat");
+}
+
+void page_answers(Server &s, const WebOptions &o) {
+    Server::PageAnswers pa;
+    pa.away = [](const Server::Grant &g, const std::string &chat) {
+        std::lock_guard<std::mutex> l(push_mu);
+        auto it = push_users.find(g.user);
+        return it != push_users.end() && it->second.away.count(chat) > 0;
+    };
+    pa.start = [](const Server::Grant &g, const std::string &chat) {
+        std::lock_guard<std::mutex> l(push_mu);
+        PushUser &u = push_users[g.user];
+        u.working.insert(chat);
+        u.away.erase(chat);  // asked from the page: it's there
+    };
+    pa.end = [o](const Server::Grant &g, const Server::AnswerEnd &a) {
+        bool away;
+        int badge = 0;
+        {
+            std::lock_guard<std::mutex> l(push_mu);
+            PushUser &u = push_users[g.user];
+            u.working.erase(a.chat);
+            away = u.away.erase(a.chat) > 0;
+            // Kept: an answer that went on without its connection (the page,
+            // back by now or not, gets it from here), and one whose page is
+            // away. Not one cut short (a Stop, even as the page went): the
+            // page has what it had. Told: while the page is away.
+            if (!a.went_on && (!away || a.left)) return;
+            if (away) badge = ++u.unseen;
+        }
+        std::thread([o, g, a, away, badge] {
+            const std::string title = keep_answer(o, g, a);
+            if (!away) return;
+            Json j = Json::object();
+            j.set("title", Json::string(cut_text(title.empty() ? std::string("TokenStation5") : title, 80)));
+            std::string body = a.content;
+            for (char &c : body)
+                if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+            if (!a.error.empty()) body = "It stopped: " + a.error;
+            else if (body.find_first_not_of(' ') == std::string::npos) body = "The answer is ready.";
+            j.set("body", Json::string(cut_text(body.substr(std::min(body.size(), body.find_first_not_of(' '))), 160)));
+            j.set("chat", Json::string(a.chat));
+            j.set("badge", jnum(badge));
+            int sent = 0, devices = 0;
+            std::string why;
+            push_send_all(o, g.user, j.dump(), sent, devices, why);
+        }).detach();
+    };
+    s.set_page_answers(pa);
+}
+
+// /ts5/push: GET this machine's key for subscribing and how many of the
+// user's devices have notifications on; POST {"subscription": {endpoint,
+// keys: {p256dh, auth}}, "name"} turns them on for one, POST {"test": true}
+// sends one to each; DELETE {"endpoint"} turns one off. /ts5/away: POST
+// {"chat", "away"} from the page as it goes to the background and comes
+// back (back: the badge's count starts again); GET: the chats with an answer
+// coming. A key's user's own, as its chats are.
+bool push_pages(const WebOptions &o, const Server::Page &p, int fd) {
+    const bool push = p.path == "/ts5/push", away = p.path == "/ts5/away";
+    if (!push && !away) return false;
+    if (!o.admit || !o.user_dir) {
+        send_error(fd, 404, "this server keeps no users");
+        return true;
+    }
+    Server::Grant g;
+    if (!o.admit(p.key, p.client, g)) {
+        send_error(fd, 401, p.key.empty() ? "This needs an API key." : "That API key isn't one of this machine's, or it is off.");
+        return true;
+    }
+    if (p.key.empty() || g.key.empty()) {
+        send_error(fd, 403, "Notifications are for a key's user: open the chat page with your key.");
+        return true;
+    }
+    Json req;
+    if (p.method != "GET" && !p.body.empty() && (!Json::parse(p.body, req) || req.type != Json::OBJ)) {
+        send_error(fd, 400, "a JSON object, please");
+        return true;
+    }
+    if (away) {
+        Json out = Json::object(), arr;
+        arr.type = Json::ARR;
+        {
+            std::lock_guard<std::mutex> l(push_mu);
+            PushUser &u = push_users[g.user];
+            if (p.method == "POST") {
+                const std::string chat = req["chat"].str();
+                const bool going = req["away"].boolean(false);
+                if (going && good_chat_id(chat) && u.working.count(chat)) u.away.insert(chat);
+                if (!going) {
+                    if (!chat.empty()) u.away.erase(chat);
+                    u.unseen = 0;
+                }
+            } else if (p.method != "GET") {
+                send_error(fd, 405, "GET or POST");
+                return true;
+            }
+            for (const std::string &c : u.working) arr.a.push_back(Json::string(c));
+        }
+        out.set("working", arr);
+        send_file(fd, 200, "application/json", out.dump(), false);
+        return true;
+    }
+    const std::string key = push_key_path(o);
+    if (p.method == "GET") {
+        std::string pub, why;
+        if (!vapid_key(key, pub, why)) {
+            send_error(fd, 500, why);
+            return true;
+        }
+        Json out = Json::object();
+        out.set("key", Json::string(pub));
+        std::lock_guard<std::mutex> l(push_mu);
+        out.set("devices", jnum((double)push_subs(o, g.user).size()));
+        send_file(fd, 200, "application/json", out.dump(), false);
+        return true;
+    }
+    if (p.method == "POST" && req["test"].boolean(false)) {
+        Json j = Json::object();
+        j.set("title", Json::string("TokenStation5"));
+        j.set("body", Json::string("Notifications are on. You get one when an answer finishes while you're away."));
+        j.set("badge", jnum(0));
+        int sent = 0, devices = 0;
+        std::string why;
+        push_send_all(o, g.user, j.dump(), sent, devices, why);
+        Json out = Json::object();
+        out.set("sent", jnum(sent));
+        out.set("devices", jnum(devices));
+        if (sent < devices) out.set("error", Json::string(why));
+        send_file(fd, sent > 0 || devices == 0 ? 200 : 502, "application/json", out.dump(), false);
+        return true;
+    }
+    if (p.method == "POST" || p.method == "DELETE") {
+        const Json &sub = req["subscription"];
+        PushSubscription s;
+        s.endpoint = p.method == "POST" ? sub["endpoint"].str() : req["endpoint"].str();
+        s.p256dh = sub["keys"]["p256dh"].str();
+        s.auth = sub["keys"]["auth"].str();
+        std::string raw_key, raw_auth;
+        if (p.method == "POST" &&
+            (!push_endpoint_ok(s.endpoint) || !b64url_decode(s.p256dh, raw_key) || raw_key.size() != 65 ||
+             !b64url_decode(s.auth, raw_auth) || raw_auth.size() != 16)) {
+            send_error(fd, 400, push_endpoint_ok(s.endpoint)
+                                    ? "the subscription's keys aren't a browser's (p256dh: 65 bytes, auth: 16)"
+                                    : "that isn't a push service this machine sends to (Apple's, Google's, Mozilla's, Microsoft's)");
+            return true;
+        }
+        std::lock_guard<std::mutex> l(push_mu);
+        std::vector<std::string> names;
+        std::vector<PushSubscription> subs = push_subs(o, g.user, &names), keep;
+        std::vector<std::string> kept_names;
+        for (size_t i = 0; i < subs.size(); i++)
+            if (subs[i].endpoint != s.endpoint) {
+                keep.push_back(subs[i]);
+                kept_names.push_back(names[i]);
+            }
+        if (p.method == "POST") {
+            keep.push_back(s);
+            std::string name = req["name"].str();
+            if (name.size() > 60) name = cut_text(name, 60);
+            kept_names.push_back(name);
+            while (keep.size() > kPushDevices) {
+                keep.erase(keep.begin());
+                kept_names.erase(kept_names.begin());
+            }
+        }
+        push_keep(o, g.user, keep, kept_names);
+        log_line("ts5: notifications: %s %s them for %s (%s)", g.user_name.empty() ? g.user.c_str() : g.user_name.c_str(),
+                 p.method == "POST" ? "turned on" : "turned off", p.client.c_str(),
+                 p.method == "POST" ? (req["name"].str().empty() ? "a device" : cut_text(req["name"].str(), 60).c_str()) : "a device");
+        Json out = Json::object();
+        out.set("devices", jnum((double)keep.size()));
+        send_file(fd, 200, "application/json", out.dump(), false);
+        return true;
+    }
+    send_error(fd, 405, "GET, POST or DELETE");
     return true;
 }
 
@@ -1258,6 +1601,7 @@ void switch_model(const WebOptions &o, const Server::Page &p, int fd) {
 }  // namespace
 
 void attach_web(Server &s, const WebOptions &o) {
+    if (o.admit && o.user_dir) page_answers(s, o);
     s.set_pages([o](const Server::Page &p, int fd) {
         // The address apps are given (…/v1), opened in a browser: the chat page.
         if ((p.path == "/v1" || p.path == "/v1/") && p.method == "GET" &&
@@ -1286,6 +1630,12 @@ void attach_web(Server &s, const WebOptions &o) {
             return true;
         }
         if (me_and_chats(o, p, fd)) return true;
+        if (push_pages(o, p, fd)) return true;
+        // The chat page as a Home Screen app: its service worker at the top
+        // (its scope: the whole site) and its manifest.
+        if (p.method == "GET" && (p.path == "/sw.js" || p.path == "/manifest.webmanifest") &&
+            serve_asset(fd, p, p.path.substr(1), false))
+            return true;
         if (p.path == "/ts5/control") {
             control(o, p, fd);
             return true;
