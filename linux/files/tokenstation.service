@@ -17,6 +17,12 @@ User=tokenstation
 Group=tokenstation
 # GPU access comes from the render and video groups (postinst adds them).
 WorkingDirectory=/var/lib/tokenstation
+# /run/tokenstation: the owner's ts5-tui puts its control socket here (the
+# phone's controls, /ts5/control); its group (tokenstation) may write in it.
+# Kept over a restart, which every model load through Settings is.
+RuntimeDirectory=tokenstation
+RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=yes
 Restart=on-failure
 RestartSec=5
 LimitMEMLOCK=infinity

@@ -192,6 +192,9 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
         req = json.loads(self.rfile.read(n) or b"{}")
+        if self.path == "/ts5/push":  # ts5-tui saying an answer finished (no phone here)
+            self.send(200, {"told": False})
+            return
         if self.path == "/ts5/tailnet" and TAILNET:
             if req.get("sign_out"):
                 tailnet.update(on=False, signed_in=False)

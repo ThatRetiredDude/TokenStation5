@@ -6,6 +6,7 @@
     .section .rodata
 FILE(ts5_web_chat_html, "chat.html")
 FILE(ts5_web_terminal_html, "terminal.html")
+FILE(ts5_web_controls_html, "controls.html")
 FILE(ts5_web_xterm_js, "xterm.js")
 FILE(ts5_web_xterm_css, "xterm.css")
 FILE(ts5_web_addon_fit_js, "addon-fit.js")
@@ -15,6 +16,14 @@ FILE(ts5_web_addon_fit_license, "LICENSE-addon-fit")
 // 192x192 (Pillow, LANCZOS). A brand asset, not licensed (LICENSING.md).
 FILE(ts5_web_icon_png, "icon.png")
 FILE(ts5_web_keep_js, "keep.js")
+// The chat page as a Home Screen app: its service worker (notifications only)
+// and its manifest.
+FILE(ts5_web_sw_js, "sw.js")
+FILE(ts5_web_manifest, "manifest.webmanifest")
+// The browser terminal's own (a Home Screen icon of it opens ts5-tui), and the
+// notifications code the pages share.
+FILE(ts5_web_terminal_manifest, "terminal.webmanifest")
+FILE(ts5_web_push_js, "push.js")
 // The launch images a phone shows while a home-screen icon opens (make_splash.py).
 FILE(ts5_web_splash_1320x2868, "splash-1320x2868.jpg")
 FILE(ts5_web_splash_1206x2622, "splash-1206x2622.jpg")

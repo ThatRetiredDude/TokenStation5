@@ -14,6 +14,7 @@
 #include <algorithm>
 
 #include "json.h"
+#include "log.h"
 #include "net.h"
 #include "tsshare.h"
 
@@ -25,7 +26,8 @@ constexpr const char *kHeader = "# ts5 keys v1";
 constexpr const char *kRequired = "# required=";
 constexpr const char *kColumns = "#id\tname\tsha256\ton\tcreated\tused\tuser";
 constexpr const char *kUsersHeader = "# ts5 users v1";
-constexpr const char *kUsersColumns = "#id\tname\ton\tweb_search\tapp_tools\ttokens_day\tmax_reply\tcreated\towner_reads";
+constexpr const char *kUsersColumns =
+    "#id\tname\ton\tweb_search\tapp_tools\ttokens_day\tmax_reply\tcreated\towner_reads\tmodels\tmay_switch\tuntil";
 // Crockford's base32 in lower case, as the TV app's keys: no i, l, o or u.
 constexpr const char *kAlphabet = "0123456789abcdefghjkmnpqrstvwxyz";
 
@@ -130,6 +132,44 @@ std::string local_day() {
     return b;
 }
 
+bool is_here(const std::string &client) {
+    return client == "::1" || client.compare(0, 4, "127.") == 0 || client == "::ffff:127.0.0.1";
+}
+
+// "YYYY-MM-DD", a real day.
+bool good_day(const std::string &d) {
+    int y = 0, m = 0, dd = 0;
+    char extra = 0;
+    if (d.size() != 10 || sscanf(d.c_str(), "%4d-%2d-%2d%c", &y, &m, &dd, &extra) != 3) return false;
+    static const int days[] = {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    return y >= 2000 && y < 3000 && m >= 1 && m <= 12 && dd >= 1 && dd <= days[m - 1] &&
+           !(m == 2 && dd == 29 && !((y % 4 == 0 && y % 100 != 0) || y % 400 == 0));
+}
+
+// A user's models in its column: names joined by commas, "*" for any.
+std::vector<std::string> split_models(const std::string &v) {
+    std::vector<std::string> out;
+    if (v == "*" || v.empty()) return out;
+    size_t at = 0;
+    for (;;) {
+        const size_t c = v.find(',', at);
+        std::string m = v.substr(at, c == std::string::npos ? std::string::npos : c - at);
+        while (!m.empty() && m.front() == ' ') m.erase(0, 1);
+        while (!m.empty() && m.back() == ' ') m.pop_back();
+        m = clean(m);
+        if (!m.empty() && std::find(out.begin(), out.end(), m) == out.end()) out.push_back(m);
+        if (c == std::string::npos) break;
+        at = c + 1;
+    }
+    return out;
+}
+
+std::string join_models(const std::vector<std::string> &models) {
+    std::string out;
+    for (const std::string &m : models) out += (out.empty() ? "" : ",") + m;
+    return out.empty() ? "*" : out;
+}
+
 int64_t mtime_ns(const struct stat &st) { return (int64_t)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec; }
 
 bool parse_count(const std::string &v, int64_t &out) {
@@ -155,6 +195,9 @@ std::string preset_of(const AccessUser &u) {
     if (u.owner()) return "owner";
     return u.web_search ? "chat-web" : "chat";
 }
+
+bool AccessUser::ended() const { return !until.empty() && local_day() > until; }
+
 
 std::string default_keys_path() {
     if (const char *k = getenv("TS5_KEYS"); k && *k) return k;
@@ -254,6 +297,9 @@ bool KeyFile::load_locked(std::string &err) {
                 else if (c == "max_reply") u.max_reply = strtoll(v[i].c_str(), nullptr, 10);
                 else if (c == "created") u.created = strtoll(v[i].c_str(), nullptr, 10);
                 else if (c == "owner_reads") u.owner_reads = v[i] == "1";
+                else if (c == "models") u.models = split_models(v[i]);
+                else if (c == "may_switch") u.may_switch = v[i] == "1";
+                else if (c == "until") u.until = v[i] == "-" ? "" : v[i];
             }
             if (u.id.size() != 8 || u.owner()) continue;  // not a user
             users_.push_back(u);
@@ -287,7 +333,8 @@ bool KeyFile::save_users_locked(std::string &err) {
     for (const AccessUser &u : users_)
         text += u.id + "\t" + clean(u.name) + "\t" + (u.on ? "1" : "0") + "\t" + (u.web_search ? "1" : "0") + "\t" +
                 (u.app_tools ? "1" : "0") + "\t" + std::to_string(u.tokens_day) + "\t" + std::to_string(u.max_reply) +
-                "\t" + std::to_string(u.created) + "\t" + (u.owner_reads ? "1" : "0") + "\n";
+                "\t" + std::to_string(u.created) + "\t" + (u.owner_reads ? "1" : "0") + "\t" + join_models(u.models) + "\t" +
+                (u.may_switch ? "1" : "0") + "\t" + (u.until.empty() ? "-" : u.until) + "\n";
     const std::string upath = dir_of(path_) + "/users.tsv";
     make_parents(upath);
     if (!write_file(upath, text, 0640, err)) return false;
@@ -489,12 +536,30 @@ bool KeyFile::admit(const std::string &key, const std::string &client, Server::G
     g.user_name = "Owner";
     if (!key.empty()) {
         const std::string h = sha256_hex(key);
+        // A refusal of a known key, in the log: once a minute a key, so a
+        // phone that keeps asking doesn't fill it.
+        const auto refused = [&](const AccessKey &k, const std::string &why) {
+            const int64_t now = (int64_t)time(nullptr);
+            int64_t &last = refused_logged_[k.id];
+            if (now - last >= 60) {
+                last = now;
+                log_line("ts5: access: %s: the key %s %s: refused", client.c_str(), k.name.c_str(), why.c_str());
+            }
+            return false;
+        };
         for (AccessKey &k : keys_)
-            if (k.on && same(k.sha256, h)) {
+            if (same(k.sha256, h)) {
+                // (This machine gets in without a key, as before: an
+                // owner's key turned off is none here.)
+                if (!k.on && k.user == "owner" && is_here(client)) break;
+                if (!k.on) return refused(k, "is switched off");
                 if (k.user != "owner") {
-                    // Another user's key: only while that user is there and on.
+                    // Another user's key: only while that user is there,
+                    // on, and before its last day is over.
                     const AccessUser *u = user_locked(k.user);
-                    if (!u || !u->on) return false;
+                    if (!u) return refused(k, "is of a user who is gone");
+                    if (!u->on) return refused(k, "is " + u->name + "'s, who is paused");
+                    if (u->ended()) return refused(k, "is " + u->name + "'s, whose last day was " + u->until);
                     g.owner = false;
                     g.user = u->id;
                     g.user_name = u->name;
@@ -503,6 +568,9 @@ bool KeyFile::admit(const std::string &key, const std::string &client, Server::G
                     g.max_reply = u->max_reply;
                     g.tokens_day = u->tokens_day;
                     g.owner_reads = u->owner_reads;
+                    g.models = u->models;
+                    g.may_switch = u->may_switch;
+                    g.until = u->until;
                     if (today_date_ != local_day()) today_.clear(), today_date_ = local_day();
                     const auto t = today_.find(u->id);
                     if (u->tokens_day > 0 && t != today_.end() && t->second >= u->tokens_day)
@@ -514,7 +582,7 @@ bool KeyFile::admit(const std::string &key, const std::string &client, Server::G
                 return true;
             }
     }
-    const bool here = client == "::1" || client.compare(0, 4, "127.") == 0 || client == "::ffff:127.0.0.1";
+    const bool here = is_here(client);
     // A device on a tailnet reaches this machine from anywhere: it always
     // needs a key, as on the TV app.
     // While there are users a key is always needed (required()), even if
@@ -630,10 +698,24 @@ bool KeyFile::set_user(const std::string &which, const std::vector<std::string> 
             (k == "on" ? u.on : k == "web_search" ? u.web_search : k == "app_tools" ? u.app_tools : u.owner_reads) = flag;
         } else if ((k == "tokens_day" || k == "max_reply") && parse_count(v, n)) {
             (k == "tokens_day" ? u.tokens_day : u.max_reply) = n;
+        } else if (k == "models") {
+            u.models = split_models(v);
+        } else if (k == "may_switch" && good_flag) {
+            u.may_switch = flag;
+        } else if (k == "until") {
+            if (v == "none" || v == "-" || v.empty()) {
+                u.until.clear();
+            } else if (!good_day(v)) {
+                err = "a last day is YYYY-MM-DD, such as 2026-12-31, or none: " + v;
+                return false;
+            } else {
+                u.until = v;
+            }
         } else {
             err = "not a change ts5 knows: " + c +
                   " (name=NAME, preset=chat|chat-web, on=on|off, web_search=on|off, app_tools=on|off, "
-                  "owner_reads=on|off, tokens_day=N, max_reply=N; 0 is no limit)";
+                  "owner_reads=on|off, tokens_day=N, max_reply=N, models=A,B|*, may_switch=on|off, "
+                  "until=YYYY-MM-DD|none; 0 is no limit)";
             return false;
         }
     }
@@ -669,6 +751,7 @@ bool KeyFile::remove_user(const std::string &which, bool forget, std::string &er
             closedir(d);
         }
         rmdir(dir.c_str());
+        unlink((user_dir(gone.id) + "/push.json").c_str());  // its devices' notifications
         rmdir(user_dir(gone.id).c_str());
     }
     return true;
@@ -795,7 +878,11 @@ std::string user_json(const AccessUser &u, const std::vector<AccessKey> &keys) {
                       ",\"owner_reads\":" + (u.owner_reads ? "true" : "false") + ",\"terminal\":" +
                       (u.owner() ? "true" : "false") + ",\"tokens_day\":" + std::to_string(u.tokens_day) +
                       ",\"max_reply\":" + std::to_string(u.max_reply) + ",\"today\":" + std::to_string(u.today) +
-                      ",\"created\":" + std::to_string(u.created) + ",\"keys\":[";
+                      ",\"created\":" + std::to_string(u.created) + ",\"may_switch\":" +
+                      (u.owner() || u.may_switch ? "true" : "false") + ",\"until\":" + json_escape(u.until) +
+                      ",\"ended\":" + (u.ended() ? "true" : "false") + ",\"models\":[";
+    for (size_t i = 0; i < u.models.size(); i++) out += (i ? "," : "") + json_escape(u.models[i]);
+    out += "],\"keys\":[";
     bool first = true;
     for (const AccessKey &k : keys) {
         if (k.user != u.id) continue;
@@ -833,7 +920,8 @@ int users_main(int argc, char **argv) {
     const auto usage = [&] {
         return fail("ts5 users [--file FILE] [--json] list | new NAME [--preset chat|chat-web] [--owner-reads] | "
                     "set USER CHANGE... | remove USER [--forget] (USER: a user's id or name; CHANGE: name=NAME, "
-                    "preset=P, on=on|off, web_search=on|off, app_tools=on|off, owner_reads=on|off, tokens_day=N, max_reply=N; "
+                    "preset=P, on=on|off, web_search=on|off, app_tools=on|off, owner_reads=on|off, tokens_day=N, max_reply=N, "
+                    "models=A,B|*, may_switch=on|off, until=YYYY-MM-DD|none; "
                     "FILE: the keys' file, " + default_keys_path() + ")");
     };
     KeyFile f(path);
@@ -886,11 +974,16 @@ int users_main(int argc, char **argv) {
         size_t n = 0;
         for (const AccessKey &k : keys) n += k.user == u.id;
         printf("\n%s%s (%s)%s\n", u.name.c_str(), u.owner() ? "" : (" [" + u.id + "]").c_str(),
-               u.owner() ? "everything, the browser terminal too" : preset_of(u).c_str(), u.on ? "" : ", paused");
-        if (!u.owner())
+               u.owner() ? "everything, the browser terminal too" : preset_of(u).c_str(),
+               u.on ? (u.ended() ? ", ended" : "") : ", paused");
+        if (!u.owner()) {
             printf("  web search %s · app tools %s · tokens a day %s (today %lld) · longest reply %s · the owner reads its chats: %s\n",
                    u.web_search ? "on" : "off", u.app_tools ? "on" : "off", limit_text(u.tokens_day).c_str(),
                    (long long)u.today, limit_text(u.max_reply).c_str(), u.owner_reads ? "yes" : "no");
+            printf("  models: %s · may switch the model: %s · last day: %s\n",
+                   u.models.empty() ? "any" : join_models(u.models).c_str(), u.may_switch ? "yes" : "no",
+                   u.until.empty() ? "none" : u.until.c_str());
+        }
         printf("  %zu %s", n, n == 1 ? "key" : "keys");
         bool first = true;
         for (const AccessKey &k : keys)

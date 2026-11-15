@@ -274,7 +274,7 @@ def main():
         # The home-screen icon is in each page as a data: address (make_icon.py):
         # iOS 27's Add to Home Screen sheet draws a letter tile for a fetched one.
         icons = []
-        for page in ("/", "/ts5/terminal"):
+        for page in ("/", "/ts5/terminal", "/ts5/controls"):
             code, body, _ = get(here + page)
             m = re.findall(rb'<link rel="apple-touch-icon" sizes="180x180" href="data:image/png;base64,([A-Za-z0-9+/=]+)">',
                            body)
@@ -283,7 +283,10 @@ def main():
             icons.append(png)
             check(ok and 5000 < len(png) < 40000, f"{page}: its home-screen icon is in the page, a 180x180 PNG",
                   (len(m), len(png)))
-        check(icons[0] == icons[1], "both pages have the same icon")
+        check(icons[0] == icons[1] == icons[2], "the three pages have the same icon")
+        code, body, _ = get(here + "/ts5/controls")
+        check(b'<link rel="manifest" href="/manifest.webmanifest">' in body,
+              "/ts5/controls: added to the Home Screen from there, it is the chat page's app")
         # iOS 27 shows no launch image, so each page covers itself with the
         # logo on black while a home-screen icon opens, until it can be used.
         for page in ("/", "/ts5/terminal"):

@@ -1,0 +1,9 @@
+{
+  "name": "TokenStation5",
+  "short_name": "TokenStation5",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#161b22"
+}

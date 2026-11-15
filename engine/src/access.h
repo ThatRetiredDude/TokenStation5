@@ -32,6 +32,14 @@
 //   max_reply   the longest reply in tokens, 0 none
 //   owner_reads the owner may read its chats (chosen when it is made; the
 //               user sees it in its own settings on the chat page)
+//   models      the models it may use (their names, as /v1/models gives
+//               them); none: any model
+//   may_switch  it may load another of its models (the chat page's model
+//               menu, through the owner's ts5-tui)
+//   until       the last day it gets in ("2026-12-31", this machine's
+//               time); none: no end
+// A key that is turned off, or a paused or ended user's, is refused with a
+// line in the log saying which and why (once a minute a key at most).
 // Its chats from the chat page are its own (users/ID/chats beside access/).
 // How many tokens each user had today goes to users.today (the server
 // writes it; "ts5 users list" reads it).
@@ -64,8 +72,15 @@ struct AccessUser {
     int64_t tokens_day = 0, max_reply = 0;
     int64_t created = 0;
     int64_t today = 0;  // tokens so far today (users.today)
+    std::vector<std::string> models;  // none: any
+    bool may_switch = false;
+    std::string until;  // "YYYY-MM-DD", or "" for no end
     bool owner() const { return id == "owner"; }
+    // Past its last day (until), on this machine's calendar.
+    bool ended() const;
 };
+
+// (model_allowed, for a user's models, is in server.h.)
 
 // The presets a user is made with: "chat" (chat only, no web search) and
 // "chat-web" (with ts5's web search). The owner's own is "owner".
@@ -104,7 +119,8 @@ public:
     std::string add_user(const std::string &name, const std::string &preset, std::string &err);
     // Changes a user (its id or name): "name=NAME", "preset=P", "on=0|1",
     // "web_search=0|1", "app_tools=0|1", "owner_reads=0|1", "tokens_day=N",
-    // "max_reply=N".
+    // "max_reply=N", "models=A,B" (or "*": any), "may_switch=0|1",
+    // "until=YYYY-MM-DD" (or "none").
     bool set_user(const std::string &which, const std::vector<std::string> &changes, std::string &err);
     // A user and its keys; its chats stay unless forget is set.
     bool remove_user(const std::string &which, bool forget, std::string &err);
@@ -131,6 +147,7 @@ private:
     std::vector<AccessKey> keys_;
     std::vector<AccessUser> users_;  // not the owner
     std::map<std::string, int64_t> today_;  // tokens today by user
+    std::map<std::string, int64_t> refused_logged_;  // key id -> when its refusal was last logged
     std::string today_date_;                // "2026-11-14", local
     bool required_ = false;
     int64_t users_mtime_ns_ = -1, users_size_ = -1;

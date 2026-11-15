@@ -341,6 +341,15 @@ jobs:
         run: |
           python3 -c "import cryptography" 2>/dev/null || python3 -m pip install --user --break-system-packages -q cryptography
           python3 engine/tests/https_test.py "$(command -v ts5)" /tmp/model/test.gguf vk
+      - name: Notifications (Web Push to a push service served here; an answer goes on when its page goes away)
+        env:
+          TS5_PAGE_TEST: require
+        run: |
+          python3 -c "import cryptography" 2>/dev/null || python3 -m pip install --user --break-system-packages -q cryptography
+          npm install --prefix /tmp/pw --no-save --silent playwright-core@1.49.1
+          export NODE_PATH=/tmp/pw/node_modules
+          export CHROME=$(command -v google-chrome chromium chromium-browser | head -1)
+          python3 engine/tests/push_test.py "$(command -v ts5)" /tmp/model/test.gguf cpu
       - name: The server's text is always valid UTF-8 (a model's broken bytes arrive as U+FFFD)
         run: python3 engine/tests/utf8_test.py "$(command -v ts5)" /tmp/model/test.gguf vk
       - name: A model's picks keep the text valid UTF-8 (a pick of broken bytes is taken again)
@@ -363,6 +372,15 @@ jobs:
         run: |
           command -v tmux || sudo apt-get install -y -qq tmux
           python3 linux/tui/test/models_test.py "$(command -v ts5-tui)"
+      - name: The phone's controls (ts5-tui in tmux loads a model; /ts5/control through its server, the owner's key only; the page in Chrome at a phone's width)
+        env:
+          TS5_PAGE_TEST: require
+        run: |
+          command -v tmux || sudo apt-get install -y -qq tmux
+          npm install --prefix /tmp/pw --no-save --silent playwright-core@1.49.1
+          export NODE_PATH=/tmp/pw/node_modules
+          export CHROME=$(command -v google-chrome chromium chromium-browser | head -1)
+          python3 linux/tui/test/controls_test.py "$(command -v ts5-tui)" "$(command -v ts5)" /tmp/model/test.gguf
       - name: Outside tools (ts5-tui --mcp against an MCP server served here, no model)
         run: python3 linux/tui/test/mcp_test.py "$(command -v ts5-tui)"
       - name: A browser on demand (ts5-tui --install-browser, from a release file made here, no network)

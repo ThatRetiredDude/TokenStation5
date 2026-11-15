@@ -873,12 +873,14 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
         }
         // The chat page and, once Access turns it on, the browser terminal
         // (web_serve.h).
-        setup = [authorize, admit](Server &s) {
+        const std::string served = basename_of(a.model);
+        setup = [authorize, admit, served](Server &s) {
             if (admit) s.set_admit(admit);
             if (tailnet) tailnet->attach(s);
             WebOptions w;
             w.authorize = authorize;
             w.admit = admit;
+            w.model = served.size() > 5 && served.compare(served.size() - 5, 5, ".gguf") == 0 ? served.substr(0, served.size() - 5) : served;
             if (keys) {
                 w.user_dir = [](const std::string &user) { return keys->user_dir(user); };
                 w.readable_users = [] {

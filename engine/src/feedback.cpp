@@ -193,7 +193,10 @@ ScrubWords feedback_scrub_words() {
     add_user(getenv("USER"));
     add_user(getenv("LOGNAME"));
     add_user(getenv("SUDO_USER"));
-    if (const char *h = getenv("HOME"); h && *h && w.home.empty()) w.home = h;
+    if (const char *h = getenv("HOME"); h && *h) {
+        if (w.home.empty()) w.home = h;
+        else if (w.home != h) w.home_env = h;
+    }
     char host[256] = {0};
     if (gethostname(host, sizeof host - 1) == 0) w.host = host;
     if (w.host == "localhost") w.host.clear();
@@ -303,15 +306,32 @@ std::string feedback_scrub(const std::string &text, const ScrubWords &w, bool ke
 
     // Long random-looking runs (a key in a shape we don't know).
     static const std::regex longrun(R"([A-Za-z0-9_+/=-]{32,})");
+    // A path or a model's file name is pieces between / = _ - (words,
+    // versions, sizes: "models/Qwen_Qwen3-0", "DeepSeek-R1-Distill-Qwen-14B"):
+    // it goes only if a long piece looks random. A run with no such marks
+    // is judged whole.
     s = regex_replace_fn(s, longrun, [](const std::smatch &m) -> std::string {
         const std::string t = m[0].str();
-        if (t.find('/') != std::string::npos && t.find_first_of("0123456789") == std::string::npos) return t;
-        return looks_random(t) ? "<secret-like text removed>" : t;
+        bool marks = false, random = false;
+        size_t from = 0;
+        for (size_t i = 0; i <= t.size(); i++) {
+            if (i < t.size() && !strchr("/=_-", t[i])) continue;
+            if (i < t.size()) marks = true;
+            const std::string piece = t.substr(from, i - from);
+            if (piece.size() >= 8 && looks_random(piece)) random = true;
+            from = i + 1;
+        }
+        if (!marks) random = looks_random(t);
+        return random ? "<secret-like text removed>" : t;
     });
 
     // The home folder, any /home/NAME or /Users/NAME, the login names and
     // this machine's name.
-    if (!w.home.empty() && w.home != "/" && w.home != "/root") replace_all(s, w.home, "~");
+    // (The longer first: one may hold the other.)
+    std::string h1 = w.home, h2 = w.home_env;
+    if (h2.size() > h1.size()) std::swap(h1, h2);
+    for (const std::string &h : {h1, h2})
+        if (h.size() > 1 && h != "/root") replace_all(s, h, "~");
     static const std::regex homes(R"((/home/|/Users/)[^/\s'"]+)");
     s = std::regex_replace(s, homes, "$1<user>");
     for (const auto &u : w.users) replace_word(s, u, "<user>", false);

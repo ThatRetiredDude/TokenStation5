@@ -71,6 +71,8 @@ Authorization: Bearer {SECRETS['bearer']}
 fetch https://bob:{SECRETS['address password']}@example.com/x from {SECRETS['public address']} {SECRETS['public IPv6']}
 name {SECRETS['MagicDNS name']} mac {SECRETS['MAC address']} mail {SECRETS['log email']}
 model /home/zuzkauser/models/Qwen3-8B.gguf sha 9f86d081884c7d659a2feaeb0c71df2b0f9b8b8c8e8b5b1d35c6a7b6f5b6a1c2
+ts5: settings for Qwen_Qwen3-8B-Q4_K_M.gguf, as tested on the PS5: TS5_DRAFT_MODEL=/home/zuzkauser/.local/share/tokenstation/models/Qwen_Qwen3-0.6B-Q4_K_M.gguf TS5_DRAFT=3
+ts5: serving DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf, its helper DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf
 user {SECRETS['login name']} on {SECRETS['machine name']} random {SECRETS['random secret']}
 ts5: tailscale: on, as {SECRETS['tailnet machine name']}, with SSH
 ts5: tailscale: {SECRETS['tailnet device name']} ({SECRETS['tailnet address']}) connected
@@ -82,6 +84,8 @@ ts5: web: 11:41:49 {SECRETS['tailnet address']} GET /ts5/terminal -> 200, 15003 
 -----END OPENSSH PRIVATE KEY-----
 """
 KEEP = ["0.0.1.285+7391b41", "127.0.0.1", "10:05:23", "Qwen3-8B.gguf",
+        "TS5_DRAFT_MODEL=~/.local/share/tokenstation/models/Qwen_Qwen3-0.6B-Q4_K_M.gguf TS5_DRAFT=3",
+        "serving DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf, its helper DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf",
         "9f86d081884c7d659a2feaeb0c71df2b0f9b8b8c8e8b5b1d35c6a7b6f5b6a1c2", "<ts5-key>", "<github-token>",
         "<tailscale-key>", "<lan-ip>", "<tailnet-ip>", "<tailnet-name>", "<mac>", "<private key removed>",
         "tailscale: on, as <tailnet-name>, with SSH", "tailscale: <device> (<tailnet-ip>) connected",
@@ -140,6 +144,10 @@ def main():
         check(k in out, f"scrub keeps {k}")
     check(run("scrub", "--keep-emails", stdin="write to me@example.cz").stdout.strip() == "write to me@example.cz",
           "--keep-emails keeps an email")
+    r = subprocess.run([ts5, "feedback", "scrub"], input="keys in /srv/ts5-other-home/.local/share/tokenstation/access/keys.tsv\n",
+                       capture_output=True, text=True, env=dict(env, HOME="/srv/ts5-other-home"), timeout=60)
+    check("/srv/ts5-other-home" not in r.stdout and "keys in ~/.local/share/tokenstation" in r.stdout,
+          "a HOME apart from the login's home folder (a test's, sudo's) is taken out too")
 
     # prepare
     logf = os.path.join(tmp, "ts5.log")

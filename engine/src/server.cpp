@@ -551,6 +551,34 @@ void handle(int fd, Server::State &state, Usage &u) {
             done();
             return;
         }
+        // A user held to some models (Grant::models), with another loaded:
+        // told which are theirs, and how to get one.
+        if (!grant.models.empty()) {
+            std::string loaded;
+            {
+                std::lock_guard<std::mutex> g(state.stats);
+                loaded = state.model;
+            }
+            if (!loaded.empty() && !model_allowed(grant.models, loaded)) {
+                std::string list;
+                for (const std::string &m : grant.models) list += (list.empty() ? "" : ", ") + m;
+                std::string shown = loaded;
+                if (shown.size() > 5 && shown.compare(shown.size() - 5, 5, ".gguf") == 0) shown.resize(shown.size() - 5);
+                const std::string why = grant.user_name + "'s models are " + list + "; this TokenStation5 has " + shown +
+                                        " loaded now. " +
+                                        (grant.may_switch ? "Switch to one of yours in the chat page's model menu."
+                                                          : "The owner can load one of yours.");
+                log_line("ts5: %s %s: %s isn't one of theirs, refused", u.rec.client.c_str(), grant.user_name.c_str(),
+                         shown.c_str());
+                send_all(fd, response(403, error_body(why, "model_not_allowed")));
+                u.rec.model = loaded;
+                u.rec.status = 403;
+                u.rec.finish = "refused";
+                u.rec.why = "model";
+                done();
+                return;
+            }
+        }
         Json req;
         if (!Json::parse(r.body, req)) {
             send_all(fd, response(400, error_body("invalid JSON")));
@@ -713,8 +741,21 @@ void handle(int fd, Server::State &state, Usage &u) {
             done();
             return;
         }
+        // A chat page's answer (Server::PageAnswers): its chat's id, when
+        // the request has a key and names one.
+        std::string page_chat = req["ts5_chat"].str();
+        if (page_chat.size() > 64 || grant.key.empty() || !state.page_answers.end) page_chat.clear();
+        for (char c : page_chat)
+            if (!isalnum((unsigned char)c) && c != '-' && c != '_') {
+                page_chat.clear();
+                break;
+            }
+        auto page_away = [&] {
+            return !page_chat.empty() && state.page_answers.away && state.page_answers.away(grant, page_chat);
+        };
+        if (!page_chat.empty() && state.page_answers.start) state.page_answers.start(grant, page_chat);
         std::function<bool()> gone;
-        if (stop_gone) gone = [fd] { return peer_gone(fd); };
+        if (stop_gone) gone = [fd, &page_away] { return peer_gone(fd) && !page_away(); };
         bool use_tools = !tools.empty();  // off for a last turn that must answer
         std::vector<std::string> tool_names;
         for (const Json &t : tools) tool_names.push_back(t["function"]["name"].str());
@@ -837,6 +878,23 @@ void handle(int fd, Server::State &state, Usage &u) {
         std::string reasoning;     // the thinking, with split_think
         std::vector<ToolCall> calls;  // the client's to run
         bool client_ok = true, ok = true, stopped = false;
+        // The client gone: a chat page's answer goes on when its page is away
+        // (sent to the background, which ends the connection). A page says so
+        // as it goes and a Stop doesn't: a moment for that word to come,
+        // decided once.
+        int going_on = -1;
+        auto goes_on = [&]() -> bool {
+            if (client_ok || page_chat.empty()) return false;
+            if (going_on < 0) {
+                going_on = 0;
+                for (int i = 0; i < 15 && !going_on; i++) {
+                    if (page_away()) going_on = 1;
+                    else usleep(100000);
+                }
+                if (going_on) log_line("ts5: %s: its page went away: the answer goes on, to be kept in its chat", id.c_str());
+            }
+            return going_on == 1;
+        };
         GenStats st;  // over every turn
         int max_tokens = sp.max_tokens;
         std::string search_failed;      // why the first failed search failed
@@ -977,7 +1035,7 @@ void handle(int fd, Server::State &state, Usage &u) {
                             thought = upto;
                         }
                     }
-                    if (answer >= text.size() && !stopped) return client_ok && !invented;
+                    if (answer >= text.size() && !stopped) return (client_ok || goes_on()) && !invented;
                     sent = std::max(sent, answer);
                     // Hold back text that could be the start of a stop string,
                     // or of a tool call.
@@ -989,11 +1047,12 @@ void handle(int fd, Server::State &state, Usage &u) {
                     size_t upto = stopped ? text.size() : text.size() - hold;
                     if (use_tools) upto = std::min(upto, content_prefix(tf, text, &tool_names));
                     if (upto > sent) {
-                        client_ok = send_all(fd, "data: " + chunk_json(text.substr(sent, upto - sent), nullptr) + "\n\n");
+                        if (client_ok)
+                            client_ok = send_all(fd, "data: " + chunk_json(text.substr(sent, upto - sent), nullptr) + "\n\n");
                         sent = upto;
                     }
                 }
-                return client_ok && !stopped && !invented;
+                return (client_ok || goes_on()) && !stopped && !invented;
             };
             auto on_text = [&](const std::string &piece) {
                 if (closing || stopped || invented) return false;
@@ -1129,7 +1188,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             }
             // After a thinking ended for the model: its answer, in a turn
             // that starts where this one stopped.
-            if (think_cut && ok && client_ok && st.gen_tokens < max_tokens) {
+            if (think_cut && ok && (client_ok || goes_on()) && st.gen_tokens < max_tokens) {
                 content += text.substr(std::min(answer, text.size()));
                 prompt += wrote;
                 carried += turn.gen_tokens;
@@ -1208,7 +1267,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             if (stream && pt.content.size() > sent && client_ok)
                 client_ok = send_all(fd, "data: " + chunk_json(pt.content.substr(sent), nullptr) + "\n\n");
             content += pt.content.substr(from);
-            if (pt.calls.empty() || stopped || !client_ok) break;
+            if (pt.calls.empty() || stopped || !(client_ok || goes_on())) break;
             // The client's own calls go back to it; web_search is ts5's.
             std::vector<ToolCall> searches;
             for (auto &c : pt.calls) ((web && c.name == "web_search") || !no_tool.empty() ? searches : calls).push_back(c);
@@ -1354,6 +1413,20 @@ void handle(int fd, Server::State &state, Usage &u) {
         // this request, in serve mode as everywhere else.
         std::string prof = e.backend().take_profile();
         if (!prof.empty()) fputs(prof.c_str(), stderr);
+        if (!page_chat.empty()) {
+            Server::AnswerEnd a;
+            a.chat = page_chat;
+            a.model = model;
+            a.content = content;
+            a.reasoning = reasoning;
+            if (!ok) a.error = err.empty() ? "the model stopped with an error" : err;
+            a.finish = st.finish;
+            a.left = !client_ok;
+            a.went_on = going_on == 1;
+            a.tokens = st.gen_tokens;
+            a.tps = st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0;
+            state.page_answers.end(grant, a);
+        }
         UsageRecord &ur = u.rec;
         ur.status = !ok && !stream ? 500 : 200;
         ur.finish = !ok ? "error" : !client_ok ? "left" : st.finish;

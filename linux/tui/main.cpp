@@ -39,6 +39,7 @@
 #include "browser_install.h"
 #include "catalog.h"  // ps5/catalog.h: the TV app's downloads, pinned and hashed
 #include "chat.h"
+#include "control.h"
 #include "files.h"
 #include "json.h"
 #include "mcp.h"
@@ -143,6 +144,10 @@ struct App {
     };
     std::vector<ChatsHit> chats_hits;
     int answers_saved = 0;
+    // The open chat's file as ts5-tui last wrote or read it: the chat page
+    // (the owner's phone) adds turns to the same file (store.h).
+    std::string chat_watch_id;
+    ChatFileState chat_watch;
     double ask_told = 0;  // the run-it question a toast on another page was shown for
     std::string load_target;  // what's loading, until /v1/models says so
     double load_t0 = 0;
@@ -202,6 +207,9 @@ struct App {
         bool owner = false, on = true, web_search = false, app_tools = true, owner_reads = false;
         int64_t tokens_day = 0, max_reply = 0, today = 0;
         int keys = 0;
+        std::vector<std::string> models;  // none: any
+        bool may_switch = false, ended = false;
+        std::string until;  // its last day, "" none
     };
     std::vector<AccessUser> acc_users;
     std::vector<std::pair<int, int>> acc_list;
@@ -260,6 +268,13 @@ struct App {
     std::string fb_summary, fb_text;
     bool fb_chat = false, fb_logs = true, fb_review = false, fb_sending = false;
     Proc fb_send;
+    std::string fb_result;  // how the last send ended, in words (the phone's controls show it)
+    double fb_result_at = 0;
+    // Answering the phone's controls: the server that asked may be the one a
+    // load or unload stops, and it dies at once (no handler for SIGTERM). Its
+    // stop waits a second, so the answer gets out to the phone first.
+    bool from_control = false;
+    double unload_at = 0;
     size_t gh_parsed = 0;
     bool gh_signed = false, gh_known = false;  // gh_known: the repositories asked since it was signed in
     std::string gh_login, gh_install, gh_code, gh_url, gh_problem, gh_file;
@@ -789,6 +804,10 @@ void access_read() {
         au.max_reply = (int64_t)u["max_reply"].num(0);
         au.today = (int64_t)u["today"].num(0);
         au.keys = (int)u["keys"].a.size();
+        for (const ts5::Json &m : u["models"].a) au.models.push_back(m.str());
+        au.may_switch = u["may_switch"].boolean(false);
+        au.until = u["until"].str();
+        au.ended = u["ended"].boolean(false);
         // The TV app's keys are its own: no users there.
         if (k == ACC_TV && !au.owner) continue;
         g->acc_list.push_back({(int)g->acc_users.size(), -1});
@@ -831,6 +850,14 @@ std::string grouped(int64_t n) {
     return out;
 }
 // What a user may do, in a few words.
+// A user's models in a row: the first two, and how many more.
+std::string models_text(const std::vector<std::string> &m) {
+    std::string out;
+    for (size_t i = 0; i < m.size() && i < 2; i++) out += (i ? ", " : "") + m[i];
+    if (m.size() > 2) out += fmt(" and %zu more", m.size() - 2);
+    return out;
+}
+
 std::string acc_user_summary(const App::AccessUser &u) {
     if (u.owner) return "you: everything, ts5-tui and the browser terminal too";
     std::string out = u.web_search ? "chat + web search" : "chat only";
@@ -839,6 +866,9 @@ std::string acc_user_summary(const App::AccessUser &u) {
     else if (u.today > 0) out += " · " + grouped(u.today) + " tokens today";
     if (u.max_reply > 0) out += " · replies up to " + grouped(u.max_reply);
     if (u.owner_reads) out += " · you may read its chats";
+    if (!u.models.empty()) out += fmt(" · %zu %s", u.models.size(), u.models.size() == 1 ? "model" : "models");
+    if (u.may_switch) out += " · may switch the model";
+    if (!u.until.empty() && !u.ended) out += " · until " + u.until;
     return out;
 }
 
@@ -1221,6 +1251,7 @@ void load_model(const ModelFile &m, bool again = false, int ctx_now = -1) {
                " > tui-serve.log 2>&1 < /dev/null & echo $! > tui-serve.pid)";
         how = "ts5 serve";
     }
+    if (g->from_control && s.online) cmd = "sleep 1; " + cmd;
     g->loader.start(cmd, "load " + m.name);
     g->load_target = api_id(m.name);
     g->load_t0 = now_s();
@@ -3651,8 +3682,10 @@ void draw_access() {
             s.put(x0 + 2, y, fit(u.name, user_w - 1), Style(u.on ? t.accent : t.dim, row.bg, BOLD));
             std::string what = acc_user_summary(u);
             if (!u.on) what = "paused · " + what;
+            else if (u.ended) what = "ended " + u.until + " · " + what;
             what += fmt(" · %d %s", u.keys, u.keys == 1 ? "key" : "keys");
-            s.put(x0 + 2 + user_w, y, fit(what, w - user_w - 4), Style(u.on ? t.fg : t.warn, row.bg, u.on ? 0 : ITALIC));
+            const bool in = u.on && !u.ended;
+            s.put(x0 + 2 + user_w, y, fit(what, w - user_w - 4), Style(in ? t.fg : t.warn, row.bg, in ? 0 : ITALIC));
             continue;
         }
         const App::AccessKey &key = g->acc_keys[(size_t)ki];
@@ -3706,10 +3739,59 @@ void draw_access() {
 
 // ---- Access: one user's permissions ----
 
-constexpr int kEdRows = 9;  // preset, web search, app tools, owner reads, tokens a day, longest reply, paused, share, a key
-constexpr int kEdShare = 7;
+// preset, web search, app tools, models, may switch, owner reads, tokens a
+// day, longest reply, last day, paused, share, a key
+constexpr int kEdRows = 12;
+constexpr int kEdModels = 3, kEdSwitch = 4, kEdReads = 5, kEdTokens = 6, kEdReply = 7, kEdUntil = 8, kEdPaused = 9, kEdShare = 10;
 const int64_t kTokensDay[] = {0, 10000, 25000, 50000, 100000, 250000, 1000000};
 const int64_t kMaxReply[] = {0, 500, 1000, 2000, 4000, 8000};
+
+// A user's page, row by row (what ts5-tui draws, and the phone's
+// controls show).
+struct UserRow {
+    std::string label, value, note;
+    bool warn;
+};
+std::vector<UserRow> user_rows(const App::AccessUser &u) {
+    const auto limit = [](int64_t n, const char *unit) { return n > 0 ? grouped(n) + " " + unit : std::string("no limit"); };
+    return {
+        {"Preset", u.web_search ? "Chat + web search" : "Chat only",
+         "the chat page and apps with " + u.name + "'s key; never ts5-tui or the browser terminal", false},
+        {"Web search", u.web_search ? "on" : "off", "ts5's own web search when a chat needs it", false},
+        {"Apps' own tools", u.app_tools ? "on" : "off",
+         "an editor's tools (files, commands), which the editor runs on " + u.name + "'s own machine", false},
+        {"Models", u.models.empty() ? "all" : models_text(u.models),
+         u.models.empty() ? "any model loaded; Enter picks some" : "other models loaded: " + u.name + " is told which are theirs",
+         false},
+        {"May switch model", u.may_switch ? "yes" : "no",
+         u.may_switch ? u.name + " loads one of their models from the chat page (everyone's chats then use it)"
+                      : "no: " + u.name + " uses the model you load",
+         false},
+        {"You read the chats", u.owner_reads ? "yes" : "no",
+         u.owner_reads ? "under Chats on your chat page. " + u.name + " sees this in Settings there"
+                       : "no: " + u.name + "'s chats are " + u.name + "'s alone (shown in Settings on the chat page)",
+         false},
+        {"Tokens a day", limit(u.tokens_day, "tokens"),
+         grouped(u.today) + " today (prompts read and replies); over it, apps are told to wait until tomorrow", false},
+        {"Longest reply", limit(u.max_reply, "tokens"), "whatever the app asks for", false},
+        {"Last day", u.until.empty() ? "none" : u.until,
+         u.until.empty() ? "no end; ←→ sets one, a week at a time"
+         : u.ended       ? "ended: none of " + u.name + "'s keys gets in (the chats stay)"
+                         : "after it none of " + u.name + "'s keys gets in (the chats stay)",
+         u.ended},
+        {"Paused", u.on ? "no" : "yes",
+         u.on ? "paused, none of " + u.name + "'s keys gets in; the chats stay" : "none of " + u.name + "'s keys gets in now",
+         !u.on},
+        // Tailscale (ts5 share, engine/src/tsshare.h): the way, and when
+        // to choose it, before Enter makes the invite.
+        {"Share by Tailscale", g->acc_share_way == 0 ? "Only this PS5" : "Join my tailnet",
+         g->acc_share_way == 0
+             ? "family, friends: own Tailscale account, reach this PS5 only, nothing else of yours"
+             : "someone you trust with all your devices: they join your tailnet and reach all of it",
+         g->acc_share_way == 1},
+        {"A key for " + u.name, "Enter", "a new key, as QR codes: the phone opens the chat page signed in", false},
+    };
+}
 
 void draw_access_user() {
     Screen &s = g->scr;
@@ -3723,37 +3805,11 @@ void draw_access_user() {
     s.put(x + 2, y, fit("what " + u.name + " may do · from the next request, on all " + u.name + "'s keys", w - (x + 2 - x0)),
           S(t.dim));
     y += 2;
-    struct Row {
-        std::string label, value, note;
-        bool warn;
-    };
-    const auto limit = [](int64_t n, const char *unit) { return n > 0 ? grouped(n) + " " + unit : std::string("no limit"); };
-    std::vector<Row> rows = {
-        {"Preset", u.web_search ? "Chat + web search" : "Chat only",
-         "the chat page and apps with " + u.name + "'s key; never ts5-tui or the browser terminal", false},
-        {"Web search", u.web_search ? "on" : "off", "ts5's own web search when a chat needs it", false},
-        {"Apps' own tools", u.app_tools ? "on" : "off",
-         "an editor's tools (files, commands), which the editor runs on " + u.name + "'s own machine", false},
-        {"You read the chats", u.owner_reads ? "yes" : "no",
-         u.owner_reads ? "under Chats on your chat page. " + u.name + " sees this in Settings there"
-                       : "no: " + u.name + "'s chats are " + u.name + "'s alone (shown in Settings on the chat page)",
-         false},
-        {"Tokens a day", limit(u.tokens_day, "tokens"),
-         grouped(u.today) + " today (prompts read and replies); over it, apps are told to wait until tomorrow", false},
-        {"Longest reply", limit(u.max_reply, "tokens"), "whatever the app asks for", false},
-        {"Paused", u.on ? "no" : "yes",
-         u.on ? "paused, none of " + u.name + "'s keys gets in; the chats stay" : "none of " + u.name + "'s keys gets in now",
-         !u.on},
-        // Tailscale (ts5 share, engine/src/tsshare.h): the way, and when
-        // to choose it, before Enter makes the invite.
-        {"Share by Tailscale", g->acc_share_way == 0 ? "Only this PS5" : "Join my tailnet",
-         g->acc_share_way == 0
-             ? "family, friends: own Tailscale account, reach this PS5 only, nothing else of yours"
-             : "someone you trust with all your devices: they join your tailnet and reach all of it",
-         g->acc_share_way == 1},
-        {"A key for " + u.name, "Enter", "a new key, as QR codes: the phone opens the chat page signed in", false},
-    };
-    for (int i = 0; i < kEdRows && y < s.h - 4; i++) {
+    const std::vector<UserRow> rows = user_rows(u);
+    // Rows of two lines; on a short screen they scroll to the one chosen.
+    const int fit_rows = std::max(1, (s.h - 5 - y) / 2);
+    const int first = std::max(0, std::min(g->acc_edit_sel - fit_rows + 1, kEdRows - fit_rows));
+    for (int i = first; i < kEdRows && y < s.h - 4; i++) {
         const bool on = g->acc_edit_sel == i && !g->acc_typing;
         const Style row = on ? Style(t.fg, t.panel2) : Style(t.fg, t.bg);
         s.fill(x0, y, w, 2, row);
@@ -5400,7 +5456,7 @@ bool access_do(const std::string &args, const std::string &done) {
 // A new key: made, and shown the one time it can be, plain, to select by
 // hand; the key alone goes to the clipboard where the terminal takes one.
 // (Not to copied.txt, where copies otherwise go: a key is kept nowhere.)
-void access_new(const std::string &name) {
+void access_new(const std::string &name, bool here = true) {
     ts5::Json j;
     std::string why;
     const std::string uid = g->acc_for_user.empty() ? "owner" : g->acc_for_user;
@@ -5442,7 +5498,7 @@ void access_new(const std::string &name) {
     } else {
         text += "In the app, as an OpenAI-compatible server:\n  address  " + at + "\n  API key  the key above\n";
     }
-    const bool sent = to_clipboard(key);
+    const bool sent = here && to_clipboard(key);
     // Codes that carry the key (after #, which no server is sent): the
     // phone's camera opens the chat page, or the browser terminal, signed
     // in, with nothing to type. Then the address and the key, for an app.
@@ -5495,6 +5551,38 @@ void access_new(const std::string &name) {
     g->qr_plain_title = "the new key";
 }
 
+bool access_do_users(const std::string &args, const std::string &done);
+
+// Asks before a user goes: their keys, any Tailscale share, their chats.
+void ask_remove_user(const App::AccessUser &u) {
+    g->ask_title = " Remove " + u.name + "? ";
+    g->ask_text = u.name + "'s " + std::to_string(u.keys) + (u.keys == 1 ? " key stops" : " keys stop") +
+                  " working, any Tailscale share made for " + u.name + " ends, and " + u.name +
+                  "'s chats on this machine are deleted. To stop " + u.name +
+                  " for a while, pause instead (P). Remove " + u.name + "?";
+    g->ask_yes = [u] {
+        // Their Tailscale invites first (ts5 share revoke): what is
+        // left for you (someone who joined the tailnet) is said.
+        ts5::Json j;
+        std::string why;
+        if (!keys_cmd(g->acc_file, "revoke " + shell_quote(u.id), j, why, "share") &&
+            why.find("gave no answer") == std::string::npos) {
+            show_toast(u.name + " was kept: " + why, g->th->bad, 9);
+            return;
+        }
+        const std::string note = j["note"].str();
+        access_do_users("remove " + shell_quote(u.id) + " --forget", u.name + ": removed" + (note.empty() ? "" : ". " + note));
+    };
+}
+
+// Asks before a key goes for good.
+void ask_remove_key(const App::AccessKey &key) {
+    g->ask_title = " Remove this key? ";
+    g->ask_text = "The app that uses \"" + key.name + "\" can't get in after that, and the key can't be brought back. "
+                  "To stop it for a while, turn it off instead (Enter). Remove it?";
+    g->ask_yes = [key] { access_do("remove " + key.id, key.name + ": removed"); };
+}
+
 // Runs "ts5 users ARGS" on the page's file and reads the users again.
 bool access_do_users(const std::string &args, const std::string &done) {
     ts5::Json j;
@@ -5504,6 +5592,72 @@ bool access_do_users(const std::string &args, const std::string &done) {
     else if (!done.empty()) show_toast(done, g->th->good, 5);
     access_read();
     return ok;
+}
+
+// A user's last day moved by days (from none: today, then days on); one
+// at or before today going back is none again.
+std::string step_day(const std::string &until, int days) {
+    const time_t now = time(nullptr);
+    time_t at = now;
+    if (!until.empty()) {
+        struct tm tm {};
+        if (sscanf(until.c_str(), "%d-%d-%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday) == 3) {
+            tm.tm_year -= 1900;
+            tm.tm_mon -= 1;
+            tm.tm_hour = 12;
+            tm.tm_isdst = -1;
+            at = mktime(&tm);
+        }
+    }
+    if (until.empty() && days < 0) return "none";
+    at += (time_t)days * 86400;
+    struct tm tm {}, today {};
+    localtime_r(&at, &tm);
+    localtime_r(&now, &today);
+    char b[16], t[16];
+    strftime(b, sizeof b, "%Y-%m-%d", &tm);
+    strftime(t, sizeof t, "%Y-%m-%d", &today);
+    if (days < 0 && strcmp(b, t) <= 0) return "none";
+    return b;
+}
+
+// Which models a user may use: a pick of the models here, Enter on one
+// adds or takes it away (the pick comes back), All lets any in.
+void pick_user_models(const std::string &id, int sel) {
+    const App::AccessUser *u = acc_user(id);
+    if (!u) return;
+    scan_models();
+    std::vector<std::string> names;
+    for (const ModelFile &m : g->models)
+        if (std::find(names.begin(), names.end(), api_id(m.name)) == names.end()) names.push_back(api_id(m.name));
+    for (const std::string &m : u->models)  // one not here (any more) can still be taken away
+        if (std::find(names.begin(), names.end(), m) == names.end()) names.push_back(m);
+    const std::vector<std::string> now = u->models;
+    const std::string who = u->name;
+    g->ask_title = " Models " + who + " may use ";
+    g->ask_text = "Enter on a model adds it or takes it away. With another model loaded, " + who +
+                  " is told which are theirs" + (u->may_switch ? " and may load one." : ".");
+    g->pick.clear();
+    g->pick.push_back({std::string(now.empty() ? "✓ " : "  ") + "All models", "any model, those downloaded later too", [id] {
+                           access_do_users("set " + shell_quote(id) + " models=*", "");
+                           pick_user_models(id, 0);
+                       }});
+    for (size_t i = 0; i < names.size(); i++) {
+        const std::string n = names[i];
+        const bool in = std::find(now.begin(), now.end(), n) != now.end();
+        g->pick.push_back({(in ? "✓ " : "  ") + n, in ? "theirs: Enter takes it away" : "", [id, n, now, in, i] {
+                               std::vector<std::string> next = now;
+                               if (in) next.erase(std::find(next.begin(), next.end(), n));
+                               else next.push_back(n);
+                               std::string list;
+                               for (const std::string &m : next) list += (list.empty() ? "" : ",") + m;
+                               access_do_users("set " + shell_quote(id) + " " + shell_quote("models=" + (list.empty() ? "*" : list)),
+                                               next.empty() ? "None left: any model again" : "");
+                               pick_user_models(id, (int)i + 1);
+                           }});
+    }
+    g->pick.push_back({"Done", "", nullptr});
+    g->pick_sel = std::min(sel, (int)g->pick.size() - 1);
 }
 
 // The next value of a list's (dir +1 or -1), from the one now.
@@ -5581,12 +5735,35 @@ void share_invite(const App::AccessUser &u, const std::string &token) {
     g->qr_plain_title = " Tailscale invite ";
 }
 
+// A row of a user's page changed: dir -1 (←) or +1 (→, Enter, space);
+// enter for Enter itself. False for the last row (a key: its name typed
+// first) and rows out of range. ts5-tui's keys and the phone's controls.
+bool user_row_do(const App::AccessUser &u, int row, int dir, bool enter) {
+    const std::string id = shell_quote(u.id);
+    if (row == 0) access_do_users("set " + id + (u.web_search ? " preset=chat" : " preset=chat-web"), "");
+    else if (row == 1) access_do_users("set " + id + (u.web_search ? " web_search=off" : " web_search=on"), "");
+    else if (row == 2) access_do_users("set " + id + (u.app_tools ? " app_tools=off" : " app_tools=on"), "");
+    else if (row == kEdModels) pick_user_models(u.id, 0);
+    else if (row == kEdSwitch) access_do_users("set " + id + (u.may_switch ? " may_switch=off" : " may_switch=on"), "");
+    else if (row == kEdReads)
+        access_do_users("set " + id + (u.owner_reads ? " owner_reads=off" : " owner_reads=on"),
+                        u.owner_reads ? u.name + "'s chats: " + u.name + "'s alone" : "You may read " + u.name + "'s chats (" + u.name + " sees so in Settings)");
+    else if (row == kEdTokens)
+        access_do_users("set " + id + " tokens_day=" + std::to_string(step_in(kTokensDay, 7, u.tokens_day, dir)), "");
+    else if (row == kEdReply)
+        access_do_users("set " + id + " max_reply=" + std::to_string(step_in(kMaxReply, 6, u.max_reply, dir)), "");
+    else if (row == kEdUntil) access_do_users("set " + id + " until=" + step_day(u.until, dir < 0 ? -7 : 7), "");
+    else if (row == kEdPaused) access_do_users("set " + id + (u.on ? " on=off" : " on=on"), "");
+    else if (row == kEdShare && !enter) g->acc_share_way = 1 - g->acc_share_way;
+    else if (row == kEdShare) share_invite(u, "");
+    else return false;
+    return true;
+}
+
 void key_access_user(const Event &e) {
     const App::AccessUser u = *acc_user(g->acc_edit);
     const auto letter = [&](char c) { return e.key == K_CHAR && e.ch.size() == 1 && tolower(e.ch[0]) == c; };
-    const int dir = e.key == K_LEFT ? -1 : 1;
     const bool flip = e.key == K_ENTER || e.key == K_LEFT || e.key == K_RIGHT || letter(' ');
-    const std::string id = shell_quote(u.id);
     if (e.key == K_ESC) {
         g->acc_edit.clear();
         return;
@@ -5594,20 +5771,8 @@ void key_access_user(const Event &e) {
     if (e.key == K_UP) g->acc_edit_sel = (g->acc_edit_sel + kEdRows - 1) % kEdRows;
     else if (e.key == K_DOWN) g->acc_edit_sel = (g->acc_edit_sel + 1) % kEdRows;
     else if (!flip) nav_key(e);
-    else if (g->acc_edit_sel == 0) access_do_users("set " + id + (u.web_search ? " preset=chat" : " preset=chat-web"), "");
-    else if (g->acc_edit_sel == 1) access_do_users("set " + id + (u.web_search ? " web_search=off" : " web_search=on"), "");
-    else if (g->acc_edit_sel == 2) access_do_users("set " + id + (u.app_tools ? " app_tools=off" : " app_tools=on"), "");
-    else if (g->acc_edit_sel == 3)
-        access_do_users("set " + id + (u.owner_reads ? " owner_reads=off" : " owner_reads=on"),
-                        u.owner_reads ? u.name + "'s chats: " + u.name + "'s alone" : "You may read " + u.name + "'s chats (" + u.name + " sees so in Settings)");
-    else if (g->acc_edit_sel == 4)
-        access_do_users("set " + id + " tokens_day=" + std::to_string(step_in(kTokensDay, 7, u.tokens_day, dir)), "");
-    else if (g->acc_edit_sel == 5)
-        access_do_users("set " + id + " max_reply=" + std::to_string(step_in(kMaxReply, 6, u.max_reply, dir)), "");
-    else if (g->acc_edit_sel == 6) access_do_users("set " + id + (u.on ? " on=off" : " on=on"), "");
-    else if (g->acc_edit_sel == kEdShare && e.key != K_ENTER) g->acc_share_way = 1 - g->acc_share_way;
-    else if (g->acc_edit_sel == kEdShare) share_invite(u, "");
-    else if (e.key == K_ENTER) {
+    else if (user_row_do(u, g->acc_edit_sel, e.key == K_LEFT ? -1 : 1, e.key == K_ENTER)) {
+    } else if (e.key == K_ENTER) {
         g->acc_typing = g->editing = true;
         g->acc_name.clear();
         g->acc_for_terminal = false;
@@ -5719,25 +5884,7 @@ void key_access(const Event &e) {
             access_do_users("set " + shell_quote(u.id) + (u.on ? " on=off" : " on=on"),
                            u.name + (u.on ? ": paused. None of the keys gets in; the chats stay" : ": on again"));
         } else {
-            g->ask_title = " Remove " + u.name + "? ";
-            g->ask_text = u.name + "'s " + std::to_string(u.keys) + (u.keys == 1 ? " key stops" : " keys stop") +
-                          " working, any Tailscale share made for " + u.name + " ends, and " + u.name +
-                          "'s chats on this machine are deleted. To stop " + u.name +
-                          " for a while, pause instead (P). Remove " + u.name + "?";
-            g->ask_yes = [u] {
-                // Their Tailscale invites first (ts5 share revoke): what is
-                // left for you (someone who joined the tailnet) is said.
-                ts5::Json j;
-                std::string why;
-                if (!keys_cmd(g->acc_file, "revoke " + shell_quote(u.id), j, why, "share") &&
-                    why.find("gave no answer") == std::string::npos) {
-                    show_toast(u.name + " was kept: " + why, g->th->bad, 9);
-                    return;
-                }
-                const std::string note = j["note"].str();
-                access_do_users("remove " + shell_quote(u.id) + " --forget",
-                                u.name + ": removed" + (note.empty() ? "" : ". " + note));
-            };
+            ask_remove_user(u);
         }
     } else if (flip && g->acc_sel == 0) {
         if (k != ACC_OWN) {
@@ -5845,10 +5992,7 @@ void key_access(const Event &e) {
             show_toast("The TV app removes its keys: its Settings page, under Apps", g->th->warn, 6);
             return;
         }
-        g->ask_title = " Remove this key? ";
-        g->ask_text = "The app that uses \"" + key.name + "\" can't get in after that, and the key can't be brought back. "
-                      "To stop it for a while, turn it off instead (Enter). Remove it?";
-        g->ask_yes = [key] { access_do("remove " + key.id, key.name + ": removed"); };
+        ask_remove_key(key);
     } else {
         nav_key(e);
     }
@@ -6218,13 +6362,16 @@ void feedback_follow() {
     g->fb_send.partial.clear();
     unlink((state_dir() + "/feedback-send.md").c_str());
     ts5::Json j;
+    g->fb_result_at = now_s();
     if (ts5::Json::parse(line, j) && j["ok"].boolean(false)) {
-        show_toast("Sent, thank you. Report " + j["id"].str() + ": only TokenStation's developers can read it", g->th->good, 10);
+        g->fb_result = "Sent, thank you. Report " + j["id"].str() + ": only TokenStation's developers can read it";
+        show_toast(g->fb_result, g->th->good, 10);
         chat_note(g->chat, "Feedback sent (report **" + j["id"].str() + "**). Only TokenStation's developers can read it; "
                            "it is never posted anywhere public.");
         return;
     }
     const std::string why = j["error"].str().empty() ? "no answer" : j["error"].str();
+    g->fb_result = "Not sent: " + why + ". Try again, or Save to a file";
     show_toast("Not sent: " + why + ". /feedback again, or Save to a file", g->th->bad, 10);
 }
 
@@ -6466,6 +6613,625 @@ void handle(const Event &e) {
 
 // ---- the loop ----
 
+// ---- the phone's controls (control.h): ts5 serve's /ts5/control, for the owner's key ----
+
+ts5::Json cj_num(double v) {
+    ts5::Json j;
+    j.type = ts5::Json::NUM;
+    j.n = std::isfinite(v) ? v : 0;
+    char b[32];
+    if (j.n == std::floor(j.n) && std::fabs(j.n) < 9e15) snprintf(b, sizeof b, "%.0f", j.n);
+    else snprintf(b, sizeof b, "%.3f", j.n);
+    j.s = b;
+    return j;
+}
+ts5::Json cj_bool(bool v) {
+    ts5::Json j;
+    j.type = ts5::Json::BOOL;
+    j.b = v;
+    return j;
+}
+ts5::Json cj_reading(const Reading &r) {
+    ts5::Json j;
+    if (r.have) j = cj_num(r.value);
+    return j;
+}
+ts5::Json cj_arr() {
+    ts5::Json j;
+    j.type = ts5::Json::ARR;
+    return j;
+}
+
+// A Settings row whose words are a secret: its words never leave ts5-tui.
+bool secret_row(const std::string &label) {
+    std::string l = label;
+    std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+    return l.find("key") != std::string::npos || l.find("token") != std::string::npos ||
+           l.find("password") != std::string::npos;
+}
+
+// What the phone draws: the server and its model, the models here and the
+// catalog's, a download or a job, the machine's readings, every Settings
+// row, and a question ts5-tui asks now (the phone answers it).
+ts5::Json control_state() {
+    using ts5::Json;
+    const ServerState sv = server();
+    Json st = Json::object();
+    st.set("app", Json::string("ts5-tui"));
+    if (g->fb_sending || (!g->fb_result.empty() && now_s() - g->fb_result_at < 120)) {
+        Json f = Json::object();
+        f.set("sending", cj_bool(g->fb_sending));
+        if (!g->fb_sending) f.set("result", Json::string(g->fb_result));
+        f.set("sent", cj_bool(g->fb_result.rfind("Sent", 0) == 0));
+        st.set("feedback", f);
+    }
+    Json s = Json::object();
+    s.set("online", cj_bool(sv.online));
+    s.set("model", Json::string(sv.model));
+    s.set("context", cj_num(sv.n_ctx));
+    s.set("own", cj_bool(own_server_pid() > 0));
+    s.set("local", cj_bool(endpoint().local()));
+    s.set("helper", Json::string(sv.helper));
+    s.set("gen_tps", cj_num(g->last_gen_tps));
+    s.set("prompt_tps", cj_num(g->last_prompt_tps));
+    s.set("why", Json::string(sv.why));
+    st.set("server", s);
+    Json ld;
+    if (!g->load_target.empty()) {
+        ld = Json::object();
+        ld.set("model", Json::string(g->load_target));
+        ld.set("secs", cj_num(now_s() - g->load_t0));
+    }
+    st.set("loading", ld);
+    st.set("load_failed", Json::string(g->load_failed));
+    Json models = cj_arr();
+    for (const ModelFile &m : g->models) {
+        Json x = Json::object();
+        x.set("name", Json::string(api_id(m.name)));
+        x.set("file", Json::string(m.name));
+        x.set("bytes", cj_num(m.size));
+        x.set("loaded", cj_bool(api_id(m.name) == sv.model));
+        x.set("tested", cj_bool(m.tested));
+        x.set("tuned", cj_bool(!m.tuned_on.empty()));
+        const std::string h = helper_of(m);
+        x.set("helper", Json::string(h == "none" ? "" : h));
+        x.set("helper_here", cj_bool(m.helper_here));
+        x.set("mine", cj_bool(access(m.dir.c_str(), W_OK) == 0));
+        models.a.push_back(x);
+    }
+    st.set("models", models);
+    Json cat = cj_arr();
+    for (const app::CatalogEntry *e : catalog_missing()) {
+        Json x = Json::object();
+        x.set("key", Json::string(e->key));
+        x.set("name", Json::string(e->name));
+        x.set("for", Json::string(e->good_for ? e->good_for : ""));
+        x.set("bytes", cj_num((double)e->bytes));
+        x.set("downloading", cj_bool(downloading(*e)));
+        cat.a.push_back(x);
+    }
+    st.set("catalog", cat);
+    Json dl;
+    if (g->dl_on && g->downloader.running()) {
+        double done = 0, total = 0, mbps = 0;
+        download_progress(done, total, mbps);
+        dl = Json::object();
+        dl.set("name", Json::string(g->dl.name));
+        dl.set("done", cj_num(done));
+        dl.set("total", cj_num(total));
+        dl.set("mbps", cj_num(mbps));
+    }
+    st.set("download", dl);
+    st.set("free_bytes", cj_num(free_bytes(download_dir())));
+    Json job;
+    if (!g->job_kind.empty() && (g->tuner.running() || !g->job_steps.empty())) {
+        job = Json::object();
+        job.set("kind", Json::string(g->job_kind));
+        job.set("model", Json::string(g->job_model));
+        job.set("running", cj_bool(g->tuner.running()));
+        job.set("summary", Json::string(g->job_summary));
+        Json steps = cj_arr();
+        for (const auto &p : g->job_steps) {
+            Json x = Json::object();
+            x.set("label", Json::string(p.label));
+            x.set("state", cj_num(p.state));
+            x.set("result", Json::string(p.result));
+            steps.a.push_back(x);
+        }
+        job.set("steps", steps);
+    }
+    st.set("job", job);
+    const Sensors &se = g->sens;
+    Json mc = Json::object();
+    mc.set("die_c", cj_reading(se.die));
+    mc.set("board_c", cj_reading(se.board));
+    mc.set("edge_c", cj_reading(se.edge));
+    mc.set("fan_pct", cj_reading(se.fan_pct));
+    mc.set("fan_rpm", cj_reading(se.fan_rpm));
+    mc.set("fan_mode", Json::string(se.fan_mode));
+    mc.set("fan_control", cj_bool(!hw_helper().empty()));
+    mc.set("gpu_busy", cj_reading(se.gpu_busy));
+    mc.set("gpu_mhz", cj_reading(se.gpu_mhz));
+    mc.set("gpu", Json::string(se.gpu_name));
+    mc.set("gtt_used", cj_num(se.gtt_used));
+    mc.set("gtt_total", cj_num(se.gtt_total));
+    mc.set("vram_used", cj_num(se.vram_used));
+    mc.set("vram_total", cj_num(se.vram_total));
+    mc.set("ram_total", cj_num(se.ram_total));
+    mc.set("ram_avail", cj_num(se.ram_avail));
+    st.set("machine", mc);
+    Json rows = cj_arr();
+    for (const SetRow &r : settings_rows()) {
+        Json x = Json::object();
+        x.set("index", cj_num((double)rows.a.size()));
+        x.set("label", Json::string(r.label));
+        x.set("value", Json::string(r.value));
+        x.set("note", Json::string(r.note));
+        x.set("change", cj_bool((bool)r.change));
+        x.set("text", cj_bool(r.text && (bool)r.set_text));
+        x.set("secret", cj_bool(secret_row(r.label)));
+        if (r.text && !secret_row(r.label)) x.set("text_value", Json::string(r.text_value));
+        rows.a.push_back(x);
+    }
+    st.set("settings", rows);
+    Json ask;
+    if (g->ask_yes || !g->pick.empty()) {
+        ask = Json::object();
+        ask.set("title", Json::string(g->ask_title));
+        ask.set("text", Json::string(g->ask_text));
+        Json picks = cj_arr();
+        for (const auto &p : g->pick) {
+            Json x = Json::object();
+            x.set("label", Json::string(p.label));
+            x.set("note", Json::string(p.note));
+            picks.a.push_back(x);
+        }
+        ask.set("picks", picks);
+    }
+    st.set("ask", ask);
+    st.set("toast", Json::string(now_s() < g->toast_until ? g->toast : std::string()));
+    return st;
+}
+
+// One request from the phone: {"do": ...}, then the state as it is after.
+// ---- Users and their keys, from the phone (the Controls page's Users) ----
+
+std::string replace_all(std::string s, const std::string &from, const std::string &to) {
+    for (size_t at = s.find(from); at != std::string::npos; at = s.find(from, at + to.size())) s.replace(at, from.size(), to);
+    return s;
+}
+
+const char *access_kind_name(int k) {
+    return k == ACC_SERVICE ? "service" : k == ACC_TV ? "tv" : k == ACC_REMOTE ? "remote" : "own";
+}
+
+// The users and their keys as the Access page has them: no key's words
+// (ts5 keeps only their SHA-256 anyway). Each user's page as its rows,
+// but for Share by Tailscale and the key row (the phone has its own).
+ts5::Json control_access() {
+    using ts5::Json;
+    Json a = Json::object();
+    a.set("kind", Json::string(access_kind_name(g->acc_kind)));
+    if (!g->acc_err.empty()) a.set("error", Json::string(g->acc_err));
+    a.set("required", cj_bool(g->acc_required));
+    a.set("writable", cj_bool(g->acc_writable));
+    Json users = cj_arr();
+    for (const App::AccessUser &u : g->acc_users) {
+        Json j = Json::object();
+        j.set("id", Json::string(u.id));
+        j.set("name", Json::string(u.name));
+        j.set("owner", cj_bool(u.owner));
+        j.set("on", cj_bool(u.on));
+        j.set("ended", cj_bool(u.ended));
+        j.set("until", Json::string(u.until));
+        j.set("summary", Json::string(acc_user_summary(u)));
+        Json keys = cj_arr();
+        for (const App::AccessKey &k : g->acc_keys) {
+            if (k.user != u.id) continue;
+            Json kj = Json::object();
+            kj.set("id", Json::string(k.id));
+            kj.set("name", Json::string(k.name));
+            kj.set("on", cj_bool(k.on));
+            kj.set("created", cj_num((double)k.created));
+            kj.set("used", cj_num((double)k.used));
+            keys.a.push_back(kj);
+        }
+        j.set("keys", keys);
+        if (!u.owner) {
+            Json rows = cj_arr();
+            const std::vector<UserRow> r = user_rows(u);
+            for (int i = 0; i < kEdRows - 1; i++) {
+                if (i == kEdShare) continue;  // on hold, and ts5-tui's alone
+                Json rj = Json::object();
+                rj.set("row", cj_num(i));
+                rj.set("label", Json::string(r[(size_t)i].label));
+                rj.set("value", Json::string(r[(size_t)i].value));
+                // (ts5-tui's keys, as the phone's buttons)
+                std::string note = replace_all(r[(size_t)i].note, "Enter picks some", "Choose picks some");
+                note = replace_all(note, "←→ sets one", "› sets one");
+                rj.set("note", Json::string(note));
+                if (r[(size_t)i].warn) rj.set("warn", cj_bool(true));
+                if (i == kEdModels) rj.set("pick", cj_bool(true));
+                rows.a.push_back(rj);
+            }
+            j.set("rows", rows);
+        }
+        users.a.push_back(j);
+    }
+    a.set("users", users);
+    return a;
+}
+
+// A user's or key's action from the phone. False with why to refuse.
+// extra: what the answer carries besides the state (a new user's id, a
+// new key's QR codes).
+bool control_users(const std::string &what, const ts5::Json &req, ts5::Json &extra, std::string &why) {
+    using ts5::Json;
+    access_read();
+    const AccessKind k = (AccessKind)g->acc_kind;
+    if (what == "users") return true;
+    if (k == ACC_REMOTE) {
+        why = "this ts5-tui works with a server on another machine: its users are that machine's";
+        return false;
+    }
+    if (k == ACC_TV) {
+        why = "the TV app's keys are made on its own Settings page";
+        return false;
+    }
+    if (!g->acc_err.empty()) {
+        why = g->acc_err;
+        return false;
+    }
+    const auto clean = [](std::string t) {
+        std::string out;
+        for (char c : t)
+            if ((unsigned char)c >= 0x20 && c != 0x7f) out += c;
+        while (!out.empty() && out.back() == ' ') out.pop_back();
+        while (!out.empty() && out.front() == ' ') out.erase(out.begin());
+        return out.size() > 60 ? out.substr(0, 60) : out;
+    };
+    const App::AccessUser *u = nullptr;
+    if (what.rfind("user_", 0) == 0) {
+        if (what != "user_new") {
+            u = acc_user(req["id"].str());
+            if (!u) {
+                why = "no such user here (removed already?)";
+                return false;
+            }
+            if (u->owner) {
+                why = "the owner always has everything";
+                return false;
+            }
+        }
+    }
+    if (what == "user_new") {
+        const std::string name = clean(req["name"].str());
+        if (name.empty()) {
+            why = "a new user needs a name";
+            return false;
+        }
+        Json j;
+        if (!keys_cmd(g->acc_file, "new " + shell_quote(name) + " --preset chat", j, why, "users")) return false;
+        access_read();
+        extra.set("made", Json::string(j["made"].str()));
+        show_toast(name + ": added from the phone, chat only", g->th->good, 6);
+    } else if (what == "user_row") {
+        const int row = (int)req["row"].num(-1);
+        if (row < 0 || row >= kEdRows - 1 || row == kEdShare || user_rows(*u)[(size_t)row].label != req["label"].str()) {
+            why = "no such row on " + u->name + "'s page";
+            return false;
+        }
+        const App::AccessUser copy = *u;
+        user_row_do(copy, row, req["dir"].num(1) < 0 ? -1 : 1, false);
+    } else if (what == "user_remove") {
+        ask_remove_user(*u);
+    } else if (what == "key_new") {
+        const std::string uid = req["user"].str("owner");
+        const App::AccessUser *who = acc_user(uid);
+        if (uid != "owner" && !who) {
+            why = "no such user here (removed already?)";
+            return false;
+        }
+        const std::string name = clean(req["name"].str());
+        g->acc_for_user = uid;
+        g->qr.clear();
+        access_new(name.empty() ? "phone" : name, false);
+        g->acc_for_user = "owner";
+        if (g->qr.empty() || !g->qr_copy) return true;  // not made: the toast says why
+        // The codes go to the phone alone: never left on this screen.
+        Json made = Json::object();
+        made.set("title", Json::string(g->qr_title));
+        Json notes = cj_arr();
+        for (std::string n : g->qr_notes) {
+            n = replace_all(n, "(Other devices or Tailscale, above)", "(ts5-tui's Access: Other devices, or Tailscale)");
+            n = replace_all(n, "(Tailscale, above, reaches it from anywhere)", "(Tailscale reaches it from anywhere)");
+            n = replace_all(n, " ←→ for ", " The buttons above: ");
+            notes.a.push_back(Json::string(n));
+        }
+        made.set("notes", notes);
+        Json codes = cj_arr();
+        for (const App::Qr &q : g->qr) {
+            Json c = Json::object();
+            c.set("label", Json::string(q.label));
+            c.set("text", Json::string(q.data));
+            Json rows = cj_arr();
+            for (const std::vector<bool> &r : qr_modules(q.data)) {
+                std::string line;
+                for (bool b : r) line += b ? '1' : '0';
+                rows.a.push_back(Json::string(line));
+            }
+            c.set("modules", rows);
+            codes.a.push_back(c);
+        }
+        made.set("codes", codes);
+        extra.set("made_key", made);
+        const std::string whose = who && !who->owner ? who->name + "'s" : "Your";
+        qr_close();
+        show_toast(whose + " new key \"" + (name.empty() ? std::string("phone") : name) +
+                       "\": made from the phone, its QR codes shown on the phone only",
+                   g->th->good, 8);
+    } else if (what == "key_on" || what == "key_remove") {
+        const App::AccessKey *key = nullptr;
+        for (const App::AccessKey &x : g->acc_keys)
+            if (x.id == req["id"].str()) key = &x;
+        if (!key) {
+            why = "no such key here (removed already?)";
+            return false;
+        }
+        const App::AccessKey copy = *key;
+        if (what == "key_remove") ask_remove_key(copy);
+        else if (req["on"].boolean(true) != copy.on) access_do(std::string(copy.on ? "off " : "on ") + copy.id, copy.name + (copy.on ? ": off" : ": on"));
+    } else {
+        why = "unknown: " + what;
+        return false;
+    }
+    return true;
+}
+
+std::string control_answer(const std::string &text) {
+    using ts5::Json;
+    Json req, out, extra = Json::object();
+    auto refuse = [&](const std::string &why) {
+        Json e = Json::object();
+        e.set("error", Json::string(why));
+        return e.dump();
+    };
+    if (!Json::parse(text, req) || req.type != Json::OBJ) return refuse("a request is a JSON object");
+    const std::string what = req["do"].str("state");
+    const std::string toast_before = g->toast;
+    const double toast_until_before = g->toast_until;
+    struct FromControl {
+        FromControl() { g->from_control = true; }
+        ~FromControl() { g->from_control = false; }
+    } from_control;
+    std::string done;
+    if (what == "state") {
+    } else if (what == "load" || what == "delete" || what == "helper") {
+        scan_models();
+        const std::string name = req["model"].str();
+        const ModelFile *m = nullptr;
+        for (const ModelFile &x : g->models)
+            if (api_id(x.name) == name) m = &x;
+        if (!m) return refuse("no model called " + name + " here");
+        const ModelFile copy = *m;
+        // quiet (a user's switch, /ts5/switch): ts5-tui asks nobody; a
+        // model it would ask the owner about is refused, and a question
+        // the owner hasn't answered yet stays theirs.
+        const bool quiet = !req["quiet"].str().empty();
+        const bool asking = g->ask_yes || !g->pick.empty();
+        if (what == "load" && quiet && asking) return refuse("ts5-tui is waiting for the owner's answer to something else");
+        // listed: the owner chose this model for the one switching (on the
+        // user's list, or the owner's own pick): no "helper-size?" question.
+        if (what == "load" && quiet && !req["listed"].str().empty()) load_model(copy);
+        else if (what == "load") load_or_ask(copy);
+        if (what == "load" && quiet && (g->ask_yes || !g->pick.empty())) {
+            const std::string q = g->ask_title;
+            g->ask_yes = nullptr;
+            g->pick.clear();
+            return refuse("ts5-tui asks the owner first about that one (" + q + ")");
+        }
+        if (what == "load" && !req["by"].str().empty() && g->load_target == name)
+            show_toast(req["by"].str() + " switched the model to " + name, g->th->accent, 8);
+        else if (what == "delete") delete_model(copy);
+        else if (helper_of(copy).empty() || helper_of(copy) == "none") show_toast("This model has no helper to get", g->th->dim, 3);
+        else if (copy.helper_here) show_toast("Its helper is already here", g->th->dim, 3);
+        else if (!helper_entry(copy)) show_toast("ts5-tui has no download for that helper", g->th->warn, 5);
+        else download_helper(copy);
+    } else if (what == "unload") {
+        // ts5-tui's own server: stopped in a second (the main loop), since
+        // the server that asked goes with it. Any other: /unload says why not.
+        const ServerState sv = server();
+        if (own_server_pid() > 0) {
+            g->unload_at = now_s() + 1;
+            show_toast("Unloading " + (sv.model.empty() ? std::string("the model") : sv.model) + "…", g->th->accent, 3);
+        } else {
+            run_command("/unload");
+        }
+    } else if (what == "download") {
+        const std::string key = req["key"].str();
+        const app::CatalogEntry *e = nullptr;
+        for (const app::CatalogEntry *c : catalog_missing())
+            if (key == c->key) e = c;
+        if (!e) return refuse("no catalog model " + key + " left to download");
+        start_download(*e);
+    } else if (what == "download_stop") {
+        if (g->downloader.running()) {
+            g->downloader.stop();
+            show_toast("Download stopped: what's there is kept for next time", g->th->warn, 4);
+        }
+    } else if (what == "job_stop") {
+        if (g->tuner.running()) {
+            g->tuner.stop();
+            g->tuner.lines.push_back("Stopped.");
+        }
+    } else if (what == "fan") {
+        const std::string mode = req["mode"].str();
+        if (mode != "auto" && mode != "cool" && mode != "early" && mode != "max")
+            return refuse("the fan's modes are auto, cool, early and max");
+        set_fan(mode);
+    } else if (what == "setting") {
+        // By its place and its label (two rows may share one), else the
+        // first with that label.
+        const std::string label = req["label"].str();
+        auto rows = settings_rows();
+        const SetRow *r = nullptr;
+        const double at = req["index"].num(-1);
+        if (at >= 0 && at < rows.size() && rows[(size_t)at].label == label) r = &rows[(size_t)at];
+        for (const SetRow &x : rows)
+            if (!r && x.label == label) r = &x;
+        if (!r) return refuse("no setting called " + label);
+        if (req["text"].type == Json::STR) {
+            if (!r->text || !r->set_text) return refuse(label + " takes no words");
+            r->set_text(req["text"].str());
+        } else if (r->change) {
+            r->change(req["dir"].num(1) < 0 ? -1 : 1);
+        } else {
+            return refuse(label + " can't be changed here");
+        }
+    } else if (what == "answer") {
+        if (g->ask_yes) {
+            auto f = g->ask_yes;
+            g->ask_yes = nullptr;
+            if (req["yes"].boolean(false)) f();
+        } else if (!g->pick.empty()) {
+            const int n = (int)g->pick.size();
+            const int i = (int)req["pick"].num(n - 1);
+            if (i < 0 || i >= n) return refuse("no such answer");
+            const auto run = g->pick[(size_t)i].run;
+            g->pick.clear();
+            if (run) run();
+        }
+    } else if (what == "rescan") {
+        scan_models();
+    } else if (what == "feedback_prepare") {
+        // /feedback from the phone: the report made here, as ts5-tui makes
+        // it, and shown there in full before anything is sent.
+        if (g->fb_sending) return refuse("the last report is still being sent");
+        std::string w = req["summary"].str();
+        while (!w.empty() && isspace((unsigned char)w.back())) w.pop_back();
+        while (!w.empty() && isspace((unsigned char)w.front())) w.erase(0, 1);
+        if (w.empty()) return refuse("write what went wrong first (and an email, if you'd like a reply)");
+        if (w.size() > 8000) {  // at a character's start
+            size_t n = 8000;
+            while (n > 0 && ((unsigned char)w[n] & 0xC0) == 0x80) n--;
+            w.resize(n);
+        }
+        g->fb_summary = w;
+        g->fb_chat = req["chat"].boolean(false);
+        g->fb_logs = req["logs"].boolean(true);
+        if (g->fb_logs && g->logs_src.empty()) pick_logs();
+        const std::string before = g->toast;
+        if (!feedback_prepare()) return refuse(g->toast != before ? g->toast : "the report couldn't be made");
+        extra.set("report", Json::string(g->fb_text));
+    } else if (what == "feedback_send" || what == "feedback_save") {
+        // Only the report the phone was shown (its length said back).
+        if (g->fb_text.empty()) return refuse("no report made yet");
+        if ((size_t)req["length"].num(-1) != g->fb_text.size()) return refuse("the report changed since it was shown: make it again");
+        if (what == "feedback_save") {
+            feedback_save();
+        } else {
+            if (g->fb_sending) return refuse("the last report is still being sent");
+            g->fb_result.clear();
+            feedback_send();
+        }
+    } else if (what == "users" || what.rfind("user_", 0) == 0 || what.rfind("key_", 0) == 0) {
+        std::string why;
+        if (!control_users(what, req, extra, why)) return refuse(why);
+    } else {
+        return refuse("unknown: " + what);
+    }
+    out = control_state();
+    for (auto &kv : extra.o) out.set(kv.first, kv.second);
+    // The users with the state when asked for (the Users tab), read again
+    // every 2 s at most; with every users' action.
+    const bool users = req["users"].boolean(false) || what == "users" || what.rfind("user_", 0) == 0 || what.rfind("key_", 0) == 0;
+    if (users) {
+        if (now_s() - g->acc_at > 2) access_read();
+        out.set("access", control_access());
+    }
+    // What the action itself said (a toast it showed), if anything new.
+    if (g->toast != toast_before || g->toast_until != toast_until_before) out.set("said", Json::string(g->toast));
+    g->full_redraw = true;
+    return out.dump();
+}
+
+// The open chat's file as it is now (after ts5-tui wrote or opened it).
+void chat_watch_reset() {
+    g->chat_watch_id = g->chat.saved_id;
+    g->chat_watch = chat_file_state(g->chat.saved_id);
+}
+
+// The chat open here went on on the chat page (the owner's phone): its new
+// turns come in at the end, once no answer is coming here. Looked at each
+// second (a stat; the file is read only when it changed).
+void chat_follow_file() {
+    static double at = 0;
+    if (now_s() - at < 1) return;
+    at = now_s();
+    const std::string id = g->chat.saved_id;
+    if (id != g->chat_watch_id) {
+        chat_watch_reset();
+        return;
+    }
+    if (id.empty() || g->chat.busy()) return;
+    const int64_t mt = chat_file_mtime(id);
+    if (mt == g->chat_watch.mtime_ns) return;
+    if (mt == 0) {  // deleted elsewhere: it stays on screen, and is written again with the next answer
+        g->chat_watch.mtime_ns = 0;
+        return;
+    }
+    ChatFileState now;
+    const size_t before = g->chat.msgs.size();
+    if (!take_new_turns(g->chat, id, g->chat_watch.turns, now)) return;
+    g->chat_watch = now;
+    if (g->chat.msgs.size() > before) {
+        g->chat.scroll = 0;
+        g->full_redraw = true;
+        show_toast("This chat went on on the chat page: its new messages are here", g->th->accent, 5);
+    }
+}
+
+// An answer of the chat ended (done, or failed; not stopped here): the
+// server tells it to the user's phone when their browser terminal is away (in
+// the background, or closed), and does nothing otherwise
+// (engine/src/web_serve.cpp, POST /ts5/push {"tell"}; another server
+// answers 404, and that's all).
+void tell_answer_end() {
+    const Endpoint ep = endpoint();
+    if (!ep.local()) return;  // the chat's words go only to this machine's own TokenStation
+    std::string title, body;
+    static double told = 0;  // the answer told last (its start): told once
+    {
+        std::lock_guard<std::mutex> l(g->chat.mu);
+        // The answer: the last of the chat but ts5-tui's notes after it (the
+        // answer length reached, the chat full and being summarized).
+        int i = (int)g->chat.msgs.size() - 1;
+        while (i >= 0 && (g->chat.msgs[i].role == "note" || g->chat.msgs[i].role == "summary")) i--;
+        if (i < 0) return;
+        const Msg &m = g->chat.msgs[i];
+        if (m.role != "assistant" || m.stopped || m.t0 == told) return;
+        told = m.t0;
+        body = m.error.empty() ? m.content : "It stopped: " + m.error;
+        for (const Msg &x : g->chat.msgs)
+            if (x.role == "user" && !x.steer) {
+                title = x.content;
+                break;
+            }
+    }
+    const auto cut = [](std::string t, size_t n) {
+        for (char &c : t)
+            if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+        if (t.size() <= n) return t;
+        while (n > 0 && ((unsigned char)t[n] & 0xC0) == 0x80) n--;
+        return t.substr(0, n);
+    };
+    ts5::Json tell = ts5::Json::object(), j = ts5::Json::object();
+    tell.set("title", ts5::Json::string(cut(title, 120)));
+    tell.set("body", ts5::Json::string(cut(body, 400)));
+    j.set("tell", tell);
+    std::thread([ep, req = j.dump()] { http(ep, "POST", "/ts5/push", req, 3000); }).detach();
+}
+
 void tick() {
     const double t = now_s();
     if (t - g->sens_at >= 1.0) {
@@ -6494,6 +7260,17 @@ void tick() {
     // on its page show up (every 10 s while that page's QR code is up).
     if (g->cur == CONNECTORS && g->gh_signed && !g->gh_status.running() && t - g->gh_at >= (g->qr_install ? 10 : 60))
         github_read(true);
+    // The service's socket too while ts5-tui works with the service.
+    static double share_t = 0;
+    if (now_s() - share_t > 1) {
+        share_t = now_s();
+        control_share(access_kind() == ACC_SERVICE);
+    }
+    control_pump(control_answer);
+    if (g->unload_at > 0 && now_s() >= g->unload_at) {
+        g->unload_at = 0;
+        run_command("/unload");
+    }
     g->fanproc.pump();
     g->logs.pump();
     parse_log_speeds();
@@ -6653,11 +7430,15 @@ void tick() {
                                : "The model wants to run a command: F1 (or /chat) to see it and say yes or no",
                    g->th->warn, 8);
     }
-    // Every chat is kept (store.h), after each answer.
+    // Turns the chat page added to the chat open here first (they come
+    // after anything here not saved yet), then every chat is kept
+    // (store.h), after each answer.
+    chat_follow_file();
     if (g->chat.answers != g->answers_saved && !g->chat.busy()) {
         g->answers_saved = g->chat.answers;
         std::string why;
         if (!save_chat(g->chat, why)) show_toast("Chat not saved: " + why, g->th->bad, 6);
+        chat_watch_reset();
     }
     // An answer cut off by the length: say why, in the chat. A chat that
     // filled up is summarized and goes on (Settings → When a chat fills up).
@@ -6744,6 +7525,8 @@ void tick() {
             }
         }
         if (hold && !g->chat.queued.empty()) g->chat.queue_held = true;
+        // Told to the phone where it's away; not where the next message goes at once.
+        if (g->chat.queued.empty() || g->chat.queue_held) tell_answer_end();
     }
     // The next of the messages entered while an answer was coming, now that it is done.
     if (!g->chat.queued.empty() && !g->chat.queue_held && !g->chat.busy() && g->chat.answers_seen == g->chat.answers)
@@ -6807,7 +7590,9 @@ bool ide_terminal() {
 // load or a tuning goes on when SSH drops; running ts5-tui again goes back
 // to it. Its config is ts5's own: ~/.tmux.conf is never read or changed.
 // Returns the exit status, or -1 to run here without tmux.
-int run_in_tmux(int argc, char **argv) {
+// detached (--start): started in the background, for the phone's controls
+// (ts5 serve runs it so); nothing when the session is there already.
+int run_in_tmux(int argc, char **argv, bool detached = false) {
     const std::string tmux = which("tmux");
     if (tmux.empty()) return -1;
     const std::string dir = state_dir();
@@ -6829,8 +7614,15 @@ int run_in_tmux(int argc, char **argv) {
     std::string me = n > 0 ? std::string(self, (size_t)n) : std::string(argv[0]);
     std::string inner = shell_quote(me);
     for (int i = 1; i < argc; i++)
-        if (strcmp(argv[i], "--tmux") != 0) inner += " " + shell_quote(argv[i]);
+        if (strcmp(argv[i], "--tmux") != 0 && strcmp(argv[i], "--start") != 0) inner += " " + shell_quote(argv[i]);
     inner += " --no-tmux";
+    if (detached) {
+        if (system((shell_quote(tmux) + " -L ts5 has-session -t ts5 >/dev/null 2>&1").c_str()) == 0) return 0;
+        const std::string cmd = shell_quote(tmux) + " -u -L ts5 -f " + shell_quote(conf) +
+                                " new-session -d -s ts5 -x 100 -y 40 -e TS5_TUI_TMUX=1 " + shell_quote(inner);
+        const int st = system(cmd.c_str());
+        return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+    }
     const std::string done = dir + "/last-chat.txt";
     unlink(done.c_str());
     const char *ct = getenv("COLORTERM");
@@ -6853,6 +7645,7 @@ int usage(FILE *f) {
     fprintf(f,
             "ts5-tui: TokenStation5 in a terminal.\n\n"
             "  ts5-tui [--url http://HOST:8081] [--key KEY] [--theme %s] [--no-intro] [--no-tools] [--tmux|--no-tmux]\n"
+            "  ts5-tui --start\n"
             "  ts5-tui --mcp | --mcp-tools | --mcp-call TOOL ['{\"ARGUMENT\": ...}']\n"
             "  ts5-tui --install-browser chromium|obscura [--dry-run]\n"
             "  ts5-tui --run-command 'COMMAND' [--sandbox on|off|no-network]\n"
@@ -6863,6 +7656,8 @@ int usage(FILE *f) {
             "over SSH. From a plain terminal it runs in its own tmux session (\"ts5\"), so SSH\n"
             "dropping stops nothing: run ts5-tui again to go back to it (Ctrl+A d leaves it).\n"
             "In an IDE's terminal tmux stays off unless --tmux.\n"
+            "--start: starts it in that session in the background (nothing if it runs), so\n"
+            "the phone's controls reach it (ts5 serve does this when the phone asks).\n"
             "--no-tools: the model gets no tools in this run (no search, pages, commands,\n"
             "browser, files, notes or outside programs), whatever Settings says.\n"
             "--mcp: starts the outside tools' programs (mcp.json, beside tui.conf), says what\n"
@@ -6922,6 +7717,7 @@ int main(int argc, char **argv) {
     if (const char *k = getenv("TS5_API_KEY"); k && *k) given_key(k);
     bool intro = app.cfg.intro;
     int tmux = 0;  // 1 --tmux, -1 --no-tmux
+    bool start = false;  // --start: in its tmux session, in the background
     int mcp_mode = 0;  // 1 --mcp, 2 --mcp-call, 3 --mcp-tools
     std::string install;  // --install-browser chromium|obscura
     bool dry = false;
@@ -6941,6 +7737,7 @@ int main(int argc, char **argv) {
         else if (a == "--no-tools") app.cfg.no_tools = true;
         else if (a == "--tmux") tmux = 1;
         else if (a == "--no-tmux") tmux = -1;
+        else if (a == "--start") start = true;
         else if (a == "--mcp") mcp_mode = 1;
         else if (a == "--mcp-tools") mcp_mode = 3;
         else if (a == "--mcp-call") {
@@ -7022,6 +7819,11 @@ int main(int argc, char **argv) {
         if (mcp_calls[0].first.empty()) return usage(stderr);
         return mcp_call_main(mcp_calls);
     }
+    if (start) {
+        const int st = run_in_tmux(argc, argv, true);
+        if (st < 0) fprintf(stderr, "ts5-tui: --start needs tmux\n");
+        return st < 0 ? 1 : st;
+    }
     // tmux by default from a plain terminal (ssh), not in an IDE's.
     if (tmux >= 0 && !getenv("TMUX") && isatty(0) && isatty(1) && (tmux == 1 || (app.cfg.tmux && !ide_terminal()))) {
         const int st = run_in_tmux(argc, argv);
@@ -7045,6 +7847,13 @@ int main(int argc, char **argv) {
     };
     scan_models();
     app.sens = read_sensors();
+    // The phone's controls (the chat page's Controls, through ts5 serve)
+    // reach this ts5-tui; a second one leaves them to the first.
+    {
+        std::string why;
+        if (!control_start(why) && why.find("another ts5-tui") == std::string::npos)
+            show_toast("The phone's controls can't reach ts5-tui: " + why, app.th->warn, 8);
+    }
     // The outside tools' programs start now, in the background.
     const std::string bad_mcp = mcp_load(app.cfg.tools_on());
     if (intro) run_intro();
@@ -7081,6 +7890,7 @@ int main(int argc, char **argv) {
         }
     }
     app.stop_poll = true;
+    control_stop();
     chat_stop(app.chat);
     mcp_stop_all();
     {

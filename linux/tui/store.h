@@ -36,6 +36,18 @@ std::vector<SavedChat> list_chats(const std::string &query = "");
 bool save_chat(Chat &c, std::string &why);
 // Replaces c's messages with a saved chat's.
 bool load_chat(Chat &c, const SavedChat &s, std::string &why);
+// The chat page (the owner's, on a phone) writes into these same files
+// (engine/src/web_serve.cpp), only ever adding turns at the end. For the
+// chat ts5-tui has open: the file's change time (0: none) and its turns.
+struct ChatFileState {
+    int64_t mtime_ns = 0;
+    size_t turns = 0;
+};
+ChatFileState chat_file_state(const std::string &id);
+int64_t chat_file_mtime(const std::string &id);  // (a stat alone)
+// The turns of chat id's file past the first `from`, added to c's messages
+// (words and answers; the rest only counted). False when unreadable.
+bool take_new_turns(Chat &c, const std::string &id, size_t from, ChatFileState &now);
 // Deletes one of ts5-tui's saved chats (its file). False, with why, for the
 // TV app's (read only here) or a file that won't go.
 bool delete_chat(const SavedChat &s, std::string &why);

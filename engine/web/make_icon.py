@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""The home-screen icon, written into the pages themselves (chat.html and
-terminal.html) as a data: address: on iOS 27 the Add to Home Screen sheet
-fetches a network icon whole and still draws a letter tile (seen on iOS 27.2,
+"""The home-screen icon, written into the pages themselves (chat.html,
+terminal.html and controls.html) as a data: address: on iOS 27 the Add to
+Home Screen sheet fetches a network icon whole and still draws a letter tile (seen on iOS 27.2,
 2026-11-14: five fetches of the logo, 200 and every byte, then a "T"), and the
 fix others report for that sheet is the icon in the page. 180x180, Apple's
 size, in 256 colours (about 20 KB): the logo looks the same at that size.
@@ -36,7 +36,7 @@ def main():
     png = icon_png(os.path.join(web, "icon.png"))
     link = ('<link rel="apple-touch-icon" sizes="180x180" href="data:image/png;base64,'
             + base64.b64encode(png).decode() + '">')
-    for page in ("chat.html", "terminal.html"):
+    for page in ("chat.html", "terminal.html", "controls.html"):
         p = os.path.join(web, page)
         text = open(p, encoding="utf-8").read()
         new, n = re.subn(r'<link rel="apple-touch-icon"[^>]*>', lambda _: link, text)

@@ -13,6 +13,23 @@
 
 namespace ts5 {
 
+// Whether model (a file name, a path, or the name /v1/models gives) is one
+// of models (a user's, Server::Grant::models): the same name, with or
+// without ".gguf", any case. None: any model.
+inline bool model_allowed(const std::vector<std::string> &models, const std::string &model) {
+    if (models.empty()) return true;
+    const auto bare = [](std::string s) {
+        if (s.find('/') != std::string::npos) s = s.substr(s.rfind('/') + 1);
+        for (char &c : s) c = (char)((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c);
+        if (s.size() > 5 && s.compare(s.size() - 5, 5, ".gguf") == 0) s.resize(s.size() - 5);
+        return s;
+    };
+    const std::string m = bare(model);
+    for (const std::string &x : models)
+        if (bare(x) == m) return true;
+    return false;
+}
+
 // The OpenAI-compatible API (chat completions with tool calls, completions,
 // models, health). With TAVILY_API_KEY set, chat requests also get a
 // web_search tool that the server runs itself (websearch.h).
@@ -52,6 +69,9 @@ public:
         int64_t max_reply = 0;  // the longest reply in tokens; 0: no limit
         int64_t tokens_day = 0; // tokens a day; 0: no limit
         bool owner_reads = false;  // the owner may read this user's chats
+        std::vector<std::string> models;  // the models this user may use; none: any
+        bool may_switch = false;          // may load another of its models (the owner: always)
+        std::string until;                // its last day, "" for no end
         // Not "": the user's tokens for today are used up, and why (429).
         std::string over;
     };
@@ -101,6 +121,24 @@ public:
     // ends it, as without one. Set before start().
     using Tls = std::function<bool(int fd, const std::string &ip, const std::string &client)>;
     void set_tls(Tls f) { state_.tls = std::move(f); }
+    // A chat page's answer: a request with a key that names the page's chat
+    // ("ts5_chat": its id, as kept on the machine). A phone's app sent to the
+    // background (the page "away") ends the connection: the answer goes on
+    // without it, to be kept in the chat and told to the user's devices.
+    struct AnswerEnd {
+        std::string chat, model, content, reasoning, error, finish;
+        bool left = false;     // the client went before the end
+        bool went_on = false;  // ... and it went on without it (the page was away)
+        int64_t tokens = 0;
+        double tps = 0;
+    };
+    struct PageAnswers {
+        // The page that asked is away: an answer whose client has gone goes on.
+        std::function<bool(const Grant &, const std::string &chat)> away;
+        std::function<void(const Grant &, const std::string &chat)> start;
+        std::function<void(const Grant &, const AnswerEnd &)> end;
+    };
+    void set_page_answers(PageAnswers f) { state_.page_answers = std::move(f); }
 
     // For a status display.
     struct Activity {
@@ -145,6 +183,7 @@ public:
         Routes routes;
         Pages pages;
         Tls tls;
+        PageAnswers page_answers;
     };
 
 private:

@@ -27,6 +27,31 @@ namespace ts5 {
 //                      object, as the chat page keeps it), DELETE one. Only
 //                      with a key: each user's own, never another's (the
 //                      owner's included), in user_dir(USER)/chats.
+//   /ts5/controls      the owner's phone controls (models, the machine,
+//                      Settings): a page that asks /ts5/control.
+//   /ts5/control       GET (the state) or POST {"do": ...}: handed to the
+//                      running ts5-tui (linux/tui/control.h) and its answer
+//                      handed back; the owner's key only (a key even on
+//                      this machine), this machine and the tailnet only. ts5-tui not running:
+//                      started in its tmux session (not by the service,
+//                      which can't start the owner's: 503 says so).
+//   /ts5/switch        GET: the models here the key's user may use, and
+//                      the one loaded; POST {"model": M}: the owner's
+//                      ts5-tui loads it. The owner, and a user who may
+//                      switch (AccessUser::may_switch), only.
+//   /ts5/push          notifications (Web Push, webpush.h) for a key's user:
+//                      GET the machine's key to subscribe with; POST
+//                      {"subscription", "name"} turns them on for a device,
+//                      {"test": true} sends one; DELETE {"endpoint"} turns
+//                      one off. Kept in user_dir(USER)/push.json.
+//   /ts5/away          POST {"chat", "away"}: the chat page going to the
+//                      background with an answer coming, and back; GET: the
+//                      chats with an answer coming. An answer whose page is
+//                      away goes on without its connection (Server::
+//                      PageAnswers), is kept in its chat, and is told to
+//                      the user's devices with the icon's count.
+//   /sw.js, /manifest.webmanifest  the chat page as a Home Screen app: its
+//                      service worker (notifications only) and manifest.
 //   /ts5/users         GET, the owner's key only: the users whose chats the
 //                      owner may read (each chose so when made, and sees it);
 //                      /ts5/users/ID/chats: that user's chats, to read.
@@ -48,6 +73,9 @@ struct WebOptions {
     // The program the terminal runs, as a shell command; "" for ts5-tui
     // beside this ts5 (or on PATH). TS5_TERMINAL_COMMAND sets it too (tests).
     std::string command;
+    // The model served (its name, no .gguf): for the owner's answers kept
+    // in ts5-tui's chats, which say which model wrote each.
+    std::string model;
 };
 
 void attach_web(Server &s, const WebOptions &o);

@@ -300,6 +300,64 @@ bool load_chat(Chat &c, const SavedChat &s, std::string &why) {
     return true;
 }
 
+int64_t chat_file_mtime(const std::string &id) {
+    if (id.empty() || id.find('/') != std::string::npos) return 0;
+    struct stat sb {};
+    if (stat((my_chats() + "/" + id + ".json").c_str(), &sb) != 0) return 0;
+    return (int64_t)sb.st_mtim.tv_sec * 1000000000 + sb.st_mtim.tv_nsec;
+}
+
+ChatFileState chat_file_state(const std::string &id) {
+    ChatFileState st;
+    if (id.empty() || id.find('/') != std::string::npos) return st;
+    const std::string path = my_chats() + "/" + id + ".json";
+    struct stat sb {};
+    if (stat(path.c_str(), &sb) != 0) return st;
+    st.mtime_ns = (int64_t)sb.st_mtim.tv_sec * 1000000000 + sb.st_mtim.tv_nsec;
+    std::string text;
+    ts5::Json j;
+    if (slurp(path, text) && ts5::Json::parse(text, j)) st.turns = j["turns"].a.size();
+    return st;
+}
+
+bool take_new_turns(Chat &c, const std::string &id, size_t from, ChatFileState &now) {
+    if (id.empty() || id.find('/') != std::string::npos) return false;
+    const std::string path = my_chats() + "/" + id + ".json";
+    std::string text;
+    ts5::Json j;
+    if (!slurp(path, text) || !ts5::Json::parse(text, j) || j.type != ts5::Json::OBJ) return false;
+    struct stat sb {};
+    if (stat(path.c_str(), &sb) == 0) now.mtime_ns = (int64_t)sb.st_mtim.tv_sec * 1000000000 + sb.st_mtim.tv_nsec;
+    const auto &turns = j["turns"].a;
+    now.turns = turns.size();
+    {
+        std::lock_guard<std::mutex> l(c.mu);
+        for (size_t i = from; i < turns.size(); i++) {
+            const ts5::Json &t = turns[i];
+            if (t["summary"].boolean(false) || !t["tool"].str().empty()) continue;
+            Msg m;
+            m.done = true;
+            m.content = t["text"].str();
+            if (t["user"].boolean(false)) {
+                m.role = "user";
+                c.history.push_back(m.content);
+            } else {
+                m.role = "assistant";
+                m.model = t["model"].str();
+                m.gen_tps = t["tps"].num(0);
+                m.gen_tokens = (int)t["tokens"].num(0);
+                m.reasoning = t["reasoning"].str();
+                const std::string end = t["end"].str("done");
+                m.stopped = end == "stopped";
+                if (end == "failed") m.error = t["error"].str("it failed");
+            }
+            c.msgs.push_back(m);
+        }
+    }
+    chat_count(c);
+    return true;
+}
+
 bool delete_chat(const SavedChat &s, std::string &why) {
     if (!s.mine) {
         why = "That chat is the TV app's: delete it on the TV";
