@@ -332,7 +332,11 @@ function machinePage() {
   } else {
     h += '<p class="note">The fan is set with TokenStation\'s hw helper, which the package installs.</p>';
   }
-  h += "<h2>GPU</h2><div class=\"grid\">" + tile("Busy", n(m.gpu_busy), "%") + tile("Clock", n(m.gpu_mhz), "MHz") + "</div>";
+  // (The PS5's amdgpu gives neither: the section only where there is one.)
+  const known = (v) => v !== null && v !== undefined;
+  if (known(m.gpu_busy) || known(m.gpu_mhz))
+    h += "<h2>GPU</h2><div class=\"grid\">" + (known(m.gpu_busy) ? tile("Busy", n(m.gpu_busy), "%") : "") +
+      (known(m.gpu_mhz) ? tile("Clock", n(m.gpu_mhz), "MHz") : "") + "</div>";
   h += '<h2>Memory</h2><div class="card">';
   const mem = [["GPU memory (GTT)", m.gtt_used, m.gtt_total], ["VRAM", m.vram_used, m.vram_total],
     ["RAM", m.ram_total ? m.ram_total - m.ram_avail : 0, m.ram_total]];
