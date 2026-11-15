@@ -39,6 +39,7 @@
 #include "browser_install.h"
 #include "catalog.h"  // ps5/catalog.h: the TV app's downloads, pinned and hashed
 #include "chat.h"
+#include "control.h"
 #include "files.h"
 #include "json.h"
 #include "mcp.h"
@@ -6466,6 +6467,276 @@ void handle(const Event &e) {
 
 // ---- the loop ----
 
+// ---- the phone's controls (control.h): ts5 serve's /ts5/control, for the owner's key ----
+
+ts5::Json cj_num(double v) {
+    ts5::Json j;
+    j.type = ts5::Json::NUM;
+    j.n = std::isfinite(v) ? v : 0;
+    char b[32];
+    if (j.n == std::floor(j.n) && std::fabs(j.n) < 9e15) snprintf(b, sizeof b, "%.0f", j.n);
+    else snprintf(b, sizeof b, "%.3f", j.n);
+    j.s = b;
+    return j;
+}
+ts5::Json cj_bool(bool v) {
+    ts5::Json j;
+    j.type = ts5::Json::BOOL;
+    j.b = v;
+    return j;
+}
+ts5::Json cj_reading(const Reading &r) {
+    ts5::Json j;
+    if (r.have) j = cj_num(r.value);
+    return j;
+}
+ts5::Json cj_arr() {
+    ts5::Json j;
+    j.type = ts5::Json::ARR;
+    return j;
+}
+
+// A Settings row whose words are a secret: its words never leave ts5-tui.
+bool secret_row(const std::string &label) {
+    std::string l = label;
+    std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+    return l.find("key") != std::string::npos || l.find("token") != std::string::npos ||
+           l.find("password") != std::string::npos;
+}
+
+// What the phone draws: the server and its model, the models here and the
+// catalog's, a download or a job, the machine's readings, every Settings
+// row, and a question ts5-tui asks now (the phone answers it).
+ts5::Json control_state() {
+    using ts5::Json;
+    const ServerState sv = server();
+    Json st = Json::object();
+    st.set("app", Json::string("ts5-tui"));
+    Json s = Json::object();
+    s.set("online", cj_bool(sv.online));
+    s.set("model", Json::string(sv.model));
+    s.set("context", cj_num(sv.n_ctx));
+    s.set("own", cj_bool(own_server_pid() > 0));
+    s.set("local", cj_bool(endpoint().local()));
+    s.set("helper", Json::string(sv.helper));
+    s.set("gen_tps", cj_num(g->last_gen_tps));
+    s.set("prompt_tps", cj_num(g->last_prompt_tps));
+    s.set("why", Json::string(sv.why));
+    st.set("server", s);
+    Json ld;
+    if (!g->load_target.empty()) {
+        ld = Json::object();
+        ld.set("model", Json::string(g->load_target));
+        ld.set("secs", cj_num(now_s() - g->load_t0));
+    }
+    st.set("loading", ld);
+    st.set("load_failed", Json::string(g->load_failed));
+    Json models = cj_arr();
+    for (const ModelFile &m : g->models) {
+        Json x = Json::object();
+        x.set("name", Json::string(api_id(m.name)));
+        x.set("file", Json::string(m.name));
+        x.set("bytes", cj_num(m.size));
+        x.set("loaded", cj_bool(api_id(m.name) == sv.model));
+        x.set("tested", cj_bool(m.tested));
+        x.set("tuned", cj_bool(!m.tuned_on.empty()));
+        const std::string h = helper_of(m);
+        x.set("helper", Json::string(h == "none" ? "" : h));
+        x.set("helper_here", cj_bool(m.helper_here));
+        x.set("mine", cj_bool(access(m.dir.c_str(), W_OK) == 0));
+        models.a.push_back(x);
+    }
+    st.set("models", models);
+    Json cat = cj_arr();
+    for (const app::CatalogEntry *e : catalog_missing()) {
+        Json x = Json::object();
+        x.set("key", Json::string(e->key));
+        x.set("name", Json::string(e->name));
+        x.set("for", Json::string(e->good_for ? e->good_for : ""));
+        x.set("bytes", cj_num((double)e->bytes));
+        x.set("downloading", cj_bool(downloading(*e)));
+        cat.a.push_back(x);
+    }
+    st.set("catalog", cat);
+    Json dl;
+    if (g->dl_on && g->downloader.running()) {
+        double done = 0, total = 0, mbps = 0;
+        download_progress(done, total, mbps);
+        dl = Json::object();
+        dl.set("name", Json::string(g->dl.name));
+        dl.set("done", cj_num(done));
+        dl.set("total", cj_num(total));
+        dl.set("mbps", cj_num(mbps));
+    }
+    st.set("download", dl);
+    st.set("free_bytes", cj_num(free_bytes(download_dir())));
+    Json job;
+    if (!g->job_kind.empty() && (g->tuner.running() || !g->job_steps.empty())) {
+        job = Json::object();
+        job.set("kind", Json::string(g->job_kind));
+        job.set("model", Json::string(g->job_model));
+        job.set("running", cj_bool(g->tuner.running()));
+        job.set("summary", Json::string(g->job_summary));
+        Json steps = cj_arr();
+        for (const auto &p : g->job_steps) {
+            Json x = Json::object();
+            x.set("label", Json::string(p.label));
+            x.set("state", cj_num(p.state));
+            x.set("result", Json::string(p.result));
+            steps.a.push_back(x);
+        }
+        job.set("steps", steps);
+    }
+    st.set("job", job);
+    const Sensors &se = g->sens;
+    Json mc = Json::object();
+    mc.set("die_c", cj_reading(se.die));
+    mc.set("board_c", cj_reading(se.board));
+    mc.set("edge_c", cj_reading(se.edge));
+    mc.set("fan_pct", cj_reading(se.fan_pct));
+    mc.set("fan_rpm", cj_reading(se.fan_rpm));
+    mc.set("fan_mode", Json::string(se.fan_mode));
+    mc.set("fan_control", cj_bool(!hw_helper().empty()));
+    mc.set("gpu_busy", cj_reading(se.gpu_busy));
+    mc.set("gpu_mhz", cj_reading(se.gpu_mhz));
+    mc.set("gpu", Json::string(se.gpu_name));
+    mc.set("gtt_used", cj_num(se.gtt_used));
+    mc.set("gtt_total", cj_num(se.gtt_total));
+    mc.set("vram_used", cj_num(se.vram_used));
+    mc.set("vram_total", cj_num(se.vram_total));
+    mc.set("ram_total", cj_num(se.ram_total));
+    mc.set("ram_avail", cj_num(se.ram_avail));
+    st.set("machine", mc);
+    Json rows = cj_arr();
+    for (const SetRow &r : settings_rows()) {
+        Json x = Json::object();
+        x.set("index", cj_num((double)rows.a.size()));
+        x.set("label", Json::string(r.label));
+        x.set("value", Json::string(r.value));
+        x.set("note", Json::string(r.note));
+        x.set("change", cj_bool((bool)r.change));
+        x.set("text", cj_bool(r.text && (bool)r.set_text));
+        x.set("secret", cj_bool(secret_row(r.label)));
+        if (r.text && !secret_row(r.label)) x.set("text_value", Json::string(r.text_value));
+        rows.a.push_back(x);
+    }
+    st.set("settings", rows);
+    Json ask;
+    if (g->ask_yes || !g->pick.empty()) {
+        ask = Json::object();
+        ask.set("title", Json::string(g->ask_title));
+        ask.set("text", Json::string(g->ask_text));
+        Json picks = cj_arr();
+        for (const auto &p : g->pick) {
+            Json x = Json::object();
+            x.set("label", Json::string(p.label));
+            x.set("note", Json::string(p.note));
+            picks.a.push_back(x);
+        }
+        ask.set("picks", picks);
+    }
+    st.set("ask", ask);
+    st.set("toast", Json::string(now_s() < g->toast_until ? g->toast : std::string()));
+    return st;
+}
+
+// One request from the phone: {"do": ...}, then the state as it is after.
+std::string control_answer(const std::string &text) {
+    using ts5::Json;
+    Json req, out;
+    auto refuse = [&](const std::string &why) {
+        Json e = Json::object();
+        e.set("error", Json::string(why));
+        return e.dump();
+    };
+    if (!Json::parse(text, req) || req.type != Json::OBJ) return refuse("a request is a JSON object");
+    const std::string what = req["do"].str("state");
+    const std::string toast_before = g->toast;
+    const double toast_until_before = g->toast_until;
+    std::string done;
+    if (what == "state") {
+    } else if (what == "load" || what == "delete" || what == "helper") {
+        scan_models();
+        const std::string name = req["model"].str();
+        const ModelFile *m = nullptr;
+        for (const ModelFile &x : g->models)
+            if (api_id(x.name) == name) m = &x;
+        if (!m) return refuse("no model called " + name + " here");
+        const ModelFile copy = *m;
+        if (what == "load") load_or_ask(copy);
+        else if (what == "delete") delete_model(copy);
+        else if (helper_of(copy).empty() || helper_of(copy) == "none") show_toast("This model has no helper to get", g->th->dim, 3);
+        else if (copy.helper_here) show_toast("Its helper is already here", g->th->dim, 3);
+        else if (!helper_entry(copy)) show_toast("ts5-tui has no download for that helper", g->th->warn, 5);
+        else download_helper(copy);
+    } else if (what == "unload") {
+        run_command("/unload");
+    } else if (what == "download") {
+        const std::string key = req["key"].str();
+        const app::CatalogEntry *e = nullptr;
+        for (const app::CatalogEntry *c : catalog_missing())
+            if (key == c->key) e = c;
+        if (!e) return refuse("no catalog model " + key + " left to download");
+        start_download(*e);
+    } else if (what == "download_stop") {
+        if (g->downloader.running()) {
+            g->downloader.stop();
+            show_toast("Download stopped: what's there is kept for next time", g->th->warn, 4);
+        }
+    } else if (what == "job_stop") {
+        if (g->tuner.running()) {
+            g->tuner.stop();
+            g->tuner.lines.push_back("Stopped.");
+        }
+    } else if (what == "fan") {
+        const std::string mode = req["mode"].str();
+        if (mode != "auto" && mode != "cool" && mode != "early" && mode != "max")
+            return refuse("the fan's modes are auto, cool, early and max");
+        set_fan(mode);
+    } else if (what == "setting") {
+        // By its place and its label (two rows may share one), else the
+        // first with that label.
+        const std::string label = req["label"].str();
+        auto rows = settings_rows();
+        const SetRow *r = nullptr;
+        const double at = req["index"].num(-1);
+        if (at >= 0 && at < rows.size() && rows[(size_t)at].label == label) r = &rows[(size_t)at];
+        for (const SetRow &x : rows)
+            if (!r && x.label == label) r = &x;
+        if (!r) return refuse("no setting called " + label);
+        if (req["text"].type == Json::STR) {
+            if (!r->text || !r->set_text) return refuse(label + " takes no words");
+            r->set_text(req["text"].str());
+        } else if (r->change) {
+            r->change(req["dir"].num(1) < 0 ? -1 : 1);
+        } else {
+            return refuse(label + " can't be changed here");
+        }
+    } else if (what == "answer") {
+        if (g->ask_yes) {
+            auto f = g->ask_yes;
+            g->ask_yes = nullptr;
+            if (req["yes"].boolean(false)) f();
+        } else if (!g->pick.empty()) {
+            const int n = (int)g->pick.size();
+            const int i = (int)req["pick"].num(n - 1);
+            if (i < 0 || i >= n) return refuse("no such answer");
+            const auto run = g->pick[(size_t)i].run;
+            g->pick.clear();
+            if (run) run();
+        }
+    } else if (what == "rescan") {
+        scan_models();
+    } else {
+        return refuse("unknown: " + what);
+    }
+    out = control_state();
+    // What the action itself said (a toast it showed), if anything new.
+    if (g->toast != toast_before || g->toast_until != toast_until_before) out.set("said", Json::string(g->toast));
+    g->full_redraw = true;
+    return out.dump();
+}
+
 void tick() {
     const double t = now_s();
     if (t - g->sens_at >= 1.0) {
@@ -6494,6 +6765,13 @@ void tick() {
     // on its page show up (every 10 s while that page's QR code is up).
     if (g->cur == CONNECTORS && g->gh_signed && !g->gh_status.running() && t - g->gh_at >= (g->qr_install ? 10 : 60))
         github_read(true);
+    // The service's socket too while ts5-tui works with the service.
+    static double share_t = 0;
+    if (now_s() - share_t > 1) {
+        share_t = now_s();
+        control_share(access_kind() == ACC_SERVICE);
+    }
+    control_pump(control_answer);
     g->fanproc.pump();
     g->logs.pump();
     parse_log_speeds();
@@ -6807,7 +7085,9 @@ bool ide_terminal() {
 // load or a tuning goes on when SSH drops; running ts5-tui again goes back
 // to it. Its config is ts5's own: ~/.tmux.conf is never read or changed.
 // Returns the exit status, or -1 to run here without tmux.
-int run_in_tmux(int argc, char **argv) {
+// detached (--start): started in the background, for the phone's controls
+// (ts5 serve runs it so); nothing when the session is there already.
+int run_in_tmux(int argc, char **argv, bool detached = false) {
     const std::string tmux = which("tmux");
     if (tmux.empty()) return -1;
     const std::string dir = state_dir();
@@ -6829,8 +7109,15 @@ int run_in_tmux(int argc, char **argv) {
     std::string me = n > 0 ? std::string(self, (size_t)n) : std::string(argv[0]);
     std::string inner = shell_quote(me);
     for (int i = 1; i < argc; i++)
-        if (strcmp(argv[i], "--tmux") != 0) inner += " " + shell_quote(argv[i]);
+        if (strcmp(argv[i], "--tmux") != 0 && strcmp(argv[i], "--start") != 0) inner += " " + shell_quote(argv[i]);
     inner += " --no-tmux";
+    if (detached) {
+        if (system((shell_quote(tmux) + " -L ts5 has-session -t ts5 >/dev/null 2>&1").c_str()) == 0) return 0;
+        const std::string cmd = shell_quote(tmux) + " -u -L ts5 -f " + shell_quote(conf) +
+                                " new-session -d -s ts5 -x 100 -y 40 -e TS5_TUI_TMUX=1 " + shell_quote(inner);
+        const int st = system(cmd.c_str());
+        return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+    }
     const std::string done = dir + "/last-chat.txt";
     unlink(done.c_str());
     const char *ct = getenv("COLORTERM");
@@ -6853,6 +7140,7 @@ int usage(FILE *f) {
     fprintf(f,
             "ts5-tui: TokenStation5 in a terminal.\n\n"
             "  ts5-tui [--url http://HOST:8081] [--key KEY] [--theme %s] [--no-intro] [--no-tools] [--tmux|--no-tmux]\n"
+            "  ts5-tui --start\n"
             "  ts5-tui --mcp | --mcp-tools | --mcp-call TOOL ['{\"ARGUMENT\": ...}']\n"
             "  ts5-tui --install-browser chromium|obscura [--dry-run]\n"
             "  ts5-tui --run-command 'COMMAND' [--sandbox on|off|no-network]\n"
@@ -6863,6 +7151,8 @@ int usage(FILE *f) {
             "over SSH. From a plain terminal it runs in its own tmux session (\"ts5\"), so SSH\n"
             "dropping stops nothing: run ts5-tui again to go back to it (Ctrl+A d leaves it).\n"
             "In an IDE's terminal tmux stays off unless --tmux.\n"
+            "--start: starts it in that session in the background (nothing if it runs), so\n"
+            "the phone's controls reach it (ts5 serve does this when the phone asks).\n"
             "--no-tools: the model gets no tools in this run (no search, pages, commands,\n"
             "browser, files, notes or outside programs), whatever Settings says.\n"
             "--mcp: starts the outside tools' programs (mcp.json, beside tui.conf), says what\n"
@@ -6922,6 +7212,7 @@ int main(int argc, char **argv) {
     if (const char *k = getenv("TS5_API_KEY"); k && *k) given_key(k);
     bool intro = app.cfg.intro;
     int tmux = 0;  // 1 --tmux, -1 --no-tmux
+    bool start = false;  // --start: in its tmux session, in the background
     int mcp_mode = 0;  // 1 --mcp, 2 --mcp-call, 3 --mcp-tools
     std::string install;  // --install-browser chromium|obscura
     bool dry = false;
@@ -6941,6 +7232,7 @@ int main(int argc, char **argv) {
         else if (a == "--no-tools") app.cfg.no_tools = true;
         else if (a == "--tmux") tmux = 1;
         else if (a == "--no-tmux") tmux = -1;
+        else if (a == "--start") start = true;
         else if (a == "--mcp") mcp_mode = 1;
         else if (a == "--mcp-tools") mcp_mode = 3;
         else if (a == "--mcp-call") {
@@ -7022,6 +7314,11 @@ int main(int argc, char **argv) {
         if (mcp_calls[0].first.empty()) return usage(stderr);
         return mcp_call_main(mcp_calls);
     }
+    if (start) {
+        const int st = run_in_tmux(argc, argv, true);
+        if (st < 0) fprintf(stderr, "ts5-tui: --start needs tmux\n");
+        return st < 0 ? 1 : st;
+    }
     // tmux by default from a plain terminal (ssh), not in an IDE's.
     if (tmux >= 0 && !getenv("TMUX") && isatty(0) && isatty(1) && (tmux == 1 || (app.cfg.tmux && !ide_terminal()))) {
         const int st = run_in_tmux(argc, argv);
@@ -7045,6 +7342,13 @@ int main(int argc, char **argv) {
     };
     scan_models();
     app.sens = read_sensors();
+    // The phone's controls (the chat page's Controls, through ts5 serve)
+    // reach this ts5-tui; a second one leaves them to the first.
+    {
+        std::string why;
+        if (!control_start(why) && why.find("another ts5-tui") == std::string::npos)
+            show_toast("The phone's controls can't reach ts5-tui: " + why, app.th->warn, 8);
+    }
     // The outside tools' programs start now, in the background.
     const std::string bad_mcp = mcp_load(app.cfg.tools_on());
     if (intro) run_intro();
@@ -7081,6 +7385,7 @@ int main(int argc, char **argv) {
         }
     }
     app.stop_poll = true;
+    control_stop();
     chat_stop(app.chat);
     mcp_stop_all();
     {

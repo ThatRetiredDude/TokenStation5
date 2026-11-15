@@ -363,6 +363,15 @@ jobs:
         run: |
           command -v tmux || sudo apt-get install -y -qq tmux
           python3 linux/tui/test/models_test.py "$(command -v ts5-tui)"
+      - name: The phone's controls (ts5-tui in tmux loads a model; /ts5/control through its server, the owner's key only; the page in Chrome at a phone's width)
+        env:
+          TS5_PAGE_TEST: require
+        run: |
+          command -v tmux || sudo apt-get install -y -qq tmux
+          npm install --prefix /tmp/pw --no-save --silent playwright-core@1.49.1
+          export NODE_PATH=/tmp/pw/node_modules
+          export CHROME=$(command -v google-chrome chromium chromium-browser | head -1)
+          python3 linux/tui/test/controls_test.py "$(command -v ts5-tui)" "$(command -v ts5)" /tmp/model/test.gguf
       - name: Outside tools (ts5-tui --mcp against an MCP server served here, no model)
         run: python3 linux/tui/test/mcp_test.py "$(command -v ts5-tui)"
       - name: A browser on demand (ts5-tui --install-browser, from a release file made here, no network)

@@ -6,6 +6,7 @@
     .section .rodata
 FILE(ts5_web_chat_html, "chat.html")
 FILE(ts5_web_terminal_html, "terminal.html")
+FILE(ts5_web_controls_html, "controls.html")
 FILE(ts5_web_xterm_js, "xterm.js")
 FILE(ts5_web_xterm_css, "xterm.css")
 FILE(ts5_web_addon_fit_js, "addon-fit.js")

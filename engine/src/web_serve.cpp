@@ -8,6 +8,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -20,6 +21,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <mutex>
+#include <vector>
 
 #include "json.h"
 #include "log.h"
@@ -34,6 +37,7 @@ namespace ts5 {
 #define TS5_WEB_FILE(sym) extern "C" const unsigned char sym[], sym##_end[];
 TS5_WEB_FILE(ts5_web_chat_html)
 TS5_WEB_FILE(ts5_web_terminal_html)
+TS5_WEB_FILE(ts5_web_controls_html)
 TS5_WEB_FILE(ts5_web_xterm_js)
 TS5_WEB_FILE(ts5_web_xterm_css)
 TS5_WEB_FILE(ts5_web_addon_fit_js)
@@ -75,6 +79,7 @@ struct WebAsset {
 const WebAsset kWebAssets[] = {
     {"chat.html", ts5_web_chat_html, ts5_web_chat_html_end},
     {"terminal.html", ts5_web_terminal_html, ts5_web_terminal_html_end},
+    {"controls.html", ts5_web_controls_html, ts5_web_controls_html_end},
     {"xterm.js", ts5_web_xterm_js, ts5_web_xterm_js_end},
     {"xterm.css", ts5_web_xterm_css, ts5_web_xterm_css_end},
     {"addon-fit.js", ts5_web_addon_fit_js, ts5_web_addon_fit_js_end},
@@ -782,6 +787,195 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
     return true;
 }
 
+// ---- the phone's controls: /ts5/control, to ts5-tui (linux/tui/control.h) ----
+
+std::string user_data_dir() {
+    if (const char *e = getenv("TS5_DATA_DIR"); e && *e) return e;
+    if (const char *x = getenv("XDG_DATA_HOME"); x && *x == '/') return std::string(x) + "/tokenstation";
+    const char *h = getenv("HOME");
+    return std::string(h && *h ? h : "") + "/.local/share/tokenstation";
+}
+
+std::string run_dir() {
+    const char *e = getenv("TS5_RUN_DIR");
+    return e && *e == '/' ? e : "/run/tokenstation";
+}
+
+// The background service (its own folder in /run, or started by systemd):
+// it can't start the owner's ts5-tui, and looks for it in /run first.
+bool as_service() {
+    struct stat st{};
+    return getenv("INVOCATION_ID") || (stat(run_dir().c_str(), &st) == 0 && st.st_uid == getuid());
+}
+
+// Where ts5-tui answers, in the order asked: this user's own first (a ts5
+// serve the owner runs), the service's (/run) first for the service.
+std::vector<std::string> control_sockets() {
+    if (const char *e = getenv("TS5_CONTROL_SOCKET"); e && *e) return {e};
+    const std::string own = user_data_dir() + "/control.sock", shared = run_dir() + "/control.sock";
+    if (as_service()) return {shared, own};
+    return {own, shared};
+}
+
+// One request to the ts5-tui at path and its answer; false when none
+// answers there.
+bool control_ask(const std::string &path, const std::string &line, std::string &out) {
+    sockaddr_un a{};
+    a.sun_family = AF_UNIX;
+    if (path.size() >= sizeof a.sun_path) return false;
+    memcpy(a.sun_path, path.c_str(), path.size() + 1);
+    const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return false;
+    if (connect(fd, (sockaddr *)&a, sizeof a) != 0) {
+        close(fd);
+        return false;
+    }
+    // ts5-tui answers between frames; a page it is busy drawing waits.
+    timeval tv{30, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    const std::string req = line + "\n";
+    bool ok = true;
+    for (size_t at = 0; ok && at < req.size();) {
+        const ssize_t n = send(fd, req.data() + at, req.size() - at, MSG_NOSIGNAL);
+        if (n < 0 && errno == EINTR) continue;
+        ok = n > 0;
+        if (ok) at += (size_t)n;
+    }
+    out.clear();
+    char b[16384];
+    while (ok) {
+        const ssize_t n = recv(fd, b, sizeof b, 0);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        out.append(b, (size_t)n);
+        if (out.size() > (16u << 20)) break;
+    }
+    close(fd);
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+    return ok && !out.empty();
+}
+
+std::string tui_path() {
+    const std::string c = tui_command();  // "'DIR/ts5-tui' --tmux" or "ts5-tui --tmux"
+    if (c[0] == '\'') return c.substr(1, c.find('\'', 1) - 1);
+    return "ts5-tui";
+}
+
+// ts5-tui in its tmux session, in the background (ts5-tui --start); as
+// the browser terminal would have it, so it shows the same one later.
+bool start_tui(std::string &why) {
+    static std::mutex mu;
+    std::lock_guard<std::mutex> l(mu);
+    const pid_t pid = fork();
+    if (pid < 0) {
+        why = strerror(errno);
+        return false;
+    }
+    if (pid == 0) {
+        // The server's secrets stay with the server.
+        unsetenv("TS5_API_KEY");
+        unsetenv("TS5_TS_AUTH_KEY");
+        unsetenv("TS5_CONTROL_SOCKET");
+        if (!getenv("LANG") && !getenv("LC_ALL")) setenv("LANG", "C.UTF-8", 1);
+        setsid();
+        const int null = open("/dev/null", O_RDWR);
+        if (null >= 0) {
+            dup2(null, 0);
+            dup2(null, 1);
+            dup2(null, 2);
+        }
+        signal(SIGPIPE, SIG_DFL);
+        const std::string tui = tui_path();
+        execlp(tui.c_str(), "ts5-tui", "--start", (char *)nullptr);
+        _exit(127);
+    }
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
+    }
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        why = WIFEXITED(st) && WEXITSTATUS(st) == 127 ? "ts5-tui isn't installed here"
+                                                      : "ts5-tui --start failed (it needs tmux)";
+        return false;
+    }
+    return true;
+}
+
+// /ts5/control: POST {"do": ...} (GET: {"do": "state"}), the owner's key
+// only (always a key, on this machine too), from this machine or the tailnet: handed to ts5-tui, its answer
+// handed back. ts5-tui not running: started for it, unless this is the
+// service (it can't start the owner's).
+void control(const WebOptions &o, const Server::Page &p, int fd) {
+    if (!o.admit) {
+        send_error(fd, 404, "this server keeps no users");
+        return;
+    }
+    Server::Grant g;
+    // A key of this machine's, even from this machine (which gets into the
+    // API without one): another user of this computer is not the owner.
+    if (!o.admit(p.key, p.client, g) || g.key.empty()) {
+        send_error(fd, 401, p.key.empty() ? "The controls need your key, on this machine too."
+                                          : "That API key isn't one of this machine's, or it is off.");
+        return;
+    }
+    if (!g.owner) {
+        log_line("ts5: controls: %s: the key %s is %s's, not the owner's: refused", p.client.c_str(), g.key.c_str(),
+                 g.user_name.c_str());
+        send_error(fd, 403, "The controls are the owner's alone.");
+        return;
+    }
+    if (!terminal_client(p.client)) {
+        log_line("ts5: controls: %s asked for them, refused: only this machine and the tailnet's devices may",
+                 p.client.c_str());
+        send_error(fd, 403, "The controls are only for this machine and your tailnet's devices (Tailscale).");
+        return;
+    }
+    if (p.method != "GET" && p.method != "POST") {
+        send_error(fd, 405, "GET or POST");
+        return;
+    }
+    Json req;
+    if (p.method == "GET") {
+        req = Json::object();
+        req.set("do", Json::string("state"));
+    } else if (!Json::parse(p.body, req) || req.type != Json::OBJ) {
+        send_error(fd, 400, "a request is a JSON object: {\"do\": ...}");
+        return;
+    }
+    const std::string what = req["do"].str("state");
+    if (what != "state") {
+        // What was done, never the words a setting was given (a key, say).
+        std::string on = req["model"].str(req["label"].str(req["mode"].str(req["key"].str())));
+        log_line("ts5: controls: %s: %s%s%s", p.client.c_str(), what.c_str(), on.empty() ? "" : " ", on.c_str());
+    }
+    const std::string line = req.dump();
+    std::string out;
+    for (const std::string &path : control_sockets())
+        if (control_ask(path, line, out)) {
+            send_file(fd, 200, "application/json", out, false);
+            return;
+        }
+    std::string why;
+    if (as_service()) {
+        why = "ts5-tui isn't running on the machine: start it there (it can stay open in its tmux session), then "
+              "the controls reach it.";
+    } else if (start_tui(why)) {
+        const std::string own = control_sockets()[0];
+        for (int i = 0; i < 50; i++) {
+            usleep(200000);
+            if (control_ask(own, line, out)) {
+                log_line("ts5: controls: started ts5-tui for them (tmux session \"ts5\")");
+                send_file(fd, 200, "application/json", out, false);
+                return;
+            }
+        }
+        why = "ts5-tui was started but doesn't answer yet: try again in a moment.";
+    } else {
+        why = "ts5-tui couldn't be started: " + why + ".";
+    }
+    send_error(fd, 503, why);
+}
+
 }  // namespace
 
 void attach_web(Server &s, const WebOptions &o) {
@@ -813,8 +1007,12 @@ void attach_web(Server &s, const WebOptions &o) {
             return true;
         }
         if (me_and_chats(o, p, fd)) return true;
+        if (p.path == "/ts5/control") {
+            control(o, p, fd);
+            return true;
+        }
         const bool web = p.path == "/" || p.path == "/chat" || p.path.rfind("/ts5/web/", 0) == 0 ||
-                         p.path == "/ts5/terminal" || p.path == "/ts5/terminal/socket";
+                         p.path == "/ts5/terminal" || p.path == "/ts5/terminal/socket" || p.path == "/ts5/controls";
         if (!web) return false;
         if (p.path == "/ts5/terminal/socket") {
             terminal(o, p, fd);
@@ -827,9 +1025,10 @@ void attach_web(Server &s, const WebOptions &o) {
         bool ok;
         if (p.path == "/" || p.path == "/chat") ok = serve_asset(fd, p, "chat.html", true);
         else if (p.path == "/ts5/terminal") ok = serve_asset(fd, p, "terminal.html", true);
+        else if (p.path == "/ts5/controls") ok = serve_asset(fd, p, "controls.html", true);
         else {
             const std::string name = p.path.substr(9);
-            ok = name != "chat.html" && name != "terminal.html" && serve_asset(fd, p, name, false);
+            ok = name != "chat.html" && name != "terminal.html" && name != "controls.html" && serve_asset(fd, p, name, false);
         }
         if (!ok) {
             send_error(fd, 404, "not found: " + p.path);

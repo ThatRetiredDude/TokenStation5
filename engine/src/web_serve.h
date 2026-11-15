@@ -27,6 +27,14 @@ namespace ts5 {
 //                      object, as the chat page keeps it), DELETE one. Only
 //                      with a key: each user's own, never another's (the
 //                      owner's included), in user_dir(USER)/chats.
+//   /ts5/controls      the owner's phone controls (models, the machine,
+//                      Settings): a page that asks /ts5/control.
+//   /ts5/control       GET (the state) or POST {"do": ...}: handed to the
+//                      running ts5-tui (linux/tui/control.h) and its answer
+//                      handed back; the owner's key only (a key even on
+//                      this machine), this machine and the tailnet only. ts5-tui not running:
+//                      started in its tmux session (not by the service,
+//                      which can't start the owner's: 503 says so).
 //   /ts5/users         GET, the owner's key only: the users whose chats the
 //                      owner may read (each chose so when made, and sees it);
 //                      /ts5/users/ID/chats: that user's chats, to read.

@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f6f8fa">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#161b22">
+<title>TokenStation5 controls</title>
+<link rel="icon" type="image/png" href="/ts5/web/icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="TokenStation5">
+<!-- The owner's phone controls: what ts5-tui's pages set, as buttons. Each
+     tap is one request to /ts5/control, which hands it to the running
+     ts5-tui (the same one the browser terminal shows); its answer is the
+     whole state, drawn again. -->
+<style>
+  :root { --bg: #ffffff; --panel: #f6f8fa; --line: #d0d7de; --fg: #1f2328; --dim: #656d76; --accent: #0969da;
+    --you: #ddf4ff; --bad: #cf222e; --good: #1a7f37; --warn: #9a6700; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d1117; --panel: #161b22; --line: #30363d; --fg: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
+      --you: #12263f; --bad: #f85149; --good: #3fb950; --warn: #d29922; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line);
+    padding: 10px 16px 0; padding-top: calc(10px + env(safe-area-inset-top)); }
+  .bar { display: flex; align-items: center; gap: 10px; }
+  .bar b { font-size: 16px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar a { border: 1px solid var(--line); color: var(--fg); border-radius: 6px; padding: 5px 10px; font-size: 13px;
+    text-decoration: none; white-space: nowrap; }
+  #status { color: var(--dim); font-size: 13px; margin: 4px 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  nav { display: flex; gap: 2px; overflow-x: auto; }
+  nav button { flex: 1; background: none; border: none; border-bottom: 2px solid transparent; color: var(--dim);
+    font: inherit; font-size: 15px; padding: 8px 6px; cursor: pointer; white-space: nowrap; }
+  nav button.on { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+  main { max-width: 760px; margin: 0 auto; padding: 12px 16px calc(80px + env(safe-area-inset-bottom)); }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: var(--dim); margin: 20px 0 8px; font-weight: 600; }
+  h2:first-child { margin-top: 4px; }
+  .card { border: 1px solid var(--line); border-radius: 10px; background: var(--bg); overflow: hidden; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--line); }
+  .row:first-child { border-top: none; }
+  .row .what { flex: 1; min-width: 0; }
+  .row .what b { display: block; font-weight: 500; overflow-wrap: anywhere; }
+  .row .what span { display: block; color: var(--dim); font-size: 13px; overflow-wrap: anywhere; }
+  .row .val { color: var(--accent); font-weight: 500; }
+  .row .what b span.tag, .row .what b span.val { display: inline-block; }
+  .tag { display: inline-block; font-size: 11px; border: 1px solid var(--line); border-radius: 10px; padding: 0 6px;
+    margin-left: 6px; color: var(--dim); font-weight: 400; vertical-align: 1px; }
+  .tag.on { border-color: var(--good); color: var(--good); }
+  button.b { border: 1px solid var(--line); background: var(--panel); color: var(--fg); border-radius: 8px;
+    padding: 7px 12px; font: inherit; font-size: 14px; cursor: pointer; white-space: nowrap; }
+  button.b.go { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.b.bad { color: var(--bad); }
+  button.b:disabled { opacity: .5; cursor: default; }
+  .btns { display: flex; gap: 6px; flex: none; }
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { flex: 1; background: var(--panel); border: none; border-left: 1px solid var(--line); color: var(--fg);
+    font: inherit; font-size: 14px; padding: 8px 4px; cursor: pointer; }
+  .seg button:first-child { border-left: none; }
+  .seg button.on { background: var(--accent); color: #fff; }
+  .meter { height: 6px; border-radius: 3px; background: var(--panel); border: 1px solid var(--line); overflow: hidden; margin-top: 6px; }
+  .meter i { display: block; height: 100%; background: var(--accent); }
+  .meter i.hot { background: var(--warn); }
+  .meter i.bad { background: var(--bad); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .tile { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .tile span { color: var(--dim); font-size: 13px; display: block; }
+  .tile b { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tile small { color: var(--dim); font-size: 13px; }
+  .note { color: var(--dim); font-size: 13px; margin: 8px 2px; }
+  .err { color: var(--bad); }
+  input.t { flex: 1; min-width: 0; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg);
+    color: var(--fg); font: 15px ui-monospace, Menlo, Consolas, monospace; }
+  .edit { display: flex; gap: 6px; padding: 0 12px 10px; }
+  #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(16px + env(safe-area-inset-bottom));
+    max-width: min(560px, calc(100% - 32px)); background: var(--fg); color: var(--bg); border-radius: 10px;
+    padding: 10px 14px; font-size: 14px; z-index: 30; box-shadow: 0 4px 16px rgba(0,0,0,.25); }
+  .shade { position: fixed; inset: 0; background: rgba(1, 4, 9, .55); display: flex; align-items: center;
+    justify-content: center; padding: 16px; z-index: 20; }
+  .dlg { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 18px; width: min(460px, 100%);
+    max-height: 90vh; overflow-y: auto; }
+  .dlg h1 { font-size: 18px; margin: 0 0 8px; }
+  .dlg p { color: var(--dim); margin: 0 0 14px; font-size: 14px; white-space: pre-wrap; }
+  .dlg .btns { justify-content: flex-end; flex-wrap: wrap; }
+  /* keep.js's own questions (save the key to the passwords?) */
+  .dlg .row { border: none; padding: 0; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+  .dlg > .row button, .dlg form .row button { border: 1px solid var(--line); background: var(--panel); color: var(--fg);
+    border-radius: 8px; padding: 7px 14px; font: inherit; font-size: 14px; cursor: pointer; }
+  .dlg .row button.go { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .dlg input[type=password] { width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--fg); font: 16px ui-monospace, Menlo, Consolas, monospace; margin-bottom: 12px; }
+  .dlg .pick { display: block; width: 100%; text-align: left; margin-bottom: 8px; }
+  .dlg .pick span { display: block; color: var(--dim); font-size: 12px; white-space: normal; }
+  .steps { padding: 6px 12px 10px; font-size: 14px; }
+  .steps div { display: flex; gap: 8px; }
+  .steps div span:last-child { color: var(--dim); margin-left: auto; text-align: right; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar"><b>Controls</b><a href="/">Chat</a></div>
+  <div id="status">…</div>
+  <nav id="tabs">
+    <button data-tab="models" class="on">Models</button>
+    <button data-tab="machine">Machine</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+</header>
+<main id="page"></main>
+<div id="toast" role="status" hidden></div>
+<div class="shade" id="askdlg" hidden><div class="dlg" id="ask"></div></div>
+<script src="/ts5/web/keep.js?v=4"></script>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const store = { get: (k) => TS5Keep.store.get(k, "") || "", set: (k, v) => TS5Keep.store.set(k, v ? v : null) };
+TS5Keep.start();
+let tab = store.get("ts5.controls.tab") || "models";
+let st = null;          // ts5-tui's state, as its last answer gave it
+let busy = false;       // a tap's request on its way (polls wait their turn)
+let editing = null;     // the Settings row whose words are being typed (its index)
+let problem = "";       // why the controls can't reach ts5-tui, if they can't
+let loadAsked = null;   // {model, t}: a load asked for here (its server starts again)
+
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function gib(b) {
+  if (!b) return "0";
+  if (b >= 1 << 30) return (b / (1 << 30)).toFixed(1) + " GiB";
+  return Math.round(b / (1 << 20)) + " MiB";
+}
+function n(v, d) { return v === null || v === undefined ? "–" : (d ? Number(v).toFixed(d) : Math.round(v)); }
+
+async function send(req) {
+  const h = { "Content-Type": "application/json" };
+  const k = store.get("ts5.key");
+  if (k) h.Authorization = "Bearer " + k;
+  let r;
+  try {
+    r = await fetch("/ts5/control", { method: "POST", headers: h, body: JSON.stringify(req), cache: "no-store" });
+  } catch (e) {
+    // A model ts5-tui loads itself comes with a server of its own: this
+    // one goes for a moment.
+    problem = loadAsked && Date.now() - loadAsked.t < 180000
+      ? "Loading " + loadAsked.model + ": the server starts again with it…"
+      : "TokenStation5 doesn't answer (is the PS5 on, and this device on the tailnet?)";
+    draw();
+    return null;
+  }
+  let j = {};
+  try { j = await r.json(); } catch (e) {}
+  if (!r.ok || j.error) {
+    problem = j.error || ("The machine said " + r.status);
+    if (r.status === 401) problem += " Open the chat page and sign in with your key first.";
+    if (r.status !== 503 && j.state) st = j.state;
+    draw();
+    return null;
+  }
+  problem = "";
+  if (k) TS5Keep.settled(k);
+  st = j;
+  if (loadAsked && j.server && j.server.online && j.server.model === loadAsked.model && !j.loading) loadAsked = null;
+  draw();
+  if (j.said) toast(j.said);
+  return j;
+}
+// One request at a time, in the order asked: a tap during a poll waits
+// for it, never dropped.
+let chain = Promise.resolve();
+function queue(req) {
+  const p = chain.then(() => send(req));
+  chain = p.catch(() => {});
+  return p;
+}
+async function act(req) {
+  busy = true;
+  try { await queue(req); } finally { busy = false; }
+}
+
+let toastT = 0;
+function toast(t) {
+  if (!t) return;
+  $("toast").textContent = t;
+  $("toast").hidden = false;
+  clearTimeout(toastT);
+  toastT = setTimeout(() => { $("toast").hidden = true; }, 5000);
+}
+
+// ---- the pages ----
+
+function statusLine() {
+  if (problem) return '<span class="err">' + esc(problem) + "</span>";
+  if (!st) return "…";
+  const s = st.server || {};
+  if (st.loading) return "Loading " + esc(st.loading.model) + "… " + n(st.loading.secs) + " s";
+  if (!s.online) return "No model loaded" + (s.why ? ": " + esc(s.why) : "");
+  let t = esc(s.model) + (s.context ? " · " + n(s.context) + " context" : "");
+  if (s.gen_tps) t += " · " + n(s.gen_tps, 1) + " tok/s";
+  return t;
+}
+
+function setting(label) { return (st.settings || []).find((r) => r.label === label); }
+function settingRow(r) {
+  const open = editing === r.index;
+  let h = '<div class="row"><div class="what"><b>' + esc(r.label) + ' <span class="val">' + esc(r.value) + "</span></b>" +
+    (r.note ? "<span>" + esc(r.note) + "</span>" : "") + '</div><div class="btns">';
+  if (r.change) h += '<button class="b" data-set="' + r.index + '" data-dir="-1" aria-label="Back">‹</button>' +
+    '<button class="b" data-set="' + r.index + '" data-dir="1" aria-label="Next">›</button>';
+  if (r.text) h += '<button class="b" data-edit="' + r.index + '">' + (open ? "Close" : "Edit") + "</button>";
+  h += "</div></div>";
+  if (r.text && open)
+    h += '<form class="edit" data-save="' + r.index + '"><input class="t" name="v" ' +
+      (r.secret ? 'type="password" placeholder="new value (the old one stays hidden)" autocomplete="off"'
+                : 'type="text" value="' + esc(r.text_value || "") + '"') +
+      ' autocapitalize="off" autocorrect="off" spellcheck="false"><button class="b go">Save</button></form>';
+  return h;
+}
+
+function modelsPage() {
+  const s = st.server || {};
+  let h = "<h2>Loaded</h2><div class=\"card\">";
+  if (st.loading) {
+    h += '<div class="row"><div class="what"><b>Loading ' + esc(st.loading.model) + "…</b><span>" + n(st.loading.secs) +
+      " s so far</span></div></div>";
+  } else if (s.online) {
+    h += '<div class="row"><div class="what"><b>' + esc(s.model) + "</b><span>" +
+      (s.context ? n(s.context) + " tokens of context" : "") + (s.helper ? " · helper " + esc(s.helper) : "") +
+      (s.gen_tps ? " · " + n(s.gen_tps, 1) + " tok/s writing, " + n(s.prompt_tps) + " reading" : "") +
+      '</span></div><div class="btns"><button class="b bad" data-do="unload">Unload</button></div></div>';
+  } else {
+    h += '<div class="row"><div class="what"><b>None</b><span>' + esc(s.why || "Load one below.") + "</span></div></div>";
+  }
+  if (st.load_failed) h += '<div class="row"><div class="what err">' + esc(st.load_failed) + "</div></div>";
+  for (const lbl of ["Context", "Speed or length"]) { const r = setting(lbl); if (r) h += settingRow(r); }
+  h += "</div>";
+  if (st.job) {
+    const j = st.job;
+    h += "<h2>" + esc(j.kind === "tune" ? "Tuning" : "Check") + " · " + esc(j.model) + '</h2><div class="card"><div class="steps">';
+    for (const p of j.steps || [])
+      h += "<div><span>" + ["○", "✱", "✓", "–", "✗"][p.state] + "</span><span>" + esc(p.label) + "</span><span>" + esc(p.result) + "</span></div>";
+    h += "</div>" + (j.summary ? '<div class="row"><div class="what">' + esc(j.summary) + "</div></div>" : "") +
+      (j.running ? '<div class="row"><div class="what"></div><button class="b bad" data-do="job_stop">Stop</button></div>' : "") + "</div>";
+  }
+  const models = st.models || [];
+  h += "<h2>Downloaded (" + models.length + ")</h2><div class=\"card\">";
+  if (!models.length) h += '<div class="row"><div class="what"><span>None yet: download one below.</span></div></div>';
+  for (const m of models) {
+    const missingHelper = m.helper && !m.helper_here;
+    h += '<div class="row"><div class="what"><b>' + esc(m.name) + (m.loaded ? '<span class="tag on">loaded</span>' : "") +
+      (m.tuned ? '<span class="tag">tuned</span>' : m.tested ? '<span class="tag">tested</span>' : "") + "</b><span>" + gib(m.bytes) +
+      (m.helper ? " · helper " + esc(m.helper) + (m.helper_here ? "" : " (not here)") : "") + '</span></div><div class="btns">' +
+      (missingHelper ? '<button class="b" data-do="helper" data-model="' + esc(m.name) + '">Helper</button>' : "") +
+      (m.loaded ? "" : '<button class="b go" data-do="load" data-model="' + esc(m.name) + '">Load</button>') +
+      (m.mine && !m.loaded ? '<button class="b bad" data-do="delete" data-model="' + esc(m.name) + '" aria-label="Delete">✕</button>' : "") +
+      "</div></div>";
+  }
+  h += "</div>";
+  if (st.download) {
+    const d = st.download, pc = d.total ? Math.min(100, (100 * d.done) / d.total) : 0;
+    h += '<h2>Downloading</h2><div class="card"><div class="row"><div class="what"><b>' + esc(d.name) + "</b><span>" + gib(d.done) +
+      " of " + gib(d.total) + (d.mbps ? " · " + n(d.mbps, 1) + " MB/s" : "") + '</span><div class="meter"><i style="width:' + pc.toFixed(1) +
+      '%"></i></div></div><button class="b bad" data-do="download_stop">Stop</button></div></div>';
+  }
+  const cat = st.catalog || [];
+  if (cat.length) {
+    h += "<h2>To download</h2><div class=\"card\">";
+    for (const c of cat)
+      h += '<div class="row"><div class="what"><b>' + esc(c.name) + "</b><span>" + esc(c.for) + " · " + gib(c.bytes) +
+        '</span></div><button class="b" data-do="download" data-key="' + esc(c.key) + '"' + (st.download ? " disabled" : "") + ">" +
+        (c.downloading ? "…" : "Download") + "</button></div>";
+    h += "</div><p class=\"note\">" + gib(st.free_bytes) + " free for downloads.</p>";
+  }
+  return h;
+}
+
+function tile(label, value, unit, sub) {
+  return '<div class="tile"><span>' + esc(label) + "</span><b>" + value + "</b>" + (unit ? " <small>" + unit + "</small>" : "") +
+    (sub ? "<span>" + sub + "</span>" : "") + "</div>";
+}
+function meter(used, total) {
+  const pc = total ? Math.min(100, (100 * used) / total) : 0;
+  return '<div class="meter"><i class="' + (pc > 92 ? "bad" : pc > 80 ? "hot" : "") + '" style="width:' + pc.toFixed(1) + '%"></i></div>';
+}
+function machinePage() {
+  const m = st.machine || {};
+  let h = "<h2>Temperatures</h2><div class=\"grid\">" +
+    tile("Chip (die)", n(m.die_c), "°C") + tile("Board", n(m.board_c), "°C") + (m.edge_c !== null && m.edge_c !== undefined ? tile("GPU edge", n(m.edge_c), "°C") : "") +
+    "</div><h2>Fan</h2><div class=\"grid\">" + tile("Speed", n(m.fan_pct), "%", m.fan_rpm ? n(m.fan_rpm) + " rpm" : "") + "</div>";
+  if (m.fan_control) {
+    const modes = [["auto", "Auto"], ["cool", "Cool"], ["early", "Early"], ["max", "Max"]];
+    h += '<div class="seg" style="margin-top:8px">' + modes.map(([k, l]) =>
+      '<button data-fan="' + k + '" class="' + (m.fan_mode === k ? "on" : "") + '">' + l + "</button>").join("") + "</div>" +
+      '<p class="note">Auto is the PS5\'s own curve; Cool and Early start the fan sooner; Max is full speed.</p>';
+  } else {
+    h += '<p class="note">The fan is set with TokenStation\'s hw helper, which the package installs.</p>';
+  }
+  h += "<h2>GPU</h2><div class=\"grid\">" + tile("Busy", n(m.gpu_busy), "%") + tile("Clock", n(m.gpu_mhz), "MHz") + "</div>";
+  h += '<h2>Memory</h2><div class="card">';
+  const mem = [["GPU memory (GTT)", m.gtt_used, m.gtt_total], ["VRAM", m.vram_used, m.vram_total],
+    ["RAM", m.ram_total ? m.ram_total - m.ram_avail : 0, m.ram_total]];
+  for (const [l, u, t] of mem)
+    if (t) h += '<div class="row"><div class="what"><b>' + l + "</b><span>" + gib(u) + " used of " + gib(t) + "</span>" + meter(u, t) + "</div></div>";
+  h += "</div>" + (m.gpu ? '<p class="note">' + esc(m.gpu) + "</p>" : "");
+  return h;
+}
+
+function settingsPage() {
+  let h = "<h2>ts5-tui's Settings</h2><div class=\"card\">";
+  for (const r of st.settings || []) h += settingRow(r);
+  h += "</div><p class=\"note\">The same rows as ts5-tui's Settings page: ‹ and › are its arrows. A change here is ts5-tui's, as if made there.</p>";
+  return h;
+}
+
+function draw() {
+  $("status").innerHTML = statusLine();
+  for (const b of document.querySelectorAll("#tabs button")) b.classList.toggle("on", b.dataset.tab === tab);
+  // Typing in a box: not drawn over until it is saved or closed.
+  if (document.activeElement && document.activeElement.classList.contains("t")) return;
+  if (!st) {
+    $("page").innerHTML = problem ? '<p class="note err">' + esc(problem) + "</p>" : '<p class="note">Asking ts5-tui…</p>';
+  } else {
+    $("page").innerHTML = tab === "machine" ? machinePage() : tab === "settings" ? settingsPage() : modelsPage();
+  }
+  drawAsk();
+}
+
+// A question ts5-tui asks (delete this model? load with less context?):
+// answered here, as its keys would.
+function drawAsk() {
+  const a = st && st.ask;
+  $("askdlg").hidden = !a;
+  if (!a) return;
+  let h = "<h1>" + esc(a.title || "ts5-tui asks") + "</h1>" + (a.text ? "<p>" + esc(a.text) + "</p>" : "");
+  if (a.picks && a.picks.length) {
+    a.picks.forEach((p, i) => {
+      h += '<button class="b pick" data-pick="' + i + '"><b>' + esc(p.label) + "</b>" + (p.note ? "<span>" + esc(p.note) + "</span>" : "") + "</button>";
+    });
+  } else {
+    h += '<div class="btns"><button class="b" data-yes="0">No</button><button class="b go" data-yes="1">Yes</button></div>';
+  }
+  $("ask").innerHTML = h;
+}
+
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("button");
+  if (!t) return;
+  if (t.dataset.tab) { tab = t.dataset.tab; store.set("ts5.controls.tab", tab); editing = null; draw(); return; }
+  if (t.dataset.do) {
+    const req = { do: t.dataset.do };
+    if (t.dataset.model) req.model = t.dataset.model;
+    if (req.do === "load") loadAsked = { model: req.model, t: Date.now() };
+    if (t.dataset.key) req.key = t.dataset.key;
+    act(req);
+  } else if (t.dataset.fan) {
+    act({ do: "fan", mode: t.dataset.fan });
+  } else if (t.dataset.set !== undefined) {
+    const r = st.settings[+t.dataset.set];
+    act({ do: "setting", index: r.index, label: r.label, dir: +t.dataset.dir });
+  } else if (t.dataset.edit !== undefined) {
+    editing = editing === +t.dataset.edit ? null : +t.dataset.edit;
+    draw();
+    const box = document.querySelector("form.edit input");
+    if (box) box.focus();
+  } else if (t.dataset.yes !== undefined) {
+    act({ do: "answer", yes: t.dataset.yes === "1" });
+  } else if (t.dataset.pick !== undefined) {
+    act({ do: "answer", pick: +t.dataset.pick });
+  }
+});
+document.addEventListener("submit", (e) => {
+  const f = e.target.closest("form.edit");
+  if (!f) return;
+  e.preventDefault();
+  const r = st.settings[+f.dataset.save];
+  const v = f.elements.v.value;
+  editing = null;
+  document.activeElement.blur();
+  act({ do: "setting", index: r.index, label: r.label, text: v });
+});
+
+// The state again every 2 s while the page is in view (each second while a
+// model loads or downloads), never two requests at once.
+async function poll() {
+  if (!document.hidden && !busy) await queue({ do: "state" }).catch(() => {});
+  const quick = loadAsked || (st && (st.loading || st.download || (st.job && st.job.running)));
+  setTimeout(poll, quick ? 1000 : 2000);
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden && !busy) queue({ do: "state" }); });
+if (!store.get("ts5.key") && location.hostname !== "127.0.0.1" && location.hostname !== "localhost") {
+  problem = "No key in this browser yet: open the chat page and sign in with your key, then come back.";
+}
+draw();
+poll();
+</script>
+</body>
+</html>
