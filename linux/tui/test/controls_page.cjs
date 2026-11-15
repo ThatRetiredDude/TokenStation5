@@ -217,9 +217,22 @@ async function until(page, fn, arg, ms) {
     await page.waitForSelector("#swlist button", { timeout: 30000 });
     const listed = await page.locator("#swlist").innerText();
     check(/Test-A/.test(listed) && /Test-D\s*loaded/.test(listed), "the menu: the models here, the loaded one marked", listed);
+    // The server may go for the switch before its answer gets out (it
+    // did once in CI): here the answer is lost on the way on purpose, and
+    // the page still waits for the model.
+    let lost = 0;
+    await page.route("**/ts5/switch", async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      await route.fetch().catch(() => null);
+      lost++;
+      await route.abort("connectionreset");
+    });
     await page.locator("#swlist button", { hasText: "Test-A" }).click();
     const back = await until(page, () => document.getElementById("model").textContent === "Test-A", null, 240000);
-    check(back, "chosen: Test-A loads, and the page shows it once it serves", await page.locator("#model").innerText());
+    await page.unroute("**/ts5/switch");
+    check(lost === 1 && back, "chosen: Test-A loads, and the page shows it once it serves (its answer lost on the way)",
+      lost + " " + (await page.locator("#model").innerText()));
+    check(await page.locator("#swdlg").isHidden(), "the menu closes for the wait", await page.locator("#swerr").innerText());
 
     // One chat list: ts5-tui's chats on the owner's chat page, and one
     // added elsewhere shows in the open list by itself.

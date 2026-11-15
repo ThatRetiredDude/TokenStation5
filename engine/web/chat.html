@@ -794,12 +794,18 @@ async function openSwitch() {
 }
 async function switchTo(name) {
   $("swerr").hidden = true;
+  let r;
   try {
-    const r = await api("/ts5/switch", { method: "POST", body: JSON.stringify({ model: name }) });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.error || "no answer");
+    r = await api("/ts5/switch", { method: "POST", body: JSON.stringify({ model: name }) });
   } catch (e) {
-    $("swerr").textContent = String(e.message || e);
+    // No answer at all: the server may have gone for the switch just
+    // before it answered. Waited for like an answered one; the menu shows
+    // what serves at the end.
+    r = null;
+  }
+  if (r && !r.ok) {
+    const j = await r.json().catch(() => ({}));
+    $("swerr").textContent = j.error || "The machine said " + r.status;
     $("swerr").hidden = false;
     return;
   }

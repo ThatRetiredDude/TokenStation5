@@ -270,6 +270,11 @@ struct App {
     Proc fb_send;
     std::string fb_result;  // how the last send ended, in words (the phone's controls show it)
     double fb_result_at = 0;
+    // Answering the phone's controls: the server that asked may be the one a
+    // load or unload stops, and it dies at once (no handler for SIGTERM). Its
+    // stop waits a second, so the answer gets out to the phone first.
+    bool from_control = false;
+    double unload_at = 0;
     size_t gh_parsed = 0;
     bool gh_signed = false, gh_known = false;  // gh_known: the repositories asked since it was signed in
     std::string gh_login, gh_install, gh_code, gh_url, gh_problem, gh_file;
@@ -1246,6 +1251,7 @@ void load_model(const ModelFile &m, bool again = false, int ctx_now = -1) {
                " > tui-serve.log 2>&1 < /dev/null & echo $! > tui-serve.pid)";
         how = "ts5 serve";
     }
+    if (g->from_control && s.online) cmd = "sleep 1; " + cmd;
     g->loader.start(cmd, "load " + m.name);
     g->load_target = api_id(m.name);
     g->load_t0 = now_s();
@@ -6994,6 +7000,10 @@ std::string control_answer(const std::string &text) {
     const std::string what = req["do"].str("state");
     const std::string toast_before = g->toast;
     const double toast_until_before = g->toast_until;
+    struct FromControl {
+        FromControl() { g->from_control = true; }
+        ~FromControl() { g->from_control = false; }
+    } from_control;
     std::string done;
     if (what == "state") {
     } else if (what == "load" || what == "delete" || what == "helper") {
@@ -7028,7 +7038,15 @@ std::string control_answer(const std::string &text) {
         else if (!helper_entry(copy)) show_toast("ts5-tui has no download for that helper", g->th->warn, 5);
         else download_helper(copy);
     } else if (what == "unload") {
-        run_command("/unload");
+        // ts5-tui's own server: stopped in a second (the main loop), since
+        // the server that asked goes with it. Any other: /unload says why not.
+        const ServerState sv = server();
+        if (own_server_pid() > 0) {
+            g->unload_at = now_s() + 1;
+            show_toast("Unloading " + (sv.model.empty() ? std::string("the model") : sv.model) + "…", g->th->accent, 3);
+        } else {
+            run_command("/unload");
+        }
     } else if (what == "download") {
         const std::string key = req["key"].str();
         const app::CatalogEntry *e = nullptr;
@@ -7208,6 +7226,10 @@ void tick() {
         control_share(access_kind() == ACC_SERVICE);
     }
     control_pump(control_answer);
+    if (g->unload_at > 0 && now_s() >= g->unload_at) {
+        g->unload_at = 0;
+        run_command("/unload");
+    }
     g->fanproc.pump();
     g->logs.pump();
     parse_log_speeds();
