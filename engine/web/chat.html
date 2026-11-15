@@ -702,6 +702,28 @@ async function send(text) {
   if (here()) redrawLast();
 }
 
+// The chats again from the machine when the page comes back into view and
+// every 15 s while it is in view: what was added elsewhere shows (for the
+// owner the list is ts5-tui's own, so a chat that went on in ts5-tui does).
+// Never while an answer comes in here; a chat begun here and not kept
+// there yet stays.
+function sig(c) { const m = c && c.messages; return m ? m.length + ":" + ((m[m.length - 1] || {}).content || "").length : ""; }
+async function refreshChats() {
+  if (!remote || busy || document.hidden || viewing) return;
+  try {
+    const r = await api("/ts5/chats");
+    if (!r.ok || busy) return;
+    const there = (await r.json()).chats || [];
+    const was = sig(chat()), n = chats.length;
+    const mine = chat();
+    if (mine && !there.find((x) => x.id === mine.id)) there.push(mine);
+    chats = there.sort((a, b) => at(b) - at(a));
+    if (sig(chat()) !== was || chats.length !== n) { draw(); if (!$("listdlg").hidden) drawList(); }
+  } catch (e) {}
+}
+document.addEventListener("visibilitychange", refreshChats);
+setInterval(refreshChats, 15000);
+
 // ---- the page ----
 function askKey(why) {
   $("keywhy").textContent = why || "This TokenStation5 needs one of its API keys. ts5-tui's Access page (F6) makes them. It stays in this browser only.";

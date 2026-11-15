@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -617,6 +618,156 @@ std::vector<std::string> chat_files(const std::string &dir) {
     return out;
 }
 
+
+// ---- the owner's chats: ts5-tui's own, one list ----
+//
+// The owner's chats on the chat page are ts5-tui's chats (DATA/chats, in
+// ts5-tui's format, linux/tui/store.cpp): the same list on the phone and
+// in ts5-tui. The chat page's own format is made from them on the way out
+// and taken back into them on the way in. Not for the background service
+// (its data is its own: /var/lib/tokenstation, where ts5-tui keeps none):
+// there the owner's chats stay under users/ID like any user's.
+
+Json jnum(double v) {
+    Json j;
+    j.type = Json::NUM;
+    j.n = v;
+    char b[32];
+    if (v == (double)(long long)v) snprintf(b, sizeof b, "%lld", (long long)v);
+    else snprintf(b, sizeof b, "%.2f", v);
+    j.s = b;
+    return j;
+}
+Json jbool(bool v) {
+    Json j;
+    j.type = Json::BOOL;
+    j.b = v;
+    return j;
+}
+
+std::string user_data_dir();
+
+// ts5-tui's chats folder (DATA/chats), for the owner, when this server's
+// keys are ts5-tui's (DATA/access/keys.tsv: the server ts5-tui starts, or
+// one its user runs with them); else "" (the service, or keys elsewhere).
+std::string tui_chats_dir(const WebOptions &o, const Server::Grant &g) {
+    if (!g.owner || !o.user_dir) return "";
+    const std::string ud = o.user_dir(g.user);
+    const size_t at = ud.rfind("/users/");
+    if (at == std::string::npos) return "";
+    const std::string base = ud.substr(0, at);
+    char a[PATH_MAX], b[PATH_MAX];
+    const std::string data = user_data_dir();
+    const bool same = base == data || (realpath(base.c_str(), a) && realpath(data.c_str(), b) && strcmp(a, b) == 0);
+    return same ? base + "/chats" : "";
+}
+
+// A turn ts5-tui keeps that the chat page shows: words and answers (not a
+// tool's result, not a summary: they stay in the file, for ts5-tui).
+bool shown_turn(const Json &t) { return !t["summary"].boolean(false) && t["tool"].str().empty(); }
+
+// ts5-tui's chat as the chat page's: {id, title, at, messages}.
+Json page_chat(const std::string &id, const Json &c) {
+    Json o = Json::object();
+    o.set("id", Json::string(id));
+    o.set("title", Json::string(c["title"].str("A chat")));
+    o.set("at", jnum(c["updated"].num(c["created"].num(0)) * 1000));
+    Json ms;
+    ms.type = Json::ARR;
+    for (const Json &t : c["turns"].a) {
+        if (!shown_turn(t)) continue;
+        Json m = Json::object();
+        const bool user = t["user"].boolean(false);
+        m.set("role", Json::string(user ? "user" : "assistant"));
+        m.set("content", Json::string(t["text"].str()));
+        if (!user) {
+            m.set("done", jbool(true));
+            if (!t["reasoning"].str().empty()) m.set("thinking", Json::string(t["reasoning"].str()));
+            const std::string end = t["end"].str("done");
+            std::string stats;
+            const double tokens = t["tokens"].num(0), tps = t["tps"].num(0);
+            if (tokens > 0) {
+                char b[64];
+                snprintf(b, sizeof b, "%.0f tokens · %.1f tok/s", tokens, tps);
+                stats = b;
+            }
+            if (end == "stopped") stats = stats.empty() ? "stopped" : stats + " · stopped";
+            std::string used;
+            for (const Json &u : t["calls"].a) used += (used.empty() ? "" : ", ") + u["name"].str();
+            if (!used.empty()) stats += (stats.empty() ? "" : " · ") + std::string("used ") + used;
+            if (!stats.empty()) m.set("stats", Json::string(stats));
+            if (end == "failed") m.set("error", Json::string(t["error"].str("it failed")));
+        }
+        ms.a.push_back(m);
+    }
+    o.set("messages", ms);
+    return o;
+}
+
+// The chat page's messages taken into ts5-tui's chat (old: what the file
+// holds now, or none): the page only ever adds messages at the end, so
+// those after the ones both have are added, after ts5-tui's own turns.
+// An answer still coming isn't kept yet (ts5-tui keeps finished ones).
+std::string tui_chat(const Json &page, const Json *old, const std::string &model) {
+    const int64_t now = (int64_t)time(nullptr);
+    Json c = Json::object();
+    c.set("v", jnum(1));
+    std::string title = old ? old->operator[]("title").str() : "";
+    if (title.empty()) title = page["title"].str();
+    std::vector<Json> turns = old ? old->operator[]("turns").a : std::vector<Json>{};
+    std::vector<Json> mine;  // the page's messages, as turns
+    for (const Json &m : page["messages"].a) {
+        const std::string role = m["role"].str();
+        if (role != "user" && role != "assistant") continue;
+        const bool user = role == "user";
+        if (!user && !m["done"].boolean(false)) continue;
+        Json t = Json::object();
+        t.set("user", jbool(user));
+        t.set("text", Json::string(m["content"].str()));
+        if (!user) {
+            t.set("model", Json::string(m["model"].str(model)));
+            const std::string stats = m["stats"].str();
+            double tokens = 0, tps = 0;
+            sscanf(stats.c_str(), "%lf tokens · %lf tok/s", &tokens, &tps);
+            t.set("tps", jnum(tps));
+            t.set("tokens", jnum(tokens));
+            const bool failed = !m["error"].str().empty();
+            t.set("end", Json::string(failed ? "failed" : stats.find("stopped") != std::string::npos ? "stopped" : "done"));
+            if (failed) t.set("error", Json::string(m["error"].str()));
+            if (!m["thinking"].str().empty()) t.set("reasoning", Json::string(m["thinking"].str()));
+        }
+        mine.push_back(t);
+    }
+    // The ones both have: the file's shown turns, in order, the same.
+    size_t same = 0;
+    for (const Json &t : turns) {
+        if (!shown_turn(t)) continue;
+        if (same >= mine.size() || t["user"].boolean(false) != mine[same]["user"].boolean(false) ||
+            t["text"].str() != mine[same]["text"].str())
+            break;
+        same++;
+    }
+    // (An empty answer is one that only called tools, in ts5-tui: one
+    // from the page with nothing in it isn't kept.)
+    for (size_t i = same; i < mine.size(); i++)
+        if (mine[i]["user"].boolean(false) || !mine[i]["text"].str().empty() || mine[i]["end"].str() == "failed")
+            turns.push_back(mine[i]);
+    if (title.empty())
+        for (const Json &t : turns)
+            if (t["user"].boolean(false)) {
+                title = t["text"].str().substr(0, 60);
+                break;
+            }
+    c.set("title", Json::string(title.empty() ? "A chat" : title));
+    c.set("created", jnum(old ? old->operator[]("created").num((double)now) : (double)now));
+    c.set("updated", jnum((double)now));
+    Json arr;
+    arr.type = Json::ARR;
+    arr.a = turns;
+    c.set("turns", arr);
+    return c.dump() + "\n";
+}
+
 bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
     const bool me = p.path == "/ts5/me";
     const bool chats = p.path == "/ts5/chats" || p.path.rfind("/ts5/chats/", 0) == 0;
@@ -728,13 +879,26 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
         send_error(fd, 403, "Chats are kept on the machine for a key's user; without a key they stay in the browser.");
         return true;
     }
+    // The owner's: ts5-tui's chats (tui), with the ones kept apart before
+    // (dir) until each is written again.
+    const std::string tui = tui_chats_dir(o, g);
     const std::string dir = o.user_dir(g.user) + "/chats";
     const std::string id = p.path.size() > 11 ? p.path.substr(11) : "";
     if (p.path == "/ts5/chats" || p.path == "/ts5/chats/") {
         if (p.method == "GET") {
             std::string out = "{\"chats\":[";
             bool first = true;
+            std::vector<std::string> seen;
+            if (!tui.empty())
+                for (const std::string &n : chat_files(tui)) {
+                    Json c;
+                    if (!Json::parse(read_whole(tui + "/" + n), c) || c.type != Json::OBJ || c["turns"].type != Json::ARR) continue;
+                    out += (first ? "" : ",") + page_chat(n.substr(0, n.size() - 5), c).dump();
+                    first = false;
+                    seen.push_back(n);
+                }
             for (const std::string &n : chat_files(dir)) {
+                if (std::find(seen.begin(), seen.end(), n) != seen.end()) continue;
                 const std::string text = read_whole(dir + "/" + n);
                 Json c;
                 if (!Json::parse(text, c) || c.type != Json::OBJ) continue;
@@ -744,6 +908,10 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
             send_file(fd, 200, "application/json", out + "]}", false);
         } else if (p.method == "DELETE") {
             for (const std::string &n : chat_files(dir)) unlink((dir + "/" + n).c_str());
+            if (!tui.empty()) {
+                for (const std::string &n : chat_files(tui)) unlink((tui + "/" + n).c_str());
+                log_line("ts5: the owner deleted all their chats, ts5-tui's too (%s)", p.client.c_str());
+            }
             send_file(fd, 200, "application/json", "{\"deleted\":true}", false);
         } else {
             send_error(fd, 405, "GET or DELETE");
@@ -755,36 +923,52 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
         return true;
     }
     const std::string file = dir + "/" + id + ".json";
+    const std::string tfile = tui.empty() ? "" : tui + "/" + id + ".json";
+    // Where it is written: ts5-tui's folder for the owner (else the user's).
+    const std::string wdir = tui.empty() ? dir : tui, wfile = tui.empty() ? file : tfile;
     if (p.method == "PUT") {
         Json c;
         if (p.body.size() > kChatMax || !Json::parse(p.body, c) || c.type != Json::OBJ || c["id"].str() != id) {
             send_error(fd, 400, "a chat is a JSON object with its id, at most 4 MB");
             return true;
         }
-        if (access(file.c_str(), F_OK) != 0 && (int)chat_files(dir).size() >= kChatsMax) {
+        if (access(wfile.c_str(), F_OK) != 0 && (int)chat_files(wdir).size() >= kChatsMax) {
             send_error(fd, 400, "a user keeps at most 1000 chats: delete some first");
             return true;
         }
-        size_t total = p.body.size();
-        for (const std::string &n : chat_files(dir)) {
+        std::string body = p.body;
+        if (!tui.empty()) {
+            Json old;
+            const bool had = Json::parse(read_whole(tfile), old) && old.type == Json::OBJ && old["turns"].type == Json::ARR;
+            body = tui_chat(c, had ? &old : nullptr, o.model);
+        }
+        size_t total = body.size();
+        for (const std::string &n : chat_files(wdir)) {
             struct stat st {};
-            if (n != id + ".json" && stat((dir + "/" + n).c_str(), &st) == 0) total += (size_t)st.st_size;
+            if (n != id + ".json" && stat((wdir + "/" + n).c_str(), &st) == 0) total += (size_t)st.st_size;
         }
         if (total > chats_max_bytes()) {
             send_error(fd, 400, "a user's chats take at most " + std::to_string(chats_max_bytes() >> 20) +
                                     " MB on the machine: delete some first");
             return true;
         }
-        make_dirs(dir);
-        if (!write_whole(file, p.body)) {
+        make_dirs(wdir);
+        if (!write_whole(wfile, body)) {
             send_error(fd, 500, "the chat could not be written on the machine");
             return true;
         }
+        if (!tui.empty()) unlink(file.c_str());  // kept apart before: ts5-tui's now
         send_file(fd, 200, "application/json", "{\"saved\":true}", false);
     } else if (p.method == "DELETE") {
         unlink(file.c_str());
+        if (!tfile.empty()) unlink(tfile.c_str());
         send_file(fd, 200, "application/json", "{\"deleted\":true}", false);
     } else if (p.method == "GET") {
+        Json c;
+        if (!tfile.empty() && Json::parse(read_whole(tfile), c) && c.type == Json::OBJ && c["turns"].type == Json::ARR) {
+            send_file(fd, 200, "application/json", page_chat(id, c).dump(), false);
+            return true;
+        }
         const std::string text = read_whole(file);
         if (text.empty()) send_error(fd, 404, "no such chat");
         else send_file(fd, 200, "application/json", text, false);

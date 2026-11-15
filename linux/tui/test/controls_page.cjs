@@ -201,6 +201,20 @@ async function until(page, fn, arg, ms) {
     const back = await until(page, () => document.getElementById("model").textContent === "Test-A", null, 240000);
     check(back, "chosen: Test-A loads, and the page shows it once it serves", await page.locator("#model").innerText());
 
+    // One chat list: ts5-tui's chats on the owner's chat page, and one
+    // added elsewhere shows in the open list by itself.
+    await page.click("#list");
+    await page.waitForSelector("#listdlg:not([hidden])", { timeout: 10000 });
+    check(/a tool chat/.test(await page.locator("#listdlg").innerText()), "the chat page's list: ts5-tui's chats",
+      (await page.locator("#listdlg").innerText()).slice(0, 400));
+    await page.evaluate(async (k) => {
+      await fetch("/ts5/chats/zzelsewhere", { method: "PUT", headers: { Authorization: "Bearer " + k, "Content-Type": "application/json" },
+        body: JSON.stringify({ id: "zzelsewhere", title: "begun elsewhere", messages: [{ role: "user", content: "x" }] }) });
+    }, key);
+    check(await until(page, () => /begun elsewhere/.test(document.getElementById("listdlg").textContent), null, 25000),
+      "a chat added elsewhere: in the open list within 15 s");
+    await page.click("#listclose");
+
     const wide = await page.evaluate(() => document.scrollingElement.scrollWidth - window.innerWidth);
     check(wide <= 0, "at a phone's width (390 px) nothing runs off the side", wide);
     if (shot) await page.screenshot({ path: shot, fullPage: true });

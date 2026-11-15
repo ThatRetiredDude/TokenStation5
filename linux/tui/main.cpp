@@ -144,6 +144,10 @@ struct App {
     };
     std::vector<ChatsHit> chats_hits;
     int answers_saved = 0;
+    // The open chat's file as ts5-tui last wrote or read it: the chat page
+    // (the owner's phone) adds turns to the same file (store.h).
+    std::string chat_watch_id;
+    ChatFileState chat_watch;
     double ask_told = 0;  // the run-it question a toast on another page was shown for
     std::string load_target;  // what's loading, until /v1/models says so
     double load_t0 = 0;
@@ -7090,6 +7094,42 @@ std::string control_answer(const std::string &text) {
     return out.dump();
 }
 
+// The open chat's file as it is now (after ts5-tui wrote or opened it).
+void chat_watch_reset() {
+    g->chat_watch_id = g->chat.saved_id;
+    g->chat_watch = chat_file_state(g->chat.saved_id);
+}
+
+// The chat open here went on on the chat page (the owner's phone): its new
+// turns come in at the end, once no answer is coming here. Looked at each
+// second (a stat; the file is read only when it changed).
+void chat_follow_file() {
+    static double at = 0;
+    if (now_s() - at < 1) return;
+    at = now_s();
+    const std::string id = g->chat.saved_id;
+    if (id != g->chat_watch_id) {
+        chat_watch_reset();
+        return;
+    }
+    if (id.empty() || g->chat.busy()) return;
+    const int64_t mt = chat_file_mtime(id);
+    if (mt == g->chat_watch.mtime_ns) return;
+    if (mt == 0) {  // deleted elsewhere: it stays on screen, and is written again with the next answer
+        g->chat_watch.mtime_ns = 0;
+        return;
+    }
+    ChatFileState now;
+    const size_t before = g->chat.msgs.size();
+    if (!take_new_turns(g->chat, id, g->chat_watch.turns, now)) return;
+    g->chat_watch = now;
+    if (g->chat.msgs.size() > before) {
+        g->chat.scroll = 0;
+        g->full_redraw = true;
+        show_toast("This chat went on on the chat page: its new messages are here", g->th->accent, 5);
+    }
+}
+
 void tick() {
     const double t = now_s();
     if (t - g->sens_at >= 1.0) {
@@ -7284,11 +7324,15 @@ void tick() {
                                : "The model wants to run a command: F1 (or /chat) to see it and say yes or no",
                    g->th->warn, 8);
     }
-    // Every chat is kept (store.h), after each answer.
+    // Turns the chat page added to the chat open here first (they come
+    // after anything here not saved yet), then every chat is kept
+    // (store.h), after each answer.
+    chat_follow_file();
     if (g->chat.answers != g->answers_saved && !g->chat.busy()) {
         g->answers_saved = g->chat.answers;
         std::string why;
         if (!save_chat(g->chat, why)) show_toast("Chat not saved: " + why, g->th->bad, 6);
+        chat_watch_reset();
     }
     // An answer cut off by the length: say why, in the chat. A chat that
     // filled up is summarized and goes on (Settings → When a chat fills up).

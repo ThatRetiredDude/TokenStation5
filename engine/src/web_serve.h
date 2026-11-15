@@ -60,6 +60,9 @@ struct WebOptions {
     // The program the terminal runs, as a shell command; "" for ts5-tui
     // beside this ts5 (or on PATH). TS5_TERMINAL_COMMAND sets it too (tests).
     std::string command;
+    // The model served (its name, no .gguf): for the owner's answers kept
+    // in ts5-tui's chats, which say which model wrote each.
+    std::string model;
 };
 
 void attach_web(Server &s, const WebOptions &o);

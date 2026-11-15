@@ -324,6 +324,99 @@ def main():
         check("ts5: controls: 127.0.0.1: user_new Robin" in log and "key_new " + robin + " Robin's phone" in log and rkey not in log,
               "the log: what was done to whom, never a key's words", [l for l in log.splitlines() if "user_" in l or "key_" in l])
 
+        # ---- one chat list: the owner's chat page chats are ts5-tui's ----
+        def tui(*k):
+            subprocess.run(["tmux", "-L", "ts5", "send-keys", "-t", "ts5"] + list(k), env=env)
+            time.sleep(0.5)
+
+        def tui_type(text):
+            subprocess.run(["tmux", "-L", "ts5", "send-keys", "-t", "ts5", "-l", text], env=env)
+            time.sleep(0.4)
+
+        def tui_screen():
+            return subprocess.run(["tmux", "-L", "ts5", "capture-pane", "-p", "-t", "ts5"], env=env,
+                                  capture_output=True, text=True).stdout
+
+        tchats = os.path.join(data, "chats")
+        ownerid = next(u["id"] for u in ctl({"do": "users"})["access"]["users"] if u["owner"])
+        apart = os.path.join(data, "users", ownerid, "chats")
+        page = {"id": "p1phone", "title": "from the phone", "at": 1, "messages": [
+            {"role": "user", "content": "hello from the phone"},
+            {"role": "assistant", "content": "hi there", "thinking": "", "done": True, "stats": "3 tokens · 5.0 tok/s"},
+            {"role": "user", "content": "still writing"},
+            {"role": "assistant", "content": "", "thinking": "", "done": False}]}
+        code, _ = call(here + "/ts5/chats/p1phone", owner, page, "PUT")
+        f = os.path.join(tchats, "p1phone.json")
+        kept = json.load(open(f)) if os.path.exists(f) else {}
+        check(code == 200 and kept.get("v") == 1 and [t["text"] for t in kept.get("turns", [])] ==
+              ["hello from the phone", "hi there", "still writing"] and not os.path.exists(os.path.join(apart, "p1phone.json")),
+              "a chat from the chat page: kept as ts5-tui's, in its folder (the answer still coming isn't)", (code, kept))
+        check(kept.get("turns", [{}, {}])[1].get("tokens") == 3 and kept["turns"][1].get("model") == "Test-A" and kept["turns"][1].get("end") == "done",
+              "its answer as ts5-tui keeps one: the model, tokens, how it ended", kept.get("turns"))
+        code, got = call(here + "/ts5/chats", owner)
+        mine = next((c for c in got.get("chats", []) if c["id"] == "p1phone"), {})
+        check([m["role"] for m in mine.get("messages", [])] == ["user", "assistant", "user"] and mine.get("title") == "from the phone"
+              and mine["messages"][1].get("stats") == "3 tokens · 5.0 tok/s", "and back on the chat page as it was", mine)
+
+        tui("F1")
+        tui_type("/open from the phone")
+        s1 = tui_screen()
+        if check("/open from the phone" in s1, "ts5-tui: /open typed (read before Enter)", s1[-400:]):
+            tui("Enter")
+        time.sleep(1)
+        s1 = tui_screen()
+        check("hello from the phone" in s1 and "hi there" in s1, "ts5-tui opens it: the phone's chat, in ts5-tui", s1)
+        page["messages"] = page["messages"][:3] + [
+            {"role": "assistant", "content": "the answer came", "done": True, "stats": "4 tokens · 6.0 tok/s"},
+            {"role": "user", "content": "one more from the phone"},
+            {"role": "assistant", "content": "and its answer", "done": True}]
+        call(here + "/ts5/chats/p1phone", owner, page, "PUT")
+        followed = wait(lambda: "and its answer" in tui_screen(), 6)
+        check(followed and "one more from the phone" in tui_screen(), "the chat open in ts5-tui goes on with what the phone added",
+              tui_screen())
+        check([t["text"] for t in json.load(open(f))["turns"]][-3:] == ["the answer came", "one more from the phone", "and its answer"],
+              "the file: each message once, in order", [t["text"] for t in json.load(open(f))["turns"]])
+
+        # ts5-tui's own turns (a tool's result, a summary) stay, where the
+        # page doesn't show them.
+        tool_chat = {"v": 1, "title": "a tool chat", "created": 1700000000, "updated": 1700000100, "turns": [
+            {"user": True, "text": "search it"},
+            {"user": False, "text": "", "calls": [{"id": "c1", "name": "web_search", "args": "{}"}], "model": "Test-A",
+             "tps": 1.0, "tokens": 5, "end": "done"},
+            {"user": False, "tool": "web_search", "call": "c1", "head": "web_search", "ok": True, "text": "results"},
+            {"user": False, "text": "found it", "model": "Test-A", "tps": 2.0, "tokens": 7, "end": "done"}]}
+        with open(os.path.join(tchats, "c17000001.json"), "w") as fh:
+            json.dump(tool_chat, fh)
+        code, got = call(here + "/ts5/chats/c17000001", owner)
+        msgs = got.get("messages", []) if code == 200 else []
+        check([m["content"] for m in msgs] == ["search it", "", "found it"] and "used web_search" in msgs[1].get("stats", ""),
+              "ts5-tui's chat on the page: a tool's result left out, the call said", msgs)
+        got["messages"] = msgs + [{"role": "user", "content": "thanks"}, {"role": "assistant", "content": "welcome", "done": True}]
+        call(here + "/ts5/chats/c17000001", owner, got, "PUT")
+        turns = json.load(open(os.path.join(tchats, "c17000001.json")))["turns"]
+        check(len(turns) == 6 and turns[2].get("tool") == "web_search" and turns[1].get("calls") and
+              [t["text"] for t in turns[-2:]] == ["thanks", "welcome"],
+              "the page goes on with it: ts5-tui's tool turns stay where they were", turns)
+
+        # A chat kept apart before (users/OWNER/chats): listed, then ts5-tui's
+        # once written again.
+        os.makedirs(apart, exist_ok=True)
+        with open(os.path.join(apart, "oldone.json"), "w") as fh:
+            json.dump({"id": "oldone", "title": "older", "at": 5, "messages": [{"role": "user", "content": "from before"}]}, fh)
+        code, got = call(here + "/ts5/chats", owner)
+        check("oldone" in [c["id"] for c in got.get("chats", [])], "a chat kept apart before: still listed", got)
+        old = next(c for c in got["chats"] if c["id"] == "oldone")
+        old["messages"].append({"role": "assistant", "content": "now ts5-tui's", "done": True})
+        call(here + "/ts5/chats/oldone", owner, old, "PUT")
+        check(os.path.exists(os.path.join(tchats, "oldone.json")) and not os.path.exists(os.path.join(apart, "oldone.json")),
+              "written again: ts5-tui's, and not kept twice", os.listdir(tchats))
+        # A user's chats stay theirs, apart.
+        call(here + "/ts5/chats/sam1", skey, {"id": "sam1", "title": "s", "messages": [{"role": "user", "content": "sam"}]}, "PUT")
+        check(os.path.exists(os.path.join(data, "users", sam, "chats", "sam1.json")) and not os.path.exists(os.path.join(tchats, "sam1.json")),
+              "a user's chat: theirs, never in ts5-tui's list", os.listdir(tchats))
+        code, _ = call(here + "/ts5/chats/p1phone", owner, None, "DELETE")
+        check(code == 200 and not os.path.exists(f), "deleted on the chat page: gone from ts5-tui's too")
+
         # ---- the page ----
         code, body = call(here + "/ts5/controls")
         check(code == 200 and b"/ts5/control" in body and b"keep.js" in body, "/ts5/controls is the controls page", code)
