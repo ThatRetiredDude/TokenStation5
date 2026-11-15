@@ -140,6 +140,10 @@ def main():
         check(k in out, f"scrub keeps {k}")
     check(run("scrub", "--keep-emails", stdin="write to me@example.cz").stdout.strip() == "write to me@example.cz",
           "--keep-emails keeps an email")
+    r = subprocess.run([ts5, "feedback", "scrub"], input="keys in /srv/ts5-other-home/.local/share/tokenstation/access/keys.tsv\n",
+                       capture_output=True, text=True, env=dict(env, HOME="/srv/ts5-other-home"), timeout=60)
+    check("/srv/ts5-other-home" not in r.stdout and "keys in ~/.local/share/tokenstation" in r.stdout,
+          "a HOME apart from the login's home folder (a test's, sudo's) is taken out too")
 
     # prepare
     logf = os.path.join(tmp, "ts5.log")

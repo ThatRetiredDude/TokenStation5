@@ -37,6 +37,7 @@ struct ScrubWords {
     std::vector<std::string> users;  // login names
     std::string host;                // this machine's name
     std::string home;                // home folder, such as /home/ps5
+    std::string home_env;            // HOME, when it is another folder (a test's, sudo's)
 };
 ScrubWords feedback_scrub_words();
 
