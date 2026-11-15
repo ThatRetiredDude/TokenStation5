@@ -95,6 +95,26 @@ async function until(page, fn, arg, ms) {
     await page.locator("form.edit button").click();
     await page.waitForTimeout(500);
 
+    // /feedback: written here, the whole report read, Cancel, then Send.
+    const words = "page test: the fan got loud";
+    await page.locator("#fbtext").fill(words);
+    await page.locator("button[data-fbprep]").click();
+    check(await until(page, (w) => !document.getElementById("fbdlg").hidden &&
+      /## What happened/.test(document.querySelector("pre.report").textContent) &&
+      document.querySelector("pre.report").textContent.includes(w), words, 20000),
+      "Feedback: the whole report, as ts5-tui made it, shown before anything is sent");
+    const rep = await page.locator("pre.report").innerText();
+    check(!/192\.168\.1\.44|ghp_/.test(rep), "Feedback: the log in it is cleaned", rep.slice(-400));
+    if (shot) await page.screenshot({ path: shot.replace(/\.png$/, "") + "-feedback.png" });
+    await page.click("button[data-fbcancel]");
+    check(await page.locator("#fbdlg").isHidden(), "Feedback: Cancel closes it, nothing sent");
+    check((await page.locator("#fbtext").inputValue()) === words, "Feedback: the words stay to change or send");
+    await page.locator("button[data-fbprep]").click();
+    await until(page, () => !document.getElementById("fbdlg").hidden, null, 20000);
+    await page.click("button[data-fbsend]");
+    check(await until(page, () => /fb-20261115-phone01/.test(document.getElementById("page").textContent), null, 30000),
+      "Feedback: Send, and the report's id comes back", (await text()).slice(-600));
+
     // Machine: temperatures, the fan, memory.
     await page.click('nav button[data-tab="machine"]');
     t = await text();

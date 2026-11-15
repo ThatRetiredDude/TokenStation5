@@ -268,6 +268,8 @@ struct App {
     std::string fb_summary, fb_text;
     bool fb_chat = false, fb_logs = true, fb_review = false, fb_sending = false;
     Proc fb_send;
+    std::string fb_result;  // how the last send ended, in words (the phone's controls show it)
+    double fb_result_at = 0;
     size_t gh_parsed = 0;
     bool gh_signed = false, gh_known = false;  // gh_known: the repositories asked since it was signed in
     std::string gh_login, gh_install, gh_code, gh_url, gh_problem, gh_file;
@@ -6354,13 +6356,16 @@ void feedback_follow() {
     g->fb_send.partial.clear();
     unlink((state_dir() + "/feedback-send.md").c_str());
     ts5::Json j;
+    g->fb_result_at = now_s();
     if (ts5::Json::parse(line, j) && j["ok"].boolean(false)) {
-        show_toast("Sent, thank you. Report " + j["id"].str() + ": only TokenStation's developers can read it", g->th->good, 10);
+        g->fb_result = "Sent, thank you. Report " + j["id"].str() + ": only TokenStation's developers can read it";
+        show_toast(g->fb_result, g->th->good, 10);
         chat_note(g->chat, "Feedback sent (report **" + j["id"].str() + "**). Only TokenStation's developers can read it; "
                            "it is never posted anywhere public.");
         return;
     }
     const std::string why = j["error"].str().empty() ? "no answer" : j["error"].str();
+    g->fb_result = "Not sent: " + why + ". Try again, or Save to a file";
     show_toast("Not sent: " + why + ". /feedback again, or Save to a file", g->th->bad, 10);
 }
 
@@ -6647,6 +6652,13 @@ ts5::Json control_state() {
     const ServerState sv = server();
     Json st = Json::object();
     st.set("app", Json::string("ts5-tui"));
+    if (g->fb_sending || (!g->fb_result.empty() && now_s() - g->fb_result_at < 120)) {
+        Json f = Json::object();
+        f.set("sending", cj_bool(g->fb_sending));
+        if (!g->fb_sending) f.set("result", Json::string(g->fb_result));
+        f.set("sent", cj_bool(g->fb_result.rfind("Sent", 0) == 0));
+        st.set("feedback", f);
+    }
     Json s = Json::object();
     s.set("online", cj_bool(sv.online));
     s.set("model", Json::string(sv.model));
@@ -7073,6 +7085,37 @@ std::string control_answer(const std::string &text) {
         }
     } else if (what == "rescan") {
         scan_models();
+    } else if (what == "feedback_prepare") {
+        // /feedback from the phone: the report made here, as ts5-tui makes
+        // it, and shown there in full before anything is sent.
+        if (g->fb_sending) return refuse("the last report is still being sent");
+        std::string w = req["summary"].str();
+        while (!w.empty() && isspace((unsigned char)w.back())) w.pop_back();
+        while (!w.empty() && isspace((unsigned char)w.front())) w.erase(0, 1);
+        if (w.empty()) return refuse("write what went wrong first (and an email, if you'd like a reply)");
+        if (w.size() > 8000) {  // at a character's start
+            size_t n = 8000;
+            while (n > 0 && ((unsigned char)w[n] & 0xC0) == 0x80) n--;
+            w.resize(n);
+        }
+        g->fb_summary = w;
+        g->fb_chat = req["chat"].boolean(false);
+        g->fb_logs = req["logs"].boolean(true);
+        if (g->fb_logs && g->logs_src.empty()) pick_logs();
+        const std::string before = g->toast;
+        if (!feedback_prepare()) return refuse(g->toast != before ? g->toast : "the report couldn't be made");
+        extra.set("report", Json::string(g->fb_text));
+    } else if (what == "feedback_send" || what == "feedback_save") {
+        // Only the report the phone was shown (its length said back).
+        if (g->fb_text.empty()) return refuse("no report made yet");
+        if ((size_t)req["length"].num(-1) != g->fb_text.size()) return refuse("the report changed since it was shown: make it again");
+        if (what == "feedback_save") {
+            feedback_save();
+        } else {
+            if (g->fb_sending) return refuse("the last report is still being sent");
+            g->fb_result.clear();
+            feedback_send();
+        }
     } else if (what == "users" || what.rfind("user_", 0) == 0 || what.rfind("key_", 0) == 0) {
         std::string why;
         if (!control_users(what, req, extra, why)) return refuse(why);

@@ -29,9 +29,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 failed = 0
@@ -104,6 +106,25 @@ def wait(pred, secs, step=0.5):
     return None
 
 
+# /feedback's service, stood in for here: nothing is ever sent to the real one.
+fb_got = []
+
+
+class Feedback(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        fb_got.append(json.loads(body))
+        data = json.dumps({"id": "fb-20261115-phone01"}).encode()
+        self.send_response(201)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
 def main():
     if len(sys.argv) < 4:
         sys.exit(__doc__)
@@ -137,8 +158,16 @@ def main():
     os.makedirs(tmux_dir)
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("TS5_") and not k.startswith("XDG_") and k not in ("INVOCATION_ID", "TMUX")}
+    fbsrv = ThreadingHTTPServer(("127.0.0.1", 0), Feedback)
+    threading.Thread(target=fbsrv.serve_forever, daemon=True).start()
+    # ts5-tui's log, as /feedback reads it: an address and a token to be
+    # taken out.
+    tui_log = os.path.join(home, "tui-log.txt")
+    with open(tui_log, "w") as f:
+        f.write("ts5: listening on 0.0.0.0:8081\nts5: client 192.168.1.44 token " + "gh" + "p_ABCDEFGHIJKLMNOPQRSTUVWXYZabcd1234\n")
     env.update(HOME=home, PATH=bin_dir + ":" + env.get("PATH", "/usr/bin:/bin"), TMUX_TMPDIR=tmux_dir, LANG="C.UTF-8",
-               TS5_RUN_DIR=os.path.join(home, "run"))
+               TS5_RUN_DIR=os.path.join(home, "run"), TS5_TUI_LOG=tui_log,
+               TS5_FEEDBACK_URL="http://127.0.0.1:%d/v1/report" % fbsrv.server_address[1])
     sockp = os.path.join(data, "control.sock")
     logs = []
     try:
@@ -417,6 +446,39 @@ def main():
         code, _ = call(here + "/ts5/chats/p1phone", owner, None, "DELETE")
         check(code == 200 and not os.path.exists(f), "deleted on the chat page: gone from ts5-tui's too")
 
+        # ---- /feedback from the phone: ts5-tui makes the report, the phone
+        # reads all of it, and only that report is sent, when asked ----
+        j = ctl({"do": "feedback_prepare", "summary": "   "})
+        check(j.get("error") and "report" not in j, "feedback: no words, refused", j)
+        j = ctl({"do": "feedback_prepare", "summary": "the phone's helper stalled, write me at me@example.cz", "logs": True})
+        rep = j.get("report", "")
+        check("## What happened" in rep and "me@example.cz" in rep, "feedback: the report comes to the phone, the email kept", j)
+        check("<lan-ip>" in rep and "192.168.1.44" not in rep and "<github-token>" in rep and "ghp_" not in rep,
+              "feedback: the log in it is cleaned", rep[-800:])
+        check("hello from the phone" not in rep, "feedback: no chat unless asked")
+        check(not fb_got, "feedback: nothing sent while it is read")
+        j2 = ctl({"do": "feedback_send", "length": len(rep.encode()) + 1})
+        check(j2.get("error") and not fb_got, "feedback: Send for a report not the one shown: refused", j2)
+        fdir = os.path.join(data, "feedback")
+        j2 = ctl({"do": "feedback_save", "length": len(rep.encode())})
+        saved = [os.path.join(fdir, n) for n in os.listdir(fdir)] if os.path.isdir(fdir) else []
+        check(not j2.get("error") and len(saved) == 1 and open(saved[0]).read() == rep and "Saved to" in j2.get("said", ""),
+              "feedback: Save keeps it on the machine, as shown", (j2.get("said"), saved))
+        check(not fb_got, "feedback: saving sends nothing")
+        j = ctl({"do": "feedback_prepare", "summary": "it stopped again", "logs": False})
+        rep = j.get("report", "")
+        check(rep and "<lan-ip>" not in rep and "192.168.1.44" not in rep, "feedback: the log left out when asked", rep[-500:])
+        j2 = ctl({"do": "feedback_send", "length": len(rep.encode())})
+        check(not j2.get("error"), "feedback: Send", j2)
+        j3 = wait(lambda: (lambda s: s if (s.get("feedback") or {}).get("result") else None)(ctl({"do": "state"})), 20)
+        fb = (j3 or {}).get("feedback", {})
+        check(fb.get("sent") and "fb-20261115-phone01" in fb.get("result", ""), "feedback: the phone is told it was sent, and its id", j3)
+        check(len(fb_got) == 1 and fb_got[0].get("summary") == "it stopped again" and "192.168.1.44" not in fb_got[0].get("body", ""),
+              "feedback: sent once, what was shown", fb_got)
+        log = open(os.path.join(home, ".cache", "tokenstation", "tui-serve.log"), errors="replace").read()
+        check("controls: 127.0.0.1: feedback_send" in log and "stopped again" not in log and "me@example.cz" not in log,
+              "the log: a report was sent, never its words", [l for l in log.splitlines() if "feedback" in l])
+
         # ---- the page ----
         code, body = call(here + "/ts5/controls")
         check(code == 200 and b"/ts5/control" in body and b"keep.js" in body, "/ts5/controls is the controls page", code)
@@ -443,6 +505,8 @@ def main():
             else:
                 print(out.rstrip())
                 check(p.returncode == 0, "the page in a browser: every kind of control")
+                check(len(fb_got) == 2 and fb_got[1].get("summary") == "page test: the fan got loud",
+                      "the page's report: sent once, after its Send", [g.get("summary") for g in fb_got])
                 if p.returncode != 0:
                     print("---- ts5-tui's screen ----")
                     print(subprocess.run(["tmux", "-L", "ts5", "capture-pane", "-p", "-t", "ts5"], env=env,
@@ -539,6 +603,7 @@ def main():
             srv.wait()
     finally:
         subprocess.run(["tmux", "-L", "ts5", "kill-server"], env=env, capture_output=True)
+        fbsrv.shutdown()
         time.sleep(0.5)
         try:
             pid = int(open(os.path.join(home, ".cache", "tokenstation", "tui-serve.pid")).read())

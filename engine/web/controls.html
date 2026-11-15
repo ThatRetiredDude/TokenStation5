@@ -109,6 +109,13 @@
   .qrtext { font: 13px ui-monospace, Menlo, Consolas, monospace; overflow-wrap: anywhere; background: var(--panel);
     border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; cursor: pointer; user-select: all; }
   .dlg .seg { margin-bottom: 8px; }
+  textarea.t { width: 100%; min-height: 96px; resize: vertical; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .fb { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .fb label { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+  .fb label span { color: var(--dim); font-size: 13px; }
+  pre.report { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; max-height: 55vh; overflow: auto; margin: 0 0 12px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -127,6 +134,7 @@
 <div id="toast" role="status" hidden></div>
 <div class="shade" id="askdlg" hidden><div class="dlg" id="ask"></div></div>
 <div class="shade" id="keydlg" hidden><div class="dlg" id="keyshow"></div></div>
+<div class="shade" id="fbdlg" hidden><div class="dlg" id="fbshow"></div></div>
 <script src="/ts5/web/keep.js?v=4"></script>
 <script>
 "use strict";
@@ -143,6 +151,8 @@ let userOpen = null;    // the user whose page is open on Users (their id)
 let keyFor = null;      // the user a new key's name is being typed for ("owner" for yours)
 let madeKey = null;     // a new key's QR codes, shown this once (kept in this page alone, never stored)
 let madeSel = 0;        // which of its codes shows
+const fb = { text: "", logs: true, chat: false };  // /feedback being written (kept across redraws)
+let fbReport = null;    // the report ts5-tui made, shown in full before it can be sent
 
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function gib(b) {
@@ -183,6 +193,7 @@ async function send(req) {
   // A new key's codes: shown, never kept in the state (or anywhere).
   if (j.made_key) { madeKey = j.made_key; madeSel = 0; delete j.made_key; }
   if (j.made) { userOpen = j.made; delete j.made; }
+  if (typeof j.report === "string") { fbReport = j.report; delete j.report; }
   // The users stay as last read while a request without them is answered.
   if (!j.access && st && st.access && tab === "users") j.access = st.access;
   st = j;
@@ -335,7 +346,32 @@ function settingsPage() {
   let h = "<h2>ts5-tui's Settings</h2><div class=\"card\">";
   for (const r of st.settings || []) h += settingRow(r);
   h += "</div><p class=\"note\">The same rows as ts5-tui's Settings page: ‹ and › are its arrows. A change here is ts5-tui's, as if made there.</p>";
+  return h + feedbackCard();
+}
+
+// /feedback, as ts5-tui's: what went wrong, the report made and cleaned on
+// the machine, read here in full, then sent (or saved there, or dropped).
+function feedbackCard() {
+  const f = st.feedback || {};
+  let h = '<h2>Feedback</h2><div class="card"><div class="fb">' +
+    '<textarea class="t" id="fbtext" placeholder="What went wrong? Add an email if you\'d like a reply." maxlength="4000">' + esc(fb.text) + "</textarea>" +
+    '<label><input type="checkbox" id="fblogs"' + (fb.logs ? " checked" : "") + '> The log\'s last lines <span>(cleaned)</span></label>' +
+    '<label><input type="checkbox" id="fbchat"' + (fb.chat ? " checked" : "") + '> The chat open in ts5-tui <span>(cleaned)</span></label>' +
+    '<div class="btns" style="justify-content:flex-end"><button class="b go" data-fbprep="1"' + (f.sending ? " disabled" : "") + ">Make the report</button></div>";
+  if (f.sending) h += '<div class="note">Sending the report…</div>';
+  else if (f.result) h += '<div class="note ' + (f.sent ? "" : "err") + '">' + esc(f.result) + "</div>";
+  h += '</div></div><p class="note">You read the whole report before anything is sent. It goes only to TokenStation\'s developers, ' +
+    "never anywhere public; keys, addresses, names and paths are taken out on the machine first.</p>";
   return h;
+}
+function utf8len(t) { return new TextEncoder().encode(t).length; }
+function drawFb() {
+  $("fbdlg").hidden = fbReport === null;
+  if (fbReport === null) { $("fbshow").innerHTML = ""; return; }
+  $("fbshow").innerHTML = "<h1>Send this report?</h1><p>Exactly what would be sent. " +
+    (fb.chat ? "The chat open in ts5-tui is in it. " : "No chat is in it. ") + (fb.logs ? "The log's last lines are in it." : "The log is left out.") +
+    '</p><pre class="report">' + esc(fbReport) + '</pre><div class="btns"><button class="b" data-fbcancel="1">Cancel</button>' +
+    '<button class="b" data-fbsave="1">Save on the machine</button><button class="b go" data-fbsend="1">Send it</button></div>';
 }
 
 
@@ -442,6 +478,7 @@ function draw() {
   }
   drawAsk();
   drawKey();
+  drawFb();
 }
 
 // A question ts5-tui asks (delete this model? load with less context?):
@@ -487,6 +524,21 @@ document.addEventListener("click", (e) => {
   if (t.dataset.keyrm !== undefined) { act({ do: "key_remove", id: t.dataset.keyrm }); return; }
   if (t.dataset.code !== undefined) { madeSel = +t.dataset.code; drawKey(); return; }
   if (t.dataset.keydone !== undefined) { madeKey = null; drawKey(); return; }
+  if (t.dataset.fbprep !== undefined) {
+    if (!fb.text.trim()) { toast("Write what went wrong first"); return; }
+    act({ do: "feedback_prepare", summary: fb.text, logs: fb.logs, chat: fb.chat });
+    return;
+  }
+  if (t.dataset.fbcancel !== undefined) { fbReport = null; drawFb(); return; }
+  if (t.dataset.fbsave !== undefined || t.dataset.fbsend !== undefined) {
+    const len = utf8len(fbReport || "");
+    const send = t.dataset.fbsend !== undefined;
+    fbReport = null;
+    drawFb();
+    if (send) fb.text = "";
+    act({ do: send ? "feedback_send" : "feedback_save", length: len });
+    return;
+  }
   if (t.dataset.do) {
     const req = { do: t.dataset.do };
     if (t.dataset.model) req.model = t.dataset.model;
@@ -526,6 +578,13 @@ document.addEventListener("submit", (e) => {
   editing = null;
   document.activeElement.blur();
   act({ do: "setting", index: r.index, label: r.label, text: v });
+});
+
+// What is written for /feedback, kept as it is typed (a redraw keeps it).
+document.addEventListener("input", (e) => { if (e.target.id === "fbtext") fb.text = e.target.value; });
+document.addEventListener("change", (e) => {
+  if (e.target.id === "fblogs") fb.logs = e.target.checked;
+  if (e.target.id === "fbchat") fb.chat = e.target.checked;
 });
 
 // A tap on a new key's text copies it (or selects it, where the browser
