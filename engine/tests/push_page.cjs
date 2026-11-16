@@ -107,6 +107,68 @@ async function until(page, fn, arg, ms) {
     check(back, "back: the page shows the answer the machine went on with and kept (no error)",
       await page.locator("#msgs").innerText());
     check((await page.locator("#send").innerText()) === "Send", "and is ready for the next message");
+
+    // The chats again from the machine (every 15 s, and when the page comes
+    // back into view): the chats' marks alone, then only a chat that changed.
+    await page.unroute("**/v1/chat/completions");
+    const asked = [];
+    page.on("request", (r) => {
+      const u = new URL(r.url());
+      if (u.pathname.startsWith("/ts5/chats") && r.method() === "GET") asked.push(u.pathname + u.search);
+    });
+    const api = (path, method, body) => fetch(base + path, { method: method || "GET",
+      headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+    const look = async () => {
+      await page.waitForTimeout(600);  // (one that began with the page's own return ends first)
+      asked.length = 0;
+      await page.evaluate(() => window.__setHidden(false));
+      await until(page, () => !refreshing, null, 10000);
+      await page.waitForTimeout(300);
+    };
+    await look();  // (what this page just wrote itself)
+    await look();
+    // (The page's own 15 s look may fall in between: one more of the same.)
+    check(asked.length >= 1 && asked.every((a) => a === "/ts5/chats?marks=1"),
+      "nothing changed there: the page asks for the marks alone", asked);
+    // Another device goes on with c1; a long chat is begun there too.
+    const c1 = await (await api("/ts5/chats/c1")).json();
+    c1.messages.push({ role: "user", content: "added on another device" }, { role: "assistant", content: "and its answer", done: true });
+    await api("/ts5/chats/c1", "PUT", c1);
+    const long = { id: "long1", title: "A long chat", at: Date.now(), messages: [] };
+    for (let i = 0; i < 30; i++) {
+      long.messages.push({ role: "user", content: "Question " + i + ": " + "tell me more about lighthouses and the sea ".repeat(4) });
+      long.messages.push({ role: "assistant", content: "Answer " + i + ": " + "a lighthouse stands on the rocks by the sea ".repeat(8), done: true });
+    }
+    await api("/ts5/chats/long1", "PUT", long);
+    await look();
+    check(asked[0] === "/ts5/chats?marks=1" &&
+      asked.filter((a) => a !== "/ts5/chats?marks=1").sort().join() === "/ts5/chats/c1,/ts5/chats/long1",
+      "two changed there: the marks, then those two chats, not the whole list", asked);
+    check(await page.evaluate(() => {
+      const c = chats.find((x) => x.id === "c1"), m = c && c.messages;
+      return !!m && m[m.length - 1].content === "and its answer" && !!chats.find((x) => x.id === "long1");
+    }), "and the page has them: c1 as it is there now, and the new chat");
+
+    // A chat longer than the model's context (768 tokens here): the page
+    // leaves its oldest messages out of what the model is sent and goes on.
+    const sent = [];
+    page.on("response", (r) => { if (new URL(r.url()).pathname === "/v1/chat/completions") sent.push(r.status()); });
+    await page.goto(base + "/?long#chat=long1");
+    check(await until(page, () => /Question 29/.test(document.getElementById("msgs").textContent), null, 20000),
+      "the long chat opens", (await page.locator("#msgs").innerText()).slice(-300));
+    await page.fill("#input", "And what now?");
+    await page.click("#send");
+    const went = await until(page, () => {
+      const last = document.getElementById("msgs").lastElementChild;
+      return !busy && last && /tokens|maximum context|stopped answering/.test(last.textContent);
+    }, null, 120000);
+    const lastText = await page.evaluate(() => document.getElementById("msgs").lastElementChild.textContent);
+    check(went && /no longer sees the oldest \d+ messages/.test(lastText) && !/maximum context length/.test(lastText),
+      "a message in a chat past the context: answered, and the page says the oldest messages were left out", lastText.slice(-400));
+    check(sent.length >= 2 && sent[0] === 400 && sent[sent.length - 1] === 200 && sent.length <= 4,
+      "asked again with less after the API's \"too long\" (a try or two, not one for every message)", sent);
+    check(await page.evaluate(() => chat().messages.length === 62), "every message stays on screen and in the chat (62)",
+      await page.evaluate(() => chat().messages.length));
     check(errors.length === 0, "no script errors", errors);
   } catch (e) {
     check(false, "the page test ran to the end", String(e));

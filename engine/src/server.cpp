@@ -593,6 +593,37 @@ void handle(int fd, Server::State &state, Usage &u) {
             return;
         }
         u.rec.stream = req["stream"].boolean(false);
+        // A chat page's answer (Server::PageAnswers): its chat's id, when
+        // the request has a key and names one. Known from here, before the
+        // wait for the engine: a page that goes away while its request
+        // waits behind another's has an answer that goes on, too.
+        std::string page_chat = req["ts5_chat"].str();
+        if (page_chat.size() > 64 || grant.key.empty() || !state.page_answers.end) page_chat.clear();
+        for (char c : page_chat)
+            if (!isalnum((unsigned char)c) && c != '-' && c != '_') {
+                page_chat.clear();
+                break;
+            }
+        auto page_away = [&] {
+            return !page_chat.empty() && state.page_answers.away && state.page_answers.away(grant, page_chat);
+        };
+        // Its end is always told, also on the ways out before an answer
+        // (refused, left, a request that failed): the chat is then no
+        // longer one with an answer coming.
+        struct PageEnd {
+            Server::State &state;
+            const Server::Grant &grant;
+            const std::string &chat;
+            bool told = false;
+            ~PageEnd() {
+                if (chat.empty() || told || !state.page_answers.end) return;
+                Server::AnswerEnd a;
+                a.chat = chat;
+                a.left = true;
+                state.page_answers.end(grant, a);
+            }
+        } page_end{state, grant, page_chat};
+        if (!page_chat.empty() && state.page_answers.start) state.page_answers.start(grant, page_chat);
         Engine *ep = engine();
         if (!ep) {
             std::string why;
@@ -733,7 +764,16 @@ void handle(int fd, Server::State &state, Usage &u) {
         }
         // Gone while it waited for the engine: nothing to run it for.
         const bool stop_gone = stop_gone_wanted();
-        if (stop_gone && peer_gone(fd)) {
+        // (A chat page's whose page went away meanwhile is run: a moment
+        // for the page's word to come, as when it goes during the answer.)
+        auto page_went_away = [&] {
+            for (int i = 0; i < 15 && !page_chat.empty(); i++) {
+                if (page_away()) return true;
+                usleep(100000);
+            }
+            return false;
+        };
+        if (stop_gone && peer_gone(fd) && !page_went_away()) {
             u.rec.finish = "left";
             u.rec.prompt = (int64_t)first_toks.size();
             log_line("ts5: %s left while its request waited, not run (%zu prompt tokens)", u.rec.client.c_str(),
@@ -741,19 +781,6 @@ void handle(int fd, Server::State &state, Usage &u) {
             done();
             return;
         }
-        // A chat page's answer (Server::PageAnswers): its chat's id, when
-        // the request has a key and names one.
-        std::string page_chat = req["ts5_chat"].str();
-        if (page_chat.size() > 64 || grant.key.empty() || !state.page_answers.end) page_chat.clear();
-        for (char c : page_chat)
-            if (!isalnum((unsigned char)c) && c != '-' && c != '_') {
-                page_chat.clear();
-                break;
-            }
-        auto page_away = [&] {
-            return !page_chat.empty() && state.page_answers.away && state.page_answers.away(grant, page_chat);
-        };
-        if (!page_chat.empty() && state.page_answers.start) state.page_answers.start(grant, page_chat);
         std::function<bool()> gone;
         if (stop_gone) gone = [fd, &page_away] { return peer_gone(fd) && !page_away(); };
         bool use_tools = !tools.empty();  // off for a last turn that must answer
@@ -1426,6 +1453,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             a.tokens = st.gen_tokens;
             a.tps = st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0;
             state.page_answers.end(grant, a);
+            page_end.told = true;
         }
         UsageRecord &ur = u.rec;
         ur.status = !ok && !stream ? 500 : 200;

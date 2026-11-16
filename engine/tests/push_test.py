@@ -367,6 +367,59 @@ def main():
         msg = json.loads(decrypt(Push.got[-1][2], ua_priv, auth)) if len(Push.got) > n0 + 1 else {}
         check(msg.get("chat") == "c2" and msg.get("badge") == 1, "the next one: 1 on the icon again", msg)
 
+        # ---- asked while another answer still comes (it waits its turn),
+        # the page gone before its turn: answered, kept and told all the same ----
+        call(here + "/ts5/away", skey, {"away": False})
+        chat4 = {"id": "c4", "title": "Waited its turn", "messages": [{"role": "user", "content": "And then?"},
+                                                                      {"role": "assistant", "content": "", "done": False}]}
+        call(here + "/ts5/chats/c4", skey, chat4, "PUT")
+        n0 = len(Push.got)
+
+        def ask(key, body):
+            c = socket.create_connection(("127.0.0.1", port), timeout=120)
+            b = json.dumps(body).encode()
+            c.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nAuthorization: Bearer " +
+                      key.encode() + b"\r\nContent-Length: " + str(len(b)).encode() + b"\r\n\r\n" + b)
+            return c
+        hold = ask(owner, {"messages": [{"role": "user", "content": "Count slowly"}], "stream": True, "max_tokens": 250})
+        held = b""
+        while held.count(b"data:") < 3:
+            b = hold.recv(4096)
+            if not b:
+                break
+            held += b
+        q = ask(skey, {"messages": [{"role": "user", "content": "And then?"}], "stream": True, "max_tokens": 40, "ts5_chat": "c4"})
+        time.sleep(0.5)
+        code, j, _ = call(here + "/ts5/away", skey, {"chat": "c4", "away": True})
+        check(code == 200 and "c4" in j.get("working", []), "an answer waiting its turn is one of the user's coming: its page can say it went",
+              (code, j))
+        q.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\1\0\0\0\0\0\0\0")
+        q.close()
+        hold.settimeout(120)
+        while b"[DONE]" not in held:
+            b = hold.recv(65536)
+            if not b:
+                break
+            held += b
+        hold.close()
+        check(b"[DONE]" in held, "the answer before it runs to its end")
+        done = wait(lambda: "c4" not in call(here + "/ts5/away", skey)[1].get("working", ["c4"]), 120)
+        code, c4, _ = call(here + "/ts5/chats/c4", skey)
+        last = (c4.get("messages") or [{}])[-1] if code == 200 else {}
+        check(done and last.get("role") == "assistant" and last.get("done") is True and len(last.get("content", "")) > 0,
+              "its turn came with the page gone: answered, and kept in its chat", c4)
+        wait(lambda: len(Push.got) > n0, 20)
+        got = Push.got[n0:]
+        msg = json.loads(decrypt(got[0][2], ua_priv, auth)) if got else {}
+        check(len(got) == 1 and msg.get("chat") == "c4" and msg.get("title") == "Waited its turn", "and told to Sam's iPhone", msg)
+        # One refused before its answer starts (longer than the context):
+        # its chat isn't left as one with an answer coming.
+        code, j, _ = call(here + "/v1/chat/completions", skey,
+                          {"messages": [{"role": "user", "content": "far too long " * 600}], "ts5_chat": "c4"})
+        check(code == 400 and "c4" not in call(here + "/ts5/away", skey)[1].get("working", ["c4"]),
+              "a request refused before its answer starts isn't left as one coming", (code, j))
+        call(here + "/ts5/away", skey, {"away": False})
+
         # ---- the owner's chats are ts5-tui's: the answer goes in as its turn ----
         oua = ec.generate_private_key(ec.SECP256R1())
         oauth = os.urandom(16)

@@ -7022,17 +7022,31 @@ std::string control_answer(const std::string &text) {
         if (what == "load" && quiet && asking) return refuse("ts5-tui is waiting for the owner's answer to something else");
         // listed: the owner chose this model for the one switching (on the
         // user's list, or the owner's own pick): no "helper-size?" question.
-        if (what == "load" && quiet && !req["listed"].str().empty()) load_model(copy);
-        else if (what == "load") load_or_ask(copy);
-        if (what == "load" && quiet && (g->ask_yes || !g->pick.empty())) {
-            const std::string q = g->ask_title;
-            g->ask_yes = nullptr;
-            g->pick.clear();
-            return refuse("ts5-tui asks the owner first about that one (" + q + ")");
-        }
-        if (what == "load" && !req["by"].str().empty() && g->load_target == name)
-            show_toast(req["by"].str() + " switched the model to " + name, g->th->accent, 8);
-        else if (what == "delete") delete_model(copy);
+        if (what == "load") {
+            const double load_before = g->load_t0;
+            if (quiet && !req["listed"].str().empty()) load_model(copy);
+            else load_or_ask(copy);
+            const bool asks = g->ask_yes || !g->pick.empty();
+            if (quiet && asks) {
+                const std::string q = g->ask_title;
+                g->ask_yes = nullptr;
+                g->pick.clear();
+                return refuse("ts5-tui asks the owner first about that one (" + q + ")");
+            }
+            // A load ts5-tui didn't start (a tuning runs, another model is
+            // still loading, the server isn't its own): it said why on its
+            // screen, and a switch is told so, not left waiting for a model
+            // that never comes. (The controls get what it said with the
+            // state, as "said". The same model asked for again while it
+            // loads is on its way.)
+            const bool started = g->load_target == name && (g->load_t0 != load_before || g->loader.running());
+            if (quiet && !started) {
+                const bool said = g->toast != toast_before || g->toast_until != toast_until_before;
+                return refuse(said ? g->toast : "ts5-tui didn't start loading " + name);
+            }
+            if (started && !req["by"].str().empty())
+                show_toast(req["by"].str() + " switched the model to " + name, g->th->accent, 8);
+        } else if (what == "delete") delete_model(copy);
         else if (helper_of(copy).empty() || helper_of(copy) == "none") show_toast("This model has no helper to get", g->th->dim, 3);
         else if (copy.helper_here) show_toast("Its helper is already here", g->th->dim, 3);
         else if (!helper_entry(copy)) show_toast("ts5-tui has no download for that helper", g->th->warn, 5);

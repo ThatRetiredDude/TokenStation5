@@ -192,6 +192,18 @@ def test_server(ts5, model, backend, d):
         check(os.path.exists(on_disk) and os.stat(os.path.dirname(on_disk)).st_mode & 0o077 == 0 and
               os.stat(on_disk).st_mode & 0o077 == 0,
               "kept in users/ID/chats beside access/, for the server's user only", on_disk)
+        # What the chat page asks every 15 s: each chat's mark and no chat;
+        # a mark changes when its chat is written again.
+        mark = got.get("marks", {}).get("lzx1", "")
+        code, got = call(there + "/ts5/chats?marks=1", skey2)
+        check(code == 200 and "chats" not in got and got.get("marks") == {"lzx1": mark} and mark,
+              "GET /ts5/chats?marks=1: the chats' marks alone, the same as the whole list gave", (mark, got))
+        call(there + "/ts5/chats/lzx1", skey, dict(chat, messages=chat["messages"] + [{"role": "assistant", "content": "hi", "done": True}]), "PUT")
+        code, got = call(there + "/ts5/chats?marks=1", skey2)
+        check(code == 200 and got.get("marks", {}).get("lzx1") not in ("", None, mark), "written again: another mark", (mark, got))
+        call(there + "/ts5/chats/lzx1", skey, chat, "PUT")
+        check(call(there + "/ts5/chats?marks=1", akey)[1].get("marks") == {} and call(there + "/ts5/chats?marks=1")[0] in (401, 403),
+              "marks are a user's own too: none of Sam's for another user, none without a key")
         code, got = call(there + "/ts5/chats", owner)
         check(code == 200 and got.get("chats") == [], "the owner's own chats are apart: Sam's aren't among them", got)
         code, got = call(there + "/ts5/chats", akey)

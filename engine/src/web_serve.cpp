@@ -645,6 +645,17 @@ std::vector<std::string> chat_files(const std::string &dir) {
 }
 
 
+// A chat file's mark: another whenever the file is written again (each
+// write is a new file, write_whole; ts5-tui's too).
+std::string chat_mark(const std::string &path) {
+    struct stat st {};
+    if (stat(path.c_str(), &st) != 0) return "";
+    char b[96];
+    snprintf(b, sizeof b, "%llx.%lx.%llx.%llx", (unsigned long long)st.st_mtim.tv_sec, (unsigned long)st.st_mtim.tv_nsec,
+             (unsigned long long)st.st_size, (unsigned long long)st.st_ino);
+    return b;
+}
+
 // ---- the owner's chats: ts5-tui's own, one list ----
 //
 // The owner's chats on the chat page are ts5-tui's chats (DATA/chats, in
@@ -764,20 +775,37 @@ std::string tui_chat(const Json &page, const Json *old, const std::string &model
         }
         mine.push_back(t);
     }
-    // The ones both have: the file's shown turns, in order, the same.
+    // What is matched and kept: words, and answers with something in them.
+    // (An empty answer is one that only called tools, in ts5-tui, and one
+    // from the page with nothing in it, a Stop before the first word, isn't
+    // kept: neither is a place where the two can differ.)
+    const auto counts = [](const Json &t) {
+        return t["user"].boolean(false) || !t["text"].str().empty() || t["end"].str() == "failed";
+    };
+    const auto same_turn = [](const Json &a, const Json &b) {
+        return a["user"].boolean(false) == b["user"].boolean(false) && a["text"].str() == b["text"].str();
+    };
+    std::vector<const Json *> file;  // the file's, of those
+    for (const Json &t : turns)
+        if (shown_turn(t) && counts(t)) file.push_back(&t);
+    std::vector<const Json *> sent;  // the page's
+    for (const Json &t : mine)
+        if (counts(t)) sent.push_back(&t);
+    // The ones both have: from the start, in order, the same.
     size_t same = 0;
-    for (const Json &t : turns) {
-        if (!shown_turn(t)) continue;
-        if (same >= mine.size() || t["user"].boolean(false) != mine[same]["user"].boolean(false) ||
-            t["text"].str() != mine[same]["text"].str())
-            break;
-        same++;
+    while (same < file.size() && same < sent.size() && same_turn(*file[same], *sent[same])) same++;
+    // The file may have gone on past the page's copy of it (turns ts5-tui
+    // added, an answer kept here) before the page's new ones were written
+    // at its end by an earlier save: those it ends with are there already.
+    size_t there = 0;
+    for (size_t n = std::min(file.size() - same, sent.size() - same); n > 0 && !there; n--) {
+        bool ends = true;
+        for (size_t i = 0; i < n && ends; i++) ends = same_turn(*file[file.size() - n + i], *sent[same + i]);
+        if (ends) there = n;
     }
-    // (An empty answer is one that only called tools, in ts5-tui: one
-    // from the page with nothing in it isn't kept.)
-    for (size_t i = same; i < mine.size(); i++)
-        if (mine[i]["user"].boolean(false) || !mine[i]["text"].str().empty() || mine[i]["end"].str() == "failed")
-            turns.push_back(mine[i]);
+    std::vector<Json> added;
+    for (size_t i = same + there; i < sent.size(); i++) added.push_back(*sent[i]);
+    turns.insert(turns.end(), added.begin(), added.end());
     if (title.empty())
         for (const Json &t : turns)
             if (t["user"].boolean(false)) {
@@ -915,26 +943,42 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
     const std::string id = p.path.size() > 11 ? p.path.substr(11) : "";
     if (p.path == "/ts5/chats" || p.path == "/ts5/chats/") {
         if (p.method == "GET") {
-            std::string out = "{\"chats\":[";
+            // ?marks=1: which chats there are and each one's mark, and no
+            // chat. What the page asks every 15 s: it then fetches the ones
+            // whose mark changed, not every chat with all its messages
+            // (megabytes, with some dozens of chats). No file is read for it.
+            const bool only_marks = p.query.find("marks=1") != std::string::npos;
+            std::string out = "{\"chats\":[", marks;
             bool first = true;
             std::vector<std::string> seen;
+            // (The mark before the file is read: one written in between is
+            // fetched again, never missed.)
             if (!tui.empty())
                 for (const std::string &n : chat_files(tui)) {
-                    Json c;
-                    if (!Json::parse(read_whole(tui + "/" + n), c) || c.type != Json::OBJ || c["turns"].type != Json::ARR) continue;
-                    out += (first ? "" : ",") + page_chat(n.substr(0, n.size() - 5), c).dump();
-                    first = false;
+                    const std::string m = chat_mark(tui + "/" + n);
+                    if (!only_marks) {
+                        Json c;
+                        if (!Json::parse(read_whole(tui + "/" + n), c) || c.type != Json::OBJ || c["turns"].type != Json::ARR)
+                            continue;
+                        out += (first ? "" : ",") + page_chat(n.substr(0, n.size() - 5), c).dump();
+                        first = false;
+                    }
+                    marks += (marks.empty() ? "" : ",") + json_escape(n.substr(0, n.size() - 5)) + ":" + json_escape(m);
                     seen.push_back(n);
                 }
             for (const std::string &n : chat_files(dir)) {
                 if (std::find(seen.begin(), seen.end(), n) != seen.end()) continue;
-                const std::string text = read_whole(dir + "/" + n);
-                Json c;
-                if (!Json::parse(text, c) || c.type != Json::OBJ) continue;
-                out += (first ? "" : ",") + text;
-                first = false;
+                const std::string m = chat_mark(dir + "/" + n);
+                if (!only_marks) {
+                    const std::string text = read_whole(dir + "/" + n);
+                    Json c;
+                    if (!Json::parse(text, c) || c.type != Json::OBJ) continue;
+                    out += (first ? "" : ",") + text;
+                    first = false;
+                }
+                marks += (marks.empty() ? "" : ",") + json_escape(n.substr(0, n.size() - 5)) + ":" + json_escape(m);
             }
-            send_file(fd, 200, "application/json", out + "]}", false);
+            send_file(fd, 200, "application/json", (only_marks ? "{" : out + "],") + "\"marks\":{" + marks + "}}", false);
         } else if (p.method == "DELETE") {
             for (const std::string &n : chat_files(dir)) unlink((dir + "/" + n).c_str());
             if (!tui.empty()) {
@@ -1019,7 +1063,10 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
 
 struct PushUser {
     std::set<std::string> away;     // chats whose page went away while their answer came
-    std::set<std::string> working;  // chats with an answer coming
+    // Chats with an answer coming, and how many requests each has (one
+    // asked again while its first still waits for the engine: the first's
+    // end isn't the chat's).
+    std::map<std::string, int> working;
     int unseen = 0;
     // The browser terminal: how many are open, and whether it went away (its
     // page in the background, or the last one closed). ts5-tui's answers that
@@ -1189,7 +1236,7 @@ void page_answers(Server &s, const WebOptions &o) {
     pa.start = [](const Server::Grant &g, const std::string &chat) {
         std::lock_guard<std::mutex> l(push_mu);
         PushUser &u = push_users[g.user];
-        u.working.insert(chat);
+        u.working[chat]++;
         u.away.erase(chat);  // asked from the page: it's there
     };
     pa.end = [o](const Server::Grant &g, const Server::AnswerEnd &a) {
@@ -1198,8 +1245,12 @@ void page_answers(Server &s, const WebOptions &o) {
         {
             std::lock_guard<std::mutex> l(push_mu);
             PushUser &u = push_users[g.user];
-            u.working.erase(a.chat);
-            away = u.away.erase(a.chat) > 0;
+            auto w = u.working.find(a.chat);
+            const bool more = w != u.working.end() && --w->second > 0;
+            if (w != u.working.end() && !more) u.working.erase(w);
+            // (Another request of the chat's still to come: the page's word
+            // that it went away is that one's too.)
+            away = more ? u.away.count(a.chat) > 0 : u.away.erase(a.chat) > 0;
             // Kept: an answer that went on without its connection (the page,
             // back by now or not, gets it from here), and one whose page is
             // away. Not one cut short (a Stop, even as the page went): the
@@ -1312,7 +1363,7 @@ bool push_pages(const WebOptions &o, const Server::Page &p, int fd) {
                 send_error(fd, 405, "GET or POST");
                 return true;
             }
-            for (const std::string &c : u.working) arr.a.push_back(Json::string(c));
+            for (const auto &c : u.working) arr.a.push_back(Json::string(c.first));
         }
         out.set("working", arr);
         send_file(fd, 200, "application/json", out.dump(), false);

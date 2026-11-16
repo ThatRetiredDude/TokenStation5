@@ -266,6 +266,8 @@ function localChats() { try { return JSON.parse(store.get("ts5.chats", "[]")) ||
 // Filled by account() once the server says whose key this is, so a shared
 // browser never shows what it kept to another user's key, not even briefly.
 let chats = [];
+let marks = {};     // by chat: its mark on the machine when the page last took it (refreshChats)
+const unread = {};  // by chat: the mark of one that can't be read there (not asked for again as it is)
 let cur = chats.length ? chats[0].id : null;
 let model = "", busy = null, busyId = null;
 let decided = false;  // account() has said whose key this is
@@ -308,7 +310,9 @@ async function account() {
     try {
       const r = await api("/ts5/chats");
       if (r.ok) {
-        const there = (await r.json()).chats || [];
+        const j = await r.json();
+        const there = j.chats || [];
+        marks = j.marks || {};  // (refreshChats)
         // Chats this browser kept before users go to the owner's account
         // only: on a browser two people share, another user's key never
         // takes (or shows) what is kept here.
@@ -703,6 +707,8 @@ async function models() {
     const j = await r.json();
     TS5Keep.settled(key());
     const m = (j.data || [])[0];
+    // (Another model, another context: what no longer fit may fit again.)
+    if ((m ? m.id : "") !== model) for (const id in left) delete left[id];
     model = m ? m.id : "";
     $("model").textContent = model || "no model loaded: load one in ts5-tui (Models)";
     booted();
@@ -713,6 +719,35 @@ async function models() {
   }
   booted();
   draw();
+}
+
+// A chat longer than the model's context: how many of its oldest messages
+// are left out of what the model is sent, by chat (kept while the page is
+// open: the next message doesn't find it out again).
+const left = {};
+// That count as one the history can begin at: a question, and never the
+// last message.
+function fits(all, n) {
+  n = Math.max(0, Math.min(n, all.length - 1));
+  while (n < all.length - 1 && all[n].role !== "user") n++;
+  return n;
+}
+// The next count to try after `n` was too long. The API says how long the
+// messages were and what fits ("maximum context length is 4096 tokens.
+// However, your messages resulted in 5000 tokens"): enough goes to leave a
+// quarter of the context for the answer, by the messages' lengths; at
+// least one question and its answer.
+function less(all, n, why) {
+  const size = (m) => (m.content || "").length + 16;
+  const m = /maximum context length is (\d+) tokens.*?resulted in (\d+) tokens/.exec(why || "");
+  let total = 0, gone = 0, k = n;
+  for (let i = n; i < all.length; i++) total += size(all[i]);
+  const goes = m && +m[2] > 0 ? total * (1 - 0.75 * +m[1] / +m[2]) : 0;
+  do {
+    gone += size(all[k++]);
+    while (k < all.length - 1 && all[k].role !== "user") gone += size(all[k++]);
+  } while (k < all.length - 1 && gone < goes);
+  return k;
 }
 
 async function send(text) {
@@ -738,26 +773,39 @@ async function send(text) {
   $("send").className = "stop";
   const t0 = performance.now();
   try {
-    const history = c.messages.slice(0, -1).filter((m) => !m.error || m.content).map((m) => ({ role: m.role, content: m.content }));
-    const r = await fetch("/v1/chat/completions", {
-      method: "POST", headers: headers(), signal: busy.signal,
-      // ts5_chat: the chat on the machine, where it keeps the answer if this
-      // page goes away before it ends (a phone's app sent to the background).
-      body: JSON.stringify({ model: model || "ts5", messages: history, stream: true,
-        stream_options: { include_usage: true }, chat_template_kwargs: { enable_thinking: prefs.think },
-        ts5_chat: remote ? c.id : undefined }),
-    });
-    if (r.status === 401) { a.error = "This needs an API key."; askKey(); throw null; }
-    if (r.status === 429) {
+    const all = c.messages.slice(0, -1).filter((m) => !m.error || m.content).map((m) => ({ role: m.role, content: m.content }));
+    let r;
+    for (;;) {
+      const history = all.slice(fits(all, left[c.id] || 0));
+      r = await fetch("/v1/chat/completions", {
+        method: "POST", headers: headers(), signal: busy.signal,
+        // ts5_chat: the chat on the machine, where it keeps the answer if this
+        // page goes away before it ends (a phone's app sent to the background).
+        // ts5_trims: a "too long" is answered here by asking again with less.
+        body: JSON.stringify({ model: model || "ts5", messages: history, stream: true,
+          stream_options: { include_usage: true }, chat_template_kwargs: { enable_thinking: prefs.think },
+          ts5_chat: remote ? c.id : undefined, ts5_trims: history.length > 1 || undefined }),
+      });
+      if (r.status === 401) { a.error = "This needs an API key."; askKey(); throw null; }
+      if (r.status === 429) {
+        const j = await r.json().catch(() => ({}));
+        a.error = (j.error && j.error.message) || "Today's tokens are used up.";
+        throw null;
+      }
+      if (r.ok) break;
       const j = await r.json().catch(() => ({}));
-      a.error = (j.error && j.error.message) || "Today's tokens are used up.";
+      const why = (j.error && j.error.message) || "";
+      // The chat no longer fits the model's context: its oldest questions
+      // and answers are left out of what the model is sent (they stay on
+      // screen) and it is asked again, while there's more than this message.
+      if (r.status === 400 && j.error && j.error.code === "context_length_exceeded" && history.length > 1) {
+        left[c.id] = less(all, all.length - history.length, why);
+        continue;
+      }
+      a.error = why || "The server said " + r.status + ".";
       throw null;
     }
-    if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      a.error = (j.error && j.error.message) || "The server said " + r.status + ".";
-      throw null;
-    }
+    const out = fits(all, left[c.id] || 0);
     const reader = r.body.getReader();
     const dec = new TextDecoder();
     let buf = "", timings = null, last = 0;
@@ -784,6 +832,7 @@ async function send(text) {
     }
     if (timings && timings.predicted_n) a.stats = timings.predicted_n + " tokens · " + timings.predicted_per_second.toFixed(1) + " tok/s";
     else a.stats = ((performance.now() - t0) / 1000).toFixed(1) + " s";
+    if (out) a.stats += " · the model no longer sees the oldest " + (out === 1 ? "message" : out + " messages") + " of this chat";
   } catch (e) {
     if (e && e.name === "AbortError") a.stats = "stopped";
     else if (e && !a.error && remote && (await recover(c, a))) kept = true;
@@ -832,20 +881,57 @@ async function recover(c, a) {
 // owner the list is ts5-tui's own, so a chat that went on in ts5-tui does).
 // Never while an answer comes in here; a chat begun here and not kept
 // there yet stays.
+// Asked for: each chat's mark alone (it changes when the chat is written
+// on the machine), then the chats whose mark isn't the one this page took
+// them with, one by one. (Every chat with all its messages every 15 s was
+// megabytes each time, with some dozens of chats.)
 function sig(c) { const m = c && c.messages; return m ? m.length + ":" + ((m[m.length - 1] || {}).content || "").length : ""; }
+let refreshing = false;
 async function refreshChats() {
-  if (!remote || busy || document.hidden || viewing) return;
+  if (!remote || busy || document.hidden || viewing || refreshing) return;
+  refreshing = true;
   try {
-    const r = await api("/ts5/chats");
+    let r = await api("/ts5/chats?marks=1");
     if (!r.ok || busy) return;
-    const there = (await r.json()).chats || [];
+    let now = (await r.json()).marks || {};
+    const want = Object.keys(now).filter((id) => unread[id] !== now[id] && (now[id] !== marks[id] || !chats.find((c) => c.id === id)));
+    const got = {};
+    if (want.length > 8) {  // many (after a long time away): the whole list at once
+      r = await api("/ts5/chats");
+      if (!r.ok) return;
+      const j = await r.json();
+      for (const c of j.chats || []) got[c.id] = c;
+      now = j.marks || {};
+    } else {
+      for (const id of want) {
+        let c = null, gone = false;
+        try {
+          r = await api("/ts5/chats/" + encodeURIComponent(id));
+          if (r.ok) c = await r.json().catch(() => { gone = true; return null; });
+          else gone = r.status === 404 || r.status === 400;
+        } catch (e) {}
+        if (c && c.id === id) got[id] = c;
+        else if (gone || c) unread[id] = now[id];
+        else now[id] = marks[id] || "";  // not reached: asked again next time
+      }
+    }
+    if (busy || viewing) return;
     const top = () => chats.slice(0, 5).map((c) => c.id + ":" + sig(c) + ":" + (c.title || "")).join("|");
     const was = sig(chat()), n = chats.length, home = chat() ? "" : top();
     const mine = chat();
+    const there = [];
+    for (const id of Object.keys(now)) {
+      const c = got[id] || (unread[id] === now[id] ? null : chats.find((x) => x.id === id));
+      if (c) there.push(c);
+    }
     if (mine && !there.find((x) => x.id === mine.id)) there.push(mine);
+    marks = now;
     chats = there.sort((a, b) => at(b) - at(a));
     if (sig(chat()) !== was || chats.length !== n || (!chat() && top() !== home)) { draw(); if (!$("listdlg").hidden) drawList(); }
-  } catch (e) {}
+  } catch (e) {
+  } finally {
+    refreshing = false;
+  }
 }
 document.addEventListener("visibilitychange", refreshChats);
 setInterval(refreshChats, 15000);
