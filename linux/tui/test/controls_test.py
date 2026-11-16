@@ -191,7 +191,7 @@ def main():
     env.update(HOME=home, PATH=bin_dir + ":" + env.get("PATH", "/usr/bin:/bin"), TMUX_TMPDIR=tmux_dir, LANG="C.UTF-8",
                TS5_RUN_DIR=os.path.join(home, "run"), TS5_TUI_LOG=tui_log,
                TS5_FEEDBACK_URL="http://127.0.0.1:%d/v1/report" % fbsrv.server_address[1],
-               TS5_PUSH_HOSTS="127.0.0.1:%d" % pushsrv.server_address[1])
+               TS5_PUSH_HOSTS="127.0.0.1:%d" % pushsrv.server_address[1], TS5_SWITCH_WAIT="2")
     sockp = os.path.join(data, "control.sock")
     logs = []
     try:
@@ -280,6 +280,20 @@ def main():
         code, j = call(here + "/ts5/control", owner, {"do": "delete", "model": "Test-A"})
         check(code == 200 and not j.get("ask") and os.path.exists(os.path.join(models, "Test-A.gguf")) and j.get("said"),
               "the loaded model is never deleted (ts5-tui says why)", (j.get("ask"), j.get("said")))
+        # A Yes that comes late (the question answered on the TV, another
+        # asked since) answers the question it was to, not the one open now.
+        code, j = call(here + "/ts5/control", owner, {"do": "delete", "model": "Test-C"})
+        ask = (j.get("ask") or {}) if code == 200 else {}
+        code, j = call(here + "/ts5/control", owner, {"do": "answer", "yes": True, "title": ask.get("title", ""),
+                                                      "text": ask.get("text", "").replace("Test-C", "Test-D")})
+        still = sock_ask(sockp, {"do": "state"}).get("ask")
+        check("something else" in j.get("error", "") and os.path.exists(os.path.join(models, "Test-C.gguf")) and still,
+              "a Yes to another question than the one ts5-tui asks now: refused, nothing deleted, the question still open", (j, still))
+        code, j = call(here + "/ts5/control", owner, {"do": "answer", "yes": False, "title": ask.get("title", ""), "text": ask.get("text", "")})
+        check(code == 200 and not j.get("error") and not j.get("ask"), "the answer to the question as shown: taken", j.get("error"))
+        code, j = call(here + "/ts5/control", owner, {"do": "answer", "yes": True, "title": ask.get("title", ""), "text": ask.get("text", "")})
+        check("answered already" in j.get("error", "") and os.path.exists(os.path.join(models, "Test-C.gguf")),
+              "an answer with no question open: told it was answered already", j.get("error"))
         code, j = call(here + "/ts5/control", owner, {"do": "fan", "mode": "max"})
         check(code == 200 and (j.get("said") or j["machine"]["fan_control"]), "the fan: set, or ts5-tui says why not", j.get("said"))
         code, j = call(here + "/ts5/control", owner, {"do": "fan", "mode": "loud"})
@@ -513,21 +527,30 @@ def main():
         tool_chat = {"v": 1, "title": "a tool chat", "created": 1700000000, "updated": 1700000100, "turns": [
             {"user": True, "text": "search it"},
             {"user": False, "text": "", "calls": [{"id": "c1", "name": "web_search", "args": "{}"}], "model": "Test-A",
-             "tps": 1.0, "tokens": 5, "end": "done"},
+             "tps": 1.0, "tokens": 5, "end": "done", "reasoning": "I should search."},
             {"user": False, "tool": "web_search", "call": "c1", "head": "web_search", "ok": True, "text": "results"},
             {"user": False, "text": "found it", "model": "Test-A", "tps": 2.0, "tokens": 7, "end": "done"}]}
         with open(os.path.join(tchats, "c17000001.json"), "w") as fh:
             json.dump(tool_chat, fh)
         code, got = call(here + "/ts5/chats/c17000001", owner)
         msgs = got.get("messages", []) if code == 200 else []
-        check([m["content"] for m in msgs] == ["search it", "", "found it"] and "used web_search" in msgs[1].get("stats", ""),
-              "ts5-tui's chat on the page: a tool's result left out, the call said", msgs)
+        check([m["content"] for m in msgs] == ["search it", "found it"] and "used web_search" in msgs[1].get("stats", "") and
+              "7 tokens" in msgs[1].get("stats", "") and "I should search." in msgs[1].get("thinking", ""),
+              "ts5-tui's chat on the page: a tool's result left out; a turn that only called tools is no empty message of "
+              "its own, its call is said with the answer after it", msgs)
         got["messages"] = msgs + [{"role": "user", "content": "thanks"}, {"role": "assistant", "content": "welcome", "done": True}]
         call(here + "/ts5/chats/c17000001", owner, got, "PUT")
         turns = json.load(open(os.path.join(tchats, "c17000001.json")))["turns"]
         check(len(turns) == 6 and turns[2].get("tool") == "web_search" and turns[1].get("calls") and
               [t["text"] for t in turns[-2:]] == ["thanks", "welcome"],
               "the page goes on with it: ts5-tui's tool turns stay where they were", turns)
+        with open(os.path.join(tchats, "c17000002.json"), "w") as fh:
+            json.dump(dict(tool_chat, title="cut short", turns=tool_chat["turns"][:3]), fh)
+        code, got = call(here + "/ts5/chats/c17000002", owner)
+        msgs = got.get("messages", []) if code == 200 else []
+        check([m["content"] for m in msgs] == ["search it", ""] and msgs[1].get("stats") == "used web_search" and msgs[1].get("done") is True,
+              "a turn that only called tools with no answer after it: its note alone", msgs)
+        os.unlink(os.path.join(tchats, "c17000002.json"))
 
         # A chat kept apart before (users/OWNER/chats): listed, then ts5-tui's
         # once written again.
@@ -547,6 +570,19 @@ def main():
               "a user's chat: theirs, never in ts5-tui's list", os.listdir(tchats))
         code, _ = call(here + "/ts5/chats/p1phone", owner, None, "DELETE")
         check(code == 200 and not os.path.exists(f), "deleted on the chat page: gone from ts5-tui's too")
+        # A user's limit of 1,000 chats isn't the owner's in ts5-tui's own
+        # folder: a long-time ts5-tui user still saves a new chat from the phone.
+        for i in range(1000):
+            with open(os.path.join(tchats, "bulk%04d.json" % i), "w") as fh:
+                json.dump({"v": 1, "title": "bulk %d" % i, "created": 1600000000 + i, "updated": 1600000000 + i,
+                           "turns": [{"user": True, "text": "q"}]}, fh)
+        code, got = call(here + "/ts5/chats/overnew", owner, {"id": "overnew", "title": "one more", "messages": [
+            {"role": "user", "content": "the 1,001st"}]}, "PUT")
+        check(code == 200 and os.path.exists(os.path.join(tchats, "overnew.json")),
+              "the owner past 1,000 chats in ts5-tui's list: a new one from the phone is kept", (code, got))
+        for i in range(1000):
+            os.unlink(os.path.join(tchats, "bulk%04d.json" % i))
+        os.unlink(os.path.join(tchats, "overnew.json"))
 
         # ---- /feedback from the phone: ts5-tui makes the report, the phone
         # reads all of it, and only that report is sent, when asked ----
@@ -665,8 +701,35 @@ def main():
         check(code == 403 and "model menu" in json.dumps(r), "a user who may switch is told to use the model menu", (code, r))
         code, r = call(here + "/ts5/switch", kkey, {"model": loaded_now})
         check(code == 400, "/ts5/switch: a model not theirs is refused", (code, r))
+        # While an answer is being written (the owner's here), a user's
+        # switch waits for its end (TS5_SWITCH_WAIT: 2 s here, a minute as
+        # shipped) and is refused if it hasn't ended by then: the switch
+        # starts the server again, and would cut the answer off.
+        answers = []
+
+        def answer(n):
+            answers.append(call(here + "/v1/chat/completions", owner,
+                                {"messages": [{"role": "user", "content": "Tell me a long story"}], "max_tokens": n}, timeout=300))
+        th = threading.Thread(target=answer, args=(600,))
+        th.start()
+        time.sleep(1.0)
+        t0 = time.time()
         code, r = call(here + "/ts5/switch", kkey, {"model": mine}, timeout=30)
-        check(code in (200, 0), "/ts5/switch: the user loads theirs (no question: the owner listed it)", (code, r))
+        took = time.time() - t0
+        th.join(300)
+        check(code == 409 and "still being written" in json.dumps(r) and took >= 1.5,
+              "/ts5/switch by a user while an answer is being written: waited for, then refused (the answer isn't cut off)",
+              (code, r, round(took, 1)))
+        check(answers and answers[0][0] == 200 and answers[0][1].get("choices"), "and that answer came whole",
+              answers[0] if answers else None)
+        th = threading.Thread(target=answer, args=(24,))
+        th.start()
+        time.sleep(0.3)
+        code, r = call(here + "/ts5/switch", kkey, {"model": mine}, timeout=30)
+        th.join(300)
+        check(code in (200, 0), "/ts5/switch: the user loads theirs (no question: the owner listed it), after a short answer's end",
+              (code, r))
+        check(len(answers) == 2 and answers[1][0] == 200, "the short answer came whole too", answers[1:] )
         # (ts5-tui's server goes a second after its answer: asked again
         # before that, for another model, the user is told it can't now.)
         other = "Test-D" if mine != "Test-D" else "Test-A"

@@ -238,20 +238,26 @@ def main():
     env = {k: v for k, v in os.environ.items() if not k.startswith("TS5_") and not k.startswith("XDG_")}
     # TS5_DATA_DIR: the keys' folder is ts5-tui's own, so the owner's chats
     # are ts5-tui's (its format), as with the server ts5-tui starts.
+    # TS5_READ_IDLE: a connection that sends nothing is closed after 3 s (30 as shipped).
     env.update(TS5_KEYS=path, TS5_DATA_DIR=base, TS5_PUSH_HOSTS=f"127.0.0.1:{pport}", TAVILY_API_KEY="",
-               TS5_TERMINAL_COMMAND="echo ready; read x; echo got:$x; sleep 600")
+               TS5_TERMINAL_COMMAND="echo ready; read x; echo got:$x; sleep 600", TS5_READ_IDLE="3")
     # A short context: the chat page asks for no limit, so its answer runs
     # to the context's end.
-    p = subprocess.Popen([ts5, "serve", "-m", model, "-c", "768", "--host", "127.0.0.1", "--port", str(port),
-                          "--backend", backend], stdout=open(log_path, "w"), stderr=subprocess.STDOUT, env=env)
     here = f"http://127.0.0.1:{port}"
+
+    def up():
+        try:
+            return call(here + "/health")[0] == 200
+        except OSError:
+            return False
+
+    def serve():
+        q = subprocess.Popen([ts5, "serve", "-m", model, "-c", "768", "--host", "127.0.0.1", "--port", str(port),
+                              "--backend", backend], stdout=open(log_path, "a"), stderr=subprocess.STDOUT, env=env)
+        wait(lambda: q.poll() is not None or up(), 240, 0.5)
+        return q
+    p = serve()
     try:
-        def up():
-            try:
-                return call(here + "/health")[0] == 200
-            except OSError:
-                return False
-        wait(lambda: p.poll() is not None or up(), 240, 0.5)
 
         # ---- the page's files ----
         code, body, h = call(here + "/sw.js")
@@ -448,8 +454,21 @@ def main():
         check(len(t.get("turns", [])) == 2, "the page's own copy, sent when it comes back, adds nothing", t)
 
         # ---- ts5-tui's answers: told while the browser terminal is away ----
+        # (Without a key: ts5-tui on this machine, with the server's word for it.)
+        word_file = os.path.join(base, "tell.key")
+        word = open(word_file).read().strip() if os.path.exists(word_file) else ""
+        check(len(word) == 64 and stat.S_IMODE(os.stat(word_file).st_mode) == 0o600,
+              "the server's word for its ts5-tui: in the data folder, its user's alone to read", word_file)
+
         def tell(key, title="A long story", body="Once upon a time"):
-            return call(here + "/ts5/push", key, {"tell": {"title": title, "body": body}})[1]
+            req = {"tell": {"title": title, "body": body}}
+            if key is None:
+                req["secret"] = word
+            return call(here + "/ts5/push", key, req)[1]
+        code, j, _ = call(here + "/ts5/push", None, {"tell": {"title": "Your PS5", "body": "Open this link"}})
+        check(code == 403, "a notification asked for from this machine with no key and no word is refused", (code, j))
+        code, j, _ = call(here + "/ts5/push", None, {"tell": {"title": "x", "body": "y"}, "secret": "0" * 64})
+        check(code == 403, "and with another word", (code, j))
 
         def owner_got(n):
             return [g for g in Push.got[n:] if g[0] == "/push/owner-phone"]
@@ -495,6 +514,130 @@ def main():
             w.close()
         call(here + "/ts5/away", owner, {"terminal": True, "away": False})
 
+        # ---- both Home Screen apps on one phone: each answer told once ----
+        tua = ec.generate_private_key(ec.SECP256R1())
+        tauth = os.urandom(16)
+        tsub = {"endpoint": push_base + "/push/owner-term", "keys": {"p256dh": b64e(raw_public(tua)), "auth": b64e(tauth)}}
+        call(here + "/ts5/push", owner, {"subscription": osub, "name": "iPhone", "app": "chat"})
+        code, j, _ = call(here + "/ts5/push", owner, {"subscription": tsub, "name": "iPhone", "app": "terminal"})
+        check(code == 200 and j.get("devices") == 2, "the chat app and the terminal app: two devices of the owner's", j)
+
+        def term_got(n):
+            return [g for g in Push.got[n:] if g[0] == "/push/owner-term"]
+        call(here + "/ts5/away", owner, {"terminal": True, "away": True})
+        n2 = len(Push.got)
+        j = tell(None, "In ts5-tui", "Its answer.")
+        wait(lambda: term_got(n2), 20)
+        time.sleep(1)
+        check(j.get("told") is True and len(term_got(n2)) == 1 and not owner_got(n2),
+              "ts5-tui's answer: told to the terminal app, not to the chat app too", (j, Push.got[n2:]))
+        call(here + "/ts5/away", owner, {"terminal": True, "away": False})
+        ochat2 = {"id": "o2", "title": "Second", "messages": [{"role": "user", "content": "Hello again"},
+                                                              {"role": "assistant", "content": "", "done": False}]}
+        call(here + "/ts5/chats/o2", owner, ochat2, "PUT")
+        n2 = len(Push.got)
+        stream_then_leave(port, owner, "o2", "Hello again", away=True)
+        wait(lambda: owner_got(n2), 120)
+        time.sleep(1)
+        check(len(owner_got(n2)) == 1 and not term_got(n2), "the chat's answer: told to the chat app, not to the terminal app too",
+              Push.got[n2:])
+        call(here + "/ts5/away", owner, {"away": False})
+        call(here + "/ts5/push", owner, {"endpoint": tsub["endpoint"]}, "DELETE")
+        call(here + "/ts5/away", owner, {"terminal": True, "away": True})
+        n2 = len(Push.got)
+        j = tell(None, "In ts5-tui", "Another.")
+        wait(lambda: owner_got(n2), 20)
+        check(j.get("told") is True and len(owner_got(n2)) == 1, "with the chat app alone: ts5-tui's answers come to it", Push.got[n2:])
+        away_file = os.path.join(base, "users", "owner", "terminal-away")
+        check(os.path.exists(away_file), "the terminal away: kept in the owner's folder (the server starts again with every model)",
+              os.listdir(os.path.join(base, "users", "owner")) if os.path.isdir(os.path.join(base, "users", "owner")) else base)
+        call(here + "/ts5/away", owner, {"terminal": True, "away": False})
+        check(not os.path.exists(away_file), "back in view: not kept as away")
+
+        # ---- a request is read within limits, an answer written within a time ----
+        def raw(data, wait_s=8, rcvbuf=0):
+            s = socket.socket()
+            if rcvbuf:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+            s.settimeout(wait_s)
+            s.connect(("127.0.0.1", port))
+            if data:
+                s.sendall(data)
+            return s
+
+        def closed_within(s, secs):
+            t0 = time.time()
+            try:
+                while True:
+                    if not s.recv(65536):
+                        return time.time() - t0 <= secs
+            except OSError:
+                return False
+            finally:
+                s.close()
+        check(closed_within(raw(b""), 5), "a connection that sends nothing is closed (3 s here, 30 as shipped)")
+        check(closed_within(raw(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"), 5), "and one that stops in its headers")
+        check(closed_within(raw(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n{"), 5),
+              "and one that stops in its body")
+        # (A key that isn't let in, from this machine: a user's, switched off.)
+        off_key = run(ts5, path, "keys", "new", "Sam's old phone", "--user", sam)["key"]
+        subprocess.run([ts5, "keys", "--file", path, "off", "Sam's old phone"], capture_output=True)
+        time.sleep(1.2)
+        check(call(here + "/v1/models", off_key)[0] == 401, "(a user's key switched off isn't let in)")
+        s = raw(("POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\n"
+                 "Content-Type: application/json\r\nContent-Length: 4000000\r\n\r\n" % off_key).encode())
+        t0 = time.time()
+        try:
+            got = s.recv(65536)
+        except OSError:
+            got = b""
+        s.close()
+        check(got.startswith(b"HTTP/1.1 401") and time.time() - t0 < 2,
+              "a 4 MB body with a key that isn't let in: refused from its headers, the body never read", got[:200])
+        big = {"id": "big1", "title": "Big", "messages": [{"role": "user", "content": "x" * 3500000}]}
+        cs = [call(here + "/ts5/chats/big%d" % i, skey, dict(big, id="big%d" % i), "PUT")[0] for i in range(4)]
+        check(cs == [200] * 4, "a 3.5 MB body with a key that is let in: read and kept", cs)
+        # A device that asks for its 14 MB of chats and then takes nothing
+        # (gone, without closing): the write is given up after 10 s with
+        # nothing taken (30 s here: the first 10 fill what the machine holds
+        # for the device, 0.2 MB more goes in the next 10). Before, it stood
+        # still for as long as the device did.
+        s = raw(("GET /ts5/chats HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\n\r\n" % skey).encode(), wait_s=45, rcvbuf=4096)
+        time.sleep(34)
+        got = b""
+        try:
+            while True:
+                part = s.recv(1 << 20)
+                if not part:
+                    break
+                got += part
+        except OSError:
+            pass
+        s.close()
+        head, _, rest = got.partition(b"\r\n\r\n")
+        want = 0
+        for line in head.split(b"\r\n"):
+            if line.lower().startswith(b"content-length:"):
+                want = int(line.split(b":")[1])
+        check(want > 14000000 and len(rest) < want, "a device that takes nothing: the write to it ends (it isn't waited for)",
+              (want, len(rest)))
+        check(call(here + "/health")[0] == 200, "and the server answers the next one")
+        for i in range(4):
+            call(here + "/ts5/chats/big%d" % i, skey, None, "DELETE")
+        socks = []
+        try:
+            for _ in range(256):  # (one at a time: the server takes 16 waiting ones at once)
+                socks.append(raw(b"", wait_s=5))
+                time.sleep(0.003)
+            time.sleep(0.2)
+            code = call(here + "/health")[0]
+        finally:
+            for x in socks:
+                x.close()
+        check(code == 503, "256 connections open at once: the next is told to try again (503), not given a thread", code)
+        wait(lambda: call(here + "/health")[0] == 200, 10)
+        check(call(here + "/health")[0] == 200, "closed again: it answers")
+
         # ---- the page in a browser (TS5_PAGE_TEST=1: if Playwright is
         # there; require: it must be) ----
         page_test = os.environ.get("TS5_PAGE_TEST", "")
@@ -525,8 +668,21 @@ def main():
         code, j, _ = call(here + "/ts5/push", skey, {"endpoint": sub["endpoint"]}, "DELETE")
         check(code == 200 and j.get("devices") == 0, "DELETE: turned off for that device", j)
         log = open(log_path).read()
-        check(vkey not in log and b64e(auth) not in log and "/push/sam-phone" not in log,
+        check(vkey not in log and b64e(auth) not in log and "/push/sam-phone" not in log and word not in log,
               "the log has no keys and no device addresses")
+
+        # ---- the server started again (as with every model ts5-tui loads) ----
+        call(here + "/ts5/away", owner, {"terminal": True, "away": True})
+        p.terminate()
+        p.wait()
+        p = serve()
+        n3 = len(Push.got)
+        j = tell(None, "After a load", "Still told.")
+        wait(lambda: owner_got(n3), 20)
+        check(j.get("told") is True and len(owner_got(n3)) == 1,
+              "the server started again: the terminal is still away, ts5-tui's answer is told (the same word)", (j, Push.got[n3:]))
+        call(here + "/ts5/away", owner, {"terminal": True, "away": False})
+        check(not os.path.exists(away_file) and tell(None).get("told") is False, "back in view: not away any more, nothing told")
     finally:
         p.terminate()
         p.wait()

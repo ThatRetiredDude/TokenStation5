@@ -309,19 +309,31 @@ std::string feedback_scrub(const std::string &text, const ScrubWords &w, bool ke
     // A path or a model's file name is pieces between / = _ - (words,
     // versions, sizes: "models/Qwen_Qwen3-0", "DeepSeek-R1-Distill-Qwen-14B"):
     // it goes only if a long piece looks random. A run with no such marks
-    // is judged whole.
+    // is judged whole. So is one of short pieces all the same length, most
+    // of them with a digit (a key written in groups: ab12-cd34-ef56-...),
+    // with its marks taken out: no piece of it is long enough to tell, and
+    // names and paths aren't made of equal pieces.
     s = regex_replace_fn(s, longrun, [](const std::smatch &m) -> std::string {
         const std::string t = m[0].str();
-        bool marks = false, random = false;
-        size_t from = 0;
+        bool marks = false, random = false, even = true;
+        size_t from = 0, pieces = 0, len = 0, digits = 0;
+        std::string whole;
         for (size_t i = 0; i <= t.size(); i++) {
             if (i < t.size() && !strchr("/=_-", t[i])) continue;
             if (i < t.size()) marks = true;
             const std::string piece = t.substr(from, i - from);
             if (piece.size() >= 8 && looks_random(piece)) random = true;
+            if (!piece.empty()) {
+                if (!pieces++) len = piece.size();
+                even = even && piece.size() == len;
+                digits += std::any_of(piece.begin(), piece.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+                whole += piece;
+            }
             from = i + 1;
         }
         if (!marks) random = looks_random(t);
+        else if (!random && even && pieces >= 4 && len >= 3 && len < 8 && digits * 2 >= pieces)
+            random = std::any_of(whole.begin(), whole.end(), [](unsigned char c) { return std::isalpha(c) != 0; });
         return random ? "<secret-like text removed>" : t;
     });
 

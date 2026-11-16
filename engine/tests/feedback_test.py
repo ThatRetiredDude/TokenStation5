@@ -60,6 +60,7 @@ SECRETS = {
     "tailnet machine name": "zx81tsnode",
     "tailnet device name": "zuzkas-iphone-15",
     "key name": "zuzkaphone",
+    "key in short groups": "ab12-cd34-ef56-gh78-ij90-kl12-mn34",
 }
 
 LOG = f"""ts5 0.0.1.285+7391b41 listening on 0.0.0.0:8081 and 127.0.0.1 at 10:05:23
@@ -74,6 +75,7 @@ model /home/zuzkauser/models/Qwen3-8B.gguf sha 9f86d081884c7d659a2feaeb0c71df2b0
 ts5: settings for Qwen_Qwen3-8B-Q4_K_M.gguf, as tested on the PS5: TS5_DRAFT_MODEL=/home/zuzkauser/.local/share/tokenstation/models/Qwen_Qwen3-0.6B-Q4_K_M.gguf TS5_DRAFT=3
 ts5: serving DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf, its helper DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf
 user {SECRETS['login name']} on {SECRETS['machine name']} random {SECRETS['random secret']}
+code {SECRETS['key in short groups']} for build-2026-11-16-10-15-00-linux-x86_64 in max_gen_tok_per_sec_avg_min_max_sum
 ts5: tailscale: on, as {SECRETS['tailnet machine name']}, with SSH
 ts5: tailscale: {SECRETS['tailnet device name']} ({SECRETS['tailnet address']}) connected
 ts5: tailscale: {SECRETS['tailnet device name']} ({SECRETS['tailnet address']})'s session ended
@@ -90,7 +92,7 @@ KEEP = ["0.0.1.285+7391b41", "127.0.0.1", "10:05:23", "Qwen3-8B.gguf",
         "<tailscale-key>", "<lan-ip>", "<tailnet-ip>", "<tailnet-name>", "<mac>", "<private key removed>",
         "tailscale: on, as <tailnet-name>, with SSH", "tailscale: <device> (<tailnet-ip>) connected",
         "tailscale: <device> (<tailnet-ip>)'s session ended", "opened one with the key <key-name>",
-        "with the key's cookie"]
+        "with the key's cookie", "build-2026-11-16-10-15-00-linux-x86_64", "max_gen_tok_per_sec_avg_min_max_sum"]
 
 
 class Service:

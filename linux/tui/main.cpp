@@ -7103,6 +7103,14 @@ std::string control_answer(const std::string &text) {
             return refuse(label + " can't be changed here");
         }
     } else if (what == "answer") {
+        // The answer says which question it is to (its title and words, as
+        // the phone showed them): one answered here meanwhile, with another
+        // asked since (delete this model? remove this user?), isn't
+        // answered by a late tap on the phone.
+        if (!g->ask_yes && g->pick.empty()) return refuse("that question is answered already");
+        if ((req["title"].type == Json::STR && req["title"].str() != g->ask_title) ||
+            (req["text"].type == Json::STR && req["text"].str() != g->ask_text))
+            return refuse("ts5-tui asks something else now: look at it again");
         if (g->ask_yes) {
             auto f = g->ask_yes;
             g->ask_yes = nullptr;
@@ -7165,7 +7173,10 @@ std::string control_answer(const std::string &text) {
     }
     // What the action itself said (a toast it showed), if anything new.
     if (g->toast != toast_before || g->toast_until != toast_until_before) out.set("said", Json::string(g->toast));
-    g->full_redraw = true;
+    // Drawn again after a request that did something; not for the phone's
+    // look at the state (every 2 s while Controls is open, every second
+    // during a load: the whole screen sent again each time, without tmux).
+    if (what != "state") g->full_redraw = true;
     return out.dump();
 }
 
@@ -7177,10 +7188,12 @@ void chat_watch_reset() {
 
 // The chat open here went on on the chat page (the owner's phone): its new
 // turns come in at the end, once no answer is coming here. Looked at each
-// second (a stat; the file is read only when it changed).
-void chat_follow_file() {
+// second (a stat; the file is read only when it changed), and at once
+// right before ts5-tui writes the chat: it writes all of it from what it
+// holds, and turns the phone added in the last second would go.
+void chat_follow_file(bool at_once = false) {
     static double at = 0;
-    if (now_s() - at < 1) return;
+    if (!at_once && now_s() - at < 1) return;
     at = now_s();
     const std::string id = g->chat.saved_id;
     if (id != g->chat_watch_id) {
@@ -7239,11 +7252,26 @@ void tell_answer_end() {
         while (n > 0 && ((unsigned char)t[n] & 0xC0) == 0x80) n--;
         return t.substr(0, n);
     };
-    ts5::Json tell = ts5::Json::object(), j = ts5::Json::object();
+    ts5::Json tell = ts5::Json::object();
     tell.set("title", ts5::Json::string(cut(title, 120)));
     tell.set("body", ts5::Json::string(cut(body, 400)));
-    j.set("tell", tell);
-    std::thread([ep, req = j.dump()] { http(ep, "POST", "/ts5/push", req, 3000); }).detach();
+    // Asked with the server's word for its ts5-tui, which only this user
+    // reads: the server ts5-tui starts keeps it in the data folder, the
+    // background service in /run/tokenstation for its group. (Without it
+    // any program on this machine could put words on the owner's phone.)
+    std::string run = control_shared_path();
+    run = run.substr(0, run.rfind('/'));
+    std::thread([ep, tell, files = std::vector<std::string>{data_dir() + "/tell.key", run + "/tell.key"}] {
+        for (const std::string &file : files) {
+            std::string secret = read_file(file);
+            while (!secret.empty() && isspace((unsigned char)secret.back())) secret.pop_back();
+            if (secret.empty()) continue;
+            ts5::Json j = ts5::Json::object();
+            j.set("tell", tell);
+            j.set("secret", ts5::Json::string(secret));
+            if (http(ep, "POST", "/ts5/push", j.dump(), 3000).status != 403) break;  // (403: another server's word)
+        }
+    }).detach();
 }
 
 void tick() {
@@ -7450,6 +7478,7 @@ void tick() {
     chat_follow_file();
     if (g->chat.answers != g->answers_saved && !g->chat.busy()) {
         g->answers_saved = g->chat.answers;
+        chat_follow_file(true);
         std::string why;
         if (!save_chat(g->chat, why)) show_toast("Chat not saved: " + why, g->th->bad, 6);
         chat_watch_reset();
@@ -7855,6 +7884,7 @@ int main(int argc, char **argv) {
     app.scr.resize(w, h);
     std::thread poller(poll_loop);
     app.chat.before_clear = [](Chat &c) {
+        chat_follow_file(true);
         std::string why;
         save_chat(c, why);
         g->answers_saved = c.answers;
@@ -7908,6 +7938,7 @@ int main(int argc, char **argv) {
     chat_stop(app.chat);
     mcp_stop_all();
     {
+        chat_follow_file(true);
         std::string why;
         save_chat(app.chat, why);
     }
