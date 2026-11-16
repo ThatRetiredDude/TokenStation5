@@ -382,7 +382,7 @@ std::atomic<int> g_open{0};  // terminals open now
 
 // A user's browser terminal opened (open) or closed: notifications for
 // ts5-tui's answers go out while none is open (the push section, below).
-void push_terminal(const std::string &user, bool open);
+void push_terminal(const WebOptions &o, const std::string &user, bool open);
 constexpr int kMaxOpen = 4;
 
 std::string tui_command() {
@@ -473,12 +473,13 @@ void terminal(const WebOptions &o, const Server::Page &p, int fd) {
     } done;
     // Its user's: while it is open, an answer that ends in ts5-tui is seen here.
     struct Seen {
+        const WebOptions &o;
         std::string user;
-        ~Seen() { if (!user.empty()) push_terminal(user, false); }
-    } seen;
-    if (o.admit && !grant.user.empty()) {
+        ~Seen() { if (!user.empty()) push_terminal(o, user, false); }
+    } seen{o, ""};
+    if (o.admit && o.user_dir && !grant.user.empty()) {
         seen.user = grant.user;
-        push_terminal(grant.user, true);
+        push_terminal(o, grant.user, true);
     }
     winsize ws{};
     ws.ws_col = (unsigned short)std::max(20.0, std::min(500.0, hello["cols"].num(80)));
@@ -645,6 +646,17 @@ std::vector<std::string> chat_files(const std::string &dir) {
 }
 
 
+// A chat file's mark: another whenever the file is written again (each
+// write is a new file, write_whole; ts5-tui's too).
+std::string chat_mark(const std::string &path) {
+    struct stat st {};
+    if (stat(path.c_str(), &st) != 0) return "";
+    char b[96];
+    snprintf(b, sizeof b, "%llx.%lx.%llx.%llx", (unsigned long long)st.st_mtim.tv_sec, (unsigned long)st.st_mtim.tv_nsec,
+             (unsigned long long)st.st_size, (unsigned long long)st.st_ino);
+    return b;
+}
+
 // ---- the owner's chats: ts5-tui's own, one list ----
 //
 // The owner's chats on the chat page are ts5-tui's chats (DATA/chats, in
@@ -700,16 +712,46 @@ Json page_chat(const std::string &id, const Json &c) {
     o.set("at", jnum(c["updated"].num(c["created"].num(0)) * 1000));
     Json ms;
     ms.type = Json::ARR;
+    // A turn of ts5-tui's that only called tools (no words of its own: the
+    // answer comes in a later turn) isn't a message of its own on the page
+    // (an empty one, which the model would get back as an empty answer):
+    // the tools it used, and what it thought, go with the answer after it.
+    std::string used_before, thought_before;
+    const auto alone = [&] {  // no answer came after it: its note alone
+        if (used_before.empty()) return;
+        Json m = Json::object();
+        m.set("role", Json::string("assistant"));
+        m.set("content", Json::string(""));
+        m.set("done", jbool(true));
+        if (!thought_before.empty()) m.set("thinking", Json::string(thought_before));
+        m.set("stats", Json::string("used " + used_before));
+        ms.a.push_back(m);
+        used_before.clear();
+        thought_before.clear();
+    };
     for (const Json &t : c["turns"].a) {
         if (!shown_turn(t)) continue;
         Json m = Json::object();
         const bool user = t["user"].boolean(false);
+        if (user) alone();
         m.set("role", Json::string(user ? "user" : "assistant"));
         m.set("content", Json::string(t["text"].str()));
         if (!user) {
-            m.set("done", jbool(true));
-            if (!t["reasoning"].str().empty()) m.set("thinking", Json::string(t["reasoning"].str()));
             const std::string end = t["end"].str("done");
+            std::string used;
+            for (const Json &u : t["calls"].a) used += (used.empty() ? "" : ", ") + u["name"].str();
+            if (t["text"].str().empty() && !used.empty() && end != "failed") {
+                used_before += (used_before.empty() ? "" : ", ") + used;
+                if (!t["reasoning"].str().empty()) thought_before += (thought_before.empty() ? "" : "\n\n") + t["reasoning"].str();
+                continue;
+            }
+            if (!used_before.empty()) used = used.empty() ? used_before : used_before + ", " + used;
+            std::string thought = t["reasoning"].str();
+            if (!thought_before.empty()) thought = thought.empty() ? thought_before : thought_before + "\n\n" + thought;
+            used_before.clear();
+            thought_before.clear();
+            m.set("done", jbool(true));
+            if (!thought.empty()) m.set("thinking", Json::string(thought));
             std::string stats;
             const double tokens = t["tokens"].num(0), tps = t["tps"].num(0);
             if (tokens > 0) {
@@ -718,14 +760,13 @@ Json page_chat(const std::string &id, const Json &c) {
                 stats = b;
             }
             if (end == "stopped") stats = stats.empty() ? "stopped" : stats + " · stopped";
-            std::string used;
-            for (const Json &u : t["calls"].a) used += (used.empty() ? "" : ", ") + u["name"].str();
             if (!used.empty()) stats += (stats.empty() ? "" : " · ") + std::string("used ") + used;
             if (!stats.empty()) m.set("stats", Json::string(stats));
             if (end == "failed") m.set("error", Json::string(t["error"].str("it failed")));
         }
         ms.a.push_back(m);
     }
+    alone();
     o.set("messages", ms);
     return o;
 }
@@ -764,20 +805,37 @@ std::string tui_chat(const Json &page, const Json *old, const std::string &model
         }
         mine.push_back(t);
     }
-    // The ones both have: the file's shown turns, in order, the same.
+    // What is matched and kept: words, and answers with something in them.
+    // (An empty answer is one that only called tools, in ts5-tui, and one
+    // from the page with nothing in it, a Stop before the first word, isn't
+    // kept: neither is a place where the two can differ.)
+    const auto counts = [](const Json &t) {
+        return t["user"].boolean(false) || !t["text"].str().empty() || t["end"].str() == "failed";
+    };
+    const auto same_turn = [](const Json &a, const Json &b) {
+        return a["user"].boolean(false) == b["user"].boolean(false) && a["text"].str() == b["text"].str();
+    };
+    std::vector<const Json *> file;  // the file's, of those
+    for (const Json &t : turns)
+        if (shown_turn(t) && counts(t)) file.push_back(&t);
+    std::vector<const Json *> sent;  // the page's
+    for (const Json &t : mine)
+        if (counts(t)) sent.push_back(&t);
+    // The ones both have: from the start, in order, the same.
     size_t same = 0;
-    for (const Json &t : turns) {
-        if (!shown_turn(t)) continue;
-        if (same >= mine.size() || t["user"].boolean(false) != mine[same]["user"].boolean(false) ||
-            t["text"].str() != mine[same]["text"].str())
-            break;
-        same++;
+    while (same < file.size() && same < sent.size() && same_turn(*file[same], *sent[same])) same++;
+    // The file may have gone on past the page's copy of it (turns ts5-tui
+    // added, an answer kept here) before the page's new ones were written
+    // at its end by an earlier save: those it ends with are there already.
+    size_t there = 0;
+    for (size_t n = std::min(file.size() - same, sent.size() - same); n > 0 && !there; n--) {
+        bool ends = true;
+        for (size_t i = 0; i < n && ends; i++) ends = same_turn(*file[file.size() - n + i], *sent[same + i]);
+        if (ends) there = n;
     }
-    // (An empty answer is one that only called tools, in ts5-tui: one
-    // from the page with nothing in it isn't kept.)
-    for (size_t i = same; i < mine.size(); i++)
-        if (mine[i]["user"].boolean(false) || !mine[i]["text"].str().empty() || mine[i]["end"].str() == "failed")
-            turns.push_back(mine[i]);
+    std::vector<Json> added;
+    for (size_t i = same + there; i < sent.size(); i++) added.push_back(*sent[i]);
+    turns.insert(turns.end(), added.begin(), added.end());
     if (title.empty())
         for (const Json &t : turns)
             if (t["user"].boolean(false)) {
@@ -840,6 +898,8 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
         j.set("max_reply", n);
         b.b = kept;
         j.set("chats_kept", b);
+        b.b = kept && !tui_chats_dir(o, g).empty();
+        j.set("tui_chats", b);  // the owner's chats are ts5-tui's own list
         b.b = g.owner_reads;
         j.set("owner_reads", b);
         n.n = (double)g.tokens_day;
@@ -915,26 +975,42 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
     const std::string id = p.path.size() > 11 ? p.path.substr(11) : "";
     if (p.path == "/ts5/chats" || p.path == "/ts5/chats/") {
         if (p.method == "GET") {
-            std::string out = "{\"chats\":[";
+            // ?marks=1: which chats there are and each one's mark, and no
+            // chat. What the page asks every 15 s: it then fetches the ones
+            // whose mark changed, not every chat with all its messages
+            // (megabytes, with some dozens of chats). No file is read for it.
+            const bool only_marks = p.query.find("marks=1") != std::string::npos;
+            std::string out = "{\"chats\":[", marks;
             bool first = true;
             std::vector<std::string> seen;
+            // (The mark before the file is read: one written in between is
+            // fetched again, never missed.)
             if (!tui.empty())
                 for (const std::string &n : chat_files(tui)) {
-                    Json c;
-                    if (!Json::parse(read_whole(tui + "/" + n), c) || c.type != Json::OBJ || c["turns"].type != Json::ARR) continue;
-                    out += (first ? "" : ",") + page_chat(n.substr(0, n.size() - 5), c).dump();
-                    first = false;
+                    const std::string m = chat_mark(tui + "/" + n);
+                    if (!only_marks) {
+                        Json c;
+                        if (!Json::parse(read_whole(tui + "/" + n), c) || c.type != Json::OBJ || c["turns"].type != Json::ARR)
+                            continue;
+                        out += (first ? "" : ",") + page_chat(n.substr(0, n.size() - 5), c).dump();
+                        first = false;
+                    }
+                    marks += (marks.empty() ? "" : ",") + json_escape(n.substr(0, n.size() - 5)) + ":" + json_escape(m);
                     seen.push_back(n);
                 }
             for (const std::string &n : chat_files(dir)) {
                 if (std::find(seen.begin(), seen.end(), n) != seen.end()) continue;
-                const std::string text = read_whole(dir + "/" + n);
-                Json c;
-                if (!Json::parse(text, c) || c.type != Json::OBJ) continue;
-                out += (first ? "" : ",") + text;
-                first = false;
+                const std::string m = chat_mark(dir + "/" + n);
+                if (!only_marks) {
+                    const std::string text = read_whole(dir + "/" + n);
+                    Json c;
+                    if (!Json::parse(text, c) || c.type != Json::OBJ) continue;
+                    out += (first ? "" : ",") + text;
+                    first = false;
+                }
+                marks += (marks.empty() ? "" : ",") + json_escape(n.substr(0, n.size() - 5)) + ":" + json_escape(m);
             }
-            send_file(fd, 200, "application/json", out + "]}", false);
+            send_file(fd, 200, "application/json", (only_marks ? "{" : out + "],") + "\"marks\":{" + marks + "}}", false);
         } else if (p.method == "DELETE") {
             for (const std::string &n : chat_files(dir)) unlink((dir + "/" + n).c_str());
             if (!tui.empty()) {
@@ -962,7 +1038,10 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
             send_error(fd, 400, "a chat is a JSON object with its id, at most 4 MB");
             return true;
         }
-        if (access(wfile.c_str(), F_OK) != 0 && (int)chat_files(wdir).size() >= kChatsMax) {
+        // A user's limits (so many chats, so much room) aren't the owner's
+        // in ts5-tui's own folder: ts5-tui keeps as many there as it likes,
+        // and they aren't the chat page's to refuse a new one for.
+        if (tui.empty() && access(wfile.c_str(), F_OK) != 0 && (int)chat_files(wdir).size() >= kChatsMax) {
             send_error(fd, 400, "a user keeps at most 1000 chats: delete some first");
             return true;
         }
@@ -973,11 +1052,12 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
             body = tui_chat(c, had ? &old : nullptr, o.model);
         }
         size_t total = body.size();
-        for (const std::string &n : chat_files(wdir)) {
-            struct stat st {};
-            if (n != id + ".json" && stat((wdir + "/" + n).c_str(), &st) == 0) total += (size_t)st.st_size;
-        }
-        if (total > chats_max_bytes()) {
+        if (tui.empty())
+            for (const std::string &n : chat_files(wdir)) {
+                struct stat st {};
+                if (n != id + ".json" && stat((wdir + "/" + n).c_str(), &st) == 0) total += (size_t)st.st_size;
+            }
+        if (tui.empty() && total > chats_max_bytes()) {
             send_error(fd, 400, "a user's chats take at most " + std::to_string(chats_max_bytes() >> 20) +
                                     " MB on the machine: delete some first");
             return true;
@@ -1019,31 +1099,64 @@ bool me_and_chats(const WebOptions &o, const Server::Page &p, int fd) {
 
 struct PushUser {
     std::set<std::string> away;     // chats whose page went away while their answer came
-    std::set<std::string> working;  // chats with an answer coming
+    // Chats with an answer coming, and how many requests each has (one
+    // asked again while its first still waits for the engine: the first's
+    // end isn't the chat's).
+    std::map<std::string, int> working;
     int unseen = 0;
     // The browser terminal: how many are open, and whether it went away (its
     // page in the background, or the last one closed). ts5-tui's answers that
-    // end then are told (POST /ts5/push {"tell"}).
+    // end then are told (POST /ts5/push {"tell"}). Away is kept in the
+    // user's folder too (term_known: read from there): the server starts
+    // again with every model ts5-tui loads, and what it knew went with it.
     int term_open = 0;
-    bool term_away = false;
+    bool term_away = false, term_known = false;
 };
 std::mutex push_mu;
 std::map<std::string, PushUser> push_users;  // by user id
 
-void push_terminal(const std::string &user, bool open) {
+// The user's browser terminal is away (push_mu held).
+bool term_away(const WebOptions &o, PushUser &u, const std::string &user) {
+    if (!u.term_known) {
+        u.term_known = true;
+        u.term_away = access((o.user_dir(user) + "/terminal-away").c_str(), F_OK) == 0;
+    }
+    return u.term_away;
+}
+void term_set_away(const WebOptions &o, PushUser &u, const std::string &user, bool away) {
+    if (term_away(o, u, user) == away) return;
+    u.term_away = away;
+    const std::string file = o.user_dir(user) + "/terminal-away";
+    if (away) {
+        make_dirs(o.user_dir(user));
+        write_whole(file, "\n");
+    } else {
+        unlink(file.c_str());
+    }
+}
+
+void push_terminal(const WebOptions &o, const std::string &user, bool open) {
     std::lock_guard<std::mutex> l(push_mu);
     PushUser &u = push_users[user];
     if (open) {
         u.term_open++;
-        u.term_away = false;
+        term_set_away(o, u, user, false);
         u.unseen = 0;
     } else if (--u.term_open <= 0) {
         u.term_open = 0;
-        u.term_away = true;
+        term_set_away(o, u, user, true);
     }
 }
 
 constexpr size_t kPushDevices = 10;  // a user's subscriptions kept, the newest
+
+// A device with notifications on: its subscription, the name it gave, and
+// which Home Screen app it is ("chat", "terminal"; "" a browser's tab, or a
+// device from before apps were told apart).
+struct PushDevice {
+    PushSubscription sub;
+    std::string name, app;
+};
 
 // Where this machine's notifications key is: beside users/ (the keys' data).
 std::string push_key_path(const WebOptions &o) {
@@ -1054,32 +1167,33 @@ std::string push_key_path(const WebOptions &o) {
     return base + "/push-key.pem";
 }
 
-std::vector<PushSubscription> push_subs(const WebOptions &o, const std::string &user, std::vector<std::string> *names = nullptr) {
-    std::vector<PushSubscription> out;
+std::vector<PushDevice> push_subs(const WebOptions &o, const std::string &user) {
+    std::vector<PushDevice> out;
     Json j;
     if (!Json::parse(read_whole(o.user_dir(user) + "/push.json"), j) || j.type != Json::OBJ) return out;
     for (const Json &x : j["devices"].a) {
-        PushSubscription s;
-        s.endpoint = x["endpoint"].str();
-        s.p256dh = x["p256dh"].str();
-        s.auth = x["auth"].str();
-        if (s.endpoint.empty()) continue;
-        out.push_back(s);
-        if (names) names->push_back(x["name"].str());
+        PushDevice d;
+        d.sub.endpoint = x["endpoint"].str();
+        d.sub.p256dh = x["p256dh"].str();
+        d.sub.auth = x["auth"].str();
+        d.name = x["name"].str();
+        d.app = x["app"].str();
+        if (d.sub.endpoint.empty()) continue;
+        out.push_back(d);
     }
     return out;
 }
 
-void push_keep(const WebOptions &o, const std::string &user, const std::vector<PushSubscription> &subs,
-               const std::vector<std::string> &names) {
+void push_keep(const WebOptions &o, const std::string &user, const std::vector<PushDevice> &devices) {
     Json j = Json::object(), arr;
     arr.type = Json::ARR;
-    for (size_t i = 0; i < subs.size(); i++) {
+    for (const PushDevice &d : devices) {
         Json x = Json::object();
-        x.set("endpoint", Json::string(subs[i].endpoint));
-        x.set("p256dh", Json::string(subs[i].p256dh));
-        x.set("auth", Json::string(subs[i].auth));
-        x.set("name", Json::string(i < names.size() ? names[i] : ""));
+        x.set("endpoint", Json::string(d.sub.endpoint));
+        x.set("p256dh", Json::string(d.sub.p256dh));
+        x.set("auth", Json::string(d.sub.auth));
+        x.set("name", Json::string(d.name));
+        if (!d.app.empty()) x.set("app", Json::string(d.app));
         arr.a.push_back(x);
     }
     j.set("devices", arr);
@@ -1087,44 +1201,98 @@ void push_keep(const WebOptions &o, const std::string &user, const std::vector<P
     write_whole(o.user_dir(user) + "/push.json", j.dump() + "\n");
 }
 
-// Sends payload to every device of user's; one gone (404, 410) is forgotten.
-// sent: how many took it; why: the first failure.
-void push_send_all(const WebOptions &o, const std::string &user, const std::string &payload, int &sent, int &devices,
-                   std::string &why) {
+// Sends payload to the user's devices; one gone (404, 410) is forgotten.
+// kind: "chat" (an answer of the chat page's) goes to all but the terminal
+// app, "terminal" (one of ts5-tui's) to all but the chat app, so a phone
+// with both Home Screen apps is told once; to every device where that
+// leaves none, and for "". sent: how many took it; why: the first failure.
+void push_send_all(const WebOptions &o, const std::string &user, const std::string &payload, const std::string &kind,
+                   int &sent, int &devices, std::string &why) {
     sent = 0;
-    std::vector<std::string> names;
-    std::vector<PushSubscription> subs;
+    std::vector<PushDevice> all, subs;
     {
         std::lock_guard<std::mutex> l(push_mu);
-        subs = push_subs(o, user, &names);
+        all = push_subs(o, user);
     }
+    const std::string other = kind == "chat" ? "terminal" : kind == "terminal" ? "chat" : "";
+    for (const PushDevice &d : all)
+        if (other.empty() || d.app != other) subs.push_back(d);
+    if (subs.empty()) subs = all;
     devices = (int)subs.size();
     std::vector<std::string> gone;
     const std::string key = push_key_path(o);
-    for (const PushSubscription &s : subs) {
+    for (const PushDevice &d : subs) {
         int status = 0;
         std::string w;
-        if (webpush_send(key, s, payload, status, w)) sent++;
+        if (webpush_send(key, d.sub, payload, status, w)) sent++;
         else {
-            if (status == 404 || status == 410) gone.push_back(s.endpoint);
+            if (status == 404 || status == 410) gone.push_back(d.sub.endpoint);
             if (why.empty()) why = w;
         }
     }
     if (!gone.empty()) {
         std::lock_guard<std::mutex> l(push_mu);
-        names.clear();
-        std::vector<PushSubscription> keep, now = push_subs(o, user, &names);
-        std::vector<std::string> kept_names;
-        for (size_t i = 0; i < now.size(); i++)
-            if (std::find(gone.begin(), gone.end(), now[i].endpoint) == gone.end()) {
-                keep.push_back(now[i]);
-                kept_names.push_back(names[i]);
-            }
-        push_keep(o, user, keep, kept_names);
+        std::vector<PushDevice> keep;
+        for (const PushDevice &d : push_subs(o, user))
+            if (std::find(gone.begin(), gone.end(), d.sub.endpoint) == gone.end()) keep.push_back(d);
+        push_keep(o, user, keep);
     }
     log_line("ts5: notifications: %d of %d device%s of %s's took it%s%s%s", sent, devices, devices == 1 ? "" : "s",
              user.c_str(), gone.empty() ? "" : " (", gone.empty() ? "" : (std::to_string(gone.size()) + " gone, forgotten").c_str(),
              gone.empty() ? (why.empty() ? "" : (": " + why).c_str()) : ")");
+}
+
+// The word this machine's ts5-tui shows it is that (POST /ts5/push
+// {"tell", "secret"}): 32 random bytes in hex, made once, in a file only
+// this server's user reads, beside the notifications key (ts5-tui's own
+// data folder, for the server it starts); the background service's also in
+// /run/tokenstation, for its group (the owner's ts5-tui is in it).
+std::string run_dir();
+bool as_service();
+std::string tell_secret(const WebOptions &o) {
+    static std::mutex mu;
+    static std::string secret;
+    std::lock_guard<std::mutex> l(mu);
+    if (!secret.empty()) return secret;
+    const std::string ud = o.user_dir("owner");
+    const size_t at = ud.rfind("/users/");
+    const std::string base = at == std::string::npos ? ud : ud.substr(0, at);
+    const std::string file = base + "/tell.key";
+    const auto good = [](std::string t) {
+        while (!t.empty() && isspace((unsigned char)t.back())) t.pop_back();
+        if (t.size() != 64) return std::string();
+        for (char c : t)
+            if (!isxdigit((unsigned char)c)) return std::string();
+        return t;
+    };
+    std::string have = good(read_whole(file));
+    if (have.empty()) {
+        unsigned char raw[32];
+        FILE *f = fopen("/dev/urandom", "rb");
+        const bool ok = f && fread(raw, 1, sizeof raw, f) == sizeof raw;
+        if (f) fclose(f);
+        if (!ok) return "";
+        static const char hex[] = "0123456789abcdef";
+        for (unsigned char c : raw) {
+            have += hex[c >> 4];
+            have += hex[c & 15];
+        }
+        make_dirs(base);
+        if (!write_whole(file, have + "\n")) return "";
+    }
+    if (as_service()) {
+        const std::string shared = run_dir() + "/tell.key";
+        if (good(read_whole(shared)) != have && write_whole(shared, have + "\n")) chmod(shared.c_str(), 0640);
+    }
+    secret = have;
+    return secret;
+}
+// (Every byte looked at: how long it takes says nothing of where they differ.)
+bool same_secret(const std::string &a, const std::string &b) {
+    if (a.empty() || a.size() != b.size()) return false;
+    unsigned char d = 0;
+    for (size_t i = 0; i < a.size(); i++) d |= (unsigned char)(a[i] ^ b[i]);
+    return d == 0;
 }
 
 // s cut to at most n bytes, on a character's start, with "…" when cut.
@@ -1189,7 +1357,7 @@ void page_answers(Server &s, const WebOptions &o) {
     pa.start = [](const Server::Grant &g, const std::string &chat) {
         std::lock_guard<std::mutex> l(push_mu);
         PushUser &u = push_users[g.user];
-        u.working.insert(chat);
+        u.working[chat]++;
         u.away.erase(chat);  // asked from the page: it's there
     };
     pa.end = [o](const Server::Grant &g, const Server::AnswerEnd &a) {
@@ -1198,8 +1366,12 @@ void page_answers(Server &s, const WebOptions &o) {
         {
             std::lock_guard<std::mutex> l(push_mu);
             PushUser &u = push_users[g.user];
-            u.working.erase(a.chat);
-            away = u.away.erase(a.chat) > 0;
+            auto w = u.working.find(a.chat);
+            const bool more = w != u.working.end() && --w->second > 0;
+            if (w != u.working.end() && !more) u.working.erase(w);
+            // (Another request of the chat's still to come: the page's word
+            // that it went away is that one's too.)
+            away = more ? u.away.count(a.chat) > 0 : u.away.erase(a.chat) > 0;
             // Kept: an answer that went on without its connection (the page,
             // back by now or not, gets it from here), and one whose page is
             // away. Not one cut short (a Stop, even as the page went): the
@@ -1222,7 +1394,7 @@ void page_answers(Server &s, const WebOptions &o) {
             j.set("badge", jnum(badge));
             int sent = 0, devices = 0;
             std::string why;
-            push_send_all(o, g.user, j.dump(), sent, devices, why);
+            push_send_all(o, g.user, j.dump(), "chat", sent, devices, why);
         }).detach();
     };
     s.set_page_answers(pa);
@@ -1253,14 +1425,21 @@ bool push_pages(const WebOptions &o, const Server::Page &p, int fd) {
         return true;
     }
     // ts5-tui's answer has ended: told to the user's devices while their
-    // browser terminal is away (ts5-tui on this machine asks without a key,
-    // as the owner).
-    if (push && p.method == "POST" && req["tell"].type == Json::OBJ && (g.owner || !g.key.empty())) {
+    // browser terminal is away. Asked with a key, or by ts5-tui on this
+    // machine without one, as the owner, with the word only it can read
+    // (tell_secret): not by any program here that can reach the port (a
+    // command the model runs, a page its browser opens).
+    if (push && p.method == "POST" && req["tell"].type == Json::OBJ) {
+        const bool keyed = !p.key.empty() && !g.key.empty();
+        if (!keyed && !(g.owner && same_secret(req["secret"].str(), tell_secret(o)))) {
+            send_error(fd, 403, "A notification is asked for with a key, or by this machine's ts5-tui.");
+            return true;
+        }
         int badge = 0;
         {
             std::lock_guard<std::mutex> l(push_mu);
             PushUser &u = push_users[g.user];
-            if (u.term_away) badge = ++u.unseen;
+            if (term_away(o, u, g.user)) badge = ++u.unseen;
         }
         if (badge > 0) {
             Json j = Json::object();
@@ -1277,7 +1456,7 @@ bool push_pages(const WebOptions &o, const Server::Page &p, int fd) {
             std::thread([o, user = g.user, payload = j.dump()] {
                 int sent = 0, devices = 0;
                 std::string why;
-                push_send_all(o, user, payload, sent, devices, why);
+                push_send_all(o, user, payload, "terminal", sent, devices, why);
             }).detach();
         }
         Json out = Json::object();
@@ -1298,7 +1477,7 @@ bool push_pages(const WebOptions &o, const Server::Page &p, int fd) {
             PushUser &u = push_users[g.user];
             if (p.method == "POST" && req["terminal"].boolean(false)) {
                 // The browser terminal's page went to the background, or came back.
-                u.term_away = req["away"].boolean(false);
+                term_set_away(o, u, g.user, req["away"].boolean(false));
                 if (!u.term_away) u.unseen = 0;
             } else if (p.method == "POST") {
                 const std::string chat = req["chat"].str();
@@ -1312,7 +1491,7 @@ bool push_pages(const WebOptions &o, const Server::Page &p, int fd) {
                 send_error(fd, 405, "GET or POST");
                 return true;
             }
-            for (const std::string &c : u.working) arr.a.push_back(Json::string(c));
+            for (const auto &c : u.working) arr.a.push_back(Json::string(c.first));
         }
         out.set("working", arr);
         send_file(fd, 200, "application/json", out.dump(), false);
@@ -1339,7 +1518,7 @@ bool push_pages(const WebOptions &o, const Server::Page &p, int fd) {
         j.set("badge", jnum(0));
         int sent = 0, devices = 0;
         std::string why;
-        push_send_all(o, g.user, j.dump(), sent, devices, why);
+        push_send_all(o, g.user, j.dump(), "", sent, devices, why);
         Json out = Json::object();
         out.set("sent", jnum(sent));
         out.set("devices", jnum(devices));
@@ -1349,7 +1528,8 @@ bool push_pages(const WebOptions &o, const Server::Page &p, int fd) {
     }
     if (p.method == "POST" || p.method == "DELETE") {
         const Json &sub = req["subscription"];
-        PushSubscription s;
+        PushDevice d;
+        PushSubscription &s = d.sub;
         s.endpoint = p.method == "POST" ? sub["endpoint"].str() : req["endpoint"].str();
         s.p256dh = sub["keys"]["p256dh"].str();
         s.auth = sub["keys"]["auth"].str();
@@ -1362,29 +1542,22 @@ bool push_pages(const WebOptions &o, const Server::Page &p, int fd) {
                                     : "that isn't a push service this machine sends to (Apple's, Google's, Mozilla's, Microsoft's)");
             return true;
         }
+        d.name = req["name"].str();
+        if (d.name.size() > 60) d.name = cut_text(d.name, 60);
+        d.app = req["app"].str();
+        if (d.app != "chat" && d.app != "terminal") d.app.clear();
         std::lock_guard<std::mutex> l(push_mu);
-        std::vector<std::string> names;
-        std::vector<PushSubscription> subs = push_subs(o, g.user, &names), keep;
-        std::vector<std::string> kept_names;
-        for (size_t i = 0; i < subs.size(); i++)
-            if (subs[i].endpoint != s.endpoint) {
-                keep.push_back(subs[i]);
-                kept_names.push_back(names[i]);
-            }
+        std::vector<PushDevice> keep;
+        for (const PushDevice &x : push_subs(o, g.user))
+            if (x.sub.endpoint != s.endpoint) keep.push_back(x);
         if (p.method == "POST") {
-            keep.push_back(s);
-            std::string name = req["name"].str();
-            if (name.size() > 60) name = cut_text(name, 60);
-            kept_names.push_back(name);
-            while (keep.size() > kPushDevices) {
-                keep.erase(keep.begin());
-                kept_names.erase(kept_names.begin());
-            }
+            keep.push_back(d);
+            while (keep.size() > kPushDevices) keep.erase(keep.begin());
         }
-        push_keep(o, g.user, keep, kept_names);
+        push_keep(o, g.user, keep);
         log_line("ts5: notifications: %s %s them for %s (%s)", g.user_name.empty() ? g.user.c_str() : g.user_name.c_str(),
                  p.method == "POST" ? "turned on" : "turned off", p.client.c_str(),
-                 p.method == "POST" ? (req["name"].str().empty() ? "a device" : cut_text(req["name"].str(), 60).c_str()) : "a device");
+                 p.method == "POST" ? (d.name.empty() ? "a device" : d.name.c_str()) : "a device");
         Json out = Json::object();
         out.set("devices", jnum((double)keep.size()));
         send_file(fd, 200, "application/json", out.dump(), false);
@@ -1602,8 +1775,11 @@ void control(const WebOptions &o, const Server::Page &p, int fd) {
 //   POST /ts5/switch {"model": M}   ts5-tui loads M (it asks nothing: a
 //                                   model it would ask the owner about is
 //                                   refused); then as GET.
-// Through the owner's ts5-tui, as the controls.
-void switch_model(const WebOptions &o, const Server::Page &p, int fd) {
+// Through the owner's ts5-tui, as the controls. A user's switch (not the
+// owner's) waits for an answer being written to end, up to a minute, and
+// is refused if it hasn't by then: the switch starts the server again, and
+// would cut that answer off for whoever asked for it.
+void switch_model(Server &srv, const WebOptions &o, const Server::Page &p, int fd) {
     if (!o.admit) {
         send_error(fd, 404, "this server keeps no users");
         return;
@@ -1636,6 +1812,19 @@ void switch_model(const WebOptions &o, const Server::Page &p, int fd) {
             send_error(fd, 400, want.empty() ? "which model? {\"model\": NAME}"
                                              : want + " isn't one of the models " + (g.owner ? "here" : g.user_name + " may use here"));
             return;
+        }
+        if (!g.owner) {
+            const auto writing = [&srv] {
+                const Server::Activity a = srv.activity();
+                return a.generating || a.phase != 0 || a.waiting > 0;
+            };
+            const char *e = getenv("TS5_SWITCH_WAIT");  // seconds (tests)
+            const double until = now_s() + (e && *e ? atof(e) : 60);
+            while (writing() && now_s() < until) usleep(200 * 1000);
+            if (writing()) {
+                send_error(fd, 409, "An answer is still being written here: try again when it has ended.");
+                return;
+            }
         }
         Json ask = Json::object();
         ask.set("do", Json::string("load"));
@@ -1674,8 +1863,11 @@ void switch_model(const WebOptions &o, const Server::Page &p, int fd) {
 }  // namespace
 
 void attach_web(Server &s, const WebOptions &o) {
-    if (o.admit && o.user_dir) page_answers(s, o);
-    s.set_pages([o](const Server::Page &p, int fd) {
+    if (o.admit && o.user_dir) {
+        page_answers(s, o);
+        tell_secret(o);  // there before ts5-tui's first answer ends
+    }
+    s.set_pages([o, &s](const Server::Page &p, int fd) {
         // The address apps are given (…/v1), opened in a browser: the chat page.
         if ((p.path == "/v1" || p.path == "/v1/") && p.method == "GET" &&
             p.header("accept").find("text/html") != std::string::npos) {
@@ -1714,7 +1906,7 @@ void attach_web(Server &s, const WebOptions &o) {
             return true;
         }
         if (p.path == "/ts5/switch") {
-            switch_model(o, p, fd);
+            switch_model(s, o, p, fd);
             return true;
         }
         const bool web = p.path == "/" || p.path == "/chat" || p.path.rfind("/ts5/web/", 0) == 0 ||

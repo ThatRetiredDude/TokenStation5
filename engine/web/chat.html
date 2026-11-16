@@ -115,6 +115,15 @@
   .msg .body h1, .msg .body h2, .msg .body h3 { font-size: 1.05em; margin: 12px 0 6px; }
   .msg .body ul, .msg .body ol { margin: 0 0 10px; padding-left: 22px; }
   .msg .body a { color: var(--accent); }
+  .msg .body li > pre { margin-top: 6px; }
+  .msg .body li > ul, .msg .body li > ol { margin-bottom: 0; }
+  .msg .body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
+  /* A table wider than the phone scrolls sideways in its own box. */
+  .msg .body .tbl { overflow-x: auto; margin: 0 0 10px; }
+  .msg .body table { border-collapse: collapse; font-size: 0.95em; }
+  .msg .body th, .msg .body td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top;
+    overflow-wrap: break-word; }
+  .msg .body th { background: var(--panel); }
   /* The home screen: what the app opens on, and a new chat until its first message. */
   #home { max-width: 560px; margin: 0 auto; padding: 5vh 0 8px; text-align: center; }
   #home img { width: 84px; height: 84px; border-radius: 19px; display: block; margin: 0 auto 10px; }
@@ -266,6 +275,8 @@ function localChats() { try { return JSON.parse(store.get("ts5.chats", "[]")) ||
 // Filled by account() once the server says whose key this is, so a shared
 // browser never shows what it kept to another user's key, not even briefly.
 let chats = [];
+let marks = {};     // by chat: its mark on the machine when the page last took it (refreshChats)
+const unread = {};  // by chat: the mark of one that can't be read there (not asked for again as it is)
 let cur = chats.length ? chats[0].id : null;
 let model = "", busy = null, busyId = null;
 let decided = false;  // account() has said whose key this is
@@ -308,7 +319,9 @@ async function account() {
     try {
       const r = await api("/ts5/chats");
       if (r.ok) {
-        const there = (await r.json()).chats || [];
+        const j = await r.json();
+        const there = j.chats || [];
+        marks = j.marks || {};  // (refreshChats)
         // Chats this browser kept before users go to the owner's account
         // only: on a browser two people share, another user's key never
         // takes (or shows) what is kept here.
@@ -363,8 +376,10 @@ function headers() {
   return h;
 }
 
-// ---- Markdown, a little: what models write most. Everything is escaped
-// first; only http(s) links are made.
+// ---- Markdown, a little: what models write most (paragraphs, headings,
+// lists with lists and code inside them, numbered steps that go on after a
+// code block, tables, rules, code). Everything is escaped first; only
+// http(s) links are made.
 function esc(s) { return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function inline(s) {
   return esc(s)
@@ -373,37 +388,104 @@ function inline(s) {
     .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:;]|$)/g, "$1<i>$2</i>")
     .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
 }
+// A table's line as its cells: "| a | b |" or "a | b" ("\|" is a bar in a cell).
+function cells(line) {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
+  return s.replace(/\\\|/g, "\u0001").split("|").map((c) => c.replace(/\u0001/g, "|").trim());
+}
 function markdown(text) {
   const out = [];
-  const parts = text.split(/^```/m);
-  parts.forEach((part, i) => {
-    if (i % 2 === 1) {
-      const nl = part.indexOf("\n");
-      const code = nl < 0 ? "" : part.slice(nl + 1).replace(/\n$/, "");
-      out.push("<pre><button type=\"button\" class=\"cp\">Copy</button><code>" + esc(code) + "</code></pre>");
-      return;
-    }
-    let list = null, para = [];
-    const flush = () => {
-      if (para.length) { out.push("<p>" + para.map(inline).join("<br>") + "</p>"); para = []; }
-      if (list) { out.push("</" + list + ">"); list = null; }
-    };
-    for (const line of part.split("\n")) {
-      let m;
-      if (!line.trim()) { flush(); continue; }
-      if ((m = line.match(/^(#{1,6})\s+(.*)$/))) { flush(); const n = Math.min(3, m[1].length); out.push("<h" + n + ">" + inline(m[2]) + "</h" + n + ">"); continue; }
-      if ((m = line.match(/^\s*[-*+]\s+(.*)$/)) || (m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
-        const kind = /^\s*\d/.test(line) ? "ol" : "ul";
-        if (para.length) { out.push("<p>" + para.map(inline).join("<br>") + "</p>"); para = []; }
-        if (list !== kind) { if (list) out.push("</" + list + ">"); out.push("<" + kind + ">"); list = kind; }
-        out.push("<li>" + inline(m[1]) + "</li>");
-        continue;
+  // The open lists, the outer one first: {kind, ind (its marks' indent)}.
+  // Each one's last item is still open: what is indented under it (more
+  // words, a code block, another list) goes inside it.
+  const lists = [];
+  let para = [];
+  let gap = false;  // an empty line came since the last one
+  const endPara = () => { if (para.length) { out.push("<p>" + para.map(inline).join("<br>") + "</p>"); para = []; } };
+  const endList = () => out.push("</li></" + lists.pop().kind + ">");
+  // Something that isn't an item: inside the item it is indented under, or
+  // after the lists.
+  const place = (ind) => { while (lists.length && ind < lists[lists.length - 1].ind + 2) endList(); };
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) { endPara(); gap = true; continue; }
+    const ind = line.match(/^\s*/)[0].replace(/\t/g, "    ").length;
+    let m;
+    // A code block, indented or not, to its closing fence (or the end,
+    // while it still comes). The fence's own indent comes off its lines.
+    if ((m = line.match(/^\s*(`{3,}|~{3,})/))) {
+      endPara();
+      place(ind);
+      const fence = m[1], code = [];
+      for (i++; i < lines.length; i++) {
+        const e = lines[i].match(/^\s*(`{3,}|~{3,})\s*$/);
+        if (e && e[1][0] === fence[0] && e[1].length >= fence.length) break;
+        code.push(lines[i].replace(new RegExp("^\\s{0," + ind + "}"), ""));
       }
-      if (list) { out.push("</" + list + ">"); list = null; }
-      para.push(line);
+      out.push("<pre><button type=\"button\" class=\"cp\">Copy</button><code>" + esc(code.join("\n")) + "</code></pre>");
+      gap = false;
+      continue;
     }
-    flush();
-  });
+    // A rule: --- (or *** or ___).
+    if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) { endPara(); while (lists.length) endList(); out.push("<hr>"); gap = false; continue; }
+    if ((m = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/))) {
+      endPara();
+      while (lists.length) endList();
+      const n = Math.min(3, m[1].length);
+      out.push("<h" + n + ">" + inline(m[2]) + "</h" + n + ">");
+      gap = false;
+      continue;
+    }
+    // An item: of the open list at its depth, of a list inside the open
+    // item (indented under it), or a new list's first. A numbered list
+    // that begins again after something between its steps (a code block)
+    // goes on from its number.
+    if ((m = line.match(/^\s*([-*+]|(\d{1,9})[.)])\s+(.*)$/))) {
+      endPara();
+      const kind = m[2] ? "ol" : "ul";
+      while (lists.length && ind < lists[lists.length - 1].ind) endList();
+      const top = lists[lists.length - 1];
+      if (top && ind < top.ind + 2 && top.kind === kind) out.push("</li><li>" + inline(m[3]));
+      else {
+        if (top && ind < top.ind + 2) endList();
+        out.push((kind === "ol" && +m[2] !== 1 ? '<ol start="' + +m[2] + '">' : "<" + kind + ">") + "<li>" + inline(m[3]));
+        lists.push({ kind, ind });
+      }
+      gap = false;
+      continue;
+    }
+    // A table: a line with bars, then its line of dashes (as many cells).
+    if (line.includes("|") && i + 1 < lines.length && /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(lines[i + 1]) &&
+        lines[i + 1].includes("-") && cells(lines[i + 1]).length === cells(line).length) {
+      endPara();
+      place(ind);
+      const head = cells(line);
+      const align = cells(lines[i + 1]).map((c) => (/^:-+:$/.test(c) ? "center" : /-:$/.test(c) ? "right" : ""));
+      const cell = (tag, c, k) => "<" + tag + (align[k] ? ' style="text-align:' + align[k] + '"' : "") + ">" + inline(c) + "</" + tag + ">";
+      let t = '<div class="tbl"><table><thead><tr>' + head.map((c, k) => cell("th", c, k)).join("") + "</tr></thead><tbody>";
+      for (i += 2; i < lines.length && lines[i].trim() && lines[i].includes("|") && !/^\s*(`{3,}|~{3,})/.test(lines[i]); i++) {
+        const row = cells(lines[i]);
+        t += "<tr>" + head.map((_, k) => cell("td", row[k] || "", k)).join("") + "</tr>";
+      }
+      i--;
+      out.push(t + "</tbody></table></div>");
+      gap = false;
+      continue;
+    }
+    // Words. Indented under an open item: more of that item. Else the
+    // lists end, and it is a paragraph's line.
+    if (lists.length) {
+      place(ind);
+      if (lists.length) { out.push((gap ? "<br><br>" : "<br>") + inline(line.trim())); gap = false; continue; }
+    }
+    para.push(line);
+    gap = false;
+  }
+  endPara();
+  while (lists.length) endList();
   return out.join("");
 }
 
@@ -551,12 +633,18 @@ function drawList() {
     e.textContent = "No chats yet. Each one is kept here from its first message on.";
     box.appendChild(e);
   }
-  $("listfoot").textContent = remote
-    ? "Kept on this TokenStation5 for " + (me.owner ? "you" : me.name) + ", on every device with your key. ts5-tui keeps its own."
-    : "Kept in this browser only, the newest " + KEEP + ". ts5-tui keeps its own.";
+  // (The owner's list is ts5-tui's own, where the server's keys are
+  // ts5-tui's: me.tui_chats. A user never has ts5-tui.)
+  $("listfoot").textContent = !remote ? "Kept in this browser only, the newest " + KEEP + ". ts5-tui keeps its own."
+    : me.tui_chats ? "The same chats as in ts5-tui: kept on this TokenStation5, on every device with your key."
+    : "Kept on this TokenStation5 for " + (me.owner ? "you" : me.name) + ", on every device with your key." +
+      (me.owner ? " ts5-tui keeps its own." : "");
 }
 
 // ---- drawing ----
+// The messages whose Thinking box is open: it stays open while the message
+// is drawn again (every 60 ms as its answer comes).
+const thinkOpen = new WeakSet();
 function msgNode(m, i) {
   const d = document.createElement("div");
   d.className = "msg " + m.role;
@@ -567,13 +655,19 @@ function msgNode(m, i) {
     const div = document.createElement("div");
     div.textContent = m.thinking;
     t.appendChild(div);
+    t.open = thinkOpen.has(m);
+    t.addEventListener("toggle", () => { if (t.open) thinkOpen.add(m); else thinkOpen.delete(m); });
     d.appendChild(t);
   }
-  const body = document.createElement("div");
-  body.className = "body";
-  if (m.role === "user") body.textContent = m.content;
-  else body.innerHTML = m.content ? markdown(m.content) : (m.thinking && !m.done ? "<span class=\"meta\">thinking…</span>" : "");
-  d.appendChild(body);
+  // An answer with no words (a turn of ts5-tui's that only called tools, a
+  // Stop before the first word): its note alone, no empty box.
+  if (m.role === "user" || m.content || !(m.done || m.error)) {
+    const body = document.createElement("div");
+    body.className = "body";
+    if (m.role === "user") body.textContent = m.content;
+    else body.innerHTML = m.content ? markdown(m.content) : (m.thinking ? "<span class=\"meta\">thinking…</span>" : "");
+    d.appendChild(body);
+  }
   if (m.role === "assistant" && (m.done || m.error)) {
     const meta = document.createElement("div");
     meta.className = "meta";
@@ -602,7 +696,7 @@ function homeNode() {
   t.textContent = "TokenStation5";
   const m = document.createElement("p");
   m.className = "hmodel";
-  m.textContent = model || $("model").textContent;
+  m.textContent = $("model").textContent;  // the model, or why there is none
   if (me && me.may_switch && model) { m.classList.add("pick"); m.title = "Switch the model"; m.onclick = openSwitch; }
   h.append(img, t, m);
   const b = document.createElement("div");
@@ -679,7 +773,22 @@ function draw() {
   c.messages.forEach((m, i) => box.appendChild(msgNode(m, i)));
   $("log").scrollTop = $("log").scrollHeight;
 }
+// Text selected in the messages: they aren't drawn again under it (the
+// selection would go with what it is in). Drawn once it is let go.
+function selecting() {
+  const s = window.getSelection ? getSelection() : null;
+  return !!s && !s.isCollapsed && $("msgs").contains(s.anchorNode);
+}
+let drawDue = false;
+document.addEventListener("selectionchange", () => {
+  if (!drawDue || selecting()) return;
+  drawDue = false;
+  const t = $("log").scrollTop;
+  draw();
+  $("log").scrollTop = t;
+});
 function redrawLast() {
+  if (selecting()) { drawDue = true; return; }
   const c = chat();
   const box = $("msgs");
   const last = box.lastElementChild;
@@ -690,12 +799,31 @@ function redrawLast() {
 }
 
 // ---- the server ----
+// The model's name, in the bar and on the home screen.
+function showModel(id) {
+  // (Another model, another context: what no longer fit may fit again.)
+  if (id !== model) for (const k in left) delete left[k];
+  model = id;
+  modelSays(model || "no model loaded: load one in ts5-tui (Models)");
+}
+function modelSays(t) {
+  if ($("model").textContent === t) return;
+  $("model").textContent = t;
+  if ($("home")) draw();  // the home screen shows it too
+}
+// The page's start: the model, then whose key this is and their chats.
+// A server that doesn't answer (it is starting, or loading a model) is
+// asked again every 3 s while the page is in view, and when it comes back
+// into view: a Home Screen app has no reload.
+let answered = false, asking = false, askAgain = false, modelsT = 0;
 async function models() {
+  if (asking) { askAgain = true; return; }
+  asking = true;
+  clearTimeout(modelsT);
   try {
     const r = await fetch("/v1/models", { headers: headers() });
     booted();
     if (r.status === 401) {
-      const j = await r.json().catch(() => ({}));
       $("model").textContent = "needs an API key";
       askKey(key() ? "That key isn't one of this TokenStation5's, or it is off." : "");
       return;
@@ -703,16 +831,73 @@ async function models() {
     const j = await r.json();
     TS5Keep.settled(key());
     const m = (j.data || [])[0];
-    model = m ? m.id : "";
-    $("model").textContent = model || "no model loaded: load one in ts5-tui (Models)";
+    showModel(m ? m.id : "");
     booted();
+    answered = true;
     await account();
     return;
   } catch (e) {
+    answered = false;
     $("model").textContent = "TokenStation5 doesn't answer";
+    if (!document.hidden) modelsT = setTimeout(models, 3000);
+  } finally {
+    asking = false;
+    if (askAgain) { askAgain = false; models(); }
   }
   booted();
   draw();
+}
+document.addEventListener("visibilitychange", () => { if (!answered && !document.hidden && $("keydlg").hidden) models(); });
+// The model's name again, every 15 s and when the page comes back into
+// view: one switched in ts5-tui or from another device shows here too.
+// (Its server starts again with it: said while it doesn't answer, and
+// asked every 3 s until it does.)
+let lookT = 0;
+async function lookModel() {
+  clearTimeout(lookT);
+  if (!answered || busy || switching || document.hidden) return;
+  try {
+    const r = await fetch("/v1/models", { headers: headers() });
+    if (r.status === 401) { models(); return; }  // the key was turned off
+    const m = ((await r.json()).data || [])[0];
+    if (busy || switching) return;
+    showModel(m ? m.id : "");
+  } catch (e) {
+    if (busy || switching) return;
+    modelSays("TokenStation5 doesn't answer");
+    lookT = setTimeout(lookModel, 3000);
+  }
+}
+document.addEventListener("visibilitychange", lookModel);
+setInterval(lookModel, 15000);
+
+// A chat longer than the model's context: how many of its oldest messages
+// are left out of what the model is sent, by chat (kept while the page is
+// open: the next message doesn't find it out again).
+const left = {};
+// That count as one the history can begin at: a question, and never the
+// last message.
+function fits(all, n) {
+  n = Math.max(0, Math.min(n, all.length - 1));
+  while (n < all.length - 1 && all[n].role !== "user") n++;
+  return n;
+}
+// The next count to try after `n` was too long. The API says how long the
+// messages were and what fits ("maximum context length is 4096 tokens.
+// However, your messages resulted in 5000 tokens"): enough goes to leave a
+// quarter of the context for the answer, by the messages' lengths; at
+// least one question and its answer.
+function less(all, n, why) {
+  const size = (m) => (m.content || "").length + 16;
+  const m = /maximum context length is (\d+) tokens.*?resulted in (\d+) tokens/.exec(why || "");
+  let total = 0, gone = 0, k = n;
+  for (let i = n; i < all.length; i++) total += size(all[i]);
+  const goes = m && +m[2] > 0 ? total * (1 - 0.75 * +m[1] / +m[2]) : 0;
+  do {
+    gone += size(all[k++]);
+    while (k < all.length - 1 && all[k].role !== "user") gone += size(all[k++]);
+  } while (k < all.length - 1 && gone < goes);
+  return k;
 }
 
 async function send(text) {
@@ -738,26 +923,49 @@ async function send(text) {
   $("send").className = "stop";
   const t0 = performance.now();
   try {
-    const history = c.messages.slice(0, -1).filter((m) => !m.error || m.content).map((m) => ({ role: m.role, content: m.content }));
-    const r = await fetch("/v1/chat/completions", {
-      method: "POST", headers: headers(), signal: busy.signal,
-      // ts5_chat: the chat on the machine, where it keeps the answer if this
-      // page goes away before it ends (a phone's app sent to the background).
-      body: JSON.stringify({ model: model || "ts5", messages: history, stream: true,
-        stream_options: { include_usage: true }, chat_template_kwargs: { enable_thinking: prefs.think },
-        ts5_chat: remote ? c.id : undefined }),
-    });
-    if (r.status === 401) { a.error = "This needs an API key."; askKey(); throw null; }
-    if (r.status === 429) {
+    // What the model is sent: the words and the answers. An answer with
+    // nothing in it (one that failed or was stopped before its first word,
+    // a turn of ts5-tui's that only called tools) isn't; words left without
+    // their answer go with the next words, as one message.
+    const all = [];
+    for (const m of c.messages.slice(0, -1)) {
+      if (m.role !== "user" && !m.content) continue;
+      const before = all[all.length - 1];
+      if (m.role === "user" && before && before.role === "user") before.content += "\n\n" + m.content;
+      else all.push({ role: m.role, content: m.content });
+    }
+    let r;
+    for (;;) {
+      const history = all.slice(fits(all, left[c.id] || 0));
+      r = await fetch("/v1/chat/completions", {
+        method: "POST", headers: headers(), signal: busy.signal,
+        // ts5_chat: the chat on the machine, where it keeps the answer if this
+        // page goes away before it ends (a phone's app sent to the background).
+        // ts5_trims: a "too long" is answered here by asking again with less.
+        body: JSON.stringify({ model: model || "ts5", messages: history, stream: true,
+          stream_options: { include_usage: true }, chat_template_kwargs: { enable_thinking: prefs.think },
+          ts5_chat: remote ? c.id : undefined, ts5_trims: history.length > 1 || undefined }),
+      });
+      if (r.status === 401) { a.error = "This needs an API key."; askKey(); throw null; }
+      if (r.status === 429) {
+        const j = await r.json().catch(() => ({}));
+        a.error = (j.error && j.error.message) || "Today's tokens are used up.";
+        throw null;
+      }
+      if (r.ok) break;
       const j = await r.json().catch(() => ({}));
-      a.error = (j.error && j.error.message) || "Today's tokens are used up.";
+      const why = (j.error && j.error.message) || "";
+      // The chat no longer fits the model's context: its oldest questions
+      // and answers are left out of what the model is sent (they stay on
+      // screen) and it is asked again, while there's more than this message.
+      if (r.status === 400 && j.error && j.error.code === "context_length_exceeded" && history.length > 1) {
+        left[c.id] = less(all, all.length - history.length, why);
+        continue;
+      }
+      a.error = why || "The server said " + r.status + ".";
       throw null;
     }
-    if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      a.error = (j.error && j.error.message) || "The server said " + r.status + ".";
-      throw null;
-    }
+    const out = fits(all, left[c.id] || 0);
     const reader = r.body.getReader();
     const dec = new TextDecoder();
     let buf = "", timings = null, last = 0;
@@ -784,6 +992,7 @@ async function send(text) {
     }
     if (timings && timings.predicted_n) a.stats = timings.predicted_n + " tokens · " + timings.predicted_per_second.toFixed(1) + " tok/s";
     else a.stats = ((performance.now() - t0) / 1000).toFixed(1) + " s";
+    if (out) a.stats += " · the model no longer sees the oldest " + (out === 1 ? "message" : out + " messages") + " of this chat";
   } catch (e) {
     if (e && e.name === "AbortError") a.stats = "stopped";
     else if (e && !a.error && remote && (await recover(c, a))) kept = true;
@@ -795,7 +1004,7 @@ async function send(text) {
   $("send").textContent = "Send";
   $("send").className = "";
   if (!kept) save(c);
-  if (here()) draw();
+  if (here()) { if (selecting()) drawDue = true; else draw(); }
 }
 
 // The connection went while the answer came (the app was in the
@@ -832,20 +1041,57 @@ async function recover(c, a) {
 // owner the list is ts5-tui's own, so a chat that went on in ts5-tui does).
 // Never while an answer comes in here; a chat begun here and not kept
 // there yet stays.
+// Asked for: each chat's mark alone (it changes when the chat is written
+// on the machine), then the chats whose mark isn't the one this page took
+// them with, one by one. (Every chat with all its messages every 15 s was
+// megabytes each time, with some dozens of chats.)
 function sig(c) { const m = c && c.messages; return m ? m.length + ":" + ((m[m.length - 1] || {}).content || "").length : ""; }
+let refreshing = false;
 async function refreshChats() {
-  if (!remote || busy || document.hidden || viewing) return;
+  if (!remote || busy || document.hidden || viewing || refreshing) return;
+  refreshing = true;
   try {
-    const r = await api("/ts5/chats");
+    let r = await api("/ts5/chats?marks=1");
     if (!r.ok || busy) return;
-    const there = (await r.json()).chats || [];
+    let now = (await r.json()).marks || {};
+    const want = Object.keys(now).filter((id) => unread[id] !== now[id] && (now[id] !== marks[id] || !chats.find((c) => c.id === id)));
+    const got = {};
+    if (want.length > 8) {  // many (after a long time away): the whole list at once
+      r = await api("/ts5/chats");
+      if (!r.ok) return;
+      const j = await r.json();
+      for (const c of j.chats || []) got[c.id] = c;
+      now = j.marks || {};
+    } else {
+      for (const id of want) {
+        let c = null, gone = false;
+        try {
+          r = await api("/ts5/chats/" + encodeURIComponent(id));
+          if (r.ok) c = await r.json().catch(() => { gone = true; return null; });
+          else gone = r.status === 404 || r.status === 400;
+        } catch (e) {}
+        if (c && c.id === id) got[id] = c;
+        else if (gone || c) unread[id] = now[id];
+        else now[id] = marks[id] || "";  // not reached: asked again next time
+      }
+    }
+    if (busy || viewing) return;
     const top = () => chats.slice(0, 5).map((c) => c.id + ":" + sig(c) + ":" + (c.title || "")).join("|");
     const was = sig(chat()), n = chats.length, home = chat() ? "" : top();
     const mine = chat();
+    const there = [];
+    for (const id of Object.keys(now)) {
+      const c = got[id] || (unread[id] === now[id] ? null : chats.find((x) => x.id === id));
+      if (c) there.push(c);
+    }
     if (mine && !there.find((x) => x.id === mine.id)) there.push(mine);
+    marks = now;
     chats = there.sort((a, b) => at(b) - at(a));
     if (sig(chat()) !== was || chats.length !== n || (!chat() && top() !== home)) { draw(); if (!$("listdlg").hidden) drawList(); }
-  } catch (e) {}
+  } catch (e) {
+  } finally {
+    refreshing = false;
+  }
 }
 document.addEventListener("visibilitychange", refreshChats);
 setInterval(refreshChats, 15000);
@@ -961,6 +1207,8 @@ async function openSwitch() {
 }
 async function switchTo(name) {
   $("swerr").hidden = true;
+  // (A user's switch waits for an answer being written to end: up to a minute.)
+  $("swlist").innerHTML = '<p class="note">Asking for ' + esc(name) + "… An answer being written now is finished first.</p>";
   let r;
   try {
     r = await api("/ts5/switch", { method: "POST", body: JSON.stringify({ model: name }) });
@@ -972,13 +1220,14 @@ async function switchTo(name) {
   }
   if (r && !r.ok) {
     const j = await r.json().catch(() => ({}));
+    await openSwitch();
     $("swerr").textContent = j.error || "The machine said " + r.status;
     $("swerr").hidden = false;
     return;
   }
   $("swdlg").hidden = true;
   switching = name;
-  $("model").textContent = "Loading " + name + "…";
+  modelSays("Loading " + name + "…");
   // Its server starts again with it: asked until it answers with that one.
   const until = Date.now() + 300000;
   while (switching === name && Date.now() < until) {
@@ -1023,7 +1272,14 @@ $("savepw").onclick = () => {
   $("setdlg").hidden = true;
   TS5Keep.save(key());
 };
-$("forget").onclick = () => { TS5Keep.forget(); $("setdlg").hidden = true; models(); };
+// This device's notifications go off with the key (the machine forgets the
+// device): a signed-out phone gets no more of that user's chats.
+$("forget").onclick = async () => {
+  await TS5Push.off(headers).catch(() => {});
+  TS5Keep.forget();
+  $("setdlg").hidden = true;
+  models();
+};
 $("keep").onchange = () => TS5Keep.change($("keep").value, key());
 // Twice: the first tap asks.
 $("clear").onclick = () => {

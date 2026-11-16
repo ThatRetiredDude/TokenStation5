@@ -275,6 +275,8 @@ async function until(page, fn, arg, ms) {
     await page.waitForSelector("#listdlg:not([hidden])", { timeout: 10000 });
     check(/a tool chat/.test(await page.locator("#listdlg").innerText()), "the chat page's list: ts5-tui's chats",
       (await page.locator("#listdlg").innerText()).slice(0, 400));
+    const foot = await page.locator("#listfoot").innerText();
+    check(/The same chats as in ts5-tui/.test(foot) && !/keeps its own/.test(foot), "its footer says so (not \"ts5-tui keeps its own\")", foot);
     await page.evaluate(async (k) => {
       await fetch("/ts5/chats/zzelsewhere", { method: "PUT", headers: { Authorization: "Bearer " + k, "Content-Type": "application/json" },
         body: JSON.stringify({ id: "zzelsewhere", title: "begun elsewhere", messages: [{ role: "user", content: "x" }] }) });
@@ -282,6 +284,28 @@ async function until(page, fn, arg, ms) {
     check(await until(page, () => /begun elsewhere/.test(document.getElementById("listdlg").textContent), null, 25000),
       "a chat added elsewhere: in the open list within 15 s");
     await page.click("#listclose");
+
+    // The controls with no ts5-tui to ask (the background service, ts5-tui
+    // not running): this device's own settings are still there.
+    const page2 = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1 });
+    page2.on("pageerror", (e) => errors.push(String(e)));
+    await page2.addInitScript((k) => {
+      try { localStorage.setItem("ts5.key", k); localStorage.setItem("ts5.keep", "passwords"); localStorage.setItem("ts5.controls.tab", "models"); } catch (e) {}
+    }, key);
+    await page2.route("**/ts5/control", (route) => route.fulfill({ status: 503, contentType: "application/json",
+      body: JSON.stringify({ error: "ts5-tui isn't running on the machine" }) }));
+    await page2.goto(base + "/ts5/controls");
+    check(await until(page2, () => /isn't running/.test(document.getElementById("page").textContent) &&
+      /under Settings/.test(document.getElementById("page").textContent), null, 15000),
+      "no ts5-tui: the page says so, and where this device's own settings are", await page2.locator("#page").innerText());
+    await page2.locator("#tabs button[data-tab=settings]").click();
+    check(await until(page2, () => /Notifications/.test(document.getElementById("page").textContent) &&
+      /A thinking model thinks first/.test(document.getElementById("page").textContent) &&
+      !!document.querySelector("#page [data-mine=forget]"), null, 10000),
+      "its Settings tab: this device's rows (notifications, thinking, the key) without ts5-tui", await page2.locator("#page").innerText());
+    await page2.locator("#page [data-mine=showthink]").click();
+    check(await page2.evaluate(() => localStorage.getItem("ts5.showthink") === "1"), "and they work: Show its thinking turned on");
+    await page2.close();
 
     const wide = await page.evaluate(() => document.scrollingElement.scrollWidth - window.innerWidth);
     check(wide <= 0, "at a phone's width (390 px) nothing runs off the side", wide);

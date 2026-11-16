@@ -237,6 +237,32 @@ def main():
         s = t.screen()
         check("charlie one" in s and "delta one" not in s, "/open TEXT still opens one", s)
         check(t.ask("charlie two") and t.requests()[-1] == ["charlie one", "charlie two"], "and goes on with its own")
+
+        # The phone adds to the open chat (its file) in the moment ts5-tui
+        # answers in it: ts5-tui writes the whole chat after its answer,
+        # and the phone's turns are in what it writes. (It looked at the
+        # file once a second, and wrote over what came since.)
+        d = os.path.join(t.home, ".local", "share", "tokenstation", "chats")
+        path = [os.path.join(d, n) for n in os.listdir(d) if json.load(open(os.path.join(d, n)))["title"] == "charlie one"][0]
+        for i in range(3):
+            n = len(t.requests())
+            t.type("charlie tui %d" % i)
+            t.tmux("send-keys", "-t", "0", "Enter")
+            j = json.load(open(path))
+            j["turns"] += [{"user": True, "text": "phone question %d" % i},
+                           {"user": False, "text": "phone answer %d" % i, "model": "Qwen3-8B-Q4_K_M", "end": "done", "tokens": 3, "tps": 40}]
+            with open(path + ".new", "w") as f:
+                json.dump(j, f)
+            os.replace(path + ".new", path)
+            end = time.time() + 15
+            while time.time() < end and len(t.requests()) <= n:
+                time.sleep(0.1)
+            t.wait("Ctrl+O chats", 15)
+            time.sleep(1.5)
+        texts = [x["text"] for x in json.load(open(path))["turns"]]
+        check(all("phone question %d" % i in texts and "phone answer %d" % i in texts and "charlie tui %d" % i in texts for i in range(3)),
+              "turns the phone added while ts5-tui answered: all in the chat after ts5-tui's save, with ts5-tui's own", texts)
+        check(len(texts) == len(set(texts)) or len([x for x in texts if x.startswith("phone")]) == 6, "and each once", texts)
     finally:
         err = open(os.path.join(t.home, "tui.err")).read() if os.path.exists(os.path.join(t.home, "tui.err")) else ""
         t.close()

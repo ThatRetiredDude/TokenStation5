@@ -149,7 +149,7 @@ def main():
     data = os.path.join(home, ".local", "share", "tokenstation")
     models = os.path.join(data, "models")
     os.makedirs(models)
-    for name in ("Test-A.gguf", "Test-B.gguf", "Test-C.gguf", "Test-D.gguf"):
+    for name in ("Test-A.gguf", "Test-B.gguf", "Test-C.gguf", "Test-D.gguf", "Test-E.gguf"):
         shutil.copy(model, os.path.join(models, name))
     keys = os.path.join(data, "access", "keys.tsv")
     os.makedirs(os.path.dirname(keys))
@@ -167,6 +167,10 @@ def main():
     with open(os.path.join(conf, "tui.conf"), "w") as f:
         # (Answers of 200 tokens at most: the test model writes on to the context's end.)
         f.write("url=http://127.0.0.1:%d\nkey=%s\nsandbox=0\nintro=0\ntheme=dark\nmax_tokens=200\n" % (port, owner))
+    # Test-E has a helper that isn't here (one ts5-tui has a download for).
+    os.makedirs(os.path.join(conf, "tune"))
+    with open(os.path.join(conf, "tune", "Test-E.gguf.env"), "w") as f:
+        f.write("TS5_DRAFT_MODEL=Llama-3.2-3B-Instruct-Q4_K_M.gguf\n")
     bin_dir = os.path.join(home, "bin")
     os.makedirs(bin_dir)
     for prog, path in (("ts5", ts5), ("ts5-tui", tui)):
@@ -187,7 +191,7 @@ def main():
     env.update(HOME=home, PATH=bin_dir + ":" + env.get("PATH", "/usr/bin:/bin"), TMUX_TMPDIR=tmux_dir, LANG="C.UTF-8",
                TS5_RUN_DIR=os.path.join(home, "run"), TS5_TUI_LOG=tui_log,
                TS5_FEEDBACK_URL="http://127.0.0.1:%d/v1/report" % fbsrv.server_address[1],
-               TS5_PUSH_HOSTS="127.0.0.1:%d" % pushsrv.server_address[1])
+               TS5_PUSH_HOSTS="127.0.0.1:%d" % pushsrv.server_address[1], TS5_SWITCH_WAIT="2")
     sockp = os.path.join(data, "control.sock")
     logs = []
     try:
@@ -276,6 +280,20 @@ def main():
         code, j = call(here + "/ts5/control", owner, {"do": "delete", "model": "Test-A"})
         check(code == 200 and not j.get("ask") and os.path.exists(os.path.join(models, "Test-A.gguf")) and j.get("said"),
               "the loaded model is never deleted (ts5-tui says why)", (j.get("ask"), j.get("said")))
+        # A Yes that comes late (the question answered on the TV, another
+        # asked since) answers the question it was to, not the one open now.
+        code, j = call(here + "/ts5/control", owner, {"do": "delete", "model": "Test-C"})
+        ask = (j.get("ask") or {}) if code == 200 else {}
+        code, j = call(here + "/ts5/control", owner, {"do": "answer", "yes": True, "title": ask.get("title", ""),
+                                                      "text": ask.get("text", "").replace("Test-C", "Test-D")})
+        still = sock_ask(sockp, {"do": "state"}).get("ask")
+        check("something else" in j.get("error", "") and os.path.exists(os.path.join(models, "Test-C.gguf")) and still,
+              "a Yes to another question than the one ts5-tui asks now: refused, nothing deleted, the question still open", (j, still))
+        code, j = call(here + "/ts5/control", owner, {"do": "answer", "yes": False, "title": ask.get("title", ""), "text": ask.get("text", "")})
+        check(code == 200 and not j.get("error") and not j.get("ask"), "the answer to the question as shown: taken", j.get("error"))
+        code, j = call(here + "/ts5/control", owner, {"do": "answer", "yes": True, "title": ask.get("title", ""), "text": ask.get("text", "")})
+        check("answered already" in j.get("error", "") and os.path.exists(os.path.join(models, "Test-C.gguf")),
+              "an answer with no question open: told it was answered already", j.get("error"))
         code, j = call(here + "/ts5/control", owner, {"do": "fan", "mode": "max"})
         check(code == 200 and (j.get("said") or j["machine"]["fan_control"]), "the fan: set, or ts5-tui says why not", j.get("said"))
         code, j = call(here + "/ts5/control", owner, {"do": "fan", "mode": "loud"})
@@ -426,6 +444,46 @@ def main():
         check([t["text"] for t in json.load(open(f))["turns"]][-3:] == ["the answer came", "one more from the phone", "and its answer"],
               "the file: each message once, in order", [t["text"] for t in json.load(open(f))["turns"]])
 
+        # The phone's copy behind ts5-tui's (the page looks every 15 s, and
+        # ts5-tui went on meanwhile): what the phone adds goes in once, after
+        # ts5-tui's, at its first save and again when its answer is done.
+        behind = {"v": 1, "title": "behind", "created": 1700000000, "updated": 1700000050, "turns": [
+            {"user": True, "text": "U1"}, {"user": False, "text": "A1", "model": "Test-A", "tps": 1.0, "tokens": 1, "end": "done"},
+            {"user": True, "text": "U2, typed in ts5-tui"},
+            {"user": False, "text": "A2, ts5-tui's", "model": "Test-A", "tps": 1.0, "tokens": 1, "end": "done"}]}
+        bf = os.path.join(tchats, "behind1.json")
+        with open(bf, "w") as fh:
+            json.dump(behind, fh)
+        phone = {"id": "behind1", "title": "behind", "at": 1, "messages": [
+            {"role": "user", "content": "U1"}, {"role": "assistant", "content": "A1", "done": True},
+            {"role": "user", "content": "U3, the phone's"}, {"role": "assistant", "content": "", "done": False}]}
+        call(here + "/ts5/chats/behind1", owner, phone, "PUT")
+        phone["messages"][-1] = {"role": "assistant", "content": "A3, the phone's", "done": True, "stats": "5 tokens · 1.0 tok/s"}
+        call(here + "/ts5/chats/behind1", owner, phone, "PUT")
+        texts = [t["text"] for t in json.load(open(bf))["turns"]]
+        check(texts == ["U1", "A1", "U2, typed in ts5-tui", "A2, ts5-tui's", "U3, the phone's", "A3, the phone's"],
+              "a phone behind ts5-tui's copy: its message and answer go in once each, after ts5-tui's", texts)
+        call(here + "/ts5/chats/behind1", owner, phone, "PUT")
+        check([t["text"] for t in json.load(open(bf))["turns"]] == texts, "saved again as it is: nothing added", json.load(open(bf))["turns"])
+        # The marks alone (the page's 15 s look): ts5-tui's chats by their
+        # files, and another mark when ts5-tui writes one again.
+        code, got = call(here + "/ts5/chats?marks=1", owner)
+        marks = got.get("marks", {}) if code == 200 else {}
+        code, whole = call(here + "/ts5/chats", owner)
+        check("chats" not in got and marks.get("behind1") and marks.get("p1phone") and
+              set(marks) == set(c["id"] for c in whole.get("chats", [])) and whole.get("marks") == marks,
+              "GET /ts5/chats?marks=1: a mark for each of ts5-tui's chats and no chat", (got, whole.get("marks")))
+        behind = json.load(open(bf))
+        behind["turns"].append({"user": True, "text": "U4, in ts5-tui"})
+        with open(bf + ".new", "w") as fh:
+            json.dump(behind, fh)
+        os.replace(bf + ".new", bf)
+        code, got = call(here + "/ts5/chats?marks=1", owner)
+        m2 = got.get("marks", {})
+        check(m2.get("behind1") not in (None, "", marks.get("behind1")) and m2.get("p1phone") == marks.get("p1phone"),
+              "ts5-tui writes one again: that chat's mark is another, the others' stay", (marks, m2))
+        os.unlink(bf)
+
         # ---- an answer of ts5-tui's while the browser terminal is away: told
         # to the phone (the keys are RFC 8291's example browser's) ----
         psub = {"endpoint": "http://127.0.0.1:%d/push/owner-phone" % pushsrv.server_address[1],
@@ -469,21 +527,30 @@ def main():
         tool_chat = {"v": 1, "title": "a tool chat", "created": 1700000000, "updated": 1700000100, "turns": [
             {"user": True, "text": "search it"},
             {"user": False, "text": "", "calls": [{"id": "c1", "name": "web_search", "args": "{}"}], "model": "Test-A",
-             "tps": 1.0, "tokens": 5, "end": "done"},
+             "tps": 1.0, "tokens": 5, "end": "done", "reasoning": "I should search."},
             {"user": False, "tool": "web_search", "call": "c1", "head": "web_search", "ok": True, "text": "results"},
             {"user": False, "text": "found it", "model": "Test-A", "tps": 2.0, "tokens": 7, "end": "done"}]}
         with open(os.path.join(tchats, "c17000001.json"), "w") as fh:
             json.dump(tool_chat, fh)
         code, got = call(here + "/ts5/chats/c17000001", owner)
         msgs = got.get("messages", []) if code == 200 else []
-        check([m["content"] for m in msgs] == ["search it", "", "found it"] and "used web_search" in msgs[1].get("stats", ""),
-              "ts5-tui's chat on the page: a tool's result left out, the call said", msgs)
+        check([m["content"] for m in msgs] == ["search it", "found it"] and "used web_search" in msgs[1].get("stats", "") and
+              "7 tokens" in msgs[1].get("stats", "") and "I should search." in msgs[1].get("thinking", ""),
+              "ts5-tui's chat on the page: a tool's result left out; a turn that only called tools is no empty message of "
+              "its own, its call is said with the answer after it", msgs)
         got["messages"] = msgs + [{"role": "user", "content": "thanks"}, {"role": "assistant", "content": "welcome", "done": True}]
         call(here + "/ts5/chats/c17000001", owner, got, "PUT")
         turns = json.load(open(os.path.join(tchats, "c17000001.json")))["turns"]
         check(len(turns) == 6 and turns[2].get("tool") == "web_search" and turns[1].get("calls") and
               [t["text"] for t in turns[-2:]] == ["thanks", "welcome"],
               "the page goes on with it: ts5-tui's tool turns stay where they were", turns)
+        with open(os.path.join(tchats, "c17000002.json"), "w") as fh:
+            json.dump(dict(tool_chat, title="cut short", turns=tool_chat["turns"][:3]), fh)
+        code, got = call(here + "/ts5/chats/c17000002", owner)
+        msgs = got.get("messages", []) if code == 200 else []
+        check([m["content"] for m in msgs] == ["search it", ""] and msgs[1].get("stats") == "used web_search" and msgs[1].get("done") is True,
+              "a turn that only called tools with no answer after it: its note alone", msgs)
+        os.unlink(os.path.join(tchats, "c17000002.json"))
 
         # A chat kept apart before (users/OWNER/chats): listed, then ts5-tui's
         # once written again.
@@ -503,6 +570,19 @@ def main():
               "a user's chat: theirs, never in ts5-tui's list", os.listdir(tchats))
         code, _ = call(here + "/ts5/chats/p1phone", owner, None, "DELETE")
         check(code == 200 and not os.path.exists(f), "deleted on the chat page: gone from ts5-tui's too")
+        # A user's limit of 1,000 chats isn't the owner's in ts5-tui's own
+        # folder: a long-time ts5-tui user still saves a new chat from the phone.
+        for i in range(1000):
+            with open(os.path.join(tchats, "bulk%04d.json" % i), "w") as fh:
+                json.dump({"v": 1, "title": "bulk %d" % i, "created": 1600000000 + i, "updated": 1600000000 + i,
+                           "turns": [{"user": True, "text": "q"}]}, fh)
+        code, got = call(here + "/ts5/chats/overnew", owner, {"id": "overnew", "title": "one more", "messages": [
+            {"role": "user", "content": "the 1,001st"}]}, "PUT")
+        check(code == 200 and os.path.exists(os.path.join(tchats, "overnew.json")),
+              "the owner past 1,000 chats in ts5-tui's list: a new one from the phone is kept", (code, got))
+        for i in range(1000):
+            os.unlink(os.path.join(tchats, "bulk%04d.json" % i))
+        os.unlink(os.path.join(tchats, "overnew.json"))
 
         # ---- /feedback from the phone: ts5-tui makes the report, the phone
         # reads all of it, and only that report is sent, when asked ----
@@ -570,6 +650,34 @@ def main():
                     print(subprocess.run(["tmux", "-L", "ts5", "capture-pane", "-p", "-t", "ts5"], env=env,
                                          capture_output=True, text=True).stdout)
 
+        # ---- Load loads, and nothing else: a model whose helper isn't here
+        # is loaded without a download begun for it (that is Get helper's) ----
+        wait(lambda: call(here + "/health")[0] == 200, 120)
+        st = sock_ask(sockp, {"do": "state"})
+        tc = next((m for m in st.get("models", []) if m["name"] == "Test-E"), {})
+        check(tc.get("helper") == "Llama-3.2-3B-Instruct-Q4_K_M" and tc.get("helper_here") is False and not st.get("download"),
+              "Test-E has a helper that isn't here, and nothing is downloading", (tc, st.get("download")))
+        code, j = call(here + "/ts5/control", owner, {"do": "load", "model": "Test-E"}, timeout=30)
+        if code == 200 and j.get("ask"):  # (helper-size: ts5-tui asks whether it's meant)
+            code, j = call(here + "/ts5/control", owner, {"do": "answer", "yes": True}, timeout=30)
+        st = sock_ask(sockp, {"do": "state"})
+        check(code == 200 and (st.get("loading") or {}).get("model") == "Test-E", "Load from the controls: ts5-tui starts loading it",
+              (code, st.get("loading"), st.get("said")))
+        check(not st.get("download") and "ownload" not in (j.get("said") or "") + (st.get("said") or ""),
+              "and no download is begun for its helper", (st.get("download"), j.get("said"), st.get("said")))
+        # A switch ts5-tui doesn't start (it is still loading that one) is
+        # told why, at once: never "loading" for a model that isn't coming.
+        r = sock_ask(sockp, {"do": "load", "model": "Test-D", "quiet": "1", "listed": "1", "by": "Kid"})
+        check("Still loading" in r.get("error", ""), "a switch while another model loads: refused, in ts5-tui's words", r.get("error") or r.get("loading"))
+        r = sock_ask(sockp, {"do": "load", "model": "Test-E", "quiet": "1", "listed": "1"})
+        check(not r.get("error") and (r.get("loading") or {}).get("model") == "Test-E",
+              "a switch to the model that is loading: it is on its way", r.get("error") or r.get("loading"))
+        st = wait(lambda: (lambda s: s if s["server"]["online"] and s["server"]["model"] == "Test-E" else None)(
+            sock_ask(sockp, {"do": "state"})), 300, 1)
+        check(st is not None and not st.get("download"), "Test-E serves, and still nothing is downloading",
+              sock_ask(sockp, {"do": "state"}).get("server"))
+        check(not [n for n in os.listdir(models) if "Llama-3.2-3B" in n], "no file of the helper's was begun", os.listdir(models))
+
         # ---- a user who may switch the model, to one of theirs ----
         kid = run("users", "new", "Kid")["made"]
         kkey = run("keys", "new", "Kid's phone", "--user", kid)["key"]
@@ -593,8 +701,41 @@ def main():
         check(code == 403 and "model menu" in json.dumps(r), "a user who may switch is told to use the model menu", (code, r))
         code, r = call(here + "/ts5/switch", kkey, {"model": loaded_now})
         check(code == 400, "/ts5/switch: a model not theirs is refused", (code, r))
+        # While an answer is being written (the owner's here), a user's
+        # switch waits for its end (TS5_SWITCH_WAIT: 2 s here, a minute as
+        # shipped) and is refused if it hasn't ended by then: the switch
+        # starts the server again, and would cut the answer off.
+        answers = []
+
+        def answer(n):
+            answers.append(call(here + "/v1/chat/completions", owner,
+                                {"messages": [{"role": "user", "content": "Tell me a long story"}], "max_tokens": n}, timeout=300))
+        th = threading.Thread(target=answer, args=(600,))
+        th.start()
+        time.sleep(1.0)
+        t0 = time.time()
         code, r = call(here + "/ts5/switch", kkey, {"model": mine}, timeout=30)
-        check(code in (200, 0), "/ts5/switch: the user loads theirs (no question: the owner listed it)", (code, r))
+        took = time.time() - t0
+        th.join(300)
+        check(code == 409 and "still being written" in json.dumps(r) and took >= 1.5,
+              "/ts5/switch by a user while an answer is being written: waited for, then refused (the answer isn't cut off)",
+              (code, r, round(took, 1)))
+        check(answers and answers[0][0] == 200 and answers[0][1].get("choices"), "and that answer came whole",
+              answers[0] if answers else None)
+        th = threading.Thread(target=answer, args=(24,))
+        th.start()
+        time.sleep(0.3)
+        code, r = call(here + "/ts5/switch", kkey, {"model": mine}, timeout=30)
+        th.join(300)
+        check(code in (200, 0), "/ts5/switch: the user loads theirs (no question: the owner listed it), after a short answer's end",
+              (code, r))
+        check(len(answers) == 2 and answers[1][0] == 200, "the short answer came whole too", answers[1:] )
+        # (ts5-tui's server goes a second after its answer: asked again
+        # before that, for another model, the user is told it can't now.)
+        other = "Test-D" if mine != "Test-D" else "Test-A"
+        code, r = call(here + "/ts5/switch", owner, {"model": other}, timeout=30)
+        check(code in (409, 0) and (code == 0 or "Still loading" in json.dumps(r)),
+              "/ts5/switch while that loads: 409 with ts5-tui's reason (not a model that never comes)", (code, r))
         st = wait(lambda: (lambda s: s if s["server"]["online"] and s["server"]["model"] == mine else None)(
             sock_ask(sockp, {"do": "state"})), 240, 1)
         check(st is not None, "it serves, through the owner's ts5-tui", sock_ask(sockp, {"do": "state"}).get("server"))

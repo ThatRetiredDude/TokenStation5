@@ -517,7 +517,11 @@ function draw() {
   // Typing in a box: not drawn over until it is saved or closed.
   if (document.activeElement && document.activeElement.classList.contains("t")) return;
   if (!st) {
-    $("page").innerHTML = problem ? '<p class="note err">' + esc(problem) + "</p>" : '<p class="note">Asking ts5-tui…</p>';
+    // No answer from ts5-tui (it isn't running, under the background
+    // service; or not yet): this device's own rows need none of it.
+    $("page").innerHTML = (problem ? '<p class="note err">' + esc(problem) + "</p>" : '<p class="note">Asking ts5-tui…</p>') +
+      (tab === "settings" ? devicePage()
+        : problem ? '<p class="note">This device\'s own settings (notifications, the chat page\'s, the key) are under Settings.</p>' : "");
   } else {
     $("page").innerHTML = tab === "machine" ? machinePage() : tab === "settings" ? settingsPage() : tab === "users" ? usersPage() : modelsPage();
   }
@@ -583,7 +587,12 @@ document.addEventListener("click", (e) => {
     if (m === "savepw" && store.get("ts5.key")) TS5Keep.save(store.get("ts5.key"));
     if (m === "forget") {
       if (!forgetArmed) { forgetArmed = true; setTimeout(() => { forgetArmed = false; draw(); }, 4000); }
-      else { forgetArmed = false; TS5Keep.forget(); location.href = "/"; return; }
+      else {
+        // (This device's notifications go off with the key: the machine forgets it.)
+        forgetArmed = false;
+        TS5Push.off(headers).catch(() => {}).then(() => { TS5Keep.forget(); location.href = "/"; });
+        return;
+      }
     }
     draw();
     return;
@@ -619,10 +628,13 @@ document.addEventListener("click", (e) => {
     draw();
     const box = document.querySelector("form.edit input");
     if (box) box.focus();
-  } else if (t.dataset.yes !== undefined) {
-    act({ do: "answer", yes: t.dataset.yes === "1" });
-  } else if (t.dataset.pick !== undefined) {
-    act({ do: "answer", pick: +t.dataset.pick });
+  } else if (t.dataset.yes !== undefined || t.dataset.pick !== undefined) {
+    // The answer goes with the question it is to: one answered on the TV
+    // meanwhile, with another asked there since, isn't answered by this tap.
+    const a = (st && st.ask) || {};
+    const req = { do: "answer", title: a.title || "", text: a.text || "" };
+    if (t.dataset.yes !== undefined) req.yes = t.dataset.yes === "1"; else req.pick = +t.dataset.pick;
+    act(req);
   }
 });
 document.addEventListener("submit", (e) => {

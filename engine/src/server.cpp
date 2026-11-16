@@ -17,6 +17,7 @@
 #include <cstring>
 #include <ctime>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -34,6 +35,7 @@ namespace {
 struct Request {
     std::string method, path, query, body;
     bool tls = false;  // the client spoke TLS (an https:// address) to this plain-HTTP port
+    bool refused = false;  // a body past kUnknownBody from a client that isn't let in: not read
     std::string key;   // the API key it sent, if any
     std::vector<std::pair<std::string, std::string>> headers;  // names in lower case
 };
@@ -73,10 +75,65 @@ static bool stop_gone_wanted() {
 #endif
 }
 
-bool read_request(int fd, Request &r) {
+double now_ms();
+
+// How a request is read from a device nobody knows yet (anything that can
+// reach the port): each wait for its next bytes ends after read_idle() (the
+// socket's own limit, recv_timeout), all of it within kReadWhole, and a
+// body past kUnknownBody is read only once its key (in the headers, which
+// come first) is one that is let in. Without these a device could hold
+// connections open for good (a thread each), or have 64 MB kept for each,
+// out of what the model has. Not on the console (its title is as it was).
+constexpr double kReadWhole = 300e3;          // ms
+constexpr size_t kUnknownBody = 64u << 10;    // bytes
+int read_idle() {                             // seconds (TS5_READ_IDLE for tests)
+    static const int s = [] {
+        const char *e = getenv("TS5_READ_IDLE");
+        return e && atoi(e) > 0 ? atoi(e) : 30;
+    }();
+    return s;
+}
+
+void recv_timeout(int fd, int seconds) {
+#ifndef TS5_PS5
+    timeval tv{seconds, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+#else
+    (void)fd;
+    (void)seconds;
+#endif
+}
+
+// known: whether the request's sender is let in (asked once the headers
+// are read, for a body past kUnknownBody).
+bool read_request(int fd, Request &r, const std::function<bool(const Request &)> &known = nullptr) {
     std::string buf;
     char tmp[16384];
     size_t hdr_end;
+    const double t0 = now_ms();
+    bool asked = false;
+    // The body may go past kUnknownBody: only for a sender who is let in.
+    const auto big_ok = [&] {
+#ifdef TS5_PS5
+        return true;
+#else
+        if (asked || !known) return true;
+        asked = true;
+        if (known(r)) return true;
+        r.refused = true;
+        return false;
+#endif
+    };
+    // recv, within the time a whole request gets.
+    const auto recv = [&](int f, char *b, size_t n, int flags) -> ssize_t {
+#ifndef TS5_PS5
+        if (now_ms() - t0 > kReadWhole) return -1;
+#endif
+        ssize_t k;
+        while ((k = ::recv(f, b, n, flags)) < 0 && errno == EINTR) {
+        }
+        return k;
+    };
     while ((hdr_end = buf.find("\r\n\r\n")) == std::string::npos) {
         ssize_t n = recv(fd, tmp, sizeof tmp, 0);
         if (n <= 0 || buf.size() > (1u << 20)) return false;
@@ -119,6 +176,7 @@ bool read_request(int fd, Request &r) {
         }
     }
     if (clen > (64u << 20)) return false;
+    if (!chunked && clen > kUnknownBody && !big_ok()) return false;
     std::string raw = buf.substr(hdr_end + 4);
     if (!chunked) {
         r.body = std::move(raw);
@@ -142,6 +200,7 @@ bool read_request(int fd, Request &r) {
         const size_t len = strtoul(raw.c_str() + at, nullptr, 16);
         if (len == 0) return true;  // any trailers are ignored
         if (r.body.size() + len > (64u << 20)) return false;
+        if (r.body.size() + len > kUnknownBody && !big_ok()) return false;
         while (raw.size() < eol + 2 + len + 2) {
             ssize_t n = recv(fd, tmp, sizeof tmp, 0);
             if (n <= 0) return false;
@@ -347,28 +406,54 @@ const char *unavailable_why(const std::string &s) {
 }
 
 void handle(int fd, Server::State &state, Usage &u) {
+    recv_timeout(fd, read_idle());  // (read_request)
     if (state.tls) {
         // A TLS handshake starts 0x16, which no HTTP request does.
         unsigned char first = 0;
         ssize_t n;
         while ((n = recv(fd, &first, 1, MSG_PEEK)) < 0 && errno == EINTR) {
         }
-        if (n == 1 && first == 0x16 && state.tls(fd, u.ip, u.rec.client)) {
+        if (n <= 0) {  // nothing sent in read_idle(), or gone
             u.pending = false;
             u.closed = true;
+            close(fd);
             return;
+        }
+        if (n == 1 && first == 0x16) {
+            recv_timeout(fd, 0);  // the front's own waits
+            if (state.tls(fd, u.ip, u.rec.client)) {
+                u.pending = false;
+                u.closed = true;
+                return;
+            }
+            recv_timeout(fd, read_idle());
         }
     }
     Request r;
-    if (!read_request(fd, r)) {
+    const auto known = [&](const Request &q) {
+        Server::Grant gr;
+        std::string name;
+        return state.admit ? state.admit(q.key, u.rec.client, gr) : state.authorize ? state.authorize(q.key, u.rec.client, name) : true;
+    };
+    if (!read_request(fd, r, known)) {
         if (r.tls)
             log_line("ts5: %s tried https:// on the API port; the address starts http://, not https://",
                     u.rec.client.c_str());
+        if (r.refused) {
+            log_line("ts5: %s %s %s: a body over %zu KB without a key that is let in, not read", u.rec.client.c_str(),
+                     r.method.c_str(), r.path.c_str(), kUnknownBody >> 10);
+            const std::string where = state.key_hint.empty() ? "Settings on the PS5, under Apps." : state.key_hint;
+            send_all(fd, response(401, error_body(r.key.empty() ? "This TokenStation5 needs an API key. Make one in " + where
+                                                                : "Incorrect API key provided. Keys are made and "
+                                                                  "turned on in " + where,
+                                                  "invalid_api_key")));
+        }
         u.pending = false;
         u.closed = true;
         close(fd);
         return;
     }
+    recv_timeout(fd, 0);  // read: what follows waits as it likes (the browser terminal's socket, a peek for a client gone)
     u.t0 = now_ms();
     const bool completions = r.method == "POST" && (r.path == "/v1/chat/completions" || r.path == "/v1/completions" ||
                                                     r.path == "/chat/completions" || r.path == "/completions");
@@ -593,6 +678,37 @@ void handle(int fd, Server::State &state, Usage &u) {
             return;
         }
         u.rec.stream = req["stream"].boolean(false);
+        // A chat page's answer (Server::PageAnswers): its chat's id, when
+        // the request has a key and names one. Known from here, before the
+        // wait for the engine: a page that goes away while its request
+        // waits behind another's has an answer that goes on, too.
+        std::string page_chat = req["ts5_chat"].str();
+        if (page_chat.size() > 64 || grant.key.empty() || !state.page_answers.end) page_chat.clear();
+        for (char c : page_chat)
+            if (!isalnum((unsigned char)c) && c != '-' && c != '_') {
+                page_chat.clear();
+                break;
+            }
+        auto page_away = [&] {
+            return !page_chat.empty() && state.page_answers.away && state.page_answers.away(grant, page_chat);
+        };
+        // Its end is always told, also on the ways out before an answer
+        // (refused, left, a request that failed): the chat is then no
+        // longer one with an answer coming.
+        struct PageEnd {
+            Server::State &state;
+            const Server::Grant &grant;
+            const std::string &chat;
+            bool told = false;
+            ~PageEnd() {
+                if (chat.empty() || told || !state.page_answers.end) return;
+                Server::AnswerEnd a;
+                a.chat = chat;
+                a.left = true;
+                state.page_answers.end(grant, a);
+            }
+        } page_end{state, grant, page_chat};
+        if (!page_chat.empty() && state.page_answers.start) state.page_answers.start(grant, page_chat);
         Engine *ep = engine();
         if (!ep) {
             std::string why;
@@ -733,7 +849,16 @@ void handle(int fd, Server::State &state, Usage &u) {
         }
         // Gone while it waited for the engine: nothing to run it for.
         const bool stop_gone = stop_gone_wanted();
-        if (stop_gone && peer_gone(fd)) {
+        // (A chat page's whose page went away meanwhile is run: a moment
+        // for the page's word to come, as when it goes during the answer.)
+        auto page_went_away = [&] {
+            for (int i = 0; i < 15 && !page_chat.empty(); i++) {
+                if (page_away()) return true;
+                usleep(100000);
+            }
+            return false;
+        };
+        if (stop_gone && peer_gone(fd) && !page_went_away()) {
             u.rec.finish = "left";
             u.rec.prompt = (int64_t)first_toks.size();
             log_line("ts5: %s left while its request waited, not run (%zu prompt tokens)", u.rec.client.c_str(),
@@ -741,19 +866,6 @@ void handle(int fd, Server::State &state, Usage &u) {
             done();
             return;
         }
-        // A chat page's answer (Server::PageAnswers): its chat's id, when
-        // the request has a key and names one.
-        std::string page_chat = req["ts5_chat"].str();
-        if (page_chat.size() > 64 || grant.key.empty() || !state.page_answers.end) page_chat.clear();
-        for (char c : page_chat)
-            if (!isalnum((unsigned char)c) && c != '-' && c != '_') {
-                page_chat.clear();
-                break;
-            }
-        auto page_away = [&] {
-            return !page_chat.empty() && state.page_answers.away && state.page_answers.away(grant, page_chat);
-        };
-        if (!page_chat.empty() && state.page_answers.start) state.page_answers.start(grant, page_chat);
         std::function<bool()> gone;
         if (stop_gone) gone = [fd, &page_away] { return peer_gone(fd) && !page_away(); };
         bool use_tools = !tools.empty();  // off for a last turn that must answer
@@ -1426,6 +1538,7 @@ void handle(int fd, Server::State &state, Usage &u) {
             a.tokens = st.gen_tokens;
             a.tps = st.gen_ms > 0 ? st.gen_tokens * 1000.0 / st.gen_ms : 0.0;
             state.page_answers.end(grant, a);
+            page_end.told = true;
         }
         UsageRecord &ur = u.rec;
         ur.status = !ok && !stream ? 500 : 200;
@@ -1577,11 +1690,37 @@ void Server::accept_loop() {
         }
         fcntl(c, F_SETFD, FD_CLOEXEC);
         setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+#ifndef TS5_PS5
+        // A device that takes nothing for 10 s (a phone out of reach that
+        // never closed its connection) is one that has gone: the write
+        // fails, as for a closed one. Without this an answer being written
+        // to it stood still, holding the engine, until TCP gave up
+        // (about 15 minutes), and everyone else waited behind it.
+        timeval snd{10, 0};
+        setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof snd);
+        // So many connections at once, and no more (each is a thread).
+        static std::atomic<int> open_now{0};
+        constexpr int kMaxOpen = 256;
+        if (open_now.load(std::memory_order_relaxed) >= kMaxOpen) {
+            send_all(c, response(503, error_body("Too many connections are open here: try again in a moment.", "overloaded")));
+            close(c);
+            continue;
+        }
+        open_now.fetch_add(1, std::memory_order_relaxed);
+        struct Open {
+            ~Open() { open_now.fetch_sub(1, std::memory_order_relaxed); }
+        };
+        auto counted = std::make_shared<Open>();
+#endif
         char ip[INET_ADDRSTRLEN] = {};
         if (peer.sin_family != AF_INET || !inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof ip)) ip[0] = 0;
         std::string client = ip;
         if (client_name_) client = client_name_(client, ntohs(peer.sin_port));
-        std::thread([this, c, client, peer_ip = std::string(ip)] {
+        std::thread([this, c, client, peer_ip = std::string(ip)
+#ifndef TS5_PS5
+                     , counted
+#endif
+        ] {
             Usage u;
             u.rec.client = client;
             u.ip = peer_ip;
