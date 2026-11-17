@@ -9,6 +9,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <map>
 #include <set>
 
 #include "files.h"
@@ -40,7 +41,7 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/connectors", "", "the Connectors page: GitHub, connected with a QR code (/github too)"},
         {"/feedback", "WHAT WENT WRONG + YOUR EMAIL FOR A REPLY", "then Enter: you read the report first; never public"},
         {"/think", "on|off|auto", "thinking before answering"},
-        {"/tools", "[on|off|NAME on|off]", "the model's tools: search, pages, terminal, files, memory, browser (each has a switch)"},
+        {"/tools", "[on|off|NAME on|off|steps N]", "the model's tools: search, pages, terminal, files, memory, browser (each has a switch)"},
         {"/browser", "[auto|obscura|chromium|text|PATH]", "the program the model's browser tool shows pages with"},
         {"/sandbox", "[on|off|network|no-network|reset|folder DIR]", "where the model's commands run: the sandbox, its network, its toolbox"},
         {"/mcp", "[add NAME PROGRAM…|remove NAME|NAME off|ask|allow|restart|only TOOL…|reload]",
@@ -372,7 +373,7 @@ void pending_calls(std::vector<Line> &out, const Chat &c, int owner, size_t at, 
         // (A browser call that waits for a yes shows what it would do in words.)
         const int kind = live && k == done && c.ask.load() == 1 ? c.ask_kind.load() : 0;
         const bool page = kind == 1;
-        wrap(out, {{kind >= 1 ? c.ask_cmd : tool_call_line(a.calls[k].name, a.calls[k].args), Style(t.accent2)}}, w, 2, "⚙ ",
+        wrap(out, {{kind >= 1 && kind != 6 ? c.ask_cmd : tool_call_line(a.calls[k].name, a.calls[k].args), Style(t.accent2)}}, w, 2, "⚙ ",
              Style(t.accent2, kDefault, BOLD), "  ");
         // A change to a file: the lines that go out and the lines that come
         // in. An outside tool's call: what it is called with, a line each.
@@ -400,9 +401,11 @@ void pending_calls(std::vector<Line> &out, const Chat &c, int owner, size_t at, 
             const std::string read[] = {list ? "List it" : "Read it", c.ask_opt, "No"};
             const std::string call[] = {"Run it", c.ask_opt, "No"};
             const std::string github[] = {"Do it", c.ask_opt, "No"};
-            const std::string *pick = kind == 5 ? github : kind == 4 ? call : kind == 3 ? read : kind == 2 ? change : page ? act : run;
+            // The message's steps are used: ‹ Go on ›  Don't ask again for this message  No, answer now
+            const std::string more[] = {"Go on", "Don't ask again for this message", "No, answer now"};
+            const std::string *pick = kind == 6 ? more : kind == 5 ? github : kind == 4 ? call : kind == 3 ? read : kind == 2 ? change : page ? act : run;
             const int on = c.ask_pick.load();
-            st.add(kind == 3 ? (list ? "    List it?  " : "    Read it?  ") : kind == 2 ? "    " + c.ask_opt + "?  " : page || kind == 5 ? "    Do it?  " : "    Run it?  ",
+            st.add(kind == 6 ? "    " + c.ask_opt + "  " : kind == 3 ? (list ? "    List it?  " : "    Read it?  ") : kind == 2 ? "    " + c.ask_opt + "?  " : page || kind == 5 ? "    Do it?  " : "    Run it?  ",
                    Style(t.warn, kDefault, BOLD));
             for (int p = 0; p < 3; p++) {
                 if (p == on) st.add("‹ " + pick[p] + " ›", Style(t.bg, t.warn, BOLD));
@@ -888,7 +891,8 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
                 // The model wants to run a command: it waits for a word.
                 x = s.put(x, y1, "?", Style(t.warn, kDefault, BOLD));
                 const int kind = c.ask_kind.load();
-                x = s.put(x + 1, y1, kind == 5   ? "the model wants to change something on GitHub"
+                x = s.put(x + 1, y1, kind == 6   ? "the model has used this message's tool steps and asks for more"
+                                     : kind == 5 ? "the model wants to change something on GitHub"
                                      : kind == 4 ? "the model wants to use an outside tool"
                                      : kind == 3 ? "the model wants to read a file or list a folder"
                                      : kind == 2 ? "the model wants to change a file"
@@ -938,7 +942,9 @@ void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v) {
     box(s, 0, iy, w, ih, Style(c.busy() ? t.dim : t.accent), Style(t.fg, t.panel));
     s.put(2, iy + 1, "ts5>", Style(c.busy() ? t.dim : t.accent2, t.panel, BOLD));
     if (c.input.empty()) {
-        const char *ph = c.ask.load() == 1 ? (c.ask_kind.load() >= 1
+        const char *ph = c.ask.load() == 1 ? (c.ask_kind.load() == 6
+                                                  ? "Let it go on? ←→ choose, Enter · Esc says no · or type the next message"
+                                              : c.ask_kind.load() >= 1
                                                   ? "Do what it says above? ←→ choose, Enter · Esc says no · or type the next message"
                                                   : "Run the command above? ←→ choose, Enter · Esc says no · or type the next message")
                          : c.busy()        ? "answering… Enter: a note it reads now · Tab: a message for after · Esc stops"
@@ -1131,10 +1137,24 @@ std::string msg_json(const Chat &c, size_t i, bool with_calls, bool thinking, co
 // writes the next one, as text now (Qwen3.5 9B and Qwen 2.5 Coder 7B on
 // the PS5, after their twelfth round).
 const char *const kLastCall = "\n\n[That was the last tool call for this message. Answer now, from what you have.]";
+// The same turn after calls that only repeated earlier ones (answer_loop),
+// and after the user's "No, answer now" to more steps.
+const char *const kLastRepeat =
+    "\n\n[Your last calls only repeated earlier ones and got the same results. Call no more tools now. Tell the user "
+    "in plain words what you tried, what is in the way, and what you would need to go on.]";
+const char *const kLastStop =
+    "\n\n[The user wants the answer now. Call no more tools. Say what is done, what is not, and what the next step "
+    "would be.]";
+// Under a result that an earlier, identical call of this message already gave.
+const char *const kSameResult =
+    "\n\n[You made this exact call before in this message and it gave this same result. Making it again will not "
+    "change anything. Do something different now, or tell the user what is in the way.]";
 
-// The request for the chat's next answer. no_tools: the model has called
-// tools many times in a row, so this turn it can only answer.
-std::string body_for(Chat &c, const ChatRequest &rq, bool no_tools = false) {
+// The request for the chat's next answer. last: this turn can only answer
+// (the user said no, the calls went in circles, or the user wants the
+// answer now), and these words under the last tool's result say so.
+std::string body_for(Chat &c, const ChatRequest &rq, const char *last = nullptr) {
+    const bool no_tools = last != nullptr;
     std::string msgs;
     // What the model reads before the chat: its notes from earlier chats
     // (Settings → Memory), then the summary this chat goes on from. One
@@ -1159,7 +1179,7 @@ std::string body_for(Chat &c, const ChatRequest &rq, bool no_tools = false) {
         }
         for (size_t i : idx) {
             if (!msgs.empty()) msgs += ",";
-            msgs += msg_json(c, i, calls_answered(c, (int)i, end), i > last_user, no_tools && i == last_tool ? kLastCall : "");
+            msgs += msg_json(c, i, calls_answered(c, (int)i, end), i > last_user, no_tools && i == last_tool ? last : "");
         }
     }
     std::string b = "{\"model\":" + ts5::json_escape(rq.model.empty() ? "tokenstation5" : rq.model) +
@@ -1171,13 +1191,18 @@ std::string body_for(Chat &c, const ChatRequest &rq, bool no_tools = false) {
     // The tools that are switched on (Settings). The web search is the
     // server's own: with other tools in the request it has to be asked for.
     // no_tools: the tools still go along (OpenAI's API takes "tool_choice"
-    // only with them), with the word that none is to be called.
+    // only with them), with the word that none is to be called. The web
+    // search is asked for as in every other turn: ts5 then writes the same
+    // tools into the prompt and reads on from what it has of the chat (it
+    // runs none of them in such a turn). Without them the prompt changed
+    // at its start, and the whole chat was read again: 24 s at 16,500
+    // tokens on the PS5, and once more in the turn after.
     const std::string tools = tools_json(rq.tools);
     if (!tools.empty()) b += ",\"tools\":" + tools;
     if (no_tools && !tools.empty()) b += ",\"tool_choice\":\"none\"";
     // "auto" also with no tools of its own: without a web search key the
-    // server searches Wikipedia only for a request that asks.
-    if (rq.ts5 && (no_tools || !rq.tools.web)) b += ",\"web_search\":false";
+    // server searches an encyclopedia only for a request that asks.
+    if (rq.ts5 && !rq.tools.web) b += ",\"web_search\":false";
     else if (rq.ts5) b += ",\"web_search\":\"auto\"" + (rq.search_source.empty() ? "" : ",\"web_search_source\":\"" + rq.search_source + "\"");
     return b + "}";
 }
@@ -1436,18 +1461,20 @@ ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
     return run_tool(u.name, u.args, rq.tools, c->cancel);
 }
 
-// So many turns of tool calls in a row for one message; the turn after
-// them gets no tools, so the model answers with what it has. So does the
-// turn after a command the user said no to: told only in words not to try
-// again, Qwen3.5 9B asked for twelve more commands in a row on the PS5
-// (rm -f, rm --, ls, echo ...), one question each.
-const int kToolRounds = 12;
-// Reading on is not one of them: a turn whose calls only ask for the next
-// part of the page or of the file that is open, and get it, is free, up to
-// so many turns in all. A Wikipedia article is 13 parts, and Qwen3.5 9B,
-// asked for what the last part of one says, was stopped at the twelfth
-// on the PS5.
-const int kMostRounds = 48;
+// A message's tool calls are counted in steps: a turn of the model's that
+// calls tools is one. The user sets how many a message gets before ts5-tui
+// asks whether the model should go on (Settings, Tool steps). It was a
+// fixed 12, after which the model had to answer: that cut a model in the
+// middle of its work as readily as one going in circles. Reading on is not
+// a step: a turn whose calls only ask for the next part of the page or of
+// the file that is open, and get it, is free, up to this many times the
+// steps in all (a Wikipedia article is 13 parts).
+const int kFreeTurns = 4;
+// Calls in a row that only repeated an earlier call of this message and
+// got the same result back, before the model has to answer in words. On
+// the PS5 Qwen3.5 9B ran "pip install npm" 26 times in one chat, with the
+// same lines back each time, twelve at a go.
+const int kStale = 3;
 
 // A call the model wrote out as text, cut from the end of a turn that got
 // no tools (the server reads no calls in such a turn): from the mark that
@@ -1540,20 +1567,48 @@ bool steer_in(Chat *c, const ChatRequest &rq) {
     return true;
 }
 
+// The steps a message gets are used up and the model asks for more: the
+// user's word, given as for a command (chat_key). 2 go on, 3 answer now.
+int ask_more(Chat *c, const std::string &used) {
+    {
+        std::lock_guard<std::mutex> l(c->mu);
+        c->ask_cmd.clear();
+        c->ask_preview.clear();
+        c->ask_opt = used + ". Go on?";
+        c->ask_dir.clear();
+    }
+    c->ask_more_always = false;
+    c->ask_kind = 6;
+    c->ask_boxed = false;
+    c->ask_t0 = now_s();
+    c->ask_pick = 0;
+    c->ask = 1;
+    while (c->ask.load() == 1 && !c->cancel.load()) usleep(30000);
+    return c->ask.exchange(0);
+}
+
 // An answer: the model's turn, and for as long as it calls tools, each
 // call run, its result added to the chat, and another turn of the model's.
 // A note the user sends meanwhile (steer_in) goes in before the next turn,
 // and the answer goes on from it as from a new message.
 void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
-    bool none = false;     // this turn was told to call no tool
-    bool said_no = false;  // the user said no to a command of this message's
-    bool again = false;    // a turn that came back empty was asked once more
-    int turns = 0;         // all of them, the free ones too
+    const char *last = nullptr;  // this turn was told to call no tool, in these words
+    bool said_no = false;        // the user said no to a command of this message's
+    bool again = false;          // a turn that came back empty was asked once more
+    int turns = 0;               // all of them, the free ones too
+    int budget = rq.tools.steps;  // the steps this message has before the user is asked (0: never)
+    // Each call of this message's and what it gave back last, and how many
+    // calls in a row brought nothing new (kStale).
+    std::map<std::string, std::string> seen;
+    int stale = 0;
     for (int round = 0;; round++, turns++) {
         if (c->cancel.load()) break;
         if (steer_in(c, rq)) {
-            round = turns = 0;
-            none = said_no = again = false;
+            round = turns = stale = 0;
+            last = nullptr;
+            said_no = again = false;
+            budget = rq.tools.steps;
+            seen.clear();
             body = body_for(*c, rq);  // (takes the chat's lock itself)
         }
         stream_answer(c, rq, body);
@@ -1575,13 +1630,16 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
             // a server that doesn't keep to "tool_choice", or written out as
             // text, which is cut from the answer. What the model said before
             // one stays, and the line under it says what happened.
-            if (none && (cut_text_call(m.content) || !m.calls.empty())) {
+            if (last && (cut_text_call(m.content) || !m.calls.empty())) {
                 m.calls.clear();
                 if (m.content.find_first_not_of(" \t\r\n") == std::string::npos) m.content.clear();
-                m.error = said_no ? "the model asked for another tool after your no instead of answering: nothing more "
-                                    "was run"
-                                  : "the model used all the rounds of tools one message gets and asked for more: tell "
-                                    "it to go on, or ask another way";
+                m.error = last == kLastRepeat ? "the model kept making the same calls with the same results, and asked "
+                                                "for another instead of answering: nothing more was run. Tell it what "
+                                                "to do differently"
+                          : last == kLastStop ? "the model asked for another tool after you said to answer now: "
+                                                "nothing more was run"
+                                              : "the model asked for another tool after your no instead of answering: "
+                                                "nothing more was run";
             }
             calls = m.calls;
         }
@@ -1613,7 +1671,7 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
                 }
                 ChatRequest quiet = rq;
                 if (quiet.thinking == 0) quiet.thinking = 2;
-                body = body_for(*c, quiet, none);  // (takes the chat's lock itself)
+                body = body_for(*c, quiet, last);  // (takes the chat's lock itself)
                 round--;
                 continue;
             }
@@ -1625,6 +1683,40 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
             const Msg &m = c->msgs.back();
             if (!c->steer.empty() && m.error.empty() && !m.full && !c->cancel.load()) continue;
             break;
+        }
+        // The message's steps are used and the model asks for more: the
+        // user says whether it goes on (as many steps again, or for as long
+        // as this message takes) or answers now, its calls not run.
+        if (budget > 0 && (round >= budget || turns >= kFreeTurns * budget)) {
+            const int said = ask_more(c, round >= budget ? fmt("%d step%s used for this message", round, round == 1 ? "" : "s")
+                                                         : fmt("%d turns of reading on used for this message", turns));
+            if (!c->cancel.load() && said == 2) {
+                if (c->ask_more_always.exchange(false)) budget = 0;
+                else budget += std::max(1, rq.tools.steps);
+            } else if (!c->cancel.load()) {
+                std::lock_guard<std::mutex> l(c->mu);
+                for (const ToolUse &u : calls) {
+                    Msg t;
+                    t.role = "tool";
+                    t.content = "Not run: the user ended the tool steps for this message and wants the answer now.";
+                    t.call_id = u.id;
+                    t.tool = u.name;
+                    t.head = "not run: you said to answer now";
+                    t.tool_ok = false;
+                    t.done = true;
+                    c->msgs.push_back(t);
+                }
+                Msg a;
+                a.role = "assistant";
+                a.model = rq.model;
+                a.t0 = now_s();
+                c->msgs.push_back(a);
+                last = kLastStop;
+            }
+            if (last == kLastStop) {
+                body = body_for(*c, rq, last);
+                continue;
+            }
         }
         bool reading = true;  // every call read on, and got its next part
         bool viewed = false;  // a browser call of this turn brought a page, or another part of one
@@ -1640,13 +1732,23 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
             said_no |= r.refused;
             reading &= r.ok && ((u.name == "browser_more" && r.text.compare(0, 6, "Page: ") == 0) ||
                                 (u.name == "read_file" && reads_on(u.args)));
+            // The same call as an earlier one of this message, with the
+            // same result back: the model is told so under it.
+            bool same = false;
+            if (!c->cancel.load() && !r.refused) {
+                const std::string cmd = tool_command(u.name, u.args);
+                std::string &before = seen[u.name + "\n" + (cmd.empty() ? u.args : cmd)];
+                same = !before.empty() && before == r.text;
+                before = r.text;
+                stale = same ? stale + 1 : 0;
+            }
             std::lock_guard<std::mutex> l(c->mu);
             Msg t;
             t.role = "tool";
-            t.content = r.text;
+            t.content = same ? r.text + kSameResult : r.text;
             t.call_id = u.id;
             t.tool = u.name;
-            t.head = r.head;
+            t.head = same ? r.head + " \xC2\xB7 the same as before" : r.head;
             t.tool_ok = r.ok;
             t.done = true;
             c->msgs.push_back(t);
@@ -1662,8 +1764,9 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
             c->msgs.push_back(a);
         }
         if (reading) round--;
-        none = round + 1 >= kToolRounds || turns + 1 >= kMostRounds || said_no;
-        body = body_for(*c, rq, none);
+        // After a no, or after calls that went in circles, the model answers.
+        last = said_no ? kLastCall : stale >= kStale ? kLastRepeat : nullptr;
+        body = body_for(*c, rq, last);
     }
 }
 
@@ -1917,7 +2020,7 @@ void complete(Chat &c, const ChatRequest &rq) {
         else if (cmd == "/download") pool = rq.catalog_names;
         else if (cmd == "/think") pool = {"on", "off", "auto"};
         else if (cmd == "/tools") pool = {"on", "off", "ask", "search", "pages", "terminal", "browser", "memory", "search on",
-                                          "search off", "search wikipedia", "search grokipedia", "search both", "pages on", "pages off", "terminal on", "terminal off",
+                                          "search off", "search web", "search wikipedia", "search grokipedia", "search both", "steps 50", "steps off", "pages on", "pages off", "terminal on", "terminal off",
                                           "terminal ask", "terminal allow", "browser on", "browser off", "browser ask",
                                           "browser allow", "files", "files on", "files off", "files ask", "files allow",
                                           "memory on", "memory off"};
@@ -2427,7 +2530,9 @@ int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h) {
             if (pick != 2 && now_s() - c.ask_t0.load() < 0.7) return CHAT_NONE;
             if (pick == 1) {
                 const int kind = c.ask_kind.load();
-                if (kind == 3 || kind == 4) {
+                if (kind == 6) {
+                    c.ask_more_always = true;
+                } else if (kind == 3 || kind == 4) {
                     std::lock_guard<std::mutex> l(c.mu);
                     if (!c.ask_dir.empty()) (kind == 3 ? c.read_dirs : c.mcp_ok).push_back(c.ask_dir);
                 } else {

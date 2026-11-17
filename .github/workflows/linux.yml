@@ -383,6 +383,10 @@ jobs:
           python3 linux/tui/test/controls_test.py "$(command -v ts5-tui)" "$(command -v ts5)" /tmp/model/test.gguf
       - name: Outside tools (ts5-tui --mcp against an MCP server served here, no model)
         run: python3 linux/tui/test/mcp_test.py "$(command -v ts5-tui)"
+      - name: The steps a message gets (ts5-tui in tmux against the stand-in server; the question, repeats, the last turn's prompt)
+        run: |
+          command -v tmux || sudo apt-get install -y -qq tmux
+          python3 linux/tui/test/steps_test.py "$(command -v ts5-tui)"
       - name: A browser on demand (ts5-tui --install-browser, from a release file made here, no network)
         run: python3 linux/tui/test/install_test.py "$(command -v ts5-tui)"
       - name: The sandbox for the model's commands (bubblewrap; as Ubuntu has it, then let in by the README's AppArmor profile)

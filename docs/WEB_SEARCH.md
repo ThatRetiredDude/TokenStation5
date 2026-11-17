@@ -36,14 +36,44 @@ about tools.
 `"capabilities": {"tools": true, "tool_format": "hermes", "web_search": true,
 "web_search_source": "tavily"}`.
 
+## Without a key: the web through DuckDuckGo (Linux)
+
+With no Tavily key a search on Linux is still a regular web search, and only
+for a request that asks for a search: `"web_search": true`, or `"web_search":
+"auto"` on a chat that looks like it needs the web or asks to search (with
+`"auto"`, once a chat needed the search it stays offered, so the chat's
+prompt starts the same from turn to turn). ts5-tui asks that way while its
+search tool is switched on, so a model in ts5-tui can search out of the box.
+A plain request that says nothing gets no search, as before.
+
+ts5 asks for DuckDuckGo's results page that needs no scripts
+(`html.duckduckgo.com/html`), the way a browser asks for a page, and gives
+the model the results as text: title, the site's own address and the line
+or two under it, eight of them (`TS5_SEARCH_RESULTS`), without the
+advertisements. The passages are short, so the tool's description tells the
+model to open a result's page when it needs more. Of eight search sites
+tried from a PS5 on 2026-11-17 it was the one that answered such a request
+with real results, in about 0.7 s: Google's page wants scripts, Bing sent
+unrelated results, Brave, Mojeek and Startpage a check for robots.
+
+When DuckDuckGo can't be searched (it sends its own check for robots, which
+ts5 does not answer, or it can't be reached), the search goes to Grokipedia,
+and when that can't be searched either, to Wikipedia. The model is told
+which it got and that an encyclopedia has no news or live data.
+
+`TS5_SEARCH_SOURCE` picks what is searched without a key: `web` (the
+default), `grokipedia`, `wikipedia` or `both` (the two encyclopedias, below);
+a request picks with `"web_search_source"`, and `/v1/models` lists the
+choices under `capabilities.search_sources`. `/v1/models` says
+`"web_search": false, "web_search_source": "web"`: `web_search` stays "a
+key is set, and the search is offered by itself". On the PS5 title the
+search is the key's alone.
+
 ## Without a key: Wikipedia
 
-With no Tavily key the search is Wikipedia's own (its public API, no key, no
-account), and only for a request that asks for a search: `"web_search":
-true`, or `"web_search": "auto"` on a chat that looks like it needs the web,
-names Wikipedia or asks to search. ts5-tui asks that way while its search
-tool is switched on, so a model in ts5-tui can look things up out of the box.
-A plain request that says nothing gets no search, as before.
+With `TS5_SEARCH_SOURCE=wikipedia` (or `"web_search_source": "wikipedia"`)
+the search is Wikipedia's own (its public API, no key, no account), for the
+same requests as above, and also for one that names Wikipedia.
 
 It is an encyclopedia: no news, prices, weather or anything live. The tool's
 description tells the model so, and to say when the articles don't hold the
@@ -70,7 +100,7 @@ On Linux the encyclopedia can also be [Grokipedia](https://grokipedia.com)
 
 - In ts5-tui: Settings → Search source, or `/tools search grokipedia`
   (`wikipedia`, `both`).
-- For `ts5 serve` and the service: `TS5_ENCYCLOPEDIA=grokipedia` or `both`
+- For `ts5 serve` and the service: `TS5_SEARCH_SOURCE=grokipedia` or `both`
   (in `/etc/default/tokenstation` for the service).
 - In a request: `"web_search_source": "grokipedia"` (or `"wikipedia"`,
   `"both"`) beside `"web_search"`. `/v1/models` lists what can be picked

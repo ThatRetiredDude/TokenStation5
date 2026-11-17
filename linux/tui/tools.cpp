@@ -309,8 +309,11 @@ ToolResult run_command(const std::string &cmd, const ToolSwitches &s, const std:
                             out.find("no new privileges") != std::string::npos || out.find("sudo:") != std::string::npos ||
                             out.find("are you root?") != std::string::npos))
             t.text += "\n(This ran in the sandbox: only " + sandbox_work() +
-                      " and the home folder ~ (the sandbox's own) can be changed, and sudo and apt can't work. Install "
-                      "tools in ~ instead, such as pip install NAME, npm install -g NAME, or a program into ~/bin.)";
+                      " and the home folder ~ (the sandbox's own) can be changed. sudo, apt and every other system "
+                      "install can't work here, however they are tried: don't try them again. A program can only come as "
+                      "a ready-built file downloaded into ~/bin; pip has Python packages only, not programs like npm, "
+                      "git or curl. If what the user asked for needs a system install, tell them that the sandbox "
+                      "doesn't allow it, and give them the command to run in their own terminal.)";
         if (out.find("No module named pip") != std::string::npos || out.find("ensurepip is not available") != std::string::npos ||
             out.find("pip: not found") != std::string::npos || out.find("pip3: not found") != std::string::npos)
             t.text += "\n(This Python has no pip. In the sandbox it can be put in ~ without sudo: curl -sS "
@@ -914,8 +917,12 @@ std::string tools_json(const ToolSwitches &s) {
             what += in_home ? "Commands start in the home folder ~, which is the sandbox's own"
                             : "Commands start in " + work + ", the only folder of the user's they can change. The home "
                               "folder ~ is the sandbox's own";
-            what += ", kept between chats: install the tools you need there (pip install NAME, npm install -g NAME, a "
-                    "program into ~/bin), not with sudo or apt, which can't work here. Where Python has no pip, "
+            what += ", kept between chats. sudo, apt and other system installs can't work here: nothing can be added "
+                    "to the system. What can be installed goes into ~: a Python package with pip install NAME (never a "
+                    "program such as npm, git or curl: pip only has Python packages, even under those names), a Node "
+                    "package with npm install -g NAME where npm is here, a program as a ready-built file downloaded "
+                    "into ~/bin. Check that a program is here with command -v NAME before you use it; when it is "
+                    "not and can't be put into ~, say so and stop trying. Where Python has no pip, "
                     "curl -sS https://bootstrap.pypa.io/get-pip.py | python3 - --user puts pip in ~ first. ";
             what += s.sandbox_net ? "The network can be used." : "There is no network.";
             what += " A program a command starts ends with the command.";

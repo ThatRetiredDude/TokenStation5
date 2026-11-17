@@ -1346,15 +1346,38 @@ def test_client_tools_and_search(ts5, model, tdir):
                         {"role": "assistant", "content": "", "tool_calls": [call("get_weather", '{"city": "Oslo"}')]},
                         {"role": "tool", "tool_call_id": "call_1", "name": "get_weather", "content": "4 °C, rain"}],
            "tools": [WEATHER]}
+    whole = []
     for name, more, answer in [("with tools", {}, "Second."), ("told to call none", {"tool_choice": "none"}, "Last.")]:
         msg, prompts, log = serve_turns(ts5, model, qwen, ["First.", "Second.", "Last."], dict(req, **more))
         want = ('<tool_call>\n{"name": "get_weather", "arguments": {"city": "Oslo"}}\n</tool_call><|im_end|>\n'
                 "<|im_start|>user\n<tool_response>\n4 °C, rain\n</tool_response><|im_end|>\n<|im_start|>assistant\n")
+        whole.append(prompts[-1])
         if msg["content"] != answer or not prompts[-1].endswith(want):
             failed += 1
             print(f"FAIL after a client's tool ran, {name}: {msg}\n{prompts[-1][-400:]}\n{log}")
         else:
             print(f"ok   after a client's tool ran, {name}")
+    # A turn told to call none has the prompt of every other turn, its tools
+    # too: the engine reads on from the chat it holds, not all of it again.
+    failed += report(whole[0] == whole[1] and '"name": "get_weather"' in whole[1],
+                     "told to call none: the same prompt as with tools, so nothing is read again", f"{whole[1][:500]}")
+    # A call the model writes in such a turn is not run: it is the answer's text.
+    msg, prompts, log = serve_turns(ts5, model, qwen, [CALL, CALL, CALL], dict(req, tools=[WEATHER, SEARCH], tool_choice="none"))
+    failed += report(not msg.get("tool_calls") and "web_search" in msg["content"] and len(prompts) == 1,
+                     "told to call none: a call the model writes anyway is not run", f"{msg}\n{log}")
+    # "auto": once a chat needed the search it stays offered, so its prompt starts the same from turn to turn.
+    chat = [{"role": "user", "content": "What is the latest PS5 firmware?"}, {"role": "assistant", "content": "It is 13.60."},
+            {"role": "user", "content": "Write a haiku about rain."}]
+    for name, ws, tools, offered in [("auto", "auto", [WEATHER], True), ("a plain chat", None, [], False)]:
+        r = {"messages": chat}
+        if tools:
+            r["tools"] = tools
+        if ws is not None:
+            r["web_search"] = ws
+        msg, prompts, log = serve_turns(ts5, model, qwen, ["Hello."], r)
+        has = '"name": "web_search"' in prompts[-1]
+        failed += report(has == offered and msg["content"] == "Hello.",
+                         f"the search stays offered in a chat that needed it once, {name}", f"offered {has}\n{prompts[-1][:600]}\n{log}")
     return failed
 
 
@@ -1409,7 +1432,8 @@ def test_wikipedia(ts5, model, tdir):
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Wikipedia)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_port}"
-    env = {k: v for k, v in os.environ.items() if k != "TAVILY_API_KEY"}
+    env = {k: v for k, v in os.environ.items() if k not in ("TAVILY_API_KEY", "TS5_ENCYCLOPEDIA")}
+    env["TS5_SEARCH_SOURCE"] = "wikipedia"
 
     def search(query, **more):
         before = len(Wikipedia.seen)
@@ -1465,7 +1489,7 @@ def test_wikipedia(ts5, model, tdir):
 
     # The server: offered only to a request that asks for a search.
     qwen = os.path.join(tdir, "Qwen-Qwen2.5-7B-Instruct.jinja")
-    wiki = {"TS5_WIKIPEDIA_URL": url}
+    wiki = {"TS5_WIKIPEDIA_URL": url, "TS5_SEARCH_SOURCE": "wikipedia"}
     cases = [
         # name, the user's message, "web_search", tools of the client's, more environment, offered
         ("asked for, a question for the web", "What is the latest PS5 firmware?", "auto", [WEATHER], {}, True),
@@ -1505,6 +1529,190 @@ def test_wikipedia(ts5, model, tdir):
         failed += report((caps["web_search"], caps["web_search_source"]) == want, f"/v1/models says where a search goes, {name}",
                          f"{caps}")
     srv.shutdown()
+    return failed
+
+
+def duck_result(title, address, passage, ad=False):
+    """One result of html.duckduckgo.com/html as it came to a PS5 on 2026-11-17."""
+    link = ("https://duckduckgo.com/y.js?ad_domain=example.com&amp;ad_provider=bingv7aa&amp;u3=" + urllib.parse.quote(address, safe="")
+            if ad else "//duckduckgo.com/l/?uddg=" + urllib.parse.quote(address, safe="") + "&amp;rut=0f3a9c")
+    shown = address.split("://", 1)[1]
+    return f"""
+            <div class="result results_links results_links_deep {'result--ad' if ad else 'web-result'} ">
+              <div class="links_main links_deep result__body">
+                <h2 class="result__title">
+                  <a rel="nofollow" class="result__a" href="{link}">{title}</a>
+                </h2>
+                <div class="result__extras"><div class="result__extras__url">
+                  <span class="result__icon"><a rel="nofollow" href="{link}"><img class="result__icon__img" width="16" height="16" alt="" src="//external-content.duckduckgo.com/ip3/x.ico" name="i15" /></a></span>
+                  <a class="result__url" href="{link}">
+                  {shown}
+                  </a>
+                  <span>&nbsp; &nbsp; 2026-11-02T00:00:00.0000000</span>
+                </div></div>
+                {'<a class="result__snippet" href="' + link + '">' + passage + '</a>' if passage else ''}
+                <div class="clear"></div>
+              </div>
+            </div>"""
+
+
+class DuckDuckGo(http.server.BaseHTTPRequestHandler):
+    """DuckDuckGo's results page that needs no scripts. A search with "robots" in it gets its
+    check for robots (HTTP 202), one with "nothing" no results, one with "broken" another page."""
+    seen = []
+
+    def do_GET(self):
+        u = urllib.parse.urlsplit(self.path)
+        q = urllib.parse.parse_qs(u.query).get("q", [""])[0]
+        DuckDuckGo.seen.append((self.path, q, dict(self.headers)))
+        status = 200
+        if u.path != "/html/":
+            status, page = 404, "<html><body>Not here.</body></html>"
+        elif "robots" in q:
+            status = 202
+            page = ('<html><body><div class="anomaly-modal__mask"><div class="anomaly-modal__modal">'
+                    '<div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>'
+                    '<div class="anomaly-modal__description">Please complete the following challenge.</div>'
+                    '</div></div><script src="/anomaly.js"></script></body></html>')
+        elif "nothing" in q:
+            page = ('<html><body><div id="links" class="results"><div class="no-results">No  results.</div></div></body></html>')
+        elif "broken" in q:
+            page = "<html><body><p>Something else entirely.</p></body></html>"
+        else:
+            results = [
+                duck_result("An advertisement", "https://ads.example.com/buy", "Buy <b>Node.js</b> now.", ad=True),
+                duck_result("<b>Node.js</b> &mdash; Download Node.js&reg;", "https://nodejs.org/en/download?x=1&y=2",
+                            "<b>Node.js</b>&reg; is a free, open-source,\n   cross-platform JavaScript runtime. Download   it for <b>Debian</b> 13."),
+                duck_result("How to Install Node.js on Debian 13 &quot;Trixie&quot;", "https://linuxize.com/post/node-debian-13/",
+                            "Three ways to install it: apt, NodeSource and nvm."),
+                duck_result("No passage here", "https://example.org/no passage/café", ""),
+            ] + [duck_result(f"Result {i}", f"https://example.net/{i}", f"Passage {i}. " + "word " * 300) for i in range(4, 11)]
+            page = ('<html><head><title>' + q + ' at DuckDuckGo</title></head><body><div id="links" class="results">' +
+                    "".join(results) + '<div class="nav-link"><form action="/html/" method="post">'
+                    '<input type="submit" class="btn btn--alt" value="Next" /><input type="hidden" name="q" value="x" />'
+                    '<input type="hidden" name="s" value="10" /></form></div></div></body></html>')
+        body = page.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=UTF-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+def test_web_results(ts5, model, tdir):
+    """Without a key the search is a regular web search (DuckDuckGo's results page), and when
+    that can't be searched Grokipedia, then Wikipedia."""
+    failed = 0
+    dsrv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), DuckDuckGo)
+    gsrv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Grokipedia)
+    wsrv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Wikipedia)
+    for srv in (dsrv, gsrv, wsrv):
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    durl, gurl, wurl = (f"http://127.0.0.1:{x.server_port}" for x in (dsrv, gsrv, wsrv))
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("TAVILY_API_KEY", "TS5_ENCYCLOPEDIA", "TS5_WIKIPEDIA", "TS5_SEARCH_SOURCE", "TS5_SEARCH_RESULTS")}
+    urls = {"TS5_DUCKDUCKGO_URL": durl, "TS5_GROKIPEDIA_URL": gurl, "TS5_WIKIPEDIA_URL": wurl}
+
+    def search(query, mode="ok", **more):
+        Grokipedia.mode = mode
+        d0, g0, w0 = len(DuckDuckGo.seen), len(Grokipedia.seen), len(Wikipedia.seen)
+        r = subprocess.run([ts5, "search", query], capture_output=True, text=True, timeout=60, env=dict(env, **dict(urls, **more)))
+        return r.returncode, r.stdout, r.stderr, DuckDuckGo.seen[d0:], Grokipedia.seen[g0:], Wikipedia.seen[w0:]
+
+    # The results: the sites' own addresses, plain text, no advertisement, eight of the ten.
+    rc, out, err, d, g, w = search("install node.js on debian 13")
+    ok = (rc == 0 and out.startswith(
+              'Web results for "install node.js on debian 13":\n\n'
+              "[1] Node.js — Download Node.js®\nhttps://nodejs.org/en/download?x=1&y=2\n"
+              "Node.js® is a free, open-source, cross-platform JavaScript runtime. Download it for Debian 13.\n\n"
+              '[2] How to Install Node.js on Debian 13 "Trixie"\nhttps://linuxize.com/post/node-debian-13/\n'
+              "Three ways to install it: apt, NodeSource and nvm.\n\n"
+              "[3] No passage here\nhttps://example.org/no passage/café\n\n[4] Result 4\nhttps://example.net/4\nPassage 4. word")
+          and "[8] Result 8\n" in out and "[9]" not in out and "advertisement" not in out and "duckduckgo.com" not in out
+          and " ...\n\n[5] Result 5" in out and out.rstrip().endswith("or say that it could not be found.")
+          and len(d) == 1 and d[0][0] == "/html/?q=install+node.js+on+debian+13" and not g and not w
+          and "8 results" in err and "DuckDuckGo)" in err and "searching the web by DuckDuckGo" in err)
+    failed += report(ok, "web search with no key: DuckDuckGo's results as plain text", f"rc {rc}\n{out}\n{err}\n{d}")
+    # Asked for as a Chrome on a Mac asks for a page.
+    h = {k.lower(): v for k, v in d[0][2].items()} if d else {}
+    ok = ("Macintosh" in h.get("user-agent", "") and "Chrome/" in h.get("user-agent", "") and h.get("sec-ch-ua-platform") == '"macOS"'
+          and h.get("sec-fetch-mode") == "navigate" and h.get("accept-language", "").startswith("en-US") and
+          "ts5" not in json.dumps(h).lower() and "tokenstation" not in json.dumps(h).lower())
+    failed += report(ok, "web search with no key: the request is a browser's", f"{h}")
+    rc, out, err, d, g, w = search("PS5", TS5_SEARCH_RESULTS="3")
+    failed += report(rc == 0 and "[3] No passage here" in out and "[4]" not in out, "web search with no key: TS5_SEARCH_RESULTS",
+                     f"rc {rc}\n{out}\n{err}")
+    rc, out, err, d, g, w = search("nothing at all")
+    failed += report(rc == 0 and out.startswith('The web search found nothing for "nothing at all".') and not g and not w and
+                     "0 results" in err, "web search with no key: no results is not a failure", f"rc {rc}\n{out}\n{err}")
+    # Its check for robots is not answered: Grokipedia is searched, and the model is told.
+    rc, out, err, d, g, w = search("robots black sea")
+    ok = (rc == 0 and out.startswith("(the web search (DuckDuckGo) refused this search, so this search went to an encyclopedia "
+                                     "instead: no news, prices or other live data.)\n\nGrokipedia articles for \"robots black sea\"")
+          and len(d) == 1 and g and not w and "answered HTTP 202" in err and "Grokipedia" in err)
+    failed += report(ok, "web search refused: Grokipedia in its place, said so", f"rc {rc}\n{out}\n{err}\n{d}")
+    # ... and Wikipedia when Grokipedia can't be searched either.
+    rc, out, err, d, g, w = search("robots PS5 firmware", mode="down")
+    ok = (rc == 0 and out.startswith("(the web search (DuckDuckGo) refused this search, so this search went to an encyclopedia")
+          and "(Grokipedia had a problem, so this search went to Wikipedia.)" in out and 'Wikipedia articles for "robots PS5 firmware"' in out
+          and len(d) == 1 and g and w)
+    failed += report(ok, "web search refused, Grokipedia down: Wikipedia", f"rc {rc}\n{out}\n{err}")
+    rc, out, err, d, g, w = search("robots PS5 firmware", mode="down", TS5_WIKIPEDIA_URL="http://127.0.0.1:9")
+    failed += report(rc == 1 and out.startswith("The search failed: the web search (DuckDuckGo) refused this search, and no "
+                                                "encyclopedia could be searched in its place."),
+                     "web search refused and no encyclopedia answers: the search failed", f"rc {rc}\n{out}\n{err}")
+    rc, out, err, d, g, w = search("broken page")
+    failed += report(rc == 0 and out.startswith("(the web search (DuckDuckGo) sent a page without results, so this search went to an "
+                                                "encyclopedia") and g, "a page that is no results page: an encyclopedia", f"rc {rc}\n{out}\n{err}")
+    rc, out, err, d, g, w = search("PS5 firmware", TS5_DUCKDUCKGO_URL="http://127.0.0.1:9")
+    failed += report(rc == 0 and out.startswith("(the web search (DuckDuckGo) couldn't be reached, so this search went to an "
+                                                "encyclopedia") and g, "DuckDuckGo not reached: an encyclopedia", f"rc {rc}\n{out}\n{err}")
+    # The older setting still counts, and the new one wins over it.
+    rc, out, err, d, g, w = search("PS5 firmware", TS5_ENCYCLOPEDIA="wikipedia")
+    failed += report(rc == 0 and out.startswith('Wikipedia articles for "PS5 firmware"') and not d,
+                     "TS5_ENCYCLOPEDIA alone still picks the encyclopedia", f"rc {rc}\n{out}\n{err}")
+    rc, out, err, d, g, w = search("PS5 firmware", TS5_ENCYCLOPEDIA="wikipedia", TS5_SEARCH_SOURCE="web")
+    failed += report(rc == 0 and out.startswith('Web results for "PS5 firmware"') and len(d) == 1 and not w,
+                     "TS5_SEARCH_SOURCE wins over TS5_ENCYCLOPEDIA", f"rc {rc}\n{out}\n{err}")
+
+    # The server: offered to a request that asks for a search, with the web's words.
+    Grokipedia.mode = "ok"
+    qwen = os.path.join(tdir, "Qwen-Qwen2.5-7B-Instruct.jinja")
+    for name, text, ws, src, offered in [
+            ("asked for, a question for the web", "What is the latest PS5 firmware?", "auto", None, True),
+            ("asked for, a question that needs none", "Write a haiku about rain.", "auto", None, False),
+            ("on", "Write a haiku about rain.", True, None, True),
+            ("not asked for", "What is the latest PS5 firmware?", None, None, False),
+            ("the request asks for the web on a machine set to Wikipedia", "Look up the Danube.", "auto", "web", True)]:
+        req = {"messages": [{"role": "user", "content": text}]}
+        if ws is not None:
+            req["web_search"] = ws
+        more = dict(urls)
+        if src:
+            req["web_search_source"] = src
+            more["TS5_SEARCH_SOURCE"] = "wikipedia"
+        msg, prompts, log = serve_turns(ts5, model, qwen, ["Hello."], req, key="", more_env=more)
+        has = '"name": "web_search"' in prompts[-1]
+        words = "Search the web. Returns the top results, each with a title, URL and a short passage" in prompts[-1]
+        failed += report(has == offered and words == offered and msg["content"] == "Hello.",
+                         f"web search with no key in the server, {name}", f"offered {has}\n{prompts[-1][:900]}\n{log}")
+    before = len(DuckDuckGo.seen)
+    msg, prompts, log = serve_turns(ts5, model, qwen, [CALL, "Done.", "Final answer."],
+                                    {"messages": [{"role": "user", "content": "Look up the PS5 firmware."}], "web_search": True},
+                                    key="", more_env=urls)
+    ok = (msg["content"] == "Done." and len(DuckDuckGo.seen) - before == 1 and 'Web results for "PS5 firmware"' in prompts[-1] and
+          "[1] Node.js" in prompts[-1])
+    failed += report(ok, "web search with no key in the server: the answer from a search", f"{msg}\n{prompts[-1][-1500:]}\n{log}")
+    models, _, _ = serve_turns(ts5, model, qwen, ["Hello."], None, key="", more_env=urls)
+    caps = models["data"][0]["capabilities"]
+    failed += report((caps["web_search"], caps["web_search_source"]) == (False, "web") and "web" in caps.get("search_sources", []) and
+                     caps.get("encyclopedias") == ["wikipedia", "grokipedia", "both"],
+                     "/v1/models: a search with no key goes to the web, and a request can pick", f"{caps}")
+    for srv in (dsrv, gsrv, wsrv):
+        srv.shutdown()
     return failed
 
 
@@ -1651,7 +1859,7 @@ def test_grokipedia(ts5, model, tdir):
     for srv in (gsrv, wsrv):
         threading.Thread(target=srv.serve_forever, daemon=True).start()
     gurl, wurl = f"http://127.0.0.1:{gsrv.server_port}", f"http://127.0.0.1:{wsrv.server_port}"
-    env = {k: v for k, v in os.environ.items() if k not in ("TAVILY_API_KEY", "TS5_ENCYCLOPEDIA", "TS5_WIKIPEDIA")}
+    env = {k: v for k, v in os.environ.items() if k not in ("TAVILY_API_KEY", "TS5_ENCYCLOPEDIA", "TS5_WIKIPEDIA", "TS5_SEARCH_SOURCE")}
     urls = {"TS5_GROKIPEDIA_URL": gurl, "TS5_WIKIPEDIA_URL": wurl}
 
     def search(query, mode="ok", **more):
@@ -1800,7 +2008,7 @@ def test_grokipedia(ts5, model, tdir):
             ("this machine's is Grokipedia", None, grok, "Search Grokipedia (xAI's", ["Grokipedia articles for"]),
             ("the request asks for Wikipedia on a machine set to Grokipedia", "wikipedia", grok,
              "Search Wikipedia. Returns the top articles", ["Wikipedia articles for"]),
-            ("a source ts5 doesn't know is this machine's", "bing", {}, "Search Wikipedia. Returns the top articles",
+            ("a source ts5 doesn't know is this machine's", "bing", {"TS5_SEARCH_SOURCE": "wikipedia"}, "Search Wikipedia. Returns the top articles",
              ["Wikipedia articles for"])]:
         req = {"messages": [{"role": "user", "content": "Look up the PS5 firmware."}], "web_search": True}
         if src:
@@ -1820,7 +2028,7 @@ def test_grokipedia(ts5, model, tdir):
                                      "web_search_source": "grokipedia"}, key="tvly-test", more_env=urls)
     failed += report("Search the web. Returns the top results" in prompts[0] and "Grokipedia" not in prompts[0],
                      "with a web search key the search is the web's, whatever the request picks", prompts[0][:600])
-    for name, key, more, want in [("no key", "", {}, "wikipedia"), ("no key, Grokipedia", "", grok, "grokipedia"),
+    for name, key, more, want in [("no key", "", {"TS5_SEARCH_SOURCE": "wikipedia"}, "wikipedia"), ("no key, Grokipedia", "", grok, "grokipedia"),
                                   ("no key, both", "", both, "both"), ("a key", "tvly-test", grok, "tavily")]:
         models, _, _ = serve_turns(ts5, model, qwen, ["Hello."], None, key=key, more_env=dict(urls, **more))
         caps = models["data"][0]["capabilities"]
@@ -2099,7 +2307,7 @@ def main():
     failed = (test_prompts(ts5, model, tdir) + test_parser(ts5) + test_search(ts5) + test_search_loop(ts5, model, tdir) +
               test_gemma4_thinking(ts5, model, tdir) + test_every_model_has_tools(ts5, model, tdir) +
               test_thinking_marks(ts5, model, tdir) + test_page_reader(ts5) +
-              test_client_tools_and_search(ts5, model, tdir) + test_wikipedia(ts5, model, tdir) + test_grokipedia(ts5, model, tdir) +
+              test_client_tools_and_search(ts5, model, tdir) + test_wikipedia(ts5, model, tdir) + test_web_results(ts5, model, tdir) + test_grokipedia(ts5, model, tdir) +
               test_thinking_guard(ts5, model, tdir) + test_text_calls(ts5, model, tdir) +
               test_stop_words(ts5, model, tdir) + test_steady_calls(ts5, model, tdir) +
               test_steer_notes(ts5, model, tdir))

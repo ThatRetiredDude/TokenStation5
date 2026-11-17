@@ -17,11 +17,18 @@
 //                        ("en" by default, "sk", "de" ...), or "off" for none
 //   TS5_WIKIPEDIA_URL    another endpoint with MediaWiki's API (default
 //                        https://LANGUAGE.wikipedia.org)
-//   TS5_ENCYCLOPEDIA     the encyclopedia searched without a key: "wikipedia"
-//                        (the default), "grokipedia" (grokipedia.com, xAI's,
+//   TS5_SEARCH_SOURCE    what is searched without a key: "web" (the default:
+//                        a regular web search, DuckDuckGo's results page; when
+//                        that can't be searched, Grokipedia is, then
+//                        Wikipedia), "grokipedia" (grokipedia.com, xAI's,
 //                        through the site's own search; when that can't be
-//                        searched, Wikipedia is) or "both". A request picks
-//                        one with "web_search_source". Not on the console.
+//                        searched, Wikipedia is), "wikipedia" or "both" (the
+//                        two encyclopedias). A request picks one with
+//                        "web_search_source". Not on the console.
+//   TS5_ENCYCLOPEDIA     the older name, for the encyclopedias alone: where
+//                        it is set and TS5_SEARCH_SOURCE is not, it counts.
+//   TS5_DUCKDUCKGO_URL   another address with DuckDuckGo's results page
+//                        (default https://html.duckduckgo.com)
 //   TS5_GROKIPEDIA_URL   another address with Grokipedia's search (default
 //                        https://grokipedia.com)
 #pragma once
@@ -35,13 +42,16 @@ namespace ts5 {
 // TAVILY_API_KEY, or "".
 std::string tavily_key();
 
-// Where a search goes: "tavily" with a key, else an encyclopedia:
-// "wikipedia", "grokipedia" or "both" (asked: a request's
-// "web_search_source", else TS5_ENCYCLOPEDIA, else Wikipedia), or "none"
-// (TS5_WIKIPEDIA=off and no Grokipedia).
+// Where a search goes: "tavily" with a key, else "web" (a regular web
+// search that needs no key) or an encyclopedia: "wikipedia", "grokipedia"
+// or "both" (asked: a request's "web_search_source", else
+// TS5_SEARCH_SOURCE, else TS5_ENCYCLOPEDIA, else the web), or "none"
+// (Wikipedia chosen with TS5_WIKIPEDIA=off; the console without a key).
 std::string search_source(const std::string &asked = "");
 // "wikipedia", "grokipedia" or "both": a search of encyclopedias alone.
 bool is_encyclopedia(const std::string &source);
+// "web" or an encyclopedia: a search with no key, for a request that asks.
+bool is_keyless(const std::string &source);
 
 // Whether a chat's last user message looks like it needs the web: it asks to
 // look something up or names a website, or it asks about what changes (news,

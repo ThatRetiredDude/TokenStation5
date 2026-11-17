@@ -138,6 +138,11 @@ struct Chat {
     // And for a change on GitHub (the github tool; anything but GET): ask_kind
     // 5, the body a line each in ask_preview, with "every GitHub change, this chat".
     std::atomic<bool> ask_always_github{false};
+    // And when a message's tool steps are used up and the model asks for
+    // more (answer_loop): ask_kind 6, ask_opt says how many were used, and
+    // the choices are go on, don't ask again for this message
+    // (ask_more_always), and no, answer now.
+    std::atomic<bool> ask_more_always{false};
     std::string command;  // a slash command for the app to run
     std::vector<std::string> cands;  // Tab's candidates
     int cand_i = -1;

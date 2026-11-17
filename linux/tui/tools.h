@@ -28,6 +28,9 @@ struct ToolSwitches {
     // A command, and a button or typing on a page, wait for the user's
     // yes; false: they go without asking (the user's choice in Settings).
     bool terminal_ask = true, browser_ask = true;
+    // The steps of tool calls one message gets before the user is asked
+    // whether the model should go on (0: never asked).
+    int steps = 50;
     // read_file, list_folder, edit_file, write_file (files.h). files_ask
     // false: they read and change without asking.
     bool files = false, files_ask = true;

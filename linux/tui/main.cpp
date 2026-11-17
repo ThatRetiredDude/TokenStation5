@@ -352,7 +352,8 @@ void browser_offer() {
     g->cfg.save();
     g->ask_title = " A browser for the model? ";
     g->ask_text = "No browser is installed here, so the model reads pages as plain text: their scripts don't run, and only "
-                  "links and simple forms work. A browser shows it the page as you would see it.";
+                  "links and simple forms work. Most sites need their scripts: Chromium shows the model the page as you "
+                  "would see it.";
     g->pick = {
         {"Chromium", "the full browser, from this system's packages (your sudo password)",
          [] { browser_install("chromium"); }},
@@ -432,8 +433,9 @@ void poll_once() {
             s.web_search = m["capabilities"]["web_search"].boolean(false);
             {
                 const std::string src = m["capabilities"]["web_search_source"].str();
-                s.wikipedia = src == "wikipedia" || src == "grokipedia" || src == "both";
+                s.wikipedia = src == "web" || src == "wikipedia" || src == "grokipedia" || src == "both";
                 s.encyclopedias = !m["capabilities"]["encyclopedias"].a.empty();
+                for (auto &x : m["capabilities"]["search_sources"].a) s.web_sources = s.web_sources || x.str() == "web";
             }
             if (m.o.count("helper")) {
                 s.helper_known = true;
@@ -650,9 +652,14 @@ std::string memory_words(const std::string &why) {
 // What a search without a web search key goes to, by name: the setting, on
 // a server that takes it.
 std::string encyclopedia_name() {
-    if (!server().encyclopedias) return "Wikipedia";
+    const ServerState sv = server();
+    if (!sv.encyclopedias) return "Wikipedia";
+    // (A ts5 before 1.2.2 takes "web" for its own choice: Wikipedia, unless it was set up otherwise.)
+    if (g->cfg.search_source == "web") return sv.web_sources ? "the web (DuckDuckGo)" : "Wikipedia";
     return g->cfg.search_source == "grokipedia" ? "Grokipedia" : g->cfg.search_source == "both" ? "Wikipedia and Grokipedia" : "Wikipedia";
 }
+// The search without a key is a regular web search, not an encyclopedia.
+bool keyless_web() { return g->cfg.search_source == "web" && server().web_sources; }
 
 // ---- Access: who can reach this TokenStation5, and with which key ----
 
@@ -1956,6 +1963,7 @@ ChatRequest chat_request() {
     rq.tools.memory = tools && g->cfg.tool_memory;
     rq.tools.browser = tools && g->cfg.tool_browser;
     rq.tools.terminal_ask = g->cfg.terminal_ask;
+    rq.tools.steps = g->cfg.tool_steps;
     rq.tools.sandbox = g->cfg.sandbox && sandbox_ready();
     rq.tools.sandbox_net = g->cfg.sandbox_net;
     rq.tools.browser_ask = g->cfg.browser_ask;
@@ -3107,7 +3115,10 @@ std::vector<SetRow> settings_rows() {
         SetRow x{"Web search key", c.web_key.empty() ? (sv.web_search ? "the server's own" : "none")
                                                      : std::string(std::min<size_t>(c.web_key.size(), 12), '*'),
                  sv.web_search         ? "on: the loaded model searches the web when a question needs it"
-                 : c.web_key.empty()   ? (sv.wikipedia ? "without a key: " + encyclopedia_name() + " only; a free one from app.tavily.com adds the web"
+                 : c.web_key.empty()   ? (sv.wikipedia && keyless_web()
+                                              ? std::string("without a key the web is searched through DuckDuckGo; a free key from "
+                                                            "app.tavily.com gives more of each page's text")
+                                          : sv.wikipedia ? "without a key: " + encyclopedia_name() + " only; a free one from app.tavily.com adds the web"
                                                        : std::string("a free key from app.tavily.com lets a model ts5-tui loads "
                                                                      "search the web"))
                  : sv.online && own_server_pid() <= 0
@@ -3146,9 +3157,13 @@ std::vector<SetRow> settings_rows() {
     if (tools_shown) {
         const ServerState sv = server();
         SetRow x{"Tool: search",
-                 !c.tool_web ? "off" : sv.web_search ? "on" : sv.wikipedia ? "on, " + encyclopedia_name() + " only" : "on, needs the key",
+                 !c.tool_web ? "off" : sv.web_search ? "on" : sv.wikipedia && keyless_web() ? "on, DuckDuckGo"
+                 : sv.wikipedia ? "on, " + encyclopedia_name() + " only" : "on, needs the key",
                  !c.tool_web       ? "the model never searches the web"
                  : sv.web_search   ? "the model searches the web when a question needs it"
+                 : sv.wikipedia && keyless_web()
+                     ? "the model searches the web through DuckDuckGo when a question needs it; when that can't be "
+                       "searched, Grokipedia, then Wikipedia"
                  : sv.wikipedia    ? "looks things up on " + encyclopedia_name() + " only; a web search key gives it the web"
                                    : "it searches once a web search key is set and the model is loaded again"};
         x.change = [save](int) {
@@ -3156,21 +3171,24 @@ std::vector<SetRow> settings_rows() {
             save();
         };
         r.push_back(x);
-        // Which encyclopedia, while there is no key for the web.
+        // What is searched, while there is no key: the web, or an encyclopedia.
         if (c.tool_web && !sv.web_search && sv.wikipedia) {
-            static const char *const ids[] = {"wikipedia", "grokipedia", "both"};
-            static const char *const names[] = {"Wikipedia", "Grokipedia", "Both"};
-            int at = 0;
-            for (int i = 0; i < 3; i++)
+            // (A ts5 before 1.2.2 has the encyclopedias alone.)
+            static const char *const ids[] = {"web", "grokipedia", "wikipedia", "both"};
+            static const char *const names[] = {"Web", "Grokipedia", "Wikipedia", "Both encyclopedias"};
+            const int first = sv.web_sources ? 0 : 1, n = 4 - first;
+            int at = sv.web_sources ? 0 : 2;
+            for (int i = first; i < 4; i++)
                 if (c.search_source == ids[i]) at = i;
             SetRow y{"Search source", sv.encyclopedias ? names[at] : "Wikipedia",
                      !sv.encyclopedias ? "this server searches Wikipedia only (a ts5 before Grokipedia)"
-                     : at == 0         ? "Wikipedia, the encyclopedia people write"
+                     : at == 0         ? "a regular web search, through DuckDuckGo; when it can't be searched, Grokipedia, then Wikipedia"
                      : at == 1         ? "Grokipedia, xAI's encyclopedia, written by its AI; if it can't be searched, Wikipedia is"
+                     : at == 2         ? "Wikipedia, the encyclopedia people write"
                                        : "each search asks Wikipedia and Grokipedia, and the model gets both lists"};
             if (sv.encyclopedias)
-                y.change = [save, at](int d) {
-                    g->cfg.search_source = ids[(at + d + 3) % 3];
+                y.change = [save, at, first, n](int d) {
+                    g->cfg.search_source = ids[first + (at - first + (d < 0 ? n - 1 : 1)) % n];
                     save();
                 };
             r.push_back(y);
@@ -3196,6 +3214,23 @@ std::vector<SetRow> settings_rows() {
             const int at = !g->cfg.tool_terminal ? 0 : g->cfg.terminal_ask ? 1 : 2, to = (at + (d < 0 ? 2 : 1)) % 3;
             g->cfg.tool_terminal = to != 0;
             g->cfg.terminal_ask = to != 2;
+            save();
+        };
+        r.push_back(x);
+    }
+    if (tools_shown) {
+        // How many steps of tool calls a message gets before the question.
+        SetRow x{"Tool steps", c.tool_steps > 0 ? std::to_string(c.tool_steps) : "no limit",
+                 c.tool_steps > 0 ? fmt("after %d steps of tool calls for one message, ts5-tui asks whether the model should go "
+                                        "on; a model that only repeats itself is stopped sooner", c.tool_steps)
+                                  : "the model is never asked to stop for the number of steps; a model that only repeats itself "
+                                    "is still stopped"};
+        x.change = [save](int d) {
+            static const int steps[] = {12, 25, 50, 100, 0};
+            int at = 2;
+            for (int i = 0; i < 5; i++)
+                if (g->cfg.tool_steps == steps[i]) at = i;
+            g->cfg.tool_steps = steps[(at + (d < 0 ? 4 : 1)) % 5];
             save();
         };
         r.push_back(x);
@@ -4617,8 +4652,8 @@ void run_command(const std::string &line) {
         };
         Config &f = g->cfg;
         const Row rows[] = {
-            {"search", "searches when a question needs it (the server does it: the whole web with a web search key; "
-                       "without one an encyclopedia: `/tools search wikipedia`, `grokipedia` or `both`)", &f.tool_web},
+            {"search", "searches when a question needs it (the server does it: with a web search key through Tavily; "
+                       "without one `/tools search web` (DuckDuckGo), `grokipedia`, `wikipedia` or `both`)", &f.tool_web},
             {"pages", "reads a web page you give it a link to", &f.tool_page},
             {"terminal", "runs a command on this machine; you see each one first and say yes or no", &f.tool_terminal},
             {"files", "reads and lists files, and changes them: you see each change, lines out and lines in, and say "
@@ -4652,6 +4687,22 @@ void run_command(const std::string &line) {
             }
             found = true;
             show_toast("The model asks before each command, each button and each outside tool again", g->th->accent, 3);
+        } else if (name == "steps") {
+            // "/tools steps 100": how many steps of tool calls a message
+            // gets before the question; "/tools steps off": never asked.
+            found = true;
+            const int n = to == "off" || to == "none" || to == "0" ? 0 : atoi(to.c_str());
+            if (to.empty() || (n <= 0 && to != "off" && to != "none" && to != "0")) {
+                show_toast(f.tool_steps > 0 ? fmt("Tool steps: %d a message, then ts5-tui asks  (/tools steps N, or off)", f.tool_steps)
+                                            : "Tool steps: no limit  (/tools steps N)",
+                           g->th->accent, 4);
+            } else {
+                f.tool_steps = std::min(n, 100000);
+                f.save();
+                show_toast(n > 0 ? fmt("Tool steps: after %d for one message, ts5-tui asks whether the model should go on", f.tool_steps)
+                                 : "Tool steps: no limit (a model that only repeats itself is still stopped)",
+                           g->th->accent, 4);
+            }
         } else if ((name == "on" || name == "off") && to.empty()) {
             // The one switch over them all.
             found = true;
@@ -4676,14 +4727,15 @@ void run_command(const std::string &line) {
                                                   : nullptr;
             found = true;
             const bool browser_was = f.tool_browser;
-            if (r.on == &f.tool_web && (to == "wikipedia" || to == "grokipedia" || to == "both")) {
-                // The encyclopedia searched without a web search key.
+            if (r.on == &f.tool_web && (to == "web" || to == "wikipedia" || to == "grokipedia" || to == "both")) {
+                // What is searched without a web search key.
                 f.search_source = to;
                 f.tool_web = true;
                 f.save();
                 const ServerState sv = server();
-                show_toast(sv.web_search ? "Search source: " + to + " (used when there is no web search key; now the web is searched)"
+                show_toast(sv.web_search ? "Search source: " + to + " (used when there is no web search key; now Tavily searches the web)"
                            : sv.online && !sv.encyclopedias ? "This server searches Wikipedia only (a ts5 before Grokipedia)"
+                           : sv.online && to == "web" && !sv.web_sources ? "This server has no web search without a key (a ts5 before 1.2.2): it searches Wikipedia"
                                                             : "Search: " + encyclopedia_name(),
                            g->th->accent, 5);
                 continue;
@@ -4741,9 +4793,13 @@ void run_command(const std::string &line) {
                 h += "\nButtons and typing on web pages go **without asking** in this chat (you chose that). `/tools ask` "
                      "brings the question back.";
             const ServerState sv = server();
-            if (f.tool_web && !sv.web_search && sv.wikipedia)
+            if (f.tool_web && !sv.web_search && sv.wikipedia && keyless_web())
+                h += "\nThe search is a regular **web search through DuckDuckGo** (when it can't be searched: Grokipedia, then "
+                     "Wikipedia). `/tools search grokipedia`, `wikipedia` or `both` searches an encyclopedia instead, "
+                     "`/tools search web` the web again.";
+            else if (f.tool_web && !sv.web_search && sv.wikipedia)
                 h += "\nWithout a web search key the search is **" + encyclopedia_name() + " only** (no news, prices or weather; "
-                     "`/tools search wikipedia`, `grokipedia` or `both` picks the encyclopedia). For the "
+                     "`/tools search web` searches the web, `wikipedia`, `grokipedia` or `both` picks the encyclopedia). For the "
                      "whole web: Settings → Web search key (a free one from app.tavily.com), then load the model again.";
             else if (f.tool_web && !sv.web_search)
                 h += "\nThe web search waits for a key: Settings → Web search key (a free one from app.tavily.com), "
@@ -7464,7 +7520,8 @@ void tick() {
     if (g->chat.ask.load() == 1 && g->cur != CHAT && g->ask_told != g->chat.ask_t0.load()) {
         g->ask_told = g->chat.ask_t0.load();
         const int kind = g->chat.ask_kind.load();
-        show_toast(kind == 5   ? "The model wants to change something on GitHub: F1 (or /chat) to see it and say yes or no"
+        show_toast(kind == 6   ? "The model has used this message's tool steps: F1 (or /chat) to let it go on or not"
+                   : kind == 5 ? "The model wants to change something on GitHub: F1 (or /chat) to see it and say yes or no"
                    : kind == 4 ? "The model wants to use an outside tool: F1 (or /chat) to see it and say yes or no"
                    : kind == 3 ? "The model wants to read a file or list a folder: F1 (or /chat) to see it and say yes or no"
                    : kind == 2 ? "The model wants to change a file: F1 (or /chat) to see it and say yes or no"

@@ -73,6 +73,13 @@ cd tokenstation-linux-amd64
 ./install.sh
 ```
 
+On Debian and Fedora the package brings Chromium with it, as the browser
+a model in ts5-tui reads web pages with (a recommended package: `apt` and
+`dnf` install those by default). `sudo apt install --no-install-recommends
+./tokenstation_latest_amd64.deb` (or `dnf install --setopt=install_weak_deps=False ...`)
+leaves it out, and pages are then read as plain text. Ubuntu has Chromium
+only as a snap, which the package doesn't pull in.
+
 A `linux-v<version>` release has the same files under versioned names:
 
 **Debian 12 or 13, and Ubuntu**: the `.deb`.
@@ -537,10 +544,15 @@ ts5-tui --url http://ps5.local:8081  # another one
   [app.tavily.com](https://app.tavily.com). A model ts5-tui loads itself
   then searches the web when a question needs it (models that use tools;
   see [docs/WEB_SEARCH.md](../docs/WEB_SEARCH.md)). Without a key the
-  search is an encyclopedia's: Settings → Search source (or
-  `/tools search wikipedia`, `grokipedia`, `both`) picks **Wikipedia**
-  (the default), **Grokipedia** (xAI's encyclopedia, written by its AI;
-  when it can't be searched, Wikipedia is) or **Both**. The key is kept in
+  search is still a regular web search: the results of DuckDuckGo (title,
+  address and a line or two of each page), and the model opens the pages
+  it needs. When DuckDuckGo can't be searched (it asks for a puzzle to be
+  solved, or doesn't answer) the search goes to Grokipedia, and when that
+  can't be searched either, to Wikipedia, and the model is told which it
+  got. Settings → Search source (or `/tools search web`, `grokipedia`,
+  `wikipedia`, `both`) picks: **Web** (the default), **Grokipedia** (xAI's
+  encyclopedia, written by its AI; when it can't be searched, Wikipedia
+  is), **Wikipedia**, or **Both** encyclopedias. The key is kept in
   ts5-tui's own settings file (yours alone to read) and handed to the
   engine in its environment, never on a command line. For the API-only
   service, add `TAVILY_API_KEY=tvly-...` to `/etc/default/tokenstation`
@@ -620,8 +632,8 @@ ts5-tui --url http://ps5.local:8081  # another one
     then `sudo apparmor_parser -r /etc/apparmor.d/bwrap`. Debian and Fedora
     need nothing. `ts5-tui --run-command 'ls ~'` runs one command the way
     the model's do and prints what the model would get back.
-  - **Browser** (off until you switch it on: Settings → Tool: browser, or
-    `/tools browser on`): the model opens a page and gets it as text with
+  - **Browser** (on; Settings → Tool: browser, or `/tools browser off`,
+    switches it off): the model opens a page and gets it as text with
     every link, text box and button numbered (`the Volga[3]`,
     `[4: text box "Search"]`, `[5: button "Go"]`), and acts on the
     numbers: it follows a link, types into a box, presses a button, reads
@@ -635,20 +647,23 @@ ts5-tui --url http://ps5.local:8081  # another one
 
     Settings → Browser (or `/browser`) says what shows the pages:
     - **Auto**: Chromium (or Chrome, Brave, Edge) if one is installed,
-      else the text view.
-    - **No browser installed?** The first time you switch the browser
-      tool on without one (none found, and none named with
-      `/browser PATH`), ts5-tui asks which to install (arrows and
+      else the text view. Chromium comes with the package: the .deb and
+      the .rpm recommend it, so `apt` and `dnf` install it beside
+      TokenStation5 (on Arch it is an optional dependency:
+      `sudo pacman -S chromium`). Most sites need their scripts to show
+      anything, which only a browser runs.
+    - **No browser installed?** Until one is, pages are read in the text
+      view. `/browser install` asks which to install (arrows and
       Enter; it starts on Neither, so an Enter meant for something else
       installs nothing): **Chromium** from your system's packages (`apt-get`, `dnf`,
-      `pacman` or `zypper`; sudo asks for your password; on Debian 13 it
-      is the small `chromium-headless-shell`), **Obscura** into your home
+      `pacman` or `zypper`; sudo asks for your password; the full
+      browser, or Debian's `chromium-headless-shell` where there is no
+      other), **Obscura** into your home
       folder (a 72 MB download from its makers' GitHub release, 150 MB
       once unpacked, checked against a SHA-256 built into ts5, no
       password), or **Neither**. ts5-tui
       steps aside while the install runs and comes back when you press
-      Enter. `/browser install` asks again, and
-      `ts5-tui --install-browser chromium|obscura` does it without the
+      Enter. `ts5-tui --install-browser chromium|obscura` does it without the
       app (`--dry-run` only says what it would run).
     - **Chromium**: the full browser, without a window, each page shut in
       its sandbox. On a PS5 beside a loaded 14B model it took 155 MiB
@@ -702,8 +717,9 @@ ts5-tui --url http://ps5.local:8081  # another one
     own. `TS5_BROWSER_AGENT=linux` in ts5-tui's environment makes it
     Chrome on Linux instead; `TS5_BROWSER_AGENT=own` leaves the browser
     its own words and sends the text view's requests as "TokenStation5".
-    The searches (Wikipedia's and Grokipedia's APIs, Tavily) name ts5,
-    as services made for programs ask. That is all ts5 does about it: a
+    The web search without a key asks for DuckDuckGo's results page the
+    same way. The searches made through a service's API (Wikipedia's,
+    Grokipedia's, Tavily) name ts5, as services made for programs ask. That is all ts5 does about it: a
     site that still tests for a person (a captcha, a "checking your
     browser" page) is left closed, and the model says so.
   - **Files** (off until you switch it on: Settings → Tool: files, or
@@ -779,10 +795,16 @@ ts5-tui --url http://ps5.local:8081  # another one
   own: with a small model, keep the questions on. A web page is text from
   a stranger: with "every command" chosen, a page the model reads could
   talk it into a command, so leave the question on when it reads pages you
-  don't trust. A model that keeps calling tools gets twelve rounds for one
-  message, then has to answer; reading on down a page or a file is not
-  counted (up to 48 turns in all). If it asks for more after that, the
-  chat says so, and "go on" gives it twelve more.
+  don't trust. A model that keeps calling tools gets 50 steps for one
+  message (Settings → Tool steps: 12, 25, 50, 100 or no limit; `/tools
+  steps N`); reading on down a page or a file is not counted. Then
+  ts5-tui asks whether it should go on: **Go on** gives it as many again,
+  **Don't ask again for this message** lets it run until it is done or
+  you press Esc, **No, answer now** has it say what is done and what is
+  not. A model that only repeats itself doesn't get that far: a call it
+  made before in the same message, with the same result back, is marked
+  "the same as before" and the model is told so, and after three in a
+  row it has to answer and say what is in the way.
 - **Keys that can't surprise**: with something typed at the prompt, Tab
   stays there (it completes a command) instead of changing the page. PgUp
   and PgDn scroll the chat, and so do Shift or Alt with the up and down
@@ -909,7 +931,7 @@ The app's own settings are on its Settings page, as on the console.
 | `MODELS_DIR` | `/var/lib/tokenstation/models` | API-only: where models live. |
 | `HOST`, `PORT` | `0.0.0.0`, `8081` | API-only: where the API listens. |
 | `KEYS` | `/var/lib/tokenstation/access/keys.tsv` | API-only: the API keys other machines get in with (see API keys above). |
-| `TS5_ENCYCLOPEDIA` | `wikipedia` | The encyclopedia searched without a web search key: `wikipedia`, `grokipedia` or `both`. Add the line to use another. |
+| `TS5_SEARCH_SOURCE` | `web` | What is searched without a web search key: `web` (DuckDuckGo's results; when it can't be searched, Grokipedia, then Wikipedia), `grokipedia`, `wikipedia` or `both`. Add the line to use another. `TS5_ENCYCLOPEDIA`, the older name for the three encyclopedia choices, still counts where this one isn't set. |
 | `CONTEXT` | `8192` | API-only: context length, or `auto` for what fits. |
 | `PS5_BOOST` | `0` | PS5: the clock boost off (`0`, faster for models: see below) or on (`1`). Skipped if `ps5_control` is missing. |
 | `PS5_CONTROL` | empty | Path to `ps5_control` if it isn't on the PATH. |

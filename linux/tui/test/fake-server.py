@@ -14,12 +14,14 @@ file with the summary to give instead). FAKE_REQUESTS: a
 file that gets each request's roles and sizes, a line a request, and its
 user messages (the first 80 characters of each).
 FAKE_WEB=1 says the server has a web search key (without it the search is
-Wikipedia's; FAKE_SOURCE=none: no search at all). FAKE_SPEED: words a second
+the web's with no key; FAKE_SOURCE=wikipedia: Wikipedia's, none: no search at
+all). FAKE_SPEED: words a second
 (60).
 Tools: when the request offers them, a message "run CMD" has the fake call
 run_command (CMD ";;" CMD2: one after the other, a turn each; CMD "&&&" CMD2:
 both in one turn), "read URL" read_web_page, "remember TEXT" remember, and
-"loop" a command every turn for as long as it is given tools. After the
+"loop" a command every turn for as long as it is given tools ("again": the
+same command every turn, with the same result). After the
 results it answers with what came back. A message "search WORDS", in a
 request that lets the server search ("web_search" true or "auto"), has the
 fake say that it searches, as ts5 does while it runs a search itself
@@ -33,8 +35,8 @@ click N, type N TEXT (typeonly: without Enter), more, back; in place of N,
 page the call before gave. "&&" between steps makes them calls of one turn.
 "call NAME ;; JSON" calls the tool of that name, if the request offers it
 (an outside tool's: linux/tui/mcp.h and fake-mcp.py); "&&&" between several.
-FAKE_TEXT_CALL: what the turn that gets no tools (after twelve rounds of
-them, or a no) answers with, a call written as text ("\\n" a line break).
+FAKE_TEXT_CALL: what the turn that may call no tool (the message's steps
+ended, calls that only repeated, or a no) answers with, a call written as text ("\\n" a line break).
 FAKE_TAILNET=1 answers /ts5/tailnet as a ts5 serve with Tailscale does (off;
 on gives a sign-in link a second later, and FAKE_TAILNET_SIGNIN seconds
 after that, 6 by default, it is connected; sign_out turns it off; "ssh"
@@ -174,9 +176,12 @@ class H(BaseHTTPRequestHandler):
         elif self.path in ("/v1/models", "/models"):
             m = {"id": MODEL, "object": "model", "context_length": N_CTX,
                  "capabilities": {"tools": True, "tool_format": "hermes", "web_search": WEB,
-                                  "web_search_source": "tavily" if WEB else os.environ.get("FAKE_SOURCE", "wikipedia"),
-                                  # (FAKE_OLD: a ts5 from before a request could pick its encyclopedia.)
-                                  **({} if os.environ.get("FAKE_OLD") else {"encyclopedias": ["wikipedia", "grokipedia", "both"]})},
+                                  "web_search_source": "tavily" if WEB else os.environ.get("FAKE_SOURCE", "web"),
+                                  # (FAKE_OLD: a ts5 from before a request could pick its encyclopedia;
+                                  # FAKE_NO_WEB: one from before the web search that needs no key, 1.2.2.)
+                                  **({} if os.environ.get("FAKE_OLD") else {"encyclopedias": ["wikipedia", "grokipedia", "both"]}),
+                                  **({} if os.environ.get("FAKE_OLD") or os.environ.get("FAKE_NO_WEB")
+                                     else {"search_sources": ["web", "grokipedia", "wikipedia", "both"]})},
                  "settings": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "thinking": True,
                               "known_good": "file"}}
             if HELPER and HELPER != "none":
@@ -269,6 +274,8 @@ class H(BaseHTTPRequestHandler):
                     calls = [("run_command", {"command": steps[len(results)]})]
         elif asked.startswith("loop") and "run_command" in tools:
             calls = [("run_command", {"command": "echo round %d" % (len(results) + 1)})]
+        elif asked.startswith("again") and "run_command" in tools:
+            calls = [("run_command", {"command": "echo the same"})]
         elif asked.startswith("read ") and "read_web_page" in tools and not results:
             calls = [("read_web_page", {"url": asked[5:].strip()})]
         elif asked.startswith("remember ") and "remember" in tools and not results:

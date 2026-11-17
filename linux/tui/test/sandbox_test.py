@@ -104,7 +104,8 @@ def main():
         out, _, code = run("echo no > " + target + "; touch /etc/ts5-sandbox-test")
         check(not os.path.exists(target), "a file outside the working folder isn't made in the home folder", out)
         check("Read-only file system" in out and code != 0, "the system is read-only", out)
-        check("This ran in the sandbox" in out and "pip install" in out, "and the model is told what to do instead", out)
+        check("This ran in the sandbox" in out and "don't try them again" in out and "pip has Python packages only" in out and
+              "pip install" not in out, "and the model is told what can and can't be done there (no program by pip)", out)
         out, _, _ = run("echo '/usr/bin/python3: No module named pip'; exit 1")
         check("get-pip.py | python3 - --user" in out, "a Python without pip: the model is told how to put pip in ~", out)
 
