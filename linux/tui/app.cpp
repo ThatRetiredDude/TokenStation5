@@ -154,7 +154,7 @@ void Config::load() {
         else if (k == "tool_steps") tool_steps = std::max(0, atoi(v.c_str()));
         else if (k == "task_window") task_window = std::max(0, atoi(v.c_str()));
         else if (k == "browser_offered") browser_offered = v == "1";
-        else if (k == "search_source" && (v == "web" || v == "wikipedia" || v == "grokipedia" || v == "both")) search_source = v;
+        else if (k == "search_source" && (v == "web" || v == "google" || v == "wikipedia" || v == "grokipedia" || v == "both")) search_source = v;
         else if (k == "tool_files") tool_files = v == "1";
         else if (k == "tool_files_ask") files_ask = v != "0";
         else if (k == "tool_github") tool_github = v != "0";

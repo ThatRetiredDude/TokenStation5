@@ -72,11 +72,20 @@ class Tui:
         # XDG_CONFIG_HOME would have it read another tui.conf than the one written above.)
         env.setdefault("LANG", "C.UTF-8")
         self.sock = "ts5steps%d" % os.getpid()
-        cmd = "cd %s/proj && env -i %s TERM=xterm-256color %s --no-tmux --no-intro --url %s 2>%s/tui.err" % (
+        self.cmd = "cd %s/proj && env -i %s TERM=xterm-256color %s --no-tmux --no-intro --url %s 2>%s/tui.err" % (
             self.home, " ".join("%s='%s'" % (k, v) for k, v in env.items() if k in ("HOME", "PATH", "LANG")),
             tui, url, self.home)
-        subprocess.run(["tmux", "-L", self.sock, "new-session", "-d", "-x", "150", "-y", "50", cmd], check=True)
+        self.start()
+
+    def start(self):
+        subprocess.run(["tmux", "-L", self.sock, "new-session", "-d", "-x", "150", "-y", "50", self.cmd], check=True)
         time.sleep(1.5)
+
+    def restart(self):
+        """ts5-tui ended and started again, with the settings it saved."""
+        self.tmux("kill-server")
+        time.sleep(0.5)
+        self.start()
 
     def tmux(self, *a):
         return subprocess.run(["tmux", "-L", self.sock, *a], capture_output=True, text=True).stdout
@@ -254,6 +263,18 @@ def main():
         r = t.requests()[n0:]
         check(r and "source=google" in r[0]["tools"], "the request asks for Google", r[0]["tools"] if r else None)
         check(t.saved().get("search_source") == "google", "and the choice is saved", t.saved())
+        # (On a PS5 a ts5-tui started with search_source=google in its settings searched by DuckDuckGo:
+        # the choice was saved and then not read.)
+        t.restart()
+        check(t.idle(), "(ts5-tui started again)", t.screen())
+        n0 = len(t.requests())
+        t.type("hello again")
+        t.keys("Enter")
+        time.sleep(1)
+        check(t.idle(), "(a message)", t.screen())
+        r = t.requests()[n0:]
+        check(r and "source=google" in r[0]["tools"] and t.saved().get("search_source") == "google",
+              "and it is still the choice when ts5-tui starts again", (r[0]["tools"] if r else None, t.saved()))
     finally:
         t.close()
 
