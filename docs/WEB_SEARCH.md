@@ -87,14 +87,30 @@ be checked against the results.
 Since November 2026 Google's page no longer has its results' addresses: a
 link to a result is an address of Google's own that sends on
 (`/goto?url=` and a token that says nothing), and the page shows only the
-site's name with a path it cuts short. So ts5 asks Google where the links
-lead: from the page, the way a click on the link asks, without following
-the answer. It asks for eight at most: the results' titles first (six when
-the AI's answer has sources, which get two). The site a result is on
-hears nothing of it until the model opens the page. A result past those
-eight keeps its passage and the line with its site's name, and the model
-is told that its address is not known. (An address Google still writes
-into a link, as `/url?q=` did, is read from the link.)
+site's name with a path it cuts short. ts5 asks Google where the first two
+results lead: from the page, the way a click on the link asks, without
+following the answer, so the site a result is on hears nothing of it until
+the model opens the page. Two, because Google sends on for two a results
+page: asked for more, at once or one after another, it answers each with
+a page that says to wait (3 seconds, then longer each time, up to 28
+seconds on a PS5 on 17 November 2026). ts5 does not sit that wait out and
+does not go around it. A result whose line under the title is its site's
+address and nothing more (a front page) needs no asking. (An address
+Google still writes into a link, as `/url?q=` did, is read from the link.)
+
+The other results keep their passages and the line with their site's
+name, and their addresses come from elsewhere: while the browser reads
+Google's page, ts5 makes the same search on DuckDuckGo (as `web` does),
+and adds its results under Google's page as a list of titles with their
+addresses, without those Google's list already has. The model is told
+which list is whose. When DuckDuckGo can't be searched, Google's page
+stands alone, with a line that says the other addresses are not known.
+That one DuckDuckGo search is also the one that answers when Google can't
+be searched (below), so no search is made twice.
+
+On a PS5 (17 November 2026, six searches) a search took 4.6 to 6.6
+seconds and Chromium about 500 MiB of memory while it ran; four of the
+six had an answer by Google's AI.
 
 - It is there where a Chromium is: `/v1/models` lists `google` under
   `capabilities.search_sources` only then. `TS5_SEARCH_BROWSER` names
@@ -102,7 +118,7 @@ into a link, as `/url?q=` did, is read from the link.)
 - A browser starts for each search and ends with it. That takes seconds
   where DuckDuckGo's page takes under one, and memory: with less than
   900 MiB free the browser is not started. A search is one page and at
-  most eight short requests to Google.
+  most two short requests to Google, and one page of DuckDuckGo's.
 - Google's question about cookies, where it asks one, is answered with its
   button for no ("Reject all", in the page's language).
 - Its check for robots ("unusual traffic", a captcha) is not answered.

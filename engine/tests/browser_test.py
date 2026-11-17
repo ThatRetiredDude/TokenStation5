@@ -856,6 +856,8 @@ class Google(http.server.BaseHTTPRequestHandler):
     others its check for robots."""
     seen = []
     goto = {}  # its own addresses that send on to a result: token -> where to
+    sent_on = 0  # how many of them it has sent on since its last results page
+    lock = threading.Lock()
     @classmethod
     def link(cls, to):
         """Google's address for a result as its page has it since November 2026: a token that says nothing."""
@@ -883,11 +885,38 @@ class Google(http.server.BaseHTTPRequestHandler):
             return self.send("<html><head><title>Sorry</title></head><body><p>Our systems have detected unusual traffic from "
                              "your computer network.</p><p>I'm not a robot</p></body></html>", 429)
         if u.path == "/goto":
-            to = Google.goto.get((q.get("url") or [""])[0])
+            token = (q.get("url") or [""])[0]
+            to = Google.goto.get(token)
             if to is None: return self.send("<html><body>not here</body></html>", 404)
+            # (As the PS5 got it on 17 November 2026: Google sends on for two a results page. The
+            # others get a page that says to wait, 3 s and then longer each time, and to ask again
+            # with another token.)
+            with Google.lock:
+                Google.sent_on += 1
+                nth = Google.sent_on
+            if nth > 2:
+                return self.send('<html lang="sk"><head><title>Google</title><meta content="%d;url=/goto?url=%sx" '
+                                 'http-equiv="refresh"></head><body></body></html>' % (3 + 2 * (nth - 3), token))
             return self.send("", 302, [("Location", to)])
+        if u.path == "/html/":
+            # Another search's results, as html.duckduckgo.com/html lists them: each with its address.
+            def other(title, to, passage):
+                return ('<div class="result results_links results_links_deep web-result"><div class="links_main links_deep '
+                        'result__body"><h2 class="result__title"><a rel="nofollow" class="result__a" href="//duckduckgo.com/l/'
+                        '?uddg=%s&amp;rut=0f3a9c">%s</a></h2><a class="result__snippet" href="//duckduckgo.com/l/?uddg=%s&amp;'
+                        'rut=0f3a9c">%s</a></div></div>' % (urllib.parse.quote(to, safe=""), e(title), urllib.parse.quote(to, safe=""), e(passage)))
+            return self.send("<html><body>%s</body></html>" % "".join([
+                other("PlayStation 5 - Wikipedia", "https://en.wikipedia.org/wiki/PlayStation_5", "A PlayStation 5 Pro model."),
+                other("PlayStation Official Site", "https://playstation.com", "Consoles, games, accessories and more."),
+                other("PS5 Pro is out November 7 at $699.99 USD : r/Games",
+                      "https://www.reddit.com/r/Games/comments/1fdksd0/ps5_pro_is_out_november_7/", "PS5 Pro will launch."),
+                other("Sony PlayStation 5 Pro launch: Price, specs, release date",
+                      "https://www.cnbc.com/2024/09/10/sony-playstation-5-pro-launch.html", "It will launch Nov. 7."),
+                other("PS5 Pro: Release Date, Price, Specs", "https://www.ign.com/articles/ps5-pro-release-date", "Everything known.")]))
         if u.path != "/search":
             return self.send("<html><body>not here</body></html>", 404)
+        with Google.lock:
+            Google.sent_on = 0
         if "robot" in query:
             return self.send("", 302, [("Location", "/sorry/index?continue=" + urllib.parse.quote(self.path))])
         if "cookies" in query and "SOCS=no" not in self.headers.get("Cookie", ""):
@@ -942,7 +971,7 @@ class Google(http.server.BaseHTTPRequestHandler):
                 "<h1>Web results</h1>%s"
                 '<a href="%s">Read more</a><a href="%s">History</a>'
                 "<h1>People also ask</h1><button>Is there a PS5 Pro coming out?</button><button>When was the PS5 Pro released?</button>"
-                "<h1>Web results</h1>%s%s%s%s%s%s%s"
+                "<h1>Web results</h1>%s%s%s%s%s%s%s%s"
                 '<h1>People also search for</h1><a href="/search?q=ps5+slim">PS5 Slim release date</a>'
                 "%s</body></html>"
                 % (e(query), head, L("https://www.playstation.com/en-us/ps5/ps5-pro/"), L(blog),
@@ -954,6 +983,9 @@ class Google(http.server.BaseHTTPRequestHandler):
                           "https://blog.playstation.com › 2024/11/07 › getting-star...", blog, "PlayStation 5 Pro launches worldwide today."),
                    result("PS5 Pro is out November 7 at $699.99 USD : r/Games", "Reddit · r/Games", "https://www.reddit.com › r › Games",
                           "https://www.reddit.com/r/Games/comments/1fdksd0/ps5_pro_is_out_november_7/", "PS5 Pro will launch on November 7, 2024."),
+                   # (A site's front page: the line under its title is its address, whole.)
+                   result("PlayStation® Official Site: Consoles, Games, Accessories & More", "PlayStation", "https://www.playstation.com",
+                          "https://www.playstation.com/", "Explore the new generation PlayStation 4 and PS5 consoles."),
                    result("PlayStation®5 Pro | Witness Play Unleashed (Slovakia)", "PlayStation", "https://www.playstation.com › en-sk › ps5-pro",
                           "https://www.playstation.com/en-sk/ps5/ps5-pro/", "PS5 Pro enhanced games."),
                    # (One its redirect sends to its own check for robots.)
@@ -1039,38 +1071,55 @@ def test_google(ts5, program):
           paths == ["/search", "/search"] and "Before you continue" not in out and "Reject all" not in out,
           "Google source: its question about cookies in English, answered where the results then come into the same page",
           f"rc {rc}\n{out}\n{err}\n{paths}")
-    # The page as it is since November 2026: every result behind an address of Google's own.
-    rc, out, err, seen = search("PlayStation 5 Pro goto")
+    # The page as it is since November 2026: every result behind an address of Google's own, and
+    # Google says where two of them lead. The others' addresses come from the same search on
+    # DuckDuckGo, made meanwhile.
+    rc, out, err, seen = search("PlayStation 5 Pro goto", TS5_DUCKDUCKGO_URL=f"http://127.0.0.1:{srv.server_port}")
     text, _, tail = out.partition("Where the numbered links above lead:\n")
     lead = tail.split("\n\n")[0].split("\n")
     check(rc == 0 and [l.rsplit(": ", 1)[-1] for l in lead if l.startswith("[")] ==
-          ["https://www.playstation.com/en-us/ps5/ps5-pro/",
-           "https://en.wikipedia.org/wiki/PlayStation_5",
+          ["https://en.wikipedia.org/wiki/PlayStation_5",
            "https://blog.playstation.com/2024/11/07/getting-started-with-playstation-5-pro-out-today/",
-           "https://www.reddit.com/r/Games/comments/1fdksd0/ps5_pro_is_out_november_7/",
-           "https://www.playstation.com/en-sk/ps5/ps5-pro/",
-           "https://www.cnbc.com/2024/09/10/sony-playstation-5-pro-launch.html"],
-          "Google source: results behind Google's own addresses: where they lead is asked of Google (no page twice)",
-          f"rc {rc}\n{out}\n{err}")
+           "https://www.playstation.com/"],
+          "Google source: results behind Google's own addresses: the first two results' are asked of Google, and a site's "
+          "front page has its address under its title", f"rc {rc}\n{out}\n{err}")
     check(any(l.endswith("] PlayStation 5 Wikipedia: https://en.wikipedia.org/wiki/PlayStation_5") for l in lead) and
-          any("] PlayStation 5 Pro: https://www.playstation.com/en-us/" in l for l in lead),
-          "Google source: each address with the link's words", lead)
+          any(l.endswith("] PlayStation® Official Site: Consoles, Games, Accessories & More PlayStation ...: "
+                         "https://www.playstation.com/") for l in lead),
+          "Google source: each address with the link's words (a long title's are cut short)", lead)
     asked = [s[0] for s in seen if s[0].startswith("/goto")]
-    check(len(asked) == 8 and len(set(asked)) == 8 and len([s for s in seen if s[0].startswith("/search")]) == 1,
-          "Google source: eight of them asked for, once each, and the results page once", [s[0][:40] for s in seen])
+    check(len(asked) == 2 and len(set(asked)) == 2 and len([s for s in seen if s[0].startswith("/search")]) == 1,
+          "Google source: two of them asked for, once each, and the results page once: its page that says to wait is never met",
+          [s[0][:40] for s in seen])
     h = {k.lower(): v for k, v in next((s[1] for s in seen if s[0].startswith("/goto")), {}).items()}
     check("Macintosh" in h.get("user-agent", "") and "/search?q=" in h.get("referer", "") and
           "ts5" not in json.dumps(h).lower(), "Google source: asked for from its page, as Chrome on a Mac asks", h)
-    check("(Google did not say where 3 more of its results lead: the line under a result's title names its site.)" in out and
-          "https://www.currys.co.uk › techtalk › playstation-news" in text and "The PS5 Pro is out now!" in text,
+    check("(Google's page does not have its results' addresses, and Google names those of two results a search. For the "
+          "others, the line under a result's title names its site.)" in out and
+          "https://www.currys.co.uk › techtalk › playstation-news" in text + tail and "The PS5 Pro is out now!" in text,
           "Google source: a result whose address is not known keeps its passage and its site's line, and that is said", out)
     numbers = set(re.findall(r"\[\d+\]", text))
     check(numbers and numbers == {l.split(" ", 1)[0] for l in lead if l.startswith("[")},
           "Google source: only the listed links keep their numbers in the text", (sorted(numbers), lead))
-    check(text.split("\n\n", 1)[-1].startswith("AI Overview\n\nThe PlayStation 5 Pro[") and "button" not in text and
-          "text box" not in text and "People also ask" not in text and "Is there a PS5 Pro coming out?" not in text and
-          "PS5 Slim release date" not in out and "\n\n\n" not in out,
+    check(text.split("\n\n", 1)[-1].startswith("AI Overview\n\nThe PlayStation 5 Pro was released globally") and
+          "button" not in text and "text box" not in text and "People also ask" not in text and
+          "Is there a PS5 Pro coming out?" not in text and "PS5 Slim release date" not in out and "\n\n\n" not in out,
           "Google source: no buttons, no boxes, no questions to press, nothing past the results", out)
+    others = out.partition("The same search on DuckDuckGo, with each result's address (many are the pages above):\n")[2]
+    others = others.split("\n\n")[0].split("\n")
+    check(others == ["- PS5 Pro is out November 7 at $699.99 USD : r/Games: https://www.reddit.com/r/Games/comments/1fdksd0/ps5_pro_is_out_november_7/",
+                     "- Sony PlayStation 5 Pro launch: Price, specs, release date: https://www.cnbc.com/2024/09/10/sony-playstation-5-pro-launch.html",
+                     "- PS5 Pro: Release Date, Price, Specs: https://www.ign.com/articles/ps5-pro-release-date"] and
+          "3 more addresses from DuckDuckGo" in err and len([s for s in seen if s[0].startswith("/html/")]) == 1,
+          "Google source: the other results' addresses from the same search on DuckDuckGo, asked once (none that Google's list has)",
+          f"{others}\n{err}")
+    check(out.rstrip().endswith("open a result's page by its address when you need more than they say."),
+          "Google source: and the words on what to do with them come last", out[-300:])
+    # (That search can't be made: Google's page as it is, and no word about the other.)
+    rc, out, err, seen = search("PlayStation 5 Pro goto")
+    check(rc == 0 and "DuckDuckGo" not in out and "Where the numbered links above lead:\n" in out and
+          "https://en.wikipedia.org/wiki/PlayStation_5\n" in out and "from DuckDuckGo" not in err,
+          "Google source: without the other search, Google's page as it is", f"rc {rc}\n{out}\n{err}")
     rc, out, err, seen = search("robot check")
     check(rc != 0 and "Google: it asked whether a robot is searching, which ts5 does not answer" in err and
           out.startswith("The search failed:"), "Google source: its check for robots is not answered", f"rc {rc}\n{out}\n{err}")

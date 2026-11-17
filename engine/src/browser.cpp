@@ -1641,11 +1641,13 @@ public:
     // start (no search box, no tabs) to where they end (no page numbers,
     // no footer), without its buttons and boxes (the page is closed after
     // this), max_chars of it, then the addresses its numbered links lead
-    // to. count: the results it lists, whether or not their addresses
-    // could be found. Google's links to its results are addresses of its
-    // own that send on (redirect_targets): the first max_ask of them are
-    // asked where they lead, the results' own titles first.
-    std::string results_page(size_t max_chars, int max_links, int max_ask, int &count) {
+    // to (also in *addresses). count: the results it lists, whether or not
+    // their addresses could be found. Google's links to its results are
+    // addresses of its own that send on (redirect_targets): the first
+    // max_ask of them are asked where they lead, the results' titles
+    // before what else there is.
+    std::string results_page(size_t max_chars, int max_links, int max_ask, int &count,
+                             std::vector<std::string> *addresses = nullptr) {
         std::string body = "\n" + view_ + "\n";
         {
             // (Lower case byte for byte, so that a place found in it is the place in body.)
@@ -1745,29 +1747,45 @@ public:
                 }
             }
             if (l.ask.empty() && (l.to.empty() || theirs(host_of(l.to)))) continue;
-            // (The link's words: on a results page a title is a heading,
-            // and its number comes lines under it. Not the address Google
-            // writes under the title, which is cut short.)
-            if (const size_t h = l.words.find("http"); h != npos && h > 0) {
-                l.words.erase(h);
+            // A result's title: its link ends with the line Google writes
+            // under the title, the result's address in pieces and often cut
+            // short ("https://en.wikipedia.org > wiki > PlayStation_5"). The
+            // text has that line whole (a link's words are cut at 80 bytes).
+            std::string crumbs;
+            {
+                const size_t m = body.find("[" + std::to_string(i + 1) + "]");
+                const size_t nl = body.rfind('\n', m);
+                crumbs = body.substr(nl == npos ? 0 : nl + 1, m - (nl == npos ? 0 : nl + 1));
+                while (!crumbs.empty() && isspace((unsigned char)crumbs.back())) crumbs.pop_back();
+                crumbs.erase(0, std::min(crumbs.find_first_not_of(" \t"), crumbs.size()));
+            }
+            if (crumbs.compare(0, 7, "http://") == 0 || crumbs.compare(0, 8, "https://") == 0) {
                 l.title = true;
+                // (The link's words: the title, not that line.)
+                if (const size_t h = l.words.find("http"); h != npos && h > 0) l.words.erase(h);
+                // Under the title of a site's front page the line is the
+                // site's address and nothing more ("https://www.kernel.org"):
+                // that one needs no asking.
+                if (!l.ask.empty() && crumbs.find_first_of(" \t>") == npos && crumbs.find("\xE2\x80\xBA") == npos &&
+                    crumbs.find("...") == npos && crumbs.find("\xE2\x80\xA6") == npos && !theirs(host_of(crumbs)) &&
+                    crumbs.find_first_of("/?#", crumbs.find("://") + 3) == npos) {
+                    l.to = crumbs + "/";
+                    l.ask.clear();
+                }
             }
             while (!l.words.empty() && isspace((unsigned char)l.words.back())) l.words.pop_back();
             leads.push_back(l);
         }
         // Where the search site's own addresses lead, max_ask of them: the
-        // results' titles, two of what else there is (its own answer's
-        // sources come first on the page), then more titles.
+        // results' titles, then what else there is (its own answer's
+        // sources).
         std::vector<std::string> ask;
         {
             std::set<std::string> asking;
-            int others = 0;
-            for (const Lead &l : leads) others += !l.ask.empty() && !l.title;
-            const int keep = std::min(2, others);
-            for (int pass = 0; pass < 3; pass++)
+            for (int pass = 0; pass < 2; pass++)
                 for (const Lead &l : leads) {
-                    if (l.ask.empty() || l.title != (pass != 1) || asking.count(l.ask)) continue;
-                    if ((int)ask.size() >= (pass == 0 ? max_ask - keep : max_ask)) break;
+                    if (l.ask.empty() || l.title != (pass == 0) || asking.count(l.ask)) continue;
+                    if ((int)ask.size() >= max_ask) break;
                     ask.push_back(l.ask);
                     asking.insert(l.ask);
                 }
@@ -1796,8 +1814,10 @@ public:
         count = (int)listed.size() + unknown;
         std::string list;
         for (const Lead &l : leads)
-            if (listed.count(l.n))
+            if (listed.count(l.n)) {
                 list += "[" + std::to_string(l.n) + "] " + (l.words.empty() ? "" : brief(l.words, 100) + ": ") + brief(l.to, 300) + "\n";
+                if (addresses) addresses->push_back(l.to);
+            }
         // The numbers of the links that are not listed say nothing.
         for (size_t i = 0; i < els_.items.size(); i++) {
             if (els_.items[i].kind != "link" || listed.count(i + 1)) continue;
@@ -1826,9 +1846,9 @@ public:
         }
         if (!list.empty()) body += "\n\nWhere the numbered links above lead:\n" + list;
         if (unknown > 0)
-            body += std::string(list.empty() ? "\n\n" : "\n") + "(Google did not say where " +
-                    (list.empty() ? "its results" : std::to_string(unknown) + " more of its results") +
-                    " lead: the line under a result's title names its site.)";
+            body += std::string(list.empty() ? "\n\n" : "\n") +
+                    "(Google's page does not have its results' addresses, and Google names those of two results a search. "
+                    "For the others, the line under a result's title names its site.)";
         while (!body.empty() && body.back() == '\n') body.pop_back();
         return body;
     }
@@ -1871,7 +1891,8 @@ bool google_browser(std::string *path) {
     return !p.empty();
 }
 
-bool google_search_page(const std::string &query, std::string &out, std::string &why, int &links) {
+bool google_search_page(const std::string &query, std::string &out, std::string &why, int &links,
+                        std::vector<std::string> *addresses) {
     links = 0;
     std::string program;
     if (!google_browser(&program)) {
@@ -1898,11 +1919,12 @@ bool google_search_page(const std::string &query, std::string &out, std::string 
         why = "its page could not be opened in the browser";
         return false;
     }
-    // (A result's address is asked of Google for the first eight: six of
-    // its results' titles and two of its own answer's sources, or as many
-    // more titles. A person clicks one or two; every asking is a request
-    // to Google more.)
-    const int kAsk = 8;
+    // (Google's page has no address of a result, only addresses of its
+    // own that send on, and Google sends on for two a page: asked for a
+    // third and more at once or after, it answers with a page that says
+    // to wait, 3 s and then longer each time, up to 28 s on the PS5 on
+    // 2026-11-17. That wait is not sat out and not worked around.)
+    const int kAsk = 2;
     // Its question about cookies comes in place of the results: answered
     // with its own button for "no", and the results follow.
     bool asked = false;
@@ -1912,7 +1934,7 @@ bool google_search_page(const std::string &query, std::string &out, std::string 
         asked = true;
         a = s.click(n);
     }
-    if (a.ok && !s.robot_check() && !(asked && s.reject_button())) out = s.results_page(6000, 20, kAsk, links);
+    if (a.ok && !s.robot_check() && !(asked && s.reject_button())) out = s.results_page(6000, 20, kAsk, links, addresses);
     if (s.robot_check()) {
         why = "it asked whether a robot is searching, which ts5 does not answer";
         return false;

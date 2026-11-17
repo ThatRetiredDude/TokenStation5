@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <future>
+#include <set>
 #include <vector>
 
 #include "browser.h"
@@ -693,7 +695,9 @@ std::string one_line(const std::string &html) {
     return out;
 }
 
-std::string duckduckgo_search(const std::string &query, int n, std::string &log, bool *failed) {
+// list: what was found, also as it is (a search that only wants the addresses).
+std::string duckduckgo_search(const std::string &query, int n, std::string &log, bool *failed,
+                              std::vector<Article> *list = nullptr) {
     const std::string base = env_or("TS5_DUCKDUCKGO_URL", "https://html.duckduckgo.com");
     const auto t0 = std::chrono::steady_clock::now();
     auto took = [&] {
@@ -756,6 +760,7 @@ std::string duckduckgo_search(const std::string &query, int n, std::string &log,
         return "The web search found nothing for \"" + query + "\". Try other or fewer words, or answer from what you know "
                "and say that it could not be looked up.";
     }
+    if (list) *list = found;
     std::string out = "Web results for \"" + query + "\":";
     int i = 0;
     for (auto &p : found)
@@ -806,19 +811,66 @@ std::string web_search(const std::string &arguments, std::string &log, bool *fai
 #ifndef TS5_PS5
         // Google, through a Chromium on this machine; when it can't be
         // searched so (no browser, its check for robots), the web as below.
+        // DuckDuckGo is asked the same meanwhile: Google's page has no
+        // address of a result and Google names those of two (browser.cpp),
+        // so the others' come from there, and it is the search that
+        // answers when Google can't be searched.
+        // (A results page has ten; more of them than of an encyclopedia's
+        // articles, as each is a line or two.)
+        const int dn = getenv("TS5_SEARCH_RESULTS") ? n : 8;
+        struct Duck {
+            std::string out, log;
+            bool bad = false;
+            std::vector<Article> found;
+        };
+        const auto duck = [&query, dn] {
+            Duck d;
+            d.out = duckduckgo_search(query, dn, d.log, &d.bad, &d.found);
+            return d;
+        };
         std::string before, before_log;
+        Duck d;
+        bool have = false;
         if (source == "google") {
             const auto t0 = std::chrono::steady_clock::now();
+            std::future<Duck> meanwhile = std::async(std::launch::async, duck);
             std::string page, why;
             int links = 0;
-            const bool ok = google_search_page(query, page, why, links);
+            std::vector<std::string> listed;
+            const bool ok = google_search_page(query, page, why, links, &listed);
+            d = meanwhile.get();
+            have = true;
             char secs[32];
             snprintf(secs, sizeof secs, "%.1f s", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
             if (ok) {
-                log = "web_search \"" + query + "\": " + std::to_string(links) + " results (" + secs + ", Google by Chromium)";
+                // The addresses Google's page did not give, as the same
+                // search elsewhere has them (a page once: not what Google's
+                // list has, with or without a "/" at its end).
+                const auto same = [](std::string u) {
+                    if (const size_t h = u.find('#'); h != std::string::npos) u.erase(h);
+                    while (!u.empty() && u.back() == '/') u.pop_back();
+                    if (const size_t c = u.find("://"); c != std::string::npos) u.erase(0, c + 3);
+                    if (u.compare(0, 4, "www.") == 0) u.erase(0, 4);
+                    return u;
+                };
+                std::set<std::string> known;
+                for (const std::string &u : listed) known.insert(same(u));
+                std::string others;
+                int more = 0;
+                if ((int)listed.size() < links)
+                    for (const Article &p : d.found)
+                        if (known.insert(same(p.url)).second) {
+                            others += "\n- " + clip(p.title, 100) + ": " + p.url;
+                            more++;
+                        }
+                log = "web_search \"" + query + "\": " + std::to_string(links) + " results (" + secs + ", Google by Chromium" +
+                      (more ? ", " + std::to_string(more) + " more addresses from DuckDuckGo" : "") + ")";
                 return "Google's results page for \"" + query + "\", as a browser shows it. An answer of Google's own at its "
                        "top (\"AI Overview\") is written by its AI: check it against the results before you rely on it.\n\n" +
-                       page + "\n\nThe passages are short: open a result's page by its address when you need more than they say.";
+                       page +
+                       (more ? "\n\nThe same search on DuckDuckGo, with each result's address (many are the pages above):" + others
+                             : "") +
+                       "\n\nThe passages are short: open a result's page by its address when you need more than they say.";
             }
             before = "(Google could not be searched: " + why + ". So this search went to DuckDuckGo.)\n\n";
             before_log = std::string("; before it: Google: ") + why + " (" + secs + ")";
@@ -826,10 +878,10 @@ std::string web_search(const std::string &arguments, std::string &log, bool *fai
         if (source == "web" || source == "google") {
             // The web; when that can't be searched now, Grokipedia, then
             // Wikipedia, and the model is told which it got.
-            bool bad = false;
-            // (A results page has ten; more of them than of an encyclopedia's
-            // articles, as each is a line or two.)
-            std::string out = duckduckgo_search(query, getenv("TS5_SEARCH_RESULTS") ? n : 8, log, &bad);
+            if (!have) d = duck();
+            const bool bad = d.bad;
+            std::string out = d.out;
+            log = d.log;
             if (!bad) {
                 log += before_log;
                 return before + out;
