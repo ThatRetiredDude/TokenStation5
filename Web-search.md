@@ -11,20 +11,29 @@ From a computer, `scripts/ts5-ps5.sh websearch tvly-YOUR-KEY` does the same (`we
 
 `GET /v1/models` shows what the loaded model can do: `"capabilities": {"tools": true, "tool_format": "hermes", "web_search": true}`.
 
-## Without a key: an encyclopedia (Linux edition)
+## Without a key: a regular web search (Linux edition)
 
-With no Tavily key the Linux edition searches an encyclopedia instead: Wikipedia unless you choose another, through its public API, with no key and no account. It does so only for a request that asks for a search. The terminal app asks while its search tool is on; over the API a request says `"web_search": true`, or `"web_search": "auto"` to leave it to the message.
+With no Tavily key the Linux edition (1.3.0 and later) still searches the web, with no key and no account. It does so only for a request that asks for a search. The terminal app asks while its search tool is on; over the API a request says `"web_search": true`, or `"web_search": "auto"` to leave it to the message.
+
+- The model gets DuckDuckGo's results: title, the site's own address and a line or two of each, eight of them, no advertisements. It opens the pages it needs with the pages tool or the browser.
+- A search takes 0.6 to 0.8 seconds on the PS5.
+- When DuckDuckGo can't be searched (it asks for a puzzle to be solved, which ts5 does not answer, or there is no connection), the search goes to Grokipedia, and when that can't be searched either, to Wikipedia. The model is told which it got.
+- **Google** can be the source where a Chromium is installed on the server's machine. ts5 opens Google's results page in that Chromium and gives the model what the page shows: the answer Google's AI writes at the top when it shows one, the results with their passages, and where the links lead. The model is told to check the AI's answer against the results. Each search starts a browser and ends it, so it takes 4 to 6 seconds on the PS5 and is not started with less than 900 MiB of memory available. When Google asks whether a robot is searching, the question is not answered: the search goes to DuckDuckGo and the model is told.
+- What is searched: in the terminal app Settings → **Search source**, or `/tools search web`, `google`, `grokipedia`, `wikipedia` or `both`. For the always-on service: `TS5_SEARCH_SOURCE=web` (or `google`, `grokipedia`, `wikipedia`, `both`) in `/etc/default/tokenstation`; a setup that has `TS5_ENCYCLOPEDIA` keeps its encyclopedia. Over the API a request can say `"web_search_source": "web"`, `"google"`, `"grokipedia"`, `"wikipedia"` or `"both"`.
+- `/v1/models` lists what the server offers under `capabilities.search_sources` (`google` only where a Chromium is installed).
+
+### The encyclopedias
+
+Wikipedia is searched through its public API:
 
 - The model gets the top articles: title, link and opening text.
 - It is told that this is an encyclopedia, with no news and no live data, and it is told when the articles are only a loose match for the question, so it says that it could not look the thing up instead of answering from the wrong article.
-- A search takes about half a second on the PS5.
 - `TS5_WIKIPEDIA=sk` (or any language code) picks another Wikipedia; `TS5_WIKIPEDIA=off` turns it off.
 - Wikipedia refuses searches for a while from an address that has sent it very many (it did after some hundreds of searches and pages in two hours of our tests). ts5 then says that Wikipedia has had too many searches from this address, and the model tells you so. It lifts by itself.
-- `/v1/models` says `"web_search_source": "wikipedia"` (`"tavily"` with a key).
 
 **Grokipedia** (xAI's encyclopedia, written by its AI) can be searched instead of Wikipedia, or beside it:
 
-- In the terminal app: Settings → **Search source**, or `/tools search wikipedia`, `grokipedia` or `both`. For the always-on service: `TS5_ENCYCLOPEDIA=grokipedia` (or `both`) in `/etc/default/tokenstation`. Over the API a request can say `"web_search_source": "grokipedia"`, `"both"` or `"wikipedia"`.
+- In the terminal app: Settings → **Search source**, or `/tools search grokipedia` or `both`. For the always-on service: `TS5_SEARCH_SOURCE=grokipedia` (or `both`) in `/etc/default/tokenstation`. Over the API a request can say `"web_search_source": "grokipedia"`, `"both"` or `"wikipedia"`.
 - The model gets the top articles as with Wikipedia: title, link, a line from each, and the opening of the first. It is told which encyclopedia it searched and that Grokipedia's articles are written by an AI.
 - **Both** gives half the results from each, and the result says that two encyclopedias were searched and which results are whose.
 - When Grokipedia doesn't answer (it is down, or it turns the request away), the search goes to Wikipedia and the result's first line says so. With `TS5_WIKIPEDIA=off` it fails instead, and the model is told why.

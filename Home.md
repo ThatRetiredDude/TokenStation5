@@ -25,14 +25,14 @@ There are two editions, built from the same code:
 ## Pages
 
 - [Using the TV app](Using-the-TV-app): the five pages and what every button does
-- [Using the terminal app (ts5-tui)](Using-the-terminal-app): chat, models, live temperatures and tuning in a terminal, over SSH or in a web browser (Linux), and the tools a model can use there: web search, files, a browser, the terminal, GitHub, and other programs' tools (MCP), each with its own switch; its Access page makes the API keys other machines use, and its Connectors page connects GitHub with a QR code
+- [Using the terminal app (ts5-tui)](Using-the-terminal-app): chat, models, live temperatures and tuning in a terminal, over SSH or in a web browser (Linux), and the tools a model can use there: web search, files, a browser, the terminal with a Linux system of its own to install programs in (from 1.3.0), GitHub, and other programs' tools (MCP), each with its own switch; long tasks that go on when the chat fills up; its Access page makes the API keys other machines use, and its Connectors page connects GitHub with a QR code
 - [Users](Users): accounts for family and friends on Linux: the chat page and the API with their own keys, only what you allow, their chats their own
 - [Phone controls](Phone-controls): from 1.2.0 on Linux, what ts5-tui sets from your phone (models, the fan, settings, users, feedback), notifications when an answer finishes, and the chat page's home screen
 - [Models](Models): what fits, what's checked, adding your own
 - [Models tested on PS5](Models-tested-on-PS5): each tested model with its speed, context and a one-line terminal install
 - [Connecting apps](Connecting-apps): Kilo Code, Continue, Cline, Open WebUI, aider, opencode, your own scripts
 - [Away from home with Tailscale](Away-from-home-with-Tailscale): apps, SSH, a chat page and ts5-tui in a browser, from anywhere
-- [Web search](Web-search): a Tavily key and the model looks things up; without a key on Linux, Wikipedia or Grokipedia
+- [Web search](Web-search): a Tavily key and the model looks things up; without a key on Linux, a regular web search (DuckDuckGo, or Google through Chromium), Grokipedia or Wikipedia
 - [PS5 hardware on Linux](PS5-hardware-on-Linux): GPU memory, compute units, clock boost, fan, tuning
 - [Benchmarks](Benchmarks): measured speeds on the console and on Linux
 - [Test results on PS5 Linux](Test-results-on-PS5-Linux): what was tested on a PS5 with Linux, and what came out
