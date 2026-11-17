@@ -39,14 +39,65 @@ def serve(ts5, model, template, backend, log, slots=None):
     sys.exit("resume_test: the server didn't start")
 
 
-def ask(port, messages):
+def ask(port, messages, tools=None):
     req = {"messages": messages, "max_tokens": 24, "temperature": 0, "reasoning_format": "none",
            "chat_template_kwargs": {"enable_thinking": True}}
+    if tools:
+        req["tools"] = tools
     # A test model's random tokens can end in part of a UTF-8 character.
     r = json.loads(urllib.request.urlopen(urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/chat/completions", json.dumps(req).encode(),
         {"Content-Type": "application/json"}), timeout=300).read().decode("utf-8", "replace"))
     return r["choices"][0]["message"]["content"], r["timings"]
+
+
+def tool_chain(ts5, model, template, backend, log):
+    """A message answered over six turns of calls and results, each with its thinking, then the
+    user's next message: a chat with tools sends a turn's thinking only until the user writes
+    again, so that request shares the prompt up to where the reply to the message before started,
+    and goes on from the copy kept there (on a PS5 it read all 4,902 tokens of such a chat again:
+    the four copies were all at later turns). Returns the problems found and what to say."""
+    tools = [{"type": "function", "function": {"name": "run_command", "description": "Runs a command.",
+              "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}}]
+    sys_m = {"role": "system", "content": "You are terse."}
+    u1 = {"role": "user", "content": "Count the files in each of the six folders."}
+
+    def turns(n, thinking):
+        out = []
+        for k in range(n):
+            a = {"role": "assistant", "content": "", "tool_calls": [{"id": f"call_{k}", "type": "function", "function": {
+                "name": "run_command", "arguments": json.dumps({"command": f"ls folder{k} | wc -l"})}}]}
+            if thinking:
+                a["reasoning_content"] = f"Folder {k} is next. I will count the files in it."
+            out += [a, {"role": "tool", "tool_call_id": f"call_{k}", "name": "run_command", "content": str(3 + k * 7 % 11)}]
+        return out
+
+    nxt = [sys_m, u1] + turns(6, False) + [{"role": "assistant", "content": "Folder 5 has the most, 5 files."},
+                                           {"role": "user", "content": "And which has the fewest?"}]
+    p, port = serve(ts5, model, template, backend, log)
+    try:
+        _, t1 = ask(port, [sys_m, u1], tools)
+        for k in range(1, 7):
+            ask(port, [sys_m, u1] + turns(k, True), tools)
+        x, tx = ask(port, nxt, tools)
+    finally:
+        p.terminate()
+        p.wait()
+    p, port = serve(ts5, model, template, backend, log)
+    try:
+        fresh, _ = ask(port, nxt, tools)
+    finally:
+        p.terminate()
+        p.wait()
+    # (The first request's prompt ends a few tokens into the reply's turn: its start, the role, a line's end.)
+    upto = t1.get("cache_n", 0) + t1.get("prompt_n", 0)
+    problems = []
+    if x != fresh:
+        problems.append(f"the message after six turns of calls gave {x!r}, a fresh server {fresh!r}")
+    if not upto - 8 <= tx.get("cache_n", 0) <= upto:
+        problems.append(f"the message after six turns of calls went on from token {tx.get('cache_n')}, not from where "
+                        f"the reply to the message before started (about {upto - 3}): {tx}")
+    return problems, f"the message after six turns of calls from {tx.get('cache_n')} of {tx.get('cache_n', 0) + tx.get('prompt_n', 0)}"
 
 
 def main():
@@ -101,7 +152,7 @@ def main():
         finally:
             p.terminate()
             p.wait()
-        problems = []
+        problems, chain = tool_chain(ts5, model, template, backend, log)
         for case, fresh_x, most in (("B", fresh_b, 600), ("C3", fresh_c3, 64)):
             (x, tx), (y, ty) = runs[None][case], runs[1][case]
             if x != fresh_x or y != fresh_x:
@@ -132,7 +183,7 @@ def main():
         print(f"PASS resume {name}: the next turn went on from token {t['cache_n']} of {t['cache_n'] + t['prompt_n']}, "
               f"a fresh chat with the same document from {tb['cache_n']} of {tb['cache_n'] + tb['prompt_n']}, "
               f"an edited last message from {tc['cache_n']} of {tc['cache_n'] + tc['prompt_n']} (with one copy: "
-              "from 0), the same answers as a fresh server")
+              f"from 0), {chain}, the same answers as a fresh server")
 
 
 if __name__ == "__main__":
