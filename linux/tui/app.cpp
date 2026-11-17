@@ -165,7 +165,7 @@ void Config::load() {
         else if (k == "sandbox_box") sandbox_box = v != "0";
         else if (k == "browser" && !v.empty()) browser = v;
     }
-    // Settings saved by a ts5-tui before 1.2.2 hold that one's defaults,
+    // Settings saved by a ts5-tui before 1.3.0 hold that one's defaults,
     // not choices: the browser tool off and Wikipedia as the search.
     if (gen < 2) {
         tool_browser = true;

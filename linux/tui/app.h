@@ -89,7 +89,7 @@ struct Config {
     // web search), "grokipedia" (xAI's encyclopedia), "wikipedia" or
     // "both" (the two encyclopedias).
     std::string search_source = "web";
-    // The settings file's generation: one saved before 2 (Linux 1.2.2)
+    // The settings file's generation: one saved before 2 (Linux 1.3.0)
     // gets that release's new defaults once, the browser tool on and the
     // web in place of Wikipedia.
     int defaults = 2;
@@ -107,7 +107,7 @@ struct ServerState {
     bool web_search = false;  // the server searches the web for the model (it has a key)
     bool wikipedia = false;   // without a key it still searches (the web or an encyclopedia), for a request that asks
     bool encyclopedias = false;  // it takes the request's choice of one ("web_search_source")
-    bool web_sources = false;    // and "web" is one of them (ts5 1.2.2 and later)
+    bool web_sources = false;    // and "web" is one of them (ts5 1.3.0 and later)
     bool google_source = false;  // and "google": the server's machine has a Chromium to read it with
     // The helper the engine really loaded beside the model, its context
     // (drafting stops past it), or why the one asked for isn't used.

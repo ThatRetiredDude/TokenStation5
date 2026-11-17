@@ -7,7 +7,7 @@ A model that goes on calling is asked about after the message's steps
 again, or answer now. Calls that only repeat earlier ones with the same
 result end sooner. The turn that must answer is sent with the same tools
 and search as every other turn (the server reads on from the chat it
-holds), and the settings a ts5-tui before 1.2.2 saved get that release's
+holds), and the settings a ts5-tui before 1.3.0 saved get that release's
 defaults once.
 
     linux/tui/test/steps_test.py PATH/TO/ts5-tui

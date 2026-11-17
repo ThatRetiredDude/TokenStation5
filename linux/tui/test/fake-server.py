@@ -186,7 +186,7 @@ class H(BaseHTTPRequestHandler):
                  "capabilities": {"tools": True, "tool_format": "hermes", "web_search": WEB,
                                   "web_search_source": "tavily" if WEB else os.environ.get("FAKE_SOURCE", "web"),
                                   # (FAKE_OLD: a ts5 from before a request could pick its encyclopedia;
-                                  # FAKE_NO_WEB: one from before the web search that needs no key, 1.2.2;
+                                  # FAKE_NO_WEB: one from before the web search that needs no key, 1.3.0;
                                   # FAKE_GOOGLE: its machine has a Chromium, so Google is a source.)
                                   **({} if os.environ.get("FAKE_OLD") else {"encyclopedias": ["wikipedia", "grokipedia", "both"]}),
                                   **({} if os.environ.get("FAKE_OLD") or os.environ.get("FAKE_NO_WEB")

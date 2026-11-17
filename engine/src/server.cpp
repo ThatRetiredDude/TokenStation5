@@ -614,7 +614,7 @@ void handle(int fd, Server::State &state, Usage &u) {
 #ifndef TS5_PS5
                                                             // What a request's "web_search_source" can pick.
                                                             ",\"encyclopedias\":[\"wikipedia\",\"grokipedia\",\"both\"]" +
-                     // (The same with the web, which a ts5 before 1.2.2 doesn't know;
+                     // (The same with the web, which a ts5 before 1.3.0 doesn't know;
                      // "google" where a Chromium is installed to read it with.)
                      ",\"search_sources\":[\"web\"," + (google_ready() ? "\"google\"," : "") +
                      "\"grokipedia\",\"wikipedia\",\"both\"]" +

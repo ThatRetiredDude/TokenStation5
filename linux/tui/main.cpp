@@ -657,7 +657,7 @@ std::string memory_words(const std::string &why) {
 std::string encyclopedia_name() {
     const ServerState sv = server();
     if (!sv.encyclopedias) return "Wikipedia";
-    // (A ts5 before 1.2.2 takes "web" for its own choice: Wikipedia, unless it was set up otherwise.)
+    // (A ts5 before 1.3.0 takes "web" for its own choice: Wikipedia, unless it was set up otherwise.)
     if (g->cfg.search_source == "web") return sv.web_sources ? "the web (DuckDuckGo)" : "Wikipedia";
     // (Where the server has no Chromium, it searches DuckDuckGo and says so to the model.)
     if (g->cfg.search_source == "google")
@@ -3197,7 +3197,7 @@ std::vector<SetRow> settings_rows() {
         r.push_back(x);
         // What is searched, while there is no key: the web, or an encyclopedia.
         if (c.tool_web && !sv.web_search && sv.wikipedia) {
-            // (A ts5 before 1.2.2 has the encyclopedias alone.)
+            // (A ts5 before 1.3.0 has the encyclopedias alone.)
             // (Google where the server's machine has a Chromium to read it with.)
             static const char *const all[] = {"web", "google", "grokipedia", "wikipedia", "both"};
             static const char *const names[] = {"Web (DuckDuckGo)", "Google", "Grokipedia", "Wikipedia", "Both encyclopedias"};
@@ -4828,7 +4828,7 @@ void run_command(const std::string &line) {
                 const ServerState sv = server();
                 show_toast(sv.web_search ? "Search source: " + to + " (used when there is no web search key; now Tavily searches the web)"
                            : sv.online && !sv.encyclopedias ? "This server searches Wikipedia only (a ts5 before Grokipedia)"
-                           : sv.online && (to == "web" || to == "google") && !sv.web_sources ? "This server has no web search without a key (a ts5 before 1.2.2): it searches Wikipedia"
+                           : sv.online && (to == "web" || to == "google") && !sv.web_sources ? "This server has no web search without a key (a ts5 before 1.3.0): it searches Wikipedia"
                            : sv.online && to == "google" && !sv.google_source
                                ? "The server's machine has no Chromium to read Google with (/browser install): it searches DuckDuckGo"
                                                             : "Search: " + encyclopedia_name(),
