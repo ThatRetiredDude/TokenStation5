@@ -1666,6 +1666,20 @@ public:
             }
             if (start != npos) body.erase(0, start);
         }
+        // Its advertisements: from their heading to the page's next part
+        // (on a PS5 they came under the results, two shops' front pages).
+        body.insert(0, "\n");
+        for (const char *h : {"sponsored results", "sponsored result", "sponsored", "sponzorované výsledky", "sponzorované"})
+            for (;;) {
+                const std::string low = lower(body);
+                const size_t at = low.find(std::string("\n") + h + "\n");
+                if (at == npos) break;
+                size_t next = npos;
+                for (const char *n : {"web results", "ai overview", "videos", "top stories", "people also ask", "images",
+                                      "výsledky z webu"})
+                    next = std::min(next, low.find(std::string("\n") + n + "\n", at + 1));
+                body.erase(at, next == npos ? npos : next - at);
+            }
         // Its buttons and boxes ("[33: button "About this result"]"): of no
         // use to a reader who cannot press them.
         for (size_t at = body.find('['); at != npos; at = body.find('[', at)) {
@@ -1751,12 +1765,14 @@ public:
             // under the title, the result's address in pieces and often cut
             // short ("https://en.wikipedia.org > wiki > PlayStation_5"). The
             // text has that line whole (a link's words are cut at 80 bytes).
+            // (Its number comes after that line, on a line of its own where
+            // the link's last part is a block, as on Google's page.)
             std::string crumbs;
             {
-                const size_t m = body.find("[" + std::to_string(i + 1) + "]");
-                const size_t nl = body.rfind('\n', m);
-                crumbs = body.substr(nl == npos ? 0 : nl + 1, m - (nl == npos ? 0 : nl + 1));
-                while (!crumbs.empty() && isspace((unsigned char)crumbs.back())) crumbs.pop_back();
+                size_t e = body.find("[" + std::to_string(i + 1) + "]");
+                while (e > 0 && isspace((unsigned char)body[e - 1])) e--;
+                const size_t nl = e > 0 ? body.rfind('\n', e - 1) : npos;
+                crumbs = body.substr(nl == npos ? 0 : nl + 1, e - (nl == npos ? 0 : nl + 1));
                 crumbs.erase(0, std::min(crumbs.find_first_not_of(" \t"), crumbs.size()));
             }
             if (crumbs.compare(0, 7, "http://") == 0 || crumbs.compare(0, 8, "https://") == 0) {
@@ -1836,6 +1852,14 @@ public:
                 while (!line.empty() && isspace((unsigned char)line.back())) line.pop_back();
                 if (line.find_first_not_of(" \t") == npos || line == "People also ask") {
                     blank = true;
+                    continue;
+                }
+                // (A link's number on a line of its own: at the end of the line it belongs to.)
+                bool marks = line[0] == '[';
+                for (size_t k = 0; marks && k < line.size(); k++)
+                    marks = line[k] == '[' || line[k] == ']' || isdigit((unsigned char)line[k]);
+                if (marks && !tidy.empty()) {
+                    tidy += line;
                     continue;
                 }
                 if (!tidy.empty()) tidy += blank ? "\n\n" : "\n";

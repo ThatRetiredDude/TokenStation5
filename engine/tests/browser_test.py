@@ -956,9 +956,12 @@ class Google(http.server.BaseHTTPRequestHandler):
             # The page as the PS5 got it on 17 November 2026: every link to a result is Google's own
             # address with a token, buttons all over, and its headings in these words.
             L = Google.link
+            # (A result's link holds blocks: its title, the site's name, and the line with the
+            # site's address in pieces. Some have no such line: Reddit's has the count of comments.)
             def result(title, site, crumbs, to, passage):
-                return ('<div class="g"><a href="%s"><h3>%s</h3><div>%s</div><cite>%s</cite></a><div>%s</div></div>'
-                        % (L(to), e(title), e(site), e(crumbs), e(passage)))
+                return ('<div class="g"><a href="%s"><h3>%s</h3><div>%s</div><div>%s</div></a><div>%s</div></div>'
+                        % (L(to), e(title), e(site), "<cite>%s</cite>" % e(crumbs) if crumbs.startswith("http") else e(crumbs),
+                           e(passage)))
             blog = "https://blog.playstation.com/2024/11/07/getting-started-with-playstation-5-pro-out-today/"
             return self.send(
                 "<html><head><title>%s - Google Search</title></head><body>%s"
@@ -972,6 +975,10 @@ class Google(http.server.BaseHTTPRequestHandler):
                 '<a href="%s">Read more</a><a href="%s">History</a>'
                 "<h1>People also ask</h1><button>Is there a PS5 Pro coming out?</button><button>When was the PS5 Pro released?</button>"
                 "<h1>Web results</h1>%s%s%s%s%s%s%s%s"
+                # (Its advertisements, as the PS5 got them under the results: a shop's front page.)
+                '<h1>Sponsored results</h1><div><a href="/aclk?sa=l&amp;adurl=https%%3A%%2F%%2Fwww.nay.sk%%2F"><div>Image from nay.sk'
+                '</div><h3>PlayStation 5 - 40 modelov na NAY.sk</h3><div>NAY a.s.</div><div><cite>https://www.nay.sk</cite></div></a>'
+                '<div>PlayStation 5 práve teraz 40 modelov na NAY.sk.</div></div>'
                 '<h1>People also search for</h1><a href="/search?q=ps5+slim">PS5 Slim release date</a>'
                 "%s</body></html>"
                 % (e(query), head, L("https://www.playstation.com/en-us/ps5/ps5-pro/"), L(blog),
@@ -981,7 +988,7 @@ class Google(http.server.BaseHTTPRequestHandler):
                    L("https://en.wikipedia.org/wiki/PlayStation_5#History"),
                    result("Getting started with PlayStation 5 Pro, out today", "PlayStation.Blog",
                           "https://blog.playstation.com › 2024/11/07 › getting-star...", blog, "PlayStation 5 Pro launches worldwide today."),
-                   result("PS5 Pro is out November 7 at $699.99 USD : r/Games", "Reddit · r/Games", "https://www.reddit.com › r › Games",
+                   result("PS5 Pro is out November 7 at $699.99 USD : r/Games", "Reddit · r/Games", "4,3K+ comments · 2 years ago",
                           "https://www.reddit.com/r/Games/comments/1fdksd0/ps5_pro_is_out_november_7/", "PS5 Pro will launch on November 7, 2024."),
                    # (A site's front page: the line under its title is its address, whole.)
                    result("PlayStation® Official Site: Consoles, Games, Accessories & More", "PlayStation", "https://www.playstation.com",
@@ -1101,6 +1108,10 @@ def test_google(ts5, program):
     numbers = set(re.findall(r"\[\d+\]", text))
     check(numbers and numbers == {l.split(" ", 1)[0] for l in lead if l.startswith("[")},
           "Google source: only the listed links keep their numbers in the text", (sorted(numbers), lead))
+    check("https://en.wikipedia.org › wiki › PlayStation_5[" in text and not re.search(r"^\[\d+\]$", text, re.M),
+          "Google source: a result's number stands at the end of its site's line, not on a line of its own", text)
+    check("Sponsored" not in out and "NAY" not in out and "nay.sk\n" not in out and "https://www.nay.sk/" not in out,
+          "Google source: no advertisements, in the text or in the list", out)
     check(text.split("\n\n", 1)[-1].startswith("AI Overview\n\nThe PlayStation 5 Pro was released globally") and
           "button" not in text and "text box" not in text and "People also ask" not in text and
           "Is there a PS5 Pro coming out?" not in text and "PS5 Slim release date" not in out and "\n\n\n" not in out,
