@@ -45,6 +45,10 @@ struct ToolSwitches {
     // (`ts5 github`, engine/src/github.h). github_ask: a change (anything
     // but GET) waits for the user's yes.
     bool github = false, github_ask = true;
+    // search_earlier: the chat has a part the model's summary or notes took
+    // the place of, which it can look things up in. Set for each request
+    // from the chat itself (chat.cpp), not a setting.
+    bool earlier = false;
     bool any() const { return page || terminal || memory || browser || files || mcp || github; }  // tools ts5-tui runs
 };
 

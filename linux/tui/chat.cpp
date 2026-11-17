@@ -1216,6 +1216,7 @@ const char *const kSameResult =
 // answer now), and these words under the last tool's result say so.
 std::string body_for(Chat &c, const ChatRequest &rq, const char *last = nullptr) {
     const bool no_tools = last != nullptr;
+    bool earlier = false;  // a summary or notes took the place of the chat's earlier part
     std::string msgs;
     // What the model reads before the chat: its notes from earlier chats
     // (Settings → Memory), then the summary this chat goes on from. One
@@ -1231,8 +1232,15 @@ std::string body_for(Chat &c, const ChatRequest &rq, const char *last = nullptr)
         int sum = -1;
         const size_t end = c.msgs.empty() ? 0 : c.msgs.size() - 1;
         const std::vector<size_t> idx = sent_msgs(c, end, &sum);
+        earlier = sum >= 0;
         const bool task = sum >= 0 && c.msgs[sum].sum_why >= 3;
         if (sum >= 0) system += (system.empty() ? "" : "\n\n") + ((task ? kTaskLead : kSummaryLead) + c.msgs[sum].content);
+        // (The tool that looks things up in what they replaced, where the
+        // request offers it: below.)
+        if (sum >= 0 && rq.tools.any())
+            system += std::string("\n\n(A detail that is not in ") + (task ? "these notes" : "this summary") +
+                      ": the tool search_earlier looks it up in the part of the conversation that " +
+                      (task ? "they" : "it") + " replaced.)";
         if (!system.empty()) msgs = role_json("system", system);
         // Notes written in the middle of a task: what was asked for goes
         // after them as it was said, whatever the notes made of it.
@@ -1265,7 +1273,10 @@ std::string body_for(Chat &c, const ChatRequest &rq, const char *last = nullptr)
     // runs none of them in such a turn). Without them the prompt changed
     // at its start, and the whole chat was read again: 24 s at 16,500
     // tokens on the PS5, and once more in the turn after.
-    const std::string tools = tools_json(rq.tools);
+    // (With an earlier part to look things up in: search_earlier.)
+    ToolSwitches offered = rq.tools;
+    offered.earlier = earlier && rq.tools.any();
+    const std::string tools = tools_json(offered);
     if (!tools.empty()) b += ",\"tools\":" + tools;
     if (no_tools && !tools.empty()) b += ",\"tool_choice\":\"none\"";
     // "auto" also with no tools of its own: without a web search key the
@@ -1419,7 +1430,137 @@ void stream_answer(Chat *c, const ChatRequest &rq, const std::string &body) {
 
 // A tool call of the model's, run. A command waits for the user's word
 // first (Enter, A for every command of this chat, Esc), which chat_key gives.
+// search_earlier: the lines of the chat's earlier part (what the model's
+// last summary or notes took the place of) that have the words asked for,
+// with the lines around them, the newest first. Lines with every word;
+// where there are none, the lines with the most of them.
+ToolResult earlier_search(Chat &c, const std::string &args) {
+    ToolResult t;
+    ts5::Json j;
+    ts5::Json::parse(args, j);
+    std::vector<std::string> words;
+    {
+        std::string w;
+        for (char ch : j["query"].str() + " ") {
+            if (!isspace((unsigned char)ch)) w += (char)tolower((unsigned char)ch);
+            else if (!w.empty()) {
+                if (words.size() < 8) words.push_back(w);
+                w.clear();
+            }
+        }
+    }
+    if (words.empty()) {
+        t.ok = false;
+        t.head = "nothing to look for";
+        t.text = "Give the words to look for, as \"query\".";
+        return t;
+    }
+    std::lock_guard<std::mutex> l(c.mu);
+    int sum = -1;
+    sent_msgs(c, c.msgs.size(), &sum);
+    if (sum < 0) {
+        t.ok = false;
+        t.head = "this chat has no earlier part";
+        t.text = "Nothing of this chat was replaced by notes: all of it is still in front of you.";
+        return t;
+    }
+    const size_t end = std::min((size_t)std::max(0, c.msgs[sum].keep_from), (size_t)sum);
+    // Each message's lines, and how many of the words each has.
+    struct Part {
+        std::string head;
+        std::vector<std::string> lines;
+        std::vector<int> score;
+    };
+    std::vector<Part> parts;  // newest first
+    int best = 0;
+    for (size_t i = end; i-- > 0;) {
+        const Msg &m = c.msgs[i];
+        Part p;
+        std::string content, reasoning;
+        split_think(m, content, reasoning);
+        if (m.role == "user") p.head = "[The user said]";
+        else if (m.role == "assistant") {
+            p.head = "[You wrote]";
+            for (auto &u : m.calls) content += (content.empty() ? "" : "\n") + tool_call_line(u.name, u.args);
+        } else if (m.role == "tool") {
+            const int o = tool_owner(c, i);
+            std::string call = m.tool;
+            if (o >= 0)
+                for (auto &u : c.msgs[o].calls)
+                    if (u.id == m.call_id) call = tool_call_line(u.name, u.args);
+            p.head = "[What came back from: " + call + "]";
+        } else if (m.role == "summary" && m.error.empty() && !m.stopped) p.head = "[Your notes from before]";
+        else continue;
+        size_t at = 0;
+        while (at <= content.size()) {
+            size_t e = content.find('\n', at);
+            if (e == std::string::npos) e = content.size();
+            std::string ln = content.substr(at, e - at);
+            at = e + 1;
+            std::string low = ln;
+            for (char &ch : low) ch = (char)tolower((unsigned char)ch);
+            int n = 0;
+            for (auto &w : words) n += low.find(w) != std::string::npos;
+            best = std::max(best, n);
+            if (ln.size() > 300) {
+                size_t cut = 300;
+                while (cut > 0 && ((unsigned char)ln[cut] & 0xC0) == 0x80) cut--;
+                ln = ln.substr(0, cut) + "…";
+            }
+            p.lines.push_back(ln);
+            p.score.push_back(n);
+        }
+        while (!p.lines.empty() && p.lines.back().empty()) {
+            p.lines.pop_back();
+            p.score.pop_back();
+        }
+        if (p.lines.empty()) continue;
+        parts.push_back(std::move(p));
+    }
+    if (best == 0) {
+        t.head = "nothing found";
+        t.text = "No line in the chat's earlier part has any of those words. Try other or fewer words: a file's name, "
+                 "a command, a number.";
+        return t;
+    }
+    std::string out;
+    int places = 0, more = 0;
+    for (const Part &p : parts) {
+        std::vector<size_t> hits;
+        for (size_t k = 0; k < p.lines.size(); k++)
+            if (p.score[k] == best) hits.push_back(k);
+        if (hits.empty()) continue;
+        if (out.size() > 3000) {
+            more++;
+            continue;
+        }
+        places++;
+        out += p.head + "\n";
+        size_t shown = (size_t)-1;  // the last line written
+        for (size_t h = 0; h < hits.size() && h < 5; h++) {
+            const size_t from = hits[h] > 0 ? hits[h] - 1 : 0, to = std::min(p.lines.size() - 1, hits[h] + 1);
+            for (size_t k = from; k <= to; k++) {
+                if (shown != (size_t)-1 && k <= shown) continue;
+                if (shown != (size_t)-1 && k > shown + 1) out += "…\n";
+                if (shown == (size_t)-1 && k > 0) out += "…\n";
+                out += p.lines[k] + "\n";
+                shown = k;
+            }
+        }
+        if (shown + 1 < p.lines.size()) out += "…\n";
+        if (hits.size() > 5) out += fmt("(%zu more lines here have them.)\n", hits.size() - 5);
+        out += "\n";
+    }
+    t.head = fmt("%d place%s found", places + more, places + more == 1 ? "" : "s");
+    t.text = std::string("From the earlier part of this chat, the newest first") +
+             (best < (int)words.size() ? " (no line has all of those words: these have the most of them)" : "") + ":\n\n" + out;
+    if (more) t.text += fmt("(%d more place%s further back. Add a word to narrow it down.)\n", more, more == 1 ? "" : "s");
+    return t;
+}
+
 ToolResult run_call(Chat *c, const ChatRequest &rq, const ToolUse &u) {
+    // (The chat's own: no question, nothing outside it is touched.)
+    if (u.name == "search_earlier") return earlier_search(*c, u.args);
     std::string cmd = tool_command(u.name, u.args), preview, opt, dir;
     const bool command = u.name == "run_command" && rq.tools.terminal && !cmd.empty();
     int kind = command ? 0 : 1;

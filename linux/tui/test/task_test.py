@@ -107,7 +107,9 @@ class Tui:
             for line in open(self.reqs):
                 if not line.startswith("  "):
                     out.append({"msgs": len(line.split(": ", 1)[1].split()), "system": "", "users": [], "notes": "",
-                                "results": [], "task": ""})
+                                "results": [], "task": "", "tools": ""})
+                elif line.startswith("  tools="):
+                    out[-1]["tools"] = line.strip()
                 elif line.startswith("  task: "):
                     out[-1]["task"] = json.loads(line.split(": ", 1)[1])
                 elif line.startswith("  system: "):
@@ -189,6 +191,9 @@ def main():
         check("[Notes on the conversation's earlier part]" in second and "STEPS DONE: 6" in second and
               "[User]\ntask 30\n" in second and "carry over everything in them that still matters" in second,
               "the next notes are written from the notes before them and the request", second[:1200])
+        check("search_earlier" not in r[0]["tools"] and "run_command" in r[0]["tools"] and
+              "search_earlier" in after["tools"] and "the tool search_earlier looks it up" in after["system"],
+              "from the notes on, the model can look things up in the part they replaced", (r[0]["tools"], after["tools"]))
         most = max(x["msgs"] for x in r if not x["notes"])
         check(most <= 14, "no request grew past the window", most)
         # The chat goes on after the task: the notes, the request, what came after, the new message.
@@ -201,6 +206,32 @@ def main():
               "it goes with the notes, the task's request and the task's end", last)
         saved = t.chat_file()
         check(saved.count('"why":3') == len(notes) and '"summary":true' in saved, "the notes are saved with the chat", saved[:600])
+        # A detail the notes don't have: looked up in the chat's earlier part.
+        t.type('call search_earlier ;; {"query": "tee step 3"}')
+        t.keys("Enter")
+        check(t.wait("looks back in the chat for: tee step 3") and t.idle(), "search_earlier is called", t.screen())
+        got = t.requests()[-1]["results"][-1]
+        check(got.startswith("From the earlier part of this chat, the newest first:") and
+              "[You wrote]\n$ echo step 3 | tee -a task-steps.txt" in got and "echo step 13 | tee" in got and
+              "echo step 4 " not in got, "it gives the lines that have the words, with whose they are", got)
+        t.type('call search_earlier ;; {"query": "step 5"}')
+        t.keys("Enter")
+        check(t.wait("looks back in the chat for: step 5") and t.idle(), "search_earlier, a result's line", t.screen())
+        got = t.requests()[-1]["results"][-1]
+        check("[What came back from: $ echo step 5 | tee -a task-steps.txt]\nexit code 0\nstep 5\n" in got and
+              got.index("step 25") < got.index("step 15") < got.index("step 5\n"),
+              "what a command gave back, under the command, the newest first", got)
+        t.type('call search_earlier ;; {"query": "zebra tee step 7"}')
+        t.keys("Enter")
+        check(t.wait("looks back in the chat for: zebra tee step 7") and t.idle(), "search_earlier, a word too many", t.screen())
+        got = t.requests()[-1]["results"][-1]
+        check("no line has all of those words: these have the most of them" in got and "$ echo step 7 | tee" in got and
+              "echo step 8 " not in got, "no line with every word: the lines with the most of them", got)
+        t.type('call search_earlier ;; {"query": "zebra"}')
+        t.keys("Enter")
+        check(t.wait("looks back in the chat for: zebra") and t.idle(), "search_earlier, a word that is nowhere", t.screen())
+        check("No line in the chat's earlier part has any of those words" in t.requests()[-1]["results"][-1],
+              "nothing found is said so", t.requests()[-1]["results"][-1])
         # The setting.
         t.type("/tools window")
         t.keys("Enter")

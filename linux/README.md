@@ -555,7 +555,11 @@ ts5-tui --url http://ps5.local:8081  # another one
   the thread in a very long one); `/tools window off` writes notes only
   when the chat is full. With Settings → Full chat on "stops" there are
   none. If the notes can't be written, the task goes on with the chat as
-  it was.
+  it was. From the first notes or summary on, the model has one more tool,
+  `search_earlier`: it looks up words in the part of the chat the notes
+  took the place of (a command it ran and what came back, a path, an
+  error's words) and gets the lines that have them, so a detail the notes
+  left out is not lost to it.
 - **Web search**: Settings → Web search key takes a free key from
   [app.tavily.com](https://app.tavily.com). A model ts5-tui loads itself
   then searches the web when a question needs it (models that use tools;

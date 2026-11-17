@@ -1089,6 +1089,15 @@ std::string tools_json(const ToolSwitches &s) {
             {{"method", "string", "GET, POST, PATCH, PUT or DELETE."},
              {"path", "string", "The API path, starting with /, with any ?query."},
              {"body?", "object", "The JSON body, for POST, PATCH and PUT."}}));
+    if (s.earlier)
+        add(tool_json("search_earlier",
+                      "Look something up in the earlier part of this chat, the part your notes took the place of: "
+                      "the commands you ran and what they gave back, the pages and files you read, what the user "
+                      "and you said. Give one or a few words that the lines you want have in them (a file's name, "
+                      "a command, a number, the words of an error); you get those lines with the lines around "
+                      "them, the newest first. Use it when your notes lack a detail you need, before you guess "
+                      "or do the work again.",
+                      "query", "The words to look for."));
     if (s.memory)
         add(tool_json("remember",
                       "Save a short note that you will still see in later chats. Use it only when the user asks "
@@ -1200,6 +1209,7 @@ std::string tool_call_line(const std::string &name, const std::string &args) {
     if (name == "run_command") return "$ " + one_line(arg_of(args, "command"), 400);
     if (name == "read_web_page") return "reads " + one_line(arg_of(args, "url"), 300);
     if (name == "remember") return "remembers: " + one_line(arg_of(args, "note"), 300);
+    if (name == "search_earlier") return "looks back in the chat for: " + one_line(arg_of(args, "query"), 200);
     if (name == "github") {
         ts5::Json j;
         ts5::Json::parse(github_fixed(args), j);
