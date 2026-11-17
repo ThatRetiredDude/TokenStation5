@@ -170,7 +170,8 @@ bool save_chat(Chat &c, std::string &why) {
                 body += std::string(n++ ? ",\n" : "\n") + "{\"user\":false,\"summary\":true,\"text\":" + ts5::json_escape(m.content) +
                         ",\"model\":" + ts5::json_escape(m.model) + ",\"kept\":" + std::to_string(kept) +
                         ",\"before\":" + std::to_string(m.sum_before) + ",\"after\":" + std::to_string(m.sum_after) +
-                        ",\"why\":" + std::to_string(m.sum_why) + "}";
+                        ",\"why\":" + std::to_string(m.sum_why) + (m.circle > 0 ? ",\"same\":" + std::to_string(m.circle) : "") +
+                        "}";
                 continue;
             }
             if (m.role == "tool") {
@@ -189,6 +190,7 @@ bool save_chat(Chat &c, std::string &why) {
             body += std::string(n++ ? ",\n" : "\n") + "{\"user\":" + (user ? "true" : "false") +
                     ",\"text\":" + ts5::json_escape(m.content);
             if (user && m.steer) body += ",\"steer\":true";
+            if (user && m.check) body += ",\"check\":true";
             if (!user && !m.calls.empty()) {
                 body += ",\"calls\":[";
                 for (size_t k = 0; k < m.calls.size(); k++)
@@ -259,6 +261,7 @@ bool load_chat(Chat &c, const SavedChat &s, std::string &why) {
                 m.sum_before = (int)t["before"].num(0);
                 m.sum_after = (int)t["after"].num(0);
                 m.sum_why = (int)t["why"].num(0);
+                m.circle = (int)t["same"].num(0);
                 // The turns kept beside it: that many of the ones before it.
                 int kept = (int)t["kept"].num(0);
                 size_t from = c.msgs.size();
@@ -270,7 +273,8 @@ bool load_chat(Chat &c, const SavedChat &s, std::string &why) {
             } else if (t["user"].boolean(false)) {
                 m.role = "user";
                 m.steer = t["steer"].boolean(false);
-                c.history.push_back(m.content);
+                m.check = t["check"].boolean(false);
+                if (!m.check) c.history.push_back(m.content);
             } else if (!t["tool"].str().empty()) {
                 m.role = "tool";
                 m.tool = t["tool"].str();

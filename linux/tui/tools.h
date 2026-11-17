@@ -21,6 +21,10 @@ struct ToolSwitches {
     // run_command's commands go through the sandbox (sandbox.h): it was
     // chosen and it runs here. sandbox_net: with the network.
     bool sandbox = false, sandbox_net = true;
+    // The sandbox has a Linux system of its own, the box, in which the
+    // model is root and installs programs (sandbox.h); false: it sees the
+    // machine's system, read-only.
+    bool box = false;
     bool memory = true;    // remember, and the notes at the top of every chat
     bool browser = false;  // browser_open and the rest (`ts5 browser`, engine/src/browser.h)
     // Settings -> Browser: "auto", "text", "obscura", "chromium", or a program's path.
@@ -28,6 +32,9 @@ struct ToolSwitches {
     // A command, and a button or typing on a page, wait for the user's
     // yes; false: they go without asking (the user's choice in Settings).
     bool terminal_ask = true, browser_ask = true;
+    // The steps of tool calls one message gets before the user is asked
+    // whether the model should go on (0: never asked).
+    int steps = 50;
     // read_file, list_folder, edit_file, write_file (files.h). files_ask
     // false: they read and change without asking.
     bool files = false, files_ask = true;
@@ -38,6 +45,10 @@ struct ToolSwitches {
     // (`ts5 github`, engine/src/github.h). github_ask: a change (anything
     // but GET) waits for the user's yes.
     bool github = false, github_ask = true;
+    // search_earlier: the chat has a part the model's summary or notes took
+    // the place of, which it can look things up in. Set for each request
+    // from the chat itself (chat.cpp), not a setting.
+    bool earlier = false;
     bool any() const { return page || terminal || memory || browser || files || mcp || github; }  // tools ts5-tui runs
 };
 
@@ -81,6 +92,9 @@ std::vector<std::string> browsers_found();
 // it stops a command that is running.
 ToolResult run_tool(const std::string &name, const std::string &args, const ToolSwitches &s,
                     const std::atomic<bool> &cancel);
+// A command is waiting for the sandbox's own system to be set up (the
+// first command in it: a download, then its basic tools).
+bool box_setup_running();
 // What the model is told about a command the user refused, and about a call
 // that didn't run because the answer was stopped.
 ToolResult tool_refused();

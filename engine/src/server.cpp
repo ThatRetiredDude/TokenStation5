@@ -614,6 +614,10 @@ void handle(int fd, Server::State &state, Usage &u) {
 #ifndef TS5_PS5
                                                             // What a request's "web_search_source" can pick.
                                                             ",\"encyclopedias\":[\"wikipedia\",\"grokipedia\",\"both\"]" +
+                     // (The same with the web, which a ts5 before 1.3.0 doesn't know;
+                     // "google" where a Chromium is installed to read it with.)
+                     ",\"search_sources\":[\"web\"," + (google_ready() ? "\"google\"," : "") +
+                     "\"grokipedia\",\"wikipedia\",\"both\"]" +
 #endif
                                                             "}" +
                                                             ",\"settings\":" + settings_json(known, sampling, think, can_think) + "}") +
@@ -783,7 +787,13 @@ void handle(int fd, Server::State &state, Usage &u) {
         };
         if (chat) {
             msgs = parse_messages(req["messages"]);
-            if (tf != ToolFormat::NONE && req["tool_choice"].str() != "none") {
+            // "tool_choice": "none": the turn can only answer, but its
+            // tools are written into the prompt as in every other turn of
+            // the chat. Left out, the prompt changed at its start, and the
+            // chat the engine holds from the turn before could not be read
+            // on from: all of it was read again (24 s at 16,500 tokens on
+            // the PS5), and once more in the next turn, when they came back.
+            if (tf != ToolFormat::NONE) {
                 bool named = false;
                 // A user without the app's tools: the model never sees them,
                 // and answers in words.
@@ -792,9 +802,15 @@ void handle(int fd, Server::State &state, Usage &u) {
                     tools.push_back(t);
                     named |= t["function"]["name"].str() == "web_search";
                 }
-                std::string last_user;
+                // "auto" looks at every message of the user's, not only the
+                // last: once a chat needed the search, it stays offered, so
+                // the prompt's tools are the same from turn to turn.
+                std::string last_user, all_user;
                 for (auto &m : msgs)
-                    if (m.role == "user") last_user = m.content;
+                    if (m.role == "user") {
+                        last_user = m.content;
+                        all_user += m.content + "\n";
+                    }
                 // "auto": a client with tools of its own that wants the
                 // search offered the way a plain chat gets it (ts5-tui).
                 const Json &ws = req["web_search"];
@@ -803,12 +819,13 @@ void handle(int fd, Server::State &state, Usage &u) {
                 // with TS5_WEB_SEARCH=always: a plain request stays as it
                 // was without a key, no search.
                 const std::string source = search_source(req["web_search_source"].str());
-                const bool wiki = is_encyclopedia(source);
+                const bool wiki = is_keyless(source);
                 const bool asked = ws.type == Json::BOOL ? ws.boolean(false) : ws.str() == "auto";
                 web = grant.web_search && !named && (source == "tavily" || (wiki && (asked || web_search_always()))) &&
                       (ws.type == Json::BOOL ? ws.boolean(false)
                                              : web_search_always() ||
-                                                   ((tools.empty() || ws.str() == "auto") && needs_web(last_user, wiki)));
+                                                   ((tools.empty() || ws.str() == "auto") &&
+                                                    needs_web(ws.str() == "auto" ? all_user : last_user, wiki)));
                 if (web) tools.push_back(web_search_tool(date, source));
             }
             prompt = render_chat(e.tok(), msgs, tools, date, think);
@@ -868,7 +885,8 @@ void handle(int fd, Server::State &state, Usage &u) {
         }
         std::function<bool()> gone;
         if (stop_gone) gone = [fd, &page_away] { return peer_gone(fd) && !page_away(); };
-        bool use_tools = !tools.empty();  // off for a last turn that must answer
+        // Off for a last turn that must answer, and for a request that says so.
+        bool use_tools = !tools.empty() && req["tool_choice"].str() != "none";
         std::vector<std::string> tool_names;
         for (const Json &t : tools) tool_names.push_back(t["function"]["name"].str());
         SampleParams sp;
@@ -1655,8 +1673,13 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
         log_line("ts5: tool calls: %s; web search: %s", state_.tool_format.c_str(),
                 search_source() == "none" ? "off (no TAVILY_API_KEY, TS5_WIKIPEDIA=off)"
                 : tavily_key().empty()
-                    ? (std::string(search_source() == "grokipedia" ? "Grokipedia" : search_source() == "both" ? "Wikipedia and Grokipedia" : "Wikipedia") +
-                       " only (no TAVILY_API_KEY), " + (web_search_always() ? "offered on every chat" : "for a request that asks for a search")).c_str()
+                    ? (std::string(search_source() == "web" ? "the web by DuckDuckGo (then Grokipedia, then Wikipedia)"
+                                   : search_source() == "google"
+                                         ? (google_ready() ? "Google through Chromium (then DuckDuckGo, Grokipedia, Wikipedia)"
+                                                             : "Google, but no Chromium is installed: DuckDuckGo (then Grokipedia, then Wikipedia)")
+                                   : search_source() == "grokipedia" ? "Grokipedia only"
+                                   : search_source() == "both" ? "Wikipedia and Grokipedia only" : "Wikipedia only") +
+                       " (no TAVILY_API_KEY), " + (web_search_always() ? "offered on every chat" : "for a request that asks for a search")).c_str()
                 : web_search_always() ? "on (Tavily), offered on every chat"
                                       : "on (Tavily), offered when a chat looks like it needs the web");
 }

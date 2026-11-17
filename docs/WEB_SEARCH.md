@@ -36,14 +36,106 @@ about tools.
 `"capabilities": {"tools": true, "tool_format": "hermes", "web_search": true,
 "web_search_source": "tavily"}`.
 
+## Without a key: the web through DuckDuckGo (Linux)
+
+With no Tavily key a search on Linux is still a regular web search, and only
+for a request that asks for a search: `"web_search": true`, or `"web_search":
+"auto"` on a chat that looks like it needs the web or asks to search (with
+`"auto"`, once a chat needed the search it stays offered, so the chat's
+prompt starts the same from turn to turn). ts5-tui asks that way while its
+search tool is switched on, so a model in ts5-tui can search out of the box.
+A plain request that says nothing gets no search, as before.
+
+ts5 asks for DuckDuckGo's results page that needs no scripts
+(`html.duckduckgo.com/html`), the way a browser asks for a page, and gives
+the model the results as text: title, the site's own address and the line
+or two under it, eight of them (`TS5_SEARCH_RESULTS`), without the
+advertisements. The passages are short, so the tool's description tells the
+model to open a result's page when it needs more. Of eight search sites
+tried from a PS5 on 2026-11-17 it was the one that answered such a request
+with real results, in about 0.7 s: Google's page wants scripts, Bing sent
+unrelated results, Brave, Mojeek and Startpage a check for robots.
+
+When DuckDuckGo can't be searched (it sends its own check for robots, which
+ts5 does not answer, or it can't be reached), the search goes to Grokipedia,
+and when that can't be searched either, to Wikipedia. The model is told
+which it got and that an encyclopedia has no news or live data.
+
+`TS5_SEARCH_SOURCE` picks what is searched without a key: `web` (the
+default), `google` (below), `grokipedia`, `wikipedia` or `both` (the two
+encyclopedias, below);
+a request picks with `"web_search_source"`, and `/v1/models` lists the
+choices under `capabilities.search_sources`. `/v1/models` says
+`"web_search": false, "web_search_source": "web"`: `web_search` stays "a
+key is set, and the search is offered by itself". On the PS5 title the
+search is the key's alone.
+
+## Without a key: Google through Chromium (Linux)
+
+Google's results page wants scripts, so a plain request gets none of it. A
+browser does: with `TS5_SEARCH_SOURCE=google` (or `"web_search_source":
+"google"`; in ts5-tui Settings → Search source, or `/tools search google`)
+ts5 opens the results page in a Chromium installed on the machine, the one
+the browser tool uses, and gives the model what the page shows between its
+"Search Results" heading and its page numbers, without the page's buttons
+and boxes and without its advertisements ("Sponsored results"): the answer
+Google's AI writes at the top when it shows one ("AI Overview"), the results
+with their passages, and under them a list of where the numbered links lead
+(the addresses of other sites only, each once). A result's number stands at
+the end of the line that names its site.
+The model is told that the answer at the top is written by an AI and is to
+be checked against the results.
+
+Since November 2026 Google's page no longer has its results' addresses: a
+link to a result is an address of Google's own that sends on
+(`/goto?url=` and a token that says nothing), and the page shows only the
+site's name with a path it cuts short. ts5 asks Google where the first two
+results lead: from the page, the way a click on the link asks, without
+following the answer, so the site a result is on hears nothing of it until
+the model opens the page. Two, because Google sends on for two a results
+page: asked for more, at once or one after another, it answers each with
+a page that says to wait (3 seconds, then longer each time, up to 28
+seconds on a PS5 on 17 November 2026). ts5 does not sit that wait out and
+does not go around it. A result whose line under the title is its site's
+address and nothing more (a front page) needs no asking. (An address
+Google still writes into a link, as `/url?q=` did, is read from the link.)
+
+The other results keep their passages and the line with their site's
+name, and their addresses come from elsewhere: while the browser reads
+Google's page, ts5 makes the same search on DuckDuckGo (as `web` does),
+and adds its results under Google's page as a list of titles with their
+addresses, without those Google's list already has. The model is told
+which list is whose. When DuckDuckGo can't be searched, Google's page
+stands alone, with a line that says the other addresses are not known.
+That one DuckDuckGo search is also the one that answers when Google can't
+be searched (below), so no search is made twice.
+
+On a PS5 (17 November 2026, six searches) a search took 4.6 to 6.6
+seconds and Chromium about 500 MiB of memory while it ran; four of the
+six had an answer by Google's AI.
+
+- It is there where a Chromium is: `/v1/models` lists `google` under
+  `capabilities.search_sources` only then. `TS5_SEARCH_BROWSER` names
+  another program than the one found (a path, or a name on the `PATH`).
+- A browser starts for each search and ends with it. That takes seconds
+  where DuckDuckGo's page takes under one, and memory: with less than
+  900 MiB free the browser is not started. A search is one page and at
+  most two short requests to Google, and one page of DuckDuckGo's.
+- Google's question about cookies, where it asks one, is answered with its
+  button for no ("Reject all", in the page's language).
+- Its check for robots ("unusual traffic", a captcha) is not answered.
+  Then, as when no Chromium is installed, the memory is short or the page
+  lists nothing, the search goes on as `web` does (DuckDuckGo, Grokipedia,
+  Wikipedia), and the result starts with a line that says why Google
+  could not be searched.
+- The page is asked for the way every page in the browser tool is: as
+  Chrome on a Mac, in English (`hl=en`), with nothing that names ts5.
+
 ## Without a key: Wikipedia
 
-With no Tavily key the search is Wikipedia's own (its public API, no key, no
-account), and only for a request that asks for a search: `"web_search":
-true`, or `"web_search": "auto"` on a chat that looks like it needs the web,
-names Wikipedia or asks to search. ts5-tui asks that way while its search
-tool is switched on, so a model in ts5-tui can look things up out of the box.
-A plain request that says nothing gets no search, as before.
+With `TS5_SEARCH_SOURCE=wikipedia` (or `"web_search_source": "wikipedia"`)
+the search is Wikipedia's own (its public API, no key, no account), for the
+same requests as above, and also for one that names Wikipedia.
 
 It is an encyclopedia: no news, prices, weather or anything live. The tool's
 description tells the model so, and to say when the articles don't hold the
@@ -70,7 +162,7 @@ On Linux the encyclopedia can also be [Grokipedia](https://grokipedia.com)
 
 - In ts5-tui: Settings → Search source, or `/tools search grokipedia`
   (`wikipedia`, `both`).
-- For `ts5 serve` and the service: `TS5_ENCYCLOPEDIA=grokipedia` or `both`
+- For `ts5 serve` and the service: `TS5_SEARCH_SOURCE=grokipedia` or `both`
   (in `/etc/default/tokenstation` for the service).
 - In a request: `"web_search_source": "grokipedia"` (or `"wikipedia"`,
   `"both"`) beside `"web_search"`. `/v1/models` lists what can be picked

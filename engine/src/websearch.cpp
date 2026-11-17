@@ -6,8 +6,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <future>
+#include <set>
 #include <vector>
 
+#include "browser.h"
 #include "net.h"
 
 namespace ts5 {
@@ -43,9 +46,20 @@ std::string search_source(const std::string &asked) {
     (void)asked;
     return "none";  // the console title's search is the key's alone
 #else
-    // The request's choice of encyclopedia, else this machine's.
-    std::string want = asked == "wikipedia" || asked == "grokipedia" || asked == "both" ? asked : env_or("TS5_ENCYCLOPEDIA", "wikipedia");
-    if (want != "grokipedia" && want != "both") want = "wikipedia";
+    // The request's choice, else this machine's: TS5_SEARCH_SOURCE, else
+    // the encyclopedia an older setup named (TS5_ENCYCLOPEDIA), else the web.
+    const auto known = [](const std::string &w) {
+        return w == "web" || w == "google" || w == "wikipedia" || w == "grokipedia" || w == "both";
+    };
+    std::string want = asked;
+    if (!known(want)) {
+        want = env_or("TS5_SEARCH_SOURCE", "");
+        if (!known(want)) {
+            const std::string old = env_or("TS5_ENCYCLOPEDIA", "");
+            want = old.empty() ? "web" : old == "grokipedia" || old == "both" ? old : "wikipedia";
+        }
+    }
+    if (want == "web" || want == "google") return want;
     const bool wiki = env_or("TS5_WIKIPEDIA", "en") != "off";
     if (want == "wikipedia") return wiki ? "wikipedia" : "none";
     return want == "both" && wiki ? "both" : "grokipedia";
@@ -53,6 +67,16 @@ std::string search_source(const std::string &asked) {
 }
 
 bool is_encyclopedia(const std::string &source) { return source == "wikipedia" || source == "grokipedia" || source == "both"; }
+
+bool is_keyless(const std::string &source) { return source == "web" || source == "google" || is_encyclopedia(source); }
+
+bool google_ready() {
+#ifdef TS5_PS5
+    return false;
+#else
+    return google_browser();
+#endif
+}
 
 bool web_search_always() { return env_or("TS5_WEB_SEARCH", "") == "always"; }
 
@@ -117,6 +141,25 @@ bool needs_web(const std::string &user_text, bool wikipedia) {
 Json web_search_tool(const std::string &today) { return web_search_tool(today, search_source()); }
 
 Json web_search_tool(const std::string &today, const std::string &source) {
+    if (source == "web" || source == "google") {
+        // The web, by a search page's results: a title, an address and a
+        // line or two of each, so the model is told to open what it needs.
+        const std::string tool =
+            "{\"type\": \"function\", \"function\": {\"name\": \"web_search\", \"description\": \"Search the web. "
+            "Returns the top results, each with a title, URL and a short passage from the page. Use it when the "
+            "answer depends on something after your training data (news, prices, weather, schedules, new "
+            "releases, a specific website), when the user asks you to look something up, or when the answer "
+            "depends on a fact you are not sure of. Do not search for explanations, writing or code you can do "
+            "yourself. When you do search, answer from the results and cite the URLs you used; a passage is "
+            "short, so open a result's page when you need more than it says. Today is " +
+            today +
+            ".\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\", "
+            "\"description\": \"What to search for, as you would type it into a search engine.\"}}, "
+            "\"required\": [\"query\"]}}}";
+        Json j;
+        Json::parse(tool, j);
+        return j;
+    }
     if (source != "tavily") {
         // An encyclopedia and nothing else: the model has to know, or it
         // answers "today's weather" from an article on the climate.
@@ -618,6 +661,130 @@ std::string grokipedia_search(const std::string &query, int n, std::string &log,
               (loose ? ", a loose match" : "") + ")";
     return out;
 }
+
+// ---- The web with no key: DuckDuckGo's results page that needs no scripts
+// (html.duckduckgo.com/html), asked for as a browser asks for a page. Of
+// eight search sites tried from a PS5 on 2026-11-17 it was the one that
+// answered such a request with real results: Google wants scripts, Bing
+// sent unrelated filler, Brave, Mojeek and Startpage a check for robots.
+// A check or a refusal here is not worked around: *failed, and the caller
+// goes to an encyclopedia.
+
+std::string url_unescape(const std::string &s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '%' && i + 2 < s.size() && isxdigit((unsigned char)s[i + 1]) && isxdigit((unsigned char)s[i + 2])) {
+            out += (char)strtol(s.substr(i + 1, 2).c_str(), nullptr, 16);
+            i += 2;
+        } else {
+            out += s[i] == '+' ? ' ' : s[i];
+        }
+    }
+    return out;
+}
+
+// A piece of a page as one line of plain text.
+std::string one_line(const std::string &html) {
+    std::string out;
+    for (char c : html_text(html)) {
+        const bool space = isspace((unsigned char)c);
+        if (space && (out.empty() || out.back() == ' ')) continue;
+        out += space ? ' ' : c;
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
+// list: what was found, also as it is (a search that only wants the addresses).
+std::string duckduckgo_search(const std::string &query, int n, std::string &log, bool *failed,
+                              std::vector<Article> *list = nullptr) {
+    const std::string base = env_or("TS5_DUCKDUCKGO_URL", "https://html.duckduckgo.com");
+    const auto t0 = std::chrono::steady_clock::now();
+    auto took = [&] {
+        char b[32];
+        snprintf(b, sizeof b, "%.1f s", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        return std::string(b);
+    };
+    const auto fail = [&](const std::string &why, const std::string &detail) {
+        if (failed) *failed = true;
+        log = "web_search \"" + query + "\": DuckDuckGo " + detail + " (" + took() + ")";
+        return kFailed + why + kTell;
+    };
+    // (A form's words: spaces as "+".)
+    std::string q = url_escape(query);
+    for (size_t i = q.find("%20"); i != std::string::npos; i = q.find("%20", i)) q.replace(i, 3, "+");
+    HttpResponse resp;
+    std::string err;
+    if (!http_get(base + "/html/?q=" + q, page_headers(secure_url(base)), resp, err, 2u << 20, 20))
+        return fail("the web search (DuckDuckGo) couldn't be reached", err);
+    const std::string &h = resp.body;
+    // Its check for robots comes as HTTP 202 with a puzzle to solve.
+    if (resp.status != 200 || h.find("anomaly-modal") != std::string::npos || h.find("anomaly.js") != std::string::npos)
+        return fail("the web search (DuckDuckGo) refused this search", resp.status != 200
+                                                                             ? "answered HTTP " + std::to_string(resp.status)
+                                                                             : "sent its check for robots");
+    std::vector<Article> found;
+    const char *const kMark = "class=\"result__a\"";
+    for (size_t at = h.find(kMark); at != std::string::npos && (int)found.size() < n;) {
+        const size_t next = h.find(kMark, at + 1);
+        const size_t open = h.rfind("<a", at), close = h.find('>', at);
+        const size_t end = close == std::string::npos ? close : h.find("</a>", close);
+        at = next;
+        if (open == std::string::npos || end == std::string::npos) continue;
+        // The address: the site's own, out of DuckDuckGo's forwarding link.
+        std::string href;
+        const size_t hr = h.find("href=\"", open);
+        if (hr != std::string::npos && hr < close) href = h.substr(hr + 6, h.find('"', hr + 6) - hr - 6);
+        for (size_t i = href.find("&amp;"); i != std::string::npos; i = href.find("&amp;", i + 1)) href.replace(i, 5, "&");
+        if (href.find("/y.js") != std::string::npos) continue;  // an advertisement
+        const size_t ud = href.find("uddg=");
+        if (ud != std::string::npos) href = url_unescape(href.substr(ud + 5, href.find('&', ud) - ud - 5));
+        else if (href.compare(0, 2, "//") == 0) href = "https:" + href;
+        if (href.compare(0, 7, "http://") != 0 && href.compare(0, 8, "https://") != 0) continue;
+        const std::string title = one_line(h.substr(close + 1, end - close - 1));
+        if (title.empty()) continue;
+        // Its passage, when it has one before the next result.
+        std::string text;
+        const size_t sn = h.find("class=\"result__snippet\"", end);
+        if (sn != std::string::npos && (next == std::string::npos || sn < next)) {
+            const size_t so = h.find('>', sn), se = so == std::string::npos ? so : h.find("</a>", so);
+            if (se != std::string::npos) text = one_line(h.substr(so + 1, se - so - 1));
+        }
+        found.push_back({title, href, text});
+    }
+    if (found.empty()) {
+        // No list and no word that there is none: not the page it sends a browser.
+        if (h.find("no-results") == std::string::npos && h.find("No results") == std::string::npos)
+            return fail("the web search (DuckDuckGo) sent a page without results", "sent a page without a list of results");
+        log = "web_search \"" + query + "\": 0 results (" + took() + ", DuckDuckGo)";
+        return "The web search found nothing for \"" + query + "\". Try other or fewer words, or answer from what you know "
+               "and say that it could not be looked up.";
+    }
+    if (list) *list = found;
+    std::string out = "Web results for \"" + query + "\":";
+    int i = 0;
+    for (auto &p : found)
+        out += "\n\n[" + std::to_string(++i) + "] " + p.title + "\n" + p.url + (p.text.empty() ? "" : "\n" + clip(p.text, 600));
+    out += "\n\nEach passage is a line or two from its page. Answer from them and cite the URLs you used. If they don't "
+           "hold the answer, open the page of the result that fits, or say that it could not be found.";
+    log = "web_search \"" + query + "\": " + std::to_string(i) + " results (" + took() + ", DuckDuckGo)";
+    return out;
+}
+
+// Grokipedia, and Wikipedia when it can't be searched (unless Wikipedia is off).
+std::string grokipedia_or_wikipedia(const std::string &query, int n, std::string &log, bool *failed) {
+    bool bad = false;
+    std::string out = grokipedia_search(query, n, log, &bad);
+    if (!bad) return out;
+    if (env_or("TS5_WIKIPEDIA", "en") == "off") {
+        if (failed) *failed = true;
+        return out;
+    }
+    const std::string why = search_failure(out), glog = log;
+    out = wikipedia_search(query, n, log, failed);
+    log += "; before it: " + glog.substr(glog.find("\": ") == std::string::npos ? 0 : glog.find("\": ") + 3);
+    return failed && *failed ? out : "(" + why + ", so this search went to Wikipedia.)\n\n" + out;
+}
 #endif
 
 }  // namespace
@@ -642,20 +809,94 @@ std::string web_search(const std::string &arguments, std::string &log, bool *fai
             return kFailed + std::string("no web search is set up on this machine") + kTell;
         }
 #ifndef TS5_PS5
-        if (source == "grokipedia") {
+        // Google, through a Chromium on this machine; when it can't be
+        // searched so (no browser, its check for robots), the web as below.
+        // DuckDuckGo is asked the same meanwhile: Google's page has no
+        // address of a result and Google names those of two (browser.cpp),
+        // so the others' come from there, and it is the search that
+        // answers when Google can't be searched.
+        // (A results page has ten; more of them than of an encyclopedia's
+        // articles, as each is a line or two.)
+        const int dn = getenv("TS5_SEARCH_RESULTS") ? n : 8;
+        struct Duck {
+            std::string out, log;
             bool bad = false;
-            std::string out = grokipedia_search(query, n, log, &bad);
-            if (!bad) return out;
-            // Grokipedia can't be searched now: Wikipedia, unless it is off, and the model is told.
-            if (env_or("TS5_WIKIPEDIA", "en") == "off") {
-                if (failed) *failed = true;
-                return out;
+            std::vector<Article> found;
+        };
+        const auto duck = [&query, dn] {
+            Duck d;
+            d.out = duckduckgo_search(query, dn, d.log, &d.bad, &d.found);
+            return d;
+        };
+        std::string before, before_log;
+        Duck d;
+        bool have = false;
+        if (source == "google") {
+            const auto t0 = std::chrono::steady_clock::now();
+            std::future<Duck> meanwhile = std::async(std::launch::async, duck);
+            std::string page, why;
+            int links = 0;
+            std::vector<std::string> listed;
+            const bool ok = google_search_page(query, page, why, links, &listed);
+            d = meanwhile.get();
+            have = true;
+            char secs[32];
+            snprintf(secs, sizeof secs, "%.1f s", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+            if (ok) {
+                // The addresses Google's page did not give, as the same
+                // search elsewhere has them (a page once: not what Google's
+                // list has, with or without a "/" at its end).
+                const auto same = [](std::string u) {
+                    if (const size_t h = u.find('#'); h != std::string::npos) u.erase(h);
+                    while (!u.empty() && u.back() == '/') u.pop_back();
+                    if (const size_t c = u.find("://"); c != std::string::npos) u.erase(0, c + 3);
+                    if (u.compare(0, 4, "www.") == 0) u.erase(0, 4);
+                    return u;
+                };
+                std::set<std::string> known;
+                for (const std::string &u : listed) known.insert(same(u));
+                std::string others;
+                int more = 0;
+                if ((int)listed.size() < links)
+                    for (const Article &p : d.found)
+                        if (known.insert(same(p.url)).second) {
+                            others += "\n- " + clip(p.title, 100) + ": " + p.url;
+                            more++;
+                        }
+                log = "web_search \"" + query + "\": " + std::to_string(links) + " results (" + secs + ", Google by Chromium" +
+                      (more ? ", " + std::to_string(more) + " more addresses from DuckDuckGo" : "") + ")";
+                return "Google's results page for \"" + query + "\", as a browser shows it. An answer of Google's own at its "
+                       "top (\"AI Overview\") is written by its AI: check it against the results before you rely on it.\n\n" +
+                       page +
+                       (more ? "\n\nThe same search on DuckDuckGo, with each result's address (many are the pages above):" + others
+                             : "") +
+                       "\n\nThe passages are short: open a result's page by its address when you need more than they say.";
             }
-            const std::string why = search_failure(out), glog = log;
-            out = wikipedia_search(query, n, log, failed);
-            log += "; before it: " + glog.substr(glog.find("\": ") == std::string::npos ? 0 : glog.find("\": ") + 3);
-            return failed && *failed ? out : "(" + why + ", so this search went to Wikipedia.)\n\n" + out;
+            before = "(Google could not be searched: " + why + ". So this search went to DuckDuckGo.)\n\n";
+            before_log = std::string("; before it: Google: ") + why + " (" + secs + ")";
         }
+        if (source == "web" || source == "google") {
+            // The web; when that can't be searched now, Grokipedia, then
+            // Wikipedia, and the model is told which it got.
+            if (!have) d = duck();
+            const bool bad = d.bad;
+            std::string out = d.out;
+            log = d.log;
+            if (!bad) {
+                log += before_log;
+                return before + out;
+            }
+            const std::string why = search_failure(out), dlog = log;
+            bool ebad = false;
+            out = grokipedia_or_wikipedia(query, n, log, &ebad);
+            log += "; before it: " + dlog.substr(dlog.find("\": ") == std::string::npos ? 0 : dlog.find("\": ") + 3) + before_log;
+            if (ebad) {
+                if (failed) *failed = true;
+                return kFailed + why + ", and no encyclopedia could be searched in its place" + kTell;
+            }
+            return "(" + why + ", so this search went to an encyclopedia instead: no news, prices or other live data.)\n\n" + out;
+        }
+        if (source == "grokipedia") return grokipedia_or_wikipedia(query, n, log, failed);
         if (source == "both") {
             // Half the results from each, Wikipedia's first.
             const int each = (n + 1) / 2;

@@ -190,10 +190,12 @@ int no_model_command(int argc, char **argv) {
         return UsageLog::read(argv[2], [](const UsageRecord &r) { printf("%s", usage_line(r).c_str()); }) ? 0 : 1;
     }
     if (cmd == "search") {
-        if (argc != 3) return usage();
+        if (argc != 3 || argv[2][0] == '-') return usage();  // (--help is no search)
         if (tavily_key().empty())
             fprintf(stderr, "ts5: TAVILY_API_KEY is not set%s\n",
-                    search_source() == "wikipedia"    ? ": searching Wikipedia"
+                    search_source() == "web"          ? ": searching the web by DuckDuckGo"
+                    : search_source() == "google"     ? ": searching Google through Chromium"
+                    : search_source() == "wikipedia"  ? ": searching Wikipedia"
                     : search_source() == "grokipedia" ? ": searching Grokipedia"
                     : search_source() == "both"       ? ": searching Wikipedia and Grokipedia"
                                                       : " and TS5_WIKIPEDIA is off");

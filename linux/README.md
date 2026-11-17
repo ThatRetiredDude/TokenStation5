@@ -73,6 +73,13 @@ cd tokenstation-linux-amd64
 ./install.sh
 ```
 
+On Debian and Fedora the package brings Chromium with it, as the browser
+a model in ts5-tui reads web pages with (a recommended package: `apt` and
+`dnf` install those by default). `sudo apt install --no-install-recommends
+./tokenstation_latest_amd64.deb` (or `dnf install --setopt=install_weak_deps=False ...`)
+leaves it out, and pages are then read as plain text. Ubuntu has Chromium
+only as a snap, which the package doesn't pull in.
+
 A `linux-v<version>` release has the same files under versioned names:
 
 **Debian 12 or 13, and Ubuntu**: the `.deb`.
@@ -533,14 +540,56 @@ ts5-tui --url http://ps5.local:8081  # another one
   earlier calls give way: the model keeps their first lines and the newest
   results whole, and the chat marks each "left out later, for room". You
   still see them in full.
+- **A long task goes on**: a message that takes the model many tool calls
+  (installing and setting up a program, working through a folder) no longer
+  ends when the chat is full. Once its calls take the chat past the task
+  window (24,000 tokens; Settings → Task window, or `/tools window N`), the
+  long outputs of its earlier commands and file reads give way first: the
+  model keeps how each ended and its first and last lines, every call and
+  every short result stay word for word, and the newest results stay
+  whole. That costs one reading of the shorter chat and puts nothing in
+  other words. When it no longer makes an eighth of the window free, or
+  the chat no longer fits the model's memory, the model writes notes on its
+  work: the plan and where it is, what is done and how it was checked, the
+  facts it found, what failed and why, the next step. The calls then go on
+  from those notes, your request word for word (and anything you typed
+  while it worked), and its latest step as it was. "Notes on the task" in
+  the chat marks the place, a click opens them, and everything above stays
+  on the screen and in the saved file. A window keeps a long task quick
+  (the model reads on from a short chat) and on track (a small model loses
+  the thread in a very long one); `/tools window off` writes notes only
+  when the chat is full. With Settings → Full chat on "stops" there are
+  none. If the notes can't be written, the task goes on with the chat as
+  it was. Notes that say what the notes before them said (a small model
+  copies its earlier notes when it is stuck) are written a second time,
+  from ts5-tui's own list of the task's calls and not from the earlier
+  notes. When three sets in a row come out word for word the same, the
+  task is going in circles: the model is told to stop and say what is done,
+  what is not and what is in the way, and the chat says why. Tell it what
+  to do differently, or to go on. From the first notes or summary on, the
+  model has one more tool,
+  `search_earlier`: it looks up words in the part of the chat the notes
+  took the place of (a command it ran and what came back, a path, an
+  error's words) and gets the lines that have them, so a detail the notes
+  left out is not lost to it.
 - **Web search**: Settings → Web search key takes a free key from
   [app.tavily.com](https://app.tavily.com). A model ts5-tui loads itself
   then searches the web when a question needs it (models that use tools;
   see [docs/WEB_SEARCH.md](../docs/WEB_SEARCH.md)). Without a key the
-  search is an encyclopedia's: Settings → Search source (or
-  `/tools search wikipedia`, `grokipedia`, `both`) picks **Wikipedia**
-  (the default), **Grokipedia** (xAI's encyclopedia, written by its AI;
-  when it can't be searched, Wikipedia is) or **Both**. The key is kept in
+  search is still a regular web search: the results of DuckDuckGo (title,
+  address and a line or two of each page), and the model opens the pages
+  it needs. When DuckDuckGo can't be searched (it asks for a puzzle to be
+  solved, or doesn't answer) the search goes to Grokipedia, and when that
+  can't be searched either, to Wikipedia, and the model is told which it
+  got. Settings → Search source (or `/tools search web`, `google`,
+  `grokipedia`, `wikipedia`, `both`) picks: **Web** (the default),
+  **Google** (its results page read through Chromium, with the answer its
+  AI writes at the top when it shows one; offered where a Chromium is
+  installed, and each search starts the browser, so it takes seconds and
+  about 900 MiB of free memory; when Google asks whether a robot is
+  searching, the search goes to DuckDuckGo and the model is told),
+  **Grokipedia** (xAI's encyclopedia, written by its AI; when it can't be
+  searched, Wikipedia is), **Wikipedia**, or **Both** encyclopedias. The key is kept in
   ts5-tui's own settings file (yours alone to read) and handed to the
   engine in its environment, never on a command line. For the API-only
   service, add `TAVILY_API_KEY=tvly-...` to `/etc/default/tokenstation`
@@ -568,16 +617,33 @@ ts5-tui --url http://ps5.local:8081  # another one
     them back, and a new chat asks again) or "no". Letters never answer,
     so a message typed while the question shows just waits its turn. A
     command runs in the sandbox (below), in
-    the folder ts5-tui was started in, with no keyboard, for 2 minutes at
-    most; Esc stops one that is running. The model gets its output and
+    the folder ts5-tui was started in, with no keyboard, for 10 minutes at
+    most (2 minutes outside the sandbox's own system); Esc stops one that
+    is running. The model gets its output and
     exit code (long output: the start and the end). Under each call a
     line says how it went; a click opens what the model got.
   - **The sandbox** (on by default: Settings → Sandbox, or `/sandbox`):
     the model's commands run in [bubblewrap](https://github.com/containers/bubblewrap)
     (`bwrap`, your system's own package; ts5 recommends it, and installs
     nothing of it itself). In there a command:
-    - sees the system read-only, so nothing in it can be installed or
-      broken, and `sudo` can't work;
+    - has a Linux system of its own, Debian 13, in which it is root:
+      `apt-get install`, `pip install` and `npm install -g` work, `sudo`
+      just runs the command, and none of it touches this machine's
+      system. What the model installs stays for later commands and chats.
+      The first command sets the system up: a 30 MB download of Debian's
+      slim image files (as Debian's image builders publish them, at one
+      fixed commit, checked by SHA-256), unpacked to
+      `~/.local/share/tokenstation/sandbox/box` (about 90 MiB, then
+      whatever gets installed), followed by its basic tools (python3, pip,
+      git, curl, wget). Root in there is root over that system's files
+      only: on this machine every one of its processes is you, with no
+      more rights than you have, and only you can enter its folder.
+      Settings → Sandbox system (or `/sandbox box off`) goes back to this
+      machine's own system, read-only, where nothing can be installed or
+      broken and `sudo` can't work; `/sandbox reset box` removes the
+      sandbox's system, and the next command sets up a fresh one. For
+      x86-64 machines. No service manager runs in it (`systemctl` starts
+      nothing): a server is started and used in the same command;
     - sees none of your home folder (SSH keys, browsers, ts5's keys,
       models and chats), none of the other home folders or mounted drives,
       none of the sockets in `/run` (your SSH and desktop agents), and
@@ -585,16 +651,18 @@ ts5-tui --url http://ps5.local:8081  # another one
     - can change one folder of yours: the one ts5-tui was started in.
       Started in your home folder itself, it gets none, and works in its
       own home;
-    - has a home folder of its own, the toolbox
+    - has a home folder of its own: `/root` in the sandbox's system, or,
+      with this machine's system, the toolbox
       (`~/.local/share/tokenstation/sandbox/home`), kept between chats:
       that is where `pip install`, `npm install -g` and a program put in
-      `~/bin` go, so the model can fetch the tools it needs once and use
-      them again. `/sandbox folder DIR` (or Settings → Sandbox folder, or
-      `ts5-tui --sandbox-folder DIR`) moves it to `DIR/tokenstation-sandbox`,
-      on a faster or roomier drive say: one with Unix permissions (ext4,
-      btrfs, xfs; not exFAT or NTFS, and not mounted `noexec`).
-      `/sandbox folder default` brings it back. While that drive isn't
-      mounted, no command runs;
+      `~/bin` go, so the model can fetch the tools it needs once
+      and use them again. `/sandbox folder DIR` (or Settings → Sandbox
+      folder, or `ts5-tui --sandbox-folder DIR`) moves the toolbox to
+      `DIR/tokenstation-sandbox` and the sandbox's system to
+      `DIR/tokenstation-box`, on a faster or roomier drive say: one with
+      Unix permissions (ext4, btrfs, xfs; not exFAT or NTFS, and not
+      mounted `noexec`). `/sandbox folder default` brings them back.
+      While that drive isn't mounted, no command runs;
     - has the network (`/sandbox no-network` takes it away);
     - sees only its own processes, and whatever it starts ends with it;
     - is the first thing the kernel ends when memory runs out, before the
@@ -602,8 +670,9 @@ ts5-tui --url http://ps5.local:8081  # another one
 
     It costs no memory of its own and starts in milliseconds. It shares
     the kernel with everything else, so it is a strong fence, not a second
-    machine. `/sandbox` says where commands run and how big the toolbox
-    is; `/sandbox reset` empties the toolbox; `/sandbox off` runs commands
+    machine. `/sandbox` says where commands run and how big its system
+    is; `/sandbox reset` says what there is to remove (`reset box`,
+    `reset toolbox`, `reset now` for both); `/sandbox off` runs commands
     as you again, with all your files. The question before a command says
     which: "in the sandbox" or "as you (no sandbox)".
     Without bubblewrap (`sudo apt install bubblewrap`), or where the system
@@ -619,9 +688,10 @@ ts5-tui --url http://ps5.local:8081  # another one
     ```
     then `sudo apparmor_parser -r /etc/apparmor.d/bwrap`. Debian and Fedora
     need nothing. `ts5-tui --run-command 'ls ~'` runs one command the way
-    the model's do and prints what the model would get back.
-  - **Browser** (off until you switch it on: Settings → Tool: browser, or
-    `/tools browser on`): the model opens a page and gets it as text with
+    the model's do and prints what the model would get back
+    (`--sandbox box`, `plain`, `no-network` or `off` for that command).
+  - **Browser** (on; Settings → Tool: browser, or `/tools browser off`,
+    switches it off): the model opens a page and gets it as text with
     every link, text box and button numbered (`the Volga[3]`,
     `[4: text box "Search"]`, `[5: button "Go"]`), and acts on the
     numbers: it follows a link, types into a box, presses a button, reads
@@ -635,20 +705,23 @@ ts5-tui --url http://ps5.local:8081  # another one
 
     Settings → Browser (or `/browser`) says what shows the pages:
     - **Auto**: Chromium (or Chrome, Brave, Edge) if one is installed,
-      else the text view.
-    - **No browser installed?** The first time you switch the browser
-      tool on without one (none found, and none named with
-      `/browser PATH`), ts5-tui asks which to install (arrows and
+      else the text view. Chromium comes with the package: the .deb and
+      the .rpm recommend it, so `apt` and `dnf` install it beside
+      TokenStation5 (on Arch it is an optional dependency:
+      `sudo pacman -S chromium`). Most sites need their scripts to show
+      anything, which only a browser runs.
+    - **No browser installed?** Until one is, pages are read in the text
+      view. `/browser install` asks which to install (arrows and
       Enter; it starts on Neither, so an Enter meant for something else
       installs nothing): **Chromium** from your system's packages (`apt-get`, `dnf`,
-      `pacman` or `zypper`; sudo asks for your password; on Debian 13 it
-      is the small `chromium-headless-shell`), **Obscura** into your home
+      `pacman` or `zypper`; sudo asks for your password; the full
+      browser, or Debian's `chromium-headless-shell` where there is no
+      other), **Obscura** into your home
       folder (a 72 MB download from its makers' GitHub release, 150 MB
       once unpacked, checked against a SHA-256 built into ts5, no
       password), or **Neither**. ts5-tui
       steps aside while the install runs and comes back when you press
-      Enter. `/browser install` asks again, and
-      `ts5-tui --install-browser chromium|obscura` does it without the
+      Enter. `ts5-tui --install-browser chromium|obscura` does it without the
       app (`--dry-run` only says what it would run).
     - **Chromium**: the full browser, without a window, each page shut in
       its sandbox. On a PS5 beside a loaded 14B model it took 155 MiB
@@ -702,8 +775,9 @@ ts5-tui --url http://ps5.local:8081  # another one
     own. `TS5_BROWSER_AGENT=linux` in ts5-tui's environment makes it
     Chrome on Linux instead; `TS5_BROWSER_AGENT=own` leaves the browser
     its own words and sends the text view's requests as "TokenStation5".
-    The searches (Wikipedia's and Grokipedia's APIs, Tavily) name ts5,
-    as services made for programs ask. That is all ts5 does about it: a
+    The web search without a key asks for DuckDuckGo's results page the
+    same way, and reads Google's through the same Chromium. The searches made through a service's API (Wikipedia's,
+    Grokipedia's, Tavily) name ts5, as services made for programs ask. That is all ts5 does about it: a
     site that still tests for a person (a captcha, a "checking your
     browser" page) is left closed, and the model says so.
   - **Files** (off until you switch it on: Settings → Tool: files, or
@@ -779,10 +853,16 @@ ts5-tui --url http://ps5.local:8081  # another one
   own: with a small model, keep the questions on. A web page is text from
   a stranger: with "every command" chosen, a page the model reads could
   talk it into a command, so leave the question on when it reads pages you
-  don't trust. A model that keeps calling tools gets twelve rounds for one
-  message, then has to answer; reading on down a page or a file is not
-  counted (up to 48 turns in all). If it asks for more after that, the
-  chat says so, and "go on" gives it twelve more.
+  don't trust. A model that keeps calling tools gets 50 steps for one
+  message (Settings → Tool steps: 12, 25, 50, 100 or no limit; `/tools
+  steps N`); reading on down a page or a file is not counted. Then
+  ts5-tui asks whether it should go on: **Go on** gives it as many again,
+  **Don't ask again for this message** lets it run until it is done or
+  you press Esc, **No, answer now** has it say what is done and what is
+  not. A model that only repeats itself doesn't get that far: a call it
+  made before in the same message, with the same result back, is marked
+  "the same as before" and the model is told so, and after three in a
+  row it has to answer and say what is in the way.
 - **Keys that can't surprise**: with something typed at the prompt, Tab
   stays there (it completes a command) instead of changing the page. PgUp
   and PgDn scroll the chat, and so do Shift or Alt with the up and down
@@ -909,7 +989,7 @@ The app's own settings are on its Settings page, as on the console.
 | `MODELS_DIR` | `/var/lib/tokenstation/models` | API-only: where models live. |
 | `HOST`, `PORT` | `0.0.0.0`, `8081` | API-only: where the API listens. |
 | `KEYS` | `/var/lib/tokenstation/access/keys.tsv` | API-only: the API keys other machines get in with (see API keys above). |
-| `TS5_ENCYCLOPEDIA` | `wikipedia` | The encyclopedia searched without a web search key: `wikipedia`, `grokipedia` or `both`. Add the line to use another. |
+| `TS5_SEARCH_SOURCE` | `web` | What is searched without a web search key: `web` (DuckDuckGo's results; when it can't be searched, Grokipedia, then Wikipedia), `google` (Google's results page through an installed Chromium; when it can't be read, as `web`), `grokipedia`, `wikipedia` or `both`. Add the line to use another. `TS5_ENCYCLOPEDIA`, the older name for the three encyclopedia choices, still counts where this one isn't set. |
 | `CONTEXT` | `8192` | API-only: context length, or `auto` for what fits. |
 | `PS5_BOOST` | `0` | PS5: the clock boost off (`0`, faster for models: see below) or on (`1`). Skipped if `ps5_control` is missing. |
 | `PS5_CONTROL` | empty | Path to `ps5_control` if it isn't on the PATH. |

@@ -44,8 +44,25 @@
 // and ends with it; it is stopped after ten idle minutes and started again
 // when it is next needed.
 #pragma once
+#include <string>
+#include <vector>
 
 namespace ts5 {
+
+// Google's results page for a query, read through a Chromium on this
+// machine: a results page that only shows with its scripts run, and that
+// answers some questions itself (its "AI Overview"). out: the page as text
+// with its links numbered, then the addresses of the links that lead to
+// other sites (links: how many). Its cookie question is answered with its
+// own "Reject all" button; its question whether a robot is searching is
+// not answered: that is a failure, as is a page with no results. false:
+// why, in words that finish "Google could not be searched: ".
+// TS5_SEARCH_BROWSER: the Chromium to use (else the first one installed).
+// TS5_GOOGLE_URL: a stand-in for https://www.google.com (tests).
+bool google_search_page(const std::string &query, std::string &out, std::string &why, int &links,
+                        std::vector<std::string> *addresses = nullptr);
+// A Chromium to read it with is installed here (path: which).
+bool google_browser(std::string *path = nullptr);
 
 // ts5 browser [--program auto|text|PATH] [--kind chromium|obscura] [--chars N] [--idle SECONDS]
 int browser_main(int argc, char **argv);

@@ -14,6 +14,7 @@ Requires:       shadow-utils
 Recommends:     libnotify
 Recommends:     tmux
 Recommends:     bubblewrap
+Recommends:     chromium
 
 # Already built; no debug packages or rebuilding here.
 %global debug_package %{nil}

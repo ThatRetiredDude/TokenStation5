@@ -17,9 +17,11 @@ what=${1:-}
 if [ "$what" = chromium ]; then
     cmd=
     if command -v apt-get >/dev/null 2>&1; then
-        # The light one first: Debian's chromium-headless-shell has no window parts.
+        # The full browser first: it is what sites are made for. (Debian's
+        # chromium-headless-shell, the one without window parts, only where
+        # there is no other.)
         pkg=
-        for p in chromium-headless-shell chromium chromium-browser; do
+        for p in chromium chromium-browser chromium-headless-shell; do
             if apt-cache policy "$p" 2>/dev/null | grep -q 'Candidate: [0-9a-zA-Z]'; then
                 pkg=$p
                 break

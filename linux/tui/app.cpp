@@ -7,6 +7,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -118,11 +119,13 @@ void Config::load() {
     path = (x && *x ? std::string(x) : home_dir() + "/.config") + "/tokenstation/tui.conf";
     std::ifstream f(path);
     std::string line;
+    int gen = 0;
     while (std::getline(f, line)) {
         const size_t eq = line.find('=');
         if (line.empty() || line[0] == '#' || eq == std::string::npos) continue;
         const std::string k = line.substr(0, eq), v = line.substr(eq + 1);
         if (k == "url") url = v;
+        else if (k == "defaults") gen = atoi(v.c_str());
         else if (k == "key") key = v;
         else if (k == "theme") theme = v;
         else if (k == "intro") intro = v != "0";
@@ -148,8 +151,10 @@ void Config::load() {
         else if (k == "tools") tools = v != "0";
         else if (k == "tool_terminal_ask") terminal_ask = v != "0";
         else if (k == "tool_browser_ask") browser_ask = v != "0";
+        else if (k == "tool_steps") tool_steps = std::max(0, atoi(v.c_str()));
+        else if (k == "task_window") task_window = std::max(0, atoi(v.c_str()));
         else if (k == "browser_offered") browser_offered = v == "1";
-        else if (k == "search_source" && (v == "wikipedia" || v == "grokipedia" || v == "both")) search_source = v;
+        else if (k == "search_source" && (v == "web" || v == "google" || v == "wikipedia" || v == "grokipedia" || v == "both")) search_source = v;
         else if (k == "tool_files") tool_files = v == "1";
         else if (k == "tool_files_ask") files_ask = v != "0";
         else if (k == "tool_github") tool_github = v != "0";
@@ -157,7 +162,14 @@ void Config::load() {
         else if (k == "sandbox") sandbox = v != "0";
         else if (k == "sandbox_network") sandbox_net = v != "0";
         else if (k == "sandbox_folder") sandbox_dir = v;
+        else if (k == "sandbox_box") sandbox_box = v != "0";
         else if (k == "browser" && !v.empty()) browser = v;
+    }
+    // Settings saved by a ts5-tui before 1.3.0 hold that one's defaults,
+    // not choices: the browser tool off and Wikipedia as the search.
+    if (gen < 2) {
+        tool_browser = true;
+        if (search_source == "wikipedia") search_source = "web";
     }
     saved_url = url;
     saved_key = key;
@@ -173,6 +185,7 @@ void Config::save() const {
         const int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd < 0) return;
         std::string s = "# ts5-tui's settings (Settings in ts5-tui changes them).\n";
+        s += "defaults=" + std::to_string(defaults) + "\n";
         s += "url=" + (url_given ? saved_url : url) + "\nkey=" + (key_given ? saved_key : key) + "\ntheme=" + theme + "\nintro=" + (intro ? "1" : "0") +
              "\nthinking=" + std::to_string(thinking) + "\ntemperature=" + fmt("%g", temp) +
              "\nmax_tokens=" + std::to_string(max_tokens) + "\ncontext=" + std::to_string(serve_ctx) + "\nhelper_room=" + (helper_room ? "1" : "0") + "\ntmux=" + (tmux ? "1" : "0") +
@@ -181,10 +194,11 @@ void Config::save() const {
              (tool_page ? "1" : "0") + "\ntool_terminal=" + (tool_terminal ? "1" : "0") + "\ntool_memory=" +
              (tool_memory ? "1" : "0") + "\ntool_browser=" + (tool_browser ? "1" : "0") + "\nbrowser=" + browser +
              "\ntools=" + (tools ? "1" : "0") + "\ntool_terminal_ask=" + (terminal_ask ? "1" : "0") +
-             "\ntool_browser_ask=" + (browser_ask ? "1" : "0") + "\nbrowser_offered=" + (browser_offered ? "1" : "0") + "\nsearch_source=" + search_source + "\ntool_files=" + (tool_files ? "1" : "0") +
+             "\ntool_browser_ask=" + (browser_ask ? "1" : "0") + "\ntool_steps=" + std::to_string(tool_steps) + "\ntask_window=" + std::to_string(task_window) + "\nbrowser_offered=" + (browser_offered ? "1" : "0") + "\nsearch_source=" + search_source + "\ntool_files=" + (tool_files ? "1" : "0") +
              "\ntool_files_ask=" + (files_ask ? "1" : "0") + "\ntool_github=" + (tool_github ? "1" : "0") +
              "\ntool_github_ask=" + (github_ask ? "1" : "0") + "\nsandbox=" + (sandbox ? "1" : "0") +
-             "\nsandbox_network=" + (sandbox_net ? "1" : "0") + "\nsandbox_folder=" + sandbox_dir + "\n";
+             "\nsandbox_network=" + (sandbox_net ? "1" : "0") + "\nsandbox_folder=" + sandbox_dir + "\nsandbox_box=" +
+             (sandbox_box ? "1" : "0") + "\n";
         if (write(fd, s.data(), s.size()) != (ssize_t)s.size()) {
             close(fd);
             return;

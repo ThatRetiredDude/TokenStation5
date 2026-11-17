@@ -114,8 +114,9 @@ uint64_t kv_ring_bytes(const HParams &hp, KvType kv);
 uint64_t vk_fixed_bytes(const HParams &hp, uint64_t weight_bytes, bool whole_blocks = true);
 // How many copies of a state that only goes forward a backend keeps
 // (Backend::state_slots): TS5_STATE_SLOTS, 1 to 8; by default 4 on Linux
-// (the start of the prompt's last two turns, and 512 and 2,048 tokens before
-// its end), 1 in the PS5 title (the last turn's start).
+// (the start of the prompt's last two turns, 512 and 2,048 tokens before its
+// end, and one kept where the reply to the user's last message starts while
+// calls and results follow it), 1 in the PS5 title (the last turn's start).
 int state_slots_wanted();
 // The context a Vulkan backend picks when asked for 0 tokens: what fits in
 // `memory` beside `used` bytes and 1 GiB kept for everything else (the

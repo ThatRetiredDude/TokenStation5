@@ -439,13 +439,50 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // from the prompt's end (another question after the same document, in a
     // fresh chat). The first two cut the prompt's chunks there; the others
     // are ends the chunks have anyway, so they read as without the copies.
+    //
+    // With three copies or more, one stays where the reply to the user's
+    // last message starts, through all the turns of calls and results that
+    // follow it. A chat with tools sends a reply's thinking only until the
+    // user writes again (as these models' templates do), so the next
+    // message's prompt differs from there on, however many calls came
+    // after: on a PS5 the message after one with 24 calls read all 4,902
+    // tokens of the chat again, every copy being at a later turn. (A tool's
+    // results are a user turn here too, one that starts <tool_response>.)
     std::vector<int> cuts, saves;  // cuts ascending; saves by priority
+    int anchor = -1;
     if (!saved_.empty()) {
         const int32_t turn = t_.token_id("<|im_start|>");
         const int ncut = std::min<int>(2, (int)saved_.size());
         for (size_t i = prompt.size(); turn >= 0 && (int)cuts.size() < ncut && i-- > keep + 1;)
             if (prompt[i] == turn) cuts.insert(cuts.begin(), (int)i);
         saves.assign(cuts.rbegin(), cuts.rend());
+        const int32_t user = t_.token_id("user");
+        if (saved_.size() >= 3 && turn >= 0 && user >= 0) {
+            // (<tool_response>: one token in Qwen3's vocabulary, several in
+            // Qwen3.5's, the last of them one that may join what follows.)
+            std::vector<int32_t> res = t_.encode("<tool_response>", false);
+            if (res.size() > 1) res.pop_back();
+            const auto results_at = [&](size_t at) {
+                return !res.empty() && at + res.size() <= prompt.size() && std::equal(res.begin(), res.end(), prompt.begin() + (long)at);
+            };
+            int after = -1;  // the turn start after the one looked at
+            for (size_t i = prompt.size(); i-- > 0;) {
+                if (prompt[i] != turn) continue;
+                const bool users = i + 1 < prompt.size() && prompt[i + 1] == user;
+                const bool results = results_at(i + 2) || results_at(i + 3);
+                if (users && !results) {
+                    anchor = after;
+                    break;
+                }
+                after = (int)i;
+            }
+            // (Not within this request's reach when it is in the part kept
+            // and no copy is there: a chat that began before this server did.)
+            if (anchor > (int)keep && std::find(cuts.begin(), cuts.end(), anchor) == cuts.end()) {
+                cuts.insert(std::upper_bound(cuts.begin(), cuts.end(), anchor), anchor);
+                saves.insert(saves.begin() + std::min<size_t>(1, saves.size()), anchor);
+            }
+        }
     }
     const int chunk = 256;
     auto chunk_len = [&](int i) {
@@ -485,10 +522,12 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         written_ = std::max(written_, (int)(i + n));
         cached_.insert(cached_.end(), prompt.begin() + i, prompt.begin() + i + n);
         if (std::find(saves.begin(), saves.end(), (int)i + n) != saves.end()) {
-            // Into an empty slot, else over the copy of the shortest prefix.
-            int s = 0;
-            for (int j = 1; j < (int)saved_.size(); j++)
-                if (saved_[j] < saved_[s]) s = j;
+            // Into an empty slot, else over the copy of the shortest prefix
+            // (never the one where the reply to the last message starts).
+            int s = -1;
+            for (int j = 0; j < (int)saved_.size(); j++)
+                if ((anchor < 0 || saved_[j] != anchor) && (s < 0 || saved_[j] < saved_[s])) s = j;
+            if (s < 0) s = 0;
             saved_[s] = -1;
             if (b_->save_state(s, serr)) saved_[s] = (int)i + n;
         }

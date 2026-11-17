@@ -710,6 +710,7 @@ def main():
         def answer(n):
             answers.append(call(here + "/v1/chat/completions", owner,
                                 {"messages": [{"role": "user", "content": "Tell me a long story"}], "max_tokens": n}, timeout=300))
+        began = time.time()
         th = threading.Thread(target=answer, args=(600,))
         th.start()
         time.sleep(1.0)
@@ -717,12 +718,19 @@ def main():
         code, r = call(here + "/ts5/switch", kkey, {"model": mine}, timeout=30)
         took = time.time() - t0
         th.join(300)
+        long_took = time.time() - began
         check(code == 409 and "still being written" in json.dumps(r) and took >= 1.5,
               "/ts5/switch by a user while an answer is being written: waited for, then refused (the answer isn't cut off)",
               (code, r, round(took, 1)))
         check(answers and answers[0][0] == 200 and answers[0][1].get("choices"), "and that answer came whole",
               answers[0] if answers else None)
-        th = threading.Thread(target=answer, args=(24,))
+        # The short answer has to end inside those 2 s on a slow machine and
+        # still be going when the switch arrives on a fast one: as many
+        # tokens as the long answer got in 0.8 s. (A fixed 24 took 3 s on a
+        # runner that wrote 8 a second, and the switch was refused.)
+        wrote = ((answers[0][1].get("usage") or {}).get("completion_tokens") or 0) if answers and answers[0][0] == 200 else 0
+        short = max(2, min(200, int(wrote / max(long_took, 0.1) * 0.8))) if wrote else 8
+        th = threading.Thread(target=answer, args=(short,))
         th.start()
         time.sleep(0.3)
         code, r = call(here + "/ts5/switch", kkey, {"model": mine}, timeout=30)

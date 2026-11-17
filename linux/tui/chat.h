@@ -37,6 +37,10 @@ struct Msg {
     // it wrote up to there stays, and the model goes on after the note).
     // steer: a user message that is such a note, sent while the answer came.
     bool steered = false, steer = false;
+    // check: a user message that is ts5-tui's own, not typed: its question
+    // to the model about an answer that came straight from a task's notes
+    // (answer_loop). Goes with steer.
+    bool check = false;
     double t0 = 0, t_first = 0, t_think_end = 0, t_end = 0;
     int chunks = 0;
     double gen_tps = 0, prompt_tps = 0;
@@ -46,8 +50,14 @@ struct Msg {
     bool full = false;    // the server refused it: the chat no longer fits its context
     // A summary: the first of the messages before it that the model still
     // gets as they were, the chat's tokens before it and (roughly) after,
-    // and why it was written (0 nearly full, 1 full, 2 asked for).
+    // and why it was written (0 nearly full, 1 full, 2 asked for; notes in
+    // the middle of a message's tool calls: 3 the chat passed the task
+    // window, 4 the server refused it as full).
     int keep_from = -1, sum_before = 0, sum_after = 0, sum_why = 0;
+    // A task's notes that came out word for word as the notes before them
+    // (answer_loop): how many sets in a row have, with these. The model is
+    // told so beside them, and at three it is told to stop.
+    int circle = 0;
     // An assistant turn's tool calls: ts5-tui runs each, adds a tool message
     // with what it gave back, and the model goes on in a new assistant turn.
     std::vector<ToolUse> calls;
@@ -138,6 +148,11 @@ struct Chat {
     // And for a change on GitHub (the github tool; anything but GET): ask_kind
     // 5, the body a line each in ask_preview, with "every GitHub change, this chat".
     std::atomic<bool> ask_always_github{false};
+    // And when a message's tool steps are used up and the model asks for
+    // more (answer_loop): ask_kind 6, ask_opt says how many were used, and
+    // the choices are go on, don't ask again for this message
+    // (ask_more_always), and no, answer now.
+    std::atomic<bool> ask_more_always{false};
     std::string command;  // a slash command for the app to run
     std::vector<std::string> cands;  // Tab's candidates
     int cand_i = -1;
@@ -164,6 +179,10 @@ struct ChatRequest {
     int max_tokens = 0;
     int n_ctx = 0;        // the loaded model's context, 0 unknown
     bool summarize = true;  // a chat that fills up is summarized and goes on (Settings)
+    // The task window: a message's run of tool calls that takes the chat
+    // past this many tokens has the model write notes on its work and go on
+    // from them (0: only when the context is nearly full).
+    int window = 0;
     ToolSwitches tools;     // the tools the model is given (Settings)
     bool ts5 = false;       // the server is ts5: it takes "web_search"
     std::string search_source;  // the encyclopedia a search without a key goes to ("": the server's own)

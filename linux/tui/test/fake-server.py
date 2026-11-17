@@ -14,12 +14,14 @@ file with the summary to give instead). FAKE_REQUESTS: a
 file that gets each request's roles and sizes, a line a request, and its
 user messages (the first 80 characters of each).
 FAKE_WEB=1 says the server has a web search key (without it the search is
-Wikipedia's; FAKE_SOURCE=none: no search at all). FAKE_SPEED: words a second
+the web's with no key; FAKE_SOURCE=wikipedia: Wikipedia's, none: no search at
+all). FAKE_SPEED: words a second
 (60).
 Tools: when the request offers them, a message "run CMD" has the fake call
 run_command (CMD ";;" CMD2: one after the other, a turn each; CMD "&&&" CMD2:
 both in one turn), "read URL" read_web_page, "remember TEXT" remember, and
-"loop" a command every turn for as long as it is given tools. After the
+"loop" a command every turn for as long as it is given tools ("again": the
+same command every turn, with the same result). After the
 results it answers with what came back. A message "search WORDS", in a
 request that lets the server search ("web_search" true or "auto"), has the
 fake say that it searches, as ts5 does while it runs a search itself
@@ -33,8 +35,16 @@ click N, type N TEXT (typeonly: without Enter), more, back; in place of N,
 page the call before gave. "&&" between steps makes them calls of one turn.
 "call NAME ;; JSON" calls the tool of that name, if the request offers it
 (an outside tool's: linux/tui/mcp.h and fake-mcp.py); "&&&" between several.
-FAKE_TEXT_CALL: what the turn that gets no tools (after twelve rounds of
-them, or a no) answers with, a call written as text ("\\n" a line break).
+"task N" runs N commands, a turn each, and counts the steps done from a
+task's notes when ts5-tui had them written. FAKE_FULL_ONCE=K refuses the
+K-th request for an answer as too long for the context, once;
+FAKE_NOTES_FAIL=1 fails a request for a task's notes. FAKE_NOTES_SAME=1
+answers a request to bring a task's notes up to date with those notes word
+for word (as a real model did on a PS5), FAKE_NOTES_SAME=near with one line
+of 26 changed; notes asked for anew are counted from the program's list of
+calls. FAKE_TASK_LINES=M has
+each step's command print M more lines. FAKE_TEXT_CALL: what the turn that may call no tool (the message's steps
+ended, calls that only repeated, or a no) answers with, a call written as text ("\\n" a line break).
 FAKE_TAILNET=1 answers /ts5/tailnet as a ts5 serve with Tailscale does (off;
 on gives a sign-in link a second later, and FAKE_TAILNET_SIGNIN seconds
 after that, 6 by default, it is connected; sign_out turns it off; "ssh"
@@ -174,9 +184,14 @@ class H(BaseHTTPRequestHandler):
         elif self.path in ("/v1/models", "/models"):
             m = {"id": MODEL, "object": "model", "context_length": N_CTX,
                  "capabilities": {"tools": True, "tool_format": "hermes", "web_search": WEB,
-                                  "web_search_source": "tavily" if WEB else os.environ.get("FAKE_SOURCE", "wikipedia"),
-                                  # (FAKE_OLD: a ts5 from before a request could pick its encyclopedia.)
-                                  **({} if os.environ.get("FAKE_OLD") else {"encyclopedias": ["wikipedia", "grokipedia", "both"]})},
+                                  "web_search_source": "tavily" if WEB else os.environ.get("FAKE_SOURCE", "web"),
+                                  # (FAKE_OLD: a ts5 from before a request could pick its encyclopedia;
+                                  # FAKE_NO_WEB: one from before the web search that needs no key, 1.3.0;
+                                  # FAKE_GOOGLE: its machine has a Chromium, so Google is a source.)
+                                  **({} if os.environ.get("FAKE_OLD") else {"encyclopedias": ["wikipedia", "grokipedia", "both"]}),
+                                  **({} if os.environ.get("FAKE_OLD") or os.environ.get("FAKE_NO_WEB")
+                                     else {"search_sources": ["web"] + (["google"] if os.environ.get("FAKE_GOOGLE") else []) +
+                                                              ["grokipedia", "wikipedia", "both"]})},
                  "settings": {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "thinking": True,
                               "known_good": "file"}}
             if HELPER and HELPER != "none":
@@ -244,7 +259,8 @@ class H(BaseHTTPRequestHandler):
                     if m.get("role") == "tool":
                         c = m.get("content") or ""
                         f.write("  tool %s %s: %s\n" % (m.get("name"), m.get("tool_call_id"), json.dumps(
-                            c if len(c) <= 480 else c[:200] + " [...] " + c[-240:])))
+                            c if len(c) <= 720 else c[:200] + " [...] " + c[-240:])))
+                        f.write("  tool-bytes: %d\n" % len(c))
                     if m.get("tool_calls"):
                         f.write("  calls: %s\n" % json.dumps(m["tool_calls"]))
         # The tool calls this turn makes (see the top of the file).
@@ -258,8 +274,39 @@ class H(BaseHTTPRequestHandler):
                 results.append(m.get("content") or "")
             elif m.get("tool_calls"):
                 turns += 1
+        # A task whose earlier part ts5-tui replaced by notes: what was asked for comes after
+        # them word for word, between two lines of ts5-tui's own.
+        goal = re.match(r"\[The earlier messages of this task are in your notes\. This is what I asked for, word for "
+                        r"word:\]\n\n(.*?)\n\n\[(?:A note I sent while you worked on it:|Go on with it from where "
+                        r"your notes end\.)", asked, re.S)
+        if goal:
+            asked = goal.group(1)
+            if REQUESTS:
+                with open(REQUESTS, "a") as f:
+                    f.write("  task: %s\n" % json.dumps(msgs[[m.get("role") for m in msgs].index("user")]["content"]))
         calls = []
-        if asked.startswith("run ") and "run_command" in tools:
+        if asked.startswith("task ") and "run_command" in tools:
+            # "task N": N commands, a turn each ("echo step K"), then the answer. The steps done
+            # before notes took their place are counted from the notes (STEPS DONE: K).
+            n = int(asked.split()[1])
+            system = " ".join(m.get("content") or "" for m in msgs if m.get("role") == "system")
+            done = sum(int(x) for x in re.findall(r"STEPS DONE: (\d+)", system)[-1:]) + len(results)
+            if done < n:
+                # (FAKE_TASK_FAIL=K: step K's command also fails, with a line of its own.)
+                bad = "; ls /no-such-ts5-folder" if os.environ.get("FAKE_TASK_FAIL") == str(done + 1) else ""
+                # (FAKE_TASK_LINES=M: it prints M more lines, a long output.)
+                if os.environ.get("FAKE_TASK_LINES"):
+                    bad += "; seq -f 'step %d prints line %%g of its long output' 1 %d" % (
+                        done + 1, int(os.environ["FAKE_TASK_LINES"]))
+                calls = [("run_command", {"command": "echo step %d | tee -a task-steps.txt%s" % (done + 1, bad)})]
+            else:
+                results = ["all %d steps of the task are done" % done]
+        elif asked.startswith("[A check by the program") and "run_command" in tools:
+            # ts5-tui's question about an answer that came straight from a task's notes: a
+            # command that shows the value, then the answer again.
+            if not results:
+                calls = [("run_command", {"command": "wc -l < task-steps.txt"})]
+        elif asked.startswith("run ") and "run_command" in tools:
             if "&&&" in asked:
                 if not results:
                     calls = [("run_command", {"command": c.strip()}) for c in asked[4:].split("&&&")]
@@ -269,6 +316,8 @@ class H(BaseHTTPRequestHandler):
                     calls = [("run_command", {"command": steps[len(results)]})]
         elif asked.startswith("loop") and "run_command" in tools:
             calls = [("run_command", {"command": "echo round %d" % (len(results) + 1)})]
+        elif asked.startswith("again") and "run_command" in tools:
+            calls = [("run_command", {"command": "echo the same"})]
         elif asked.startswith("read ") and "read_web_page" in tools and not results:
             calls = [("read_web_page", {"url": asked[5:].strip()})]
         elif asked.startswith("remember ") and "remember" in tools and not results:
@@ -304,6 +353,15 @@ class H(BaseHTTPRequestHandler):
             if turns < len(steps):
                 page = next((r for r in reversed(results) if r.startswith("Page: ")), "")
                 calls = [browser_call(c.strip(), page) for c in steps[turns].split("&&")]
+        # FAKE_FULL_ONCE=K: the K-th request for an answer is refused as too long for the context,
+        # once (the count ts5-tui keeps of a chat is a guess). FAKE_NOTES_FAIL=1: a request for a
+        # task's notes fails.
+        COUNTS["answers"] = COUNTS.get("answers", 0) + (0 if summary else 1)
+        if summary and os.environ.get("FAKE_NOTES_FAIL") and "The assistant is in the middle of this work" in last:
+            self.send(500, {"error": {"message": "the fake's notes fail"}})
+            return
+        if not summary and COUNTS["answers"] == int(os.environ.get("FAKE_FULL_ONCE", "0")):
+            prompt = N_CTX
         if prompt >= N_CTX:
             # As ts5 serve: refused before anything streams, in OpenAI's words and code.
             self.send(400, {"error": {"message": "This model's maximum context length is %d tokens. However, your "
@@ -366,6 +424,27 @@ class H(BaseHTTPRequestHandler):
                 text = os.environ["FAKE_TEXT_CALL"].replace("\\n", "\n")
             elif results:
                 text = "The tool gave me this: " + " | ".join(r.strip()[:300] for r in results)
+            elif summary and "The assistant is in the middle of this work" in last:
+                # Notes on a task: the steps its talk shows (and the notes before it counted, or,
+                # where the notes are written anew, the program's list of the calls before).
+                listed = re.search(r"^\[The calls the assistant made before what follows[^\n]*\]\n((?:\d+\. [^\n]*\n)+)",
+                                   last, re.M)
+                if listed:
+                    before = int(re.findall(r"^(\d+)\. ", listed.group(1), re.M)[-1])
+                else:
+                    before = sum(int(x) for x in re.findall(r"STEPS DONE: (\d+)", last)[-1:])
+                steps = len(re.findall(r"^\[The assistant used a tool: ", last, re.M))
+                text = "## Done\nSTEPS DONE: %d\n## Next\nThe next step of the task." % (before + steps)
+                same = os.environ.get("FAKE_NOTES_SAME")
+                if same:
+                    text += "\n## Facts\nfact: the folder is proj"
+                    if same == "near":
+                        text += "".join("\nfact %d of the work" % k for k in range(1, 21))
+                    old = re.search(r"^\[Notes on the conversation's earlier part\]\n(.*?)\n\n\[User\]\n", last, re.M | re.S)
+                    if old and same == "near":
+                        text = re.sub(r"STEPS DONE: \d+", "STEPS DONE: %d" % (before + steps), old.group(1))
+                    elif old:
+                        text = old.group(1)
             elif summary:
                 said = re.findall(r"^\[User\]\n(.*)$", last, re.M)
                 text = SUMMARY % (len(said), (said[0] if said else "")[:40])
@@ -407,6 +486,7 @@ class H(BaseHTTPRequestHandler):
 
 
 BLANKS = {}
+COUNTS = {}
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 18081
 sys.stderr.write("ts5: listening on 127.0.0.1:%d (fake)\n" % port)
 ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()

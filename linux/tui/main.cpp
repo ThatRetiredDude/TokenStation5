@@ -352,7 +352,8 @@ void browser_offer() {
     g->cfg.save();
     g->ask_title = " A browser for the model? ";
     g->ask_text = "No browser is installed here, so the model reads pages as plain text: their scripts don't run, and only "
-                  "links and simple forms work. A browser shows it the page as you would see it.";
+                  "links and simple forms work. Most sites need their scripts: Chromium shows the model the page as you "
+                  "would see it.";
     g->pick = {
         {"Chromium", "the full browser, from this system's packages (your sudo password)",
          [] { browser_install("chromium"); }},
@@ -432,8 +433,12 @@ void poll_once() {
             s.web_search = m["capabilities"]["web_search"].boolean(false);
             {
                 const std::string src = m["capabilities"]["web_search_source"].str();
-                s.wikipedia = src == "wikipedia" || src == "grokipedia" || src == "both";
+                s.wikipedia = src == "web" || src == "wikipedia" || src == "grokipedia" || src == "both";
                 s.encyclopedias = !m["capabilities"]["encyclopedias"].a.empty();
+                for (auto &x : m["capabilities"]["search_sources"].a) {
+                    s.web_sources = s.web_sources || x.str() == "web";
+                    s.google_source = s.google_source || x.str() == "google";
+                }
             }
             if (m.o.count("helper")) {
                 s.helper_known = true;
@@ -650,9 +655,19 @@ std::string memory_words(const std::string &why) {
 // What a search without a web search key goes to, by name: the setting, on
 // a server that takes it.
 std::string encyclopedia_name() {
-    if (!server().encyclopedias) return "Wikipedia";
+    const ServerState sv = server();
+    if (!sv.encyclopedias) return "Wikipedia";
+    // (A ts5 before 1.3.0 takes "web" for its own choice: Wikipedia, unless it was set up otherwise.)
+    if (g->cfg.search_source == "web") return sv.web_sources ? "the web (DuckDuckGo)" : "Wikipedia";
+    // (Where the server has no Chromium, it searches DuckDuckGo and says so to the model.)
+    if (g->cfg.search_source == "google")
+        return sv.google_source ? "Google (through Chromium)" : sv.web_sources ? "the web (DuckDuckGo)" : "Wikipedia";
     return g->cfg.search_source == "grokipedia" ? "Grokipedia" : g->cfg.search_source == "both" ? "Wikipedia and Grokipedia" : "Wikipedia";
 }
+// The search without a key is a regular web search, not an encyclopedia.
+bool keyless_web() { return (g->cfg.search_source == "web" || g->cfg.search_source == "google") && server().web_sources; }
+// It goes to Google, read through the server's Chromium.
+bool keyless_google() { return g->cfg.search_source == "google" && server().google_source; }
 
 // ---- Access: who can reach this TokenStation5, and with which key ----
 
@@ -1948,6 +1963,7 @@ ChatRequest chat_request() {
     rq.max_tokens = g->cfg.max_tokens;
     rq.n_ctx = sv.n_ctx;
     rq.summarize = g->cfg.summarize;
+    rq.window = g->cfg.task_window;
     const bool tools = g->cfg.tools_on();  // the one switch over them all
     rq.tools.web = tools && g->cfg.tool_web;
     if (sv.encyclopedias) rq.search_source = g->cfg.search_source;
@@ -1956,8 +1972,10 @@ ChatRequest chat_request() {
     rq.tools.memory = tools && g->cfg.tool_memory;
     rq.tools.browser = tools && g->cfg.tool_browser;
     rq.tools.terminal_ask = g->cfg.terminal_ask;
+    rq.tools.steps = g->cfg.tool_steps;
     rq.tools.sandbox = g->cfg.sandbox && sandbox_ready();
     rq.tools.sandbox_net = g->cfg.sandbox_net;
+    rq.tools.box = rq.tools.sandbox && g->cfg.sandbox_box && box_can();
     rq.tools.browser_ask = g->cfg.browser_ask;
     rq.tools.files = tools && g->cfg.tool_files;
     rq.tools.files_ask = g->cfg.files_ask;
@@ -2952,8 +2970,8 @@ std::string move_sandbox_folder(std::string dir, bool &ok) {
     } else if ((to = sandbox_dir_check(dir, why)).empty()) {
         return "The toolbox can't go there: " + why;
     }
-    const std::string from = sandbox_home();
-    const unsigned long long size = sandbox_size();
+    const std::string from = sandbox_home(), box_from = box_root();
+    const unsigned long long size = sandbox_size(), box_was = box_size();
     const int r = sandbox_move(from, to, why);
     if (r == 0) return "The toolbox stays where it was: " + why;
     const std::string tail = "/tokenstation-sandbox";
@@ -2964,6 +2982,16 @@ std::string move_sandbox_folder(std::string dir, bool &ok) {
     std::string msg = "The toolbox is now " + tilde_path(to) + fmt(", %.1f GiB free there", sandbox_free() / 1073741824.0);
     if (r == 2) msg += ". " + why;
     else if (size && from != to) msg += fmt(" (%.1f MiB moved)", size / 1048576.0);
+    // The sandbox's own system goes beside it.
+    if (box_was && box_from != box_root()) {
+        std::string w;
+        const int b = box_follow(box_from, w);
+        msg += b == 1   ? fmt(". The sandbox's system went with it (%.0f MiB)", box_was / 1048576.0)
+               : b == 2 ? ". The new place already holds a sandbox system, so that one is used and the old one stays at " +
+                              tilde_path(box_from)
+                        : ". The sandbox's system could not be moved (" + w + "): a fresh one is set up at the new place "
+                          "with the next command, and the old one stays at " + tilde_path(box_from);
+    }
     return msg;
 }
 
@@ -3107,7 +3135,11 @@ std::vector<SetRow> settings_rows() {
         SetRow x{"Web search key", c.web_key.empty() ? (sv.web_search ? "the server's own" : "none")
                                                      : std::string(std::min<size_t>(c.web_key.size(), 12), '*'),
                  sv.web_search         ? "on: the loaded model searches the web when a question needs it"
-                 : c.web_key.empty()   ? (sv.wikipedia ? "without a key: " + encyclopedia_name() + " only; a free one from app.tavily.com adds the web"
+                 : c.web_key.empty()   ? (sv.wikipedia && keyless_web()
+                                              ? std::string("without a key the web is searched through ") +
+                                                    (keyless_google() ? "Google" : "DuckDuckGo") +
+                                                    "; a free key from app.tavily.com gives more of each page's text"
+                                          : sv.wikipedia ? "without a key: " + encyclopedia_name() + " only; a free one from app.tavily.com adds the web"
                                                        : std::string("a free key from app.tavily.com lets a model ts5-tui loads "
                                                                      "search the web"))
                  : sv.online && own_server_pid() <= 0
@@ -3146,9 +3178,16 @@ std::vector<SetRow> settings_rows() {
     if (tools_shown) {
         const ServerState sv = server();
         SetRow x{"Tool: search",
-                 !c.tool_web ? "off" : sv.web_search ? "on" : sv.wikipedia ? "on, " + encyclopedia_name() + " only" : "on, needs the key",
+                 !c.tool_web ? "off" : sv.web_search ? "on"
+                 : sv.wikipedia && keyless_web() ? (keyless_google() ? "on, Google" : "on, DuckDuckGo")
+                 : sv.wikipedia ? "on, " + encyclopedia_name() + " only" : "on, needs the key",
                  !c.tool_web       ? "the model never searches the web"
                  : sv.web_search   ? "the model searches the web when a question needs it"
+                 : sv.wikipedia && keyless_google()
+                     ? "the model searches Google when a question needs it, read through Chromium; when that can't be, DuckDuckGo"
+                 : sv.wikipedia && keyless_web()
+                     ? "the model searches the web through DuckDuckGo when a question needs it; when that can't be "
+                       "searched, Grokipedia, then Wikipedia"
                  : sv.wikipedia    ? "looks things up on " + encyclopedia_name() + " only; a web search key gives it the web"
                                    : "it searches once a web search key is set and the model is loaded again"};
         x.change = [save](int) {
@@ -3156,21 +3195,33 @@ std::vector<SetRow> settings_rows() {
             save();
         };
         r.push_back(x);
-        // Which encyclopedia, while there is no key for the web.
+        // What is searched, while there is no key: the web, or an encyclopedia.
         if (c.tool_web && !sv.web_search && sv.wikipedia) {
-            static const char *const ids[] = {"wikipedia", "grokipedia", "both"};
-            static const char *const names[] = {"Wikipedia", "Grokipedia", "Both"};
-            int at = 0;
-            for (int i = 0; i < 3; i++)
-                if (c.search_source == ids[i]) at = i;
-            SetRow y{"Search source", sv.encyclopedias ? names[at] : "Wikipedia",
+            // (A ts5 before 1.3.0 has the encyclopedias alone.)
+            // (Google where the server's machine has a Chromium to read it with.)
+            static const char *const all[] = {"web", "google", "grokipedia", "wikipedia", "both"};
+            static const char *const names[] = {"Web (DuckDuckGo)", "Google", "Grokipedia", "Wikipedia", "Both encyclopedias"};
+            std::vector<int> ids;
+            for (int i = 0; i < 5; i++)
+                if ((i != 0 || sv.web_sources) && (i != 1 || sv.google_source)) ids.push_back(i);
+            int at = -1;
+            for (size_t k = 0; k < ids.size(); k++)
+                if (c.search_source == all[ids[k]]) at = (int)k;
+            // (A choice this server doesn't have: what it does in its place.)
+            if (at < 0) at = sv.web_sources ? 0 : (int)ids.size() - 2;
+            const int id = ids[at];
+            SetRow y{"Search source", sv.encyclopedias ? names[id] : "Wikipedia",
                      !sv.encyclopedias ? "this server searches Wikipedia only (a ts5 before Grokipedia)"
-                     : at == 0         ? "Wikipedia, the encyclopedia people write"
-                     : at == 1         ? "Grokipedia, xAI's encyclopedia, written by its AI; if it can't be searched, Wikipedia is"
+                     : id == 0         ? "a regular web search, through DuckDuckGo; when it can't be searched, Grokipedia, then Wikipedia"
+                     : id == 1         ? "Google's results page, with its AI overview when it has one, read through Chromium: a few "
+                                         "seconds and a browser's memory for each search; when it can't be, DuckDuckGo"
+                     : id == 2         ? "Grokipedia, xAI's encyclopedia, written by its AI; if it can't be searched, Wikipedia is"
+                     : id == 3         ? "Wikipedia, the encyclopedia people write"
                                        : "each search asks Wikipedia and Grokipedia, and the model gets both lists"};
             if (sv.encyclopedias)
-                y.change = [save, at](int d) {
-                    g->cfg.search_source = ids[(at + d + 3) % 3];
+                y.change = [save, at, ids](int d) {
+                    const int n = (int)ids.size();
+                    g->cfg.search_source = all[ids[(at + (d < 0 ? n - 1 : 1)) % n]];
                     save();
                 };
             r.push_back(y);
@@ -3200,6 +3251,43 @@ std::vector<SetRow> settings_rows() {
         };
         r.push_back(x);
     }
+    if (tools_shown) {
+        // How many steps of tool calls a message gets before the question.
+        SetRow x{"Tool steps", c.tool_steps > 0 ? std::to_string(c.tool_steps) : "no limit",
+                 c.tool_steps > 0 ? fmt("after %d steps of tool calls for one message, ts5-tui asks whether the model should go "
+                                        "on; a model that only repeats itself is stopped sooner", c.tool_steps)
+                                  : "the model is never asked to stop for the number of steps; a model that only repeats itself "
+                                    "is still stopped"};
+        x.change = [save](int d) {
+            static const int steps[] = {12, 25, 50, 100, 0};
+            int at = 2;
+            for (int i = 0; i < 5; i++)
+                if (g->cfg.tool_steps == steps[i]) at = i;
+            g->cfg.tool_steps = steps[(at + (d < 0 ? 4 : 1)) % 5];
+            save();
+        };
+        r.push_back(x);
+    }
+    if (tools_shown && c.summarize) {
+        // A long task: where in the chat the model writes notes on its work
+        // and goes on from them.
+        SetRow x{"Task window", c.task_window > 0 ? with_commas(c.task_window) + " tokens" : "the whole context",
+                 c.task_window > 0
+                     ? fmt("a run of tool calls that takes the chat past %s tokens has the model write notes on its work "
+                           "and go on from them, with your request word for word: a long task stays quick and on "
+                           "track; the chat stays here to read",
+                           with_commas(c.task_window).c_str())
+                     : "the model writes notes on a long task only when the chat no longer fits its memory for a chat"};
+        x.change = [save](int d) {
+            static const int sizes[] = {8000, 16000, 24000, 32000, 48000, 64000, 0};
+            int at = 2;
+            for (int i = 0; i < 7; i++)
+                if (g->cfg.task_window == sizes[i]) at = i;
+            g->cfg.task_window = sizes[(at + (d < 0 ? 6 : 1)) % 7];
+            save();
+        };
+        r.push_back(x);
+    }
     if (tools_shown && c.tool_terminal) {
         // Where the commands run: three steps, and why it can't be, if it can't.
         std::string why;
@@ -3208,13 +3296,31 @@ std::vector<SetRow> settings_rows() {
                  !c.sandbox ? "off" : !ready ? "unavailable" : c.sandbox_net ? "on, with network" : "on, no network",
                  !c.sandbox ? "commands run as you, with all your files"
                  : !ready   ? why + "; until then commands run as you"
-                            : std::string("read-only system, home hidden; changes only the start folder and its toolbox") +
-                                  (c.sandbox_net ? "" : "; no network")};
+                 : c.sandbox_box && box_can()
+                     ? std::string("a Linux system of its own, home hidden; changes only that system and the start folder") +
+                           (c.sandbox_net ? "" : "; no network")
+                     : std::string("read-only system, home hidden; changes only the start folder and its toolbox") +
+                           (c.sandbox_net ? "" : "; no network")};
         x.change = [save](int d) {
             const int at = !g->cfg.sandbox ? 2 : g->cfg.sandbox_net ? 0 : 1, to = (at + (d < 0 ? 2 : 1)) % 3;
             g->cfg.sandbox = to != 2;
             g->cfg.sandbox_net = to != 1;
             if (g->cfg.sandbox) sandbox_ready(nullptr, true);
+            save();
+        };
+        r.push_back(x);
+    }
+    if (tools_shown && c.tool_terminal && c.sandbox && sandbox_ready() && box_can()) {
+        // The system the sandbox's commands see: its own, or this machine's.
+        const bool there = c.sandbox_box && box_there();
+        SetRow x{"Sandbox system", c.sandbox_box ? std::string(box_name()) + ", its own" : "this machine's, read-only",
+                 !c.sandbox_box ? "the model uses the programs installed here and can't install system packages (no apt)"
+                 : there        ? fmt("the model is root in it: apt, pip and npm install there; %.0f MiB so far",
+                                      box_size() / 1048576.0)
+                                : "the model is root in it: apt, pip and npm install there; set up with the first command "
+                                  "(a 30 MB download)"};
+        x.change = [save](int) {
+            g->cfg.sandbox_box = !g->cfg.sandbox_box;
             save();
         };
         r.push_back(x);
@@ -3225,8 +3331,11 @@ std::vector<SetRow> settings_rows() {
         const bool there = sandbox_toolbox_ok(why);
         SetRow x{"Sandbox folder", tilde_path(sandbox_home()),
                  !there ? "missing: is its drive mounted? Enter: another folder, or default"
-                        : fmt("%.1f MiB of tools, %.1f GiB free there; Enter: another folder, or default",
-                              sandbox_size() / 1048576.0, sandbox_free() / 1073741824.0)};
+                 : c.sandbox_box && box_can()
+                     ? fmt("the sandbox's system is kept beside it; %.1f GiB free there; Enter: another folder, or default",
+                           sandbox_free() / 1073741824.0)
+                     : fmt("%.1f MiB of tools, %.1f GiB free there; Enter: another folder, or default",
+                           sandbox_size() / 1048576.0, sandbox_free() / 1073741824.0)};
         x.text = true;
         x.text_value = c.sandbox_dir;
         x.set_text = [](const std::string &v) {
@@ -4617,8 +4726,8 @@ void run_command(const std::string &line) {
         };
         Config &f = g->cfg;
         const Row rows[] = {
-            {"search", "searches when a question needs it (the server does it: the whole web with a web search key; "
-                       "without one an encyclopedia: `/tools search wikipedia`, `grokipedia` or `both`)", &f.tool_web},
+            {"search", "searches when a question needs it (the server does it: with a web search key through Tavily; "
+                       "without one `/tools search web` (DuckDuckGo), `google`, `grokipedia`, `wikipedia` or `both`)", &f.tool_web},
             {"pages", "reads a web page you give it a link to", &f.tool_page},
             {"terminal", "runs a command on this machine; you see each one first and say yes or no", &f.tool_terminal},
             {"files", "reads and lists files, and changes them: you see each change, lines out and lines in, and say "
@@ -4652,6 +4761,41 @@ void run_command(const std::string &line) {
             }
             found = true;
             show_toast("The model asks before each command, each button and each outside tool again", g->th->accent, 3);
+        } else if (name == "steps") {
+            // "/tools steps 100": how many steps of tool calls a message
+            // gets before the question; "/tools steps off": never asked.
+            found = true;
+            const int n = to == "off" || to == "none" || to == "0" ? 0 : atoi(to.c_str());
+            if (to.empty() || (n <= 0 && to != "off" && to != "none" && to != "0")) {
+                show_toast(f.tool_steps > 0 ? fmt("Tool steps: %d a message, then ts5-tui asks  (/tools steps N, or off)", f.tool_steps)
+                                            : "Tool steps: no limit  (/tools steps N)",
+                           g->th->accent, 4);
+            } else {
+                f.tool_steps = std::min(n, 100000);
+                f.save();
+                show_toast(n > 0 ? fmt("Tool steps: after %d for one message, ts5-tui asks whether the model should go on", f.tool_steps)
+                                 : "Tool steps: no limit (a model that only repeats itself is still stopped)",
+                           g->th->accent, 4);
+            }
+        } else if (name == "window") {
+            // "/tools window 32000": where a long task's notes are due;
+            // "/tools window off": only when the chat is full.
+            found = true;
+            const bool off = to == "off" || to == "none" || to == "0";
+            const int n = off ? 0 : atoi(to.c_str());
+            if (to.empty() || (!off && n < 2000)) {
+                show_toast(f.task_window > 0 ? fmt("Task window: notes at %s tokens  (/tools window N, 2000 or more, or off)",
+                                                   with_commas(f.task_window).c_str())
+                                             : "Task window: the whole context  (/tools window N)",
+                           g->th->accent, 4);
+            } else {
+                f.task_window = n;
+                f.save();
+                show_toast(n > 0 ? fmt("Task window: past %s tokens in a run of tool calls, the model writes notes and goes on from them",
+                                       with_commas(n).c_str())
+                                 : "Task window: the whole context (notes only when the chat is full)",
+                           g->th->accent, 4);
+            }
         } else if ((name == "on" || name == "off") && to.empty()) {
             // The one switch over them all.
             found = true;
@@ -4676,14 +4820,17 @@ void run_command(const std::string &line) {
                                                   : nullptr;
             found = true;
             const bool browser_was = f.tool_browser;
-            if (r.on == &f.tool_web && (to == "wikipedia" || to == "grokipedia" || to == "both")) {
-                // The encyclopedia searched without a web search key.
+            if (r.on == &f.tool_web && (to == "web" || to == "google" || to == "wikipedia" || to == "grokipedia" || to == "both")) {
+                // What is searched without a web search key.
                 f.search_source = to;
                 f.tool_web = true;
                 f.save();
                 const ServerState sv = server();
-                show_toast(sv.web_search ? "Search source: " + to + " (used when there is no web search key; now the web is searched)"
+                show_toast(sv.web_search ? "Search source: " + to + " (used when there is no web search key; now Tavily searches the web)"
                            : sv.online && !sv.encyclopedias ? "This server searches Wikipedia only (a ts5 before Grokipedia)"
+                           : sv.online && (to == "web" || to == "google") && !sv.web_sources ? "This server has no web search without a key (a ts5 before 1.3.0): it searches Wikipedia"
+                           : sv.online && to == "google" && !sv.google_source
+                               ? "The server's machine has no Chromium to read Google with (/browser install): it searches DuckDuckGo"
                                                             : "Search: " + encyclopedia_name(),
                            g->th->accent, 5);
                 continue;
@@ -4741,9 +4888,17 @@ void run_command(const std::string &line) {
                 h += "\nButtons and typing on web pages go **without asking** in this chat (you chose that). `/tools ask` "
                      "brings the question back.";
             const ServerState sv = server();
-            if (f.tool_web && !sv.web_search && sv.wikipedia)
+            if (f.tool_web && !sv.web_search && sv.wikipedia && keyless_google())
+                h += "\nThe search is **Google, read through Chromium** (its results page, with its AI overview when it has one; "
+                     "when it can't be read: DuckDuckGo). `/tools search web` searches DuckDuckGo, which is quicker and takes "
+                     "no browser; `grokipedia`, `wikipedia` or `both` an encyclopedia.";
+            else if (f.tool_web && !sv.web_search && sv.wikipedia && keyless_web())
+                h += "\nThe search is a regular **web search through DuckDuckGo** (when it can't be searched: Grokipedia, then "
+                     "Wikipedia). `/tools search google` searches Google through Chromium, `grokipedia`, `wikipedia` or `both` "
+                     "an encyclopedia, `/tools search web` the web again.";
+            else if (f.tool_web && !sv.web_search && sv.wikipedia)
                 h += "\nWithout a web search key the search is **" + encyclopedia_name() + " only** (no news, prices or weather; "
-                     "`/tools search wikipedia`, `grokipedia` or `both` picks the encyclopedia). For the "
+                     "`/tools search web` searches the web, `wikipedia`, `grokipedia` or `both` picks the encyclopedia). For the "
                      "whole web: Settings → Web search key (a free one from app.tavily.com), then load the model again.";
             else if (f.tool_web && !sv.web_search)
                 h += "\nThe web search waits for a key: Settings → Web search key (a free one from app.tavily.com), "
@@ -4767,10 +4922,35 @@ void run_command(const std::string &line) {
                        : !ready   ? "Sandbox: unavailable, " + why
                                   : std::string("Sandbox: on, ") + (f.sandbox_net ? "with network" : "no network"),
                        !f.sandbox || !ready ? g->th->warn : g->th->accent, 5);
+        } else if (arg == "box" || arg == "box on" || arg == "box off") {
+            if (!box_can()) {
+                show_toast("The sandbox's own system is built for x86-64 machines only", g->th->warn, 5);
+            } else {
+                if (arg != "box") f.sandbox_box = arg == "box on";
+                f.save();
+                show_toast(f.sandbox_box ? std::string("Sandbox system: ") + box_name() + ", its own. The model is root in it and "
+                                                                                          "installs programs with apt" +
+                                               (box_there() ? "" : " (set up with the first command)")
+                                         : "Sandbox system: this machine's, read-only. Nothing can be installed with apt",
+                           g->th->accent, 6);
+            }
         } else if (arg == "reset") {
-            chat_note(c, fmt("The toolbox holds %s (`%s`): what the model installed and wrote in its home folder. "
-                             "`/sandbox reset now` empties it.",
-                             fmt("%.1f MiB", sandbox_size() / 1048576.0).c_str(), tilde(sandbox_home()).c_str()));
+            std::string h;
+            if (box_there())
+                h += fmt("The sandbox's own system holds %.0f MiB (`%s`): %s and everything the model installed in it. "
+                         "`/sandbox reset box` removes it, and a fresh one is set up with the next command.\n",
+                         box_size() / 1048576.0, tilde(box_root()).c_str(), box_name());
+            h += fmt("The toolbox holds %s (`%s`): what the model installed and wrote in its home folder%s. "
+                     "`/sandbox reset toolbox` empties it.\n",
+                     fmt("%.1f MiB", sandbox_size() / 1048576.0).c_str(), tilde(sandbox_home()).c_str(),
+                     box_there() ? " while the sandbox had no system of its own" : "");
+            h += "`/sandbox reset now` does both.";
+            chat_note(c, h);
+        } else if (arg == "reset box") {
+            if (c.busy()) show_toast("Not while the model answers", g->th->warn, 3);
+            else if (!box_any()) show_toast("The sandbox has no system of its own yet", g->th->accent, 3);
+            else if (box_reset(why)) show_toast("The sandbox's system is removed: a fresh one is set up with the next command", g->th->accent, 5);
+            else show_toast("The sandbox's system: " + why, g->th->bad, 6);
         } else if (arg == "folder") {
             std::string h = fmt("The toolbox is `%s` (%.1f MiB, %.1f GiB free on its drive). ", tilde(sandbox_home()).c_str(),
                                 sandbox_size() / 1048576.0, sandbox_free() / 1073741824.0);
@@ -4783,16 +4963,40 @@ void run_command(const std::string &line) {
             bool ok;
             const std::string msg = move_sandbox_folder(arg.substr(7), ok);
             show_toast(msg, ok ? g->th->accent : g->th->warn, 7);
-        } else if (arg == "reset now") {
+        } else if (arg == "reset now" || arg == "reset toolbox") {
+            const bool both = arg == "reset now" && box_any();
             if (c.busy()) show_toast("Not while the model answers", g->th->warn, 3);
-            else if (sandbox_reset(why)) show_toast("The toolbox is empty", g->th->accent, 3);
+            else if (both && !box_reset(why)) show_toast("The sandbox's system: " + why, g->th->bad, 6);
+            else if (sandbox_reset(why))
+                show_toast(both ? "The toolbox is empty and the sandbox's system is removed (a fresh one comes with the next command)"
+                                : "The toolbox is empty",
+                           g->th->accent, both ? 5 : 3);
             else show_toast("The toolbox: " + why, g->th->bad, 6);
         } else {
             const bool ready = sandbox_ready(&why, true);
-            std::string h = "**Where the model's commands run**  (`/sandbox on`, `off`, `network`, `no-network`; or Settings)\n";
+            std::string h = "**Where the model's commands run**  (`/sandbox on`, `off`, `network`, `no-network`, `box on`, "
+                            "`box off`; or Settings)\n";
             if (!f.sandbox) h += "**Off.** Commands run as you, with all your files and the network.\n";
             else if (!ready) h += "**Unavailable:** " + why + ". Until then commands run as you, with all your files.\n";
-            else {
+            else if (f.sandbox_box && box_can()) {
+                h += std::string("**In the sandbox, ") + (f.sandbox_net ? "with network" : "no network") + ", in a system of its "
+                     "own (" + box_name() + ").** The model is root there: it installs programs with apt, pip and npm, and "
+                     "`sudo` just runs the command. None of that touches this machine's system, and a command sees none "
+                     "of your home folder (keys, SSH, browsers, ts5's own files) and none of your environment variables. "
+                     "Whatever it starts ends with it.\n";
+                h += sandbox_starts_home()
+                         ? "It starts in the sandbox's own home folder (`/root` in there): you started ts5-tui in your home "
+                           "folder, which it can't see. Start ts5-tui in a project's folder to let it work on that one.\n"
+                         : "It starts in `" + tilde(sandbox_work()) + "` (where you started ts5-tui), the one folder of "
+                           "yours it can change.\n";
+                h += box_there() ? fmt("Its system is `%s` (%.0f MiB), kept between chats. `/sandbox reset box` removes it for a "
+                                       "fresh one, `/sandbox folder` moves it to another drive, `/sandbox box off` goes back to "
+                                       "this machine's system, read-only.\n",
+                                       tilde(box_root()).c_str(), box_size() / 1048576.0)
+                                 : "Its system is set up with the first command: a 30 MB download from Debian's image "
+                                   "builders, checked by its SHA-256, then its basic tools (python3, pip, git, curl). "
+                                   "`/sandbox box off` goes back to this machine's system, read-only.\n";
+            } else {
                 h += std::string("**In the sandbox, ") + (f.sandbox_net ? "with network" : "no network") +
                      ".** A command sees the system read-only and none of your home folder (keys, SSH, browsers, ts5's "
                      "own files), and none of your environment variables. Whatever it starts ends with it.\n";
@@ -7464,7 +7668,8 @@ void tick() {
     if (g->chat.ask.load() == 1 && g->cur != CHAT && g->ask_told != g->chat.ask_t0.load()) {
         g->ask_told = g->chat.ask_t0.load();
         const int kind = g->chat.ask_kind.load();
-        show_toast(kind == 5   ? "The model wants to change something on GitHub: F1 (or /chat) to see it and say yes or no"
+        show_toast(kind == 6   ? "The model has used this message's tool steps: F1 (or /chat) to let it go on or not"
+                   : kind == 5 ? "The model wants to change something on GitHub: F1 (or /chat) to see it and say yes or no"
                    : kind == 4 ? "The model wants to use an outside tool: F1 (or /chat) to see it and say yes or no"
                    : kind == 3 ? "The model wants to read a file or list a folder: F1 (or /chat) to see it and say yes or no"
                    : kind == 2 ? "The model wants to change a file: F1 (or /chat) to see it and say yes or no"
@@ -7691,7 +7896,7 @@ int usage(FILE *f) {
             "  ts5-tui --start\n"
             "  ts5-tui --mcp | --mcp-tools | --mcp-call TOOL ['{\"ARGUMENT\": ...}']\n"
             "  ts5-tui --install-browser chromium|obscura [--dry-run]\n"
-            "  ts5-tui --run-command 'COMMAND' [--sandbox on|off|no-network]\n"
+            "  ts5-tui --run-command 'COMMAND' [--sandbox on|off|no-network|box|plain]\n"
             "  ts5-tui --github-call '{\"method\": \"GET\", \"path\": \"/user/repos\"}' [--dry-run]\n"
             "  ts5-tui --sandbox-folder DIR|default\n\n"
             "It talks to a running TokenStation (the tokenstation service, the TV app, or\n"
@@ -7711,7 +7916,8 @@ int usage(FILE *f) {
             "checked by SHA-256, into the home folder. --dry-run only says what would be done.\n"
             "--run-command: runs one command the way the model's terminal tool does (in the\n"
             "sandbox, unless it is off; /sandbox in the app) and prints what the model would\n"
-            "get back. --sandbox: on, off or no-network for that command.\n"
+            "get back. --sandbox: on, off or no-network for that command; box: in the\n"
+            "sandbox's own Linux system; plain: in the sandbox with this machine's system.\n"
             "--github-call: one call of the model's GitHub tool, as it would be made (after the\n"
             "fixes it gets), with what the question before a change would show; --dry-run\n"
             "shows that alone.\n"
@@ -7812,13 +8018,17 @@ int main(int argc, char **argv) {
     }
     if (run_mode) {
         // One command as the terminal tool runs it, and what the model gets back.
-        if (!sandbox_arg.empty() && sandbox_arg != "on" && sandbox_arg != "off" && sandbox_arg != "no-network") return usage(stderr);
+        if (!sandbox_arg.empty() && sandbox_arg != "on" && sandbox_arg != "off" && sandbox_arg != "no-network" &&
+            sandbox_arg != "plain" && sandbox_arg != "box")
+            return usage(stderr);
         ToolSwitches t;
         t.terminal = true;
         const bool want = sandbox_arg.empty() ? app.cfg.sandbox : sandbox_arg != "off";
         std::string why;
         t.sandbox = want && sandbox_ready(&why);
         t.sandbox_net = sandbox_arg.empty() ? app.cfg.sandbox_net : sandbox_arg != "no-network";
+        // plain: this machine's system, read-only; box: the sandbox's own.
+        t.box = t.sandbox && box_can() && (sandbox_arg == "box" || (sandbox_arg != "plain" && app.cfg.sandbox_box));
         if (want && !t.sandbox) fprintf(stderr, "ts5-tui: the sandbox is unavailable: %s. The command runs as you.\n", why.c_str());
         signal(SIGPIPE, SIG_IGN);
         std::atomic<bool> cancel{false};

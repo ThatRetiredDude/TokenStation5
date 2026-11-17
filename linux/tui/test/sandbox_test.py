@@ -46,7 +46,8 @@ def main():
         f.write("A-KEY\n")
     box = os.path.join(home, ".local", "share", "tokenstation", "sandbox", "home")
     env = {k: v for k, v in os.environ.items() if not k.startswith("XDG_") and k != "TS5_TUI_BWRAP"}
-    env.update({"HOME": home, "SECRET_ENV": "a-value-of-the-users"})
+    # (The plain sandbox, this machine's system read-only: the box has box_test.py.)
+    env.update({"HOME": home, "SECRET_ENV": "a-value-of-the-users", "TS5_SANDBOX_BOX": "0"})
 
     def run(cmd, cwd=proj, extra=(), more_env=None):
         e = dict(env)
@@ -104,7 +105,8 @@ def main():
         out, _, code = run("echo no > " + target + "; touch /etc/ts5-sandbox-test")
         check(not os.path.exists(target), "a file outside the working folder isn't made in the home folder", out)
         check("Read-only file system" in out and code != 0, "the system is read-only", out)
-        check("This ran in the sandbox" in out and "pip install" in out, "and the model is told what to do instead", out)
+        check("This ran in the sandbox" in out and "don't try them again" in out and "pip has Python packages only" in out and
+              "pip install" not in out, "and the model is told what can and can't be done there (no program by pip)", out)
         out, _, _ = run("echo '/usr/bin/python3: No module named pip'; exit 1")
         check("get-pip.py | python3 - --user" in out, "a Python without pip: the model is told how to put pip in ~", out)
 

@@ -50,7 +50,9 @@ struct Config {
     // the server's web search, reading a web page, running a command here
     // (asked first), and notes kept between chats (tools.h).
     bool tool_web = true, tool_page = true, tool_terminal = true, tool_memory = true;
-    bool tool_browser = false;       // the browser the model works: off until the user turns it on
+    // The browser the model works (pages as a browser shows them, scripts
+    // run): on. Without a browser program here its pages are plain text.
+    bool tool_browser = true;
     // One switch over them all: off, the model gets no tool, whatever the
     // switches above say. --no-tools turns it off for one run.
     bool tools = true;
@@ -59,6 +61,13 @@ struct Config {
     // Whether a command, and a button or typing on a web page, wait for
     // the user's yes (the default) or go without asking.
     bool terminal_ask = true, browser_ask = true;
+    // The steps of tool calls one message gets before ts5-tui asks whether
+    // the model should go on (0: it is never asked).
+    int tool_steps = 50;
+    // The task window: a message's tool calls that take the chat past this
+    // many tokens have the model write notes and go on from them (0: only
+    // when the chat no longer fits the model's context).
+    int task_window = 24000;
     // The file tools (read, list, change, write; files.h): off until the
     // user turns them on, and asking first.
     bool tool_files = false, files_ask = true;
@@ -70,11 +79,20 @@ struct Config {
     // for ts5's data folder (/sandbox folder).
     bool sandbox = true, sandbox_net = true;
     std::string sandbox_dir;
+    // The sandbox has a Linux system of its own (the box, sandbox.h), where
+    // the model is root and installs programs with apt; off: it sees this
+    // machine's system, read-only.
+    bool sandbox_box = true;
     std::string browser = "auto";    // "auto", "obscura", "chromium", "text", or a browser program's path
     bool browser_offered = false;    // the offer to install one was answered (it is made once; /browser install after)
-    // The encyclopedia a search without a web search key goes to:
-    // "wikipedia", "grokipedia" (xAI's) or "both".
-    std::string search_source = "wikipedia";
+    // What a search without a web search key goes to: "web" (a regular
+    // web search), "grokipedia" (xAI's encyclopedia), "wikipedia" or
+    // "both" (the two encyclopedias).
+    std::string search_source = "web";
+    // The settings file's generation: one saved before 2 (Linux 1.3.0)
+    // gets that release's new defaults once, the browser tool on and the
+    // web in place of Wikipedia.
+    int defaults = 2;
     std::string path;       // where it is saved
     void load();
     void save() const;
@@ -87,8 +105,10 @@ struct ServerState {
     int n_ctx = 0;
     std::string tool_format, known_good, checked_model, why;
     bool web_search = false;  // the server searches the web for the model (it has a key)
-    bool wikipedia = false;   // without a key it searches an encyclopedia, for a request that asks
+    bool wikipedia = false;   // without a key it still searches (the web or an encyclopedia), for a request that asks
     bool encyclopedias = false;  // it takes the request's choice of one ("web_search_source")
+    bool web_sources = false;    // and "web" is one of them (ts5 1.3.0 and later)
+    bool google_source = false;  // and "google": the server's machine has a Chromium to read it with
     // The helper the engine really loaded beside the model, its context
     // (drafting stops past it), or why the one asked for isn't used.
     // helper_known: the server says (an older one doesn't).
