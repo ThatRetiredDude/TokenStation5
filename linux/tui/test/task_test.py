@@ -200,10 +200,13 @@ def main():
               after["results"])
         # Under the notes: the calls as ts5-tui recorded them, each with how it ended.
         made = calls_of(after["system"])
-        check("(Recorded by the program, oldest first, each with how it ended. Where your notes and this list differ, "
-              "the list is right.)" in after["system"] and
-              made == ["%d. $ echo step %d | tee -a task-steps.txt \u2192 exit 0" % (k, k) for k in range(1, 7)],
-              "under the notes: the six calls they were written from, as the program recorded them", after["system"][-900:])
+        check("(Recorded by the program, oldest first, each with how it ended and, where it gave back one line, that "
+              "line. Where your notes and this list differ, the list is right." in after["system"] and
+              made == ["%d. $ echo step %d | tee -a task-steps.txt \u2192 exit 0: step %d" % (k, k, k) for k in range(1, 7)],
+              "under the notes: the six calls they were written from, as the program recorded them, with their one line",
+              after["system"][-900:])
+        check("Tell me only what you can see" in after["task"] and "never give one from memory" in after["task"],
+              "beside the request: what is reported must be there to see", after["task"][-600:])
         later = calls_of(r[r.index(notes[-1]) + 1]["system"])
         n = len(later) and int(later[-1].split(".")[0])
         check(len(later) == 20 and n >= 21 and later[0].startswith("%d. $ echo step %d " % (n - 19, n - 19)) and
@@ -288,7 +291,7 @@ def main():
         check(after["msgs"] == 2 and "STEPS DONE: 4" in after["system"] and after["task"].startswith(ASKED + "\n\ntask 10\n\n" + GO),
               "the turn goes again from the notes and the request", after)
         made = calls_of(after["system"])
-        check(len(made) == 4 and made[1].endswith("\u2192 exit 0") and
+        check(len(made) == 4 and made[1].endswith("\u2192 exit 0: step 2") and
               made[2] == "3. $ echo step 3 | tee -a task-steps.txt; ls /no-such-ts5-folder \u2192 exit 2: "
               "ls: cannot access '/no-such-ts5-folder': No such file or directory",
               "a call that failed is listed with the last line it gave back", made)

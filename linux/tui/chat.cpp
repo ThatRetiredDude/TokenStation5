@@ -1053,15 +1053,18 @@ const char *const kTaskLead =
     "so far\n\n";
 // Under the notes: the task's calls as ts5-tui recorded them (task_calls).
 const char *const kTaskCalls =
-    "\n\n# The calls made in this task so far\n\n(Recorded by the program, oldest first, each with how it ended. "
-    "Where your notes and this list differ, the list is right.)\n";
+    "\n\n# The calls made in this task so far\n\n(Recorded by the program, oldest first, each with how it ended and, "
+    "where it gave back one line, that line. Where your notes and this list differ, the list is right. Every "
+    "command started in the folder the tool's description names, not where an earlier one left off.)\n";
 const char *const kGoalOpen =
     "[The earlier messages of this task are in your notes. This is what I asked for, word for word:]\n\n";
 const char *const kGoalNote = "\n\n[A note I sent while you worked on it:]\n\n";
 const char *const kGoalGo =
     "\n\n[Go on with it from where your notes end. What the notes say is done, is done: do not do it again. What "
     "they say failed, do not try the same way again. When you think it is finished, read my request once more and "
-    "make sure every part of it is done before you say so.]";
+    "make sure every part of it is done before you say so. Tell me only what you can see: a value you report (a "
+    "file's lines, a version, a size, a name) must stand in your notes, in the list of calls or in a tool's result "
+    "after them. One that does not, read again with a command before you tell me; never give one from memory.]";
 
 // The request a task's notes stand beside: the user's last message before
 // `before` that is not a note sent while the model worked, and those notes
@@ -1251,23 +1254,32 @@ std::string task_calls(const Chat &c, size_t sum, size_t most) {
         if (how.empty()) how = m.tool_ok ? "done" : "failed";
         // (The head is written for the user: "you said no: it wasn't run".)
         for (size_t at; (at = how.find("you said")) != std::string::npos;) how.replace(at, 3, "the user");
-        if (!m.tool_ok) {
-            // (Its last line that is not a hint of ts5-tui's own, which come in brackets.)
+        {
+            // A failed call's last line, and the one line of a call that gave
+            // back just one (a size, a version, a count: what an answer is
+            // made of, and what notes leave out). Not ts5-tui's own hints,
+            // which come in brackets.
             std::string last;
+            int n = 0;
             for (size_t at = 0; at < m.content.size();) {
                 size_t e = m.content.find('\n', at);
                 if (e == std::string::npos) e = m.content.size();
                 std::string line = m.content.substr(at, e - at);
                 at = e + 1;
                 while (!line.empty() && isspace((unsigned char)line.back())) line.pop_back();
-                if (!line.empty() && line[0] != '(' && line.compare(0, 9, "exit code") != 0) last = line;
+                if (line.empty() || line[0] == '(' || line.compare(0, 9, "exit code") == 0) continue;
+                last = line;
+                n++;
             }
             if (last.size() > 120) {
                 size_t cut = 117;
                 while (cut > 0 && ((unsigned char)last[cut] & 0xC0) == 0x80) cut--;
                 last = last.substr(0, cut) + "...";
             }
-            if (!last.empty()) how += ": " + last;
+            if (!m.tool_ok || n == 1) {
+                if (!last.empty()) how += ": " + last;
+            } else if (n > 1 && m.tool == "run_command")
+                how += fmt(", %d lines", n);
         }
         lines.push_back(std::to_string(lines.size() + 1) + ". " + call + " \xE2\x86\x92 " + how);
     }
@@ -2325,10 +2337,14 @@ std::string summary_ask(int words, const std::string &focus, bool again, bool mo
             "commands and calls made: copy neither.) Write those notes, under these headings and in this order:\n"
             "- Steps: the steps the work takes, each marked done, in work or not started, as things stand at the "
             "end of what is shown;\n"
-            "- Next: the very next step, as exactly as it can be said (the command or call, with its paths);\n"
-            "- Facts: what was found on the way that the rest of the work needs, word for word where it is short: "
-            "the folder commands start in, the full path of every file and folder made, versions, addresses, "
-            "settings, numbers, what a check printed;\n"
+            "- Next: the very next step, as exactly as it can be said (the command or call, with its paths). When "
+            "all that is left is to tell the user the results, say so, and see that each of those results stands "
+            "under Facts;\n"
+            "- Facts: what was found on the way that the rest of the work or the answer to the user needs, as the "
+            "values themselves, word for word: the full path of every file and folder made, versions, addresses, "
+            "settings, numbers, the lines a command printed (\"memory.py prints Memory: 14.10 GB\", not \"memory.py "
+            "prints the memory\"). Everything the user asked to be told at the end belongs here as soon as it is "
+            "known;\n"
             "- Failed: what was tried and did not work, with the error's own words and the cause if it was found, "
             "so that it is not tried the same way again;\n"
             "- Decisions: those made and why, and anything the user said on the way;\n"
@@ -2350,7 +2366,11 @@ std::string summary_ask(int words, const std::string &focus, bool again, bool mo
                        "they are. Write nothing about what did or did not come after it."
                      : "The conversation is not over: the user goes on after the notes. Write nothing about it having "
                        "ended, or about nothing more having been asked.");
-    a += fmt("Use up to about %d words; shorter is better where nothing is lost.", words);
+    // (Told "shorter is better", Qwen3.5 9B wrote 313 tokens of the 1,024 it
+    // had and left out every value its answer needed, which it then made up.)
+    a += fmt(task ? "Use the room you have, up to about %d words: a value that is not written down is lost."
+                  : "Use up to about %d words; shorter is better where nothing is lost.",
+             words);
     if (again)
         a += task ? " What is shown opens with notes on the work before it: bring them up to date. Mark the steps "
                     "as they stand now, write the next step anew, keep the facts that are still true, and drop "
