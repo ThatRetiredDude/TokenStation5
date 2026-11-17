@@ -548,7 +548,7 @@ ts5-tui --url http://ps5.local:8081  # another one
   model keeps how each ended and its first and last lines, every call and
   every short result stay word for word, and the newest results stay
   whole. That costs one reading of the shorter chat and puts nothing in
-  other words. When it no longer makes a quarter of the window free, or
+  other words. When it no longer makes an eighth of the window free, or
   the chat no longer fits the model's memory, the model writes notes on its
   work: the plan and where it is, what is done and how it was checked, the
   facts it found, what failed and why, the next step. The calls then go on
@@ -560,7 +560,14 @@ ts5-tui --url http://ps5.local:8081  # another one
   the thread in a very long one); `/tools window off` writes notes only
   when the chat is full. With Settings → Full chat on "stops" there are
   none. If the notes can't be written, the task goes on with the chat as
-  it was. From the first notes or summary on, the model has one more tool,
+  it was. Notes that say what the notes before them said (a small model
+  copies its earlier notes when it is stuck) are written a second time,
+  from ts5-tui's own list of the task's calls and not from the earlier
+  notes. When three sets in a row come out word for word the same, the
+  task is going in circles: the model is told to stop and say what is done,
+  what is not and what is in the way, and the chat says why. Tell it what
+  to do differently, or to go on. From the first notes or summary on, the
+  model has one more tool,
   `search_earlier`: it looks up words in the part of the chat the notes
   took the place of (a command it ran and what came back, a path, an
   error's words) and gets the lines that have them, so a detail the notes

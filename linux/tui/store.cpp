@@ -170,7 +170,8 @@ bool save_chat(Chat &c, std::string &why) {
                 body += std::string(n++ ? ",\n" : "\n") + "{\"user\":false,\"summary\":true,\"text\":" + ts5::json_escape(m.content) +
                         ",\"model\":" + ts5::json_escape(m.model) + ",\"kept\":" + std::to_string(kept) +
                         ",\"before\":" + std::to_string(m.sum_before) + ",\"after\":" + std::to_string(m.sum_after) +
-                        ",\"why\":" + std::to_string(m.sum_why) + "}";
+                        ",\"why\":" + std::to_string(m.sum_why) + (m.circle > 0 ? ",\"same\":" + std::to_string(m.circle) : "") +
+                        "}";
                 continue;
             }
             if (m.role == "tool") {
@@ -260,6 +261,7 @@ bool load_chat(Chat &c, const SavedChat &s, std::string &why) {
                 m.sum_before = (int)t["before"].num(0);
                 m.sum_after = (int)t["after"].num(0);
                 m.sum_why = (int)t["why"].num(0);
+                m.circle = (int)t["same"].num(0);
                 // The turns kept beside it: that many of the ones before it.
                 int kept = (int)t["kept"].num(0);
                 size_t from = c.msgs.size();

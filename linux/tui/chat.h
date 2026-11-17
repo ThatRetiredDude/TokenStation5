@@ -54,6 +54,10 @@ struct Msg {
     // the middle of a message's tool calls: 3 the chat passed the task
     // window, 4 the server refused it as full).
     int keep_from = -1, sum_before = 0, sum_after = 0, sum_why = 0;
+    // A task's notes that came out word for word as the notes before them
+    // (answer_loop): how many sets in a row have, with these. The model is
+    // told so beside them, and at three it is told to stop.
+    int circle = 0;
     // An assistant turn's tool calls: ts5-tui runs each, adds a tool message
     // with what it gave back, and the model goes on in a new assistant turn.
     std::vector<ToolUse> calls;

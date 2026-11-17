@@ -345,19 +345,124 @@ def main():
               saved.count("step 3 prints line 75 of its long output") == 1,
               "saved with the chat: which gave way, and every output whole", saved.count('"left_out":true'))
         check("left out later, for room" in t.up("left out later, for room"), "the chat marks them", t.screen())
-        # More of the same in the next message: once giving way no longer makes a quarter of the
-        # window free, notes are written, from the outputs as the model has them.
+        # A longer task: once giving way no longer makes an eighth of the window free (the calls
+        # and the short forms have filled it), notes are written, from the outputs as the model
+        # has them.
         # (In a new chat: the fake counts the steps done from every call the notes' talk shows.)
         t.keys("C-n")
-        t.type("task 24")
+        t.type("task 40")
         t.keys("Enter")
-        check(t.wait("all 24 steps of the task are done", 240) and t.idle(), "a longer task ends too", t.screen())
-        check(t.steps() == ["step %d" % k for k in range(1, 13)] + ["step %d" % k for k in range(1, 25)],
+        check(t.wait("all 40 steps of the task are done", 300) and t.idle(), "a longer task ends too", t.screen())
+        check(t.steps() == ["step %d" % k for k in range(1, 13)] + ["step %d" % k for k in range(1, 41)],
               "every step ran once, in order", t.steps())
-        notes = [x for x in t.requests() if x["notes"]]
+        r = t.requests()
+        notes = [x for x in r if x["notes"]]
         check(notes and NOTE in notes[0]["notes"] and "The assistant is in the middle of this work" in notes[0]["notes"],
               "when that no longer makes room: notes, written from the outputs as the model has them",
-              [x["notes"][:300] for x in notes])
+              [x["tokens"] for x in r])
+        if notes:
+            n = r[r.index(notes[0]) - 1]
+            check(len(n["bytes"]) >= 18, "not before: the task was %d calls long by then" % len(n["bytes"]), len(n["bytes"]))
+            after = r[r.index(notes[0]) + 1]
+            check(len(after["bytes"]) == 1 and after["bytes"][0] > 5000,
+                  "the latest step stays whole beside the notes (three eighths of the window)", after["bytes"])
+    finally:
+        t.close()
+
+    # ---- Notes that come out as the notes before them. (On a PS5 Qwen3.5 9B wrote the same
+    # notes fifteen times, with a step as next that was long done, and went back to that step
+    # after each.) They are written once more, anew: from the program's list of the task's calls,
+    # the earlier notes' facts and the work since.
+    ANEW = "[The calls the assistant made before what follows, as the program recorded them: oldest first, each with how it ended]"
+    REMARK = "[The program's own remark: after the last stretch of work your notes came out word for word as the notes before it"
+    t = Tui(tui, "task_window=8000\n", {"FAKE_NOTES_SAME": "1"})
+    try:
+        check(t.idle(), "ts5-tui is up (notes that repeat)", t.screen())
+        t.type("task 18")
+        t.keys("Enter")
+        check(t.wait("all 18 steps of the task are done", 120) and t.idle(), "a task whose notes repeat comes to its end", t.screen())
+        check(t.steps() == ["step %d" % k for k in range(1, 19)], "every step ran once, in order", t.steps())
+        r = t.requests()
+        notes = [x for x in r if x["notes"]]
+        anew = [x for x in notes if ANEW in x["notes"]]
+        check(len(anew) >= 1 and len(anew) <= 2 and len(notes) == 1 + 2 * len(anew),
+              "notes that repeated the ones before were asked for once more", (len(notes), len(anew)))
+        if anew:
+            a = anew[0]["notes"]
+            copy = r[r.index(anew[0]) - 1]["notes"]
+            check("[Notes on the conversation's earlier part]\n## Done\nSTEPS DONE: 6\n" in copy and "bring them up to date" in copy,
+                  "the first request had shown the earlier notes", copy[:400])
+            check("[Notes on the conversation's earlier part]" not in a and "STEPS DONE" not in a and
+                  a.index("[User]\ntask 18\n") < a.index(ANEW) and
+                  ANEW + "\n1. $ echo step 1 | tee -a task-steps.txt \u2192 exit 0: step 1\n" in a and
+                  "\n6. $ echo step 6 | tee -a task-steps.txt \u2192 exit 0: step 6\n\n" in a and "\n7. $ echo step 7" not in a,
+                  "anew: the request, then the program's list of the calls before, not the earlier notes", a[:1500])
+            check("[What the assistant had written down before, from its facts on]\n## Facts\nfact: the folder is proj\n\n" in a,
+                  "the earlier notes' facts go along", a[:1800])
+            check("[The assistant used a tool: $ echo step 7 | tee -a task-steps.txt]" in a and
+                  "The steps are marked anew here, from that list and from what is shown" in a and "bring them up to date" not in a,
+                  "then the work since, and the ask says how the steps are marked", a[-900:])
+            after = r[r.index(anew[0]) + 1]
+            n = int(re.findall(r"STEPS DONE: (\d+)", after["system"])[-1])
+            check(n > 6 and len(after["results"]) == 1 and "step %d\n" % (n + 1) in after["results"][0],
+                  "the model goes on from the notes written anew (the steps done counted from the list)",
+                  (n, after["results"]))
+            check(REMARK in after["task"] and "leave it, go on with the steps that do not depend on it" in after["task"],
+                  "beside the request: the program's remark that the work brought the task no further", after["task"][-700:])
+        first_after = r[r.index(notes[0]) + 1]
+        check(REMARK not in first_after["task"], "not beside a task's first notes", first_after["task"][-300:])
+        saved = t.chat_file()
+        check(saved.count('"why":3') == 1 + len(anew), "the chat keeps one set of notes for each time, the one written anew",
+              saved.count('"why":3'))
+        check("going in circles" not in t.screen() and not t.up("going in circles"), "two such sets in a row end nothing", t.screen())
+        # Three in a row: the model is told to stop and say where things stand, and the chat says why.
+        t.keys("C-n")
+        t.type("task 60")
+        t.keys("Enter")
+        check(t.wait("This task was going in circles", 240) and t.idle(), "three sets of notes in a row that say nothing new end the task",
+              t.screen())
+        scr = " ".join(t.screen().split())
+        check("3 times in a row the model's notes on its work came out word for word as the notes before" in scr and
+              "Tell it what to do differently, or to go on." in scr, "the chat says why", scr[-900:])
+        steps = t.steps()[18:]
+        check(0 < len(steps) < 60 and steps == ["step %d" % k for k in range(1, len(steps) + 1)],
+              "the steps up to there ran once each", len(steps))
+        r = t.requests()
+        last = r[-1]
+        check(not last["notes"] and "tool_choice=none" in last["tools"] and last["results"] and
+              "[This work has been going in circles: three times in a row your notes on it came out word for word" in last["results"][-1] and
+              "Call no more tools now." in last["results"][-1],
+              "the last turn gets no tools, and is told under its latest result to say where things stand",
+              (last["tools"], last["results"][-1][-500:] if last["results"] else ""))
+        check("The tool gave me this:" in scr, "the model's answer follows", scr[-500:])
+        saved = t.chat_file()
+        check('"same":3' in saved and '"same":2' in saved and '"same":1' in saved, "saved with the chat, on the notes",
+              re.findall(r'"why":3[^}]*', saved))
+        # The chat goes on from there.
+        t.type("hello again")
+        t.keys("Enter")
+        check(t.wait("You said: hello again") and t.idle(), "the chat goes on after it", t.screen())
+        last = t.requests()[-1]
+        check(last["users"][-1] == "hello again" and "going in circles" not in json.dumps(last["users"]) + last["system"],
+              "without the program's words to the model about the circle", last["users"])
+    finally:
+        t.close()
+
+    # One line in twenty at most that is new: written anew as well, but no circle.
+    t = Tui(tui, "task_window=8000\n", {"FAKE_NOTES_SAME": "near"})
+    try:
+        check(t.idle(), "ts5-tui is up (notes that nearly repeat)", t.screen())
+        t.type("task 40")
+        t.keys("Enter")
+        check(t.wait("all 40 steps of the task are done", 240) and t.idle(), "a task whose notes change in one line of 26 ends",
+              t.screen())
+        check(t.steps() == ["step %d" % k for k in range(1, 41)], "every step ran once, in order", t.steps())
+        r = t.requests()
+        notes = [x for x in r if x["notes"]]
+        anew = [x for x in notes if ANEW in x["notes"]]
+        check(len(anew) >= 3 and len(notes) == 1 + 2 * len(anew), "each such set was written anew", (len(notes), len(anew)))
+        check(not [x for x in r if REMARK in x["task"]] and not t.up("going in circles"),
+              "with no remark and no end: something in them was new", len(r))
     finally:
         t.close()
 

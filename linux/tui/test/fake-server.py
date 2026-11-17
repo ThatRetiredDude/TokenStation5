@@ -38,7 +38,11 @@ page the call before gave. "&&" between steps makes them calls of one turn.
 "task N" runs N commands, a turn each, and counts the steps done from a
 task's notes when ts5-tui had them written. FAKE_FULL_ONCE=K refuses the
 K-th request for an answer as too long for the context, once;
-FAKE_NOTES_FAIL=1 fails a request for a task's notes. FAKE_TASK_LINES=M has
+FAKE_NOTES_FAIL=1 fails a request for a task's notes. FAKE_NOTES_SAME=1
+answers a request to bring a task's notes up to date with those notes word
+for word (as a real model did on a PS5), FAKE_NOTES_SAME=near with one line
+of 26 changed; notes asked for anew are counted from the program's list of
+calls. FAKE_TASK_LINES=M has
 each step's command print M more lines. FAKE_TEXT_CALL: what the turn that may call no tool (the message's steps
 ended, calls that only repeated, or a no) answers with, a call written as text ("\\n" a line break).
 FAKE_TAILNET=1 answers /ts5/tailnet as a ts5 serve with Tailscale does (off;
@@ -421,10 +425,26 @@ class H(BaseHTTPRequestHandler):
             elif results:
                 text = "The tool gave me this: " + " | ".join(r.strip()[:300] for r in results)
             elif summary and "The assistant is in the middle of this work" in last:
-                # Notes on a task: the steps its talk shows (and the notes before it counted).
-                before = sum(int(x) for x in re.findall(r"STEPS DONE: (\d+)", last)[-1:])
+                # Notes on a task: the steps its talk shows (and the notes before it counted, or,
+                # where the notes are written anew, the program's list of the calls before).
+                listed = re.search(r"^\[The calls the assistant made before what follows[^\n]*\]\n((?:\d+\. [^\n]*\n)+)",
+                                   last, re.M)
+                if listed:
+                    before = int(re.findall(r"^(\d+)\. ", listed.group(1), re.M)[-1])
+                else:
+                    before = sum(int(x) for x in re.findall(r"STEPS DONE: (\d+)", last)[-1:])
                 steps = len(re.findall(r"^\[The assistant used a tool: ", last, re.M))
                 text = "## Done\nSTEPS DONE: %d\n## Next\nThe next step of the task." % (before + steps)
+                same = os.environ.get("FAKE_NOTES_SAME")
+                if same:
+                    text += "\n## Facts\nfact: the folder is proj"
+                    if same == "near":
+                        text += "".join("\nfact %d of the work" % k for k in range(1, 21))
+                    old = re.search(r"^\[Notes on the conversation's earlier part\]\n(.*?)\n\n\[User\]\n", last, re.M | re.S)
+                    if old and same == "near":
+                        text = re.sub(r"STEPS DONE: \d+", "STEPS DONE: %d" % (before + steps), old.group(1))
+                    elif old:
+                        text = old.group(1)
             elif summary:
                 said = re.findall(r"^\[User\]\n(.*)$", last, re.M)
                 text = SUMMARY % (len(said), (said[0] if said else "")[:40])

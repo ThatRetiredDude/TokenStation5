@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <strings.h>
 #include <ctime>
 #include <fstream>
 #include <map>
@@ -18,6 +19,13 @@
 #include "tools.h"
 
 namespace tui {
+
+// How many of a task's sets of notes in a row may come out word for word as
+// the notes before them (work that, by the model's own account, changed
+// nothing) before the model is told to stop and say where things stand. On
+// the PS5 Qwen3.5 9B wrote fifteen such sets in fifteen minutes, on a step
+// it could not get right.
+static const int kCircles = 3;
 
 const std::vector<SlashCommand> &slash_commands() {
     static const std::vector<SlashCommand> c = {
@@ -538,6 +546,14 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
                 if (m.sum_after > 0) say += ", about " + thousands(m.sum_after) + " tokens";
                 say += ". Everything above is still here to read, and saved.";
                 wrap(out, {{say, Style(t.dim)}}, w, 2);
+                if (m.circle >= kCircles)
+                    wrap(out,
+                         {{fmt("This task was going in circles: %d times in a row the model's notes on its work came out "
+                               "word for word as the notes before. It was told to stop and say where things stand. Tell "
+                               "it what to do differently, or to go on.",
+                               m.circle),
+                           Style(t.warn)}},
+                         w, 2);
                 const bool open = m.think_open == 1;
                 Line th;
                 th.add(task ? (open ? "  ▾ The notes" : "  ▸ The notes") : open ? "  ▾ The summary" : "  ▸ The summary",
@@ -1074,6 +1090,16 @@ const char *const kGoalGo =
     "file's lines, a version, a size, a name) must stand in your notes, in the list of calls or in a tool's result "
     "after them. One that does not, read again with a command before you tell me; never give one from memory.]";
 
+// Under the request, beside notes written after a stretch of work that went
+// in a circle (answer_loop): on a PS5 Qwen3.5 9B went back to the same step
+// after each of fifteen sets of notes, one it could not get right, and
+// never reached the three steps after it.
+const char *const kGoalCircle =
+    "\n\n[The program's own remark: after the last stretch of work your notes came out word for word as the notes "
+    "before it, so that work brought the task no further. Do not go the same way again. Look at the list of calls "
+    "for what was tried, and take the next step a different way; if it still fails, leave it, go on with the "
+    "steps that do not depend on it, and tell me at the end what could not be done and why.]";
+
 // ts5-tui's question about an answer given straight from a task's notes,
 // with no call between the notes and the answer (answer_loop). On a PS5
 // Qwen3.5 9B answered so with a memory size, a Python version and a file
@@ -1129,14 +1155,15 @@ int rough_tokens(const std::string &s) { return (int)(s.size() / 3) + 8; }
 // how it went), and that the rest is gone.
 std::string short_result(const Msg &m) {
     const std::string &s = m.content;
-    size_t cut = std::min<size_t>(s.size(), 300);
+    const bool command = m.tool == "run_command";
+    size_t cut = std::min<size_t>(s.size(), command ? 200 : 300);
     while (cut > 0 && cut < s.size() && ((unsigned char)s[cut] & 0xC0) == 0x80) cut--;
     const size_t nl = s.rfind('\n', cut);
     if (cut < s.size() && nl != std::string::npos && nl >= 60) cut = nl;
-    if (m.tool != "run_command" || s.size() < cut + 600)
+    if (!command || s.size() < cut + 600)
         return s.substr(0, cut) +
                "\n[The rest of this result was left out later, to make room in the chat. Ask for it again if it is needed.]";
-    size_t from = s.size() - 200;
+    size_t from = s.size() - 120;
     const size_t line = s.find('\n', from);
     if (line != std::string::npos && line + 2 < s.size()) from = line + 1;
     while (from < s.size() && ((unsigned char)s[from] & 0xC0) == 0x80) from++;
@@ -1196,7 +1223,7 @@ int task_limit(const ChatRequest &rq);
 
 // A task past its window, before the model is asked for notes: the long
 // outputs of its earlier commands and file reads give way as in make_room,
-// when that alone takes the chat a quarter under the window. What stays is
+// when that alone takes the chat an eighth under the window. What stays is
 // the chat's own record, word for word: every call, every short result, the
 // first and last lines of the long ones, and the newest results whole (the
 // latest step, and those before it that fit a quarter of the window with
@@ -1208,7 +1235,12 @@ int task_limit(const ChatRequest &rq);
 // times, and the model wrote their sum into its file. Only results a call
 // gets again as they were give way here (a command's output, a file, a
 // folder's list): what a web page said is for the notes to keep. True when
-// some gave way and notes can wait.
+// some gave way and notes can wait. (An eighth: giving way costs little
+// even when it has to be done again a step later, the server reading on
+// from the first output that went; in the first run with it on a PS5 it
+// took 4 to 6 s where a set of notes and the reading after it took 21 s,
+// and the notes it was passed over for at three quarters gave a wrong sum
+// and a wrong count of the files done.)
 bool outputs_give_way(Chat &c, const ChatRequest &rq) {
     const int limit = task_limit(rq);
     if (limit <= 0) return false;
@@ -1230,10 +1262,10 @@ bool outputs_give_way(Chat &c, const ChatRequest &rq) {
         }
         whole = limit;  // (older ones no longer count as the newest)
         if (m.content.size() < 1200 || (m.tool != "run_command" && m.tool != "read_file" && m.tool != "list_folder")) continue;
-        freed += (int)(m.content.size() - short_result(m).size()) / 4;
+        freed += t - rough_tokens(short_result(m));
         go.push_back(idx[k]);
     }
-    if (go.empty() || c.ctx_used + fresh - freed > limit / 4 * 3) return false;
+    if (go.empty() || c.ctx_used + fresh - freed > limit / 8 * 7) return false;
     for (size_t i : go) {
         c.msgs[i].left_out = true;
         c.msgs[i].head += " \xC2\xB7 left out later, for room";
@@ -1295,6 +1327,13 @@ const char *const kLastCall = "\n\n[That was the last tool call for this message
 const char *const kLastRepeat =
     "\n\n[Your last calls only repeated earlier ones and got the same results. Call no more tools now. Tell the user "
     "in plain words what you tried, what is in the way, and what you would need to go on.]";
+// The same turn after stretches of a task that went in a circle
+// (answer_loop, kCircles).
+const char *const kLastCircles =
+    "\n\n[This work has been going in circles: three times in a row your notes on it came out word for word as "
+    "the notes before. Call no more tools now. Tell the user in plain words what is done, what is not done, what "
+    "is in the way, and what you would need to go on. Say only what a result above, the list of calls or your "
+    "notes show: a step whose check failed is not done.]";
 const char *const kLastStop =
     "\n\n[The user wants the answer now. Call no more tools. Say what is done, what is not, and what the next step "
     "would be.]";
@@ -1415,7 +1454,8 @@ std::string body_for(Chat &c, const ChatRequest &rq, const char *last = nullptr)
         // after them as it was said, whatever the notes made of it.
         if (task) {
             const std::string goal = task_goal(c, (size_t)sum, goal_cap(rq));
-            if (!goal.empty()) msgs += "," + role_json("user", kGoalOpen + goal + kGoalGo);
+            if (!goal.empty())
+                msgs += "," + role_json("user", kGoalOpen + goal + kGoalGo + (c.msgs[sum].circle > 0 ? kGoalCircle : ""));
         }
         size_t last_user = 0, last_tool = (size_t)-1;
         for (size_t i : idx) {
@@ -1970,7 +2010,7 @@ int ask_more(Chat *c, const std::string &used) {
 // A note the user sends meanwhile (steer_in) goes in before the next turn,
 // and the answer goes on from it as from a new message.
 bool task_too_long(Chat &c, const ChatRequest &rq);
-bool task_notes(Chat *c, const ChatRequest &rq, int why);
+bool task_notes(Chat *c, const ChatRequest &rq, int why, int *same = nullptr);
 
 void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
     const char *last = nullptr;  // this turn was told to call no tool, in these words
@@ -1983,6 +2023,11 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
     std::map<std::string, std::string> seen;
     int stale = 0;
     bool no_notes = false;  // notes on the task could not be written: not tried again for this message
+    // The task's sets of notes in a row that came out word for word as the
+    // notes before them (task_notes): stretches of work that, by the
+    // model's own account, changed nothing. At kCircles the model is told
+    // to stop and say where things stand.
+    int circles = 0;
     bool refused_once = false;  // a turn the server refused went again after notes
     // An answer that comes straight from notes (no call since they were
     // written, and calls of this message's in the part they replaced) is
@@ -1997,7 +2042,7 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
     for (int round = 0;; round++, turns++) {
         if (c->cancel.load()) break;
         if (steer_in(c, rq)) {
-            round = turns = stale = 0;
+            round = turns = stale = circles = 0;
             last = nullptr;
             said_no = again = false;
             from_notes = false;
@@ -2063,6 +2108,9 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
                 m.error = last == kLastRepeat ? "the model kept making the same calls with the same results, and asked "
                                                 "for another instead of answering: nothing more was run. Tell it what "
                                                 "to do differently"
+                          : last == kLastCircles ? "the model's work went in circles, and it asked for another tool "
+                                                   "instead of saying where things stand: nothing more was run. "
+                                                   "Tell it what to do differently"
                           : last == kLastStop ? "the model asked for another tool after you said to answer now: "
                                                 "nothing more was run"
                                               : "the model asked for another tool after your no instead of answering: "
@@ -2218,10 +2266,15 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
                 seen.clear();
                 stale = 0;
             } else if (!no_notes) {
-                if (task_notes(c, rq, 3)) {
+                int same = 0;
+                if (task_notes(c, rq, 3, &same)) {
+                    if (c->cancel.load()) break;
                     seen.clear();
                     stale = 0;
                     from_notes = replaced();
+                    circles = same == 2 ? circles + 1 : 0;
+                    std::lock_guard<std::mutex> l(c->mu);
+                    c->msgs.back().circle = circles;
                 } else {
                     if (c->cancel.load()) break;
                     no_notes = true;
@@ -2238,7 +2291,7 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
         }
         if (reading) round--;
         // After a no, or after calls that went in circles, the model answers.
-        last = said_no ? kLastCall : stale >= kStale ? kLastRepeat : nullptr;
+        last = said_no ? kLastCall : stale >= kStale ? kLastRepeat : circles >= kCircles ? kLastCircles : nullptr;
         body = body_for(*c, rq, last);
     }
 }
@@ -2266,9 +2319,53 @@ int summary_out_max(const ChatRequest &rq, bool task) {
     return room > 0 ? std::min(3072, std::max(task ? 1024 : 512, room / 6)) : 2048;
 }
 
-std::string summary_ask(int words, const std::string &focus, bool again, bool more, bool task);
+// A task's notes from their Facts heading on (Facts, Failed, Decisions,
+// Text, in summary_ask's order); "" where no line is that heading.
+std::string facts_on(const std::string &notes) {
+    for (size_t at = 0; at < notes.size();) {
+        size_t e = notes.find('\n', at);
+        if (e == std::string::npos) e = notes.size();
+        size_t k = at;
+        while (k < e && strchr("#*-_> \t0123456789.", notes[k])) k++;
+        if (e - k >= 5 && strncasecmp(notes.c_str() + k, "facts", 5) == 0 &&
+            (k + 5 == e || strchr(":*_# \r", notes[k + 5])))
+            return notes.substr(at);
+        at = e + 1;
+    }
+    return "";
+}
+
+// Whether a task's notes say what the notes before them said: 2 none of
+// their lines is new, 1 one in twenty at most, 0 more. (On a PS5 Qwen3.5 9B
+// wrote fifteen sets in a row that were the first set word for word, 28
+// lines with a step as next that was long done; in another task its third
+// set differed from the second in one line of 30 and left out three files
+// it had counted since.)
+int same_notes(const std::string &now, const std::string &before) {
+    auto lines = [](const std::string &s) {
+        std::vector<std::string> out;
+        for (size_t at = 0; at < s.size();) {
+            size_t e = s.find('\n', at);
+            if (e == std::string::npos) e = s.size();
+            size_t a = at, b = e;
+            while (a < b && isspace((unsigned char)s[a])) a++;
+            while (b > a && isspace((unsigned char)s[b - 1])) b--;
+            if (b > a) out.push_back(s.substr(a, b - a));
+            at = e + 1;
+        }
+        return out;
+    };
+    const std::vector<std::string> a = lines(now), b = lines(before);
+    if (a.size() < 4) return 0;
+    const std::set<std::string> old(b.begin(), b.end());
+    size_t fresh = 0;
+    for (const std::string &x : a) fresh += !old.count(x);
+    return fresh == 0 ? 2 : fresh * 20 <= a.size() ? 1 : 0;
+}
+
+std::string summary_ask(int words, const std::string &focus, int again, bool more, bool task);
 std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::string &then, const std::string &focus,
-                         int why, int used, int out_max, double room, int *keep_from, int *kept);
+                         int why, int used, int out_max, double room, int *keep_from, int *kept, bool anew = false);
 
 // The request for a summary. Its own words, no tools, no web search, and no
 // thinking where the model can leave it out.
@@ -2350,7 +2447,7 @@ std::string without_own_request(const std::string &notes) {
 // Writes the summary into the chat's last message (a summary's). True when
 // the chat goes on from it; false with the chat as it was.
 bool write_summary(Chat *c, const ChatRequest &rq, std::string msgs, const std::string &then, const std::string &focus,
-                   int out_max) {
+                   int out_max, bool anew = false) {
     // The chat's size is a guess here (the server counts, this side only
     // estimates): a request the server finds too long goes again with more
     // left out, twice at most.
@@ -2365,7 +2462,7 @@ bool write_summary(Chat *c, const ChatRequest &rq, std::string msgs, const std::
         m.content.clear();
         m.reasoning.clear();
         msgs = summary_msgs(*c, c->msgs.size() - 1, rq, then, focus, m.sum_why, m.sum_before, out_max, kRoom[round + 1],
-                            &m.keep_from, &m.sum_after);
+                            &m.keep_from, &m.sum_after, anew);
     }
     bool ok = false;
     {
@@ -2432,10 +2529,17 @@ const char *const kTalkOpen =
     "Below, between the two lines of dashes, is a conversation between a user and an AI assistant. Read it; what to "
     "do with it comes after it.\n\n-----\n";
 const char *const kTalkNotes = "[Notes on the conversation's earlier part]\n";
+// In their place where a task's notes are written anew (summary_msgs).
+const char *const kTalkCalls =
+    "[The calls the assistant made before what follows, as the program recorded them: oldest first, each with how "
+    "it ended]\n";
+const char *const kTalkFacts = "[What the assistant had written down before, from its facts on]\n";
 
-// What the model is asked for. words: about how long it may get. more: the
-// chat's latest messages stay as they are, after what is summarized.
-std::string summary_ask(int words, const std::string &focus, bool again, bool more, bool task) {
+// What the model is asked for. words: about how long it may get. again: 1
+// notes open what is shown, to be brought up to date; 2 a task's notes are
+// written anew, from the program's list of its calls (summary_msgs). more:
+// the chat's latest messages stay as they are, after what is summarized.
+std::string summary_ask(int words, const std::string &focus, int again, bool more, bool task) {
     std::string a =
         "-----\n\nThe assistant cannot hold all of that any longer, so notes take its place: the assistant goes on "
         "from the notes alone, and anything that is not in them is lost to it. Write those notes. Include:\n"
@@ -2498,10 +2602,20 @@ std::string summary_ask(int words, const std::string &focus, bool again, bool mo
                        "ended, or about nothing more having been asked.");
     // (Told "shorter is better", Qwen3.5 9B wrote 313 tokens of the 1,024 it
     // had and left out every value its answer needed, which it then made up.)
-    a += fmt(task ? "Use the room you have, up to about %d words: a value that is not written down is lost."
+    // (Asked under Facts to work nothing out, Qwen3.5 9B still kept a "total
+    // so far" in its notes, 10542 for 9532.)
+    a += fmt(task ? "Use the room you have, up to about %d words: a value that is not written down is lost. Copy "
+                    "numbers as they stand: never add them up, count them or pick the largest in the notes."
                   : "Use up to about %d words; shorter is better where nothing is lost.",
              words);
-    if (again)
+    if (again == 2)
+        a += " What is shown opens with what the user asked for, then the program's own list of the calls made "
+             "before, each with how it ended, then what was written down before. The steps are marked anew here, "
+             "from that list and from what is shown: a step is done only where a call that did it is there to see, "
+             "and one whose check still fails is in work. Next is the first step that is not done; where the list "
+             "shows the same call failing again and again, say under Failed what was tried, and name a different "
+             "way as next. Keep the earlier facts that still hold.";
+    else if (again)
         a += task ? " What is shown opens with notes on the work before it: bring them up to date. Mark the steps "
                     "as they stand now, write the next step anew, keep the facts that are still true, and drop "
                     "what the work no longer needs (how a file looked before it was fixed)."
@@ -2693,14 +2807,31 @@ namespace {
 // roughly (*kept). used: the server's count for the chat; room: how much of
 // the context the request may take (1.0 at first). Under c.mu.
 std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::string &then, const std::string &focus,
-                         int why, int used, int out_max, double room, int *keep_from, int *kept_tokens) {
+                         int why, int used, int out_max, double room, int *keep_from, int *kept_tokens, bool anew) {
     int sum = -1;
     const std::vector<size_t> idx = sent_msgs(c, end, &sum);
+    // What the request opens with: the notes before these. Where a task's
+    // notes are written anew (task_notes: they had come out as the ones
+    // before them), not those notes, which the model would copy once more,
+    // but the program's list of the task's calls up to them and the notes'
+    // facts, and the steps are the model's to mark from the list.
+    anew = anew && why >= 3 && sum >= 0 && c.msgs[sum].sum_why >= 3;
+    std::string before;
+    if (anew) {
+        const int limit = task_limit(rq);
+        const std::string calls =
+            task_calls(c, (size_t)sum, limit > 0 ? (size_t)std::min(60, std::max(20, limit / 200)) : 60);
+        if (!calls.empty()) before += kTalkCalls + calls + "\n";
+        const std::string facts = facts_on(c.msgs[sum].content);
+        if (!facts.empty()) before += kTalkFacts + facts + "\n\n";
+    } else if (sum >= 0) {
+        before = kTalkNotes + c.msgs[sum].content + "\n\n";
+    }
     // Each message's tokens, roughly, brought to what the server counted
     // for the whole chat.
     std::vector<std::string> text(idx.size());
     std::vector<int> tok(idx.size());
-    const int lead = sum >= 0 ? rough_tokens(c.msgs[sum].content) + 60 : 0;
+    const int lead = sum >= 0 ? rough_tokens(before) + 60 : 0;
     double rough = lead;
     for (size_t k = 0; k < idx.size(); k++) {
         // A summary is asked for without tools: the calls and what they
@@ -2719,7 +2850,10 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
     // message of the user's), a quarter of the context at most, and never
     // the first message, so there is something to summarize.
     const bool task = why >= 3;
-    double keep_max = (task && task_limit(rq) > 0 ? task_limit(rq) / 4.0 : rq.n_ctx > 0 ? rq.n_ctx / 4.0 : 2048) * room;
+    // (A task's latest step, which the model has not read yet: three eighths
+    // of its window. At a quarter of 8,000 tokens a file's first 150 lines
+    // did not stay, and the model read the file again after the notes.)
+    double keep_max = (task && task_limit(rq) > 0 ? task_limit(rq) * 3 / 8.0 : rq.n_ctx > 0 ? rq.n_ctx / 4.0 : 2048) * room;
     // The message that comes after the summary has to fit beside them, with
     // its answer: one the server refused is at least as long as the room
     // that was left.
@@ -2764,7 +2898,7 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
     // (A task's notes are paths, commands and numbers, at more tokens a
     // word than prose: two fifths of the tokens, not half.)
     const std::string ask = summary_ask(std::min(task ? out_max * 2 / 5 : out_max / 2, std::max(100, (int)(bytes / 12))),
-                                        focus, sum >= 0, first_kept < idx.size(), task);
+                                        focus, anew ? 2 : sum >= 0 ? 1 : 0, first_kept < idx.size(), task);
     // The request has to fit the context itself: the longest messages lose
     // their middles until it does.
     if (rq.n_ctx > 0) {
@@ -2785,8 +2919,9 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
         }
     }
     std::string talk = kTalkOpen;
-    if (sum >= 0) talk += kTalkNotes + c.msgs[sum].content + "\n\n";
+    if (!anew) talk += before;
     if (!goal.empty()) talk += "[User]\n" + goal + "\n\n";
+    if (anew) talk += before;
     for (size_t k = 0; k < first_kept; k++) {
         const std::string &role = c.msgs[idx[k]].role;
         talk += (role == "tool" ? "" : role == "assistant" ? "[Assistant]\n" : "[User]\n") + text[k] + "\n\n";
@@ -2829,13 +2964,23 @@ bool task_too_long(Chat &c, const ChatRequest &rq) {
 // latest step as it was. why: 3 the chat passed the task window or is
 // nearly full, 4 the server refused it as full. Runs in the answer's own
 // thread. False when no notes were written: the chat is as it was.
-bool task_notes(Chat *c, const ChatRequest &rq, int why) {
+//
+// Notes that come out as the task's notes before them (same_notes) are
+// written once more, anew: not from those notes but from ts5-tui's own list
+// of the task's calls, the earlier notes' facts and the work since
+// (summary_msgs). *same: same_notes' answer for the first writing. Where the
+// second writing fails, the first stands.
+bool task_notes(Chat *c, const ChatRequest &rq, int why, int *same) {
     const int out_max = summary_out_max(rq, true);
+    if (same) *same = 0;
     std::string msgs;
+    int before = -1;  // the task's notes before these
     {
         std::lock_guard<std::mutex> l(c->mu);
         int fresh = 0;
         for (size_t i = c->msgs.size(); i > 0 && c->msgs[i - 1].role == "tool"; i--) fresh += rough_tokens(sent_result(c->msgs[i - 1]));
+        sent_msgs(*c, c->msgs.size(), &before);
+        if (before >= 0 && c->msgs[before].sum_why < 3) before = -1;
         Msg m;
         m.role = "summary";
         m.model = rq.model;
@@ -2845,7 +2990,31 @@ bool task_notes(Chat *c, const ChatRequest &rq, int why) {
         msgs = summary_msgs(*c, c->msgs.size(), rq, "", "", why, m.sum_before, out_max, 1.0, &m.keep_from, &m.sum_after);
         c->msgs.push_back(m);
     }
-    return write_summary(c, rq, msgs, "", "", out_max);
+    if (!write_summary(c, rq, msgs, "", "", out_max)) return false;
+    if (before < 0 || c->cancel.load()) return true;
+    Msg first;
+    {
+        std::lock_guard<std::mutex> l(c->mu);
+        const int how = same_notes(c->msgs.back().content, c->msgs[before].content);
+        if (same) *same = how;
+        if (!how) return true;
+        first = c->msgs.back();
+        Msg m;
+        m.role = "summary";
+        m.model = rq.model;
+        m.t0 = first.t0;
+        m.sum_before = first.sum_before;
+        m.sum_why = why;
+        msgs = summary_msgs(*c, c->msgs.size() - 1, rq, "", "", why, m.sum_before, out_max, 1.0, &m.keep_from, &m.sum_after,
+                            true);
+        c->msgs.back() = m;
+    }
+    if (!write_summary(c, rq, msgs, "", "", out_max, true)) {
+        std::lock_guard<std::mutex> l(c->mu);
+        c->msgs.back() = first;
+        c->ctx_used = first.sum_after;
+    }
+    return true;
 }
 
 }  // namespace
