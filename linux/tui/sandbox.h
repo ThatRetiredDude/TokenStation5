@@ -59,4 +59,49 @@ unsigned long long sandbox_size();
 // Empties the toolbox. false with why.
 bool sandbox_reset(std::string &why);
 
+// ---- The box: a Linux system of the sandbox's own (config sandbox_box).
+// Debian's slim system, downloaded once and unpacked beside the toolbox
+// (<data>/sandbox/box, or DIR/tokenstation-box). A command runs in it as
+// its root, in the same bubblewrap: apt-get install works, and so does
+// "sudo", which there is nothing to ask. Root in the box is the user
+// outside it: every file it writes is the user's, and nothing of the
+// machine's system can be changed. The user's home folder stays hidden,
+// and the folder ts5-tui was started in is shared, as without the box.
+// What an ordinary user can't do in a namespace with one user id (give a
+// file to another user, become another user) is answered "done" by a
+// small filter of system calls, so that packages' own scripts go through.
+
+// Where the box is.
+std::string box_root();
+// It is set up (unpacked whole, its own files written).
+bool box_there();
+// The base system by name ("Debian 13"), for the words about it.
+const char *box_name();
+// The program and its arguments that set the box up: download (curl or
+// wget), the SHA-256 checked, unpacked, its own few files written. It
+// prints what it does, a line each; ends 0 when the box is there, 2 when
+// it can't be done here, 3 when the download failed or was another file.
+// TS5_BOX_URL and TS5_BOX_SHA256 name another base system (a test's).
+std::vector<std::string> box_setup_argv();
+// The command that gives a fresh box its basic tools, run in the box with
+// the network (python3, pip, git, curl ...); a box without them works too.
+std::string box_tools_command();
+// The program and its arguments that run `bash -c cmd` in the box, and
+// the environment a command gets there.
+std::vector<std::string> box_argv(const std::string &cmd, bool net);
+std::vector<std::string> box_env(bool net);
+// What the box holds, in bytes (0 without one), and removing it whole:
+// the next command sets up a fresh one.
+unsigned long long box_size();
+bool box_reset(std::string &why);
+// This machine can run the box: its base system is built for x86-64.
+// (TS5_SANDBOX_BOX=0 in the environment: never.)
+bool box_can();
+// A box, or what is left of one, is on the disk.
+bool box_any();
+// After the toolbox's place changed (sandbox_set_dir): the box that was at
+// old_root goes with it. As sandbox_move: 1 moved or nothing to move, 2
+// the new place already holds one, 0 failed (why).
+int box_follow(const std::string &old_root, std::string &why);
+
 }  // namespace tui

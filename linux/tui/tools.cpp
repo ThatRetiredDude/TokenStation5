@@ -242,13 +242,36 @@ Ran run_shell(const std::string &cmd, double limit, const std::atomic<bool> &can
     return r;
 }
 
-double command_limit() {
+// box: an install in the sandbox's own system takes longer than a look around.
+double command_limit(bool box = false) {
     if (const char *e = getenv("TS5_TUI_COMMAND_SECONDS")) {
         const double v = atof(e);
         if (v >= 1) return v;
     }
-    return 120;
+    return box ? 600 : 120;
 }
+
+// The last lines of a program's output, on one line.
+std::string last_words(const std::string &out, int lines) {
+    std::vector<std::string> l;
+    size_t i = 0;
+    while (i < out.size()) {
+        const size_t e = std::min(out.find('\n', i), out.size());
+        std::string x = out.substr(i, e - i);
+        while (!x.empty() && (x.back() == ' ' || x.back() == '\r')) x.pop_back();
+        if (!x.empty()) l.push_back(x);
+        i = e + 1;
+    }
+    std::string s;
+    for (size_t k = l.size() > (size_t)lines ? l.size() - lines : 0; k < l.size(); k++) s += (s.empty() ? "" : " ") + l[k];
+    return s;
+}
+
+std::mutex g_box_mu;                    // one setup at a time
+std::atomic<bool> g_box_setup{false};   // one is running
+double g_box_failed_at = 0;             // the last one that failed, and why (under g_box_mu)
+std::string g_box_failed;
+const double kBoxAgain = 300;           // a failed setup is not tried again sooner
 
 ToolResult run_command(const std::string &cmd, const ToolSwitches &s, const std::atomic<bool> &cancel) {
     ToolResult t;
@@ -258,9 +281,64 @@ ToolResult run_command(const std::string &cmd, const ToolSwitches &s, const std:
         t.text = "run_command needs a command, such as {\"command\": \"ls -la\"}.";
         return t;
     }
-    const double limit = command_limit();
     std::vector<std::string> argv, env;
-    if (s.sandbox) {
+    // The sandbox's own system, set up the first time a command needs it.
+    bool box = s.sandbox && s.box;
+    std::string box_note;  // what the model is told about it, under the command's output
+    double box_secs = 0;
+    if (box && !box_there()) {
+        std::lock_guard<std::mutex> l(g_box_mu);
+        if (box_there()) {
+        } else if (g_box_failed_at > 0 && now_s() - g_box_failed_at < kBoxAgain) {
+            box = false;
+            box_note = "\n(Still the plain sandbox, the machine's system read-only: the sandbox's own system could not "
+                       "be set up a moment ago. " + g_box_failed + ")";
+        } else {
+            const double t0 = now_s();
+            g_box_setup = true;
+            const std::vector<std::string> setup = box_setup_argv();
+            const Ran su = run_shell("", 900, cancel, &setup, nullptr);
+            if (cancel.load()) {
+                g_box_setup = false;
+                std::string w;
+                box_reset(w);  // (a half-made one)
+                t.ok = false;
+                t.head = "stopped";
+                t.text = "stopped by the user while the sandbox's system was being set up. The command did not run.";
+                return t;
+            }
+            if (su.code != 0 || !box_there()) {
+                box = false;
+                g_box_failed_at = now_s();
+                g_box_failed = last_words(clean(su.out), 1);
+                if (g_box_failed.empty()) g_box_failed = su.timed_out ? "It took too long." : "Its setup did not start.";
+                box_note = "\n(The sandbox's own system could not be set up: " + g_box_failed +
+                           " So this command ran in the plain sandbox: the machine's system, read-only, where nothing "
+                           "can be installed with apt. Tell the user.)";
+            } else {
+                box_note = std::string("\n(Before this command the sandbox's own system was set up, fresh: ") + box_name() +
+                           ", in which you are root.";
+                if (s.sandbox_net) {
+                    // Its basic tools, so that the first commands find a Python and a curl.
+                    const std::vector<std::string> a = box_argv(box_tools_command(), true), e = box_env(true);
+                    const Ran tools = run_shell("", 900, cancel, &a, &e);
+                    box_note += tools.code == 0 && !tools.timed_out && !tools.stopped
+                                    ? " It has python3, pip, git, curl and wget; apt-get install -y NAME adds more.)"
+                                    : " Its basic tools could not be installed (" + last_words(clean(tools.out), 1) +
+                                          "): apt-get update && apt-get install -y NAME installs what you need.)";
+                } else {
+                    box_note += " It is bare, and without the network nothing can be installed in it.)";
+                }
+            }
+            g_box_setup = false;
+            box_secs = now_s() - t0;
+        }
+    }
+    const double limit = command_limit(box);
+    if (box) {
+        argv = box_argv(cmd, s.sandbox_net);
+        env = box_env(s.sandbox_net);
+    } else if (s.sandbox) {
         std::string why;
         if (!sandbox_toolbox_ok(why)) {
             t.ok = false;
@@ -302,8 +380,26 @@ ToolResult run_command(const std::string &cmd, const ToolSwitches &s, const std:
     else if (r.code == 0 && out.empty() && has("curl") && (has("grep") || has("awk") || has("sed")))
         t.text += "\n(Nothing matched. If this looked for HTTP header names: HTTP/2 sends them in lower case "
                   "(server:, content-type:), so match them regardless of case: grep -i, or tolower($0) in awk.)";
-    if (s.sandbox) {
+    if (box) {
+        t.head += box_secs > 0 ? fmt(" · box, set up in %.0f s", box_secs) : std::string(" · box");
+        t.text += box_note;
+        // What a box is not, said where a command runs into it.
+        if (out.find("Unable to locate package") != std::string::npos)
+            t.text += "\n(apt's lists are empty or old in this sandbox: run apt-get update, then install again. If the "
+                      "package is still not found, it has another name in Debian: apt-cache search WORD finds it.)";
+        if (!s.sandbox_net &&
+            (out.find("Temporary failure") != std::string::npos || out.find("Could not resolve") != std::string::npos ||
+             out.find("Network is unreachable") != std::string::npos))
+            t.text += "\n(The sandbox has no network now, so nothing can be downloaded or installed. Tell the user: "
+                      "/sandbox network turns it on.)";
+        if (out.find("System has not been booted with systemd") != std::string::npos ||
+            out.find("Failed to connect to bus") != std::string::npos || out.find("systemctl: command not found") != std::string::npos ||
+            out.find("systemctl: not found") != std::string::npos)
+            t.text += "\n(No service manager runs in the sandbox, so systemctl and service can't start anything. Start the "
+                      "program itself, in the same command that uses it: what a command starts ends when the command ends.)";
+    } else if (s.sandbox) {
         t.head += " · sandbox";
+        t.text += box_note;
         // What the sandbox stopped, said so the model doesn't try it again.
         if (r.code != 0 && (out.find("Read-only file system") != std::string::npos ||
                             out.find("no new privileges") != std::string::npos || out.find("sudo:") != std::string::npos ||
@@ -909,7 +1005,24 @@ std::string tools_json(const ToolSwitches &s) {
             "check the system. One command per call; no programs that wait for typing. ";
         what += command_shell() == "/bin/sh" ? "It runs in sh (no bash here: no arrays, [[ ]] or other bash syntax)."
                                              : "It runs in bash.";
-        if (s.sandbox) {
+        if (s.sandbox && s.box) {
+            // (A setting's words, the same in every message of a chat.)
+            const std::string work = sandbox_work();
+            what = "Run a shell command (bash) and get its output and exit code. Use it when the user asks you to look "
+                   "at files, run or install a program, or build something. One command per call; no programs that wait "
+                   "for typing. It runs in a sandbox with a Linux system of its own (" + std::string(box_name()) +
+                   "), in which you are root: apt-get install -y NAME installs a program (apt-get update first when a "
+                   "package is not found), pip and npm install into it too, and sudo is not needed. What you install "
+                   "stays for later commands and chats. It is not the user's system: nothing here changes their "
+                   "machine, and their home folder is not in it. ";
+            what += sandbox_starts_home() ? "Commands start in /root, the sandbox's own home folder."
+                                          : "Commands start in " + work + ", the user's folder that is shared with the "
+                                            "sandbox: files made there are the user's to keep; ~ is /root, the "
+                                            "sandbox's own.";
+            what += s.sandbox_net ? " The network can be used." : " There is no network: nothing can be downloaded or installed.";
+            what += " A program a command starts ends with the command (no systemctl): start a server and use it in the "
+                    "same command. A command may take up to 10 minutes.";
+        } else if (s.sandbox) {
             // (A setting's words, the same in every message of a chat.)
             const std::string work = sandbox_work();
             const bool in_home = sandbox_starts_home();
@@ -1095,6 +1208,8 @@ std::string tool_call_line(const std::string &name, const std::string &args) {
     if (is_mcp_tool(name)) return one_line(mcp_call_line(name, args), 400);
     return name + " " + one_line(args, 300);
 }
+
+bool box_setup_running() { return g_box_setup.load(); }
 
 ToolResult tool_refused() {
     ToolResult t;

@@ -1966,6 +1966,7 @@ ChatRequest chat_request() {
     rq.tools.steps = g->cfg.tool_steps;
     rq.tools.sandbox = g->cfg.sandbox && sandbox_ready();
     rq.tools.sandbox_net = g->cfg.sandbox_net;
+    rq.tools.box = rq.tools.sandbox && g->cfg.sandbox_box && box_can();
     rq.tools.browser_ask = g->cfg.browser_ask;
     rq.tools.files = tools && g->cfg.tool_files;
     rq.tools.files_ask = g->cfg.files_ask;
@@ -2960,8 +2961,8 @@ std::string move_sandbox_folder(std::string dir, bool &ok) {
     } else if ((to = sandbox_dir_check(dir, why)).empty()) {
         return "The toolbox can't go there: " + why;
     }
-    const std::string from = sandbox_home();
-    const unsigned long long size = sandbox_size();
+    const std::string from = sandbox_home(), box_from = box_root();
+    const unsigned long long size = sandbox_size(), box_was = box_size();
     const int r = sandbox_move(from, to, why);
     if (r == 0) return "The toolbox stays where it was: " + why;
     const std::string tail = "/tokenstation-sandbox";
@@ -2972,6 +2973,16 @@ std::string move_sandbox_folder(std::string dir, bool &ok) {
     std::string msg = "The toolbox is now " + tilde_path(to) + fmt(", %.1f GiB free there", sandbox_free() / 1073741824.0);
     if (r == 2) msg += ". " + why;
     else if (size && from != to) msg += fmt(" (%.1f MiB moved)", size / 1048576.0);
+    // The sandbox's own system goes beside it.
+    if (box_was && box_from != box_root()) {
+        std::string w;
+        const int b = box_follow(box_from, w);
+        msg += b == 1   ? fmt(". The sandbox's system went with it (%.0f MiB)", box_was / 1048576.0)
+               : b == 2 ? ". The new place already holds a sandbox system, so that one is used and the old one stays at " +
+                              tilde_path(box_from)
+                        : ". The sandbox's system could not be moved (" + w + "): a fresh one is set up at the new place "
+                          "with the next command, and the old one stays at " + tilde_path(box_from);
+    }
     return msg;
 }
 
@@ -3243,13 +3254,31 @@ std::vector<SetRow> settings_rows() {
                  !c.sandbox ? "off" : !ready ? "unavailable" : c.sandbox_net ? "on, with network" : "on, no network",
                  !c.sandbox ? "commands run as you, with all your files"
                  : !ready   ? why + "; until then commands run as you"
-                            : std::string("read-only system, home hidden; changes only the start folder and its toolbox") +
-                                  (c.sandbox_net ? "" : "; no network")};
+                 : c.sandbox_box && box_can()
+                     ? std::string("a Linux system of its own, home hidden; changes only that system and the start folder") +
+                           (c.sandbox_net ? "" : "; no network")
+                     : std::string("read-only system, home hidden; changes only the start folder and its toolbox") +
+                           (c.sandbox_net ? "" : "; no network")};
         x.change = [save](int d) {
             const int at = !g->cfg.sandbox ? 2 : g->cfg.sandbox_net ? 0 : 1, to = (at + (d < 0 ? 2 : 1)) % 3;
             g->cfg.sandbox = to != 2;
             g->cfg.sandbox_net = to != 1;
             if (g->cfg.sandbox) sandbox_ready(nullptr, true);
+            save();
+        };
+        r.push_back(x);
+    }
+    if (tools_shown && c.tool_terminal && c.sandbox && sandbox_ready() && box_can()) {
+        // The system the sandbox's commands see: its own, or this machine's.
+        const bool there = c.sandbox_box && box_there();
+        SetRow x{"Sandbox system", c.sandbox_box ? std::string(box_name()) + ", its own" : "this machine's, read-only",
+                 !c.sandbox_box ? "the model uses the programs installed here and can't install system packages (no apt)"
+                 : there        ? fmt("the model is root in it: apt, pip and npm install there; %.0f MiB so far",
+                                      box_size() / 1048576.0)
+                                : "the model is root in it: apt, pip and npm install there; set up with the first command "
+                                  "(a 30 MB download)"};
+        x.change = [save](int) {
+            g->cfg.sandbox_box = !g->cfg.sandbox_box;
             save();
         };
         r.push_back(x);
@@ -3260,8 +3289,11 @@ std::vector<SetRow> settings_rows() {
         const bool there = sandbox_toolbox_ok(why);
         SetRow x{"Sandbox folder", tilde_path(sandbox_home()),
                  !there ? "missing: is its drive mounted? Enter: another folder, or default"
-                        : fmt("%.1f MiB of tools, %.1f GiB free there; Enter: another folder, or default",
-                              sandbox_size() / 1048576.0, sandbox_free() / 1073741824.0)};
+                 : c.sandbox_box && box_can()
+                     ? fmt("the sandbox's system is kept beside it; %.1f GiB free there; Enter: another folder, or default",
+                           sandbox_free() / 1073741824.0)
+                     : fmt("%.1f MiB of tools, %.1f GiB free there; Enter: another folder, or default",
+                           sandbox_size() / 1048576.0, sandbox_free() / 1073741824.0)};
         x.text = true;
         x.text_value = c.sandbox_dir;
         x.set_text = [](const std::string &v) {
@@ -4823,10 +4855,35 @@ void run_command(const std::string &line) {
                        : !ready   ? "Sandbox: unavailable, " + why
                                   : std::string("Sandbox: on, ") + (f.sandbox_net ? "with network" : "no network"),
                        !f.sandbox || !ready ? g->th->warn : g->th->accent, 5);
+        } else if (arg == "box" || arg == "box on" || arg == "box off") {
+            if (!box_can()) {
+                show_toast("The sandbox's own system is built for x86-64 machines only", g->th->warn, 5);
+            } else {
+                if (arg != "box") f.sandbox_box = arg == "box on";
+                f.save();
+                show_toast(f.sandbox_box ? std::string("Sandbox system: ") + box_name() + ", its own. The model is root in it and "
+                                                                                          "installs programs with apt" +
+                                               (box_there() ? "" : " (set up with the first command)")
+                                         : "Sandbox system: this machine's, read-only. Nothing can be installed with apt",
+                           g->th->accent, 6);
+            }
         } else if (arg == "reset") {
-            chat_note(c, fmt("The toolbox holds %s (`%s`): what the model installed and wrote in its home folder. "
-                             "`/sandbox reset now` empties it.",
-                             fmt("%.1f MiB", sandbox_size() / 1048576.0).c_str(), tilde(sandbox_home()).c_str()));
+            std::string h;
+            if (box_there())
+                h += fmt("The sandbox's own system holds %.0f MiB (`%s`): %s and everything the model installed in it. "
+                         "`/sandbox reset box` removes it, and a fresh one is set up with the next command.\n",
+                         box_size() / 1048576.0, tilde(box_root()).c_str(), box_name());
+            h += fmt("The toolbox holds %s (`%s`): what the model installed and wrote in its home folder%s. "
+                     "`/sandbox reset toolbox` empties it.\n",
+                     fmt("%.1f MiB", sandbox_size() / 1048576.0).c_str(), tilde(sandbox_home()).c_str(),
+                     box_there() ? " while the sandbox had no system of its own" : "");
+            h += "`/sandbox reset now` does both.";
+            chat_note(c, h);
+        } else if (arg == "reset box") {
+            if (c.busy()) show_toast("Not while the model answers", g->th->warn, 3);
+            else if (!box_any()) show_toast("The sandbox has no system of its own yet", g->th->accent, 3);
+            else if (box_reset(why)) show_toast("The sandbox's system is removed: a fresh one is set up with the next command", g->th->accent, 5);
+            else show_toast("The sandbox's system: " + why, g->th->bad, 6);
         } else if (arg == "folder") {
             std::string h = fmt("The toolbox is `%s` (%.1f MiB, %.1f GiB free on its drive). ", tilde(sandbox_home()).c_str(),
                                 sandbox_size() / 1048576.0, sandbox_free() / 1073741824.0);
@@ -4839,16 +4896,40 @@ void run_command(const std::string &line) {
             bool ok;
             const std::string msg = move_sandbox_folder(arg.substr(7), ok);
             show_toast(msg, ok ? g->th->accent : g->th->warn, 7);
-        } else if (arg == "reset now") {
+        } else if (arg == "reset now" || arg == "reset toolbox") {
+            const bool both = arg == "reset now" && box_any();
             if (c.busy()) show_toast("Not while the model answers", g->th->warn, 3);
-            else if (sandbox_reset(why)) show_toast("The toolbox is empty", g->th->accent, 3);
+            else if (both && !box_reset(why)) show_toast("The sandbox's system: " + why, g->th->bad, 6);
+            else if (sandbox_reset(why))
+                show_toast(both ? "The toolbox is empty and the sandbox's system is removed (a fresh one comes with the next command)"
+                                : "The toolbox is empty",
+                           g->th->accent, both ? 5 : 3);
             else show_toast("The toolbox: " + why, g->th->bad, 6);
         } else {
             const bool ready = sandbox_ready(&why, true);
-            std::string h = "**Where the model's commands run**  (`/sandbox on`, `off`, `network`, `no-network`; or Settings)\n";
+            std::string h = "**Where the model's commands run**  (`/sandbox on`, `off`, `network`, `no-network`, `box on`, "
+                            "`box off`; or Settings)\n";
             if (!f.sandbox) h += "**Off.** Commands run as you, with all your files and the network.\n";
             else if (!ready) h += "**Unavailable:** " + why + ". Until then commands run as you, with all your files.\n";
-            else {
+            else if (f.sandbox_box && box_can()) {
+                h += std::string("**In the sandbox, ") + (f.sandbox_net ? "with network" : "no network") + ", in a system of its "
+                     "own (" + box_name() + ").** The model is root there: it installs programs with apt, pip and npm, and "
+                     "`sudo` just runs the command. None of that touches this machine's system, and a command sees none "
+                     "of your home folder (keys, SSH, browsers, ts5's own files) and none of your environment variables. "
+                     "Whatever it starts ends with it.\n";
+                h += sandbox_starts_home()
+                         ? "It starts in the sandbox's own home folder (`/root` in there): you started ts5-tui in your home "
+                           "folder, which it can't see. Start ts5-tui in a project's folder to let it work on that one.\n"
+                         : "It starts in `" + tilde(sandbox_work()) + "` (where you started ts5-tui), the one folder of "
+                           "yours it can change.\n";
+                h += box_there() ? fmt("Its system is `%s` (%.0f MiB), kept between chats. `/sandbox reset box` removes it for a "
+                                       "fresh one, `/sandbox folder` moves it to another drive, `/sandbox box off` goes back to "
+                                       "this machine's system, read-only.\n",
+                                       tilde(box_root()).c_str(), box_size() / 1048576.0)
+                                 : "Its system is set up with the first command: a 30 MB download from Debian's image "
+                                   "builders, checked by its SHA-256, then its basic tools (python3, pip, git, curl). "
+                                   "`/sandbox box off` goes back to this machine's system, read-only.\n";
+            } else {
                 h += std::string("**In the sandbox, ") + (f.sandbox_net ? "with network" : "no network") +
                      ".** A command sees the system read-only and none of your home folder (keys, SSH, browsers, ts5's "
                      "own files), and none of your environment variables. Whatever it starts ends with it.\n";
@@ -7748,7 +7829,7 @@ int usage(FILE *f) {
             "  ts5-tui --start\n"
             "  ts5-tui --mcp | --mcp-tools | --mcp-call TOOL ['{\"ARGUMENT\": ...}']\n"
             "  ts5-tui --install-browser chromium|obscura [--dry-run]\n"
-            "  ts5-tui --run-command 'COMMAND' [--sandbox on|off|no-network]\n"
+            "  ts5-tui --run-command 'COMMAND' [--sandbox on|off|no-network|box|plain]\n"
             "  ts5-tui --github-call '{\"method\": \"GET\", \"path\": \"/user/repos\"}' [--dry-run]\n"
             "  ts5-tui --sandbox-folder DIR|default\n\n"
             "It talks to a running TokenStation (the tokenstation service, the TV app, or\n"
@@ -7768,7 +7849,8 @@ int usage(FILE *f) {
             "checked by SHA-256, into the home folder. --dry-run only says what would be done.\n"
             "--run-command: runs one command the way the model's terminal tool does (in the\n"
             "sandbox, unless it is off; /sandbox in the app) and prints what the model would\n"
-            "get back. --sandbox: on, off or no-network for that command.\n"
+            "get back. --sandbox: on, off or no-network for that command; box: in the\n"
+            "sandbox's own Linux system; plain: in the sandbox with this machine's system.\n"
             "--github-call: one call of the model's GitHub tool, as it would be made (after the\n"
             "fixes it gets), with what the question before a change would show; --dry-run\n"
             "shows that alone.\n"
@@ -7869,13 +7951,17 @@ int main(int argc, char **argv) {
     }
     if (run_mode) {
         // One command as the terminal tool runs it, and what the model gets back.
-        if (!sandbox_arg.empty() && sandbox_arg != "on" && sandbox_arg != "off" && sandbox_arg != "no-network") return usage(stderr);
+        if (!sandbox_arg.empty() && sandbox_arg != "on" && sandbox_arg != "off" && sandbox_arg != "no-network" &&
+            sandbox_arg != "plain" && sandbox_arg != "box")
+            return usage(stderr);
         ToolSwitches t;
         t.terminal = true;
         const bool want = sandbox_arg.empty() ? app.cfg.sandbox : sandbox_arg != "off";
         std::string why;
         t.sandbox = want && sandbox_ready(&why);
         t.sandbox_net = sandbox_arg.empty() ? app.cfg.sandbox_net : sandbox_arg != "no-network";
+        // plain: this machine's system, read-only; box: the sandbox's own.
+        t.box = t.sandbox && box_can() && (sandbox_arg == "box" || (sandbox_arg != "plain" && app.cfg.sandbox_box));
         if (want && !t.sandbox) fprintf(stderr, "ts5-tui: the sandbox is unavailable: %s. The command runs as you.\n", why.c_str());
         signal(SIGPIPE, SIG_IGN);
         std::atomic<bool> cancel{false};

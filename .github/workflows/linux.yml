@@ -397,6 +397,8 @@ jobs:
             sudo tee /etc/apparmor.d/bwrap > /dev/null
           sudo apparmor_parser -r /etc/apparmor.d/bwrap
           python3 linux/tui/test/sandbox_test.py "$(command -v ts5-tui)" --require
+      - name: The sandbox's own Linux system (Debian 13 downloaded and checked, then apt, pip and sudo in it as root)
+        run: python3 linux/tui/test/box_test.py "$(command -v ts5-tui)" --apt --require
       - name: Tune it (ts5-tune, then the engine reads tune.env; --models, then the per-model file)
         run: |
           ts5-tune --quick --pp 64 --tg 16 /tmp/model/test.gguf

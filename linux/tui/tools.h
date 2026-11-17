@@ -21,6 +21,10 @@ struct ToolSwitches {
     // run_command's commands go through the sandbox (sandbox.h): it was
     // chosen and it runs here. sandbox_net: with the network.
     bool sandbox = false, sandbox_net = true;
+    // The sandbox has a Linux system of its own, the box, in which the
+    // model is root and installs programs (sandbox.h); false: it sees the
+    // machine's system, read-only.
+    bool box = false;
     bool memory = true;    // remember, and the notes at the top of every chat
     bool browser = false;  // browser_open and the rest (`ts5 browser`, engine/src/browser.h)
     // Settings -> Browser: "auto", "text", "obscura", "chromium", or a program's path.
@@ -84,6 +88,9 @@ std::vector<std::string> browsers_found();
 // it stops a command that is running.
 ToolResult run_tool(const std::string &name, const std::string &args, const ToolSwitches &s,
                     const std::atomic<bool> &cancel);
+// A command is waiting for the sandbox's own system to be set up (the
+// first command in it: a download, then its basic tools).
+bool box_setup_running();
 // What the model is told about a command the user refused, and about a call
 // that didn't run because the answer was stopped.
 ToolResult tool_refused();

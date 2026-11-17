@@ -161,6 +161,7 @@ void Config::load() {
         else if (k == "sandbox") sandbox = v != "0";
         else if (k == "sandbox_network") sandbox_net = v != "0";
         else if (k == "sandbox_folder") sandbox_dir = v;
+        else if (k == "sandbox_box") sandbox_box = v != "0";
         else if (k == "browser" && !v.empty()) browser = v;
     }
     // Settings saved by a ts5-tui before 1.2.2 hold that one's defaults,
@@ -195,7 +196,8 @@ void Config::save() const {
              "\ntool_browser_ask=" + (browser_ask ? "1" : "0") + "\ntool_steps=" + std::to_string(tool_steps) + "\nbrowser_offered=" + (browser_offered ? "1" : "0") + "\nsearch_source=" + search_source + "\ntool_files=" + (tool_files ? "1" : "0") +
              "\ntool_files_ask=" + (files_ask ? "1" : "0") + "\ntool_github=" + (tool_github ? "1" : "0") +
              "\ntool_github_ask=" + (github_ask ? "1" : "0") + "\nsandbox=" + (sandbox ? "1" : "0") +
-             "\nsandbox_network=" + (sandbox_net ? "1" : "0") + "\nsandbox_folder=" + sandbox_dir + "\n";
+             "\nsandbox_network=" + (sandbox_net ? "1" : "0") + "\nsandbox_folder=" + sandbox_dir + "\nsandbox_box=" +
+             (sandbox_box ? "1" : "0") + "\n";
         if (write(fd, s.data(), s.size()) != (ssize_t)s.size()) {
             close(fd);
             return;

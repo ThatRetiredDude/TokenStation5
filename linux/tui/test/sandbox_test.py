@@ -46,7 +46,8 @@ def main():
         f.write("A-KEY\n")
     box = os.path.join(home, ".local", "share", "tokenstation", "sandbox", "home")
     env = {k: v for k, v in os.environ.items() if not k.startswith("XDG_") and k != "TS5_TUI_BWRAP"}
-    env.update({"HOME": home, "SECRET_ENV": "a-value-of-the-users"})
+    # (The plain sandbox, this machine's system read-only: the box has box_test.py.)
+    env.update({"HOME": home, "SECRET_ENV": "a-value-of-the-users", "TS5_SANDBOX_BOX": "0"})
 
     def run(cmd, cwd=proj, extra=(), more_env=None):
         e = dict(env)

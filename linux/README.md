@@ -580,16 +580,33 @@ ts5-tui --url http://ps5.local:8081  # another one
     them back, and a new chat asks again) or "no". Letters never answer,
     so a message typed while the question shows just waits its turn. A
     command runs in the sandbox (below), in
-    the folder ts5-tui was started in, with no keyboard, for 2 minutes at
-    most; Esc stops one that is running. The model gets its output and
+    the folder ts5-tui was started in, with no keyboard, for 10 minutes at
+    most (2 minutes outside the sandbox's own system); Esc stops one that
+    is running. The model gets its output and
     exit code (long output: the start and the end). Under each call a
     line says how it went; a click opens what the model got.
   - **The sandbox** (on by default: Settings → Sandbox, or `/sandbox`):
     the model's commands run in [bubblewrap](https://github.com/containers/bubblewrap)
     (`bwrap`, your system's own package; ts5 recommends it, and installs
     nothing of it itself). In there a command:
-    - sees the system read-only, so nothing in it can be installed or
-      broken, and `sudo` can't work;
+    - has a Linux system of its own, Debian 13, in which it is root:
+      `apt-get install`, `pip install` and `npm install -g` work, `sudo`
+      just runs the command, and none of it touches this machine's
+      system. What the model installs stays for later commands and chats.
+      The first command sets the system up: a 30 MB download of Debian's
+      slim image files (as Debian's image builders publish them, at one
+      fixed commit, checked by SHA-256), unpacked to
+      `~/.local/share/tokenstation/sandbox/box` (about 90 MiB, then
+      whatever gets installed), followed by its basic tools (python3, pip,
+      git, curl, wget). Root in there is root over that system's files
+      only: on this machine every one of its processes is you, with no
+      more rights than you have, and only you can enter its folder.
+      Settings → Sandbox system (or `/sandbox box off`) goes back to this
+      machine's own system, read-only, where nothing can be installed or
+      broken and `sudo` can't work; `/sandbox reset box` removes the
+      sandbox's system, and the next command sets up a fresh one. For
+      x86-64 machines. No service manager runs in it (`systemctl` starts
+      nothing): a server is started and used in the same command;
     - sees none of your home folder (SSH keys, browsers, ts5's keys,
       models and chats), none of the other home folders or mounted drives,
       none of the sockets in `/run` (your SSH and desktop agents), and
@@ -597,16 +614,18 @@ ts5-tui --url http://ps5.local:8081  # another one
     - can change one folder of yours: the one ts5-tui was started in.
       Started in your home folder itself, it gets none, and works in its
       own home;
-    - has a home folder of its own, the toolbox
+    - has a home folder of its own: `/root` in the sandbox's system, or,
+      with this machine's system, the toolbox
       (`~/.local/share/tokenstation/sandbox/home`), kept between chats:
       that is where `pip install`, `npm install -g` and a program put in
-      `~/bin` go, so the model can fetch the tools it needs once and use
-      them again. `/sandbox folder DIR` (or Settings → Sandbox folder, or
-      `ts5-tui --sandbox-folder DIR`) moves it to `DIR/tokenstation-sandbox`,
-      on a faster or roomier drive say: one with Unix permissions (ext4,
-      btrfs, xfs; not exFAT or NTFS, and not mounted `noexec`).
-      `/sandbox folder default` brings it back. While that drive isn't
-      mounted, no command runs;
+      `~/bin` go, so the model can fetch the tools it needs once
+      and use them again. `/sandbox folder DIR` (or Settings → Sandbox
+      folder, or `ts5-tui --sandbox-folder DIR`) moves the toolbox to
+      `DIR/tokenstation-sandbox` and the sandbox's system to
+      `DIR/tokenstation-box`, on a faster or roomier drive say: one with
+      Unix permissions (ext4, btrfs, xfs; not exFAT or NTFS, and not
+      mounted `noexec`). `/sandbox folder default` brings them back.
+      While that drive isn't mounted, no command runs;
     - has the network (`/sandbox no-network` takes it away);
     - sees only its own processes, and whatever it starts ends with it;
     - is the first thing the kernel ends when memory runs out, before the
@@ -614,8 +633,9 @@ ts5-tui --url http://ps5.local:8081  # another one
 
     It costs no memory of its own and starts in milliseconds. It shares
     the kernel with everything else, so it is a strong fence, not a second
-    machine. `/sandbox` says where commands run and how big the toolbox
-    is; `/sandbox reset` empties the toolbox; `/sandbox off` runs commands
+    machine. `/sandbox` says where commands run and how big its system
+    is; `/sandbox reset` says what there is to remove (`reset box`,
+    `reset toolbox`, `reset now` for both); `/sandbox off` runs commands
     as you again, with all your files. The question before a command says
     which: "in the sandbox" or "as you (no sandbox)".
     Without bubblewrap (`sudo apt install bubblewrap`), or where the system
@@ -631,7 +651,8 @@ ts5-tui --url http://ps5.local:8081  # another one
     ```
     then `sudo apparmor_parser -r /etc/apparmor.d/bwrap`. Debian and Fedora
     need nothing. `ts5-tui --run-command 'ls ~'` runs one command the way
-    the model's do and prints what the model would get back.
+    the model's do and prints what the model would get back
+    (`--sandbox box`, `plain`, `no-network` or `off` for that command).
   - **Browser** (on; Settings → Tool: browser, or `/tools browser off`,
     switches it off): the model opens a page and gets it as text with
     every link, text box and button numbered (`the Volga[3]`,
