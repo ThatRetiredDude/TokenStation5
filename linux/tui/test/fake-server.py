@@ -38,7 +38,8 @@ page the call before gave. "&&" between steps makes them calls of one turn.
 "task N" runs N commands, a turn each, and counts the steps done from a
 task's notes when ts5-tui had them written. FAKE_FULL_ONCE=K refuses the
 K-th request for an answer as too long for the context, once;
-FAKE_NOTES_FAIL=1 fails a request for a task's notes. FAKE_TEXT_CALL: what the turn that may call no tool (the message's steps
+FAKE_NOTES_FAIL=1 fails a request for a task's notes. FAKE_TASK_LINES=M has
+each step's command print M more lines. FAKE_TEXT_CALL: what the turn that may call no tool (the message's steps
 ended, calls that only repeated, or a no) answers with, a call written as text ("\\n" a line break).
 FAKE_TAILNET=1 answers /ts5/tailnet as a ts5 serve with Tailscale does (off;
 on gives a sign-in link a second later, and FAKE_TAILNET_SIGNIN seconds
@@ -254,7 +255,8 @@ class H(BaseHTTPRequestHandler):
                     if m.get("role") == "tool":
                         c = m.get("content") or ""
                         f.write("  tool %s %s: %s\n" % (m.get("name"), m.get("tool_call_id"), json.dumps(
-                            c if len(c) <= 480 else c[:200] + " [...] " + c[-240:])))
+                            c if len(c) <= 720 else c[:200] + " [...] " + c[-240:])))
+                        f.write("  tool-bytes: %d\n" % len(c))
                     if m.get("tool_calls"):
                         f.write("  calls: %s\n" % json.dumps(m["tool_calls"]))
         # The tool calls this turn makes (see the top of the file).
@@ -288,6 +290,10 @@ class H(BaseHTTPRequestHandler):
             if done < n:
                 # (FAKE_TASK_FAIL=K: step K's command also fails, with a line of its own.)
                 bad = "; ls /no-such-ts5-folder" if os.environ.get("FAKE_TASK_FAIL") == str(done + 1) else ""
+                # (FAKE_TASK_LINES=M: it prints M more lines, a long output.)
+                if os.environ.get("FAKE_TASK_LINES"):
+                    bad += "; seq -f 'step %d prints line %%g of its long output' 1 %d" % (
+                        done + 1, int(os.environ["FAKE_TASK_LINES"]))
                 calls = [("run_command", {"command": "echo step %d | tee -a task-steps.txt%s" % (done + 1, bad)})]
             else:
                 results = ["all %d steps of the task are done" % done]

@@ -1123,16 +1123,31 @@ std::string role_json(const std::string &role, const std::string &content) {
 // turn's marks). The server's own count comes with each answer.
 int rough_tokens(const std::string &s) { return (int)(s.size() / 3) + 8; }
 
-// What the model keeps of a tool's result that gave way (make_room): its
-// first lines (a page's name and address), and that the rest is gone.
-std::string result_start(const std::string &content) {
-    size_t cut = std::min<size_t>(content.size(), 300);
-    while (cut > 0 && cut < content.size() && ((unsigned char)content[cut] & 0xC0) == 0x80) cut--;
-    const size_t nl = content.rfind('\n', cut);
-    if (cut < content.size() && nl != std::string::npos && nl >= 60) cut = nl;
-    return content.substr(0, cut) +
-           "\n[The rest of this result was left out later, to make room in the chat. Ask for it again if it is needed.]";
+// What the model keeps of a tool's result that gave way (make_room,
+// outputs_give_way): its first lines (a page's name and address, how a
+// command ended), a command's last lines too (where a build or a test says
+// how it went), and that the rest is gone.
+std::string short_result(const Msg &m) {
+    const std::string &s = m.content;
+    size_t cut = std::min<size_t>(s.size(), 300);
+    while (cut > 0 && cut < s.size() && ((unsigned char)s[cut] & 0xC0) == 0x80) cut--;
+    const size_t nl = s.rfind('\n', cut);
+    if (cut < s.size() && nl != std::string::npos && nl >= 60) cut = nl;
+    if (m.tool != "run_command" || s.size() < cut + 600)
+        return s.substr(0, cut) +
+               "\n[The rest of this result was left out later, to make room in the chat. Ask for it again if it is needed.]";
+    size_t from = s.size() - 200;
+    const size_t line = s.find('\n', from);
+    if (line != std::string::npos && line + 2 < s.size()) from = line + 1;
+    while (from < s.size() && ((unsigned char)s[from] & 0xC0) == 0x80) from++;
+    return s.substr(0, cut) +
+           "\n[The middle of this output was left out later, to make room in the chat. Run the command again if it is "
+           "needed.]\n" +
+           s.substr(from);
 }
+
+// A tool's result as the model is sent it.
+std::string sent_result(const Msg &m) { return m.left_out ? short_result(m) : m.content; }
 
 // A run of tool calls that fills the chat (a model reading a long page part
 // after part: on the PS5 two runs ended in "This chat is full" at 16,384
@@ -1158,7 +1173,7 @@ int make_room(Chat &c, const ChatRequest &rq) {
         if (m.role != "tool" || m.left_out || m.content.size() < 1200) continue;
         m.left_out = true;
         m.head += " \xC2\xB7 left out later, for room";
-        freed += (int)(m.content.size() - result_start(m.content).size()) / 4;
+        freed += (int)(m.content.size() - short_result(m).size()) / 4;
         n++;
     }
     c.ctx_used = std::max(0, c.ctx_used - freed);
@@ -1171,10 +1186,60 @@ int make_room(Chat &c, const ChatRequest &rq) {
         if (m.left_out || m.content.size() < 1200) continue;
         m.left_out = true;
         m.head += " \xC2\xB7 left out later, for room";
-        fresh -= rough_tokens(m.content) - rough_tokens(result_start(m.content));
+        fresh -= rough_tokens(m.content) - rough_tokens(short_result(m));
         n++;
     }
     return n;
+}
+
+int task_limit(const ChatRequest &rq);
+
+// A task past its window, before the model is asked for notes: the long
+// outputs of its earlier commands and file reads give way as in make_room,
+// when that alone takes the chat a quarter under the window. What stays is
+// the chat's own record, word for word: every call, every short result, the
+// first and last lines of the long ones, and the newest results whole (the
+// latest step, and those before it that fit a quarter of the window with
+// it). The server reads the shortened chat once. Notes cost a reading of
+// the whole chat, their writing and a reading of the new one (Qwen3.5 9B on
+// a PS5: 16 to 24 s a set through a window of 8,000 tokens, 47 s through
+// 24,000, six sets in a task of 55 calls), and they put the work in other
+// words: those notes added sixteen line counts up themselves, wrongly both
+// times, and the model wrote their sum into its file. Only results a call
+// gets again as they were give way here (a command's output, a file, a
+// folder's list): what a web page said is for the notes to keep. True when
+// some gave way and notes can wait.
+bool outputs_give_way(Chat &c, const ChatRequest &rq) {
+    const int limit = task_limit(rq);
+    if (limit <= 0) return false;
+    std::lock_guard<std::mutex> l(c.mu);
+    if (c.ctx_used <= 0) return false;
+    size_t newest = c.msgs.size();
+    int fresh = 0;
+    while (newest > 0 && c.msgs[newest - 1].role == "tool") fresh += rough_tokens(sent_result(c.msgs[--newest]));
+    const std::vector<size_t> idx = sent_msgs(c, newest, nullptr);
+    std::vector<size_t> go;
+    int freed = 0, whole = fresh;
+    for (size_t k = idx.size(); k-- > 0;) {
+        const Msg &m = c.msgs[idx[k]];
+        if (m.role != "tool" || m.left_out) continue;
+        const int t = rough_tokens(m.content);
+        if (whole + t <= limit / 4) {
+            whole += t;
+            continue;
+        }
+        whole = limit;  // (older ones no longer count as the newest)
+        if (m.content.size() < 1200 || (m.tool != "run_command" && m.tool != "read_file" && m.tool != "list_folder")) continue;
+        freed += (int)(m.content.size() - short_result(m).size()) / 4;
+        go.push_back(idx[k]);
+    }
+    if (go.empty() || c.ctx_used + fresh - freed > limit / 4 * 3) return false;
+    for (size_t i : go) {
+        c.msgs[i].left_out = true;
+        c.msgs[i].head += " \xC2\xB7 left out later, for room";
+    }
+    c.ctx_used = std::max(0, c.ctx_used - freed);
+    return true;
 }
 
 // What a note that cut an answer short ends with, for the model.
@@ -1189,7 +1254,7 @@ const char *const kNoteCut =
 std::string msg_json(const Chat &c, size_t i, bool with_calls, bool thinking, const char *last_word = "") {
     const Msg &m = c.msgs[i];
     if (m.role == "tool") {
-        std::string result = m.left_out ? result_start(m.content) : m.content;
+        std::string result = sent_result(m);
         if (*last_word) {
             while (!result.empty() && strchr(" \t\r\n", result.back())) result.pop_back();
             result += last_word;
@@ -1237,8 +1302,6 @@ const char *const kLastStop =
 const char *const kSameResult =
     "\n\n[You made this exact call before in this message and it gave this same result. Making it again will not "
     "change anything. Do something different now, or tell the user what is in the way.]";
-
-int task_limit(const ChatRequest &rq);
 
 // The calls a task has made up to where its notes end (the summary at
 // `sum`), as ts5-tui recorded them: one line a call, what it was and how it
@@ -2145,17 +2208,24 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
         make_room(*c, rq);
         // A long task: past the task window, or with the chat nearly full
         // even so, the model writes notes on its work and goes on from
-        // them, the user's request and its latest step.
-        if (!no_notes && task_too_long(*c, rq)) {
-            if (task_notes(c, rq, 3)) {
+        // them, the user's request and its latest step. Where the long
+        // outputs of earlier commands make room by giving way, they do, and
+        // notes wait.
+        if (task_too_long(*c, rq)) {
+            if (outputs_give_way(*c, rq)) {
                 // (What the earlier calls gave back is no longer the
                 // model's to read: one made again is no repeat.)
                 seen.clear();
                 stale = 0;
-                from_notes = replaced();
-            } else {
-                if (c->cancel.load()) break;
-                no_notes = true;
+            } else if (!no_notes) {
+                if (task_notes(c, rq, 3)) {
+                    seen.clear();
+                    stale = 0;
+                    from_notes = replaced();
+                } else {
+                    if (c->cancel.load()) break;
+                    no_notes = true;
+                }
             }
         }
         {
@@ -2403,7 +2473,8 @@ std::string summary_ask(int words, const std::string &focus, bool again, bool mo
             "values themselves, word for word: the full path of every file and folder made, versions, addresses, "
             "settings, numbers, the lines a command printed (\"memory.py prints Memory: 14.10 GB\", not \"memory.py "
             "prints the memory\"). Everything the user asked to be told at the end belongs here as soon as it is "
-            "known;\n"
+            "known. Only what a call's result shows or the user said: work nothing out here (no sum, no count, no "
+            "\"largest so far\" of your own). What has to be worked out is a step for a command;\n"
             "- Failed: what was tried and did not work, with the error's own words and the cause if it was found, "
             "so that it is not tried the same way again;\n"
             "- Decisions: those made and why, and anything the user said on the way;\n"
@@ -2637,7 +2708,7 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
         const Msg &m = c.msgs[idx[k]];
         std::string reasoning;
         split_think(m, text[k], reasoning);
-        if (m.role == "tool") text[k] = "[What the tool gave back]\n" + text[k];
+        if (m.role == "tool") text[k] = "[What the tool gave back]\n" + sent_result(m);
         for (auto &u : m.calls)
             text[k] += (text[k].empty() ? "" : "\n") + ("[The assistant used a tool: " + tool_call_line(u.name, u.args) + "]");
         tok[k] = rough_tokens(text[k]);
@@ -2744,7 +2815,7 @@ bool task_too_long(Chat &c, const ChatRequest &rq) {
     int fresh = 0;
     for (size_t i = c.msgs.size(); i > 0 && c.msgs[i - 1].role == "tool"; i--) {
         const Msg &m = c.msgs[i - 1];
-        fresh += rough_tokens(m.left_out ? result_start(m.content) : m.content);
+        fresh += rough_tokens(sent_result(m));
     }
     if (c.ctx_used + fresh <= limit) return false;
     int sum = -1, turns = 0;
@@ -2764,7 +2835,7 @@ bool task_notes(Chat *c, const ChatRequest &rq, int why) {
     {
         std::lock_guard<std::mutex> l(c->mu);
         int fresh = 0;
-        for (size_t i = c->msgs.size(); i > 0 && c->msgs[i - 1].role == "tool"; i--) fresh += rough_tokens(c->msgs[i - 1].content);
+        for (size_t i = c->msgs.size(); i > 0 && c->msgs[i - 1].role == "tool"; i--) fresh += rough_tokens(sent_result(c->msgs[i - 1]));
         Msg m;
         m.role = "summary";
         m.model = rq.model;

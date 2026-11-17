@@ -110,7 +110,9 @@ class Tui:
             for line in open(self.reqs):
                 if not line.startswith("  "):
                     out.append({"msgs": len(line.split(": ", 1)[1].split()), "system": "", "users": [], "notes": "",
-                                "results": [], "task": "", "tools": ""})
+                                "results": [], "bytes": [], "task": "", "tools": "", "tokens": int(line.split(" tokens")[0])})
+                elif line.startswith("  tool-bytes: "):
+                    out[-1]["bytes"].append(int(line.split(": ", 1)[1]))
                 elif line.startswith("  tools="):
                     out[-1]["tools"] = line.strip()
                 elif line.startswith("  task: "):
@@ -299,6 +301,63 @@ def main():
         check(t.wait("You said: hello again") and t.idle(), "the chat goes on", t.screen())
         check(len([x for x in t.requests() if x["users"] and x["users"][-1].startswith("[A check by the program")]) == 2,
               "and the next message is not asked about", t.requests()[-1]["users"])
+    finally:
+        t.close()
+
+    # ---- Long outputs: past the window they give way, and no notes are asked for while that
+    # makes room. (The fake counts a third of the bytes here; a step prints 150 lines, about
+    # 2,000 tokens.)
+    t = Tui(tui, "task_window=8000\n", {"FAKE_COUNT": "len", "FAKE_TASK_LINES": "150"})
+    try:
+        check(t.idle(), "ts5-tui is up (long outputs)", t.screen())
+        t.type("task 12")
+        t.keys("Enter")
+        check(t.wait("all 12 steps of the task are done", 120) and t.idle(), "a task whose commands print a lot comes to its end",
+              t.screen())
+        check(t.steps() == ["step %d" % k for k in range(1, 13)], "every step ran once, in order", t.steps())
+        r = t.requests()
+        NOTE = "[The middle of this output was left out later, to make room in the chat. Run the command again if it is needed.]"
+        gave = [x for x in r if x["bytes"] and min(x["bytes"]) < 1200]
+        check(gave and not [x for x in r if x["notes"]], "past the window: the earlier outputs give way, and no notes are written",
+              ([x["tokens"] for x in r], len([x for x in r if x["notes"]])))
+        if gave:
+            first = gave[0]
+            k = len(first["results"])
+            check(k >= 3 and all(b < 1200 for b in first["bytes"][:-1]) and first["bytes"][-1] > 5000,
+                  "all at once, and the newest stays whole", first["bytes"])
+            one = first["results"][0]
+            check(one.startswith("exit code 0\nstep 1\nstep 1 prints line 1 of its long output\n") and
+                  NOTE in one and one.rstrip().endswith("step 1 prints line 150 of its long output") and
+                  "prints line 75 of" not in one,
+                  "one that gave way: how it ended, its first lines, that the middle is gone, its last lines", one)
+            before = r[r.index(first) - 1]
+            check(before["bytes"] and min(before["bytes"]) > 5000 and not before["system"] and not first["system"] and
+                  first["msgs"] == before["msgs"] + 2,
+                  "the chat is as it was but for them: no notes in their place, every call still there",
+                  (before["msgs"], first["msgs"], first["system"][:200]))
+        check(max(x["tokens"] for x in r) <= 8000 + 2200, "no request went more than a step past the window",
+              [x["tokens"] for x in r])
+        last = r[-1]
+        check(len(last["bytes"]) == 12 and len([b for b in last["bytes"] if b < 1200]) >= 9,
+              "the last turn has all twelve calls, the old outputs short", last["bytes"])
+        saved = t.chat_file()
+        check(saved.count('"left_out":true') >= 9 and '"summary":true' not in saved and
+              saved.count("step 3 prints line 75 of its long output") == 1,
+              "saved with the chat: which gave way, and every output whole", saved.count('"left_out":true'))
+        check("left out later, for room" in t.up("left out later, for room"), "the chat marks them", t.screen())
+        # More of the same in the next message: once giving way no longer makes a quarter of the
+        # window free, notes are written, from the outputs as the model has them.
+        # (In a new chat: the fake counts the steps done from every call the notes' talk shows.)
+        t.keys("C-n")
+        t.type("task 24")
+        t.keys("Enter")
+        check(t.wait("all 24 steps of the task are done", 240) and t.idle(), "a longer task ends too", t.screen())
+        check(t.steps() == ["step %d" % k for k in range(1, 13)] + ["step %d" % k for k in range(1, 25)],
+              "every step ran once, in order", t.steps())
+        notes = [x for x in t.requests() if x["notes"]]
+        check(notes and NOTE in notes[0]["notes"] and "The assistant is in the middle of this work" in notes[0]["notes"],
+              "when that no longer makes room: notes, written from the outputs as the model has them",
+              [x["notes"][:300] for x in notes])
     finally:
         t.close()
 

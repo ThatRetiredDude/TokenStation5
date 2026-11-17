@@ -1045,6 +1045,10 @@ std::string tools_json(const ToolSwitches &s) {
             what += " Every command starts in the same folder again: a cd in one call does not last to the next. A "
                     "program a command starts ends with the command.";
         }
+        // (On a PS5 Qwen3.5 9B added sixteen line counts up itself and wrote
+        // 11182 for 10986 into its file, with every count in front of it.)
+        what += " Have a command do the counting, adding and comparing (wc -l, sort -n, awk, python3 -c): a number "
+                "worked out without one is often wrong.";
         add(tool_json("run_command", what.c_str(), "command", "The command line, as typed into a shell."));
     }
     if (s.browser) {

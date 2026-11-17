@@ -543,7 +543,12 @@ ts5-tui --url http://ps5.local:8081  # another one
 - **A long task goes on**: a message that takes the model many tool calls
   (installing and setting up a program, working through a folder) no longer
   ends when the chat is full. Once its calls take the chat past the task
-  window (24,000 tokens; Settings → Task window, or `/tools window N`), or
+  window (24,000 tokens; Settings → Task window, or `/tools window N`), the
+  long outputs of its earlier commands and file reads give way first: the
+  model keeps how each ended and its first and last lines, every call and
+  every short result stay word for word, and the newest results stay
+  whole. That costs one reading of the shorter chat and puts nothing in
+  other words. When it no longer makes a quarter of the window free, or
   the chat no longer fits the model's memory, the model writes notes on its
   work: the plan and where it is, what is done and how it was checked, the
   facts it found, what failed and why, the next step. The calls then go on
