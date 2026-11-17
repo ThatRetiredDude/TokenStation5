@@ -286,7 +286,9 @@ class H(BaseHTTPRequestHandler):
             system = " ".join(m.get("content") or "" for m in msgs if m.get("role") == "system")
             done = sum(int(x) for x in re.findall(r"STEPS DONE: (\d+)", system)[-1:]) + len(results)
             if done < n:
-                calls = [("run_command", {"command": "echo step %d | tee -a task-steps.txt" % (done + 1)})]
+                # (FAKE_TASK_FAIL=K: step K's command also fails, with a line of its own.)
+                bad = "; ls /no-such-ts5-folder" if os.environ.get("FAKE_TASK_FAIL") == str(done + 1) else ""
+                calls = [("run_command", {"command": "echo step %d | tee -a task-steps.txt%s" % (done + 1, bad)})]
             else:
                 results = ["all %d steps of the task are done" % done]
         elif asked.startswith("run ") and "run_command" in tools:

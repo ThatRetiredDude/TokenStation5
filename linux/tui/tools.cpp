@@ -1019,6 +1019,10 @@ std::string tools_json(const ToolSwitches &s) {
                                           : "Commands start in " + work + ", the user's folder that is shared with the "
                                             "sandbox: files made there are the user's to keep; ~ is /root, the "
                                             "sandbox's own.";
+            // (On a PS5 Qwen3.5 9B wrote a file after "cd facts" in one call and
+            // looked for it in the next, in the folder commands start in.)
+            what += " Every command starts there again: a cd in one call does not last to the next, so give full "
+                    "paths, or cd DIR && ... in the one command.";
             what += s.sandbox_net ? " The network can be used." : " There is no network: nothing can be downloaded or installed.";
             what += " A program a command starts ends with the command (no systemctl): start a server and use it in the "
                     "same command. A command may take up to 10 minutes.";
@@ -1038,7 +1042,8 @@ std::string tools_json(const ToolSwitches &s) {
                     "not and can't be put into ~, say so and stop trying. Where Python has no pip, "
                     "curl -sS https://bootstrap.pypa.io/get-pip.py | python3 - --user puts pip in ~ first. ";
             what += s.sandbox_net ? "The network can be used." : "There is no network.";
-            what += " A program a command starts ends with the command.";
+            what += " Every command starts in the same folder again: a cd in one call does not last to the next. A "
+                    "program a command starts ends with the command.";
         }
         add(tool_json("run_command", what.c_str(), "command", "The command line, as typed into a shell."));
     }

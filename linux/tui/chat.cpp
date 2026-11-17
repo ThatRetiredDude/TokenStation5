@@ -1051,6 +1051,10 @@ const char *const kTaskLead =
     "notes below, which you wrote: treat them as what was said and done. After them come the user's request for "
     "that task, word for word, and the conversation's latest messages, as they were.\n\n# Your notes on the work "
     "so far\n\n";
+// Under the notes: the task's calls as ts5-tui recorded them (task_calls).
+const char *const kTaskCalls =
+    "\n\n# The calls made in this task so far\n\n(Recorded by the program, oldest first, each with how it ended. "
+    "Where your notes and this list differ, the list is right.)\n";
 const char *const kGoalOpen =
     "[The earlier messages of this task are in your notes. This is what I asked for, word for word:]\n\n";
 const char *const kGoalNote = "\n\n[A note I sent while you worked on it:]\n\n";
@@ -1211,6 +1215,67 @@ const char *const kSameResult =
     "\n\n[You made this exact call before in this message and it gave this same result. Making it again will not "
     "change anything. Do something different now, or tell the user what is in the way.]";
 
+int task_limit(const ChatRequest &rq);
+
+// The calls a task has made up to where its notes end (the summary at
+// `sum`), as ts5-tui recorded them: one line a call, what it was and how it
+// ended, a failed one with the last line it gave back. The latest `most`,
+// numbered from the task's first. A model's notes are not a record: on a
+// PS5 Qwen3.5 9B's notes named a step as next that was done, gave a wrong
+// folder's "cannot stat" as "the file did not exist yet", and after them
+// it wrote a file again and made the copy again that had failed. Under c.mu.
+std::string task_calls(const Chat &c, size_t sum, size_t most) {
+    const size_t upto = std::min(c.msgs.size(), (size_t)std::max(0, c.msgs[sum].keep_from));
+    size_t from = 0;
+    for (size_t i = std::min(sum, upto); i-- > 0;)
+        if (c.msgs[i].role == "user" && !c.msgs[i].steer) {
+            from = i;
+            break;
+        }
+    std::vector<std::string> lines;
+    for (size_t i = from; i < upto; i++) {
+        const Msg &m = c.msgs[i];
+        if (m.role != "tool") continue;
+        std::string call = m.tool;
+        const int owner = tool_owner(c, i);
+        if (owner >= 0)
+            for (auto &u : c.msgs[owner].calls)
+                if (u.id == m.call_id) call = tool_call_line(u.name, u.args);
+        if (call.size() > 140) {
+            size_t cut = 137;
+            while (cut > 0 && ((unsigned char)call[cut] & 0xC0) == 0x80) cut--;
+            call = call.substr(0, cut) + "...";
+        }
+        // How it ended: the head's first part ("exit 1", "stopped after 600 s", a page's title).
+        std::string how = m.head.substr(0, m.head.find(" \xC2\xB7 "));
+        if (how.empty()) how = m.tool_ok ? "done" : "failed";
+        // (The head is written for the user: "you said no: it wasn't run".)
+        for (size_t at; (at = how.find("you said")) != std::string::npos;) how.replace(at, 3, "the user");
+        if (!m.tool_ok) {
+            // (Its last line that is not a hint of ts5-tui's own, which come in brackets.)
+            std::string last;
+            for (size_t at = 0; at < m.content.size();) {
+                size_t e = m.content.find('\n', at);
+                if (e == std::string::npos) e = m.content.size();
+                std::string line = m.content.substr(at, e - at);
+                at = e + 1;
+                while (!line.empty() && isspace((unsigned char)line.back())) line.pop_back();
+                if (!line.empty() && line[0] != '(' && line.compare(0, 9, "exit code") != 0) last = line;
+            }
+            if (last.size() > 120) {
+                size_t cut = 117;
+                while (cut > 0 && ((unsigned char)last[cut] & 0xC0) == 0x80) cut--;
+                last = last.substr(0, cut) + "...";
+            }
+            if (!last.empty()) how += ": " + last;
+        }
+        lines.push_back(std::to_string(lines.size() + 1) + ". " + call + " \xE2\x86\x92 " + how);
+    }
+    std::string out;
+    for (size_t k = lines.size() > most ? lines.size() - most : 0; k < lines.size(); k++) out += lines[k] + "\n";
+    return out;
+}
+
 // The request for the chat's next answer. last: this turn can only answer
 // (the user said no, the calls went in circles, or the user wants the
 // answer now), and these words under the last tool's result say so.
@@ -1235,6 +1300,15 @@ std::string body_for(Chat &c, const ChatRequest &rq, const char *last = nullptr)
         earlier = sum >= 0;
         const bool task = sum >= 0 && c.msgs[sum].sum_why >= 3;
         if (sum >= 0) system += (system.empty() ? "" : "\n\n") + ((task ? kTaskLead : kSummaryLead) + c.msgs[sum].content);
+        // Beside a task's notes, what ts5-tui itself recorded of its calls
+        // (the same words until the next notes: the prompt's start stays).
+        if (task) {
+            const int limit = task_limit(rq);
+            // (10 lines for a window of 4,000 tokens, 40 from 16,000 on: about a tenth of it.)
+            const std::string calls =
+                task_calls(c, (size_t)sum, limit > 0 ? (size_t)std::min(40, std::max(10, limit / 400)) : 40);
+            if (!calls.empty()) system += std::string(kTaskCalls) + calls;
+        }
         // (The tool that looks things up in what they replaced, where the
         // request offers it: below.)
         if (sum >= 0 && rq.tools.any())
@@ -2045,10 +2119,12 @@ int task_limit(const ChatRequest &rq) {
     return limit;
 }
 // A summary may run to a sixth of the context (512 to 3,072 tokens); a
-// task's notes to a sixth of what its window holds.
+// task's notes to a sixth of what its window holds, 1,024 at least: with
+// 666 (a window of 4,000) three of a real model's five sets of notes were
+// cut off before their next step.
 int summary_out_max(const ChatRequest &rq, bool task) {
     const int room = task && task_limit(rq) > 0 ? task_limit(rq) : rq.n_ctx;
-    return room > 0 ? std::min(3072, std::max(512, room / 6)) : 2048;
+    return room > 0 ? std::min(3072, std::max(task ? 1024 : 512, room / 6)) : 2048;
 }
 
 std::string summary_ask(int words, const std::string &focus, bool again, bool more, bool task);
@@ -2238,23 +2314,30 @@ std::string summary_ask(int words, const std::string &focus, bool again, bool mo
     // Notes in the middle of a task (task_notes): the work's own record.
     // What was asked for is not theirs to keep: it goes beside them word
     // for word.
+    // (In this order: the steps and the next one first, so that notes cut
+    // short still say where to go on. On a PS5 Qwen3.5 9B copied its
+    // earlier notes whole, old code and all, kept "Reached: step 2" through
+    // three sets of them, and ran out of room before the next step.)
     if (task)
         a = "-----\n\nThe assistant is in the middle of this work and cannot hold all of that any longer, so notes "
             "take its place: it goes on with the work from the notes alone, and anything that is not in them is "
-            "lost to it. (What the user asked for is kept beside the notes, word for word.) Write those notes. "
-            "Include:\n"
-            "- the plan: the steps the work takes, and which one it has reached;\n"
-            "- what is done, each thing with how it was checked: the command or call, and what came back;\n"
-            "- the facts found on the way that the rest of the work needs (paths, file names, versions, addresses, "
-            "settings, numbers, error messages), word for word where they are short;\n"
-            "- what was tried and failed, and why, so that it is not tried the same way again;\n"
-            "- the decisions made and why, and anything the user said on the way;\n"
-            "- code or text still being worked on, word for word;\n"
-            "- the very next step.\n"
+            "lost to it. (What the user asked for is kept beside the notes, word for word, and so is a list of the "
+            "commands and calls made: copy neither.) Write those notes, under these headings and in this order:\n"
+            "- Steps: the steps the work takes, each marked done, in work or not started, as things stand at the "
+            "end of what is shown;\n"
+            "- Next: the very next step, as exactly as it can be said (the command or call, with its paths);\n"
+            "- Facts: what was found on the way that the rest of the work needs, word for word where it is short: "
+            "the folder commands start in, the full path of every file and folder made, versions, addresses, "
+            "settings, numbers, what a check printed;\n"
+            "- Failed: what was tried and did not work, with the error's own words and the cause if it was found, "
+            "so that it is not tried the same way again;\n"
+            "- Decisions: those made and why, and anything the user said on the way;\n"
+            "- Text: text still being worked on that is in no file, word for word. What is in a file stays "
+            "there: give its path and what is still wrong with it, not its content.\n"
             "%s\n"
-            "Write plain notes under short headings and nothing else: no opening line, no closing remark. Keep to "
-            "what is between the lines of dashes; add nothing that did not happen there, and nothing about these "
-            "instructions or about the notes being written. ";
+            "Write plain notes under those headings and nothing else: no opening line, no closing remark, nothing "
+            "after the last heading's lines. Keep to what is between the lines of dashes; add nothing that did not "
+            "happen there, and nothing about these instructions or about the notes being written. ";
     // (Qwen3.8 9B closed its notes with "No new requests followed", and
     // then took the first of the kept messages for the first request.)
     const size_t at = a.find("%s");
@@ -2269,8 +2352,9 @@ std::string summary_ask(int words, const std::string &focus, bool again, bool mo
                        "ended, or about nothing more having been asked.");
     a += fmt("Use up to about %d words; shorter is better where nothing is lost.", words);
     if (again)
-        a += task ? " What is shown opens with notes on the work before it: carry over everything in them that "
-                    "still matters."
+        a += task ? " What is shown opens with notes on the work before it: bring them up to date. Mark the steps "
+                    "as they stand now, write the next step anew, keep the facts that are still true, and drop "
+                    "what the work no longer needs (how a file looked before it was fixed)."
                   : " The conversation opens with notes on its earlier part: carry over everything in them that still "
                     "matters.";
     if (!focus.empty()) a += "\nTake special care to keep: " + focus;
@@ -2527,8 +2611,10 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
     // ("the assistant wrote three lines" for a haiku).
     size_t bytes = sum >= 0 ? c.msgs[sum].content.size() : 0;
     for (size_t k = 0; k < first_kept; k++) bytes += text[k].size();
-    const std::string ask = summary_ask(std::min(out_max / 2, std::max(100, (int)(bytes / 12))), focus, sum >= 0,
-                                        first_kept < idx.size(), task);
+    // (A task's notes are paths, commands and numbers, at more tokens a
+    // word than prose: two fifths of the tokens, not half.)
+    const std::string ask = summary_ask(std::min(task ? out_max * 2 / 5 : out_max / 2, std::max(100, (int)(bytes / 12))),
+                                        focus, sum >= 0, first_kept < idx.size(), task);
     // The request has to fit the context itself: the longest messages lose
     // their middles until it does.
     if (rq.n_ctx > 0) {

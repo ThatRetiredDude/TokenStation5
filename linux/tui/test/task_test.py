@@ -155,6 +155,14 @@ class Tui:
         shutil.rmtree(self.home, ignore_errors=True)
 
 
+def calls_of(system):
+    """The lines of the list of calls under a task's notes."""
+    head = "# The calls made in this task so far"
+    if head not in system:
+        return []
+    return [l for l in system.split(head, 1)[1].split("\n") if re.match(r"\d+\. ", l)]
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -190,9 +198,20 @@ def main():
               "then the request, word for word", (after["users"], after["task"]))
         check(len(after["results"]) == 1 and "step 7" in after["results"][0], "then the latest step and what it gave back",
               after["results"])
+        # Under the notes: the calls as ts5-tui recorded them, each with how it ended.
+        made = calls_of(after["system"])
+        check("(Recorded by the program, oldest first, each with how it ended. Where your notes and this list differ, "
+              "the list is right.)" in after["system"] and
+              made == ["%d. $ echo step %d | tee -a task-steps.txt \u2192 exit 0" % (k, k) for k in range(1, 7)],
+              "under the notes: the six calls they were written from, as the program recorded them", after["system"][-900:])
+        later = calls_of(r[r.index(notes[-1]) + 1]["system"])
+        n = len(later) and int(later[-1].split(".")[0])
+        check(len(later) == 20 and n >= 21 and later[0].startswith("%d. $ echo step %d " % (n - 19, n - 19)) and
+              later[-1].startswith("%d. $ echo step %d " % (n, n)),
+              "after later notes: the latest 20 calls, numbered from the task's first", later)
         second = notes[1]["notes"]
         check("[Notes on the conversation's earlier part]" in second and "STEPS DONE: 6" in second and
-              "[User]\ntask 30\n" in second and "carry over everything in them that still matters" in second,
+              "[User]\ntask 30\n" in second and "bring them up to date" in second,
               "the next notes are written from the notes before them and the request", second[:1200])
         check("search_earlier" not in r[0]["tools"] and "run_command" in r[0]["tools"] and
               "search_earlier" in after["tools"] and "the tool search_earlier looks it up" in after["system"],
@@ -251,7 +270,7 @@ def main():
         t.close()
 
     # ---- No window: the server refuses the fifth turn as full, in the middle of the calls.
-    t = Tui(tui, "task_window=0\n", {"FAKE_FULL_ONCE": "5"})
+    t = Tui(tui, "task_window=0\n", {"FAKE_FULL_ONCE": "5", "FAKE_TASK_FAIL": "3"})
     try:
         check(t.idle(), "ts5-tui is up (no window)", t.screen())
         t.type("task 10")
@@ -268,6 +287,11 @@ def main():
         after = r[r.index(notes[0]) + 1]
         check(after["msgs"] == 2 and "STEPS DONE: 4" in after["system"] and after["task"].startswith(ASKED + "\n\ntask 10\n\n" + GO),
               "the turn goes again from the notes and the request", after)
+        made = calls_of(after["system"])
+        check(len(made) == 4 and made[1].endswith("\u2192 exit 0") and
+              made[2] == "3. $ echo step 3 | tee -a task-steps.txt; ls /no-such-ts5-folder \u2192 exit 2: "
+              "ls: cannot access '/no-such-ts5-folder': No such file or directory",
+              "a call that failed is listed with the last line it gave back", made)
         check('"why":4' in t.chat_file(), "saved as notes written with the chat full", t.chat_file()[:400])
         seen = t.up("The chat was full in the middle of this task")
         check("your request word for word" in seen and "latest step" not in seen, "the chat says so", seen or t.screen())

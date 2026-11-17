@@ -78,9 +78,11 @@ browser does: with `TS5_SEARCH_SOURCE=google` (or `"web_search_source":
 ts5 opens the results page in a Chromium installed on the machine, the one
 the browser tool uses, and gives the model what the page shows between its
 "Search Results" heading and its page numbers, without the page's buttons
-and boxes: the answer Google's AI writes at the top when it shows one ("AI
-Overview"), the results with their passages, and under them a list of where
-the numbered links lead (the addresses of other sites only, each once).
+and boxes and without its advertisements ("Sponsored results"): the answer
+Google's AI writes at the top when it shows one ("AI Overview"), the results
+with their passages, and under them a list of where the numbered links lead
+(the addresses of other sites only, each once). A result's number stands at
+the end of the line that names its site.
 The model is told that the answer at the top is written by an AI and is to
 be checked against the results.
 
