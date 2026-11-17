@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -522,6 +523,23 @@ public:
         value = r["result"]["value"].str();
         return true;
     }
+    // From here on, what the network answers with a redirect is noted:
+    // the address that was asked for, and the address its answer sent it
+    // on to (the browser's Network events have to be on for that).
+    void watch_redirects(bool on) {
+        watch_ = on;
+        if (on) {
+            redirects_.clear();
+            requests_.clear();
+        }
+    }
+    const std::map<std::string, std::string> &redirects() const { return redirects_; }
+    // What the browser has to say unasked is read, for wait_ms at most.
+    void drain(int wait_ms) {
+        Json none;
+        std::string e;
+        await(-1, "", none, e, wait_ms);
+    }
     // A script was sent and its answer has not come.
     bool busy() const { return asked_ != 0; }
     bool gone() const { return gone_; }
@@ -560,6 +578,7 @@ private:
                 return false;
             }
             if (got == 0) {
+                if (id < 0) return false;  // (drain: no answer was waited for)
                 err = "the browser didn't answer in " + std::to_string(timeout_ms / 1000) + " s";
                 trace("!", std::to_string(id) + " " + method + ": no answer in " + std::to_string(timeout_ms) + " ms");
                 return false;
@@ -588,6 +607,18 @@ private:
                 err = "the page crashed the browser's tab";
                 gone_ = true;
                 return false;
+            } else if (watch_ && event == "Network.requestWillBeSent") {
+                // A request, and the same request again once its answer
+                // sent it on (with that answer in redirectResponse).
+                const Json &p = j["params"];
+                const std::string rid = p["requestId"].str(), to = p["request"]["url"].str();
+                if (p.o.count("redirectResponse")) {
+                    std::string from = p["redirectResponse"]["url"].str();
+                    if (from.empty() && requests_.count(rid)) from = requests_[rid];
+                    if (!from.empty() && !to.empty() && !redirects_.count(from)) redirects_[from] = to;
+                } else if (!rid.empty()) {
+                    requests_[rid] = to;
+                }
             }
         }
     }
@@ -599,6 +630,8 @@ private:
     bool obscura_ = false;  // the browser is Obscura (plain_agent)
     int asked_ = 0;         // the script sent last, while its answer has not come
     std::string asked_js_;  // that script
+    bool watch_ = false;    // watch_redirects
+    std::map<std::string, std::string> redirects_, requests_;  // address asked for -> sent on to; request -> its address
 };
 
 // Run in the page before it is read: every element that takes a click or
@@ -1573,13 +1606,46 @@ public:
     }
     // The page asks whether a robot is searching.
     bool robot_check() const {
-        return url_.find("/sorry/") != npos || view_.find("unusual traffic") != npos || view_.find("not a robot") != npos;
+        // (Its own words for it, on a page that is little else: a result's
+        // passage may say them too.)
+        return url_.find("/sorry/") != npos ||
+               (view_.size() < 3000 && (view_.find("unusual traffic") != npos || view_.find("not a robot") != npos));
     }
+    // Where addresses of the search site's own lead that only send on to a
+    // result (Google: /goto?url=TOKEN, a token that says nothing). Each is
+    // asked for from the page the way a click on it asks, and the answer
+    // is not followed: the address it names is noted, and the site there
+    // hears nothing. max_s for all of them together.
+    std::map<std::string, std::string> redirect_targets(const std::vector<std::string> &urls, double max_s) {
+        std::map<std::string, std::string> to;
+        if (!cdp_ || cdp_->gone() || urls.empty()) return to;
+        Json r;
+        std::string e, v, list;
+        for (const std::string &u : urls) list += (list.empty() ? "" : ",") + json_escape(u);
+        cdp_->watch_redirects(true);
+        if (cdp_->call("Network.enable", "{}", r, e, 5000)) {
+            cdp_->eval("(async () => { await Promise.all([" + list +
+                           "].map(u => fetch(u, {redirect: 'manual', credentials: 'include'}).catch(() => 0))); return 'ok'; })()",
+                       v, e, (int)(max_s * 1000));
+            // (What the network saw of them comes beside the script's answer, not before it.)
+            const double t0 = now_s();
+            while (!cdp_->gone() && cdp_->redirects().size() < urls.size() && now_s() - t0 < 0.6) cdp_->drain(100);
+            cdp_->call("Network.disable", "{}", r, e, 5000);
+        }
+        to = cdp_->redirects();
+        cdp_->watch_redirects(false);
+        return to;
+    }
+
     // The page as a search's results: its text from where the results
     // start (no search box, no tabs) to where they end (no page numbers,
-    // no footer), max_chars of it, then the addresses of its numbered
-    // links that lead to other sites than the search site's own.
-    std::string results_page(size_t max_chars, int max_links, int &count) const {
+    // no footer), without its buttons and boxes (the page is closed after
+    // this), max_chars of it, then the addresses its numbered links lead
+    // to. count: the results it lists, whether or not their addresses
+    // could be found. Google's links to its results are addresses of its
+    // own that send on (redirect_targets): the first max_ask of them are
+    // asked where they lead, the results' own titles first.
+    std::string results_page(size_t max_chars, int max_links, int max_ask, int &count) {
         std::string body = "\n" + view_ + "\n";
         {
             // (Lower case byte for byte, so that a place found in it is the place in body.)
@@ -1598,6 +1664,28 @@ public:
             }
             if (start != npos) body.erase(0, start);
         }
+        // Its buttons and boxes ("[33: button "About this result"]"): of no
+        // use to a reader who cannot press them.
+        for (size_t at = body.find('['); at != npos; at = body.find('[', at)) {
+            size_t d = at + 1;
+            while (d < body.size() && isdigit((unsigned char)body[d])) d++;
+            if (d == at + 1 || d >= body.size() || body[d] != ':') {
+                at++;
+                continue;
+            }
+            // ("[19: button]", or with its words in quotes: "[20: button "Tools"]".)
+            const size_t line = body.find('\n', d), stop = body.find_first_of("\"]", d);
+            size_t close = stop;
+            if (stop != npos && body[stop] == '"') {
+                close = body.find("\"]", stop + 1);
+                if (close != npos) close++;
+            }
+            if (close == npos || close > line) {
+                at++;
+                continue;
+            }
+            body.erase(at, close + 1 - at);
+        }
         while (!body.empty() && isspace((unsigned char)body.front())) body.erase(0, 1);
         if (body.size() > max_chars) {
             size_t cut = body.rfind('\n', max_chars);
@@ -1607,52 +1695,140 @@ public:
             }
             body.erase(cut);
         }
-        while (!body.empty() && isspace((unsigned char)body.back())) body.pop_back();
         const std::string own = host_of(url_);
         const auto theirs = [&](const std::string &h) {
             return h.empty() || h == own || h.find("google.") != npos || h.find("gstatic.") != npos ||
                    h.find("googleusercontent.") != npos;
         };
-        std::set<std::string> seen;
-        std::string list;
-        count = 0;
-        for (size_t i = 0; i < els_.items.size() && count < max_links; i++) {
+        // The numbered links of that text: to another site, or to the
+        // search site's own address that sends on to one.
+        struct Lead {
+            size_t n;           // its number in the text
+            std::string words;  // the link's words
+            std::string to;     // where it leads, when that is known
+            std::string ask;    // the search site's address that sends on to it
+            bool title;         // a result's title (its words end with the address Google writes under it)
+        };
+        std::vector<Lead> leads;
+        for (size_t i = 0; i < els_.items.size(); i++) {
             const PageElement &el = els_.items[i];
-            if (el.kind != "link" || el.href.empty()) continue;
-            std::string u = resolve_url(url_, el.href);
-            // (A link through the search site's own redirect: where it leads.)
-            if (const size_t r = u.find("/url?"); r != npos && theirs(host_of(u))) {
-                size_t q = u.find("q=", r);
-                if (q == npos || (u[q - 1] != '?' && u[q - 1] != '&')) q = u.find("url=", r);
-                if (q != npos) {
-                    q = u.find('=', q) + 1;
-                    const std::string enc = u.substr(q, u.find('&', q) == npos ? npos : u.find('&', q) - q);
-                    std::string dec;
-                    for (size_t k = 0; k < enc.size(); k++) {
-                        if (enc[k] == '%' && k + 2 < enc.size() && isxdigit((unsigned char)enc[k + 1]) && isxdigit((unsigned char)enc[k + 2])) {
-                            dec += (char)strtol(enc.substr(k + 1, 2).c_str(), nullptr, 16);
-                            k += 2;
-                        } else {
-                            dec += enc[k];
+            if (el.kind != "link" || el.href.empty() || body.find("[" + std::to_string(i + 1) + "]") == npos) continue;
+            Lead l{i + 1, clean_text(el.label), resolve_url(url_, el.href), "", false};
+            if (const size_t q = l.to.find('?'); q != npos && theirs(host_of(l.to))) {
+                // (The search site's redirect: /url?q=ADDRESS, or /goto?url=TOKEN.)
+                const std::string path = l.to.substr(0, q);
+                std::string dec;
+                if (ends_with(path, "/url") || ends_with(path, "/goto")) {
+                    for (const char *key : {"url=", "q="}) {
+                        size_t k = l.to.find(key, q);
+                        while (k != npos && l.to[k - 1] != '?' && l.to[k - 1] != '&') k = l.to.find(key, k + 1);
+                        if (k == npos) continue;
+                        k += strlen(key);
+                        const std::string enc = l.to.substr(k, l.to.find_first_of("&#", k) == npos ? npos : l.to.find_first_of("&#", k) - k);
+                        dec.clear();
+                        for (size_t c = 0; c < enc.size(); c++) {
+                            if (enc[c] == '%' && c + 2 < enc.size() && isxdigit((unsigned char)enc[c + 1]) && isxdigit((unsigned char)enc[c + 2])) {
+                                dec += (char)strtol(enc.substr(c + 1, 2).c_str(), nullptr, 16);
+                                c += 2;
+                            } else {
+                                dec += enc[c];
+                            }
                         }
+                        if (!dec.empty()) break;
                     }
-                    u = resolve_url(url_, dec);
+                }
+                if (dec.compare(0, 7, "http://") == 0 || dec.compare(0, 8, "https://") == 0) {
+                    l.to = dec;
+                } else if (dec.size() >= 16 && dec.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_=") == npos) {
+                    l.ask = l.to;
+                    l.to.clear();
                 }
             }
-            if (u.empty() || theirs(host_of(u))) continue;
-            // (Its tail that scrolls to the passage's words; a part of a page is the page.)
-            if (const size_t f = u.find('#'); f != npos) u.erase(f);
-            if (body.find("[" + std::to_string(i + 1) + "]") == npos || !seen.insert(u).second) continue;
-            // (The link's words too: on a results page a title is a heading,
+            if (l.ask.empty() && (l.to.empty() || theirs(host_of(l.to)))) continue;
+            // (The link's words: on a results page a title is a heading,
             // and its number comes lines under it. Not the address Google
             // writes under the title, which is cut short.)
-            std::string words = clean_text(el.label);
-            if (const size_t h = words.find("http"); h != npos && h > 0) words.erase(h);
-            while (!words.empty() && isspace((unsigned char)words.back())) words.pop_back();
-            list += "[" + std::to_string(i + 1) + "] " + (words.empty() ? "" : brief(words, 100) + ": ") + brief(u, 300) + "\n";
-            count++;
+            if (const size_t h = l.words.find("http"); h != npos && h > 0) {
+                l.words.erase(h);
+                l.title = true;
+            }
+            while (!l.words.empty() && isspace((unsigned char)l.words.back())) l.words.pop_back();
+            leads.push_back(l);
+        }
+        // Where the search site's own addresses lead, max_ask of them: the
+        // results' titles, two of what else there is (its own answer's
+        // sources come first on the page), then more titles.
+        std::vector<std::string> ask;
+        {
+            std::set<std::string> asking;
+            int others = 0;
+            for (const Lead &l : leads) others += !l.ask.empty() && !l.title;
+            const int keep = std::min(2, others);
+            for (int pass = 0; pass < 3; pass++)
+                for (const Lead &l : leads) {
+                    if (l.ask.empty() || l.title != (pass != 1) || asking.count(l.ask)) continue;
+                    if ((int)ask.size() >= (pass == 0 ? max_ask - keep : max_ask)) break;
+                    ask.push_back(l.ask);
+                    asking.insert(l.ask);
+                }
+        }
+        const std::map<std::string, std::string> found = redirect_targets(ask, 6);
+        // What is listed: an address once, under a result's title where it has one.
+        int unknown = 0;
+        std::set<size_t> listed;
+        std::set<std::string> seen;
+        for (int pass = 0; pass < 2; pass++)
+            for (Lead &l : leads) {
+                if (l.title != (pass == 0)) continue;
+                if (!l.ask.empty()) {
+                    const auto f = found.find(l.ask);
+                    if (f != found.end() && !theirs(host_of(f->second))) l.to = f->second;
+                    if (l.to.empty()) {
+                        unknown += l.title;
+                        continue;
+                    }
+                }
+                // (Its tail that scrolls to the passage's words; a part of a page is the page.)
+                if (const size_t h = l.to.find('#'); h != npos) l.to.erase(h);
+                if (!seen.insert(l.to).second || (int)listed.size() >= max_links) continue;
+                listed.insert(l.n);
+            }
+        count = (int)listed.size() + unknown;
+        std::string list;
+        for (const Lead &l : leads)
+            if (listed.count(l.n))
+                list += "[" + std::to_string(l.n) + "] " + (l.words.empty() ? "" : brief(l.words, 100) + ": ") + brief(l.to, 300) + "\n";
+        // The numbers of the links that are not listed say nothing.
+        for (size_t i = 0; i < els_.items.size(); i++) {
+            if (els_.items[i].kind != "link" || listed.count(i + 1)) continue;
+            const std::string mark = "[" + std::to_string(i + 1) + "]";
+            for (size_t at = body.find(mark); at != npos; at = body.find(mark, at)) body.erase(at, mark.size());
+        }
+        // The lines that leaves empty, and a heading with nothing under it now.
+        {
+            std::string tidy;
+            bool blank = true;
+            for (size_t at = 0; at < body.size();) {
+                size_t e = body.find('\n', at);
+                if (e == npos) e = body.size();
+                std::string line = body.substr(at, e - at);
+                at = e + 1;
+                while (!line.empty() && isspace((unsigned char)line.back())) line.pop_back();
+                if (line.find_first_not_of(" \t") == npos || line == "People also ask") {
+                    blank = true;
+                    continue;
+                }
+                if (!tidy.empty()) tidy += blank ? "\n\n" : "\n";
+                tidy += line;
+                blank = false;
+            }
+            body = tidy;
         }
         if (!list.empty()) body += "\n\nWhere the numbered links above lead:\n" + list;
+        if (unknown > 0)
+            body += std::string(list.empty() ? "\n\n" : "\n") + "(Google did not say where " +
+                    (list.empty() ? "its results" : std::to_string(unknown) + " more of its results") +
+                    " lead: the line under a result's title names its site.)";
         while (!body.empty() && body.back() == '\n') body.pop_back();
         return body;
     }
@@ -1722,17 +1898,21 @@ bool google_search_page(const std::string &query, std::string &out, std::string 
         why = "its page could not be opened in the browser";
         return false;
     }
-    out = s.results_page(6000, 20, links);
+    // (A result's address is asked of Google for the first eight: six of
+    // its results' titles and two of its own answer's sources, or as many
+    // more titles. A person clicks one or two; every asking is a request
+    // to Google more.)
+    const int kAsk = 8;
     // Its question about cookies comes in place of the results: answered
     // with its own button for "no", and the results follow.
     bool asked = false;
-    for (int k = 0; k < 2 && a.ok && links == 0 && !s.robot_check(); k++) {
+    for (int k = 0; k < 2 && a.ok && !s.robot_check(); k++) {
         const int n = s.reject_button();
         if (!n) break;
         asked = true;
         a = s.click(n);
-        out = s.results_page(6000, 20, links);
     }
+    if (a.ok && !s.robot_check() && !(asked && s.reject_button())) out = s.results_page(6000, 20, kAsk, links);
     if (s.robot_check()) {
         why = "it asked whether a robot is searching, which ts5 does not answer";
         return false;

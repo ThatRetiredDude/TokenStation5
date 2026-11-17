@@ -77,19 +77,32 @@ browser does: with `TS5_SEARCH_SOURCE=google` (or `"web_search_source":
 "google"`; in ts5-tui Settings → Search source, or `/tools search google`)
 ts5 opens the results page in a Chromium installed on the machine, the one
 the browser tool uses, and gives the model what the page shows between its
-"Search Results" heading and its page numbers: the answer Google's AI
-writes at the top when it shows one ("AI Overview"), the results with their
-passages, and under them a list of where the numbered links lead (the
-addresses of other sites only, each once, Google's own redirect taken off).
+"Search Results" heading and its page numbers, without the page's buttons
+and boxes: the answer Google's AI writes at the top when it shows one ("AI
+Overview"), the results with their passages, and under them a list of where
+the numbered links lead (the addresses of other sites only, each once).
 The model is told that the answer at the top is written by an AI and is to
 be checked against the results.
+
+Since November 2026 Google's page no longer has its results' addresses: a
+link to a result is an address of Google's own that sends on
+(`/goto?url=` and a token that says nothing), and the page shows only the
+site's name with a path it cuts short. So ts5 asks Google where the links
+lead: from the page, the way a click on the link asks, without following
+the answer. It asks for eight at most: the results' titles first (six when
+the AI's answer has sources, which get two). The site a result is on
+hears nothing of it until the model opens the page. A result past those
+eight keeps its passage and the line with its site's name, and the model
+is told that its address is not known. (An address Google still writes
+into a link, as `/url?q=` did, is read from the link.)
 
 - It is there where a Chromium is: `/v1/models` lists `google` under
   `capabilities.search_sources` only then. `TS5_SEARCH_BROWSER` names
   another program than the one found (a path, or a name on the `PATH`).
 - A browser starts for each search and ends with it. That takes seconds
   where DuckDuckGo's page takes under one, and memory: with less than
-  900 MiB free the browser is not started.
+  900 MiB free the browser is not started. A search is one page and at
+  most eight short requests to Google.
 - Google's question about cookies, where it asks one, is answered with its
   button for no ("Reject all", in the page's language).
 - Its check for robots ("unusual traffic", a captcha) is not answered.

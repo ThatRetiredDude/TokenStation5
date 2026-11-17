@@ -11,6 +11,8 @@ then driven through it over its debugging port, scripts and all. OBSCURA is
 the real Obscura program (ts5-tui --install-browser obscura puts it in
 ~/.local/bin): how ts5 waits for it is then checked with it too.
 """
+import base64
+import hashlib
 import http.server
 import json
 from html import escape as html_escape
@@ -853,6 +855,13 @@ class Google(http.server.BaseHTTPRequestHandler):
     writes in, results, links of its own; for some searches its question about cookies first, for
     others its check for robots."""
     seen = []
+    goto = {}  # its own addresses that send on to a result: token -> where to
+    @classmethod
+    def link(cls, to):
+        """Google's address for a result as its page has it since November 2026: a token that says nothing."""
+        token = "CAESaAHEIkXX" + base64.urlsafe_b64encode(hashlib.sha256(to.encode()).digest()).decode().rstrip("=")
+        cls.goto[token] = to
+        return "/goto?url=" + token
     def log_message(self, *a): pass
     def send(self, body, status=200, headers=()):
         b = body.encode()
@@ -873,6 +882,10 @@ class Google(http.server.BaseHTTPRequestHandler):
         if u.path.startswith("/sorry/"):
             return self.send("<html><head><title>Sorry</title></head><body><p>Our systems have detected unusual traffic from "
                              "your computer network.</p><p>I'm not a robot</p></body></html>", 429)
+        if u.path == "/goto":
+            to = Google.goto.get((q.get("url") or [""])[0])
+            if to is None: return self.send("<html><body>not here</body></html>", 404)
+            return self.send("", 302, [("Location", to)])
         if u.path != "/search":
             return self.send("<html><body>not here</body></html>", 404)
         if "robot" in query:
@@ -887,6 +900,20 @@ class Google(http.server.BaseHTTPRequestHandler):
                              '<form action="/save" method="get"><input type="hidden" name="continue" value="%s">'
                              '<button type="submit">Prijať všetko</button></form><a href="/more">Ďalšie možnosti</a></body></html>'
                              % (e(query), e(self.path), e(self.path)))
+        if "consent" in query and "SOCS=no" not in self.headers.get("Cookie", ""):
+            # (As the PS5 got it with hl=en: in English, on the results' own address, and its button
+            # for no puts the results into the page that is open: no other page is gone to.)
+            return self.send('<html><head><title>%s - Google Search</title></head><body><button>en</button>'
+                             '<a href="https://accounts.google.com/ServiceLogin">Sign in</a>'
+                             '<h1>Before you continue to Google</h1><p>We use <a href="https://policies.google.com/technologies/'
+                             'cookies">cookies</a> and data, including IP addresses, to</p><ul><li>Deliver and maintain Google '
+                             'services</li></ul><button id="no">Reject all</button><button>Accept all</button>'
+                             '<a href="/more">More options</a>'
+                             "<script>document.getElementById('no').addEventListener('click', () => { "
+                             "document.cookie = 'SOCS=no; path=/'; fetch(location.href).then(r => r.text()).then(t => { "
+                             "history.replaceState(null, '', location.href + '&sei=x'); "
+                             "document.body.innerHTML = t.slice(t.indexOf('<body>') + 6, t.indexOf('</body>')); }); });</script>"
+                             "</body></html>" % e(query))
         head = ('<a href="#main">Skip to main content</a><a href="https://support.google.com/websearch">Accessibility help</a>'
                 '<form action="/search"><input type="text" name="q" aria-label="Search" value="%s"><button>Clear</button></form>'
                 '<a href="https://accounts.google.com/ServiceLogin">Sign in</a><a href="/search?q=%s&amp;udm=50">AI Mode</a>'
@@ -896,6 +923,50 @@ class Google(http.server.BaseHTTPRequestHandler):
                 '<h1>Footer Links</h1><a href="https://policies.google.com/privacy">Privacy</a>'
                 '<a href="https://shop.example.com/an-advertisement">A shop below the results</a>'
                 % (urllib.parse.quote(query), urllib.parse.quote(query)))
+        if "goto" in query:
+            # The page as the PS5 got it on 17 November 2026: every link to a result is Google's own
+            # address with a token, buttons all over, and its headings in these words.
+            L = Google.link
+            def result(title, site, crumbs, to, passage):
+                return ('<div class="g"><a href="%s"><h3>%s</h3><div>%s</div><cite>%s</cite></a><div>%s</div></div>'
+                        % (L(to), e(title), e(site), e(crumbs), e(passage)))
+            blog = "https://blog.playstation.com/2024/11/07/getting-started-with-playstation-5-pro-out-today/"
+            return self.send(
+                "<html><head><title>%s - Google Search</title></head><body>%s"
+                '<div><h1>AI Overview</h1><button>Sony reveals £700 PlayStation 5 Pro console | Games | The ...</button>'
+                '<p>The <a href="%s">PlayStation 5 Pro</a> was released globally on November 7, 2024.'
+                '<a href="%s" aria-label="PlayStation Blog"></a><button>Wikipedia +1</button></p>'
+                '<p>Are you looking for <a href="/search?q=ps5+pro+price">current pricing</a>?</p>'
+                '<p>AI responses may include mistakes. <a href="https://support.google.com/websearch?p=ai_overviews">Learn more</a></p>'
+                '<button>Copy text</button><button>Good response</button><input type="text" aria-label="Ask anything"></div>'
+                "<h1>Web results</h1>%s"
+                '<a href="%s">Read more</a><a href="%s">History</a>'
+                "<h1>People also ask</h1><button>Is there a PS5 Pro coming out?</button><button>When was the PS5 Pro released?</button>"
+                "<h1>Web results</h1>%s%s%s%s%s%s%s"
+                '<h1>People also search for</h1><a href="/search?q=ps5+slim">PS5 Slim release date</a>'
+                "%s</body></html>"
+                % (e(query), head, L("https://www.playstation.com/en-us/ps5/ps5-pro/"), L(blog),
+                   result("PlayStation 5", "Wikipedia", "https://en.wikipedia.org › wiki › PlayStation_5",
+                          "https://en.wikipedia.org/wiki/PlayStation_5", "A PlayStation 5 Pro model was released on November 7, 2024."),
+                   L("https://en.wikipedia.org/wiki/PlayStation_5#:~:text=A%20PlayStation%205%20Pro"),
+                   L("https://en.wikipedia.org/wiki/PlayStation_5#History"),
+                   result("Getting started with PlayStation 5 Pro, out today", "PlayStation.Blog",
+                          "https://blog.playstation.com › 2024/11/07 › getting-star...", blog, "PlayStation 5 Pro launches worldwide today."),
+                   result("PS5 Pro is out November 7 at $699.99 USD : r/Games", "Reddit · r/Games", "https://www.reddit.com › r › Games",
+                          "https://www.reddit.com/r/Games/comments/1fdksd0/ps5_pro_is_out_november_7/", "PS5 Pro will launch on November 7, 2024."),
+                   result("PlayStation®5 Pro | Witness Play Unleashed (Slovakia)", "PlayStation", "https://www.playstation.com › en-sk › ps5-pro",
+                          "https://www.playstation.com/en-sk/ps5/ps5-pro/", "PS5 Pro enhanced games."),
+                   # (One its redirect sends to its own check for robots.)
+                   result("Sony PlayStation 5 Pro: Dočkáme sa na konci roka 2024 ...", "Heureka", "https://www.heureka.sk › playstati...",
+                          "/sorry/index?continue=x", "Niektorí odhadujú vydanie už v septembri 2024."),
+                   result("Sony PlayStation 5 Pro launch: Price, specs, release date", "CNBC",
+                          "https://www.cnbc.com › 2024/09/10 › sony-playstation...",
+                          "https://www.cnbc.com/2024/09/10/sony-playstation-5-pro-launch.html", "It will launch Nov. 7 for $700 in the U.S."),
+                   result("PS5 Pro release date, price and specs revealed", "Currys", "https://www.currys.co.uk › techtalk › playstation-news",
+                          "https://www.currys.co.uk/techtalk/playstation-news/ps5-pro.html", "The PS5 Pro is out now!"),
+                   result("Všetko o Sony PlayStation 5 Pro: Výkon, cena a dátum ...", "Nay.sk", "https://www.nay.sk › produkty › v...",
+                          "https://www.nay.sk/produkty/vsetko-o-ps5-pro", "PlayStation 5 Pro zlepší grafiku a zvuk."),
+                   tail.replace("Page Navigation", "Page navigation").replace("Footer Links", "Footer links")))
         if "nothing" in query:
             return self.send("<html><head><title>%s - Google Search</title></head><body>%s<p>Your search - <b>%s</b> - did not "
                              "match any documents.</p>%s</body></html>" % (e(query), head, e(query), tail))
@@ -962,6 +1033,44 @@ def test_google(ts5, program):
           paths[:3] == ["/search", "/save", "/search"] and "Než prejdete" not in out and "súborov cookie" not in out,
           "Google source: its question about cookies, in the language of the place, is answered with its button for no",
           f"rc {rc}\n{out}\n{err}\n{paths}")
+    rc, out, err, seen = search("consent first")
+    paths = [s[0].split("?")[0] for s in seen if not s[0].startswith("/favicon")]
+    check(rc == 0 and "PlayStation 5 Wikipedia: https://en.wikipedia.org/wiki/PlayStation_5" in out and
+          paths == ["/search", "/search"] and "Before you continue" not in out and "Reject all" not in out,
+          "Google source: its question about cookies in English, answered where the results then come into the same page",
+          f"rc {rc}\n{out}\n{err}\n{paths}")
+    # The page as it is since November 2026: every result behind an address of Google's own.
+    rc, out, err, seen = search("PlayStation 5 Pro goto")
+    text, _, tail = out.partition("Where the numbered links above lead:\n")
+    lead = tail.split("\n\n")[0].split("\n")
+    check(rc == 0 and [l.rsplit(": ", 1)[-1] for l in lead if l.startswith("[")] ==
+          ["https://www.playstation.com/en-us/ps5/ps5-pro/",
+           "https://en.wikipedia.org/wiki/PlayStation_5",
+           "https://blog.playstation.com/2024/11/07/getting-started-with-playstation-5-pro-out-today/",
+           "https://www.reddit.com/r/Games/comments/1fdksd0/ps5_pro_is_out_november_7/",
+           "https://www.playstation.com/en-sk/ps5/ps5-pro/",
+           "https://www.cnbc.com/2024/09/10/sony-playstation-5-pro-launch.html"],
+          "Google source: results behind Google's own addresses: where they lead is asked of Google (no page twice)",
+          f"rc {rc}\n{out}\n{err}")
+    check(any(l.endswith("] PlayStation 5 Wikipedia: https://en.wikipedia.org/wiki/PlayStation_5") for l in lead) and
+          any("] PlayStation 5 Pro: https://www.playstation.com/en-us/" in l for l in lead),
+          "Google source: each address with the link's words", lead)
+    asked = [s[0] for s in seen if s[0].startswith("/goto")]
+    check(len(asked) == 8 and len(set(asked)) == 8 and len([s for s in seen if s[0].startswith("/search")]) == 1,
+          "Google source: eight of them asked for, once each, and the results page once", [s[0][:40] for s in seen])
+    h = {k.lower(): v for k, v in next((s[1] for s in seen if s[0].startswith("/goto")), {}).items()}
+    check("Macintosh" in h.get("user-agent", "") and "/search?q=" in h.get("referer", "") and
+          "ts5" not in json.dumps(h).lower(), "Google source: asked for from its page, as Chrome on a Mac asks", h)
+    check("(Google did not say where 3 more of its results lead: the line under a result's title names its site.)" in out and
+          "https://www.currys.co.uk › techtalk › playstation-news" in text and "The PS5 Pro is out now!" in text,
+          "Google source: a result whose address is not known keeps its passage and its site's line, and that is said", out)
+    numbers = set(re.findall(r"\[\d+\]", text))
+    check(numbers and numbers == {l.split(" ", 1)[0] for l in lead if l.startswith("[")},
+          "Google source: only the listed links keep their numbers in the text", (sorted(numbers), lead))
+    check(text.split("\n\n", 1)[-1].startswith("AI Overview\n\nThe PlayStation 5 Pro[") and "button" not in text and
+          "text box" not in text and "People also ask" not in text and "Is there a PS5 Pro coming out?" not in text and
+          "PS5 Slim release date" not in out and "\n\n\n" not in out,
+          "Google source: no buttons, no boxes, no questions to press, nothing past the results", out)
     rc, out, err, seen = search("robot check")
     check(rc != 0 and "Google: it asked whether a robot is searching, which ts5 does not answer" in err and
           out.startswith("The search failed:"), "Google source: its check for robots is not answered", f"rc {rc}\n{out}\n{err}")
