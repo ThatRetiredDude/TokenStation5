@@ -68,8 +68,11 @@ class Tui:
                 break
             except OSError:
                 time.sleep(0.1)
+        # (env -i: tmux hands ts5-tui the environment this test was started in, and a runner's
+        # XDG_CONFIG_HOME would have it read another tui.conf than the one written above.)
+        env.setdefault("LANG", "C.UTF-8")
         self.sock = "ts5steps%d" % os.getpid()
-        cmd = "cd %s/proj && env %s TERM=xterm-256color %s --no-tmux --no-intro --url %s 2>%s/tui.err" % (
+        cmd = "cd %s/proj && env -i %s TERM=xterm-256color %s --no-tmux --no-intro --url %s 2>%s/tui.err" % (
             self.home, " ".join("%s='%s'" % (k, v) for k, v in env.items() if k in ("HOME", "PATH", "LANG")),
             tui, url, self.home)
         subprocess.run(["tmux", "-L", self.sock, "new-session", "-d", "-x", "150", "-y", "50", cmd], check=True)
