@@ -540,6 +540,22 @@ ts5-tui --url http://ps5.local:8081  # another one
   earlier calls give way: the model keeps their first lines and the newest
   results whole, and the chat marks each "left out later, for room". You
   still see them in full.
+- **A long task goes on**: a message that takes the model many tool calls
+  (installing and setting up a program, working through a folder) no longer
+  ends when the chat is full. Once its calls take the chat past the task
+  window (24,000 tokens; Settings → Task window, or `/tools window N`), or
+  the chat no longer fits the model's memory, the model writes notes on its
+  work: the plan and where it is, what is done and how it was checked, the
+  facts it found, what failed and why, the next step. The calls then go on
+  from those notes, your request word for word (and anything you typed
+  while it worked), and its latest step as it was. "Notes on the task" in
+  the chat marks the place, a click opens them, and everything above stays
+  on the screen and in the saved file. A window keeps a long task quick
+  (the model reads on from a short chat) and on track (a small model loses
+  the thread in a very long one); `/tools window off` writes notes only
+  when the chat is full. With Settings → Full chat on "stops" there are
+  none. If the notes can't be written, the task goes on with the chat as
+  it was.
 - **Web search**: Settings → Web search key takes a free key from
   [app.tavily.com](https://app.tavily.com). A model ts5-tui loads itself
   then searches the web when a question needs it (models that use tools;

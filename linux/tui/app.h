@@ -64,6 +64,10 @@ struct Config {
     // The steps of tool calls one message gets before ts5-tui asks whether
     // the model should go on (0: it is never asked).
     int tool_steps = 50;
+    // The task window: a message's tool calls that take the chat past this
+    // many tokens have the model write notes and go on from them (0: only
+    // when the chat no longer fits the model's context).
+    int task_window = 24000;
     // The file tools (read, list, change, write; files.h): off until the
     // user turns them on, and asking first.
     bool tool_files = false, files_ask = true;

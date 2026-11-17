@@ -152,6 +152,7 @@ void Config::load() {
         else if (k == "tool_terminal_ask") terminal_ask = v != "0";
         else if (k == "tool_browser_ask") browser_ask = v != "0";
         else if (k == "tool_steps") tool_steps = std::max(0, atoi(v.c_str()));
+        else if (k == "task_window") task_window = std::max(0, atoi(v.c_str()));
         else if (k == "browser_offered") browser_offered = v == "1";
         else if (k == "search_source" && (v == "web" || v == "wikipedia" || v == "grokipedia" || v == "both")) search_source = v;
         else if (k == "tool_files") tool_files = v == "1";
@@ -193,7 +194,7 @@ void Config::save() const {
              (tool_page ? "1" : "0") + "\ntool_terminal=" + (tool_terminal ? "1" : "0") + "\ntool_memory=" +
              (tool_memory ? "1" : "0") + "\ntool_browser=" + (tool_browser ? "1" : "0") + "\nbrowser=" + browser +
              "\ntools=" + (tools ? "1" : "0") + "\ntool_terminal_ask=" + (terminal_ask ? "1" : "0") +
-             "\ntool_browser_ask=" + (browser_ask ? "1" : "0") + "\ntool_steps=" + std::to_string(tool_steps) + "\nbrowser_offered=" + (browser_offered ? "1" : "0") + "\nsearch_source=" + search_source + "\ntool_files=" + (tool_files ? "1" : "0") +
+             "\ntool_browser_ask=" + (browser_ask ? "1" : "0") + "\ntool_steps=" + std::to_string(tool_steps) + "\ntask_window=" + std::to_string(task_window) + "\nbrowser_offered=" + (browser_offered ? "1" : "0") + "\nsearch_source=" + search_source + "\ntool_files=" + (tool_files ? "1" : "0") +
              "\ntool_files_ask=" + (files_ask ? "1" : "0") + "\ntool_github=" + (tool_github ? "1" : "0") +
              "\ntool_github_ask=" + (github_ask ? "1" : "0") + "\nsandbox=" + (sandbox ? "1" : "0") +
              "\nsandbox_network=" + (sandbox_net ? "1" : "0") + "\nsandbox_folder=" + sandbox_dir + "\nsandbox_box=" +

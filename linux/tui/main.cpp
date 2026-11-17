@@ -1963,6 +1963,7 @@ ChatRequest chat_request() {
     rq.max_tokens = g->cfg.max_tokens;
     rq.n_ctx = sv.n_ctx;
     rq.summarize = g->cfg.summarize;
+    rq.window = g->cfg.task_window;
     const bool tools = g->cfg.tools_on();  // the one switch over them all
     rq.tools.web = tools && g->cfg.tool_web;
     if (sv.encyclopedias) rq.search_source = g->cfg.search_source;
@@ -3263,6 +3264,26 @@ std::vector<SetRow> settings_rows() {
             for (int i = 0; i < 5; i++)
                 if (g->cfg.tool_steps == steps[i]) at = i;
             g->cfg.tool_steps = steps[(at + (d < 0 ? 4 : 1)) % 5];
+            save();
+        };
+        r.push_back(x);
+    }
+    if (tools_shown && c.summarize) {
+        // A long task: where in the chat the model writes notes on its work
+        // and goes on from them.
+        SetRow x{"Task window", c.task_window > 0 ? with_commas(c.task_window) + " tokens" : "the whole context",
+                 c.task_window > 0
+                     ? fmt("a run of tool calls that takes the chat past %s tokens has the model write notes on its work "
+                           "and go on from them, with your request word for word: a long task stays quick and on "
+                           "track; the chat stays here to read",
+                           with_commas(c.task_window).c_str())
+                     : "the model writes notes on a long task only when the chat no longer fits its memory for a chat"};
+        x.change = [save](int d) {
+            static const int sizes[] = {8000, 16000, 24000, 32000, 48000, 64000, 0};
+            int at = 2;
+            for (int i = 0; i < 7; i++)
+                if (g->cfg.task_window == sizes[i]) at = i;
+            g->cfg.task_window = sizes[(at + (d < 0 ? 6 : 1)) % 7];
             save();
         };
         r.push_back(x);
@@ -4754,6 +4775,25 @@ void run_command(const std::string &line) {
                 f.save();
                 show_toast(n > 0 ? fmt("Tool steps: after %d for one message, ts5-tui asks whether the model should go on", f.tool_steps)
                                  : "Tool steps: no limit (a model that only repeats itself is still stopped)",
+                           g->th->accent, 4);
+            }
+        } else if (name == "window") {
+            // "/tools window 32000": where a long task's notes are due;
+            // "/tools window off": only when the chat is full.
+            found = true;
+            const bool off = to == "off" || to == "none" || to == "0";
+            const int n = off ? 0 : atoi(to.c_str());
+            if (to.empty() || (!off && n < 2000)) {
+                show_toast(f.task_window > 0 ? fmt("Task window: notes at %s tokens  (/tools window N, 2000 or more, or off)",
+                                                   with_commas(f.task_window).c_str())
+                                             : "Task window: the whole context  (/tools window N)",
+                           g->th->accent, 4);
+            } else {
+                f.task_window = n;
+                f.save();
+                show_toast(n > 0 ? fmt("Task window: past %s tokens in a run of tool calls, the model writes notes and goes on from them",
+                                       with_commas(n).c_str())
+                                 : "Task window: the whole context (notes only when the chat is full)",
                            g->th->accent, 4);
             }
         } else if ((name == "on" || name == "off") && to.empty()) {

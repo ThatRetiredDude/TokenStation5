@@ -46,7 +46,9 @@ struct Msg {
     bool full = false;    // the server refused it: the chat no longer fits its context
     // A summary: the first of the messages before it that the model still
     // gets as they were, the chat's tokens before it and (roughly) after,
-    // and why it was written (0 nearly full, 1 full, 2 asked for).
+    // and why it was written (0 nearly full, 1 full, 2 asked for; notes in
+    // the middle of a message's tool calls: 3 the chat passed the task
+    // window, 4 the server refused it as full).
     int keep_from = -1, sum_before = 0, sum_after = 0, sum_why = 0;
     // An assistant turn's tool calls: ts5-tui runs each, adds a tool message
     // with what it gave back, and the model goes on in a new assistant turn.
@@ -169,6 +171,10 @@ struct ChatRequest {
     int max_tokens = 0;
     int n_ctx = 0;        // the loaded model's context, 0 unknown
     bool summarize = true;  // a chat that fills up is summarized and goes on (Settings)
+    // The task window: a message's run of tool calls that takes the chat
+    // past this many tokens has the model write notes on its work and go on
+    // from them (0: only when the context is nearly full).
+    int window = 0;
     ToolSwitches tools;     // the tools the model is given (Settings)
     bool ts5 = false;       // the server is ts5: it takes "web_search"
     std::string search_source;  // the encyclopedia a search without a key goes to ("": the server's own)

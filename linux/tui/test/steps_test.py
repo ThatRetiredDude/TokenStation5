@@ -54,7 +54,9 @@ class Tui:
         self.conf = os.path.join(conf, "tui.conf")
         url = "http://127.0.0.1:%d" % self.port
         with open(self.conf, "w") as f:
-            f.write("url=%s\nsandbox=0\nintro=0\ntool_terminal_ask=0\n%s" % (url, conf_lines))
+            # (task_window=0: no notes in the middle of a message here, task_test.py has those. The
+            # fake's "loop" counts its rounds from the results it is sent, and would start again.)
+            f.write("url=%s\nsandbox=0\nintro=0\ntool_terminal_ask=0\ntask_window=0\n%s" % (url, conf_lines))
         env = {k: v for k, v in os.environ.items() if not k.startswith("TS5_") and not k.startswith("XDG_")}
         # (A context that holds every round of a message: one that fills in the middle of a message ends it.)
         env.update(HOME=self.home, FAKE_REQUESTS=self.reqs, FAKE_SPEED="5000", FAKE_CTX="262144")

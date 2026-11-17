@@ -41,7 +41,7 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/connectors", "", "the Connectors page: GitHub, connected with a QR code (/github too)"},
         {"/feedback", "WHAT WENT WRONG + YOUR EMAIL FOR A REPLY", "then Enter: you read the report first; never public"},
         {"/think", "on|off|auto", "thinking before answering"},
-        {"/tools", "[on|off|NAME on|off|steps N]", "the model's tools: search, pages, terminal, files, memory, browser (each has a switch)"},
+        {"/tools", "[on|off|NAME on|off|steps N|window N]", "the model's tools: search, pages, terminal, files, memory, browser (each has a switch)"},
         {"/browser", "[auto|obscura|chromium|text|PATH]", "the program the model's browser tool shows pages with"},
         {"/sandbox", "[on|off|network|no-network|box on|box off|reset|folder DIR]", "where the model's commands run: the sandbox, its network, its own Linux system"},
         {"/mcp", "[add NAME PROGRAM…|remove NAME|NAME off|ask|allow|restart|only TOOL…|reload]",
@@ -482,18 +482,24 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
         if (m.role == "summary") {
             Line h;
             h.add("▌ ", Style(t.dim, kDefault, BOLD));
-            h.add("Summary", Style(t.dim, kDefault, BOLD));
+            // (Notes in the middle of a task: sum_why 3 and 4.)
+            const bool task = m.sum_why >= 3;
+            h.add(task ? "Notes on the task" : "Summary", Style(t.dim, kDefault, BOLD));
             out.push_back(h);
             std::string content, reasoning;
             split_think(m, content, reasoning);
-            const std::string because = m.sum_why == 1 ? "The chat was full" : m.sum_why == 2 ? "You asked for a summary"
-                                                                                               : "The chat was nearly full";
+            const std::string because = m.sum_why == 1   ? "The chat was full"
+                                        : m.sum_why == 2 ? "You asked for a summary"
+                                        : m.sum_why == 3 ? "The chat grew long in the middle of this task"
+                                        : m.sum_why == 4 ? "The chat was full in the middle of this task"
+                                                         : "The chat was nearly full";
             if (!m.done) {
                 Line wl;
                 wl.add("  ", Style());
                 wl.add("●", Style(mix(t.bg, t.accent2, 0.3 + 0.7 * (0.5 + 0.5 * sin(now * 5))), kDefault, BOLD));
-                wl.add(fmt(m.sum_why == 2 ? " %s: the model is writing it, to go on from… %.0f s"
-                                          : " %s: the model is writing a summary of it, to go on from… %.0f s",
+                wl.add(fmt(task ? " %s: the model is writing notes on its work, to go on from… %.0f s"
+                           : m.sum_why == 2 ? " %s: the model is writing it, to go on from… %.0f s"
+                                            : " %s: the model is writing a summary of it, to go on from… %.0f s",
                            because.c_str(), now - m.t0),
                        Style(t.accent2, kDefault, ITALIC));
                 out.push_back(wl);
@@ -508,8 +514,10 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
                 pv.add("    " + last, Style(mix(t.dim, t.bg, 0.35), kDefault, ITALIC));
                 out.push_back(pv);
             } else if (m.stopped || !m.error.empty()) {
-                wrap(out, {{m.stopped ? std::string("Stopped: no summary was written, and the chat is as it was.")
-                                      : "No summary was written: " + m.error + ". The chat is as it was.",
+                wrap(out, {{m.stopped ? std::string(task ? "Stopped: no notes were written, and the chat is as it was."
+                                                         : "Stopped: no summary was written, and the chat is as it was.")
+                            : (task ? "No notes were written: " : "No summary was written: ") + m.error +
+                                  ". The chat is as it was.",
                             Style(t.bad)}},
                      w, 2, "✖ ", Style(t.bad, kDefault, BOLD), "  ");
             } else {
@@ -519,15 +527,21 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
                             (c.msgs[k].role == "assistant" && c.msgs[k].error.empty() && !c.msgs[k].content.empty());
                 std::string say = because;
                 if (m.sum_before > 0) say += " (" + thousands(m.sum_before) + " tokens)";
-                say += m.sum_why == 2 ? ". " : ", so the model wrote a summary of it. ";
-                say += "From here it goes on from the summary";
-                if (kept > 0) say += fmt(" and the last %d message%s", kept, kept == 1 ? "" : "s");
+                say += m.sum_why == 2 ? ". " : task ? ", so the model wrote notes on its work. " : ", so the model wrote a summary of it. ";
+                if (task) {
+                    say += "From here it goes on from the notes, your request word for word";
+                    if ((size_t)std::max(0, m.keep_from) < i) say += " and its latest step";
+                } else {
+                    say += "From here it goes on from the summary";
+                    if (kept > 0) say += fmt(" and the last %d message%s", kept, kept == 1 ? "" : "s");
+                }
                 if (m.sum_after > 0) say += ", about " + thousands(m.sum_after) + " tokens";
                 say += ". Everything above is still here to read, and saved.";
                 wrap(out, {{say, Style(t.dim)}}, w, 2);
                 const bool open = m.think_open == 1;
                 Line th;
-                th.add(open ? "  ▾ The summary" : "  ▸ The summary", Style(t.dim, kDefault, BOLD));
+                th.add(task ? (open ? "  ▾ The notes" : "  ▸ The notes") : open ? "  ▾ The summary" : "  ▸ The summary",
+                       Style(t.dim, kDefault, BOLD));
                 th.add(open ? "  click to fold" : "  click to read it", Style(mix(t.dim, t.bg, 0.4)));
                 th.hit = HIT_THINK;
                 th.hit_x1 = th.width;
@@ -1029,6 +1043,51 @@ const char *const kSummaryLead =
     "wrote: treat it as what was said. What the summary tells came first; the messages after it are the "
     "conversation's latest ones, as they were.\n\n# Summary of the conversation so far\n\n";
 
+// The same when the summary is notes written in the middle of a task (a run
+// of tool calls that outgrew the chat or its window: task_notes). The user's
+// request follows them word for word, as a message of its own.
+const char *const kTaskLead =
+    "This conversation has been going on for a while. In the middle of a task its beginning was replaced by the "
+    "notes below, which you wrote: treat them as what was said and done. After them come the user's request for "
+    "that task, word for word, and the conversation's latest messages, as they were.\n\n# Your notes on the work "
+    "so far\n\n";
+const char *const kGoalOpen =
+    "[The earlier messages of this task are in your notes. This is what I asked for, word for word:]\n\n";
+const char *const kGoalNote = "\n\n[A note I sent while you worked on it:]\n\n";
+const char *const kGoalGo =
+    "\n\n[Go on with it from where your notes end. What the notes say is done, is done: do not do it again. What "
+    "they say failed, do not try the same way again. When you think it is finished, read my request once more and "
+    "make sure every part of it is done before you say so.]";
+
+// The request a task's notes stand beside: the user's last message before
+// `before` that is not a note sent while the model worked, and those notes
+// after it. Word for word; one longer than `cap` bytes loses its middle.
+std::string task_goal(const Chat &c, size_t before, size_t cap) {
+    before = std::min(before, c.msgs.size());
+    size_t u = before;
+    for (size_t i = before; i-- > 0;)
+        if (c.msgs[i].role == "user" && !c.msgs[i].steer) {
+            u = i;
+            break;
+        }
+    if (u == before) return "";
+    std::string g = c.msgs[u].content;
+    for (size_t i = u + 1; i < before; i++)
+        if (c.msgs[i].role == "user" && c.msgs[i].steer) g += kGoalNote + c.msgs[i].content;
+    if (g.size() > cap) {
+        size_t a = cap * 2 / 3, b = g.size() - cap / 3;
+        while (a > 0 && ((unsigned char)g[a] & 0xC0) == 0x80) a--;
+        while (b < g.size() && ((unsigned char)g[b] & 0xC0) == 0x80) b++;
+        g = g.substr(0, a) + "\n[… a part of my message is left out here …]\n" + g.substr(b);
+    }
+    return g;
+}
+// How long the request may be beside the notes: 6,000 tokens or so, a
+// quarter of the context at most.
+size_t goal_cap(const ChatRequest &rq) {
+    return rq.n_ctx > 0 ? (size_t)std::min(18000, std::max(1500, rq.n_ctx * 3 / 4)) : 18000;
+}
+
 std::string role_json(const std::string &role, const std::string &content) {
     return "{\"role\":\"" + role + "\",\"content\":" + ts5::json_escape(content) + "}";
 }
@@ -1172,8 +1231,15 @@ std::string body_for(Chat &c, const ChatRequest &rq, const char *last = nullptr)
         int sum = -1;
         const size_t end = c.msgs.empty() ? 0 : c.msgs.size() - 1;
         const std::vector<size_t> idx = sent_msgs(c, end, &sum);
-        if (sum >= 0) system += (system.empty() ? "" : "\n\n") + (kSummaryLead + c.msgs[sum].content);
+        const bool task = sum >= 0 && c.msgs[sum].sum_why >= 3;
+        if (sum >= 0) system += (system.empty() ? "" : "\n\n") + ((task ? kTaskLead : kSummaryLead) + c.msgs[sum].content);
         if (!system.empty()) msgs = role_json("system", system);
+        // Notes written in the middle of a task: what was asked for goes
+        // after them as it was said, whatever the notes made of it.
+        if (task) {
+            const std::string goal = task_goal(c, (size_t)sum, goal_cap(rq));
+            if (!goal.empty()) msgs += "," + role_json("user", kGoalOpen + goal + kGoalGo);
+        }
         size_t last_user = 0, last_tool = (size_t)-1;
         for (size_t i : idx) {
             if (c.msgs[i].role == "user") last_user = i;
@@ -1593,6 +1659,9 @@ int ask_more(Chat *c, const std::string &used) {
 // call run, its result added to the chat, and another turn of the model's.
 // A note the user sends meanwhile (steer_in) goes in before the next turn,
 // and the answer goes on from it as from a new message.
+bool task_too_long(Chat &c, const ChatRequest &rq);
+bool task_notes(Chat *c, const ChatRequest &rq, int why);
+
 void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
     const char *last = nullptr;  // this turn was told to call no tool, in these words
     bool said_no = false;        // the user said no to a command of this message's
@@ -1603,6 +1672,8 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
     // calls in a row brought nothing new (kStale).
     std::map<std::string, std::string> seen;
     int stale = 0;
+    bool no_notes = false;  // notes on the task could not be written: not tried again for this message
+    bool refused_once = false;  // a turn the server refused went again after notes
     for (int round = 0;; round++, turns++) {
         if (c->cancel.load()) break;
         if (steer_in(c, rq)) {
@@ -1622,6 +1693,38 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
         }
         // Cut short for a note: it goes in, and the model goes on.
         if (steered) continue;
+        // The server refused the turn in the middle of the message's calls,
+        // the chat being full (the count on this side is a guess): the
+        // model writes notes on the work so far, and the turn goes again
+        // from them. Once a message; where it can't be, the turn's error
+        // stands as before.
+        if (rq.summarize && !no_notes && !refused_once && !c->cancel.load()) {
+            bool refused = false;
+            {
+                std::lock_guard<std::mutex> l(c->mu);
+                const size_t n = c->msgs.size();
+                refused = n >= 2 && c->msgs[n - 1].full && c->msgs[n - 2].role == "tool";
+                if (refused) c->msgs.pop_back();
+            }
+            if (refused) {
+                refused_once = true;
+                if (!task_notes(c, rq, 4)) break;
+                seen.clear();
+                stale = 0;
+                {
+                    std::lock_guard<std::mutex> l(c->mu);
+                    Msg a;
+                    a.role = "assistant";
+                    a.model = rq.model;
+                    a.t0 = now_s();
+                    c->msgs.push_back(a);
+                }
+                body = body_for(*c, rq, last);
+                round--;
+                turns--;
+                continue;
+            }
+        }
         std::vector<ToolUse> calls;
         {
             std::lock_guard<std::mutex> l(c->mu);
@@ -1757,6 +1860,20 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
         }
         if (c->cancel.load()) break;
         make_room(*c, rq);
+        // A long task: past the task window, or with the chat nearly full
+        // even so, the model writes notes on its work and goes on from
+        // them, the user's request and its latest step.
+        if (!no_notes && task_too_long(*c, rq)) {
+            if (task_notes(c, rq, 3)) {
+                // (What the earlier calls gave back is no longer the
+                // model's to read: one made again is no repeat.)
+                seen.clear();
+                stale = 0;
+            } else {
+                if (c->cancel.load()) break;
+                no_notes = true;
+            }
+        }
         {
             std::lock_guard<std::mutex> l(c->mu);
             Msg a;
@@ -1778,7 +1895,22 @@ void run_answer(Chat *c, ChatRequest rq, std::string body) {
     c->running = false;
 }
 
-std::string summary_ask(int words, const std::string &focus, bool again, bool more);
+// The tokens a message's run of tool calls may take the chat to before the
+// model writes notes on it: the task window (Settings), and room for an
+// answer in the context at the latest. 0: neither is known.
+int task_limit(const ChatRequest &rq) {
+    int limit = rq.n_ctx > 0 ? rq.n_ctx - std::max(rq.n_ctx / 8, 1024) : 0;
+    if (rq.window > 0) limit = limit > 0 ? std::min(limit, rq.window) : rq.window;
+    return limit;
+}
+// A summary may run to a sixth of the context (512 to 3,072 tokens); a
+// task's notes to a sixth of what its window holds.
+int summary_out_max(const ChatRequest &rq, bool task) {
+    const int room = task && task_limit(rq) > 0 ? task_limit(rq) : rq.n_ctx;
+    return room > 0 ? std::min(3072, std::max(512, room / 6)) : 2048;
+}
+
+std::string summary_ask(int words, const std::string &focus, bool again, bool more, bool task);
 std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::string &then, const std::string &focus,
                          int why, int used, int out_max, double room, int *keep_from, int *kept);
 
@@ -1791,7 +1923,6 @@ std::string summary_body(const ChatRequest &rq, const std::string &msgs, int out
            ",\"tool_choice\":\"none\",\"web_search\":false,\"chat_template_kwargs\":{\"enable_thinking\":false}}";
 }
 
-// The summary's answer, then the message that waited for it.
 // Whether text speaks of a summary (summary, summarize, summarise).
 bool speaks_of_summary(const std::string &text) {
     std::string l = text;
@@ -1860,7 +1991,10 @@ std::string without_own_request(const std::string &notes) {
     return out.size() * 3 < notes.size() ? notes : out;
 }
 
-void run_summary(Chat *c, ChatRequest rq, std::string msgs, std::string then, std::string focus, int out_max) {
+// Writes the summary into the chat's last message (a summary's). True when
+// the chat goes on from it; false with the chat as it was.
+bool write_summary(Chat *c, const ChatRequest &rq, std::string msgs, const std::string &then, const std::string &focus,
+                   int out_max) {
     // The chat's size is a guess here (the server counts, this side only
     // estimates): a request the server finds too long goes again with more
     // left out, twice at most.
@@ -1897,6 +2031,8 @@ void run_summary(Chat *c, ChatRequest rq, std::string msgs, std::string then, st
             // model that thinks anyway counts its thinking too.)
             const int rough = rough_tokens(content);
             m.sum_after += (m.gen_tokens > 0 ? std::min(m.gen_tokens, rough) : rough) + 60;
+            // (A task's notes: the request that goes beside them.)
+            if (m.sum_why >= 3) m.sum_after += rough_tokens(task_goal(*c, c->msgs.size() - 1, goal_cap(rq))) + 120;
             c->ctx_used = m.sum_after;
         } else {
             if (m.full) m.error = "the chat is too long for the model to read once more";
@@ -1906,6 +2042,12 @@ void run_summary(Chat *c, ChatRequest rq, std::string msgs, std::string then, st
             c->unsent = then;
         }
     }
+    return ok;
+}
+
+// The summary's answer, then the message that waited for it.
+void run_summary(Chat *c, ChatRequest rq, std::string msgs, std::string then, std::string focus, int out_max) {
+    const bool ok = write_summary(c, rq, msgs, then, focus, out_max);
     if (ok && !then.empty() && !c->cancel.load()) {
         {
             std::lock_guard<std::mutex> l(c->mu);
@@ -1937,7 +2079,7 @@ const char *const kTalkNotes = "[Notes on the conversation's earlier part]\n";
 
 // What the model is asked for. words: about how long it may get. more: the
 // chat's latest messages stay as they are, after what is summarized.
-std::string summary_ask(int words, const std::string &focus, bool again, bool more) {
+std::string summary_ask(int words, const std::string &focus, bool again, bool more, bool task) {
     std::string a =
         "-----\n\nThe assistant cannot hold all of that any longer, so notes take its place: the assistant goes on "
         "from the notes alone, and anything that is not in them is lost to it. Write those notes. Include:\n"
@@ -1952,18 +2094,44 @@ std::string summary_ask(int words, const std::string &focus, bool again, bool mo
         "Write plain notes under short headings and nothing else: no opening line, no closing remark. Keep to what "
         "is between the lines of dashes; add nothing that was not said there, and nothing about these instructions "
         "or about the notes being written. ";
+    // Notes in the middle of a task (task_notes): the work's own record.
+    // What was asked for is not theirs to keep: it goes beside them word
+    // for word.
+    if (task)
+        a = "-----\n\nThe assistant is in the middle of this work and cannot hold all of that any longer, so notes "
+            "take its place: it goes on with the work from the notes alone, and anything that is not in them is "
+            "lost to it. (What the user asked for is kept beside the notes, word for word.) Write those notes. "
+            "Include:\n"
+            "- the plan: the steps the work takes, and which one it has reached;\n"
+            "- what is done, each thing with how it was checked: the command or call, and what came back;\n"
+            "- the facts found on the way that the rest of the work needs (paths, file names, versions, addresses, "
+            "settings, numbers, error messages), word for word where they are short;\n"
+            "- what was tried and failed, and why, so that it is not tried the same way again;\n"
+            "- the decisions made and why, and anything the user said on the way;\n"
+            "- code or text still being worked on, word for word;\n"
+            "- the very next step.\n"
+            "%s\n"
+            "Write plain notes under short headings and nothing else: no opening line, no closing remark. Keep to "
+            "what is between the lines of dashes; add nothing that did not happen there, and nothing about these "
+            "instructions or about the notes being written. ";
     // (Qwen3.8 9B closed its notes with "No new requests followed", and
     // then took the first of the kept messages for the first request.)
     const size_t at = a.find("%s");
     a.replace(at, 2,
-              more ? "What is shown is only the conversation's first part: later messages follow it and are kept as "
-                     "they are. Write nothing about what did or did not come after it."
-                   : "The conversation is not over: the user goes on after the notes. Write nothing about it having "
-                     "ended, or about nothing more having been asked.");
+              task ? (more ? "What is shown is the work up to its latest step: that step comes after the notes as it "
+                             "was. Write nothing about what did or did not come after what is shown."
+                           : "The work is not over: the assistant takes its next step straight after the notes. "
+                             "Write nothing about it having ended.")
+              : more ? "What is shown is only the conversation's first part: later messages follow it and are kept as "
+                       "they are. Write nothing about what did or did not come after it."
+                     : "The conversation is not over: the user goes on after the notes. Write nothing about it having "
+                       "ended, or about nothing more having been asked.");
     a += fmt("Use up to about %d words; shorter is better where nothing is lost.", words);
     if (again)
-        a += " The conversation opens with notes on its earlier part: carry over everything in them that still "
-             "matters.";
+        a += task ? " What is shown opens with notes on the work before it: carry over everything in them that "
+                    "still matters."
+                  : " The conversation opens with notes on its earlier part: carry over everything in them that still "
+                    "matters.";
     if (!focus.empty()) a += "\nTake special care to keep: " + focus;
     return a;
 }
@@ -2022,7 +2190,7 @@ void complete(Chat &c, const ChatRequest &rq) {
         else if (cmd == "/download") pool = rq.catalog_names;
         else if (cmd == "/think") pool = {"on", "off", "auto"};
         else if (cmd == "/tools") pool = {"on", "off", "ask", "search", "pages", "terminal", "browser", "memory", "search on",
-                                          "search off", "search web", "search google", "search wikipedia", "search grokipedia", "search both", "steps 50", "steps off", "pages on", "pages off", "terminal on", "terminal off",
+                                          "search off", "search web", "search google", "search wikipedia", "search grokipedia", "search both", "steps 50", "steps off", "window 24000", "window off", "pages on", "pages off", "terminal on", "terminal off",
                                           "terminal ask", "terminal allow", "browser on", "browser off", "browser ask",
                                           "browser allow", "files", "files on", "files off", "files ask", "files allow",
                                           "memory on", "memory off"};
@@ -2175,7 +2343,8 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
     // The last turns stay as they were: whole ones (a turn starts at a
     // message of the user's), a quarter of the context at most, and never
     // the first message, so there is something to summarize.
-    double keep_max = (rq.n_ctx > 0 ? rq.n_ctx / 4.0 : 2048) * room;
+    const bool task = why >= 3;
+    double keep_max = (task && task_limit(rq) > 0 ? task_limit(rq) / 4.0 : rq.n_ctx > 0 ? rq.n_ctx / 4.0 : 2048) * room;
     // The message that comes after the summary has to fit beside them, with
     // its answer: one the server refused is at least as long as the room
     // that was left.
@@ -2186,7 +2355,7 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
     }
     size_t first_kept = idx.size();
     double tail = 0, kept = 0;
-    for (size_t k = idx.size(); k-- > 1;) {
+    for (size_t k = idx.size(); !task && k-- > 1;) {
         tail += tok[k] * scale;
         if (tail > keep_max) break;
         if (c.msgs[idx[k]].role == "user") {
@@ -2194,19 +2363,37 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
             kept = tail;
         }
     }
+    // In the middle of a task there is no such turn to keep: the model's
+    // latest step stays as it was, its calls and what they gave back, which
+    // it has not read yet. (Not after the server refused the chat, why 4:
+    // that step may be what is too long.)
+    if (why == 3) {
+        size_t k = idx.size();
+        while (k > 0 && c.msgs[idx[k - 1]].role == "tool") k--;
+        if (k > 1 && k < idx.size() && c.msgs[idx[k - 1]].role == "assistant" && !c.msgs[idx[k - 1]].calls.empty()) {
+            for (size_t j = k - 1; j < idx.size(); j++) tail += tok[j] * scale;
+            if (tail <= keep_max) {
+                first_kept = k - 1;
+                kept = tail;
+            }
+        }
+    }
+    // Notes of a task before these: the request that stands beside them is
+    // part of what the new notes are written from.
+    const std::string goal = sum >= 0 && c.msgs[sum].sum_why >= 3 ? task_goal(c, (size_t)sum, goal_cap(rq)) : "";
     // The notes may get about half as long as what they stand for, 100
     // words at least: under that the models drop a short text's own words
     // ("the assistant wrote three lines" for a haiku).
     size_t bytes = sum >= 0 ? c.msgs[sum].content.size() : 0;
     for (size_t k = 0; k < first_kept; k++) bytes += text[k].size();
     const std::string ask = summary_ask(std::min(out_max / 2, std::max(100, (int)(bytes / 12))), focus, sum >= 0,
-                                        first_kept < idx.size());
+                                        first_kept < idx.size(), task);
     // The request has to fit the context itself: the longest messages lose
     // their middles until it does.
     if (rq.n_ctx > 0) {
         const double limit = (rq.n_ctx - out_max - 256) * room;
         for (int round = 0; round < 200; round++) {
-            double need = lead + rough_tokens(ask) + 40;
+            double need = lead + rough_tokens(ask) + 40 + (goal.empty() ? 0 : rough_tokens(goal));
             size_t big = 0;
             for (size_t k = 0; k < first_kept; k++) {
                 need += rough_tokens(text[k]);
@@ -2222,6 +2409,7 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
     }
     std::string talk = kTalkOpen;
     if (sum >= 0) talk += kTalkNotes + c.msgs[sum].content + "\n\n";
+    if (!goal.empty()) talk += "[User]\n" + goal + "\n\n";
     for (size_t k = 0; k < first_kept; k++) {
         const std::string &role = c.msgs[idx[k]].role;
         talk += (role == "tool" ? "" : role == "assistant" ? "[Assistant]\n" : "[User]\n") + text[k] + "\n\n";
@@ -2237,6 +2425,52 @@ std::string summary_msgs(Chat &c, size_t end, const ChatRequest &rq, const std::
     return role_json("user", talk + ask);
 }
 
+// Whether a message's run of tool calls has taken the chat past where notes
+// are due (task_limit), with something new to write them from: two turns
+// since the last notes, of which the latest stays as it is.
+bool task_too_long(Chat &c, const ChatRequest &rq) {
+    if (!rq.summarize) return false;
+    const int limit = task_limit(rq);
+    if (limit <= 0) return false;
+    std::lock_guard<std::mutex> l(c.mu);
+    if (c.ctx_used <= 0) return false;
+    // (The count the last answer came with, and the results added since.)
+    int fresh = 0;
+    for (size_t i = c.msgs.size(); i > 0 && c.msgs[i - 1].role == "tool"; i--) {
+        const Msg &m = c.msgs[i - 1];
+        fresh += rough_tokens(m.left_out ? result_start(m.content) : m.content);
+    }
+    if (c.ctx_used + fresh <= limit) return false;
+    int sum = -1, turns = 0;
+    for (size_t i : sent_msgs(c, c.msgs.size(), &sum)) turns += c.msgs[i].role == "assistant" && (int)i > sum;
+    return turns >= 2;
+}
+
+// Notes in the middle of a message: the model writes down where its work
+// stands (summary_ask's task words), and the message's calls go on from the
+// notes, the user's request word for word (body_for) and, for why 3, the
+// latest step as it was. why: 3 the chat passed the task window or is
+// nearly full, 4 the server refused it as full. Runs in the answer's own
+// thread. False when no notes were written: the chat is as it was.
+bool task_notes(Chat *c, const ChatRequest &rq, int why) {
+    const int out_max = summary_out_max(rq, true);
+    std::string msgs;
+    {
+        std::lock_guard<std::mutex> l(c->mu);
+        int fresh = 0;
+        for (size_t i = c->msgs.size(); i > 0 && c->msgs[i - 1].role == "tool"; i--) fresh += rough_tokens(c->msgs[i - 1].content);
+        Msg m;
+        m.role = "summary";
+        m.model = rq.model;
+        m.t0 = now_s();
+        m.sum_before = c->ctx_used + fresh;
+        m.sum_why = why;
+        msgs = summary_msgs(*c, c->msgs.size(), rq, "", "", why, m.sum_before, out_max, 1.0, &m.keep_from, &m.sum_after);
+        c->msgs.push_back(m);
+    }
+    return write_summary(c, rq, msgs, "", "", out_max);
+}
+
 }  // namespace
 
 bool chat_summarize(Chat &c, const ChatRequest &rq, const std::string &then, const std::string &focus, int why,
@@ -2246,8 +2480,7 @@ bool chat_summarize(Chat &c, const ChatRequest &rq, const std::string &then, con
         return false;
     }
     if (c.worker.joinable()) c.worker.join();
-    // The summary may run to a sixth of the context (512 to 3,072 tokens).
-    const int out_max = rq.n_ctx > 0 ? std::min(3072, std::max(512, rq.n_ctx / 6)) : 2048;
+    const int out_max = summary_out_max(rq, false);
     std::string msgs;
     {
         std::lock_guard<std::mutex> l(c.mu);
