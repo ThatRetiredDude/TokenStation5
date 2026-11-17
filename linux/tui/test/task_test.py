@@ -252,9 +252,9 @@ def main():
         got = t.requests()[-1]["results"][-1]
         check("no line has all of those words: these have the most of them" in got and "$ echo step 7 | tee" in got and
               "echo step 8 " not in got, "no line with every word: the lines with the most of them", got)
-        t.type('call search_earlier ;; {"query": "zebra"}')
+        t.type('call search_earlier ;; {"query": "walrus"}')
         t.keys("Enter")
-        check(t.wait("looks back in the chat for: zebra") and t.idle(), "search_earlier, a word that is nowhere", t.screen())
+        check(t.wait("looks back in the chat for: walrus") and t.idle(), "search_earlier, a word that is nowhere", t.screen())
         check("No line in the chat's earlier part has any of those words" in t.requests()[-1]["results"][-1],
               "nothing found is said so", t.requests()[-1]["results"][-1])
         # The setting.
@@ -269,6 +269,36 @@ def main():
         t.keys("Enter")
         check(t.wait("Task window: the whole context") and t.saved().get("task_window") == "0", "/tools window off",
               (t.screen(), t.saved().get("task_window")))
+    finally:
+        t.close()
+
+    # ---- An answer straight from the notes (the turn that would answer is refused as full, notes
+    # are written, the answer comes with no call after them): ts5-tui asks about it, once.
+    t = Tui(tui, "task_window=0\n", {"FAKE_FULL_ONCE": "5"})
+    try:
+        check(t.idle(), "ts5-tui is up (an answer from the notes)", t.screen())
+        t.type("task 4")
+        t.keys("Enter")
+        check(t.wait("The tool gave me this: exit code 0", 60) and t.idle(), "an answer straight from the notes is asked about",
+              t.screen())
+        r = t.requests()
+        notes = [x for x in r if x["notes"]]
+        asked = [x for x in r if x["users"] and x["users"][-1].startswith("[A check by the program, not a message from me.")]
+        check(len(notes) == 1 and len(asked) == 2 and r.index(asked[0]) == r.index(notes[0]) + 2,
+              "once: after the answer that followed the notes", [x["users"] for x in r])
+        check(len(asked[1]["results"]) == 1 and asked[1]["results"][0].strip().endswith("4"),
+              "the model reads the value again and answers once more", asked[1]["results"])
+        check(t.steps() == ["step %d" % k for k in range(1, 5)], "no step ran twice", t.steps())
+        scr = t.screen()
+        check("A check: that answer came straight from the notes on the task" in scr and "[A check by the program" not in scr,
+              "the chat says so in a line, without the question's words", scr)
+        saved = t.chat_file()
+        check('"check":true' in saved and '"why":4' in saved, "saved with the chat", saved[-900:])
+        t.type("hello again")
+        t.keys("Enter")
+        check(t.wait("You said: hello again") and t.idle(), "the chat goes on", t.screen())
+        check(len([x for x in t.requests() if x["users"] and x["users"][-1].startswith("[A check by the program")]) == 2,
+              "and the next message is not asked about", t.requests()[-1]["users"])
     finally:
         t.close()
 

@@ -189,6 +189,7 @@ bool save_chat(Chat &c, std::string &why) {
             body += std::string(n++ ? ",\n" : "\n") + "{\"user\":" + (user ? "true" : "false") +
                     ",\"text\":" + ts5::json_escape(m.content);
             if (user && m.steer) body += ",\"steer\":true";
+            if (user && m.check) body += ",\"check\":true";
             if (!user && !m.calls.empty()) {
                 body += ",\"calls\":[";
                 for (size_t k = 0; k < m.calls.size(); k++)
@@ -270,7 +271,8 @@ bool load_chat(Chat &c, const SavedChat &s, std::string &why) {
             } else if (t["user"].boolean(false)) {
                 m.role = "user";
                 m.steer = t["steer"].boolean(false);
-                c.history.push_back(m.content);
+                m.check = t["check"].boolean(false);
+                if (!m.check) c.history.push_back(m.content);
             } else if (!t["tool"].str().empty()) {
                 m.role = "tool";
                 m.tool = t["tool"].str();

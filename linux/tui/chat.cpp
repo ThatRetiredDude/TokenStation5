@@ -564,6 +564,14 @@ void build_lines(std::vector<Line> &out, Chat &c, const Theme &t, int w) {
             }
             continue;
         }
+        if (m.role == "user" && m.check) {
+            // ts5-tui's own question about an answer (answer_loop): a line, not its words.
+            wrap(out, {{"▌ A check: that answer came straight from the notes on the task, so the model was asked "
+                        "to read its values again and answer once more.",
+                        Style(t.dim)}},
+                 w, 2);
+            continue;
+        }
         if (m.role == "user") {
             Line h;
             h.add("▌ ", Style(t.accent2, kDefault, BOLD));
@@ -1066,6 +1074,18 @@ const char *const kGoalGo =
     "file's lines, a version, a size, a name) must stand in your notes, in the list of calls or in a tool's result "
     "after them. One that does not, read again with a command before you tell me; never give one from memory.]";
 
+// ts5-tui's question about an answer given straight from a task's notes,
+// with no call between the notes and the answer (answer_loop). On a PS5
+// Qwen3.5 9B answered so with a memory size, a Python version and a file
+// size that were in no notes and that no command had printed.
+const char *const kAnswerCheck =
+    "[A check by the program, not a message from me. Your notes took the place of the work just before that "
+    "answer, and you made no call between them and it. Every value in the answer (a file's lines, a version, a "
+    "size, a name, a number) must be one you can see in your notes, in the list of calls or in a tool's result. "
+    "For each one that is not there to see, run the command that shows it now (cat the file, ls -l), and then "
+    "give the whole answer again with the values as the commands show them. If every value is there to see, give "
+    "the same answer again.]";
+
 // The request a task's notes stand beside: the user's last message before
 // `before` that is not a note sent while the model worked, and those notes
 // after it. Word for word; one longer than `cap` bytes loses its middle.
@@ -1080,7 +1100,7 @@ std::string task_goal(const Chat &c, size_t before, size_t cap) {
     if (u == before) return "";
     std::string g = c.msgs[u].content;
     for (size_t i = u + 1; i < before; i++)
-        if (c.msgs[i].role == "user" && c.msgs[i].steer) g += kGoalNote + c.msgs[i].content;
+        if (c.msgs[i].role == "user" && c.msgs[i].steer && !c.msgs[i].check) g += kGoalNote + c.msgs[i].content;
     if (g.size() > cap) {
         size_t a = cap * 2 / 3, b = g.size() - cap / 3;
         while (a > 0 && ((unsigned char)g[a] & 0xC0) == 0x80) a--;
@@ -1901,12 +1921,23 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
     int stale = 0;
     bool no_notes = false;  // notes on the task could not be written: not tried again for this message
     bool refused_once = false;  // a turn the server refused went again after notes
+    // An answer that comes straight from notes (no call since they were
+    // written, and calls of this message's in the part they replaced) is
+    // asked about once a message (kAnswerCheck).
+    bool from_notes = false, checked = false;
+    auto replaced = [&]() {
+        std::lock_guard<std::mutex> l(c->mu);
+        int sum = -1;
+        sent_msgs(*c, c->msgs.size(), &sum);
+        return sum >= 0 && !task_calls(*c, (size_t)sum, 1).empty();
+    };
     for (int round = 0;; round++, turns++) {
         if (c->cancel.load()) break;
         if (steer_in(c, rq)) {
             round = turns = stale = 0;
             last = nullptr;
             said_no = again = false;
+            from_notes = false;
             budget = rq.tools.steps;
             seen.clear();
             body = body_for(*c, rq);  // (takes the chat's lock itself)
@@ -1938,6 +1969,7 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
                 if (!task_notes(c, rq, 4)) break;
                 seen.clear();
                 stale = 0;
+                from_notes = replaced();
                 {
                     std::lock_guard<std::mutex> l(c->mu);
                     Msg a;
@@ -2011,11 +2043,35 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
         if (calls.empty()) {
             // A note that came as the answer ended: the chat goes on with it.
             // (Where the answer failed, it waits in the queue instead.)
-            std::lock_guard<std::mutex> l(c->mu);
-            const Msg &m = c->msgs.back();
-            if (!c->steer.empty() && m.error.empty() && !m.full && !c->cancel.load()) continue;
-            break;
+            bool ask = false;
+            {
+                std::lock_guard<std::mutex> l(c->mu);
+                const Msg &m = c->msgs.back();
+                const bool fine = m.error.empty() && !m.full && !c->cancel.load();
+                if (!c->steer.empty() && fine) continue;
+                // An answer straight from the notes: asked about, once.
+                ask = from_notes && !checked && fine && !m.stopped && !m.content.empty() && !last;
+                if (ask) {
+                    Msg u;
+                    u.role = "user";
+                    u.steer = u.check = u.done = true;
+                    u.content = kAnswerCheck;
+                    c->msgs.push_back(u);
+                    Msg a;
+                    a.role = "assistant";
+                    a.model = rq.model;
+                    a.t0 = now_s();
+                    c->msgs.push_back(a);
+                }
+            }
+            if (!ask) break;
+            checked = true;
+            from_notes = false;
+            body = body_for(*c, rq);  // (takes the chat's lock itself)
+            round--;
+            continue;
         }
+        from_notes = false;
         // The message's steps are used and the model asks for more: the
         // user says whether it goes on (as many steps again, or for as long
         // as this message takes) or answers now, its calls not run.
@@ -2096,6 +2152,7 @@ void answer_loop(Chat *c, const ChatRequest &rq, std::string body) {
                 // model's to read: one made again is no repeat.)
                 seen.clear();
                 stale = 0;
+                from_notes = replaced();
             } else {
                 if (c->cancel.load()) break;
                 no_notes = true;
@@ -2336,7 +2393,9 @@ std::string summary_ask(int words, const std::string &focus, bool again, bool mo
             "lost to it. (What the user asked for is kept beside the notes, word for word, and so is a list of the "
             "commands and calls made: copy neither.) Write those notes, under these headings and in this order:\n"
             "- Steps: the steps the work takes, each marked done, in work or not started, as things stand at the "
-            "end of what is shown;\n"
+            "end of what is shown. Done means that a call shown there did all of it and its result was what the "
+            "step asks for: a step with two parts and one of them done is in work, and so is one whose check gave "
+            "a wrong value;\n"
             "- Next: the very next step, as exactly as it can be said (the command or call, with its paths). When "
             "all that is left is to tell the user the results, say so, and see that each of those results stands "
             "under Facts;\n"

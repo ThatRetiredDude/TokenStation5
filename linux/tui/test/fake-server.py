@@ -291,6 +291,11 @@ class H(BaseHTTPRequestHandler):
                 calls = [("run_command", {"command": "echo step %d | tee -a task-steps.txt%s" % (done + 1, bad)})]
             else:
                 results = ["all %d steps of the task are done" % done]
+        elif asked.startswith("[A check by the program") and "run_command" in tools:
+            # ts5-tui's question about an answer that came straight from a task's notes: a
+            # command that shows the value, then the answer again.
+            if not results:
+                calls = [("run_command", {"command": "wc -l < task-steps.txt"})]
         elif asked.startswith("run ") and "run_command" in tools:
             if "&&&" in asked:
                 if not results:

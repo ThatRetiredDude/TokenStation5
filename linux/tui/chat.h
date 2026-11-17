@@ -37,6 +37,10 @@ struct Msg {
     // it wrote up to there stays, and the model goes on after the note).
     // steer: a user message that is such a note, sent while the answer came.
     bool steered = false, steer = false;
+    // check: a user message that is ts5-tui's own, not typed: its question
+    // to the model about an answer that came straight from a task's notes
+    // (answer_loop). Goes with steer.
+    bool check = false;
     double t0 = 0, t_first = 0, t_think_end = 0, t_end = 0;
     int chunks = 0;
     double gen_tps = 0, prompt_tps = 0;
