@@ -13,6 +13,7 @@ the real Obscura program (ts5-tui --install-browser obscura puts it in
 """
 import http.server
 import json
+from html import escape as html_escape
 import os
 import re
 import shutil
@@ -847,6 +848,132 @@ def test_programs(ts5, base):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+class Google(http.server.BaseHTTPRequestHandler):
+    """A stand-in for Google's results page as a browser gets it: an answer of its own that a script
+    writes in, results, links of its own; for some searches its question about cookies first, for
+    others its check for robots."""
+    seen = []
+    def log_message(self, *a): pass
+    def send(self, body, status=200, headers=()):
+        b = body.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        for k, v in headers: self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(b)
+    def do_GET(self):
+        u = urllib.parse.urlparse(self.path)
+        q = urllib.parse.parse_qs(u.query)
+        query = (q.get("q") or [""])[0]
+        Google.seen.append((self.path, dict(self.headers)))
+        e = html_escape
+        if u.path == "/save":
+            return self.send("", 302, [("Set-Cookie", "SOCS=no; Path=/"), ("Location", (q.get("continue") or ["/"])[0])])
+        if u.path.startswith("/sorry/"):
+            return self.send("<html><head><title>Sorry</title></head><body><p>Our systems have detected unusual traffic from "
+                             "your computer network.</p><p>I'm not a robot</p></body></html>", 429)
+        if u.path != "/search":
+            return self.send("<html><body>not here</body></html>", 404)
+        if "robot" in query:
+            return self.send("", 302, [("Location", "/sorry/index?continue=" + urllib.parse.quote(self.path))])
+        if "cookies" in query and "SOCS=no" not in self.headers.get("Cookie", ""):
+            # (As a PS5 in Slovakia got it: on the results' own address, in the language of the place.)
+            return self.send('<html><head><title>%s - Hľadať Googlom</title></head><body><button>sk</button>'
+                             '<a href="https://accounts.google.com/ServiceLogin">Prihlásiť sa</a>'
+                             '<h1>Než prejdete na Google</h1><p>Pomocou súborov cookie a údajov vrátane adries IP</p>'
+                             '<form action="/save" method="get"><input type="hidden" name="continue" value="%s">'
+                             '<button type="submit">Odmietnuť všetko</button></form>'
+                             '<form action="/save" method="get"><input type="hidden" name="continue" value="%s">'
+                             '<button type="submit">Prijať všetko</button></form><a href="/more">Ďalšie možnosti</a></body></html>'
+                             % (e(query), e(self.path), e(self.path)))
+        head = ('<a href="#main">Skip to main content</a><a href="https://support.google.com/websearch">Accessibility help</a>'
+                '<form action="/search"><input type="text" name="q" aria-label="Search" value="%s"><button>Clear</button></form>'
+                '<a href="https://accounts.google.com/ServiceLogin">Sign in</a><a href="/search?q=%s&amp;udm=50">AI Mode</a>'
+                '<a href="/search?q=%s&amp;tbm=isch">Images</a><button>Tools</button><h1>Search Results</h1>'
+                % (e(query), urllib.parse.quote(query), urllib.parse.quote(query)))
+        tail = ('<h1>Page Navigation</h1><a href="/search?q=%s&amp;start=10">2</a><a href="/search?q=%s&amp;start=10">Next</a>'
+                '<h1>Footer Links</h1><a href="https://policies.google.com/privacy">Privacy</a>'
+                '<a href="https://shop.example.com/an-advertisement">A shop below the results</a>'
+                % (urllib.parse.quote(query), urllib.parse.quote(query)))
+        if "nothing" in query:
+            return self.send("<html><head><title>%s - Google Search</title></head><body>%s<p>Your search - <b>%s</b> - did not "
+                             "match any documents.</p>%s</body></html>" % (e(query), head, e(query), tail))
+        return self.send(
+            "<html><head><title>%s - Google Search</title></head><body>%s"
+            "<script>document.addEventListener('DOMContentLoaded', () => { document.getElementById('late').textContent = "
+            "'The PlayStation 5 Pro was released on November 7, 2024.'; });</script>"
+            '<div><h1>AI Overview</h1><div id="late"></div>'
+            '<a href="https://blog.example.com/ps5-pro#:~:text=released,2024">PlayStation.Blog</a></div>'
+            '<div class="g"><a href="https://en.wikipedia.org/wiki/PlayStation_5"><h3>PlayStation 5</h3><div>Wikipedia</div>'
+            "<cite>https://en.wikipedia.org &rsaquo; wiki</cite></a>"
+            "<div>A PlayStation 5 Pro model was released on November 7, 2024.</div>"
+            '<a href="https://en.wikipedia.org/wiki/PlayStation_5#History">History</a></div>'
+            '<div class="g"><a href="/url?q=https%%3A%%2F%%2Fwww.example.com%%2Fa%%3Fb%%3D1&amp;sa=U"><h3>Through the redirect</h3></a>'
+            "<div>Passage two.</div></div>"
+            '<div class="g"><a href="https://en.wikipedia.org/wiki/PlayStation_5"><h3>The same address again</h3></a></div>'
+            "%s</body></html>" % (e(query), head, tail))
+
+
+def test_google(ts5, program):
+    """The web search's Google source: its results page read through the browser (`ts5 search`)."""
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Google)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    env = {k: v for k, v in os.environ.items() if k not in ("TAVILY_API_KEY", "TS5_ENCYCLOPEDIA", "TS5_SEARCH_RESULTS")}
+    env.update(TS5_SEARCH_SOURCE="google", TS5_GOOGLE_URL=f"http://127.0.0.1:{srv.server_port}",
+               TS5_SEARCH_BROWSER=shutil.which(program) or program, TS5_BROWSER_NO_SANDBOX="1",
+               # (No other search answers here: what Google can't give fails.)
+               TS5_DUCKDUCKGO_URL="http://127.0.0.1:9", TS5_GROKIPEDIA_URL="http://127.0.0.1:9", TS5_WIKIPEDIA_URL="http://127.0.0.1:9")
+
+    def search(query, **more):
+        n0 = len(Google.seen)
+        r = subprocess.run([ts5, "search", query], capture_output=True, text=True, timeout=180, env=dict(env, **more))
+        return r.returncode, r.stdout, r.stderr, Google.seen[n0:]
+
+    rc, out, err, seen = search("PlayStation 5 Pro release date")
+    check(rc == 0 and out.startswith('Google\'s results page for "PlayStation 5 Pro release date", as a browser shows it.')
+          and "results (" in err and "Google by Chromium)" in err and "searching Google through Chromium" in err,
+          "Google source: the results page is read through the browser", f"rc {rc}\n{out}\n{err}")
+    check("AI Overview\n\nThe PlayStation 5 Pro was released on November 7, 2024." in out and "written by its AI" in out,
+          "Google source: its own answer, which a script writes into the page, is there", out)
+    check("A PlayStation 5 Pro model was released on November 7, 2024." in out and "Passage two." in out,
+          "Google source: the results' passages", out)
+    body = out.split("\n\n", 1)[-1]
+    check(body.startswith("AI Overview") and "Skip to main content" not in out and "text box" not in out and "Sign in" not in out,
+          "Google source: the text starts where the results start (no search box, no tabs)", out)
+    check("Next" not in out and "Privacy" not in out and "A shop below the results" not in out,
+          "Google source: and ends where they end (no page numbers, no footer)", out)
+    lead = out.split("Where the numbered links above lead:\n")[-1].split("\n\n")[0].split("\n")
+    check([l.split("] ", 1)[-1] for l in lead] ==
+          ["PlayStation.Blog: https://blog.example.com/ps5-pro",
+           "PlayStation 5 Wikipedia: https://en.wikipedia.org/wiki/PlayStation_5",
+           "Through the redirect: https://www.example.com/a?b=1"],
+          "Google source: where the results lead (no link of Google's own, no page twice, its redirect followed)", lead)
+    pages = [s for s in seen if not s[0].startswith("/favicon")]
+    check(len(pages) == 1 and pages[0][0].startswith("/search?q=PlayStation+5+Pro+release+date") and "hl=en" in pages[0][0],
+          "Google source: one page asked for", [s[0] for s in seen])
+    h = {k.lower(): v for k, v in seen[0][1].items()} if seen else {}
+    check("Macintosh" in h.get("user-agent", "") and "Headless" not in h.get("user-agent", "") and
+          "ts5" not in json.dumps(h).lower() and "tokenstation" not in json.dumps(h).lower(),
+          "Google source: asked for as Chrome on a Mac asks", h)
+    rc, out, err, seen = search("cookies first")
+    paths = [s[0].split("?")[0] for s in seen if not s[0].startswith("/favicon")]
+    check(rc == 0 and "PlayStation 5 Wikipedia: https://en.wikipedia.org/wiki/PlayStation_5" in out and
+          paths[:3] == ["/search", "/save", "/search"] and "Než prejdete" not in out and "súborov cookie" not in out,
+          "Google source: its question about cookies, in the language of the place, is answered with its button for no",
+          f"rc {rc}\n{out}\n{err}\n{paths}")
+    rc, out, err, seen = search("robot check")
+    check(rc != 0 and "Google: it asked whether a robot is searching, which ts5 does not answer" in err and
+          out.startswith("The search failed:"), "Google source: its check for robots is not answered", f"rc {rc}\n{out}\n{err}")
+    rc, out, err, seen = search("nothing here")
+    check("Google: its page listed nothing found" in err, "Google source: a page with no results is no result", f"rc {rc}\n{out}\n{err}")
+    # Without a browser: said, and the web search in its place.
+    rc, out, err, seen = search("PlayStation 5", TS5_SEARCH_BROWSER="/nonexistent/chromium")
+    check(not seen and "Google: no Chromium is installed here to read it with" in err, "Google source: no browser, said so",
+          f"rc {rc}\n{out}\n{err}")
+    srv.shutdown()
+
+
 def main():
     ts5 = sys.argv[1]
     program = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -863,6 +990,7 @@ def main():
             print("     (no Chromium installed: the browser checks are left out)")
     if program:
         test_browser(ts5, program, base)
+        test_google(ts5, program)
     if len(sys.argv) > 3:
         test_obscura(ts5, sys.argv[3], base)
     if failed:

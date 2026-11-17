@@ -435,7 +435,10 @@ void poll_once() {
                 const std::string src = m["capabilities"]["web_search_source"].str();
                 s.wikipedia = src == "web" || src == "wikipedia" || src == "grokipedia" || src == "both";
                 s.encyclopedias = !m["capabilities"]["encyclopedias"].a.empty();
-                for (auto &x : m["capabilities"]["search_sources"].a) s.web_sources = s.web_sources || x.str() == "web";
+                for (auto &x : m["capabilities"]["search_sources"].a) {
+                    s.web_sources = s.web_sources || x.str() == "web";
+                    s.google_source = s.google_source || x.str() == "google";
+                }
             }
             if (m.o.count("helper")) {
                 s.helper_known = true;
@@ -656,10 +659,15 @@ std::string encyclopedia_name() {
     if (!sv.encyclopedias) return "Wikipedia";
     // (A ts5 before 1.2.2 takes "web" for its own choice: Wikipedia, unless it was set up otherwise.)
     if (g->cfg.search_source == "web") return sv.web_sources ? "the web (DuckDuckGo)" : "Wikipedia";
+    // (Where the server has no Chromium, it searches DuckDuckGo and says so to the model.)
+    if (g->cfg.search_source == "google")
+        return sv.google_source ? "Google (through Chromium)" : sv.web_sources ? "the web (DuckDuckGo)" : "Wikipedia";
     return g->cfg.search_source == "grokipedia" ? "Grokipedia" : g->cfg.search_source == "both" ? "Wikipedia and Grokipedia" : "Wikipedia";
 }
 // The search without a key is a regular web search, not an encyclopedia.
-bool keyless_web() { return g->cfg.search_source == "web" && server().web_sources; }
+bool keyless_web() { return (g->cfg.search_source == "web" || g->cfg.search_source == "google") && server().web_sources; }
+// It goes to Google, read through the server's Chromium.
+bool keyless_google() { return g->cfg.search_source == "google" && server().google_source; }
 
 // ---- Access: who can reach this TokenStation5, and with which key ----
 
@@ -3127,8 +3135,9 @@ std::vector<SetRow> settings_rows() {
                                                      : std::string(std::min<size_t>(c.web_key.size(), 12), '*'),
                  sv.web_search         ? "on: the loaded model searches the web when a question needs it"
                  : c.web_key.empty()   ? (sv.wikipedia && keyless_web()
-                                              ? std::string("without a key the web is searched through DuckDuckGo; a free key from "
-                                                            "app.tavily.com gives more of each page's text")
+                                              ? std::string("without a key the web is searched through ") +
+                                                    (keyless_google() ? "Google" : "DuckDuckGo") +
+                                                    "; a free key from app.tavily.com gives more of each page's text"
                                           : sv.wikipedia ? "without a key: " + encyclopedia_name() + " only; a free one from app.tavily.com adds the web"
                                                        : std::string("a free key from app.tavily.com lets a model ts5-tui loads "
                                                                      "search the web"))
@@ -3168,10 +3177,13 @@ std::vector<SetRow> settings_rows() {
     if (tools_shown) {
         const ServerState sv = server();
         SetRow x{"Tool: search",
-                 !c.tool_web ? "off" : sv.web_search ? "on" : sv.wikipedia && keyless_web() ? "on, DuckDuckGo"
+                 !c.tool_web ? "off" : sv.web_search ? "on"
+                 : sv.wikipedia && keyless_web() ? (keyless_google() ? "on, Google" : "on, DuckDuckGo")
                  : sv.wikipedia ? "on, " + encyclopedia_name() + " only" : "on, needs the key",
                  !c.tool_web       ? "the model never searches the web"
                  : sv.web_search   ? "the model searches the web when a question needs it"
+                 : sv.wikipedia && keyless_google()
+                     ? "the model searches Google when a question needs it, read through Chromium; when that can't be, DuckDuckGo"
                  : sv.wikipedia && keyless_web()
                      ? "the model searches the web through DuckDuckGo when a question needs it; when that can't be "
                        "searched, Grokipedia, then Wikipedia"
@@ -3185,21 +3197,30 @@ std::vector<SetRow> settings_rows() {
         // What is searched, while there is no key: the web, or an encyclopedia.
         if (c.tool_web && !sv.web_search && sv.wikipedia) {
             // (A ts5 before 1.2.2 has the encyclopedias alone.)
-            static const char *const ids[] = {"web", "grokipedia", "wikipedia", "both"};
-            static const char *const names[] = {"Web", "Grokipedia", "Wikipedia", "Both encyclopedias"};
-            const int first = sv.web_sources ? 0 : 1, n = 4 - first;
-            int at = sv.web_sources ? 0 : 2;
-            for (int i = first; i < 4; i++)
-                if (c.search_source == ids[i]) at = i;
-            SetRow y{"Search source", sv.encyclopedias ? names[at] : "Wikipedia",
+            // (Google where the server's machine has a Chromium to read it with.)
+            static const char *const all[] = {"web", "google", "grokipedia", "wikipedia", "both"};
+            static const char *const names[] = {"Web (DuckDuckGo)", "Google", "Grokipedia", "Wikipedia", "Both encyclopedias"};
+            std::vector<int> ids;
+            for (int i = 0; i < 5; i++)
+                if ((i != 0 || sv.web_sources) && (i != 1 || sv.google_source)) ids.push_back(i);
+            int at = -1;
+            for (size_t k = 0; k < ids.size(); k++)
+                if (c.search_source == all[ids[k]]) at = (int)k;
+            // (A choice this server doesn't have: what it does in its place.)
+            if (at < 0) at = sv.web_sources ? 0 : (int)ids.size() - 2;
+            const int id = ids[at];
+            SetRow y{"Search source", sv.encyclopedias ? names[id] : "Wikipedia",
                      !sv.encyclopedias ? "this server searches Wikipedia only (a ts5 before Grokipedia)"
-                     : at == 0         ? "a regular web search, through DuckDuckGo; when it can't be searched, Grokipedia, then Wikipedia"
-                     : at == 1         ? "Grokipedia, xAI's encyclopedia, written by its AI; if it can't be searched, Wikipedia is"
-                     : at == 2         ? "Wikipedia, the encyclopedia people write"
+                     : id == 0         ? "a regular web search, through DuckDuckGo; when it can't be searched, Grokipedia, then Wikipedia"
+                     : id == 1         ? "Google's results page, with its AI overview when it has one, read through Chromium: a few "
+                                         "seconds and a browser's memory for each search; when it can't be, DuckDuckGo"
+                     : id == 2         ? "Grokipedia, xAI's encyclopedia, written by its AI; if it can't be searched, Wikipedia is"
+                     : id == 3         ? "Wikipedia, the encyclopedia people write"
                                        : "each search asks Wikipedia and Grokipedia, and the model gets both lists"};
             if (sv.encyclopedias)
-                y.change = [save, at, first, n](int d) {
-                    g->cfg.search_source = ids[first + (at - first + (d < 0 ? n - 1 : 1)) % n];
+                y.change = [save, at, ids](int d) {
+                    const int n = (int)ids.size();
+                    g->cfg.search_source = all[ids[(at + (d < 0 ? n - 1 : 1)) % n]];
                     save();
                 };
             r.push_back(y);
@@ -4685,7 +4706,7 @@ void run_command(const std::string &line) {
         Config &f = g->cfg;
         const Row rows[] = {
             {"search", "searches when a question needs it (the server does it: with a web search key through Tavily; "
-                       "without one `/tools search web` (DuckDuckGo), `grokipedia`, `wikipedia` or `both`)", &f.tool_web},
+                       "without one `/tools search web` (DuckDuckGo), `google`, `grokipedia`, `wikipedia` or `both`)", &f.tool_web},
             {"pages", "reads a web page you give it a link to", &f.tool_page},
             {"terminal", "runs a command on this machine; you see each one first and say yes or no", &f.tool_terminal},
             {"files", "reads and lists files, and changes them: you see each change, lines out and lines in, and say "
@@ -4759,7 +4780,7 @@ void run_command(const std::string &line) {
                                                   : nullptr;
             found = true;
             const bool browser_was = f.tool_browser;
-            if (r.on == &f.tool_web && (to == "web" || to == "wikipedia" || to == "grokipedia" || to == "both")) {
+            if (r.on == &f.tool_web && (to == "web" || to == "google" || to == "wikipedia" || to == "grokipedia" || to == "both")) {
                 // What is searched without a web search key.
                 f.search_source = to;
                 f.tool_web = true;
@@ -4767,7 +4788,9 @@ void run_command(const std::string &line) {
                 const ServerState sv = server();
                 show_toast(sv.web_search ? "Search source: " + to + " (used when there is no web search key; now Tavily searches the web)"
                            : sv.online && !sv.encyclopedias ? "This server searches Wikipedia only (a ts5 before Grokipedia)"
-                           : sv.online && to == "web" && !sv.web_sources ? "This server has no web search without a key (a ts5 before 1.2.2): it searches Wikipedia"
+                           : sv.online && (to == "web" || to == "google") && !sv.web_sources ? "This server has no web search without a key (a ts5 before 1.2.2): it searches Wikipedia"
+                           : sv.online && to == "google" && !sv.google_source
+                               ? "The server's machine has no Chromium to read Google with (/browser install): it searches DuckDuckGo"
                                                             : "Search: " + encyclopedia_name(),
                            g->th->accent, 5);
                 continue;
@@ -4825,10 +4848,14 @@ void run_command(const std::string &line) {
                 h += "\nButtons and typing on web pages go **without asking** in this chat (you chose that). `/tools ask` "
                      "brings the question back.";
             const ServerState sv = server();
-            if (f.tool_web && !sv.web_search && sv.wikipedia && keyless_web())
+            if (f.tool_web && !sv.web_search && sv.wikipedia && keyless_google())
+                h += "\nThe search is **Google, read through Chromium** (its results page, with its AI overview when it has one; "
+                     "when it can't be read: DuckDuckGo). `/tools search web` searches DuckDuckGo, which is quicker and takes "
+                     "no browser; `grokipedia`, `wikipedia` or `both` an encyclopedia.";
+            else if (f.tool_web && !sv.web_search && sv.wikipedia && keyless_web())
                 h += "\nThe search is a regular **web search through DuckDuckGo** (when it can't be searched: Grokipedia, then "
-                     "Wikipedia). `/tools search grokipedia`, `wikipedia` or `both` searches an encyclopedia instead, "
-                     "`/tools search web` the web again.";
+                     "Wikipedia). `/tools search google` searches Google through Chromium, `grokipedia`, `wikipedia` or `both` "
+                     "an encyclopedia, `/tools search web` the web again.";
             else if (f.tool_web && !sv.web_search && sv.wikipedia)
                 h += "\nWithout a web search key the search is **" + encyclopedia_name() + " only** (no news, prices or weather; "
                      "`/tools search web` searches the web, `wikipedia`, `grokipedia` or `both` picks the encyclopedia). For the "

@@ -104,6 +104,7 @@ struct ServerState {
     bool wikipedia = false;   // without a key it still searches (the web or an encyclopedia), for a request that asks
     bool encyclopedias = false;  // it takes the request's choice of one ("web_search_source")
     bool web_sources = false;    // and "web" is one of them (ts5 1.2.2 and later)
+    bool google_source = false;  // and "google": the server's machine has a Chromium to read it with
     // The helper the engine really loaded beside the model, its context
     // (drafting stops past it), or why the one asked for isn't used.
     // helper_known: the server says (an older one doesn't).

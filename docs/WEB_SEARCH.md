@@ -62,12 +62,43 @@ and when that can't be searched either, to Wikipedia. The model is told
 which it got and that an encyclopedia has no news or live data.
 
 `TS5_SEARCH_SOURCE` picks what is searched without a key: `web` (the
-default), `grokipedia`, `wikipedia` or `both` (the two encyclopedias, below);
+default), `google` (below), `grokipedia`, `wikipedia` or `both` (the two
+encyclopedias, below);
 a request picks with `"web_search_source"`, and `/v1/models` lists the
 choices under `capabilities.search_sources`. `/v1/models` says
 `"web_search": false, "web_search_source": "web"`: `web_search` stays "a
 key is set, and the search is offered by itself". On the PS5 title the
 search is the key's alone.
+
+## Without a key: Google through Chromium (Linux)
+
+Google's results page wants scripts, so a plain request gets none of it. A
+browser does: with `TS5_SEARCH_SOURCE=google` (or `"web_search_source":
+"google"`; in ts5-tui Settings → Search source, or `/tools search google`)
+ts5 opens the results page in a Chromium installed on the machine, the one
+the browser tool uses, and gives the model what the page shows between its
+"Search Results" heading and its page numbers: the answer Google's AI
+writes at the top when it shows one ("AI Overview"), the results with their
+passages, and under them a list of where the numbered links lead (the
+addresses of other sites only, each once, Google's own redirect taken off).
+The model is told that the answer at the top is written by an AI and is to
+be checked against the results.
+
+- It is there where a Chromium is: `/v1/models` lists `google` under
+  `capabilities.search_sources` only then. `TS5_SEARCH_BROWSER` names
+  another program than the one found (a path, or a name on the `PATH`).
+- A browser starts for each search and ends with it. That takes seconds
+  where DuckDuckGo's page takes under one, and memory: with less than
+  900 MiB free the browser is not started.
+- Google's question about cookies, where it asks one, is answered with its
+  button for no ("Reject all", in the page's language).
+- Its check for robots ("unusual traffic", a captcha) is not answered.
+  Then, as when no Chromium is installed, the memory is short or the page
+  lists nothing, the search goes on as `web` does (DuckDuckGo, Grokipedia,
+  Wikipedia), and the result starts with a line that says why Google
+  could not be searched.
+- The page is asked for the way every page in the browser tool is: as
+  Chrome on a Mac, in English (`hl=en`), with nothing that names ts5.
 
 ## Without a key: Wikipedia
 

@@ -187,6 +187,13 @@ def main():
         t.keys("Right")
         t.keys("Enter")  # No, answer now
         check(t.idle(), "No, answer now", t.screen())
+        # (This server's machine has no Chromium to read Google with.)
+        t.type("/tools search google")
+        t.keys("Enter")
+        check(t.wait("no Chromium to read Google with"), "/tools search google on a server without a browser: said", t.screen())
+        t.type("/tools search web")
+        t.keys("Enter")
+        check(t.wait("Search: the web (DuckDuckGo)"), "/tools search web", t.screen())
         t.type("/tools steps off")
         t.keys("Enter")
         check(t.wait("Tool steps: no limit"), "/tools steps off", t.screen())
@@ -199,7 +206,7 @@ def main():
         t.close()
 
     # ---- The default (50 steps): calls that only repeat end long before it.
-    t = Tui(tui, "")
+    t = Tui(tui, "", {"FAKE_GOOGLE": "1"})
     try:
         check(t.idle(), "ts5-tui is up, with its own defaults", t.screen())
         t.type("again")
@@ -230,6 +237,18 @@ def main():
         t.type("/tools steps")
         t.keys("Enter")
         check(t.wait("Tool steps: 50 a message"), "/tools steps says the setting", t.screen())
+        # Google as the search, on a server whose machine has a Chromium.
+        t.type("/tools search google")
+        t.keys("Enter")
+        check(t.wait("Search: Google (through Chromium)"), "/tools search google", t.screen())
+        n0 = len(t.requests())
+        t.type("hello")
+        t.keys("Enter")
+        time.sleep(1)
+        check(t.idle(), "(a message)", t.screen())
+        r = t.requests()[n0:]
+        check(r and "source=google" in r[0]["tools"], "the request asks for Google", r[0]["tools"] if r else None)
+        check(t.saved().get("search_source") == "google", "and the choice is saved", t.saved())
     finally:
         t.close()
 

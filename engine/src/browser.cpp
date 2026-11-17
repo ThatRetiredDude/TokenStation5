@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1554,6 +1555,109 @@ private:
         return a;
     }
 
+public:
+    // ---- A search site's results page (google_search_page)
+
+    // The page's button that says no to its cookies, by its words in a few
+    // languages (Google asks in the language of the place, whatever the
+    // address says). 0: it has none.
+    int reject_button() const {
+        for (size_t i = 0; i < els_.items.size(); i++) {
+            if (els_.items[i].kind != "button") continue;
+            const std::string l = lower(els_.items[i].label);
+            for (const char *w : {"reject all", "odmietnu", "ablehnen", "tout refuser", "rechazar", "rifiuta", "odrzu", "odmítn",
+                                  "afwijzen", "rejeitar", "avvisa", "afvis", "hylkää", "avvis alle", "elutas", "respinge"})
+                if (l.find(w) != npos) return (int)i + 1;
+        }
+        return 0;
+    }
+    // The page asks whether a robot is searching.
+    bool robot_check() const {
+        return url_.find("/sorry/") != npos || view_.find("unusual traffic") != npos || view_.find("not a robot") != npos;
+    }
+    // The page as a search's results: its text from where the results
+    // start (no search box, no tabs) to where they end (no page numbers,
+    // no footer), max_chars of it, then the addresses of its numbered
+    // links that lead to other sites than the search site's own.
+    std::string results_page(size_t max_chars, int max_links, int &count) const {
+        std::string body = "\n" + view_ + "\n";
+        {
+            // (Lower case byte for byte, so that a place found in it is the place in body.)
+            const std::string low = lower(body);
+            // Google names its parts in headings a screen reader finds: in
+            // English, and in Slovak as the PS5 this was made on got them.
+            size_t end = npos;
+            for (const char *h : {"page navigation", "navigácia na stránke", "footer links", "odkazy v päte", "related searches",
+                                  "people also search for", "podobné vyhľadávania"})
+                end = std::min(end, low.find(std::string("\n") + h + "\n"));
+            if (end != npos) body.erase(end);
+            size_t start = npos;
+            for (const char *h : {"search results", "výsledky vyhľadávania"}) {
+                const size_t at = low.find(std::string("\n") + h + "\n");
+                if (at != npos && at < body.size()) start = std::min(start, at + strlen(h) + 2);
+            }
+            if (start != npos) body.erase(0, start);
+        }
+        while (!body.empty() && isspace((unsigned char)body.front())) body.erase(0, 1);
+        if (body.size() > max_chars) {
+            size_t cut = body.rfind('\n', max_chars);
+            if (cut == npos || cut < max_chars / 2) {
+                cut = max_chars;
+                while (cut > 0 && ((unsigned char)body[cut] & 0xC0) == 0x80) cut--;
+            }
+            body.erase(cut);
+        }
+        while (!body.empty() && isspace((unsigned char)body.back())) body.pop_back();
+        const std::string own = host_of(url_);
+        const auto theirs = [&](const std::string &h) {
+            return h.empty() || h == own || h.find("google.") != npos || h.find("gstatic.") != npos ||
+                   h.find("googleusercontent.") != npos;
+        };
+        std::set<std::string> seen;
+        std::string list;
+        count = 0;
+        for (size_t i = 0; i < els_.items.size() && count < max_links; i++) {
+            const PageElement &el = els_.items[i];
+            if (el.kind != "link" || el.href.empty()) continue;
+            std::string u = resolve_url(url_, el.href);
+            // (A link through the search site's own redirect: where it leads.)
+            if (const size_t r = u.find("/url?"); r != npos && theirs(host_of(u))) {
+                size_t q = u.find("q=", r);
+                if (q == npos || (u[q - 1] != '?' && u[q - 1] != '&')) q = u.find("url=", r);
+                if (q != npos) {
+                    q = u.find('=', q) + 1;
+                    const std::string enc = u.substr(q, u.find('&', q) == npos ? npos : u.find('&', q) - q);
+                    std::string dec;
+                    for (size_t k = 0; k < enc.size(); k++) {
+                        if (enc[k] == '%' && k + 2 < enc.size() && isxdigit((unsigned char)enc[k + 1]) && isxdigit((unsigned char)enc[k + 2])) {
+                            dec += (char)strtol(enc.substr(k + 1, 2).c_str(), nullptr, 16);
+                            k += 2;
+                        } else {
+                            dec += enc[k];
+                        }
+                    }
+                    u = resolve_url(url_, dec);
+                }
+            }
+            if (u.empty() || theirs(host_of(u))) continue;
+            // (Its tail that scrolls to the passage's words; a part of a page is the page.)
+            if (const size_t f = u.find('#'); f != npos) u.erase(f);
+            if (body.find("[" + std::to_string(i + 1) + "]") == npos || !seen.insert(u).second) continue;
+            // (The link's words too: on a results page a title is a heading,
+            // and its number comes lines under it. Not the address Google
+            // writes under the title, which is cut short.)
+            std::string words = clean_text(el.label);
+            if (const size_t h = words.find("http"); h != npos && h > 0) words.erase(h);
+            while (!words.empty() && isspace((unsigned char)words.back())) words.pop_back();
+            list += "[" + std::to_string(i + 1) + "] " + (words.empty() ? "" : brief(words, 100) + ": ") + brief(u, 300) + "\n";
+            count++;
+        }
+        if (!list.empty()) body += "\n\nWhere the numbered links above lead:\n" + list;
+        while (!body.empty() && body.back() == '\n') body.pop_back();
+        return body;
+    }
+
+private:
     std::string program_;  // "" for the text view
     bool obscura_;
     size_t chars_;
@@ -1578,6 +1682,71 @@ private:
 volatile sig_atomic_t g_quit = 0;
 
 }  // namespace
+
+bool google_browser(std::string *path) {
+    std::string p;
+    if (const char *e = getenv("TS5_SEARCH_BROWSER"); e && *e) {
+        p = which(e);
+    } else {
+        const std::vector<std::string> found = find_browsers("chromium");
+        if (!found.empty()) p = found.front();
+    }
+    if (path) *path = p;
+    return !p.empty();
+}
+
+bool google_search_page(const std::string &query, std::string &out, std::string &why, int &links) {
+    links = 0;
+    std::string program;
+    if (!google_browser(&program)) {
+        why = "no Chromium is installed here to read it with";
+        return false;
+    }
+    // A browser beside a model: not when the machine has no room for one.
+    if (FILE *f = fopen("/proc/meminfo", "r")) {
+        char line[256];
+        long avail = -1;
+        while (fgets(line, sizeof line, f))
+            if (sscanf(line, "MemAvailable: %ld kB", &avail) == 1) break;
+        fclose(f);
+        if (avail >= 0 && avail < 900 * 1024) {
+            why = "the browser it takes needs about 900 MiB of free memory and " + std::to_string(avail / 1024) + " MiB are free";
+            return false;
+        }
+    }
+    const char *e = getenv("TS5_GOOGLE_URL");
+    const std::string base = e && *e ? e : "https://www.google.com";
+    Session s(program, false, 6000);
+    Answer a = s.open(base + "/search?q=" + form_encode(query) + "&hl=en");
+    if (!a.ok || s.mode() != "chromium") {
+        why = "its page could not be opened in the browser";
+        return false;
+    }
+    out = s.results_page(6000, 20, links);
+    // Its question about cookies comes in place of the results: answered
+    // with its own button for "no", and the results follow.
+    bool asked = false;
+    for (int k = 0; k < 2 && a.ok && links == 0 && !s.robot_check(); k++) {
+        const int n = s.reject_button();
+        if (!n) break;
+        asked = true;
+        a = s.click(n);
+        out = s.results_page(6000, 20, links);
+    }
+    if (s.robot_check()) {
+        why = "it asked whether a robot is searching, which ts5 does not answer";
+        return false;
+    }
+    if (!a.ok) {
+        why = "its page could not be read";
+        return false;
+    }
+    if (links == 0) {
+        why = asked && s.reject_button() ? "its question about cookies could not be answered" : "its page listed nothing found";
+        return false;
+    }
+    return true;
+}
 
 int browser_main(int argc, char **argv) {
     std::string program = "auto", kind;

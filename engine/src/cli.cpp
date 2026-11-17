@@ -194,6 +194,7 @@ int no_model_command(int argc, char **argv) {
         if (tavily_key().empty())
             fprintf(stderr, "ts5: TAVILY_API_KEY is not set%s\n",
                     search_source() == "web"          ? ": searching the web by DuckDuckGo"
+                    : search_source() == "google"     ? ": searching Google through Chromium"
                     : search_source() == "wikipedia"  ? ": searching Wikipedia"
                     : search_source() == "grokipedia" ? ": searching Grokipedia"
                     : search_source() == "both"       ? ": searching Wikipedia and Grokipedia"

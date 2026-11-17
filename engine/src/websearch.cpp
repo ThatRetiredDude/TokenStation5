@@ -8,6 +8,7 @@
 #include <cstring>
 #include <vector>
 
+#include "browser.h"
 #include "net.h"
 
 namespace ts5 {
@@ -45,15 +46,18 @@ std::string search_source(const std::string &asked) {
 #else
     // The request's choice, else this machine's: TS5_SEARCH_SOURCE, else
     // the encyclopedia an older setup named (TS5_ENCYCLOPEDIA), else the web.
+    const auto known = [](const std::string &w) {
+        return w == "web" || w == "google" || w == "wikipedia" || w == "grokipedia" || w == "both";
+    };
     std::string want = asked;
-    if (want != "web" && want != "wikipedia" && want != "grokipedia" && want != "both") {
+    if (!known(want)) {
         want = env_or("TS5_SEARCH_SOURCE", "");
-        if (want != "web" && want != "wikipedia" && want != "grokipedia" && want != "both") {
+        if (!known(want)) {
             const std::string old = env_or("TS5_ENCYCLOPEDIA", "");
             want = old.empty() ? "web" : old == "grokipedia" || old == "both" ? old : "wikipedia";
         }
     }
-    if (want == "web") return "web";
+    if (want == "web" || want == "google") return want;
     const bool wiki = env_or("TS5_WIKIPEDIA", "en") != "off";
     if (want == "wikipedia") return wiki ? "wikipedia" : "none";
     return want == "both" && wiki ? "both" : "grokipedia";
@@ -62,7 +66,15 @@ std::string search_source(const std::string &asked) {
 
 bool is_encyclopedia(const std::string &source) { return source == "wikipedia" || source == "grokipedia" || source == "both"; }
 
-bool is_keyless(const std::string &source) { return source == "web" || is_encyclopedia(source); }
+bool is_keyless(const std::string &source) { return source == "web" || source == "google" || is_encyclopedia(source); }
+
+bool google_ready() {
+#ifdef TS5_PS5
+    return false;
+#else
+    return google_browser();
+#endif
+}
 
 bool web_search_always() { return env_or("TS5_WEB_SEARCH", "") == "always"; }
 
@@ -127,7 +139,7 @@ bool needs_web(const std::string &user_text, bool wikipedia) {
 Json web_search_tool(const std::string &today) { return web_search_tool(today, search_source()); }
 
 Json web_search_tool(const std::string &today, const std::string &source) {
-    if (source == "web") {
+    if (source == "web" || source == "google") {
         // The web, by a search page's results: a title, an address and a
         // line or two of each, so the model is told to open what it needs.
         const std::string tool =
@@ -792,18 +804,40 @@ std::string web_search(const std::string &arguments, std::string &log, bool *fai
             return kFailed + std::string("no web search is set up on this machine") + kTell;
         }
 #ifndef TS5_PS5
-        if (source == "web") {
+        // Google, through a Chromium on this machine; when it can't be
+        // searched so (no browser, its check for robots), the web as below.
+        std::string before, before_log;
+        if (source == "google") {
+            const auto t0 = std::chrono::steady_clock::now();
+            std::string page, why;
+            int links = 0;
+            const bool ok = google_search_page(query, page, why, links);
+            char secs[32];
+            snprintf(secs, sizeof secs, "%.1f s", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+            if (ok) {
+                log = "web_search \"" + query + "\": " + std::to_string(links) + " results (" + secs + ", Google by Chromium)";
+                return "Google's results page for \"" + query + "\", as a browser shows it. An answer of Google's own at its "
+                       "top (\"AI Overview\") is written by its AI: check it against the results before you rely on it.\n\n" +
+                       page + "\n\nThe passages are short: open a result's page by its address when you need more than they say.";
+            }
+            before = "(Google could not be searched: " + why + ". So this search went to DuckDuckGo.)\n\n";
+            before_log = std::string("; before it: Google: ") + why + " (" + secs + ")";
+        }
+        if (source == "web" || source == "google") {
             // The web; when that can't be searched now, Grokipedia, then
             // Wikipedia, and the model is told which it got.
             bool bad = false;
             // (A results page has ten; more of them than of an encyclopedia's
             // articles, as each is a line or two.)
             std::string out = duckduckgo_search(query, getenv("TS5_SEARCH_RESULTS") ? n : 8, log, &bad);
-            if (!bad) return out;
+            if (!bad) {
+                log += before_log;
+                return before + out;
+            }
             const std::string why = search_failure(out), dlog = log;
             bool ebad = false;
             out = grokipedia_or_wikipedia(query, n, log, &ebad);
-            log += "; before it: " + dlog.substr(dlog.find("\": ") == std::string::npos ? 0 : dlog.find("\": ") + 3);
+            log += "; before it: " + dlog.substr(dlog.find("\": ") == std::string::npos ? 0 : dlog.find("\": ") + 3) + before_log;
             if (ebad) {
                 if (failed) *failed = true;
                 return kFailed + why + ", and no encyclopedia could be searched in its place" + kTell;

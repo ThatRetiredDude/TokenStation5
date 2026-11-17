@@ -614,8 +614,10 @@ void handle(int fd, Server::State &state, Usage &u) {
 #ifndef TS5_PS5
                                                             // What a request's "web_search_source" can pick.
                                                             ",\"encyclopedias\":[\"wikipedia\",\"grokipedia\",\"both\"]" +
-                     // (The same with the web, which a ts5 before 1.2.2 doesn't know.)
-                     ",\"search_sources\":[\"web\",\"grokipedia\",\"wikipedia\",\"both\"]" +
+                     // (The same with the web, which a ts5 before 1.2.2 doesn't know;
+                     // "google" where a Chromium is installed to read it with.)
+                     ",\"search_sources\":[\"web\"," + (google_ready() ? "\"google\"," : "") +
+                     "\"grokipedia\",\"wikipedia\",\"both\"]" +
 #endif
                                                             "}" +
                                                             ",\"settings\":" + settings_json(known, sampling, think, can_think) + "}") +
@@ -1672,6 +1674,9 @@ void Server::set_engine(Engine *e, const std::string &model_name, const std::str
                 search_source() == "none" ? "off (no TAVILY_API_KEY, TS5_WIKIPEDIA=off)"
                 : tavily_key().empty()
                     ? (std::string(search_source() == "web" ? "the web by DuckDuckGo (then Grokipedia, then Wikipedia)"
+                                   : search_source() == "google"
+                                         ? (google_ready() ? "Google through Chromium (then DuckDuckGo, Grokipedia, Wikipedia)"
+                                                             : "Google, but no Chromium is installed: DuckDuckGo (then Grokipedia, then Wikipedia)")
                                    : search_source() == "grokipedia" ? "Grokipedia only"
                                    : search_source() == "both" ? "Wikipedia and Grokipedia only" : "Wikipedia only") +
                        " (no TAVILY_API_KEY), " + (web_search_always() ? "offered on every chat" : "for a request that asks for a search")).c_str()

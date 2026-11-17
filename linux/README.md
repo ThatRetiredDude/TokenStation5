@@ -549,10 +549,15 @@ ts5-tui --url http://ps5.local:8081  # another one
   it needs. When DuckDuckGo can't be searched (it asks for a puzzle to be
   solved, or doesn't answer) the search goes to Grokipedia, and when that
   can't be searched either, to Wikipedia, and the model is told which it
-  got. Settings → Search source (or `/tools search web`, `grokipedia`,
-  `wikipedia`, `both`) picks: **Web** (the default), **Grokipedia** (xAI's
-  encyclopedia, written by its AI; when it can't be searched, Wikipedia
-  is), **Wikipedia**, or **Both** encyclopedias. The key is kept in
+  got. Settings → Search source (or `/tools search web`, `google`,
+  `grokipedia`, `wikipedia`, `both`) picks: **Web** (the default),
+  **Google** (its results page read through Chromium, with the answer its
+  AI writes at the top when it shows one; offered where a Chromium is
+  installed, and each search starts the browser, so it takes seconds and
+  about 900 MiB of free memory; when Google asks whether a robot is
+  searching, the search goes to DuckDuckGo and the model is told),
+  **Grokipedia** (xAI's encyclopedia, written by its AI; when it can't be
+  searched, Wikipedia is), **Wikipedia**, or **Both** encyclopedias. The key is kept in
   ts5-tui's own settings file (yours alone to read) and handed to the
   engine in its environment, never on a command line. For the API-only
   service, add `TAVILY_API_KEY=tvly-...` to `/etc/default/tokenstation`
@@ -739,7 +744,7 @@ ts5-tui --url http://ps5.local:8081  # another one
     Chrome on Linux instead; `TS5_BROWSER_AGENT=own` leaves the browser
     its own words and sends the text view's requests as "TokenStation5".
     The web search without a key asks for DuckDuckGo's results page the
-    same way. The searches made through a service's API (Wikipedia's,
+    same way, and reads Google's through the same Chromium. The searches made through a service's API (Wikipedia's,
     Grokipedia's, Tavily) name ts5, as services made for programs ask. That is all ts5 does about it: a
     site that still tests for a person (a captcha, a "checking your
     browser" page) is left closed, and the model says so.
@@ -952,7 +957,7 @@ The app's own settings are on its Settings page, as on the console.
 | `MODELS_DIR` | `/var/lib/tokenstation/models` | API-only: where models live. |
 | `HOST`, `PORT` | `0.0.0.0`, `8081` | API-only: where the API listens. |
 | `KEYS` | `/var/lib/tokenstation/access/keys.tsv` | API-only: the API keys other machines get in with (see API keys above). |
-| `TS5_SEARCH_SOURCE` | `web` | What is searched without a web search key: `web` (DuckDuckGo's results; when it can't be searched, Grokipedia, then Wikipedia), `grokipedia`, `wikipedia` or `both`. Add the line to use another. `TS5_ENCYCLOPEDIA`, the older name for the three encyclopedia choices, still counts where this one isn't set. |
+| `TS5_SEARCH_SOURCE` | `web` | What is searched without a web search key: `web` (DuckDuckGo's results; when it can't be searched, Grokipedia, then Wikipedia), `google` (Google's results page through an installed Chromium; when it can't be read, as `web`), `grokipedia`, `wikipedia` or `both`. Add the line to use another. `TS5_ENCYCLOPEDIA`, the older name for the three encyclopedia choices, still counts where this one isn't set. |
 | `CONTEXT` | `8192` | API-only: context length, or `auto` for what fits. |
 | `PS5_BOOST` | `0` | PS5: the clock boost off (`0`, faster for models: see below) or on (`1`). Skipped if `ps5_control` is missing. |
 | `PS5_CONTROL` | empty | Path to `ps5_control` if it isn't on the PATH. |

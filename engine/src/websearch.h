@@ -20,7 +20,10 @@
 //   TS5_SEARCH_SOURCE    what is searched without a key: "web" (the default:
 //                        a regular web search, DuckDuckGo's results page; when
 //                        that can't be searched, Grokipedia is, then
-//                        Wikipedia), "grokipedia" (grokipedia.com, xAI's,
+//                        Wikipedia), "google" (Google's results page read
+//                        through a Chromium on this machine, browser.h; when
+//                        that can't be, the web as above), "grokipedia"
+//                        (grokipedia.com, xAI's,
 //                        through the site's own search; when that can't be
 //                        searched, Wikipedia is), "wikipedia" or "both" (the
 //                        two encyclopedias). A request picks one with
@@ -50,8 +53,10 @@ std::string tavily_key();
 std::string search_source(const std::string &asked = "");
 // "wikipedia", "grokipedia" or "both": a search of encyclopedias alone.
 bool is_encyclopedia(const std::string &source);
-// "web" or an encyclopedia: a search with no key, for a request that asks.
+// "web", "google" or an encyclopedia: a search with no key, for a request that asks.
 bool is_keyless(const std::string &source);
+// "google" can be searched here: a Chromium is installed to read it with.
+bool google_ready();
 
 // Whether a chat's last user message looks like it needs the web: it asks to
 // look something up or names a website, or it asks about what changes (news,

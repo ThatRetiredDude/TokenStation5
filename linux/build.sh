@@ -185,7 +185,8 @@ ar_if_stale "$out/obj/libts5mbedtls.a" "${mbed_objects[@]}"
 ar_if_stale "$out/obj/libts5speech.a" "${wobjects[@]}"
 ar_if_stale "$out/obj/libts5wg.a" "${wgobjects[@]}"
 
-"$CXX" "${opt[@]}" -o "$out/tokenstation" "${engine_objects[@]}" "${title_objects[@]}" \
+# (cli_browser.o: the web search's Google source reads its page through a browser.)
+"$CXX" "${opt[@]}" -o "$out/tokenstation" "${engine_objects[@]}" "${title_objects[@]}" "$out/obj/own/cli_browser.o" \
     "$out/obj/own/font_data.o" "$out/obj/own/lexicon_data.o" \
     "$out/obj/libts5wg.a" "$out/obj/libts5speech.a" "$out/obj/libts5mbedtls.a" \
     $(pkg-config --libs sdl2) -ldl

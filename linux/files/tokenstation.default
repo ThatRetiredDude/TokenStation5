@@ -27,7 +27,9 @@ KEYS=/var/lib/tokenstation/access/keys.tsv
 
 # What a search goes to when there is no web search key (TAVILY_API_KEY):
 # web (a regular web search through DuckDuckGo; when that can't be searched,
-# Grokipedia, then Wikipedia), grokipedia, wikipedia or both (encyclopedias).
+# Grokipedia, then Wikipedia), google (Google's results page, read through an
+# installed Chromium; when it can't be read, as web), grokipedia, wikipedia
+# or both (encyclopedias).
 #TS5_SEARCH_SOURCE=web
 
 # Context length in tokens, or "auto" for what fits in GPU memory.
