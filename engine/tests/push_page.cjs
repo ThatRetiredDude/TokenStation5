@@ -61,6 +61,9 @@ async function until(page, fn, arg, ms) {
       new URL(page.url()).pathname === "/", "Controls, for a user who isn't the owner: their own (this page's dialog)");
     check(await page.locator("#notif").isVisible(), "a Notifications row for a key's user",
       await page.locator("#setdlg").innerText());
+    // (The row is shown first and its words after the page has asked the
+    // machine for its key: wait for them.)
+    await until(page, () => document.getElementById("notifnote").textContent.length > 0, null, 10000);
     const note = await page.locator("#notifnote").innerText();
     check(/answer finishes/.test(note), "it says what they are for", note);
     await page.click("#setdone");
