@@ -47,7 +47,7 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/usage", "", "the API's use by app and model (last day and week)"},
         {"/access", "", "the Access page: who can reach this TokenStation5, and its API keys (/keys too)"},
         {"/connectors", "", "the Connectors page: GitHub, connected with a QR code (/github too)"},
-        {"/feedback", "WHAT WENT WRONG + YOUR EMAIL FOR A REPLY", "then Enter: you read the report first; never public"},
+        {"/feedback", "WHAT WENT WRONG + YOUR EMAIL FOR A REPLY", "then Enter: a window to send it (and read it first if you like); never public"},
         {"/think", "on|off|auto", "thinking before answering"},
         {"/tools", "[on|off|NAME on|off|steps N|window N]", "the model's tools: search, pages, terminal, files, memory, browser (each has a switch)"},
         {"/browser", "[auto|obscura|chromium|text|PATH]", "the program the model's browser tool shows pages with"},

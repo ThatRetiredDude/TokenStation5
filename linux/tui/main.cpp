@@ -6549,7 +6549,8 @@ void feedback_start(const std::string &summary) {
     g->fb_chat = false;
     g->fb_logs = true;
     if (g->logs_src.empty()) pick_logs();
-    if (feedback_prepare()) feedback_review();
+    // The choice to send comes first; reading the report is one of them.
+    if (feedback_prepare()) feedback_choices();
 }
 
 void feedback_save() {
@@ -6607,30 +6608,31 @@ void feedback_follow() {
 
 void feedback_choices() {
     g->ask_title = " Send this report? ";
-    g->ask_text = "It goes only to TokenStation's developers, never anywhere public. " +
-                  std::string(g->fb_chat ? "This chat is in it. " : "Your chat is not in it. ") +
-                  (g->fb_logs ? "The log's last lines are in it." : "The log is left out.");
+    g->ask_text = "\"" + g->fb_summary + "\" goes only to TokenStation's developers, never anywhere public, with this "
+                  "machine's versions and settings" + std::string(g->fb_logs ? " and the log's last lines" : "") +
+                  (g->fb_chat ? " and this chat" : "") +
+                  ". Keys, addresses, names and paths are taken out first. Enter sends it; Read it first shows it before.";
     g->pick.clear();
-    g->pick.push_back({"Read it again", "the whole report, as it would be sent", [] { feedback_review(); }});
     g->pick.push_back({"Send it", "to TokenStation's developers. Your name isn't on it unless you wrote it (an email lets them answer)",
                        [] { feedback_send(); }});
+    g->pick.push_back({"Read it first", "the whole report, exactly as it would be sent; then back here",
+                       [] { feedback_review(); }});
     if (chat_has_messages() || g->fb_chat)
         g->pick.push_back({g->fb_chat ? "Leave the chat out" : "Add this chat",
                            g->fb_chat ? "the report without what you and the model wrote"
-                                      : "what you and the model wrote (its last 40 messages), cleaned the same way; you read it first",
+                                      : "what you and the model wrote (its last 40 messages), cleaned the same way",
                            [] {
                                g->fb_chat = !g->fb_chat;
-                               if (feedback_prepare()) feedback_review();
+                               if (feedback_prepare()) feedback_choices();
                            }});
     g->pick.push_back({g->fb_logs ? "Leave the log out" : "Put the log back",
                        g->fb_logs ? "only your words, the versions and the settings" : "the log's last 300 lines, cleaned",
                        [] {
                            g->fb_logs = !g->fb_logs;
-                           if (feedback_prepare()) feedback_review();
+                           if (feedback_prepare()) feedback_choices();
                        }});
     g->pick.push_back({"Save to a file", "kept on this machine; nothing is sent", [] { feedback_save(); }});
     g->pick.push_back({"Cancel", "nothing is sent or kept", [] {}});
-    // (An Enter meant for something else only shows the report again.)
     g->pick_sel = 0;
 }
 
