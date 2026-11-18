@@ -926,6 +926,57 @@ std::string pages_base() {
     return u;
 }
 
+// Whether Tailscale is set to be on: the server's word, or, with no server
+// to ask (offline), what its tailscale.conf beside the keys says.
+bool tailscale_set_on() {
+    if (g->tn_have) return g->tn_on;
+    const size_t slash = g->acc_file.rfind('/');
+    if (slash == std::string::npos) return false;
+    bool on = false;
+    if (FILE *f = fopen((g->acc_file.substr(0, slash) + "/tailscale.conf").c_str(), "r")) {
+        char line[256];
+        while (fgets(line, sizeof line, f))
+            if (!strncmp(line, "on=", 3)) on = line[3] == '1';
+        fclose(f);
+    }
+    return on;
+}
+
+// Why a new key's QR code can't open the chat page by Tailscale now, in a
+// line for the code's window, or "" when it can. Without a running server
+// the code opens nothing; without a connected tailnet it holds this
+// network's address (http), which a phone away from home can't reach.
+// short_why: the same in a few words, for the window's title.
+// has_link: the code holds an address at all (not when no other machine
+// can reach this one: its own note says so).
+std::string phone_code_problem(std::string &short_why, bool has_link = true) {
+    short_why.clear();
+    const AccessKind k = (AccessKind)g->acc_kind;
+    if (k == ACC_TV || k == ACC_REMOTE) return "";
+    const ServerState sv = server();
+    const bool off = sv.polled && !sv.online;
+    const bool connected = g->tn_have && g->tn_state == "connected" && !g->tn_url.empty();
+    if (connected) return "";
+    if (!off && !has_link) return "";
+    const bool ts_on = tailscale_set_on();
+    if (off) {
+        short_why = "Server off: this code opens nothing yet";
+        return std::string("The server is off (● offline, in the bar at the top), so nothing answers this code") +
+               (ts_on ? ", and without it Tailscale isn't connected, so the code holds this network's address. "
+                      : ". Tailscale is off too, so the code holds this network's address only. ") +
+               "Load a model (Models, F2)" + (ts_on ? "" : ", turn Tailscale on (Access, F6)") +
+               ", then make the key again for a code that opens the chat page by Tailscale.";
+    }
+    if (!ts_on) {
+        short_why = "This network only: Tailscale is off";
+        return "Tailscale is off, so this code opens the chat page on this network only, by http, never from away. "
+               "Turn Tailscale on (Access, F6), then make the key again for a code that works anywhere.";
+    }
+    short_why = "This network only: Tailscale isn't connected";
+    return "Tailscale isn't connected yet" + (g->tn_state.empty() ? std::string() : " (" + g->tn_state + ")") +
+           ", so this code holds this network's address only. Once Access (F6) says connected, make the key again.";
+}
+
 // The browser terminal's address on the tailnet: the API's, at /ts5/terminal.
 std::string terminal_url() {
     const std::string u = pages_base();
@@ -3730,6 +3781,12 @@ void draw_access() {
             r.warn = true, r.note = "Enter: a key as a QR code (http) · no HTTPS: " +
                                     (g->tn_https_problem.empty() ? std::string("see Logs (F5)") : g->tn_https_problem);
         else if (tailnet) r.note = "Enter: a new key in a QR code: the phone opens the chat page signed in (or an app's address)";
+        else if (server().polled && !server().online)
+            r.warn = true, r.note = "server off: load a model (F2) first, or a phone's code opens nothing";
+        else if (reach && !tailscale_set_on())
+            r.warn = true, r.note = "Enter: a key whose code works on this network only · Tailscale on (above): from anywhere";
+        else if (reach && g->tn_on)
+            r.warn = true, r.note = "Enter: a key whose code works on this network only, until Tailscale (above) is connected";
         else if (reach) r.note = "Enter: a new key in a QR code: the phone opens the chat page signed in (this network)";
         else r.note = "other machines can't reach it yet: Other devices, or Tailscale, above";
         rows.push_back(r);
@@ -5772,6 +5829,20 @@ void access_new(const std::string &name, bool here = true) {
                           " A tap on the text under a code copies it.");
     g->qr_short = base.empty() ? "The new key, shown this once"
                                 : std::string("Scan it: ") + (term ? "the browser terminal" : "the chat page") + ", signed in";
+    // Said first, and in the title, when the code can't open the chat page
+    // by Tailscale (the server off, Tailscale off or not connected): a
+    // code to this network's address, or to nothing, looks just like a
+    // good one.
+    {
+        std::string why_short;
+        const std::string why = phone_code_problem(why_short, !base.empty());
+        if (!why.empty()) {
+            g->qr_notes.insert(g->qr_notes.begin(), "⚠ " + why);
+            g->qr_short = why_short;
+            g->qr_title = " " + why_short + " ";
+            text = "⚠ " + why + "\n\n" + text;
+        }
+    }
     if (!base.empty()) {
         text += "\nOn a phone or tablet" + std::string(tailnet ? " with Tailscale on" : "") + ", these open signed in:\n  chat page  " +
                 base + "/#key=" + key + "\n";
