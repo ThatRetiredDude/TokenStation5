@@ -372,6 +372,10 @@ jobs:
         run: |
           command -v tmux || sudo apt-get install -y -qq tmux
           python3 linux/tui/test/models_test.py "$(command -v ts5-tui)"
+      - name: Connect a phone (ts5-tui in tmux; a new key's QR code says when it can't open the chat page by Tailscale)
+        run: |
+          command -v tmux || sudo apt-get install -y -qq tmux
+          python3 linux/tui/test/connect_test.py "$(command -v ts5-tui)"
       - name: The phone's controls (ts5-tui in tmux loads a model; /ts5/control through its server, the owner's key only; the page in Chrome at a phone's width)
         env:
           TS5_PAGE_TEST: require
