@@ -391,6 +391,8 @@ jobs:
         run: python3 linux/tui/test/task_test.py "$(command -v ts5-tui)"
       - name: A browser on demand (ts5-tui --install-browser, from a release file made here, no network)
         run: python3 linux/tui/test/install_test.py "$(command -v ts5-tui)"
+      - name: /update (ts5-tui --update and /update in tmux, from a made-up release with stand-ins for sudo and apt, no network)
+        run: python3 linux/tui/test/update_test.py "$(command -v ts5-tui)"
       - name: The sandbox for the model's commands (bubblewrap; as Ubuntu has it, then let in by the README's AppArmor profile)
         run: |
           command -v bwrap || sudo apt-get install -y -qq bubblewrap

@@ -63,6 +63,7 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/logs", "", "the engine's log"},
         {"/help", "", "keys and commands"},
         {"/unload", "", "stop the model ts5-tui loaded: its GPU memory is free"},
+        {"/update", "", "install the newest TokenStation5: ts5-tui closes, updates (sudo asks for your password) and opens again"},
         {"/quit", "", "leave (exit, quit or q too): a model ts5-tui loaded is unloaded"},
     };
     return c;
