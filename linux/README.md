@@ -53,7 +53,7 @@ One build runs on Debian 12 and anything newer: Ubuntu, Fedora, Bazzite,
 SteamOS, Arch. The newest build is always the
 [`linux-latest`](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/linux-latest)
 pre-release, under fixed names, so one command fetches and installs it (run it
-again to update):
+again to update, or `/update` in ts5-tui):
 
 ```sh
 # Debian 12 or 13, Ubuntu
@@ -385,8 +385,13 @@ ts5-tui --url http://ps5.local:8081  # another one
   names after `/model`: `/model`, `/download`, `/search`, `/new`, `/chats`, `/open`,
   `/save`, `/copy`, `/find`, `/tune`, `/check`, `/bench`, `/usage`, `/access`, `/connectors`,
   `/think on|off`, `/fan auto|cool|early|max`, `/theme`, `/help`, `/unload`,
-  `/quit` (`exit`, `quit` or `q` work too). A `ts5 fetch URL FILE --sha256 HEX`
-  line pasted at the prompt downloads that model.
+  `/update`, `/quit` (`exit`, `quit` or `q` work too). A `ts5 fetch URL FILE --sha256 HEX`
+  line pasted at the prompt downloads that model. `/update` installs the
+  newest build: ts5-tui closes (a model it loaded stops), downloads
+  `linux-latest` and installs it the way this copy was installed (`apt`,
+  `dnf`, `pacman`, or the portable build's `install.sh`; sudo asks for the
+  password), then opens again with that model loaded back. The same
+  version is left alone. `ts5-tui --update` does it without the app.
 - **In between**: the chat (markdown, highlighted code, the thinking folded
   away: a click on its "Thought for" line opens that one, Ctrl+T all of
   them), or a page: **F1** Chat, **F2** Models (the models downloaded

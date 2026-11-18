@@ -46,6 +46,7 @@
 #include "qrcodegen.hpp"  // third_party/qrcodegen: the QR codes on the Access page
 #include "sandbox.h"
 #include "store.h"
+#include "update.h"
 #include "tested.h"  // the models tested on a PS5 that the catalog doesn't have
 #include "tested_models.h"  // engine/src: the helper tuning found for each of them
 
@@ -78,6 +79,8 @@ struct App {
     std::string ep_err;
     Screen scr;
     bool truecolor = false, quit = false, full_redraw = true;
+    // /update: once the loop ends, the newest build is installed and ts5-tui opens again.
+    bool update = false;
     ScreenId cur = CHAT;
     std::string toast;
     double toast_until = 0;
@@ -4560,6 +4563,7 @@ const ModelFile *find_model(const std::string &q) {
 }
 
 void request_quit();
+void request_update();
 void feedback_start(const std::string &summary);
 void feedback_follow();
 void copy_out(const std::string &text, const std::string &what);
@@ -4582,6 +4586,7 @@ void run_command(const std::string &line) {
     if (cmd == "/fetch") cmd = "/download";
     if (cmd == "/new" || cmd == "/clear") chat_new(c);
     else if (cmd == "/quit" || cmd == "/exit" || cmd == "/q") request_quit();
+    else if (cmd == "/update" || cmd == "/upgrade") request_update();
     else if (cmd == "/chat") go(CHAT);
     else if (cmd == "/models") go(MODELS);
     else if (cmd == "/status") go(STATUS);
@@ -5353,6 +5358,27 @@ void request_quit() {
                   (getenv("TMUX") ? " To leave it running and come back later, press Ctrl+A, then D instead." : "") +
                   " Quit anyway?";
     g->ask_yes = [] { g->quit = true; };
+}
+
+// /update asks first: ts5-tui closes for a while, the model it loaded
+// stops, and sudo asks for the password. A job or a download stops too.
+void request_update() {
+    const bool job = g->tuner.running(), dl = g->downloader.running() && g->dl_on;
+    const bool own = own_server_pid() > 0;
+    const std::string model = server().model;
+    g->ask_title = " Update TokenStation5? ";
+    g->ask_text = std::string("ts5-tui closes") +
+                  (own ? ", " + (model.empty() ? std::string("the model it loaded") : model) + " stops" : std::string()) +
+                  (job ? ", " + g->tuner.title + " stops" : std::string()) +
+                  (dl ? ", the download of " + g->dl.name + " stops (it goes on later)" : std::string()) +
+                  ", and the newest TokenStation5 is downloaded and installed here (sudo asks for your password). Then "
+                  "ts5-tui opens again, the new one" +
+                  (own ? std::string(", and loads ") + (model.empty() ? "the model" : model) + " again" : std::string()) +
+                  ". Your chats and settings stay. Update now?";
+    g->ask_yes = [] {
+        g->update = true;
+        g->quit = true;
+    };
 }
 
 void go(ScreenId to) {
@@ -6523,7 +6549,8 @@ void feedback_start(const std::string &summary) {
     g->fb_chat = false;
     g->fb_logs = true;
     if (g->logs_src.empty()) pick_logs();
-    if (feedback_prepare()) feedback_review();
+    // The choice to send comes first; reading the report is one of them.
+    if (feedback_prepare()) feedback_choices();
 }
 
 void feedback_save() {
@@ -6581,30 +6608,31 @@ void feedback_follow() {
 
 void feedback_choices() {
     g->ask_title = " Send this report? ";
-    g->ask_text = "It goes only to TokenStation's developers, never anywhere public. " +
-                  std::string(g->fb_chat ? "This chat is in it. " : "Your chat is not in it. ") +
-                  (g->fb_logs ? "The log's last lines are in it." : "The log is left out.");
+    g->ask_text = "\"" + g->fb_summary + "\" goes only to TokenStation's developers, never anywhere public, with this "
+                  "machine's versions and settings" + std::string(g->fb_logs ? " and the log's last lines" : "") +
+                  (g->fb_chat ? " and this chat" : "") +
+                  ". Keys, addresses, names and paths are taken out first. Enter sends it; Read it first shows it before.";
     g->pick.clear();
-    g->pick.push_back({"Read it again", "the whole report, as it would be sent", [] { feedback_review(); }});
     g->pick.push_back({"Send it", "to TokenStation's developers. Your name isn't on it unless you wrote it (an email lets them answer)",
                        [] { feedback_send(); }});
+    g->pick.push_back({"Read it first", "the whole report, exactly as it would be sent; then back here",
+                       [] { feedback_review(); }});
     if (chat_has_messages() || g->fb_chat)
         g->pick.push_back({g->fb_chat ? "Leave the chat out" : "Add this chat",
                            g->fb_chat ? "the report without what you and the model wrote"
-                                      : "what you and the model wrote (its last 40 messages), cleaned the same way; you read it first",
+                                      : "what you and the model wrote (its last 40 messages), cleaned the same way",
                            [] {
                                g->fb_chat = !g->fb_chat;
-                               if (feedback_prepare()) feedback_review();
+                               if (feedback_prepare()) feedback_choices();
                            }});
     g->pick.push_back({g->fb_logs ? "Leave the log out" : "Put the log back",
                        g->fb_logs ? "only your words, the versions and the settings" : "the log's last 300 lines, cleaned",
                        [] {
                            g->fb_logs = !g->fb_logs;
-                           if (feedback_prepare()) feedback_review();
+                           if (feedback_prepare()) feedback_choices();
                        }});
     g->pick.push_back({"Save to a file", "kept on this machine; nothing is sent", [] { feedback_save(); }});
     g->pick.push_back({"Cancel", "nothing is sent or kept", [] {}});
-    // (An Enter meant for something else only shows the report again.)
     g->pick_sel = 0;
 }
 
@@ -7896,6 +7924,7 @@ int usage(FILE *f) {
             "  ts5-tui --start\n"
             "  ts5-tui --mcp | --mcp-tools | --mcp-call TOOL ['{\"ARGUMENT\": ...}']\n"
             "  ts5-tui --install-browser chromium|obscura [--dry-run]\n"
+            "  ts5-tui --update [--dry-run]\n"
             "  ts5-tui --run-command 'COMMAND' [--sandbox on|off|no-network|box|plain]\n"
             "  ts5-tui --github-call '{\"method\": \"GET\", \"path\": \"/user/repos\"}' [--dry-run]\n"
             "  ts5-tui --sandbox-folder DIR|default\n\n"
@@ -7914,6 +7943,9 @@ int usage(FILE *f) {
             "--install-browser: a browser for the model's browser tool. chromium: from this\n"
             "system's packages (sudo asks for the password). obscura: its makers' release,\n"
             "checked by SHA-256, into the home folder. --dry-run only says what would be done.\n"
+            "--update: downloads the newest TokenStation5 (the linux-latest release) and\n"
+            "installs it the way this copy was installed (sudo asks for the password).\n"
+            "/update in the app does the same, then opens ts5-tui again.\n"
             "--run-command: runs one command the way the model's terminal tool does (in the\n"
             "sandbox, unless it is off; /sandbox in the app) and prints what the model would\n"
             "get back. --sandbox: on, off or no-network for that command; box: in the\n"
@@ -7976,6 +8008,7 @@ int main(int argc, char **argv) {
     bool gh_mode = false;  // --github-call
     std::string gh_args;
     bool folder_mode = false;
+    bool update_mode = false;  // --update
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -7995,6 +8028,7 @@ int main(int argc, char **argv) {
             mcp_calls.push_back({tool, i + 1 < argc && argv[i + 1][0] != '-' ? next() : std::string()});
         }
         else if (a == "--install-browser") install = next();
+        else if (a == "--update") update_mode = true;
         else if (a == "--dry-run") dry = true;
         else if (a == "--run-command") run_mode = true, run_cmd = next();
         else if (a == "--github-call") gh_mode = true, gh_args = next();
@@ -8053,6 +8087,23 @@ int main(int argc, char **argv) {
         printf("%s\n%s\n", r.head.c_str(), r.text.c_str());
         return r.ok ? 0 : 1;
     }
+    // The program as it is now: after an update the same path is the new one.
+    std::string self;
+    {
+        char buf[4096];
+        const ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+        self = n > 0 ? std::string(buf, (size_t)n) : std::string(argv[0]);
+        // Replaced while it ran (an update from outside): the path is still the program's.
+        const std::string gone = " (deleted)";
+        if (self.size() > gone.size() && self.compare(self.size() - gone.size(), gone.size(), gone) == 0)
+            self.resize(self.size() - gone.size());
+    }
+    if (update_mode) {
+        // The newest build, without the screen (what /update runs once ts5-tui has closed).
+        const int st = system(update_cmd(self, "/dev/null", dry).c_str());
+        const int rc = st == -1 ? 127 : WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+        return rc == 10 ? 0 : rc;
+    }
     if (!install.empty()) {
         // A browser for the model's browser tool, without the screen (what the offer in the app runs).
         const int st = system(browser_install_cmd(install, dry).c_str());
@@ -8101,6 +8152,11 @@ int main(int argc, char **argv) {
     };
     scan_models();
     app.sens = read_sensors();
+    // Back from /update: what it did, and the model ts5-tui had loaded, loaded again.
+    std::string updated = getenv("TS5_TUI_UPDATED") ? getenv("TS5_TUI_UPDATED") : "";
+    const std::string reload = getenv("TS5_TUI_RELOAD") ? getenv("TS5_TUI_RELOAD") : "";
+    unsetenv("TS5_TUI_UPDATED");
+    unsetenv("TS5_TUI_RELOAD");
     // The phone's controls (the chat page's Controls, through ts5 serve)
     // reach this ts5-tui; a second one leaves them to the first.
     {
@@ -8115,6 +8171,14 @@ int main(int argc, char **argv) {
     if (!bad_saved.empty())
         show_toast("The saved server address \"" + bad_saved + "\" isn't one: using " + app.cfg.url + " (Settings → Server)",
                    app.th->warn, 12);
+    if (!updated.empty())
+        show_toast(updated, updated.rfind("Updated", 0) == 0 || updated.rfind("Already", 0) == 0 ? app.th->good : app.th->warn, 10);
+    if (!reload.empty() && !server().online)
+        for (auto &m : app.models)
+            if (m.path == reload) {
+                load_model(m);
+                break;
+            }
     app.full_redraw = true;
     while (!app.quit) {
         if (g_winch) {
@@ -8143,6 +8207,11 @@ int main(int argc, char **argv) {
             if (app.quit) break;
         }
     }
+    // /update: the model ts5-tui serves is loaded again by the new one.
+    std::string reload_after;
+    if (app.update && own_server_pid() > 0)
+        for (auto &m : app.models)
+            if (api_id(m.name) == server().model) reload_after = m.path;
     app.stop_poll = true;
     control_stop();
     chat_stop(app.chat);
@@ -8164,7 +8233,8 @@ int main(int argc, char **argv) {
     if (app.view_on) term_write("\x1b[?7l");
     set_mouse(true);  // tmux's own, back as its config has it
     term_leave();
-    std::string t = transcript(app.chat);
+    // /update reopens ts5-tui: the chat stays in it, not printed here.
+    std::string t = app.update ? std::string() : transcript(app.chat);
     if (was_downloading && app.dl_on)
         t += fmt("ts5-tui: the download of %s stopped; /download %s goes on from where it was.\n", app.dl.name.c_str(),
                  app.dl.cat ? app.dl.cat->key : (app.dl.url + " " + app.dl.file + (app.dl.sha256.empty() ? "" : " --sha256 " + app.dl.sha256)).c_str());
@@ -8172,7 +8242,7 @@ int main(int argc, char **argv) {
     // unless Settings → When you quit keeps it serving.
     if (pid_t own = own_server_pid(); own > 0) {
         const std::string name = server().model.empty() ? std::string("the model") : server().model;
-        if (app.cfg.keep_model) {
+        if (app.cfg.keep_model && !app.update) {
             t += fmt("ts5-tui: %s keeps serving (pid %d, port %d). Stop it with: kill %d\n", name.c_str(), own,
                      app.ep.port, own);
         } else {
@@ -8191,6 +8261,37 @@ int main(int argc, char **argv) {
                 t += fmt("ts5-tui: unloaded %s, its GPU memory is free (Settings → When you quit keeps it loaded).\n",
                          name.c_str());
         }
+    }
+    if (app.update) {
+        // Out of the screen, in this terminal (or this tmux pane): the
+        // update's script, where sudo can ask for the password; then the
+        // program at the same path, which is now the new one.
+        fputs(t.c_str(), stdout);
+        printf("\nts5-tui: updating TokenStation5\n\n");
+        fflush(stdout);
+        const std::string note = state_dir() + "/update-note.txt";
+        unlink(note.c_str());
+        const int st = system(update_cmd(self, note, false).c_str());
+        const int rc = st == -1 ? 127 : WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+        std::string said = read_file(note);
+        unlink(note.c_str());
+        while (!said.empty() && (said.back() == '\n' || said.back() == ' ')) said.pop_back();
+        if (said.empty()) said = rc == 0 ? "Updated" : "No update: it ended with " + std::to_string(rc);
+        if (rc != 0 && rc != 10) {
+            // What went wrong stays on the screen until it has been read.
+            printf("\nEnter opens ts5-tui again. ");
+            fflush(stdout);
+            tcflush(STDIN_FILENO, TCIFLUSH);
+            for (int c; (c = getchar()) != EOF && c != '\n';) {}
+        }
+        setenv("TS5_TUI_UPDATED", said.c_str(), 1);
+        if (!reload_after.empty()) setenv("TS5_TUI_RELOAD", reload_after.c_str(), 1);
+        std::vector<char *> args(argv, argv + argc);
+        args.push_back(nullptr);
+        execv(self.c_str(), args.data());
+        execvp("ts5-tui", args.data());
+        fprintf(stderr, "ts5-tui: %s. Start it again with: ts5-tui\n", strerror(errno));
+        return 1;
     }
     if (getenv("TS5_TUI_TMUX")) {
         // The tmux pane closes now: the ts5-tui outside prints it.

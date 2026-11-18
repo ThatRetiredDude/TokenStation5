@@ -2,12 +2,13 @@
 """ts5-tui's /feedback, driven in tmux against fake-server.py and a
 feedback service served here.
 
-/feedback with no words says what to write; with words it shows the
-report itself (cleaned: the log's LAN address and token are gone, the
-user's email stays), then the choices. "Add this chat" puts the chat in
-and shows the report again; "Save to a file" keeps it without sending;
-"Send it" posts it once, and the chat says the report's id. Nothing is
-sent before Send.
+/feedback with no words says what to write; with words it opens the
+window to send it (owner, 2026-11-18: not the log first). "Read it first"
+shows the report (cleaned: the log's LAN address and token are gone, the
+user's email stays) and comes back; "Add this chat" puts the chat in and
+comes back; "Save to a file" keeps it without sending; Enter on "Send it"
+posts it once, and the chat says the report's id. Nothing is sent before
+Send.
 
     linux/tui/test/feedback_test.py PATH/TO/ts5-tui PATH/TO/ts5
 """
@@ -84,7 +85,17 @@ def main():
         ct.check("YOUR EMAIL FOR A REPLY" in flat(t.screen()), "the hint stays while typing", t.screen())
         t.type("the helper stopped, write me at me@example.cz")
         t.keys("Enter")
-        ct.check(t.wait("Read what /feedback would send", 15), "the report opens to read", t.screen())
+        ct.check(t.wait("Send this report?", 15) and t.wait("Read it first", 2),
+                 "the window to send it comes first, not the report", t.screen())
+        scr = flat(t.screen())
+        ct.check("the helper stopped" in scr and "the log's last lines" in scr and "this chat" not in scr.split("Send it")[0],
+                 "it says what goes: the words and the log, no chat", t.screen())
+        ct.check("Read what /feedback would send" not in t.screen(), "the log isn't shown unless asked", t.screen())
+        ct.check(not got, "nothing sent yet")
+        # Read it first: Send it, Read it first.
+        t.keys("Down")
+        t.keys("Enter")
+        ct.check(t.wait("Read what /feedback would send", 10), "Read it first opens the report", t.screen())
         time.sleep(0.5)
         scr = t.screen()
         ct.check("## What happened" in scr and "me@example.cz" in scr, "the user's words, their email kept", scr)
@@ -93,18 +104,20 @@ def main():
         ct.check("hello there" not in scr, "no chat yet")
         ct.check(not got, "nothing sent while reading")
         t.keys("q")
-        ct.check(t.wait("Send this report?", 5) and t.wait("Read it again", 2), "the choices come next", t.screen())
-        ct.check("Your chat is not in it" in flat(t.screen()), "it says the chat is out", t.screen())
-        # Add this chat: Read it again, Send it, Add this chat.
+        ct.check(t.wait("Send this report?", 5) and t.wait("Read it first", 2), "then back to the window", t.screen())
+        # Add this chat: Send it, Read it first, Add this chat.
         t.keys("Down")
         t.keys("Down")
         t.keys("Enter")
-        ct.check(t.wait("Read what /feedback would send", 10) and t.wait("hello there", 5),
-                 "Add this chat shows the report again, with it", t.screen())
+        ct.check(t.wait("Send this report?", 10) and t.wait("Leave the chat out", 5) and "and this chat" in flat(t.screen()),
+                 "Add this chat: back to the window, which says the chat is in", t.screen())
+        t.keys("Down")
+        t.keys("Enter")
+        ct.check(t.wait("hello there", 10), "Read it first shows the chat in it", t.screen())
         t.keys("Escape")
-        ct.check(t.wait("Send this report?", 5) and "This chat is in it" in flat(t.screen()), "it says the chat is in", t.screen())
+        t.wait("Send this report?", 5)
         ct.check(not got, "still nothing sent")
-        # Save to a file: Read, Send, Leave the chat out, Leave the log out, Save.
+        # Save to a file: Send, Read, Leave the chat out, Leave the log out, Save.
         for _ in range(4):
             t.keys("Down")
         t.keys("Enter")
@@ -113,15 +126,12 @@ def main():
         files = os.listdir(d) if os.path.isdir(d) else []
         ct.check(len(files) == 1 and "hello there" in open(os.path.join(d, files[0])).read(), "the file has the report")
         ct.check(not got, "saving sends nothing")
-        # Send it.
+        # Send it: Enter in the window.
         t.type("/feedback it stopped again")
         t.keys("Enter")
-        ct.check(t.wait("Read what /feedback would send", 15), "the report opens again")
-        t.keys("q")
-        t.wait("Send this report?", 5)
-        t.keys("Down")
+        ct.check(t.wait("Send this report?", 15), "the window again")
         t.keys("Enter")
-        ct.check(t.wait("fb-20261113-tui001", 15), "Send it: the report's id is told", t.screen())
+        ct.check(t.wait("fb-20261113-tui001", 15), "Enter sends it: the report's id is told", t.screen())
         ct.check(len(got) == 1, "sent once", got)
         if got:
             g = got[0]
