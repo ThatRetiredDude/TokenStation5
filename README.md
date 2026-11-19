@@ -6,20 +6,136 @@
 
 ### The PS5 was built to push pixels. We're teaching it to push tokens.
 
-Your PS5 becomes a private AI assistant at home or away with Tailscale. Talk to it with the controller, chat with it on the TV, or plug it into the coding tools and chat apps you already use, at home or away with Tailscale. No cloud, no subscription, and your conversations stay at home.
+A private AI assistant that runs on your own hardware: a jailbroken PS5, a PS5 running Linux, or any Linux PC with a Vulkan GPU. Chat on the TV, in a terminal or on your phone, talk to it with the controller, and plug it into the coding tools and chat apps you already use, at home or away with Tailscale. No cloud, no subscription, and your conversations stay at home.
 
+[![Linux release](https://img.shields.io/github/v/release/ThatRetiredDude/TokenStation5?filter=linux-v*&label=Linux&logo=linux&logoColor=white&color=FCC624&style=for-the-badge)](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/linux-v1.3.1)
+[![PS5 title](https://img.shields.io/github/v/release/ThatRetiredDude/TokenStation5?filter=0*&label=PS5%20title&logo=playstation&logoColor=white&color=003791&style=for-the-badge)](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/01.004.001)
 [![Prospero Store](https://img.shields.io/badge/Prospero_Store-PPSA99555-003791?style=for-the-badge&logo=playstation&logoColor=white)](https://github.com/darkxex/ProsperoStore)
-[![License](https://img.shields.io/badge/license-PolyForm_SB_%2F_GPL--3.0-yellow?style=for-the-badge)](LICENSING.md)
-[![Stars](https://img.shields.io/github/stars/ThatRetiredDude/TokenStation5?style=for-the-badge&logo=github&color=gold)](https://github.com/ThatRetiredDude/TokenStation5/stargazers)
 
-![PS5](https://img.shields.io/badge/PS5-jailbroken-003791?style=flat-square&logo=playstation&logoColor=white)
+[![Downloads](https://img.shields.io/github/downloads/ThatRetiredDude/TokenStation5/total?style=for-the-badge&logo=github&label=downloads&color=2ea44f)](https://github.com/ThatRetiredDude/TokenStation5/releases)
+[![Stars](https://img.shields.io/github/stars/ThatRetiredDude/TokenStation5?style=for-the-badge&logo=github&color=gold)](https://github.com/ThatRetiredDude/TokenStation5/stargazers)
+[![License](https://img.shields.io/badge/license-PolyForm_SB_%2F_GPL--3.0-yellow?style=for-the-badge)](LICENSING.md)
+[![Wiki](https://img.shields.io/badge/docs-wiki-8A2BE2?style=for-the-badge&logo=gitbook&logoColor=white)](https://github.com/ThatRetiredDude/TokenStation5/wiki)
+
+![Debian](https://img.shields.io/badge/Debian_12%2F13-A81D33?style=flat-square&logo=debian&logoColor=white)
+![Ubuntu](https://img.shields.io/badge/Ubuntu-E95420?style=flat-square&logo=ubuntu&logoColor=white)
+![Fedora](https://img.shields.io/badge/Fedora-51A2DA?style=flat-square&logo=fedora&logoColor=white)
+![Arch](https://img.shields.io/badge/Arch-1793D1?style=flat-square&logo=archlinux&logoColor=white)
+![SteamOS](https://img.shields.io/badge/Bazzite_%2F_SteamOS-1A9FFF?style=flat-square&logo=steam&logoColor=white)
+![PS5](https://img.shields.io/badge/PS5-jailbroken_or_Linux-003791?style=flat-square&logo=playstation&logoColor=white)
 ![GPU](https://img.shields.io/badge/GPU-RDNA_2_·_16GB-ED1C24?style=flat-square&logo=amd&logoColor=white)
 ![Vulkan](https://img.shields.io/badge/Vulkan-compute-A41E22?style=flat-square&logo=vulkan&logoColor=white)
 ![Engine](https://img.shields.io/badge/ts5-from_scratch_·_C%2B%2B17-00599C?style=flat-square&logo=cplusplus&logoColor=white)
 ![API](https://img.shields.io/badge/API-OpenAI--compatible-412991?style=flat-square&logo=openai&logoColor=white)
+![Tailscale](https://img.shields.io/badge/Tailscale-built_in-242424?style=flat-square&logo=tailscale&logoColor=white)
 ![Not llama.cpp](https://img.shields.io/badge/not-llama.cpp-black?style=flat-square)
 
+**[🐧 Install on Linux](#-tokenstation-for-linux-131)** · **[🎮 Install on a PS5](#-the-ps5-title)** · **[📖 Wiki](https://github.com/ThatRetiredDude/TokenStation5/wiki)** · **[🧠 Models](#-models)** · **[📦 Releases](https://github.com/ThatRetiredDude/TokenStation5/releases)**
+
 </div>
+
+---
+
+> [!TIP]
+> **TokenStation for Linux 1.3.1 is out.** It runs on a PS5 running Linux and on
+> any Linux PC with a Vulkan GPU, with everything the PS5 title does plus a
+> terminal app, a chat page for your phone, users, and a model that can use
+> tools. [Jump to the install](#-tokenstation-for-linux-131).
+
+## Two editions, one engine
+
+| | 🐧 **Linux** | 🎮 **PS5 title** |
+| --- | --- | --- |
+| **Runs on** | A PS5 running Linux, or any x86-64 Linux PC with a Vulkan GPU | A jailbroken PS5 on firmware 13.60 or lower |
+| **Latest** | [1.3.1](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/linux-v1.3.1) (2026-11-18) | [01.004.001](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/01.004.001) (2026-10-28) |
+| **Install** | One command: `.deb`, `.rpm`, Arch package or portable build | The Prospero Store, or the title's zip |
+| **Memory for models** | About 12 to 13 GiB on a PS5, so 14B models fit | 11.4 GiB, up to 12B models |
+| **Ways to use it** | TV dashboard, desktop app, terminal app over SSH, browser terminal, phone chat page, API | TV dashboard, voice, API |
+| **Extras** | Users, phone controls, notifications, tools (web, browser, terminal sandbox, files, GitHub, MCP), fan and clock control | Runs on the console itself, no Linux needed |
+| **License** | PolyForm Small Business | GPL-3.0-or-later |
+
+Both are built from the same code around **ts5**, our own inference engine, written from scratch for the PS5's GPU.
+
+---
+
+## 🐧 TokenStation for Linux 1.3.1
+
+### Install
+
+Pick **one** line, the one for your system. Each always fetches the newest
+build, so run it again to update (or type `/update` in the terminal app).
+Your models, chats, keys and settings stay where they are.
+
+```sh
+# Debian 12 or 13, Ubuntu
+curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation_latest_amd64.deb && sudo apt install ./tokenstation_latest_amd64.deb
+
+# Fedora
+sudo dnf install https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest.x86_64.rpm
+
+# Arch
+curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-x86_64.pkg.tar.zst && sudo pacman -U ./tokenstation-latest-x86_64.pkg.tar.zst
+
+# Bazzite, SteamOS and anything else (installs into your home folder; run it as yourself, not with sudo)
+curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz | tar xz && cd tokenstation-linux-amd64 && ./install.sh
+```
+
+Prefer a fixed version? The same four files are attached to every numbered
+release, for example
+[linux-v1.3.1](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/linux-v1.3.1).
+
+### Then
+
+1. **On a PS5 only:** restart once (`sudo reboot`, then run the Linux loader
+   again). The install raises the GPU's memory limit, and that takes hold at boot.
+2. **Start it.** With a desktop, open **TokenStation5** from the app menu. Over
+   SSH, or with no desktop, type `ts5-tui`.
+3. **Get a model and chat.** In the terminal app type `/download qwen3-8b` and
+   press Enter (about 5 GB; its helper model follows by itself), select it on
+   the Models page (F2), press Enter to load it, and chat on F1. In the desktop
+   app: Models, Qwen3 8B, download, then Chat.
+
+That's it. The full five-step guide, with checks and what to do when something
+looks wrong, is the wiki's
+**[Install on Linux](https://github.com/ThatRetiredDude/TokenStation5/wiki/Install-on-Linux)**.
+
+> [!IMPORTANT]
+> **On a PS5 running Linux** you need Linux on the console first (from
+> [ps5-linux-loader](https://github.com/rmuxwashere/ps5-linux-loader), firmware
+> 3.00 to 13.60) and **Mesa 25.3 or newer** for its GPU: Debian 13 with
+> `trixie-backports`, Fedora, Ubuntu 26.04 or Bazzite. Debian 12's Mesa doesn't
+> know the chip. Check with `vulkaninfo --summary`: you want **RADV GFX1013**.
+> TokenStation5 doesn't boot or unlock anything itself.
+
+### What the Linux edition adds
+
+- **⌨️ A terminal app, `ts5-tui`.** Chat, download, switch and tune models, and
+  watch GPU memory, temperatures and the fan live, over SSH or in a browser.
+- **🛠️ A model that uses tools.** Web search with no key (DuckDuckGo, Google
+  through Chromium, Grokipedia or Wikipedia), a real browser, files, GitHub
+  (connected with a QR code), other programs' tools over MCP, and a terminal
+  whose commands run in a sandbox with a Debian system of its own, where the
+  model can `apt install` what it needs without touching yours. Every tool has
+  its own off, ask or allow switch. Long tasks keep going when the chat fills up.
+- **📱 Your phone.** Scan a QR code and a chat page opens, signed in, at home or
+  on mobile data through Tailscale. Add it to the Home Screen as an app, get a
+  notification when an answer finishes, and load models, set the fan or manage
+  users from Controls.
+- **👥 Users.** Accounts for family and friends, with their own keys and chats,
+  and only what you allow (models, web search, tokens a day).
+- **🧠 Bigger and newer models.** 14B models fit on a PS5 with Linux, plus Qwen
+  3.5 with up to 262k tokens of context, Gemma 4, and two-bit Bonsai models up
+  to 27B.
+- **🌡️ The hardware is yours.** Fan modes, clock boost, and 36, 38 or 40 GPU
+  compute units on a PS5; all 8 CPU cores.
+- **🖥️ Any Linux PC.** The same app on a desktop with any Vulkan GPU.
+
+What changed in each version is in
+[the release notes](https://github.com/ThatRetiredDude/TokenStation5/tree/linux-package/linux/release-notes).
+Found a bug? Type `/feedback` in `ts5-tui`, or
+[open an issue](https://github.com/ThatRetiredDude/TokenStation5/issues/new)
+with your distribution, the GPU line from `vulkaninfo --summary`, and what
+happened.
 
 ---
 
@@ -27,90 +143,134 @@ Your PS5 becomes a private AI assistant at home or away with Tailscale. Talk to 
 
 ### 🎙️ Talk to it
 
-Hold **R1** on the DualSense, ask your question out loud, and let go. The
-console turns your speech into text, the model answers, and the reply is
-read back to you in a natural voice on the TV or the controller's speaker.
-Speech recognition and the voice both run on the PS5 itself, so nothing you
-say goes to a server. Pick from several voices and set how fast they talk.
+Hold **R1** on the DualSense, ask your question out loud, and let go. Your
+speech becomes text, the model answers, and the reply is read back in a natural
+voice on the TV or the controller's speaker. Speech recognition and the voice
+both run on the machine itself, so nothing you say goes to a server.
 
-### 💬 Chat on the TV
+### 💬 Chat anywhere
 
-A full chat screen on the big screen. Type with the on-screen keyboard, or
-plug in a USB or Bluetooth keyboard. Replies stream in as they're written.
+A full chat screen on the TV, with the on-screen keyboard or a USB or Bluetooth
+keyboard. On Linux, also in the terminal app, in a browser terminal, and on a
+chat page made for phones. Replies stream in as they're written, thinking
+included.
 
 ### 🧑‍💻 A coding assistant for your editor
 
-The console serves the same API that OpenAI-compatible apps already speak, so
-it drops straight into Kilo Code, Continue, aider, opencode, Open WebUI or your own
-scripts. Point them at the PS5's address and you have a local coding model
-for every machine on your network, with no per-token bill.
+TokenStation5 serves the API that OpenAI-compatible apps already speak, so it
+drops straight into Kilo Code, Continue, Cline, aider, opencode, Open WebUI or
+your own scripts. Point them at `http://<address>:8081/v1` and you have a local
+coding model for every machine on your network, with no per-token bill. Setup
+for each is in
+[Connecting apps](https://github.com/ThatRetiredDude/TokenStation5/wiki/Connecting-apps).
 
 ### 🔑 A key for each app
 
-Make a key on the TV for each app, named after it, and turn on Require a
-key: apps on your network then need one, the way they'd use an OpenAI key,
-and Home shows each app's requests under its name. Turn a key off to shut
-that app out without removing it.
+Make a key for each app, named after it, and turn on Require a key: apps then
+need one, the way they'd use an OpenAI key, and Home shows each app's usage
+under its name. Turn a key off to shut that app out without removing it.
 
 ### 🌍 Away from home with Tailscale
 
-Turn on Tailscale in Settings and scan the code with your phone: the PS5
-joins your tailnet as a device of its own, with nothing to set up on the
-router. Your phone, tablet or laptop then reaches it from anywhere, through
-Tailscale's private network, with one of your keys. It works even where no
-port can be opened, like a building's shared internet.
+Turn on Tailscale and scan the code with your phone: TokenStation5 joins your
+tailnet as a device of its own, with nothing to set up on the router and
+nothing opened to the internet. Your phone, tablet or laptop then reaches it
+from anywhere. On Linux it can get its own HTTPS certificate, and you can share
+it with someone else's tailnet.
 
 ### ⚡ Fast enough to actually use
 
-Qwen 2.5 Coder 7B writes about **70 tokens a second** (a token is roughly
-three quarters of a word) and reads your prompt at almost **500 a second**;
-the smaller Llama 3.2 3B writes over **130 a second**. Models are ready about
-2 seconds after you pick them. When you're editing code it gets faster still,
-up to about 100 a second, by guessing ahead from what's already in your file. All the numbers are in
-[On the console today](#on-the-console-today).
+On a PS5 with Linux, Qwen3 8B writes about **72 tokens a second** (a token is
+roughly three quarters of a word) and reads prompts at about **850 a second**;
+Qwen3 14B, the best all-rounder, writes about **41 a second**. Small helper
+models that draft ahead make writing faster still, with exactly the same text.
+Models are ready a couple of seconds after you pick them. All the numbers are in
+[Models](#-models) and the wiki's
+[Benchmarks](https://github.com/ThatRetiredDude/TokenStation5/wiki/Benchmarks).
 
 ### 🌐 Answers from the web
 
-Add a free [Tavily](https://tavily.com) key (typed right on the console) and
-the model can look things up when a question needs fresh information, like
-news, prices or the weather, then answer with links to its sources. It only
-searches when it has to, and only the search words leave the house.
+The model looks things up when a question needs fresh information, then answers
+with links to its sources. Add a free [Tavily](https://tavily.com) key, or on
+Linux use the keyless search. Only the search words leave the house.
 
 ### 📺 Run it all from the couch
 
-Everything works with the controller:
-
-- **Home** shows how your apps have used it, like an AI provider's usage page.
-- **Models** lists what's on the console, what fits, and runs a speed test or
-  a correctness check with one button.
-- **Chat** and **Settings** for voice, keyboard and web search.
-- **Logs** for when you want the details.
-
-New models download straight to the console, checked against their hash, and
-a stopped download picks up where it left off.
-
-### 🧠 Good models, checked on the real hardware
-
-Qwen 2.5 Coder 7B for code, Qwen 3 8B and Llama 3.1 8B for everyday chat,
-Google's Gemma 3 12B and Mistral Nemo 12B when you want a bigger model, and
-Llama 3.2 3B when you want speed. Each checked model comes with the sampling
-settings that did best in a run of app-style checks on the PS5. Every model passes a check that runs the
-same prompt on the PS5's GPU and on a separate reference, and compares the
-results at every word. Want another? The Models page searches Hugging Face
-and shows only the files that fit the console.
+Everything works with the controller: **Home** shows how your apps used it,
+like an AI provider's usage page; **Models** lists what's there and what fits,
+downloads new ones (checked against their hash, resumed if stopped), searches
+Hugging Face, and runs a speed test or a correctness check with one button;
+**Chat**, **Settings** and **Logs** do what they say.
 
 ### 🔓 Free for personal use
 
 Free for individuals and small businesses. See [Licensing](#licensing).
 
-## What you need
+---
 
-- A PS5 on firmware 13.60 or lower, with the jailbreak loaded
-- A home network
-- Optional: a USB or Bluetooth keyboard, and a Tavily key for web search
+## 🧠 Models
 
-Install the TokenStation5 title, pick a model on the TV, and you're running.
-Step-by-step setup is in [On the PS5](#on-the-ps5).
+Every model below ran on a PS5 with Linux and passed the check against ts5's
+CPU reference. Speeds are tokens a second, one request at a time, without a
+helper. Files are Q4_K_M unless named.
+
+| Model | Good for | File | Prompt | Writing | Context |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Qwen3 14B | Best all-rounder; can think first | 9.0 GB | ~490 | 41 | 32k |
+| Qwen3.5 9B | Very long documents | 5.6 GB | ~826 | 67 | 256k |
+| Qwen3 8B | Fast chat, thinking, tools | 5.0 GB | ~850 | 72 | 32k |
+| Llama 3.1 8B Instruct | Fast chat with a long memory | 4.9 GB | ~850 | 74 | 128k |
+| Qwen 2.5 Coder 7B Instruct | Coding, fastest | 4.7 GB | ~960 | 77 | 32k |
+| DeepSeek R1 Distill Qwen 14B | Math, logic, puzzles | 9.0 GB | ~490 | 38-41 | 32k |
+| Gemma 3 12B / Gemma 4 12B | General chat | 7.3 / 7.7 GB | ~400 | 43-45 | 64k / 128k |
+| Ternary Bonsai 2 27B (Q2_0) | The biggest that fits | 7.6 GB | ~229 | 23 | 150k |
+| Ternary Bonsai 2 4B (Q2_0) | Fastest, smallest download | 1.2 GB | ~1,380 | 119 | 256k |
+
+The full list, the helper for each model and one-line installs are in
+[Models tested on PS5](https://github.com/ThatRetiredDude/TokenStation5/wiki/Models-tested-on-PS5).
+
+**On the PS5 title** the GPU gets 11.44 GiB, so a 12B at Q4_K_M is the practical
+ceiling. Its Models page offers Llama 3.2 3B, Qwen 2.5 Coder 7B, Qwen 3 8B and
+Llama 3.1 8B, and Gemma 3 12B and Mistral Nemo 12B are checked there too:
+
+| Model (PS5 title) | GPU check | Prompt tok/s | Generation tok/s | Load | GPU memory |
+| --- | :---: | ---: | ---: | ---: | ---: |
+| Llama 3.2 3B Q4_K_M | ✅ | **1016** | **131** | ~1 s | 1.9 + 0.9 GiB |
+| Qwen 2.5 Coder 7B Q4_K_M | ✅ | **483** | **70** | 2.3 s | 4.4 + 0.4 GiB |
+| Qwen 3 8B Q4_K_M | ✅ | **429** | **68** | ~2.4 s | 4.7 + 1.1 GiB |
+| Llama 3.1 8B Q4_K_M | ✅ | **428** | **70** | ~2.3 s | 4.6 + 1.0 GiB |
+| Gemma 3 12B Q4_K_M | ✅ | **250** | **40** | ~3.5 s | 6.8 + 1.1 GiB |
+
+`ts5 bench` with a 512-token prompt and 128 generated tokens, at 8k context.
+GPU memory is weights plus the f16 KV cache. Editing code with Coder 7B runs at
+102 tok/s with drafting against 64 without, with byte-identical output.
+
+**Architectures:** Llama 3.x, Mistral and Mistral Nemo, Qwen 2.5, Qwen 3, Gemma 3,
+and on Linux also Qwen 3.5, Gemma 4 (dense) and Bonsai.
+**Quants:** F32, F16, Q8_0, Q6_K, Q5_K_M, Q4_K_M, Q5_0, Q5_1, Q4_0, Q4_1, and
+Q2_0 on Linux. Mixture-of-experts models aren't supported yet.
+
+---
+
+## 🎮 The PS5 title
+
+ts5 also ships as its own PS5 title, **TokenStation5** (title ID `PPSA99555`, a
+homebrew ID that no store game uses). It's the same engine, linked against
+Mihawk-99's RADV port so it runs on the console's GPU.
+
+**What you need:** a PS5 on firmware 13.60 or lower with the jailbreak loaded,
+a home network, and optionally a USB or Bluetooth keyboard.
+
+**Install:** get it from the [Prospero Store](https://github.com/darkxex/ProsperoStore),
+or from the [latest title release](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/01.004.001).
+Pick a model on the TV and you're running. Step by step:
+[Install on PS5 (Prospero Store)](https://github.com/ThatRetiredDude/TokenStation5/wiki/Install-on-PS5-(Prospero-Store)).
+
+The TV shows a dashboard that lists the models on the console with their size,
+quant, GPU memory and results, and suggests starter models. Use the controller
+to pick one, then ✕ serves it on the API, □ runs the GPU check, △ runs the speed
+test, and ○ stops serving. Everything the controller does is also one command
+from a PC: see [ps5/README.md](ps5/README.md).
 
 > [!WARNING]
 > The jailbreak's own FTP and payload ports have no password, so anyone on
@@ -126,41 +286,24 @@ Step-by-step setup is in [On the PS5](#on-the-ps5).
 > them back from a computer (Settings > Instructions > Add models from a
 > computer) or download them again.
 
-## Linux: testers wanted
-
-TokenStation5 also runs on Linux: on a PS5 running Linux, or on any Linux PC with
-a Vulkan GPU. The Linux build is new, and we're looking for people to try it.
-One command installs the newest build (run it again to update):
+### Building the title yourself
 
 ```sh
-# Debian 12/13, Ubuntu
-curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation_latest_amd64.deb && sudo apt install ./tokenstation_latest_amd64.deb
-
-# Fedora
-sudo dnf install https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest.x86_64.rpm
-
-# Arch
-curl -LO https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-x86_64.pkg.tar.zst && sudo pacman -U tokenstation-latest-x86_64.pkg.tar.zst
-
-# Bazzite, SteamOS and others (installs into your home folder; run as yourself, not sudo)
-curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux-latest/tokenstation-latest-linux-amd64.tar.gz | tar xz && cd tokenstation-*-linux-amd64 && ./install.sh
+ps5/setup.sh && ps5/build.sh        # or download the title from the latest CI run
+export PS5_HOST=192.168.1.50
+scripts/ts5-ps5.sh install          # to /data/homebrew/PPSA99555
+scripts/ts5-ps5.sh fetch qwen25-coder-7b
+# launch TokenStation5 from the home screen
 ```
 
-On a PS5 running Linux you also need Mesa 25.3 or newer. The full guide,
-including the PS5 setup, is in the wiki:
-[Install on Linux](https://github.com/ThatRetiredDude/TokenStation5/wiki/Install-on-Linux).
-
-Tried it? [Open an issue](https://github.com/ThatRetiredDude/TokenStation5/issues/new)
-titled "Linux test: <your system>" with your distribution, your GPU (the line
-from `vulkaninfo --summary`), anything the install printed that looked wrong,
-and one speed line from `ts5 bench -m <model.gguf> --pp 512 --tg 128`.
+Publishing to the Prospero Store is set up: push a version tag and the
+[`release`](.github/workflows/release.yml) workflow builds and attaches
+`PPSA99555.zip` plus a ready-to-submit catalog record. See
+[docs/STORE.md](docs/STORE.md).
 
 ---
 
 ## Under the hood
-
-Everything above runs on **ts5**, our own inference engine, written from
-scratch for this one GPU.
 
 ### ts5: not llama.cpp
 
@@ -173,13 +316,16 @@ ts5 is not a fork, a wrapper or a rebrand of llama.cpp. Every layer is ours:
   unified-memory hardware like the PS5.
 - **Tokenizers:** byte-level BPE and SentencePiece, token-for-token identical
   to the reference implementation.
-- **OpenAI-compatible server:** chat completions with streaming, prompt-prefix
-  caching, and llama-server-style timing stats.
-- **Speculative decoding:** drafts looked up in the prompt, verified in one
-  batched pass by kernels built for it, with byte-identical output and an
+- **OpenAI-compatible server:** chat completions with streaming, tool calls,
+  prompt-prefix caching, and llama-server-style timing stats.
+- **Speculative decoding:** drafts from a small helper model or looked up in
+  the prompt, verified in one batched pass, with byte-identical output and an
   adaptive policy that stops drafting where nothing is accepted.
-- **Zero third-party code:** the build needs a C++17 compiler, the Vulkan
-  headers and glslang, and nothing else.
+- **Long context:** 8-bit and 4-bit KV cache and YaRN, so the long-memory
+  models get their full window on a PS5.
+- **Almost no third-party code:** the engine needs a C++17 compiler, the Vulkan
+  headers and glslang; the Linux binary adds Mbed TLS for HTTPS
+  ([NOTICE.md](NOTICE.md)).
 
 ### Why build our own
 
@@ -190,185 +336,74 @@ GPU's fp16 throughput, because the console's driver lacks the matrix
 instructions llama.cpp's Vulkan path is tuned for.
 
 ts5 is built around this one GPU's constraints instead of around every GPU's:
-- batches split to stay under the console driver's 10-second watchdog (done)
-- weights loaded straight into the GPU's 11.4 GiB heap with no staging copy (done)
-- kernels tuned to RDNA 2 wavefronts and packed fp16 math (done, still being tuned)
+batches split to stay under the console driver's 10-second watchdog, weights
+loaded straight into the GPU's heap with no staging copy, and kernels tuned to
+RDNA 2 wavefronts and packed fp16 math. The tuned kernels read prompts 13 to 16
+times faster than the first console build and generate about 3.5 times faster,
+with the same answers. The full plan is in [engine/DESIGN.md](engine/DESIGN.md).
 
-The full plan is in [engine/DESIGN.md](engine/DESIGN.md).
-
-## Status
-
-| | |
-| --- | --- |
-| Engine core | ✅ Working on Linux and on the PS5. Logits match the reference at every position, on every quant type |
-| Models | ✅ Qwen 2.5, Qwen 2.5 Coder, Qwen 3, Llama, Mistral, Mistral Nemo, Gemma 3 |
-| Quants | ✅ F32, F16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K_M, Q5_K_M |
-| OpenAI API | ✅ `/v1/chat/completions` (streaming), `/v1/completions`, `/v1/models` |
-| PS5 title | ✅ Runs on a real PS5 as **TokenStation5** (`PPSA99555`). The GPU check passes on the console, and the API serves the home network |
-| TV dashboard | ✅ Pick, check, benchmark and serve models with the controller, on the TV |
-| PS5 kernel tuning | 🔨 Ongoing: prompts read 13 to 16 times faster and generation about 3.5 times faster than the first console build; the new attention doubled generation again at 16k+ context |
-| Speculative decoding | ✅ Code editing with Coder 7B runs at 102 tok/s against 64 with drafting off, byte-identical output; free chat stays within 4% |
-| Hugging Face search | ✅ From the TV, finds other Llama, Mistral, Qwen 2.5, Qwen 3 and Gemma 3 GGUFs that fit the console |
-
-## On the console today
-
-Measured on a PS5 at 8k context. Numbers in brackets are the build that first
-ran there, before any kernel tuning:
-
-| Model | GPU check | Prompt tok/s | Generation tok/s | Load | GPU memory |
-| --- | :---: | ---: | ---: | ---: | ---: |
-| Qwen 2.5 0.5B Q8_0 | ✅ | **4636** | **233** | ~0.5 s | |
-| Llama 3.2 3B Q4_K_M | ✅ | **1016** (78) | **131** (36) | ~1 s | 1.9 + 0.9 GiB |
-| Qwen 2.5 Coder 7B Q4_K_M | ✅ | **483** (31) | **70** (21) | 2.3 s | 4.4 + 0.4 GiB |
-| Qwen 3 8B Q4_K_M | ✅ | **429** (29) | **68** (19) | ~2.4 s | 4.7 + 1.1 GiB |
-| Llama 3.1 8B Q4_K_M | ✅ | **428** (28.5) | **70** (19.7) | ~2.3 s | 4.6 + 1.0 GiB |
-| Gemma 3 12B Q4_K_M | ✅ | **250** (188) | **40** (35) | ~3.5 s | 6.8 + 1.1 GiB |
-
-The GPU check runs the same prompt through the console's GPU and through
-ts5's CPU reference, and compares the logits at every position. With a
-512-token prompt, all five models pick the same top word as the CPU at every
-one of the 512 positions, because prompts are summed in 32-bit (16-bit sums,
-`TS5_MMB_F16=1`, read prompts 9 to 14% faster but put Llama 3.2 3B over the
-check's bar). The first check of a model saves the CPU's answers next to it,
-so later checks run only the GPU and take about a second. Prompt and generation speeds are `ts5 bench`
-(512-token prompt, 128 generated tokens). Load is how long a model takes to
-get ready: the loader reads at 2 GB/s, measured on Coder 7B (2.3 s, down
-from 51); the other models' times scale with their size. GPU memory is
-weights plus the f16 KV cache.
-
-The tuned kernels read prompts 13 to 16 times faster than the first console
-build and generate about 3.5 times faster, with the same answers. Long
-contexts gained the most from the new attention: after a 16,384-token prompt,
-Qwen 2.5 Coder 7B reads at 387 tok/s and generates at 50, where generating
-at that depth used to run at 23. On Llama 3.2 3B, where the llama.cpp port
-used to generate half again as fast as ts5, ts5 is now ahead (131 tok/s to
-the port's 124). Speculative decoding adds its gain on top of all of that:
-editing code with Coder 7B runs at 102 tok/s against 64 with drafting off,
-with byte-identical output, and free chat stays within 4% either way
-because drafting backs off where nothing is accepted.
-
-[PS5LM Plus](https://github.com/abhi245y/PS5LM), a llama.cpp port, stays on
-the console as the baseline ts5 has to beat.
-
-## Quick start
-
-```sh
-# build (any Linux box with a Vulkan driver)
-sudo apt install glslang-tools libvulkan-dev mesa-vulkan-drivers
-cmake -S engine -B engine/build && cmake --build engine/build -j
-
-# serve an OpenAI-compatible API
-engine/build/ts5 serve -m qwen2.5-coder-7b-instruct-q4_k_m.gguf --port 8081
-
-# or chat from the terminal
-engine/build/ts5 run -m model.gguf --chat -p "Write a haiku about a PS5"
-
-# measure prompt and generation speed
-engine/build/ts5 bench -m model.gguf
-
-# download a model over HTTPS, checking its hash; a stopped download goes on where it left off
-engine/build/ts5 fetch https://huggingface.co/REPO/resolve/main/model.gguf model.gguf --sha256 HEX
-```
-
-Then point any OpenAI-compatible client at `http://<host>:8081/v1`: Kilo
-Code, Open WebUI, Continue, opencode, aider, or your own scripts. Setup for
-each is in [docs/CLIENTS.md](docs/CLIENTS.md).
-
-## On the PS5
-
-ts5 ships as its own PS5 title, **TokenStation5** (title ID `PPSA99555`, a
-homebrew ID that no store game uses). It's the same engine, linked against
-Mihawk-99's RADV port so it runs on the console's GPU.
-
-```sh
-ps5/setup.sh && ps5/build.sh        # or download the title from the latest CI run
-export PS5_HOST=192.168.1.50
-scripts/ts5-ps5.sh install          # to /data/homebrew/PPSA99555
-scripts/ts5-ps5.sh fetch qwen25-coder-7b
-# launch TokenStation5 from the home screen
-```
-
-Publishing to the [Prospero Store](https://github.com/darkxex/ProsperoStore)
-is set up: push a version tag and the [`release`](.github/workflows/release.yml)
-workflow builds and attaches `PPSA99555.zip` plus a ready-to-submit catalog
-record. See [docs/STORE.md](docs/STORE.md) for the submission steps.
-
-The TV shows a dashboard. It lists the models on the console with their size,
-quant, GPU memory and results, and suggests starter models that aren't there
-yet. Use the controller to pick one, then:
-
-- ✕ serves it on the API;
-- □ runs the GPU check;
-- △ runs the speed test;
-- ○ stops serving.
-
-Everything the controller does is also one command from the PC. All of it is in
-[ps5/README.md](ps5/README.md).
-
-## Proven correct, not vibes
+### Proven correct, not vibes
 
 Every kernel is checked against an independent fp32 CPU implementation and
 against llama.cpp itself:
 
-- Logits at every position match the CPU reference to about 1e-4 across F32,
-  F16, Q8_0, Q4_0, Q4_1, Q5_0, Q5_1, Q4_K_M and Q5_K_M, for every architecture
-  ts5 runs, and match llama.cpp to 2e-4 on unquantized models.
-- KV-cache reuse across calls and 300-token prompts are covered.
-- The tokenizer matches `llama-tokenize` on 15 tricky strings (code,
-  contractions, CJK, emoji, chat special tokens) for Qwen, Llama 3 and
-  SentencePiece vocabularies.
-- The same check runs on the console itself (`ts5 check`, the dashboard's □).
-  Qwen 2.5 Coder 7B on the PS5's GPU gives the CPU's top token at all 8
-  positions, with logits within 0.15% of the largest.
-- Every change is checked on the console itself, with the real models,
-  before it is called done. GitHub builds the PS5 title on every pull request
-  and push to main; it runs no tests of its own.
-
-For engine work away from the console, the same comparisons run on a Linux
-box with a Vulkan GPU:
+- Logits at every position match the CPU reference to about 1e-4 on every quant
+  type and architecture ts5 runs, and match llama.cpp to 2e-4 on unquantized
+  models.
+- The tokenizer matches `llama-tokenize` on tricky strings (code, contractions,
+  CJK, emoji, chat special tokens) for Qwen, Llama 3 and SentencePiece
+  vocabularies.
+- The same check runs on the machine itself (`ts5 check`, the dashboard's □):
+  the GPU's answers against the CPU's, position by position. The first check
+  saves the CPU's answers, so later checks take about a second.
+- Every change is checked on a real PS5 with real models before it's called
+  done.
 
 ```sh
 engine/tests/run.sh                          # Vulkan vs the CPU reference
 LLAMA_CPP=~/llama.cpp engine/tests/run.sh    # plus llama.cpp and tokenizer checks
 ```
 
-## Models that fit
+### Build the engine from source
 
-Memory is an 11.44 GiB GPU heap on the console. These four are the ones the
-Models page offers; all are measured in
-[On the console today](#on-the-console-today):
+```sh
+# any Linux box with a Vulkan driver
+sudo apt install glslang-tools libvulkan-dev mesa-vulkan-drivers
+cmake -S engine -B engine/build && cmake --build engine/build -j
 
-| Model | Quant | Size | Role |
-| --- | --- | ---: | --- |
-| Llama 3.2 3B Instruct | Q4_K_M | ~1.9 GiB | quick answers |
-| Qwen 2.5 Coder 7B Instruct | Q4_K_M | ~4.4 GiB | coding |
-| Qwen 3 8B | Q4_K_M | ~4.7 GiB | general chat and thinking |
-| Llama 3.1 8B Instruct | Q4_K_M | ~4.6 GiB | general chat |
+engine/build/ts5 serve -m qwen2.5-coder-7b-instruct-q4_k_m.gguf --port 8081   # OpenAI-compatible API
+engine/build/ts5 run -m model.gguf --chat -p "Write a haiku about a PS5"       # chat in the terminal
+engine/build/ts5 bench -m model.gguf                                           # prompt and generation speed
+engine/build/ts5 fetch https://huggingface.co/REPO/resolve/main/model.gguf model.gguf --sha256 HEX
+```
 
-For anything else, the Models page's Hugging Face search lists GGUFs of the
-architectures ts5 runs (Llama, Mistral, Qwen 2.5, Qwen 3 and Gemma 3) and
-shows only the files that fit the console's memory with room for a working
-context, chat-tuned ones first. A 12B at Q4_K_M (about 7 GiB) is the practical
-ceiling: Gemma 3 12B (bartowski's `google_gemma-3-12b-it-Q4_K_M.gguf`, ~6.8
-GiB) and Mistral Nemo 12B are checked on the console and come with their own
-settings. Gemma 3 keeps most of its layers to a 1,024-token window, so it
-still fits a context of about 29,700 tokens. Qwen 3.5 and Gemma 4 aren't
-supported yet.
+The Linux packages, the terminal app and the services are built from the
+[`linux-package`](https://github.com/ThatRetiredDude/TokenStation5/tree/linux-package)
+branch: see
+[Building from source](https://github.com/ThatRetiredDude/TokenStation5/wiki/Building-from-source).
+
+---
 
 ## Repo map
 
 - [engine/](engine/): ts5 source, shaders, tests, [design](engine/DESIGN.md)
 - [ps5/](ps5/): the PS5 title: build, packaging, console control
-- [docs/ROADMAP.md](https://github.com/ThatRetiredDude/TokenStation5/blob/roadmap/docs/ROADMAP.md): the punch list (done, open, next), kept on the `roadmap` branch
+- [linux/ on `linux-package`](https://github.com/ThatRetiredDude/TokenStation5/tree/linux-package/linux): the Linux edition: packages, services, [release notes](https://github.com/ThatRetiredDude/TokenStation5/tree/linux-package/linux/release-notes)
+- [docs/CLIENTS.md](docs/CLIENTS.md): setting up each app
+- [docs/WEB_SEARCH.md](docs/WEB_SEARCH.md): web search and tool calling
 - [docs/FEASIBILITY.md](docs/FEASIBILITY.md): hardware, memory budget, risks
-- [docs/WEB_SEARCH.md](docs/WEB_SEARCH.md): web search with a Tavily key, and tool calling
+- [docs/ROADMAP.md](docs/ROADMAP.md): the punch list
 - [scripts/](scripts/): console deploy, model fetch and benchmark tools
-- [models.tsv](models.tsv): the model lineup, the context each one gets, and (its `console` column) the models the title can download on the console
+- [models.tsv](models.tsv): the model lineup and the context each one gets
+- [The wiki](https://github.com/ThatRetiredDude/TokenStation5/wiki): the user guide for both editions
 
 ## The baseline: PS5LM Plus
 
-On the console: jailbreak (firmware 13.60 or lower), then load ShadowMountPlus,
-ftpsrv (2121) and elfldr (9021). On a PC on the same network:
+[PS5LM Plus](https://github.com/abhi245y/PS5LM), a llama.cpp port, stays on the
+console as the baseline ts5 has to beat. On Llama 3.2 3B ts5 now generates
+131 tok/s to the port's 124. To run it yourself: jailbreak (firmware 13.60 or
+lower), load ShadowMountPlus, ftpsrv (2121) and elfldr (9021), then on a PC on
+the same network:
 
 ```sh
 export PS5_HOST=192.168.1.50
@@ -378,16 +413,16 @@ scripts/load-model.sh Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
 python3 scripts/bench.py                # results land in bench/results.md
 ```
 
-`bench.py` speaks plain OpenAI API, so the same command benchmarks ts5 on the
-console.
-
 ## Safety
 
-The API asks for a key once Settings > Require a key is on; apps send it the
-way they send an OpenAI key, and the TV makes and shows the keys. The
-jailbreak's own FTP and payload ports have no password, so anyone on the
-network can read the title's files, keys included. Keep the console on a
-network you trust.
+- The API is plain HTTP on port 8081. Turn on **Require a key** and make a key
+  per app; apps send it the way they send an OpenAI key.
+- Never forward port 8081 on your router. Use Tailscale to reach it from
+  outside: only your own devices can, and on Linux it can use HTTPS.
+- On a jailbroken PS5 the jailbreak's FTP and payload ports have no password.
+  Keep the console on a network you trust.
+- On Linux, the model's terminal commands run in a sandbox that sees none of
+  your home folder, and each tool can be set to off, ask or allow.
 
 ## Support development
 
@@ -400,19 +435,21 @@ tuning and new models. Crypto only for now:
 | Ξ Ethereum | `0x5976376b0c2125655e01d0a7758c744c43fb6d93` | <img src="docs/donate/ethereum.png" alt="Ethereum address QR" width="120"> |
 | ◎ Solana | `u5zcwMcmrn7qAN4zUJzLhpLDQv81qtFDfZR1ohCrMs9` | <img src="docs/donate/solana.png" alt="Solana address QR" width="120"> |
 
-Double-check the address against this page before sending — crypto transfers
+Double-check the address against this page before sending: crypto transfers
 can't be reversed.
 
 ## Licensing
 
 - **Everything in this repository, unless [LICENSING.md](LICENSING.md) says
-  otherwise:** [PolyForm Small Business 1.0.0](LICENSE.md). Free for
-  individuals and for companies under 100 people and about $1M in revenue;
-  larger companies need a commercial license.
+  otherwise, including the Linux edition:** [PolyForm Small Business 1.0.0](LICENSE.md).
+  Free for individuals and for companies under 100 people and about $1M in
+  revenue; larger companies need a commercial license.
 - **`ps5/`, `payloads/` and the built PS5 title:**
   [GPL-3.0-or-later](ps5/LICENSE), because the title links PS5_Vulkan's
-  GPL-3.0 code.
+  GPL-3.0 code. The Linux binary links nothing GPL.
 
-[LICENSING.md](LICENSING.md) has the full map, including what the GPL means
-for the engine code inside the PS5 title, and
-[NOTICE.md](NOTICE.md) lists the third-party code.
+[LICENSING.md](LICENSING.md) has the full map, and [NOTICE.md](NOTICE.md) lists
+the third-party code.
+
+TokenStation5 is an independent project, not affiliated with or endorsed by
+Sony Interactive Entertainment, Tailscale Inc. or any model maker.
