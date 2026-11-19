@@ -210,23 +210,34 @@ Free for individuals and small businesses. See [Licensing](#licensing).
 
 ## 🧠 Models
 
-Every model below ran on a PS5 with Linux and passed the check against ts5's
-CPU reference. Speeds are tokens a second, one request at a time, without a
-helper. Files are Q4_K_M unless named.
+Every model below ran on a PS5 with Linux (40 compute units, GPU memory raised)
+and passed the check against ts5's CPU reference. The terminal app downloads
+each one with `/download <key>`, with its helper right after it. Speeds are
+tokens a second, one request at a time, without a helper. Files are Q4_K_M
+unless named.
 
-| Model | Good for | File | Prompt | Writing | Context |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Qwen3 14B | Best all-rounder; can think first | 9.0 GB | ~490 | 41 | 32k |
-| Qwen3.5 9B | Very long documents | 5.6 GB | ~826 | 67 | 256k |
-| Qwen3 8B | Fast chat, thinking, tools | 5.0 GB | ~850 | 72 | 32k |
-| Llama 3.1 8B Instruct | Fast chat with a long memory | 4.9 GB | ~850 | 74 | 128k |
-| Qwen 2.5 Coder 7B Instruct | Coding, fastest | 4.7 GB | ~960 | 77 | 32k |
-| DeepSeek R1 Distill Qwen 14B | Math, logic, puzzles | 9.0 GB | ~490 | 38-41 | 32k |
-| Gemma 3 12B / Gemma 4 12B | General chat | 7.3 / 7.7 GB | ~400 | 43-45 | 64k / 128k |
-| Ternary Bonsai 2 27B (Q2_0) | The biggest that fits | 7.6 GB | ~229 | 23 | 150k |
-| Ternary Bonsai 2 4B (Q2_0) | Fastest, smallest download | 1.2 GB | ~1,380 | 119 | 256k |
+| Model | `/download` key | Good for | File | Prompt | Writing | Context | Helper |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| Qwen3 14B | `qwen3-14b` | Best all-rounder; can think first | 9.0 GB | ~490 | 41 | 32k | Qwen3 0.6B |
+| Qwen3.5 9B (DeepSeek-V4-Pro heretic) | `qwen35-9b` | Very long documents (10/10 facts at 225k) | 5.6 GB | ~826 | 67 | 256k | none |
+| Qwen3.8 9B (distill) | `qwen38-9b` | Long documents, newer training; thinks, calls tools | 5.8 GB | ~651 | 67 | 256k | none |
+| DeepSeek R1 Distill Qwen 14B | `deepseek-r1-14b` | Math, logic, puzzles; thinks out loud | 9.0 GB | ~490 | 38-41 | 32k | Qwen3 0.6B |
+| Qwen3 8B | `qwen3-8b` | Fast chat, thinking, tools | 5.0 GB | ~850 | 72 | 32k | Qwen3 0.6B |
+| Llama 3.1 8B Instruct | `llama31-8b` | Fast chat with a long memory (10/10 at 111k) | 4.9 GB | ~850 | 74 | 128k | Llama 3.2 1B |
+| Qwen 2.5 Coder 7B Instruct | `qwen25-coder-7b` | Coding, fastest | 4.7 GB | ~960 | 77 | 32k | Qwen3 0.6B |
+| Qwen 2.5 Coder 14B Instruct | `qwen25-coder-14b` | Coding, stronger | 9.0 GB | | ~28-30 | 32k | Qwen3 0.6B |
+| Llama 3.2 3B Instruct | `llama32-3b` | Quick answers | 2.0 GB | ~1,290 | 145 | 128k | Llama 3.2 1B |
+| Gemma 3 12B | `gemma3-12b` | General chat | 7.3 GB | ~406 | 45 | 64k | by tuning |
+| Gemma 4 12B | `gemma4-12b` | General chat | 7.7 GB | ~394 | 43 | 128k | by tuning |
+| Ternary Bonsai 2 27B (Q2_0) | `bonsai2-27b` | The biggest that fits; thinks, calls tools | 7.6 GB | ~229 | 23 | 150k | none |
+| Ternary Bonsai 2 9B (Q2_0) | `bonsai2-9b` | Small file, long memory | 2.6 GB | ~740 | 59 | 256k | none |
+| Ternary Bonsai 2 4B (Q2_0) | `bonsai2-4b` | Fastest, smallest download | 1.2 GB | ~1,380 | 119 | 256k | none |
 
-The full list, the helper for each model and one-line installs are in
+Helpers draft a few words ahead and the big model checks them: the same text,
+written faster (Qwen3 14B goes from about 41 to 56 tok/s on chat). Qwen 2.5
+Coder 14B was measured on long prompts only. Long-document scores count 10
+facts hidden in a document. Each model's pinned download and hash, and the
+helpers, are in
 [Models tested on PS5](https://github.com/ThatRetiredDude/TokenStation5/wiki/Models-tested-on-PS5).
 
 **On the PS5 title** the GPU gets 11.44 GiB, so a 12B at Q4_K_M is the practical
