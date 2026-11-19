@@ -1,6 +1,6 @@
 # Models
 
-ts5 runs GGUF files of these architectures: **Llama** (3.x), **Mistral** (and Mistral Nemo), **Qwen 2.5**, **Qwen 3**, **Gemma 3**, and on the Linux edition **Gemma 4** (the dense 12B and 31B) and **Qwen 3.5** (the dense 9B was tested, up to 262k tokens of context). Quant types: F32, F16, Q8_0, Q6_K, Q5_K_M, Q4_K_M, Q5_0, Q5_1, Q4_0, Q4_1 (2-bit types such as Q2_K and IQ2 are not supported yet). Mixture-of-experts models (Gemma 4 26B A4B, Qwen 3 MoE, Qwen 3.5 MoE) are not supported.
+ts5 runs GGUF files of these architectures: **Llama** (3.x), **Mistral** (and Mistral Nemo), **Qwen 2.5**, **Qwen 3**, **Gemma 3**, and on the Linux edition also **Qwen 3.5** (and models built on it: the Qwen3.8 9B distill and the Ternary Bonsai 2 models, tested up to 262k tokens of context) and **Gemma 4** (the dense 12B and 31B). Quant types: F32, F16, Q8_0, Q6_K, Q5_K_M, Q4_K_M, Q5_0, Q5_1, Q4_0, Q4_1, and on Linux Q2_0 (the Bonsai models' two-bit files). Other 2-bit and 1-bit types (Q2_K, IQ2, PQ2_0, PTQ1_0) are not supported yet, nor are mixture-of-experts models (Gemma 4 26B A4B, Qwen 3 MoE, Qwen 3.5 MoE).
 
 ## What fits
 
@@ -24,7 +24,7 @@ Every model below passed the GPU check on a real PS5, and comes with the samplin
 | Gemma 3 12B | Q4_K_M | ~6.8 GiB | a bigger model; sliding-window layers keep its cache small (about 29k context on the title) |
 | Mistral Nemo 12B | Q4_K_M | ~7.0 GiB | a bigger model with its own tool format |
 
-The first four are the ones the Models page offers to download on the console. Also run and checked on Linux on a PS5 (with the memory raised): Qwen 3 14B, Qwen 2.5 Coder 14B, DeepSeek R1 Distill Qwen 14B, Gemma 3 4B, Gemma 4 12B, and Qwen 3 8B at Q6_K and Q8_0. Speeds are in [Benchmarks](Benchmarks); each tested model with a one-line terminal install is in [Models tested on PS5](Models-tested-on-PS5).
+The first four are the ones the Models page offers to download on the console. On Linux on a PS5 (with the memory raised) the terminal app downloads 14 checked models: these four plus Qwen3 14B, Qwen 2.5 Coder 14B, DeepSeek R1 Distill Qwen 14B, Qwen3.5 9B, Qwen3.8 9B, Gemma 3 12B, Gemma 4 12B and the Ternary Bonsai 2 27B, 9B and 4B. Each one with its speed, context, helper and a one-line terminal install is in **[Models tested on PS5](Models-tested-on-PS5)**; more numbers are in [Benchmarks](Benchmarks).
 
 Model weights are not part of TokenStation5. Each is downloaded from its maker's or a quantizer's Hugging Face repository, under that model's own license (Gemma and Llama have terms of use of their own).
 

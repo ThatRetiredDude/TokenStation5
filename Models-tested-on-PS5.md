@@ -16,17 +16,18 @@ The [terminal app](Using-the-terminal-app) downloads every model on this page fo
 | Llama 3.1 8B Instruct | Fast general chat with a long memory (10/10 facts at 111k) | 4.9 GB | ~850 | 74 | 128k | Llama 3.2 1B |
 | Qwen 2.5 Coder 7B Instruct | Coding, fastest | 4.7 GB | ~960 | 77 | 32k | Qwen3 0.6B |
 | Qwen 2.5 Coder 14B Instruct | Coding, stronger | 9.0 GB | not measured | ~28-30 (long prompts) | 32k | Qwen3 0.6B |
-| Gemma 3 12B | General chat; weak on long documents past ~8k (4/10 at 53k). One known near-tie in its check | 7.3 GB | ~406 | 45 | 64k | Gemma 3 1B |
-| Gemma 4 12B | General chat; 6/10 facts at 112k. Its English-text check is over the bar (being looked into) | 7.7 GB | ~394 | 43 | 128k | Gemma 3 1B |
+| Llama 3.2 3B Instruct | Quick answers; the fastest Q4_K_M model here | 2.0 GB | ~1,290 | 145 | 128k | Llama 3.2 1B |
+| Gemma 3 12B | General chat; weak on long documents past ~8k (4/10 at 53k). One known near-tie in its check | 7.3 GB | ~406 | 45 | 64k | Gemma 3 1B, by tuning only |
+| Gemma 4 12B | General chat; 6/10 facts at 112k. Its English-text check is over the bar (being looked into) | 7.7 GB | ~394 | 43 | 128k | Gemma 3 1B, by tuning only |
 | Ternary Bonsai 2 27B (Q2_0) | The biggest model that fits: a 27B at two bits a weight. Slower; thinks, calls tools | 7.6 GB | ~229 | 23 | 150k | none |
 | Ternary Bonsai 2 9B (Q2_0) | Small file, long memory; thinks, calls tools | 2.6 GB | ~740 | 59 | 256k | none |
 | Ternary Bonsai 2 4B (Q2_0) | The fastest here and the smallest download; thinks, calls tools | 1.2 GB | ~1,380 | 119 | 256k | none |
 
-Which one: **Qwen3 14B** for the best answers, **Qwen3.5 9B** for very long documents, **Llama 3.1 8B** or **Qwen3 8B** when speed matters most, **Qwen 2.5 Coder** for code, a **Bonsai** when the download or the memory has to stay small. Long-document scores count 10 facts hidden in a document. More numbers are in [Benchmarks](Benchmarks) and [Test results on PS5 Linux](Test-results-on-PS5-Linux).
+Which one: **Qwen3 14B** for the best answers, **Qwen3.5 9B** for very long documents, **Llama 3.1 8B** or **Qwen3 8B** when speed matters most, **Llama 3.2 3B** for quick answers, **Qwen 2.5 Coder** for code, a **Bonsai** when the download or the memory has to stay small. Long-document scores count 10 facts hidden in a document. More numbers are in [Benchmarks](Benchmarks) and [Test results on PS5 Linux](Test-results-on-PS5-Linux).
 
-**The Bonsai models** ([prism-ml](https://huggingface.co/prism-ml)'s Ternary-Bonsai-2, built on Qwen3.8) keep every weight as −1, 0 or +1, two bits each, so a 27B is a 7.6 GB file and a 4B is 1.2 GB. ts5 reads their files as they are, and all three pass the check against the CPU reference. They think before they answer and call tools like the Qwen models. Use the **Q2_0** file of a repo; the other packings there (PQ2_0, PTQ1_0) need the makers' own program.
+**The Bonsai models** ([prism-ml](https://huggingface.co/prism-ml)'s Ternary-Bonsai-2: the 27B built on Qwen3.8 27B, the 9B and 4B on Qwen3.5) keep every weight as −1, 0 or +1, two bits each, so a 27B is a 7.6 GB file and a 4B is 1.2 GB. ts5 reads their files as they are, and all three pass the check against the CPU reference. They think before they answer and call tools like the Qwen models. Use the **Q2_0** file of a repo; the other packings there (PQ2_0, PTQ1_0) need the makers' own program.
 
-**Helpers** are small models of the same family that draft a few words ahead for the big one, which then checks them. That makes writing faster with exactly the same text. The helper in the column is the one tuning picked on the test PS5. It's built into ts5 for these models: each uses it without any tuning once the helper's file is in the same folder (the terminal app downloads it right after the model).
+**Helpers** are small models of the same family that draft a few words ahead for the big one, which then checks them. That makes writing faster with exactly the same text. The helper in the column is the one tuning picked on the test PS5. It's built into ts5 for these models: each uses it without any tuning once the helper's file is in the same folder (the terminal app downloads it right after the model). The Gemma 12Bs are the exception: Gemma 3 1B makes their short answers 15 to 32% faster but long prompts 5 to 9% slower, so they use it only after `ts5-tune --models` picks it on your machine.
 
 | Helper | Used for | File size |
 | --- | --- | ---: |
@@ -108,6 +109,12 @@ ts5 fetch https://huggingface.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF/resolv
 
 ```sh
 ts5 fetch https://huggingface.co/bartowski/Qwen2.5-Coder-14B-Instruct-GGUF/resolve/5b379ec4bf71bafecb5f9081ad28b19939128988/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf --sha256 2946d28c9e1bb2bcae6d42e8678863a31775df6f740315c7d7e6d6b6411f5937
+```
+
+**Llama 3.2 3B Instruct** (2.0 GB, [bartowski/Llama-3.2-3B-Instruct-GGUF](https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF))
+
+```sh
+ts5 fetch https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/5ab33fa94d1d04e903623ae72c95d1696f09f9e8/Llama-3.2-3B-Instruct-Q4_K_M.gguf Llama-3.2-3B-Instruct-Q4_K_M.gguf --sha256 6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff
 ```
 
 **Gemma 3 12B** (7.3 GB, [bartowski/google_gemma-3-12b-it-GGUF](https://huggingface.co/bartowski/google_gemma-3-12b-it-GGUF))
