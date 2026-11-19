@@ -9,7 +9,6 @@
 A private AI assistant that runs on your own hardware: a jailbroken PS5, a PS5 running Linux, or any Linux PC with a Vulkan GPU. Chat on the TV, in a terminal or on your phone, talk to it with the controller, and plug it into the coding tools and chat apps you already use, at home or away with Tailscale. No cloud, no subscription, and your conversations stay at home.
 
 [![Linux release](https://img.shields.io/github/v/release/ThatRetiredDude/TokenStation5?filter=linux-v*&label=Linux&logo=linux&logoColor=white&color=FCC624&style=for-the-badge)](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/linux-v1.3.1)
-[![PS5 title](https://img.shields.io/github/v/release/ThatRetiredDude/TokenStation5?filter=0*&label=PS5%20title&logo=playstation&logoColor=white&color=003791&style=for-the-badge)](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/01.004.001)
 [![Prospero Store](https://img.shields.io/badge/Prospero_Store-PPSA99555-003791?style=for-the-badge&logo=playstation&logoColor=white)](https://github.com/darkxex/ProsperoStore)
 
 [![Downloads](https://img.shields.io/github/downloads/ThatRetiredDude/TokenStation5/total?style=for-the-badge&logo=github&label=downloads&color=2ea44f)](https://github.com/ThatRetiredDude/TokenStation5/releases)
