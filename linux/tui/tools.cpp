@@ -1,5 +1,6 @@
 // ts5-tui's tools for the model (tools.h).
 #include "tools.h"
+#include "keep.h"
 
 #include <fcntl.h>
 #include <poll.h>
@@ -349,7 +350,29 @@ ToolResult run_command(const std::string &cmd, const ToolSwitches &s, const std:
         argv = sandbox_argv(cmd, s.sandbox_net);
         env = sandbox_env(s.sandbox_net);
     }
-    const Ran r = run_shell(cmd, limit, cancel, s.sandbox ? &argv : nullptr, s.sandbox ? &env : nullptr);
+    // The sandbox that stays up (keep.h): a program one command starts is
+    // there for the next. Where it can't be started, a sandbox of its own
+    // for this command, as before.
+    Ran r;
+    bool kept = false;
+    if (s.sandbox && kept_on()) {
+        std::string why;
+        const KeptRun k = kept_run(cmd, box, s.sandbox_net, limit, cancel, why);
+        kept = k.started;
+        if (kept) {
+            r.out = k.out;
+            r.code = k.code;
+            r.timed_out = k.timed_out;
+            r.stopped = k.stopped;
+            r.left_running = k.left_running;
+            r.secs = k.secs;
+            box_note += k.note;
+        } else {
+            box_note += "\n(The sandbox could not stay up between commands (" + why +
+                        "), so this command had one of its own: a program it starts ends with it.)";
+        }
+    }
+    if (!kept) r = run_shell(cmd, limit, cancel, s.sandbox ? &argv : nullptr, s.sandbox ? &env : nullptr);
     if (!r.started) {
         t.ok = false;
         t.head = "could not start";
@@ -365,7 +388,10 @@ ToolResult run_command(const std::string &cmd, const ToolSwitches &s, const std:
     t.head = (r.stopped ? std::string("stopped") : r.timed_out ? fmt("stopped after %.0f s", limit) : fmt("exit %d", r.code)) +
              (lines ? fmt(" · %d line%s", lines, lines == 1 ? "" : "s") : std::string(" · no output")) +
              fmt(" · %.1f s", r.secs) + (r.left_running ? " · something it started still runs" : "");
-    if (r.left_running) how += " (a program it started is still running in the background)";
+    if (r.left_running && kept)
+        how += " (a program it started is still running in the sandbox, for the next commands; what it writes from "
+               "now on isn't shown: send its output to a file, as in cmd > /tmp/cmd.log 2>&1 &)";
+    else if (r.left_running) how += " (a program it started is still running in the background)";
     t.text = how + "\n" + (out.empty() ? "(no output)" : middle_out(out, 3000, 5000));
     // grep that matched nothing ends with 1 and says nothing: on the PS5
     // three models took that for a broken curl (one tried apt, then built
@@ -395,8 +421,12 @@ ToolResult run_command(const std::string &cmd, const ToolSwitches &s, const std:
         if (out.find("System has not been booted with systemd") != std::string::npos ||
             out.find("Failed to connect to bus") != std::string::npos || out.find("systemctl: command not found") != std::string::npos ||
             out.find("systemctl: not found") != std::string::npos)
-            t.text += "\n(No service manager runs in the sandbox, so systemctl and service can't start anything. Start the "
-                      "program itself, in the same command that uses it: what a command starts ends when the command ends.)";
+            t.text += kept ? "\n(No service manager runs in the sandbox, so systemctl and service can't start anything. Start "
+                             "the program itself in the background, its output to a file (prog > /tmp/prog.log 2>&1 &): "
+                             "it keeps running for the next commands.)"
+                           : "\n(No service manager runs in the sandbox, so systemctl and service can't start anything. Start "
+                             "the program itself, in the same command that uses it: what a command starts ends when the "
+                             "command ends.)";
     } else if (s.sandbox) {
         t.head += " · sandbox";
         t.text += box_note;
@@ -1024,8 +1054,11 @@ std::string tools_json(const ToolSwitches &s) {
             what += " Every command starts there again: a cd in one call does not last to the next, so give full "
                     "paths, or cd DIR && ... in the one command.";
             what += s.sandbox_net ? " The network can be used." : " There is no network: nothing can be downloaded or installed.";
-            what += " A program a command starts ends with the command (no systemctl): start a server and use it in the "
-                    "same command. A command may take up to 10 minutes.";
+            what += kept_on() ? " No systemctl: start a server yourself, in the background with its output sent to a "
+                                "file (prog > /tmp/prog.log 2>&1 &); it keeps running for the next commands of this "
+                                "chat. A command may take up to 10 minutes."
+                              : " A program a command starts ends with the command (no systemctl): start a server and use "
+                                "it in the same command. A command may take up to 10 minutes.";
         } else if (s.sandbox) {
             // (A setting's words, the same in every message of a chat.)
             const std::string work = sandbox_work();
@@ -1042,8 +1075,11 @@ std::string tools_json(const ToolSwitches &s) {
                     "not and can't be put into ~, say so and stop trying. Where Python has no pip, "
                     "curl -sS https://bootstrap.pypa.io/get-pip.py | python3 - --user puts pip in ~ first. ";
             what += s.sandbox_net ? "The network can be used." : "There is no network.";
-            what += " Every command starts in the same folder again: a cd in one call does not last to the next. A "
-                    "program a command starts ends with the command.";
+            what += kept_on() ? " Every command starts in the same folder again: a cd in one call does not last to the "
+                                "next. A program started in the background (prog > /tmp/prog.log 2>&1 &) keeps running "
+                                "for the next commands of this chat."
+                              : " Every command starts in the same folder again: a cd in one call does not last to the "
+                                "next. A program a command starts ends with the command.";
         }
         // (On a PS5 Qwen3.5 9B added sixteen line counts up itself and wrote
         // 11182 for 10986 into its file, with every count in front of it.)

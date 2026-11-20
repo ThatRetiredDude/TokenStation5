@@ -1,5 +1,6 @@
 // ts5-tui's Chat (chat.h).
 #include "chat.h"
+#include "keep.h"
 
 #include <sys/socket.h>
 #include <unistd.h>
@@ -3077,6 +3078,7 @@ bool chat_steer_to_queue(Chat &c) {
 void chat_new(Chat &c) {
     chat_stop(c);
     browser_stop();  // the page the old chat had open goes with it
+    kept_end();      // and the sandbox, with what its commands left running
     if (c.before_clear) c.before_clear(c);
     std::lock_guard<std::mutex> l(c.mu);
     c.msgs.clear();

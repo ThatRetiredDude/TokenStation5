@@ -669,11 +669,20 @@ ts5-tui --url http://ps5.local:8081  # another one
       mounted `noexec`). `/sandbox folder default` brings them back.
       While that drive isn't mounted, no command runs;
     - has the network (`/sandbox no-network` takes it away);
-    - sees only its own processes, and whatever it starts ends with it;
+    - sees only its own processes, and stays up between commands: a
+      server one command starts in the background
+      (`prog > /tmp/prog.log 2>&1 &`) is there for the next, until the
+      chat ends, ts5-tui quits or it sits unused for 30 minutes
+      (`TS5_SANDBOX_KEEP=0`: a sandbox of its own for each command);
+    - has a memory cap for all its programs together (Settings →
+      Sandbox memory, 2 GiB by default, `sandbox_memory` in MiB in
+      tui.conf): systemd's own limit where the user's systemd gives one,
+      else ts5-tui ends the biggest program past it, and the model is
+      told why;
     - is the first thing the kernel ends when memory runs out, before the
       model's server (also with the sandbox off).
 
-    It costs no memory of its own and starts in milliseconds. It shares
+    It costs no memory of its own (a shell) and starts in milliseconds. It shares
     the kernel with everything else, so it is a strong fence, not a second
     machine. `/sandbox` says where commands run and how big its system
     is; `/sandbox reset` says what there is to remove (`reset box`,

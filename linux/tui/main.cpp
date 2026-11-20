@@ -42,6 +42,7 @@
 #include "control.h"
 #include "files.h"
 #include "json.h"
+#include "keep.h"
 #include "mcp.h"
 #include "qrcodegen.hpp"  // third_party/qrcodegen: the QR codes on the Access page
 #include "sandbox.h"
@@ -3000,6 +3001,18 @@ struct SetRow {
 };
 
 // A path with the home folder as ~.
+// /sandbox's words on the sandbox that stays up (keep.h) and its memory cap.
+std::string kept_line() {
+    if (!kept_on()) return "Every command gets a sandbox of its own (TS5_SANDBOX_KEEP=0): whatever it starts ends with it.\n";
+    const unsigned long long cap = (unsigned long long)g->cfg.sandbox_memory << 20;
+    std::string h = "It stays up between commands: a server one command starts in the background is there for the next, "
+                    "until the chat ends. ";
+    h += cap ? "Its programs may hold " + bytes_words(cap) + " together (Settings → Sandbox memory)"
+             : std::string("Its memory has no cap (Settings → Sandbox memory)");
+    if (kept_up()) h += "; they hold " + bytes_words(kept_memory()) + " now";
+    return h + ".\n";
+}
+
 std::string tilde_path(const std::string &p) {
     const std::string h = home_dir();
     return p.size() > h.size() && p.compare(0, h.size(), h) == 0 && p[h.size()] == '/' ? "~" + p.substr(h.size()) : p;
@@ -3375,6 +3388,26 @@ std::vector<SetRow> settings_rows() {
                                   "(a 30 MB download)"};
         x.change = [save](int) {
             g->cfg.sandbox_box = !g->cfg.sandbox_box;
+            save();
+        };
+        r.push_back(x);
+    }
+    if (tools_shown && c.tool_terminal && c.sandbox && sandbox_ready() && kept_on()) {
+        // The memory cap of the sandbox that stays up (keep.h).
+        const unsigned long long used = kept_memory();
+        const std::string how = kept_cap_how();
+        SetRow x{"Sandbox memory", c.sandbox_memory ? bytes_words((unsigned long long)c.sandbox_memory << 20) + " at most" : "no cap",
+                 !kept_up() ? std::string("all its programs together; it starts with the first command and stays up for the next")
+                 : c.sandbox_memory ? fmt("its programs hold %s now; the cap is kept by %s", bytes_words(used).c_str(), how.c_str())
+                                    : fmt("its programs hold %s now; a runaway program can take the model's memory",
+                                          bytes_words(used).c_str())};
+        x.change = [save](int d) {
+            static const int sizes[] = {512, 1024, 2048, 4096, 8192, 0};
+            int at = 2;
+            for (int i = 0; i < 6; i++)
+                if (sizes[i] == g->cfg.sandbox_memory) at = i;
+            g->cfg.sandbox_memory = sizes[(at + (d < 0 ? 5 : 1)) % 6];
+            kept_set_cap((unsigned long long)g->cfg.sandbox_memory << 20);
             save();
         };
         r.push_back(x);
@@ -5044,8 +5077,7 @@ void run_command(const std::string &line) {
                 h += std::string("**In the sandbox, ") + (f.sandbox_net ? "with network" : "no network") + ", in a system of its "
                      "own (" + box_name() + ").** The model is root there: it installs programs with apt, pip and npm, and "
                      "`sudo` just runs the command. None of that touches this machine's system, and a command sees none "
-                     "of your home folder (keys, SSH, browsers, ts5's own files) and none of your environment variables. "
-                     "Whatever it starts ends with it.\n";
+                     "of your home folder (keys, SSH, browsers, ts5's own files) and none of your environment variables.\n";
                 h += sandbox_starts_home()
                          ? "It starts in the sandbox's own home folder (`/root` in there): you started ts5-tui in your home "
                            "folder, which it can't see. Start ts5-tui in a project's folder to let it work on that one.\n"
@@ -5058,10 +5090,11 @@ void run_command(const std::string &line) {
                                  : "Its system is set up with the first command: a 30 MB download from Debian's image "
                                    "builders, checked by its SHA-256, then its basic tools (python3, pip, git, curl). "
                                    "`/sandbox box off` goes back to this machine's system, read-only.\n";
+                h += kept_line();
             } else {
                 h += std::string("**In the sandbox, ") + (f.sandbox_net ? "with network" : "no network") +
                      ".** A command sees the system read-only and none of your home folder (keys, SSH, browsers, ts5's "
-                     "own files), and none of your environment variables. Whatever it starts ends with it.\n";
+                     "own files), and none of your environment variables.\n";
                 h += sandbox_starts_home()
                          ? "It starts in its own home folder: you started ts5-tui in your home folder, which it can't see. "
                            "Start ts5-tui in a project's folder to let it work on that one.\n"
@@ -5072,6 +5105,7 @@ void run_command(const std::string &line) {
                     h += fmt("Its home folder is the toolbox, `%s` (%s), kept between chats: pip, npm and programs in ~/bin "
                              "go there. `/sandbox reset` empties it, `/sandbox folder` moves it to another drive.\n",
                              tilde(sandbox_home()).c_str(), fmt("%.1f MiB", sandbox_size() / 1048576.0).c_str());
+                h += kept_line();
             }
             if (!f.tool_terminal || !f.tools_on()) h += "(The terminal tool is off: `/tools terminal on`.)\n";
             chat_note(c, h);
@@ -8021,6 +8055,8 @@ int usage(FILE *f) {
             "sandbox, unless it is off; /sandbox in the app) and prints what the model would\n"
             "get back. --sandbox: on, off or no-network for that command; box: in the\n"
             "sandbox's own Linux system; plain: in the sandbox with this machine's system.\n"
+            "Given more than once, the commands run one after the other in the one sandbox,\n"
+            "which stays up between them, as in a chat.\n"
             "--github-call: one call of the model's GitHub tool, as it would be made (after the\n"
             "fixes it gets), with what the question before a change would show; --dry-run\n"
             "shows that alone.\n"
@@ -8075,7 +8111,8 @@ int main(int argc, char **argv) {
     bool dry = false;
     std::vector<std::pair<std::string, std::string>> mcp_calls;
     bool run_mode = false;  // --run-command
-    std::string run_cmd, sandbox_arg, sandbox_folder;
+    std::string sandbox_arg, sandbox_folder;
+    std::vector<std::string> run_cmds;  // --run-command, in order, in the one sandbox that stays up
     bool gh_mode = false;  // --github-call
     std::string gh_args;
     bool folder_mode = false;
@@ -8101,7 +8138,7 @@ int main(int argc, char **argv) {
         else if (a == "--install-browser") install = next();
         else if (a == "--update") update_mode = true;
         else if (a == "--dry-run") dry = true;
-        else if (a == "--run-command") run_mode = true, run_cmd = next();
+        else if (a == "--run-command") run_mode = true, run_cmds.push_back(next());
         else if (a == "--github-call") gh_mode = true, gh_args = next();
         else if (a == "--sandbox") sandbox_arg = next();
         else if (a == "--sandbox-folder") folder_mode = true, sandbox_folder = next();
@@ -8114,6 +8151,7 @@ int main(int argc, char **argv) {
             return usage(stderr);
         }
     }
+    kept_set_cap((unsigned long long)app.cfg.sandbox_memory << 20);
     if (folder_mode) {
         if (sandbox_folder.empty()) return usage(stderr);
         bool ok;
@@ -8137,9 +8175,18 @@ int main(int argc, char **argv) {
         if (want && !t.sandbox) fprintf(stderr, "ts5-tui: the sandbox is unavailable: %s. The command runs as you.\n", why.c_str());
         signal(SIGPIPE, SIG_IGN);
         std::atomic<bool> cancel{false};
-        const ToolResult r = run_tool("run_command", "{\"command\":" + ts5::json_escape(run_cmd) + "}", t, cancel);
-        printf("%s\n%s\n", r.head.c_str(), r.text.c_str());
-        return r.ok ? 0 : 1;
+        // Several: one after the other, as a chat's would, in the same sandbox;
+        // a line ===== between them. The exit code is the last one's.
+        bool ok = true;
+        for (size_t i = 0; i < run_cmds.size(); i++) {
+            const ToolResult r = run_tool("run_command", "{\"command\":" + ts5::json_escape(run_cmds[i]) + "}", t, cancel);
+            if (i) printf("=====\n");
+            printf("%s\n%s\n", r.head.c_str(), r.text.c_str());
+            fflush(stdout);
+            ok = r.ok;
+        }
+        kept_end();
+        return ok ? 0 : 1;
     }
     if (gh_mode) {
         // One GitHub tool call: what the user would see first, then what the model gets back.
@@ -8309,6 +8356,7 @@ int main(int argc, char **argv) {
     if (was_downloading && app.dl_on)
         t += fmt("ts5-tui: the download of %s stopped; /download %s goes on from where it was.\n", app.dl.name.c_str(),
                  app.dl.cat ? app.dl.cat->key : (app.dl.url + " " + app.dl.file + (app.dl.sha256.empty() ? "" : " --sha256 " + app.dl.sha256)).c_str());
+    kept_end();  // the sandbox, and what its commands left running
     // A model ts5-tui loaded goes with it, and its GPU memory is free again,
     // unless Settings → When you quit keeps it serving.
     if (pid_t own = own_server_pid(); own > 0) {
