@@ -17,6 +17,8 @@
 #include <sys/statvfs.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -43,6 +45,7 @@
 #include "files.h"
 #include "json.h"
 #include "keep.h"
+#include "task.h"
 #include "mcp.h"
 #include "qrcodegen.hpp"  // third_party/qrcodegen: the QR codes on the Access page
 #include "sandbox.h"
@@ -4660,6 +4663,83 @@ void copy_out(const std::string &text, const std::string &what);
 bool to_clipboard(const std::string &text);
 void view_open(const std::string &text, const std::string &title, size_t at, bool sent);
 
+// This program's path (after an update the same path is the new one).
+std::string self_path() {
+    char buf[4096];
+    const ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+    std::string self = n > 0 ? std::string(buf, (size_t)n) : std::string("ts5-tui");
+    const std::string gone = " (deleted)";
+    if (self.size() > gone.size() && self.compare(self.size() - gone.size(), gone.size(), gone) == 0)
+        self.resize(self.size() - gone.size());
+    return self;
+}
+
+// A ts5-tui of this user's has the screen open (its control socket answers).
+bool tui_open() {
+    const std::string path = control_socket_path();
+    const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return false;
+    sockaddr_un a{};
+    a.sun_family = AF_UNIX;
+    snprintf(a.sun_path, sizeof a.sun_path, "%s", path.c_str());
+    const bool ok = connect(fd, (sockaddr *)&a, sizeof a) == 0;
+    close(fd);
+    return ok;
+}
+
+// The address and key ts5-tui was given (not saved), for a task's program.
+void task_env() {
+    if (g->cfg.url_given) setenv("TS5_URL", g->cfg.url.c_str(), 1);
+    if (g->cfg.key_given) setenv("TS5_API_KEY", g->cfg.key.c_str(), 1);
+}
+
+TaskLimits task_limits() {
+    TaskLimits l;
+    l.steps = g->cfg.task_steps;
+    l.hours = g->cfg.task_hours;
+    l.tokens = g->cfg.task_tokens;
+    return l;
+}
+
+// /task: start one, stop the one running, or the list.
+void task_command(const std::string &arg) {
+    Chat &c = g->chat;
+    std::string why;
+    if (arg.empty() || arg == "list") {
+        const std::vector<TaskInfo> all = task_list();
+        std::string h = "**Unattended tasks**  (`/task GOAL` starts one, `/task stop` ends it)\n";
+        if (all.empty()) h += "None yet. A task runs by itself in the sandbox, with nobody asked anything, until it is "
+                              "done or reaches a limit: " + fmt("%d steps, %g hours", g->cfg.task_steps, g->cfg.task_hours) +
+                              (g->cfg.task_tokens ? ", " + with_commas((int)g->cfg.task_tokens) + " tokens" : std::string()) +
+                              " (task_steps, task_hours, task_tokens in tui.conf). It keeps going when ts5-tui closes.\n";
+        for (size_t i = 0; i < all.size() && i < 8; i++) {
+            const TaskInfo &t = all[i];
+            std::string goal = t.goal.substr(0, 160);
+            for (char &ch : goal)
+                if (ch == '\n') ch = ' ';
+            h += "- **" + task_state_words(t) + "** · " + goal + "\n  " + task_progress(t) + " · `" +
+                 tilde_path(task_dir(t.id)) + "`\n";
+        }
+        chat_note(c, h);
+    } else if (arg == "stop") {
+        TaskInfo t;
+        if (!task_running(&t)) show_toast("No task is running", g->th->warn, 4);
+        else if (task_stop(t.id, why)) show_toast("The task is stopping: its last command and turn end, then it says how far it got", g->th->accent, 6);
+        else show_toast("The task: " + why, g->th->bad, 6);
+    } else {
+        char cwd[4096];
+        const std::string folder = getcwd(cwd, sizeof cwd) ? cwd : sandbox_work();
+        task_env();
+        const std::string id = task_start(self_path(), arg, folder, task_limits(), why);
+        if (id.empty()) show_toast("No task: " + why, g->th->bad, 8);
+        else
+            show_toast(fmt("The task runs by itself now, in the sandbox (%d steps, %g hours at most). It keeps going when "
+                           "ts5-tui closes; /task shows how far it is",
+                           g->cfg.task_steps, g->cfg.task_hours),
+                       g->th->accent, 8);
+    }
+}
+
 void run_command(const std::string &line) {
     std::string cmd = line, arg;
     const size_t sp = line.find(' ');
@@ -5002,6 +5082,8 @@ void run_command(const std::string &line) {
                 h += "\nThis server isn't ts5's own: whether its model can call tools is up to it.";
             chat_note(c, h);
         }
+    } else if (cmd == "/task" || cmd == "/tasks") {
+        task_command(cmd == "/tasks" ? std::string() : arg);
     } else if (cmd == "/sandbox") {
         auto tilde = tilde_path;
         // "/sandbox": where the commands run; "/sandbox off", "no-network",
@@ -8031,6 +8113,7 @@ int usage(FILE *f) {
             "  ts5-tui --install-browser chromium|obscura [--dry-run]\n"
             "  ts5-tui --update [--dry-run]\n"
             "  ts5-tui --run-command 'COMMAND' [--sandbox on|off|no-network|box|plain]\n"
+            "  ts5-tui --task 'GOAL' [--steps N] [--hours H] [--tokens T] | --tasks | --task-stop ID\n"
             "  ts5-tui --github-call '{\"method\": \"GET\", \"path\": \"/user/repos\"}' [--dry-run]\n"
             "  ts5-tui --sandbox-folder DIR|default\n\n"
             "It talks to a running TokenStation (the tokenstation service, the TV app, or\n"
@@ -8057,6 +8140,10 @@ int usage(FILE *f) {
             "sandbox's own Linux system; plain: in the sandbox with this machine's system.\n"
             "Given more than once, the commands run one after the other in the one sandbox,\n"
             "which stays up between them, as in a chat.\n"
+            "--task GOAL: an unattended task (as /task GOAL): the model works on GOAL by itself in\n"
+            "the sandbox, started in this folder, in a program of its own that keeps going\n"
+            "when this one ends; --steps N, --hours H, --tokens T set its limits. It prints\n"
+            "the task's id. --tasks lists them, --task-stop ID ends one.\n"
             "--github-call: one call of the model's GitHub tool, as it would be made (after the\n"
             "fixes it gets), with what the question before a change would show; --dry-run\n"
             "shows that alone.\n"
@@ -8111,6 +8198,13 @@ int main(int argc, char **argv) {
     bool dry = false;
     std::vector<std::pair<std::string, std::string>> mcp_calls;
     bool run_mode = false;  // --run-command
+    // --task GOAL (with --steps, --hours, --tokens), --task-run ID (the
+    // task's own program), --task-stop ID, --tasks.
+    std::string task_goal, task_run_id, task_stop_id;
+    bool task_new = false, tasks_list = false;
+    int lim_steps = 0;
+    double lim_hours = 0;
+    long long lim_tokens = -1;
     std::string sandbox_arg, sandbox_folder;
     std::vector<std::string> run_cmds;  // --run-command, in order, in the one sandbox that stays up
     bool gh_mode = false;  // --github-call
@@ -8139,6 +8233,13 @@ int main(int argc, char **argv) {
         else if (a == "--update") update_mode = true;
         else if (a == "--dry-run") dry = true;
         else if (a == "--run-command") run_mode = true, run_cmds.push_back(next());
+        else if (a == "--task") task_new = true, task_goal = next();
+        else if (a == "--task-run") task_run_id = next();
+        else if (a == "--task-stop") task_stop_id = next();
+        else if (a == "--tasks") tasks_list = true;
+        else if (a == "--steps") lim_steps = atoi(next().c_str());
+        else if (a == "--hours") lim_hours = atof(next().c_str());
+        else if (a == "--tokens") lim_tokens = atoll(next().c_str());
         else if (a == "--github-call") gh_mode = true, gh_args = next();
         else if (a == "--sandbox") sandbox_arg = next();
         else if (a == "--sandbox-folder") folder_mode = true, sandbox_folder = next();
@@ -8236,6 +8337,55 @@ int main(int argc, char **argv) {
         return 2;
     }
     signal(SIGPIPE, SIG_IGN);
+    if (!task_run_id.empty()) {
+        // An unattended task's own program (task.h), started by /task or --task.
+        TaskHooks h;
+        h.request = [](bool &ok, std::string &why) {
+            poll_once();
+            const ServerState sv = server();
+            ok = sv.online && !sv.model.empty();
+            why = sv.why.empty() ? "no model is loaded" : sv.why;
+            return chat_request();
+        };
+        h.ended = [](const TaskInfo &) {
+            // The model ts5-tui loaded stayed for the task: it goes now,
+            // unless ts5-tui is open again or Settings keeps it.
+            const pid_t own = own_server_pid();
+            if (own > 0 && !g->cfg.keep_model && !tui_open()) {
+                kill(own, SIGTERM);
+                fprintf(stderr, "ts5-tui: the task has ended: the model it kept loaded is unloaded (pid %d)\n", (int)own);
+            }
+        };
+        return task_run_main(task_run_id, h);
+    }
+    if (task_new || tasks_list || !task_stop_id.empty()) {
+        std::string why;
+        if (!task_stop_id.empty()) {
+            const bool ok = task_stop(task_stop_id, why);
+            fprintf(ok ? stdout : stderr, ok ? "ts5-tui: task %s is stopping\n" : "ts5-tui: %s\n",
+                    ok ? task_stop_id.c_str() : why.c_str());
+            return ok ? 0 : 1;
+        }
+        if (tasks_list) {
+            for (const TaskInfo &t : task_list())
+                printf("%s  %s  %s\n    %s\n", t.id.c_str(), task_state_words(t).c_str(), task_progress(t).c_str(),
+                       t.goal.substr(0, 200).c_str());
+            return 0;
+        }
+        TaskLimits l = task_limits();
+        if (lim_steps > 0) l.steps = lim_steps;
+        if (lim_hours > 0) l.hours = lim_hours;
+        if (lim_tokens >= 0) l.tokens = lim_tokens;
+        char cwd[4096];
+        task_env();
+        const std::string id = task_start(self_path(), task_goal, getcwd(cwd, sizeof cwd) ? cwd : ".", l, why);
+        if (id.empty()) {
+            fprintf(stderr, "ts5-tui: %s\n", why.c_str());
+            return 1;
+        }
+        printf("%s\n", id.c_str());
+        return 0;
+    }
     if (mcp_mode == 1 || mcp_mode == 3) return mcp_check_main(mcp_mode == 3);
     if (mcp_mode == 2) {
         if (mcp_calls[0].first.empty()) return usage(stderr);
@@ -8361,9 +8511,14 @@ int main(int argc, char **argv) {
     // unless Settings → When you quit keeps it serving.
     if (pid_t own = own_server_pid(); own > 0) {
         const std::string name = server().model.empty() ? std::string("the model") : server().model;
+        TaskInfo task;
         if (app.cfg.keep_model && !app.update) {
             t += fmt("ts5-tui: %s keeps serving (pid %d, port %d). Stop it with: kill %d\n", name.c_str(), own,
                      app.ep.port, own);
+        } else if (!app.update && task_running(&task)) {
+            t += fmt("ts5-tui: %s keeps serving for the unattended task that runs (%s); the task unloads it when it "
+                     "ends. ts5-tui --task-stop %s ends the task.\n",
+                     name.c_str(), task.goal.substr(0, 80).c_str(), task.id.c_str());
         } else {
             // Asked first; one that hasn't gone in 5 s is ended outright,
             // so the line below is true when it prints.

@@ -704,6 +704,25 @@ ts5-tui --url http://ps5.local:8081  # another one
     need nothing. `ts5-tui --run-command 'ls ~'` runs one command the way
     the model's do and prints what the model would get back
     (`--sandbox box`, `plain`, `no-network` or `off` for that command).
+  - **Unattended tasks** (`/task GOAL`, or `ts5-tui --task 'GOAL'` from a
+    shell): the model works on GOAL by itself, for hours, with nobody
+    asked anything, in a program of its own that keeps going when
+    ts5-tui closes and waits for the model's server when it starts again.
+    It works in the folder it was started in, in the sandbox only (no task
+    starts without it): its commands run there without asking; a button or
+    typing on a web page, a change on GitHub, the file tools and outside
+    tools are refused. It ends when the model answers, when it goes in
+    circles, at its limits (200 steps, 4 hours, no token limit by default:
+    `task_steps`, `task_hours`, `task_tokens` in tui.conf, or `--steps`,
+    `--hours`, `--tokens`), or on `/task stop` (`ts5-tui --task-stop ID`).
+    One at a time. A model ts5-tui loaded stays loaded for a running task
+    when ts5-tui quits, and is unloaded when the task ends (unless Settings
+    → When you quit keeps it). `/task` and `ts5-tui --tasks` list them. Each
+    keeps its whole log for good in
+    `~/.local/share/tokenstation/tasks/<id>/`: `task.json`, `log.jsonl`
+    (every turn, call, result, set of notes and refusal), `commands/N.txt`
+    (each command's whole output) and `runner.log`; its chat is in the
+    chat list.
   - **Browser** (on; Settings → Tool: browser, or `/tools browser off`,
     switches it off): the model opens a page and gets it as text with
     every link, text box and button numbered (`the Volga[3]`,

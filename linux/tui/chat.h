@@ -200,6 +200,10 @@ const std::vector<SlashCommand> &slash_commands();
 void draw_chat_screen(Screen &s, const Theme &t, Chat &c, const ChatView &v);
 int chat_key(Chat &c, const Event &e, const ChatRequest &rq, int screen_h);
 void chat_note(Chat &c, const std::string &text);
+// Sends text as the user's message and starts the answer on c.worker, as
+// Enter does (steer: it counts as a note to the request before it, not a
+// request of its own).
+void chat_send(Chat &c, const ChatRequest &rq, const std::string &text, bool steer = false);
 // Sends the first of the queued messages, after a summary where the chat is
 // nearly full. False when an answer is still coming or none waits.
 bool chat_send_queued(Chat &c, const ChatRequest &rq);

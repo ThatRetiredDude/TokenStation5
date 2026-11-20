@@ -92,6 +92,10 @@ std::vector<std::string> browsers_found();
 // it stops a command that is running.
 ToolResult run_tool(const std::string &name, const std::string &args, const ToolSwitches &s,
                     const std::atomic<bool> &cancel);
+// Every command run_command runs, with its whole output (before it is
+// shortened for the model), its exit code and seconds: an unattended task
+// keeps them (task.h). nullptr: none.
+void set_command_log(void (*log)(const std::string &cmd, const std::string &out, int code, double secs));
 // A command is waiting for the sandbox's own system to be set up (the
 // first command in it: a download, then its basic tools).
 bool box_setup_running();

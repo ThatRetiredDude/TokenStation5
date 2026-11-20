@@ -52,6 +52,7 @@ const std::vector<SlashCommand> &slash_commands() {
         {"/think", "on|off|auto", "thinking before answering"},
         {"/tools", "[on|off|NAME on|off|steps N|window N]", "the model's tools: search, pages, terminal, files, memory, browser (each has a switch)"},
         {"/browser", "[auto|obscura|chromium|text|PATH]", "the program the model's browser tool shows pages with"},
+        {"/task", "GOAL|stop|list", "an unattended task: the model works on GOAL by itself, in the sandbox, for hours"},
         {"/sandbox", "[on|off|network|no-network|box on|box off|reset|folder DIR]", "where the model's commands run: the sandbox, its network, its own Linux system"},
         {"/mcp", "[add NAME PROGRAM…|remove NAME|NAME off|ask|allow|restart|only TOOL…|reload]",
          "outside tools: programs that speak MCP, whose tools the model can then call"},
@@ -2628,13 +2629,14 @@ std::string summary_ask(int words, const std::string &focus, int again, bool mor
 }
 
 
-void send(Chat &c, const ChatRequest &rq, const std::string &text) {
+void send(Chat &c, const ChatRequest &rq, const std::string &text, bool steer = false) {
     if (c.worker.joinable()) c.worker.join();
     {
         std::lock_guard<std::mutex> l(c.mu);
         Msg u;
         u.role = "user";
         u.content = text;
+        u.steer = steer;
         c.msgs.push_back(u);
         Msg a;
         a.role = "assistant";
@@ -3054,6 +3056,8 @@ bool chat_summarize(Chat &c, const ChatRequest &rq, const std::string &then, con
     c.worker = std::thread(run_summary, &c, rq, msgs, then, focus, out_max);
     return true;
 }
+
+void chat_send(Chat &c, const ChatRequest &rq, const std::string &text, bool steer) { send(c, rq, text, steer); }
 
 void chat_stop(Chat &c) {
     if (c.running) {

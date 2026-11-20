@@ -274,6 +274,8 @@ double g_box_failed_at = 0;             // the last one that failed, and why (un
 std::string g_box_failed;
 const double kBoxAgain = 300;           // a failed setup is not tried again sooner
 
+void (*g_command_log)(const std::string &, const std::string &, int, double) = nullptr;
+
 ToolResult run_command(const std::string &cmd, const ToolSwitches &s, const std::atomic<bool> &cancel) {
     ToolResult t;
     if (cmd.find_first_not_of(" \t\n") == std::string::npos) {
@@ -373,6 +375,7 @@ ToolResult run_command(const std::string &cmd, const ToolSwitches &s, const std:
         }
     }
     if (!kept) r = run_shell(cmd, limit, cancel, s.sandbox ? &argv : nullptr, s.sandbox ? &env : nullptr);
+    if (g_command_log && r.started) g_command_log(cmd, r.out, r.code, r.secs);
     if (!r.started) {
         t.ok = false;
         t.head = "could not start";
@@ -1262,6 +1265,10 @@ std::string tool_call_line(const std::string &name, const std::string &args) {
     }
     if (is_mcp_tool(name)) return one_line(mcp_call_line(name, args), 400);
     return name + " " + one_line(args, 300);
+}
+
+void set_command_log(void (*log)(const std::string &cmd, const std::string &out, int code, double secs)) {
+    g_command_log = log;
 }
 
 bool box_setup_running() { return g_box_setup.load(); }
