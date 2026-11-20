@@ -8,7 +8,7 @@
 
 A private AI assistant that runs on your own hardware: a jailbroken PS5, a PS5 running Linux, or any Linux PC with a Vulkan GPU. Chat on the TV, in a terminal or on your phone, talk to it with the controller, and plug it into the coding tools and chat apps you already use, at home or away with Tailscale. No cloud, no subscription, and your conversations stay at home.
 
-[![Linux release](https://img.shields.io/github/v/release/ThatRetiredDude/TokenStation5?filter=linux-v*&label=Linux&logo=linux&logoColor=white&color=FCC624&style=for-the-badge)](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/linux-v1.3.1)
+[![Linux release](https://img.shields.io/github/v/release/ThatRetiredDude/TokenStation5?filter=linux-v*&label=Linux&logo=linux&logoColor=white&color=FCC624&style=for-the-badge)](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/linux-v1.4.0)
 [![Prospero Store](https://img.shields.io/badge/Prospero_Store-PPSA99555-003791?style=for-the-badge&logo=playstation&logoColor=white)](https://github.com/darkxex/ProsperoStore)
 
 [![Downloads](https://img.shields.io/github/downloads/ThatRetiredDude/TokenStation5/total?style=for-the-badge&logo=github&label=downloads&color=2ea44f)](https://github.com/ThatRetiredDude/TokenStation5/releases)
@@ -29,24 +29,24 @@ A private AI assistant that runs on your own hardware: a jailbroken PS5, a PS5 r
 ![Tailscale](https://img.shields.io/badge/Tailscale-built_in-242424?style=flat-square&logo=tailscale&logoColor=white)
 ![Not llama.cpp](https://img.shields.io/badge/not-llama.cpp-black?style=flat-square)
 
-**[🐧 Install on Linux](#-tokenstation-for-linux-131)** · **[🎮 Install on a PS5](#-the-ps5-title)** · **[📖 Wiki](https://github.com/ThatRetiredDude/TokenStation5/wiki)** · **[🧠 Models](#-models)** · **[📦 Releases](https://github.com/ThatRetiredDude/TokenStation5/releases)**
+**[🐧 Install on Linux](#-tokenstation-for-linux-140)** · **[🎮 Install on a PS5](#-the-ps5-title)** · **[📖 Wiki](https://github.com/ThatRetiredDude/TokenStation5/wiki)** · **[🧠 Models](#-models)** · **[📦 Releases](https://github.com/ThatRetiredDude/TokenStation5/releases)**
 
 </div>
 
 ---
 
 > [!TIP]
-> **TokenStation for Linux 1.3.1 is out.** It runs on a PS5 running Linux and on
+> **TokenStation for Linux 1.4.0 is out.** It runs on a PS5 running Linux and on
 > any Linux PC with a Vulkan GPU, with everything the PS5 title does plus a
 > terminal app, a chat page for your phone, users, and a model that can use
-> tools. [Jump to the install](#-tokenstation-for-linux-131).
+> tools. [Jump to the install](#-tokenstation-for-linux-140).
 
 ## Two editions, one engine
 
 | | 🐧 **Linux** | 🎮 **PS5 title** |
 | --- | --- | --- |
 | **Runs on** | A PS5 running Linux, or any x86-64 Linux PC with a Vulkan GPU | A jailbroken PS5 on firmware 13.60 or lower |
-| **Latest** | [1.3.1](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/linux-v1.3.1) (2026-11-18) | [01.004.001](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/01.004.001) (2026-10-28) |
+| **Latest** | [1.4.0](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/linux-v1.4.0) (2026-11-20) | [01.004.001](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/01.004.001) (2026-10-28) |
 | **Install** | One command: `.deb`, `.rpm`, Arch package or portable build | The Prospero Store, or the title's zip |
 | **Memory for models** | About 12 to 13 GiB on a PS5, so 14B models fit | 11.4 GiB, up to 12B models |
 | **Ways to use it** | TV dashboard, desktop app, terminal app over SSH, browser terminal, phone chat page, API | TV dashboard, voice, API |
@@ -57,7 +57,7 @@ Both are built from the same code around **ts5**, our own inference engine, writ
 
 ---
 
-## 🐧 TokenStation for Linux 1.3.1
+## 🐧 TokenStation for Linux 1.4.0
 
 ### Install
 
@@ -81,7 +81,7 @@ curl -L https://github.com/ThatRetiredDude/TokenStation5/releases/download/linux
 
 Prefer a fixed version? The same four files are attached to every numbered
 release, for example
-[linux-v1.3.1](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/linux-v1.3.1).
+[linux-v1.4.0](https://github.com/ThatRetiredDude/TokenStation5/releases/tag/linux-v1.4.0).
 
 ### Then
 
@@ -116,6 +116,12 @@ looks wrong, is the wiki's
   whose commands run in a sandbox with a Debian system of its own, where the
   model can `apt install` what it needs without touching yours. Every tool has
   its own off, ask or allow switch. Long tasks keep going when the chat fills up.
+- **⚙️ Unattended tasks (new in 1.4.0).** `/task` hands the model a job it
+  works on by itself for hours in the sandbox: nothing is asked, it keeps going
+  when you close the app, it checks its own work before it calls it done, and
+  its whole log is kept. Give it files, set its steps and hours, and watch or
+  stop it from the terminal app or your phone, which gets a notification when
+  it ends.
 - **📱 Your phone.** Scan a QR code and a chat page opens, signed in, at home or
   on mobile data through Tailscale. Add it to the Home Screen as an app, get a
   notification when an answer finishes, and load models, set the fan or manage
