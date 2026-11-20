@@ -262,6 +262,17 @@ def test_server(ts5, model, backend, d, path, key):
         keys(ts5, path, "off", "laptop Kilo Code")
         settle()
         check(get(there + "/v1/models", key)[0] == 401, "a key turned off is refused, with the model still loaded")
+        check(get(there + "/v1/models", key)[0] == 401, "and again")
+        refused = "the key laptop Kilo Code is switched off: refused"
+        for _ in range(30):  # (the log is written by its own thread)
+            log.seek(0)
+            if refused in log.read():
+                break
+            time.sleep(0.1)
+        log.seek(0)
+        lines = [l for l in log.read().splitlines() if refused in l]
+        check(len(lines) == 1 and "ts5: access: " in lines[0] and key not in lines[0],
+              "the log says a switched-off key tried, by its name, once a minute at most", lines)
         keys(ts5, path, "on", "laptop Kilo Code")
         settle()
         check(get(there + "/v1/models", key)[0] == 200, "turned on again it gets in")
