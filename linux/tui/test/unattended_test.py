@@ -166,6 +166,64 @@ def main():
         steps = open(os.path.join(proj, "task-steps.txt")).read().split("\n") if os.path.exists(
             os.path.join(proj, "task-steps.txt")) else []
         check("step 8" in steps, "and it reached its last step", steps)
+        # ts5-tui itself (in tmux): the task on the bar, /task with its steps,
+        # /task open following its chat, no message into it, /task stop.
+        if shutil.which("tmux"):
+            tm = os.path.join(top, "tmux")
+            os.makedirs(tm)
+            cfg = os.path.join(home, ".config", "tokenstation")
+            os.makedirs(cfg, exist_ok=True)
+            with open(os.path.join(cfg, "tui.conf"), "w") as f:
+                f.write("intro=0\ntask_steps=300\n")
+            # (env -i: tmux would hand ts5-tui this test's own environment.)
+            inner = "cd %s && exec env -i PATH=%s HOME=%s TERM=xterm-256color LANG=C.UTF-8 %s --url %s --no-tmux" % (
+                proj, base["PATH"], home, tui, url)
+            tenv = {"PATH": base["PATH"], "TMUX_TMPDIR": tm, "HOME": home}
+
+            def tmux(*a):
+                return subprocess.run(["tmux", *a], env=tenv, capture_output=True, text=True).stdout
+
+            def screen():
+                return tmux("capture-pane", "-t", "u", "-p")
+
+            def typed(text):
+                tmux("send-keys", "-t", "u", "-l", text)
+                time.sleep(0.3)
+                tmux("send-keys", "-t", "u", "Enter")
+
+            def wait_for(words, secs=20):
+                t0 = time.time()
+                while time.time() - t0 < secs:
+                    s = screen()
+                    if words in s:
+                        return s
+                    time.sleep(0.3)
+                return screen()
+
+            tmux("new-session", "-d", "-s", "u", "-x", "140", "-y", "40", inner)
+            time.sleep(2)
+            typed("/task loop")
+            s = wait_for("⚙ task")
+            check("⚙ task" in s and "step" in s.split("\n")[1], "ts5-tui's bar shows the task while it runs", s[:600])
+            time.sleep(4)
+            typed("/task")
+            s = wait_for("Its latest steps")
+            check("Its latest steps" in s and "$ echo round" in s, "/task lists it with its latest steps", s)
+            typed("/task open")
+            s = wait_for("$ echo round", 10)
+            n0 = s.count("$ echo round")
+            time.sleep(4)
+            s = screen()
+            check("$ echo round" in s and "running task's chat" in s, "/task open shows the task's chat", s)
+            typed("hello there")
+            time.sleep(1)
+            s = screen()
+            check("takes no messages" in s, "a message into the running task's chat is not sent", s)
+            tmux("send-keys", "-t", "u", "C-u")
+            typed("/task stop")
+            s = wait_for("The task has ended: stopped", 20)
+            check("The task has ended: stopped" in s, "/task stop: it ends, and ts5-tui says so", s)
+            tmux("kill-server")
     finally:
         for p in servers:
             p.kill()

@@ -717,7 +717,10 @@ ts5-tui --url http://ps5.local:8081  # another one
     `--hours`, `--tokens`), or on `/task stop` (`ts5-tui --task-stop ID`).
     One at a time. A model ts5-tui loaded stays loaded for a running task
     when ts5-tui quits, and is unloaded when the task ends (unless Settings
-    → When you quit keeps it). `/task` and `ts5-tui --tasks` list them. Each
+    → When you quit keeps it). `/task` and `ts5-tui --tasks` list them (with the
+    running one's latest steps); the bar shows ⚙ task while one runs, and
+    `/task open` opens its chat, which follows the task as it goes and
+    takes no messages. Each
     keeps its whole log for good in
     `~/.local/share/tokenstation/tasks/<id>/`: `task.json`, `log.jsonl`
     (every turn, call, result, set of notes and refusal), `commands/N.txt`

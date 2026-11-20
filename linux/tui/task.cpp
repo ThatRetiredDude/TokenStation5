@@ -549,6 +549,13 @@ void watcher() {
         else if (t.limits.tokens > 0 && t.tokens_out >= t.limits.tokens)
             end_early("tokens", fmt("its %s tokens are written", with_commas((int)std::min<long long>(t.limits.tokens, 2000000000)).c_str()));
         if (wall() - saved >= 2) {
+            // The chat too, so ts5-tui's /task open follows it as it goes.
+            if (!c.msgs.empty()) {
+                std::string why;
+                save_chat(c, why);
+                std::lock_guard<std::mutex> l(R->mu);
+                R->t.chat_id = c.saved_id;
+            }
             save_state();
             saved = wall();
         }

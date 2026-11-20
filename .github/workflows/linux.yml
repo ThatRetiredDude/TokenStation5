@@ -408,7 +408,9 @@ jobs:
       - name: The sandbox's own Linux system (Debian 13 downloaded and checked, then apt, pip and sudo in it as root)
         run: python3 linux/tui/test/box_test.py "$(command -v ts5-tui)" --apt --require
       - name: Unattended tasks (ts5-tui --task against the stand-in server; done, the step and hour limits, a stop, the server gone and back)
-        run: python3 linux/tui/test/unattended_test.py "$(command -v ts5-tui)"
+        run: |
+          command -v tmux || sudo apt-get install -y -qq tmux
+          python3 linux/tui/test/unattended_test.py "$(command -v ts5-tui)"
       - name: Tune it (ts5-tune, then the engine reads tune.env; --models, then the per-model file)
         run: |
           ts5-tune --quick --pp 64 --tg 16 /tmp/model/test.gguf

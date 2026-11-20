@@ -154,6 +154,14 @@ struct App {
     // The open chat's file as ts5-tui last wrote or read it: the chat page
     // (the owner's phone) adds turns to the same file (store.h).
     std::string chat_watch_id;
+    // The unattended task that runs (task.h), looked at every 2 s: shown on
+    // the bar; its chat, when open here, follows it and takes no messages.
+    TaskInfo task;
+    bool task_on = false;
+    double task_seen = 0;
+    // The chat open is a task's, loaded from its file (/task open): ts5-tui
+    // never writes it while it is so (the task's program does).
+    bool task_view = false;
     ChatFileState chat_watch;
     double ask_told = 0;  // the run-it question a toast on another page was shown for
     std::string load_target;  // what's loading, until /v1/models says so
@@ -2264,6 +2272,18 @@ void draw_top_bar() {
                           {what + fit(g->job_model, 30), Style(t.warn, t.panel2, BOLD)},
                           {more, Style(t.warn, t.panel2)}},
                          -1});
+    }
+    if (g->task_on) {
+        const TaskInfo &k = g->task;
+        std::string more = fmt(" · step %d/%d", k.steps, k.limits.steps);
+        if (k.started > 0) {
+            const int mins = (int)((time(nullptr) - k.started) / 60);
+            more += fmt(" · %d:%02d", mins / 60, mins % 60);
+        }
+        items.push_back({{{"⚙ ", Style(t.accent, t.panel2, BOLD)},
+                          {k.state == "waiting" ? "task waits for the model" : "task", Style(t.accent, t.panel2, BOLD)},
+                          {more, Style(t.accent, t.panel2)}},
+                         1});
     }
     if (g->downloader.running() && g->dl_on) {
         double done, total, mbps;
@@ -4701,13 +4721,15 @@ TaskLimits task_limits() {
     return l;
 }
 
+void chat_watch_reset();
+
 // /task: start one, stop the one running, or the list.
 void task_command(const std::string &arg) {
     Chat &c = g->chat;
     std::string why;
     if (arg.empty() || arg == "list") {
         const std::vector<TaskInfo> all = task_list();
-        std::string h = "**Unattended tasks**  (`/task GOAL` starts one, `/task stop` ends it)\n";
+        std::string h = "**Unattended tasks**  (`/task GOAL` starts one, `/task open` shows its chat, `/task stop` ends it)\n";
         if (all.empty()) h += "None yet. A task runs by itself in the sandbox, with nobody asked anything, until it is "
                               "done or reaches a limit: " + fmt("%d steps, %g hours", g->cfg.task_steps, g->cfg.task_hours) +
                               (g->cfg.task_tokens ? ", " + with_commas((int)g->cfg.task_tokens) + " tokens" : std::string()) +
@@ -4719,8 +4741,33 @@ void task_command(const std::string &arg) {
                 if (ch == '\n') ch = ' ';
             h += "- **" + task_state_words(t) + "** · " + goal + "\n  " + task_progress(t) + " · `" +
                  tilde_path(task_dir(t.id)) + "`\n";
+            if (i == 0 && !t.ended_state()) {
+                h += "\n  Its latest steps:\n";
+                for (const std::string &l : task_tail(t.id, 10)) h += "  `" + l + "`\n";
+            }
         }
         chat_note(c, h);
+    } else if (arg == "open") {
+        // The newest task's chat (the running one's follows it as it goes).
+        const std::vector<TaskInfo> all = task_list();
+        if (all.empty() || all[0].chat_id.empty()) {
+            show_toast(all.empty() ? "No task yet" : "The task's chat isn't saved yet: in a moment", g->th->warn, 4);
+            return;
+        }
+        for (const SavedChat &s : list_chats())
+            if (s.id == all[0].chat_id) {
+                if (load_chat(c, s, why)) {
+                    g->task_view = true;
+                    chat_watch_reset();
+                    show_toast(all[0].ended_state() ? "The task's chat: " + task_state_words(all[0])
+                                                    : "The running task's chat: it follows the task as it goes",
+                               g->th->accent, 5);
+                } else {
+                    show_toast("The task's chat: " + why, g->th->bad, 5);
+                }
+                return;
+            }
+        show_toast("The task's chat isn't in the chat list", g->th->warn, 4);
     } else if (arg == "stop") {
         TaskInfo t;
         if (!task_running(&t)) show_toast("No task is running", g->th->warn, 4);
@@ -6423,6 +6470,13 @@ void key_chat(const Event &e) {
         run_command("/copy");
         return;
     }
+    if (e.key == K_ENTER && g->task_on && !g->chat.saved_id.empty() && g->chat.saved_id == g->task.chat_id &&
+        !g->chat.input.empty() && g->chat.input[0] != '/') {
+        show_toast("This is the running task's chat: it follows the task and takes no messages. /new starts a chat of "
+                   "your own; /task stop ends the task",
+                   g->th->warn, 7);
+        return;
+    }
     const int r = chat_key(g->chat, e, rq, g->scr.h);
     if (r == CHAT_COMMAND) run_command(g->chat.command);
 }
@@ -7622,6 +7676,23 @@ void chat_follow_file(bool at_once = false) {
     if (id.empty() || g->chat.busy()) return;
     const int64_t mt = chat_file_mtime(id);
     if (mt == g->chat_watch.mtime_ns) return;
+    if (g->task_on && id == g->task.chat_id && mt != 0) {
+        // The running task's chat: all of it again, its calls too.
+        for (const SavedChat &s : list_chats())
+            if (s.id == id) {
+                std::string why;
+                const int scroll = g->chat.scroll;
+                g->task_view = true;
+                if (load_chat(g->chat, s, why)) {
+                    g->task_view = true;
+                    g->chat.scroll = scroll;
+                    g->chat_watch = chat_file_state(id);
+                    g->full_redraw = true;
+                }
+                break;
+            }
+        return;
+    }
     if (mt == 0) {  // deleted elsewhere: it stays on screen, and is written again with the next answer
         g->chat_watch.mtime_ns = 0;
         return;
@@ -7698,11 +7769,25 @@ void tick() {
     if (t - g->sens_at >= 1.0) {
         g->sens = read_sensors();
         g->sens_at = t;
-        // A terminal closed under ts5-tui ends the model it loaded too.
-        term_end_with(g->cfg.keep_model ? -1 : (int)own_server_pid());
+        // A terminal closed under ts5-tui ends the model it loaded too
+        // (not while a task works with it: the task unloads it at its end).
+        term_end_with(g->cfg.keep_model || g->task_on ? -1 : (int)own_server_pid());
         if (g->sens.die.have) {
             g->die_hist.push_back(g->sens.die.value);
             if (g->die_hist.size() > 600) g->die_hist.erase(g->die_hist.begin(), g->die_hist.begin() + 100);
+        }
+    }
+    if (t - g->task_seen >= 2) {
+        // The unattended task: on the bar while it runs, and a word when it ends.
+        g->task_seen = t;
+        const bool was = g->task_on;
+        const std::string was_id = g->task.id;
+        g->task_on = task_running(&g->task);
+        if (was && !g->task_on) {
+            TaskInfo done;
+            if (task_read(was_id, done))
+                show_toast("The task has ended: " + task_state_words(done) + " (/task open shows its chat)",
+                           done.state == "done" ? g->th->good : g->th->warn, 10);
         }
     }
     if (g->cur == ACCESS && !g->acc_typing && !g->ask_yes && g->pick.empty() && t - g->acc_at >= 5) access_read();
@@ -8413,6 +8498,10 @@ int main(int argc, char **argv) {
     app.scr.resize(w, h);
     std::thread poller(poll_loop);
     app.chat.before_clear = [](Chat &c) {
+        if (g->task_view) {
+            g->task_view = false;
+            return;
+        }
         chat_follow_file(true);
         std::string why;
         save_chat(c, why);
