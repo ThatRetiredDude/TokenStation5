@@ -186,6 +186,8 @@ std::vector<BoxProc> procs_under(pid_t top) {
 // The user's systemd can give a program a memory limit of its own (a
 // scope in a cgroup with the memory controller). Found once.
 int g_systemd = -1;
+bool g_oom_continue = true;
+bool systemd_try(const std::string &run);
 bool systemd_ok() {
     if (g_systemd >= 0) return g_systemd == 1;
     g_systemd = 0;
@@ -193,6 +195,21 @@ bool systemd_ok() {
         if (strcmp(e, "0") == 0) return false;
     const std::string run = which("systemd-run");
     if (run.empty() || !getenv("XDG_RUNTIME_DIR")) return false;
+    // OOMPolicy=continue: past the cap the kernel ends the biggest program
+    // and the sandbox goes on (systemd's default stops the whole scope).
+    // An older systemd without it for scopes: the cap still holds, and a
+    // program past it ends the sandbox.
+    for (int with = 1; with >= 0; with--) {
+        g_oom_continue = with == 1;
+        if (systemd_try(run)) {
+            g_systemd = 1;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool systemd_try(const std::string &run) {
     const pid_t pid = fork();
     if (pid == 0) {
         const int devnull = open("/dev/null", O_RDWR);
@@ -201,8 +218,12 @@ bool systemd_ok() {
             dup2(devnull, 1);
             dup2(devnull, 2);
         }
-        execl(run.c_str(), "systemd-run", "--user", "--scope", "--quiet", "--collect", "-p", "MemoryMax=64M", "-p",
-              "MemorySwapMax=0", "/bin/true", (char *)nullptr);
+        if (g_oom_continue)
+            execl(run.c_str(), "systemd-run", "--user", "--scope", "--quiet", "--collect", "-p", "MemoryMax=64M", "-p",
+                  "MemorySwapMax=0", "-p", "OOMPolicy=continue", "/bin/true", (char *)nullptr);
+        else
+            execl(run.c_str(), "systemd-run", "--user", "--scope", "--quiet", "--collect", "-p", "MemoryMax=64M", "-p",
+                  "MemorySwapMax=0", "/bin/true", (char *)nullptr);
         _exit(127);
     }
     if (pid < 0) return false;
@@ -216,8 +237,7 @@ bool systemd_ok() {
         kill(pid, SIGKILL);
         waitpid(pid, &st, 0);
     }
-    g_systemd = done && WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 1 : 0;
-    return g_systemd == 1;
+    return done && WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
 
 struct Kept {
@@ -423,6 +443,7 @@ bool start_locked(Kept &k, bool box, bool net, std::string &why) {
                                         "DBUS_SESSION_BUS_ADDRESS",
                                         "-u",
                                         "XDG_RUNTIME_DIR"};
+        if (g_oom_continue) pre.insert(pre.end() - 6, {"-p", "OOMPolicy=continue"});
         a.insert(a.begin(), pre.begin(), pre.end());
         for (const char *v : {"XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"})
             if (const char *x = getenv(v)) env.push_back(std::string(v) + "=" + x);
@@ -670,6 +691,15 @@ KeptRun kept_run(const std::string &cmd, bool box, bool net, double limit, const
         std::lock_guard<std::mutex> l(g_mu);
         Kept &k = g_k;
         if (gone) {
+            // Ended by the kernel past the cap (a systemd without
+            // OOMPolicy=continue stops the whole scope then): said so.
+            const bool oom = k.pid == top && !k.cgroup.empty() &&
+                             cgroup_number(k.cgroup + "/memory.events", "oom_kill") > k.ooms;
+            if (oom)
+                r.note += fmt("\n(Together the sandbox's programs went past its memory cap of %s, and the kernel "
+                              "ended them. Use less memory at once: smaller batches, fewer workers, or one program "
+                              "at a time.)",
+                              bytes_words(k.cap).c_str());
             if (k.pid == top) {
                 int st;
                 if (waitpid(top, &st, WNOHANG) == top || kill(top, 0) != 0) {

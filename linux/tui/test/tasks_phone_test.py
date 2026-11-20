@@ -69,6 +69,16 @@ def main():
         code, _ = call(here + "/ts5/push", owner, {"subscription": psub, "name": "iPhone"})
         check(code == 200, "the owner's phone takes notifications")
 
+        # The whole state (over 8 KiB) through curl, as a phone's shell would.
+        if shutil.which("curl"):
+            raw = subprocess.run(["curl", "-s", "-H", "Authorization: Bearer " + owner, "-H", "Content-Type: application/json",
+                                  "-d", '{"do":"tasks"}', here + "/ts5/control"], capture_output=True).stdout
+            try:
+                whole = json.loads(raw)
+            except ValueError:
+                whole = None
+            check(whole is not None and len(raw) > 8192, "curl gets the whole reply (%d bytes), JSON to its end" % len(raw),
+                  raw[-200:])
         code, j = call(here + "/ts5/control", owner, {"do": "tasks"})
         t = (j or {}).get("tasks") if code == 200 else None
         check(t is not None and t.get("list") == [] and t.get("limits", {}).get("steps") == 3,
