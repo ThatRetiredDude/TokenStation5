@@ -725,7 +725,10 @@ ts5-tui --url http://ps5.local:8081  # another one
     `~/.local/share/tokenstation/tasks/<id>/`: `task.json`, `log.jsonl`
     (every turn, call, result, set of notes and refusal), `commands/N.txt`
     (each command's whole output) and `runner.log`; its chat is in the
-    chat list. On the phone, Controls → Tasks shows the running task with
+    chat list. `--file PATH` gives a task a copy of a file (in
+    `task-files/<id>/`). The model is told its budget, checks its work once
+    before it counts as done, and writes a report when a limit cuts it off.
+    On the phone, Controls → Tasks (with Add files) shows the running task with
     its latest steps, stops it and starts a new one, and every task's end
     comes as a notification.
   - **Browser** (on; Settings → Tool: browser, or `/tools browser off`,

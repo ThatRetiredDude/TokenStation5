@@ -54,7 +54,7 @@ def main():
     sockp = os.path.join(data, "control.sock")
     tasks = os.path.join(data, "tasks")
     try:
-        p = subprocess.run([tui, "--start"], env=env, capture_output=True, text=True, timeout=30)
+        p = subprocess.run([tui, "--start"], env=env, cwd=home, capture_output=True, text=True, timeout=30)
         check(p.returncode == 0 and wait(lambda: os.path.exists(sockp), 20), "ts5-tui runs, with its control socket",
               p.stderr)
         st = sock_ask(sockp, {"do": "load", "model": "Test-A"})
@@ -83,6 +83,18 @@ def main():
         t = (j or {}).get("tasks") if code == 200 else None
         check(t is not None and t.get("list") == [] and t.get("limits", {}).get("steps") == 3,
               "tasks: none yet, and the limits a new one gets", (code, t))
+        # Files for the task, in pieces, as the page sends them.
+        import base64
+        blob = bytes(range(256)) * 1200  # 307,200 bytes: two pieces
+        code, j = call(here + "/ts5/control", owner, {"do": "task_file", "name": "../data.bin",
+                                                     "data": base64.b64encode(blob[:262144]).decode()})
+        code2, j2 = call(here + "/ts5/control", owner, {"do": "task_file", "name": "data.bin", "more": True,
+                                                       "data": base64.b64encode(blob[262144:]).decode()})
+        call(here + "/ts5/control", owner, {"do": "task_file", "name": "drop.txt", "data": base64.b64encode(b"x").decode()})
+        code3, j3 = call(here + "/ts5/control", owner, {"do": "task_file_drop", "name": "drop.txt"})
+        fl = ((j3 or {}).get("tasks") or {}).get("files") if code3 == 200 else None
+        check(code == 200 and code2 == 200 and fl == [{"name": "data.bin", "size": len(blob)}],
+              "task_file: a file in two pieces waits for the task (its name without folders); one dropped", (code, code2, fl))
         del ct.push_got[:]
         code, j = call(here + "/ts5/control", owner, {"do": "task_start", "goal": "List the files here.", "steps": 2})
         t = (j or {}).get("tasks") or {}
@@ -92,6 +104,10 @@ def main():
         tid = lst[0]["id"] if lst else ""
         tj = json.load(open(os.path.join(tasks, tid, "task.json"))) if tid else {}
         check(tj.get("limits", {}).get("steps") == 2, "with the phone's limits", tj.get("limits"))
+        got = os.path.join(data, "sandbox", "home", "task-files", tid, "data.bin")
+        check(tj.get("files") == ["data.bin"] and os.path.exists(got) and open(got, "rb").read() == blob and
+              not os.listdir(os.path.join(tasks, "incoming")),
+              "the task takes the file, byte for byte, where its commands start", (tj.get("files"), got))
         code, j = call(here + "/ts5/control", owner, {"do": "task_start", "goal": "Another"})
         check("one at a time" in json.dumps(j), "a second one is refused while it runs", j)
         code, j = call(here + "/ts5/control", owner, {"do": "task_stop", "id": tid})

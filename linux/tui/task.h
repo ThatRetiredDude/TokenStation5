@@ -52,6 +52,12 @@ struct TaskInfo {
     double created = 0, started = 0, ended = 0, updated = 0;
     int pid = 0, steps = 0, commands = 0, refused = 0, restarts = 0;
     long long tokens_out = 0, tokens_in = 0;
+    // The files given with it (their names), and the folder they are in as
+    // the task's commands see it ("task-files/<id>", in the folder they
+    // start in).
+    std::vector<std::string> files;
+    std::string files_dir;
+    int checks = 0;  // the looks the program asked for before "done" counted
     bool ended_state() const { return state != "starting" && state != "waiting" && state != "running"; }
 };
 
@@ -69,8 +75,24 @@ std::string task_progress(const TaskInfo &t);
 // Makes the task and starts its program (self: this program's path), in
 // its own session, in folder. Its id, or "" and why (one runs already, no
 // sandbox, no goal).
+// files: paths of files it is given, copied into task-files/<id> where
+// its commands start; incoming: the files waiting (task_file_put) go with
+// it too.
 std::string task_start(const std::string &self, const std::string &goal, const std::string &folder,
-                       const TaskLimits &lim, std::string &why);
+                       const TaskLimits &lim, std::string &why, const std::vector<std::string> &files = {},
+                       bool incoming = false);
+// Files handed over for the next task (from the phone, a piece at a time):
+// kept in <data>/tasks/incoming until a task takes them. A name is a file's
+// own (no folders); 64 MiB a file and 256 MiB together at most.
+struct TaskFile {
+    std::string name;
+    long long size = 0;
+};
+bool task_file_put(const std::string &name, const std::string &bytes, bool append, std::string &why);
+bool task_file_drop(const std::string &name);
+std::vector<TaskFile> task_files_incoming();
+// base64 (either alphabet, padding or not); false on a byte that isn't.
+bool task_b64(const std::string &in, std::string &out);
 // Asks its program to stop (it ends the model's turn and its command, and
 // says so). False with why.
 bool task_stop(const std::string &id, std::string &why);

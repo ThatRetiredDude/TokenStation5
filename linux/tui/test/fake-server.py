@@ -268,7 +268,7 @@ class H(BaseHTTPRequestHandler):
         results = []
         turns = 0  # the turns with calls since the user's message
         for m in msgs:
-            if m.get("role") == "user" and (m.get("content") or "").startswith("(ts5-tui: the model's server started again"):
+            if m.get("role") == "user" and (m.get("content") or "").startswith("(ts5-tui: "):
                 pass  # (an unattended task going on after its server came back: the same request)
             elif m.get("role") == "user":
                 asked, results, turns = m.get("content") or "", [], 0

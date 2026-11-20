@@ -7485,6 +7485,7 @@ ts5::Json control_tasks() {
         x.set("progress", Json::string(task_progress(t)));
         x.set("running", Json::string(t.ended_state() ? "" : "yes"));
         x.set("answer", Json::string(t.answer.substr(0, 1500)));
+        x.set("files", jn((double)t.files.size()));
         x.set("started", jn(t.started));
         x.set("ended", jn(t.ended));
         arr.a.push_back(x);
@@ -7496,6 +7497,15 @@ ts5::Json control_tasks() {
     if (!all.empty())
         for (const std::string &l : task_tail(all[0].id, 30)) tail.a.push_back(Json::string(l));
     out.set("tail", tail);
+    Json files;
+    files.type = Json::ARR;
+    for (const TaskFile &f : task_files_incoming()) {
+        Json x = Json::object();
+        x.set("name", Json::string(f.name));
+        x.set("size", jn((double)f.size));
+        files.a.push_back(x);
+    }
+    out.set("files", files);
     Json lim = Json::object();
     lim.set("steps", jn(g->cfg.task_steps));
     lim.set("hours", jn(g->cfg.task_hours));
@@ -7683,6 +7693,14 @@ std::string control_answer(const std::string &text) {
         if (id.empty()) return refuse("no task is running");
         if (!task_stop(id, why)) return refuse(why);
         show_toast("The task is stopping (from the phone)", g->th->accent, 5);
+    } else if (what == "task_file") {
+        // A file for the next task, a piece at a time ("more": added to the
+        // file's end): {"name", "data" (base64), "more"}.
+        std::string bytes, why;
+        if (!task_b64(req["data"].str(), bytes)) return refuse("the file's piece isn't base64");
+        if (!task_file_put(req["name"].str(), bytes, req["more"].boolean(false), why)) return refuse(why);
+    } else if (what == "task_file_drop") {
+        task_file_drop(req["name"].str());
     } else if (what == "task_start") {
         // From the phone: in the folder ts5-tui was started in, with the
         // limits it was given or Settings' own.
@@ -7693,7 +7711,8 @@ std::string control_answer(const std::string &text) {
         if (req["tokens"].num(-1) >= 0) l.tokens = (long long)req["tokens"].num(0);
         char cwd[4096];
         task_env();
-        const std::string id = task_start(self_path(), req["goal"].str(), getcwd(cwd, sizeof cwd) ? cwd : ".", l, why);
+        const std::string id =
+            task_start(self_path(), req["goal"].str(), getcwd(cwd, sizeof cwd) ? cwd : ".", l, why, {}, true);
         if (id.empty()) return refuse(why);
         show_toast("A task was started from the phone: /task shows it", g->th->accent, 6);
         g->task_seen = 0;
@@ -8314,7 +8333,8 @@ int usage(FILE *f) {
             "which stays up between them, as in a chat.\n"
             "--task GOAL: an unattended task (as /task GOAL): the model works on GOAL by itself in\n"
             "the sandbox, started in this folder, in a program of its own that keeps going\n"
-            "when this one ends; --steps N, --hours H, --tokens T set its limits. It prints\n"
+            "when this one ends; --steps N, --hours H, --tokens T set its limits; --file PATH\n"
+            "(as often as needed) gives it a copy of a file, in task-files/ID. It prints\n"
             "the task's id. --tasks lists them, --task-stop ID ends one.\n"
             "--github-call: one call of the model's GitHub tool, as it would be made (after the\n"
             "fixes it gets), with what the question before a change would show; --dry-run\n"
@@ -8373,6 +8393,7 @@ int main(int argc, char **argv) {
     // --task GOAL (with --steps, --hours, --tokens), --task-run ID (the
     // task's own program), --task-stop ID, --tasks.
     std::string task_goal, task_run_id, task_stop_id;
+    std::vector<std::string> task_files;
     bool task_new = false, tasks_list = false;
     int lim_steps = 0;
     double lim_hours = 0;
@@ -8408,6 +8429,7 @@ int main(int argc, char **argv) {
         else if (a == "--task") task_new = true, task_goal = next();
         else if (a == "--task-run") task_run_id = next();
         else if (a == "--task-stop") task_stop_id = next();
+        else if (a == "--file") task_files.push_back(next());
         else if (a == "--tasks") tasks_list = true;
         else if (a == "--steps") lim_steps = atoi(next().c_str());
         else if (a == "--hours") lim_hours = atof(next().c_str());
@@ -8556,7 +8578,7 @@ int main(int argc, char **argv) {
         if (lim_tokens >= 0) l.tokens = lim_tokens;
         char cwd[4096];
         task_env();
-        const std::string id = task_start(self_path(), task_goal, getcwd(cwd, sizeof cwd) ? cwd : ".", l, why);
+        const std::string id = task_start(self_path(), task_goal, getcwd(cwd, sizeof cwd) ? cwd : ".", l, why, task_files);
         if (id.empty()) {
             fprintf(stderr, "ts5-tui: %s\n", why.c_str());
             return 1;

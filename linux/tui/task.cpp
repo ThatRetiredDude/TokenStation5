@@ -111,6 +111,12 @@ ts5::Json to_json(const TaskInfo &t) {
     j.set("restarts", num(t.restarts));
     j.set("tokens_out", num((double)t.tokens_out));
     j.set("tokens_in", num((double)t.tokens_in));
+    ts5::Json fl;
+    fl.type = ts5::Json::ARR;
+    for (const std::string &f : t.files) fl.a.push_back(str(f));
+    j.set("files", fl);
+    j.set("files_dir", str(t.files_dir));
+    j.set("checks", num(t.checks));
     return j;
 }
 
@@ -137,6 +143,10 @@ void from_json(const ts5::Json &j, TaskInfo &t) {
     t.restarts = (int)j["restarts"].num(0);
     t.tokens_out = (long long)j["tokens_out"].num(0);
     t.tokens_in = (long long)j["tokens_in"].num(0);
+    t.files.clear();
+    for (const ts5::Json &f : j["files"].a) t.files.push_back(f.str());
+    t.files_dir = j["files_dir"].str();
+    t.checks = (int)j["checks"].num(0);
 }
 
 bool task_write(const TaskInfo &t) {
@@ -235,8 +245,120 @@ std::string task_progress(const TaskInfo &t) {
     return p;
 }
 
+namespace {
+
+// A file's own name, safe as one: no folders, no leading dot, no control
+// characters; "" for none.
+std::string file_name_of(const std::string &path) {
+    std::string n = path.substr(path.find_last_of("/\\") == std::string::npos ? 0 : path.find_last_of("/\\") + 1);
+    for (char &c : n)
+        if ((unsigned char)c < 0x20 || c == 0x7f) c = '_';
+    while (!n.empty() && n[0] == '.') n.erase(0, 1);
+    if (n.size() > 200) n.resize(200);
+    return n;
+}
+
+bool copy_file(const std::string &from, const std::string &to) {
+    FILE *a = fopen(from.c_str(), "rb");
+    if (!a) return false;
+    FILE *b = fopen(to.c_str(), "wb");
+    if (!b) {
+        fclose(a);
+        return false;
+    }
+    char buf[1 << 16];
+    size_t n;
+    bool ok = true;
+    while (ok && (n = fread(buf, 1, sizeof buf, a)) > 0) ok = fwrite(buf, 1, n, b) == n;
+    ok = ok && !ferror(a);
+    fclose(a);
+    return fclose(b) == 0 && ok;
+}
+
+std::string incoming_dir() { return tasks_dir() + "/incoming"; }
+
+}  // namespace
+
+bool task_b64(const std::string &in, std::string &out) {
+    out.clear();
+    unsigned acc = 0;
+    int bits = 0;
+    for (char ch : in) {
+        int v;
+        if (ch >= 'A' && ch <= 'Z') v = ch - 'A';
+        else if (ch >= 'a' && ch <= 'z') v = ch - 'a' + 26;
+        else if (ch >= '0' && ch <= '9') v = ch - '0' + 52;
+        else if (ch == '+' || ch == '-') v = 62;
+        else if (ch == '/' || ch == '_') v = 63;
+        else if (ch == '=' || ch == '\n' || ch == '\r') continue;
+        else return false;
+        acc = (acc << 6) | (unsigned)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back((char)((acc >> bits) & 0xff));
+        }
+    }
+    return true;
+}
+
+std::vector<TaskFile> task_files_incoming() {
+    std::vector<TaskFile> out;
+    DIR *d = opendir(incoming_dir().c_str());
+    if (!d) return out;
+    while (dirent *e = readdir(d)) {
+        if (e->d_name[0] == '.') continue;
+        struct stat st;
+        if (stat((incoming_dir() + "/" + e->d_name).c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        out.push_back({e->d_name, (long long)st.st_size});
+    }
+    closedir(d);
+    std::sort(out.begin(), out.end(), [](const TaskFile &a, const TaskFile &b) { return a.name < b.name; });
+    return out;
+}
+
+bool task_file_put(const std::string &name, const std::string &bytes, bool append, std::string &why) {
+    const std::string n = file_name_of(name);
+    if (n.empty()) {
+        why = "a file needs a name";
+        return false;
+    }
+    long long total = 0, own = 0;
+    for (const TaskFile &f : task_files_incoming()) {
+        total += f.size;
+        if (f.name == n) own = f.size;
+    }
+    if (!append) total -= own, own = 0;
+    if (own + (long long)bytes.size() > (64ll << 20)) {
+        why = n + " is over 64 MiB: too big to hand over this way (put it in the task's folder yourself)";
+        return false;
+    }
+    if (total + (long long)bytes.size() > (256ll << 20)) {
+        why = "the files for a task are 256 MiB together at most";
+        return false;
+    }
+    make_dirs(incoming_dir());
+    chmod(tasks_dir().c_str(), 0700);
+    FILE *f = fopen((incoming_dir() + "/" + n).c_str(), append ? "ab" : "wb");
+    if (!f) {
+        why = n + " could not be written in " + incoming_dir();
+        return false;
+    }
+    const bool ok = fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
+    if (fclose(f) != 0 || !ok) {
+        why = n + " could not be written (is the disk full?)";
+        return false;
+    }
+    return true;
+}
+
+bool task_file_drop(const std::string &name) {
+    const std::string n = file_name_of(name);
+    return !n.empty() && unlink((incoming_dir() + "/" + n).c_str()) == 0;
+}
+
 std::string task_start(const std::string &self, const std::string &goal, const std::string &folder,
-                       const TaskLimits &lim, std::string &why) {
+                       const TaskLimits &lim, std::string &why, const std::vector<std::string> &files, bool incoming) {
     std::string g = goal;
     while (!g.empty() && isspace((unsigned char)g.back())) g.pop_back();
     while (!g.empty() && isspace((unsigned char)g.front())) g.erase(0, 1);
@@ -271,6 +393,37 @@ std::string task_start(const std::string &self, const std::string &goal, const s
     t.folder = folder;
     t.limits = lim;
     t.created = t.updated = wall();
+    // Its files: into task-files/<id> where its commands start (the
+    // folder, or the sandbox's home when the folder is the home folder).
+    std::vector<std::string> from = files;
+    std::vector<TaskFile> waiting;
+    if (incoming) waiting = task_files_incoming();
+    for (const TaskFile &f : waiting) from.push_back(incoming_dir() + "/" + f.name);
+    if (!from.empty()) {
+        std::string tb;
+        if (!sandbox_toolbox_ok(tb)) {
+            why = "its files could not be handed over: " + tb;
+            return "";
+        }
+        t.files_dir = "task-files/" + t.id;
+        const std::string dir = (sandbox_starts_home() ? sandbox_home() : sandbox_work()) + "/" + t.files_dir;
+        if (!make_dirs(dir)) {
+            why = "its files' folder could not be made: " + dir;
+            return "";
+        }
+        for (const std::string &f : from) {
+            std::string n = file_name_of(f);
+            if (n.empty()) continue;
+            for (int i = 2; std::find(t.files.begin(), t.files.end(), n) != t.files.end(); i++)
+                n = std::to_string(i) + "-" + file_name_of(f);
+            if (!copy_file(f, dir + "/" + n)) {
+                why = "this file could not be read or copied: " + f;
+                return "";
+            }
+            t.files.push_back(n);
+        }
+        for (const TaskFile &f : waiting) unlink((incoming_dir() + "/" + f.name).c_str());
+    }
     if (!make_dirs(task_dir(t.id) + "/commands") || !task_write(t)) {
         why = "its folder could not be made in " + tasks_dir();
         return "";
@@ -353,14 +506,63 @@ std::vector<std::string> task_tail(const std::string &id, size_t n) {
 
 namespace {
 
-const char kTaskLead[] =
-    "\n\n(This is an unattended task: nobody is here to answer a question until it has ended, so don't ask one. "
-    "Work on it by yourself until it is done, then answer with what you did, what came of it, and where the "
-    "results are (files in the folder you work in). Your commands run in the sandbox without asking: install what "
-    "you need there, and a server you start in the background stays up for your next commands. Anything that "
-    "would reach outside the sandbox (a button or typing on a web page, a change on GitHub, an outside tool) is "
-    "refused; reading web pages and searching is fine. If something can't be done, say so in your answer and "
-    "stop; don't try the same thing again and again.)";
+// What the task's first message says after the goal. (Reworked 2026-11-20
+// after a read of every prompt a long task gets: the model is told its
+// budget, so it can plan for it; where its files are; to keep its results
+// in files as it goes, so a task cut off by a limit leaves them; and to
+// check what it made before it calls it done.)
+bool task_check_on() {
+    const char *e = getenv("TS5_TASK_CHECK");
+    return !e || strcmp(e, "0") != 0;
+}
+
+std::string task_lead(const TaskInfo &t) {
+    std::string s =
+        "\n\n(This is an unattended task: nobody is here to answer a question until it has ended, so don't ask one: "
+        "where something is open, choose what fits the request best, say what you chose in your answer, and go on. "
+        "Work on it by yourself until it is done.\n"
+        "- Your commands run in the sandbox without asking: install what you need there, and a server you start in "
+        "the background stays up for your next commands.\n"
+        "- Anything that would reach outside the sandbox (a button or typing on a web page, a change on GitHub, an "
+        "outside tool) is refused; reading web pages and searching is fine.\n";
+    s += fmt("- Your budget: %d steps (a step is one turn of yours that calls tools)", t.limits.steps);
+    s += fmt(" and %g hour%s", t.limits.hours, t.limits.hours == 1 ? "" : "s");
+    if (t.limits.tokens > 0) s += fmt(", and %lld tokens of your own writing", t.limits.tokens);
+    s += ". Plan for it: the important parts first, and save results to files as you go, so that what is done is "
+         "kept if the budget runs out.\n";
+    if (!t.files.empty()) {
+        s += "- The files given with this task are in the folder " + t.files_dir + " (from where your commands start): ";
+        for (size_t i = 0; i < t.files.size() && i < 40; i++) s += (i ? ", " : "") + t.files[i];
+        if (t.files.size() > 40) s += fmt(" and %zu more", t.files.size() - 40);
+        s += ". Look at them with commands before you use them, and leave them as they are: write what you make "
+             "to other files.\n";
+    }
+    s += "- Before you call it done, check what you made with a command (the file is there and holds what it "
+         "should, the program runs, the server answers), and fix what the check shows.\n"
+         "- If something can't be done, don't try the same thing again and again: do the rest, and say in your "
+         "answer what could not be done and why.\n"
+         "Your last message is the report: what you did, what came of it, where the results are (files, with their "
+         "paths), and what is left undone.)";
+    return s;
+}
+
+// After its first answer, once: a task is not done because the model says
+// so. (A PS5 run of Qwen3.5 9B reported "the server is now running" for one
+// that had ended, and three of five lines of a report it had not read
+// back.)
+const char kCheck[] =
+    "(ts5-tui: a check before this task counts as done; nobody has read your answer yet. Read the request once "
+    "more, part by part. For each part, show with a command that it is done: the file exists and holds what it "
+    "should, the program runs, the number you reported is the one a command prints. Do what is missing or wrong. "
+    "If you asked a question, nobody will answer it: decide yourself and go on. Then give your report again, "
+    "complete, with what you checked.)";
+
+// A task cut off by a limit, or stuck: one last turn without tools, so
+// that what was done is told.
+const char kReport[] =
+    "(ts5-tui: the task ends here: %s. You have no more tool calls. Write your report now, from what you have "
+    "done so far: what is finished, with the files and their paths; what is not; and what you would do next. "
+    "Report only what your commands' results showed.)";
 
 const char kGoOn[] =
     "(ts5-tui: the model's server started again, so your last turn was cut off. Go on with the task from where "
@@ -373,6 +575,7 @@ struct Runner {
     std::atomic<bool> quit{false};
     std::string end_state, end_why;  // set by whatever ends it early (a limit, stop)
     std::atomic<bool> steps_out{false};
+    std::atomic<double> report_until{0};  // the last turn (the report) may run until then
     size_t logged = 0;  // c.msgs logged so far
     int command_n = 0;
 };
@@ -543,7 +746,14 @@ void watcher() {
             std::lock_guard<std::mutex> l(R->mu);
             t = R->t;
         }
-        if (file_exists(task_dir(t.id) + "/stop")) end_early("stopped", "stopped by you");
+        if (R->report_until.load() > 0) {
+            // The report's turn: only its own time, or a stop, ends it.
+            if (wall() > R->report_until.load() || file_exists(task_dir(t.id) + "/stop")) {
+                R->c.cancel = true;
+                const int fd = R->c.fd.load();
+                if (fd >= 0) shutdown(fd, SHUT_RDWR);
+            }
+        } else if (file_exists(task_dir(t.id) + "/stop")) end_early("stopped", "stopped by you");
         else if (t.started > 0 && wall() - t.started > t.limits.hours * 3600)
             end_early("hours", fmt("its %g hour%s are up", t.limits.hours, t.limits.hours == 1 ? "" : "s"));
         else if (t.limits.tokens > 0 && t.tokens_out >= t.limits.tokens)
@@ -621,7 +831,7 @@ int task_run_main(const std::string &id, const TaskHooks &h) {
         }
         save_state();
         event("working with " + rq.model);
-        bool first = true;
+        bool first = true, check_now = false;
         for (;;) {
             // The task's own switches: commands in the sandbox without
             // asking, and nothing that reaches out of it.
@@ -642,8 +852,10 @@ int task_run_main(const std::string &id, const TaskHooks &h) {
                 final_why = "the sandbox is unavailable here, and a task runs only in it";
                 break;
             }
-            chat_send(r.c, rq, first ? r.t.goal + kTaskLead : std::string(kGoOn), !first);
+            chat_send(r.c, rq, first ? r.t.goal + task_lead(r.t) : check_now ? std::string(kCheck) : std::string(kGoOn),
+                      !first);
             first = false;
+            check_now = false;
             if (r.c.worker.joinable()) r.c.worker.join();
             r.c.running = false;
             {
@@ -669,6 +881,25 @@ int task_run_main(const std::string &id, const TaskHooks &h) {
                     content = m.content;
                     stopped = m.stopped;
                     break;
+                }
+            }
+            if (err.empty() && !stopped && !r.steps_out && r.t.checks == 0 && task_check_on()) {
+                // Its first answer: the check, once, when it did anything
+                // and has steps left for it.
+                int used;
+                {
+                    std::lock_guard<std::mutex> l(r.c.mu);
+                    used = steps_in(r.c);
+                }
+                if (used > 0 && used < r.t.limits.steps) {
+                    {
+                        std::lock_guard<std::mutex> l(r.mu);
+                        r.t.checks = 1;
+                        r.t.answer = content;
+                    }
+                    event("its first answer: asked to check it against the request before it counts as done");
+                    check_now = true;
+                    continue;
                 }
             }
             if (err.empty() && !stopped) {
@@ -722,6 +953,28 @@ int task_run_main(const std::string &id, const TaskHooks &h) {
                 if (rq.model != r.t.model) r.t.model = rq.model;
             }
             event("going on with " + rq.model);
+        }
+    }
+    // Cut off by a limit, or stuck: one last turn without tools for the
+    // report (3 minutes at most), where the server still answers.
+    if (final_state == "hours" || final_state == "tokens" || final_state == "stuck") {
+        bool ok = false;
+        std::string why;
+        ChatRequest last = h.request(ok, why);
+        if (ok) {
+            last.tools = ToolSwitches{};
+            last.tools.web = last.tools.page = last.tools.terminal = last.tools.memory = false;
+            event("asking for its report, without tools");
+            r.report_until = wall() + 180;
+            if (r.c.worker.joinable()) r.c.worker.join();
+            r.c.running = false;
+            chat_send(r.c, last, fmt(kReport, final_why.c_str()), true);
+            if (r.c.worker.joinable()) r.c.worker.join();
+            r.c.running = false;
+            std::lock_guard<std::mutex> l(r.c.mu);
+            if (!r.c.msgs.empty() && r.c.msgs.back().role == "assistant" && r.c.msgs.back().error.empty() &&
+                !r.c.msgs.back().content.empty())
+                r.t.answer = r.c.msgs.back().content;
         }
     }
     r.quit = true;

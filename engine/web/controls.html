@@ -126,7 +126,10 @@
     white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dim); max-height: 50vh; overflow-y: auto; }
   .row .what span.ans { color: var(--fg); margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
   #newtask { border-top: none; flex-direction: column; }
-  #newtask button { align-self: flex-end; }
+  #newtask .tbtns { display: flex; gap: 8px; justify-content: flex-end; }
+  #newtask .tfiles { display: flex; flex-wrap: wrap; gap: 6px; }
+  #newtask .tfile { font-size: 13px; padding: 3px 8px; border-radius: 10px; border: 1px solid var(--line, #8884); overflow-wrap: anywhere; }
+  #newtask .tfile .x { border: none; background: none; color: inherit; font-size: 15px; padding: 0 2px; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -516,7 +519,12 @@ function tasksPage() {
     const lim = k.limits || {};
     h += '<h2>New task</h2><div class="card"><form class="add" id="newtask"><textarea class="t" id="taskgoal" rows="3" ' +
       'placeholder="What the model should do, by itself, in the sandbox" maxlength="4000">' + esc(taskGoal) +
-      '</textarea><button class="b go">Start</button></form><p class="note">It runs in the folder ts5-tui was started in, ' +
+      '</textarea><div class="tfiles">' + (k.files || []).map((f) => '<span class="tfile">' + esc(f.name) + " · " + size(f.size) +
+        ' <button type="button" class="x" data-taskfiledrop="' + esc(f.name) + '" aria-label="Remove">×</button></span>').join("") +
+      (upBusy ? '<span class="tfile">' + esc(upBusy) + "</span>" : "") + "</div>" +
+      '<div class="tbtns"><button type="button" class="b" data-taskfiles="1"' + (upBusy ? " disabled" : "") +
+      '>Add files</button><button class="b go"' + (upBusy ? " disabled" : "") + '>Start</button></div></form><p class="note">' +
+      "Files you add go with the task (64 MB each at most): the model finds them in task-files. It runs in the folder ts5-tui was started in, " +
       "until it is done or reaches " + n(lim.steps) + " steps or " + esc(lim.hours) + " hours" +
       (lim.tokens ? " or " + n(lim.tokens) + " tokens" : "") + ". Nobody is asked anything; you get a notification when it ends.</p></div>";
   }
@@ -691,6 +699,48 @@ document.addEventListener("click", (e) => {
     if (t.dataset.yes !== undefined) req.yes = t.dataset.yes === "1"; else req.pick = +t.dataset.pick;
     act(req);
   }
+});
+// Files for the next task: read here and handed to ts5-tui a piece at a
+// time (256 KiB), which keeps them until the task starts.
+let upBusy = "";
+const upInput = document.createElement("input");
+upInput.type = "file";
+upInput.multiple = true;
+upInput.style.display = "none";
+document.body.appendChild(upInput);
+function size(b) {
+  return b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : b >= 1024 ? Math.round(b / 1024) + " KB" : b + " B";
+}
+function b64(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+upInput.addEventListener("change", async () => {
+  const files = Array.from(upInput.files || []);
+  upInput.value = "";
+  for (const f of files) {
+    if (f.size > 64 * 1048576) { toast(f.name + " is over 64 MB"); continue; }
+    const step = 262144;
+    let at = 0, ok = true;
+    do {
+      upBusy = "Sending " + f.name + (f.size > step ? " · " + Math.round(100 * at / f.size) + "%" : "") + "…";
+      draw();
+      const piece = new Uint8Array(await f.slice(at, at + step).arrayBuffer());
+      const j = await queue({ do: "task_file", name: f.name, data: b64(piece), more: at > 0 });
+      ok = !!j;
+      at += step;
+    } while (ok && at < f.size);
+    if (!ok) break;
+  }
+  upBusy = "";
+  act({ do: "tasks" });
+});
+document.addEventListener("click", (e) => {
+  const t = e.target.closest ? e.target.closest("[data-taskfiles],[data-taskfiledrop]") : null;
+  if (!t) return;
+  if (t.dataset.taskfiles) upInput.click();
+  else act({ do: "task_file_drop", name: t.dataset.taskfiledrop });
 });
 document.addEventListener("submit", (e) => {
   if (e.target.id === "newtask") {

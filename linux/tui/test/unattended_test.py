@@ -101,7 +101,9 @@ def main():
     try:
         serve()
         # Done by itself.
-        tid, p = start("task 6", "--steps", "40", "--hours", "1")
+        with open(os.path.join(top, "notes.txt"), "w") as f:
+            f.write("a file given with the task\n")
+        tid, p = start("task 6", "--steps", "40", "--hours", "1", "--file", os.path.join(top, "notes.txt"))
         check(p.returncode == 0 and tid, "ts5-tui --task prints the task's id and returns at once", (p.stdout, p.stderr))
         j = wait_end(tid)
         check(j.get("state") == "done", "it ends by itself: done", j)
@@ -117,6 +119,15 @@ def main():
         check(kinds.count("call") == 6 and kinds.count("result") == 6 and "answer" in kinds and "user" in kinds,
               "the log has the request, every call, every result and the answers", kinds)
         check(j.get("answer", "") != "" and j.get("chat_id", "") != "", "its last answer and its chat are kept", j)
+        given = os.path.join(proj, "task-files", tid, "notes.txt")
+        check(j.get("files") == ["notes.txt"] and os.path.exists(given) and "given with" in open(given).read(),
+              "--file: its copy is in task-files/ID in the folder", (j.get("files"), given))
+        first = next((x.get("content", "") for x in log(tid) if x.get("kind") == "user"), "")
+        check("task-files/" + tid in first and "notes.txt" in first and "40 steps" in first and "1 hour" in first,
+              "the model is told its files and its budget", first[-900:])
+        users = [x.get("content", "") for x in log(tid) if x.get("kind") == "user"]
+        check(j.get("checks") == 1 and any("a check before this task counts as done" in u for u in users),
+              "its first answer is checked once before it counts as done", (j.get("checks"), [u[:60] for u in users]))
         chat = os.path.join(home, ".local", "share", "tokenstation", "chats", j.get("chat_id", "x") + ".json")
         check(os.path.exists(chat), "the task's chat is in the chat list", chat)
         p = tui_run("--tasks")
@@ -135,6 +146,10 @@ def main():
         tid, _ = start("loop", "--steps", "500", "--hours", "0.0011")
         j = wait_end(tid, 60)
         check(j.get("state") == "hours" and "hour" in j.get("why", ""), "out of time", j)
+        users = [x.get("content", "") for x in log(tid) if x.get("kind") == "user"]
+        check(any("the task ends here" in u for u in users) and j.get("answer", "") != "",
+              "cut off by its time, it is asked for a report without tools, and the report is kept",
+              ([u[:80] for u in users], j.get("answer", "")[:200]))
 
         # One at a time, and a stop.
         tid, _ = start("loop", "--steps", "500", "--hours", "1")
