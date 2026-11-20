@@ -1435,11 +1435,14 @@ bool push_pages(const WebOptions &o, const Server::Page &p, int fd) {
             send_error(fd, 403, "A notification is asked for with a key, or by this machine's ts5-tui.");
             return true;
         }
+        // "always": an unattended task's end (linux/tui/task.h), told
+        // whether the terminal is away or not, to every device.
+        const bool always = req["tell"]["always"].boolean(false);
         int badge = 0;
         {
             std::lock_guard<std::mutex> l(push_mu);
             PushUser &u = push_users[g.user];
-            if (term_away(o, u, g.user)) badge = ++u.unseen;
+            if (always || term_away(o, u, g.user)) badge = ++u.unseen;
         }
         if (badge > 0) {
             Json j = Json::object();
@@ -1451,12 +1454,12 @@ bool push_pages(const WebOptions &o, const Server::Page &p, int fd) {
             body = from == std::string::npos ? "The answer is ready." : body.substr(from);
             j.set("title", Json::string(cut_text(title.empty() ? std::string("ts5-tui") : title, 80)));
             j.set("body", Json::string(cut_text(body, 160)));
-            j.set("url", Json::string("/ts5/terminal"));
+            j.set("url", Json::string(always ? "/ts5/controls#tasks" : "/ts5/terminal"));
             j.set("badge", jnum(badge));
-            std::thread([o, user = g.user, payload = j.dump()] {
+            std::thread([o, user = g.user, payload = j.dump(), always] {
                 int sent = 0, devices = 0;
                 std::string why;
-                push_send_all(o, user, payload, "terminal", sent, devices, why);
+                push_send_all(o, user, payload, always ? "" : "terminal", sent, devices, why);
             }).detach();
         }
         Json out = Json::object();

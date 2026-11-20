@@ -83,6 +83,14 @@ struct Config {
     // the model is root and installs programs with apt; off: it sees this
     // machine's system, read-only.
     bool sandbox_box = true;
+    // The memory all the sandbox's programs may hold together (keep.h), in
+    // MiB; 0: no cap.
+    int sandbox_memory = 2048;
+    // An unattended task's limits (task.h): steps, hours, tokens the model
+    // writes (0: none).
+    int task_steps = 200;
+    double task_hours = 4;
+    long long task_tokens = 0;
     std::string browser = "auto";    // "auto", "obscura", "chromium", "text", or a browser program's path
     bool browser_offered = false;    // the offer to install one was answered (it is made once; /browser install after)
     // What a search without a web search key goes to: "web" (a regular

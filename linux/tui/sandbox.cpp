@@ -23,6 +23,7 @@
 #include <mutex>
 
 #include "app.h"
+#include "keep.h"
 #include "store.h"
 
 namespace tui {
@@ -200,6 +201,7 @@ std::string sandbox_dir_check(const std::string &dir_in, std::string &why) {
 }
 
 int sandbox_move(const std::string &from, const std::string &to, std::string &why) {
+    kept_end();  // (nothing may run in it meanwhile)
     if (real(from) == real(to)) return 1;
     if (!is_dir(from) || dir_empty(from)) {
         rmdir(from.c_str());  // an empty one left behind: gone (only ever an empty one)
@@ -382,6 +384,7 @@ unsigned long long sandbox_size() {
 }
 
 bool sandbox_reset(std::string &why) {
+    kept_end();  // (nothing may run in it meanwhile)
     const std::string toolbox = sandbox_home();
     if (!is_dir(toolbox)) return true;
     if (!empty_dir(toolbox, why)) return false;
@@ -696,12 +699,14 @@ unsigned long long box_size() {
 bool box_any() { return is_dir(box_root()); }
 
 int box_follow(const std::string &old_root, std::string &why) {
+    kept_end();  // (nothing may run in it meanwhile)
     const std::string to = box_root();
     if (old_root == to || !is_dir(old_root)) return 1;
     return sandbox_move(old_root, to, why);
 }
 
 bool box_reset(std::string &why) {
+    kept_end();  // (nothing may run in it meanwhile)
     {
         std::lock_guard<std::mutex> l(g_size_mu);
         g_size_at = -1e9;

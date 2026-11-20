@@ -669,11 +669,20 @@ ts5-tui --url http://ps5.local:8081  # another one
       mounted `noexec`). `/sandbox folder default` brings them back.
       While that drive isn't mounted, no command runs;
     - has the network (`/sandbox no-network` takes it away);
-    - sees only its own processes, and whatever it starts ends with it;
+    - sees only its own processes, and stays up between commands: a
+      server one command starts in the background
+      (`prog > /tmp/prog.log 2>&1 &`) is there for the next, until the
+      chat ends, ts5-tui quits or it sits unused for 30 minutes
+      (`TS5_SANDBOX_KEEP=0`: a sandbox of its own for each command);
+    - has a memory cap for all its programs together (Settings →
+      Sandbox memory, 2 GiB by default, `sandbox_memory` in MiB in
+      tui.conf): systemd's own limit where the user's systemd gives one,
+      else ts5-tui ends the biggest program past it, and the model is
+      told why;
     - is the first thing the kernel ends when memory runs out, before the
       model's server (also with the sandbox off).
 
-    It costs no memory of its own and starts in milliseconds. It shares
+    It costs no memory of its own (a shell) and starts in milliseconds. It shares
     the kernel with everything else, so it is a strong fence, not a second
     machine. `/sandbox` says where commands run and how big its system
     is; `/sandbox reset` says what there is to remove (`reset box`,
@@ -695,6 +704,33 @@ ts5-tui --url http://ps5.local:8081  # another one
     need nothing. `ts5-tui --run-command 'ls ~'` runs one command the way
     the model's do and prints what the model would get back
     (`--sandbox box`, `plain`, `no-network` or `off` for that command).
+  - **Unattended tasks** (`/task GOAL`, or `ts5-tui --task 'GOAL'` from a
+    shell): the model works on GOAL by itself, for hours, with nobody
+    asked anything, in a program of its own that keeps going when
+    ts5-tui closes and waits for the model's server when it starts again.
+    It works in the folder it was started in, in the sandbox only (no task
+    starts without it): its commands run there without asking; a button or
+    typing on a web page, a change on GitHub, the file tools and outside
+    tools are refused. It ends when the model answers, when it goes in
+    circles, at its limits (200 steps, 4 hours, no token limit by default:
+    `task_steps`, `task_hours`, `task_tokens` in tui.conf, or `--steps`,
+    `--hours`, `--tokens`), or on `/task stop` (`ts5-tui --task-stop ID`).
+    One at a time. A model ts5-tui loaded stays loaded for a running task
+    when ts5-tui quits, and is unloaded when the task ends (unless Settings
+    → When you quit keeps it). `/task` and `ts5-tui --tasks` list them (with the
+    running one's latest steps); the bar shows ⚙ task while one runs, and
+    `/task open` opens its chat, which follows the task as it goes and
+    takes no messages. Each
+    keeps its whole log for good in
+    `~/.local/share/tokenstation/tasks/<id>/`: `task.json`, `log.jsonl`
+    (every turn, call, result, set of notes and refusal), `commands/N.txt`
+    (each command's whole output) and `runner.log`; its chat is in the
+    chat list. `--file PATH` gives a task a copy of a file (in
+    `task-files/<id>/`). The model is told its budget, checks its work once
+    before it counts as done, and writes a report when a limit cuts it off.
+    On the phone, Controls → Tasks (with Add files) shows the running task with
+    its latest steps, stops it and starts a new one, and every task's end
+    comes as a notification.
   - **Browser** (on; Settings → Tool: browser, or `/tools browser off`,
     switches it off): the model opens a page and gets it as text with
     every link, text box and button numbered (`the Volga[3]`,

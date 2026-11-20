@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 failed = 0
 
@@ -117,21 +118,61 @@ def main():
         parts = out.split("exit code 0\n", 1)[-1].split("---\n")
         dns = os.path.realpath("/etc/resolv.conf")
         in_run = {dns.split("/")[2]} if dns.startswith("/run/") else set()
-        check(set(parts[0].split()) <= in_run and parts[1].strip() == os.path.basename(top) and parts[2].strip() == "",
+        # (/run/ts5-keep: ts5-tui's own shell in the sandbox that stays up, its pipes and the commands.)
+        check(set(parts[0].split()) <= in_run | {"ts5-keep"} and parts[1].strip() == os.path.basename(top) and parts[2].strip() == "",
               "no sockets in /run (but the way to the name servers' file), nothing of /tmp, no other home folders", out)
         if in_run:
-            out, _, _ = run("find /run -mindepth 1 | sort; cat /etc/resolv.conf > /dev/null && echo dns-ok")
+            out, _, _ = run("find /run -mindepth 1 | grep -v '^/run/ts5-keep' | sort; cat /etc/resolv.conf > /dev/null && echo dns-ok")
             bits = dns.split("/")
             want = sorted("/".join(bits[:k]) for k in range(3, len(bits) + 1)) + ["dns-ok"]
             check(out.split("exit code 0\n", 1)[-1].split() == want, "  (in /run only " + dns + ", and it can be read)", out)
         out, _, _ = run("cat /proc/self/oom_score_adj; ps -e | wc -l")
         lines = out.split("\n")
         check(lines[2] == "1000", "when memory runs out the kernel ends it first", out)
-        check(int(lines[3].strip()) <= 5, "it sees its own processes only", out)
+        # (bwrap, ts5-tui's shell in it and its part for this command, the command, ps and wc.)
+        check(int(lines[3].strip()) <= 8, "it sees its own processes only", out)
 
         out, _, _ = run("sleep 41.375 & echo started")
         left = subprocess.run(["pgrep", "-f", "sleep 41.375"], capture_output=True, text=True).stdout
-        check("started" in out and left.strip() == "", "a program it starts ends with it", left)
+        check("started" in out and left.strip() == "", "a program it starts ends with ts5-tui", left)
+
+        # The sandbox stays up between commands (keep.h): what one starts is
+        # there for the next, and goes when ts5-tui does.
+        def run_many(cmds, more_env=None):
+            e = dict(env)
+            e.update(more_env or {})
+            a = [tui]
+            for c in cmds:
+                a += ["--run-command", c]
+            p = subprocess.run(a, cwd=proj, env=e, capture_output=True, text=True, timeout=120)
+            return p.stdout.split("=====\n"), p.returncode
+
+        serve = "python3 -m http.server %d --bind 127.0.0.1 > /tmp/srv.log 2>&1 & sleep 1; echo served"
+        ask = ("python3 -c \"import urllib.request; print('status', urllib.request.urlopen('http://127.0.0.1:%d/')"
+               ".status)\" 2>&1 | tail -1")
+        outs, _ = run_many([serve % 18731, ask % 18731, "cat /tmp/srv.log | wc -l"])
+        check(len(outs) == 3 and "something it started still runs" in outs[0] and "for the next commands" in outs[0],
+              "a server started in the background: the model is told it stays up", outs)
+        check(len(outs) == 3 and "status 200" in outs[1], "the next command reaches it", outs)
+        check(len(outs) == 3 and "exit 0" in outs[2], "and /tmp is the same between commands", outs)
+        time.sleep(0.5)
+        left = subprocess.run(["pgrep", "-f", "http.server 18731"], capture_output=True, text=True).stdout
+        check(left.strip() == "", "it ended with ts5-tui", left)
+        outs, _ = run_many([serve % 18732, ask % 18732], {"TS5_SANDBOX_KEEP": "0"})
+        check(len(outs) == 2 and "status 200" not in outs[1], "TS5_SANDBOX_KEEP=0: a sandbox of its own for each command", outs)
+        outs, _ = run_many(["echo a; sleep 20; echo b", "echo after"], {"TS5_TUI_COMMAND_SECONDS": "2"})
+        check(len(outs) == 2 and "stopped after 2 s" in outs[0] and "\nb\n" not in outs[0] and "after" in outs[1],
+              "a command past its time limit is stopped, and the sandbox goes on", outs)
+        os.makedirs(os.path.join(home, ".config", "tokenstation"), exist_ok=True)
+        with open(os.path.join(home, ".config", "tokenstation", "tui.conf"), "w") as f:
+            f.write("sandbox=1\nsandbox_memory=256\n")
+        hog = ("python3 -c \"import time\na=[]\nfor i in range(30):\n    a.append(bytearray(40<<20)); time.sleep(0.1)\n"
+               "print('survived')\"")
+        outs, _ = run_many([hog, "echo next"], {"TS5_SANDBOX_CGROUP": "0"})
+        check(len(outs) == 2 and "\nsurvived\n" not in outs[0] and "past its memory cap of 256 MiB" in outs[0],
+              "sandbox_memory=256: a program past the cap is ended, and the model is told why", outs)
+        check(len(outs) == 2 and "next" in outs[1], "(the next command runs)", outs)
+        os.remove(os.path.join(home, ".config", "tokenstation", "tui.conf"))
 
         # The network: a page served here.
         class Quiet(http.server.SimpleHTTPRequestHandler):

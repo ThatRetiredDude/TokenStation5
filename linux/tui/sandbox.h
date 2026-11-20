@@ -7,7 +7,7 @@
 // to DIR/tokenstation-sandbox, on another drive say. The one folder of the
 // user's it can change is the one ts5-tui was started in. Its environment
 // holds none of the user's variables (keys in them stay out), the network
-// is a switch, and what a command starts ends with it. Without bwrap, or where the
+// is a switch, and one sandbox stays up between commands (keep.h). Without bwrap, or where the
 // system doesn't let it run (Ubuntu 24.04 and later stop it with
 // AppArmor unless allowed), commands run as before, as the user, and
 // Settings says why.

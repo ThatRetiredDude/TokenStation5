@@ -121,6 +121,15 @@
   pre.report { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace;
     background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; max-height: 55vh; overflow: auto; margin: 0 0 12px; }
   [hidden] { display: none !important; }
+  /* Tasks: a running one's latest steps, an earlier one's answer. */
+  pre.tail { margin: 0; padding: 10px 12px; border-top: 1px solid var(--line); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; overflow-wrap: anywhere; color: var(--dim); max-height: 50vh; overflow-y: auto; }
+  .row .what span.ans { color: var(--fg); margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+  #newtask { border-top: none; flex-direction: column; }
+  #newtask .tbtns { display: flex; gap: 8px; justify-content: flex-end; }
+  #newtask .tfiles { display: flex; flex-wrap: wrap; gap: 6px; }
+  #newtask .tfile { font-size: 13px; padding: 3px 8px; border-radius: 10px; border: 1px solid var(--line, #8884); overflow-wrap: anywhere; }
+  #newtask .tfile .x { border: none; background: none; color: inherit; font-size: 15px; padding: 0 2px; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -132,6 +141,7 @@
     <button data-tab="machine">Machine</button>
     <button data-tab="settings">Settings</button>
     <button data-tab="users">Users</button>
+    <button data-tab="tasks">Tasks</button>
   </nav>
 </header>
 <main id="page"></main>
@@ -169,6 +179,7 @@ function n(v, d) { return v === null || v === undefined ? "–" : (d ? Number(v)
 
 async function send(req) {
   if (tab === "users" && req.users === undefined) req.users = true;
+  if (tab === "tasks" && req.tasks === undefined) req.tasks = true;
   const h = { "Content-Type": "application/json" };
   const k = store.get("ts5.key");
   if (k) h.Authorization = "Bearer " + k;
@@ -201,6 +212,7 @@ async function send(req) {
   if (typeof j.report === "string") { fbReport = j.report; delete j.report; }
   // The users stay as last read while a request without them is answered.
   if (!j.access && st && st.access && tab === "users") j.access = st.access;
+  if (!j.tasks && st && st.tasks && tab === "tasks") j.tasks = st.tasks;
   st = j;
   if (loadAsked && j.server && j.server.online && j.server.model === loadAsked.model && !j.loading) loadAsked = null;
   draw();
@@ -487,6 +499,48 @@ function userPage(u) {
   return h;
 }
 
+// Unattended tasks (ts5-tui's /task): the newest ten, the newest one's
+// latest steps, Stop, and a new one.
+let taskGoal = "";      // a new task's goal being typed (kept across redraws)
+let stopArmed = "";     // the task whose Stop was tapped once (a second tap stops it)
+function tasksPage() {
+  const k = st.tasks;
+  if (!k) return '<p class="note">Asking ts5-tui for the tasks…</p>';
+  const list = k.list || [], run = list.find((t) => t.running);
+  let h = "";
+  if (run) {
+    h += "<h2>Running</h2><div class=\"card\"><div class=\"row\"><div class=\"what\"><b>" + esc(run.goal) + "</b><span>" +
+      esc(run.words) + " · " + esc(run.progress) + '</span></div><button class="b bad" data-taskstop="' + esc(run.id) + '">' +
+      (stopArmed === run.id ? "Stop it?" : "Stop") + "</button></div>";
+    if ((k.tail || []).length)
+      h += '<pre class="tail">' + (k.tail || []).map(esc).join("\n") + "</pre>";
+    h += "</div>";
+  } else {
+    const lim = k.limits || {};
+    h += '<h2>New task</h2><div class="card"><form class="add" id="newtask"><textarea class="t" id="taskgoal" rows="3" ' +
+      'placeholder="What the model should do, by itself, in the sandbox" maxlength="4000">' + esc(taskGoal) +
+      '</textarea><div class="tfiles">' + (k.files || []).map((f) => '<span class="tfile">' + esc(f.name) + " · " + size(f.size) +
+        ' <button type="button" class="x" data-taskfiledrop="' + esc(f.name) + '" aria-label="Remove">×</button></span>').join("") +
+      (upBusy ? '<span class="tfile">' + esc(upBusy) + "</span>" : "") + "</div>" +
+      '<div class="tbtns"><button type="button" class="b" data-taskfiles="1"' + (upBusy ? " disabled" : "") +
+      '>Add files</button><button class="b go"' + (upBusy ? " disabled" : "") + '>Start</button></div></form><p class="note">' +
+      "Files you add go with the task (64 MB each at most): the model finds them in task-files. It runs in the folder ts5-tui was started in, " +
+      "until it is done or reaches " + n(lim.steps) + " steps or " + esc(lim.hours) + " hours" +
+      (lim.tokens ? " or " + n(lim.tokens) + " tokens" : "") + ". Nobody is asked anything; you get a notification when it ends.</p></div>";
+  }
+  const past = list.filter((t) => !t.running);
+  if (past.length) {
+    h += "<h2>Earlier</h2><div class=\"card\">";
+    for (const t of past)
+      h += '<div class="row"><div class="what"><b>' + esc(t.goal) + "</b><span>" + esc(t.words) + " · " + esc(t.progress) +
+        (t.answer ? "</span><span class=\"ans\">" + esc(t.answer) : "") + "</span></div></div>";
+    h += "</div>";
+  }
+  if (!run && past.length && (k.tail || []).length)
+    h += '<h2>The last one\'s last steps</h2><div class="card"><pre class="tail">' + (k.tail || []).map(esc).join("\n") + "</pre></div>";
+  return h;
+}
+
 // A QR code from its modules ("0"/"1" rows), with its quiet zone.
 function qrSvg(rows) {
   const n = rows.length, q = 4;
@@ -523,7 +577,8 @@ function draw() {
       (tab === "settings" ? devicePage()
         : problem ? '<p class="note">This device\'s own settings (notifications, the chat page\'s, the key) are under Settings.</p>' : "");
   } else {
-    $("page").innerHTML = tab === "machine" ? machinePage() : tab === "settings" ? settingsPage() : tab === "users" ? usersPage() : modelsPage();
+    $("page").innerHTML = tab === "machine" ? machinePage() : tab === "settings" ? settingsPage() : tab === "users" ? usersPage()
+      : tab === "tasks" ? tasksPage() : modelsPage();
   }
   drawAsk();
   drawKey();
@@ -553,6 +608,7 @@ document.addEventListener("click", (e) => {
   if (t.dataset.tab) {
     tab = t.dataset.tab; store.set("ts5.controls.tab", tab); editing = null; userOpen = null; keyFor = null; draw();
     if (tab === "users") act({ do: "users" });
+    if (tab === "tasks") act({ do: "tasks" });
     if (tab === "settings") notifRefresh();
     return;
   }
@@ -570,6 +626,13 @@ document.addEventListener("click", (e) => {
     return;
   }
   if (t.dataset.userrm !== undefined) { act({ do: "user_remove", id: t.dataset.userrm }); return; }
+  if (t.dataset.taskstop !== undefined) {
+    if (stopArmed !== t.dataset.taskstop) {
+      stopArmed = t.dataset.taskstop; draw();
+      setTimeout(() => { stopArmed = ""; draw(); }, 4000);
+    } else { stopArmed = ""; act({ do: "task_stop", id: t.dataset.taskstop }); }
+    return;
+  }
   if (t.dataset.keyon !== undefined) { act({ do: "key_on", id: t.dataset.keyon, on: t.dataset.on === "1" }); return; }
   if (t.dataset.keyrm !== undefined) { act({ do: "key_remove", id: t.dataset.keyrm }); return; }
   if (t.dataset.code !== undefined) { madeSel = +t.dataset.code; drawKey(); return; }
@@ -637,7 +700,58 @@ document.addEventListener("click", (e) => {
     act(req);
   }
 });
+// Files for the next task: read here and handed to ts5-tui a piece at a
+// time (256 KiB), which keeps them until the task starts.
+let upBusy = "";
+const upInput = document.createElement("input");
+upInput.type = "file";
+upInput.multiple = true;
+upInput.style.display = "none";
+document.body.appendChild(upInput);
+function size(b) {
+  return b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : b >= 1024 ? Math.round(b / 1024) + " KB" : b + " B";
+}
+function b64(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+upInput.addEventListener("change", async () => {
+  const files = Array.from(upInput.files || []);
+  upInput.value = "";
+  for (const f of files) {
+    if (f.size > 64 * 1048576) { toast(f.name + " is over 64 MB"); continue; }
+    const step = 262144;
+    let at = 0, ok = true;
+    do {
+      upBusy = "Sending " + f.name + (f.size > step ? " · " + Math.round(100 * at / f.size) + "%" : "") + "…";
+      draw();
+      const piece = new Uint8Array(await f.slice(at, at + step).arrayBuffer());
+      const j = await queue({ do: "task_file", name: f.name, data: b64(piece), more: at > 0 });
+      ok = !!j;
+      at += step;
+    } while (ok && at < f.size);
+    if (!ok) break;
+  }
+  upBusy = "";
+  act({ do: "tasks" });
+});
+document.addEventListener("click", (e) => {
+  const t = e.target.closest ? e.target.closest("[data-taskfiles],[data-taskfiledrop]") : null;
+  if (!t) return;
+  if (t.dataset.taskfiles) upInput.click();
+  else act({ do: "task_file_drop", name: t.dataset.taskfiledrop });
+});
 document.addEventListener("submit", (e) => {
+  if (e.target.id === "newtask") {
+    e.preventDefault();
+    const v = taskGoal.trim();
+    document.activeElement.blur();
+    if (!v) { toast("Write what the task is first"); return; }
+    taskGoal = "";
+    act({ do: "task_start", goal: v });
+    return;
+  }
   if (e.target.id === "adduser" || e.target.dataset.keyfor !== undefined) {
     e.preventDefault();
     const f = e.target, v = f.elements.v.value.trim();
@@ -657,7 +771,10 @@ document.addEventListener("submit", (e) => {
 });
 
 // What is written for /feedback, kept as it is typed (a redraw keeps it).
-document.addEventListener("input", (e) => { if (e.target.id === "fbtext") fb.text = e.target.value; });
+document.addEventListener("input", (e) => {
+  if (e.target.id === "fbtext") fb.text = e.target.value;
+  if (e.target.id === "taskgoal") taskGoal = e.target.value;
+});
 document.addEventListener("change", (e) => {
   if (e.target.id === "fblogs") fb.logs = e.target.checked;
   if (e.target.id === "fbchat") fb.chat = e.target.checked;
@@ -690,7 +807,9 @@ document.addEventListener("visibilitychange", () => {
 if (!store.get("ts5.key") && location.hostname !== "127.0.0.1" && location.hostname !== "localhost") {
   problem = "No key in this browser yet: open the chat page and sign in with your key, then come back.";
 }
-if (!["models", "machine", "settings", "users"].includes(tab)) tab = "models";
+// A task's notification opens Tasks.
+if (location.hash === "#tasks") tab = "tasks";
+if (!["models", "machine", "settings", "users", "tasks"].includes(tab)) tab = "models";
 draw();
 poll();
 notifRefresh();
