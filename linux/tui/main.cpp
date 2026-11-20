@@ -7461,6 +7461,49 @@ bool control_users(const std::string &what, const ts5::Json &req, ts5::Json &ext
     return true;
 }
 
+// The tasks for the phone's Controls: the newest ten, and the newest one's
+// latest steps (the running one's while one runs).
+ts5::Json control_tasks() {
+    using ts5::Json;
+    auto jn = [](double v) {
+        Json j;
+        j.type = Json::NUM;
+        j.n = v;
+        j.s = fmt("%.0f", v);
+        return j;
+    };
+    Json arr;
+    arr.type = Json::ARR;
+    const std::vector<TaskInfo> all = task_list();
+    for (size_t i = 0; i < all.size() && i < 10; i++) {
+        const TaskInfo &t = all[i];
+        Json x = Json::object();
+        x.set("id", Json::string(t.id));
+        x.set("goal", Json::string(t.goal.substr(0, 400)));
+        x.set("state", Json::string(t.state));
+        x.set("words", Json::string(task_state_words(t)));
+        x.set("progress", Json::string(task_progress(t)));
+        x.set("running", Json::string(t.ended_state() ? "" : "yes"));
+        x.set("answer", Json::string(t.answer.substr(0, 1500)));
+        x.set("started", jn(t.started));
+        x.set("ended", jn(t.ended));
+        arr.a.push_back(x);
+    }
+    Json out = Json::object();
+    out.set("list", arr);
+    Json tail;
+    tail.type = Json::ARR;
+    if (!all.empty())
+        for (const std::string &l : task_tail(all[0].id, 30)) tail.a.push_back(Json::string(l));
+    out.set("tail", tail);
+    Json lim = Json::object();
+    lim.set("steps", jn(g->cfg.task_steps));
+    lim.set("hours", jn(g->cfg.task_hours));
+    lim.set("tokens", jn((double)g->cfg.task_tokens));
+    out.set("limits", lim);
+    return out;
+}
+
 std::string control_answer(const std::string &text) {
     using ts5::Json;
     Json req, out, extra = Json::object();
@@ -7632,6 +7675,28 @@ std::string control_answer(const std::string &text) {
     } else if (what == "users" || what.rfind("user_", 0) == 0 || what.rfind("key_", 0) == 0) {
         std::string why;
         if (!control_users(what, req, extra, why)) return refuse(why);
+    } else if (what == "tasks") {
+    } else if (what == "task_stop") {
+        std::string why;
+        TaskInfo t;
+        const std::string id = req["id"].str().empty() && task_running(&t) ? t.id : req["id"].str();
+        if (id.empty()) return refuse("no task is running");
+        if (!task_stop(id, why)) return refuse(why);
+        show_toast("The task is stopping (from the phone)", g->th->accent, 5);
+    } else if (what == "task_start") {
+        // From the phone: in the folder ts5-tui was started in, with the
+        // limits it was given or Settings' own.
+        std::string why;
+        TaskLimits l = task_limits();
+        if (req["steps"].num(0) >= 1) l.steps = (int)req["steps"].num(0);
+        if (req["hours"].num(0) > 0) l.hours = req["hours"].num(0);
+        if (req["tokens"].num(-1) >= 0) l.tokens = (long long)req["tokens"].num(0);
+        char cwd[4096];
+        task_env();
+        const std::string id = task_start(self_path(), req["goal"].str(), getcwd(cwd, sizeof cwd) ? cwd : ".", l, why);
+        if (id.empty()) return refuse(why);
+        show_toast("A task was started from the phone: /task shows it", g->th->accent, 6);
+        g->task_seen = 0;
     } else {
         return refuse("unknown: " + what);
     }
@@ -7644,6 +7709,8 @@ std::string control_answer(const std::string &text) {
         if (now_s() - g->acc_at > 2) access_read();
         out.set("access", control_access());
     }
+    // The tasks, when asked for (the Tasks part of Controls) and with every task action.
+    if (req["tasks"].boolean(false) || what.rfind("task", 0) == 0) out.set("tasks", control_tasks());
     // What the action itself said (a toast it showed), if anything new.
     if (g->toast != toast_before || g->toast_until != toast_until_before) out.set("said", Json::string(g->toast));
     // Drawn again after a request that did something; not for the phone's
@@ -7713,6 +7780,8 @@ void chat_follow_file(bool at_once = false) {
 // the background, or closed), and does nothing otherwise
 // (engine/src/web_serve.cpp, POST /ts5/push {"tell"}; another server
 // answers 404, and that's all).
+void tell_phone(const std::string &title, const std::string &body, bool always, bool wait = false);
+
 void tell_answer_end() {
     const Endpoint ep = endpoint();
     if (!ep.local()) return;  // the chat's words go only to this machine's own TokenStation
@@ -7742,16 +7811,32 @@ void tell_answer_end() {
         while (n > 0 && ((unsigned char)t[n] & 0xC0) == 0x80) n--;
         return t.substr(0, n);
     };
+    tell_phone(cut(title, 120), cut(body, 400), false);
+}
+
+// title and body to the owner's phone through this machine's server (POST
+// /ts5/push {"tell"}): while their browser terminal is away, or always (an
+// unattended task's end). wait: here, not in a thread of its own (a task's
+// program ends right after).
+void tell_phone(const std::string &title, const std::string &body, bool always, bool wait) {
+    const Endpoint ep = endpoint();
+    if (!ep.local()) return;
     ts5::Json tell = ts5::Json::object();
-    tell.set("title", ts5::Json::string(cut(title, 120)));
-    tell.set("body", ts5::Json::string(cut(body, 400)));
+    tell.set("title", ts5::Json::string(title));
+    tell.set("body", ts5::Json::string(body));
+    if (always) {
+        ts5::Json t;
+        t.type = ts5::Json::BOOL;
+        t.b = true;
+        tell.set("always", t);
+    }
     // Asked with the server's word for its ts5-tui, which only this user
     // reads: the server ts5-tui starts keeps it in the data folder, the
     // background service in /run/tokenstation for its group. (Without it
     // any program on this machine could put words on the owner's phone.)
     std::string run = control_shared_path();
     run = run.substr(0, run.rfind('/'));
-    std::thread([ep, tell, files = std::vector<std::string>{data_dir() + "/tell.key", run + "/tell.key"}] {
+    auto send = [ep, tell, files = std::vector<std::string>{data_dir() + "/tell.key", run + "/tell.key"}] {
         for (const std::string &file : files) {
             std::string secret = read_file(file);
             while (!secret.empty() && isspace((unsigned char)secret.back())) secret.pop_back();
@@ -7761,7 +7846,9 @@ void tell_answer_end() {
             j.set("secret", ts5::Json::string(secret));
             if (http(ep, "POST", "/ts5/push", j.dump(), 3000).status != 403) break;  // (403: another server's word)
         }
-    }).detach();
+    };
+    if (wait) send();
+    else std::thread(send).detach();
 }
 
 void tick() {
@@ -8432,7 +8519,13 @@ int main(int argc, char **argv) {
             why = sv.why.empty() ? "no model is loaded" : sv.why;
             return chat_request();
         };
-        h.ended = [](const TaskInfo &) {
+        h.ended = [](const TaskInfo &t) {
+            // To the owner's phone, whatever the terminal does.
+            std::string title = "Task " + task_state_words(t);
+            std::string goal = t.goal.substr(0, 80);
+            for (char &ch : goal)
+                if (ch == '\n') ch = ' ';
+            tell_phone(title.substr(0, 100), goal + (t.answer.empty() ? "" : ": " + t.answer.substr(0, 300)), true, true);
             // The model ts5-tui loaded stayed for the task: it goes now,
             // unless ts5-tui is open again or Settings keeps it.
             const pid_t own = own_server_pid();

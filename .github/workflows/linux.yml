@@ -385,6 +385,8 @@ jobs:
           export NODE_PATH=/tmp/pw/node_modules
           export CHROME=$(command -v google-chrome chromium chromium-browser | head -1)
           python3 linux/tui/test/controls_test.py "$(command -v ts5-tui)" "$(command -v ts5)" /tmp/model/test.gguf
+      - name: Tasks from the phone (/ts5/control tasks, task_start, task_stop through a real server; the notification at a task's end)
+        run: python3 linux/tui/test/tasks_phone_test.py "$(command -v ts5-tui)" "$(command -v ts5)" /tmp/model/test.gguf
       - name: Outside tools (ts5-tui --mcp against an MCP server served here, no model)
         run: python3 linux/tui/test/mcp_test.py "$(command -v ts5-tui)"
       - name: The steps a message gets (ts5-tui in tmux against the stand-in server; the question, repeats, the last turn's prompt)

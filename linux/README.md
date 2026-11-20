@@ -725,7 +725,9 @@ ts5-tui --url http://ps5.local:8081  # another one
     `~/.local/share/tokenstation/tasks/<id>/`: `task.json`, `log.jsonl`
     (every turn, call, result, set of notes and refusal), `commands/N.txt`
     (each command's whole output) and `runner.log`; its chat is in the
-    chat list.
+    chat list. On the phone, Controls → Tasks shows the running task with
+    its latest steps, stops it and starts a new one, and every task's end
+    comes as a notification.
   - **Browser** (on; Settings → Tool: browser, or `/tools browser off`,
     switches it off): the model opens a page and gets it as text with
     every link, text box and button numbered (`the Volga[3]`,
