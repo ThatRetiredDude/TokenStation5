@@ -406,7 +406,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         P.sh = &sh;
         const size_t nb = sh.cols / 256, row_bytes = nb * 144, bytes = row_bytes * sh.rows;
         std::string err;
-        if (!gfx10::assemble(gen((int)sh.cols, "", 0, 1), P.k, &err)) return die("mv_q4k: " + err);
+        if (!gfx10::assemble(gen((int)sh.cols, "", 0, 1, !v2), P.k, &err)) return die("mv_q4k: " + err);
         size_t cb = (P.k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, P.code) || !dev.alloc(cb * 2, kfd::Mem::Gtt, P.dcode) ||
             !dev.alloc((size_t)dev.cu_count() * per_cu * 8 * 16, kfd::Mem::Gtt, P.ts)) return die(dev.err());
@@ -468,12 +468,14 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
             s.dispatch(ck, ccode.gpu, args, 5, g, t);
             if (!run(s, &gs)) return die(dev.err() + " (copying to VRAM)");
         }
-        const uint32_t wgs = dev.cu_count() * per_cu, per = (sh.rows + wgs - 1) / wgs;
+        // per: rows per workgroup for the sliced variants; step: the row step
+        // the round-robin default gets in the same argument.
+        const uint32_t wgs = dev.cu_count() * per_cu, per = (sh.rows + wgs - 1) / wgs, step = v2 ? per : wgs * 8;
         auto mv = [&](const kfd::Buffer& w, double* t_s) -> bool {
             std::memset(P.yb.cpu, 0xff, sh.rows * 4);
             pm4::Stream s;
             uint32_t args[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)P.xb.gpu, (uint32_t)(P.xb.gpu >> 32),
-                                 (uint32_t)P.yb.gpu, (uint32_t)(P.yb.gpu >> 32), sh.rows, sh.cols, per, 0};
+                                 (uint32_t)P.yb.gpu, (uint32_t)(P.yb.gpu >> 32), sh.rows, sh.cols, step, 0};
             uint32_t g[3] = {wgs, 1, 1}, t[3] = {256, 1, 1};
             s.dispatch(k, P.code.gpu, args, 10, g, t);
             return run(s, t_s);
@@ -488,7 +490,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
             pm4::Stream s;
             uint32_t args[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)P.xb.gpu, (uint32_t)(P.xb.gpu >> 32),
                                  (uint32_t)P.yb.gpu, (uint32_t)(P.yb.gpu >> 32), sh.rows, (uint32_t)P.ts.gpu,
-                                 rows_arg ? rows_arg : per, (uint32_t)(P.ts.gpu >> 32)};
+                                 rows_arg ? rows_arg : step, (uint32_t)(P.ts.gpu >> 32)};
             uint32_t g[3] = {wgs, 1, 1}, t[3] = {256, 1, 1};
             for (int i = 0; i < n; i++) {
                 if (i) s.wait_kernels();
@@ -542,20 +544,27 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         }
         std::sort(st.begin(), st.end());
         double e_steady = check("steady");
-        std::printf("%-30s %6.1f %9.2e  %6.1f / %6.1f / %6.1f  %8.1f   steady %6.1f GB/s, %7.1f us  (err %.2e)\n", sh.name, bytes / 1e6, e,
-                    r.back(), med, r.front(), bytes / med / 1e3, bytes / st[1] / 1e9, st[1] * 1e6, e_steady);
+        std::vector<double> st20;
+        for (int i = 0; i < 3; i++) {
+            if (!batch(k, P.code.gpu, P.wv, 20, &per_s)) return die(dev.err() + " (steady 20)");
+            st20.push_back(per_s);
+        }
+        std::sort(st20.begin(), st20.end());
+        std::printf("%-30s %6.1f %9.2e  %6.1f / %6.1f / %6.1f  %8.1f   steady %6.1f GB/s, %7.1f us  (err %.2e); batches of 20: %7.1f us\n", sh.name, bytes / 1e6, e,
+                    r.back(), med, r.front(), bytes / med / 1e3, bytes / st[1] / 1e9, st[1] * 1e6, e_steady, st20[1] * 1e6);
         std::fflush(stdout);
         // diag: the same kernel with parts left out (results not checked),
         // then with 1 and 3 steps of loads in flight (results checked).
-        for (int d = 1; diag && d < 22; d++) {
+        for (int d = 1; diag && d < 23; d++) {
             // 1-7: parts left out; 8: timestamps; 9: timestamps, nothing but the frame; 10, 11: 2 and 3 steps in
             // flight; 12, 13: loads only with 2 and 3 steps in flight; 14-17 rows dealt round-robin: full,
             // loads only, full with 2 steps, timestamps
             // 18-21: cache hints on the weight loads: slc dlc (the old default) and glc dlc, full and loads only
             const bool inter = d >= 14 && d <= 17;
-            const char* hints = d == 18 || d == 19 ? "slc dlc" : d >= 20 ? "glc dlc" : "";
+            const char* hints = d == 18 || d == 19 ? "slc dlc" : d == 20 || d == 21 ? "glc dlc" : "";
             const int mode = d <= 8 ? d : d == 9 ? 15 : d == 12 || d == 13 || d == 15 || d == 19 || d == 21 ? 3 : d == 17 ? 8 : 0;
             const int depth = d == 10 || d == 12 || d == 16 ? 2 : d == 11 || d == 13 ? 3 : 1;
+            // 22: sliced rows, 1 step, full (the default before round 19)
             const uint32_t dper = inter ? wgs * 8 : per;
             gfx10::Kernel dk;
             std::string err;
@@ -572,7 +581,8 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
             }
             std::sort(dt.begin(), dt.end());
             if (inter) std::printf("    [rows round-robin]");
-            if (d >= 18) std::printf("    [hints \"%s\"]", hints);
+            if (d >= 18 && d <= 21) std::printf("    [hints \"%s\"]", hints);
+            if (d == 22) std::printf("    [rows sliced]");
             if (mode & 8) {   // the last run's wave records (shader clock, HW_ID1)
                 const uint32_t* T = (const uint32_t*)P.ts.cpu;
                 const uint32_t nw = wgs * 8;
@@ -606,7 +616,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
                 std::printf("    without%s%s%s, %d step(s) in flight: %8.1f us median\n", mode & 1 ? " math" : "", mode & 2 ? " lds-reads" : "",
                             mode & 4 ? " weight-loads" : "", depth, dt[dt.size() / 2]);
             else {
-                double e2 = check(inter ? "round-robin" : d >= 18 ? "hints" : depth == 2 ? "depth 2" : "depth 3");
+                double e2 = check(inter ? "round-robin" : d == 22 ? "sliced" : d >= 18 ? "hints" : depth == 2 ? "depth 2" : "depth 3");
                 std::printf("    %d steps in flight: %8.1f us median, %6.1f GB/s, err %.2e\n", depth, dt[dt.size() / 2],
                             bytes / dt[dt.size() / 2] / 1e3, e2);
             }
