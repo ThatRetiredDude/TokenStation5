@@ -2,8 +2,8 @@
 //   ts5-direct info              what the kernel reports about the GPU
 //   ts5-direct fill              smoke test: a kernel fills a buffer, the CPU checks it
 //   ts5-direct read-bw [MiB]     read bandwidth on the direct path (default 1024 MiB)
-//   ts5-direct bw-sweep [MiB]    read bandwidth over memory kinds, loads in flight, cache hints,
-//                                wave size and workgroup counts
+//   ts5-direct bw-sweep [MiB] [wave64]   read bandwidth over memory kinds, loads in flight,
+//                                cache hints and workgroup counts (wave64 adds wave64 rows)
 // Kernels are assembled at start from the text built into the program.
 #include <algorithm>
 #include <chrono>
@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "gfx10_asm.h"
 #include "kernels.h"   // generated: kernel sources as strings
@@ -86,7 +87,7 @@ const char* mem_name(kfd::Mem m) {
 // Read bandwidth over memory kinds, loads in flight, cache hints, wave size
 // and workgroup counts. The source is filled on the GPU with a constant, so
 // every thread's sum is known and checked.
-int cmd_bw_sweep(kfd::Device& dev, size_t mib) {
+int cmd_bw_sweep(kfd::Device& dev, size_t mib, bool wave64) {
     if (!dev.create_queue()) return die(dev.err());
     gfx10::Kernel fk;
     kfd::Buffer fcode;
@@ -109,7 +110,7 @@ int cmd_bw_sweep(kfd::Device& dev, size_t mib) {
     double best_all = 0;
     std::string best_cfg;
     std::printf("mem     wave  loads hints        wgs    GB/s   check\n");
-    for (kfd::Mem m : {kfd::Mem::Gtt, kfd::Mem::GttUncached, kfd::Mem::Vram}) {
+    for (kfd::Mem m : {kfd::Mem::Vram, kfd::Mem::GttUncached, kfd::Mem::Gtt}) {
         kfd::Buffer src, out;
         if (!dev.alloc(bytes, m, src)) {
             std::printf("%-7s (can't allocate: %s)\n", mem_name(m), dev.err().c_str());
@@ -126,10 +127,15 @@ int cmd_bw_sweep(kfd::Device& dev, size_t mib) {
             if (!run(s, &gs)) return die(dev.err());
             std::printf("%-7s fill %.1f MiB: %.1f GB/s write\n", mem_name(m), bytes / 1048576.0, bytes / gs / 1e9);
         }
-        for (bool w64 : {false, true})
-            for (int n : {4, 8, 16})
-                for (const char* h : {"", "slc", "glc slc dlc"})
-                    for (int per_cu : {8, 32, 128}) {
+        // Round 1 (2026-11-24): the cache hints and loads in flight mattered
+        // most, and fewer workgroups did better; wave64 hung once at 5120
+        // workgroups, so it's only swept when asked for.
+        std::vector<bool> waves = {false};
+        if (wave64) waves.push_back(true);
+        for (bool w64 : waves)
+            for (int n : {2, 4, 8})
+                for (const char* h : {"glc slc dlc", "glc dlc", "slc dlc", "glc slc"})
+                    for (int per_cu : {2, 4, 8, 16}) {
                         gfx10::Kernel k;
                         kfd::Buffer code;
                         std::string err;
@@ -283,13 +289,13 @@ int main(int argc, char** argv) {
                         gfx10::pgm_rsrc2(k));
         }
         for (bool w64 : {false, true})
-            for (int n : {4, 8, 16})
-                for (const char* h : {"", "slc", "glc slc dlc"}) {
+            for (int n : {2, 4, 8, 16})
+                for (const char* h : {"", "slc", "glc slc dlc", "glc dlc", "slc dlc", "glc slc"}) {
                     gfx10::Kernel k;
                     std::string err;
                     if (!gfx10::assemble(gen_read_kernel(n, h, w64), k, &err)) return die("read_gen: " + err);
                 }
-        std::printf("read_gen: 18 variants ok\n");
+        std::printf("read_gen: 48 variants ok\n");
         return 0;
     }
     kfd::Device dev;
@@ -297,6 +303,7 @@ int main(int argc, char** argv) {
     if (cmd == "info") return cmd_info(dev);
     if (cmd == "fill") return cmd_fill(dev);
     if (cmd == "read-bw") return cmd_read_bw(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024);
-    if (cmd == "bw-sweep") return cmd_bw_sweep(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024);
+    if (cmd == "bw-sweep")
+        return cmd_bw_sweep(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024, argc > 3 && std::string(argv[3]) == "wave64");
     return die("unknown command " + cmd + " (info, fill, read-bw [MiB], bw-sweep [MiB])");
 }
