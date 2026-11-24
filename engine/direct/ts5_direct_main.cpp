@@ -348,7 +348,7 @@ void q4k_scale_min(int j, const uint8_t* q, int& sc, int& m) {
 // Q4_K mat-vec (mv_q4k.h) on the shapes of Qwen3 8B's Q4_K matrices: random
 // blocks and x, the GPU's y checked against a CPU sum in double, then timed
 // one dispatch at a time with the matrix in VRAM.
-int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu) {
+int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
     if (!dev.create_queue()) return die(dev.err());
     gfx10::Kernel ck;
     kfd::Buffer ccode;
@@ -380,7 +380,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu) {
     struct Prep {
         const Shape* sh;
         gfx10::Kernel k;
-        kfd::Buffer code, wh, wv, xb, yb;
+        kfd::Buffer code, dcode, wh, wv, xb, yb;
         std::vector<double> ref, mag;
     };
     std::vector<Prep> preps(sizeof(shapes) / sizeof(shapes[0]));
@@ -392,7 +392,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu) {
         std::string err;
         if (!gfx10::assemble(ts5::direct::gen_mv_q4k((int)sh.cols), P.k, &err)) return die("mv_q4k: " + err);
         size_t cb = (P.k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
-        if (!dev.alloc(cb, kfd::Mem::Gtt, P.code)) return die(dev.err());
+        if (!dev.alloc(cb, kfd::Mem::Gtt, P.code) || !dev.alloc(cb, kfd::Mem::Gtt, P.dcode)) return die(dev.err());
         for (size_t i = 0; i < cb / 4; i++) ((uint32_t*)P.code.cpu)[i] = 0xbf9f0000;
         std::memcpy(P.code.cpu, P.k.code.data(), P.k.code.size() * 4);
         if (!dev.alloc(bytes, kfd::Mem::Gtt, P.wh) || !dev.alloc(bytes, kfd::Mem::Vram, P.wv) ||
@@ -492,6 +492,28 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu) {
         std::printf("%-30s %6.1f %9.2e  %6.1f / %6.1f / %6.1f  %8.1f\n", sh.name, bytes / 1e6, e, r.back(), med, r.front(),
                     bytes / med / 1e3);
         std::fflush(stdout);
+        for (int d = 1; diag && d < 8; d++) {   // the same kernel with parts left out (results not checked)
+            gfx10::Kernel dk;
+            std::string err;
+            if (!gfx10::assemble(ts5::direct::gen_mv_q4k((int)sh.cols, "slc dlc", d), dk, &err)) return die("mv_q4k diag: " + err);
+            if (dk.code.size() * 4 + 256 > P.dcode.size) return die("diag code too big");
+            for (size_t i = 0; i < P.dcode.size / 4; i++) ((uint32_t*)P.dcode.cpu)[i] = 0xbf9f0000;
+            std::memcpy(P.dcode.cpu, dk.code.data(), dk.code.size() * 4);
+            std::vector<double> dt;
+            for (int i = 0; i < runs; i++) {
+                pm4::Stream s;
+                uint32_t args[10] = {(uint32_t)P.wv.gpu, (uint32_t)(P.wv.gpu >> 32), (uint32_t)P.xb.gpu, (uint32_t)(P.xb.gpu >> 32),
+                                     (uint32_t)P.yb.gpu, (uint32_t)(P.yb.gpu >> 32), sh.rows, sh.cols, per, 0};
+                uint32_t g[3] = {wgs, 1, 1}, t[3] = {256, 1, 1};
+                s.dispatch(dk, P.dcode.gpu, args, 10, g, t);
+                if (!run(s, &gs)) return die(dev.err() + " (diag " + std::to_string(d) + ")");
+                dt.push_back(gs * 1e6);
+            }
+            std::sort(dt.begin(), dt.end());
+            std::printf("    without%s%s%s: %8.1f us median\n", d & 1 ? " math" : "", d & 2 ? " lds-reads" : "", d & 4 ? " weight-loads" : "",
+                        dt[dt.size() / 2]);
+            std::fflush(stdout);
+        }
     }
     std::printf("mv-q4k: %s (%u workgroups, 256 threads each)\n", all_ok ? "all rows match the CPU" : "SOME ROWS WRONG",
                 dev.cu_count() * per_cu);
@@ -578,8 +600,8 @@ int main(int argc, char** argv) {
         return cmd_bw_sweep(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024, {kfd::Mem::Vram}, cfgs,
                             argc > 3 ? std::atoi(argv[3]) : 30);
     }
-    if (cmd == "mv-q4k")
-        return cmd_mv_q4k(dev, argc > 2 ? std::atoi(argv[2]) : 30, argc > 3 ? std::atoi(argv[3]) : 1);
+    if (cmd == "mv-q4k" || cmd == "mv-diag")
+        return cmd_mv_q4k(dev, argc > 2 ? std::atoi(argv[2]) : 30, argc > 3 ? std::atoi(argv[3]) : 1, cmd == "mv-diag");
     if (cmd == "bw-repeat") {
         // bw-repeat N [wave64]: one good setup N times (hang hunt), VRAM
         int n = argc > 2 ? std::atoi(argv[2]) : 500;

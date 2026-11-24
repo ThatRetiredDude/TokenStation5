@@ -23,7 +23,9 @@
 
 namespace ts5::direct {
 
-inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc") {
+// diag (timing only, results wrong): 1 drops the block math, 2 the LDS
+// reads of x and sums, 4 the weight loads.
+inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", int diag = 0) {
     const int nit = ncols / 2048;          // steps per row
     const int row_bytes = ncols / 256 * 144;
     const int nseg = ncols / 16;
@@ -127,6 +129,7 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc") {
     o("s_mov_b32 s31, 0xfedcba98");
 
     auto loads = [&](int base) {   // one step's four loads into v[base..base+15]
+        if (diag & 4) return;
         o("global_load_dwordx4 v[" + S(base) + ":" + S(base + 3) + "], v1, s[22:23]" + H);
         o("global_load_dwordx4 v[" + S(base + 4) + ":" + S(base + 7) + "], v2, s[22:23]" + H);
         o("global_load_dwordx4 v[" + S(base + 8) + ":" + S(base + 11) + "], v1, s[22:23] offset:576" + H);
@@ -156,6 +159,14 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc") {
     // One block: header h[0:3], nibbles q[0:3], x low at xr (16), high at xr+16, sums at sr, sr+1.
     auto block = [&](int h, int q, int xr, int sr) {
         auto V = [&](int r) { return "v" + S(r); };
+        if (diag & 1) {   // keep every input alive, nothing else
+            o("v_add3_u32 v119, " + V(h) + ", " + V(q) + ", " + V(q + 3));
+            o("v_add_f32 v6, " + V(xr) + ", v6");
+            o("v_add_f32 v6, " + V(sr) + ", v6");
+            o("v_cvt_f32_u32 v119, v119");
+            o("v_add_f32 v6, v119, v6");
+            return;
+        }
         o("v_cvt_f32_f16 v108, " + V(h));
         o("v_cvt_f32_f16_sdwa v109, " + V(h) + " src0_sel:WORD_1");
         o("v_cndmask_b32 v110, " + V(h + 1) + ", " + V(h + 2) + ", vcc_lo");   // A
@@ -216,7 +227,7 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc") {
         for (int c = 0; c < 4; c++) o("v_add_nc_u32 v" + S(130 + c) + ", s11, v" + S(126 + c));
         o("s_lshl_b32 s11, s33, 9");
         o("v_add_nc_u32 v125, s11, v5");
-        for (int blk = 0; blk < 2; blk++) {
+        for (int blk = 0; blk < 2 && !(diag & 2); blk++) {
             const int xr = blk ? 74 : 40, sr = blk ? 106 : 72, xo = blk * 4096, so = blk * 256;
             for (int c = 0; c < 8; c++)
                 o("ds_read_b128 v[" + S(xr + 4 * c) + ":" + S(xr + 4 * c + 3) + "], v" + S(130 + (c & 3)) + " offset:" +
