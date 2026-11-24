@@ -103,7 +103,7 @@ int usage() {
             "       ts5 fetch URL FILE [--sha256 HEX] | ts5 peak [--device N] [--gib G]\n"
             "       ts5 helpers -m model.gguf --helper FILE...  (which files could draft for the model)\n"
             "  -c N|auto      context length (default 8192; auto: what fits in GPU memory)\n"
-            "  --backend B    vk or cpu\n"
+            "  --backend B    vk, cpu or direct (the PS5 GPU without Vulkan: Qwen3, Q4_K_M)\n"
             "  --device N     Vulkan device index\n"
             "  serve: --host ADDR --port N\n"
             "  run:   -p PROMPT [--chat] [-n N] [--temp T]\n"
@@ -591,7 +591,21 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
 
     double t0 = now_ms();
     Backend *be = nullptr;
-    if (a.backend == "cpu") {
+    if (a.backend == "direct") {
+#ifdef TS5_DIRECT
+        if (a.n_ctx <= 0) a.n_ctx = 8192;
+        model.use_context(a.n_ctx);
+        draft = false;   // a draft model would need a second backend beside it
+        be = make_direct_backend(model, a.n_ctx, err);
+#else
+        err = "built without the direct engine";
+#endif
+        if (!be) {
+            log_drain();
+            fprintf(stderr, "ts5: %s\n", err.c_str());
+            return 1;
+        }
+    } else if (a.backend == "cpu") {
         if (a.n_ctx <= 0) a.n_ctx = 8192;
         if (!model.load(nullptr, err)) { fprintf(stderr, "ts5: %s\n", err.c_str()); return 1; }
         model.use_context(a.n_ctx);

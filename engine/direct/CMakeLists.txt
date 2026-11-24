@@ -35,6 +35,6 @@ add_library(ts5model STATIC ${ENGINE_SRC}/gguf.cpp ${ENGINE_SRC}/model.cpp ${ENG
 target_include_directories(ts5model PUBLIC ${ENGINE_SRC})
 target_compile_options(ts5model PRIVATE -w)
 target_link_libraries(ts5model PUBLIC Threads::Threads)
-add_executable(ts5-direct ts5_direct_main.cpp token.cpp kfd.cpp ${CMAKE_CURRENT_BINARY_DIR}/kernels.h)
+add_executable(ts5-direct ts5_direct_main.cpp token.cpp runner.cpp kfd.cpp ${CMAKE_CURRENT_BINARY_DIR}/kernels.h)
 target_include_directories(ts5-direct PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(ts5-direct ts5gfx10 ts5model -static-libstdc++ -static-libgcc)

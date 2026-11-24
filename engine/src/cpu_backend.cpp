@@ -544,6 +544,13 @@ private:
 
 Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv) { return new CpuBackend(m, n_ctx, kv); }
 
+// (Here rather than in vk_backend.cpp so a build without Vulkan links.)
+int full_layers(const HParams &hp) {
+    int n = 0;
+    for (int l = 0; l < hp.n_layer; l++) n += !hp.swa(l);
+    return n;
+}
+
 bool kv_turn_setting() {
     static const bool on = [] {
         if (const char *e = getenv("TS5_KV_TURN"); e && *e) return atoi(e) != 0;

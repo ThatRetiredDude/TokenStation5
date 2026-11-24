@@ -32,7 +32,7 @@
 using namespace ts5;
 
 namespace ts5::direct {
-int cmd_token(kfd::Device& dev, int argc, char** argv);   // token.cpp
+int cmd_token(int argc, char** argv);   // token.cpp (its own device, runner.h)
 }
 
 namespace {
@@ -975,14 +975,10 @@ int main(int argc, char** argv) {
         }
         return 0;
     }
+    if (cmd == "token") return ts5::direct::cmd_token(argc, argv);
     kfd::Device dev;
     if (!dev.open()) return die(dev.err());
     if (cmd == "info") return cmd_info(dev);
-    if (cmd == "token") {
-        // A token's stream is about 30,000 dwords: a 1 MiB ring.
-        if (!dev.create_queue(1 << 20)) return die(dev.err());
-        return ts5::direct::cmd_token(dev, argc, argv);
-    }
     if (cmd == "fill") return cmd_fill(dev);
     if (cmd == "read-bw") return cmd_read_bw(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024);
     if (cmd == "bw-sweep") {

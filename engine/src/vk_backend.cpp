@@ -3047,12 +3047,6 @@ KvType kv_type_setting(bool *automatic) {
     return t;
 }
 
-int full_layers(const HParams &hp) {
-    int n = 0;
-    for (int l = 0; l < hp.n_layer; l++) n += !hp.swa(l);
-    return n;
-}
-
 // K values per token over the full layers, or the sliding ones.
 static uint64_t kv_values(const HParams &hp, bool sliding) {
     uint64_t n = 0;

@@ -49,6 +49,18 @@ if(TS5_VULKAN)
   target_compile_definitions(ts5core PUBLIC TS5_VULKAN=1)
 endif()
 
+# The direct engine (engine/direct): ts5's own GPU kernels through /dev/kfd,
+# for the PS5 (--backend direct). Linux only.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  option(TS5_DIRECT "Build the direct engine backend" ON)
+else()
+  set(TS5_DIRECT OFF)
+endif()
+if(TS5_DIRECT)
+  target_sources(ts5core PRIVATE direct/gfx10_asm.cpp direct/kfd.cpp direct/runner.cpp direct/direct_backend.cpp)
+  target_compile_definitions(ts5core PUBLIC TS5_DIRECT=1)
+endif()
+
 add_executable(ts5 src/main.cpp src/cli.cpp src/checks.cpp src/tokenizer.cpp src/server.cpp src/engine.cpp
   src/tools.cpp src/known_good.cpp src/net.cpp src/websearch.cpp src/log.cpp src/browser.cpp src/access.cpp
   src/github.cpp src/feedback.cpp src/tsshare.cpp)

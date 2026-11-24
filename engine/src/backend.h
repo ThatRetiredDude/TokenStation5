@@ -75,6 +75,12 @@ struct VkContext;
 // stores them, so a comparison with that GPU measures its kernels rather
 // than the cache's precision.
 Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv = KvType::F32);
+#ifdef TS5_DIRECT
+// The direct engine (engine/direct): the PS5 GPU driven through /dev/kfd with
+// ts5's own kernels, no Vulkan. Qwen3 with Q4_K / Q6_K weights only; loads
+// `m` (open, not loaded) itself. Null with why in err.
+Backend *make_direct_backend(Model &m, int n_ctx, std::string &err);
+#endif
 // The cache type TS5_KV asks for: q8, q4, else f16. *automatic: TS5_KV is
 // unset, empty or auto, so an auto-fit context (-c auto) may take q8 where f16
 // is short (auto_kv_type), and K8V4 where q8 is still short. q4 is only ever
