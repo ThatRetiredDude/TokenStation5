@@ -839,6 +839,17 @@ int cmd_attn(kfd::Device& dev, const std::vector<uint32_t>& lens) {
             std::sort(st.begin(), st.end());
             return true;
         };
+        {   // warm the clock up: batches until 50 ms of GPU time (round 27: the
+            // first length ran cold, and n = 1000 read 56 us first and 30 us second)
+            double warm = 0;
+            while (warm < 0.05) {
+                pm4::Stream s;
+                for (int i = 0; i < 60; i++) add(s, C.kv, C.vv, i > 0);
+                double total;
+                if (!run(s, &total)) return die(dev.err() + " (attn warm-up)");
+                warm += total;
+            }
+        }
         std::vector<double> st, st100, stp, str_;
         if (!timed(20, 10, st) || !timed(60, 3, st100) || !timed(60, 3, stp, 1) || !timed(60, 3, str_, 2))
             return die(dev.err() + " (attn batches)");

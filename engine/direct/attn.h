@@ -76,17 +76,23 @@ inline std::string gen_attn_part() {
         o("v_permlanex16_b32 v9, v8, s86, s87");
         o("v_" + op + "_f32 v8, v8, v9");
     };
+    // K rows for the 256 positions from s<pos>: thread i's row, position
+    // min(pos + i, n - 1), into v[48:111]. The next chunk's are loaded while
+    // this chunk's V is worked (round 27: about 300 GB/s with K and V in turn).
+    auto kloads = [&](const std::string& pos) {
+        o("v_add_nc_u32 v2, " + pos + ", v0");
+        o("v_min_u32 v2, s17, v2");
+        o("v_lshlrev_b32 v2, 3, v2");
+        o("v_add_nc_u32 v2, s13, v2");
+        o("v_lshlrev_b32 v2, 8, v2");      // (8 t + g) * 256
+        for (int c = 0; c < 16; c++)
+            o("global_load_dwordx4 v[" + S(48 + 4 * c) + ":" + S(51 + 4 * c) + "], v2, s[2:3] offset:" + S(16 * c));
+    };
+    kloads("s16");
     k += "chunk:\n";
     o("s_cmp_ge_u32 s16, s15");
     o("s_cbranch_scc1 finish");
-    // ---- K: thread i's row, position min(t, n - 1)
     o("v_add_nc_u32 v1, s16, v0");         // t
-    o("v_min_u32 v2, s17, v1");
-    o("v_lshlrev_b32 v2, 3, v2");
-    o("v_add_nc_u32 v2, s13, v2");
-    o("v_lshlrev_b32 v2, 8, v2");          // (8 t + g) * 256
-    for (int c = 0; c < 16; c++)
-        o("global_load_dwordx4 v[" + S(48 + 4 * c) + ":" + S(51 + 4 * c) + "], v2, s[2:3] offset:" + S(16 * c));
     for (int h = 0; h < 4; h++) o("v_mov_b32 v" + S(4 + h) + ", 0");
     for (int c = 0; c < 16; c += 2) {      // two chunks of 8 dims at a time: q in s[20:83]
         for (int cc = 0; cc < 2; cc++)
@@ -143,7 +149,10 @@ inline std::string gen_attn_part() {
     o("ds_write_b128 v10, v[4:7] offset:256");
     o("s_waitcnt lgkmcnt(0)");
     o("s_barrier");
-    // ---- V: dims 2 dp, +1, positions s16 + pg + 4 it
+    o("s_add_u32 s91, s16, 256");
+    kloads("s91");                         // the next chunk's K (past the split's end: never used)
+    // ---- V: dims 2 dp, +1, positions s16 + pg + 4 it; p one iteration
+    // ahead in v[124:127] / v[116:119]
     o("v_add_nc_u32 v27, s16, v25");
     for (int b = 0; b < 4; b++) {          // 4 batches of 16: all loads and p reads first
         for (int i = 0; i < 16; i++) {
@@ -155,15 +164,19 @@ inline std::string gen_attn_part() {
             o("v_lshl_add_u32 v30, v30, 8, v26");
             o("global_load_dword v" + S(32 + i) + ", v30, s[4:5]");
         }
-        for (int i = 0; i < 16; i++)
-            o("ds_read_b128 v[" + S(48 + 4 * i) + ":" + S(51 + 4 * i) + "], v28 offset:" + S(256 + 64 * (16 * b + i)));
+        const int buf[2] = {124, 116};
+        auto pread = [&](int i) {
+            o("ds_read_b128 v[" + S(buf[i & 1]) + ":" + S(buf[i & 1] + 3) + "], v28 offset:" + S(256 + 64 * (16 * b + i)));
+        };
+        pread(0);
         for (int i = 0; i < 16; i++) {
-            o("s_waitcnt vmcnt(" + S(15 - i) + ") lgkmcnt(" + S(15 - i) + ")");
+            if (i < 15) pread(i + 1);
+            o("s_waitcnt vmcnt(" + S(15 - i) + ") lgkmcnt(" + S(i < 15 ? 1 : 0) + ")");
             o("v_cvt_f32_f16 v112, v" + S(32 + i));
             o("v_cvt_f32_f16_sdwa v113, v" + S(32 + i) + " src0_sel:WORD_1");
             for (int h = 0; h < 4; h++) {
-                o("v_fmac_f32 v" + S(16 + 2 * h) + ", " + V(48 + 4 * i + h) + ", v112");
-                o("v_fmac_f32 v" + S(17 + 2 * h) + ", " + V(48 + 4 * i + h) + ", v113");
+                o("v_fmac_f32 v" + S(16 + 2 * h) + ", " + V(buf[i & 1] + h) + ", v112");
+                o("v_fmac_f32 v" + S(17 + 2 * h) + ", " + V(buf[i & 1] + h) + ", v113");
             }
         }
     }
