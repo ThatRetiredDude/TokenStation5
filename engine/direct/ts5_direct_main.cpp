@@ -25,6 +25,7 @@
 #include "mv_q4k.h"
 #include "mv_q4k2.h"
 #include "mv_q6k.h"
+#include "attn.h"
 #include "pm4.h"
 
 using namespace ts5;
@@ -697,6 +698,149 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
 
 }  // namespace
 
+// Attention for one token (attn.h) over n cached positions, Qwen3 8B's
+// heads: random q, K, V checked against a CPU softmax in double, from
+// system memory and from VRAM, then timed in batches of 20 (part + reduce).
+int cmd_attn(kfd::Device& dev, const std::vector<uint32_t>& lens) {
+    if (!dev.create_queue()) return die(dev.err());
+    gfx10::Kernel ck, kp, kr;
+    kfd::Buffer ccode, pcode, rcode;
+    if (!load_kernel(dev, kKernel_copy, ck, ccode)) return 1;
+    {
+        const std::string ps = ts5::direct::gen_attn_part(), rs = ts5::direct::gen_attn_reduce();
+        if (!load_kernel(dev, ps.c_str(), kp, pcode) || !load_kernel(dev, rs.c_str(), kr, rcode)) return 1;
+    }
+    std::printf("attn_part: %zu words, %d vgprs; attn_reduce: %zu words\n", kp.code.size(), kp.vgprs, kr.code.size());
+    uint64_t* sig = (uint64_t*)dev.signals.cpu;
+    auto run = [&](pm4::Stream& s, double* gpu_s) -> bool {
+        std::memset(sig, 0, 64);
+        pm4::Stream w;
+        w.acquire_all();
+        w.release(dev.signals.gpu + 8, 0, true);
+        w.w.insert(w.w.end(), s.w.begin(), s.w.end());
+        w.release(dev.signals.gpu + 16, 0, true);
+        w.release(dev.signals.gpu, 1);
+        if (!dev.submit(w.w) || !dev.wait((volatile uint64_t*)sig, 1, 20000)) return false;
+        *gpu_s = (sig[2] - sig[1]) / 100e6;
+        return true;
+    };
+    uint32_t seed = 4242;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
+    auto rf = [&]() { return (float)((int)(rnd() >> 16) - 32768) / 32768.0f; };
+    // Everything allocated up front (round 6: no alloc/free between dispatches).
+    struct Case { uint32_t n, chunks; kfd::Buffer q, kh, vh, kv, vv, part, out; std::vector<double> ref; };
+    std::vector<Case> cases(lens.size());
+    for (size_t ci = 0; ci < lens.size(); ci++) {
+        Case& C = cases[ci];
+        C.n = lens[ci];
+        C.chunks = (C.n + 255) / 256;
+        const size_t kvb = (size_t)C.n * 8 * 256;
+        if (!dev.alloc(32 * 128 * 4, kfd::Mem::Gtt, C.q) || !dev.alloc(kvb, kfd::Mem::Gtt, C.kh) || !dev.alloc(kvb, kfd::Mem::Gtt, C.vh) ||
+            !dev.alloc(kvb, kfd::Mem::Vram, C.kv) || !dev.alloc(kvb, kfd::Mem::Vram, C.vv) ||
+            !dev.alloc((size_t)C.chunks * 8 * 2112, kfd::Mem::Gtt, C.part) || !dev.alloc(32 * 128 * 4, kfd::Mem::Gtt, C.out))
+            return die(dev.err());
+        float* Q = (float*)C.q.cpu;
+        for (int i = 0; i < 32 * 128; i++) Q[i] = rf() * 2.0f;
+        uint16_t* K = (uint16_t*)C.kh.cpu;
+        uint16_t* V = (uint16_t*)C.vh.cpu;
+        for (size_t i = 0; i < kvb / 2; i++) {
+            float a = rf(), b = rf();
+            K[i] = a == 0 ? 0 : float_to_half(a);
+            V[i] = b == 0 ? 0 : float_to_half(b);
+        }
+        C.ref.assign(32 * 128, 0.0);
+        std::vector<double> sc(C.n);
+        for (int h = 0; h < 32; h++) {
+            const int g = h / 4;
+            double m = -1e300;
+            for (uint32_t t = 0; t < C.n; t++) {
+                double d = 0;
+                for (int i = 0; i < 128; i++) d += (double)Q[h * 128 + i] * half_to_float(K[((size_t)t * 8 + g) * 128 + i]);
+                sc[t] = d / std::sqrt(128.0);
+                m = std::max(m, sc[t]);
+            }
+            double l = 0;
+            for (uint32_t t = 0; t < C.n; t++) { sc[t] = std::exp(sc[t] - m); l += sc[t]; }
+            for (uint32_t t = 0; t < C.n; t++)
+                for (int i = 0; i < 128; i++) C.ref[h * 128 + i] += sc[t] / l * half_to_float(V[((size_t)t * 8 + g) * 128 + i]);
+        }
+    }
+    const float scale = (float)(1.4426950408889634 / std::sqrt(128.0));
+    uint32_t scale_bits;
+    std::memcpy(&scale_bits, &scale, 4);
+    bool all_ok = true;
+    for (Case& C : cases) {
+        const size_t kvb = (size_t)C.n * 8 * 256;
+        double gs;
+        for (int w = 0; w < 2; w++) {   // K, V into VRAM
+            const kfd::Buffer& src = w ? C.vh : C.kh;
+            const kfd::Buffer& dst = w ? C.vv : C.kv;
+            pm4::Stream s;
+            uint32_t n16 = (uint32_t)(kvb / 16);
+            uint32_t args[5] = {(uint32_t)src.gpu, (uint32_t)(src.gpu >> 32), (uint32_t)dst.gpu, (uint32_t)(dst.gpu >> 32), n16};
+            uint32_t g[3] = {(n16 + 255) / 256, 1, 1}, t[3] = {256, 1, 1};
+            s.dispatch(ck, ccode.gpu, args, 5, g, t);
+            if (!run(s, &gs)) return die(dev.err() + " (copying to VRAM)");
+        }
+        auto add = [&](pm4::Stream& s, const kfd::Buffer& kb, const kfd::Buffer& vb, bool wait_first) {
+            uint32_t a1[10] = {(uint32_t)C.q.gpu, (uint32_t)(C.q.gpu >> 32), (uint32_t)kb.gpu, (uint32_t)(kb.gpu >> 32),
+                               (uint32_t)vb.gpu, (uint32_t)(vb.gpu >> 32), C.n, scale_bits, (uint32_t)C.part.gpu, (uint32_t)(C.part.gpu >> 32)};
+            uint32_t a2[10] = {(uint32_t)C.part.gpu, (uint32_t)(C.part.gpu >> 32), (uint32_t)C.out.gpu, (uint32_t)(C.out.gpu >> 32),
+                               C.chunks, 0, 0, 0, 0, 0};
+            uint32_t g1[3] = {C.chunks * 8, 1, 1}, g2[3] = {8, 1, 1}, t[3] = {256, 1, 1};
+            if (wait_first) s.wait_kernels();
+            s.dispatch(kp, pcode.gpu, a1, 10, g1, t);
+            s.wait_kernels();
+            s.dispatch(kr, rcode.gpu, a2, 10, g2, t);
+        };
+        auto check = [&](const char* where) -> double {
+            const float* O = (const float*)C.out.cpu;
+            double worst = 0;
+            int bad = 0, first = 0;
+            for (int i = 0; i < 32 * 128; i++) {
+                double e = std::fabs(O[i] - C.ref[i]);
+                if (!(e == e)) e = 1e9;
+                if (e > 1e-3 && bad++ == 0) first = i;
+                worst = std::max(worst, e);
+            }
+            if (bad) {
+                std::printf("  n=%u %s: WRONG, %d of 4096 values, worst error %.3g, first bad %d (head %d dim %d): gpu %g cpu %g\n", C.n,
+                            where, bad, worst, first, first / 128, first % 128, ((const float*)C.out.cpu)[first], C.ref[first]);
+                all_ok = false;
+            }
+            return worst;
+        };
+        double e_sys, e_vram;
+        {
+            std::memset(C.out.cpu, 0xff, 32 * 128 * 4);
+            pm4::Stream s;
+            add(s, C.kh, C.vh, false);
+            if (!run(s, &gs)) return die(dev.err() + " (attn, system memory)");
+            e_sys = check("system memory");
+            std::memset(C.out.cpu, 0xff, 32 * 128 * 4);
+            pm4::Stream s2;
+            add(s2, C.kv, C.vv, false);
+            if (!run(s2, &gs)) return die(dev.err() + " (attn, VRAM)");
+            e_vram = check("VRAM");
+        }
+        std::vector<double> st;
+        for (int rep = 0; rep < 8; rep++) {   // 5 warm-up batches, then 3 timed
+            pm4::Stream s;
+            for (int i = 0; i < 20; i++) add(s, C.kv, C.vv, i > 0);
+            double total;
+            if (!run(s, &total)) return die(dev.err() + " (attn batches)");
+            if (rep >= 5) st.push_back(total / 20);
+        }
+        std::sort(st.begin(), st.end());
+        double e_steady = check("steady");
+        std::printf("n=%-6u K+V %6.1f MB  err %.2e / %.2e / %.2e  batches of 20: %8.1f us per token-layer, %6.1f GB/s of K+V\n", C.n,
+                    2 * kvb / 1e6, e_sys, e_vram, e_steady, st[1] * 1e6, 2 * kvb / st[1] / 1e9);
+        std::fflush(stdout);
+    }
+    std::printf("attn: %s\n", all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
+    return all_ok ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     std::string cmd = argc > 1 ? argv[1] : "info";
     if (cmd == "gen-mv2") {
@@ -704,6 +848,10 @@ int main(int argc, char** argv) {
                                             argc > 4 ? std::atoi(argv[4]) : 1)
                        .c_str(),
                    stdout);
+        return 0;
+    }
+    if (cmd == "gen-attn") {   // prints attn_part, or attn_reduce with "reduce"
+        std::fputs((argc > 2 && std::string(argv[2]) == "reduce" ? ts5::direct::gen_attn_reduce() : ts5::direct::gen_attn_part()).c_str(), stdout);
         return 0;
     }
     if (cmd == "gen-mv6") {   // prints mv_q6k for a column count [diag]
@@ -760,6 +908,12 @@ int main(int argc, char** argv) {
             if (!gfx10::assemble(ts5::direct::gen_mv_q4k2(cols), k, &err)) return die("mv_q4k2 " + std::to_string(cols) + ": " + err);
             std::printf("mv_q4k2 %d cols: %zu words, %d vgprs, lds %u\n", cols, k.code.size(), k.vgprs, k.lds_bytes);
         }
+        for (const std::string& src : {ts5::direct::gen_attn_part(), ts5::direct::gen_attn_reduce()}) {
+            gfx10::Kernel k;
+            std::string err;
+            if (!gfx10::assemble(src, k, &err)) return die("attn: " + err);
+            std::printf("%s: %zu words, %d vgprs, %d sgprs\n", k.name.c_str(), k.code.size(), k.vgprs, k.sgprs);
+        }
         for (int cols : {2048, 4096, 12288}) {
             gfx10::Kernel k;
             std::string err;
@@ -800,6 +954,12 @@ int main(int argc, char** argv) {
         }
         return cmd_bw_sweep(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024, {kfd::Mem::Vram}, cfgs,
                             argc > 3 ? std::atoi(argv[3]) : 30);
+    }
+    if (cmd == "attn") {   // attn [n ...]: positions in the cache (default 1000 4096 16384)
+        std::vector<uint32_t> lens;
+        for (int i = 2; i < argc; i++) lens.push_back((uint32_t)std::atol(argv[i]));
+        if (lens.empty()) lens = {1000, 4096, 16384};
+        return cmd_attn(dev, lens);
     }
     if (cmd == "mv-q6k" || cmd == "mv-q6k-diag")
         return cmd_mv_q4k(dev, argc > 2 ? std::atoi(argv[2]) : 30, argc > 3 ? std::atoi(argv[3]) : 1, cmd == "mv-q6k-diag", false, true);

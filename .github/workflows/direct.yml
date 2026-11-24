@@ -51,6 +51,12 @@ jobs:
             build/direct/ts5-direct gen-mv6 $v > /tmp/mv6.s
             python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/mv6.s
           done
+      - name: Check the attention kernels against llvm-mc
+        run: |
+          for v in part reduce; do
+            build/direct/ts5-direct gen-attn $v > /tmp/attn.s
+            python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/attn.s
+          done
       - name: Keep ts5-direct for testing on the PS5
         uses: actions/upload-artifact@v4
         with:
