@@ -27,12 +27,14 @@
 #include "mv_q6k.h"
 #include "attn.h"
 #include "ops.h"
+#include "mm_q4k.h"
 #include "pm4.h"
 
 using namespace ts5;
 
 namespace ts5::direct {
 int cmd_token(int argc, char** argv);   // token.cpp (its own device, runner.h)
+int cmd_mm_q4k(int argc, char** argv);  // mm_test.cpp
 }
 
 namespace {
@@ -899,6 +901,10 @@ int main(int argc, char** argv) {
         std::fputs((v & 2 ? ts5::direct::gen_mv_q6k(cols, 0, st) : ts5::direct::gen_mv_q4k(cols, "", 0, 1, true, st)).c_str(), stdout);
         return 0;
     }
+    if (cmd == "gen-mm") {   // prints mm_q4k for K columns and T tokens
+        std::fputs(ts5::direct::gen_mm_q4k(argc > 2 ? std::atoi(argv[2]) : 4096, argc > 3 ? std::atoi(argv[3]) : 16).c_str(), stdout);
+        return 0;
+    }
     if (cmd == "gen-mv6") {   // prints mv_q6k for a column count [diag]
         std::fputs(ts5::direct::gen_mv_q6k(argc > 2 ? std::atoi(argv[2]) : 4096, argc > 3 ? std::atoi(argv[3]) : 0).c_str(), stdout);
         return 0;
@@ -976,6 +982,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (cmd == "token") return ts5::direct::cmd_token(argc, argv);
+    if (cmd == "mm-q4k") return ts5::direct::cmd_mm_q4k(argc, argv);
     kfd::Device dev;
     if (!dev.open()) return die(dev.err());
     if (cmd == "info") return cmd_info(dev);
