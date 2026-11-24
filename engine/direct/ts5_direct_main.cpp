@@ -4,6 +4,7 @@
 //   ts5-direct read-bw [MiB]     read bandwidth on the direct path (default 1024 MiB)
 //   ts5-direct bw-sweep [MiB]    read bandwidth over memory kinds, loads in flight, cache hints
 //                                and workgroup counts, 5 runs each
+//   ts5-direct bw-last [MiB] [runs]     grid vs chunked, workgroup placement per run
 //   ts5-direct bw-repeat [N] [wave64]   the best setup N times in a row (hang hunt)
 // Kernels are assembled at start from the text built into the program.
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -45,16 +47,25 @@ bool load_kernel(kfd::Device& dev, const char* src, gfx10::Kernel& k, kfd::Buffe
 // A read kernel with N loads in flight per loop, optional cache hints on the
 // loads ("glc slc dlc" streams past the caches), wave32 or wave64. Same
 // arguments as kernels/read_bw.s, which is the N=4, no-hint, wave32 case.
-std::string gen_read_kernel(int n, const std::string& hints, bool wave64, int tpw = 256) {
+// chunked: each workgroup streams its own contiguous slice (s3 is then the
+// workgroup's step, tpw*16) instead of the whole grid striding together.
+// Every lane also stores HW_ID1 (where its wave ran) 4 MiB into the output.
+std::string gen_read_kernel(int n, const std::string& hints, bool wave64, int tpw = 256, bool chunked = false) {
     int shift = 0;
     while ((1 << shift) < tpw) shift++;
     std::string k = ".kernel read_gen\n";
     k += wave64 ? ".wave64\n" : ".wave32\n";
     k += ".user_sgprs 6\n.tgid_x\n";
-    k += "    s_lshl_b32 s7, s6, " + std::to_string(shift) + "\n    v_add_nc_u32 v1, s7, v0\n    v_lshlrev_b32 v2, 4, v1\n";
+    k += "    s_lshl_b32 s7, s6, " + std::to_string(shift) + "\n    v_add_nc_u32 v1, s7, v0\n";
+    k += chunked ? "    v_lshlrev_b32 v2, 4, v0\n" : "    v_lshlrev_b32 v2, 4, v1\n";
     const int a = 4 + 4 * n;   // the four sums sit right after the load registers
     for (int c = 0; c < 4; c++) k += "    v_mov_b32 v" + std::to_string(a + c) + ", 0\n";
-    k += "    s_mov_b32 s8, s0\n    s_mov_b32 s9, s1\nloop:\n";
+    k += "    s_mov_b32 s8, s0\n    s_mov_b32 s9, s1\n";
+    if (chunked) {   // slice start = wg * loops * n * step
+        k += "    s_mul_i32 s10, s2, s3\n    s_mul_i32 s10, s10, " + std::to_string(n) + "\n    s_mul_i32 s10, s10, s6\n";
+        k += "    s_add_u32 s8, s8, s10\n    s_addc_u32 s9, s9, 0\n";
+    }
+    k += "loop:\n";
     for (int i = 0; i < n; i++) {
         int r = 4 + 4 * i;
         k += "    global_load_dwordx4 v[" + std::to_string(r) + ":" + std::to_string(r + 3) + "], v2, s[8:9]" +
@@ -71,7 +82,9 @@ std::string gen_read_kernel(int n, const std::string& hints, bool wave64, int tp
     k += "    s_cmp_lg_u32 s2, 0\n    s_cbranch_scc1 loop\n";
     const std::string A = std::to_string(a), A1 = std::to_string(a + 1), A2 = std::to_string(a + 2), A3 = std::to_string(a + 3);
     k += "    v_add3_u32 v" + A + ", v" + A + ", v" + A1 + ", v" + A2 + "\n    v_add_nc_u32 v" + A + ", v" + A + ", v" + A3 + "\n";
-    k += "    v_lshlrev_b32 v1, 2, v1\n    global_store_dword v1, v" + A + ", s[4:5]\n    s_endpgm\n";
+    k += "    v_lshlrev_b32 v1, 2, v1\n    global_store_dword v1, v" + A + ", s[4:5]\n";
+    k += "    s_getreg_b32 s10, hwreg(HW_REG_HW_ID1)\n    v_add_nc_u32 v3, 0x400000, v1\n    v_mov_b32 v" + A1 + ", s10\n";
+    k += "    global_store_dword v3, v" + A1 + ", s[4:5]\n    s_endpgm\n";
     return k;
 }
 
@@ -85,11 +98,13 @@ struct ReadCfg {
     bool wave64;
     int per_cu;   // workgroups per CU
     int tpw = 256;   // threads per workgroup
+    bool chunked = false;
 };
 
 std::string cfg_name(const ReadCfg& c) {
     return std::string("wave") + (c.wave64 ? "64" : "32") + " loads " + std::to_string(c.loads) + " hints " +
-           (c.hints.empty() ? "-" : c.hints) + " wgs/CU " + std::to_string(c.per_cu) + " threads/wg " + std::to_string(c.tpw);
+           (c.hints.empty() ? "-" : c.hints) + " wgs/CU " + std::to_string(c.per_cu) + " threads/wg " + std::to_string(c.tpw) +
+           (c.chunked ? " chunked" : " grid");
 }
 
 // Read bandwidth over a list of setups. Everything is allocated and every
@@ -109,7 +124,7 @@ int cmd_bw_sweep(kfd::Device& dev, size_t mib, const std::vector<kfd::Mem>& mems
     size_t total = 0;
     for (size_t i = 0; i < cfgs.size(); i++) {
         std::string err;
-        if (!gfx10::assemble(gen_read_kernel(cfgs[i].loads, cfgs[i].hints, cfgs[i].wave64, cfgs[i].tpw), ks[i], &err))
+        if (!gfx10::assemble(gen_read_kernel(cfgs[i].loads, cfgs[i].hints, cfgs[i].wave64, cfgs[i].tpw, cfgs[i].chunked), ks[i], &err))
             return die("assembler: " + err);
         at[i] = total;
         total += (ks[i].code.size() * 4 + 256 + 255) & ~(size_t)255;
@@ -145,7 +160,7 @@ int cmd_bw_sweep(kfd::Device& dev, size_t mib, const std::vector<kfd::Mem>& mems
             std::printf("%-7s (can't allocate: %s)\n", mem_name(m), dev.err().c_str());
             continue;
         }
-        if (!dev.alloc((size_t)max_threads * 4, kfd::Mem::Gtt, out)) return die(dev.err());
+        if (!dev.alloc(8u << 20, kfd::Mem::Gtt, out)) return die(dev.err());   // sums, then HW_ID1 at 4 MiB
         {   // fill the source with C on the GPU
             pm4::Stream s;
             uint32_t n = (uint32_t)(bytes / 4);
@@ -165,10 +180,13 @@ int cmd_bw_sweep(kfd::Device& dev, size_t mib, const std::vector<kfd::Mem>& mems
             size_t loops = bytes / (step * c.loads);
             if (loops < 1) continue;
             size_t used = loops * step * c.loads;
+            if (c.chunked) step = (size_t)c.tpw * 16;
             uint32_t args[6] = {(uint32_t)src.gpu, (uint32_t)(src.gpu >> 32), (uint32_t)loops, (uint32_t)step,
                                 (uint32_t)out.gpu, (uint32_t)(out.gpu >> 32)};
             uint32_t g[3] = {wgs, 1, 1}, t[3] = {(uint32_t)c.tpw, 1, 1};
+            // r: GB/s per run; placement: busiest WGP's workgroup count and WGPs used, per run
             std::vector<double> r;
+            std::vector<std::pair<double, std::pair<int, int>>> placed;
             for (int rep = 0; rep < repeat; rep++) {
                 pm4::Stream s;
                 s.dispatch(ks[i], code.gpu + at[i], args, 6, g, t);
@@ -180,13 +198,26 @@ int cmd_bw_sweep(kfd::Device& dev, size_t mib, const std::vector<kfd::Mem>& mems
                 }
                 dispatches++;
                 r.push_back(used / gs / 1e9);
+                {   // HW_ID1 of each workgroup's first lane: SE 20:18, SA 16, WGP 13:10
+                    const uint32_t* hw = (const uint32_t*)((const char*)out.cpu + (4u << 20));
+                    std::map<uint32_t, int> per;
+                    for (uint32_t w = 0; w < wgs; w++) per[(hw[w * c.tpw] >> 10) & 0x7ff & ~0x30u]++;
+                    int mx = 0;
+                    for (auto& p : per) mx = std::max(mx, p.second);
+                    placed.push_back({r.back(), {mx, (int)per.size()}});
+                }
             }
+            std::sort(placed.begin(), placed.end());
             std::sort(r.begin(), r.end());
             uint32_t want = (uint32_t)(loops * c.loads * 4 * C);
             uint32_t* o = (uint32_t*)out.cpu;
             bool ok = o[0] == want && o[threads - 1] == want;
             std::printf("%-7s %-5s %-5d %-12s %-6u %-5d %6.1f / %6.1f / %6.1f  %s\n", mem_name(m), c.wave64 ? "64" : "32", c.loads,
                         c.hints.empty() ? "-" : c.hints.c_str(), wgs, c.tpw, r.back(), r[r.size() / 2], r.front(), ok ? "ok" : "WRONG");
+            std::printf("        %s; busiest WGP/WGPs used: slowest run %d/%d, fastest %d/%d; runs under 300 GB/s: %d of %zu\n",
+                        c.chunked ? "chunked" : "grid", placed.front().second.first, placed.front().second.second,
+                        placed.back().second.first, placed.back().second.second,
+                        (int)std::count_if(r.begin(), r.end(), [](double x) { return x < 300; }), r.size());
             std::fflush(stdout);
             if (ok && r[r.size() / 2] > best_all) {
                 best_all = r[r.size() / 2];
@@ -291,12 +322,16 @@ int cmd_read_bw(kfd::Device& dev, size_t mib) {
 int main(int argc, char** argv) {
     std::string cmd = argc > 1 ? argv[1] : "info";
     if (cmd == "gen") {
-        // Prints a generated read kernel: gen N wave64(0/1) [hints...]
+        // Prints a generated read kernel: gen N wave64(0/1) [hints...] [chunked]
         int n = argc > 2 ? std::atoi(argv[2]) : 4;
         bool w64 = argc > 3 && std::atoi(argv[3]);
         std::string h;
-        for (int i = 4; i < argc; i++) h += (h.empty() ? "" : " ") + std::string(argv[i]);
-        std::fputs(gen_read_kernel(n, h, w64).c_str(), stdout);
+        bool chunked = false;
+        for (int i = 4; i < argc; i++) {
+            if (std::string(argv[i]) == "chunked") chunked = true;
+            else h += (h.empty() ? "" : " ") + std::string(argv[i]);
+        }
+        std::fputs(gen_read_kernel(n, h, w64, 256, chunked).c_str(), stdout);
         return 0;
     }
     if (cmd == "asm-only") {
@@ -308,14 +343,15 @@ int main(int argc, char** argv) {
             std::printf("%s: %zu words, %d vgprs, rsrc1 0x%08x rsrc2 0x%08x\n", kk.name, k.code.size(), k.vgprs, gfx10::pgm_rsrc1(k),
                         gfx10::pgm_rsrc2(k));
         }
-        for (bool w64 : {false, true})
-            for (int n : {1, 2, 3, 4, 8, 16})
-                for (const char* h : {"", "slc", "glc slc dlc", "glc dlc", "slc dlc", "glc slc"}) {
-                    gfx10::Kernel k;
-                    std::string err;
-                    if (!gfx10::assemble(gen_read_kernel(n, h, w64), k, &err)) return die("read_gen: " + err);
-                }
-        std::printf("read_gen: 72 variants ok\n");
+        for (bool ch : {false, true})
+            for (bool w64 : {false, true})
+                for (int n : {1, 2, 3, 4, 8, 16})
+                    for (const char* h : {"", "slc", "glc slc dlc", "glc dlc", "slc dlc", "glc slc"}) {
+                        gfx10::Kernel k;
+                        std::string err;
+                        if (!gfx10::assemble(gen_read_kernel(n, h, w64, 256, ch), k, &err)) return die("read_gen: " + err);
+                    }
+        std::printf("read_gen: 144 variants ok\n");
         return 0;
     }
     kfd::Device dev;
@@ -335,11 +371,27 @@ int main(int argc, char** argv) {
         return cmd_bw_sweep(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024,
                             {kfd::Mem::Vram, kfd::Mem::GttUncached, kfd::Mem::Gtt}, cfgs, 5);
     }
+    if (cmd == "bw-last") {
+        // bw-last [MiB] [runs]: last read pass. Grid vs chunked slices, the
+        // always-slow "3 loads glc dlc" row, more workgroups per CU, and where
+        // each workgroup ran (to explain the 254 GB/s runs). VRAM only.
+        std::vector<ReadCfg> cfgs;
+        for (bool ch : {false, true}) {
+            cfgs.push_back({4, "slc dlc", false, 1, 256, ch});
+            cfgs.push_back({4, "glc dlc", false, 1, 256, ch});
+            cfgs.push_back({3, "glc dlc", false, 1, 256, ch});
+            cfgs.push_back({4, "slc dlc", false, 2, 256, ch});
+            cfgs.push_back({4, "slc dlc", false, 4, 256, ch});
+            cfgs.push_back({4, "slc dlc", false, 8, 128, ch});
+        }
+        return cmd_bw_sweep(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024, {kfd::Mem::Vram}, cfgs,
+                            argc > 3 ? std::atoi(argv[3]) : 30);
+    }
     if (cmd == "bw-repeat") {
         // bw-repeat N [wave64]: one good setup N times (hang hunt), VRAM
         int n = argc > 2 ? std::atoi(argv[2]) : 500;
         bool w64 = argc > 3 && std::string(argv[3]) == "wave64";
         return cmd_bw_sweep(dev, 1024, {kfd::Mem::Vram}, {{3, "slc dlc", w64, 1, 256}}, n);
     }
-    return die("unknown command " + cmd + " (info, fill, read-bw [MiB], bw-sweep [MiB], bw-repeat [N] [wave64])");
+    return die("unknown command " + cmd + " (info, fill, read-bw [MiB], bw-sweep [MiB], bw-last [MiB] [runs], bw-repeat [N] [wave64])");
 }
