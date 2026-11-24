@@ -1,0 +1,17 @@
+#!/bin/sh
+# Called by toybox dhcp (bound, renew, deconfig) and by rc for ts5.ip= (static).
+case $1 in
+  deconfig) ifconfig "$interface" 0.0.0.0 ;;
+  bound|renew)
+    ifconfig "$interface" "$ip" netmask "${subnet:-255.255.255.0}"
+    for r in $router; do route add default gw "$r" dev "$interface"; break; done
+    : >/etc/resolv.conf
+    for d in $dns; do echo "nameserver $d" >>/etc/resolv.conf; done ;;
+  static)
+    iface=$2; spec=$3
+    addr=${spec%%,*}; rest=${spec#*,}
+    gw=${rest%%,*}; dns=${rest#*,}
+    ifconfig "$iface" "${addr%/*}/${addr#*/}"
+    [ -n "$gw" ] && route add default gw "$gw" dev "$iface"
+    [ -n "$dns" ] && echo "nameserver $dns" >/etc/resolv.conf ;;
+esac

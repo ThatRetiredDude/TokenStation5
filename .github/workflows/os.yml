@@ -1,0 +1,33 @@
+name: os
+
+# TokenStation5 OS: builds the initrd (toybox, mksh, dropbear, os/rootfs)
+# and boots it in QEMU with the runner's own kernel: banner and shell on
+# the console, DHCP on Ethernet, and an ssh key login.
+
+on:
+  push:
+    branches: [main, linux-package]
+    paths: ["os/**", ".github/workflows/os.yml"]
+  pull_request:
+    paths: ["os/**", ".github/workflows/os.yml"]
+
+jobs:
+  initrd:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools cpio qemu-system-x86 openssh-client linux-libc-dev
+      - name: Build the initrd
+        run: os/build.sh out
+      - name: Boot it in QEMU
+        run: |
+          sudo chmod 666 /dev/kvm 2>/dev/null || true
+          sudo cp /boot/vmlinuz-$(uname -r) out/vmlinuz && sudo chmod 644 out/vmlinuz
+          os/tests/qemu-boot.sh out/vmlinuz out/ts5os-initrd.cpio.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ts5os-initrd
+          path: out/ts5os-initrd.cpio.gz

@@ -1,0 +1,6 @@
+# TokenStation5 OS: toybox init reads this.
+::sysinit:/etc/rc
+tty1::respawn:/bin/login -f root
+ttyS0::respawn:/bin/login -f root
+::ctrlaltdel:/bin/reboot
+::shutdown:/etc/rc.shutdown

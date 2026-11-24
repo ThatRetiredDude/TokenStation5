@@ -1,0 +1,67 @@
+#!/bin/sh
+# TokenStation5 OS start-up: mounts, the models SSD, Ethernet, ssh, then ts5.
+# Everything it does is logged to /run/boot.log; the console stays quiet.
+export PATH=/bin:/sbin
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev 2>/dev/null
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs -o mode=1777 shm /dev/shm
+mount -t tmpfs run /run
+mount -t tmpfs -o mode=1777 tmp /tmp
+exec 3>&1 >>/run/boot.log 2>&1
+set -x
+hostname ts5
+echo 1 >/proc/sys/kernel/printk 2>/dev/null   # kernel messages off the console
+
+# Kernel command line settings: ts5.data=LABEL (default TS5DATA), ts5.ip=ADDR/BITS,GATEWAY,DNS,
+# ts5.debug (print this log on the console when start-up is done)
+DATA=TS5DATA IP= DEBUG=
+for a in $(cat /proc/cmdline); do
+  case $a in ts5.data=*) DATA=${a#ts5.data=};; ts5.ip=*) IP=${a#ts5.ip=};; ts5.debug) DEBUG=1;; esac
+done
+
+# The models SSD (or any partition with that label) holds models, ssh keys and settings.
+mkdir -p /data
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  dev=$(blkid 2>/dev/null | grep "LABEL=\"$DATA\"" | head -n1 | cut -d: -f1)
+  [ -n "$dev" ] && break
+  sleep 0.5
+done
+[ -n "$dev" ] && mount "$dev" /data
+
+# Network: Ethernet first. Wi-Fi comes next (/etc/rc.wifi, when present).
+ifconfig lo 127.0.0.1 up
+for i in /sys/class/net/*; do
+  n=${i##*/}
+  case $n in lo|wl*) continue;; esac
+  ifconfig "$n" up
+  if [ -n "$IP" ]; then
+    /etc/dhcp.script static "$n" "$IP"
+  else
+    dhcp -i "$n" -s /etc/dhcp.script -b -p /run/dhcp.$n.pid
+  fi
+done
+[ -x /etc/rc.wifi ] && /etc/rc.wifi
+
+# ssh: keys from the data disk (ssh/authorized_keys), or the one built into the image.
+mkdir -p /root/.ssh /etc/dropbear
+chmod 700 /root/.ssh
+for f in /data/ssh/authorized_keys /etc/ts5/authorized_keys; do
+  [ -f "$f" ] && cat "$f" >>/root/.ssh/authorized_keys
+done
+chmod 600 /root/.ssh/authorized_keys 2>/dev/null
+if [ -d /data ] && mountpoint -q /data; then
+  mkdir -p /data/ssh && rm -rf /etc/dropbear && ln -s /data/ssh /etc/dropbear   # host keys survive reboots
+fi
+dropbear -R -p 22 -P /run/dropbear.pid
+
+# ts5: the server runs in the background with the model loaded; ts5-tui attaches to it.
+if [ -x /data/ts5/bin/ts5 ]; then
+  ln -sf /data/ts5/bin/ts5 /data/ts5/bin/ts5-tui /bin/ 2>/dev/null
+  (cd /data/ts5 && exec ./bin/ts5 serve >>/run/ts5.log 2>&1) &
+fi
+set +x
+[ -n "$DEBUG" ] && cat /run/boot.log >&3
+echo "ts5: boot done" >&3
