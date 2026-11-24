@@ -24,6 +24,7 @@
 #include "kfd.h"
 #include "mv_q4k.h"
 #include "mv_q4k2.h"
+#include "mv_q6k.h"
 #include "pm4.h"
 
 using namespace ts5;
@@ -349,11 +350,14 @@ void q4k_scale_min(int j, const uint8_t* q, int& sc, int& m) {
 // Q4_K mat-vec (mv_q4k.h) on the shapes of Qwen3 8B's Q4_K matrices: random
 // blocks and x, the GPU's y checked against a CPU sum in double, then timed
 // one dispatch at a time with the matrix in VRAM.
-int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v2 = false) {
+// q6: the same for Q6_K (mv_q6k.h) on Qwen3 8B's Q6_K shapes (no diag
+// variants; mv-q6k-diag adds the plain-read control).
+int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v2 = false, bool q6 = false) {
+    const size_t BB = q6 ? 210 : 144;   // block bytes
     auto gen = [v2](int cols, const std::string& hints, int d, int depth, bool inter = false) {
         return v2 ? ts5::direct::gen_mv_q4k2(cols, hints, d, depth) : ts5::direct::gen_mv_q4k(cols, hints, d, depth, inter);
     };
-    std::printf("kernel: %s\n", v2 ? "mv_q4k2 (2 lanes per block)" : "mv_q4k (8 lanes per block, headers by one dword load)");
+    std::printf("kernel: %s\n", q6 ? "mv_q6k (4 lanes per block)" : v2 ? "mv_q4k2 (2 lanes per block)" : "mv_q4k (8 lanes per block, headers by one dword load)");
     if (!dev.create_queue()) return die(dev.err());
     gfx10::Kernel ck;
     kfd::Buffer ccode;
@@ -372,8 +376,12 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         return true;
     };
     struct Shape { const char* name; uint32_t rows, cols; };
-    const Shape shapes[] = {{"attn_q/attn_output 4096x4096", 4096, 4096}, {"attn_k 1024x4096", 1024, 4096},
-                            {"ffn_gate/up 12288x4096", 12288, 4096}, {"ffn_down 4096x12288", 4096, 12288}};
+    const Shape shapes4[] = {{"attn_q/attn_output 4096x4096", 4096, 4096}, {"attn_k 1024x4096", 1024, 4096},
+                             {"ffn_gate/up 12288x4096", 12288, 4096}, {"ffn_down 4096x12288", 4096, 12288}};
+    const Shape shapes6[] = {{"attn_v 1024x4096", 1024, 4096}, {"ffn_down 4096x12288", 4096, 12288},
+                             {"output 151936x4096", 151936, 4096}};
+    const Shape* shapes = q6 ? shapes6 : shapes4;
+    const size_t nshapes = q6 ? 3 : 4;
     uint32_t seed = 12345;
     auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
     bool all_ok = true;
@@ -399,24 +407,31 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         for (size_t i = 0; i < cb / 4; i++) ((uint32_t*)rd_code.cpu)[i] = 0xbf9f0000;
         std::memcpy(rd_code.cpu, rk.code.data(), rk.code.size() * 4);
     }
-    std::vector<Prep> preps(sizeof(shapes) / sizeof(shapes[0]));
+    std::vector<Prep> preps(nshapes);
     for (size_t si = 0; si < preps.size(); si++) {
         Prep& P = preps[si];
         const Shape& sh = shapes[si];
         P.sh = &sh;
-        const size_t nb = sh.cols / 256, row_bytes = nb * 144, bytes = row_bytes * sh.rows;
+        const size_t nb = sh.cols / 256, row_bytes = nb * BB, bytes = row_bytes * sh.rows;
         std::string err;
-        if (!gfx10::assemble(gen((int)sh.cols, "", 0, 1, !v2), P.k, &err)) return die("mv_q4k: " + err);
+        if (!gfx10::assemble(q6 ? ts5::direct::gen_mv_q6k((int)sh.cols) : gen((int)sh.cols, "", 0, 1, !v2), P.k, &err))
+            return die("mv kernel: " + err);
         size_t cb = (P.k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, P.code) || !dev.alloc(cb * 2, kfd::Mem::Gtt, P.dcode) ||
             !dev.alloc((size_t)dev.cu_count() * per_cu * 8 * 16, kfd::Mem::Gtt, P.ts)) return die(dev.err());
         for (size_t i = 0; i < cb / 4; i++) ((uint32_t*)P.code.cpu)[i] = 0xbf9f0000;
         std::memcpy(P.code.cpu, P.k.code.data(), P.k.code.size() * 4);
-        if (!dev.alloc(bytes, kfd::Mem::Gtt, P.wh) || !dev.alloc(bytes, kfd::Mem::Vram, P.wv) ||
+        if (!dev.alloc(bytes + 4096, kfd::Mem::Gtt, P.wh) || !dev.alloc(bytes + 4096, kfd::Mem::Vram, P.wv) ||
             !dev.alloc(sh.cols * 4, kfd::Mem::Gtt, P.xb) || !dev.alloc(sh.rows * 4, kfd::Mem::Gtt, P.yb))
             return die(dev.err());
         uint8_t* W = (uint8_t*)P.wh.cpu;
-        for (size_t b = 0; b < nb * sh.rows; b++) {
+        for (size_t b = 0; q6 && b < nb * sh.rows; b++) {   // Q6_K: random ql, qh, scales; d small
+            uint8_t* blk = W + b * 210;
+            for (int i = 0; i < 208; i++) blk[i] = (uint8_t)(rnd() >> 24);
+            uint16_t d = float_to_half(0.0001f + (rnd() >> 8) * (0.001f / 16777216.0f));
+            std::memcpy(blk + 208, &d, 2);
+        }
+        for (size_t b = 0; !q6 && b < nb * sh.rows; b++) {
             uint8_t* blk = W + b * 144;
             uint16_t d = float_to_half(0.0005f + (rnd() >> 8) * (0.004f / 16777216.0f));
             uint16_t dm = float_to_half(0.0005f + (rnd() >> 8) * (0.004f / 16777216.0f));
@@ -429,7 +444,34 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         // CPU reference, and the size of each row's terms to judge the error by.
         P.ref.resize(sh.rows);
         P.mag.resize(sh.rows);
-        for (uint32_t r = 0; r < sh.rows; r++) {
+        for (uint32_t r = 0; q6 && r < sh.rows; r++) {   // Q6_K, as ggml's dequantize_row_q6_K
+            double acc = 0, am = 0;
+            for (size_t b = 0; b < nb; b++) {
+                const uint8_t* blk = W + r * row_bytes + b * 210;
+                uint16_t dh;
+                std::memcpy(&dh, blk + 208, 2);
+                const double d = half_to_float(dh);
+                const int8_t* sc = (const int8_t*)(blk + 192);
+                const float* x = X + b * 256;
+                for (int n = 0; n < 2; n++) {
+                    const uint8_t* ql = blk + 64 * n;
+                    const uint8_t* qh = blk + 128 + 32 * n;
+                    for (int l = 0; l < 32; l++) {
+                        const int is = l / 16;
+                        const int q1 = ((ql[l] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                        const int q2 = ((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                        const int q3 = ((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+                        const int q4 = ((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+                        const double t[4] = {d * sc[8 * n + is] * q1 * x[128 * n + l], d * sc[8 * n + is + 2] * q2 * x[128 * n + l + 32],
+                                             d * sc[8 * n + is + 4] * q3 * x[128 * n + l + 64], d * sc[8 * n + is + 6] * q4 * x[128 * n + l + 96]};
+                        for (double v : t) { acc += v; am += std::fabs(v); }
+                    }
+                }
+            }
+            P.ref[r] = acc;
+            P.mag[r] = am;
+        }
+        for (uint32_t r = 0; !q6 && r < sh.rows; r++) {
             double acc = 0, am = 0;
             for (size_t b = 0; b < nb; b++) {
                 const uint8_t* blk = W + r * row_bytes + b * 144;
@@ -457,7 +499,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
     }
     for (Prep& P : preps) {
         const Shape& sh = *P.sh;
-        const size_t bytes = sh.cols / 256 * 144 * sh.rows;
+        const size_t bytes = sh.cols / 256 * BB * sh.rows;
         const gfx10::Kernel& k = P.k;
         double gs;
         {   // matrix into VRAM
@@ -470,7 +512,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         }
         // per: rows per workgroup for the sliced variants; step: the row step
         // the round-robin default gets in the same argument.
-        const uint32_t wgs = dev.cu_count() * per_cu, per = (sh.rows + wgs - 1) / wgs, step = v2 ? per : wgs * 8;
+        const uint32_t wgs = dev.cu_count() * per_cu, per = (sh.rows + wgs - 1) / wgs, step = v2 && !q6 ? per : wgs * 8;
         auto mv = [&](const kfd::Buffer& w, double* t_s) -> bool {
             std::memset(P.yb.cpu, 0xff, sh.rows * 4);
             pm4::Stream s;
@@ -555,7 +597,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         std::fflush(stdout);
         // diag: the same kernel with parts left out (results not checked),
         // then with 1 and 3 steps of loads in flight (results checked).
-        for (int d = 1; diag && d < 24; d++) {
+        for (int d = 1; diag && !q6 && d < 24; d++) {
             // 1-7: parts left out; 8: timestamps; 9: timestamps, nothing but the frame; 10, 11: 2 and 3 steps in
             // flight; 12, 13: loads only with 2 and 3 steps in flight; 14-17 rows dealt round-robin: full,
             // loads only, full with 2 steps, timestamps
@@ -648,7 +690,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
             std::fflush(stdout);
         }
     }
-    std::printf("mv-q4k: %s (%u workgroups, 256 threads each)\n", all_ok ? "all rows match the CPU" : "SOME ROWS WRONG",
+    std::printf("%s: %s (%u workgroups, 256 threads each)\n", q6 ? "mv-q6k" : "mv-q4k", all_ok ? "all rows match the CPU" : "SOME ROWS WRONG",
                 dev.cu_count() * per_cu);
     return all_ok ? 0 : 1;
 }
@@ -662,6 +704,10 @@ int main(int argc, char** argv) {
                                             argc > 4 ? std::atoi(argv[4]) : 1)
                        .c_str(),
                    stdout);
+        return 0;
+    }
+    if (cmd == "gen-mv6") {   // prints mv_q6k for a column count [diag]
+        std::fputs(ts5::direct::gen_mv_q6k(argc > 2 ? std::atoi(argv[2]) : 4096, argc > 3 ? std::atoi(argv[3]) : 0).c_str(), stdout);
         return 0;
     }
     if (cmd == "gen-mv") {   // prints mv_q4k for a column count
@@ -714,6 +760,12 @@ int main(int argc, char** argv) {
             if (!gfx10::assemble(ts5::direct::gen_mv_q4k2(cols), k, &err)) return die("mv_q4k2 " + std::to_string(cols) + ": " + err);
             std::printf("mv_q4k2 %d cols: %zu words, %d vgprs, lds %u\n", cols, k.code.size(), k.vgprs, k.lds_bytes);
         }
+        for (int cols : {2048, 4096, 12288}) {
+            gfx10::Kernel k;
+            std::string err;
+            if (!gfx10::assemble(ts5::direct::gen_mv_q6k(cols), k, &err)) return die("mv_q6k " + std::to_string(cols) + ": " + err);
+            std::printf("mv_q6k %d cols: %zu words, %d vgprs, lds %u\n", cols, k.code.size(), k.vgprs, k.lds_bytes);
+        }
         return 0;
     }
     kfd::Device dev;
@@ -749,6 +801,8 @@ int main(int argc, char** argv) {
         return cmd_bw_sweep(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024, {kfd::Mem::Vram}, cfgs,
                             argc > 3 ? std::atoi(argv[3]) : 30);
     }
+    if (cmd == "mv-q6k" || cmd == "mv-q6k-diag")
+        return cmd_mv_q4k(dev, argc > 2 ? std::atoi(argv[2]) : 30, argc > 3 ? std::atoi(argv[3]) : 1, cmd == "mv-q6k-diag", false, true);
     if (cmd == "mv-q4k" || cmd == "mv-diag")
         return cmd_mv_q4k(dev, argc > 2 ? std::atoi(argv[2]) : 30, argc > 3 ? std::atoi(argv[3]) : 1, cmd == "mv-diag",
                           argc > 4 && std::string(argv[4]) == "v2");
