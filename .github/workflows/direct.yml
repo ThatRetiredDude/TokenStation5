@@ -65,6 +65,10 @@ jobs:
             build/direct/ts5-direct gen-mm $v > /tmp/mm.s
             python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/mm.s
           done
+          for v in "4096 16" "12288 16" "4096 8"; do
+            build/direct/ts5-direct gen-xt $v > /tmp/xt.s
+            python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/xt.s
+          done
           for v in 0 1 2 3; do
             build/direct/ts5-direct gen-mvs $v > /tmp/mvs.s
             python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/mvs.s

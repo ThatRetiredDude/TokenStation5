@@ -1,7 +1,8 @@
 // ts5's "direct" backend (--backend direct): the direct engine's runner
 // behind the Backend interface, for Qwen3 models of Q4_K and Q6_K weights on
-// the PS5's GPU. One token at a time for now, prompts included: the runner
-// queues them back to back, so a prompt runs at the generation speed.
+// the PS5's GPU. A prompt goes Runner::kBatch tokens a pass over the weights
+// (send_batch); generation and short tails one token at a time.
+#include <algorithm>
 #include <cstring>
 #include <memory>
 
@@ -25,7 +26,12 @@ public:
             err = "position past the context";
             return false;
         }
-        for (int i = 0; i < n; i++) {
+        int i = 0;
+        if (!(all_logits && logits) && r_.batch_ok())
+            // Batches of kBatch; a tail of 4 or more is one more (short) batch.
+            for (; n - i >= 4; i += std::min(n - i, direct::Runner::kBatch))
+                if (!r_.send_batch(tokens + i, std::min(n - i, direct::Runner::kBatch), pos0 + i)) return fail(err);
+        for (; i < n; i++) {
             if (!r_.send(tokens[i], pos0 + i)) return fail(err);
             if (all_logits && logits) {   // each token's logits: wait for each
                 if (!r_.wait_all()) return fail(err);

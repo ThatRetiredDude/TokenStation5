@@ -40,6 +40,12 @@ public:
     // Queues one token at `pos`: row `id` of the embeddings, or with id -1
     // the token the last one's argmax chose. Returns at once.
     bool send(int32_t id, int pos);
+    // Queues up to kBatch prompt tokens at pos0.. at once (ids given): one
+    // pass over each weight matrix for all of them (mm_q4k.h, mm_q6k.h).
+    // Only the last token's logits (and argmax) are kept. Returns at once.
+    static constexpr int kBatch = 16;
+    bool send_batch(const int32_t* ids, int nt, int pos0);
+    bool batch_ok() const { return batch_ok_; }
     // Waits until every token sent so far is done.
     bool wait_all(int timeout_ms = 60000);
     uint64_t sent() const { return seq_; }
@@ -65,6 +71,9 @@ private:
     bool load(const std::string& src, Prog& p, std::string& err);
     Prog* mv_prog(const Weight& w, Stage st = Stage::None);
     void build(int32_t id, int pos, uint64_t seq, pm4::Stream& s);
+    Prog* mm_prog(const Weight& w);
+    Prog* xt_prog(int K);
+    bool init_batch(std::string& err);
 
     kfd::Device dev_;
     Model* m_ = nullptr;
@@ -73,7 +82,10 @@ private:
     uint32_t wgs_ = 0, step_ = 0, scale_bits_ = 0;
     uint64_t seq_ = 0;
     int nstamps_ = 0;
-    std::map<uint64_t, Prog> mvs_;
+    std::map<uint64_t, Prog> mvs_, mms_, xts_;
+    bool batch_ok_ = false;
+    size_t part_bytes_ = 0;
+    kfd::Buffer pX_, pXN_, pT_, pQ_, pK_, pV_, pA_, pG_, pU_, pH_, pxT_, pxs32_, pxs16_, ppart_;
     Prog k_norm_, k_addnorm_, k_qk_, k_silu_, k_attn_, k_red_, k_argmax_, k_embed_;
     kfd::Buffer wbuf_, bx2_, bzero_, bblk_, bx_, bxn_, bq_, bk_, bv_, batt_, bt_, bg_, bu_, bh_, blog_, bkv_, brope_, bpart_, bstamp_,
         bslot_, bids_, bts_;

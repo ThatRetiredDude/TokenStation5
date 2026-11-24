@@ -171,6 +171,61 @@ int cmd_token(int argc, char** argv) {
         for (int i = 0; i < S_COUNT; i++)
             std::printf("  %-18s %8.3f ms  %5.1f%%\n", kStepName[i], step_time[i] / profiled * 1e3, 100 * step_time[i] / tot);
     }
+    // 3. The prompt path (send_batch), after the timing above (it reuses
+    // the KV cache from position 0): a longer prompt in batches, its last
+    // token's logits against the CPU's for the same tokens, then timed.
+    if (R.batch_ok()) {
+        std::vector<int32_t> p2 = have_tok ? tok.encode("The quick brown fox jumps over the lazy dog. Paris is the capital and most "
+                                                        "populous city of France, on the Seine. Its museums include the Louvre and",
+                                                        false)
+                                           : std::vector<int32_t>(37, 785);
+        const int np = (int)p2.size(), base = 0;
+        std::vector<float> cpu_last(V);
+        std::unique_ptr<Backend> cpu2(make_cpu_backend(m, ctx, KvType::F16));
+        if (!cpu2->forward(p2.data(), np, base, cpu_last.data(), false, err)) return fail("cpu: " + err);
+        for (int i = 0; i < np; i += Runner::kBatch)
+            if (!R.send_batch(p2.data() + i, std::min(np - i, Runner::kBatch), base + i)) return fail(R.err() + " (prompt batch)");
+        if (!R.wait_all(60000)) return fail(R.err() + " (prompt batches)");
+        double md = 0, ml = 0;
+        int gtop = 0, ctop = 0;
+        bool nan = false;
+        for (int i = 0; i < V; i++) {
+            if (!(gl[i] == gl[i])) nan = true;
+            md = std::max(md, (double)std::fabs(gl[i] - cpu_last[i]));
+            ml = std::max(ml, (double)std::fabs(cpu_last[i]));
+            if (gl[i] > gl[gtop]) gtop = i;
+            if (cpu_last[i] > cpu_last[ctop]) ctop = i;
+        }
+        const bool bok = !nan && gtop == ctop && md < 0.05 * ml && R.picked() == gtop;
+        if (!bok) ok = false;
+        std::printf("prompt batches: %d tokens, last token's top-1 gpu %s %d, cpu %s %d, max |diff| %.4f of max |logit| %.3f, GPU argmax %d: %s\n",
+                    np, piece(gtop).c_str(), gtop, piece(ctop).c_str(), ctop, md, ml, R.picked(), bok ? "MATCH" : "MISMATCH");
+        // Timed: 512 tokens (32 batches) queued, then the same as single tokens.
+        std::vector<int32_t> filler(512);
+        for (int i = 0; i < 512; i++) filler[i] = p2[i % np];
+        for (int mode = 0; mode < 2 && 512 <= ctx; mode++) {
+            const uint64_t q0 = R.sent();
+            auto h0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < 512;) {
+                if (mode == 0) {
+                    if (!R.send_batch(filler.data() + i, Runner::kBatch, i)) return fail(R.err() + " (timed prompt)");
+                    i += Runner::kBatch;
+                } else {
+                    if (!R.send(filler[i], i)) return fail(R.err() + " (timed prompt)");
+                    i++;
+                }
+            }
+            if (!R.wait_all(120000)) return fail(R.err() + " (timed prompt)");
+            const double hs = std::chrono::duration<double>(std::chrono::steady_clock::now() - h0).count();
+            const double gs = (R.t_end(R.sent() - 1) - R.t_start(q0)) / 100e6;
+            std::printf("prompt of 512 tokens, %s: GPU %.1f ms = %.1f tok/s (host clock %.1f tok/s)\n",
+                        mode == 0 ? "batches of 16" : "a token at a time", gs * 1e3, 512 / gs, 512 / hs);
+            std::fflush(stdout);
+        }
+    } else {
+        std::printf("prompt batches: not available for this model\n");
+    }
+
     return ok ? 0 : 1;
 }
 

@@ -29,6 +29,7 @@
 #include "ops.h"
 #include "mm_q4k.h"
 #include "mm_q6k.h"
+#include "prefill.h"
 #include "pm4.h"
 
 using namespace ts5;
@@ -884,6 +885,10 @@ int main(int argc, char** argv) {
     }
     if (cmd == "gen-attn") {   // prints attn_part, or attn_reduce with "reduce"
         std::fputs((argc > 2 && std::string(argv[2]) == "reduce" ? ts5::direct::gen_attn_reduce() : ts5::direct::gen_attn_part()).c_str(), stdout);
+        return 0;
+    }
+    if (cmd == "gen-xt") {   // prints to_xT (prefill.h) for K columns and T tokens
+        std::fputs(ts5::direct::gen_to_xT(argc > 2 ? std::atoi(argv[2]) : 4096, argc > 3 ? std::atoi(argv[3]) : 16).c_str(), stdout);
         return 0;
     }
     if (cmd == "gen-ops") {   // prints rmsnorm, add_rmsnorm, qk_post and silu_mul

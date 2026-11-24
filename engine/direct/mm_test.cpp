@@ -166,7 +166,7 @@ int cmd_mm_q4k(int argc, char** argv) {
                     k.vgprs, k.sgprs);
         std::fflush(stdout);
     }
-    std::printf("mm-q4k: %s\n", all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
+    std::printf("%s: %s\n", q6 ? "mm-q6k" : "mm-q4k", all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
     return all_ok ? 0 : 1;
 }
 
