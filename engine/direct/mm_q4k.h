@@ -17,7 +17,8 @@
 // Arguments: s[0:1] W, s[2:3] xT (K x T, f32, a column's T values
 // together), s[4:5] Y (T x R, f32), s6 R, s7 unused, s[8:9] xs (K/32 x T,
 // f32); s10 workgroup id. Grid: R / 32 workgroups of 32 threads. W must have
-// 144 readable bytes after its last row (the next block is loaded ahead).
+// 144 readable bytes after its last row and xT 2T dwords after its end
+// (the next block and the next step's x are loaded ahead).
 #pragma once
 #include <string>
 
@@ -30,7 +31,7 @@ inline std::string gen_mm_q4k(int K, int T) {
     const int NB = K / 256, RB = NB * 144;
     const int A = 8, B = 44;                  // the block being worked on, the next one (36 dwords each)
     const int DSC = 80, DMM = 88, ACC = 96, TMP = 112, U = 128;
-    const int SX = 20, SXS = 84;              // x: 4 columns of T; the sub-block sums: T
+    const int SX = 20, SXS = 84;              // x: two sets of 2 columns of T; the sub-block sums: T
     k += ".kernel mm_q4k\n.wave32\n.user_sgprs 10\n.tgid_x\n";
     o("s_lshl_b32 s11, s10, 5");
     o("v_add_nc_u32 v3, s11, v0");             // the lane's row
@@ -46,6 +47,10 @@ inline std::string gen_mm_q4k(int K, int T) {
     o("s_mov_b32 s14, s8");                    // its sub-block sums
     o("s_mov_b32 s15, s9");
     o("s_mov_b32 s16, " + S(NB));
+    for (int i = 0; i < 2 * T; i += (2 * T - i >= 16 ? 16 : 8)) {
+        const int w = 2 * T - i >= 16 ? 16 : 8;
+        o("s_load_dwordx" + S(w) + " s[" + S(SX + i) + ":" + S(SX + i + w - 1) + "], s[2:3], " + S(4 * i));
+    }
     k += "block:\n";
     o("v_add_nc_u32 v1, 144, v1");
     load(B);                                   // the next block (past the row's end on its last: unused)
@@ -81,10 +86,22 @@ inline std::string gen_mm_q4k(int K, int T) {
             o("s_load_dwordx" + S(w) + " s[" + S(dst + i) + ":" + S(dst + i + w - 1) + "], " + base + ", " + S(off + 4 * i));
         }
     };
-    for (int j = 0; j < 8; j++) {
-        for (int dw = 0; dw < 8; dw++) {
-            const std::string q = "v" + S(A + 4 + 8 * (j / 2) + dw);
-            sload(SX, 4 * T, "s[12:13]", (32 * j + 4 * dw) * T * 4);
+    // Steps of 2 columns (2T SGPRs), the next step's x loaded while this
+    // one's multiply-adds run (round 39 waited for every load: its passes
+    // ran at a fifth of what the arithmetic allows). Two SGPR sets
+    // alternate. Scalar loads may return out of order, so each step waits
+    // for all of them (lgkmcnt(0)) before issuing the next.
+    // The x of step (j, dw, h): columns 32 j + 4 dw + 2 h, + 1.
+    auto xoff = [&](int st) { const int j = st / 16, dw = (st / 2) % 8, h = st % 2; return (32 * j + 4 * dw + 2 * h) * T * 4; };
+    auto buf = [&](int st) { return SX + (st & 1) * 2 * T; };
+    for (int st = 0; st < 128; st++) {
+        const int j = st / 16, dw = (st / 2) % 8, h = st % 2;
+        o("s_waitcnt lgkmcnt(0)");
+        if (st + 1 < 128) sload(buf(st + 1), 2 * T, "s[12:13]", xoff(st + 1));
+        else sload(buf(0), 2 * T, "s[12:13]", 256 * T * 4);   // the next block's first step (past the end on the last: unused)
+        if (dw == 7 && h == 0) sload(SXS, T, "s[14:15]", j * T * 4);   // the sub-block's sums, for its end
+        const std::string q = "v" + S(A + 4 + 8 * (j / 2) + dw);
+        if (h == 0) {
             if (j & 1) {
                 o("v_lshrrev_b32 v" + S(U) + ", 4, " + q);
                 o("v_and_b32 v" + S(U) + ", 0x0f0f0f0f, v" + S(U));
@@ -92,19 +109,19 @@ inline std::string gen_mm_q4k(int K, int T) {
                 o("v_and_b32 v" + S(U) + ", 0x0f0f0f0f, " + q);
             }
             for (int b = 0; b < 4; b++) o("v_cvt_f32_ubyte" + S(b) + " v" + S(U + 1 + b) + ", v" + S(U));
-            o("s_waitcnt lgkmcnt(0)");
-            for (int c = 0; c < 4; c++)
-                for (int t = 0; t < T; t++) {
-                    const std::string x = "s" + S(SX + c * T + t), w = "v" + S(U + 1 + c);
-                    if (dw == 0 && c == 0) o("v_mul_f32 v" + S(TMP + t) + ", " + x + ", " + w);
-                    else o("v_fmac_f32 v" + S(TMP + t) + ", " + x + ", " + w);
-                }
         }
-        sload(SXS, T, "s[14:15]", j * T * 4);
-        o("s_waitcnt lgkmcnt(0)");
-        for (int t = 0; t < T; t++) {
-            o("v_fmac_f32 v" + S(ACC + t) + ", v" + S(DSC + j) + ", v" + S(TMP + t));
-            o("v_fma_f32 v" + S(ACC + t) + ", -v" + S(DMM + j) + ", s" + S(SXS + t) + ", v" + S(ACC + t));
+        for (int c = 0; c < 2; c++)
+            for (int t = 0; t < T; t++) {
+                const std::string x = "s" + S(buf(st) + c * T + t), w = "v" + S(U + 1 + 2 * h + c);
+                if (dw == 0 && h == 0 && c == 0) o("v_mul_f32 v" + S(TMP + t) + ", " + x + ", " + w);
+                else o("v_fmac_f32 v" + S(TMP + t) + ", " + x + ", " + w);
+            }
+        if (dw == 7 && h == 1) {
+            o("s_waitcnt lgkmcnt(0)");
+            for (int t = 0; t < T; t++) {
+                o("v_fmac_f32 v" + S(ACC + t) + ", v" + S(DSC + j) + ", v" + S(TMP + t));
+                o("v_fma_f32 v" + S(ACC + t) + ", -v" + S(DMM + j) + ", s" + S(SXS + t) + ", v" + S(ACC + t));
+            }
         }
     }
     o("s_add_u32 s12, s12, " + S(256 * T * 4));

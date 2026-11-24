@@ -55,7 +55,7 @@ int cmd_mm_q4k(int argc, char** argv) {
         kfd::Buffer code, W, xT, xs, Y;
         const size_t cb = (k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, code) || !dev.alloc(wbytes + 4096, kfd::Mem::Gtt, W) ||
-            !dev.alloc((size_t)sh.K * T * 4, kfd::Mem::Gtt, xT) || !dev.alloc((size_t)sh.K / 32 * T * 4, kfd::Mem::Gtt, xs) ||
+            !dev.alloc((size_t)sh.K * T * 4 + 4096, kfd::Mem::Gtt, xT) || !dev.alloc((size_t)sh.K / 32 * T * 4, kfd::Mem::Gtt, xs) ||
             !dev.alloc((size_t)sh.R * T * 4, kfd::Mem::Gtt, Y)) {
             std::fprintf(stderr, "mm-q4k: %s\n", dev.err().c_str());
             return 1;
@@ -123,9 +123,20 @@ int cmd_mm_q4k(int argc, char** argv) {
             std::printf("  %s: WRONG, %zu of %zu values, worst %.3g, first token %zu row %zu: gpu %g cpu %g\n", sh.name, bad,
                         (size_t)T * sh.R, worst, first / sh.R, first % sh.R, y[first], ref[first]);
         }
-        // Timed: batches of 20 passes, each waiting for the last.
+        // Timed: batches of 20 passes, each waiting for the last, after
+        // 100 ms of warm-up (round 39's first timings ran on a cold clock).
+        for (double warm = 0; warm < 0.1;) {
+            pm4::Stream s;
+            for (int i = 0; i < 20; i++) {
+                if (i) s.wait_kernels();
+                s.dispatch(k, code.gpu, args, 10, g, th);
+            }
+            double tot;
+            if (!run(s, &tot)) { std::fprintf(stderr, "mm-q4k: %s\n", dev.err().c_str()); return 1; }
+            warm += tot;
+        }
         std::vector<double> st;
-        for (int rep = 0; rep < 8; rep++) {
+        for (int rep = 0; rep < 12; rep++) {
             pm4::Stream s;
             for (int i = 0; i < 20; i++) {
                 if (i) s.wait_kernels();
