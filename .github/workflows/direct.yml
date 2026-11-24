@@ -1,0 +1,27 @@
+name: direct
+
+# The direct engine (engine/direct): builds the assembler and checks every
+# instruction form and every kernel against llvm-mc, byte for byte. llvm-mc
+# is only the second opinion here; nothing it makes ships.
+
+on:
+  push:
+    branches: [main, linux-package]
+    paths: ["engine/direct/**", ".github/workflows/direct.yml"]
+  pull_request:
+    paths: ["engine/direct/**", ".github/workflows/direct.yml"]
+
+jobs:
+  assembler:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install a compiler and llvm-mc
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++ cmake llvm-18
+          echo /usr/lib/llvm-18/bin >> "$GITHUB_PATH"
+      - name: Build
+        run: cmake -S engine/direct -B build/direct && cmake --build build/direct -j
+      - name: Check against llvm-mc
+        run: python3 engine/direct/tests/asm_check.py build/direct/ts5-asm
