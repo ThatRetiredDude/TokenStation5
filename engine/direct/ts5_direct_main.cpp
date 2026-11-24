@@ -26,9 +26,14 @@
 #include "mv_q4k2.h"
 #include "mv_q6k.h"
 #include "attn.h"
+#include "ops.h"
 #include "pm4.h"
 
 using namespace ts5;
+
+namespace ts5::direct {
+int cmd_token(kfd::Device& dev, int argc, char** argv);   // token.cpp
+}
 
 namespace {
 
@@ -878,6 +883,13 @@ int main(int argc, char** argv) {
         std::fputs((argc > 2 && std::string(argv[2]) == "reduce" ? ts5::direct::gen_attn_reduce() : ts5::direct::gen_attn_part()).c_str(), stdout);
         return 0;
     }
+    if (cmd == "gen-ops") {   // prints rmsnorm, add_rmsnorm, qk_post and silu_mul
+        std::fputs((ts5::direct::gen_rmsnorm(4096, 1e-6f) + ts5::direct::gen_rmsnorm(4096, 1e-6f, true) +
+                    ts5::direct::gen_qk_post(32, 1e-6f) + ts5::direct::gen_silu_mul())
+                       .c_str(),
+                   stdout);
+        return 0;
+    }
     if (cmd == "gen-mv6") {   // prints mv_q6k for a column count [diag]
         std::fputs(ts5::direct::gen_mv_q6k(argc > 2 ? std::atoi(argv[2]) : 4096, argc > 3 ? std::atoi(argv[3]) : 0).c_str(), stdout);
         return 0;
@@ -944,11 +956,23 @@ int main(int argc, char** argv) {
             if (!gfx10::assemble(ts5::direct::gen_mv_q6k(cols), k, &err)) return die("mv_q6k " + std::to_string(cols) + ": " + err);
             std::printf("mv_q6k %d cols: %zu words, %d vgprs, lds %u\n", cols, k.code.size(), k.vgprs, k.lds_bytes);
         }
+        for (const std::string& src : {ts5::direct::gen_rmsnorm(4096, 1e-6f), ts5::direct::gen_rmsnorm(4096, 1e-6f, true),
+                                       ts5::direct::gen_qk_post(32, 1e-6f), ts5::direct::gen_silu_mul()}) {
+            gfx10::Kernel k;
+            std::string err;
+            if (!gfx10::assemble(src, k, &err)) return die("ops: " + err);
+            std::printf("%s: %zu words, %d vgprs, %d sgprs\n", k.name.c_str(), k.code.size(), k.vgprs, k.sgprs);
+        }
         return 0;
     }
     kfd::Device dev;
     if (!dev.open()) return die(dev.err());
     if (cmd == "info") return cmd_info(dev);
+    if (cmd == "token") {
+        // A token's stream is about 30,000 dwords: a 1 MiB ring.
+        if (!dev.create_queue(1 << 20)) return die(dev.err());
+        return ts5::direct::cmd_token(dev, argc, argv);
+    }
     if (cmd == "fill") return cmd_fill(dev);
     if (cmd == "read-bw") return cmd_read_bw(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024);
     if (cmd == "bw-sweep") {

@@ -26,6 +26,15 @@ add_custom_command(
   COMMAND ${CMAKE_COMMAND} -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR} -DOUT=${CMAKE_CURRENT_BINARY_DIR}/kernels.h
           -P ${CMAKE_CURRENT_SOURCE_DIR}/embed_kernels.cmake
   DEPENDS ${kernel_srcs} ${CMAKE_CURRENT_SOURCE_DIR}/embed_kernels.cmake)
-add_executable(ts5-direct ts5_direct_main.cpp kfd.cpp ${CMAKE_CURRENT_BINARY_DIR}/kernels.h)
+# ts5's model reader, quantization, tokenizer and CPU backend: the token
+# command loads models with them and checks its logits against the CPU.
+set(ENGINE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+find_package(Threads REQUIRED)
+add_library(ts5model STATIC ${ENGINE_SRC}/gguf.cpp ${ENGINE_SRC}/model.cpp ${ENGINE_SRC}/log.cpp ${ENGINE_SRC}/quants.cpp
+            ${ENGINE_SRC}/cpu_backend.cpp ${ENGINE_SRC}/tokenizer.cpp)
+target_include_directories(ts5model PUBLIC ${ENGINE_SRC})
+target_compile_options(ts5model PRIVATE -w)
+target_link_libraries(ts5model PUBLIC Threads::Threads)
+add_executable(ts5-direct ts5_direct_main.cpp token.cpp kfd.cpp ${CMAKE_CURRENT_BINARY_DIR}/kernels.h)
 target_include_directories(ts5-direct PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries(ts5-direct ts5gfx10 -static-libstdc++ -static-libgcc)
+target_link_libraries(ts5-direct ts5gfx10 ts5model -static-libstdc++ -static-libgcc)

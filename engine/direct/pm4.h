@@ -77,6 +77,15 @@ struct Stream {
         packet(ACQUIRE_MEM, {0, 0xffffffff, 0xffffffff, 0, 0, 0x0000000a, gcr});
     }
 
+    // Invalidates only the caches a CU reads through (scalar, vector L0, the
+    // shader array's L1), not L2, which every CU shares and kernels write
+    // into: what a token's next kernel needs after wait_kernels() to see
+    // the previous one's results instead of lines it read earlier.
+    void acquire_light() {
+        uint32_t gcr = 1u << 7 /* GLK_INV */ | 1u << 8 /* GLV_INV */ | 1u << 9 /* GL1_INV */;
+        packet(ACQUIRE_MEM, {0, 0xffffffff, 0xffffffff, 0, 0, 0x0000000a, gcr});
+    }
+
     // Waits for every kernel before it to finish (no cache flush): the one
     // barrier a kernel needs when it reads what the previous one wrote.
     void wait_kernels() { packet(EVENT_WRITE, {CS_PARTIAL_FLUSH | 4u << 8}); }
@@ -112,6 +121,13 @@ struct Stream {
         // fence never lands before the flushes and writes it follows.
         uint32_t sel = data_sel << 29 | 3u << 24 | 0u << 16 /* to memory */;
         packet(RELEASE_MEM, {event, sel, (uint32_t)addr, (uint32_t)(addr >> 32), (uint32_t)value, (uint32_t)(value >> 32), 0});
+    }
+
+    // The GPU's clock at `addr` once everything before it is done, with no
+    // cache flush or invalidation (for profiles inside a token).
+    void stamp(uint64_t addr) {
+        uint32_t event = CACHE_FLUSH_AND_INV_TS_EVENT | 5u << 8;
+        packet(RELEASE_MEM, {event, 3u << 29, (uint32_t)addr, (uint32_t)(addr >> 32), 0, 0, 0});
     }
 };
 

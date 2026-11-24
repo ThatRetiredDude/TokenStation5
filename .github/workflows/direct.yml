@@ -57,6 +57,10 @@ jobs:
             build/direct/ts5-direct gen-attn $v > /tmp/attn.s
             python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/attn.s
           done
+      - name: Check the token kernels against llvm-mc
+        run: |
+          build/direct/ts5-direct gen-ops > /tmp/ops.s
+          python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/ops.s
       - name: Keep ts5-direct for testing on the PS5
         uses: actions/upload-artifact@v4
         with:
