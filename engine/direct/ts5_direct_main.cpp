@@ -6,7 +6,7 @@
 //                                and workgroup counts, 5 runs each
 //   ts5-direct bw-last [MiB] [runs]     grid vs chunked, workgroup placement per run
 //   ts5-direct bw-repeat [N] [wave64]   the best setup N times in a row (hang hunt)
-//   ts5-direct mv-q4k [runs] [wgs/CU] [v1]   Q4_K mat-vec on Qwen3 8B's shapes: checked against the CPU, timed
+//   ts5-direct mv-q4k [runs] [wgs/CU] [v2]   Q4_K mat-vec on Qwen3 8B's shapes: checked against the CPU, timed
 // Kernels are assembled at start from the text built into the program.
 #include <algorithm>
 #include <chrono>
@@ -349,11 +349,11 @@ void q4k_scale_min(int j, const uint8_t* q, int& sc, int& m) {
 // Q4_K mat-vec (mv_q4k.h) on the shapes of Qwen3 8B's Q4_K matrices: random
 // blocks and x, the GPU's y checked against a CPU sum in double, then timed
 // one dispatch at a time with the matrix in VRAM.
-int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v2 = true) {
+int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v2 = false) {
     auto gen = [v2](int cols, const std::string& hints, int d, int depth) {
         return v2 ? ts5::direct::gen_mv_q4k2(cols, hints, d, depth) : ts5::direct::gen_mv_q4k(cols, hints, d, depth);
     };
-    std::printf("kernel: %s\n", v2 ? "mv_q4k2 (2 lanes per block)" : "mv_q4k (8 lanes per block)");
+    std::printf("kernel: %s\n", v2 ? "mv_q4k2 (2 lanes per block)" : "mv_q4k (8 lanes per block, headers by one dword load)");
     if (!dev.create_queue()) return die(dev.err());
     gfx10::Kernel ck;
     kfd::Buffer ccode;
@@ -693,7 +693,7 @@ int main(int argc, char** argv) {
     }
     if (cmd == "mv-q4k" || cmd == "mv-diag")
         return cmd_mv_q4k(dev, argc > 2 ? std::atoi(argv[2]) : 30, argc > 3 ? std::atoi(argv[3]) : 1, cmd == "mv-diag",
-                          !(argc > 4 && std::string(argv[4]) == "v1"));
+                          argc > 4 && std::string(argv[4]) == "v2");
     if (cmd == "bw-repeat") {
         // bw-repeat N [wave64]: one good setup N times (hang hunt), VRAM
         int n = argc > 2 ? std::atoi(argv[2]) : 500;

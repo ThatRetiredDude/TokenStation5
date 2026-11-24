@@ -137,17 +137,34 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", i
         o("v_xor_b32 v112, " + S(c) + ", v110");
         o("v_lshl_add_u32 v" + S(126 + c) + ", v112, 4, v4");
     }
+    // Headers: one dword load per step brings the step's 8 headers (round
+    // 13: loads, not math, set the pace, and a 16-byte header loaded by all
+    // 8 lanes of its block cost a whole load instruction per block). In
+    // each 16-lane row, lane i holds dword (i & 3) of block
+    // [2r, 2r+1, 2r+4, 2r+5][(i >> 2) & 3], r the row: exactly the blocks
+    // that row's lanes work on, so v_permlane16 hands each lane its block's
+    // four dwords.
+    o("v_bfe_u32 v112, v0, 2, 2");        // j
+    o("v_and_b32 v113, 1, v112");
+    o("v_lshrrev_b32 v112, 1, v112");
+    o("v_lshl_add_u32 v113, v112, 2, v113");   // (j & 1) + 4 (j >> 1)
+    o("v_bfe_u32 v112, v0, 4, 1");        // r
+    o("v_lshl_add_u32 v113, v112, 1, v113");   // block
+    o("v_and_b32 v112, 3, v0");
+    o("v_lshlrev_b32 v112, 2, v112");
+    o("v_mad_u32_u24 v135, v113, 144, v112");  // header dword offset
     o("v_cmp_le_u32 vcc_lo, 2, v110");    // the upper scales' packing (p >= 2), kept in vcc
     o("v_mov_b32 v6, 0");                 // the row's sum
     o("s_mov_b32 s30, 0x76543210");
     o("s_mov_b32 s31, 0xfedcba98");
 
-    auto loads = [&](int base) {   // one step's four loads into v[base..base+15]
+    // One step's loads into v[base..base+8]: the header dword, then each
+    // group's 16 bytes of nibbles.
+    auto loads = [&](int base) {
         if (diag & 4) return;
-        o("global_load_dwordx4 v[" + S(base) + ":" + S(base + 3) + "], v1, s[22:23]" + H);
-        o("global_load_dwordx4 v[" + S(base + 4) + ":" + S(base + 7) + "], v2, s[22:23]" + H);
-        o("global_load_dwordx4 v[" + S(base + 8) + ":" + S(base + 11) + "], v1, s[22:23] offset:576" + H);
-        o("global_load_dwordx4 v[" + S(base + 12) + ":" + S(base + 15) + "], v2, s[22:23] offset:576" + H);
+        o("global_load_dword v" + S(base) + ", v135, s[22:23]" + H);
+        o("global_load_dwordx4 v[" + S(base + 1) + ":" + S(base + 4) + "], v2, s[22:23]" + H);
+        o("global_load_dwordx4 v[" + S(base + 5) + ":" + S(base + 8) + "], v2, s[22:23] offset:576" + H);
         o("v_nop");   // VMEMtoScalarWrite: the loads read s[22:23] before it changes
     };
     int site = 0;
@@ -249,11 +266,18 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", i
             o("ds_read_b32 v" + S(sr) + ", v125 offset:" + S(so));
             o("ds_read_b32 v" + S(sr + 1) + ", v125 offset:" + S(so + 8));
         }
-        o("s_waitcnt vmcnt(" + S(4 * depth) + ")");
+        o("s_waitcnt vmcnt(" + S(3 * depth) + ")");
+        for (int g = 0; g < 2; g++)
+            for (int d = 0; d < 4; d++) {   // group g's header dword d from lane 4 (2g + (i >= 8)) + d of the row
+                const unsigned lo = (8u * g + d) * 0x11111111u, hi = (8u * g + 4 + d) * 0x11111111u;
+                o("s_mov_b32 s48, " + S(lo));
+                o("s_mov_b32 s49, " + S(hi));
+                o("v_permlane16_b32 v" + S(184 + 4 * g + d) + ", v" + S(base) + ", s48, s49");
+            }
         o("s_waitcnt lgkmcnt(10)");
-        block(base, base + 4, 40, 72);
+        block(184, base + 1, 40, 72);
         o("s_waitcnt lgkmcnt(0)");
-        block(base + 8, base + 12, 74, 106);
+        block(188, base + 5, 74, 106);
         o("s_add_u32 s33, s33, 1");
         o("s_cmp_eq_u32 s33, " + S(nit));
         o("s_cbranch_scc0 cnext" + n);
@@ -282,7 +306,7 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", i
 
     // depth+1 register sets in rotation; each compute waits only for the
     // oldest set while the other `depth` sets' loads stay in flight.
-    const int sets[4] = {8, 24, 134, 150};
+    const int sets[4] = {8, 17, 26, 150};   // 9 registers each
     for (int i = 0; i < depth; i++) {
         loads(sets[i]);
         advance_load();
