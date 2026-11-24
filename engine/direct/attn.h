@@ -77,8 +77,8 @@ inline std::string gen_attn_part() {
         o("v_" + op + "_f32 v8, v8, v9");
     };
     // K rows for the 256 positions from s<pos>: thread i's row, position
-    // min(pos + i, n - 1), into v[48:111]. The next chunk's are loaded while
-    // this chunk's V is worked (round 27: about 300 GB/s with K and V in turn).
+    // min(pos + i, n - 1), into v[48:111]. (Round 28 loaded the next chunk's
+    // during V: 20-30% slower, V's first wait then waits for all of K.)
     auto kloads = [&](const std::string& pos) {
         o("v_add_nc_u32 v2, " + pos + ", v0");
         o("v_min_u32 v2, s17, v2");
@@ -88,10 +88,10 @@ inline std::string gen_attn_part() {
         for (int c = 0; c < 16; c++)
             o("global_load_dwordx4 v[" + S(48 + 4 * c) + ":" + S(51 + 4 * c) + "], v2, s[2:3] offset:" + S(16 * c));
     };
-    kloads("s16");
     k += "chunk:\n";
     o("s_cmp_ge_u32 s16, s15");
     o("s_cbranch_scc1 finish");
+    kloads("s16");
     o("v_add_nc_u32 v1, s16, v0");         // t
     for (int h = 0; h < 4; h++) o("v_mov_b32 v" + S(4 + h) + ", 0");
     for (int c = 0; c < 16; c += 2) {      // two chunks of 8 dims at a time: q in s[20:83]
@@ -149,10 +149,8 @@ inline std::string gen_attn_part() {
     o("ds_write_b128 v10, v[4:7] offset:256");
     o("s_waitcnt lgkmcnt(0)");
     o("s_barrier");
-    o("s_add_u32 s91, s16, 256");
-    kloads("s91");                         // the next chunk's K (past the split's end: never used)
     // ---- V: dims 2 dp, +1, positions s16 + pg + 4 it; p one iteration
-    // ahead in v[124:127] / v[116:119]
+    // ahead in v[116:119] / v[4:7] (free once p is in LDS)
     o("v_add_nc_u32 v27, s16, v25");
     for (int b = 0; b < 4; b++) {          // 4 batches of 16: all loads and p reads first
         for (int i = 0; i < 16; i++) {
@@ -164,7 +162,7 @@ inline std::string gen_attn_part() {
             o("v_lshl_add_u32 v30, v30, 8, v26");
             o("global_load_dword v" + S(32 + i) + ", v30, s[4:5]");
         }
-        const int buf[2] = {124, 116};
+        const int buf[2] = {116, 4};
         auto pread = [&](int i) {
             o("ds_read_b128 v[" + S(buf[i & 1]) + ":" + S(buf[i & 1] + 3) + "], v28 offset:" + S(256 + 64 * (16 * b + i)));
         };
