@@ -2,8 +2,9 @@
 //   ts5-direct info              what the kernel reports about the GPU
 //   ts5-direct fill              smoke test: a kernel fills a buffer, the CPU checks it
 //   ts5-direct read-bw [MiB]     read bandwidth on the direct path (default 1024 MiB)
-//   ts5-direct bw-sweep [MiB] [wave64]   read bandwidth over memory kinds, loads in flight,
-//                                cache hints and workgroup counts (wave64 adds wave64 rows)
+//   ts5-direct bw-sweep [MiB]    read bandwidth over memory kinds, loads in flight, cache hints
+//                                and workgroup counts, 5 runs each
+//   ts5-direct bw-repeat [N] [wave64]   the best setup N times in a row (hang hunt)
 // Kernels are assembled at start from the text built into the program.
 #include <algorithm>
 #include <chrono>
@@ -40,14 +41,6 @@ bool load_kernel(kfd::Device& dev, const char* src, gfx10::Kernel& k, kfd::Buffe
     return true;
 }
 
-bool load_kernel_words(kfd::Device& dev, const gfx10::Kernel& k, kfd::Buffer& code) {
-    size_t bytes = k.code.size() * 4 + 256;
-    if (!dev.alloc(bytes, kfd::Mem::Gtt, code)) { std::fprintf(stderr, "ts5-direct: %s\n", dev.err().c_str()); return false; }
-    uint32_t* p = (uint32_t*)code.cpu;
-    std::memcpy(p, k.code.data(), k.code.size() * 4);
-    for (size_t i = k.code.size(); i < code.size / 4; i++) p[i] = 0xbf9f0000;   // s_code_end
-    return true;
-}
 
 // A read kernel with N loads in flight per loop, optional cache hints on the
 // loads ("glc slc dlc" streams past the caches), wave32 or wave64. Same
@@ -84,14 +77,45 @@ const char* mem_name(kfd::Mem m) {
     return m == kfd::Mem::Gtt ? "gtt" : m == kfd::Mem::GttUncached ? "gtt-uc" : "vram";
 }
 
-// Read bandwidth over memory kinds, loads in flight, cache hints, wave size
-// and workgroup counts. The source is filled on the GPU with a constant, so
-// every thread's sum is known and checked.
-int cmd_bw_sweep(kfd::Device& dev, size_t mib, bool wave64) {
+struct ReadCfg {
+    int loads;
+    std::string hints;
+    bool wave64;
+    int per_cu;   // workgroups per CU
+};
+
+std::string cfg_name(const ReadCfg& c) {
+    return std::string("wave") + (c.wave64 ? "64" : "32") + " loads " + std::to_string(c.loads) + " hints " +
+           (c.hints.empty() ? "-" : c.hints) + " wgs/CU " + std::to_string(c.per_cu);
+}
+
+// Read bandwidth over a list of setups. Everything is allocated and every
+// kernel assembled into one code buffer before the first dispatch: no
+// memory is allocated or freed while the queue runs. (Rounds 1 and 2 on the
+// PS5 hung after 29 and 48 rows, each row allocating and freeing its code;
+// a new allocation can make the kernel stop and restore the queue.)
+// `repeat` runs every setup that many times and reports the spread.
+int cmd_bw_sweep(kfd::Device& dev, size_t mib, const std::vector<kfd::Mem>& mems, const std::vector<ReadCfg>& cfgs, int repeat) {
     if (!dev.create_queue()) return die(dev.err());
     gfx10::Kernel fk;
     kfd::Buffer fcode;
     if (!load_kernel(dev, kKernel_fill, fk, fcode)) return 1;
+    // All the kernels, 256-byte aligned, in one buffer.
+    std::vector<gfx10::Kernel> ks(cfgs.size());
+    std::vector<size_t> at(cfgs.size());
+    size_t total = 0;
+    for (size_t i = 0; i < cfgs.size(); i++) {
+        std::string err;
+        if (!gfx10::assemble(gen_read_kernel(cfgs[i].loads, cfgs[i].hints, cfgs[i].wave64), ks[i], &err))
+            return die("assembler: " + err);
+        at[i] = total;
+        total += (ks[i].code.size() * 4 + 256 + 255) & ~(size_t)255;
+    }
+    kfd::Buffer code;
+    if (!dev.alloc(total, kfd::Mem::Gtt, code)) return die(dev.err());
+    for (size_t i = 0; i < total / 4; i++) ((uint32_t*)code.cpu)[i] = 0xbf9f0000;   // s_code_end
+    for (size_t i = 0; i < cfgs.size(); i++) std::memcpy((char*)code.cpu + at[i], ks[i].code.data(), ks[i].code.size() * 4);
+
     uint64_t* sig = (uint64_t*)dev.signals.cpu;
     auto run = [&](pm4::Stream& s, double* gpu_s) -> bool {
         std::memset(sig, 0, 64);
@@ -107,16 +131,18 @@ int cmd_bw_sweep(kfd::Device& dev, size_t mib, bool wave64) {
     };
     const uint32_t C = 3;
     const size_t bytes = mib << 20;
+    const uint32_t max_threads = dev.cu_count() * 256 * 256;
     double best_all = 0;
     std::string best_cfg;
-    std::printf("mem     wave  loads hints        wgs    GB/s   check\n");
-    for (kfd::Mem m : {kfd::Mem::Vram, kfd::Mem::GttUncached, kfd::Mem::Gtt}) {
+    long dispatches = 0;
+    std::printf("mem     wave  loads hints        wgs    GB/s (best / median / worst of %d)  check\n", repeat);
+    for (kfd::Mem m : mems) {
         kfd::Buffer src, out;
         if (!dev.alloc(bytes, m, src)) {
             std::printf("%-7s (can't allocate: %s)\n", mem_name(m), dev.err().c_str());
             continue;
         }
-        if (!dev.alloc((size_t)dev.cu_count() * 256 * 256 * 4, kfd::Mem::Gtt, out)) return die(dev.err());
+        if (!dev.alloc((size_t)max_threads * 4, kfd::Mem::Gtt, out)) return die(dev.err());
         {   // fill the source with C on the GPU
             pm4::Stream s;
             uint32_t n = (uint32_t)(bytes / 4);
@@ -124,57 +150,48 @@ int cmd_bw_sweep(kfd::Device& dev, size_t mib, bool wave64) {
             uint32_t g[3] = {(n + 255) / 256, 1, 1}, t[3] = {256, 1, 1};
             s.dispatch(fk, fcode.gpu, args, 4, g, t);
             double gs;
-            if (!run(s, &gs)) return die(dev.err());
+            if (!run(s, &gs)) return die(dev.err() + " (filling)");
             std::printf("%-7s fill %.1f MiB: %.1f GB/s write\n", mem_name(m), bytes / 1048576.0, bytes / gs / 1e9);
         }
-        // Round 1 (2026-11-24): the cache hints and loads in flight mattered
-        // most, and fewer workgroups did better; wave64 hung once at 5120
-        // workgroups, so it's only swept when asked for.
-        std::vector<bool> waves = {false};
-        if (wave64) waves.push_back(true);
-        for (bool w64 : waves)
-            for (int n : {2, 4, 8})
-                for (const char* h : {"glc slc dlc", "glc dlc", "slc dlc", "glc slc"})
-                    for (int per_cu : {2, 4, 8, 16}) {
-                        gfx10::Kernel k;
-                        kfd::Buffer code;
-                        std::string err;
-                        if (!gfx10::assemble(gen_read_kernel(n, h, w64), k, &err)) return die("assembler: " + err);
-                        if (!load_kernel_words(dev, k, code)) return 1;
-                        uint32_t wgs = dev.cu_count() * per_cu;
-                        uint32_t threads = wgs * 256;
-                        size_t step = (size_t)threads * 16;
-                        size_t loops = bytes / (step * n);
-                        if (loops < 1) { dev.free(code); continue; }
-                        size_t used = loops * step * n;
-                        uint32_t args[6] = {(uint32_t)src.gpu, (uint32_t)(src.gpu >> 32), (uint32_t)loops, (uint32_t)step,
-                                            (uint32_t)out.gpu, (uint32_t)(out.gpu >> 32)};
-                        uint32_t g[3] = {wgs, 1, 1}, t[3] = {256, 1, 1};
-                        double best = 0;
-                        for (int rep = 0; rep < 3; rep++) {
-                            pm4::Stream s;
-                            s.dispatch(k, code.gpu, args, 6, g, t);
-                            double gs;
-                            if (!run(s, &gs)) return die(dev.err());
-                            best = std::max(best, used / gs / 1e9);
-                        }
-                        uint32_t want = (uint32_t)(loops * n * 4 * C);
-                        uint32_t* o = (uint32_t*)out.cpu;
-                        bool ok = o[0] == want && o[threads - 1] == want;
-                        std::printf("%-7s %-5s %-5d %-12s %-6u %6.1f  %s\n", mem_name(m), w64 ? "64" : "32", n, h[0] ? h : "-", wgs,
-                                    best, ok ? "ok" : "WRONG");
-                        std::fflush(stdout);
-                        if (ok && best > best_all) {
-                            best_all = best;
-                            best_cfg = std::string(mem_name(m)) + " wave" + (w64 ? "64" : "32") + " loads " + std::to_string(n) +
-                                       " hints " + (h[0] ? h : "-") + " wgs " + std::to_string(wgs);
-                        }
-                        dev.free(code);
-                    }
-        dev.free(out);
-        dev.free(src);
+        for (size_t i = 0; i < cfgs.size(); i++) {
+            const ReadCfg& c = cfgs[i];
+            uint32_t wgs = dev.cu_count() * c.per_cu;
+            uint32_t threads = wgs * 256;
+            if (threads > max_threads) continue;
+            size_t step = (size_t)threads * 16;
+            size_t loops = bytes / (step * c.loads);
+            if (loops < 1) continue;
+            size_t used = loops * step * c.loads;
+            uint32_t args[6] = {(uint32_t)src.gpu, (uint32_t)(src.gpu >> 32), (uint32_t)loops, (uint32_t)step,
+                                (uint32_t)out.gpu, (uint32_t)(out.gpu >> 32)};
+            uint32_t g[3] = {wgs, 1, 1}, t[3] = {256, 1, 1};
+            std::vector<double> r;
+            for (int rep = 0; rep < repeat; rep++) {
+                pm4::Stream s;
+                s.dispatch(ks[i], code.gpu + at[i], args, 6, g, t);
+                double gs;
+                if (!run(s, &gs)) {
+                    std::printf("HANG at dispatch %ld (%s %s, rep %d): %s\n", dispatches, mem_name(m), cfg_name(c).c_str(), rep,
+                                dev.err().c_str());
+                    return 1;
+                }
+                dispatches++;
+                r.push_back(used / gs / 1e9);
+            }
+            std::sort(r.begin(), r.end());
+            uint32_t want = (uint32_t)(loops * c.loads * 4 * C);
+            uint32_t* o = (uint32_t*)out.cpu;
+            bool ok = o[0] == want && o[threads - 1] == want;
+            std::printf("%-7s %-5s %-5d %-12s %-6u %6.1f / %6.1f / %6.1f  %s\n", mem_name(m), c.wave64 ? "64" : "32", c.loads,
+                        c.hints.empty() ? "-" : c.hints.c_str(), wgs, r.back(), r[r.size() / 2], r.front(), ok ? "ok" : "WRONG");
+            std::fflush(stdout);
+            if (ok && r[r.size() / 2] > best_all) {
+                best_all = r[r.size() / 2];
+                best_cfg = std::string(mem_name(m)) + " " + cfg_name(c);
+            }
+        }
     }
-    std::printf("bw-sweep: best %.1f GB/s (%s)\n", best_all, best_cfg.c_str());
+    std::printf("bw-sweep: best median %.1f GB/s (%s), %ld dispatches, no hang\n", best_all, best_cfg.c_str(), dispatches);
     return 0;
 }
 
@@ -289,13 +306,13 @@ int main(int argc, char** argv) {
                         gfx10::pgm_rsrc2(k));
         }
         for (bool w64 : {false, true})
-            for (int n : {2, 4, 8, 16})
+            for (int n : {1, 2, 3, 4, 8, 16})
                 for (const char* h : {"", "slc", "glc slc dlc", "glc dlc", "slc dlc", "glc slc"}) {
                     gfx10::Kernel k;
                     std::string err;
                     if (!gfx10::assemble(gen_read_kernel(n, h, w64), k, &err)) return die("read_gen: " + err);
                 }
-        std::printf("read_gen: 48 variants ok\n");
+        std::printf("read_gen: 72 variants ok\n");
         return 0;
     }
     kfd::Device dev;
@@ -303,7 +320,19 @@ int main(int argc, char** argv) {
     if (cmd == "info") return cmd_info(dev);
     if (cmd == "fill") return cmd_fill(dev);
     if (cmd == "read-bw") return cmd_read_bw(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024);
-    if (cmd == "bw-sweep")
-        return cmd_bw_sweep(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024, argc > 3 && std::string(argv[3]) == "wave64");
-    return die("unknown command " + cmd + " (info, fill, read-bw [MiB], bw-sweep [MiB])");
+    if (cmd == "bw-sweep") {
+        // bw-sweep [MiB]: setups around round 2's best, VRAM then GTT, 5 runs each
+        std::vector<ReadCfg> cfgs;
+        for (int n : {1, 2, 3, 4})
+            for (const char* h : {"slc dlc", "glc dlc", "glc slc", "glc slc dlc"})
+                for (int pc : {1, 2, 3, 4}) cfgs.push_back({n, h, false, pc});
+        return cmd_bw_sweep(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024, {kfd::Mem::Vram, kfd::Mem::Gtt}, cfgs, 5);
+    }
+    if (cmd == "bw-repeat") {
+        // bw-repeat N [wave64]: one good setup N times (hang hunt), VRAM
+        int n = argc > 2 ? std::atoi(argv[2]) : 500;
+        bool w64 = argc > 3 && std::string(argv[3]) == "wave64";
+        return cmd_bw_sweep(dev, 1024, {kfd::Mem::Vram}, {{2, "slc dlc", w64, 2}}, n);
+    }
+    return die("unknown command " + cmd + " (info, fill, read-bw [MiB], bw-sweep [MiB], bw-repeat [N] [wave64])");
 }
