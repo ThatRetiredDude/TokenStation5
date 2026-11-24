@@ -372,7 +372,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
     uint32_t seed = 12345;
     auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
     bool all_ok = true;
-    std::printf("shape                          MB     err        GB/s (best / median / worst of %d)  us median\n", runs);
+    std::printf("shape                          MB     err        single dispatches: GB/s (best / median / worst of %d)  us median\n", runs);
     // Everything for every shape is allocated before the first dispatch:
     // round 6 freed one shape's buffers and allocated the next one's
     // between dispatches, and the second shape's results never arrived
@@ -462,6 +462,26 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
             s.dispatch(k, P.code.gpu, args, 10, g, t);
             return run(s, t_s);
         };
+        // Steady state: n dispatches back to back in one submission, each
+        // waiting for the one before (as a token's kernels do), timed as a
+        // whole. Single dispatches with the CPU waiting between them let the
+        // GPU clock drop: round 11's wave records ran at about 490 MHz on
+        // the short shapes and 1.6-2.3 GHz on the long ones.
+        auto batch = [&](const gfx10::Kernel& kk, uint64_t code_gpu, const kfd::Buffer& w, int n, double* per_s) -> bool {
+            pm4::Stream s;
+            uint32_t args[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)P.xb.gpu, (uint32_t)(P.xb.gpu >> 32),
+                                 (uint32_t)P.yb.gpu, (uint32_t)(P.yb.gpu >> 32), sh.rows, (uint32_t)P.ts.gpu, per,
+                                 (uint32_t)(P.ts.gpu >> 32)};
+            uint32_t g[3] = {wgs, 1, 1}, t[3] = {256, 1, 1};
+            for (int i = 0; i < n; i++) {
+                if (i) s.wait_kernels();
+                s.dispatch(kk, code_gpu, args, 10, g, t);
+            }
+            double total;
+            if (!run(s, &total)) return false;
+            *per_s = total / n;
+            return true;
+        };
         auto check = [&](const char* where) -> double {
             const float* Y = (const float*)P.yb.cpu;
             double worst = 0;
@@ -490,8 +510,21 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
         }
         std::sort(r.begin(), r.end());
         double med = r[r.size() / 2];
-        std::printf("%-30s %6.1f %9.2e  %6.1f / %6.1f / %6.1f  %8.1f\n", sh.name, bytes / 1e6, e, r.back(), med, r.front(),
-                    bytes / med / 1e3);
+        // Steady: warm the clock up with 3 batches of 100 dispatches (a
+        // batch is about 5,100 ring dwords; submit() takes up to half the
+        // 16,384-dword ring), then time 3 more.
+        double per_s;
+        for (int i = 0; i < 3; i++)
+            if (!batch(k, P.code.gpu, P.wv, 100, &per_s)) return die(dev.err() + " (warm-up)");
+        std::vector<double> st;
+        for (int i = 0; i < 3; i++) {
+            if (!batch(k, P.code.gpu, P.wv, 100, &per_s)) return die(dev.err() + " (steady)");
+            st.push_back(per_s);
+        }
+        std::sort(st.begin(), st.end());
+        double e_steady = check("steady");
+        std::printf("%-30s %6.1f %9.2e  %6.1f / %6.1f / %6.1f  %8.1f   steady %6.1f GB/s, %7.1f us  (err %.2e)\n", sh.name, bytes / 1e6, e,
+                    r.back(), med, r.front(), bytes / med / 1e3, bytes / st[1] / 1e9, st[1] * 1e6, e_steady);
         std::fflush(stdout);
         // diag: the same kernel with parts left out (results not checked),
         // then with 1 and 3 steps of loads in flight (results checked).
@@ -505,16 +538,10 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
             if (dk.code.size() * 4 + 256 > P.dcode.size) return die("diag code too big");
             for (size_t i = 0; i < P.dcode.size / 4; i++) ((uint32_t*)P.dcode.cpu)[i] = 0xbf9f0000;
             std::memcpy(P.dcode.cpu, dk.code.data(), dk.code.size() * 4);
-            std::vector<double> dt;
-            for (int i = 0; i < runs; i++) {
-                std::memset(P.yb.cpu, 0xff, sh.rows * 4);
-                pm4::Stream s;
-                uint32_t args[10] = {(uint32_t)P.wv.gpu, (uint32_t)(P.wv.gpu >> 32), (uint32_t)P.xb.gpu, (uint32_t)(P.xb.gpu >> 32),
-                                     (uint32_t)P.yb.gpu, (uint32_t)(P.yb.gpu >> 32), sh.rows, (uint32_t)P.ts.gpu, per,
-                                     (uint32_t)(P.ts.gpu >> 32)};
-                uint32_t g[3] = {wgs, 1, 1}, t[3] = {256, 1, 1};
-                s.dispatch(dk, P.dcode.gpu, args, 10, g, t);
-                if (!run(s, &gs)) return die(dev.err() + " (diag " + std::to_string(d) + ")");
+            std::vector<double> dt;   // steady: right after the warm batches above, 3 batches of `runs`
+            std::memset(P.yb.cpu, 0xff, sh.rows * 4);
+            for (int i = 0; i < 3; i++) {
+                if (!batch(dk, P.dcode.gpu, P.wv, runs, &gs)) return die(dev.err() + " (diag " + std::to_string(d) + ")");
                 dt.push_back(gs * 1e6);
             }
             std::sort(dt.begin(), dt.end());
@@ -543,9 +570,9 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
                 int cu_max = 0, simd_max = 0;
                 for (auto& p : per_cu) cu_max = std::max(cu_max, p.second);
                 for (auto& p : per_simd) simd_max = std::max(simd_max, p.second);
-                std::printf("    %s records: %8.1f us median; clocks: starts median %u max %u, staged after %u median, run %u min / %u median / "
+                std::printf("    %s records (last dispatch): %8.1f us median, about %.0f MHz; clocks: starts median %u max %u, staged after %u median, run %u min / %u median / "
                             "%u max, last end %u; %zu CUs used (busiest %d workgroups), %zu SIMDs (busiest %d waves)\n",
-                            mode == 8 ? "full kernel" : "frame only", dt[dt.size() / 2], start[nw / 2], start.back(), staged[nw / 2],
+                            mode == 8 ? "full kernel" : "frame only", dt[dt.size() / 2], endt.back() / dt[dt.size() / 2], start[nw / 2], start.back(), staged[nw / 2],
                             total.front(), total[nw / 2], total.back(), endt.back(), per_cu.size(), cu_max, per_simd.size(), simd_max);
             } else if (mode)
                 std::printf("    without%s%s%s: %8.1f us median\n", d & 1 ? " math" : "", d & 2 ? " lds-reads" : "",

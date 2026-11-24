@@ -50,7 +50,7 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", i
 
     if (diag & 8) {
         o("s_memtime s[38:39]");
-        o("s_getreg_b32 s39, hwreg(HW_REG_HW_ID1)");
+        o("s_getreg_b32 s47, hwreg(HW_REG_HW_ID1)");   // not s39: s_memtime writes s[38:39] later
     }
     // ---- x into LDS: every thread copies ncols/1024 runs of 16 bytes.
     const int nload = ncols / 1024;
@@ -307,7 +307,7 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", i
         o("s_mov_b32 s41, s9");
         o("v_mov_b32 v7, s46");
         o("v_mov_b32 v8, s38");
-        o("v_mov_b32 v9, s39");
+        o("v_mov_b32 v9, s47");
         o("v_mov_b32 v10, s42");
         o("v_mov_b32 v11, s44");
         o("s_mov_b32 exec_lo, 1");
