@@ -30,7 +30,12 @@ namespace ts5::direct {
 // end: 16 bytes per wave (start lo, HW_ID1, staged - start, end - start)
 // at s[7], s[9] + 16 * (workgroup * 8 + wave).
 // depth: steps whose loads are in flight while one is worked on (1 to 3).
-inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", int diag = 0, int depth = 1) {
+// inter: rows dealt round-robin over every wave of the dispatch (wave v of
+// workgroup w takes rows 8w + v, then + s8 each time; the host passes s8 =
+// workgroups * 8), so the whole GPU walks the matrix front to back together,
+// as Vulkan's one-row workgroups do; otherwise each workgroup owns a slice of
+// s8 rows.
+inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", int diag = 0, int depth = 1, bool inter = false) {
     const int nit = ncols / 2048;          // steps per row
     const int row_bytes = ncols / 256 * 144;
     const int nseg = ncols / 16;
@@ -102,9 +107,16 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", i
     // ---- this wave's rows: r_begin + wave, step 8, below r_end
     o("v_lshrrev_b32 v7, 5, v0");
     o("v_readfirstlane_b32 s16, v7");
-    o("s_mul_i32 s17, s10, s8");          // r_begin
-    o("s_add_u32 s18, s17, s8");
-    o("s_min_u32 s18, s18, s6");          // r_end
+    if (inter) {
+        o("s_lshl_b32 s17, s10, 3");
+        o("s_mov_b32 s18, s6");           // r_end: the matrix's end
+        o("s_mov_b32 s19, s8");           // row step
+    } else {
+        o("s_mul_i32 s17, s10, s8");      // r_begin
+        o("s_add_u32 s18, s17, s8");
+        o("s_min_u32 s18, s18, s6");      // r_end
+        o("s_mov_b32 s19, 8");
+    }
     o("s_add_u32 s34, s17, s16");         // compute cursor: row
     o("s_cmp_ge_u32 s34, s18");
     o("s_cbranch_scc1 end");
@@ -178,7 +190,7 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", i
         o("s_branch ldone" + n);
         label("lnew" + n);
         o("s_mov_b32 s27, 0");
-        o("s_add_u32 s26, s26, 8");
+        o("s_add_u32 s26, s26, s19");
         o("s_cmp_lt_u32 s26, s18");
         o("s_cselect_b32 s11, s26, 0");   // past the end: re-read row 0, never used
         o("s_mul_i32 s22, s11, " + S(row_bytes));
@@ -298,7 +310,7 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", i
         o("s_mov_b32 exec_lo, s29");
         o("v_mov_b32 v6, 0");
         o("s_mov_b32 s33, 0");
-        o("s_add_u32 s34, s34, 8");
+        o("s_add_u32 s34, s34, s19");
         o("s_cmp_ge_u32 s34, s18");
         o("s_cbranch_scc1 end");
         label("cnext" + n);

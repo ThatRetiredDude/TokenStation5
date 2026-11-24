@@ -350,8 +350,8 @@ void q4k_scale_min(int j, const uint8_t* q, int& sc, int& m) {
 // blocks and x, the GPU's y checked against a CPU sum in double, then timed
 // one dispatch at a time with the matrix in VRAM.
 int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v2 = false) {
-    auto gen = [v2](int cols, const std::string& hints, int d, int depth) {
-        return v2 ? ts5::direct::gen_mv_q4k2(cols, hints, d, depth) : ts5::direct::gen_mv_q4k(cols, hints, d, depth);
+    auto gen = [v2](int cols, const std::string& hints, int d, int depth, bool inter = false) {
+        return v2 ? ts5::direct::gen_mv_q4k2(cols, hints, d, depth) : ts5::direct::gen_mv_q4k(cols, hints, d, depth, inter);
     };
     std::printf("kernel: %s\n", v2 ? "mv_q4k2 (2 lanes per block)" : "mv_q4k (8 lanes per block, headers by one dword load)");
     if (!dev.create_queue()) return die(dev.err());
@@ -483,11 +483,12 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         // whole. Single dispatches with the CPU waiting between them let the
         // GPU clock drop: round 11's wave records ran at about 490 MHz on
         // the short shapes and 1.6-2.3 GHz on the long ones.
-        auto batch = [&](const gfx10::Kernel& kk, uint64_t code_gpu, const kfd::Buffer& w, int n, double* per_s) -> bool {
+        auto batch = [&](const gfx10::Kernel& kk, uint64_t code_gpu, const kfd::Buffer& w, int n, double* per_s,
+                         uint32_t rows_arg = 0) -> bool {
             pm4::Stream s;
             uint32_t args[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)P.xb.gpu, (uint32_t)(P.xb.gpu >> 32),
-                                 (uint32_t)P.yb.gpu, (uint32_t)(P.yb.gpu >> 32), sh.rows, (uint32_t)P.ts.gpu, per,
-                                 (uint32_t)(P.ts.gpu >> 32)};
+                                 (uint32_t)P.yb.gpu, (uint32_t)(P.yb.gpu >> 32), sh.rows, (uint32_t)P.ts.gpu,
+                                 rows_arg ? rows_arg : per, (uint32_t)(P.ts.gpu >> 32)};
             uint32_t g[3] = {wgs, 1, 1}, t[3] = {256, 1, 1};
             for (int i = 0; i < n; i++) {
                 if (i) s.wait_kernels();
@@ -544,13 +545,17 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         std::fflush(stdout);
         // diag: the same kernel with parts left out (results not checked),
         // then with 1 and 3 steps of loads in flight (results checked).
-        for (int d = 1; diag && d < 14; d++) {
+        for (int d = 1; diag && d < 18; d++) {
             // 1-7: parts left out; 8: timestamps; 9: timestamps, nothing but the frame; 10, 11: 2 and 3 steps in
-            // flight; 12, 13: loads only with 2 and 3 steps in flight
-            const int mode = d <= 8 ? d : d == 9 ? 15 : d >= 12 ? 3 : 0, depth = d == 10 || d == 12 ? 2 : d == 11 || d == 13 ? 3 : 1;
+            // flight; 12, 13: loads only with 2 and 3 steps in flight; 14-17 rows dealt round-robin: full,
+            // loads only, full with 2 steps, timestamps
+            const bool inter = d >= 14;
+            const int mode = d <= 8 ? d : d == 9 ? 15 : d == 12 || d == 13 || d == 15 ? 3 : d == 17 ? 8 : 0;
+            const int depth = d == 10 || d == 12 || d == 16 ? 2 : d == 11 || d == 13 ? 3 : 1;
+            const uint32_t dper = inter ? wgs * 8 : per;
             gfx10::Kernel dk;
             std::string err;
-            if (!gfx10::assemble(gen((int)sh.cols, "slc dlc", mode, depth), dk, &err))
+            if (!gfx10::assemble(gen((int)sh.cols, "slc dlc", mode, depth, inter), dk, &err))
                 return die("mv_q4k diag: " + err);
             if (dk.code.size() * 4 + 256 > P.dcode.size) return die("diag code too big");
             for (size_t i = 0; i < P.dcode.size / 4; i++) ((uint32_t*)P.dcode.cpu)[i] = 0xbf9f0000;
@@ -558,10 +563,11 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
             std::vector<double> dt;   // steady: right after the warm batches above, 3 batches of `runs`
             std::memset(P.yb.cpu, 0xff, sh.rows * 4);
             for (int i = 0; i < 3; i++) {
-                if (!batch(dk, P.dcode.gpu, P.wv, runs, &gs)) return die(dev.err() + " (diag " + std::to_string(d) + ")");
+                if (!batch(dk, P.dcode.gpu, P.wv, runs, &gs, dper)) return die(dev.err() + " (diag " + std::to_string(d) + ")");
                 dt.push_back(gs * 1e6);
             }
             std::sort(dt.begin(), dt.end());
+            if (inter) std::printf("    [rows round-robin]");
             if (mode & 8) {   // the last run's wave records (shader clock, HW_ID1)
                 const uint32_t* T = (const uint32_t*)P.ts.cpu;
                 const uint32_t nw = wgs * 8;
@@ -595,7 +601,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
                 std::printf("    without%s%s%s, %d step(s) in flight: %8.1f us median\n", mode & 1 ? " math" : "", mode & 2 ? " lds-reads" : "",
                             mode & 4 ? " weight-loads" : "", depth, dt[dt.size() / 2]);
             else {
-                double e2 = check(depth == 2 ? "depth 2" : "depth 3");
+                double e2 = check(inter ? "round-robin" : depth == 2 ? "depth 2" : "depth 3");
                 std::printf("    %d steps in flight: %8.1f us median, %6.1f GB/s, err %.2e\n", depth, dt[dt.size() / 2],
                             bytes / dt[dt.size() / 2] / 1e3, e2);
             }
