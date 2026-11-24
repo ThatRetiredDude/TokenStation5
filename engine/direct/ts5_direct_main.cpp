@@ -555,14 +555,17 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         std::fflush(stdout);
         // diag: the same kernel with parts left out (results not checked),
         // then with 1 and 3 steps of loads in flight (results checked).
-        for (int d = 1; diag && d < 23; d++) {
+        for (int d = 1; diag && d < 24; d++) {
             // 1-7: parts left out; 8: timestamps; 9: timestamps, nothing but the frame; 10, 11: 2 and 3 steps in
             // flight; 12, 13: loads only with 2 and 3 steps in flight; 14-17 rows dealt round-robin: full,
             // loads only, full with 2 steps, timestamps
             // 18-21: cache hints on the weight loads: slc dlc (the old default) and glc dlc, full and loads only
-            const bool inter = d >= 14 && d <= 17;
+            // 23: round-robin wave records in batches of 100 (round 19: 100-dispatch
+            // batches ran ~6 us slower per call than batches of 20; clock or queue?)
+            const bool inter = (d >= 14 && d <= 17) || d == 23;
+            const int nrun = d == 23 ? 100 : runs;
             const char* hints = d == 18 || d == 19 ? "slc dlc" : d == 20 || d == 21 ? "glc dlc" : "";
-            const int mode = d <= 8 ? d : d == 9 ? 15 : d == 12 || d == 13 || d == 15 || d == 19 || d == 21 ? 3 : d == 17 ? 8 : 0;
+            const int mode = d <= 8 ? d : d == 9 ? 15 : d == 12 || d == 13 || d == 15 || d == 19 || d == 21 ? 3 : d == 17 || d == 23 ? 8 : 0;
             const int depth = d == 10 || d == 12 || d == 16 ? 2 : d == 11 || d == 13 ? 3 : 1;
             // 22: sliced rows, 1 step, full (the default before round 19)
             const uint32_t dper = inter ? wgs * 8 : per;
@@ -576,13 +579,14 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
             std::vector<double> dt;   // steady: right after the warm batches above, 3 batches of `runs`
             std::memset(P.yb.cpu, 0xff, sh.rows * 4);
             for (int i = 0; i < 3; i++) {
-                if (!batch(dk, P.dcode.gpu, P.wv, runs, &gs, dper)) return die(dev.err() + " (diag " + std::to_string(d) + ")");
+                if (!batch(dk, P.dcode.gpu, P.wv, nrun, &gs, dper)) return die(dev.err() + " (diag " + std::to_string(d) + ")");
                 dt.push_back(gs * 1e6);
             }
             std::sort(dt.begin(), dt.end());
             if (inter) std::printf("    [rows round-robin]");
             if (d >= 18 && d <= 21) std::printf("    [hints \"%s\"]", hints);
             if (d == 22) std::printf("    [rows sliced]");
+            if (d == 23) std::printf("    [batches of 100]");
             if (mode & 8) {   // the last run's wave records (shader clock, HW_ID1)
                 const uint32_t* T = (const uint32_t*)P.ts.cpu;
                 const uint32_t nw = wgs * 8;
