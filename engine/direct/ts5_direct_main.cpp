@@ -545,17 +545,19 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         std::fflush(stdout);
         // diag: the same kernel with parts left out (results not checked),
         // then with 1 and 3 steps of loads in flight (results checked).
-        for (int d = 1; diag && d < 18; d++) {
+        for (int d = 1; diag && d < 22; d++) {
             // 1-7: parts left out; 8: timestamps; 9: timestamps, nothing but the frame; 10, 11: 2 and 3 steps in
             // flight; 12, 13: loads only with 2 and 3 steps in flight; 14-17 rows dealt round-robin: full,
             // loads only, full with 2 steps, timestamps
-            const bool inter = d >= 14;
-            const int mode = d <= 8 ? d : d == 9 ? 15 : d == 12 || d == 13 || d == 15 ? 3 : d == 17 ? 8 : 0;
+            // 18-21: cache hints on the weight loads: none and glc dlc, full and loads only
+            const bool inter = d >= 14 && d <= 17;
+            const char* hints = d == 18 || d == 19 ? "" : d >= 20 ? "glc dlc" : "slc dlc";
+            const int mode = d <= 8 ? d : d == 9 ? 15 : d == 12 || d == 13 || d == 15 || d == 19 || d == 21 ? 3 : d == 17 ? 8 : 0;
             const int depth = d == 10 || d == 12 || d == 16 ? 2 : d == 11 || d == 13 ? 3 : 1;
             const uint32_t dper = inter ? wgs * 8 : per;
             gfx10::Kernel dk;
             std::string err;
-            if (!gfx10::assemble(gen((int)sh.cols, "slc dlc", mode, depth, inter), dk, &err))
+            if (!gfx10::assemble(gen((int)sh.cols, hints, mode, depth, inter), dk, &err))
                 return die("mv_q4k diag: " + err);
             if (dk.code.size() * 4 + 256 > P.dcode.size) return die("diag code too big");
             for (size_t i = 0; i < P.dcode.size / 4; i++) ((uint32_t*)P.dcode.cpu)[i] = 0xbf9f0000;
@@ -568,6 +570,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
             }
             std::sort(dt.begin(), dt.end());
             if (inter) std::printf("    [rows round-robin]");
+            if (d >= 18) std::printf("    [hints \"%s\"]", hints);
             if (mode & 8) {   // the last run's wave records (shader clock, HW_ID1)
                 const uint32_t* T = (const uint32_t*)P.ts.cpu;
                 const uint32_t nw = wgs * 8;
@@ -601,7 +604,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
                 std::printf("    without%s%s%s, %d step(s) in flight: %8.1f us median\n", mode & 1 ? " math" : "", mode & 2 ? " lds-reads" : "",
                             mode & 4 ? " weight-loads" : "", depth, dt[dt.size() / 2]);
             else {
-                double e2 = check(inter ? "round-robin" : depth == 2 ? "depth 2" : "depth 3");
+                double e2 = check(inter ? "round-robin" : d >= 18 ? "hints" : depth == 2 ? "depth 2" : "depth 3");
                 std::printf("    %d steps in flight: %8.1f us median, %6.1f GB/s, err %.2e\n", depth, dt[dt.size() / 2],
                             bytes / dt[dt.size() / 2] / 1e3, e2);
             }
