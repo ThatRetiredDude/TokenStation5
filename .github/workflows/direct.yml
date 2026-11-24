@@ -27,6 +27,12 @@ jobs:
         run: python3 engine/direct/tests/asm_check.py build/direct/ts5-asm
       - name: Assemble the built-in kernels
         run: build/direct/ts5-direct asm-only
+      - name: Check generated read kernels against llvm-mc
+        run: |
+          for v in "4 0" "8 0 slc" "16 0 glc slc dlc" "4 1" "8 1 glc slc dlc" "16 1 slc"; do
+            build/direct/ts5-direct gen $v > /tmp/gen.s
+            python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/gen.s
+          done
       - name: Keep ts5-direct for testing on the PS5
         uses: actions/upload-artifact@v4
         with:

@@ -2,7 +2,10 @@
 //   ts5-direct info              what the kernel reports about the GPU
 //   ts5-direct fill              smoke test: a kernel fills a buffer, the CPU checks it
 //   ts5-direct read-bw [MiB]     read bandwidth on the direct path (default 1024 MiB)
+//   ts5-direct bw-sweep [MiB]    read bandwidth over memory kinds, loads in flight, cache hints,
+//                                wave size and workgroup counts
 // Kernels are assembled at start from the text built into the program.
+#include <algorithm>
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>
@@ -34,6 +37,139 @@ bool load_kernel(kfd::Device& dev, const char* src, gfx10::Kernel& k, kfd::Buffe
     std::memcpy(p, k.code.data(), k.code.size() * 4);
     for (size_t i = k.code.size(); i < code.size / 4; i++) p[i] = 0xbf9f0000;   // s_code_end
     return true;
+}
+
+bool load_kernel_words(kfd::Device& dev, const gfx10::Kernel& k, kfd::Buffer& code) {
+    size_t bytes = k.code.size() * 4 + 256;
+    if (!dev.alloc(bytes, kfd::Mem::Gtt, code)) { std::fprintf(stderr, "ts5-direct: %s\n", dev.err().c_str()); return false; }
+    uint32_t* p = (uint32_t*)code.cpu;
+    std::memcpy(p, k.code.data(), k.code.size() * 4);
+    for (size_t i = k.code.size(); i < code.size / 4; i++) p[i] = 0xbf9f0000;   // s_code_end
+    return true;
+}
+
+// A read kernel with N loads in flight per loop, optional cache hints on the
+// loads ("glc slc dlc" streams past the caches), wave32 or wave64. Same
+// arguments as kernels/read_bw.s, which is the N=4, no-hint, wave32 case.
+std::string gen_read_kernel(int n, const std::string& hints, bool wave64) {
+    std::string k = ".kernel read_gen\n";
+    k += wave64 ? ".wave64\n" : ".wave32\n";
+    k += ".user_sgprs 6\n.tgid_x\n";
+    k += "    s_lshl_b32 s7, s6, 8\n    v_add_nc_u32 v1, s7, v0\n    v_lshlrev_b32 v2, 4, v1\n";
+    const int a = 4 + 4 * n;   // the four sums sit right after the load registers
+    for (int c = 0; c < 4; c++) k += "    v_mov_b32 v" + std::to_string(a + c) + ", 0\n";
+    k += "    s_mov_b32 s8, s0\n    s_mov_b32 s9, s1\nloop:\n";
+    for (int i = 0; i < n; i++) {
+        int r = 4 + 4 * i;
+        k += "    global_load_dwordx4 v[" + std::to_string(r) + ":" + std::to_string(r + 3) + "], v2, s[8:9]" +
+             (hints.empty() ? "" : " " + hints) + "\n";
+        k += "    s_add_u32 s8, s8, s3\n    s_addc_u32 s9, s9, 0\n";
+    }
+    k += "    s_sub_u32 s2, s2, 1\n";
+    for (int i = 0; i < n; i++) {
+        int r = 4 + 4 * i;
+        k += "    s_waitcnt vmcnt(" + std::to_string(n - 1 - i) + ")\n";
+        for (int c = 0; c < 4; c++)
+            k += "    v_add_nc_u32 v" + std::to_string(a + c) + ", v" + std::to_string(a + c) + ", v" + std::to_string(r + c) + "\n";
+    }
+    k += "    s_cmp_lg_u32 s2, 0\n    s_cbranch_scc1 loop\n";
+    const std::string A = std::to_string(a), A1 = std::to_string(a + 1), A2 = std::to_string(a + 2), A3 = std::to_string(a + 3);
+    k += "    v_add3_u32 v" + A + ", v" + A + ", v" + A1 + ", v" + A2 + "\n    v_add_nc_u32 v" + A + ", v" + A + ", v" + A3 + "\n";
+    k += "    v_lshlrev_b32 v1, 2, v1\n    global_store_dword v1, v" + A + ", s[4:5]\n    s_endpgm\n";
+    return k;
+}
+
+const char* mem_name(kfd::Mem m) {
+    return m == kfd::Mem::Gtt ? "gtt" : m == kfd::Mem::GttUncached ? "gtt-uc" : "vram";
+}
+
+// Read bandwidth over memory kinds, loads in flight, cache hints, wave size
+// and workgroup counts. The source is filled on the GPU with a constant, so
+// every thread's sum is known and checked.
+int cmd_bw_sweep(kfd::Device& dev, size_t mib) {
+    if (!dev.create_queue()) return die(dev.err());
+    gfx10::Kernel fk;
+    kfd::Buffer fcode;
+    if (!load_kernel(dev, kKernel_fill, fk, fcode)) return 1;
+    uint64_t* sig = (uint64_t*)dev.signals.cpu;
+    auto run = [&](pm4::Stream& s, double* gpu_s) -> bool {
+        std::memset(sig, 0, 64);
+        pm4::Stream w;
+        w.acquire_all();
+        w.release(dev.signals.gpu + 8, 0, true);
+        w.w.insert(w.w.end(), s.w.begin(), s.w.end());
+        w.release(dev.signals.gpu + 16, 0, true);
+        w.release(dev.signals.gpu, 1);
+        if (!dev.submit(w.w) || !dev.wait((volatile uint64_t*)sig, 1, 20000)) return false;
+        *gpu_s = (sig[2] - sig[1]) / 100e6;
+        return true;
+    };
+    const uint32_t C = 3;
+    const size_t bytes = mib << 20;
+    double best_all = 0;
+    std::string best_cfg;
+    std::printf("mem     wave  loads hints        wgs    GB/s   check\n");
+    for (kfd::Mem m : {kfd::Mem::Gtt, kfd::Mem::GttUncached, kfd::Mem::Vram}) {
+        kfd::Buffer src, out;
+        if (!dev.alloc(bytes, m, src)) {
+            std::printf("%-7s (can't allocate: %s)\n", mem_name(m), dev.err().c_str());
+            continue;
+        }
+        if (!dev.alloc((size_t)dev.cu_count() * 256 * 256 * 4, kfd::Mem::Gtt, out)) return die(dev.err());
+        {   // fill the source with C on the GPU
+            pm4::Stream s;
+            uint32_t n = (uint32_t)(bytes / 4);
+            uint32_t args[4] = {(uint32_t)src.gpu, (uint32_t)(src.gpu >> 32), C, n};
+            uint32_t g[3] = {(n + 255) / 256, 1, 1}, t[3] = {256, 1, 1};
+            s.dispatch(fk, fcode.gpu, args, 4, g, t);
+            double gs;
+            if (!run(s, &gs)) return die(dev.err());
+            std::printf("%-7s fill %.1f MiB: %.1f GB/s write\n", mem_name(m), bytes / 1048576.0, bytes / gs / 1e9);
+        }
+        for (bool w64 : {false, true})
+            for (int n : {4, 8, 16})
+                for (const char* h : {"", "slc", "glc slc dlc"})
+                    for (int per_cu : {8, 32, 128}) {
+                        gfx10::Kernel k;
+                        kfd::Buffer code;
+                        std::string err;
+                        if (!gfx10::assemble(gen_read_kernel(n, h, w64), k, &err)) return die("assembler: " + err);
+                        if (!load_kernel_words(dev, k, code)) return 1;
+                        uint32_t wgs = dev.cu_count() * per_cu;
+                        uint32_t threads = wgs * 256;
+                        size_t step = (size_t)threads * 16;
+                        size_t loops = bytes / (step * n);
+                        if (loops < 1) { dev.free(code); continue; }
+                        size_t used = loops * step * n;
+                        uint32_t args[6] = {(uint32_t)src.gpu, (uint32_t)(src.gpu >> 32), (uint32_t)loops, (uint32_t)step,
+                                            (uint32_t)out.gpu, (uint32_t)(out.gpu >> 32)};
+                        uint32_t g[3] = {wgs, 1, 1}, t[3] = {256, 1, 1};
+                        double best = 0;
+                        for (int rep = 0; rep < 3; rep++) {
+                            pm4::Stream s;
+                            s.dispatch(k, code.gpu, args, 6, g, t);
+                            double gs;
+                            if (!run(s, &gs)) return die(dev.err());
+                            best = std::max(best, used / gs / 1e9);
+                        }
+                        uint32_t want = (uint32_t)(loops * n * 4 * C);
+                        uint32_t* o = (uint32_t*)out.cpu;
+                        bool ok = o[0] == want && o[threads - 1] == want;
+                        std::printf("%-7s %-5s %-5d %-12s %-6u %6.1f  %s\n", mem_name(m), w64 ? "64" : "32", n, h[0] ? h : "-", wgs,
+                                    best, ok ? "ok" : "WRONG");
+                        std::fflush(stdout);
+                        if (ok && best > best_all) {
+                            best_all = best;
+                            best_cfg = std::string(mem_name(m)) + " wave" + (w64 ? "64" : "32") + " loads " + std::to_string(n) +
+                                       " hints " + (h[0] ? h : "-") + " wgs " + std::to_string(wgs);
+                        }
+                        dev.free(code);
+                    }
+        dev.free(out);
+        dev.free(src);
+    }
+    std::printf("bw-sweep: best %.1f GB/s (%s)\n", best_all, best_cfg.c_str());
+    return 0;
 }
 
 int cmd_info(kfd::Device& dev) {
@@ -128,6 +264,15 @@ int cmd_read_bw(kfd::Device& dev, size_t mib) {
 
 int main(int argc, char** argv) {
     std::string cmd = argc > 1 ? argv[1] : "info";
+    if (cmd == "gen") {
+        // Prints a generated read kernel: gen N wave64(0/1) [hints...]
+        int n = argc > 2 ? std::atoi(argv[2]) : 4;
+        bool w64 = argc > 3 && std::atoi(argv[3]);
+        std::string h;
+        for (int i = 4; i < argc; i++) h += (h.empty() ? "" : " ") + std::string(argv[i]);
+        std::fputs(gen_read_kernel(n, h, w64).c_str(), stdout);
+        return 0;
+    }
     if (cmd == "asm-only") {
         // Assembles every built-in kernel; needs no GPU (for CI).
         for (auto& kk : kAllKernels) {
@@ -137,6 +282,14 @@ int main(int argc, char** argv) {
             std::printf("%s: %zu words, %d vgprs, rsrc1 0x%08x rsrc2 0x%08x\n", kk.name, k.code.size(), k.vgprs, gfx10::pgm_rsrc1(k),
                         gfx10::pgm_rsrc2(k));
         }
+        for (bool w64 : {false, true})
+            for (int n : {4, 8, 16})
+                for (const char* h : {"", "slc", "glc slc dlc"}) {
+                    gfx10::Kernel k;
+                    std::string err;
+                    if (!gfx10::assemble(gen_read_kernel(n, h, w64), k, &err)) return die("read_gen: " + err);
+                }
+        std::printf("read_gen: 18 variants ok\n");
         return 0;
     }
     kfd::Device dev;
@@ -144,5 +297,6 @@ int main(int argc, char** argv) {
     if (cmd == "info") return cmd_info(dev);
     if (cmd == "fill") return cmd_fill(dev);
     if (cmd == "read-bw") return cmd_read_bw(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024);
-    return die("unknown command " + cmd + " (info, fill, read-bw [MiB])");
+    if (cmd == "bw-sweep") return cmd_bw_sweep(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024);
+    return die("unknown command " + cmd + " (info, fill, read-bw [MiB], bw-sweep [MiB])");
 }
