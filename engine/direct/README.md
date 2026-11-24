@@ -28,3 +28,17 @@ Build and check (llvm-mc only as a second opinion, never shipped):
 
     cmake -S engine/direct -B build/direct && cmake --build build/direct
     python3 engine/direct/tests/asm_check.py build/direct/ts5-asm
+
+## ts5-direct
+
+The runtime test tool. It talks to the GPU through `/dev/kfd`: it allocates
+memory, creates a user-mode compute queue, writes PM4 packets into the
+queue's ring and rings its doorbell. Its kernels are built in as text and
+are assembled when it starts.
+
+    ts5-direct info            what the kernel reports about the GPU, then makes a queue
+    ts5-direct fill            a kernel fills 4 MiB, and the CPU checks every dword
+    ts5-direct read-bw [MiB]   read bandwidth on the direct path (default 1024 MiB)
+    ts5-direct asm-only        assembles the built-in kernels; needs no GPU
+
+CI builds it and keeps it as the `ts5-direct` artifact.

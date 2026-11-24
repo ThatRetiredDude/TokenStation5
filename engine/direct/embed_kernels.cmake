@@ -1,0 +1,15 @@
+# Writes kernels.h: each kernels/*.s file as a string, so ts5-direct carries
+# its kernels as text and assembles them when it starts.
+file(GLOB srcs "${SRC_DIR}/kernels/*.s")
+list(SORT srcs)
+set(out "// Generated from engine/direct/kernels/*.s; do not edit.\n#pragma once\n\n")
+set(all "")
+foreach(f ${srcs})
+  get_filename_component(n "${f}" NAME_WE)
+  file(READ "${f}" body)
+  string(APPEND out "static const char kKernel_${n}[] = R\"ts5k(${body})ts5k\";\n")
+  string(APPEND all "    {\"${n}\", kKernel_${n}},\n")
+endforeach()
+string(APPEND out "\nstruct EmbeddedKernel { const char* name; const char* src; };\nstatic const EmbeddedKernel kAllKernels[] = {\n${all}};\n")
+file(WRITE "${OUT}.tmp" "${out}")
+file(COPY_FILE "${OUT}.tmp" "${OUT}" ONLY_IF_DIFFERENT)

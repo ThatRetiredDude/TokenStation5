@@ -25,3 +25,10 @@ jobs:
         run: cmake -S engine/direct -B build/direct && cmake --build build/direct -j
       - name: Check against llvm-mc
         run: python3 engine/direct/tests/asm_check.py build/direct/ts5-asm
+      - name: Assemble the built-in kernels
+        run: build/direct/ts5-direct asm-only
+      - name: Keep ts5-direct for testing on the PS5
+        uses: actions/upload-artifact@v4
+        with:
+          name: ts5-direct
+          path: build/direct/ts5-direct

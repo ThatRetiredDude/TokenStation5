@@ -3,7 +3,7 @@
 # runs models):
 #   cmake -S engine/direct -B build/direct && cmake --build build/direct
 #   python3 engine/direct/tests/asm_check.py build/direct/ts5-asm
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.21)
 project(ts5direct CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,3 +17,15 @@ target_include_directories(ts5gfx10 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(ts5-asm ts5_asm_main.cpp)
 target_link_libraries(ts5-asm ts5gfx10)
+
+# ts5-direct: the runtime test tool (info, fill, read-bw). Linked with a
+# static C++ library so the CI build runs on the PS5's Debian as it is.
+file(GLOB kernel_srcs "${CMAKE_CURRENT_SOURCE_DIR}/kernels/*.s")
+add_custom_command(
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/kernels.h
+  COMMAND ${CMAKE_COMMAND} -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR} -DOUT=${CMAKE_CURRENT_BINARY_DIR}/kernels.h
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/embed_kernels.cmake
+  DEPENDS ${kernel_srcs} ${CMAKE_CURRENT_SOURCE_DIR}/embed_kernels.cmake)
+add_executable(ts5-direct ts5_direct_main.cpp kfd.cpp ${CMAKE_CURRENT_BINARY_DIR}/kernels.h)
+target_include_directories(ts5-direct PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(ts5-direct ts5gfx10 -static-libstdc++ -static-libgcc)
