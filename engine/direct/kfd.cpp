@@ -245,14 +245,29 @@ bool Device::create_queue(size_t ring_bytes) {
 bool Device::submit(const std::vector<uint32_t>& words) {
     if (!have_queue_) { errno = 0; return fail("no queue"); }
     uint32_t* ring = (uint32_t*)ring_.cpu;
-    size_t ring_dw = ring_.size / 4;
+    const uint64_t ring_dw = ring_.size / 4;
     volatile uint64_t* rptr = (volatile uint64_t*)rptr_.cpu;
-    if (words.size() >= ring_dw) { errno = 0; return fail("command stream longer than the ring"); }
-    // Wait for room: the GPU's read pointer counts dwords consumed.
+    if (words.size() + 1 >= ring_dw / 2) { errno = 0; return fail("command stream longer than half the ring"); }
+    // A packet must not wrap around the ring's end: pad the tail with a NOP
+    // and start at the beginning.
+    uint64_t at = put_ % ring_dw;
+    uint64_t pad = at + words.size() > ring_dw ? ring_dw - at : 0;
+    // Wait for room. The GPU reports how far it has read as an offset in the
+    // ring (it wraps), so the work still queued is put - read, modulo the ring.
+    auto pending = [&]() { return (at + ring_dw - (*rptr % ring_dw)) % ring_dw; };
     auto t0 = std::chrono::steady_clock::now();
-    while (put_ + words.size() - (*rptr) >= ring_dw) {
-        if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(5)) { errno = 0; return fail("the queue stopped taking work"); }
+    while (pending() + pad + words.size() + 1 >= ring_dw) {
+        if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(5)) {
+            errno = 0;
+            return fail("the queue stopped taking work (ring read " + std::to_string(*rptr) + ", written " + std::to_string(put_) + ")");
+        }
         std::this_thread::yield();
+    }
+    if (pad) {
+        // One NOP packet covering the tail (a 1-dword NOP is count 0x3fff).
+        ring[at] = pad == 1 ? (3u << 30 | 0x3fffu << 16 | 0x10u << 8) : (3u << 30 | (uint32_t)((pad - 2) & 0x3fff) << 16 | 0x10u << 8);
+        for (uint64_t i = 1; i < pad; i++) ring[at + i] = 0;
+        put_ += pad;
     }
     for (uint32_t w : words) ring[(put_++) % ring_dw] = w;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);

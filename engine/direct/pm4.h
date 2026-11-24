@@ -47,8 +47,9 @@ enum : uint32_t {
 };
 
 inline uint32_t header(uint32_t op, uint32_t body_dwords) {
-    // type 3, count = body - 1, compute shader type (bit 1)
-    return 3u << 30 | ((body_dwords - 1) & 0x3fff) << 16 | (op & 0xff) << 8 | 1u << 1;
+    // type 3, count = body - 1. (The shader-type bit is for compute work on
+    // the graphics ring; compute queues don't use it.)
+    return 3u << 30 | ((body_dwords - 1) & 0x3fff) << 16 | (op & 0xff) << 8;
 }
 
 struct Stream {
@@ -89,12 +90,13 @@ struct Stream {
         set_sh(COMPUTE_PGM_RSRC3, {0});
         set_sh(COMPUTE_TMPRING_SIZE, {0});
         set_sh(COMPUTE_RESOURCE_LIMITS, {0});
-        set_sh(COMPUTE_STATIC_THREAD_MGMT_SE0, {0xffffffff, 0xffffffff});
-        set_sh(COMPUTE_STATIC_THREAD_MGMT_SE2, {0xffffffff, 0xffffffff});
+        // COMPUTE_STATIC_THREAD_MGMT_SE* (which CUs may run waves) is left
+        // alone: the kernel sets it per queue for the CUs that exist.
         set_sh(COMPUTE_RESTART_X, {0, 0, 0});
         if (nargs) set_sh(COMPUTE_USER_DATA_0, args, nargs);
-        set_sh(COMPUTE_START_X, {0, 0, 0, threads[0], threads[1], threads[2]});
-        uint32_t init = 1u << 0 /* COMPUTE_SHADER_EN */ | 1u << 2 /* FORCE_START_AT_000 */ | 1u << 4 /* ORDER_MODE */;
+        // START_X..Z, NUM_THREAD_X..Z, then PIPELINESTAT_ENABLE and PERFCOUNT_ENABLE off.
+        set_sh(COMPUTE_START_X, {0, 0, 0, threads[0], threads[1], threads[2], 0, 0});
+        uint32_t init = 1u << 0 /* COMPUTE_SHADER_EN */ | 1u << 2 /* FORCE_START_AT_000 */;
         if (k.wave32) init |= 1u << 15;   // CS_W32_EN
         packet(DISPATCH_DIRECT, {groups[0], groups[1], groups[2], init});
     }
@@ -106,7 +108,9 @@ struct Stream {
                          1u << 14 /* GLV_INV */ | 1u << 15 /* GL1_INV */ | 1u << 20 /* GL2_INV */ | 1u << 21 /* GL2_WB */ |
                          1u << 22 /* SEQ */;
         uint32_t data_sel = timestamp ? 3 : 2;   // 3: GPU clock, 2: 64-bit value
-        uint32_t sel = data_sel << 29 | 0u << 24 /* no interrupt */ | 0u << 16 /* to memory */;
+        // INT_SEL 3: write the data only after the write confirm, so the
+        // fence never lands before the flushes and writes it follows.
+        uint32_t sel = data_sel << 29 | 3u << 24 | 0u << 16 /* to memory */;
         packet(RELEASE_MEM, {event, sel, (uint32_t)addr, (uint32_t)(addr >> 32), (uint32_t)value, (uint32_t)(value >> 32), 0});
     }
 };
