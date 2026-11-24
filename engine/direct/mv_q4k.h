@@ -19,18 +19,24 @@
 // Arguments: s[0:1] W, s[2:3] x, s[4:5] y, s6 rows, s7 unused, s8 rows per
 // workgroup, s9 unused; s10 workgroup id.
 #pragma once
+#include <algorithm>
 #include <string>
 
 namespace ts5::direct {
 
 // diag (timing only, results wrong): 1 drops the block math, 2 the LDS
 // reads of x and sums, 4 the weight loads.
-inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", int diag = 0) {
+// depth: steps whose loads are in flight while one is worked on (1 to 3).
+inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", int diag = 0, int depth = 2) {
     const int nit = ncols / 2048;          // steps per row
     const int row_bytes = ncols / 256 * 144;
     const int nseg = ncols / 16;
     const int sums = ncols * 4;            // LDS byte offset of the 16-value sums
-    const int lds = sums + nseg * 4;
+    // At least 33 KiB of LDS, so that no two workgroups share a CU (64 KiB
+    // each in CU mode): with 17 KiB (4096 columns) the dispatcher packed
+    // several onto some CUs and left others idle, and those shapes ran at
+    // half the speed of 12288 columns' 52 KiB (round 8).
+    const int lds = std::max(sums + nseg * 4, 33 * 1024);
     const std::string H = hints.empty() ? "" : " " + hints;
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
@@ -235,7 +241,7 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", i
             o("ds_read_b32 v" + S(sr) + ", v125 offset:" + S(so));
             o("ds_read_b32 v" + S(sr + 1) + ", v125 offset:" + S(so + 8));
         }
-        o("s_waitcnt vmcnt(4)");
+        o("s_waitcnt vmcnt(" + S(4 * depth) + ")");
         o("s_waitcnt lgkmcnt(10)");
         block(base, base + 4, 40, 72);
         o("s_waitcnt lgkmcnt(0)");
@@ -266,15 +272,19 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", i
         label("cnext" + n);
     };
 
-    loads(8);
-    advance_load();
+    // depth+1 register sets in rotation; each compute waits only for the
+    // oldest set while the other `depth` sets' loads stay in flight.
+    const int sets[4] = {8, 24, 134, 150};
+    for (int i = 0; i < depth; i++) {
+        loads(sets[i]);
+        advance_load();
+    }
     label("loop");
-    loads(24);
-    advance_load();
-    compute(8);
-    loads(8);
-    advance_load();
-    compute(24);
+    for (int i = 0; i <= depth; i++) {
+        loads(sets[(i + depth) % (depth + 1)]);
+        advance_load();
+        compute(sets[i]);
+    }
     o("s_branch loop");
     label("end");
     o("s_endpgm");

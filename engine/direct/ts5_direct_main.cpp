@@ -392,7 +392,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
         std::string err;
         if (!gfx10::assemble(ts5::direct::gen_mv_q4k((int)sh.cols), P.k, &err)) return die("mv_q4k: " + err);
         size_t cb = (P.k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
-        if (!dev.alloc(cb, kfd::Mem::Gtt, P.code) || !dev.alloc(cb, kfd::Mem::Gtt, P.dcode)) return die(dev.err());
+        if (!dev.alloc(cb, kfd::Mem::Gtt, P.code) || !dev.alloc(cb * 2, kfd::Mem::Gtt, P.dcode)) return die(dev.err());
         for (size_t i = 0; i < cb / 4; i++) ((uint32_t*)P.code.cpu)[i] = 0xbf9f0000;
         std::memcpy(P.code.cpu, P.k.code.data(), P.k.code.size() * 4);
         if (!dev.alloc(bytes, kfd::Mem::Gtt, P.wh) || !dev.alloc(bytes, kfd::Mem::Vram, P.wv) ||
@@ -492,15 +492,20 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
         std::printf("%-30s %6.1f %9.2e  %6.1f / %6.1f / %6.1f  %8.1f\n", sh.name, bytes / 1e6, e, r.back(), med, r.front(),
                     bytes / med / 1e3);
         std::fflush(stdout);
-        for (int d = 1; diag && d < 8; d++) {   // the same kernel with parts left out (results not checked)
+        // diag: the same kernel with parts left out (results not checked),
+        // then with 1 and 3 steps of loads in flight (results checked).
+        for (int d = 1; diag && d < 10; d++) {
+            const int mode = d < 8 ? d : 0, depth = d == 8 ? 1 : d == 9 ? 3 : 2;
             gfx10::Kernel dk;
             std::string err;
-            if (!gfx10::assemble(ts5::direct::gen_mv_q4k((int)sh.cols, "slc dlc", d), dk, &err)) return die("mv_q4k diag: " + err);
+            if (!gfx10::assemble(ts5::direct::gen_mv_q4k((int)sh.cols, "slc dlc", mode, depth), dk, &err))
+                return die("mv_q4k diag: " + err);
             if (dk.code.size() * 4 + 256 > P.dcode.size) return die("diag code too big");
             for (size_t i = 0; i < P.dcode.size / 4; i++) ((uint32_t*)P.dcode.cpu)[i] = 0xbf9f0000;
             std::memcpy(P.dcode.cpu, dk.code.data(), dk.code.size() * 4);
             std::vector<double> dt;
             for (int i = 0; i < runs; i++) {
+                std::memset(P.yb.cpu, 0xff, sh.rows * 4);
                 pm4::Stream s;
                 uint32_t args[10] = {(uint32_t)P.wv.gpu, (uint32_t)(P.wv.gpu >> 32), (uint32_t)P.xb.gpu, (uint32_t)(P.xb.gpu >> 32),
                                      (uint32_t)P.yb.gpu, (uint32_t)(P.yb.gpu >> 32), sh.rows, sh.cols, per, 0};
@@ -510,8 +515,14 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
                 dt.push_back(gs * 1e6);
             }
             std::sort(dt.begin(), dt.end());
-            std::printf("    without%s%s%s: %8.1f us median\n", d & 1 ? " math" : "", d & 2 ? " lds-reads" : "", d & 4 ? " weight-loads" : "",
-                        dt[dt.size() / 2]);
+            if (mode)
+                std::printf("    without%s%s%s: %8.1f us median\n", d & 1 ? " math" : "", d & 2 ? " lds-reads" : "",
+                            d & 4 ? " weight-loads" : "", dt[dt.size() / 2]);
+            else {
+                double e2 = check(depth == 1 ? "depth 1" : "depth 3");
+                std::printf("    %d steps in flight: %8.1f us median, %6.1f GB/s, err %.2e\n", depth, dt[dt.size() / 2],
+                            bytes / dt[dt.size() / 2] / 1e3, e2);
+            }
             std::fflush(stdout);
         }
     }
