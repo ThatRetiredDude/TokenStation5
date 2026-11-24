@@ -728,12 +728,16 @@ int cmd_attn(kfd::Device& dev, const std::vector<uint32_t>& lens) {
     auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
     auto rf = [&]() { return (float)((int)(rnd() >> 16) - 32768) / 32768.0f; };
     // Everything allocated up front (round 6: no alloc/free between dispatches).
-    struct Case { uint32_t n, chunks; kfd::Buffer q, kh, vh, kv, vv, part, out; std::vector<double> ref; };
+    struct Case { uint32_t n, chunks, per; kfd::Buffer q, kh, vh, kv, vv, part, out; std::vector<double> ref; };
     std::vector<Case> cases(lens.size());
     for (size_t ci = 0; ci < lens.size(); ci++) {
         Case& C = cases[ci];
         C.n = lens[ci];
-        C.chunks = (C.n + 255) / 256;
+        // At most 10 splits per KV head (80 workgroups: two per CU), every
+        // split at least one 256-position chunk.
+        const uint32_t nch = (C.n + 255) / 256, per = (nch + 9) / 10;
+        C.per = per * 256;
+        C.chunks = (nch + per - 1) / per;   // splits
         const size_t kvb = (size_t)C.n * 8 * 256;
         if (!dev.alloc(32 * 128 * 4, kfd::Mem::Gtt, C.q) || !dev.alloc(kvb, kfd::Mem::Gtt, C.kh) || !dev.alloc(kvb, kfd::Mem::Gtt, C.vh) ||
             !dev.alloc(kvb, kfd::Mem::Vram, C.kv) || !dev.alloc(kvb, kfd::Mem::Vram, C.vv) ||
@@ -783,13 +787,14 @@ int cmd_attn(kfd::Device& dev, const std::vector<uint32_t>& lens) {
             if (!run(s, &gs)) return die(dev.err() + " (copying to VRAM)");
         }
         auto add = [&](pm4::Stream& s, const kfd::Buffer& kb, const kfd::Buffer& vb, bool wait_first) {
-            uint32_t a1[10] = {(uint32_t)C.q.gpu, (uint32_t)(C.q.gpu >> 32), (uint32_t)kb.gpu, (uint32_t)(kb.gpu >> 32),
-                               (uint32_t)vb.gpu, (uint32_t)(vb.gpu >> 32), C.n, scale_bits, (uint32_t)C.part.gpu, (uint32_t)(C.part.gpu >> 32)};
+            uint32_t a1[12] = {(uint32_t)C.q.gpu, (uint32_t)(C.q.gpu >> 32), (uint32_t)kb.gpu, (uint32_t)(kb.gpu >> 32),
+                               (uint32_t)vb.gpu, (uint32_t)(vb.gpu >> 32), C.n, scale_bits, (uint32_t)C.part.gpu, (uint32_t)(C.part.gpu >> 32),
+                               C.per, 0};
             uint32_t a2[10] = {(uint32_t)C.part.gpu, (uint32_t)(C.part.gpu >> 32), (uint32_t)C.out.gpu, (uint32_t)(C.out.gpu >> 32),
                                C.chunks, 0, 0, 0, 0, 0};
             uint32_t g1[3] = {C.chunks * 8, 1, 1}, g2[3] = {8, 1, 1}, t[3] = {256, 1, 1};
             if (wait_first) s.wait_kernels();
-            s.dispatch(kp, pcode.gpu, a1, 10, g1, t);
+            s.dispatch(kp, pcode.gpu, a1, 12, g1, t);
             s.wait_kernels();
             s.dispatch(kr, rcode.gpu, a2, 10, g2, t);
         };
@@ -823,18 +828,22 @@ int cmd_attn(kfd::Device& dev, const std::vector<uint32_t>& lens) {
             if (!run(s2, &gs)) return die(dev.err() + " (attn, VRAM)");
             e_vram = check("VRAM");
         }
-        std::vector<double> st;
-        for (int rep = 0; rep < 8; rep++) {   // 5 warm-up batches, then 3 timed
-            pm4::Stream s;
-            for (int i = 0; i < 20; i++) add(s, C.kv, C.vv, i > 0);
-            double total;
-            if (!run(s, &total)) return die(dev.err() + " (attn batches)");
-            if (rep >= 5) st.push_back(total / 20);
-        }
-        std::sort(st.begin(), st.end());
+        auto timed = [&](int per_batch, int warm, std::vector<double>& st) -> bool {
+            for (int rep = 0; rep < warm + 3; rep++) {
+                pm4::Stream s;
+                for (int i = 0; i < per_batch; i++) add(s, C.kv, C.vv, i > 0);
+                double total;
+                if (!run(s, &total)) return false;
+                if (rep >= warm) st.push_back(total / per_batch);
+            }
+            std::sort(st.begin(), st.end());
+            return true;
+        };
+        std::vector<double> st, st100;
+        if (!timed(20, 10, st) || !timed(60, 3, st100)) return die(dev.err() + " (attn batches)");
         double e_steady = check("steady");
-        std::printf("n=%-6u K+V %6.1f MB  err %.2e / %.2e / %.2e  batches of 20: %8.1f us per token-layer, %6.1f GB/s of K+V\n", C.n,
-                    2 * kvb / 1e6, e_sys, e_vram, e_steady, st[1] * 1e6, 2 * kvb / st[1] / 1e9);
+        std::printf("n=%-6u K+V %6.1f MB  err %.2e / %.2e / %.2e  %u splits; batches of 20: %7.1f us, %6.1f GB/s of K+V; of 60 (a ring holds about 70): %7.1f us\n", C.n,
+                    2 * kvb / 1e6, e_sys, e_vram, e_steady, C.chunks, st[1] * 1e6, 2 * kvb / st[1] / 1e9, st100[1] * 1e6);
         std::fflush(stdout);
     }
     std::printf("attn: %s\n", all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
