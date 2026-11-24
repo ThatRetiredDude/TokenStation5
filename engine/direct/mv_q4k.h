@@ -30,12 +30,16 @@ namespace ts5::direct {
 // end: 16 bytes per wave (start lo, HW_ID1, staged - start, end - start)
 // at s[7], s[9] + 16 * (workgroup * 8 + wave).
 // depth: steps whose loads are in flight while one is worked on (1 to 3).
+// hints: none by default. Round 17: with "slc dlc" every 128-byte line two
+// blocks share (nibbles start 16 bytes into a 144-byte block) came from
+// memory twice, and the kernel ran at about 211 GB/s; with no hints it runs
+// at 392-407 GB/s, within 7% of a plain read of the same bytes.
 // inter: rows dealt round-robin over every wave of the dispatch (wave v of
 // workgroup w takes rows 8w + v, then + s8 each time; the host passes s8 =
 // workgroups * 8), so the whole GPU walks the matrix front to back together,
 // as Vulkan's one-row workgroups do; otherwise each workgroup owns a slice of
 // s8 rows.
-inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", int diag = 0, int depth = 1, bool inter = false) {
+inline std::string gen_mv_q4k(int ncols, const std::string& hints = "", int diag = 0, int depth = 1, bool inter = false) {
     const int nit = ncols / 2048;          // steps per row
     const int row_bytes = ncols / 256 * 144;
     const int nseg = ncols / 16;

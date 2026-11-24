@@ -406,7 +406,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         P.sh = &sh;
         const size_t nb = sh.cols / 256, row_bytes = nb * 144, bytes = row_bytes * sh.rows;
         std::string err;
-        if (!gfx10::assemble(gen((int)sh.cols, "slc dlc", 0, 1), P.k, &err)) return die("mv_q4k: " + err);
+        if (!gfx10::assemble(gen((int)sh.cols, "", 0, 1), P.k, &err)) return die("mv_q4k: " + err);
         size_t cb = (P.k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, P.code) || !dev.alloc(cb * 2, kfd::Mem::Gtt, P.dcode) ||
             !dev.alloc((size_t)dev.cu_count() * per_cu * 8 * 16, kfd::Mem::Gtt, P.ts)) return die(dev.err());
@@ -549,9 +549,9 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
             // 1-7: parts left out; 8: timestamps; 9: timestamps, nothing but the frame; 10, 11: 2 and 3 steps in
             // flight; 12, 13: loads only with 2 and 3 steps in flight; 14-17 rows dealt round-robin: full,
             // loads only, full with 2 steps, timestamps
-            // 18-21: cache hints on the weight loads: none and glc dlc, full and loads only
+            // 18-21: cache hints on the weight loads: slc dlc (the old default) and glc dlc, full and loads only
             const bool inter = d >= 14 && d <= 17;
-            const char* hints = d == 18 || d == 19 ? "" : d >= 20 ? "glc dlc" : "slc dlc";
+            const char* hints = d == 18 || d == 19 ? "slc dlc" : d >= 20 ? "glc dlc" : "";
             const int mode = d <= 8 ? d : d == 9 ? 15 : d == 12 || d == 13 || d == 15 || d == 19 || d == 21 ? 3 : d == 17 ? 8 : 0;
             const int depth = d == 10 || d == 12 || d == 16 ? 2 : d == 11 || d == 13 ? 3 : 1;
             const uint32_t dper = inter ? wgs * 8 : per;
