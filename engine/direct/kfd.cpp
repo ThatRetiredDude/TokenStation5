@@ -264,9 +264,16 @@ bool Device::submit(const std::vector<uint32_t>& words) {
         std::this_thread::yield();
     }
     if (pad) {
-        // One NOP packet covering the tail (a 1-dword NOP is count 0x3fff).
-        ring[at] = pad == 1 ? (3u << 30 | 0x3fffu << 16 | 0x10u << 8) : (3u << 30 | (uint32_t)((pad - 2) & 0x3fff) << 16 | 0x10u << 8);
-        for (uint64_t i = 1; i < pad; i++) ring[at + i] = 0;
+        // NOP packets covering the tail (a 1-dword NOP is count 0x3fff). A
+        // packet's count has 14 bits, so a long tail takes several: round 33
+        // padded 23,000 dwords with one, its count wrapped, and the GPU read
+        // the rest of the tail as packets ("Illegal opcode in command stream").
+        for (uint64_t i = 0; i < pad; i++) ring[at + i] = 0;
+        for (uint64_t i = 0; i < pad;) {
+            const uint64_t n = std::min<uint64_t>(pad - i, 8192);
+            ring[at + i] = n == 1 ? (3u << 30 | 0x3fffu << 16 | 0x10u << 8) : (3u << 30 | (uint32_t)(n - 2) << 16 | 0x10u << 8);
+            i += n;
+        }
         put_ += pad;
     }
     for (uint32_t w : words) ring[(put_++) % ring_dw] = w;
