@@ -48,9 +48,18 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc") {
         o("s_add_u32 s36, s36, 4096");
         o("s_addc_u32 s37, s37, 0");
     }
+    // LDS layout: 16-value segment s at s*64, its four 16-byte chunks
+    // swizzled, chunk c at 16 * (c ^ ((s >> 2) & 3)) (address bits 5:4 xor
+    // bits 9:8). The 8 lanes of a block read segments 4p + (0|1) (+2 for the
+    // high nibbles), p = 0..3, which without the swizzle all sit at the
+    // same two bank offsets: a 16-way conflict on every x read (round 6:
+    // 41 GB/s).
+    o("v_lshrrev_b32 v8, 4, v7");
+    o("v_and_b32 v8, 0x30, v8");
+    o("v_xor_b32 v8, v7, v8");
     o("s_waitcnt vmcnt(0)");
     for (int i = 0; i < nload; i++)
-        o("ds_write_b128 v7, v[" + S(40 + 4 * i) + ":" + S(43 + 4 * i) + "] offset:" + S(4096 * i));
+        o("ds_write_b128 v8, v[" + S(40 + 4 * i) + ":" + S(43 + 4 * i) + "] offset:" + S(4096 * i));
     o("s_waitcnt lgkmcnt(0)");
     o("s_barrier");
     // ---- the sum of every 16 values: thread j takes j, j+256, ...
@@ -108,6 +117,10 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc") {
     o("v_lshl_add_u32 v5, v111, 2, v5");
     o("v_lshl_add_u32 v5, v108, 6, v5");
     o("v_add_nc_u32 v5, " + S(sums) + ", v5");  // sums bytes
+    for (int c = 0; c < 4; c++) {   // x chunk c of the lane's segments, swizzled: v4 + 16 (c ^ p)
+        o("v_xor_b32 v112, " + S(c) + ", v110");
+        o("v_lshl_add_u32 v" + S(126 + c) + ", v112, 4, v4");
+    }
     o("v_cmp_le_u32 vcc_lo, 2, v110");    // the upper scales' packing (p >= 2), kept in vcc
     o("v_mov_b32 v6, 0");                 // the row's sum
     o("s_mov_b32 s30, 0x76543210");
@@ -200,13 +213,14 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc") {
     auto compute = [&](int base) {   // the step whose loads sit in v[base..base+15]
         const std::string n = S(site++);
         o("s_lshl_b32 s11, s33, 13");
-        o("v_add_nc_u32 v124, s11, v4");
+        for (int c = 0; c < 4; c++) o("v_add_nc_u32 v" + S(130 + c) + ", s11, v" + S(126 + c));
         o("s_lshl_b32 s11, s33, 9");
         o("v_add_nc_u32 v125, s11, v5");
         for (int blk = 0; blk < 2; blk++) {
             const int xr = blk ? 74 : 40, sr = blk ? 106 : 72, xo = blk * 4096, so = blk * 256;
             for (int c = 0; c < 8; c++)
-                o("ds_read_b128 v[" + S(xr + 4 * c) + ":" + S(xr + 4 * c + 3) + "], v124 offset:" + S(xo + (c < 4 ? 16 * c : 128 + 16 * (c - 4))));
+                o("ds_read_b128 v[" + S(xr + 4 * c) + ":" + S(xr + 4 * c + 3) + "], v" + S(130 + (c & 3)) + " offset:" +
+                  S(xo + (c < 4 ? 0 : 128)));
             o("ds_read_b32 v" + S(sr) + ", v125 offset:" + S(so));
             o("ds_read_b32 v" + S(sr + 1) + ", v125 offset:" + S(so + 8));
         }

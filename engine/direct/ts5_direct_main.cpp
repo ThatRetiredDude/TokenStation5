@@ -373,23 +373,32 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu) {
     auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
     bool all_ok = true;
     std::printf("shape                          MB     err        GB/s (best / median / worst of %d)  us median\n", runs);
-    for (const Shape& sh : shapes) {
-        const size_t nb = sh.cols / 256, row_bytes = nb * 144, bytes = row_bytes * sh.rows;
-        // Code for this column count.
+    // Everything for every shape is allocated before the first dispatch:
+    // round 6 freed one shape's buffers and allocated the next one's
+    // between dispatches, and the second shape's results never arrived
+    // (NaN) and the third's copy hit GPU page faults.
+    struct Prep {
+        const Shape* sh;
         gfx10::Kernel k;
+        kfd::Buffer code, wh, wv, xb, yb;
+        std::vector<double> ref, mag;
+    };
+    std::vector<Prep> preps(sizeof(shapes) / sizeof(shapes[0]));
+    for (size_t si = 0; si < preps.size(); si++) {
+        Prep& P = preps[si];
+        const Shape& sh = shapes[si];
+        P.sh = &sh;
+        const size_t nb = sh.cols / 256, row_bytes = nb * 144, bytes = row_bytes * sh.rows;
         std::string err;
-        if (!gfx10::assemble(ts5::direct::gen_mv_q4k((int)sh.cols), k, &err)) return die("mv_q4k: " + err);
-        kfd::Buffer code;
-        size_t cb = (k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
-        if (!dev.alloc(cb, kfd::Mem::Gtt, code)) return die(dev.err());
-        for (size_t i = 0; i < cb / 4; i++) ((uint32_t*)code.cpu)[i] = 0xbf9f0000;
-        std::memcpy(code.cpu, k.code.data(), k.code.size() * 4);
-        // Matrix, x, y.
-        kfd::Buffer wh, wv, xb, yb;
-        if (!dev.alloc(bytes, kfd::Mem::Gtt, wh) || !dev.alloc(bytes, kfd::Mem::Vram, wv) ||
-            !dev.alloc(sh.cols * 4, kfd::Mem::Gtt, xb) || !dev.alloc(sh.rows * 4, kfd::Mem::Gtt, yb))
+        if (!gfx10::assemble(ts5::direct::gen_mv_q4k((int)sh.cols), P.k, &err)) return die("mv_q4k: " + err);
+        size_t cb = (P.k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
+        if (!dev.alloc(cb, kfd::Mem::Gtt, P.code)) return die(dev.err());
+        for (size_t i = 0; i < cb / 4; i++) ((uint32_t*)P.code.cpu)[i] = 0xbf9f0000;
+        std::memcpy(P.code.cpu, P.k.code.data(), P.k.code.size() * 4);
+        if (!dev.alloc(bytes, kfd::Mem::Gtt, P.wh) || !dev.alloc(bytes, kfd::Mem::Vram, P.wv) ||
+            !dev.alloc(sh.cols * 4, kfd::Mem::Gtt, P.xb) || !dev.alloc(sh.rows * 4, kfd::Mem::Gtt, P.yb))
             return die(dev.err());
-        uint8_t* W = (uint8_t*)wh.cpu;
+        uint8_t* W = (uint8_t*)P.wh.cpu;
         for (size_t b = 0; b < nb * sh.rows; b++) {
             uint8_t* blk = W + b * 144;
             uint16_t d = float_to_half(0.0005f + (rnd() >> 8) * (0.004f / 16777216.0f));
@@ -398,10 +407,11 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu) {
             std::memcpy(blk + 2, &dm, 2);
             for (int i = 4; i < 144; i++) blk[i] = (uint8_t)(rnd() >> 24);
         }
-        float* X = (float*)xb.cpu;
+        float* X = (float*)P.xb.cpu;
         for (uint32_t c = 0; c < sh.cols; c++) X[c] = (float)((int)(rnd() >> 16) - 32768) / 32768.0f;
         // CPU reference, and the size of each row's terms to judge the error by.
-        std::vector<double> ref(sh.rows), mag(sh.rows);
+        P.ref.resize(sh.rows);
+        P.mag.resize(sh.rows);
         for (uint32_t r = 0; r < sh.rows; r++) {
             double acc = 0, am = 0;
             for (size_t b = 0; b < nb; b++) {
@@ -424,49 +434,56 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu) {
                     }
                 }
             }
-            ref[r] = acc;
-            mag[r] = am;
+            P.ref[r] = acc;
+            P.mag[r] = am;
         }
+    }
+    for (Prep& P : preps) {
+        const Shape& sh = *P.sh;
+        const size_t bytes = sh.cols / 256 * 144 * sh.rows;
+        const gfx10::Kernel& k = P.k;
         double gs;
         {   // matrix into VRAM
             pm4::Stream s;
             uint32_t n16 = (uint32_t)(bytes / 16);
-            uint32_t args[5] = {(uint32_t)wh.gpu, (uint32_t)(wh.gpu >> 32), (uint32_t)wv.gpu, (uint32_t)(wv.gpu >> 32), n16};
+            uint32_t args[5] = {(uint32_t)P.wh.gpu, (uint32_t)(P.wh.gpu >> 32), (uint32_t)P.wv.gpu, (uint32_t)(P.wv.gpu >> 32), n16};
             uint32_t g[3] = {(n16 + 255) / 256, 1, 1}, t[3] = {256, 1, 1};
             s.dispatch(ck, ccode.gpu, args, 5, g, t);
             if (!run(s, &gs)) return die(dev.err() + " (copying to VRAM)");
         }
         const uint32_t wgs = dev.cu_count() * per_cu, per = (sh.rows + wgs - 1) / wgs;
         auto mv = [&](const kfd::Buffer& w, double* t_s) -> bool {
-            std::memset(yb.cpu, 0xff, sh.rows * 4);
+            std::memset(P.yb.cpu, 0xff, sh.rows * 4);
             pm4::Stream s;
-            uint32_t args[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)xb.gpu, (uint32_t)(xb.gpu >> 32),
-                                 (uint32_t)yb.gpu, (uint32_t)(yb.gpu >> 32), sh.rows, sh.cols, per, 0};
+            uint32_t args[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)P.xb.gpu, (uint32_t)(P.xb.gpu >> 32),
+                                 (uint32_t)P.yb.gpu, (uint32_t)(P.yb.gpu >> 32), sh.rows, sh.cols, per, 0};
             uint32_t g[3] = {wgs, 1, 1}, t[3] = {256, 1, 1};
-            s.dispatch(k, code.gpu, args, 10, g, t);
+            s.dispatch(k, P.code.gpu, args, 10, g, t);
             return run(s, t_s);
         };
         auto check = [&](const char* where) -> double {
-            const float* Y = (const float*)yb.cpu;
+            const float* Y = (const float*)P.yb.cpu;
             double worst = 0;
+            uint32_t bad = 0, first_bad = 0;
             for (uint32_t r = 0; r < sh.rows; r++) {
-                double e = std::fabs(Y[r] - ref[r]) / (mag[r] > 0 ? mag[r] : 1);
+                double e = std::fabs(Y[r] - P.ref[r]) / (P.mag[r] > 0 ? P.mag[r] : 1);
                 if (!(e == e)) e = 1e9;   // NaN: the row was never written
+                if (e > 1e-5 && bad++ == 0) first_bad = r;
                 worst = std::max(worst, e);
             }
-            if (worst > 1e-5) {
-                std::printf("  %s: WRONG, worst error %.3g; rows 0..3 gpu %g %g %g %g cpu %g %g %g %g\n", where, worst, Y[0], Y[1], Y[2],
-                            Y[3], ref[0], ref[1], ref[2], ref[3]);
+            if (bad) {
+                std::printf("  %s %s: WRONG, %u of %u rows, worst error %.3g, first bad row %u: gpu %g cpu %g\n", sh.name, where, bad,
+                            sh.rows, worst, first_bad, Y[first_bad], P.ref[first_bad]);
                 all_ok = false;
             }
             return worst;
         };
-        if (!mv(wh, &gs)) return die(dev.err() + " (mv_q4k from system memory)");
+        if (!mv(P.wh, &gs)) return die(dev.err() + " (mv_q4k from system memory)");
         check("system memory");
         std::vector<double> r;
         double e = 0;
         for (int i = 0; i < runs; i++) {
-            if (!mv(wv, &gs)) return die(dev.err() + " (mv_q4k from VRAM)");
+            if (!mv(P.wv, &gs)) return die(dev.err() + " (mv_q4k from VRAM)");
             if (i == 0) e = check("VRAM");
             r.push_back(bytes / gs / 1e9);
         }
@@ -475,11 +492,6 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu) {
         std::printf("%-30s %6.1f %9.2e  %6.1f / %6.1f / %6.1f  %8.1f\n", sh.name, bytes / 1e6, e, r.back(), med, r.front(),
                     bytes / med / 1e3);
         std::fflush(stdout);
-        dev.free(wh);
-        dev.free(wv);
-        dev.free(xb);
-        dev.free(yb);
-        dev.free(code);
     }
     std::printf("mv-q4k: %s (%u workgroups, 256 threads each)\n", all_ok ? "all rows match the CPU" : "SOME ROWS WRONG",
                 dev.cu_count() * per_cu);
