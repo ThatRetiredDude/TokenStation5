@@ -66,12 +66,17 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
     const std::string path = argv[2];
     const int ntime = argc > 3 ? std::atoi(argv[3]) : 64;
     const int ctx = argc > 4 ? std::atoi(argv[4]) : 2048;
-    bool profile = false, light = true, serial = false, fused = true;
+    bool profile = false, light = true, serial = false, fused = false, mvonly = false;
     for (int i = 5; i < argc; i++) {
         if (std::string(argv[i]) == "profile") profile = serial = true;
         if (std::string(argv[i]) == "nolight") light = false;   // no cache invalidation between kernels (timing only)
         if (std::string(argv[i]) == "serial") serial = true;    // the host waits for each token before sending the next
-        if (std::string(argv[i]) == "unfused") fused = false;   // separate norm and SiLU kernels (round 35's stream)
+        // The mat-vecs stage x through the norm or SiLU themselves: three
+        // fewer kernels and waits per layer, but round 36 measured it 4-5%
+        // SLOWER (every workgroup redoes the norm before its first weight
+        // load), so it is off unless asked for.
+        if (std::string(argv[i]) == "fused") fused = true;
+        if (std::string(argv[i]) == "mvonly") mvonly = true;    // timing only: the mat-vecs and their waits, nothing else
     }
 
     Model m;
@@ -189,6 +194,7 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
     std::memcpy(&scale_bits, &scale, 4);
     const uint32_t wgs = dev.cu_count(), step = wgs * 8;
 
+    bool timing = false;
     // One token's commands: its embedding (row `id`, or with id -1 the row
     // the last token's argmax chose), every layer, the logits, their argmax.
     // seq numbers the tokens sent: the fence is set to seq + 1 at the end.
@@ -199,6 +205,7 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
             ((uint32_t*)bstamp.cpu)[2048 + ns] = (uint32_t)step_id;
             s.stamp(bstamp.gpu + 8 * ns++);
         };
+        auto skip = [&]() { return mvonly && timing; };   // the check tokens stay whole
         auto barrier = [&]() {
             s.wait_kernels();
             if (light) s.acquire_light();
@@ -212,6 +219,7 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
             s.dispatch(p->k, p->code.gpu, args, 10, g, t256);
         };
         auto norm = [&](bool add, const Weight& w) {
+            if (skip()) return;
             const Prog& p = add ? k_addnorm : k_norm;
             const uint64_t a = addr(w.data);
             const uint32_t args[8] = {lo(bx.gpu), hi(bx.gpu), lo(a), hi(a), lo(bxn.gpu), hi(bxn.gpu), lo(bt.gpu), hi(bt.gpu)};
@@ -254,7 +262,7 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
                 const uint32_t args[16] = {lo(bq.gpu), hi(bq.gpu), lo(bk.gpu), hi(bk.gpu), lo(bv.gpu), hi(bv.gpu), lo(qn), hi(qn),
                                            lo(kn),     hi(kn),     lo(rr),     hi(rr),     lo(kr),     hi(kr),     lo(vr), hi(vr)};
                 const uint32_t g[3] = {(uint32_t)(NQ + NKV), 1, 1};
-                s.dispatch(k_qk.k, k_qk.code.gpu, args, 16, g, t64);
+                if (!skip()) s.dispatch(k_qk.k, k_qk.code.gpu, args, 16, g, t64);
             }
             barrier();
             stamp(S_QK);
@@ -262,11 +270,11 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
                 const uint32_t a1[12] = {lo(bq.gpu), hi(bq.gpu), lo(kc), hi(kc), lo(vc), hi(vc), n, scale_bits,
                                          lo(bpart.gpu), hi(bpart.gpu), per * 256, 0};
                 const uint32_t g1[3] = {splits * NKV, 1, 1};
-                s.dispatch(k_attn.k, k_attn.code.gpu, a1, 12, g1, t256);
-                barrier();
+                if (!skip()) s.dispatch(k_attn.k, k_attn.code.gpu, a1, 12, g1, t256);
+                if (!skip()) barrier();
                 const uint32_t a2[10] = {lo(bpart.gpu), hi(bpart.gpu), lo(batt.gpu), hi(batt.gpu), splits, 0, 0, 0, 0, 0};
                 const uint32_t g2[3] = {(uint32_t)NKV, 1, 1};
-                s.dispatch(k_red.k, k_red.code.gpu, a2, 10, g2, t256);
+                if (!skip()) s.dispatch(k_red.k, k_red.code.gpu, a2, 10, g2, t256);
             }
             barrier();
             stamp(S_ATTN);
@@ -292,7 +300,7 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
             {
                 const uint32_t args[6] = {lo(bg.gpu), hi(bg.gpu), lo(bu.gpu), hi(bu.gpu), lo(bh.gpu), hi(bh.gpu)};
                 const uint32_t g[3] = {(uint32_t)(F / 1024), 1, 1};
-                s.dispatch(k_silu.k, k_silu.code.gpu, args, 6, g, t256);
+                if (!skip()) s.dispatch(k_silu.k, k_silu.code.gpu, args, 6, g, t256);
             }
             barrier();
             stamp(S_SILU);
@@ -395,6 +403,7 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
     std::string text;
     std::vector<double> gpu_ms, wall_ms;
     const int pos0 = pos;
+    timing = true;
     const uint64_t seq0 = seq;
     auto w0 = std::chrono::steady_clock::now();
     for (int i = 0; i < ntime && pos < ctx; i++, pos++) {
@@ -430,7 +439,7 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
     if (ntimed)
         std::printf("timed %d tokens (positions %d-%d)%s%s%s: GPU %.2f ms median per token (%.1f tok/s); first start to last end %.2f ms "
                     "per token (%.1f tok/s); host clock %.1f tok/s%s\n",
-                    ntimed, pos0, pos - 1, serial ? ", serial" : fused ? ", queued" : ", queued, unfused", light ? "" : ", no cache invalidation",
+                    ntimed, pos0, pos - 1, serial ? ", serial" : fused ? ", queued, fused" : mvonly ? ", queued, MAT-VECS ONLY (output wrong)" : ", queued", light ? "" : ", no cache invalidation",
                     profile ? ", profiled" : "", med(gpu_ms), 1e3 / med(gpu_ms), span_ms / ntimed, 1e3 * ntimed / span_ms,
                     1e3 * ntimed / total_ms, serial ? (", host wait " + std::to_string(med(wall_ms)).substr(0, 5) + " ms median").c_str() : "");
     if (profile && profiled) {
