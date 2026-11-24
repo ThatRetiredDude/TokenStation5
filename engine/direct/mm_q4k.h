@@ -24,7 +24,7 @@
 
 namespace ts5::direct {
 
-inline std::string gen_mm_q4k(int K, int T) {
+inline std::string gen_mm_q4k(int K, int T, int SPLIT = 4) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
@@ -32,24 +32,35 @@ inline std::string gen_mm_q4k(int K, int T) {
     const int A = 8, B = 44;                  // the block being worked on, the next one (36 dwords each)
     const int DSC = 80, DMM = 88, ACC = 96, TMP = 112, U = 128;
     const int SX = 20, SXS = 84;              // x: two sets of 2 columns of T; the sub-block sums: T
-    k += ".kernel mm_q4k\n.wave32\n.user_sgprs 10\n.tgid_x\n";
+    // SPLIT waves a workgroup, each its own slice of the blocks, summed in
+    // LDS at the end (round 40: with a wave per 32 rows and the whole row,
+    // 4096-row shapes left most SIMDs with one or two waves).
+    const int PB = NB / SPLIT;                 // blocks a wave
+    k += ".kernel mm_q4k\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds " + S(SPLIT * T * 128) + "\n";
+    o("v_lshrrev_b32 v2, 5, v0");
+    o("v_readfirstlane_b32 s19, v2");          // the wave: its slice
+    o("v_and_b32 v0, 31, v0");
     o("s_lshl_b32 s11, s10, 5");
     o("v_add_nc_u32 v3, s11, v0");             // the lane's row
     o("v_mul_u32_u24 v1, " + S(RB) + ", v3");  // its first byte
+    o("s_mul_i32 s11, s19, " + S(PB * 144));
+    o("v_add_nc_u32 v1, s11, v1");
     o("v_lshlrev_b32 v3, 2, v3");
     for (int t = 0; t < T; t++) o("v_mov_b32 v" + S(ACC + t) + ", 0");
     auto load = [&](int base) {
         for (int i = 0; i < 9; i++) o("global_load_dwordx4 v[" + S(base + 4 * i) + ":" + S(base + 3 + 4 * i) + "], v1, s[0:1] offset:" + S(16 * i));
     };
     load(A);
-    o("s_mov_b32 s12, s2");                    // x of the current block
-    o("s_mov_b32 s13, s3");
-    o("s_mov_b32 s14, s8");                    // its sub-block sums
-    o("s_mov_b32 s15, s9");
-    o("s_mov_b32 s16, " + S(NB));
+    o("s_mul_i32 s11, s19, " + S(PB * 256 * T * 4));
+    o("s_add_u32 s12, s2, s11");                    // x of the current block
+    o("s_addc_u32 s13, s3, 0");
+    o("s_mul_i32 s11, s19, " + S(PB * 8 * T * 4));
+    o("s_add_u32 s14, s8, s11");                    // its sub-block sums
+    o("s_addc_u32 s15, s9, 0");
+    o("s_mov_b32 s16, " + S(PB));
     for (int i = 0; i < 2 * T; i += (2 * T - i >= 16 ? 16 : 8)) {
         const int w = 2 * T - i >= 16 ? 16 : 8;
-        o("s_load_dwordx" + S(w) + " s[" + S(SX + i) + ":" + S(SX + i + w - 1) + "], s[2:3], " + S(4 * i));
+        o("s_load_dwordx" + S(w) + " s[" + S(SX + i) + ":" + S(SX + i + w - 1) + "], s[12:13], " + S(4 * i));
     }
     k += "block:\n";
     o("v_add_nc_u32 v1, 144, v1");
@@ -133,12 +144,27 @@ inline std::string gen_mm_q4k(int K, int T) {
     o("s_sub_u32 s16, s16, 1");
     o("s_cmp_lg_u32 s16, 0");
     o("s_cbranch_scc1 block");
+    o("v_lshlrev_b32 v5, 2, v0");
+    o("s_mul_i32 s11, s19, " + S(T * 128));
+    o("v_add_nc_u32 v5, s11, v5");
+    for (int t = 0; t < T; t++) o("ds_write_b32 v5, v" + S(ACC + t) + " offset:" + S(t * 128));
+    o("s_waitcnt lgkmcnt(0)");
+    o("s_barrier");
+    o("s_cmp_lg_u32 s19, 0");
+    o("s_cbranch_scc1 done");
+    o("v_lshlrev_b32 v5, 2, v0");
+    for (int w = 1; w < SPLIT; w++) {
+        for (int t = 0; t < T; t++) o("ds_read_b32 v" + S(TMP + t) + ", v5 offset:" + S((w * T + t) * 128));
+        o("s_waitcnt lgkmcnt(0)");
+        for (int t = 0; t < T; t++) o("v_add_f32 v" + S(ACC + t) + ", v" + S(ACC + t) + ", v" + S(TMP + t));
+    }
     for (int t = 0; t < T; t++) {
         o("s_mul_i32 s17, s6, " + S(4 * t));
-        o("s_add_u32 s18, s4, s17");
-        o("s_addc_u32 s19, s5, 0");
-        o("global_store_dword v3, v" + S(ACC + t) + ", s[18:19]");
+        o("s_add_u32 s100, s4, s17");
+        o("s_addc_u32 s101, s5, 0");
+        o("global_store_dword v3, v" + S(ACC + t) + ", s[100:101]");
     }
+    k += "done:\n";
     o("s_endpgm");
     return k;
 }

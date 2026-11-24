@@ -61,7 +61,7 @@ jobs:
         run: |
           build/direct/ts5-direct gen-ops > /tmp/ops.s
           python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/ops.s
-          for v in "4096 16" "12288 16" "4096 8"; do
+          for v in "4096 16" "12288 16" "4096 8" "4096 16 q6" "12288 8 q6"; do
             build/direct/ts5-direct gen-mm $v > /tmp/mm.s
             python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/mm.s
           done

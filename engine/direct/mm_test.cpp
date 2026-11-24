@@ -1,5 +1,6 @@
-// ts5-direct mm-q4k [T]: the prompt kernel (mm_q4k.h) on Qwen3 8B's Q4_K
-// shapes, against the CPU, and timed: one pass over the weights for T tokens.
+// ts5-direct mm-q4k|mm-q6k [T] [split]: the prompt kernels (mm_q4k.h,
+// mm_q6k.h) on Qwen3 8B's shapes, against the CPU, and timed: one pass over
+// the weights for T tokens.
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -13,13 +14,18 @@
 #include "gfx10_asm.h"
 #include "kfd.h"
 #include "mm_q4k.h"
+#include "mm_q6k.h"
 #include "pm4.h"
 
 namespace ts5::direct {
 
 int cmd_mm_q4k(int argc, char** argv) {
+    const bool q6 = std::string(argv[1]) == "mm-q6k";
     const int T = argc > 2 ? std::atoi(argv[2]) : 16;
+    const int SPLIT = argc > 3 ? std::atoi(argv[3]) : 4;
     if (T != 8 && T != 16) { std::fprintf(stderr, "mm-q4k: T is 8 or 16\n"); return 1; }
+    if (SPLIT != 1 && SPLIT != 2 && SPLIT != 4 && SPLIT != 8) { std::fprintf(stderr, "mm-q4k: split is 1, 2, 4 or 8\n"); return 1; }
+    const int BB = q6 ? 210 : 144, SUB = q6 ? 16 : 32;   // bytes a block, values a sub-block (x sums)
     kfd::Device dev;
     if (!dev.open() || !dev.create_queue(1 << 20)) { std::fprintf(stderr, "mm-q4k: %s\n", dev.err().c_str()); return 1; }
     uint64_t* sig = (uint64_t*)dev.signals.cpu;
@@ -45,17 +51,18 @@ int cmd_mm_q4k(int argc, char** argv) {
     uint32_t seed = 777;
     auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
     bool all_ok = true;
-    std::printf("mm_q4k, T = %d tokens a pass\n", T);
+    std::printf("%s, T = %d tokens a pass, %d waves a workgroup\n", q6 ? "mm_q6k" : "mm_q4k", T, SPLIT);
     for (const Shape& sh : shapes) {
         const int NB = sh.K / 256;
-        const size_t rb = (size_t)NB * 144, wbytes = rb * sh.R;
+        if (NB % SPLIT || (q6 && (NB / SPLIT) % 2)) continue;
+        const size_t rb = (size_t)NB * BB, wbytes = rb * sh.R;
         gfx10::Kernel k;
         std::string err;
-        if (!gfx10::assemble(gen_mm_q4k(sh.K, T), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
+        if (!gfx10::assemble(q6 ? gen_mm_q6k(sh.K, T, SPLIT) : gen_mm_q4k(sh.K, T, SPLIT), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
         kfd::Buffer code, W, xT, xs, Y;
         const size_t cb = (k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, code) || !dev.alloc(wbytes + 4096, kfd::Mem::Gtt, W) ||
-            !dev.alloc((size_t)sh.K * T * 4 + 4096, kfd::Mem::Gtt, xT) || !dev.alloc((size_t)sh.K / 32 * T * 4, kfd::Mem::Gtt, xs) ||
+            !dev.alloc((size_t)sh.K * T * 4 + 4096, kfd::Mem::Gtt, xT) || !dev.alloc((size_t)sh.K / SUB * T * 4, kfd::Mem::Gtt, xs) ||
             !dev.alloc((size_t)sh.R * T * 4, kfd::Mem::Gtt, Y)) {
             std::fprintf(stderr, "mm-q4k: %s\n", dev.err().c_str());
             return 1;
@@ -63,7 +70,13 @@ int cmd_mm_q4k(int argc, char** argv) {
         for (size_t i = 0; i < cb / 4; i++) ((uint32_t*)code.cpu)[i] = 0xbf9f0000;
         std::memcpy(code.cpu, k.code.data(), k.code.size() * 4);
         uint8_t* w = (uint8_t*)W.cpu;
-        for (size_t b = 0; b < (size_t)NB * sh.R; b++) {
+        for (size_t b = 0; b < (size_t)NB * sh.R && q6; b++) {
+            uint8_t* blk = w + b * 210;   // ql, qh, int8 scales, then f16 d
+            for (int i = 0; i < 208; i++) blk[i] = (uint8_t)(rnd() >> 24);
+            const uint16_t d = fp32_to_fp16(0.0001f + (rnd() >> 8) * (0.0008f / 16777216.0f));
+            std::memcpy(blk + 208, &d, 2);
+        }
+        for (size_t b = 0; b < (size_t)NB * sh.R && !q6; b++) {
             uint8_t* blk = w + b * 144;
             const uint16_t d = fp32_to_fp16(0.0005f + (rnd() >> 8) * (0.004f / 16777216.0f));
             const uint16_t dm = fp32_to_fp16(0.0005f + (rnd() >> 8) * (0.004f / 16777216.0f));
@@ -77,17 +90,17 @@ int cmd_mm_q4k(int argc, char** argv) {
         float* xsum = (float*)xs.cpu;
         for (int c = 0; c < sh.K; c++)
             for (int t = 0; t < T; t++) xt[(size_t)c * T + t] = X[(size_t)t * sh.K + c];
-        for (int s = 0; s < sh.K / 32; s++)
+        for (int s = 0; s < sh.K / SUB; s++)
             for (int t = 0; t < T; t++) {
                 float a = 0;
-                for (int c = 0; c < 32; c++) a += X[(size_t)t * sh.K + 32 * s + c];
+                for (int c = 0; c < SUB; c++) a += X[(size_t)t * sh.K + SUB * s + c];
                 xsum[(size_t)s * T + t] = a;
             }
         // CPU reference, and each row's sum of |terms| to judge errors by.
         std::vector<double> ref((size_t)T * sh.R), mag((size_t)T * sh.R);
         std::vector<float> row(sh.K);
         for (int r = 0; r < sh.R; r++) {
-            dequantize_row(GGML_Q4_K, w + r * rb, row.data(), sh.K);
+            dequantize_row(q6 ? GGML_Q6_K : GGML_Q4_K, w + r * rb, row.data(), sh.K);
             for (int t = 0; t < T; t++) {
                 double a = 0, m = 0;
                 for (int c = 0; c < sh.K; c++) {
@@ -101,7 +114,7 @@ int cmd_mm_q4k(int argc, char** argv) {
         }
         const uint32_t args[10] = {(uint32_t)W.gpu, (uint32_t)(W.gpu >> 32), (uint32_t)xT.gpu, (uint32_t)(xT.gpu >> 32), (uint32_t)Y.gpu,
                                    (uint32_t)(Y.gpu >> 32), (uint32_t)sh.R, 0, (uint32_t)xs.gpu, (uint32_t)(xs.gpu >> 32)};
-        const uint32_t g[3] = {(uint32_t)(sh.R / 32), 1, 1}, th[3] = {32, 1, 1};
+        const uint32_t g[3] = {(uint32_t)(sh.R / 32), 1, 1}, th[3] = {(uint32_t)(32 * SPLIT), 1, 1};
         std::memset(Y.cpu, 0xff, (size_t)sh.R * T * 4);
         double gs;
         {

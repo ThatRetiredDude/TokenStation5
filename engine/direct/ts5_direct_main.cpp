@@ -28,6 +28,7 @@
 #include "attn.h"
 #include "ops.h"
 #include "mm_q4k.h"
+#include "mm_q6k.h"
 #include "pm4.h"
 
 using namespace ts5;
@@ -901,8 +902,10 @@ int main(int argc, char** argv) {
         std::fputs((v & 2 ? ts5::direct::gen_mv_q6k(cols, 0, st) : ts5::direct::gen_mv_q4k(cols, "", 0, 1, true, st)).c_str(), stdout);
         return 0;
     }
-    if (cmd == "gen-mm") {   // prints mm_q4k for K columns and T tokens
-        std::fputs(ts5::direct::gen_mm_q4k(argc > 2 ? std::atoi(argv[2]) : 4096, argc > 3 ? std::atoi(argv[3]) : 16).c_str(), stdout);
+    if (cmd == "gen-mm") {   // prints mm_q4k (or mm_q6k with a 4th argument "q6") for K columns and T tokens
+        const int K = argc > 2 ? std::atoi(argv[2]) : 4096, T = argc > 3 ? std::atoi(argv[3]) : 16;
+        const bool q6 = argc > 4 && std::string(argv[4]) == "q6";
+        std::fputs((q6 ? ts5::direct::gen_mm_q6k(K, T) : ts5::direct::gen_mm_q4k(K, T)).c_str(), stdout);
         return 0;
     }
     if (cmd == "gen-mv6") {   // prints mv_q6k for a column count [diag]
@@ -982,7 +985,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (cmd == "token") return ts5::direct::cmd_token(argc, argv);
-    if (cmd == "mm-q4k") return ts5::direct::cmd_mm_q4k(argc, argv);
+    if (cmd == "mm-q4k" || cmd == "mm-q6k") return ts5::direct::cmd_mm_q4k(argc, argv);
     kfd::Device dev;
     if (!dev.open()) return die(dev.err());
     if (cmd == "info") return cmd_info(dev);
