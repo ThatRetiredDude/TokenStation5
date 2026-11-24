@@ -786,7 +786,7 @@ int cmd_attn(kfd::Device& dev, const std::vector<uint32_t>& lens) {
             s.dispatch(ck, ccode.gpu, args, 5, g, t);
             if (!run(s, &gs)) return die(dev.err() + " (copying to VRAM)");
         }
-        auto add = [&](pm4::Stream& s, const kfd::Buffer& kb, const kfd::Buffer& vb, bool wait_first) {
+        auto add = [&](pm4::Stream& s, const kfd::Buffer& kb, const kfd::Buffer& vb, bool wait_first, int only = 0) {   // only: 1 part, 2 reduce
             uint32_t a1[12] = {(uint32_t)C.q.gpu, (uint32_t)(C.q.gpu >> 32), (uint32_t)kb.gpu, (uint32_t)(kb.gpu >> 32),
                                (uint32_t)vb.gpu, (uint32_t)(vb.gpu >> 32), C.n, scale_bits, (uint32_t)C.part.gpu, (uint32_t)(C.part.gpu >> 32),
                                C.per, 0};
@@ -794,9 +794,9 @@ int cmd_attn(kfd::Device& dev, const std::vector<uint32_t>& lens) {
                                C.chunks, 0, 0, 0, 0, 0};
             uint32_t g1[3] = {C.chunks * 8, 1, 1}, g2[3] = {8, 1, 1}, t[3] = {256, 1, 1};
             if (wait_first) s.wait_kernels();
-            s.dispatch(kp, pcode.gpu, a1, 12, g1, t);
-            s.wait_kernels();
-            s.dispatch(kr, rcode.gpu, a2, 10, g2, t);
+            if (only != 2) s.dispatch(kp, pcode.gpu, a1, 12, g1, t);
+            if (!only) s.wait_kernels();
+            if (only != 1) s.dispatch(kr, rcode.gpu, a2, 10, g2, t);
         };
         auto check = [&](const char* where) -> double {
             const float* O = (const float*)C.out.cpu;
@@ -828,10 +828,10 @@ int cmd_attn(kfd::Device& dev, const std::vector<uint32_t>& lens) {
             if (!run(s2, &gs)) return die(dev.err() + " (attn, VRAM)");
             e_vram = check("VRAM");
         }
-        auto timed = [&](int per_batch, int warm, std::vector<double>& st) -> bool {
+        auto timed = [&](int per_batch, int warm, std::vector<double>& st, int only = 0) -> bool {
             for (int rep = 0; rep < warm + 3; rep++) {
                 pm4::Stream s;
-                for (int i = 0; i < per_batch; i++) add(s, C.kv, C.vv, i > 0);
+                for (int i = 0; i < per_batch; i++) add(s, C.kv, C.vv, i > 0, only);
                 double total;
                 if (!run(s, &total)) return false;
                 if (rep >= warm) st.push_back(total / per_batch);
@@ -839,11 +839,12 @@ int cmd_attn(kfd::Device& dev, const std::vector<uint32_t>& lens) {
             std::sort(st.begin(), st.end());
             return true;
         };
-        std::vector<double> st, st100;
-        if (!timed(20, 10, st) || !timed(60, 3, st100)) return die(dev.err() + " (attn batches)");
+        std::vector<double> st, st100, stp, str_;
+        if (!timed(20, 10, st) || !timed(60, 3, st100) || !timed(60, 3, stp, 1) || !timed(60, 3, str_, 2))
+            return die(dev.err() + " (attn batches)");
         double e_steady = check("steady");
-        std::printf("n=%-6u K+V %6.1f MB  err %.2e / %.2e / %.2e  %u splits; batches of 20: %7.1f us, %6.1f GB/s of K+V; of 60 (a ring holds about 70): %7.1f us\n", C.n,
-                    2 * kvb / 1e6, e_sys, e_vram, e_steady, C.chunks, st[1] * 1e6, 2 * kvb / st[1] / 1e9, st100[1] * 1e6);
+        std::printf("n=%-6u K+V %6.1f MB  err %.2e / %.2e / %.2e  %u splits; batches of 20: %7.1f us, %6.1f GB/s of K+V; of 60 (a ring holds about 70): %7.1f us; part alone %7.1f us, reduce alone %6.1f us\n", C.n,
+                    2 * kvb / 1e6, e_sys, e_vram, e_steady, C.chunks, st[1] * 1e6, 2 * kvb / st[1] / 1e9, st100[1] * 1e6, stp[1] * 1e6, str_[1] * 1e6);
         std::fflush(stdout);
     }
     std::printf("attn: %s\n", all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
