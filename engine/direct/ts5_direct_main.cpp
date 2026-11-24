@@ -531,7 +531,9 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         // batch is about 5,100 ring dwords; submit() takes up to half the
         // 16,384-dword ring), then time 3 more.
         double per_s;
-        for (int i = 0; i < 3; i++)
+        // The first shape gets 20 warm-up batches (it came in under-clocked
+        // in rounds 14 and 17 with 3).
+        for (int i = 0; i < (&P == &preps[0] ? 20 : 3); i++)
             if (!batch(k, P.code.gpu, P.wv, 100, &per_s)) return die(dev.err() + " (warm-up)");
         std::vector<double> st;
         for (int i = 0; i < 3; i++) {
