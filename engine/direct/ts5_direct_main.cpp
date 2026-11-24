@@ -6,10 +6,12 @@
 //                                and workgroup counts, 5 runs each
 //   ts5-direct bw-last [MiB] [runs]     grid vs chunked, workgroup placement per run
 //   ts5-direct bw-repeat [N] [wave64]   the best setup N times in a row (hang hunt)
+//   ts5-direct mv-q4k [runs] [wgs/CU]   Q4_K mat-vec on Qwen3 8B's shapes: checked against the CPU, timed
 // Kernels are assembled at start from the text built into the program.
 #include <algorithm>
 #include <chrono>
 #include <cinttypes>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -20,6 +22,7 @@
 #include "gfx10_asm.h"
 #include "kernels.h"   // generated: kernel sources as strings
 #include "kfd.h"
+#include "mv_q4k.h"
 #include "pm4.h"
 
 using namespace ts5;
@@ -317,10 +320,180 @@ int cmd_read_bw(kfd::Device& dev, size_t mib) {
     return got == want ? 0 : 1;
 }
 
+float half_to_float(uint16_t h) {
+    uint32_t s = (h >> 15) & 1, e = (h >> 10) & 31, m = h & 1023;
+    float v = e == 0 ? std::ldexp((float)m, -24) : std::ldexp((float)(m | 1024), (int)e - 25);
+    return s ? -v : v;
+}
+
+uint16_t float_to_half(float f) {   // normal range only, round to nearest
+    int e;
+    float m = std::frexp(std::fabs(f), &e);   // f = m 2^e, m in [0.5, 1)
+    uint32_t mant = (uint32_t)std::lround(m * 2048.0f);   // 11 bits incl. the leading 1
+    if (mant == 2048) { mant = 1024; e++; }
+    return (uint16_t)((f < 0 ? 0x8000 : 0) | ((uint32_t)(e + 14) << 10) | (mant & 1023));
+}
+
+// The 6-bit scale and min of sub-block j (0..7) of a Q4_K block's 12 bytes.
+void q4k_scale_min(int j, const uint8_t* q, int& sc, int& m) {
+    if (j < 4) {
+        sc = q[j] & 63;
+        m = q[j + 4] & 63;
+    } else {
+        sc = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        m = (q[j + 4] >> 4) | ((q[j] >> 6) << 4);
+    }
+}
+
+// Q4_K mat-vec (mv_q4k.h) on the shapes of Qwen3 8B's Q4_K matrices: random
+// blocks and x, the GPU's y checked against a CPU sum in double, then timed
+// one dispatch at a time with the matrix in VRAM.
+int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu) {
+    if (!dev.create_queue()) return die(dev.err());
+    gfx10::Kernel ck;
+    kfd::Buffer ccode;
+    if (!load_kernel(dev, kKernel_copy, ck, ccode)) return 1;
+    uint64_t* sig = (uint64_t*)dev.signals.cpu;
+    auto run = [&](pm4::Stream& s, double* gpu_s) -> bool {
+        std::memset(sig, 0, 64);
+        pm4::Stream w;
+        w.acquire_all();
+        w.release(dev.signals.gpu + 8, 0, true);
+        w.w.insert(w.w.end(), s.w.begin(), s.w.end());
+        w.release(dev.signals.gpu + 16, 0, true);
+        w.release(dev.signals.gpu, 1);
+        if (!dev.submit(w.w) || !dev.wait((volatile uint64_t*)sig, 1, 20000)) return false;
+        *gpu_s = (sig[2] - sig[1]) / 100e6;
+        return true;
+    };
+    struct Shape { const char* name; uint32_t rows, cols; };
+    const Shape shapes[] = {{"attn_q/attn_output 4096x4096", 4096, 4096}, {"attn_k 1024x4096", 1024, 4096},
+                            {"ffn_gate/up 12288x4096", 12288, 4096}, {"ffn_down 4096x12288", 4096, 12288}};
+    uint32_t seed = 12345;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
+    bool all_ok = true;
+    std::printf("shape                          MB     err        GB/s (best / median / worst of %d)  us median\n", runs);
+    for (const Shape& sh : shapes) {
+        const size_t nb = sh.cols / 256, row_bytes = nb * 144, bytes = row_bytes * sh.rows;
+        // Code for this column count.
+        gfx10::Kernel k;
+        std::string err;
+        if (!gfx10::assemble(ts5::direct::gen_mv_q4k((int)sh.cols), k, &err)) return die("mv_q4k: " + err);
+        kfd::Buffer code;
+        size_t cb = (k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
+        if (!dev.alloc(cb, kfd::Mem::Gtt, code)) return die(dev.err());
+        for (size_t i = 0; i < cb / 4; i++) ((uint32_t*)code.cpu)[i] = 0xbf9f0000;
+        std::memcpy(code.cpu, k.code.data(), k.code.size() * 4);
+        // Matrix, x, y.
+        kfd::Buffer wh, wv, xb, yb;
+        if (!dev.alloc(bytes, kfd::Mem::Gtt, wh) || !dev.alloc(bytes, kfd::Mem::Vram, wv) ||
+            !dev.alloc(sh.cols * 4, kfd::Mem::Gtt, xb) || !dev.alloc(sh.rows * 4, kfd::Mem::Gtt, yb))
+            return die(dev.err());
+        uint8_t* W = (uint8_t*)wh.cpu;
+        for (size_t b = 0; b < nb * sh.rows; b++) {
+            uint8_t* blk = W + b * 144;
+            uint16_t d = float_to_half(0.0005f + (rnd() >> 8) * (0.004f / 16777216.0f));
+            uint16_t dm = float_to_half(0.0005f + (rnd() >> 8) * (0.004f / 16777216.0f));
+            std::memcpy(blk, &d, 2);
+            std::memcpy(blk + 2, &dm, 2);
+            for (int i = 4; i < 144; i++) blk[i] = (uint8_t)(rnd() >> 24);
+        }
+        float* X = (float*)xb.cpu;
+        for (uint32_t c = 0; c < sh.cols; c++) X[c] = (float)((int)(rnd() >> 16) - 32768) / 32768.0f;
+        // CPU reference, and the size of each row's terms to judge the error by.
+        std::vector<double> ref(sh.rows), mag(sh.rows);
+        for (uint32_t r = 0; r < sh.rows; r++) {
+            double acc = 0, am = 0;
+            for (size_t b = 0; b < nb; b++) {
+                const uint8_t* blk = W + r * row_bytes + b * 144;
+                uint16_t dh, mh;
+                std::memcpy(&dh, blk, 2);
+                std::memcpy(&mh, blk + 2, 2);
+                double d = half_to_float(dh), dmin = half_to_float(mh);
+                const uint8_t* q = blk + 16;
+                for (int j = 0; j < 4; j++) {
+                    int s0, m0, s1, m1;
+                    q4k_scale_min(2 * j, blk + 4, s0, m0);
+                    q4k_scale_min(2 * j + 1, blk + 4, s1, m1);
+                    for (int l = 0; l < 32; l++) {
+                        double w0 = d * s0 * (q[32 * j + l] & 0xF) - dmin * m0;
+                        double w1 = d * s1 * (q[32 * j + l] >> 4) - dmin * m1;
+                        double x0 = X[b * 256 + 64 * j + l], x1 = X[b * 256 + 64 * j + 32 + l];
+                        acc += w0 * x0 + w1 * x1;
+                        am += std::fabs(w0 * x0) + std::fabs(w1 * x1);
+                    }
+                }
+            }
+            ref[r] = acc;
+            mag[r] = am;
+        }
+        double gs;
+        {   // matrix into VRAM
+            pm4::Stream s;
+            uint32_t n16 = (uint32_t)(bytes / 16);
+            uint32_t args[5] = {(uint32_t)wh.gpu, (uint32_t)(wh.gpu >> 32), (uint32_t)wv.gpu, (uint32_t)(wv.gpu >> 32), n16};
+            uint32_t g[3] = {(n16 + 255) / 256, 1, 1}, t[3] = {256, 1, 1};
+            s.dispatch(ck, ccode.gpu, args, 5, g, t);
+            if (!run(s, &gs)) return die(dev.err() + " (copying to VRAM)");
+        }
+        const uint32_t wgs = dev.cu_count() * per_cu, per = (sh.rows + wgs - 1) / wgs;
+        auto mv = [&](const kfd::Buffer& w, double* t_s) -> bool {
+            std::memset(yb.cpu, 0xff, sh.rows * 4);
+            pm4::Stream s;
+            uint32_t args[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)xb.gpu, (uint32_t)(xb.gpu >> 32),
+                                 (uint32_t)yb.gpu, (uint32_t)(yb.gpu >> 32), sh.rows, sh.cols, per, 0};
+            uint32_t g[3] = {wgs, 1, 1}, t[3] = {256, 1, 1};
+            s.dispatch(k, code.gpu, args, 10, g, t);
+            return run(s, t_s);
+        };
+        auto check = [&](const char* where) -> double {
+            const float* Y = (const float*)yb.cpu;
+            double worst = 0;
+            for (uint32_t r = 0; r < sh.rows; r++) {
+                double e = std::fabs(Y[r] - ref[r]) / (mag[r] > 0 ? mag[r] : 1);
+                if (!(e == e)) e = 1e9;   // NaN: the row was never written
+                worst = std::max(worst, e);
+            }
+            if (worst > 1e-5) {
+                std::printf("  %s: WRONG, worst error %.3g; rows 0..3 gpu %g %g %g %g cpu %g %g %g %g\n", where, worst, Y[0], Y[1], Y[2],
+                            Y[3], ref[0], ref[1], ref[2], ref[3]);
+                all_ok = false;
+            }
+            return worst;
+        };
+        if (!mv(wh, &gs)) return die(dev.err() + " (mv_q4k from system memory)");
+        check("system memory");
+        std::vector<double> r;
+        double e = 0;
+        for (int i = 0; i < runs; i++) {
+            if (!mv(wv, &gs)) return die(dev.err() + " (mv_q4k from VRAM)");
+            if (i == 0) e = check("VRAM");
+            r.push_back(bytes / gs / 1e9);
+        }
+        std::sort(r.begin(), r.end());
+        double med = r[r.size() / 2];
+        std::printf("%-30s %6.1f %9.2e  %6.1f / %6.1f / %6.1f  %8.1f\n", sh.name, bytes / 1e6, e, r.back(), med, r.front(),
+                    bytes / med / 1e3);
+        std::fflush(stdout);
+        dev.free(wh);
+        dev.free(wv);
+        dev.free(xb);
+        dev.free(yb);
+        dev.free(code);
+    }
+    std::printf("mv-q4k: %s (%u workgroups, 256 threads each)\n", all_ok ? "all rows match the CPU" : "SOME ROWS WRONG",
+                dev.cu_count() * per_cu);
+    return all_ok ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     std::string cmd = argc > 1 ? argv[1] : "info";
+    if (cmd == "gen-mv") {   // prints mv_q4k for a column count
+        std::fputs(ts5::direct::gen_mv_q4k(argc > 2 ? std::atoi(argv[2]) : 4096).c_str(), stdout);
+        return 0;
+    }
     if (cmd == "gen") {
         // Prints a generated read kernel: gen N wave64(0/1) [hints...] [chunked]
         int n = argc > 2 ? std::atoi(argv[2]) : 4;
@@ -352,6 +525,12 @@ int main(int argc, char** argv) {
                         if (!gfx10::assemble(gen_read_kernel(n, h, w64, 256, ch), k, &err)) return die("read_gen: " + err);
                     }
         std::printf("read_gen: 144 variants ok\n");
+        for (int cols : {2048, 4096, 12288, 14336}) {
+            gfx10::Kernel k;
+            std::string err;
+            if (!gfx10::assemble(ts5::direct::gen_mv_q4k(cols), k, &err)) return die("mv_q4k " + std::to_string(cols) + ": " + err);
+            std::printf("mv_q4k %d cols: %zu words, %d vgprs, lds %u\n", cols, k.code.size(), k.vgprs, k.lds_bytes);
+        }
         return 0;
     }
     kfd::Device dev;
@@ -387,11 +566,13 @@ int main(int argc, char** argv) {
         return cmd_bw_sweep(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024, {kfd::Mem::Vram}, cfgs,
                             argc > 3 ? std::atoi(argv[3]) : 30);
     }
+    if (cmd == "mv-q4k")
+        return cmd_mv_q4k(dev, argc > 2 ? std::atoi(argv[2]) : 30, argc > 3 ? std::atoi(argv[3]) : 1);
     if (cmd == "bw-repeat") {
         // bw-repeat N [wave64]: one good setup N times (hang hunt), VRAM
         int n = argc > 2 ? std::atoi(argv[2]) : 500;
         bool w64 = argc > 3 && std::string(argv[3]) == "wave64";
         return cmd_bw_sweep(dev, 1024, {kfd::Mem::Vram}, {{3, "slc dlc", w64, 1, 256}}, n);
     }
-    return die("unknown command " + cmd + " (info, fill, read-bw [MiB], bw-sweep [MiB], bw-last [MiB] [runs], bw-repeat [N] [wave64])");
+    return die("unknown command " + cmd + " (info, fill, read-bw [MiB], bw-sweep [MiB], bw-last [MiB] [runs], bw-repeat [N] [wave64], mv-q4k [runs] [wgs/CU])");
 }

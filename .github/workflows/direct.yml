@@ -33,6 +33,12 @@ jobs:
             build/direct/ts5-direct gen $v > /tmp/gen.s
             python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/gen.s
           done
+      - name: Check the Q4_K mat-vec kernels against llvm-mc
+        run: |
+          for c in 2048 4096 12288 14336; do
+            build/direct/ts5-direct gen-mv $c > /tmp/mv.s
+            python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/mv.s
+          done
       - name: Keep ts5-direct for testing on the PS5
         uses: actions/upload-artifact@v4
         with:
