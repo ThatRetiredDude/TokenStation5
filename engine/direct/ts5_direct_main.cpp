@@ -518,27 +518,35 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
                 dt.push_back(gs * 1e6);
             }
             std::sort(dt.begin(), dt.end());
-            if (mode & 8) {   // the last run's wave timestamps (shader clock)
+            if (mode & 8) {   // the last run's wave records (shader clock, HW_ID1)
                 const uint32_t* T = (const uint32_t*)P.ts.cpu;
                 const uint32_t nw = wgs * 8;
-                uint64_t t0min = ~0ull, t0max = 0;
-                std::vector<uint32_t> staged, total;
+                uint32_t t0 = T[0];
+                for (uint32_t w = 1; w < nw; w++)
+                    if ((int32_t)(T[4 * w] - t0) < 0) t0 = T[4 * w];
+                std::vector<uint32_t> start, staged, total, endt;
+                std::map<uint32_t, int> per_cu, per_simd;   // workgroups per CU, waves per SIMD
                 for (uint32_t w = 0; w < nw; w++) {
-                    uint64_t t0 = T[4 * w] | (uint64_t)T[4 * w + 1] << 32;
-                    t0min = std::min(t0min, t0);
-                    t0max = std::max(t0max, t0);
+                    uint32_t st = T[4 * w] - t0, hw = T[4 * w + 1];
+                    start.push_back(st);
                     staged.push_back(T[4 * w + 2]);
                     total.push_back(T[4 * w + 3]);
+                    endt.push_back(st + T[4 * w + 3]);
+                    uint32_t simd = hw & 0x1d3f00, cu = (hw & 0x1d3c00) | ((hw >> 9) & 1);   // SE, SA, WGP (+ SIMD / CU of the WGP)
+                    per_simd[simd]++;
+                    if (w % 8 == 0) per_cu[cu]++;
                 }
-                uint64_t endmax = 0;
-                for (uint32_t w = 0; w < nw; w++)
-                    endmax = std::max(endmax, (T[4 * w] | (uint64_t)T[4 * w + 1] << 32) - t0min + T[4 * w + 3]);
+                std::sort(start.begin(), start.end());
                 std::sort(staged.begin(), staged.end());
                 std::sort(total.begin(), total.end());
-                std::printf("    %s timestamps: %8.1f us median; clocks: waves start within %llu, x staged after %u median (max %u), "
-                            "waves run %u min / %u median / %u max, last wave ends at %llu\n",
-                            mode == 8 ? "full kernel" : "frame only", dt[dt.size() / 2], (unsigned long long)(t0max - t0min),
-                            staged[nw / 2], staged.back(), total.front(), total[nw / 2], total.back(), (unsigned long long)endmax);
+                std::sort(endt.begin(), endt.end());
+                int cu_max = 0, simd_max = 0;
+                for (auto& p : per_cu) cu_max = std::max(cu_max, p.second);
+                for (auto& p : per_simd) simd_max = std::max(simd_max, p.second);
+                std::printf("    %s records: %8.1f us median; clocks: starts median %u max %u, staged after %u median, run %u min / %u median / "
+                            "%u max, last end %u; %zu CUs used (busiest %d workgroups), %zu SIMDs (busiest %d waves)\n",
+                            mode == 8 ? "full kernel" : "frame only", dt[dt.size() / 2], start[nw / 2], start.back(), staged[nw / 2],
+                            total.front(), total[nw / 2], total.back(), endt.back(), per_cu.size(), cu_max, per_simd.size(), simd_max);
             } else if (mode)
                 std::printf("    without%s%s%s: %8.1f us median\n", d & 1 ? " math" : "", d & 2 ? " lds-reads" : "",
                             d & 4 ? " weight-loads" : "", dt[dt.size() / 2]);

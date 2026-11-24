@@ -27,7 +27,7 @@ namespace ts5::direct {
 // diag (timing only, results wrong): 1 drops the block math, 2 the LDS
 // reads of x and sums, 4 the weight loads; 8 (results still right) has
 // every wave write s_memtime at its start, after x is staged and at its
-// end: 16 bytes per wave (start lo, start hi, staged - start, end - start)
+// end: 16 bytes per wave (start lo, HW_ID1, staged - start, end - start)
 // at s[7], s[9] + 16 * (workgroup * 8 + wave).
 // depth: steps whose loads are in flight while one is worked on (1 to 3).
 inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", int diag = 0, int depth = 1) {
@@ -48,7 +48,10 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", i
 
     k += ".kernel mv_q4k\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds " + S(lds) + "\n";
 
-    if (diag & 8) o("s_memtime s[38:39]");
+    if (diag & 8) {
+        o("s_memtime s[38:39]");
+        o("s_getreg_b32 s39, hwreg(HW_REG_HW_ID1)");
+    }
     // ---- x into LDS: every thread copies ncols/1024 runs of 16 bytes.
     const int nload = ncols / 1024;
     o("v_lshlrev_b32 v7, 4, v0");
@@ -294,7 +297,7 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "slc dlc", i
     label("end");
     if (diag & 8) {
         o("s_memtime s[44:45]");
-        o("s_waitcnt lgkmcnt(0)");
+        o("s_waitcnt vmcnt(0) lgkmcnt(0)");   // prefetched loads into v[8:11] must land before they're reused
         o("s_sub_u32 s42, s42, s38");
         o("s_sub_u32 s44, s44, s38");
         o("s_lshl_b32 s46, s10, 3");
