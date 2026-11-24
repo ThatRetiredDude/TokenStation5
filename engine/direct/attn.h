@@ -39,10 +39,11 @@ inline std::string gen_attn_part() {
     k += ".kernel attn_part\n.wave32\n.user_sgprs 12\n.tgid_x\n.lds 16384\n";
     // LDS: wave maxima 0..127 ([head][wave]), wave sums 128..255, p 256 + 16 t
     // ([position][head]), V partials 8192 + 32 (64 group + dim pair).
-    // VGPRs: v4-7 scores / p, v12-15 running max, v16-23 V sums, v128-131
+    // VGPRs: v4-7 scores / p, v12-15 running max, v16-23 V sums, v120-123
     // this thread's share of the 2^ sums (round 24 kept them in v100-103,
     // inside the p registers, and every value came out wrong), v[48:111] K
-    // and then p, v[32:47] V, v112-127 temporaries.
+    // and then p, v[32:47] V (and reduction temporaries), v112-119 temporaries:
+    // 124 in all. At 132 (round 25) only one workgroup fit on a CU.
     o("s_and_b32 s13, s12, 7");            // g
     o("s_lshr_b32 s14, s12, 3");           // split
     o("s_mul_i32 s16, s14, s10");          // first position of the split
@@ -65,7 +66,7 @@ inline std::string gen_attn_part() {
     o("v_lshlrev_b32 v29, 5, v0");         // 32 i
     for (int h = 0; h < 4; h++) {
         o("v_mov_b32 v" + S(12 + h) + ", s88");
-        o("v_mov_b32 v" + S(128 + h) + ", 0");
+        o("v_mov_b32 v" + S(120 + h) + ", 0");
     }
     for (int r = 16; r < 24; r++) o("v_mov_b32 v" + S(r) + ", 0");
     auto wave_reduce = [&](const std::string& op) {   // v8 over the wave, into every lane
@@ -118,13 +119,13 @@ inline std::string gen_attn_part() {
     o("s_barrier");
     o("v_mov_b32 v9, 0");
     for (int h = 0; h < 4; h++) {         // new max into v12 + h, the old sums' scale into v116 + h
-        o("ds_read_b128 v[120:123], v9 offset:" + S(32 * h));
-        o("ds_read_b128 v[124:127], v9 offset:" + S(32 * h + 16));
+        o("ds_read_b128 v[32:35], v9 offset:" + S(32 * h));
+        o("ds_read_b128 v[36:39], v9 offset:" + S(32 * h + 16));
         o("s_waitcnt lgkmcnt(0)");
-        o("v_max3_f32 v114, v120, v121, v122");
-        o("v_max3_f32 v114, v114, v123, v124");
-        o("v_max3_f32 v114, v114, v125, v126");
-        o("v_max3_f32 v114, v114, v127, v" + S(12 + h));
+        o("v_max3_f32 v114, v32, v33, v34");
+        o("v_max3_f32 v114, v114, v35, v36");
+        o("v_max3_f32 v114, v114, v37, v38");
+        o("v_max3_f32 v114, v114, v39, v" + S(12 + h));
         o("v_sub_f32 v" + S(116 + h) + ", v" + S(12 + h) + ", v114");
         o("v_exp_f32 v" + S(116 + h) + ", v" + S(116 + h));
         o("v_mov_b32 v" + S(12 + h) + ", v114");
@@ -132,8 +133,8 @@ inline std::string gen_attn_part() {
     for (int h = 0; h < 4; h++) {         // p = 2^(s - M); this thread's sum share
         o("v_sub_f32 v" + S(4 + h) + ", v" + S(4 + h) + ", v" + S(12 + h));
         o("v_exp_f32 v" + S(4 + h) + ", v" + S(4 + h));
-        o("v_mul_f32 v" + S(128 + h) + ", v" + S(128 + h) + ", v" + S(116 + h));
-        o("v_add_f32 v" + S(128 + h) + ", v" + S(128 + h) + ", v" + S(4 + h));
+        o("v_mul_f32 v" + S(120 + h) + ", v" + S(120 + h) + ", v" + S(116 + h));
+        o("v_add_f32 v" + S(120 + h) + ", v" + S(120 + h) + ", v" + S(4 + h));
     }
     for (int h = 0; h < 4; h++) {         // rescale the V sums
         o("v_mul_f32 v" + S(16 + 2 * h) + ", v" + S(16 + 2 * h) + ", v" + S(116 + h));
@@ -170,7 +171,7 @@ inline std::string gen_attn_part() {
     o("s_branch chunk");
     k += "finish:\n";
     for (int h = 0; h < 4; h++) {
-        o("v_mov_b32 v8, v" + S(128 + h));
+        o("v_mov_b32 v8, v" + S(120 + h));
         wave_reduce("add");
         o("ds_write_b32 v3, v8 offset:" + S(128 + 32 * h));
     }
@@ -190,11 +191,11 @@ inline std::string gen_attn_part() {
     }
     o("v_mov_b32 v9, 0");
     for (int h = 0; h < 4; h++) {         // sums L_h into v40 + h
-        o("ds_read_b128 v[120:123], v9 offset:" + S(128 + 32 * h));
-        o("ds_read_b128 v[124:127], v9 offset:" + S(144 + 32 * h));
+        o("ds_read_b128 v[32:35], v9 offset:" + S(128 + 32 * h));
+        o("ds_read_b128 v[36:39], v9 offset:" + S(144 + 32 * h));
         o("s_waitcnt lgkmcnt(0)");
-        o("v_add_f32 v" + S(40 + h) + ", v120, v121");
-        for (int r = 122; r <= 127; r++) o("v_add_f32 v" + S(40 + h) + ", v" + S(40 + h) + ", v" + S(r));
+        o("v_add_f32 v" + S(40 + h) + ", v32, v33");
+        for (int r = 34; r <= 39; r++) o("v_add_f32 v" + S(40 + h) + ", v" + S(40 + h) + ", v" + S(r));
     }
     o("s_mul_i32 s90, s12, 2112");
     o("v_lshl_add_u32 v30, v24, 3, s90");  // this thread's dims of head 0: + 32 + 512 h
