@@ -6,7 +6,7 @@
 //                                and workgroup counts, 5 runs each
 //   ts5-direct bw-last [MiB] [runs]     grid vs chunked, workgroup placement per run
 //   ts5-direct bw-repeat [N] [wave64]   the best setup N times in a row (hang hunt)
-//   ts5-direct mv-q4k [runs] [wgs/CU]   Q4_K mat-vec on Qwen3 8B's shapes: checked against the CPU, timed
+//   ts5-direct mv-q4k [runs] [wgs/CU] [v1]   Q4_K mat-vec on Qwen3 8B's shapes: checked against the CPU, timed
 // Kernels are assembled at start from the text built into the program.
 #include <algorithm>
 #include <chrono>
@@ -23,6 +23,7 @@
 #include "kernels.h"   // generated: kernel sources as strings
 #include "kfd.h"
 #include "mv_q4k.h"
+#include "mv_q4k2.h"
 #include "pm4.h"
 
 using namespace ts5;
@@ -348,7 +349,11 @@ void q4k_scale_min(int j, const uint8_t* q, int& sc, int& m) {
 // Q4_K mat-vec (mv_q4k.h) on the shapes of Qwen3 8B's Q4_K matrices: random
 // blocks and x, the GPU's y checked against a CPU sum in double, then timed
 // one dispatch at a time with the matrix in VRAM.
-int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
+int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v2 = true) {
+    auto gen = [v2](int cols, const std::string& hints, int d, int depth) {
+        return v2 ? ts5::direct::gen_mv_q4k2(cols, hints, d, depth) : ts5::direct::gen_mv_q4k(cols, hints, d, depth);
+    };
+    std::printf("kernel: %s\n", v2 ? "mv_q4k2 (2 lanes per block)" : "mv_q4k (8 lanes per block)");
     if (!dev.create_queue()) return die(dev.err());
     gfx10::Kernel ck;
     kfd::Buffer ccode;
@@ -390,7 +395,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
         P.sh = &sh;
         const size_t nb = sh.cols / 256, row_bytes = nb * 144, bytes = row_bytes * sh.rows;
         std::string err;
-        if (!gfx10::assemble(ts5::direct::gen_mv_q4k((int)sh.cols), P.k, &err)) return die("mv_q4k: " + err);
+        if (!gfx10::assemble(gen((int)sh.cols, "slc dlc", 0, 1), P.k, &err)) return die("mv_q4k: " + err);
         size_t cb = (P.k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, P.code) || !dev.alloc(cb * 2, kfd::Mem::Gtt, P.dcode) ||
             !dev.alloc((size_t)dev.cu_count() * per_cu * 8 * 16, kfd::Mem::Gtt, P.ts)) return die(dev.err());
@@ -533,7 +538,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
             const int mode = d <= 8 ? d : d == 9 ? 15 : 0, depth = d == 10 ? 2 : d == 11 ? 3 : 1;
             gfx10::Kernel dk;
             std::string err;
-            if (!gfx10::assemble(ts5::direct::gen_mv_q4k((int)sh.cols, "slc dlc", mode, depth), dk, &err))
+            if (!gfx10::assemble(gen((int)sh.cols, "slc dlc", mode, depth), dk, &err))
                 return die("mv_q4k diag: " + err);
             if (dk.code.size() * 4 + 256 > P.dcode.size) return die("diag code too big");
             for (size_t i = 0; i < P.dcode.size / 4; i++) ((uint32_t*)P.dcode.cpu)[i] = 0xbf9f0000;
@@ -594,6 +599,13 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
 
 int main(int argc, char** argv) {
     std::string cmd = argc > 1 ? argv[1] : "info";
+    if (cmd == "gen-mv2") {
+        std::fputs(ts5::direct::gen_mv_q4k2(argc > 2 ? std::atoi(argv[2]) : 4096, "slc dlc", argc > 3 ? std::atoi(argv[3]) : 0,
+                                            argc > 4 ? std::atoi(argv[4]) : 1)
+                       .c_str(),
+                   stdout);
+        return 0;
+    }
     if (cmd == "gen-mv") {   // prints mv_q4k for a column count
         std::fputs(ts5::direct::gen_mv_q4k(argc > 2 ? std::atoi(argv[2]) : 4096, "slc dlc", argc > 3 ? std::atoi(argv[3]) : 0,
                                            argc > 4 ? std::atoi(argv[4]) : 1)
@@ -638,6 +650,12 @@ int main(int argc, char** argv) {
             if (!gfx10::assemble(ts5::direct::gen_mv_q4k(cols), k, &err)) return die("mv_q4k " + std::to_string(cols) + ": " + err);
             std::printf("mv_q4k %d cols: %zu words, %d vgprs, lds %u\n", cols, k.code.size(), k.vgprs, k.lds_bytes);
         }
+        for (int cols : {4096, 8192, 12288}) {
+            gfx10::Kernel k;
+            std::string err;
+            if (!gfx10::assemble(ts5::direct::gen_mv_q4k2(cols), k, &err)) return die("mv_q4k2 " + std::to_string(cols) + ": " + err);
+            std::printf("mv_q4k2 %d cols: %zu words, %d vgprs, lds %u\n", cols, k.code.size(), k.vgprs, k.lds_bytes);
+        }
         return 0;
     }
     kfd::Device dev;
@@ -674,7 +692,8 @@ int main(int argc, char** argv) {
                             argc > 3 ? std::atoi(argv[3]) : 30);
     }
     if (cmd == "mv-q4k" || cmd == "mv-diag")
-        return cmd_mv_q4k(dev, argc > 2 ? std::atoi(argv[2]) : 30, argc > 3 ? std::atoi(argv[3]) : 1, cmd == "mv-diag");
+        return cmd_mv_q4k(dev, argc > 2 ? std::atoi(argv[2]) : 30, argc > 3 ? std::atoi(argv[3]) : 1, cmd == "mv-diag",
+                          !(argc > 4 && std::string(argv[4]) == "v1"));
     if (cmd == "bw-repeat") {
         // bw-repeat N [wave64]: one good setup N times (hang hunt), VRAM
         int n = argc > 2 ? std::atoi(argv[2]) : 500;
