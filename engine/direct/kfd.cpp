@@ -182,7 +182,15 @@ bool Device::create_queue(size_t ring_bytes) {
     size_t ctl_stack = round_up((size_t)waves * 12 + 8 + 40, 4096);
     size_t debug_mem = round_up((size_t)waves * 32, 64);
     size_t cwsr_size = wg_data + ctl_stack;
-    if (!alloc(ring_bytes, Mem::GttUncached, ring_) || !alloc(4096, Mem::GttUncached, ptrs_) || !alloc(4096, Mem::Gtt, eop_) ||
+    size_t eop_size = 4096;
+    // The kernel wants exactly the sizes it publishes in the topology
+    // (cwsr_size, ctl_stack_size); use them when it gives them.
+    for (auto& p : props) {
+        if (p.first == "cwsr_size" && p.second) cwsr_size = p.second;
+        if (p.first == "ctl_stack_size" && p.second) ctl_stack = p.second;
+        if (p.first == "eop_buffer_size" && p.second) eop_size = p.second;
+    }
+    if (!alloc(ring_bytes, Mem::GttUncached, ring_) || !alloc(4096, Mem::GttUncached, ptrs_) || !alloc(round_up(eop_size, 4096), Mem::Gtt, eop_) ||
         !alloc(round_up((cwsr_size + debug_mem) * (num_xcc ? num_xcc : 1), 4096), Mem::Gtt, cwsr_))
         return false;
     std::memset(ring_.cpu, 0, ring_.size);
@@ -211,7 +219,7 @@ bool Device::create_queue(size_t ring_bytes) {
     q.queue_percentage = KFD_MAX_QUEUE_PERCENTAGE;
     q.queue_priority = 7;
     q.eop_buffer_address = eop_.gpu;
-    q.eop_buffer_size = eop_.size;
+    q.eop_buffer_size = (uint32_t)eop_size;
     q.ctx_save_restore_address = cwsr_.gpu;
     q.ctx_save_restore_size = (uint32_t)cwsr_size;
     q.ctl_stack_size = (uint32_t)ctl_stack;
@@ -304,7 +312,14 @@ Device::~Device() {
         xioctl(kfd_, AMDKFD_IOC_DESTROY_QUEUE, &d);
     }
     if (doorbells_map_) munmap(doorbells_map_, 0x2000);
-    while (!owned_.empty()) { Buffer b = owned_.back(); free(b); }
+    // The event page belongs to the kernel's signal events from here on, and
+    // it refuses to free it ("Free signal BO is not allowed"); closing /dev/kfd
+    // releases it with everything else.
+    while (!owned_.empty()) {
+        Buffer b = owned_.back();
+        if (b.handle == event_page_.handle) { owned_.pop_back(); continue; }
+        free(b);
+    }
     if (drm_ >= 0) close(drm_);
     if (kfd_ >= 0) close(kfd_);
 }
