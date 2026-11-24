@@ -388,6 +388,17 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         kfd::Buffer code, dcode, ts, wh, wv, xb, yb;
         std::vector<double> ref, mag;
     };
+    // The read kernel for mv-diag's control row.
+    gfx10::Kernel rk;
+    kfd::Buffer rd_code, rd_out;
+    {
+        std::string err;
+        if (!gfx10::assemble(gen_read_kernel(4, "slc dlc", false, 256, true), rk, &err)) return die("read kernel: " + err);
+        size_t cb = (rk.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
+        if (!dev.alloc(cb, kfd::Mem::Gtt, rd_code) || !dev.alloc(8u << 20, kfd::Mem::Gtt, rd_out)) return die(dev.err());
+        for (size_t i = 0; i < cb / 4; i++) ((uint32_t*)rd_code.cpu)[i] = 0xbf9f0000;
+        std::memcpy(rd_code.cpu, rk.code.data(), rk.code.size() * 4);
+    }
     std::vector<Prep> preps(sizeof(shapes) / sizeof(shapes[0]));
     for (size_t si = 0; si < preps.size(); si++) {
         Prep& P = preps[si];
@@ -533,9 +544,10 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
         std::fflush(stdout);
         // diag: the same kernel with parts left out (results not checked),
         // then with 1 and 3 steps of loads in flight (results checked).
-        for (int d = 1; diag && d < 12; d++) {
-            // 1-7: parts left out; 8: timestamps; 9: timestamps, nothing but the frame; 10, 11: 2 and 3 steps in flight
-            const int mode = d <= 8 ? d : d == 9 ? 15 : 0, depth = d == 10 ? 2 : d == 11 ? 3 : 1;
+        for (int d = 1; diag && d < 14; d++) {
+            // 1-7: parts left out; 8: timestamps; 9: timestamps, nothing but the frame; 10, 11: 2 and 3 steps in
+            // flight; 12, 13: loads only with 2 and 3 steps in flight
+            const int mode = d <= 8 ? d : d == 9 ? 15 : d >= 12 ? 3 : 0, depth = d == 10 || d == 12 ? 2 : d == 11 || d == 13 ? 3 : 1;
             gfx10::Kernel dk;
             std::string err;
             if (!gfx10::assemble(gen((int)sh.cols, "slc dlc", mode, depth), dk, &err))
@@ -580,13 +592,34 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
                             mode == 8 ? "full kernel" : "frame only", dt[dt.size() / 2], endt.back() / dt[dt.size() / 2], start[nw / 2], start.back(), staged[nw / 2],
                             total.front(), total[nw / 2], total.back(), endt.back(), per_cu.size(), cu_max, per_simd.size(), simd_max);
             } else if (mode)
-                std::printf("    without%s%s%s: %8.1f us median\n", d & 1 ? " math" : "", d & 2 ? " lds-reads" : "",
-                            d & 4 ? " weight-loads" : "", dt[dt.size() / 2]);
+                std::printf("    without%s%s%s, %d step(s) in flight: %8.1f us median\n", mode & 1 ? " math" : "", mode & 2 ? " lds-reads" : "",
+                            mode & 4 ? " weight-loads" : "", depth, dt[dt.size() / 2]);
             else {
                 double e2 = check(depth == 2 ? "depth 2" : "depth 3");
                 std::printf("    %d steps in flight: %8.1f us median, %6.1f GB/s, err %.2e\n", depth, dt[dt.size() / 2],
                             bytes / dt[dt.size() / 2] / 1e3, e2);
             }
+            std::fflush(stdout);
+        }
+        if (diag) {   // control: the plain read kernel (chunked, 4 loads, slc dlc) over the same matrix bytes, steady
+            const uint32_t threads = wgs * 256;
+            const uint32_t loops = (uint32_t)(bytes / ((size_t)threads * 16 * 4));
+            const double used = (double)loops * threads * 16 * 4;
+            uint32_t args[6] = {(uint32_t)P.wv.gpu, (uint32_t)(P.wv.gpu >> 32), loops, 4096, (uint32_t)rd_out.gpu, (uint32_t)(rd_out.gpu >> 32)};
+            uint32_t g[3] = {wgs, 1, 1}, t[3] = {256, 1, 1};
+            std::vector<double> rt;
+            for (int rep = 0; rep < 3; rep++) {
+                pm4::Stream s;
+                for (int i = 0; i < 100; i++) {
+                    if (i) s.wait_kernels();
+                    s.dispatch(rk, rd_code.gpu, args, 6, g, t);
+                }
+                double total;
+                if (!run(s, &total)) return die(dev.err() + " (read control)");
+                rt.push_back(total / 100);
+            }
+            std::sort(rt.begin(), rt.end());
+            std::printf("    control: plain reads of %.1f MB: %8.1f us, %6.1f GB/s\n", used / 1e6, rt[1] * 1e6, used / rt[1] / 1e9);
             std::fflush(stdout);
         }
     }
