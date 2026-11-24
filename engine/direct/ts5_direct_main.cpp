@@ -380,7 +380,7 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
     struct Prep {
         const Shape* sh;
         gfx10::Kernel k;
-        kfd::Buffer code, dcode, wh, wv, xb, yb;
+        kfd::Buffer code, dcode, ts, wh, wv, xb, yb;
         std::vector<double> ref, mag;
     };
     std::vector<Prep> preps(sizeof(shapes) / sizeof(shapes[0]));
@@ -392,7 +392,8 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
         std::string err;
         if (!gfx10::assemble(ts5::direct::gen_mv_q4k((int)sh.cols), P.k, &err)) return die("mv_q4k: " + err);
         size_t cb = (P.k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
-        if (!dev.alloc(cb, kfd::Mem::Gtt, P.code) || !dev.alloc(cb * 2, kfd::Mem::Gtt, P.dcode)) return die(dev.err());
+        if (!dev.alloc(cb, kfd::Mem::Gtt, P.code) || !dev.alloc(cb * 2, kfd::Mem::Gtt, P.dcode) ||
+            !dev.alloc((size_t)dev.cu_count() * per_cu * 8 * 16, kfd::Mem::Gtt, P.ts)) return die(dev.err());
         for (size_t i = 0; i < cb / 4; i++) ((uint32_t*)P.code.cpu)[i] = 0xbf9f0000;
         std::memcpy(P.code.cpu, P.k.code.data(), P.k.code.size() * 4);
         if (!dev.alloc(bytes, kfd::Mem::Gtt, P.wh) || !dev.alloc(bytes, kfd::Mem::Vram, P.wv) ||
@@ -494,8 +495,9 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
         std::fflush(stdout);
         // diag: the same kernel with parts left out (results not checked),
         // then with 1 and 3 steps of loads in flight (results checked).
-        for (int d = 1; diag && d < 10; d++) {
-            const int mode = d < 8 ? d : 0, depth = d == 8 ? 1 : d == 9 ? 3 : 2;
+        for (int d = 1; diag && d < 12; d++) {
+            // 1-7: parts left out; 8: timestamps; 9: timestamps, nothing but the frame; 10, 11: 2 and 3 steps in flight
+            const int mode = d <= 8 ? d : d == 9 ? 15 : 0, depth = d == 10 ? 2 : d == 11 ? 3 : 1;
             gfx10::Kernel dk;
             std::string err;
             if (!gfx10::assemble(ts5::direct::gen_mv_q4k((int)sh.cols, "slc dlc", mode, depth), dk, &err))
@@ -508,18 +510,40 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
                 std::memset(P.yb.cpu, 0xff, sh.rows * 4);
                 pm4::Stream s;
                 uint32_t args[10] = {(uint32_t)P.wv.gpu, (uint32_t)(P.wv.gpu >> 32), (uint32_t)P.xb.gpu, (uint32_t)(P.xb.gpu >> 32),
-                                     (uint32_t)P.yb.gpu, (uint32_t)(P.yb.gpu >> 32), sh.rows, sh.cols, per, 0};
+                                     (uint32_t)P.yb.gpu, (uint32_t)(P.yb.gpu >> 32), sh.rows, (uint32_t)P.ts.gpu, per,
+                                     (uint32_t)(P.ts.gpu >> 32)};
                 uint32_t g[3] = {wgs, 1, 1}, t[3] = {256, 1, 1};
                 s.dispatch(dk, P.dcode.gpu, args, 10, g, t);
                 if (!run(s, &gs)) return die(dev.err() + " (diag " + std::to_string(d) + ")");
                 dt.push_back(gs * 1e6);
             }
             std::sort(dt.begin(), dt.end());
-            if (mode)
+            if (mode & 8) {   // the last run's wave timestamps (shader clock)
+                const uint32_t* T = (const uint32_t*)P.ts.cpu;
+                const uint32_t nw = wgs * 8;
+                uint64_t t0min = ~0ull, t0max = 0;
+                std::vector<uint32_t> staged, total;
+                for (uint32_t w = 0; w < nw; w++) {
+                    uint64_t t0 = T[4 * w] | (uint64_t)T[4 * w + 1] << 32;
+                    t0min = std::min(t0min, t0);
+                    t0max = std::max(t0max, t0);
+                    staged.push_back(T[4 * w + 2]);
+                    total.push_back(T[4 * w + 3]);
+                }
+                uint64_t endmax = 0;
+                for (uint32_t w = 0; w < nw; w++)
+                    endmax = std::max(endmax, (T[4 * w] | (uint64_t)T[4 * w + 1] << 32) - t0min + T[4 * w + 3]);
+                std::sort(staged.begin(), staged.end());
+                std::sort(total.begin(), total.end());
+                std::printf("    %s timestamps: %8.1f us median; clocks: waves start within %llu, x staged after %u median (max %u), "
+                            "waves run %u min / %u median / %u max, last wave ends at %llu\n",
+                            mode == 8 ? "full kernel" : "frame only", dt[dt.size() / 2], (unsigned long long)(t0max - t0min),
+                            staged[nw / 2], staged.back(), total.front(), total[nw / 2], total.back(), (unsigned long long)endmax);
+            } else if (mode)
                 std::printf("    without%s%s%s: %8.1f us median\n", d & 1 ? " math" : "", d & 2 ? " lds-reads" : "",
                             d & 4 ? " weight-loads" : "", dt[dt.size() / 2]);
             else {
-                double e2 = check(depth == 1 ? "depth 1" : "depth 3");
+                double e2 = check(depth == 2 ? "depth 2" : "depth 3");
                 std::printf("    %d steps in flight: %8.1f us median, %6.1f GB/s, err %.2e\n", depth, dt[dt.size() / 2],
                             bytes / dt[dt.size() / 2] / 1e3, e2);
             }
@@ -536,7 +560,10 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false) {
 int main(int argc, char** argv) {
     std::string cmd = argc > 1 ? argv[1] : "info";
     if (cmd == "gen-mv") {   // prints mv_q4k for a column count
-        std::fputs(ts5::direct::gen_mv_q4k(argc > 2 ? std::atoi(argv[2]) : 4096).c_str(), stdout);
+        std::fputs(ts5::direct::gen_mv_q4k(argc > 2 ? std::atoi(argv[2]) : 4096, "slc dlc", argc > 3 ? std::atoi(argv[3]) : 0,
+                                           argc > 4 ? std::atoi(argv[4]) : 1)
+                       .c_str(),
+                   stdout);
         return 0;
     }
     if (cmd == "gen") {
