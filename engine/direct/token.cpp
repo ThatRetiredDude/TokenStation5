@@ -66,10 +66,11 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
     const std::string path = argv[2];
     const int ntime = argc > 3 ? std::atoi(argv[3]) : 64;
     const int ctx = argc > 4 ? std::atoi(argv[4]) : 2048;
-    bool profile = false, light = true;
+    bool profile = false, light = true, serial = false;
     for (int i = 5; i < argc; i++) {
-        if (std::string(argv[i]) == "profile") profile = true;
+        if (std::string(argv[i]) == "profile") profile = serial = true;
         if (std::string(argv[i]) == "nolight") light = false;   // no cache invalidation between kernels (timing only)
+        if (std::string(argv[i]) == "serial") serial = true;    // the host waits for each token before sending the next
     }
 
     Model m;
@@ -107,10 +108,13 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
         if (!load(dev, src, p, e)) { std::fprintf(stderr, "mat-vec kernel: %s\n", e.c_str()); return nullptr; }
         return &p;
     };
-    Prog k_norm, k_addnorm, k_qk, k_silu, k_attn, k_red;
+    Prog k_norm, k_addnorm, k_qk, k_silu, k_attn, k_red, k_argmax, k_embed;
+    if (m.tok_embd.type() != GGML_Q4_K || E / 16 > 1024) return fail("token embeddings not Q4_K");
+    if (V % 4) return fail("vocabulary not a multiple of 4");
     if (!load(dev, gen_rmsnorm(E, hp.rms_eps), k_norm, err) || !load(dev, gen_rmsnorm(E, hp.rms_eps, true), k_addnorm, err) ||
         !load(dev, gen_qk_post(NQ, hp.rms_eps), k_qk, err) || !load(dev, gen_silu_mul(), k_silu, err) ||
-        !load(dev, gen_attn_part(), k_attn, err) || !load(dev, gen_attn_reduce(), k_red, err))
+        !load(dev, gen_attn_part(), k_attn, err) || !load(dev, gen_attn_reduce(), k_red, err) || !load(dev, gen_argmax(), k_argmax, err) ||
+        !load(dev, gen_embed_q4k(E), k_embed, err))
         return fail("kernel: " + err);
 
     // Every weight the token reads, checked once.
@@ -129,15 +133,17 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
     std::printf(" )\n");
 
     // Activations, KV cache, RoPE table, partials, stamps.
-    kfd::Buffer bx, bxn, bq, bk, bv, batt, bt, bg, bu, bh, blog, bkv, brope, bpart, bstamp;
+    kfd::Buffer bx, bxn, bq, bk, bv, batt, bt, bg, bu, bh, blog, bkv, brope, bpart, bstamp, bslot, bids, bts;
     const size_t kv_layer = (size_t)ctx * NKV * HD * 2;   // K or V, f16
     for (auto pr : {std::make_pair(&bx, (size_t)E * 4), std::make_pair(&bxn, (size_t)E * 4), std::make_pair(&bq, (size_t)NQ * HD * 4),
                     std::make_pair(&bk, (size_t)NKV * HD * 4), std::make_pair(&bv, (size_t)NKV * HD * 4),
                     std::make_pair(&batt, (size_t)NQ * HD * 4), std::make_pair(&bt, (size_t)E * 4), std::make_pair(&bg, (size_t)F * 4),
                     std::make_pair(&bu, (size_t)F * 4), std::make_pair(&bh, (size_t)F * 4), std::make_pair(&blog, (size_t)V * 4 + 4096),
                     std::make_pair(&bkv, kv_layer * 2 * hp.n_layer), std::make_pair(&brope, (size_t)ctx * 128 * 4),
-                    std::make_pair(&bpart, (size_t)10 * NKV * 2112), std::make_pair(&bstamp, (size_t)8 * 4096)})
+                    std::make_pair(&bpart, (size_t)10 * NKV * 2112), std::make_pair(&bstamp, (size_t)8 * 4096),
+                    std::make_pair(&bslot, (size_t)4096), std::make_pair(&bids, (size_t)ctx * 4), std::make_pair(&bts, (size_t)ctx * 16)})
         if (!dev.alloc((pr.second + 4095) & ~(size_t)4095, kfd::Mem::Gtt, *pr.first)) return fail(dev.err() + " (activations)");
+    std::memset(bslot.cpu, 0, 4096);
     {
         // cos then sin of each pair's angle, as the CPU backend's rope().
         float* R = (float*)brope.cpu;
@@ -156,8 +162,10 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
     std::memcpy(&scale_bits, &scale, 4);
     const uint32_t wgs = dev.cu_count(), step = wgs * 8;
 
-    // One token's commands.
-    auto build = [&](int pos, pm4::Stream& s, int* nstamps) {
+    // One token's commands: its embedding (row `id`, or with id -1 the row
+    // the last token's argmax chose), every layer, the logits, their argmax.
+    // seq numbers the tokens sent: the fence is set to seq + 1 at the end.
+    auto build = [&](int32_t id, int pos, uint64_t seq, pm4::Stream& s, int* nstamps) {
         int ns = 0;
         auto stamp = [&](int step_id) {
             if (!profile) return;
@@ -184,7 +192,17 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
             s.dispatch(p.k, p.code.gpu, args, 8, g, t256);
         };
         const uint32_t n = pos + 1, nch = (n + 255) / 256, per = (nch + 9) / 10, splits = (nch + per - 1) / per;
+        if (seq == 0) s.acquire_all();   // what the host wrote: weights, RoPE table, slot
+        else barrier();                  // the last token's argmax
+        s.stamp(bts.gpu + 16 * seq);
         stamp(-1);
+        {
+            const uint64_t te = addr(m.tok_embd.data), io = bids.gpu + 4 * (size_t)pos;
+            const uint32_t args[10] = {lo(te), hi(te), lo(bx.gpu), hi(bx.gpu), lo(bslot.gpu), hi(bslot.gpu), (uint32_t)id, 0, lo(io), hi(io)};
+            const uint32_t g[3] = {1, 1, 1}, t[3] = {(uint32_t)(E / 16), 1, 1};
+            s.dispatch(k_embed.k, k_embed.code.gpu, args, 10, g, t);
+            barrier();
+        }
         for (int l = 0; l < hp.n_layer; l++) {
             const Layer& L = m.layers[l];
             const uint64_t kc = bkv.gpu + (size_t)l * 2 * kv_layer, vc = kc + kv_layer;
@@ -243,7 +261,16 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
         norm(true, m.out_norm);
         barrier();
         mv(outw, bxn.gpu, blog.gpu);
+        barrier();
+        {
+            const uint32_t groups = (uint32_t)((V + 4095) / 4096);
+            const uint32_t args[6] = {lo(blog.gpu), hi(blog.gpu), lo(bslot.gpu), hi(bslot.gpu), (uint32_t)(V / 4 - 1), groups * 256};
+            const uint32_t g[3] = {groups, 1, 1};
+            s.dispatch(k_argmax.k, k_argmax.code.gpu, args, 6, g, t256);
+        }
         stamp(S_OUT);
+        s.release(bts.gpu + 16 * seq + 8, 0, true);
+        s.release(dev.signals.gpu, seq + 1);
         *nstamps = ns;
     };
 
@@ -251,36 +278,22 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
     Tokenizer tok;
     const bool have_tok = tok.load(m.gguf, err);
     auto piece = [&](int32_t t) { return have_tok ? tok.decode(t) : "<" + std::to_string(t) + ">"; };
-    const int dt = (int)(m.tok_embd.info->row_bytes());
     std::vector<double> step_time(S_COUNT, 0.0);
     int profiled = 0;
-    auto gpu_token = [&](int32_t token, int pos, double* gpu_s) -> bool {
-        dequantize_row(m.tok_embd.type(), m.tok_embd.data + (size_t)token * dt, (float*)bx.cpu, E);
-        pm4::Stream body;
-        int ns = 0;
-        build(pos, body, &ns);
-        std::memset(sig, 0, 64);
-        pm4::Stream w;
-        w.acquire_all();
-        w.release(dev.signals.gpu + 8, 0, true);
-        w.w.insert(w.w.end(), body.w.begin(), body.w.end());
-        w.release(dev.signals.gpu + 16, 0, true);
-        w.release(dev.signals.gpu, 1);
-        if (!dev.submit(w.w) || !dev.wait((volatile uint64_t*)sig, 1, 20000)) return false;
-        *gpu_s = (sig[2] - sig[1]) / 100e6;
-        if (profile && ns > 1) {
-            const uint64_t* T = (const uint64_t*)bstamp.cpu;
-            const uint32_t* id = (const uint32_t*)bstamp.cpu + 2048;
-            for (int i = 1; i < ns; i++) step_time[id[i]] += (T[i] - T[i - 1]) / 100e6;
-            profiled++;
-        }
-        return true;
+    uint64_t seq = 0;
+    sig[0] = 0;
+    const uint64_t* TS = (const uint64_t*)bts.cpu;
+    auto send = [&](int32_t token, int pos, int* ns) -> bool {
+        pm4::Stream s;
+        build(token, pos, seq, s, ns);
+        seq++;
+        return dev.submit(s.w);
     };
-    auto argmax = [&](const float* L) {
-        int best = 0;
-        for (int i = 1; i < V; i++)
-            if (L[i] > L[best]) best = i;
-        return best;
+    auto gpu_token = [&](int32_t token, int pos, double* gpu_s) -> bool {
+        int ns = 0;
+        if (!send(token, pos, &ns) || !dev.wait((volatile uint64_t*)sig, seq, 20000)) return false;
+        *gpu_s = (TS[2 * (seq - 1) + 1] - TS[2 * (seq - 1)]) / 100e6;
+        return true;
     };
 
     // 1. Against the CPU backend: the prompt, then a few greedy tokens.
@@ -297,7 +310,7 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
     for (; pos < ncheck; pos++) {
         const int32_t t = pos < (int)prompt.size() ? prompt[pos] : next;
         double gs;
-        if (!gpu_token(t, pos, &gs)) return fail(dev.err() + " (token at " + std::to_string(pos) + ")");
+        if (!gpu_token(pos < (int)prompt.size() ? t : -1, pos, &gs)) return fail(dev.err() + " (token at " + std::to_string(pos) + ")");
         if (!cpu->forward(&t, 1, pos, cl.data(), false, err)) return fail("cpu: " + err);
         double md = 0, ml = 0;
         bool nan = false;
@@ -317,7 +330,11 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
         int shared = 0;
         for (int a : g5)
             for (int b : c5) shared += a == b;
-        const bool same = g5[0] == c5[0] && !nan && md < 0.05 * ml;
+        const int32_t gpu_pick = (int32_t)~(uint32_t)*(volatile uint64_t*)bslot.cpu;
+        const int32_t gpu_id = ((volatile int32_t*)bids.cpu)[pos];
+        if (gpu_pick != g5[0]) std::printf("  GPU argmax %d, its logits' top-1 %d\n", gpu_pick, g5[0]);
+        if (gpu_id != t) std::printf("  GPU embedded token %d, wanted %d\n", gpu_id, t);
+        const bool same = g5[0] == c5[0] && !nan && md < 0.05 * ml && gpu_pick == g5[0] && gpu_id == t;
         if (!same) ok = false;
         std::printf("%3d  %-12.12s %-16.16s %-16.16s %9.4f  %10.3f  %d of 5        %.2f%s\n", pos, piece(t).c_str(),
                     (piece(g5[0]) + " " + std::to_string(g5[0])).c_str(), (piece(c5[0]) + " " + std::to_string(c5[0])).c_str(), md, ml,
@@ -327,30 +344,50 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
     }
     std::printf("check: %s\n", ok ? "GPU logits match the CPU backend" : "GPU LOGITS DIFFER FROM THE CPU");
 
-    // 2. Timing: greedy tokens, one submission each.
+    // 2. Timing: greedy tokens, the GPU picking each next one itself. By
+    // default every token is sent at once (the ring holds several), so the
+    // GPU never waits for the host; "serial" waits for each first.
     std::string text;
     std::vector<double> gpu_ms, wall_ms;
+    const int pos0 = pos;
+    const uint64_t seq0 = seq;
+    auto w0 = std::chrono::steady_clock::now();
     for (int i = 0; i < ntime && pos < ctx; i++, pos++) {
-        auto w0 = std::chrono::steady_clock::now();
-        double gs;
-        if (!gpu_token(next, pos, &gs)) return fail(dev.err() + " (timed token at " + std::to_string(pos) + ")");
-        next = argmax(gl);
-        wall_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count());
-        gpu_ms.push_back(gs * 1e3);
-        text += piece(next);
+        auto t1 = std::chrono::steady_clock::now();
+        int ns = 0;
+        if (!send(-1, pos, &ns)) return fail(dev.err() + " (timed token at " + std::to_string(pos) + ")");
+        if (serial) {
+            if (!dev.wait((volatile uint64_t*)sig, seq, 20000)) return fail(dev.err() + " (timed token at " + std::to_string(pos) + ")");
+            if (profile && ns > 1) {
+                const uint64_t* T = (const uint64_t*)bstamp.cpu;
+                const uint32_t* idv = (const uint32_t*)bstamp.cpu + 2048;
+                for (int j = 1; j < ns; j++) step_time[idv[j]] += (T[j] - T[j - 1]) / 100e6;
+                profiled++;
+            }
+            wall_ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count());
+        }
     }
+    if (!dev.wait((volatile uint64_t*)sig, seq, 60000)) return fail(dev.err() + " (waiting for the timed tokens)");
+    const double total_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count();
+    for (uint64_t q = seq0; q < seq; q++) gpu_ms.push_back((TS[2 * q + 1] - TS[2 * q]) / 100e6 * 1e3);
+    const int ntimed = (int)(seq - seq0);
+    for (int p = pos0 + 1; p < pos; p++) text += piece(((volatile int32_t*)bids.cpu)[p]);
+    text += piece((int32_t)~(uint32_t)*(volatile uint64_t*)bslot.cpu);
+    // From the first token's start to the last one's end on the GPU's clock:
+    // the time per token a reader sees, including gaps between tokens.
+    const double span_ms = ntimed ? (TS[2 * (seq - 1) + 1] - TS[2 * seq0]) / 100e6 * 1e3 : 0;
     auto med = [](std::vector<double> v) {
         if (v.empty()) return 0.0;
         std::sort(v.begin(), v.end());
         return v[v.size() / 2];
     };
-    double sum_wall = 0;
-    for (double x : wall_ms) sum_wall += x;
     std::printf("text: %s\n", text.c_str());
-    if (!wall_ms.empty())
-        std::printf("timed %zu tokens (positions %d-%d)%s%s: GPU %.2f ms median (%.1f tok/s), wall %.2f ms median, %.1f tok/s overall\n",
-                    wall_ms.size(), ncheck, pos - 1, light ? "" : ", no cache invalidation", profile ? ", profiled" : "", med(gpu_ms),
-                    1e3 / med(gpu_ms), med(wall_ms), 1e3 * wall_ms.size() / sum_wall);
+    if (ntimed)
+        std::printf("timed %d tokens (positions %d-%d)%s%s%s: GPU %.2f ms median per token (%.1f tok/s); first start to last end %.2f ms "
+                    "per token (%.1f tok/s); host clock %.1f tok/s%s\n",
+                    ntimed, pos0, pos - 1, serial ? ", serial" : ", queued", light ? "" : ", no cache invalidation",
+                    profile ? ", profiled" : "", med(gpu_ms), 1e3 / med(gpu_ms), span_ms / ntimed, 1e3 * ntimed / span_ms,
+                    1e3 * ntimed / total_ms, serial ? (", host wait " + std::to_string(med(wall_ms)).substr(0, 5) + " ms median").c_str() : "");
     if (profile && profiled) {
         double tot = 0;
         for (double x : step_time) tot += x;

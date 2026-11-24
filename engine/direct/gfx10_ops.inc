@@ -413,6 +413,7 @@
     {"global_atomic_inc", GLOBAL, 0x3c, F_ATOMIC},
     {"global_atomic_fmin", GLOBAL, 0x3f, F_ATOMIC},
     {"global_atomic_fmax", GLOBAL, 0x40, F_ATOMIC},
+    {"global_atomic_umax_x2", GLOBAL, 0x58, F_ATOMIC},
     {"buffer_load_ubyte", MUBUF, 0x8, F_LOAD},
     {"buffer_load_ushort", MUBUF, 0xa, F_LOAD},
     {"buffer_load_dword", MUBUF, 0xc, F_LOAD},

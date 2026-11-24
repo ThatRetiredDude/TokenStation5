@@ -885,7 +885,8 @@ int main(int argc, char** argv) {
     }
     if (cmd == "gen-ops") {   // prints rmsnorm, add_rmsnorm, qk_post and silu_mul
         std::fputs((ts5::direct::gen_rmsnorm(4096, 1e-6f) + ts5::direct::gen_rmsnorm(4096, 1e-6f, true) +
-                    ts5::direct::gen_qk_post(32, 1e-6f) + ts5::direct::gen_silu_mul())
+                    ts5::direct::gen_qk_post(32, 1e-6f) + ts5::direct::gen_silu_mul() + ts5::direct::gen_argmax() +
+                    ts5::direct::gen_embed_q4k(4096))
                        .c_str(),
                    stdout);
         return 0;
@@ -957,7 +958,8 @@ int main(int argc, char** argv) {
             std::printf("mv_q6k %d cols: %zu words, %d vgprs, lds %u\n", cols, k.code.size(), k.vgprs, k.lds_bytes);
         }
         for (const std::string& src : {ts5::direct::gen_rmsnorm(4096, 1e-6f), ts5::direct::gen_rmsnorm(4096, 1e-6f, true),
-                                       ts5::direct::gen_qk_post(32, 1e-6f), ts5::direct::gen_silu_mul()}) {
+                                       ts5::direct::gen_qk_post(32, 1e-6f), ts5::direct::gen_silu_mul(), ts5::direct::gen_argmax(),
+                                       ts5::direct::gen_embed_q4k(4096)}) {
             gfx10::Kernel k;
             std::string err;
             if (!gfx10::assemble(src, k, &err)) return die("ops: " + err);

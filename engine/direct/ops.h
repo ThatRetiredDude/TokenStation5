@@ -192,4 +192,155 @@ inline std::string gen_silu_mul() {
     return k;
 }
 
+// The index of the largest of n logits (n a multiple of 4), the lowest on a
+// tie as the CPU's argmax, into a 64-bit slot by atomic max: high half the
+// value as an ordered integer, low half ~index. The slot must be 0 before
+// (embed resets it after reading). Each thread takes 4 runs of 4 values,
+// runs past the end clamped onto the last (a repeat changes nothing), so
+// the host launches ceil(n / 4096) workgroups of 256.
+// Arguments: s[0:1] logits, s[2:3] slot, s4 n / 4 - 1, s5 threads launched; s6 workgroup id.
+inline std::string gen_argmax() {
+    auto S = [](long v) { return std::to_string(v); };
+    std::string k;
+    auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
+    k += ".kernel argmax\n.wave32\n.user_sgprs 6\n.tgid_x\n";
+    o("s_lshl_b32 s7, s6, 8");
+    o("v_add_nc_u32 v1, s7, v0");                   // g: the first run
+    for (int i = 0; i < 4; i++) {
+        o("v_min_u32 v" + S(2 + i) + ", s4, v1");   // run, clamped
+        if (i < 3) o("v_add_nc_u32 v1, s5, v1");
+    }
+    for (int i = 0; i < 4; i++) {
+        o("v_lshlrev_b32 v" + S(6 + i) + ", 4, v" + S(2 + i));
+        o("global_load_dwordx4 v[" + S(12 + 4 * i) + ":" + S(15 + 4 * i) + "], v" + S(6 + i) + ", s[0:1]");
+    }
+    o("v_mov_b32 v40, 0");                          // best key (below every value)
+    o("v_mov_b32 v41, -1");                         // its index
+    for (int i = 0; i < 4; i++) {
+        o("s_waitcnt vmcnt(" + S(3 - i) + ")");
+        o("v_lshlrev_b32 v10, 2, v" + S(2 + i));    // the run's first index
+        for (int c = 0; c < 4; c++) {
+            const std::string v = "v" + S(12 + 4 * i + c);
+            o("v_ashrrev_i32 v11, 31, " + v);
+            o("v_or_b32 v11, 0x80000000, v11");
+            o("v_xor_b32 " + v + ", " + v + ", v11");   // ordered: ~b below zero, b | 2^31 above
+            o("v_cmp_gt_u32 vcc_lo, " + v + ", v40");
+            o("v_cndmask_b32 v40, v40, " + v + ", vcc_lo");
+            o("v_add_nc_u32 v11, " + S(c) + ", v10");
+            o("v_cndmask_b32 v41, v41, v11, vcc_lo");
+        }
+    }
+    // the wave's largest key, then the lowest index holding it
+    o("v_mov_b32 v42, v40");
+    o("v_nop");
+    o("v_nop");
+    for (int x : {1, 2, 4, 8}) o("v_max_u32_dpp v42, v42, v42 row_xmask:" + S(x) + " row_mask:0xf bank_mask:0xf");
+    o("s_mov_b32 s8, 0x76543210");
+    o("s_mov_b32 s9, 0xfedcba98");
+    o("v_permlanex16_b32 v43, v42, s8, s9");
+    o("v_max_u32 v42, v42, v43");
+    o("v_cmp_eq_u32 vcc_lo, v42, v40");
+    o("v_mov_b32 v44, -1");
+    o("v_cndmask_b32 v44, v44, v41, vcc_lo");
+    o("v_nop");
+    o("v_nop");
+    for (int x : {1, 2, 4, 8}) o("v_min_u32_dpp v44, v44, v44 row_xmask:" + S(x) + " row_mask:0xf bank_mask:0xf");
+    o("v_permlanex16_b32 v43, v44, s8, s9");
+    o("v_min_u32 v44, v44, v43");
+    o("v_not_b32 v46, v44");
+    o("v_mov_b32 v47, v42");
+    o("v_mov_b32 v45, 0");
+    o("s_mov_b32 exec_lo, 1");
+    o("global_atomic_umax_x2 v45, v[46:47], s[2:3]");
+    o("s_endpgm");
+    return k;
+}
+
+// x = row `id` of a Q4_K table (ncols values, 16 per thread: ncols / 16
+// threads in one workgroup, at most 1024). id: s6, or with s6 = -1 the
+// argmax slot's (~ its low half), which is then reset to 0. The id is
+// written to s[8:9] (the token list), so the host can read what was made.
+// Arguments: s[0:1] table, s[2:3] x, s[4:5] slot, s6 id or -1, s[8:9] id out.
+inline std::string gen_embed_q4k(int ncols) {
+    auto S = [](long v) { return std::to_string(v); };
+    std::string k;
+    auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
+    const int rb = ncols / 256 * 144;
+    k += ".kernel embed_q4k\n.wave32\n.user_sgprs 10\n";
+    o("s_load_dwordx2 s[12:13], s[4:5], 0x0");
+    o("s_waitcnt lgkmcnt(0)");
+    o("s_not_b32 s14, s12");
+    o("s_cmp_eq_u32 s6, -1");
+    o("s_cselect_b32 s14, s14, s6");               // the id
+    o("s_mul_i32 s16, s14, " + S(rb));
+    o("s_mul_hi_u32 s17, s14, " + S(rb));
+    o("s_add_u32 s16, s16, s0");
+    o("s_addc_u32 s17, s17, s1");                  // its row
+    o("v_lshrrev_b32 v2, 4, v0");                   // block
+    o("v_and_b32 v3, 15, v0");                      // sub: 16 values of it
+    o("v_mul_u32_u24 v1, 144, v2");
+    o("global_load_dword v4, v1, s[16:17]");        // d, dmin
+    o("v_lshrrev_b32 v5, 1, v3");                   // is: the 32-value group
+    o("v_add_nc_u32 v6, v1, v5");
+    o("global_load_ubyte v7, v6, s[16:17] offset:4");    // sc[is]
+    o("global_load_ubyte v8, v6, s[16:17] offset:8");    // sc[is + 4]
+    o("v_mov_b32 v9, 4");
+    o("v_cmp_le_u32 vcc_lo, 4, v5");
+    o("v_cndmask_b32 v9, 0, v9, vcc_lo");
+    o("v_sub_nc_u32 v9, v6, v9");
+    o("global_load_ubyte v10, v9, s[16:17] offset:4");   // sc[is - 4] (sc[is] below 4)
+    o("v_lshrrev_b32 v11, 2, v3");
+    o("v_lshlrev_b32 v11, 5, v11");
+    o("v_and_b32 v12, 1, v3");
+    o("v_lshlrev_b32 v12, 4, v12");
+    o("v_add3_u32 v11, v1, v11, v12");
+    o("global_load_dwordx4 v[16:19], v11, s[16:17] offset:16");   // the 16 bytes of nibbles
+    o("v_and_b32 v13, 1, v5");
+    o("v_lshlrev_b32 v13, 2, v13");                 // nibble shift: 4 (is & 1)
+    // the slot is read by every wave before one resets it
+    o("s_barrier");
+    o("v_mov_b32 v20, 0");
+    o("v_mov_b32 v30, 0");
+    o("v_mov_b32 v31, 0");
+    o("v_mov_b32 v21, s14");
+    o("v_cmp_eq_u32 vcc_lo, 0, v0");
+    o("s_and_saveexec_b32 s22, vcc_lo");
+    o("global_store_dwordx2 v20, v[30:31], s[4:5]");   // slot = 0
+    o("global_store_dword v20, v21, s[8:9]");
+    o("s_mov_b32 exec_lo, s22");
+    o("s_waitcnt vmcnt(0)");
+    // scale and min: below 4 sc[is] & 63, sc[is+4] & 63; else
+    // (sc[is+4] & 15) | (sc[is-4] >> 6) << 4, (sc[is+4] >> 4) | (sc[is] >> 6) << 4
+    o("v_and_b32 v22, 63, v7");
+    o("v_and_b32 v23, 63, v8");
+    o("v_and_b32 v24, 15, v8");
+    o("v_lshrrev_b32 v25, 6, v10");
+    o("v_lshl_or_b32 v24, v25, 4, v24");
+    o("v_lshrrev_b32 v25, 4, v8");
+    o("v_lshrrev_b32 v26, 6, v7");
+    o("v_lshl_or_b32 v25, v26, 4, v25");
+    o("v_cmp_le_u32 vcc_lo, 4, v5");
+    o("v_cndmask_b32 v22, v22, v24, vcc_lo");
+    o("v_cndmask_b32 v23, v23, v25, vcc_lo");
+    o("v_cvt_f32_u32 v22, v22");
+    o("v_cvt_f32_u32 v23, v23");
+    o("v_cvt_f32_f16 v24, v4");
+    o("v_lshrrev_b32 v25, 16, v4");
+    o("v_cvt_f32_f16 v25, v25");
+    o("v_mul_f32 v22, v24, v22");                   // d sc
+    o("v_mul_f32 v23, v25, v23");                   // dmin m
+    for (int i = 0; i < 4; i++) o("v_lshrrev_b32 v" + S(16 + i) + ", v13, v" + S(16 + i));
+    for (int j = 0; j < 16; j++) {
+        const std::string r = "v" + S(28 + j);
+        o("v_bfe_u32 " + r + ", v" + S(16 + j / 4) + ", " + S(8 * (j % 4)) + ", 4");
+        o("v_cvt_f32_u32 " + r + ", " + r);
+        o("v_mul_f32 " + r + ", v22, " + r);
+        o("v_sub_f32 " + r + ", " + r + ", v23");
+    }
+    o("v_lshlrev_b32 v1, 6, v0");
+    for (int i = 0; i < 4; i++) o("global_store_dwordx4 v1, v[" + S(28 + 4 * i) + ":" + S(31 + 4 * i) + "], s[2:3] offset:" + S(16 * i));
+    o("s_endpgm");
+    return k;
+}
+
 }  // namespace ts5::direct
