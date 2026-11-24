@@ -66,11 +66,12 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
     const std::string path = argv[2];
     const int ntime = argc > 3 ? std::atoi(argv[3]) : 64;
     const int ctx = argc > 4 ? std::atoi(argv[4]) : 2048;
-    bool profile = false, light = true, serial = false;
+    bool profile = false, light = true, serial = false, fused = true;
     for (int i = 5; i < argc; i++) {
         if (std::string(argv[i]) == "profile") profile = serial = true;
         if (std::string(argv[i]) == "nolight") light = false;   // no cache invalidation between kernels (timing only)
         if (std::string(argv[i]) == "serial") serial = true;    // the host waits for each token before sending the next
+        if (std::string(argv[i]) == "unfused") fused = false;   // separate norm and SiLU kernels (round 35's stream)
     }
 
     Model m;
@@ -95,13 +96,13 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
 
     // Kernels. Mat-vecs by (type, columns).
     std::map<uint64_t, Prog> mvs;
-    auto mv_prog = [&](const Weight& w) -> Prog* {
-        const uint64_t key = (uint64_t)w.type() << 32 | (uint64_t)w.ne0();
+    auto mv_prog = [&](const Weight& w, Stage st = Stage::None) -> Prog* {
+        const uint64_t key = (uint64_t)st << 48 | (uint64_t)w.type() << 32 | (uint64_t)w.ne0();
         auto it = mvs.find(key);
         if (it != mvs.end()) return &it->second;
         std::string src;
-        if (w.type() == GGML_Q4_K) src = gen_mv_q4k((int)w.ne0(), "", 0, 1, true);
-        else if (w.type() == GGML_Q6_K) src = gen_mv_q6k((int)w.ne0());
+        if (w.type() == GGML_Q4_K) src = gen_mv_q4k((int)w.ne0(), "", 0, 1, true, st, hp.rms_eps);
+        else if (w.type() == GGML_Q6_K) src = gen_mv_q6k((int)w.ne0(), 0, st, hp.rms_eps);
         else return nullptr;
         Prog& p = mvs[key];
         std::string e;
@@ -123,19 +124,25 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
         const Layer& L = m.layers[l];
         for (const Weight* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down})
             if (!*w || !mv_prog(*w)) return fail("layer " + std::to_string(l) + ": a weight of a type the mat-vecs don't take yet");
+        for (const Weight* w : {&L.wq, &L.wk, &L.wv, &L.w_gate, &L.w_up})
+            if (fused && !mv_prog(*w, Stage::Norm)) return fail("layer " + std::to_string(l) + ": staged norm kernel");
+        if (fused && !mv_prog(L.w_down, Stage::Silu)) return fail("layer " + std::to_string(l) + ": a weight of a type the mat-vecs don't take yet");
         if (!is_f32(L.attn_norm) || !is_f32(L.ffn_norm) || !is_f32(L.q_norm) || !is_f32(L.k_norm) || L.bq)
             return fail("layer " + std::to_string(l) + ": norms not f32, or biases");
     }
     const Weight& outw = m.output ? m.output : m.tok_embd;
-    if (!mv_prog(outw) || !is_f32(m.out_norm)) return fail("output weight or norm of an unexpected type");
+    if (!mv_prog(outw) || (fused && !mv_prog(outw, Stage::Norm)) || !is_f32(m.out_norm)) return fail("output weight or norm of an unexpected type");
     std::printf("mat-vec kernels: %zu (", mvs.size());
-    for (auto& kv : mvs) std::printf(" %s x%u", (kv.first >> 32) == GGML_Q4_K ? "q4k" : "q6k", (uint32_t)kv.first);
+    for (auto& kv : mvs)
+        std::printf(" %s x%u%s", ((kv.first >> 32) & 0xffff) == GGML_Q4_K ? "q4k" : "q6k", (uint32_t)kv.first,
+                    (kv.first >> 48) == (uint64_t)Stage::Norm ? "+norm" : (kv.first >> 48) == (uint64_t)Stage::Silu ? "+silu" : "");
     std::printf(" )\n");
 
     // Activations, KV cache, RoPE table, partials, stamps.
-    kfd::Buffer bx, bxn, bq, bk, bv, batt, bt, bg, bu, bh, blog, bkv, brope, bpart, bstamp, bslot, bids, bts;
+    kfd::Buffer bx2, bzero, bblk, bx, bxn, bq, bk, bv, batt, bt, bg, bu, bh, blog, bkv, brope, bpart, bstamp, bslot, bids, bts;
     const size_t kv_layer = (size_t)ctx * NKV * HD * 2;   // K or V, f16
-    for (auto pr : {std::make_pair(&bx, (size_t)E * 4), std::make_pair(&bxn, (size_t)E * 4), std::make_pair(&bq, (size_t)NQ * HD * 4),
+    for (auto pr : {std::make_pair(&bx2, (size_t)E * 4), std::make_pair(&bzero, (size_t)E * 4),
+                    std::make_pair(&bblk, (size_t)(hp.n_layer + 1) * 5 * 32), std::make_pair(&bx, (size_t)E * 4), std::make_pair(&bxn, (size_t)E * 4), std::make_pair(&bq, (size_t)NQ * HD * 4),
                     std::make_pair(&bk, (size_t)NKV * HD * 4), std::make_pair(&bv, (size_t)NKV * HD * 4),
                     std::make_pair(&batt, (size_t)NQ * HD * 4), std::make_pair(&bt, (size_t)E * 4), std::make_pair(&bg, (size_t)F * 4),
                     std::make_pair(&bu, (size_t)F * 4), std::make_pair(&bh, (size_t)F * 4), std::make_pair(&blog, (size_t)V * 4 + 4096),
@@ -144,6 +151,26 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
                     std::make_pair(&bslot, (size_t)4096), std::make_pair(&bids, (size_t)ctx * 4), std::make_pair(&bts, (size_t)ctx * 16)})
         if (!dev.alloc((pr.second + 4095) & ~(size_t)4095, kfd::Mem::Gtt, *pr.first)) return fail(dev.err() + " (activations)");
     std::memset(bslot.cpu, 0, 4096);
+    std::memset(bzero.cpu, 0, bzero.size);
+    // The staged mat-vecs' pointer blocks (mv_stage.h), 5 per layer: Q with
+    // the residual written back, K and V, gate with it written back, up,
+    // down's u; then the output's. The residual ping-pongs: x (layer input)
+    // + t -> x2 at attention, x2 + t -> x at the FFN.
+    auto blk = [&](int l, int i) { return bblk.gpu + ((size_t)l * 5 + i) * 32; };
+    {
+        uint64_t* B = (uint64_t*)bblk.cpu;
+        for (int l = 0; l < hp.n_layer; l++) {
+            const Layer& L = m.layers[l];
+            const uint64_t t = l ? bt.gpu : bzero.gpu;
+            uint64_t* b = B + (size_t)l * 5 * 4;
+            const uint64_t v[5][3] = {{addr(L.attn_norm.data), t, bx2.gpu}, {addr(L.attn_norm.data), t, 0},
+                                      {addr(L.ffn_norm.data), bt.gpu, bx.gpu}, {addr(L.ffn_norm.data), bt.gpu, 0}, {bu.gpu, 0, 0}};
+            for (int i = 0; i < 5; i++)
+                for (int j = 0; j < 3; j++) b[i * 4 + j] = v[i][j];
+        }
+        uint64_t* b = B + (size_t)hp.n_layer * 5 * 4;
+        b[0] = addr(m.out_norm.data), b[1] = bt.gpu, b[2] = 0;
+    }
     {
         // cos then sin of each pair's angle, as the CPU backend's rope().
         float* R = (float*)brope.cpu;
@@ -177,10 +204,10 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
             if (light) s.acquire_light();
         };
         const uint32_t t256[3] = {256, 1, 1}, t64[3] = {64, 1, 1};
-        auto mv = [&](const Weight& w, uint64_t x, uint64_t y) {
-            Prog* p = mv_prog(w);
+        auto mv = [&](const Weight& w, uint64_t x, uint64_t y, Stage st = Stage::None, uint64_t block = 0) {
+            Prog* p = mv_prog(w, st);
             const uint64_t a = addr(w.data);
-            const uint32_t args[10] = {lo(a), hi(a), lo(x), hi(x), lo(y), hi(y), (uint32_t)w.ne1(), 0, step, 0};
+            const uint32_t args[10] = {lo(a), hi(a), lo(x), hi(x), lo(y), hi(y), (uint32_t)w.ne1(), lo(block), step, hi(block)};
             const uint32_t g[3] = {wgs, 1, 1};
             s.dispatch(p->k, p->code.gpu, args, 10, g, t256);
         };
@@ -207,12 +234,18 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
             const Layer& L = m.layers[l];
             const uint64_t kc = bkv.gpu + (size_t)l * 2 * kv_layer, vc = kc + kv_layer;
             if (l) barrier();
-            norm(l > 0, L.attn_norm);   // after layer 0: x += the last layer's down output first
-            barrier();
-            stamp(S_NORM);
-            mv(L.wq, bxn.gpu, bq.gpu);
-            mv(L.wk, bxn.gpu, bk.gpu);
-            mv(L.wv, bxn.gpu, bv.gpu);
+            if (fused) {
+                mv(L.wq, bx.gpu, bq.gpu, Stage::Norm, blk(l, 0));
+                mv(L.wk, bx.gpu, bk.gpu, Stage::Norm, blk(l, 1));
+                mv(L.wv, bx.gpu, bv.gpu, Stage::Norm, blk(l, 1));
+            } else {
+                norm(l > 0, L.attn_norm);   // after layer 0: x += the last layer's down output first
+                barrier();
+                stamp(S_NORM);
+                mv(L.wq, bxn.gpu, bq.gpu);
+                mv(L.wk, bxn.gpu, bk.gpu);
+                mv(L.wv, bxn.gpu, bv.gpu);
+            }
             barrier();
             stamp(S_QKV);
             {
@@ -240,6 +273,15 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
             mv(L.wo, batt.gpu, bt.gpu);
             barrier();
             stamp(S_WO);
+            if (fused) {
+                mv(L.w_gate, bx2.gpu, bg.gpu, Stage::Norm, blk(l, 2));
+                mv(L.w_up, bx2.gpu, bu.gpu, Stage::Norm, blk(l, 3));
+                barrier();
+                stamp(S_GATEUP);
+                mv(L.w_down, bg.gpu, bt.gpu, Stage::Silu, blk(l, 4));
+                stamp(S_DOWN);
+                continue;
+            }
             norm(true, L.ffn_norm);
             barrier();
             stamp(S_NORM2);
@@ -258,9 +300,12 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
             stamp(S_DOWN);
         }
         barrier();
-        norm(true, m.out_norm);
-        barrier();
-        mv(outw, bxn.gpu, blog.gpu);
+        if (fused) mv(outw, bx.gpu, blog.gpu, Stage::Norm, blk(hp.n_layer, 0));
+        else {
+            norm(true, m.out_norm);
+            barrier();
+            mv(outw, bxn.gpu, blog.gpu);
+        }
         barrier();
         {
             const uint32_t groups = (uint32_t)((V + 4095) / 4096);
@@ -385,7 +430,7 @@ int cmd_token(kfd::Device& dev, int argc, char** argv) {
     if (ntimed)
         std::printf("timed %d tokens (positions %d-%d)%s%s%s: GPU %.2f ms median per token (%.1f tok/s); first start to last end %.2f ms "
                     "per token (%.1f tok/s); host clock %.1f tok/s%s\n",
-                    ntimed, pos0, pos - 1, serial ? ", serial" : ", queued", light ? "" : ", no cache invalidation",
+                    ntimed, pos0, pos - 1, serial ? ", serial" : fused ? ", queued" : ", queued, unfused", light ? "" : ", no cache invalidation",
                     profile ? ", profiled" : "", med(gpu_ms), 1e3 / med(gpu_ms), span_ms / ntimed, 1e3 * ntimed / span_ms,
                     1e3 * ntimed / total_ms, serial ? (", host wait " + std::to_string(med(wall_ms)).substr(0, 5) + " ms median").c_str() : "");
     if (profile && profiled) {

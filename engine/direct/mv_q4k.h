@@ -22,6 +22,8 @@
 #include <algorithm>
 #include <string>
 
+#include "mv_stage.h"
+
 namespace ts5::direct {
 
 // diag (timing only, results wrong): 1 drops the block math, 2 the LDS
@@ -39,7 +41,8 @@ namespace ts5::direct {
 // workgroups * 8), so the whole GPU walks the matrix front to back together,
 // as Vulkan's one-row workgroups do; otherwise each workgroup owns a slice of
 // s8 rows.
-inline std::string gen_mv_q4k(int ncols, const std::string& hints = "", int diag = 0, int depth = 1, bool inter = false) {
+inline std::string gen_mv_q4k(int ncols, const std::string& hints = "", int diag = 0, int depth = 1, bool inter = false,
+                              Stage st = Stage::None, float eps = 1e-6f) {
     const int nit = ncols / 2048;          // steps per row
     const int row_bytes = ncols / 256 * 144;
     const int nseg = ncols / 16;
@@ -48,7 +51,8 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "", int diag
     // each in CU mode): with 17 KiB (4096 columns) the dispatcher packed
     // several onto some CUs and left others idle, and those shapes ran at
     // half the speed of 12288 columns' 52 KiB (round 8).
-    const int lds = std::max(sums + nseg * 4, 33 * 1024);
+    // 32 more bytes for the staged norm's sums (mv_stage.h)
+    const int lds = std::max(sums + nseg * 4, 33 * 1024) + (st != Stage::None ? 32 : 0);
     const std::string H = hints.empty() ? "" : " " + hints;
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
@@ -81,6 +85,7 @@ inline std::string gen_mv_q4k(int ncols, const std::string& hints = "", int diag
     o("v_lshrrev_b32 v8, 4, v7");
     o("v_and_b32 v8, 0x30, v8");
     o("v_xor_b32 v8, v7, v8");
+    if (st != Stage::None) k += gen_stage(st, ncols, eps, lds - 32, "s10");
     o("s_waitcnt vmcnt(0)");
     for (int i = 0; i < nload; i++)
         o("ds_write_b128 v8, v[" + S(40 + 4 * i) + ":" + S(43 + 4 * i) + "] offset:" + S(4096 * i));

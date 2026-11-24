@@ -891,6 +891,14 @@ int main(int argc, char** argv) {
                    stdout);
         return 0;
     }
+    if (cmd == "gen-mvs") {   // a staged mat-vec (mv_stage.h): 0/1 Q4_K norm 4096 / SiLU 12288, 2/3 the same for Q6_K
+        using ts5::direct::Stage;
+        const int v = argc > 2 ? std::atoi(argv[2]) : 0;
+        const Stage st = v & 1 ? Stage::Silu : Stage::Norm;
+        const int cols = v & 1 ? 12288 : 4096;
+        std::fputs((v & 2 ? ts5::direct::gen_mv_q6k(cols, 0, st) : ts5::direct::gen_mv_q4k(cols, "", 0, 1, true, st)).c_str(), stdout);
+        return 0;
+    }
     if (cmd == "gen-mv6") {   // prints mv_q6k for a column count [diag]
         std::fputs(ts5::direct::gen_mv_q6k(argc > 2 ? std::atoi(argv[2]) : 4096, argc > 3 ? std::atoi(argv[3]) : 0).c_str(), stdout);
         return 0;

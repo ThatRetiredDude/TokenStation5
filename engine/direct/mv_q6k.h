@@ -34,16 +34,19 @@
 #include <algorithm>
 #include <string>
 
+#include "mv_stage.h"
+
 namespace ts5::direct {
 
 // diag: 4 drops the weight loads (results wrong); 8 (results right) has
 // every wave write s_memtime records as mv_q4k's diag 8 does.
-inline std::string gen_mv_q6k(int ncols, int diag = 0) {
+inline std::string gen_mv_q6k(int ncols, int diag = 0, Stage st = Stage::None, float eps = 1e-6f) {
     const int nit = ncols / 2048;          // steps per row
     const int row_bytes = ncols / 256 * 210;
     const int nseg = ncols / 16;
     const int sums = ncols * 4;            // LDS byte offset of the 16-value sums
-    const int lds = std::max(sums + nseg * 4, 33 * 1024);   // >= 33 KiB: one workgroup per CU (see mv_q4k)
+    // 32 more bytes for the staged norm's sums (mv_stage.h)
+    const int lds = std::max(sums + nseg * 4, 33 * 1024) + (st != Stage::None ? 32 : 0);   // >= 33 KiB: one workgroup per CU (see mv_q4k)
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
@@ -75,6 +78,7 @@ inline std::string gen_mv_q6k(int ncols, int diag = 0) {
     o("v_xor_b32 v12, v12, v11");         // chunk slot
     o("v_lshlrev_b32 v13, 4, v12");
     o("v_lshl_add_u32 v13, v10, 6, v13");
+    if (st != Stage::None) k += gen_stage(st, ncols, eps, lds - 32, "s10");
     o("s_waitcnt vmcnt(0)");
     for (int i = 0; i < nload; i++)
         o("ds_write_b128 v13, v[" + S(40 + 4 * i) + ":" + S(43 + 4 * i) + "] offset:" + S(4096 * i));
