@@ -13,9 +13,12 @@
 // load at byte 192 + 8h; the h = 1 lanes' load also holds d, which the
 // h = 0 lanes get by DPP). 8 blocks (1680 bytes, 2048 columns) per step.
 //
-// Blocks are only 2-byte aligned: every other block's loads are at
-// addresses 2 mod 4. gfx10 runs with SH_MEM_CONFIG in unaligned mode; the
-// CPU check covers it.
+// Blocks are only 2-byte aligned: block g of a step starts 2 (g & 1) bytes
+// past a dword. Round 21 loaded at those addresses directly and every row
+// came out wrong: the GPU drops the low address bits (a model of the kernel
+// with every odd block read 2 bytes early reproduces its row 0 exactly,
+// -1.14e8 vs -66.1), so loads start at the dword below
+// and take one dword more, and v_alignbyte_b32 shifts the bytes into place.
 //
 // x sits in LDS with the sum of every 16 values next to it, so the "- 32"
 // costs one multiply-add per 16 values: sum x (q - 32) = q.x - 32 sum(x).
@@ -134,6 +137,11 @@ inline std::string gen_mv_q6k(int ncols, int diag = 0) {
     o("v_lshl_add_u32 v4, v22, 3, v23");
     o("v_add_nc_u32 v4, 192, v4");        // scales: 192 + 8h
     o("v_lshlrev_b32 v24, 3, v21");       // scale byte shift: 8 (t&1)
+    o("v_and_b32 v29, 1, v20");
+    o("v_lshlrev_b32 v29, 1, v29");       // misalignment: 2 (g & 1) bytes
+    o("v_sub_nc_u32 v2, v2, v29");
+    o("v_sub_nc_u32 v3, v3, v29");
+    o("v_sub_nc_u32 v4, v4, v29");
     // x: segment 16 (8 step + g) + 8h + 4 (k >> 1) + 2 (k & 1) + (t & 1); its
     // slot's bit 1 is (k & 1) ^ h, its chunk c sits at c ^ (g & 3). One
     // address per (k & 1, c); k >> 1 is the offset 256, the step 8192.
@@ -159,13 +167,17 @@ inline std::string gen_mv_q6k(int ncols, int diag = 0) {
     o("s_mov_b32 s31, 0xfedcba98");
     o("s_mov_b32 s50, 0xc2000000");       // -32.0
 
-    // One step's loads into v[base .. base + 14]: ql (2 x 16), qh (16), scales (12).
+    // One step's loads into v[base .. base + 17], each from the dword at or
+    // below its bytes: ql (2 x 20), qh (20), scales (12).
     auto loads = [&](int base) {
         if (diag & 4) return;
         o("global_load_dwordx4 v[" + S(base) + ":" + S(base + 3) + "], v2, s[22:23]");
-        o("global_load_dwordx4 v[" + S(base + 4) + ":" + S(base + 7) + "], v2, s[22:23] offset:32");
-        o("global_load_dwordx4 v[" + S(base + 8) + ":" + S(base + 11) + "], v3, s[22:23]");
-        o("global_load_dwordx3 v[" + S(base + 12) + ":" + S(base + 14) + "], v4, s[22:23]");
+        o("global_load_dword v" + S(base + 4) + ", v2, s[22:23] offset:16");
+        o("global_load_dwordx4 v[" + S(base + 5) + ":" + S(base + 8) + "], v2, s[22:23] offset:32");
+        o("global_load_dword v" + S(base + 9) + ", v2, s[22:23] offset:48");
+        o("global_load_dwordx4 v[" + S(base + 10) + ":" + S(base + 13) + "], v3, s[22:23]");
+        o("global_load_dword v" + S(base + 14) + ", v3, s[22:23] offset:16");
+        o("global_load_dwordx3 v[" + S(base + 15) + ":" + S(base + 17) + "], v4, s[22:23]");
         o("v_nop");   // VMEMtoScalarWrite
     };
     int site = 0;
@@ -191,7 +203,7 @@ inline std::string gen_mv_q6k(int ncols, int diag = 0) {
     auto V = [&](int r) { return "v" + S(r); };
     auto compute = [&](int base) {
         const std::string n = S(site++);
-        const int A = base, B = base + 4, C = base + 8, SC = base + 12;
+        const int A = base, B = base + 5, C = base + 10, SC = base + 15;
         o("s_lshl_b32 s11, s33, 13");
         for (int i = 0; i < 8; i++) o("v_add_nc_u32 v" + S(48 + i) + ", s11, v" + S(40 + i));
         o("s_lshl_b32 s11, s33, 9");
@@ -203,7 +215,12 @@ inline std::string gen_mv_q6k(int ncols, int diag = 0) {
                   " offset:" + S(256 * (q >> 1)));
             o("ds_read_b32 v" + S(120 + q) + ", v26 offset:" + S(8 * q));
         }
-        o("s_waitcnt vmcnt(4)");
+        o("s_waitcnt vmcnt(7)");
+        for (int r : {A, B, C})   // bytes into place, in order (each reads the next, not yet shifted)
+            for (int i = 0; i < 4; i++) o("v_alignbyte_b32 v" + S(r + i) + ", v" + S(r + i + 1) + ", v" + S(r + i) + ", v29");
+        o("v_alignbyte_b32 v" + S(SC) + ", v" + S(SC + 1) + ", v" + S(SC) + ", v29");
+        o("v_alignbyte_b32 v" + S(SC + 1) + ", v" + S(SC + 2) + ", v" + S(SC + 1) + ", v29");
+        o("v_alignbyte_b32 v" + S(SC + 2) + ", v" + S(SC + 2) + ", v" + S(SC + 2) + ", v29");
         // d: from the block's h = 1 lanes (t = 2, 3), bytes 8..9 of their scale load
         o("v_mov_b32_dpp v164, " + V(SC + 2) + " quad_perm:[2,3,2,3] row_mask:0xf bank_mask:0xf");
         o("v_lshrrev_b32 v165, v24, " + V(SC));
@@ -267,7 +284,7 @@ inline std::string gen_mv_q6k(int ncols, int diag = 0) {
         label("cnext" + n);
     };
     // Two register sets in rotation: one step's loads in flight while the other is worked on.
-    const int sets[2] = {130, 145};
+    const int sets[2] = {124, 142};   // 18 registers each
     loads(sets[0]);
     advance_load();
     label("loop");
