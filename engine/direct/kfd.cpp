@@ -177,7 +177,9 @@ bool Device::create_queue(size_t ring_bytes) {
     errno = 0;
     // Context save area, sized the way the kernel checks it (kfd_queue.c, GFX10).
     uint32_t cus = cu_count();
-    uint32_t waves = cus * max_waves_per_simd * simd_per_cu;
+    // Waves the save area holds, as kfd_queue.c counts them (get_num_waves):
+    // 32 per CU from GFX10.1 on, 40 before.
+    uint32_t waves = gfx_target >= 100100 ? cus * 32 : cus * 40;
     size_t wg_data = round_up((size_t)cus * (0x40000 + 0x4000 + 0x10000 + 0x1000), 4096);
     size_t ctl_stack = round_up((size_t)waves * 12 + 8 + 40, 4096);
     size_t debug_mem = round_up((size_t)waves * 32, 64);
@@ -190,11 +192,13 @@ bool Device::create_queue(size_t ring_bytes) {
         if (p.first == "ctl_stack_size" && p.second) ctl_stack = p.second;
         if (p.first == "eop_buffer_size" && p.second) eop_size = p.second;
     }
-    if (!alloc(ring_bytes, Mem::GttUncached, ring_) || !alloc(4096, Mem::GttUncached, ptrs_) || !alloc(round_up(eop_size, 4096), Mem::Gtt, eop_) ||
+    if (!alloc(ring_bytes, Mem::GttUncached, ring_) || !alloc(4096, Mem::GttUncached, rptr_) ||
+        !alloc(4096, Mem::GttUncached, wptr_) || !alloc(round_up(eop_size, 4096), Mem::Gtt, eop_) ||
         !alloc(round_up((cwsr_size + debug_mem) * (num_xcc ? num_xcc : 1), 4096), Mem::Gtt, cwsr_))
         return false;
     std::memset(ring_.cpu, 0, ring_.size);
-    std::memset(ptrs_.cpu, 0, ptrs_.size);
+    std::memset(rptr_.cpu, 0, rptr_.size);
+    std::memset(wptr_.cpu, 0, wptr_.size);
     // Events: GPU memory faults and hardware errors, so wait() can say what went wrong.
     if (!alloc(0x8000, Mem::GttUncached, event_page_)) return false;
     kfd_ioctl_create_event_args ev{};
@@ -212,8 +216,9 @@ bool Device::create_queue(size_t ring_bytes) {
     kfd_ioctl_create_queue_args q{};
     q.ring_base_address = ring_.gpu;
     q.ring_size = (uint32_t)ring_.size;
-    q.read_pointer_address = ptrs_.gpu;
-    q.write_pointer_address = ptrs_.gpu + 8;
+    // The kernel wants each of these to be the start of its own one-page buffer.
+    q.read_pointer_address = rptr_.gpu;
+    q.write_pointer_address = wptr_.gpu;
     q.gpu_id = gpu_id;
     q.queue_type = KFD_IOC_QUEUE_TYPE_COMPUTE;   // PM4
     q.queue_percentage = KFD_MAX_QUEUE_PERCENTAGE;
@@ -241,7 +246,7 @@ bool Device::submit(const std::vector<uint32_t>& words) {
     if (!have_queue_) { errno = 0; return fail("no queue"); }
     uint32_t* ring = (uint32_t*)ring_.cpu;
     size_t ring_dw = ring_.size / 4;
-    volatile uint64_t* rptr = (volatile uint64_t*)ptrs_.cpu;
+    volatile uint64_t* rptr = (volatile uint64_t*)rptr_.cpu;
     if (words.size() >= ring_dw) { errno = 0; return fail("command stream longer than the ring"); }
     // Wait for room: the GPU's read pointer counts dwords consumed.
     auto t0 = std::chrono::steady_clock::now();
@@ -251,7 +256,7 @@ bool Device::submit(const std::vector<uint32_t>& words) {
     }
     for (uint32_t w : words) ring[(put_++) % ring_dw] = w;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    *(volatile uint64_t*)((char*)ptrs_.cpu + 8) = put_;
+    *(volatile uint64_t*)wptr_.cpu = put_;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     *doorbell_ = put_;
     return true;
@@ -296,7 +301,7 @@ bool Device::wait(volatile uint64_t* fence, uint64_t value, int timeout_ms) {
             if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(timeout_ms)) {
                 errno = 0;
                 return fail("timed out waiting for the GPU (fence " + std::to_string(*fence) + ", want " + std::to_string(value) +
-                            ", ring read " + std::to_string(*(volatile uint64_t*)ptrs_.cpu) + " of " + std::to_string(put_) + ")");
+                            ", ring read " + std::to_string(*(volatile uint64_t*)rptr_.cpu) + " of " + std::to_string(put_) + ")");
             }
             std::this_thread::yield();
         }

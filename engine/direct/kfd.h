@@ -59,7 +59,7 @@ private:
     std::string err_;
     std::vector<Buffer> owned_;
     // queue
-    Buffer ring_, ptrs_, eop_, cwsr_, event_page_;
+    Buffer ring_, rptr_, wptr_, eop_, cwsr_, event_page_;
     uint32_t queue_id_ = 0;
     bool have_queue_ = false;
     volatile uint64_t* doorbell_ = nullptr;
