@@ -222,6 +222,232 @@ inline std::string gen_attn_part() {
     return k;
 }
 
+// attn_part2: attn_part for NQT consecutive prompt tokens at once (1, 2, 4):
+// QR = 4 NQT query rows (token tt, head h: row 4 tt + h) against each K and
+// V row loaded, so a prompt batch reads the KV cache 16 / NQT times instead
+// of 16 (round 62: attention 0.13 ms a prompt token, the cache read ~16x).
+// Token tt sees positions < s6 + tt (s6: token 0's count); the splits are
+// the last token's. Running maxima start at -1e30, not -inf, so a row with
+// no visible position in a split gets p = 0, sums 0 (not NaN).
+// Arguments as attn_part, plus s11: bytes from one token's q (16 KiB) and
+// partials to the next (q: 16384, partials: s11). Writes each token's partials
+// where attn_part would (attn_reduce unchanged).
+// VGPRs: v4.. scores (QR), sums (QR), V sums (2 QR), v48-111 K then V and p,
+// v112-119 temporaries. SGPRs: q in s[20:83] (two sets of QR x 4 dims),
+// maxima s[90 ..), scales s[90 + QR ..).
+inline std::string gen_attn_part2(int NQT) {
+    auto S = [](long v) { return std::to_string(v); };
+    std::string k;
+    auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
+    if (NQT != 1 && NQT != 2 && NQT != 4) return "";
+    const int QR = 4 * NQT;
+    if (QR > 8) return "";   // (16 rows: q 128 SGPRs a set; not yet)
+    const int SC = 4, SU = SC + QR, VA = SU + QR, MISC = VA + 2 * QR;   // scores, sums, V sums
+    const int DP = MISC, PG = MISC + 1, DP4 = MISC + 2, PG32 = MISC + 3, I32 = MISC + 4, VT = MISC + 5, VPOS = MISC + 6, P16 = MISC + 7;
+    const int SM = 90, SS = 90 + QR;                     // SGPR maxima, scales
+    const int LS = 32 * QR, LP = 64 * QR, LV = LP + 256 * QR * 4;   // LDS: sums, p [pos][row], V partials
+    k += ".kernel attn_part\n.wave32\n.user_sgprs 12\n.tgid_x\n.lds " + S(LV + 256 * 2 * QR * 4) + "\n";
+    o("s_and_b32 s13, s12, 7");            // g
+    o("s_lshr_b32 s14, s12, 3");           // split
+    o("s_mul_i32 s16, s14, s10");          // first position of the split
+    o("s_add_u32 s85, s6, " + S(NQT - 1)); // the last token's count
+    o("s_add_u32 s15, s16, s10");
+    o("s_min_u32 s15, s15, s85");          // the split's end
+    o("s_lshl_b32 s18, s13, 11");          // q + 2048 g
+    o("s_add_u32 s18, s0, s18");
+    o("s_addc_u32 s19, s1, 0");
+    o("s_sub_u32 s17, s85, 1");            // last position
+    o("s_mov_b32 s88, 0xff800000");        // -inf
+    o("s_mov_b32 s86, 0x76543210");
+    o("s_mov_b32 s87, 0xfedcba98");
+    for (int r = 0; r < QR; r++) o("s_mov_b32 s" + S(SM + r) + ", 0xf149f2ca");   // -1e30
+    o("v_lshrrev_b32 v3, 5, v0");
+    o("v_lshlrev_b32 v3, 2, v3");          // 4 wave
+    o("v_and_b32 v" + S(DP) + ", 63, v0");
+    o("v_lshrrev_b32 v" + S(PG) + ", 6, v0");
+    o("v_lshlrev_b32 v" + S(DP4) + ", 2, v" + S(DP));
+    o("v_lshlrev_b32 v" + S(PG32) + ", " + S(2 + (QR == 8 ? 3 : 2)) + ", v" + S(PG));   // pg QR 4
+    o("v_lshlrev_b32 v" + S(I32) + ", " + S(QR == 8 ? 6 : 5) + ", v0");                 // i 2 QR 4 (V partials)
+    o("v_lshlrev_b32 v" + S(P16) + ", " + S(QR == 8 ? 5 : 4) + ", v0");                 // i QR 4 (p)
+    for (int r = 0; r < QR; r++) o("v_mov_b32 v" + S(SU + r) + ", 0");
+    for (int r = 0; r < 2 * QR; r++) o("v_mov_b32 v" + S(VA + r) + ", 0");
+    auto wave_reduce = [&](const std::string& op) {   // v112 over the wave, into every lane
+        o("v_nop");
+        o("v_nop");
+        for (int x : {1, 2, 4, 8}) o("v_" + op + "_f32_dpp v112, v112, v112 row_xmask:" + S(x) + " row_mask:0xf bank_mask:0xf");
+        o("v_permlanex16_b32 v113, v112, s86, s87");
+        o("v_" + op + "_f32 v112, v112, v113");
+    };
+    auto kloads = [&](const std::string& pos) {
+        o("v_add_nc_u32 v2, " + pos + ", v0");
+        o("v_min_u32 v2, s17, v2");
+        o("v_lshlrev_b32 v2, 3, v2");
+        o("v_add_nc_u32 v2, s13, v2");
+        o("v_lshlrev_b32 v2, 8, v2");      // (8 t + g) * 256
+        for (int c = 0; c < 16; c++)
+            o("global_load_dwordx4 v[" + S(48 + 4 * c) + ":" + S(51 + 4 * c) + "], v2, s[2:3] offset:" + S(16 * c));
+    };
+    // q for 4 dims (K dwords 2 st, 2 st + 1), every row, into set st & 1
+    auto qload = [&](int st) {
+        for (int r = 0; r < QR; r++)
+            o("s_load_dwordx4 s[" + S(20 + 32 * (st & 1) + 4 * r) + ":" + S(23 + 32 * (st & 1) + 4 * r) + "], s[18:19], " +
+              S(16384 * (r / 4) + 512 * (r % 4) + 16 * st));
+    };
+    k += "chunk:\n";
+    o("s_cmp_ge_u32 s16, s15");
+    o("s_cbranch_scc1 finish");
+    kloads("s16");
+    o("v_add_nc_u32 v1, s16, v0");         // position
+    for (int r = 0; r < QR; r++) o("v_mov_b32 v" + S(SC + r) + ", 0");
+    qload(0);
+    for (int st = 0; st < 32; st++) {
+        o("s_waitcnt vmcnt(" + S(15 - st / 2) + ") lgkmcnt(0)");
+        if (st + 1 < 32) qload(st + 1);
+        for (int j = 0; j < 2; j++) {
+            const int kr = 48 + 2 * st + j;
+            o("v_cvt_f32_f16 v114, v" + S(kr));
+            o("v_cvt_f32_f16_sdwa v115, v" + S(kr) + " src0_sel:WORD_1");
+            for (int r = 0; r < QR; r++) {
+                o("v_fmac_f32 v" + S(SC + r) + ", s" + S(20 + 32 * (st & 1) + 4 * r + 2 * j) + ", v114");
+                o("v_fmac_f32 v" + S(SC + r) + ", s" + S(21 + 32 * (st & 1) + 4 * r + 2 * j) + ", v115");
+            }
+        }
+    }
+    for (int tt = 0; tt < NQT; tt++) {     // visible: position < min(split end, s6 + tt)
+        o("s_add_u32 s84, s6, " + S(tt));
+        o("s_min_u32 s84, s84, s15");
+        o("v_cmp_gt_u32 vcc_lo, s84, v1");
+        for (int h = 0; h < 4; h++) {
+            const int r = 4 * tt + h;
+            o("v_mul_f32 v" + S(SC + r) + ", s7, v" + S(SC + r));
+            o("v_cndmask_b32 v" + S(SC + r) + ", s88, v" + S(SC + r) + ", vcc_lo");
+        }
+    }
+    for (int r = 0; r < QR; r++) {
+        o("v_mov_b32 v112, v" + S(SC + r));
+        wave_reduce("max");
+        o("ds_write_b32 v3, v112 offset:" + S(32 * r));
+    }
+    o("s_waitcnt lgkmcnt(0)");
+    o("s_barrier");
+    o("v_mov_b32 v113, 0");
+    for (int r = 0; r < QR; r++) {         // new max into s[SM + r], the old sums' scale into s[SS + r]
+        o("ds_read_b128 v[116:119], v113 offset:" + S(32 * r));
+        o("ds_read_b128 v[48:51], v113 offset:" + S(32 * r + 16));
+        o("s_waitcnt lgkmcnt(0)");
+        o("v_max3_f32 v114, v116, v117, v118");
+        o("v_max3_f32 v114, v114, v119, v48");
+        o("v_max3_f32 v114, v114, v49, v50");
+        o("v_max3_f32 v114, v114, v51, s" + S(SM + r));
+        o("v_sub_f32 v115, s" + S(SM + r) + ", v114");
+        o("v_exp_f32 v115, v115");
+        o("v_readfirstlane_b32 s" + S(SM + r) + ", v114");
+        o("v_readfirstlane_b32 s" + S(SS + r) + ", v115");
+    }
+    for (int r = 0; r < QR; r++) {         // p = 2^(s - M); this thread's sum share
+        o("v_subrev_f32 v" + S(SC + r) + ", s" + S(SM + r) + ", v" + S(SC + r));
+        o("v_exp_f32 v" + S(SC + r) + ", v" + S(SC + r));
+        o("v_mul_f32 v" + S(SU + r) + ", s" + S(SS + r) + ", v" + S(SU + r));
+        o("v_add_f32 v" + S(SU + r) + ", v" + S(SU + r) + ", v" + S(SC + r));
+    }
+    for (int r = 0; r < QR; r++) {         // rescale the V sums
+        o("v_mul_f32 v" + S(VA + 2 * r) + ", s" + S(SS + r) + ", v" + S(VA + 2 * r));
+        o("v_mul_f32 v" + S(VA + 2 * r + 1) + ", s" + S(SS + r) + ", v" + S(VA + 2 * r + 1));
+    }
+    for (int i = 0; i < QR / 4; i++)
+        o("ds_write_b128 v" + S(P16) + ", v[" + S(SC + 4 * i) + ":" + S(SC + 4 * i + 3) + "] offset:" + S(LP + 16 * i));
+    o("s_waitcnt lgkmcnt(0)");
+    o("s_barrier");
+    // ---- V: dims 2 dp, +1, positions s16 + pg + 4 it; V in v48.., p in v80.. / v96..
+    o("v_add_nc_u32 v" + S(VPOS) + ", s16, v" + S(PG));
+    for (int b = 0; b < 4; b++) {
+        for (int i = 0; i < 16; i++) {
+            const int it = 16 * b + i;
+            o("v_add_nc_u32 v" + S(VT) + ", " + S(4 * it) + ", v" + S(VPOS));
+            o("v_min_u32 v" + S(VT) + ", s17, v" + S(VT));
+            o("v_lshlrev_b32 v" + S(VT) + ", 3, v" + S(VT));
+            o("v_add_nc_u32 v" + S(VT) + ", s13, v" + S(VT));
+            o("v_lshl_add_u32 v" + S(VT) + ", v" + S(VT) + ", 8, v" + S(DP4));
+            o("global_load_dword v" + S(48 + i) + ", v" + S(VT) + ", s[4:5]");
+        }
+        const int buf[2] = {80, 96};
+        auto pread = [&](int i) {
+            for (int q = 0; q < QR / 4; q++)
+                o("ds_read_b128 v[" + S(buf[i & 1] + 4 * q) + ":" + S(buf[i & 1] + 4 * q + 3) + "], v" + S(PG32) + " offset:" + S(LP + 4 * QR * 4 * (16 * b + i) + 16 * q));
+        };
+        pread(0);
+        for (int i = 0; i < 16; i++) {
+            if (i < 15) pread(i + 1);
+            o("s_waitcnt vmcnt(" + S(15 - i) + ") lgkmcnt(" + S(i < 15 ? QR / 4 : 0) + ")");
+            o("v_cvt_f32_f16 v114, v" + S(48 + i));
+            o("v_cvt_f32_f16_sdwa v115, v" + S(48 + i) + " src0_sel:WORD_1");
+            for (int r = 0; r < QR; r++) {
+                o("v_fmac_f32 v" + S(VA + 2 * r) + ", v" + S(buf[i & 1] + r) + ", v114");
+                o("v_fmac_f32 v" + S(VA + 2 * r + 1) + ", v" + S(buf[i & 1] + r) + ", v115");
+            }
+        }
+    }
+    o("s_add_u32 s16, s16, 256");
+    o("s_branch chunk");
+    k += "finish:\n";
+    for (int r = 0; r < QR; r++) {
+        o("v_mov_b32 v112, v" + S(SU + r));
+        wave_reduce("add");
+        o("ds_write_b32 v3, v112 offset:" + S(LS + 32 * r));
+    }
+    // ---- add the 4 position groups
+    for (int q = 0; q < QR / 2; q++)
+        o("ds_write_b128 v" + S(I32) + ", v[" + S(VA + 4 * q) + ":" + S(VA + 4 * q + 3) + "] offset:" + S(LV + 16 * q));
+    o("s_waitcnt lgkmcnt(0)");
+    o("s_barrier");
+    o("v_cmp_gt_u32 vcc_lo, 64, v0");
+    o("s_and_saveexec_b32 s89, vcc_lo");
+    o("s_cbranch_execz done");
+    for (int g = 1; g < 4; g++) {
+        for (int q = 0; q < QR / 2; q++)
+            o("ds_read_b128 v[" + S(48 + 4 * q) + ":" + S(51 + 4 * q) + "], v" + S(I32) + " offset:" + S(LV + 64 * 8 * QR * g + 16 * q));
+        o("s_waitcnt lgkmcnt(0)");
+        for (int r = 0; r < 2 * QR; r++) o("v_add_f32 v" + S(VA + r) + ", v" + S(VA + r) + ", v" + S(48 + r));
+    }
+    o("v_mov_b32 v113, 0");
+    for (int r = 0; r < QR; r++) {         // sums into v80 + r
+        o("ds_read_b128 v[116:119], v113 offset:" + S(LS + 32 * r));
+        o("ds_read_b128 v[48:51], v113 offset:" + S(LS + 32 * r + 16));
+        o("s_waitcnt lgkmcnt(0)");
+        o("v_add_f32 v" + S(80 + r) + ", v116, v117");
+        for (int x : {118, 119, 48, 49, 50, 51}) o("v_add_f32 v" + S(80 + r) + ", v" + S(80 + r) + ", v" + S(x));
+    }
+    for (int r = 0; r < QR; r++) o("v_mov_b32 v" + S(96 + r) + ", s" + S(SM + r));
+    o("s_mul_i32 s90, s12, 2112");         // (the maxima are in v96.. now)
+    o("v_lshl_add_u32 v" + S(VT) + ", v" + S(DP) + ", 3, s90");
+    o("s_mov_b32 s92, s8");
+    o("s_mov_b32 s93, s9");
+    for (int tt = 0; tt < NQT; tt++) {
+        if (tt) {
+            o("s_add_u32 s92, s92, s11");
+            o("s_addc_u32 s93, s93, 0");
+        }
+        for (int h = 0; h < 4; h++)
+            o("global_store_dwordx2 v" + S(VT) + ", v[" + S(VA + 2 * (4 * tt + h)) + ":" + S(VA + 2 * (4 * tt + h) + 1) + "], s[92:93] offset:" + S(32 + 512 * h));
+    }
+    o("v_cmp_eq_u32 vcc_lo, 0, v0");
+    o("s_and_b32 exec_lo, exec_lo, vcc_lo");
+    o("v_mov_b32 v" + S(VT) + ", s90");
+    o("s_mov_b32 s92, s8");
+    o("s_mov_b32 s93, s9");
+    for (int tt = 0; tt < NQT; tt++) {
+        if (tt) {
+            o("s_add_u32 s92, s92, s11");
+            o("s_addc_u32 s93, s93, 0");
+        }
+        o("global_store_dwordx4 v" + S(VT) + ", v[" + S(96 + 4 * tt) + ":" + S(99 + 4 * tt) + "], s[92:93]");
+        o("global_store_dwordx4 v" + S(VT) + ", v[" + S(80 + 4 * tt) + ":" + S(83 + 4 * tt) + "], s[92:93] offset:16");
+    }
+    k += "done:\n";
+    o("s_endpgm");
+    return k;
+}
+
 inline std::string gen_attn_reduce() {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;

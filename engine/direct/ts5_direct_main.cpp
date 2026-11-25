@@ -722,6 +722,149 @@ int cmd_mv_q4k(kfd::Device& dev, int runs, int per_cu, bool diag = false, bool v
 // Attention for one token (attn.h) over n cached positions, Qwen3 8B's
 // heads: random q, K, V checked against a CPU softmax in double, from
 // system memory and from VRAM, then timed in batches of 20 (part + reduce).
+// attn2 [n ...]: a prompt batch's attention, 16 tokens whose last sees n
+// positions (the first n - 15): attn_part a token at a time (the runner's
+// path) against attn_part2 for 2 tokens at a time (and 1, as a check), each
+// checked against the CPU and timed (round 76).
+int cmd_attn2(kfd::Device& dev, const std::vector<uint32_t>& lens) {
+    if (!dev.create_queue()) return die(dev.err());
+    gfx10::Kernel kp, kr, k1, k2;
+    kfd::Buffer pcode, rcode, c1, c2;
+    {
+        const std::string ps = ts5::direct::gen_attn_part(), rs = ts5::direct::gen_attn_reduce();
+        const std::string p1 = ts5::direct::gen_attn_part2(1), p2 = ts5::direct::gen_attn_part2(2);
+        if (!load_kernel(dev, ps.c_str(), kp, pcode) || !load_kernel(dev, rs.c_str(), kr, rcode) || !load_kernel(dev, p1.c_str(), k1, c1) ||
+            !load_kernel(dev, p2.c_str(), k2, c2))
+            return 1;
+    }
+    std::printf("attn_part %d vgprs; attn_part2(1) %d vgprs %zu words; attn_part2(2) %d vgprs %zu words\n", kp.vgprs, k1.vgprs, k1.code.size(), k2.vgprs, k2.code.size());
+    uint64_t* sig = (uint64_t*)dev.signals.cpu;
+    auto run = [&](pm4::Stream& s, double* gpu_s) -> bool {
+        std::memset(sig, 0, 64);
+        pm4::Stream w;
+        w.acquire_all();
+        w.release(dev.signals.gpu + 8, 0, true);
+        w.w.insert(w.w.end(), s.w.begin(), s.w.end());
+        w.release(dev.signals.gpu + 16, 0, true);
+        w.release(dev.signals.gpu, 1);
+        if (!dev.submit(w.w) || !dev.wait((volatile uint64_t*)sig, 1, 20000)) return false;
+        *gpu_s = (sig[2] - sig[1]) / 100e6;
+        return true;
+    };
+    uint32_t seed = 777;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
+    auto rf = [&]() { return (float)((int)(rnd() >> 16) - 32768) / 32768.0f; };
+    const float scale = (float)(1.4426950408889634 / std::sqrt(128.0));
+    uint32_t scale_bits;
+    std::memcpy(&scale_bits, &scale, 4);
+    const int T = 16;
+    const size_t part_bytes = 10 * 8 * 2112;
+    bool all_ok = true;
+    auto split = [](uint32_t n, uint32_t& per, uint32_t& splits) {
+        const uint32_t nch = (n + 255) / 256;
+        per = (nch + 9) / 10;
+        splits = (nch + per - 1) / per;
+        per *= 256;
+    };
+    for (uint32_t n : lens) {
+        if (n < (uint32_t)T) continue;
+        const size_t kvb = (size_t)n * 8 * 256;
+        kfd::Buffer q, kc, vc, part, out;
+        if (!dev.alloc((size_t)T * 16384, kfd::Mem::Gtt, q) || !dev.alloc(kvb, kfd::Mem::Gtt, kc) || !dev.alloc(kvb, kfd::Mem::Gtt, vc) ||
+            !dev.alloc(T * part_bytes, kfd::Mem::Gtt, part) || !dev.alloc((size_t)T * 16384, kfd::Mem::Gtt, out))
+            return die(dev.err());
+        float* Q = (float*)q.cpu;
+        for (int i = 0; i < T * 4096; i++) Q[i] = rf() * 2.0f;
+        uint16_t* K = (uint16_t*)kc.cpu;
+        uint16_t* V = (uint16_t*)vc.cpu;
+        for (size_t i = 0; i < kvb / 2; i++) {
+            const float a = rf(), b = rf();
+            K[i] = a == 0 ? 0 : float_to_half(a);
+            V[i] = b == 0 ? 0 : float_to_half(b);
+        }
+        std::vector<double> ref((size_t)T * 4096, 0.0), sc(n);
+        for (int t = 0; t < T; t++) {
+            const uint32_t nt = n - (T - 1) + t;
+            for (int h = 0; h < 32; h++) {
+                const int g = h / 4;
+                double m = -1e300;
+                for (uint32_t p = 0; p < nt; p++) {
+                    double d = 0;
+                    for (int i = 0; i < 128; i++) d += (double)Q[t * 4096 + h * 128 + i] * half_to_float(K[((size_t)p * 8 + g) * 128 + i]);
+                    sc[p] = d / std::sqrt(128.0);
+                    m = std::max(m, sc[p]);
+                }
+                double l = 0;
+                for (uint32_t p = 0; p < nt; p++) { sc[p] = std::exp(sc[p] - m); l += sc[p]; }
+                for (uint32_t p = 0; p < nt; p++)
+                    for (int i = 0; i < 128; i++) ref[(size_t)t * 4096 + h * 128 + i] += sc[p] / l * half_to_float(V[((size_t)p * 8 + g) * 128 + i]);
+            }
+        }
+        const uint32_t t256[3] = {256, 1, 1};
+        // way 0: attn_part a token at a time; 1, 2: attn_part2 for 1 / 2 tokens
+        auto build = [&](pm4::Stream& s, int way) {
+            uint32_t splits[T];
+            const int G = way == 0 ? 1 : way;
+            for (int t0 = 0; t0 < T; t0 += G) {
+                uint32_t per, sp;
+                split(n - (T - 1) + t0 + G - 1, per, sp);
+                for (int t = t0; t < t0 + G; t++) splits[t] = sp;
+                const uint64_t qa = q.gpu + (size_t)t0 * 16384, pa = part.gpu + t0 * part_bytes;
+                const uint32_t a1[12] = {(uint32_t)qa, (uint32_t)(qa >> 32), (uint32_t)kc.gpu, (uint32_t)(kc.gpu >> 32), (uint32_t)vc.gpu, (uint32_t)(vc.gpu >> 32),
+                                         n - (T - 1) + t0, scale_bits, (uint32_t)pa, (uint32_t)(pa >> 32), per, (uint32_t)part_bytes};
+                const uint32_t g1[3] = {sp * 8, 1, 1};
+                const gfx10::Kernel& kk = way == 0 ? kp : way == 1 ? k1 : k2;
+                const kfd::Buffer& cc = way == 0 ? pcode : way == 1 ? c1 : c2;
+                s.dispatch(kk, cc.gpu, a1, 12, g1, t256);
+            }
+            s.wait_kernels();
+            for (int t = 0; t < T; t++) {
+                const uint64_t pa = part.gpu + t * part_bytes, oa = out.gpu + (size_t)t * 16384;
+                const uint32_t a2[10] = {(uint32_t)pa, (uint32_t)(pa >> 32), (uint32_t)oa, (uint32_t)(oa >> 32), splits[t], 0, 0, 0, 0, 0};
+                const uint32_t g2[3] = {8, 1, 1};
+                s.dispatch(kr, rcode.gpu, a2, 10, g2, t256);
+            }
+        };
+        for (int way = 0; way < 3; way++) {
+            std::memset(out.cpu, 0xff, (size_t)T * 16384);
+            pm4::Stream s;
+            build(s, way);
+            double gs;
+            if (!run(s, &gs)) return die(dev.err() + " (attn2)");
+            const float* O = (const float*)out.cpu;
+            double worst = 0;
+            int bad = 0, first = 0;
+            for (int i = 0; i < T * 4096; i++) {
+                double e = std::fabs(O[i] - ref[i]);
+                if (!(e == e)) e = 1e9;
+                if (e > 1e-3 && bad++ == 0) first = i;
+                worst = std::max(worst, e);
+            }
+            std::vector<double> st;
+            for (int rep = 0; rep < 40; rep++) {
+                pm4::Stream s2;
+                for (int b = 0; b < 4; b++) {
+                    if (b) s2.wait_kernels();
+                    build(s2, way);
+                }
+                double tot;
+                if (!run(s2, &tot)) return die(dev.err() + " (attn2 timed)");
+                if (rep >= 20) st.push_back(tot / 4);
+            }
+            std::sort(st.begin(), st.end());
+            const char* name[3] = {"attn_part, a token at a time", "attn_part2, 1 token", "attn_part2, 2 tokens"};
+            std::printf("  n=%5u %-30s: %8.1f us a 16-token batch, worst error %.3g%s", n, name[way], st[st.size() / 2] * 1e6, worst, bad ? "" : "\n");
+            if (bad) {
+                std::printf(", WRONG: %d of %d values, first token %d head %d dim %d: gpu %g cpu %g\n", bad, T * 4096, first / 4096, first % 4096 / 128, first % 128, O[first], ref[first]);
+                all_ok = false;
+            }
+            std::fflush(stdout);
+        }
+    }
+    std::printf("attn2: %s\n", all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
+    return all_ok ? 0 : 1;
+}
+
 int cmd_attn(kfd::Device& dev, const std::vector<uint32_t>& lens) {
     if (!dev.create_queue()) return die(dev.err());
     gfx10::Kernel ck, kp, kr;
@@ -893,7 +1036,8 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (cmd == "gen-attn") {   // prints attn_part, or attn_reduce with "reduce"
-        std::fputs((argc > 2 && std::string(argv[2]) == "reduce" ? ts5::direct::gen_attn_reduce() : ts5::direct::gen_attn_part()).c_str(), stdout);
+        const std::string v = argc > 2 ? argv[2] : "part";   // part2-1 / part2-2: attn_part2 for 1 / 2 tokens
+        std::fputs((v == "reduce" ? ts5::direct::gen_attn_reduce() : v.rfind("part2-", 0) == 0 ? ts5::direct::gen_attn_part2(std::atoi(v.c_str() + 6)) : ts5::direct::gen_attn_part()).c_str(), stdout);
         return 0;
     }
     if (cmd == "gen-xt") {   // prints to_xT (prefill.h) for K columns and T tokens
@@ -1040,6 +1184,12 @@ int main(int argc, char** argv) {
         }
         return cmd_bw_sweep(dev, argc > 2 ? (size_t)std::atol(argv[2]) : 1024, {kfd::Mem::Vram}, cfgs,
                             argc > 3 ? std::atoi(argv[3]) : 30);
+    }
+    if (cmd == "attn2") {   // attn2 [n ...]: a prompt batch's attention (default 64 300 1000 2048)
+        std::vector<uint32_t> lens;
+        for (int i = 2; i < argc; i++) lens.push_back((uint32_t)std::atol(argv[i]));
+        if (lens.empty()) lens = {64, 300, 1000, 2048};
+        return cmd_attn2(dev, lens);
     }
     if (cmd == "attn") {   // attn [n ...]: positions in the cache (default 1000 4096 16384)
         std::vector<uint32_t> lens;
