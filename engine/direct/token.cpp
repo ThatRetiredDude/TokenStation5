@@ -391,4 +391,54 @@ int cmd_token(int argc, char** argv) {
     return ok ? 0 : 1;
 }
 
+// ts5-direct pprof MODEL.gguf [tokens] [context]: a long prompt in big
+// passes with no CPU check (round 95: attn-bench put attn_f at 0.455 ms a
+// token at depth 7680, but pp8192 runs ~0.3 ms a token slower than pp512
+// plus that). Each pass timed on the GPU, then one profiled pass at a few
+// depths. Run with TS5_DIRECT_PACE=0 to see the engine without pauses.
+int cmd_pprof(int argc, char** argv) {
+    if (argc < 3) return fail("usage: pprof MODEL.gguf [tokens] [context]");
+    const int n = argc > 3 ? std::atoi(argv[3]) : 8192, ctx = argc > 4 ? std::atoi(argv[4]) : 16384;
+    if (n % 512 || n > ctx) return fail("tokens: a multiple of 512, at most the context");
+    Model m;
+    std::string err;
+    if (!m.open(argv[2], err)) return fail(err);
+    Runner R;
+    if (!R.init(m, ctx, err)) return fail(err);
+    if (!R.big_ok()) return fail("no big passes on this model");
+    std::vector<int32_t> ids(n);
+    for (int i = 0; i < n; i++) ids[i] = 1000 + (i * 37) % 20000;
+    R.set_prompt_tokens(n);
+    for (int rep = 0; rep < 2; rep++) {
+        double tot = 0;
+        const int p0 = R.pauses();
+        std::printf("prompt of %d tokens, run %d, GPU ms a pass (ms a token):", n, rep + 1);
+        for (int i = 0; i < n; i += 512) {
+            const uint64_t q0 = R.sent();
+            if (!R.send_batch(ids.data() + i, 512, i, i + 512 >= n) || !R.wait_all(120000)) return fail(R.err() + " (pprof)");
+            const double s = (R.t_end(R.sent() - 1) - R.t_start(q0)) / 100e6;
+            tot += s;
+            std::printf(" %d:%.1f(%.3f)", i, s * 1e3, s / 512 * 1e3);
+        }
+        std::printf("\n  in all %.1f ms = %.1f tok/s on the GPU (waits between passes left out), thermal pauses %d\n", tot * 1e3, n / tot, R.pauses() - p0);
+        std::fflush(stdout);
+    }
+    for (int d : {0, n / 4, n / 2, n - 512}) {
+        const bool was = R.opt.profile;
+        R.opt.profile = true;
+        std::vector<double> acc(S_COUNT, 0.0);
+        if (!R.send_batch(ids.data() + d, 512, d, true) || !R.wait_all(60000)) return fail(R.err() + " (pprof profile)");
+        R.add_profile(acc);
+        R.opt.profile = was;
+        double tot = 0;
+        for (double x : acc) tot += x;
+        std::printf("profile at depth %d (%.3f ms a token):", d, tot / 512 * 1e3);
+        for (int i = 0; i < S_COUNT; i++)
+            if (acc[i] > 0) std::printf(" %s %.3f", kStepName[i], acc[i] / 512 * 1e3);
+        std::printf("\n");
+        std::fflush(stdout);
+    }
+    return 0;
+}
+
 }  // namespace ts5::direct

@@ -564,7 +564,9 @@ int cmd_attn_bench(int argc, char** argv) {
     std::memcpy(&scale_bits, &scale, 4);
     const int modes[] = {0, 1, 2, 3, 4, 8, 16, 24, 32, 39};
     const char* names[] = {"full", "no qk reads", "no pv reads", "no lds reads", "no softmax", "no qk fma", "no pv fma", "no fma", "no staging", "fma only"};
-    for (int mi = 0; mi < (int)(sizeof(modes) / sizeof(modes[0])); mi++) {
+    // modes[0] twice: the first pass warms the clock up (round 94's first rows ran slow)
+    for (int mj = 0; mj < 1 + (int)(sizeof(modes) / sizeof(modes[0])); mj++) {
+        const int mi = mj ? mj - 1 : 0;
         gfx10::Kernel k;
         std::string err;
         if (!gfx10::assemble(gen_attn_f(modes[mi]), k, &err)) { std::fprintf(stderr, "attn-bench: %s\n", err.c_str()); return 1; }
@@ -592,6 +594,7 @@ int cmd_attn_bench(int argc, char** argv) {
             double pairs = 0;
             for (int t = 0; t < NT; t++) pairs += pos0 + t + 1;
             const double fl = pairs * 32 * 128 * 4;
+            if (!mj) continue;
             std::printf("attn-bench %-12s depth %5d: %8.1f us a layer (%5.3f ms a token over 36 layers), %5.2f TFLOP/s, %d VGPRs, %zu bytes of code\n", names[mi], pos0,
                         sec * 1e6, sec * 36 / NT * 1e3, fl / sec / 1e12, k.vgprs, k.code.size() * 4);
             std::fflush(stdout);
