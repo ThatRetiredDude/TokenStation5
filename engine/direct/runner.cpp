@@ -126,13 +126,13 @@ static bool attn2() {   // TS5_DIRECT_ATTN2=0: the old attention a token at a ti
 // Thermal pacing for big passes (round 81: a 512-token pass took the die
 // 46 -> 87 C in 0.5 s at full clock; the PS5's own 85 C limiter never cut
 // in). Between layers the runner reads k10temp Tctl and, at or above
-// TS5_DIRECT_HOT (default 80), lets the GPU drain and waits until it reads
-// TS5_DIRECT_COOL (default 70) or less (the die cools ~30 C in 0.1 s).
+// TS5_DIRECT_HOT (default 83), lets the GPU drain and waits until it reads
+// TS5_DIRECT_COOL (default 75) or less (the die cools ~30 C in 0.1 s).
 // TS5_DIRECT_PACE=0 turns it off.
 namespace {
 struct Pace {
     int fd = -1;
-    double hot = 80, cool = 70;
+    double hot = 83, cool = 75;   // round 82: 80/70 gave 873-903 tok/s, 83/75 928 at Tctl max 78.75
     Pace() {
         const char* e = std::getenv("TS5_DIRECT_PACE");
         if (e && std::atoi(e) == 0) return;
