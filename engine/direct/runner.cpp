@@ -6,6 +6,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
+#include <thread>
+#include <unistd.h>
 
 #include "attn.h"
 #include "mm_q4k.h"
@@ -120,6 +123,48 @@ static bool attn2() {   // TS5_DIRECT_ATTN2=0: the old attention a token at a ti
     static const bool on = !(std::getenv("TS5_DIRECT_ATTN2") && std::atoi(std::getenv("TS5_DIRECT_ATTN2")) == 0);
     return on;
 }
+// Thermal pacing for big passes (round 81: a 512-token pass took the die
+// 46 -> 87 C in 0.5 s at full clock; the PS5's own 85 C limiter never cut
+// in). Between layers the runner reads k10temp Tctl and, at or above
+// TS5_DIRECT_HOT (default 80), lets the GPU drain and waits until it reads
+// TS5_DIRECT_COOL (default 70) or less (the die cools ~30 C in 0.1 s).
+// TS5_DIRECT_PACE=0 turns it off.
+namespace {
+struct Pace {
+    int fd = -1;
+    double hot = 80, cool = 70;
+    Pace() {
+        const char* e = std::getenv("TS5_DIRECT_PACE");
+        if (e && std::atoi(e) == 0) return;
+        if (const char* h = std::getenv("TS5_DIRECT_HOT")) hot = std::atof(h);
+        if (const char* c = std::getenv("TS5_DIRECT_COOL")) cool = std::atof(c);
+        for (int i = 0; i < 32 && fd < 0; i++) {
+            char path[64], name[32] = {0};
+            std::snprintf(path, sizeof path, "/sys/class/hwmon/hwmon%d/name", i);
+            FILE* f = std::fopen(path, "r");
+            if (!f) continue;
+            bool k10 = std::fgets(name, sizeof name, f) && std::strncmp(name, "k10temp", 7) == 0;
+            std::fclose(f);
+            if (!k10) continue;
+            std::snprintf(path, sizeof path, "/sys/class/hwmon/hwmon%d/temp1_input", i);
+            fd = open(path, O_RDONLY | O_CLOEXEC);
+        }
+    }
+    double read() const {   // C, or -1
+        char b[24];
+        if (fd < 0) return -1;
+        ssize_t n = pread(fd, b, sizeof b - 1, 0);
+        if (n <= 0) return -1;
+        b[n] = 0;
+        return std::atof(b) / 1000.0;
+    }
+};
+const Pace& pace() {
+    static const Pace p;
+    return p;
+}
+}  // namespace
+
 static bool xt2() {
     static const bool on = std::getenv("TS5_DIRECT_XT2") && std::atoi(std::getenv("TS5_DIRECT_XT2")) == 1;
     return on;
@@ -474,6 +519,21 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
         sums();
         stamp(S_DOWN);
         if (pfull) return false;
+        if (big && pace().fd >= 0) {
+            // Each layer marks its end at signals+64; the CPU stays at most
+            // two layers ahead, so a pause takes effect within ~30 ms.
+            volatile uint64_t* lf = (volatile uint64_t*)((char*)dev_.signals.cpu + 64);
+            s.release(dev_.signals.gpu + 64, ++lseq_);
+            if (lseq_ > 2 && !dev_.wait(lf, lseq_ - 2, 60000)) return false;
+            if (pace().read() >= pace().hot) {
+                const auto t0 = std::chrono::steady_clock::now();
+                if (lseq_ > 1 && !dev_.wait(lf, lseq_ - 1, 60000)) return false;
+                for (int i = 0; i < 500 && pace().read() > pace().cool; i++)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                pauses_++;
+                pause_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            }
+        }
         if (!flush()) return false;
     }
     // The last token's logits and argmax, as a single token's.
@@ -615,6 +675,7 @@ bool Runner::init(Model& m, int n_ctx, std::string& err) {
     std::memcpy(&scale_bits_, &scale, 4);
     wgs_ = dev_.cu_count(), step_ = wgs_ * 8;
     ((uint64_t*)dev_.signals.cpu)[0] = 0;
+    ((uint64_t*)dev_.signals.cpu)[8] = 0;   // the big passes' layer fence (pace)
     {
         std::string e;
         batch_ok_ = !opt.fused && init_batch(e);

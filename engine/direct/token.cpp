@@ -239,6 +239,8 @@ int cmd_token(int argc, char** argv) {
         for (int mode : {2, 0, 1}) {
             if (512 > ctx || (mode == 2 && !R.big_ok())) continue;
             const uint64_t q0 = R.sent();
+            const int p0 = R.pauses();
+            const double ps0 = R.pause_s();
             auto h0 = std::chrono::steady_clock::now();
             for (int i = 0; i < 512;) {
                 if (mode == 2) {
@@ -256,8 +258,9 @@ int cmd_token(int argc, char** argv) {
             if (!R.wait_all(120000)) return fail(R.err() + " (timed prompt)");
             const double hs = std::chrono::duration<double>(std::chrono::steady_clock::now() - h0).count();
             const double gs = (R.t_end(R.sent() - 1) - R.t_start(q0)) / 100e6;
-            std::printf("prompt of 512 tokens, %s: GPU %.1f ms = %.1f tok/s (host clock %.1f tok/s)\n",
-                        mode == 2 ? "big passes" : mode == 0 ? "batches of 16" : "a token at a time", gs * 1e3, 512 / gs, 512 / hs);
+            std::printf("prompt of 512 tokens, %s: GPU %.1f ms = %.1f tok/s (host clock %.1f tok/s); thermal pauses %d, %.1f ms\n",
+                        mode == 2 ? "big passes" : mode == 0 ? "batches of 16" : "a token at a time", gs * 1e3, 512 / gs, 512 / hs,
+                        R.pauses() - p0, (R.pause_s() - ps0) * 1e3);
             std::fflush(stdout);
         }
         // Where a batch's time goes: the same 512 tokens, each batch waited

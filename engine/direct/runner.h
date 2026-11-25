@@ -65,6 +65,9 @@ public:
     // Waits until every token sent so far is done.
     bool wait_all(int timeout_ms = 60000);
     uint64_t sent() const { return seq_; }
+    // Thermal pauses between big-pass layers so far, and their seconds.
+    int pauses() const { return pauses_; }
+    double pause_s() const { return pause_s_; }
 
     int n_ctx() const { return ctx_; }
     const float* logits() const { return (const float*)blog_.cpu; }
@@ -101,7 +104,9 @@ private:
     int ctx_ = 0, E_ = 0, F_ = 0, NQ_ = 0, NKV_ = 0, HD_ = 0, V_ = 0;
     size_t kv_layer_ = 0;
     uint32_t wgs_ = 0, step_ = 0, scale_bits_ = 0;
-    uint64_t seq_ = 0;
+    uint64_t seq_ = 0, lseq_ = 0;
+    int pauses_ = 0;
+    double pause_s_ = 0;
     int nstamps_ = 0;
     std::map<uint64_t, Prog> mvs_, mms_, xts_;
     bool batch_ok_ = false, big_ok_ = false;
