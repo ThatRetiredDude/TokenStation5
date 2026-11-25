@@ -1120,7 +1120,21 @@ bool Runner::init_verify(std::string& err) {
         err = "verify attention kernels: " + err;
         return false;
     }
+    for (int T = 2; T <= kVerify && NQ_ == 32; T++)
+        if (!load(gen_attn_d(false, (unsigned)(NQ_ * HD_ * 4), (unsigned)(64 * NKV_ * 2112), T), k_attns_[T], err)) {
+            err = "verify attention kernels (shared K/V): " + err;
+            return false;
+        }
     return true;
+}
+
+// The verify pass's T tokens share each K/V load in one workgroup a split
+// (round 113: a launch with a workgroup a token read the cache T times;
+// at 5-7k positions checking 2-4 tokens cost 1.3-2x one token's pass).
+// TS5_DIRECT_VSHARE=0: a workgroup a token as round 107.
+static bool vshare() {
+    static const bool on = !(std::getenv("TS5_DIRECT_VSHARE") && std::atoi(std::getenv("TS5_DIRECT_VSHARE")) == 0);
+    return on;
 }
 
 // The verify pass's mat-vecs launched together share the CUs (round 106: T2
@@ -1247,8 +1261,13 @@ void Runner::build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4
         if (vb && NQ_ == 32 && !opt.dattn_old && per0 == perL && sp0 == spL) {
             const uint64_t q = vq_.gpu, part = vpart_.gpu;
             const uint32_t a1[12] = {lo(q), hi(q), lo(kc), hi(kc), lo(vc), hi(vc), (uint32_t)(pos0 + 1), scale_bits_, lo(part), hi(part), per0 * 256, 0};
-            const uint32_t g1[3] = {sp0 * NKV_, (uint32_t)T, 1};
-            s.dispatch(k_attnv_.k, k_attnv_.code.gpu, a1, 12, g1, t128);
+            if (vshare() && T >= 2 && T <= kVerify) {
+                const uint32_t g1[3] = {sp0 * NKV_, 1, 1}, tT[3] = {128u * (uint32_t)T, 1, 1};
+                s.dispatch(k_attns_[T].k, k_attns_[T].code.gpu, a1, 12, g1, tT);
+            } else {
+                const uint32_t g1[3] = {sp0 * NKV_, (uint32_t)T, 1};
+                s.dispatch(k_attnv_.k, k_attnv_.code.gpu, a1, 12, g1, t128);
+            }
             barrier();
             const uint32_t a2[10] = {lo(part), hi(part), lo(vatt_.gpu), hi(vatt_.gpu), sp0, (uint32_t)pos0, 0, 0, (uint32_t)pb, 0};
             const uint32_t g2[3] = {(uint32_t)NKV_, (uint32_t)T, 1};
