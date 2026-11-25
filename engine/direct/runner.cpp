@@ -886,16 +886,20 @@ void Runner::build(int32_t id, int pos, uint64_t seq, pm4::Stream& s) {
         s.stamp(bstamp_.gpu + 8 * ns++);
     };
     auto skip = [&]() { return opt.mvonly && timing; };
+    static const bool msp = std::getenv("TS5_DIRECT_MSPLIT") && std::atoi(std::getenv("TS5_DIRECT_MSPLIT")) == 1;
     auto barrier = [&]() {
         s.wait_kernels();
         if (opt.light) s.acquire_light();
     };
     const uint32_t t256[3] = {256, 1, 1}, t64[3] = {64, 1, 1};
-    auto mv = [&](const Weight& w, uint64_t x, uint64_t y, Stage st = Stage::None, uint64_t block = 0) {
+    // grid (TS5_DIRECT_MSPLIT=1, round 106 test): mat-vecs launched together
+    // share the CUs, as the verify pass's vsplit
+    auto mv = [&](const Weight& w, uint64_t x, uint64_t y, Stage st = Stage::None, uint64_t block = 0, uint32_t grid = 0) {
         Prog* p = mv_prog(w, st);
         const uint64_t a = addr(w.data);
-        const uint32_t args[10] = {lo(a), hi(a), lo(x), hi(x), lo(y), hi(y), (uint32_t)w.ne1(), lo(block), p->persist ? wgs_ * 8 : step_, hi(block)};
-        const uint32_t g[3] = {wgs_, 1, 1};
+        if (!grid) grid = wgs_;
+        const uint32_t args[10] = {lo(a), hi(a), lo(x), hi(x), lo(y), hi(y), (uint32_t)w.ne1(), lo(block), grid * 8, hi(block)};
+        const uint32_t g[3] = {grid, 1, 1};
         s.dispatch(p->k, p->code.gpu, args, 10, g, t256);
     };
     auto norm = [&](bool add, const Weight& w) {
@@ -934,9 +938,12 @@ void Runner::build(int32_t id, int pos, uint64_t seq, pm4::Stream& s) {
             norm(l > 0, L.attn_norm);   // after layer 0: x += the last layer's down output first
             barrier();
             stamp(S_NORM);
-            mv(L.wq, bxn_.gpu, bq_.gpu);
-            mv(L.wk, bxn_.gpu, bk_.gpu);
-            mv(L.wv, bxn_.gpu, bv_.gpu);
+            const uint64_t rq = (uint64_t)L.wq.ne1(), rk = (uint64_t)L.wk.ne1(), rv = (uint64_t)L.wv.ne1();
+            const uint32_t gq = msp ? std::max<uint32_t>(1, (uint32_t)(wgs_ * rq / (rq + rk + rv))) : 0;
+            const uint32_t gk = msp ? std::max<uint32_t>(1, (wgs_ - gq) / 2) : 0, gv = msp ? std::max<uint32_t>(1, wgs_ - gq - gk) : 0;
+            mv(L.wq, bxn_.gpu, bq_.gpu, Stage::None, 0, gq);
+            mv(L.wk, bxn_.gpu, bk_.gpu, Stage::None, 0, gk);
+            mv(L.wv, bxn_.gpu, bv_.gpu, Stage::None, 0, gv);
         }
         barrier();
         stamp(S_QKV);
@@ -979,8 +986,8 @@ void Runner::build(int32_t id, int pos, uint64_t seq, pm4::Stream& s) {
         norm(true, L.ffn_norm);
         barrier();
         stamp(S_NORM2);
-        mv(L.w_gate, bxn_.gpu, bg_.gpu);
-        mv(L.w_up, bxn_.gpu, bu_.gpu);
+        mv(L.w_gate, bxn_.gpu, bg_.gpu, Stage::None, 0, msp ? wgs_ / 2 : 0);
+        mv(L.w_up, bxn_.gpu, bu_.gpu, Stage::None, 0, msp ? wgs_ - wgs_ / 2 : 0);
         barrier();
         stamp(S_GATEUP);
         {
@@ -1041,8 +1048,10 @@ void Runner::add_profile(std::vector<double>& acc) const {
 
 Runner::Prog* Runner::mvt_prog(const Weight& w, int T) {
     static const bool old = std::getenv("TS5_DIRECT_MVT") && std::strcmp(std::getenv("TS5_DIRECT_MVT"), "old") == 0;
-    static const int kk = env_int("TS5_DIRECT_MVT_K", 4), pd = env_int("TS5_DIRECT_MVT_PD", 0);
+    static const int kk4 = env_int("TS5_DIRECT_MVT_K4", env_int("TS5_DIRECT_MVT_K", 4)), kk6 = env_int("TS5_DIRECT_MVT_K6", env_int("TS5_DIRECT_MVT_K", 4));
+    static const int pd4 = env_int("TS5_DIRECT_MVT_PD4", env_int("TS5_DIRECT_MVT_PD", 0)), pd6 = env_int("TS5_DIRECT_MVT_PD6", env_int("TS5_DIRECT_MVT_PD", 0));
     const bool q6 = w.type() == GGML_Q6_K;
+    const int kk = q6 ? kk6 : kk4, pd = q6 ? pd6 : pd4;   // (_K4 / _PD4: Q4_K's, _K6 / _PD6: Q6_K's; round 105)
     const uint64_t key = (uint64_t)T << 48 | (uint64_t)w.type() << 32 | (uint64_t)w.ne0();
     auto it = mvts_.find(key);
     if (it != mvts_.end()) return &it->second;
@@ -1089,6 +1098,13 @@ bool Runner::init_verify(std::string& err) {
     return true;
 }
 
+// TS5_DIRECT_VSPLIT=1: the verify pass's mat-vecs launched together share
+// the CUs (round 106 test; default off until measured).
+static bool vsplit() {
+    static const bool on = std::getenv("TS5_DIRECT_VSPLIT") && std::atoi(std::getenv("TS5_DIRECT_VSPLIT")) == 1;
+    return on;
+}
+
 // TS5_DIRECT_VBATCH=0: the verify pass's norms and q/k kernels a launch per
 // token (round 101), not one launch for all T (round 102).
 static bool vbatch() {
@@ -1121,16 +1137,22 @@ void Runner::build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4
     };
     const uint32_t t256[3] = {256, 1, 1}, t64[3] = {64, 1, 1}, t128[3] = {128, 1, 1};
     const size_t xE = (size_t)E_ * 4, xA = (size_t)NQ_ * HD_ * 4, xKV = (size_t)NKV_ * HD_ * 4, xF = (size_t)F_ * 4, pb = (size_t)64 * NKV_ * 2112;
-    auto mvt = [&](const Weight& w, uint64_t x, size_t xs, uint64_t y, size_t ys) {
+    // grid: workgroups (default one a CU). Round 105: inside a pass gate + up
+    // cost 1.23x one token against 1.09x alone; two persistent kernels of a
+    // workgroup a CU each at ~162 VGPRs can't share a CU, so the second waits
+    // for the first's to finish. vsplit(): kernels launched together share
+    // the CUs instead (q / k / v by rows, gate / up half each).
+    auto mvt = [&](const Weight& w, uint64_t x, size_t xs, uint64_t y, size_t ys, uint32_t grid = 0) {
         Prog* p = mvt_prog(w, T);
         const uint32_t rows = (uint32_t)w.ne1();
-        const uint32_t nw = wgs_ * 8;   // one workgroup a CU, passes over the rows (mvt_q4k.h)
+        if (!grid) grid = wgs_;
+        const uint32_t nw = grid * 8;   // passes over the rows (mvt_q4k.h)
         const uint64_t a = addr(w.data);
         const uint32_t args[10] = {lo(a), hi(a), lo(x), hi(x), lo(y), hi(y), rows, (uint32_t)xs, nw, (uint32_t)ys};
-        const uint32_t g[3] = {wgs_, 1, 1};
+        const uint32_t g[3] = {grid, 1, 1};
         s.dispatch(p->k, p->code.gpu, args, 10, g, t256);
     };
-    const bool vb = vbatch();
+    const bool vb = vbatch(), sp = vsplit();
     auto norm = [&](bool add, const Weight& w) {
         const Prog& p = add ? k_addnorm_ : k_norm_;
         const uint64_t a = addr(w.data);
@@ -1163,9 +1185,14 @@ void Runner::build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4
         norm(l > 0, L.attn_norm);
         barrier();
         stamp(S_NORM);
-        mvt(L.wq, vxn_.gpu, xE, vq_.gpu, xA);
-        mvt(L.wk, vxn_.gpu, xE, vk_.gpu, xKV);
-        mvt(L.wv, vxn_.gpu, xE, vv_.gpu, xKV);
+        {
+            const uint64_t rq = (uint64_t)L.wq.ne1(), rk = (uint64_t)L.wk.ne1(), rv = (uint64_t)L.wv.ne1();
+            const uint32_t gq = sp ? std::max<uint32_t>(1, (uint32_t)(wgs_ * rq / (rq + rk + rv))) : 0;
+            const uint32_t gk = sp ? std::max<uint32_t>(1, (wgs_ - gq) / 2) : 0, gv = sp ? std::max<uint32_t>(1, wgs_ - gq - gk) : 0;
+            mvt(L.wq, vxn_.gpu, xE, vq_.gpu, xA, gq);
+            mvt(L.wk, vxn_.gpu, xE, vk_.gpu, xKV, gk);
+            mvt(L.wv, vxn_.gpu, xE, vv_.gpu, xKV, gv);
+        }
         barrier();
         stamp(S_QKV);
         for (int t = 0; t < (vb ? 1 : T); t++) {   // batched: k_qkv_, token tgid_y
@@ -1205,8 +1232,8 @@ void Runner::build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4
         norm(true, L.ffn_norm);
         barrier();
         stamp(S_NORM2);
-        mvt(L.w_gate, vxn_.gpu, xE, vg_.gpu, xF);
-        mvt(L.w_up, vxn_.gpu, xE, vu_.gpu, xF);
+        mvt(L.w_gate, vxn_.gpu, xE, vg_.gpu, xF, sp ? wgs_ / 2 : 0);
+        mvt(L.w_up, vxn_.gpu, xE, vu_.gpu, xF, sp ? wgs_ - wgs_ / 2 : 0);
         barrier();
         stamp(S_GATEUP);
         {
