@@ -136,7 +136,7 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {
     auto to_xT = [&](uint64_t y, int K) {
         Prog* p = xt_prog(K);
         const uint32_t args[8] = {lo(y), hi(y), lo(pxT_.gpu), hi(pxT_.gpu), lo(pxs32_.gpu), hi(pxs32_.gpu), lo(pxs16_.gpu), hi(pxs16_.gpu)};
-        const uint32_t g[3] = {(uint32_t)(K / 256), 1, 1};
+        const uint32_t g[3] = {(uint32_t)(K / (1024 / kBatch)), 1, 1};
         s.dispatch(p->k, p->code.gpu, args, 8, g, t256);
     };
     auto mm = [&](const Weight& w, uint64_t y) {
