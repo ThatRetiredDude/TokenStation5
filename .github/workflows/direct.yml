@@ -67,6 +67,10 @@ jobs:
             build/direct/ts5-direct gen-mvt2 $v > /tmp/mvt.s
             python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/mvt.s
           done
+          for v in "1024 4 2" "3072 4 2" "1024 8 3" "3072 2 1"; do
+            build/direct/ts5-direct gen-mvg $v > /tmp/mvg.s
+            python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/mvg.s
+          done
       - name: Check the token kernels against llvm-mc
         run: |
           build/direct/ts5-direct gen-ops > /tmp/ops.s

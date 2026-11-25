@@ -84,6 +84,10 @@ Backend *make_cpu_backend(const Model &m, int n_ctx, KvType kv = KvType::F32);
 // ts5's own kernels, no Vulkan. Qwen3 with Q4_K / Q6_K weights only; loads
 // `m` (open, not loaded) itself. Null with why in err.
 Backend *make_direct_backend(Model &m, int n_ctx, std::string &err);
+// A draft (helper) model beside a SoKnee main backend, on its GPU queue: Qwen3
+// 0.6B's shapes too (1024 / 3072 columns, 16 query heads; weights reshaped at
+// load). `main` must be make_direct_backend's and outlive it.
+Backend *make_direct_helper(Model &m, int n_ctx, Backend *main, std::string &err);
 #endif
 // The cache type TS5_KV asks for: q8, q4, else f16. *automatic: TS5_KV is
 // unset, empty or auto, so an auto-fit context (-c auto) may take q8 where f16

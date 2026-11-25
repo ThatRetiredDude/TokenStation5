@@ -19,9 +19,11 @@ namespace {
 class DirectBackend : public Backend {
 public:
     const char *name() const override { return "soknee"; }
-    bool init(Model &m, int n_ctx, std::string &err) {
+    // share: the main model's backend, for a helper (draft) model on the
+    // same GPU queue and address space (Runner::init's share).
+    bool init(Model &m, int n_ctx, std::string &err, DirectBackend *share = nullptr) {
         V_ = m.hp.n_vocab;
-        return r_.init(m, n_ctx, err);
+        return r_.init(m, n_ctx, err, share ? &share->r_ : nullptr);
     }
 
     bool forward(const int32_t *tokens, int n, int pos0, float *logits, bool all_logits, std::string &err) override {
@@ -97,6 +99,17 @@ private:
 Backend *make_direct_backend(Model &m, int n_ctx, std::string &err) {
     std::unique_ptr<DirectBackend> b(new DirectBackend);
     if (!b->init(m, n_ctx, err)) return nullptr;
+    return b.release();
+}
+
+Backend *make_direct_helper(Model &m, int n_ctx, Backend *main, std::string &err) {
+    DirectBackend *mb = dynamic_cast<DirectBackend *>(main);
+    if (!mb) {
+        err = "the main model isn't on SoKnee";
+        return nullptr;
+    }
+    std::unique_ptr<DirectBackend> b(new DirectBackend);
+    if (!b->init(m, n_ctx, err, mb)) return nullptr;
     return b.release();
 }
 

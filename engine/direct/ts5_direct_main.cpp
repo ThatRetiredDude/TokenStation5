@@ -33,6 +33,7 @@
 #include "mvt_q6k.h"
 #include "mvt2_q4k.h"
 #include "mvt2_q6k.h"
+#include "mvg_q4k.h"
 #include "attn_d.h"
 #include "ops.h"
 #include "mm_q4k.h"
@@ -52,12 +53,14 @@ namespace ts5::direct {
 int cmd_token(int argc, char** argv);   // token.cpp (its own device, runner.h)
 int cmd_pprof(int argc, char** argv);   // token.cpp
 int cmd_verify_test(int argc, char** argv);   // token.cpp
+int cmd_helper_test(int argc, char** argv);   // token.cpp
 int cmd_mm_q4k(int argc, char** argv);  // mm_test.cpp
 int cmd_xt_bench(int argc, char** argv);  // mm_test.cpp
 int cmd_dot_test(int argc, char** argv);  // mm_test.cpp
 int cmd_fma_peak(int argc, char** argv);  // mm_test.cpp
 int cmd_attn_bench(int argc, char** argv);  // mm_test.cpp
 int cmd_mvt_test(int argc, char** argv);  // mm_test.cpp
+int cmd_mvg_test(int argc, char** argv);  // mm_test.cpp
 int cmd_bw_peak(int argc, char** argv);  // mm_test.cpp
 }
 
@@ -1066,6 +1069,12 @@ int main(int argc, char** argv) {
         std::fputs(src.c_str(), stdout);
         return 0;
     }
+    if (cmd == "gen-mvg" && argc > 3) {   // gen-mvg COLUMNS K [PD]: a helper model's one-token Q4_K mat-vec (mvg_q4k.h)
+        const std::string src = ts5::direct::gen_mvg_q4k(std::atoi(argv[2]), std::atoi(argv[3]), argc > 4 ? std::atoi(argv[4]) : 2);
+        if (src.empty()) { std::fprintf(stderr, "gen-mvg: no kernel for that\n"); return 1; }
+        std::fputs(src.c_str(), stdout);
+        return 0;
+    }
     if (cmd == "gen-xt") {   // prints to_xT (prefill.h) for K columns and T tokens
         {
             const int K = argc > 2 ? std::atoi(argv[2]) : 4096, T = argc > 3 ? std::atoi(argv[3]) : 16, NT = argc > 4 ? std::atoi(argv[4]) : 256;
@@ -1179,6 +1188,7 @@ int main(int argc, char** argv) {
     if (cmd == "token") return ts5::direct::cmd_token(argc, argv);
     if (cmd == "pprof") return ts5::direct::cmd_pprof(argc, argv);
     if (cmd == "verify-test") return ts5::direct::cmd_verify_test(argc, argv);
+    if (cmd == "helper-test") return ts5::direct::cmd_helper_test(argc, argv);
     if (cmd == "tensors" && argc > 2) {   // tensors MODEL.gguf: every tensor's name, type and shape, and the model's sizes
         ts5::Model m;
         std::string err;
@@ -1199,6 +1209,7 @@ int main(int argc, char** argv) {
     if (cmd == "fma-peak") return ts5::direct::cmd_fma_peak(argc, argv);
     if (cmd == "attn-bench") return ts5::direct::cmd_attn_bench(argc, argv);
     if (cmd == "mvt-test") return ts5::direct::cmd_mvt_test(argc, argv);
+    if (cmd == "mvg-test") return ts5::direct::cmd_mvg_test(argc, argv);
     if (cmd == "bw-peak") return ts5::direct::cmd_bw_peak(argc, argv);
     kfd::Device dev;
     if (!dev.open()) return die(dev.err());

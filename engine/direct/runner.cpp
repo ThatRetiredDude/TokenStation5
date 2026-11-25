@@ -27,6 +27,8 @@
 #include "mvt_q6k.h"
 #include "mvt2_q4k.h"
 #include "mvt2_q6k.h"
+#include "mvg_q4k.h"
+#include "helper_prep.h"
 #include "ops.h"
 #include "prefill.h"
 
@@ -45,11 +47,16 @@ uint64_t addr(const void* p) { return (uint64_t)(uintptr_t)p; }
 bool Runner::load(const std::string& src, Prog& p, std::string& err) {
     if (!gfx10::assemble(src, p.k, &err)) return false;
     const size_t bytes = (p.k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
-    if (!dev_.alloc(bytes, kfd::Mem::Gtt, p.code)) { err = dev_.err(); return false; }
+    if (!dv_->alloc(bytes, kfd::Mem::Gtt, p.code)) { err = dv_->err(); return false; }
     uint32_t* w = (uint32_t*)p.code.cpu;
     for (size_t i = 0; i < bytes / 4; i++) w[i] = 0xbf9f0000;   // s_code_end past the end
     std::memcpy(w, p.k.code.data(), p.k.code.size() * 4);
     return true;
+}
+
+static int env_int(const char* name, int def) {
+    const char* e = std::getenv(name);
+    return e && *e ? std::atoi(e) : def;
 }
 
 Runner::Prog* Runner::mv_prog(const Weight& w, Stage st) {
@@ -57,11 +64,20 @@ Runner::Prog* Runner::mv_prog(const Weight& w, Stage st) {
     auto it = mvs_.find(key);
     if (it != mvs_.end()) return &it->second;
     std::string src;
-    if (w.ne0() % 2048 || w.ne0() > 14336 || w.ne1() % 8) return nullptr;
-    if (w.type() == GGML_Q4_K) src = gen_mv_q4k((int)w.ne0(), "", 0, 1, true, st, m_->hp.rms_eps);
+    bool persist = false;
+    if (w.ne0() % 2048 && w.ne0() % 1024 == 0 && w.type() == GGML_Q4_K && st == Stage::None) {
+        // 1024 / 3072 columns (a helper model's): mvg_q4k, persistent passes
+        static const int kk = env_int("TS5_DIRECT_MVG_K", 4), pd = env_int("TS5_DIRECT_MVG_PD", 2);
+        src = gen_mvg_q4k((int)w.ne0(), kk, pd);
+        if (src.empty()) src = gen_mvg_q4k((int)w.ne0(), 4, 2);
+        persist = true;
+        if (src.empty()) return nullptr;
+    } else if (w.ne0() % 2048 || w.ne0() > 14336 || w.ne1() % 8) return nullptr;
+    else if (w.type() == GGML_Q4_K) src = gen_mv_q4k((int)w.ne0(), "", 0, 1, true, st, m_->hp.rms_eps);
     else if (w.type() == GGML_Q6_K) src = gen_mv_q6k((int)w.ne0(), 0, st, m_->hp.rms_eps);
     else return nullptr;
     Prog& p = mvs_[key];
+    p.persist = persist;
     std::string e;
     if (!load(src, p, e)) {
         std::fprintf(stderr, "direct: mat-vec kernel: %s\n", e.c_str());
@@ -268,7 +284,7 @@ bool Runner::init_big(std::string& err) {
     const HParams& hp = m_->hp;
     if (!big_on() || NQ_ != 32 || opt.old_mm || opt.f32_mm) return false;
     for (int l = 0; l < hp.n_layer; l++) {
-        const Layer& L = m_->layers[l];
+        const Layer& L = lay_[l];
         for (const Weight* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down})
             for (int TT = 128; TT <= kBig; TT += 128)
                 if (!mt_prog(*w, big_sk(*w, TT))) return false;
@@ -280,8 +296,8 @@ bool Runner::init_big(std::string& err) {
         err = "big pass kernels: " + err;
         return false;
     }
-    if (!dev_.alloc((size_t)96 << 20, kfd::Mem::Gtt, pP_)) {
-        err = dev_.err() + " (partial sums)";
+    if (!dv_->alloc((size_t)96 << 20, kfd::Mem::Gtt, pP_)) {
+        err = dv_->err() + " (partial sums)";
         return false;
     }
     return true;
@@ -293,7 +309,7 @@ bool Runner::init_batch(std::string& err) {
     const HParams& hp = m_->hp;
     const int A = NQ_ * HD_;
     for (int l = 0; l < hp.n_layer; l++) {
-        const Layer& L = m_->layers[l];
+        const Layer& L = lay_[l];
         for (const Weight* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down})
             if (!mm_prog(*w)) return false;
     }
@@ -305,8 +321,8 @@ bool Runner::init_batch(std::string& err) {
                     std::make_pair(&pA_, T * A * 4), std::make_pair(&pG_, T * F_ * 4), std::make_pair(&pU_, T * F_ * 4),
                     std::make_pair(&pH_, T * F_ * 4), std::make_pair(&pxT_, KM * T * 4 + 4096), std::make_pair(&px16_, KM * T * 2 + 4096), std::make_pair(&pxs32_, KM / 32 * T * 4 + 4096),
                     std::make_pair(&pxs16_, KM / 16 * T * 4 + 4096), std::make_pair(&ppart_, T * part_bytes_)}) {
-        if (!dev_.alloc((pr.second + 4095) & ~(size_t)4095, opt.vram_prompt ? kfd::Mem::Vram : kfd::Mem::Gtt, *pr.first)) {
-            err = dev_.err() + " (prompt buffers)";
+        if (!dv_->alloc((pr.second + 4095) & ~(size_t)4095, opt.vram_prompt ? kfd::Mem::Vram : kfd::Mem::Gtt, *pr.first)) {
+            err = dv_->err() + " (prompt buffers)";
             return false;
         }
         if (pr.first->cpu) std::memset(pr.first->cpu, 0, pr.first->size);
@@ -315,7 +331,7 @@ bool Runner::init_batch(std::string& err) {
 }
 
 std::string Runner::err() const {
-    std::string e = dev_.err();
+    std::string e = dv_->err();
     const size_t at = e.find("fault at 0x");
     if (at == std::string::npos || !m_) return e;
     const uint64_t f = std::strtoull(e.c_str() + at + 11, nullptr, 16);
@@ -333,8 +349,8 @@ std::string Runner::err() const {
         {"pX", &pX_}, {"pXN", &pXN_}, {"pT", &pT_}, {"pQ", &pQ_}, {"pK", &pK_}, {"pV", &pV_}, {"pA", &pA_}, {"pG", &pG_}, {"pU", &pU_},
         {"pH", &pH_}, {"pxT", &pxT_}, {"px16", &px16_}, {"pxs32", &pxs32_}, {"pxs16", &pxs16_}, {"ppart", &ppart_}};
     for (auto& b : bufs) consider(b.first, b.second->gpu, b.second->size);
-    for (size_t l = 0; l < m_->layers.size(); l++) {
-        const Layer& L = m_->layers[l];
+    for (size_t l = 0; l < lay_.size(); l++) {
+        const Layer& L = lay_[l];
         const std::pair<const char*, const Weight*> ws[] = {{"wq", &L.wq}, {"wk", &L.wk}, {"wv", &L.wv}, {"wo", &L.wo},
                                                             {"gate", &L.w_gate}, {"up", &L.w_up}, {"down", &L.w_down}};
         for (auto& w : ws) {
@@ -360,7 +376,7 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
     // Each layer's stream goes out on its own (a whole prompt batch is
     // longer than half the ring).
     auto flush = [&]() {
-        bool ok = dev_.submit(s.w);
+        bool ok = dv_->submit(s.w);
         s.w.clear();
         return ok;
     };
@@ -442,13 +458,13 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
     s.stamp(bts_.gpu + 16 * (seq % (bts_.size / 16)));
     stamp(-1);
     for (int t = 0; t < nt; t++) {
-        const uint64_t te = addr(m_->tok_embd.data), x = pX_.gpu + (size_t)t * E_ * 4, io = bids_.gpu + 4 * (size_t)(pos0 + t);
+        const uint64_t te = addr(tok_.data), x = pX_.gpu + (size_t)t * E_ * 4, io = bids_.gpu + 4 * (size_t)(pos0 + t);
         const uint32_t args[10] = {lo(te), hi(te), lo(x), hi(x), lo(bslot_.gpu), hi(bslot_.gpu), (uint32_t)ids[t], 0, lo(io), hi(io)};
         const uint32_t t1[3] = {(uint32_t)(E_ / 16), 1, 1};
         s.dispatch(k_embed_.k, k_embed_.code.gpu, args, 10, one, t1);
     }
     for (int l = 0; l < hp.n_layer; l++) {
-        const Layer& L = m_->layers[l];
+        const Layer& L = lay_[l];
         const uint64_t kc = bkv_.gpu + (size_t)l * 2 * kv_layer_, vc = kc + kv_layer_;
         barrier();
         if (l == 0) stamp(S_EMBED);
@@ -565,9 +581,9 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
         if (big && pace().fd >= 0) {
             // Each layer marks its end at signals+64; the CPU stays at most
             // two layers ahead, so a pause takes effect within ~30 ms.
-            volatile uint64_t* lf = (volatile uint64_t*)((char*)dev_.signals.cpu + 64);
-            s.release(dev_.signals.gpu + 64, ++lseq_);
-            if (lseq_ > 2 && !dev_.wait(lf, lseq_ - 2, 60000)) return false;
+            volatile uint64_t* lf = (volatile uint64_t*)((char*)dv_->signals.cpu + sig_ + 64);
+            s.release((dv_->signals.gpu + sig_) + 64, ++lseq_);
+            if (lseq_ > 2 && !dv_->wait(lf, lseq_ - 2, 60000)) return false;
             const bool lp = prompt_tokens_ >= pace().long_tokens;
             const double hot = lp ? pace().hot_long : pace().hot, cool = lp ? pace().cool_long : pace().cool;
             const double tc = pace().read();
@@ -575,7 +591,7 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
             if (hot_n_ >= 2 || tc >= hot + 1) {
                 hot_n_ = 0;
                 const auto t0 = std::chrono::steady_clock::now();
-                if (lseq_ > 1 && !dev_.wait(lf, lseq_ - 1, 60000)) return false;
+                if (lseq_ > 1 && !dv_->wait(lf, lseq_ - 1, 60000)) return false;
                 for (int i = 0; i < 500 && pace().read() > cool; i++)
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 pauses_++;
@@ -590,10 +606,10 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
     norm(true, m_->out_norm, nt - 1, 1, bxn_.gpu);
     barrier();
     {
-        const Weight& outw = m_->output ? m_->output : m_->tok_embd;
+        const Weight& outw = outw_;
         Prog* p = mv_prog(outw);
         const uint64_t a = addr(outw.data);
-        const uint32_t args[10] = {lo(a), hi(a), lo(bxn_.gpu), hi(bxn_.gpu), lo(blog_.gpu), hi(blog_.gpu), (uint32_t)outw.ne1(), 0, step_, 0};
+        const uint32_t args[10] = {lo(a), hi(a), lo(bxn_.gpu), hi(bxn_.gpu), lo(blog_.gpu), hi(blog_.gpu), (uint32_t)outw.ne1(), 0, p->persist ? wgs_ * 8 : step_, 0};
         const uint32_t g[3] = {wgs_, 1, 1};
         s.dispatch(p->k, p->code.gpu, args, 10, g, t256);
     }
@@ -607,7 +623,7 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
     }
     stamp(S_OUT);
     s.release(bts_.gpu + 16 * (seq % (bts_.size / 16)) + 8, 0, true);
-    s.release(dev_.signals.gpu, seq + 1);
+    s.release((dv_->signals.gpu + sig_), seq + 1);
     nstamps_ = ns;
     return flush();
 }
@@ -623,7 +639,81 @@ std::string Runner::mv_kernels() const {
     return s;
 }
 
-bool Runner::init(Model& m, int n_ctx, std::string& err) {
+// The weights the kernels read (lay_, tok_, outw_): the model's as loaded,
+// but a helper model's (Qwen3 0.6B) that the kernels can't take as the file
+// has them reshaped into pbuf_ (helper_prep.h): Q6_K with columns not whole
+// 2048-column steps, and embeddings not Q4_K, requantized to Q4_K; with
+// 2 query heads a KV head, wq's rows and wo's columns padded with zero
+// heads to 4 (NQ_ then counts them). A model that needs none of it (Qwen3
+// 8B) allocates nothing here.
+bool Runner::prep_weights(std::string& err) {
+    lay_ = m_->layers;
+    tok_ = m_->tok_embd;
+    const bool pad = NQ_ == 2 * NKV_;
+    struct Job {
+        Weight* w;
+        bool rq;      // requantize to Q4_K
+        int pd;       // 1: wq's rows, 2: wo's columns
+        int64_t ne0, ne1;
+        size_t bytes, off;
+    };
+    std::vector<Job> jobs;
+    size_t total = 0;
+    auto plan = [&](Weight& w, bool need_q4k, int pd) -> bool {
+        if (!w) return true;
+        const bool rq = (need_q4k && w.type() != GGML_Q4_K) || (w.type() == GGML_Q6_K && w.ne0() % 2048) || (pd == 2 && w.type() != GGML_Q4_K);
+        if (!rq && !pd) return true;
+        if (w.ne0() % 256) { err = w.info->name + ": columns not whole 256-value blocks"; return false; }
+        const int64_t ne0 = w.ne0() * (pd == 2 ? 2 : 1), ne1 = w.ne1() * (pd == 1 ? 2 : 1);
+        const size_t rb = rq || pd == 2 ? (size_t)ne0 / 256 * 144 : (size_t)w.info->row_bytes();
+        jobs.push_back({&w, rq, pd, ne0, ne1, rb * (size_t)ne1, total});
+        total += (rb * (size_t)ne1 + 255) & ~(size_t)255;
+        return true;
+    };
+    for (Layer& L : lay_) {
+        if (pad && (L.wq.ne1() != (int64_t)NQ_ * HD_ || L.wo.ne0() != (int64_t)NQ_ * HD_)) { err = "query heads' weights of an unexpected shape"; return false; }
+        bool ok = plan(L.wq, false, pad ? 1 : 0) && plan(L.wo, false, pad ? 2 : 0);
+        for (Weight* w : {&L.wk, &L.wv, &L.w_gate, &L.w_up, &L.w_down}) ok = ok && plan(*w, false, 0);
+        if (!ok) return false;
+    }
+    if (!plan(tok_, true, 0)) return false;
+    Weight out = m_->output;
+    if (out && !plan(out, false, 0)) return false;
+    if (!jobs.empty()) {
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!dv_->alloc((total + (64 << 10) + 4095) & ~(size_t)4095, kfd::Mem::Gtt, pbuf_)) { err = dv_->err() + " (reshaped weights)"; return false; }
+        std::vector<uint8_t> tmp;
+        for (Job& j : jobs) {
+            Weight& w = *j.w;
+            uint8_t* dst = (uint8_t*)pbuf_.cpu + j.off;
+            const int64_t rows = w.ne1(), cols = w.ne0();
+            const uint8_t* src = w.data;
+            if (j.rq && j.pd) {   // requantize, then pad
+                tmp.resize((size_t)rows * (size_t)cols / 256 * 144);
+                q4k_requantize(w.type(), src, (size_t)w.info->row_bytes(), rows, cols, tmp.data());
+                src = tmp.data();
+            } else if (j.rq) q4k_requantize(w.type(), src, (size_t)w.info->row_bytes(), rows, cols, dst);
+            const size_t rb = j.rq ? (size_t)cols / 256 * 144 : (size_t)w.info->row_bytes();
+            if (j.pd == 1) pad_q_rows(src, rb, NKV_, HD_, dst);
+            if (j.pd == 2) pad_o_cols(src, rows, (int)(cols / 256), dst);
+            GgufTensor& t = pinfo_.emplace_back(*w.info);
+            if (j.rq) t.type = GGML_Q4_K;
+            t.ne[0] = j.ne0;
+            if (t.ne.size() > 1) t.ne[1] = j.ne1;
+            t.nbytes = j.bytes;
+            w.info = &t;
+            w.data = dst;
+        }
+        std::fprintf(stderr, "direct: %zu weights reshaped for the kernels (%.1f MB, %.2f s)\n", jobs.size(), total / 1e6,
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    }
+    if (pad) NQ_ = 4 * NKV_;
+    outw_ = out ? out : tok_;
+    if (tok_.type() != GGML_Q4_K) { err = "token embeddings not Q4_K"; return false; }
+    return true;
+}
+
+bool Runner::init(Model& m, int n_ctx, std::string& err, Runner* share) {
     opt.dattn_old = !dattn();
     if (const char* e = std::getenv("TS5_DIRECT_ATTN")) {
         opt.attn_pairs = std::strcmp(e, "pairs") == 0;
@@ -633,22 +723,29 @@ bool Runner::init(Model& m, int n_ctx, std::string& err) {
     const HParams& hp = m.hp;
     E_ = hp.n_embd, F_ = hp.n_ff, NQ_ = hp.n_head, NKV_ = hp.n_head_kv, HD_ = hp.head_dim, V_ = hp.n_vocab;
     ctx_ = n_ctx;
-    if (hp.arch != "qwen3" || NKV_ != 8 || HD_ != 128 || NQ_ % NKV_ || E_ % 2048 || F_ % 2048 || F_ > 14336 || !hp.rope_neox ||
+    if (hp.arch != "qwen3" || NKV_ != 8 || HD_ != 128 || NQ_ % NKV_ || E_ % 1024 || F_ % 1024 || F_ > 14336 || !hp.rope_neox ||
         hp.rope_dims != 128 || hp.yarn_factor > 1.f) {
         err = "the direct engine runs only Qwen3 with 8 KV heads of 128 for now";
         return false;
     }
-    if (!m.tok_embd || m.tok_embd.type() != GGML_Q4_K || E_ / 16 > 1024) { err = "token embeddings not Q4_K"; return false; }
+    if (!m.tok_embd || E_ / 16 > 1024) { err = "token embeddings missing or too wide"; return false; }
     if (V_ % 4) { err = "vocabulary not a multiple of 4"; return false; }
-    if (!dev_.open()) { err = dev_.err(); return false; }
-    // A token's stream is about 30,000 dwords: a 1 MiB ring holds several.
-    if (!dev_.create_queue(1 << 20)) { err = dev_.err(); return false; }
+    if (share) {   // a helper model's runner: the main runner's device, queue and VM
+        dv_ = share->dv_;
+        sig_ = share->sig_ + 128;
+        if (sig_ + 128 > dv_->signals.size) { err = "too many runners on one device"; return false; }
+    } else {
+        if (!dv_->open()) { err = dv_->err(); return false; }
+        // A token's stream is about 30,000 dwords: a 1 MiB ring holds several.
+        if (!dv_->create_queue(1 << 20)) { err = dv_->err(); return false; }
+    }
 
     // The weights, in one buffer the GPU reads at the CPU's addresses; 64
     // KiB past the end: the mat-vecs load one step ahead, across row ends.
     const uint64_t wbytes = m.data_bytes();
-    if (!dev_.alloc((wbytes + (64 << 10) + 4095) & ~(uint64_t)4095, kfd::Mem::Gtt, wbuf_)) { err = dev_.err() + " (weights)"; return false; }
+    if (!dv_->alloc((wbytes + (64 << 10) + 4095) & ~(uint64_t)4095, kfd::Mem::Gtt, wbuf_)) { err = dv_->err() + " (weights)"; return false; }
     if (!m.load((uint8_t*)wbuf_.cpu, err)) return false;
+    if (!prep_weights(err)) return false;
 
     if (!load(gen_rmsnorm(E_, hp.rms_eps), k_norm_, err) || !load(gen_rmsnorm(E_, hp.rms_eps, true), k_addnorm_, err) ||
         !load(gen_qk_post(NQ_, hp.rms_eps), k_qk_, err) || !load(gen_silu_mul(), k_silu_, err) || !load(gen_attn_part(), k_attn_, err) || !load(gen_attn_part2(2), k_attn2_, err) || !load(gen_attn_d(), k_attnd_, err) ||
@@ -658,7 +755,7 @@ bool Runner::init(Model& m, int n_ctx, std::string& err) {
     }
     auto is_f32 = [](const Weight& w) { return w && w.type() == GGML_F32; };
     for (int l = 0; l < hp.n_layer; l++) {
-        const Layer& L = m.layers[l];
+        const Layer& L = lay_[l];
         for (const Weight* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down})
             if (!*w || !mv_prog(*w)) {
                 err = "layer " + std::to_string(l) + ": a weight the direct engine's mat-vecs don't take yet (Q4_K and Q6_K only)";
@@ -674,7 +771,7 @@ bool Runner::init(Model& m, int n_ctx, std::string& err) {
             return false;
         }
     }
-    const Weight& outw = m.output ? m.output : m.tok_embd;
+    const Weight& outw = outw_;
     if (!mv_prog(outw) || (opt.fused && !mv_prog(outw, Stage::Norm)) || !is_f32(m.out_norm)) {
         err = "output weight or norm of an unexpected type";
         return false;
@@ -690,7 +787,7 @@ bool Runner::init(Model& m, int n_ctx, std::string& err) {
                     std::make_pair(&bkv_, kv_layer_ * 2 * hp.n_layer), std::make_pair(&brope_, (size_t)ctx_ * 128 * 4),
                     std::make_pair(&bpart_, (size_t)64 * NKV_ * 2112), std::make_pair(&bstamp_, (size_t)8 * 4096),
                     std::make_pair(&bslot_, (size_t)4096), std::make_pair(&bids_, (size_t)ctx_ * 4), std::make_pair(&bts_, (size_t)16 << 20)})
-        if (!dev_.alloc((pr.second + 4095) & ~(size_t)4095, kfd::Mem::Gtt, *pr.first)) { err = dev_.err() + " (activations)"; return false; }
+        if (!dv_->alloc((pr.second + 4095) & ~(size_t)4095, kfd::Mem::Gtt, *pr.first)) { err = dv_->err() + " (activations)"; return false; }
     std::memset(bslot_.cpu, 0, 4096);
     std::memset(bzero_.cpu, 0, bzero_.size);
     // The staged mat-vecs' pointer blocks (mv_stage.h), 5 per layer: Q with
@@ -700,7 +797,7 @@ bool Runner::init(Model& m, int n_ctx, std::string& err) {
     {
         uint64_t* B = (uint64_t*)bblk_.cpu;
         for (int l = 0; l < hp.n_layer; l++) {
-            const Layer& L = m.layers[l];
+            const Layer& L = lay_[l];
             const uint64_t t = l ? bt_.gpu : bzero_.gpu;
             uint64_t* b = B + (size_t)l * 5 * 4;
             const uint64_t v[5][3] = {{addr(L.attn_norm.data), t, bx2_.gpu}, {addr(L.attn_norm.data), t, 0},
@@ -726,9 +823,9 @@ bool Runner::init(Model& m, int n_ctx, std::string& err) {
     }
     const float scale = (float)(hp.attn_scale * hp.yarn_attn() * 1.4426950408889634);
     std::memcpy(&scale_bits_, &scale, 4);
-    wgs_ = dev_.cu_count(), step_ = wgs_ * 8;
-    ((uint64_t*)dev_.signals.cpu)[0] = 0;
-    ((uint64_t*)dev_.signals.cpu)[8] = 0;   // the big passes' layer fence (pace)
+    wgs_ = dv_->cu_count(), step_ = wgs_ * 8;
+    ((uint64_t*)((char*)dv_->signals.cpu + sig_))[0] = 0;
+    ((uint64_t*)((char*)dv_->signals.cpu + sig_))[8] = 0;   // the big passes' layer fence (pace)
     {
         std::string e;
         batch_ok_ = !opt.fused && init_batch(e);
@@ -758,7 +855,7 @@ void Runner::build(int32_t id, int pos, uint64_t seq, pm4::Stream& s) {
     auto mv = [&](const Weight& w, uint64_t x, uint64_t y, Stage st = Stage::None, uint64_t block = 0) {
         Prog* p = mv_prog(w, st);
         const uint64_t a = addr(w.data);
-        const uint32_t args[10] = {lo(a), hi(a), lo(x), hi(x), lo(y), hi(y), (uint32_t)w.ne1(), lo(block), step_, hi(block)};
+        const uint32_t args[10] = {lo(a), hi(a), lo(x), hi(x), lo(y), hi(y), (uint32_t)w.ne1(), lo(block), p->persist ? wgs_ * 8 : step_, hi(block)};
         const uint32_t g[3] = {wgs_, 1, 1};
         s.dispatch(p->k, p->code.gpu, args, 10, g, t256);
     };
@@ -780,14 +877,14 @@ void Runner::build(int32_t id, int pos, uint64_t seq, pm4::Stream& s) {
     s.stamp(bts_.gpu + 16 * (seq % (bts_.size / 16)));
     stamp(-1);
     {
-        const uint64_t te = addr(m_->tok_embd.data), io = bids_.gpu + 4 * (size_t)pos;
+        const uint64_t te = addr(tok_.data), io = bids_.gpu + 4 * (size_t)pos;
         const uint32_t args[10] = {lo(te), hi(te), lo(bx_.gpu), hi(bx_.gpu), lo(bslot_.gpu), hi(bslot_.gpu), (uint32_t)id, 0, lo(io), hi(io)};
         const uint32_t g[3] = {1, 1, 1}, t[3] = {(uint32_t)(E_ / 16), 1, 1};
         s.dispatch(k_embed_.k, k_embed_.code.gpu, args, 10, g, t);
         barrier();
     }
     for (int l = 0; l < hp.n_layer; l++) {
-        const Layer& L = m_->layers[l];
+        const Layer& L = lay_[l];
         const uint64_t kc = bkv_.gpu + (size_t)l * 2 * kv_layer_, vc = kc + kv_layer_;
         if (l) barrier();
         if (opt.fused) {
@@ -858,7 +955,7 @@ void Runner::build(int32_t id, int pos, uint64_t seq, pm4::Stream& s) {
         stamp(S_DOWN);
     }
     barrier();
-    const Weight& outw = m_->output ? m_->output : m_->tok_embd;
+    const Weight& outw = outw_;
     if (opt.fused) mv(outw, bx_.gpu, blog_.gpu, Stage::Norm, blk(hp.n_layer, 0));
     else {
         norm(true, m_->out_norm);
@@ -874,7 +971,7 @@ void Runner::build(int32_t id, int pos, uint64_t seq, pm4::Stream& s) {
     }
     stamp(S_OUT);
     s.release(bts_.gpu + 16 * (seq % (bts_.size / 16)) + 8, 0, true);
-    s.release(dev_.signals.gpu, seq + 1);
+    s.release((dv_->signals.gpu + sig_), seq + 1);
     nstamps_ = ns;
 }
 
@@ -883,10 +980,10 @@ bool Runner::send(int32_t id, int pos) {
     pm4::Stream s;
     build(id, pos, seq_, s);
     seq_++;
-    return dev_.submit(s.w);
+    return dv_->submit(s.w);
 }
 
-bool Runner::wait_all(int timeout_ms) { return dev_.wait((volatile uint64_t*)dev_.signals.cpu, seq_, timeout_ms); }
+bool Runner::wait_all(int timeout_ms) { return dv_->wait((volatile uint64_t*)((char*)dv_->signals.cpu + sig_), seq_, timeout_ms); }
 
 void Runner::add_profile(std::vector<double>& acc) const {
     const uint64_t* T = (const uint64_t*)bstamp_.cpu;
@@ -902,10 +999,6 @@ void Runner::add_profile(std::vector<double>& acc) const {
 // ahead and Q6_K's 1. TS5_DIRECT_MVT=old: round 100's mvt_q4k / mvt_q6k (K 8,
 // x read once a slot). TS5_DIRECT_MVT_K / _PD: other row slots / depths, for
 // tests (a combination that doesn't fit in VGPRs falls back to the default).
-static int env_int(const char* name, int def) {
-    const char* e = std::getenv(name);
-    return e && *e ? std::atoi(e) : def;
-}
 
 Runner::Prog* Runner::mvt_prog(const Weight& w, int T) {
     static const bool old = std::getenv("TS5_DIRECT_MVT") && std::strcmp(std::getenv("TS5_DIRECT_MVT"), "old") == 0;
@@ -936,10 +1029,10 @@ Runner::Prog* Runner::mvt_prog(const Weight& w, int T) {
 bool Runner::init_verify(std::string& err) {
     if (std::getenv("TS5_DIRECT_VERIFY") && std::atoi(std::getenv("TS5_DIRECT_VERIFY")) == 0) return false;
     const HParams& hp = m_->hp;
-    const Weight& outw = m_->output ? m_->output : m_->tok_embd;
+    const Weight& outw = outw_;
     for (int T = 2; T <= kVerify; T++) {
         for (int l = 0; l < hp.n_layer; l++) {
-            const Layer& L = m_->layers[l];
+            const Layer& L = lay_[l];
             for (const Weight* w : {&L.wq, &L.wk, &L.wv, &L.wo, &L.w_gate, &L.w_up, &L.w_down})
                 if (!mvt_prog(*w, T)) { err = "a weight the multi-token mat-vecs don't take"; return false; }
         }
@@ -950,7 +1043,7 @@ bool Runner::init_verify(std::string& err) {
                     std::make_pair(&vk_, T * NKV_ * HD_ * 4), std::make_pair(&vv_, T * NKV_ * HD_ * 4), std::make_pair(&vatt_, T * NQ_ * HD_ * 4),
                     std::make_pair(&vt_, T * E_ * 4), std::make_pair(&vg_, T * F_ * 4), std::make_pair(&vu_, T * F_ * 4),
                     std::make_pair(&vh_, T * F_ * 4), std::make_pair(&vlog_, T * V_ * 4 + 4096), std::make_pair(&vpart_, T * 64 * NKV_ * 2112)})
-        if (!dev_.alloc((pr.second + 4095) & ~(size_t)4095, kfd::Mem::Gtt, *pr.first)) { err = dev_.err() + " (verify activations)"; return false; }
+        if (!dv_->alloc((pr.second + 4095) & ~(size_t)4095, kfd::Mem::Gtt, *pr.first)) { err = dv_->err() + " (verify activations)"; return false; }
     return true;
 }
 
@@ -959,7 +1052,7 @@ bool Runner::send_verify(const int32_t* ids, int n, int pos0) {
     pm4::Stream s;
     build_verify(ids, n, pos0, seq_, s);
     seq_++;
-    return dev_.submit(s.w);
+    return dv_->submit(s.w);
 }
 
 // build()'s steps for T tokens: the same small kernels with the same
@@ -996,14 +1089,14 @@ void Runner::build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4
     else barrier();
     s.stamp(bts_.gpu + 16 * (seq % (bts_.size / 16)));
     for (int t = 0; t < T; t++) {
-        const uint64_t te = addr(m_->tok_embd.data), io = bids_.gpu + 4 * (size_t)(pos0 + t), x = vx_.gpu + t * xE;
+        const uint64_t te = addr(tok_.data), io = bids_.gpu + 4 * (size_t)(pos0 + t), x = vx_.gpu + t * xE;
         const uint32_t args[10] = {lo(te), hi(te), lo(x), hi(x), lo(bslot_.gpu), hi(bslot_.gpu), (uint32_t)ids[t], 0, lo(io), hi(io)};
         const uint32_t g[3] = {1, 1, 1}, th[3] = {(uint32_t)(E_ / 16), 1, 1};
         s.dispatch(k_embed_.k, k_embed_.code.gpu, args, 10, g, th);
     }
     barrier();
     for (int l = 0; l < hp.n_layer; l++) {
-        const Layer& L = m_->layers[l];
+        const Layer& L = lay_[l];
         const uint64_t kc = bkv_.gpu + (size_t)l * 2 * kv_layer_, vc = kc + kv_layer_;
         if (l) barrier();
         norm(l > 0, L.attn_norm);
@@ -1058,10 +1151,10 @@ void Runner::build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4
     barrier();
     norm(true, m_->out_norm);
     barrier();
-    mvt(m_->output ? m_->output : m_->tok_embd, vxn_.gpu, xE, vlog_.gpu, (size_t)V_ * 4);
+    mvt(outw_, vxn_.gpu, xE, vlog_.gpu, (size_t)V_ * 4);
     barrier();
     s.release(bts_.gpu + 16 * (seq % (bts_.size / 16)) + 8, 0, true);
-    s.release(dev_.signals.gpu, seq + 1);
+    s.release((dv_->signals.gpu + sig_), seq + 1);
     nstamps_ = 0;
 }
 

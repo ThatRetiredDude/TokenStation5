@@ -523,3 +523,115 @@ int cmd_verify_test(int argc, char** argv) {
 }
 
 }  // namespace ts5::direct
+
+namespace ts5::direct {
+
+// ts5-direct helper-test MAIN.gguf DRAFT.gguf [tokens] [context]: a helper
+// (draft) model on the main model's GPU queue (round 102: Qwen3 0.6B beside
+// 8B on SoKnee, its weights reshaped at load). For a few chat prompts: the
+// helper's prompt time; the main model's greedy answer, with the helper fed
+// the same tokens (teacher forced) and its greedy pick at each position set
+// against the main model's next token: the share of 1..4-token drafts a
+// verify pass would keep; the helper's GPU time a token, and the wall time
+// of 4 chained draft tokens (the GPU picking each next one itself).
+int cmd_helper_test(int argc, char** argv) {
+    if (argc < 4) return fail("usage: helper-test MAIN.gguf DRAFT.gguf [tokens] [context]");
+    const int n = argc > 4 ? std::atoi(argv[4]) : 128, ctx = argc > 5 ? std::atoi(argv[5]) : 4096;
+    using clk = std::chrono::steady_clock;
+    auto secs = [](clk::time_point a, clk::time_point b) { return std::chrono::duration<double>(b - a).count(); };
+    Model mm, dm;
+    std::string err;
+    if (!mm.open(argv[2], err)) return fail(err);
+    if (!dm.open(argv[3], err)) return fail(err);
+    Runner R, H;
+    const auto t0 = clk::now();
+    if (!R.init(mm, ctx, err)) return fail("main: " + err);
+    const auto t1 = clk::now();
+    if (!H.init(dm, ctx, err, &R)) return fail("helper: " + err);
+    const auto t2 = clk::now();
+    std::printf("helper-test: main loaded in %.1f s, helper in %.1f s; helper mat-vecs ( %s ), prompt passes %s\n", secs(t0, t1), secs(t1, t2),
+                H.mv_kernels().c_str(), H.batch_ok() ? (H.big_ok() ? "big + 16" : "16") : "none (a token at a time)");
+    Tokenizer tok;
+    if (!tok.load(mm.gguf, err)) return fail(err);
+    const char* asks[] = {
+        "Explain in a short paragraph why the sky is blue.",
+        "Write a Python function that returns the n-th Fibonacci number, with a docstring.",
+        "List five tips for keeping a sourdough starter healthy.",
+        "Summarize the plot of Romeo and Juliet in three sentences.",
+    };
+    auto median = [](std::vector<double> v) { std::sort(v.begin(), v.end()); return v.empty() ? 0.0 : v[v.size() / 2]; };
+    std::vector<double> th_all;
+    int kept_all[5] = {0}, pos_all = 0;
+    for (const char* ask : asks) {
+        const std::string text = std::string("<|im_start|>user\n") + ask + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+        const std::vector<int32_t> prompt = tok.encode(text, false);
+        const int P = (int)prompt.size();
+        if (P + n + 8 > ctx) return fail("context too short");
+        auto feed = [&](Runner& X) -> bool {
+            X.set_prompt_tokens(P);
+            for (int i = 0; i < P;) {
+                const int c = X.batch_ok() ? X.prompt_chunk(P - i) : 1;
+                if (!(c > 1 ? X.send_batch(prompt.data() + i, c, i, i + c >= P) : X.send(prompt[i], i))) return false;
+                i += c;
+            }
+            return X.wait_all(120000);
+        };
+        const auto p0 = clk::now();
+        if (!feed(R)) return fail(R.err() + " (main prompt)");
+        const auto p1 = clk::now();
+        if (!feed(H)) return fail(H.err() + " (helper prompt)");
+        const auto p2 = clk::now();
+        std::vector<int32_t> gen(n + 1), hp(n + 1);
+        gen[0] = R.picked();
+        hp[0] = H.picked();
+        std::vector<double> th;
+        int len = n;
+        for (int i = 0; i < n; i++) {
+            if (!R.send(gen[i], P + i) || !H.send(gen[i], P + i)) return fail("send");
+            if (!R.wait_all() || !H.wait_all()) return fail(R.err() + " / " + H.err());
+            th.push_back((H.t_end(H.sent() - 1) - H.t_start(H.sent() - 1)) / 100e6);
+            gen[i + 1] = R.picked();
+            hp[i + 1] = H.picked();
+            if (gen[i + 1] == 151645 || gen[i + 1] == 151643) { len = i + 1; break; }   // <|im_end|>, <|endoftext|>
+        }
+        // kept[k]: tokens a k-token draft from each position would keep
+        int kept[5] = {0};
+        for (int i = 0; i <= len; i++) {
+            int run = 0;
+            while (i + run <= len && hp[i + run] == gen[i + run]) run++;
+            for (int k = 1; k <= 4; k++) kept[k] += std::min(run, k);
+        }
+        // 4 chained draft tokens: the helper's argmax feeds its next token on the GPU
+        std::vector<double> tc;
+        for (int rep = 0; rep < 8; rep++) {
+            const auto c0 = clk::now();
+            const int at = P + len - 4;
+            if (!H.send(gen[len - 4], at)) return fail("send");
+            for (int j = 1; j < 4; j++)
+                if (!H.send(-1, at + j)) return fail("send");
+            if (!H.wait_all()) return fail(H.err());
+            tc.push_back(secs(c0, clk::now()));
+        }
+        std::string out;
+        for (int i = 0; i < len; i++) out += tok.decode(gen[i]);
+        for (char& c : out)
+            if (c == '\n') c = ' ';
+        std::printf("\nhelper-test: \"%s\" (%d prompt tokens, %d answer tokens)\n", ask, P, len);
+        std::printf("  prompt: main %.1f ms, helper %.1f ms\n", secs(p0, p1) * 1e3, secs(p1, p2) * 1e3);
+        std::printf("  helper picks the main model's next token at %.1f%% of %d positions; kept per draft of 1/2/3/4 tokens: %.2f %.2f %.2f %.2f\n",
+                    100.0 * kept[1] / (len + 1), len + 1, (double)kept[1] / (len + 1), (double)kept[2] / (len + 1), (double)kept[3] / (len + 1),
+                    (double)kept[4] / (len + 1));
+        std::printf("  helper: %.3f ms a token (median GPU), 4 chained draft tokens %.2f ms wall (median)\n", median(th) * 1e3, median(tc) * 1e3);
+        std::printf("  main's answer: %.300s\n", out.c_str());
+        std::fflush(stdout);
+        th_all.insert(th_all.end(), th.begin(), th.end());
+        for (int k = 1; k <= 4; k++) kept_all[k] += kept[k];
+        pos_all += len + 1;
+    }
+    std::printf("\nhelper-test: overall %.1f%% agreement; kept per draft of 1/2/3/4: %.2f %.2f %.2f %.2f; helper %.3f ms a token\n",
+                100.0 * kept_all[1] / pos_all, (double)kept_all[1] / pos_all, (double)kept_all[2] / pos_all, (double)kept_all[3] / pos_all,
+                (double)kept_all[4] / pos_all, median(th_all) * 1e3);
+    return 0;
+}
+
+}  // namespace ts5::direct

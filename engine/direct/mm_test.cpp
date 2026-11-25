@@ -21,6 +21,7 @@
 #include "mvt_q6k.h"
 #include "mvt2_q4k.h"
 #include "mvt2_q6k.h"
+#include "mvg_q4k.h"
 #include "mm_q4k.h"
 #include "mm_q4k_sb.h"
 #include "mm_q4k_h.h"
@@ -764,6 +765,115 @@ int cmd_mvt_test(int argc, char** argv) {
             }
     }
     std::printf("mvt-test: %s\n", bad ? "MISMATCH" : "all bit for bit the same");
+    return bad != 0;
+}
+
+// ts5-direct mvg-test: mvg_q4k (round 102: a Qwen3 0.6B helper's 1024- and
+// 3072-column mat-vecs) against the CPU (dequantize_row, a double sum), at
+// the helper's shapes and several row slots / prefetch depths, and how long
+// one takes warm (as the runner sends it: wait and cache invalidation after).
+int cmd_mvg_test(int, char**) {
+    kfd::Device dev;
+    if (!dev.open() || !dev.create_queue(1 << 22)) { std::fprintf(stderr, "mvg-test: %s\n", dev.err().c_str()); return 1; }
+    uint64_t* sig = (uint64_t*)dev.signals.cpu;
+    uint64_t seq = 0;
+    sig[0] = 0;
+    const uint32_t wgs = dev.cu_count();
+    struct Shape { const char* name; int rows, cols; };
+    const Shape shapes[] = {{"q 4096x1024", 4096, 1024}, {"k/v 1024x1024", 1024, 1024}, {"gate/up 3072x1024", 3072, 1024},
+                            {"down 1024x3072", 1024, 3072}, {"output 151936x1024", 151936, 1024}};
+    const size_t maxw = (size_t)151936 * 1024 / 256 * 144 + 4096;
+    kfd::Buffer ts, code, w, x, y;
+    if (!dev.alloc(4096, kfd::Mem::Gtt, ts) || !dev.alloc(1 << 20, kfd::Mem::Gtt, code) || !dev.alloc(maxw, kfd::Mem::Gtt, w) ||
+        !dev.alloc((size_t)3072 * 4, kfd::Mem::Gtt, x) || !dev.alloc((size_t)151936 * 4 + 4096, kfd::Mem::Gtt, y)) {
+        std::fprintf(stderr, "mvg-test: %s\n", dev.err().c_str());
+        return 1;
+    }
+    uint32_t r = 4242;
+    auto rnd = [&]() { r = r * 1664525u + 1013904223u; return r; };
+    const uint32_t t256[3] = {256, 1, 1};
+    auto submit = [&](pm4::Stream& s) -> bool {
+        s.release(dev.signals.gpu, ++seq);
+        if (!dev.submit(s.w) || !dev.wait((volatile uint64_t*)sig, seq, 20000)) { std::fprintf(stderr, "mvg-test: %s\n", dev.err().c_str()); return false; }
+        return true;
+    };
+    auto one = [&](pm4::Stream& s, const gfx10::Kernel& k, const uint32_t* args) {
+        const uint32_t g[3] = {wgs, 1, 1};
+        s.dispatch(k, code.gpu, args, 10, g, t256);
+        s.wait_kernels();
+        s.acquire_light();
+    };
+    struct Cfg { int K, PD; };
+    const Cfg cfgs[] = {{4, 2}, {2, 1}, {2, 2}, {4, 1}, {4, 3}, {8, 2}, {8, 3}};
+    int bad = 0;
+    for (const Shape& sh : shapes) {
+        const size_t wb = (size_t)sh.rows * sh.cols / 256 * 144;
+        uint8_t* W = (uint8_t*)w.cpu;
+        for (size_t i = 0; i < wb + 4096; i++) W[i] = (uint8_t)(rnd() >> 24);
+        for (size_t b = 0; b < wb / 144; b++) {   // sane f16 scales: 2^-10 .. 2^-7
+            uint16_t* dd = (uint16_t*)(W + b * 144);
+            dd[0] = (uint16_t)(0x1400 + (rnd() >> 22));
+            dd[1] = (uint16_t)(0x1400 + (rnd() >> 22));
+        }
+        float* X = (float*)x.cpu;
+        for (int i = 0; i < sh.cols; i++) X[i] = (float)((int)(rnd() >> 16 & 0xffff) - 32768) / 32768.0f;
+        std::vector<double> ref(sh.rows);
+        double ymax = 0;
+        {
+            std::vector<float> row(sh.cols);
+            for (int i = 0; i < sh.rows; i++) {
+                dequantize_row(GGML_Q4_K, W + (size_t)i * sh.cols / 256 * 144, row.data(), sh.cols);
+                double a = 0;
+                for (int c = 0; c < sh.cols; c++) a += (double)row[c] * X[c];
+                ref[i] = a;
+                ymax = std::max(ymax, std::fabs(a));
+            }
+        }
+        for (const Cfg& cf : cfgs) {
+            const std::string src = gen_mvg_q4k(sh.cols, cf.K, cf.PD);
+            if (src.empty()) {
+                std::printf("mvg-test %-20s K %d PD %d: no kernel\n", sh.name, cf.K, cf.PD);
+                continue;
+            }
+            gfx10::Kernel k;
+            std::string err;
+            if (!gfx10::assemble(src, k, &err)) { std::fprintf(stderr, "mvg-test: %s\n", err.c_str()); return 1; }
+            std::memcpy(code.cpu, k.code.data(), k.code.size() * 4);
+            const uint32_t args[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)x.gpu, (uint32_t)(x.gpu >> 32), (uint32_t)y.gpu, (uint32_t)(y.gpu >> 32),
+                                       (uint32_t)sh.rows, 0, wgs * 8, 0};
+            std::memset(y.cpu, 0xff, (size_t)sh.rows * 4);
+            {
+                pm4::Stream s;
+                s.acquire_all();
+                one(s, k, args);
+                if (!submit(s)) return 1;
+            }
+            double md = 0;
+            int nan = 0;
+            for (int i = 0; i < sh.rows; i++) {
+                const float g = ((const float*)y.cpu)[i];
+                if (!(g == g)) nan++;
+                else md = std::max(md, std::fabs(g - ref[i]));
+            }
+            const bool ok = !nan && md <= 1e-4 * ymax + 1e-6;
+            bad += !ok;
+            // warm: ~150 ms of work, then 200 runs between two stamps
+            const int nwarm = std::min(4000, std::max(200, (int)(150e3 / (wb / 350e3))));
+            pm4::Stream s;
+            s.acquire_all();
+            for (int i = 0; i < nwarm; i++) one(s, k, args);
+            s.stamp(ts.gpu);
+            for (int i = 0; i < 200; i++) one(s, k, args);
+            s.stamp(ts.gpu + 8);
+            if (!submit(s)) return 1;
+            const uint64_t* tt = (const uint64_t*)ts.cpu;
+            const double t = (tt[1] - tt[0]) / 100e6 / 200;
+            std::printf("mvg-test %-20s K %d PD %d: %7.1f us (%.0f GB/s), max |diff| %.3g of max |y| %.3g%s, %d VGPRs\n", sh.name, cf.K, cf.PD,
+                        t * 1e6, wb / t / 1e9, md, ymax, ok ? "" : (nan ? "  NAN" : "  MISMATCH"), k.vgprs);
+            std::fflush(stdout);
+        }
+    }
+    std::printf("mvg-test: %s\n", bad ? "MISMATCH" : "all match the CPU");
     return bad != 0;
 }
 

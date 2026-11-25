@@ -6,6 +6,7 @@
 #pragma once
 #include <cstdint>
 #include <algorithm>
+#include <deque>
 #include <map>
 #include <string>
 #include <vector>
@@ -43,7 +44,10 @@ public:
     // Opens nothing itself: `m` is open (not loaded). Allocates the weights'
     // buffer and loads them into it, then the kernels, activations, a KV
     // cache of n_ctx positions (f16). False with why in err.
-    bool init(Model& m, int n_ctx, std::string& err);
+    // share: another runner whose device, queue and GPU address space this
+    // one uses too (a draft model's runner beside the main one: KFD gives a
+    // process one address space per GPU). That runner must outlive this one.
+    bool init(Model& m, int n_ctx, std::string& err, Runner* share = nullptr);
 
     // Queues one token at `pos`: row `id` of the embeddings, or with id -1
     // the token the last one's argmax chose. Returns at once.
@@ -101,6 +105,7 @@ private:
     struct Prog {
         gfx10::Kernel k;
         kfd::Buffer code;
+        bool persist = false;   // mvg_q4k: s8 takes the waves a dispatch has (passes over the rows), not mv's step
     };
     bool load(const std::string& src, Prog& p, std::string& err);
     Prog* mv_prog(const Weight& w, Stage st = Stage::None);
@@ -115,8 +120,18 @@ private:
     Prog* mvt_prog(const Weight& w, int T);
     void build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4::Stream& s);
 
-    kfd::Device dev_;
+    kfd::Device own_;
+    kfd::Device* dv_ = &own_;   // own_, or the main runner's for a helper model (init's share)
+    uint32_t sig_ = 0;          // this runner's fences in the signals page (byte offset)
     Model* m_ = nullptr;
+    // The weights the kernels read: the model's, or for a helper model
+    // (Qwen3 0.6B) some reshaped at load (helper_prep.h: Q6_K rows of 1024 /
+    // 3072 columns as Q4_K, 16 query heads padded to 32), in pbuf_.
+    std::vector<Layer> lay_;
+    Weight tok_, outw_;
+    std::deque<GgufTensor> pinfo_;
+    kfd::Buffer pbuf_;
+    bool prep_weights(std::string& err);
     int ctx_ = 0, E_ = 0, F_ = 0, NQ_ = 0, NKV_ = 0, HD_ = 0, V_ = 0;
     size_t kv_layer_ = 0;
     uint32_t wgs_ = 0, step_ = 0, scale_bits_ = 0;
