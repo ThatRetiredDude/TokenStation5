@@ -28,7 +28,8 @@ namespace ts5::direct {
 // step (no scalar waits), 2 no nibble unpacking, 3 both; 4 x read from LDS
 // (contents garbage) by broadcast ds_read_b128 into VGPRs, one step ahead,
 // instead of scalar loads (round 46: the scalar loads' waits are 57% of a
-// pass).
+// pass); 5 half the x bytes loaded per step (each SGPR used twice), 6 every
+// step's x from the same 128 bytes (always in the scalar cache).
 inline std::string gen_mm_q4k(int K, int T, int SPLIT = 4, int exp = 0) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
@@ -121,7 +122,9 @@ inline std::string gen_mm_q4k(int K, int T, int SPLIT = 4, int exp = 0) {
             if (dw == 7 && h == 0) sload(SXS, T, "s[14:15]", j * T * 4);
         } else if (!(exp & 1)) {
             o("s_waitcnt lgkmcnt(0)");
-            if (st + 1 < 128) sload(buf(st + 1), 2 * T, "s[12:13]", xoff(st + 1));
+            if (exp == 5) sload(buf(st + 1), T, "s[12:13]", xoff((st + 1) % 128) / 2);   // half the bytes
+            else if (exp == 6) sload(buf(st + 1), 2 * T, "s[2:3]", 0);                // always the same 128 bytes
+            else if (st + 1 < 128) sload(buf(st + 1), 2 * T, "s[12:13]", xoff(st + 1));
             else sload(buf(0), 2 * T, "s[12:13]", 256 * T * 4);   // the next block's first step (past the end on the last: unused)
             if (dw == 7 && h == 0) sload(SXS, T, "s[14:15]", j * T * 4);   // the sub-block's sums, for its end
         } else if (st == 0) o("s_waitcnt lgkmcnt(0)");
@@ -137,7 +140,7 @@ inline std::string gen_mm_q4k(int K, int T, int SPLIT = 4, int exp = 0) {
         }
         for (int c = 0; c < 2; c++)
             for (int t = 0; t < T; t++) {
-                const std::string x = exp == 4 ? "v" + S(XV + (st & 1) * 2 * T + c * T + t) : "s" + S(buf(st) + c * T + t),
+                const std::string x = exp == 4 ? "v" + S(XV + (st & 1) * 2 * T + c * T + t) : "s" + S(buf(st) + (exp == 5 ? t : c * T + t)),
                                   w = "v" + S(U + 1 + 2 * h + c);
                 if (dw == 0 && h == 0 && c == 0) o("v_mul_f32 v" + S(TMP + t) + ", " + x + ", " + w);
                 else o("v_fmac_f32 v" + S(TMP + t) + ", " + x + ", " + w);
