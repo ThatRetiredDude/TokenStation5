@@ -358,6 +358,30 @@ int cmd_token(int argc, char** argv) {
                 for (int i = 0; i < S_COUNT; i++)
                     if (acc[i] > 0) std::printf("  %-18s %8.3f ms  %5.1f%%\n", kStepName[i], acc[i] / 16 * 1e3, 100 * acc[i] / tot);
                 std::fflush(stdout);
+                // Round 91: one token at depth ctx - 16 with attn_d and with attn_part.
+                std::vector<float> a(V), b(V);
+                const bool dold = R.opt.dattn_old;
+                for (int pass = 0; pass < 2; pass++) {
+                    R.opt.dattn_old = pass == 1;
+                    if (!R.send(p2[0], ctx - 16) || !R.wait_all(20000)) return fail(R.err() + " (attn_d check)");
+                    std::memcpy((pass ? b : a).data(), R.logits(), (size_t)V * 4);
+                }
+                R.opt.dattn_old = dold;
+                double md5 = 0, ml5 = 0;
+                int ta = 0, tb = 0;
+                bool nan5 = false;
+                for (int i = 0; i < V; i++) {
+                    if (!(a[i] == a[i])) nan5 = true;
+                    md5 = std::max(md5, (double)std::fabs(a[i] - b[i]));
+                    ml5 = std::max(ml5, (double)std::fabs(b[i]));
+                    if (a[i] > a[ta]) ta = i;
+                    if (b[i] > b[tb]) tb = i;
+                }
+                const bool ok5 = !nan5 && ta == tb && md5 < 0.02 * ml5;
+                if (!ok5) ok = false;
+                std::printf("attn_d at depth %d: top-1 attn_d %s %d, attn_part %s %d, max |diff| %.4f of max |logit| %.3f: %s\n", ctx - 16,
+                            piece(ta).c_str(), ta, piece(tb).c_str(), tb, md5, ml5, ok5 ? "MATCH" : "MISMATCH");
+                std::fflush(stdout);
             }
         }
     } else {

@@ -13,6 +13,7 @@
 #include "attn.h"
 #include "attn_t.h"
 #include "attn_f.h"
+#include "attn_d.h"
 #include "mm_q4k.h"
 #include "mm_q6k.h"
 #include "mm_q4k_sb.h"
@@ -175,6 +176,10 @@ const Pace& pace() {
 }
 }  // namespace
 
+static bool dattn() {   // generation's attention: attn_d (round 91); TS5_DIRECT_DATTN=old: attn_part
+    static const bool on = !(std::getenv("TS5_DIRECT_DATTN") && std::strcmp(std::getenv("TS5_DIRECT_DATTN"), "old") == 0);
+    return on;
+}
 static uint32_t dsplits() {   // generation's attention splits at most (TS5_DIRECT_DSPLITS, 1-64)
     static const uint32_t n = [] {
         const char* e = std::getenv("TS5_DIRECT_DSPLITS");
@@ -608,6 +613,7 @@ std::string Runner::mv_kernels() const {
 }
 
 bool Runner::init(Model& m, int n_ctx, std::string& err) {
+    opt.dattn_old = !dattn();
     if (const char* e = std::getenv("TS5_DIRECT_ATTN")) {
         opt.attn_pairs = std::strcmp(e, "pairs") == 0;
         opt.attn_t = std::strcmp(e, "t") == 0;
@@ -634,7 +640,7 @@ bool Runner::init(Model& m, int n_ctx, std::string& err) {
     if (!m.load((uint8_t*)wbuf_.cpu, err)) return false;
 
     if (!load(gen_rmsnorm(E_, hp.rms_eps), k_norm_, err) || !load(gen_rmsnorm(E_, hp.rms_eps, true), k_addnorm_, err) ||
-        !load(gen_qk_post(NQ_, hp.rms_eps), k_qk_, err) || !load(gen_silu_mul(), k_silu_, err) || !load(gen_attn_part(), k_attn_, err) || !load(gen_attn_part2(2), k_attn2_, err) ||
+        !load(gen_qk_post(NQ_, hp.rms_eps), k_qk_, err) || !load(gen_silu_mul(), k_silu_, err) || !load(gen_attn_part(), k_attn_, err) || !load(gen_attn_part2(2), k_attn2_, err) || !load(gen_attn_d(), k_attnd_, err) ||
         !load(gen_attn_reduce(), k_red_, err) || !load(gen_argmax(), k_argmax_, err) || !load(gen_embed_q4k(E_), k_embed_, err)) {
         err = "kernel: " + err;
         return false;
@@ -798,7 +804,9 @@ void Runner::build(int32_t id, int pos, uint64_t seq, pm4::Stream& s) {
             const uint32_t a1[12] = {lo(bq_.gpu), hi(bq_.gpu), lo(kc), hi(kc), lo(vc), hi(vc), n, scale_bits_,
                                      lo(bpart_.gpu), hi(bpart_.gpu), per * 256, 0};
             const uint32_t g1[3] = {splits * NKV_, 1, 1};
-            if (!skip()) s.dispatch(k_attn_.k, k_attn_.code.gpu, a1, 12, g1, t256);
+            const uint32_t t128[3] = {128, 1, 1};
+            if (!skip() && !opt.dattn_old && NQ_ == 32) s.dispatch(k_attnd_.k, k_attnd_.code.gpu, a1, 12, g1, t128);   // round 91
+            else if (!skip()) s.dispatch(k_attn_.k, k_attn_.code.gpu, a1, 12, g1, t256);
             if (!skip()) barrier();
             const uint32_t a2[10] = {lo(bpart_.gpu), hi(bpart_.gpu), lo(batt_.gpu), hi(batt_.gpu), splits, 0, 0, 0, 0, 0};
             const uint32_t g2[3] = {(uint32_t)NKV_, 1, 1};
