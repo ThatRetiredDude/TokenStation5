@@ -524,4 +524,73 @@ int cmd_fma_peak(int, char**) {
     return 0;
 }
 
+// ts5-direct bw-peak: read bandwidth with no arithmetic to speak of, in GTT
+// (where the model's weights live) and VRAM (round 72: the prompt kernel's
+// weight stream ran at ~223 GB/s; is that the memory or the kernel?).
+// Patterns: lin (each wave 512 contiguous bytes a load), row (each lane its
+// own 2304-byte row, 16 bytes a load, as the prompt kernels read Q4_K).
+int cmd_bw_peak(int, char**) {
+    kfd::Device dev;
+    if (!dev.open() || !dev.create_queue(1 << 20)) { std::fprintf(stderr, "bw-peak: %s\n", dev.err().c_str()); return 1; }
+    uint64_t* sig = (uint64_t*)dev.signals.cpu;
+    uint64_t seq = 0;
+    sig[0] = 0;
+    kfd::Buffer ts, code, out;
+    if (!dev.alloc(4096, kfd::Mem::Gtt, ts) || !dev.alloc(65536, kfd::Mem::Gtt, code) || !dev.alloc(1 << 22, kfd::Mem::Gtt, out)) return 1;
+    const size_t bytes = (size_t)128 << 20;   // 128 MiB (VRAM is a 512 MiB carve-out)
+    for (kfd::Mem mem : {kfd::Mem::Gtt, kfd::Mem::Vram}) {
+        kfd::Buffer B;
+        if (!dev.alloc(bytes, mem, B)) { std::fprintf(stderr, "bw-peak: %s\n", dev.err().c_str()); return 1; }
+        if (mem == kfd::Mem::Gtt) std::memset(B.cpu, 1, bytes);
+        for (int pat = 0; pat < 2; pat++)
+            for (int per : {pat ? 32 : 8, pat ? 144 : 32}) {   // loads a lane (row: 144 = the whole 2304-byte row)
+                // lin: workgroup g, wave w, load i: 512 bytes at ((g 8 + w) per + i) 512 + 16 lane
+                // row: lane's row = (g 8 + w) 32 + lane, load i at row 2304 + 16 i (per <= 144)
+                std::string src = ".kernel bw_peak\n.wave32\n.user_sgprs 4\n.tgid_x\n";
+                src += "    v_lshrrev_b32 v2, 5, v0\n    v_and_b32 v0, 31, v0\n    s_lshl_b32 s5, s4, 3\n    v_add_nc_u32 v2, s5, v2\n";   // v2 = g 8 + w
+                if (pat == 0) src += "    v_mul_u32_u24 v1, " + std::to_string(per * 512) + ", v2\n    v_lshl_add_u32 v1, v0, 4, v1\n";
+                else src += "    v_lshl_add_u32 v3, v2, 5, v0\n    v_mul_u32_u24 v1, 2304, v3\n";
+                for (int i = 0; i < 8; i++) src += "    v_mov_b32 v" + std::to_string(8 + i) + ", 0\n";
+                for (int i = 0; i < per; i++) {
+                    const int r = 16 + 4 * (i % 8);
+                    const int off = pat == 0 ? i * 512 : i * 16;
+                    if (off < 4096) src += "    global_load_dwordx4 v[" + std::to_string(r) + ":" + std::to_string(r + 3) + "], v1, s[0:1] offset:" + std::to_string(off) + "\n";
+                    else src += "    v_add_nc_u32 v4, " + std::to_string(off) + ", v1\n    global_load_dwordx4 v[" + std::to_string(r) + ":" + std::to_string(r + 3) + "], v4, s[0:1]\n";
+                    if (i % 8 == 7) {
+                        src += "    s_waitcnt vmcnt(0)\n";
+                        for (int j = 0; j < 8; j++) src += "    v_add_nc_u32 v" + std::to_string(8 + j) + ", v" + std::to_string(8 + j) + ", v" + std::to_string(16 + 4 * j) + "\n";
+                    }
+                }
+                src += "    v_add_nc_u32 v8, v8, v9\n    v_lshl_add_u32 v1, v2, 7, v0\n    v_lshlrev_b32 v1, 2, v1\n    global_store_dword v1, v8, s[2:3]\n    s_endpgm\n";
+                gfx10::Kernel k;
+                std::string err;
+                if (!gfx10::assemble(src, k, &err)) { std::fprintf(stderr, "bw-peak: %s\n", err.c_str()); return 1; }
+                std::memcpy(code.cpu, k.code.data(), k.code.size() * 4);
+                const size_t per_wave = pat == 0 ? (size_t)per * 512 : (size_t)32 * 2304;
+                const uint32_t wg = (uint32_t)std::min<size_t>(bytes / per_wave / 8, (1 << 22) / 1024);
+                const double moved = (double)wg * 8 * 32 * 16 * per;
+                const uint32_t args[4] = {(uint32_t)B.gpu, (uint32_t)(B.gpu >> 32), (uint32_t)out.gpu, (uint32_t)(out.gpu >> 32)};
+                const uint32_t g[3] = {wg, 1, 1}, th[3] = {256, 1, 1};
+                std::vector<double> st;
+                for (int rep = 0; rep < 6; rep++) {
+                    pm4::Stream w;
+                    w.acquire_all();
+                    w.release(ts.gpu, 0, true);
+                    w.dispatch(k, code.gpu, args, 4, g, th);
+                    w.wait_kernels();
+                    w.release(ts.gpu + 8, 0, true);
+                    w.release(dev.signals.gpu, ++seq);
+                    if (!dev.submit(w.w) || !dev.wait((volatile uint64_t*)sig, seq, 20000)) { std::fprintf(stderr, "bw-peak: %s\n", dev.err().c_str()); return 1; }
+                    const uint64_t* tt = (const uint64_t*)ts.cpu;
+                    if (rep) st.push_back((tt[1] - tt[0]) / 100e6);
+                }
+                std::sort(st.begin(), st.end());
+                std::printf("bw-peak %s %s, %2d loads a lane, %6u workgroups: %8.1f us, %6.1f MB read, %6.1f GB/s\n", mem == kfd::Mem::Gtt ? "GTT " : "VRAM",
+                            pat ? "row" : "lin", per, wg, st[st.size() / 2] * 1e6, moved / 1e6, moved / st[st.size() / 2] / 1e9);
+                std::fflush(stdout);
+            }
+    }
+    return 0;
+}
+
 }  // namespace ts5::direct
