@@ -9,6 +9,8 @@
 #include "attn.h"
 #include "mm_q4k.h"
 #include "mm_q6k.h"
+#include "mm_q4k_sb.h"
+#include "mm_q6k_sb.h"
 #include "mv_q4k.h"
 #include "mv_q6k.h"
 #include "ops.h"
@@ -64,8 +66,10 @@ Runner::Prog* Runner::mm_prog(const Weight& w) {
     const int K = (int)w.ne0(), NB = K / 256;
     if (K % 256 || w.ne1() % 32) return nullptr;
     std::string src;
-    if (w.type() == GGML_Q4_K && NB % 4 == 0) src = gen_mm_q4k(K, kBatch, 4);
-    else if (w.type() == GGML_Q6_K && NB % 4 == 0) src = gen_mm_q6k(K, kBatch, 2);
+    // Blocks split across the 4 waves (mm_q4k_sb.h, mm_q6k_sb.h; round 49:
+    // 10-38% faster); opt.old_mm: the earlier kernels.
+    if (w.type() == GGML_Q4_K && NB % 4 == 0) src = opt.old_mm ? gen_mm_q4k(K, kBatch, 4) : gen_mm_q4k_sb(K, kBatch);
+    else if (w.type() == GGML_Q6_K && NB % 4 == 0 && NB % 2 == 0) src = opt.old_mm ? gen_mm_q6k(K, kBatch, 2) : gen_mm_q6k_sb(K, kBatch);
     else return nullptr;
     Prog& p = mms_[key];
     std::string e;
@@ -147,7 +151,7 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {
         Prog* p = mm_prog(w);
         const uint64_t a = addr(w.data), xs = w.type() == GGML_Q6_K ? pxs16_.gpu : pxs32_.gpu;
         const uint32_t args[10] = {lo(a), hi(a), lo(pxT_.gpu), hi(pxT_.gpu), lo(y), hi(y), (uint32_t)w.ne1(), 0, lo(xs), hi(xs)};
-        const uint32_t g[3] = {(uint32_t)(w.ne1() / 32), 1, 1}, th[3] = {(uint32_t)(w.type() == GGML_Q6_K ? 64 : 128), 1, 1};
+        const uint32_t g[3] = {(uint32_t)(w.ne1() / 32), 1, 1}, th[3] = {(uint32_t)(w.type() == GGML_Q6_K && opt.old_mm ? 64 : 128), 1, 1};
         s.dispatch(p->k, p->code.gpu, args, 10, g, th);
     };
     // Tokens t0 .. t0 + n - 1 in one launch (a workgroup a token).

@@ -45,7 +45,8 @@ int cmd_token(int argc, char** argv) {
         if (a == "fused") R.opt.fused = true;
         if (a == "mvonly") R.opt.mvonly = true;
         if (a == "vramprompt") R.opt.vram_prompt = true;   // prompt activations in VRAM
-        if (a == "skipxt") R.opt.skip_xt = true;           // prompt timing without to_xT (prompt check fails)     // timing only: the mat-vecs and their waits, nothing else
+        if (a == "skipxt") R.opt.skip_xt = true;
+        if (a == "oldmm") R.opt.old_mm = true;             // round 41's prompt kernels           // prompt timing without to_xT (prompt check fails)     // timing only: the mat-vecs and their waits, nothing else
     }
 
     Model m;

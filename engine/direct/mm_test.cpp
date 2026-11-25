@@ -15,6 +15,7 @@
 #include "kfd.h"
 #include "mm_q4k.h"
 #include "mm_q4k_sb.h"
+#include "mm_q6k_sb.h"
 #include "mm_q6k.h"
 #include "prefill.h"
 #include "pm4.h"
@@ -64,7 +65,7 @@ int cmd_mm_q4k(int argc, char** argv) {
         const size_t rb = (size_t)NB * BB, wbytes = rb * sh.R;
         gfx10::Kernel k;
         std::string err;
-        if (!gfx10::assemble(q6 ? gen_mm_q6k(sh.K, T, SPLIT) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
+        if (!gfx10::assemble(q6 ? (EXP == 10 ? gen_mm_q6k_sb(sh.K, T) : gen_mm_q6k(sh.K, T, SPLIT)) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
         kfd::Buffer code, W, xT, xs, Y;
         const size_t cb = (k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, code) || !dev.alloc(wbytes + 4096, kfd::Mem::Gtt, W) ||
