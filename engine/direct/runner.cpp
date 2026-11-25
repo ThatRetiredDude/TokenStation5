@@ -109,11 +109,15 @@ Runner::Prog* Runner::mm_prog(const Weight& w) {
     return &p;
 }
 
-// to_xT's workgroup size: TS5_DIRECT_XT_NT=128 tries 128 (twice the
-// workgroups; round 67 measures it).
+// to_xT's workgroup size: TS5_DIRECT_XT_NT=128 tries 128 (round 67: slower);
+// TS5_DIRECT_XT2=1 tries to_xT2 (no LDS or barriers; round 68 measures it).
 static int xt_nt() {
     static const int nt = std::getenv("TS5_DIRECT_XT_NT") && std::atoi(std::getenv("TS5_DIRECT_XT_NT")) == 128 ? 128 : 256;
     return nt;
+}
+static bool xt2() {
+    static const bool on = std::getenv("TS5_DIRECT_XT2") && std::atoi(std::getenv("TS5_DIRECT_XT2")) == 1;
+    return on;
 }
 
 Runner::Prog* Runner::xt_prog(int K) {
@@ -122,7 +126,7 @@ Runner::Prog* Runner::xt_prog(int K) {
     if (K % 256) return nullptr;
     Prog& p = xts_[K];
     std::string e;
-    if (!load(gen_to_xT(K, kBatch, xt_nt()), p, e)) {
+    if (!load(xt2() ? gen_to_xT2(K, kBatch, opt.old_mm || opt.f32_mm) : gen_to_xT(K, kBatch, xt_nt()), p, e)) {
         std::fprintf(stderr, "direct: to_xT kernel: %s\n", e.c_str());
         xts_.erase(K);
         return nullptr;
@@ -211,7 +215,7 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
         Prog* p = xt_prog(K);
         const uint32_t args[10] = {lo(y),           hi(y),           lo(pxT_.gpu),   hi(pxT_.gpu),   lo(pxs32_.gpu),
                                    hi(pxs32_.gpu), lo(pxs16_.gpu), hi(pxs16_.gpu), lo(px16_.gpu), hi(px16_.gpu)};
-        const uint32_t g[3] = {(uint32_t)(K / (4 * xt_nt() / kBatch)), 1, 1}, th[3] = {(uint32_t)xt_nt(), 1, 1};
+        const uint32_t g[3] = {(uint32_t)(xt2() ? K / 256 : K / (4 * xt_nt() / kBatch)), 1, 1}, th[3] = {(uint32_t)(xt2() ? 256 : xt_nt()), 1, 1};
         s.dispatch(p->k, p->code.gpu, args, 10, g, th);
     };
     auto mm = [&](const Weight& w, uint64_t y) {

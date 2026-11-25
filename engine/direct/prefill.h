@@ -143,4 +143,109 @@ inline std::string gen_to_xT(int K, int T, int NT = 256) {
     return k;
 }
 
+// to_xT2: the same outputs as to_xT with no LDS and no barriers (round 67:
+// the cross-token exponent made to_xT 7.0 / 16.0 us at K 4096 / 12288, two
+// barriers on 64-192 workgroups). Each thread owns one column for all T
+// tokens (T loads of 4 bytes, coalesced across the wave), so the max over
+// tokens is its own and a wave is exactly one 32-column exponent chunk: the
+// max and the 16- and 32-column sums by DPP and permlanex16. xT (a column's
+// T values) and x16 (its T/2 dwords) are contiguous a thread; xs16 / xs32
+// by the chunk's first lane (16 / 32 consecutive dwords). WXT 0 skips xT
+// (the f16 prompt kernels never read it).
+// Arguments as to_xT. Grid: K / 256 workgroups of 256. T is 8 or 16.
+inline std::string gen_to_xT2(int K, int T, bool WXT = true) {
+    auto S = [](long v) { return std::to_string(v); };
+    std::string k;
+    auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
+    auto lg = [](int v) { int l = 0; while ((1 << l) < v) l++; return l; };
+    if (T != 8 && T != 16) return "";
+    const int X = 8, Y = X + T, M = Y + T, SM = M + 2, E = SM + 2;   // x, scaled / sums, max, temps, exponent
+    k += ".kernel to_xT\n.wave32\n.user_sgprs 10\n.tgid_x\n";
+    o("s_mov_b32 s86, 0x76543210");
+    o("s_mov_b32 s87, 0xfedcba98");
+    o("v_lshlrev_b32 v3, 2, v0");
+    o("s_lshl_b32 s18, s10, 10");                       // 256 columns, 4 bytes
+    o("s_add_u32 s14, s0, s18");
+    o("s_addc_u32 s15, s1, 0");
+    for (int t = 0; t < T; t++) {
+        o("global_load_dword v" + S(X + t) + ", v3, s[14:15]");
+        if (t + 1 < T) {
+            o("s_add_u32 s14, s14, " + S(K * 4));
+            o("s_addc_u32 s15, s15, 0");
+        }
+    }
+    o("s_waitcnt vmcnt(0)");
+    // max |x| over the tokens, then the 32 columns of the wave
+    o("v_max3_f32 v" + S(M) + ", |v" + S(X) + "|, |v" + S(X + 1) + "|, 0");
+    for (int t = 2; t < T; t += 2)
+        o("v_max3_f32 v" + S(M) + ", v" + S(M) + ", |v" + S(X + t) + "|, |v" + S(X + t + 1) + "|");
+    auto red = [&](const std::string& op, int r) {   // v r over 16 lanes (xmask), into every lane of the row
+        for (int m : {1, 2, 4, 8}) {
+            o("v_nop");
+            o("v_nop");
+            o("v_" + op + "_f32_dpp v" + S(r) + ", v" + S(r) + ", v" + S(r) + " row_xmask:" + S(m) + " row_mask:0xf bank_mask:0xf");
+        }
+    };
+    red("max", M);
+    o("v_permlanex16_b32 v" + S(M + 1) + ", v" + S(M) + ", s86, s87");
+    o("v_max_f32 v" + S(M) + ", v" + S(M) + ", v" + S(M + 1));
+    o("v_lshrrev_b32 v" + S(E) + ", 23, v" + S(M));
+    o("v_add_nc_u32 v" + S(E) + ", 0xffffff7e, v" + S(E));   // E = biased exponent - 130
+    o("v_max_i32 v" + S(E) + ", 0xffffff9c, v" + S(E));      // at least -100
+    o("v_sub_nc_u32 v" + S(E + 1) + ", 0, v" + S(E));
+    o("v_and_b32 v" + S(E) + ", 0xff, v" + S(E));
+    // x16: x 2^-E, token pairs as f16 (low half the even token)
+    for (int t = 0; t < T; t++) o("v_ldexp_f32 v" + S(Y + t) + ", v" + S(X + t) + ", v" + S(E + 1));
+    for (int p = 0; p < T / 2; p++) o("v_cvt_pkrtz_f16_f32 v" + S(Y + p) + ", v" + S(Y + 2 * p) + ", v" + S(Y + 2 * p + 1));
+    o("s_lshl_b32 s17, s10, " + S(8 + lg(T * 2)));
+    o("s_add_u32 s12, s8, s17");
+    o("s_addc_u32 s13, s9, 0");
+    o("v_lshlrev_b32 v4, " + S(lg(T * 2)) + ", v0");
+    for (int i = 0; i < T / 8; i++) o("global_store_dwordx4 v4, v[" + S(Y + 4 * i) + ":" + S(Y + 4 * i + 3) + "], s[12:13] offset:" + S(16 * i));
+    if (WXT) {
+        o("s_lshl_b32 s17, s10, " + S(8 + lg(T * 4)));
+        o("s_add_u32 s12, s2, s17");
+        o("s_addc_u32 s13, s3, 0");
+        o("v_lshlrev_b32 v4, " + S(lg(T * 4)) + ", v0");
+        for (int i = 0; i < T / 4; i++) o("global_store_dwordx4 v4, v[" + S(X + 4 * i) + ":" + S(X + 4 * i + 3) + "], s[12:13] offset:" + S(16 * i));
+    }
+    // sums of 16 columns (xs16) into Y, then of 32 (xs32) into X, E in the low byte
+    for (int t = 0; t < T; t++) o("v_mov_b32 v" + S(Y + t) + ", v" + S(X + t));
+    o("v_nop");
+    o("v_nop");
+    for (int m : {1, 2, 4, 8})   // a token's step T instructions after its last: no waits
+        for (int t = 0; t < T; t++)
+            o("v_add_f32_dpp v" + S(Y + t) + ", v" + S(Y + t) + ", v" + S(Y + t) + " row_xmask:" + S(m) + " row_mask:0xf bank_mask:0xf");
+    for (int t = 0; t < T; t++) {
+        o("v_permlanex16_b32 v" + S(SM) + ", v" + S(Y + t) + ", s86, s87");
+        o("v_add_f32 v" + S(X + t) + ", v" + S(Y + t) + ", v" + S(SM));
+    }
+    for (int t = 0; t < T; t++) {
+        o("v_and_or_b32 v" + S(Y + t) + ", v" + S(Y + t) + ", 0xffffff00, v" + S(E));
+        o("v_and_or_b32 v" + S(X + t) + ", v" + S(X + t) + ", 0xffffff00, v" + S(E));
+    }
+    // xs16: lanes c % 16 == 0, at (c / 16) T
+    o("v_and_b32 v5, 15, v0");
+    o("v_cmp_eq_u32 vcc_lo, 0, v5");
+    o("s_and_saveexec_b32 s16, vcc_lo");
+    o("s_lshl_b32 s17, s10, " + S(4 + lg(T * 4)));
+    o("s_add_u32 s12, s6, s17");
+    o("s_addc_u32 s13, s7, 0");
+    o("v_lshlrev_b32 v4, " + S(lg(T * 4) - 4) + ", v0");
+    for (int i = 0; i < T / 4; i++) o("global_store_dwordx4 v4, v[" + S(Y + 4 * i) + ":" + S(Y + 4 * i + 3) + "], s[12:13] offset:" + S(16 * i));
+    o("s_mov_b32 exec_lo, s16");
+    // xs32: lanes c % 32 == 0, at (c / 32) T
+    o("v_and_b32 v5, 31, v0");
+    o("v_cmp_eq_u32 vcc_lo, 0, v5");
+    o("s_and_saveexec_b32 s16, vcc_lo");
+    o("s_lshl_b32 s17, s10, " + S(3 + lg(T * 4)));
+    o("s_add_u32 s12, s4, s17");
+    o("s_addc_u32 s13, s5, 0");
+    o("v_lshlrev_b32 v4, " + S(lg(T * 4) - 5) + ", v0");
+    for (int i = 0; i < T / 4; i++) o("global_store_dwordx4 v4, v[" + S(X + 4 * i) + ":" + S(X + 4 * i + 3) + "], s[12:13] offset:" + S(16 * i));
+    o("s_mov_b32 exec_lo, s16");
+    o("s_endpgm");
+    return k;
+}
+
 }  // namespace ts5::direct

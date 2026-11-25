@@ -295,8 +295,8 @@ int cmd_xt_bench(int, char**) {
     for (int K : {4096, 12288}) {
         gfx10::Kernel k;
         std::string err;
-      for (int NT : {256, 128}) {
-        if (!gfx10::assemble(gen_to_xT(K, T, NT), k, &err)) { std::fprintf(stderr, "xt-bench: %s\n", err.c_str()); return 1; }
+      for (int NT : {256, 1}) {   // 1: to_xT2 (no LDS)
+        if (!gfx10::assemble(NT == 1 ? gen_to_xT2(K, T) : gen_to_xT(K, T, NT), k, &err)) { std::fprintf(stderr, "xt-bench: %s\n", err.c_str()); return 1; }
         kfd::Buffer code;
         if (!dev.alloc(65536, kfd::Mem::Gtt, code)) return 1;
         std::memcpy(code.cpu, k.code.data(), k.code.size() * 4);
@@ -313,7 +313,7 @@ int cmd_xt_bench(int, char**) {
             const uint32_t args[10] = {(uint32_t)Y.gpu,   (uint32_t)(Y.gpu >> 32),   (uint32_t)xT.gpu, (uint32_t)(xT.gpu >> 32),
                                        (uint32_t)x32.gpu, (uint32_t)(x32.gpu >> 32), (uint32_t)x16.gpu, (uint32_t)(x16.gpu >> 32),
                                        (uint32_t)xh.gpu,  (uint32_t)(xh.gpu >> 32)};
-            const uint32_t g[3] = {(uint32_t)(K / (4 * NT / T)), 1, 1}, th[3] = {(uint32_t)NT, 1, 1};
+            const uint32_t g[3] = {(uint32_t)(NT == 1 ? K / 256 : K / (4 * NT / T)), 1, 1}, th[3] = {(uint32_t)(NT == 1 ? 256 : NT), 1, 1};
             double gs;
             {
                 pm4::Stream s;
