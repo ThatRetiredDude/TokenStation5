@@ -57,7 +57,8 @@ namespace ts5::direct {
 // bytes at (group NB + b) 4608: the 32 rows' 16-byte headers (lane i at 16 i),
 // then for quarter w, at 512 + 1024 w, the first 16 quant bytes of each row
 // (lane i at 16 i) and at + 512 the second 16. Every load is 512 contiguous bytes.
-inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 1, int LN = 32, bool BK = true, bool IL = false) {
+inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 1, int LN = 32, bool BK = true, bool IL = false, int D = 1) {
+    if (D < 1 || D > 3 || (D > 1 && RW != 1)) return "";
     if (LN == 64 && RW != 1) return "";
     if (IL && (RW != 1 || LN != 32)) return "";
     const int LB = LN == 64 ? 6 : 5, L4 = 4 * LN;   // log2 lanes; bytes a row of lanes
@@ -67,7 +68,7 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
     const int NB = K / 256, RB = NB * 144, P = T / 2;   // dwords of x a column
     if (NB % SK) return "";
     // per row r: quants A + 12 r (B + 12 r), scales SC + 2 r, minimums MN + 2 r, sums ACC + T r, f16 sums TMP + P r
-    const int A = 8, B = A + 12 * RW, SC = B + 12 * RW, MN = SC + 2 * RW, ACC = MN + 2 * RW, TMP = ACC + T * RW;
+    const int A = 8, B = A + 12 * RW, C3 = B + 12 * RW, SC = (D == 3 ? C3 + 12 : C3), MN = SC + 2 * RW, ACC = MN + 2 * RW, TMP = ACC + T * RW;
     BK = BK && RW == 1 && TMP % 4 == 0;
     const int U = BK ? TMP + std::max(8, 4 * ((P - 1) / 3) + (P - 1) % 3 + 1) : TMP + P * RW;   // (BK: past W1 = TMP + 7 and the last sum)
     auto tr = [&](int r, int p) { return BK ? TMP + 4 * (p / 3) + p % 3 : TMP + P * r + p; };   // f16 sum p of row r
@@ -120,6 +121,10 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
         }
     };
     load(A);
+    if (D == 3 && NB / SK >= 2 && !(exp & 8)) {   // block g + SK into B as well
+        for (const char* v : {"v1", "v2"}) o(std::string("v_add_nc_u32 ") + v + ", " + S((IL ? 4608 : 144) * SK) + ", " + v);
+        load(B);
+    }
     o("s_mul_i32 s11, s19, " + S(64 * P * 4));
     o("s_mul_i32 s16, s17, " + S(256 * P * 4));
     o("s_add_u32 s11, s11, s16");
@@ -138,27 +143,38 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
         }
     };
     sload(SX, XC ? P : 4 * P, "s[12:13]", 0);
-    k += "block:\n";
+    auto body = [&](int cur, int nxt, const std::string& sfx) {
     for (const char* v : {"v1", "v2", "v6", "v7"})
         if (RW == 2 || v[1] < '3') o(std::string("v_add_nc_u32 ") + v + ", " + S((IL ? 4608 : 144) * SK) + ", " + v);
     // the next block's quants, unless this is the last (past the matrix's end)
-    o("s_cmp_eq_u32 s16, 1");
-    o("s_cbranch_scc1 noload");
-    if (!(exp & 8)) load(B);
-    k += "noload:\n";
-    o("s_waitcnt vmcnt(" + S(3 * RW) + ")");
+    if (D == 1) {
+        o("s_cmp_eq_u32 s16, 1");
+        o("s_cbranch_scc1 noload" + sfx);
+        if (!(exp & 8)) load(nxt);
+        k += "noload" + sfx + ":\n";
+        o("s_waitcnt vmcnt(" + S(3 * RW) + ")");
+    } else {   // block i + D - 1 into the set block i - 1 used; then wait for block i's
+        o("s_cmp_lt_u32 s16, " + S(D));
+        o("s_cbranch_scc1 noload" + sfx);
+        if (!(exp & 8)) load(nxt);
+        o("s_waitcnt vmcnt(" + S(3 * (D - 1)) + ")");
+        o("s_branch loaded" + sfx);
+        k += "noload" + sfx + ":\n";
+        o("s_waitcnt vmcnt(0)");
+        k += "loaded" + sfx + ":\n";
+    }
     auto bit = [](int byte) { return 8 * (byte % 4); };
     std::string Hr;
     auto H = [&](int byte) { return "v" + S(std::stoi(Hr) + 1 + byte / 4); };
     for (int w = 0; w < 4; w++) {
-        k += "sc" + S(w) + ":\n";
+        k += "sc" + S(w) + sfx + ":\n";
         if (w < 3) {
             o("s_cmp_lg_u32 s19, " + S(w));
-            o("s_cbranch_scc1 sc" + S(w + 1));
+            o("s_cbranch_scc1 sc" + S(w + 1) + sfx);
         }
         for (int r = 0; r < RW; r++)
         for (int jj = 0; jj < 2; jj++) {
-            Hr = S(A + 12 * r);
+            Hr = S(cur + 12 * r);
             const int j = 2 * w + jj;
             const std::string sc = "v" + S(SC + 2 * r + jj), m = "v" + S(MN + 2 * r + jj);
             if (j < 4) {
@@ -173,12 +189,12 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
                 o("v_lshl_or_b32 " + m + ", v" + S(U) + ", 4, " + m);
             }
         }
-        o("s_branch scdone");
+        o("s_branch scdone" + sfx);
     }
-    k += "scdone:\n";
+    k += "scdone" + sfx + ":\n";
     for (int r = 0; r < RW; r++) {
-    o("v_cvt_f32_f16 v" + S(U) + ", v" + S(A + 12 * r));
-    o("v_lshrrev_b32 v" + S(U + 1) + ", 16, v" + S(A + 12 * r));
+    o("v_cvt_f32_f16 v" + S(U) + ", v" + S(cur + 12 * r));
+    o("v_lshrrev_b32 v" + S(U + 1) + ", 16, v" + S(cur + 12 * r));
     o("v_cvt_f32_f16 v" + S(U + 1) + ", v" + S(U + 1));
     for (int jj = 0; jj < 2; jj++) {
         const std::string sc = "v" + S(SC + 2 * r + jj), m = "v" + S(MN + 2 * r + jj);
@@ -198,16 +214,16 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
         else if (st + 1 < 16) sload(buf(st + 1), 4 * P, "s[12:13]", xoff(st + 1));
         else {   // the next block's first step, unless this is the last
             o("s_cmp_eq_u32 s16, 1");
-            o("s_cbranch_scc1 nox");
+            o("s_cbranch_scc1 nox" + sfx);
             sload(buf(0), 4 * P, "s[12:13]", 256 * SK * P * 4);
-            k += "nox:\n";
+            k += "nox" + sfx + ":\n";
         }
         if (dw == 6) sload(SXS, T, "s[14:15]", jj * T * 4);   // the sub-block's sums, for its end
         for (int r = 0; r < RW; r++) {
         // The quants to f16 pairs by the exponent trick (round 62): a nibble
         // n or'd into 0x6400 is the f16 1024 + n, less 1024 exactly. W0 holds
         // columns 0 and 2 (bytes 0, 2), W1 columns 1 and 3.
-        const std::string q = "v" + S(A + 12 * r + 4 + dw), u = "v" + S(U), w0 = "v" + S(W0), w1 = "v" + S(W1);
+        const std::string q = "v" + S(cur + 12 * r + 4 + dw), u = "v" + S(U), w0 = "v" + S(W0), w1 = "v" + S(W1);
         if (!(exp & 2)) {
             if (jj) {
                 o("v_lshrrev_b32 " + u + ", 4, " + q);
@@ -230,9 +246,9 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
                 else if (idx + 1 < 64) sload(SX + ((idx + 1) & 1) * P, P, "s[12:13]", xoff((idx + 1) / 4) + ((idx + 1) % 4) * P * 4);
                 else {
                     o("s_cmp_eq_u32 s16, 1");
-                    o("s_cbranch_scc1 nox");
+                    o("s_cbranch_scc1 nox" + sfx);
                     sload(SX, P, "s[12:13]", 256 * SK * P * 4);
-                    k += "nox:\n";
+                    k += "nox" + sfx + ":\n";
                 }
             }
             for (int p = 0; p < P; p++) {
@@ -262,11 +278,27 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
     o("s_addc_u32 s13, s13, 0");
     o("s_add_u32 s14, s14, " + S(8 * SK * T * 4));
     o("s_addc_u32 s15, s15, 0");
-    o("s_waitcnt vmcnt(0)");
-    for (int i = 0; i < 12 * RW; i++) o("v_mov_b32 v" + S(A + i) + ", v" + S(B + i));
-    o("s_sub_u32 s16, s16, 1");
-    o("s_cmp_lg_u32 s16, 0");
-    o("s_cbranch_scc1 block");
+    };
+    if (D == 1) {
+        k += "block:\n";
+        body(A, B, "");
+        o("s_waitcnt vmcnt(0)");
+        for (int i = 0; i < 12 * RW; i++) o("v_mov_b32 v" + S(A + i) + ", v" + S(B + i));
+        o("s_sub_u32 s16, s16, 1");
+        o("s_cmp_lg_u32 s16, 0");
+        o("s_cbranch_scc1 block");
+    } else {   // D register sets in turn, the loop unrolled D times (no copies; blocks D - 1 ahead)
+        const int set[3] = {A, B, C3};
+        k += "block:\n";
+        for (int u = 0; u < D; u++) {
+            body(set[u], set[(u + D - 1) % D], "_" + S(u));
+            o("s_sub_u32 s16, s16, 1");
+            o("s_cmp_eq_u32 s16, 0");
+            o("s_cbranch_scc1 blocks_done");
+        }
+        o("s_branch block");
+        k += "blocks_done:\n";
+    }
     o("v_lshlrev_b32 v5, 2, v0");
     o("s_mul_i32 s11, s18, " + S(RW * T * L4));
     o("v_add_nc_u32 v5, s11, v5");
