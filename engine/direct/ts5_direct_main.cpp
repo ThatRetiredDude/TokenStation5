@@ -914,7 +914,7 @@ int main(int argc, char** argv) {
         const int K = argc > 2 ? std::atoi(argv[2]) : 4096, T = argc > 3 ? std::atoi(argv[3]) : 16;
         const bool q6 = argc > 4 && std::string(argv[4]) == "q6";
         const int ex = argc > 5 ? std::atoi(argv[5]) : 0;   // gen-mm K T q4 EXP: mm_q4k's timing experiment
-        std::fputs((q6 ? (ex == 10 ? ts5::direct::gen_mm_q6k_sb(K, T) : ts5::direct::gen_mm_q6k(K, T)) : ex == 10 ? ts5::direct::gen_mm_q4k_sb(K, T) : ts5::direct::gen_mm_q4k(K, T, 4, ex)).c_str(), stdout);
+        std::fputs((q6 ? (ex == 10 ? ts5::direct::gen_mm_q6k_sb(K, T) : ts5::direct::gen_mm_q6k(K, T)) : ex >= 10 ? ts5::direct::gen_mm_q4k_sb(K, T, ex - 9) : ts5::direct::gen_mm_q4k(K, T, 4, ex)).c_str(), stdout);
         return 0;
     }
     if (cmd == "gen-mv6") {   // prints mv_q6k for a column count [diag]
