@@ -206,6 +206,15 @@ const Pace& pace() {
 
 double Runner::die_temp() { return pace().read(); }
 
+// Profile stamps (opt.profile): TS5_DIRECT_STAMP=me writes them from the
+// command processor after a wait for the kernels before (pm4 stamp_me),
+// otherwise end-of-pipe as before (round 108: being checked).
+static void prof_stamp(pm4::Stream& s, uint64_t addr) {
+    static const bool me = std::getenv("TS5_DIRECT_STAMP") && std::strcmp(std::getenv("TS5_DIRECT_STAMP"), "me") == 0;
+    if (me) s.stamp_me(addr);
+    else s.stamp(addr);
+}
+
 static bool dattn() {   // generation's attention: attn_d (round 91); TS5_DIRECT_DATTN=old: attn_part
     static const bool on = !(std::getenv("TS5_DIRECT_DATTN") && std::strcmp(std::getenv("TS5_DIRECT_DATTN"), "old") == 0);
     return on;
@@ -457,7 +466,7 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
     auto stamp = [&](int step_id) {
         if (!opt.profile) return;
         ((uint32_t*)bstamp_.cpu)[2048 + ns] = (uint32_t)step_id;
-        s.stamp(bstamp_.gpu + 8 * ns++);
+        prof_stamp(s, bstamp_.gpu + 8 * ns++);
     };
     if (seq == 0) s.acquire_all();
     else barrier();
@@ -885,7 +894,7 @@ void Runner::build(int32_t id, int pos, uint64_t seq, pm4::Stream& s) {
     auto stamp = [&](int step_id) {
         if (!opt.profile) return;
         ((uint32_t*)bstamp_.cpu)[2048 + ns] = (uint32_t)step_id;
-        s.stamp(bstamp_.gpu + 8 * ns++);
+        prof_stamp(s, bstamp_.gpu + 8 * ns++);
     };
     auto skip = [&]() { return opt.mvonly && timing; };
     static const bool msp = std::getenv("TS5_DIRECT_MSPLIT") && std::atoi(std::getenv("TS5_DIRECT_MSPLIT")) == 1;
@@ -1138,7 +1147,7 @@ void Runner::build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4
     auto stamp = [&](int step_id) {   // opt.profile: build()'s steps
         if (!opt.profile) return;
         ((uint32_t*)bstamp_.cpu)[2048 + ns] = (uint32_t)step_id;
-        s.stamp(bstamp_.gpu + 8 * ns++);
+        prof_stamp(s, bstamp_.gpu + 8 * ns++);
     };
     auto barrier = [&]() {
         s.wait_kernels();

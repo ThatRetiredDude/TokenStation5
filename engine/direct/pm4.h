@@ -15,6 +15,7 @@ enum : uint32_t {
     NOP = 0x10,
     DISPATCH_DIRECT = 0x15,
     WRITE_DATA = 0x37,
+    COPY_DATA = 0x40,
     WAIT_REG_MEM = 0x3c,
     INDIRECT_BUFFER = 0x3f,
     EVENT_WRITE = 0x46,
@@ -128,6 +129,17 @@ struct Stream {
     void stamp(uint64_t addr) {
         uint32_t event = CACHE_FLUSH_AND_INV_TS_EVENT | 5u << 8;
         packet(RELEASE_MEM, {event, 3u << 29, (uint32_t)addr, (uint32_t)(addr >> 32), 0, 0, 0});
+    }
+
+    // The GPU's clock at `addr` when the queue gets here, after waiting for
+    // every kernel before it (round 108: the end-of-pipe stamps above gave
+    // profiles of a verify pass whose steps were impossible, e.g. 36 q/k
+    // launches in 0.05 ms; this one is written by the command processor
+    // itself once the wait is over). COPY_DATA from the GPU clock (src 9),
+    // 64 bits, to memory with a write confirm.
+    void stamp_me(uint64_t addr) {
+        wait_kernels();
+        packet(COPY_DATA, {9u | 5u << 8 | 1u << 16 | 1u << 20, 0, 0, (uint32_t)addr, (uint32_t)(addr >> 32)});
     }
 };
 

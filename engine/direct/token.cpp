@@ -4,6 +4,7 @@
 //
 //   ts5-direct token MODEL.gguf [tokens to time] [context] [profile|serial|nolight|fused|mvonly ...]
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -451,8 +452,8 @@ int cmd_pprof(int argc, char** argv) {
 // run's. GPU ms a token and a pass from the queue's timestamps.
 // Paced (round 108: unpaced at prompt 4000 it took the die past 91 C in
 // ~20 s): each phase starts at Tctl < TS5_VT_START (default 60 C), and
-// between passes at TS5_VT_HOT (default 82) or more it waits for
-// TS5_VT_COOL (default 70) or less. The pauses are between passes, so the
+// after a pass that read TS5_VT_HOT (default 82) or more at any point it
+// waits for TS5_VT_COOL (default 70) or less. The pauses are between passes, so the
 // GPU times of the passes don't include them; "paused" says how long.
 int cmd_verify_test(int argc, char** argv) {
     if (argc < 3) return fail("usage: verify-test MODEL.gguf [tokens] [prompt] [context] [profile]");
@@ -480,8 +481,23 @@ int cmd_verify_test(int argc, char** argv) {
         }
         paused += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     };
+    // Tctl read every 5 ms on a thread (round 108: read only between passes
+    // it said 76.5 C while the die ran at 86-90; it drops within ms of the
+    // GPU going idle); a pass whose highest reading was TS5_VT_HOT or more
+    // waits for TS5_VT_COOL after it.
+    std::atomic<int> hot_mc{0};
+    std::atomic<bool> sampling{true};
+    std::thread sampler([&]() {
+        while (sampling.load()) {
+            const int mc = (int)(Runner::die_temp() * 1000);
+            int cur = hot_mc.load();
+            while (mc > cur && !hot_mc.compare_exchange_weak(cur, mc)) {}
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+    struct Join { std::atomic<bool>& f; std::thread& t; ~Join() { f = false; t.join(); } } join{sampling, sampler};
     auto pace_pass = [&]() {   // between passes
-        const double c = Runner::die_temp();
+        const double c = hot_mc.exchange(0) / 1000.0;
         peak = std::max(peak, c);
         if (c >= vt_hot) wait_below(vt_cool + 0.01);
     };
