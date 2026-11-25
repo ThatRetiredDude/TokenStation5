@@ -129,15 +129,23 @@ static bool attn2() {   // TS5_DIRECT_ATTN2=0: the old attention a token at a ti
 // TS5_DIRECT_HOT (default 83), lets the GPU drain and waits until it reads
 // TS5_DIRECT_COOL (default 75) or less (the die cools ~30 C in 0.1 s).
 // TS5_DIRECT_PACE=0 turns it off.
+// Long prompts (TS5_DIRECT_LONG tokens or more, default 2048; the backend
+// says how long a prompt is before its first pass) pace at TS5_DIRECT_HOT_LONG
+// / TS5_DIRECT_COOL_LONG instead: Vulkan's long prompts run the die at 88-91 C
+// (round 84), and a short prompt barely reaches 79 C either way.
 namespace {
 struct Pace {
-    int fd = -1;
+    int fd = -1, long_tokens = 2048;
     double hot = 83, cool = 75;   // round 82: 80/70 gave 873-903 tok/s, 83/75 928 at Tctl max 78.75
+    double hot_long = 86, cool_long = 80;
     Pace() {
         const char* e = std::getenv("TS5_DIRECT_PACE");
         if (e && std::atoi(e) == 0) return;
         if (const char* h = std::getenv("TS5_DIRECT_HOT")) hot = std::atof(h);
         if (const char* c = std::getenv("TS5_DIRECT_COOL")) cool = std::atof(c);
+        if (const char* h = std::getenv("TS5_DIRECT_HOT_LONG")) hot_long = std::atof(h);
+        if (const char* c = std::getenv("TS5_DIRECT_COOL_LONG")) cool_long = std::atof(c);
+        if (const char* l = std::getenv("TS5_DIRECT_LONG")) long_tokens = std::atoi(l);
         for (int i = 0; i < 32 && fd < 0; i++) {
             char path[64], name[32] = {0};
             std::snprintf(path, sizeof path, "/sys/class/hwmon/hwmon%d/name", i);
@@ -525,10 +533,12 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
             volatile uint64_t* lf = (volatile uint64_t*)((char*)dev_.signals.cpu + 64);
             s.release(dev_.signals.gpu + 64, ++lseq_);
             if (lseq_ > 2 && !dev_.wait(lf, lseq_ - 2, 60000)) return false;
-            if (pace().read() >= pace().hot) {
+            const bool lp = prompt_tokens_ >= pace().long_tokens;
+            const double hot = lp ? pace().hot_long : pace().hot, cool = lp ? pace().cool_long : pace().cool;
+            if (pace().read() >= hot) {
                 const auto t0 = std::chrono::steady_clock::now();
                 if (lseq_ > 1 && !dev_.wait(lf, lseq_ - 1, 60000)) return false;
-                for (int i = 0; i < 500 && pace().read() > pace().cool; i++)
+                for (int i = 0; i < 500 && pace().read() > cool; i++)
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 pauses_++;
                 pause_s_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

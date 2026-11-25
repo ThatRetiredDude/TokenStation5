@@ -27,6 +27,7 @@ public:
             return false;
         }
         int i = 0;
+        r_.set_prompt_tokens(n);
         if (!(all_logits && logits) && r_.batch_ok())
             // Big passes of 128-512 while 128 are left (big_ok), then batches
             // of kBatch; a tail of 4 or more is one more (short) batch.

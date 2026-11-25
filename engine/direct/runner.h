@@ -67,6 +67,8 @@ public:
     uint64_t sent() const { return seq_; }
     // Thermal pauses between big-pass layers so far, and their seconds.
     int pauses() const { return pauses_; }
+    // The whole prompt's length, before its first pass: long prompts pace hotter.
+    void set_prompt_tokens(int n) { prompt_tokens_ = n; }
     double pause_s() const { return pause_s_; }
 
     int n_ctx() const { return ctx_; }
@@ -105,7 +107,7 @@ private:
     size_t kv_layer_ = 0;
     uint32_t wgs_ = 0, step_ = 0, scale_bits_ = 0;
     uint64_t seq_ = 0, lseq_ = 0;
-    int pauses_ = 0;
+    int pauses_ = 0, prompt_tokens_ = 0;
     double pause_s_ = 0;
     int nstamps_ = 0;
     std::map<uint64_t, Prog> mvs_, mms_, xts_;
