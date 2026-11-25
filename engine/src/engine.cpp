@@ -118,7 +118,7 @@ void Engine::note_call(int pos, int n, bool gen) {
     // gen: a generation step (one token, or a verify pass whose K/V are bit
     // for bit one token's), noted as one-token positions whatever its n
     const int sm = b_->exact_call_max();
-    if (gen && n > sm) n = 1;
+    if (gen && n > sm && b_->verify_bit_exact()) n = 1;
     if (n > sm || runs_.empty() || runs_.back().n > sm) runs_.push_back({pos, n});
 }
 

@@ -67,6 +67,9 @@ public:
     // ones as they were made). SoKnee: 3 (from 4 its prompt kernels, whose
     // rounding differs).
     virtual int exact_call_max() const { return 8; }
+    // A generation step's call of several tokens (speculative decoding's
+    // verify) writes K/V bit for bit as one token at a time would (SoKnee).
+    virtual bool verify_bit_exact() const { return false; }
     // A backend whose state only goes forward (rewind_limit() 0: Qwen3.5's
     // linear layers) keeps state_slots() copies of it, so a request that
     // shares the start of the last one goes on from a copy, not from the
