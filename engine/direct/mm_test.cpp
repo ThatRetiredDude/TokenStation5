@@ -24,6 +24,7 @@ int cmd_mm_q4k(int argc, char** argv) {
     const bool q6 = std::string(argv[1]) == "mm-q6k";
     const int T = argc > 2 ? std::atoi(argv[2]) : 16;
     const int SPLIT = argc > 3 ? std::atoi(argv[3]) : 4;
+    const int EXP = argc > 4 ? std::atoi(argv[4]) : 0;   // gen_mm_q4k's timing experiments (results wrong)
     if (T != 8 && T != 16) { std::fprintf(stderr, "mm-q4k: T is 8 or 16\n"); return 1; }
     if (SPLIT != 1 && SPLIT != 2 && SPLIT != 4 && SPLIT != 8) { std::fprintf(stderr, "mm-q4k: split is 1, 2, 4 or 8\n"); return 1; }
     const int BB = q6 ? 210 : 144, SUB = q6 ? 16 : 32;   // bytes a block, values a sub-block (x sums)
@@ -52,14 +53,15 @@ int cmd_mm_q4k(int argc, char** argv) {
     uint32_t seed = 777;
     auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
     bool all_ok = true;
-    std::printf("%s, T = %d tokens a pass, %d waves a workgroup\n", q6 ? "mm_q6k" : "mm_q4k", T, SPLIT);
+    std::printf("%s, T = %d tokens a pass, %d waves a workgroup%s\n", q6 ? "mm_q6k" : "mm_q4k", T, SPLIT,
+                EXP == 1 ? ", TIMING ONLY: no x loads" : EXP == 2 ? ", TIMING ONLY: no unpacking" : EXP == 3 ? ", TIMING ONLY: neither" : "");
     for (const Shape& sh : shapes) {
         const int NB = sh.K / 256;
         if (NB % SPLIT || (q6 && (NB / SPLIT) % 2)) continue;
         const size_t rb = (size_t)NB * BB, wbytes = rb * sh.R;
         gfx10::Kernel k;
         std::string err;
-        if (!gfx10::assemble(q6 ? gen_mm_q6k(sh.K, T, SPLIT) : gen_mm_q4k(sh.K, T, SPLIT), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
+        if (!gfx10::assemble(q6 ? gen_mm_q6k(sh.K, T, SPLIT) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
         kfd::Buffer code, W, xT, xs, Y;
         const size_t cb = (k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, code) || !dev.alloc(wbytes + 4096, kfd::Mem::Gtt, W) ||
@@ -132,7 +134,7 @@ int cmd_mm_q4k(int argc, char** argv) {
             if (e > 1e-5 && bad++ == 0) first = i;
             worst = std::max(worst, e);
         }
-        if (bad) {
+        if (bad && !EXP) {
             all_ok = false;
             std::printf("  %s: WRONG, %zu of %zu values, worst %.3g, first token %zu row %zu: gpu %g cpu %g\n", sh.name, bad,
                         (size_t)T * sh.R, worst, first / sh.R, first % sh.R, y[first], ref[first]);
