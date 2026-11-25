@@ -46,6 +46,16 @@ public:
     // The most positions whose logits forward_in_place can leave at
     // logits_view() at once (all_logits).
     virtual int in_place_rows() const { return 1 << 30; }
+    // Greedy drafting on the device (a drafter that picks each next token on
+    // its GPU, SoKnee): enter tokens[0..n-1] at pos0.., then k - 1 more, each
+    // the argmax after the one before, with no host round trip between; out
+    // gets the k argmaxes in order. Only when greedy_drafts().
+    virtual bool greedy_drafts() const { return false; }
+    virtual bool draft_greedy(const int32_t *tokens, int n, int pos0, int k, int32_t *out, std::string &err) {
+        (void)tokens, (void)n, (void)pos0, (void)k, (void)out;
+        err = "no greedy drafting on this backend";
+        return false;
+    }
     virtual int n_ctx() const = 0;
     // How far before the furthest position forwarded so far a forward call
     // may start and still find the keys it needs: a sliding layer's ring

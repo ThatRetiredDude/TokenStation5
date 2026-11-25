@@ -295,6 +295,40 @@ void Engine::draft_model(int32_t tok, int k, std::vector<int32_t> &out) {
     draft_n_ = 0;
     catch_ms_ = 0;
     catch_n_ = 0;
+    if (db_->greedy_drafts()) {
+        // All k drafts in one go on the drafter's GPU (SoKnee round 103: 4
+        // chained drafts 7.1 ms against 2.1-2.2 ms each with a host round
+        // trip and argmax between). A real backlog first, timed as catch-up.
+        const int32_t *in = cu_.data();
+        int n = (int)cu_.size(), at = (int)dcached_;
+        if (n >= 9) {
+            const double t0 = now_ms();
+            if (!db_->forward(in, n - 1, at, nullptr, false, err)) {
+                drafter_ok_ = false;
+                ts5::log_line("ts5: draft model failed (%s); drafting by lookup only", err.c_str());
+                return;
+            }
+            catch_ms_ += now_ms() - t0;
+            catch_n_ += n - 1;
+            in += n - 1, at += n - 1, n = 1;
+        }
+        gd_.resize(k);
+        const double t0 = now_ms();
+        if (!db_->draft_greedy(in, n, at, k, gd_.data(), err)) {
+            drafter_ok_ = false;
+            ts5::log_line("ts5: draft model failed (%s); drafting by lookup only", err.c_str());
+            return;
+        }
+        draft_ms_ += now_ms() - t0;  // (a few backlog tokens cost as one draft)
+        draft_n_ += k;
+        for (int i = 0; i < k; i++) {
+            t = gd_[i];
+            if (t < 0 || t >= (int32_t)m_.hp.n_vocab) break;
+            out.push_back(t);
+            if (t_.is_eog(t)) break;
+        }
+        return;
+    }
     for (int i = 0; i < k; i++) {
         const int32_t *in = i == 0 ? cu_.data() : &t;
         const int n = i == 0 ? (int)cu_.size() : 1;
@@ -733,7 +767,11 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
             const double behind = (double)(cached_.size() - dcached_);
             const double catch_per = t_catch > 0 ? t_catch : 0.2 * per;
             mk = best_k(room, by_drafter.p(0.6f), per, catch_per * behind / 16);
-            if (mk == 0 && step >= dprobe_next) {
+            // No probe while the drafter is far behind (a long prompt): a
+            // probe then only catches it up one 256-token chunk and drafts
+            // nothing (SoKnee round 103: 10-18 probes on 7k-token prompts
+            // cost 0.2-1.7 s a request and never drafted).
+            if (mk == 0 && step >= dprobe_next && behind <= 512) {
                 mk = std::min(room, 2);
                 dprobe = true;
             }
@@ -802,7 +840,8 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         if (dprobe) {
             // Worth it: with what the probe showed, the cost model would draft.
             const double per = t_draft > 0 ? t_draft : fwd_ms(1) / 8;
-            const bool worth = best_k(room, by_drafter.p(0.6f), per, 0.0) > 0;
+            // (a probe that drafted nothing, only caught up, showed nothing)
+            const bool worth = batch.size() > 1 && best_k(room, by_drafter.p(0.6f), per, 0.0) > 0;
             dprobe_every = worth ? 16 : std::min(dprobe_every * 2, 128);
             dprobe_next = step + dprobe_every;
         }

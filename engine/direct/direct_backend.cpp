@@ -81,6 +81,31 @@ public:
         return forward(tokens, n, pos0, nullptr, false, err);
     }
     int in_place_rows() const override { return r_.verify_ok() ? direct::Runner::kVerify : 1; }
+    // A helper's drafts (round 104): the tokens in, then k - 1 sends of the
+    // last argmax (send(-1)), one wait; drafts are the tokens those sends
+    // embedded, and the last argmax.
+    bool greedy_drafts() const override { return true; }
+    bool draft_greedy(const int32_t *tokens, int n, int pos0, int k, int32_t *out, std::string &err) override {
+        if (pos0 < 0 || n < 1 || k < 1 || pos0 + n + k - 1 > r_.n_ctx()) {
+            err = "position past the context";
+            return false;
+        }
+        view_ = nullptr;
+        int i = 0;
+        if (r_.batch_ok())
+            for (int c; n - i >= 4; i += c) {
+                c = r_.prompt_chunk(n - i);
+                if (!r_.send_batch(tokens + i, c, pos0 + i, i + c == n)) return fail(err);
+            }
+        for (; i < n; i++)
+            if (!r_.send(tokens[i], pos0 + i)) return fail(err);
+        for (int j = 1; j < k; j++)
+            if (!r_.send(-1, pos0 + n - 1 + j)) return fail(err);
+        if (!r_.wait_all()) return fail(err);
+        for (int j = 0; j + 1 < k; j++) out[j] = r_.token_at(pos0 + n + j);
+        out[k - 1] = r_.picked();
+        return true;
+    }
     int n_ctx() const override { return r_.n_ctx(); }
     KvType kv_type() const override { return KvType::F16; }
 
