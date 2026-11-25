@@ -34,10 +34,11 @@ inline std::string gen_mm_t(int K, bool q6, int SK = 1) {
     // VGPRs: v0 thread, v1 W read (rg 16), v2 x read (tg 16), v3 quant row
     // offset, v4 x16 offset, v5 thread 4, v6 scratch address, A v7-10 (8 rows'
     // quants), B v11-14 (8 tokens' x), staging v15-26 (quants 4 / ql 4 qh 4,
-    // then x 8), header v27-30 (Q6_K: v27 its two scales and d), xs v31,
+    // then x 8), header v27-30 (Q6_K: v31, its two scales and d; round 79:
+    // at v27 it overlapped the staged x), xs v31 (Q4_K),
     // f16 sums v32-63 (row i, pair p: 32 + 4 i + p), f32 sums v64-127
     // (token t, row i: 64 + 8 t + i).
-    const int A = 7, B = 11, Q = 15, QH = 19, X = 15 + (q6 ? 8 : 4), H = 27, XSV = 31, TMP = 32, ACC = 64;
+    const int A = 7, B = 11, Q = 15, QH = 19, X = 15 + (q6 ? 8 : 4), H = q6 ? 31 : 27, XSV = 31, TMP = 32, ACC = 64;
     // SGPRs: s10 row tile, s11 token tile, s12 SK slice; s[14:15] the block
     // being loaded, s[16:17] s[32:33] s[34:35] scratch addresses, s[18:19]
     // x16 and s[20:21] xs of the sub-block being loaded, s22 sub-blocks
