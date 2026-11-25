@@ -222,6 +222,23 @@ int cmd_token(int argc, char** argv) {
                         mode == 0 ? "batches of 16" : "a token at a time", gs * 1e3, 512 / gs, 512 / hs);
             std::fflush(stdout);
         }
+        // Where a batch's time goes: the same 512 tokens, each batch waited
+        // for and stamped between steps (the stamps' waits add a little).
+        {
+            const bool was = R.opt.profile;
+            R.opt.profile = true;
+            std::vector<double> acc(S_COUNT, 0.0);
+            for (int i = 0; i < 512 && 512 <= ctx; i += Runner::kBatch) {
+                if (!R.send_batch(filler.data() + i, Runner::kBatch, i) || !R.wait_all(60000)) return fail(R.err() + " (profiled prompt)");
+                R.add_profile(acc);
+            }
+            R.opt.profile = was;
+            double tot = 0;
+            for (double x : acc) tot += x;
+            std::printf("prompt profile (per prompt token, 512 tokens in batches of 16, %.2f ms a token in all):\n", tot / 512 * 1e3);
+            for (int i = 0; i < S_COUNT; i++)
+                if (acc[i] > 0) std::printf("  %-18s %8.3f ms  %5.1f%%\n", kStepName[i], acc[i] / 512 * 1e3, 100 * acc[i] / tot);
+        }
     } else {
         std::printf("prompt batches: not available for this model\n");
     }

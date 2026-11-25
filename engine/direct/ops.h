@@ -20,32 +20,36 @@ inline std::string f32_bits(float f) {
 // y = x / sqrt(mean(x^2) + eps) * w, n values (a multiple of 1024), one
 // workgroup of 256 threads, each n/256 consecutive values. add: first
 // x += t (written back), the residual add after a layer's attention or FFN.
-// Arguments: s[0:1] x, s[2:3] w, s[4:5] y, s[6:7] t (add only).
+// Arguments: s[0:1] x, s[2:3] w, s[4:5] y, s[6:7] t (add only); s8 workgroup
+// id: workgroup g takes the g-th row of n of x, y and t (a prompt batch's
+// tokens in one launch; one workgroup for a single token).
 inline std::string gen_rmsnorm(int n, float eps, bool add = false) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
     const int per = n / 256, nl = per / 4;   // values and 16-byte loads per thread
-    k += std::string(".kernel ") + (add ? "add_rmsnorm" : "rmsnorm") + "\n.wave32\n.user_sgprs 8\n.lds 64\n";
-    o("v_mul_u32_u24 v1, " + S(per * 4) + ", v0");
-    for (int i = 0; i < nl; i++) o("global_load_dwordx4 v[" + S(8 + 4 * i) + ":" + S(11 + 4 * i) + "], v1, s[0:1] offset:" + S(16 * i));
+    k += std::string(".kernel ") + (add ? "add_rmsnorm" : "rmsnorm") + "\n.wave32\n.user_sgprs 8\n.tgid_x\n.lds 64\n";
+    o("v_mul_u32_u24 v1, " + S(per * 4) + ", v0");   // in w
+    o("s_mul_i32 s12, s8, " + S(n * 4));
+    o("v_add_nc_u32 v4, s12, v1");                   // in x, y, t: the workgroup's row
+    for (int i = 0; i < nl; i++) o("global_load_dwordx4 v[" + S(8 + 4 * i) + ":" + S(11 + 4 * i) + "], v4, s[0:1] offset:" + S(16 * i));
     if (add)
         for (int i = 0; i < nl; i++)
-            o("global_load_dwordx4 v[" + S(80 + 4 * i) + ":" + S(83 + 4 * i) + "], v1, s[6:7] offset:" + S(16 * i));
+            o("global_load_dwordx4 v[" + S(80 + 4 * i) + ":" + S(83 + 4 * i) + "], v4, s[6:7] offset:" + S(16 * i));
     for (int i = 0; i < nl; i++) o("global_load_dwordx4 v[" + S(8 + per + 4 * i) + ":" + S(11 + per + 4 * i) + "], v1, s[2:3] offset:" + S(16 * i));
     o("s_waitcnt vmcnt(" + S(nl) + ")");
     if (add) {
         for (int i = 0; i < per; i++) o("v_add_f32 v" + S(8 + i) + ", v" + S(8 + i) + ", v" + S(80 + i));
-        for (int i = 0; i < nl; i++) o("global_store_dwordx4 v1, v[" + S(8 + 4 * i) + ":" + S(11 + 4 * i) + "], s[0:1] offset:" + S(16 * i));
+        for (int i = 0; i < nl; i++) o("global_store_dwordx4 v4, v[" + S(8 + 4 * i) + ":" + S(11 + 4 * i) + "], s[0:1] offset:" + S(16 * i));
     }
     o("v_mul_f32 v2, v8, v8");
     for (int i = 1; i < per; i++) o("v_fmac_f32 v2, v" + S(8 + i) + ", v" + S(8 + i));
     o("v_nop");
     o("v_nop");
     for (int x : {1, 2, 4, 8}) o("v_add_f32_dpp v2, v2, v2 row_xmask:" + S(x) + " row_mask:0xf bank_mask:0xf");
-    o("s_mov_b32 s8, 0x76543210");
-    o("s_mov_b32 s9, 0xfedcba98");
-    o("v_permlanex16_b32 v3, v2, s8, s9");
+    o("s_mov_b32 s10, 0x76543210");
+    o("s_mov_b32 s11, 0xfedcba98");
+    o("v_permlanex16_b32 v3, v2, s10, s11");
     o("v_add_f32 v2, v2, v3");
     o("v_lshrrev_b32 v3, 5, v0");
     o("v_lshlrev_b32 v3, 2, v3");
@@ -66,7 +70,7 @@ inline std::string gen_rmsnorm(int n, float eps, bool add = false) {
         o("v_mul_f32 v" + S(8 + i) + ", v2, v" + S(8 + i));
         o("v_mul_f32 v" + S(8 + i) + ", v" + S(8 + per + i) + ", v" + S(8 + i));
     }
-    for (int i = 0; i < nl; i++) o("global_store_dwordx4 v1, v[" + S(8 + 4 * i) + ":" + S(11 + 4 * i) + "], s[4:5] offset:" + S(16 * i));
+    for (int i = 0; i < nl; i++) o("global_store_dwordx4 v4, v[" + S(8 + 4 * i) + ":" + S(11 + 4 * i) + "], s[4:5] offset:" + S(16 * i));
     o("s_endpgm");
     return k;
 }

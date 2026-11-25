@@ -18,7 +18,7 @@
 namespace ts5::direct {
 
 // Where a token's time goes, for profiles: a stamp after each step.
-enum Step { S_NORM, S_QKV, S_QK, S_ATTN, S_WO, S_NORM2, S_GATEUP, S_SILU, S_DOWN, S_OUT, S_COUNT };
+enum Step { S_NORM, S_QKV, S_QK, S_ATTN, S_WO, S_NORM2, S_GATEUP, S_SILU, S_DOWN, S_OUT, S_XT, S_EMBED, S_COUNT };
 extern const char* const kStepName[S_COUNT];
 
 class Runner {

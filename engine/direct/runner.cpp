@@ -17,7 +17,8 @@
 namespace ts5::direct {
 
 const char* const kStepName[S_COUNT] = {"attn norm",      "q k v",     "q/k norm+rope", "attention", "attn out",
-                                        "add + ffn norm", "gate + up", "silu * up",     "down",      "out norm + output"};
+                                        "add + ffn norm", "gate + up", "silu * up",     "down",      "out norm + output",
+                                        "to_xT (prompt)", "embed (prompt)"};
 
 namespace {
 uint32_t lo(uint64_t a) { return (uint32_t)a; }
@@ -145,15 +146,24 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {
         const uint32_t g[3] = {(uint32_t)(w.ne1() / 32), 1, 1}, th[3] = {(uint32_t)(w.type() == GGML_Q6_K ? 64 : 128), 1, 1};
         s.dispatch(p->k, p->code.gpu, args, 10, g, th);
     };
-    auto norm = [&](bool add, const Weight& w, int t, uint64_t out) {
+    // Tokens t0 .. t0 + n - 1 in one launch (a workgroup a token).
+    auto norm = [&](bool add, const Weight& w, int t0, int n, uint64_t out) {
         const Prog& p = add ? k_addnorm_ : k_norm_;
-        const uint64_t a = addr(w.data), x = pX_.gpu + (size_t)t * E_ * 4, d = pT_.gpu + (size_t)t * E_ * 4;
+        const uint64_t a = addr(w.data), x = pX_.gpu + (size_t)t0 * E_ * 4, d = pT_.gpu + (size_t)t0 * E_ * 4;
         const uint32_t args[8] = {lo(x), hi(x), lo(a), hi(a), lo(out), hi(out), lo(d), hi(d)};
-        s.dispatch(p.k, p.code.gpu, args, 8, one, t256);
+        const uint32_t g[3] = {(uint32_t)n, 1, 1};
+        s.dispatch(p.k, p.code.gpu, args, 8, g, t256);
+    };
+    int ns = 0;
+    auto stamp = [&](int step_id) {
+        if (!opt.profile) return;
+        ((uint32_t*)bstamp_.cpu)[2048 + ns] = (uint32_t)step_id;
+        s.stamp(bstamp_.gpu + 8 * ns++);
     };
     if (seq == 0) s.acquire_all();
     else barrier();
     s.stamp(bts_.gpu + 16 * (seq % (bts_.size / 16)));
+    stamp(-1);
     for (int t = 0; t < nt; t++) {
         const uint64_t te = addr(m_->tok_embd.data), x = pX_.gpu + (size_t)t * E_ * 4, io = bids_.gpu + 4 * (size_t)(pos0 + t);
         const uint32_t args[10] = {lo(te), hi(te), lo(x), hi(x), lo(bslot_.gpu), hi(bslot_.gpu), (uint32_t)ids[t], 0, lo(io), hi(io)};
@@ -164,14 +174,18 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {
         const Layer& L = m_->layers[l];
         const uint64_t kc = bkv_.gpu + (size_t)l * 2 * kv_layer_, vc = kc + kv_layer_;
         barrier();
-        for (int t = 0; t < nt; t++) norm(l > 0, L.attn_norm, t, pXN_.gpu + (size_t)t * E_ * 4);
+        if (l == 0) stamp(S_EMBED);
+        norm(l > 0, L.attn_norm, 0, nt, pXN_.gpu);
         barrier();
+        stamp(S_NORM);
         to_xT(pXN_.gpu, E_);
         barrier();
+        stamp(S_XT);
         mm(L.wq, pQ_.gpu);
         mm(L.wk, pK_.gpu);
         mm(L.wv, pV_.gpu);
         barrier();
+        stamp(S_QKV);
         for (int t = 0; t < nt; t++) {
             const int pos = pos0 + t;
             const uint64_t q = pQ_.gpu + (size_t)t * A * 4, k = pK_.gpu + (size_t)t * NKV_ * HD_ * 4, v = pV_.gpu + (size_t)t * NKV_ * HD_ * 4;
@@ -183,6 +197,7 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {
             s.dispatch(k_qk_.k, k_qk_.code.gpu, args, 16, g, t64);
         }
         barrier();
+        stamp(S_QK);
         uint32_t splits[kBatch];
         for (int t = 0; t < nt; t++) {
             const uint32_t n = pos0 + t + 1, nch = (n + 255) / 256, per = (nch + 9) / 10;
@@ -200,31 +215,41 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {
             s.dispatch(k_red_.k, k_red_.code.gpu, a2, 10, g2, t256);
         }
         barrier();
+        stamp(S_ATTN);
         to_xT(pA_.gpu, A);
         barrier();
+        stamp(S_XT);
         mm(L.wo, pT_.gpu);
         barrier();
-        for (int t = 0; t < nt; t++) norm(true, L.ffn_norm, t, pXN_.gpu + (size_t)t * E_ * 4);
+        stamp(S_WO);
+        norm(true, L.ffn_norm, 0, nt, pXN_.gpu);
         barrier();
+        stamp(S_NORM2);
         to_xT(pXN_.gpu, E_);
         barrier();
+        stamp(S_XT);
         mm(L.w_gate, pG_.gpu);
         mm(L.w_up, pU_.gpu);
         barrier();
+        stamp(S_GATEUP);
         {
             const uint32_t args[6] = {lo(pG_.gpu), hi(pG_.gpu), lo(pU_.gpu), hi(pU_.gpu), lo(pH_.gpu), hi(pH_.gpu)};
             const uint32_t g[3] = {(uint32_t)((size_t)T * F_ / 1024), 1, 1};
             s.dispatch(k_silu_.k, k_silu_.code.gpu, args, 6, g, t256);
         }
         barrier();
+        stamp(S_SILU);
         to_xT(pH_.gpu, F_);
         barrier();
+        stamp(S_XT);
         mm(L.w_down, pT_.gpu);
+        if (opt.profile) barrier();
+        stamp(S_DOWN);
         if (!flush()) return false;
     }
     // The last token's logits and argmax, as a single token's.
     barrier();
-    norm(true, m_->out_norm, nt - 1, bxn_.gpu);
+    norm(true, m_->out_norm, nt - 1, 1, bxn_.gpu);
     barrier();
     {
         const Weight& outw = m_->output ? m_->output : m_->tok_embd;
@@ -241,8 +266,10 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {
         const uint32_t g[3] = {groups, 1, 1};
         s.dispatch(k_argmax_.k, k_argmax_.code.gpu, args, 6, g, t256);
     }
+    stamp(S_OUT);
     s.release(bts_.gpu + 16 * (seq % (bts_.size / 16)) + 8, 0, true);
     s.release(dev_.signals.gpu, seq + 1);
+    nstamps_ = ns;
     return flush();
 }
 
