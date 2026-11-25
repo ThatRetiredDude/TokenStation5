@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "attn.h"
@@ -65,9 +66,10 @@ Runner::Prog* Runner::mv_prog(const Weight& w, Stage st) {
 // 512 workgroups' worth of 4 waves to run at full speed): 12288 rows 2,
 // 4096 rows 4, 1024 rows 8.
 static int q4_sk(const Weight& w) {
+    static const int max_sk = std::getenv("TS5_DIRECT_MAX_SK") ? std::atoi(std::getenv("TS5_DIRECT_MAX_SK")) : 8;   // for tests
     const int wg = (int)(w.ne1() / 32), NB = (int)(w.ne0() / 256);
     int sk = 1;
-    while (sk < 8 && wg * sk < 512 && NB % (2 * sk) == 0) sk *= 2;
+    while (sk < max_sk && wg * sk < 512 && NB % (2 * sk) == 0) sk *= 2;
     return sk;
 }
 
@@ -136,6 +138,37 @@ bool Runner::init_batch(std::string& err) {
         if (pr.first->cpu) std::memset(pr.first->cpu, 0, pr.first->size);
     }
     return true;
+}
+
+std::string Runner::err() const {
+    std::string e = dev_.err();
+    const size_t at = e.find("fault at 0x");
+    if (at == std::string::npos || !m_) return e;
+    const uint64_t f = std::strtoull(e.c_str() + at + 11, nullptr, 16);
+    std::string best;
+    uint64_t best_start = 0;
+    auto consider = [&](const std::string& name, uint64_t start, uint64_t size) {
+        if (!start || start > f || start < best_start) return;
+        best_start = start;
+        char b[200];
+        std::snprintf(b, sizeof b, "%s [0x%llx, +%llu)%s", name.c_str(), (unsigned long long)start, (unsigned long long)size,
+                      f < start + size ? "" : " (past its end)");
+        best = b;
+    };
+    const std::pair<const char*, const kfd::Buffer*> bufs[] = {
+        {"pX", &pX_}, {"pXN", &pXN_}, {"pT", &pT_}, {"pQ", &pQ_}, {"pK", &pK_}, {"pV", &pV_}, {"pA", &pA_}, {"pG", &pG_}, {"pU", &pU_},
+        {"pH", &pH_}, {"pxT", &pxT_}, {"px16", &px16_}, {"pxs32", &pxs32_}, {"pxs16", &pxs16_}, {"ppart", &ppart_}};
+    for (auto& b : bufs) consider(b.first, b.second->gpu, b.second->size);
+    for (size_t l = 0; l < m_->layers.size(); l++) {
+        const Layer& L = m_->layers[l];
+        const std::pair<const char*, const Weight*> ws[] = {{"wq", &L.wq}, {"wk", &L.wk}, {"wv", &L.wv}, {"wo", &L.wo},
+                                                            {"gate", &L.w_gate}, {"up", &L.w_up}, {"down", &L.w_down}};
+        for (auto& w : ws) {
+            const size_t bb = w.second->type() == GGML_Q6_K ? 210 : w.second->type() == GGML_Q4_K ? 144 : 0;
+            consider("layer " + std::to_string(l) + " " + w.first, addr(w.second->data), bb * (size_t)(w.second->ne0() / 256) * (size_t)w.second->ne1());
+        }
+    }
+    return best.empty() ? e : e + "; nearest below: " + best;
 }
 
 bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {

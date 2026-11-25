@@ -30,7 +30,7 @@ int cmd_mm_q4k(int argc, char** argv) {
     const int SPLIT = argc > 3 ? std::atoi(argv[3]) : 4;
     const int EXP = argc > 4 ? std::atoi(argv[4]) : 0;   // gen_mm_q4k's timing experiments (results wrong)
     if (T != 8 && T != 16) { std::fprintf(stderr, "mm-q4k: T is 8 or 16\n"); return 1; }
-    if (SPLIT != 1 && SPLIT != 2 && SPLIT != 4 && SPLIT != 8) { std::fprintf(stderr, "mm-q4k: split is 1, 2, 4 or 8\n"); return 1; }
+    if (SPLIT != 1 && SPLIT != 2 && SPLIT != 4 && SPLIT != 8 && !(EXP >= 12 && (SPLIT == 16 || SPLIT == 32))) { std::fprintf(stderr, "mm-q4k: split is 1, 2, 4 or 8\n"); return 1; }
     const int BB = q6 ? 210 : 144, SUB = q6 ? 16 : 32;   // bytes a block, values a sub-block (x sums)
     kfd::Device dev;
     if (!dev.open() || !dev.create_queue(1 << 20)) { std::fprintf(stderr, "mm-q4k: %s\n", dev.err().c_str()); return 1; }

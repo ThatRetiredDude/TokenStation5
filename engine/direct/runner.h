@@ -65,7 +65,9 @@ public:
     // The last token's profile (opt.profile): seconds per step added to `acc`.
     void add_profile(std::vector<double>& acc) const;
     std::string mv_kernels() const;
-    const std::string& err() const { return dev_.err(); }
+    // The error; a GPU memory fault also says which buffer or tensor the
+    // address is in (or just past).
+    std::string err() const;
 
 private:
     struct Prog {
