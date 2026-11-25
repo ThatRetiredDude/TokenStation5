@@ -64,11 +64,13 @@ Runner::Prog* Runner::mv_prog(const Weight& w, Stage st) {
 // the best for most shapes; Q6_K's 158 VGPRs leave room for fewer waves).
 // The f16 prompt kernels' groups of 4 waves a workgroup (SK): enough for
 // about 512 workgroups' worth, at most 4, and 2 for K 12288 (round 58, us a
-// pass SK 1/2/4/8: attn_q 65/64/52/65, attn_k 41/19/15/19, gate/up
+// pass SK 1/2/4/8 for Q4_K: attn_q 65/64/52/65, attn_k 41/19/15/19, gate/up
 // 150/137/135/187, down 187/146/156/208).
 static int mm_sk(const Weight& w) {
     static const int max_sk = std::getenv("TS5_DIRECT_MAX_SK") ? std::atoi(std::getenv("TS5_DIRECT_MAX_SK")) : 4;   // for tests
     const int wg = (int)(w.ne1() / 32), NB = (int)(w.ne0() / 256), cap = std::min(max_sk, NB > 16 ? 2 : 4);
+    if (w.type() == GGML_Q6_K)   // round 59, us a pass SK 1/2/4: attn_q 74/87/81, attn_k 45/26/20, gate/up 265/186/206, down 227/239/231
+        return std::min(max_sk, wg <= 32 ? 4 : wg >= 384 ? 2 : 1);
     int sk = 1;
     while (sk < cap && wg * sk < 512 && NB % (2 * sk) == 0) sk *= 2;
     return sk;

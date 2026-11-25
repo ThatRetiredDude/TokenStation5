@@ -76,14 +76,14 @@ int cmd_mm_q4k(int argc, char** argv) {
                 : EXP == 6 ? ", TIMING ONLY: x always the same 128 bytes" : EXP == 10 ? ", blocks split across the waves (sb)" : EXP == 11 ? ", blocks split across the waves, 2 rows a lane (sb)"
                 : EXP == 12 ? ", packed f16 multiply-adds (mm_q4k_h; errors judged at 3e-3)"
                 : EXP == 16 ? ", f16 (mm_q4k_h), rows sweep; pair = two launches back to back as gate + up"
-                : EXP == 13 ? ", f16, TIMING ONLY: no x loads" : EXP == 14 ? ", f16, TIMING ONLY: no unpacking" : EXP == 15 ? ", f16, TIMING ONLY: neither" : "");
+                : EXP == 17 ? ", f16 (mm_q4k_h), 2 rows a lane" : EXP == 13 ? ", f16, TIMING ONLY: no x loads" : EXP == 14 ? ", f16, TIMING ONLY: no unpacking" : EXP == 15 ? ", f16, TIMING ONLY: neither" : "");
     for (const Shape& sh : shapes) {
         const int NB = sh.K / 256;
         if (EXP >= 12 ? (NB % (SPLIT / 4)) : (NB % SPLIT || (q6 && (NB / SPLIT) % 2))) continue;
         const size_t rb = (size_t)NB * BB, wbytes = rb * sh.R;
         gfx10::Kernel k;
         std::string err;
-        if (!gfx10::assemble(q6 ? (EXP >= 12 ? gen_mm_q6k_h(sh.K, T, SPLIT / 4) : EXP == 10 ? gen_mm_q6k_sb(sh.K, T) : gen_mm_q6k(sh.K, T, SPLIT)) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : EXP == 11 ? gen_mm_q4k_sb(sh.K, T, 2) : EXP >= 12 ? gen_mm_q4k_h(sh.K, T, EXP == 16 ? 0 : EXP - 12, q6 ? 1 : SPLIT / 4) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
+        if (!gfx10::assemble(q6 ? (EXP >= 12 ? gen_mm_q6k_h(sh.K, T, SPLIT / 4) : EXP == 10 ? gen_mm_q6k_sb(sh.K, T) : gen_mm_q6k(sh.K, T, SPLIT)) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : EXP == 11 ? gen_mm_q4k_sb(sh.K, T, 2) : EXP >= 12 ? gen_mm_q4k_h(sh.K, T, EXP >= 16 ? 0 : EXP - 12, q6 ? 1 : SPLIT / 4, EXP == 17 ? 2 : 1) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
         kfd::Buffer code, W, xT, xs, Y;
         const size_t cb = (k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, code) || !dev.alloc(wbytes + 4096, kfd::Mem::Gtt, W) ||
@@ -161,7 +161,7 @@ int cmd_mm_q4k(int argc, char** argv) {
         }
         const uint32_t args[10] = {(uint32_t)W.gpu, (uint32_t)(W.gpu >> 32), (uint32_t)xT.gpu, (uint32_t)(xT.gpu >> 32), (uint32_t)Y.gpu,
                                    (uint32_t)(Y.gpu >> 32), (uint32_t)sh.R, 0, (uint32_t)xs.gpu, (uint32_t)(xs.gpu >> 32)};
-        const uint32_t g[3] = {(uint32_t)(sh.R / (EXP == 11 ? 64 : 32)), 1, 1}, th[3] = {(uint32_t)(32 * SPLIT), 1, 1};
+        const uint32_t g[3] = {(uint32_t)(sh.R / (EXP == 11 || EXP == 17 ? 64 : 32)), 1, 1}, th[3] = {(uint32_t)(32 * SPLIT), 1, 1};
         std::memset(Y.cpu, 0xff, (size_t)sh.R * T * 4);
         double gs;
         {
@@ -178,7 +178,7 @@ int cmd_mm_q4k(int argc, char** argv) {
             if (e > (EXP >= 12 ? 3e-3 : 1e-5) && bad++ == 0) first = i;   // f16: x rounded, sub-block sums in f16
             worst = std::max(worst, e);
         }
-        if (bad && (!EXP || (EXP >= 10 && EXP <= 12) || EXP == 16)) {
+        if (bad && (!EXP || (EXP >= 10 && EXP <= 12) || EXP >= 16)) {
             all_ok = false;
             std::printf("  %s: WRONG, %zu of %zu values, worst %.3g, first token %zu row %zu: gpu %g cpu %g\n", sh.name, bad,
                         (size_t)T * sh.R, worst, first / sh.R, first % sh.R, y[first], ref[first]);
@@ -230,7 +230,7 @@ int cmd_mm_q4k(int argc, char** argv) {
                     k.vgprs, k.sgprs);
         std::fflush(stdout);
     }
-    std::printf("%s: %s\n", q6 ? "mm-q6k" : "mm-q4k", EXP && (EXP < 10 || (EXP > 12 && EXP != 16)) ? "timing only, values not checked" : all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
+    std::printf("%s: %s\n", q6 ? "mm-q6k" : "mm-q4k", EXP && (EXP < 10 || (EXP > 12 && EXP < 16)) ? "timing only, values not checked" : all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
     return all_ok ? 0 : 1;
 }
 
