@@ -14,6 +14,7 @@
 #include "gfx10_asm.h"
 #include "kfd.h"
 #include "mm_q4k.h"
+#include "mm_q4k_sb.h"
 #include "mm_q6k.h"
 #include "prefill.h"
 #include "pm4.h"
@@ -56,14 +57,14 @@ int cmd_mm_q4k(int argc, char** argv) {
     std::printf("%s, T = %d tokens a pass, %d waves a workgroup%s\n", q6 ? "mm_q6k" : "mm_q4k", T, SPLIT,
                 EXP == 1 ? ", TIMING ONLY: no x loads" : EXP == 2 ? ", TIMING ONLY: no unpacking" : EXP == 3 ? ", TIMING ONLY: neither"
                 : EXP == 4 ? ", TIMING ONLY: x from LDS" : EXP == 5 ? ", TIMING ONLY: half the x bytes"
-                : EXP == 6 ? ", TIMING ONLY: x always the same 128 bytes" : "");
+                : EXP == 6 ? ", TIMING ONLY: x always the same 128 bytes" : EXP == 10 ? ", blocks split by sub-block pairs (mm_q4k_sb)" : "");
     for (const Shape& sh : shapes) {
         const int NB = sh.K / 256;
         if (NB % SPLIT || (q6 && (NB / SPLIT) % 2)) continue;
         const size_t rb = (size_t)NB * BB, wbytes = rb * sh.R;
         gfx10::Kernel k;
         std::string err;
-        if (!gfx10::assemble(q6 ? gen_mm_q6k(sh.K, T, SPLIT) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
+        if (!gfx10::assemble(q6 ? gen_mm_q6k(sh.K, T, SPLIT) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
         kfd::Buffer code, W, xT, xs, Y;
         const size_t cb = (k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, code) || !dev.alloc(wbytes + 4096, kfd::Mem::Gtt, W) ||
@@ -136,7 +137,7 @@ int cmd_mm_q4k(int argc, char** argv) {
             if (e > 1e-5 && bad++ == 0) first = i;
             worst = std::max(worst, e);
         }
-        if (bad && !EXP) {
+        if (bad && (!EXP || EXP == 10)) {
             all_ok = false;
             std::printf("  %s: WRONG, %zu of %zu values, worst %.3g, first token %zu row %zu: gpu %g cpu %g\n", sh.name, bad,
                         (size_t)T * sh.R, worst, first / sh.R, first % sh.R, y[first], ref[first]);
@@ -171,7 +172,7 @@ int cmd_mm_q4k(int argc, char** argv) {
                     k.vgprs, k.sgprs);
         std::fflush(stdout);
     }
-    std::printf("%s: %s\n", q6 ? "mm-q6k" : "mm-q4k", EXP ? "timing only, values not checked" : all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
+    std::printf("%s: %s\n", q6 ? "mm-q6k" : "mm-q4k", EXP && EXP != 10 ? "timing only, values not checked" : all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
     return all_ok ? 0 : 1;
 }
 

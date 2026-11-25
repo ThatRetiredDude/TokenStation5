@@ -120,16 +120,16 @@ inline std::string gen_mm_q4k(int K, int T, int SPLIT = 4, int exp = 0) {
             o("v_mov_b32 v134, " + S((xoff((st + 1) % 128) / 2) & 16383));
             for (int i = 0; i < 2 * T; i += 4) o("ds_read_b128 v[" + S(nb + i) + ":" + S(nb + i + 3) + "], v134 offset:" + S(4 * i));
             if (dw == 7 && h == 0) sload(SXS, T, "s[14:15]", j * T * 4);
-        } else if (!(exp & 1)) {
+        } else if (!(exp == 1 || exp == 3)) {
             o("s_waitcnt lgkmcnt(0)");
             if (exp == 5) sload(buf(st + 1), T, "s[12:13]", xoff((st + 1) % 128) / 2);   // half the bytes
             else if (exp == 6) sload(buf(st + 1), 2 * T, "s[2:3]", 0);                // always the same 128 bytes
             else if (st + 1 < 128) sload(buf(st + 1), 2 * T, "s[12:13]", xoff(st + 1));
             else sload(buf(0), 2 * T, "s[12:13]", 256 * T * 4);   // the next block's first step (past the end on the last: unused)
             if (dw == 7 && h == 0) sload(SXS, T, "s[14:15]", j * T * 4);   // the sub-block's sums, for its end
-        } else if (st == 0) o("s_waitcnt lgkmcnt(0)");
+        } else if (st == 0) o("s_waitcnt lgkmcnt(0)");   // exp 1, 3
         const std::string q = "v" + S(A + 4 + 8 * (j / 2) + dw);
-        if (h == 0 && !(exp & 2)) {
+        if (h == 0 && !(exp == 2 || exp == 3)) {
             if (j & 1) {
                 o("v_lshrrev_b32 v" + S(U) + ", 4, " + q);
                 o("v_and_b32 v" + S(U) + ", 0x0f0f0f0f, v" + S(U));
@@ -146,7 +146,7 @@ inline std::string gen_mm_q4k(int K, int T, int SPLIT = 4, int exp = 0) {
                 else o("v_fmac_f32 v" + S(TMP + t) + ", " + x + ", " + w);
             }
         if (dw == 7 && h == 1) {
-            if (!(exp & 1)) o("s_waitcnt lgkmcnt(0)");
+            if (!(exp == 1 || exp == 3)) o("s_waitcnt lgkmcnt(0)");
             for (int t = 0; t < T; t++) {
                 o("v_fmac_f32 v" + S(ACC + t) + ", v" + S(DSC + j) + ", v" + S(TMP + t));
                 o("v_fma_f32 v" + S(ACC + t) + ", -v" + S(DMM + j) + ", s" + S(SXS + t) + ", v" + S(ACC + t));

@@ -1023,6 +1023,29 @@ bool assemble(const std::string& text, Kernel& out, std::string* err) {
         if (!assemble_line(text.substr(pos, nl - pos), c)) break;
         pos = nl + 1;
     }
+    // GFX10's branch bug (as llvm-mc handles it): a branch whose offset is
+    // 0x3f misbehaves, so an s_nop goes after it, which makes the offset
+    // 0x40. Each insertion moves what follows, so repeat until none is left.
+    for (bool again = c.err.empty(); again;) {
+        again = false;
+        for (auto& f : c.fixes) {
+            auto it = c.labels.find(f.label);
+            if (it == c.labels.end()) break;   // reported below
+            if ((int64_t)it->second - (int64_t)(f.word + 1) != 0x3f) continue;
+            const size_t w = f.word;
+            out.code.insert(out.code.begin() + (long)w + 1, 0xbf800000u);   // s_nop 0
+            for (auto& l : c.labels)
+                if (l.second > w) l.second++;
+            for (auto& g : c.fixes)
+                if (g.word > w) g.word++;
+            for (auto& a : out.at) {
+                if (a.word > w) a.word++;
+                else if (a.word == w) a.words++;
+            }
+            again = true;
+            break;
+        }
+    }
     if (c.err.empty()) {
         for (auto& f : c.fixes) {
             auto it = c.labels.find(f.label);

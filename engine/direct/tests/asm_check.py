@@ -57,7 +57,10 @@ def check(ts5_asm, path, mc):
     for n, w in zip(lines, want):
         # 'A' bytes are label fixups llvm-mc leaves open here; the whole-file
         # check below compares them once resolved.
-        if len(got[n]) != len(w) or any(a != b and b != 'A' for a, b in zip(got[n], w)):
+        g = got[n]
+        if len(g) == len(w) + 4 and g[-4:] == ['00', '00', '80', 'bf']:
+            g = g[:-4]   # the s_nop after a branch of offset 0x3f (GFX10's branch bug), as llvm-mc's object file has it
+        if len(g) != len(w) or any(a != b and b != 'A' for a, b in zip(g, w)):
             bad += 1
             if bad <= 40:
                 print(f'  {path}:{n}: {src_lines[n - 1].strip()}\n    ts5-asm {" ".join(got[n])}\n    llvm-mc {" ".join(w)}')
