@@ -52,6 +52,7 @@ inline std::string gen_attn_d(bool batched = false, unsigned q_bytes = 16384, un
         o("v_and_b32 v0, 127, v0");                // the thread in its token's 128
         o("s_add_u32 s28, s6, " + S(nt - 1));      // the last token's positions
         o("s_mul_i32 s29, s13, 8448");             // its fold's LDS
+        o("s_mov_b32 s30, s13");                   // (s13 becomes g below: the token stays in s30)
     }
     if (batched || share) {
         o("s_mul_i32 s26, s13, " + S(q_bytes));
@@ -107,7 +108,7 @@ inline std::string gen_attn_d(bool batched = false, unsigned q_bytes = 16384, un
         o("v_lshl_add_u32 " + v(AD + b) + ", v5, 11, v3");
     }
     if (share) {
-        o("s_cmp_eq_u32 s13, 0");
+        o("s_cmp_eq_u32 s30, 0");
         o("s_cbranch_scc0 staged");
     }
     for (int b = 0; b < 4; b++) {
@@ -125,7 +126,7 @@ inline std::string gen_attn_d(bool batched = false, unsigned q_bytes = 16384, un
         o("s_waitcnt lgkmcnt(0)");
         k += "staged:\n";
         o("s_barrier");
-        o("s_cmp_eq_u32 s13, 0");
+        o("s_cmp_eq_u32 s30, 0");
         o("s_cbranch_scc1 have");
         for (int x = 0; x < 16; x++) o("ds_read_b128 " + vr(KV + 4 * x, 4) + ", v7 offset:" + S(2048 * x));
         o("s_waitcnt lgkmcnt(0)");
