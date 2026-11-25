@@ -254,12 +254,14 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
     o("s_cmp_lg_u32 s18, 0");
     o("s_cbranch_scc1 done");
     o("v_lshlrev_b32 v5, 2, v0");
-    // (the quants' registers A .., free now, hold the T partials read back)
+    // (the quants' registers A .., free now, hold the T partials read back;
+    // at T 32 they would run into ACC (round 70: 23% of values wrong), so TMP ..)
+    const int RD = A + T <= ACC ? A : TMP;
     for (int w = 1; w < 4 * SK; w++)
         for (int r = 0; r < RW; r++) {
-            for (int t = 0; t < T; t++) o("ds_read_b32 v" + S(A + t) + ", v5 offset:" + S(((w * RW + r) * T + t) * L4));
+            for (int t = 0; t < T; t++) o("ds_read_b32 v" + S(RD + t) + ", v5 offset:" + S(((w * RW + r) * T + t) * L4));
             o("s_waitcnt lgkmcnt(0)");
-            for (int t = 0; t < T; t++) o("v_add_f32 v" + S(ACC + T * r + t) + ", v" + S(ACC + T * r + t) + ", v" + S(A + t));
+            for (int t = 0; t < T; t++) o("v_add_f32 v" + S(ACC + T * r + t) + ", v" + S(ACC + T * r + t) + ", v" + S(RD + t));
         }
     for (int t = 0; t < T; t++) {
         o("s_mul_i32 s17, s6, " + S(4 * t));

@@ -447,4 +447,64 @@ int cmd_dot_test(int argc, char** argv) {
     return ok ? 0 : 3;
 }
 
+// ts5-direct fma-peak: how fast this GPU runs back-to-back multiply-adds with
+// no memory traffic (round 63: the prompt kernels' bare multiply-adds reached
+// only ~66% of the assumed f16 peak; is the peak or the kernel the limit?).
+// Variants: pk-s (v_pk_fma_f16 with an SGPR operand, as the prompt kernels),
+// pk-v (VGPR operands only), f32 (v_fma_f32), mix (v_fma_mix_f32).
+int cmd_fma_peak(int, char**) {
+    kfd::Device dev;
+    if (!dev.open() || !dev.create_queue(1 << 20)) { std::fprintf(stderr, "fma-peak: %s\n", dev.err().c_str()); return 1; }
+    uint64_t* sig = (uint64_t*)dev.signals.cpu;
+    uint64_t seq = 0;
+    sig[0] = 0;
+    kfd::Buffer ts, code, out;
+    if (!dev.alloc(4096, kfd::Mem::Gtt, ts) || !dev.alloc(65536, kfd::Mem::Gtt, code) || !dev.alloc(1 << 22, kfd::Mem::Gtt, out)) return 1;
+    const char* names[4] = {"pk-s", "pk-v", "f32", "mix"};
+    const int iters = 2000;
+    for (int var = 0; var < 4; var++) {
+        std::string src = ".kernel fma_peak\n.wave32\n.user_sgprs 3\n.tgid_x\n";
+        for (int i = 0; i < 24; i++) src += "    v_cvt_f32_u32 v" + std::to_string(8 + i) + ", v0\n";
+        src += "    s_mov_b32 s20, 0x3c003c00\n    s_mov_b32 s21, 0x3c003c01\n    s_mov_b32 s4, s2\n";
+        src += "loop:\n";
+        for (int i = 0; i < 128; i++) {
+            const std::string d = "v" + std::to_string(8 + i % 16), w = "v" + std::to_string(24 + (i / 16) % 8);
+            if (var == 0) src += "    v_pk_fma_f16 " + d + ", s" + std::to_string(20 + (i & 1)) + ", " + w + ", " + d + "\n";
+            else if (var == 1) src += "    v_pk_fma_f16 " + d + ", v" + std::to_string(24 + (i / 16 + 3) % 8) + ", " + w + ", " + d + "\n";
+            else if (var == 2) src += "    v_fma_f32 " + d + ", s" + std::to_string(20 + (i & 1)) + ", " + w + ", " + d + "\n";
+            else src += "    v_fma_mix_f32 " + d + ", " + w + ", " + d + ", " + d + " op_sel_hi:[1,1,0]\n";
+        }
+        src += "    s_sub_u32 s4, s4, 1\n    s_cmp_lg_u32 s4, 0\n    s_cbranch_scc1 loop\n";
+        src += "    s_lshl_b32 s5, s3, 10\n    v_lshlrev_b32 v1, 2, v0\n    v_add_nc_u32 v1, s5, v1\n";
+        src += "    v_add_f32 v8, v8, v9\n    global_store_dword v1, v8, s[0:1]\n    s_endpgm\n";
+        gfx10::Kernel k;
+        std::string err;
+        if (!gfx10::assemble(src, k, &err)) { std::fprintf(stderr, "fma-peak: %s\n", err.c_str()); return 1; }
+        std::memcpy(code.cpu, k.code.data(), k.code.size() * 4);
+        for (int wg : {320, 1280, 4096}) {
+            const uint32_t args[3] = {(uint32_t)out.gpu, (uint32_t)(out.gpu >> 32), (uint32_t)iters};
+            const uint32_t g[3] = {(uint32_t)wg, 1, 1}, th[3] = {256, 1, 1};
+            std::vector<double> st;
+            for (int rep = 0; rep < 5; rep++) {
+                pm4::Stream w;
+                w.acquire_all();
+                w.release(ts.gpu, 0, true);
+                w.dispatch(k, code.gpu, args, 3, g, th);
+                w.wait_kernels();
+                w.release(ts.gpu + 8, 0, true);
+                w.release(dev.signals.gpu, ++seq);
+                if (!dev.submit(w.w) || !dev.wait((volatile uint64_t*)sig, seq, 20000)) { std::fprintf(stderr, "fma-peak: %s\n", dev.err().c_str()); return 1; }
+                const uint64_t* tt = (const uint64_t*)ts.cpu;
+                if (rep) st.push_back((tt[1] - tt[0]) / 100e6);
+            }
+            std::sort(st.begin(), st.end());
+            const double sec = st[st.size() / 2], fl = (double)wg * 256 * iters * 128 * (var < 2 ? 4 : 2);
+            std::printf("fma-peak %-4s %4d workgroups of 256: %8.3f ms, %6.2f TFLOP/s, %.0f instructions a SIMD a us (%d VGPRs)\n", names[var], wg, sec * 1e3,
+                        fl / sec / 1e12, (double)wg * 8 * iters * 128 / sec / 1e6 / 80, k.vgprs);
+            std::fflush(stdout);
+        }
+    }
+    return 0;
+}
+
 }  // namespace ts5::direct
