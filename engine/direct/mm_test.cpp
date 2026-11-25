@@ -52,8 +52,21 @@ int cmd_mm_q4k(int argc, char** argv) {
         return true;
     };
     struct Shape { const char* name; int R, K; };
-    const Shape shapes[] = {{"attn_q/output 4096x4096", 4096, 4096}, {"attn_k 1024x4096", 1024, 4096},
-                            {"ffn_gate/up 12288x4096", 12288, 4096}, {"ffn_down 4096x12288", 4096, 12288}};
+    std::vector<Shape> shapes = {{"attn_q/output 4096x4096", 4096, 4096}, {"attn_k 1024x4096", 1024, 4096},
+                                 {"ffn_gate/up 12288x4096", 12288, 4096}, {"ffn_down 4096x12288", 4096, 12288}};
+    // EXP 16: mm_q4k_h over rows 1024 .. 16384 (K 4096) and a few K 12288,
+    // to see whether the time a row jumps once the workgroups no longer all
+    // fit on the GPU at once (round 55: gate/up 12288 rows, 384 workgroups,
+    // ran slower without its x loads).
+    static std::vector<std::string> names;
+    if (EXP == 16) {
+        shapes.clear();
+        std::vector<std::pair<int, int>> rk;
+        for (int R : {1024, 2048, 3072, 4096, 6144, 7168, 8192, 8960, 9216, 10240, 11264, 12288, 14336, 16384, 24576}) rk.push_back({R, 4096});
+        for (int R : {2048, 4096, 8192}) rk.push_back({R, 12288});
+        for (auto [R, K] : rk) names.push_back("sweep " + std::to_string(R) + "x" + std::to_string(K));
+        for (size_t i = 0; i < rk.size(); i++) shapes.push_back({names[i].c_str(), rk[i].first, rk[i].second});
+    }
     uint32_t seed = 777;
     auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed; };
     bool all_ok = true;
@@ -62,6 +75,7 @@ int cmd_mm_q4k(int argc, char** argv) {
                 : EXP == 4 ? ", TIMING ONLY: x from LDS" : EXP == 5 ? ", TIMING ONLY: half the x bytes"
                 : EXP == 6 ? ", TIMING ONLY: x always the same 128 bytes" : EXP == 10 ? ", blocks split across the waves (sb)" : EXP == 11 ? ", blocks split across the waves, 2 rows a lane (sb)"
                 : EXP == 12 ? ", packed f16 multiply-adds (mm_q4k_h; errors judged at 3e-3)"
+                : EXP == 16 ? ", f16 (mm_q4k_h), rows sweep; pair = two launches back to back as gate + up"
                 : EXP == 13 ? ", f16, TIMING ONLY: no x loads" : EXP == 14 ? ", f16, TIMING ONLY: no unpacking" : EXP == 15 ? ", f16, TIMING ONLY: neither" : "");
     for (const Shape& sh : shapes) {
         const int NB = sh.K / 256;
@@ -69,7 +83,7 @@ int cmd_mm_q4k(int argc, char** argv) {
         const size_t rb = (size_t)NB * BB, wbytes = rb * sh.R;
         gfx10::Kernel k;
         std::string err;
-        if (!gfx10::assemble(q6 ? (EXP >= 12 ? gen_mm_q6k_h(sh.K, T) : EXP == 10 ? gen_mm_q6k_sb(sh.K, T) : gen_mm_q6k(sh.K, T, SPLIT)) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : EXP == 11 ? gen_mm_q4k_sb(sh.K, T, 2) : EXP >= 12 ? gen_mm_q4k_h(sh.K, T, EXP - 12) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
+        if (!gfx10::assemble(q6 ? (EXP >= 12 ? gen_mm_q6k_h(sh.K, T) : EXP == 10 ? gen_mm_q6k_sb(sh.K, T) : gen_mm_q6k(sh.K, T, SPLIT)) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : EXP == 11 ? gen_mm_q4k_sb(sh.K, T, 2) : EXP >= 12 ? gen_mm_q4k_h(sh.K, T, EXP == 16 ? 0 : EXP - 12) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
         kfd::Buffer code, W, xT, xs, Y;
         const size_t cb = (k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, code) || !dev.alloc(wbytes + 4096, kfd::Mem::Gtt, W) ||
@@ -164,7 +178,7 @@ int cmd_mm_q4k(int argc, char** argv) {
             if (e > (EXP == 12 ? 3e-3 : 1e-5) && bad++ == 0) first = i;   // f16: x rounded, sub-block sums in f16
             worst = std::max(worst, e);
         }
-        if (bad && (!EXP || (EXP >= 10 && EXP <= 12))) {
+        if (bad && (!EXP || (EXP >= 10 && EXP <= 12) || EXP == 16)) {
             all_ok = false;
             std::printf("  %s: WRONG, %zu of %zu values, worst %.3g, first token %zu row %zu: gpu %g cpu %g\n", sh.name, bad,
                         (size_t)T * sh.R, worst, first / sh.R, first % sh.R, y[first], ref[first]);
@@ -194,12 +208,29 @@ int cmd_mm_q4k(int argc, char** argv) {
         }
         std::sort(st.begin(), st.end());
         const double us = st[st.size() / 2] * 1e6;
+        if (EXP == 16) {   // two launches back to back (no wait between them), as gate + up
+            std::vector<double> sp;
+            for (int rep = 0; rep < 12; rep++) {
+                pm4::Stream s;
+                for (int i = 0; i < 10; i++) {
+                    if (i) s.wait_kernels();
+                    s.dispatch(k, code.gpu, args, 10, g, th);
+                    s.dispatch(k, code.gpu, args, 10, g, th);
+                }
+                double tot;
+                if (!run(s, &tot)) { std::fprintf(stderr, "mm-q4k: %s\n", dev.err().c_str()); return 1; }
+                if (rep >= 2) sp.push_back(tot / 10);
+            }
+            std::sort(sp.begin(), sp.end());
+            std::printf("%-26s rows %5d, %4d workgroups: %8.1f us a pass, %7.2f ns a row; pair %8.1f us (%.2fx one)\n", sh.name, sh.R, sh.R / 32, us,
+                        us * 1e3 / sh.R, sp[sp.size() / 2] * 1e6, sp[sp.size() / 2] * 1e6 / us);
+        }
         std::printf("%-26s %7.1f MB  err %.2e  %8.1f us a pass  %6.1f us a token  %6.1f GB/s of weights  %5.0f GFLOP/s  (%u words, %d vgprs, %d sgprs)\n",
                     sh.name, wbytes / 1e6, worst, us, us / T, wbytes / us / 1e3, 2.0 * sh.R * sh.K * T / us / 1e3, (unsigned)k.code.size(),
                     k.vgprs, k.sgprs);
         std::fflush(stdout);
     }
-    std::printf("%s: %s\n", q6 ? "mm-q6k" : "mm-q4k", EXP && (EXP < 10 || EXP > 12) ? "timing only, values not checked" : all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
+    std::printf("%s: %s\n", q6 ? "mm-q6k" : "mm-q4k", EXP && (EXP < 10 || (EXP > 12 && EXP != 16)) ? "timing only, values not checked" : all_ok ? "all values match the CPU" : "SOME VALUES WRONG");
     return all_ok ? 0 : 1;
 }
 
