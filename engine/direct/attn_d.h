@@ -35,7 +35,11 @@ namespace ts5::direct {
 // can be longer), are masked: they add exp(-inf) = 0 times a finite value
 // and rescale by exp(0) = 1, which leaves its sums bit for bit as they were.
 // Token t's q, positions and partials as batched's; one workgroup a split.
-inline std::string gen_attn_d(bool batched = false, unsigned q_bytes = 16384, unsigned part_bytes = 0, int nt = 0) {
+// pairs (round 122, with nt 2): workgroup (x, y) shares K/V between tokens
+// 2y and 2y + 1 only, so a T 4 pass is two 256-thread workgroups a split
+// (round 121: one 512-thread workgroup a split left a WGP one workgroup and
+// no overlap: T 3 / T 4 attention at 4,000 positions 2.2-2.4x one token).
+inline std::string gen_attn_d(bool batched = false, unsigned q_bytes = 16384, unsigned part_bytes = 0, int nt = 0, bool pairs = false) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
@@ -44,9 +48,19 @@ inline std::string gen_attn_d(bool batched = false, unsigned q_bytes = 16384, un
     const int Q = 8, M = 40, L = 44, SC = 48, KV = 64, O = 128, AD = 192, T = 196;
     const bool share = nt >= 2;
     if (share && (nt > 4 || batched)) return "";
+    if (pairs && nt != 2) return "";
     const int lds = share ? std::max(32768, nt * 8448) : 8448;
     k += ".kernel attn_d\n.wave32\n.user_sgprs 12\n.tgid_x\n" + std::string(batched ? ".tgid_y\n" : "") + ".lds " + S(lds) + "\n";
-    if (share) {
+    if (share && pairs) {
+        o("v_lshrrev_b32 v5, 7, v0");
+        o("v_readfirstlane_b32 s30, v5");          // the token in the pair
+        o("v_and_b32 v0, 127, v0");
+        o("s_lshl_b32 s31, s13, 1");               // the pair's first token (tgid_y 2)
+        o("s_add_u32 s28, s6, s31");
+        o("s_add_u32 s28, s28, 1");                // the pair's last token's positions
+        o("s_add_u32 s13, s31, s30");              // token t of the pass
+        o("s_mul_i32 s29, s30, 8448");             // its fold's LDS
+    } else if (share) {
         o("v_lshrrev_b32 v5, 7, v0");
         o("v_readfirstlane_b32 s13, v5");          // token t
         o("v_and_b32 v0, 127, v0");                // the thread in its token's 128

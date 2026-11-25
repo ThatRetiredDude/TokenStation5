@@ -154,6 +154,7 @@ private:
     Prog k_qkb_, k_attnb_, k_redb_, k_sum_, k_attnt_, k_attnf_, k_redu_;
     Prog k_qkv_;   // the verify pass's q/k kernel, T tokens a launch
     Prog k_attnv_, k_redv_;   // its attention and reduce, T tokens a launch
+    Prog k_attnp_;      // pairs of tokens sharing K/V, for T 4 (round 122)
     Prog k_attns_[5];   // [T]: its attention with T tokens sharing each K/V load (round 113)
     kfd::Buffer pP_;   // the tiled kernels' SK partial sums
     size_t part_bytes_ = 0;

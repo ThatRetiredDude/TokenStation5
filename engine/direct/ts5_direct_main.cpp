@@ -1053,7 +1053,7 @@ int main(int argc, char** argv) {
     }
     if (cmd == "gen-attn") {   // prints attn_part, or attn_reduce with "reduce"
         const std::string v = argc > 2 ? argv[2] : "part";   // part2-1 / part2-2: attn_part2 for 1 / 2 tokens
-        std::fputs((v == "t" ? ts5::direct::gen_attn_t() : v == "f" ? ts5::direct::gen_attn_f() : v == "d" ? ts5::direct::gen_attn_d() : v.rfind("d-s", 0) == 0 ? ts5::direct::gen_attn_d(false, 16384, 64 * 8 * 2112, std::atoi(v.c_str() + 3)) : v == "reduce-u" ? ts5::direct::gen_attn_reduce(true, true) : v == "reduce" ? ts5::direct::gen_attn_reduce() : v == "reduce-b" ? ts5::direct::gen_attn_reduce(true) : v == "part2-b" ? ts5::direct::gen_attn_part2(2, true) : v.rfind("part2-", 0) == 0 ? ts5::direct::gen_attn_part2(std::atoi(v.c_str() + 6)) : ts5::direct::gen_attn_part()).c_str(), stdout);
+        std::fputs((v == "t" ? ts5::direct::gen_attn_t() : v == "f" ? ts5::direct::gen_attn_f() : v == "d" ? ts5::direct::gen_attn_d() : v == "d-p2" ? ts5::direct::gen_attn_d(false, 16384, 64 * 8 * 2112, 2, true) : v.rfind("d-s", 0) == 0 ? ts5::direct::gen_attn_d(false, 16384, 64 * 8 * 2112, std::atoi(v.c_str() + 3)) : v == "reduce-u" ? ts5::direct::gen_attn_reduce(true, true) : v == "reduce" ? ts5::direct::gen_attn_reduce() : v == "reduce-b" ? ts5::direct::gen_attn_reduce(true) : v == "part2-b" ? ts5::direct::gen_attn_part2(2, true) : v.rfind("part2-", 0) == 0 ? ts5::direct::gen_attn_part2(std::atoi(v.c_str() + 6)) : ts5::direct::gen_attn_part()).c_str(), stdout);
         return 0;
     }
     if (cmd == "gen-mvt" && argc > 5) {   // gen-mvt q4|q6 COLUMNS T K: the multi-token mat-vecs (mvt_q4k.h, mvt_q6k.h)
