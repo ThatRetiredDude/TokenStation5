@@ -61,7 +61,11 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
     const int U = BK ? TMP + std::max(8, 4 * ((P - 1) / 3) + (P - 1) % 3 + 1) : TMP + P * RW;   // (BK: past W1 = TMP + 7 and the last sum)
     auto tr = [&](int r, int p) { return BK ? TMP + 4 * (p / 3) + p % 3 : TMP + P * r + p; };   // f16 sum p of row r
     const int W0 = BK ? TMP + 3 : U + 5, W1 = BK ? TMP + 7 : U + 6;
-    const int SX = 20, SXS = 84;                         // x: two sets of 4 columns (4 P); the sub-block sums: T (f32)
+    // XC (T 32): x a column at a time (two sets of P = 16 SGPRs; 4 columns
+    // of 32 tokens twice over would be 128), the sub-block sums after them.
+    const bool XC = T == 32;
+    if (XC && (RW != 1 || LN != 32)) return "";
+    const int SX = 20, SXS = XC ? SX + 2 * P : 84;      // x: two sets of 4 columns (4 P); the sub-block sums: T (f32)
     k += ".kernel mm_q4k_h\n" + std::string(LN == 64 ? ".wave64" : ".wave32") + "\n.user_sgprs 10\n.tgid_x\n.lds " + S(4 * SK * RW * T * L4) + "\n";
     o("v_lshrrev_b32 v2, " + S(LB) + ", v0");
     o("v_readfirstlane_b32 s18, v2");                    // the wave: 4 g + w
@@ -111,7 +115,7 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
             o("s_load_dwordx" + S(w) + " s[" + S(dst + i) + ":" + S(dst + i + w - 1) + "], " + base + ", " + S(off + 4 * i));
         }
     };
-    sload(SX, 4 * P, "s[12:13]", 0);
+    sload(SX, XC ? P : 4 * P, "s[12:13]", 0);
     k += "block:\n";
     for (const char* v : {"v1", "v2", "v6", "v7"})
         if (RW == 2 || v[1] < '3') o(std::string("v_add_nc_u32 ") + v + ", " + S(144 * SK) + ", " + v);
@@ -167,8 +171,8 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
     auto buf = [&](int st) { return SX + (st & 1) * 4 * P; };
     for (int st = 0; st < 16; st++) {
         const int jj = st / 8, dw = st % 8;
-        o("s_waitcnt lgkmcnt(0)");
-        if (exp & 1) {}
+        if (XC) {}   // (a column at a time, below)
+        else if ((o("s_waitcnt lgkmcnt(0)"), exp & 1)) {}
         else if (st + 1 < 16) sload(buf(st + 1), 4 * P, "s[12:13]", xoff(st + 1));
         else {   // the next block's first step, unless this is the last
             o("s_cmp_eq_u32 s16, 1");
@@ -197,8 +201,20 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
         for (int c = 0; c < 4; c++) {
             const std::string w = exp & 2 ? q : (c & 1) ? w1 : w0;
             const bool hi = c >> 1;
+            const int idx = 4 * st + c;   // XC: the column's set, and the next column's load into the other
+            if (XC) {
+                o("s_waitcnt lgkmcnt(0)");
+                if (exp & 1) {}
+                else if (idx + 1 < 64) sload(SX + ((idx + 1) & 1) * P, P, "s[12:13]", xoff((idx + 1) / 4) + ((idx + 1) % 4) * P * 4);
+                else {
+                    o("s_cmp_eq_u32 s16, 1");
+                    o("s_cbranch_scc1 nox");
+                    sload(SX, P, "s[12:13]", 256 * SK * P * 4);
+                    k += "nox:\n";
+                }
+            }
             for (int p = 0; p < P; p++) {
-                const std::string x = "s" + S(buf(st) + c * P + p), d = "v" + S(tr(r, p));
+                const std::string x = "s" + S(XC ? SX + (idx & 1) * P + p : buf(st) + c * P + p), d = "v" + S(tr(r, p));
                 if (dw == 0 && c == 0) o("v_pk_mul_f16 " + d + ", " + x + ", " + w + (hi ? " op_sel:[0,1] op_sel_hi:[1,1]" : " op_sel_hi:[1,0]"));
                 else o("v_pk_fma_f16 " + d + ", " + x + ", " + w + ", " + d + (hi ? " op_sel:[0,1,0] op_sel_hi:[1,1,1]" : " op_sel_hi:[1,0,1]"));
             }
