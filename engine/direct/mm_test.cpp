@@ -561,7 +561,7 @@ int cmd_bw_peak(int, char**) {
                         for (int j = 0; j < 8; j++) src += "    v_add_nc_u32 v" + std::to_string(8 + j) + ", v" + std::to_string(8 + j) + ", v" + std::to_string(16 + 4 * j) + "\n";
                     }
                 }
-                src += "    v_add_nc_u32 v8, v8, v9\n    v_lshl_add_u32 v1, v2, 7, v0\n    v_lshlrev_b32 v1, 2, v1\n    global_store_dword v1, v8, s[2:3]\n    s_endpgm\n";
+                src += "    v_add_nc_u32 v8, v8, v9\n    v_lshl_add_u32 v1, v2, 5, v0\n    v_lshlrev_b32 v1, 2, v1\n    global_store_dword v1, v8, s[2:3]\n    s_endpgm\n";
                 gfx10::Kernel k;
                 std::string err;
                 if (!gfx10::assemble(src, k, &err)) { std::fprintf(stderr, "bw-peak: %s\n", err.c_str()); return 1; }
