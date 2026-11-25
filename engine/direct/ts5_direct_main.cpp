@@ -28,6 +28,8 @@
 #include "attn.h"
 #include "attn_t.h"
 #include "attn_f.h"
+#include "mvt_q4k.h"
+#include "mvt_q6k.h"
 #include "attn_d.h"
 #include "ops.h"
 #include "mm_q4k.h"
@@ -51,6 +53,7 @@ int cmd_xt_bench(int argc, char** argv);  // mm_test.cpp
 int cmd_dot_test(int argc, char** argv);  // mm_test.cpp
 int cmd_fma_peak(int argc, char** argv);  // mm_test.cpp
 int cmd_attn_bench(int argc, char** argv);  // mm_test.cpp
+int cmd_mvt_test(int argc, char** argv);  // mm_test.cpp
 int cmd_bw_peak(int argc, char** argv);  // mm_test.cpp
 }
 
@@ -1046,6 +1049,11 @@ int main(int argc, char** argv) {
         std::fputs((v == "t" ? ts5::direct::gen_attn_t() : v == "f" ? ts5::direct::gen_attn_f() : v == "d" ? ts5::direct::gen_attn_d() : v == "reduce-u" ? ts5::direct::gen_attn_reduce(true, true) : v == "reduce" ? ts5::direct::gen_attn_reduce() : v == "reduce-b" ? ts5::direct::gen_attn_reduce(true) : v == "part2-b" ? ts5::direct::gen_attn_part2(2, true) : v.rfind("part2-", 0) == 0 ? ts5::direct::gen_attn_part2(std::atoi(v.c_str() + 6)) : ts5::direct::gen_attn_part()).c_str(), stdout);
         return 0;
     }
+    if (cmd == "gen-mvt" && argc > 5) {   // gen-mvt q4|q6 COLUMNS T K: the multi-token mat-vecs (mvt_q4k.h, mvt_q6k.h)
+        const int nc = std::atoi(argv[3]), T = std::atoi(argv[4]), K = std::atoi(argv[5]);
+        std::fputs((std::string(argv[2]) == "q6" ? ts5::direct::gen_mvt_q6k(nc, T, K) : ts5::direct::gen_mvt_q4k(nc, T, K)).c_str(), stdout);
+        return 0;
+    }
     if (cmd == "gen-xt") {   // prints to_xT (prefill.h) for K columns and T tokens
         {
             const int K = argc > 2 ? std::atoi(argv[2]) : 4096, T = argc > 3 ? std::atoi(argv[3]) : 16, NT = argc > 4 ? std::atoi(argv[4]) : 256;
@@ -1163,6 +1171,7 @@ int main(int argc, char** argv) {
     if (cmd == "dot-test") return ts5::direct::cmd_dot_test(argc, argv);
     if (cmd == "fma-peak") return ts5::direct::cmd_fma_peak(argc, argv);
     if (cmd == "attn-bench") return ts5::direct::cmd_attn_bench(argc, argv);
+    if (cmd == "mvt-test") return ts5::direct::cmd_mvt_test(argc, argv);
     if (cmd == "bw-peak") return ts5::direct::cmd_bw_peak(argc, argv);
     kfd::Device dev;
     if (!dev.open()) return die(dev.err());

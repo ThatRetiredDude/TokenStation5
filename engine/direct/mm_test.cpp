@@ -15,6 +15,10 @@
 #include "gfx10_asm.h"
 #include "kfd.h"
 #include "attn_f.h"
+#include "mv_q4k.h"
+#include "mv_q6k.h"
+#include "mvt_q4k.h"
+#include "mvt_q6k.h"
 #include "mm_q4k.h"
 #include "mm_q4k_sb.h"
 #include "mm_q4k_h.h"
@@ -601,6 +605,111 @@ int cmd_attn_bench(int argc, char** argv) {
         }
     }
     return 0;
+}
+
+// ts5-direct mvt-test [T ...]: the multi-token mat-vecs (mvt_q4k, mvt_q6k)
+// against T one-token mat-vecs (mv_q4k, mv_q6k, as generation runs them) on
+// random Q4_K / Q6_K matrices of Qwen3 8B's shapes: every output must be bit
+// for bit the same (round 99: speculative decoding's verify pass), and the
+// time of one multi-token pass against T one-token ones. No model needed.
+int cmd_mvt_test(int argc, char** argv) {
+    std::vector<int> Ts;
+    for (int i = 2; i < argc; i++) Ts.push_back(std::atoi(argv[i]));
+    if (Ts.empty()) Ts = {2, 3, 4};
+    kfd::Device dev;
+    if (!dev.open() || !dev.create_queue(1 << 20)) { std::fprintf(stderr, "mvt-test: %s\n", dev.err().c_str()); return 1; }
+    uint64_t* sig = (uint64_t*)dev.signals.cpu;
+    uint64_t seq = 0;
+    sig[0] = 0;
+    const uint32_t wgs = dev.cu_count();
+    struct Shape { const char* name; bool q6; int rows, cols; };
+    const Shape shapes[] = {{"q/o 4096x4096 Q4_K", false, 4096, 4096}, {"k/v 1024x4096 Q4_K", false, 1024, 4096},
+                            {"gate/up 12288x4096 Q4_K", false, 12288, 4096}, {"down 4096x12288 Q4_K", false, 4096, 12288},
+                            {"v 1024x4096 Q6_K", true, 1024, 4096}, {"down 4096x12288 Q6_K", true, 4096, 12288},
+                            {"output 32768x4096 Q6_K", true, 32768, 4096}};
+    const size_t maxw = (size_t)32768 * 4096 / 256 * 210 + 64;
+    kfd::Buffer ts, code, w, x, y1, y2;
+    if (!dev.alloc(4096, kfd::Mem::Gtt, ts) || !dev.alloc(1 << 20, kfd::Mem::Gtt, code) || !dev.alloc(maxw, kfd::Mem::Gtt, w) ||
+        !dev.alloc((size_t)8 * 12288 * 4, kfd::Mem::Gtt, x) || !dev.alloc((size_t)8 * 32768 * 4, kfd::Mem::Gtt, y1) ||
+        !dev.alloc((size_t)8 * 32768 * 4, kfd::Mem::Gtt, y2)) {
+        std::fprintf(stderr, "mvt-test: %s\n", dev.err().c_str());
+        return 1;
+    }
+    uint32_t r = 777;
+    auto rnd = [&]() { r = r * 1664525u + 1013904223u; return r; };
+    for (size_t i = 0; i < (size_t)8 * 12288; i++) ((float*)x.cpu)[i] = (float)((int)(rnd() >> 16 & 0xffff) - 32768) / 32768.0f;
+    auto run = [&](const gfx10::Kernel& k, const uint32_t* args, uint32_t groups, double* sec) -> bool {
+        std::memcpy(code.cpu, k.code.data(), k.code.size() * 4);
+        std::vector<double> st;
+        for (int rep = 0; rep < 6; rep++) {
+            pm4::Stream s;
+            s.acquire_all();
+            s.release(ts.gpu, 0, true);
+            const uint32_t g[3] = {groups, 1, 1}, th[3] = {256, 1, 1};
+            s.dispatch(k, code.gpu, args, 10, g, th);
+            s.wait_kernels();
+            s.release(ts.gpu + 8, 0, true);
+            s.release(dev.signals.gpu, ++seq);
+            if (!dev.submit(s.w) || !dev.wait((volatile uint64_t*)sig, seq, 20000)) { std::fprintf(stderr, "mvt-test: %s\n", dev.err().c_str()); return false; }
+            const uint64_t* tt = (const uint64_t*)ts.cpu;
+            if (rep) st.push_back((tt[1] - tt[0]) / 100e6);
+        }
+        std::sort(st.begin(), st.end());
+        *sec = st[st.size() / 2];
+        return true;
+    };
+    int bad = 0;
+    for (const Shape& sh : shapes) {
+        const int bb = sh.q6 ? 210 : 144;
+        const size_t wb = (size_t)sh.rows * sh.cols / 256 * bb;
+        uint8_t* W = (uint8_t*)w.cpu;
+        for (size_t i = 0; i < wb + 64; i++) W[i] = (uint8_t)(rnd() >> 24);
+        for (size_t b = 0; b < wb / bb; b++) {   // sane f16 scales: 2^-10 .. 2^-7
+            uint8_t* blk = W + b * bb;
+            uint16_t* dd = (uint16_t*)(sh.q6 ? blk + 208 : blk);
+            dd[0] = (uint16_t)(0x1400 + (rnd() >> 22));
+            if (!sh.q6) dd[1] = (uint16_t)(0x1400 + (rnd() >> 22));
+        }
+        gfx10::Kernel km;
+        std::string err;
+        if (!gfx10::assemble(sh.q6 ? gen_mv_q6k(sh.cols) : gen_mv_q4k(sh.cols, "", 0, 1, true), km, &err)) { std::fprintf(stderr, "mvt-test: %s\n", err.c_str()); return 1; }
+        double t1 = 0;
+        for (int t = 0; t < 8; t++) {   // the one-token results for up to 8 tokens
+            const uint64_t xa = x.gpu + (size_t)t * sh.cols * 4, ya = y1.gpu + (size_t)t * sh.rows * 4;
+            const uint32_t args[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)xa, (uint32_t)(xa >> 32), (uint32_t)ya, (uint32_t)(ya >> 32),
+                                       (uint32_t)sh.rows, 0, wgs * 8, 0};
+            double sec;
+            if (!run(km, args, wgs, &sec)) return 1;
+            if (!t) t1 = sec;
+        }
+        std::printf("mvt-test %-24s one token: %7.1f us (%.0f GB/s)\n", sh.name, t1 * 1e6, wb / t1 / 1e9);
+        for (int T : Ts)
+            for (int K : {4, 8}) {
+                const std::string src = sh.q6 ? gen_mvt_q6k(sh.cols, T, K) : gen_mvt_q4k(sh.cols, T, K);
+                gfx10::Kernel kt;
+                if (src.empty() || !gfx10::assemble(src, kt, &err)) { std::fprintf(stderr, "mvt-test: T %d K %d: %s\n", T, K, err.c_str()); return 1; }
+                const uint32_t nw = std::max(wgs * 8, (uint32_t)((sh.rows + K - 1) / K + 7) / 8 * 8);
+                const uint32_t args[10] = {(uint32_t)w.gpu, (uint32_t)(w.gpu >> 32), (uint32_t)x.gpu, (uint32_t)(x.gpu >> 32), (uint32_t)y2.gpu, (uint32_t)(y2.gpu >> 32),
+                                           (uint32_t)sh.rows, (uint32_t)(sh.cols * 4), nw, (uint32_t)(sh.rows * 4)};
+                std::memset(y2.cpu, 0xff, (size_t)T * sh.rows * 4);
+                double sec;
+                if (!run(kt, args, nw / 8, &sec)) return 1;
+                size_t diff = 0;
+                for (int t = 0; t < T; t++)
+                    diff += std::memcmp((const char*)y1.cpu + (size_t)t * sh.rows * 4, (const char*)y2.cpu + (size_t)t * sh.rows * 4, (size_t)sh.rows * 4) != 0;
+                int first = -1;
+                for (size_t i = 0; i < (size_t)T * sh.rows && first < 0; i++)
+                    if (((const uint32_t*)y1.cpu)[i] != ((const uint32_t*)y2.cpu)[i]) first = (int)i;
+                bad += diff != 0;
+                std::printf("mvt-test %-24s T %d K %d: %7.1f us = %.2fx one token (%d tokens' outputs differ%s), %d VGPRs, %zu bytes, %u workgroups\n", sh.name, T, K,
+                            sec * 1e6, sec / t1, (int)diff, first >= 0 ? (", first at " + std::to_string(first) + ": " + std::to_string(((const float*)y1.cpu)[first]) + " vs " +
+                                                                                   std::to_string(((const float*)y2.cpu)[first])).c_str() : "",
+                            kt.vgprs, kt.code.size() * 4, nw / 8);
+                std::fflush(stdout);
+            }
+    }
+    std::printf("mvt-test: %s\n", bad ? "MISMATCH" : "all bit for bit the same");
+    return bad != 0;
 }
 
 // ts5-direct bw-peak: read bandwidth with no arithmetic to speak of, in GTT
