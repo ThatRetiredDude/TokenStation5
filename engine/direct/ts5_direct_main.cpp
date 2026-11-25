@@ -26,6 +26,7 @@
 #include "mv_q4k2.h"
 #include "mv_q6k.h"
 #include "attn.h"
+#include "attn_t.h"
 #include "ops.h"
 #include "mm_q4k.h"
 #include "mm_q4k_sb.h"
@@ -1038,7 +1039,7 @@ int main(int argc, char** argv) {
     }
     if (cmd == "gen-attn") {   // prints attn_part, or attn_reduce with "reduce"
         const std::string v = argc > 2 ? argv[2] : "part";   // part2-1 / part2-2: attn_part2 for 1 / 2 tokens
-        std::fputs((v == "reduce" ? ts5::direct::gen_attn_reduce() : v == "reduce-b" ? ts5::direct::gen_attn_reduce(true) : v == "part2-b" ? ts5::direct::gen_attn_part2(2, true) : v.rfind("part2-", 0) == 0 ? ts5::direct::gen_attn_part2(std::atoi(v.c_str() + 6)) : ts5::direct::gen_attn_part()).c_str(), stdout);
+        std::fputs((v == "t" ? ts5::direct::gen_attn_t() : v == "reduce-u" ? ts5::direct::gen_attn_reduce(true, true) : v == "reduce" ? ts5::direct::gen_attn_reduce() : v == "reduce-b" ? ts5::direct::gen_attn_reduce(true) : v == "part2-b" ? ts5::direct::gen_attn_part2(2, true) : v.rfind("part2-", 0) == 0 ? ts5::direct::gen_attn_part2(std::atoi(v.c_str() + 6)) : ts5::direct::gen_attn_part()).c_str(), stdout);
         return 0;
     }
     if (cmd == "gen-xt") {   // prints to_xT (prefill.h) for K columns and T tokens

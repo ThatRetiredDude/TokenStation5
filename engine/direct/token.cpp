@@ -233,6 +233,37 @@ int cmd_token(int argc, char** argv) {
         } else {
             std::printf("big passes: not available (%s)\n", R.big_ok() ? "context under 384" : "TS5_DIRECT_BIG=0 or a weight the tiled kernels don't take");
         }
+        // Round 85: a 2048-token prompt in big passes with attn_t against the
+        // same with attn_part2 (checked against the CPU above): last logits.
+        if (R.big_ok() && 2048 <= ctx) {
+            std::vector<int32_t> p4(2048);
+            for (int i = 0; i < 2048; i++) p4[i] = p2[(i * 13) % np];
+            std::vector<float> a(V), b(V);
+            const bool pairs = R.opt.attn_pairs;
+            for (int pass = 0; pass < 2; pass++) {
+                R.opt.attn_pairs = pass == 1;
+                for (int i = 0; i < 2048; i += 512)
+                    if (!R.send_batch(p4.data() + i, 512, i, i + 512 == 2048)) return fail(R.err() + " (attn_t check)");
+                if (!R.wait_all(120000)) return fail(R.err() + " (attn_t check)");
+                std::memcpy((pass ? b : a).data(), R.logits(), (size_t)V * 4);
+            }
+            R.opt.attn_pairs = pairs;
+            double md4 = 0, ml4 = 0;
+            int ta = 0, tb = 0;
+            bool nan4 = false;
+            for (int i = 0; i < V; i++) {
+                if (!(a[i] == a[i])) nan4 = true;
+                md4 = std::max(md4, (double)std::fabs(a[i] - b[i]));
+                ml4 = std::max(ml4, (double)std::fabs(b[i]));
+                if (a[i] > a[ta]) ta = i;
+                if (b[i] > b[tb]) tb = i;
+            }
+            const bool ok4 = !nan4 && ta == tb && md4 < 0.02 * ml4;
+            if (!ok4) ok = false;
+            std::printf("attn_t, 2048 tokens: last token's top-1 attn_t %s %d, attn_part2 %s %d, max |diff| %.4f of max |logit| %.3f: %s\n",
+                        piece(ta).c_str(), ta, piece(tb).c_str(), tb, md4, ml4, ok4 ? "MATCH" : "MISMATCH");
+            std::fflush(stdout);
+        }
         // Timed: 512 tokens (32 batches) queued, then the same as single tokens.
         std::vector<int32_t> filler(512);
         for (int i = 0; i < 512; i++) filler[i] = p2[i % np];

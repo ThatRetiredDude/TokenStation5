@@ -494,17 +494,20 @@ inline std::string gen_attn_part2(int NQT, bool batched = false) {
 
 // batched: a whole pass, token tgid_y (s11); s5 the pass's first position,
 // s8 bytes of partials a token; the splits worked out as attn_part2's pairs.
-inline std::string gen_attn_reduce(bool batched = false) {
+// uniform (with batched): every token of the pass has s4 splits (attn_t's).
+inline std::string gen_attn_reduce(bool batched = false, bool uniform = false) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
     k += ".kernel attn_reduce\n.wave32\n.user_sgprs 10\n.tgid_x\n" + std::string(batched ? ".tgid_y\n" : "");
     if (batched) {
+        if (!uniform) {
         o("s_lshr_b32 s12, s11, 1");
         o("s_lshl_b32 s12, s12, 1");
         o("s_add_u32 s12, s12, s5");
         o("s_add_u32 s12, s12, 2");            // the pair's last token's count
         k += attn_split_code("s12", "s13", "s4", "s14", "_r");
+        }
         o("s_mul_i32 s12, s11, s8");
         o("s_add_u32 s0, s0, s12");
         o("s_addc_u32 s1, s1, 0");

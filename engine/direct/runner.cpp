@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "attn.h"
+#include "attn_t.h"
 #include "mm_q4k.h"
 #include "mm_q6k.h"
 #include "mm_q4k_sb.h"
@@ -129,15 +130,15 @@ static bool attn2() {   // TS5_DIRECT_ATTN2=0: the old attention a token at a ti
 // TS5_DIRECT_HOT (default 83), lets the GPU drain and waits until it reads
 // TS5_DIRECT_COOL (default 75) or less (the die cools ~30 C in 0.1 s).
 // TS5_DIRECT_PACE=0 turns it off.
-// Long prompts (TS5_DIRECT_LONG tokens or more, default 2048; the backend
+// Long prompts (TS5_DIRECT_LONG tokens or more, default 1024; the backend
 // says how long a prompt is before its first pass) pace at TS5_DIRECT_HOT_LONG
 // / TS5_DIRECT_COOL_LONG instead: Vulkan's long prompts run the die at 88-91 C
 // (round 84), and a short prompt barely reaches 79 C either way.
 namespace {
 struct Pace {
-    int fd = -1, long_tokens = 2048;
+    int fd = -1, long_tokens = 1024;
     double hot = 83, cool = 75;   // round 82: 80/70 gave 873-903 tok/s, 83/75 928 at Tctl max 78.75
-    double hot_long = 86, cool_long = 80;
+    double hot_long = 88, cool_long = 82;   // round 85: pp2048 783 (83/75: 688), die max 87.5
     Pace() {
         const char* e = std::getenv("TS5_DIRECT_PACE");
         if (e && std::atoi(e) == 0) return;
@@ -252,7 +253,8 @@ bool Runner::init_big(std::string& err) {
     }
     if (!xtb_prog(E_) || !xtb_prog(NQ_ * HD_) || !xtb_prog(F_)) return false;
     if (!load(gen_qk_post(NQ_, hp.rms_eps, NKV_), k_qkb_, err) || !load(gen_attn_part2(2, true), k_attnb_, err) ||
-        !load(gen_attn_reduce(true), k_redb_, err) || !load(gen_sum_parts(), k_sum_, err)) {
+        !load(gen_attn_reduce(true), k_redb_, err) || !load(gen_sum_parts(), k_sum_, err) ||
+        !load(gen_attn_t(), k_attnt_, err) || !load(gen_attn_reduce(true, true), k_redu_, err)) {
         err = "big pass kernels: " + err;
         return false;
     }
@@ -460,7 +462,17 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
         }
         barrier();
         stamp(S_QK);
-        if (big) {   // token pairs, one launch; each pair's splits worked out on the GPU
+        if (big && !opt.attn_pairs && NQ_ == 32) {   // round 85: 32 tokens x 4 heads per K/V chunk (attn_t.h), one split layout for the pass
+            const uint32_t nl = pos0 + nt, nch = (nl + 255) / 256, per = (nch + 9) / 10, splits = (nch + per - 1) / per;
+            const uint32_t a1[14] = {lo(pQ_.gpu), hi(pQ_.gpu), lo(kc), hi(kc), lo(vc), hi(vc), (uint32_t)pos0, scale_bits_,
+                                     lo(ppart_.gpu), hi(ppart_.gpu), per * 256, (uint32_t)part_bytes_, nl, 0};
+            const uint32_t g1[3] = {splits * NKV_, (uint32_t)nt / 32, 1};
+            s.dispatch(k_attnt_.k, k_attnt_.code.gpu, a1, 14, g1, t256);
+            barrier();
+            const uint32_t a2[10] = {lo(ppart_.gpu), hi(ppart_.gpu), lo(pA_.gpu), hi(pA_.gpu), splits, (uint32_t)pos0, 0, 0, (uint32_t)part_bytes_, 0};
+            const uint32_t g2[3] = {(uint32_t)NKV_, (uint32_t)nt, 1};
+            s.dispatch(k_redu_.k, k_redu_.code.gpu, a2, 10, g2, t256);
+        } else if (big) {   // token pairs, one launch; each pair's splits worked out on the GPU
             const uint32_t nl = pos0 + nt, nch = (nl + 255) / 256, per = (nch + 9) / 10, smax = (nch + per - 1) / per;
             const uint32_t a1[12] = {lo(pQ_.gpu), hi(pQ_.gpu), lo(kc), hi(kc), lo(vc), hi(vc), (uint32_t)pos0, scale_bits_,
                                      lo(ppart_.gpu), hi(ppart_.gpu), 0, (uint32_t)part_bytes_};
@@ -586,6 +598,7 @@ std::string Runner::mv_kernels() const {
 }
 
 bool Runner::init(Model& m, int n_ctx, std::string& err) {
+    if (const char* e = std::getenv("TS5_DIRECT_ATTNT")) opt.attn_pairs = std::atoi(e) == 0;
     m_ = &m;
     const HParams& hp = m.hp;
     E_ = hp.n_embd, F_ = hp.n_ff, NQ_ = hp.n_head, NKV_ = hp.n_head_kv, HD_ = hp.head_dim, V_ = hp.n_vocab;
