@@ -25,7 +25,10 @@
 namespace ts5::direct {
 
 // exp (timing experiments, results wrong): 1 no x loads after the first
-// step (no scalar waits), 2 no nibble unpacking, 3 both.
+// step (no scalar waits), 2 no nibble unpacking, 3 both; 4 x read from LDS
+// (contents garbage) by broadcast ds_read_b128 into VGPRs, one step ahead,
+// instead of scalar loads (round 46: the scalar loads' waits are 57% of a
+// pass).
 inline std::string gen_mm_q4k(int K, int T, int SPLIT = 4, int exp = 0) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
@@ -38,7 +41,8 @@ inline std::string gen_mm_q4k(int K, int T, int SPLIT = 4, int exp = 0) {
     // LDS at the end (round 40: with a wave per 32 rows and the whole row,
     // 4096-row shapes left most SIMDs with one or two waves).
     const int PB = NB / SPLIT;                 // blocks a wave
-    k += ".kernel mm_q4k\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds " + S(SPLIT * T * 128) + "\n";
+    const int XV = 136;                       // exp 4: x sets in VGPRs (2 of 2T)
+    k += ".kernel mm_q4k\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds " + S(exp == 4 ? 16384 : SPLIT * T * 128) + "\n";
     o("v_lshrrev_b32 v2, 5, v0");
     o("v_readfirstlane_b32 s19, v2");          // the wave: its slice
     o("v_and_b32 v0, 31, v0");
@@ -109,7 +113,13 @@ inline std::string gen_mm_q4k(int K, int T, int SPLIT = 4, int exp = 0) {
     auto buf = [&](int st) { return SX + (st & 1) * 2 * T; };
     for (int st = 0; st < 128; st++) {
         const int j = st / 16, dw = (st / 2) % 8, h = st % 2;
-        if (!(exp & 1)) {
+        if (exp == 4) {
+            o("s_waitcnt lgkmcnt(0)");
+            const int nb = XV + ((st + 1) & 1) * 2 * T;
+            o("v_mov_b32 v134, " + S((xoff((st + 1) % 128) / 2) & 16383));
+            for (int i = 0; i < 2 * T; i += 4) o("ds_read_b128 v[" + S(nb + i) + ":" + S(nb + i + 3) + "], v134 offset:" + S(4 * i));
+            if (dw == 7 && h == 0) sload(SXS, T, "s[14:15]", j * T * 4);
+        } else if (!(exp & 1)) {
             o("s_waitcnt lgkmcnt(0)");
             if (st + 1 < 128) sload(buf(st + 1), 2 * T, "s[12:13]", xoff(st + 1));
             else sload(buf(0), 2 * T, "s[12:13]", 256 * T * 4);   // the next block's first step (past the end on the last: unused)
@@ -127,7 +137,8 @@ inline std::string gen_mm_q4k(int K, int T, int SPLIT = 4, int exp = 0) {
         }
         for (int c = 0; c < 2; c++)
             for (int t = 0; t < T; t++) {
-                const std::string x = "s" + S(buf(st) + c * T + t), w = "v" + S(U + 1 + 2 * h + c);
+                const std::string x = exp == 4 ? "v" + S(XV + (st & 1) * 2 * T + c * T + t) : "s" + S(buf(st) + c * T + t),
+                                  w = "v" + S(U + 1 + 2 * h + c);
                 if (dw == 0 && h == 0 && c == 0) o("v_mul_f32 v" + S(TMP + t) + ", " + x + ", " + w);
                 else o("v_fmac_f32 v" + S(TMP + t) + ", " + x + ", " + w);
             }
