@@ -32,7 +32,8 @@ public:
         bool skip_xt = false;
         bool old_mm = false;
         bool f32_mm = false;        // the prompt path with round 50's f32 split-block kernels        // the prompt path with round 41's mat-mul kernels (for comparison)       // timing only: the prompt path without to_xT (results wrong)
-        bool attn_pairs = false;    // big passes with attn_part2 (token pairs), not attn_t (TS5_DIRECT_ATTNT=0)
+        bool attn_pairs = false;    // big passes with attn_part2 (token pairs) (TS5_DIRECT_ATTN=pairs)
+        bool attn_t = false;        // big passes with attn_t (round 85, TS5_DIRECT_ATTN=t); default attn_f
         bool mvonly = false;   // timing: skip everything but the mat-vecs once `timing` is set
     };
     Options opt;
@@ -115,7 +116,7 @@ private:
     bool batch_ok_ = false, big_ok_ = false;
     std::map<uint64_t, Prog> mts_;
     std::map<int, Prog> xtbs_;
-    Prog k_qkb_, k_attnb_, k_redb_, k_sum_, k_attnt_, k_redu_;
+    Prog k_qkb_, k_attnb_, k_redb_, k_sum_, k_attnt_, k_attnf_, k_redu_;
     kfd::Buffer pP_;   // the tiled kernels' SK partial sums
     size_t part_bytes_ = 0;
     kfd::Buffer pX_, pXN_, pT_, pQ_, pK_, pV_, pA_, pG_, pU_, pH_, pxT_, px16_, pxs32_, pxs16_, ppart_;

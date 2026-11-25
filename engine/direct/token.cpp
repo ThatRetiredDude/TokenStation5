@@ -260,8 +260,8 @@ int cmd_token(int argc, char** argv) {
             }
             const bool ok4 = !nan4 && ta == tb && md4 < 0.02 * ml4;
             if (!ok4) ok = false;
-            std::printf("attn_t, 2048 tokens: last token's top-1 attn_t %s %d, attn_part2 %s %d, max |diff| %.4f of max |logit| %.3f: %s\n",
-                        piece(ta).c_str(), ta, piece(tb).c_str(), tb, md4, ml4, ok4 ? "MATCH" : "MISMATCH");
+            std::printf("attn_%s, 2048 tokens: last token's top-1 new %s %d, attn_part2 %s %d, max |diff| %.4f of max |logit| %.3f: %s\n",
+                        R.opt.attn_t ? "t" : "f", piece(ta).c_str(), ta, piece(tb).c_str(), tb, md4, ml4, ok4 ? "MATCH" : "MISMATCH");
             std::fflush(stdout);
         }
         // Timed: 512 tokens (32 batches) queued, then the same as single tokens.
@@ -333,7 +333,7 @@ int cmd_token(int argc, char** argv) {
                 double tot = 0;
                 for (double x : acc) tot += x;
                 std::printf("prompt profile at depth %d (512 tokens, one big pass, %s, %.3f ms a token in all):\n", ctx - 512,
-                            mode ? "attn_part2" : "attn_t", tot / 512 * 1e3);
+                            mode ? "attn_part2" : R.opt.attn_t ? "attn_t" : "attn_f", tot / 512 * 1e3);
                 for (int i = 0; i < S_COUNT; i++)
                     if (acc[i] > 0) std::printf("  %-18s %8.3f ms  %5.1f%%\n", kStepName[i], acc[i] / 512 * 1e3, 100 * acc[i] / tot);
                 std::fflush(stdout);

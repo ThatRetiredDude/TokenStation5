@@ -53,7 +53,7 @@ jobs:
           done
       - name: Check the attention kernels against llvm-mc
         run: |
-          for v in part reduce part2-1 part2-2 part2-b reduce-b t reduce-u; do
+          for v in part reduce part2-1 part2-2 part2-b reduce-b t f reduce-u; do
             build/direct/ts5-direct gen-attn $v > /tmp/attn.s
             python3 engine/direct/tests/asm_check.py build/direct/ts5-asm /tmp/attn.s
           done

@@ -12,6 +12,7 @@
 
 #include "attn.h"
 #include "attn_t.h"
+#include "attn_f.h"
 #include "mm_q4k.h"
 #include "mm_q6k.h"
 #include "mm_q4k_sb.h"
@@ -254,7 +255,7 @@ bool Runner::init_big(std::string& err) {
     if (!xtb_prog(E_) || !xtb_prog(NQ_ * HD_) || !xtb_prog(F_)) return false;
     if (!load(gen_qk_post(NQ_, hp.rms_eps, NKV_), k_qkb_, err) || !load(gen_attn_part2(2, true), k_attnb_, err) ||
         !load(gen_attn_reduce(true), k_redb_, err) || !load(gen_sum_parts(), k_sum_, err) ||
-        !load(gen_attn_t(), k_attnt_, err) || !load(gen_attn_reduce(true, true), k_redu_, err)) {
+        !load(gen_attn_t(), k_attnt_, err) || !load(gen_attn_f(), k_attnf_, err) || !load(gen_attn_reduce(true, true), k_redu_, err)) {
         err = "big pass kernels: " + err;
         return false;
     }
@@ -467,7 +468,8 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
             const uint32_t a1[14] = {lo(pQ_.gpu), hi(pQ_.gpu), lo(kc), hi(kc), lo(vc), hi(vc), (uint32_t)pos0, scale_bits_,
                                      lo(ppart_.gpu), hi(ppart_.gpu), per * 256, (uint32_t)part_bytes_, nl, 0};
             const uint32_t g1[3] = {splits * NKV_, (uint32_t)nt / 32, 1};
-            s.dispatch(k_attnt_.k, k_attnt_.code.gpu, a1, 14, g1, t256);
+            const Prog& ka = opt.attn_t ? k_attnt_ : k_attnf_;
+            s.dispatch(ka.k, ka.code.gpu, a1, 14, g1, t256);
             barrier();
             const uint32_t a2[10] = {lo(ppart_.gpu), hi(ppart_.gpu), lo(pA_.gpu), hi(pA_.gpu), splits, (uint32_t)pos0, 0, 0, (uint32_t)part_bytes_, 0};
             const uint32_t g2[3] = {(uint32_t)NKV_, (uint32_t)nt, 1};
@@ -598,7 +600,10 @@ std::string Runner::mv_kernels() const {
 }
 
 bool Runner::init(Model& m, int n_ctx, std::string& err) {
-    if (const char* e = std::getenv("TS5_DIRECT_ATTNT")) opt.attn_pairs = std::atoi(e) == 0;
+    if (const char* e = std::getenv("TS5_DIRECT_ATTN")) {
+        opt.attn_pairs = std::strcmp(e, "pairs") == 0;
+        opt.attn_t = std::strcmp(e, "t") == 0;
+    }
     m_ = &m;
     const HParams& hp = m.hp;
     E_ = hp.n_embd, F_ = hp.n_ff, NQ_ = hp.n_head, NKV_ = hp.n_head_kv, HD_ = hp.head_dim, V_ = hp.n_vocab;
