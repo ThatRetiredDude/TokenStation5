@@ -5,6 +5,7 @@
 #include "utf8_out.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -210,6 +211,16 @@ bool Engine::repair(const std::vector<int32_t> &prompt, size_t &keep, GenStats &
                   st.prompt_repaired, best_calls.size(), now_ms() - t0, best_m, prompt.size());
     keep = best_m;
     return true;
+}
+
+// TS5_HELPER_RATIO: the most a helper's draft token may cost, as a share
+// of the target's one-token forward, for it to draft (default 0.25).
+static double helper_ratio() {
+    static const double r = [] {
+        const char *v = std::getenv("TS5_HELPER_RATIO");
+        return v && std::atof(v) > 0 ? std::atof(v) : 0.25;
+    }();
+    return r;
 }
 
 static uint64_t gram_key(int32_t a, int32_t b) { return ((uint64_t)(uint32_t)a << 21) | (uint32_t)b; }
@@ -777,6 +788,13 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
         const bool from_lookup = batch.size() > 1;
         // The cascade: where the free lookup finds nothing, the draft model.
         bool by_model = batch.size() == 1 && room > 0 && db_ && drafter_ok_;
+        // A helper whose draft token costs over helper_ratio() of a target
+        // token sits out the rest of this request: deep in a conversation a
+        // 0.6B reads nearly as much K/V a token as the 8B (Qwen3: 112 against
+        // 144 KiB), and in round 117 at 2.9-6.6k context its 4.4-7.6 ms a
+        // draft token against the 8B's ~15 made a 12-turn chat 8% slower
+        // with 66% of its drafts kept (short contexts: ~1.9 against 13.6).
+        if (by_model && adapt && t_draft > 0 && t_fwd[1] > 0 && t_draft > helper_ratio() * t_fwd[1]) by_model = false;
         int mk = room;
         bool dprobe = false;
         if (by_model && adapt) {
