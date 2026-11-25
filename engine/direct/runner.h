@@ -149,6 +149,7 @@ private:
     kfd::Buffer vx_, vxn_, vq_, vk_, vv_, vatt_, vt_, vg_, vu_, vh_, vlog_, vpart_;
     Prog k_qkb_, k_attnb_, k_redb_, k_sum_, k_attnt_, k_attnf_, k_redu_;
     Prog k_qkv_;   // the verify pass's q/k kernel, T tokens a launch
+    Prog k_attnv_, k_redv_;   // its attention and reduce, T tokens a launch
     kfd::Buffer pP_;   // the tiled kernels' SK partial sums
     size_t part_bytes_ = 0;
     kfd::Buffer pX_, pXN_, pT_, pQ_, pK_, pV_, pA_, pG_, pU_, pH_, pxT_, px16_, pxs32_, pxs16_, ppart_;

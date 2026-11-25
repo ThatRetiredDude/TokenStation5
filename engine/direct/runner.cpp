@@ -1095,13 +1095,19 @@ bool Runner::init_verify(std::string& err) {
     // q/k norm + RoPE for all T tokens in one launch (the big passes' kernel:
     // the same arithmetic, every pointer stepped a token by tgid_y)
     if (!load(gen_qk_post(NQ_, hp.rms_eps, NKV_), k_qkv_, err)) { err = "verify qk kernel: " + err; return false; }
+    // attention for all T tokens in one launch when they split alike (round 107)
+    if (NQ_ == 32 && (!load(gen_attn_d(true, (unsigned)(NQ_ * HD_ * 4), (unsigned)(64 * NKV_ * 2112)), k_attnv_, err) ||
+                      !load(gen_attn_reduce(true, true), k_redv_, err))) {
+        err = "verify attention kernels: " + err;
+        return false;
+    }
     return true;
 }
 
-// TS5_DIRECT_VSPLIT=1: the verify pass's mat-vecs launched together share
-// the CUs (round 106 test; default off until measured).
+// The verify pass's mat-vecs launched together share the CUs (round 106: T2
+// 16.12 ms against 16.43 a pass); TS5_DIRECT_VSPLIT=0: each takes them all.
 static bool vsplit() {
-    static const bool on = std::getenv("TS5_DIRECT_VSPLIT") && std::atoi(std::getenv("TS5_DIRECT_VSPLIT")) == 1;
+    static const bool on = !(std::getenv("TS5_DIRECT_VSPLIT") && std::atoi(std::getenv("TS5_DIRECT_VSPLIT")) == 0);
     return on;
 }
 
@@ -1208,23 +1214,46 @@ void Runner::build_verify(const int32_t* ids, int T, int pos0, uint64_t seq, pm4
         }
         barrier();
         stamp(S_QK);
-        for (int t = 0; t < T; t++) {
-            const uint32_t n = pos0 + t + 1, nch = (n + 255) / 256, per = (nch + dsplits() - 1) / dsplits(), splits = (nch + per - 1) / per;
-            const uint64_t q = vq_.gpu + t * xA, part = vpart_.gpu + t * pb;
-            const uint32_t a1[12] = {lo(q), hi(q), lo(kc), hi(kc), lo(vc), hi(vc), n, scale_bits_, lo(part), hi(part), per * 256, 0};
-            const uint32_t g1[3] = {splits * NKV_, 1, 1};
-            if (!opt.dattn_old && NQ_ == 32) s.dispatch(k_attnd_.k, k_attnd_.code.gpu, a1, 12, g1, t128);
-            else s.dispatch(k_attn_.k, k_attn_.code.gpu, a1, 12, g1, t256);
+        // One launch for all T when every token has the same split size and
+        // count (the usual case: a split covers whole 256-position chunks), so
+        // each token's arithmetic is its own launch's; else a launch a token.
+        auto split_of = [&](int t, uint32_t* per, uint32_t* splits) {
+            const uint32_t n = pos0 + t + 1, nch = (n + 255) / 256;
+            *per = (nch + dsplits() - 1) / dsplits();
+            *splits = (nch + *per - 1) / *per;
+        };
+        uint32_t per0, sp0, perL, spL;
+        split_of(0, &per0, &sp0);
+        split_of(T - 1, &perL, &spL);
+        if (vb && NQ_ == 32 && !opt.dattn_old && per0 == perL && sp0 == spL) {
+            const uint64_t q = vq_.gpu, part = vpart_.gpu;
+            const uint32_t a1[12] = {lo(q), hi(q), lo(kc), hi(kc), lo(vc), hi(vc), (uint32_t)(pos0 + 1), scale_bits_, lo(part), hi(part), per0 * 256, 0};
+            const uint32_t g1[3] = {sp0 * NKV_, (uint32_t)T, 1};
+            s.dispatch(k_attnv_.k, k_attnv_.code.gpu, a1, 12, g1, t128);
+            barrier();
+            const uint32_t a2[10] = {lo(part), hi(part), lo(vatt_.gpu), hi(vatt_.gpu), sp0, (uint32_t)pos0, 0, 0, (uint32_t)pb, 0};
+            const uint32_t g2[3] = {(uint32_t)NKV_, (uint32_t)T, 1};
+            s.dispatch(k_redv_.k, k_redv_.code.gpu, a2, 10, g2, t256);
+            barrier();
+        } else {
+            for (int t = 0; t < T; t++) {
+                const uint32_t n = pos0 + t + 1, nch = (n + 255) / 256, per = (nch + dsplits() - 1) / dsplits(), splits = (nch + per - 1) / per;
+                const uint64_t q = vq_.gpu + t * xA, part = vpart_.gpu + t * pb;
+                const uint32_t a1[12] = {lo(q), hi(q), lo(kc), hi(kc), lo(vc), hi(vc), n, scale_bits_, lo(part), hi(part), per * 256, 0};
+                const uint32_t g1[3] = {splits * NKV_, 1, 1};
+                if (!opt.dattn_old && NQ_ == 32) s.dispatch(k_attnd_.k, k_attnd_.code.gpu, a1, 12, g1, t128);
+                else s.dispatch(k_attn_.k, k_attn_.code.gpu, a1, 12, g1, t256);
+            }
+            barrier();
+            for (int t = 0; t < T; t++) {
+                const uint32_t n = pos0 + t + 1, nch = (n + 255) / 256, per = (nch + dsplits() - 1) / dsplits(), splits = (nch + per - 1) / per;
+                const uint64_t part = vpart_.gpu + t * pb, out = vatt_.gpu + t * xA;
+                const uint32_t a2[10] = {lo(part), hi(part), lo(out), hi(out), splits, 0, 0, 0, 0, 0};
+                const uint32_t g2[3] = {(uint32_t)NKV_, 1, 1};
+                s.dispatch(k_red_.k, k_red_.code.gpu, a2, 10, g2, t256);
+            }
+            barrier();
         }
-        barrier();
-        for (int t = 0; t < T; t++) {
-            const uint32_t n = pos0 + t + 1, nch = (n + 255) / 256, per = (nch + dsplits() - 1) / dsplits(), splits = (nch + per - 1) / per;
-            const uint64_t part = vpart_.gpu + t * pb, out = vatt_.gpu + t * xA;
-            const uint32_t a2[10] = {lo(part), hi(part), lo(out), hi(out), splits, 0, 0, 0, 0, 0};
-            const uint32_t g2[3] = {(uint32_t)NKV_, 1, 1};
-            s.dispatch(k_red_.k, k_red_.code.gpu, a2, 10, g2, t256);
-        }
-        barrier();
         stamp(S_ATTN);
         mvt(L.wo, vatt_.gpu, xA, vt_.gpu, xE);
         barrier();

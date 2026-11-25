@@ -18,14 +18,27 @@
 
 namespace ts5::direct {
 
-inline std::string gen_attn_d() {
+// batched (round 107: a verify pass's T tokens in one launch): token tgid_y
+// (s13), whose q is s[0:1] + t q_bytes, positions s6 + t, partials s[8:9] +
+// t part_bytes; the rest as one token's (every token of the launch must have
+// the same s10, so each is bit for bit its own launch).
+inline std::string gen_attn_d(bool batched = false, unsigned q_bytes = 16384, unsigned part_bytes = 0) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
     auto v = [&](int a) { return "v" + S(a); };
     auto vr = [&](int a, int n) { return "v[" + S(a) + ":" + S(a + n - 1) + "]"; };
     const int Q = 8, M = 40, L = 44, SC = 48, KV = 64, O = 128, AD = 192, T = 196;
-    k += ".kernel attn_d\n.wave32\n.user_sgprs 12\n.tgid_x\n.lds 8448\n";
+    k += ".kernel attn_d\n.wave32\n.user_sgprs 12\n.tgid_x\n" + std::string(batched ? ".tgid_y\n" : "") + ".lds 8448\n";
+    if (batched) {
+        o("s_mul_i32 s26, s13, " + S(q_bytes));
+        o("s_add_u32 s0, s0, s26");
+        o("s_addc_u32 s1, s1, 0");
+        o("s_add_u32 s6, s6, s13");
+        o("s_mul_i32 s26, s13, " + S(part_bytes));
+        o("s_add_u32 s8, s8, s26");
+        o("s_addc_u32 s9, s9, 0");
+    }
     o("s_and_b32 s13, s12, 7");                    // g
     o("s_lshr_b32 s14, s12, 3");                   // split
     o("s_mul_i32 s16, s14, s10");                  // ps
