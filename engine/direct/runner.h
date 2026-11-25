@@ -2,7 +2,7 @@
 // the GPU reads, its kernels, and one command stream per token (embedding,
 // every layer, the logits and their argmax), sent to a KFD user queue with
 // no wait between tokens. Used by ts5-direct's token command and by ts5's
-// "direct" backend.
+// SoKnee backend ("soknee", old name "direct").
 #pragma once
 #include <cstdint>
 #include <algorithm>

@@ -1,10 +1,13 @@
-# The direct engine
+# SoKnee
 
-ts5 driving the PS5's GPU (GFX10.1, gfx1013) itself: our own machine code,
+SoKnee (the directory keeps its working name, `direct`) is ts5 driving the PS5's GPU (GFX10.1, gfx1013) itself: our own machine code,
 our own command packets, and the kernel's amdgpu driver only for memory and
 starting the chip. No Vulkan, Mesa, RADV, ACO, LLVM or SPIR-V at run time.
 It is the engine for TokenStation5 OS, and the Vulkan engine stays as the
 reference every kernel here has to match.
+
+Pick it with `ts5 bench --engine soknee` (or `--backend soknee`; the old
+name `direct` still works).
 
 | Part | Status |
 | --- | --- |

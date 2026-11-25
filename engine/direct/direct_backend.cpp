@@ -1,4 +1,4 @@
-// ts5's "direct" backend (--backend direct): the direct engine's runner
+// ts5's SoKnee backend (--backend soknee, or the old name direct): the direct engine's runner
 // behind the Backend interface, for Qwen3 models of Q4_K and Q6_K weights on
 // the PS5's GPU. A prompt goes up to Runner::kBig tokens a pass over the weights
 // (send_batch, prompt_chunk); generation and short tails one token at a time.
@@ -15,7 +15,7 @@ namespace {
 
 class DirectBackend : public Backend {
 public:
-    const char *name() const override { return "direct"; }
+    const char *name() const override { return "soknee"; }
     bool init(Model &m, int n_ctx, std::string &err) {
         V_ = m.hp.n_vocab;
         return r_.init(m, n_ctx, err);
@@ -49,7 +49,7 @@ public:
     const float *logits_view() const override { return r_.logits(); }
     bool forward_in_place(const int32_t *tokens, int n, int pos0, bool all_logits, std::string &err) override {
         if (all_logits && n > 1) {
-            err = "the direct backend keeps one token's logits";
+            err = "SoKnee keeps one token's logits";
             return false;
         }
         return forward(tokens, n, pos0, nullptr, false, err);

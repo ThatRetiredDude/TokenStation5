@@ -103,7 +103,8 @@ int usage() {
             "       ts5 fetch URL FILE [--sha256 HEX] | ts5 peak [--device N] [--gib G]\n"
             "       ts5 helpers -m model.gguf --helper FILE...  (which files could draft for the model)\n"
             "  -c N|auto      context length (default 8192; auto: what fits in GPU memory)\n"
-            "  --backend B    vk, cpu or direct (the PS5 GPU without Vulkan: Qwen3, Q4_K_M)\n"
+            "  --backend B    vk, cpu or soknee (our own PS5 GPU engine, no Vulkan: Qwen3, Q4_K_M;\n"
+            "                 'direct' also works). --engine is the same option.\n"
             "  --device N     Vulkan device index\n"
             "  serve: --host ADDR --port N\n"
             "  run:   -p PROMPT [--chat] [-n N] [--temp T]\n"
@@ -145,7 +146,7 @@ bool parse(int argc, char **argv, Args &a) {
         else if (s == "--pp") a.pp = atoi(next().c_str());
         else if (s == "--tg") a.tg = atoi(next().c_str());
         else if (s == "--temp") a.temp = (float)atof(next().c_str());
-        else if (s == "--backend") a.backend = next();
+        else if (s == "--backend" || s == "--engine") a.backend = next();
         else if (s == "--device") a.device = atoi(next().c_str());
         else if (s == "--chat") a.chat = true;
         else if (s == "--step") a.step = true;
@@ -159,6 +160,7 @@ bool parse(int argc, char **argv, Args &a) {
         else ok = false;
     }
     if (!ok || a.model.empty()) return false;
+    if (a.backend == "direct") a.backend = "soknee";   // the engine's old name
 #ifdef TS5_VULKAN
     if (a.backend.empty()) a.backend = "vk";
 #else
@@ -591,7 +593,7 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
 
     double t0 = now_ms();
     Backend *be = nullptr;
-    if (a.backend == "direct") {
+    if (a.backend == "soknee") {
 #ifdef TS5_DIRECT
         if (a.n_ctx <= 0) a.n_ctx = 8192;
         model.use_context(a.n_ctx);
