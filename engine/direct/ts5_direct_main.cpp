@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "../src/model.h"
 #include "gfx10_asm.h"
 #include "kernels.h"   // generated: kernel sources as strings
 #include "kfd.h"
@@ -1168,6 +1169,20 @@ int main(int argc, char** argv) {
     if (cmd == "token") return ts5::direct::cmd_token(argc, argv);
     if (cmd == "pprof") return ts5::direct::cmd_pprof(argc, argv);
     if (cmd == "verify-test") return ts5::direct::cmd_verify_test(argc, argv);
+    if (cmd == "tensors" && argc > 2) {   // tensors MODEL.gguf: every tensor's name, type and shape, and the model's sizes
+        ts5::Model m;
+        std::string err;
+        if (!m.open(argv[2], err)) { std::fprintf(stderr, "tensors: %s\n", err.c_str()); return 1; }
+        const ts5::HParams& hp = m.hp;
+        std::printf("%s: embd %d, layers %d, ff %d, heads %d / %d kv, head dim %d, vocab %d\n", hp.arch.c_str(), hp.n_embd, hp.n_layer, hp.n_ff,
+                    hp.n_head, hp.n_head_kv, hp.head_dim, hp.n_vocab);
+        for (const auto& t : m.gguf.tensors) {
+            std::printf("%-32s %-6s", t.name.c_str(), ts5::type_name(t.type));
+            for (int64_t e : t.ne) std::printf(" %lld", (long long)e);
+            std::printf("\n");
+        }
+        return 0;
+    }
     if (cmd == "mm-q4k" || cmd == "mm-q6k") return ts5::direct::cmd_mm_q4k(argc, argv);
     if (cmd == "xt-bench") return ts5::direct::cmd_xt_bench(argc, argv);
     if (cmd == "dot-test") return ts5::direct::cmd_dot_test(argc, argv);

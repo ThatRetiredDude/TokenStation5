@@ -597,7 +597,14 @@ int ts5::cli_main(int argc, char **argv, const ServingHook &on_serving) {
 #ifdef TS5_DIRECT
         if (a.n_ctx <= 0) a.n_ctx = 8192;
         model.use_context(a.n_ctx);
-        draft = false;   // a draft model would need a second backend beside it
+        // A Qwen3 0.6B helper on SoKnee itself needs its shapes (1024 and 3072
+        // columns, 16 query heads). Until then, for measuring what a helper
+        // gains next to SoKnee's verify passes only: TS5_SOKNEE_VK_HELPER=1
+        // runs the draft model on Vulkan beside it. Off by default.
+        {
+            const char *vh = getenv("TS5_SOKNEE_VK_HELPER");
+            if (!(vh && atoi(vh) == 1)) draft = false;
+        }
         be = make_direct_backend(model, a.n_ctx, err);
 #else
         err = "built without the direct engine";
