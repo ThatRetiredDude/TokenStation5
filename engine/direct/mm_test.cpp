@@ -554,7 +554,7 @@ int cmd_bw_peak(int, char**) {
                 for (int i = 0; i < per; i++) {
                     const int r = 16 + 4 * (i % 8);
                     const int off = pat == 0 ? i * 512 : i * 16;
-                    if (off < 4096) src += "    global_load_dwordx4 v[" + std::to_string(r) + ":" + std::to_string(r + 3) + "], v1, s[0:1] offset:" + std::to_string(off) + "\n";
+                    if (off < 2048) src += "    global_load_dwordx4 v[" + std::to_string(r) + ":" + std::to_string(r + 3) + "], v1, s[0:1] offset:" + std::to_string(off) + "\n";
                     else src += "    v_add_nc_u32 v4, " + std::to_string(off) + ", v1\n    global_load_dwordx4 v[" + std::to_string(r) + ":" + std::to_string(r + 3) + "], v4, s[0:1]\n";
                     if (i % 8 == 7) {
                         src += "    s_waitcnt vmcnt(0)\n";
