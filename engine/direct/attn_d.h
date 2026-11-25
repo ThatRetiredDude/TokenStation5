@@ -50,7 +50,7 @@ inline std::string gen_attn_d(bool batched = false, unsigned q_bytes = 16384, un
     if (share && (nt > 4 || batched)) return "";
     if (pairs && nt != 2) return "";
     const int lds = share ? std::max(32768, nt * 8448) : 8448;
-    k += ".kernel attn_d\n.wave32\n.user_sgprs 12\n.tgid_x\n" + std::string(batched ? ".tgid_y\n" : "") + ".lds " + S(lds) + "\n";
+    k += ".kernel attn_d\n.wave32\n.user_sgprs 12\n.tgid_x\n" + std::string(batched || pairs ? ".tgid_y\n" : "") + ".lds " + S(lds) + "\n";
     if (share && pairs) {
         o("v_lshrrev_b32 v5, 7, v0");
         o("v_readfirstlane_b32 s30, v5");          // the token in the pair
