@@ -408,6 +408,7 @@ bool run_bench(const Model &m, Backend &b, int pp, int tg, BenchResult &r, std::
     if (!b.forward(toks.data(), std::min((int)toks.size(), 8), 0, lg.data(), false, err)) return false;
     b.take_profile();
     if (progress) progress("prompt: " + std::to_string(pp) + " tokens");
+    b.expect_prompt(pp);
     double t = now_ms();
     const int chunk = 256;
     for (int i = 0; i < pp; i += chunk) {

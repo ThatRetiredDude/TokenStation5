@@ -507,6 +507,7 @@ bool Engine::generate(const std::vector<int32_t> &prompt, const SampleParams &p,
     // are for backends without a view.
     const bool in_place = b_->logits_view() != nullptr;
     std::vector<float> logits(in_place ? 0 : nv);
+    b_->expect_prompt((int)prompt.size());
     double t0 = now_ms();
     int n = 0;
     for (size_t i = keep; i < prompt.size(); i += (size_t)n) {

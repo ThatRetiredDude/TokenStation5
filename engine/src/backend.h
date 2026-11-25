@@ -63,6 +63,10 @@ public:
     virtual bool save_state(int, std::string &) { return false; }
     virtual bool restore_state(int, std::string &) { return false; }
     virtual KvType kv_type() const { return KvType::F32; }
+    // A hint before a prompt goes in as several forward calls (the server and
+    // bench feed 256 tokens a call): the prompt ends at position `end`. SoKnee
+    // paces its heat by the whole prompt's length, not by one call's.
+    virtual void expect_prompt(int end) { (void)end; }
     // Since the last call, a few lines of text: with TS5_PROFILE set (vk),
     // the CPU's time per forward call, and with TS5_PROFILE=1 also the GPU's
     // time per kernel; else empty.

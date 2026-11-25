@@ -27,7 +27,11 @@ public:
             return false;
         }
         int i = 0;
-        r_.set_prompt_tokens(n);
+        // Round 95: the bench and the server feed 256 tokens a call, so a
+        // call's own n always looked short and an 8k prompt paced at 83/75
+        // (~3.3 s of pauses in 13.9). The whole prompt's end decides.
+        r_.set_prompt_tokens(std::max(pos0 + n, expect_end_));
+        if (pos0 + n >= expect_end_) expect_end_ = 0;
         if (!(all_logits && logits) && r_.batch_ok())
             // Big passes of 128-512 while 128 are left (big_ok), then batches
             // of kBatch; a tail of 4 or more is one more (short) batch.
@@ -46,6 +50,7 @@ public:
         if (logits && !all_logits) std::memcpy(logits, r_.logits(), (size_t)V_ * 4);
         return true;
     }
+    void expect_prompt(int end) override { expect_end_ = end; }
     const float *logits_view() const override { return r_.logits(); }
     bool forward_in_place(const int32_t *tokens, int n, int pos0, bool all_logits, std::string &err) override {
         if (all_logits && n > 1) {
@@ -64,7 +69,7 @@ private:
         return false;
     }
     direct::Runner r_;
-    int V_ = 0;
+    int V_ = 0, expect_end_ = 0;
 };
 
 }  // namespace
