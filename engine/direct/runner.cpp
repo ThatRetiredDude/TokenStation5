@@ -183,7 +183,7 @@ static bool dattn() {   // generation's attention: attn_d (round 91); TS5_DIRECT
 static uint32_t dsplits() {   // generation's attention splits at most (TS5_DIRECT_DSPLITS, 1-64)
     static const uint32_t n = [] {
         const char* e = std::getenv("TS5_DIRECT_DSPLITS");
-        const int v = e ? std::atoi(e) : 40;
+        const int v = e ? std::atoi(e) : 10;   // rounds 88-91: 10 beat 40 every time with attn_d
         return (uint32_t)std::min(64, std::max(1, v));
     }();
     return n;
