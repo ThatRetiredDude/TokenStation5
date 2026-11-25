@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -77,6 +78,7 @@ int cmd_mm_q4k(int argc, char** argv) {
                 : EXP == 12 ? ", packed f16 multiply-adds (mm_q4k_h; errors judged at 3e-3)"
                 : EXP == 16 ? ", f16 (mm_q4k_h), rows sweep; pair = two launches back to back as gate + up"
                 : EXP == 17 ? ", f16 (mm_q4k_h), 2 rows a lane" : EXP == 13 ? ", f16, TIMING ONLY: no x loads" : EXP == 14 ? ", f16, TIMING ONLY: no unpacking" : EXP == 15 ? ", f16, TIMING ONLY: neither" : "");
+    if (std::getenv("TS5_MM_WVRAM") && std::atoi(std::getenv("TS5_MM_WVRAM"))) std::printf("weights in VRAM (TS5_MM_WVRAM)\n");
     for (const Shape& sh : shapes) {
         const int NB = sh.K / 256;
         if (EXP >= 12 ? (NB % (SPLIT / 4)) : (NB % SPLIT || (q6 && (NB / SPLIT) % 2))) continue;
@@ -159,7 +161,34 @@ int cmd_mm_q4k(int argc, char** argv) {
                 mag[(size_t)t * sh.R + r] = m;
             }
         }
-        const uint32_t args[10] = {(uint32_t)W.gpu, (uint32_t)(W.gpu >> 32), (uint32_t)xT.gpu, (uint32_t)(xT.gpu >> 32), (uint32_t)Y.gpu,
+        // TS5_MM_WVRAM=1: the weights copied into VRAM (the GPU's carve-out,
+        // large pages) to compare with GTT (system memory, 4 KiB pages; each
+        // lane reads its own row, so a wave touches 32 rows' pages at once).
+        static const bool wvram = std::getenv("TS5_MM_WVRAM") && std::atoi(std::getenv("TS5_MM_WVRAM"));
+        kfd::Buffer Wv;
+        if (wvram) {
+            static gfx10::Kernel ck;
+            static kfd::Buffer cc;
+            if (!cc.gpu) {
+                const char* src = ".kernel copy16\n.wave32\n.user_sgprs 4\n.tgid_x\n"
+                                  "    v_lshlrev_b32 v1, 4, v0\n    s_lshl_b32 s5, s4, 12\n    v_add_nc_u32 v1, s5, v1\n"
+                                  "    global_load_dwordx4 v[4:7], v1, s[0:1]\n    s_waitcnt vmcnt(0)\n"
+                                  "    global_store_dwordx4 v1, v[4:7], s[2:3]\n    s_endpgm\n";
+                if (!gfx10::assemble(src, ck, &err) || !dev.alloc(65536, kfd::Mem::Gtt, cc)) { std::fprintf(stderr, "mm-q4k: copy: %s\n", err.c_str()); return 1; }
+                for (size_t i = 0; i < 65536 / 4; i++) ((uint32_t*)cc.cpu)[i] = 0xbf9f0000;
+                std::memcpy(cc.cpu, ck.code.data(), ck.code.size() * 4);
+            }
+            const size_t vb = (wbytes + 4096 + 4095) & ~(size_t)4095;
+            if (!dev.alloc(vb, kfd::Mem::Vram, Wv)) { std::fprintf(stderr, "mm-q4k: %s\n", dev.err().c_str()); return 1; }
+            const uint32_t ca[4] = {(uint32_t)W.gpu, (uint32_t)(W.gpu >> 32), (uint32_t)Wv.gpu, (uint32_t)(Wv.gpu >> 32)};
+            const uint32_t cg[3] = {(uint32_t)(vb / 4096), 1, 1}, ct[3] = {256, 1, 1};
+            pm4::Stream s;
+            s.dispatch(ck, cc.gpu, ca, 4, cg, ct);
+            double cs;
+            if (!run(s, &cs)) { std::fprintf(stderr, "mm-q4k: copy: %s\n", dev.err().c_str()); return 1; }
+        }
+        const uint64_t wg = wvram ? Wv.gpu : W.gpu;
+        const uint32_t args[10] = {(uint32_t)wg, (uint32_t)(wg >> 32), (uint32_t)xT.gpu, (uint32_t)(xT.gpu >> 32), (uint32_t)Y.gpu,
                                    (uint32_t)(Y.gpu >> 32), (uint32_t)sh.R, 0, (uint32_t)xs.gpu, (uint32_t)(xs.gpu >> 32)};
         const uint32_t g[3] = {(uint32_t)(sh.R / (EXP == 11 || EXP == 17 ? 64 : 32)), 1, 1}, th[3] = {(uint32_t)(32 * SPLIT), 1, 1};
         std::memset(Y.cpu, 0xff, (size_t)sh.R * T * 4);
