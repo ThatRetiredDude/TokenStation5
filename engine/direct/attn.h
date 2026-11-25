@@ -498,6 +498,7 @@ inline std::string gen_attn_part2(int NQT, bool batched = false) {
 inline std::string gen_attn_reduce(bool batched = false, bool uniform = false) {
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
+    auto v = [&](int a) { return "v" + std::to_string(a); };
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
     k += ".kernel attn_reduce\n.wave32\n.user_sgprs 10\n.tgid_x\n" + std::string(batched ? ".tgid_y\n" : "");
     if (batched) {
@@ -527,29 +528,60 @@ inline std::string gen_attn_reduce(bool batched = false, bool uniform = false) {
     o("v_mov_b32 v11, 0");                 // L
     o("v_mov_b32 v12, 0");                 // O
     o("v_mov_b32 v13, 0");
+    // Round 90: splits 8 at a time with all their loads in flight first
+    // (round 89: at 40 splits a serial load-wait-fold per split made this
+    // one-workgroup-per-KV-head kernel latency-bound), then one at a time.
+    auto fold = [&](int m, int l, int o0) {
+        o("v_max_f32 v9, v10, " + v(m));             // new M
+        o("v_sub_f32 v14, v10, v9");
+        o("v_exp_f32 v14, v14");                     // old scale
+        o("v_sub_f32 v15, " + v(m) + ", v9");
+        o("v_exp_f32 v15, v15");                     // this split's scale
+        o("v_mov_b32 v10, v9");
+        o("v_mul_f32 v11, v11, v14");
+        o("v_fmac_f32 v11, " + v(l) + ", v15");
+        o("v_mul_f32 v12, v12, v14");
+        o("v_fmac_f32 v12, " + v(o0) + ", v15");
+        o("v_mul_f32 v13, v13, v14");
+        o("v_fmac_f32 v13, " + v(o0 + 1) + ", v15");
+    };
     o("s_mov_b32 s12, 0");
+    o("s_add_u32 s15, s12, 8");
+    o("s_cmp_gt_u32 s15, s4");
+    o("s_cbranch_scc1 tail");
+    k += "loop8:\n";
+    for (int u = 0; u < 8; u++) {
+        o("v_add_nc_u32 " + v(48 + u) + ", " + S(0x4200 * u) + ", v3");
+        o("v_add_nc_u32 " + v(56 + u) + ", " + S(0x4200 * u) + ", v4");
+    }
+    for (int u = 0; u < 8; u++) {
+        o("global_load_dword " + v(16 + u) + ", " + v(48 + u) + ", s[0:1]");
+        o("global_load_dword " + v(24 + u) + ", " + v(48 + u) + ", s[0:1] offset:16");
+        o("global_load_dwordx2 v[" + S(32 + 2 * u) + ":" + S(33 + 2 * u) + "], " + v(56 + u) + ", s[0:1]");
+    }
+    o("s_waitcnt vmcnt(0)");
+    for (int u = 0; u < 8; u++) fold(16 + u, 24 + u, 32 + 2 * u);
+    o("v_add_nc_u32 v3, 0x21000, v3");      // + 8 splits
+    o("v_add_nc_u32 v4, 0x21000, v4");
+    o("s_mov_b32 s12, s15");
+    o("s_add_u32 s15, s12, 8");
+    o("s_cmp_le_u32 s15, s4");
+    o("s_cbranch_scc1 loop8");
+    k += "tail:\n";
+    o("s_cmp_ge_u32 s12, s4");
+    o("s_cbranch_scc1 folded");
     k += "loop:\n";
     o("global_load_dword v5, v3, s[0:1]");
     o("global_load_dword v6, v3, s[0:1] offset:16");
     o("global_load_dwordx2 v[7:8], v4, s[0:1]");
     o("s_waitcnt vmcnt(0)");
-    o("v_max_f32 v9, v10, v5");            // new M
-    o("v_sub_f32 v14, v10, v9");
-    o("v_exp_f32 v14, v14");               // old scale
-    o("v_sub_f32 v15, v5, v9");
-    o("v_exp_f32 v15, v15");               // this chunk's scale
-    o("v_mov_b32 v10, v9");
-    o("v_mul_f32 v11, v11, v14");
-    o("v_fmac_f32 v11, v6, v15");
-    o("v_mul_f32 v12, v12, v14");
-    o("v_fmac_f32 v12, v7, v15");
-    o("v_mul_f32 v13, v13, v14");
-    o("v_fmac_f32 v13, v8, v15");
+    fold(5, 6, 7);
     o("v_add_nc_u32 v3, 0x4200, v3");      // next chunk: + 8 * 2112
     o("v_add_nc_u32 v4, 0x4200, v4");
     o("s_add_u32 s12, s12, 1");
     o("s_cmp_lt_u32 s12, s4");
     o("s_cbranch_scc1 loop");
+    k += "folded:\n";
     o("v_rcp_f32 v11, v11");
     o("v_mul_f32 v12, v12, v11");
     o("v_mul_f32 v13, v13, v11");
