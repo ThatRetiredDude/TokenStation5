@@ -23,7 +23,7 @@
 namespace ts5::direct {
 
 // exp (timing only, wrong values): 1 no x loads in the loop, 2 no unpacking
-// (the quant dword used as the f16 pair), 3 neither.
+// (the quant dword used as the f16 pair), 3 neither; 4 no f32 epilogue (with 1 2: 7 none of them).
 //
 // SK (1, 2, 4, 8): SK groups of 4 waves a workgroup (128 SK threads), group
 // g taking blocks g, g + SK, ...; the 4 SK partial sums added through LDS.
@@ -185,7 +185,7 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
             }
         }
         }
-        if (dw == 7) {
+        if (dw == 7 && !(exp & 4)) {
             // the sub-block into f32: acc[t] += d sc 2^E tmp[t] - dmin m xs[t]
             // (E: x16's exponent, the same for every token, in xs's low byte)
             o("s_sext_i32_i8 s17, s" + S(SXS));
