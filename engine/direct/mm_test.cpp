@@ -682,9 +682,11 @@ int cmd_mvt_test(int argc, char** argv) {
     };
     int bad = 0;
     // round 100's mvt (K 8) beside round 101's mvt2 variants (K row slots, PD items ahead)
-    // (round 108: Q6_K's K 4 with its dot products one after another, ilp off, beside the default)
-    struct Cfg { bool v2; int K, PD; bool ilp = true; };
-    const std::vector<Cfg> q4cfg = {{false, 8, 0}, {true, 4, 2}, {true, 8, 2}, {true, 4, 3}};
+    // (round 108: Q6_K's K 4 with its dot products one after another, ilp
+    // off, beside the default; round 110: Q4_K's K 4 staging x every pass,
+    // res off, beside x staged once)
+    struct Cfg { bool v2; int K, PD; bool ilp = true, res = true; };
+    const std::vector<Cfg> q4cfg = {{false, 8, 0}, {true, 4, 2, true, false}, {true, 4, 2}, {true, 8, 2}, {true, 4, 3}};
     const std::vector<Cfg> q6cfg = {{false, 8, 0}, {true, 4, 1, false}, {true, 2, 1}, {true, 4, 1}, {true, 8, 1}};
     for (const Shape& sh : shapes) {
         const int bb = sh.q6 ? 210 : 144;
@@ -724,9 +726,9 @@ int cmd_mvt_test(int argc, char** argv) {
             for (const Cfg& cf : sh.q6 ? q6cfg : q4cfg) {
                 const int K = cf.K;
                 const std::string src = !cf.v2 ? (sh.q6 ? gen_mvt_q6k(sh.cols, T, K) : gen_mvt_q4k(sh.cols, T, K))
-                                               : (sh.q6 ? gen_mvt2_q6k(sh.cols, T, K, cf.PD, cf.ilp) : gen_mvt2_q4k(sh.cols, T, K, cf.PD));
+                                               : (sh.q6 ? gen_mvt2_q6k(sh.cols, T, K, cf.PD, cf.ilp) : gen_mvt2_q4k(sh.cols, T, K, cf.PD, cf.res));
                 char cname[32];
-                std::snprintf(cname, sizeof cname, cf.v2 ? (cf.ilp ? "mvt2 K %d PD %d" : "mvt2 K %d PD %d no-ilp") : "mvt  K %d", K, cf.PD);
+                std::snprintf(cname, sizeof cname, cf.v2 ? (!cf.ilp ? "mvt2 K %d PD %d no-ilp" : !cf.res ? "mvt2 K %d PD %d no-res" : "mvt2 K %d PD %d") : "mvt  K %d", K, cf.PD);
                 if (src.empty()) {
                     std::printf("mvt-test %-24s T %d %s: no kernel (too many VGPRs)\n", sh.name, T, cname);
                     continue;

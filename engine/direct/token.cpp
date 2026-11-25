@@ -470,6 +470,7 @@ int cmd_verify_test(int argc, char** argv) {
     for (int i = 0; i < P; i++) prompt[i] = 1000 + (i * 37) % 20000;
     auto envd = [](const char* n, double d) { const char* e = std::getenv(n); return e ? std::atof(e) : d; };
     const double vt_start = envd("TS5_VT_START", 60), vt_hot = envd("TS5_VT_HOT", 82), vt_cool = envd("TS5_VT_COOL", 70);
+    const double vt_min_ms = envd("TS5_VT_MIN_MS", 150);
     double paused = 0, peak = 0;
     auto wait_below = [&](double below) {   // at most 60 s
         const auto t0 = std::chrono::steady_clock::now();
@@ -499,7 +500,15 @@ int cmd_verify_test(int argc, char** argv) {
     auto pace_pass = [&]() {   // between passes
         const double c = hot_mc.exchange(0) / 1000.0;
         peak = std::max(peak, c);
-        if (c >= vt_hot) wait_below(vt_cool + 0.01);
+        if (c >= vt_hot) {
+            // at least TS5_VT_MIN_MS (default 150; round 109: the die reads
+            // under 70 within ms of going idle, so pauses to 70 alone came to
+            // 0.4 s in all and the 5 ms sampler still saw 91.8 C)
+            const auto t0 = std::chrono::steady_clock::now();
+            std::this_thread::sleep_for(std::chrono::milliseconds((int)vt_min_ms));
+            paused += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            wait_below(vt_cool + 0.01);
+        }
     };
     auto send_prompt = [&]() -> bool {
         wait_below(vt_start);

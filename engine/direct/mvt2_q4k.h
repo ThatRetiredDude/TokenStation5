@@ -16,17 +16,26 @@
 // takes 136 VGPRs).
 #pragma once
 #include <algorithm>
+#include <cstdint>
+#include <cstdio>
 #include <string>
 
 namespace ts5::direct {
 
-inline std::string gen_mvt2_q4k(int ncols, int T, int K = 4, int PD = 2) {
+inline std::string gen_mvt2_q4k(int ncols, int T, int K = 4, int PD = 2, bool resident = true) {
     const int NS = 4, J = 2 * K;          // weight sets; items a chunk: (half g, slot kk), g major
     if (T < 1 || T > 4 || K < 2 || K % 2 || PD < 1 || PD >= NS || PD > K) return "";
     const int nit = ncols / 2048;          // steps (chunks) per row
     const int row_bytes = ncols / 256 * 144;
     const int SUMS = T * 8192;             // LDS: x chunk of token t at 8192 t, its 128 sums at SUMS + 512 t
-    const int lds = std::max(SUMS + T * 512, 33 * 1024);
+    // resident (round 110): where every chunk of x fits in LDS at once (4096
+    // columns up to T 3), all of it is staged once at the start, chunk c at
+    // c CB, and the passes read it with no staging, barriers or waits for
+    // every load (each chunk of each pass otherwise staged x again behind an
+    // s_waitcnt vmcnt(0) that also drained the weight loads in flight).
+    const int CB = SUMS + T * 512;
+    const bool res = resident && nit * CB <= 65536;
+    const int lds = res ? std::max(nit * CB, 33 * 1024) : std::max(SUMS + T * 512, 33 * 1024);
     auto S = [](long v) { return std::to_string(v); };
     auto V = [&](int r) { return "v" + S(r); };
     auto VR = [&](int a, int n) { return "v[" + S(a) + ":" + S(a + n - 1) + "]"; };
@@ -128,53 +137,64 @@ inline std::string gen_mvt2_q4k(int ncols, int T, int K = 4, int PD = 2) {
         o("global_load_dwordx4 " + VR(W(s) + 1, 4) + ", v2, " + sp + (g ? " offset:576" : ""));
         o("v_nop");                        // (VMEM reads of s[sa:sa+1] before SALU writes them)
     };
+    // ---- stage a chunk of every token (s36:37 its address) at LDS offset cb
+    auto stage = [&](int cb) {
+        for (int t = 0; t < T; t++) {
+            if (t) {
+                o("s_add_u32 s" + S(36 + 2 * t) + ", s" + S(34 + 2 * t) + ", s7");
+                o("s_addc_u32 s" + S(37 + 2 * t) + ", s" + S(35 + 2 * t) + ", 0");
+            }
+            o("global_load_dwordx4 " + VR(XR + 8 * t, 4) + ", v10, s[" + S(36 + 2 * t) + ":" + S(37 + 2 * t) + "]");
+            o("global_load_dwordx4 " + VR(XR + 8 * t + 4, 4) + ", v15, s[" + S(36 + 2 * t) + ":" + S(37 + 2 * t) + "]");
+        }
+        o("s_waitcnt vmcnt(0)");
+        for (int t = 0; t < T; t++) {
+            o("ds_write_b128 v9, " + VR(XR + 8 * t, 4) + " offset:" + S(cb + 8192 * t));
+            o("ds_write_b128 v9, " + VR(XR + 8 * t + 4, 4) + " offset:" + S(cb + 8192 * t + 4096));
+        }
+        o("s_waitcnt lgkmcnt(0)");
+        o("s_barrier");
+        for (int r = 0; 2 * r < T; r++) {
+            const bool half = 2 * r + 1 >= T;
+            if (half) {
+                o("s_mov_b32 s21, vcc_lo");            // (vcc holds p >= 2)
+                o("v_cmp_gt_u32 vcc_lo, 128, v0");     // only token 2 r
+                o("s_and_saveexec_b32 s19, vcc_lo");
+            }
+            for (int c = 0; c < 4; c++) o("ds_read_b128 " + VR(XR + 4 * c, 4) + ", v11 offset:" + S(cb + r * 16384 + 16 * c));
+            o("s_waitcnt lgkmcnt(0)");
+            o("v_add_f32 v13, " + V(XR) + ", " + V(XR + 1));
+            for (int c = 2; c < 16; c++) o("v_add_f32 v13, v13, " + V(XR + c));
+            o("ds_write_b32 v12, v13 offset:" + S(cb + r * 1024));
+            if (half) {
+                o("s_mov_b32 exec_lo, s19");
+                o("s_mov_b32 vcc_lo, s21");
+            }
+        }
+        o("s_waitcnt lgkmcnt(0)");
+        o("s_barrier");
+    };
     o("s_mul_i32 s15, s8, " + S(K));       // rows a pass of the dispatch takes
     o("s_mov_b32 s20, 0");                 // the pass's row offset
     o("s_mov_b32 s18, 0");
     for (int j = 0; j < PD; j++) loads(j, false);   // in flight while x is staged
+    if (res)
+        for (int c = 0; c < nit; c++) {
+            o("s_add_u32 s36, s2, " + S(8192 * c));
+            o("s_addc_u32 s37, s3, 0");
+            stage(c * CB);
+        }
     label("pass");
     for (int i = 0; i < K * T; i++) o("v_mov_b32 " + V(ACC + i) + ", 0");
     o("s_mov_b32 s18, 0");
     label("chunk");
-    // ---- stage chunk s18 of every token
-    o("s_barrier");                        // every wave done with the last chunk
-    o("s_lshl_b32 s11, s18, 13");
-    o("s_add_u32 s36, s2, s11");
-    o("s_addc_u32 s37, s3, 0");
-    for (int t = 0; t < T; t++) {
-        if (t) {
-            o("s_add_u32 s" + S(36 + 2 * t) + ", s" + S(34 + 2 * t) + ", s7");
-            o("s_addc_u32 s" + S(37 + 2 * t) + ", s" + S(35 + 2 * t) + ", 0");
-        }
-        o("global_load_dwordx4 " + VR(XR + 8 * t, 4) + ", v10, s[" + S(36 + 2 * t) + ":" + S(37 + 2 * t) + "]");
-        o("global_load_dwordx4 " + VR(XR + 8 * t + 4, 4) + ", v15, s[" + S(36 + 2 * t) + ":" + S(37 + 2 * t) + "]");
+    if (!res) {
+        o("s_barrier");                    // every wave done with the last chunk
+        o("s_lshl_b32 s11, s18, 13");
+        o("s_add_u32 s36, s2, s11");
+        o("s_addc_u32 s37, s3, 0");
+        stage(0);
     }
-    o("s_waitcnt vmcnt(0)");
-    for (int t = 0; t < T; t++) {
-        o("ds_write_b128 v9, " + VR(XR + 8 * t, 4) + " offset:" + S(8192 * t));
-        o("ds_write_b128 v9, " + VR(XR + 8 * t + 4, 4) + " offset:" + S(8192 * t + 4096));
-    }
-    o("s_waitcnt lgkmcnt(0)");
-    o("s_barrier");
-    for (int r = 0; 2 * r < T; r++) {
-        const bool half = 2 * r + 1 >= T;
-        if (half) {
-            o("s_mov_b32 s21, vcc_lo");            // (vcc holds p >= 2)
-            o("v_cmp_gt_u32 vcc_lo, 128, v0");     // only token 2 r
-            o("s_and_saveexec_b32 s19, vcc_lo");
-        }
-        for (int c = 0; c < 4; c++) o("ds_read_b128 " + VR(XR + 4 * c, 4) + ", v11 offset:" + S(r * 16384 + 16 * c));
-        o("s_waitcnt lgkmcnt(0)");
-        o("v_add_f32 v13, " + V(XR) + ", " + V(XR + 1));
-        for (int c = 2; c < 16; c++) o("v_add_f32 v13, v13, " + V(XR + c));
-        o("ds_write_b32 v12, v13 offset:" + S(r * 1024));
-        if (half) {
-            o("s_mov_b32 exec_lo, s19");
-            o("s_mov_b32 vcc_lo, s21");
-        }
-    }
-    o("s_waitcnt lgkmcnt(0)");
-    o("s_barrier");
     // ---- the chunk's items: half g of each row slot's step, x of the half
     // read once for all slots (round 101: mvt_q4k read it once a slot, and
     // the LDS reads cost about half a one-token mat-vec a token)
@@ -270,9 +290,17 @@ inline std::string gen_mvt2_q4k(int ncols, int T, int K = 4, int PD = 2) {
             if (kk == 0) o("s_waitcnt lgkmcnt(0)");
         }
     }
+    if (res)   // the next chunk's x and sums
+        for (int r = 4; r <= 8; r++) o("v_add_nc_u32 v" + S(r) + ", " + S(CB) + ", v" + S(r));
     o("s_add_u32 s18, s18, 1");
     o("s_cmp_lt_u32 s18, " + S(nit));
     o("s_cbranch_scc1 chunk");
+    if (res)
+        for (int r = 4; r <= 8; r++) {
+            char h[16];
+            std::snprintf(h, sizeof h, "0x%x", (unsigned)(uint32_t)(-(int64_t)nit * CB));
+            o("v_add_nc_u32 v" + S(r) + ", " + h + ", v" + S(r));
+        }
     // ---- each slot's row: the 32 lanes' sums, lane 0 stores
     for (int kk = 0; kk < K; kk++) {
         o("s_mul_i32 s11, s8, " + S(kk));

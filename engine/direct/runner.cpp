@@ -1064,6 +1064,7 @@ Runner::Prog* Runner::mvt_prog(const Weight& w, int T) {
     const bool q6 = w.type() == GGML_Q6_K;
     const int kk = q6 ? kk6 : kk4, pd = q6 ? pd6 : pd4;   // (_K4 / _PD4: Q4_K's, _K6 / _PD6: Q6_K's; round 105)
     static const bool ilp = env_int("TS5_DIRECT_MVT_ILP", 1) != 0;   // Q6_K's dot products side by side (round 108)
+    static const bool res = env_int("TS5_DIRECT_MVT_RES", 1) != 0;   // Q4_K's x staged once where it fits (round 110)
     const uint64_t key = (uint64_t)T << 48 | (uint64_t)w.type() << 32 | (uint64_t)w.ne0();
     auto it = mvts_.find(key);
     if (it != mvts_.end()) return &it->second;
@@ -1072,8 +1073,8 @@ Runner::Prog* Runner::mvt_prog(const Weight& w, int T) {
     std::string src;
     if (old) src = q6 ? gen_mvt_q6k(nc, T, 8) : gen_mvt_q4k(nc, T, 8);
     else {
-        src = q6 ? gen_mvt2_q6k(nc, T, kk, pd ? pd : 1, ilp) : gen_mvt2_q4k(nc, T, kk, pd ? pd : 2);
-        if (src.empty()) src = q6 ? gen_mvt2_q6k(nc, T, 4, 1, ilp) : gen_mvt2_q4k(nc, T, 4, 2);
+        src = q6 ? gen_mvt2_q6k(nc, T, kk, pd ? pd : 1, ilp) : gen_mvt2_q4k(nc, T, kk, pd ? pd : 2, res);
+        if (src.empty()) src = q6 ? gen_mvt2_q6k(nc, T, 4, 1, ilp) : gen_mvt2_q4k(nc, T, 4, 2, res);
     }
     if (src.empty()) return nullptr;
     Prog& p = mvts_[key];
