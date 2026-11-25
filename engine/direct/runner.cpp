@@ -11,6 +11,8 @@
 #include "mm_q6k.h"
 #include "mm_q4k_sb.h"
 #include "mm_q6k_sb.h"
+#include "mm_q4k_h.h"
+#include "mm_q6k_h.h"
 #include "mv_q4k.h"
 #include "mv_q6k.h"
 #include "ops.h"
@@ -68,8 +70,12 @@ Runner::Prog* Runner::mm_prog(const Weight& w) {
     std::string src;
     // Blocks split across the 4 waves (mm_q4k_sb.h, mm_q6k_sb.h; round 49:
     // 10-38% faster); opt.old_mm: the earlier kernels.
-    if (w.type() == GGML_Q4_K && NB % 4 == 0) src = opt.old_mm ? gen_mm_q4k(K, kBatch, 4) : gen_mm_q4k_sb(K, kBatch);
-    else if (w.type() == GGML_Q6_K && NB % 4 == 0 && NB % 2 == 0) src = opt.old_mm ? gen_mm_q6k(K, kBatch, 2) : gen_mm_q6k_sb(K, kBatch);
+    // Default: packed f16 multiply-adds (mm_q4k_h.h, mm_q6k_h.h; round 52:
+    // 1.5-2x the f32 kernels); opt.f32_mm the f32 ones.
+    if (w.type() == GGML_Q4_K && NB % 4 == 0)
+        src = opt.old_mm ? gen_mm_q4k(K, kBatch, 4) : opt.f32_mm ? gen_mm_q4k_sb(K, kBatch) : gen_mm_q4k_h(K, kBatch);
+    else if (w.type() == GGML_Q6_K && NB % 4 == 0 && NB % 2 == 0)
+        src = opt.old_mm ? gen_mm_q6k(K, kBatch, 2) : opt.f32_mm ? gen_mm_q6k_sb(K, kBatch) : gen_mm_q6k_h(K, kBatch);
     else return nullptr;
     Prog& p = mms_[key];
     std::string e;
@@ -111,7 +117,7 @@ bool Runner::init_batch(std::string& err) {
     for (auto pr : {std::make_pair(&pX_, T * E_ * 4), std::make_pair(&pXN_, T * E_ * 4), std::make_pair(&pT_, T * E_ * 4),
                     std::make_pair(&pQ_, T * A * 4), std::make_pair(&pK_, T * NKV_ * HD_ * 4), std::make_pair(&pV_, T * NKV_ * HD_ * 4),
                     std::make_pair(&pA_, T * A * 4), std::make_pair(&pG_, T * F_ * 4), std::make_pair(&pU_, T * F_ * 4),
-                    std::make_pair(&pH_, T * F_ * 4), std::make_pair(&pxT_, KM * T * 4 + 4096), std::make_pair(&pxs32_, KM / 32 * T * 4 + 4096),
+                    std::make_pair(&pH_, T * F_ * 4), std::make_pair(&pxT_, KM * T * 4 + 4096), std::make_pair(&px16_, KM * T * 2 + 4096), std::make_pair(&pxs32_, KM / 32 * T * 4 + 4096),
                     std::make_pair(&pxs16_, KM / 16 * T * 4 + 4096), std::make_pair(&ppart_, T * part_bytes_)}) {
         if (!dev_.alloc((pr.second + 4095) & ~(size_t)4095, opt.vram_prompt ? kfd::Mem::Vram : kfd::Mem::Gtt, *pr.first)) {
             err = dev_.err() + " (prompt buffers)";
@@ -143,14 +149,16 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {
     auto to_xT = [&](uint64_t y, int K) {
         if (opt.skip_xt) return;
         Prog* p = xt_prog(K);
-        const uint32_t args[8] = {lo(y), hi(y), lo(pxT_.gpu), hi(pxT_.gpu), lo(pxs32_.gpu), hi(pxs32_.gpu), lo(pxs16_.gpu), hi(pxs16_.gpu)};
+        const uint32_t args[10] = {lo(y),           hi(y),           lo(pxT_.gpu),   hi(pxT_.gpu),   lo(pxs32_.gpu),
+                                   hi(pxs32_.gpu), lo(pxs16_.gpu), hi(pxs16_.gpu), lo(px16_.gpu), hi(px16_.gpu)};
         const uint32_t g[3] = {(uint32_t)(K / (1024 / kBatch)), 1, 1};
-        s.dispatch(p->k, p->code.gpu, args, 8, g, t256);
+        s.dispatch(p->k, p->code.gpu, args, 10, g, t256);
     };
     auto mm = [&](const Weight& w, uint64_t y) {
         Prog* p = mm_prog(w);
         const uint64_t a = addr(w.data), xs = w.type() == GGML_Q6_K ? pxs16_.gpu : pxs32_.gpu;
-        const uint32_t args[10] = {lo(a), hi(a), lo(pxT_.gpu), hi(pxT_.gpu), lo(y), hi(y), (uint32_t)w.ne1(), 0, lo(xs), hi(xs)};
+        const uint64_t x = opt.old_mm || opt.f32_mm ? pxT_.gpu : px16_.gpu;
+        const uint32_t args[10] = {lo(a), hi(a), lo(x), hi(x), lo(y), hi(y), (uint32_t)w.ne1(), 0, lo(xs), hi(xs)};
         const uint32_t g[3] = {(uint32_t)(w.ne1() / 32), 1, 1}, th[3] = {(uint32_t)(w.type() == GGML_Q6_K && opt.old_mm ? 64 : 128), 1, 1};
         s.dispatch(p->k, p->code.gpu, args, 10, g, th);
     };

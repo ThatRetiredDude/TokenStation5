@@ -17,6 +17,7 @@
 #include "mm_q4k_sb.h"
 #include "mm_q4k_h.h"
 #include "mm_q6k_sb.h"
+#include "mm_q6k_h.h"
 #include "mm_q6k.h"
 #include "prefill.h"
 #include "pm4.h"
@@ -67,7 +68,7 @@ int cmd_mm_q4k(int argc, char** argv) {
         const size_t rb = (size_t)NB * BB, wbytes = rb * sh.R;
         gfx10::Kernel k;
         std::string err;
-        if (!gfx10::assemble(q6 ? (EXP == 10 ? gen_mm_q6k_sb(sh.K, T) : gen_mm_q6k(sh.K, T, SPLIT)) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : EXP == 11 ? gen_mm_q4k_sb(sh.K, T, 2) : EXP == 12 ? gen_mm_q4k_h(sh.K, T) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
+        if (!gfx10::assemble(q6 ? (EXP == 12 ? gen_mm_q6k_h(sh.K, T) : EXP == 10 ? gen_mm_q6k_sb(sh.K, T) : gen_mm_q6k(sh.K, T, SPLIT)) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : EXP == 11 ? gen_mm_q4k_sb(sh.K, T, 2) : EXP == 12 ? gen_mm_q4k_h(sh.K, T) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
         kfd::Buffer code, W, xT, xs, Y;
         const size_t cb = (k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, code) || !dev.alloc(wbytes + 4096, kfd::Mem::Gtt, W) ||
@@ -219,22 +220,23 @@ int cmd_xt_bench(int, char**) {
         if (!dev.alloc(65536, kfd::Mem::Gtt, code)) return 1;
         std::memcpy(code.cpu, k.code.data(), k.code.size() * 4);
         for (kfd::Mem mem : {kfd::Mem::Gtt, kfd::Mem::Vram}) {
-            kfd::Buffer Y, xT, x32, x16;
+            kfd::Buffer Y, xT, x32, x16, xh;
             if (!dev.alloc((size_t)T * K * 4, mem, Y) || !dev.alloc((size_t)T * K * 4, mem, xT) || !dev.alloc((size_t)K / 32 * T * 4, mem, x32) ||
-                !dev.alloc((size_t)K / 16 * T * 4, mem, x16)) {
+                !dev.alloc((size_t)K / 16 * T * 4, mem, x16) || !dev.alloc((size_t)T * K * 2, mem, xh)) {
                 std::fprintf(stderr, "xt-bench: %s\n", dev.err().c_str());
                 return 1;
             }
             const bool gtt = mem == kfd::Mem::Gtt;
             if (gtt)
                 for (size_t i = 0; i < (size_t)T * K; i++) ((float*)Y.cpu)[i] = (float)((int)(rnd() >> 16) - 32768) / 32768.0f;
-            const uint32_t args[8] = {(uint32_t)Y.gpu, (uint32_t)(Y.gpu >> 32), (uint32_t)xT.gpu, (uint32_t)(xT.gpu >> 32),
-                                      (uint32_t)x32.gpu, (uint32_t)(x32.gpu >> 32), (uint32_t)x16.gpu, (uint32_t)(x16.gpu >> 32)};
+            const uint32_t args[10] = {(uint32_t)Y.gpu,   (uint32_t)(Y.gpu >> 32),   (uint32_t)xT.gpu, (uint32_t)(xT.gpu >> 32),
+                                       (uint32_t)x32.gpu, (uint32_t)(x32.gpu >> 32), (uint32_t)x16.gpu, (uint32_t)(x16.gpu >> 32),
+                                       (uint32_t)xh.gpu,  (uint32_t)(xh.gpu >> 32)};
             const uint32_t g[3] = {(uint32_t)(K / (1024 / T)), 1, 1}, th[3] = {256, 1, 1};
             double gs;
             {
                 pm4::Stream s;
-                s.dispatch(k, code.gpu, args, 8, g, th);
+                s.dispatch(k, code.gpu, args, 10, g, th);
                 if (!run(s, &gs)) { std::fprintf(stderr, "xt-bench: %s\n", dev.err().c_str()); return 1; }
             }
             if (gtt) {
@@ -252,6 +254,12 @@ int cmd_xt_bench(int, char**) {
                             worst = std::max(worst, std::fabs(xs[(size_t)gi * T + t] - a));
                         }
                 }
+                const uint16_t* h = (const uint16_t*)xh.cpu;
+                for (int c = 0; c < K; c++)
+                    for (int t = 0; t < T; t++) {
+                        const float v = y[(size_t)t * K + c];
+                        worst = std::max(worst, (double)std::fabs(fp16_to_fp32(h[(size_t)c * T + t]) - v) / (std::fabs(v) + 1e-3) * 1e-2);
+                    }
                 std::printf("to_xT K %d: worst error %.3g %s\n", K, worst, worst < 1e-4 ? "ok" : "WRONG");
                 if (!(worst < 1e-4)) ok = false;
             }
@@ -264,7 +272,7 @@ int cmd_xt_bench(int, char**) {
                             s.wait_kernels();
                             if (chain) s.acquire_light();
                         }
-                        s.dispatch(k, code.gpu, args, 8, g, th);
+                        s.dispatch(k, code.gpu, args, 10, g, th);
                     }
                     double tot;
                     if (!run(s, &tot)) { std::fprintf(stderr, "xt-bench: %s\n", dev.err().c_str()); return 1; }
