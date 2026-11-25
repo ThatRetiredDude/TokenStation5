@@ -188,7 +188,7 @@ int cmd_token(int argc, char** argv) {
         std::unique_ptr<Backend> cpu2(make_cpu_backend(m, ctx, KvType::F16));
         if (!cpu2->forward(p2.data(), np, base, cpu_last.data(), false, err)) return fail("cpu: " + err);
         for (int i = 0; i < np; i += Runner::kBatch)
-            if (!R.send_batch(p2.data() + i, std::min(np - i, Runner::kBatch), base + i)) return fail(R.err() + " (prompt batch)");
+            if (!R.send_batch(p2.data() + i, std::min(np - i, Runner::kBatch), base + i, i + Runner::kBatch >= np)) return fail(R.err() + " (prompt batch)");
         if (!R.wait_all(60000)) return fail(R.err() + " (prompt batches)");
         double md = 0, ml = 0;
         int gtop = 0, ctop = 0;
@@ -212,7 +212,7 @@ int cmd_token(int argc, char** argv) {
             auto h0 = std::chrono::steady_clock::now();
             for (int i = 0; i < 512;) {
                 if (mode == 0) {
-                    if (!R.send_batch(filler.data() + i, Runner::kBatch, i)) return fail(R.err() + " (timed prompt)");
+                    if (!R.send_batch(filler.data() + i, Runner::kBatch, i, i + Runner::kBatch >= 512)) return fail(R.err() + " (timed prompt)");
                     i += Runner::kBatch;
                 } else {
                     if (!R.send(filler[i], i)) return fail(R.err() + " (timed prompt)");

@@ -46,9 +46,11 @@ public:
     bool send(int32_t id, int pos);
     // Queues up to kBatch prompt tokens at pos0.. at once (ids given): one
     // pass over each weight matrix for all of them (mm_q4k.h, mm_q6k.h).
-    // Only the last token's logits (and argmax) are kept. Returns at once.
+    // Only the last token's logits (and argmax) are kept, and only with
+    // `logits` (a prompt's earlier batches skip the output matrix: round 62's
+    // profile, 0.083 of 1.60 ms a token). Returns at once.
     static constexpr int kBatch = 16;
-    bool send_batch(const int32_t* ids, int nt, int pos0);
+    bool send_batch(const int32_t* ids, int nt, int pos0, bool logits = true);
     bool batch_ok() const { return batch_ok_; }
     // Waits until every token sent so far is done.
     bool wait_all(int timeout_ms = 60000);

@@ -181,7 +181,7 @@ std::string Runner::err() const {
     return best.empty() ? e : e + "; nearest below: " + best;
 }
 
-bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {
+bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
     if (!batch_ok_ || nt < 1 || nt > kBatch || pos0 < 0 || pos0 + nt > ctx_) return false;
     const HParams& hp = m_->hp;
     const int T = kBatch, A = NQ_ * HD_;
@@ -320,6 +320,7 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {
     }
     // The last token's logits and argmax, as a single token's.
     barrier();
+    if (logits) {   // (a prompt's earlier batches need none)
     norm(true, m_->out_norm, nt - 1, 1, bxn_.gpu);
     barrier();
     {
@@ -336,6 +337,7 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {
         const uint32_t args[6] = {lo(blog_.gpu), hi(blog_.gpu), lo(bslot_.gpu), hi(bslot_.gpu), (uint32_t)(V_ / 4 - 1), groups * 256};
         const uint32_t g[3] = {groups, 1, 1};
         s.dispatch(k_argmax_.k, k_argmax_.code.gpu, args, 6, g, t256);
+    }
     }
     stamp(S_OUT);
     s.release(bts_.gpu + 16 * (seq % (bts_.size / 16)) + 8, 0, true);

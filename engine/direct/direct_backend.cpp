@@ -30,7 +30,7 @@ public:
         if (!(all_logits && logits) && r_.batch_ok())
             // Batches of kBatch; a tail of 4 or more is one more (short) batch.
             for (; n - i >= 4; i += std::min(n - i, direct::Runner::kBatch))
-                if (!r_.send_batch(tokens + i, std::min(n - i, direct::Runner::kBatch), pos0 + i)) return fail(err);
+                if (!r_.send_batch(tokens + i, std::min(n - i, direct::Runner::kBatch), pos0 + i, i + std::min(n - i, direct::Runner::kBatch) == n)) return fail(err);
         for (; i < n; i++) {
             if (!r_.send(tokens[i], pos0 + i)) return fail(err);
             if (all_logits && logits) {   // each token's logits: wait for each
