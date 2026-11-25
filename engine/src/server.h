@@ -188,6 +188,7 @@ public:
 
 private:
     void accept_loop();
+    void helper_idle_loop();
     std::string host_;
     int port_ = 0, sock_ = -1;
     State state_;

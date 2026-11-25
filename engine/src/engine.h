@@ -77,6 +77,12 @@ public:
         int n_ctx = 0;
     };
     Helper helper;
+    // Between requests (the server's idle helper, round 115): enter up to
+    // max_tokens of the conversation the drafter hasn't seen, no logits, so
+    // the next turn's helper is only that turn's new message behind (in a
+    // chat it otherwise stayed thousands behind and never drafted). True
+    // while more is left.
+    bool drafter_catch_up(int max_tokens);
     Tokenizer &tok() { return t_; }
     const Model &model() const { return m_; }
     Backend &backend() { return *b_; }

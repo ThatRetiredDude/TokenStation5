@@ -1639,7 +1639,30 @@ bool Server::start(const std::string &host, int port, std::string &err) {
     host_ = host;
     port_ = port;
     std::thread([this] { accept_loop(); }).detach();
+    std::thread([this] { helper_idle_loop(); }).detach();
     return true;
+}
+
+// The helper (draft model) catches up on the conversation while nothing
+// asks: once the engine has been idle 100 ms with no one waiting, 256
+// tokens at a time, letting go of the engine between chunks, so a request
+// that comes waits at most one chunk (the 0.6B: a few ms). Back-to-back
+// requests never see it. TS5_HELPER_IDLE=0 turns it off.
+void Server::helper_idle_loop() {
+    if (const char *v = std::getenv("TS5_HELPER_IDLE"); v && std::atoi(v) == 0) return;
+    uint64_t seen = ~0ull;
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const uint64_t now = state_.gen_total.load() + state_.prompt_total.load();
+        const bool quiet = now == seen && state_.waiting.load() == 0 && state_.phase.load() == 0;
+        seen = now;
+        if (!quiet) continue;
+        for (bool more = true; more && state_.waiting.load() == 0;) {
+            std::unique_lock<std::mutex> lk(state_.gen, std::try_to_lock);
+            if (!lk.owns_lock() || !state_.engine) break;
+            more = state_.engine->drafter_catch_up(256);
+        }
+    }
 }
 
 void Server::set_engine(Engine *e, const std::string &model_name, const std::string &unavailable) {

@@ -254,6 +254,25 @@ bool Engine::set_drafter(Model &dm, Backend *db, std::string &err) {
     return true;
 }
 
+bool Engine::drafter_catch_up(int max_tokens) {
+    if (!db_ || !drafter_ok_ || !dm_ || dcached_ >= cached_.size()) return false;
+    // (the last token stays for the next draft's batch, as draft_model leaves it)
+    size_t n = std::min(cached_.size() - 1 - std::min(dcached_, cached_.size() - 1), (size_t)max_tokens);
+    if (dcached_ + n + 2 > (size_t)db_->n_ctx()) n = (size_t)db_->n_ctx() > dcached_ + 2 ? db_->n_ctx() - dcached_ - 2 : 0;
+    if (n == 0) return false;
+    const int nv = dm_->hp.n_vocab;
+    for (size_t i = 0; i < n; i++)
+        if (cached_[dcached_ + i] >= (int32_t)nv) return false;  // draft_model says so when it meets it
+    std::string err;
+    if (!db_->forward(cached_.data() + dcached_, (int)n, (int)dcached_, nullptr, false, err)) {
+        drafter_ok_ = false;
+        ts5::log_line("ts5: draft model failed (%s); drafting by lookup only", err.c_str());
+        return false;
+    }
+    dcached_ += n;
+    return dcached_ + 1 < cached_.size();
+}
+
 // Propose up to k tokens as the draft model's greedy continuation: catch its
 // cache up to the confirmed history plus `tok` in one batch, then extend one
 // token at a time. Any draft source is safe; the verify walk keeps the
