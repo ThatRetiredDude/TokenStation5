@@ -18,6 +18,7 @@
 #include "mm_q4k_sb.h"
 #include "mm_q4k_h.h"
 #include "mm_q4k_w.h"
+#include "mm_q4k_t.h"
 #include "mm_q6k_sb.h"
 #include "mm_q6k_h.h"
 #include "mm_q6k.h"
@@ -31,8 +32,8 @@ int cmd_mm_q4k(int argc, char** argv) {
     const int T = argc > 2 ? std::atoi(argv[2]) : 16;
     const int SPLIT = argc > 3 ? std::atoi(argv[3]) : 4;
     const int EXP = argc > 4 ? std::atoi(argv[4]) : 0;   // gen_mm_q4k's timing experiments (results wrong)
-    if (T != 8 && T != 16 && !(EXP == 20 && (T == 32 || T == 64)) && !((EXP == 12 || EXP == 22) && !q6 && T == 32)) { std::fprintf(stderr, "mm-q4k: T is 8 or 16 (32, 64 for test 20; 32 for Q4_K test 12 / 22)\n"); return 1; }
-    if (SPLIT != 1 && SPLIT != 2 && SPLIT != 4 && SPLIT != 8 && !(EXP >= 12 && (SPLIT == 16 || SPLIT == 32))) { std::fprintf(stderr, "mm-q4k: split is 1, 2, 4 or 8\n"); return 1; }
+    if (T != 8 && T != 16 && !(EXP == 30 && !q6 && (T == 64 || T == 128)) && !(EXP == 20 && (T == 32 || T == 64)) && !((EXP == 12 || EXP == 22) && !q6 && T == 32)) { std::fprintf(stderr, "mm-q4k: T is 8 or 16 (32, 64 for test 20; 32 for Q4_K test 12 / 22)\n"); return 1; }
+    if (EXP != 30 && SPLIT != 1 && SPLIT != 2 && SPLIT != 4 && SPLIT != 8 && !(EXP >= 12 && (SPLIT == 16 || SPLIT == 32))) { std::fprintf(stderr, "mm-q4k: split is 1, 2, 4 or 8\n"); return 1; }
     const int BB = q6 ? 210 : 144, SUB = q6 ? 16 : 32;   // bytes a block, values a sub-block (x sums)
     kfd::Device dev;
     if (!dev.open() || !dev.create_queue(1 << 20)) { std::fprintf(stderr, "mm-q4k: %s\n", dev.err().c_str()); return 1; }
@@ -78,20 +79,20 @@ int cmd_mm_q4k(int argc, char** argv) {
                 : EXP == 6 ? ", TIMING ONLY: x always the same 128 bytes" : EXP == 10 ? ", blocks split across the waves (sb)" : EXP == 11 ? ", blocks split across the waves, 2 rows a lane (sb)"
                 : EXP == 12 ? ", packed f16 multiply-adds (mm_q4k_h; errors judged at 3e-3)"
                 : EXP == 16 ? ", f16 (mm_q4k_h), rows sweep; pair = two launches back to back as gate + up"
-                : EXP == 26 ? ", f16 (mm_q4k_h), 2 register sets in turn (no copies)" : EXP == 27 ? ", f16 (mm_q4k_h), 3 register sets: weights 2 blocks ahead" : EXP == 25 ? ", f16 (mm_q4k_h), weights interleaved for the GPU (every load 512 contiguous bytes)" : EXP == 23 ? ", f16, TIMING ONLY: no weight loads" : EXP == 24 ? ", f16, TIMING ONLY: multiply-adds only (no weight or x loads, unpacking or epilogue)" : EXP == 22 ? ", f16 (mm_q4k_h), the old register layout (sums in every VGPR bank)" : EXP == 21 ? ", f16 (mm_q4k_h), wave64: 64 rows a wave" : EXP == 17 ? ", f16 (mm_q4k_h), 2 rows a lane" : EXP == 20 ? ", wide f16 (mm_q4k_w: weights dequantized to f16, a column a step)" : EXP == 18 ? ", f16, TIMING ONLY: no f32 epilogue" : EXP == 19 ? ", f16, TIMING ONLY: no x loads, unpacking or epilogue" : EXP == 13 ? ", f16, TIMING ONLY: no x loads" : EXP == 14 ? ", f16, TIMING ONLY: no unpacking" : EXP == 15 ? ", f16, TIMING ONLY: neither" : "");
+                : EXP == 30 ? ", tiled GEMM (mm_q4k_t): weights and x staged in LDS, 8 rows x 8 tokens a thread; split = SK workgroups along K" : EXP == 26 ? ", f16 (mm_q4k_h), 2 register sets in turn (no copies)" : EXP == 27 ? ", f16 (mm_q4k_h), 3 register sets: weights 2 blocks ahead" : EXP == 25 ? ", f16 (mm_q4k_h), weights interleaved for the GPU (every load 512 contiguous bytes)" : EXP == 23 ? ", f16, TIMING ONLY: no weight loads" : EXP == 24 ? ", f16, TIMING ONLY: multiply-adds only (no weight or x loads, unpacking or epilogue)" : EXP == 22 ? ", f16 (mm_q4k_h), the old register layout (sums in every VGPR bank)" : EXP == 21 ? ", f16 (mm_q4k_h), wave64: 64 rows a wave" : EXP == 17 ? ", f16 (mm_q4k_h), 2 rows a lane" : EXP == 20 ? ", wide f16 (mm_q4k_w: weights dequantized to f16, a column a step)" : EXP == 18 ? ", f16, TIMING ONLY: no f32 epilogue" : EXP == 19 ? ", f16, TIMING ONLY: no x loads, unpacking or epilogue" : EXP == 13 ? ", f16, TIMING ONLY: no x loads" : EXP == 14 ? ", f16, TIMING ONLY: no unpacking" : EXP == 15 ? ", f16, TIMING ONLY: neither" : "");
     if (std::getenv("TS5_MM_WVRAM") && std::atoi(std::getenv("TS5_MM_WVRAM"))) std::printf("weights in VRAM (TS5_MM_WVRAM)\n");
     for (const Shape& sh : shapes) {
         const int NB = sh.K / 256;
-        if (EXP >= 12 ? (NB % (SPLIT / 4)) : (NB % SPLIT || (q6 && (NB / SPLIT) % 2))) continue;
+        if (EXP == 30 ? (SPLIT < 1 || NB % SPLIT) : EXP >= 12 ? (NB % (SPLIT / 4)) : (NB % SPLIT || (q6 && (NB / SPLIT) % 2))) continue;
         const size_t rb = (size_t)NB * BB, wbytes = rb * sh.R;
         gfx10::Kernel k;
         std::string err;
-        if (!gfx10::assemble(q6 ? (EXP >= 12 ? gen_mm_q6k_h(sh.K, T, SPLIT / 4, EXP != 22) : EXP == 10 ? gen_mm_q6k_sb(sh.K, T) : gen_mm_q6k(sh.K, T, SPLIT)) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : EXP == 11 ? gen_mm_q4k_sb(sh.K, T, 2) : EXP == 20 ? gen_mm_q4k_w(sh.K, T, SPLIT / 4) : EXP >= 12 ? gen_mm_q4k_h(sh.K, T, EXP == 18 ? 4 : EXP == 19 ? 7 : EXP == 23 ? 8 : EXP == 24 ? 15 : EXP >= 16 ? 0 : EXP - 12, q6 ? 1 : SPLIT / 4, EXP == 17 ? 2 : 1, EXP == 21 ? 64 : 32, EXP != 22, EXP == 25, EXP == 26 ? 2 : EXP == 27 ? 3 : 1) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
+        if (!gfx10::assemble(q6 ? (EXP >= 12 ? gen_mm_q6k_h(sh.K, T, SPLIT / 4, EXP != 22) : EXP == 10 ? gen_mm_q6k_sb(sh.K, T) : gen_mm_q6k(sh.K, T, SPLIT)) : EXP == 10 ? gen_mm_q4k_sb(sh.K, T) : EXP == 11 ? gen_mm_q4k_sb(sh.K, T, 2) : EXP == 30 ? gen_mm_q4k_t(sh.K, T, SPLIT) : EXP == 20 ? gen_mm_q4k_w(sh.K, T, SPLIT / 4) : EXP >= 12 ? gen_mm_q4k_h(sh.K, T, EXP == 18 ? 4 : EXP == 19 ? 7 : EXP == 23 ? 8 : EXP == 24 ? 15 : EXP >= 16 ? 0 : EXP - 12, q6 ? 1 : SPLIT / 4, EXP == 17 ? 2 : 1, EXP == 21 ? 64 : 32, EXP != 22, EXP == 25, EXP == 26 ? 2 : EXP == 27 ? 3 : 1) : gen_mm_q4k(sh.K, T, SPLIT, EXP), k, &err)) { std::fprintf(stderr, "mm-q4k: %s\n", err.c_str()); return 1; }
         kfd::Buffer code, W, xT, xs, Y;
         const size_t cb = (k.code.size() * 4 + 256 + 4095) & ~(size_t)4095;
         if (!dev.alloc(cb, kfd::Mem::Gtt, code) || !dev.alloc(wbytes + 4096, kfd::Mem::Gtt, W) ||
             !dev.alloc((size_t)sh.K * T * 4 + 4096, kfd::Mem::Gtt, xT) || !dev.alloc((size_t)sh.K / SUB * T * 4, kfd::Mem::Gtt, xs) ||
-            !dev.alloc((size_t)sh.R * T * 4, kfd::Mem::Gtt, Y)) {
+            !dev.alloc((size_t)sh.R * T * 4 * (EXP == 30 ? SPLIT : 1), kfd::Mem::Gtt, Y)) {
             std::fprintf(stderr, "mm-q4k: %s\n", dev.err().c_str());
             return 1;
         }
@@ -209,15 +210,19 @@ int cmd_mm_q4k(int argc, char** argv) {
         const uint64_t wg = EXP == 25 ? Wi.gpu : wvram ? Wv.gpu : W.gpu;
         const uint32_t args[10] = {(uint32_t)wg, (uint32_t)(wg >> 32), (uint32_t)xT.gpu, (uint32_t)(xT.gpu >> 32), (uint32_t)Y.gpu,
                                    (uint32_t)(Y.gpu >> 32), (uint32_t)sh.R, 0, (uint32_t)xs.gpu, (uint32_t)(xs.gpu >> 32)};
-        const uint32_t g[3] = {(uint32_t)(sh.R / (EXP == 11 || EXP == 17 || EXP == 21 ? 64 : 32)), 1, 1}, th[3] = {(uint32_t)((EXP == 21 ? 64 : 32) * SPLIT), 1, 1};
-        std::memset(Y.cpu, 0xff, (size_t)sh.R * T * 4);
+        const uint32_t g[3] = {(uint32_t)(EXP == 30 ? sh.R / mm_q4k_t_rows(T) : sh.R / (EXP == 11 || EXP == 17 || EXP == 21 ? 64 : 32)), (uint32_t)(EXP == 30 ? SPLIT : 1), 1},
+                       th[3] = {(uint32_t)(EXP == 30 ? 256 : (EXP == 21 ? 64 : 32) * SPLIT), 1, 1};
+        std::memset(Y.cpu, 0xff, (size_t)sh.R * T * 4 * (EXP == 30 ? SPLIT : 1));
         double gs;
         {
             pm4::Stream s;
             s.dispatch(k, code.gpu, args, 10, g, th);
             if (!run(s, &gs)) { std::fprintf(stderr, "mm-q4k: %s\n", dev.err().c_str()); return 1; }
         }
-        const float* y = (const float*)Y.cpu;
+        float* y = (float*)Y.cpu;
+        if (EXP == 30)   // the SK partial sums
+            for (int p = 1; p < SPLIT; p++)
+                for (size_t i = 0; i < (size_t)T * sh.R; i++) y[i] += y[(size_t)p * T * sh.R + i];
         double worst = 0;
         size_t bad = 0, first = 0;
         for (size_t i = 0; i < (size_t)T * sh.R; i++) {
@@ -226,7 +231,7 @@ int cmd_mm_q4k(int argc, char** argv) {
             if (e > (EXP >= 12 ? 3e-3 : 1e-5) && bad++ == 0) first = i;   // f16: x rounded, sub-block sums in f16
             worst = std::max(worst, e);
         }
-        if (bad && (!EXP || (EXP >= 10 && EXP <= 12) || EXP == 16 || EXP == 17 || EXP == 20 || EXP == 21 || EXP == 22 || EXP == 25 || EXP == 26 || EXP == 27)) {
+        if (bad && (!EXP || (EXP >= 10 && EXP <= 12) || EXP == 16 || EXP == 17 || EXP == 20 || EXP == 21 || EXP == 22 || EXP == 25 || EXP == 26 || EXP == 27 || EXP == 30)) {
             all_ok = false;
             std::printf("  %s: WRONG, %zu of %zu values, worst %.3g, first token %zu row %zu: gpu %g cpu %g\n", sh.name, bad,
                         (size_t)T * sh.R, worst, first / sh.R, first % sh.R, y[first], ref[first]);
