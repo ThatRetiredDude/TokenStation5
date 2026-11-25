@@ -34,7 +34,15 @@ namespace ts5::direct {
 // RW (1, 2): rows a lane (rows r and r + 32), so each x value loaded serves
 // RW rows (round 55: the x loads cost 25% on attn_q and ffn_down).
 // Grid: R / (32 RW) workgroups of 128 SK.
-inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 1) {
+//
+// LN 64: wave64, 64 rows a wave, so each x value loaded (a scalar load,
+// the same for every lane) serves 64 rows: half the x loads and scalar
+// instructions per multiply-add, the VGPRs a lane unchanged (round 64: the
+// x stream, not the weights, is what costs; 2 rows a lane lost on VGPRs).
+// Grid: R / LN workgroups of 4 LN SK threads.
+inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 1, int LN = 32) {
+    if (LN == 64 && RW != 1) return "";
+    const int LB = LN == 64 ? 6 : 5, L4 = 4 * LN;   // log2 lanes; bytes a row of lanes
     auto S = [](long v) { return std::to_string(v); };
     std::string k;
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
@@ -43,13 +51,13 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
     // per row r: quants A + 12 r (B + 12 r), scales SC + 2 r, minimums MN + 2 r, sums ACC + T r, f16 sums TMP + P r
     const int A = 8, B = A + 12 * RW, SC = B + 12 * RW, MN = SC + 2 * RW, ACC = MN + 2 * RW, TMP = ACC + T * RW, U = TMP + P * RW;
     const int SX = 20, SXS = 84;                         // x: two sets of 4 columns (4 P); the sub-block sums: T (f32)
-    k += ".kernel mm_q4k_h\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds " + S(4 * SK * RW * T * 128) + "\n";
-    o("v_lshrrev_b32 v2, 5, v0");
+    k += ".kernel mm_q4k_h\n" + std::string(LN == 64 ? ".wave64" : ".wave32") + "\n.user_sgprs 10\n.tgid_x\n.lds " + S(4 * SK * RW * T * L4) + "\n";
+    o("v_lshrrev_b32 v2, " + S(LB) + ", v0");
     o("v_readfirstlane_b32 s18, v2");                    // the wave: 4 g + w
     o("s_and_b32 s19, s18, 3");                          // w: its quarter of a block
     o("s_lshr_b32 s17, s18, 2");                         // g: blocks g, g + SK, ..
-    o("v_and_b32 v0, 31, v0");
-    o("s_lshl_b32 s11, s10, " + S(RW == 2 ? 6 : 5));
+    o("v_and_b32 v0, " + S(LN - 1) + ", v0");
+    o("s_lshl_b32 s11, s10, " + S(RW == 2 ? 6 : LB));
     o("v_add_nc_u32 v3, s11, v0");                       // the row (and row + 32)
     o("v_mul_u32_u24 v1, " + S(RB) + ", v3");
     o("s_mul_i32 s11, s17, 144");
@@ -211,9 +219,9 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
     o("s_cmp_lg_u32 s16, 0");
     o("s_cbranch_scc1 block");
     o("v_lshlrev_b32 v5, 2, v0");
-    o("s_mul_i32 s11, s18, " + S(RW * T * 128));
+    o("s_mul_i32 s11, s18, " + S(RW * T * L4));
     o("v_add_nc_u32 v5, s11, v5");
-    for (int t = 0; t < RW * T; t++) o("ds_write_b32 v5, v" + S(ACC + t) + " offset:" + S(t * 128));
+    for (int t = 0; t < RW * T; t++) o("ds_write_b32 v5, v" + S(ACC + t) + " offset:" + S(t * L4));
     o("s_waitcnt lgkmcnt(0)");
     o("s_barrier");
     o("s_cmp_lg_u32 s18, 0");
@@ -222,7 +230,7 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
     // (TMP and U, contiguous, hold the T partials read back)
     for (int w = 1; w < 4 * SK; w++)
         for (int r = 0; r < RW; r++) {
-            for (int t = 0; t < T; t++) o("ds_read_b32 v" + S(TMP + t) + ", v5 offset:" + S(((w * RW + r) * T + t) * 128));
+            for (int t = 0; t < T; t++) o("ds_read_b32 v" + S(TMP + t) + ", v5 offset:" + S(((w * RW + r) * T + t) * L4));
             o("s_waitcnt lgkmcnt(0)");
             for (int t = 0; t < T; t++) o("v_add_f32 v" + S(ACC + T * r + t) + ", v" + S(ACC + T * r + t) + ", v" + S(TMP + t));
         }

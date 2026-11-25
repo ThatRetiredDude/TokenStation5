@@ -76,6 +76,13 @@ static int mm_sk(const Weight& w) {
     return sk;
 }
 
+// Lanes a wave of the Q4_K f16 prompt kernel: TS5_DIRECT_W64=1 tries wave64
+// (64 rows a wave, half the x loads a multiply-add; round 65 measures it).
+static int mm_ln(const Weight& w) {
+    static const bool w64 = std::getenv("TS5_DIRECT_W64") && std::atoi(std::getenv("TS5_DIRECT_W64")) == 1;
+    return w64 && w.type() == GGML_Q4_K ? 64 : 32;
+}
+
 Runner::Prog* Runner::mm_prog(const Weight& w) {
     const uint64_t key = (uint64_t)w.type() << 56 | (uint64_t)w.ne1() << 28 | (uint64_t)w.ne0();
     auto it = mms_.find(key);
@@ -88,7 +95,7 @@ Runner::Prog* Runner::mm_prog(const Weight& w) {
     // Default: packed f16 multiply-adds (mm_q4k_h.h, mm_q6k_h.h; round 52:
     // 1.5-2x the f32 kernels); opt.f32_mm the f32 ones.
     if (w.type() == GGML_Q4_K && NB % 4 == 0)
-        src = opt.old_mm ? gen_mm_q4k(K, kBatch, 4) : opt.f32_mm ? gen_mm_q4k_sb(K, kBatch) : gen_mm_q4k_h(K, kBatch, 0, mm_sk(w));
+        src = opt.old_mm ? gen_mm_q4k(K, kBatch, 4) : opt.f32_mm ? gen_mm_q4k_sb(K, kBatch) : gen_mm_q4k_h(K, kBatch, 0, mm_sk(w), 1, mm_ln(w));
     else if (w.type() == GGML_Q6_K && NB % 4 == 0 && NB % 2 == 0)
         src = opt.old_mm ? gen_mm_q6k(K, kBatch, 2) : opt.f32_mm ? gen_mm_q6k_sb(K, kBatch) : gen_mm_q6k_h(K, kBatch, mm_sk(w));
     else return nullptr;
@@ -205,7 +212,9 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0) {
         const uint64_t a = addr(w.data), xs = w.type() == GGML_Q6_K ? pxs16_.gpu : pxs32_.gpu;
         const uint64_t x = opt.old_mm || opt.f32_mm ? pxT_.gpu : px16_.gpu;
         const uint32_t args[10] = {lo(a), hi(a), lo(x), hi(x), lo(y), hi(y), (uint32_t)w.ne1(), 0, lo(xs), hi(xs)};
-        const uint32_t g[3] = {(uint32_t)(w.ne1() / 32), 1, 1}, th[3] = {(uint32_t)(w.type() == GGML_Q6_K && opt.old_mm ? 64 : !opt.old_mm && !opt.f32_mm ? 128 * mm_sk(w) : 128), 1, 1};
+        const bool h = !opt.old_mm && !opt.f32_mm;
+        const int ln = h ? mm_ln(w) : 32;
+        const uint32_t g[3] = {(uint32_t)(w.ne1() / ln), 1, 1}, th[3] = {(uint32_t)(w.type() == GGML_Q6_K && opt.old_mm ? 64 : h ? 4 * ln * mm_sk(w) : 128), 1, 1};
         s.dispatch(p->k, p->code.gpu, args, 10, g, th);
     };
     // Tokens t0 .. t0 + n - 1 in one launch (a workgroup a token).
