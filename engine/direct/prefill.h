@@ -15,8 +15,8 @@ namespace ts5::direct {
 // a workgroup, 16-48 workgroups, sums by 16-32 serial LDS reads) took 24%
 // of a prompt's time.
 // Also x16 (K x T/2 dwords: the f16 kernels' x, a column's tokens in
-// pairs, low half the even one), scaled by 2^-E for each 32 columns and
-// token so that |x16| < 16, with E (int8) in the low byte of xs16 and xs32
+// pairs, low half the even one), scaled by 2^-E for each 32 columns (one E
+// for all T tokens) so that |x16| < 16, with E (int8) in the low byte of xs16 and xs32
 // (they lose their last 8 bits, 2^-15 relative).
 // Arguments: s[0:1] Y, s[2:3] xT, s[4:5] xs32, s[6:7] xs16, s[8:9] x16;
 // s10 workgroup id. Grid: K / C workgroups of 256. T is 8 or 16.
@@ -26,7 +26,7 @@ inline std::string gen_to_xT(int K, int T) {
     auto o = [&](const std::string& line) { k += "    " + line + "\n"; };
     const int LT = T == 16 ? 4 : 3, C = 1024 / T, TPT = 256 / T;   // columns a workgroup, threads a token
     const int LTPT = 8 - LT;
-    k += ".kernel to_xT\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds 8192\n";
+    k += ".kernel to_xT\n.wave32\n.user_sgprs 10\n.tgid_x\n.lds 8256\n";
     o("v_lshrrev_b32 v1, " + S(LTPT) + ", v0");          // t
     o("v_and_b32 v2, " + S(TPT - 1) + ", v0");           // q: columns 4q .. 4q + 3 of the workgroup's
     o("v_mul_u32_u24 v3, " + S(K * 4) + ", v1");
@@ -35,6 +35,13 @@ inline std::string gen_to_xT(int K, int T) {
     o("s_add_u32 s14, s0, s18");
     o("s_addc_u32 s15, s1, 0");
     o("global_load_dwordx4 v[8:11], v3, s[14:15]");
+    // the C/32 chunk maxima in LDS (8192 ..) start at 0
+    o("v_cmp_gt_u32 vcc_lo, " + S(C / 32) + ", v0");
+    o("s_and_saveexec_b32 s16, vcc_lo");
+    o("v_lshlrev_b32 v5, 2, v0");
+    o("v_mov_b32 v6, 0");
+    o("ds_write_b32 v5, v6 offset:8192");
+    o("s_mov_b32 exec_lo, s16");
     o("v_mul_u32_u24 v4, " + S(C * 4) + ", v1");         // LDS [t][C]
     o("v_lshl_add_u32 v4, v2, 4, v4");
     o("s_waitcnt vmcnt(0)");
@@ -52,7 +59,7 @@ inline std::string gen_to_xT(int K, int T) {
     o("v_nop");
     o("v_nop");
     o("v_add_f32_dpp v13, v12, v12 row_xmask:4 row_mask:0xf bank_mask:0xf");
-    // the 32 columns' max |x| (each token's): x16 = x 2^-E with E = its
+    // the 32 columns' max |x| (of all the tokens): x16 = x 2^-E with E = its
     // exponent - 3, so |x16| < 16; E into xs16's and xs32's low byte
     o("v_max3_f32 v14, |v8|, |v9|, |v10|");
     o("v_max3_f32 v14, v14, |v11|, v14");
@@ -61,6 +68,18 @@ inline std::string gen_to_xT(int K, int T) {
         o("v_nop");
         o("v_max_f32_dpp v14, v14, v14 row_xmask:" + S(m) + " row_mask:0xf bank_mask:0xf");
     }
+    // ... and over all T tokens (LDS max: order-free, so deterministic): one
+    // E a chunk for every token, so the prompt kernels fold 2^E into the
+    // weights' scale once a sub-block instead of once a token (round 62)
+    o("s_waitcnt lgkmcnt(0)");
+    o("s_barrier");
+    o("v_lshrrev_b32 v5, 3, v2");
+    o("v_lshlrev_b32 v5, 2, v5");
+    o("ds_max_u32 v5, v14 offset:8192");
+    o("s_waitcnt lgkmcnt(0)");
+    o("s_barrier");
+    o("ds_read_b32 v14, v5 offset:8192");
+    o("s_waitcnt lgkmcnt(0)");
     o("v_lshrrev_b32 v15, 23, v14");
     o("v_add_nc_u32 v15, 0xffffff7e, v15");             // E = biased exponent - 130 (2^E <= max/8)
     o("v_max_i32 v15, 0xffffff9c, v15");                // at least -100 (zero or tiny: fits a byte)

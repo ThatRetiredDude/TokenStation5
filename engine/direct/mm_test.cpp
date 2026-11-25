@@ -117,9 +117,10 @@ int cmd_mm_q4k(int argc, char** argv) {
             for (int t = 3; t < T; t += 4)
                 for (int c = 0; c < sh.K; c++) X[(size_t)t * sh.K + c] *= 4000.0f;
         // to_xT's x16 scale exponent of each 32 columns and token
-        auto scale_e = [&](int t, int c0) {
+        auto scale_e = [&](int, int c0) {   // the chunk's max over all the tokens (round 62)
             float m = 0;
-            for (int c = c0 & ~31; c < (c0 & ~31) + 32; c++) m = std::max(m, std::fabs(X[(size_t)t * sh.K + c]));
+            for (int t = 0; t < T; t++)
+                for (int c = c0 & ~31; c < (c0 & ~31) + 32; c++) m = std::max(m, std::fabs(X[(size_t)t * sh.K + c]));
             uint32_t b;
             std::memcpy(&b, &m, 4);
             return std::max((int)(b >> 23) - 130, -100);
@@ -339,7 +340,8 @@ int cmd_xt_bench(int, char**) {
                             worst = std::max(worst, std::fabs(g - a) - std::fabs(a) * 0x1p-15);
                             // the exponent: the 32 columns' max |x| over 2^e in [8, 16)
                             float m = 0;
-                            for (int c = 0; c < 32; c++) m = std::max(m, std::fabs(y[(size_t)t * K + (gi * sub & ~31) + c]));
+                            for (int u = 0; u < T; u++)   // over all the tokens (round 62)
+                                for (int c = 0; c < 32; c++) m = std::max(m, std::fabs(y[(size_t)u * K + (gi * sub & ~31) + c]));
                             if (m > 0 && !(std::ldexp(m, -e) >= 8 && std::ldexp(m, -e) < 16)) worst = 1;
                             if (sub == 32) e32[(size_t)gi * T + t] = e;
                         }

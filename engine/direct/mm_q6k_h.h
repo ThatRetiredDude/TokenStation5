@@ -105,6 +105,8 @@ inline std::string gen_mm_q6k_h(int K, int T, int SK = 1) {
         }
     };
     sload(SX, 4 * P, "s[12:13]", 0);
+    o("s_mov_b32 s103, 0x64006400");             // f16 1024, 1024 (the quants' exponent trick; g is no longer needed)
+    o("s_mov_b32 s104, 0xe400e400");             // f16 -1024, -1024
     k += "block:\n";
     // the next block's aligned start: + 208 from an even block, + 212 from an odd one
     if (SK > 1) o("s_mov_b32 s17, " + S(210 * SK));
@@ -177,35 +179,35 @@ inline std::string gen_mm_q6k_h(int K, int T, int SK = 1) {
             o("v_and_b32 " + u1 + ", 0x03030303, " + qh);
         }
         o("v_lshl_or_b32 " + u + ", " + u1 + ", 4, " + u);
-        for (int b = 0; b < 4; b++) o("v_cvt_f32_ubyte" + S(b) + " v" + S(U + 1 + b) + ", " + u);
-        o("v_cvt_pkrtz_f16_f32 v" + S(U + 5) + ", v" + S(U + 1) + ", v" + S(U + 2));
-        o("v_cvt_pkrtz_f16_f32 v" + S(U + 6) + ", v" + S(U + 3) + ", v" + S(U + 4));
+        // to f16 pairs by the exponent trick (as mm_q4k_h): W0 columns 0 and 2, W1 1 and 3
+        const std::string w0 = "v" + S(U + 5), w1 = "v" + S(U + 6);
+        o("v_and_or_b32 " + w0 + ", " + u + ", 0x003f003f, s103");
+        o("v_lshrrev_b32 " + u1 + ", 8, " + u);
+        o("v_and_or_b32 " + w1 + ", " + u1 + ", 0x003f003f, s103");
+        o("v_pk_add_f16 " + w0 + ", " + w0 + ", s104");
+        o("v_pk_add_f16 " + w1 + ", " + w1 + ", s104");
         for (int c = 0; c < 4; c++) {
-            const std::string w = "v" + S(U + 5 + c / 2);
-            const bool hi = c & 1;
+            const std::string w = (c & 1) ? w1 : w0;
+            const bool hi = c >> 1;
             for (int p = 0; p < P; p++) {
                 const std::string x = "s" + S(buf(st) + c * P + p), d = "v" + S(TMP + p);
                 if (kk == 0 && c == 0) o("v_pk_mul_f16 " + d + ", " + x + ", " + w + (hi ? " op_sel:[0,1] op_sel_hi:[1,1]" : " op_sel_hi:[1,0]"));
                 else o("v_pk_fma_f16 " + d + ", " + x + ", " + w + ", " + d + (hi ? " op_sel:[0,1,0] op_sel_hi:[1,1,1]" : " op_sel_hi:[1,0,1]"));
             }
         }
-        if (kk == 3)
-            // acc[t] += d sc (tmp[t] - 32 xs[t])
+        if (kk == 3) {
+            // acc[t] += d sc 2^E tmp[t] - 32 d sc xs[t] (E: x16's exponent, the same for every token)
+            o("s_sext_i32_i8 s17, s" + S(SXS));
+            o("v_ldexp_f32 v" + S(U + 5) + ", v" + S(DSC + qq) + ", s17");
+            o("v_mul_f32 v" + S(U + 6) + ", v" + S(DSC + qq) + ", v" + S(M32));
             for (int p = 0; p < P; p++)
                 for (int h = 0; h < 2; h++) {
                     const int t = 2 * p + h;
-                    const std::string f = "v" + S(U + 7);
-                    if (h) {
-                        o("v_lshrrev_b32 " + f + ", 16, v" + S(TMP + p));
-                        o("v_cvt_f32_f16 " + f + ", " + f);
-                    } else {
-                        o("v_cvt_f32_f16 " + f + ", v" + S(TMP + p));
-                    }
-                    o("s_sext_i32_i8 s17, s" + S(SXS + t));   // x16's scale exponent (to_xT)
-                    o("v_ldexp_f32 " + f + ", " + f + ", s17");
-                    o("v_fmac_f32 " + f + ", s" + S(SXS + t) + ", v" + S(M32));
-                    o("v_fmac_f32 v" + S(ACC + t) + ", v" + S(DSC + qq) + ", " + f);
+                    const std::string a = "v" + S(ACC + t);
+                    o("v_fma_mix_f32 " + a + ", v" + S(U + 5) + ", v" + S(TMP + p) + ", " + a + " op_sel:[0," + S(h) + ",0] op_sel_hi:[0,1,0]");
+                    o("v_fmac_f32 " + a + ", s" + S(SXS + t) + ", v" + S(U + 6));
                 }
+        }
     }
     o("s_add_u32 s12, s12, " + S(256 * SK * P * 4));
     o("s_addc_u32 s13, s13, 0");

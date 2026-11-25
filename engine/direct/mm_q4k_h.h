@@ -63,6 +63,8 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
     }
     o("v_lshlrev_b32 v3, 2, v3");
     for (int t = 0; t < T * RW; t++) o("v_mov_b32 v" + S(ACC + t) + ", 0");
+    o("s_mov_b32 s103, 0x64006400");                     // f16 1024, 1024 (the quants' exponent trick)
+    o("s_mov_b32 s104, 0xe400e400");                     // f16 -1024, -1024
     auto load = [&](int base) {
         for (int r = 0; r < RW; r++) {
             const std::string h = r ? "v6" : "v1", q = r ? "v7" : "v2";
@@ -157,22 +159,25 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
         }
         if (dw == 6) sload(SXS, T, "s[14:15]", jj * T * 4);   // the sub-block's sums, for its end
         for (int r = 0; r < RW; r++) {
-        const std::string q = "v" + S(A + 12 * r + 4 + dw), u = "v" + S(U);
-        if (exp & 2) {}
-        else if (jj) {
-            o("v_lshrrev_b32 " + u + ", 4, " + q);
-            o("v_and_b32 " + u + ", 0x0f0f0f0f, " + u);
-        } else {
-            o("v_and_b32 " + u + ", 0x0f0f0f0f, " + q);
-        }
+        // The quants to f16 pairs by the exponent trick (round 62): a nibble
+        // n or'd into 0x6400 is the f16 1024 + n, less 1024 exactly. W0 holds
+        // columns 0 and 2 (bytes 0, 2), W1 columns 1 and 3.
+        const std::string q = "v" + S(A + 12 * r + 4 + dw), u = "v" + S(U), w0 = "v" + S(U + 5), w1 = "v" + S(U + 6);
         if (!(exp & 2)) {
-            for (int b = 0; b < 4; b++) o("v_cvt_f32_ubyte" + S(b) + " v" + S(U + 1 + b) + ", " + u);
-            o("v_cvt_pkrtz_f16_f32 v" + S(U + 5) + ", v" + S(U + 1) + ", v" + S(U + 2));
-            o("v_cvt_pkrtz_f16_f32 v" + S(U + 6) + ", v" + S(U + 3) + ", v" + S(U + 4));
+            if (jj) {
+                o("v_lshrrev_b32 " + u + ", 4, " + q);
+                o("v_and_or_b32 " + w0 + ", " + u + ", 0x000f000f, s103");
+            } else {
+                o("v_and_or_b32 " + w0 + ", " + q + ", 0x000f000f, s103");
+            }
+            o("v_lshrrev_b32 " + u + ", " + S(jj ? 12 : 8) + ", " + q);
+            o("v_and_or_b32 " + w1 + ", " + u + ", 0x000f000f, s103");
+            o("v_pk_add_f16 " + w0 + ", " + w0 + ", s104");
+            o("v_pk_add_f16 " + w1 + ", " + w1 + ", s104");
         }
         for (int c = 0; c < 4; c++) {
-            const std::string w = exp & 2 ? q : "v" + S(U + 5 + c / 2);
-            const bool hi = c & 1;
+            const std::string w = exp & 2 ? q : (c & 1) ? w1 : w0;
+            const bool hi = c >> 1;
             for (int p = 0; p < P; p++) {
                 const std::string x = "s" + S(buf(st) + c * P + p), d = "v" + S(TMP + P * r + p);
                 if (dw == 0 && c == 0) o("v_pk_mul_f16 " + d + ", " + x + ", " + w + (hi ? " op_sel:[0,1] op_sel_hi:[1,1]" : " op_sel_hi:[1,0]"));
@@ -181,21 +186,16 @@ inline std::string gen_mm_q4k_h(int K, int T, int exp = 0, int SK = 1, int RW = 
         }
         }
         if (dw == 7) {
-            // the sub-block into f32: acc[t] += d sc tmp[t] - dmin m xs[t]
+            // the sub-block into f32: acc[t] += d sc 2^E tmp[t] - dmin m xs[t]
+            // (E: x16's exponent, the same for every token, in xs's low byte)
+            o("s_sext_i32_i8 s17, s" + S(SXS));
+            for (int r = 0; r < RW; r++) o("v_ldexp_f32 v" + S(U + 5 + r) + ", v" + S(SC + 2 * r + jj) + ", s17");
             for (int p = 0; p < P; p++)
                 for (int h = 0; h < 2; h++) {
                     const int t = 2 * p + h;
-                    o("s_sext_i32_i8 s17, s" + S(SXS + t));   // x16's scale exponent (to_xT)
                     for (int r = 0; r < RW; r++) {
-                        const std::string a = "v" + S(ACC + T * r + t), f = "v" + S(U + 7), tmp = "v" + S(TMP + P * r + p);
-                        if (h) {
-                            o("v_lshrrev_b32 " + f + ", 16, " + tmp);
-                            o("v_cvt_f32_f16 " + f + ", " + f);
-                        } else {
-                            o("v_cvt_f32_f16 " + f + ", " + tmp);
-                        }
-                        o("v_ldexp_f32 " + f + ", " + f + ", s17");
-                        o("v_fmac_f32 " + a + ", v" + S(SC + 2 * r + jj) + ", " + f);
+                        const std::string a = "v" + S(ACC + T * r + t), tmp = "v" + S(TMP + P * r + p);
+                        o("v_fma_mix_f32 " + a + ", v" + S(U + 5 + r) + ", " + tmp + ", " + a + " op_sel:[0," + S(h) + ",0] op_sel_hi:[0,1,0]");
                         o("v_fma_f32 " + a + ", -v" + S(MN + 2 * r + jj) + ", s" + S(SXS + t) + ", " + a);
                     }
                 }
