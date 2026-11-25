@@ -94,7 +94,7 @@ private:
     bool batch_ok_ = false;
     size_t part_bytes_ = 0;
     kfd::Buffer pX_, pXN_, pT_, pQ_, pK_, pV_, pA_, pG_, pU_, pH_, pxT_, px16_, pxs32_, pxs16_, ppart_;
-    Prog k_norm_, k_addnorm_, k_qk_, k_silu_, k_attn_, k_red_, k_argmax_, k_embed_;
+    Prog k_norm_, k_addnorm_, k_qk_, k_silu_, k_attn_, k_attn2_, k_red_, k_argmax_, k_embed_;
     kfd::Buffer wbuf_, bx2_, bzero_, bblk_, bx_, bxn_, bq_, bk_, bv_, batt_, bt_, bg_, bu_, bh_, blog_, bkv_, brope_, bpart_, bstamp_,
         bslot_, bids_, bts_;
 };

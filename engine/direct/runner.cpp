@@ -115,6 +115,10 @@ static int xt_nt() {
     static const int nt = std::getenv("TS5_DIRECT_XT_NT") && std::atoi(std::getenv("TS5_DIRECT_XT_NT")) == 128 ? 128 : 256;
     return nt;
 }
+static bool attn2() {   // TS5_DIRECT_ATTN2=0: the old attention a token at a time
+    static const bool on = !(std::getenv("TS5_DIRECT_ATTN2") && std::atoi(std::getenv("TS5_DIRECT_ATTN2")) == 0);
+    return on;
+}
 static bool xt2() {
     static const bool on = std::getenv("TS5_DIRECT_XT2") && std::atoi(std::getenv("TS5_DIRECT_XT2")) == 1;
     return on;
@@ -281,13 +285,18 @@ bool Runner::send_batch(const int32_t* ids, int nt, int pos0, bool logits) {
         barrier();
         stamp(S_QK);
         uint32_t splits[kBatch];
-        for (int t = 0; t < nt; t++) {
-            const uint32_t n = pos0 + t + 1, nch = (n + 255) / 256, per = (nch + 9) / 10;
-            splits[t] = (nch + per - 1) / per;
+        // Round 76: attn_part2 reads K/V once for 2 prompt tokens (1.8-3.8x the
+        // old kernel a token at a time); a pair splits by its later token.
+        for (int t = 0; t < nt;) {
+            const int G = attn2() && NQ_ == 32 && t + 1 < nt ? 2 : 1;   // part2 steps q 16 KiB a token
+            const uint32_t n = pos0 + t + 1, nl = n + G - 1, nch = (nl + 255) / 256, per = (nch + 9) / 10;
+            for (int u = t; u < t + G; u++) splits[u] = (nch + per - 1) / per;
             const uint64_t q = pQ_.gpu + (size_t)t * A * 4, part = ppart_.gpu + t * part_bytes_;
-            const uint32_t a1[12] = {lo(q), hi(q), lo(kc), hi(kc), lo(vc), hi(vc), n, scale_bits_, lo(part), hi(part), per * 256, 0};
+            const uint32_t a1[12] = {lo(q), hi(q), lo(kc), hi(kc), lo(vc), hi(vc), n, scale_bits_, lo(part), hi(part), per * 256, (uint32_t)part_bytes_};
             const uint32_t g1[3] = {splits[t] * NKV_, 1, 1};
-            s.dispatch(k_attn_.k, k_attn_.code.gpu, a1, 12, g1, t256);
+            const Prog& k = G == 2 ? k_attn2_ : k_attn_;
+            s.dispatch(k.k, k.code.gpu, a1, 12, g1, t256);
+            t += G;
         }
         barrier();
         for (int t = 0; t < nt; t++) {
@@ -391,7 +400,7 @@ bool Runner::init(Model& m, int n_ctx, std::string& err) {
     if (!m.load((uint8_t*)wbuf_.cpu, err)) return false;
 
     if (!load(gen_rmsnorm(E_, hp.rms_eps), k_norm_, err) || !load(gen_rmsnorm(E_, hp.rms_eps, true), k_addnorm_, err) ||
-        !load(gen_qk_post(NQ_, hp.rms_eps), k_qk_, err) || !load(gen_silu_mul(), k_silu_, err) || !load(gen_attn_part(), k_attn_, err) ||
+        !load(gen_qk_post(NQ_, hp.rms_eps), k_qk_, err) || !load(gen_silu_mul(), k_silu_, err) || !load(gen_attn_part(), k_attn_, err) || !load(gen_attn_part2(2), k_attn2_, err) ||
         !load(gen_attn_reduce(), k_red_, err) || !load(gen_argmax(), k_argmax_, err) || !load(gen_embed_q4k(E_), k_embed_, err)) {
         err = "kernel: " + err;
         return false;
